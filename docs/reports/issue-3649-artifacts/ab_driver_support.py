@@ -41,6 +41,7 @@ USAGE = [
     "ab_driver_support.py effective-flag <flag> <global-value> <extra-string>",
     "ab_driver_support.py server-argv <bin> <data-dir> <listen> <batch> <maxbytes> "
     "<wait> <scans> <extra>",
+    "ab_driver_support.py validate-resolved <batch> <maxbytes> <wait> <scans>",
     "ab_driver_support.py census-served <data-dir> <ticket.json>",
     "ab_driver_support.py parse-listening <server-log>",
     "ab_driver_support.py validate-ramp <ramp>",
@@ -474,6 +475,37 @@ OVERRIDABLE = ("--batch-size", "--max-batch-bytes", "--admission-wait-timeout-ms
 NOT_REQUESTED = "NOT-REQUESTED"
 
 
+def validate_resolved(batch, maxbytes, wait, scans):
+    """Range-check the values a server will ACTUALLY be given.
+
+    ON THE RESOLVED VALUE, not on the flag. The batch-size floor was added in
+    round 6 on `--batch-size` and per-arm extras were a second route to the same
+    value -- symmetric `--base-server-extra '--batch-size 0'` and
+    `--head-server-extra '--batch-size 0'` need no control label, the server
+    clamps both to one row per batch, and the analyzer renders a measurement
+    verdict for a configuration nothing recorded. That is the fifth time a guard
+    on one entry point has been bypassable through a route added later, so the
+    check lives where the value is RESOLVED: every present and future caller
+    inherits it because there is only one place the resolved value exists.
+
+    Returns a list of problems, empty when the configuration is usable.
+    """
+    problems = []
+    if not re.fullmatch(r"[0-9]+", batch) or int(batch) < 1:
+        problems.append(
+            "the resolved --batch-size is %r; cqlite-flight clamps 0 to one row "
+            "per batch, so the manifest would not record the value that ran -- and "
+            "the Arrow batch row cap is the mechanism #2820 changed" % batch
+        )
+    if not re.fullmatch(r"[0-9]+", scans) or int(scans) < 1:
+        problems.append("the resolved --max-concurrent-scans is %r" % scans)
+    for name, value in (("--max-batch-bytes", maxbytes),
+                        ("--admission-wait-timeout-ms", wait)):
+        if value != NOT_REQUESTED and not re.fullmatch(r"[0-9]+", value):
+            problems.append("the resolved %s is %r" % (name, value))
+    return problems
+
+
 def server_argv(binary, data_dir, listen, batch, maxbytes, wait, scans, extra):
     """The server command line, with every option emitted exactly once.
 
@@ -500,6 +532,13 @@ def server_argv(binary, data_dir, listen, batch, maxbytes, wait, scans, extra):
             err("cause-detail %r has no value" % words[index])
             return None
         index += 2
+
+    problems = validate_resolved(batch, maxbytes, wait, scans)
+    if problems:
+        err("cause resolved-config-invalid")
+        for problem in problems:
+            err("cause-detail %s" % problem)
+        return None
 
     argv = [binary, "--data-dir", data_dir, "--listen", listen,
             "--batch-size", batch, "--max-concurrent-scans", scans]
@@ -720,6 +759,17 @@ def main(argv):
             return 2
         bound = parse_listening(rest[0])
         sys.stdout.write((bound or "NOT-OBSERVED") + "\n")
+        return 0
+    if command == "validate-resolved":
+        if len(rest) != 4:
+            err("usage-error validate-resolved needs <batch> <maxbytes> <wait> <scans>")
+            return 2
+        problems = validate_resolved(*rest)
+        if problems:
+            err("cause resolved-config-invalid")
+            for problem in problems:
+                err("cause-detail %s" % problem)
+            return 1
         return 0
     if command == "server-argv":
         if len(rest) != 8:

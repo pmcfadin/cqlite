@@ -1499,16 +1499,32 @@ echo
 echo "-- the target band is defined for --shape full --"
 
 mkfixture "$TMP/shape-bad" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
-python3 - "$TMP/shape-bad/manifest.json" <<'PYINNER'
+# The manifest AND the records: a session that ran limit-k produced limit-k
+# records, and the two must agree or the reconciliation refuses it first (which
+# is a different, also-correct refusal, and would leave this case untested).
+python3 - "$TMP/shape-bad" <<'PYINNER'
 import json
+import os
 import sys
 
-path = sys.argv[1]
+root = sys.argv[1]
+path = os.path.join(root, "manifest.json")
 with open(path, encoding="utf-8") as handle:
     manifest = json.load(handle)
 manifest["workload"]["shape"] = "limit-k"
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(manifest, handle, indent=1, sort_keys=True)
+for name in os.listdir(root):
+    if not name.endswith(".jsonl"):
+        continue
+    target = os.path.join(root, name)
+    with open(target, encoding="utf-8") as handle:
+        records = [json.loads(line) for line in handle if line.strip()]
+    for record in records:
+        record["shape"] = "limit-k"
+    with open(target, "w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
 PYINNER
 run_analyzer "$TMP/shape-bad"
 check_verdict "a limit-k session scored against the full-scan band" UNMEASURED 7 single-stream

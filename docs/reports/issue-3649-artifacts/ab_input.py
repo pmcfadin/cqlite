@@ -46,6 +46,68 @@ from ab_common import Unmeasured
 SCHEMA_MANIFEST = "ab-3649.manifest/v1"
 SCHEMA_STEP = "flight-loadgen.step/v1"
 
+#: EVERY FIELD A STEP RECORD CARRIES, AND WHAT IS DONE ABOUT IT.
+#:
+#: Nine fields have been reconciled against the manifest one at a time, each
+#: added after a review found it missing: `target_concurrency`, `duration_s`,
+#: `rows_total`, `round`, the admission ceiling, `max_batch_bytes`, the wait
+#: timeout, the CPU affinity, the pair order -- and then `shape`, which is what
+#: prompted this table. The recurrence is the evidence that adding them one at a
+#: time IS the defect: nothing stopped a tenth field from being unreconciled,
+#: because nothing enumerated the set.
+#:
+#: So the set is enumerated here, every entry carries a disposition, and
+#: `selftest-analyze.sh` asserts that EVERY key of a real step record appears in
+#: it. A field added to `flight-loadgen`'s record and not accounted for here
+#: fails that case rather than being silently unchecked.
+#:
+#: DECLARED RESIDUAL, because the completeness is one-directional: this proves
+#: every RECORD field is accounted for. It cannot prove that a MANIFEST field
+#: which ought to constrain records has been remembered -- `WORKLOAD_DISPOSITION`
+#: below is the mirror, and between them they cover both sides, but neither can
+#: know about a constraint nobody thought of.
+RECORD_FIELD_DISPOSITION = {
+    "schema": ("checked", "asserted equal to the flight-loadgen schema tag"),
+    "round": ("reconciled", "the manifest run entry's arm and replicate"),
+    "target_concurrency": ("reconciled", "workload.ramp at this record's position"),
+    "shape": ("reconciled", "workload.shape"),
+    "duration_s": ("reconciled", "workload.step_duration_seconds, wide band"),
+    "requests_ok": ("checked", "must be positive for a counted step"),
+    "requests_error": ("checked", "must be zero"),
+    "requests_unavailable": ("checked", "zero, or the step is excluded (utilization)"),
+    "rows_per_s": ("checked", "finite and positive"),
+    "qps": ("checked", "finite"),
+    "rows_total": ("checked", "internally consistent with rows_per_s x duration_s"),
+    "latency_ms": ("checked", "percentile keys present and numeric"),
+    "error_codes": ("excused", "empty whenever requests_error is zero, which is asserted"),
+    "endpoint": ("excused", "the port is ephemeral, so the manifest records no endpoint"),
+    "seed": ("excused", "flight-loadgen's own ticket seed; this driver never sets it"),
+    "ts_unix_ms": ("excused", "wall clock; nothing in the manifest constrains it"),
+    "step": ("excused", "positional index, already implied by target_concurrency"),
+    "bytes_per_s": ("excused", "no verdict reads it"),
+    "bytes_total": ("excused", "no verdict reads it"),
+}
+
+#: The mirror: every `workload` field the driver records, and whether it
+#: constrains a step record. Same completeness case, other direction.
+WORKLOAD_DISPOSITION = {
+    "shape": ("constrains", "record.shape"),
+    "ramp": ("constrains", "record.target_concurrency, positionally"),
+    "step_duration_seconds": ("constrains", "record.duration_s, wide band"),
+    "step_duration": ("excused", "display only; the canonical value is the seconds field"),
+    "prewarm": ("excused", "describes a pass whose output goes to /dev/null"),
+    "prewarm_requested": ("excused", "recorded beside the effective value"),
+    "temperature": ("excused", "page-cache state; no record field reflects it"),
+    "merge_path": ("excused", "the server does not log it, so nothing can corroborate it"),
+    "server_cpus": ("excused", "verified against /proc at run time, not in the record"),
+    "client_cpus": ("excused", "not verified; declared in FINDINGS.md"),
+    "ticket_template": ("excused", "a path; its content is validated at pre-flight"),
+    "max_concurrent_scans": ("excused", "corroborated from the server's startup line"),
+    "batch_size": ("excused", "corroborated from the server's startup line"),
+    "max_batch_bytes": ("excused", "corroborated from the server's startup line"),
+    "admission_wait_timeout_ms": ("excused", "corroborated from the server's startup line"),
+}
+
 MODE_SINGLE_STREAM = "single-stream"
 MODE_UTILIZATION = "utilization"
 
@@ -222,8 +284,19 @@ def _read_records(path):
     return records
 
 
-def _validate_shape(record, path, index):
+def _validate_shape(record, path, index, declared_shape):
     where = "%s record %d" % (path, index)
+    # RECONCILED, like every other shared field: a manifest declaring `full` must
+    # not reference records produced under a narrowed shape and still receive a
+    # target-band verdict.
+    if declared_shape is not None and record.get("shape") != declared_shape:
+        raise Unmeasured(
+            "shape-record-mismatch",
+            "%s: the record was produced with shape %r but the manifest declares "
+            "%r; the band this verdict is scored against is defined for the shape "
+            "the manifest names"
+            % (where, record.get("shape"), declared_shape),
+        )
     if record.get("schema") != SCHEMA_STEP:
         raise Unmeasured(
             "run-record-schema",
@@ -351,7 +424,8 @@ class RunPoint(object):
         self.shed = shed
 
 
-def load_run(path, mode, declared_steps, expected_round, declared_duration_s):
+def load_run(path, mode, declared_steps, expected_round, declared_duration_s,
+             declared_shape):
     records = _read_records(path)
     expected = 1 if mode == MODE_SINGLE_STREAM else len(declared_steps)
     if len(records) != expected:
@@ -361,7 +435,7 @@ def load_run(path, mode, declared_steps, expected_round, declared_duration_s):
             "%s)" % (path, len(records), expected, declared_steps),
         )
     for index, record in enumerate(records, start=1):
-        _validate_shape(record, path, index)
+        _validate_shape(record, path, index, declared_shape)
         # The round label is stamped by the driver from the (arm, replicate) it
         # is running, so a file listed under the wrong entry is caught here
         # rather than silently analysed as the arm it is filed under.
@@ -522,6 +596,16 @@ def admission_of(entry):
 def collect_pairs(manifest, manifest_dir, mode, declared_steps):
     """Resolve the manifest's declared runs into replicate-indexed pairs."""
     declared_duration_s = step_duration_seconds(manifest)
+    declared_shape = manifest.get("workload", {})
+    declared_shape = (
+        declared_shape.get("shape") if isinstance(declared_shape, dict) else None
+    )
+    if not isinstance(declared_shape, str) or not declared_shape:
+        raise Unmeasured(
+            "manifest-field",
+            "manifest.workload.shape is missing; the records cannot be reconciled "
+            "against a shape the manifest does not name",
+        )
     seen = {}
     admissions = {}
     positions = {}
@@ -553,7 +637,8 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
             path = os.path.join(manifest_dir, path)
         expected_round = "%s-r%02d" % (arm, replicate)
         seen[key] = load_run(
-            path, mode, declared_steps, expected_round, declared_duration_s
+            path, mode, declared_steps, expected_round, declared_duration_s,
+            declared_shape,
         )
         value, source = admission_of(entry)
         # An explicitly NON-FLAG provenance is a refusal, not a downgrade: the

@@ -272,6 +272,33 @@ fi
 # ramp that maps to no analyzer section.
 [ -f "$SUPPORT" ] || usage_error \
   "ab_driver_support.py is not beside this script at $SUPPORT; the driver's ramp validator, record validator and startup parser all live there"
+# EACH ARM'S EFFECTIVE CONFIGURATION, COMPUTED ONCE AND RECORDED AS DATA. The
+# per-run asserts below and the analyzer's cross-arm comparison both read these,
+# so a control that deliberately serves one arm differently is EXPECTED rather
+# than merely excused -- and a measurement, which declares no difference, still
+# gets strict equality.
+eff() { # <flag> <global> <extra>
+  python3 "$SUPPORT" effective-flag "$1" "$2" "$3"
+}
+for _arm in base head; do
+  if [ "$_arm" = "base" ]; then _extra="$BASE_SERVER_EXTRA"; else _extra="$HEAD_SERVER_EXTRA"; fi
+  eval "EXPECT_${_arm}_BATCH=\"$(eff --batch-size "$BATCH_SIZE" "$_extra")\""
+  eval "EXPECT_${_arm}_MAXBYTES=\"$(eff --max-batch-bytes "${MAX_BATCH_BYTES:-NOT-REQUESTED}" "$_extra")\""
+  eval "EXPECT_${_arm}_WAIT=\"$(eff --admission-wait-timeout-ms "${ADMISSION_WAIT_TIMEOUT_MS:-NOT-REQUESTED}" "$_extra")\""
+  eval "EXPECT_${_arm}_SCANS=\"$(eff --max-concurrent-scans "$MAX_CONCURRENT_SCANS" "$_extra")\""
+done
+export AB_EXPECT_BASE_BATCH="$EXPECT_base_BATCH" AB_EXPECT_HEAD_BATCH="$EXPECT_head_BATCH"
+export AB_EXPECT_BASE_MAXBYTES="$EXPECT_base_MAXBYTES" AB_EXPECT_HEAD_MAXBYTES="$EXPECT_head_MAXBYTES"
+export AB_EXPECT_BASE_WAIT="$EXPECT_base_WAIT" AB_EXPECT_HEAD_WAIT="$EXPECT_head_WAIT"
+export AB_EXPECT_BASE_SCANS="$EXPECT_base_SCANS" AB_EXPECT_HEAD_SCANS="$EXPECT_head_SCANS"
+say "expected-config base batch-size $EXPECT_base_BATCH max-batch-bytes $EXPECT_base_MAXBYTES wait-timeout-ms $EXPECT_base_WAIT max-concurrent-scans $EXPECT_base_SCANS"
+for _arm in base head; do
+  eval "_b=\$EXPECT_${_arm}_BATCH; _m=\$EXPECT_${_arm}_MAXBYTES; _w=\$EXPECT_${_arm}_WAIT; _s=\$EXPECT_${_arm}_SCANS"
+  python3 "$SUPPORT" validate-resolved "$_b" "$_m" "$_w" "$_s" \
+    || usage_error "the $_arm arm's RESOLVED server configuration is unusable (the cause is named above); per-arm extras are a second route to every global flag, so the check is on the resolved value"
+done
+say "expected-config head batch-size $EXPECT_head_BATCH max-batch-bytes $EXPECT_head_MAXBYTES wait-timeout-ms $EXPECT_head_WAIT max-concurrent-scans $EXPECT_head_SCANS"
+
 RAMP_INFO="$(python3 "$SUPPORT" validate-ramp "$RAMP")" \
   || usage_error "--ramp $RAMP was refused (the cause is named above)"
 RAMP_TOP="${RAMP_INFO%% *}"
@@ -333,6 +360,18 @@ REPO="$REPO_TOP"
 # analyzer command this script prints names the session directory explicitly, so
 # what gets certified is never the symlink.
 # ---------------------------------------------------------------------------
+# CANONICALISED BEFORE ANYTHING IS DERIVED FROM IT. `CARGO_TARGET_DIR` is read
+# by cargo AFTER the driver has `cd`-ed into the arm's worktree, so a relative
+# --work-dir put the target directory under the WORKTREE while this script kept
+# checking the original-relative path -- both arms compiling, then
+# `build-incomplete`. Same failure economics as a missing command: it only shows
+# after the expensive step, on a box billed by the hour. Every path below (the
+# session directory, the worktrees, the target directories, the lock) is derived
+# from this one value, so canonicalising here fixes all of them at once.
+mkdir -p "$WORK_DIR" 2>/dev/null || usage_error "--work-dir $WORK_DIR cannot be created"
+WORK_DIR="$(cd "$WORK_DIR" 2>/dev/null && pwd -P || true)"
+[ -n "$WORK_DIR" ] || usage_error "--work-dir could not be resolved to an absolute path"
+
 SESSION_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 RUN_DIR="$WORK_DIR/run-$SESSION_ID"
 LOG_DIR="$RUN_DIR/logs"
@@ -345,7 +384,6 @@ RUNS_JSONL="$RUN_DIR/runs.jsonl"
 # one. Two concurrent sessions on one box contend for CPU and page cache and
 # invalidate each other's numbers, which no amount of file isolation fixes.
 SESSION_LOCK="$WORK_DIR/.session-lock"
-mkdir -p "$WORK_DIR"
 mkdir "$SESSION_LOCK" 2>/dev/null || {
   warn "cause work-dir-busy"
   warn "cause-detail another session holds $SESSION_LOCK. This is not about files -- each session now writes only to its own directory -- it is about CPU: two measurement sessions on one box invalidate each other. If nothing is running, remove that directory."
@@ -666,27 +704,6 @@ if [ "$CORPUS_FILES" -lt "$MIN_SSTABLES" ]; then
   die corpus-too-few-sstables \
     "the SERVED directory $SERVED_DIR holds $CORPUS_FILES Data.db file(s), below the required $MIN_SSTABLES; issue #3058 gives the Flight row route a single-source fast path that NEVER enters the k-way merge, so a one-source corpus measures a code path #2820 did not touch -- and it does so identically on both arms, producing a ratio of 1.0 by construction"
 fi
-# EACH ARM'S EFFECTIVE CONFIGURATION, COMPUTED ONCE AND RECORDED AS DATA. The
-# per-run asserts below and the analyzer's cross-arm comparison both read these,
-# so a control that deliberately serves one arm differently is EXPECTED rather
-# than merely excused -- and a measurement, which declares no difference, still
-# gets strict equality.
-eff() { # <flag> <global> <extra>
-  python3 "$SUPPORT" effective-flag "$1" "$2" "$3"
-}
-for _arm in base head; do
-  if [ "$_arm" = "base" ]; then _extra="$BASE_SERVER_EXTRA"; else _extra="$HEAD_SERVER_EXTRA"; fi
-  eval "EXPECT_${_arm}_BATCH=\"$(eff --batch-size "$BATCH_SIZE" "$_extra")\""
-  eval "EXPECT_${_arm}_MAXBYTES=\"$(eff --max-batch-bytes "${MAX_BATCH_BYTES:-NOT-REQUESTED}" "$_extra")\""
-  eval "EXPECT_${_arm}_WAIT=\"$(eff --admission-wait-timeout-ms "${ADMISSION_WAIT_TIMEOUT_MS:-NOT-REQUESTED}" "$_extra")\""
-  eval "EXPECT_${_arm}_SCANS=\"$(eff --max-concurrent-scans "$MAX_CONCURRENT_SCANS" "$_extra")\""
-done
-export AB_EXPECT_BASE_BATCH="$EXPECT_base_BATCH" AB_EXPECT_HEAD_BATCH="$EXPECT_head_BATCH"
-export AB_EXPECT_BASE_MAXBYTES="$EXPECT_base_MAXBYTES" AB_EXPECT_HEAD_MAXBYTES="$EXPECT_head_MAXBYTES"
-export AB_EXPECT_BASE_WAIT="$EXPECT_base_WAIT" AB_EXPECT_HEAD_WAIT="$EXPECT_head_WAIT"
-export AB_EXPECT_BASE_SCANS="$EXPECT_base_SCANS" AB_EXPECT_HEAD_SCANS="$EXPECT_head_SCANS"
-say "expected-config base batch-size $EXPECT_base_BATCH max-batch-bytes $EXPECT_base_MAXBYTES wait-timeout-ms $EXPECT_base_WAIT max-concurrent-scans $EXPECT_base_SCANS"
-say "expected-config head batch-size $EXPECT_head_BATCH max-batch-bytes $EXPECT_head_MAXBYTES wait-timeout-ms $EXPECT_head_WAIT max-concurrent-scans $EXPECT_head_SCANS"
 
 say "merge-path $MERGE_PATH -- CQLITE_FLIGHT_MERGE_PATH is set to this on BOTH arms' servers"
 say "admission max-concurrent-scans $MAX_CONCURRENT_SCANS (pinned on both arms; ramp tops at $RAMP_TOP) batch-size $BATCH_SIZE"
