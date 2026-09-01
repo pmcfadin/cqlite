@@ -257,6 +257,7 @@ def render_common(manifest, mode, admission, session):
     # data root -- so the size floor and the >=2-SSTable #3058 guard are claims
     # about the table under measurement.
     out("corpus served-dir %s" % field(manifest, "corpus", "served_dir"))
+    out("corpus compressed %s" % field(manifest, "corpus", "compressed"))
     out(
         "corpus data-db-bytes %s data-db-files %s min-required-bytes %s"
         % (
@@ -387,6 +388,22 @@ def analyze(mode, path, opts):
                 "and the ratio is 1.0 by construction"
                 % (corpus["data_db_files"], MIN_SSTABLES_FLOOR),
             )
+
+    # THE COMPRESSED-CORPUS REQUIREMENT, RE-CHECKED HERE. Documented in
+    # FINDINGS.md and enforced by nothing until round 12 -- and the failure is in
+    # the FAVOURABLE direction, because removing LZ4 decode removes real CPU from
+    # the denominator and inflates the ratio. Re-checked rather than trusted for
+    # the usual reason: a manifest is data, and this analyzer does not get to
+    # assume which driver produced it.
+    if not control and manifest["corpus"].get("compressed") is not True:
+        raise Unmeasured(
+            "corpus-uncompressed",
+            "the manifest does not record the served corpus as compressed. The "
+            "field is LZ4, and an uncompressed corpus biases the measured ratio "
+            "TOWARD the target -- so this is not a conservative failure. Label the "
+            "session --control if an uncompressed corpus is what you meant to "
+            "measure",
+        )
 
     pairs, admission, session = collect_pairs_checked(
         manifest, manifest_dir, mode, declared_steps
@@ -823,6 +840,31 @@ def report(mode, manifest, pairs, admission, opts, stats, session):
             "exactly -- run an EVEN replicate count to remove this residual"
             % (mode, session["base_first"], session["head_first"])
         )
+    # THE SWEEP (round 12): requirements the runbook states that no check can
+    # honestly REFUSE, disclosed here rather than left unstated. Refusing on a
+    # host name would red a correct rig the day someone uses `i4i.2xlarge`, and a
+    # guard that reds on correct input is the guard people learn to waive.
+    host_type = field(manifest, "host", "instance_type")
+    if not host_type.startswith("i4i"):
+        out(
+            "verdict-detail %s HOST the acceptance criteria name the field i4i "
+            "narrow rig, and this session ran on %r. That cannot be refused from "
+            "inside -- a rig class is not reliably derivable from a host string -- "
+            "so it is DISCLOSED: a verdict measured off the named rig is not the "
+            "verdict the criteria ask for" % (mode, host_type)
+        )
+    loadavg = field(manifest, "host", "loadavg1")
+    try:
+        busy = float(loadavg) > 2.0
+    except ValueError:
+        busy = False
+    if busy:
+        out(
+            "verdict-detail %s HOST the one-minute load average at session start "
+            "was %s. A contended box is the condition this issue exists because of "
+            "-- the proxy bench it rejected measured the box as much as the branch"
+            % (mode, loadavg)
+        )
     for line in non_exhaustive_lines(mode, len(pairs)):
         out("verdict-detail %s NON-EXHAUSTIVE %s" % (mode, line))
     out("---- end section %s ----" % mode)
@@ -885,6 +927,13 @@ def _main(argv):
 
     out("=== issue #3649 -- served-path A/B throughput, #2820 batched merge fan-in ===")
     out("sections %s" % ",".join(mode for mode, _ in requested))
+    if len(requested) < 2:
+        out(
+            "sections-note only one quantity was supplied. The acceptance criteria "
+            "name BOTH a single-stream target band and a utilization direction, so "
+            "one section cannot cover them; this is a statement about coverage, "
+            "not about the section that ran"
+        )
     for mode, path in requested:
         out("manifest %s %s" % (mode, path))
 

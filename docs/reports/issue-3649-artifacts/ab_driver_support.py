@@ -208,6 +208,42 @@ def validate_ticket(path):
         err("cause ticket-template-unparseable")
         err("cause-detail %s: top level is not an object" % path)
         return 1
+    # MIRRORS `FlightTicket` (cqlite-flight/src/ticket.rs:225-256). Exactly four
+    # fields carry no `#[serde(default)]` and are therefore REQUIRED: `version`
+    # (u8), `keyspace`, `table` and `ddl`. A ticket missing `ddl` used to pass
+    # pre-flight and the census and then fail deserialisation in the load
+    # generator -- after ALL THREE release builds. Seventh validator-versus-
+    # consumer instance, and the same rig economics every time: the check is
+    # cheap and it belongs before the expensive step.
+    required = (("version", int), ("keyspace", str), ("table", str), ("ddl", str))
+    for field, kind in required:
+        value = ticket.get(field)
+        if value is None:
+            err("cause ticket-schema-invalid")
+            err(
+                "cause-detail %s: required field %r is missing; cqlite-flight's "
+                "FlightTicket declares it with no serde default, so the load "
+                "generator would fail to deserialise this ticket after every "
+                "build had completed" % (path, field)
+            )
+            return 1
+        if isinstance(value, bool) or not isinstance(value, kind):
+            err("cause ticket-schema-invalid")
+            err(
+                "cause-detail %s: required field %r is %r, expected %s"
+                % (path, field, value, kind.__name__)
+            )
+            return 1
+    if not ticket["ddl"].strip():
+        err("cause ticket-schema-invalid")
+        err("cause-detail %s: ddl is empty; it is parsed into the TableSchema that "
+            "drives the merge" % path)
+        return 1
+    if not 0 <= ticket["version"] <= 255:
+        err("cause ticket-schema-invalid")
+        err("cause-detail %s: version %r is not a u8" % (path, ticket["version"]))
+        return 1
+
     problems = []
     # MIRRORS `pathsafe::validate_snapshot` (cqlite-flight/src/pathsafe.rs:60-73):
     # present-but-EMPTY is rejected there, at ticket parse time. The census used
@@ -400,6 +436,7 @@ def census_served(data_dir, ticket_path):
         return 1
     total = 0
     count = 0
+    uncompressed = []
     # CONTAINMENT, not just scope. `DirSource::data_paths` excludes any entry
     # whose CANONICAL target escapes the resolved directory
     # (cqlite-flight/src/producer.rs:215-235, `pathsafe::assert_within`), because
@@ -423,11 +460,30 @@ def census_served(data_dir, ticket_path):
                 continue
             total += os.path.getsize(real)
             count += 1
+            # THE COMPRESSED-CORPUS REQUIREMENT, ASKED RATHER THAN ASSUMED.
+            # `FINDINGS.md` records it as a requirement -- the field is LZ4 and
+            # the plan of record flags UNCOMPRESSED as a known artifact -- and
+            # nothing checked it, so an uncompressed corpus cleared every floor.
+            # Worse than a gap: removing LZ4 decode removes real CPU from the
+            # denominator, so an uncompressed corpus BIASES THE RATIO TOWARD THE
+            # TARGET. The failure was in the favourable direction, which is the
+            # hardest kind to notice. A zero-length CompressionInfo.db counts as
+            # absent: this repository records that an empty one makes SELECT
+            # return 0 rows silently.
+            info = real[: -len("-Data.db")] + "-CompressionInfo.db"
+            if not os.path.isfile(info) or os.path.getsize(info) == 0:
+                uncompressed.append(os.path.basename(real))
     except OSError as exc:
         err("cause corpus-census-failed")
         err("cause-detail %s: %s" % (served, exc))
         return 1
-    sys.stdout.write("%d %d %s\n" % (count, total, served))
+    # `<files> <bytes> <compressed> <dir>` -- the compression verdict travels
+    # with the census so the manifest records it and the analyzer can re-check.
+    compressed = "compressed" if count and not uncompressed else "UNCOMPRESSED"
+    if uncompressed:
+        err("note %d of %d served SSTables have no usable CompressionInfo.db: %s"
+            % (len(uncompressed), count, ", ".join(sorted(uncompressed)[:4])))
+    sys.stdout.write("%d %d %s %s\n" % (count, total, compressed, served))
     return 0
 
 

@@ -601,6 +601,7 @@ manifest = {
     "corpus": {
         "path": env("AB_CORPUS", ""),
         "served_dir": env("AB_SERVED_DIR", ""),
+        "compressed": env("AB_CORPUS_COMPRESSED", "") == "compressed",
         "data_db_bytes": int(env("AB_CORPUS_BYTES", "0")),
         "data_db_files": int(env("AB_CORPUS_FILES", "0")),
         "min_bytes_required": int(env("AB_MIN_CORPUS_BYTES", "0")),
@@ -728,13 +729,21 @@ CENSUS="$(python3 "$SUPPORT" census-served "$CORPUS" "$TICKET_TEMPLATE")" \
 CORPUS_FILES="${CENSUS%% *}"
 CENSUS_REST="${CENSUS#* }"
 CORPUS_BYTES="${CENSUS_REST%% *}"
+CENSUS_REST="${CENSUS_REST#* }"
+CORPUS_COMPRESSED="${CENSUS_REST%% *}"
 SERVED_DIR="${CENSUS_REST#* }"
+export AB_CORPUS_COMPRESSED="$CORPUS_COMPRESSED"
 # EXPORTED, because `write_manifest` reads these from the environment. Unexported,
 # every manifest recorded the census as zero -- and the corpus size is a thing the
 # acceptance criteria explicitly require the report to state.
 export AB_SERVED_DIR="$SERVED_DIR"
 export AB_CORPUS_FILES="$CORPUS_FILES" AB_CORPUS_BYTES="$CORPUS_BYTES"
 say "corpus path $CORPUS served-dir $SERVED_DIR data-db-files $CORPUS_FILES data-db-bytes $CORPUS_BYTES"
+say "corpus compression $CORPUS_COMPRESSED -- every served SSTable must have a usable CompressionInfo.db; the field is LZ4 and an UNCOMPRESSED corpus biases the ratio TOWARD the target"
+if [ "$CORPUS_COMPRESSED" != "compressed" ] && [ -z "$CONTROL" ]; then
+  die corpus-uncompressed \
+    "the served directory $SERVED_DIR holds SSTables with no usable CompressionInfo.db. The field is LZ4 (throughput-program-2026-07.md line 21) and removing LZ4 decode removes real CPU from the denominator, so an uncompressed corpus inflates the measured ratio -- the failure is in the direction that looks like success. Run it as a --control if you mean to measure an uncompressed corpus"
+fi
 say "corpus census scope THE SERVED DIRECTORY ONLY -- unrelated tables, snapshots and hard-linked copies elsewhere under --data-dir are deliberately not counted"
 [ "$CORPUS_FILES" -gt 0 ] || die corpus-empty "the served directory $SERVED_DIR holds no *-Data.db files"
 if [ "$CORPUS_BYTES" -lt "$MIN_CORPUS_BYTES" ]; then
@@ -1149,8 +1158,14 @@ with open(runs_path, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(entry, sort_keys=True) + "\n")
 PYEOF
   write_manifest
-  # A convenience pointer only. Atomic, holds no data, and its worst failure is
-  # naming a complete earlier session.
+}
+
+# `latest` is documented as the most recent COMPLETED session, so it is moved
+# once, at the end -- not after every arm. Updated per run it pointed at
+# whatever the last interrupted session had reached, which is an unpaired or
+# replicate-short manifest wearing the name an operator reaches for when they
+# have lost the printed `next` line.
+publish_latest() {
   ln -sfn "$RUN_DIR" "$WORK_DIR/.latest.tmp.$$" 2>/dev/null \
     && mv -T "$WORK_DIR/.latest.tmp.$$" "$WORK_DIR/latest" 2>/dev/null || true
 }
@@ -1190,6 +1205,7 @@ while [ "$rep" -le "$REPLICATES" ]; do
 done
 
 write_manifest
+publish_latest
 say "session complete: $REPLICATES paired replicates in $RUN_DIR"
 # The two build worktrees are REGISTERED IN THE REPOSITORY and outlive this
 # process. On a rig that is torn down it does not matter; on a persistent

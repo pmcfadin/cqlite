@@ -157,6 +157,7 @@ def main():
             "data_db_files": 3,
             "min_bytes_required": 268435456,
             "min_sstables_required": 2,
+            "compressed": True,
             "rows_declared": 3999890,
         },
         "host": {
@@ -810,7 +811,7 @@ for bad_dur in "0" "-5s" "nope" "nan" "inf" "1e30" "1e308m" "-1"; do
 done
 
 # A ticket that narrows the scan cannot receive a full-scan verdict.
-printf '{"version":2,"keyspace":"ks","table":"t","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' > "$TMP/tk-full.json"
+printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' > "$TMP/tk-full.json"
 run_support validate-ticket "$TMP/tk-full.json"
 check_support "a full-ring, unprojected, unfiltered ticket" 0
 # THE VALIDATOR MUST NOT BE STRICTER THAN THE SERVER. Read from
@@ -822,23 +823,23 @@ check_support "a full-ring, unprojected, unfiltered ticket" 0
 #     -- every token, the full ring expressed as a Cassandra wraparound range;
 #   * an EXPLICIT (i64::MIN, i64::MAX] is half-open and therefore drops the token
 #     equal to i64::MIN, which is a real token (#3633). Not the full ring.
-printf '{"version":2,"keyspace":"ks","table":"t","wraparound":true}\n' > "$TMP/tk-wrap.json"
+printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","wraparound":true}\n' > "$TMP/tk-wrap.json"
 run_support validate-ticket "$TMP/tk-wrap.json"
 check_support "a ticket setting the ignored wraparound flag" 0
-printf '{"version":2,"keyspace":"ks","table":"t","token_start":5,"token_end":5}\n' > "$TMP/tk-eq.json"
+printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","token_start":5,"token_end":5}\n' > "$TMP/tk-eq.json"
 run_support validate-ticket "$TMP/tk-eq.json"
 check_support "a ticket whose equal token endpoints ARE the whole ring" 0
 # `pathsafe::validate_snapshot` REJECTS an empty name, so accepting one here
 # burned both builds before the load generator refused it -- the same rig
 # economics as the relative work directory. Sixth validator-versus-consumer.
-printf '{"version":2,"keyspace":"ks","table":"t","snapshot":""}\n' > "$TMP/tk-emptysnap.json"
+printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","snapshot":""}\n' > "$TMP/tk-emptysnap.json"
 run_support validate-ticket "$TMP/tk-emptysnap.json"
 check_support "a ticket with an empty snapshot name, which the server rejects" 1 ticket-identifier-invalid
-printf '{"version":2,"keyspace":"ks","table":"t","snapshot":"snap-1_a"}\n' > "$TMP/tk-snap.json"
+printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","snapshot":"snap-1_a"}\n' > "$TMP/tk-snap.json"
 run_support validate-ticket "$TMP/tk-snap.json"
 check_support "a ticket with a valid snapshot name" 0
 for narrowing in '"limit":100' '"predicates":[{"c":"x"}]' '"filter":"x>1"' '"aggregation":"count"' '"columns":["a"]' '"token_start":42' '"token_end":42' '"token_start":-9223372036854775808,"token_end":9223372036854775807'; do
-  printf '{"version":2,"keyspace":"ks","table":"t",%s}\n' "$narrowing" > "$TMP/tk-bad.json"
+  printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)",%s}\n' "$narrowing" > "$TMP/tk-bad.json"
   run_support validate-ticket "$TMP/tk-bad.json"
   if [ "$RC" = "1" ] && grep -q '^AB-3649: cause ticket-not-full-ring$' "$TMP/err.txt"; then
     ok "a ticket with ${narrowing:0:44} is refused as not a full-ring scan"
@@ -1958,6 +1959,8 @@ else
   mkdir -p "$TMP/tinycorpus/ks/tbl"
   head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-1-big-Data.db"
   head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-2-big-Data.db"
+  head -c 512 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-1-big-CompressionInfo.db"
+  head -c 512 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-2-big-CompressionInfo.db"
   # Unrelated tables and a snapshot subtree that the census must NOT count: this
   # is finding 1's shape, and without them the served-scope guard is untested.
   mkdir -p "$TMP/tinycorpus/other/bigtable" "$TMP/tinycorpus/ks/tbl/snapshots/s1"
@@ -1966,6 +1969,7 @@ else
   head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/snapshots/s1/nb-8-big-Data.db"
   mkdir -p "$TMP/onesstcorpus/ks/tbl"
   head -c 4096 /dev/zero > "$TMP/onesstcorpus/ks/tbl/nb-1-big-Data.db"
+  head -c 512 /dev/zero > "$TMP/onesstcorpus/ks/tbl/nb-1-big-CompressionInfo.db"
   # ...and the one-source corpus gets a SECOND file elsewhere, so the #3058 guard
   # can only pass by counting the wrong directory.
   mkdir -p "$TMP/onesstcorpus/ks/decoy"
@@ -1975,7 +1979,7 @@ else
   # which is a different (and separately named) refusal.
   mkdir -p "$TMP/emptycorpus/ks/tbl"
   mkdir -p "$TMP/nosuchtable/ks/other"
-  printf '{"version": 2, "keyspace": "ks", "table": "tbl"}\n' > "$TMP/ticket.json"
+  printf '{"version": 2, "keyspace": "ks", "table": "tbl", "ddl": "CREATE TABLE ks.tbl (a int PRIMARY KEY)"}\n' > "$TMP/ticket.json"
 
   # A SCRATCH REPOSITORY, SO NO CASE DEPENDS ON WHERE THIS SUITE WAS RUN FROM.
   # The driver resolves --repo before its corpus, lock, ref and CPU checks, so a
@@ -2114,6 +2118,7 @@ PYINNER
   # so a symlinked decoy must satisfy neither floor.
   mkdir -p "$TMP/symcorpus/ks/tbl" "$TMP/symcorpus/elsewhere"
   head -c 4096 /dev/zero > "$TMP/symcorpus/ks/tbl/nb-1-big-Data.db"
+  head -c 512 /dev/zero > "$TMP/symcorpus/ks/tbl/nb-1-big-CompressionInfo.db"
   head -c 400000 /dev/zero > "$TMP/symcorpus/elsewhere/real-Data.db"
   ln -sf "$TMP/symcorpus/elsewhere/real-Data.db" "$TMP/symcorpus/ks/tbl/nb-2-big-Data.db"
   run_driver --corpus "$TMP/symcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
@@ -2256,7 +2261,7 @@ PYINNER
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --shape limit-k
   check_driver "the driver refuses a non-full shape for a measurement session" 3
-  printf '{"version":2,"keyspace":"ks","table":"t","limit":100}\n' > "$TMP/tk-narrow.json"
+  printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","limit":100}\n' > "$TMP/tk-narrow.json"
   # NOT a control: the ticket check applies to measurements only, so labelling
   # this one would skip the very guard it names. It therefore also cannot lower
   # the corpus floors -- and does not need to, because the ticket is validated
@@ -2654,7 +2659,11 @@ STUBEOF
   mkdir -p "$TMP/e2e-corpus/ks/tbl"
   truncate -s 150000000 "$TMP/e2e-corpus/ks/tbl/nb-1-big-Data.db"
   truncate -s 150000000 "$TMP/e2e-corpus/ks/tbl/nb-2-big-Data.db"
-  printf '{"version":2,"keyspace":"ks","table":"tbl","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' \
+  # The compressed-corpus requirement is now ENFORCED, so a served SSTable
+  # without a usable CompressionInfo.db is refused for a measurement.
+  head -c 512 /dev/zero > "$TMP/e2e-corpus/ks/tbl/nb-1-big-CompressionInfo.db"
+  head -c 512 /dev/zero > "$TMP/e2e-corpus/ks/tbl/nb-2-big-CompressionInfo.db"
+  printf '{"version":2,"keyspace":"ks","table":"tbl","ddl":"CREATE TABLE ks.tbl (a int PRIMARY KEY)","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' \
     > "$TMP/e2e-ticket.json"
 
   run_e2e() { # <work-dir> <extra driver args...>
