@@ -337,6 +337,15 @@ export CQLITE_BOOTSTRAP_TEST_MODE=1
 export CQLITE_BOOTSTRAP_ENV_FILE="$tmp/etc-environment"
 : >"$CQLITE_BOOTSTRAP_ENV_FILE"
 
+# --- KEEP BOOTSTRAP'S CLAUDE CREDENTIAL SECTION OUT OF THIS SUITE (issue #3733) -----
+# Section 5c makes a REAL, BOUNDED, BILLED `claude -p` network call and, under --yes (which
+# 59 cases below pass), seeds the HOST's running tmux server via `tmux setenv -g`. Neither
+# is this suite's subject, and the second is host mutation caused by a test run. The
+# section's own loud, non-passing opt-out keeps it entirely out of the way; exported ONCE
+# here, exactly as the perf suite does for the pin section, so a case added later inherits
+# it. Section 5c's own coverage lives in scripts/tests/test_claude_auth_capability.sh.
+export CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1
+
 
 # --- CARGO_HOME isolation: THIS SUITE WAS BREAKING cargo FOR THE WHOLE BOX ---------
 # The mold section writes `${CARGO_HOME:-$HOME/.cargo}/config.toml`, and on this fleet

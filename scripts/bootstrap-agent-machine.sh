@@ -81,6 +81,24 @@
 #      passes, so a freshly launched box is PINNED rather than merely reported unpinned.
 #      PAM reads /etc/environment at session creation, so the probe in the SAME run sees
 #      what the write just persisted — no reboot and no re-login.
+#   5c. Claude credential reachability (issue #3733, LINUX only). TWO independent
+#      questions, because they fail independently and their remedies differ, each on its
+#      own greppable line. `claude-auth:` asks whether the PERSISTED credential is valid
+#      for a COLD, non-interactive start: the token is read from /etc/environment (the
+#      pam_env source — the ONLY place it is provisioned), the inherited
+#      CLAUDE_CODE_OAUTH_TOKEN is SCRUBBED so an already-authenticated bootstrap session
+#      cannot answer for a persisted one (#3414's lesson, one subject over), and the value
+#      is exercised by a bounded `claude -p` requiring BOTH rc 0 AND a sentinel.
+#      `claude-tmux-env:` asks whether that credential REACHES a tmux-spawned pane — the
+#      dimension that actually failed in the field: a pane's environment comes from the
+#      tmux SERVER, fixed at server start, so a server predating provisioning hands out
+#      panes with neither variable however correct the disk is, and NOTHING ON DISK
+#      distinguishes such a box. Verdicts: VERIFIED / NOT-PERSISTED / FAILED / UNMEASURED
+#      and VERIFIED / SERVER-STALE / SERVER-MISSING / SERVER-INCOMPLETE / NO-SERVER /
+#      UNMEASURED. Only VERIFIED is an [ok] on either line (same posture as `git-push:`
+#      and `gate-pin:`); NO-SERVER is UNMEASURED-class. The TOKEN VALUE IS NEVER PRINTED,
+#      and bootstrap writes it to NO file — /etc/environment already holds it and a second
+#      copy is what openspec/specs/worker-environment-preflight/spec.md forbids.
 #   6. Health check: run the gate's fmt component and print its authoritative
 #      `accelerators:` line.
 #
@@ -122,6 +140,26 @@
 #                                                      #   CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 is the
 #                                                      #   env spelling, for harnesses that drive
 #                                                      #   bootstrap on a fixed command line.
+#   bash scripts/bootstrap-agent-machine.sh --skip-claude-auth # skip ONLY section 5c (the
+#                                                      #   Claude credential probe AND the tmux
+#                                                      #   reachability measurement). The probe
+#                                                      #   makes a real bounded network/LLM call,
+#                                                      #   so an opt-out is warranted — but a
+#                                                      #   SILENT skip is not: it emits
+#                                                      #   `claude-auth: OPT-OUT` as a [warn], so
+#                                                      #   it withholds "All checks green." and can
+#                                                      #   never buy a vacuous green.
+#                                                      #   CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1 is
+#                                                      #   the env spelling, for harnesses that
+#                                                      #   drive bootstrap on a fixed command line.
+#   bash scripts/bootstrap-agent-machine.sh --fix-claude-auth  # seed the RUNNING tmux server's
+#                                                      #   environment from the value already
+#                                                      #   persisted in /etc/environment, which
+#                                                      #   repairs SERVER-MISSING / SERVER-STALE /
+#                                                      #   SERVER-INCOMPLETE without persisting a
+#                                                      #   second copy of the secret ANYWHERE.
+#                                                      #   Implied by --yes. Nothing else — the
+#                                                      #   sibling of --fix-gate-pin.
 #   bash scripts/bootstrap-agent-machine.sh --skip-smoke   # skip the final GATE run (section 6).
 #                                                      #   DISTINCT from --skip-push-probe: this
 #                                                      #   one is about the gate fmt smoke, that
@@ -166,6 +204,29 @@ fi
 # stays a verification step rather than becoming an installer — the same reasoning that
 # justified --fix-credentials.
 FIX_GATE_PIN=0
+# --skip-claude-auth / CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1 (issue #3733): skip section 5c
+# entirely — no `claude -p` probe and no tmux server inspection. A FOURTH subject, so a
+# fourth switch, exactly as --skip-gate-pin is separate from --skip-push-probe. It is LOUD
+# and NON-PASSING (a `claude-auth: OPT-OUT` [warn]).
+#
+# WHY AN OPT-OUT EXISTS HERE AT ALL, when the sibling probes justify theirs on hangs: this
+# one makes a REAL, BILLED, NETWORK LLM CALL. That is a cost an offline box, a hermetic
+# self-test and a rate-limited fleet each have a legitimate reason to decline. What is NOT
+# legitimate is declining it QUIETLY, which is why the opt-out is a warn and not a skip.
+SKIP_CLAUDE_AUTH=0
+SKIP_CLAUDE_AUTH_HOW=""
+if [ "${CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH:-0}" = 1 ]; then
+  SKIP_CLAUDE_AUTH=1; SKIP_CLAUDE_AUTH_HOW="CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1"
+fi
+# --fix-claude-auth (issue #3733): seed the RUNNING tmux server from the ALREADY-PERSISTED
+# value, and nothing else. Implied by --yes, mirroring --fix-gate-pin.
+#
+# IT PERSISTS NOTHING. The repair for the field failure is not another file: the token is
+# already in /etc/environment, and the broken thing is a long-running process whose start
+# environment predates it. `tmux setenv -g` fixes exactly that, and writing a second 644
+# copy of the credential would violate openspec/specs/worker-environment-preflight/spec.md
+# ("no file written by the bootstrap contains the token value") while buying nothing.
+FIX_CLAUDE_AUTH=0
 FIX_CREDENTIALS=0
 STRICT=0
 for arg in "$@"; do
@@ -175,6 +236,8 @@ for arg in "$@"; do
     --skip-push-probe) SKIP_PUSH_PROBE=1 ;;
     --skip-gate-pin) SKIP_GATE_PIN=1; SKIP_GATE_PIN_HOW="--skip-gate-pin" ;;
     --fix-gate-pin) FIX_GATE_PIN=1 ;;
+    --skip-claude-auth) SKIP_CLAUDE_AUTH=1; SKIP_CLAUDE_AUTH_HOW="--skip-claude-auth" ;;
+    --fix-claude-auth) FIX_CLAUDE_AUTH=1 ;;
     --fix-credentials) FIX_CREDENTIALS=1 ;;
     --strict) STRICT=1 ;;
     -h|--help)
@@ -199,6 +262,16 @@ if [ "$FIX_GATE_PIN" = 1 ] && [ "$SKIP_GATE_PIN" = 1 ]; then
     exit 2
   fi
   SKIP_GATE_PIN=0; SKIP_GATE_PIN_HOW=""
+fi
+# The same rule for the #3733 pair, resolved here rather than inline for the same reason:
+# flag ORDER must not change the outcome, and an explicit --fix beside an explicit --skip
+# is a usage error, never a silent resolution.
+if [ "$FIX_CLAUDE_AUTH" = 1 ] && [ "$SKIP_CLAUDE_AUTH" = 1 ]; then
+  if [ "$SKIP_CLAUDE_AUTH_HOW" = "--skip-claude-auth" ]; then
+    echo "bootstrap: --skip-claude-auth and --fix-claude-auth are contradictory (try --help)" >&2
+    exit 2
+  fi
+  SKIP_CLAUDE_AUTH=0; SKIP_CLAUDE_AUTH_HOW=""
 fi
 
 # ---- OS + package-manager detection ----
@@ -2910,7 +2983,99 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   fi
 fi
 
-# ---- 5c. Notification channel (ntfy) — issue #3119 ----
+# ---- 5c. Claude credential reachability — issue #3733 ----
+# TWO INDEPENDENT VERDICTS, because they fail independently on a real box and their
+# remedies differ. The mechanics, the measured causal chain and the recovery procedure
+# live in docs/development/fleet-runbook.md ("Claude credential reachability"); the
+# implementation lives in scripts/claude-auth-capability.sh, which is standalone-runnable
+# and self-tested (scripts/tests/test_claude_auth_capability.sh, in `tooling-tests`).
+#
+# WHY THIS IS NOT INLINE: bootstrap is already 3000+ lines, and the logic is worth testing
+# on its own — the same argument that put the perf checks in scripts/perf-capability.sh.
+hdr "Claude credential reachability (issue #3733)"
+CLAUDE_AUTH_LIB="$REPO_ROOT/scripts/claude-auth-capability.sh"
+# INITIALISE BEFORE THE GUARDS, never after: the gate below is read as
+# ${CLAUDE_AUTH_SECTION_OK:-0}, so an INHERITED CLAUDE_AUTH_SECTION_OK=1 must not be able
+# to carry a checkout with no capability script into the implementation (the same ambient-
+# export hazard section 2c documents).
+CLAUDE_AUTH_SECTION_OK=0
+CLAUDE_AUTH_V=""
+CLAUDE_AUTH_D=""
+CLAUDE_TMUX_V=""
+CLAUDE_TMUX_D=""
+if [ "$SKIP_CLAUDE_AUTH" = 1 ]; then
+  # Loud and NON-PASSING by construction: an opt-out that returned `ok` would be a switch
+  # for buying a vacuous green, which is the failure mode this section exists to remove.
+  warn "claude-auth: OPT-OUT ($SKIP_CLAUDE_AUTH_HOW) — the persisted credential was NOT exercised and tmux reachability was NOT measured"
+  info "this run cannot certify that a NEW tmux session on this box can start 'claude'; drop the opt-out to measure it"
+elif [ ! -r "$CLAUDE_AUTH_LIB" ]; then
+  warn "claude-auth: UNMEASURED (scripts/claude-auth-capability.sh missing from this checkout — nothing here can answer the cold-start question)"
+else
+  CLAUDE_AUTH_SECTION_OK=1
+fi
+
+if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
+  # shellcheck source=scripts/claude-auth-capability.sh
+  . "$CLAUDE_AUTH_LIB"
+
+  # ---- (a) is the PERSISTED credential valid for a cold, non-interactive start? ----
+  claude_auth_verdict_into CLAUDE_AUTH_V CLAUDE_AUTH_D
+  if [ "$CLAUDE_AUTH_V" = VERIFIED ]; then
+    ok "claude-auth: VERIFIED ($CLAUDE_AUTH_D)"
+  else
+    warn "claude-auth: $CLAUDE_AUTH_V ($CLAUDE_AUTH_D)"
+  fi
+  # THE REMEDY DIFFERS BY VERDICT, and getting that wrong sends an operator in a circle —
+  # the #3414 `default` vs `invalid` lesson. NOT-PERSISTED means provision it; FAILED means
+  # replace a value that IS there; UNMEASURED means fix the named precondition and re-run.
+  case "$CLAUDE_AUTH_V" in
+    NOT-PERSISTED)
+      info "provision it:  add a CLAUDE_CODE_OAUTH_TOKEN=<token> line to /etc/environment (root:root 0644, its own line, NO inline comment — pam_env takes a trailing '# ...' as part of the value)"
+      info "no browser is needed: the credential is a STATIC, SHAREABLE gateway token, so provisioning a box is a file copy plus 'bash scripts/bootstrap-agent-machine.sh --fix-claude-auth' — there is no interactive OAuth step"
+      info "bootstrap deliberately NEVER writes the credential itself; it only reports and reaches it" ;;
+    FAILED)
+      info "replace the VALUE (not the presence) — the CLAUDE_CODE_OAUTH_TOKEN line in /etc/environment is there and is rejected; bootstrap never rewrites it"
+      info "then re-run, and seed the running tmux server:  bash scripts/bootstrap-agent-machine.sh --fix-claude-auth" ;;
+    UNMEASURED)
+      info "resolve the condition named above and re-run; check by hand:  bash scripts/claude-auth-capability.sh --auth" ;;
+  esac
+
+  # ---- (b) does that credential REACH a tmux-spawned pane? ----
+  # Measured BEFORE any repair, so the run reports the state it FOUND; the repair below
+  # re-measures rather than asserting its own success.
+  claude_tmux_env_verdict_into CLAUDE_TMUX_V CLAUDE_TMUX_D
+  # THE REPAIR IS ATTEMPTED ONLY WHERE IT CAN HELP. `tmux setenv -g` needs a running
+  # server, so NO-SERVER and UNMEASURED are left alone: running it there would print a
+  # failure that says nothing about the box.
+  if [ "$CLAUDE_TMUX_V" != VERIFIED ] && { [ "$AUTO_YES" = 1 ] || [ "$FIX_CLAUDE_AUTH" = 1 ]; }; then
+    case "$CLAUDE_TMUX_V" in
+      SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE)
+        info "repairing: seeding the running tmux server from the persisted value (nothing is written to disk)"
+        claude_auth_fix_tmux_env | while IFS= read -r claude_fix_line; do info "$claude_fix_line"; done
+        # RE-MEASURED, never assumed: `tmux setenv` exiting 0 is a claim about the command,
+        # not about the server's environment, and this whole section exists because those
+        # are different facts.
+        claude_tmux_env_verdict_into CLAUDE_TMUX_V CLAUDE_TMUX_D ;;
+    esac
+  fi
+  if [ "$CLAUDE_TMUX_V" = VERIFIED ]; then
+    ok "claude-tmux-env: VERIFIED ($CLAUDE_TMUX_D)"
+  else
+    warn "claude-tmux-env: $CLAUDE_TMUX_V ($CLAUDE_TMUX_D)"
+  fi
+  case "$CLAUDE_TMUX_V" in
+    SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE)
+      info "repair the RUNNING server (no reboot, no re-login, nothing written to disk):  bash scripts/bootstrap-agent-machine.sh --fix-claude-auth   (--yes does it too)"
+      info "or by hand:  tmux setenv -g CLAUDE_CODE_OAUTH_TOKEN \"\$TOKEN\"; tmux setenv -g CLAUDE_CONFIG_DIR \"\$CLAUDE_CONFIG_DIR\"" ;;
+    NO-SERVER)
+      info "nothing to repair yet — but the NEXT server inherits the environment of whatever STARTS it, so start it from a PAM session (ssh/login), not from a stale process tree"
+      info "and note 'tmux new-session <command>' runs no login shell, so /etc/profile.d never executes for a spawned lane: a lane spawner must pass -e for BOTH variables or rely on a seeded server" ;;
+    UNMEASURED)
+      info "check by hand:  bash scripts/claude-auth-capability.sh --tmux-env" ;;
+  esac
+fi
+
+# ---- 5d. Notification channel (ntfy) — issue #3119 ----
 # The gate's push signal (#2667) and the worker supervisor page over ntfy. That
 # dependency used to be an out-of-band, per-machine `/usr/local/bin/agent-notify`
 # that this script never mentioned — and whose upstream v1.1.0 silently swallows
