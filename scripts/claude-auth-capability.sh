@@ -181,7 +181,18 @@ claude_auth_strip_pam_quotes_into() {
 }
 
 # claude_auth_read_key_into <outvar_value> <outvar_state> <file> <key>:
-# parse ONE assignment the way pam_env reads the file —
+# parse ONE assignment the way pam_env reads the file. THE GRAMMAR IS MEASURED, not
+# reasoned about: /etc/pam.d/sudo carries `pam_env.so readenv=1`, so appending a probe line
+# to /etc/environment and reading `sudo env` shows exactly what pam_env delivered. On this
+# fleet (pam 1.5.3):
+#   * leading whitespace is skipped, then an EXACT 7-byte `export ` prefix is dropped
+#     (delivered: `export K=v`, `  export K=v`; NOT delivered: `export  K=v` with two
+#     spaces, `export<TAB>K=v`, `exportK=v`, `setenv K=v`). `man 8 pam_env` documents it —
+#     "The export instruction can be specified for bash compatibility, but will be ignored"
+#     — and `export ` is the one such literal in the shipped pam_env.so;
+#   * the key runs up to the FIRST `=` with NO whitespace before it: `K = v` delivered
+#     nothing usable, so a `K[[:space:]]*=` anchor would report PERSISTED for a line no
+#     session receives — the permissive direction, and the worse one;
 #   * whole-line `#` comments are skipped (the anchor forbids a leading `#`);
 #   * NO inline-comment stripping: pam_env takes a trailing `# ...` as part of the value;
 #   * the LAST assignment wins if a file somehow carries two.
@@ -189,17 +200,32 @@ claude_auth_strip_pam_quotes_into() {
 # A SYMLINK is `unreadable`, not followed: what it points at is not the file whose bytes
 # pam_env consumes, and an unknown must never resolve to the good case.
 claude_auth_read_key_into() {
-  local __ov="$1" __os="$2" __f="$3" __k="$4" __raw
+  local __ov="$1" __os="$2" __f="$3" __k="$4" __raw __g=0
   eval "$__ov="; eval "$__os=unreadable"
+  # `-L` IS TESTED FIRST, and the order is the whole point: a DANGLING symlink fails `-e`,
+  # so an existence test in front of it answered `absent-file` — "nothing is provisioned
+  # here, add a line" — about a path we deliberately refuse to look through. The comment
+  # above said symlinks are refused; the code said they are missing. Refusal wins.
+  if [ -L "$__f" ]; then eval "$__os=unreadable"; return 0; fi
   if [ ! -e "$__f" ]; then eval "$__os=absent-file"; return 0; fi
-  if [ -L "$__f" ] || [ ! -f "$__f" ] || [ ! -r "$__f" ]; then eval "$__os=unreadable"; return 0; fi
-  if ! grep -Eq "^[[:space:]]*$__k[[:space:]]*=" "$__f" 2>/dev/null; then
-    eval "$__os=absent"; return 0
-  fi
+  if [ ! -f "$__f" ] || [ ! -r "$__f" ]; then eval "$__os=unreadable"; return 0; fi
+  # `grep` IS THREE-VALUED: 0 match, 1 NO match, >=2 ERROR (127 absent). `if ! grep -q`
+  # reads it two-valued and collapses "cannot tell" onto the AFFIRMATIVE `absent`, which
+  # reported NOT-PERSISTED for a box whose token IS provisioned and sent the operator to
+  # add a line already there. This repo lints for that shape (`1699-find-tristate`), and
+  # `unreadable` is already in this function's own state set. NOT A PIPE: `$?` on its own
+  # line.
+  grep -Eq "^[[:space:]]*(export )?$__k=" "$__f" 2>/dev/null
+  __g=$?
+  case "$__g" in
+    0) ;;
+    1) eval "$__os=absent"; return 0 ;;
+    *) eval "$__os=unreadable"; return 0 ;;
+  esac
   # A SENTINEL PREFIX, because an EMPTY capture and a FAILED capture are otherwise the
   # same string: `KEY=` is a legitimate (empty) assignment while sed producing nothing
   # means the parse failed. Without the marker the `unparseable` branch is unreachable.
-  __raw=$(sed -n "s/^[[:space:]]*$__k[[:space:]]*=/VAL:/p" "$__f" 2>/dev/null | tail -1)
+  __raw=$(sed -n "s/^[[:space:]]*\(export \)\{0,1\}$__k=/VAL:/p" "$__f" 2>/dev/null | tail -1)
   case "$__raw" in
     VAL:*) claude_auth_strip_pam_quotes_into "$__ov" "${__raw#VAL:}"; eval "$__os=present" ;;
     *)     eval "$__os=unparseable" ;;

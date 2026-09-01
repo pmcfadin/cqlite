@@ -425,6 +425,75 @@ else
 fi
 
 # =====================================================================================
+# 7b. `grep` IS THREE-VALUED AND MUST NOT BE READ TWO-VALUED. It exits 0 on a match, 1 on
+#     NO match and >=2 on an ERROR (127 when absent). The shipped `if ! grep -q …; then
+#     absent` collapsed "cannot tell" onto the AFFIRMATIVE "no token line here", so a box
+#     whose token IS provisioned reported NOT-PERSISTED and bootstrap told the operator to
+#     add a line that is already there. This repo lints for exactly that shape
+#     (`1699-find-tristate`), and the function's own comment enumerates `unreadable` as a
+#     state it distinguishes — which it then lost.
+d7b=$(mkshim "$tmp/s7b"); plant_claude_probe_env "$d7b"
+cat >"$d7b/grep" <<'EOF'
+#!/usr/bin/env bash
+printf 'grep: memory exhausted\n' >&2
+exit 2
+EOF
+chmod +x "$d7b/grep"
+run_cap "$d7b" "$ef2" -- --auth      # $ef2 DOES carry the token
+if printf '%s' "$out" | grep -q '^claude-auth: UNMEASURED'; then
+  ok "claude-auth: a grep ERROR is UNMEASURED, never the affirmative 'no token line here'"
+else
+  bad "claude-auth: a failing grep was read as an absent assignment: $out"
+fi
+
+# 7c. A DANGLING SYMLINK IS `unreadable`, NOT `absent-file`. The comment two lines above the
+#     check says a symlink is refused rather than followed — but `[ ! -e ]` ran FIRST and a
+#     dangling link fails it, so the code answered `absent-file` (NOT-PERSISTED: "provision
+#     it") about a path whose target we deliberately refuse to look at. Code and comment
+#     have to agree, and the non-permissive answer is the correct one.
+d7c=$(mkshim "$tmp/s7c"); plant_claude_probe_env "$d7c"
+ln -s "$tmp/no-such-env-file" "$tmp/env-dangling"
+run_cap "$d7c" "$tmp/env-dangling" -- --auth
+if printf '%s' "$out" | grep -q '^claude-auth: UNMEASURED'; then
+  ok "claude-auth: a DANGLING symlink is unreadable (UNMEASURED), not a missing file"
+else
+  bad "claude-auth: a dangling symlink was classified as an absent file: $out"
+fi
+
+# 7d. pam_env STRIPS A LEADING `export `, SO THE PARSER MUST TOO. MEASURED, not reasoned
+#     about, through a REAL PAM session (`/etc/pam.d/sudo` carries `pam_env.so readenv=1`,
+#     so `sudo env` shows exactly what pam_env delivered from /etc/environment):
+#       `export K=v`      -> delivered            `export  K=v` (two spaces) -> NOT delivered
+#       `  export K=v`    -> delivered            `export<TAB>K=v`           -> NOT delivered
+#       `exportK=v`       -> NOT delivered        `setenv K=v`               -> NOT delivered
+#     i.e. exactly the 7-byte literal `export ` after leading whitespace, which is also the
+#     one string `strings /usr/lib/x86_64-linux-gnu/security/pam_env.so` carries and what
+#     `man 8 pam_env` documents ("The export instruction can be specified for bash
+#     compatibility, but will be ignored"). Without this, a box provisioned with an
+#     `export`-prefixed line reads NOT-PERSISTED while every real session gets the token.
+ef_export="$tmp/env-export"
+mkenvfile "$ef_export" "export CLAUDE_CODE_OAUTH_TOKEN=$TOK" "  export CLAUDE_CONFIG_DIR=$CFGDIR"
+d7d=$(mkshim "$tmp/s7d"); plant_claude_probe_env "$d7d"
+run_cap "$d7d" "$ef_export" -- --auth
+if printf '%s' "$out" | grep -q '^claude-auth: VERIFIED'; then
+  ok "claude-auth: an 'export '-prefixed assignment is read the way pam_env reads it"
+else
+  bad "claude-auth: an export-prefixed token line was not seen: $out"
+fi
+# ...and the non-forms pam_env REJECTS must not be honoured either, or the parser would
+# certify a line no session receives — the permissive direction, and the worse one.
+ef_notexport="$tmp/env-not-export"
+mkenvfile "$ef_notexport" "export  CLAUDE_CODE_OAUTH_TOKEN=$TOK" "setenv CLAUDE_CODE_OAUTH_TOKEN=$TOK" \
+  "exportCLAUDE_CODE_OAUTH_TOKEN=$TOK"
+d7e=$(mkshim "$tmp/s7e"); plant_claude_probe_env "$d7e"
+run_cap "$d7e" "$ef_notexport" -- --auth
+if printf '%s' "$out" | grep -q '^claude-auth: NOT-PERSISTED'; then
+  ok "claude-auth: the export spellings pam_env REJECTS are not honoured either"
+else
+  bad "claude-auth: a line pam_env would ignore was accepted as persisted: $out"
+fi
+
+# =====================================================================================
 # 8-12. THE TMUX DIMENSION — the one that actually failed in the field and that no
 #       existing check covers. A pane's environment comes from the SERVER.
 # =====================================================================================
@@ -836,7 +905,7 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case.
-CASE_FLOOR=45
+CASE_FLOOR=50
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
