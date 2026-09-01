@@ -242,6 +242,28 @@ current fleet capacity look adequate. Measured, twice, on two different boxes:
 - **2026-09-01, `ip-172-31-6-169`** (independent corroboration): `lane-3731/target` at
   **108G**, alongside a 15G `/data/sccache`. Broken down, that one lane is `debug` **89G** plus
   `agent-gate-side` **20G**.
+- **#3724, `box7`, 2026-09-01 — a COLD gate that COMPLETED**: `target/` grew to **102G**
+  mid-run and **peaked at 105G** at completion. Quote this one for a cold single lane; the
+  101–143G figures above are warm trees carrying earlier runs' profiles.
+
+**AND ONLY A RUN THAT COMPLETES THE BUILD CAN MEASURE THE BUILD (#3724, lead measurement).**
+An **~80G** figure circulated before this and was wrong for a reason worth naming: every run it
+came from **died before finishing the build**, so it measured how far cargo got, not what a full
+gate needs. A peak read off an aborted or ENOSPC-killed run is a **lower bound on the lower
+bound** — the failure truncates exactly the components that were about to allocate most. Never
+quote a disk peak from a run with no terminal `RESULT: PASS|FAIL`.
+
+**Corollary for capacity, which is the ruling's input and not a ruling:** at ~102G per cold
+gate a 295G volume supports **two lanes gating serially with reserve — not four lanes with
+independent trees**. What the slot cap should actually COUNT is #3434/#3763/#3755 under one
+owner design ruling, deliberately not this section.
+
+**The longest component is `tooling-tests`, and its measured figure has been understated three
+times running: ~850s → 2073s (#3473 gate of record #4) → 2417s / 40.3 min (#3724, 2026-09-01).**
+That matters here because a lane sizing a disk-pressure window — or deciding a `STALLED` gate is
+dead — off the longest component must derive the bound **from the component table in its own
+SUMMARY**, never from a figure in prose like this one. Three successive corrections are the
+evidence that prose figure will be low again.
 
 **What moved it:** the feature-matrix lanes. `feature-iso-parquet`, `feature-iso-delta-scan`,
 `legacy-heuristics`, `all-features-check` and the `--all-features` clippy matrix each compile
