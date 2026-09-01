@@ -805,6 +805,10 @@ mod partition_driver;
 pub(crate) mod partition_shadow;
 mod raw_type_value;
 mod raw_value;
+// Campsite split of `raw_value` (epic #1116 / issue #3723): fixed-width scalar
+// arms + their width guards, and the marshal→CQL-short-form normalization.
+mod raw_value_fixed_width;
+mod raw_value_marshal_short;
 mod row_data;
 mod row_framing;
 mod udt;
@@ -835,6 +839,16 @@ pub(crate) mod decoder_lockstep_tests;
 // Pins that the two live `ComparatorType` decoders share one structural body.
 #[cfg(test)]
 mod decoder_consolidation_tests;
+
+// Tests for the bounded raw-value decoder (split out of `raw_value.rs`,
+// epic #1116 / issue #3723).
+#[cfg(test)]
+mod raw_value_tests;
+
+// Issue #3723: nested fixed-width collection/tuple elements must REFUSE a
+// wrong declared length.
+#[cfg(test)]
+mod regression_3723_nested_fixed_width_tests;
 
 #[cfg(test)]
 mod regression_1741c_tests;
