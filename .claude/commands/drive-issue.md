@@ -93,9 +93,15 @@ On start, BEFORE anything else: `git fetch origin`, then check whether this mach
   - `FOREIGN-ISSUE`/`FOREIGN-MACHINE`/`FOREIGN-WORKTREE` (4) → this marker is not about this
     lane's work (a reused lane, a copied tree, a marker that travelled with a branch). Escalate to
     the lead rather than adopting or deleting it.
-  - `UNSTAMPED`/`MALFORMED`/`DUPLICATE-SENTINEL` (8) → the marker predates #3822 or was hand-edited,
-    so its plan could belong to any session. Do NOT adopt its contents; re-`write` a stamped marker
-    only if this lane's work genuinely IS the issue it describes.
+  - `UNSTAMPED` (8) → the marker predates #3822 (the state EVERY existing lane is in on rollout),
+    so its plan could belong to any session. Do NOT read its contents as your plan. The route
+    forward IS `drive-issue-state.sh write <N> --stage <stage>`, which succeeds over an unstamped
+    marker, DISCARDS its body and says so — save anything you need out of the file first, then
+    resume as a fresh start of that stage.
+  - `MALFORMED`/`DUPLICATE-SENTINEL` (8) → the file CLAIMS an identity that cannot be read, which
+    may be a live peer's, so it is NOT overwritten for you. Move it aside deliberately
+    (`mv .drive-issue-state.md .drive-issue-state.md.unreadable`); the lane then reads `ABSENT` and
+    you write a fresh stamped marker on the normal path. Say in your report that you did it.
 - **Not held → fresh start**: claim per worker.md step 3, then route (oracle-driven → straight to
   implement; design-driven → `flow-activate` to Seam 1, render the spec INLINE in an issue comment
   as the approval request, then Delta 3). The spec render and the coord request are **ONE combined
