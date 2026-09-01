@@ -8,12 +8,15 @@ What CQLite guarantees about the **shape** of query and `export` output in the `
 Four places in the tree cited `QUERY_RESULT_CONTRACT.md` as their specification while no such file
 existed (issue #3644, test-side item (b)):
 
-| Citation site | Claim it makes |
+| Citation site | Claim it made |
 |---|---|
-| `cqlite-core/src/util/value_fmt.rs:2` | "Implements the Value → String mapping per QUERY_RESULT_CONTRACT.md" |
-| `cqlite-cli/src/output/mod.rs:8` | "All writers follow the QUERY_RESULT_CONTRACT.md specification" |
-| `cqlite-cli/src/output/csv.rs:3` | "Implements CSV output format following QUERY_RESULT_CONTRACT.md specification" |
-| `cqlite-cli/tests/output_determinism_regression_tests.rs:4` | "as specified in QUERY_RESULT_CONTRACT.md" |
+| `cqlite-core/src/util/value_fmt.rs` | "Implements the Value → String mapping per QUERY_RESULT_CONTRACT.md" |
+| `cqlite-cli/src/output/mod.rs` | "All writers follow the QUERY_RESULT_CONTRACT.md specification" |
+| `cqlite-cli/src/output/csv.rs` | "Implements CSV output format following QUERY_RESULT_CONTRACT.md specification" |
+| `cqlite-cli/tests/output_determinism_regression_tests.rs` | "as specified in QUERY_RESULT_CONTRACT.md" |
+
+Each now cites this file by its **path**, not by a bare filename — the bare name is part of why
+nobody could tell the document was missing.
 
 A dangling authority reference is worse than none: it reads as though a decision was written down
 and settled somewhere, so the next reader stops looking. That already cost time on #1491 — a

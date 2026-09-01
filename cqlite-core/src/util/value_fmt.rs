@@ -1,5 +1,7 @@
 //! Value formatting shared by output writers
-//! Implements the Value → String mapping per QUERY_RESULT_CONTRACT.md
+//! Implements the Value → String mapping per
+//! `docs/development/QUERY_RESULT_CONTRACT.md`, which names THIS module as the
+//! normative artifact for it rather than restating the per-type table.
 //!
 //! This module provides stable, cqlsh-compatible formatting for all CQL value
 //! types.  It originally lived in `cqlite-cli/src/output/value_fmt.rs` and was

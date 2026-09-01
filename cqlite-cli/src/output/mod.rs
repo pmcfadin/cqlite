@@ -5,7 +5,7 @@
 //!
 //! ## Contract
 //!
-//! All writers follow the QUERY_RESULT_CONTRACT.md specification:
+//! All writers follow `docs/development/QUERY_RESULT_CONTRACT.md`:
 //! - Column order determined by `metadata.columns`
 //! - Null values handled consistently
 //! - Format-specific conventions (e.g., row count footer for tables)

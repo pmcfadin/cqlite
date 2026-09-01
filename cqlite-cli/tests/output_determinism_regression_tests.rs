@@ -1,7 +1,8 @@
 //! Output Determinism Regression Tests
 //!
 //! These tests ensure that JSON and CSV output formats maintain deterministic, stable
-//! column ordering as specified in QUERY_RESULT_CONTRACT.md. They serve as regression
+//! column ordering as specified in `docs/development/QUERY_RESULT_CONTRACT.md`
+//! (section 1, "Column order", which names these tests). They serve as regression
 //! protection against accidental ordering changes.
 //!
 //! # Contract Guarantees Tested
