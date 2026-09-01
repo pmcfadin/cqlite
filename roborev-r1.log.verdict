@@ -1,3 +1,0 @@
-## Summary
-
-The change adds launch-time and slot-grant disk-admission checks with refusal reporting and an end-to-end concurrency harness.

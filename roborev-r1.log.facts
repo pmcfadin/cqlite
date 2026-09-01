@@ -1,9 +1,0 @@
-git_ref=ef083e2bf147578c51dc9e431ec35221424368a2..e69c7d8ec0700e68b155dcd39f10c53d588fb115
-status=done
-model=gpt-5.6-sol
-requested_model=gpt-5.6-sol
-verdict=F
-token_state=parsed
-input_tokens=319064
-cached_input_tokens=251392
-output_tokens=5723
