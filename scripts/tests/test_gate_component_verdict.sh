@@ -339,6 +339,13 @@ echo "=== section 6: the two DOCUMENTED text-completion grammars, run against re
 # prefix defect one layer out, in the very string being published.
 RECORD_RE='^RESULT: (PASS|FAIL)([[:space:]]|$)'
 ONLY_RE='^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'
+# THE THIRD MODE. `--delta` can terminate with ERROR (4 emit sites) or REFUSED (3, via
+# `emit_summary "$(_tree_result REFUSED)"`), neither of which the RECORD grammar matches —
+# so a --delta poller using the record grammar HANGS FOREVER on a terminal outcome, which
+# is #3750's own defect class in a different mode. Set token-for-token with
+# gate-liveness.sh's enumerated terminal set, so there is ONE source of truth for "what is
+# terminal"; case 15.10 DERIVES that equality from the reader rather than trusting this line.
+DELTA_RE='^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'
 
 g() { grep -qE "$1" "$2"; }   # returns grep's status; called in `if`, never through a pipe
 
@@ -688,6 +695,112 @@ expect "14.1 a RESULT token split by a control character is not reassembled unde
 _ctl_mark="$TMP/$(printf '====\001 AGENT-GATE')-nope.txt"
 expect "14.2 a block marker split by a control character is not reassembled undefused" \
   COULD-NOT-MEASURE 4 "summary-absent" -- "$_ctl_mark" --mode only --component fmt
+
+echo "=== section 15: the THIRD per-mode completion grammar (--delta) ==="
+# THE FINDING THIS CLOSES. The published RECORD grammar is PASS|FAIL, and `--delta` can
+# terminate with ERROR or REFUSED. A --delta poller using the grammar this change publishes
+# would hang forever on a terminal outcome — #3750's exact defect class, in a third mode,
+# inside the doctrine paragraph #3750 rewrites.
+#
+# WHY WIDENING IS SAFE HERE, AND ONLY HERE. Matching ERROR/REFUSED as COMPLETION cannot
+# create a false pass, because this change separated completion from verdict: the verdict is
+# a separate affirmative assertion (premerge-assert.sh requires the PASS token exactly, and
+# gate-component-verdict.sh reads the component's own line). Before that separation,
+# widening a completion grammar WOULD have been dangerous. So the fix is ENABLED by the
+# change it is a finding against — which is why three completion grammars are not three
+# chances to be wrong.
+#
+# RECORD STAYS EXACTLY PASS|FAIL: a full gate emits only those, and AC4 (the gate-of-record
+# probe must keep refusing PARTIAL) is load-bearing.
+
+# The published strings are EXTRACTED FROM THE SHIPPED HEADER and compared to the ones the
+# behavioural cases above actually ran. #3750 happened because a PUBLISHED string did not
+# behave as published; testing a constant that merely resembles the published one would
+# reproduce that gap one level up.
+_pub() {  # <mode-label> -> the grammar published for that mode, or empty
+  sed -n "s/^#[[:space:]]*$1[[:space:]]*(.*):[[:space:]]*grep -qE '\([^']*\)'.*/\1/p" "$VERDICT" | head -1
+}
+_pub_record=$(_pub record); _pub_only=$(_pub only); _pub_delta=$(_pub delta)
+if [ -n "$_pub_record" ] && [ -n "$_pub_only" ] && [ -n "$_pub_delta" ]; then
+  ok "15.1 the shipped header publishes a grammar for all THREE modes"
+else
+  bad "15.1 the shipped header publishes a grammar for all THREE modes" \
+      "record='$_pub_record' only='$_pub_only' delta='$_pub_delta'"
+fi
+if [ "$_pub_record" = "$RECORD_RE" ]; then ok "15.2 the PUBLISHED record grammar is byte-identical to the one asserted behaviourally"
+else bad "15.2 the PUBLISHED record grammar is byte-identical to the one asserted behaviourally" "published='$_pub_record' tested='$RECORD_RE'"; fi
+if [ "$_pub_only" = "$ONLY_RE" ]; then ok "15.3 the PUBLISHED --only grammar is byte-identical to the one asserted behaviourally"
+else bad "15.3 the PUBLISHED --only grammar is byte-identical to the one asserted behaviourally" "published='$_pub_only' tested='$ONLY_RE'"; fi
+if [ "$_pub_delta" = "$DELTA_RE" ]; then ok "15.4 the PUBLISHED --delta grammar is byte-identical to the one asserted behaviourally"
+else bad "15.4 the PUBLISHED --delta grammar is byte-identical to the one asserted behaviourally" "published='$_pub_delta' tested='$DELTA_RE'"; fi
+
+# Fixtures for the two delta terminal outcomes the record grammar cannot see.
+SE1="$TMP/delta-error.txt"
+mk_block "$SE1" " DELTA" run-1 "ERROR (delta could not resolve its anchor)" \
+  "MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION)"
+SE2="$TMP/delta-refused.txt"
+mk_block "$SE2" " DELTA" run-1 "REFUSED (the diff changes files --delta cannot re-certify)" \
+  "MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION)"
+
+if g "$DELTA_RE" "$SE1" && ! g "$RECORD_RE" "$SE1"; then
+  ok "15.5 a --delta ERROR terminates the DELTA grammar and is invisible to the RECORD one (the hang)"
+else
+  bad "15.5 a --delta ERROR terminates the DELTA grammar and is invisible to the RECORD one (the hang)" \
+      "delta-match=$(g "$DELTA_RE" "$SE1" && echo yes || echo NO) record-match=$(g "$RECORD_RE" "$SE1" && echo YES || echo no)"
+fi
+if g "$DELTA_RE" "$SE2" && ! g "$RECORD_RE" "$SE2"; then
+  ok "15.6 a --delta REFUSED terminates the DELTA grammar and is invisible to the RECORD one"
+else
+  bad "15.6 a --delta REFUSED terminates the DELTA grammar and is invisible to the RECORD one" \
+      "delta-match=$(g "$DELTA_RE" "$SE2" && echo yes || echo NO) record-match=$(g "$RECORD_RE" "$SE2" && echo YES || echo no)"
+fi
+
+# AC4, UNWEAKENED: the record grammar must refuse PARTIAL and must not have silently
+# started matching the delta tokens either.
+if ! g "$RECORD_RE" "$S2" && ! g "$RECORD_RE" "$SE1" && ! g "$RECORD_RE" "$SE2"; then
+  ok "15.7 the RECORD grammar refuses PARTIAL, ERROR and REFUSED alike (AC4 unweakened)"
+else
+  bad "15.7 the RECORD grammar refuses PARTIAL, ERROR and REFUSED alike (AC4 unweakened)"
+fi
+
+# Token-terminated, like its two siblings: a longer word is a different word.
+SE3="$TMP/delta-errors.txt"
+mk_block "$SE3" " DELTA" run-1 "ERRORS EVERYWHERE" "MODE: delta"
+if g "$DELTA_RE" "$SE3"; then
+  bad "15.8 the DELTA grammar is token-terminated (ERRORS is not ERROR)" "ERRORS matched"
+else ok "15.8 the DELTA grammar is token-terminated (ERRORS is not ERROR)"; fi
+if g "$DELTA_RE" "$S9"; then
+  bad "15.9 widening to ERROR/REFUSED must not readmit the #3041 INCOMPLETE sentinel" "INCOMPLETE matched"
+else ok "15.9 widening to ERROR/REFUSED must not readmit the #3041 INCOMPLETE sentinel"; fi
+
+# ONE SOURCE OF TRUTH, DERIVED. The delta grammar's token set must EQUAL the terminal set
+# gate-liveness.sh enumerates in its own `case` arm — read out of that file at run time, so
+# a token added to the reader and not here (or vice versa) reds instead of drifting. A
+# second independent list is what this case exists to forbid.
+_reader_set=$(grep -oE '^[[:space:]]*PASS\|FAIL\|[A-Z|]+\)' "$READER" | head -1 | tr -d ' )')
+_delta_set=$(printf '%s' "$DELTA_RE" | sed -n 's/^\^RESULT: (\([^)]*\)).*/\1/p')
+if [ -n "$_reader_set" ] && [ "$_reader_set" = "$_delta_set" ]; then
+  ok "15.10 the DELTA grammar's token set is DERIVED-equal to gate-liveness.sh's terminal set"
+else
+  bad "15.10 the DELTA grammar's token set is DERIVED-equal to gate-liveness.sh's terminal set" \
+      "reader='$_reader_set' delta='$_delta_set'"
+fi
+
+# PUBLISHED AT EVERY SITE, under AC4's textual-distinguishability rule: a reader must be
+# able to tell which of the THREE modes a site is using, so a site that names two grammars
+# and not the third is a site that teaches the hang.
+_missing=""
+for _f in "$REPO_ROOT/CLAUDE.md" \
+          "$REPO_ROOT/docs/development/gate-ops.md" \
+          "$REPO_ROOT/website/src/content/docs/agents-developing/gate-contract.md" \
+          "$REPO_ROOT/.claude/skills/ci-cd-validation/SKILL.md"; do
+  grep -qF 'ERROR|REFUSED' "$_f" 2>/dev/null || _missing="$_missing ${_f#$REPO_ROOT/}"
+done
+if [ -z "$_missing" ]; then
+  ok "15.11 the --delta grammar is published at every site that publishes the other two"
+else
+  bad "15.11 the --delta grammar is published at every site that publishes the other two" "missing:$_missing"
+fi
 
 # ---------------------------------------------------------------------------
 # CASE FLOORS (#3544). A span-replacing edit once silently deleted four cases from a
