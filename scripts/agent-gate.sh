@@ -14741,6 +14741,19 @@ EOF
     # demanding it would be demanding meaningless fixture handling. LATENT when found
     # (measured: all 12 currently derived targets reference CQLITE_DATASETS_ROOT, counts 2-10),
     # so this changes nothing today and closes the false-red for the next target.
+    # RAW-STRING LINES ARE EXCLUDED FROM THE LOOKUP SCAN (roborev round 7). Rust raw strings
+    # can CONTAIN the lookup as data — `r#"std::env::var("CQLITE_REQUIRE_FIXTURES")"#` matched
+    # the pattern, so a target with NO executable lookup read as strict-aware (measured).
+    #
+    # DELIBERATELY LINE-ORIENTED, with the residual DECLARED rather than papered over: a raw
+    # string that SPANS lines still hides its content. Chasing that needs the stateful parser
+    # #3789 owns, and this would be the sixth carve of one check — rounds 3,4,5,6,7 each found
+    # a hole in it, twice in my own preceding fix. So the POLARITY is chosen instead: dropping
+    # the whole line can only cause a FALSE REJECT (a loud lane FAIL), never a false accept.
+    # MEASURED before adopting it: 0 of the 12 derived targets carry a lookup on a line that
+    # also holds a raw-string opener, and all 12 are still accepted after the exclusion.
+    _fx_lookup_src="$LOG_DIR/fx-noraw-$_fx_base.rs"
+    grep -vE 'r#*"' "$_fx_strip" > "$_fx_lookup_src" 2>/dev/null || true
     _fx_reads=0
     grep -qE 'CQLITE_DATASETS_ROOT' "$_fx_strip" 2>/dev/null && _fx_reads=1 || _fx_rrc=$?
     if [ "${_fx_rrc:-1}" -ge 2 ]; then
@@ -14752,7 +14765,7 @@ EOF
       continue
     fi
     _fx_rc=0
-    _fx_cnt=$(grep -cE "$_fx_lookup" "$_fx_strip") || _fx_rc=$?
+    _fx_cnt=$(grep -cE "$_fx_lookup" "$_fx_lookup_src") || _fx_rc=$?
     if [ "$_fx_rc" -ge 2 ]; then
       _fx_fatal="$_fx_fatal $_fx_base(grep exit $_fx_rc)"
     elif [ "${_fx_cnt:-0}" -eq 0 ]; then
@@ -14787,8 +14800,9 @@ EOF
     census+=("       CQLITE_REQUIRE_FIXTURES — the")
     census+=("       variable this lane exports, and deliberately the only one accepted here:")
     census+=("       0 RECOGNISED gaps")
-    census+=("       RESIDUAL (R6-F2): `//`-commented lookups are correctly excluded, but a")
-    census+=("       lookup inside a `/* … */` BLOCK comment is NOT — Rust block comments NEST,")
+    census+=("       RESIDUAL (R6-F2/R7-F2): \`//\`-commented lookups and single-line RAW STRINGS")
+    census+=("       are excluded; a MULTI-LINE raw string, and a")
+    census+=("       lookup inside a \`/* … */\` BLOCK comment is NOT — Rust block comments NEST,")
     census+=("       nesting is not regular, so no regex can strip them; a stateful scanner is")
     census+=("       #3789's subject. A block-commented lookup would read as fixture-aware.")
     census+=("       SCOPE OF THAT CLAIM (R3-F1): it is STRUCTURAL. It proves an executable")
