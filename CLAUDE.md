@@ -1988,7 +1988,10 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `BASHOPTS`, so by a caller and not only by the invoker. Every `shift` now validates `$#`
   FIRST. **The transferable rule from (4)-(6): when a round's fix names a site, sweep the
   CLASS and add coverage driven by a TABLE, or the next round finds the same defect one exit
-  path over** — which is what happened here three times running.
+  path over** — which is what happened here three times running. That table immediately paid
+  out on a site none of the three findings named: a FAILED REDIRECTION is a native diagnostic
+  too, and bash applies redirections LEFT TO RIGHT, so `: >>"$lock" 2>/dev/null` printed its own
+  unprefixed `Permission denied` before stderr was diverted — the suppressor must come FIRST.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT

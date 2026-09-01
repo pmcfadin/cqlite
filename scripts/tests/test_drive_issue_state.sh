@@ -1759,7 +1759,8 @@ signal-after-rename:WRITTEN:143
 write-succeeds:WRITTEN:0
 verify-owned:OWNED:0
 show-fields:SHOWN:0
-adopt-succeeds:ADOPTED:0"
+adopt-succeeds:ADOPTED:0
+lock-file-unusable:ERROR:1"
 # An unwritable worktree is only measurable when permissions apply to us: root bypasses them,
 # so the row is DECLARED unavailable rather than passing vacuously.
 if [ "$(id -u)" -ne 0 ]; then
@@ -1870,6 +1871,14 @@ inv_run() {  # inv_run <row-name> — set the state up, run it, print output, re
     show-fields)
       inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 >/dev/null 2>&1
       inv_exec "$d" "$DS" '' "$SESS_A" $$ show 3822 ;;
+    lock-file-unusable)
+      # A FAILED REDIRECTION IS A NATIVE DIAGNOSTIC TOO — found by sweeping G3's class, not by
+      # the finding. `: >>"$lock" 2>/dev/null` applies the failing redirection BEFORE stderr is
+      # diverted, so bash prints its own unprefixed line. Making the lock path a DIRECTORY is
+      # the root-proof way to make the redirection fail (permissions are bypassed under root,
+      # `EISDIR` is not).
+      mkdir -p "$d/$MARKER.lock"
+      inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822 ;;
     unwritable-worktree)
       chmod 555 "$d"
       inv_exec "$d" "$DS" '' "$SESS_A" $$ write 3822; local wrc=$?
@@ -1907,8 +1916,8 @@ else
 fi
 # ROW FLOOR, the same idea as the case floor: a span-replacing edit that silently drops rows
 # otherwise leaves a green tally over a shrunken table.
-if [ "$inv_count" -ge 29 ]; then
-  ok "TABLE FLOOR: $inv_count failure modes exercised (floor 29) — including all four success verdicts, both signal phases and every refusal token"
+if [ "$inv_count" -ge 30 ]; then
+  ok "TABLE FLOOR: $inv_count failure modes exercised (floor 30) — including all four success verdicts, both signal phases and every refusal token"
 else
   bad "table floor breached: only $inv_count rows ran"
 fi

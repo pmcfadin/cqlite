@@ -519,7 +519,12 @@ lock_marker() {
   # output anchor every consumer rests on, and emit no verdict at all.
   [ -w "$wt" ] || refuse ERROR 1 "the worktree directory $(sane "$wt") is not writable, so the marker lock cannot be taken — nothing was decided and nothing was written"
   command -v flock >/dev/null 2>&1 || refuse ERROR 1 "flock is not available on this host, so the ownership-verify -> replace sequence cannot be SERIALIZED. Refusing rather than mutating unserialized: two sessions in one lane could both pass verification and one clobber the other's stamp, which is the defect this marker exists to prevent. An unmeasurable guarantee is never read as satisfied."
-  : >>"$lock" 2>/dev/null || refuse ERROR 1 "cannot create the marker lock file $(sane "$lock") — nothing was decided"
+  # THE `2>/dev/null` COMES FIRST, AND THAT ORDER IS THE WHOLE POINT (roborev job 30, found by
+  # sweeping G3's class rather than by the finding). Bash applies redirections LEFT TO RIGHT, so
+  # `: >>"$lock" 2>/dev/null` attempts the failing redirection BEFORE stderr is diverted and
+  # prints its own UNPREFIXED `bash: <path>: Permission denied` (measured, both orders). A
+  # redirection is an external-command diagnostic in every way that matters to contract (a).
+  : 2>/dev/null >>"$lock" || refuse ERROR 1 "cannot create the marker lock file $(sane "$lock") — it may be a directory, or the lane may not permit creating it; nothing was decided"
   eval "exec ${MARKER_LOCK_FD}>>\"\$lock\""
   # flock's own stderr is SUPPRESSED rather than captured: capturing it would mean running
   # flock inside a command substitution, i.e. in a subshell, which is not a place to be
@@ -1024,7 +1029,7 @@ write_marker() {
     # nowhere to capture it to, and the group's non-zero status already routes to the
     # anchored WRITE_ERR below (roborev job 26 F2).
     if [ -n "$bodyfile" ] && [ -s "$bodyfile" ]; then cat "$bodyfile" 2>/dev/null; fi
-  } >"$tmp" || { rm -f "$tmp" 2>/dev/null || true; WRITE_ERR="failed writing the stamp to $(sane "$tmp") — nothing was replaced (the body could not be read, or the temporary file could not be written)"; return 1; }
+  } 2>/dev/null >"$tmp" || { rm -f "$tmp" 2>/dev/null || true; WRITE_ERR="failed writing the stamp to $(sane "$tmp") — nothing was replaced (the body could not be read, or the temporary file could not be written)"; return 1; }
   # The last thing before the atomic commit, over the committed bytes themselves.
   assert_assembled_marker "$tmp" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
   # THE COMMIT. mv's NATIVE text is CAPTURED and FOLDED for the same reason as mktemp's:
@@ -1037,6 +1042,12 @@ write_marker() {
   # signal-OBSERVABLE, or the phase machinery below can never see it.
   local mverrf="$tmp.err" mverr=''
   register_tmp "$mverrf"
+  # PRE-CREATED, WITH `2>/dev/null` FIRST: the commit below redirects into this path, and a
+  # redirection bash cannot satisfy prints an UNPREFIXED diagnostic (see lock_marker). Proving
+  # the path creatable here keeps that diagnostic out of the one command that must not emit one.
+  : 2>/dev/null >"$mverrf" || {
+    rm -f "$tmp" 2>/dev/null || true
+    WRITE_ERR="cannot create the commit's diagnostic file next to $(sane "$path") — nothing was written"; return 1; }
   COMMIT_PHASE=committing
   if mv -f "$tmp" "$path" >"$mverrf" 2>&1; then
     COMMIT_PHASE=committed
@@ -1168,7 +1179,7 @@ cmd_write() {
         carried="$(mktemp "${TMPDIR:-/tmp}/drive-issue-body.XXXXXX" 2>&1)" || refuse ERROR 1 "cannot create a temporary file for the carried body under $(sane "${TMPDIR:-/tmp}") — nothing was written (mktemp: $(sane "$carried"))"
         { [ -n "$carried" ] && [ -f "$carried" ]; } || refuse ERROR 1 "mktemp exited 0 for the carried body but named no usable temporary file (it emitted: $(sane "$carried")) — nothing was written"
         register_tmp "$carried"
-        marker_body >"$carried" || refuse ERROR 1 "cannot read the existing marker's body from $(sane "$(marker_path)"), so it cannot be carried forward — refusing rather than silently replacing a plan with an empty one; nothing was written"
+        marker_body 2>/dev/null >"$carried" || refuse ERROR 1 "cannot read the existing marker's body from $(sane "$(marker_path)"), so it cannot be carried forward — refusing rather than silently replacing a plan with an empty one; nothing was written"
         assert_body_safe "$carried"
         body_src="$carried"
       fi
@@ -1290,7 +1301,7 @@ cmd_adopt() {
   carried="$(mktemp "${TMPDIR:-/tmp}/drive-issue-body.XXXXXX" 2>&1)" || refuse ERROR 1 "cannot create a temporary file for the carried body under $(sane "${TMPDIR:-/tmp}") — nothing was written (mktemp: $(sane "$carried"))"
   { [ -n "$carried" ] && [ -f "$carried" ]; } || refuse ERROR 1 "mktemp exited 0 for the carried body but named no usable temporary file (it emitted: $(sane "$carried")) — nothing was written"
   register_tmp "$carried"
-  marker_body >"$carried" || refuse ERROR 1 "cannot read the existing marker's body from $(sane "$(marker_path)"), so it cannot be carried across the adoption — refusing rather than transferring ownership onto an empty plan; nothing was written"
+  marker_body 2>/dev/null >"$carried" || refuse ERROR 1 "cannot read the existing marker's body from $(sane "$(marker_path)"), so it cannot be carried across the adoption — refusing rather than transferring ownership onto an empty plan; nothing was written"
   assert_body_safe "$carried"
   [ -z "$stage" ] || f_stage="stage: $stage"
   local f_request='' f_pr='' f_branch=''
