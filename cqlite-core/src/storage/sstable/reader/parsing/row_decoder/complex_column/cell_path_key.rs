@@ -175,9 +175,12 @@
 //!   so a 5-byte `int` element decoded from its first 4 bytes. They are now
 //!   `!= N`, returning [`Error::FixedWidthLengthMismatch`], which
 //!   `raw_value::is_fatal_decode_error` makes FATAL for a WRONG width (a zero
-//!   length is refused but stays TOLERATED), so it escapes the tolerant
-//!   `break`/`None` handlers above and reaches the public read path. Relevant
-//!   here because this file routes scalar cell-path keys through that arm.
+//!   length is refused but stays TOLERATED). Relevant here because this file
+//!   routes scalar cell-path keys through that arm, so on the MULTICELL path the
+//!   refusal escapes the tolerant `break`/`None` handlers above and reaches the
+//!   public read path. NOT so for a frozen column — a SIMPLE cell, whose tolerant
+//!   `break` is the census's unguarded FIFTH site (declared in
+//!   `raw_value/fatal_decode_error.rs`; open under #3778).
 //! * **nested tuples and UDTs — OPEN.** The decoders iterate the DECLARED
 //!   components and stop, leaving extra components unread.
 //! * **nested collections — OPEN.** The element loop runs the DECLARED count and
