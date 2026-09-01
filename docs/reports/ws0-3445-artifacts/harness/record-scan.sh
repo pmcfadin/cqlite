@@ -50,6 +50,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$OUT" ] && [ -n "$BINARY" ] || { echo "record-scan.sh: --out and --binary are required" >&2; exit 2; }
+# A malformed bound must REFUSE, never take the "disabled" branch: `awk 'm+0==0'` treats
+# `--max-load abc` as 0 and so as "check off", i.e. a typo would silently buy a pass.
+case "$MAX_LOAD" in
+  ''|*[!0-9.]*|*.*.*) echo "record-scan.sh: --max-load must be a number (0 disables): '$MAX_LOAD'" >&2; exit 2;;
+esac
+case "$LOAD_SAMPLE_SECS" in
+  ''|*[!0-9]*|0) echo "record-scan.sh: --load-sample-secs must be a positive integer" >&2; exit 2;;
+esac
 [ -x "$BINARY" ] || { echo "record-scan.sh: not executable: $BINARY" >&2; exit 2; }
 [ -d "$CORPUS/ws0/events" ] || { echo "record-scan.sh: no corpus at $CORPUS/ws0/events" >&2; exit 2; }
 
@@ -75,7 +83,7 @@ trap cleanup EXIT
 # verdict taken from the MAXIMUM rather than from either endpoint.
 { echo "loadavg_before=$(cut -d' ' -f1-3 /proc/loadavg)"
   echo "nproc=$(nproc)"
-  echo "peer_cargo_or_gate_procs=$(pgrep -c -f 'cargo|agent-gate' || true)"
+  echo "peer_cargo_or_gate_procs=$(pgrep -c -f 'cargo|agent-gate' || echo 0)"
 } > "$OUT/cotenancy-before.txt"
 
 taskset -c "$CPU" "$BINARY" \
@@ -94,8 +102,18 @@ done
 touch "$RUNDIR/go"
 sleep "$SETTLE"          # steady state, after the barrier release transient
 
-# Affinity is READ BACK from the kernel rather than trusted to taskset's argument.
-tr -d '\0' < "/proc/$WPID/status" | grep -E 'Cpus_allowed_list' > "$OUT/affinity-observed.txt" || true
+# Affinity is READ BACK from the kernel rather than trusted to taskset's argument -- and
+# the read is REQUIRED to have worked, because the validity ledger asserts "pinned (kernel
+# read-back)" for every rep. An empty file would make that column an unbacked claim.
+if ! tr -d '\0' < "/proc/$WPID/status" | grep -E 'Cpus_allowed_list' > "$OUT/affinity-observed.txt"; then
+  echo "record-scan.sh: could not read back affinity for pid $WPID" >&2
+  exit 1
+fi
+if ! grep -qE "Cpus_allowed_list:[[:space:]]*${CPU}\$" "$OUT/affinity-observed.txt"; then
+  echo "record-scan.sh: affinity read-back does not equal the requested cpu ${CPU}:" >&2
+  cat "$OUT/affinity-observed.txt" >&2
+  exit 1
+fi
 
 # --- load sampler across the measured window ------------------------------------
 : > "$OUT/load-samples.txt"
@@ -106,22 +124,24 @@ tr -d '\0' < "/proc/$WPID/status" | grep -E 'Cpus_allowed_list' > "$OUT/affinity
 SAMPLER=$!
 stop_sampler() { kill "$SAMPLER" 2>/dev/null || true; }
 
+PERF_RC=0
 if [ "$MODE" = record ]; then
+  # `|| true` here would report success for a perf that never recorded anything.
   perf record -e "$EVENT" -c "$PERIOD" -p "$WPID" -o "$OUT/perf.data" \
-    -- sleep "$SECS" > "$OUT/perf-record.log" 2>&1 || true
+    -- sleep "$SECS" > "$OUT/perf-record.log" 2>&1 || PERF_RC=$?
 else
-  # -x, gives the machine-readable form whose 6th field is pct_running: the validity rule
+  # -x, gives the machine-readable form whose 5th field is pct_running: the validity rule
   # is checked from THAT field, not from the absence of a warning in the human-readable form.
   # `perf stat -x,` writes its CSV to STDERR, not stdout: sending stdout to counters.csv
   # yields an EMPTY counters file and a log that happens to hold the data, which is how a
   # validity check ends up reading nothing and reporting nothing wrong. Capture stderr.
   perf stat -x, -e "$STAT_EVENTS" -p "$WPID" \
-    -- sleep "$SECS" 2> "$OUT/counters.csv" > "$OUT/perf-stat.stdout" || true
+    -- sleep "$SECS" 2> "$OUT/counters.csv" > "$OUT/perf-stat.stdout" || PERF_RC=$?
 fi
 
 stop_sampler
 { echo "loadavg_after=$(cut -d' ' -f1-3 /proc/loadavg)"
-  echo "peer_cargo_or_gate_procs=$(pgrep -c -f 'cargo|agent-gate' || true)"
+  echo "peer_cargo_or_gate_procs=$(pgrep -c -f 'cargo|agent-gate' || echo 0)"
 } > "$OUT/cotenancy-after.txt"
 
 # --- quiescence verdict: REFUSE loudly, never silently re-roll -------------------
@@ -145,7 +165,48 @@ else
 fi
 
 touch "$RUNDIR/stop"
-wait "$WPID" || true
-cp "$RUNDIR/worker-0.summary.json" "$OUT/worker-summary.json" 2>/dev/null || true
+# The worker's OWN verdict is load-bearing and must not be discarded: it exits non-zero on
+# a zero-row pass, which is the "0 rows is a failure, never a measurement" rule this rig
+# inherits. `wait || true` threw that away, so a worker that died 3 s into a 40 s window
+# left `perf record -- sleep 40` exiting 0 and the rep looking valid.
+WORKER_RC=0
+wait "$WPID" || WORKER_RC=$?
+# Its summary is REQUIRED, not optional: the validity ledger's "rows measured" column has
+# no mechanical backing without it.
+if ! cp "$RUNDIR/worker-0.summary.json" "$OUT/worker-summary.json" 2>/dev/null; then
+  echo "record-scan.sh: worker wrote no summary — refusing to call this a rep" >&2
+  if [ "$WORKER_RC" -eq 0 ]; then WORKER_RC=1; fi
+fi
 trap - EXIT; rm -rf "$RUNDIR"
+
+# --- the rep is only a rep if EVERY verdict says so ------------------------------
+# BLOCKER (review): previously the quiescence verdict was WRITTEN and then ignored, the
+# script printed "rep written" and exited 0, so a caller checking $? published a rep taken
+# at peak load 18. A recorded refusal that changes nothing observable is not a refusal.
+QV=$(sed -n 's/^verdict=//p' "$OUT/quiescence-verdict.txt" 2>/dev/null)
+# NB: written as `if` blocks, not `[ x ] && y`. Under `set -e` a bare `[ test ] && assign`
+# whose test is FALSE returns non-zero as a statement and kills the script -- so the
+# healthy path would have exited here.
+FAIL=
+if [ "$WORKER_RC" -ne 0 ]; then FAIL="$FAIL worker-exit=$WORKER_RC"; fi
+if [ "$PERF_RC" -ne 0 ]; then FAIL="$FAIL perf-exit=$PERF_RC"; fi
+# pct_running is the issue's own validity rule, so it is CHECKED here rather than left for
+# a human to eyeball in the CSV. Field 5 of `perf stat -x,`; any event below 100.00 means
+# the counters were multiplexed and the rep is not publishable.
+if [ "$MODE" = stat ] && [ -s "$OUT/counters.csv" ]; then
+  BADPCT=$(awk -F, 'NF>=5 && $5+0 < 100 { n++ } END { print n+0 }' "$OUT/counters.csv")
+  NEVENTS=$(awk -F, 'NF>=5 { n++ } END { print n+0 }' "$OUT/counters.csv")
+  if [ "$NEVENTS" -eq 0 ]; then FAIL="$FAIL pct_running=unreadable"
+  elif [ "$BADPCT" -ne 0 ]; then FAIL="$FAIL pct_running<100.00_on_${BADPCT}_of_${NEVENTS}_events"
+  fi
+fi
+case "$QV" in
+  OK|UNCHECKED) ;;
+  '') FAIL="$FAIL quiescence-verdict=absent" ;;
+  *)  FAIL="$FAIL quiescence=$QV" ;;
+esac
+if [ -n "$FAIL" ]; then
+  echo "record-scan.sh: REP REFUSED —$FAIL (artifacts left in $OUT for the record)" >&2
+  exit 3
+fi
 echo "record-scan.sh: rep written to $OUT"

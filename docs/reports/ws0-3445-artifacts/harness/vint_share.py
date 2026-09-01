@@ -64,6 +64,12 @@ import sys
 
 # The decoder proper. `zigzag_decode` is included because `decode_signed` is defined as
 # `decode_unsigned` + ZigZag unmap, so the unmap is decode work by construction.
+# Page size used to align a segment's file range the way the kernel maps it. 4 KiB is the
+# x86-64 base page and matches every LOAD alignment observed here; a host with a different
+# base page would mis-align this, which is why the caller's symbol self-check is what
+# actually certifies the rebase rather than this constant.
+PAGE_SIZE = 4096
+
 DECODER_FRAMES = (
     "cqlite_core::parser::vint::decode_unsigned",
     "cqlite_core::parser::vint::decode_signed",
@@ -123,7 +129,7 @@ def pie_bias(binary: str, map_vaddr: int, map_fileoff: int) -> int:
         p_offset, p_vaddr = int(f[1], 16), int(f[2], 16)
         filesz = int(f[4], 16)
         # Page-align the segment's file range down the way the kernel maps it.
-        lo = p_offset & ~0xFFF
+        lo = p_offset & ~(PAGE_SIZE - 1)
         if lo <= map_fileoff < p_offset + filesz:
             return map_vaddr - (p_vaddr + (map_fileoff - p_offset))
     raise SystemExit(
@@ -158,18 +164,27 @@ def instruction_addresses(binary: str) -> list[int]:
     return addrs
 
 
-def read_samples(perf_data: str, binary: str) -> tuple[collections.Counter, dict[int, str], int, int]:
-    """(cycles by file address in `binary`, perf's symbol per address, cycles total, cycles off-binary).
+def read_samples(perf_data: str, binary: str) -> tuple[collections.Counter, dict[int, str], int, int, int]:
+    """(cycles by file address in `binary`, perf's symbol per address, total, off-binary, unparsed).
 
-    The denominator is EVERY sample in the window, including libc and kernel: the question
-    is a share of scan on-CPU, so work outside the binary must stay in the denominator.
+    THE DENOMINATOR IS THE LARGEST JUDGEMENT CALL IN THIS SCRIPT, so it is returned in
+    parts rather than as one number the caller has to trust. `total` is EVERY sample in the
+    window, including libc and the kernel, because the question asked is a share of scan
+    ON-CPU. But 43-58% of that is off-binary and is UNREACHABLE by the numerator (only the
+    measured binary has DWARF for an inline chain), so a share against `total` and a share
+    against the in-binary subset are different quantities and BOTH are reported. Comparing
+    two shares taken against DIFFERENT denominators is how this script's first user
+    (me) published an AC2 ratio with the wrong sign.
+
+    `unparsed` exists because a line landing in neither `total` nor `other` would vanish
+    silently, which is an unmeasured quantity masquerading as zero.
     """
     map_vaddr, map_fileoff = mmap_record(perf_data, binary)
     base = pie_bias(binary, map_vaddr, map_fileoff)
     out = run(["perf", "script", "-i", perf_data, "-F", "ip,dso,sym,symoff,period"])
     by_addr: collections.Counter = collections.Counter()
     persym: dict[int, str] = {}
-    total = other = 0
+    total = other = unparsed = 0
     for line in out.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -179,6 +194,7 @@ def read_samples(perf_data: str, binary: str) -> tuple[collections.Counter, dict
         try:
             period = int(parts[0])
         except (ValueError, IndexError):
+            unparsed += 1
             continue
         total += period
         if binary not in line:
@@ -194,7 +210,7 @@ def read_samples(perf_data: str, binary: str) -> tuple[collections.Counter, dict
         if fa not in persym:
             m = re.match(r"^(.*)\+0x[0-9a-f]+$", " ".join(parts[2:]).rsplit(" (", 1)[0])
             persym[fa] = m.group(1) if m else ""
-    return by_addr, persym, total, other
+    return by_addr, persym, total, other, unparsed
 
 
 def verify_base(persym: dict[int, str], sym_addrs: list[int], syms: list[tuple[int, str]]) -> tuple[int, int]:
@@ -205,10 +221,13 @@ def verify_base(persym: dict[int, str], sym_addrs: list[int], syms: list[tuple[i
             continue
         i = bisect.bisect_right(sym_addrs, fa) - 1
         nname = syms[i][1] if i >= 0 else ""
-        # perf and nm render templates/closures slightly differently; compare on a
-        # normalised form rather than demanding byte equality of two demanglers.
+        # perf and nm render templates/closures slightly differently, so compare on a
+        # normalised form rather than demanding byte equality of two demanglers -- but
+        # require EQUALITY of that normalised form. A bidirectional substring test (the
+        # first version) would accept `foo` against `foo_inner`, i.e. a genuinely wrong
+        # symbol, which is precisely what this check exists to reject.
         norm = lambda s: re.sub(r"[<>\s]", "", s)
-        if nname and (norm(nname) == norm(pname) or norm(pname) in norm(nname) or norm(nname) in norm(pname)):
+        if nname and norm(nname) == norm(pname):
             ok += 1
         else:
             bad += 1
@@ -252,19 +271,41 @@ def classify(chain: list[str]) -> str:
     return "other"
 
 
-def shares(by_addr: collections.Counter, chains: dict[int, list[str]], total: int) -> dict:
+def shares(by_addr: collections.Counter, chains: dict[int, list[str]], total: int,
+           in_binary: int) -> dict:
+    """Bucket cycles, reporting shares against BOTH denominators.
+
+    An address for which DWARF yielded NO chain is counted in its own bucket, never folded
+    into "other". Folding it in makes an address `addr2line` answered `??` for into a
+    positive statement that it is not VInt -- a pass derived from the absence of a signal,
+    and it can only push the share DOWN.
+    """
     buckets: collections.Counter = collections.Counter()
+    no_chain = 0
     for fa, cyc in by_addr.items():
-        buckets[classify(chains.get(fa, []))] += cyc
+        ch = chains.get(fa)
+        if not ch:
+            no_chain += cyc
+            continue
+        buckets[classify(ch)] += cyc
     narrow = buckets["narrow"]
     wide = narrow + buckets["wide_only"]
+    pct = lambda v, d: (100.0 * v / d) if d else 0.0
     return {
         "narrow_cycles": narrow,
         "wide_cycles": wide,
         "write_vint_cycles": buckets["write_vint"],
-        "narrow_pct": 100.0 * narrow / total if total else 0.0,
-        "wide_pct": 100.0 * wide / total if total else 0.0,
-        "write_vint_pct": 100.0 * buckets["write_vint"] / total if total else 0.0,
+        "no_chain_cycles": no_chain,
+        "narrow_pct": pct(narrow, total),
+        "wide_pct": pct(wide, total),
+        "write_vint_pct": pct(buckets["write_vint"], total),
+        "no_chain_pct_of_total": pct(no_chain, total),
+        "no_chain_pct_of_in_binary": pct(no_chain, in_binary),
+        # In-binary basis: the same numerator over only the cycles the numerator could
+        # REACH. Reported because a share against `total` and a share against this are
+        # different quantities, and two shares on different bases must never be divided.
+        "narrow_pct_in_binary": pct(narrow, in_binary),
+        "wide_pct_in_binary": pct(wide, in_binary),
     }
 
 
@@ -297,9 +338,15 @@ def main() -> int:
     ap.add_argument("--max-symbol-mismatch", type=float, default=0.5,
                     help="percent of addresses where nm and perf may disagree before this "
                          "REFUSES to report a share (default 0.5)")
+    ap.add_argument("--max-no-chain", type=float, default=20.0,
+                    help="percent of IN-BINARY cycles at addresses for which DWARF yields no "
+                         "inline chain, above which this REFUSES to report a share. Those "
+                         "cycles can only push the share DOWN, so an unbounded quantity here "
+                         "is an unbounded UNDERCOUNT (default 20.0)")
     args = ap.parse_args()
 
-    by_addr, persym, total, other = read_samples(args.perf_data, args.binary)
+    by_addr, persym, total, other, unparsed = read_samples(args.perf_data, args.binary)
+    in_binary = total - other
     if total == 0:
         print("vint_share.py: REFUSED — zero cycles sampled; a 0-sample window is a failure, "
               "never a measurement", file=sys.stderr)
@@ -322,7 +369,16 @@ def main() -> int:
         "binary": args.binary,
         "cycles_total": total,
         "cycles_outside_binary": other,
+        "cycles_in_binary": in_binary,
         "pct_outside_binary": 100.0 * other / total,
+        "lines_unparsed": unparsed,
+        "denominator_note": (
+            "narrow_pct/wide_pct are against cycles_total (ALL DSOs incl. libc and kernel) "
+            "as the issue's 'share of scan on-CPU' wording requires. *_in_binary are against "
+            "cycles_in_binary, the only cycles the DWARF numerator can reach. The two are "
+            "DIFFERENT quantities: never divide one by the other, and never compare a share "
+            "on one basis with a share on the other."
+        ),
         "rebase_selfcheck": {"addresses_checked": checked, "mismatches": bad,
                              "mismatch_pct": mismatch_pct, "verdict": "PASS"},
         "skid_band": {},
@@ -330,7 +386,17 @@ def main() -> int:
     for k in range(0, args.skid_max + 1):
         shifted = skid_shift(by_addr, insns, k)
         chains = inline_chains(args.binary, sorted(shifted))
-        result["skid_band"][f"k={k}"] = shares(shifted, chains, total)
+        result["skid_band"][f"k={k}"] = shares(shifted, chains, total, in_binary)
+
+    nc = result["skid_band"]["k=0"]["no_chain_pct_of_in_binary"]
+    if nc > args.max_no_chain:
+        print(
+            f"vint_share.py: REFUSED — {nc:.2f}% of in-binary cycles are at addresses with no "
+            f"DWARF inline chain (> {args.max_no_chain}%). Those cycles can only push the "
+            f"share DOWN, so the result would be an unbounded undercount.",
+            file=sys.stderr,
+        )
+        return 1
     base_row = result["skid_band"]["k=0"]
     result.update({k: base_row[k] for k in base_row})
     ks = list(result["skid_band"].values())
@@ -338,6 +404,8 @@ def main() -> int:
     result["narrow_pct_max"] = max(r["narrow_pct"] for r in ks)
     result["wide_pct_min"] = min(r["wide_pct"] for r in ks)
     result["wide_pct_max"] = max(r["wide_pct"] for r in ks)
+    result["narrow_pct_in_binary_min"] = min(r["narrow_pct_in_binary"] for r in ks)
+    result["narrow_pct_in_binary_max"] = max(r["narrow_pct_in_binary"] for r in ks)
 
     print(json.dumps(result, indent=2))
     if args.json_out:

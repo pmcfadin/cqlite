@@ -1,0 +1,5 @@
+verdict=REFUSED
+reason=box-not-quiet-across-rep
+samples=2
+peak_load=59.21
+max_load=0.01

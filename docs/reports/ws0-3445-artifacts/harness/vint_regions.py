@@ -30,6 +30,7 @@ import bisect
 import collections
 import json
 import re
+import os
 import subprocess
 import sys
 
@@ -164,10 +165,13 @@ def main() -> int:
     if args.perf_data:
         # Cycle-weighted composition: for every SAMPLED address that DWARF calls vint, book
         # its cycles to (opcode, hosting symbol, innermost non-vint caller frame).
-        sys.path.insert(0, __file__.rsplit("/", 1)[0])
+        # os.path.dirname, not rsplit: invoked bare ("python3 vint_regions.py") __file__
+        # has no separator, and rsplit would insert the FILENAME onto sys.path.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import vint_share as vsh  # the ONE sample reader, reused rather than re-implemented
 
-        by_addr, persym, total, _ = vsh.read_samples(args.perf_data, args.binary)
+        by_addr, persym, total, other, _unparsed = vsh.read_samples(args.perf_data, args.binary)
+        in_binary = total - other
         # The PIE rebase self-check is NOT optional here either. This script publishes a
         # cycle-weighted table, and a wrong rebase yields a complete, confident, WRONG one
         # exactly as it would in vint_share.py -- so it must REFUSE on the same terms rather
@@ -192,8 +196,13 @@ def main() -> int:
         by_op: collections.Counter = collections.Counter()
         by_caller: collections.Counter = collections.Counter()
         vint_cycles = 0
+        no_chain_cycles = 0
         for a, cyc in by_addr.items():
-            ch = schains.get(a, [])
+            ch = schains.get(a)
+            if not ch:
+                # No DWARF chain: counted, never folded into "not VInt". See vint_share.py.
+                no_chain_cycles += cyc
+                continue
             if not is_vint(ch):
                 continue
             vint_cycles += cyc
@@ -211,8 +220,12 @@ def main() -> int:
             by_caller[caller] += cyc
         result["cycle_weighted"] = {
             "cycles_total_all_dsos": total,
+            "cycles_in_binary": in_binary,
             "vint_cycles": vint_cycles,
+            "no_chain_cycles": no_chain_cycles,
+            "no_chain_pct_of_in_binary": 100.0 * no_chain_cycles / in_binary if in_binary else 0.0,
             "vint_pct_of_total": 100.0 * vint_cycles / total if total else 0.0,
+            "vint_pct_of_in_binary": 100.0 * vint_cycles / in_binary if in_binary else 0.0,
             "by_opcode": [
                 {"opcode": o, "cycles": c, "pct_of_vint": 100.0 * c / vint_cycles}
                 for o, c in by_op.most_common()
