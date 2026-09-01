@@ -4314,12 +4314,15 @@ elif [ ! -d "$pinroot/scripts" ]; then
 else
   mkdir -p "$tmp/scc-home/.cargo"
   scc_bs="$pinroot/scripts/bootstrap-agent-machine.sh"
-  # A SECOND COPY WITH THE CAP LITERAL SUBSTITUTED. The shipped literal is deliberately the
-  # unsubstituted `__DERIVED_CAP__` placeholder until the measurement run lands, and bootstrap
-  # REFUSES to persist it — so the cases that exercise a real WRITE substitute the artifact in
-  # their own scratch copy (the idiom this repo mandates over a settable seam), while the cases
-  # that exercise the REFUSAL use the shipped script. When the placeholder is substituted for
-  # real, both keep working: the sed is asserted to have matched.
+  # A SECOND COPY WITH THE CAP LITERAL SUBSTITUTED. The shipped literal is now a REAL cap (`50G`,
+  # derived as a bracket — see .agent-ami/profile.yaml), so bootstrap no longer refuses it. The
+  # WRITE cases still substitute the artifact in their own scratch copy rather than reaching for
+  # the shipped value (the idiom this repo mandates over a settable seam), so they stay
+  # independent of whatever the fleet cap happens to be. The sed is asserted to have matched.
+  # NOTE (#3727): the REFUSAL path — bootstrap declining a literal sccache would silently discard
+  # — used to be covered incidentally, BY the shipped literal being a placeholder. Now that it is
+  # a real value that coverage is gone, so the refusal needs its OWN scratch fixture with a
+  # deliberately unusable literal; 12b-m self-retires rather than pass for the wrong reason.
   scc_bs_sub="$tmp/scc-bs-substituted.sh"
   cp "$scc_bs" "$scc_bs_sub"
   sed -i.bak "s/^SCC_ENV_VALUE='[^']*'$/SCC_ENV_VALUE='30G'/" "$scc_bs_sub" 2>/dev/null \

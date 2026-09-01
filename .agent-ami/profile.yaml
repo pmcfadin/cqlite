@@ -39,19 +39,30 @@ env:
   # Both caches live on the DURABLE volume so the golden snapshot captures them;
   # under $HOME they are lost with the instance and every worker rebuilds cold.
   SCCACHE_DIR: "{data_mount}/sccache"
-  # DERIVED, NOT ROUND (issue #3727). `__DERIVED_CAP__` = __WORKING_SET__ measured working set
-  # (the measurement is in the issue), sized so the fleet's concurrent lanes do not evict each
-  # other's objects; the previous value was a round `30G` with no recorded derivation.
-  # TODO(#3727): __DERIVED_CAP__ / __WORKING_SET__ substituted after the measurement run. The
-  # value MUST be a <digits>[KkMmGgTt] form (see the spelling note below); bootstrap REFUSES to
-  # persist an unsubstituted placeholder rather than writing a line sccache would discard.
+  # DERIVED AS A BRACKET, NOT A ROUND NUMBER (issue #3727). `50G` sits inside an interval whose
+  # BOTH ENDS WERE MEASURED, not argued:
+  #   LOWER, measured on box3's own production cache: with the cap made non-binding, the fleet's
+  #   real workload pushed the cache PAST the old 10 GiB ceiling within ~19 minutes
+  #   (10380303858 -> 11516555977 bytes, 18:14Z -> 18:29Z 2026-09-01, continuing to 13612750401 by
+  #   18:58Z) — so the working set EXCEEDS 10 GiB, proven on the cache being sized rather than
+  #   inferred from a hit rate.
+  #   UPPER, lane-3358's independent measurement on box2: (10 GiB, ~56 GB], carrying their own
+  #   caveat that thrashing inflates the upper end because an evicted-then-recompiled unit is
+  #   counted twice.
+  # 50G is inside that bracket near the top, leaving headroom not to evict within one gate, and it
+  # is affordable on a 295G device. The previous value was a round `30G` with no derivation.
+  # FALSIFIABLE, which is the point of shipping it this way: lane-3358's criterion is "the cache
+  # never evicts during one full gate", and since #3727 every gate SUMMARY carries
+  # `sccache-used=<bytes>(<pct>%)` beside `sccache-cap=`, so ANY gate can refute it. If a SUMMARY
+  # ever shows sccache-used near 100% of cap, the working set has outgrown this value and the
+  # bracket must be RE-DERIVED — never just raised while declaring victory (issue #3727 AC6).
   #
   # WHY THE OLD VALUE WAS INEFFECTIVE, WHICH IS THE WHOLE OF #3727: it was declared HERE and
   # NEVER PERSISTED. This block's env reaches the commands the LAUNCHER runs, so the variable
   # existed only inside those processes — measured, a fresh PAM session (`sudo -i`) and
   # `env -i bash -lc` both reported it UNSET, while SCCACHE_DIR two lines up IS in
   # /etc/environment — so the fleet-effective cap was sccache's own 10 GiB DEFAULT on boxes
-  # provisioned to hold __DERIVED_CAP__, and no artifact said so. The persistence that makes it
+  # provisioned to hold 50G, and no artifact said so. The persistence that makes it
   # real is `--fix-sccache-cap` in verify.run below, which writes /etc/environment (read by PAM at
   # session creation) and then VERIFIES the value against a fresh session AND the running sccache
   # server. Presence in a config file and visibility to the process that reads it are different
@@ -64,7 +75,7 @@ env:
   #
   # This literal must equal SCC_ENV_VALUE in scripts/bootstrap-agent-machine.sh (the single source
   # of truth for the fleet cap); scripts/tests/test_bootstrap_agent_machine.sh asserts they agree.
-  SCCACHE_CACHE_SIZE: "__DERIVED_CAP__"
+  SCCACHE_CACHE_SIZE: "50G"
   CQLITE_DATASETS_ROOT: "{data_mount}/datasets"
 verify:
   # --fix-credentials --strict (issue #3369). Two independent gaps, both real on a box

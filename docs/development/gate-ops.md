@@ -316,14 +316,11 @@ mode (both path seams mandatory, no production fallback).
 Each active worktree owns its own ~25–30GB `target/` dir. Several concurrent
 worktrees can exhaust the disk mid-gate (a confusing hard failure). `flow-finalize`
 removes a finished issue's worktree; additionally prune stale worktrees' `target/`
-dirs and size the shared cache with `SCCACHE_CACHE_SIZE` (`__DERIVED_CAP__` on the fleet
+dirs and size the shared cache with `SCCACHE_CACHE_SIZE` (`50G` on the fleet
 boxes — derived from a measured working set, see `.agent-ami/profile.yaml`; persist it with
 `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`, because a value only in a launcher
 profile reaches launcher-created processes alone — #3727) (previously `30G` on the
 10-core machine).
-
-<!-- TODO(#3727): __DERIVED_CAP__ substituted after the measurement run — the value MUST be a
-     <digits>[KkMmGgTt] form (see the grammar table above). -->
 
 **macOS Time Machine local-snapshot gotcha:** deleting `target/` dirs alone often
 reclaims **nothing** while a Time Machine *local snapshot* is pinning the freed

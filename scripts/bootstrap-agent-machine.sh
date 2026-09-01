@@ -3030,11 +3030,11 @@ SCC_ENV_COMMENT='# cqlite: sccache object-cache size cap (issue #3727)'
 # why it was never enough on its own), and scripts/tests/test_bootstrap_agent_machine.sh asserts
 # the two agree — two spellings of one number is drift, and a drift check is cheaper than a
 # convention. MUST be a <digits>[KkMmGgTt] form: see the grammar table above.
-# TODO(#3727): __DERIVED_CAP__ substituted after the measurement run. Until then the shape
-# guard below REFUSES to persist it, so an unsubstituted placeholder cannot reach
+# The value is DERIVED AS A BRACKET (see .agent-ami/profile.yaml for the measurement and both
+# bounds). The shape guard below still applies to it: an unusable literal cannot reach
 # /etc/environment — where it would be silently discarded by sccache AND, because this section
 # never rewrites an existing value, would be permanent.
-SCC_ENV_VALUE='__DERIVED_CAP__'
+SCC_ENV_VALUE='50G'
 SCC_ENV_LINE="SCCACHE_CACHE_SIZE=$SCC_ENV_VALUE"
 
 # A SHAPE GUARD ON OUR OWN CONSTANT — deliberately NOT a classifier of anybody else's value.
