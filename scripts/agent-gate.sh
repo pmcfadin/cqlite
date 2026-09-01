@@ -642,7 +642,15 @@
 #   feature-iso-parquet / feature-iso-delta-scan
 #                      RUSTFLAGS=-D warnings cargo test -p cqlite-core
 #                      --no-default-features --features all-compression,<one-of>
-#                      --lib --no-run, each WITHOUT the other feature (issue #1699).
+#                      --lib, each WITHOUT the other feature (issue #1699).
+#                      ASYMMETRIC SINCE #3725: feature-iso-parquet keeps `--no-run`
+#                      (compile-only), while feature-iso-delta-scan EXECUTES — it drops
+#                      `--no-run` and additionally names the cqlite-core integration
+#                      targets DERIVED from their crate-root
+#                      `#![cfg(... feature = "delta-scan" ...)]` attributes (13 today,
+#                      incl. issue_1007_complex_type_parity), under the zero-tests
+#                      guards and, on the FULL gate only, CQLITE_REQUIRE_FIXTURES=1.
+#                      Isolation is unchanged: delta-scan WITHOUT parquet, never both.
 #                      clippy enables parquet AND delta-scan together, which is the
 #                      shape that MASKS cross-feature coupling; these two lanes are
 #                      separately named so a SUMMARY FAIL says WHICH direction of
@@ -14182,6 +14190,560 @@ run_feature_iso() { # run_feature_iso <feature>
     --no-default-features --features "all-compression,$1" --lib --no-run
 }
 
+# _ds_fixture_posture <is-full-gate 0|1> <allow-missing 0|1> — print
+# `<strict|lenient>\t<note>`: the fixture mode the delta-scan isolation lane runs its
+# dataset-consuming targets under (issue #3725).
+#
+# THIS IS THE ANTI-VACUITY HALF OF THE LANE, WHICH IS WHY IT IS A NAMED FUNCTION.
+# MEASURED on issue_1007_complex_type_parity: with /data/datasets it runs 6 tests and
+# compares 11 rows in 0.10s; with an EMPTY or unset CQLITE_DATASETS_ROOT the same target
+# still reports `6 passed`, in 0.00s, having compared NOTHING — the file's own
+# `skip_or_fail` prints `[SKIP] <table>: …` and returns unless CQLITE_REQUIRE_FIXTURES=1.
+# So an executor added for #3725's AC2 would satisfy AC3's letter (it prints 6) while
+# closing the coverage gap VACUOUSLY. Enrollment in DATASET_COMPONENTS is NOT sufficient
+# either — that is #3522's node-bindings precedent verbatim.
+#
+# It is a function rather than an inline `if` so it can be OBSERVED: only a FULL gate run
+# takes the strict branch, and this harness cannot run one for a single component (the
+# #3544 component-set pre-flight refuses a substituted COMPONENTS array), so
+# scripts/tests/test_agent_gate_summary.sh EXTRACTS this function and RUNS it in all three
+# modes — the same `awk '/^_rust_module_closure/,/^\}/'` idiom that file already uses. An
+# inline decision would have been reachable only by a 20-minute full gate, i.e. covered by
+# nothing.
+#
+# The mode is decided by THIS SCRIPT's own state and the inherited variables are then
+# UNSET by the caller — never the reverse (node-bindings' B2 rule): deriving the mode FROM
+# the environment would let the ambient shell redefine what the gate certifies, and
+# exporting CQLITE_REQUIRE_FIXTURES=1 is routine in this repo.
+_ds_fixture_posture() {
+  local full="${1:-0}" allow="${2:-0}"
+  # The documented #2078 opt-out wins over the full gate: an opt-out the gate reports as
+  # TAKEN but that does not let the run finish is the per-lane veto #2078 forbids.
+  if [ "$allow" = 1 ]; then
+    printf 'lenient\tCQLITE_REQUIRE_FIXTURES unset (AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — with the corpus absent the dataset-gated cases SKIP-PASS having compared nothing, so this run does NOT validate that half'
+    return 0
+  fi
+  if [ "$full" = 1 ]; then
+    printf 'strict\tCQLITE_REQUIRE_FIXTURES=1 — an absent fixture FAILs BY NAME instead of printing [SKIP] and passing (measured: issue_1007_complex_type_parity reports `6 passed` / 0 rows compared without it)'
+    return 0
+  fi
+  printf 'lenient\tCQLITE_REQUIRE_FIXTURES unset (--only/--lite probe run) — with the corpus absent the dataset-gated cases SKIP-PASS, so this run does NOT validate that half'
+}
+
+# _ds_inner_cfg_gate <src-file> <feature> — over a test target's INNER `#![cfg…]` lines,
+# is every one of them a shape this scan RECOGNISES, and if so which features do they
+# name? (issue #3725)
+#
+# WHAT IT DELIBERATELY DOES **NOT** DO, and the five review rounds behind that. It does not
+# decide whether an inner attribute is CRATE-level. `_crate_gated_test_targets` tried, and
+# rounds 37/38/40/41/42 of #1699 each found the next syntax that fooled a structural scan of
+# the leading region (`//`, `/* */`, `/*! */`, a multiline `#![cfg(all(`, a multiline
+# non-cfg attribute, brackets inside a string literal) until the owner descoped it to an
+# OCCURRENCE REPORT with the ruling that the question needs a Rust parser a bash gate
+# component cannot have. Reintroducing that classifier would reintroduce those findings.
+#
+# So this answers a strictly SMALLER question, at a KNOWN feature set, with a CLOSED
+# grammar and a refusal instead of an approximation:
+#
+# stdout: the co-required feature names, comma-separated (EMPTY for the bare single-feature
+#         form). exit 0 = every inner cfg line is RECOGNISED and at least one names
+#         <feature>; 1 = no inner cfg line names <feature>; 2 = the file could not be read;
+#         3 = an inner cfg line names <feature> (or accompanies one) in a shape this scan
+#         does not model — stdout carries that line.
+#
+# THE POLARITY OF EACH NON-ZERO EXIT IS CHOSEN, and that is the whole safety argument:
+#   * 2 (unreadable) is NEVER conflated with 1 (no gate). Both would otherwise flow into
+#     the same permissive branch, and a failed read would silently DROP a target from the
+#     lane — a dropped target cannot fail the zero-tests guard, so an empty run PASSes.
+#   * 3 (unmodelled) costs the target its ALLOWED-ZERO excusal and never costs the gate a
+#     zero-tests check. It is not a claim the target is fine; it is a refusal to claim it
+#     may legitimately run nothing. `any(...)` is REACHABLE at this feature set while
+#     `all(...)` may not be, so reading one as the other in EITHER direction is wrong, and
+#     the direction chosen here produces a loud red rather than a silent excusal.
+#
+# STACKED ATTRIBUTES ARE CONJUNCTIVE, so ALL inner cfg lines are unioned rather than the
+# first one winning (roborev round 42's finding against the retired classifier, which this
+# grammar would otherwise have reproduced): `#![cfg(feature = "delta-scan")]` followed by
+# `#![cfg(feature = "write-support")]` configures the target out just as `all(…)` does, and
+# a first-match scan would have called it un-excusable and RED a correct target.
+#
+# COLUMN ZERO IS REQUIRED for a recognised shape, and an INDENTED inner cfg line is exit 3.
+# An inner attribute is legal inside an inline `mod m { #![cfg(…)] … }`, where it gates that
+# module and NOT the target — reading it as the target's gate is the overstatement round 35
+# fixed. Column zero is what rustfmt emits for a crate-level inner attribute and not for a
+# module-level one; it is a cheap structural property, and getting it wrong falls in the
+# REFUSE direction (a red naming the line), never in the excuse direction.
+#
+# DECLARED RESIDUAL: a column-zero inner cfg line inside an inline module (hand-indented to
+# column zero, which rustfmt does not produce) would still be read as the target's gate.
+# What that buys is an ALLOWED-ZERO excusal, which is harmless unless the target ALSO runs
+# zero tests for an unrelated reason — in which case the emptiness is masked. The lane's
+# census states this rather than leaving it to be discovered.
+_ds_inner_cfg_gate() {
+  local f="$1" feat="$2" out
+  [ -r "$f" ] || { echo "UNREADABLE $f" >&2; return 2; }
+  # ONE awk pass, whose EXIT STATUS is checked. Not `grep | sed | tr`: that pipeline cannot
+  # distinguish "no match" from a read error, which is the tri-state this function exists to
+  # preserve (the same defect the occurrence report's `|| true` had).
+  out=$(awk -v F="$feat" '
+    function feats(line,   rest, tok, acc) {
+      rest = line; acc = ""
+      while (match(rest, /feature[[:space:]]*=[[:space:]]*"[A-Za-z0-9_.+-]+"/)) {
+        tok = substr(rest, RSTART, RLENGTH)
+        sub(/^feature[[:space:]]*=[[:space:]]*"/, "", tok)
+        sub(/"$/, "", tok)
+        if (tok != F) acc = acc (acc == "" ? "" : ",") tok
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+      return acc
+    }
+    # Every INNER cfg/cfg_attr line, indented or not — the same recogniser the occurrence
+    # report uses, so the two agree on what the population IS even though only this one
+    # classifies within it.
+    /^[[:space:]]*#!\[[[:space:]]*cfg(_attr)?[[:space:]]*\(/ {
+      n_lines++
+      line = $0
+      # COLUMN ZERO and the two recognised whole-line shapes. Anchored both ends: a
+      # substring match is what lets a nested feature reference inside any(...)/not(...)/a
+      # multi-line attribute pose as the direct conjunctive form.
+      if (line == "#![cfg(feature = \"" F "\")]") { names[++n] = ""; if (F != "") saw_f = 1; next }
+      if (line ~ /^#!\[cfg\(feature[[:space:]]*=[[:space:]]*"[A-Za-z0-9_.+-]+"\)\]$/) {
+        acc = feats(line); names[++n] = acc
+        if (index(line, "\"" F "\"") > 0) saw_f = 1
+        next
+      }
+      if (line ~ /^#!\[cfg\(all\((feature[[:space:]]*=[[:space:]]*"[A-Za-z0-9_.+-]+"[[:space:]]*,[[:space:]]*)+feature[[:space:]]*=[[:space:]]*"[A-Za-z0-9_.+-]+"\)\)\]$/) {
+        acc = feats(line); names[++n] = acc
+        if (index(line, "\"" F "\"") > 0) saw_f = 1
+        next
+      }
+      # UNMODELLED. Recorded, not decided — and the FIRST one is reported, with the whole
+      # scan abandoned, because a partial classification of a conjunction is worse than none.
+      if (unmodelled == "") unmodelled = line
+      if (index(line, "\"" F "\"") > 0) saw_f = 1
+      next
+    }
+    END {
+      if (n_lines == 0) { exit 0 }                      # no inner cfg at all -> caller exit 1
+      if (!saw_f && unmodelled == "") { exit 0 }        # names other features only -> exit 1
+      if (unmodelled != "") { print "SHAPE " unmodelled; exit 0 }
+      # CONJUNCTIVE UNION over every recognised line, deduped.
+      acc = ""
+      for (i = 1; i <= n; i++) {
+        m = names[i]
+        while (m != "") {
+          k = index(m, ",")
+          if (k > 0) { tok = substr(m, 1, k - 1); m = substr(m, k + 1) } else { tok = m; m = "" }
+          if (tok != "" && !(tok in seen)) { seen[tok] = 1; acc = acc (acc == "" ? "" : ",") tok }
+        }
+      }
+      print "GATE " acc
+      exit 0
+    }
+  ' "$f") || return 2
+  case "$out" in
+    "")          return 1 ;;
+    "GATE "*)    printf '%s' "${out#GATE }" ; return 0 ;;
+    "GATE")      printf '' ; return 0 ;;
+    "SHAPE "*)   printf '%s' "${out#SHAPE }" ; return 3 ;;
+    *)
+      # An unrecognised report from our OWN scan is an unmeasured state, not silence.
+      echo "UNRECOGNISED-REPORT $out ($f)" >&2
+      return 2 ;;
+  esac
+}
+
+# _ds_lane_fail <name> <log> <start> <line>… — record a FAIL-CLOSED derivation verdict.
+#
+# NOT `{ …; } | tee "$log"` on purpose: record_result appends to THIS shell's result
+# array, and the right-hand side of a pipe is a SUBSHELL — a piped variant would print the
+# message and LOSE the component's recorded result, so the SUMMARY would carry no line at
+# all for a component that failed. (legacy-heuristics keeps its record_result outside the
+# pipeline for the same reason; this helper makes that impossible to get wrong.)
+_ds_lane_fail() {
+  local name="$1" log="$2" start="$3"; shift 3
+  printf '%s\n' "$@" > "$log"
+  printf '%s\n' "$@"
+  local end; end=$(date +%s)
+  record_result "$name" FAIL "$((end - start))"
+  echo ">>> [$name] FAIL ($((end - start))s)"
+}
+
+# run_feature_iso_delta_scan: the delta-scan ISOLATION lane, WIDENED from compile-only to
+# EXECUTING (issue #3725).
+#
+# WHAT WAS WRONG. The lane ran `cargo test --lib --no-run`, so the 13 cqlite-core
+# integration targets crate-level-gated on `delta-scan` — including
+# `issue_1007_complex_type_parity`, whose 6 cases are the parity oracle for #3612's
+# multicell cell-path surface — were named by no `--test` in ANY gate component, and the
+# `delta_scan` module's own lib tests were compiled and never run. `core-tests` runs
+# `--features cli-helpers` (delta-scan OFF, so those files compile to zero tests), clippy
+# compiles them inside a ~30-feature union and executes nothing, and `ci.yml`'s
+# `--features delta-scan --lib` names no integration target. The ONE executor is
+# `parity-regen-matrix.yml`'s `cql-type` leg, which does run them strictly (under
+# `CQLITE_REQUIRE_FIXTURES=1`, after a Docker regen) — so the defect was never "it executes
+# nowhere", it was that nothing MERGE-GATING executed it, and that lane is registry-EXEMPT
+# from `required`.
+#
+# WHAT IS PRESERVED. The isolation purpose is unchanged: `--no-default-features --features
+# all-compression,delta-scan`, i.e. delta-scan WITHOUT parquet, never `--all-features` and
+# never both. That mutual-isolation pair is what makes cross-feature coupling visible at
+# all (run_clippy enables parquet AND delta-scan together, the shape that MASKS it), and
+# `--lib` under `_deny_warnings` still compiles the lib WITH its inline `#[cfg(test)]`
+# modules, which is where #1978's incident class lives. Executing is ADDED to that, not
+# substituted for it: `--no-run` is dropped, so the same compile now also runs.
+#
+# `--all-targets` is still FORBIDDEN here (section 34 of test_agent_gate_summary.sh pins
+# it): it would pull in ~100 integration files written against the DEFAULT feature set,
+# which fail at this feature set as NOISE, not leakage. Naming the derived targets
+# explicitly is the opposite instrument — it reaches exactly the files this feature gates.
+run_feature_iso_delta_scan() {
+  local name=feature-iso-delta-scan
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  local feat=delta-scan
+  local iso_features="all-compression,$feat"
+
+  # ---- fixture posture, decided from THIS script's own state -----------------------
+  local _full=0
+  [ -z "$ONLY" ] && [ "${LITE:-0}" -eq 0 ] && _full=1
+  local _posture _fx_mode _fx_note
+  _posture=$(_ds_fixture_posture "$_full" "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}")
+  _fx_mode=${_posture%%$'\t'*}; _fx_note=${_posture#*$'\t'}
+  local -a fixture_env=()
+  if [ "$_fx_mode" = strict ]; then
+    fixture_env=(CQLITE_REQUIRE_FIXTURES=1)
+  else
+    # `env -u`, not merely omitting the assignment: plain `env` INHERITS an exported
+    # value, and an inherited CQLITE_REQUIRE_FIXTURES=1 would make `--only`/`--lite` and
+    # the documented #2078 opt-out FAIL while the census below reports fixtures as
+    # optional (node-bindings round-1 B2).
+    fixture_env=(-u CQLITE_REQUIRE_FIXTURES -u CQLITE_PARITY_REQUIRE_DATASETS)
+  fi
+
+  # ---- DERIVE the target set from cargo metadata + committed source ----------------
+  # CANDIDATES FROM CARGO, never a tests/*.rs glob: a manifest-gated
+  # (`required-features`) or directory-style target is invisible to a glob. A FAILED
+  # derivation is a FAIL that NAMES the derivation — never a fallback to a glob and never
+  # a fallback to an EMPTY set, which would silently excuse every gated target.
+  local meta_targets
+  if ! meta_targets=$(_package_test_targets_gated cqlite-core "$feat"); then
+    _ds_lane_fail "$name" "$log" "$start" \
+      "[$name] FAIL-CLOSED: could not enumerate cqlite-core's test targets from cargo" \
+      "        metadata, so the $feat target set is unmeasurable. The DERIVATION failed —" \
+      "        this is deliberately NOT a fallback to a tests/*.rs glob (which omits" \
+      "        manifest-gated and directory-style targets) and NOT a fallback to an empty" \
+      "        set, which would excuse every gated target while reporting PASS."
+    return 0
+  fi
+  # The feature set cargo ACTUALLY resolves for this invocation — the oracle for both the
+  # required-features check and the co-required-gate census. A census that cannot be taken
+  # is never reported as empty.
+  local ds_enabled
+  if ! ds_enabled=$(_resolved_package_features cqlite-core \
+      --no-default-features --features "$iso_features"); then
+    _ds_lane_fail "$name" "$log" "$start" \
+      "[$name] FAIL-CLOSED: could not derive cqlite-core's enabled feature set at" \
+      "        --no-default-features --features $iso_features via 'cargo tree -p" \
+      "        cqlite-core' (a cargo failure or an offline registry). Without it neither" \
+      "        the required-features check nor the co-required-gate census can be taken," \
+      "        and an unmeasurable census is never reported as empty."
+    return 0
+  fi
+
+  local -a targets=() allow_zero=() observe_ids=()
+  local names="" count=0 zero_reason="" rf_unmet="" shape_unmodelled="" derived_srcs=""
+  local cfg_site="feature[[:space:]]*=[[:space:]]*\"$feat\""
+  local _mt_name _mt_src _mt_how _mt_rel _mt_rf _obs_id _gate_rc _coreq _off _rf1 _az_id
+  while IFS="$(printf '\t')" read -r _mt_name _mt_src _mt_how _mt_rel _mt_rf; do
+    [ -n "$_mt_name" ] || continue
+    # MEMBERSHIP IS GRAMMAR-FREE, AND DELIBERATELY SO. Either cargo gates the target on the
+    # feature (`manifest`, the arm no source scan can see) or its source carries a
+    # cfg-SHAPED reference to it. Matched on the ATTRIBUTE shape `feature = "delta-scan"`
+    # rather than the bare string, so a doc comment naming the feature is not a gate.
+    #
+    # Nothing about the ATTRIBUTE's structure is consulted here, because an over-broad
+    # membership set costs only a compile and can never produce a false PASS — whereas
+    # deciding membership from a grammar would drop a target the grammar does not model,
+    # and a DROPPED target cannot fail the zero-tests guard, so an empty run would pass.
+    # (That asymmetry is why the excusal below is the only thing that needs a grammar.)
+    #
+    # TRI-STATE: grep 0 = matched, 1 = no match, >=2 = ERROR. `grep -c … 2>/dev/null`
+    # reports 0 both for "no match" and for "could not read", so a scan failure would
+    # silently omit the target — the fail-open this whole component set exists to remove.
+    _coreq=""; _gate_rc=0
+    if [ "$_mt_how" != manifest ]; then
+      local _mt_cnt _mt_rc=0
+      _mt_cnt=$(grep -cE "$cfg_site" "$_mt_src") || _mt_rc=$?
+      if [ "$_mt_rc" -ge 2 ]; then
+        _ds_lane_fail "$name" "$log" "$start" \
+          "[$name] FAIL-CLOSED: the $feat cfg-site scan could not read the source of test" \
+          "        target '$_mt_name' ($_mt_src) — grep exit $_mt_rc. A failed scan reads as" \
+          "        'no $feat site', which silently DROPS the target from the lane; and a" \
+          "        dropped target cannot fail the zero-tests guard, so an empty run PASSes."
+        return 0
+      fi
+      [ "${_mt_cnt:-0}" -gt 0 ] || continue
+      # A MEMBER. Now — and only now — classify the inner cfg shape, which decides whether
+      # the target may legitimately execute ZERO tests here.
+      _coreq=$(_ds_inner_cfg_gate "$_mt_src" "$feat") || _gate_rc=$?
+      if [ "$_gate_rc" -eq 2 ]; then
+        _ds_lane_fail "$name" "$log" "$start" \
+          "[$name] FAIL-CLOSED: the inner-cfg scan could not read the source of test target" \
+          "        '$_mt_name' ($_mt_src) after its cfg site was already matched, so the" \
+          "        allowed-zero classification is unmeasurable. An unmeasured classification" \
+          "        is never resolved in the permissive direction."
+        return 0
+      fi
+      # exit 1 = no inner cfg line names the feature in a recognised shape (an ITEM-level
+      # gate, say). NOT excusable: the feature is ON here, so those bodies compile IN and
+      # the target must execute at least one test.
+      [ "$_gate_rc" -eq 1 ] && _coreq=""
+    fi
+    # A target whose FULL required-features are not satisfied here must NOT be named:
+    # cargo REJECTS an explicit `--test <name>` with unmet required-features, so naming it
+    # is a FALSE RED on entirely correct code. Reported as a coverage gap instead.
+    # (MEASURED: issue_1704_scan_path_error_counts requires observability-testing +
+    # delta-scan + lz4 and cargo refuses the whole invocation when it is named here.)
+    _off=""
+    if [ -n "${_mt_rf:-}" ]; then
+      for _rf1 in ${_mt_rf//,/ }; do
+        [ -n "$_rf1" ] || continue
+        case " $ds_enabled " in
+          *" $_rf1 "*) ;;
+          *) _off="${_off:+$_off,}$_rf1" ;;
+        esac
+      done
+    fi
+    if [ -n "$_off" ]; then
+      rf_unmet="$rf_unmet $_mt_name(required-features unmet:$_off)"
+      continue
+    fi
+    # CONFIRMED SUBJECT — nothing may RECORD the target before the decision to INVOKE it,
+    # or check_test_targets_observed demands a `Running` banner for a target the lane
+    # deliberately never ran (a false red produced by the guard meant to prevent one).
+    _obs_id="$_mt_rel"
+    case "$_mt_rel" in tests/*) _obs_id="${_mt_rel#tests/}" ;; esac
+    _az_id="${_obs_id%.rs}"
+    observe_ids+=("$_az_id")
+    targets+=(--test "$_mt_name")
+    count=$((count + 1))
+    names="$names $_mt_name"
+    derived_srcs="$derived_srcs$_mt_src
+"
+    # ALLOWED-ZERO, DERIVED (never a curated list). A crate-level gate of the form
+    # `#![cfg(all(feature = "delta-scan", feature = "X"))]` with X NOT enabled here
+    # configures the WHOLE target out, so it legitimately executes 0 tests: it stays in
+    # the invocation (it must still COMPILE at this feature set, which is the isolation
+    # value) and is passed to the zero-tests guard as allowed-zero WITH ITS REASON. If X
+    # later joins this lane's feature set the excusal disappears with no gate edit.
+    #
+    # An UNMODELLED shape (exit 3) is NOT excused — see _ds_inner_cfg_gate's polarity.
+    if [ "$_gate_rc" -eq 3 ]; then
+      shape_unmodelled="$shape_unmodelled $_mt_name"
+      continue
+    fi
+    if [ -n "$_coreq" ]; then
+      _off=""
+      for _rf1 in ${_coreq//,/ }; do
+        [ -n "$_rf1" ] || continue
+        case " $ds_enabled " in
+          *" $_rf1 "*) ;;
+          *) _off="${_off:+$_off,}$_rf1" ;;
+        esac
+      done
+      if [ -n "$_off" ]; then
+        allow_zero+=("$_az_id")
+        zero_reason="$zero_reason $_az_id(crate gate also requires:$_off)"
+      fi
+    fi
+  done <<EOF
+$meta_targets
+EOF
+
+  if [ "$count" -eq 0 ]; then
+    _ds_lane_fail "$name" "$log" "$start" \
+      "[$name] FAIL-CLOSED: derived ZERO $feat --test targets from cargo metadata's test" \
+      "        targets (crate-level '#![cfg(... feature = \"$feat\" ...)]' or" \
+      "        required-features). The DERIVATION, not the feature, is what failed — an" \
+      "        unreadable or moved tests dir, or a renamed feature. A lane with no subject" \
+      "        has no verdict to give, so this is a FAIL, never a PASS and never a SKIP."
+    return 0
+  fi
+
+  # The `--lib` half needs its OWN guard: check_no_unexpected_zero_tests keys on
+  # `Running tests/<name>.rs`, so the library unit suite could execute zero tests — or
+  # `--lib` could be dropped from the invocation entirely — and the lane would stay green
+  # on its integration targets alone. Derived, not hard-coded.
+  local -a ds_unit_srcs=()
+  local _ds_us
+  while IFS= read -r _ds_us; do
+    [ -n "$_ds_us" ] && ds_unit_srcs+=("$_ds_us")
+  done <<EOF
+$(_package_unittest_srcs cqlite-core lib "$ds_enabled")
+EOF
+  if [ "${#ds_unit_srcs[@]}" -eq 0 ]; then
+    _ds_lane_fail "$name" "$log" "$start" \
+      "[$name] FAIL-CLOSED: could not derive cqlite-core's lib unittest target from cargo" \
+      "        metadata, so the --lib half of this lane would run under NO zero-test guard."
+    return 0
+  fi
+
+  # ---- DECLARE THE NARROWING (the rule this whole component set is built on) -------
+  # An UNATTRIBUTED cfg site is a site this lane does not claim. Derived by scanning ALL
+  # of cqlite-core/tests for cfg-shaped references to the feature and subtracting the
+  # derived target roots: today that is 0 RECOGNISED (all 13 references are crate-level),
+  # and a future ITEM-level or child-module gate shows up here as a declared gap instead
+  # of being silently absorbed. grep: 0 = matches, 1 = none, >=2 = ERROR (never silence).
+  local _un_list _un_rc=0 _un_n=0 _un_where="" _uf
+  _un_list=$(grep -rlE "$cfg_site" \
+    "$REPO_ROOT/cqlite-core/tests" 2>/dev/null | sort) || _un_rc=$?
+  if [ "$_un_rc" -ge 2 ]; then
+    _ds_lane_fail "$name" "$log" "$start" \
+      "[$name] FAIL-CLOSED: the unattributed-site scan of cqlite-core/tests FAILED (grep" \
+      "        exit $_un_rc — an unreadable directory or a partial walk), so the narrowing" \
+      "        census would have been taken over an INCOMPLETE source set and printed as a" \
+      "        clean zero gap. A census that could not be taken is never reported as empty."
+    return 0
+  fi
+  while IFS= read -r _uf; do
+    [ -n "$_uf" ] || continue
+    case "$derived_srcs" in
+      *"$_uf"$'\n'*) continue ;;
+    esac
+    _un_n=$((_un_n + 1)); _un_where="$_un_where ${_uf#$REPO_ROOT/}"
+  done <<EOF
+$_un_list
+EOF
+  # Which derived targets honour the strict-fixture flag at all. DERIVED, and it matters:
+  # a target that reads neither CQLITE_REQUIRE_FIXTURES nor CQLITE_PARITY_REQUIRE_DATASETS
+  # is outside the anti-vacuity mechanism entirely, so the strict posture cannot be
+  # claimed for it. (MEASURED: scan_delta_parity_test PASSES against an empty corpus and
+  # FAILS against a real one — the exact shape a fixture-blind target hides.)
+  local _fx_blind="" _fx_blind_n=0 _dsrc
+  while IFS= read -r _dsrc; do
+    [ -n "$_dsrc" ] || continue
+    if ! grep -qE 'CQLITE_(REQUIRE_FIXTURES|PARITY_REQUIRE_DATASETS)' "$_dsrc" 2>/dev/null; then
+      _fx_blind_n=$((_fx_blind_n + 1))
+      _fx_blind="$_fx_blind $(basename "${_dsrc%.rs}")"
+    fi
+  done <<EOF
+$derived_srcs
+EOF
+
+  local -a census=()
+  census+=("EXECUTES (issue #3725): cargo test -p cqlite-core --no-default-features --features $iso_features --lib + $count derived --test target(s)")
+  census+=("  ISOLATION PRESERVED: $feat WITHOUT parquet — never --all-features, never both.")
+  census+=("       That mutual isolation is what makes cross-feature coupling visible (#1699);")
+  census+=("       execution is ADDED to it, not substituted for it.")
+  census+=("  derived targets:$names")
+  census+=("       DERIVED at run time from cargo metadata + the committed crate-root")
+  census+=("       '#![cfg(... feature = \"$feat\" ...)]' attributes, so a new gated file is")
+  census+=("       picked up with NO gate edit. A failed derivation FAILs and names the")
+  census+=("       derivation; it is never a fallback to an empty set.")
+  census+=("  fixtures: $_fx_note")
+  if [ "$_fx_blind_n" -gt 0 ]; then
+    census+=("       NOT COVERED BY THAT FLAG — $_fx_blind_n derived target(s) read neither")
+    census+=("       CQLITE_REQUIRE_FIXTURES nor CQLITE_PARITY_REQUIRE_DATASETS, so the strict")
+    census+=("       posture cannot be claimed for them:$_fx_blind")
+  else
+    census+=("       every derived target reads a strict-fixture variable: 0 RECOGNISED gaps")
+  fi
+  if [ -n "$rf_unmet" ]; then
+    census+=("  NOT INVOKED — cargo REJECTS an explicit --test whose required-features are unmet,")
+    census+=("       so naming these would be a false red on correct code. DECLARED coverage")
+    census+=("       gap:$rf_unmet")
+  fi
+  if [ -n "$zero_reason" ]; then
+    census+=("  allowed-zero (crate gate co-requires a feature this isolation lane omits — the")
+    census+=("       whole target compiles out, so 0 tests is CORRECT here; it must still")
+    census+=("       COMPILE):$zero_reason")
+  else
+    census+=("  allowed-zero: 0 RECOGNISED — every derived target must execute at least one test")
+  fi
+  if [ -n "$shape_unmodelled" ]; then
+    census+=("  NOT EXCUSED — crate-level cfg shape this scan does not model (nested, any(...),")
+    census+=("       not(...), multi-line). It is NOT a claim the target is fine; it is a refusal")
+    census+=("       to claim it may run zero tests, so it stays under the zero-tests")
+    census+=("       guard:$shape_unmodelled")
+  fi
+  if [ "$_un_n" -gt 0 ]; then
+    census+=("  UNATTRIBUTED cfg site(s): $_un_n RECOGNISED — a cfg-shaped '$feat' reference in a")
+    census+=("       cqlite-core/tests file that is NOT a derived target root (an ITEM-level gate,")
+    census+=("       or a child module). Its contribution is UNCLASSIFIED: this lane derives")
+    census+=("       CRATE-LEVEL gates only, because only those configure a whole target out.")
+    census+=("       NON-EXHAUSTIVE (#3472): recognised sites, not necessarily all:$_un_where")
+  else
+    census+=("  UNATTRIBUTED cfg site(s): 0 RECOGNISED — every cfg-shaped '$feat' reference under")
+    census+=("       cqlite-core/tests is a derived target root. NON-EXHAUSTIVE (#3472): this is")
+    census+=("       evidence that none was RECOGNISED, never evidence that none is THERE.")
+  fi
+  census+=("  NOT RUN HERE: the parity-regen-matrix.yml cql-type leg runs issue_1007 after a")
+  census+=("       DOCKER REGEN of test_types; this lane runs it against the committed/fetched")
+  census+=("       corpus. That lane executes these cases genuinely — it is simply EXEMPT from")
+  census+=("       required, which is the half #3725 fixes here.")
+  census+=("  enabled features (cargo tree -p, package-scoped):$ds_enabled")
+  local _cl
+  for _cl in "${census[@]}"; do echo ">>> [$name] $_cl"; done
+  {
+    echo "==== [$name] COVERAGE CENSUS (issue #3725 / #1699) ===="
+    for _cl in "${census[@]}"; do echo "$_cl"; done
+    echo "==== end census ===="
+  } > "$log"
+
+  echo ">>> [$name] RUSTFLAGS=-D warnings cargo test --no-fail-fast -p cqlite-core --no-default-features --features $iso_features --lib + $count target(s)"
+  # --no-fail-fast for the reason legacy-heuristics carries it: cargo test stops after the
+  # first failing test BINARY, and this lane is the first MERGE-GATING thing ever to
+  # execute these targets — fail-fast turns triage into a serial reveal.
+  #
+  # CARGO_TERM_COLOR=never is belt, not the fix: every parse below goes through
+  # _ansi_stripped_log (#3400).
+  # ONE argv array, shared by the RECORD and the EXECUTION, so the two cannot describe
+  # different invocations.
+  local -a cargo_argv=(test --no-fail-fast --package cqlite-core
+    --no-default-features --features "$iso_features" --lib "${targets[@]}")
+  # OBSERVED EXPLICITLY, on the line immediately BEFORE the invocation (#3453, job 273 F3).
+  # The in-shell interceptors cannot see this call: _deny_warnings prepends its OWN `env`,
+  # so the shell `env` wrapper finds a NESTED `env` in command position rather than `cargo`
+  # and records nothing — the SUMMARY would then read "component FAILed before its first
+  # cargo build/test invocation" while cargo had in fact run and failed a test. That is
+  # affirmatively false, and worse than silence. Recording HERE rather than earlier also
+  # keeps it an EXECUTION record: a FAIL-CLOSED derivation above never reaches this line,
+  # and the annotation then correctly claims no invocation.
+  _fm_observe_cargo_argv "${cargo_argv[@]}" || true
+  if _deny_warnings env "${fixture_env[@]}" \
+      CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" CARGO_TERM_COLOR=never \
+      cargo "${cargo_argv[@]}" >>"$log" 2>&1; then
+    # A GREEN CARGO EXIT IS NOT SUFFICIENT — that is this issue's whole subject. All three
+    # guards, because each is blind where the others see: zero-tests covers the integration
+    # targets' COUNTS, targets-observed covers a target that never printed a banner at all
+    # (a silently dropped --test), and unittest-targets-ran covers the `--lib` half.
+    if check_no_unexpected_zero_tests "$name" "$log" \
+        ${allow_zero[@]+"${allow_zero[@]}"} 2>>"$log" \
+        && check_test_targets_observed "$name" "$log" ${observe_ids[@]+"${observe_ids[@]}"} 2>>"$log" \
+        && check_unittest_targets_ran "$name" "$log" "${ds_unit_srcs[@]}" 2>>"$log"; then
+      echo ">>> [$name] zero-test guards: $count integration target(s) + unit suite (derived): ${ds_unit_srcs[*]}"
+      status=PASS
+    else
+      status=FAIL
+    fi
+  else
+    status=FAIL
+  fi
+  if [ "$status" = FAIL ]; then
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
 # all-features-check: COMPILE + LINT cqlite-core at `--all-features` (issue #3453).
 #
 # THE DEFECT IT EXISTS FOR — MEASURED, NOT ARGUED. No cargo invocation anywhere in
@@ -17851,15 +18413,16 @@ run_file_size
 #     CQLITE_DATASETS_ROOT in test_agent_gate_summary.sh *sets an empty* root to
 #     exercise the preflight, it consumes no real data), minimal-build (a cargo
 #     build plus a compile-only `cargo test --lib --no-run`; no tests run, no
-#     data — issue #1978), the two #1699 feature-isolation lanes
-#     (feature-iso-parquet / feature-iso-delta-scan: `cargo test --lib --no-run`,
-#     compile-only — nothing executes, so no fixture can be consumed), and format-compat. format-compat is excluded (#1175
+#     data — issue #1978), feature-iso-parquet (still `cargo test --lib --no-run`,
+#     compile-only — nothing executes, so no fixture can be consumed; its sibling
+#     feature-iso-delta-scan is NO LONGER in this list — #3725 widened it to EXECUTE
+#     13 dataset-consuming parity targets, so it IS in DATASET_COMPONENTS), and format-compat. format-compat is excluded (#1175
 #     finding 1): its sole target (cargo test -p format-compatibility-tests,
 #     tests/format-compatibility) is pure in-memory byte-level format-compliance
 #     assertions with hardcoded vectors — it reads no CQLITE_DATASETS_ROOT and no
 #     Data.db — so guarding it just made `--only format-compat` falsely fail the
 #     preflight when datasets are absent.
-DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests cli-tests python-bindings node-bindings smoke flight-tests legacy-heuristics"
+DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests cli-tests python-bindings node-bindings smoke flight-tests legacy-heuristics feature-iso-delta-scan"
 
 # selected_needs_datasets: true iff at least one SELECTED component reads datasets.
 # With no --only, every component runs, so it's always true. With --only, it's true
@@ -18400,7 +18963,12 @@ dispatch_component() {
     # what the lane does. Corrected on the C re-audit; comments beside code are not
     # pinned by section 34, which scans the function body.)
     feature-iso-parquet) run_component feature-iso-parquet run_feature_iso parquet ;;
-    feature-iso-delta-scan) run_component feature-iso-delta-scan run_feature_iso delta-scan ;;
+    # feature-iso-delta-scan is NOT wrapped in run_component (issue #3725): it EXECUTES
+    # rather than compile-only, so it prints a coverage census to stdout AND its log and
+    # does its own timing/record_result — run_component would swallow the census into the
+    # log alone. AGENT_GATE_FM_COMPONENT is already armed at the top of dispatch_component,
+    # exactly as it is for run_legacy_heuristics / run_core_tests.
+    feature-iso-delta-scan) run_feature_iso_delta_scan ;;
     python-bindings) run_python_bindings ;;
     node-bindings) run_node_bindings ;;
     binding-rust-tests) run_binding_rust_tests ;;

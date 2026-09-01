@@ -1900,7 +1900,14 @@ if [ -n "$dataset_components" ]; then
 else
   bad "1699-dataset-extract: could NOT extract DATASET_COMPONENTS — the extraction itself broke, so every membership assert below would pass vacuously"
 fi
-for lane in flight-tests legacy-heuristics; do
+# feature-iso-delta-scan JOINED THIS LOOP on #3725, and it used to be asserted ABSENT
+# below. The lane was widened from `--lib --no-run` to EXECUTING 13 dataset-consuming
+# parity targets, so the old assert (correct while it compiled only) would now certify
+# exactly the hole #3725 closes: enrollment is what puts the #2078 preflight in front of
+# it. Its SIBLING feature-iso-parquet is still compile-only and stays in the ABSENT loop —
+# the two lanes are deliberately ASYMMETRIC now, which is why they are asserted separately
+# rather than as one pair.
+for lane in flight-tests legacy-heuristics feature-iso-delta-scan; do
   case " $dataset_components " in
     *" $lane "*)
       ok "1699-dataset-present: $lane is in DATASET_COMPONENTS (so the #2078 missing-fixtures preflight covers it)" ;;
@@ -1908,7 +1915,7 @@ for lane in flight-tests legacy-heuristics; do
       bad "1699-dataset-present: $lane is NOT in DATASET_COMPONENTS — it runs dataset-dependent tests, so missing fixtures would bypass the preflight and it would fail obscurely instead" ;;
   esac
 done
-for lane in feature-iso-parquet feature-iso-delta-scan; do
+for lane in feature-iso-parquet; do
   case " $dataset_components " in
     *" $lane "*)
       bad "1699-dataset-absent: $lane is in DATASET_COMPONENTS — it is a compile-only isolation lane (--lib --no-run) that opens no fixture, so enrolling it makes a fixture-less checkout fail-closed for no reason" ;;
@@ -1984,7 +1991,7 @@ fi
 # it. Scoped to the two lane functions so the pre-existing clippy component (which has
 # the same latent exposure, filed separately) does not make this assert fail for
 # something outside this change.
-for fn_ in run_legacy_heuristics run_feature_iso; do
+for fn_ in run_legacy_heuristics run_feature_iso run_feature_iso_delta_scan; do
   body_="$tmp/1699-lanefn-$fn_.txt"
   awk -v f="^$fn_\\\\(\\\\) \\\\{" '$0 ~ f, /^\}/' "$GATE" > "$body_"
   if [ ! -s "$body_" ]; then
@@ -2105,7 +2112,7 @@ fi
 #
 # Scoped to the #1699 lane functions: the pattern is pervasive in this repo (~696 sites
 # in scripts/) and auditing all of it is #3380's neighbourhood, not this issue's.
-for fn_ in run_legacy_heuristics run_feature_iso run_flight_tests; do
+for fn_ in run_legacy_heuristics run_feature_iso run_feature_iso_delta_scan run_flight_tests; do
   body_="$tmp/1699-pipefail-$fn_.txt"
   awk -v f="^$fn_\\\\(\\\\) \\\\{" '$0 ~ f, /^\}/' "$GATE" > "$body_"
   if [ ! -s "$body_" ]; then
@@ -2787,9 +2794,10 @@ fi
 # with NO file arguments, and `grep -lE <pattern>` with no files reads STDIN. Portable loops
 # have neither problem. STATIC lint, following the precedent in
 # test_agent_gate_tree_portability.sh, which lints tree-integrity functions the same way.
-for fn_ in run_legacy_heuristics run_flight_tests run_feature_iso _rust_module_closure \
+for fn_ in run_legacy_heuristics run_flight_tests run_feature_iso run_feature_iso_delta_scan \
+           _rust_module_closure \
            _lh_positive_in_closure _package_test_targets_gated _package_unittest_srcs \
-           _resolved_package_features _deny_warnings; do
+           _resolved_package_features _deny_warnings _ds_inner_cfg_gate _ds_fixture_posture; do
   body_="$tmp/1699-gnu-$fn_.txt"
   awk -v f="^$fn_\\\\(\\\\) \\\\{" '$0 ~ f, /^\}/' "$GATE" > "$body_"
   if [ ! -s "$body_" ]; then
