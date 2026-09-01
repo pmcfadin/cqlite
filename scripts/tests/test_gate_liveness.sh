@@ -857,9 +857,19 @@ run_reader "$TMP/st.txt"
 printf '%s' "$OUT" | grep -q 'NOT a claim that the process is dead' \
   && ok "11c.6 STALLED states it is NOT a death claim" \
   || bad "11c.6 STALLED states it is NOT a death claim" "$(printf '%s' "$OUT" | head -1)"
-printf '%s' "$OUT" | grep -q 'relaunches it at the next component boundary' \
-  && ok "11c.7 STALLED explains the beater-recovery path instead of advising a re-run" \
-  || bad "11c.7 STALLED explains the beater-recovery path" "$(printf '%s' "$OUT" | head -1)"
+# THE PROPERTY, NOT THE PHRASE. This asserted the exact words "relaunches it at the next component
+# boundary", and job 322 made that INCOMPLETE: the beater is now also relaunched while the gate is
+# QUEUED for the #1825 slot, which is the case where an operator reading "next component boundary"
+# would conclude recovery is far off -- there is no component boundary yet. Pinning the sentence
+# rather than the property is what made a correct behaviour change into a test failure, twice in this
+# change (cf. the deleted 4b.175). Both recovery paths must be DISCLOSED; the wording may move.
+if printf '%s' "$OUT" | grep -q 'relaunches it' \
+   && printf '%s' "$OUT" | grep -q 'component boundary' \
+   && printf '%s' "$OUT" | grep -q 'queued for the gate slot'; then
+  ok "11c.7 STALLED discloses BOTH beater-recovery paths (component boundary AND queued) instead of advising a re-run"
+else
+  bad "11c.7 STALLED discloses both beater-recovery paths" "$(printf '%s' "$OUT" | head -1)"
+fi
 # Host-independence, asserted at the source: no verdict may depend on /proc, a pid check or a
 # machine identity, or this suite becomes host-dependent again.
 # THE GUARD TESTS ITS STATED PROPERTY: a verdict must not DEPEND on /proc. The first version grepped
