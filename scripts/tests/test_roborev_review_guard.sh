@@ -387,6 +387,36 @@ case "$cmd" in
       esac
     fi
     _EMIT_MACHINE=1
+    # ===== DEPTH MODEL: THE TARGET ROW SITS BELOW `--limit` NEWER ROWS (#3654 round 3) =====
+    # `roborev list` has no offset — `--limit` is its only depth control — so a job on a busy
+    # branch is reachable ONLY by asking for more rows. With STUB_LIST_DEPTH=N the daemon holds N
+    # newer filler jobs ahead of the target, and returns the newest min(limit, N) of them, adding
+    # the target only when the caller asked deeper than N. A stub that returned the target at any
+    # limit would make a depth case pass before AND after the fix, i.e. measure nothing.
+    if [ -n "${STUB_LIST_DEPTH:-}" ]; then
+      _limit=50 _prev=""
+      for _a in $*; do
+        [ "$_prev" = "--limit" ] && _limit=$_a
+        _prev=$_a
+      done
+      printf '['
+      _i=0
+      while [ "$_i" -lt "$STUB_LIST_DEPTH" ] && [ "$_i" -lt "$_limit" ]; do
+        [ "$_i" -eq 0 ] || printf ','
+        printf '{"id":%s,"git_ref":"dead..beef","status":"done","source_machine_id":"filler-not-the-target"}' \
+          "$((900000 + _i))"
+        _i=$((_i + 1))
+      done
+      # STUB_LIST_OMIT_TARGET models a job that is simply NOT on this branch's list at any depth,
+      # which is what makes the exhaustion path testable: without it the target reappears as soon
+      # as the limit exceeds the filler count, and the "searched to the end" case measures nothing.
+      if [ "$_limit" -gt "$STUB_LIST_DEPTH" ] && [ -z "${STUB_LIST_OMIT_TARGET:-}" ]; then
+        [ "$_i" -eq 0 ] || printf ','
+        emit_job_object
+      fi
+      printf ']\n'
+      exit 0
+    fi
     printf '['; emit_job_object; printf ']\n'
     exit 0
     ;;
@@ -1203,6 +1233,8 @@ export STUB_VERDICT_FIELD=''
 export STUB_RECORD_BLANK_FOR=0
 export STUB_PAYLOAD_JOB=''
 export STUB_LIST_JSON=array
+export STUB_LIST_DEPTH=''
+export STUB_LIST_OMIT_TARGET=''
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
 # #3312 (owner ruling (4)): the WAIVER knobs. There are no snapshot knobs any more — nothing reads a
@@ -1250,6 +1282,8 @@ reset_stub() {
   STUB_RECORD_BLANK_FOR=0
   STUB_PAYLOAD_JOB=''
   STUB_LIST_JSON=array
+  STUB_LIST_DEPTH=''
+  STUB_LIST_OMIT_TARGET=''
   STUB_RECORD_OUTPUT=''
   STUB_RECORD_OUTPUT_FIELD=''
   STUB_GH_COMMENTS=''
@@ -6237,6 +6271,43 @@ assert_verdict 'case (jm14)' PASS 0
 assert_says 'case (jm14) a recheck of an older, differently-branched job names its daemon' \
   "^job-machine: $JM_UUID \(source_machine_id; job ids are per-daemon\)$"
 assert_says 'case (jm14) and it is still a recheck' '^MODE: recheck '
+reset_stub
+
+printf '== (jm17) #3654 r3: a target BEYOND the first 50 rows is still found (depth, not width) ==\n'
+# ROUND 2 FIXED THE BRANCH AND LEFT THE DEPTH. With the branch right, a fixed `--limit 50` still
+# drops the target the moment the branch holds more than 50 jobs — and the jobs that sit deep are
+# the OLD ones, which are exactly the ones a `--recheck-job` names. So the documented cross-box
+# mitigation failed for its own primary case. This case puts the target under 60 newer rows: it
+# FAILS against a fixed `--limit 50` (the key reads NOT RECORDED) and passes once the lookup
+# retrieves until found. Deliberately 60, not 5000 — the property is "deeper than the first page",
+# and a case that needs a huge fixture invites being trimmed later.
+reset_stub
+STUB_ANNOUNCE_SHA="$jm_head"
+STUB_SOURCE_MACHINE_ID="$JM_UUID"
+STUB_JOB_BRANCH='issue-earlier-lane'
+STUB_LIST_BRANCH='issue-earlier-lane'
+STUB_LIST_DEPTH=60
+run_wrapper "$jm_work"
+assert_verdict 'case (jm17)' PASS 0
+assert_says 'case (jm17) the daemon is named for a job below the first page of rows' \
+  "^job-machine: $JM_UUID \(source_machine_id; job ids are per-daemon\)$"
+assert_lacks 'case (jm17) depth never yields a filler row'"'"'s machine id' 'filler-not-the-target'
+reset_stub
+
+printf '== (jm18) #3654 r3: a genuinely absent job says so, naming the depth searched ==\n'
+# THE COMPLEMENT, and the reason the loop needs an affirmative end-of-list signal: retrieving
+# "until found" must still TERMINATE when the job is not there at all, and must say that it
+# reached the end of the daemon's list rather than merely giving up at some number.
+reset_stub
+STUB_ANNOUNCE_SHA="$jm_head"
+STUB_JOB_BRANCH='issue-earlier-lane'
+STUB_LIST_BRANCH='issue-earlier-lane'
+STUB_LIST_DEPTH=10
+STUB_LIST_OMIT_TARGET=1
+run_wrapper "$jm_work"
+assert_says 'case (jm18) the miss names the depth reached and that the list ended' \
+  'searched to a depth of [0-9]+ rows and to the end of what the daemon returns'
+assert_lacks 'case (jm18) it never claims a fixed 50-job window' "latest 50 jobs"
 reset_stub
 
 printf '== (jm15) #3654 r2: NO ambient-branch fallback when the record does not name its branch ==\n'

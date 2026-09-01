@@ -1487,16 +1487,44 @@ read_machine_fact() { # read_machine_fact <job> -> sets JOB_MACHINE_ID | JOB_MAC
     JOB_MACHINE_MISS="the job record does not name its own branch, and the daemon's job list is branch-filtered, so the lookup could not be scoped to this job; it was deliberately NOT retried against the branch this invocation is on, which would answer about a different branch than the job's"
     return 1
   fi
-  json=$(roborev list --json --limit 50 --repo "$REPO" --branch "$job_branch" 2>/dev/null || printf '')
-  if [ -z "$json" ]; then
-    JOB_MACHINE_MISS="the daemon returned no job list for this job's own branch '$job_branch'"
-    return 1
-  fi
-  : >"$mfacts"
-  : >"$mprompt"
-  if ! extract_job_facts "$1" "$json" "$mfacts" "$mprompt"; then
+  # ===== DEPTH: RETRIEVE UNTIL FOUND OR EXHAUSTED, NEVER A BIGGER CONSTANT (#3654 round 3) =====
+  # Round 2 fixed the wrong-branch half of this lookup and left the DEPTH half: a fixed
+  # `--limit 50` silently drops the target once the branch holds more than 50 jobs, so the
+  # cross-box mitigation failed for precisely the long-lived jobs most likely to be RECHECKED —
+  # and a recheck is the one mode the mitigation is documented for. Raising the constant would
+  # relocate that defect rather than remove it, so the loop instead stops on an AFFIRMATIVE
+  # end-of-list signal.
+  #
+  # WHY DOUBLING AND NOT AN OFFSET: `roborev list` has no offset or cursor — measured on
+  # v0.61.2, `--limit` is its ONLY depth control — so depth is reached by asking for more rows.
+  # The daemon returning the SAME payload for a strictly larger limit is the only evidence
+  # available that it has no more rows to give; that, not a constant, is the terminating
+  # condition. The round guard below is a runaway stop, not a depth policy, and when it fires it
+  # is NAMED in the miss cause rather than reported as a plain absence.
+  local lim=50 prev="" found=0 rounds=0
+  while : ; do
+    json=$(roborev list --json --limit "$lim" --repo "$REPO" --branch "$job_branch" 2>/dev/null || printf '')
+    if [ -z "$json" ]; then
+      JOB_MACHINE_MISS="the daemon returned no job list for this job's own branch '$job_branch'"
+      return 1
+    fi
+    : >"$mfacts"
+    : >"$mprompt"
+    if extract_job_facts "$1" "$json" "$mfacts" "$mprompt"; then found=1; break; fi
+    # Identical payload for a strictly larger limit: the daemon has nothing deeper to return.
+    if [ "$json" = "$prev" ]; then break; fi
+    prev="$json"
+    rounds=$((rounds + 1))
+    if [ "$rounds" -ge 12 ]; then break; fi
+    lim=$((lim * 2))
+  done
+  if [ "$found" -ne 1 ]; then
     rm -f "$mfacts" "$mprompt"
-    JOB_MACHINE_MISS="job '$1' is not in the daemon's latest 50 jobs for its own branch '$job_branch'"
+    if [ "$rounds" -ge 12 ]; then
+      JOB_MACHINE_MISS="job '$1' was not found on its own branch '$job_branch' after searching to a depth of $lim rows, where the search hit its runaway guard rather than the end of the daemon's list"
+    else
+      JOB_MACHINE_MISS="job '$1' is not in the daemon's job list for its own branch '$job_branch', searched to a depth of $lim rows and to the end of what the daemon returns"
+    fi
     return 1
   fi
   id=$(sed -n 's/^source_machine_id=//p' "$mfacts" | head -1)
