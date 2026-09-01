@@ -497,11 +497,31 @@ fn comparator_orders_by_raw_cell_path_bytes(cmp: &ComparatorType) -> bool {
 /// field structure to decode INTO and the type stays an opaque `Custom`
 /// ([`key_is_opaque_composite`] still names it, so the path fails closed with a
 /// clear error rather than guessing).
+///
+/// UDT references are resolved by [`UdtRegistry::resolve_type`] — the SINGLE
+/// shared resolver, not a second implementation (roborev F2). This matters for
+/// correctness, not just tidiness: `from_cql_type_with_registry`'s own `Custom`
+/// arm looks a reference up with `registry.get_udt(keyspace, name)`, which is NOT
+/// qualifier-aware, so a Cassandra-style QUALIFIED reference (`ks.contact_info`,
+/// which the CQL parser retains) missed the registry and stayed an opaque
+/// `Custom` — while the Flight bypass predicate answers the same question with
+/// `resolve_type`, which IS qualifier-aware (`split_qualified_udt`). The two
+/// therefore DISAGREED: the predicate called the type resolvable and selected the
+/// single-generation arm, while a MULTI-generation merged read of the same table
+/// failed closed — reintroducing exactly the generation-dependent correctness
+/// outcome this issue exists to remove. Resolving here first makes both arms agree
+/// BY CONSTRUCTION: one resolver, one answer.
+///
+/// Resolution is fail-open by design (an unknown reference is left UNCHANGED,
+/// never fabricated — no-heuristics, issue #28), so a genuinely unresolvable UDT
+/// still arrives as a bare `Custom` and `decode_composite` still fails closed
+/// naming the column and the declared type.
 #[cfg(feature = "write-support")]
 fn element_comparator(declared: &CqlType, udts: Option<UdtScope<'_>>) -> Result<ComparatorType> {
     match udts {
         Some(udts) => {
-            ComparatorType::from_cql_type_with_registry(declared, udts.registry, udts.keyspace)
+            let resolved = udts.registry.resolve_type(declared, udts.keyspace);
+            ComparatorType::from_cql_type_with_registry(&resolved, udts.registry, udts.keyspace)
         }
         None => ComparatorType::from_cql_type(declared),
     }

@@ -70,6 +70,11 @@ fn schema() -> TableSchema {
             // set<frozen<key_part>> — a composite UDT element, resolvable
             // through `registry()` (issue #2339).
             col("kset", "set<frozen<key_part>>"),
+            // The SAME element type by a keyspace-QUALIFIED reference, which is
+            // how Cassandra emits a UDT column type and what the CQL parser
+            // retains (roborev F2): `CqlType::parse` yields
+            // `Custom("udt:ks.key_part")`.
+            col("qset", "set<frozen<ks.key_part>>"),
             // inet/time element ordering (roborev 1631/1632): InetAddressType /
             // TimeType order by raw serialized bytes, NOT the formatted-string
             // order the scalar `compare_custom` would use.
@@ -426,6 +431,62 @@ fn set_of_frozen_udt_decodes_structurally() {
             ]),
         ])),
         "a frozen<UDT> set element must decode structurally (issue #2339)"
+    );
+}
+
+/// Roborev F2 (issue #2339): a keyspace-QUALIFIED UDT reference must decode on
+/// the merged-read arm, because the Flight bypass predicate already treats it as
+/// resolvable.
+///
+/// `ComparatorType::from_cql_type_with_registry`'s `Custom` arm looks a reference
+/// up with `registry.get_udt(keyspace, name)`, which is NOT qualifier-aware, so
+/// `Custom("udt:ks.key_part")` missed a registry keyed by BARE name and stayed an
+/// opaque `Custom` — the merged read then failed closed. The bypass predicate
+/// answers the same question with `UdtRegistry::resolve_type`, which IS
+/// qualifier-aware, so it selected the single-generation arm: one generation
+/// decoded, two errored. `element_comparator` now resolves through that SAME
+/// resolver, so the two arms agree by construction.
+///
+/// The expectation is IDENTICAL to `set_of_frozen_udt_decodes_structurally`'s
+/// (same fixture-derived cell paths, same declared UDT) because a qualifier is a
+/// resolution detail, not a different type — and the decoded `UdtValue.type_name`
+/// stays the BARE name, which `resolve_udt_reference` guarantees.
+#[test]
+fn set_of_qualified_frozen_udt_decodes_structurally() {
+    let beta = hex("00000004626574610000000400000002");
+    let gamma = hex("0000000567616d6d610000000400000003");
+    let bare = assemble_read_cells(
+        vec![
+            elem("kset", Value::blob(Vec::new()), gamma.clone()),
+            elem("kset", Value::blob(Vec::new()), beta.clone()),
+        ],
+        &schema(),
+        None,
+        registry(),
+    )
+    .expect("the BARE reference decodes (the pre-existing path)");
+    let qualified = assemble_read_cells(
+        vec![
+            elem("qset", Value::blob(Vec::new()), gamma),
+            elem("qset", Value::blob(Vec::new()), beta),
+        ],
+        &schema(),
+        None,
+        registry(),
+    )
+    .expect(
+        "a QUALIFIED `set<frozen<ks.key_part>>` element must decode on the merged-read \
+         arm — the bypass predicate already calls it resolvable (roborev F2, #2339)",
+    );
+    assert_eq!(
+        get(&qualified, "qset"),
+        get(&bare, "kset"),
+        "a keyspace qualifier is a resolution detail: the decoded value must be \
+         identical to the bare reference's"
+    );
+    assert!(
+        matches!(get(&qualified, "qset"), Some(Value::Set(items)) if items.len() == 2),
+        "sanity: the qualified column really did reassemble both elements"
     );
 }
 

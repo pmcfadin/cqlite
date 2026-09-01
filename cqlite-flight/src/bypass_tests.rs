@@ -456,6 +456,103 @@ fn a_resolvable_composite_set_element_selects_the_fast_arm() {
     }
 }
 
+/// Roborev F2 (issue #2339): the bypass predicate's "the merge arm can resolve
+/// this" answer and the merge arm's ACTUAL behaviour must agree — including for a
+/// keyspace-QUALIFIED UDT reference (`set<frozen<ks.contact_info>>`), which is how
+/// Cassandra emits a UDT column type and what the CQL parser retains.
+///
+/// The predicate resolves with `UdtRegistry::resolve_type`, which is
+/// qualifier-aware; the merge arm built its comparator with
+/// `ComparatorType::from_cql_type_with_registry`, whose `Custom` arm looks the
+/// reference up by BARE name only. So for a qualified reference the predicate
+/// selected the single-generation arm while a MULTI-generation merged read of the
+/// same table failed closed — a correctness outcome flipping on SSTable
+/// generation count, which is the defect #2339 exists to remove.
+///
+/// This test drives BOTH sides for real (the predicate, and
+/// `assemble_read_cells` on a Cassandra-framed `cell_path`) and asserts they
+/// agree, so a future divergence between the two resolvers reds here rather than
+/// only under a two-generation table.
+#[test]
+fn the_bypass_predicate_and_the_merge_arm_agree_on_a_qualified_udt_reference() {
+    use crate::testutil::{simple_schema, write_row};
+    use cqlite_core::schema::udt_registry_from_cql;
+    use cqlite_core::storage::write_engine::merge::{assemble_read_cells, CellData, UdtScope};
+    use cqlite_core::Value;
+
+    let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
+    let base = simple_schema();
+    let registry = udt_registry_from_cql(
+        "CREATE TYPE contact_info (email text, phone text);",
+        &base.keyspace,
+    );
+    let scope = || {
+        Some(UdtScope {
+            registry: &registry,
+            keyspace: &base.keyspace,
+        })
+    };
+
+    /// `contact_info { email: "a@b", phone: "1" }` in Cassandra's frozen-UDT
+    /// framing: an i32-BE length per field (`TupleType.buildValue`, pinned
+    /// `cassandra-5.0.8`; `UserType extends TupleType`).
+    const CONTACT_PATH: &[u8] = &[
+        0, 0, 0, 3, b'a', b'@', b'b', // email "a@b"
+        0, 0, 0, 1, b'1', // phone "1"
+    ];
+
+    let with_type = |ty: &str| {
+        let mut schema = base.clone();
+        if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {
+            c.data_type = ty.to_string();
+        }
+        schema
+    };
+
+    // (declared type, must BOTH arms serve it?)
+    let cases = [
+        ("set<frozen<contact_info>>", true),
+        // The SAME type by a keyspace-qualified reference.
+        (
+            &format!("set<frozen<{}.contact_info>>", base.keyspace)[..],
+            true,
+        ),
+        // Control: a name in no registry — neither arm may claim it.
+        ("set<frozen<not_registered>>", false),
+    ];
+
+    for (declared, expect_served) in cases {
+        let schema = with_type(declared);
+        let predicate_selects =
+            bypass_reason(&readers, &schema, ForcedMergePath::Auto, false, scope())
+                == BypassReason::Selected;
+
+        let element = CellData {
+            column: "name".into(),
+            value: Value::blob(Vec::new()),
+            timestamp: 1,
+            ttl: None,
+            cell_path: Some(CONTACT_PATH.to_vec()),
+            local_deletion_time: None,
+            is_complex_element: true,
+            is_deleted: false,
+            has_empty_value: false,
+        };
+        let merge_arm_decodes = assemble_read_cells(vec![element], &schema, None, scope()).is_ok();
+
+        assert_eq!(
+            predicate_selects, merge_arm_decodes,
+            "`{declared}`: the bypass predicate says resolvable={predicate_selects} while \
+             the merged-read arm decodes={merge_arm_decodes} — a disagreement makes \
+             correctness depend on SSTable generation count (issue #2339 F2)"
+        );
+        assert_eq!(
+            merge_arm_decodes, expect_served,
+            "`{declared}`: expected both arms to serve it = {expect_served}"
+        );
+    }
+}
+
 /// Roborev (issue #3058): the ONE accounting difference between the arms is
 /// the documented one — a fully-suppressed partition is counted as scanned by
 /// the merge arm (it arrives as `StreamingStep::PartitionEnd`) and not by the
