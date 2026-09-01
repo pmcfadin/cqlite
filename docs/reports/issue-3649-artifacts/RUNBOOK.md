@@ -110,8 +110,13 @@ the session if you skip it — **§6, the #3058 single-source bypass**.
       naming the refusal you will hit; `analyze-ab.py` then **refuses** it with
       `corpus-network-storage` and yields no verdict. The warning fires before
       the builds, so move the corpus then rather than burning the session.
-      `NOT-MEASURABLE` (an LVM or mapper device, say) is disclosed rather than
-      refused — confirm it by hand if you see it.
+      `NOT-MEASURABLE` (an LVM or mapper device, say) and `UNRECOGNISED` (a
+      device model naming neither AWS storage service) are disclosed rather than
+      refused — confirm by hand if you see either. **The discriminator is the
+      NVMe vendor model string, and nothing else works**: on Nitro, EBS is
+      presented as an NVMe device on purpose, and `queue/rotational` and the
+      filesystem type are identical for both. Don't reach for `lsblk` heuristics
+      or `rotational` — they were measured and do not discriminate.
 - [ ] `taskset`, `python3`, `cargo`, `git`, `curl` present.
 
 ---

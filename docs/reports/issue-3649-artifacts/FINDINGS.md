@@ -475,7 +475,7 @@ is worth recording as a result rather than a shortfall**:
 |---|---|
 | compressed corpus | **enforced**, driver and analyzer |
 | required ticket fields (`version`, `keyspace`, `table`, `ddl`) | **enforced** at pre-flight, mirrored from `ticket.rs:225-256` |
-| corpus on local NVMe, not network storage | **enforced** — the device model behind the served directory; the driver warns at pre-flight and the analyzer refuses the verdict |
+| corpus on local NVMe, not network storage | **enforced on AWS, declared elsewhere** — an affirmative match on the device model; the driver warns at pre-flight and the analyzer refuses the verdict |
 | an uncontended box | **disclosed** — measured against `nproc/2` and reported beside the verdict |
 | the `i4i` label itself | **declared** — not derivable from a host string, and the two properties it stood for are checked directly instead |
 
@@ -499,6 +499,36 @@ made this deterministic test suite flaky, crossing the limit between two cases o
 a single run. A guard that reds on correct input is the guard an operator waives
 at 2am on a metered box, and the escape (`--control`) disclaims the whole
 verdict, so the refusal would have cost the session and bought nothing.
+
+**What the storage check depends on, stated so nobody re-derives it.** The
+signal is the NVMe **vendor model string** — `Amazon Elastic Block Store` versus
+`Amazon EC2 NVMe Instance Storage` — and that is a fair objection, because a
+vendor string is the same *kind* of evidence as a hostname. The reason it is
+used anyway is that **nothing else discriminates**, measured rather than assumed
+on an EBS-backed lane box:
+
+| candidate signal | on EBS here | on instance storage | discriminates? |
+|---|---|---|---|
+| `queue/rotational` | `0` | `0` | no |
+| filesystem type | `ext4` | `ext4`/`xfs` | no |
+| device name | `nvme0n1` | `nvme1n1` | no — Nitro presents EBS as NVMe *by design* |
+| IMDS `block-device-mapping/` | empty here | varies | not available |
+| device model | `Amazon Elastic Block Store` | `Amazon EC2 NVMe Instance Storage` | **yes** |
+
+On Nitro, EBS is deliberately presented as an NVMe device, so network-attached
+block storage and instance storage are indistinguishable at every layer below
+the device identity. **So this property is measurable on AWS and not portably** —
+and that is the honest scope, recorded here rather than left implicit.
+
+It is still worth more than the hostname check it replaces, for two reasons that
+are not about brittleness: the string is reported **by the device** and names the
+storage service directly, rather than describing the machine class and leaving
+the storage to be inferred; and **both verdicts are affirmative matches**. The
+first version was not — it returned `LOCAL` for any model that was not EBS, so an
+NFS-backed loop device or another cloud's network volume passed as a local disk.
+That is a pass derived from the absence of a bad signal, in the one check added
+to stop exactly that, and it is why there is a fourth token: `UNRECOGNISED` is
+disclosed as *not known to be local*, distinctly from `NOT-MEASURABLE`.
 
 **The refusal belongs where the false claim would be made, and finding that out
 was the useful part.** It was written into the driver's pre-flight first, and the
