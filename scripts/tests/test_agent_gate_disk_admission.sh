@@ -177,13 +177,16 @@ LOW=$(gib_kib 10)
 a_slots="$tmp/a-slots"
 peer_script=$(df_script a-peer "$HIGH")
 run_stub_gate a-peer "$peer_script" \
-  CQLITE_GATE_SLOTS_DIR="$a_slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=6
+  CQLITE_GATE_SLOTS_DIR="$a_slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=15
 a_peer_pid=$RS_PID; a_peer_run=$RS_RUNDIR
 
-# The peer must actually HOLD the only slot before the subject launches, or the
-# subject would never queue and the case would silently degrade into case B.
+# The peer must actually HOLD the only slot before the subject launches, AND must go
+# on holding it for longer than the subject's own startup takes on a loaded box — or
+# the subject finds a free slot, never queues, and this case silently degrades into
+# case B: a green that measured the wrong thing. Hence the generous peer hold; the
+# subject exits the moment the slot is granted, so the hold only bounds the wait.
 a_peer_holding=0
-a_deadline=$(( $(date +%s) + 20 ))
+a_deadline=$(( $(date +%s) + 90 ))
 while [ "$(date +%s)" -lt "$a_deadline" ]; do
   [ "$(marker_count "$a_peer_run")" -ge 1 ] && { a_peer_holding=1; break; }
   sleep 0.1
@@ -199,7 +202,7 @@ run_stub_gate a-subj "$subj_script" \
   CQLITE_GATE_SLOTS_DIR="$a_slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=4
 a_subj_pid=$RS_PID; a_subj_run=$RS_RUNDIR; a_subj_sum=$RS_SUMMARY; a_subj_err=$RS_ERR
 
-watch_until_exit "$a_subj_pid" "$a_subj_run" 60; a_status=$WX_STATUS; a_markers=$WX_MARKERS
+watch_until_exit "$a_subj_pid" "$a_subj_run" 180; a_status=$WX_STATUS; a_markers=$WX_MARKERS
 wait "$a_peer_pid" 2>/dev/null
 
 if grep -q 'waiting for gate slot' "$a_subj_err" 2>/dev/null; then
@@ -267,9 +270,9 @@ fi
 b_slots="$tmp/b-slots"
 b_peer_script=$(df_script b-peer "$HIGH")
 run_stub_gate b-peer "$b_peer_script" \
-  CQLITE_GATE_SLOTS_DIR="$b_slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=6
+  CQLITE_GATE_SLOTS_DIR="$b_slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=15
 b_peer_pid=$RS_PID; b_peer_run=$RS_RUNDIR
-b_deadline=$(( $(date +%s) + 20 ))
+b_deadline=$(( $(date +%s) + 90 ))
 while [ "$(date +%s)" -lt "$b_deadline" ]; do
   [ "$(marker_count "$b_peer_run")" -ge 1 ] && break
   sleep 0.1
@@ -278,7 +281,7 @@ b_subj_script=$(df_script b-subj "$HIGH" "$HIGH")
 run_stub_gate b-subj "$b_subj_script" \
   CQLITE_GATE_SLOTS_DIR="$b_slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=3
 b_subj_err=$RS_ERR
-watch_until_exit "$RS_PID" "$RS_RUNDIR" 60; b_status=$WX_STATUS; b_markers=$WX_MARKERS
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 180; b_status=$WX_STATUS; b_markers=$WX_MARKERS
 wait "$b_peer_pid" 2>/dev/null
 if [ "$b_status" -eq 0 ] && [ "$b_markers" -ge 1 ]; then
   ok "CONTROL: above-bar at BOTH moments proceeds and DOES begin work (exit 0, $b_markers marker(s))"
