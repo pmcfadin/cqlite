@@ -26,7 +26,7 @@ middle; you sit in one standing seat (spec approval — merge is autonomous on g
 |------|--------------|
 | `flow-groom` | rough idea → one scoped issue (one `P0`–`P3`, `status:ready`, testable criteria); decides oracle vs design |
 | `flow-activate` | worktree + branch + `opsx:propose`; renders spec + design inline; **STOPS at Seam 1** |
-| `flow-implement` | implement (TDD) → review-first (`rust-reviewer` + roborev on the lite-green diff) → open PR → spawn `flow-closer` for the endgame (full gate → **C** → final roborev → merge → finalize) |
+| `flow-implement` | implement (TDD) → review-first (`rust-reviewer` + roborev on the lite-green diff) → open PR → spawn `flow-closer` for the endgame (rebase → full gate → **C** → **roborev LAST** → `premerge-assert` → merge → finalize) |
 | `flow-address` | resolves PR review comments; re-verifies; pushes; replies |
 | `flow-finalize` | `opsx:archive` + **stamp the telemetry ledger** + remove worktree/branch + close issue (post-merge) |
 | `flow-board` | status across in-flight work + drives the one item waiting on you |
@@ -130,6 +130,21 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   which asserts the PR is
   OPEN and its `headRefOid` **equals the locally-certified tip**, exiting non-zero (and printing a
   loud refusal) on a moved head, a closed/merged PR, or a gh failure.
+  **Since #3752 it also runs two fail-closed legs BEFORE the head check, both refusing on
+  `UNMEASURED`** (a positive verdict requires a positive measurement): `PREMERGE: REVIEW-BINDING`
+  asserts that a roborev job RECORDED ON THE PR has a reviewed head that is an ANCESTOR of the certified
+  sha, with no reviewable code after it. `git merge-base --is-ancestor` is the load-bearing test and runs
+  FIRST — `git cat-file -t` is a DIAGNOSTIC ONLY, because a rebase leaves the old commit dangling and
+  reflog-reachable so it still answers `commit`, and an object-validity-first check gives a reassuring
+  answer that never fires. The reviewed head comes from the JOB RECORD's `git_ref` (`<base40>..<head40>`),
+  never from the `Enqueued job <N> for <sha>` line, which for a range review names only the BASE. A
+  code-free PR diff is a loudly DECLARED `NOT-APPLICABLE`, because a code-free diff cannot be
+  roborev-certified at all. `PREMERGE: HOLD-CHECK` re-reads the PR thread and the issue it closes for a
+  column-zero `HOLD:` order, and the PR timeline for a lead disarm inside 30 minutes.
+  **How a lead actually stops a merge (AC7):** convert the PR to draft (`gh pr ready --undo`), which
+  GitHub enforces, or set a per-tier `ci:` state. **`gh pr merge --disable-auto` alone is NOT a stop** —
+  it removes the auto-merge REQUEST and a plain `gh pr merge --squash` succeeds immediately afterward
+  (measured: #3735 merged three minutes after the lead disarmed it).
   **The third argument is REQUIRED (#3465), and it closes TWO distinct escapes with one mechanism.**
   Verifying the head against a *claimed* certified sha never verified that a certified sha EXISTS.
   **#3408 = no gate at all**: it merged on 22 `--lite` PASSes and no full `scripts/agent-gate.sh` run,
@@ -614,9 +629,23 @@ Inside `flow-implement` the loop is ONE coherent design, not three patches:
 ```
 implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lite-green diff
   (review-first, DEFAULT) → fix (lite re-cert + diff-scoped targets, NEVER a full gate)
-  → open PR → flow-closer { FULL gate ONCE → C → final roborev → merge-on-green → finalize }
+  → open PR → flow-closer { rebase → FULL gate ONCE → C → ROBOREV LAST → premerge-assert
+                            → arm → finalize }
 ```
 
+- **ROBOREV LAST, and a later rebase VOIDS the roborev round (issue #3752).** The endgame order is
+  **rebase → gate of record → C → roborev → `premerge-assert` → arm**, and a **byte asymmetry** decides
+  it: a roborev round changes no bytes, so reviewing after gating costs nothing and cannot invalidate a
+  gate PASS; a rebase changes bytes, so gating or reviewing before it certifies the wrong tree.
+  Review-after-gate is free; gate-after-review is not. Measured on PR #3735: a genuine PASS (job 304 at
+  `d3812f59`, `findings: NONE`, 1.07M input tokens) survived the lane's correct rebase as a true
+  statement about a commit `git cat-file -t` reports does not exist — with two unreviewed commits after
+  the reviewed content, one of them the semantic rebase-conflict fix in the only file overlapping `main`.
+  Post the terminal `==== ROBOREV REVIEW SUMMARY ====` block as a top-level PR comment: the merge gate's
+  `review-binding` leg reads the job id from there. And a **non-empty semantic overlap means git can
+  merge cleanly and still be wrong** — compute it over `merge-base..origin/main`, never
+  `HEAD..origin/main` (measured 16 files vs the correct 3), re-run the tests touching every overlapping
+  file, and expect a fix; any such fix invalidates both the gate and the review.
 - **Review-first is the default (issue #2086).** `rust-reviewer` + roborev run on the **lite-green** diff
   **before** the first full gate, so review discovers fixable problems before we pay for the 12–25 min gate.
   Skip only for a genuinely mechanical diff (no `pub`-item change AND single call site AND no new surface).
