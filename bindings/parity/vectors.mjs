@@ -3,9 +3,10 @@
  *
  * Twin of `vectors.py`: materializes every vector in `canonical-vectors.json`
  * into the NODE binding's native value shape and checks it against the
- * vector's expected canonical output. Both halves must agree with the SAME
- * expected value, which is the only reason the two independent canonicalizers
- * are KNOWN to agree.
+ * vector's expected canonical output; it also drives the `errors` table (each
+ * case must RAISE) and enforces the shared `floor` block. Both halves read the
+ * SAME file, which is the only reason the two independent canonicalizers are
+ * KNOWN to agree.
  *
  * Note: this file `JSON.parse`s the vector table, so a `cli` field holding an
  * integer above 2^53 is read lossily here. That is harmless and deliberate --
@@ -22,13 +23,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { canonNode, parseType } from './canonical.mjs';
+import {
+  CanonicalError, canonNode, canonicalEqual, parseType, shapeTag,
+} from './canonical.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const VECTORS_PATH = path.join(HERE, 'canonical-vectors.json');
 
+/** The leg this runner owns; the python and cli legs are vectors.py's job. */
+export const LEGS = ['node'];
+
+export function loadAll(p = VECTORS_PATH) {
+  return JSON.parse(fs.readFileSync(p, 'utf8'));
+}
+
 export function loadVectors(p = VECTORS_PATH) {
-  return JSON.parse(fs.readFileSync(p, 'utf8')).vectors;
+  return loadAll(p).vectors;
 }
 
 /** Turn a vector's leg spec into a napi-binding-shaped native value. */
@@ -59,68 +69,169 @@ export function materializeNode(spec) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Value vectors
+// ---------------------------------------------------------------------------
+
 /**
- * Type-tagged shape, so `1` and `"1"` (or `1` and `true`) never compare equal
- * by accident -- the integer rule's whole point is WHICH JSON type a value
- * lands in.
+ * Returns `{ failures, counts }`. `counts` is per (vector, leg) PAIR, not per
+ * vector, so a vector failing on more than one leg cannot under-count (N7).
  */
-export function typedShape(v) {
-  if (v === null) return 'null';
-  if (typeof v === 'boolean') return 'bool';
-  if (typeof v === 'number') return 'number';
-  if (typeof v === 'string') return 'str';
-  if (Array.isArray(v)) return `[${v.map(typedShape).join(',')}]`;
-  if (typeof v === 'object') {
-    return `{${Object.keys(v).sort().map((k) => `${k}:${typedShape(v[k])}`).join(',')}}`;
-  }
-  return typeof v;
-}
-
-export function deepEqual(a, b) {
-  if (a === null || b === null) return a === b;
-  if (Array.isArray(a) || Array.isArray(b)) {
-    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
-    return a.every((x, i) => deepEqual(x, b[i]));
-  }
-  if (typeof a === 'object' || typeof b === 'object') {
-    if (typeof a !== 'object' || typeof b !== 'object') return false;
-    const ka = Object.keys(a).sort();
-    const kb = Object.keys(b).sort();
-    if (ka.length !== kb.length || ka.some((k, i) => k !== kb[i])) return false;
-    return ka.every((k) => deepEqual(a[k], b[k]));
-  }
-  return a === b;
-}
-
-/** Return a list of human-readable failures; empty means the JS leg agrees. */
 export function checkVectors(vectors = loadVectors()) {
   const failures = [];
+  const counts = {
+    vectors: 0, checks: 0, ok: 0, failed: 0, skipped: 0,
+  };
   for (const vec of vectors) {
-    const t = parseType(vec.type);
+    counts.vectors += 1;
+    counts.checks += 1;
     const expected = vec.canonical;
     let actual;
     try {
+      // parseType is INSIDE the try (N6): a malformed `type` is THIS vector's
+      // failure, never an abort that leaves every later vector unmeasured.
+      const t = parseType(vec.type);
       actual = canonNode(materializeNode(vec.node), t);
     } catch (e) {
       failures.push(`${vec.name}/node: raised ${e && e.message ? e.message : e}`);
+      counts.failed += 1;
       continue;
     }
-    if (!deepEqual(actual, expected) || typedShape(actual) !== typedShape(expected)) {
-      failures.push(
-        `${vec.name}/node: expected ${JSON.stringify(expected)} (${typedShape(expected)}), `
-        + `got ${JSON.stringify(actual)} (${typedShape(actual)})`,
-      );
+    if (canonicalEqual(actual, expected)) {
+      counts.ok += 1;
+      continue;
     }
+    failures.push(
+      `${vec.name}/node: expected ${JSON.stringify(expected)} (${shapeTag(expected)}), `
+      + `got ${JSON.stringify(actual)} (${shapeTag(actual)})`,
+    );
+    counts.failed += 1;
+  }
+  return { failures, counts };
+}
+
+// ---------------------------------------------------------------------------
+// Refusal cases (issue #1455, N3)
+// ---------------------------------------------------------------------------
+
+function expectRaise(fn, expect) {
+  let result;
+  try {
+    result = fn();
+  } catch (e) {
+    if (!(e instanceof CanonicalError)) {
+      return [false, `raised ${e && e.name ? e.name : 'Error'} (expected CanonicalError): ${e && e.message}`];
+    }
+    if (String(e.message).toLowerCase().includes(expect.toLowerCase())) return [true, ''];
+    return [false, `raised CanonicalError but message lacks "${expect}": ${e.message}`];
+  }
+  return [false, `did NOT raise; returned ${JSON.stringify(result)}`];
+}
+
+export function checkErrors(errors = loadAll().errors || []) {
+  const failures = [];
+  const counts = {
+    cases: 0, checks: 0, ok: 0, failed: 0,
+  };
+  const record = (label, ok, detail) => {
+    if (ok) counts.ok += 1;
+    else { counts.failed += 1; failures.push(`${label}: ${detail}`); }
+  };
+  for (const c of errors) {
+    counts.cases += 1;
+    if (c.stage === 'parse_type') {
+      counts.checks += 1;
+      const [ok, detail] = expectRaise(() => parseType(c.type), c.expect);
+      record(`${c.name}/parse_type`, ok, detail);
+      continue;
+    }
+    for (const [leg, spec] of Object.entries(c.legs || {})) {
+      if (!LEGS.includes(leg)) continue;
+      counts.checks += 1;
+      const [ok, detail] = expectRaise(
+        () => canonNode(materializeNode(spec), parseType(c.type)),
+        c.expect,
+      );
+      record(`${c.name}/${leg}`, ok, detail);
+    }
+  }
+  return { failures, counts };
+}
+
+// ---------------------------------------------------------------------------
+// Case floor (issue #1455, B2)
+// ---------------------------------------------------------------------------
+
+export function collectKinds(typeText) {
+  const walk = (t) => [t.kind, ...t.args.flatMap(walk)];
+  return walk(parseType(typeText));
+}
+
+/** The subject set must not be able to shrink to nothing and stay green. */
+export function checkFloor(data = loadAll()) {
+  const floor = data.floor;
+  if (!floor || typeof floor !== 'object') {
+    return ['canonical-vectors.json has no `floor` block — the case floor cannot be checked'];
+  }
+  const failures = [];
+  const vectors = data.vectors || [];
+  const errors = data.errors || [];
+  if (vectors.length < floor.min_vectors) {
+    failures.push(`vector floor: ${vectors.length} < ${floor.min_vectors} — vectors were REMOVED`);
+  }
+  if (errors.length < floor.min_errors) {
+    failures.push(`error-case floor: ${errors.length} < ${floor.min_errors} — cases were REMOVED`);
+  }
+  const names = vectors.map((v) => v.name);
+  if (new Set(names).size !== names.length) failures.push('duplicate vector names');
+
+  const seen = new Set();
+  let nested = false;
+  for (const vec of vectors) {
+    let kinds;
+    try {
+      kinds = collectKinds(vec.type);
+    } catch (e) {
+      failures.push(`${vec.name}: unparseable type "${vec.type}": ${e.message}`);
+      continue;
+    }
+    kinds.forEach((k) => seen.add(k));
+    const containers = kinds.filter((k) => ['list', 'set', 'map', 'tuple'].includes(k));
+    if (containers.length >= 2) nested = true;
+  }
+  const missing = floor.required_kinds.filter((k) => !seen.has(k));
+  if (missing.length) failures.push(`no vector covers CQL kind(s): ${JSON.stringify(missing)}`);
+  if (floor.require_nested_container && !nested) {
+    failures.push('no vector nests a container inside a container');
+  }
+  if (floor.require_null_canonical && !vectors.some((v) => v.canonical === null)) {
+    failures.push('no vector canonicalizes to null');
   }
   return failures;
 }
 
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
 function main() {
-  const vectors = loadVectors();
-  const failures = checkVectors(vectors);
-  for (const line of failures) process.stderr.write(`FAIL ${line}\n`);
-  process.stdout.write(`${vectors.length - failures.length}/${vectors.length} vectors OK (node leg)\n`);
-  return failures.length ? 1 : 0;
+  const data = loadAll();
+  const floorFailures = checkFloor(data);
+  const vec = checkVectors(data.vectors);
+  const err = checkErrors(data.errors || []);
+  for (const line of [...floorFailures, ...vec.failures, ...err.failures]) {
+    process.stderr.write(`FAIL ${line}\n`);
+  }
+  process.stdout.write(
+    `vectors: ${vec.counts.ok}/${vec.counts.checks} leg-checks OK over `
+    + `${vec.counts.vectors} vectors (${vec.counts.skipped} leg-checks skipped) `
+    + `[legs: ${LEGS.join(', ')}]\n`,
+  );
+  process.stdout.write(
+    `refusals: ${err.counts.ok}/${err.counts.checks} leg-checks OK over ${err.counts.cases} cases\n`,
+  );
+  process.stdout.write(`floor: ${floorFailures.length ? 'FAILED' : 'OK'}\n`);
+  return (floorFailures.length || vec.failures.length || err.failures.length) ? 1 : 0;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {

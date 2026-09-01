@@ -248,6 +248,50 @@ export function normalizeDecimalString(s) {
   return `${sign}${out}`;
 }
 
+/**
+ * Type-tagged shape of a CANONICAL value -- ONE definition, every caller.
+ *
+ * There is no int/float distinction in JS, and there must not be one in the
+ * Python twin either: `JSON.stringify({h: 1.0})` emits `{"h":1}`, so an
+ * INTEGRAL double read back by `json.load` is a Python `int` while the python
+ * and cli legs still hold a `float`. Tagging them differently would red this
+ * lane on correct input (issue #1455, B4). `bool` is checked FIRST, so the
+ * property the tag enforces -- number vs string vs bool vs null -- is intact.
+ */
+export function shapeTag(v) {
+  if (v === null || v === undefined) return 'null';
+  if (typeof v === 'boolean') return 'bool';
+  if (typeof v === 'number') return 'number';
+  if (typeof v === 'string') return 'str';
+  if (Array.isArray(v)) return `[${v.map(shapeTag).join(',')}]`;
+  if (typeof v === 'object') {
+    return `{${Object.keys(v).sort().map((k) => `${k}:${shapeTag(v[k])}`).join(',')}}`;
+  }
+  return typeof v;
+}
+
+/** Deep equality over canonical values (shape tag compared separately). */
+export function deepEqual(a, b) {
+  if (a === null || b === null) return a === b;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((x, i) => deepEqual(x, b[i]));
+  }
+  if (typeof a === 'object' || typeof b === 'object') {
+    if (typeof a !== 'object' || typeof b !== 'object') return false;
+    const ka = Object.keys(a).sort();
+    const kb = Object.keys(b).sort();
+    if (ka.length !== kb.length || ka.some((k, i) => k !== kb[i])) return false;
+    return ka.every((k) => deepEqual(a[k], b[k]));
+  }
+  return a === b;
+}
+
+/** Canonical equality that ALSO compares the shape tag. */
+export function canonicalEqual(a, b) {
+  return deepEqual(a, b) && shapeTag(a) === shapeTag(b);
+}
+
 function canonDuration(months, days, nanos) {
   return { months: canonInt(months), days: canonInt(days), nanos: canonInt(nanos) };
 }

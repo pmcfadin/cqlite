@@ -41,6 +41,8 @@ __all__ = [
     "canon_row_python",
     "canon_row_cli",
     "normalize_decimal_string",
+    "shape_tag",
+    "canonical_equal",
     "JS_SAFE_INT_MAX",
 ]
 
@@ -314,6 +316,44 @@ def normalize_decimal_string(s: str) -> str:
     return f"{sign}{out}"
 
 
+def shape_tag(v: Any) -> str:
+    """Type-tagged shape of a CANONICAL value -- ONE definition, every caller.
+
+    ``int`` and ``float`` deliberately collapse to ``"number"``. JSON has a
+    single number type and the Node leg crosses a JSON boundary
+    (``JSON.stringify({h: 1.0})`` -> ``{"h":1}``, which ``json.load`` returns as
+    ``int``), so an INTEGRAL double would report ``float`` on the python/cli
+    legs and ``int`` on the node leg for an IDENTICAL canonical value. That is a
+    false red on correct input -- latent only because today's corpus happens to
+    hold no integral float -- and a lane that reds on correct input is the lane
+    agents learn to waive. ``bool`` is tested FIRST, so the property this tag
+    actually enforces (number vs string vs bool vs null) is unaffected: the
+    integer rule's above-2^53 case is number-vs-STRING, which still fails.
+    """
+    if isinstance(v, bool):
+        return "bool"
+    if isinstance(v, (int, float)):
+        return "number"
+    if isinstance(v, str):
+        return "str"
+    if v is None:
+        return "null"
+    if isinstance(v, list):
+        return "[" + ",".join(shape_tag(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{" + ",".join(f"{k}:{shape_tag(v[k])}" for k in sorted(v)) + "}"
+    return type(v).__name__
+
+
+def canonical_equal(a: Any, b: Any) -> bool:
+    """Equality over canonical values that ALSO compares :func:`shape_tag`.
+
+    A bare ``==`` in Python makes ``1 == True`` and ``1 == 1.0``; only the first
+    of those is a real divergence, and the shape tag is what separates them.
+    """
+    return a == b and shape_tag(a) == shape_tag(b)
+
+
 def _canon_duration(months: int, days: int, nanos: int) -> dict:
     return {
         "months": canon_int(int(months)),
@@ -406,7 +446,13 @@ class PythonAdapter(_Adapter):
         if kind == "decimal":
             if not isinstance(value, _decimal.Decimal):
                 raise CanonicalError(f"decimal column got {type(value).__name__}")
-            return normalize_decimal_string(format(value, "f"))
+            # `str()`, NEVER `format(value, "f")`: the "f" presentation expands the
+            # scale to POSITIONAL notation before normalize_decimal_string's
+            # DECIMAL_PLAIN_MAX_CHARS guard can refuse it, so a Decimal carrying a
+            # pathological 32-bit exponent attempts a multi-gigabyte allocation
+            # inside format() itself. str() is bounded (Decimal renders scientific
+            # for extreme exponents) and the guard then decides (issue #1455, R2).
+            return normalize_decimal_string(str(value))
         if kind == "inet":
             if not isinstance(value, (_ip.IPv4Address, _ip.IPv6Address)):
                 raise CanonicalError(f"inet column got {type(value).__name__}")
