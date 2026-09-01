@@ -1096,6 +1096,38 @@ fn a_key_spelled_differently_by_the_two_sides_still_finds_its_guide() {
     }
 }
 
+/// A MULTICELL container-keyed map's VALUES get their guide POSITIONALLY, so a legitimate
+/// text value spelled `null` is not read as an actual null (roborev job 36, issue #3726).
+///
+/// Such a map resolves NO `golden_key` by text: the golden's object key is `getString`'s
+/// cell-path text, which is not the declared type's `toJSONString` document, so it renders to
+/// nothing and matches no entry. Every value was therefore decoded against `Value::Null` —
+/// and that is not inert, because `decode_shape` reads the token `null` as `Value::Null`
+/// exactly when the guide is null. A text value spelled `null` came back as a real null and
+/// was reported as a divergence it is not.
+///
+/// The fallback is the i-th golden entry, which is not a guess: emitted order IS
+/// `compare::map::compare_map`'s pairing rule and both sides preserve it.
+#[test]
+fn a_multicell_container_keyed_maps_values_are_guided_positionally() {
+    let ty = ty_of("frozen<map<frozen<tuple<timestamp, text>>, text>>");
+    // Golden keys are getString cell-path text — they render to nothing, so no key matches.
+    // The VALUES are the text "null" and an ordinary word.
+    let golden = json!({"a\\:1": "null", "b\\:2": "word"});
+    let csv = "{(a, 1): null, (b, 2): word}";
+    let decoded = match decode(&golden, csv, &ty) {
+        Ok(decoded) => decoded,
+        Err(why) => panic!("the cell must decode: {why}"),
+    };
+    assert_eq!(
+        decoded[0]["value"],
+        json!("null"),
+        "the golden says this value is the TEXT `null`, so the CSV token must not become a \
+         real null: {decoded}"
+    );
+    assert_eq!(decoded[1]["value"], json!("word"), "{decoded}");
+}
+
 /// THE DUPLICATE-RENDERING REFUSAL IS WHOLE-NODE, AND THAT COSTS THE ENTRY VALUES —
 /// pinned executably as a known hole (roborev job 34, issue #3726).
 ///

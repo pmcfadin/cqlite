@@ -236,7 +236,7 @@ fn decode_object<'t>(
         _ => Vec::new(),
     };
     let mut out = Vec::with_capacity(parts.len());
-    for part in parts {
+    for (index, part) in parts.iter().enumerate() {
         let (key, value) = entry_cut(part)?;
         // A UDT field step, spelled `parent.field` as the comparator spells it. A
         // MAP key reaches the same branch (CSV cannot tell the two apart), but a
@@ -341,8 +341,23 @@ fn decode_object<'t>(
                 None => Value::String(key.to_string()),
             },
         );
+        // THE VALUE'S GUIDE, with a POSITIONAL fallback (roborev job 36).
+        //
+        // A MULTICELL container-keyed map resolves NO `golden_key` at all: the golden's
+        // object key is `getString`'s cell-path text, which is not the declared type's
+        // `toJSONString` document, so it renders to nothing and matches no entry. Every
+        // value in such a map was therefore decoded against `Value::Null` — and that is
+        // not inert, because `decode_shape`'s null-token arm reads the token `null` as
+        // `Value::Null` only when the guide is null. A legitimate TEXT value spelled
+        // `null` was decoded as an actual null and reported as a divergence it is not.
+        //
+        // Falling back to the i-th golden entry is not a guess: a map's entries are
+        // compared in EMITTED ORDER — that is `compare::map::compare_map`'s pairing rule,
+        // which both sides preserve — so the i-th CSV entry's value belongs to the i-th
+        // golden entry by the same rule the comparison will use on it.
         let child_golden = golden_key
             .and_then(|k| fields.and_then(|g| g.get(k)))
+            .or_else(|| fields.and_then(|g| g.values().nth(index)))
             .unwrap_or(&Value::Null);
         let decoded = match value_ty(key) {
             // A map VALUE / UDT field is a cell value: natural kind, as in
