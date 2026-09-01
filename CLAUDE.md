@@ -511,9 +511,28 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   spill file, which under ENOSPC is what cannot be written. **THAT NOTE REACHES THE PARENT ONLY
   FROM THE PARENT SHELL**: the serial MAIN lane and every `--lite`/`--delta` component. A
   SIDE-lane component runs in a backgrounded subshell (#1737) where the append is lost, and the
-  marker-FILE idiom used elsewhere is unavailable **by construction** under ENOSPC — that path
-  is covered by (1) instead, the missing/malformed `.result` rendering UNMEASURED. Partial and
-  declared beats a false clean. **(3)** The emitted `scan:` field now declares its **SUBJECT
+  marker-FILE idiom used elsewhere is unavailable **by construction** under ENOSPC.
+  **THAT PATH WAS CLAIMED TO BE "COVERED BY (1)" AND WAS NOT — a stated coverage is worse than a
+  declared gap (roborev job 319).** On the SIDE-lane tree-capture route the component's `.result`
+  is a **complete, well-formed `PASS`** written before the disk filled, so nothing was malformed
+  for (1) to catch: the marker append to `$LOG_DIR/tree-integrity.fail` failed under `|| true`,
+  the in-memory note died at the subshell boundary, and if space freed before the terminal
+  capture the parent **certified the run**. The escalation now needs **no disk**: the SIDE branch
+  **truncates its own verdict** (`> file` on an existing file allocates nothing — `O_TRUNC` is
+  metadata — so it succeeds exactly where the append failed), and an EMPTY `.result` is already a
+  first-class unread verdict ⇒ synthetic `FAIL 0` ⇒ `OVERALL=FAIL` ⇒ named UNMEASURED. It trades
+  SPECIFICITY for soundness and says so on stderr: the block reports the verdict as unreadable
+  rather than `tree-integrity: FAIL`, because the only channel that could carry the reason is the
+  one that just failed. **A less specific FAIL beats a false PASS.** Same round, same family, one
+  file down: **the missing NEWLINE is part of the verdict.** An ENOSPC short write can truncate
+  `printf '%s %s\n'` ON A FIELD BOUNDARY — `PASS 12` losing its newline, or `PASS 1` being all
+  that reached disk of `PASS 12` — and both parse as well-formed two-field verdicts, the second
+  with a valid integer that is merely the WRONG NUMBER, so every content check passes and the sole
+  evidence is `read`'s nonzero status, which was discarded with `|| true`. The verdict must be
+  exactly ONE TERMINATED LINE; trailing content is refused too. Fixed on the READ side
+  deliberately — unlinking the partial file would make the component **vanish** from the
+  `--lite`/`--delta` tables, whose loops treat absence as "not selected", so **the partial file is
+  the evidence**. Partial and declared beats a false clean. **(3)** The emitted `scan:` field now declares its **SUBJECT
   set** exactly as it declares its **signature set** — the three kinds, plus the gate-internal
   writers **known to sit outside** them (`_fm_*` sidecars, `node-bindings.leak-lane`,
   `summary-integrity.fail`, the heartbeat file), whose ENOSPC failures are **DECLARED false

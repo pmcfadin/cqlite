@@ -340,6 +340,18 @@ certify a maybe**. That is not a breach of "an attribution, never a verdict": wh
 is the aggregation's handling of a file it could not read, which would be correct if this line
 did not exist.
 
+**And the SIDE lane's escalation channel was itself on the full filesystem (roborev job 319).**
+A SIDE-lane component that detects a tree-capture failure escalates by appending to a marker file
+under `$LOG_DIR` — on the same filesystem that just filled — and that append was `|| true`, while
+its in-memory note dies at the subshell boundary and its own `.result` is a complete, well-formed
+`PASS` written before the disk filled. If space freed before the terminal capture, the run
+certified. The escalation now needs no disk: the SIDE branch **truncates its own verdict**, which
+allocates nothing, and an empty `.result` is already an unread verdict — synthetic `FAIL 0`,
+`OVERALL=FAIL`, named UNMEASURED. Two rules came out of it that generalise past this script: **a
+stated coverage is worse than a declared gap** (a comment claimed this path was covered by the
+third subject kind, and it was not), and **when the failure you are reporting is "the disk is
+full", every channel in the report path must be checked for needing disk.**
+
 **This is a diagnostic, not the fix.** Nothing here makes the slot cap disk-aware, refuses or
 queues a gate on low free space, budgets disk per lane, or shares one `CARGO_TARGET_DIR` per
 box. That capacity-management work is tracked under **#3434 / #3763 / #3755** — do not read
