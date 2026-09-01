@@ -124,10 +124,29 @@
 --     in time-series.cql and oa-test.cql) — every row later reads as expired and
 --     the fixture silently stops testing anything.
 --   * Every INSERT carries `USING TIMESTAMP 1000`, which pins
---     liveness_info.tstamp in the committed sstabledump JSONL golden. No cell is
---     ever written as an explicit CQL NULL, so — unlike issue-3630's fixture —
---     there is no cell tombstone carrying an unpinnable wall-clock
---     local_delete_time, and this golden IS byte-reproducible.
+--     liveness_info.tstamp (and each complex deletion's marked_deleted) in the
+--     committed sstabledump JSONL golden.
+--
+-- BUT THE GOLDEN IS NOT FULLY REPRODUCIBLE, AND AN EARLIER DRAFT OF THIS COMMENT
+-- CLAIMED IT WAS. MEASURED on the generated golden: assigning a WHOLE non-frozen
+-- collection — which is what an `INSERT` of a collection column does — makes
+-- Cassandra write a COMPLEX-COLUMN DELETION ahead of the cells, one per
+-- collection, i.e. five per row here:
+--     {"name":"inet_map","deletion_info":{"marked_deleted":"...000999Z",
+--                                         "local_delete_time":"2026-09-01T23:38:17Z"}}
+-- `marked_deleted` IS pinned (timestamp-1 = 999µs), but `local_delete_time` is a
+-- wall clock (nowInSeconds) that NO CQL clause can pin, so that one field differs
+-- on every regeneration. The same residual issue-3504-udt-collision.cql and
+-- issue-3630-row-collision.cql record for their tombstones.
+--
+-- Do NOT byte-compare this golden across regenerations; compare the cell PATHS
+-- (which is what the ordering oracle is about) and the values, or normalise
+-- local_delete_time away first. The tombstone is KEPT rather than avoided: it is
+-- what a real `INSERT` into a non-frozen collection produces, so removing it
+-- (by populating with `UPDATE ... SET col = col + {...}`, which writes no complex
+-- deletion) would buy reproducibility at the cost of the shape users actually
+-- have on disk. Recorded rather than tolerated, because an overclaim in a
+-- committed fixture comment is what stops the next reader checking.
 --
 -- COMMITTED CHECKOUT-RELATIVE under test-data/fixtures/issue_3790/, NOT under
 -- test-data/datasets/sstables/. That directory is itself an "sstables root" (it
