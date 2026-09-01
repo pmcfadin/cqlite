@@ -72,6 +72,25 @@
 # just scrubbed, so scrubbing the variable while leaving the mechanism that re-injects it
 # is not a scrub (#3414 hit exactly this).
 #
+# WHICH `-u` IS THE MECHANISM AND WHICH IS BELT — measured by deleting each one and running
+# scripts/tests/test_claude_auth_capability.sh, because a scrub nothing can falsify is a
+# scrub nothing asserts:
+#   * `-u BASH_ENV` in the `--auth` probe is THE MECHANISM. Remove it and a $BASH_ENV file
+#     re-exporting the credential reaches the child AFTER `env KEY=<persisted>` has run and
+#     overrides it — a VERIFIED that is about the inherited value. Pinned by case 2b.
+#   * `-u $CLAUDE_AUTH_TOKEN_KEY` in the COLD PROBE is THE MECHANISM, because the
+#     re-supplying assignment there is CONDITIONAL (`[ -z "$__ptok" ] ||`): with nothing
+#     persisted, that flag is the only thing keeping the inherited token out of the pane.
+#     Pinned by the cold-start scrub case in section 21.
+#   * `-u $CLAUDE_AUTH_TOKEN_KEY` in the `--auth` probe is BELT, redundant BY CONSTRUCTION:
+#     `KEY=$__tok` always follows on the same `env` and an explicit assignment always wins,
+#     and the function returns early when the persisted value is empty. No test can red on
+#     its removal. Kept because over-scrubbing costs one word; DECLARED here rather than
+#     covered by a case that would be asserting something already true.
+#   * `-u ENV` is belt everywhere: $ENV is read only by an interactive POSIX shell (bash
+#     only in posix mode), and every shell started here — the `claude` child, the cold
+#     probe's `sh -c` pane — is non-interactive.
+#
 # THE TOKEN VALUE IS NEVER PRINTED — not to stdout, not to a log, not into a diagnostic.
 # Everything reports SET/ABSENT/MATCH/DIFFERS. Comparison is by string equality on the
 # extracted VALUE of both sides (never on a reconstructed `KEY=value` line: extracting the
@@ -706,9 +725,12 @@ claude_tmux_show_key_into() {
 # openspec/specs/worker-environment-preflight/spec.md forbids.
 #
 # RESIDUAL, stated rather than implied: `tmux setenv -g KEY value` passes the value in
-# ARGV, so it is briefly visible in `ps` to anyone on the box. That is not a new exposure
-# — the same value sits in a mode-644 /etc/environment every user can read — and tmux
-# offers no stdin form, so it is declared rather than worked around.
+# ARGV, so it is briefly visible in `ps` to anyone on the box. The SAME exposure class,
+# with a shorter window, applies to BOTH probes' `env KEY=<token> …` invocations — named
+# here too, because a residual declared for one call site and silently carried by two reads
+# as a bounded exposure when it is not. That is not a new exposure — the same value sits in
+# a mode-644 /etc/environment every user can read — and neither tmux nor `env` offers a
+# stdin form, so it is declared rather than worked around.
 #
 # CLAUDE_CONFIG_DIR is seeded from /etc/environment when it is there, else from THIS
 # process's environment (the fleet keeps it in /etc/profile.d, which a tmux-spawned lane

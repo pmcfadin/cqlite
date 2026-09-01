@@ -172,17 +172,34 @@ exit 1
 EOF
   chmod +x "$1/claude"
 }
-# plant_claude_reporting_scrub <dir>: rc 0, prints which value it actually received,
-# LENGTH-ONLY plus a marker naming the source, so a case can assert the scrub without the
-# suite ever holding the secret in its own output.
+# plant_claude_probe_env <dir>: rc 0, and it reports — CLASSIFIED, never as a value — what
+# the probe process actually handed it. Both halves of the isolation argument are named, so
+# a case can assert either one without the suite ever printing the secret:
+#   saw=persisted | other-token | other-len=N | unset
+#   cfgdir=fresh-empty | persisted-dir | inherited-dir | nonexistent | nonempty | unset
+# `fresh-empty` is the property the code CLAIMS — a throwaway, empty CLAUDE_CONFIG_DIR that
+# is neither the persisted one nor the inherited one — expressed as a property rather than
+# as the mktemp template, so a rename of the template does not red a correct probe.
 plant_claude_probe_env() {
   cat >"$1/claude" <<EOF
 #!/usr/bin/env bash
 t="\${CLAUDE_CODE_OAUTH_TOKEN-}"
 if [ "\$t" = '$TOK' ]; then printf 'saw=persisted\n'
+elif [ "\$t" = '$TOK_OTHER' ]; then printf 'saw=other-token\n'
 elif [ -n "\$t" ]; then printf 'saw=other-len=%s\n' "\${#t}"
 else printf 'saw=unset\n'; fi
-printf 'cfgdir=%s\n' "\${CLAUDE_CONFIG_DIR:+set}"
+c="\${CLAUDE_CONFIG_DIR-}"
+if [ -z "\$c" ]; then printf 'cfgdir=unset\n'
+elif [ "\$c" = '$CFGDIR' ]; then printf 'cfgdir=persisted-dir\n'
+elif [ "\$c" = '$CFGDIR_OTHER' ]; then printf 'cfgdir=inherited-dir\n'
+elif [ ! -d "\$c" ]; then printf 'cfgdir=nonexistent\n'
+else
+  # Globbing, not \`find\`: it needs no external tool and has no three-valued rc to read
+  # two-valued — an empty match here is emptiness, not a failed scan.
+  shopt -s nullglob dotglob
+  ents=("\$c"/*)
+  if [ "\${#ents[@]}" -eq 0 ]; then printf 'cfgdir=fresh-empty\n'; else printf 'cfgdir=nonempty\n'; fi
+fi
 printf '%s\n' '$SENTINEL'
 exit 0
 EOF
@@ -323,8 +340,14 @@ fi
 #     INHERITED value while claiming to answer about the PERSISTED one. With nothing
 #     persisted and a perfectly good token in the environment, the verdict must still be
 #     NOT-PERSISTED — never VERIFIED.
+#
+#     WHAT THIS CASE DOES **NOT** PROVE, stated because a green tally standing in for an
+#     unmeasured property is the exact failure this file exists to remove one level down:
+#     the env file here carries NO token, so NOT-PERSISTED is decided by the FILE READ
+#     before the probe is ever launched. Deleting the `env -u …` scrub leaves this case
+#     green. The scrub's own falsifying cases are 1c and 1d below.
 # =====================================================================================
-run_cap "$d" "$ef" "CLAUDE_CODE_OAUTH_TOKEN=$TOK" "BASH_ENV=$tmp/nonexistent-bashenv" -- --auth
+run_cap "$d" "$ef" "CLAUDE_CODE_OAUTH_TOKEN=$TOK" -- --auth
 if printf '%s' "$out" | grep -q '^claude-auth: NOT-PERSISTED'; then
   ok "claude-auth: an INHERITED token does NOT satisfy the persisted-credential question (the scrub)"
 else
@@ -355,6 +378,61 @@ if printf '%s' "$out" | grep -q 'saw=persisted'; then
   ok "claude-auth: the probe is handed the PERSISTED value even when a DIFFERENT one is inherited"
 else
   bad "claude-auth: the probe did not receive the persisted value: $out"
+fi
+
+# =====================================================================================
+# 2b. THE `-u BASH_ENV` HALF, AND IT IS THE ONE THAT ACTUALLY BITES. Scrubbing the variable
+#     while leaving the mechanism that RE-INJECTS it is not a scrub: a non-interactive bash
+#     SOURCES $BASH_ENV at startup, AFTER `env KEY=<persisted>` has run, so an
+#     `export CLAUDE_CODE_OAUTH_TOKEN=…` line in that file overrides the value the probe was
+#     deliberately handed. #3414 hit exactly this.
+#
+#     THE FILE MUST EXIST — the earlier version of this case pointed BASH_ENV at a
+#     NONEXISTENT path, which sources nothing and therefore exercises nothing. FALSIFIED
+#     BOTH WAYS while writing it: delete `-u BASH_ENV` from the probe's `env` and this case
+#     reds with `saw=other-token`; restore it and it greens.
+be_inject="$tmp/bashenv-inject.sh"
+printf 'export CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$TOK_OTHER" >"$be_inject"
+d2b=$(mkshim "$tmp/s2b"); plant_claude_probe_env "$d2b"
+run_cap "$d2b" "$ef2" "BASH_ENV=$be_inject" -- --auth --show-probe-output
+if printf '%s' "$out" | grep -q 'saw=persisted'; then
+  ok "claude-auth: a BASH_ENV file that re-exports the credential cannot reach the probe (the -u BASH_ENV scrub)"
+else
+  bad "claude-auth: BASH_ENV re-injected a credential into the probe: $out"
+fi
+if printf '%s' "$out" | grep -q '^claude-auth: VERIFIED'; then
+  ok "claude-auth: ...and the verdict is still about the PERSISTED value"
+else
+  bad "claude-auth: the BASH_ENV case did not reach a verdict about the persisted value: $out"
+fi
+#     `-u ENV` RIDES WITH IT AND IS **NOT** SEPARATELY REACHABLE HERE, stated rather than
+#     faked: $ENV is sourced only by an INTERACTIVE POSIX shell (and bash reads it only in
+#     posix mode), while every shell this code starts — the `claude` child and the cold
+#     probe's `sh -c` pane — is non-interactive. So no fixture can make an `ENV` file change
+#     an outcome, and a case that "covers" it would be asserting something already true.
+#     It is scrubbed anyway because the cost is one word and the failure mode is silent.
+
+# =====================================================================================
+# 2c. THE OTHER HALF OF THE ISOLATION ARGUMENT: A FRESH, EMPTY CLAUDE_CONFIG_DIR. The probe
+#     asks whether the PERSISTED TOKEN authenticates, so it must not run against the box's
+#     own config directory — a probe inheriting it could pass on session state the token had
+#     nothing to do with. That property was printed by the stub and asserted by NOTHING.
+#     Here the persisted dir and a DIFFERENT inherited dir both exist, and the probe must
+#     receive neither: an empty throwaway.
+d2c=$(mkshim "$tmp/s2c"); plant_claude_probe_env "$d2c"
+run_cap "$d2c" "$ef2" "CLAUDE_CONFIG_DIR=$CFGDIR_OTHER" -- --auth --show-probe-output
+if printf '%s' "$out" | grep -q 'cfgdir=fresh-empty'; then
+  ok "claude-auth: the probe runs against a FRESH EMPTY config dir — neither the persisted nor the inherited one"
+else
+  bad "claude-auth: the probe did not get an isolated config dir: $out"
+fi
+# ...and it does not survive the run. A leaked throwaway config dir is a real cost on a
+# fleet box, and the `mktemp -d`/`rm -rf` pair has no trap between it and the probe.
+strayc=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'cqlite-claude-probe.*' -newer "$TRANSCRIPT" 2>/dev/null | head -3)
+if [ -z "$strayc" ]; then
+  ok "claude-auth: the throwaway config dir is removed, not leaked"
+else
+  bad "claude-auth: stray probe config dirs survive: $strayc"
 fi
 
 # =====================================================================================
@@ -809,6 +887,10 @@ else
 fi
 # The INHERITED credential must not be able to answer for the PERSISTED one here either:
 # a good token in the ambient environment with nothing persisted is still a fail.
+# FALSIFIED: delete `-u "$CLAUDE_AUTH_TOKEN_KEY"` from the cold probe's `env` array and this
+# case reds (the pane receives the inherited token, whose length does not match the empty
+# persisted one). That flag is THE MECHANISM here, not belt, because the re-supplying
+# assignment is CONDITIONAL — with nothing persisted, nothing overrides the inherited value.
 d21f=$(mkshim "$tmp/s21f"); plant_tmux "$d21f" no-server
 run_cap "$d21f" "$ef" "CLAUDE_CODE_OAUTH_TOKEN=$TOK" "CLAUDE_CONFIG_DIR=$CFGDIR" -- --tmux-env
 if printf '%s' "$out" | grep -q '^claude-tmux-env: COLD-START-MISSING'; then
@@ -905,7 +987,7 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # input is the floor agents learn to delete. The platform-guard case is NO LONGER skippable:
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case.
-CASE_FLOOR=50
+CASE_FLOOR=54
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
