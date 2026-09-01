@@ -6311,7 +6311,36 @@ _disk_verdict_read() {
     _disk_note_unread_verdict "$comp" "verdict file UNREADABLE"
     return 1
   fi
-  read -r DISK_VERDICT_ST DISK_VERDICT_SECS < "$rf" || true
+  # #3800 (roborev job 319): THE TERMINATOR IS PART OF THE VERDICT, and ignoring `read`'s status
+  # was a false PASS on the most likely ENOSPC shape of all. `record_result` writes
+  # `printf '%s %s\n'`; a short write truncating that mid-flight can land ON A FIELD BOUNDARY --
+  # `PASS 12` losing its newline, or `PASS 1` being all that reached the disk of `PASS 12`. Both
+  # parse as a perfectly well-formed two-field verdict (the second even has a VALID integer, just
+  # the wrong number), so every content check passes and the only remaining evidence that the
+  # write failed is the MISSING NEWLINE -- which `read` reports as a nonzero status and this line
+  # discarded. Trailing content is refused for the same reason: what is on disk must be exactly
+  # the one terminated line the writer emits, or the verdict was not fully written.
+  #
+  # THE FIX IS ON THE READ SIDE, DELIBERATELY, AND "DELETE THE PARTIAL FILE" WOULD BE UNSOUND.
+  # The tempting repair -- have `record_result` unlink the `.result` when its write fails -- is
+  # wrong for the aggregations whose loops treat an ABSENT `.result` as "this component was not
+  # selected" and `continue` past it (`--lite`/`--delta` under `--only`). There, deleting the file
+  # makes the component VANISH from the table without failing anything, which is worse than the
+  # partial file: the partial file is the EVIDENCE, and rejecting it on read is what converts it
+  # into a named UNMEASURED subject plus a synthetic FAIL.
+  local _rd_term=0 _rd_extra="" _rd_more=1
+  {
+    read -r DISK_VERDICT_ST DISK_VERDICT_SECS || _rd_term=$?
+    read -r _rd_extra || _rd_more=$?
+  } < "$rf"
+  if [ "$_rd_term" -ne 0 ]; then
+    _disk_note_unread_verdict "$comp" "verdict file MALFORMED"; return 1
+  fi
+  # A second line at all -- terminated (rc 0) or not (rc != 0 but non-empty) -- means the file
+  # holds more than the one verdict `record_result` writes.
+  if [ "$_rd_more" -eq 0 ] || [ -n "$_rd_extra" ]; then
+    _disk_note_unread_verdict "$comp" "verdict file MALFORMED"; return 1
+  fi
   case "$DISK_VERDICT_ST" in
     PASS|FAIL|SKIP) ;;
     *) _disk_note_unread_verdict "$comp" "verdict file MALFORMED"; return 1 ;;
@@ -9465,7 +9494,36 @@ _tree_boundary_fail() {
   if [ "${BASHPID:-$$}" != "$$" ]; then
     # APPEND (never truncate): two concurrent SIDE-lane detections must not corrupt
     # each other, and the reader consumes only the FIRST complete line.
-    printf '%s\t%s\t%s\n' "$kind" "$comp" "$reason" >> "$LOG_DIR/tree-integrity.fail" 2>/dev/null || true
+    #
+    # #3800 (roborev job 319): AND THE MARKER CHANNEL IS ITSELF A FILE ON THE FILESYSTEM THAT
+    # MAY BE FULL. This is the SIDE-lane half of the ENOSPC path #3800 exists for, and it was
+    # fail-OPEN: `tree-integrity: FAIL` is reachable from a capture failure, a capture failure is
+    # reachable from ENOSPC on the logs filesystem, and the escalation from a SIDE-lane component
+    # is an append to another file on THAT SAME filesystem, whose failure this line swallowed
+    # with `|| true`. With no marker written the post-drain consumer sees nothing, and if space
+    # frees before the terminal capture the parent reads this component's already-written PASS
+    # and CERTIFIES the run. The in-memory channel cannot help: it is lost at the subshell
+    # boundary. A comment in `record_result` used to claim this path was "covered by (1) instead,
+    # the missing/malformed `.result`" -- it was NOT, because the `.result` here is a complete,
+    # well-formed PASS written before the disk filled.
+    #
+    # THE FALLBACK NEEDS NO DISK: truncate this component's OWN verdict. `> file` on an existing
+    # file allocates nothing -- O_TRUNC is metadata -- so it succeeds precisely where the append
+    # failed, and an EMPTY `.result` is the shape round 4 already made a first-class UNREAD
+    # verdict: the parent's reconstruction renders a synthetic `FAIL 0`, forces `OVERALL=FAIL`
+    # (job 316) and names the component on the `disk-exhaustion:` line as UNMEASURED. The run
+    # fails closed with the disk attribution, which is the whole point of the issue.
+    #
+    # It trades SPECIFICITY for soundness, and says so: the block reports the component's verdict
+    # as unreadable rather than reporting `tree-integrity: FAIL`, because the only channel that
+    # could carry the reason is the one that just failed. A less specific FAIL beats a false PASS.
+    local _tbf_rc=0
+    printf '%s\t%s\t%s\n' "$kind" "$comp" "$reason" >> "$LOG_DIR/tree-integrity.fail" 2>/dev/null || _tbf_rc=$?
+    if [ "$_tbf_rc" -ne 0 ]; then
+      echo "⚠️ agent-gate: tree-integrity FAIL after [$comp] ($reason) — the SIDE-lane marker write FAILED (rc $_tbf_rc; the logs filesystem may be full), so this component's own verdict is being INVALIDATED instead: the parent will report it as an unread verdict and FAIL the run (#3800)" >&2
+      : > "$LOG_DIR/$comp.result" 2>/dev/null || true
+      return 1
+    fi
     echo "⚠️ agent-gate: tree-integrity FAIL after [$comp] ($reason) — recorded for post-drain fail-close (#2926)" >&2
     return 1
   fi
@@ -9946,9 +10004,16 @@ record_result() { # <name> <status> <seconds>
   # component. A SIDE-lane component runs in a backgrounded subshell (#1737), where this
   # append is LOST at the subshell boundary, and under ENOSPC the marker-file idiom
   # _apply_tree_integrity_marker uses is unavailable BY CONSTRUCTION (there is no space to
-  # write a marker). That path is covered by the THIRD subject kind instead: the missing or
-  # malformed `.result` is recorded as an UNREAD VERDICT by the parent's fail-closed guard,
-  # which renders UNMEASURED naming the component. Partial and declared beats a false clean.
+  # write a marker).
+  #
+  # #3800 (roborev job 319) CORRECTS WHAT THIS COMMENT USED TO CLAIM. It said that path was
+  # "covered by the THIRD subject kind instead: the missing or malformed `.result`". It was NOT:
+  # on the SIDE-lane tree-capture route the `.result` is a COMPLETE, WELL-FORMED PASS written
+  # before the disk filled, so there was nothing malformed for the parent to catch and the run
+  # could certify. The coverage is now real rather than asserted, because `_tree_boundary_fail`'s
+  # SIDE branch INVALIDATES this component's verdict (a zero-allocation truncate) when its own
+  # marker write fails -- see the reasoning there. Partial and declared beats a false clean; a
+  # claim of coverage that is merely stated is worse than either.
   local _rr_err _rr_rc
   _rr_err="$( { printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"; } 2>&1 )"; _rr_rc=$?
   [ "$_rr_rc" -eq 0 ] || _disk_note_capture_failure "component verdict write ($1.result)" "$_rr_err"

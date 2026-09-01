@@ -101,7 +101,8 @@ EXTRACT_OK=1
             _disk_scan_subject _disk_exhaustion_line \
             _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file _tree_hex_id_ok \
             _tree_digest_ok _tree_manifest_ok _tree_mtime _tree_identity \
-            _tree_emit_capture_diag _tree_note_capture_failure; do
+            _tree_emit_capture_diag _tree_note_capture_failure \
+            _tree_boundary_fail; do
     extract_region "^${fn}[(][)] [{]\$" '^[}]$'
   done
 } >> "$EX"
@@ -113,14 +114,14 @@ for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _d
             record_result _disk_scan_subject _disk_exhaustion_line \
             _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file _tree_hex_id_ok \
             _tree_digest_ok _tree_manifest_ok _tree_mtime _tree_identity \
-            _tree_emit_capture_diag _tree_note_capture_failure; do
+            _tree_emit_capture_diag _tree_note_capture_failure _tree_boundary_fail; do
   if ! grep -q "^${want}" "$EX"; then
     bad "extract: '$want' was NOT extracted from the shipped agent-gate.sh -- every case below would be vacuous"
     EXTRACT_OK=0
   fi
 done
 if [ "$EXTRACT_OK" -eq 1 ]; then
-  ok "extract: the shipped signature set, BOTH gate-internal subject channels and 26 helpers (incl. the REAL _tree_identity and the shipped record_result) were extracted from scripts/agent-gate.sh"
+  ok "extract: the shipped signature set, BOTH gate-internal subject channels and 27 helpers (incl. the REAL _tree_identity, the shipped record_result and the shipped _tree_boundary_fail) were extracted from scripts/agent-gate.sh"
 fi
 
 # #3800 (roborev job 316): `aggregate_lite_components` is extracted into its OWN file, NOT into
@@ -1555,7 +1556,140 @@ fi
 # recertifies the same run: 2. The no-bypass + call-site-disposition census: 1 (two ok() calls,
 # counted as 1 case each -> the two structural asserts are the 6th and 7th ok, so the floor
 # rises by 7, not 6.) 2+1+2+2 = 7, plus the separate extract-agg provenance case = 8.)
-CASE_FLOOR=76
+# ============================================================================
+# (21) roborev job 319 -- TWO FALSE-PASS ROUTES THAT SURVIVED ROUND 5.
+# ============================================================================
+
+# (21a) THE TERMINATOR IS PART OF THE VERDICT. `record_result` writes `printf '%s %s\n'`; an
+# ENOSPC short write can truncate that ON A FIELD BOUNDARY. `PASS 12` losing only its newline,
+# and `PASS 1` being all that reached the disk of `PASS 12`, BOTH parse as well-formed two-field
+# verdicts -- the second with a VALID integer that is simply the wrong number -- so every content
+# check passes and the sole remaining evidence is the MISSING NEWLINE, which `read` reports as a
+# nonzero status and the pre-fix code discarded with `|| true`. Trailing content is refused on the
+# same principle: what is on disk must be exactly the one terminated line the writer emits.
+d="$tmp/c21a"; mkdir -p "$d"
+o21a=$(
+  . "$EX"; LOG_DIR="$d"; _disk_env
+  printf 'PASS 12'          > "$d/a.result"   # newline lost
+  printf 'PASS 1'           > "$d/b.result"   # truncated mid-number: VALID integer, wrong value
+  printf 'PASS 12\nPASS 9\n'> "$d/c.result"   # trailing content
+  printf 'PASS 12\nJUNK'    > "$d/e.result"   # trailing content, itself unterminated
+  printf 'PASS 12\n'        > "$d/d.result"   # the WELL-FORMED control
+  for c in a b c e d; do
+    rc=0; _disk_verdict_read "$c" "$d/$c.result" || rc=$?
+    printf '%s rc=%s\n' "$c" "$rc"
+  done
+  printf 'RECORDED %s\n' "${#DISK_UNREAD_VERDICTS[@]}"
+)
+exp21a='a rc=1
+b rc=1
+c rc=1
+e rc=1
+d rc=0
+RECORDED 4'
+if [ "$o21a" = "$exp21a" ]; then
+  ok "21a-terminator: an unterminated verdict line (incl. one truncated to a VALID but WRONG integer) and any trailing content are MALFORMED and RECORDED, while the well-formed terminated line still reads clean"
+else
+  bad "21a-terminator: the terminator/trailing-content contract is not enforced.
+--- got ---
+$o21a
+--- want ---
+$exp21a"
+fi
+o21am=$(
+  . "$EX"; LOG_DIR="$d"; _disk_env
+  # The pre-fix read: take the two fields, discard read's status, check content only.
+  _disk_verdict_read() {
+    local comp="${1:-}" rf="${2:-}"
+    DISK_VERDICT_ST=""; DISK_VERDICT_SECS=""
+    [ -f "$rf" ] || return 2
+    read -r DISK_VERDICT_ST DISK_VERDICT_SECS < "$rf" || true
+    case "$DISK_VERDICT_ST" in PASS|FAIL|SKIP) ;; *) return 1 ;; esac
+    _disk_secs_is_int "$DISK_VERDICT_SECS" || return 1
+    return 0
+  }
+  for c in a b c; do
+    rc=0; _disk_verdict_read "$c" "$d/$c.result" || rc=$?
+    printf '%s rc=%s st=%s secs=%s\n' "$c" "$rc" "$DISK_VERDICT_ST" "$DISK_VERDICT_SECS"
+  done
+)
+exp21am='a rc=0 st=PASS secs=12
+b rc=0 st=PASS secs=1
+c rc=0 st=PASS secs=12'
+if [ "$o21am" = "$exp21am" ]; then
+  ok "21a-mutation: the pre-fix read ADOPTS all three truncated verdicts as clean PASSes -- including 'PASS 1', a verdict whose duration is simply wrong -- so 21a measures the terminator check and not something else"
+else
+  bad "21a-mutation: the pre-fix read did not adopt the truncated verdicts, so 21a is not measuring the fix.
+--- got ---
+$o21am
+--- want ---
+$exp21am"
+fi
+
+# (21b) THE SIDE-LANE MARKER CHANNEL IS A FILE ON THE FILESYSTEM THAT MAY BE FULL -- the SIDE-lane
+# half of this issue's own ENOSPC path, and it was fail-OPEN. A SIDE-lane component detecting a
+# tree-capture failure escalates by APPENDING to $LOG_DIR/tree-integrity.fail; under ENOSPC that
+# append fails, the pre-fix code swallowed it with `|| true`, the in-memory channel is lost at the
+# subshell boundary, and the component's own `.result` is a COMPLETE WELL-FORMED PASS written
+# before the disk filled -- so nothing anywhere was malformed and the run could CERTIFY.
+#
+# Driven through the SHIPPED `_tree_boundary_fail` with a REAL ENOSPC: the marker path is a
+# symlink to /dev/full, so the append returns the platform's own ENOSPC. The assertion is the
+# zero-allocation fallback -- the component's verdict is TRUNCATED, which round 4 already made a
+# first-class UNREAD verdict and job 316 already made fatal.
+if [ -c /dev/full ] && : 2>/dev/null >/dev/full; then
+  d="$tmp/c21b"; mkdir -p "$d"
+  ln -s /dev/full "$d/tree-integrity.fail"
+  printf 'PASS 611\n' > "$d/legacy-heuristics.result"
+  o21b=$(
+    . "$EX"; LOG_DIR="$d"; _disk_env
+    # A SUBSHELL is what makes this the SIDE-lane branch: the shipped function selects on
+    # BASHPID != $$, so this is the real lane discriminator and not a flag the test sets.
+    ( _tree_boundary_fail legacy-heuristics "tree-capture-failed; the tree cannot be proven unchanged" capture-failed ) 2>&1 | sed -n 's/.*\(marker write FAILED\).*/STDERR \1/p'
+    printf 'SIZE %s\n' "$(wc -c < "$d/legacy-heuristics.result" | tr -d ' ')"
+    rc=0; _disk_verdict_read legacy-heuristics "$d/legacy-heuristics.result" || rc=$?
+    printf 'RC %s\n' "$rc"
+    printf 'LINE %s\n' "$(_disk_exhaustion_line legacy-heuristics FAIL)"
+  )
+  size21b=$(printf '%s\n' "$o21b" | sed -n 's/^SIZE //p')
+  rc21b=$(printf '%s\n' "$o21b" | sed -n 's/^RC //p')
+  line21b=$(printf '%s\n' "$o21b" | sed -n 's/^LINE //p')
+  if [ "${size21b:-x}" = 0 ] && [ "${rc21b:-}" = 1 ] \
+     && case "$o21b" in *"STDERR marker write FAILED"*) true ;; *) false ;; esac \
+     && case "$line21b" in "disk-exhaustion: UNMEASURED (#3800)"*"legacy-heuristics(verdict file MALFORMED)"*) true ;; *) false ;; esac; then
+    ok "21b-side-enospc: on a REAL ENOSPC marker write the SIDE lane says so and INVALIDATES its own verdict (truncate allocates nothing, so it succeeds where the append failed) -- the parent then reads an unread verdict and the line is UNMEASURED naming the component, instead of certifying a well-formed PASS"
+  else
+    bad "21b-side-enospc: the SIDE-lane fallback did not fire: size='${size21b:-<none>}' rc='${rc21b:-<none>}' line: $line21b
+raw: $o21b"
+  fi
+  # NEGATIVE CONTROL: with a WRITABLE marker path the verdict must be left ALONE -- the fallback
+  # must fire only when the marker channel actually failed, or every SIDE-lane detection would
+  # lose its reason.
+  d="$tmp/c21bn"; mkdir -p "$d"
+  printf 'PASS 611\n' > "$d/legacy-heuristics.result"
+  o21bn=$(
+    . "$EX"; LOG_DIR="$d"; _disk_env
+    ( _tree_boundary_fail legacy-heuristics "mid-run mutation" mutation ) 2>/dev/null
+    printf 'SIZE %s\n' "$(wc -c < "$d/legacy-heuristics.result" | tr -d ' ')"
+    printf 'MARKER %s\n' "$(wc -l < "$d/tree-integrity.fail" | tr -d ' ')"
+  )
+  if case "$o21bn" in *"SIZE 9"*"MARKER 1"*) true ;; *) false ;; esac; then
+    ok "21b-control: with a WRITABLE marker path the marker is recorded and the component's verdict is left untouched -- the invalidation fires only on a failed marker write, so a normal SIDE-lane detection keeps its reason"
+  else
+    bad "21b-control: the fallback fired (or the marker was not recorded) on a HEALTHY marker write: $o21bn"
+  fi
+else
+  printf 'SKIP - 21b-side-enospc: /dev/full is unavailable/unwritable on this host, so a GENUINE ENOSPC marker write cannot be induced (Linux-only). DECLARED, not silently omitted; 21a and the job-316 cases carry the rest of the property.\n'
+fi
+
+# +4 (roborev job 319: the two false-PASS routes that survived round 5. 21a the terminator and
+# trailing-content contract, plus the mutation showing the pre-fix read ADOPTS all three
+# truncated verdicts (incl. `PASS 1`, a valid integer that is the wrong number): 2. 21b the
+# SIDE-lane marker channel under a REAL /dev/full ENOSPC -- the zero-allocation verdict
+# invalidation -- and the negative control proving a HEALTHY marker write leaves the verdict
+# alone: 2, DECLARED as a skip where /dev/full is unavailable, so the floor takes the lower
+# count and holds on macOS: 2 + 0. Floor rises by 2, not 4.)
+CASE_FLOOR=78
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \
