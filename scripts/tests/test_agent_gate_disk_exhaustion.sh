@@ -559,31 +559,106 @@ else
   done
 fi
 
-# The COMPONENT-TABLE sites specifically. This is the property the retired case pinned and
-# it is still worth pinning DIRECTLY: the census above proves accountability, which an
-# author could satisfy by exempting a table-bearing site. Sites are derived from the
-# `_fm_summary_line` shape, and every one must be MARKED (never EXEMPT).
-tbl_lines=$(grep -n 'META+=("\$(_fm_summary_line\|^ *meta+=("\$(_fm_summary_line' "$GATE" | cut -d: -f1)
-tbl_n=0; tbl_marked=0; tbl_bad=""
-for ln in $tbl_lines; do
-  tbl_n=$((tbl_n + 1))
-  # The emit site is the first emit call at or after the table-building loop. Its verdict
-  # comes from the CENSUS, never from a second derivation that could disagree with it.
-  v=$(printf '%s\n' "$dc_out" | awk -F'\t' -v s="$ln" '$2 >= s { print $1; exit }')
-  case "$v" in
-    MARKED*) tbl_marked=$((tbl_marked + 1)) ;;
-    *) tbl_bad="${tbl_bad:+$tbl_bad,}$ln($v)" ;;
-  esac
-done
-if [ "$tbl_n" -ge 5 ]; then
-  ok "14-tables: derived $tbl_n component-table emit sites from the shipped source (not a hard-coded count)"
+# ─────────────────────────────────────────────────────────────────────────────────
+# The COMPONENT-TABLE sites specifically. The census above proves ACCOUNTABILITY, which an
+# author could satisfy by exempting a table-bearing site; this pins the stronger half --
+# a block that carries a component table may never be exempted away.
+#
+# ITS SUBJECT SET USED TO BE CIRCULAR ONE LEVEL DOWN (#3800, final round). It derived
+# table-bearing sites from `_fm_summary_line` -- ONE renderer's NAME -- so the ONE block that
+# renders a component table with its own `printf '%-18s %s (%ss)'`, the #2926 tree-integrity
+# COMPONENT-BOUNDARY FAIL (`_tree_boundary_meta_lines`), was INVISIBLE to it. That is the same
+# defect roborev found in the parent census (a subject set that is the compliant set), and it
+# is why that site survived a round exempted on reasoning that does not hold: a
+# `tree-integrity: FAIL` is itself reachable from ENOSPC, because the capture manifest is
+# written into $LOG_DIR and `TREE_CAPTURE_FAIL_REASON` is a FIXED CONSTANT that cannot name
+# disk.
+#
+# THE DERIVATION IS NOW OVER THE ROW FORMAT, NOT OVER A RENDERER'S NAME, in two steps:
+#   1. a function is a COMPONENT-ROW RENDERER if its body emits the canonical verdict-row
+#      format `%-18s %s (%s` on a CODE line;
+#   2. a table-bearing ROW SITE is any code line OUTSIDE every renderer's own body that
+#      either contains that format directly or CALLS a renderer.
+# Each row site maps to the first emit call at or after it, and those emit sites are DEDUPED,
+# so the count is table-bearing BLOCKS. A third renderer written tomorrow is recognised with
+# no edit to this file, which is the property that stops this class recurring a third time.
+# The verdict always comes from the CENSUS, never from a second derivation that could disagree.
+# ─────────────────────────────────────────────────────────────────────────────────
+DISK_TABLE_AWK="$tmp/disk-table-sites.awk"
+cat >"$DISK_TABLE_AWK" <<'DISK_TABLE_PROG'
+{ line[NR] = $0 }
+END {
+  fmt = "%-18s %s (%s"           # the canonical per-component verdict row
+  fn = ""
+  for (i = 1; i <= NR; i++) {
+    l = line[i]
+    if (l ~ /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/) { fn = l; sub(/\(\).*$/, "", fn); fnstart[fn] = i; continue }
+    if (fn != "" && l ~ /^\}/) { fnend[fn] = i; fn = "" ; continue }
+    if (fn != "" && l !~ /^[ \t]*#/ && index(l, fmt) > 0) renderer[fn] = 1
+  }
+  nr = 0; names = ""
+  for (f in renderer) { nr++; names = names (names == "" ? "" : ",") f; if (!(f in fnend)) fnend[f] = NR }
+  printf "RENDERERS\t%d\t%s\n", nr, names
+  for (i = 1; i <= NR; i++) {
+    l = line[i]
+    if (l ~ /^[ \t]*#/) continue
+    inside = 0
+    for (f in renderer) if (i >= fnstart[f] && i <= fnend[f]) inside = 1
+    if (inside) continue          # a renderer's own definition is not a USE of it
+    hit = ""
+    if (index(l, fmt) > 0) hit = "inline-format"
+    else for (f in renderer) if (l ~ ("(^|[^_a-zA-Z0-9])" f "([^_a-zA-Z0-9]|$)")) { hit = f; break }
+    if (hit != "") printf "%d\t%s\n", i, hit
+  }
+}
+DISK_TABLE_PROG
+
+table_renderers() { awk -f "$DISK_TABLE_AWK" "${1:-$GATE}" | awk -F'\t' '$1=="RENDERERS"{print $2"\t"$3}'; }
+# table_verdicts <file> -> "<emit-line>\t<census-verdict>\t<row-line>\t<via>" per DISTINCT
+# table-bearing emit site.
+table_verdicts() {
+  local f="${1:-$GATE}" cen rl how el v seen=" "
+  cen=$(disk_census "$f")
+  while IFS=$'\t' read -r rl how; do
+    [ -n "$rl" ] || continue
+    el=$(printf '%s\n' "$cen" | awk -F'\t' -v s="$rl" '$2 >= s { print $2; exit }')
+    v=$(printf '%s\n'  "$cen" | awk -F'\t' -v s="$rl" '$2 >= s { print $1; exit }')
+    [ -n "$el" ] || { el="none"; v="NO-EMIT-SITE"; }
+    case "$seen" in *" $el "*) continue ;; esac
+    seen="$seen$el "
+    printf '%s\t%s\t%s\t%s\n' "$el" "$v" "$rl" "$how"
+  done < <(awk -f "$DISK_TABLE_AWK" "$f" | grep -v '^RENDERERS')
+}
+
+tr_n=$(table_renderers | cut -f1)
+tr_names=$(table_renderers | cut -f2)
+if [ "${tr_n:-0}" -ge 2 ]; then
+  ok "14-renderers: derived $tr_n component-row RENDERER(s) from the row FORMAT, not from a name ($tr_names)"
+else
+  bad "14-renderers: derived only ${tr_n:-0} component-row renderer(s) ($tr_names) -- the row-format derivation no longer matches the script, so the table census would be blind again"
+fi
+tv_out=$(table_verdicts)
+tbl_n=$(printf '%s\n' "$tv_out" | grep -c '	')
+tbl_marked=$(printf '%s\n' "$tv_out" | grep -c '	MARKED')
+tbl_bad=$(printf '%s\n' "$tv_out" | awk -F'\t' '$2 !~ /^MARKED/ { printf "%s(%s via %s),", $1, $2, $4 }')
+if [ "$tbl_n" -ge 7 ]; then
+  ok "14-tables: derived $tbl_n DISTINCT component-table emit sites from the shipped source, across $tr_n renderer(s) (not a hard-coded count, not one renderer's name)"
 else
   bad "14-tables: derived only $tbl_n component-table emit sites -- the derivation no longer matches the script's shape"
+  printf '%s\n' "$tv_out"
 fi
 if [ "$tbl_n" -gt 0 ] && [ "$tbl_marked" -eq "$tbl_n" ]; then
   ok "14-tables: all $tbl_n component-table emit sites are MARKED (a table-bearing block may never be exempted away)"
 else
   bad "14-tables: $tbl_marked of $tbl_n component-table sites are MARKED; not-marked: ${tbl_bad:-<none>}"
+fi
+# Both renderers must actually be REPRESENTED in the derived set. Counting 7 sites proves
+# nothing if all 7 came through one renderer -- that is the blind spot restated as a number.
+tv_vias=$(printf '%s\n' "$tv_out" | cut -f4 | sort -u | grep -c .)
+if [ "$tv_vias" -ge 2 ]; then
+  ok "14-tables: the derived sites reach the census through $tv_vias DISTINCT renderers -- the second renderer is represented, not merely counted"
+else
+  bad "14-tables: every derived table site came through ONE renderer ($(printf '%s\n' "$tv_out" | cut -f4 | sort -u | tr '\n' ' ')) -- the derivation is single-renderer again"
 fi
 
 # POSITIVE CONTROLS, both directions. A guard that has not been shown to fail on a planted
@@ -619,6 +694,38 @@ if ! cmp -s "$GATE" "$ctl_b"; then
   fi
 else
   bad "14-control-b: could not build the control (no marked component-table site matched) -- the census cannot be shown to discriminate"
+fi
+# (c) PERMANENT CONTROL FOR THE SECOND RENDERER (#3800, final round). Controls (a) and (b)
+#     both plant into the `_fm_summary_line` family; neither can fail if the table-site
+#     derivation goes blind to `_tree_boundary_meta_lines` again -- which is exactly what
+#     happened, and is why that site shipped exempt for a round. Plant: delete the bare
+#     `_disk_exhaustion_line` call from the boundary renderer's body (the only call of that
+#     shape -- every other call site is an array append). The census must report a GAP AND
+#     the table-site case must stop being all-MARKED. A refactor that reintroduces the blind
+#     spot reds this case instead of greening the suite.
+ctl_c="$tmp/disk-census-control-c.sh"
+ctl_c_hits=$(grep -c '^  _disk_exhaustion_line ' "$GATE" | tr -d ' ')
+awk 'BEGIN { done = 0 }
+     { if (!done && $0 ~ /^  _disk_exhaustion_line /) { done = 1; next }
+       print }' "$GATE" >"$ctl_c"
+if [ "$ctl_c_hits" = 1 ] && ! cmp -s "$GATE" "$ctl_c"; then
+  c_gaps=$(disk_census "$ctl_c" | grep -c '^GAP	')
+  c_tv=$(table_verdicts "$ctl_c")
+  c_n=$(printf '%s\n' "$c_tv" | grep -c '	')
+  c_marked=$(printf '%s\n' "$c_tv" | grep -c '	MARKED')
+  if [ "$c_gaps" -ge 1 ]; then
+    ok "14-control-c: removing the attribution from the NON-_fm_summary_line renderer makes the census report a GAP ($c_gaps)"
+  else
+    bad "14-control-c: a gate with the boundary renderer's attribution REMOVED still censused clean"
+  fi
+  if [ "$c_n" -ge 7 ] && [ "$c_marked" -lt "$c_n" ]; then
+    ok "14-control-c: and the table-site case FAILS on it -- $c_marked of $c_n sites MARKED, so the second renderer's site is genuinely in the subject set"
+  else
+    bad "14-control-c: the table-site derivation still reported $c_marked/$c_n MARKED with the boundary attribution removed -- it is BLIND to the second renderer again"
+    printf '%s\n' "$c_tv"
+  fi
+else
+  bad "14-control-c: could not build the control (expected exactly one bare '_disk_exhaustion_line' call, found ${ctl_c_hits:-0}) -- the second-renderer arm cannot be shown to discriminate"
 fi
 # Every exemption must carry a reason that DISTINGUISHES its site: 19 copies of one generic
 # sentence is not 19 reasons. Measured as: the reason texts are distinct from one another.
@@ -681,8 +788,11 @@ fi
 # host-attribution, evidence-not-proof, the negative on the retired 'NOT a defect in the diff'
 # claim, and the retained ATTRIBUTION clause -- 4 cases replacing 1); +5 (job 299 finding 1: the
 # circular 2-case 14-emit-sites replaced by a 7-case census over ALL emit sites -- accountability,
-# the table-bearing subset, two positive controls and the distinct-reasons assert).
-CASE_FLOOR=38
+# the table-bearing subset, two positive controls and the distinct-reasons assert); +4 (#3800
+# final round: the table-site derivation went from ONE renderer's name to the row FORMAT, adding
+# 14-renderers, the two-distinct-renderers assert and control (c)'s two cases -- the permanent
+# pin against the blind spot that let the tree-integrity boundary site ship exempt).
+CASE_FLOOR=42
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \
