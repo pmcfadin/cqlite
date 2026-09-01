@@ -83,7 +83,7 @@
 #
 #   ==== ROBOREV REVIEW SUMMARY ====
 #   repo: / branch: / base: / head-sha: / reviewed-sha: / assert-base: / job: /
-#   job-machine: / model: / census: /
+#   model: / census: /
 #   tokens: / push-assert: / census-check: / code-free: / job-record: /
 #   sha-assert: / review-completed: / prompt-content: /
 #   vacuity-tier1: / vacuity-tier2: / findings: / [deferral:] / roborev-exit: / log:
@@ -184,29 +184,6 @@
 #   roborev-exit      PASS | FINDINGS (exit N) | ERROR (exit N) | SKIP
 #   model             <model> | <model> (SUBSTITUTED — requested '<r>') |
 #                     <model> (UNCONFIRMED — no model field in the job record) | -
-#   job-machine       <uuid> (source_machine_id; job ids are per-daemon) |
-#                     NOT RECORDED (...) | UNAVAILABLE (...)
-#                     WHICH DAEMON ISSUED THE `job:` ID ABOVE (#3654). INFORMATIONAL, exactly
-#                     like `census:`/`tokens:`/`waiver:` — it is in neither the verdict-grammar
-#                     scan nor the affirmation loop (both enumerate the verdict-carrying keys by
-#                     name), so it can never make a run pass or fail; a `NOT RECORDED` or
-#                     `UNAVAILABLE` here beside affirmative keys still reaches RESULT: PASS.
-#                     WHY IT EXISTS: **roborev job ids are PER-DAEMON, not global.** Each fleet
-#                     box runs its own daemon with its own database and its own sequential ids,
-#                     so two boxes can legitimately present the SAME id for DIFFERENT reviews —
-#                     measured, `job=265` on two lanes 50 minutes apart — and a coordination lead
-#                     read the repetition as a collision and WITHHELD a valid absence waiver. A
-#                     pasted block is read by people who are not on the box, so it names the
-#                     daemon. It is NOT an authorization field and NOT a uniqueness proof: the
-#                     binding that identifies a review is the record's `git_ref` (see
-#                     `reviewed-sha:`), and the marker grammar is deliberately UNCHANGED — no
-#                     machine field was added to it, because every field in a hand-typed control
-#                     line is another way for a legitimate authorization to read MALFORMED.
-#                     THE THREE STATES ARE AFFIRMATIVE AND CLOSED, never blank: the uuid when a
-#                     record carried `source_machine_id`; `NOT RECORDED` when a job record WAS
-#                     read and carries none (a REAL state — `roborev show <id> --json` does not
-#                     carry the field at all; `roborev list --json` rows do); `UNAVAILABLE` when
-#                     no job record could be read, naming the `job-record:` state it inherits.
 #   census            `<N> file(s), +<A>/-<D>` | -
 #   tokens            `input=<n> cached=<n> output=<n>` | UNAVAILABLE
 # FINDINGS means the reviewer RAN and reported findings (a GENUINE review to triage and
@@ -248,7 +225,7 @@
 # range), `review-completed` (job status + an allow-list of terminal verdict markers),
 # `prompt-content` (the CODE subset of our census inside the prompt actually sent). Prose matching (`vacuity-tier1`) and token accounting (`vacuity-tier2`)
 # CORROBORATE; tier 1 can only ever raise a NOTICE. `base:`, `head-sha:`, `reviewed-sha:`,
-# `assert-base:`, `job-machine:`, `census:`, `tokens:`, `waiver:` and `deferral:` are INFORMATIONAL — they are in neither
+# `assert-base:`, `census:`, `tokens:`, `waiver:` and `deferral:` are INFORMATIONAL — they are in neither
 # the verdict-grammar scan nor the affirmation loop (both enumerate the verdict-carrying keys
 # by name), so none of them can make a run pass or fail on its own.
 #
@@ -423,36 +400,33 @@ review's token accounting (genuine reviews measured 398k-649k input / 314k-554k 
 the vacuous baseline is ~18.7k input / 0 cached).
 
 THAT SENTENCE IS TRUE AT REVIEW TIME, AND FALSE AFTER THE FACT ONLY FOR A HUMAN READING
-THE STORED RECORD — IT STAYS TRUE OF THE MACHINE, AND MUST. THAT IS WHERE THE BEST
-EVIDENCE IS (#3654). The prompt roborev SENT is retained in the job record and can be
-retrieved later, even though the snapshot file it names is transient and long deleted:
+THE STORED RECORD — IT STAYS TRUE OF THE MACHINE, AND MUST (#3654). The prompt roborev
+SENT is retained in the job record and can be retrieved later, even though the snapshot
+file it names is transient and long deleted:
 
     roborev show <id> --prompt
 
 Under '### Combined Diff' a delivery-by-path prompt carries roborev's own wording — 'Diff
 too large to include inline ... Read the diff from: <path>'. That is the DIRECT ARTIFACT:
-roborev's ACTUAL prompt rather than a statistic about it, and it is what an absence-waiver
-request should LEAD with.
+roborev's ACTUAL prompt rather than a statistic about it.
 
-IT IS NOT SELF-AUTHENTICATING, AND THE TRUST PROPERTIES RUN THE OPPOSITE WAY FROM THE
-OBVIOUS READING. roborev's prompt EMBEDS repository-controlled content — project
-guidelines, AGENTS.md, additional context, previous-review bodies — at positions
-indistinguishable from roborev's own text, so a reviewed branch can carry text MIMICKING
-that delivery wording and an authorizer would read it as roborev's. A human in the loop is
-not a channel separation; it is the same shared channel with a slower parser. So the
-prompt is read for the STRUCTURAL fact it reports, never as proof of its own provenance.
-THE TOKEN ACCOUNTING IS DAEMON-RECORDED BUT NOT INDEPENDENT, AND IT DOES NOT ESTABLISH
-DELIVERY EITHER. The RECORD is authentic — the daemon writes the counts and the reviewed
-branch cannot rewrite them. Their VALUE is a different claim: the counts measure THE
-PROMPT, and the prompt embeds repository-controlled content, so a branch influences their
-MAGNITUDE without forging anything. That bites exactly where the counts are used — the
-vacuous baseline is about 18.7k input / 0 cached, so padding non-diff prompt content can
-make a review that never received the diff look token-rich. So NEITHER SIGNAL ESTABLISHES
-PROVENANCE, and the two are NOT INDEPENDENT: both are functions of the same
-repository-influenced prompt. The prompt still LEADS and a request should still lead with
-it, with the counts read ALONGSIDE it as a consistency check — never as unforgeable
-corroboration. What evidence SHOULD be required before granting is an OPEN QUESTION,
-PENDING on #3654, and is deliberately not settled here.
+WHAT THE TWO SIGNALS CAN AND CANNOT ESTABLISH. THE PROMPT IS NOT SELF-AUTHENTICATING:
+roborev's prompt EMBEDS repository-controlled content — project guidelines, AGENTS.md,
+additional context, previous-review bodies — at positions indistinguishable from roborev's
+own text, so a reviewed branch can carry text MIMICKING that delivery wording and an
+authorizer would read it as roborev's. A human in the loop is not a channel separation; it
+is the same shared channel with a slower parser. So the prompt reports a STRUCTURAL fact
+and is never proof of its own provenance. THE TOKEN ACCOUNTING IS DAEMON-RECORDED BUT NOT
+INDEPENDENT: the RECORD is authentic — the daemon writes the counts and the reviewed branch
+cannot rewrite them — but their VALUE measures THE PROMPT, and the prompt embeds
+repository-controlled content, so a branch influences their MAGNITUDE without forging
+anything. That bites exactly where the counts are used — the vacuous baseline is about
+18.7k input / 0 cached, so padding non-diff prompt content can make a review that never
+received the diff look token-rich. So NEITHER SIGNAL ESTABLISHES PROVENANCE, and the two
+are NOT INDEPENDENT: both are functions of the same repository-influenced prompt.
+
+WHICH EVIDENCE A WAIVER SHOULD REST ON IS AN OPEN QUESTION, TRACKED AS #3826. Nothing
+here recommends one signal over the other, or any ordering between them.
 
 THIS RESURRECTS NOTHING OF THE DELETED DELIVERY CLASSIFIER, and the distinction is
 load-bearing rather than a caveat. The classifier failed because it inferred delivery
@@ -513,19 +487,12 @@ branches, different token counts, both correct. A repeated id is therefore NOT e
 of a collision; reading it as one cost a valid waiver a round. The check that settles it:
 
     roborev show <id> --json | jq '.job | {id, git_ref, branch, status, token_usage}'
-    roborev list --json --limit <N> --repo <abs-repo> --branch <branch> | jq '.[] | select(.id==<id>) | {id, source_machine_id, git_ref, branch}'
+    roborev list --json --repo <abs-repo> --branch <branch> | jq '.[] | select(.id==<id>) | {id, git_ref, branch}'
 
 git_ref MUST equal the marker's <base40>..<head40>. THREE TRAPS IN THOSE COMMANDS, all
 measured on roborev v0.61.2: (1) 'show <id> --json' NESTS git_ref/status/token_usage
-under '.job' and does not carry source_machine_id ANYWHERE, so a top-level jq over that
-payload prints nulls for all four — a check whose output cannot show what it claims;
-(0) 'roborev list' returns only the newest --limit rows (DEFAULT 50) and offers NO offset
-or cursor, so an OLDER job sits BEYOND the first page and the command returns NOTHING
-though the record exists. That is not a corner case: a --recheck-job names an old job by
-construction, and a heavily-reviewed branch accumulates rows, so "the job is deep" and
-"someone is applying a waiver" are the SAME population. RAISE <N> — 50, 200, 800 — until
-the row appears or the list stops growing. THE WRAPPER'S OWN LOOKUP DOES THIS
-AUTOMATICALLY; only this manual form needs the limit raised by hand;
+under '.job', so a top-level jq over that payload prints nulls for all of them — a check
+whose output cannot show what it claims;
 (2) 'roborev list' defaults its branch filter to the CURRENT HEAD OF THE --repo PATH —
 NOT to the branch your shell is standing in (measured: from a cwd that is not a git
 repository at all, '--repo <lane>' returns that lane's branch's rows) — so pass --branch
@@ -549,34 +516,6 @@ it appears to rule out — a probe whose output is IDENTICAL under the two state
 to separate, the same class as reading the gate's 'RESULT: INCOMPLETE' launch sentinel as
 a verdict, or locating a gate run directory with 'ls -t'. Run on both of the 'job=265'
 lanes, it gave the right answer for a reason that did not hold. Use git_ref.
-
-THE BLOCK NAMES THE DAEMON, so a pasted artifact is self-describing for a reader who is
-not on the box: 'job-machine:' sits beside 'job:' and reports source_machine_id when a
-record carried it, 'NOT RECORDED' when a record was read and carries none, and
-'UNAVAILABLE' when no record could be read. It is INFORMATIONAL and can never pass or
-fail a run. THE MARKER GRAMMAR IS DELIBERATELY UNCHANGED: no machine field was added to
-it, in either marker kind. The authorizer would have to know the value, it is derivable
-from the record, and every field in a hand-typed control line is one more way for a
-legitimate authorization to read MALFORMED.
-
-DECLARED BOUNDARY — WHAT THE 'job=' BINDING DOES NOT CLOSE, AND WHY IT IS NOT CLOSED HERE
-(#3654). CLAIMED: within ONE daemon, base+head+job names one review, and '--recheck-job'
-re-decides THAT record. NOT CLAIMED: that a marker cannot cross boxes. The marker travels
-through GITHUB, not through the daemon, while '--recheck-job <id>' reads the LOCAL
-daemon's record for that id — so if two boxes hold the SAME id for the SAME git_ref range,
-a waiver granted after an authorizer inspected box A's review is ACCEPTED on box B against
-box B's DIFFERENT review: sha-assert passes, the id matches, and the authorization crosses
-reviews. 'A repeated id cannot reach another box's recheck' is true of the RECORD and
-IRRELEVANT to the MARKER, which is the thing that actually travels. Not exotic on this
-fleet: ids have already collided at 265, and two lanes reviewing one branch has happened.
-
-IT IS NOT CLOSED HERE because closing it means adding a field to a HAND-TYPED CONTROL
-LINE, which this issue's own disposition forbids — so it is a DESIGN CALL, escalated to
-the owner and PENDING on #3654, not something this change may decide. THE MITIGATION THAT
-EXISTS TODAY IS OPERATIONAL, NOT MECHANICAL: the block NAMES the issuing daemon, so an
-authorizer comparing 'job-machine:' between the request and the recheck SEES a cross-box
-mismatch — which is why the key exists at all. It is informational and CANNOT enforce: a
-reader who does not compare it is stopped by nothing.
 
 THREE THINGS STOP THE DOCUMENTATION BECOMING THE CREDENTIAL. (1) The marker must BE the
 line: an indented, '>'-quoted, bulleted or mid-sentence copy does not match, so pasting
@@ -842,9 +781,6 @@ JOB="-"
 MODEL_LINE="-"
 CENSUS="-"
 TOKENS="UNAVAILABLE"
-# Was a job record READ at all (any payload, complete or not)? Distinct from `record_required_present`,
-# which answers about COMPLETENESS — see the `job-machine:` state selection below (#3654 round 2).
-JOB_RECORD_READ=0
 # Populated by roborev_census (in the sourced oracles file); declared here so the
 # array always exists even if that oracle ever returns before filling it.
 # shellcheck disable=SC2034 # read in roborev-review-oracles.sh, not here
@@ -862,39 +798,6 @@ PUSH_ASSERT="SKIP"
 CENSUS_CHECK="SKIP"
 CODE_FREE="SKIP"
 JOB_RECORD="SKIP"
-# WHICH DAEMON ISSUED THE JOB ID (#3654). Initialised to the state a run that never reached a job
-# record is actually in — never blank, and never a bare `-`, which would read as "no daemon" rather
-# than "nothing was read". Recomputed once, below, from the facts the record read produced.
-#
-# IT INTERPOLATES `$JOB_RECORD` RATHER THAN HARD-CODING `SKIP`, and it is declared HERE, directly
-# after that variable, for two reasons that are one reason: a hard-coded `SKIP` made an abort
-# between the record poll and the recompute emit `job-record: PASS` beside
-# `job-machine: UNAVAILABLE (... job-record: SKIP)` — two keys contradicting each other about the
-# same fact.
-#
-# ROUND 3 FINDING: INTERPOLATING HERE MOVED THAT BUG INSTEAD OF REMOVING IT. `$JOB_RECORD` is
-# `SKIP` AT THIS POINT, so the expansion captures `SKIP` permanently and an abort after the record
-# poll still emits the contradictory pair. The general rule, which is the part worth keeping: for a
-# value whose whole purpose is to reflect LATER state, no expansion at an EARLY site can ever be
-# right — it has to be BUILT WHEN IT IS READ. So this stays deliberately EMPTY and the fallback is
-# constructed at emit time by `job_machine_value` below. (The `on_exit` EXIT trap emits the block
-# on ANY abort, which is exactly the path that made this reachable.)
-JOB_MACHINE=""
-job_machine_value() { # the job-machine: value, resolved against the CURRENT job-record state
-  # A computed state wins; otherwise the run never reached the recompute, and the honest thing to
-  # report is the state AS IT STANDS NOW, not as it stood at initialization.
-  if [ -n "$JOB_MACHINE" ]; then printf '%s' "$JOB_MACHINE"; return 0; fi
-  # ROUND 4: THE FALLBACK MUST ALSO CONSULT WHETHER A RECORD WAS READ. Reporting a flat
-  # `UNAVAILABLE (no job record was read)` on every abort is FALSE whenever the run died AFTER the
-  # record poll — a record WAS read, and the only thing missing is the daemon lookup. That is the
-  # same mis-attribution as round 2's (collapsing read-failure onto field-absence): two different
-  # facts flattened into one affirmative sentence.
-  if [ "${JOB_RECORD_READ:-0}" -eq 1 ]; then
-    printf 'NOT RECORDED (a job record WAS read, but the run ended before the daemon lookup completed, so the issuing daemon was never determined — job-record: %s)' "$JOB_RECORD"
-    return 0
-  fi
-  printf 'UNAVAILABLE (no job record was read — job-record: %s)' "$JOB_RECORD"
-}
 SHA_ASSERT="SKIP"
 # The POSITIVE "a review actually happened" assert. Absence of a vacuous phrase is
 # NOT evidence a review occurred: a transcript that only says "Waiting for job N to
@@ -1076,15 +979,6 @@ emit_summary() {
   # visible rather than inferred. Placed beside `head-sha:`/`reviewed-sha:`, the other endpoints.
   emit_kv 'assert-base' "${RANGE_BASE_SHA:--} (merge-base of $BASE and HEAD; $BASE tip ${BASE_TIP_SHA:--})"
   emit_kv 'job' "$JOB"
-  # ===== WHICH DAEMON'S JOB ID THAT IS (#3654) =====
-  # INFORMATIONAL, exactly like `assert-base:`/`census:`/`tokens:` — NOT in the verdict-grammar scan
-  # and NOT in the affirmation loop (both enumerate the verdict-carrying keys by name), so it can
-  # never make a run pass or fail on its own. Emitted UNCONDITIONALLY and beside `job:`, because the
-  # thing it disambiguates is the value on the line above it: roborev job ids are PER-DAEMON, and a
-  # block is pasted into PR threads read by people who are not on the box. A conditional emit would
-  # reproduce the defect — a reader with no `job-machine:` line cannot tell "this daemon was not
-  # recorded" from "this wrapper does not report it".
-  emit_kv 'job-machine' "$(job_machine_value)"
   emit_kv 'model' "$MODEL_LINE"
   emit_kv 'census' "$CENSUS"
   emit_kv 'tokens' "$TOKENS"
@@ -1439,18 +1333,10 @@ read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FIL
       # `--repo` run from another lane returns those same rows). It is correct here BY CONSTRUCTION
       # for the ordinary case — the wrapper enqueued the review for the `--repo` checkout's own
       # branch — and it must NOT grow a `--branch` here: `sha-assert` depends on this read, and
-      # changing what it selects is a separate question from #3654. The supplementary machine read
-      # below is a NEW read and scopes to the RECORD's own branch; that difference is deliberate and
-      # documented there, and it is what makes the key work on the recheck path.
+      # changing what it selects is a separate question from #3654.
       list) json=$(roborev list --json --limit 50 --repo "$REPO" 2>/dev/null || printf '') ;;
     esac
     extract_job_facts "$1" "$json" "$FACTS_FILE" "$PROMPT_FILE" "$RECORD_OUTPUT_FILE" || continue
-    # A RECORD WAS READ. Tracked SEPARATELY from `record_required_present`, which answers a
-    # DIFFERENT question — completeness — and answering "was anything read?" with it made
-    # `job-machine:` state that no record could be read when one had been (#3654 round 2). Two
-    # questions, two signals; a state that is not an affirmative true statement about what
-    # happened is the diagnostic that stops the next person looking.
-    JOB_RECORD_READ=1
     if record_required_present; then
       rm -f "$best_facts"
       return 0
@@ -1464,111 +1350,6 @@ read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FIL
   fi
   rm -f "$best_facts"
   return 1
-}
-
-# ===== WHICH DAEMON ISSUED THIS JOB ID — A SUPPLEMENTARY, ISOLATED READ (#3654) =====
-# `source_machine_id` is carried by `roborev list --json` ROWS ONLY: measured on roborev v0.61.2,
-# `roborev show <id> --json` does not carry it anywhere, not even in its nested `job` object. And
-# `read_job_record` above STOPS at the first payload that answers, which on a healthy daemon is
-# `show` — so a machine id read only through that loop would be `NOT RECORDED` on EVERY real run,
-# i.e. a key that reports nothing while looking like it reports something. Hence one extra `list`
-# read, and ONLY when the record already read did not carry the field.
-#
-# ISOLATED ON PURPOSE: it writes to its OWN scratch facts file and never to `$FACTS_FILE`, so it
-# cannot change any fact an assert reads, cannot change which row the record loop chose, and cannot
-# move a verdict. It runs AFTER the record poll loop has settled, so it also cannot perturb the
-# transient-read modelling above it. A failure here is not an error — it yields no id, and the key
-# says so affirmatively.
-#
-# IT IS SCOPED TO THE RECORD'S OWN BRANCH, NOT TO THE CHECKOUT'S (#3654 round 2). `roborev list`
-# is BRANCH-FILTERED and its default follows the CURRENT HEAD OF THE `--repo` PATH; `$BRANCH` is
-# read from that same HEAD, so both name the branch the CHECKOUT is on and neither names the JOB's
-# — so scoping by it answers about a DIFFERENT branch whenever the job was enqueued elsewhere, and
-# `--recheck-job` is exactly where that happens (an older job, a renamed or rebased lane). That
-# would have rendered `NOT RECORDED` for a record that HAS a `source_machine_id`, silently defeating
-# the operator mitigation this key exists for — the documented "compare `job-machine:` between the
-# request and the recheck" — in the one mode it is documented for. So the branch comes from the
-# JOB RECORD (`.job.branch` on `show`, top level on `list`), which is the job's own fact.
-#
-# AND THERE IS NO AMBIENT FALLBACK. When the record does not name its branch the lookup is NOT
-# retried against `$BRANCH`: that would answer about a different branch while looking like an
-# answer about this job — the same defect one layer down. The state says so instead.
-#
-# `--limit 50` IS SOUND ONCE THE BRANCH IS RIGHT, and the bound is per-branch rather than
-# per-daemon: measured on this fleet, the whole daemon database held 31 records across all
-# branches, so 50 jobs on ONE branch is far past anything observed. If it were ever exceeded the
-# result is the affirmative `NOT RECORDED` state with a named cause — never a wrong id, because the
-# extractor matches the job id and returns nothing when it is absent.
-#
-# BOUNDED CASES WHERE IT LEGITIMATELY DOES NOT RESOLVE, so the state is read as information and not
-# as a defect: a roborev build whose `list` rows do not carry `source_machine_id`; a record that
-# does not name its own branch; and a branch holding more than `--limit 50` jobs. Each lands on
-# `NOT RECORDED` with its own cause named, which is why that value explains itself rather than
-# merely reporting an absence.
-# TWO GLOBALS, NOT STDOUT, AND THAT IS LOAD-BEARING. This first PRINTED the uuid and was called in
-# a command substitution — so the SUBSHELL's assignment to `JOB_MACHINE_MISS` never reached the
-# parent and every miss rendered the generic cause instead of the one it had just measured (caught
-# by case jm15). A result that is two values does not fit one channel.
-JOB_MACHINE_ID=""
-JOB_MACHINE_MISS=""
-read_machine_fact() { # read_machine_fact <job> -> sets JOB_MACHINE_ID | JOB_MACHINE_MISS
-  local mfacts="$FACTS_FILE.machine" mprompt="$FACTS_FILE.machine.prompt" json="" id="" job_branch=""
-  JOB_MACHINE_ID=""
-  JOB_MACHINE_MISS=""
-  id=$(fact source_machine_id)
-  if [ -n "$id" ]; then JOB_MACHINE_ID="$id"; return 0; fi
-  job_branch=$(fact branch)
-  if [ -z "$job_branch" ]; then
-    JOB_MACHINE_MISS="the job record does not name its own branch, and the daemon's job list is branch-filtered, so the lookup could not be scoped to this job; it was deliberately NOT retried against the branch this invocation is on, which would answer about a different branch than the job's"
-    return 1
-  fi
-  # ===== DEPTH: RETRIEVE UNTIL FOUND OR EXHAUSTED, NEVER A BIGGER CONSTANT (#3654 round 3) =====
-  # Round 2 fixed the wrong-branch half of this lookup and left the DEPTH half: a fixed
-  # `--limit 50` silently drops the target once the branch holds more than 50 jobs, so the
-  # cross-box mitigation failed for precisely the long-lived jobs most likely to be RECHECKED —
-  # and a recheck is the one mode the mitigation is documented for. Raising the constant would
-  # relocate that defect rather than remove it, so the loop instead stops on an AFFIRMATIVE
-  # end-of-list signal.
-  #
-  # WHY DOUBLING AND NOT AN OFFSET: `roborev list` has no offset or cursor — measured on
-  # v0.61.2, `--limit` is its ONLY depth control — so depth is reached by asking for more rows.
-  # The daemon returning the SAME payload for a strictly larger limit is the only evidence
-  # available that it has no more rows to give; that, not a constant, is the terminating
-  # condition. The round guard below is a runaway stop, not a depth policy, and when it fires it
-  # is NAMED in the miss cause rather than reported as a plain absence.
-  local lim=50 prev="" found=0 rounds=0
-  while : ; do
-    json=$(roborev list --json --limit "$lim" --repo "$REPO" --branch "$job_branch" 2>/dev/null || printf '')
-    if [ -z "$json" ]; then
-      JOB_MACHINE_MISS="the daemon returned no job list for this job's own branch '$job_branch'"
-      return 1
-    fi
-    : >"$mfacts"
-    : >"$mprompt"
-    if extract_job_facts "$1" "$json" "$mfacts" "$mprompt"; then found=1; break; fi
-    # Identical payload for a strictly larger limit: the daemon has nothing deeper to return.
-    if [ "$json" = "$prev" ]; then break; fi
-    prev="$json"
-    rounds=$((rounds + 1))
-    if [ "$rounds" -ge 12 ]; then break; fi
-    lim=$((lim * 2))
-  done
-  if [ "$found" -ne 1 ]; then
-    rm -f "$mfacts" "$mprompt"
-    if [ "$rounds" -ge 12 ]; then
-      JOB_MACHINE_MISS="job '$1' was not found on its own branch '$job_branch' after searching to a depth of $lim rows, where the search hit its runaway guard rather than the end of the daemon's list"
-    else
-      JOB_MACHINE_MISS="job '$1' is not in the daemon's job list for its own branch '$job_branch', searched to a depth of $lim rows and to the end of what the daemon returns"
-    fi
-    return 1
-  fi
-  id=$(sed -n 's/^source_machine_id=//p' "$mfacts" | head -1)
-  rm -f "$mfacts" "$mprompt"
-  if [ -z "$id" ]; then
-    JOB_MACHINE_MISS="neither the job record nor the daemon's job list for branch '$job_branch' carries source_machine_id"
-    return 1
-  fi
-  JOB_MACHINE_ID="$id"
 }
 
 # REQUIRED to stop polling: the fields without which an assert cannot run at all.
@@ -1633,31 +1414,6 @@ TOKEN_STATE=$(fact token_state)
 TOK_IN=$(fact input_tokens)
 TOK_CACHED=$(fact cached_input_tokens)
 TOK_OUT=$(fact output_tokens)
-
-# ===== `job-machine:` — THREE AFFIRMATIVE STATES, NEVER BLANK, NEVER FAILING (#3654) =====
-# The states are decided here, once, so the emit site has nothing to infer. Ordered
-# id-then-record-then-nothing, and the last two are told apart by whether a job record was READ at
-# all: "the record does not carry the field" and "there is no record" are different operator
-# actions, and collapsing them onto one value is the shape this repository keeps paying for. The
-# key is INFORMATIONAL — it is in neither the verdict-grammar scan nor the affirmation loop — so
-# none of these three can red an otherwise-clean run.
-# CALLED IN THIS SHELL, NEVER IN A COMMAND SUBSTITUTION: it reports a uuid AND, when there is none,
-# the cause it measured — and a subshell would discard the second (see read_machine_fact).
-if [ "$announce_ok" -eq 1 ]; then
-  read_machine_fact "$JOB" || true
-fi
-# THE SPLIT IS "WAS A RECORD READ", NOT "IS IT COMPLETE" (#3654 round 2). This used to branch on
-# `record_required_present`, which asks about COMPLETENESS — so a record that WAS read but is
-# nonterminal or incomplete rendered `UNAVAILABLE (no job record could be read)`, a state that is
-# simply FALSE about what happened. Each of the three states has to be an affirmative TRUE statement
-# or the key is worse than absent, so the read is tracked on its own signal.
-if [ -n "$JOB_MACHINE_ID" ]; then
-  JOB_MACHINE="$JOB_MACHINE_ID (source_machine_id; job ids are per-daemon)"
-elif [ "${JOB_RECORD_READ:-0}" -eq 1 ]; then
-  JOB_MACHINE="NOT RECORDED (${JOB_MACHINE_MISS:-a job record was read, but the lookup recorded no cause for the missing daemon id — this is a defect in the lookup, not a measurement}; 'roborev list --json' rows carry that field, 'roborev show <id> --json' does not. Identify the review by the record's git_ref, never by the id alone)"
-else
-  JOB_MACHINE="UNAVAILABLE (no job record could be read at all, so the issuing daemon is unknown — job-record: $JOB_RECORD)"
-fi
 
 # The sanctioned form reviews a RANGE, so the job record's `git_ref` is
 # `<base40>..<head40>` and BOTH endpoints are asserted — strictly stronger than the

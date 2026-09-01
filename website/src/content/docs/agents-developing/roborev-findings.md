@@ -307,9 +307,8 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    **That cost is true at review time, and false after the fact only for a *human* reading the stored
    record — it stays true of the *machine*, and must (#3654).** The prompt roborev *sent* is **retained in the job record** and retrievable later —
    `roborev show <id> --prompt` — even though the snapshot file it names is transient and already deleted,
-   and a delivery-by-path prompt says so in its own words under `### Combined Diff`. That is **direct**
-   **direct artifact** — roborev's *actual prompt* rather than a statistic about it — and an absence-waiver
-   request should **lead with it**.
+   and a delivery-by-path prompt says so in its own words under `### Combined Diff`. That is **the direct
+   artifact** — roborev's *actual prompt* rather than a statistic about it.
 
    **It is not self-authenticating, and the trust properties run the opposite way from the obvious
    reading.** roborev's prompt **embeds repository-controlled content** at positions indistinguishable from
@@ -322,10 +321,10 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    influences their *magnitude* without forging anything. That bites exactly where the counts are used:
    the vacuous baseline is ~18.7k input / 0 cached, so padding non-diff prompt content can make a review
    that received **no diff** look token-rich. **Neither signal establishes provenance, and the two are not
-   independent** — both are functions of the same repository-influenced prompt. The prompt still *leads*,
-   and a request should still lead with it, with the counts read *alongside* it as a consistency check —
-   never as unforgeable corroboration. What evidence *should* be required before granting is an **open
-   question, pending on #3654**, and is deliberately not settled here. **It resurrects nothing of the deleted delivery classifier, and that distinction is
+   independent** — both are functions of the same repository-influenced prompt. **Which evidence a waiver
+   should rest on is an open question, tracked as
+   [#3826](https://github.com/pmcfadin/cqlite/issues/3826)** — nothing here recommends one signal over the
+   other, or any ordering between them. **It resurrects nothing of the deleted delivery classifier, and that distinction is
    load-bearing rather than a caveat:** the classifier read injectable prompt text *at decision time* to
    produce an **automated verdict**, while this is a **human** reading a **stored record** as evidence for a
    **hand-granted** waiver — there is no automated verdict to spoof. Nothing in the wrapper parses the
@@ -342,10 +341,9 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    ```bash
    # git_ref / status / token_usage are NESTED under .job on this payload:
    roborev show <id> --json | jq '.job | {id, git_ref, branch, status, token_usage}'
-   # the issuing daemon is on the LIST row — `show --json` carries source_machine_id NOWHERE.
    # `roborev list` defaults its branch filter to the --repo path's CURRENT HEAD, not to the
    # branch your shell is on — so name --branch when that checkout is not on the job's branch:
-   roborev list --json --repo <abs> --branch <branch> | jq '.[] | select(.id==<id>) | {id, source_machine_id, git_ref}'
+   roborev list --json --repo <abs> --branch <branch> | jq '.[] | select(.id==<id>) | {id, git_ref, branch}'
    ```
 
    **Read `.job`, never a `show` payload's top-level `id`.** That field is the *review* row's own
@@ -365,32 +363,10 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    `mergeable: MERGEABLE` on a marker-bearing merge commit). Run on both `job=265` lanes it gave the right
    answer for a reason that did not hold.
 
-   **The block therefore names the daemon: `job-machine:`, beside `job:`.** It is **informational** — in
-   neither the verdict scan nor the affirmation backstop, so no state of it can red a correct run — with
-   three affirmative renderings: the uuid when a record carried `source_machine_id`; `NOT RECORDED` when a
-   record **was** read and carries none (a real state, since `show --json` never carries the field — hence
-   the wrapper's one supplementary `list` read, without which the key would report nothing on every real
-   run); and `UNAVAILABLE` when no record could be read, naming the `job-record:` state it inherits. **The
-   marker grammar is unchanged**: no machine field was added to either kind — the authorizer would have to
-   know it, it is derivable from the record, and every field in a hand-typed control line is one more way
-   for a legitimate authorization to read `MALFORMED`.
-
-   **Declared boundary — what the `job=` binding does not close (#3654).** *Claimed:* within **one** daemon,
-   base+head+job names one review and `--recheck-job` re-decides that record. *Not claimed:* that a marker
-   cannot cross boxes. **The marker travels through GitHub, not through the daemon**, while
-   `--recheck-job <id>` reads the **local** daemon's record — so if two boxes hold the same id for the same
-   `git_ref` range, a waiver granted after an authorizer inspected box A's review is **accepted on box B
-   against box B's different review**: `sha-assert` passes, the id matches, and the authorization crosses
-   reviews. "A repeated id cannot reach another box's recheck" is true of the *record* and irrelevant to the
-   *marker*, which is what actually travels — and on this fleet it is not exotic: ids have already collided
-   at 265, and two lanes reviewing one branch has happened (2026-09-01, a peer session and this lane both
-   landing on #3654 within seconds; cause tracked as [#3810](https://github.com/pmcfadin/cqlite/issues/3810)
-   — `CLAIM_ACTOR` defaults to the literal `flow`, so `claim.sh` answers `VERIFY-OK` to both lanes on one box). **It is not closed here** because closing it
-   means adding a field to a hand-typed control line, which this issue's disposition forbids: a **design
-   call, escalated to the owner and pending on #3654**. The mitigation that exists today is **operational,
-   not mechanical** — the block names the issuing daemon, so an authorizer comparing `job-machine:` between
-   the request and the recheck **sees** a cross-box mismatch. That is why the key exists; being
-   informational, it stops nobody who does not look.
+   **Whether the block should name the issuing daemon — and the cross-box question that comes with it,
+   since the marker travels through GitHub while `--recheck-job` reads the *local* daemon — is tracked as
+   [#3825](https://github.com/pmcfadin/cqlite/issues/3825), together with the marker-grammar question it
+   raises.**
 
    **THE ABSENCE WAIVER — the break-glass, its four constraints, and why the documentation is not the
    credential (#3312 job 23).** The **OWNER or the coordination LEAD** may excuse an absence FAIL with a
