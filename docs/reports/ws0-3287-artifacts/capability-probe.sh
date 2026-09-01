@@ -80,6 +80,20 @@ SRC="${2:-docs/reports/ws0-3224-artifacts/cache-hostile.c}"
 mkdir -p "$OUT/host" || { echo "cannot create $OUT/host" >&2; exit 2; }
 D="$OUT/host"
 
+# STALE MEASUREMENTS FROM A PREVIOUS RUN -- POSSIBLY FROM A DIFFERENT HOST -- MUST
+# NOT SURVIVE INTO THIS RUN'S VERDICT. If a group is unavailable this time, no new
+# CSV is written for it, and the classifier would happily read the old file and
+# report another machine's numbers beside this machine's inventory under a
+# COMPLETE verdict. Since this probe's whole purpose is to be re-run on a
+# CANDIDATE host, that is the worst possible failure here. Every generated
+# measurement file is therefore removed up front; the hand-written
+# gate-guard-positive-control.txt is deliberately NOT matched by these globs.
+# (#3287 roborev job 312, finding 2.)
+rm -f "$D"/arm-*.csv "$D"/arm-*.txt "$D"/gate-probe-*.csv "$D"/gate-probe-*.txt \
+      "$D"/differential.txt "$D"/tma-probe.txt "$D"/event-disposition.txt \
+      "$D"/counter-semantics-verification.txt "$D"/capability-probe.txt \
+      "$D"/cache-hostile-build.txt
+
 FAILED=0
 note_fail() { FAILED=1; echo "PROBE-STEP-FAILED: $*" >&2; }
 
@@ -156,25 +170,42 @@ fi
 # and its non-empty-file check was vacuous, because the block wrote its own
 # headings. (job 309 f2.)
 : > "$D/tma-probe.txt"
-TMA_L1=absent; TMA_L2=absent; TMA_ANY_ERROR=0
-tma_probe() { # $1 label  rest: perf args
+TMA_L1=UNMEASURED; TMA_L2=UNMEASURED
+
+# NOTE THE CALLING CONVENTION, AND WHY IT IS NOT $( ).
+# Revision 4 did `TMA_L1=$(tma_probe ...)`, which runs the function in a SUBSHELL:
+# every note_fail inside it set FAILED=1 in a child process that then exited, so
+# the parent's FAILED stayed 0 and Gate A was FAIL-OPEN -- an operational error
+# could leave VERDICT: COMPLETE over an unmeasured TMA gate. The class was swept
+# across the whole file and this was its only instance. The classification is now
+# returned through a global. (#3287 roborev job 312, finding 1.)
+TMA_CLASS=""
+tma_probe() { # $1 label  rest: perf args   -> sets TMA_CLASS
   local label="$1"; shift
-  local out rc cls
+  local out rc
   out=$("$@" 2>&1); rc=$?
-  if [ $rc -eq 0 ]; then cls=RESOLVED
+  if [ $rc -eq 0 ]; then
+    # rc=0 is NOT sufficient. A metric group must actually produce numbers; an
+    # exit status is not a measurement. Require at least one numeric field in the
+    # output before calling the gate RESOLVED.
+    if grep -qE '[0-9]' <<<"$out" && grep -qvE '^[[:space:]]*$' <<<"$out"; then
+      TMA_CLASS=RESOLVED
+    else
+      TMA_CLASS="ERROR (rc=0 but no numeric output)"
+      note_fail "Gate A: '$label' exited 0 and produced no numbers — TMA capability NOT measured"
+    fi
   elif grep -qE 'Bad event|Unable to find|No supported events|not supported|Invalid argument|Cannot find metric' <<<"$out"; then
-    cls=ABSENT
+    TMA_CLASS=ABSENT
   else
-    cls="ERROR"; TMA_ANY_ERROR=1
-    note_fail "Gate A: '$label' failed operationally (rc=$rc) — TMA capability NOT measured"
+    TMA_CLASS="ERROR (rc=$rc)"
+    note_fail "Gate A: '$label' failed operationally (rc=$rc) — TMA capability NOT measured, and an operational error is not a capability answer"
   fi
-  { echo "== $label =="; echo "$out"; echo "[rc=$rc class=$cls]"; echo; } >> "$D/tma-probe.txt"
-  echo "$cls"
+  { echo "== $label =="; echo "$out"; echo "[rc=$rc class=$TMA_CLASS]"; echo; } >> "$D/tma-probe.txt"
 }
-TMA_L1=$(tma_probe "perf stat -M TopdownL1" perf stat -M TopdownL1 -- true)
-TMA_L2=$(tma_probe "perf stat -M TopdownL2" perf stat -M TopdownL2 -- true)
+tma_probe "perf stat -M TopdownL1" perf stat -M TopdownL1 -- true; TMA_L1="$TMA_CLASS"
+tma_probe "perf stat -M TopdownL2" perf stat -M TopdownL2 -- true; TMA_L2="$TMA_CLASS"
 for e in topdown.slots slots topdown-retiring topdown-fe-bound topdown-be-bound topdown-bad-spec; do
-  tma_probe "event $e" perf stat -e "$e" -- true >/dev/null
+  tma_probe "event $e" perf stat -e "$e" -- true
 done
 [ -s "$D/tma-probe.txt" ] || note_fail "Gate A: tma-probe.txt is empty"
 
@@ -188,7 +219,15 @@ probe_event() { # $1 event -> sets DISP[$1]
   val=$(awk -v ev="$e" '$2==ev{print $1}' <<<"$out" | head -1)
   if   grep -q 'Bad event\|Unable to find\|No supported events' <<<"$out"; then DISP[$e]=ABSENT-FROM-PMU
   elif grep -q '<not supported>' <<<"$out"; then DISP[$e]=NOT-SUPPORTED
-  elif grep -q '<not counted>'   <<<"$out"; then DISP[$e]=NOT-COUNTED
+  elif grep -q '<not counted>'   <<<"$out"; then
+    # '<not counted>' does NOT establish absence: the counter was programmed and
+    # the kernel never scheduled it (contention, a too-short workload, a
+    # multiplexing accident). Treating it as a capability disposition let the
+    # event be silently excluded while the probe still reported COMPLETE.
+    # (job 312, finding 3.)
+    DISP[$e]="NOT-COUNTED (measurement failed — NOT evidence of absence)"
+    note_fail "event triage: '$e' returned <not counted>; the counter was never scheduled, so its capability is UNKNOWN — re-run on an idle host"
+
   elif [ $rc -ne 0 ]; then
     DISP[$e]="ERROR(rc=$rc)"
     note_fail "event triage: '$e' failed operationally (rc=$rc); an operational error is not a capability answer"
@@ -269,13 +308,29 @@ run_arm() { # $1 events  $2 label  $3 buf-mib  $4 work-kib  $5 accesses  $6 outb
   [ $rc -eq 0 ] || note_fail "arm $2 (rc=$rc, see $6.txt)"
   return $rc
 }
-csv_val() { awk -F, -v e="$2" '$3==e{print $1; exit}' "$1"; }
+# Some perf/PMU combinations STRIP the modifier from the reported event name, so a
+# lookup keyed strictly on 'name:u' would reject a perfectly good capture as
+# missing -- a false FAIL on correct input, which is the guard agents learn to
+# waive. Match the rendered name first, then its modifier-stripped base.
+# (job 312, finding 4.)
+csv_val() { # $1 csv  $2 rendered name
+  local v
+  v=$(awk -F, -v e="$2" '$3==e{print $1; exit}' "$1" 2>/dev/null)
+  if [ -z "$v" ]; then v=$(awk -F, -v e="${2%:u}" '$3==e{print $1; exit}' "$1" 2>/dev/null); fi
+  echo "$v"
+}
+csv_row() { # $1 csv  $2 rendered name
+  local r
+  r=$(awk -F, -v e="$2" '$3==e{print; exit}' "$1" 2>/dev/null)
+  if [ -z "$r" ]; then r=$(awk -F, -v e="${2%:u}" '$3==e{print; exit}' "$1" 2>/dev/null); fi
+  echo "$r"
+}
 csv_validate() { # $1 csv  $2 label  rest: rendered names — 100.00% is REQUIRED
   local csv="$1" label="$2"; shift 2
   [ -s "$csv" ] || { note_fail "$label: CSV missing/empty"; return 1; }
   local ev line c en bad=0
   for ev in "$@"; do
-    line=$(awk -F, -v e="$ev" '$3==e{print; exit}' "$csv")
+    line=$(csv_row "$csv" "$ev")
     [ -n "$line" ] || { note_fail "$label: no CSV row for '$ev'"; bad=1; continue; }
     c=$(cut -d, -f1 <<<"$line"); en=$(cut -d, -f5 <<<"$line")
     [[ "$c"  =~ ^[0-9]+$ ]] || { note_fail "$label: '$ev' count not numeric ('$c')"; bad=1; }
@@ -340,7 +395,16 @@ classify() { # $1 rendered-name  $2 group
   local n="$1" g="$2" f h
   f=$(csv_val "$D/arm-friendly-L2resident-$g.csv" "$n" 2>/dev/null)
   h=$(csv_val "$D/arm-hostile-512m-$g.csv"        "$n" 2>/dev/null)
-  if ! [[ "$f" =~ ^[0-9]+$ ]] || ! [[ "$h" =~ ^[0-9]+$ ]]; then echo "ABSENT/UNMEASURED"; return; fi
+  if ! [[ "$f" =~ ^[0-9]+$ ]] || ! [[ "$h" =~ ^[0-9]+$ ]]; then
+    # Distinguish the two reasons a value is missing: the event was excluded up
+    # front because this PMU does not have it (a capability ANSWER), or the arm
+    # should have produced it and did not (a measurement FAILURE, already counted
+    # by csv_validate). Reporting both as one string hid the difference.
+    local base="${n%:u}"
+    if [ "${DISP[$base]:-}" != PROGRAMS ]; then echo "ABSENT (${DISP[$base]:-unprobed})"
+    else echo "UNMEASURED (event programs, but no value in this run's CSV)"; fi
+    return
+  fi
   if [ "$f" -eq 0 ] && [ "$h" -eq 0 ]; then echo "STUCK (0 in both arms)"; return; fi
   if [ "$h" -gt "$f" ]; then echo "MOVING ($f -> $h)"; else echo "NOT-MOVING ($f -> $h)"; fi
 }
@@ -366,6 +430,13 @@ classify() { # $1 rendered-name  $2 group
   done
   for e in offcore_requests.all_data_rd offcore_requests_buffer.sq_full; do
     echo "  $e : ${DISP[$e]:-unprobed} (disposition only; not in a differential group)"
+  done
+  # The prefetch group was being MEASURED and VALIDATED and then left out of this
+  # verdict, even though the resume note names l1d_pend_miss.fb_full as a required
+  # Gate B signal -- the fill-buffer half of the prefetch-pressure story, and the
+  # one Gate B signal that actually works on a guest. (job 312, finding 5.)
+  for n in l1d_pend_miss.fb_full:u l1d_pend_miss.pending:u; do
+    echo "  $n : $(classify "$n" prefetch)"
   done
   echo
   echo "-- GATE C: reproduce #3224's own baseline counters --"

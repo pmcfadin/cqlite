@@ -37,3 +37,54 @@ Reproduce:
     taskset -c 2,10 perf stat -x, -e instructions:u -- \
       ./ch chase --buffer-mib 512 --working-kib 0 --accesses $n --arm pc-$n --delay-ms 1500
   done
+
+
+================================================================================
+== POSITIVE CONTROLS for the two HIGH findings of #3287 roborev job 312 ==
+================================================================================
+
+Same principle as above: a guard that has never been shown to fire is not
+evidence. Both fixes were verified by planting the defect they exist to catch,
+AND by running the same plant against the PREVIOUS revision to confirm the
+finding was real rather than theoretical.
+
+-- A. Gate A was FAIL-OPEN (finding 1) ----------------------------------------
+
+Revision 4 classified the TMA probe with `TMA_L1=$(tma_probe ...)`. Command
+substitution runs the function in a SUBSHELL, so every `note_fail` inside it set
+FAILED=1 in a child that then exited; the parent's FAILED stayed 0.
+
+Plant: a TMA probe command that exits 7 with an unrecognised diagnostic — i.e. an
+operational error, which must never be read as a capability answer.
+
+  revision 4 (subshell):   exit 0   VERDICT: COMPLETE   <-- FAIL-OPEN, reproduced
+  fixed (global return):   exit 1   VERDICT: UNMEASURED
+                                    "Gate A: 'PLANTED operational error' failed
+                                     operationally (rc=7) — TMA capability NOT
+                                     measured, and an operational error is not a
+                                     capability answer"
+
+So revision 4 could report a COMPLETE probe over a TMA gate it had not measured —
+on the one gate #3287's AC1 turns on. The class was then swept across the whole
+file (`grep` for any state-mutating function invoked inside `$( )`): `tma_probe`
+was its ONLY instance. `classify` is also called in `$( )` and is safe because it
+mutates nothing — verified by reading it, not assumed.
+
+-- B. Stale measurements could outlive their host (finding 2) ------------------
+
+This probe exists to be re-run on a CANDIDATE host. If a group is unavailable on
+the new host, no CSV is written for it — and revision 4 left the OLD file in
+place, so the classifier read a PREVIOUS machine's numbers and reported them
+beside the current inventory under a COMPLETE verdict. The worst failure
+available here: a confident answer about the wrong computer.
+
+Plant: pre-seed the output directory with arm CSVs claiming
+`cycle_activity.stalls_l3_miss:u` = 999,999,999 (friendly) and 888,888,888
+(hostile) — i.e. a counter that looks alive.
+
+  after the fixed run:  0 files still contain the planted values
+                        cycle_activity.stalls_l3_miss:u : STUCK (0 in both arms)
+
+The planted numbers are gone and the verdict is derived from this run alone. All
+generated measurement files are removed up front; the hand-written file you are
+reading is deliberately not matched by those globs.
