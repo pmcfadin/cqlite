@@ -195,6 +195,15 @@
 #                SKIP into a red gate of record. Structural (it reads source), because
 #                running that component takes ~35 minutes.
 #
+#
+#   ROUND 11 (roborev job 72) — the last fix round:
+#  51.  GREEN  — a UNICODE feature name is credited from its DERIVED env spelling. The
+#                scan no longer extracts a suffix and so no longer models cargo's
+#                feature-name grammar, which it had been wrong about three times.
+#  52.  GREEN  — a dependency KEY is package-local: activations are (package, key) PAIRS.
+#                Pins the MODEL, not a verdict flip — a verdict-flipping fixture is not
+#                constructible, because activating a dependency is itself an effect.
+#
 #   CASE NUMBERS ARE STABLE IDENTIFIERS, NOT POSITIONS — deleted cases leave gaps (the
 #   convention scripts/tests/test_pub_surface_guard.sh already uses). The suite asserts
 #   the exact NUMBER OF CASES RUN at the end, which is what catches a silent deletion.
@@ -1379,13 +1388,83 @@ append_after_line "$D/a/src/lib.rs" 'pub fn always() {}' 'pub mod exotic;'
 expect_green "$D" "case 50"
 ok "SOUNDNESS: vertical tab, form feed, NEL and LINE SEPARATOR between \`#\` and \`[\` are Rust whitespace and are recognised"
 
+# --- 51. GREEN: a UNICODE feature name is credited from its env spelling -----
+# The build-script scan used to extract a SUFFIX after `CARGO_FEATURE_` and so had to model
+# cargo's feature-name grammar — wrong three times running (ASCII-only, punctuation, then
+# Unicode: `CARGO_FEATURE_CAFÉ` captured as `CAF`, reporting a live `café` dead). It now
+# DERIVES each declared name's exact env spelling from the metadata and searches for that
+# literal, so there is no grammar to guess. `cargo metadata` accepts non-ASCII feature
+# names — measured, which is why this case can exist at all.
+D="$(fixture unicode-feature-name)"
+python3 - "$D/a/Cargo.toml" <<'PYEOF'
+import io, sys
+p = sys.argv[1]
+s = io.open(p, encoding="utf-8").read()
+s = s.replace('tfeat = []', 'tfeat = []\n"café" = []\n"naïve-mode" = []')
+io.open(p, "w", encoding="utf-8").write(s)
+PYEOF
+python3 - "$D/a/build.rs" <<'PYEOF'
+import io, sys
+with io.open(sys.argv[1], "w", encoding="utf-8") as fh:
+    fh.write("fn main() {\n")
+    fh.write('    if std::env::var("CARGO_FEATURE_CAFÉ").is_ok() { println!("cargo:rustc-cfg=cafe"); }\n')
+    fh.write('    if std::env::var("CARGO_FEATURE_NAÏVE_MODE").is_ok() { println!("cargo:rustc-cfg=naive"); }\n')
+    fh.write("}\n")
+PYEOF
+expect_green "$D" "case 51"
+ok "a UNICODE feature name (\`café\`, and \`naïve-mode\` with its \`-\` normalized) is credited from its DERIVED env spelling"
+
+# --- 52. GREEN: a dependency KEY is package-local ----------------------------
+# Two members declare the SAME key `dup` for DIFFERENT packages, and one of them activates
+# it. Activations are tracked as (package, key) PAIRS so member A's activation cannot make
+# member B's unrelated `dup?/feature` edge read live.
+#
+# HONEST SCOPE, stated because it matters: this pins the MODEL, not a verdict flip. A
+# verdict-flipping fixture is not constructible — activating a dependency is ITSELF an
+# effect, so any closure that leaks an activation already credits its origin through that
+# same activation. The fix is still correct (cargo namespaces keys per package) and this
+# case proves the pairing introduced no false FAIL on the cross-member same-key shape.
+D="$(fixture cross-member-same-key)"
+EXTB="$TMPROOT/extdup-cross-member-same-key"
+mkdir -p "$EXTB/src"
+cat >"$EXTB/Cargo.toml" <<'EOF'
+[package]
+name = "otherdup"
+version = "0.0.0"
+edition = "2021"
+
+[features]
+otherfeat = []
+EOF
+echo "pub fn nothing() {}" >"$EXTB/src/lib.rs"
+python3 - "$D/a/Cargo.toml" "$D/b/Cargo.toml" <<'PYEOF'
+import sys
+a, b = sys.argv[1], sys.argv[2]
+s = open(a).read()
+# a's key `dup` is the workspace member optdep; a ACTIVATES it.
+s = s.replace('bee = { path = "../b", package = "b" }',
+              'bee = { path = "../b", package = "b" }\ndup = { path = "../optdep", package = "optdep", optional = true }')
+s = s.replace('tfeat = []', 'tfeat = []\nactivates_dup = ["dep:dup"]\nreaches_b = ["bee/weak_on_dup"]')
+open(a, "w").write(s)
+s = open(b).read()
+# b's key `dup` is a DIFFERENT package, and b never activates it.
+s = s.replace('[features]',
+              '[dependencies]\ndup = { path = "../../extdup-cross-member-same-key", package = "otherdup", optional = true }\n\n[features]')
+s = s.replace('bfeat = []', 'bfeat = []\nweak_on_dup = ["dup?/otherfeat", "bfeat"]')
+open(b, "w").write(s)
+PYEOF
+grep -q '^activates_dup = ' "$D/a/Cargo.toml" || fail_case "case 52: fixture edit did not plant activates_dup"
+grep -q '^weak_on_dup = ' "$D/b/Cargo.toml" || fail_case "case 52: fixture edit did not plant weak_on_dup"
+expect_green "$D" "case 52"
+ok "a dependency KEY is package-local: two members using the same key for different packages certify, and activations are tracked as (package, key) pairs"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=54
+CASE_COUNT_EXPECTED=56
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 

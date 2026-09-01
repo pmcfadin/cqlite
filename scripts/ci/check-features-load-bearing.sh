@@ -53,12 +53,19 @@
 #       another spelling each time — a constant argument, `env::vars()` iteration, an
 #       aliased `use std::env::var as get_var`, a local wrapper — every one of which
 #       reported a LIVE feature DEAD. So: in a package that HAS a build script, a
-#       feature is credited when `CARGO_FEATURE_<NAME>` appears IN ANY FORM ANYWHERE in
-#       that package's `.rs` sources, comments and strings included. A BARE
-#       `CARGO_FEATURE_` prefix (environment iteration names no individual feature)
-#       credits EVERY feature of that package. A package with NO build script gets no
-#       env credit at all — cargo sets these variables for a build script's execution,
-#       so without one there is nothing to read them.
+#       feature is credited when its environment spelling appears ANYWHERE in that
+#       package's `.rs` sources, comments and strings included.
+#       THAT SPELLING IS DERIVED, NEVER PARSED: for each name in the metadata this
+#       computes cargo's own transform (`to_uppercase()`, `-` -> `_`) and searches for the
+#       literal. The earlier version extracted a SUFFIX after `CARGO_FEATURE_` and so had
+#       to model cargo's feature-name grammar — wrong three times over (ASCII-only, then
+#       `+`/`.`, then Unicode, where `CARGO_FEATURE_CAFÉ` captured as `CAF` and reported a
+#       live `café` dead). Deriving removes the class instead of patching it again.
+#       An occurrence of `CARGO_FEATURE_` that NO declared spelling accounts for is
+#       unattributable — environment ITERATION names no individual feature — and credits
+#       EVERY feature of that package. A package with NO build script gets no env credit
+#       at all: cargo sets these variables for a build script's execution, so without one
+#       there is nothing to read them.
 #   E2  OPTIONAL DEPENDENCY — G's dep list enables an optional dependency (`dep:x`).
 #       The "bare optional-dep name" spelling (`wasm = ["wasm-bindgen", ...]`) is
 #       covered by the closure, because cargo SYNTHESISES an implicit feature per
@@ -803,29 +810,57 @@ def cfg_feature_sites(code, strings):
 # is nothing to match. A `CARGO_FEATURE_` with no `[A-Z0-9_]` name after it therefore
 # credits EVERY feature of that package — the only reading that cannot report a live
 # feature dead.
-# CARGO'S OWN GRAMMAR AND NORMALIZATION, matched exactly (roborev job 65). Cargo permits
-# `+`, `-`, `_` and `.` in a feature name, and its environment spelling uppercases the
-# name and converts ONLY `-` to `_` — so `foo+bar` is read as `CARGO_FEATURE_FOO+BAR`.
-# Accepting only `[A-Z0-9_]` reported such a feature dead: a latent false FAIL, which in a
-# fleet-wide mandatory component would have surfaced on someone else's unrelated PR. (No
-# feature in this workspace has such a name today; `+` and `.` are both accepted by
-# `cargo metadata`, measured.) `-` cannot appear in the env spelling at all, being
-# normalized away, but accepting it costs only over-crediting.
-CARGO_FEATURE_MENTION_RE = re.compile(r'CARGO_FEATURE_([A-Z0-9_+.-]*)')
+# DERIVED, NOT PARSED — and this is a SIMPLIFICATION, not a fourth patch (roborev job 72).
+# Extracting a SUFFIX after `CARGO_FEATURE_` forced this code to model cargo's feature-name
+# grammar, and it was wrong three times running: ASCII-only, then punctuation (`+`/`.`),
+# then Unicode (`CARGO_FEATURE_CAFÉ` captured as `CAF`, reporting a live `café` dead —
+# `cargo metadata` accepts non-ASCII feature names, measured). The grammar is not knowable
+# by guessing, and it does not need to be: every declared feature name is already known
+# from the metadata, so for each one this COMPUTES its exact environment spelling — cargo's
+# rule, `to_uppercase()` with `-` -> `_` — and searches for that LITERAL. No suffix to
+# mis-capture, no character class to get wrong; the whole class disappears.
+#
+# The BARE PREFIX still credits everything, for the reason it always did: code that
+# ITERATES the environment (`k.starts_with("CARGO_FEATURE_")`) names no individual feature,
+# so nothing can be matched. Concretely, an occurrence of `CARGO_FEATURE_` that NO declared
+# feature's spelling accounts for is unattributable and credits every feature of the
+# package — the only reading that cannot report a live feature dead.
+CARGO_FEATURE_PREFIX = "CARGO_FEATURE_"
 
 
-def build_script_feature_mentions(raw_text):
-    """Yield (suffix, offset) for every CARGO_FEATURE_* mention; '' means the bare prefix."""
-    for m in CARGO_FEATURE_MENTION_RE.finditer(raw_text):
-        yield m.group(1), m.start()
+def cargo_feature_mentions(raw_text, features):
+    """Which of `features` this text names, and whether it names something unattributable.
+
+    Returns (matched, unattributable_offset_or_None). Note one spelling can be a PREFIX of
+    another (`foo` -> ...FOO, `foo_bar` -> ...FOO_BAR), so a single mention may credit both:
+    over-crediting, which the contract permits and declares.
+    """
+    matched = {}
+    unattributable = None
+    spellings = [(cargo_feature_env_name(f), f) for f in features]
+    start = 0
+    while True:
+        at = raw_text.find(CARGO_FEATURE_PREFIX, start)
+        if at == -1:
+            break
+        after = at + len(CARGO_FEATURE_PREFIX)
+        hit = False
+        for spelling, feat in spellings:
+            if spelling and raw_text.startswith(spelling, after):
+                matched.setdefault(feat, at)
+                hit = True
+        if not hit and unattributable is None:
+            unattributable = at
+        start = after
+    return matched, unattributable
 
 
 def cargo_feature_env_name(feature):
     """cargo's build-script env spelling: UPPERCASED with `-` -> `_`, and nothing else.
 
-    Mapping every non-alphanumeric to `_` was wrong in the direction that matters: it made
-    `foo+bar` look like `FOO_BAR`, so the real `CARGO_FEATURE_FOO+BAR` read never matched
-    and the feature was reported dead.
+    This is cargo's own rule, applied to a name taken from the metadata — never a grammar
+    this script guesses at. `str.upper()` is full Unicode, as Rust's `to_uppercase()` is,
+    so `café` -> `CAFÉ`.
     """
     return feature.replace("-", "_").upper()
 
@@ -1136,16 +1171,19 @@ for dirpath, dirnames, filenames in os.walk(REPO_ROOT, onerror=_walk_error, foll
         if bs_owners:
             # RAW text, not the lexed code: a mention in a comment or a string counts too
             # (see the note above — the class is closed, not narrowed).
-            mentions = list(build_script_feature_mentions(text))
             for owner in bs_owners:
                 record = members[owner]["refsites"]
-                for env, off in mentions:
-                    line_no = text.count("\n", 0, off) + 1
-                    for feat in members[owner]["features"]:
-                        if feat in record:
-                            continue
-                        if env == "" or cargo_feature_env_name(feat) == env:
-                            record[feat] = "%s:%d (CARGO_FEATURE_%s)" % (rel, line_no, env or "<bare prefix>")
+                feats = members[owner]["features"]
+                matched, unattributable = cargo_feature_mentions(text, feats)
+                for feat, off in matched.items():
+                    record.setdefault(feat, "%s:%d (%s%s)" % (
+                        rel, text.count("\n", 0, off) + 1, CARGO_FEATURE_PREFIX,
+                        cargo_feature_env_name(feat)))
+                if unattributable is not None:
+                    line_no = text.count("\n", 0, unattributable) + 1
+                    for feat in feats:
+                        record.setdefault(feat, "%s:%d (%s<unattributable mention>)" % (
+                            rel, line_no, CARGO_FEATURE_PREFIX))
 
 if scanned_files == 0:
     fail("NOT ONE Rust source file of a workspace-member target could be found, so no reference site could possibly have been observed. A positive verdict requires an affirmative measurement; refusing to pass over an empty scan.")
@@ -1192,7 +1230,12 @@ for name, rec in members.items():
 # ---------------------------------------------------------------------------
 uncond = {}
 edges = {}
-own_deps = {}
+# ACTIVATIONS ARE (PACKAGE, KEY) PAIRS, never bare keys (roborev job 72). A dependency key
+# is PACKAGE-LOCAL: two members may each declare a key `x` for entirely different
+# packages, so a bare-key activation set let member A's activation of its own `x` make
+# member B's unrelated `x?/feature` edge read live. The pair keeps each member's dependency
+# namespace separate, which is what cargo does.
+own_deps = {}    # (pkg, feat) -> set of (pkg, dependency KEY) it activates
 ext_edges = {}
 all_nodes = []
 
@@ -1213,7 +1256,7 @@ for name, rec in members.items():
                 key = entry[4:]
                 if key not in rec["dep_keys"]:
                     fail("feature '%s' of member '%s' enables the optional dependency '%s', but member '%s' declares no dependency with the key '%s'. Refusing to credit an effect it could not resolve." % (feat, name, entry, name, key))
-                acts.add(key)
+                acts.add((name, key))
                 effect = True
                 continue
             if "/" in entry:
@@ -1233,7 +1276,7 @@ for name, rec in members.items():
                 # learn to waive.
                 activates = (not weak) and info["optional"]
                 if activates:
-                    acts.add(key)
+                    acts.add((name, key))
                     effect = True
                 if edge_is_redundant(info, dfeat) and not activates:
                     # The dependency declaration already enables this feature and the
@@ -1285,7 +1328,9 @@ def analyse(origin):
         changed = False
         for n in list(reach):
             for kind, key, tgt, weak in edges[n]:
-                if weak and key not in acts:
+                # A dependency key is resolved in the DECLARING member's namespace — n[0] —
+                # never globally and never the origin's.
+                if weak and (n[0], key) not in acts:
                     continue
                 if tgt not in reach:
                     reach.add(tgt)
@@ -1303,7 +1348,7 @@ def load_bearing(origin):
         if n in uncond:
             return True
         for key, _dfeat, weak in ext_edges[n]:
-            if not weak or key in acts:
+            if not weak or (n[0], key) in acts:
                 return True
     return False
 
