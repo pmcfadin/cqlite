@@ -16273,6 +16273,17 @@ run_pub_surface() {
 # peer's artifacts are never answered as ours. Includes the /proc starttime parser tested
 # differentially against awk over every live pid. Hermetic; one bounded nested
 # `--only file-size` for wiring evidence (cannot select tooling-tests, so no recursion).
+# Also runs scripts/tests/test_gate_liveness_no_sigpipe.sh (#3803), the STRUCTURAL guard that
+# no bash BUILTIN writer may feed a pipe in scripts/gate-liveness.sh. A short-circuiting reader
+# (grep -m1/-q, or a downstream `| head -1`) closed the pipe under bash's builtin printf, which
+# reports the failed write on stderr rather than dying on SIGPIPE — so `printf: write error:
+# Broken pipe` replaced the verdict CAUSE in 2 of 257 cases of test_gate_liveness.sh on PR #3794's
+# gate of record, and under `set -o pipefail` a matched read could still return 141. A behavioural
+# test cannot reliably lose that race, so the guard asserts the CHANNEL IS GONE by scanning the
+# SHIPPED reader (never a copy), with positive and negative controls so a "0 RECOGNISED" verdict
+# cannot come from a matcher that matches nothing. It DECLARES its narrowing at run time: it
+# guards ONE file, and scripts/flow/claim.sh + scripts/flow/roborev-review-oracles.sh carry the
+# same shape UNGUARDED. Hermetic: no cargo, no datasets, no network, never invokes the gate.
 # Also runs scripts/tests/test_gate_detached.sh (#3473), which pins BOTH the cgroup
 # mechanism (a `KillMode=control-group` teardown kills work that used setsid+nohup, while
 # the same work in its own cgroup survives — demonstrated on a cgroup the test creates and
@@ -17691,6 +17702,30 @@ run_tooling_tests() {
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
     echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # gate-liveness SIGPIPE guard (#3803): STRUCTURAL, because the defect is a race.
+  # `printf '%s\n' "$t" | grep -m1 ...` lets bash's BUILTIN printf take EPIPE when the
+  # reader short-circuits; bash reports the failed write on stderr instead of dying, so
+  # `printf: write error: Broken pipe` replaced the verdict CAUSE text in 2 of 257 cases of
+  # test_gate_liveness.sh on PR #3794's gate of record — and under that file's `set -o
+  # pipefail` a MATCHED `grep -m1` could still yield 141. It fires under gate load and not
+  # on an idle box, so a green behavioural run is not evidence of a fix; this guard asserts
+  # the CHANNEL IS GONE (every reader is a herestring) by scanning the SHIPPED
+  # scripts/gate-liveness.sh, with positive+negative controls so "0 RECOGNISED" cannot be a
+  # matcher that matches nothing. It DECLARES its narrowing on every run (scripts/flow/claim.sh
+  # and scripts/flow/roborev-review-oracles.sh carry the same shape and are UNGUARDED).
+  # Hermetic: no cargo, no datasets, no network, never invokes the gate.
+  echo ">>> [$name] bash scripts/tests/test_gate_liveness_no_sigpipe.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gate_liveness_no_sigpipe.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (gate-liveness SIGPIPE guard #3803); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
 
