@@ -3101,8 +3101,21 @@ require_help_phrase "refs/heartbeats/<machine> refusal (single-slot per machine)
 # UNCLAIMED-WORK signature and says nothing about a death. It was the same defect roborev had already
 # fixed in the runbook, surviving in a second file. Both phrases are pinned, so deleting either — or
 # merging them back into one signature — reds this case, and the two files carry one wording.
-require_help_phrase "held-claim signature, presented as THE dead-lane signal" \
-  'A HELD `refs/claims/issue-<N>` WITH NO LIVE SESSION IS THE DEAD-LANE SIGNAL'
+# SIGNATURE (a) IS NOT A VERDICT EITHER (roborev job 52) — and this one was a real correctness defect,
+# not a wording problem. /drive-issue's park-and-resume protocol produces "held claim, no live session"
+# for HEALTHY work: a lane blocked on a lead or owner answer keeps its claim, arms a `drive-issue-<N>`
+# cron, refreshes its heartbeat and ends its turn. This very repository is an instance while #3548 is in
+# flight (a held refs/claims/issue-3548 plus a .drive-issue-state.md marker with no session between
+# turns), so the previous "IS THE DEAD-LANE SIGNAL" wording invited an operator to adopt a claim out
+# from under a live, waiting lane. Both the new statement AND the named disambiguators are pinned — the
+# statement without the checks would be unactionable, and the checks are what make (a) usable at all —
+# plus a refutation of the removed label, on the job-41 pattern.
+require_help_phrase "signature (a) stated as NOT a verdict (park-and-resume makes the same shape)" \
+  'A HELD `refs/claims/issue-<N>` WITH NO LIVE SESSION IS NOT A VERDICT EITHER'
+require_help_phrase "signature (a) disambiguators, named" \
+  'no active `drive-issue-<N>` cron, no waiting marker'
+refute_help_phrase "a definite dead-lane label for signature (a)" \
+  'WITH NO LIVE SESSION IS THE DEAD-LANE SIGNAL'
 # SIGNATURE (b) IS PINNED AS AN AMBIGUITY, NOT AS A LABEL (roborev job 41). Three rounds each replaced
 # one definite classification of this shape with another — job 38 called a HELD claim ref the #3436
 # signature, job 40 called the NO-claim-ref shape the dead-lane signal, job 41 called it unclaimed work
@@ -3215,7 +3228,7 @@ $nsd_out"
 fi
 
 # ===========================================================================
-echo "TEST 83: the signature-(b) statement is SETTLED WORDING, in EVERY file that carries it (#3548)"
+echo "TEST 83: BOTH signature statements are SETTLED WORDING, in EVERY file that carries them (#3548)"
 # ===========================================================================
 # THE DEFECT CLASS, not a new property. One statement about one board signature lives in FIVE files
 # (this script's --help, the fleet runbook, CLAUDE.md, the website page, and the seam comment), and it
@@ -3254,16 +3267,38 @@ if [ -n "$missing83" ]; then
   bad "TEST 83 cannot run: committed source unreadable —$missing83 (fail-closed: absence is not a pass)"
 else
   rb83n=$(_norm <"$_rb"); cl83n=$(_norm <"$_cl"); wb83n=$(_norm <"$_wb")
-  # --- REQUIRED, in the two canonical statements. Same phrase, both files: divergence reds.
+  # --- REQUIRED IN EVERY COVERED FILE (roborev job 52, finding 2). CLAUDE.md and the website page used
+  #     to be checked against PROHIBITED phrases only, so DELETING their guidance outright passed — a
+  #     pass derived from the absence of a bad signal, which this repo's doctrine forbids by name. These
+  #     three clauses are short enough to be carried verbatim by a comment block, a doctrine bullet and
+  #     a prose page alike, and each is load-bearing: that neither shape is a verdict, the operator rule,
+  #     and the one named disambiguator that makes signature (a) actionable rather than a hunch.
+  for _pair in "--help:$help83n" "fleet-runbook.md:$rb83n" "CLAUDE.md:$cl83n" "website delivery-pipeline.md:$wb83n"; do
+    _who="${_pair%%:*}"; _txt="${_pair#*:}"
+    for _need in \
+      'NEITHER signature is a verdict' \
+      'a prompt to look, never' \
+      'no active `drive-issue-<N>` cron'; do
+      if grep -Fqi -- "$_need" <<<"$_txt"; then
+        ok "$_who carries the settled cross-file clause: \"$_need\""
+      else
+        bad "$_who is MISSING the settled signature clause (#3548) — deleted or reworded: \"$_need\""
+      fi
+    done
+  done
+  # --- REQUIRED in the two CANONICAL statements only: the full sentences, which the shorter
+  #     restatements deliberately do not carry. Same phrase in both files, so a reword in either is a
+  #     DIVERGENCE that reds naming that file — the defect class this case exists for.
   for _pair in "--help:$help83n" "fleet-runbook.md:$rb83n"; do
     _who="${_pair%%:*}"; _txt="${_pair#*:}"
     for _need in \
       'NO claim ref is AMBIGUOUS and is deliberately NOT classified here' \
+      'WITH NO LIVE SESSION IS NOT A VERDICT EITHER' \
       'a prompt to look, never as a verdict'; do
       if grep -Fqi -- "$_need" <<<"$_txt"; then
-        ok "$_who carries the settled signature-(b) phrase: \"$_need\""
+        ok "$_who carries the canonical phrase: \"$_need\""
       else
-        bad "$_who has DIVERGED from the settled signature-(b) wording (#3548) — this phrase is gone: \"$_need\""
+        bad "$_who has DIVERGED from the canonical signature wording (#3548) — this phrase is gone: \"$_need\""
       fi
     done
   done
@@ -3275,13 +3310,14 @@ else
     for _refuse in \
       'is the #3436 unclaimed-work signature' \
       'no claim ref is the dead-lane signal' \
-      'as the signature of a lost lane'; do
+      'as the signature of a lost lane' \
+      'no live session is the dead-lane signal'; do
       grep -Fqi -- "$_refuse" <<<"$_txt" && _leaked="$_leaked | $_refuse"
     done
     if [ -z "$_leaked" ]; then
-      ok "$_who asserts no definite label for signature (b)"
+      ok "$_who asserts no definite label for signature (a) or (b)"
     else
-      bad "$_who RE-ASSERTS a definite label for signature (b) (#3548, jobs 38/40/41/47):$_leaked"
+      bad "$_who RE-ASSERTS a definite signature label (#3548, jobs 38/40/41/47/52):$_leaked"
     fi
   done
 fi

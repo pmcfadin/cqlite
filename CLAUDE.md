@@ -1972,12 +1972,15 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   false-`DEAD` healthy lanes), and `refs/heartbeats/<machine>` is SINGLE-SLOT PER MACHINE and
   force-updated, so N lanes overwrite each other (the same masking the retired per-machine claim ref
   had). Lane liveness here rests on the coordination sweep plus **TWO board signatures that mean
-  DIFFERENT things**: a **HELD `refs/claims/issue-<N>` with no live session** is the DEAD-LANE signal
-  (a vanished `/drive-issue` lane keeps its claim ref — the ref outlives the process), while **Ready +
-  pushed branch + NO claim ref** is **AMBIGUOUS and deliberately NOT classified** — parked-by-design
-  work, #3436's unclaimed-work case and a lane that died before claiming all look identical, nothing
-  separates them mechanically, so it is **a prompt to look, never a verdict** and never by itself
-  evidence of a lane death. All of these are **operating mechanisms, NOT committed tooling: no such script or command exists in
+  DIFFERENT things — and NEITHER signature is a verdict**; both are AMBIGUOUS prompts to look. A
+  **HELD `refs/claims/issue-<N>` with no live session** is a dead-lane CANDIDATE, not a death:
+  `/drive-issue`'s park-and-resume makes that exact shape for HEALTHY work (blocked on an answer, the
+  lane keeps its claim, arms a cron, beats, ends its turn), so it counts only with **no active
+  `drive-issue-<N>` cron**, no waiting marker (`.drive-issue-state.md` / an open `coord:*` request) and
+  stale heartbeat+branch activity — otherwise you adopt a claim out from under a live waiting lane.
+  **Ready + pushed branch + NO claim ref** is likewise **AMBIGUOUS and deliberately NOT classified** —
+  parked-by-design work, #3436's unclaimed-work case and a lane that died before claiming all look
+  identical. Either way it is **a prompt to look, never a verdict**. All of these are **operating mechanisms, NOT committed tooling: no such script or command exists in
   this repo**, and #3436's reading of the second CONFLICTS with the runbook's "parked-by-design"
   reading of the same shape, unresolved. AC4 survives the descope, and
   **EXCLUSION IS THE ABSTENTION**: the two populated carriers are NOT ENUMERATED, so they produce no

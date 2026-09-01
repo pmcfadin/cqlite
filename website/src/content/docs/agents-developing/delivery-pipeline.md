@@ -476,12 +476,17 @@ supervisor iteration, needs no such rule: there an absent or recycled pid really
 gone, and `DEAD-NO-PROCESS`/`DEAD-PID-REUSED` are correct.
 
 What lane liveness rests on here is the **coordination lead's sweep** plus **two board signatures
-that mean different things and must not be merged**: a **held `refs/claims/issue-<N>` with no live
-session** is the **dead-lane** signal — a vanished `/drive-issue` lane keeps its claim ref, since the
-ref outlives the process — while **Ready + pushed branch + no claim ref** is **ambiguous and
-deliberately not classified**: parked-by-design work, #3436's unclaimed-work case and a lane that died
-before claiming all present identically, and nothing separates them mechanically today, so it is **a
-prompt to look, never a verdict** and never by itself evidence that a lane died. All of it is
+that mean different things and must not be merged — and NEITHER signature is a verdict**; both are
+ambiguous prompts to look. A **held `refs/claims/issue-<N>` with no live session** is a dead-lane
+**candidate**, not a death: `/drive-issue`'s park-and-resume produces that exact shape for **healthy**
+work — a lane blocked on a lead or owner answer keeps its claim, arms a `drive-issue-<N>` cron,
+refreshes its heartbeat and ends its turn — so it counts only if there is also **no active
+`drive-issue-<N>` cron**, no waiting marker (`.drive-issue-state.md`, or an open `coord:*` request on
+the issue) and stale heartbeat and branch activity; act without those checks and you adopt a claim out
+from under a live lane that is waiting. **Ready + pushed branch + no claim ref** is likewise
+**ambiguous and deliberately not classified**: parked-by-design work, #3436's unclaimed-work case and a
+lane that died before claiming all present identically, and nothing separates them mechanically today.
+Either shape is **a prompt to look, never a verdict**. All of it is
 **operating mechanism, not committed tooling**: there is no sweep command and no board-signature script
 in this repository, and that ambiguity is unresolved. Full record, including the primitives that do exist:
 `docs/development/fleet-runbook.md` → *Lane liveness on a supervisor-less `/drive-issue` fleet*.

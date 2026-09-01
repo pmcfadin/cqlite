@@ -260,13 +260,17 @@
 #   exits 1. That reinforces the rule above rather than softening it: EXIT 1 MEANS
 #   "NOTHING WAS REPORTED", NEVER a clean bill of health (#3467). On such a fleet lane liveness
 #   rests on the coordination sweep plus TWO BOARD SIGNATURES THAT MEAN DIFFERENT THINGS AND MUST
-#   NOT BE MERGED — and only the FIRST is definite. Three rounds of review each replaced one definite
-#   label for (b) with another (jobs 38, 40, 41); the shape is genuinely ambiguous, so it is no longer
-#   classified at all. Wording below is shared verbatim with docs/development/fleet-runbook.md so the
-#   two cannot drift.
-#   (a) A HELD `refs/claims/issue-<N>` WITH NO LIVE SESSION IS THE DEAD-LANE SIGNAL — a vanished
-#   `/drive-issue` lane RETAINS its claim ref, because the ref outlives the process, so this is where
-#   dead-lane investigation goes on such a fleet. That one is NOT ambiguous.
+#   NOT BE MERGED — and NEITHER signature is a verdict. Both are prompts to look. Four rounds of review
+#   each replaced one definite label with another (jobs 38, 40, 41 on (b); job 52 on (a)), so neither
+#   shape is classified any more. Wording below is shared verbatim with
+#   docs/development/fleet-runbook.md so the two cannot drift.
+#   (a) A HELD `refs/claims/issue-<N>` WITH NO LIVE SESSION IS NOT A VERDICT EITHER: /drive-issue's
+#   park-and-resume protocol produces exactly that shape for HEALTHY work — a lane blocked on a lead or
+#   owner answer keeps its claim, arms a `drive-issue-<N>` cron, refreshes its heartbeat and ends its turn.
+#   It is a dead-lane CANDIDATE only if, in addition, there is no active `drive-issue-<N>` cron, no waiting
+#   marker (`.drive-issue-state.md`, or an open `coord:*` request on the issue), and the heartbeat and
+#   branch activity are stale. Without those checks a parked lane and a dead one are indistinguishable, and
+#   adopting the claim takes it out from under a live lane that is waiting for an answer.
 #   (b) `Ready` + pushed branch + NO claim ref is AMBIGUOUS and is deliberately NOT classified here: the
 #   same shape fits parked-by-design work, the #3436 unclaimed-work case, and a lane that died before
 #   claiming. Nothing distinguishes them mechanically today, so check the branch's last commit time and
