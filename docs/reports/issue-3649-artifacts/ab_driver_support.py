@@ -37,8 +37,12 @@ NOT_OBSERVED = "NOT-OBSERVED"
 
 USAGE = [
     "ab_driver_support.py validate-ramp <ramp>",
+    "ab_driver_support.py parse-duration <value>",
+    "ab_driver_support.py validate-ticket <template.json>",
+    "ab_driver_support.py check-affinity <pid> <cpu-list>",
     "ab_driver_support.py validate-replicate <jsonl> <round-label> <ramp>",
-    "ab_driver_support.py parse-startup <server-log> <scans|source>",
+    "ab_driver_support.py parse-startup <server-log> "
+    "<scans|source|batch-size|max-batch-bytes|wait-timeout-ms>",
 ]
 
 
@@ -66,6 +70,186 @@ def parse_ramp(raw):
         if later <= earlier:
             return None
     return steps
+
+
+# The startup-line fields worth reading back. `max_concurrent_scans` is the one
+# the server RESOLVES (it may derive a value we did not pass); the rest are
+# echoes of what we passed, and reading them back is how we know we configured
+# the process we are actually talking to.
+STARTUP_FIELDS = {
+    "scans": r"max_concurrent_scans[\"']?\s*[=:]\s*[\"']?(\d+)",
+    "source": r"max_concurrent_scans_source[\"']?\s*[=:]\s*[\"']?([A-Za-z-]+)",
+    "batch-size": r"batch_size[\"']?\s*[=:]\s*[\"']?(\d+)",
+    "max-batch-bytes": r"max_batch_bytes[\"']?\s*[=:]\s*[\"']?(\d+)",
+    "wait-timeout-ms": r"admission_wait_timeout_ms[\"']?\s*[=:]\s*[\"']?(\d+)",
+}
+
+
+def parse_duration_seconds(raw):
+    """MIRRORS `flight_loadgen::ramp::parse_duration` -- deliberately, field for
+    field (tools/flight-loadgen/src/ramp.rs:224).
+
+    A grammar STRICTER than the load generator's rejects work that has already
+    been done: `--step-duration 60` is valid there (a bare number is seconds), so
+    a session can build both arms, run every replicate and meter a rig for an
+    hour, and then be refused by the analyzer over a missing unit suffix. On a
+    box you cannot get back, a false refusal AFTER the data exists is worse than
+    one before, because the input cannot be regenerated.
+
+    So: optional `ms` / `m` / `s` suffix, bare means seconds, the number parsed
+    as a float and required finite and non-negative, exactly as there. Returns
+    None if it is not a duration at all.
+    """
+    text = raw.strip()
+    for suffix, scale in (("ms", 0.001), ("m", 60.0), ("s", 1.0)):
+        if text.endswith(suffix):
+            text, factor = text[: -len(suffix)], scale
+            break
+    else:
+        factor = 1.0
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    if value != value or value in (float("inf"), float("-inf")) or value < 0.0:
+        return None
+    seconds = value * factor
+    if seconds != seconds or seconds in (float("inf"), float("-inf")):
+        return None
+    # `Duration::try_from_secs_f64` is applied to the FINAL, SCALED value there,
+    # and rejects anything at or beyond u64 seconds -- which is how "1e30" and
+    # "1e308m" are refused. Mirrored, because a docstring claiming a field-for-
+    # field mirror has to be true: accepting what the load generator rejects is a
+    # smaller problem than rejecting what it accepts, but it is still a false
+    # claim about the code.
+    if seconds >= 18446744073709551616.0:
+        return None
+    return seconds
+
+
+def validate_duration(raw):
+    """Print the canonical seconds as a VALUE, or refuse with a named cause."""
+    seconds = parse_duration_seconds(raw)
+    if seconds is None:
+        err("cause step-duration-invalid")
+        err(
+            "cause-detail --step-duration %r is not a duration flight-loadgen "
+            "would accept: an optional ms/m/s suffix on a finite, non-negative "
+            "number, bare meaning seconds" % raw
+        )
+        return 1
+    if seconds <= 0.0:
+        err("cause step-duration-invalid")
+        err(
+            "cause-detail --step-duration %r is zero: a step that holds for no "
+            "time measures nothing" % raw
+        )
+        return 1
+    sys.stdout.write("%r\n" % seconds)
+    return 0
+
+
+# A full-ring, unprojected, unfiltered ticket -- the only shape the target band
+# is defined for. Each entry is (field, what makes it NOT a full scan).
+_TICKET_NARROWING = (
+    ("limit", "carries a LIMIT"),
+    ("filter", "carries a filter"),
+    ("aggregation", "carries an aggregation"),
+    ("columns", "projects a column subset"),
+    ("token_start", "starts at a token bound"),
+    ("token_end", "ends at a token bound"),
+)
+
+
+def validate_ticket(path):
+    """Refuse a ticket that is not a full-ring scan of every column."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            ticket = json.load(handle)
+    except (OSError, ValueError) as exc:
+        err("cause ticket-template-unparseable")
+        err("cause-detail %s: %s" % (path, exc))
+        return 1
+    if not isinstance(ticket, dict):
+        err("cause ticket-template-unparseable")
+        err("cause-detail %s: top level is not an object" % path)
+        return 1
+    problems = []
+    for field, why in _TICKET_NARROWING:
+        if ticket.get(field) is not None:
+            problems.append("%s (%s = %r)" % (why, field, ticket[field]))
+    predicates = ticket.get("predicates")
+    if isinstance(predicates, list) and predicates:
+        problems.append("carries %d predicate(s)" % len(predicates))
+    if ticket.get("wraparound"):
+        problems.append("sets wraparound")
+    if problems:
+        err("cause ticket-not-full-ring")
+        err(
+            "cause-detail %s is not a full-ring scan of every column -- it %s. "
+            "The #3649 target band is defined for `--shape full` over the whole "
+            "ring; a narrowed ticket would receive a verdict against a band that "
+            "does not describe it. Pass --control <label> to run it anyway"
+            % (path, "; it ".join(problems))
+        )
+        return 1
+    return 0
+
+
+def check_affinity(pid, expected):
+    """Is the server actually pinned where we asked? Requested and effective are
+    different facts, and a mis-pinned server invalidates the measurement without
+    reporting anything."""
+    want = expand_cpu_list(expected)
+    if want is None:
+        err("cause affinity-unverifiable")
+        err("cause-detail %r is not a CPU list" % expected)
+        return 1
+    path = "/proc/%s/status" % pid
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        # Not every platform exposes this; an unreadable /proc is UNVERIFIABLE,
+        # never "pinned correctly".
+        sys.stdout.write("UNVERIFIABLE\n")
+        return 0
+    match = re.search(r"^Cpus_allowed_list:\s*(\S+)", text, re.MULTILINE)
+    if not match:
+        sys.stdout.write("UNVERIFIABLE\n")
+        return 0
+    have = expand_cpu_list(match.group(1))
+    if have is None:
+        sys.stdout.write("UNVERIFIABLE\n")
+        return 0
+    if have != want:
+        err("cause affinity-mismatch")
+        err(
+            "cause-detail pid %s is allowed CPUs %s but %s was requested; the "
+            "server is not pinned where the manifest will say it is"
+            % (pid, match.group(1), expected)
+        )
+        return 1
+    sys.stdout.write("VERIFIED\n")
+    return 0
+
+
+def expand_cpu_list(spec):
+    cpus = set()
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            low, _, high = part.partition("-")
+            if not (re.fullmatch(r"[0-9]+", low) and re.fullmatch(r"[0-9]+", high)):
+                return None
+            cpus.update(range(int(low), int(high) + 1))
+        elif re.fullmatch(r"[0-9]+", part):
+            cpus.add(int(part))
+        else:
+            return None
+    return cpus or None
 
 
 def ramp_section(steps):
@@ -240,11 +424,7 @@ def parse_startup(path, want):
             line = candidate
     if not line:
         return NOT_OBSERVED
-    if want == "scans":
-        pattern = r"max_concurrent_scans[\"']?\s*[=:]\s*[\"']?(\d+)"
-    else:
-        pattern = r"max_concurrent_scans_source[\"']?\s*[=:]\s*[\"']?([A-Za-z-]+)"
-    match = re.search(pattern, line)
+    match = re.search(STARTUP_FIELDS[want], line)
     return match.group(1) if match else NOT_OBSERVED
 
 
@@ -259,14 +439,30 @@ def main(argv):
             err("usage-error validate-ramp needs <ramp>")
             return 2
         return validate_ramp(rest[0])
+    if command == "parse-duration":
+        if len(rest) != 1:
+            err("usage-error parse-duration needs <value>")
+            return 2
+        return validate_duration(rest[0])
+    if command == "validate-ticket":
+        if len(rest) != 1:
+            err("usage-error validate-ticket needs <template.json>")
+            return 2
+        return validate_ticket(rest[0])
+    if command == "check-affinity":
+        if len(rest) != 2:
+            err("usage-error check-affinity needs <pid> <cpu-list>")
+            return 2
+        return check_affinity(rest[0], rest[1])
     if command == "validate-replicate":
         if len(rest) != 3:
             err("usage-error validate-replicate needs <jsonl> <round-label> <ramp>")
             return 2
         return validate_replicate(rest[0], rest[1], rest[2])
     if command == "parse-startup":
-        if len(rest) != 2 or rest[1] not in ("scans", "source"):
-            err("usage-error parse-startup needs <server-log> <scans|source>")
+        if len(rest) != 2 or rest[1] not in STARTUP_FIELDS:
+            err("usage-error parse-startup needs <server-log> <%s>"
+                % "|".join(sorted(STARTUP_FIELDS)))
             return 2
         sys.stdout.write(parse_startup(rest[0], rest[1]) + "\n")
         return 0
