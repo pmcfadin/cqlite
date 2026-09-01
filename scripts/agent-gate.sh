@@ -6801,6 +6801,19 @@ _record_status_detail() {
 # (run_file_size) renders paths git already quotes, so no REACHABLE input carries a
 # control character — this boundary exists so the NEXT writer cannot reintroduce the
 # row-injection route by not thinking about it.
+# LOCALE-PINNED, and the CLAIM is narrowed to what the code delivers (roborev round 1, L2):
+# `[:cntrl:]` is evaluated in the CURRENT locale, so an unpinned `tr` makes this boundary's
+# coverage a property of the caller's environment rather than of this line. `LC_ALL=C`
+# fixes it at C0 (0x00-0x1F) + DEL (0x7F), which is the whole of what row injection and ANSI
+# need: LF/CR forge rows, ESC starts a sequence, and both are C0.
+# WHAT IS DELIBERATELY *NOT* COVERED, said plainly rather than left inside a word like
+# "all": the C1 block (U+0080-U+009F). In UTF-8 those are TWO bytes (0xC2 0x80-0x9F), which
+# a byte-wise `tr` cannot match as a class, and which a UTF-8 terminal does not treat as
+# control introducers anyway — so the residual is not a route, and the previous wording
+# ("no control characters at all", "the whole class") asserted a coverage this line never
+# had. A comment claiming more than its code is the defect class this repo polices; the
+# claim is narrowed rather than the implementation grown, because no reachable input
+# carries even a C0 (see the defence-in-depth note above).
 # LENGTH is NOT capped here: a cap would be a SILENT truncation of a disclosure, which is
 # the defect this issue removes — bounding the value is the WRITER's job (see
 # _fs_abbrev_grown, which elides by a NAMED remainder).
@@ -6818,7 +6831,7 @@ _status_detail() {
   # repository-controlled grown-file PATH, which no Rust path plausibly spells — and it is
   # the boundary, not each writer, that has to hold. Display only: no decision anywhere
   # reads this value, so a redaction can never grant what a parse would.
-  head -1 "$f" 2>/dev/null | tr -d '[:cntrl:]' | sed 's/RESULT:/RESULT[redacted-token]:/g'
+  head -1 "$f" 2>/dev/null | LC_ALL=C tr -d '[:cntrl:]' | sed 's/RESULT:/RESULT[redacted-token]:/g'
 }
 
 # _fm_summary_line <name> <status> <time>: the ONE renderer for a SUMMARY component
@@ -9782,6 +9795,26 @@ _tree_mode_components() {
   else
     printf '%s\n' "${COMPONENTS[@]}"
   fi
+}
+
+# _tree_boundary_row <name> <status> <secs> (#3402, roborev round 1 M1): ONE spelling of
+# the boundary table's row, for BOTH loops below — which previously hand-rolled the same
+# printf twice, directly under a comment promising "never a second dialect of it".
+#
+# It carries the #3402 status detail. Without it a boundary block rendered
+# `file-size: OPT-OUT (0s)` with the env var, the count and the grown paths STRIPPED — the
+# invisible opt-out this issue exists to remove, surviving on the one path where a run is
+# already in trouble and the disclosure matters most.
+#
+# It deliberately does NOT call _fm_summary_line: the boundary block has never carried the
+# #3453 feature-matrix annotation, and adding it here would change the shape of every
+# boundary block for a reason unrelated to this issue. So the two renderers still differ —
+# in the ANNOTATION — while agreeing BY CONSTRUCTION on the detail, because both obtain it
+# from the same _status_detail boundary. Unifying them is a separate question and a
+# separate change.
+_tree_boundary_row() {
+  local _d; _d=$(_status_detail "$1")
+  printf '%-18s %s (%ss)%s\n' "$1:" "$2" "$3" "${_d:+ — $_d}"
 }
 
 _tree_boundary_meta_lines() {
@@ -17797,22 +17830,24 @@ _fs_emit() { # _fs_emit <logfile> <line> [<line>…]  — one output line per ar
   printf '%s\n' "$@" 2>/dev/null >>"$_fs_log" ||
     _FS_WRITE_FAILURES=$((_FS_WRITE_FAILURES + 1))
 }
-# _fs_abbrev_grown <entry…> (#3402): the grown-file list as it appears on the SUMMARY
-# line. Each argument is a `path: before -> after (limit N)` entry, so the path is the
-# text up to the first `: `. Up to 3 paths print in full; beyond that the remainder is
+# _fs_abbrev_grown <path…> (#3402): the grown-file list as it appears on the SUMMARY line.
+# Each argument is a RAW PATH. It used to take the formatted `path: before -> after
+# (limit N)` entries and recover the path with `${e%%: *}` — which TRUNCATES any filename
+# containing `: ` and then names a file that does not exist (roborev round 1, L3). The
+# caller has the path in hand at construction time, so re-deriving it from a DISPLAY STRING
+# was a lossy round-trip with nothing to gain; the fix is to carry it, not to pick a rarer
+# delimiter. Up to 3 paths print in full; beyond that the remainder is
 # NAMED as elided (`a,b,c,+N more`) — the same rule and the same reason as
 # _fm_abbrev_features: an abbreviation must not imply a completeness it does not have,
 # and a silent truncation in a SUMMARY block is exactly the invisible-opt-out shape this
 # issue exists to remove. The exact count is carried separately by the caller, so this
 # renders identity, never arithmetic.
 _fs_abbrev_grown() {
-  local shown=0 out="" e p
-  for e in ${1+"$@"}; do
-    p="${e%%: *}"
-    if [ "$shown" -lt 3 ]; then
-      out="${out:+$out,}$p"
-      shown=$((shown + 1))
-    fi
+  local shown=0 out="" p
+  for p in ${1+"$@"}; do
+    [ "$shown" -lt 3 ] || break
+    out="${out:+$out,}$p"
+    shown=$((shown + 1))
   done
   [ "$#" -gt "$shown" ] && out="$out,+$(( $# - shown )) more"
   printf '%s' "$out"
@@ -17862,7 +17897,10 @@ run_file_size() {
     files=$(git diff --name-only --diff-filter=d HEAD -- '*.rs' 2>/dev/null)
   fi
 
-  local -a over=() grew=()
+  # `grew` is the DISPLAY list; `grew_paths` is the same set as raw paths, carried rather
+  # than recovered from the display string later (roborev round 1, L3). The two are
+  # appended together, on adjacent lines, so they cannot fall out of step.
+  local -a over=() grew=() grew_paths=()
   local f cur lim base_n
   while IFS= read -r f; do
     [ -n "$f" ] && [ -f "$f" ] || continue
@@ -17878,6 +17916,7 @@ run_file_size() {
     base_n=${base_n:-0}
     if [ "$cur" -gt "$base_n" ]; then
       grew+=("$(printf '%s: %s -> %s (limit %s)' "$f" "$base_n" "$cur" "$lim")")
+      grew_paths+=("$f")
     fi
   done <<<"$files"
 
@@ -17920,7 +17959,7 @@ run_file_size() {
       # EXACT `FAIL`, so OPT-OUT rides to a PASS RESULT without a special case.
       status=OPT-OUT
       _record_status_detail "$name" \
-        "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); ${#grew[@]} over-threshold file(s) grown: $(_fs_abbrev_grown ${grew[@]+"${grew[@]}"})"
+        "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); ${#grew[@]} over-threshold file(s) grown: $(_fs_abbrev_grown ${grew_paths[@]+"${grew_paths[@]}"})"
       _fs_emit "$log" ">>> [$name] ${#grew[@]} over-threshold file(s) grew; ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1:"
       for line in ${grew[@]+"${grew[@]}"}; do
         _fs_emit "$log" "      $line"

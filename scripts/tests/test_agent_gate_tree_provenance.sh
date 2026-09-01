@@ -437,6 +437,84 @@ else
   bad "J2 mutant: the sweep guard was not found — the mutant is vacuous"
 fi
 
+echo "=== phase B2 (#3402): a boundary row carries the component's STATUS DETAIL ======="
+#
+# WHY: #3402 makes `file-size` report a non-failing OPT-OUT token whose detail (the engaged
+# env var, the count, the grown paths) is the whole disclosure. That detail is appended by
+# `_fm_summary_line`, which the BOUNDARY table does not use — it renders result files
+# directly. So a boundary block printed `file-size: OPT-OUT (0s)` with the disclosure
+# STRIPPED: the invisible opt-out #3402 removes, surviving on the one path where the run is
+# already in trouble and a reader most needs to know the ratchet was not enforced.
+#
+# HOW: the boundary hook fires BEFORE any component runs, so the row is produced by SEEDING
+# the pair a real `file-size` run would have written — `<c>.result` and `<c>.status-detail`
+# — into the LOG_DIR as it is created. That exercises the REAL sweep, the REAL renderer and
+# the REAL `_status_detail` read; only the producer is substituted, which is the same shape
+# as this suite's existing `cargo` stub.
+seedbin="$tmp/seedbin"; mkdir -p "$seedbin"
+seed_real_mktemp=$(command -v mktemp 2>/dev/null)
+if [ -z "$seed_real_mktemp" ]; then
+  bad "B2: no mktemp on PATH — the boundary-detail path CANNOT be exercised"
+  bad "B2: (detail assertion not reached)"
+  bad "B2 mutant: (not reached)"
+else
+  cat > "$seedbin/mktemp" <<SEEDSTUB
+#!/usr/bin/env bash
+d=\$("$seed_real_mktemp" "\$@") || exit 1
+case "\$d" in
+  */agent-gate.*)
+    if [ -d "\$d" ] && [ -n "\${SEED_DETAIL:-}" ]; then
+      printf 'OPT-OUT 0\n' > "\$d/file-size.result"
+      printf '%s\n' "\$SEED_DETAIL" > "\$d/file-size.status-detail"
+    fi
+    ;;
+esac
+printf '%s\n' "\$d"
+SEEDSTUB
+  chmod +x "$seedbin/mktemp"
+  seed_detail='CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); 1 over-threshold file(s) grown: cqlite-core/src/big.rs'
+  r_b2=$(mkrepo b2-detail-repo)
+  sum="$tmp/b2-detail.txt"; out="$tmp/b2-detail.out"
+  ( cd "$r_b2" && PATH="$seedbin:$STUBBIN:$PATH" env SEED_DETAIL="$seed_detail" \
+      AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=boundary \
+      AGENT_GATE_TREE_SELFTEST_MUTATE=README.md \
+      bash "$r_b2/scripts/agent-gate.sh" >"$out" 2>&1 )
+  # POSITIVE CONTROL FIRST: without a file-size row at all, the detail assertion below
+  # would be measuring nothing — the seeding, not the renderer, would have failed.
+  if grep -qE '^file-size: +OPT-OUT \(0s\)' "$sum"; then
+    ok "B2: the seeded OPT-OUT row reaches the boundary table (the renderer is under test)"
+  else
+    bad "B2: no 'file-size: OPT-OUT' row in the boundary block — seeding failed, detail UNMEASURED"
+    grep -E '^[a-z][a-z0-9-]*: ' "$sum" 2>/dev/null | head -5
+  fi
+  if grep -Fq -- "$seed_detail" "$sum"; then
+    ok "B2 (#3402): the boundary row carries the status detail — the disclosure survives a boundary block"
+  else
+    bad "B2 (#3402): the boundary row DROPPED the status detail — the opt-out is invisible here"
+    grep -E '^file-size: ' "$sum" 2>/dev/null
+  fi
+  # The mutant: restore the hand-rolled printf the two loops used before #3402 routed them
+  # through _tree_boundary_row. A row still prints, so only the DETAIL can distinguish the
+  # two — which is what makes the assertion above discriminating rather than incidental.
+  mut="$tmp/gate-mutant-boundary-detail.sh"
+  if gate_replace_line "$GATE" "$mut" '_tree_boundary_row "$_c" "$_st" "$_secs"' \
+       "printf '%-18s %s (%ss)\\n' \"\$_c:\" \"\$_st\" \"\$_secs\""; then
+    r_b2m=$(mkrepo_from b2-detail-mutant-repo "$mut")
+    sum="$tmp/b2-detail-mutant.txt"; out="$tmp/b2-detail-mutant.out"
+    ( cd "$r_b2m" && PATH="$seedbin:$STUBBIN:$PATH" env SEED_DETAIL="$seed_detail" \
+        AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=boundary \
+        AGENT_GATE_TREE_SELFTEST_MUTATE=README.md \
+        bash "$r_b2m/scripts/agent-gate.sh" >"$out" 2>&1 )
+    if grep -Fq -- "$seed_detail" "$sum"; then
+      bad "B2 mutant: the detail survives the hand-rolled printf — the check cannot fail"
+    else
+      ok "B2 mutant: the pre-#3402 printf drops the detail (proved discriminating)"
+    fi
+  else
+    bad "B2 mutant: the _tree_boundary_row call site was not found — the mutant is vacuous"
+  fi
+fi
+
 echo "=== phase C (J3): the run's OWN stdout/stderr target is carved out, nothing more ="
 
 r_fd=$(mkrepo fd-repo)

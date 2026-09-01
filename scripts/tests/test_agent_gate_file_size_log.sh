@@ -536,6 +536,71 @@ for bad_val in 0 true; do
 done
 
 # ---------------------------------------------------------------------------
+# Case 4e (#3402, roborev round 1 L3) — a grown path CONTAINING THE `: ` that the abbreviator
+# used to split on. `_fs_abbrev_grown` took the formatted `path: before -> after (limit N)`
+# entries and recovered the path with `${e%%: *}`, so `we: ird.rs` was truncated to `we` and
+# the SUMMARY NAMED A FILE THAT DOES NOT EXIST — worse than eliding it, because the reader
+# has no way to tell a real name from a mangled one. Fixed by CARRYING the path instead of
+# re-deriving it from a display string.
+#
+# The second needle is END-ANCHORED, and that is the whole of its value. A `lacks` on the
+# truncated stem CANNOT FAIL here: with one grown file the buggy render ends at
+# `…/src/we`, which is a PREFIX of the correct `…/src/we: ird.rs`, so any needle matching
+# the bug also matches the fix (or, with a trailing comma appended to dodge that, matches
+# neither). Anchoring on `$` states the property that actually distinguishes them — the
+# full name is the LAST thing on the line, so nothing was silently dropped after the split
+# point.
+# ---------------------------------------------------------------------------
+mkrepo colonpath 'cqlite-core/src/we: ird.rs' 900 950 main; r4e="$REPO"
+out4e="$tmp/colonpath.out"
+run_only_file_size "$r4e" "$out4e" CQLITE_ALLOW_FILE_GROWTH=1
+d4e=$(logdir_of "$out4e") || bad "case4e: the run published no usable 'logs:' dir"
+sumrow4e="$tmp/colonpath.sumrow"
+fs_summary_row "$r4e/.sum" "$sumrow4e" ||
+  bad "case4e (#3402): the run emitted no usable file-size row — the L3 asserts are UNMEASURED"
+assert_verdict "case4e: a delimiter-bearing grown path is still an OPT-OUT" "$d4e" OPT-OUT
+has "case4e (#3402): the row names the delimiter-bearing path IN FULL" \
+    "$sumrow4e" "cqlite-core/src/we: ird.rs"
+has_re "case4e (#3402): the path is the FINAL field — not a stem with the remainder lost" \
+    "$sumrow4e" 'grown: cqlite-core/src/we: ird\.rs$'
+
+# ---------------------------------------------------------------------------
+# Case 4f (#3402, roborev round 1 L2) — the row must not depend on the caller's LOCALE.
+# `_status_detail` reduces the value with `tr -d '[:cntrl:]'`, and `[:cntrl:]` is evaluated
+# in the CURRENT locale, so an unpinned `tr` made this emit boundary's behaviour a property
+# of the invoker's environment rather than of the code. `LC_ALL=C` is pinned AT the call;
+# this case measures the resulting property directly — the SAME fixture rendered under a C
+# and a UTF-8 locale must produce a BYTE-IDENTICAL row.
+# A UTF-8 locale is not guaranteed to be generated on every host, so its half is a DECLARED
+# skip rather than a silent pass (one skip per skipped assert, the case-8 convention).
+# ---------------------------------------------------------------------------
+mkrepo localec cqlite-core/src/big.rs 900 950 main; r4f="$REPO"
+out4f="$tmp/locale-c.out"
+run_only_file_size "$r4f" "$out4f" CQLITE_ALLOW_FILE_GROWTH=1 LC_ALL=C
+sumrow4f_c="$tmp/locale-c.sumrow"
+fs_summary_row "$r4f/.sum" "$sumrow4f_c" ||
+  bad "case4f (#3402): no file-size row under LC_ALL=C — the locale comparison is UNMEASURED"
+has "case4f (#3402): under LC_ALL=C the row still carries the full detail" \
+    "$sumrow4f_c" "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced)"
+fs_utf8=$(locale -a 2>/dev/null | grep -im1 -E '^(C|en_US)\.utf-?8$' || true)
+if [ -z "$fs_utf8" ]; then
+  skip "case4f: no UTF-8 locale generated on this host — the cross-locale comparison not run"
+else
+  mkrepo localeu cqlite-core/src/big.rs 900 950 main; r4g="$REPO"
+  out4g="$tmp/locale-u.out"
+  run_only_file_size "$r4g" "$out4g" CQLITE_ALLOW_FILE_GROWTH=1 LC_ALL="$fs_utf8"
+  sumrow4f_u="$tmp/locale-u.sumrow"
+  fs_summary_row "$r4g/.sum" "$sumrow4f_u" ||
+    bad "case4f (#3402): no file-size row under $fs_utf8 — the locale comparison is UNMEASURED"
+  if [ -s "$sumrow4f_c" ] && [ -s "$sumrow4f_u" ] && cmp -s "$sumrow4f_c" "$sumrow4f_u"; then
+    ok "case4f (#3402): the row is BYTE-IDENTICAL under LC_ALL=C and $fs_utf8"
+  else
+    bad "case4f (#3402): the row DIFFERS between LC_ALL=C and $fs_utf8 — the reduction is locale-dependent"
+    diff "$sumrow4f_c" "$sumrow4f_u" 2>/dev/null | head -4
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Case 5 — base ref UNRESOLVABLE (no main/master, no origin/*): the ratchet is skipped and
 # the log must say so EXPLICITLY, while the advisory list still works off `git diff HEAD`.
 # ---------------------------------------------------------------------------
@@ -959,7 +1024,10 @@ printf 'file-size component log + opt-out marker guard (#3401/#3402): %d passed,
 # misattributing one as the other.
 # 99 -> 107 on #3402's C1 fix: +2 case9, +2 case10, +4 case11, all unconditional (the
 # FS_SABOTAGE=dir shape is uid-independent and needs no /dev/full, so none can self-skip).
-EXPECTED_CHECKS=107
+# 107 -> 112 on roborev round 1: +3 case4e (L3, delimiter-bearing path) and +2 case4f
+# (L2, locale independence — its second assert is a DECLARED skip on a host with no
+# UTF-8 locale, so the census total is the same either way).
+EXPECTED_CHECKS=112
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"
