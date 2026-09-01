@@ -632,9 +632,9 @@ mod tests {
     ///
     /// Oracle (pinned Cassandra 5.0.8, the only format authority here):
     /// `git show cassandra-5.0.8:src/java/org/apache/cassandra/dht/Murmur3Partitioner.java`
-    ///   - line 50:      `public static final LongToken MINIMUM = new LongToken(Long.MIN_VALUE);`
-    ///   - lines 261-267: `private LongToken getToken(ByteBuffer key, long[] hash)`
-    ///                    `{ if (key.remaining() == 0) return MINIMUM; ... }`
+    /// - line 50: `public static final LongToken MINIMUM = new LongToken(Long.MIN_VALUE);`
+    /// - lines 261-267: `private LongToken getToken(ByteBuffer key, long[] hash)` is
+    ///   `{ if (key.remaining() == 0) return MINIMUM; return new LongToken(normalize(hash[0])); }`
     ///
     /// So Cassandra returns `Long.MIN_VALUE` for a zero-length key, short-circuiting
     /// the hash entirely. The raw hash of `b""` at seed 0 is `h1 == 0` and
