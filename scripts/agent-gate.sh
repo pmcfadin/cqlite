@@ -9048,6 +9048,72 @@ fi
 
 # ===========================================================================
 
+# ---- #3755 disk-admission RENDERERS, hoisted above emit_summary --------------------
+#
+# THESE TWO LIVE HERE, APART FROM THE REST OF THE #3755 BLOCK, FOR ONE REASON: bash
+# defines functions as it READS the file, and emit_summary is reached by early-terminal
+# paths (the component-set pre-flight, the fixture and schemas preflights) long before
+# the slot-cap block near acquire_gate_slot is ever parsed. Defined down there, they
+# were UNDEFINED at those call sites — `_emit_wants_disk_admission: command not found`
+# on the gate's own stderr, and, because an undefined function exits non-zero, the line
+# SILENTLY OMITTED from exactly the early blocks the shared assembly exists to cover.
+# The same hazard the `_gate_atexit`/`_gate_release_slot` guard documents further down.
+# Caught by the minimal-PATH case in test_agent_gate_summary.sh, which reads any
+# `command not found` on the gate's stderr as a defect.
+#
+# They are pure renderers: they read state and print, and depend on nothing else in the
+# #3755 block, so hoisting them costs nothing.
+
+# The `disk-admission:` line every FULL-gate SUMMARY carries. Empty until the probe runs,
+# i.e. for the exempt modes and for every block emitted before acquire_gate_slot.
+DISK_ADMISSION_LINE=""
+# 1 once acquire_gate_slot has passed its mode exemptions, i.e. once this run is a class
+# of run the probe applies to. Lets _disk_admission_meta tell "emitted before the probe"
+# (benign, ordering) from "the probe ran and produced nothing" (a defect, and named one).
+_DA_PROBE_REACHED=0
+
+# _disk_admission_meta: the line for the shared assembly slot. ALWAYS prints something.
+#
+# OMISSION IS THE ONE RENDERING THAT MUST NEVER HAPPEN (roborev job 335). A block with
+# no `disk-admission:` line at all leaves a reader unable to tell "this gate was never
+# probed" from "this block predates the probe" from "somebody forgot a call site" — and
+# the third is the state that ships a hole. So every state has a NAME:
+#
+#   * a verdict exists                -> the verdict
+#   * --only (self-exempt from the cap, so the probe never runs)
+#                                     -> NOT EVALUATED, naming the exemption
+#   * the block was emitted BEFORE acquire_gate_slot (the component-set pre-flight at
+#     the mode dispatch is a real instance)
+#                                     -> NOT EVALUATED, naming the ordering
+#   * the probe RAN and left no verdict
+#                                     -> that is a DEFECT in this file, and it says so
+#                                        rather than rendering as one of the benign
+#                                        states above
+_disk_admission_meta() {
+  if [ -n "${DISK_ADMISSION_LINE:-}" ]; then
+    printf '%s' "$DISK_ADMISSION_LINE"
+  elif [ -n "${ONLY:-}" ]; then
+    printf '%s' 'disk-admission: NOT EVALUATED (--only self-exempts from the #1825 slot cap, so the #3755 probe never runs) — asserts NOTHING about free space'
+  elif [ "${_DA_PROBE_REACHED:-0}" -eq 0 ]; then
+    printf '%s' 'disk-admission: NOT EVALUATED (this block was emitted BEFORE the #3755 probe, which runs inside acquire_gate_slot) — asserts NOTHING about free space'
+  else
+    printf '%s' 'disk-admission: INTERNAL (#3755) — the probe was reached but left no verdict; this is a defect in agent-gate.sh, not a property of the filesystem'
+  fi
+}
+
+# _emit_wants_disk_admission: which MODES carry the line. The full gate and --only reach
+# the full-gate terminal path and so must carry it (--only as an honest NOT EVALUATED);
+# --lite/--delta are exempt from the cap and from the probe, and the two selftest hooks
+# emit synthetic blocks whose content is pinned by test_agent_gate_summary.sh.
+_emit_wants_disk_admission() {
+  [ "${LITE:-0}" -eq 1 ] && return 1
+  [ "${DELTA:-0}" -eq 1 ] && return 1
+  [ "${SELFTEST:-0}" -eq 1 ] && return 1
+  [ "${LITE_AGG_SELFTEST:-0}" -eq 1 ] && return 1
+  return 0
+}
+
+
 # emit_summary <result> [meta-line ...]
 #
 # Build the canonical SUMMARY block (start marker .. RESULT .. end marker) ONCE
@@ -19140,9 +19206,8 @@ _GATE_MIN_FREE_GB_DEFAULT=40
 # (refuse essentially everything) while naming the value as unusable.
 _GATE_MAX_FREE_GB=1048576
 
-# The `disk-admission:` line every FULL-gate SUMMARY carries. Empty until the probe
-# runs, i.e. for the exempt modes, which get no line at all.
-DISK_ADMISSION_LINE=""
+# DISK_ADMISSION_LINE and _DA_PROBE_REACHED are declared above emit_summary (see the
+# hoist note there); everything else the probe needs is declared here.
 # Rendered per-moment states, so the line can name BOTH evaluations and a reader can
 # tell whether a run was admitted once or twice.
 _DA_LAUNCH_RENDER=""
@@ -19158,10 +19223,6 @@ _DA_EVALUATIONS=0
 # there — so a refusal can never claim a slot was released when none was ever held.
 _DA_MOMENT=""
 _DA_SLOT_NOTE=""
-# 1 once acquire_gate_slot has passed its mode exemptions, i.e. once this run is a class
-# of run the probe applies to. Lets _disk_admission_meta tell "emitted before the probe"
-# (benign, ordering) from "the probe ran and produced nothing" (a defect, and named one).
-_DA_PROBE_REACHED=0
 # Per-measurement outputs of _gate_disk_admission_measure.
 _DA_STATE=""
 _DA_VALUE=""
@@ -19414,46 +19475,10 @@ _gate_disk_admission_line() {
   return 0
 }
 
-# _disk_admission_meta: the line for the shared assembly slot. ALWAYS prints something.
-#
-# OMISSION IS THE ONE RENDERING THAT MUST NEVER HAPPEN (roborev job 335). A block with
-# no `disk-admission:` line at all leaves a reader unable to tell "this gate was never
-# probed" from "this block predates the probe" from "somebody forgot a call site" — and
-# the third is the state that ships a hole. So every state has a NAME:
-#
-#   * a verdict exists                -> the verdict
-#   * --only (self-exempt from the cap, so the probe never runs)
-#                                     -> NOT EVALUATED, naming the exemption
-#   * the block was emitted BEFORE acquire_gate_slot (the component-set pre-flight at
-#     the mode dispatch is a real instance)
-#                                     -> NOT EVALUATED, naming the ordering
-#   * the probe RAN and left no verdict
-#                                     -> that is a DEFECT in this file, and it says so
-#                                        rather than rendering as one of the benign
-#                                        states above
-_disk_admission_meta() {
-  if [ -n "${DISK_ADMISSION_LINE:-}" ]; then
-    printf '%s' "$DISK_ADMISSION_LINE"
-  elif [ -n "${ONLY:-}" ]; then
-    printf '%s' 'disk-admission: NOT EVALUATED (--only self-exempts from the #1825 slot cap, so the #3755 probe never runs) — asserts NOTHING about free space'
-  elif [ "${_DA_PROBE_REACHED:-0}" -eq 0 ]; then
-    printf '%s' 'disk-admission: NOT EVALUATED (this block was emitted BEFORE the #3755 probe, which runs inside acquire_gate_slot) — asserts NOTHING about free space'
-  else
-    printf '%s' 'disk-admission: INTERNAL (#3755) — the probe was reached but left no verdict; this is a defect in agent-gate.sh, not a property of the filesystem'
-  fi
-}
-
-# _emit_wants_disk_admission: which MODES carry the line. The full gate and --only reach
-# the full-gate terminal path and so must carry it (--only as an honest NOT EVALUATED);
-# --lite/--delta are exempt from the cap and from the probe, and the two selftest hooks
-# emit synthetic blocks whose content is pinned by test_agent_gate_summary.sh.
-_emit_wants_disk_admission() {
-  [ "${LITE:-0}" -eq 1 ] && return 1
-  [ "${DELTA:-0}" -eq 1 ] && return 1
-  [ "${SELFTEST:-0}" -eq 1 ] && return 1
-  [ "${LITE_AGG_SELFTEST:-0}" -eq 1 ] && return 1
-  return 0
-}
+# _disk_admission_meta / _emit_wants_disk_admission are DELIBERATELY NOT HERE: they are
+# defined ABOVE emit_summary instead, because bash defines functions as it READS the
+# file and emit_summary is reached by early-terminal paths thousands of lines before
+# this block. See the note at their definition site.
 
 # _gate_disk_admission_launch: the FIRST evaluation, taken before the daemon is
 # started and therefore before this run can queue.
