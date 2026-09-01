@@ -14675,17 +14675,47 @@ EOF
   # every one of the 12 derived targets FAILS under CQLITE_REQUIRE_FIXTURES=1 against an
   # empty datasets root — 71 of the 72 integration tests fail, the single pass being the
   # fixture-free synthetic case named above.
-  local _fx_blind="" _fx_blind_n=0 _dsrc _fx_rc _fx_fatal=""
-  local _fx_lookup='(env::var(_os)?|var(_os)?)[[:space:]]*\([[:space:]]*"CQLITE_REQUIRE_FIXTURES"'
+  # TWO NARROWINGS ON TOP OF THE R3-F1 PATTERN, each MEASURED against the real population
+  # before it was applied (all 12 targets still match, so neither is a false-red risk):
+  #
+  #   1. A WORD BOUNDARY before `var`. `(env::var|var)\(` also matched any call whose name
+  #      merely ENDS in `var` — `my_read_var("CQLITE_REQUIRE_FIXTURES")` satisfied it — so a
+  #      helper that names the variable while doing nothing with it counted as a lookup.
+  #      Measured: old pattern ACCEPTED that shape, this one rejects it. The bare-`var` arm
+  #      is kept because `use std::env::var;` then `var("…")` is a legitimate direct lookup.
+  #   2. `//`-COMMENT TAILS ARE STRIPPED FIRST. Otherwise a commented-out lookup — e.g.
+  #      `// this used to call std::env::var("CQLITE_REQUIRE_FIXTURES")` — satisfied the
+  #      check, which is the very shape R3-F1 was filed about, surviving in the one form the
+  #      new pattern could not see. Measured: accepted before, rejected now.
+  #
+  # A lookup quoted inside a Rust STRING needs escaped quotes (`\"CQLITE_…\"`) and so cannot
+  # match a pattern that requires a bare `"` — verified, not assumed, so the panic-message
+  # half of R3-F1 is closed by the grammar rather than by a second scan.
+  #
+  # NO PIPE INTO `grep -q`, deliberately. Under `set -o pipefail` an early-exiting `grep -q`
+  # SIGPIPEs its upstream and the PIPELINE reports 141 — which this code reads as ">= 2", a
+  # scan failure — so a healthy match would intermittently FAIL the lane. That is the #3380
+  # class, and section 19 of test_agent_gate_summary.sh lints this function for exactly it.
+  # The stripped copy goes to a file and `grep -c` consumes it whole: an AFFIRMATIVE count,
+  # which is what a permissive branch must key on.
+  local _fx_blind="" _fx_blind_n=0 _dsrc _fx_rc _fx_fatal="" _fx_cnt _fx_strip _fx_base
+  local _fx_lookup='(^|[^A-Za-z0-9_])(env::)?var(_os)?[[:space:]]*\([[:space:]]*"CQLITE_REQUIRE_FIXTURES"'
   while IFS= read -r _dsrc; do
     [ -n "$_dsrc" ] || continue
+    _fx_base=$(basename "${_dsrc%.rs}")
+    _fx_strip="$LOG_DIR/fx-nocomment-$_fx_base.rs"
+    # A failed strip is UNMEASURED, never "no match": the same three-valued rule as the scan.
+    if ! sed 's|//.*||' "$_dsrc" > "$_fx_strip" 2>/dev/null; then
+      _fx_fatal="$_fx_fatal $_fx_base(comment-strip failed)"
+      continue
+    fi
     _fx_rc=0
-    grep -qE "$_fx_lookup" "$_dsrc" 2>/dev/null || _fx_rc=$?
+    _fx_cnt=$(grep -cE "$_fx_lookup" "$_fx_strip") || _fx_rc=$?
     if [ "$_fx_rc" -ge 2 ]; then
-      _fx_fatal="$_fx_fatal $(basename "${_dsrc%.rs}")"
-    elif [ "$_fx_rc" -eq 1 ]; then
+      _fx_fatal="$_fx_fatal $_fx_base(grep exit $_fx_rc)"
+    elif [ "${_fx_cnt:-0}" -eq 0 ]; then
       _fx_blind_n=$((_fx_blind_n + 1))
-      _fx_blind="$_fx_blind $(basename "${_dsrc%.rs}")"
+      _fx_blind="$_fx_blind $_fx_base"
     fi
   done <<EOF
 $derived_srcs
@@ -14715,10 +14745,13 @@ EOF
     census+=("       variable this lane exports, and deliberately the only one accepted here:")
     census+=("       0 RECOGNISED gaps")
     census+=("       SCOPE OF THAT CLAIM (R3-F1): it is STRUCTURAL. It proves an executable")
-    census+=("       env::var lookup of that literal EXISTS in the target root — a comment or a")
-    census+=("       panic string no longer satisfies it — NOT that every skip path routes")
-    census+=("       through it, and NOT that a wholly fixture-FREE target is distinguishable")
-    census+=("       from a fixture-blind one, which no outcome-based probe can decide either.")
+    census+=("       env::var/var_os lookup of that literal EXISTS in the target root, outside")
+    census+=("       any // comment and not inside a string (a quoted one needs escaped quotes,")
+    census+=("       which the pattern rejects) and not merely a call whose name ends in 'var'.")
+    census+=("       It does NOT prove every skip path routes through it, and it CANNOT")
+    census+=("       distinguish a wholly fixture-FREE target from a fixture-blind one — which")
+    census+=("       no outcome-based probe can decide either (see the rejected-probe note in")
+    census+=("       this function). RECOGNISED limitation, declared rather than implied.")
   fi
   census+=("       WHICH corpus is missing is named BY THE TARGET, not by this lane: each strict")
   census+=("       failure prints the KEYSPACE and TABLE it could not open (test_types,")

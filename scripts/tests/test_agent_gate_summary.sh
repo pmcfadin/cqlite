@@ -3543,6 +3543,45 @@ else
   fi
 fi
 
+# THE FIXTURE-AWARENESS PATTERN, RUN against the shapes it must and must not accept
+# (roborev round 3, R3-F1 + the two narrowings measured on top of it). The pattern is READ
+# FROM THE SHIPPED GATE, never retyped here: a copy would drift from the value that runs,
+# and this suite would then certify a pattern nobody executes.
+fxp_=$(grep -m1 "^  local _fx_lookup=" "$GATE" | sed "s/^  local _fx_lookup=//")
+if [ -z "$fxp_" ]; then
+  bad "3725-fx-pattern: could not read _fx_lookup out of the gate — every case below would pass vacuously"
+else
+  eval "fx_re_=$fxp_"
+  fxd_="$tmp/3725-fx"; mkdir -p "$fxd_"
+  # The scan the lane performs: strip // comment tails, then match. Kept in this order and
+  # WITHOUT a pipe into grep -q, exactly as the lane does it (#3380).
+  fx_match_() { sed 's|//.*||' "$1" > "$fxd_/stripped.rs"; grep -cE "$fx_re_" "$fxd_/stripped.rs" 2>/dev/null || true; }
+  printf 'fn f() { let x = std::env::var("CQLITE_REQUIRE_FIXTURES"); }\n' > "$fxd_/path.rs"
+  printf 'use std::env::var;\nfn f() { let x = var("CQLITE_REQUIRE_FIXTURES"); }\n' > "$fxd_/bare.rs"
+  printf 'fn f() { let x = my_read_var("CQLITE_REQUIRE_FIXTURES"); }\n' > "$fxd_/lookalike.rs"
+  printf '// used to call std::env::var("CQLITE_REQUIRE_FIXTURES")\nfn f() {}\n' > "$fxd_/commented.rs"
+  printf 'fn f() { panic!("set std::env::var(\\"CQLITE_REQUIRE_FIXTURES\\") first"); }\n' > "$fxd_/instring.rs"
+  printf 'fn f() {}\n' > "$fxd_/absent.rs"
+  # ACCEPT: the two real lookup spellings. Rejecting either would red a correct target.
+  for ok_ in path bare; do
+    if [ "$(fx_match_ "$fxd_/$ok_.rs")" -gt 0 ]; then
+      ok "3725-fx-pattern[accept-$ok_]: a real env lookup is recognised"
+    else
+      bad "3725-fx-pattern[accept-$ok_]: a REAL env::var lookup is not recognised — the lane would call a correct target fixture-blind and FAIL the gate of record on it"
+    fi
+  done
+  # REJECT: the four shapes that must not count as an executable lookup. Each was a measured
+  # false-accept of an earlier revision (lookalike + commented) or is closed by the grammar
+  # (instring: a quoted lookup needs escaped quotes).
+  for no_ in lookalike commented instring absent; do
+    if [ "$(fx_match_ "$fxd_/$no_.rs")" -eq 0 ]; then
+      ok "3725-fx-pattern[reject-$no_]: does not count as an executable lookup"
+    else
+      bad "3725-fx-pattern[reject-$no_]: ACCEPTED as a fixture-awareness lookup — a target can then satisfy the check without ever reading the variable, which is R3-F1's defect"
+    fi
+  done
+fi
+
 # The two targets that used to IGNORE the strict flag must keep honouring it (roborev round
 # 1, finding 1). Source facts, and cheap: the lane's own guard fails closed if either
 # regresses, but a named assert here says WHICH file and WHY, and reds in the fast loop.
