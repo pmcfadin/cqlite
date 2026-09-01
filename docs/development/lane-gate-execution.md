@@ -218,12 +218,28 @@ run their own gate.
 | **accident and drift** — stale artifacts, leftover beats, colliding temp names, two gates on one path | **defect, fixed** | the larger category in practice, and the source of most real findings here |
 
 The cheap hardening already in place (`mktemp` everywhere, symlink and non-regular-file refusal,
-non-destructive probes) **stays** — the same ruling says cheap hardening is worth keeping even
-where an invoker could reach the same end another way. What this section licenses is declining to
-*add* more: a further "a local user could plant X" finding should be recorded against this model
-rather than fixed. Written down because the review rounds showed that list does not close by
-itself — 25 findings over seven rounds, launcher-side rising 2 → 2 → 3 while the reader settled
-at one per round.
+hard-link refusal, non-destructive probes) **stays** — the same ruling says cheap hardening is
+worth keeping even where an invoker could reach the same end another way. What this section
+licenses is declining to *add* more: a further "a local user could plant X" finding should be
+recorded against this model rather than fixed.
+
+**The census, kept current because a stale count is the defect this document twice had to fix in
+itself.** Written down because the review rounds showed the list does not close by itself: 25
+findings over the first seven rounds (launcher-side rising 2 → 2 → 3 while the reader settled at
+one per round), then **jobs 319/320/321 added 4 + 1 + 2**. Of those seven, **one (job 320) was in
+the fix job 319 had just made**, and **five separate rounds have now landed in this file's
+reservation/locking subsystem alone** (183, 203, 261, 269, 321). That subsystem, not the file, is
+where the variant list refuses to close.
+
+**Where the boundary now sits for output-path aliasing, stated so the next finding is triageable
+rather than automatically fixed.** Destinations are checked for **symlinks** (job 169) and for
+**multiple hard links** (job 321) — both cheap, both kept. Aliasing routes beyond those two —
+bind mounts, `/proc/self/fd` paths, a mount namespace, a directory replaced between check and
+open — are **NOT closed**, are **invoker-class** under the table above, and should be **recorded
+against this model rather than fixed**. Job 321's hard-link finding was itself within what this
+section licensed declining; it was fixed because it is the same spelling of an axis already
+closed for symlinks and cost ~35 lines, not because the model required it. A *third* spelling of
+the same axis is where that stops being true.
 
 ## Telling reaped from running (AC4)
 
