@@ -44,9 +44,40 @@ def resolve_datasets_root(explicit: Optional[str] = None) -> Path:
     return candidate if candidate.exists() else root
 
 
-def load_fixtures(path: Path = FIXTURES_PATH) -> List[dict]:
+def load_fixture_file(path: Path = FIXTURES_PATH) -> dict:
     with path.open(encoding="utf-8") as handle:
-        return json.load(handle)["fixtures"]
+        return json.load(handle)
+
+
+def load_fixtures(path: Path = FIXTURES_PATH) -> List[dict]:
+    return load_fixture_file(path)["fixtures"]
+
+
+def check_fixture_floor(data: Optional[dict] = None) -> List[str]:
+    """The fixture set must not be able to shrink to nothing and stay green.
+
+    Issue #1455 (B2), which is #3544's lesson applied to this table: an empty
+    or truncated ``fixtures.json`` yields an EMPTY pytest parametrize -- one
+    skipped placeholder and the 3-way comparison silently gone.
+    """
+    if data is None:
+        data = load_fixture_file()
+    floor = data.get("floor")
+    if not isinstance(floor, dict):
+        return ["fixtures.json has no `floor` block — the case floor cannot be checked"]
+    fixtures = data.get("fixtures", [])
+    names = [f["name"] for f in fixtures]
+    failures: List[str] = []
+    if len(fixtures) < floor["min_fixtures"]:
+        failures.append(
+            f"fixture floor: {len(fixtures)} < {floor['min_fixtures']} — fixtures were REMOVED"
+        )
+    missing = [n for n in floor["required_names"] if n not in names]
+    if missing:
+        failures.append(f"required fixture(s) absent: {missing}")
+    if len(set(names)) != len(names):
+        failures.append("duplicate fixture names")
+    return failures
 
 
 def fixture_types(fixture: dict) -> Dict[str, Any]:
@@ -68,11 +99,13 @@ def run_fixture(fixture: dict, datasets: Path) -> Dict[str, Any]:
     with cqlite.open(str(datasets), schema=str(schema)) as db:
         result = db.execute(fixture["query"])
         raw_rows = list(result)
-        observed: List[str] = []
-        rows = []
-        for row in raw_rows:
-            observed = list(row.keys())
-            rows.append(canon_row_python(row, types))
+        # UNION over every row, never the last row's keys (issue #1455, B3): a
+        # per-row assignment is last-row-wins, so a column missing from every
+        # row BUT the last would pass while one missing only from the last row
+        # would red. The CLI leg computes the same union, so the three legs are
+        # compared under ONE rule.
+        observed = sorted({key for row in raw_rows for key in row.keys()})
+        rows = [canon_row_python(row, types) for row in raw_rows]
     if not rows:
         raise DriverError(
             f"fixture {fixture['name']!r} returned 0 rows from {datasets} "
@@ -82,7 +115,7 @@ def run_fixture(fixture: dict, datasets: Path) -> Dict[str, Any]:
         "fixture": fixture["name"],
         "leg": "python",
         "query": fixture["query"],
-        "observed_columns": sorted(observed),
+        "observed_columns": observed,
         "rows": rows,
     }
 
@@ -98,7 +131,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    fixtures = load_fixtures()
+    data = load_fixture_file()
+    floor_failures = check_fixture_floor(data)
+    if floor_failures:
+        for line in floor_failures:
+            print(f"FAIL {line}", file=sys.stderr)
+        return 2
+    fixtures = data["fixtures"]
     if args.fixture:
         wanted = set(args.fixture)
         fixtures = [f for f in fixtures if f["name"] in wanted]

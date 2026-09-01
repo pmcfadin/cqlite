@@ -39,8 +39,30 @@ export function resolveDatasetsRoot(explicit) {
   return fs.existsSync(candidate) ? candidate : root;
 }
 
+export function loadFixtureFile(p = FIXTURES_PATH) {
+  return JSON.parse(fs.readFileSync(p, 'utf8'));
+}
+
 export function loadFixtures(p = FIXTURES_PATH) {
-  return JSON.parse(fs.readFileSync(p, 'utf8')).fixtures;
+  return loadFixtureFile(p).fixtures;
+}
+
+/** The fixture set must not be able to shrink to nothing and stay green (B2). */
+export function checkFixtureFloor(data = loadFixtureFile()) {
+  const floor = data.floor;
+  if (!floor || typeof floor !== 'object') {
+    return ['fixtures.json has no `floor` block — the case floor cannot be checked'];
+  }
+  const fixtures = data.fixtures || [];
+  const names = fixtures.map((f) => f.name);
+  const failures = [];
+  if (fixtures.length < floor.min_fixtures) {
+    failures.push(`fixture floor: ${fixtures.length} < ${floor.min_fixtures} — fixtures were REMOVED`);
+  }
+  const missing = floor.required_names.filter((n) => !names.includes(n));
+  if (missing.length) failures.push(`required fixture(s) absent: ${JSON.stringify(missing)}`);
+  if (new Set(names).size !== names.length) failures.push('duplicate fixture names');
+  return failures;
 }
 
 export function fixtureTypes(fixture) {
@@ -56,16 +78,21 @@ export async function runFixture(fixture, datasets) {
   const types = fixtureTypes(fixture);
   const db = await Database.open(datasets, { schema });
   let rows;
-  let observed = [];
+  const observedSet = new Set();
   try {
     const result = await db.executeNative(fixture.query);
     rows = result.rows.map((row) => {
-      observed = Object.keys(row);
+      // UNION over every row, never the last row's keys (issue #1455, B3).
+      // This leg is the one that SKIPS a metadata column with no value
+      // (bindings/node/src/row.rs:123-138), so a per-row assignment here would
+      // be last-row-wins over a genuinely varying key set.
+      Object.keys(row).forEach((k) => observedSet.add(k));
       return canonRowNode(row, types);
     });
   } finally {
     await db.close();
   }
+  const observed = [...observedSet].sort();
   if (!rows.length) {
     throw new Error(
       `fixture '${fixture.name}' returned 0 rows from ${datasets} (query: ${fixture.query})`,
@@ -75,7 +102,7 @@ export async function runFixture(fixture, datasets) {
     fixture: fixture.name,
     leg: 'node',
     query: fixture.query,
-    observed_columns: observed.slice().sort(),
+    observed_columns: observed,
     rows,
   };
 }
@@ -114,7 +141,13 @@ async function main() {
   const datasets = resolveDatasetsRoot(args.datasetsRoot);
   fs.mkdirSync(args.outDir, { recursive: true });
 
-  let fixtures = loadFixtures();
+  const data = loadFixtureFile();
+  const floorFailures = checkFixtureFloor(data);
+  if (floorFailures.length) {
+    for (const line of floorFailures) process.stderr.write(`FAIL ${line}\n`);
+    return 2;
+  }
+  let fixtures = data.fixtures;
   if (args.fixtures.length) {
     const wanted = new Set(args.fixtures);
     fixtures = fixtures.filter((f) => wanted.has(f.name));

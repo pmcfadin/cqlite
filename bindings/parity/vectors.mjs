@@ -214,7 +214,36 @@ export function checkFloor(data = loadAll()) {
 // Entry point
 // ---------------------------------------------------------------------------
 
+/**
+ * Emit `[{name, canonical}]` for every vector THROUGH `JSON.stringify`.
+ *
+ * This is the only way the JS/Python pin can see the SERIALIZATION boundary
+ * (issue #1455, B4): `checkVectors` compares an IN-MEMORY value, so it cannot
+ * observe that `JSON.stringify({h: 1.0})` emits `{"h":1}` and that `json.load`
+ * therefore hands Python an `int` where the python and cli legs hold a
+ * `float`. The Python side re-reads this file and compares.
+ */
+export function emitCanonical(target, vectors = loadVectors()) {
+  const out = vectors.map((vec) => ({
+    name: vec.name,
+    canonical: canonNode(materializeNode(vec.node), parseType(vec.type)),
+  }));
+  fs.writeFileSync(target, `${JSON.stringify(out, null, 1)}\n`, 'utf8');
+  return out.length;
+}
+
 function main() {
+  const emitAt = process.argv.indexOf('--emit');
+  if (emitAt !== -1) {
+    const target = process.argv[emitAt + 1];
+    if (!target) {
+      process.stderr.write('--emit requires a path\n');
+      return 2;
+    }
+    const n = emitCanonical(target);
+    process.stdout.write(`emitted ${n} canonical values -> ${target}\n`);
+    return 0;
+  }
   const data = loadAll();
   const floorFailures = checkFloor(data);
   const vec = checkVectors(data.vectors);

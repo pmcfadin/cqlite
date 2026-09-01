@@ -23,8 +23,22 @@
     "timestamp+blob+varint+decimal fixture is covered for timestamp, blob and",
     "decimal ONLY. The varint canonicalization rule is exercised by",
     "canonical-vectors.json, not by any live fixture. No fixture was fabricated",
-    "to close this."
+    "to close this.",
+    "",
+    "`floor` (issue #1455, B2) is the case floor: an empty or truncated fixture",
+    "list would otherwise produce an EMPTY pytest parametrize \u2014 one skipped",
+    "placeholder and the 3-way comparison silently gone, green. The floor names",
+    "the fixtures by NAME, not just a count, so swapping one for a trivial",
+    "substitute is caught too."
   ],
+  "floor": {
+    "min_fixtures": 3,
+    "required_names": [
+      "basic_types",
+      "collections",
+      "typed_collections"
+    ]
+  },
   "fixtures": [
     {
       "name": "basic_types",
