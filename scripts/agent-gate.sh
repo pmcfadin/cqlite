@@ -1889,9 +1889,20 @@ _fixture_status() {
 # and #1465 had wired its exception-path/abandoned-iterator LEAK BUDGETS in as a
 # SECOND jest invocation (`npm run test:leaks`). Composed naively that runs the leak
 # budgets TWICE per component. Under the two-project jest config #1465 introduced a
-# bare `npm test` runs BOTH projects, and the all-projects `--listTests` set contains
-# leak-paths.test.js EXACTLY ONCE -- so #3522's whole-suite run already executes the
-# leak budgets exactly once, and the second invocation was pure duplication.
+# bare `npm test` runs BOTH projects, and the `testPathIgnorePatterns` entry in the
+# `default` project hands leak-paths.test.js to the `leaks` project ALONE -- so exactly
+# one project matches it, #3522's whole-suite run already executes the leak budgets
+# exactly once, and the second invocation was pure duplication.
+#
+# THAT "EXACTLY ONCE" IS GROUNDED IN THE CONFIG PLUS TWO RUN-TIME CHECKS, AND
+# DELIBERATELY NOT IN `--listTests` (#3772). An earlier draft of this very comment
+# cited the `--listTests` set as the evidence -- while the paragraph below it explains
+# that `--listTests` DEDUPLICATES and therefore cannot see a double execution at all.
+# The evidence is: the project exclusion above (config), `check_jest_suites_ran`'s
+# suite-TOTAL comparison, and the JSON affirmation's refusal on two suites at the leak
+# path (both run time). Naming the wrong oracle is the exact defect this issue is
+# about, so it is worth saying twice: reason about execution multiplicity from the
+# RUN, never from the listing.
 #
 # NO FILE COUNT IS QUOTED HERE, DELIBERATELY (issue #3772). This argument used to rest
 # on a one-off measurement -- a hard-coded file count, asserted as "no duplicates" -- and
@@ -10838,13 +10849,16 @@ run_node_bindings() {
   census+=("  AFFIRMED BY NAME (#1465): the 2 exception-path/abandoned-iterator LEAK BUDGET tests")
   census+=("       inside leak-paths.test.js, checked from this run's own jest --json report. The")
   census+=("       suite guards judge the file set and per-suite work; only this one knows WHICH")
-  census+=("       tests must have passed. ONE executor: the npm test above, which runs BOTH jest")
-  census+=("       projects and so executes the leak file exactly once — npm run test:leaks is a")
-  census+=("       human/debug entry point, not a lane. Both facts are DERIVED on this run, never")
-  census+=("       quoted: the file count is reconciled and printed below as \"suite set")
-  census+=("       RECONCILED: N\", and a DOUBLE execution would fail check_jest_suites_ran (jest")
-  census+=("       reported total vs the DEDUPLICATED disk inventory) and the affirmation itself")
-  census+=("       (suites.length !== 1 at the leak path). This line used to carry a hard-coded")
+  census+=("       tests must have passed. ONE executor: the npm test above (a bare npm test runs")
+  census+=("       both jest projects, and the config hands the leak file to exactly one of")
+  census+=("       them), so npm run test:leaks is a human/debug entry point, not a lane. What")
+  census+=("       THIS RUN establishes, rather than asserts: the reconciled file count, printed")
+  census+=("       below as \"suite set RECONCILED: N\"; and that the leak file executed EXACTLY")
+  census+=("       ONCE — zero or twice would fail check_jest_suites_ran (jest reported total vs")
+  census+=("       the DEDUPLICATED disk inventory) and the affirmation itself (suites.length")
+  census+=("       !== 1 at the leak path). Jest PROJECT identities are NOT checked by either")
+  census+=("       guard; both projects running is inferred from the leak file having executed,")
+  census+=("       which is weaker and is stated as such. This line used to carry a hard-coded")
   census+=("       file count asserted as duplicate-free; it had gone stale as the suite grew,")
   census+=("       and its cited oracle could not see a duplicate anyway (jest --listTests")
   census+=("       DEDUPES across projects — measured, #3772). No count is printed here now, in")
