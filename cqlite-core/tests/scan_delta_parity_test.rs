@@ -784,6 +784,7 @@ fn assert_writetime(context: &str, actual_micros: i64, expected_micros: i64) {
 ///     ships binaries), **0** undecidable.
 ///   * THE WHOLE COMMITTED CORPUS, as a wider check: 162 goldens, 75016 live cells, 768
 ///     suppressed expiring cells across 8 ttl-bearing goldens, **0** undecidable.
+///
 /// So the refusal branch is known-DEFENSIVE rather than dead, and the comparison it guards
 /// is EXACT for every cell this target actually compares. Reaching the refusal needs an
 /// `UPDATE ... USING TTL` (or `USING TIMESTAMP`) touching individual columns of a row at a
