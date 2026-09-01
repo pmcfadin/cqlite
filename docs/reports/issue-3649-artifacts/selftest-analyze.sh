@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=361
+CASE_FLOOR=364
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -3152,7 +3152,8 @@ fi
 # pinned to the disposition it actually has, not to a shared idea of rigour.
 for spec in \
   "NETWORK:nvme0n1 Amazon Elastic Block Store:refuse" \
-  "NOT-MEASURABLE:- no device model:disclose"
+  "NOT-MEASURABLE:- no device model:disclose" \
+  "UNRECOGNISED:nvme0n1 Samsung SSD 980 PRO:unrecognised"
 do
   token="${spec%%:*}"; rest="${spec#*:}"
   detail="${rest%%:*}"; want="${rest##*:}"
@@ -3174,12 +3175,19 @@ PYINNER
   if [ "$want" = refuse ]; then
     check_verdict "a corpus on network storage" UNMEASURED 7 single-stream
     check_cause "a network-backed corpus" corpus-network-storage
-  else
+  elif [ "$want" = disclose ]; then
     check_verdict "a corpus whose storage could not be measured" MEETS-TARGET 0 single-stream
     if grep -q '^AB-3649: verdict-detail single-stream STORAGE whether the corpus sits on local or network storage could not be measured' "$TMP/out.txt"; then
       ok "an unmeasurable storage probe is disclosed as a gap, not scored as local"
     else
       bad "an unmeasurable storage probe was neither refused nor disclosed"
+    fi
+  else
+    check_verdict "a corpus on an unrecognised device" MEETS-TARGET 0 single-stream
+    if grep -q '^AB-3649: verdict-detail single-stream STORAGE the corpus device reports a model this probe does not recognise' "$TMP/out.txt"; then
+      ok "an unrecognised device model is disclosed as not-known-local, distinctly from unmeasurable"
+    else
+      bad "an unrecognised device model was not disclosed as its own state"
     fi
   fi
 done
@@ -3283,13 +3291,46 @@ else
   bad "the driver's network-storage handling is not warn-and-name (see stderr above)"
 fi
 
+# THE FALL-THROUGH. The probe's first version returned LOCAL for any model that
+# was not EBS, so an NFS-backed loop device or another cloud's network volume
+# passed as a local disk -- a pass derived from the ABSENCE of a bad signal, in
+# the one check added to stop exactly that. Pinned by calling the classifier
+# directly, because no path on this box reports a third-party model.
+if python3 - "$HERE" <<'PYINNER'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+
+cases = {
+    "Amazon Elastic Block Store": "NETWORK",
+    "Amazon EC2 NVMe Instance Storage": "LOCAL",
+    "Samsung SSD 980 PRO": "UNRECOGNISED",
+    "NetApp LUN C-Mode": "UNRECOGNISED",
+    "": "NOT-MEASURABLE",
+}
+problems = []
+for model, want in cases.items():
+    got = S.classify_storage_model(model)
+    if got != want:
+        problems.append("model %r classified %s, expected %s" % (model, got, want))
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "an unrecognised device model is UNRECOGNISED, not waved through as local"
+else
+  bad "the storage classifier mis-sorts a device model (see stderr above)"
+fi
+
 # The storage PROBE itself, against real paths. `/` on this box is EBS-backed, so
 # the NETWORK arm is exercised against a genuine device rather than a mock; a box
 # where it is not simply reports LOCAL or NOT-MEASURABLE, all three of which are
 # recognised tokens, which is the property under test.
 probe_out="$(python3 "$SUPPORT" probe-storage / 2>/dev/null || echo 'FAILED - -')"
 case "${probe_out%% *}" in
-  LOCAL|NETWORK|NOT-MEASURABLE)
+  LOCAL|NETWORK|UNRECOGNISED|NOT-MEASURABLE)
     ok "probe-storage answers with a recognised token for a real path" ;;
   *)
     bad "probe-storage answered '${probe_out%% *}', which is not a recognised token" ;;

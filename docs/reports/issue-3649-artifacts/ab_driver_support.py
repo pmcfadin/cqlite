@@ -997,9 +997,25 @@ def probe_storage(path):
     *Amazon Elastic Block Store* for its devices. A hostname pattern would red a
     correct rig the day someone uses `i4i.2xlarge`; the device model does not.
 
-    THREE-VALUED, and the third value is not a pass. `NOT-MEASURABLE` on a
-    platform that exposes no device model is a different fact from `LOCAL`, and
-    only one of them is a gap.
+    FOUR-VALUED, and only ONE of them is a pass. `NOT-MEASURABLE` (no model to
+    read) and `UNRECOGNISED` (a model that names neither service) are different
+    facts from `LOCAL`, and neither is evidence of a local disk.
+
+    WHAT THIS DEPENDS ON, because the next person will otherwise re-derive it:
+    the NVMe **vendor model string**, and nothing else discriminates. Measured on
+    an EBS-backed lane box -- `queue/rotational` is `0` and the filesystem type is
+    `ext4`, which is exactly what instance storage reports too, and IMDS returns
+    nothing. On Nitro, EBS is *presented as an NVMe device on purpose*, so there
+    is no portable, non-vendor signal separating network-attached block storage
+    from instance storage: the two are indistinguishable by design at every layer
+    below the device identity.
+
+    So this is measurable ON AWS and not portably. It is worth more than the
+    hostname check it replaces for one reason: the string is reported BY THE
+    DEVICE and names the storage service directly, rather than describing the
+    machine class and leaving the storage to be inferred -- and both the pass and
+    the fail are affirmative matches, so a device this does not recognise is
+    reported as unrecognised rather than waved through.
     """
     try:
         source = subprocess.run(
@@ -1022,11 +1038,29 @@ def probe_storage(path):
             model = handle.read().strip()
     except OSError:
         return "NOT-MEASURABLE", base, "no device model at %s" % model_path
-    if not model:
-        return "NOT-MEASURABLE", base, "the device model is empty"
-    if "elastic block store" in model.lower():
-        return "NETWORK", base, model
-    return "LOCAL", base, model
+    return classify_storage_model(model), base, (model or "the device model is empty")
+
+
+def classify_storage_model(model):
+    """Sort a device model string into the four storage verdicts.
+
+    AFFIRMATIVE ON BOTH SIDES. The first version returned LOCAL for any model
+    that was not EBS -- a pass derived from the ABSENCE of a bad signal, which is
+    the shape this lane keeps finding elsewhere. An unrecognised model is
+    UNRECOGNISED: an NFS-backed loop device, another cloud's network volume or a
+    SAN LUN would all have passed as local.
+
+    Split out from the filesystem walk so it can be exercised against models no
+    path on any one box reports.
+    """
+    if not model.strip():
+        return "NOT-MEASURABLE"
+    lowered = model.lower()
+    if "elastic block store" in lowered:
+        return "NETWORK"
+    if "instance storage" in lowered:
+        return "LOCAL"
+    return "UNRECOGNISED"
 
 
 def parse_startup(path, want):

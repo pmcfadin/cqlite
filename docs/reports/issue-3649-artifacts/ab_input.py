@@ -244,7 +244,7 @@ def load_manifest(path, mode):
     # downstream -- the sentinel rule this lane keeps re-learning. The token set
     # is CLOSED for the same reason: `!= "NETWORK"` would accept a typo.
     for holder, key, allowed in (
-        ("corpus", "storage", ("LOCAL", "NETWORK", "NOT-MEASURABLE")),
+        ("corpus", "storage", ("LOCAL", "NETWORK", "UNRECOGNISED", "NOT-MEASURABLE")),
         ("host", "contention", ("QUIET", "CONTENDED", "NOT-MEASURABLE")),
     ):
         value = _require(manifest[holder], key, str, "manifest.%s" % holder)

@@ -915,11 +915,22 @@ def report(mode, manifest, pairs, admission, opts, stats, session):
     # LOCAL STORAGE -- the other property the `i4i` label stood for. NETWORK is
     # refused upstream; only the unmeasurable state reaches here, and it is
     # reported as itself rather than as a verified local disk.
-    if field(manifest, "corpus", "storage") == "NOT-MEASURABLE":
+    storage = field(manifest, "corpus", "storage")
+    if storage == "NOT-MEASURABLE":
         out(
             "verdict-detail %s STORAGE whether the corpus sits on local or "
             "network storage could not be measured (%s). The rig is specified for "
             "local NVMe; confirm it by hand before reporting this verdict"
+            % (mode, field(manifest, "corpus", "storage_detail"))
+        )
+    elif storage == "UNRECOGNISED":
+        out(
+            "verdict-detail %s STORAGE the corpus device reports a model this "
+            "probe does not recognise (%s), so it is NOT known to be local. The "
+            "only signal that separates network-attached block storage from "
+            "instance storage is the vendor model string -- rotational flags and "
+            "filesystem types are identical for both -- so an unrecognised device "
+            "is declared, not assumed local. Confirm it by hand"
             % (mode, field(manifest, "corpus", "storage_detail"))
         )
     for line in non_exhaustive_lines(mode, len(pairs)):
