@@ -76,6 +76,24 @@
 --                          — tuple field.
 --   nu frozen<inner_u>     — NESTED UDT field: a UDT field whose own type is a
 --                            UDT, which is the recursion route.
+--   fu frozen<list<frozen<inner_u>>>
+--                          — A UDT INSIDE A COLLECTION inside a UDT field. Added
+--                            for roborev round 1's BLOCKER 1 on #3722: the
+--                            collection/tuple arms used to render their ELEMENT
+--                            type to a STRING, and `CqlType::Udt` renders to a
+--                            BARE NAME, so the inline field definitions were
+--                            DISCARDED and the element resolved by name through
+--                            the UdtRegistry — falling back to Value::Blob on a
+--                            schema-less read. No other field in this type can
+--                            reach that path: `nu` is a UDT DIRECTLY (the field
+--                            arm, which always recursed structurally), and
+--                            fl/fs/fm/tp carry only SCALAR elements. This field
+--                            is the one that makes the element path observable,
+--                            and it is CASSANDRA-WRITTEN rather than hand-built
+--                            precisely because a hand-constructed byte sequence
+--                            can embed the same framing assumption the decoder
+--                            makes, which is the symmetric-oracle trap AC6
+--                            forbids.
 --   bl blob                — *** CONTROL 1 ***: the ONE field that MUST STILL
 --                            decode to `Value::Blob`. A fix that blanket-stops
 --                            emitting Blob (e.g. by making the fallback an error
@@ -156,6 +174,7 @@ CREATE TYPE IF NOT EXISTS wide (
     fm frozen<map<text, int>>,
     tp frozen<tuple<int, text>>,
     nu frozen<inner_u>,
+    fu frozen<list<frozen<inner_u>>>,
     bl blob,
     i  int
 );

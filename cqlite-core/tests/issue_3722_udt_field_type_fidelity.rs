@@ -436,6 +436,34 @@ fn assert_wide_fully_decoded(udt: &UdtValue, ctx: &str) {
             variant(other)
         ),
     }
+    // A UDT INSIDE A COLLECTION inside a UDT field — roborev round 1's BLOCKER 1.
+    // The element type used to be rendered to a STRING, and `CqlType::Udt` renders
+    // to a BARE NAME, so the inline field defs were dropped and the element
+    // resolved by registry name (⇒ `Value::Blob` schema-less). No other field here
+    // reaches that path: `nu` is a UDT DIRECTLY (the field arm, always structural)
+    // and fl/fs/fm/tp carry only scalar elements.
+    //
+    // Golden (sstabledump): `[{"a": 11, "b": "e1"}, {"a": -22, "b": "e2"}]`.
+    match peel(field(udt, "fu")) {
+        Value::List(items) => {
+            assert_eq!(items.len(), 2, "{ctx}: frozen<list<frozen<inner_u>>> arity");
+            for (i, (want_a, want_b)) in [(11, "e1"), (-22, "e2")].iter().enumerate() {
+                let e = as_udt(&items[i], &format!("{ctx}: fu[{i}]"));
+                assert_eq!(e.type_name, "inner_u", "{ctx}: fu[{i}] type name");
+                assert_eq!(
+                    field(e, "a"),
+                    &Value::Integer(*want_a),
+                    "{ctx}: fu[{i}].a — a BARE-NAME element render would have made this a Blob"
+                );
+                assert_eq!(field(e, "b").as_str(), Some(*want_b), "{ctx}: fu[{i}].b");
+            }
+        }
+        other => panic!(
+            "{ctx}: frozen<list<frozen<inner_u>>> must be Value::List of Udt, got {}",
+            variant(other)
+        ),
+    }
+
     let nested = as_udt(field(udt, "nu"), &format!("{ctx}: nested frozen<inner_u>"));
     assert_eq!(nested.type_name, "inner_u", "{ctx}: nested UDT type name");
     assert_eq!(
@@ -550,7 +578,7 @@ async fn frozen_set_udt_element_decodes_every_field_cql_short_spelling() {
 async fn null_udt_fields_stay_null_and_populated_siblings_still_decode() {
     let rows = rows(Spelling::CqlShort).await;
     let udt = as_udt(column(&rows, 2, "w"), "w/row2");
-    for name in ["t", "vi", "du", "fs", "fm", "nu"] {
+    for name in ["t", "vi", "du", "fs", "fm", "nu", "fu"] {
         let f = udt
             .fields
             .iter()

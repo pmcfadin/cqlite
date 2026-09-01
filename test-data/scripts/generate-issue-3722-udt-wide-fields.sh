@@ -210,13 +210,13 @@ flush_ks() {
 WIDE_A="{s: -300, t: -1, d: 123.45, vi: 90071992547409910000, tm: '13:30:54.234000000',
  tu: 8ac6d580-6d4d-11ee-b962-0242ac120002, du: 2mo3d4h5m, dt: '2026-03-14',
  ip: '192.168.1.42', fl: [1,-2,3], fs: {'a','b'}, fm: {'k1': 10, 'k2': -20},
- tp: (7, 'seven'), nu: {a: 5, b: 'nested'}, bl: 0xdeadbeef, i: 7}"
+ tp: (7, 'seven'), nu: {a: 5, b: 'nested'}, fu: [{a: 11, b: 'e1'}, {a: -22, b: 'e2'}], bl: 0xdeadbeef, i: 7}"
 
 WIDE_B="{s: 32767, t: 127, d: -0.001, vi: -170141183460469231731687303715884105728,
  tm: '00:00:00.000000001', tu: 8ac6d581-6d4d-11ee-b962-0242ac120002,
  du: -1y2mo3d4h5m6s7ms8us9ns, dt: '1970-01-02', ip: '2001:db8::dead:beef',
  fl: [-2147483648, 2147483647], fs: {'zzz'}, fm: {'neg': -1},
- tp: (-1, 'minus'), nu: {a: -5, b: 'nested-b'}, bl: 0x00ff, i: -7}"
+ tp: (-1, 'minus'), nu: {a: -5, b: 'nested-b'}, fu: [{a: -33, b: 'e3'}], bl: 0x00ff, i: -7}"
 
 # ----------------------------------------------------------------------------
 # Rows. Separate rows are used wherever a decode failure in one column could
@@ -277,7 +277,7 @@ insert_rows() {
          {s: -300, t: null, d: 123.45, vi: null, tm: '13:30:54.234000000',
           tu: 8ac6d580-6d4d-11ee-b962-0242ac120002, du: null, dt: '2026-03-14',
           ip: '192.168.1.42', fl: [1,-2,3], fs: null, fm: null,
-          tp: (7, 'seven'), nu: null, bl: 0xdeadbeef, i: 7}
+          tp: (7, 'seven'), nu: null, fu: null, bl: 0xdeadbeef, i: 7}
        ) USING TIMESTAMP $T_FIXED"
 }
 
