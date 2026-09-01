@@ -91,6 +91,12 @@ On start, BEFORE anything else: `git fetch origin`, then check whether this mach
     the turn. Do not "fix" it by rewriting the marker.
   - `LIVENESS-UNKNOWN` (7) → liveness could not be measured. STOP the same way and say so in your
     report; never adopt on unproven information.
+  - `ERROR` (1) → an I/O or internal failure: an unreadable marker, no `flock` on this host, the
+    shared liveness library missing, or a helper the writer depends on failing. NOTHING was
+    decided and NOTHING was written. Do not proceed from the marker and do not write over it —
+    report the `verdict-detail` line to the lead. **Every** exit of that script carries a verdict
+    token, a fatal start-up failure included, so an EMPTY token means you are not reading its
+    output (redirection, a shell wrapper) — never that the run was fine.
   - `FOREIGN-ISSUE`/`FOREIGN-MACHINE`/`FOREIGN-WORKTREE` (4) → this marker is not about this
     lane's work (a reused lane, a copied tree, a marker that travelled with a branch). Escalate to
     the lead rather than adopting or deleting it.

@@ -279,6 +279,10 @@ refuse() {
   exit "$code"
 }
 
+# THE ONE EXTERNAL CALL WHOSE STDERR IS DELIBERATELY *NOT* SUPPRESSED (roborev job 26 F2).
+# `--help` emits no verdict line and no consumer parses it — it is contract (a)'s stated
+# exemption — so there is no anchor to protect here, and a HUMAN who asks for the contract and
+# gets nothing is better served by awk's own diagnostic than by silence.
 print_help() {
   awk 'NR>=2 && /^# ---END-HELP---/{exit} NR>=2 {sub(/^# ?/,""); print}' "$0"
 }
