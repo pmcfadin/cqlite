@@ -1125,10 +1125,23 @@ roborev_diff_header_has_path() {
 # reason to leave a hole that a non-invoker or an accident can walk through.
 #
 # TWO RESIDUALS INSIDE THE MODEL, named rather than implied:
-#   * THE MARKER IS READ FROM TOP-LEVEL PR COMMENTS ONLY (`gh pr view --json comments`). A marker posted
-#     inside a REVIEW body or as a review-thread reply is NOT read, so it silently does not apply — the
-#     run reports `waiver: NONE` and the FAIL stands. That direction is fail-CLOSED, but it will read as
-#     "my waiver was ignored", so the form documents the channel.
+#   * THE MARKER IS READ FROM TOP-LEVEL PR COMMENTS ONLY (`gh pr view --json comments`), AND THE MOST
+#     PROBABLE MISPLACEMENT IS THE LINKED ISSUE THREAD (#3759). Three locations are not read: a marker
+#     posted on the PR's LINKED ISSUE — the likeliest, because that is where lane/lead coordination
+#     lives — inside a REVIEW body, or as a review-thread reply. None of them applies, and the FAIL
+#     stands. MEASURED: for PR #3710 both authorizations were granted, field-perfect, on issue #3544,
+#     and the run reported `waiver: NONE` / `deferral: NONE` — textually identical to "the lead
+#     refused" and to "nobody posted one". Position 1 of a six-PR queue idled ~8 hours.
+#     SINCE #3759 THE LINKED-ISSUE CASE IS DIAGNOSED, NOT GRANTED: when the PR-side scan returns
+#     `none`, the PR's linked issue(s) are scanned with the SAME scanner and the SAME scope, and a
+#     marker there that WOULD have been accepted by the channel is reported `waiver: MISPLACED (found
+#     on linked issue #N …)` naming the issue and the remedy. `MISPLACED` GRANTS NOTHING — not
+#     partially, not with a notice — and the FAIL stands; only a marker on the PULL REQUEST grants,
+#     and moving it there is a HUMAN act by the authorizer. A `none` verdict now also DECLARES whether
+#     the probe ran, so "checked and not there" and "never checked" can never read alike.
+#     LEAD-SIDE PROCEDURE, the other half of the fix: after posting either marker, verify with
+#     `gh pr view <PR> --json comments` that the line is ON THE PR. A grant is only granted once it is
+#     readable by the scanner that reads it.
 #   * AN AUTHORIZED HUMAN CAN AUTHORIZE CARELESSLY — pre-authorizing a job id, or waiving without checking
 #     the token accounting. Nothing here can detect that; the control is the permanent, attributable
 #     comment, which is why the reason is required and recorded verbatim.
@@ -1175,6 +1188,240 @@ WAIVER_SCAN_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/roborev-waiver-s
 # edit calling it instead of the scanner would reintroduce a SECOND, shell-side authorization path, and
 # two implementations of an authorization rule drift, and a drift in an authorization rule is a bypass.
 # The allowlist is still expressed once, above, and consumed only by the scanner it is passed to.
+
+
+# ============ THE LINKED-ISSUE MISPLACEMENT PROBE (issue #3759) ============
+# WHY IT EXISTS, measured rather than imagined. For PR #3710 the coordination lead granted BOTH
+# authorizations — field-perfect, correct base/head/job, each the sole nonblank content of its own
+# top-level comment, from an allowlisted author — on ISSUE #3544, the thread where that lane's
+# coordination had happened all day. The wrapper reads PR comments only, so it reported
+# `waiver: NONE` / `deferral: NONE`, which is TEXTUALLY IDENTICAL to "the lead refused" and to
+# "nobody ever posted one". Position 1 of a six-PR serial queue idled ~8 hours and blocked five
+# lanes. The channel behaved exactly as designed; the DIAGNOSTIC could not tell the operator which
+# of three very different situations they were in.
+#
+# WHAT THIS ADDS, AND WHAT IT DELIBERATELY DOES NOT. It adds one DIAGNOSTIC state, `misplaced`. It
+# GRANTS NOTHING — not partially, not with a notice — and no channel rule is loosened to produce
+# it: the allowlist, the sole-nonblank-content rule, the column-zero anchor, the structured author
+# association, the placeholder refusal and the base+head+job binding are all untouched, and the
+# security property ONLY A MARKER ON THE PULL REQUEST GRANTS is preserved exactly. Copying a marker
+# from an issue onto the PR is a HUMAN act by the authorizer; this code only tells them to do it.
+#
+# ONE ENFORCER, INHERITED BY CALL. `roborev-waiver-scan.py` is unmodified and is passed the SAME
+# kind, base, head, job, allowlist (and observed count) as the PR-side call. It is already
+# thread-agnostic — it consumes `{"comments":[{"author":{"login":…},"body":…}]}` on stdin and knows
+# nothing about pull requests — and `gh issue view <N> --json comments` emits that shape
+# BYTE-IDENTICALLY to `gh pr view --json comments` (measured live on issue #3626, 2026-09-01). That
+# measurement is what LICENSES the reuse: had the shapes differed, the options would have been a
+# translation layer (a new component inside an authorization path) or a second scanner — and a
+# second implementation of a marker grammar is a second place for it to diverge, which in an
+# AUTHORIZATION grammar is a bypass (#3626's "reuse, do not reinvent" ruling). The scanner is never
+# told which thread its input came from: thread identity is the CALLER's knowledge, so the
+# `misplaced` state is assigned HERE and the scanner's contract stays exactly "given these
+# comments, does an authorization for this review exist in them?".
+#
+# NEVER RETURNS NON-ZERO AND NEVER EXITS. A two-valued return would re-import the very collapse
+# this change exists to remove, so every failure is a STATE WITH A CAUSE, from a CLOSED set of four
+# outcomes: `misplaced` / `checked` / `no-subject` / `could-not-check`. A partial read — one thread
+# read, another unavailable — is `could-not-check` naming BOTH halves and is NEVER `checked`: a
+# partial scan reported as a complete one is worse than an admitted failure, because it is the
+# version nobody re-checks.
+#
+# Sets, and never returns non-zero:
+#   ROBOREV_PROBE_OUTCOME  misplaced | checked | no-subject | could-not-check
+#   ROBOREV_PROBE_ISSUE    the issue number, on `misplaced` only
+#   ROBOREV_PROBE_DETAIL   the rendering for this outcome, from the closed set above
+
+# THE BOUND. The probe is a DIAGNOSTIC on a path that has already determined the run FAILs, so it
+# must not become an unbounded fan-out of network calls; when the declared set exceeds this, the
+# rendering says so rather than leaving the unprobed remainder silent. Named, not inline, because
+# the number appears in the rendering the operator reads.
+ROBOREV_LINKED_ISSUE_PROBE_MAX=3
+
+roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-findings-count>]
+  local kind="$1" base="$2" head="$3" job="$4" observed="${5:-}"
+  local rel_errfile rel_json rel_errtext numbers declared probed=0
+  local issue read_ok=() unread=() comments result state scan_rc
+  local issue_errfile issue_errtext
+  ROBOREV_PROBE_OUTCOME="could-not-check"
+  ROBOREV_PROBE_ISSUE=""
+  ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: the probe was never asked"
+  if ! command -v gh >/dev/null 2>&1; then
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: 'gh' is not on PATH"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$WAIVER_SCAN_TOOL" ]; then
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: the structured authorization scanner is unusable, and a marker is NEVER recognised from a flattened text stream — not even to print a diagnostic, because a second recogniser is a second place for the grammar to diverge"
+    return 0
+  fi
+  if ! rel_errfile="$(mktemp 2>/dev/null)"; then
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: no temporary file could be created to capture the 'gh' diagnostic"
+    return 0
+  fi
+  # ===== THE LINKED ISSUE COMES FROM THE STRUCTURED RELATION, NEVER FROM THE PR BODY (#3626) =====
+  # #3626 DELETED a PR-body link requirement, and not because Markdown is hard to parse: A PULL-REQUEST
+  # BODY IS EDITABLE AT ANY TIME BY ANYONE WITH WRITE ACCESS, WITH NO PER-EDIT ATTRIBUTION, while a
+  # top-level comment is permanent and attributable — so the body was the WEAKER ARTIFACT and would
+  # stay weaker even if Markdown parsed trivially. Reinstating a body scan FOR ANY PURPOSE would be
+  # reinstating a deleted generation, so this reads the relation and the guard suite asserts that no
+  # `--json body` read and no `#N` prose scan came back.
+  #
+  # ===== THE MUTABLE-DERIVED BOUNDARY, WRITTEN HERE BECAUSE THE NEXT EDIT READS THE CODE FIRST =====
+  # `closingIssuesReferences` is itself derived from the body's closing keywords, so it is ALSO
+  # mutable by anyone with write access. That is acceptable HERE AND ONLY HERE for one precise
+  # reason: THE RESULT GRANTS NOTHING. It selects WHICH THREAD TO PRINT A DIAGNOSTIC ABOUT. The worst
+  # outcome from a re-pointed relation is a diagnostic naming the wrong issue, or naming none, and the
+  # run FAILs either way. THE MOMENT ANY CONSUMER DOWNSTREAM OF THIS RELATION COULD GRANT, THIS
+  # ARGUMENT EVAPORATES AND THE RELATION MUST GO WITH IT.
+  #
+  # ===== A SEPARATE, LATER CALL — THE GRANTING PAYLOAD DOES NOT CHANGE SHAPE (#3759 R4) =====
+  # This is deliberately NOT folded into the caller's `gh pr view --json comments` as
+  # `--json comments,closingIssuesReferences`. Two reasons, the first decisive. (1) THE PAYLOAD AN
+  # AUTHORIZATION IS DECIDED FROM MUST NOT CHANGE SHAPE AS A SIDE EFFECT OF ADDING A DIAGNOSTIC: that
+  # document is the scanner's input, and the fixed, measured shape is exactly what licenses reusing
+  # the scanner unmodified. (2) THE PROBE MUST BE REACHABLE ONLY FROM A BRANCH THAT HAS ALREADY
+  # FAILED TO GRANT: fetching the relation up front would make its data available on every path
+  # including the granted one, so reachability would rest on where an `if` sits rather than on the
+  # data not existing. Issued as its own later call, the ordering is STRUCTURAL — on any other state
+  # the call is NOT MADE, not merely ignored, which is also the only version an invocation-log assert
+  # can measure. The extra round-trip on a failing run is the accepted cost.
+  if ! rel_json="$(cd "$REPO" && gh pr view --json closingIssuesReferences 2>"$rel_errfile")"; then
+    rel_errtext="$(tr -d '\r' <"$rel_errfile" | tr '\n' ' ')"
+    rm -f "$rel_errfile"
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: 'gh pr view --json closingIssuesReferences' failed (${rel_errtext:-no diagnostic was produced})"
+    return 0
+  fi
+  rm -f "$rel_errfile"
+  # ===== EVERY NUMBER IS VALIDATED AFFIRMATIVELY, AND A NON-NUMBER IS NEVER INTERPOLATED RAW =====
+  # The payload is remote text. The python leg reduces each entry to DIGITS or to the fixed token
+  # `NON-NUMERIC` — it never echoes an unrecognised value — and the shell then re-tests each token
+  # for digits itself. Two affirmative tests rather than one because the shell is what interpolates
+  # into an emitted diagnostic, and a value that reaches a renderer must have been judged by the
+  # process that renders it.
+  if ! numbers="$(printf '%s' "$rel_json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+refs = data.get("closingIssuesReferences") if isinstance(data, dict) else None
+if refs is None:
+    refs = []
+if not isinstance(refs, list):
+    sys.exit(1)
+for ref in refs:
+    n = ref.get("number") if isinstance(ref, dict) else None
+    if isinstance(n, bool):
+        n = None
+    if isinstance(n, int):
+        sys.stdout.write("%d\n" % n)
+    elif isinstance(n, str) and n.isdigit() and n:
+        sys.stdout.write("%s\n" % n)
+    else:
+        # NEVER the raw value: an unrecognised entry is reported as a KIND, not as text.
+        sys.stdout.write("NON-NUMERIC\n")
+' 2>/dev/null)"; then
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: the closingIssuesReferences payload could not be parsed"
+    return 0
+  fi
+  declared=0
+  for issue in $numbers; do declared=$(( declared + 1 )); done
+  if [ "$declared" -eq 0 ]; then
+    ROBOREV_PROBE_OUTCOME="no-subject"
+    ROBOREV_PROBE_DETAIL="no linked issue is declared on this PR, so no linked-issue thread was checked"
+    return 0
+  fi
+  # PROBED IN GITHUB'S RETURNED ORDER — not sorted. Any sort is a policy nobody asked for, and the
+  # order GitHub returns is the only one attributable to something outside this code.
+  for issue in $numbers; do
+    [ "$probed" -lt "$ROBOREV_LINKED_ISSUE_PROBE_MAX" ] || break
+    case "$issue" in
+      ''|*[!0-9]*)
+        probed=$(( probed + 1 ))
+        unread+=("an entry that is not an issue number")
+        continue
+        ;;
+    esac
+    probed=$(( probed + 1 ))
+    if ! issue_errfile="$(mktemp 2>/dev/null)"; then
+      unread+=("#$issue (no temporary file could be created to capture the 'gh' diagnostic)")
+      continue
+    fi
+    if ! comments="$(cd "$REPO" && gh issue view "$issue" --json comments 2>"$issue_errfile")"; then
+      issue_errtext="$(tr -d '\r' <"$issue_errfile" | tr '\n' ' ')"
+      rm -f "$issue_errfile"
+      unread+=("#$issue (${issue_errtext:-no diagnostic was produced})")
+      continue
+    fi
+    rm -f "$issue_errfile"
+    # THE SAME SCANNER, THE SAME KIND, THE SAME SCOPE, THE SAME ALLOWLIST. No new argument, no new
+    # grammar, no thread parameter — see the header. The deferral additionally passes the SAME
+    # observed count, so `count=` is matched identically on both threads.
+    if [ -n "$observed" ]; then
+      result="$(printf '%s' "$comments" | python3 "$WAIVER_SCAN_TOOL" "$kind" "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS" "$observed" 2>/dev/null)" && scan_rc=0 || scan_rc=1
+    else
+      result="$(printf '%s' "$comments" | python3 "$WAIVER_SCAN_TOOL" "$kind" "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS" 2>/dev/null)" && scan_rc=0 || scan_rc=1
+    fi
+    if [ "$scan_rc" -ne 0 ]; then
+      unread+=("#$issue (its comments payload could not be parsed)")
+      continue
+    fi
+    state="$(printf '%s\n' "$result" | sed -n 's/^state=//p' | head -1)"
+    read_ok+=("#$issue")
+    # ===== ESCALATION ONLY FROM AN ISSUE-SIDE `granted`, KEYED ON THE AFFIRMATIVE VALUE =====
+    # An issue-side marker that is itself stale, malformed or unauthorized is a DIFFERENT defect that
+    # happens to be on a different thread, and re-posting it would not help — reporting MISPLACED for
+    # it would make the run FAIL after the operator followed the remedy, which spends the
+    # diagnostic's credibility. `MISPLACED` must mean EXACTLY ONE operator action: re-post the
+    # identical marker as a top-level PR comment. So the condition is exactly "this marker WOULD have
+    # been accepted by the channel had it been on the pull request", and every other state — including
+    # one this code has never judged — leaves the outcome alone rather than inheriting an escalating
+    # branch.
+    if [ "$state" = "granted" ]; then
+      ROBOREV_PROBE_OUTCOME="misplaced"
+      ROBOREV_PROBE_ISSUE="$issue"
+      # ===== THE RENDERING CLAIMS WHAT THE PROBE MEASURED, AND NOT ONE STEP MORE (#3759 R3) =====
+      # "would have been ACCEPTED BY THE CHANNEL", never "would have GRANTED". The probe asks the
+      # SCANNER's verdict — every property decidable from the comment itself: shape, sole content,
+      # column-zero anchor, allowlist, field grammar, reason substance, the base/head/job binding, and
+      # for a deferral the `count=` match. It deliberately does NOT run the deferral's NETWORK
+      # DISPOSITION LEG (each `issues=` number's four-valued open-issue check) issue-side. That
+      # scoping is sound because (1) MISPLACED grants nothing, so the worst case is advice one step
+      # short of complete rather than a pass; (2) the remedy is identical either way — a deferral
+      # naming a closed issue on the wrong thread must STILL be moved to the PR, where the disposition
+      # leg then runs and reports its own precise ISSUE-CLOSED / ISSUE-ABSENT / ISSUE-UNVERIFIABLE;
+      # and (3) it would add one network call per declared issue per probed thread on a purely
+      # diagnostic path. A DIAGNOSTIC THAT OVERSTATES WHAT IT MEASURED IS WHAT STOPS THE NEXT PERSON
+      # LOOKING, so the claim is stated at its true strength and the remaining legs are named.
+      ROBOREV_PROBE_DETAIL="an authorization for THIS review (this base, head and job) is on LINKED ISSUE #$issue, not on the pull request — it would have been ACCEPTED BY THE CHANNEL there (shape, sole nonblank content, top-level, allowlisted author, fields and scope all check out)"
+      if [ -n "$observed" ]; then
+        ROBOREV_PROBE_DETAIL="$ROBOREV_PROBE_DETAIL, and its count= matches the $observed observed finding(s); the issue-disposition legs (every issues= number must be an OPEN issue GitHub confirms) are NOT run issue-side and still apply once it is on the PR"
+      fi
+      return 0
+    fi
+  done
+  # ===== A PARTIAL READ IS `could-not-check` NAMING BOTH HALVES, NEVER `checked` =====
+  if [ "${#unread[@]}" -gt 0 ]; then
+    ROBOREV_PROBE_OUTCOME="could-not-check"
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: read with no matching marker: ${read_ok[*]:-none}; NOT read: $(printf '%s; ' "${unread[@]}")"
+    return 0
+  fi
+  if [ "$probed" -lt "$declared" ]; then
+    # THE UNPROBED REMAINDER IS NAMED, NEVER IMPLIED — the same reason the gate prints
+    # `0 RECOGNISED` rather than a bare `0`. A lane that omits coverage silently is
+    # indistinguishable from one that covers it.
+    ROBOREV_PROBE_OUTCOME="checked"
+    ROBOREV_PROBE_DETAIL="linked issues ${read_ok[*]} checked — $probed of $declared declared, probe bounded at $ROBOREV_LINKED_ISSUE_PROBE_MAX: no matching marker"
+    return 0
+  fi
+  ROBOREV_PROBE_OUTCOME="checked"
+  if [ "$declared" -eq 1 ]; then
+    ROBOREV_PROBE_DETAIL="linked issue ${read_ok[*]} checked: no matching marker there either"
+  else
+    ROBOREV_PROBE_DETAIL="linked issues ${read_ok[*]} checked: no matching marker there either"
+  fi
+  return 0
+}
 
 # roborev_absence_waiver_lookup <base-sha> <head-sha> <job-id>: does the PR for this branch carry a
 # waiver for THIS REVIEW? Sets, and never returns non-zero:
@@ -1284,12 +1531,39 @@ roborev_absence_waiver_lookup() {
   # A STATE THIS CODE HAS NEVER JUDGED IS NOT A PASS: an unrecognised (or empty) verdict from the
   # scanner fails closed instead of inheriting the permissive path.
   case "$ROBOREV_WAIVER_STATE" in
-    granted|unauthorized|stale|malformed|none) ;;
+    # `misplaced` IS IN THIS LIST AS A BELT, NOT AS A ROUTE (#3759). The scanner never emits it —
+    # thread identity is the caller's knowledge — and the probe below assigns it AFTER this
+    # validation, so no list entry is strictly required today. It is here so that a future refactor
+    # routing the probe's result through this validation cannot rewrite an accurate diagnostic into a
+    # generic `unavailable`, re-collapsing the very state this change splits out. THIS IS A
+    # RECOGNITION LIST, NOT A GRANTING LIST: membership confers nothing, and the only granting gate
+    # anywhere is the token-exact `[ "$ROBOREV_WAIVER_STATE" = "granted" ]` in the checks file.
+    granted|unauthorized|stale|malformed|none|misplaced) ;;
     *)
       ROBOREV_WAIVER_DETAIL="the waiver scanner returned the unrecognised state '$ROBOREV_WAIVER_STATE'; failing closed"
       ROBOREV_WAIVER_STATE="unavailable"
       ;;
   esac
+  # ===== THE LINKED-ISSUE PROBE: ONLY FROM `none`, AND IT GRANTS NOTHING (#3759) =====
+  # ONLY FROM `none`, and the probe is NOT EVEN PERFORMED for the other states. A PR-side `stale`,
+  # `malformed`, `unauthorized` or `unavailable` is already specific, already actionable and already
+  # correct — "your marker names a different review", "a field is wrong", "this login may not grant",
+  # "the oracle could not be consulted" — and replacing one with MISPLACED would substitute a vaguer
+  # diagnosis for a precise one and send the operator to move a comment that still would not grant.
+  # `none` is the only state carrying no information, so it is the only one the probe may refine.
+  # Not calling it (rather than calling and discarding) is what makes the reachability STRUCTURAL and
+  # measurable from an invocation log; a network call whose result is discarded is latency plus a
+  # future footgun.
+  if [ "$ROBOREV_WAIVER_STATE" = "none" ]; then
+    roborev_linked_issue_marker_probe prompt-content-absent "$base" "$head" "$job"
+    if [ "$ROBOREV_PROBE_OUTCOME" = "misplaced" ]; then
+      # KEYED ON THE AFFIRMATIVE VALUE: only the one outcome that means "a marker the channel would
+      # have accepted is on the wrong thread" changes the state. Every other outcome — including one
+      # this code has never judged — leaves it at `none` and merely records what the probe did.
+      ROBOREV_WAIVER_STATE="misplaced"
+    fi
+    ROBOREV_WAIVER_DETAIL="$ROBOREV_PROBE_DETAIL"
+  fi
   return 0
 }
 
@@ -1341,10 +1615,19 @@ roborev_absence_waiver_lookup() {
 # larger category. "The invoker can bypass this" => record it, do not patch it. "A non-invoker can
 # bypass this", or "this can be bypassed BY ACCIDENT" => defect.
 #
-# RESIDUALS, named rather than implied: the marker is read from TOP-LEVEL PR COMMENTS ONLY, so one
-# posted inside a review body or a review-thread reply is silently not applied (the run reports
-# `deferral: NONE` and the FAIL stands — fail-closed, but it reads as "my authorization was ignored");
-# and an authorized human can authorize carelessly — pre-authorizing a job, or deferring without
+# RESIDUALS, named rather than implied: the marker is read from TOP-LEVEL PR COMMENTS ONLY, AND THE
+# MOST PROBABLE MISPLACEMENT IS THE PR'S LINKED ISSUE THREAD (#3759) — that is where lane/lead
+# coordination lives — followed by a review body and a review-thread reply. None of the three is read,
+# so a marker there is silently not applied (the run reports `deferral: NONE` and the FAIL stands —
+# fail-closed, but it reads as "my authorization was ignored"). MEASURED on PR #3710, where both
+# authorizations were granted field-perfect on issue #3544 and neither applied. SINCE #3759 THE
+# LINKED-ISSUE CASE IS DIAGNOSED, NOT GRANTED: on a `none`, the PR's linked issue(s) are scanned with
+# the SAME scanner and scope, and a marker there that WOULD have been accepted by the channel reports
+# `deferral: MISPLACED (found on linked issue #N …)` with the remedy. MISPLACED GRANTS NOTHING and the
+# FAIL stands — only a marker on the PULL REQUEST grants — and a `none` now DECLARES whether the probe
+# ran. LEAD-SIDE PROCEDURE: after posting the marker, verify with `gh pr view <PR> --json comments`
+# that the line is ON THE PR; a grant is only granted once it is readable by the scanner that reads it.
+# And an authorized human can authorize carelessly — pre-authorizing a job, or deferring without
 # checking that the findings really are the tracked ones. Nothing mechanical detects either; the
 # control is the permanent, attributable comment, which is why a substantive reason is required and
 # recorded verbatim.
@@ -1519,13 +1802,33 @@ roborev_findings_deferral_lookup() {
     # of being rewritten to a generic "unrecognised state", which is the diagnostic-quality failure
     # this case exists to avoid; nothing becomes permissive either way, because `unavailable` is
     # non-granting on both paths. `pr-unlinked` is GONE with the check that produced it.
-    granted|unauthorized|stale|malformed|none|count-mismatch|unavailable) ;;
+    # `misplaced` IS A BELT HERE FOR THE SAME REASON AS ON THE WAIVER (#3759): the scanner never
+    # emits it, the probe below assigns it after this validation, and the entry exists so a future
+    # refactor routing the probe through this validation cannot rewrite an accurate diagnostic into a
+    # generic `unavailable`. A RECOGNITION LIST, NOT A GRANTING LIST — the only granting gate is the
+    # token-exact `= "granted"` comparison on the line after this `case`.
+    granted|unauthorized|stale|malformed|none|count-mismatch|unavailable|misplaced) ;;
     *)
       ROBOREV_DEFERRAL_DETAIL="the deferral scanner returned the unrecognised state '$ROBOREV_DEFERRAL_STATE'; failing closed"
       ROBOREV_DEFERRAL_STATE="unavailable"
       return 0
       ;;
   esac
+  # ===== THE LINKED-ISSUE PROBE: ONLY FROM `none`, AND IT GRANTS NOTHING (#3759) =====
+  # Identical rule and identical reasoning to the waiver's (see the block in
+  # `roborev_absence_waiver_lookup`), served by the SAME helper — two copies of a probe over an
+  # authorization channel would be two places for it to diverge. The observed findings count is
+  # passed through UNCHANGED, so `count=` is matched issue-side exactly as it is PR-side; what is
+  # deliberately NOT run issue-side is the network disposition leg, and the rendering says so.
+  if [ "$ROBOREV_DEFERRAL_STATE" = "none" ]; then
+    roborev_linked_issue_marker_probe findings-deferral "$base" "$head" "$job" "$observed"
+    if [ "$ROBOREV_PROBE_OUTCOME" = "misplaced" ]; then
+      ROBOREV_DEFERRAL_STATE="misplaced"
+    fi
+    ROBOREV_DEFERRAL_DETAIL="$ROBOREV_PROBE_DETAIL"
+  fi
+  # The disposition legs below are unreachable from `none`/`misplaced` — this comparison is the one
+  # granting gate, and it is left EXACTLY as it was: nothing about the probe widens it.
   [ "$ROBOREV_DEFERRAL_STATE" = "granted" ] || return 0
   # ===== DISPOSITION: EACH DEFERRED ISSUE MUST BE AN OPEN, FILED ISSUE — AND THAT IS THE WHOLE OF IT =
   # This is the ONE leg that enforces NOT-DROPPED, since the PR-body scan was removed (#3626). It needs
