@@ -63,9 +63,20 @@
 #   skips pages still under I/O. The floor would therefore pre-warm the very cold
 #   phase it precedes, and only for the patched arm. At `off` neither binary issues
 #   any advice, so the floor performs only synchronous index/summary reads that
-#   complete before it exits and are cleanly dropped. It also makes the floor
-#   arm-independent, which is more correct anyway: startup cost is a property of
-#   starting the process, not of the advice policy.
+#   complete before it exits and are cleanly dropped.
+#
+#   THE COST OF THAT CHOICE, STATED RATHER THAN GLOSSED: the floor is measured at
+#   `off` and the cold phase runs at `auto`, so
+#       scan_major_faults = cold(auto) - floor(off)
+#                         = scan(auto) + [setup(auto) - setup(off)]
+#   and the bracketed residual is NOT zero for an arm whose `auto` setup issues
+#   advice — this harness's own advice census shows exactly that, `WILLNEED=1` on a
+#   `--setup-only` run at `auto`. The residual is arm-asymmetric and of the same
+#   order as the difference being measured, so `scan_major_faults` bounds the scan
+#   cost, it does not resolve it. An earlier revision of this comment claimed the
+#   `off` floor "makes the floor arm-independent"; that was contradicted by the
+#   census in this same file and is withdrawn. Treat a small between-arm difference
+#   in this column as unresolved, never as a signal.
 #
 # Requires: passwordless sudo for /proc/sys/vm/drop_caches (checked, fail-closed).
 set -euo pipefail
@@ -116,6 +127,7 @@ fi
 case "$ROUNDS" in
   ''|*[!0-9]*) echo "cold-warm-ab: --rounds must be a positive integer, got '$ROUNDS'" >&2; exit 2 ;;
 esac
+ROUNDS=$((10#$ROUNDS))   # "08" is digit-only but octal to $(( )); normalise before arithmetic
 [ "$ROUNDS" -ge 2 ] || { echo "cold-warm-ab: --rounds must be at least 2, got '$ROUNDS'" >&2; exit 2; }
 if [ $(( ROUNDS % 2 )) -ne 0 ]; then
   echo "cold-warm-ab: --rounds must be EVEN so each arm runs first equally often, got '$ROUNDS'" >&2
@@ -136,7 +148,7 @@ fi
 # constrained to a charset safe for both, and required unique. Unvalidated:
 # a duplicate silently overwrites another arm's artifacts and makes its CSV rows
 # indistinguishable, a comma corrupts the CSV, and a slash writes outside --out.
-_seen_labels=""
+_seen_labels=""; _seen_digests=""
 for entry in "${BINARIES[@]}"; do
   label="${entry%%=*}"; path="${entry#*=}"
   if [ "$label" = "$entry" ] || [ -z "$label" ] || [ -z "$path" ]; then
@@ -151,6 +163,11 @@ for entry in "${BINARIES[@]}"; do
   esac
   _seen_labels="$_seen_labels $label"
   [ -x "$path" ] || { echo "cold-warm-ab: not executable: $path" >&2; exit 2; }
+  _d=$(sha256sum "$path" | cut -d' ' -f1)
+  case " $_seen_digests " in
+    *" $_d "*) echo "cold-warm-ab: both --bin arms are the SAME binary (sha256 $_d); that A/B compares nothing" >&2; exit 2 ;;
+  esac
+  _seen_digests="$_seen_digests $_d"
 done
 
 # A reused directory keeps stale per-phase artifacts from a previous run beside
@@ -175,7 +192,7 @@ _dev=$(findmnt -no SOURCE --target "$CORPUS" 2>/dev/null || true)
 # `lsblk -no PKNAME` EXITS 0 AND PRINTS NOTHING for a whole disk (no parent), so a
 # `|| basename` fallback never fires and every whole-disk device silently recorded
 # UNKNOWN — an unmeasured value taking the permissive branch. Resolve affirmatively.
-_base=$(lsblk -no PKNAME "$_dev" 2>/dev/null | head -1 | tr -d ' ')
+_base=$(lsblk -no PKNAME "$_dev" 2>/dev/null | head -1 | tr -d ' ' || true)
 [ -n "$_base" ] || _base=$(basename "$_dev")
 _model=UNKNOWN; _ra=UNKNOWN
 if [ -r "/sys/block/${_base}/device/model" ]; then
@@ -196,8 +213,9 @@ INSTANCE=$(curl -sf -m 3 -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" http://169
 # A garbled IMDS body must not be recorded as an instance type. Only accept the
 # shape AWS actually emits; anything else is UNKNOWN, which takes the non-i4i arm.
 case "$INSTANCE" in
+  *[!a-z0-9.-]*)       INSTANCE=UNKNOWN ;;   # rejects newlines and every other stray byte
   [a-z0-9]*.[a-z0-9]*) : ;;
-  *) INSTANCE=UNKNOWN ;;
+  *)                   INSTANCE=UNKNOWN ;;
 esac
 
 {
@@ -232,6 +250,10 @@ esac
   echo "primary-signal: scan-attributable major page faults = cold(major_faults) - floor(major_faults)"
   echo "primary-signal-note: %F is per-process (immune to neighbours) but NOT isolated to the scan mapping; the floor phase estimates the non-scan startup cost. The subtraction is an ESTIMATE, not per-mapping accounting."
   echo "secondary-signal: wall seconds (contended; medians only)"
+  echo "limit-p99: UNAVAILABLE — ws0-scan-bench reports whole-scan wall seconds, not a per-operation latency distribution; there is no p99 in this data on any host"
+  echo "limit-fixture-compression: none (#1406) — the compressed-chunk read path is NOT exercised"
+  echo "limit-attribution-residual: scan_major_faults = cold(auto) - floor(off) carries an arm-asymmetric [setup(auto)-setup(off)] residual of the same order as the difference; it BOUNDS the scan cost, it does not resolve it"
+  echo "limit-cross-arm-readahead: the warm phase runs at auto, so an arm that issues whole-file WILLNEED can leave read-ahead in flight past the next drop_caches; see drain-* below"
   echo "env-pinned-floor: CQLITE_PREFETCH=off CQLITE_DISK_ACCESS_MODE=mmap"
   echo "env-pinned-cold-warm: CQLITE_PREFETCH=auto CQLITE_DISK_ACCESS_MODE=mmap"
   echo "env-inherited-cqlite: $(env | grep -E '^CQLITE_' | sort | tr '\n' ' ' | sed 's/ $//')"
@@ -239,15 +261,47 @@ esac
   for entry in "${BINARIES[@]}"; do
     echo "arm: ${entry%%=*}  sha256=$(sha256sum "${entry#*=}" | cut -d' ' -f1)"
   done
+  echo "run: INCOMPLETE (in progress or aborted)"
 } | tee "$OUT/host.txt"
+# Replaced with COMPLETE at the end; an aborted run therefore leaves a NEGATIVE
+# statement rather than well-formed CSVs that look finished.
+trap 'echo "run: ABORTED (exit $?)" >> "$OUT/host.txt"' EXIT
 
 echo "round,arm,phase,wall_secs,max_rss_kb,major_faults,minor_faults" > "$OUT/summary.csv"
 echo "round,arm,floor_major_faults,cold_major_faults,scan_major_faults" > "$OUT/scan-attributable.csv"
+echo "round,arm,where,drain_state" > "$OUT/drain.csv"
 
 # One `/usr/bin/time` invocation per PHASE, each a single-pass run, so every
 # recorded number is attributable to exactly one phase. An earlier version wrapped
 # `--passes N` in ONE invocation, which summed cold+warm into a column the header
 # called cold — a mislabel that would have propagated into the artifact.
+# Bounded drain of in-flight device I/O before dropping the cache.
+#
+# `sync` flushes writes and does NOT wait for reads, and `drop_caches` skips pages
+# still under I/O — so read-ahead issued by a previous phase (or by the other arm's
+# warm phase, which runs at `auto`) can land in the page cache AFTER the drop and
+# pre-warm a run labelled cold. This polls the device's in-flight counter to zero
+# with a bounded timeout and RECORDS the outcome; it never silently assumes it
+# drained. On a device shared with other workloads it may legitimately never reach
+# zero, which is why the result is reported rather than enforced.
+DRAIN_STATE=UNKNOWN
+drain_and_drop() {
+  local round="$1" label="$2" where="$3" i=0 inflight
+  DRAIN_STATE=NOT-ATTEMPTED
+  if [ -r "/sys/block/${_base}/stat" ]; then
+    DRAIN_STATE=TIMEOUT
+    while [ "$i" -lt 100 ]; do
+      inflight=$(awk '{print $9}' "/sys/block/${_base}/stat" 2>/dev/null || echo "")
+      if [ -z "$inflight" ]; then DRAIN_STATE=UNREADABLE; break; fi
+      if [ "$inflight" -eq 0 ] 2>/dev/null; then DRAIN_STATE=DRAINED; break; fi
+      i=$((i+1)); sleep 0.1
+    done
+  fi
+  sync; sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches'
+  echo "$round,$label,$where,$DRAIN_STATE" >> "$OUT/drain.csv"
+  [ "$DRAIN_STATE" = DRAINED ] || echo "  [drain] $where: $DRAIN_STATE (device busy or unreadable; this run may not be fully cold)"
+}
+
 # Set by run_phase so the caller can derive the scan-attributable fault count.
 LAST_MAJF=""
 
@@ -280,10 +334,10 @@ for round in $(seq 1 "$ROUNDS"); do
     # CQLITE_PREFETCH=off so it issues no read-ahead that could outlive it and
     # pre-warm the cold phase below. Its faults are the non-scan cost of starting
     # this process on a cold cache.
-    sync; sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches'
+    drain_and_drop "$round" "$label" pre-floor
     run_phase "$round" "$label" "$path" floor off --setup-only
     local_floor="$LAST_MAJF"
-    sync; sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches'
+    drain_and_drop "$round" "$label" pre-cold
     run_phase "$round" "$label" "$path" cold auto --passes 1
     local_cold="$LAST_MAJF"
     echo "$round,$label,$local_floor,$local_cold,$(( local_cold - local_floor ))" >> "$OUT/scan-attributable.csv"
@@ -310,12 +364,15 @@ done
       st="$OUT/${label}.advice.strace"
       if env CQLITE_PREFETCH=auto CQLITE_DISK_ACCESS_MODE=mmap \
            strace -f -e trace=madvise -o "$st" "$path" --corpus "$CORPUS" --setup-only >/dev/null 2>&1; then
+        _c_wn=UNMEASURED; _c_rd=UNMEASURED; _c_sq=UNMEASURED; _c_dn=UNMEASURED
+        if [ -r "$st" ]; then
+          _c_wn=$(grep -c MADV_WILLNEED   "$st" || true); [ -n "$_c_wn" ] || _c_wn=UNMEASURED
+          _c_rd=$(grep -c MADV_RANDOM     "$st" || true); [ -n "$_c_rd" ] || _c_rd=UNMEASURED
+          _c_sq=$(grep -c MADV_SEQUENTIAL "$st" || true); [ -n "$_c_sq" ] || _c_sq=UNMEASURED
+          _c_dn=$(grep -c MADV_DONTNEED   "$st" || true); [ -n "$_c_dn" ] || _c_dn=UNMEASURED
+        fi
         printf '%s: WILLNEED=%s RANDOM=%s SEQUENTIAL=%s DONTNEED=%s\n' \
-          "$label" \
-          "$(grep -c MADV_WILLNEED "$st" || true)" \
-          "$(grep -c MADV_RANDOM "$st" || true)" \
-          "$(grep -c MADV_SEQUENTIAL "$st" || true)" \
-          "$(grep -c MADV_DONTNEED "$st" || true)"
+          "$label" "$_c_wn" "$_c_rd" "$_c_sq" "$_c_dn"
       else
         echo "$label: CENSUS FAILED — no evidence recorded for this arm"
       fi
@@ -324,7 +381,9 @@ done
   fi
 } | tee "$OUT/advice-census.txt"
 
+trap - EXIT
 {
+  echo "run: COMPLETE"
   echo "finished-utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "loadavg-at-end: $(cut -d' ' -f1-3 /proc/loadavg)"
 } | tee -a "$OUT/host.txt"
