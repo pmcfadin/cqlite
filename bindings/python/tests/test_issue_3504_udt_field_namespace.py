@@ -507,9 +507,17 @@ def test_binding_facts_match_the_committed_cross_binding_reference(rows):
     reference = json.loads(Path(PARITY_FACTS).read_text())
     expected = reference["udts"]
 
+    # Every entry is DERIVED from this binding's own output; nothing here is a
+    # literal. `cm`/`tm` (MULTICELL: the key lives in the CELL PATH) sit beside
+    # `fcm`/`ftm` (FROZEN: a single value cell) because those are two different
+    # decoders in cqlite-core and only the frozen one used to reach a UDT at all
+    # (#3612). Carrying both makes this case a parity control in TWO directions
+    # at once: cross-BINDING, as every entry here is, and cross-DECODE-PATH.
     observed = {
         "row1.c": _facts(rows[1]["c"]),
         "row1.p": _facts(rows[1]["p"]),
+        "row1.cm_key": _facts(next(iter(rows[1]["cm"]))),
+        "row1.tm_key": _facts(next(iter(rows[1]["tm"]))),
         "row1.fcm_key": _facts(next(iter(rows[1]["fcm"]))),
         "row1.ftm_key": _facts(next(iter(rows[1]["ftm"]))),
         "row1.fs_0": _facts(rows[1]["fs"][0]),
@@ -523,13 +531,41 @@ def test_binding_facts_match_the_committed_cross_binding_reference(rows):
     assert sorted(observed) == sorted(expected)
     assert observed == expected
 
-    assert next(iter(rows[1]["fcm"].values())) == reference["map_values"]["row1.fcm_value"]
-    assert next(iter(rows[1]["ftm"].values())) == reference["map_values"]["row1.ftm_value"]
+    # The map VALUES, one per map column, also derived from this binding.
+    map_values = reference["map_values"]
+    for column, fact_key in (
+        ("cm", "row1.cm_value"),
+        ("tm", "row1.tm_value"),
+        ("fcm", "row1.fcm_value"),
+        ("ftm", "row1.ftm_value"),
+    ):
+        assert next(iter(rows[1][column].values())) == map_values[fact_key], column
+    # ...and those four values must be PAIRWISE DISTINCT in the reference, which
+    # is what makes the four assertions above discriminating. The four map columns
+    # hold the SAME key by construction, so a case that read the wrong column's
+    # cell -- exactly the confusion a multicell/frozen pair invites -- would pass
+    # unnoticed against equal values.
+    declared = [
+        map_values["row1.cm_value"],
+        map_values["row1.tm_value"],
+        map_values["row1.fcm_value"],
+        map_values["row1.ftm_value"],
+    ]
+    assert len(set(declared)) == len(declared), declared
 
     # Non-vacuity: the reference must actually carry the colliding subject, or an
     # emptied/renamed file would let this pass having compared nothing.
     assert expected["row1.c"]["fields"]["_type"] == "user-supplied-type"
     assert expected["row1.c"]["typeName"] == "collide"
+    # ...and the reference states the CROSS-DECODE-PATH identity in its own right:
+    # the multicell key facts EQUAL the frozen ones, which is #3612's property (a
+    # caller cannot tell the two spellings of one map apart). Stated here so the
+    # committed FILE remains a valid control on its own -- the per-binding case
+    # that measures this within one binding is
+    # `test_non_frozen_map_udt_key_projects_like_the_frozen_control`, and this
+    # case is what compares the two BINDINGS.
+    assert expected["row1.cm_key"] == expected["row1.fcm_key"]
+    assert expected["row1.tm_key"] == expected["row1.ftm_key"]
 
 
 # =============================================================================

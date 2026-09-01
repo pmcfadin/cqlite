@@ -415,9 +415,17 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     const reference = JSON.parse(fs.readFileSync(PARITY_FACTS, 'utf8'));
     const expected = reference.udts;
 
+    // Every entry is DERIVED from this binding's own output; nothing here is a
+    // literal. `cm`/`tm` (MULTICELL: the key lives in the CELL PATH) sit beside
+    // `fcm`/`ftm` (FROZEN: a single value cell) because those are two different
+    // decoders in cqlite-core and only the frozen one used to reach a UDT at all
+    // (#3612). Carrying both makes this case a parity control in TWO directions
+    // at once: cross-BINDING, as every entry here is, and cross-DECODE-PATH.
     const observed = {
       'row1.c': facts(rows.get(1).c),
       'row1.p': facts(rows.get(1).p),
+      'row1.cm_key': facts(soleEntry(rows.get(1).cm)[0]),
+      'row1.tm_key': facts(soleEntry(rows.get(1).tm)[0]),
       'row1.fcm_key': facts(soleEntry(rows.get(1).fcm)[0]),
       'row1.ftm_key': facts(soleEntry(rows.get(1).ftm)[0]),
       'row1.fs_0': facts([...rows.get(1).fs][0]),
@@ -431,8 +439,24 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     expect(Object.keys(observed).sort()).toEqual(Object.keys(expected).sort());
     expect(observed).toEqual(expected);
 
-    expect(soleEntry(rows.get(1).fcm)[1]).toBe(reference.map_values['row1.fcm_value']);
-    expect(soleEntry(rows.get(1).ftm)[1]).toBe(reference.map_values['row1.ftm_value']);
+    // The map VALUES, one per map column, also derived from this binding.
+    const mapValues = reference.map_values;
+    expect(soleEntry(rows.get(1).cm)[1]).toBe(mapValues['row1.cm_value']);
+    expect(soleEntry(rows.get(1).tm)[1]).toBe(mapValues['row1.tm_value']);
+    expect(soleEntry(rows.get(1).fcm)[1]).toBe(mapValues['row1.fcm_value']);
+    expect(soleEntry(rows.get(1).ftm)[1]).toBe(mapValues['row1.ftm_value']);
+    // ...and those four values must be PAIRWISE DISTINCT in the reference, which
+    // is what makes the four assertions above discriminating. The four map
+    // columns hold the SAME key by construction, so a case that read the wrong
+    // column's cell -- exactly the confusion a multicell/frozen pair invites --
+    // would pass unnoticed against equal values.
+    const declaredMapValues = [
+      mapValues['row1.cm_value'],
+      mapValues['row1.tm_value'],
+      mapValues['row1.fcm_value'],
+      mapValues['row1.ftm_value'],
+    ];
+    expect(new Set(declaredMapValues).size).toBe(declaredMapValues.length);
 
     // Non-vacuity: the reference must actually carry the colliding subjects, or
     // an emptied/renamed file would let this pass having compared nothing. Both
@@ -443,6 +467,14 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     expect(expected['row1.c'].fields._type).toBe('user-supplied-type');
     expect(ownField(expected['row1.c'].fields, '__proto__')).toBe('user-supplied-proto');
     expect(expected['row1.c'].typeName).toBe('collide');
+    // ...and the reference states the CROSS-DECODE-PATH identity in its own
+    // right: the multicell key facts EQUAL the frozen ones, which is #3612's
+    // property (a caller cannot tell the two spellings of one map apart). Stated
+    // here so the committed FILE remains a valid control on its own -- the
+    // per-binding case that measures this within one binding lives above, and
+    // this file is what compares the two bindings.
+    expect(expected['row1.cm_key']).toEqual(expected['row1.fcm_key']);
+    expect(expected['row1.tm_key']).toEqual(expected['row1.ftm_key']);
   });
 
   // ==========================================================================
