@@ -537,3 +537,215 @@ fn an_empty_buffer_for_a_fixed_width_scalar_is_not_rejected_by_the_width_rule() 
         Value::Map(vec![])
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE UDT BOUNDARY'S BYTE ACCOUNTING (roborev BLOCKER 6 on this issue).
+//
+// The UDT arms used to bypass the exhaustion rule: both delegated decoders returned a
+// bare `Value` and dropped their cursor, so bytes after the last declared field — and
+// an INCOMPLETE 1-3 byte field-length prefix, which the field loop silently treats as
+// "trailing fields omitted" — vanished. Consumption is now part of the decode
+// signature (`parse_typed_value_reporting`) and the assert is written ONCE, so these
+// cases are refused for both UDT decoders at once.
+//
+// AUTHORITY, read first-hand at the pinned tag rather than from CQLite's behaviour:
+// `cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/TupleType.java` `split`,
+// which `UserType extends TupleType` inherits and calls (`UserType.java:263`):
+//
+//     for (int i = 0; i < numberOfElements; i++) {
+//         if (position == length) return Arrays.copyOfRange(components, 0, i);
+//         if (position + 4 > length)
+//             throw new MarshalException("Not enough bytes to read %dth component");
+//         ...
+//     }
+//     if (position < length) throw new MarshalException("... but got more");
+//
+// So: omitted trailing components are legal ONLY at exact end-of-buffer; a partial
+// length prefix is corruption; trailing bytes are corruption.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// `UserType`'s per-field framing: `[i32 size][bytes]`, which is `TupleType`'s.
+fn udt_field(bytes: &[u8]) -> Vec<u8> {
+    let mut out = (bytes.len() as i32).to_be_bytes().to_vec();
+    out.extend_from_slice(bytes);
+    out
+}
+
+/// A one-field `inner(a int)` UDT carrying `a = 1`, exactly 8 bytes.
+fn inner_a_1() -> Vec<u8> {
+    udt_field(&1i32.to_be_bytes())
+}
+
+#[test]
+fn a_registry_udt_field_consuming_every_byte_decodes() {
+    let p = parser_with_udt("inner", &[("a", CqlType::Int)]);
+    let value = p
+        .parse_simple_udt_field_value(&inner_a_1(), &CqlType::Custom("inner".to_string()))
+        .expect("the exact serialization must decode");
+    match unfrozen(&value) {
+        Value::Udt(udt) => {
+            assert_eq!(udt.type_name, "inner");
+            assert_eq!(udt.fields[0].value, Some(Value::Integer(1)));
+        }
+        other => panic!("expected Udt, got {:?}", other),
+    }
+}
+
+#[test]
+fn trailing_bytes_after_the_last_registry_udt_field_are_refused() {
+    let p = parser_with_udt("inner", &[("a", CqlType::Int)]);
+    let mut bytes = inner_a_1();
+    // A whole extra `[i32]` behind the last DECLARED field: `TupleType.split`'s
+    // post-loop `if (position < length) throw ... "but got more"`.
+    bytes.extend_from_slice(&0i32.to_be_bytes());
+    let err = p
+        .parse_simple_udt_field_value(&bytes, &CqlType::Custom("inner".to_string()))
+        .expect_err("trailing bytes after the last declared field are corruption");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("trailing byte"),
+        "the error must name the unaccounted bytes, got: {msg}"
+    );
+}
+
+#[test]
+fn a_partial_trailing_registry_udt_field_length_prefix_is_refused() {
+    // TWO declared fields, so the loop reaches the second and finds fewer than four
+    // bytes left: Cassandra's `if (position + 4 > length) throw`. CQLite's field loop
+    // treats that as "trailing fields omitted" and stops WITHOUT advancing, which is
+    // precisely the state the reported offset makes visible.
+    let p = parser_with_udt("inner2", &[("a", CqlType::Int), ("b", CqlType::Text)]);
+    let mut bytes = inner_a_1();
+    bytes.extend_from_slice(&[0x00, 0x00]); // 2 of the 4 prefix bytes
+    let err = p
+        .parse_simple_udt_field_value(&bytes, &CqlType::Custom("inner2".to_string()))
+        .expect_err("an incomplete field-length prefix is corruption, not an omitted field");
+    assert!(err.to_string().contains("trailing byte"), "got: {}", err);
+}
+
+#[test]
+fn omitted_trailing_registry_udt_fields_are_accepted_at_exact_end_of_buffer() {
+    // The POSITIVE control for the two refusals above: the same two-field UDT, the
+    // same one serialized field, and NO stray bytes — `if (position == length) return
+    // Arrays.copyOfRange(components, 0, i)`. Without this case the assert could be
+    // refusing every short encoding, which Cassandra accepts.
+    let p = parser_with_udt("inner2", &[("a", CqlType::Int), ("b", CqlType::Text)]);
+    let value = p
+        .parse_simple_udt_field_value(&inner_a_1(), &CqlType::Custom("inner2".to_string()))
+        .expect("a UDT whose trailing fields are omitted at exact EOF is legal");
+    match unfrozen(&value) {
+        Value::Udt(udt) => {
+            assert_eq!(udt.fields[0].value, Some(Value::Integer(1)));
+            assert_eq!(udt.fields[1].value, None, "omitted trailing field is null");
+        }
+        other => panic!("expected Udt, got {:?}", other),
+    }
+}
+
+#[test]
+fn trailing_bytes_after_the_last_inline_udt_field_are_refused() {
+    // The INLINE decoder (issue #239's fallback: a UDT with no registry entry but
+    // inline field definitions) is a SECOND implementation of the same field loop, so
+    // it needs its own case — a per-site checklist is what BLOCKER 6 rejected, and
+    // this is the site the contract change had to reach as well.
+    let p = parser();
+    let ty = CqlType::Udt("inline1".to_string(), vec![("a".to_string(), CqlType::Int)]);
+    let mut bytes = inner_a_1();
+    bytes.extend_from_slice(&0i32.to_be_bytes());
+    let err = p
+        .parse_simple_udt_field_value(&bytes, &ty)
+        .expect_err("trailing bytes after the last inline field are corruption");
+    assert!(err.to_string().contains("trailing byte"), "got: {}", err);
+}
+
+#[test]
+fn a_partial_trailing_inline_udt_field_length_prefix_is_refused() {
+    let p = parser();
+    let ty = CqlType::Udt(
+        "inline2".to_string(),
+        vec![
+            ("a".to_string(), CqlType::Int),
+            ("b".to_string(), CqlType::Text),
+        ],
+    );
+    let mut bytes = inner_a_1();
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00]); // 3 of the 4 prefix bytes
+    let err = p
+        .parse_simple_udt_field_value(&bytes, &ty)
+        .expect_err("an incomplete inline field-length prefix is corruption");
+    assert!(err.to_string().contains("trailing byte"), "got: {}", err);
+}
+
+#[test]
+fn omitted_trailing_inline_udt_fields_are_accepted_at_exact_end_of_buffer() {
+    let p = parser();
+    let ty = CqlType::Udt(
+        "inline2".to_string(),
+        vec![
+            ("a".to_string(), CqlType::Int),
+            ("b".to_string(), CqlType::Text),
+        ],
+    );
+    let value = p
+        .parse_simple_udt_field_value(&inner_a_1(), &ty)
+        .expect("an inline UDT whose trailing fields are omitted at exact EOF is legal");
+    match unfrozen(&value) {
+        Value::Udt(udt) => assert_eq!(udt.fields[1].value, None),
+        other => panic!("expected Udt, got {:?}", other),
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MALFORMED FIELD LENGTHS ON BOTH UDT PATHS (roborev BLOCKER 4).
+//
+// A field length other than `-1` (null) or `0` (empty) used to be cast straight to
+// `usize`, so `-2` became ~1.8e19 and the following bounds ADD overflowed — a panic
+// on untrusted file bytes. #3612 / PR #3736 closed that upstream by routing all five
+// field loops through `complex_column/component_len.rs::checked_component_len`, which
+// rejects any negative before converting and uses `checked_add`. These two cases pin
+// that the guard is REACHED FROM THIS ISSUE'S NEW ENTRY POINT — the `CqlType`-driven
+// decoder — on both UDT implementations, because a guard upstream of a path nobody
+// takes protects nothing.
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn a_registry_udt_field_length_below_minus_one_is_refused_without_panicking() {
+    let p = parser_with_udt("inner", &[("a", CqlType::Int)]);
+    let err = p
+        .parse_simple_udt_field_value(
+            &(-2i32).to_be_bytes(),
+            &CqlType::Custom("inner".to_string()),
+        )
+        .expect_err("-2 is not a legal component length");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("negative length") && msg.contains("-2"),
+        "the error must name the illegal length, got: {msg}"
+    );
+}
+
+#[test]
+fn an_inline_udt_field_length_below_minus_one_is_refused_without_panicking() {
+    let p = parser();
+    let ty = CqlType::Udt("inline1".to_string(), vec![("a".to_string(), CqlType::Int)]);
+    let err = p
+        .parse_simple_udt_field_value(&(-2i32).to_be_bytes(), &ty)
+        .expect_err("-2 is not a legal component length");
+    assert!(err.to_string().contains("negative length"), "got: {}", err);
+}
+
+#[test]
+fn a_udt_field_length_of_i32_min_is_refused_without_overflowing() {
+    // The extreme of the same class: `i32::MIN as usize` is 0xFFFF...80000000, and the
+    // pre-#3736 `current_offset + field_len` would overflow in debug and wrap in
+    // release. Kept as its own case because `-2` and `i32::MIN` exercise the same
+    // guard but different arithmetic.
+    let p = parser_with_udt("inner", &[("a", CqlType::Int)]);
+    let err = p
+        .parse_simple_udt_field_value(
+            &i32::MIN.to_be_bytes(),
+            &CqlType::Custom("inner".to_string()),
+        )
+        .expect_err("i32::MIN is not a legal component length");
+    assert!(err.to_string().contains("negative length"), "got: {}", err);
+}
