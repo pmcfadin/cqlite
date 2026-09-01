@@ -765,3 +765,95 @@ def test_a_udt_with_a_collection_field_projects_because_that_field_is_bytes():
     # The residual, at the only layer that can reach it today.
     with pytest.raises(TypeError, match=r"unhashable type: 'dict'"):
         hash(cqlite.Udt("t", "k", {"m": {"a": 1}}))
+
+
+# =============================================================================
+# AC5 — the committed fixture resolves CHECKOUT-RELATIVE, never through
+# CQLITE_DATASETS_ROOT (#3131/#3148; issue #3724 AC5)
+# =============================================================================
+
+
+def test_fixture_and_parity_facts_resolve_checkout_relative_not_via_the_env(
+    monkeypatch, tmp_path
+):
+    """SCENARIO: the committed fixture paths do not hang off `CQLITE_DATASETS_ROOT`.
+
+    The module docstring above and the reference file's `note_on_paths` DOCUMENT
+    this contract; nothing ASSERTED it. `_assert_fixture_present` cannot: it
+    checks the file exists at the ALREADY-RESOLVED path, so it would pass
+    unchanged if resolution became env-routed and the env root happened to hold
+    the file. Committed fixtures are committed SOURCE and are resolved
+    checkout-relative — and the corpus resolvers are an EITHER/OR on the
+    variable (`conftest.py:42-48`), so a fixture reached through one is
+    invisible exactly where the suite runs, because every gate run sets it.
+
+    Two halves, and the second is the one that catches a regression.
+
+    AFFIRMATIVE EQUALITY. The resolved paths must EQUAL the checkout-derived
+    expectation, anchored on this file's own location. A "the env value is not a
+    prefix" check would go vacuous whenever the variable is unset or
+    coincidentally equals the checkout — a pass derived from the absence of a
+    bad signal, which CLAUDE.md forbids.
+
+    BEHAVIOURAL INVARIANCE. With `CQLITE_DATASETS_ROOT` *and* the env-routed
+    `conftest.DATASETS` it produces both pointed at an EMPTY directory, a FRESH
+    evaluation of this very module must resolve the SAME three paths, and the
+    committed artifacts must still open and read through them. A resolution
+    routed through either would land in the empty directory and red here — on
+    every run, not merely where the exported root differs from the checkout.
+    Both patches are `monkeypatch`'s, so nothing leaks to sibling tests, and the
+    probe module is never inserted into `sys.modules`.
+
+    NOT ASSERTED: `CQLITE_SCHEMAS_ROOT`. Python's `SCHEMAS` is purely
+    checkout-derived and is pinned below, but the Node side legitimately honours
+    that variable (`setup.js:67-72` — the gate-validated #3148 contract), so
+    honouring it is not an AC5 violation in either binding.
+    """
+    import importlib.util
+    import os
+    import sys
+
+    import conftest
+
+    repo_root = Path(__file__).resolve().parents[3]
+    expected_root = repo_root / "test-data" / "fixtures" / "issue_3504"
+    expected_facts = expected_root / "binding-parity-facts.json"
+    expected_schemas = repo_root / "test-data" / "schemas"
+    expected_schema = expected_schemas / "issue-3504-udt-collision.cql"
+
+    # Half 1 — the resolved constants ARE the checkout-derived paths.
+    assert FIXTURE_ROOT == expected_root
+    assert PARITY_FACTS == expected_facts
+    assert SCHEMAS == expected_schemas
+    assert SCHEMA == expected_schema
+
+    # Half 2 — invariance under a datasets root that holds no corpus at all.
+    bogus = tmp_path / "no-corpus-here"
+    bogus.mkdir()
+    monkeypatch.setenv("CQLITE_DATASETS_ROOT", str(bogus))
+    monkeypatch.setattr(conftest, "DATASETS", bogus)
+
+    # Non-vacuity: both env-routed values really did move, and the root really is
+    # corpus-free — otherwise the invariance below would prove nothing.
+    assert os.environ["CQLITE_DATASETS_ROOT"] == str(bogus)
+    assert conftest.DATASETS == bogus
+    assert bogus != expected_root
+    assert not sorted(bogus.glob("**/*-Data.db"))
+
+    spec = importlib.util.spec_from_file_location(
+        "issue_3504_udt_field_namespace__resolution_probe", Path(__file__).resolve()
+    )
+    assert spec is not None and spec.loader is not None
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    assert probe.FIXTURE_ROOT == expected_root
+    assert probe.PARITY_FACTS == expected_facts
+    assert probe.SCHEMA == expected_schema
+    assert "issue_3504_udt_field_namespace__resolution_probe" not in sys.modules
+
+    # ...and the committed artifacts still READ through the re-resolved paths.
+    with cqlite.open(probe.FIXTURE_ROOT, schema=probe.SCHEMA) as db:
+        ids = sorted(row.get("id") for row in db.execute(probe.QUERY).rows)
+    assert ids == [1, 2, 3], f"fixture unreadable under a bogus datasets root: {ids}"
+    reference = json.loads(probe.PARITY_FACTS.read_text())
+    assert reference["udts"]["row1.c"]["typeName"] == "collide"
