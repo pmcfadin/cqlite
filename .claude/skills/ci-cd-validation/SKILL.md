@@ -35,7 +35,10 @@ context, and never read `gate.log`.
 ```bash
 # ITERATE — every fix round. --lite components (exactly, per scripts/agent-gate.sh LITE_COMPONENTS):
 #   file-size · fmt · clippy (PER-PACKAGE scoped, #1844 — not whole-workspace) · roborev-lints ·
-#   scoped-tests (blast-radius: touched package --lib + the diff's new --test targets). ~1-5 min.
+#   scoped-tests (blast-radius: touched package --lib + the diff's new --test targets).
+# COST IS A FUNCTION OF THE DIFF (#3764): ~1-5 min is the warm NARROW-diff case (median 1.4 min); a
+#   cqlite-core/src/ diff measures median 20 min (to 43 min local, ~104 min under peer load), and a cold
+#   clippy alone adds 16-24 min whatever the diff. CLAUDE.md's Lite row has the full model.
 # Emits a DISTINCT ==== AGENT-GATE LITE SUMMARY ==== block that must NEVER be pasted as the full SUMMARY.
 AGENT_GATE_SUMMARY_FILE=/tmp/lite-<N>.txt \
   bash scripts/agent-gate.sh --lite > /tmp/lite-<N>.log 2>&1 < /dev/null

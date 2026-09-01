@@ -761,13 +761,47 @@ Exit codes: `0` = PASS, `1` = FAIL/REFUSED (`--delta`), `2` = usage/anchor error
 
 ## Tiered gate: `--lite` iterate, full gate once (issue #1821)
 
-The gate is tiered. `scripts/agent-gate.sh --lite` runs only the fast subset
-(file-size + fmt + scoped workspace clippy + blast-radius-scoped tests, ~1–5 min).
-It is the **fast iteration loop, NOT the gate of record** — it emits a DISTINCT
-`==== AGENT-GATE LITE SUMMARY ====` block (`MODE: lite`) that must **never** be
-pasted as the full SUMMARY. Iterate on `--lite` every fix round; run the FULL
-`scripts/agent-gate.sh` **exactly once** before merge. `--lite` never replaces the
-full gate.
+The gate is tiered. `scripts/agent-gate.sh --lite` runs only the reduced component
+set (`LITE_COMPONENTS`: file-size + fmt + clippy + `roborev-lints` +
+blast-radius-scoped tests). It is the **fast iteration loop, NOT the gate of
+record** — it emits a DISTINCT `==== AGENT-GATE LITE SUMMARY ====` block
+(`MODE: lite`) that must **never** be pasted as the full SUMMARY. Iterate on
+`--lite` every fix round; run the FULL `scripts/agent-gate.sh` **exactly once**
+before merge. `--lite` never replaces the full gate.
+
+**`--lite` is NOT a flat `~1–5 min` budget — its cost is a FUNCTION of the diff
+(issue #3764).** There are **two cost drivers, and only ONE of them scales with
+your diff.**
+
+1. **`clippy` is NOT diff-scoped.** `--lite` runs the SAME workspace
+   `--all-features --all-targets` matrix the full gate runs (`LITE_COMPONENTS`,
+   `scripts/agent-gate.sh:5797`), so **every** `--lite` pays it whatever the diff:
+   measured over 188 completed lite runs it is a no-op warm, 2–7 min part-warm, and
+   **16–24 min cold**.
+2. **`scoped-tests` is diff-scoped, and it has a fan-out leg.** It RUNS the touched
+   package's `--lib` plus the diff's new `--test` targets (owners by longest-prefix
+   path match over `cargo metadata`, from `merge-base(HEAD, origin/main)...HEAD`
+   **plus the uncommitted working-tree diff**; defaults to `cqlite-core --lib` when
+   no rust package is in the diff) — **and when a changed path is under
+   `cqlite-core/src/` it ALSO runs `cargo test -p <pkg> --all-targets --no-run` for
+   every workspace member that depends on `cqlite-core` and owns a `--test` target
+   (issue #2658: COMPILE-CHECKED, never run).** That leg — not "touched packages",
+   which consult no dependency edge at all — is why a core-src diff annotates 9–11
+   package sets, and its `--all-targets` is what balloons `target/debug/deps`
+   (**+18 GB in a single round**, as reported in issues #3763/#3764).
+   **`cqlite-core/tests/**` does NOT trigger the fan-out; `cqlite-core/src/**`
+   does.**
+
+**Measured bands** (completed runs, one fleet box): a **narrow** diff is **median
+1.4 min** (n=43) — so the `~1–5 min` this page used to claim is that case exactly, a
+**FLOOR and not a range**; a **`cqlite-core/src/`** diff is **median 20 min, range
+3.8–43 min** (n=20), and issue #3764 reports **up to ~104 min under peer load**.
+
+**And `--lite` is EXEMPT from the issue #1825 gate-slot cap** (as are `--delta` and
+`--only`) — it runs outside slot arbitration entirely, so on a shared box its build
+competes with a peer's gate of record for disk and CPU with nothing arbitrating it.
+**There is NO admission check for `--lite` today, and issue #3763 owns that gap** —
+read this as a budgeting fact, not as an instruction to apply one yourself.
 
 **Division of labor (issues #1855, #2084).** In the worker → subagent model, an
 implementer subagent (`sstable-developer`) edits, commits, pushes, and verifies
