@@ -2375,10 +2375,14 @@ fi
 # one, so the subject is the script being changed rather than the last commit's.
 #
 # Case 101 is the positive control. Without it, cases 97-99 could all be satisfied by a
-# component that FAILs or SKIPs for some reason upstream of the manifest entirely. Cases
-# 101/102 assert the rc-0 and rc-9 outcomes from a RECORDED npm invocation (the stub
-# appends its argv to $STUB_NPM_INVOCATIONS), not from a message the component prints
-# before the suite starts.
+# component that FAILs or SKIPs for some reason upstream of the manifest entirely.
+#
+# EVERY case here is decided through the ONE `_nbgate_measure`/`_nbgate_assert` pair below
+# (roborev #3642, round 3), which requires both halves of the same claim: every verdict the
+# run RECORDS (log lines AND the single SUMMARY entry, never the first line that happens to
+# match) and the RECORDED npm argv (the stub appends to $STUB_NPM_INVOCATIONS), so no case
+# can rest on a message the component prints before the suite starts, nor on a branch
+# announcement a later disagreeing verdict contradicts.
 # ---------------------------------------------------------------------------
 nbgate_ok=0
 if ! command -v git >/dev/null 2>&1; then
@@ -2467,100 +2471,163 @@ JESTSTUB
       bash "$nbgate_wt/scripts/agent-gate.sh" --only node-bindings >"$out" 2>&1
     printf '%s' "$out"
   }
-  _nbgate_verdict() { # <log>
-    grep -Eo '^>>> \[node-bindings\] (PASS|FAIL|SKIP) \(' "$1" 2>/dev/null \
-      | head -1 | awk '{print $3}'
+  # ---- ONE assertion path for EVERY node-gate case (roborev #3642, round 3) ------------
+  # Three review rounds each found the SAME defect in a DIFFERENT case, and each was fixed
+  # only in the case the reviewer named -- which is how a finding family regenerates:
+  #   round 1 -> case 101: asserted a message the component prints BEFORE `npm test`, so it
+  #              passed when the suite never ran;
+  #   round 2 -> case 100: never asserted that `npm test` was NOT invoked, so a lost early
+  #              return would print the right diagnostic and run the suite anyway;
+  #   round 3 -> cases 98/99: selected the FIRST verdict-shaped line (`head -1`), which is
+  #              the branch ANNOUNCEMENT, so a later disagreeing verdict recorded after a
+  #              lost `return` left both green -- and neither consulted the npm log.
+  # ONE defect: an assertion keyed on an EARLY or PARTIAL marker instead of on what the run
+  # RECORDED, uncorroborated by the invocation log. So both properties now live in one
+  # helper every node-gate case goes through, and a case cannot be written without them:
+  #
+  #   (a) EVERY verdict the run RECORDS -- each `>>> [node-bindings] <V> (` line in the log
+  #       AND the single SUMMARY entry -- must be in the case's allowed set, and there must
+  #       be at least one. Not "the first", not "some line matches": the announcement and
+  #       the terminal line have the SAME shape, so a `return` lost after the announcement
+  #       is only ever visible as a SECOND, DISAGREEING verdict.
+  #   (b) The recorded npm argv must agree with the case's contract: npm must have been
+  #       reached AT ALL (`ci`/`install` precede every branch under test, so an absent
+  #       `test` line then means "not reached" rather than "the marker was never written"),
+  #       and `npm test` must be present or absent exactly as the case requires.
+  #
+  # `_nbgate_measure` reads the three artifacts of one completed run ONCE; the assert
+  # REFUSES to answer about any tag other than the last measured one, so re-ordering or
+  # inserting a case reds it instead of silently reading a stale measurement.
+  NBG_TAG=""; NBG_LOG_N=0; NBG_LOG_TOKS=""; NBG_LOG_LAST=""
+  NBG_SUM_N=0; NBG_SUM_TOKS=""; NBG_LIVE=0; NBG_TEST=0; NBG_WHY=""
+  _nbgate_measure() { # <tag>
+    local tag=$1 log sum argv toks sumtoks
+    log="$WORK/nbgate-$tag.log"; sum="$WORK/nbgate-$tag.summary"
+    argv="$WORK/nbgate-$tag.npm-argv"
+    NBG_TAG=$tag
+    toks=$(grep -Eo '^>>> \[node-bindings\] (PASS|FAIL|SKIP) \(' "$log" 2>/dev/null \
+      | awk '{print $3}')
+    NBG_LOG_TOKS=$(printf '%s\n' "$toks" | grep -E '^(PASS|FAIL|SKIP)$' | tr '\n' ' ')
+    NBG_LOG_N=$(printf '%s\n' "$toks" | grep -cE '^(PASS|FAIL|SKIP)$')
+    NBG_LOG_LAST=$(printf '%s\n' "$toks" | grep -E '^(PASS|FAIL|SKIP)$' | tail -1)
+    # `^node-bindings:` cannot match the sibling `node-bindings-leak-lane:` line.
+    sumtoks=$(sed -n 's/^node-bindings:[[:space:]]*\([A-Za-z-]*\).*/\1/p' "$sum" 2>/dev/null)
+    NBG_SUM_TOKS=$(printf '%s\n' "$sumtoks" | grep -E '.' | tr '\n' ' ')
+    NBG_SUM_N=$(printf '%s\n' "$sumtoks" | grep -cE '.')
+    NBG_LIVE=0; NBG_TEST=0
+    grep -qE '^(ci|install)( |$)' "$argv" 2>/dev/null && NBG_LIVE=1
+    grep -qE '^test( |$)' "$argv" 2>/dev/null && NBG_TEST=1
+    return 0
+  }
+  # _nbgate_assert <tag> <allowed verdicts, space-separated> <expect npm test: yes|no>
+  # Sets NBG_WHY to EVERY violated property (not just the first) and returns non-zero.
+  _nbgate_assert() {
+    local tag=$1 allowed=$2 wanttest=$3 t why=""
+    if [ "$NBG_TAG" != "$tag" ]; then
+      NBG_WHY="measurement mismatch: the last measured run is '${NBG_TAG:-<none>}', not '$tag' — a case must assert the run it just measured"
+      return 1
+    fi
+    [ "$NBG_LOG_N" -ge 1 ] || why="$why; the run recorded NO node-bindings verdict line at all"
+    for t in $NBG_LOG_TOKS; do
+      case " $allowed " in
+        *" $t "*) ;;
+        *) why="$why; the run RECORDED verdict '$t' (allowed: $allowed); recorded sequence: ${NBG_LOG_TOKS:-<none>}, final: ${NBG_LOG_LAST:-<none>}" ;;
+      esac
+    done
+    [ "$NBG_SUM_N" = 1 ] || why="$why; the SUMMARY holds $NBG_SUM_N 'node-bindings:' entries, expected exactly 1 (entries: ${NBG_SUM_TOKS:-<none>})"
+    for t in $NBG_SUM_TOKS; do
+      case " $allowed " in
+        *" $t "*) ;;
+        *) why="$why; the SUMMARY records '$t' (allowed: $allowed)" ;;
+      esac
+    done
+    [ "$NBG_LIVE" = 1 ] || why="$why; no 'npm ci'/'npm install' in the argv log, so the invocation marker is not PROVEN LIVE in this run and an absent 'test' line would prove nothing"
+    if [ "$wanttest" = yes ]; then
+      [ "$NBG_TEST" = 1 ] || why="$why; 'npm test' was NOT invoked, so the suite never ran"
+    else
+      [ "$NBG_TEST" = 0 ] || why="$why; 'npm test' WAS invoked, so the run continued into the suite it was supposed to gate"
+    fi
+    if [ -n "$why" ]; then
+      NBG_WHY="${why#; } [recorded npm argv: $(tr '\n' '|' < "$WORK/nbgate-$tag.npm-argv" 2>/dev/null || echo '<no argv log>')]"
+      return 1
+    fi
+    NBG_WHY=""
+    return 0
   }
 
   # Case 101 FIRST — the positive control. If a green manifest does not carry the run past
-  # the corpus gate, the three verdict cases below prove nothing.
+  # the corpus gate, the verdict cases below prove nothing.
   #
-  # ASSERTED FROM THE INVOCATION, NOT FROM THE MESSAGE (roborev #3642, blocker 2). The
-  # `corpus complete` line is printed BEFORE `npm test`, so an early return or a failure
-  # inserted between the two satisfied the message while the suite never ran — the case
-  # claimed rc-0 behaviour it did not measure. The npm PATH stub now appends its argv to
-  # $STUB_NPM_INVOCATIONS, so `npm test` having been REACHED is a recorded fact. Both are
-  # required: the message locates the decision, the marker proves what followed it.
-  # Measured RED: inserting `return 0` immediately after that echo in agent-gate.sh keeps
-  # the message and drops the marker; before this change case 101 stayed green, after it
-  # the case FAILs naming the absent `npm test`.
+  # ALLOWED VERDICTS ARE `PASS FAIL`, DELIBERATELY, AND `SKIP` IS WHAT THAT EXCLUDES. Under
+  # the substituted stubs the run reaches `npm test` and then FAILs DOWNSTREAM of the corpus
+  # gate: the jest stub writes no JSON report, so the #1465 budget affirmation cannot pass
+  # (measured: terminal verdict FAIL, `node-bindings-leak-lane: NO-BUDGET-AFFIRMATION`).
+  # Pinning `PASS` here would red on correct code — the guard agents learn to waive. The
+  # property this case owns is that the run did NOT stop at the corpus gate, which is
+  # exactly `no SKIP recorded anywhere` + `npm test` invoked.
   nbg_log=$(_nbgate_run rc0 0 0)
-  nbg_argv="$WORK/nbgate-rc0.npm-argv"
-  nbg_msg=0; nbg_test=0
+  _nbgate_measure rc0
+  nbg_msg=0
   grep -q 'corpus complete: check-dataset-manifest.sh verified every expected table' "$nbg_log" && nbg_msg=1
-  grep -qE '^test( |$)' "$nbg_argv" 2>/dev/null && nbg_test=1
-  if [ "$nbg_msg" = 1 ] && [ "$nbg_test" = 1 ]; then
-    ok "case 101: manifest rc 0 -> the component passes the corpus gate and INVOKES npm test (recorded in the stub's argv log, not merely announced)"
+  if _nbgate_assert rc0 "PASS FAIL" yes && [ "$nbg_msg" = 1 ]; then
+    ok "case 101: manifest rc 0 -> the component passes the corpus gate and INVOKES npm test (recorded in the stub's argv log, not merely announced), with no corpus-gate SKIP recorded anywhere"
   else
-    bad "case 101: manifest rc 0 did not reach the suite (corpus-complete message: $nbg_msg, 'npm test' recorded in $nbg_argv: $nbg_test; recorded npm argv: $(tr '\n' '|' < "$nbg_argv" 2>/dev/null || echo '<no argv log>')), so cases 97-100 below are not measuring the mapping. Log: $nbg_log"
+    bad "case 101: manifest rc 0 did not reach the suite (corpus-complete message: $nbg_msg; ${NBG_WHY:-<properties held>}), so the mapping cases below are not measuring the mapping. Log: $nbg_log"
   fi
 
-  # Case 97 — rc 9 WITHOUT the opt-out is a FAIL, named as an incomplete corpus.
+  # Case 97 — rc 9 WITHOUT the opt-out is a FAIL, named as an incomplete corpus, and the
+  # suite must not run: a FAIL verdict alone would not say the corpus gate GATED.
   nbg_log=$(_nbgate_run rc9 9 0)
-  nbg_v=$(_nbgate_verdict "$nbg_log")
-  if [ "$nbg_v" = FAIL ] && grep -q 'the corpus at .* is INCOMPLETE' "$nbg_log"; then
-    ok "case 97: manifest rc 9 without the opt-out -> node-bindings FAIL, named as an INCOMPLETE corpus"
+  _nbgate_measure rc9
+  if _nbgate_assert rc9 "FAIL" no && grep -q 'the corpus at .* is INCOMPLETE' "$nbg_log"; then
+    ok "case 97: manifest rc 9 without the opt-out -> node-bindings FAIL (every recorded verdict, log and SUMMARY), named as an INCOMPLETE corpus, with the suite not run"
   else
-    bad "case 97: manifest rc 9 without the opt-out gave verdict '${nbg_v:-<none>}' and no incomplete-corpus diagnostic; a corpus this component cannot vouch for must not pass. Log: $nbg_log"
+    bad "case 97: manifest rc 9 without the opt-out did not record a gated FAIL: ${NBG_WHY:-<verdict properties held>}; incomplete-corpus diagnostic: $(grep -c 'the corpus at .* is INCOMPLETE' "$nbg_log" 2>/dev/null). A corpus this component cannot vouch for must not pass. Log: $nbg_log"
   fi
 
-  # Case 102 — the OTHER HALF of case 101's claim, from the same recorded marker (roborev
-  # #3642, blocker 2). A FAIL verdict is not the same fact as "the suite did not run": the
-  # component could print the incomplete-corpus diagnostic and still have invoked `npm test`
-  # over a corpus it just refused to vouch for. The rc-9 run above must have reached npm
-  # (`ci`/`run build`/`run typecheck` all precede the manifest check, so the recording is
-  # PROVEN LIVE in this very run — without that half, "no test line" could just mean the
-  # marker was never written) and must NOT have reached `npm test`.
-  nbg_argv9="$WORK/nbgate-rc9.npm-argv"
-  nbg_live=0; nbg_test9=0
-  grep -qE '^(ci|install)( |$)' "$nbg_argv9" 2>/dev/null && nbg_live=1
-  grep -qE '^test( |$)' "$nbg_argv9" 2>/dev/null && nbg_test9=1
-  if [ "$nbg_live" = 1 ] && [ "$nbg_test9" = 0 ]; then
+  # Case 102 — the invocation half of case 97's run, named as its own case because it is a
+  # DIFFERENT fact: a FAIL verdict is not the same claim as "the suite did not run". Read
+  # from the SAME measurement (never re-grepped), so the two cases cannot drift.
+  if [ "$NBG_TAG" = rc9 ] && [ "$NBG_LIVE" = 1 ] && [ "$NBG_TEST" = 0 ]; then
     ok "case 102: the rc-9 FAIL STOPS the run before the suite — npm ci was recorded and 'npm test' was not (the corpus gate gates, it does not merely complain)"
   else
-    bad "case 102: the rc-9 run's npm argv log does not show a gated suite (npm ci/install recorded: $nbg_live, 'npm test' recorded: $nbg_test9; argv: $(tr '\n' '|' < "$nbg_argv9" 2>/dev/null || echo '<no argv log>')). Either the component ran the suite over a corpus it refused to vouch for, or the marker was never written and case 101's proof is vacuous."
+    bad "case 102: the rc-9 run's npm argv log does not show a gated suite (measured run: '${NBG_TAG:-<none>}', npm ci/install recorded: $NBG_LIVE, 'npm test' recorded: $NBG_TEST; argv: $(tr '\n' '|' < "$WORK/nbgate-rc9.npm-argv" 2>/dev/null || echo '<no argv log>')). Either the component ran the suite over a corpus it refused to vouch for, or the marker was never written and case 101's proof is vacuous."
   fi
 
   # Case 98 — rc 9 WITH the opt-out is a SKIP. The #2078 opt-out has to reach THIS verdict
   # and not only the absent-corpus one: the pre-npm branch keys on
-  # _node_bindings_corpus_present, which a PARTIAL corpus satisfies.
+  # _node_bindings_corpus_present, which a PARTIAL corpus satisfies. `SKIP` is the ONLY
+  # allowed verdict, so the announcement-then-FAIL shape a lost `return` produces reds here
+  # (measured RED: deleting that branch's `return 0` records SKIP then FAIL and invokes
+  # `npm test`; before this round both halves selected the announcement and stayed green).
   nbg_log=$(_nbgate_run rc9opt 9 1)
-  nbg_v=$(_nbgate_verdict "$nbg_log")
-  if [ "$nbg_v" = SKIP ] && grep -q 'reports an INCOMPLETE corpus' "$nbg_log"; then
-    ok "case 98: manifest rc 9 + AGENT_GATE_ALLOW_MISSING_FIXTURES=1 -> node-bindings SKIP (the #2078 opt-out reaches the manifest verdict, not just the absent-corpus one)"
+  _nbgate_measure rc9opt
+  if _nbgate_assert rc9opt "SKIP" no && grep -q 'reports an INCOMPLETE corpus' "$nbg_log"; then
+    ok "case 98: manifest rc 9 + AGENT_GATE_ALLOW_MISSING_FIXTURES=1 -> node-bindings SKIP as its ONLY recorded verdict, with the suite not run (the #2078 opt-out reaches the manifest verdict, not just the absent-corpus one, and it is EFFECTIVE)"
   else
-    bad "case 98: manifest rc 9 under the #2078 opt-out gave verdict '${nbg_v:-<none>}', expected SKIP; the documented remedy would not work in the state that prints it. Log: $nbg_log"
+    bad "case 98: manifest rc 9 under the #2078 opt-out did not record an effective SKIP: ${NBG_WHY:-<verdict properties held>}; opt-out diagnostic: $(grep -c 'reports an INCOMPLETE corpus' "$nbg_log" 2>/dev/null). Either the documented remedy would not work in the state that prints it, or the run did not stop where it said it did. Log: $nbg_log"
   fi
-  # The SKIP must also be RECORDED, not merely printed: an opt-out is only worth having if
-  # it is both visible and effective, and the SUMMARY block is where it becomes visible.
-  if grep -qE '^node-bindings: *SKIP' "$WORK/nbgate-rc9opt.summary" 2>/dev/null; then
-    ok "case 99: the rc-9 opt-out SKIP is RECORDED as SKIP in the gate SUMMARY block"
+  # Case 99 — the SUMMARY half of the same run, named separately because an opt-out is only
+  # worth having if it is both EFFECTIVE (case 98) and VISIBLE. Asserted from the same
+  # measurement: exactly ONE `node-bindings:` entry, and that entry is SKIP — an appended or
+  # overwritten later entry is what a lost `return` would leave behind.
+  if [ "$NBG_TAG" = rc9opt ] && [ "$NBG_SUM_N" = 1 ] && [ "$NBG_SUM_TOKS" = "SKIP " ]; then
+    ok "case 99: the rc-9 opt-out SKIP is RECORDED as the gate SUMMARY's ONE node-bindings entry"
   else
-    bad "case 99: the rc-9 opt-out SKIP is not recorded as SKIP in the SUMMARY ($(grep -E '^node-bindings:' "$WORK/nbgate-rc9opt.summary" 2>/dev/null | head -1))"
+    bad "case 99: the rc-9 opt-out SKIP is not the SUMMARY's single node-bindings entry (measured run: '${NBG_TAG:-<none>}', entries: $NBG_SUM_N, verdicts: '${NBG_SUM_TOKS:-<none>}'; lines: $(grep -E '^node-bindings:' "$WORK/nbgate-rc9opt.summary" 2>/dev/null | tr '\n' '|'))"
   fi
 
   # Case 100 — any OTHER non-zero code is a TOOLING failure, and the opt-out does NOT
   # excuse it. Run WITH the opt-out on purpose: that is the direction that can go wrong.
-  # The opt-out excuses missing fixtures, not an unanswered question.
+  # The opt-out excuses missing fixtures, not an unanswered question. Same two properties:
+  # FAIL is the only verdict allowed to be recorded, and the suite must not have run.
   nbg_log=$(_nbgate_run rc2opt 2 1)
-  nbg_v=$(_nbgate_verdict "$nbg_log")
-  # ...and, from the SAME recorded marker case 102 uses (roborev #3642, round 2, finding 2):
-  # the verdict and the diagnostic together still do not say the SUITE WAS NOT RUN. Remove
-  # the early return after the tooling failure and the component would print this exact
-  # message, run the whole jest suite over a corpus no checker vouched for, and leave this
-  # case green. So assert the same two halves as case 102: npm was reached AT ALL in this
-  # run (`ci`/`run build`/`run typecheck` all precede the manifest check, so a missing
-  # `test` line means "not reached", not "the marker was never written"), and `npm test`
-  # was NOT.
-  nbg_argv2="$WORK/nbgate-rc2opt.npm-argv"
-  nbg_live2=0; nbg_test2=0
-  grep -qE '^(ci|install)( |$)' "$nbg_argv2" 2>/dev/null && nbg_live2=1
-  grep -qE '^test( |$)' "$nbg_argv2" 2>/dev/null && nbg_test2=1
-  if [ "$nbg_v" = FAIL ] && grep -q 'TOOLING failure, not a corpus verdict' "$nbg_log" \
-     && [ "$nbg_live2" = 1 ] && [ "$nbg_test2" = 0 ]; then
-    ok "case 100: manifest rc 2 under the #2078 opt-out -> node-bindings FAIL as a TOOLING failure AND the suite is not run (npm ci recorded, 'npm test' not) — the opt-out excuses missing fixtures, not an unanswered question"
+  _nbgate_measure rc2opt
+  if _nbgate_assert rc2opt "FAIL" no \
+     && grep -q 'TOOLING failure, not a corpus verdict' "$nbg_log"; then
+    ok "case 100: manifest rc 2 under the #2078 opt-out -> node-bindings FAIL as a TOOLING failure, FAIL its only recorded verdict, AND the suite is not run (npm ci recorded, 'npm test' not) — the opt-out excuses missing fixtures, not an unanswered question"
   else
-    bad "case 100: manifest rc 2 under the opt-out gave verdict '${nbg_v:-<none>}', tooling diagnostic $(grep -c 'TOOLING failure, not a corpus verdict' "$nbg_log" 2>/dev/null), npm ci/install recorded: $nbg_live2, 'npm test' recorded: $nbg_test2 (argv: $(tr '\n' '|' < "$nbg_argv2" 2>/dev/null || echo '<no argv log>')). Either a malfunctioning checker is read as a judged corpus, or the run continued into the suite anyway. Log: $nbg_log"
+    bad "case 100: manifest rc 2 under the opt-out did not record a gated tooling FAIL: ${NBG_WHY:-<verdict properties held>}; tooling diagnostic: $(grep -c 'TOOLING failure, not a corpus verdict' "$nbg_log" 2>/dev/null). Either a malfunctioning checker is read as a judged corpus, or the run continued into the suite anyway. Log: $nbg_log"
   fi
 fi
 
