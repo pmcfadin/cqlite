@@ -13,7 +13,8 @@
 //! |----------------|------------------|-------------------------------------------------------------------|
 //! | `Io`           | `io`             | `Io`, `InvalidPath`, `Timeout`                                     |
 //! | `Serialization`| `serialization`  | `Serialization`, `TypeConversion`                                 |
-//! | `Corruption`   | `corruption`     | `Corruption`, `CorruptCommitLogFrame`                              |
+//! | `Corruption`   | `corruption`     | `Corruption`, `CorruptCommitLogFrame`,                             |
+//! |                |                  | `FixedWidthLengthMismatch` (issue #3723 — a wrong on-disk width)   |
 //! | `Schema`       | `schema`         | `Schema`, `Table`                                                  |
 //! | `Parsing`      | `parsing`        | `Parse`, `CqlParse`, `InvalidFormat`, `UnsupportedFormat`,        |
 //! |                |                  | `UnsupportedVersion`, `UnsupportedCommitLogVersion`               |

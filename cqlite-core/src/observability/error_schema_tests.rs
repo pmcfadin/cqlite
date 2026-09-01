@@ -476,6 +476,12 @@ fn error_samples() -> Vec<Error> {
         Error::InvalidInput("i".into()),
         Error::UnsupportedQuery("q".into()),
         Error::Cancelled,
+        Error::FixedWidthLengthMismatch {
+            cql_type: "int".into(),
+            context: "col".into(),
+            expected: 4,
+            actual: 5,
+        },
     ];
     #[cfg(target_arch = "wasm32")]
     samples.push(Error::Wasm("w".into()));
@@ -886,6 +892,21 @@ fn independent_expectations() -> Vec<(Error, ObsErrorCategory)> {
         // (misleading — it is not a transport failure) and not lumped into the
         // generic `Other` bucket (would hide cancellation rate).
         (Error::Cancelled, Cancelled),
+        // Issue #3723: a fixed-width value whose declared on-disk length is not a
+        // width the pinned Cassandra serializer admits. Judged from MEANING: the
+        // bytes on disk are not a legal encoding of the declared type, which is
+        // data corruption — not `Parsing` (this decoder understands the format
+        // perfectly; there is no capability gap) and not `Schema` (the schema is
+        // right, the value is not).
+        (
+            Error::FixedWidthLengthMismatch {
+                cql_type: "int".into(),
+                context: "col".into(),
+                expected: 4,
+                actual: 5,
+            },
+            Corruption,
+        ),
     ];
     out.extend(wasm_expectations());
     out
