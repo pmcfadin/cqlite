@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=278
+CASE_FLOOR=283
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -1957,6 +1957,44 @@ PYINNER
   else
     bad "the census did not scope itself to the served directory"
   fi
+  # ...and it must mirror the CONTAINMENT check too, not only the scope: the
+  # server excludes an entry whose canonical target escapes the served directory,
+  # so a symlinked decoy must satisfy neither floor.
+  mkdir -p "$TMP/symcorpus/ks/tbl" "$TMP/symcorpus/elsewhere"
+  head -c 4096 /dev/zero > "$TMP/symcorpus/ks/tbl/nb-1-big-Data.db"
+  head -c 400000 /dev/zero > "$TMP/symcorpus/elsewhere/real-Data.db"
+  ln -sf "$TMP/symcorpus/elsewhere/real-Data.db" "$TMP/symcorpus/ks/tbl/nb-2-big-Data.db"
+  run_driver --corpus "$TMP/symcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-sym" --min-corpus-bytes 1 --repo "$SCRATCH"
+  check_driver "a symlinked decoy standing in for a second SSTable" 2 corpus-too-few-sstables
+  # A HARD link -- which is what a Cassandra snapshot is -- canonicalises inside
+  # the directory and must still count, or the check would red on real corpora.
+  mkdir -p "$TMP/hardcorpus/ks/tbl"
+  head -c 4096 /dev/zero > "$TMP/hardcorpus/ks/tbl/nb-1-big-Data.db"
+  if ln "$TMP/hardcorpus/ks/tbl/nb-1-big-Data.db" "$TMP/hardcorpus/ks/tbl/nb-2-big-Data.db" 2>/dev/null; then
+    census_out="$(python3 "$SUPPORT" census-served "$TMP/hardcorpus" "$TMP/ticket.json" 2>/dev/null)"
+    if [ "${census_out%% *}" = "2" ]; then
+      ok "a hard link, as a Cassandra snapshot uses, still counts"
+    else
+      bad "the containment check wrongly excluded a hard link ('$census_out')"
+    fi
+  else
+    ok "hard-link case skipped: this filesystem does not support them (declared, not assumed)"
+  fi
+
+  # FINDING 5: arms served under different flags is a control by definition.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --head-server-extra '--max-batch-bytes 1'
+  check_driver "asymmetric per-arm flags without a control label" 3
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --head-server-extra '--max-batch-bytes 1' \
+    --control sensitivity --work-dir "$TMP/w-asym" --min-corpus-bytes 1 \
+    --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD
+  if [ "$RC" != "3" ]; then
+    ok "a labelled control may serve the arms asymmetrically"
+  else
+    bad "a labelled control was refused for asymmetric flags (exit $RC)"
+  fi
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-badarm" --min-corpus-bytes 1 --merge-path sideways
@@ -2407,6 +2445,54 @@ PYINNER
   fi
   echo "  note    DECLARED GAP: the real cargo build, cqlite-flight and flight-loadgen are"
   echo "          exercised by nothing here -- these cases prove the DRIVER's logic only."
+fi
+
+echo
+echo "-- cross-references in FINDINGS.md name the section they point at --"
+
+# I have now introduced a stale `§n` twice while renumbering, in consecutive
+# rounds, and this repository treats a reference that no longer says what it
+# used to as decay rather than cosmetics. A bare `§13` cannot be checked -- both
+# the old and the new number exist -- so every cross-reference carries a short
+# title and this case asserts the title still matches that section's heading.
+if python3 - "$HERE/FINDINGS.md" <<'PYINNER'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+headings = {
+    int(number): title.lower()
+    for number, title in re.findall(r"^## (\d+)\.\s+(.*)$", text, re.M)
+}
+flat = " ".join(text.split())
+bad = []
+for number, title in re.findall(r"§(\d+)\s*\(([^)]+)\)", flat):
+    number = int(number)
+    if number not in headings:
+        bad.append("§%d names no section" % number)
+    elif title.strip().lower().rstrip(".") not in headings[number]:
+        bad.append("§%d says %r but that section is %r" % (number, title, headings[number]))
+# Only the LESSON sections (9+) are checked for a title. The fact sections
+# 1-8 are stable, are referenced by number from RUNBOOK.md, and share their
+# numbering with other documents' sections quoted here (`phase2 ... 3.2`,
+# `RUNBOOK.md 2`), which a bare-number scan cannot tell apart. The lessons are
+# the ones that renumber, and they are the ones that went stale twice.
+bare = [
+    n for n in re.findall(r"\u00a7(\d+)(?!\s*\()", flat)
+    if int(n) in headings and int(n) >= 9
+]
+if bare:
+    bad.append("lesson references with no title: %s" % ", ".join(sorted(set(bare))))
+if not re.search(r"§\d+\s*\(", flat):
+    bad.append("no titled cross-references found, so this guard proved nothing")
+for problem in bad:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if bad else 0)
+PYINNER
+then
+  ok "every FINDINGS.md cross-reference names the section it points at, and matches it"
+else
+  bad "a cross-reference does not match its section (see stderr above)"
 fi
 
 # ---------------------------------------------------------------------------

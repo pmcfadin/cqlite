@@ -303,7 +303,7 @@ directly with the egress batching #2820 changed.
 | `ab_input.py` | manifest/JSONL loading and every named refusal, including the admission handling |
 | `ab_common.py` | the anchored, sanitized emission every module writes through |
 | `ab_driver_support.py` | the driver's ramp/record validators and startup parser, as an **executable file** so they can be tested without a rig |
-| `selftest-analyze.sh` | 265 deterministic cases over synthetic fixtures, with a case floor |
+| `selftest-analyze.sh` | 282 deterministic cases, including a complete two-arm session run end to end under PATH shims |
 | `RUNBOOK.md` | the metered-rig procedure: pre-flight, positive control, the run, the termination contract, and the AC checklist |
 
 **Not delivered, and deliberately so: a number.** The AC is discharged by a rig
@@ -311,7 +311,63 @@ session, not by this lane.
 
 ---
 
-## 9. The fourth lesson: when one mechanism keeps producing findings, delete the mechanism
+## 9. The fifth lesson, and the one that closes the class: the driver was never executed
+
+Round 5's High finding was that **`ab-throughput.sh` did not run at all**. A
+helper had been extracted into `ab_driver_support.py` and one call site was left
+invoking it as a bare shell command, so under `set -e` every session died with
+`command not found` **during its first replicate, after both release builds**. A
+second finding in the same round: the corpus census was computed and never
+exported, so every manifest recorded it as zero — the corpus size the acceptance
+criteria explicitly require be stated.
+
+**Neither was subtle, and neither was visible to anything we had.** `bash -n`
+cannot see a missing command or an unexported variable, and the self-test covered
+the analyzer and the *extracted* helpers. 265 cases were green over a program
+that could not complete a single session.
+
+This is the FIFTH instance of one class in this lane — the dead utilization path,
+ten environment-coupled cases, the silent passer among them, the inline parity
+rule, and now the driver itself. §13 (a green suite over an unexecuted subject)
+states the class; §10 (when one mechanism keeps producing findings) says that when a
+mechanism keeps producing findings you remove the reason it can. **The reason was
+that the session loop needed a rig, so nothing could run it.** So it no longer
+needs one:
+
+- `cargo`, `cqlite-flight` and `flight-loadgen` are replaced by **PATH shims** —
+  the idiom this repository's own gate self-tests already use — with **no source
+  seam and no test-only flag** a real invoker could trip over.
+- The stub server **binds a real socket** and prints a realistic configuration
+  line and a real post-bind readiness line; the stub load generator **connects to
+  the endpoint it is handed**, so a wrong or stale address fails the run instead
+  of passing quietly.
+- A case runs a **complete five-pair, two-arm session** and asserts the manifest,
+  the ten replicate files, the census, the per-arm builds, the reaped servers —
+  **and that the analyzer reads the driver's own output and renders a verdict**,
+  which no fixture can establish because it is the property of the two halves
+  meeting.
+
+RED-verified: reintroducing the two findings reds 11 cases and 1 case
+respectively.
+
+**DECLARED GAP, stated in the suite's own output rather than only here: the real
+cargo build, the real `cqlite-flight` and the real `flight-loadgen` are exercised
+by nothing.** These cases prove the driver's logic — ordering, plumbing,
+recording, promotion — not that the server works.
+
+**One thing the harness taught immediately, worth keeping.** The first version of
+the stub load generator emitted a constant rate per arm, so every pair's ratio
+was identical, the bootstrap interval had zero width, and the analyzer refused the
+session as `bootstrap-degenerate`. That was **the guard working correctly on a
+defective fixture** — and it is the failure mode a synthetic harness invites: a
+stub simple enough to be obviously right is often too simple to be realistic, and
+the difference surfaces as a false red against real code. The stub now carries a
+deterministic per-replicate jitter, derived from `crc32` rather than `hash()`,
+which is salted per process and would have made the suite non-deterministic.
+
+---
+
+## 10. The fourth lesson: when one mechanism keeps producing findings, delete the mechanism
 
 Four review rounds produced findings in the driver's session lifecycle — the
 work directory, the port, readiness, the census — roughly seven of the last
@@ -343,9 +399,11 @@ improving the sequencing and **removed the shared resource instead**:
 defect.** Not the sequencing around it, not the guard in front of it. Ask what
 resource is being shared and whether it needs to be shared at all — the fix that
 ends the series is usually a deletion. Same shape as removing the second duration
-grammar rather than widening it (§11), one level up.
+grammar rather than widening it -- §12 (a parameter accepted without being
+checked) -- one level up.
 
-**And a second instance of the mirroring rule from §11.** The corpus census
+**And a second instance of the mirroring rule from §12 (a parameter accepted
+without being checked).** The corpus census
 scanned the whole data root recursively while the server reads **one** resolved
 directory, flat. So both size gates could pass on files that are never served —
 including the ≥2-SSTable gate that exists to stop the #3058 single-source bypass,
@@ -363,7 +421,7 @@ nowhere else to decide it.
 
 ---
 
-## 10. The third lesson: the dangerous defect is the one no test would have failed on
+## 11. The third lesson: the dangerous defect is the one no test would have failed on
 
 Round 3's headline finding was that **every pair ran BASE before HEAD**.
 Interleaving across replicates — which the design called for and which was
@@ -398,7 +456,7 @@ count forces.
 
 ---
 
-## 11. The second lesson: a parameter accepted without being checked against the claim
+## 12. The second lesson: a parameter accepted without being checked against the claim
 
 Round 1's review asked whether the instrument *works*. Round 2's asked whether it
 measures *the right thing*, and three of its five findings were one shape: **an
@@ -432,7 +490,7 @@ Both are worse than the same grammar, applied early.
 
 ---
 
-## 12. The first lesson: a green suite over an unexecuted subject
+## 13. The first lesson: a green suite over an unexecuted subject
 
 Two independent reviews found that the **utilization half of the instrument had
 no producer** — `ab-throughput.sh`'s inline record validator hard-coded a SINGLE
@@ -463,7 +521,7 @@ Two rules worth carrying:
 
 ---
 
-## 13. A process finding: cadence, not partition
+## 14. A process finding: cadence, not partition
 
 *The sections above are about the artifact. This one is about how we sequenced
 the work that produced it, and it is recorded here because this is where the next
@@ -477,7 +535,8 @@ recording how it got that big, because the obvious conclusion is the wrong one.
 **The obvious split would have been actively harmful.** Splitting by layer —
 analyzer first, driver second — ships a manifest schema that nothing produces.
 That is not a missed test; it is a design that *guarantees* an unexecuted subject,
-which is precisely the hole §12 describes. Reflexively partitioning by layer
+which is precisely the hole §13 (a green suite over an unexecuted subject)
+describes. Reflexively partitioning by layer
 makes the round-1 defect structural rather than accidental.
 
 **There was one real seam, and it was a requirement-sequencing error rather than
