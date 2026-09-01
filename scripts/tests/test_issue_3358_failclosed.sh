@@ -309,8 +309,19 @@ else
   bad "absent: no 'no directory \`wide_multiclustering_small-*\` holding \`${DATA_DB}\`' \
 line — the failure does not demonstrate THIS guard fired; see $absent_out"
 fi
-# A SKIP must not reappear under any wording. The removed guards printed 'SKIP:'.
-if grep -q 'SKIP' "$absent_out"; then
+# A SKIP must not reappear under any wording — but the MARKER is what this matches, not
+# the message. A bare `SKIP` substring scan over the whole cargo output false-FAILs a
+# CORRECT run whenever the checkout or TMPDIR path (or an unrelated diagnostic) happens to
+# contain those four letters: e.g. a lane directory named `.../SKIPPED-lane/...` appears in
+# every path cargo prints (roborev job 292, Low). A guard that reds on correct input is the
+# guard agents learn to waive, which is this lane's own subject.
+# `SKIP:` — the marker the removed guards printed (`eprintln!("SKIP: {KEYSPACE}.{TABLE}
+# Data.db is absent (gitignored corpus)")`) — keeps the check wording-AGNOSTIC (anything may
+# follow the colon) while no filesystem path can satisfy it.
+# DECLARED RESIDUAL (1 RECOGNISED): a future skip printed WITHOUT the colon would be missed.
+# That is the deliberate trade — a missed novel spelling is recoverable, a guard nobody
+# trusts is not — and it is declared here rather than left for the next reader to discover.
+if grep -q 'SKIP:' "$absent_out"; then
   bad "absent: output contains 'SKIP' — a committed fixture must never skip (#3220); \
 see $absent_out"
 else
@@ -385,7 +396,9 @@ else
 small for parsing: 0 bytes' — the run failed for some OTHER reason, which does not \
 prove the empty fixture was rejected; see $empty_out"
 fi
-if grep -q 'SKIP' "$empty_out"; then
+# Same marker rule as the absent case above (roborev job 292): match `SKIP:`, never a bare
+# `SKIP` substring, so a checkout/TMPDIR path containing those letters cannot false-FAIL.
+if grep -q 'SKIP:' "$empty_out"; then
   bad "empty: output contains 'SKIP' — an empty fixture must be a hard failure, not an \
 absence; see $empty_out"
 else
