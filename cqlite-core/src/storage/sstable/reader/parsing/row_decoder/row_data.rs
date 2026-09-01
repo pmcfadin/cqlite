@@ -1,7 +1,7 @@
 use super::*;
 
 // Issue #3721: the per-column decode-failure policy lives in `column_decode_error`.
-use super::column_decode_error::{column_decode_failure, dispatch_type};
+use super::column_decode_error::{column_decode_failure, dispatch_type, row_body_exhausted};
 
 impl V5CompressedLegacyParser {
     /// Parse row data (header + cells) and return cells with new offset
@@ -419,15 +419,15 @@ impl V5CompressedLegacyParser {
             // type, so this resolves identically either way.
             let complex_type: &str = header_type.unwrap_or(&column.data_type);
 
+            // Issue #3721: bytes exhausted with a column the row declares PRESENT still
+            // outstanding is TRUNCATION, never a row boundary — see `row_body_exhausted`.
             if offset >= data.len() {
-                tracing::debug!(
-                    "V5CompressedLegacy: Reached end of data at column {} ('{}'), parsed {}/{} on-disk cells",
-                    col_idx,
-                    column.name,
-                    cells.len(),
-                    columns_in_order.len()
-                );
-                break;
+                return Err(row_body_exhausted(
+                    column,
+                    header_type,
+                    (offset, data.len()),
+                    (col_idx, columns_in_order.len(), cells.len()),
+                ));
             }
 
             // Issue #221: Branch based on column type - complex columns need special parsing

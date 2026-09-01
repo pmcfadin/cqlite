@@ -771,3 +771,268 @@ async fn the_reported_type_names_the_complex_columns_declared_key_type() {
     .expect_err("mis-declared map key must fail the read");
     assert_dispatch_type(&err, "map<bigint, text>", "map<int, text>");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Roborev job 10 — the FIFTH swallow site: the row body runs OUT OF BYTES while
+// the row's own column set still names a column as PRESENT.
+//
+// `row_data.rs`'s per-column loop opened with
+//
+// ```text
+// if offset >= data.len() {
+//     tracing::debug!("… Reached end of data at column {} ('{}'), parsed {}/{} …");
+//     break;
+// }
+// ```
+//
+// — a `break`, so row assembly returned `Ok` with that column and every successor
+// missing, while the log line ADMITTED having decoded fewer cells than the column
+// set names. Same shape as the four sites above, reached by a different route.
+//
+// This is TRUNCATED OR CORRUPT DATA, never a legitimate boundary. At
+// `cassandra-5.0.8`, `db/rows/UnfilteredSerializer.deserializeRowBody` fixes the
+// column set BEFORE any cell is read (`hasAllColumns ? headerColumns :
+// Columns.serializer.deserializeSubset(headerColumns, in)`) and `columns.apply(…)`
+// iterates exactly that set; running out of input mid-set raises out of the
+// serializer. Cassandra serves no short row.
+//
+// The legitimate end of a row is a DIFFERENT control-flow path and is untouched: a
+// row whose column set is fully consumed leaves the `for` loop normally and never
+// evaluates this condition. It is also evaluated only AFTER the
+// missing-columns-bitmap skip, so every column reaching it is one the row itself
+// declares has cell bytes on disk. The controls at the end of this section pin
+// that the reads which SHOULD succeed still do.
+//
+// # What reaches this site, measured — read this before adding a case
+//
+// A merely SHORT row does NOT reach it: `row_data.rs` already rejects
+// `row_size > available` upstream (issue #2481), so a row whose declared extent
+// runs past the buffer fails there. The condition here needs a row whose FRAMING
+// places its column set's first present column at exactly the end of the buffer —
+// i.e. a cursor that is wrong, which is corruption evidence and is exactly what the
+// `column_decode_error` module says may not be answered with a short row.
+//
+// It is provoked by TRUNCATING a copy of a real Cassandra-written `Data.db` at a
+// PINNED length (nothing is synthesized; the bytes that remain are Cassandra's, and
+// a CQLite-written fixture could not be the oracle — #3042). The scanner rejects the
+// genuinely truncated row upstream, resynchronises past it, and lands on a framing
+// whose first present column has no bytes left. Each case asserts the untruncated
+// size, so a regenerated fixture fails loudly instead of silently testing something
+// else.
+//
+// MEASURED with the site restored to its `break`: both cases below return
+// `Ok` with ZERO rows — a SUCCESSFUL `SELECT` reporting no data at all over a
+// damaged SSTable that does hold a row. After the fix both are an
+// `Error::ColumnDecode` naming the column, its type and the offset.
+//
+// The scratch copy omits the CHECKSUM components (`CRC.db`, `Digest.crc32`). They
+// are integrity metadata over the file's bytes, not part of the row format, and they
+// are a SEPARATE layer: an uncompressed table's `CRC.db` rejects this truncation
+// before the decoder sees it, which is correct and is not the property under test —
+// the row decoder must be sound on the bytes it is handed, and it is handed them
+// whenever that layer is absent (a BTI/compressed table writes no `CRC.db`) or the
+// damage is chunk-aligned. The `…_without_its_checksum_components` controls prove
+// the omission is not itself what fails the read.
+//
+// # NOT covered here: the compaction path (reported, not faked)
+//
+// `iterate_all_partitions_for_compaction` cannot reach this site today, and no test
+// below pretends otherwise. Its driver does not resynchronise, so on the same
+// truncated fixtures the #2481 `row_size > available` rejection above is the last
+// thing that happens and the driver folds that `Err` into "end of partition" — a
+// SEPARATE swallow (`Ok` with zero rows), out of scope for this change. Measured
+// over cuts 0..60 of six committed uncompressed fixtures: not one reaches this site
+// via the compaction entry point. The compaction arm of the propagation itself is
+// covered by `compaction_read_surfaces_the_column_decode_failure_to_its_caller` and
+// `streaming_compaction_read_surfaces_the_column_decode_failure` above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// SIMPLE-arm subject: `id int PRIMARY KEY, fs frozen<set<int>>,
+/// fm frozen<map<int,text>>` — FROZEN collections are single-cell, so both regular
+/// columns are decoded by the SIMPLE arm. Uncompressed, single partition, committed.
+const TRUNC_SIMPLE_TABLE: &str = "frozen_int_collections";
+const TRUNC_SIMPLE_DIR: &str = "frozen_int_collections-c9820c30748d11f1a94ae34493d77740";
+/// The fixture's untruncated size, asserted so a corpus change cannot silently move
+/// the truncation onto some other condition.
+const TRUNC_SIMPLE_FULL_LEN: usize = 145;
+/// Truncated length at which the outstanding column is `fm`, on-disk column 0 of 2.
+const TRUNC_SIMPLE_KEEP: usize = 108;
+
+const TRUNC_SIMPLE_SCHEMA: &str = "\
+CREATE TABLE IF NOT EXISTS test_signed_coll.frozen_int_collections (
+    id INT PRIMARY KEY,
+    fs FROZEN<SET<INT>>,
+    fm FROZEN<MAP<INT, TEXT>>
+);
+";
+
+/// COMPLEX-arm subject: the same fixture the complex cases above use, so the two
+/// differ only in whether the outstanding column is frozen (single-cell, SIMPLE) or
+/// non-frozen (multicell, COMPLEX).
+const TRUNC_COMPLEX_FULL_LEN: usize = 109;
+const TRUNC_COMPLEX_KEEP: usize = 79;
+
+/// Copy `keyspace/dir` into a scratch tree, truncating `Data.db` to `keep` bytes
+/// (`None` = untruncated) and omitting the checksum components. The `TempDir` is
+/// returned with the root: dropping it deletes the tree.
+fn truncated_copy(
+    keyspace: &str,
+    table: &str,
+    dir: &str,
+    full_len: usize,
+    keep: Option<usize>,
+) -> (tempfile::TempDir, PathBuf) {
+    let src = fixture_root(keyspace, table).join(keyspace).join(dir);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("sstables");
+    let dst = root.join(keyspace).join(dir);
+    std::fs::create_dir_all(&dst).expect("scratch dir");
+    for entry in std::fs::read_dir(&src).expect("read committed fixture dir") {
+        let entry = entry.expect("dir entry");
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Checksum components only — see the section header.
+        if name.contains("CRC") || name.contains("Digest") {
+            continue;
+        }
+        let bytes = std::fs::read(entry.path()).expect("read component");
+        if name.ends_with("-Data.db") {
+            assert_eq!(
+                bytes.len(),
+                full_len,
+                "{keyspace}.{table}'s Data.db is {} bytes, not the {full_len} this case \
+                 pins — the fixture was regenerated and the truncation length below no \
+                 longer selects the condition under test",
+                bytes.len()
+            );
+            let keep = keep.unwrap_or(bytes.len());
+            std::fs::write(dst.join(&name), &bytes[..keep]).expect("write truncated Data.db");
+        } else {
+            std::fs::write(dst.join(&name), &bytes).expect("write component");
+        }
+    }
+    (tmp, root)
+}
+
+/// `SELECT *` over a scratch copy — the PUBLIC read path.
+async fn select_all_truncated(
+    keyspace: &str,
+    table: &str,
+    dir: &str,
+    full_len: usize,
+    keep: Option<usize>,
+    schema_table: &str,
+) -> Result<usize, Error> {
+    let (tmp, root) = truncated_copy(keyspace, table, dir, full_len, keep);
+    let schema = write_schema(tmp.path(), &complex_schema(schema_table));
+    let db = open_db(&root, &schema, keyspace).await;
+    let result = db
+        .execute(&format!("SELECT * FROM {keyspace}.{table}"))
+        .await?;
+    Ok(result.rows.len())
+}
+
+/// The exhaustion must be the per-column variant AND must say what it measured:
+/// which column of how many was still outstanding, and where the body ran out. A
+/// bare "corrupt SSTable" would leave an operator no better off than the
+/// `tracing::debug!` this replaces.
+fn assert_row_body_exhausted(err: &Error, column: &str, at: usize, on_disk_columns: usize) {
+    assert_column_decode(err, column);
+    let Error::ColumnDecode { offset, source, .. } = err else {
+        unreachable!("assert_column_decode already matched the variant");
+    };
+    assert_eq!(
+        *offset, at,
+        "the failure must be reported at the byte where the body ran out"
+    );
+    let cause = source.to_string();
+    assert!(
+        cause.contains("row body exhausted"),
+        "the surfaced cause must be the row-body-exhaustion one this case exists for, \
+         not some other failure aborting the same read; got: {cause}"
+    );
+    assert!(
+        cause.contains(&format!("of {on_disk_columns}")),
+        "the cause must say how much of the column set was outstanding (`of \
+         {on_disk_columns}`), which is what distinguishes truncation from the end of a \
+         row; got: {cause}"
+    );
+}
+
+/// SIMPLE arm. Pre-fix: `Ok` with ZERO rows.
+#[tokio::test]
+async fn a_simple_column_left_without_bytes_fails_the_select() {
+    let err = select_all_truncated(
+        COMPLEX_KEYSPACE,
+        TRUNC_SIMPLE_TABLE,
+        TRUNC_SIMPLE_DIR,
+        TRUNC_SIMPLE_FULL_LEN,
+        Some(TRUNC_SIMPLE_KEEP),
+        TRUNC_SIMPLE_SCHEMA,
+    )
+    .await
+    .expect_err(
+        "a row body that ends while the column set still names a PRESENT column is \
+         damaged data and must FAIL the read — pre-#3721 this `break`ed and reported a \
+         SUCCESSFUL query with zero rows (roborev job 10)",
+    );
+    assert_row_body_exhausted(&err, "fm", TRUNC_SIMPLE_KEEP, 2);
+    // The frozen collection is decoded by the SIMPLE arm, and the report names the
+    // dispatch type — so this case cannot be confused with its complex sibling.
+    assert_dispatch_type(&err, "frozen<map<INT, TEXT>>", "frozen<map<int, text>>");
+}
+
+/// COMPLEX arm. Same condition with a non-frozen (multicell) collection outstanding.
+#[tokio::test]
+async fn a_complex_column_left_without_bytes_fails_the_select() {
+    let err = select_all_truncated(
+        COMPLEX_KEYSPACE,
+        COMPLEX_TABLE,
+        COMPLEX_DIR,
+        TRUNC_COMPLEX_FULL_LEN,
+        Some(TRUNC_COMPLEX_KEEP),
+        COMPLEX_TABLE_CORRECT,
+    )
+    .await
+    .expect_err("the same condition with a COMPLEX column outstanding must also fail");
+    assert_row_body_exhausted(&err, "m", TRUNC_COMPLEX_KEEP, 2);
+    assert_dispatch_type(&err, "map<INT, TEXT>", "map<int, text>");
+}
+
+// ─── CONTROLS: the truncation is what fails the read, not the scratch copy ───
+
+/// The SAME scratch copy, UNTRUNCATED, reads cleanly — so the two cases above are
+/// attributable to the missing bytes and not to the omitted checksum components or
+/// to copying the fixture. Without this, a fix that failed every read of a
+/// checksum-less SSTable would satisfy them.
+#[tokio::test]
+async fn the_simple_subject_still_reads_cleanly_without_its_checksum_components() {
+    let rows = select_all_truncated(
+        COMPLEX_KEYSPACE,
+        TRUNC_SIMPLE_TABLE,
+        TRUNC_SIMPLE_DIR,
+        TRUNC_SIMPLE_FULL_LEN,
+        None,
+        TRUNC_SIMPLE_SCHEMA,
+    )
+    .await
+    .expect("the untruncated scratch copy must read cleanly");
+    assert_eq!(
+        rows, 1,
+        "present fixture must return its row — 0 rows is a read regression, never a pass"
+    );
+}
+
+#[tokio::test]
+async fn the_complex_subject_still_reads_cleanly_without_its_checksum_components() {
+    let rows = select_all_truncated(
+        COMPLEX_KEYSPACE,
+        COMPLEX_TABLE,
+        COMPLEX_DIR,
+        TRUNC_COMPLEX_FULL_LEN,
+        None,
+        COMPLEX_TABLE_CORRECT,
+    )
+    .await
+    .expect("the untruncated scratch copy must read cleanly");
+    assert_eq!(rows, 1, "present fixture must return its row");
+}

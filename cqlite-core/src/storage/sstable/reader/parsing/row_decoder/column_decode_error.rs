@@ -146,6 +146,63 @@ pub(super) fn column_decode_failure(
     Error::column_decode(column_name, column_type, offset, cause)
 }
 
+/// The row body ran out of BYTES while the row's own column set still names a
+/// column as PRESENT (issue #3721). Reported as [`Error::ColumnDecode`] like every
+/// other per-column failure, so the row/partition loops route it through
+/// [`end_of_partition_or_bail`] rather than mistaking it for end-of-partition.
+///
+/// # Why this is truncation and not the legitimate end of the row
+///
+/// Cassandra basis, `cassandra-5.0.8`
+/// `db/rows/UnfilteredSerializer.deserializeRowBody`: the column set is fixed
+/// BEFORE a single cell is read —
+///
+/// ```java
+/// Columns columns = hasAllColumns ? headerColumns
+///                                 : Columns.serializer.deserializeSubset(headerColumns, in);
+/// columns.apply(column -> { ... readSimpleColumn / readComplexColumn ... });
+/// ```
+///
+/// — and iteration runs over exactly that set. Exhausting the input mid-set raises
+/// out of the serializer; there is no short-row form and no end-of-cells sentinel
+/// (see the module note above). So this condition is corrupt or truncated data.
+///
+/// # The legitimate end of data is DISTINGUISHABLE here, structurally
+///
+/// [`super::row_data`]'s loop evaluates this condition only AFTER its
+/// `if !is_present(col_idx) { continue; }` skip, so every column reaching it is one
+/// the row's missing-columns bitmap declares has cell bytes on disk — and a cell is
+/// never zero bytes (it always carries at least its flags byte, `db/rows/Cell`'s
+/// five-bit `Serializer`). A row whose column set IS fully consumed leaves the
+/// `for` loop normally and never evaluates this condition at all. "No more columns
+/// expected" and "bytes exhausted with columns outstanding" are therefore different
+/// control-flow paths, not two readings of one predicate — nothing is guessed.
+///
+/// The `break` this replaces logged `parsed {}/{} on-disk cells`, i.e. ADMITTED
+/// decoding fewer cells than the column set names, and then let row assembly return
+/// `Ok` with this column and every successor silently absent.
+///
+/// `progress` is `(col_idx, on_disk_column_count, cells_decoded)` and `bounds` is
+/// `(offset, data_len)`; both are reported so the failure names where the body
+/// stopped and how much of the column set was consumed.
+pub(super) fn row_body_exhausted(
+    column: &crate::schema::Column,
+    header_type: Option<&str>,
+    bounds: (usize, usize),
+    progress: (usize, usize, usize),
+) -> Error {
+    let (offset, data_len) = bounds;
+    let (col_idx, column_count, cells_decoded) = progress;
+    let ty = dispatch_type(&column.data_type, header_type);
+    let cause = Error::corruption(format!(
+        "row body exhausted at offset {offset} (data length {data_len}) with on-disk column \
+         {col_idx} of {column_count} ('{}') still declared PRESENT by the row's column set; \
+         {cells_decoded} cell(s) decoded — truncated or corrupt row body",
+        column.name
+    ));
+    column_decode_failure(&column.name, &ty, offset, cause)
+}
+
 /// Is `e` the per-column decode failure that must never be mistaken for the end of
 /// a partition body? A MATCH on the variant, never a message-text test (issue #28).
 pub(crate) fn is_column_decode(e: &Error) -> bool {
