@@ -8,7 +8,7 @@
 # could not be told apart from a run where the ratchet was genuinely satisfied. The
 # component now reports its own NON-FAILING `OPT-OUT` token carrying the env var, the
 # count and the grown file names inline. The property that matters most here is the
-# NEGATIVE one (cases 4c/4d): `OPT-OUT` may be emitted ONLY for the affirmative value `1`,
+# NEGATIVE one (case 4c): `OPT-OUT` may be emitted ONLY for the affirmative value `1`,
 # because a permissive branch keyed on `!= <bad>` would let a typo waive the ratchet.
 #
 # The #3401 defect: run_file_size computed the base ref, the over-threshold advisory list and
@@ -35,7 +35,8 @@
 #   4. grown + CQLITE_ALLOW_FILE_GROWTH=1 -> OPT-OUT (the opt-out is RECORDED, and — since
 #      #3402 — VISIBLE in the SUMMARY block, not only in this log)
 #   4b. #3402: four grown files -> the SUMMARY's file list ELIDES with a named remainder
-#   4c/4d. #3402: a MALFORMED override (`0`, `true`) -> still a ratchet FAIL, never OPT-OUT
+#   4c. #3402: a MALFORMED override, run for BOTH spellings (`0` and `true`) -> still a
+#       ratchet FAIL, never OPT-OUT
 #   5. base ref unresolvable              -> PASS (advisory only, ratchet skipped)
 #   6. AC2: the FAIL stdout NAMES $LOG_DIR/file-size.log, so it is reachable from the
 #      SUMMARY's existing `logs:` line without the reader guessing a filename.
@@ -501,7 +502,7 @@ has "case4b (#3402): the SUMMARY row NAMES the elided remainder rather than trun
     "$sumrow4b" ",+1 more"
 
 # ---------------------------------------------------------------------------
-# Cases 4c/4d (#3402) — THE FALSE-PASS ROUTE, and the reason the emit is keyed on the
+# Case 4c (#3402), run for BOTH malformed spellings — THE FALSE-PASS ROUTE, and the reason the emit is keyed on the
 # AFFIRMATIVE `= 1`. `CQLITE_ALLOW_FILE_GROWTH` has THREE states, not two: exactly `1`
 # (engaged), SET BUT NOT 1 (`0`, `true`, `yes` — a typo, and already reported as "this IS
 # a ratchet violation"), and unset. A permissive branch keyed on `!= <bad>` would let the
@@ -772,6 +773,16 @@ STUB
   else
     ok "case9: the combined failure does NOT disclaim the real ratchet violation"
   fi
+  # #3402: the same non-disclaimer, on the SUMMARY ROW. stdout is gate.log, which agents are
+  # told never to read — the row is the artifact a reader actually sees, so the property has
+  # to hold there too or it holds only where nobody looks.
+  sumrow9="$tmp/bothfail.sumrow"
+  fs_summary_row "$r9/.sum" "$sumrow9" ||
+    bad "case9 (#3402): the run emitted no usable file-size row — the SUMMARY asserts are UNMEASURED"
+  has "case9 (#3402): the row reports BOTH failures, not persistence alone" \
+      "$sumrow9" "TWO failures: a REAL size-ratchet violation AND a log-persistence failure"
+  lacks "case9 (#3402): the row does NOT disclaim the real ratchet violation" \
+      "$sumrow9" "not a ratchet violation"
 
   # -------------------------------------------------------------------------
   # Case 10 — persistence failure on a NO-BASE run (#3401 review L1). With no resolvable
@@ -800,6 +811,16 @@ STUB
   else
     ok "case10: claims no ratchet verdict for a run that never computed one"
   fi
+  # #3402: and the ROW must not claim it either. `ratchet_verdict` is PASS on this path
+  # (nothing ever set it otherwise), so an arm that simply interpolated it would assert a
+  # comparison that never ran — #3401 review L1, one artifact over.
+  sumrow10="$tmp/nobasepersist.sumrow"
+  fs_summary_row "$r10/.sum" "$sumrow10" ||
+    bad "case10 (#3402): the run emitted no usable file-size row — the SUMMARY asserts are UNMEASURED"
+  has "case10 (#3402): the row says the ratchet was SKIPPED, so nothing was compared" \
+      "$sumrow10" "the ratchet was SKIPPED (base ref unavailable), so nothing was compared"
+  lacks "case10 (#3402): the row claims NO computed ratchet verdict" \
+      "$sumrow10" "the ratchet itself computed"
 
   # -------------------------------------------------------------------------
   # Case 11 — the sibling must carry the SAME arithmetic in EVERY ratchet state (#3401
@@ -837,6 +858,27 @@ STUB
   # instead, so it cannot be satisfied from any other state.
   has "case11: CONTROL — the sibling records the allowance as the reason the ratchet passed" \
       "$sib11" "growth allowance: ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1"
+  # #3402 — THE REPRODUCED DEFECT. The opt-out branch stamps the status detail, then the
+  # persistence block turns the token into FAIL, so before the fix this row read
+  #   file-size: FAIL (0s)  [no-cargo] — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced);
+  #   1 over-threshold file(s) grown: cqlite-core/src/big.rs
+  # — a FAIL whose entire detail describes an opt-out that is NOT why it failed, sending the
+  # reader to look for a growth violation that the gate had in fact ALLOWED. Measured on the
+  # real gate, not reasoned about. The four needles are complementary and none is satisfiable
+  # from another state: the FAIL token (persistence), the persistence wording, the ratchet's
+  # OWN state preserved (so the opt-out is disclosed, not merely suppressed), and the ABSENCE
+  # of the opt-out branch's own phrasing, which is the exact bytes that used to leak here.
+  sumrow11="$tmp/optoutpersist.sumrow"
+  fs_summary_row "$r11/.sum" "$sumrow11" ||
+    bad "case11 (#3402): the run emitted no usable file-size row — the SUMMARY asserts are UNMEASURED"
+  has_re "case11 (#3402): the row's TOKEN is FAIL — a persistence failure IS a component failure" \
+      "$sumrow11" '^file-size: +FAIL \([0-9]+s\)'
+  has "case11 (#3402): the row says the failure is LOG PERSISTENCE, not the ratchet" \
+      "$sumrow11" "LOG PERSISTENCE FAILURE, not a ratchet violation"
+  has "case11 (#3402): the row STILL names the ratchet's own state, so the opt-out is disclosed" \
+      "$sumrow11" "the ratchet itself computed OPT-OUT"
+  lacks "case11 (#3402): the row does NOT present the opt-out as the reason for the FAIL" \
+      "$sumrow11" "(ratchet NOT enforced)"
 
   # -------------------------------------------------------------------------
   # Case 13 — CQLITE_ALLOW_FILE_GROWTH set to a NON-1 value (#3401 review item 3). The
@@ -915,7 +957,9 @@ printf 'file-size component log + opt-out marker guard (#3401/#3402): %d passed,
 # precondition failure (an unusable repo, a missing mktemp) short-circuits its case's
 # remaining asserts and lands here too, so the message names both causes rather than
 # misattributing one as the other.
-EXPECTED_CHECKS=99
+# 99 -> 107 on #3402's C1 fix: +2 case9, +2 case10, +4 case11, all unconditional (the
+# FS_SABOTAGE=dir shape is uid-independent and needs no /dev/full, so none can self-skip).
+EXPECTED_CHECKS=107
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"

@@ -6808,7 +6808,17 @@ _status_detail() {
   local f
   f=$(_status_detail_file "$1")
   [ -n "${LOG_DIR:-}" ] && [ -s "$f" ] || return 0
-  head -1 "$f" 2>/dev/null | tr -d '[:cntrl:]'
+  # …and `RESULT:` is neutralised at the SAME one boundary, for the same reason and with
+  # the same standing: the #2908/#3041 completion probe greps the summary FILE for
+  # `RESULT: (PASS|FAIL)`, and this detail lands on a component ROW inside that file, so a
+  # detail carrying the token would let a poller read a verdict off a row instead of off the
+  # terminal line. scripts/tests/test_agent_gate_summary.sh already guards the annotation
+  # half of that invariant (3453-annot-c); the detail is the other half of the same line.
+  # DEFENCE IN DEPTH on the same terms as the strip above — the nearest live route is a
+  # repository-controlled grown-file PATH, which no Rust path plausibly spells — and it is
+  # the boundary, not each writer, that has to hold. Display only: no decision anywhere
+  # reads this value, so a redaction can never grant what a parse would.
+  head -1 "$f" 2>/dev/null | tr -d '[:cntrl:]' | sed 's/RESULT:/RESULT[redacted-token]:/g'
 }
 
 # _fm_summary_line <name> <status> <time>: the ONE renderer for a SUMMARY component
@@ -18064,6 +18074,38 @@ run_file_size() {
       # loop broke mid-block (a PARTIAL sibling exists), or the landed line count differs.
       # "the only copy" was false for the middle one (#3401 review item 4).
       msg+=("    (It could NOT be written IN FULL to $sib — stdout carries the complete copy.)")
+    fi
+    # #3402: the STATUS DETAIL must describe why the COMPONENT failed, not merely echo the
+    # ratchet state. The opt-out branch above already stamped `CQLITE_ALLOW_FILE_GROWTH=1
+    # (ratchet NOT enforced); …`, and `status` has since become FAIL for a reason that has
+    # nothing to do with the ratchet — so without this the SUMMARY row reads
+    # `file-size: FAIL (0s)  [no-cargo] — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced);
+    # 1 over-threshold file(s) grown: …`: a FAIL whose ENTIRE detail describes an opt-out
+    # that is not why it failed. That was MEASURED on the real gate, not inferred. It is
+    # #3401 review's own class ("a state reporting something it never computed"), which
+    # that issue hit SIX times — arriving one level up, in the very artifact this issue
+    # exists to make trustworthy.
+    #
+    # THREE ARMS, because the row must not claim a computation that did not happen (#3401
+    # review L1): both-failed; ratchet SKIPPED (no base ref — `ratchet_verdict` is PASS
+    # there, but NOTHING was compared, so naming that verdict would assert a comparison
+    # that never ran); and persistence-only, which is where OPT-OUT lands.
+    #
+    # The `see <sib>` pointer is added ONLY on the VERIFIED-sibling path. Pointing a reader
+    # at a file that rejected every write is the false-pointer failure #3401 review FIX 2
+    # already removed from stdout, and it must not reappear one artifact over. `sib_ok` is
+    # final here and nowhere earlier — this block must stay BELOW the landed-line check.
+    local _fs_detail_where=""
+    [ "$sib_ok" = 1 ] && _fs_detail_where=" — see $sib"
+    if [ "$ratchet_verdict" = FAIL ]; then
+      _record_status_detail "$name" \
+        "TWO failures: a REAL size-ratchet violation AND a log-persistence failure ($log_persist_err)$_fs_detail_where"
+    elif [ -z "$base" ]; then
+      _record_status_detail "$name" \
+        "LOG PERSISTENCE FAILURE, not a ratchet violation ($log_persist_err); the ratchet was SKIPPED (base ref unavailable), so nothing was compared$_fs_detail_where"
+    else
+      _record_status_detail "$name" \
+        "LOG PERSISTENCE FAILURE, not a ratchet violation ($log_persist_err); the ratchet itself computed $ratchet_verdict$_fs_detail_where"
     fi
     for _m in ${msg[@]+"${msg[@]}"}; do
       printf '%s\n' "$_m"
