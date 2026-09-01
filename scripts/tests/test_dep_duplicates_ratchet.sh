@@ -192,6 +192,29 @@ tree_foreign_line() { tree_baseline; printf 'error: failed to select a version\n
 tree_with_section_header() {
   printf 'foo v1.0.0\n└── x v0.1.0\n\nfoo v2.0.0\n\n[dev-dependencies]\nbar v0.1.0\nbar v0.2.0\n'
 }
+# The SECOND header cargo's tree printer can emit at column zero (both literals live in
+# the cargo binary beside the tree code; `[dev-dependencies]` is the one this workspace's
+# own output happens to carry). Recognised, for the same false-positive reason as above.
+tree_with_build_header() {
+  printf 'foo v1.0.0\n└── x v0.1.0\n\nfoo v2.0.0\n\n[build-dependencies]\nbar v0.1.0\nbar v0.2.0\n'
+}
+# `--charset ascii` continuations. cargo picks its symbol set for the output device, so a
+# parser that recognises only the utf8 box-drawing characters would call every ASCII
+# branch line malformed — a strictness fix reddening on correct cargo output.
+tree_ascii_charset() {
+  printf 'foo v1.0.0\n|-- x v0.1.0\n`-- y v0.2.0\n\nfoo v2.0.0\n\nbar v0.1.0\nbar v0.2.0\n'
+}
+# PUNCTUATION AT COLUMN ZERO — the round-3 finding. The old classifier decided
+# CONTINUATION by "the first character is not a crate-name character", so any column-zero
+# line beginning with punctuation was SILENTLY IGNORED and the remaining records still
+# produced a verdict: a census parsed in part, published in full.
+tree_punctuation_line() { tree_baseline; printf '{"reason":"build-finished","success":true}\n'; }
+# AN UNRECOGNISED SECTION HEADER. `[…]` at column zero is the shape of a header, but only
+# the two cargo really emits may be skipped; a third one means this output is not the
+# document the parser thinks it is reading, so it is named rather than assumed harmless.
+tree_unknown_section_header() {
+  printf 'foo v1.0.0\nfoo v2.0.0\n\n[features]\nbar v0.1.0\nbar v0.2.0\n'
+}
 
 baseline_matching() { printf 'instances 4\ncrates 2\ncrate foo 2\ncrate bar 2\n'; }
 
@@ -482,6 +505,35 @@ assert_case "P18b: a FOREIGN column-zero line (a diagnostic on stdout) is UNMEAS
 d=$(new_tree p19); plant_cargo "$d" 0 tree_with_section_header; run_guard "$d"
 assert_case "P19: a real [dev-dependencies] section header is RECOGNISED, not called malformed (strictness must not red on correct cargo output)" \
   0 'MEASURED 4 duplicate instance(s) / 2 duplicated crate(s)' 'verdict NO-INCREASE (4/2 vs baseline 4/2)'
+d=$(new_tree p19b); plant_cargo "$d" 0 tree_with_build_header; run_guard "$d"
+assert_case "P19b: a [build-dependencies] section header is RECOGNISED too (the allowlist is the pair cargo emits, not the one line this workspace happens to print)" \
+  0 'MEASURED 4 duplicate instance(s) / 2 duplicated crate(s)' 'verdict NO-INCREASE (4/2 vs baseline 4/2)'
+d=$(new_tree p19c); plant_cargo "$d" 0 tree_ascii_charset; run_guard "$d"
+assert_case "P19c: ASCII-charset tree branches (|-- and \`--) are RECOGNISED continuations — cargo chooses its symbol set, and only utf8 was ever tested" \
+  0 'MEASURED 4 duplicate instance(s) / 2 duplicated crate(s)' 'verdict NO-INCREASE (4/2 vs baseline 4/2)'
+
+# --- P19d/P19e: THE GRAMMAR IS CLOSED, NOT MERELY STRICT ABOUT RECORDS ------
+# THE DEFECT THESE PIN (roborev round 3, #1700). The classifier read "the first character
+# is not a crate-name character" as CONTINUATION, so column-zero PUNCTUATION was silently
+# ignored: a `{"reason":…}` JSON diagnostic, a `*** truncated ***` marker, another
+# subcommand's output — dropped, while the records around them still produced
+# NO-INCREASE. That is the same shape as the round-2 singleton finding one layer down:
+# strictness was added for the lines that LOOK like records and everything else kept the
+# permissive branch. A grammar is closed only when every line is AFFIRMATIVELY recognised.
+d=$(new_tree p19d); plant_cargo "$d" 0 tree_punctuation_line; run_guard "$d"
+assert_case "P19d: a PUNCTUATION-prefixed column-zero line is UNMEASURABLE (exit 3), quoting it — never silently skipped as a continuation" \
+  3 'SKIP-UNMEASURABLE cause=unrecognised-line' '{"reason":"build-finished"' 'NOT a pass'
+case "$OUT" in
+  *'verdict '*) bad "P19d: a partially parsed census must not print a verdict — that is the vacuous pass" ;;
+  *)            ok "P19d: a partially parsed census prints NO verdict at all" ;;
+esac
+d=$(new_tree p19e); plant_cargo "$d" 0 tree_unknown_section_header; run_guard "$d"
+assert_case "P19e: an UNRECOGNISED [section] header is named (exit 3) rather than assumed harmless — the allowlist is exact, and a new one means this is not the document being parsed" \
+  3 'SKIP-UNMEASURABLE cause=unrecognised-section-header' '[features]' '[dev-dependencies]'
+case "$OUT" in
+  *'verdict '*) bad "P19e: an unrecognised header must not yield a verdict" ;;
+  *)            ok "P19e: an unrecognised header yields NO verdict" ;;
+esac
 
 # --- P20: THE MEASURED SUBJECT IS PLATFORM-INDEPENDENT --------------------
 # THE DEFECT THIS PINS (roborev, #1700): `cargo tree` defaults to the HOST target, so the
@@ -874,8 +926,11 @@ echo "dep-duplicates ratchet self-test: $PASS passed, $FAIL failed"
 # the PLANTED cases became host-independent (plant_timeout, above) that floor can be much
 # tighter than it was: P1-P8, P10-P13 and P16-P20 produce 37 verdicts on ANY host, and
 # only P9/P14/P15/L1/G* depend on what is installed. Measured: 57 here, 51 on a simulated
-# host with no timeout(1) and no cargo.
-CASE_FLOOR=36
+# host with no timeout(1) and no cargo. Round 3's grammar-closure cases add six more
+# host-independent verdicts BY CONSTRUCTION (P19b, P19c, P19d x2, P19e x2 — shim cargo +
+# plant_timeout, no ambient tool), so 43 / 63 / 57; the floor moves with them, or a
+# deletion of the new cases would not red.
+CASE_FLOOR=42
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): cases are being skipped or dying silently.\n' \
     "$((PASS + FAIL))" "$CASE_FLOOR" >&2

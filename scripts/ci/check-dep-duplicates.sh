@@ -40,9 +40,13 @@
 #                           below), `cargo tree` non-zero (an offline registry, a broken
 #                           lockfile), a timeout, or output the parser does not recognise:
 #                           nothing recognisable at all (`unparseable-output`), a
-#                           column-zero line that is not a duplicate-group head
-#                           (`malformed-record` — truncation, a diagnostic on stdout), or a
-#                           crate counted ONCE (`implausible-census` — a duplicate group
+#                           column-zero line that ALMOST reads as a duplicate-group head
+#                           (`malformed-record` — truncation, a diagnostic on stdout), a
+#                           column-zero line matching no recognised shape at all
+#                           (`unrecognised-line` — punctuation, JSON, another
+#                           subcommand's output), a `[…]` header outside the exact pair
+#                           cargo's tree printer emits (`unrecognised-section-header`), or
+#                           a crate counted ONCE (`implausible-census` — a duplicate group
 #                           has at least two members, the same rule the baseline reader
 #                           enforces).
 #                           The gate component maps this to SKIP NAMING THE CAUSE. It is
@@ -340,14 +344,28 @@ census_bump() {
 # whose whole reason for existing is never to emit one. A parser strict about the file it
 # reads and permissive about the command it runs is guessing on the half that matters.
 #
-# The classification is CLOSED, three ways, and every line lands in exactly one:
-#   CONTINUATION  a line whose first character is not a crate-name character: a tree
-#                 branch (`├`, `│`, `└`), an indented entry, or a `[dev-dependencies]` /
-#                 `[build-dependencies]` section header. All of these cargo really prints
-#                 (this workspace's own output carries a `[dev-dependencies]` line), and
-#                 rejecting them would red the guard on CORRECT input.
+# THE RULE IS "RECOGNISED, ELSE REFUSE" — not "strict about the lines that look like
+# records" (roborev round 3, #1700). The first version of this parser decided
+# CONTINUATION by a NEGATIVE test: "the first character is not a crate-name character".
+# That is the permissive `!= <bad>` branch CLAUDE.md forbids, and it silently swallowed
+# every column-zero line beginning with PUNCTUATION — a `{"reason":…}` cargo JSON
+# diagnostic, a `*** truncated ***` marker, another subcommand's output — while the
+# records around it still produced a NO-INCREASE verdict. A census parsed in part may not
+# be published in full. So each line must MATCH one recognised shape; anything else is
+# UNMEASURABLE and named:
 #   RECORD        a column-zero `<name> v<version>` duplicate-group head. Counted.
-#   MALFORMED     anything else at column zero. NOT skipped — UNMEASURABLE, named.
+#   CONTINUATION  an INDENTED line (every nested entry cargo prints), or a column-zero
+#                 tree branch in either of cargo's symbol sets — utf8 `├ │ └ ─` (the
+#                 default) or `--charset ascii` `|` and `` ` ``. Cargo chooses the set for
+#                 the output device, so recognising only one would red on correct output.
+#   HEADER        EXACTLY `[dev-dependencies]` or `[build-dependencies]`. That pair is
+#                 what cargo's tree printer emits at column zero (both literals sit beside
+#                 the tree code in the cargo binary; this workspace's own output carries
+#                 the first). Any OTHER `[…]` line is `unrecognised-section-header`: it
+#                 means the document is not the one this parser was written against, and
+#                 assuming a header is harmless is how an under-count becomes a verdict.
+#   anything else at column zero — `unrecognised-line`. NOT skipped: UNMEASURABLE, named,
+#                 quoting the line.
 now_instances=0
 now_names=""
 nonblank=0
@@ -356,10 +374,25 @@ while IFS= read -r line || [ -n "$line" ]; do
     '') continue ;;
   esac
   nonblank=$((nonblank + 1))
-  # CONTINUATION? Decided on the FIRST character only, so the rule is unambiguous.
+  # AFFIRMATIVE CLASSIFICATION. Every arm below RECOGNISES a shape; the final arm is a
+  # refusal, never a skip. Ordering is by first character and the arms are disjoint, so
+  # the rule is unambiguous.
   case "$line" in
+    # RECORD candidate — column zero, crate-name first character. Validated below.
     [A-Za-z0-9_-]*) ;;
-    *) continue ;;
+    # CONTINUATION — an indented entry (space or tab: cargo indents with spaces, the tab
+    # is admitted because an indented line is a continuation whatever the whitespace).
+    [[:blank:]]*) continue ;;
+    # CONTINUATION — a column-zero tree branch. utf8 charset (cargo's default) then the
+    # `--charset ascii` symbols. Both are cargo's own; neither can begin a crate name.
+    '├'*|'│'*|'└'*|'─'*) continue ;;
+    '|'*|'`'*) continue ;;
+    # HEADER — an EXACT allowlist (whole line), not a `[`-prefix test.
+    '[dev-dependencies]'|'[build-dependencies]') continue ;;
+    '['*) unmeasurable unrecognised-section-header \
+      "$PROBE_DESC printed a column-zero section header this parser does not recognise: '$line' (the recognised pair is [dev-dependencies] and [build-dependencies]); the output is not the document this parser was written against" ;;
+    *) unmeasurable unrecognised-line \
+      "$PROBE_DESC printed a column-zero line that is neither a '<name> v<version>' duplicate-group head nor a recognised tree branch or section header: '$line'" ;;
   esac
   # A top-level line, so it MUST be a record. Split with parameter expansion, never
   # `set -- $line`: word splitting also GLOBS, and cargo prints `(*)` on a de-duplicated
