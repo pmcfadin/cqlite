@@ -976,10 +976,21 @@ fi
 # every case runs on every host, no assertion is host-conditional, and a missing git is a hard
 # failure because the subject IS a git-worktree tool. So the largest legitimate displacement
 # is 0, and `measured - 0` is the strongest detector available — a floor with slack is a floor
+# with a hole in it.
+#
+# TWO SECTIONS ADDED IN ROUND 2 BRANCH ON THE HOST, AND NEITHER WEAKENS THE EXACT FLOOR —
+# checked rather than assumed, because an exact floor is only correct while the count is
+# invariant on every PASSING run. (1) Section 11b's mode-000 case: both branches emit the SAME
+# NUMBER of assertions by construction, so the count does not move. (2) Section 12's
+# outside-a-worktree case: if the scratch dir turns out to be INSIDE a repository the section
+# calls `bad`, so the run FAILS anyway — the floor could then only add a second red to an
+# already-red run, never a false red to a green one. Any future host-conditional block must
+# satisfy one of those two shapes or the floor needs a derived margin, as
+# test_premerge_assert.sh's does.
 # that stops noticing a silently-dying section. Adding cases never reds it (it is a lower
 # bound); REMOVING one does, which is the point. Move it consciously, in the same diff as the
 # shrink it accounts for.
-ASSERT_FLOOR=185
+ASSERT_FLOOR=261
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

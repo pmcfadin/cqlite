@@ -2959,10 +2959,16 @@ fi
 # `--kill-after` exists (it DELEGATES to a real runner rather than reimplementing
 # the escalation it tests) and carries at most 6 assertions — measured by counting
 # the `ok`/`bad` calls inside it, not guessed. Every other case runs on every host.
-# 268 executed here minus that 6 is the floor. Adding cases never reds it (it is a
+# 273 executed here minus that 6 is the floor. Adding cases never reds it (it is a
 # lower bound); deleting a section does, which is the point. Move it consciously,
 # in the same diff as the shrink it accounts for.
-ASSERT_FLOOR=262
+#
+# ROUND 2 ADDED 5 HOST-INDEPENDENT ASSERTIONS (268 -> 273: one behavioural, that the AMBIGUOUS
+# refusal does not ALSO print the never-opened diagnostic, plus the four S3 structural asserts),
+# so the floor moves by the SAME 5 and the derived 6-assertion margin is PRESERVED. It is
+# deliberately NOT raised to the exact 273: the margin accounts for a real host-gated block, and
+# a floor that reds on a legitimately-configured machine is the guard agents learn to waive.
+ASSERT_FLOOR=267
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"
