@@ -240,12 +240,18 @@ current fleet capacity look adequate. Measured, twice, on two different boxes:
   peaking at 143G**, with two other active lanes at **68G** and **57G** — **0 bytes free**
   at the failure.
 - **2026-09-01, `ip-172-31-6-169`** (independent corroboration): `lane-3731/target` at
-  **108G**, alongside a 15G `/data/sccache`.
+  **108G**, alongside a 15G `/data/sccache`. Broken down, that one lane is `debug` **89G** plus
+  `agent-gate-side` **20G**.
 
 **What moved it:** the feature-matrix lanes. `feature-iso-parquet`, `feature-iso-delta-scan`,
 `legacy-heuristics`, `all-features-check` and the `--all-features` clippy matrix each compile
 a **distinct feature profile**, and cargo never evicts a stale profile's artifacts — so the
-per-worktree peak grew with the component set while this paragraph did not.
+per-worktree peak grew with the component set while this paragraph did not. A **second,
+separately-named mechanism** rides on top and the breakdown above measures it directly: #2657's
+2-lane split gives every SIDE-lane component its **own isolated `CARGO_TARGET_DIR`** under
+`target/agent-gate-side`, deliberately, to stop it thrashing MAIN's shared dir. That is a whole
+extra profile tree per worktree — 20G of the 108G above — so widening the SIDE lane raises the
+disk peak even when no new feature is compiled.
 
 **The consequence to plan around:** three concurrent full gates need roughly **430G** of
 `target/` on a **295G** disk. They do not fit. `flow-finalize` removes a finished issue's
