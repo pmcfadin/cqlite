@@ -3006,6 +3006,137 @@ $l_out"
 fi
 kill "${zparent:-0}" 2>/dev/null || true
 
+
+# ===========================================================================
+echo "TEST 81: --help states the SUPERVISOR-ONLY scope and that exit 1 is not healthy (#3548)"
+# ===========================================================================
+# The owner ruling of 2026-09-01 (option C) is a DOCUMENTATION deliverable: the descope is
+# only worth anything if it is still there next month. A wording pass that deletes the scope
+# statement leaves a command whose subject set is empty on this fleet and no text saying so —
+# which is the exact "reads as working while answering about the empty set" failure #3548 is
+# about. So the load-bearing sentences are pinned, one grep per claim, on ONE line each (the
+# help is a comment block, so a phrase spanning a line break can never match).
+help81=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
+# (a) the scope itself, plus the ruling citation, so the descope is attributable.
+if printf '%s\n' "$help81" | grep -qi 'SUPERVISOR FLEETS ONLY' \
+  && printf '%s\n' "$help81" | grep -q '#3548'; then
+  ok "--help states the supervisor-fleets-only scope and cites #3548"
+else
+  bad "--help must state the SUPERVISOR-FLEETS-ONLY scope and cite #3548"
+fi
+# (b) the only writer, named — this is WHY the subject set is empty here, and without it the
+#     scope reads as an arbitrary restriction someone may "relax".
+if printf '%s\n' "$help81" | grep -q 'worker-supervisor.sh' \
+  && printf '%s\n' "$help81" | grep -qi 'subject set is EMPTY\|set is EMPTY'; then
+  ok "--help names worker-supervisor.sh as the only writer and says the subject set is EMPTY without it"
+else
+  bad "--help must name the only writer of the claim refs and state that the subject set is empty on a supervisor-less fleet"
+fi
+# (c) the reinforcement of the #3467 rule. Not a duplicate of TEST 52's behavioural check: that
+#     one pins that the CODE never exits 0, this one pins that the CONTRACT still tells an
+#     operator not to read the 1 as clean — and the descope is precisely what makes a 1 the
+#     NORMAL outcome on this fleet, so deleting this sentence is more dangerous than before.
+if printf '%s\n' "$help81" | grep -qi 'never a clean bill of health\|never read 1 as a clean bill of health'; then
+  ok "--help still says exit 1 is NOT a clean bill of health (#3467 rule reinforced, not softened)"
+else
+  bad "--help must keep the 'exit 1 is never a clean bill of health' rule"
+fi
+# (d) the two MEASURED refusals. A later reader's first instinct is "just point it at the
+#     populated namespace", so the evidence that both fail has to survive in the file that is
+#     the authoritative contract — otherwise it gets re-derived, or worse, not.
+if printf '%s\n' "$help81" | grep -q 'refs/claims/issue-<N>' \
+  && printf '%s\n' "$help81" | grep -qi 'SINGLE-SLOT PER MACHINE'; then
+  ok "--help records both rejected namespaces with their measured reasons (transient claiming-shell pid; single-slot heartbeats)"
+else
+  bad "--help must record why refs/claims/issue-<N> and refs/heartbeats/<machine> are NOT read"
+fi
+# (e) AC4, which the ruling explicitly preserves through the descope.
+if printf '%s\n' "$help81" | grep -qi 'stale pid must never yield'; then
+  ok "--help keeps AC4: a stale pid must never yield a DEAD-* verdict, it must abstain"
+else
+  bad "--help must keep AC4 (a stale pid must never yield DEAD-*)"
+fi
+
+# ===========================================================================
+echo "TEST 82: NAMESPACE CONTAINMENT — a dead pid in refs/claims/issue-<N> yields NO verdict (#3548 AC4)"
+# ===========================================================================
+# THE PROPERTY THAT STOPS THE OBVIOUS "FIX". `refs/claims/issue-<N>` is populated on every
+# /drive-issue box and carries a pid — but it is the TRANSIENT CLAIMING SHELL's, never
+# refreshed, and MEASURED DEAD while its lane was running (pid 3775744 on #3548). Reading it
+# would make this command report DEAD-NO-PROCESS for HEALTHY lanes. `refs/heartbeats/<machine>`
+# is single-slot per machine, so it cannot carry a per-lane verdict either. Both are therefore
+# out of the subject set, and that containment is pinned BEHAVIOURALLY rather than in prose:
+# staged exactly as the real fleet has them, a later read-side change that widened the listing
+# would turn a measured false positive into a verdict and fail here. RED-VERIFIED rather than
+# reasoned: with the listing widened to `refs/*claims/*` in a scratch copy, this fixture produces
+# a row naming issue 8801, so the assertion below reds — it is not passing because the fixture is
+# undetectable.
+#
+# Its own remote, so no lane-claims ref from an earlier case can supply a subject and make the
+# assertion pass for the wrong reason (the TEST 27 fixture idiom).
+ns_origin="$T/origin-ns.git"
+ns_work="$T/work-ns"
+g init --bare -q "$ns_origin"
+g clone -q "$ns_origin" "$ns_work" 2>/dev/null
+(
+  cd "$ns_work" || exit 1
+  echo seed >seed.txt; g add seed.txt; g commit -qm seed; g push -q -u origin main
+)
+# The per-issue LOCK, in claim.sh's own shape, carrying a verified-absent pid...
+(
+  cd "$ns_work" || exit 1
+  et=$(git hash-object -t tree --stdin </dev/null)
+  now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  cs=$(GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git commit-tree "$et" -m "claim issue=8801 machine=nsBox pid=${ABSENT_PID} actor=flow ts=${now_ts}")
+  g push -q origin "${cs}:refs/claims/issue-8801"
+)
+# ...plus a machine heartbeat, the other populated namespace.
+(cd "$ns_work" && HEARTBEAT_MACHINE=nsBox bash "$HB" beat 8801 >/dev/null 2>&1)
+ns_out=$(cd "$ns_work" && HEARTBEAT_MACHINE=nsBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+ns_rc=$?
+# NON-VACUITY FIRST: the fixture really is present and really would be judged dead if it were
+# in the subject set. Without this, an empty or unpushed fixture passes the containment check.
+ns_lock=$(g -C "$ns_work" ls-remote origin 'refs/claims/issue-8801' | awk '{print $1}')
+ns_beat=$(g -C "$ns_work" ls-remote origin 'refs/heartbeats/nsBox' | awk '{print $1}')
+if [ -n "$ns_lock" ] && [ -n "$ns_beat" ]; then
+  ok "NON-VACUITY: both populated namespaces are staged (refs/claims/issue-8801, refs/heartbeats/nsBox) with pid $ABSENT_PID"
+else
+  bad "NON-VACUITY broken: fixture refs missing (lock='$ns_lock' beat='$ns_beat')"
+fi
+if [ "$ns_rc" -eq 1 ] \
+  && ! printf '%s\n' "$ns_out" | grep -q 'DEAD-' \
+  && ! printf '%s\n' "$ns_out" | grep -q '8801'; then
+  ok "a dead pid in refs/claims/issue-<N> (and a heartbeat beside it) produces NO DEAD-* verdict and no row at all (rc=$ns_rc)"
+else
+  bad "the populated namespaces must be OUT of the subject set — no DEAD-* and no row: rc=$ns_rc out:
+$ns_out"
+fi
+# ...and the run must say it measured NOTHING, so an operator is not left reading silence as
+# health. This is the descope's operator-facing half: on a supervisor-less fleet THIS is the
+# normal output, and it has to be self-describing.
+if printf '%s\n' "$ns_out" | grep -qi 'not the same as an idle fleet' \
+  && printf '%s\n' "$ns_out" | grep -qi "NOT 'no dead lanes'"; then
+  ok "the empty-subject-set run says nothing was measured and that this is NOT 'no dead lanes'"
+else
+  bad "an empty subject set must report that nothing was measured: out:
+$ns_out"
+fi
+# NON-VACUITY, the other direction: the SAME pid in the SAME shape, in the namespace this
+# command DOES read, is reported DEAD. So TEST 82 pins the NAMESPACE boundary, not a fixture
+# that simply fails to be detectable.
+craft_lane_claim "$ns_work" "nsBox" 8802 "$ABSENT_PID" 30
+nsd_out=$(cd "$ns_work" && HEARTBEAT_MACHINE=nsBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+nsd_rc=$?
+if [ "$nsd_rc" -eq 3 ] && printf '%s\n' "$nsd_out" | grep -E '^nsBox +8802 ' | grep -q 'DEAD-NO-PROCESS'; then
+  ok "NON-VACUITY: the same absent pid in refs/lane-claims IS reported DEAD-NO-PROCESS (rc=3) — the boundary is the namespace"
+else
+  bad "NON-VACUITY broken: the same pid in the subject namespace must be DEAD: rc=$nsd_rc out:
+$nsd_out"
+fi
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed, $SKIP skipped ==="
 [ "$FAIL" -eq 0 ]
