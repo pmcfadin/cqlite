@@ -17,6 +17,8 @@ mod fixed_width;
 mod marshal_short;
 // Issue #3723: ONE multicell-set member decoded from its cell path.
 mod set_member;
+#[cfg(test)]
+mod set_member_tests;
 
 #[cfg(test)]
 mod tests;
