@@ -1203,6 +1203,18 @@ fn decode_object<'t>(
         CqlType::Map(key_ty, _) if container::is_container_type(key_ty) => Some(&**key_ty),
         _ => None,
     };
+    // The golden's keys AS RENDERED, computed ONCE: a container key's rendering
+    // parses a JSON document, and doing that per (entry x golden key) would be
+    // quadratic in parses rather than in string compares. A golden key that does not
+    // render is absent from this list, so it matches no entry and the comparison
+    // reports the difference.
+    let rendered_golden_keys: Vec<(String, &String)> = fields
+        .map(|g| {
+            g.keys()
+                .filter_map(|key| entry_key_rendering(ty, key).map(|rendered| (rendered, key)))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
         let (key, value) = entry_cut(part)?;
@@ -1215,10 +1227,10 @@ fn decode_object<'t>(
         } else {
             format!("{path}.{key}")
         };
-        let golden_key = fields.and_then(|g| {
-            g.keys()
-                .find(|k| entry_key_rendering(ty, k).as_deref() == Some(key))
-        });
+        let golden_key = rendered_golden_keys
+            .iter()
+            .find(|(rendered, _)| rendered == key)
+            .map(|(_, golden_key)| *golden_key);
         let mut entry = Map::new();
         entry.insert(
             "key".to_string(),
@@ -1237,6 +1249,11 @@ fn decode_object<'t>(
                     // `compare::compare_map` canonicalizes that text under the
                     // declared container key type, which REFUSES a flat scalar and
                     // names the position.
+                    //
+                    // The ENTRY's path is reused for the key: the only thing that
+                    // reads it is the exclusion predicate, and no exclusion can name
+                    // a path inside a map (a dotted skip path through one is rejected
+                    // when the case is validated against the DDL).
                     decode_at(&guide, key, key_ty, &child, excluded, Kinding::Natural)
                         .unwrap_or_else(|_| Value::String(key.to_string()))
                 }
