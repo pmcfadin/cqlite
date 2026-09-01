@@ -801,8 +801,14 @@ fi
 #      on the binary being ABSENT; that is luck, not design.
 #      Asserted STRUCTURALLY rather than per message, because it is a CLASS: a behavioural
 #      case only covers the two instances someone already found.
-evalbt=$(grep -n 'eval "' "$CAPLIB" | grep -v '\\`' | grep '`' || true)
-evalcs=$(grep -n 'eval "' "$CAPLIB" | grep -E '(^|[^\\])\$\(' || true)
+# WHOLE-LINE COMMENTS ARE EXCLUDED, and that exclusion is not a loophole: a backtick in a
+# comment is inert. Caught by this guard's own first run, which red on a comment QUOTING the
+# defect — a guard that reds on correct input is the guard agents learn to delete.
+# DECLARED NON-EXHAUSTIVE: it reads ONE LINE AT A TIME, so an eval string continued across
+# lines is not covered. Every eval in this file is single-line today.
+evalsrc=$(grep -n 'eval "' "$CAPLIB" | grep -v '^[0-9]*:[[:space:]]*#')
+evalbt=$(printf '%s\n' "$evalsrc" | grep -v '\\`' | grep '`' || true)
+evalcs=$(printf '%s\n' "$evalsrc" | grep -E '(^|[^\\])\$\(' || true)
 if [ -z "$evalbt" ] && [ -z "$evalcs" ]; then
   ok "no unescaped backtick or \$( ) survives inside a double-quoted eval string"
 else
