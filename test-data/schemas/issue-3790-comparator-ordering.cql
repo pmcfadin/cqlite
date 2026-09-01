@@ -66,7 +66,8 @@
 --
 -- ============================================================================
 -- THE ORACLE — inet. Computed from the address bytes; CONFIRMED against the
--- generated sstabledump golden (see test-data/fixtures/issue_3790/README.md,
+-- generated sstabledump golden (see the README beside the fixture at
+-- test-data/datasets/sstables/test_comparator_order/README.md,
 -- which is the authority; this comment is a convenience copy).
 --
 --   Cassandra BYTE_ORDER (correct)      | CQLite formatted-string (the defect)
