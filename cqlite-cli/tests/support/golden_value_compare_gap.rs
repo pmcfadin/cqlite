@@ -419,6 +419,23 @@ impl Divergence {
                 // IS the lane's structural check — arity, declared fields, field order —
                 // so this reimplements none of it. A CLI value that does not canonicalize
                 // is not a decode of this type at all, and is reported.
+                //
+                // DECLARED RESIDUAL — SCALAR KINDS ARE NOT CHECKED HERE, and the reason is
+                // that `canon_typed` deliberately does not check them (roborev job 34).
+                // The canonicalizer ACCEPTS a string where the DDL declares an `int`,
+                // ON PURPOSE: it canonicalizes both sides and lets the COMPARISON report
+                // the inequality, which is how a wrong-kind egress is normally caught. At
+                // this position there is no other side to compare against — the golden is
+                // undecoded, which is the whole premise of the gap — so nothing catches
+                // it and a tuple slot holding `"3"` where `int` is declared IS suppressed.
+                // `gaps::the_undecoded_golden_gap_suppresses_a_wrong_KIND_member` pins that
+                // hole EXECUTABLY rather than in prose, so closing it reds a test instead
+                // of requiring someone to re-read this paragraph.
+                //
+                // Not closed here because closing it means a STRICT type validator — a
+                // second opinion about what a well-formed value of a declared type is —
+                // and that is the shape #3500 abandoned, needing its own design rather
+                // than a clause bolted onto a gap matcher. Proposed as a follow-up.
                 if !matches!(cli, Value::Array(_)) {
                     return false;
                 }

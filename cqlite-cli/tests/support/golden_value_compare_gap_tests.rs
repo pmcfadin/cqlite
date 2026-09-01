@@ -899,6 +899,43 @@ fn an_unpairable_key_alone_is_suppressed_and_the_values_agree() {
     assert!(report.stale_skips.is_empty(), "{:?}", report.stale_skips);
 }
 
+/// THE KNOWN HOLE, PINNED EXECUTABLY: a member of the right SHAPE but the wrong KIND is
+/// still suppressed (roborev job 34, issue #3726).
+///
+/// The matcher canonicalizes the egress side under the declared type, which rejects a wrong
+/// ARITY or an undeclared UDT field. It does NOT reject a wrong scalar KIND, because
+/// `canon_typed` deliberately accepts a string where an `int` is declared — it canonicalizes
+/// both sides and lets the COMPARISON report the inequality. At this position there is no
+/// other side: the golden is undecoded, which is the gap's whole premise.
+///
+/// So this asserts the CURRENT, WRONG-ISH behaviour on purpose. It is a hole marker, not an
+/// endorsement: closing it needs a strict type validator, which is its own design (#3500's
+/// abandoned ladder is exactly "a second opinion about what a well-formed value is"). When
+/// someone builds it, THIS TEST REDS and they delete it — which is the point of writing the
+/// residual as a test rather than as a paragraph nobody re-reads.
+#[test]
+fn the_undecoded_golden_gap_suppresses_a_wrong_kind_member() {
+    let gap = Divergence::NestedFrozenValueLeftUndecodedByGolden;
+    let inner = CqlType::Set(Box::new(CqlType::Numeric("int".into())));
+    let golden_hex = json!("000000020000001100000005616c706861");
+    let matched = gap.matched(
+        &golden_hex,
+        &json!(["not-an-int"]),
+        Position {
+            ty: &inner,
+            egress: Egress::Json,
+            depth: Depth::TopLevel,
+            kinding: Kinding::Natural,
+            map_key_spelling: MapKeySpelling::ToJsonString,
+        },
+    );
+    assert!(
+        matched,
+        "KNOWN HOLE: a wrong-KIND member is still suppressed. If this now fails, a strict \
+         validator has landed — delete this test and update the residual note on the variant."
+    );
+}
+
 /// THE OTHER RETIREMENT AXIS: a golden whose keys ARE decoded.
 ///
 /// The gap's golden half requires every key to be UNDECODED — not a document the
