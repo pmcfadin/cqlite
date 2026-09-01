@@ -3218,8 +3218,45 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   SCC_RUN_WHY=""
   SCC_RUN_STATE=""        # ok | no-server | unreadable
   SCC_SERVER_STARTED=0
-  # scc_running_cap: the cap the RUNNING production server is enforcing, in bytes. Deliberately
-  # run with the AMBIENT environment — that is the server a gate on this box would talk to.
+  SCC_SESSION_DIR=""      # the measured session's SCCACHE_DIR, as reported BY that session
+  SCC_SESSION_PORT=""     # ... and its SCCACHE_SERVER_PORT
+  SCC_SESSION_SET=""      # were they set at all (`${VAR+1}`)? empty and unset are different facts
+
+  # THE THING VERIFIED MUST BE THE THING GATES WILL CONTACT (issue #3727 roborev round 2, f2).
+  # The value was read from a fresh, profile-free PAM session; the server probe and the start ran
+  # in BOOTSTRAP's ambient environment — a different environment. sccache's routing is env-driven
+  # (SCCACHE_SERVER_PORT selects WHICH server a client talks to, SCCACHE_DIR which cache it uses),
+  # so an invoking shell that exports either of them made this section inspect — or START — one
+  # server and report VERIFIED about a value that gates, launched from the measured session, would
+  # take to ANOTHER server. Nothing hostile is needed: one exported variable in the caller's shell
+  # is enough. That is *verifying one object and certifying another*, which is the defect class
+  # this whole section exists to remove, so it cannot be left as a caveat.
+  #
+  # FIXED BY MOVING THE MEASUREMENT, NOT BY CAPTURING THE ENVIRONMENT (roborev offered both). Every
+  # server read and the start now run INSIDE the same `sudo -n -u <self>` fresh session that
+  # produced the value, so the routing they use IS the routing that session has — no set of
+  # variables has to be enumerated, and there is no curated list to fall out of date when sccache
+  # adds a routing variable. The alternative (capture the session's SCCACHE_* and re-apply them
+  # here) requires knowing the FULL routing set to be correct, and a partial capture would produce
+  # exactly the false VERIFIED being fixed.
+  #
+  # ONE THING IS DELIBERATELY *NOT* RUN IN THAT CONTEXT: the value->bytes oracle. Its whole point is
+  # ISOLATION — a private port and a private, empty SCCACHE_DIR — because it asks "what does sccache
+  # make of this string", a question about the string and not about this box's cache.
+  #
+  # The BINARY is resolved here, by absolute path, and passed in: sudo replaces PATH with its own
+  # `secure_path`, so a name would be resolved against a different PATH than the one bootstrap
+  # checked, and a box whose sccache sits outside secure_path would report UNMEASURED while its
+  # gates work fine — red on correct input. The routing comes from the session; the binary identity
+  # comes from us.
+  SCC_SCCACHE_BIN="$(command -v sccache 2>/dev/null || true)"
+  scc_session_run() {
+    local __b="$1"; shift
+    bounded "$__b" env -u BASH_ENV -u ENV sudo -n -u "$SCC_SELF_USER" "$@"
+  }
+  # scc_running_cap: the cap the RUNNING server is enforcing, in bytes — read INSIDE the measured
+  # session (see the note on scc_session_run: the routing must be the session's, or the verdict is
+  # about a server no gate will contact).
   #
   # THE SOUNDNESS OF THE WHOLE VERDICT IS IN TELLING A SERVER'S ANSWER FROM THE CLIENT'S OWN, AND
   # A NULL `cache_size` DOES NOT DO IT. Measured, in this order, and the second measurement
@@ -3240,13 +3277,14 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # each, no mutation, and it needs no knowledge of ports or process tables.
   scc_running_cap() {
     SCC_RUN_CAP=""; SCC_RUN_WHY=""; SCC_RUN_STATE=unreadable
-    have sccache || { SCC_RUN_WHY="no 'sccache' on PATH, so no running server can be read"; return 1; }
+    [ -n "$SCC_SCCACHE_BIN" ] || { SCC_RUN_WHY="no 'sccache' on PATH, so no running server can be read"; return 1; }
     if [ -z "$TIMEOUT_BIN" ]; then
       SCC_RUN_WHY="no timeout/gtimeout on PATH — refusing an UNBOUNDED sccache probe"
       return 1
     fi
     local json rc=0 hits n
-    json=$(bounded 20 sccache --show-stats --stats-format json 2>/dev/null) || rc=$?
+    json=$(scc_session_run 20 env -u SCCACHE_CACHE_SIZE "$SCC_SCCACHE_BIN" \
+      --show-stats --stats-format json 2>/dev/null) || rc=$?
     if [ "$rc" != 0 ] || [ -z "$json" ]; then
       SCC_RUN_WHY="'sccache --show-stats --stats-format json' produced no output (rc $rc)"
       return 1
@@ -3268,8 +3306,8 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     # and be reported as server-attributed — the one input that could invert this test.
     local sentinel=7K sentinel_bytes=7168 json2 rc2=0 cap2=""
     if [ "$SCC_RUN_CAP" = "$sentinel_bytes" ]; then sentinel=9K; sentinel_bytes=9216; fi
-    json2=$(bounded 20 env -u BASH_ENV -u ENV SCCACHE_CACHE_SIZE="$sentinel" \
-      sccache --show-stats --stats-format json 2>/dev/null) || rc2=$?
+    json2=$(scc_session_run 20 env SCCACHE_CACHE_SIZE="$sentinel" "$SCC_SCCACHE_BIN" \
+      --show-stats --stats-format json 2>/dev/null) || rc2=$?
     if [ "$rc2" != 0 ] || [ -z "$json2" ]; then
       SCC_RUN_CAP=""
       SCC_RUN_WHY="the attribution differential could not be taken (the second 'sccache --show-stats' produced no output, rc $rc2), so it cannot be established whether $hits is a RUNNING server's cap or this client's own resolution of SCCACHE_CACHE_SIZE"
@@ -3316,21 +3354,25 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # different cap keeps its NOT-HONOURED verdict and the `sccache --stop-server` REMEDY, for a
   # human to run between gates.
   #
-  # Started with the ambient SCCACHE_DIR (that is the production cache a gate would use) and with
-  # SCCACHE_CACHE_SIZE forced to the measured session value; BASH_ENV/ENV are scrubbed for the
-  # same reason the probe scrubs them. The return code is REPORTED but never trusted: the verdict
-  # comes from re-reading the server, because "start-server exited 0" and "a server is running
-  # with this cap" are different claims (and sccache exits 0 when a server is already up).
+  # STARTED INSIDE THE MEASURED SESSION (roborev round 2, f2), with SCCACHE_CACHE_SIZE forced to
+  # the value that session sees. So the server is created with the session's OWN routing — its
+  # SCCACHE_DIR and SCCACHE_SERVER_PORT — which is the server gates launched from such a session
+  # will contact, and it is created as the account those gates run as rather than as whoever ran
+  # bootstrap. (That also removes a smaller defect noted before this finding: started ambiently, a
+  # `sudo bootstrap` would have created the server on ROOT's cache directory.) The return code is
+  # REPORTED but never trusted: the verdict comes from re-reading the server, because "start-server
+  # exited 0" and "a server is running with this cap" are different claims — and sccache exits 0
+  # when a server is already up.
   scc_start_server_for() {
     local v="$1" rc=0
-    have sccache || { SCC_START_WHY="no 'sccache' on PATH"; return 1; }
+    [ -n "$SCC_SCCACHE_BIN" ] || { SCC_START_WHY="no 'sccache' on PATH"; return 1; }
     if [ -z "$TIMEOUT_BIN" ]; then
       SCC_START_WHY="no timeout/gtimeout on PATH — refusing to start a server UNBOUNDED"
       return 1
     fi
-    bounded 30 env -u BASH_ENV -u ENV SCCACHE_CACHE_SIZE="$v" \
-      sccache --start-server >/dev/null 2>&1 || rc=$?
-    SCC_START_WHY="'sccache --start-server' exited $rc"
+    scc_session_run 30 env SCCACHE_CACHE_SIZE="$v" "$SCC_SCCACHE_BIN" \
+      --start-server >/dev/null 2>&1 || rc=$?
+    SCC_START_WHY="'sccache --start-server' exited $rc in the measured session"
     return 0
   }
 
@@ -3595,6 +3637,13 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     info "scope: measured through a PAM-created (sudo) session against the line in $SCC_ENV_FILE. Whether the service stacks a gate is actually launched from also read that file is NOT checked here — and a process tree created WITHOUT PAM (a systemd unit, a container entrypoint) never has it applied at all"
     info "scope: the cap is read by the sccache SERVER at STARTUP, so this verdict is about THIS box's CURRENT server plus FUTURE sessions. A server started later by a session that does NOT see the value will enforce sccache's default instead, and a server already running keeps its cap for its whole lifetime"
     info "scope: VERIFIED asserts that the file SETS this value, that a fresh session SEES that same value, and that the RUNNING server enforces exactly the bytes that value means — it does NOT prove the file is where the session got it. Agreement is measured; provenance is not"
+    # WHICH SERVER WAS MEASURED, stated rather than assumed: every read and any start ran INSIDE
+    # that session, so its routing decided which server answered. Printed even when unset, because
+    # "sccache's own default location" is itself the answer a reader needs.
+    case "$SCC_SESSION_SET" in
+      *d*|*p*) info "scope: the server measured here is the one THAT SESSION routes to — SCCACHE_DIR='$SCC_SESSION_DIR' SCCACHE_SERVER_PORT='${SCC_SESSION_PORT:-<unset>}' (every read, and any start, ran inside that session, so this is the server a gate launched from such a session will contact)" ;;
+      *)       info "scope: that session sets NEITHER SCCACHE_DIR NOR SCCACHE_SERVER_PORT, so the server measured here is the one at sccache's own default location and port (every read, and any start, ran inside that session)" ;;
+    esac
     info "the authoritative per-run confirmation is the gate's own SUMMARY line:  accelerators: ... sccache-cap=<bytes>(pinned)   ((default) there means that gate's server is at sccache's own cap, (stale) that it predates the value)"
     if [ "${SCC_SERVER_STARTED:-0}" = 1 ]; then
       info "scope: there was NO server when this run began, so the cap is in force from now on because THIS RUN started it. Anything that stops the server later and does not see the value (a session created before the /etc/environment line existed) will start one at sccache's own default again"
@@ -3660,9 +3709,16 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     # silently DISCARDS an empty value, which is a misconfigured box, not an unprovisioned one.
     scc_probe_out=$(bounded "$SCC_PROBE_BOUND" env -u SCCACHE_CACHE_SIZE -u BASH_ENV -u ENV \
       sudo -n -u "$SCC_SELF_USER" \
-      bash -c 'printf "cqlite-scc-probe-set=%s\ncqlite-scc-probe=%s\n" "${SCCACHE_CACHE_SIZE+1}" "${SCCACHE_CACHE_SIZE-}"' 2>/dev/null) || scc_probe_rc=$?
+      bash -c 'printf "cqlite-scc-probe-set=%s\ncqlite-scc-probe=%s\ncqlite-scc-routing-set=%s%s\ncqlite-scc-dir=%s\ncqlite-scc-port=%s\n" "${SCCACHE_CACHE_SIZE+1}" "${SCCACHE_CACHE_SIZE-}" "${SCCACHE_DIR+d}" "${SCCACHE_SERVER_PORT+p}" "${SCCACHE_DIR-}" "${SCCACHE_SERVER_PORT-}"' 2>/dev/null) || scc_probe_rc=$?
     scc_probe_set=$(printf '%s\n' "$scc_probe_out" | sed -n 's/^cqlite-scc-probe-set=//p' | head -1)
     scc_probe_seen=$(printf '%s\n' "$scc_probe_out" | sed -n 's/^cqlite-scc-probe=//p' | head -1)
+    # THE ROUTING THAT SESSION USES, reported so the verdict NAMES the object it certified rather
+    # than leaving a reader to assume it was this box's usual cache (roborev round 2, f2). Read from
+    # the same markers, in the same probe — not a second one, which could answer about a different
+    # session.
+    SCC_SESSION_SET=$(printf '%s\n' "$scc_probe_out" | sed -n 's/^cqlite-scc-routing-set=//p' | head -1)
+    SCC_SESSION_DIR=$(printf '%s\n' "$scc_probe_out" | sed -n 's/^cqlite-scc-dir=//p' | head -1)
+    SCC_SESSION_PORT=$(printf '%s\n' "$scc_probe_out" | sed -n 's/^cqlite-scc-port=//p' | head -1)
     if [ "$scc_probe_rc" = 124 ] || [ "$scc_probe_rc" = 137 ]; then
       warn "sccache-cap: UNMEASURED (the probe exceeded its ${SCC_PROBE_BOUND}s bound and was killed — cap visibility is UNKNOWN, not ok)"
     elif ! printf '%s\n' "$scc_probe_out" | grep -q '^cqlite-scc-probe-set='; then
