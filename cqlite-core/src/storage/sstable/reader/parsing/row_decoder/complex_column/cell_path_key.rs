@@ -118,7 +118,10 @@
 //! doc comment, and is deliberately not restated here — an earlier revision of
 //! this header argued the OPPOSITE (that caller-side aggregation was "deliberately
 //! NOT taken"), outlived the change that took it, and contradicted that doc
-//! comment. One statement, at the site that owns the signal.
+//! comment. One statement, at the site that owns the signal — and, since the
+//! prose was what drifted, the cardinality itself is now PINNED by a test:
+//! `warn_cardinality_tests` (declared at the foot of this file) asserts that two
+//! undecodable entries produce exactly ONE record carrying `affected_entries: 2`.
 //!
 //! What is recorded here, because the aggregate does not answer it, is a DIFFERENT
 //! question: the per-row line is not additionally DEDUPLICATED across rows, and
@@ -761,3 +764,13 @@ impl V5CompressedLegacyParser {
         }
     }
 }
+
+// Issue #3612 (R8-F2): the CARDINALITY of the undecodable-key diagnostic this
+// module raises via `opaque_out` — one line per column per ROW, from the caller,
+// carrying the count. Declared here, and sited beside `cell_path_key_tests.rs`,
+// because `complex_column.rs` (the emitter) is thousands of lines over the
+// file-size ratchet and cannot take a new line (epic #1116). See that file's
+// header.
+#[cfg(test)]
+#[path = "warn_cardinality_tests.rs"]
+mod warn_cardinality_tests;
