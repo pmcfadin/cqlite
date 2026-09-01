@@ -450,15 +450,16 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
   // CQLITE_DATASETS_ROOT (#3131/#3148; issue #3724 AC5)
   // ==========================================================================
 
-  test('the fixture and the parity reference resolve checkout-relative, not via CQLITE_DATASETS_ROOT', async () => {
+  test('the fixture and the parity reference resolve checkout-relative, not via CQLITE_DATASETS_ROOT', () => {
     // The file docstring and the reference's `note_on_paths` DOCUMENT this
     // contract; nothing ASSERTED it. `assertFixturePresent` cannot: it checks
     // existence at the ALREADY-RESOLVED path, so it would pass unchanged if
     // resolution became env-routed and the env root happened to hold the file.
-    // Committed fixtures are committed SOURCE; the corpus resolvers are an
-    // EITHER/OR on the variable (`setup.js:23-25`), so a fixture reached
-    // through one is invisible exactly where the suite runs, because every gate
-    // run sets it.
+    // MEASURED: with `FIXTURE_ROOT` re-anchored on the env-routed
+    // `TEST_DATA_ROOT` and `CQLITE_DATASETS_ROOT` pointed at a symlink to the
+    // checkout's `test-data`, all 13 other tests here — the guard and the
+    // cross-binding parity case included — stay GREEN and only this one reds.
+    const { spawnSync } = require('child_process');
     const os = require('os');
 
     // Half 1 — AFFIRMATIVE EQUALITY against a `__dirname`-derived repo root. A
@@ -467,92 +468,146 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     // from the absence of a bad signal.
     const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
     const expectedRoot = path.join(REPO_ROOT, 'test-data', 'fixtures', 'issue_3504');
+    const expectedFacts = path.join(expectedRoot, 'binding-parity-facts.json');
     expect(FIXTURE_ROOT).toBe(expectedRoot);
-    expect(PARITY_FACTS).toBe(path.join(expectedRoot, 'binding-parity-facts.json'));
+    expect(PARITY_FACTS).toBe(expectedFacts);
     // SCHEMA is pinned to the RESOLVED schemas dir, not to the checkout:
     // `CQLITE_SCHEMAS_ROOT` legitimately relocates that directory
     // (`setup.js:67-102`, the gate-validated #3148 contract), so pinning it to
-    // the checkout would red on a correct out-of-tree run. Only the FIXTURE
-    // corpus and the parity facts are in AC5's scope.
-    expect(SCHEMA).toBe(path.join(global.testPaths.SCHEMAS_DIR, 'issue-3504-udt-collision.cql'));
+    // the checkout would red a correct out-of-tree run. Only the FIXTURE corpus
+    // and the parity facts are in AC5's scope.
+    const expectedSchema = path.join(
+      global.testPaths.SCHEMAS_DIR,
+      'issue-3504-udt-collision.cql'
+    );
+    expect(SCHEMA).toBe(expectedSchema);
 
-    // Half 2 — BEHAVIOURAL INVARIANCE under a datasets root holding no corpus.
+    // Half 2 — BEHAVIOURAL INVARIANCE, MEASURED IN A CHILD PROCESS.
     //
-    // ASYMMETRY WITH THE PYTHON SUITE, STATED BECAUSE IT BOUNDS WHAT THIS HALF
-    // PROVES: the Python case re-evaluates ITS OWN module under the bogus root
-    // (`importlib` gives it a throwaway module object), so it catches even a
-    // resolution that reads the variable directly at load time. Here that is
-    // unavailable — re-requiring this file would re-register its `describe`/
-    // `test` blocks mid-run, which jest forbids — so the probe re-evaluates the
-    // RESOLVER (`setup.js`) instead and pins the ANCHOR. The two mutants that
-    // matters for: one anchored on the env-routed constant reds
-    // UNCONDITIONALLY, because `TEST_DATA_ROOT`/`SSTABLES_DIR` never equals
-    // `PROJECT_ROOT` even with the variable unset; one reading the variable
-    // directly at load time reds in half 1 on every gate run, since every gate
-    // run sets it.
-    const savedTestPaths = global.testPaths;
-    const savedEnv = {
-      CQLITE_DATASETS_ROOT: process.env.CQLITE_DATASETS_ROOT,
-      CQLITE_REQUIRE_FIXTURES: process.env.CQLITE_REQUIRE_FIXTURES,
-      CQLITE_PARITY_REQUIRE_DATASETS: process.env.CQLITE_PARITY_REQUIRE_DATASETS,
-    };
+    // Module-level constants freeze at load, so reloading a NEIGHBOURING module
+    // in-process cannot observe a resolution that reads the variable DIRECTLY
+    // at load time: such a check stays green whenever the variable happened to
+    // be unset when this file was first imported. Jest forbids re-requiring a
+    // test file mid-run (its `describe` would re-register), so the probe is a
+    // fresh `node` that stubs `describe` to a no-op, requires `setup.js` and
+    // then THIS file, and reads the constants back off `module.exports`.
+    //
+    // It asserts a PAIR, because the invariant alone would be satisfiable by an
+    // environment the child never saw:
+    //   * the POSITIVE CONTROL — the child echoes the perturbed value back, and
+    //     `SSTABLES_DIR`, whose documented contract IS to follow the variable
+    //     (`setup.js:23-25`), HAS moved onto the bogus root;
+    //   * the INVARIANT — the fixture root and parity-facts path are unmoved and
+    //     checkout-derived, and the fixture still reads its three rows.
+    //
+    // Nothing in the parent process is mutated: no env var, no global, no module
+    // registry. The pollution risk is removed rather than managed.
     const bogus = fs.mkdtempSync(path.join(os.tmpdir(), 'cqlite-3724-no-corpus-'));
+    const outPath = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'cqlite-3724-probe-')),
+      'probe.json'
+    );
     try {
-      process.env.CQLITE_DATASETS_ROOT = bogus;
-      // The two strict-fixture flags are cleared for the re-evaluation ONLY:
-      // `setup.js:246-251` THROWS under a corpus-less root when either is set
-      // (as the gate's node-bindings lane sets them), which would make this
-      // probe unable to run rather than able to measure.
-      delete process.env.CQLITE_REQUIRE_FIXTURES;
-      delete process.env.CQLITE_PARITY_REQUIRE_DATASETS;
-
-      // Re-evaluate the path resolver in a FRESH module registry, so its
-      // constants are recomputed against the bogus root.
-      jest.isolateModules(() => {
-        require('./setup.js');
-      });
-      const fresh = global.testPaths;
-
-      // Non-vacuity: the env-routed constant really DID move onto the bogus
-      // root — otherwise the invariance below would prove only that the
-      // variable is ignored everywhere.
-      expect(fresh).not.toBe(savedTestPaths);
-      expect(fresh.SSTABLES_DIR).toBe(path.join(bogus, 'sstables'));
       expect(fs.readdirSync(bogus)).toEqual([]);
 
-      // THE INVARIANT: the anchor this file's paths are built from is
-      // env-INDEPENDENT, byte-identical under the bogus root, and equal to the
-      // `__dirname`-derived checkout root.
-      expect(fresh.PROJECT_ROOT).toBe(savedTestPaths.PROJECT_ROOT);
-      expect(fresh.PROJECT_ROOT).toBe(REPO_ROOT);
-      expect(FIXTURE_ROOT).toBe(
-        path.join(fresh.PROJECT_ROOT, 'test-data', 'fixtures', 'issue_3504')
-      );
+      const childEnv = { ...process.env, CQLITE_DATASETS_ROOT: bogus };
+      // Cleared for the CHILD only: `setup.js:246-251` makes a corpus-less root
+      // a hard throw under either strict-fixture flag (as the gate's
+      // node-bindings lane sets them), which would leave the probe unable to run
+      // rather than able to measure.
+      delete childEnv.CQLITE_REQUIRE_FIXTURES;
+      delete childEnv.CQLITE_PARITY_REQUIRE_DATASETS;
 
-      // ...and the committed artifacts still OPEN and READ while the variable
-      // points at an empty directory.
-      const probeDb = await Database.open(FIXTURE_ROOT, { schema: SCHEMA });
-      try {
-        const result = await probeDb.executeNative(QUERY);
-        expect(result.rows.map((row) => row.id).sort()).toEqual([1, 2, 3]);
-      } finally {
-        await probeDb.close();
+      const probe = spawnSync(
+        process.execPath,
+        ['-e', RESOLUTION_PROBE, __dirname, __filename, outPath],
+        { env: childEnv, encoding: 'utf8', timeout: 180000 }
+      );
+      expect(probe.error).toBeUndefined();
+      if (probe.status !== 0) {
+        throw new Error(
+          `resolution probe failed (status=${probe.status})\n` +
+            `--- stdout ---\n${probe.stdout}\n--- stderr ---\n${probe.stderr}`
+        );
       }
-      const reference = JSON.parse(fs.readFileSync(PARITY_FACTS, 'utf8'));
-      expect(reference.udts['row1.c'].typeName).toBe('collide');
+      const payload = JSON.parse(fs.readFileSync(outPath, 'utf8'));
+
+      // POSITIVE CONTROL — the perturbation really was in effect, and a constant
+      // whose contract is to follow the variable really did move onto it.
+      expect(payload.envSeen).toBe(bogus);
+      expect(payload.controlEnvRouted).toBe(path.join(bogus, 'sstables'));
+      expect(payload.controlEnvRouted).not.toBe(global.testPaths.SSTABLES_DIR);
+
+      // THE INVARIANT — unmoved, checkout-derived, and still readable.
+      expect(payload.projectRoot).toBe(REPO_ROOT);
+      expect(payload.fixtureRoot).toBe(expectedRoot);
+      expect(payload.parityFacts).toBe(expectedFacts);
+      // The schemas dir must not move either: it follows CQLITE_SCHEMAS_ROOT,
+      // which the probe leaves exactly as this process has it.
+      expect(payload.schemasDir).toBe(global.testPaths.SCHEMAS_DIR);
+      expect(payload.schema).toBe(expectedSchema);
+      expect(payload.readError).toBeNull();
+      expect(payload.rowIds).toEqual([1, 2, 3]);
     } finally {
-      // Restore BEFORE anything else can observe the probe's state: the
-      // re-required setup.js reassigns `global.testPaths`, and three env vars
-      // were changed. No sibling test may see either.
-      global.testPaths = savedTestPaths;
-      for (const [name, value] of Object.entries(savedEnv)) {
-        if (value === undefined) {
-          delete process.env[name];
-        } else {
-          process.env[name] = value;
-        }
-      }
       fs.rmSync(bogus, { recursive: true, force: true });
+      fs.rmSync(path.dirname(outPath), { recursive: true, force: true });
     }
   });
 });
+
+// The child-process probe for the AC5 behavioural half above. Run as
+// `node -e <this> <testsDir> <thisFile> <outPath>` with a perturbed
+// `CQLITE_DATASETS_ROOT`, it re-resolves `setup.js` AND this module from scratch
+// and records BOTH the paths this suite resolves and a path that legitimately
+// DOES follow that variable, so the parent can prove the perturbation was in
+// effect. `describe` is the only jest global it stubs: this file registers its
+// suite at module scope, and with the callback never invoked no other one is
+// reached.
+const RESOLUTION_PROBE = `
+global.describe = () => {};
+const fsProbe = require('fs');
+const pathProbe = require('path');
+const [testsDir, modulePath, outPath] = process.argv.slice(1);
+require(pathProbe.join(testsDir, 'setup.js'));
+const mod = require(modulePath);
+const payload = {
+  // The POSITIVE CONTROL pair: what the child actually saw, and a constant
+  // whose documented contract IS to follow it.
+  envSeen: process.env.CQLITE_DATASETS_ROOT,
+  controlEnvRouted: global.testPaths.SSTABLES_DIR,
+  // The INVARIANT: this suite's own resolved constants.
+  projectRoot: global.testPaths.PROJECT_ROOT,
+  schemasDir: global.testPaths.SCHEMAS_DIR,
+  fixtureRoot: mod.FIXTURE_ROOT,
+  parityFacts: mod.PARITY_FACTS,
+  schema: mod.SCHEMA,
+  rowIds: null,
+  readError: null,
+};
+// The read is attempted AFTER the paths are recorded, and its failure is
+// REPORTED rather than thrown: an env-routed resolution makes the open fail, and
+// the parent must be able to name the path mismatch that caused it instead of
+// reporting only a dead child.
+(async () => {
+  try {
+    const { Database } = require(pathProbe.join(testsDir, '..', 'lib', 'index.js'));
+    const db = await Database.open(mod.FIXTURE_ROOT, { schema: mod.SCHEMA });
+    try {
+      const result = await db.executeNative(mod.QUERY);
+      payload.rowIds = result.rows.map((row) => row.id).sort();
+    } finally {
+      await db.close();
+    }
+  } catch (err) {
+    payload.readError = String((err && err.stack) || err);
+  }
+  fsProbe.writeFileSync(outPath, JSON.stringify(payload));
+})();
+`;
+
+// Exported for that probe, and ONLY for it. Reading the constants off
+// `module.exports` is what makes the probe measure THIS file's resolution rather
+// than a re-derivation of it — a re-derivation would assert nothing about the
+// constants the suite actually uses, which is precisely the vacuity this
+// replaced. Harmless to jest: a test file may carry exports.
+module.exports = { FIXTURE_ROOT, SCHEMA, PARITY_FACTS, QUERY };
