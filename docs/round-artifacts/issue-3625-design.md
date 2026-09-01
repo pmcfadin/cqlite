@@ -232,3 +232,75 @@ RED arm (measured, scratch worktree, boundary fix reverted and nothing else): th
 behavioural cases in `test_agent_gate_tree_provenance.sh` fail —
 `only 0 of 1 boundary row(s) are fully annotated` and `the boundary block has no aggregate census:
 line` — and the other 40 cases stay green.
+
+---
+
+## Census audit (batch 2) — 1 HIGH, 1 MEDIUM, 3 LOWs, all fixed
+
+### BLOCKER 1 (HIGH) — `scoped-tests` had no statically correct kind
+
+Declared `both`, but the lane's subject depends on **what the diff routed to**. A diff confined
+to `bindings/python/**` dispatches no cargo at all: `classify_scoped_plan` diverts `cqlite-py`
+out of the rust set and sets `python_diff=1`, and the `cqlite-core` fallback is deliberately
+guarded on `python_diff -eq 0` ("a python-only diff now legitimately leaves pkgs empty"). The
+log then holds only maturin + pytest output — no `test result:`, no `N tests run:`, no
+`Executable` — so `both` measured `ZERO` → `VACUOUS` → `OVERALL=FAIL` on a **correct** `--lite`
+fix round and a **correct** `--delta`, which is a certifying mode. Verified from source, no gate
+run needed.
+
+Fixed with a new kind, **`runtime:<why>`**: the lane writes its own complete record before its
+verdict is finalized, from the same routing variables the dispatch was made from
+(`pkgs[]`, `python_diff`, `PYTHON_TIER_NOTE`). Three routes, three censuses —
+
+| route | census |
+|---|---|
+| rust packages dispatched | measure `both`, as before |
+| python tier only, and it RAN | the pytest tally in the same log, through the same `indirect:pytest` path (so it inherits the corrected present-and-zero rule) |
+| nothing executable dispatched (tier SKIPPED, or neither) | an affirmative `NOT-APPLICABLE` naming that there was no executable subject — **not** `VACUOUS` |
+
+The ran/did-not-run discrimination is the gate's own `python-tier: PASS`/`FAIL` convention,
+factored into one predicate `_python_tier_ran` that `_delta_python_tier_gap` now also calls — one
+concept, one spelling.
+
+**The general rule this leaves behind:** before declaring a lane's subject, ask whether the lane
+always HAS that subject. A kind that is right for the common route and wrong for a rarer one is a
+guard that reds on correct input, which is the guard agents learn to waive.
+
+### BLOCKER 2 (MEDIUM) — the two `self:` lanes were not coupled to AC2
+
+`run_delta_node_tests` and `run_delta_shell_selftests` called `_census_declare` and then pushed
+the **raw** `$status`, never routing through `_census_status_for`. A `ZERO` there would have
+rendered `{verified NOTHING: …}` beside a `PASS`, been counted as `VACUOUS` on the aggregate line,
+and left the run green. Unreachable today only because both early-return on an empty target set —
+i.e. the coupling was absent and something unrelated was holding the line. Both now do
+`status=$(_census_finalize <name> "$status")` followed by the closed-set `OVERALL` flip, because
+these functions own their own `OVERALL` bookkeeping.
+
+### LOW 1 — the status check ran BELOW the kind dispatch
+
+A FAILing `fmt` rendered its gap reason and was counted under `DECLARED-GAP` instead of
+`not-applicable (SKIP/FAIL)`. No verdict changed, but a miscounted census line is what stops the
+next person looking. `_census_measure` now resolves the declaration first (an undeclared name is a
+fact about the TABLE, not about this run), then checks status, then dispatches on kind.
+
+### LOW 2 — the nextest arm counted tests RUN, not PASSED
+
+`N tests run: X passed, Y failed` has `N = X + Y`, so summing `N` under a `COUNT %d tests passed`
+label was a **false label** — only reachable on a PASS today, where the two are equal, which is
+exactly why it would have decayed unnoticed. It now reads `X passed` off the same line.
+
+### LOW 3 — the `-q` trap, recorded
+
+`cargo test -q` suppresses the `Executable` status line while leaving libtest's `test result:`
+intact (measured). So a `-q` lane is safe as `libtest` and can never be `compile`/`both`: adding a
+`--no-run` pass to a quiet lane would silently measure `ZERO test binaries`. `kit-dashboard-drift`
+is the only `-q` lane and is correctly `libtest`; the note now lives at `_census_compile_tally` and
+case M5 pins the pairing.
+
+### Deliberately NOT fixed (audit LOW 5)
+
+The `<log>.ansi-stripped` full copy written at every `record_result`. It is deleted immediately
+after the tallies, it lives inside the per-run `mktemp -d`, and its failure mode degrades to a
+non-fatal `NOT-MEASURED`. The disk-pressure consequence — an `ENOSPC` inside `$LOG_DIR` now also
+costs a `NOT-MEASURED` — is stated in the code comment rather than defended against, because the
+alternative (parsing the coloured original) is the defect the routing exists to prevent.

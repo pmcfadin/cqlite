@@ -788,7 +788,17 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   node-bindings/jest) an ABSENT tally is `NOT-MEASURED`, since a third-party report format is not
   ours and its absence is a measurement failure, not proof of vacuity. Declaration site:
   `_census_kind` (a CLOSED set; an undeclared component is a named FAIL, so a new component
-  cannot join with a blank census). **Its domain is WIDER than `COMPONENTS`, and getting that
+  cannot join with a blank census). **BUT A STATIC DECLARATION IS NOT ALWAYS POSSIBLE, AND
+  ASSUMING IT WAS COST A HIGH**: `scoped-tests` was declared `both`, and a diff confined to
+  `bindings/python/**` dispatches NO cargo at all (`classify_scoped_plan` diverts `cqlite-py`
+  and the `cqlite-core` fallback is deliberately guarded on `python_diff -eq 0`), so its log
+  holds only maturin + pytest output and the lane measured ZERO — reddening a CORRECT `--lite`
+  fix round and a CORRECT `--delta`, a certifying mode. A lane whose SUBJECT DEPENDS ON WHAT
+  THE RUN ROUTED TO gets the `runtime:<why>` kind and writes its own record from the same
+  routing variables the dispatch was made from; "no executable subject was dispatched" is an
+  affirmative `NOT-APPLICABLE`, never `VACUOUS`. **The general rule: before declaring a lane's
+  subject, ask whether the lane always HAS that subject — a kind that is right for the common
+  route and wrong for a rarer one is a guard that reds on correct input.** **Its domain is WIDER than `COMPONENTS`, and getting that
   wrong was measured, not theorised**: a name reaches a component line from `COMPONENTS`, from a
   `NAMES+=("<literal>")` append in the `run_delta_*` helpers, AND from a `record_result
   "<literal>"` call — the #2926 `tree-selftest` hook is the third kind, and enumerating only the
