@@ -124,20 +124,19 @@ if [ "$EXTRACT_OK" -eq 1 ]; then
   ok "extract: the shipped signature set, BOTH gate-internal subject channels and 27 helpers (incl. the REAL _tree_identity, the shipped record_result and the shipped _tree_boundary_fail) were extracted from scripts/agent-gate.sh"
 fi
 
-# #3800 (roborev job 316): `aggregate_lite_components` is extracted into its OWN file, NOT into
-# $EX, and the reason is case 15's subject set. Case 15 asserts that NO function in $EX assigns
-# OVERALL/RESULT -- the "attribution, never a verdict" property this whole issue rests on -- by
-# scanning the WHOLE extracted file. The aggregator's entire job is to assign OVERALL, so
-# extracting it into $EX would have made case 15 red on correct input, and the tempting repair
-# (excluding it BY NAME) is the "exclude whatever fails" shape that would let a future
-# attribution helper be excused the same way. A separate file keeps case 15's subject set
-# exactly what it was and states the distinction instead of eroding it: the aggregator is a
-# CONSUMER under test, not a member of the attribution family.
+# #3800 (roborev job 316, rationale corrected in round 3): `aggregate_lite_components` is
+# extracted into its OWN file. The original reason was case 15's subject set -- it scanned the
+# WHOLE of `$EX` for an `OVERALL=` assignment, and the aggregator's entire job is to make one.
+# That reason is now obsolete: case 15 derives its population from the SHIPPED source instead
+# (every `_disk_*` function), which is stronger and cannot be eroded by how this file partitions
+# its extractions. The separation is KEPT because it states a real distinction: the aggregator is
+# a CONSUMER of the attribution channels, not a member of the attribution family.
 #
-# And the distinction is real, not bookkeeping. What job 316 wired to the verdict is the
-# AGGREGATION's disposition of a `.result` file it could not READ -- which would be correct if
-# the `disk-exhaustion:` line did not exist at all. The line itself still changes nothing, which
-# is why case 15 must keep failing on any attribution function that touches OVERALL.
+# And the distinction is what keeps "an attribution, never a verdict" true while the aggregation
+# fails closed. What job 316 wired to the verdict is the AGGREGATION's disposition of a `.result`
+# file it could not READ -- correct even if the `disk-exhaustion:` line did not exist. The line
+# itself still changes nothing, which is why case 15 must keep failing on any ATTRIBUTION
+# function that touches OVERALL.
 EX_AGG="$tmp/extracted-aggregator.sh"
 extract_region '^aggregate_lite_components[(][)] [{]$' '^[}]$' > "$EX_AGG"
 if grep -q '^aggregate_lite_components' "$EX_AGG" && grep -q '_disk_verdict_read_aggregate' "$EX_AGG"; then
@@ -869,10 +868,43 @@ fi
 # (15) STRUCTURAL: the line is an ATTRIBUTION, never a verdict. No extracted function may
 # assign OVERALL/RESULT, and no emit site may derive a status from the call.
 # ─────────────────────────────────────────────────────────────────────────────────
-if grep -qE '^[^#]*\b(OVERALL|RESULT)=' "$EX"; then
-  bad "15-attribution: an extracted disk-exhaustion function assigns OVERALL/RESULT -- it must never change the verdict"
+# #3800 (roborev job 319 round 3): THE SUBJECT SET IS DERIVED FROM THE SHIPPED SOURCE, not from
+# `$EX`. Scanning the whole extracted file conflated two different populations: the ATTRIBUTION
+# family, which must never touch the verdict, and the CONSUMERS this suite also extracts so its
+# cases can drive real code (`record_result`, `aggregate_lite_components`, `_tree_boundary_fail`),
+# which legitimately DO own verdicts -- so the assert red on correct input twice, once when the
+# aggregator arrived and once when `record_result` gained its fail-closed `OVERALL=FAIL`. Fixing
+# it by EXCLUDING those names would have been the "exclude whatever fails" shape; deriving the
+# population from the source is strictly STRONGER instead, because it covers every `_disk_*`
+# function in the shipped gate including any this suite never extracted.
+_att_offenders=$(awk '
+  /^_disk_[A-Za-z0-9_]*\(\) \{/ { inb=1; fn=$1; next }
+  inb && /^\}$/ { inb=0; next }
+  inb && /^[^#]*(OVERALL|RESULT)=/ { print fn ": " $0 }
+' "$GATE")
+_att_n=$(awk '/^_disk_[A-Za-z0-9_]*\(\) \{/ { n++ } END { print n+0 }' "$GATE")
+if [ "$_att_n" -ge 8 ] && [ -z "$_att_offenders" ]; then
+  ok "15-attribution: none of the $_att_n _disk_* functions in the SHIPPED gate assigns OVERALL or RESULT -- the line is an attribution, never a verdict (population derived from source, so a helper this suite never extracts is covered too)"
 else
-  ok "15-attribution: no extracted function assigns OVERALL or RESULT"
+  bad "15-attribution: population=$_att_n (expected >= 8; a collapsed population would green this vacuously) offenders:
+$_att_offenders"
+fi
+# POSITIVE CONTROL: the scan must FAIL on a planted assignment, or its green means only that the
+# awk found nothing -- the same vacuity this suite pins everywhere else.
+_att_ctl=$(mktemp "$tmp/att-ctl.XXXXXX")
+awk '
+  { print }
+  /^_disk_exhaustion_line\(\) \{/ && !done { print "  OVERALL=FAIL"; done=1 }
+' "$GATE" > "$_att_ctl"
+_att_ctl_off=$(awk '
+  /^_disk_[A-Za-z0-9_]*\(\) \{/ { inb=1; fn=$1; next }
+  inb && /^\}$/ { inb=0; next }
+  inb && /^[^#]*(OVERALL|RESULT)=/ { print fn }
+' "$_att_ctl")
+if [ -n "$_att_ctl_off" ]; then
+  ok "15-attribution-control: an OVERALL assignment planted inside _disk_exhaustion_line IS detected ($_att_ctl_off), so the clean scan above is a measurement and not an empty match"
+else
+  bad "15-attribution-control: the planted assignment was NOT detected -- the attribution scan is blind and its green says nothing"
 fi
 if grep -n '_disk_exhaustion_line' "$GATE" | grep -v '^[0-9]*:#' | grep -qE 'OVERALL|if |&&|\|\|'; then
   bad "15-attribution: a call site of _disk_exhaustion_line feeds a conditional or OVERALL"
@@ -1682,6 +1714,119 @@ else
   printf 'SKIP - 21b-side-enospc: /dev/full is unavailable/unwritable on this host, so a GENUINE ENOSPC marker write cannot be induced (Linux-only). DECLARED, not silently omitted; 21a and the job-316 cases carry the rest of the property.\n'
 fi
 
+# (22) roborev job 319 round 3 -- A COMPONENT CAN VANISH FROM A CERTIFICATION.
+#
+# The verdict-write failure was ATTRIBUTED and not DISPOSED of (job 316's correction, one
+# function over), and two aggregation paths read an ABSENT `.result` as benign:
+#   * the full gate excluded `file-size` from SELECTED_MAIN (it runs inline before the dataset
+#     preflight and must not be dispatched twice), so it was the ONE selected component the
+#     post-drain presence guard did not cover -- and the reconstruction loop skips an absent
+#     `.result` as "not selected". An ENOSPC stopping `file-size.result` therefore OMITTED the
+#     component from a gate reporting RESULT: PASS.
+#   * the lite aggregator read "absent" as "--only skipped it", which is only one of its two
+#     causes; the other is "it ran and its verdict never reached the disk".
+
+# (22a) STRUCTURAL: file-size must be RECORDED as selected while still not being DISPATCHED.
+# Both halves matter and they pull in opposite directions, which is why the original code was
+# written the way it was -- a test that checked only one would license re-breaking the other.
+fs_sel=$(awk '
+  /^launch_components\(\) \{/ { inb=1 }
+  inb && /_pool_selected "\$c" && SELECTED_MAIN\+=\("\$c"\)/ { sel=1 }
+  inb && /dispatch_component "\$c"/ { disp=1 }
+  inb && /^\}$/ { inb=0 }
+  END { printf "sel=%d\n", sel+0 }' "$GATE")
+fs_skips_dispatch=$(awk '
+  /^launch_components\(\) \{/ { inb=1 }
+  inb && /\[ "\$c" = file-size \]/ { seen=1 }
+  inb && seen && /continue/ { c++ }
+  inb && /^\}$/ { inb=0 }
+  END { print (c+0 > 0) ? "yes" : "no" }' "$GATE")
+if [ "$fs_sel" = "sel=1" ] && [ "$fs_skips_dispatch" = yes ]; then
+  ok "22a-file-size-selected: file-size is RECORDED in SELECTED_MAIN (so the fail-closed presence guard covers it) while still being skipped for DISPATCH (it already ran inline before the dataset preflight) -- the two halves that pull in opposite directions"
+else
+  bad "22a-file-size-selected: file-size is not both recorded-as-selected and skipped-for-dispatch (recorded: $fs_sel, skips dispatch: $fs_skips_dispatch); if it is not recorded, an ENOSPC on its .result omits it from a RESULT: PASS"
+fi
+
+# (22b) THE LITE PATH, through the SHIPPED aggregator. With no `--only`, an absent `.result` for a
+# component this run SELECTED is a measurement failure and must fail; under `--only` the very same
+# absence is a legitimate skip. One predicate decides -- `_pool_selected`, the same one
+# run_file_size/run_component early-return on -- so the two cases cannot be confused.
+d="$tmp/c22b"; mkdir -p "$d"
+o22b=$(
+  . "$EX"; . "$EX_AGG"; LOG_DIR="$d"; _disk_env
+  _pool_selected() { [ -z "$ONLY" ] && return 0; case " ${ONLY//,/ } " in *" $1 "*) return 0 ;; esac; return 1; }
+  printf 'PASS 3\n' > "$d/file-size.result"
+  printf 'PASS 9\n' > "$d/fmt.result"
+  # clippy + roborev-lints ran but their verdicts never reached the disk.
+  ONLY=""; OVERALL=PASS; NAMES=(); STATUSES=(); TIMES=(); DISK_UNREAD_VERDICTS=()
+  aggregate_lite_components
+  printf 'PLAIN %s rows=%s recorded=%s\n' "$OVERALL" "${#NAMES[@]}" "${#DISK_UNREAD_VERDICTS[@]}"
+  # Same directory, but this run only ever selected file-size and fmt: the identical absences are
+  # now legitimate skips and must NOT fail.
+  ONLY="file-size,fmt"; OVERALL=PASS; NAMES=(); STATUSES=(); TIMES=(); DISK_UNREAD_VERDICTS=()
+  aggregate_lite_components
+  printf 'ONLY %s rows=%s recorded=%s\n' "$OVERALL" "${#NAMES[@]}" "${#DISK_UNREAD_VERDICTS[@]}"
+)
+exp22b='PLAIN FAIL rows=4 recorded=2
+ONLY PASS rows=2 recorded=0'
+if [ "$o22b" = "$exp22b" ]; then
+  ok "22b-lite-absent: with no --only, a SELECTED component whose verdict never reached the disk FAILS the lite run and is recorded as an unread verdict (4 rows, not 2); with --only naming the other two, the IDENTICAL absences are legitimate skips and the run still passes"
+else
+  bad "22b-lite-absent: absence is not being discriminated by SELECTION.
+--- got ---
+$o22b
+--- want ---
+$exp22b"
+fi
+o22bm=$(
+  . "$EX"; . "$EX_AGG"; LOG_DIR="$d"; _disk_env
+  _pool_selected() { return 0; }
+  # The pre-fix reading: absent => skip, unconditionally.
+  aggregate_lite_components() {
+    local -a LN=() LS=() LT=(); local c rf st secs
+    for c in file-size fmt clippy roborev-lints; do
+      rf="$LOG_DIR/$c.result"; [ -f "$rf" ] || continue
+      _disk_verdict_read_aggregate "$c" "$rf" || OVERALL=FAIL
+      st="$DISK_VERDICT_ST"; secs="$DISK_VERDICT_SECS"
+      LN+=("$c"); LS+=("$st"); LT+=("${secs}s"); [ "$st" = FAIL ] && OVERALL=FAIL
+    done
+    NAMES=("${LN[@]+"${LN[@]}"}")
+  }
+  ONLY=""; OVERALL=PASS; NAMES=(); DISK_UNREAD_VERDICTS=()
+  aggregate_lite_components
+  printf 'MUTANT %s rows=%s\n' "$OVERALL" "${#NAMES[@]}"
+)
+if [ "$o22bm" = "MUTANT PASS rows=2" ]; then
+  ok "22b-mutation: the pre-fix reading certifies the SAME directory with two components silently missing from the table -- the vanishing this case removes"
+else
+  bad "22b-mutation: the pre-fix reading did not certify, so 22b is not measuring the selection fix; got: $o22bm"
+fi
+
+# (22c) `record_result` FAILS THE RUN, not merely records. Driven through the SHIPPED function at
+# /dev/full so the write failure is a REAL ENOSPC. Attribution and disposition are asserted
+# TOGETHER: the pre-fix code had the first and not the second.
+if [ -c /dev/full ] && : 2>/dev/null >/dev/full; then
+  d="$tmp/c22c"; mkdir -p "$d"
+  o22c=$(
+    . "$EX"; LOG_DIR="$d"; _disk_env
+    _hb_ensure() { :; }; _fm_note_if_no_cargo_observed() { :; }
+    _assert_summary_integrity() { :; }; _tree_check_boundary() { :; }
+    ln -s /dev/full "$d/core-tests.result"
+    OVERALL=PASS
+    record_result core-tests PASS 611 >/dev/null 2>&1
+    printf 'OVERALL %s\n' "$OVERALL"
+    printf 'RECORDED %s\n' "${#DISK_MEM_SUBJECTS[@]}"
+  )
+  if case "$o22c" in *"OVERALL FAIL"*) true ;; *) false ;; esac \
+     && case "$o22c" in *"RECORDED 1"*) true ;; *) false ;; esac; then
+    ok "22c-record-result-fails: a REAL ENOSPC verdict write both RECORDS the in-memory subject and sets OVERALL=FAIL -- attributing a write failure is not disposing of it, and the shell that knows the verdict never reached disk is the one that fails the run"
+  else
+    bad "22c-record-result-fails: expected OVERALL FAIL and one recorded subject; got: $o22c"
+  fi
+else
+  printf 'SKIP - 22c-record-result-fails: /dev/full unavailable/unwritable, so a GENUINE ENOSPC verdict write cannot be induced (Linux-only). DECLARED, not silently omitted.\n'
+fi
+
 # (21c) THE LADDER'S LOWER RUNGS -- roborev job 319 round 2. The first version of 21b's fallback
 # ended `|| true`, which is the shape it was written to remove: if BOTH the marker append and the
 # truncation fail, the original well-formed PASS survives and the parent certifies. The 21b
@@ -1732,8 +1877,15 @@ fi
 # count and holds on macOS: 2 + 0. Floor rises by 2, not 4. 21c -- the ladder's lower rungs,
 # added in round 2 of the same job when the `|| true` on the truncation turned out to be the very
 # shape 21b was written to remove -- also DECLARES its skip (it needs a host that refuses both a
-# truncate and an unlink), so it does not raise the floor either.)
-CASE_FLOOR=78
+# truncate and an unlink), so it does not raise the floor either.); +3 (roborev job 319 round 3:
+# a component can VANISH from a certification. 22a the two opposed halves of file-size's
+# selection (recorded for the presence guard, still not dispatched); 22b the lite path through the
+# SHIPPED aggregator in BOTH directions -- selected-and-absent FAILS, --only-absent still passes
+# -- plus the mutation certifying the same directory with two components missing from the table;
+# 22c record_result setting OVERALL=FAIL under a REAL /dev/full ENOSPC, which DECLARES its skip
+# elsewhere and so does not raise the floor. 1 + 2 = 3.); +1 (the case-15 positive control added
+# with them, when re-deriving that guard's population from source made its own vacuity reachable.)
+CASE_FLOOR=82
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \

@@ -10052,7 +10052,16 @@ record_result() { # <name> <status> <seconds>
   # claim of coverage that is merely stated is worse than either.
   local _rr_err _rr_rc
   _rr_err="$( { printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"; } 2>&1 )"; _rr_rc=$?
-  [ "$_rr_rc" -eq 0 ] || _disk_note_capture_failure "component verdict write ($1.result)" "$_rr_err"
+  if [ "$_rr_rc" -ne 0 ]; then
+    _disk_note_capture_failure "component verdict write ($1.result)" "$_rr_err"
+    # #3800 (roborev job 319 round 3): ATTRIBUTING THE WRITE FAILURE IS NOT DISPOSING OF IT --
+    # the same correction job 316 made one function over. This knows its own verdict never
+    # reached the disk, so it fails the run HERE, in the shell that knows. In a SIDE-lane
+    # subshell the assignment is lost at the boundary (#1737) and the cover is the parent's
+    # presence guard over the now-absent-or-empty `.result`; in the serial MAIN lane and in
+    # every --lite/--delta component it is this line that fails the run.
+    OVERALL=FAIL
+  fi
   # BOTH #3473 and #3453 land at this chokepoint; the merge keeps both, and the ORDER is
   # argued rather than arbitrary. `_hb_ensure` goes FIRST because everything below it can
   # be slow or can fail: the sidecar note writes a file, and the two integrity asserts do
@@ -18162,7 +18171,18 @@ aggregate_lite_components() {
   local c rf st secs i
   for c in file-size fmt clippy roborev-lints; do
     rf="$LOG_DIR/$c.result"
-    [ -f "$rf" ] || continue   # not run (e.g. --only skip) — do not add, do not fail
+    # #3800 (roborev job 319 round 3): "absent" was read as "--only skipped it", which is only
+    # ONE of its two causes -- the other is that the component RAN and its verdict never reached
+    # the disk (ENOSPC), and that one was silently dropped from the table AND from OVERALL. The
+    # discriminator is not the file, it is the SELECTION: `_pool_selected` is the same predicate
+    # `run_file_size`/`run_component` early-return on, so a component this run did not select is
+    # still skipped, and one it DID select owes a readable verdict.
+    if [ ! -f "$rf" ]; then
+      _pool_selected "$c" || continue
+      _disk_note_unread_verdict "$c" "verdict file ABSENT"
+      LN+=("$c"); LS+=(FAIL); LT+=("0s"); OVERALL=FAIL
+      continue
+    fi
     # #3800 (job 304): the ONE reader, so a `.result` this lane could not READ becomes an
     # UNMEASURED subject of the `disk-exhaustion:` line. #3800 (job 316): via the aggregation
     # wrapper, so it ALSO fails the run. The `[ -n "$st" ]` belt that stood here covered only
@@ -19641,7 +19661,18 @@ launch_components() {
   local -a main_lane=() side_lane=()
   local c
   for c in "${COMPONENTS[@]}"; do
-    [ "$c" = file-size ] && continue
+    if [ "$c" = file-size ]; then
+      # #3800 (roborev job 319 round 3): file-size ALREADY RAN inline (before the dataset
+      # preflight, which exits early when data is missing), so it must not be dispatched again --
+      # but it was `continue`d before reaching SELECTED_MAIN, which made it the ONE selected
+      # component the post-drain fail-closed presence guard did not cover. The reconstruction loop
+      # then skips an absent `.result` as "not selected", so an ENOSPC that stopped
+      # `file-size.result` being created omitted the component from a gate reporting
+      # `RESULT: PASS` -- a component silently missing from a certification, which is a worse
+      # form of this issue's own opening defect. Recorded as selected, still not dispatched.
+      _pool_selected "$c" && SELECTED_MAIN+=("$c")
+      continue
+    fi
     _pool_selected "$c" || continue
     if is_side_component "$c"; then side_lane+=("$c"); SELECTED_SIDE+=("$c")
     else main_lane+=("$c"); SELECTED_MAIN+=("$c"); fi
