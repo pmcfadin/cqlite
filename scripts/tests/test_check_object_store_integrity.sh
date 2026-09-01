@@ -364,12 +364,18 @@ fi
 # administrative directory, and sweeping that would audit the wrong thing while reporting
 # a verdict about "the store".
 R_WT_MAIN=$(newrepo wtmain)
+# CANONICALISED, NOT THE LITERAL PATH: the subject reports `pwd -P`, and on macOS
+# `${TMPDIR}` resolves through `/private`, so pinning `$R_WT_MAIN/.git/objects`
+# false-REDS on correct input on a platform this script's own header claims to
+# support (#3749 review NIT 9). A guard that reds on correct input is the guard
+# agents learn to waive.
+R_WT_MAIN_P=$(cd "$R_WT_MAIN" && pwd -P)
 R_WT="$T/wt-linked"
 if g "$R_WT_MAIN" worktree add -q --detach "$R_WT" >/dev/null 2>&1 && [ -d "$R_WT" ]; then
   WT_PRIVATE=$(git -C "$R_WT" rev-parse --absolute-git-dir 2>/dev/null)
   if run 0 "worktree: VERIFIED" --repo "$R_WT"; then
-    if printf '%s\n' "$OUT" | grep -q "^OBJECT-STORE: store $R_WT_MAIN/\.git/objects$"; then
-      ok "worktree: a linked worktree sweeps the SHARED common store ($R_WT_MAIN/.git/objects)"
+    if printf '%s\n' "$OUT" | grep -q "^OBJECT-STORE: store $R_WT_MAIN_P/\.git/objects$"; then
+      ok "worktree: a linked worktree sweeps the SHARED common store ($R_WT_MAIN_P/.git/objects)"
     else
       bad "worktree: the swept store is not the shared one: $(printf '%s\n' "$OUT" | grep '^OBJECT-STORE: store ')"
     fi
@@ -583,4 +589,270 @@ if [ "$before" = "$after" ] && [ -n "$before" ]; then
   ok "no-mutation: a full sweep leaves the repository byte-identical (no ref, no pack, no rewrite)"
 else
   bad "no-mutation: the sweep changed the repository"
+fi
+
+# --- Case 16: REACHABILITY IS NOT CORRUPT (the #3749 review's BLOCKER B) ----
+# THE DEFECT THIS CASE EXISTS FOR, MEASURED ON THE REAL FLEET STORE: `git fsck`
+# prints `error: <ref>: invalid reflog entry <sha>` when a reflog names an object a
+# peer lane's gc has pruned, and on a store eight lanes are concurrently writing that
+# happened on roughly a quarter to a half of all runs — on a store nothing is wrong
+# with. The first classifier recognised damage from `/^error/p`, so every one of
+# those was a CORRUPT that pages high, stops the supervisor and fails `--strict`
+# bootstrap. The class now comes from fsck's exit BITMASK (1/4 = object/pack damage,
+# 2/8/16 = reachability/refs/commit-graph).
+#
+# IT IS NOT DEMOTED TO CLEAN EITHER, and that is the other half: a genuinely MISSING
+# object reports the same ERROR_REACHABLE bit, so this lands on its own NON-PASSING
+# state with its own cause.
+R_REFLOG=$(newrepo reflog)
+RL_BR=$(git -C "$R_REFLOG" symbolic-ref --short HEAD 2>/dev/null)
+RL_LOG="$R_REFLOG/.git/logs/refs/heads/$RL_BR"
+if [ -n "$RL_BR" ] && [ -f "$RL_LOG" ]; then
+  printf '%s %s t <t@t> 1700000000 +0000\tbogus\n' \
+    "$(git -C "$R_REFLOG" rev-parse HEAD)" \
+    "1111111111111111111111111111111111111111" >>"$RL_LOG"
+fi
+RL_RC=0
+git -C "$R_REFLOG" fsck --no-progress --no-dangling >/dev/null 2>"$T/reflog-fsck.err" || RL_RC=$?
+if [ "$RL_RC" -eq 2 ] && grep -q 'invalid reflog entry' "$T/reflog-fsck.err" &&
+  git -C "$R_REFLOG" cat-file -p "$(git -C "$R_REFLOG" rev-parse HEAD:f1)" >/dev/null 2>&1; then
+  # ONE property: the fixture differs from its clean twin only by a reflog line, and
+  # the assertion is on the BITMASK (2 = ERROR_REACHABLE, no 1/4) rather than on the
+  # message — that is the signal the subject now classifies on.
+  ok "reflog-plant: the plant IS the defect described (fsck exits 2 = ERROR_REACHABLE with an 'invalid reflog entry', objects readable)"
+else
+  bad "reflog-plant: fsck rc=$RL_RC on the reflog fixture (wanted 2) — the case below would prove nothing"
+fi
+if run 5 "reflog: UNMEASURED not CORRUPT" --repo "$R_REFLOG"; then
+  if [ "$(verdict_of)" = UNMEASURED ]; then
+    ok "reflog: a stale reflog entry on a busy shared store is UNMEASURED, NOT CORRUPT (it stops no supervisor)"
+  else
+    bad "reflog: verdict was '$(verdict_of)', wanted UNMEASURED — a healthy store must not read as corrupt"
+  fi
+  if printf '%s\n' "$OUT" | grep -q 'reachability/ref/commit-graph' &&
+    printf '%s\n' "$OUT" | grep -q 'reflog expire'; then
+    ok "reflog: the cause NAMES the class and gives the remedy for it (not the re-clone remedy, which is for damage)"
+  else
+    bad "reflog: the UNMEASURED cause does not name the reachability class"
+  fi
+  if ! printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: object '; then
+    ok "reflog: NO 'object' lines — the 40-hex tokens in a reflog diagnostic name INTACT objects, not damaged ones"
+  else
+    bad "reflog: intact object ids were reported as affected objects"
+  fi
+fi
+
+# --- Case 17: THE DISCRIMINATOR — a non-clean walk must REPRODUCE ----------
+# The store this sweep audits is mutated by up to 8 peer lanes WHILE fsck walks it,
+# so a diagnostic can be a concurrency artefact. No fixture can hold a concurrent
+# writer, so the discriminator is exercised with a git shim whose FIRST fsck reports
+# and whose SECOND does not — the sequence a transient produces.
+#
+# THREE ARMS, EACH ONE PROPERTY APART: report-once vs report-always (the condition),
+# and reachability vs damage (the exit bits).
+mk_fsck_shim() {
+  # mk_fsck_shim <dir> <always|once> <rc> <message> <log>
+  local d="$1" when="$2" rc="$3" msg="$4" log="$5"
+  mk_bin "$d" timeout gtimeout
+  rm -f "$d/git"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '# Test shim: on `fsck`, report %s and exit %s; delegate everything else.\n' "$when" "$rc"
+    printf 'for a in "$@"; do\n'
+    printf '  if [ "$a" = fsck ]; then\n'
+    printf '    printf "call\\n" >>%s\n' "$(printf '%q' "$log")"
+    printf '    n=$(grep -c . %s 2>/dev/null || printf 0)\n' "$(printf '%q' "$log")"
+    if [ "$when" = always ]; then
+      printf '    if [ 1 -eq 1 ]; then\n'
+    else
+      printf '    if [ "$n" -le 1 ]; then\n'
+    fi
+    printf '      printf "%%s\\n" %s >&2\n' "$(printf '%q' "$msg")"
+    printf '      exit %s\n' "$rc"
+    printf '    fi\n'
+    printf '    break\n'
+    printf '  fi\n'
+    printf 'done\n'
+    printf 'exec %s "$@"\n' "$(printf '%q' "$REAL_GIT")"
+  } >"$d/git"
+  chmod +x "$d/git"
+}
+if [ -z "${REAL_GIT:-}" ]; then
+  bad "discriminator: no real git on PATH — the shim arms cannot be built"
+else
+  RL_MSG='error: refs/heads/x: invalid reflog entry 1111111111111111111111111111111111111111'
+  DMG_MSG='error: f761ec192d9f0dca3329044b96ebdb12839dbff6: hash-path mismatch, found at: /somewhere'
+  # (a) CONSTRUCTION, asserted before the subject runs: the once-shim really does
+  #     report on its first fsck and not on its second.
+  SH_ONCE="$T/shim-once"
+  LOG_ONCE="$T/shim-once-calls.txt"
+  : >"$LOG_ONCE"
+  mk_fsck_shim "$SH_ONCE" once 2 "$RL_MSG" "$LOG_ONCE"
+  c1=0; PATH="$SH_ONCE:$PATH" "$SH_ONCE/git" -C "$R_CLEAN" fsck --no-progress >/dev/null 2>&1 || c1=$?
+  c2=0; PATH="$SH_ONCE:$PATH" "$SH_ONCE/git" -C "$R_CLEAN" fsck --no-progress >/dev/null 2>&1 || c2=$?
+  if [ "$c1" -eq 2 ] && [ "$c2" -eq 0 ] && [ "$(grep -c . "$LOG_ONCE" | tr -d ' ')" -eq 2 ]; then
+    ok "discriminator-plant: the once-shim IS the sequence described (first fsck rc=2, second rc=0, both logged)"
+  else
+    bad "discriminator-plant: first=$c1 second=$c2 calls=$(grep -c . "$LOG_ONCE" | tr -d ' ') — the cases below would prove nothing"
+  fi
+  : >"$LOG_ONCE"
+  OUT=$(PATH="$SH_ONCE:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+  RC=$?
+  record_out "discriminator-transient"
+  if [ "$RC" -eq 0 ] && [ "$(verdict_of)" = VERIFIED ] &&
+    [ "$(grep -c . "$LOG_ONCE" | tr -d ' ')" -eq 2 ] &&
+    printf '%s\n' "$OUT" | grep -q 'did NOT reproduce'; then
+    ok "discriminator: a diagnostic that does not survive a SECOND walk is VERIFIED — and the run says so, having really walked twice"
+  else
+    bad "discriminator(transient): rc=$RC verdict='$(verdict_of)' walks=$(grep -c . "$LOG_ONCE" | tr -d ' ') (wanted 0/VERIFIED/2)"
+  fi
+  # (b) ONE PROPERTY APART: the same message on EVERY walk. It reproduces, so it is
+  #     non-passing — and still not CORRUPT, because it is the reachability class.
+  SH_ALWAYS="$T/shim-always"
+  LOG_ALWAYS="$T/shim-always-calls.txt"
+  : >"$LOG_ALWAYS"
+  mk_fsck_shim "$SH_ALWAYS" always 2 "$RL_MSG" "$LOG_ALWAYS"
+  OUT=$(PATH="$SH_ALWAYS:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+  RC=$?
+  record_out "discriminator-persistent"
+  if [ "$RC" -eq 5 ] && [ "$(verdict_of)" = UNMEASURED ] &&
+    [ "$(grep -c . "$LOG_ALWAYS" | tr -d ' ')" -eq 2 ]; then
+    ok "discriminator: the SAME diagnostic on BOTH walks does not reach VERIFIED — the re-run is a discriminator, not a retry-until-clean"
+  else
+    bad "discriminator(persistent): rc=$RC verdict='$(verdict_of)' walks=$(grep -c . "$LOG_ALWAYS" | tr -d ' ') (wanted 5/UNMEASURED/2)"
+  fi
+  # (c) A DAMAGE class (fsck exit bit 1) seen ONCE and not the second time is
+  #     UNMEASURED: neither established damage nor a clean store. One property apart
+  #     from (a) — the exit bits.
+  SH_FLICK="$T/shim-flicker"
+  LOG_FLICK="$T/shim-flicker-calls.txt"
+  : >"$LOG_FLICK"
+  mk_fsck_shim "$SH_FLICK" once 3 "$DMG_MSG" "$LOG_FLICK"
+  OUT=$(PATH="$SH_FLICK:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+  RC=$?
+  record_out "discriminator-flicker"
+  if [ "$RC" -eq 5 ] && [ "$(verdict_of)" = UNMEASURED ] &&
+    printf '%s\n' "$OUT" | grep -q 'did not reproduce'; then
+    ok "discriminator: a DAMAGE class seen once and not twice is UNMEASURED — a flickering corruption signal is certified as neither"
+  else
+    bad "discriminator(flicker): rc=$RC verdict='$(verdict_of)' (wanted 5/UNMEASURED)"
+  fi
+  # (d) AND THE FATAL BRANCH STILL FIRES when it reproduces: same shim, always-arm,
+  #     damage bits. Without this the three arms above could all be a subject that
+  #     simply never reports CORRUPT.
+  SH_DMG="$T/shim-damage"
+  LOG_DMG="$T/shim-damage-calls.txt"
+  : >"$LOG_DMG"
+  mk_fsck_shim "$SH_DMG" always 3 "$DMG_MSG" "$LOG_DMG"
+  OUT=$(PATH="$SH_DMG:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+  RC=$?
+  record_out "discriminator-reproduced-damage"
+  if [ "$RC" -eq 4 ] && [ "$(verdict_of)" = CORRUPT ] &&
+    [ "$(grep -c . "$LOG_DMG" | tr -d ' ')" -eq 2 ]; then
+    ok "discriminator: a damage class on BOTH walks IS CORRUPT (exit 4) — the discriminator did not defang the fatal branch"
+  else
+    bad "discriminator(reproduced): rc=$RC verdict='$(verdict_of)' walks=$(grep -c . "$LOG_DMG" | tr -d ' ') (wanted 4/CORRUPT/2)"
+  fi
+fi
+
+# --- Case 18: THE INHERITED GIT ENVIRONMENT CANNOT BEND THE VERDICT --------
+# Reproduced against the first version of this script: `GIT_OBJECT_DIRECTORY=<good>`
+# with `--repo <bad>` printed `store <bad>/.git/objects` and `verdict VERIFIED`,
+# exit 0 — every emitted line affirmatively false, with no signal to either consumer.
+# The script pinned two ambient variables and inherited the rest of the family.
+#
+# THE CONSTRUCTION IS ASSERTED FIRST, and it is what makes this case non-vacuous: a
+# PLAIN (non-isolated) git really is redirected by the variable, so a green below is
+# the isolation and not an inert variable.
+plain_rc=0
+GIT_OBJECT_DIRECTORY="$R_CLEAN/.git/objects" \
+  git --git-dir="$R_MIS/.git" fsck --no-progress --no-dangling >/dev/null 2>&1 || plain_rc=$?
+if [ "$plain_rc" -eq 0 ]; then
+  ok "env-plant: the injection IS effective against a non-isolated git (GIT_OBJECT_DIRECTORY makes the CORRUPT store fsck clean)"
+else
+  bad "env-plant: a plain git was not redirected by GIT_OBJECT_DIRECTORY (rc=$plain_rc) — the cases below would prove nothing"
+fi
+OUT=$(GIT_OBJECT_DIRECTORY="$R_CLEAN/.git/objects" bash "$SUBJECT" --repo "$R_MIS" 2>&1)
+RC=$?
+record_out "env-object-directory"
+if [ "$RC" -eq 4 ] && [ "$(verdict_of)" = CORRUPT ] &&
+  printf '%s\n' "$OUT" | grep -q "^OBJECT-STORE: store $R_MIS/\.git/objects$"; then
+  ok "env: an inherited GIT_OBJECT_DIRECTORY cannot make the sweep read a store OTHER than the one it names"
+else
+  bad "env(GIT_OBJECT_DIRECTORY): rc=$RC verdict='$(verdict_of)' — a false verdict about the named store"
+fi
+OUT=$(GIT_DIR="$R_CLEAN/.git" bash "$SUBJECT" --repo "$R_MIS" 2>&1)
+RC=$?
+record_out "env-git-dir"
+if [ "$RC" -eq 4 ] && [ "$(verdict_of)" = CORRUPT ] &&
+  printf '%s\n' "$OUT" | grep -q "^OBJECT-STORE: store $R_MIS/\.git/objects$"; then
+  ok "env: an inherited GIT_DIR does not repoint the sweep (the subject is --repo, resolved under isolation)"
+else
+  bad "env(GIT_DIR): rc=$RC verdict='$(verdict_of)' store=$(printf '%s\n' "$OUT" | grep '^OBJECT-STORE: store ')"
+fi
+OUT=$(GIT_ALTERNATE_OBJECT_DIRECTORIES="$R_MIS/.git/objects" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+RC=$?
+record_out "env-alternates"
+if [ "$RC" -eq 0 ] && [ "$(verdict_of)" = VERIFIED ]; then
+  ok "env: an inherited GIT_ALTERNATE_OBJECT_DIRECTORIES cannot import a CORRUPT store into a healthy one's verdict"
+else
+  bad "env(alternates): rc=$RC verdict='$(verdict_of)' — a false verdict about the named store"
+fi
+
+# --- Case 19: A MULTI-LINE fsck DIAGNOSTIC SURVIVES WHOLE, AND sane() RUNS -
+# git PERMITS NEWLINES IN PATHS and fsck quotes the path verbatim, so a diagnostic
+# can be two physical lines. The first version split findings with `sed`, so the
+# CONTINUATION — which carries the rest of the path the operator has to act on —
+# matched no pattern and was DROPPED SILENTLY: the anchor invariant held, but by
+# truncation, and the header's "fields are otherwise kept VERBATIM" was false.
+#
+# This is also the ONLY case that puts a control character into a field, so it is
+# what exercises sane()'s escape loop at all.
+NL=$'\n'
+R_NLDIR="$T/nl${NL}dir"
+if mkdir -p "$R_NLDIR" 2>/dev/null && [ -d "$R_NLDIR" ]; then
+  R_NL="$R_NLDIR/repo"
+  mkdir -p "$R_NL"
+  git init -q "$R_NL" >/dev/null 2>&1
+  g "$R_NL" config user.email t@t
+  g "$R_NL" config user.name t
+  printf 'content aaa\n' >"$R_NL/f1"
+  printf 'content bbb\n' >"$R_NL/f2"
+  g "$R_NL" add f1 f2 >/dev/null 2>&1
+  g "$R_NL" -c user.email=t@t -c user.name=t commit -q -m c1 >/dev/null 2>&1
+  NL_A=$(git -C "$R_NL" rev-parse HEAD:f1 2>/dev/null)
+  NL_B=$(git -C "$R_NL" rev-parse HEAD:f2 2>/dev/null)
+  if [ -n "$NL_A" ] && [ -n "$NL_B" ] && [ "$NL_A" != "$NL_B" ]; then
+    chmod 644 "$(loose_path "$R_NL" "$NL_A")" 2>/dev/null
+    cp "$(loose_path "$R_NL" "$NL_B")" "$(loose_path "$R_NL" "$NL_A")"
+  fi
+  # ABSOLUTE --git-dir, deliberately: with `-C <repo>` git prints the object path
+  # RELATIVE to the repo, which does not contain the newline-bearing directory at all
+  # — so the construction would be asserted against a diagnostic of a different shape
+  # than the one the subject (which passes an absolute --git-dir) actually receives.
+  nl_lines=$(git --git-dir="$R_NL/.git" fsck --no-progress --no-dangling 2>&1 | grep -c . | tr -d ' ')
+  if [ "$(git -C "$R_NL" cat-file -p "$NL_A" 2>/dev/null)" = "content bbb" ] && [ "$nl_lines" -ge 3 ]; then
+    ok "newline-plant: the plant IS the shape described (a hash-path mismatch whose quoted path contains a NEWLINE, so fsck emits a multi-line diagnostic)"
+  else
+    bad "newline-plant: content='$(git -C "$R_NL" cat-file -p "$NL_A" 2>/dev/null | head -1)' fsck-lines=$nl_lines — the case below would prove nothing"
+  fi
+  OUT=$(bash "$SUBJECT" --repo "$R_NL" 2>&1)
+  RC=$?
+  record_out "newline-path"
+  if [ "$RC" -eq 4 ] && [ "$(verdict_of)" = CORRUPT ]; then
+    ok "newline-path: a store under a newline-bearing path is still classified (exit 4)"
+  else
+    bad "newline-path: rc=$RC verdict='$(verdict_of)' (wanted 4/CORRUPT)"
+  fi
+  # THE TRUNCATION HALF: the continuation must be PRESENT, on the SAME anchored line,
+  # with the newline rendered as a visible escape. `nl${NL}dir` is the containing
+  # directory, so `dir/repo/.git/objects` is exactly the text `sed` used to drop.
+  if printf '%s\n' "$OUT" | grep -q 'finding .*hash-path mismatch' &&
+    printf '%s\n' "$OUT" | grep -q 'nl\\ndir/repo/\.git/objects'; then
+    ok "newline-path: the CONTINUATION of a multi-line diagnostic survives on the same anchored line, newline escaped as \\n (sane()'s escape loop, unexercised before)"
+  else
+    bad "newline-path: the diagnostic was truncated — the operator is handed a path that does not exist: $(printf '%s\n' "$OUT" | grep 'finding ' | head -1)"
+  fi
+else
+  bad "newline-path: could not create a newline-bearing directory (the case cannot run on this filesystem)"
 fi
