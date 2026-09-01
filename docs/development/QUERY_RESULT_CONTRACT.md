@@ -35,7 +35,7 @@ per-type renderings would decay exactly like a stale comment, which is the failu
 |---|---|
 | `Value` → text (table, CSV, and the stringified JSON arms) | `ValueFormatter::format_value` / `format_into` — `cqlite-core/src/util/value_fmt.rs` |
 | Genuine-NULL predicate | `ValueFormatter::is_null` — `value_fmt.rs:39` |
-| `Value` → JSON kind | `JSONWriter::value_to_json` — `cqlite-cli/src/output/json.rs:147` |
+| `Value` → JSON kind | `JsonCell::from_value` — `cqlite-cli/src/output/json_cell.rs` |
 | CSV framing/escaping | the `csv` crate, as configured in `cqlite-cli/src/output/csv.rs` |
 
 Each rule below names the test that pins it. A rule with no pinning test does not belong here.
@@ -102,7 +102,7 @@ CSV framing (delimiter, quoting, embedded quotes and newlines) is the `csv` crat
 
 ## 6. Value rendering — JSON kinds
 
-JSON is the one egress that is **not** just stringified text: `value_to_json` (`json.rs:147`) chooses
+JSON is the one egress that is **not** just stringified text: `JsonCell::from_value` (`json_cell.rs`) chooses
 a JSON *kind* per `Value` arm. The oracle for that choice is Cassandra's
 `AbstractType.toJSONString` hierarchy at the pinned tag `cassandra-5.0.8` — never CQLite's own prior
 output (CLAUDE.md, format-authority rule).
