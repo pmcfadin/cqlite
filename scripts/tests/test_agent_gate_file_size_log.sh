@@ -67,6 +67,12 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 GATE="$SCRIPT_DIR/../agent-gate.sh"
+# Case 4i runs a REAL FULL gate in a fixture, which must clear the #3544 component-set
+# pre-flight first: that needs the canonical remote identity pinned in the fixture's own copy
+# of the gate and a committed component manifest beside it. Both are the sanctioned
+# artifact-substitution helpers (a settable seam would reopen the hole #3544 closes).
+# shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.bash
+. "$SCRIPT_DIR/lib/agent-gate-canonical-pin.bash"
 
 # Never inherit a caller's summary path / parent marker (#2751/#2874 discipline), and
 # never block on the machine-wide gate slot (#1825) — these runs compile nothing.
@@ -542,6 +548,95 @@ for bad_val in 0 true; do
 done
 
 # ---------------------------------------------------------------------------
+# Case 4i (#3402, roborev job 26) — the disclosure must survive an EARLY-EXIT emit.
+#
+# `run_file_size` executes ~250 lines BEFORE the dataset and schemas preflights, and each
+# early-exit `emit_summary` hand-builds its own meta list. So a full gate with an engaged
+# override and a missing corpus recorded `file-size: OPT-OUT` and then emitted its ONLY
+# block with NO component row at all — the override name and the growth count absent from
+# the very artifact this issue exists to put them in. Round 1 found the same shape in the
+# tree-integrity boundary block; this is the preflight emit.
+#
+# This is the suite's one REAL FULL-GATE run. It compiles nothing: the preflight fails before
+# any component is dispatched, which is exactly the window under test. It needs the #3544
+# pre-flight to pass, hence the pinned canonical remote + committed manifest and a local bare
+# origin.
+# ---------------------------------------------------------------------------
+pf_root="$tmp/preflight-fixture"
+pf_empty="$tmp/preflight-empty-root/sstables"
+pf_ok=1
+mkdir -p "$pf_root/scripts" "$pf_root/cqlite-core/src" "$pf_empty" 2>/dev/null || pf_ok=0
+if [ "$pf_ok" = 1 ]; then
+  cp "$GATE" "$pf_root/scripts/agent-gate.sh" || pf_ok=0
+fi
+if [ "$pf_ok" = 1 ]; then
+  agent_gate_pin_canonical_remote "$pf_root/scripts/agent-gate.sh" "$pf_root.origin.git" || pf_ok=0
+  agent_gate_install_components_manifest "$pf_root/scripts/agent-gate.sh" || pf_ok=0
+fi
+if [ "$pf_ok" = 1 ]; then
+  lines 900 "$pf_root/cqlite-core/src/big.rs"
+  printf 'target/\n*.log\n' > "$pf_root/.gitignore"
+  ( cd "$pf_root" && git "${GIT_CFG[@]}" init -q -b main . &&
+    git "${GIT_CFG[@]}" add -A && git "${GIT_CFG[@]}" commit -qm init &&
+    git init -q --bare "$pf_root.origin.git" &&
+    git "${GIT_CFG[@]}" remote add origin "$pf_root.origin.git" &&
+    git "${GIT_CFG[@]}" push -q origin main ) >/dev/null 2>&1 || pf_ok=0
+fi
+if [ "$pf_ok" != 1 ]; then
+  # NOT a skip: this suite needs git and a writable scratch, both of which every other case
+  # already relies on, so a failure here is a broken harness rather than a missing capability.
+  bad "case4i: could not build the full-gate preflight fixture — the early-exit path is UNMEASURED"
+  bad "case4i: (OPT-OUT row needle not reached)"
+  bad "case4i: (count-agreement needle not reached)"
+  bad "case4i mutant: (not reached)"
+else
+  lines 950 "$pf_root/cqlite-core/src/big.rs"
+  pf_sum="$tmp/preflight.sum"; pf_out="$tmp/preflight.out"
+  ( cd "$pf_root" && env -u AGENT_GATE_SUMMARY_FILE CQLITE_DATASETS_ROOT="${pf_empty%/sstables}" \
+      CQLITE_ALLOW_FILE_GROWTH=1 CQLITE_GATE_DISABLE_CAP=1 AGENT_GATE_SUMMARY_FILE="$pf_sum" \
+      bash "$pf_root/scripts/agent-gate.sh" >"$pf_out" 2>&1 )
+  # POSITIVE CONTROL: the run must actually have stopped at the corpus preflight. Without
+  # this, an assert below could be measuring a run that never got there.
+  if grep -q 'missing-fixtures: FAIL-CLOSED' "$pf_sum" 2>/dev/null; then
+    ok "case4i: the fixture run really stopped at the #2078 corpus preflight (window under test)"
+  else
+    bad "case4i: the run did not reach the corpus preflight — the early-exit path is UNMEASURED"
+    grep -E '^(preflight|component-set|RESULT):' "$pf_sum" 2>/dev/null | head -3
+  fi
+  has "case4i (#3402): the preflight-FAIL block carries the OPT-OUT row with its detail" \
+      "$pf_sum" "OPT-OUT (0s) — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); 1 over-threshold file(s) grown"
+  # The count must AGREE with the rows printed. It did not: the helper assigns its count
+  # inside a command substitution, so the caller read 0 beside one row — a count
+  # contradicting its own table, which is the invariant
+  # scripts/tests/test_agent_gate_tree_provenance.sh asserts for the boundary block.
+  pf_rows=$(grep -cE '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP|OPT-OUT) \([0-9]+s\)' "$pf_sum" 2>/dev/null | tr -d ' ')
+  pf_said=$(sed -n 's/^components-completed-before-exit: \([0-9]*\) .*/\1/p' "$pf_sum" | head -1)
+  if [ -n "$pf_said" ] && [ "$pf_said" = "${pf_rows:-x}" ]; then
+    ok "case4i (#3402): components-completed-before-exit ($pf_said) equals the rows printed — no contradicted count"
+  else
+    bad "case4i (#3402): the block says '$pf_said' completed but printed ${pf_rows:-<unmeasured>} row(s)"
+  fi
+  # The mutant: drop the rows argument from the corpus-preflight emit, which is the state
+  # before this fix. The block still emits, so only the row can distinguish the two.
+  pf_mut="$tmp/preflight-mutant"
+  if cp -r "$pf_root" "$pf_mut" 2>/dev/null &&
+     sed -i 's/^\( *\)\${_pf_rows:+"\$_pf_rows"} \\$/\1\\/' "$pf_mut/scripts/agent-gate.sh" &&
+     ! grep -q '_pf_rows:+' "$pf_mut/scripts/agent-gate.sh"; then
+    pf_msum="$tmp/preflight-mutant.sum"
+    ( cd "$pf_mut" && env -u AGENT_GATE_SUMMARY_FILE CQLITE_DATASETS_ROOT="${pf_empty%/sstables}" \
+        CQLITE_ALLOW_FILE_GROWTH=1 CQLITE_GATE_DISABLE_CAP=1 AGENT_GATE_SUMMARY_FILE="$pf_msum" \
+        bash "$pf_mut/scripts/agent-gate.sh" >"$tmp/preflight-mutant.out" 2>&1 )
+    if grep -q 'CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced)' "$pf_msum" 2>/dev/null; then
+      bad "case4i mutant: the row survives without the rows argument — the check cannot fail"
+    else
+      ok "case4i mutant: without the rows argument the override is INVISIBLE in the block (proved discriminating)"
+    fi
+  else
+    bad "case4i mutant: could not build the mutant fixture — the assert above is unproven"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Case 5 — base ref UNRESOLVABLE (no main/master, no origin/*): the ratchet is skipped and
 # the log must say so EXPLICITLY, while the advisory list still works off `git diff HEAD`.
 # ---------------------------------------------------------------------------
@@ -973,7 +1068,7 @@ printf 'file-size component log + opt-out marker guard (#3401/#3402): %d passed,
 # the first value written here was WRONG (109, guessed from the number of asserts typed
 # rather than counted from a run: `fs_summary_row || bad` contributes nothing unless it
 # fires).
-EXPECTED_CHECKS=108
+EXPECTED_CHECKS=112
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"
