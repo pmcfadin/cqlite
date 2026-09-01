@@ -772,7 +772,7 @@ impl V5CompressedLegacyParser {
                                             field_data, nested_udt, registry,
                                         )?
                                     } else {
-                                        Self::parse_simple_udt_field_value(
+                                        self.parse_simple_udt_field_value(
                                             field_data,
                                             &field_def.field_type,
                                         )?
@@ -794,7 +794,7 @@ impl V5CompressedLegacyParser {
                                             1,
                                         )?
                                     } else {
-                                        Self::parse_simple_udt_field_value(
+                                        self.parse_simple_udt_field_value(
                                             field_data,
                                             &field_def.field_type,
                                         )?
@@ -812,7 +812,7 @@ impl V5CompressedLegacyParser {
                                             )?;
                                             Value::Frozen(Box::new(inner_value))
                                         } else {
-                                            Self::parse_simple_udt_field_value(
+                                            self.parse_simple_udt_field_value(
                                                 field_data,
                                                 &field_def.field_type,
                                             )?
@@ -836,18 +836,18 @@ impl V5CompressedLegacyParser {
                                             )?;
                                             Value::Frozen(Box::new(inner_value))
                                         } else {
-                                            Self::parse_simple_udt_field_value(
+                                            self.parse_simple_udt_field_value(
                                                 field_data,
                                                 &field_def.field_type,
                                             )?
                                         }
                                     }
-                                    _ => Self::parse_simple_udt_field_value(
+                                    _ => self.parse_simple_udt_field_value(
                                         field_data,
                                         &field_def.field_type,
                                     )?,
                                 },
-                                _ => Self::parse_simple_udt_field_value(
+                                _ => self.parse_simple_udt_field_value(
                                     field_data,
                                     &field_def.field_type,
                                 )?,
@@ -877,12 +877,12 @@ impl V5CompressedLegacyParser {
                                         )?;
                                         Value::Frozen(Box::new(inner_value))
                                     }
-                                    _ => Self::parse_simple_udt_field_value(
+                                    _ => self.parse_simple_udt_field_value(
                                         field_data,
                                         &field_def.field_type,
                                     )?,
                                 },
-                                _ => Self::parse_simple_udt_field_value(
+                                _ => self.parse_simple_udt_field_value(
                                     field_data,
                                     &field_def.field_type,
                                 )?,
@@ -962,7 +962,7 @@ impl V5CompressedLegacyParser {
                             } else if field_len == 0 {
                                 // Empty field - parse with empty data
                                 let value =
-                                    Self::parse_simple_udt_field_value(&[], &field_def.field_type)?;
+                                    self.parse_simple_udt_field_value(&[], &field_def.field_type)?;
                                 Some(value)
                             } else {
                                 let field_len = Self::checked_component_len(
@@ -1056,15 +1056,15 @@ impl V5CompressedLegacyParser {
                                             }
                                             _ => {
                                                 // Other frozen types - parse as simple value
-                                                let inner_value =
-                                                    Self::parse_simple_udt_field_value(
+                                                let inner_value = self
+                                                    .parse_simple_udt_field_value(
                                                         field_data, inner,
                                                     )?;
                                                 Value::Frozen(Box::new(inner_value))
                                             }
                                         }
                                     }
-                                    _ => Self::parse_simple_udt_field_value(
+                                    _ => self.parse_simple_udt_field_value(
                                         field_data,
                                         &field_def.field_type,
                                     )?,
