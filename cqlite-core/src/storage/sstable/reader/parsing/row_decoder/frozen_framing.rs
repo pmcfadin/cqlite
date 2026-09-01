@@ -34,6 +34,18 @@
 
 use super::*;
 
+/// One element's decode: the exact bytes of a single collection element, in.
+///
+/// `&dyn` rather than a generic so the framing below is monomorphized once and
+/// the two callers (a rendered type string, or a structured `&CqlType`) share it.
+type ElementDecoder<'a> = &'a dyn Fn(&[u8]) -> Result<Value>;
+
+/// A tuple element's decode, which additionally needs its POSITION (to pick the
+/// element type) and a description for error messages. Named rather than written
+/// inline because `clippy::type_complexity` is `-D warnings` here, and a named
+/// alias is the fix that keeps the signature readable.
+type TupleElementDecoder<'a> = &'a dyn Fn(usize, &[u8], &str) -> Result<Value>;
+
 impl V5CompressedLegacyParser {
     /// Frozen list/set framing, raw (no VUInt cell-value-length prefix — the
     /// caller has already bounded `data`). `as_set = true` produces
@@ -50,7 +62,7 @@ impl V5CompressedLegacyParser {
         mut offset: usize,
         column_name: &str,
         as_set: bool,
-        decode_element: &dyn Fn(&[u8]) -> Result<Value>,
+        decode_element: ElementDecoder<'_>,
     ) -> Result<(Value, usize)> {
         let kind = if as_set { "set" } else { "list" };
         let count = Self::read_frozen_count(data, &mut offset, data.len(), kind, column_name)?;
@@ -118,8 +130,8 @@ impl V5CompressedLegacyParser {
         data: &[u8],
         mut offset: usize,
         column_name: &str,
-        decode_key: &dyn Fn(&[u8]) -> Result<Value>,
-        decode_value: &dyn Fn(&[u8]) -> Result<Value>,
+        decode_key: ElementDecoder<'_>,
+        decode_value: ElementDecoder<'_>,
     ) -> Result<(Value, usize)> {
         let count = Self::read_frozen_count(data, &mut offset, data.len(), "map", column_name)?;
 
@@ -221,7 +233,7 @@ impl V5CompressedLegacyParser {
         blob_end: usize,
         element_count: usize,
         column_name: &str,
-        decode_element: &dyn Fn(usize, &[u8], &str) -> Result<Value>,
+        decode_element: TupleElementDecoder<'_>,
     ) -> Result<Vec<Value>> {
         let mut elements = Vec::with_capacity(element_count);
 

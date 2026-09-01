@@ -787,9 +787,8 @@ mod block_emit;
 mod block_emit_windowed;
 mod cell_kind;
 mod cell_value;
-// campsite split of `cell_value` (issue #1795): scalar arms + complex ladder.
-mod cell_value_complex;
-mod cell_value_scalar;
+mod cell_value_complex; // campsite split of `cell_value` (#1795): complex ladder
+mod cell_value_scalar; // campsite split of `cell_value` (#1795): scalar arms
 mod compaction;
 mod compaction_stream; // issue #2299 (split of `compaction`, campsite #1116)
 pub(in crate::storage::sstable::reader) use compaction_stream::{
