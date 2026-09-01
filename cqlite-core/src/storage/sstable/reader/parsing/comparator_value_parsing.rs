@@ -285,8 +285,7 @@ fn parse_value_with_comparator_at_depth(
             })))
         }
         ComparatorType::Frozen(inner_comparator) => {
-            let inner_value =
-                parse_value_with_comparator_at_depth(value_data, inner_comparator, depth + 1)?;
+            let inner_value = parse_frozen_inner_at_depth(value_data, inner_comparator, depth + 1)?;
             Ok(Value::Frozen(Box::new(inner_value)))
         }
         ComparatorType::Custom(name) => {
@@ -299,6 +298,61 @@ fn parse_value_with_comparator_at_depth(
             // block-path `RowCellStateMachine`, which uses this standalone parser.
             super::custom_scalar::decode_custom_scalar(name, value_data)
         }
+    }
+}
+
+/// Decode the INNER type of a `frozen<...>` with FROZEN framing (issue #2339).
+///
+/// A frozen COLLECTION is one opaque value produced by Cassandra's
+/// `CollectionSerializer.serialize()`: `i32-BE count` + `i32-BE length`-prefixed
+/// elements (pinned `cassandra-5.0.8`
+/// `serializers/CollectionSerializer.java`'s `writeCollectionSize`/`writeValue`).
+/// That is a DIFFERENT framing from the VInt-prefixed NON-frozen (multicell)
+/// collection shape [`super::value_parsing`]'s `parse_{list,set,map}_value_with`
+/// decode, so `frozen<map<..>>` / `frozen<set<..>>` / `frozen<list<..>>` must
+/// dispatch to the frozen helpers or they mis-decode (e.g. a
+/// `set<frozen<map<text,int>>>` element).
+///
+/// Every OTHER inner type — tuple, UDT, scalar, a nested `frozen` — already
+/// decodes correctly through the main body: tuple/UDT field framing is the same
+/// 4-byte i32-BE shape (`TupleType.buildValue`), and a scalar is its own
+/// serialized form either way. Dispatch is on the DECLARED comparator only, never
+/// a byte pattern (no-heuristics, issue #28).
+fn parse_frozen_inner_at_depth(
+    value_data: &[u8],
+    inner: &ComparatorType,
+    depth: usize,
+) -> Result<Value> {
+    if depth > MAX_VALUE_NESTING_DEPTH {
+        return Err(Error::corruption(format!(
+            "Value decode recursion depth {} exceeds maximum {}",
+            depth, MAX_VALUE_NESTING_DEPTH
+        )));
+    }
+    match inner {
+        ComparatorType::List(element_comparator) => {
+            super::frozen_value_parsing::parse_frozen_list_value_with(
+                value_data,
+                element_comparator,
+                |d, c| parse_value_with_comparator_at_depth(d, c, depth + 1),
+            )
+        }
+        ComparatorType::Set(element_comparator) => {
+            super::frozen_value_parsing::parse_frozen_set_value_with(
+                value_data,
+                element_comparator,
+                |d, c| parse_value_with_comparator_at_depth(d, c, depth + 1),
+            )
+        }
+        ComparatorType::Map(key_comparator, value_comparator) => {
+            super::frozen_value_parsing::parse_frozen_map_value_with(
+                value_data,
+                key_comparator,
+                value_comparator,
+                |d, c| parse_value_with_comparator_at_depth(d, c, depth + 1),
+            )
+        }
+        other => parse_value_with_comparator_at_depth(value_data, other, depth),
     }
 }
 

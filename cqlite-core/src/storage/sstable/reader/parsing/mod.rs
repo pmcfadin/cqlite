@@ -19,6 +19,7 @@ mod block_entries;
 pub(crate) mod byte_comparable; // Needs to be accessible from row_cell_state_machine
 pub(crate) mod comparator_value_parsing; // Standalone comparator-based parsing for state machine
 mod custom_scalar;
+mod frozen_value_parsing; // FROZEN collection i32-BE element framing (issue #2339)
 mod key_parsing;
 // `pub(crate)` (not `pub`) so the in-crate `fuzz_support` driver (issue #1614)
 // can reach `V5CompressedLegacyParser::parse_block_emit` for the block-emit fuzz
