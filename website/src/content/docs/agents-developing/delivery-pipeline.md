@@ -181,7 +181,14 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   merge-base(`origin/main`, `<certified>`) and `<certified>`, with `openspec/changes/archive/**` excluded
   (archiving is flow-finalize's work, not a routing signal). Non-empty ⇒ design-routed ⇒ **C REQUIRED**,
   and an absent or `NOT-RUN` verdict REFUSES the merge naming the stage and the cause; empty ⇒
-  affirmatively `c-verdict: NOT-APPLICABLE (no openspec change on branch)`. **PURE DELETIONS ARE EXCLUDED TOO (`--diff-filter=d`, #3751 round 1).** Rename detection is pinned OFF deliberately, so a real `openspec archive` MOVE appears as a DELETION from `openspec/changes/<slug>/` plus an ADDITION under `archive/` — the addition is excluded, so counting the deletion made every archive-only finalize PR read design-routed and REFUSE for want of a C verdict: a false refusal on correct, doctrine-mandated input. A path that is ONLY deleted also contributes nothing to audit, since there is no spec delta at the certified tree for C to anchor to; every ADDED or MODIFIED path under a live change still routes to C. A plain LISTING of
+  affirmatively `c-verdict: NOT-APPLICABLE (no openspec change on branch)`. **PURE DELETIONS ARE
+  EXCLUDED TOO (`--diff-filter=d`, #3751 round 1).** Rename detection is pinned OFF deliberately, so
+  a real `openspec archive` MOVE appears as a DELETION from `openspec/changes/<slug>/` plus an
+  ADDITION under `archive/` — the addition is excluded, so counting the deletion made every
+  archive-only finalize PR read design-routed and REFUSE for want of a C verdict: a false refusal on
+  correct, doctrine-mandated input. A path that is ONLY deleted also contributes nothing to audit,
+  since there is no spec delta at the certified tree for C to anchor to; every ADDED or MODIFIED
+  path under a live change still routes to C. A plain LISTING of
   `openspec/changes/` cannot answer it — measured 2026-09-01, `origin/main` carries `archive` plus two
   sibling lanes' in-flight change directories, so every branch would read design-routed and the
   "measurement" would be vacuous — and the base is the **MERGE-BASE, never `origin/main`'s TIP** (#3392: a
@@ -190,7 +197,23 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   absent from this checkout — is `UNMEASURED` and is TREATED AS REQUIRED**: never derive a pass from the
   absence of a bad signal. There is deliberately NO spelling of the flag that means "not applicable": a
   supplied PATH can only carry a review-stage verdict token, so a file asserting `NOT-APPLICABLE` is
-  refused as an unrecognised token, and inapplicability is reachable ONLY through AUTO's measurement. **TWO BINDINGS MAKE `AUTO` THE INTENDED FORM, AND BOTH WERE ADDED AFTER A REVIEW FOUND THEM ABSENT (#3751 round 1).** `AUTO` locates the stage in the CURRENT worktree, so the stage must be BOUND to the tree being merged: this worktree's `HEAD` must EQUAL the certified commit, else the merge REFUSES naming the divergence. On this fleet every lane is a worktree of ONE shared `.git`, so a PEER lane's certified commit RESOLVES from any lane — `rev-parse`, `merge-base` and the routing diff all succeed against a commit that has nothing to do with the `.review-stage/` records in *this* directory, which is #3616's peer-artifact class one directory over. **Resolvability is not provenance.** Rule 1 already asserts `headRefOid == certified`, so HEAD == certified binds the local artifact to THIS PR transitively, and correct input is unaffected (the closer pushes, then asserts, in the lane it just certified). Second binding: the verdict line is validated against its WHOLE documented grammar — `REVIEW-STAGE: <kind> RESULT: <token> elapsed=<n> deadline=<n> agent=<t> report=<abs>` — with the **stage KIND compared by STRING EQUALITY** and each mandatory key required EXACTLY ONCE. "Somewhere on this line it says `RESULT: PASS`" is not a verdict about C: measured on #3751's own branch, a sibling `code-review` stage's PASS line satisfied `--c-verdict`, and a truncated capture with no `elapsed=`/`agent=`/`report=` did too. Only
+  refused as an unrecognised token, and inapplicability is reachable ONLY through AUTO's
+  measurement. **TWO BINDINGS MAKE `AUTO` THE INTENDED FORM, AND BOTH WERE ADDED AFTER A REVIEW
+  FOUND THEM ABSENT (#3751 round 1).** `AUTO` locates the stage in the CURRENT worktree, so the
+  stage must be BOUND to the tree being merged: this worktree's `HEAD` must EQUAL the certified
+  commit, else the merge REFUSES naming the divergence. On this fleet every lane is a worktree of
+  ONE shared `.git`, so a PEER lane's certified commit RESOLVES from any lane — `rev-parse`,
+  `merge-base` and the routing diff all succeed against a commit that has nothing to do with the
+  `.review-stage/` records in *this* directory, which is #3616's peer-artifact class one directory
+  over. **Resolvability is not provenance.** Rule 1 already asserts `headRefOid == certified`, so
+  HEAD == certified binds the local artifact to THIS PR transitively, and correct input is
+  unaffected (the closer pushes, then asserts, in the lane it just certified). Second binding: the
+  verdict line is validated against its WHOLE documented grammar — `REVIEW-STAGE: <kind> RESULT:
+  <token> elapsed=<n> deadline=<n> agent=<t> report=<abs>` — with the **stage KIND compared by
+  STRING EQUALITY** and each mandatory key required EXACTLY ONCE. "Somewhere on this line it says
+  `RESULT: PASS`" is not a verdict about C: measured on #3751's own branch, a sibling `code-review`
+  stage's PASS line satisfied `--c-verdict`, and a truncated capture with no
+  `elapsed=`/`agent=`/`report=` did too. Only
   `PASS` and `AUTHOR-PERFORMED` proceed, and the second prints **under its own token on a
   `PREMERGE: C-VERDICT` line, never folded into `PREMERGE: OK`** — the same reason the roborev wrapper's
   `WAIVED` is distinct from `PASS`: a reader must be able to see that the intent audit was performed by
@@ -564,7 +587,13 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   WEAKER than the gate's `INCOMPLETE` sentinel** — at least the sentinel names itself a non-verdict — so
   never read one as a completed review. Writes go under `.review-stage/`, whose ignore status is
   **verified with `git check-ignore`, fail-closed**, so a stage opened mid-run cannot dirty a running gate
-  (#2926) or make `premerge-assert.sh` refuse on `dirty: yes` (#3648). **And a SYMLINK at the report path, at the `.stage` path or at ANY component under `.review-stage/` is REFUSED, never followed (#3751 round 1)** — `check-ignore` judges a LEXICAL path while a WRITE follows links, so an ignored-but-symlinked report clobbered a TRACKED file and reported `OPEN-OK` (measured); the writes themselves go through a same-directory temporary file plus an atomic `mv -f`, which replaces a link instead of following it and never lets a concurrent reader see a half-written `result:` line.
+  (#2926) or make `premerge-assert.sh` refuse on `dirty: yes` (#3648). **And a SYMLINK at the report
+  path, at the `.stage` path or at ANY component under `.review-stage/` is REFUSED, never followed
+  (#3751 round 1)** — `check-ignore` judges a LEXICAL path while a WRITE follows links, so an
+  ignored-but-symlinked report clobbered a TRACKED file and reported `OPEN-OK` (measured); the
+  writes themselves go through a same-directory temporary file plus an atomic `mv -f`, which
+  replaces a link instead of following it and never lets a concurrent reader see a half-written
+  `result:` line.
   `verdict` establishes that a VERDICT WAS RECORDED, never that a review was PERFORMED — a report whose
   only content is `result: PASS` reads as PASS. Where no independent audit can be obtained, the sanctioned
   fallback is `record-author-performed --reason <why> --evidence <artifact> --performed-by author|peer`,
@@ -577,7 +606,8 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   reached the token that PROCEEDS at the merge point while the writer would have refused all three. A
   non-emptiness test standing in for a validity test, and the same fact checked in two places with two
   strengths; a report asserting the token without usable working is now
-  `NOT-RUN (report ungrammatical: …)`, naming the field and the defect. All six pipeline-gating agent definitions carry the matching report-of-record
+  `NOT-RUN (report ungrammatical: …)`, naming the field and the defect. All six pipeline-gating
+  agent definitions carry the matching report-of-record
   clause: the class is *spawns whose silence gates a merge*, so `flow-closer` (which owns the merge) and
   `sstable-developer` (which had queued work it never did) are in it beside the four reviewers.
   **The claim is about the CONSUMER and not about the agents, and stating it narrowly is the point:**
