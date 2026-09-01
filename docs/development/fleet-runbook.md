@@ -957,7 +957,9 @@ the *same box* was working an hour earlier.
 
 `bash scripts/bootstrap-agent-machine.sh` runs section 5c and prints two independent, greppable
 lines. **Only `VERIFIED` is an `[ok]` on either line**; everything else is a `[warn]` carrying its
-own remedy, and `NO-SERVER` is UNMEASURED-class (nothing was running to ask).
+own remedy, and `NO-SERVER` is UNMEASURED-class — which since the cold-start probe means
+"the isolated probe could not run", **not** merely "no server was running": a serverless box is
+measured, not excused (below).
 
 ```
 claude-auth:      VERIFIED | NOT-PERSISTED | FAILED | UNMEASURED

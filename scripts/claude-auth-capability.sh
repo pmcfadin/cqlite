@@ -56,8 +56,9 @@
 # depending on an internal JSON field shape that can change upstream, and a check that
 # silently stops matching reports VERIFIED for the wrong reason.
 #
-# ONLY `VERIFIED` IS A SUCCESS, on either line. NO-SERVER is UNMEASURED-class: nothing was
-# running to ask, so nothing was measured. An unmeasured capability never inherits the
+# ONLY `VERIFIED` IS A SUCCESS, on either line. NO-SERVER is UNMEASURED-class: the isolated
+# cold-start probe could not run, so nothing was measured (it does NOT merely mean "no
+# server was running" — that case is measured now). An unmeasured capability never inherits the
 # permissive branch — the standing rule that a positive verdict requires an AFFIRMATIVE
 # MEASUREMENT (docs/development/fleet-runbook.md; CLAUDE.md, "git-push:"/"gate-pin:").
 #
