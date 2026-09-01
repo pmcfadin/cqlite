@@ -3214,6 +3214,78 @@ else
 $nsd_out"
 fi
 
+# ===========================================================================
+echo "TEST 83: the signature-(b) statement is SETTLED WORDING, in EVERY file that carries it (#3548)"
+# ===========================================================================
+# THE DEFECT CLASS, not a new property. One statement about one board signature lives in FIVE files
+# (this script's --help, the fleet runbook, CLAUDE.md, the website page, and the seam comment), and it
+# produced review findings at THREE different sites — jobs 38, 40/41 and 47 — every time because a fix
+# landed at one site and not the others. Nothing mechanically detected that drift; TEST 81 reads only
+# --help, so a runbook table cell could keep asserting the label review had just removed. This case is
+# the missing half.
+#
+# WHAT IT ASSERTS, and why it is phrases rather than paragraphs. A table cell, a comment block and a
+# doctrine bullet legitimately differ in length and wrapping, so byte-identity would red on correct
+# input — the guard people learn to waive. Instead the LOAD-BEARING PHRASES are pinned across files:
+#   * REQUIRED in the two canonical statements (--help and the runbook): the ambiguity sentence and
+#     the operator rule. Reword either and THAT file loses the phrase, so divergence between them is
+#     what reds, which is the actual defect class.
+#   * REFUSED in ALL FOUR files: every definite label review has rejected. CLAUDE.md and the website
+#     page carry the shortest restatements and have leaked a definite label TWICE, so they are covered
+#     by the refutations even though their prose is deliberately not the canonical wording.
+# Text is NORMALISED before matching — whitespace flattened (every file wraps) and markdown emphasis
+# characters removed — because the same sentence is `**bold**` in one file and plain in another, and a
+# guard that missed `is the **#3436 unclaimed-work** signature` would have missed the job-41 leak in
+# the very files that leaked it.
+_rb="$SCRIPT_DIR/../../docs/development/fleet-runbook.md"
+_cl="$SCRIPT_DIR/../../CLAUDE.md"
+_wb="$SCRIPT_DIR/../../website/src/content/docs/agents-developing/delivery-pipeline.md"
+# FAIL-CLOSED on an unreadable file: committed source is never legitimately absent, and a skip here
+# would silently retire the guard (this suite's own `skip` exists for unstageable HOST premises, not
+# for missing repository content).
+_norm() { tr '\n' ' ' | tr -s ' ' | tr -d '*_'; }
+_help83_raw=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
+help83n=$(_norm <<<"$_help83_raw")
+rb83n=""; cl83n=""; wb83n=""; missing83=""
+for _f in "$_rb" "$_cl" "$_wb"; do
+  [ -r "$_f" ] || missing83="$missing83 $_f"
+done
+if [ -n "$missing83" ]; then
+  bad "TEST 83 cannot run: committed source unreadable —$missing83 (fail-closed: absence is not a pass)"
+else
+  rb83n=$(_norm <"$_rb"); cl83n=$(_norm <"$_cl"); wb83n=$(_norm <"$_wb")
+  # --- REQUIRED, in the two canonical statements. Same phrase, both files: divergence reds.
+  for _pair in "--help:$help83n" "fleet-runbook.md:$rb83n"; do
+    _who="${_pair%%:*}"; _txt="${_pair#*:}"
+    for _need in \
+      'NO claim ref is AMBIGUOUS and is deliberately NOT classified here' \
+      'a prompt to look, never as a verdict'; do
+      if grep -Fqi -- "$_need" <<<"$_txt"; then
+        ok "$_who carries the settled signature-(b) phrase: \"$_need\""
+      else
+        bad "$_who has DIVERGED from the settled signature-(b) wording (#3548) — this phrase is gone: \"$_need\""
+      fi
+    done
+  done
+  # --- REFUSED, in all four. Each is a definite label a review round removed; naming the file matters
+  #     because the whole class is "fixed here, still wrong there".
+  for _pair in "--help:$help83n" "fleet-runbook.md:$rb83n" "CLAUDE.md:$cl83n" "website delivery-pipeline.md:$wb83n"; do
+    _who="${_pair%%:*}"; _txt="${_pair#*:}"
+    _leaked=""
+    for _refuse in \
+      'is the #3436 unclaimed-work signature' \
+      'no claim ref is the dead-lane signal' \
+      'as the signature of a lost lane'; do
+      grep -Fqi -- "$_refuse" <<<"$_txt" && _leaked="$_leaked | $_refuse"
+    done
+    if [ -z "$_leaked" ]; then
+      ok "$_who asserts no definite label for signature (b)"
+    else
+      bad "$_who RE-ASSERTS a definite label for signature (b) (#3548, jobs 38/40/41/47):$_leaked"
+    fi
+  done
+fi
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed, $SKIP skipped ==="
 [ "$FAIL" -eq 0 ]
