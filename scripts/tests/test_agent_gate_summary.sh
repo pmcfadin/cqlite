@@ -1366,8 +1366,8 @@ fi
 # ...and the call site must consume the token through a VARIABLE: reading
 # `$(_perf_accel_token)` there would reintroduce the very fork the path excludes.
 accel_fn_text=$(fn_text "$GATE" accelerators_line)
-if printf '%s' "$accel_fn_text" | grep -q '_perf_accel_token_into' \
-   && ! printf '%s' "$accel_fn_text" | grep -q '\$(_perf_accel_token\|`_perf_accel_token'; then
+if grep -q '_perf_accel_token_into' <<<"$accel_fn_text" \
+   && ! grep -q '\$(_perf_accel_token\|`_perf_accel_token' <<<"$accel_fn_text"; then
   ok "perf-free: accelerators_line consumes the perf token through a variable, not a subshell"
 else
   bad "perf-free: accelerators_line reads the perf token through a command substitution"
@@ -4523,7 +4523,7 @@ else
 fi
 # and the truncation must be MARKED, tested on real multiline input rather than on the prefix alone
 cs_fn=$(awk '/^_crate_gated_test_targets\(\) \{/,/^\}/' "$GATE")
-if printf '%s' "$cs_fn" | grep -q 's/\$/+/'; then
+if grep -q 's/\$/+/' <<<"$cs_fn"; then
   ok "1699-cfgsite-marker: a continued attribute is marked with a truncation indicator"
 else
   bad "1699-cfgsite-marker: no truncation marker in the cfg-site report — a multiline attribute is silently reported as if complete"
@@ -4807,8 +4807,8 @@ fi
 nll_fn=$(sed -n '/^_node_leak_lane_affirm() {/,/^}$/p' "$GATE")
 nll_component=$(sed -n '/^run_node_bindings() {/,/^}$/p' "$GATE")
 if [ -n "$nll_fn" ] \
-   && ! printf '%s' "$nll_fn" | grep -qE 'npm (run )?test' \
-   && printf '%s' "$nll_component" | grep -q '_node_leak_lane_affirm "$(_node_leak_lane_note_file)" "$suite_json"' \
+   && ! grep -qE 'npm (run )?test' <<<"$nll_fn" \
+   && grep -q '_node_leak_lane_affirm "$(_node_leak_lane_note_file)" "$suite_json"' <<<"$nll_component" \
    && [ "$(printf '%s' "$nll_component" | grep -cE '^[[:space:]]*npm (run )?test( |$)')" -eq 1 ]; then
   ok "1465-one-executor: the affirmation is wired to the component, runs no jest itself, and node-bindings invokes npm test exactly once"
 else
@@ -4833,7 +4833,7 @@ fi
 # 1465c. The component-level dataset SKIP must declare the leak-lane state, or a skipped
 #        component leaves NO `node-bindings-leak-lane:` line and "no line" becomes
 #        ambiguous between "it ran" and "this gate predates the line".
-if printf '%s' "$nll_component" | grep -q '_node_leak_lane_note SKIP-OPTOUT'; then
+if grep -q '_node_leak_lane_note SKIP-OPTOUT' <<<"$nll_component"; then
   ok "1465-skip-declares: the #3522 opt-out SKIP branch writes the SKIP-OPTOUT note"
 else
   bad "1465-skip-declares: the opt-out SKIP branch does not declare the leak-lane state"
@@ -4927,7 +4927,7 @@ fi
 nll_comp_v1=$(sed -n '/^run_node_bindings() {/,/^}$/p' "$GATE")
 nll_leakfile_v1="$SCRIPT_DIR/../../bindings/node/__test__/leak-paths.test.js"
 nll_v1_ok=1
-printf '%s' "$nll_comp_v1" | grep -q 'leak_strict_env=(-u CQLITE_LEAK_BUDGET_RELAX)' \
+grep -q 'leak_strict_env=(-u CQLITE_LEAK_BUDGET_RELAX)' <<<"$nll_comp_v1" \
   || { nll_v1_ok=0; echo "  node-bindings does not declare the strict leak-budget env"; }
 # every `env` that launches node in this component must carry the unset array
 nll_env_launches=$(printf '%s\n' "$nll_comp_v1" | grep -cE '^[[:space:]]*if (! )?env ')
@@ -4970,7 +4970,7 @@ else
   # Y4: the in-lane strictness control keys on CQLITE_JEST_JSON as its "this is the gate"
   # marker. NOTHING otherwise pins the pairing, so a rename on either side would silently
   # turn the control into a no-op instead of reddening. Both halves asserted here.
-  printf '%s' "$nll_comp_v1" | grep -q 'CQLITE_JEST_JSON=' \
+  grep -q 'CQLITE_JEST_JSON=' <<<"$nll_comp_v1" \
     || { nll_v1_ok=0; echo "  node-bindings no longer EXPORTS CQLITE_JEST_JSON — the lane-side strictness control has no marker to read"; }
   grep -q 'process\.env\.CQLITE_JEST_JSON' "$nll_leakfile_v1" \
     || { nll_v1_ok=0; echo "  the lane no longer READS CQLITE_JEST_JSON — its gate-of-record strictness assertion cannot fire"; }
@@ -5043,16 +5043,16 @@ fi
 nll_entered=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note ENTERED-FAILED' _ "$GATE" 2>/dev/null)
 nll_noaffirm=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note NO-BUDGET-AFFIRMATION' _ "$GATE" 2>/dev/null)
 nll_e_ok=1
-printf '%s' "$nll_entered" | grep -q "REACHED" || { nll_e_ok=0; echo "  ENTERED-FAILED does not say the invocation was reached"; }
-printf '%s' "$nll_entered" | grep -q "NOT an earlier" || { nll_e_ok=0; echo "  ENTERED-FAILED does not distinguish itself from an earlier step"; }
-printf '%s' "$nll_entered" | grep -qE "UNKNOWN|unknown" || { nll_e_ok=0; echo "  ENTERED-FAILED does not state that execution is UNKNOWN"; }
+grep -q "REACHED" <<<"$nll_entered" || { nll_e_ok=0; echo "  ENTERED-FAILED does not say the invocation was reached"; }
+grep -q "NOT an earlier" <<<"$nll_entered" || { nll_e_ok=0; echo "  ENTERED-FAILED does not distinguish itself from an earlier step"; }
+grep -qE "UNKNOWN|unknown" <<<"$nll_entered" || { nll_e_ok=0; echo "  ENTERED-FAILED does not state that execution is UNKNOWN"; }
 # No phrase may assert that the budgets ran. Each of these would be an overclaim.
 for _bad in "DID execute" "so the leak budgets ran" "the budgets ran" "budgets executed"; do
-  if printf '%s' "$nll_entered" | grep -qF "$_bad"; then
+  if grep -qF "$_bad" <<<"$nll_entered"; then
     nll_e_ok=0; echo "  ENTERED-FAILED overclaims execution via: '$_bad'"
   fi
 done
-printf '%s' "$nll_noaffirm" | grep -qE "named (#1465 )?budget test" || { nll_e_ok=0; echo "  NO-BUDGET-AFFIRMATION does not name the budget tests"; }
+grep -qE "named (#1465 )?budget test" <<<"$nll_noaffirm" || { nll_e_ok=0; echo "  NO-BUDGET-AFFIRMATION does not name the budget tests"; }
 if [ "$nll_e_ok" -eq 1 ]; then
   ok "1465-failure-states: ENTERED-FAILED says REACHED + execution UNKNOWN + not-an-earlier-step and asserts no execution; NO-BUDGET-AFFIRMATION names the budget tests"
 else
