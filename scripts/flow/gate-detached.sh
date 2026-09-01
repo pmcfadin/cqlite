@@ -696,25 +696,42 @@ _pid_state() {  # <pid> -> exists | gone | unknown
   printf 'unknown'                                             # no /proc and ps inconclusive
 }
 
-_unit_is_live() {  # <unit> -> 0 = live or unmeasurable (refuse), 1 = affirmatively not running
+# THREE-VALUED, because ONE function was being asked two questions with OPPOSITE safe answers
+# (roborev job 319, Medium). `_unit_is_live` collapsed "live" and "unmeasurable" onto 0, which is the
+# CONSERVATIVE answer at the reclamation site (refuse to reclaim) and the PERMISSIVE one at the
+# heartbeat-acceptance sites, where 0 ACCEPTS a run. The unit gate was added there specifically to
+# reject one-beat-then-dead; keying it on a predicate that says "live" when it cannot measure
+# re-admitted exactly that case, and the comment I wrote at both sites — "an unmeasurable unit still
+# accepts (it can only weaken, never invent, liveness)" — asserted the permissive rationale as if it
+# were safe. It is not: there, refusing costs a retry; accepting returns success for a run whose
+# verdict will never arrive.
+#
+# This is the THIRD round in this one function (jobs 205 and 241 precede it, both the same shape one
+# spelling apart), so the fix is not a fourth patch at a call site: the state becomes explicit and
+# each caller names the polarity it needs.
+_unit_state() {  # <unit> -> live | terminal | unknown
   local st rc
   st=$(systemctl --user show -p ActiveState --value "$1" 2>/dev/null); rc=$?
-  if [ "$rc" != 0 ] || [ -z "$st" ]; then return 0; fi   # could not measure => treat as LIVE
-  # THE GRAMMAR IS CLOSED ON THE *TERMINAL* SIDE, not the live side (roborev job 241). The first version
-  # listed the LIVE states and made everything else `return 1` — so `maintenance`, or any state a future
-  # systemd introduces, read as AFFIRMATIVELY GONE and a live reservation could be reclaimed, putting two
-  # gates on one summary path. That is an open grammar in the PERMISSIVE direction.
-  #
-  # This is the same defect job 205 fixed in this same function, in its exit-code form: `is-active`
-  # answers 0 only for "active", so every other outcome fell into "dead, reclaim it". I corrected the
-  # exit-code version and then reproduced it in the state-name version two rounds later. Only
-  # `inactive` and `failed` are affirmative terminal readings; EVERYTHING else — known transitional,
-  # unknown, or newly invented — is live-or-unmeasurable, and both refuse.
+  if [ "$rc" != 0 ] || [ -z "$st" ]; then printf 'unknown'; return 0; fi
+  # The grammar stays CLOSED ON THE TERMINAL SIDE (job 241): only `inactive` and `failed` are
+  # affirmative "not running" answers, so a state systemd invents later reads `live`, never terminal.
   case "$st" in
-    inactive|failed) return 1 ;;   # the only affirmative "not running" answers systemd gives
-    *) return 0 ;;                 # active, activating, reloading, refreshing, deactivating,
-                                   # maintenance, and anything unrecognised => treat as LIVE
+    inactive|failed) printf 'terminal' ;;
+    *)               printf 'live' ;;
   esac
+}
+
+# 0 only for an AFFIRMATIVELY nonterminal unit. Use this where 0 ACCEPTS something.
+_unit_is_affirmatively_live() {  # <unit>
+  [ "$(_unit_state "$1")" = live ]
+}
+
+_unit_is_live() {  # <unit> -> 0 = live or unmeasurable (refuse), 1 = affirmatively not running
+  # RETAINED, with this polarity, for the sites where 0 means REFUSE (reservation reclamation, and
+  # the "has the unit already died" branch below): there, lumping `unknown` in with `live` is the
+  # conservative answer, and job 205/241's reasoning applies unchanged. It is now a thin wrapper over
+  # the ONE state reader, so the two polarities cannot drift into two opinions about one unit.
+  [ "$(_unit_state "$1")" != terminal ]
 }
 
 _proc_is_zombie() {  # <pid> -> 0 = provably a zombie, 1 = not, or unmeasurable
@@ -784,12 +801,23 @@ _res_ident=$(_proc_identity $$)
 # names that path as ITS summary. That is one question asked of several paths, using the SAME liveness
 # primitives as the main path (`_pid_state`, `_proc_is_zombie`, `_proc_identity`, `_unit_is_live`) rather
 # than a second copy of the classification.
+# Can <pid> be ruled OUT as a running gate without reading its argv? (roborev job 319)
+# 0 = yes, AFFIRMATIVELY: it is gone, or it is a zombie — both have already exited, so neither can be
+#     running anything, and treating them as ruled out is what keeps a dead owner's reservation
+#     reclaimable (the job-196 permanent block).
+# 1 = no: it is present (or unmeasurable) and we could not read its argv => UNKNOWN, caller refuses.
+_pid_ruled_out() {
+  [ "$(_pid_state "$1")" = gone ] && return 0
+  _proc_is_zombie "$1" && return 0
+  return 1
+}
+
 _unit_runs_a_gate() {  # <unit> -> 0 = a FULL gate is live in that cgroup | 1 = affirmatively not | 2 = unmeasurable
   # ASK WHAT IS IN THE CGROUP, NOT WHETHER ANYTHING IS (lead order; box-wide finding). `ActiveState`
   # answers "is any task left in the scope", which a single ORPHANED `sleep` satisfies forever -- one box
   # was measured with 12 orphaned sleeps and 0 gate scopes. That let an affirmative "owner is dead" reading
   # be overridden into `live`, so the path was refused FOREVER with nothing to reap the orphan.
-  local unit="$1" cg procs p a hit _pdir found=1
+  local unit="$1" cg procs p a hit _pdir found=1 _unknown=0 _nargv
   cg=$(systemctl --user show -p ControlGroup --value "$unit" 2>/dev/null) || return 2   # could not ASK
   # AN EMPTY ControlGroup IS AN AFFIRMATIVE ANSWER, NOT AN UNKNOWN. `systemctl show` returns rc=0 with an
   # EMPTY value for a unit that no longer exists, so treating empty as unmeasurable made every stale
@@ -808,8 +836,23 @@ _unit_runs_a_gate() {  # <unit> -> 0 = a FULL gate is live in that cgroup | 1 = 
   [ -r "$procs" ] || return 2               # exists but UNREADABLE => genuinely unmeasurable; caller refuses
   while IFS= read -r p; do
     [ -n "$p" ] || continue
-    [ -r "/proc/$p/cmdline" ] || continue   # exited mid-scan: not evidence either way
+    # AN UNINSPECTABLE PID IS NOT A "NO" (roborev job 319, Medium). This line used to `continue`,
+    # and its comment claimed that was "not evidence either way" — but the function DEFAULTS to
+    # found=1, so skipping every uninspectable pid returns 1, "AFFIRMATIVELY no gate", which is
+    # precisely the evidence the comment disclaimed. The caller reclaims the reservation on 1, so a
+    # live gate whose argv we merely could not read had its summary path handed to a second gate.
+    #
+    # The distinction that makes refusing safe — the same one `_pid_state` was written for — is
+    # between a pid that is AFFIRMATIVELY GONE and one that is PRESENT but unreadable. Refusing on
+    # both would resurrect the job-196 permanent block, because a genuinely dead owner's pids are
+    # unreadable too. A ZOMBIE counts as ruled out for the same reason `_proc_is_zombie` exists: it
+    # has already exited and cannot be running a gate.
+    if ! [ -r "/proc/$p/cmdline" ]; then
+      if _pid_ruled_out "$p"; then continue; fi
+      _unknown=1; continue
+    fi
     hit=0
+    _nargv=0
     # OWNERSHIP, NOT GATE-OF-RECORD: do NOT exclude --lite/--delta/--only here. That exclusion is right
     # for a waiter asking "is THE full gate running", and I over-applied it to a different question. This
     # helper answers "is another run still using this summary path", and a --lite/--only run is using it
@@ -823,10 +866,23 @@ _unit_runs_a_gate() {  # <unit> -> 0 = a FULL gate is live in that cgroup | 1 = 
     # Measured: the argv form found 7 gate processes and excluded the searching shell; the
     # substring-of-cmdline form counted 10, over-counting searchers.
     while IFS= read -r -d "" a; do
+      _nargv=$((_nargv + 1))
       case "$a" in *agent-gate.sh) hit=1; break ;; esac
     done < "/proc/$p/cmdline"
     if [ "$hit" = 1 ]; then found=0; break; fi
+    # THE SAME DEFECT ONE STEP DEEPER, and job 319 named only the outer half. `-r` SUCCEEDS on
+    # /proc/<pid>/cmdline for a process that is exiting or mid-exec, and the file then reads EMPTY —
+    # so the argv scan completes, matches nothing, and "no argv at all" was scored identically to
+    # "argv read, no gate in it". Measured on this very lane while instrumenting #3473: two live
+    # daemons read as unmeasurable for exactly this reason. Within THIS function's scope the benign
+    # explanation does not apply — a kernel thread also has an empty cmdline but can never be inside
+    # a `systemd-run --user` unit's cgroup — so empty here means exiting or mid-exec: unknown.
+    if [ "$_nargv" = 0 ] && ! _pid_ruled_out "$p"; then _unknown=1; fi
   done < "$procs"
+  # A "no gate" conclusion is only sound if we could inspect EVERY pid. Unknown is a THIRD answer and
+  # the caller already refuses on it; ordering matters — an affirmative FIND (found=0) still wins,
+  # because a gate we positively saw is not made doubtful by a sibling we could not read.
+  if [ "$found" != 0 ] && [ "$_unknown" = 1 ]; then return 2; fi
   return $found
 }
 
@@ -1329,13 +1385,16 @@ while [ "$_i" -lt 40 ]; do
     # about this run — and a gate that published ONE heartbeat and then died before writing its
     # terminal summary answers RUNNING for the whole staleness window, so accepting 2 blindly made
     # this launcher exit 0 for a run whose verdict will NEVER arrive. Gate 2 on the unit, using the
-    # same closed grammar as everywhere else: only `inactive|failed` are affirmative deaths, so an
-    # unmeasurable unit still accepts (it can only weaken, never invent, liveness). When the unit IS
-    # affirmatively dead we deliberately do NOT break — control falls through to the settled-snapshot
-    # check below, which is the path that can still find a terminal summary written in the gap.
+    # AFFIRMATIVELY live, not "not affirmatively dead" (roborev job 319, Medium). An earlier revision
+    # of this line used `_unit_is_live`, whose 0 also covers UNMEASURABLE, and justified it as "it can
+    # only weaken, never invent, liveness". That is wrong HERE: 0 ACCEPTS the run, so an unreadable
+    # unit state let the one-beat-then-dead case through — the very case this gate was added to
+    # reject. Where 0 accepts, only an affirmative reading may grant. When the unit is NOT live we
+    # deliberately do NOT break — control falls through to the settled-snapshot check below, which is
+    # the path that can still find a terminal summary written in the gap.
     case "$?" in
       0) _hb_seen=1; break ;;                                  # COMPLETE — a verdict exists
-      2) if _unit_is_live "$UNIT"; then _hb_seen=1; break; fi ;; # RUNNING — only if not dead
+      2) if _unit_is_affirmatively_live "$UNIT"; then _hb_seen=1; break; fi ;; # RUNNING — only if live
     esac
   fi
   # If the unit already died, stop waiting — but take ONE SETTLED SNAPSHOT first (roborev job 213).
@@ -1408,13 +1467,14 @@ if [ "$_hb_seen" -ne 1 ] && [ -n "$_new_rid" ]; then
   # different path than its name claims and still pass — which is why the case now uses a component slow
   # enough that liveness, not completion, is what answers.
   bash "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid" >/dev/null 2>&1
-  # Same distinction as the in-loop probe above (roborev job 318, Medium): RUNNING is not evidence
-  # the unit survives, so it is accepted only while the unit is not affirmatively dead. Here there is
-  # no fall-through to gain — this is the last check — so an affirmatively dead unit leaves
-  # `_hb_seen` at 0 and the launcher refuses, which is the correct outcome: no verdict is coming.
+  # Same distinction as the in-loop probe above (roborev jobs 318 then 319, Medium): RUNNING is not
+  # evidence the unit survives, so it is accepted only on an AFFIRMATIVELY live unit — an unmeasurable
+  # one refuses, because 0 here ACCEPTS. Here there is no fall-through to gain — this is the last
+  # check — so anything other than a live unit leaves `_hb_seen` at 0 and the launcher refuses, which
+  # is the correct outcome: no verdict is coming.
   case "$?" in
     0) _hb_seen=1 ;;                              # COMPLETE — a verdict exists
-    2) _unit_is_live "$UNIT" && _hb_seen=1 ;;     # RUNNING — only if not affirmatively dead
+    2) _unit_is_affirmatively_live "$UNIT" && _hb_seen=1 ;;   # RUNNING — only if AFFIRMATIVELY live
   esac
 fi
 if [ "$_hb_seen" -ne 1 ]; then

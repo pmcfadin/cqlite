@@ -1597,9 +1597,15 @@ fi
 # AFFIRMATIVELY GONE and a live reservation could be reclaimed, putting two gates on one summary path.
 # The same rule, the same function, two rounds apart, one layer over. Knowing the rule and having just
 # applied it did not prevent violating it; only closing the grammar on the terminal side does.
-_uil=$(sed -n '/^_unit_is_live()/,/^}/p' "$LAUNCHER")
-if printf '%s' "$_uil" | grep -q 'inactive|failed) return 1' \
-   && printf '%s' "$_uil" | grep -q '\*) return 0'; then
+# The grammar now lives in `_unit_state` (job 319 made the state three-valued so each caller names its
+# polarity), and `_unit_is_live` is a thin wrapper over it. This test follows the PROPERTY to wherever
+# the state is decided rather than pinning one function's spelling — it failed on a correct refactor,
+# which is the shape a test agents learn to delete.
+_uil=$(sed -n '/^_unit_state()/,/^}/p' "$LAUNCHER"
+       sed -n '/^_unit_is_live()/,/^}/p' "$LAUNCHER")
+_us_only=$(sed -n '/^_unit_state()/,/^}/p' "$LAUNCHER")
+if printf '%s' "$_us_only" | grep -qE "inactive\|failed\) +printf 'terminal'" \
+   && printf '%s' "$_us_only" | grep -qE "\*\) +printf 'live'"; then
   ok "4b.139 only inactive|failed are terminal; every other state reads LIVE"
 else
   bad "4b.139 only inactive|failed are terminal" "the grammar is closed on the wrong side"
@@ -1612,6 +1618,8 @@ chmod +x "$_ud/systemctl"
 _uil_bad=0
 _uil_check() {  # <state> <expected LIVE|GONE>
   local got
+  # `$_uil` carries _unit_state AND _unit_is_live: the wrapper delegates, so extracting only the
+  # wrapper produced `_unit_state: command not found` and a uniform GONE — a false RED on correct code.
   if ( export PATH="$_ud:$PATH"; eval "$_uil"; FAKE_STATE="$1" _unit_is_live fake.service ); then got=LIVE; else got=GONE; fi
   [ "$got" = "$2" ] || { _uil_bad=$((_uil_bad+1)); echo "     state '${1:-<empty>}' -> $got, expected $2"; }
 }
@@ -2092,14 +2100,24 @@ if grep -q '_unit_is_live' "$LAUNCHER" && ! grep -q 'is-active --quiet "$_own_un
 else
   bad "4b.106 reservation liveness reads ActiveState" "a bare is-active still decides reclamation"
 fi
-_lifecode=$(sed -n '/^_unit_is_live()/,/^}/p' "$LAUNCHER")
+# BEHAVIOURAL, not a grep for the state NAMES (job 319). The closed terminal grammar deliberately
+# stopped ENUMERATING the transitional states — they fall to `*) live`, which is what makes a state
+# systemd invents later safe — so a test demanding the names in the source FAILS on the stronger
+# implementation. Ask the function instead.
+_lifecode=$(sed -n '/^_unit_state()/,/^}/p' "$LAUNCHER"
+            sed -n '/^_unit_is_live()/,/^}/p' "$LAUNCHER")
+_ud107=$(mktemp -d "$TMP/uil107.XXXXXX")
+printf '#!/usr/bin/env bash\nif [ "$FAKE_STATE" = FAIL ]; then exit 1; fi\nprintf "%%s\\n" "$FAKE_STATE"\n' > "$_ud107/systemctl"
+chmod +x "$_ud107/systemctl"
 _missing=""
 for _st in activating deactivating reloading; do
-  printf '%s' "$_lifecode" | grep -q "$_st" || _missing="$_missing $_st"
+  ( export PATH="$_ud107:$PATH"; eval "$_lifecode"; FAKE_STATE="$_st" _unit_is_live fake.service ) \
+    || _missing="$_missing $_st"
 done
 [ -z "$_missing" ] && ok "4b.107 transitional unit states count as LIVE" \
-                   || bad "4b.107 transitional unit states count as live" "missing:$_missing"
-if printf '%s' "$_lifecode" | grep -q 'could not measure => treat as LIVE'; then
+                   || bad "4b.107 transitional unit states count as live" "read as GONE:$_missing"
+# Likewise behavioural: the old form grepped for a COMMENT, which any rewrite silently defeats.
+if ( export PATH="$_ud107:$PATH"; eval "$_lifecode"; FAKE_STATE=FAIL _unit_is_live fake.service ); then
   ok "4b.108 an unmeasurable unit state counts as LIVE (refuse), never as dead"
 else
   bad "4b.108 an unmeasurable unit state counts as live" "unmeasurable may reach the reclaim branch"
@@ -2142,13 +2160,35 @@ wait "$_target" 2>/dev/null || true
 # F1. The rollback list was a space-joined string iterated UNQUOTED, so it word-split and
 # glob-expanded. Structural pin first: an array, iterated quoted, and NO unquoted iteration left.
 _f1_src="$REPO_ROOT/scripts/flow/gate-detached.sh"
+# The property is "an ARRAY, iterated with the elements QUOTED" — not one spelling of it. Job 319
+# replaced the iteration with the bash-3.2-safe ${A[@]+"${A[@]}"}, which still quotes every element
+# (verified behaviourally by 4b.189 below), so accept either and keep refusing the unquoted string.
 if grep -q '^_extra_locks=()' "$_f1_src" \
-   && grep -q 'for _l in "${_extra_locks\[@\]}"' "$_f1_src" \
+   && { grep -q 'for _l in "${_extra_locks\[@\]}"' "$_f1_src" \
+        || grep -q 'for _l in ${_extra_locks\[@\]+"${_extra_locks\[@\]}"}' "$_f1_src"; } \
    && ! grep -q 'in \$_extra_locks' "$_f1_src"; then
   ok "4b.154 the rollback list is an ARRAY iterated QUOTED (no word-split, no glob)"
 else
   bad "4b.154 the rollback list is an array iterated quoted" \
       "$(grep -n '_extra_locks' "$_f1_src" | head -4)"
+fi
+
+# 4b.189 (job 319): 4b.154 now accepts a SECOND spelling, so the equivalence it rests on is proved
+# here rather than assumed. ${A[@]+"${A[@]}"} must (a) preserve every element verbatim, (b) NOT
+# word-split or glob-expand, and (c) expand to NOTHING when the array is empty — which is the whole
+# reason for the form, since a bare "${A[@]}" aborts under `set -u` on bash 3.2.
+_q189d=$(mktemp -d "$TMP/q189.XXXXXX"); : > "$_q189d/GLOBBED"
+_q189=$( cd "$_q189d" && set -uo pipefail
+  _a=("a b" "*" "c"); _n=0; _seen=""
+  for _x in ${_a[@]+"${_a[@]}"}; do _n=$((_n+1)); _seen="$_seen|$_x"; done
+  _e=(); _m=0
+  for _x in ${_e[@]+"${_e[@]}"}; do _m=$((_m+1)); done
+  printf '%s %s %s' "$_n" "$_m" "$_seen" )
+if [ "$_q189" = '3 0 |a b|*|c' ]; then
+  ok "4b.189 the safe form preserves elements, does not split or glob, and vanishes when empty"
+else
+  bad "4b.189 the safe form preserves elements, does not split or glob, vanishes when empty" \
+      "got '$_q189' (expected '3 0 |a b|*|c'; a GLOBBED element means the form expanded unquoted)"
 fi
 
 # NOT a discriminator for the array fix, and the honest version of this case says so. I wrote it as
@@ -2445,6 +2485,155 @@ else
   ok "4b.169 the dead-owner fall-through no longer consults ActiveState"
 fi
 
+# --- job 319 F1: AN UNINSPECTABLE PID IS NOT AN AFFIRMATIVE "NO GATE" ---------------------------
+# _unit_runs_a_gate defaults to found=1, so `continue`-ing past a pid whose argv could not be read
+# returned 1 = "affirmatively no gate" and the caller RECLAIMED a live gate's summary path. But
+# refusing on every unreadable pid would resurrect the job-196 permanent block, since a genuinely
+# dead owner's pids are unreadable too. The matrix below pins BOTH directions, and (d)/(e) are the
+# controls without which (a)-(c) could pass by answering "unmeasurable" to everything.
+#
+# /proc is redirected at a fake tree so the uninspectable states are CONSTRUCTIBLE: `kill -0` and
+# `ps` still see the real pid, so _pid_state and _proc_is_zombie answer about a real process.
+_f1_src=$( sed -n '/^_pid_state() {/,/^}$/p'        "$LAUNCHER"
+           sed -n '/^_proc_is_zombie() {/,/^}$/p'   "$LAUNCHER"
+           sed -n '/^_pid_ruled_out() {/,/^}$/p'    "$LAUNCHER"
+           sed -n '/^_unit_runs_a_gate() {/,/^}$/p' "$LAUNCHER" )
+if ! printf '%s' "$_f1_src" | grep -q '_pid_ruled_out()' \
+   || ! printf '%s' "$_f1_src" | grep -q '^_unit_runs_a_gate()'; then
+  bad "4b.177 job-319 F1 helpers could be extracted" "extraction produced nothing usable"
+else
+  _f1d="$TMP/f1"; mkdir -p "$_f1d/fs/unit" "$_f1d/proc"
+  _f1_run() {  # <procs-content> -> rc
+    local content="$1" src rc
+    printf '%s\n' "$content" > "$_f1d/fs/unit/cgroup.procs"
+    src=${_f1_src//\/sys\/fs\/cgroup/$_f1d\/fs}
+    src=${src//\/proc/$_f1d\/proc}
+    ( eval "$src"
+      systemctl() { printf '/unit\n'; }
+      _unit_runs_a_gate fake.service ) >/dev/null 2>&1; rc=$?
+    printf '%s' "$rc"
+  }
+  sleep 300 & _f1_live=$!
+  # (a) PRESENT but argv unreadable => the THIRD value, so the caller refuses instead of reclaiming.
+  mkdir -p "$_f1d/proc/$_f1_live"
+  : > "$_f1d/proc/$_f1_live/cmdline"; chmod 000 "$_f1d/proc/$_f1_live/cmdline" 2>/dev/null
+  _rc_a=$(_f1_run "$_f1_live")
+  if [ ! -r "$_f1d/proc/$_f1_live/cmdline" ]; then
+    [ "$_rc_a" = 2 ] \
+      && ok "4b.177 a PRESENT pid with unreadable argv is UNMEASURABLE, not 'no gate'" \
+      || bad "4b.177 a present pid with unreadable argv is unmeasurable" "rc=$_rc_a (2 expected)"
+  else
+    skipc "4b.177 present-but-unreadable argv" "cannot make a file unreadable as this user (root?)"
+  fi
+  # (b) AFFIRMATIVELY GONE => still 1, or a dead owner's reservation blocks forever (job 196).
+  sleep 0.1 & _f1_dead=$!; wait "$_f1_dead" 2>/dev/null || true
+  rm -rf "$_f1d/proc/$_f1_dead"
+  _rc_b=$(_f1_run "$_f1_dead")
+  [ "$_rc_b" = 1 ] \
+    && ok "4b.178 an affirmatively GONE pid stays reclaimable (no permanent block)" \
+    || bad "4b.178 an affirmatively gone pid stays reclaimable" "rc=$_rc_b (1 expected)"
+  # (c) READABLE BUT EMPTY argv (exiting / mid-exec) is the same defect one step deeper.
+  mkdir -p "$_f1d/proc/$_f1_live"; chmod 644 "$_f1d/proc/$_f1_live/cmdline" 2>/dev/null
+  : > "$_f1d/proc/$_f1_live/cmdline"
+  _rc_c=$(_f1_run "$_f1_live")
+  [ "$_rc_c" = 2 ] \
+    && ok "4b.179 a READABLE-but-EMPTY argv is unmeasurable, not 'no gate'" \
+    || bad "4b.179 a readable-but-empty argv is unmeasurable" "rc=$_rc_c (2 expected)"
+  # (d) CONTROL: a real gate argv must still be FOUND, or (a)-(c) pass by never finding anything.
+  printf '/bin/bash\0/x/scripts/agent-gate.sh\0' > "$_f1d/proc/$_f1_live/cmdline"
+  _rc_d=$(_f1_run "$_f1_live")
+  [ "$_rc_d" = 0 ] \
+    && ok "4b.180 control: a readable gate argv is still found LIVE (0)" \
+    || bad "4b.180 control: a readable gate argv is still found live" "rc=$_rc_d (0 expected)"
+  # (e) CONTROL: a readable NON-gate argv must still be an affirmative 1, not the new third value.
+  printf '/bin/sleep\0300\0' > "$_f1d/proc/$_f1_live/cmdline"
+  _rc_e=$(_f1_run "$_f1_live")
+  [ "$_rc_e" = 1 ] \
+    && ok "4b.181 control: a readable NON-gate argv is still affirmatively 1" \
+    || bad "4b.181 control: a readable non-gate argv is still affirmatively 1" "rc=$_rc_e (1 expected)"
+  kill "$_f1_live" 2>/dev/null; wait "$_f1_live" 2>/dev/null || true
+  chmod -R u+w "$_f1d" 2>/dev/null || true
+fi
+
+# --- job 319 F2: ONE function, TWO questions with OPPOSITE safe answers -------------------------
+# _unit_is_live collapses live+unmeasurable onto 0. Where 0 means REFUSE (reclamation) that is
+# conservative; where 0 means ACCEPT (heartbeat acceptance) it re-admits one-beat-then-dead, which is
+# the case that gate exists to reject. The polarity is now named by the CALLER, and the row that
+# matters is `unknown`: the two predicates must DISAGREE there, and agree everywhere else.
+_f2_src=$( sed -n '/^_unit_state() {/,/^}$/p'                  "$LAUNCHER"
+           sed -n '/^_unit_is_affirmatively_live() {/,/^}$/p'  "$LAUNCHER"
+           sed -n '/^_unit_is_live() {/,/^}$/p'                "$LAUNCHER" )
+if ! printf '%s' "$_f2_src" | grep -q '^_unit_state()' \
+   || ! printf '%s' "$_f2_src" | grep -q '^_unit_is_affirmatively_live()'; then
+  bad "4b.182 job-319 F2 helpers could be extracted" "extraction produced nothing usable"
+else
+  # `_f2_st`, NOT `st`: bash locals are DYNAMICALLY scoped, and `_unit_state` declares its own
+  # `local st`. A stub named after the callee's local therefore read the callee's EMPTY variable, so
+  # every state arrived as "" => unknown and three of these cases failed on a test defect that looked
+  # exactly like a real one. Name stub state after the stub.
+  _f2() {  # <ActiveState-or-FAIL> <predicate> -> rc
+    local _f2_st="$1" fn="$2" rc
+    ( eval "$_f2_src"
+      systemctl() { if [ "$_f2_st" = FAIL ]; then return 1; fi; printf '%s\n' "$_f2_st"; }
+      "$fn" u.service ) >/dev/null 2>&1; rc=$?
+    printf '%s' "$rc"
+  }
+  _f2_unk_live=$(_f2 FAIL _unit_is_live); _f2_unk_aff=$(_f2 FAIL _unit_is_affirmatively_live)
+  if [ "$_f2_unk_live" = 0 ] && [ "$_f2_unk_aff" != 0 ]; then
+    ok "4b.182 on an UNMEASURABLE unit the two polarities DISAGREE (refuse-to-reclaim 0, accept-refuses)"
+  else
+    bad "4b.182 on an unmeasurable unit the two polarities disagree" \
+        "_unit_is_live=$_f2_unk_live (0 expected) _unit_is_affirmatively_live=$_f2_unk_aff (nonzero expected)"
+  fi
+  # CONTROLS: without these, 4b.182 passes for a predicate that refuses unconditionally.
+  _f2_act_aff=$(_f2 active _unit_is_affirmatively_live)
+  [ "$_f2_act_aff" = 0 ] \
+    && ok "4b.183 control: an AFFIRMATIVELY active unit is accepted (0)" \
+    || bad "4b.183 control: an affirmatively active unit is accepted" "rc=$_f2_act_aff (0 expected)"
+  _f2_inact_aff=$(_f2 inactive _unit_is_affirmatively_live)
+  _f2_inact_live=$(_f2 inactive _unit_is_live)
+  if [ "$_f2_inact_aff" != 0 ] && [ "$_f2_inact_live" != 0 ]; then
+    ok "4b.184 an affirmatively TERMINAL unit is rejected by both polarities"
+  else
+    bad "4b.184 an affirmatively terminal unit is rejected by both" \
+        "aff=$_f2_inact_aff live=$_f2_inact_live (both nonzero expected)"
+  fi
+  # The terminal grammar stays CLOSED (job 241): an unrecognised state is LIVE, never terminal.
+  _f2_new_aff=$(_f2 refreshing _unit_is_affirmatively_live)
+  [ "$_f2_new_aff" = 0 ] \
+    && ok "4b.185 an unrecognised/transitional state is LIVE, never terminal (closed grammar)" \
+    || bad "4b.185 an unrecognised state is live, never terminal" "rc=$_f2_new_aff (0 expected)"
+  # And the ACCEPT sites must not go back to the two-valued predicate.
+  _f2_bad=0
+  while IFS= read -r _ln; do
+    case "$_ln" in *_unit_is_affirmatively_live*) : ;; *) _f2_bad=$((_f2_bad+1)); echo "     $_ln" ;; esac
+  done < <(grep -nE '^\s+2\)' "$LAUNCHER" | grep -F '_unit_is' || true)
+  [ "$_f2_bad" = 0 ] \
+    && ok "4b.186 every RUNNING-acceptance site uses the affirmative predicate" \
+    || bad "4b.186 every RUNNING-acceptance site uses the affirmative predicate" "$_f2_bad site(s) do not"
+fi
+
+# --- job 319 F3: empty-array expansion under `set -u` on bash 3.2 --------------------------------
+# This script sets `set -uo pipefail` and the repo supports stock macOS /bin/bash 3.2, where an empty
+# "${ARRAY[@]}" is UNBOUND and aborts. A bare `gate-detached.sh` leaves GATE_ARGS empty, so the
+# DEFAULT full-gate invocation was the broken one. Structural, because this host's bash 5.2 accepts
+# the unsafe form — the defect is unobservable here by construction.
+# STRIP THE SAFE FORM FIRST. The safe form ${A[@]+"${A[@]}"} CONTAINS the literal "${A[@]}", so a
+# naive grep for the unsafe spelling matches every correct site — this test failed on the fixed tree
+# and would have "passed" only by reverting the fix.
+_f3_bad=0
+while IFS= read -r _ln; do _f3_bad=$((_f3_bad+1)); echo "     $_ln"; done < <(
+  sed -E 's/\$\{(GATE_ARGS|_extra_locks)\[@\]\+"\$\{(GATE_ARGS|_extra_locks)\[@\]\}"\}//g' "$LAUNCHER" \
+    | grep -nE '"\$\{(GATE_ARGS|_extra_locks)\[@\]\}"' || true )
+[ "$_f3_bad" = 0 ] \
+  && ok "4b.187 no bare \"\${ARRAY[@]}\" expansion (bash 3.2 + set -u safe form)" \
+  || bad "4b.187 no bare array expansion under set -u" "$_f3_bad unsafe site(s)"
+if grep -qE '\$\{GATE_ARGS\[@\]\+"\$\{GATE_ARGS\[@\]\}"\}' "$LAUNCHER"; then
+  ok "4b.188 the gate exec uses the \${A[@]+\"\${A[@]}\"} form"
+else
+  bad "4b.188 the gate exec uses the safe form" "not found at the systemd-run exec"
+fi
+
 # --- #3740: this launcher must not FORWARD build-flag contamination ------------------------------
 # agent-gate.sh's header says "never export global RUSTFLAGS on a worker": a non-empty RUSTFLAGS
 # SUPPRESSES cargo's managed block and the gate then APPENDS its own, yielding a doubled
@@ -2532,7 +2721,11 @@ rm -rf "$rp_t"
 # arrive. Asserted STRUCTURALLY at BOTH acceptance sites, because the two differ only in what a
 # rejection means and a fix applied to one is the call-site defect this file already has a case for.
 _j318_bare=$(grep -cE '^\s*0\|2\)\s*_hb_seen=1' "$LAUNCHER" || true)
-_j318_gated=$(grep -cE '_unit_is_live "\$UNIT".*_hb_seen=1|2\) if _unit_is_live' "$LAUNCHER" || true)
+# job 319 (Medium) upgraded BOTH sites from `_unit_is_live` to `_unit_is_affirmatively_live`: the
+# two-valued predicate returns 0 for UNMEASURABLE too, and where 0 ACCEPTS that re-admits precisely
+# the one-beat-then-dead case 4b.174/4b.175 exist for. So the affirmative predicate is what counts
+# here, and the old spelling must NOT satisfy this test.
+_j318_gated=$(grep -cE '_unit_is_affirmatively_live "\$UNIT"' "$LAUNCHER" || true)
 if [ "${_j318_bare:-0}" -eq 0 ]; then
   ok "4b.174 no acceptance site treats RUNNING (exit 2) as monitorable without a unit check"
 else
@@ -2543,9 +2736,9 @@ fi
 # fixing only the one roborev named is exactly the audit-by-primitive failure this suite exists to
 # catch. Both must gate on the unit.
 if [ "${_j318_gated:-0}" -ge 2 ]; then
-  ok "4b.175 BOTH RUNNING acceptance sites gate on _unit_is_live (found $_j318_gated)"
+  ok "4b.175 BOTH RUNNING acceptance sites gate on AFFIRMATIVE liveness (found $_j318_gated)"
 else
-  bad "4b.175 BOTH RUNNING acceptance sites gate on _unit_is_live" \
+  bad "4b.175 BOTH RUNNING acceptance sites gate on affirmative liveness" \
       "only $_j318_gated site(s) gated; the in-loop probe and the post-loop fallback both need it"
 fi
 # 4b.176 (roborev job 318, Low): the launcher validated an absolute `bash` and then exec'd a
