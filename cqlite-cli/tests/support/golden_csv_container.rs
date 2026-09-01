@@ -298,7 +298,9 @@
 //! `key_part` UDTs whose `label`s are plain identifiers, an empty string or null.
 
 use super::schema::CqlType;
-use super::{container, stringified_blob_spelling, Kinding};
+use super::{
+    canon_typed, container, stringified_blob_spelling, Canon, Depth, Egress, Kinding, Side,
+};
 use serde_json::{Map, Value};
 
 /// The ONE bracket pair a container of this declared type may be rendered with
@@ -307,6 +309,62 @@ use serde_json::{Map, Value};
 /// Taken from the DDL, so each kind is required to use its own bracket: a `set`
 /// rendered `[a, b]` or a `tuple` rendered `[a, b]` is a failure (review finding
 /// R2), where the earlier golden-shape-only rule accepted any of the three.
+/// This type's declared map KEY type, or `None` when it is not a map.
+fn map_key_ty(ty: &CqlType) -> Option<&CqlType> {
+    match ty {
+        CqlType::Map(key_ty, _) => Some(key_ty),
+        _ => None,
+    }
+}
+
+/// A GOLDEN map key as the canonical value it denotes, or `None` when it does not
+/// denote one under the declared key type.
+///
+/// Goes through the lane's ONE answer to "what does the golden's map key denote"
+/// (`container::golden_map_key_value`) and the ONE canonicalizer, so the guide lookup
+/// pairs keys by exactly the equality `compare::compare_map` will use on them — which
+/// is the whole point of matching this way rather than on text.
+fn canonical_golden_key(key: &str, key_ty: &CqlType) -> Option<(Canon, Value)> {
+    let value =
+        container::golden_map_key_value(key, key_ty, container::MapKeySpelling::ToJsonString)
+            .ok()?;
+    let canon = canon_typed(
+        &value,
+        Egress::Csv,
+        key_ty,
+        Depth::Inside,
+        container::golden_map_key_kinding(key_ty, container::MapKeySpelling::ToJsonString),
+        Side::Golden,
+    )
+    .ok()?;
+    Some((canon, value))
+}
+
+/// A CSV entry's key TEXT as the canonical value it denotes WHEN READ UNDER `guide`.
+///
+/// Used only to CHOOSE the guide, by asking of each candidate "does this text, read
+/// under you, denote you?" — never to produce the value, which is decoded again by the
+/// caller once a candidate is selected. It must take a guide because reading the text
+/// depends on one: with `Null` the token `null` reads as `Null`, so a golden slot
+/// holding the TEXT `"null"` would never match its own entry.
+fn canonical_cli_key(
+    text: &str,
+    key_ty: &CqlType,
+    guide: &Value,
+    excluded: &Excluded<'_>,
+) -> Option<Canon> {
+    let decoded = decode_at(guide, text, key_ty, "", excluded, Kinding::Natural).ok()?;
+    canon_typed(
+        &decoded,
+        Egress::Csv,
+        key_ty,
+        Depth::Inside,
+        Kinding::Natural,
+        Side::Cli,
+    )
+    .ok()
+}
+
 fn brackets(ty: &CqlType) -> Option<(char, char)> {
     match ty {
         CqlType::List(_) => Some(('[', ']')),
@@ -1254,6 +1312,18 @@ fn decode_object<'t>(
                 .collect()
         })
         .unwrap_or_default();
+    // …and the golden's keys AS CANONICAL VALUES, for the fallback below. Same
+    // once-only reason. A key that does not canonicalize is absent, so it matches
+    // nothing.
+    let canonical_golden_keys: Vec<(Canon, Value, &String)> = match (fields, map_key_ty(ty)) {
+        (Some(g), Some(key_ty)) => g
+            .keys()
+            .filter_map(|key| {
+                canonical_golden_key(key, key_ty).map(|(canon, value)| (canon, value, key))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
         let (key, value) = entry_cut(part)?;
@@ -1266,14 +1336,60 @@ fn decode_object<'t>(
         } else {
             format!("{path}.{key}")
         };
-        // UNAMBIGUOUS BY PRECONDITION: `decode_shape` asks `node_refusal` before it
-        // reaches this decode, and that refuses a node whose golden keys do not all
-        // render distinctly (see `decode_does_not_recover`). So this lookup cannot be
-        // the "first of several identical spellings" it would otherwise be.
+        // WHICH GOLDEN ENTRY DOES THIS CSV ENTRY MEAN? Two matches, and they are DUALS
+        // rather than two notions of the same thing (roborev, issue #3726):
+        //
+        //   * by RENDERED TEXT — cheap, and exact where both sides spell the value the
+        //     same way, which is the overwhelmingly common case. It is unambiguous by
+        //     PRECONDITION: `decode_shape` asks `node_refusal` first, and that refuses a
+        //     node whose golden keys do not all render DISTINCTLY, so this cannot be the
+        //     "first of several identical spellings" it would otherwise be.
+        //   * by CANONICAL VALUE — for keys the two sides legitimately SPELL differently.
+        //     `entry_key_rendering` translates the spellings this lane knows
+        //     (`stringified_csv_text` handles `blob`) and deliberately leaves the rest
+        //     alone, so a `timestamp` golden key reads `2024-01-01T00:00:00Z` where the
+        //     CSV cell reads `2024-01-01 00:00:00+0000`. `canon_timestamp` accepts BOTH
+        //     separators — that is this lane stating in its own source that the two
+        //     spellings denote one value — so the comparison pairs them while a text
+        //     match cannot. Without this the key got NO guide, and a container key
+        //     holding a `null` member then decoded that token as the TEXT `"null"`
+        //     instead of `Null`, reporting CORRECT egress as a divergence.
+        //
+        // The two answer OPPOSITE questions and neither subsumes the other: the refusal
+        // above covers DIFFERENT values that share one spelling, this covers ONE value
+        // spelled two ways. An AMBIGUOUS canonical match (two golden keys of equal
+        // canonical value, e.g. a numeric `1` and `1.0`) selects NOTHING — a guide is
+        // never guessed at.
         let golden_key = rendered_golden_keys
             .iter()
             .find(|(rendered, _)| rendered == key)
-            .map(|(_, golden_key)| *golden_key);
+            .map(|(_, golden_key)| *golden_key)
+            .or_else(|| {
+                let key_ty = map_key_ty(ty)?;
+                let mut hit = None;
+                for (canon_golden, guide, golden_key) in &canonical_golden_keys {
+                    // ASK THE QUESTION THE OTHER WAY ROUND. Canonicalizing the CSV text
+                    // on its own and comparing cannot work, and the reason is a
+                    // circularity worth stating: reading that text needs the very guide
+                    // we are trying to choose. With no guide the token `null` reads as
+                    // `Null`, so a golden slot holding the TEXT `"null"` never matches
+                    // its own entry. (A first attempt did exactly that and could not fix
+                    // this case.)
+                    //
+                    // So each CANDIDATE is tried AS the guide: does this CSV text, read
+                    // under candidate `g`, denote `g`? A candidate that answers yes is a
+                    // consistent reading of the entry; one that answers no is not.
+                    if canonical_cli_key(key, key_ty, guide, excluded).as_ref()
+                        == Some(canon_golden)
+                    {
+                        if hit.is_some() {
+                            return None;
+                        }
+                        hit = Some(*golden_key);
+                    }
+                }
+                hit
+            });
         let mut entry = Map::new();
         entry.insert(
             "key".to_string(),

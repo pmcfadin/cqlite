@@ -1042,51 +1042,58 @@ fn a_getstring_spelled_golden_key_renders_as_nothing_and_is_not_refused() {
     assert_eq!(node_refusal(&golden, Some(&ty)), None);
 }
 
-/// EVIDENCE, NOT A GUARD: a key the two sides spell DIFFERENTLY decodes correctly
-/// even though it finds no guide — so the roborev finding's stated failure mode does
-/// not reproduce (issue #3726).
+/// A KEY THE TWO SIDES SPELL DIFFERENTLY STILL FINDS ITS GUIDE, and the guide is
+/// chosen by asking each CANDIDATE whether the CSV text READ UNDER IT denotes it
+/// (roborev job 11, issue #3726).
 ///
-/// The premise is real. `entry_key_rendering` translates only the spellings this lane
-/// knows (`blob`, via `stringified_csv_text`) and deliberately leaves `timestamp`
-/// alone, so the golden carries `2024-01-01T00:00:00Z` where the CSV cell carries
-/// `2024-01-01 00:00:00+0000`; the guide lookup matches on text and therefore finds
-/// NOTHING. `canon_timestamp` accepts both separators, which is this lane stating in
-/// its own source that the two denote one value.
+/// `entry_key_rendering` translates only the spellings this lane knows (`blob`, via
+/// `stringified_csv_text`) and deliberately leaves `timestamp` alone, so the golden
+/// renders `2024-01-01T00:00:00Z` where the CSV cell carries
+/// `2024-01-01 00:00:00+0000` and the TEXT lookup finds nothing.
 ///
-/// The predicted consequence — "decoded against `Null` and falsely diverges" — does
-/// NOT follow, and the reason is one line of `decode_shape`: the null-token arm is
-/// `Value::Null if text == "null" => Ok(Value::Null)`. Decoding against `Null` is
-/// exactly what RESOLVES a `null` token, so the guide's absence costs nothing here.
-/// A scalar member decodes to its own text either way, and both sides then
-/// canonicalize equal.
+/// BOTH DIRECTIONS ARE HERE ON PURPOSE, because testing only the first is what made an
+/// earlier round of this work conclude — wrongly — that the missing guide was harmless:
 ///
-/// A canonical-value fallback for the guide lookup was written for this finding and
-/// REVERTED: with this case decoding correctly without it, its benefit could not be
-/// demonstrated by any test, and an undemonstrable guard in a function that has
-/// absorbed three review rounds is not worth its risk. This case is kept as the
-/// evidence for that decision — if a future change makes the missing guide matter, it
-/// reds here first.
+///   * golden slot `null`, CSV token `null` — harmless. `decode_shape`'s null-token arm
+///     is `Value::Null if text == "null"`, so an ABSENT guide (which is `Value::Null`)
+///     resolves the token correctly by coincidence.
+///   * golden slot the TEXT `"null"`, CSV token `null` — NOT harmless, and it is the
+///     same bytes on the CSV side, because CSV is unquoted. With no guide the token
+///     reads as `Null` where the golden says `Text("null")`, so CORRECT egress is
+///     reported as a divergence.
+///
+/// Note what the second case rules out: canonicalizing the CSV text ON ITS OWN and
+/// matching that against the golden keys cannot work, because reading the text needs
+/// the guide being chosen. Hence the per-candidate question.
 #[test]
-fn a_key_spelled_differently_by_the_two_sides_still_decodes_correctly() {
+fn a_key_spelled_differently_by_the_two_sides_still_finds_its_guide() {
     let ty = ty_of("frozen<map<frozen<tuple<timestamp, text>>, int>>");
-    let golden = json!({"[\"2024-01-01T00:00:00Z\", null]": 7});
     let csv = "{(2024-01-01 00:00:00+0000, null): 7}";
-    // The premise: the golden's rendering and the CSV text really do differ, so the
-    // text lookup finds no guide.
+
+    // The premise both cases share: the golden's rendering and the CSV text differ, so
+    // the text lookup finds nothing and the fallback is what is under test.
     assert_eq!(
         entry_key_rendering(&ty, "[\"2024-01-01T00:00:00Z\", null]").as_deref(),
         Some("(2024-01-01T00:00:00Z, null)"),
         "premise: the golden renders with the T separator"
     );
-    let decoded = match decode(&golden, csv, &ty) {
-        Ok(decoded) => decoded,
-        Err(why) => panic!("the CSV cell must decode: {why}"),
-    };
-    assert_eq!(
-        decoded[0]["key"],
-        json!(["2024-01-01 00:00:00+0000", null]),
-        "the null slot decodes as Null with no guide at all — `Value::Null if text == \"null\"`"
-    );
+
+    for (slot, expected) in [
+        (json!(null), json!(["2024-01-01 00:00:00+0000", null])),
+        (json!("null"), json!(["2024-01-01 00:00:00+0000", "null"])),
+    ] {
+        let key = format!("[\"2024-01-01T00:00:00Z\", {slot}]");
+        let golden = json!({ key.clone(): 7 });
+        let decoded = match decode(&golden, csv, &ty) {
+            Ok(decoded) => decoded,
+            Err(why) => panic!("golden slot {slot}: the CSV cell must decode: {why}"),
+        };
+        assert_eq!(
+            decoded[0]["key"], expected,
+            "golden slot {slot}: the guide must be found, so the CSV token `null` reads \
+             as whatever the golden says it is"
+        );
+    }
 }
 
 /// TWO DISTINCT CONTAINER KEYS THAT RENDER ALIKE make the node unrecoverable, so it
