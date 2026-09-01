@@ -892,7 +892,11 @@ On **Linux** the line additionally carries a `mold=` token and a `perf=` token
 
 ```
 accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=ok
+cpu-budget: wrapper=nice ncpu=16 max-concurrency=1(pinned) cores-per-gate=16 build-jobs=16(derived) test-threads=16
 ```
+
+(The `cpu-budget:` line is a sibling of `accelerators:` and carries the resolved
+slot cap **and where it came from** — see the concurrency-cap section below.)
 
 - **`sccache`** — cross-worktree compile cache (~25.6% faster fresh builds).
 - **`nextest`** — parallel `core-tests` (the gate's long pole).
@@ -947,6 +951,23 @@ caller blocks cleanly rather than spin-failing.
 - **N** defaults to `max(2, floor((ncpu-2)/4))` — a conservative fraction of cores
   that still lets a couple of gates run on a small box. Override with
   `CQLITE_GATE_MAX_CONCURRENCY`.
+- **Every SUMMARY says where N came from (issue #3414).** The `cpu-budget:` line
+  stamps `max-concurrency=N(pinned|default|invalid|clamped)`, the same idiom as
+  `build-jobs=N(derived|caller)` beside it: `pinned` = the env var held a valid
+  integer ≥ 1 and was used verbatim, `default` = it was unset so N is the formula
+  above, `invalid` = it was empty or non-numeric and was silently discarded for the
+  formula, `clamped` = it was a valid integer < 1 and was silently raised to 1.
+  `3` and `3 because nothing set it` are different operational facts — read
+  `N(default)` on a fleet box as *the pin is not provisioned*.
+
+  **The remedy DIFFERS BY TOKEN, and getting that wrong sends you in a circle.** A
+  `default` box has no pin line at all, so
+  `bash scripts/bootstrap-agent-machine.sh --fix-gate-pin` (or `--yes`) persists one.
+  An `invalid` or `clamped` box ALREADY HAS the line, holding a bad value — and
+  bootstrap deliberately never rewrites an existing value, because a box running >1
+  gate on purpose must not be clobbered — so re-running it there is a **silent
+  no-op**. Fix the VALUE by hand in `/etc/environment`. Bootstrap says the same thing
+  at the same fork, as `gate-pin: NOT-HONOURED`.
 - **SIGKILL-safe stale-slot reaping:** each slot is an `fcntl.flock` held by a
   small background daemon (`scripts/lib/gate_slot_daemon.py`) that the gate starts
   and monitors. Because the daemon opens the lock fd *after* it is forked, the

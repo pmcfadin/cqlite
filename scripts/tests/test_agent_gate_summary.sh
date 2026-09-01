@@ -4614,7 +4614,20 @@ fi
 # 1465c. The component-level dataset SKIP must declare the leak-lane state, or a skipped
 #        component leaves NO `node-bindings-leak-lane:` line and "no line" becomes
 #        ambiguous between "it ran" and "this gate predates the line".
-if printf '%s' "$nll_component" | grep -q '_node_leak_lane_note SKIP-OPTOUT'; then
+# SIGPIPE-FREE MATCH, DELIBERATELY NOT `printf | grep -q` (#3685). Measured at this site:
+#        `printf '%s' "$nll_component" | grep -q PATTERN` under this suite's `set -uo pipefail`
+#        returned **rc=141** in 30 of 80 runs (37.5%) — `grep -q` exits at the first match, closing
+#        the read end, and whichever of `printf`'s write(2) calls lands after that gets EPIPE. Over
+#        those 80 runs `rc=1` occurred ZERO times: the note was present EVERY time, so the pipeline
+#        was inverting a TRUE assertion into a FAIL. It red two consecutive gates of record on an
+#        identical tree digest (#3414) before the mechanism was found.
+#
+#        DANGER HEURISTIC for the other ~200 sites in #3685 — large variable x EARLY match. Here the
+#        data is 34,397 bytes (it FITS a 65,536-byte pipe, so this is syscall interleaving, NOT
+#        buffer exhaustion) and the first match is at byte 3,372, so grep discards 31,025 bytes it
+#        never reads: near-maximal exposure. A pattern near the END of its data is nearly safe.
+#        `[[ ]]` glob measured 0/80 on the identical variable and load. Only THIS site is changed.
+if [[ $nll_component == *'_node_leak_lane_note SKIP-OPTOUT'* ]]; then
   ok "1465-skip-declares: the #3522 opt-out SKIP branch writes the SKIP-OPTOUT note"
 else
   bad "1465-skip-declares: the opt-out SKIP branch does not declare the leak-lane state"
@@ -4708,7 +4721,18 @@ fi
 nll_comp_v1=$(sed -n '/^run_node_bindings() {/,/^}$/p' "$GATE")
 nll_leakfile_v1="$SCRIPT_DIR/../../bindings/node/__test__/leak-paths.test.js"
 nll_v1_ok=1
-printf '%s' "$nll_comp_v1" | grep -q 'leak_strict_env=(-u CQLITE_LEAK_BUDGET_RELAX)' \
+# SIGPIPE-FREE MATCH (#3685), second and LAST measured-dangerous site in this file. The
+# `printf | grep -q` form here false-FAILed 12/40 (30%): the data is 34,397 bytes and this
+# pattern sits at byte 6,331, so `grep -q` exits having DISCARDED 28,066 bytes and whichever
+# of printf's write(2) calls lands after that gets EPIPE -> rc=141 -> a FAIL on a TRUE
+# assertion. It is why `1465-gate-strict` red 1-in-3 suite runs even after L4618 was fixed.
+#        SORT KEY for #3685's other sites is BYTES DISCARDED, not "early match" — the
+#        discarded count IS the race window. Measured here: 305-byte data at 14% => 0/40
+#        (too small to race); 34,397-byte data at 93%/98% => 0/40 (only ~2.5KB discarded);
+#        34,397 at 18%/10% => 30%/37.5%. Small OR late is safe; only large AND early fires.
+#        `grep -c` sites below are SAFE by construction — a count reads all input, so there
+#        is no early exit to race. Only the two `grep -q` sites needed changing.
+[[ $nll_comp_v1 == *'leak_strict_env=(-u CQLITE_LEAK_BUDGET_RELAX)'* ]] \
   || { nll_v1_ok=0; echo "  node-bindings does not declare the strict leak-budget env"; }
 # every `env` that launches node in this component must carry the unset array
 nll_env_launches=$(printf '%s\n' "$nll_comp_v1" | grep -cE '^[[:space:]]*if (! )?env ')

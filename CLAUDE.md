@@ -745,6 +745,22 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   differential is re-run under a FAILING shim, where each body must name exactly the one invocation
   it reached — with the short-circuit proved by measurement (strictly fewer invocations than the
   passing run) rather than assumed.
+- **Every SUMMARY's `cpu-budget:` line says WHERE the slot cap came from (#3414):**
+  `max-concurrency=N(pinned|default|invalid|clamped)`, the same idiom as `build-jobs=N(derived|caller)`
+  beside it. `pinned` = a valid `CQLITE_GATE_MAX_CONCURRENCY` >= 1 used verbatim; `default` = the var
+  is UNSET so N is the #1825 formula; `invalid` = it was EMPTY or non-numeric and was silently
+  discarded for the formula; `clamped` = it was a valid integer < 1 and was silently raised to 1.
+  Read `N(default)` on a fleet box as **the pin is not provisioned** — `3` and `3 because nothing set
+  it` are different operational facts, and the second one is what ran unseen for months. `invalid`
+  and `clamped` exist because `${VAR:-dflt}` cannot tell unset from set-empty (`${VAR+set}` can), so a
+  mis-set variable was textually identical to a healthy defaulted box.
+  **THE REMEDY DIFFERS BY TOKEN, and getting that wrong sends an operator in a circle.** A
+  `default` box has NO pin line, so `bash scripts/bootstrap-agent-machine.sh --fix-gate-pin`
+  (or `--yes`) persists one. An `invalid`/`clamped` box ALREADY HAS the line, with a bad value —
+  and bootstrap deliberately never rewrites an existing value (a box running >1 gate on purpose
+  must not be clobbered), so re-running it is a **silent no-op**: fix the VALUE in
+  `/etc/environment` by hand. Bootstrap says the same thing at the same fork, as
+  `gate-pin: NOT-HONOURED`.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a
@@ -1922,7 +1938,41 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   pins `CQLITE_GATE_MAX_CONCURRENCY=1` (the #1825 cap admits one gate; the per-gate core budget then
   gives it full cores), and every gate derives `CARGO_BUILD_JOBS` + nextest `--test-threads` from its
   slot count and runs under `taskpolicy -c utility`/`nice`, so no manual `pgrep`-serialization is
-  needed. It pre-claims by checking the `refs/claims/issue-<N>` ref (`claim.sh status <N>`) AND any legacy
+  needed. **A PIN THAT IS PRESENT IS NOT A PIN THAT IS IN EFFECT (#3414).** That pin lived in
+  `~/.bashrc` on all three boxes and was in effect on NONE of them: stock Ubuntu `.bashrc` opens
+  with `case $- in *i*) ;; *) return;; esac`, and a gate is launched non-interactively, so every
+  gate resolved N from the #1825 formula (`--slots 3` on 16 cores) while `grep` said the pin was
+  installed — one gate queued 1h31m and was killed with no verdict, and a measurement lane was
+  given an isolation guarantee the semaphore was not providing. Bootstrap now persists to
+  `/etc/environment` (read by PAM at session creation, no interactivity guard; bash itself never
+  reads it, login shell or not) and takes its verdict from an AFFIRMATIVE PROBE — it SCRUBS its own
+  inherited value — **and `BASH_ENV`/`ENV` with it, since a non-interactive bash SOURCES `$BASH_ENV`
+  and that file can re-export the variable just scrubbed** — and reads it back out of a fresh,
+  profile-free session, in the same posture as `git-push:`. FIVE verdicts ship and only the first is
+  an `[ok]`: **`VERIFIED`** (the system-wide file sets a value, a fresh session sees THAT SAME
+  value, and the gate honours it), **`NOT-SYSTEM-WIDE`** (the session sees a value the file does not
+  set — a sudo- or user-specific override, so ordinary sessions get something else),
+  **`NOT-HONOURED`** (visible, but the gate discards or clamps it — fix the VALUE, not the
+  presence), **`FAILED`** (not visible), **`UNMEASURED`** (the probe could not run, the gate could
+  not be consulted, or the file could not be read/parsed), **`OPT-OUT`/`SKIPPED`**. **`VERIFIED` IS THE ONLY `[ok]`, AND A
+  NON-LINUX HOST DOES NOT GET ONE.** An earlier form emitted `ok "NOT-APPLICABLE"` there — the
+  mechanism is Linux/`pam_env`-specific, so macOS was scoped OUT rather than supported — and that
+  reasoning is still right about the MECHANISM and was wrong about the VERDICT: an `[ok]` is what
+  `--strict` reads, so it **certified an unpinned host**, which is the false-certification shape this
+  whole section exists to remove. A non-Linux host whose session shows a value now reports
+  **`UNMEASURED`** (there is no PAM-read system-wide file to correlate against, so a machine-wide pin
+  cannot be told apart from a user-scoped one), and the per-run authority there is the gate's own
+  `cpu-budget:` token. **Scoping a platform out is not the same as passing it**, and `NOT-APPLICABLE`
+  is emitted nowhere in the script today. **`VERIFIED` IS SCOPED AND SAYS SO**: it
+  measures a PAM-created (sudo) session, so a gate launched from a systemd unit or a container
+  entrypoint — no PAM in its ancestry, so `/etc/environment` never applies — is NOT covered, and the
+  authoritative per-run confirmation stays that gate's own `cpu-budget: max-concurrency=N(pinned)`
+  token. The generalisation,
+  which is the same one #3369 landed one section over: **presence in a config file and visibility to
+  the process that reads it are different facts, and only the second one is a verdict** — so never
+  certify a setting by re-reading the file you just wrote, and never let an INHERITED value answer a
+  question about a PERSISTED one (bootstrap runs inside an already-pinned session, so an unscrubbed
+  probe would have certified the exact failure it exists to catch). It pre-claims by checking the `refs/claims/issue-<N>` ref (`claim.sh status <N>`) AND any legacy
   `issue-<N>-*` branch. Multiple sessions on ONE machine are now expected, each
   claim-protocol-gated; NEVER N bare sessions without the protocol — and note the claim ref is a
   hard control only *cross-machine* (git arbitrates the push). Locally it is advisory: a session
