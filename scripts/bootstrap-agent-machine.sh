@@ -2286,13 +2286,22 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     pin_child_rc=$?
     if [ "$pin_child_rc" = 4 ]; then pin_create_rc=3; return 3; fi
     if [ "$pin_child_rc" != 0 ]; then
-      # OUR file, incomplete. Roll it back for the same reason pin_create_mode_ok does: a
-      # reported failure must match the filesystem, or the next run inherits it as a pin.
-      if ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} rm -f "$PIN_ENV_FILE" 2>/dev/null && [ ! -e "$PIN_ENV_FILE" ]; then
-        PIN_CREATE_RESIDUE="the write failed after the file was created (rc $pin_child_rc); the incomplete file was REMOVED"
-      else
-        PIN_CREATE_RESIDUE="the write failed after the file was created (rc $pin_child_rc) AND the incomplete file could not be removed — inspect $PIN_ENV_FILE by hand"
-      fi
+      # NEVER TOUCH THE DESTINATION ON A PRE-LINK FAILURE (roborev job 328, Medium). This
+      # branch used to `rm -f "$PIN_ENV_FILE"` unconditionally, which was DESTRUCTIVE and
+      # defeated the very no-clobber guarantee the temp+`ln` rewrite exists for: exit 5 means
+      # the TEMP write failed, i.e. `ln` never ran and the destination was NEVER ours — so if
+      # a concurrent provisioner created /etc/environment during our write, we deleted THEIR
+      # file and called it our own cleanup.
+      #
+      # The child already removes its own temp on every failure path, and there is NO child
+      # exit where `ln` SUCCEEDED and we then failed (a successful `ln` falls through to
+      # rc=0). Therefore the parent never needs to remove the destination here, and the
+      # correct disposition is: report, and touch NOTHING.
+      #
+      # pin_create_mode_ok's rollback is a DIFFERENT case and stays: it runs only after `ln`
+      # succeeded, and `ln` is atomic and fails if the destination exists, so the inode it
+      # removes is provably the one THIS invocation created.
+      PIN_CREATE_RESIDUE="the staging write failed (rc $pin_child_rc) before $PIN_ENV_FILE was linked; nothing was written there and the temporary was removed by the child"
       pin_create_rc=1; return 1
     fi
     pin_create_mode_ok "$PIN_ENV_FILE"; pin_create_rc=$?; return "$pin_create_rc"

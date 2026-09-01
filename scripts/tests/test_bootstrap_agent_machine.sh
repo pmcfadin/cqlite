@@ -3808,6 +3808,38 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     echo "  file-exists=$([ -e "$envf_bc" ] && echo yes || echo no) content=[$(cat "$envf_bc" 2>/dev/null | tr '\n' '|')]"
   fi
 
+  # 11bi. A PRE-LINK FAILURE MUST NOT TOUCH THE DESTINATION (roborev job 328, Medium — a
+  #      DESTRUCTIVE defect I introduced with the temp+`ln` rewrite). Exit 5 means the STAGING
+  #      write failed, so `ln` never ran and the destination was NEVER ours. The branch used to
+  #      `rm -f "$PIN_ENV_FILE"` unconditionally, so a provisioner that created
+  #      /etc/environment during our write had ITS file deleted by our "cleanup" — defeating
+  #      the exact no-clobber guarantee the rewrite exists for.
+  #
+  #      DRIVEN BY A READ-ONLY DIRECTORY, which is the one schedulable way to reach exit 5 from
+  #      the CLI: the destination is absent (so the create branch IS entered) and the temp
+  #      write then fails with EACCES.
+  #
+  #      WHAT THIS CASE CANNOT DO, stated rather than implied: it cannot schedule the RACE
+  #      itself. Entering the create branch requires the destination to be absent, and a peer
+  #      creating it mid-write is not something a test can time. So this asserts the reachable
+  #      half — the failure is reported and NOTHING is written or removed at the destination —
+  #      and the unreachable half rests on the code carrying no destination-`rm` on that path
+  #      at all, which is a structural property of a branch that now has none.
+  pin_ro_dir="$tmp/pin-ro-dir"; rm -rf "$pin_ro_dir"; mkdir -p "$pin_ro_dir"
+  envf_bi="$pin_ro_dir/env"; rm -f "$envf_bi"
+  chmod 0555 "$pin_ro_dir"
+  out_bi=$(runpin "$pinroot" "$shims_one" "$envf_bi" HOME="$pin_home_plain" --fix-gate-pin)
+  chmod 0755 "$pin_ro_dir" 2>/dev/null || true
+  if printf '%s' "$out_bi" | grep -q 'the pin was NOT persisted' \
+     && printf '%s' "$out_bi" | grep -q 'before .* was linked' \
+     && [ ! -e "$envf_bi" ]; then
+    ok "gate-pin: a staging-write failure reports itself and writes NOTHING at the destination (no destructive cleanup of a path that was never ours)"
+  else
+    bad "gate-pin: the pre-link failure path did not report cleanly, or touched the destination"
+    printf '%s\n' "$out_bi" | grep -iE 'gate-pin|staging|persisted|CREATED' | head -4
+    echo "  dest exists=$([ -e "$envf_bi" ] && echo yes || echo no)"
+  fi
+
   # 11bh. AN INVARIANT GUARD, EXPLICITLY *NOT* A DISCRIMINATOR FOR THE LOCK. Two concurrent
   #      runs must leave exactly ONE CQLITE_GATE_MAX_CONCURRENCY line, because pam_env
   #      resolves duplicates by taking the last.
