@@ -1,27 +1,37 @@
-//! MEASUREMENT ONLY (issue #3742): does a zero-column `RecordBatch`'s explicit
-//! row count survive the REAL `do_get` encode path plus an arrow-flight client
-//! decode?
+//! Issue #3742 — a TRANSPORT FACT, recorded: does a zero-column `RecordBatch`'s
+//! explicit row count survive the REAL `do_get` encode path plus an arrow-flight
+//! client decode?
 //!
-//! Context: a zero-column projection is publicly reachable on four Flight
-//! `do_get` routes and today fails, because `RecordBatch::try_new(<zero-field
-//! schema>, vec![])` returns `Err("must either specify a row count or at least
-//! one column")` at arrow-array 53.4.1. Posture "B" would build the batch with
-//! `RecordBatchOptions::new().with_row_count(Some(n))` +
-//! `RecordBatch::try_new_with_options` — arrow's sanctioned mechanism for a
-//! batch whose row count is not derivable from its columns.
+//! # This file advocates nothing, and describes no shipped behaviour
 //!
-//! B is only viable if the row count SURVIVES THE WIRE. A zero-column batch has
-//! NO data buffers, so the count can only travel in the IPC `RecordBatch`
-//! flatbuffer's `length` field — or nowhere. These tests measure it end to end
-//! through [`crate::streaming::encode_do_get`] (the encoder the real `do_get`
-//! response stream uses, `streaming.rs`) and
+//! #3742 was RESOLVED by posture "A": a request whose OUTPUT COLUMN SET is empty
+//! is refused at spec admission with `InvalidArgument`
+//! (`filter.rs::admit_output_columns`), so no zero-column batch is constructed
+//! anywhere on the shipped read path and none is ever encoded. Nothing below
+//! reflects a code path a client can reach.
+//!
+//! The alternative considered and NOT taken — posture "B", building the batch
+//! with `RecordBatchOptions::new().with_row_count(Some(n))` +
+//! `RecordBatch::try_new_with_options` so a zero-column projection returns its
+//! ROW COUNT instead of an error — was ruled OUT OF SCOPE for #3742 and left as
+//! a follow-up. B would only ever be viable if the row count SURVIVED THE WIRE:
+//! a zero-column batch has NO data buffers, so the count can travel only in the
+//! IPC `RecordBatch` flatbuffer's `length` field, or nowhere. Measuring that is
+//! expensive to redo and cheap to keep, so the measurement is retained HERE, in
+//! the state it was taken, for whoever picks the follow-up up. Its answer is a
+//! property of arrow-ipc 53.4.1 and of `streaming::encode_do_get`, not a
+//! statement about what CQLite does or should do.
+//!
+//! Measured end to end through [`crate::streaming::encode_do_get`] (the encoder
+//! the real `do_get` response stream uses) and
 //! `arrow_flight::decode::FlightRecordBatchStream` (what a Trino/arrow-flight
 //! client uses), plus a direct arrow-ipc `StreamWriter`/`StreamReader`
 //! round-trip to locate WHERE the count travels.
 //!
 //! These tests change no production behaviour: they neither construct nor
-//! require a zero-column batch anywhere in the shipped read path. They record a
-//! transport-layer FACT the posture decision depends on.
+//! require a zero-column batch anywhere in the shipped read path, and the
+//! `RecordBatchOptions` they use to build the fixture batch is confined to this
+//! test module — the shipped encoder never calls it.
 
 use crate::streaming::{encode_do_get, DoGetStream, StreamProbe};
 use arrow::array::{RecordBatch, RecordBatchOptions};

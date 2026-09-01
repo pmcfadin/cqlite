@@ -1,10 +1,20 @@
-//! Issue #3742 — ROUTE OBSERVATION for the zero-column point-read measurement.
+//! Issue #3742 — ROUTE OBSERVATION, from the EMITTED signal, for the
+//! zero-output-column admission contract.
 //!
-//! `issue_3742_zero_column_projection.rs` records what a zero-column projection
-//! DOES. This file answers the separate question roborev raised about it: was the
-//! POINT-READ route actually selected for that request, or did it silently fall
-//! back to a full scan (in which case the zero-column outcome recorded there is
-//! not the point route's outcome at all)?
+//! `issue_3742_zero_column_projection.rs` asserts that a zero-output-column
+//! request is REFUSED at spec admission (`InvalidArgument`, no message). This
+//! file answers the complementary question with a signal the server actually
+//! emits rather than a decision recomputed beside it: was any partition read at
+//! all?
+//!
+//! Since the admission check landed, the answer is the point: a refused request
+//! emits NO `access_path` label, because it is refused before a producer, a
+//! route or a scan exists. Its ungated sibling can no longer establish the route
+//! for the refused ticket at all — `ScanSpec::from_ticket` rejects it, so there
+//! is no `ScanSpec` to hand `detect_route` — so the route is pinned here the
+//! only way left: the SAME full-PK-equality filter with a SERVED projection
+//! reports `streaming_partition_lookup`, and the zero-column variant of that
+//! same filter reports nothing.
 //!
 //! The only route signal this crate publishes to an integration test is the
 //! `access_path` attribute on `cqlite.query.rows_scanned`
@@ -13,11 +23,9 @@
 //! hence its OWN test binary (the capture's meter provider is process-global;
 //! `point_read_metrics_test.rs` documents the same hazard).
 //!
-//! Its ungated sibling asserts the ROUTING DECISION instead, through the very
-//! function the production path calls (`point_read::detect_route` over a
-//! production-lowered `ScanSpec`). This file is the stronger, EMITTED-signal
-//! half: the label is flushed by `ScanProgressMeter::drop`, so it is recorded
-//! even for the request that then FAILS on arrow's zero-column refusal.
+//! NOTE (#3375): a module-level `#![cfg(feature = "observability-testing")]`
+//! target executes in NO gate component and in NO CI lane. Nothing here is
+//! merge-gating; the contract itself is pinned by the ungated sibling.
 //!
 //! ```text
 //! cargo test -p cqlite-flight --features observability-testing \
@@ -68,12 +76,14 @@ fn ticket_bytes(columns: Option<serde_json::Value>) -> Vec<u8> {
     serde_json::to_vec(&t).expect("ticket json")
 }
 
-/// Drive `do_get` to completion (success OR terminal stream error) and return
-/// the distinct `access_path` labels the read emitted, plus the error text.
+/// Drive `do_get` to completion (success, up-front refusal, OR terminal stream
+/// error) and return the distinct `access_path` labels the read emitted, plus
+/// the terminal `Status` itself — the STATUS, not its text, so the CODE can be
+/// asserted rather than pattern-matched out of a message.
 fn drive_and_collect_access_paths(
     data_dir: &std::path::Path,
     ticket: Vec<u8>,
-) -> (Vec<String>, Option<String>) {
+) -> (Vec<String>, Option<tonic::Status>) {
     let mc = testing::metrics_capture();
     mc.reset();
     let rt = tokio::runtime::Runtime::new().expect("rt");
@@ -81,13 +91,13 @@ fn drive_and_collect_access_paths(
         let svc = CqliteFlightService::new(data_dir.to_path_buf(), 8192);
         let resp = match svc.do_get(Request::new(Ticket::new(ticket))).await {
             Ok(r) => r,
-            Err(status) => return Some(status.to_string()),
+            Err(status) => return Some(status),
         };
         let mut stream = resp.into_inner();
         let mut err = None;
         while let Some(item) = stream.next().await {
             if let Err(status) = item {
-                err = Some(status.to_string());
+                err = Some(status);
                 break;
             }
         }
@@ -111,20 +121,21 @@ fn drive_and_collect_access_paths(
     (labels, err)
 }
 
-/// MEASUREMENT (#3742): the zero-column request on the point-read ticket shape
-/// reports the POINT-READ access path — so the recorded zero-column outcome is
-/// the point route's outcome, not a silent full-scan fallback.
+/// CONTRACT (#3742), from the emitted signal: a zero-output-column request on
+/// the point-read ticket shape is refused BEFORE any partition is read, so it
+/// emits no `access_path` at all — while the same filter with a served
+/// projection reports the POINT-READ path, which is what establishes that this
+/// ticket shape is a point read and not a full scan.
 #[test]
-fn zero_column_point_read_request_reports_the_point_read_access_path() {
+fn a_refused_zero_column_point_read_emits_no_access_path() {
     let (_temp, data_dir) = build_fixture();
 
     // Control: the same ticket WITHOUT a projection.
     let (control_labels, control_err) =
         drive_and_collect_access_paths(&data_dir, ticket_bytes(None));
-    eprintln!("MEASURE point-read control access_path={control_labels:?} err={control_err:?}");
-    assert_eq!(
-        control_err, None,
-        "point-read control must complete without a stream error"
+    assert!(
+        control_err.is_none(),
+        "point-read control must complete without an error: {control_err:?}"
     );
     assert_eq!(
         control_labels,
@@ -132,19 +143,34 @@ fn zero_column_point_read_request_reports_the_point_read_access_path() {
         "the full-PK-equality control must report the point-read access path"
     );
 
-    // The measurement: the SAME filter with `"columns": []`.
-    let (labels, err) =
-        drive_and_collect_access_paths(&data_dir, ticket_bytes(Some(serde_json::json!([]))));
-    eprintln!("MEASURE point-read columns=[] access_path={labels:?} err={err:?}");
-    let err = err.expect("zero-column point read must end in a terminal stream error");
+    // The SAME filter with a SERVED one-column projection: still the point-read
+    // path. This is what pins the route for the refused ticket below, whose only
+    // difference is a projection the routing decision never reads.
+    let (served_labels, served_err) =
+        drive_and_collect_access_paths(&data_dir, ticket_bytes(Some(serde_json::json!(["key"]))));
     assert!(
-        err.contains("must either specify a row count or at least one column"),
-        "expected arrow's zero-column refusal, got: {err}"
+        served_err.is_none(),
+        "a served projection on the point-read filter must complete: {served_err:?}"
     );
     assert_eq!(
-        labels,
+        served_labels,
         vec!["streaming_partition_lookup".to_string()],
-        "the zero-column request must be measured on the POINT-READ route \
-         (never a silent full_scan fallback)"
+        "columns=[key] on the same filter must still report the point-read path"
+    );
+
+    // The contract: the SAME filter with `"columns": []`.
+    let (labels, err) =
+        drive_and_collect_access_paths(&data_dir, ticket_bytes(Some(serde_json::json!([]))));
+    let status = err.expect("a zero-column request must be REFUSED");
+    assert_eq!(
+        status.code(),
+        tonic::Code::InvalidArgument,
+        "the refusal is a client error, got {:?} ({status})",
+        status.code()
+    );
+    assert!(
+        labels.is_empty(),
+        "a request refused at spec admission reads NO partition, so it emits no \
+         access_path at all, got {labels:?}"
     );
 }

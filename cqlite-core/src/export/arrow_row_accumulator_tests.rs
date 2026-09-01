@@ -375,11 +375,23 @@ fn recomputed_payload_matches_the_sum_of_the_row_widths() {
 /// `rows_to_record_batch` ends in the identical `try_new` with no explicit row
 /// count and `convert_to_arrays` returns an empty vec for zero columns. Changing
 /// it here would change Arrow output for this case inside a behaviour-preserving
-/// refactor, so it is deliberately NOT changed. **Reachability is no longer
-/// open**: a zero-column projection IS publicly reachable over `do_get`, on the
-/// full-scan, point-read and aggregation routes alike — measured in
-/// `cqlite-flight/tests/issue_3742_zero_column_projection.rs`. Issue #3742 owns
-/// the resulting behaviour; no fix posture is presupposed here.
+/// refactor, so it is deliberately NOT changed.
+///
+/// **The state this test pins is NO LONGER REACHABLE from a public Flight
+/// route** (issue #3742, resolved): a `do_get` request whose OUTPUT COLUMN SET is
+/// empty — an empty projection, a projection of only unknown columns, either of
+/// those on the point-read route, or an aggregation with neither group-by keys
+/// nor aggregates — is now refused at spec admission with `InvalidArgument`
+/// (`cqlite-flight/src/filter.rs::admit_output_columns`), before any producer or
+/// Arrow schema exists. So a zero-column accumulator is no longer FED by that
+/// path.
+///
+/// That does not make this test dead, and it is deliberately kept: it pins an
+/// ACCUMULATOR-level invariant (`len()` still counts staged rows that no batch
+/// can carry, and both conversion paths agree on refusing), which holds for any
+/// caller of this module — Flight is not the only one — and which is exactly
+/// what a future posture change would have to flip visibly. What it must NOT be
+/// read as any more is a live description of Flight behaviour.
 ///
 /// # MEASURED terminal behaviour (arrow-array 53.4.1)
 ///
@@ -387,11 +399,13 @@ fn recomputed_payload_matches_the_sum_of_the_row_widths() {
 /// `Err(ArrowError::InvalidArgumentError("must either specify a row count or at
 /// least one column"))`, so BOTH paths refuse. That measurement is now PINNED
 /// here (issue #3742): the refusal, its message, and the fact that `len()` still
-/// reports the staged rows that no batch carries. It is pinned so that a fix —
-/// whichever posture issue #3742 settles on (reject at the boundary, carry an
-/// explicit row count, or project a count anchor) — has to flip this test
-/// deliberately and visibly, rather than sliding past an arm that asserts
-/// nothing. The `(Ok, Ok)` arm below is the arrow-upgrade tripwire.
+/// reports the staged rows that no batch carries. #3742 settled on rejecting the
+/// request UPSTREAM (at Flight spec admission) rather than changing anything
+/// here, so this arm still holds; carrying an explicit row count
+/// (`RecordBatchOptions::with_row_count`) was left as an out-of-scope follow-up
+/// and would have to flip this test deliberately and visibly, rather than
+/// sliding past an arm that asserts nothing. The `(Ok, Ok)` arm below is the
+/// arrow-upgrade tripwire.
 #[test]
 fn a_zero_column_projection_tracks_rows_that_its_batch_cannot_carry() {
     let columns: Vec<ColumnInfo> = Vec::new();
@@ -443,8 +457,8 @@ fn a_zero_column_projection_tracks_rows_that_its_batch_cannot_carry() {
         // measured for issue #3742 — makes this arm unreachable. If an arrow
         // upgrade starts ACCEPTING a zero-field/zero-array batch, the equality
         // assert still enforces issue #3552's agreement property, and the panic
-        // then forces #3742 to re-measure rather than letting a silently changed
-        // terminal behaviour pass as green.
+        // then forces a deliberate re-measurement rather than letting a silently
+        // changed terminal behaviour pass as green.
         (Ok(fused), Ok(reference)) => {
             assert_eq!(
                 fused, reference,
