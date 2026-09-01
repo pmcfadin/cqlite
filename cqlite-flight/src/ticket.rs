@@ -242,6 +242,15 @@ pub struct FlightTicket {
     #[serde(default)]
     pub token_end: Option<i64>,
     /// Whether the token range wraps the ring (`token_start > token_end`).
+    ///
+    /// RETAINED FOR WIRE COMPATIBILITY AND NO LONGER CONSULTED (issue #3634).
+    /// Wrapping is DERIVED from `token_start`/`token_end` wherever it is needed —
+    /// [`Self::token_in_range`] here, and `ScanSpec::from_ticket` on the producer
+    /// side — the way `Range.isWrapAround(left, right)` derives it at
+    /// `cassandra-5.0.8` (`left.compareTo(right) >= 0`). A flag that contradicts
+    /// its own endpoints describes a range Cassandra cannot express, so honouring
+    /// it could only produce a membership rule no Cassandra range has. Old
+    /// connectors may keep sending it; it is ignored, never rejected.
     #[serde(default)]
     pub wraparound: bool,
     /// Projection: emit only these columns. `None` emits all columns.
@@ -395,12 +404,20 @@ impl FlightTicket {
     pub fn token_in_range(&self, token: i64) -> bool {
         match (self.token_start, self.token_end) {
             (None, None) => true,
-            (start, end) => token_in_half_open_range(
-                token,
-                start.unwrap_or(i64::MIN),
-                end.unwrap_or(i64::MAX),
-                self.wraparound,
-            ),
+            (start, end) => {
+                let start = start.unwrap_or(i64::MIN);
+                let end = end.unwrap_or(i64::MAX);
+                // DERIVED from the normalized endpoints, NOT from `self.wraparound`
+                // (issue #3634). This method is public API, and the server filters
+                // with a bound whose wrapping is derived
+                // (`ScanSpec::from_ticket` -> `TokenFilter` -> `ScanTokenBound`).
+                // Trusting the wire flag here would let this method report a
+                // DIFFERENT membership than the scan actually applies for a ticket
+                // whose flag contradicts its endpoints — and `validate()` accepts
+                // such a ticket, because the flag is `#[serde(default)]` and is
+                // never checked against the bounds.
+                token_in_half_open_range(token, start, end, start >= end)
+            }
         }
     }
 }
@@ -848,6 +865,110 @@ mod tests {
         assert!(t.token_in_range(0));
         assert!(t.token_in_range(100), "end is inclusive");
         assert!(!t.token_in_range(101));
+    }
+
+    /// #3634: `token_in_range` must DERIVE wrapping from its own endpoints and
+    /// ignore the `wraparound` wire flag entirely.
+    ///
+    /// The flag is `#[serde(default)]` and `validate()` never checks it against
+    /// `token_start`/`token_end`, so both inconsistent shapes are client-reachable
+    /// — `start > end` with the flag false (reached by merely OMITTING it) and
+    /// `start < end` with it true. Cassandra can express neither, because
+    /// `Range.isWrapAround(left, right)` IS `left.compareTo(right) >= 0`.
+    ///
+    /// This is public API, and the server filters with a derived bound, so a
+    /// flag-trusting answer here would DISAGREE with the rows the scan returns.
+    /// Both shapes are pinned in BOTH flag directions, so the verdict is proved
+    /// independent of the flag rather than merely correct for one value of it.
+    #[test]
+    fn token_in_range_derives_wrapping_and_ignores_the_wire_flag() {
+        for wrap in [true, false] {
+            // start > end: wraps, whatever the flag says.
+            let t = ticket_with_range(Some(100), Some(-100), wrap);
+            for token in [i64::MIN, -200, -100, 200, i64::MAX] {
+                assert!(
+                    t.token_in_range(token),
+                    "(100, -100] wraps (flag={wrap}), so {token} is in range"
+                );
+            }
+            for token in [-99, 0, 99, 100] {
+                assert!(
+                    !t.token_in_range(token),
+                    "(100, -100] excludes its gap (flag={wrap}); {token}"
+                );
+            }
+
+            // start < end: does NOT wrap, whatever the flag says — so it must not
+            // become the outer-ring superset a trusted `true` flag would produce.
+            let t = ticket_with_range(Some(10), Some(20), wrap);
+            assert!(!t.token_in_range(10), "start exclusive (flag={wrap})");
+            assert!(t.token_in_range(11), "flag={wrap}");
+            assert!(t.token_in_range(20), "end inclusive (flag={wrap})");
+            assert!(
+                !t.token_in_range(21),
+                "(10, 20] must not admit 21 (flag={wrap})"
+            );
+            assert!(
+                !t.token_in_range(i64::MIN),
+                "(10, 20] must not admit the outer ring (flag={wrap})"
+            );
+        }
+    }
+
+    /// #3634: the whole point of deriving is that the THREE membership surfaces
+    /// agree. `token_in_range` (this public API), the producer's `TokenFilter`
+    /// and the core `ScanTokenBound` must give the SAME verdict for the same
+    /// ticket — including for a ticket whose flag contradicts its endpoints,
+    /// which is exactly where they used to diverge.
+    #[test]
+    fn token_in_range_agrees_with_the_producer_filter_on_inconsistent_flags() {
+        let shapes = [
+            (Some(100), Some(-100)),
+            (Some(10), Some(20)),
+            (Some(42), Some(42)),
+        ];
+        let probes = [
+            i64::MIN,
+            -1000,
+            -100,
+            -99,
+            0,
+            9,
+            10,
+            11,
+            20,
+            21,
+            42,
+            43,
+            99,
+            100,
+            101,
+            1000,
+            i64::MAX,
+        ];
+        for (start, end) in shapes {
+            for wrap in [true, false] {
+                let t = ticket_with_range(start, end, wrap);
+                let s = start.unwrap_or(i64::MIN);
+                let e = end.unwrap_or(i64::MAX);
+                for token in probes {
+                    // The derived rule, straight from `Range.contains` at the
+                    // pinned tag — not from this crate's prior behaviour.
+                    let expected = if s >= e {
+                        token > s || token <= e
+                    } else {
+                        token > s && token <= e
+                    };
+                    assert_eq!(
+                        t.token_in_range(token),
+                        expected,
+                        "({s}, {e}] flag={wrap} token={token}: token_in_range must \
+                         match Range.contains, so it cannot disagree with the \
+                         producer filter or the core bound"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
