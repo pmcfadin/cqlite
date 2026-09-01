@@ -19,14 +19,25 @@
 //! shapes produce an empty `columns` vec and the Arrow encode ends in
 //! `RecordBatch::try_new(schema_with_no_fields, vec![])`.
 //!
+//! Route observation: each route measured here ASSERTS the route it names —
+//! the scan/point-read split through the production routing decision
+//! (`point_read::detect_route` over a production-lowered `ScanSpec`), and the
+//! point route additionally through the EMITTED `access_path` label in the
+//! `observability-testing`-gated sibling
+//! `tests/issue_3742_zero_column_point_read_route.rs`.
+//!
 //! Contrast: the DataFusion `TableProvider` spike REFUSES to push an empty
 //! projection (`cqlite-flight/src/df_spike/provider.rs:191-198`), narrowing to a
 //! "count anchor" column instead — a guard that exists precisely because this
 //! shape loses the row count.
 
+use cqlite_core::schema::parse_cql_schema;
 use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
+use cqlite_flight::filter::ScanSpec;
+use cqlite_flight::point_read::{detect_route, PointReadRoute};
 use cqlite_flight::service::CqliteFlightService;
 use cqlite_flight::test_fixtures as fx;
+use cqlite_flight::ticket::FlightTicket;
 
 use arrow::record_batch::RecordBatch;
 use arrow_flight::decode::FlightRecordBatchStream;
@@ -189,25 +200,64 @@ fn drive_batches(data_dir: &std::path::Path, ticket: Vec<u8>) -> Result<Vec<Reco
     })
 }
 
+/// Assert that the given ticket bytes SELECT the partition point-read route.
+///
+/// This runs the production routing decision on production inputs: the ticket is
+/// deserialized as the service deserializes it, its DDL parsed by the same
+/// `parse_cql_schema` the service calls (`service.rs:425`), lowered by the same
+/// `ScanSpec::from_ticket`, and handed to `point_read::detect_route` — the ONE
+/// function `MergeProducer::produce_streaming` consults to pick the route
+/// (`producer.rs:784` -> `producer_point.rs:87`), which it takes unconditionally
+/// whenever the decision is not `Scan`.
+///
+/// What this establishes: the zero-column ticket shape does NOT route to the
+/// full-scan path, so the outcome recorded below is the point route's outcome.
+/// What it does NOT establish, being a decision rather than an emitted signal:
+/// that this particular request reached `produce_streaming` at all. That half is
+/// covered by the EMITTED `access_path` label
+/// (`tests/issue_3742_zero_column_point_read_route.rs`), which needs the
+/// in-memory OTel capture and is therefore gated on `observability-testing`;
+/// measured there, the zero-column request reports `streaming_partition_lookup`.
+fn assert_ticket_routes_to_point_read(what: &str, ticket: &[u8]) {
+    let parsed: FlightTicket = serde_json::from_slice(ticket).expect("ticket deserializes");
+    let schema = parse_cql_schema(&parsed.ddl).expect("ticket ddl parses");
+    let spec = ScanSpec::from_ticket(&parsed, &schema).expect("ticket lowers to a scan spec");
+    let route = detect_route(spec.filter.as_ref(), &schema);
+    assert!(
+        matches!(route, PointReadRoute::PartitionPointRead(_)),
+        "{what}: must select the partition point-read route, got {route:?}"
+    );
+}
+
 /// MEASUREMENT (#3742): the POINT-READ route (a full-partition-key equality
 /// filter) shares `MergeProducer::output_columns()`, so an empty projection
 /// reaches it too.
+///
+/// The route is ASSERTED, not assumed (roborev job 1, finding 1): without it the
+/// zero-column assertions below would pass identically had the request quietly
+/// fallen back to a full scan, and the test would not measure what it names.
 #[test]
 fn measure_zero_column_projection_on_the_point_read_route() {
     let (_temp, data_dir) = build_fixture();
     let filter =
         serde_json::json!({"type": "Compare", "column": "key", "op": "Equal", "value": "k1"});
 
-    let (ok, msgs, err) = drive(
-        &data_dir,
-        ticket_with(serde_json::json!({"filter": filter.clone()})),
+    // Control: the same point-read ticket with no projection. Asserted (not
+    // printed) so the zero-column failure can never be mistaken for a point
+    // route that is simply broken on this fixture: it must route to the point
+    // path AND return exactly the one target partition's row.
+    let control = ticket_with(serde_json::json!({"filter": filter.clone()}));
+    assert_ticket_routes_to_point_read("point-read control", &control);
+    let batches = drive_batches(&data_dir, control).expect("point-read control must succeed");
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        rows, 1,
+        "point-read control: the `key = 'k1'` partition is exactly one row"
     );
-    eprintln!("MEASURE point-read control: rpc_ok={ok} msgs={msgs} err={err:?}");
 
-    let (ok_a, msgs_a, err_a) = drive(
-        &data_dir,
-        ticket_with(serde_json::json!({"filter": filter, "columns": []})),
-    );
+    let zero = ticket_with(serde_json::json!({"filter": filter, "columns": []}));
+    assert_ticket_routes_to_point_read("point-read columns=[]", &zero);
+    let (ok_a, msgs_a, err_a) = drive(&data_dir, zero);
     eprintln!("MEASURE point-read columns=[]: rpc_ok={ok_a} msgs={msgs_a} err={err_a:?}");
     assert_zero_column_outcome("point-read columns=[]", ok_a, msgs_a, err_a.as_deref());
 }
