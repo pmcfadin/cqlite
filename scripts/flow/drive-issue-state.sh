@@ -170,6 +170,11 @@
 #              refusal names. MALFORMED / DUPLICATE-SENTINEL get no exception: they CLAIM
 #              an identity that cannot be READ, which may be a live peer's, so a human
 #              moves the file aside deliberately and `write` then takes the ABSENT path.
+#              NEITHER DOES A SYMLINK AT THE MARKER PATH — dangling or not. It is classified
+#              `not-regular` and refused (`verdict ERROR`), never followed and never replaced:
+#              a link is an artifact someone placed deliberately, and `mv` would silently
+#              destroy it. A DANGLING one used to classify `absent` (`-e` follows the link),
+#              which took the fresh-start path and clobbered it (roborev job 43 K1).
 #              An OWNED marker's recorded `stage`/`request-id`/`pr`/`branch` are PRESERVED
 #              unless this call overrides them; erasing one is the explicit
 #              `--clear stage|request-id|pr|branch` (repeatable). Omitting a flag never
@@ -858,7 +863,10 @@ count_matching_lines() {
   return 0
 }
 
-# marker_class <path> — echo absent | not-regular | stamped | displaced | legacy.
+# marker_class <path> — echo absent | not-regular | stamped | displaced | legacy | error.
+#
+# `not-regular` covers a directory, an unreadable regular file, and ANY SYMLINK (dangling or
+# not) — see the `-L` note in the body.
 #
 # ONE CLASSIFIER FOR EVERY CALLER, AND "LEGACY" REQUIRES THE WHOLE FILE TO BE SENTINEL-FREE.
 # The first cut inferred "carries no ownership stamp" from the FIRST LINE ALONE, and the
@@ -878,7 +886,18 @@ count_matching_lines() {
 #             whose handler DESTROYS the file. Every caller must refuse on it.
 marker_class() {
   local path="$1" nb ne first rc=0
-  [ -e "$path" ] || { printf 'absent\n'; return 0; }
+  # EXISTENCE IS `-e` OR `-L`, AND A SYMLINK IS NEVER A MARKER THIS SCRIPT OWNS (roborev job 43
+  # K1). `-e` FOLLOWS the link, so it is FALSE for a DANGLING symlink — an entry that plainly
+  # EXISTS — and the classifier answered `absent`, which is the ONE class whose handler in
+  # `write` replaces the path without a word. A symlink is a deliberate artifact someone placed,
+  # so it is routed through `not-regular` (the refusal that already exists) whether its target
+  # exists or not: the `-L` test comes FIRST, before `-f`, because `-f` follows the link and a
+  # symlink to a real file would otherwise be indistinguishable from a marker we wrote. That
+  # order is what makes BOTH symlink shapes take one refusal rather than two behaviours. Same
+  # doctrine as count_sentinel's: a `test` file predicate is two-valued, so it collapses "cannot
+  # tell" onto one answer — and unswept it picks the permissive one.
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then printf 'absent\n'; return 0; fi
+  [ ! -L "$path" ] || { printf 'not-regular\n'; return 0; }
   { [ -f "$path" ] && [ -r "$path" ]; } || { printf 'not-regular\n'; return 0; }
   first="$(head -1 "$path" 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] || { printf 'error\n'; return 0; }
@@ -896,7 +915,7 @@ read_marker() {
   local path cls; path="$(marker_path)"
   cls="$(marker_class "$path")"
   [ "$cls" != absent ] || refuse ABSENT 3 "no $MARKER_NAME in $(sane "$(this_worktree)") — nothing to resume; this is a legitimate FRESH START, not a refusal"
-  [ "$cls" != not-regular ] || refuse ERROR 1 "$(sane "$path") exists but is not a readable regular file — nothing was decided"
+  [ "$cls" != not-regular ] || refuse ERROR 1 "$(sane "$path") exists but is not a readable regular file (a SYMLINK takes this path too, dangling or not: it is an artifact someone placed deliberately, so it is refused rather than followed or replaced) — nothing was decided"
   [ "$cls" != error ] || refuse ERROR 1 "$(sane "$path") exists but could NOT BE CLASSIFIED: reading its first line, or scanning it for column-zero stamp sentinels, FAILED. An unperformed scan is not an absence of sentinels, so nothing is inferred from it — NOTHING was decided and NOTHING was replaced."
   if [ "$cls" = displaced ]; then
     refuse MALFORMED 8 "$(sane "$path") contains a stamp sentinel at column zero but NOT as its first line, so it DOES assert an ownership identity and that identity cannot be READ — it is NOT treated as an unstamped legacy marker and is never replaced for you, because an unreadable identity may be a LIVE PEER's (a single prepended blank line or comment produces this shape). INSPECT it, and if it is genuinely corrupt remove it or move it aside (e.g. 'mv $MARKER_NAME $MARKER_NAME.corrupt'); with no marker present this lane takes the ABSENT fresh-start path and a new stamped marker is written normally."
@@ -1566,7 +1585,7 @@ cmd_write() {
   mpath="$(marker_path)"
   mcls="$(marker_class "$mpath")"
   if [ "$mcls" != absent ]; then
-    [ "$mcls" != not-regular ] || refuse ERROR 1 "$(sane "$mpath") exists but is not a readable regular file — nothing was decided"
+    [ "$mcls" != not-regular ] || refuse ERROR 1 "$(sane "$mpath") exists but is not a readable regular file (a SYMLINK takes this path too, dangling or not: it is an artifact someone placed deliberately, so it is refused rather than followed or replaced) — nothing was written"
     # THE ONE PLACE WHERE A PERMISSIVE MISCLASSIFICATION DESTROYS DATA (roborev job 30 G1):
     # below, `legacy` DISCARDS and REPLACES the file. An unmeasurable classification must
     # therefore never arrive here as `legacy` (it no longer can) and must never be treated as
@@ -1716,6 +1735,19 @@ cmd_adopt() {
   assert_reason "$reason"
   reason_token="$REASON_TOKEN"
   actor="$(resolve_actor "$actor_raw")"
+
+  # THE AXIS GUARDS RUN BEFORE ANYTHING DERIVES A PATH OR TAKES A LOCK (roborev job 43 K2).
+  # `lock_marker` derives its lockfile from `marker_path`, i.e. from the WORKTREE axis, so with
+  # that axis unmeasurable `adopt` used to compose a lock path at the FILESYSTEM ROOT and refuse
+  # with a generic "the worktree directory / is not writable" — while `write` and `show`, which
+  # guard first, refused by name with `axis=worktree`. Same input, two diagnostics depending on
+  # the subcommand, and the axis form is the one .claude/commands/drive-issue.md publishes as the
+  # ERROR arm of the consumer contract. `check_ownership` re-asserts all three (it is verify's and
+  # adopt's one door); these calls are the ones that make the refusal precede the lock, and they
+  # are idempotent — each axis resolves once and caches its state.
+  require_machine_axis
+  require_worktree_axis
+  require_session_axis
 
   lock_marker
   check_ownership "$issue" adopt

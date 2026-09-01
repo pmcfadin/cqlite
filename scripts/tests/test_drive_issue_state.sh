@@ -2300,9 +2300,49 @@ wt_gone_run() {  # wt_gone_run <subcommand...> — run with a DELETED working di
   ( cd "$g" && rmdir "$g" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
       "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" bash "$DS" "$@" 2>&1 )
 }
+# THE MATRIX IS DERIVED FROM THE SCRIPT'S OWN DISPATCH TABLE, NEVER CURATED (roborev job 43
+# K2). This loop used to read `for sub in write verify show` — `adopt` was simply absent, which
+# is how `adopt` came to call `lock_marker` BEFORE `require_worktree_axis` (deriving a lock path
+# at the filesystem root and refusing with a generic "not writable" instead of the axis form the
+# consumer contract in .claude/commands/drive-issue.md publishes) with a green suite. The names
+# now come from the `case "$SUB"` arms, so a NEW subcommand joins this matrix with no test edit —
+# and if its extra arguments are not declared in wt_extra_args it REDS rather than not being
+# covered. A FAILED derivation is a FAIL, never a fallback to an empty set: an empty loop is a
+# vacuous green, which is this file's standing rule (a positive verdict needs an affirmative
+# measurement).
+WT_SUBS=$(LC_ALL=C sed -n 's/^  \([a-z][a-z-]*\)) *shift; cmd_.*/\1/p' "$DS" | tr '\n' ' ')
+wt_nsubs=0
+for _s in $WT_SUBS; do wt_nsubs=$((wt_nsubs + 1)); done
+wt_missing=''
+for _req in write verify adopt show; do
+  case " $WT_SUBS " in *" $_req "*) : ;; *) wt_missing="$wt_missing $_req" ;; esac
+done
+if [ "$wt_nsubs" -ge 4 ] && [ -z "$wt_missing" ]; then
+  ok "DERIVED: the axis matrix took its $wt_nsubs subcommands from the script's own dispatch table ($WT_SUBS)"
+else
+  bad "the subcommand derivation FAILED (n=$wt_nsubs missing:$wt_missing set='$WT_SUBS') — the matrix below would run vacuously"
+fi
+
+# wt_extra_args <sub> — the arguments a subcommand needs to REACH its axis guard, or return 1
+# for a subcommand nobody has declared. Declared per subcommand, so a new one cannot join the
+# matrix silently: the loop below FAILs on a `return 1`.
+wt_extra_args() {
+  case "$1" in
+    write | verify | show) printf '%s\n' '' ;;
+    adopt) printf '%s\n' '--reason cron-reinvoke:writer-pid-gone' ;;
+    *) return 1 ;;
+  esac
+}
+
 wt_fail=0
-for sub in write verify show; do
-  g_out=$(wt_gone_run "$sub" 3822); g_rc=$?
+for sub in $WT_SUBS; do
+  if ! wt_xargs=$(wt_extra_args "$sub"); then
+    wt_fail=1
+    bad "subcommand '$sub' exists in the dispatch table but declares no arguments in wt_extra_args — it is NOT covered by the unmeasurable-worktree matrix"
+    continue
+  fi
+  # shellcheck disable=SC2086 -- deliberate word splitting: the extra args are a token list
+  g_out=$(wt_gone_run "$sub" 3822 $wt_xargs); g_rc=$?
   if [ "$g_rc" -ne 0 ] && [ "$(verdict_of "$g_out")" = ERROR ] \
      && printf '%s\n' "$g_out" | grep -q 'axis=worktree' \
      && [ "$(verdict_count "$g_out")" = 1 ]; then
@@ -2337,11 +2377,28 @@ L40=$(lane lane40)
 run "$L40" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 >/dev/null 2>&1
 n40_v=$(run "$L40" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822); n40_vrc=$?
 n40_s=$(run "$L40" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- show 3822); n40_src=$?
+# `adopt` in a LIVE lane it already owns is the re-entrant no-op (ADOPTED, nothing transferred) —
+# which is exactly what proves the adopt row above refused for the AXIS and not because adopt
+# refuses everywhere.
+n40_a=$(run "$L40" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- adopt 3822 --reason cron-reinvoke:writer-pid-gone); n40_arc=$?
 if [ "$wt_fail" -eq 0 ] && [ "$n40_vrc" -eq 0 ] && [ "$(verdict_of "$n40_v")" = OWNED ] \
-   && [ "$n40_src" -eq 0 ] && [ "$(verdict_of "$n40_s")" = SHOWN ]; then
-  ok "NON-VACUITY: verify and show still work normally in a live worktree — the refusals are about the unmeasurable axis"
+   && [ "$n40_src" -eq 0 ] && [ "$(verdict_of "$n40_s")" = SHOWN ] \
+   && [ "$n40_arc" -eq 0 ] && [ "$(verdict_of "$n40_a")" = ADOPTED ]; then
+  ok "NON-VACUITY: verify, show and adopt still work normally in a live worktree — the refusals are about the unmeasurable axis"
 else
-  bad "the live-worktree control regressed: v_rc=$n40_vrc v=$(verdict_of "$n40_v") s_rc=$n40_src s=$(verdict_of "$n40_s")"
+  bad "the live-worktree control regressed: v_rc=$n40_vrc v=$(verdict_of "$n40_v") s_rc=$n40_src s=$(verdict_of "$n40_s") a_rc=$n40_arc a=$(verdict_of "$n40_a")"
+fi
+# THE ORDERING IS ALSO PINNED STRUCTURALLY, because the behavioural row above can only see the
+# CURRENT arrangement: in `cmd_adopt` the worktree-axis guard must appear BEFORE `lock_marker`
+# (which derives its path from that axis). A reordering that reintroduces K2 reds here even if a
+# future refactor changes the refusal text.
+adopt_body=$(LC_ALL=C sed -n '/^cmd_adopt() {/,/^}/p' "$DS")
+a_axis_ln=$(printf '%s\n' "$adopt_body" | grep -n '^  require_worktree_axis$' | head -1 | cut -d: -f1)
+a_lock_ln=$(printf '%s\n' "$adopt_body" | grep -n '^  lock_marker$' | head -1 | cut -d: -f1)
+if [ -n "$a_axis_ln" ] && [ -n "$a_lock_ln" ] && [ "$a_axis_ln" -lt "$a_lock_ln" ]; then
+  ok "STRUCTURAL: cmd_adopt calls require_worktree_axis (line $a_axis_ln of the function) BEFORE lock_marker (line $a_lock_ln)"
+else
+  bad "cmd_adopt's axis guard does not precede its lock: axis='$a_axis_ln' lock='$a_lock_ln' (an absent line means the pin lost its subject)"
 fi
 
 # ===========================================================================
@@ -2880,6 +2937,98 @@ else
 fi
 
 # ===========================================================================
+case_begin 46-symlink-marker-is-never-clobbered "roborev job 43 K1: a SYMLINK at the marker path — DANGLING or not — is refused as not-regular and is NEVER replaced"
+# ===========================================================================
+# THE DEFECT: `marker_class` detected absence with `[ -e "$path" ]`, and `-e` FOLLOWS the link,
+# so it is FALSE for a DANGLING symlink — an entry that plainly EXISTS. That classified as
+# `absent`, the ONE class whose handler in `write` REPLACES the path without a word, so `mv`
+# destroyed the link. A symlink is a deliberate artifact someone placed; in a file whose whole
+# job is refusing to clobber what it does not own, silently replacing one is the wrong default.
+#
+# VERIFICATION DISCIPLINE: every assertion below uses `-L` and `readlink`, never `-f` or `cat` —
+# both of those FOLLOW the link and would normalize away the very property under test.
+L46=$(lane lane46)
+K46_DANGLING="$T/no-such-target-46"
+ln -s "$K46_DANGLING" "$L46/$MARKER"
+[ ! -e "$K46_DANGLING" ] || bad "fixture: the dangling target $K46_DANGLING unexpectedly exists"
+d46_w=$(run "$L46" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 --stage implement 2>&1); d46_wrc=$?
+d46_link_after=$(readlink "$L46/$MARKER" 2>/dev/null || true)
+if [ "$d46_wrc" -ne 0 ] && [ "$(verdict_of "$d46_w")" = ERROR ] \
+   && [ "$(verdict_count "$d46_w")" = 1 ] \
+   && printf '%s\n' "$d46_w" | grep -q 'not a readable regular file'; then
+  ok "write over a DANGLING symlink: exactly ONE verdict, ERROR, naming the not-regular refusal (it used to classify absent and replace it)"
+else
+  bad "write over a dangling symlink did not refuse: rc=$d46_wrc verdict=$(verdict_of "$d46_w") count=$(verdict_count "$d46_w")
+$d46_w"
+fi
+if [ -L "$L46/$MARKER" ] && [ "$d46_link_after" = "$K46_DANGLING" ] && [ ! -e "$K46_DANGLING" ]; then
+  ok "the SYMLINK ITSELF survives, still pointing at the same target, and nothing was created at that target (asserted with -L/readlink, never -f/cat)"
+else
+  bad "the symlink was clobbered: is-link=$([ -L "$L46/$MARKER" ] && echo yes || echo no) readlink='$d46_link_after' expected='$K46_DANGLING' target-exists=$([ -e "$K46_DANGLING" ] && echo yes || echo no)"
+fi
+# A DANGLING SYMLINK IS NOT A FRESH START. The readers used to answer ABSENT (exit 3) — the
+# verdict that means "resume nothing, this lane is clean" — for an entry that exists.
+d46_v=$(run "$L46" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- verify 3822 2>&1); d46_vrc=$?
+d46_s=$(run "$L46" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- show 3822 2>&1); d46_src=$?
+if [ "$d46_vrc" -ne 0 ] && [ "$(verdict_of "$d46_v")" = ERROR ] \
+   && [ "$d46_src" -ne 0 ] && [ "$(verdict_of "$d46_s")" = ERROR ]; then
+  ok "verify and show over a dangling symlink report ERROR, never ABSENT — an entry that exists is not a clean lane"
+else
+  bad "a dangling symlink still reads as absent: v_rc=$d46_vrc v=$(verdict_of "$d46_v") s_rc=$d46_src s=$(verdict_of "$d46_s")
+$d46_v
+$d46_s"
+fi
+# THE NON-DANGLING SHAPE, which `-e` DID see but `-f` FOLLOWED: it must take the SAME refusal,
+# and the TARGET's bytes must be untouched. That is why the `-L` test precedes `-f`.
+L46b=$(lane lane46b)
+K46_TARGET="$T/real-target-46.md"
+printf 'peer plan, do not touch\n' >"$K46_TARGET"
+ln -s "$K46_TARGET" "$L46b/$MARKER"
+b46_w=$(run "$L46b" CLAIM_MACHINE=boxA "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" -- write 3822 2>&1); b46_wrc=$?
+b46_link_after=$(readlink "$L46b/$MARKER" 2>/dev/null || true)
+b46_bytes=$(cat "$K46_TARGET" 2>/dev/null || true)
+if [ "$b46_wrc" -ne 0 ] && [ "$(verdict_of "$b46_w")" = ERROR ] \
+   && printf '%s\n' "$b46_w" | grep -q 'not a readable regular file' \
+   && [ -L "$L46b/$MARKER" ] && [ "$b46_link_after" = "$K46_TARGET" ] \
+   && [ "$b46_bytes" = 'peer plan, do not touch' ]; then
+  ok "write over a symlink to a REAL file takes the same not-regular refusal; the link and the target's bytes are both untouched"
+else
+  bad "a non-dangling symlink was not refused, or was followed: rc=$b46_wrc verdict=$(verdict_of "$b46_w") readlink='$b46_link_after' target-bytes='$b46_bytes'
+$b46_w"
+fi
+if all_lines_anchored "$d46_w" && all_lines_anchored "$d46_v" && all_lines_anchored "$d46_s" && all_lines_anchored "$b46_w"; then
+  ok "every line of all four symlink refusals carries the anchored DRIVE-STATE: prefix"
+else
+  bad "a symlink refusal leaked an unprefixed line"
+fi
+# POSITIVE CONTROL, by ARTIFACT SUBSTITUTION: with the `-L` existence handling reverted in a
+# scratch copy, the same write DESTROYS the dangling symlink — so the assertions above measure
+# the fix and not the fixture. (A test-only seam is never used for this; the artifact is
+# substituted, per this file's own idiom.)
+mkdir -p "$T/k1-scratch/lib"
+cp "$SCRIPT_DIR/../flow/lib/process-liveness.sh" "$T/k1-scratch/lib/"
+k1_pre="$T/k1-scratch/drive-issue-state.sh"
+LC_ALL=C awk -v q="'" '
+  index($0, "&& [ ! -L \"$path\" ]; then printf") { print "  [ -e \"$path\" ] || { printf " q "absent\\n" q "; return 0; }"; next }
+  index($0, "[ ! -L \"$path\" ] || { printf " q "not-regular") { next }
+  { print }
+' "$DS" >"$k1_pre"
+k1_pin=0
+grep -q '^  \[ -e "\$path" \] || { printf .absent' "$k1_pre" || k1_pin=$((k1_pin + 1))
+[ "$(grep -c '! -L "\$path"' "$k1_pre" || true)" = 0 ] || k1_pin=$((k1_pin + 1))
+bash -n "$k1_pre" 2>/dev/null || k1_pin=$((k1_pin + 1))
+L46p=$(lane lane46p)
+K46P_TARGET="$T/no-such-target-46p"
+ln -s "$K46P_TARGET" "$L46p/$MARKER"
+( cd "$L46p" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID CLAIM_MACHINE=boxA \
+    "CLAUDE_CODE_SESSION_ID=$SESS_A" "CLAUDE_PID=$$" bash "$k1_pre" write 3822 ) >/dev/null 2>&1
+if [ "$k1_pin" -eq 0 ] && [ ! -L "$L46p/$MARKER" ] && [ -f "$L46p/$MARKER" ]; then
+  ok "POSITIVE CONTROL: with the -L handling reverted, the same write REPLACES the dangling symlink with a regular file — the silent clobber is real"
+else
+  bad "the positive control did not reproduce the clobber: pin-failures=$k1_pin still-a-link=$([ -L "$L46p/$MARKER" ] && echo yes || echo no) regular-file=$([ -f "$L46p/$MARKER" ] && echo yes || echo no)"
+fi
+
+# ===========================================================================
 case_begin 28-case-floor "CASE FLOOR: a silently shrunken suite must RED, not green (#3544)"
 # ===========================================================================
 REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-issue 4-foreign-machine
@@ -2902,8 +3051,8 @@ REQUIRED_CASES="1-write-verify-owned 2-ac3-unstamped-prose-refused 3-foreign-iss
 40-worktree-axis-must-be-measurable 41-body-without-trailing-newline
 42-verdict-emission-is-a-critical-section
 43-identity-recorded-losslessly 44-body-file-is-read-not-stat-gated
-45-unknown-prologue-keys-survive 28-case-floor"
-CASE_FLOOR=45
+45-unknown-prologue-keys-survive 46-symlink-marker-is-never-clobbered 28-case-floor"
+CASE_FLOOR=46
 executed=0
 for _c in $CASES; do executed=$((executed + 1)); done
 missing=""
@@ -2915,10 +3064,10 @@ if [ "$executed" -ge "$CASE_FLOOR" ] && [ -z "$missing" ]; then
 else
   bad "case floor breached: executed=$executed floor=$CASE_FLOOR missing:$missing"
 fi
-if [ "$PASS" -ge 160 ]; then
-  ok "assertion floor: $PASS assertions passed (>= 160)"
+if [ "$PASS" -ge 170 ]; then
+  ok "assertion floor: $PASS assertions passed (>= 170)"
 else
-  bad "assertion floor breached: only $PASS assertions passed (floor 160)"
+  bad "assertion floor breached: only $PASS assertions passed (floor 170)"
 fi
 
 # ===========================================================================
