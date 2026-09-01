@@ -89,9 +89,16 @@ pub struct SubPhaseNanos {
     pub decompress: u64,
     /// k-way merge + reconcile + per-row materialize, merge-consumer thread.
     pub merge: u64,
-    /// Arrow array BUILD — the row→column transpose. This is the cost a columnar
-    /// producer would eliminate, i.e. the decode-to-column figure M15 item 1 asks
-    /// to be reported SEPARATELY from the vectorized-exec delta.
+    /// Arrow array BUILD, plus — since issue #3552 — the push-time cell resolution,
+    /// per-row width charge and column-major commit folded into the row loop. This is
+    /// the cost a columnar producer would eliminate, i.e. the decode-to-column figure
+    /// M15 item 1 asks to be reported SEPARATELY from the vectorized-exec delta.
+    ///
+    /// NOT COMPARABLE ACROSS #3552 in either direction: it gained the push-time work
+    /// above and lost the flush-time transpose, which moved into it. `merge + encode`
+    /// is NOT a workaround — the per-row width charge sat in NEITHER bucket before
+    /// #3552 and is inside `encode` now, so the sum gains it too. Use throughput
+    /// (rows/s), or normalise per row.
     pub encode: u64,
     /// Egress channel send incl. backpressure park — `None` when the sink that
     /// served the scan does not instrument it.

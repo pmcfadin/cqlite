@@ -14,13 +14,14 @@
 //! `statics::drive_partition_rows` (issue #3095), so they cannot drift from the
 //! streaming loop on statics.
 
-use cqlite_core::export::estimate_arrow_row_bytes;
-use cqlite_core::query::{PartitionKeyCache, QueryRow};
+use cqlite_core::export::ArrowRowAccumulator;
+use cqlite_core::query::PartitionKeyCache;
 use cqlite_core::storage::write_engine::merge::MergeStep;
 
 use crate::agg::AggPlan;
 use crate::batch_bytes::BatchByteCap;
 use crate::cancel::CancelFlag;
+use crate::egress_flush::StageEncodeAccum;
 use crate::producer::{BatchSink, MergeProducer, PartitionStepper, ProducerError};
 use crate::scan_progress::{ScanProgress, ScanProgressMeter};
 
@@ -59,7 +60,21 @@ impl MergeProducer {
         // error, panic). `access_path` is `full_scan` for the k-way scan and
         // `streaming_partition_lookup` for the point-read path (issue #2207).
         let mut meter = ScanProgressMeter::new(progress, access_path);
-        let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
+        // Issue #3552: the build pass's transpose, run at PUSH time and SPLIT across two
+        // calls — `stage` resolves each projected cell ONCE per row and charges the
+        // width from that same visit, then `commit` moves the staged cells into
+        // column-major storage. Both are timed (roborev round 7); attributing the
+        // whole transpose to `stage` alone is what made `stream_encode` under-report.
+        // row's payload width. Reused across batches: `clear` retains capacity up to a
+        // BOUND and releases the excess, so a store far over that bound may shrink and
+        // later reallocate (issue #3552, roborev rounds 6-7).
+        let mut buffer = ArrowRowAccumulator::with_capacity(&self.columns, self.batch_size);
+        // Issue #3552: `stage` AND `commit` together perform the transpose that used to run inside
+        // `flush_buffer`'s `stream_encode` region, so its wall time is folded back into
+        // that SAME bucket from here — locally, one atomic on Drop, never per row. Without
+        // this the transpose would have left the measured window without leaving the
+        // program and `stream_encode` would read lower with no work removed.
+        let mut stage_encode = StageEncodeAccum::new();
         let mut emitted: u64 = 0;
         // Issue #2825: running payload-byte estimate for the rows currently
         // buffered. Advanced by exactly one row's estimate per push and reset on
@@ -129,11 +144,25 @@ impl MergeProducer {
                     // Dual row-cap / byte-cap boundary (issue #2825), test-then-push:
                     // cut on the row that WOULD cross the cap, before it joins the
                     // buffer. `batch_bytes.rs` documents the rule and its one-row floor.
-                    let width = estimate_arrow_row_bytes(&self.columns, &row);
+                    //
+                    // Issue #3552: `stage` resolves the row's cells into the
+                    // columnar store's staging slot and charges the width from
+                    // THOSE cells (one resolution per cell, not two); the staged
+                    // row joins the batch at `commit`, after any cut — the same
+                    // order, and the same numbers, as the estimate/push it
+                    // replaces.
+                    let width = stage_encode.timed(|| buffer.stage(row));
                     if byte_cap.cut_before(width).is_yes() {
                         self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
                     }
-                    buffer.push(row);
+                    // `commit` is the OTHER half of the push-time transpose — it moves the
+                    // staged cells into column-major storage (walking only the slots the row
+                    // filled, since roborev round 14) — so it
+                    // is timed too, or `stream_encode` under-reports exactly the work the fold
+                    // moved here (issue #3552, roborev round 7). The intervening flush is
+                    // deliberately OUTSIDE both windows: it is `Encode`'s own region already, and
+                    // double-counting it would inflate the counter instead of correcting it.
+                    stage_encode.timed(|| buffer.commit());
                     emitted += 1;
                     byte_cap.accumulate(width);
                     if buffer.len() >= self.batch_size {

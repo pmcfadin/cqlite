@@ -13,11 +13,23 @@
 //!
 //! # The mechanism
 //!
-//! [`BatchByteCap`] is a running accumulator: each candidate row's
-//! [`estimate_arrow_row_bytes`] width is tested against the accumulator with
+//! [`BatchByteCap`] is a running accumulator: each candidate row's payload width
+//! is tested against the accumulator with
 //! [`cut_before`](BatchByteCap::cut_before) **before** the row joins the buffer,
 //! and the producer flushes when EITHER the row-cap or this byte-cap trips —
-//! whichever comes first. The decision is made before `rows_to_record_batch`
+//! whichever comes first.
+//!
+//! Where that width COMES FROM differs by route (issue #3552). Both incremental
+//! row routes get it from `ArrowRowAccumulator::stage`, which charges it from the
+//! cells it has just resolved for the build pass — so the cap's input costs no
+//! separate pass over the row. The aggregate route, which applies the boundary to
+//! an already-materialized row slice, still calls
+//! [`estimate_arrow_row_bytes`] per row through [`BatchByteCap::row_width`]. The
+//! two are the same number: one shared charging core, differing only in how a
+//! cell is resolved, pinned per row over the shared shape corpus by
+//! `cqlite_core::export::arrow_row_accumulator`'s
+//! `fused_width_equals_the_standalone_estimate_over_the_shape_corpus`. Nothing
+//! about the BOUNDARY RULE below depends on which produced it. The decision is made before `rows_to_record_batch`
 //! allocates anything: building a batch to discover it is oversized is a report,
 //! not a cap, and `RecordBatch::get_array_memory_size()` is only readable after
 //! every value has been copied.
@@ -328,6 +340,13 @@ impl BatchByteCap {
     /// Estimate `row`'s Arrow payload width for the projected `columns` — the
     /// quantity both [`Self::cut_before`] and [`Self::accumulate`] take, computed
     /// once per row by the caller so it is never estimated twice.
+    ///
+    /// This is the AGGREGATE route's way of obtaining that width (issue #3552):
+    /// it applies the boundary to an already-materialized row slice, so it has no
+    /// incremental push loop to fold the charge into. The two incremental row
+    /// routes do NOT call this — they take the identical number from
+    /// `ArrowRowAccumulator::stage`, charged from the cells the build pass will
+    /// consume. See the module documentation.
     pub fn row_width(columns: &[ColumnInfo], row: &QueryRow) -> usize {
         estimate_arrow_row_bytes(columns, row)
     }

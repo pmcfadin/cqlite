@@ -61,7 +61,22 @@
 //! every shape, enforced by the property test in `arrow_size_tests.rs` over a
 //! corpus covering fixed-width columns, `text`, `blob`, `list`/`set`, `map`,
 //! `tuple`/UDT, JSON, deeply nested empty collections, all-null rows, empty
-//! strings and empty collections. The three pre-existing per-`Value` estimators
+//! strings and empty collections.
+//!
+//! **The production consumer of that contract is the FUSED accounting, not this
+//! function (issue #3552).** `cqlite-flight`'s two `do_get` row routes take each
+//! row's width from [`super::ArrowRowAccumulator::stage`], which charges it from
+//! the cells it resolved for the Arrow build pass instead of re-resolving them
+//! here; `estimate_arrow_row_bytes` remains the aggregate route's estimator, this
+//! module's tested surface, and the ORACLE the fused width is pinned against.
+//! Both charge through the private `charge_row` core and differ ONLY in cell
+//! resolution, and their per-row equality over the SHARED shape corpus — absent
+//! columns, duplicate output columns and the saturating fan-out included — is
+//! asserted by `arrow_row_accumulator`'s
+//! `fused_width_equals_the_standalone_estimate_over_the_shape_corpus`. That test
+//! is what transfers the conservatism contract above to the fused path: weaken it
+//! and the contract stops covering production. Read the `# Cross-issue
+//! dependency` section below with that substitution in mind. The three pre-existing per-`Value` estimators
 //! are all *under*-estimators for this purpose (see the issue-#2825 design §d):
 //! `Value::size_estimate` models the SERIALIZED size (a 1-byte vint prefix where
 //! Arrow spends a 4-byte offset plus a validity bit), and
@@ -125,7 +140,19 @@ mod shape;
 #[path = "arrow_size_render.rs"]
 mod render;
 
+// Per-ROW charging over a resolved column set: the shared `charge_row` loop and
+// the fused accounting's `PreparedColumns` cache (issue #3552). Its own file for
+// the same reason as its two siblings — and re-exported below under its OWN
+// visibility, so `arrow_row_accumulator`'s import path is unchanged.
+#[path = "arrow_size_prepared.rs"]
+mod prepared;
+
+use prepared::charge_row;
 use render::RENDER_CONTAINER_BYTES;
+
+// The estimator ⇄ accumulator seam, re-exported at its unchanged
+// `pub(in crate::export)` visibility (issue #3552 review N5).
+pub(in crate::export) use prepared::PreparedColumns;
 use shape::{
     branches, column_shape, column_slack_bytes, unwrap_frozen_type, unwrap_frozen_value, Shape,
     TextFidelity,
@@ -249,25 +276,15 @@ pub const MAX_ESTIMATE_LEAF_SLOTS: usize = 1 << 20;
 /// );
 /// ```
 pub fn estimate_arrow_row_bytes(columns: &[ColumnInfo], row: &QueryRow) -> usize {
-    let mut est = Estimator::new();
-    for col in columns {
-        let cell = row.values.get(col.name.as_str());
-        let shape = column_shape(col);
-        // Both node budgets are per COLUMN (review C2).
-        est.begin_column();
-        // The per-column residual, charged exactly once per row and only for a
-        // column whose builder materializes a childless array node (review C1).
-        est.add(column_slack_bytes(&shape));
-        // A LEAF column is charged in place, so the narrow path never allocates
-        // the worklist at all (`Vec::new` does not allocate until its first
-        // push). Only collection/struct cells reach `drain`.
-        est.charge_child(shape, cell);
-        est.drain();
-        if est.total == usize::MAX {
-            return usize::MAX;
-        }
-    }
-    est.total
+    // Resolution: one `values.get(name)` probe per projected column. The FUSED
+    // accounting (`PreparedColumns`, issue #3552) resolves the same cells the
+    // build pass's transpose does instead; both then charge through
+    // `charge_row`, so only the RESOLUTION differs between them.
+    charge_row(
+        columns
+            .iter()
+            .map(|col| (column_shape(col), row.values.get(col.name.as_str()))),
+    )
 }
 
 /// Sum of Arrow buffer **lengths** across `batch`, recursively including child

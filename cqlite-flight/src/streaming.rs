@@ -522,8 +522,9 @@ pub(crate) fn spawn_streaming(
 ///
 /// # The blind spot this closes
 ///
-/// `StreamSubPhase::Encode` (`egress_flush.rs`) times ONLY `flush_buffer` — the
-/// Arrow ARRAY BUILD, on the merge-consumer thread. The arrow-flight encoder stage
+/// `StreamSubPhase::Encode` (`egress_flush.rs`) times ONLY the projected cells'
+/// resolution and the Arrow ARRAY BUILD, on the merge-consumer thread (since issue
+/// #3552 that is `flush_buffer` PLUS the push-time `StageEncodeAccum`). The arrow-flight encoder stage
 /// built in [`encode_do_get`] runs LATER, on the async gRPC task, and does the IPC
 /// framing, the dictionary hydration, and the re-slicing of any batch larger than
 /// the encoder's own target. None of that was inside ANY sub-phase, so a change

@@ -59,6 +59,12 @@ mod arrow_typed_value;
 #[cfg(feature = "arrow")]
 pub(crate) mod arrow_columnar;
 
+// Push-time columnar row accumulator (issue #3552): the build pass's transpose
+// stage, moved to push time, with the payload-byte accounting fused into the same
+// cell visit so a projected cell is resolved ONCE per row instead of twice.
+#[cfg(feature = "arrow")]
+pub mod arrow_row_accumulator;
+
 // CQL decimal rescaling for Arrow/Parquet export (split out of `arrow_convert`,
 // epic #1116; issue #1755 bounded/fail-closed fix).
 #[cfg(feature = "arrow")]
@@ -104,6 +110,11 @@ pub use arrow_convert::{
 pub use arrow_size::{
     arrow_payload_bytes, estimate_arrow_row_bytes, MAX_ESTIMATE_LEAF_SLOTS, MAX_ESTIMATE_NODES,
 };
+
+// Re-export the fused push-time accumulator (issue #3552) beside the converter
+// and the estimator it folds together.
+#[cfg(feature = "arrow")]
+pub use arrow_row_accumulator::ArrowRowAccumulator;
 
 // Delta-scan Arrow schema derivation (Epic #696, Issue #703 / DS7).
 // Requires both `delta-scan` (for the CDC envelope model) and `arrow` (for
