@@ -221,6 +221,16 @@ def collect_marker_events(payload, events, unparsed):
             login = author["login"]
         stamp = parse_iso(comment.get("createdAt") or comment.get("created_at"))
         if not isinstance(body, str):
+            # THREE-VALUED, not two (#3752, lane-3752 audit). An ABSENT or null
+            # body is a comment with no text, and text is the only thing a
+            # column-zero marker can live in, so there is genuinely nothing to
+            # read and skipping it is correct. Any OTHER type is a payload
+            # SHAPE we do not understand: silently skipping it would fold "no
+            # marker here" onto "we could not look", and the fold lands on the
+            # permissive side, because a skipped comment can only ever REDUCE
+            # the hold set. So it is recorded and the leg goes UNMEASURED.
+            if body is not None:
+                unparsed.append("a thread comment's body was not a string")
             continue
         if stamp is None:
             # A marker we cannot ORDER cannot be decided against its siblings.

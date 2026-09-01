@@ -211,7 +211,15 @@ classify_paths() {
   local paths
   paths=$(git -c diff.renames=false -c diff.relative=false \
     diff --name-only "$1..$2" 2>/dev/null) || return 2
-  printf '%s\n' "$paths" | bash "$CLASSIFY_TOOL" >/dev/null 2>&1
+  # FED BY REDIRECTION, NOT A PIPE (#3752, lane-3752 audit). This script runs
+  # under `set -o pipefail` and the classifier BREAKS out of its read loop on
+  # the first non-docs path, so on a path list larger than the pipe buffer the
+  # producer takes SIGPIPE and the PIPELINE reports 141 — turning a perfectly
+  # good verdict 1 (`carries code`) into the `*)` arm, i.e. UNMEASURED. That is
+  # this leg's own three-valued rule violated by the plumbing: "the consumer
+  # decided early" is not "the measurement failed". A here-string has no such
+  # race, and the byte stream is identical (both append one newline).
+  bash "$CLASSIFY_TOOL" >/dev/null 2>&1 <<<"$paths"
   case "$?" in
     0) return 0 ;;
     1) return 1 ;;
@@ -546,8 +554,12 @@ reviewed_head_of() {
     esac
     [ -n "$json" ] || continue
     : >"$tmp/facts"
-    printf '%s' "$json" | python3 "$FACTS_TOOL" "$job" "$tmp/facts" "$tmp/prompt" \
-      >/dev/null 2>&1 || continue
+    # Redirection, not a pipe, for the reason given in `classify_paths`: under
+    # `set -o pipefail` a consumer that exits before draining stdin makes the
+    # pipeline report the PRODUCER's SIGPIPE, which is indistinguishable here
+    # from the parse having failed.
+    python3 "$FACTS_TOOL" "$job" "$tmp/facts" "$tmp/prompt" \
+      >/dev/null 2>&1 <<<"$json" || continue
     ref=$(sed -n 's/^git_ref=//p' "$tmp/facts" | head -1 | tr 'A-F' 'a-f')
     [ -n "$ref" ] || continue
     case "$ref" in
@@ -629,13 +641,42 @@ cmd_hold_check() {
       "disarm inside the ${PREMERGE_DISARM_WINDOW_SECS}s window could not be ruled out." \
       "An incompletely-read timeline is a hold, never a clearance."
 
+  # WHICH ISSUE THREADS THIS PR CLOSES IS A THREE-VALUED SIGNAL, AND THE
+  # PERMISSIVE COLLAPSE HERE WAS A FALSE CLEARANCE (#3752, lane-3752 audit).
+  # This used to read `issues=$(python3 -c ...) || issues=""`, which folded "the
+  # PR closes NO issue" and "which issues it closes could not be read" onto ONE
+  # value — the empty list — so a payload this extractor could not parse
+  # silently re-read NO issue thread and the leg could still reach
+  # NO-HOLD-RECOGNISED with a `HOLD:` sitting on the issue. Note the asymmetry
+  # that made it invisible: an unreadable KNOWN issue is already `unmeasured`
+  # ten lines down, so only the step that DISCOVERS the list was permissive.
+  # The rc is now checked AFFIRMATIVELY, and the extractor REFUSES on any shape
+  # it does not recognise rather than skipping the entry (a skipped entry is the
+  # same collapse one level in).
   local extra=()
-  local issues issue
+  local issues issue issues_rc
   issues=$(python3 -c 'import json,sys
 d=json.load(open(sys.argv[1]))
-r=d.get("closingIssuesReferences") or []
-print("\n".join(str(i.get("number")) for i in r if isinstance(i,dict) and i.get("number")))' \
-    "$tmp/pr.json" 2>/dev/null) || issues=""
+r=d.get("closingIssuesReferences")
+if r is None:
+    r=[]
+if not isinstance(r,list):
+    raise SystemExit("closingIssuesReferences is not a list")
+out=[]
+for i in r:
+    if not isinstance(i,dict):
+        raise SystemExit("a closingIssuesReferences entry is not an object")
+    n=i.get("number")
+    if not isinstance(n,int) or isinstance(n,bool):
+        raise SystemExit("a closingIssuesReferences entry carries no integer number")
+    out.append(str(n))
+print("\n".join(out))' \
+    "$tmp/pr.json" 2>/dev/null)
+  issues_rc=$?
+  [ "$issues_rc" -eq 0 ] ||
+    unmeasured "the PR payload's closingIssuesReferences could not be read (exit $issues_rc), so" \
+      "WHICH issue threads this PR closes is unknown, and a stop order posted on one of them" \
+      "could not be ruled out. Unreadable is a hold, never a clearance."
   while IFS= read -r issue; do
     [ -n "$issue" ] || continue
     if gh issue view "$issue" --repo "$repo" --json body,comments \
