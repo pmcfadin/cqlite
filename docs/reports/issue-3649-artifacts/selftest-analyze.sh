@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=59
+CASE_FLOOR=65
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -512,6 +512,56 @@ if [ -f "$DRIVER" ] && bash -n "$DRIVER"; then
   ok "ab-throughput.sh parses"
 else
   bad "ab-throughput.sh is absent or does not parse"
+fi
+
+echo
+echo "-- a CONTROL session may render a verdict, but never a discharging one --"
+
+# A null / sensitivity control is still a real measurement, so it must produce a
+# token; what it must NOT do is read as if it discharged the acceptance criteria.
+mkfixture "$TMP/control" 6 "100000:116000,100000:117000,100000:117000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/control/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["control"] = "sensitivity"
+manifest["server_extra"] = {"base": "", "head": "--max-batch-bytes 1"}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/control"
+check_verdict "a labelled control session still renders a token" MEETS-TARGET 0
+if grep -q "^AB-3649: control sensitivity$" "$TMP/out.txt"; then
+  ok "the control label is printed on its own line"
+else
+  bad "the control label was not printed"
+fi
+if grep -q '^AB-3649: verdict-detail CONTROL this session is labelled ' "$TMP/out.txt"; then
+  ok "a control session says in its own output that it does not discharge the criteria"
+else
+  bad "a control session did not disclaim discharging the criteria"
+fi
+if grep -q '^AB-3649: verdict-detail CONTROL the two arms were served under DIFFERENT ' "$TMP/out.txt"; then
+  ok "asymmetric per-arm server flags are disclosed beside the verdict"
+else
+  bad "asymmetric per-arm server flags were not disclosed"
+fi
+if grep -q '^AB-3649: arm head server-extra \[--max-batch-bytes 1\]$' "$TMP/out.txt"; then
+  ok "the injected handicap is printed verbatim"
+else
+  bad "the injected handicap was not printed"
+fi
+
+# An ordinary measurement says so, and carries neither disclaimer.
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: control none$' "$TMP/out.txt" \
+   && ! grep -q '^AB-3649: verdict-detail CONTROL ' "$TMP/out.txt"; then
+  ok "an ordinary measurement reports control none and carries no control disclaimer"
+else
+  bad "an ordinary measurement was mislabelled as a control"
 fi
 
 echo

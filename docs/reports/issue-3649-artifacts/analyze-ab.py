@@ -627,6 +627,14 @@ def report(opts, manifest, pairs):
         )
     )
     out("thermal-state %s" % field(manifest, "workload", "temperature"))
+    control = manifest.get("control")
+    control = control if isinstance(control, str) and control else None
+    out("control %s" % (control if control else "none"))
+    extra_base = field(manifest, "server_extra", "base")
+    extra_head = field(manifest, "server_extra", "head")
+    out("arm base server-extra [%s]" % ("" if extra_base == "NOT-RECORDED" else extra_base))
+    out("arm head server-extra [%s]" % ("" if extra_head == "NOT-RECORDED" else extra_head))
+    asymmetric = extra_base != extra_head
     out(
         "replicates requested %d paired %d order interleaved-base-head"
         % (manifest["replicates_requested"], len(pairs))
@@ -720,6 +728,18 @@ def report(opts, manifest, pairs):
             level=level_text, lo=fmt(band_low, 2), hi=fmt(band_high, 2)
         )
     )
+    if control:
+        out(
+            "verdict-detail CONTROL this session is labelled %r, so its verdict "
+            "describes the control and does NOT discharge the #3649 acceptance "
+            "criteria" % control
+        )
+    if asymmetric:
+        out(
+            "verdict-detail CONTROL the two arms were served under DIFFERENT "
+            "server flags, so the difference measured is the injected one and not "
+            "the commit pair's"
+        )
     for line in non_exhaustive_lines(len(pairs)):
         out("verdict-detail NON-EXHAUSTIVE %s" % line)
     return verdict

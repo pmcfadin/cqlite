@@ -108,6 +108,11 @@ ab-throughput.sh [options]
   --min-corpus-bytes <n>    refuse below this many Data.db bytes  (default 268435456)
   --rows-declared <n>       corpus row count, recorded not measured  (default none)
   --no-prewarm              skip the per-replicate warming pass
+  --control <label>         mark this session a CONTROL, not a measurement; the
+                            label is recorded and the analyzer refuses to let its
+                            verdict be read as discharging the AC
+  --base-server-extra <s>   extra server flags for the BASE arm only  (control use)
+  --head-server-extra <s>   extra server flags for the HEAD arm only  (control use)
   --temperature <t>         warm | cold                                (default warm)
   -h, --help                print this and exit 3
 
@@ -135,6 +140,9 @@ MIN_CORPUS_BYTES=268435456
 ROWS_DECLARED=''
 PREWARM=1
 TEMPERATURE='warm'
+CONTROL=''
+BASE_SERVER_EXTRA=''
+HEAD_SERVER_EXTRA=''
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -154,6 +162,9 @@ while [ "$#" -gt 0 ]; do
     --min-corpus-bytes)  MIN_CORPUS_BYTES="${2:-}"; shift 2 ;;
     --rows-declared)     ROWS_DECLARED="${2:-}";    shift 2 ;;
     --no-prewarm)        PREWARM=0;                 shift ;;
+    --control)           CONTROL="${2:-}";          shift 2 ;;
+    --base-server-extra) BASE_SERVER_EXTRA="${2:-}"; shift 2 ;;
+    --head-server-extra) HEAD_SERVER_EXTRA="${2:-}"; shift 2 ;;
     --temperature)       TEMPERATURE="${2:-}";      shift 2 ;;
     -h|--help)           print_usage; exit 3 ;;
     *)                   usage_error "unrecognised argument: $1" ;;
@@ -234,6 +245,11 @@ manifest = {
         "temperature": env("AB_TEMPERATURE", ""),
         "ticket_template": env("AB_TICKET_TEMPLATE", ""),
     },
+    "control": env("AB_CONTROL") or None,
+    "server_extra": {
+        "base": env("AB_BASE_SERVER_EXTRA", ""),
+        "head": env("AB_HEAD_SERVER_EXTRA", ""),
+    },
     "corpus": {
         "path": env("AB_CORPUS", ""),
         "data_db_bytes": int(env("AB_CORPUS_BYTES", "0")),
@@ -261,6 +277,8 @@ export AB_BASE_REF="$BASE_REF" AB_HEAD_REF="$HEAD_REF"
 export AB_SHAPE="$SHAPE" AB_RAMP="$RAMP" AB_STEP_DURATION="$STEP_DURATION"
 export AB_PREWARM="$PREWARM" AB_TEMPERATURE="$TEMPERATURE"
 export AB_TICKET_TEMPLATE="$TICKET_TEMPLATE"
+export AB_CONTROL="$CONTROL"
+export AB_BASE_SERVER_EXTRA="$BASE_SERVER_EXTRA" AB_HEAD_SERVER_EXTRA="$HEAD_SERVER_EXTRA"
 export AB_CORPUS="$CORPUS" AB_MIN_CORPUS_BYTES="$MIN_CORPUS_BYTES"
 export AB_ROWS_DECLARED="$ROWS_DECLARED"
 export AB_GENERATED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -271,6 +289,16 @@ export AB_GENERATED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 say "=== issue #3649 -- interleaved paired A/B, #2820 batched merge fan-in ==="
 say "repo $REPO"
 say "work-dir $WORK_DIR"
+if [ -n "$CONTROL" ]; then
+  say "control $CONTROL -- this session is a CONTROL; its verdict does not discharge the #3649 acceptance criteria"
+else
+  say "control none -- this session is a measurement"
+fi
+if [ -n "$BASE_SERVER_EXTRA" ] || [ -n "$HEAD_SERVER_EXTRA" ]; then
+  say "server-extra base [$BASE_SERVER_EXTRA] head [$HEAD_SERVER_EXTRA]"
+  [ "$BASE_SERVER_EXTRA" = "$HEAD_SERVER_EXTRA" ] || say \
+    "server-extra ASYMMETRIC -- the arms are not being served under the same configuration, so any difference measured is the injected one and not the commit pair's"
+fi
 
 for tool in git cargo python3; do
   command -v "$tool" >/dev/null 2>&1 || die preflight-tool "$tool is not on PATH"
@@ -403,9 +431,15 @@ run_one() { # <arm> <replicate>
       || die cold-drop-failed "--temperature cold needs passwordless sudo to drop the page cache; without it the run is warm and would be recorded as cold"
   fi
 
+  local extra=''
+  if [ "$arm" = "base" ]; then extra="$BASE_SERVER_EXTRA"; else extra="$HEAD_SERVER_EXTRA"; fi
   local -a server_cmd=()
   [ -n "$SERVER_CPUS" ] && server_cmd+=(taskset -c "$SERVER_CPUS")
   server_cmd+=("$bin/cqlite-flight" --data-dir "$CORPUS" --listen "127.0.0.1:$PORT")
+  # Word-split on purpose: the value is an operator-supplied flag list, and it is
+  # recorded verbatim in the manifest so a reader of the report sees it.
+  # shellcheck disable=SC2206
+  [ -n "$extra" ] && server_cmd+=($extra)
   "${server_cmd[@]}" > "$server_log" 2>&1 &
   local srv=$!
 
