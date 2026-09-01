@@ -549,3 +549,155 @@ fn test_tombstone_column_in_result_is_null() {
         "Internal tombstone metadata must not appear in output: {json_str}"
     );
 }
+
+// ============================================================================
+// FLOAT (f32) spelling — issue #3777
+// ============================================================================
+
+/// Serialize one value the way the writer does, so the assertions are on the
+/// BYTES the CLI emits rather than on an intermediate `JsonValue`.
+fn json_text(value: &Value) -> String {
+    serde_json::to_string(&JSONWriter::value_to_json(value)).expect("serialize")
+}
+
+/// Issue #3777: a CQL `float` must serialize as the shortest decimal that
+/// round-trips the **f32**, which is what `sstabledump` prints (Cassandra
+/// `FloatSerializer` → `Float.toString`).
+///
+/// The oracle is the committed dump, NOT CQLite's own prior output:
+///
+/// ```text
+/// $ grep -o '{"name":"height","value":[^,}]*' \
+///     test-data/datasets/sstables/test_basic/simple_table-*/nb-1-big-Data.db.jsonl
+/// {"name":"height","value":1.84
+/// {"name":"height","value":1.65
+/// ```
+///
+/// and `test_timeseries.sensor_data`, whose `temperature`/`humidity` floats carry
+/// the full 7–9 significant digits an f32 can hold.
+#[test]
+fn float32_renders_shortest_decimal_that_round_trips_the_f32() {
+    // (f32 literal, the spelling the sstabledump golden carries)
+    let cases: &[(f32, &str)] = &[
+        // test_basic.simple_table `height FLOAT`
+        (1.67, "1.67"),
+        (1.84, "1.84"),
+        (1.65, "1.65"),
+        (1.56, "1.56"),
+        (1.87, "1.87"),
+        // test_timeseries.sensor_data `temperature`/`humidity` FLOAT
+        (92.88221, "92.88221"),
+        (-16.172066, "-16.172066"),
+        (1.5052613, "1.5052613"),
+        (8.8656225, "8.8656225"),
+        // Integral and zero spellings.
+        (0.0, "0.0"),
+        (-0.0, "-0.0"),
+        (1.0, "1.0"),
+        (-2.5, "-2.5"),
+    ];
+
+    for (f, expected) in cases {
+        assert_eq!(
+            json_text(&Value::Float32(*f)),
+            *expected,
+            "FLOAT {f} must render as the shortest f32 round-trip, not its widened f64"
+        );
+    }
+}
+
+/// The property behind the case list above: whatever the writer emits must parse
+/// back to the SAME f32, and must carry no more digits than the f32's own
+/// shortest round-trip spelling.
+#[test]
+fn float32_json_round_trips_through_f32_for_a_spread_of_values() {
+    let values: &[f32] = &[
+        1.67,
+        -16.172066,
+        f32::MIN_POSITIVE,
+        f32::MAX,
+        f32::MIN,
+        1e-7,
+        1e10,
+        1.0 / 3.0,
+        core::f32::consts::PI,
+        16_777_215.0,
+        0.1,
+        1234.5678,
+    ];
+    for &f in values {
+        let text = json_text(&Value::Float32(f));
+        let parsed: f32 = text
+            .parse()
+            .unwrap_or_else(|e| panic!("emitted {text} for {f} is not parseable as f32: {e}"));
+        assert_eq!(
+            parsed.to_bits(),
+            f.to_bits(),
+            "emitted {text} does not round-trip {f}"
+        );
+        // No more significant digits than `f32`'s own shortest spelling.
+        let digits = |s: &str| s.chars().filter(|c| c.is_ascii_digit()).count();
+        assert!(
+            digits(&text) <= digits(&f.to_string()),
+            "emitted {text} carries more digits than the f32 shortest form {}",
+            f
+        );
+    }
+}
+
+/// PRESERVED, deliberately: a non-finite `float`/`double` renders as JSON `null`
+/// because JSON has no literal for `NaN`/`±Infinity`. That is a DECLARED 3-way
+/// asymmetry (CLAUDE.md, `bindings/parity` declared gap 4; AD2's
+/// `Divergence::NonFiniteFloatRendersAsJsonNull`) and is NOT in scope for #3777 —
+/// this test pins it so the preservation is visible rather than accidental.
+#[test]
+fn nonfinite_float_renders_as_json_null_unchanged() {
+    for v in [
+        Value::Float32(f32::NAN),
+        Value::Float32(f32::INFINITY),
+        Value::Float32(f32::NEG_INFINITY),
+        Value::Float(f64::NAN),
+        Value::Float(f64::INFINITY),
+        Value::Float(f64::NEG_INFINITY),
+    ] {
+        assert!(
+            JSONWriter::value_to_json(&v).is_null(),
+            "non-finite {v:?} must stay JSON null (declared divergence, not #3777)"
+        );
+    }
+}
+
+/// `Value::Float` is a CQL `double` and is ALREADY correct: no widening happens,
+/// so its shortest f64 round-trip is exactly what `sstabledump` prints (measured
+/// against `test_timeseries.sensor_data`'s `pressure DOUBLE`). Pinned so the
+/// #3777 fix to the `Float32` arm cannot drift the `Float` one.
+#[test]
+fn float64_double_is_not_widened_and_keeps_its_shortest_decimal() {
+    let cases: &[(f64, &str)] = &[
+        // test_timeseries.sensor_data `pressure DOUBLE`, from the golden.
+        (1017.9518806690071, "1017.9518806690071"),
+        (1002.1829379523564, "1002.1829379523564"),
+        (1.67, "1.67"),
+        (0.1, "0.1"),
+    ];
+    for (f, expected) in cases {
+        assert_eq!(json_text(&Value::Float(*f)), *expected);
+    }
+}
+
+/// MEASUREMENT for the route decision (#3777): serde_json cannot fix this arm
+/// from the outside. `Number` stores an `f64` unconditionally — `Number::from_f32`
+/// itself is `N::Float(f as f64)` — so `serde_json::Value::from(1.67f32)` carries
+/// the widened f64 and prints the widened spelling. The `float_roundtrip` feature
+/// (enabled for this crate's dev-dependencies) only touches DESERIALIZATION
+/// (`src/de.rs`, `src/value/de.rs`); nothing in `ser.rs`/`number.rs` reads it. So
+/// only the streaming `Serializer::serialize_f32` path preserves f32 shortest
+/// form, and this writer builds a `JsonValue`.
+#[test]
+fn serde_json_value_from_f32_still_widens_so_the_fix_must_be_local() {
+    assert_eq!(
+        serde_json::to_string(&serde_json::Value::from(1.67f32)).expect("serialize"),
+        "1.6699999570846558",
+        "if this ever changes, the local shortest-form conversion can be dropped"
+    );
+}
