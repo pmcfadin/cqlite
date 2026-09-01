@@ -228,16 +228,25 @@ fn a_map_value_beside_a_container_key_is_compared() {
     assert!(diffs[0].contains("num:211"), "{diffs:?}");
 }
 
-/// The MEASURED `m_tuple_udt` disagreement, at the level `compare_map` sees it: the
-/// golden's key is `getString`'s colon-joined text (the MULTICELL cell path, written
-/// `writeString(ct.nameComparator().getString(...))` by
-/// `cassandra-5.0.8 JsonTransformer.serializeCell`), which is not a `toJSONString`
-/// document at all — so the pairing REFUSES and names the oracle it contradicts,
-/// rather than guessing. The whole-column claim for that one column therefore stays
-/// a declared gap (see `gap::Divergence`), and it is a VALUE disagreement, not a
-/// lane limitation.
+/// A FROZEN map whose golden key is not the `toJSONString` document the oracle says
+/// it is: REPORTED, never suppressed.
+///
+/// The column here is `frozen<map<…>>`, so `container::MapKeySpelling` is
+/// `ToJsonString` and the key text is held to that spelling. Text that does not parse
+/// is then a fact about the ORACLE — the golden is not the document this lane reads —
+/// and the refusal names it rather than guessing.
+///
+/// SCOPED DELIBERATELY, because the two cases used to be conflated and that conflation
+/// was a defect. This is NOT the `m_tuple_udt` disagreement: that column is MULTICELL,
+/// so its keys are the cell PATH (`writeString(ct.nameComparator().getString(...))`,
+/// `cassandra-5.0.8 JsonTransformer.serializeCell`) BY CONSTRUCTION, the spelling is
+/// read from the DDL before any text is looked at, and the refusal names that cause
+/// instead. Deciding the two apart by whether the text happens to parse is what let a
+/// frozen oracle fault be swallowed by the multicell gap — see
+/// `gap::Divergence::MulticellMapKeyUndecodedByGoldenRendersAsBlobHex` and
+/// `gaps::a_frozen_column_with_an_unparseable_golden_key_is_not_this_gap`.
 #[test]
-fn a_getstring_spelled_golden_key_is_refused_and_names_the_oracle() {
+fn a_frozen_maps_non_tojsonstring_golden_key_is_refused_and_names_the_oracle() {
     let diffs = diffs(
         MAP_TUPLE_UDT,
         json!({"charlie\\:3:8": 80}),
