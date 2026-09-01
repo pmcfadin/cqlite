@@ -429,9 +429,16 @@ mold_write_block() {
     # Refuse in those cases rather than fall back to the symlink path: the fallback IS the
     # defect above, and destroying a user's symlink is not recoverable, while skipping the
     # accelerator config is.
+    #
+    # `cd -P`, NOT bare `cd` (#3756 roborev round 3). bash's `cd` defaults to LOGICAL path
+    # handling, which resolves `..` TEXTUALLY against the path given — so a target whose text
+    # crosses a symlinked directory and then `..` lands somewhere `readlink -f` would not.
+    # Measured on a fixture where `link -> real/inner`: `cd link/..` gives the PARENT OF THE
+    # LINK, `cd -P link/..` gives `real`. Writing the block to the wrong file is bad; doing it
+    # while believing we resolved the link is worse.
     _wd=''
     if [ ! -L "$_wt" ] && [ ! -d "$_wt" ]; then
-      _wd=$(cd "$(dirname "$_wt")" 2>/dev/null && pwd -P) || _wd=''
+      _wd=$(cd -P "$(dirname "$_wt")" 2>/dev/null && pwd -P) || _wd=''
     fi
     if [ -z "$_wd" ]; then
       warn "$cfg_file is a symlink whose target could not be resolved — skipping mold linker config rather than replacing the symlink with a plain file"
@@ -439,6 +446,18 @@ mold_write_block() {
       return 0
     fi
     write_target="$_wd/$(basename "$_wt")"
+    # AND RE-CHECK THE VALUE ACTUALLY USED, not just the intermediate it came from (#3756
+    # roborev round 3). The guards above test `$_wt`, and normalisation can move the answer:
+    # a target whose text ends in `/` forces DIRECTORY resolution, so `-L` reads false even
+    # when the name IS a symlink to a regular file, and `basename` then strips the slash and
+    # hands `mv` that very symlink. Whatever the route, the no-clobber guarantee is about
+    # `$write_target`, so it is asserted ON `$write_target` — a check on an input cannot speak
+    # for an output that was computed from it.
+    if [ -L "$write_target" ] || [ -d "$write_target" ]; then
+      warn "$cfg_file resolves to $write_target, which is itself a symlink or a directory — skipping mold linker config rather than replacing it"
+      rm -f "$preserved"
+      return 0
+    fi
   fi
   tmpw=$(mktemp "$(dirname "$write_target")/.cqlite-mold.XXXXXX" 2>/dev/null) \
     || { warn "mktemp failed in $(dirname "$write_target") — skipping mold linker config"; rm -f "$preserved"; return 0; }

@@ -400,11 +400,23 @@ add_construct '(^|[^[:alnum:]_-])base64[[:space:]]+-w' \
 # strtod, so `timeout 0.5 cmd` and `timeout .5 cmd` are real invocations — and the ORIGINAL
 # `[0-9]` form caught `0.5`, so requiring an integer would have NARROWED the rule while fixing
 # its false positive. A false-positive fix that loses a true positive is not a fix.
-# ...AND strtod ACCEPTS AN EXPONENT (#3756 roborev round 2): `timeout 1e2 cmd` and
-# `timeout 1.5e2s cmd` are valid, and the original `[0-9]` form caught both. Same ruling as the
-# fractional case — restore rather than narrow. The exponent needs digits after `e`, so
-# `timeout 2>/dev/null` stays excluded (measured, both directions, in the controls below).
-RE_TIMEOUT_UNGUARDED='(^|[^[:alnum:]_-])timeout[[:space:]]+([0-9]+(\.[0-9]+)?|\.[0-9]+)([eE][+-]?[0-9]+)?[smhd]?([[:space:]]|$)'
+# ...AND THE NUMERIC GRAMMAR IS GONE, BECAUSE ENUMERATING IT DID NOT CONVERGE (#3756 roborev
+# rounds 1-3). Three consecutive rounds each named another duration spelling the pattern did not
+# model — fractional (`0.5`), leading-dot (`.5`), exponent (`1e2`, `1.5e2s`), trailing-dot
+# (`1.`) — and coreutils parses the duration with strtod, whose accepted syntax is wider than
+# anything worth restating here. That is this file's own documented non-convergence, in the rule
+# it was documented about: a fifth numeric epicycle buys a sixth finding.
+#
+# So the rule stops modelling NUMBERS and models the one thing the false positive was ever about.
+# The original `[0-9]` was right except that it also matched the `2` of
+# `command -v timeout 2>/dev/null`, where the digit is a REDIRECTION'S FILE DESCRIPTOR. A
+# duration is therefore any token that STARTS with a digit or a dot, CONTAINS no redirection or
+# command metacharacter, and is terminated by whitespace or end of line; `2>` fails because `>`
+# can neither be inside the token nor end it. Measured: 9 of 9 real spellings FLAGGED —
+# including all four named across those three rounds — and 5 of 5 guard/redirection/assignment
+# forms CLEAN. Widening the numeric syntax again is impossible by construction, because no
+# numeric syntax is written down any more.
+RE_TIMEOUT_UNGUARDED='(^|[^[:alnum:]_-])timeout[[:space:]]+[0-9.][^[:space:]|;&<>()]*([[:space:]]|$)'
 add_construct "$RE_TIMEOUT_UNGUARDED" \
   'timeout(1) is NOT installed on stock macOS — guard it with `command -v timeout` or restructure' \
   '  timeout 30 some-command' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
@@ -1189,10 +1201,12 @@ esac
 printf '%s\n' \
   '  bound=$(command -v timeout 2>/dev/null || true)' \
   '  if [ "$(command -v timeout 2>/dev/null)" != "" ]; then' \
-  '  exec 2>/dev/null' >"$tmp/timeout-ok.sh"
+  '  exec 2>/dev/null' \
+  '  x=$(command -v timeout 2>&1)' \
+  '  timeout=5' >"$tmp/timeout-ok.sh"
 scan_found "$RE_TIMEOUT_UNGUARDED" "$tmp/timeout-ok.sh"
 case $? in
-  1) ok 'structural control: `command -v timeout 2>/dev/null` — the guard this rule RECOMMENDS — is not flagged; a digit followed by `>` is a redirection fd, not a duration' ;;
+  1) ok 'structural control: the guard this rule RECOMMENDS (`command -v timeout 2>/dev/null`, `2>&1`), a bare `exec 2>/dev/null` and a `timeout=5` ASSIGNMENT are not flagged — a digit that begins a REDIRECTION is not a duration' ;;
   0) bad "structural control: the timeout rule flags its own recommended guard — a lint that reds on the remedy it prints is the lint agents learn to waive: $(scan_all_hits)" ;;
   *) : ;; # already counted by scan_found
 esac
@@ -1204,7 +1218,9 @@ printf '%s\n' \
   '  timeout .5 flaky-command' \
   '  timeout 1.5s flaky-command' \
   '  timeout 1e2 flaky-command' \
-  '  timeout 1.5e2s flaky-command' >"$tmp/timeout-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
+  '  timeout 1.5e2s flaky-command' \
+  '  timeout 1. flaky-command' \
+  '  t=$(timeout 20 bash -c x)' >"$tmp/timeout-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
 _timeout_missed=''
 _timeout_broke=0
 while IFS= read -r _tl; do
@@ -1220,7 +1236,7 @@ done <"$tmp/timeout-bad.sh"
 if [ "$_timeout_broke" -eq 1 ]; then
   : # already counted by scan_found
 elif [ -z "$_timeout_missed" ]; then
-  ok 'structural control: every real `timeout <duration> cmd` spelling is still FLAGGED — integer, GNU suffix, and the FRACTIONAL and EXPONENT forms (0.5, .5, 1.5s, 1e2, 1.5e2s) that the original [0-9] rule caught. Asserted per SPELLING, not over the whole fixture: a single scan of the file would go green on one hit and hide the others'
+  ok 'structural control: every real `timeout <duration> cmd` spelling is FLAGGED — integer, GNU suffix, and the FRACTIONAL / LEADING-DOT / EXPONENT / TRAILING-DOT forms (0.5, .5, 1.5s, 1e2, 1.5e2s, 1.) named across three review rounds, which the original [0-9] rule caught and a numeric grammar kept losing. Asserted per SPELLING, not over the whole fixture: a single scan of the file would go green on one hit and hide the others'
 else
   bad "structural control: the timeout rule no longer detects:$_timeout_missed — the false-positive fix narrowed it past its subject, which is a coverage loss dressed as a fix"
 fi

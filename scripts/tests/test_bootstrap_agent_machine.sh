@@ -946,6 +946,47 @@ else
   printf '%s\n' "$outS" | grep -i 'mold\|symlink' | head -5
 fi
 
+# 6t. AN INTERMEDIATE DIRECTORY SYMLINK FOLLOWED BY `..` RESOLVES PHYSICALLY (#3756 roborev
+#     round 3). bash's `cd` is LOGICAL by default: it resolves `..` against the path TEXT, so
+#     `cd link/..` lands in the parent of the LINK while `cd -P link/..` lands in the parent of
+#     the link's TARGET — and `readlink -f`, the thing being replaced, is physical. Measured on
+#     the fixture below: logical gives `$sbT/.cargo`, physical gives `$sbT/real`. The
+#     consequence of getting it wrong is not a skipped config, it is the block written to a
+#     DIFFERENT FILE while the run believes it resolved the link.
+sbT=$(mktemp -d "$tmp/moldT.XXXXXX"); mkdir -p "$sbT/.cargo" "$sbT/real/inner"
+ln -s "$sbT/real/inner" "$sbT/.cargo/linkdir"
+# target text crosses the symlinked directory and then goes UP: physically that is $sbT/real.
+ln -s "$sbT/.cargo/linkdir/../cargo-config.toml" "$sbT/.cargo/config.toml"
+PATH="$stubO:$PATH" HOME="$sbT" CARGO_HOME="$sbT/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+if [ -L "$sbT/.cargo/config.toml" ] \
+   && [ "$(count_begin "$sbT/real/cargo-config.toml")" = 1 ] \
+   && [ ! -e "$sbT/.cargo/cargo-config.toml" ]; then
+  ok "mold/symlink: a target crossing a symlinked directory and then \`..\` resolves PHYSICALLY (to \$sbT/real, where readlink -f would put it) — not to the logical parent, which is a different file" # portability-lint-allow: the replaced construct NAMED in a diagnostic string, not an invocation
+else
+  bad "mold/symlink: the intermediate-symlink + .. case resolved to the wrong file (physical target begin=$(count_begin "$sbT/real/cargo-config.toml") logical-path-written=$([ -e "$sbT/.cargo/cargo-config.toml" ] && echo yes || echo no))"
+  ls -l "$sbT/.cargo" "$sbT/real" 2>&1 | head -12
+fi
+
+# 6u. THE NO-CLOBBER GUARANTEE IS ASSERTED ON THE VALUE ACTUALLY WRITTEN (#3756 roborev round 3).
+#     A target whose TEXT ends in `/` forces directory resolution, so `-L` reads false even when
+#     the name is a symlink to a regular file; `basename` then strips the slash and hands `mv`
+#     that very symlink. The guard therefore re-tests `$write_target` itself, and this case
+#     drives exactly that route: config.toml -> "…/second/" -> a regular file.
+sbU=$(mktemp -d "$tmp/moldU.XXXXXX"); mkdir -p "$sbU/.cargo"
+printf 'user = 1\n' >"$sbU/.cargo/actual.toml"
+ln -s "$sbU/.cargo/actual.toml" "$sbU/.cargo/second"
+ln -s "$sbU/.cargo/second/" "$sbU/.cargo/config.toml"
+outU=$(PATH="$stubO:$PATH" HOME="$sbU" CARGO_HOME="$sbU/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+if [ -L "$sbU/.cargo/second" ] && [ "$(count_begin "$sbU/.cargo/actual.toml")" = 0 ] \
+   && printf '%s' "$outU" | grep -qE "could not be resolved|which is itself a symlink or a directory"; then
+  ok "mold/symlink: a trailing-slash target naming a SECOND symlink is refused — the intermediate guards can be bypassed by normalisation, so the no-clobber test is re-run on the write target itself"
+else
+  bad "mold/symlink: the trailing-slash second-symlink case was not refused (second-is-link=$([ -L "$sbU/.cargo/second" ] && echo yes || echo no) actual-begin=$(count_begin "$sbU/.cargo/actual.toml"))"
+  printf '%s\n' "$outU" | grep -i 'mold\|symlink' | head -5
+fi
+
 # --- 7. git push credentials (issue #2942) ---------------------------------
 # `gh` auth and `git` auth are SEPARATE credential paths: an authenticated gh CLI is
 # NOT evidence that a raw `git push` can authenticate, and scripts/flow/claim.sh +
