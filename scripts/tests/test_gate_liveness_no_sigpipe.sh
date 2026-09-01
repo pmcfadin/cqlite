@@ -47,7 +47,7 @@ SUBJECT="$REPO_ROOT/scripts/gate-liveness.sh"
 # Case floor (CLAUDE.md, #3544): a span-replacing edit that silently deletes cases yields a green
 # tally over a shrunken suite. This is ENFORCED (exit 1), not merely printed, and may only go DOWN
 # with a stated reason.
-CASE_FLOOR=14
+CASE_FLOOR=15
 
 pass=0; fail=0; cases=0
 ok()   { cases=$((cases+1)); pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
@@ -123,10 +123,19 @@ violations() {
       gsub(/\|\|/, ";", work)          # a logical OR separates commands; it is not a pipe
       ncmd = split(work, cmd, ";")
       for (c = 1; c <= ncmd; c++) {
-        if (cmd[c] !~ /(^|[^[:alnum:]_.\/-])(printf|echo)[[:space:]]/) continue
         n = split(cmd[c], seg, "|")
         if (n < 2) continue
-        for (i = 2; i <= n; i++) {
+        # The writer must be UPSTREAM of the reader: find the FIRST pipeline stage that is a
+        # builtin writer, and only consider reader stages AFTER it. Testing "this segment has a
+        # writer somewhere" and "some stage has a reader" independently reports
+        # `producer | grep -q x | printf ... ` -- safe, because the writer feeds nothing that
+        # short-circuits. Case 9c pins it.
+        wstage = 0
+        for (i = 1; i <= n; i++) {
+          if (seg[i] ~ /(^|[^[:alnum:]_.\/-])(printf|echo)[[:space:]]/) { wstage = i; break }
+        }
+        if (wstage == 0 || wstage == n) continue
+        for (i = wstage + 1; i <= n; i++) {
           s = seg[i]
           sub(/^[[:space:]]+/, "", s)
           sub(/^&[[:space:]]*/, "", s)   # `|&` redirects stderr too; still a pipe
@@ -275,6 +284,20 @@ if [ "$conv_n" -eq 2 ]; then
   ok "9b converse control: neither a quoted pipe nor a \`;\` masks a real hazardous pipeline"
 else
   bad "9b converse control" "expected 2 real sites, matcher found $conv_n — the narrowing in cases 6-9 has gone too far and is now hiding genuine #3803 sites"
+fi
+
+# ---------------------------------------------------------------------------
+# 9c. The writer must be UPSTREAM of the reader. A builtin at the END of a pipeline feeds nothing
+#    that can short-circuit, so it cannot take EPIPE; reporting it reds the mandatory component on
+#    safe code (roborev job 22). Paired with a positive half so this cannot be satisfied by a
+#    matcher that simply stopped looking.
+# ---------------------------------------------------------------------------
+printf '#!/usr/bin/env bash\n%s\n' 'producer | grep -q x | printf %s done' >"$tmp/down.sh"
+printf '#!/usr/bin/env bash\n%s\n' 'printf %s "$t" | grep -q x' >"$tmp/up.sh"
+if [ "$(violations "$tmp/down.sh" | grep -c .)" -eq 0 ] && [ "$(violations "$tmp/up.sh" | grep -c .)" -eq 1 ]; then
+  ok "9c a builtin DOWNSTREAM of the reader is safe (0 RECOGNISED); upstream is still flagged"
+else
+  bad "9c writer/reader ordering" "expected down=0 up=1, got down=$(violations "$tmp/down.sh" | grep -c .) up=$(violations "$tmp/up.sh" | grep -c .)"
 fi
 
 # ---------------------------------------------------------------------------
