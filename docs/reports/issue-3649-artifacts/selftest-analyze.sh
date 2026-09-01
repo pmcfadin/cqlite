@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=65
+CASE_FLOOR=72
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -111,12 +111,14 @@ def main():
             "server_cpus": "0,2",
             "client_cpus": "1,3",
             "temperature": "warm",
+            "merge_path": "merge",
         },
         "corpus": {
             "path": "/data/ab-3649/corpus/sstables",
             "data_db_bytes": 681574400,
             "data_db_files": 3,
             "min_bytes_required": 268435456,
+            "min_sstables_required": 2,
             "rows_declared": 3999890,
         },
         "host": {
@@ -515,6 +517,59 @@ else
 fi
 
 echo
+echo "-- the #3058 single-source fast path cannot silently null the measurement --"
+
+# With one source on disk and no pinned merge arm, #3058 routes every request
+# onto a fast path #2820 never touched -- on BOTH arms -- so the ratio is 1.0 by
+# construction. That is a measurement of nothing and must not render a verdict.
+mkfixture "$TMP/bypassed" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/bypassed/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["workload"]["merge_path"] = "auto"
+manifest["corpus"]["data_db_files"] = 1
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/bypassed"
+check_verdict "one source with no pinned merge arm" UNMEASURED 7
+check_cause "the #3058 fast path served both arms" merge-path-bypassed
+
+# With several sources the arm cannot be settled from the manifest, so this is a
+# disclosure rather than a refusal.
+mkfixture "$TMP/unpinned" 6 "100000:117000,100000:117000,100000:118000,100000:118000,100000:118000,100000:119000"
+python3 - "$TMP/unpinned/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["workload"]["merge_path"] = "auto"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/unpinned"
+check_verdict "several sources with no pinned merge arm still renders" MEETS-TARGET 0
+if grep -q '^AB-3649: verdict-detail MERGE-PATH ' "$TMP/out.txt"; then
+  ok "an unpinned merge arm is disclosed beside the verdict"
+else
+  bad "an unpinned merge arm was not disclosed"
+fi
+
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: merge-path merge$' "$TMP/out.txt" \
+   && ! grep -q '^AB-3649: verdict-detail MERGE-PATH ' "$TMP/out.txt"; then
+  ok "a pinned merge arm is recorded and carries no disclosure"
+else
+  bad "a pinned merge arm was not recorded cleanly"
+fi
+
+echo
 echo "-- a CONTROL session may render a verdict, but never a discharging one --"
 
 # A null / sensitivity control is still a real measurement, so it must produce a
@@ -596,8 +651,13 @@ check_driver() { # <description> <expected-exit> [expected-cause]
 if [ ! -f "$DRIVER" ]; then
   bad "the driver is absent, so none of its guards could be exercised"
 else
+  # Two sources, so the #3058 SSTable-count guard is satisfied and the guards
+  # under test are the ones each case names.
   mkdir -p "$TMP/tinycorpus/ks/tbl"
   head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-1-big-Data.db"
+  head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-2-big-Data.db"
+  mkdir -p "$TMP/onesstcorpus/ks/tbl"
+  head -c 4096 /dev/zero > "$TMP/onesstcorpus/ks/tbl/nb-1-big-Data.db"
   mkdir -p "$TMP/emptycorpus"
   printf '{"version": 2, "keyspace": "ks", "table": "tbl"}\n' > "$TMP/ticket.json"
 
@@ -628,6 +688,15 @@ else
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
     --work-dir "$TMP/w-small"
   check_driver "a corpus below the stated minimum size" 2 corpus-too-small
+
+  run_driver --corpus "$TMP/onesstcorpus" --ticket-template "$TMP/ticket.json" \
+    --work-dir "$TMP/w-onesst" --min-corpus-bytes 1
+  check_driver "a single-SSTable corpus, which #3058 would route past the merge" \
+    2 corpus-too-few-sstables
+
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --work-dir "$TMP/w-badarm" --min-corpus-bytes 1 --merge-path sideways
+  check_driver "an unrecognised --merge-path value" 3
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
     --work-dir "$TMP/w-same" --min-corpus-bytes 1 --repo "$HERE" \

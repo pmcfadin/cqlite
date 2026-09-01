@@ -627,6 +627,8 @@ def report(opts, manifest, pairs):
         )
     )
     out("thermal-state %s" % field(manifest, "workload", "temperature"))
+    merge_path = field(manifest, "workload", "merge_path")
+    out("merge-path %s" % merge_path)
     control = manifest.get("control")
     control = control if isinstance(control, str) and control else None
     out("control %s" % (control if control else "none"))
@@ -728,6 +730,12 @@ def report(opts, manifest, pairs):
             level=level_text, lo=fmt(band_low, 2), hi=fmt(band_high, 2)
         )
     )
+    if merge_path != "merge":
+        out(
+            "verdict-detail MERGE-PATH CQLITE_FLIGHT_MERGE_PATH was %r, not "
+            "'merge', so the #3058 single-source fast path may have served some or "
+            "all requests -- that path is not the one #2820 changed" % merge_path
+        )
     if control:
         out(
             "verdict-detail CONTROL this session is labelled %r, so its verdict "
@@ -771,6 +779,18 @@ def main(argv):
         manifest = load_manifest(opts["manifest"])
         manifest_dir = os.path.dirname(os.path.abspath(opts["manifest"]))
         pairs = collect_pairs(manifest, manifest_dir)
+        merge_path = manifest.get("workload", {})
+        merge_path = merge_path.get("merge_path") if isinstance(merge_path, dict) else None
+        files = manifest["corpus"]["data_db_files"]
+        if merge_path != "merge" and files < 2:
+            raise Unmeasured(
+                "merge-path-bypassed",
+                "the corpus holds %d *-Data.db file(s) and CQLITE_FLIGHT_MERGE_PATH "
+                "was %r rather than 'merge': issue #3058 routes a single-source "
+                "request onto a fast path that never enters the k-way merge, so "
+                "BOTH arms ran code #2820 did not touch and the ratio is 1.0 by "
+                "construction" % (files, merge_path),
+            )
         if len(pairs) < manifest["replicates_requested"]:
             raise Unmeasured(
                 "replicate-shortfall",

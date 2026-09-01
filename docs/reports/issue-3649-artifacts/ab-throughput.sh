@@ -106,6 +106,9 @@ ab-throughput.sh [options]
   --server-cpus <list>      taskset list for the server         (default unpinned)
   --client-cpus <list>      taskset list for the load generator (default unpinned)
   --min-corpus-bytes <n>    refuse below this many Data.db bytes  (default 268435456)
+  --min-sstables <n>        refuse below this many Data.db files         (default 2)
+  --merge-path <arm>        CQLITE_FLIGHT_MERGE_PATH for BOTH servers  (default merge;
+                            auto | merge | bypass -- see the #3058 note below)
   --rows-declared <n>       corpus row count, recorded not measured  (default none)
   --no-prewarm              skip the per-replicate warming pass
   --control <label>         mark this session a CONTROL, not a measurement; the
@@ -137,6 +140,8 @@ PORT=8815
 SERVER_CPUS=''
 CLIENT_CPUS=''
 MIN_CORPUS_BYTES=268435456
+MIN_SSTABLES=2
+MERGE_PATH='merge'
 ROWS_DECLARED=''
 PREWARM=1
 TEMPERATURE='warm'
@@ -160,6 +165,8 @@ while [ "$#" -gt 0 ]; do
     --server-cpus)       SERVER_CPUS="${2:-}";      shift 2 ;;
     --client-cpus)       CLIENT_CPUS="${2:-}";      shift 2 ;;
     --min-corpus-bytes)  MIN_CORPUS_BYTES="${2:-}"; shift 2 ;;
+    --min-sstables)      MIN_SSTABLES="${2:-}";     shift 2 ;;
+    --merge-path)        MERGE_PATH="${2:-}";       shift 2 ;;
     --rows-declared)     ROWS_DECLARED="${2:-}";    shift 2 ;;
     --no-prewarm)        PREWARM=0;                 shift ;;
     --control)           CONTROL="${2:-}";          shift 2 ;;
@@ -179,6 +186,8 @@ case "$REPLICATES" in ''|*[!0-9]*) usage_error "--replicates must be a positive 
 case "$PORT" in ''|*[!0-9]*) usage_error "--port must be an integer" ;; esac
 case "$MIN_CORPUS_BYTES" in ''|*[!0-9]*) usage_error "--min-corpus-bytes must be an integer" ;; esac
 case "$TEMPERATURE" in warm|cold) ;; *) usage_error "--temperature must be warm or cold" ;; esac
+case "$MIN_SSTABLES" in ''|*[!0-9]*) usage_error "--min-sstables must be an integer" ;; esac
+case "$MERGE_PATH" in auto|merge|bypass) ;; *) usage_error "--merge-path must be auto, merge or bypass" ;; esac
 if [ -n "$SERVER_CPUS" ] || [ -n "$CLIENT_CPUS" ]; then
   [ -n "$SERVER_CPUS" ] && [ -n "$CLIENT_CPUS" ] || usage_error \
     "--server-cpus and --client-cpus must be given together: pinning one and not the other measures the load generator competing with the server"
@@ -244,6 +253,7 @@ manifest = {
         "client_cpus": env("AB_CLIENT_CPUS", "none-unpinned"),
         "temperature": env("AB_TEMPERATURE", ""),
         "ticket_template": env("AB_TICKET_TEMPLATE", ""),
+        "merge_path": env("AB_MERGE_PATH", ""),
     },
     "control": env("AB_CONTROL") or None,
     "server_extra": {
@@ -255,6 +265,7 @@ manifest = {
         "data_db_bytes": int(env("AB_CORPUS_BYTES", "0")),
         "data_db_files": int(env("AB_CORPUS_FILES", "0")),
         "min_bytes_required": int(env("AB_MIN_CORPUS_BYTES", "0")),
+        "min_sstables_required": int(env("AB_MIN_SSTABLES", "0")),
         "rows_declared": int(rows) if rows else None,
     },
     "host": {
@@ -280,6 +291,7 @@ export AB_TICKET_TEMPLATE="$TICKET_TEMPLATE"
 export AB_CONTROL="$CONTROL"
 export AB_BASE_SERVER_EXTRA="$BASE_SERVER_EXTRA" AB_HEAD_SERVER_EXTRA="$HEAD_SERVER_EXTRA"
 export AB_CORPUS="$CORPUS" AB_MIN_CORPUS_BYTES="$MIN_CORPUS_BYTES"
+export AB_MIN_SSTABLES="$MIN_SSTABLES" AB_MERGE_PATH="$MERGE_PATH"
 export AB_ROWS_DECLARED="$ROWS_DECLARED"
 export AB_GENERATED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -326,6 +338,14 @@ say "corpus path $CORPUS data-db-files $CORPUS_FILES data-db-bytes $CORPUS_BYTES
 if [ "$CORPUS_BYTES" -lt "$MIN_CORPUS_BYTES" ]; then
   die corpus-too-small \
     "$CORPUS_BYTES Data.db bytes is below the required $MIN_CORPUS_BYTES; a --shape full scan over a corpus this small measures request setup, not the read path (RUNBOOK.md states the floor and its basis)"
+fi
+if [ "$CORPUS_FILES" -lt "$MIN_SSTABLES" ]; then
+  die corpus-too-few-sstables \
+    "$CORPUS_FILES Data.db files is below the required $MIN_SSTABLES; issue #3058 gives the Flight row route a single-source fast path that NEVER enters the k-way merge, so a one-source corpus measures a code path #2820 did not touch -- and it does so identically on both arms, producing a ratio of 1.0 by construction"
+fi
+say "merge-path $MERGE_PATH -- CQLITE_FLIGHT_MERGE_PATH is set to this on BOTH arms' servers"
+if [ "$MERGE_PATH" != "merge" ]; then
+  say "merge-path NOT-PINNED -- with anything but 'merge' the #3058 predicate may route a request onto the single-source fast path, which #2820 did not touch"
 fi
 
 resolve() { git -C "$REPO" rev-parse --verify --quiet "$1^{commit}" || true; }
@@ -433,7 +453,7 @@ run_one() { # <arm> <replicate>
 
   local extra=''
   if [ "$arm" = "base" ]; then extra="$BASE_SERVER_EXTRA"; else extra="$HEAD_SERVER_EXTRA"; fi
-  local -a server_cmd=()
+  local -a server_cmd=(env "CQLITE_FLIGHT_MERGE_PATH=$MERGE_PATH")
   [ -n "$SERVER_CPUS" ] && server_cmd+=(taskset -c "$SERVER_CPUS")
   server_cmd+=("$bin/cqlite-flight" --data-dir "$CORPUS" --listen "127.0.0.1:$PORT")
   # Word-split on purpose: the value is an operator-supplied flag list, and it is
