@@ -253,12 +253,19 @@ tma_probe() { # $1 label  rest: perf args   -> sets TMA_RECORD
   TMA_RECORD="rc=$rc, ${lines} line(s) recorded verbatim in tma-probe.txt (this probe does not interpret it)"
   { echo "== $label =="; echo "$out"; echo "[rc=$rc]"; echo; } >> "$D/tma-probe.txt"
 }
-tma_probe "perf stat -M TopdownL1" perf stat -M TopdownL1 -- true; TMA_L1="$TMA_RECORD"
-tma_probe "perf stat -M TopdownL2" perf stat -M TopdownL2 -- true; TMA_L2="$TMA_RECORD"
+# --all-user / ':u' EVERYWHERE, for the same reason the disposition sweep uses it
+# (roborev jobs 318 and 320): this study measures user-only, so asking about the
+# kernel-inclusive form asks a question whose answer it never uses. On a host that
+# permits :u and denies kernel counting, the unmodified form reports the metric
+# group unusable while the study's own measurements would have worked. `--all-user`
+# is perf's own way to apply the modifier to a METRIC GROUP, whose constituent
+# events this script never names.
+tma_probe "perf stat --all-user -M TopdownL1" perf stat --all-user -M TopdownL1 -- true; TMA_L1="$TMA_RECORD"
+tma_probe "perf stat --all-user -M TopdownL2" perf stat --all-user -M TopdownL2 -- true; TMA_L2="$TMA_RECORD"
 # The individual topdown EVENTS go through the retained disposition sweep instead
 # of this recorder, so they get the four-valued answer that layer provides.
 for e in slots topdown-retiring topdown-fe-bound topdown-be-bound topdown-bad-spec; do
-  tma_probe "event $e" perf stat -e "$e" -- true
+  tma_probe "event ${e}:u" perf stat -e "${e}:u" -- true
 done
 [ -s "$D/tma-probe.txt" ] || note_fail "Gate A: tma-probe.txt is empty — the step did not record its output"
 
@@ -442,8 +449,12 @@ csv_validate() { # $1 csv  $2 label  rest: rendered names — 100.00% is REQUIRE
     c=$(cut -d, -f1 <<<"$line"); en=$(cut -d, -f5 <<<"$line")
     [[ "$c"  =~ ^[0-9]+$ ]] || { note_fail "$label: '$ev' count not numeric ('$c')"; bad=1; }
     [[ "$en" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { note_fail "$label: '$ev' enabled% not numeric ('$en')"; bad=1; continue; }
-    awk -v x="$en" 'BEGIN{exit !(x>=99.999)}' || {
-      note_fail "$label: '$ev' enabled%=$en — these groups are small BECAUSE every value must be a count, not a scaled estimate"; bad=1; }
+    # BOUNDED ON BOTH SIDES (roborev job 320). A one-sided `>= 99.999` accepted 150
+    # and every other impossible value a misparsed field can produce, so the guard
+    # would have passed exactly the case it exists to catch: a number that is not
+    # the enabled percentage at all.
+    awk -v x="$en" 'BEGIN{exit !(x>=99.999 && x<=100.001)}' || {
+      note_fail "$label: '$ev' enabled%=$en — required 100.00 (these groups are small BECAUSE every value must be a count, not a scaled estimate); a value outside [99.999,100.001] is either multiplexing or a misparsed field, and neither may be published as a count"; bad=1; }
   done
   return $bad
 }

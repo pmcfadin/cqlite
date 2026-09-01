@@ -8,11 +8,13 @@ sizes the guard uses.
   window          accesses=1e3        accesses=1e5        ratio    guard (>= 10x)
   --------------  ------------------  ------------------  -------  --------------
   UNGATED         243,571,204 instr   244,165,415 instr   1.00x    FAILS  <- caught
-  GATED (FIFO)          6,296 instr        600,301 instr  95.35x   PASSES
+  GATED (FIFO)            ~6.3e3 instr       ~6.0e5 instr   ~95x    PASSES
 
-The GATED row is read from this run's own gate-probe CSVs and shifts slightly on
-every re-run; the UNGATED row is a one-off re-measurement of the original
-defective window, which no current revision of the probe regenerates.
+The GATED row is given to one or two significant figures ON PURPOSE: its exact
+values are in this run's own gate-probe CSVs, which are the authority, and they
+shift on every re-run. The property is the ~95x scaling against a 10x threshold.
+The UNGATED row keeps exact figures -- it is a one-off re-measurement of the
+original defective window, which no current revision of the probe regenerates.
 
 Read the ungated row: the count barely moves when the workload does 100x more
 work, because a CONSTANT term -- buffer init (page faults + permutation build) and

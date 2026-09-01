@@ -1,19 +1,19 @@
-== perf stat -M TopdownL1 ==
+== perf stat --all-user -M TopdownL1 ==
 event syntax error: 'topdown-retiring/metric-id=topdown!1retiring/,TOPDOWN.SL..'
                      \___ Bad event or PMU
 
 Unable to find PMU or event on a PMU of 'topdown-retiring'
 [rc=1]
 
-== perf stat -M TopdownL2 ==
+== perf stat --all-user -M TopdownL2 ==
 event syntax error: 'topdown-retiring/metric-id=topdown!1retiring/,TOPDOWN.SL..'
                      \___ Bad event or PMU
 
 Unable to find PMU or event on a PMU of 'topdown-retiring'
 [rc=1]
 
-== event slots ==
-event syntax error: 'slots'
+== event slots:u ==
+event syntax error: 'slots:u'
                      \___ Bad event name
 
 Unable to find event on a PMU of 'slots'
@@ -24,8 +24,8 @@ Run 'perf list' for a list of valid events
     -e, --event <event>   event selector. use 'perf list' to list available events
 [rc=129]
 
-== event topdown-retiring ==
-event syntax error: 'topdown-retiring'
+== event topdown-retiring:u ==
+event syntax error: 'topdown-retiring:u'
                      \___ Bad event name
 
 Unable to find event on a PMU of 'topdown-retiring'
@@ -36,8 +36,8 @@ Run 'perf list' for a list of valid events
     -e, --event <event>   event selector. use 'perf list' to list available events
 [rc=129]
 
-== event topdown-fe-bound ==
-event syntax error: 'topdown-fe-bound'
+== event topdown-fe-bound:u ==
+event syntax error: 'topdown-fe-bound:u'
                      \___ Bad event name
 
 Unable to find event on a PMU of 'topdown-fe-bound'
@@ -48,8 +48,8 @@ Run 'perf list' for a list of valid events
     -e, --event <event>   event selector. use 'perf list' to list available events
 [rc=129]
 
-== event topdown-be-bound ==
-event syntax error: 'topdown-be-bound'
+== event topdown-be-bound:u ==
+event syntax error: 'topdown-be-bound:u'
                      \___ Bad event name
 
 Unable to find event on a PMU of 'topdown-be-bound'
@@ -60,8 +60,8 @@ Run 'perf list' for a list of valid events
     -e, --event <event>   event selector. use 'perf list' to list available events
 [rc=129]
 
-== event topdown-bad-spec ==
-event syntax error: 'topdown-bad-spec'
+== event topdown-bad-spec:u ==
+event syntax error: 'topdown-bad-spec:u'
                      \___ Bad event name
 
 Unable to find event on a PMU of 'topdown-bad-spec'

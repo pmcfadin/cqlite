@@ -76,6 +76,13 @@ fi
 # -M TopdownL1/L2
 for i in "${!args[@]}"; do [ "${args[$i]}" = "-M" ] && M="${args[$((i+1))]}"; done
 if [ -n "${M:-}" ]; then
+  # A metric group is subject to the same permission split as a bare event: without
+  # --all-user this host refuses it, with --all-user it works. Gate A must ask in the
+  # terms the study measures (roborev job 320).
+  if [ -n "${SHIM_KERNEL_DENIED:-}" ] && [[ " ${args[*]} " != *" --all-user "* ]]; then
+    echo "Error: Access to performance monitoring and observability operations is limited." >&2
+    exit 1
+  fi
   case "${SHIM_TMA:-absent}" in
     absent) echo "Cannot find metric or group \`$M'" >&2; exit 1 ;;
     error)  echo "some unexpected diagnostic" >&2; exit 7 ;;
@@ -272,6 +279,15 @@ if [ "$rc" != 0 ] && grep -q 'enabled%=74.00' "$d/stderr.txt"; then
   ok "enabled%<100 -> rejected (small groups exist BECAUSE every value must be a count)"
 else bad "a multiplexed group was accepted as counts (rc=$rc)" "$d"; fi
 
+# --- 4b. an IMPOSSIBLE enabled% must be rejected too --------------------------
+# roborev job 320: the bound was one-sided (`>= 99.999`), so 150 -- or any misparsed
+# field that happens to be a large number -- sailed through the guard that exists to
+# ensure every published value is a count. The bound is two-sided now.
+d="$TMP/c4b"; mkdir -p "$d"; rc=$(SHIM_TMA=absent SHIM_ENABLED=150.00 run_probe "$d")
+if [ "$rc" != 0 ] && grep -q 'enabled%=150.00' "$d/stderr.txt"; then
+  ok "enabled%>100 -> rejected (an impossible percentage is a misparse, not a count)"
+else bad "an impossible enabled% was accepted (rc=$rc)" "$d"; fi
+
 # --- 5. stale measurements from a previous run/host must be purged ----------
 d="$TMP/c5"; mkdir -p "$d/out/host"
 printf '# stale\n999999999,,cycle_activity.stalls_l3_miss:u,1,100.00,,\n' > "$d/out/host/arm-friendly-L2resident-stalls.csv"
@@ -311,6 +327,18 @@ if [ "$rc" = 0 ] && grep -q 'VERDICT: COMPLETE' <<<"$(verdict "$d")" \
    && ! grep -q 'event triage' "$d/stderr.txt"; then
   ok "kernel-counting denied, user-only permitted -> sweep still measures (probes the ':u' spec the arms use)"
 else bad "the sweep asked about a spec the arms do not measure (rc=$rc, $(verdict "$d"))" "$d"; fi
+
+# --- 8b2. Gate A must ask in user-only terms too ------------------------------
+# roborev job 320: the sweep was fixed for this in job 318 and Gate A was not. On a
+# host permitting ':u' and denying kernel counting, an unmodified `-M TopdownL2`
+# reports the metric group unusable while the study's own user-only measurement
+# would have worked -- a false "this host cannot serve #3287". Reverting either
+# --all-user or the ':u' on the topdown events fails this case.
+d="$TMP/c8b2"; mkdir -p "$d"; rc=$(SHIM_TMA=resolved SHIM_KERNEL_DENIED=1 run_probe "$d")
+if [ "$rc" = 0 ] && grep -q 'tma_retiring' "$d/out/host/tma-probe.txt" \
+   && ! grep -q 'limited' "$d/out/host/tma-probe.txt"; then
+  ok "kernel-counting denied -> Gate A still records real TMA rows (asks --all-user / ':u')"
+else bad "Gate A asked in terms this study does not measure (rc=$rc)" "$d"; fi
 
 # --- 8c. an arm that did not run the requested configuration must FAIL ---------
 # roborev job 318. perf exiting 0 over a well-formed CSV says the counters worked;
@@ -369,12 +397,64 @@ fi
 # complete, online, allowed sibling group yields one. A single-vCPU or heavily
 # constrained container has none, and reporting that as a Gate D defect would be
 # a false accusation (roborev job 318).
-have_group=no
-allowed=$(awk '/^Cpus_allowed_list:/{print $2}' /proc/self/status)
-for c in $(tr ',' ' ' <<<"${allowed:-}" | tr '-' ' '); do
+# The precondition must apply the PROBE'S OWN predicate, not a weaker proxy
+# (roborev job 320). "cpu N has more than one sibling" is not "a complete sibling
+# group is available": in a restricted container cpu0's sibling can be cpu8 with
+# only cpu0 allowed, so the weaker test ran the case on a host that legitimately
+# has no pinnable group, and the probe's correct refusal read as a Gate D defect.
+# Every member of the group must be BOTH online AND in this process's affinity.
+#
+# It lives in its own script so it can be RUN UNDER A RESTRICTED AFFINITY and shown
+# to answer differently — a precondition nobody has watched change its mind is an
+# assumption, not a check.
+cat > "$TMP/has-group.sh" <<'PRED'
+#!/usr/bin/env bash
+_expand() { # "0-3,8" -> "0 1 2 3 8"
+  local part lo hi
+  for part in $(tr ',' ' ' <<<"${1:-}"); do
+    case "$part" in
+      *-*) lo=${part%%-*}; hi=${part##*-}; while [ "$lo" -le "$hi" ]; do printf '%s ' "$lo"; lo=$((lo+1)); done ;;
+      "" ) ;;
+      *  ) printf '%s ' "$part" ;;
+    esac
+  done
+}
+allowed=" $(_expand "$(awk '/^Cpus_allowed_list:/{print $2}' /proc/self/status)") "
+online=" $(_expand "$(cat /sys/devices/system/cpu/online 2>/dev/null)") "
+for c in $allowed; do
   sl=$(cat "/sys/devices/system/cpu/cpu$c/topology/thread_siblings_list" 2>/dev/null) || continue
-  case "$sl" in *,*|*-*) have_group=yes; break;; esac
+  members=$(_expand "$sl")
+  # A singleton is a complete group but not a MULTI-thread one; this case wants the
+  # shape the probe derives on a normal SMT host.
+  [ "$(wc -w <<<"$members")" -ge 2 ] || continue
+  complete=yes
+  for m in $members; do
+    case "$allowed" in *" $m "*) ;; *) complete=no; break;; esac
+    case "$online"  in *" $m "*) ;; *) complete=no; break;; esac
+  done
+  [ "$complete" = yes ] && { echo yes; exit 0; }
 done
+echo no
+PRED
+chmod +x "$TMP/has-group.sh"
+have_group=$(bash "$TMP/has-group.sh")
+
+# --- 10b. the precondition itself must be able to say NO ----------------------
+# Its whole job is to skip case 10 on a host with no complete allowed group. Run it
+# under a one-CPU affinity, which is exactly that host, and require it to change its
+# answer. Without this, a precondition stuck at "yes" is indistinguishable from a
+# correct one on any healthy machine.
+if [ -n "${onecpu:-}" ] && [ -n "${sibs:-}" ] && [ "$sibs" != "${onecpu:-}" ] && command -v taskset >/dev/null 2>&1; then
+  restricted=$(/usr/bin/taskset -c "$onecpu" bash "$TMP/has-group.sh")
+  if [ "$have_group" = yes ] && [ "$restricted" = no ]; then
+    ok "topology precondition answers yes unrestricted and NO under a 1-cpu affinity (job 320: was a weaker proxy that always said yes)"
+  else
+    bad "the topology precondition did not discriminate (unrestricted=$have_group restricted=$restricted)"
+  fi
+else
+  skip "topology precondition control (needs taskset and an SMT sibling group)"
+fi
+
 if [ "$have_group" != yes ]; then
   skip "Gate D healthy-host case (this host exposes no multi-thread sibling group within its affinity — nothing to derive)"
 else
@@ -391,15 +471,15 @@ echo "cases: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 # A case FLOOR, on #3544's precedent: a span-replacing edit once silently deleted
 # four cases and the suite reported failed:0 over a shrunken set. A green tally
 # over fewer cases is not a green suite.
-FLOOR=15
+FLOOR=18
 if [ $((PASS+FAIL+SKIP)) -lt $FLOOR ]; then
   echo "FAIL: only $((PASS+FAIL+SKIP)) cases were reached, floor is $FLOOR — cases were deleted, not fixed"
   exit 1
 fi
 # A SKIP is counted for the floor but must never substitute for verification: the
-# 11 shim-driven cases depend on nothing about this host, so if any of them failed
+# 15 shim-driven cases depend on nothing about this host, so if any of them failed
 # to RUN, something is wrong with the suite rather than with the machine.
-SHIM_FLOOR=13
+SHIM_FLOOR=15
 if [ "$PASS" -lt $SHIM_FLOOR ] && [ "$FAIL" = 0 ]; then
   echo "FAIL: only $PASS cases PASSed with 0 failures; $SHIM_FLOOR are host-independent and must always run"
   exit 1

@@ -142,14 +142,19 @@ the issue names in advance as "has not answered the question".
 Quoted verbatim from the committed captures, each line naming the file it is in:
 
 ```
-tma-probe.txt        perf stat -M TopdownL1      -> Unable to find PMU or event on a PMU of 'topdown-retiring'   [rc=1]
-tma-probe.txt        perf stat -M TopdownL2      -> Unable to find PMU or event on a PMU of 'topdown-retiring'   [rc=1]
-tma-probe.txt        perf stat -e slots          -> Bad event name / Unable to find event on a PMU of 'slots'    [rc=129]
-tma-probe.txt        -e topdown-retiring         -> Bad event name / Unable to find event on a PMU of ...        [rc=129]
-tma-probe.txt        -e topdown-{fe,be}-bound,
-                        -e topdown-bad-spec      -> the same, all three                                          [rc=129]
-event-disposition.txt  topdown.slots             -> ABSENT-FROM-PMU
+tma-probe.txt   perf stat --all-user -M TopdownL1 -> Unable to find PMU or event on a PMU of 'topdown-retiring'  [rc=1]
+tma-probe.txt   perf stat --all-user -M TopdownL2 -> Unable to find PMU or event on a PMU of 'topdown-retiring'  [rc=1]
+tma-probe.txt   perf stat -e slots:u              -> Bad event name / Unable to find event on a PMU of 'slots'   [rc=129]
+tma-probe.txt   -e topdown-retiring:u             -> Bad event name / Unable to find event on a PMU of ...       [rc=129]
+tma-probe.txt   -e topdown-{fe,be}-bound:u,
+                -e topdown-bad-spec:u             -> the same, all three                                         [rc=129]
+event-disposition.txt  topdown.slots              -> ABSENT-FROM-PMU
 ```
+
+Every probe above is in the **user-only** terms this study measures in (`--all-user` for a metric
+group, `:u` for an event), so none of these answers can be an artefact of kernel-counting
+permission — a distinction that costs nothing here, where `perf_event_paranoid` is permissive, and
+decides the verdict on a host where it is not (roborev job 320).
 
 On Ice Lake and later, TMA is served by `PERF_METRICS` through those pseudo-events plus `slots`. Here
 `slots` does not resolve on this PMU **at all** — `perf` cannot even name the event, so no
@@ -286,13 +291,15 @@ sizes:
 | window | 1e3 accesses | 1e5 accesses | scaling | guard (≥10×) |
 |---|--:|--:|--:|---|
 | **UNGATED** (`--delay-ms` only) | 243,571,204 instr | 244,165,415 instr | **1.00×** | **FAILS — caught** |
-| **GATED** (control FIFO) | 6,296 instr | 600,301 instr | **95.35×** | PASSES |
+| **GATED** (control FIFO) | ~6.3e3 instr | ~6.0e5 instr | **~95×** | PASSES |
 
-The GATED row is read from the committed capture beside this file
-([`host/gate-probe-1000.csv`](host/gate-probe-1000.csv) /
-[`host/gate-probe-100000.csv`](host/gate-probe-100000.csv)) and moves by a fraction of a percent
-whenever the probe is re-run; the UNGATED row is a one-off re-measurement of the original defective
-window, which no current revision of the probe can regenerate.
+**The GATED row is deliberately given to one or two significant figures.** Its exact values are in
+the committed capture beside this file ([`host/gate-probe-1000.csv`](host/gate-probe-1000.csv) /
+[`host/gate-probe-100000.csv`](host/gate-probe-100000.csv)), which is the authority; they move by a
+fraction of a percent on every re-run, and quoting them precisely in prose meant correcting this
+sentence four times in one day. The property is the ~95× scaling against a 10× threshold, and that
+does not move. The UNGATED row keeps its exact figures because it is a one-off re-measurement of the
+original defective window, which no current revision of the probe can regenerate.
 
 The ungated count barely moves when the workload does 100× more work, because a **constant ~244
 million instructions** of buffer init and address-space teardown sits inside the window against roughly
@@ -305,7 +312,7 @@ property (#3224 requires it near 1.0), the ungated capture had not merely inflat
 Two properties of the guard, both deliberate. It is a **scaling** test, not a tuned ceiling, so it is
 **host-independent**: #3224's absolute ceiling of 1e6 instructions per 1e3 accesses was correct for its
 own machine and importing it would risk a false FAIL elsewhere, so the absolute is *reported* and only
-the scaling property can fail the run. And the discrimination is enormous — 1.00× versus 95.35× against
+the scaling property can fail the run. And the discrimination is enormous — 1.00× versus ~95× against
 a 10× threshold — so the bound needs no tuning and is insensitive to host and load.
 
 **What did NOT change, and why that was predictable:** every capability verdict. Contamination can only
@@ -408,10 +415,10 @@ The tables here say what each answer *means for #3287*, and record what this hos
 
 | probe | pass criterion |
 |---|---|
-| `perf stat -e slots -- true` and `-e topdown.slots` | resolves and counts; **neither resolves here** — `slots` is `Bad event name` in `tma-probe.txt`, `topdown.slots` is `ABSENT-FROM-PMU` in `event-disposition.txt` |
+| `perf stat -e slots:u -- true` and `-e topdown.slots:u` | resolves and counts; **neither resolves here** — `slots:u` is `Bad event name` in `tma-probe.txt`, `topdown.slots` is `ABSENT-FROM-PMU` in `event-disposition.txt` |
 | `topdown-retiring`, `topdown-fe-bound`, `topdown-be-bound`, `topdown-bad-spec` | all four present; **all four unresolvable here** (`Bad event name`, rc=129, `tma-probe.txt`) |
-| `perf stat -M TopdownL1 -- true` | resolves and prints four level-1 shares summing to ~100% |
-| `perf stat -M TopdownL2 -- true` | **resolves** — this is the AC itself. Level-2 is unreachable if level-1 is |
+| `perf stat --all-user -M TopdownL1 -- true` | resolves and prints four level-1 shares summing to ~100% |
+| `perf stat --all-user -M TopdownL2 -- true` | **resolves** — this is the AC itself. Level-2 is unreachable if level-1 is. Probe in USER-ONLY terms: that is what the study measures, and a kernel-counting denial would otherwise read as a capability answer |
 
 Level-2 is served by `PERF_METRICS` on Ice Lake and later. If `slots` does not resolve — whether the
 event is absent from the table, as here, or `perf_event_open` refuses it — stop: there is no level-1
