@@ -805,6 +805,92 @@ else
   bad "15.11 the --delta grammar is published at every site that publishes the other two" "missing:$_missing"
 fi
 
+echo "=== section 16: the reader gives COMPLETION; the MODE FILTER is ours (F1) ==="
+# gate-liveness.sh's terminal set is MODE-INVARIANT BY DESIGN — it answers "is there a
+# verdict", not "for which mode" — so it accepts --delta's ERROR and REFUSED. Delegating
+# completion to it therefore does NOT validate the token against the PASS|FAIL|PARTIAL set
+# this tool publishes for `--mode only`, and a block reaching the component read with an
+# out-of-set token could return PASS.
+#
+# THE READER IS RIGHT TO BE MODE-INVARIANT AND WE ARE RIGHT TO BE MODE-SPECIFIC: that is the
+# same completion/verdict division one level down. Probably unreachable today (the gate emits
+# those two only from run_delta(), whose DELTA marker the B2 refusal already rejects) — fixed
+# anyway, because "unreachable today" is an argument someone must re-derive, while a branch
+# keyed on the AFFIRMATIVE value is a property the code holds. Same reason the sanitiser
+# ordering was fixed.
+_mk_tok() {  # <path> <RESULT-value> — a FULL-marker, tree-integrity-PASS block with a PASS component
+  { echo "==== AGENT-GATE SUMMARY ===="
+    echo "run-id: run-1"
+    echo "tree-integrity: PASS"
+    comp_line tooling-tests PASS 1112s
+    echo "RESULT: $2"
+    echo "==== END AGENT-GATE SUMMARY ===="
+  } > "$1"
+}
+_mk_tok "$TMP/tok-error.txt" "ERROR (delta could not resolve its anchor)"
+expect "16.1 a full-marker block carrying ERROR is outside --only's set => COULD-NOT-MEASURE" \
+  COULD-NOT-MEASURE 4 "outside" -- "$TMP/tok-error.txt" --mode only --component tooling-tests --run-id run-1
+_mk_tok "$TMP/tok-refused.txt" "REFUSED (the diff changes files --delta cannot re-certify)"
+expect "16.2 a full-marker block carrying REFUSED is outside --only's set => COULD-NOT-MEASURE" \
+  COULD-NOT-MEASURE 4 "outside" -- "$TMP/tok-refused.txt" --mode only --component tooling-tests --run-id run-1
+# CONTROL: all three of --only's own tokens still reach a verdict, or the filter has become
+# refuse-everything and 16.1/16.2 prove nothing.
+_mk_tok "$TMP/tok-pass.txt" "PASS"
+expect "16.3 control: a full-gate PASS token is IN --only's set and still reaches a verdict" \
+  PASS 0 "tooling-tests" -- "$TMP/tok-pass.txt" --mode only --component tooling-tests --run-id run-1
+# ONE SOURCE OF TRUTH, DERIVED: the set the code enforces must equal the set the header
+# PUBLISHES for this mode, read out of the shipped script at run time (the 15.10 idiom), so
+# a token added to one and not the other reds instead of drifting.
+_only_pub=$(printf '%s' "$_pub_only" | sed -n 's/^\^RESULT: (\([^)]*\)).*/\1/p')
+_only_code=$(sed -n 's/^[[:space:]]*\(PASS|FAIL|PARTIAL\))[[:space:]]*$/\1/p' "$VERDICT" | head -1)
+if [ -n "$_only_pub" ] && [ "$_only_pub" = "$_only_code" ]; then
+  ok "16.4 the ENFORCED --only token set is DERIVED-equal to the one the header publishes"
+else
+  bad "16.4 the ENFORCED --only token set is DERIVED-equal to the one the header publishes" \
+      "published='$_only_pub' enforced='$_only_code'"
+fi
+
+echo "=== section 17: the component-line shape is anchored over BOTH real emitters (F2) ==="
+# The shape was validated as a PREFIX, so `fmt: PASS (1s) arbitrary text` was accepted as a
+# genuine component verdict. Anchored at BOTH ends now.
+#
+# THE OBVIOUS TIGHTENING IS WRONG AND WOULD RED CORRECT INPUT. Requiring the two spaces and
+# an annotation — because `_fm_summary_line` always emits one — assumes ONE emitter. There
+# are TWO: `_tree_boundary_meta_lines` emits `printf '%-18s %s (%ss)\n'`, with NO annotation
+# at all, and that is the shape a tree-integrity BOUNDARY block carries. Requiring the
+# annotation would reject a legitimate component line — a false FAIL, and a tool that reds on
+# correct input is the tool lanes learn to waive. Hence a fully anchored ALTERNATION over the
+# two real shapes; 17.3 is the regression guard for that trap, so do not "tidy" it away.
+SG1="$TMP/shape-garbage.txt"
+mk_only_summary "$SG1" run-1 PARTIAL tooling-tests "tooling-tests:     PASS (1112s) arbitrary text"
+expect "17.1 trailing garbage after a single space is NOT a component verdict" \
+  NOT-PASS 1 "absent" -- "$SG1" --mode only --component tooling-tests --run-id run-1
+SG2="$TMP/shape-annotated.txt"
+mk_only_summary "$SG2" run-1 PARTIAL tooling-tests "$(comp_line tooling-tests PASS 1112s '[unobservable:nested]')"
+expect "17.2 control: the ANNOTATED shape (_fm_summary_line) is accepted" \
+  PASS 0 "tooling-tests" -- "$SG2" --mode only --component tooling-tests --run-id run-1
+# THE REGRESSION GUARD. Byte-for-byte what `_tree_boundary_meta_lines` emits — reproduced
+# with its own printf, not described, so a fixture cannot drift from the emitter.
+SG3="$TMP/shape-unannotated.txt"
+mk_only_summary "$SG3" run-1 PARTIAL tooling-tests "$(printf '%-18s %s (%ss)' 'tooling-tests:' PASS 1112)"
+expect "17.3 the UNANNOTATED boundary shape (_tree_boundary_meta_lines) is accepted" \
+  PASS 0 "tooling-tests" -- "$SG3" --mode only --component tooling-tests --run-id run-1
+SG4="$TMP/shape-nosecs.txt"
+mk_only_summary "$SG4" run-1 PARTIAL tooling-tests "$(printf '%-18s %s (%ss)' 'tooling-tests:' PASS '')"
+expect "17.4 an empty duration field is not a component line (a truncated .result)" \
+  NOT-PASS 1 "absent" -- "$SG4" --mode only --component tooling-tests --run-id run-1
+
+# DERIVED, like the delta token set: there are exactly TWO distinct component-line printf
+# formats in the shipped gate. A THIRD emitter appearing must RED here rather than silently
+# not matching one of this tool's two alternatives.
+_emitters=$(grep -o "printf '%-18s[^']*'" "$REPO_ROOT/scripts/agent-gate.sh" | sort -u | grep -c '^')
+if [ "$_emitters" = 2 ]; then
+  ok "17.5 the shipped gate still has exactly TWO component-line emitters (the alternation covers both)"
+else
+  bad "17.5 the shipped gate still has exactly TWO component-line emitters (the alternation covers both)" \
+      "found $_emitters distinct printf formats — the alternation may no longer cover them all"
+fi
+
 # ---------------------------------------------------------------------------
 # CASE FLOORS (#3544). A span-replacing edit once silently deleted four cases from a
 # sibling suite and it reported `failed: 0` at 102 instead of 105 for a whole round — a
