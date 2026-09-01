@@ -530,21 +530,51 @@ pub const QUIET_OBSERVATION_BASELINE: Duration = Duration::from_millis(44);
 ///
 /// It is LIVE from construction: build it as the first statement of the test, so
 /// every stage including the first is charged.
-pub struct TestDeadline {
-    started: Instant,
+/// **THE CALIBRATED STATE, BEHIND ONE `RefCell`** (#3652, roborev job 271
+/// finding 5).
+///
+/// It used to be four plain fields mutated through `&mut self`, and that made a
+/// measurement UNAPPLIABLE while any stage was open: a [`Stage`] borrows the
+/// deadline immutably for its whole life, so the sibling test's five-write loop
+/// could not fold a completed acknowledgement in until the loop had finished and
+/// the stage had been dropped — i.e. an ack could not extend the deadline for the
+/// LATER writes of the same loop, which is precisely the calibration-inertness
+/// class #3515 treated as its most important.
+///
+/// Interior mutability rather than a restructured loop, because the alternatives
+/// each break something load-bearing: re-opening the stage per write would record
+/// five stages and fail the wait census (`assert_census_matches_run`), and
+/// tracking the stage's own timing outside the stage would leave two clocks for
+/// one stage. This type already holds `RefCell` state for exactly this reason
+/// (`opened`, `stages`, both written by a live `Stage`), so this is the shape it
+/// already had rather than a new mechanism.
+///
+/// Grouped in ONE cell and not four: every write here is one transition (a new
+/// scale implies a new span implies a new deadline instant), so a single borrow is
+/// what makes it impossible to publish half of it.
+#[derive(Debug)]
+struct Calibration {
     /// The instant past which no wait in this test may be STARTED (a wait already
     /// in flight can return its observed success a bounded moment later — see
     /// `poll_with_progress`). Moves LATER on calibration and never earlier.
     deadline: Instant,
     /// `clamp(base x scale, base, cap)`.
     span: Duration,
-    base: Duration,
-    cap: Duration,
     /// The LARGEST scale any in-band measurement has yielded so far.
     scale: f64,
     /// Every measurement folded in, with the scale it yielded, so a failure can
     /// report how the one bound was arrived at.
     observations: Vec<(&'static str, Duration, f64)>,
+}
+
+pub struct TestDeadline {
+    started: Instant,
+    /// The deadline instant, its span, the largest scale and every observation —
+    /// one cell, so a completed measurement can be folded in WHILE a stage is open
+    /// (#3652). See [`Calibration`].
+    cal: RefCell<Calibration>,
+    base: Duration,
+    cap: Duration,
     /// EVERY STAGE OPENED, in the order [`TestDeadline::stage`] created it.
     ///
     /// **RECORDED WHERE A STAGE COMES INTO EXISTENCE, NOT WHERE IT REPORTS**
@@ -578,12 +608,14 @@ impl TestDeadline {
         let started = Instant::now();
         Self {
             started,
-            deadline: started + base,
-            span: base,
+            cal: RefCell::new(Calibration {
+                deadline: started + base,
+                span: base,
+                scale: 1.0,
+                observations: Vec::new(),
+            }),
             base,
             cap,
-            scale: 1.0,
-            observations: Vec::new(),
             opened: RefCell::new(Vec::new()),
             stages: RefCell::new(Vec::new()),
         }
@@ -595,21 +627,37 @@ impl TestDeadline {
     /// takes the LARGEST scale seen so far — so calibration is monotone: it can
     /// only ever move the deadline LATER. A quiet host measures below the
     /// baseline, yields `scale == 1`, and gets exactly `base`.
-    pub fn calibrate(&mut self, name: &'static str, observed: Duration) {
+    /// **IT TAKES `&self`, SO A MEASUREMENT CAN BE APPLIED THE MOMENT IT COMPLETES
+    /// — EVEN WITH THE STAGE THAT PRODUCED IT STILL OPEN** (#3652, roborev job 271
+    /// finding 5). Through `&mut self` it could not: a live [`Stage`] borrows this
+    /// deadline, so the sibling test's five acknowledgements reached this function
+    /// only after all five waits had finished, and a slow FIRST ack could not
+    /// extend the deadline for the four writes that followed it.
+    ///
+    /// **REPEATED CALLS DO NOT COMPOUND, WHICH IS WHAT MAKES PER-MEASUREMENT
+    /// APPLICATION SAFE.** The span is `clamp(base x LARGEST scale, base, cap)` —
+    /// derived from the base every time and never from the current span — so
+    /// folding the same value in twice, or folding five values in one at a time
+    /// rather than the slowest of them at the end, yields the identical deadline.
+    /// What each call does add is one entry to `observations`, which is the
+    /// diagnostic record [`TestDeadline::describe`] renders: five acks now appear
+    /// as five observations, which is what actually happened.
+    pub fn calibrate(&self, name: &'static str, observed: Duration) {
         let scale = (observed.as_secs_f64() / QUIET_OBSERVATION_BASELINE.as_secs_f64()).max(1.0);
-        self.observations.push((name, observed, scale));
-        if scale <= self.scale {
+        let mut cal = self.cal.borrow_mut();
+        cal.observations.push((name, observed, scale));
+        if scale <= cal.scale {
             return;
         }
-        self.scale = scale;
+        cal.scale = scale;
         let scaled = Duration::from_secs_f64(self.base.as_secs_f64() * scale);
         let span = scaled.clamp(self.base, self.cap);
         debug_assert!(
-            span >= self.span,
+            span >= cal.span,
             "calibration may only ever LOOSEN the deadline"
         );
-        self.span = span;
-        self.deadline = self.started + span;
+        cal.span = span;
+        cal.deadline = self.started + span;
     }
 
     /// Open an attribution stage. A [`Stage`] carries a name and a start instant
@@ -629,7 +677,10 @@ impl TestDeadline {
 
     /// Time left before the one deadline.
     pub fn remaining(&self) -> Duration {
-        self.deadline.saturating_duration_since(Instant::now())
+        self.cal
+            .borrow()
+            .deadline
+            .saturating_duration_since(Instant::now())
     }
 
     /// How much of the test has been consumed. Deliberately NOT named `elapsed`:
@@ -641,30 +692,38 @@ impl TestDeadline {
 
     /// The deadline's span — `clamp(base x scale, base, cap)`.
     pub fn span(&self) -> Duration {
-        self.span
+        self.cal.borrow().span
     }
 
     /// How the one bound was arrived at. Reported by every failure.
     pub fn describe(&self) -> String {
-        let observations = if self.observations.is_empty() {
-            "none yet — the deadline is still its UNCALIBRATED base (design.md, \"The residual\": \
-             no measurement exists yet to calibrate it against)"
-                .to_string()
-        } else {
-            self.observations
-                .iter()
-                .map(|(name, value, scale)| format!("{name} {value:.3?} => scale {scale:.3}"))
-                .collect::<Vec<_>>()
-                .join(", ")
+        // ONE borrow for every calibrated fact this sentence states, so the span,
+        // the scale and the observations it lists cannot come from different
+        // moments (#3652 — a stage may now calibrate while this is being built,
+        // from another site in the same thread's call stack).
+        let (span, scale, observations) = {
+            let cal = self.cal.borrow();
+            let observations = if cal.observations.is_empty() {
+                "none yet — the deadline is still its UNCALIBRATED base (design.md, \"The \
+                 residual\": no measurement exists yet to calibrate it against)"
+                    .to_string()
+            } else {
+                cal.observations
+                    .iter()
+                    .map(|(name, value, scale)| format!("{name} {value:.3?} => scale {scale:.3}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            (cal.span, cal.scale, observations)
         };
         format!(
             "ONE per-test deadline {:.1?} = clamp(base {:.1?} x scale {:.3}, base, cap {:.1?}), \
              where scale is the LARGEST of [{observations}] over quiet baseline {:.0?}. ANY single \
              stage may consume the whole of it: there are no per-stage budgets. Observed progress \
              is reported as evidence and NEVER extends it. Spent {:.2?}, remaining {:.2?}",
-            self.span,
+            span,
             self.base,
-            self.scale,
+            scale,
             self.cap,
             QUIET_OBSERVATION_BASELINE,
             self.spent(),
@@ -726,7 +785,7 @@ impl TestDeadline {
             .unwrap_or_default();
         format!(
             "stage timings: {stages}{worst}\ndeadline {:.1?}: spent {:.2?}, remaining {:.2?}",
-            self.span,
+            self.span(),
             self.spent(),
             self.remaining()
         )
@@ -864,6 +923,14 @@ impl Stage<'_> {
 /// there, everything about the one deadline's arithmetic stays here.
 #[cfg(test)]
 mod census_tests;
+
+/// The CALIBRATION's own coverage, moved out under the campsite rule (#1135): this
+/// file was 50 lines from the 1500-line test threshold when #3652 added to it.
+/// Split by SUBJECT — everything about how a measurement becomes a deadline is
+/// there (including the round-8 arithmetic tests moved with it), everything about
+/// the stage/deadline machinery around it stays here.
+#[cfg(test)]
+mod calibration_tests;
 
 // ---------------------------------------------------------------------------
 // Unit coverage
@@ -1182,7 +1249,7 @@ fn the_baseline_is_quiet_inert_and_contention_active() {
         for series in run.series {
             let slowest = Duration::from_micros(series.quiet.1);
             quiet_slowest = quiet_slowest.max(series.quiet.1);
-            let mut d = TestDeadline::start(T1_DEADLINE_BASE, T1_DEADLINE_CAP);
+            let d = TestDeadline::start(T1_DEADLINE_BASE, T1_DEADLINE_CAP);
             d.calibrate(series.what, slowest);
             assert_eq!(
                 d.span(),
@@ -1223,7 +1290,7 @@ fn the_baseline_is_quiet_inert_and_contention_active() {
             }
 
             let observed = Duration::from_micros(binding);
-            let mut d = TestDeadline::start(T1_DEADLINE_BASE, T1_DEADLINE_CAP);
+            let d = TestDeadline::start(T1_DEADLINE_BASE, T1_DEADLINE_CAP);
             d.calibrate("recorded contention case", observed);
             assert!(
                 d.span() > T1_DEADLINE_BASE,
@@ -1271,66 +1338,6 @@ fn the_baseline_is_quiet_inert_and_contention_active() {
          {binding_level}, {contended_bound:.1?}). Both ends are DERIVED from the table in this \
          file — do not relabel the constant, adjust it or the recorded data."
     );
-}
-
-/// Calibration takes the LARGEST scale, only ever LOOSENS, and never exceeds the
-/// cap.
-#[test]
-fn calibration_takes_the_largest_scale_and_only_ever_loosens() {
-    let base = Duration::from_secs(100);
-    let cap = Duration::from_secs(300);
-
-    // Below the baseline: the identity.
-    let mut d = TestDeadline::start(base, cap);
-    d.calibrate("t_boot", QUIET_OBSERVATION_BASELINE / 10);
-    assert_eq!(d.span(), base, "a quiet observation must not scale");
-
-    // 2x the baseline loosens proportionally...
-    d.calibrate("t_ack", QUIET_OBSERVATION_BASELINE * 2);
-    assert_eq!(d.span(), Duration::from_secs(200));
-
-    // ...and a SMALLER later observation may not pull it back in: the deadline
-    // takes the largest scale seen, so calibration is monotone.
-    d.calibrate("t_ack(again)", QUIET_OBSERVATION_BASELINE / 2);
-    assert_eq!(
-        d.span(),
-        Duration::from_secs(200),
-        "a smaller later observation must not TIGHTEN the deadline: {}",
-        d.describe()
-    );
-
-    // A pathological observation is clamped at the cap, never beyond it.
-    d.calibrate("t_ack(pathological)", QUIET_OBSERVATION_BASELINE * 600);
-    assert_eq!(d.span(), cap, "the cap is the maximum: {}", d.describe());
-}
-
-/// The one bound reports its own derivation, so any failure can be audited.
-#[test]
-fn the_deadline_describes_its_own_derivation() {
-    let uncalibrated = TestDeadline::start(T1_DEADLINE_BASE, T1_DEADLINE_CAP).describe();
-    assert!(
-        uncalibrated.contains("UNCALIBRATED base"),
-        "the irreducible base must say so: {uncalibrated}"
-    );
-
-    let mut d = TestDeadline::start(T1_DEADLINE_BASE, T1_DEADLINE_CAP);
-    d.calibrate("t_ack", QUIET_OBSERVATION_BASELINE * 2);
-    let described = d.describe();
-    for needle in [
-        "ONE per-test deadline",
-        "base",
-        "scale",
-        "cap",
-        "t_ack",
-        "quiet baseline",
-        "no per-stage budgets",
-        "NEVER extends it",
-    ] {
-        assert!(
-            described.contains(needle),
-            "the deadline description must report {needle:?}: {described}"
-        );
-    }
 }
 
 /// A stage's waits share the ONE deadline, so none of them can double-spend it.

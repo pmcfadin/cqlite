@@ -75,6 +75,25 @@ fn synthetic_bufs(collectors: usize) -> (Arc<Mutex<StreamBufs>>, Vec<BufHandle>)
     (bufs, handles)
 }
 
+/// **A REAL CHILD FOR THE FAILURE PATHS THAT MUST TEAR ONE DOWN** (#3652, roborev
+/// job 265 finding 4).
+///
+/// `await_write_ack` takes the child so a missing acknowledgement can kill AND reap
+/// it, so its tests have to supply one. A `sleep` and not the product binary
+/// deliberately: what is under test is this harness's teardown, and a stand-in that
+/// cannot exit on its own makes "the child was still running afterwards"
+/// unambiguous — with the product binary, an exit of its own would be
+/// indistinguishable from a teardown.
+fn stand_in_child() -> std::process::Child {
+    std::process::Command::new("sleep")
+        .arg("300")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn `sleep 300` as a stand-in child")
+}
+
 /// OBSERVED PROGRESS MAY NOT EXTEND THE DEADLINE — the property the round-8
 /// descope exists to make true (design.md D6a).
 ///
@@ -968,6 +987,9 @@ fn an_already_expired_poll_takes_exactly_one_artifact_scan() {
             0
         },
         &stage,
+        // No triggering operation: this test is about the SCAN BOUND, and a
+        // trigger would add a step between the window and the loop (#3652).
+        || {},
         |_slice, _artifacts| None::<()>,
     );
     assert!(
@@ -1011,6 +1033,7 @@ fn every_poll_iteration_takes_exactly_one_artifact_scan() {
             0
         },
         &stage,
+        || {},
         |_slice, _artifacts| {
             steps.set(steps.get() + 1);
             if steps.get() >= ITERATIONS {
@@ -1204,7 +1227,11 @@ fn the_measured_acknowledgement_includes_the_write_itself() {
     // returns instantly is what makes the mis-measurement invisible.
     out.record("OK");
 
-    let t_ack = await_write_ack(&io, mark, "the stand-in write", &stage);
+    // A child is required because the FAILURE path tears one down (#3652); this
+    // test takes the success path, which never touches it, and reaps it below.
+    let mut child = stand_in_child();
+    let t_ack = await_write_ack(&io, mark, "the stand-in write", &stage, &mut child);
+    let _ = kill_and_reap(&mut child);
     assert!(
         t_ack >= WRITE_COST,
         "the acknowledgement measurement must span the write it acknowledges: got {t_ack:?} for \
@@ -1212,6 +1239,117 @@ fn the_measured_acknowledgement_includes_the_write_itself() {
          collapses to ~0 whenever the ack is already in hand, `scale` stays at 1.000, and the \
          one deadline does not expand under contention — #3515's own original defect, \
          reintroduced through a mis-placed timer"
+    );
+    drop((out, err));
+}
+
+/// **A MISSING ACKNOWLEDGEMENT KILLS AND REAPS THE CHILD BEFORE IT FAILS** (#3652,
+/// roborev job 265 finding 4).
+///
+/// An absent `OK` is the signature of a STALLED interactive child, and
+/// `await_write_ack` used to panic with that child — the very process being
+/// diagnosed — still running, along with the two reader threads blocked on its
+/// pipes. Pre-existing on `main` (`assert!(ack.is_some(), ...)` there does the
+/// same), which is why it was filed rather than treated as a regression.
+///
+/// The property is asserted on the CHILD'S STATE after the failure, not on the
+/// message: a message can say anything. `try_wait` answers `Some(status)` only for
+/// a process this harness has already reaped — a child left running answers `None`,
+/// which is the pre-fix reading.
+///
+/// The panic below is EXPECTED OUTPUT OF A PASSING TEST and it prints, loudly. The
+/// process-global panic hook is deliberately NOT touched: it is shared by every
+/// test in this binary, a swap can interleave with a concurrent test's and a panic
+/// between swap and restore skips the restore outright — the round-17 hazard
+/// (roborev job 262) that silenced panic output for everything that ran afterwards.
+#[test]
+fn a_missing_acknowledgement_kills_and_reaps_the_child_before_failing() {
+    let (io, out, err) = ChildIo::synthetic();
+    let mark = io.mark_from_the_start();
+    // An already-lapsed deadline, so the wait fails without waiting: nothing here
+    // depends on how long anything takes.
+    let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(25));
+    let stage = deadline.stage("b.write-ack");
+    assert!(
+        stage.remaining().is_zero(),
+        "the precondition of this test is an already-lapsed deadline"
+    );
+
+    let mut child = stand_in_child();
+    let pid = child.id();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        await_write_ack(&io, mark, "the stand-in write", &stage, &mut child)
+    }));
+    assert!(
+        failed.is_err(),
+        "no `OK` was ever recorded and the deadline had lapsed, so the wait must fail — this test          asserts what the FAILURE path does to the child"
+    );
+
+    match child.try_wait() {
+        Ok(Some(_reaped)) => {}
+        Ok(None) => panic!(
+            "the interactive child (pid {pid}) was STILL RUNNING after the acknowledgement              failure: the panic left the stalled process it was diagnosing alive, plus its              reader threads, for the rest of this test binary (#3652, job 265 finding 4)"
+        ),
+        Err(error) => panic!("could not establish the child's state after the failure: {error}"),
+    }
+    drop((out, err));
+}
+
+/// **A POLL'S OBSERVATION WINDOW COVERS THE OPERATION IT TRIGGERS** (#3652, roborev
+/// job 262 finding 2).
+///
+/// The poll's window is its transcript mark plus its artifact baseline, and both
+/// are taken INSIDE the poll — so a caller that performed the triggering operation
+/// first (`drop(stdin)`, a signal) had its window open AFTER the operation, and
+/// every line the child emitted in that gap was outside it. A timeout could then
+/// report `progress observed: NONE — 0 new output lines and 0 new durable
+/// artifacts` against evidence this harness had already produced, which is the
+/// wrong-cause class #3515 exists to remove.
+///
+/// The poll here runs against an already-lapsed deadline, so it declares its expiry
+/// on the first iteration and nothing depends on timing: what is asserted is which
+/// records the window CONTAINED.
+#[test]
+fn a_polls_window_covers_the_effects_of_the_operation_it_triggers() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let (io, out, err) = ChildIo::synthetic();
+
+    let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(25));
+    let stage = deadline.stage("triggered-window");
+    assert!(
+        stage.remaining().is_zero(),
+        "the precondition of this test is an already-lapsed deadline"
+    );
+
+    let fail = match poll_with_progress_triggered(
+        &io,
+        dir.path(),
+        &stage,
+        // Stands in for `drop(stdin)`: the operation whose EARLY effects the poll
+        // must be able to see. A real child emits exactly this kind of line while
+        // shutting down, before the poll's first look.
+        || out.record("flushing memtable before exit..."),
+        |_slice, _artifacts| None::<()>,
+    ) {
+        Err(fail) => fail,
+        Ok(((), _)) => panic!("the step never completes, so an expired poll must give up"),
+    };
+
+    let observed = fail.observed();
+    assert!(
+        observed.contains("1 new output line"),
+        "the line the poll's OWN trigger produced must be inside the window the poll reports          from — a window opened after the operation excludes it and the failure then denies          evidence this harness produced: {observed}"
+    );
+    assert!(
+        !observed.contains("progress observed while polling: NONE"),
+        "progress WAS observed: reporting NONE here is the defect (#3652): {observed}"
+    );
+    assert!(
+        fail.transcript().contains("flushing memtable before exit"),
+        "and the transcript the verdict was taken from must print it: {}",
+        fail.transcript()
     );
     drop((out, err));
 }

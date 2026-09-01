@@ -87,7 +87,7 @@ fn sigint_in_writable_session_flushes_before_exit() {
     let data_dir = wd.join("data");
     // THE ONE BOUND. Live from here, so every stage including the first is
     // charged; still uncalibrated, because no measurement exists yet.
-    let mut deadline = TestDeadline::start(T1_DEADLINE_BASE, T1_DEADLINE_CAP);
+    let deadline = TestDeadline::start(T1_DEADLINE_BASE, T1_DEADLINE_CAP);
 
     // Stage (a): session up.
     let (mut child, io, t_boot) = start_writable_session(&wd, &schema, &[], &deadline);
@@ -141,7 +141,10 @@ fn sigint_in_writable_session_flushes_before_exit() {
     .expect("write INSERT to child stdin");
     stdin.flush().expect("flush child stdin");
 
-    let t_ack = await_write_ack(&io, mark, "the INSERT (id=7)", &stage);
+    // The child is passed MUTABLY so a missing ack tears it down before failing
+    // (#3652, roborev job 265 finding 4): a stalled interactive child is the very
+    // thing an absent ack diagnoses, and it used to survive the panic.
+    let t_ack = await_write_ack(&io, mark, "the INSERT (id=7)", &stage, &mut child);
     stage.finish();
     deadline.calibrate("t_ack", t_ack);
 
@@ -298,7 +301,7 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     let schema = write_schema(tmp.path());
     let wd = tmp.path().join("wd");
     let data_dir = wd.join("data");
-    let mut deadline = TestDeadline::start(T2_DEADLINE_BASE, T2_DEADLINE_CAP);
+    let deadline = TestDeadline::start(T2_DEADLINE_BASE, T2_DEADLINE_CAP);
 
     // Stage (a): session up. The tiny threshold makes a handful of small rows
     // cross it, forcing a mid-session flush without writing 64MB over stdin.
@@ -353,11 +356,33 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
         .expect("write INSERT to child stdin");
         stdin.flush().expect("flush child stdin");
 
-        await_write_ack(&io, mark, &format!("write id={id}"), &acks);
-        t_ack = t_ack.max(before.elapsed());
+        await_write_ack(&io, mark, &format!("write id={id}"), &acks, &mut child);
+        let this_ack = before.elapsed();
+        t_ack = t_ack.max(this_ack);
+        // **THE MEASUREMENT IS APPLIED THE MOMENT IT COMPLETES** (#3652, roborev
+        // job 271 finding 5). Every ack used to reach `calibrate` only AFTER all
+        // five waits had finished, so a slow FIRST ack could not extend the
+        // deadline for the four writes that FOLLOWED it: the loop ran against a
+        // deadline calibrated from `t_boot` alone, which is the
+        // calibration-inertness class this harness treats as its most serious.
+        //
+        // Safe to call per write because calibration does not COMPOUND: the span
+        // is `clamp(base x LARGEST scale, base, cap)`, derived from the base and
+        // never from the current span, so five one-at-a-time calls and one call
+        // with the slowest of the five produce the identical deadline (see
+        // `TestDeadline::calibrate`). What it does add is one `observations` entry
+        // per write, which is the diagnostic record — and five acks really did
+        // happen.
+        //
+        // It takes `&self` for exactly this: through `&mut self` the live `acks`
+        // stage's borrow made a mid-loop calibration unspellable.
+        deadline.calibrate("t_ack(write)", this_ack);
     }
+    // The stage's own elapsed time over all five writes — the DIAGNOSTIC — and the
+    // slowest single ack, which is the value that DECIDED the scale above. It is
+    // deliberately NOT re-folded here: it has already been applied, and a second
+    // fold would record an observation for a measurement that was taken once.
     let t_acks_total = acks.finish();
-    deadline.calibrate("t_ack(slowest of 5)", t_ack);
 
     // Stage (c): a durable SSTable must exist BEFORE we close the session.
     let stage = deadline.stage("c.mid-session-flush");
@@ -405,10 +430,22 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
         &mut child,
         "closing the child's stdin (the EOF that ends the session)",
     );
-    drop(stdin);
-    let exited = poll_with_progress(&io, &data_dir, &stage, |slice, _artifacts| {
-        child.wait_timeout(slice).expect("wait_timeout on child")
-    });
+    // THE EOF IS PERFORMED BY THE POLL, AFTER THE POLL HAS ESTABLISHED ITS
+    // OBSERVATION WINDOW (#3652, roborev job 262 finding 2). `drop(stdin)` used to
+    // run HERE, before the call — and the poll's transcript mark and artifact
+    // baseline are taken INSIDE it, so every line the child emitted and every
+    // artifact it created between the `drop` and the poll's first read was outside
+    // the window: a timeout could report "progress observed: NONE" against
+    // evidence this harness had already produced. Moving the operation inside is
+    // what makes the ordering structural instead of a convention this call site
+    // has to remember; see `poll_with_progress_triggered`.
+    let exited = poll_with_progress_triggered(
+        &io,
+        &data_dir,
+        &stage,
+        || drop(stdin),
+        |slice, _artifacts| child.wait_timeout(slice).expect("wait_timeout on child"),
+    );
     let (status, _t_exit): (ExitStatus, Duration) = match exited {
         Ok(v) => v,
         Err(fail) => {
@@ -455,7 +492,8 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     );
     eprintln!(
         "[#3515]   b.write-acks {WRITES} writes in {t_acks_total:.3?} (slowest single ack \
-         {t_ack:.3?}, which is the calibration input)"
+         {t_ack:.3?}; #3652: EVERY ack is folded into the deadline as it completes, and the \
+         slowest is the one that decided the scale)"
     );
 
     // The census check, as in the sibling test (job 253, finding 3). This test's

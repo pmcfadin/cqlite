@@ -316,7 +316,47 @@ pub fn poll_with_progress<T>(
     stage: &Stage,
     step: impl FnMut(Duration, usize) -> Option<T>,
 ) -> PollOutcome<T> {
-    poll_with_progress_sampled(io, data_dir, || count_data_db(data_dir), stage, step)
+    poll_with_progress_sampled(io, data_dir, || count_data_db(data_dir), stage, || {}, step)
+}
+
+/// [`poll_with_progress`], but it PERFORMS the operation whose effects it observes
+/// — **AFTER establishing its observation window, never before** (#3652, roborev
+/// job 262 finding 2).
+///
+/// **THE DEFECT THIS EXISTS TO MAKE UNSPELLABLE.** A poll's window is a transcript
+/// [`Mark`] plus an artifact baseline, both taken inside the poll. So a caller that
+/// performed the triggering operation — closing the child's stdin, delivering a
+/// signal — and *then* called the poll had its window open AFTER the operation:
+/// every line the child emitted, and every artifact it created, in that gap was
+/// outside the window, and a timeout could report `progress observed: NONE — 0 new
+/// output lines and 0 new durable artifacts` against evidence the harness had
+/// already produced. That is the same shape as roborev job 253 finding 2 (a `t_ack`
+/// timer started after the write it measured) and job 243 finding 1 (a `Mark` taken
+/// after the `writeln!` whose response it awaited); [`Mark`] states the rule, and
+/// this makes the poll's own version of it structural rather than a convention a
+/// call site has to remember.
+///
+/// **THE RESIDUAL, STATED WHERE IT IS PAID.** The caller must still refuse to
+/// INITIATE the operation past the one deadline (`require_live_or_kill`, roborev job
+/// 253 finding 2), and that check necessarily happens BEFORE this call — so it now
+/// precedes the window establishment (one `mark()`, i.e. a lock acquisition, and one
+/// artifact scan) rather than the trigger itself. Both of those reads wait for
+/// nothing, and the alternative is the defect above.
+pub fn poll_with_progress_triggered<T>(
+    io: &ChildIo,
+    data_dir: &Path,
+    stage: &Stage,
+    trigger: impl FnOnce(),
+    step: impl FnMut(Duration, usize) -> Option<T>,
+) -> PollOutcome<T> {
+    poll_with_progress_sampled(
+        io,
+        data_dir,
+        || count_data_db(data_dir),
+        stage,
+        trigger,
+        step,
+    )
 }
 
 /// [`poll_with_progress`] with the artifact sample supplied by the caller.
@@ -332,6 +372,7 @@ fn poll_with_progress_sampled<T>(
     data_dir: &Path,
     mut sample: impl FnMut() -> usize,
     stage: &Stage,
+    trigger: impl FnOnce(),
     mut step: impl FnMut(Duration, usize) -> Option<T>,
 ) -> PollOutcome<T> {
     const SLICE: Duration = Duration::from_millis(100);
@@ -353,6 +394,13 @@ fn poll_with_progress_sampled<T>(
     // which is what makes the two halves of the progress report come from one
     // read (design.md D6b; job 247, finding 3).
     let mut last_artifact_at: Option<Instant> = None;
+    // THE TRIGGERING OPERATION, AFTER THE WINDOW AND BEFORE THE FIRST STEP
+    // (#3652, job 262 finding 2). Everything the operation causes — a line, an
+    // artifact — is therefore inside the window this poll decides and reports
+    // from. `poll_with_progress` passes a no-op: a poll with no operation of its
+    // own observes one issued by an earlier stage, which opened its own window
+    // before it.
+    trigger();
 
     loop {
         // THE ITERATION'S ONE SAMPLE OF EACH SIGNAL, reused by everything below
@@ -743,12 +791,16 @@ pub fn select_rows(
     {
         Some(status) => status,
         None => {
-            let _ = child.kill();
+            // Killed AND REAPED (#3652): the read-side child is the one being
+            // diagnosed, and leaving it unreaped leaves its two collector threads
+            // blocked on its pipes for the rest of the binary.
+            let teardown = kill_and_reap(&mut child);
             panic!(
                 "stage (e) durability-read: the read-side `cqlite --execute` child did not exit.\n\
                  query: `{query}`\n\
                  data dir: {}\n\
                  {}\n\
+                 {teardown}\n\
                  WHAT THIS ESTABLISHES: only that the independent read-only reopen did not finish \
                  before the test's deadline. It says NOTHING about whether the row is durable, and \
                  nothing about the write side, which had already exited cleanly. \
@@ -895,12 +947,14 @@ pub fn start_writable_session(
         &stage,
     );
     if let Err(end) = &ready {
-        let _ = child.kill();
+        // Killed AND REAPED through the one teardown (#3652).
+        let teardown = kill_and_reap(&mut child);
         panic!(
             "stage (a) session-up: the readiness banner was not observed on the child's stderr.\n\
              awaited substring on stderr: {MARKER_SESSION_READY:?}\n\
              {}\n\
              {}\n\
+             {teardown}\n\
              WHAT THIS ESTABLISHES: only that the banner was not observed before the deadline on \
              THIS host. It does NOT distinguish a child that never reached the interactive loop \
              from one that was never scheduled, nor either of those from drift in the product's \
@@ -915,6 +969,54 @@ pub fn start_writable_session(
     // `t_boot` is the stage's own spend, which starts before the spawn (above).
     let t_boot = stage.finish();
     (child, io, t_boot)
+}
+
+/// **THE ONE PLACE A CHILD IS TORN DOWN ON A FAILURE PATH: KILL *AND* REAP**
+/// (#3652, roborev job 265 finding 4).
+///
+/// Every failure site in this harness used to spell this `let _ = child.kill();`,
+/// which sends the signal and never waits — so the child it was diagnosing was
+/// left as a ZOMBIE for the rest of the test binary, and its reader threads stayed
+/// blocked on pipes nobody would ever close. `await_write_ack` did not even do
+/// that: it panicked with the interactive child — *the stalled process being
+/// diagnosed* — still running.
+///
+/// So the teardown is ONE function, and it returns a SENTENCE rather than
+/// printing: the caller owns its failure message, and what happened to the child
+/// is part of the evidence that message carries. It is deliberately reported
+/// rather than asserted — a kill that fails because the child had already exited
+/// is not a defect, and neither is one that fails because the test is already
+/// failing for another reason.
+///
+/// `wait()` is unbounded ON PURPOSE and cannot hang here: `Child::kill` sends
+/// `SIGKILL`, which no process can catch, block or ignore, so the only wait is for
+/// the kernel to reap. A bounded wait would need a fresh uncalibrated wall-clock
+/// constant — exactly what #3515 removed from this harness — to buy nothing.
+pub fn kill_and_reap(child: &mut std::process::Child) -> String {
+    let pid = child.id();
+    let killed = child.kill();
+    match child.wait() {
+        Ok(status) => format!(
+            "child teardown: pid {pid} was killed and REAPED before this failure was reported (it \
+             ended {status:?}), so it is not left running and its pipe readers are released{}",
+            match killed {
+                Ok(()) => String::new(),
+                // Not a defect: `kill` reports an error for a child that had
+                // already exited, which is the common case on a failure path.
+                Err(error) =>
+                    format!(" — the kill itself reported {error} (it had already exited)"),
+            }
+        ),
+        Err(error) => format!(
+            "child teardown: pid {pid} could NOT be reaped ({error}), so it may still be running. \
+             This is a defect in this test harness and NOT a statement about the property under \
+             test{}",
+            match killed {
+                Ok(()) => String::new(),
+                Err(kill_error) => format!("; the kill reported {kill_error}"),
+            }
+        ),
+    }
 }
 
 /// **REFUSE TO INITIATE NEW EVIDENCE-PRODUCING WORK PAST THE ONE DEADLINE**, and
@@ -933,9 +1035,12 @@ pub fn require_live_or_kill(
     what: &str,
 ) {
     if let Err(expired) = stage.check_live(what) {
-        let _ = child.kill();
+        // Killed AND REAPED through the one teardown, and what happened to it is
+        // part of the message (#3652): `let _ = child.kill()` left a zombie and
+        // its reader threads attached.
+        let teardown = kill_and_reap(child);
         panic!(
-            "{}\nchild transcript:\n{}\n{}",
+            "{}\n{teardown}\nchild transcript:\n{}\n{}",
             expired.describe(),
             io.transcript_text(),
             stage.report()
@@ -955,25 +1060,44 @@ pub fn require_live_or_kill(
 /// was derived, and what the child actually said. It does NOT conclude that the
 /// session dead-ended, nor that no interactive writable session exists (the two
 /// causes the retired messages named), neither of which a timeout establishes.
-pub fn await_write_ack(io: &ChildIo, mark: Mark, what: &str, stage: &Stage) -> Duration {
+///
+/// **IT TAKES THE CHILD MUTABLY SO THE FAILURE PATH CAN TEAR IT DOWN** (#3652,
+/// roborev job 265 finding 4). A missing acknowledgement is the signature of a
+/// STALLED interactive child, and this function used to panic with that child
+/// still running — leaking the very process it was diagnosing, plus the two reader
+/// threads blocked on its pipes, into the rest of the test binary. Every other
+/// failure site in this harness already took the child; this one is now the same
+/// shape, through the same [`kill_and_reap`].
+pub fn await_write_ack(
+    io: &ChildIo,
+    mark: Mark,
+    what: &str,
+    stage: &Stage,
+    child: &mut std::process::Child,
+) -> Duration {
     match io.wait_for(mark, Stream::Stdout, |l| l.trim() == "OK", stage) {
         Ok((_, took)) => took,
-        Err(end) => panic!(
-            "stage {}: {what} was not acknowledged with `OK` on the child's stdout.\n\
-             awaited on stdout: a line whose trimmed text is exactly \"OK\"\n\
-             {}\n\
-             {}\n\
-             WHAT THIS ESTABLISHES: only that no acknowledgement was observed before the test's \
-             deadline. It does NOT establish whether the write was rejected, is still in progress, \
-             was never read, or whether the child was descheduled — inspect the transcript below \
-             (the child prints `Error: ...` on stderr for a rejected statement).\n\
-             child transcript (the snapshot the verdict was taken from):\n{}\n{}",
-            stage.name(),
-            stage.describe(),
-            end.describe(),
-            end.transcript(),
-            stage.report()
-        ),
+        Err(end) => {
+            let teardown = kill_and_reap(child);
+            panic!(
+                "stage {}: {what} was not acknowledged with `OK` on the child's stdout.\n\
+                 awaited on stdout: a line whose trimmed text is exactly \"OK\"\n\
+                 {}\n\
+                 {}\n\
+                 {teardown}\n\
+                 WHAT THIS ESTABLISHES: only that no acknowledgement was observed before the \
+                 test's deadline. It does NOT establish whether the write was rejected, is still \
+                 in progress, was never read, or whether the child was descheduled — inspect the \
+                 transcript below (the child prints `Error: ...` on stderr for a rejected \
+                 statement).\n\
+                 child transcript (the snapshot the verdict was taken from):\n{}\n{}",
+                stage.name(),
+                stage.describe(),
+                end.describe(),
+                end.transcript(),
+                stage.report()
+            )
+        }
     }
 }
 

@@ -37,6 +37,7 @@
 //! of a line. That is the same doctrine one directory over (CLAUDE.md, #3312):
 //! control and data must not share a channel.
 
+use std::cell::Cell;
 use std::io::{BufRead, BufReader};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -144,6 +145,29 @@ impl Transcript {
             readers: ReaderSlots::new(streams),
             read_failures: Vec::new(),
         }
+    }
+
+    /// **THE ONE TERMINAL TRANSITION: A READER'S END AND ITS RESULT, TOGETHER**
+    /// (#3652, roborev job 262 finding 1, re-found independently by job 271).
+    ///
+    /// The two facts used to be written under SEPARATE lock acquisitions —
+    /// `ReaderHandle::read_failed` pushed the result, `impl Drop` set the slot —
+    /// so a snapshot taken between them held a failure for a reader it still
+    /// counted as `Open`. That pairing is not merely untidy: `pipe_status` reads
+    /// the OPEN COUNT first, so a store whose only reader had failed but not yet
+    /// dropped derived `AllOpen` and DISCARDED the failure note, and
+    /// `stream_status` answered `Open` for a stream whose reader was finished —
+    /// which is exactly the "wait out the whole deadline and then blame it"
+    /// wrong-cause path round 18 removed, reintroduced through a lock window.
+    ///
+    /// Both fields belong to this store, so the transition is ONE method on it
+    /// and there is no interleaving point left to observe. `failure` is `None`
+    /// for a reader that ended at EOF.
+    fn reader_ended(&mut self, stream: Stream, failure: Option<String>) {
+        if let Some(note) = failure {
+            self.read_failures.push((stream, note));
+        }
+        self.readers.set(stream, ReaderSlot::Ended);
     }
 
     fn append(&mut self, stream: Stream, text: String) {
@@ -271,6 +295,21 @@ pub struct ReaderHandle {
     /// misattribution the per-stream verdict below is decided from (CLAUDE.md,
     /// #3312: control and data must not share a channel).
     stream: Stream,
+    /// **THIS HANDLE HAS ALREADY MADE ITS ONE TERMINAL TRANSITION** (#3652).
+    ///
+    /// A reader ends exactly once, and [`Transcript::reader_ended`] is the only
+    /// way it ends. `read_failed` performs that transition with the result, so
+    /// the `Drop` that follows it must not enter the transition path a second
+    /// time — not because setting an already-`Ended` slot would corrupt anything
+    /// (the write is idempotent) but because "exactly one terminal transition per
+    /// reader" is then a property of this type rather than of the arithmetic in
+    /// the store, and nothing later can make the second write non-idempotent
+    /// without failing here first.
+    ///
+    /// A `Cell` and not an `AtomicBool`: a handle is owned by ONE reader thread —
+    /// `spawn_reader` moves it in and every method takes `&self` — so the flag is
+    /// never read across threads, and `Cell<bool>` is `Send`.
+    ended: Cell<bool>,
 }
 
 impl ReaderHandle {
@@ -300,21 +339,38 @@ impl ReaderHandle {
     /// stake is the CAUSE a failure reports, not a verdict: the awaited line is
     /// absent in both cases. It is stored, never rendered from the reader thread,
     /// so the message and the decision still come from one snapshot.
+    /// **THE RESULT AND THE CLOSE ARE ONE TRANSITION, UNDER ONE LOCK** (#3652,
+    /// job 262 finding 1 / job 271). This used to push the result and leave the
+    /// reader's slot `Open` until `Drop` ran, so a snapshot taken in between held
+    /// a failure for a reader still counted as open — see
+    /// [`Transcript::reader_ended`] for what that made `pipe_status` and
+    /// `stream_status` report.
     pub fn read_failed(&self, error: impl std::fmt::Display) {
         if let Ok(mut log) = self.log.lock() {
             let stream = self.stream;
-            log.read_failures.push((stream, error.to_string()));
+            log.reader_ended(stream, Some(error.to_string()));
+            // Recorded only where the transition actually happened: a poisoned
+            // lock records nothing, and the `Drop` below must then still try.
+            self.ended.set(true);
         }
     }
 }
 
 impl Drop for ReaderHandle {
     fn drop(&mut self) {
+        // ALREADY TRANSITIONED, WITH ITS RESULT, UNDER ONE LOCK (#3652): a reader
+        // that failed ended AT `read_failed`, so there is nothing left to do here
+        // and nothing to record twice.
+        if self.ended.get() {
+            return;
+        }
         if let Ok(mut log) = self.log.lock() {
             // WHICH pipe ended, not merely that one did (round 18): a bare count
             // cannot tell a wait whether the reader IT is waiting on is the one
-            // that went away.
-            log.readers.set(self.stream, ReaderSlot::Ended);
+            // that went away. `None`: this reader ended at EOF — the terminal
+            // result is what distinguishes the two, and it goes through the SAME
+            // transition (#3652).
+            log.reader_ended(self.stream, None);
         }
     }
 }
@@ -968,6 +1024,7 @@ impl ChildIo {
             .map(|stream| ReaderHandle {
                 log: Arc::clone(&log),
                 stream: *stream,
+                ended: Cell::new(false),
             })
             .collect();
         (Self { log }, handles)
@@ -1229,6 +1286,94 @@ mod pipe_status_tests {
             "an unreadable store has NOT established that output is over: treating it as \
              terminal would abandon a wait on the strength of a measurement that failed"
         );
+    }
+
+    /// **A SNAPSHOT CAN NEVER HOLD A FAILURE FOR A READER IT STILL COUNTS AS
+    /// OPEN** (#3652, roborev job 262 finding 1, re-found independently by job
+    /// 271).
+    ///
+    /// `read_failed` recorded the terminal result and `Drop` marked the reader
+    /// ended under SEPARATE lock acquisitions, so a snapshot taken between them
+    /// held exactly that impossible pairing. What it cost is not tidiness:
+    /// `pipe_status` tests the OPEN COUNT before it looks at any terminal result,
+    /// so the note was DISCARDED, and `stream_status` answered `Open` for a stream
+    /// whose reader was finished — the wrong-cause path round 18 removed,
+    /// reintroduced through a lock window.
+    ///
+    /// **THE INTERLEAVING IS FORCED, NOT RACED.** The state a snapshot could catch
+    /// between those two acquisitions is precisely the state of a handle that has
+    /// called `read_failed` and has not yet been dropped — a reader thread
+    /// descheduled between the two lines of `spawn_reader`'s `Err` arm. So this
+    /// test simply does not drop the handle, and the ordering holds on every host
+    /// and at every load rather than depending on a scheduler.
+    #[test]
+    fn a_failed_reader_is_never_snapshotted_as_still_open() {
+        // TWO readers: the one that fails, and a sibling that stays attached — the
+        // shape where the old ordering lost the failure ENTIRELY, because
+        // `readers_open() == 2` derived `AllOpen` and nothing consulted the note.
+        let (io, handles) = ChildIo::with_readers(&[Stream::Stdout, Stream::Stderr]);
+        let mark = io.mark();
+        let mut handles = handles.into_iter();
+        let out = handles.next().expect("stdout handle");
+        let err = handles.next().expect("stderr handle");
+        err.read_failed(std::io::Error::other("simulated pipe failure"));
+        // DELIBERATELY NOT DROPPED YET: this is the interleaving point.
+
+        let snapshot = io.snapshot(mark);
+        match snapshot.stream_status(Stream::Stderr) {
+            StreamStatus::Ended(StreamEnded::ReadFailed { note }) => assert!(
+                note.contains("simulated pipe failure"),
+                "the ended stream must carry its own terminal result: {note}"
+            ),
+            other => panic!(
+                "a reader that has recorded a read failure is FINISHED, and this snapshot reports                  it as {other:?}: the failure and the close were written under separate locks, so                  a wait on this stream is told its line can still arrive and will sleep out the                  whole deadline before blaming it"
+            ),
+        }
+        assert_eq!(
+            snapshot.stream_status(Stream::Stdout),
+            StreamStatus::Open,
+            "the SIBLING reader is untouched: the transition must end the failed reader's stream              and no other"
+        );
+        match snapshot.pipe_status() {
+            PipeStatus::PartiallyClosed {
+                open: 1,
+                ended: 1,
+                failure_note: Some(note),
+            } => assert!(
+                note.contains("stderr reader") && note.contains("simulated pipe failure"),
+                "the whole-store state must attribute the failure to the pipe that had it: {note}"
+            ),
+            other => panic!(
+                "one reader had failed and one was still attached, and the whole-store derivation                  reports {other:?}. `AllOpen` here is the defect: the recorded failure is                  dropped on the floor because the open COUNT is what this derivation tests first"
+            ),
+        }
+        drop((out, err));
+
+        // AND THE CONSEQUENCE THAT DECIDES A WAIT, with a single reader: whether
+        // output is OVER. `read_failed` on the only reader means no further line
+        // can ever arrive — but the old ordering left that reader `Open` until its
+        // handle dropped, so this derived `AllOpen`, `is_terminal()` was false, and
+        // every wait and poll kept sleeping until the deadline.
+        let (io, handles) = ChildIo::with_readers(&[Stream::Stdout]);
+        let mark = io.mark();
+        let only = handles.into_iter().next().expect("the one handle");
+        only.read_failed(std::io::Error::other("the only reader failed"));
+        let status = io.snapshot(mark).pipe_status();
+        match &status {
+            PipeStatus::ReaderFailed { note } => assert!(
+                note.contains("the only reader failed"),
+                "the terminal state must carry the result that produced it: {note}"
+            ),
+            other => panic!(
+                "every reader had ended (in an I/O error) and the derivation reports {other:?}"
+            ),
+        }
+        assert!(
+            status.is_terminal(),
+            "no further line can arrive once the only reader has failed, so continuing to wait              could only delay the same verdict: {}",
+            status.describe()
+        );
+        drop(only);
     }
 
     /// **A WAIT AGAINST AN UNREADABLE STORE REPORTS THAT IT COULD NOT MEASURE** —
