@@ -16499,12 +16499,15 @@ run_dep_duplicates() {
 # so this file measures BEHAVIOUR against real code and nothing here depends on it; mechanization
 # is #3499. Hermetic: temp dir only, no cargo, no datasets, no network, never invokes the gate.
 # Also runs scripts/tests/test_dep_duplicates_ratchet.sh (#1700), the non-vacuity proof
-# for the ADVISORY dep-duplicates component: 33 cases drive
+# for the ADVISORY dep-duplicates component: its cases drive
 # scripts/ci/check-dep-duplicates.sh over PLANTED cargo-tree output (shim `cargo` +
-# scratch copy of the guard, no test seam) and assert the emitted TOKENS, and its last
-# three substitute a stub guard in a detached worktree to prove the COMPONENT records SKIP
-# — never PASS — when nothing was measured. Offline; SKIP-aware where cargo or
-# `git worktree` is unavailable.
+# scratch copy of the guard, no test seam) and assert the emitted TOKENS, and its G1/G2
+# cases substitute a stub guard in a detached worktree to prove the COMPONENT records PASS
+# for BOTH affirmative verdicts and SKIP — never PASS — when nothing was measured. Its ONE
+# live case accepts either affirmative verdict and reports an unmeasurable host as SKIPPED,
+# deliberately: this suite runs HERE, so a suite that red on a legitimate ADVISORY-INCREASE
+# would fail the full gate and defeat the component's advisory contract. It carries its own
+# case FLOOR. Offline; SKIP-aware where cargo or `git worktree` is unavailable.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -17913,17 +17916,20 @@ run_tooling_tests() {
   fi
 
   # dep-duplicates ratchet self-test (#1700). Proves the ADVISORY guard actually FIRES,
-  # which for an always-non-failing guard is the harder property: 33 cases drive
+  # which for an always-non-failing guard is the harder property: its cases drive
   # scripts/ci/check-dep-duplicates.sh over PLANTED cargo-tree output (a shim `cargo` on
   # PATH and a scratch copy of the guard — there is no test seam) and assert the emitted
   # TOKENS, not exit statuses: NO-INCREASE / ADVISORY-INCREASE naming who grew /
   # RATCHET-LOOSE / colour-immunity with a positive control that the fixture really carries
   # escapes / an empty-but-legitimate ZERO kept distinct from an unparseable read / every
-  # UNMEASURABLE and baseline-garbage refusal / the --regenerate round trip. Its last three
-  # cases (G2) substitute a stub guard in a detached scratch worktree and assert the GATE
-  # COMPONENT records SKIP — never PASS — for an unmeasurable exit, for a zero exit with no
-  # verdict line, and for an unexpected status: the vacuous-pass guard for the one component
-  # that may never FAIL. Cheap and offline (the only cargo is a warm metadata probe); it
+  # UNMEASURABLE and baseline-garbage refusal / the --regenerate round trip / a MIXED delta
+  # where one metric grows while the other shrinks. Its G1/G2 cases substitute a stub guard
+  # in a detached scratch worktree and assert the GATE COMPONENT records PASS for a clean
+  # measurement AND for an ADVISORY-INCREASE (naming the crates), and SKIP — never PASS —
+  # for an unmeasurable exit, a zero exit with no verdict line, and an unexpected status:
+  # the vacuous-pass guard for the one component that may never FAIL. Its ONE live case (G3)
+  # accepts either affirmative verdict and reports an unmeasurable host SKIPPED, so this
+  # component cannot red on correct input. Cheap and offline (the only cargo is a warm metadata probe); it
   # SKIPs its live/gate cases where cargo or `git worktree` is unavailable. A failure FAILs
   # the component, mirroring the guards above.
   echo ">>> [$name] bash scripts/tests/test_dep_duplicates_ratchet.sh"

@@ -44,14 +44,29 @@
 #                             fresh baseline still reports ADVISORY-INCREASE (proving the
 #                             file was written from the measurement, not a template)
 #   P13 usage              -> an unrecognized argument exits 2
-#   L1  the real tree      -> the committed guard + committed baseline agree (SKIP-aware)
-#   G1  gate component     -> `--only dep-duplicates` records PASS with the driver-named
-#                             annotation and no UNDECLARED
-#   G2  gate SKIP paths    -> with the guard substituted for a stub, the component records
-#                             SKIP for exit 3 AND for a zero exit with NO verdict line —
-#                             never PASS. This is the vacuous-pass guard, and it is the
-#                             reason the component may never fail: SKIP is the only way it
-#                             can say "nothing was measured".
+#   L1  the real tree      -> the committed guard + committed baseline agree; BOTH
+#                             affirmative verdicts pass and a documented UNMEASURABLE is
+#                             reported SKIPPED (see G3 for why)
+#   G1  gate component     -> PLANTED, in a scratch worktree with the guard substituted:
+#                             a clean measurement records PASS with the driver-named
+#                             annotation and the affirmative line echoed (G1a); an
+#                             ADVISORY-INCREASE records PASS too, naming the crates (G1b);
+#                             a verdict with no `probe … INVOKED` line records the driver
+#                             as NOT REACHED rather than claiming a cargo run (G1c)
+#   G2  gate SKIP paths    -> same substitution: the component records SKIP for exit 3,
+#                             for a zero exit with NO verdict line, and for an unexpected
+#                             rc — never PASS. This is the vacuous-pass guard, and it is
+#                             the reason the component may never fail: SKIP is the only
+#                             way it can say "nothing was measured".
+#   G3  the live component -> the committed component over the REAL workspace. The
+#                             DETERMINISTIC assertions live in G1/G2 against planted
+#                             input, deliberately: asserting them here made the suite —
+#                             and therefore the FULL GATE, via tooling-tests — red on
+#                             correct input, since a legitimate ADVISORY-INCREASE or a
+#                             documented UNMEASURABLE are both correct behaviour. G3
+#                             accepts either affirmative verdict, reports a live SKIP as
+#                             SKIPPED, and still FAILS on a FAIL, a missing component line
+#                             or a PASS with no echoed measurement.
 
 set -uo pipefail
 
@@ -338,72 +353,141 @@ else
     0:*'verdict NO-INCREASE'*)   ok "L1: the committed guard and the committed baseline agree on the real workspace (verdict NO-INCREASE)" ;;
     0:*'verdict ADVISORY-INCREASE'*) ok "L1: the committed guard measured the real workspace and reports ADVISORY-INCREASE (non-failing; the baseline wants regenerating)" ;;
     3:*)                         skipped "L1: the real workspace could not be measured here ($(printf '%s' "$OUT" | grep -o 'cause=[a-z-]*' | head -1))" ;;
+    # DELIBERATELY NOT SKIPPED, and the asymmetry with G3 is the point: exit 4 means the
+    # COMMITTED baseline in THIS checkout does not parse. That is a repository defect (a
+    # truncation, a hand-edit, a bad merge), not a property of this host, and it is the one
+    # thing L1 exists to catch — a suite that skipped here would let a corrupt baseline ride.
+    # G3 accepts the same state as a SKIP because it asserts the COMPONENT'S MAPPING from
+    # guard output to SUMMARY status, which is correct for every non-measuring cause.
+    4:*)                         bad "L1: the COMMITTED baseline $BASELINE_REL does not parse: $(printf '%s' "$OUT" | grep -o 'cause=[a-z-]* detail=.*' | head -1)" ;;
     *)                           bad "L1: rc=$RC with no verdict line: $(printf '%s' "$OUT" | tr '\n' '|')" ;;
   esac
 fi
 
-# --- G1/G2: the gate component ------------------------------------------
-# G1 runs the REAL component through the gate (`--only dep-duplicates` selects nothing
-# else, so this nesting cannot recurse into tooling-tests). G2 needs the guard SUBSTITUTED
-# — the component has no seam either — so it uses a detached scratch worktree.
+# --- G/G2/G3: the gate component -----------------------------------------
+# TWO KINDS OF CASE, AND THE SPLIT IS THE POINT (roborev finding on #1700).
+#
+# The component's contract has a DETERMINISTIC half (guard output -> SUMMARY status)
+# and a HOST-DEPENDENT half (what the real workspace measures today). Asserting the
+# deterministic half AGAINST THE LIVE WORKSPACE is what made this suite red on correct
+# input: a legitimate `ADVISORY-INCREASE` failed the `0 INCREASE RECOGNISED` assertion,
+# and a documented UNMEASURABLE (offline registry, no cargo, broken lockfile) failed the
+# PASS assertion — and because this suite runs under `tooling-tests`, EITHER state failed
+# the FULL GATE. That defeats the component's own advisory/SKIP contract through the back
+# door and is exactly CLAUDE.md's "a lane that reds on correct input is the lane agents
+# learn to waive".
+#
+#   G1a/G1b/G1c + G2a/G2b/G2c   PLANTED. The guard is SUBSTITUTED in a scratch worktree
+#                               (the component has no seam either), so every mapping from
+#                               guard output to SUMMARY status is pinned EXACTLY, with no
+#                               dependence on what this box's dependency graph looks like.
+#   G3                          LIVE. The real component over the real workspace. BOTH
+#                               affirmative verdicts are correct component behaviour, so
+#                               BOTH pass; a documented SKIP is reported SKIPPED, never a
+#                               failure. It keeps an affirmative assertion — the SUMMARY
+#                               line must exist and the guard's own measurement must be
+#                               echoed — so it is not a tautology; only the set of
+#                               CORRECT outcomes is widened.
 if [ ! -f "$GATE" ]; then
-  skipped "G1/G2: scripts/agent-gate.sh is absent"
-elif [ -z "$(type -P cargo || true)" ]; then
-  skipped "G1/G2: no cargo on PATH — the component would SKIP for an unrelated reason"
+  skipped "G1/G2/G3: scripts/agent-gate.sh is absent"
 else
-  g1_sum="$TMPROOT/g1-summary.txt"
-  ( cd "$REPO_ROOT" && AGENT_GATE_SUMMARY_FILE="$g1_sum" AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
-      bash "$GATE" --only dep-duplicates ) >"$TMPROOT/g1.log" 2>&1
-  g1_line="$(grep -E '^dep-duplicates: +(PASS|FAIL|SKIP)' "$g1_sum" 2>/dev/null | head -1)"
-  case "$g1_line" in
-    'dep-duplicates:'*PASS*) ok "G1: the component records PASS on the real workspace" ;;
-    '')                      bad "G1: no dep-duplicates component line in the SUMMARY — the component did not run" ;;
-    *)                       bad "G1: expected PASS, got: $g1_line" ;;
-  esac
-  case "$g1_line" in
-    *UNDECLARED*|*UNCLASSIFIED*)
-      bad "G1: the feature-matrix annotation reads UNDECLARED/UNCLASSIFIED — the declared class does not match how cargo is really invoked (#3453): $g1_line" ;;
-    *'via check-dep-duplicates.sh'*'feature set NOT observed'*)
-      ok "G1: the annotation NAMES the driver and claims no feature set (#3453 indirect class, recorded from the guard's own probe line)" ;;
-    *)  bad "G1: unexpected annotation: $g1_line" ;;
-  esac
-  if grep -q '0 INCREASE RECOGNISED' "$TMPROOT/g1.log"; then
-    ok "G1: the component echoes the guard's affirmative measurement into the gate log"
-  else
-    bad "G1: the component recorded a status without echoing the guard's affirmative measurement"
-  fi
-
-  # G2 — THE VACUOUS-PASS GUARD. Two stubs, in one scratch checkout.
   wt="$TMPROOT/wt"
   if git -C "$REPO_ROOT" worktree add --detach "$wt" HEAD >"$TMPROOT/wt.log" 2>&1; then
     WORKTREES+=("$wt")
-    # G2_LOG is set by the CALLER, not inside g2_run: `line=$(g2_run …)` runs the
-    # function in a command-substitution SUBSHELL, so an assignment made in there is
-    # discarded (it was, and the suite died on an unbound variable mid-run).
-    G2_LOG=""
-    g2_run() { # <stub body> -> echoes the component's SUMMARY status; log goes to $G2_LOG
+    # COMPONENT_LOG is set by the CALLER, not inside component_run: `line=$(component_run …)`
+    # runs the function in a command-substitution SUBSHELL, so an assignment made in there
+    # is discarded (it was, and the suite died on an unbound variable mid-run).
+    COMPONENT_LOG=""
+    component_run() { # <stub body> -> echoes the component's SUMMARY status; log -> $COMPONENT_LOG
       printf '%s\n' "$1" > "$wt/$GUARD_REL"
       chmod +x "$wt/$GUARD_REL"
-      local s="${G2_LOG%.log}.summary.txt"
+      local s="${COMPONENT_LOG%.log}.summary.txt"
       ( cd "$wt" && AGENT_GATE_SUMMARY_FILE="$s" AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
-          bash "$wt/scripts/agent-gate.sh" --only dep-duplicates ) >"$G2_LOG" 2>&1
+          bash "$wt/scripts/agent-gate.sh" --only dep-duplicates ) >"$COMPONENT_LOG" 2>&1
       grep -E '^dep-duplicates: +(PASS|FAIL|SKIP)' "$s" 2>/dev/null | head -1
     }
-    G2_LOG="$TMPROOT/g2a.log"
-    line=$(g2_run '#!/usr/bin/env bash
+
+    # G1a — THE CLEAN MEASUREMENT, planted. This is where the deterministic PASS
+    # assertion belongs: the stub emits exactly what the real guard emits on a clean
+    # tree, so PASS, the driver-named annotation and the echoed affirmative line are
+    # asserted against an input this suite CONTROLS.
+    COMPONENT_LOG="$TMPROOT/g1a.log"
+    line=$(component_run '#!/usr/bin/env bash
+echo "dep-duplicates: probe cargo tree -d --workspace INVOKED (rc 0)"
+echo "dep-duplicates: MEASURED 4 duplicate instance(s) / 2 duplicated crate(s) from cargo tree -d --workspace"
+echo "dep-duplicates: 0 INCREASE RECOGNISED — 4 duplicate instance(s) / 2 duplicated crate(s) vs baseline 4/2"
+echo "dep-duplicates: verdict NO-INCREASE (4/2 vs baseline 4/2)"
+exit 0')
+    case "$line" in
+      *PASS*) ok "G1a: a clean NO-INCREASE measurement is recorded PASS" ;;
+      '')     bad "G1a: no dep-duplicates component line in the SUMMARY — the component did not run" ;;
+      *)      bad "G1a: expected PASS, got: $line" ;;
+    esac
+    case "$line" in
+      *UNDECLARED*|*UNCLASSIFIED*)
+        bad "G1a: the feature-matrix annotation reads UNDECLARED/UNCLASSIFIED — the declared class does not match how cargo is really invoked (#3453): $line" ;;
+      *'via check-dep-duplicates.sh'*'feature set NOT observed'*)
+        ok "G1a: the annotation NAMES the driver and claims no feature set (#3453 indirect class, recorded from the guard's own probe line)" ;;
+      *)  bad "G1a: unexpected annotation: $line" ;;
+    esac
+    if grep -q '0 INCREASE RECOGNISED' "$COMPONENT_LOG"; then
+      ok "G1a: the component echoes the guard's AFFIRMATIVE measurement into the gate log (never a bare 0)"
+    else
+      bad "G1a: the component recorded a status without echoing the guard's affirmative measurement"
+    fi
+
+    # G1b — AN INCREASE IS STILL PASS, and LOUDLY. The other half of #1700 AC2: this
+    # component emits no FAIL at all, so an increase must be recorded PASS with the
+    # ADVISORY-INCREASE block echoed where a human will see it.
+    COMPONENT_LOG="$TMPROOT/g1b.log"
+    line=$(component_run '#!/usr/bin/env bash
+echo "dep-duplicates: probe cargo tree -d --workspace INVOKED (rc 0)"
+echo "dep-duplicates: MEASURED 6 duplicate instance(s) / 3 duplicated crate(s) from cargo tree -d --workspace"
+echo "dep-duplicates: ADVISORY-INCREASE the duplicate census GREW: 6 instance(s) vs baseline 4 (delta +2), 3 crate(s) vs baseline 2 (delta +1)"
+echo "dep-duplicates: ADVISORY-INCREASE crates newly duplicated: baz(2)"
+echo "dep-duplicates: verdict ADVISORY-INCREASE (6/3 vs baseline 4/2)"
+exit 0')
+    case "$line" in
+      *PASS*) ok "G1b: an ADVISORY-INCREASE is recorded PASS — this component emits no FAIL at all (#1700 AC2)" ;;
+      *)      bad "G1b: an increase was recorded as '${line:-<no component line>}' instead of PASS" ;;
+    esac
+    if grep -q 'ADVISORY-INCREASE crates newly duplicated: baz(2)' "$COMPONENT_LOG"; then
+      ok "G1b: the ADVISORY-INCREASE block is echoed into the gate log NAMING the crates responsible"
+    else
+      bad "G1b: an increase was recorded PASS without echoing the crates responsible — a silent advisory is no advisory"
+    fi
+
+    # G1c — REACH IS READ FROM THE PROBE LINE, NEVER FROM THE STATUS (#3453). A guard
+    # that reached a verdict without printing `probe … INVOKED` must NOT have an
+    # invocation attributed to it: claiming a cargo run that did not happen is the
+    # defect the reach recording exists to fix.
+    COMPONENT_LOG="$TMPROOT/g1c.log"
+    line=$(component_run '#!/usr/bin/env bash
+echo "dep-duplicates: MEASURED 4 duplicate instance(s) / 2 duplicated crate(s) from cargo tree -d --workspace"
+echo "dep-duplicates: 0 INCREASE RECOGNISED — 4 duplicate instance(s) / 2 duplicated crate(s) vs baseline 4/2"
+echo "dep-duplicates: verdict NO-INCREASE (4/2 vs baseline 4/2)"
+exit 0')
+    case "$line" in
+      *'never reached'*) ok "G1c: with no probe line the annotation records the driver as NOT REACHED rather than claiming an unobserved cargo run (#3453)" ;;
+      *)                 bad "G1c: a verdict with no probe line produced: ${line:-<no component line>}" ;;
+    esac
+
+    # G2 — THE VACUOUS-PASS GUARD. Three stubs, same scratch checkout.
+    COMPONENT_LOG="$TMPROOT/g2a.log"
+    line=$(component_run '#!/usr/bin/env bash
 echo "dep-duplicates: SKIP-UNMEASURABLE cause=planted-cause detail=planted"
 exit 3')
     case "$line" in
       *SKIP*) ok "G2a: an UNMEASURABLE guard (exit 3) is recorded SKIP, never PASS — a pass may not rest on an unmeasured state" ;;
       *)      bad "G2a: expected SKIP, got: ${line:-<no component line>}" ;;
     esac
-    if grep -q 'cause=planted-cause' "$G2_LOG"; then
+    if grep -q 'cause=planted-cause' "$COMPONENT_LOG"; then
       ok "G2a: the component NAMES the guard's own cause rather than a generic SKIP"
     else
       bad "G2a: the guard's cause did not reach the component's output"
     fi
-    G2_LOG="$TMPROOT/g2b.log"
-    line=$(g2_run '#!/usr/bin/env bash
+    COMPONENT_LOG="$TMPROOT/g2b.log"
+    line=$(component_run '#!/usr/bin/env bash
 echo "dep-duplicates: probe cargo tree -d --workspace INVOKED (rc 0)"
 echo "dep-duplicates: MEASURED 0 duplicate instance(s) / 0 duplicated crate(s)"
 exit 0')
@@ -411,8 +495,8 @@ exit 0')
       *SKIP*) ok "G2b: a zero exit with NO verdict line is recorded SKIP — the vacuous pass this component must never emit" ;;
       *)      bad "G2b: a verdict-less zero exit was recorded as '${line:-<no component line>}' instead of SKIP" ;;
     esac
-    G2_LOG="$TMPROOT/g2c.log"
-    line=$(g2_run '#!/usr/bin/env bash
+    COMPONENT_LOG="$TMPROOT/g2c.log"
+    line=$(component_run '#!/usr/bin/env bash
 echo "not our prefix at all"
 exit 55')
     case "$line" in
@@ -420,7 +504,49 @@ exit 55')
       *)      bad "G2c: an unexpected rc was recorded as '${line:-<no component line>}' instead of SKIP" ;;
     esac
   else
-    skipped "G2: could not create a detached scratch worktree ($(tail -1 "$TMPROOT/wt.log" 2>/dev/null))"
+    skipped "G1/G2: could not create a detached scratch worktree ($(tail -1 "$TMPROOT/wt.log" 2>/dev/null))"
+  fi
+
+  # G3 — THE LIVE COMPONENT. It still has to prove the COMMITTED component, the COMMITTED
+  # guard and the COMMITTED baseline agree on a REAL tree — so the assertion is
+  # affirmative — but every outcome the component is DESIGNED to produce here is accepted:
+  #   PASS + NO-INCREASE       the ratchet holds
+  #   PASS + ADVISORY-INCREASE the ratchet grew; ADVISORY, non-failing BY MANDATE
+  #   SKIP + a named cause     nothing could be measured on this host (reported SKIPPED)
+  # A FAIL, a missing component line, or a PASS with no echoed measurement remain
+  # failures: those are states the component must never reach.
+  if [ -z "$(type -P cargo || true)" ]; then
+    skipped "G3: no cargo on PATH — the live component would SKIP for an unrelated reason"
+  else
+    g3_sum="$TMPROOT/g3-summary.txt"
+    g3_log="$TMPROOT/g3.log"
+    ( cd "$REPO_ROOT" && AGENT_GATE_SUMMARY_FILE="$g3_sum" AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
+        bash "$GATE" --only dep-duplicates ) >"$g3_log" 2>&1
+    g3_line="$(grep -E '^dep-duplicates: +(PASS|FAIL|SKIP)' "$g3_sum" 2>/dev/null | head -1)"
+    case "$g3_line" in
+      '')
+        bad "G3: no dep-duplicates component line in the SUMMARY — the component did not run" ;;
+      *FAIL*)
+        bad "G3: the component recorded FAIL, which it may never do (#1700 AC2): $g3_line" ;;
+      *SKIP*)
+        skipped "G3: the live workspace could not be measured here ($(grep -o 'cause=[a-z-]*' "$g3_log" | head -1)) — a SKIP is a documented, correct outcome and not a failure" ;;
+      *PASS*)
+        if grep -qE 'dep-duplicates: (0 INCREASE RECOGNISED|ADVISORY-INCREASE)' "$g3_log"; then
+          ok "G3: the live component records PASS and echoes an AFFIRMATIVE reading ($(grep -oE 'verdict (NO-INCREASE|ADVISORY-INCREASE)' "$g3_log" | head -1))"
+        else
+          bad "G3: PASS with NEITHER an affirmative '0 INCREASE RECOGNISED' nor an ADVISORY-INCREASE in the log — that is the vacuous pass this component must never emit"
+        fi
+        case "$g3_line" in
+          *UNDECLARED*|*UNCLASSIFIED*)
+            bad "G3: the live annotation reads UNDECLARED/UNCLASSIFIED — the declared class does not match how cargo is really invoked (#3453): $g3_line" ;;
+          *'via check-dep-duplicates.sh'*'feature set NOT observed'*)
+            ok "G3: the live annotation NAMES the driver and claims no feature set (#3453 indirect class)" ;;
+          *)  bad "G3: unexpected live annotation: $g3_line" ;;
+        esac
+        ;;
+      *)
+        bad "G3: unrecognised component status: $g3_line" ;;
+    esac
   fi
 fi
 
