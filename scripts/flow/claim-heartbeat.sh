@@ -1113,8 +1113,17 @@ cmd_should_reap() {
 # Behaviour here is unchanged; the library is the single definition. A MISSING library
 # is fatal and named — never a silent continue with the predicates undefined, which
 # would make every liveness answer an empty string.
-[ -r "$SCRIPT_HOME/lib/process-liveness.sh" ] || {
-  echo "$prog: cannot read $SCRIPT_HOME/lib/process-liveness.sh (the shared process-liveness primitives, #3822) — NOTHING was measured" >&2
+# `-f` AS WELL AS `-r`, matching drive-issue-state.sh's guard on the SAME library (roborev
+# job 57). `-r` alone is TRUE for a FIFO, and the `.` below then BLOCKS FOREVER waiting for a
+# writer: MEASURED, `mkfifo lib/process-liveness.sh` made this script run until killed
+# (`timeout 10` -> rc 124) with NO diagnostic at all — no verdict, no timeout, in a script the
+# fleet reaper runs unattended. A socket, a device or a directory is the same class. `-f` is
+# false for every one of them, so ONE predicate covers the class rather than a list of types to
+# keep complete. Both predicates FOLLOW a symlink, which is deliberate: a symlinked checkout is
+# a legitimate layout. This exposure is NEW with the library extraction — before it, the
+# predicates were inline here and there was no `source` to guard.
+{ [ -f "$SCRIPT_HOME/lib/process-liveness.sh" ] && [ -r "$SCRIPT_HOME/lib/process-liveness.sh" ]; } || {
+  echo "$prog: cannot read $SCRIPT_HOME/lib/process-liveness.sh as a regular file (the shared process-liveness primitives, #3822) — NOTHING was measured" >&2
   exit 1
 }
 # shellcheck source=lib/process-liveness.sh

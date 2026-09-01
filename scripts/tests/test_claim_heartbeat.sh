@@ -3018,6 +3018,77 @@ $l_out"
 fi
 kill "${zparent:-0}" 2>/dev/null || true
 
+
+echo
+echo "TEST 81: a NON-REGULAR shared library is REFUSED, never sourced (roborev job 57, Medium)"
+# The regression this pins is one the library extraction INTRODUCED: before it, the liveness
+# predicates were inline in claim-heartbeat.sh and there was no `source` at all. The guard
+# written for the new `source` was `-r` only — and `-r` is TRUE for a FIFO, so `.` BLOCKED
+# FOREVER waiting for a writer. MEASURED before the fix: `timeout 10` -> rc 124 with NO output
+# whatsoever. That is the worst breach available in a script the fleet reaper runs unattended:
+# not a wrong verdict but NO verdict, indefinitely.
+#
+# EVERY CASE IS BOUNDED BY `timeout` AND ASSERTS rc != 124 EXPLICITLY. Unbounded, a regression
+# would not FAIL this suite, it would HANG it, and the thing that noticed would be the gate's
+# stall watchdog minutes later — the same rule drive-issue-state.sh's hang cases follow.
+#
+# The table is over the TYPE, not over one member of it: the fix is `-f`, which is false for a
+# FIFO, a socket, a device and a directory alike, so the class is covered by one predicate
+# rather than by a list of types someone has to keep complete.
+hb81_run() { # hb81_run <case-dir> -> sets HB81_RC / HB81_OUT
+  HB81_RC=0
+  HB81_OUT="$(timeout 10 bash "$1/claim-heartbeat.sh" --help 2>&1)" || HB81_RC=$?
+}
+HB81="$T/nonregular-lib"
+for hb81_kind in fifo directory dangling-symlink symlink-to-device; do
+  rm -rf "$HB81"
+  mkdir -p "$HB81/lib"
+  cp "$HB" "$HB81/claim-heartbeat.sh"
+  hb81_target="$HB81/lib/process-liveness.sh"
+  case "$hb81_kind" in
+    fifo)              mkfifo "$hb81_target" 2>/dev/null || { skip "TEST 81/$hb81_kind: mkfifo unavailable"; continue; } ;;
+    directory)         mkdir -p "$hb81_target" ;;
+    dangling-symlink)  ln -s "$HB81/lib/nothing-here" "$hb81_target" ;;
+    symlink-to-device) [ -c /dev/null ] || { skip "TEST 81/$hb81_kind: no /dev/null char device"; continue; }
+                       ln -s /dev/null "$hb81_target" ;;
+  esac
+  hb81_run "$HB81"
+  if [ "$HB81_RC" -eq 124 ]; then
+    bad "TEST 81/$hb81_kind: the run HUNG (timeout 10 -> rc 124) — the \`source\` guard let a non-regular library be opened. Output: $HB81_OUT"
+  elif [ "$HB81_RC" -eq 0 ]; then
+    bad "TEST 81/$hb81_kind: the run SUCCEEDED (rc=0) with a $hb81_kind at lib/process-liveness.sh — the library was not required to be a regular file"
+  elif printf '%s\n' "$HB81_OUT" | grep -q 'process-liveness.sh as a regular file'; then
+    ok "TEST 81/$hb81_kind: refused (rc=$HB81_RC, not 124) with a diagnostic naming the library and the regular-file requirement"
+  else
+    bad "TEST 81/$hb81_kind: rc=$HB81_RC but the diagnostic does not name the regular-file requirement. Output: $HB81_OUT"
+  fi
+done
+# POSITIVE CONTROL 1 — the same harness with a REAL library must SUCCEED. Without it every case
+# above is satisfied by a script that is simply broken, which is the vacuity this suite's other
+# non-vacuity arms exist to exclude.
+rm -rf "$HB81"; mkdir -p "$HB81/lib"
+cp "$HB" "$HB81/claim-heartbeat.sh"
+cp "$SCRIPT_DIR/../flow/lib/process-liveness.sh" "$HB81/lib/process-liveness.sh"
+hb81_run "$HB81"
+if [ "$HB81_RC" -eq 0 ]; then
+  ok "TEST 81/control: a REGULAR library still sources and --help succeeds — the cases above are about the TYPE, not a broken harness"
+else
+  bad "NON-VACUITY broken: a regular library gave rc=$HB81_RC — TEST 81 cannot attribute its refusals to the guard. Output: $HB81_OUT"
+fi
+# POSITIVE CONTROL 2 — a SYMLINK to a regular library must still WORK. Both `-f` and `-r`
+# FOLLOW a symlink, deliberately: a symlinked checkout is a legitimate layout, and a guard that
+# reds on correct input is the guard agents learn to waive.
+rm -rf "$HB81"; mkdir -p "$HB81/lib"
+cp "$HB" "$HB81/claim-heartbeat.sh"
+cp "$SCRIPT_DIR/../flow/lib/process-liveness.sh" "$HB81/lib/real-liveness.sh"
+ln -s "$HB81/lib/real-liveness.sh" "$HB81/lib/process-liveness.sh"
+hb81_run "$HB81"
+if [ "$HB81_RC" -eq 0 ]; then
+  ok "TEST 81/symlink-to-regular: a symlinked library is FOLLOWED and still works — the refusal is about the resolved TYPE, not about links"
+else
+  bad "TEST 81/symlink-to-regular: a symlink to a regular library was refused (rc=$HB81_RC) — that is a false refusal on a legitimate layout. Output: $HB81_OUT"
+fi
+rm -rf "$HB81"
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed, $SKIP skipped ==="
 [ "$FAIL" -eq 0 ]

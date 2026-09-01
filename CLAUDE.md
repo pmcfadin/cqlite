@@ -2063,6 +2063,18 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   pre-planted entry of any type. **And a test whose subject is a HANG must be BOUNDED and must
   assert rc != 124 explicitly**: unbounded, a regression does not fail the suite, it hangs it,
   and the thing that notices is the gate's stall watchdog minutes later.
+  (12) **EXTRACTING A SHARED LIBRARY MOVES A `source` INTO A SCRIPT THAT NEVER HAD ONE, AND
+  THE GUARD WRITTEN FOR IT WAS WEAKER THAN THE ONE THIS SAME CHANGE HAD ALREADY WRITTEN NEXT
+  DOOR.** Pulling the liveness predicates out of `claim-heartbeat.sh` into
+  `lib/process-liveness.sh` gave that script its first `.` — a NEW open, hence a new exposure —
+  and it was guarded `-r` only, while `drive-issue-state.sh`'s guard on the SAME library
+  already required `-f` as well. A FIFO there passed `-r` and the `.` BLOCKED FOREVER
+  (measured: `timeout 10` ⇒ rc 124, **no output at all**), in the script the fleet reaper runs
+  unattended. So: **an extraction's DEDUPLICATION is not complete until the GUARDS around the
+  new dependency are deduplicated too** — the second call site is where the review rounds get
+  lost, exactly as the predicates themselves would have been. `-f` is the whole class in one
+  predicate (false for FIFO, socket, device and directory alike) and FOLLOWS a symlink on
+  purpose, since a symlinked checkout is a legitimate layout.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT
