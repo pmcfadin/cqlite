@@ -253,18 +253,38 @@ claude_auth_resolve_timeout() {
 #   BOUNDED — `claude -p` (90s, the network probe); every `tmux` invocation, live or
 #     throwaway (`show-environment -g`, `setenv -g`, `new-session`, `kill-server`); the
 #     pane-report wait loop; the digest tool; and (below) the identity lookups `id` uses.
+#     A DELEGATION PREFIX AND A SCRUBBING `env` ARE INSIDE THE BOUND, NOT IN FRONT OF IT:
+#     `runuser -u`/`sudo -n -u` and `env -u …` are words of the bounded argv, and `env`
+#     EXECVEs its target rather than forking one, so the single process the bound kills is
+#     the whole chain — including the `env` that fronts the `claude -p` probe, which is
+#     written outside the `timeout` word only because it must scrub the inherited credential
+#     before `timeout` is reached.
 #   DECLARED UNBOUNDABLE-BY-NEED, each because it cannot block indefinitely:
 #     * `uname -s` — a syscall wrapper;
-#     * `mktemp`, `rm`, `cat` of a file this process just wrote, `chmod` — local filesystem
-#       calls on paths we created;
-#     * `grep`/`sed` over the pam_env file — only reached AFTER `[ -f ]` has established it
-#       is a REGULAR file, so there is no fifo or device to block on, and bounding them
-#       would make the NOT-PERSISTED verdict itself depend on a `timeout` binary that a
-#       correct box need not have (the read must still work when the probe cannot run);
+#     * `mktemp`, `rm`, `chown -R` over the probe's own working directory, `cat` reading a
+#       file this process wrote and the `cat >` heredoc that writes the pane script into
+#       that directory — local filesystem calls on paths WE created, over content of a size
+#       this file fixes;
+#     * `grep`/`sed`/`tail` over the pam_env file — only reached AFTER `[ -f ]` has
+#       established it is a REGULAR file, so there is no fifo or device to block on, and
+#       bounding them would make the NOT-PERSISTED verdict itself depend on a `timeout`
+#       binary that a correct box need not have (the read must still work when the probe
+#       cannot run);
+#     * `sed`/`tail` over the pane REPORT file — the ONE read here of a file another process
+#       wrote, so it is declared on its own terms rather than riding on the clause above:
+#       this process CREATED it (`: >` inside a 0700 `mktemp -d`, so it is a regular file,
+#       never a fifo), and the read is reached only after the BOUNDED wait loop has already
+#       observed the terminating `end` line in it — so it is complete, regular and small by
+#       the time it is read, and a wedged or absent pane is the wait loop's outcome, not a
+#       hang here;
 #     * `tr`/`cut` inside the redaction boundary, over a string already in memory — a bound
 #       that fired there would DESTROY the verdict text it is rendering.
-#   NOT AN EXTERNAL CALL AT ALL — `command -v` is a shell builtin, so a missing-binary check
-#     spawns nothing.
+#   NOT AN EXTERNAL CALL AT ALL — `command -v`, `printf` and the `kill -s` signal re-raise
+#     are shell builtins, so a missing-binary check, every message and the re-raise spawn
+#     nothing.
+#   NOT RUN BY THIS PROCESS — the `sh` that executes the pane script runs INSIDE the
+#     throwaway tmux server. This process never waits on it: what it waits on is the bounded
+#     report loop above, and cleanup kills that server whatever the pane is doing.
 # A `timeout` that cannot ENFORCE the bound (no SIGKILL escalation) is not a bound at all;
 # `claude_auth_resolve_timeout` refuses such a candidate, and every caller of a bounded
 # operation treats that refusal as UNMEASURED rather than running the call unbounded.
