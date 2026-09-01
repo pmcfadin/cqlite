@@ -762,8 +762,8 @@ Exit codes: `0` = PASS, `1` = FAIL/REFUSED (`--delta`), `2` = usage/anchor error
 ## Tiered gate: `--lite` iterate, full gate once (issue #1821)
 
 The gate is tiered. `scripts/agent-gate.sh --lite` runs only the reduced component
-set (`LITE_COMPONENTS`: file-size + fmt + clippy + `roborev-lints` +
-blast-radius-scoped tests). It is the **fast iteration loop, NOT the gate of
+set (`LITE_COMPONENTS`: file-size + fmt + scoped workspace clippy + `roborev-lints`
++ blast-radius-scoped tests). It is the **fast iteration loop, NOT the gate of
 record** — it emits a DISTINCT `==== AGENT-GATE LITE SUMMARY ====` block
 (`MODE: lite`) that must **never** be pasted as the full SUMMARY. Iterate on
 `--lite` every fix round; run the FULL `scripts/agent-gate.sh` **exactly once**
@@ -773,29 +773,40 @@ before merge. `--lite` never replaces the full gate.
 (issue #3764).** There are **two cost drivers, and only ONE of them scales with
 your diff.**
 
-1. **`clippy` is NOT diff-scoped.** `--lite` runs the SAME workspace
-   `--all-features --all-targets` matrix the full gate runs (`LITE_COMPONENTS`,
-   `scripts/agent-gate.sh:5797`), so **every** `--lite` pays it whatever the diff:
-   measured over 188 completed lite runs it is a no-op warm, 2–7 min part-warm, and
-   **16–24 min cold**.
+1. **`clippy` is NOT diff-scoped.** `--lite` dispatches the IDENTICAL `run_clippy`
+   the full gate does — `run_component clippy run_clippy` at
+   `scripts/agent-gate.sh:17233` and `:18220` respectively — i.e. the issue #1844
+   **per-package scoped workspace** matrix at `:9357`, and `run_clippy` never reads
+   the diff. (The whole-workspace `--all-features --all-targets` pass is the
+   `CQLITE_CLIPPY_FULL=1` path only; do not read the scoped matrix as that one.) So
+   **every** `--lite` pays clippy IN FULL whatever the diff: measured over 188
+   completed lite runs it is a no-op warm, 2–7 min part-warm, and **16–24 min
+   cold**.
 2. **`scoped-tests` is diff-scoped, and it has a fan-out leg.** It RUNS the touched
    package's `--lib` plus the diff's new `--test` targets (owners by longest-prefix
-   path match over `cargo metadata`, from `merge-base(HEAD, origin/main)...HEAD`
-   **plus the uncommitted working-tree diff**; defaults to `cqlite-core --lib` when
+   path match over `cargo metadata`, from `merge-base(HEAD, <base>)...HEAD` — where
+   `<base>` is the FIRST of `origin/main` → `main` → `origin/master` → `master` that
+   resolves (`:16870`) — **plus `git diff HEAD`, i.e. the uncommitted diff over
+   TRACKED files only, untracked excluded**; defaults to `cqlite-core --lib` when
    no rust package is in the diff) — **and when a changed path is under
    `cqlite-core/src/` it ALSO runs `cargo test -p <pkg> --all-targets --no-run` for
-   every workspace member that depends on `cqlite-core` and owns a `--test` target
-   (issue #2658: COMPILE-CHECKED, never run).** That leg — not "touched packages",
+   every workspace member that DIRECTLY DECLARES a dependency on `cqlite-core`
+   (the `--no-deps` metadata edge) and owns a `--test` target (issue #2658:
+   COMPILE-CHECKED, never run).** That leg — not "touched packages",
    which consult no dependency edge at all — is why a core-src diff annotates 9–11
    package sets, and its `--all-targets` is what balloons `target/debug/deps`
-   (**+18 GB in a single round**, as reported in issues #3763/#3764).
+   (**+18 GB in a single round** — reported by another lane in issues #3763/#3764,
+   not measured here).
    **`cqlite-core/tests/**` does NOT trigger the fan-out; `cqlite-core/src/**`
    does.**
 
-**Measured bands** (completed runs, one fleet box): a **narrow** diff is **median
-1.4 min** (n=43) — so the `~1–5 min` this page used to claim is that case exactly, a
-**FLOOR and not a range**; a **`cqlite-core/src/`** diff is **median 20 min, range
-3.8–43 min** (n=20), and issue #3764 reports **up to ~104 min under peer load**.
+**Measured bands** (completed runs, one fleet box): a **narrow, WARM-clippy** diff
+is **median 1.4 min** (n=43) — so the `~1–5 min` this page used to claim is that case
+exactly, a **FLOOR and not a range**; a **`cqlite-core/src/`** diff is **median 20
+min, range 3.8–43 min** (n=20). **The two bands are marginal over DIFFERENT subsets
+and do not compose** — a 1.4 min run is by construction one that paid no cold clippy,
+so the cold-clippy band is not additive on top of it. Beyond those, lane-3612
+**reports** (not measured here) **up to ~104 min under peer load** in issue #3764.
 
 **And `--lite` is EXEMPT from the issue #1825 gate-slot cap** (as are `--delta` and
 `--only`) — it runs outside slot arbitration entirely, so on a shared box its build
