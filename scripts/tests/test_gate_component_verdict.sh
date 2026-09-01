@@ -116,6 +116,14 @@ expect() {
   if printf '%s' "$out" | grep -qF '==== AGENT-GATE'; then
     bad "$label" "output carries an AGENT-GATE block marker: $(printf '%s' "$out" | head -3)"; return
   fi
+  # (4) EVERY non-empty output line, stdout AND stderr, must carry the anchor, or the
+  # output is not reliably attributable and a fragment of it could be pasted as
+  # something else. Same property base-staleness.sh's `BASE-STALENESS: ` prefix has.
+  local unanchored
+  unanchored=$(printf '%s\n' "$out" | grep -vE '^gate-verdict: ' | grep -v '^$' || true)
+  if [ -n "$unanchored" ]; then
+    bad "$label" "output line(s) missing the gate-verdict: anchor: $(printf '%s' "$unanchored" | head -2)"; return
+  fi
   if ! printf '%s' "$out" | grep -q "^gate-verdict: $want\b"; then
     bad "$label" "expected verdict $want, got: $(printf '%s' "$out" | head -1)"; return
   fi
@@ -254,6 +262,18 @@ expect "5.5 --mode only REQUIRES --component" \
 expect "5.6 a component name outside the closed grammar is refused, not injected" \
   USAGE 64 "" -- "$S2" --mode only --component 'foo.*bar|baz'
 
+# --help must print the header COMMENT BLOCK and stop there. It used to be a fixed line
+# range, which bleeds into the code the moment the header changes length — and a --help
+# that prints `set -uo pipefail` is a reader being shown the wrong thing.
+_h=$(bash "$VERDICT" --help 2>&1); _hrc=$?
+_hlast=$(printf '%s\n' "$_h" | grep -v '^$' | tail -1)
+if [ "$_hrc" -eq 0 ] && [ -n "$_h" ] && printf '%s' "$_hlast" | grep -q '^#'; then
+  ok "5.7 --help exits 0 and stops at the header boundary (never bleeds into the code)"
+else
+  bad "5.7 --help exits 0 and stops at the header boundary (never bleeds into the code)" \
+      "rc=$_hrc last-line='$_hlast'"
+fi
+
 echo "=== section 6: the two DOCUMENTED text-completion grammars, run against real fixtures ==="
 # These are the strings CLAUDE.md publishes. The whole defect was that the documented
 # string did not behave as documented, so they are asserted BEHAVIOURALLY here rather
@@ -331,7 +351,7 @@ fi
 # sibling suite and it reported `failed: 0` at 102 instead of 105 for a whole round — a
 # green tally over a shrunken suite. Assert the count, not just the failures.
 # ---------------------------------------------------------------------------
-FLOOR=27
+FLOOR=28
 total=$((pass + fail))
 if [ "$total" -lt "$FLOOR" ]; then
   bad "case floor: ran $total cases, expected at least $FLOOR (cases deleted?)"

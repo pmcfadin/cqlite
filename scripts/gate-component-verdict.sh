@@ -102,7 +102,7 @@ while [ $# -gt 0 ]; do
     --component) COMPONENT="${2:?--component needs a value}"; shift 2 ;;
     --run-id)    WANT_RUN_ID="${2:?--run-id needs a value}"; shift 2 ;;
     --heartbeat) HB="${2:?--heartbeat needs a path}"; shift 2 ;;
-    -h|--help)   sed -n '2,80p' "$0"; exit 0 ;;
+    -h|--help)   awk 'NR>1 { if ($0 !~ /^#/) exit; print }' "$0"; exit 0 ;;
     -*)          usage_refusal "unknown option '$1'" ;;
     *)           if [ -n "$SUMMARY" ]; then usage_refusal "unexpected extra argument '$1'"; fi
                  SUMMARY="$1"; shift ;;
