@@ -737,5 +737,9 @@ done
 
 write_manifest
 say "session complete: $REPLICATES paired replicates in $RUN_DIR"
-say "next python3 $(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/analyze-ab.py --manifest $RUN_DIR/manifest.json"
+# Name the section this session's ramp belongs to, so the manifest cannot be
+# pasted into the wrong one (the analyzer refuses that, but a correct next-step
+# line is cheaper than a refusal).
+if [ "$RAMP_TOP" -eq 1 ]; then SECTION_FLAG='--single-stream'; else SECTION_FLAG='--utilization'; fi
+say "next python3 $(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/analyze-ab.py $SECTION_FLAG $RUN_DIR/manifest.json"
 exit 0
