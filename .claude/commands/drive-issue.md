@@ -51,8 +51,12 @@ first issue comment. ALL upward communication goes through its protocol on issue
 When you are blocked on a lead/owner response (Seam-1 spec approval, a decision request, a HOLD):
 
 1. Post the coord request (marker + label) with your recommendation and a default.
-2. Record durable state in the worktree: `.drive-issue-state.md` — stage reached, open request ID,
-   PR/branch, timestamp (`date -u`).
+2. Record durable state in the worktree **through the script, never by hand** (#3822):
+   `bash scripts/flow/drive-issue-state.sh write <N> --stage <stage> --request-id <id> [--pr <n>]
+   [--branch <b>] [--body-file <notes.md>]`. It stamps the marker with this lane's ownership
+   identity (issue, machine, worktree, session, session pid + start window, actor) inside a bounded
+   prologue and REFUSES to overwrite a marker that is not yours — a hand-written marker carries no
+   stamp and Delta 4 will refuse to rehydrate from it.
 3. **Arm the cron**: `CronList` first — if a job named `drive-issue-<N>` already exists, do NOT
    create another. Else `CronCreate` name `drive-issue-<N>`, interval ~15 minutes, prompt exactly:
    `/drive-issue <N>`. The command is resume-safe (Delta 4), so each firing rehydrates, checks for
@@ -71,11 +75,27 @@ cron re-invokes forever. Deleting the cron is part of "done"; a report that omit
 On start, BEFORE anything else: `git fetch origin`, then check whether this machine already holds
 `refs/claims/issue-<N>` (`claim.sh verify <N>`) or has the issue worktree.
 
-- **Held → resume**: read `.drive-issue-state.md` + the issue thread. If a pairing response newer
-  than your open request exists → `CronDelete drive-issue-<N>`, clear the state marker's open
-  request, and continue the pipeline from the recorded stage. If not → beat the heartbeat, post
-  nothing, end the turn (the cron persists). Never re-ask an unanswered question — one marker, one
-  wait.
+- **Held → resume**: gate the rehydrate on
+  `bash scripts/flow/drive-issue-state.sh verify <N>` (#3822) — never read the marker's prose
+  first. `--help` is the authoritative contract; act on the `verdict` token:
+  - `OWNED` (0) → read the marker + the issue thread and resume from the recorded stage. If a
+    pairing response newer than your open request exists → `CronDelete drive-issue-<N>`, `write`
+    the marker again with the cleared request, and continue. If not → beat the heartbeat, post
+    nothing, end the turn (the cron persists). Never re-ask an unanswered question.
+  - `ABSENT` (3) → no durable state; treat as a fresh start of this stage and `write` one.
+  - `ADOPTABLE` (5) → the recorded writer is provably gone (the normal cron re-invoke on a new
+    session id). Take it EXPLICITLY: `drive-issue-state.sh adopt <N> --reason <what the resume is>`,
+    which rewrites the stamp and records the prior session. Then resume.
+  - `LIVE-PEER` (6) → a live peer session owns this lane. STOP: post nothing, adopt nothing, end
+    the turn. Do not "fix" it by rewriting the marker.
+  - `LIVENESS-UNKNOWN` (7) → liveness could not be measured. STOP the same way and say so in your
+    report; never adopt on unproven information.
+  - `FOREIGN-ISSUE`/`FOREIGN-MACHINE`/`FOREIGN-WORKTREE` (4) → this marker is not about this
+    lane's work (a reused lane, a copied tree, a marker that travelled with a branch). Escalate to
+    the lead rather than adopting or deleting it.
+  - `UNSTAMPED`/`MALFORMED`/`DUPLICATE-SENTINEL` (8) → the marker predates #3822 or was hand-edited,
+    so its plan could belong to any session. Do NOT adopt its contents; re-`write` a stamped marker
+    only if this lane's work genuinely IS the issue it describes.
 - **Not held → fresh start**: claim per worker.md step 3, then route (oracle-driven → straight to
   implement; design-driven → `flow-activate` to Seam 1, render the spec INLINE in an issue comment
   as the approval request, then Delta 3). The spec render and the coord request are **ONE combined

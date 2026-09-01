@@ -1905,6 +1905,37 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   deletes the ref (refuses under an open PR without `--force`). Maintain the liveness heartbeat
   (`scripts/flow/claim-heartbeat.sh beat <N>`, refreshed at claim + every stage transition);
   `flow-board` reaps deterministically (age > 4h AND no open PR) (#2089).
+  **The per-lane STATE MARKER is ownership-stamped too, and its session axis is deliberately NOT
+  fail-closed (#3822).** `/drive-issue`'s durable `.drive-issue-state.md` used to be prose with no
+  writer, no reader and no ownership stamp, so a session rehydrating in a shared or REUSED worktree
+  adopted a peer's plan wholesale. It is now written and read ONLY through
+  `scripts/flow/drive-issue-state.sh` (`write` / `verify` / `adopt --reason <why>` / `show`;
+  `--help` is the contract), which stamps issue, machine, worktree, session, the SESSION's pid + its
+  start window, and actor into a **bounded prologue** — an exact first-line sentinel, `key: value`
+  lines at column zero, an exact end sentinel — so identity is never grepped out of the free-form
+  body (#3312: remove the shared channel; a body line reproducing a sentinel at column zero is
+  REFUSED at write time, and a duplicate sentinel is its own read-time refusal). **The axis split is
+  the load-bearing decision and the thing a future agent will otherwise undo:** `issue`, `machine`
+  and `worktree` are FAIL-CLOSED and each refusal NAMES ITS AXIS, because they are stable across a
+  legitimate resume and distinct across lanes. `session` is RECORDED but not fail-closed, because
+  the marker's *intended consumer* is the Delta 3 cron re-invoke — a NEW `CLAUDE_CODE_SESSION_ID` in
+  the SAME lane on the SAME issue — so verifying it literally would red EVERY correct resume, and a
+  guard that reds on correct input is the guard agents learn to waive. A session difference alone is
+  resolved by the LIVENESS of the recorded writer, three-valued on `dead-lanes`' precedent: provably
+  GONE ⇒ `ADOPTABLE` and `verify` STILL exits non-zero (adoption is an explicit `adopt` gesture that
+  records the prior session, never an implicit inheritance); provably ALIVE ⇒ `LIVE-PEER`, which
+  **`adopt` also refuses** (an adopt that ignores liveness is a mute button for the whole guard);
+  UNMEASURABLE ⇒ `LIVENESS-UNKNOWN`, refused — a positive verdict requires an affirmative
+  measurement. **The pid recorded is the SESSION's (`CLAUDE_PID`), and there is deliberately NO `$$`
+  fallback**: `$$` is the transient bash that exits immediately, so recording it would make a LIVE
+  peer read as DEAD seconds later — the exact false-permissive this closes. PID reuse is defeated by
+  requiring the live pid's start window to still intersect the recorded one, measured by the
+  three-valued primitives now SHARED with `claim-heartbeat.sh` in
+  `scripts/flow/lib/process-liveness.sh` (one definition, sourced by both: a second implementation
+  of those review rounds is a second place to lose them). `machine` is the same notion `claim.sh`
+  records — same env var, same default, same sanitizer — and the agreement is pinned BEHAVIOURALLY
+  by `scripts/tests/test_drive_issue_state.sh`, which extracts claim.sh's own definition and
+  compares, rather than by care.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT
