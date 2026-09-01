@@ -2074,7 +2074,7 @@ n_components=$( fx "$same" && bash scripts/agent-gate.sh --list 2>/dev/null | wc
 # of the exact match, because a PASS whose baseline source is unstated cannot be audited: the
 # transitional TEXT path is format-brittle and becomes unreachable once the manifest is on main.
 # _cs_pass_line_ok <line> <expected-head>: the PASS line equals <expected-head> followed by EXACTLY
-# ONE of the three legal object-provenance clauses (#3746 / roborev job 311). Pinned as a CLOSED SET
+# ONE of the three legal object-provenance clauses (#3749 / roborev job 311). Pinned as a CLOSED SET
 # rather than one literal because which clause is emitted is ENVIRONMENT-DEPENDENT — it says whether
 # this box's shared object store already held the fixture's baseline commit, which a peer lane's
 # fetch can change between runs. Pinning one literal would red on correct input; pinning nothing
@@ -2085,9 +2085,9 @@ _cs_pass_line_ok() {
   local l="$1" h="$2" tail
   case "$l" in "$h"*) tail="${l#"$h"}" ;; *) return 1 ;; esac
   case "$tail" in
-    "; objects: baseline REUSED from this lane's SHARED store — store TRUSTED, not verified (#3746)") return 0 ;;
-    "; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — store TRUSTED, not verified (#3746)") return 0 ;;
-    "; objects: provenance NOT RECORDED — treat the store as TRUSTED, not verified (#3746)") return 0 ;;
+    "; objects: baseline REUSED from this lane's SHARED store — store TRUSTED, not verified (#3749)") return 0 ;;
+    "; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — store TRUSTED, not verified (#3749)") return 0 ;;
+    "; objects: provenance NOT RECORDED — treat the store as TRUSTED, not verified (#3749)") return 0 ;;
   esac
   return 1
 }
@@ -2102,7 +2102,7 @@ if [ "$(field VERDICT "$s_out")" = PASS ] \
    && _cs_pass_line_ok "$s_line" "component-set: PASS ($n_components/$n_components names vs origin/main $s_sha; NAMES ONLY — not implementations, and no component is run here) — baseline read via the committed manifest"; then
   ok "3544-no-skew: an in-sync tree stamps an affirmative PASS naming its baseline sha, the read path AND the object-store trust boundary"
 else
-  bad "3544-no-skew: expected 'component-set: PASS ($n_components/$n_components names vs origin/main $s_sha; NAMES ONLY — not implementations, and no component is run here) — baseline read via the committed manifest' + one of the three legal '; objects: …(#3746)' clauses"
+  bad "3544-no-skew: expected 'component-set: PASS ($n_components/$n_components names vs origin/main $s_sha; NAMES ONLY — not implementations, and no component is run here) — baseline read via the committed manifest' + one of the three legal '; objects: …(#3749)' clauses"
   printf '%s\n' "$s_out"
 fi
 
