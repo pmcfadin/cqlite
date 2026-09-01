@@ -302,6 +302,13 @@ required-features = ["cli-helpers"]
 name = "issue_3721_range_marker_refusal_surface"
 required-features = ["cli-helpers"]
 
+# The delta-scan row loop must not re-wrap (and so ERASE) `Error::ColumnDecode`
+# (issue #3721). `#![cfg]`-gated on `delta-scan` + `cli-helpers`; declared here so
+# the target is not compiled into a default-feature `cargo test`.
+[[test]]
+name = "issue_3721_delta_scan_column_decode_variant"
+required-features = ["delta-scan", "cli-helpers"]
+
 # Scan-path error counting (issue #1704). It is
 # `#![cfg(all(feature = "observability-testing", feature = "delta-scan"))]` — the
 # in-memory metric capture harness needs the SDK testing exporters, and the

@@ -689,6 +689,20 @@ impl V5CompressedLegacyParser {
                         }
                     }
                     Err(e) => {
+                        // Issue #3721: keep the MATCHABLE variant. Re-wrapping a
+                        // per-column failure in `Error::corruption` erased the one
+                        // thing that distinguishes it — the `Error::ColumnDecode`
+                        // discriminant that `column_decode_error::is_column_decode`
+                        // and `indexed_walk_falls_back` match on — so every caller
+                        // above this point lost the ability to tell a decode
+                        // failure from any other corruption, and the only
+                        // alternative left to them would be inspecting message
+                        // text (issue #28 forbids it). Nothing is lost by
+                        // returning it as-is: the variant already carries the
+                        // column, the dispatch type, the offset and the cause.
+                        if column_decode_error::is_column_decode(&e) {
+                            return Err(e);
+                        }
                         return Err(Error::corruption(format!(
                             "delta-scan: row parse error in partition {} at offset {} in {}.{}: {}",
                             partition_index, offset, self.keyspace, self.table_name, e
