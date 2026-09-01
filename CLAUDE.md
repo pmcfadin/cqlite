@@ -1932,7 +1932,11 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   POSITIVELY IDENTIFIED rejection (an authentication error, a 401 anchored on non-digits,
   `Failed to authenticate`, `Please run /login`), because its remedy is "replace the value" — a rate
   limit, an outage, an exhausted quota or a CLI crash prove nothing about the credential and report
-  UNMEASURED with the cause named, equally non-passing. The probe's bound must ESCALATE
+  UNMEASURED with the cause named, equally non-passing. **The matcher ORDER is that rule, not a
+  detail of it** — killed-by-bound, then transport, then service failure, then rejection — so a
+  response naming BOTH a benign cause and an authentication wording takes the non-accusing answer;
+  with rejection tested first, a 429 body carrying `authentication_error` told the operator to
+  replace a potentially VALID token. The probe's bound must ESCALATE
   (`--kill-after=`/`-k`, probed by running it): a SIGTERM-only `timeout` does not bound a child that
   ignores SIGTERM — measured, rc 124 after the child's own 30s — so where no hard bound exists the
   probe is NOT RUN. And the credential is never printed **including under `bash -x`**: the redaction

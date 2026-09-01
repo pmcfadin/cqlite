@@ -960,7 +960,10 @@ lines. **Only `VERIFIED` is an `[ok]` on either line**; everything else is a `[w
 own remedy. **`FAILED` is an accusation about a credential, so it is earned, not defaulted to**: it
 is emitted only for a positively identified authentication rejection, and every other unsuccessful
 probe — rate limit, outage, quota, crash, bound fired, no sentinel — is `UNMEASURED` with its cause
-named. Both are non-passing and both exit non-zero; only the operator's next action differs, and
+named. The matchers are ordered killed-by-bound -> transport -> service failure -> **rejection
+last**, so a response naming both a benign cause and an authentication wording takes the
+non-accusing answer: ambiguity is not evidence.
+Both are non-passing and both exit non-zero; only the operator's next action differs, and
 telling someone to replace a working token because the API was rate-limiting is exactly the
 "measurement of something adjacent, reported as the thing itself" failure this section exists for.
 Everything else is a `[warn]` carrying its own remedy, and `NO-SERVER` is UNMEASURED-class — which since the cold-start probe means

@@ -1460,6 +1460,20 @@ claude_auth_case 'an invalid API key' s29g 1 \
   'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}' FAILED
 claude_auth_case 'an explicit re-login demand' s29h 1 \
   'Invalid API key · Please run /login' FAILED
+# THE TIE RULE, WHICH IS THE WHOLE ORDERING. A message naming BOTH a non-credential
+# service failure and a credential rejection is AMBIGUOUS, and an accusation about a
+# credential must be EARNED: its remedy is "replace the VALUE". The matchers were ordered
+# transport -> rejection -> service, so a mixed response was classified FAILED and bootstrap
+# told the operator to discard a potentially valid token — exactly the harm the FAILED/
+# UNMEASURED split exists to remove, surviving in the tie case. Two shapes, because a tie
+# arises from either service matcher half.
+claude_auth_case 'a 429 whose body ALSO names an authentication error' s29j 1 \
+  'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of requests has exceeded your rate limit"}} (upstream reported authentication_error while retrying)' UNMEASURED
+claude_auth_case 'a 503 gateway page that ALSO says unauthorized' s29k 1 \
+  'API Error: 503 Service Unavailable — the gateway returned: unauthorized' UNMEASURED
+# ...and the ordering must not have swallowed the rejection verdict: a message naming ONLY
+# a rejection still earns FAILED (asserted by s29f/s29g/s29h above), and one naming only a
+# service failure is still UNMEASURED (s29a-s29d).
 # A 401 must not be matched inside a longer number — the guard against a matcher that
 # earns an accusation from a coincidence.
 claude_auth_case 'a 401 embedded in a larger number is NOT a rejection' s29i 1 \

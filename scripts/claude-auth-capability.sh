@@ -157,16 +157,34 @@ CLAUDE_AUTH_PROBE_BOUND=90
 # WORKING token — this issue's own history, a measurement of something adjacent reported as
 # the thing itself.
 #
-# The matchers are ORDERED so the safe answer wins a tie: a message naming BOTH a transport
-# failure and a rejection is UNMEASURED, never FAILED.
+# THE DECISION ORDER, DERIVED FROM THAT RULE AND STATED ONCE — the code below follows this
+# list and nothing else, so change the list and the code together:
+#   1. the probe was KILLED by its own bound (rc 124/137) — we ended it; nothing was learned;
+#   2. TRANSPORT: the API was not reached, so it never saw the credential;
+#   3. SERVICE: the API was reached and refused for a reason that is NOT about this
+#      credential — a rate limit, a 5xx, an overload, an exhausted quota;
+#   4. REJECTION: only here, with NO benign explanation present in the output, is FAILED
+#      earned;
+#   5. rc 0 with no sentinel — it did not answer, which is not evidence of rejection;
+#   6. anything else — non-zero with nothing identified.
+# THE ORDER *IS* THE SAFE-TIE RULE, not a detail of it: a message naming both a benign
+# cause and a rejection is ambiguous, and ambiguity must take the non-accusing answer. Only
+# rule 2 was in front of rejection at first, so a 429 body that also carried the words
+# `authentication_error` was classified FAILED and the operator was told to replace a
+# potentially VALID token — the exact harm the FAILED/UNMEASURED split exists to remove,
+# surviving in the tie case. Steps 3 and 4 are therefore in this order for a REASON, not by
+# accident of how they were written.
 #
 # `401`/`429`/`5xx` are anchored on non-digits, because a status code matched inside a
 # larger number would earn an accusation from a coincidence.
 CLAUDE_AUTH_NETWORK_RE='getaddrinfo|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|network is unreachable|temporary failure in name resolution|connection error'
 CLAUDE_AUTH_REJECT_RE='invalid api key|invalid x-api-key|invalid[ _-]?token|invalid credentials|authentication[ _-](error|failed|required)|failed to authenticate|unauthorized|(^|[^0-9])401([^0-9]|$)|oauth (token|session) (has )?expired|could not be refreshed|please run /login|not logged in|api key .{0,24}(invalid|rejected|revoked|expired)|credentials? .{0,24}(invalid|rejected|revoked|expired)'
-# NOT a classification of the box — only a better SENTENCE for the same UNMEASURED verdict.
-# An unrecognised shape lands on the generic UNMEASURED branch below, so widening this
-# regex can never change a verdict, only its wording.
+# THIS MATCHER DECIDES A VERDICT IN THE TIE CASE, and that is a change from what this
+# comment used to claim ("only a better SENTENCE for the same UNMEASURED verdict"): because
+# it is tested BEFORE the rejection matcher, a shape it recognises keeps a co-occurring
+# rejection wording from earning FAILED. Widening it can therefore turn a FAILED into an
+# UNMEASURED — which is the safe direction, and the intended one — while a shape it does
+# not recognise still lands on the generic UNMEASURED branch below.
 CLAUDE_AUTH_SERVICE_RE='rate.?limit|(^|[^0-9])429([^0-9]|$)|too many requests|quota|credit balance|overloaded|(^|[^0-9])5[0-9][0-9]([^0-9]|$)|service unavailable|internal server error|bad gateway'
 # The cold-start tmux probe is local-only (no network), so it gets a much tighter bound.
 CLAUDE_AUTH_TMUX_PROBE_BOUND=20
@@ -558,19 +576,23 @@ claude_auth_verdict_into__untraced() {
     eval "$__od=\"the probe exceeded its \${CLAUDE_AUTH_PROBE_BOUND}s bound and was killed — the credential is UNKNOWN, not ok\""
     return 0
   fi
-  # TRANSPORT FIRST, so a message naming both a transport failure and a rejection takes the
-  # safe answer: an unreachable API says nothing about the credential.
+  # TRANSPORT FIRST (step 2), so a message naming both a transport failure and a rejection
+  # takes the safe answer: an unreachable API says nothing about the credential.
   if claude_auth_matches_ci "$__out" "$CLAUDE_AUTH_NETWORK_RE"; then
     eval "$__od=\"the probe could not reach the API (\$(claude_auth_redact \"\$__out\")) — the credential is UNKNOWN, not ok\""
+    return 0
+  fi
+  # SERVICE BEFORE REJECTION, and the order is the safe-tie rule itself (see step 3/4 of
+  # the decision order at the top of this file): a response naming BOTH a rate limit and an
+  # authentication error says nothing certain about the credential, and FAILED's remedy is
+  # "replace the VALUE".
+  if claude_auth_matches_ci "$__out" "$CLAUDE_AUTH_SERVICE_RE"; then
+    eval "$__od=\"the API refused for a reason that is NOT credential rejection — a rate limit, an outage, an overload or an exhausted quota (rc=\$__rc): \$(claude_auth_redact \"\$__out\") — the credential is UNKNOWN, not rejected; retry rather than replace it\""
     return 0
   fi
   if claude_auth_matches_ci "$__out" "$CLAUDE_AUTH_REJECT_RE"; then
     eval "$__ov=FAILED"
     eval "$__od=\"the \$CLAUDE_AUTH_TOKEN_KEY persisted in \$__file was REJECTED (rc=\$__rc): \$(claude_auth_redact \"\$__out\")\""
-    return 0
-  fi
-  if claude_auth_matches_ci "$__out" "$CLAUDE_AUTH_SERVICE_RE"; then
-    eval "$__od=\"the API refused for a reason that is NOT credential rejection — a rate limit, an outage, an overload or an exhausted quota (rc=\$__rc): \$(claude_auth_redact \"\$__out\") — the credential is UNKNOWN, not rejected; retry rather than replace it\""
     return 0
   fi
   if [ "$__rc" -eq 0 ]; then
