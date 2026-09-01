@@ -488,10 +488,20 @@ for _n in $base_names; do
   [ "$now_n" -lt "$base_n" ] && shrank=$((shrank + 1))
 done
 
+# signed_delta <n>: a delta rendered with ITS OWN sign. The advisory branch below fires
+# when EITHER metric rises, so the OTHER may have FALLEN — an unconditional `+` printed
+# `+-2`, a malformed number in the one line an operator reads to decide whether to
+# collapse the duplication or re-tighten the baseline. A zero delta renders as `0`: this
+# branch is only reached when at least one metric rose, so a `0` here is the honest
+# statement that the OTHER metric did not move.
+signed_delta() {
+  if [ "$1" -gt 0 ]; then printf '+%s' "$1"; else printf '%s' "$1"; fi
+}
+
 if [ "$now_instances" -gt "$base_instances" ] || [ "$now_crates" -gt "$base_crates" ]; then
   # LOUD AND TEXTUALLY DISTINCT, and it names WHO — never a bare number. Non-failing by
   # design (#1700 AC2): the exit status below is 0.
-  say "ADVISORY-INCREASE the duplicate census GREW: $now_instances instance(s) vs baseline $base_instances (delta +$((now_instances - base_instances))), $now_crates crate(s) vs baseline $base_crates (delta +$((now_crates - base_crates)))"
+  say "ADVISORY-INCREASE the duplicate census GREW: $now_instances instance(s) vs baseline $base_instances (delta $(signed_delta "$((now_instances - base_instances))")), $now_crates crate(s) vs baseline $base_crates (delta $(signed_delta "$((now_crates - base_crates))"))"
   [ -n "$grew" ] && say "ADVISORY-INCREASE crates that gained instances:$grew"
   [ -n "$newly" ] && say "ADVISORY-INCREASE crates newly duplicated:$newly"
   [ -z "$grew$newly" ] && say "ADVISORY-INCREASE no single crate grew — the totals rose through crates absent from the baseline census, which means the baseline is stale relative to the invocation"

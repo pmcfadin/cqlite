@@ -44,6 +44,9 @@
 #                             fresh baseline still reports ADVISORY-INCREASE (proving the
 #                             file was written from the measurement, not a template)
 #   P13 usage              -> an unrecognized argument exits 2
+#   P16 MIXED deltas       -> the advisory branch fires on EITHER metric rising, so the
+#                             other may have FALLEN: each delta carries its OWN sign
+#                             (never `+-2`), pinned in both directions
 #   P14 no bounded probe   -> a PATH with no timeout(1) is exit 3,
 #                             `cause=probe-unboundable`, and NO probe is claimed: a
 #                             missing capability may not inherit the permissive branch,
@@ -127,6 +130,18 @@ EOF
 tree_grew() { tree_baseline; printf 'foo v3.0.0\n└── w v9.9.9\n'; }
 tree_new_crate() { tree_baseline; printf '\nbaz v1.0.0\nbaz v2.0.0\n'; }
 tree_smaller() { printf 'foo v1.0.0\n└── x v0.1.0\n\nfoo v2.0.0\n'; }
+# MIXED-DIRECTION fixtures: one metric grows while the other shrinks, which is the state
+# the advisory branch can be entered in (it fires on EITHER metric rising). Both keep every
+# duplicate group at two or more members, as real `cargo tree -d` output has.
+# 5 instances / 1 crate: foo grew five ways and bar stopped being duplicated.
+tree_more_instances_fewer_crates() {
+  printf 'foo v1.0.0\n└── x v0.1.0\n\nfoo v2.0.0\n\nfoo v3.0.0\n\nfoo v4.0.0\n\nfoo v5.0.0\n'
+}
+# 6 instances / 3 crates: against a baseline of 8/2, instances FELL by 2 while a third
+# crate became duplicated — the reviewer's own `+-2` example.
+tree_fewer_instances_more_crates() {
+  printf 'foo v1.0.0\nfoo v2.0.0\n\nbar v1.0.0\nbar v2.0.0\n\nbaz v1.0.0\nbaz v2.0.0\n'
+}
 # Colour EXACTLY where cargo puts it — around the rendered entry — and colour survives
 # redirection to a file, which is why an un-stripped parse reads zero instances here.
 tree_coloured() {
@@ -356,6 +371,31 @@ assert_case "P12d: growth beyond the REGENERATED baseline is still ADVISORY-INCR
 d=$(new_tree p13); plant_cargo "$d" 0 tree_baseline; run_guard "$d" --bogus
 assert_case "P13: an unrecognized argument exits 2 (repo convention)" 2 "unrecognized argument '--bogus'"
 
+# --- P16: MIXED deltas, each with its OWN sign ----------------------------
+# THE DEFECT THIS PINS: the advisory branch is entered when EITHER metric increases, so
+# the OTHER may have decreased — and an unconditional `+` in front of a negative delta
+# printed `+-2`. This line is what an operator reads to decide whether to collapse the
+# duplication or re-tighten the baseline, so a malformed number in it is not cosmetic.
+# Both mixed directions are exercised, and both fixtures are REALISTIC (every duplicate
+# group has at least two members, as `cargo tree -d` output does).
+d=$(new_tree p16a); plant_cargo "$d" 0 tree_more_instances_fewer_crates; run_guard "$d"
+assert_case "P16a: instances UP while crates DOWN renders each delta with its own sign (+1 / -1)" \
+  0 'ADVISORY-INCREASE the duplicate census GREW: 5 instance(s) vs baseline 4 (delta +1), 1 crate(s) vs baseline 2 (delta -1)' \
+  'verdict ADVISORY-INCREASE (5/1 vs baseline 4/2)'
+case "$OUT" in
+  *'+-'*) bad "P16a: the advisory line contains a MALFORMED delta ('+-'): $(printf '%s' "$OUT" | grep -F '+-' | head -1)" ;;
+  *)      ok "P16a: no malformed '+-' delta anywhere in the advisory block" ;;
+esac
+d=$(new_tree p16b); printf 'instances 8\ncrates 2\ncrate foo 4\ncrate bar 4\n' > "$d/$BASELINE_REL"
+plant_cargo "$d" 0 tree_fewer_instances_more_crates; run_guard "$d"
+assert_case "P16b: crates UP while instances DOWN renders each delta with its own sign (-2 / +1)" \
+  0 'ADVISORY-INCREASE the duplicate census GREW: 6 instance(s) vs baseline 8 (delta -2), 3 crate(s) vs baseline 2 (delta +1)' \
+  'verdict ADVISORY-INCREASE (6/3 vs baseline 8/2)'
+case "$OUT" in
+  *'+-'*) bad "P16b: the advisory line contains a MALFORMED delta ('+-'): $(printf '%s' "$OUT" | grep -F '+-' | head -1)" ;;
+  *)      ok "P16b: no malformed '+-' delta anywhere in the advisory block" ;;
+esac
+
 # --- P14: the probe cannot be BOUNDED -------------------------------------
 # A host with no usable `timeout` must NOT fall through to an unbounded `cargo tree`: a
 # missing capability may not inherit the permissive branch, and the permissive branch
@@ -411,22 +451,24 @@ fi
 exit 97
 SHIM
 chmod +x "$d/bin/cargo"
-if grep -qx 'readonly PROBE_TIMEOUT_SECS=1' "$d/$GUARD_REL" \
+if [ -z "$(type -P timeout || true)" ] && [ -z "$(type -P gtimeout || true)" ]; then
+  skipped "P15: this host has no timeout(1) at all, so neither the guard's bound nor this case's own outer bound can be applied here (P14 is the case for such a host)"
+elif grep -qx 'readonly PROBE_TIMEOUT_SECS=1' "$d/$GUARD_REL" \
    && grep -qx 'readonly PROBE_KILL_GRACE_SECS=1' "$d/$GUARD_REL"; then
   ok "P15: the scratch copy's bound was really shortened (the substitution took, so P15 cannot pass or fail for the wrong reason)"
+  # An OUTER bound, not a wall-clock threshold assert: if the guard's own bound does NOT
+  # work the outer timeout kills it and rc is 124, which fails the assertion below with
+  # the guard's own claim visible. Nothing here depends on how long anything took.
+  OUT="$(PATH="$d/bin:$PATH" timeout 60 bash "$d/$GUARD_REL" 2>&1)"; RC=$?
+  assert_case "P15: a SIGTERM-IGNORING cargo is HARD-KILLED at the bound and reported UNMEASURABLE (exit 3), not waited on forever" \
+    3 'probe bound:' 'INVOKED (rc 137)' 'SKIP-UNMEASURABLE cause=cargo-tree-failed' 'SIGKILL'
+  case "$OUT" in
+    *'outlived the bound'*) bad "P15: the planted cargo ran to completion — the bound was not enforced" ;;
+    *)                      ok "P15: the planted cargo did NOT outlive the bound" ;;
+  esac
 else
   bad "P15: could not shorten the bound in the scratch copy — the constants were renamed or reformatted"
 fi
-# An OUTER bound, not a wall-clock threshold assert: if the guard's own bound does NOT
-# work the outer timeout kills it and rc is 124, which fails the assertion below with the
-# guard's own claim visible. Nothing here depends on how long anything took.
-OUT="$(PATH="$d/bin:$PATH" timeout 60 bash "$d/$GUARD_REL" 2>&1)"; RC=$?
-assert_case "P15: a SIGTERM-IGNORING cargo is HARD-KILLED at the bound and reported UNMEASURABLE (exit 3), not waited on forever" \
-  3 'probe bound:' 'INVOKED (rc 137)' 'SKIP-UNMEASURABLE cause=cargo-tree-failed' 'SIGKILL'
-case "$OUT" in
-  *'outlived the bound'*) bad "P15: the planted cargo ran to completion — the bound was not enforced" ;;
-  *)                      ok "P15: the planted cargo did NOT outlive the bound" ;;
-esac
 
 # --- L1: the live tree ---------------------------------------------------
 if [ -z "$(type -P cargo || true)" ]; then
@@ -640,9 +682,10 @@ echo
 echo "dep-duplicates ratchet self-test: $PASS passed, $FAIL failed"
 # A CASE FLOOR beside the tally (#3544's lesson): a span-replacing edit that deletes cases
 # leaves a green "0 failed" over a shrunken suite, which certifies nothing. The floor sits
-# below the leanest host (no cargo, no git worktree => L1/G1/G2/P9 skip) so it reds on a
-# structural loss and never on a lean box.
-CASE_FLOOR=22
+# below the leanest host (no cargo, no timeout(1), no git worktree => P9/P14/P15/L1/G*
+# all skip, which still leaves 28 verdicts) so it reds on a structural loss and never on a
+# lean box.
+CASE_FLOOR=26
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): cases are being skipped or dying silently.\n' \
     "$((PASS + FAIL))" "$CASE_FLOOR" >&2
