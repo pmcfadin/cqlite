@@ -183,17 +183,18 @@ SCAN_FILES=(
 # that decays — how many tracked shell scripts it did NOT. `NOT MEASURED` is its own third state:
 # a census that could not be taken is never rendered as a number, because a number in a scope
 # declaration reads as authority.
-_scope_unscanned_line() {
-  local _tracked _n_tracked=0 _n_unscanned=0 _f _rel _hit
-  _tracked=$(cd "$REPO_ROOT" 2>/dev/null && git ls-files 'scripts/*.sh' 'scripts/**/*.sh' 2>/dev/null) || {
-    printf 'unscanned: NOT MEASURED (the tracked-script census could not be taken)\n'; return 0; }
-  [ -n "$_tracked" ] || { printf 'unscanned: NOT MEASURED (the tracked-script census returned nothing)\n'; return 0; }
+_scope_unscanned_line() { # _scope_unscanned_line <repo-root>
+  local _root="$1" _tracked _n_tracked=0 _n_unscanned=0 _f _rel _hit
+  _tracked=$(cd "$_root" 2>/dev/null && git ls-files 'scripts/*.sh' 'scripts/**/*.sh' 2>/dev/null) || {
+    printf 'unscanned: NOT MEASURED (the tracked-script census could not be taken under %s)\n' "$_root"; return 0; }
+  [ -n "$_tracked" ] || {
+    printf 'unscanned: NOT MEASURED (the tracked-script census returned nothing under %s)\n' "$_root"; return 0; }
   while IFS= read -r _rel; do
     [ -n "$_rel" ] || continue
     _n_tracked=$((_n_tracked + 1))
     _hit=no
     for _f in "${SCAN_FILES[@]}"; do
-      [ "$_f" = "$REPO_ROOT/$_rel" ] && _hit=yes
+      [ "$_f" = "$_root/$_rel" ] && _hit=yes
     done
     [ "$_hit" = no ] && _n_unscanned=$((_n_unscanned + 1))
   done <<EOF_SCOPE
@@ -202,14 +203,20 @@ EOF_SCOPE
   printf 'unscanned: %d of %d tracked scripts/**/*.sh are NOT scanned by this lint\n' \
     "$_n_unscanned" "$_n_tracked"
 }
-printf '\n==== PORTABILITY LINT SCOPE ====\n'
-printf 'This lint is an ENUMERATED subject set, not a derived one. A PASS below says nothing\n'
-printf 'about any file absent from this list.\n'
-for _scope_f in "${SCAN_FILES[@]}"; do
-  printf 'scanned:   %s\n' "${_scope_f#"$REPO_ROOT/"}"
-done
-_scope_unscanned_line
-printf '================================\n\n'
+emit_scope_declaration() {
+  local _scope_f
+  printf '==== PORTABILITY LINT SCOPE ====\n'
+  printf 'This lint is an ENUMERATED subject set, not a derived one. A PASS below says nothing\n'
+  printf 'about any file absent from this list.\n'
+  for _scope_f in "${SCAN_FILES[@]}"; do
+    printf 'scanned:   %s\n' "${_scope_f#"$REPO_ROOT/"}"
+  done
+  _scope_unscanned_line "$REPO_ROOT"
+  printf '================================\n'
+}
+printf '\n'
+emit_scope_declaration
+printf '\n'
 
 # Three parallel arrays: the ERE, why it is not portable, and a sample violation the ERE
 # MUST detect (the positive control that keeps the pattern honest).
@@ -995,6 +1002,73 @@ for _bs_f in "$BOOTSTRAP_SH" "$BOOTSTRAP_TEST"; do
     *) : ;; # already counted by scan_found
   esac
 done
+
+# ---------------------------------------------------------------------------
+# THE SCOPE DECLARATION IS ASSERTED, NOT JUST PRINTED (#3756 AC2). A declaration nothing
+# checks is a comment that happens to reach stdout: delete it, mis-spell a member's path, or
+# let the census silently degrade, and no test would notice. Three properties, each the one
+# that makes the declaration mean something:
+#   (i)   EVERY member is named. A scanned file missing from the declaration understates the
+#         scope, which is the safe direction for a reader but still a lie about what ran.
+#   (ii)  THE ARITHMETIC IS CONSISTENT. `unscanned` + the `.sh` members of SCAN_FILES must
+#         equal the tracked total. This is the control that would have caught the real defect
+#         found while writing it: members spelled `scripts/tests/../flow/x.sh` compared
+#         unequal to the tracked path, so four scanned files counted as UNSCANNED and the
+#         declaration OVERSTATED the gap by 4 while looking entirely plausible.
+#   (iii) AN UNTAKEABLE CENSUS SAYS SO. The count is the one number a reader will quote, so
+#         "could not measure" must never render as a number — the standing rule against
+#         deriving a verdict from the absence of a signal, applied to a scope line.
+# ---------------------------------------------------------------------------
+emit_scope_declaration >"$tmp/scope.txt" 2>&1
+_scope_missing=''
+for _scope_f in "${SCAN_FILES[@]}"; do
+  grep -qF -- "scanned:   ${_scope_f#"$REPO_ROOT/"}" "$tmp/scope.txt" \
+    || _scope_missing="$_scope_missing ${_scope_f#"$REPO_ROOT/"}"
+done
+if [ -z "$_scope_missing" ]; then
+  ok "scope: the run-time declaration names every one of the ${#SCAN_FILES[@]} SCAN_FILES members — a reader of a green run learns exactly what it covered"
+else
+  bad "scope: the run-time declaration omits scanned file(s):$_scope_missing — a declaration that understates its own subject set is not a scope statement"
+fi
+_scope_unscanned=$(grep -c '^unscanned: ' "$tmp/scope.txt")
+if [ "${_scope_unscanned:-0}" = 1 ]; then
+  ok 'scope: exactly one unscanned: line is emitted (a reader has one number to quote, not zero and not several)'
+else
+  bad "scope: the declaration emitted ${_scope_unscanned:-0} unscanned: lines — it must emit exactly one"
+fi
+_scope_line=$(grep '^unscanned: ' "$tmp/scope.txt" | head -1)
+case "$_scope_line" in
+  'unscanned: NOT MEASURED'*)
+    skip "scope: the tracked-script census could not be taken on this host, so the arithmetic control below has no subject ($_scope_line)" ;;
+  *)
+    _scope_n=$(printf '%s\n' "$_scope_line" | awk '{ print $2 }')
+    _scope_m=$(printf '%s\n' "$_scope_line" | awk '{ print $4 }')
+    # Count the SCAN_FILES members that the census could possibly have enumerated: tracked,
+    # under scripts/, and ending .sh. Anything else (roborev-job-facts.py) is outside the
+    # census's own subject and must NOT be expected to reduce the unscanned count.
+    _scope_sh=0
+    for _scope_f in "${SCAN_FILES[@]}"; do
+      case "${_scope_f#"$REPO_ROOT/"}" in
+        scripts/*.sh) _scope_sh=$((_scope_sh + 1)) ;;
+      esac
+    done
+    if [ "$((_scope_n + _scope_sh))" = "$_scope_m" ]; then
+      ok "scope: the census arithmetic is consistent — $_scope_n unscanned + $_scope_sh scanned .sh members = $_scope_m tracked, so no member is being miscounted through a path-spelling mismatch"
+    else
+      bad "scope: the census arithmetic does NOT close — $_scope_n unscanned + $_scope_sh scanned .sh members != $_scope_m tracked. A member whose path spelling differs from the tracked path counts as UNSCANNED, overstating the gap while reading as plausible"
+    fi ;;
+esac
+# (iii) the untakeable census renders as NOT MEASURED, never as a number.
+mkdir -p "$tmp/not-a-repo"
+_scope_nm=$(_scope_unscanned_line "$tmp/not-a-repo")
+case "$_scope_nm" in
+  *'NOT MEASURED'*)
+    case "$_scope_nm" in
+      *' of '*' tracked '*) bad "scope control: an untakeable census printed NOT MEASURED but ALSO a count ($_scope_nm) — the number is what a reader quotes" ;;
+      *) ok 'scope control: a census that CANNOT be taken renders NOT MEASURED and emits no number — an unmeasurable scope is never dressed as a measured one' ;;
+    esac ;;
+  *) bad "scope control: a census taken outside any repository still produced a numeric scope line ($_scope_nm) — that is a fabricated measurement" ;;
+esac
 
 # NEGATIVE CONTROL for the timeout rule (#3756): `command -v timeout` is the REMEDY this rule's
 # own message recommends, and the old `[0-9]` form matched the `2` of its `2>/dev/null`. Both
