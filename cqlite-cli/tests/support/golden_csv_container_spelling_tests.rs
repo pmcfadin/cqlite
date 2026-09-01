@@ -43,16 +43,22 @@ enum Expect {
     /// it through verbatim (or, for `blob`, translating it) is correct.
     Same,
     /// A DECLARED narrowing — the ONLY exception set this differential admits.
-    /// Carries the CSV spelling `ValueFormatter` produces, so the divergence is
-    /// PINNED on both sides rather than tolerated: a change in either spelling
-    /// fails, and `why` names the narrowing and where the value comparison closes
-    /// it.
+    ///
+    /// Carries BOTH spellings, so the divergence is PINNED on both sides rather
+    /// than tolerated: `csv` is what `ValueFormatter` produces and `golden` is what
+    /// the SEAM produces from the golden node at this kinding, and a change in
+    /// EITHER fails. An earlier revision carried `csv` alone and then asserted only
+    /// that the two sides still differ, which pinned the golden side not at all —
+    /// arbitrary golden-side text passed while the doc claimed both were pinned.
+    ///
+    /// `why` names the narrowing and where the value comparison closes it.
     ///
     /// A divergence that is not one of these must FAIL. Adding an entry to make a
     /// newly-measured divergence pass would convert a defect into documentation of
     /// itself.
     Narrowed {
         csv: &'static str,
+        golden: &'static str,
         why: &'static str,
     },
 }
@@ -83,10 +89,11 @@ enum Expect {
 ///     neither spelling can carry a `, `, a bracket, an undoubled `: ` or an empty
 ///     rendering, so the structural question this seam answers is unaffected.
 ///   * **`double` 0.0, both kindings.** The golden's `0.0` (Java
-///     `Double.toString`) against `ValueFormatter`'s `0` (Rust's `{}`). The
-///     declared trailing-zero narrowing; the value comparison closes it in
-///     `super::super::normalize_decimal`, and it likewise cannot carry a
-///     separator, a bracket or an empty rendering.
+///     `Double.toString`) against `ValueFormatter`'s `0e0` — its `|f| < 1e-6`
+///     branch takes `{:e}`. The declared exponent-form narrowing; the value
+///     comparison closes it in `super::super::normalize_decimal`, which reads an
+///     exponent, and it likewise cannot carry a separator, a bracket or an empty
+///     rendering.
 ///
 /// # What this case deliberately does NOT assert, and why
 ///
@@ -225,6 +232,9 @@ fn every_declared_type_spells_a_scalar_the_way_the_csv_egress_does() {
             natural: "0.0",
             natural_expect: Expect::Narrowed {
                 csv: "0e0",
+                // `writeRawValue(toJSONString(0.0))` is the bare JSON number
+                // `0.0`, which the seam spells back as `0.0`.
+                golden: "0.0",
                 why: "DECLARED float-spelling narrowing (exponent form): Java \
                       Double.toString spells zero `0.0`, while ValueFormatter's \
                       `|f| < 1e-6` branch takes `{:e}` and spells it `0e0`. Closed \
@@ -235,6 +245,8 @@ fn every_declared_type_spells_a_scalar_the_way_the_csv_egress_does() {
             stringified: "0.0",
             stringified_expect: Expect::Narrowed {
                 csv: "0e0",
+                // `writeString(getString(0.0))` is the text `0.0`, passed through.
+                golden: "0.0",
                 why: "the same declared narrowing at the stringified position",
             },
             source: "test_signed_coll.signed_special_collections golden, \
@@ -311,6 +323,9 @@ fn every_declared_type_spells_a_scalar_the_way_the_csv_egress_does() {
             natural: "\"2025-10-06 01:12:05.394Z\"",
             natural_expect: Expect::Narrowed {
                 csv: "2025-10-06 01:12:05.394+0000",
+                // FORMATTER_TO_JSON's `yyyy-MM-dd HH:mm:ss.SSSX`, as the committed
+                // golden carries it; the seam unquotes the JSON string and stops.
+                golden: "2025-10-06 01:12:05.394Z",
                 why: "DECLARED timestamp narrowing: FORMATTER_TO_JSON's `X` zone \
                       against ValueFormatter's `+0000`. Closed for VALUE equality \
                       by canon_timestamp; the pattern's colons are digit-flanked \
@@ -319,6 +334,9 @@ fn every_declared_type_spells_a_scalar_the_way_the_csv_egress_does() {
             stringified: "2025-10-06T01:12:05.394Z",
             stringified_expect: Expect::Narrowed {
                 csv: "2025-10-06 01:12:05.394+0000",
+                // FORMATTER_UTC's `yyyy-MM-dd'T'HH:mm:ss.SSSX`, so the `T`
+                // separator as well; `stringified_csv_text` translates only `blob`.
+                golden: "2025-10-06T01:12:05.394Z",
                 why: "the same declared narrowing, with FORMATTER_UTC's `T` \
                       separator as well",
             },
@@ -413,13 +431,30 @@ fn every_declared_type_spells_a_scalar_the_way_the_csv_egress_does() {
                      where ValueFormatter renders {csv:?} (golden spelling from {})",
                     case.decl, case.source
                 ),
-                Expect::Narrowed { csv: pinned, why } => {
+                Expect::Narrowed {
+                    csv: pinned,
+                    golden: pinned_golden,
+                    why,
+                } => {
+                    // BOTH sides pinned, and the three failures are worded apart
+                    // because they are three different events: the CSV spelling
+                    // moved, the GOLDEN-side spelling moved, or the divergence
+                    // closed and the narrowing is now stale.
                     assert_eq!(
                         &csv, pinned,
                         "{} at {kinding:?}: the CSV spelling moved, so this \
                          declared narrowing no longer describes the divergence \
                          it excuses ({why})",
                         case.decl
+                    );
+                    assert_eq!(
+                        &got, pinned_golden,
+                        "{} at {kinding:?}: the GOLDEN-side spelling moved — the \
+                         seam produced {got:?} from the {writer} golden where \
+                         this narrowing pins {pinned_golden:?}, so the narrowing \
+                         no longer describes the divergence it excuses ({why}) \
+                         (golden spelling from {})",
+                        case.decl, case.source
                     );
                     assert_ne!(
                         got, csv,
