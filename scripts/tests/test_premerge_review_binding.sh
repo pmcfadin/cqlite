@@ -33,6 +33,18 @@ FAILED=0
 ok()  { printf 'ok   - %s\n' "$1"; PASSED=$((PASSED + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAILED=$((FAILED + 1)); }
 
+# THREE-VALUED FILE PROBES (#3752, lane-3752 audit). Every structural assert
+# below reads a file, and "matched" / "did not match" / "could not be read" are
+# three facts a `grep -q` inside an `if/else` reduces to two — folding the third
+# onto whichever branch was written second, which under the ABSENCE asserts here
+# is the PERMISSIVE one. The helpers also remove a MEASURED false FAIL: the
+# `--paginate` assert below reddened once and then passed three times over a
+# byte-identical file, because this suite runs under `set -o pipefail` and a
+# `producer | grep -q` pipeline reports the producer's SIGPIPE when `grep -q`
+# matches and exits before the producer has finished writing. See the library
+# header for the full account.
+. "$SCRIPT_DIR/lib/tristate-file-probe.bash"
+
 # The scratch dir is validated BEFORE any path is built from it (#3650 B5): an
 # unchecked mktemp leaves $T empty and every "$T/..." resolves at the ROOT.
 if ! T=$(mktemp -d "${TMPDIR:-/tmp}/premerge-review-binding-test.XXXXXX" 2>/dev/null) ||
@@ -473,35 +485,61 @@ if run_hold 5 "hold: an unreadable PR thread is UNMEASURED"; then
 fi
 
 # --- the window is a committed constant with NO env override --------------------
-if grep -qE '^PREMERGE_DISARM_WINDOW_SECS=1800$' "$BINDING"; then
-  ok "window: 1800s is a NAMED COMMITTED CONSTANT"
-else
-  bad "window: the disarm window is not a committed constant named PREMERGE_DISARM_WINDOW_SECS=1800"
-fi
-if grep -vE '^[[:space:]]*#' "$BINDING" | grep -qE 'PREMERGE_DISARM_WINDOW_SECS=\$\{|:-.*DISARM'; then
-  bad "window: the disarm window has an env override — the constrained party must not set it (#3312)"
-else
-  ok "window: the disarm window has NO env override (#3312)"
-fi
+assert_src_present \
+  "window: 1800s is a NAMED COMMITTED CONSTANT" \
+  "window: the disarm window is not a committed constant named PREMERGE_DISARM_WINDOW_SECS=1800" \
+  "$BINDING" '^PREMERGE_DISARM_WINDOW_SECS=1800$'
+assert_src_absent \
+  "window: the disarm window has NO env override (#3312)" \
+  "window: the disarm window has an env override — the constrained party must not set it (#3312)" \
+  "$BINDING" 'PREMERGE_DISARM_WINDOW_SECS=\$\{|:-.*DISARM' code
 
 # --- the output anchor (#3650 D2, reused) ----------------------------------------
-grep -v '^[[:space:]]*#' "$BINDING" >"$T/binding-code.txt"
-code_lines=$(grep -c . "$T/binding-code.txt" | tr -d ' ')
-all_lines=$(grep -c . "$BINDING" | tr -d ' ')
-if [ "$code_lines" -lt "$all_lines" ] && [ "$code_lines" -gt 60 ] &&
-  grep -q 'verdict UNMEASURED' "$T/binding-code.txt" &&
-  grep -q 'self-check' "$T/binding-code.txt"; then
-  ok "template: the comment-stripped source ($code_lines of $all_lines lines) still holds the templates"
-else
-  bad "template: the comment strip left no usable template text ($code_lines of $all_lines) — vacuous"
-fi
+# The DERIVATION is measured too: a failed comment strip used to leave an empty
+# file, and every probe below would then have measured the derivation instead of
+# the subject — the token loop reporting "no forbidden token" about a file that
+# holds nothing at all, which is the vacuous pass this block exists to prevent.
 tmpl_bad=0
-for tok in PASS OK 'RESULT:'; do
-  if grep -q -- "$tok" "$T/binding-code.txt"; then
-    bad "template: the script's own static text contains '$tok': $(grep -m1 -- "$tok" "$T/binding-code.txt")"
+if ! probe_write_code_lines "$BINDING" "$T/binding-code.txt"; then
+  bad "template: UNMEASURED — could not derive the comment-stripped source ($PROBE_WHY)"
+  tmpl_bad=1
+else
+  code_lines=$(probe_count "$T/binding-code.txt" nonblank) || code_lines=-1
+  all_lines=$(probe_count "$BINDING" nonblank) || all_lines=-1
+  if [ "$code_lines" -lt 0 ] || [ "$all_lines" -lt 0 ]; then
+    bad "template: UNMEASURED — the line census could not be taken ($PROBE_WHY)"
     tmpl_bad=1
+  else
+    probe_file_fixed "$T/binding-code.txt" 'verdict UNMEASURED'
+    have_verdict=$?
+    probe_file_fixed "$T/binding-code.txt" 'self-check'
+    have_selfcheck=$?
+    if [ "$have_verdict" -eq 2 ] || [ "$have_selfcheck" -eq 2 ]; then
+      bad "template: UNMEASURED — the stripped source could not be re-read ($PROBE_WHY)"
+      tmpl_bad=1
+    elif [ "$code_lines" -lt "$all_lines" ] && [ "$code_lines" -gt 60 ] &&
+      [ "$have_verdict" -eq 0 ] && [ "$have_selfcheck" -eq 0 ]; then
+      ok "template: the comment-stripped source ($code_lines of $all_lines lines) still holds the templates"
+    else
+      bad "template: the comment strip left no usable template text ($code_lines of $all_lines) — vacuous"
+      tmpl_bad=1
+    fi
   fi
-done
+  for tok in PASS OK 'RESULT:'; do
+    probe_file_fixed "$T/binding-code.txt" "$tok"
+    case "$?" in
+      0)
+        bad "template: the script's own static text contains '$tok'"
+        tmpl_bad=1
+        ;;
+      1) : ;;
+      *)
+        bad "template: UNMEASURED — could not scan the stripped source for '$tok' ($PROBE_WHY)"
+        tmpl_bad=1
+        ;;
+    esac
+  done
+fi
 [ "$tmpl_bad" -eq 0 ] &&
   ok "template: the script's STATIC text carries none of PASS, OK, RESULT: (structural)"
 
@@ -572,26 +610,23 @@ case "$UOUT" in
 esac
 
 # --- no test-only seam into our own enforcer scripts (#3312) ----------------------
-if grep -vE '^[[:space:]]*#' "$BINDING" | grep -qE '\$\{[A-Z_]*(SCAN|FACTS|CLASSIFY)[A-Z_]*:?-'; then
-  bad "seam: the binding resolves one of its own enforcers through an overridable variable (#3312)"
-else
-  ok "seam: every own-enforcer path is resolved from OWN_DIR with no override (#3312)"
-fi
+assert_src_absent \
+  "seam: every own-enforcer path is resolved from OWN_DIR with no override (#3312)" \
+  "seam: the binding resolves one of its own enforcers through an overridable variable (#3312)" \
+  "$BINDING" '\$\{[A-Z_]*(SCAN|FACTS|CLASSIFY)[A-Z_]*:?-' code
 
 # --- premerge-assert wiring --------------------------------------------------------
 # A leg nothing calls is a guard that never fires, so the wiring is asserted
 # BEHAVIOURALLY (the shipped assert really refuses on an unbound review), not
 # just by grepping for the helper's name.
-if grep -q 'premerge-review-binding.sh' "$ASSERT"; then
-  ok "wiring: premerge-assert.sh names the review-binding helper"
-else
-  bad "wiring: premerge-assert.sh does not invoke premerge-review-binding.sh"
-fi
-if grep -q 'hold-check' "$ASSERT"; then
-  ok "wiring: premerge-assert.sh invokes the hold-check leg too"
-else
-  bad "wiring: premerge-assert.sh does not invoke the hold-check leg"
-fi
+assert_src_present_fixed \
+  "wiring: premerge-assert.sh names the review-binding helper" \
+  "wiring: premerge-assert.sh does not invoke premerge-review-binding.sh" \
+  "$ASSERT" 'premerge-review-binding.sh'
+assert_src_present_fixed \
+  "wiring: premerge-assert.sh invokes the hold-check leg too" \
+  "wiring: premerge-assert.sh does not invoke the hold-check leg" \
+  "$ASSERT" 'hold-check'
 
 # A minimal but REAL gate-of-record block at the certified sha, so the assert
 # gets past its own offline gate check and reaches the #3752 legs.
@@ -709,13 +744,18 @@ json.dump({"body": "==== ROBOREV REVIEW SUMMARY ====\njob: 304\nRESULT: PASS\n==
            "comments": [{"body": "job: 999 outside any block"}]}, open(sys.argv[1], "w"))
 PY
 scan_out=$(python3 "$SCANNER" jobs "$scan_pr" 2>&1)
-if printf '%s\n' "$scan_out" | grep -qx 'job=304' &&
-  ! printf '%s\n' "$scan_out" | grep -qx 'job=999'; then
+# Here-strings, not pipes: `grep -qx` exits on its match, and under this
+# suite's `set -o pipefail` a pipeline then reports the producer's SIGPIPE
+# rather than the match (#3752, lane-3752). A one-shot `printf` of a small
+# variable happens to be safe today because the whole string lands in one
+# write, but that is a property of the DATA, not of the construct.
+if grep -qx 'job=304' <<<"$scan_out" &&
+  ! grep -qx 'job=999' <<<"$scan_out"; then
   ok "scanner: a job id is read ONLY from inside a roborev block, never from loose prose"
 else
   bad "scanner: block scoping is wrong (got: $scan_out)"
 fi
-if printf '%s\n' "$scan_out" | grep -q '^recorded-verdict=304:'; then
+if grep -q '^recorded-verdict=304:' <<<"$scan_out"; then
   ok "scanner: the recorded terminal verdict is reported informationally"
 else
   bad "scanner: the recorded terminal verdict was not reported (got: $scan_out)"
@@ -962,11 +1002,16 @@ fi
 # signal that was never fully read is the affirmative-measurement rule violated
 # directly — a false PASS on exactly AC6's scenario (#3735 merged three minutes
 # after the lead disarmed it).
-if grep -vE '^[[:space:]]*#' "$BINDING" | grep -qE 'gh api .*--paginate'; then
-  ok "timeline: the disarm timeline is requested with --paginate (structural)"
-else
-  bad "timeline: the timeline request takes one page only — a later disarm is invisible"
-fi
+# THIS IS THE ASSERT THAT FLAKED (#3752, lane-3752). It was
+# `grep -vE '^ *#' "$BINDING" | grep -qE 'gh api .*--paginate'`, and it reddened
+# once and then passed three times over a byte-identical helper: under this
+# suite's `set -o pipefail` the consumer exits on its match while the producer
+# is still writing, the producer takes SIGPIPE, and the pipeline reports 141 —
+# a FALSE FAIL on correct input, i.e. the guard agents learn to waive.
+assert_src_present \
+  "timeline: the disarm timeline is requested with --paginate (structural)" \
+  "timeline: the timeline request takes one page only — a later disarm is invisible" \
+  "$BINDING" 'gh api .*--paginate' code
 
 # `gh api --paginate` emits ONE JSON ARRAY PER PAGE, concatenated — not one
 # array. Every page must be decoded before any verdict is reached.
@@ -1012,10 +1057,238 @@ if run_hold 5 "timeline: a pagination that cannot be decoded in full is UNMEASUR
   esac
 fi
 
+# ==============================================================================
+# THE THREE-VALUED PROBE ITSELF (#3752, lane-3752 audit)
+# ==============================================================================
+# Every structural assert above reads a FILE, and a `grep -q` inside an
+# `if/else` answers a three-valued question two-valued: "matched", "did not
+# match" and "could not be read" are three facts, and the two-valued form folds
+# the third onto whichever branch was written second. Under the ABSENCE asserts
+# here (no env override, no enforcer seam, no PASS in the static text) that
+# branch is `ok` — an unreadable subject CERTIFIES the property, which is a
+# false PASS in a merge-gate test.
+#
+# SUBSTITUTING THE ARTIFACT, never a path variable into repo code (#3312): each
+# case builds its own scratch subject and probes THAT.
+PROBE_T="$T/probe"
+mkdir -p "$PROBE_T/adir"
+printf 'gh api --paginate "repos/x/y"\n' >"$PROBE_T/present.txt"
+printf '# gh api --paginate "repos/x/y"\n' >"$PROBE_T/comment-only.txt"
+printf 'gh api "repos/x/y"\n' >"$PROBE_T/absent.txt"
+: >"$PROBE_T/empty.txt"
+
+probe_file_match "$PROBE_T/present.txt" 'gh api .*--paginate' code
+case "$?" in
+  0) ok "probe: a readable subject that MATCHES returns 0" ;;
+  *) bad "probe: a readable matching subject did not return 0" ;;
+esac
+probe_file_match "$PROBE_T/absent.txt" 'gh api .*--paginate' code
+case "$?" in
+  1) ok "probe: a readable subject that does NOT match returns 1" ;;
+  *) bad "probe: a readable non-matching subject did not return 1" ;;
+esac
+# The `code` mode is not decoration: it is what stops this file's own prose
+# about --paginate satisfying an assert about the helper's CODE.
+probe_file_match "$PROBE_T/comment-only.txt" 'gh api .*--paginate' code
+case "$?" in
+  1) ok "probe: a match that lives ONLY in a comment is not code (mode=code)" ;;
+  *) bad "probe: a commented-out match was read as code" ;;
+esac
+for _sub in "$PROBE_T/no-such-file" "$PROBE_T/adir" "$PROBE_T/empty.txt"; do
+  probe_file_match "$_sub" 'gh api .*--paginate' code
+  if [ "$?" -eq 2 ]; then
+    ok "probe: an unmeasurable subject ($(basename "$_sub")) returns 2, never the permissive 1"
+  else
+    bad "probe: $(basename "$_sub") collapsed onto a match verdict — the fold is back"
+  fi
+done
+
+# THE ROUTING, which is where the false PASS actually lived. `ok`/`bad` are
+# rebound to counters via their OWN saved definitions (`declare -f`), so the
+# restore cannot drift from the originals and the self-test's own probes do not
+# print into the suite's tally.
+_OK_DEF=$(declare -f ok)
+_BAD_DEF=$(declare -f bad)
+SELF_OK=0
+SELF_BAD=0
+SELF_MSG=""
+ok() { SELF_OK=$((SELF_OK + 1)); SELF_MSG="$1"; }
+bad() { SELF_BAD=$((SELF_BAD + 1)); SELF_MSG="$1"; }
+assert_src_absent "probe-selftest: absent" "probe-selftest: present" \
+  "$PROBE_T/no-such-file" 'anything'
+ABS_OK=$SELF_OK
+ABS_BAD=$SELF_BAD
+ABS_MSG=$SELF_MSG
+SELF_OK=0
+SELF_BAD=0
+PRES_ABSENT_MSG="probe-present: the pattern is NOT there"
+assert_src_present "probe-present: found" "$PRES_ABSENT_MSG" \
+  "$PROBE_T/no-such-file" 'anything'
+PRES_OK=$SELF_OK
+PRES_BAD=$SELF_BAD
+PRES_MSG=$SELF_MSG
+SELF_OK=0
+SELF_BAD=0
+assert_count "probe-selftest: count" "probe-selftest: got %s" \
+  "$PROBE_T/no-such-file" line-exact 'x' 0
+CNT_OK=$SELF_OK
+CNT_BAD=$SELF_BAD
+CNT_MSG=$SELF_MSG
+eval "$_OK_DEF"
+eval "$_BAD_DEF"
+
+if [ "$ABS_BAD" -eq 1 ] && [ "$ABS_OK" -eq 0 ]; then
+  ok "probe: an ABSENCE assert over an unreadable subject FAILS — it can no longer self-certify"
+else
+  bad "probe: an unreadable subject satisfied an ABSENCE assert (ok=$ABS_OK bad=$ABS_BAD) — false PASS"
+fi
+case "$ABS_MSG" in
+  *UNMEASURED*"could not read"*)
+    ok "probe: the third state is REPORTED AS ITSELF, not as the absence of the property" ;;
+  *) bad "probe: the unmeasurable case borrowed another verdict's wording (got: $ABS_MSG)" ;;
+esac
+# The PRESENCE direction was already fail-closed; what it lacked was a cause.
+# It must not reuse the "the pattern is NOT there" wording, because "the helper
+# lost its pagination" and "I could not read the helper" send an operator to
+# two different places.
+if [ "$PRES_BAD" -eq 1 ] && [ "$PRES_OK" -eq 0 ]; then
+  case "$PRES_MSG" in
+    "$PRES_ABSENT_MSG")
+      bad "probe: an unreadable subject reported the ABSENT cause — the two failures are conflated" ;;
+    *UNMEASURED*"could not read"*)
+      ok "probe: a PRESENCE assert names UNMEASURED, never the absent-property cause" ;;
+    *) bad "probe: a PRESENCE assert over an unreadable subject named no cause: $PRES_MSG" ;;
+  esac
+else
+  bad "probe: the presence routing did not fail closed (ok=$PRES_OK bad=$PRES_BAD)"
+fi
+# A COUNT is the same trap one step out: `[ "$(probe_count ...)" -eq 0 ]` on an
+# unreadable subject compares an EMPTY string and would have to be handled by
+# the caller, so the helper refuses rather than returning a number it did not
+# measure. The expected value here is 0 ON PURPOSE — an unmeasured subject must
+# not satisfy an assert that a count is zero.
+if [ "$CNT_BAD" -eq 1 ] && [ "$CNT_OK" -eq 0 ]; then
+  ok "probe: an unreadable subject does not satisfy a 'count is 0' assert"
+else
+  bad "probe: a count over an unreadable subject was read as 0 (ok=$CNT_OK bad=$CNT_BAD)"
+fi
+
+# NO PIPELINE MAY DECIDE A VERDICT IN THIS SUITE. This is the structural half of
+# the measured false FAIL: under `set -o pipefail` a `producer | grep -q` reports
+# the producer's SIGPIPE when the consumer matches and exits early, so the
+# construct itself is the defect and its absence is the property. The needle is
+# assembled so this guard cannot match its own line (the sibling suite's idiom).
+_pipe_a='| grep -'
+_pipe_b='q'
+assert_src_absent_fixed \
+  "pipeline: no verdict in this suite is derived from a pipe into an early-exiting grep" \
+  "pipeline: a pipe into an early-exiting grep is back — under pipefail such a pipeline reports the PRODUCER's SIGPIPE, so a correct file reds intermittently" \
+  "${BASH_SOURCE[0]}" "$_pipe_a$_pipe_b" code
+
+# ==============================================================================
+# THE HOLD LEG'S ISSUE-THREAD DISCOVERY IS THREE-VALUED (#3752, lane-3752)
+# ==============================================================================
+# `issues=$(python3 -c ...) || issues=""` folded "this PR closes NO issue" and
+# "which issues it closes could not be READ" onto one value, so an unreadable
+# payload re-read NO issue thread and the leg could still report a CLEARANCE
+# with a `HOLD:` sitting on the issue. The POSITIVE CONTROL comes first: without
+# it the refusals below could all be firing on some other cause.
+raw_pr_hold() { printf '%s\n' "$2" >"$1"; }
+
+timeline_payload '[]'
+raw_pr_hold "$MOCK_GH_DIR/pr-hold.json" \
+  '{"body":"","comments":[],"closingIssuesReferences":[{"number":9001}]}'
+python3 - "$MOCK_GH_DIR/issue-9001.json" "$(iso_ago 600)" <<'PY'
+import json, sys
+json.dump({"body": "", "comments": [
+    {"author": {"login": "pmcfadin"}, "createdAt": sys.argv[2],
+     "body": "HOLD: merge after #9999"}]}, open(sys.argv[1], "w"))
+PY
+if run_hold 4 "issues: a HOLD on the CLOSED ISSUE's thread stops the merge (positive control)"; then
+  case "$OUT" in
+    *"also re-reading issue #9001"*)
+      ok "issues: the issue thread named by closingIssuesReferences really is re-read" ;;
+    *) bad "issues: the issue thread was never re-read — the refusals below prove nothing (got: $OUT)" ;;
+  esac
+fi
+
+# The three unreadable SHAPES. Each is a payload that DECODES as JSON, so the
+# leg's own `gh`/JSON guards do not fire: the only thing standing between them
+# and a false clearance is the extractor refusing a shape it cannot read.
+rm -f "$MOCK_GH_DIR/issue-9001.json"
+raw_pr_hold "$MOCK_GH_DIR/pr-hold.json" \
+  '{"body":"","comments":[],"closingIssuesReferences":"9001"}'
+if run_hold 5 "issues: closingIssuesReferences that is not a LIST is UNMEASURED"; then
+  case "$OUT" in
+    *"closingIssuesReferences could not be read"*)
+      ok "issues: the cause names the closingIssuesReferences read, not something else" ;;
+    *) bad "issues: expected the closingIssuesReferences cause (got: $OUT)" ;;
+  esac
+fi
+raw_pr_hold "$MOCK_GH_DIR/pr-hold.json" \
+  '{"body":"","comments":[],"closingIssuesReferences":["9001"]}'
+if run_hold 5 "issues: a closingIssuesReferences ENTRY that is not an object is UNMEASURED"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "issues: an unreadable entry is a refusal, never 'this PR closes nothing'" ;;
+    *) bad "issues: expected UNMEASURED (got: $OUT)" ;;
+  esac
+fi
+raw_pr_hold "$MOCK_GH_DIR/pr-hold.json" \
+  '{"body":"","comments":[],"closingIssuesReferences":[{"number":"9001"}]}'
+if run_hold 5 "issues: a non-integer issue number is UNMEASURED, not skipped"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "issues: a skipped entry would be the same fold one level in, so it refuses" ;;
+    *) bad "issues: expected UNMEASURED (got: $OUT)" ;;
+  esac
+fi
+# NON-VACUITY IN THE OTHER DIRECTION: a PR that genuinely closes nothing must
+# still clear, or the fix would just be a blanket hold.
+raw_pr_hold "$MOCK_GH_DIR/pr-hold.json" \
+  '{"body":"","comments":[],"closingIssuesReferences":[]}'
+if run_hold 0 "issues: a PR that closes NOTHING still clears (the fix is not a blanket hold)"; then
+  case "$OUT" in
+    *"verdict NO-HOLD-RECOGNISED"*) ok "issues: an empty closing list is a measured absence" ;;
+    *) bad "issues: expected NO-HOLD-RECOGNISED (got: $OUT)" ;;
+  esac
+fi
+# And an ABSENT key is an absence too: gh omits it on payloads that were not
+# asked for it, and refusing there would red correct input.
+raw_pr_hold "$MOCK_GH_DIR/pr-hold.json" '{"body":"","comments":[]}'
+if run_hold 0 "issues: an ABSENT closingIssuesReferences key is an absence, not a refusal"; then
+  case "$OUT" in
+    *"verdict NO-HOLD-RECOGNISED"*) ok "issues: an absent key does not red a correct payload" ;;
+    *) bad "issues: an absent key was read as unmeasurable (got: $OUT)" ;;
+  esac
+fi
+
+# --- the scanner's comment bodies are three-valued too --------------------------
+# A body that is neither a string nor null is a payload SHAPE the scanner does
+# not understand, and skipping it can only ever SHRINK the hold set.
+raw_pr_hold "$MOCK_GH_DIR/pr-hold.json" \
+  "{\"body\":\"\",\"comments\":[{\"author\":{\"login\":\"pmcfadin\"},\"createdAt\":\"$(iso_ago 600)\",\"body\":42}],\"closingIssuesReferences\":[]}"
+if run_hold 5 "scanner: a comment body of an unexpected TYPE is UNMEASURED"; then
+  case "$OUT" in
+    *"body was not a string"*)
+      ok "scanner: the unreadable comment is named, not silently dropped from the hold set" ;;
+    *) bad "scanner: expected the body-shape cause (got: $OUT)" ;;
+  esac
+fi
+raw_pr_hold "$MOCK_GH_DIR/pr-hold.json" \
+  "{\"body\":\"\",\"comments\":[{\"author\":{\"login\":\"pmcfadin\"},\"createdAt\":\"$(iso_ago 600)\",\"body\":null}],\"closingIssuesReferences\":[]}"
+if run_hold 0 "scanner: a NULL body is a comment with no text, and still clears"; then
+  case "$OUT" in
+    *"verdict NO-HOLD-RECOGNISED"*)
+      ok "scanner: text is the only place a column-zero marker can live, so null is an absence" ;;
+    *) bad "scanner: a null body was read as unmeasurable (got: $OUT)" ;;
+  esac
+fi
+
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=61
+CASE_FLOOR=80
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"
