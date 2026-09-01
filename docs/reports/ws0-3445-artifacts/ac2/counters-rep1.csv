@@ -1,0 +1,6 @@
+51180554877,,cycles,25117152228,100.00,,
+123390837298,,instructions,25079222254,100.00,2.41,insn per cycle
+14833804671,,cycle_activity.stalls_total,25079253952,100.00,,
+3737194950,,cycle_activity.stalls_l1d_miss,25079252068,100.00,,
+53146983206,,idq_uops_not_delivered.core,25079240843,100.00,,
+1095338155,,int_misc.recovery_cycles,25079216770,100.00,,

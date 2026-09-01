@@ -84,8 +84,11 @@ if [ "$MODE" = record ]; then
 else
   # -x, gives the machine-readable form whose 6th field is pct_running: the validity rule
   # is checked from THAT field, not from the absence of a warning in the human-readable form.
+  # `perf stat -x,` writes its CSV to STDERR, not stdout: sending stdout to counters.csv
+  # yields an EMPTY counters file and a log that happens to hold the data, which is how a
+  # validity check ends up reading nothing and reporting nothing wrong. Capture stderr.
   perf stat -x, -e "$STAT_EVENTS" -p "$WPID" \
-    -- sleep "$SECS" > "$OUT/counters.csv" 2> "$OUT/perf-stat.log" || true
+    -- sleep "$SECS" 2> "$OUT/counters.csv" > "$OUT/perf-stat.stdout" || true
 fi
 
 { echo "loadavg_after=$(cut -d' ' -f1-3 /proc/loadavg)"
