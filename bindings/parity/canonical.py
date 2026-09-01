@@ -291,11 +291,38 @@ def canon_uuid_str(s: str) -> str:
 
 
 def normalize_decimal_string(s: str) -> str:
-    """Canonical plain-decimal text, identical to normalizeDecimalString() in JS.
+    """Canonical decimal text, identical to normalizeDecimalString() in JS.
 
-    Trailing zeros of the SCALE are preserved (Cassandra's decimal carries a
-    scale, and ``0.10`` is not ``0.1`` on the wire). Only the exponent is
-    normalized away, and only when the positional form stays bounded.
+    THE THREE LEGS USE TWO DIFFERENT RENDERERS, and this function is what makes
+    them converge (issue #1455, F7). MEASURED, not reasoned about — the strings
+    below were observed by executing each renderer:
+
+    * the CLI goes through ``cqlite_core::util::value_fmt::ValueFormatter``
+      (``cqlite-cli/src/output/json.rs:181``), which for a NEGATIVE scale
+      EXPANDS positionally: ``(scale=-5000, unscaled=1)`` -> ``1`` followed by
+      5000 zeros, and ``(scale=-1, unscaled=1)`` -> ``10``;
+    * both bindings go through ``cqlite_ffi_common::decimal::decimal_to_string``
+      (``bindings/{node,python}/src/value.rs``), which for the same inputs emits
+      ``1e5000`` and ``1e1``.
+
+    They agree everywhere else, including above each renderer's own 1e6 scale
+    cap (both then emit ``1e1000001``) and for a large POSITIVE scale (both emit
+    the positional ``0.000…1``).
+
+    So an INTEGER's trailing zeros are folded into an exponent: a value with no
+    fractional part canonicalizes to ``<mantissa>e<exp>``. That is the only
+    transformation needed, and it is deliberately NOT applied to a value that
+    has a fractional part — ``0.10`` must stay ``0.10``, because Cassandra's
+    decimal carries a scale, both renderers preserve it there, and folding it
+    would discard a distinction the legs actually agree on.
+
+    Nothing here changes the CLI's renderer; the divergence is reconciled in the
+    HARNESS, which is where a test-only issue may act.
+
+    The folding also STRENGTHENS the bound it interacts with (R2): the integer
+    path allocates at most the mantissa, so it can never expand a pathological
+    exponent — ``1e1000000000`` stays ``1e1000000000`` rather than attempting a
+    gigabyte of zeros.
     """
     text = str(s).strip()
     m = _DECIMAL_RE.match(text)
@@ -305,16 +332,44 @@ def normalize_decimal_string(s: str) -> str:
     exp = int(exp_part) if exp_part is not None else 0
     digits = int_part + frac_part
     point = len(int_part) + exp  # index of the decimal point within `digits`
+
+    # Leading zeros carry no value; drop them and move the point with them.
+    lead = len(digits) - len(digits.lstrip("0"))
+    if lead:
+        digits = digits[lead:]
+        point -= lead
+
+    if not digits:
+        # Every digit was a zero. A FRACTIONAL zero keeps its scale (`-0.00`,
+        # which both legs render identically); an integral one is just `0`.
+        if frac_part:
+            return f"{sign}0.{'0' * len(frac_part)}"
+        return f"{sign}0"
+
+    if point >= len(digits):
+        # INTEGER: no fractional digits. `point - len(digits)` zeros are
+        # implicit, and `digits` may carry more of its own; fold them all into
+        # the exponent so the CLI's expanded form and the bindings' exponent
+        # form reduce to ONE string.
+        mantissa = digits.rstrip("0")
+        if not mantissa:
+            return f"{sign}0"
+        exp10 = point - len(mantissa)
+        body = f"{sign}{mantissa}"
+        return body if exp10 == 0 else f"{body}e{exp10}"
+
     if abs(point) > DECIMAL_PLAIN_MAX_CHARS or len(digits) > DECIMAL_PLAIN_MAX_CHARS:
-        stripped = digits.lstrip("0") or "0"
-        scale = len(frac_part) - exp
-        body = f"{sign}{stripped}"
-        return body if scale == 0 else f"{body}e{-scale}"
+        # A FRACTIONAL value too wide to materialize positionally. Same
+        # mantissa/exponent shape as the integer path above, so one canonical
+        # form covers both.
+        mantissa = digits.rstrip("0") or "0"
+        exp10 = point - len(mantissa)
+        body = f"{sign}{mantissa}"
+        return body if exp10 == 0 else f"{body}e{exp10}"
+
     if point <= 0:
         digits = "0" * (1 - point) + digits
         point = 1
-    elif point > len(digits):
-        digits = digits + "0" * (point - len(digits))
     whole = digits[:point].lstrip("0") or "0"
     frac = digits[point:]
     out = whole if not frac else f"{whole}.{frac}"

@@ -238,7 +238,29 @@ export function canonUuidStr(s) {
   return low;
 }
 
-/** Canonical plain-decimal text, identical to normalize_decimal_string() in Python. */
+/**
+ * Canonical decimal text, identical to normalize_decimal_string() in Python.
+ *
+ * THE THREE LEGS USE TWO DIFFERENT RENDERERS, and this is what makes them
+ * converge (issue #1455, F7). MEASURED by executing each renderer, not
+ * reasoned about:
+ *
+ *   (scale=-1,    unscaled=1) -> CLI `10`                 | bindings `1e1`
+ *   (scale=-5000, unscaled=1) -> CLI `1` + 5000 zeros     | bindings `1e5000`
+ *   (scale=-5000, unscaled=-7)-> CLI `-7` + 5000 zeros    | bindings `-7e5000`
+ *
+ * The CLI goes through `cqlite_core::util::value_fmt::ValueFormatter`
+ * (`cqlite-cli/src/output/json.rs:181`), which EXPANDS a negative scale
+ * positionally; both bindings go through
+ * `cqlite_ffi_common::decimal::decimal_to_string`, which emits exponent form.
+ * They agree everywhere else, including above each renderer's own 1e6 scale cap
+ * and for a large POSITIVE scale.
+ *
+ * So an INTEGER's trailing zeros are folded into an exponent. Deliberately NOT
+ * applied to a value with a fractional part: `0.10` must stay `0.10`, because
+ * both renderers preserve that scale and folding would discard a distinction
+ * the legs agree on. Nothing here changes the CLI's renderer.
+ */
 export function normalizeDecimalString(s) {
   const text = String(s).trim();
   const m = DECIMAL_RE.exec(text);
@@ -249,17 +271,43 @@ export function normalizeDecimalString(s) {
   const exp = m[4] === undefined ? 0 : parseInt(m[4], 10);
   let digits = intPart + fracPart;
   let point = intPart.length + exp;
-  if (Math.abs(point) > DECIMAL_PLAIN_MAX_CHARS || digits.length > DECIMAL_PLAIN_MAX_CHARS) {
-    const stripped = digits.replace(/^0+/, '') || '0';
-    const scale = fracPart.length - exp;
-    const body = `${sign}${stripped}`;
-    return scale === 0 ? body : `${body}e${-scale}`;
+
+  // Leading zeros carry no value; drop them and move the point with them.
+  const lead = digits.length - digits.replace(/^0+/, '').length;
+  if (lead) {
+    digits = digits.slice(lead);
+    point -= lead;
   }
+
+  if (!digits) {
+    // Every digit was a zero. A FRACTIONAL zero keeps its scale (`-0.00`);
+    // an integral one is just `0`.
+    return fracPart ? `${sign}0.${'0'.repeat(fracPart.length)}` : `${sign}0`;
+  }
+
+  const foldToExponent = () => {
+    const mantissa = digits.replace(/0+$/, '');
+    if (!mantissa) return `${sign}0`;
+    const exp10 = point - mantissa.length;
+    const body = `${sign}${mantissa}`;
+    return exp10 === 0 ? body : `${body}e${exp10}`;
+  };
+
+  // INTEGER: no fractional digits. Fold the implicit and explicit trailing
+  // zeros into the exponent so the CLI's expanded form and the bindings'
+  // exponent form reduce to ONE string. This path allocates at most the
+  // mantissa, so it can never expand a pathological exponent (R2).
+  if (point >= digits.length) return foldToExponent();
+
+  // A FRACTIONAL value too wide to materialize positionally: same
+  // mantissa/exponent shape, so one canonical form covers both.
+  if (Math.abs(point) > DECIMAL_PLAIN_MAX_CHARS || digits.length > DECIMAL_PLAIN_MAX_CHARS) {
+    return foldToExponent();
+  }
+
   if (point <= 0) {
     digits = '0'.repeat(1 - point) + digits;
     point = 1;
-  } else if (point > digits.length) {
-    digits += '0'.repeat(point - digits.length);
   }
   const whole = digits.slice(0, point).replace(/^0+/, '') || '0';
   const frac = digits.slice(point);

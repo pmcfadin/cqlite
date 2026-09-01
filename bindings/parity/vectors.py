@@ -19,6 +19,7 @@ import datetime as _dt
 import decimal as _decimal
 import ipaddress as _ipaddress
 import json
+import re
 import sys
 import uuid as _uuid
 from pathlib import Path
@@ -330,6 +331,16 @@ REQUIRED_FLOOR_KEYS = (
 )
 ALL_LEGS = ("python", "node", "cli")
 
+# Kinds whose leg value is a STRING a RENDERER produced, rather than a native
+# passthrough. Only these can carry a MODELLED (wrong) leg claim, which is what
+# F7 was: the vectors said the CLI printed `1e5000` for a negative scale when
+# it actually prints `1` followed by 5000 zeros. Every one of these must now
+# declare `_source`.
+RENDERER_FORMATTED_KINDS = frozenset({
+    "decimal", "uuid", "timeuuid", "inet", "blob",
+    "timestamp", "date", "time", "duration", "varint",
+})
+
 
 def check_schema(data: Optional[dict] = None) -> List[str]:
     """Every case must CARRY every field the runners read (issue #1455, F3).
@@ -361,6 +372,19 @@ def check_schema(data: Optional[dict] = None) -> List[str]:
         for key in ("name", "type", "canonical", *ALL_LEGS):
             if key not in vec:
                 failures.append(f"vector {label!r} is missing `{key}`")
+        # PROVENANCE for the family where a MODELLED leg string actually bit us
+        # (issue #1455, F7): a decimal vector must say whether its cli/node
+        # strings were OBSERVED from the real renderer or are a synthetic
+        # parser input. A vector asserting what we ASSUME a leg prints is worth
+        # less than no vector, because it manufactures confidence.
+        hit = sorted(RENDERER_FORMATTED_KINDS.intersection(re.findall(r"[a-z_]+", vec.get("type", ""))))
+        if hit and not str(vec.get("_source", "")).startswith(("measured", "synthetic")):
+            failures.append(
+                f"vector {label!r} carries a RENDERER-FORMATTED kind ({', '.join(hit)}) but its "
+                "`_source` does not start with 'measured' or 'synthetic' — say whether the leg "
+                "strings were OBSERVED by executing the renderer or are a synthetic parser "
+                "input (F7)"
+            )
     for case in data["rows"]:
         label = case.get("name", "<unnamed>")
         for key in ("name", "columns", "canonical", *ALL_LEGS):

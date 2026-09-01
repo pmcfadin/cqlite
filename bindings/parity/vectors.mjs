@@ -272,6 +272,16 @@ export const REQUIRED_FLOOR_KEYS = [
 export const ALL_LEGS = ['python', 'node', 'cli'];
 
 /**
+ * Kinds whose leg value is a STRING a RENDERER produced, rather than a native
+ * passthrough. Only these can carry a MODELLED (wrong) leg claim — which is
+ * what F7 was — so each must declare `_source`.
+ */
+export const RENDERER_FORMATTED_KINDS = new Set([
+  'decimal', 'uuid', 'timeuuid', 'inet', 'blob',
+  'timestamp', 'date', 'time', 'duration', 'varint',
+]);
+
+/**
  * Every case must CARRY every field the runners read (issue #1455, F3).
  *
  * The class this closes: a `|| []` / `?? 0` / `.get(k, default)` read lets an
@@ -297,6 +307,18 @@ export function checkSchema(data = loadAll()) {
     const label = vec.name || '<unnamed>';
     for (const key of ['name', 'type', 'canonical', ...ALL_LEGS]) {
       if (!(key in vec)) failures.push(`vector '${label}' is missing \`${key}\``);
+    }
+    // PROVENANCE for the family where a MODELLED leg string bit us (F7): a
+    // decimal vector must say whether its cli/node strings were OBSERVED from
+    // the real renderer or are a synthetic parser input.
+    const rendered = [...new Set(String(vec.type || '').match(/[a-z_]+/g) || [])]
+      .filter((k) => RENDERER_FORMATTED_KINDS.has(k)).sort();
+    if (rendered.length && !/^(measured|synthetic)/.test(String(vec._source || ''))) {
+      failures.push(
+        `vector '${label}' carries a RENDERER-FORMATTED kind (${rendered.join(', ')}) but its `
+        + "`_source` does not start with 'measured' or 'synthetic' — say whether the leg "
+        + 'strings were OBSERVED by executing the renderer or are a synthetic parser input (F7)',
+      );
     }
   }
   for (const c of data.rows) {
