@@ -84,16 +84,37 @@ def main():
     outdir = sys.argv[1]
     requested = int(sys.argv[2])
     spec = sys.argv[3]  # "base:head,base:head,..." one entry per replicate
+    # Optional 4th arg: the concurrency ramp. Default "1" (single-stream). For a
+    # multi-step ramp the spec's rate is the PEAK and it sits at the top step,
+    # with lower steps scaled down -- so the peak-selection logic is exercised
+    # rather than trivially satisfied by a one-element ladder.
+    ramp = sys.argv[4] if len(sys.argv) > 4 else "1"
+    steps = [int(v) for v in ramp.split(",")]
     os.makedirs(outdir, exist_ok=True)
     runs = []
     for index, entry in enumerate(spec.split(","), start=1):
         base_rate, head_rate = (float(v) for v in entry.split(":"))
         for arm, rate in (("base", base_rate), ("head", head_rate)):
             name = "%s-r%02d.jsonl" % (arm, index)
+            scale = [0.55, 0.78, 0.91, 1.0]
             with open(os.path.join(outdir, name), "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(step_record("%s-r%02d" % (arm, index), rate)))
-                handle.write("\n")
-            runs.append({"arm": arm, "replicate": index, "file": name, "temperature": "warm"})
+                for position, concurrency in enumerate(steps):
+                    factor = 1.0 if len(steps) == 1 else scale[min(position, len(scale) - 1)]
+                    if position == len(steps) - 1:
+                        factor = 1.0
+                    record = step_record("%s-r%02d" % (arm, index), rate * factor)
+                    record["step"] = position
+                    record["target_concurrency"] = concurrency
+                    handle.write(json.dumps(record))
+                    handle.write("\n")
+            runs.append({
+                "arm": arm,
+                "replicate": index,
+                "file": name,
+                "temperature": "warm",
+                "admission_observed": "16",
+                "admission_source": "flag",
+            })
     manifest = {
         "schema": "ab-3649.manifest/v1",
         "driver_version": "selftest-fixture",
@@ -105,13 +126,17 @@ def main():
         },
         "workload": {
             "shape": "full",
-            "ramp": "1",
             "step_duration": "60s",
+            "ramp": ramp,
             "prewarm": True,
             "server_cpus": "0,2",
             "client_cpus": "1,3",
             "temperature": "warm",
             "merge_path": "merge",
+            "max_concurrent_scans": 16,
+            "batch_size": 8192,
+            "max_batch_bytes": "server-default",
+            "admission_wait_timeout_ms": "server-default",
         },
         "corpus": {
             "path": "/data/ab-3649/corpus/sstables",
@@ -140,10 +165,27 @@ PYEOF
 mkfixture() { python3 "$TMP/mkfixture.py" "$@"; }
 
 RC=0
-run_analyzer() { # <dir> [extra args...]
+run_analyzer() { # <dir> [extra args...]   -- the single-stream section
   local dir="$1"; shift
   set +e
-  python3 "$ANALYZER" --manifest "$dir/manifest.json" "$@" \
+  python3 "$ANALYZER" --single-stream "$dir/manifest.json" "$@" \
+    > "$TMP/out.txt" 2> "$TMP/err.txt"
+  RC=$?
+  set -e
+}
+
+run_util() { # <dir> [extra args...]   -- the utilization section
+  local dir="$1"; shift
+  set +e
+  python3 "$ANALYZER" --utilization "$dir/manifest.json" "$@" \
+    > "$TMP/out.txt" 2> "$TMP/err.txt"
+  RC=$?
+  set -e
+}
+
+run_both() { # <single-stream-dir> <utilization-dir>
+  set +e
+  python3 "$ANALYZER" --single-stream "$1/manifest.json" --utilization "$2/manifest.json" \
     > "$TMP/out.txt" 2> "$TMP/err.txt"
   RC=$?
   set -e
@@ -159,12 +201,16 @@ anchored() { # every line of both streams carries the prefix
   return 0
 }
 
-verdict_token() { sed -n 's/^AB-3649: verdict \([A-Z][A-Z-]*\)$/\1/p' "$TMP/out.txt"; }
+# `verdict <quantity> <TOKEN>`: one line per section, the quantity in a fixed
+# position, so a two-section report still has exactly one verdict per quantity.
+verdict_token() { # [quantity]
+  sed -n "s/^AB-3649: verdict ${1:-[a-z-]*} \([A-Z][A-Z-]*\)\$/\1/p" "$TMP/out.txt"
+}
 
-check_verdict() { # <description> <expected-token> <expected-exit>
-  local desc="$1" want="$2" want_rc="$3"
+check_verdict() { # <description> <expected-token> <expected-exit> [quantity]
+  local desc="$1" want="$2" want_rc="$3" quantity="${4:-}"
   local got
-  got="$(verdict_token)"
+  got="$(verdict_token "$quantity")"
   local lines
   lines="$(printf '%s\n' "$got" | grep -c . || true)"
   if [ "$lines" != "1" ]; then
@@ -187,10 +233,10 @@ check_verdict() { # <description> <expected-token> <expected-exit>
 }
 
 check_cause() { # <description> <expected-cause>
-  if grep -q "^AB-3649: cause $2$" "$TMP/err.txt"; then
+  if grep -qE "^AB-3649: cause [a-z-]+ $2\$" "$TMP/err.txt"; then
     ok "$1 -> cause $2"
   else
-    bad "$1 (cause line 'AB-3649: cause $2' absent; stderr: $(head -2 "$TMP/err.txt" | tr '\n' ' '))"
+    bad "$1 (no 'AB-3649: cause <quantity> $2' line; stderr: $(head -2 "$TMP/err.txt" | tr '\n' ' '))"
   fi
 }
 
@@ -221,7 +267,7 @@ if grep -q '^AB-3649: test ci-contains-1.0 yes$' "$TMP/out.txt"; then
 else
   bad "the inconclusive case did not report ci-contains-1.0"
 fi
-if grep -qE '^AB-3649: ratio point 1\.1[0-9]+ ' "$TMP/out.txt"; then
+if grep -qE '^AB-3649: ratio single-stream point 1\.1[0-9]+ ' "$TMP/out.txt"; then
   ok "a point estimate sitting INSIDE the target band still does not earn a verdict"
 else
   bad "the inconclusive fixture no longer has a point estimate inside the band, so it is no longer testing the case it exists for"
@@ -459,7 +505,7 @@ if [ "$(grep -c '^AB-3649: ceiling ' "$TMP/out.txt")" = "1" ]; then
 else
   bad "the ceiling was not named on an ordinary measured run"
 fi
-if [ "$(grep -c '^AB-3649: verdict-detail NON-EXHAUSTIVE ' "$TMP/out.txt")" -ge 4 ]; then
+if [ "$(grep -c '^AB-3649: verdict-detail single-stream NON-EXHAUSTIVE ' "$TMP/out.txt")" -ge 4 ]; then
   ok "every measured run declares its own non-exhaustiveness"
 else
   bad "a measured run did not print its NON-EXHAUSTIVE declarations"
@@ -491,7 +537,8 @@ fi
 #     cannot match its own source line.
 NEEDLES=("PA""SS" "RE""SULT:" "AGENT-""GATE" "ROB""OREV" "PRE""MERGE")
 structural_bad=0
-for target in "$ANALYZER" "$DRIVER"; do
+for target in "$ANALYZER" "$DRIVER" "$HERE/ab_common.py" "$HERE/ab_input.py" \
+              "$HERE/ab_stats.py"; do
   [ -f "$target" ] || continue
   for needle in "${NEEDLES[@]}"; do
     if grep -q -- "$needle" "$target"; then
@@ -555,7 +602,7 @@ with open(path, "w", encoding="utf-8") as handle:
 PYINNER
 run_analyzer "$TMP/unpinned"
 check_verdict "several sources with no pinned merge arm still renders" MEETS-TARGET 0
-if grep -q '^AB-3649: verdict-detail MERGE-PATH ' "$TMP/out.txt"; then
+if grep -q '^AB-3649: verdict-detail single-stream MERGE-PATH ' "$TMP/out.txt"; then
   ok "an unpinned merge arm is disclosed beside the verdict"
 else
   bad "an unpinned merge arm was not disclosed"
@@ -563,7 +610,7 @@ fi
 
 run_analyzer "$TMP/meets"
 if grep -q '^AB-3649: merge-path merge$' "$TMP/out.txt" \
-   && ! grep -q '^AB-3649: verdict-detail MERGE-PATH ' "$TMP/out.txt"; then
+   && ! grep -q '^AB-3649: verdict-detail single-stream MERGE-PATH ' "$TMP/out.txt"; then
   ok "a pinned merge arm is recorded and carries no disclosure"
 else
   bad "a pinned merge arm was not recorded cleanly"
@@ -594,12 +641,12 @@ if grep -q "^AB-3649: control sensitivity$" "$TMP/out.txt"; then
 else
   bad "the control label was not printed"
 fi
-if grep -q '^AB-3649: verdict-detail CONTROL this session is labelled ' "$TMP/out.txt"; then
+if grep -q '^AB-3649: verdict-detail single-stream CONTROL this session is labelled ' "$TMP/out.txt"; then
   ok "a control session says in its own output that it does not discharge the criteria"
 else
   bad "a control session did not disclaim discharging the criteria"
 fi
-if grep -q '^AB-3649: verdict-detail CONTROL the two arms were served under DIFFERENT ' "$TMP/out.txt"; then
+if grep -q '^AB-3649: verdict-detail single-stream CONTROL the two arms were served under DIFFERENT ' "$TMP/out.txt"; then
   ok "asymmetric per-arm server flags are disclosed beside the verdict"
 else
   bad "asymmetric per-arm server flags were not disclosed"
@@ -613,7 +660,7 @@ fi
 # An ordinary measurement says so, and carries neither disclaimer.
 run_analyzer "$TMP/meets"
 if grep -q '^AB-3649: control none$' "$TMP/out.txt" \
-   && ! grep -q '^AB-3649: verdict-detail CONTROL ' "$TMP/out.txt"; then
+   && ! grep -q '^AB-3649: verdict-detail single-stream CONTROL ' "$TMP/out.txt"; then
   ok "an ordinary measurement reports control none and carries no control disclaimer"
 else
   bad "an ordinary measurement was mislabelled as a control"
@@ -667,43 +714,43 @@ else
   run_driver --no-such-flag
   check_driver "an unrecognised driver flag exits 3" 3
 
-  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --replicates 2
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 --replicates 2
   check_driver "the driver refuses fewer than 3 replicates" 3
 
-  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --server-cpus 0,2
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 --server-cpus 0,2
   check_driver "the driver refuses a server CPU set with no client CPU set" 3
 
-  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --server-cpus 0,2 --client-cpus 2,3 --work-dir "$TMP/w-overlap" --min-corpus-bytes 1
   check_driver "the driver refuses overlapping server and client CPU sets" 3
 
-  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/nope.json" \
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/nope.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-tpl"
   check_driver "an absent ticket template" 2 ticket-template-absent
 
-  run_driver --corpus "$TMP/emptycorpus" --ticket-template "$TMP/ticket.json" \
+  run_driver --corpus "$TMP/emptycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-empty" --min-corpus-bytes 1
   check_driver "a corpus holding no Data.db files" 2 corpus-empty
 
-  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-small"
   check_driver "a corpus below the stated minimum size" 2 corpus-too-small
 
-  run_driver --corpus "$TMP/onesstcorpus" --ticket-template "$TMP/ticket.json" \
+  run_driver --corpus "$TMP/onesstcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-onesst" --min-corpus-bytes 1
   check_driver "a single-SSTable corpus, which #3058 would route past the merge" \
     2 corpus-too-few-sstables
 
-  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-badarm" --min-corpus-bytes 1 --merge-path sideways
   check_driver "an unrecognised --merge-path value" 3
 
-  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-same" --min-corpus-bytes 1 --repo "$HERE" \
     --base-ref HEAD --head-ref HEAD
   check_driver "two arm refs resolving to the same commit" 2 arm-refs-identical
 
-  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-badref" --min-corpus-bytes 1 --repo "$HERE" \
     --base-ref no-such-rev-3649 --head-ref HEAD
   check_driver "an arm ref that resolves to nothing" 2 arm-ref-unresolvable

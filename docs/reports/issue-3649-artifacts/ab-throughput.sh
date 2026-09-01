@@ -99,6 +99,12 @@ ab-throughput.sh [options]
   --replicates <N>          interleaved replicate pairs                  (default 5)
   --work-dir <dir>          worktrees, target dirs, results       (default /data/ab-3649)
   --repo <dir>              repository to build from       (default this checkout)
+  --max-concurrent-scans <n>  cqlite-flight admission ceiling, pinned on BOTH
+                            arms and asserted against the server's own startup
+                            line. **REQUIRED** -- see the note below
+  --batch-size <n>          rows per Arrow record batch, both arms   (default 8192)
+  --max-batch-bytes <n>     Arrow payload bytes per batch, both arms  (server default)
+  --admission-wait-timeout-ms <n>  admission wait before a shed       (server default)
   --shape <s>               flight-loadgen shape                      (default full)
   --ramp <list>             flight-loadgen ramp                          (default 1)
   --step-duration <d>       per-step hold                              (default 60s)
@@ -119,7 +125,18 @@ ab-throughput.sh [options]
   --temperature <t>         warm | cold                                (default warm)
   -h, --help                print this and exit 3
 
-Then: python3 analyze-ab.py --manifest <work-dir>/results/manifest.json
+--max-concurrent-scans is REQUIRED because admission control (#2420, WS4;
+cqlite-flight/src/cli.rs:59-73) sheds a `do_get` past the ceiling with gRPC
+UNAVAILABLE. Unset, the ceiling is DERIVED from available parallelism, so two
+runs on differently-loaded boxes get different ceilings and a ramp step above
+one measures THE ADMISSION CEILING -- which looks like a plateau, exactly the
+shape someone would misread as saturation. Pin it AT OR ABOVE the top of your
+ramp.
+
+Then, for a --ramp 1 session:
+  python3 analyze-ab.py --single-stream <work-dir>/results/manifest.json
+and for a concurrency-ramp session:
+  python3 analyze-ab.py --utilization  <work-dir>/results/manifest.json
 USAGE
 }
 
@@ -142,6 +159,10 @@ CLIENT_CPUS=''
 MIN_CORPUS_BYTES=268435456
 MIN_SSTABLES=2
 MERGE_PATH='merge'
+MAX_CONCURRENT_SCANS=''
+BATCH_SIZE=8192
+MAX_BATCH_BYTES=''
+ADMISSION_WAIT_TIMEOUT_MS=''
 ROWS_DECLARED=''
 PREWARM=1
 TEMPERATURE='warm'
@@ -167,6 +188,10 @@ while [ "$#" -gt 0 ]; do
     --min-corpus-bytes)  MIN_CORPUS_BYTES="${2:-}"; shift 2 ;;
     --min-sstables)      MIN_SSTABLES="${2:-}";     shift 2 ;;
     --merge-path)        MERGE_PATH="${2:-}";       shift 2 ;;
+    --max-concurrent-scans)      MAX_CONCURRENT_SCANS="${2:-}";      shift 2 ;;
+    --batch-size)                BATCH_SIZE="${2:-}";                shift 2 ;;
+    --max-batch-bytes)           MAX_BATCH_BYTES="${2:-}";           shift 2 ;;
+    --admission-wait-timeout-ms) ADMISSION_WAIT_TIMEOUT_MS="${2:-}"; shift 2 ;;
     --rows-declared)     ROWS_DECLARED="${2:-}";    shift 2 ;;
     --no-prewarm)        PREWARM=0;                 shift ;;
     --control)           CONTROL="${2:-}";          shift 2 ;;
@@ -188,6 +213,24 @@ case "$MIN_CORPUS_BYTES" in ''|*[!0-9]*) usage_error "--min-corpus-bytes must be
 case "$TEMPERATURE" in warm|cold) ;; *) usage_error "--temperature must be warm or cold" ;; esac
 case "$MIN_SSTABLES" in ''|*[!0-9]*) usage_error "--min-sstables must be an integer" ;; esac
 case "$MERGE_PATH" in auto|merge|bypass) ;; *) usage_error "--merge-path must be auto, merge or bypass" ;; esac
+[ -n "$MAX_CONCURRENT_SCANS" ] || usage_error \
+  "--max-concurrent-scans is required: unpinned, cqlite-flight DERIVES the admission ceiling from available parallelism (#3225), so it is a property of the box rather than of the experiment, and a ramp step above it measures the admission ceiling instead of merge throughput"
+case "$MAX_CONCURRENT_SCANS" in ''|*[!0-9]*) usage_error "--max-concurrent-scans must be a positive integer" ;; esac
+[ "$MAX_CONCURRENT_SCANS" -ge 1 ] || usage_error "--max-concurrent-scans must be at least 1"
+case "$BATCH_SIZE" in ''|*[!0-9]*) usage_error "--batch-size must be a positive integer" ;; esac
+if [ -n "$MAX_BATCH_BYTES" ]; then
+  case "$MAX_BATCH_BYTES" in ''|*[!0-9]*) usage_error "--max-batch-bytes must be an integer" ;; esac
+fi
+if [ -n "$ADMISSION_WAIT_TIMEOUT_MS" ]; then
+  case "$ADMISSION_WAIT_TIMEOUT_MS" in ''|*[!0-9]*) usage_error "--admission-wait-timeout-ms must be an integer" ;; esac
+fi
+# The ramp's top step must fit under the pinned ceiling, or the session is
+# guaranteed to shed at that step and measure admission instead of throughput.
+RAMP_TOP="$(printf '%s' "$RAMP" | tr ',' '\n' | sort -n | tail -1)"
+case "$RAMP_TOP" in ''|*[!0-9]*) usage_error "--ramp must be a comma-separated list of positive integers" ;; esac
+if [ "$RAMP_TOP" -gt "$MAX_CONCURRENT_SCANS" ]; then
+  usage_error "--ramp tops out at $RAMP_TOP but --max-concurrent-scans is $MAX_CONCURRENT_SCANS; every request past the ceiling waits and is then shed with gRPC UNAVAILABLE (#2420), so that step would measure the admission ceiling. Raise the pin to at least $RAMP_TOP"
+fi
 if [ -n "$SERVER_CPUS" ] || [ -n "$CLIENT_CPUS" ]; then
   [ -n "$SERVER_CPUS" ] && [ -n "$CLIENT_CPUS" ] || usage_error \
     "--server-cpus and --client-cpus must be given together: pinning one and not the other measures the load generator competing with the server"
@@ -254,6 +297,11 @@ manifest = {
         "temperature": env("AB_TEMPERATURE", ""),
         "ticket_template": env("AB_TICKET_TEMPLATE", ""),
         "merge_path": env("AB_MERGE_PATH", ""),
+        "max_concurrent_scans": int(env("AB_MAX_CONCURRENT_SCANS", "0")) or None,
+        "batch_size": int(env("AB_BATCH_SIZE", "0")) or None,
+        "max_batch_bytes": env("AB_MAX_BATCH_BYTES") or "server-default",
+        "admission_wait_timeout_ms": env("AB_ADMISSION_WAIT_TIMEOUT_MS")
+        or "server-default",
     },
     "control": env("AB_CONTROL") or None,
     "server_extra": {
@@ -292,6 +340,9 @@ export AB_CONTROL="$CONTROL"
 export AB_BASE_SERVER_EXTRA="$BASE_SERVER_EXTRA" AB_HEAD_SERVER_EXTRA="$HEAD_SERVER_EXTRA"
 export AB_CORPUS="$CORPUS" AB_MIN_CORPUS_BYTES="$MIN_CORPUS_BYTES"
 export AB_MIN_SSTABLES="$MIN_SSTABLES" AB_MERGE_PATH="$MERGE_PATH"
+export AB_MAX_CONCURRENT_SCANS="$MAX_CONCURRENT_SCANS" AB_BATCH_SIZE="$BATCH_SIZE"
+export AB_MAX_BATCH_BYTES="$MAX_BATCH_BYTES"
+export AB_ADMISSION_WAIT_TIMEOUT_MS="$ADMISSION_WAIT_TIMEOUT_MS"
 export AB_ROWS_DECLARED="$ROWS_DECLARED"
 export AB_GENERATED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -361,6 +412,7 @@ if [ "$CORPUS_FILES" -lt "$MIN_SSTABLES" ]; then
     "$CORPUS_FILES Data.db files is below the required $MIN_SSTABLES; issue #3058 gives the Flight row route a single-source fast path that NEVER enters the k-way merge, so a one-source corpus measures a code path #2820 did not touch -- and it does so identically on both arms, producing a ratio of 1.0 by construction"
 fi
 say "merge-path $MERGE_PATH -- CQLITE_FLIGHT_MERGE_PATH is set to this on BOTH arms' servers"
+say "admission max-concurrent-scans $MAX_CONCURRENT_SCANS (pinned on both arms; ramp tops at $RAMP_TOP) batch-size $BATCH_SIZE"
 if [ "$MERGE_PATH" != "merge" ]; then
   say "merge-path NOT-PINNED -- with anything but 'merge' the #3058 predicate may route a request onto the single-source fast path, which #2820 did not touch"
 fi
@@ -451,6 +503,37 @@ build_arm head "$HEAD_SHA"
 # ---------------------------------------------------------------------------
 port_is_bound() { (echo > "/dev/tcp/127.0.0.1/$PORT") >/dev/null 2>&1; }
 
+# Best effort, and NAMED when it fails: an unreadable startup line yields
+# NOT-OBSERVED, never a fabricated value. The caller records that distinctly and
+# the analyzer says so beside the verdict.
+parse_startup() { # <server-log> <scans|source>
+  python3 - "$1" "$2" <<'PYEOF'
+import re
+import sys
+
+path, want = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+except OSError:
+    print("NOT-OBSERVED")
+    raise SystemExit(0)
+line = ""
+for candidate in text.splitlines():
+    if "cqlite-flight starting" in candidate:
+        line = candidate
+# No top-level `}` in this body: a `}` at column zero would terminate a naive
+# `sed -n '/^parse_startup()/,/^}/p'` extraction of this function mid-heredoc,
+# which is exactly how its own test harness reads it out.
+if want == "scans":
+    pattern = r"max_concurrent_scans[\"']?\s*[=:]\s*[\"']?(\d+)"
+else:
+    pattern = r"max_concurrent_scans_source[\"']?\s*[=:]\s*[\"']?([A-Za-z-]+)"
+match = re.search(pattern, line) if line else None
+print(match.group(1) if match else "NOT-OBSERVED")
+PYEOF
+}
+
 run_one() { # <arm> <replicate>
   local arm="$1" rep="$2"
   local tag; tag="$(printf '%s-r%02d' "$arm" "$rep")"
@@ -472,7 +555,12 @@ run_one() { # <arm> <replicate>
   if [ "$arm" = "base" ]; then extra="$BASE_SERVER_EXTRA"; else extra="$HEAD_SERVER_EXTRA"; fi
   local -a server_cmd=(env "CQLITE_FLIGHT_MERGE_PATH=$MERGE_PATH")
   [ -n "$SERVER_CPUS" ] && server_cmd+=(taskset -c "$SERVER_CPUS")
-  server_cmd+=("$bin/cqlite-flight" --data-dir "$CORPUS" --listen "127.0.0.1:$PORT")
+  server_cmd+=("$bin/cqlite-flight" --data-dir "$CORPUS" --listen "127.0.0.1:$PORT"
+               --batch-size "$BATCH_SIZE"
+               --max-concurrent-scans "$MAX_CONCURRENT_SCANS")
+  [ -n "$MAX_BATCH_BYTES" ] && server_cmd+=(--max-batch-bytes "$MAX_BATCH_BYTES")
+  [ -n "$ADMISSION_WAIT_TIMEOUT_MS" ] \
+    && server_cmd+=(--admission-wait-timeout-ms "$ADMISSION_WAIT_TIMEOUT_MS")
   # Word-split on purpose: the value is an operator-supplied flag list, and it is
   # recorded verbatim in the manifest so a reader of the report sees it.
   # shellcheck disable=SC2206
@@ -492,6 +580,27 @@ run_one() { # <arm> <replicate>
   port_is_bound || die server-never-bound \
     "the $tag server did not bind port $PORT within ${waited}s; see $server_log"
   say "run $tag server pid $srv bound 127.0.0.1:$PORT after ${waited}s"
+
+  # PROVENANCE, READ FROM THE SERVER RATHER THAN ASSUMED. cli::log_startup emits
+  # one `cqlite-flight starting` line carrying the RESOLVED admission ceiling and
+  # its source ("flag" | "env" | "derived" | "derived-fallback",
+  # cqlite-flight/src/admission.rs:183-193). A value we passed and a value the
+  # server resolved are different facts; only the second one is a measurement.
+  local admission_observed admission_source
+  admission_observed="$(parse_startup "$server_log" scans)"
+  admission_source="$(parse_startup "$server_log" source)"
+  say "run $tag admission requested $MAX_CONCURRENT_SCANS observed $admission_observed source $admission_source"
+  if [ "$admission_observed" != "NOT-OBSERVED" ] \
+     && [ "$admission_observed" != "$MAX_CONCURRENT_SCANS" ]; then
+    kill -9 "$srv" 2>/dev/null || true
+    die admission-mismatch \
+      "$tag: the server resolved --max-concurrent-scans to $admission_observed but $MAX_CONCURRENT_SCANS was requested; the arms would not be served under the same admission ceiling"
+  fi
+  if [ "$admission_source" != "NOT-OBSERVED" ] && [ "$admission_source" != "flag" ]; then
+    kill -9 "$srv" 2>/dev/null || true
+    die admission-provenance \
+      "$tag: the server reports the admission ceiling came from '$admission_source', not 'flag', even though --max-concurrent-scans was passed; something else (CQLITE_MAX_CONCURRENT_SCANS in the environment, or a derived fallback) is deciding it"
+  fi
 
   local -a client_prefix=()
   [ -n "$CLIENT_CPUS" ] && client_prefix+=(taskset -c "$CLIENT_CPUS")
@@ -587,11 +696,13 @@ sys.stdout.write(
 )
 PYEOF
 
-  python3 - "$RUNS_JSONL" "$arm" "$rep" "$tag.jsonl" "$TEMPERATURE" "$cpu0" "$cpu1" "$hz" <<'PYEOF'
+  python3 - "$RUNS_JSONL" "$arm" "$rep" "$tag.jsonl" "$TEMPERATURE" "$cpu0" "$cpu1" "$hz" \
+    "$admission_observed" "$admission_source" <<'PYEOF'
 import json
 import sys
 
-runs_path, arm, rep, filename, temperature, cpu0, cpu1, hz = sys.argv[1:9]
+(runs_path, arm, rep, filename, temperature, cpu0, cpu1, hz,
+ admission_observed, admission_source) = sys.argv[1:11]
 try:
     server_cpu_s = (int(cpu1) - int(cpu0)) / float(hz)
 except (ValueError, ZeroDivisionError):
@@ -602,6 +713,10 @@ entry = {
     "file": filename,
     "temperature": temperature,
     "server_cpu_seconds": server_cpu_s,
+    # NOT-OBSERVED is carried through as a string; the analyzer reports it as an
+    # uncorroborated requested value rather than treating it as agreement.
+    "admission_observed": admission_observed,
+    "admission_source": admission_source,
 }
 with open(runs_path, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(entry, sort_keys=True) + "\n")
