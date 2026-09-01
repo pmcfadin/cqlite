@@ -8,7 +8,7 @@ sizes the guard uses.
   window          accesses=1e3        accesses=1e5        ratio    guard (>= 10x)
   --------------  ------------------  ------------------  -------  --------------
   UNGATED         243,571,204 instr   244,165,415 instr   1.00x    FAILS  <- caught
-  GATED (FIFO)          6,296 instr        600,316 instr  95.35x   PASSES
+  GATED (FIFO)          6,296 instr        600,301 instr  95.35x   PASSES
 
 The GATED row is read from this run's own gate-probe CSVs and shifts slightly on
 every re-run; the UNGATED row is a one-off re-measurement of the original

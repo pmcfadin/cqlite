@@ -90,6 +90,10 @@
 #        1 = probe INCOMPLETE / a required step could not be measured
 #        2 = usage or build error
 set -uo pipefail
+# Numeric output must not depend on the caller's locale (roborev job 318): a
+# group-separated count is not a number to `[[ =~ ^[0-9]+$ ]]`. The CSV parse is
+# the actual fix; this is the belt.
+export LC_ALL=C LANG=C
 
 OUT="${1:-}"
 [ -n "$OUT" ] || { echo "usage: capability-probe.sh <output-dir> [cache-hostile.c]" >&2; exit 2; }
@@ -262,13 +266,43 @@ done
 # Four-valued. PROGRAMS is deliberately NOT called SUPPORTED: programming a
 # counter and measuring with it are different facts, which is this host's lesson.
 declare -A DISP
-probe_event() { # $1 event -> sets DISP[$1]
-  local e="$1" out rc val
-  out=$(perf stat -e "$e" -- true 2>&1); rc=$?
-  val=$(awk -v ev="$e" '$2==ev{print $1}' <<<"$out" | head -1)
-  if   grep -q 'Bad event\|Unable to find\|No supported events' <<<"$out"; then DISP[$e]=ABSENT-FROM-PMU
-  elif grep -q '<not supported>' <<<"$out"; then DISP[$e]=NOT-SUPPORTED
-  elif grep -q '<not counted>'   <<<"$out"; then
+# The probe runs against the EXACT event spec the arms measure -- `${e}:u`, not the
+# bare name -- and reads perf's MACHINE-READABLE output, never the human table.
+# Both were roborev job 318 findings and both are the same mistake in two places:
+# asking a different question from the one the answer is used for.
+#   (a) A host that permits user-only counting and denies kernel counting (a
+#       `perf_event_paranoid` this probe explicitly does not require to be 0)
+#       answers "operational error" for the bare event while `:u` -- what every
+#       arm actually uses -- works. That excluded a usable event and failed the run.
+#   (b) The human table group-separates counts under some locales, so a perfectly
+#       good `1,234,567` failed `^[0-9]+$` and was reported as a probe ERROR.
+#       LC_ALL=C is set at the top as a belt; the CSV form is the fix, because it
+#       is unformatted by construction rather than by environment.
+# Defined HERE, above its first caller. It used to sit beside the differential,
+# hundreds of lines BELOW the disposition sweep that now uses it -- bash resolves a
+# function at call time, so the sweep called an undefined csv_val, got an empty
+# value and reported every event as 'no numeric count'. Caught by the selftest,
+# which is the point of having one.
+csv_val() { # $1 csv  $2 rendered name
+  local v
+  v=$(awk -F, -v e="$2" '$3==e{print $1; exit}' "$1" 2>/dev/null)
+  if [ -z "$v" ]; then v=$(awk -F, -v e="${2%:u}" '$3==e{print $1; exit}' "$1" 2>/dev/null); fi
+  echo "$v"
+}
+
+EVPROBE_CSV="$OUT/.event-probe.csv"
+probe_event() { # $1 event -> sets DISP[$1] (key is the BARE name)
+  local e="$1" out rc val ptext
+  rm -f "$EVPROBE_CSV"
+  out=$(perf stat -x, -o "$EVPROBE_CSV" -e "${e}:u" -- true 2>&1); rc=$?
+  # Diagnostics land on stderr, the row lands in the CSV: both are evidence, so
+  # both are searched. csv_val accepts a perf that strips the modifier.
+  ptext="$out
+$(cat "$EVPROBE_CSV" 2>/dev/null)"
+  val=$(csv_val "$EVPROBE_CSV" "${e}:u")
+  if   grep -q 'Bad event\|Unable to find\|No supported events' <<<"$ptext"; then DISP[$e]=ABSENT-FROM-PMU
+  elif grep -q '<not supported>' <<<"$ptext"; then DISP[$e]=NOT-SUPPORTED
+  elif grep -q '<not counted>'   <<<"$ptext"; then
     # '<not counted>' does NOT establish absence: the counter was programmed and
     # the kernel never scheduled it (contention, a too-short workload, a
     # multiplexing accident). Treating it as a capability disposition let the
@@ -276,14 +310,14 @@ probe_event() { # $1 event -> sets DISP[$1]
     # (job 312, finding 3.)
     DISP[$e]="NOT-COUNTED (measurement failed — NOT evidence of absence)"
     note_fail "event triage: '$e' returned <not counted>; the counter was never scheduled, so its capability is UNKNOWN — re-run on an idle host"
-
   elif [ $rc -ne 0 ]; then
     DISP[$e]="ERROR(rc=$rc)"
-    note_fail "event triage: '$e' failed operationally (rc=$rc); an operational error is not a capability answer"
+    note_fail "event triage: '$e:u' failed operationally (rc=$rc); an operational error is not a capability answer"
   elif ! [[ "$val" =~ ^[0-9]+$ ]]; then
     DISP[$e]="ERROR(no numeric value)"
-    note_fail "event triage: '$e' exited 0 but produced no numeric count"
-  else DISP[$e]="PROGRAMS"; fi
+    note_fail "event triage: '$e:u' exited 0 but produced no numeric count in its CSV row"
+  else DISP[$e]=PROGRAMS; fi
+  rm -f "$EVPROBE_CSV"
 }
 CANDIDATES=(cycles instructions
   cycle_activity.stalls_total cycle_activity.stalls_l2_miss cycle_activity.stalls_l3_miss
@@ -347,6 +381,33 @@ add_group offcore offcore_requests_outstanding.all_data_rd offcore_requests_outs
 add_group cache   LLC-loads LLC-load-misses cache-references cache-misses
 add_group prefetch l1d_pend_miss.pending l1d_pend_miss.fb_full
 
+# The benchmark REPORTS the configuration it actually ran; until roborev job 318
+# nothing CHECKED it. A perf exit of 0 over a well-formed CSV says the counters
+# worked -- it says nothing about WHICH workload they counted. So an argument-
+# handling regression, or a `cache-hostile.c` picked up from a different revision
+# via the optional source argument, could run the 512 MiB configuration under the
+# label `hostile-2g`, produce entirely valid counts, and publish them under
+# VERDICT: COMPLETE with the arms mislabelled -- which inverts the differential
+# that is this probe's whole method. Every field the benchmark prints is now
+# asserted against what was REQUESTED, and a mismatch is fatal to the run.
+_arm_field() { sed -n "s/^$2=//p" "$1" | head -1; }
+arm_config_assert() { # $1 txt  $2 label  $3 buf-mib  $4 work-kib  $5 accesses
+  local f="$1" label="$2" want_buf want_ws want_acc got miss=""
+  want_buf=$(( $3 * 1048576 ))
+  # work-kib 0 means "chase the whole buffer" -- the hostile arms' defining property.
+  if [ "$4" -gt 0 ]; then want_ws=$(( $4 * 1024 )); else want_ws=$want_buf; fi
+  want_acc="$5"
+  [ -r "$f" ] || { note_fail "arm $label: no output file to verify the configuration against"; return 1; }
+  for pair in "arm:$label" "gate:fifo" "buffer_bytes:$want_buf" \
+              "working_set_bytes:$want_ws" "accesses:$want_acc" "init_overrun:0"; do
+    got=$(_arm_field "$f" "${pair%%:*}")
+    [ "$got" = "${pair#*:}" ] || miss="$miss ${pair%%:*}(want=${pair#*:} got=${got:-<absent>})"
+  done
+  # A completion field, so a truncated run cannot pass by having the right header.
+  [[ "$(_arm_field "$f" ns_per_access)" =~ ^[0-9]+\.?[0-9]*$ ]] || miss="$miss ns_per_access(absent-or-nonnumeric)"
+  [ -z "$miss" ] || { note_fail "arm $label: the benchmark did NOT run the requested configuration —$miss. The counts are real but the arm is mislabelled, so the differential they feed is invalid."; return 1; }
+  return 0
+}
 run_arm() { # $1 events  $2 label  $3 buf-mib  $4 work-kib  $5 accesses  $6 outbase
   rm -f "$CTL" "$ACK"; mkfifo "$CTL" "$ACK" || { note_fail "mkfifo for $2"; return 90; }
   taskset -c "$CPUSET" timeout 900 \
@@ -355,6 +416,9 @@ run_arm() { # $1 events  $2 label  $3 buf-mib  $4 work-kib  $5 accesses  $6 outb
                   --arm "$2" --ctl-fifo "$CTL" --ack-fifo "$ACK" > "$6.txt" 2>&1
   local rc=$?; rm -f "$CTL" "$ACK"; echo "arm-rc: $2 = $rc" >> "$6.txt"
   [ $rc -eq 0 ] || note_fail "arm $2 (rc=$rc, see $6.txt)"
+  # Verified even when rc != 0: a mislabelled arm is worth naming either way, and
+  # the check reads only the file, so it cannot make a failed run worse.
+  arm_config_assert "$6.txt" "$2" "$3" "$4" "$5" || rc=1
   return $rc
 }
 # Some perf/PMU combinations STRIP the modifier from the reported event name, so a
@@ -362,12 +426,6 @@ run_arm() { # $1 events  $2 label  $3 buf-mib  $4 work-kib  $5 accesses  $6 outb
 # missing -- a false FAIL on correct input, which is the guard agents learn to
 # waive. Match the rendered name first, then its modifier-stripped base.
 # (job 312, finding 4.)
-csv_val() { # $1 csv  $2 rendered name
-  local v
-  v=$(awk -F, -v e="$2" '$3==e{print $1; exit}' "$1" 2>/dev/null)
-  if [ -z "$v" ]; then v=$(awk -F, -v e="${2%:u}" '$3==e{print $1; exit}' "$1" 2>/dev/null); fi
-  echo "$v"
-}
 csv_row() { # $1 csv  $2 rendered name
   local r
   r=$(awk -F, -v e="$2" '$3==e{print; exit}' "$1" 2>/dev/null)

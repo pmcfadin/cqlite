@@ -1,5 +1,5 @@
-# started on Tue Sep  1 21:14:41 2026
+# started on Tue Sep  1 21:36:43 2026
 
-10740499627,,cycle_activity.stalls_total:u,3351864601,100.00,,
-9430905756,,cycle_activity.stalls_l2_miss:u,3351864601,100.00,,
-0,,cycle_activity.stalls_l3_miss:u,3351864601,100.00,,
+13356451474,,cycle_activity.stalls_total:u,4130134951,100.00,,
+11851457798,,cycle_activity.stalls_l2_miss:u,4130134951,100.00,,
+0,,cycle_activity.stalls_l3_miss:u,4130134951,100.00,,

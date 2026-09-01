@@ -28,7 +28,13 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROBE="$HERE/capability-probe.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT INT TERM
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIP=0
+# A case the HOST cannot express is not a failure and not a deleted case. It is
+# counted, so the floor below still detects deletion, and it is reported, so a
+# run that skipped something is never mistaken for a run that verified it.
+# (roborev job 318: these two topology cases red on a non-SMT or single-vCPU
+# host, and a guard that reds on correct input is the guard agents learn to waive.)
+skip() { SKIP=$((SKIP+1)); printf '   SKIP  %s\n' "$1"; }
 ok()  { PASS=$((PASS+1)); printf '   PASS  %s\n' "$1"; }
 # A failing case must say WHY. A test that reports only "FAIL" sends the next
 # person back to reconstruct the run by hand, which is where this suite's own
@@ -55,6 +61,10 @@ mk_env() { # $1 dir
 #        SHIM_UNGATED=1                           -> instruction count is CONSTANT
 #        SHIM_STRIP_MOD=1                         -> CSV event names lose ':u'
 #        SHIM_NEST_VIOLATE=1                      -> stalls_l3_miss > stalls_total
+#        SHIM_KERNEL_DENIED=1                     -> the BARE event form is refused;
+#                                                    only the ':u' form is permitted
+#        SHIM_ARM_MISLABEL=1                      -> the benchmark reports a buffer
+#                                                    size other than the one asked for
 args=("$@")
 if [[ " ${args[*]} " == *" --version "* ]]; then echo "perf version shim"; exit 0; fi
 if [[ " ${args[*]} " == *" list "* ]]; then
@@ -79,18 +89,42 @@ for i in "${!args[@]}"; do
   [ "${args[$i]}" = "-o" ] && OF="${args[$((i+1))]}"
 done
 [ -n "${EV:-}" ] || exit 0
-# single-event probe form (no -o): used by the disposition sweep
-if [ -z "${OF:-}" ]; then
-  if [ -n "${SHIM_EVENT_NOTCOUNTED:-}" ] && [ "$EV" = "$SHIM_EVENT_NOTCOUNTED" ]; then
-    echo "   <not counted>      $EV"; exit 0
+# The disposition sweep and the measurement form are told apart by --control, not
+# by the presence of -o: since roborev job 318 the sweep passes `-x, -o FILE` too.
+IS_MEASURE=0
+[[ " ${args[*]} " == *" --control "* ]] && IS_MEASURE=1
+# single-event probe form: used by the disposition sweep
+if [ "$IS_MEASURE" = 0 ]; then
+  BARE="${EV%:u}"
+  # A host permitting user-only counting and denying kernel counting: the bare
+  # form is refused, the ':u' form -- the one the arms measure -- works. The probe
+  # must ask the question it uses the answer for.
+  if [ -n "${SHIM_KERNEL_DENIED:-}" ] && [ "$EV" = "$BARE" ]; then
+    echo "Error: Access to performance monitoring and observability operations is limited." >&2
+    exit 1
   fi
-  case "$EV" in
+  name="$EV"; [ -n "${SHIM_STRIP_MOD:-}" ] && name="$BARE"
+  if [ -n "${SHIM_EVENT_NOTCOUNTED:-}" ] && [ "$BARE" = "$SHIM_EVENT_NOTCOUNTED" ]; then
+    [ -n "${OF:-}" ] && printf '<not counted>,,%s,0,0.00,,\n' "$name" > "$OF"
+    exit 0
+  fi
+  case "$BARE" in
     LLC-loads|LLC-load-misses|offcore_requests.all_data_rd|offcore_requests_buffer.sq_full|topdown.slots|slots|topdown-*|cycle_activity.stalls_mem_any)
       echo "event syntax error: Bad event name" >&2; exit 1 ;;
   esac
-  echo "           1234      $EV"; exit 0
+  [ -n "${OF:-}" ] && printf '1234,,%s,1000000,100.00,,\n' "$name" > "$OF"
+  exit 0
 fi
-# measurement form: synthesise a CSV for the requested group
+# measurement form: RUN the workload, then synthesise a CSV for the requested group.
+# Real perf runs the command after `--` and its stdout is what run_arm captures; the
+# shim used to skip it entirely, which was invisible until the probe started
+# asserting the benchmark's self-reported configuration (roborev job 318).
+WLI=-1
+for i in "${!args[@]}"; do [ "${args[$i]}" = "--" ] && { WLI=$((i+1)); break; }; done
+WL_RC=0
+if [ "$WLI" -ge 0 ] && [ -n "${args[$WLI]:-}" ]; then
+  "${args[@]:$WLI}" || WL_RC=$?
+fi
 accesses=1000
 for i in "${!args[@]}"; do [ "${args[$i]}" = "--accesses" ] && accesses="${args[$((i+1))]}"; done
 work=0
@@ -114,12 +148,33 @@ for e in "${evs[@]}"; do
   esac
   printf '%s,,%s,1000000,%s,,\n' "$v" "$name" "$en" >> "$OF"
 done
-exit 0
+exit $WL_RC
 SHIM
+  # The stub benchmark REPORTS the configuration it was asked for, exactly as
+  # cache-hostile.c does, because since roborev job 318 the probe asserts those
+  # fields. SHIM_ARM_MISLABEL makes it report a different buffer size -- the
+  # defect the assert exists for: real counts, wrong arm.
   cat > "$b/cc" <<'SHIM'
 #!/usr/bin/env bash
 out=""; for i in "$@"; do [ "$prev" = "-o" ] && out="$i"; prev="$i"; done
-[ -n "$out" ] && { printf '#!/bin/sh\nexit 0\n' > "$out"; chmod +x "$out"; }
+[ -n "$out" ] && { cat > "$out" <<'STUB'
+#!/usr/bin/env bash
+buf=0; work=0; acc=0; arm=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --buffer-mib) buf="$2"; shift 2;; --working-kib) work="$2"; shift 2;;
+    --accesses) acc="$2"; shift 2;;   --arm) arm="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+bb=$(( buf * 1048576 ))
+if [ "$work" -gt 0 ]; then ws=$(( work * 1024 )); else ws=$bb; fi
+[ -n "${SHIM_ARM_MISLABEL:-}" ] && bb=$(( bb / 4 ))
+printf 'mode=chase\narm=%s\ngate=fifo\nbuffer_bytes=%s\nworking_set_bytes=%s\naccesses=%s\nns_per_access=42.000\ninit_overrun=0\n' \
+  "$arm" "$bb" "$ws" "$acc"
+exit 0
+STUB
+chmod +x "$out"; }
 exit 0
 SHIM
   cat > "$b/taskset" <<'SHIM'
@@ -245,15 +300,58 @@ if [ "$rc" != 0 ] && grep -q 'nesting violated' "$d/stderr.txt"; then
   ok "stalls_l3_miss > stalls_total -> nesting VIOLATED and the run fails"
 else bad "a nesting violation was not caught (rc=$rc)" "$d"; fi
 
+# --- 8b. the disposition sweep must ask about the spec the arms MEASURE --------
+# roborev job 318. A host that permits user-only counting and denies kernel
+# counting refuses the BARE event and allows ':u'. The sweep used to probe the
+# bare form, so it reported an operational error and failed the run for events
+# every arm can measure perfectly well. Bad input: a kernel-denying host must not
+# red. (Reverting the probe to the bare form fails this case.)
+d="$TMP/c8b"; mkdir -p "$d"; rc=$(SHIM_TMA=absent SHIM_KERNEL_DENIED=1 run_probe "$d")
+if [ "$rc" = 0 ] && grep -q 'VERDICT: COMPLETE' <<<"$(verdict "$d")" \
+   && ! grep -q 'event triage' "$d/stderr.txt"; then
+  ok "kernel-counting denied, user-only permitted -> sweep still measures (probes the ':u' spec the arms use)"
+else bad "the sweep asked about a spec the arms do not measure (rc=$rc, $(verdict "$d"))" "$d"; fi
+
+# --- 8c. an arm that did not run the requested configuration must FAIL ---------
+# roborev job 318. perf exiting 0 over a well-formed CSV says the counters worked;
+# it says NOTHING about which workload they counted. A mislabelled arm produces
+# real counts and inverts the differential, which is the probe's entire method.
+d="$TMP/c8c"; mkdir -p "$d"; rc=$(SHIM_TMA=absent SHIM_ARM_MISLABEL=1 run_probe "$d")
+if [ "$rc" != 0 ] && grep -q 'did NOT run the requested configuration' "$d/stderr.txt" \
+   && grep -q 'buffer_bytes' "$d/stderr.txt"; then
+  ok "benchmark reporting the wrong buffer size -> run FAILS, naming the field (counts real, arm mislabelled)"
+else bad "an arm that ran a different configuration was accepted (rc=$rc)" "$d"; fi
+
 # --- 9. Gate D: a CPU set outside this process's affinity must be refused -----
 # The fix for job 313 f3 intersects candidate sibling groups with BOTH the online
 # set and /proc/self/status Cpus_allowed_list. Driving it needs no shim: run the
 # probe under a taskset that permits ONE cpu, so no COMPLETE sibling group can be
 # both online and allowed, and the probe must refuse rather than pin blind.
+#
+# THE FIXTURE IS DERIVED FROM THE REAL TOPOLOGY, AND SKIPS WHERE IT CANNOT HOLD
+# (roborev job 318). Two host shapes break the naive form, and both were live:
+#   - `Cpus_allowed_list: 0,2,4` has no dash, so the old `-F-` extraction kept the
+#     WHOLE list and tasksetted three CPUs -- enough to contain a complete sibling
+#     group, so the probe correctly did NOT refuse and the case reported FAIL.
+#   - On a NON-SMT host a single CPU IS a complete sibling group, so restricting to
+#     one cpu is a perfectly pinnable configuration and refusing would be the bug.
+# The first is a parsing defect and is fixed; the second is a host that cannot
+# express this fixture at all, and is SKIPped by name.
 d="$TMP/c9"; mkdir -p "$d"
 bin9=$(mk_env "$d")
-onecpu=$(awk -F- '/^Cpus_allowed_list:/{print $1}' /proc/self/status | awk '{print $2}')
-if [ -n "$onecpu" ] && command -v taskset >/dev/null 2>&1; then
+# Exactly one cpu id, from either spelling: "0-15", "0,2,4", "2-3,8".
+onecpu=$(awk '/^Cpus_allowed_list:/{print $2}' /proc/self/status | cut -d, -f1 | cut -d- -f1)
+sibs=""
+[ -n "$onecpu" ] && sibs=$(cat "/sys/devices/system/cpu/cpu$onecpu/topology/thread_siblings_list" 2>/dev/null)
+if [ -z "$onecpu" ] || ! command -v taskset >/dev/null 2>&1; then
+  skip "Gate D affinity case (no taskset, or Cpus_allowed_list unreadable)"
+elif [ -z "$sibs" ]; then
+  skip "Gate D affinity case (cpu$onecpu exposes no thread_siblings_list — cannot predict the fixture)"
+elif [ "$sibs" = "$onecpu" ]; then
+  # Non-SMT: one cpu is a COMPLETE group, so the probe SHOULD pin and refusing
+  # would be the defect. The fixture cannot be built here.
+  skip "Gate D affinity case (non-SMT: cpu$onecpu is itself a complete sibling group, so a 1-cpu mask is pinnable and refusal would be WRONG)"
+else
   # NOTE: the shim `taskset` inside $bin9 would defeat this, so the REAL taskset is
   # used to launch, and the shim dir is put on PATH only for the probe's children.
   ( export PATH="$bin9:$PATH"; exec /usr/bin/taskset -c "$onecpu" bash "$PROBE" "$d/out" "$HERE/../ws0-3224-artifacts/cache-hostile.c" ) \
@@ -262,29 +360,53 @@ if [ -n "$onecpu" ] && command -v taskset >/dev/null 2>&1; then
   if [ "$rc9" != 0 ] && grep -q "affinity mask" "$d/stderr.txt"; then
     ok "single-CPU affinity -> Gate D refuses to pin (job 313 f3: was 'file is readable' only)"
   else
-    bad "a CPU set outside the process's affinity was accepted (rc=$rc9)" "$d"
+    bad "a CPU set outside the process's affinity was accepted (rc=$rc9; cpu$onecpu of siblings [$sibs])" "$d"
   fi
-else
-  echo "   SKIP  Gate D affinity case (no taskset or unreadable Cpus_allowed_list)"
 fi
 
 # --- 10. Gate D: the healthy host must still be accepted ----------------------
-d="$TMP/c10"; mkdir -p "$d"; rc=$(SHIM_TMA=absent run_probe "$d")
-if [ "$rc" = 0 ] && grep -qE 'cpuset: +[0-9]+(,[0-9]+)*' "$d/out/host/differential.txt" \
-   && grep -q 'all members online AND in this process' "$d/out/host/capability-probe.txt"; then
-  ok "unrestricted host -> a complete, online, allowed sibling group IS derived (good input accepted)"
-else bad "Gate D rejected a healthy host (rc=$rc)" "$d"; fi
+# Same treatment in the good-input direction: this asserts that a host WITH a
+# complete, online, allowed sibling group yields one. A single-vCPU or heavily
+# constrained container has none, and reporting that as a Gate D defect would be
+# a false accusation (roborev job 318).
+have_group=no
+allowed=$(awk '/^Cpus_allowed_list:/{print $2}' /proc/self/status)
+for c in $(tr ',' ' ' <<<"${allowed:-}" | tr '-' ' '); do
+  sl=$(cat "/sys/devices/system/cpu/cpu$c/topology/thread_siblings_list" 2>/dev/null) || continue
+  case "$sl" in *,*|*-*) have_group=yes; break;; esac
+done
+if [ "$have_group" != yes ]; then
+  skip "Gate D healthy-host case (this host exposes no multi-thread sibling group within its affinity — nothing to derive)"
+else
+  d="$TMP/c10"; mkdir -p "$d"; rc=$(SHIM_TMA=absent run_probe "$d")
+  if [ "$rc" = 0 ] && grep -qE 'cpuset: +[0-9]+(,[0-9]+)*' "$d/out/host/differential.txt" \
+     && grep -q 'all members online AND in this process' "$d/out/host/capability-probe.txt"; then
+    ok "unrestricted host -> a complete, online, allowed sibling group IS derived (good input accepted)"
+  else bad "Gate D rejected a healthy host (rc=$rc)" "$d"; fi
+fi
 
 # =============================================================================
 echo
-echo "cases: PASS=$PASS FAIL=$FAIL"
+echo "cases: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 # A case FLOOR, on #3544's precedent: a span-replacing edit once silently deleted
 # four cases and the suite reported failed:0 over a shrunken set. A green tally
 # over fewer cases is not a green suite.
-FLOOR=12
-if [ $((PASS+FAIL)) -lt $FLOOR ]; then
-  echo "FAIL: only $((PASS+FAIL)) cases ran, floor is $FLOOR — cases were deleted, not fixed"
+FLOOR=15
+if [ $((PASS+FAIL+SKIP)) -lt $FLOOR ]; then
+  echo "FAIL: only $((PASS+FAIL+SKIP)) cases were reached, floor is $FLOOR — cases were deleted, not fixed"
+  exit 1
+fi
+# A SKIP is counted for the floor but must never substitute for verification: the
+# 11 shim-driven cases depend on nothing about this host, so if any of them failed
+# to RUN, something is wrong with the suite rather than with the machine.
+SHIM_FLOOR=13
+if [ "$PASS" -lt $SHIM_FLOOR ] && [ "$FAIL" = 0 ]; then
+  echo "FAIL: only $PASS cases PASSed with 0 failures; $SHIM_FLOOR are host-independent and must always run"
   exit 1
 fi
 [ "$FAIL" = 0 ] || exit 1
-echo "ALL GUARDS VERIFIED (bad input rejected AND good input accepted, $PASS cases)"
+if [ "$SKIP" -gt 0 ]; then
+  echo "GUARDS VERIFIED ($PASS cases); $SKIP SKIPPED because this host cannot express the fixture — NOT verified here"
+else
+  echo "ALL GUARDS VERIFIED (bad input rejected AND good input accepted, $PASS cases)"
+fi

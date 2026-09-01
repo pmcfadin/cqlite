@@ -24,13 +24,13 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.35x (need >=10
   offcore_requests_outstanding.cycles_with_data_rd:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
   offcore_requests.all_data_rd : ABSENT-FROM-PMU (disposition only; not in a differential group)
   offcore_requests_buffer.sq_full : ABSENT-FROM-PMU (disposition only; not in a differential group)
-  l1d_pend_miss.fb_full:u : disposition=PROGRAMS  friendly-L2resident=4226  hostile-512m=521061  hostile-2g=23782
-  l1d_pend_miss.pending:u : disposition=PROGRAMS  friendly-L2resident=140145400  hostile-512m=9605405316  hostile-2g=5642752330
+  l1d_pend_miss.fb_full:u : disposition=PROGRAMS  friendly-L2resident=330564  hostile-512m=25460446  hostile-2g=3388951
+  l1d_pend_miss.pending:u : disposition=PROGRAMS  friendly-L2resident=142666899  hostile-512m=12743975963  hostile-2g=6162942854
 
 -- GATE C: reproduce #3224's own baseline counters --
   cycle_activity.stalls_l3_miss:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
-  cycle_activity.stalls_l2_miss:u : disposition=PROGRAMS  friendly-L2resident=11564  hostile-512m=9430905756  hostile-2g=5541580486
-  cycle_activity.stalls_total:u : disposition=PROGRAMS  friendly-L2resident=280795503  hostile-512m=10740499627  hostile-2g=6101774072
+  cycle_activity.stalls_l2_miss:u : disposition=PROGRAMS  friendly-L2resident=118952  hostile-512m=11851457798  hostile-2g=6115350738
+  cycle_activity.stalls_total:u : disposition=PROGRAMS  friendly-L2resident=305455292  hostile-512m=13356451474  hostile-2g=6735150839
   LLC-loads:u : disposition=ABSENT-FROM-PMU  friendly-L2resident=(no value in this run's CSV)  hostile-512m=(no value in this run's CSV)  hostile-2g=(no value in this run's CSV)
   LLC-load-misses:u : disposition=ABSENT-FROM-PMU  friendly-L2resident=(no value in this run's CSV)  hostile-512m=(no value in this run's CSV)  hostile-2g=(no value in this run's CSV)
   cache-references:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
@@ -42,9 +42,9 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.35x (need >=10
     This check catches a nesting VIOLATION (which would invalidate #3224's
     difference-based partition); it cannot catch a silent zero. Only the
     differential can, which is why both are reported.
-    friendly-L2resident: HOLDS (0 <= 11564 <= 280795503)
-    hostile-512m: HOLDS (0 <= 9430905756 <= 10740499627)
-    hostile-2g: HOLDS (0 <= 5541580486 <= 6101774072)
+    friendly-L2resident: HOLDS (0 <= 118952 <= 305455292)
+    hostile-512m: HOLDS (0 <= 11851457798 <= 13356451474)
+    hostile-2g: HOLDS (0 <= 6115350738 <= 6735150839)
 
 -- GATE D: topology (reported; #3224's geometry needs 6+2 complete cores EXCLUSIVELY) --
   see capability-probe.txt
