@@ -414,12 +414,16 @@ mold_write_block() {
       esac
       _hops=$((_hops + 1))
     done
-    # A result that is STILL a symlink (loop or hop limit), that does not EXIST (dangling),
-    # or whose directory cannot be canonicalised is NOT a resolved target. Refuse rather
-    # than fall back to the symlink path: the fallback IS the defect above, and replacing a
-    # user's symlink is not recoverable, while skipping the accelerator config is.
+    # WHAT COUNTS AS RESOLVED, chosen to MATCH `readlink -f` rather than to be stricter than
+    # it: the final component need NOT already exist (a symlink pointing at a file its owner
+    # has not created yet is an ordinary dotfile-manager setup, and GNU resolves it), but its
+    # PARENT DIRECTORY must, or there is nowhere to rename onto. A result that is still a
+    # symlink (loop or hop limit), or that resolves to a DIRECTORY, is not a write target.
+    # Refuse in those cases rather than fall back to the symlink path: the fallback IS the
+    # defect above, and destroying a user's symlink is not recoverable, while skipping the
+    # accelerator config is.
     _wd=''
-    if [ ! -L "$_wt" ] && [ -e "$_wt" ]; then
+    if [ ! -L "$_wt" ] && [ ! -d "$_wt" ]; then
       _wd=$(cd "$(dirname "$_wt")" 2>/dev/null && pwd -P) || _wd=''
     fi
     if [ -z "$_wd" ]; then

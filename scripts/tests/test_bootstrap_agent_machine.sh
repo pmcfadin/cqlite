@@ -879,19 +879,37 @@ else
   echo "--- target ---"; cat "$realO" 2>/dev/null; echo "--------------"
 fi
 
-# 6p. A DANGLING symlink is REFUSED, not silently replaced (#3756). The old fallback
-#     wrote through to the symlink path, which turns an unresolvable link into a plain
-#     file — unrecoverable for the user, where skipping the accelerator config is not.
+# 6p. AN UNRESOLVABLE symlink is REFUSED, not silently replaced (#3756). The old fallback
+#     wrote through to the symlink PATH, which turns an unresolvable link into a plain file —
+#     unrecoverable for the user, where skipping the accelerator config is not. A symlink LOOP
+#     is the unresolvable case that cannot be argued away as "just create it".
 sbP=$(mktemp -d "$tmp/moldP.XXXXXX"); mkdir -p "$sbP/.cargo"
-ln -s "$sbP/.cargo/nowhere.toml" "$sbP/.cargo/config.toml"
+ln -s "$sbP/.cargo/loop-b.toml" "$sbP/.cargo/config.toml"
+ln -s "$sbP/.cargo/config.toml" "$sbP/.cargo/loop-b.toml"
 outP=$(PATH="$stubO:$PATH" HOME="$sbP" CARGO_HOME="$sbP/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
-if [ -L "$sbP/.cargo/config.toml" ] && [ ! -e "$sbP/.cargo/nowhere.toml" ] \
+if [ -L "$sbP/.cargo/config.toml" ] && [ -L "$sbP/.cargo/loop-b.toml" ] \
    && printf '%s' "$outP" | grep -q "symlink whose target could not be resolved"; then
-  ok "mold/symlink: a DANGLING symlinked config is refused with a named warning and left untouched, rather than replaced by a plain file"
+  ok "mold/symlink: a symlink LOOP is refused with a named warning and both links are left untouched, rather than one being replaced by a plain file"
 else
-  bad "mold/symlink: the dangling symlink case did not refuse (still-link=$([ -L "$sbP/.cargo/config.toml" ] && echo yes || echo no) target-exists=$([ -e "$sbP/.cargo/nowhere.toml" ] && echo yes || echo no))"
+  bad "mold/symlink: the symlink-loop case did not refuse (config-is-link=$([ -L "$sbP/.cargo/config.toml" ] && echo yes || echo no) b-is-link=$([ -L "$sbP/.cargo/loop-b.toml" ] && echo yes || echo no))"
   printf '%s\n' "$outP" | grep -i 'mold\|symlink' | head -5
+fi
+
+# 6q. A symlink whose TARGET DOES NOT EXIST YET but whose parent directory does is WRITTEN
+#     THROUGH, not refused (#3756). `readlink -f` resolves such a path, and a dotfile manager
+#     that links config.toml ahead of the file is an ordinary setup — so the portable
+#     replacement must MATCH that behaviour. Without this case the fix could quietly be
+#     stricter than what it replaced, and nothing would say so.
+sbQ=$(mktemp -d "$tmp/moldQ.XXXXXX"); mkdir -p "$sbQ/.cargo" "$sbQ/dotfiles"
+ln -s "$sbQ/dotfiles/cargo-config.toml" "$sbQ/.cargo/config.toml"
+PATH="$stubO:$PATH" HOME="$sbQ" CARGO_HOME="$sbQ/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+if [ -L "$sbQ/.cargo/config.toml" ] && [ -f "$sbQ/dotfiles/cargo-config.toml" ] \
+   && [ "$(count_begin "$sbQ/dotfiles/cargo-config.toml")" = 1 ]; then
+  ok "mold/symlink: a symlink to a not-yet-created target is written THROUGH (the target is created, the link survives) — the portable resolver is not stricter than the readlink -f it replaced" # portability-lint-allow: the replaced construct NAMED in a diagnostic string, not an invocation
+else
+  bad "mold/symlink: a symlink to a not-yet-created target was not written through (still-link=$([ -L "$sbQ/.cargo/config.toml" ] && echo yes || echo no) target-exists=$([ -f "$sbQ/dotfiles/cargo-config.toml" ] && echo yes || echo no) begin-count=$(count_begin "$sbQ/dotfiles/cargo-config.toml"))"
 fi
 
 # --- 7. git push credentials (issue #2942) ---------------------------------

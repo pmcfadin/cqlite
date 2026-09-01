@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# PORTABILITY GUARD for the roborev review-guard code path (issue #3296).
+# PORTABILITY GUARD for an ENUMERATED set of macOS-sensitive shell files (issues #3296, #3756).
+# It began as, and still is, the guard for the roborev review-guard code path; #3756 added
+# `scripts/bootstrap-agent-machine.sh` and its suite. The AUTHORITATIVE statement of what a run
+# covered is the `==== PORTABILITY LINT SCOPE ====` block it PRINTS — not this comment, and not
+# the file's name. See SCOPE OF THIS SCANNER below.
 #
 # WHY THIS FILE EXISTS. `scripts/tests/test_roborev_review_guard.sh` gates a merge (it runs
 # inside the gate's `roborev-lints` component, in --lite AND in the full gate of record). At
@@ -134,7 +138,17 @@ trap 'rm -rf "$tmp"' EXIT
 #     tally epilogue — but NOT under the shims, so they are not portability coverage.) Everything
 #     else in the scanned files — the whole of the rest of test_roborev_review_guard.sh, all of
 #     scripts/flow/roborev-review*.sh, and roborev-job-facts.py — is covered by the ENUMERATED
-#     SCANNER ALONE.
+#     SCANNER ALONE, and so are BOTH bootstrap files added by #3756, which have no behavioural
+#     probe in this file at all.
+#   * AND THE SUBJECT SET IS ITSELF A COVERAGE CLAIM (#3756). The list below is ENUMERATED, so a
+#     file absent from it is not covered however green this run is — which is not hypothetical:
+#     `xargs -0 -r` shipped in test_bootstrap_agent_machine.sh's tree-identity digest while THIS
+#     FILE carried the `xargs -r` rule verbatim, because that file was never scanned. A full
+#     derivation over all tracked `scripts/**/*.sh` was MEASURED and rejected (10 of 15 rules red
+#     across ~40 sites, mostly other portability lints' own rule TABLES and deliberate
+#     GNU-first/BSD-fallback pairs — a cross-cutting cleanup with its own review surface, which
+#     would red `roborev-lints` in every lane's --lite). So the set stays enumerated and DECLARES
+#     ITSELF AT RUN TIME rather than claiming a completeness it does not have.
 #   * SO THE COVERAGE CLAIM IS NARROW, AND THIS IS ITS HONEST FORM (#3296 round-9 finding 2, which
 #     CORRECTS the round-8 wording here — the earlier text called a missed spelling a "BOUNDED
 #     FALSE NEGATIVE with a backstop underneath it" without qualification, and that was WRONG):
@@ -142,9 +156,10 @@ trap 'rm -rf "$tmp"' EXIT
 #         catches the defect whatever the spelling, because it runs the code under BSD semantics.
 #       - ANYWHERE ELSE in the scanned files there is NO backstop. An unenumerated spelling
 #         introduced there — `$SED -i`, an alias, `eval`, a quoted metacharacter inside the option
-#         run — is an UNCOVERED false negative: this file reports the code path clean and nothing
+#         run — is an UNCOVERED false negative: this file reports the scanned set clean and nothing
 #         in it will contradict that. See residual 5 below, which states it as a residual rather
-#         than leaving it to be rediscovered.
+#         than leaving it to be rediscovered. The two bootstrap files are wholly in this second
+#         category: nothing in THIS file executes them under a shim.
 #   * WHY THIS STILL SURVIVES WHERE THE DELETED LINT DID NOT — and the difference is NOT "it has a
 #     backstop everywhere", which is the claim just retracted. It is that the deleted lint's misses
 #     were false PASSES about the property it was the SOLE check for, and its false-PASS count GREW
@@ -398,10 +413,12 @@ fi
 #      `sed_inplace_verified`, `summary_key_order` — under BSD `sed -i` / BSD `paste` semantics.
 #      For code INSIDE those three, residuals 1-4 are bounded: the probe runs the code and a defect
 #      surfaces as a failing case whatever the spelling. For every OTHER line of the scanned set —
-#      the rest of test_roborev_review_guard.sh, all four scripts/flow/roborev-review* files —
-#      the enumerated scanner is the ONLY mechanism in this file, so a spelling from 1-4 introduced
-#      THERE is an UNCOVERED false negative: the scan reports the code path clean and no probe
-#      contradicts it.
+#      the rest of test_roborev_review_guard.sh, all four scripts/flow/roborev-review* files, and
+#      BOTH #3756 bootstrap files — the enumerated scanner is the ONLY mechanism in this file, so a
+#      spelling from 1-4 introduced THERE is an UNCOVERED false negative: the scan reports the
+#      scanned set clean and no probe contradicts it. (The bootstrap pair does have a behavioural
+#      probe, but it is test_bootstrap_agent_machine.sh's own cases 6o-6q under a BSD `readlink`
+#      shim, it covers ONE call site, and it backstops nothing else in those 7300 lines.)
 #      This is a KNOWN REDUCTION IN COVERAGE, accepted and recorded, not argued away. It is NOT
 #      closed by adding "parsing-based validation": a bash re-implementation of shell word
 #      splitting is a second implementation of a grammar, and a second implementation's correctness
