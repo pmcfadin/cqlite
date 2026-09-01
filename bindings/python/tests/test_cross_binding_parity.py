@@ -45,7 +45,16 @@ PARITY_DIR = PROJECT_ROOT / "bindings" / "parity"
 if str(PARITY_DIR) not in sys.path:
     sys.path.insert(0, str(PARITY_DIR))
 
-from canonical import canon_row_cli, canonical_equal, shape_tag  # noqa: E402
+from canonical import (  # noqa: E402
+    CanonicalError,
+    CqlType,
+    canon_python,
+    canon_row_cli,
+    canonical_equal,
+    parse_type,
+    shape_tag,
+    subtree_has_udt,
+)
 from driver import (  # noqa: E402
     check_fixture_floor,
     fixture_types,
@@ -53,9 +62,11 @@ from driver import (  # noqa: E402
     run_fixture,
 )
 from vectors import (  # noqa: E402
+    ALL_LEGS,
     check_errors,
     check_floor,
     check_rows,
+    check_schema,
     check_vectors,
     load_all as load_vector_file,
 )
@@ -411,6 +422,99 @@ def test_canonicalizer_row_cases_python_leg():
     assert not failures, "row-case failures (python/cli legs):\n" + "\n".join(failures)
     assert counts["checks"] > 0, "no row leg-checks ran"
     assert counts["ok"] == counts["checks"]
+
+
+def test_canonical_vector_file_schema():
+    """Every case must CARRY every field the runners read (issue #1455, F3).
+
+    The class: a ``.get(key, default)`` / ``|| []`` read lets an ABSENT field
+    take the permissive branch, so an accidentally deleted leg key silently
+    skips that leg and the differential pin stays green over a shrunken subject
+    set. The floors count CASES; this requires each case to be COMPLETE.
+    """
+    assert not check_schema(), "\n".join(check_schema())
+
+
+@pytest.mark.parametrize("section", ["vectors", "rows"])
+@pytest.mark.parametrize("leg", ALL_LEGS)
+def test_every_case_carries_every_leg(section, leg):
+    """Stated as a test as well as a runner check, so it cannot be lost with it."""
+    data = load_vector_file()
+    missing = [c["name"] for c in data[section] if leg not in c]
+    assert not missing, f"{section} case(s) missing the {leg!r} leg: {missing}"
+
+
+def test_container_kinds_are_type_specific_not_interchangeable():
+    """A list/set/tuple swap must RED, not be normalized away (issue #1455, F4).
+
+    Accepting the three interchangeably was a hole in the harness's core
+    purpose: a binding regression returning an ``Array`` for ``set<text>`` (or
+    a ``Set`` for ``list<int>``) is a change to a public API shape and is
+    exactly the cross-binding drift this exists to catch. Only the python and
+    node legs can enforce it — the CLI renders all three as a bare JSON array
+    (README gap 1).
+    """
+    with pytest.raises(CanonicalError, match=r"declared set<> expects a Python frozenset/set"):
+        canon_python(["a"], parse_type("set<text>"))
+    with pytest.raises(CanonicalError, match=r"declared list<> expects a Python list"):
+        canon_python(("a",), parse_type("list<text>"))
+    with pytest.raises(CanonicalError, match=r"declared tuple<> expects a Python tuple"):
+        canon_python(["a"], parse_type("tuple<text>"))
+    with pytest.raises(CanonicalError, match=r"declared map<> expects a Python dict"):
+        canon_python([], parse_type("map<text, text>"))
+    # ...and the correct shapes still pass.
+    assert canon_python(frozenset({"b", "a"}), parse_type("set<text>")) == ["a", "b"]
+    assert canon_python(["b", "a"], parse_type("list<text>")) == ["b", "a"]
+    assert canon_python(("b", "a"), parse_type("tuple<text, text>")) == ["b", "a"]
+
+
+def test_hashable_position_projection_is_allowed_not_red():
+    """INTENTIONAL projection #2 — `value_hashable.rs`, measured, not guessed.
+
+    Inside a ``set`` element or a ``map`` KEY the Python binding projects every
+    container: ``list``/``tuple`` -> ``tuple``, ``map`` -> ``tuple`` of
+    2-``tuple``s. A context-free strict check would red on correct input here,
+    which is the guard agents learn to waive.
+    """
+    assert canon_python(
+        frozenset({(1, 9), (2,)}), parse_type("set<frozen<list<int>>>")
+    ) == [[1, 9], [2]]
+    assert canon_python(
+        {(("a", 1),): "x"}, parse_type("map<frozen<map<text, int>>, text>")
+    ) == [[[["a", 1]], "x"]]
+    # A map VALUE is NOT a hashable position, so a real list is correct there.
+    assert canon_python({"a": [2, 1]}, parse_type("map<text, frozen<list<int>>>")) == [
+        ["a", [2, 1]]
+    ]
+
+
+def test_set_of_udt_projection_is_allowed():
+    """INTENTIONAL projection #1 — SET<FROZEN<UDT>> arrives as a `list` (#804/#3500).
+
+    Measured at source: ``bindings/python/src/value.rs::set_to_py`` branches on
+    ``items.iter().any(contains_udt)`` — UDT-CONTAINMENT, not unhashability.
+
+    The type tree is built DIRECTLY here because ``parse_type`` refuses a UDT
+    name, so the allowance is currently unreachable through the public entry
+    point. Keeping the branch live and tested is the point: adding UDT support
+    later must not silently turn a correct binding red.
+    """
+    from canonical import PYTHON_ADAPTER
+
+    udt_set = CqlType("set", (CqlType("udt", ()),))
+    assert subtree_has_udt(udt_set)
+    assert not subtree_has_udt(parse_type("set<frozen<list<int>>>"))
+    # The #804 `list` projection is ACCEPTED for a UDT subtree. Asserted at
+    # `as_seq` rather than through `canon_python`, because canonicalizing the
+    # UDT SCALAR is a separate declared gap (UDTs are refused).
+    assert PYTHON_ADAPTER.as_seq([], udt_set, False) == []
+    # ...and it is refused inside a HASHABLE position, where value_hashable.rs
+    # never re-enters set_to_py, so the UDT branch is unreachable there.
+    with pytest.raises(CanonicalError, match=r"declared set<> expects a Python frozenset/set"):
+        PYTHON_ADAPTER.as_seq([], udt_set, True)
+    # ...and refused for a subtree WITHOUT a UDT, which is F4's whole point.
+    with pytest.raises(CanonicalError, match=r"declared set<> expects a Python frozenset/set"):
+        canon_python([[1]], parse_type("set<frozen<list<int>>>"))
 
 
 def test_canonical_vector_case_floor():
