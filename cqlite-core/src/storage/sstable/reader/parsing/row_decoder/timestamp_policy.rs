@@ -122,11 +122,29 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                 .parse_range_tombstone_marker_full(data, offset, schema)
             {
                 Ok((bv, bk, dp, ds, next_offset)) => {
-                    if sh.feed_range_marker(bv, bk, dp, ds).is_err() {
-                        return MarkerOutcome::Stop;
+                    // Issue #3721: the marker PARSED (`next_offset` is bound, so the
+                    // partition body continues there) and the FSM refuses only an
+                    // unrepresentable bound kind. Reporting that as `Stop` — the
+                    // framing terminator a marker PARSE failure earns — made the
+                    // driver `flush_and_emitted!(offset, false)`, i.e. `Ok` with the
+                    // tombstone and every later row of the partition gone. The two
+                    // halves stay distinguished: see `MarkerOutcome`.
+                    if let Err(e) = sh.feed_range_marker(bv, bk, dp, ds) {
+                        // The driver decodes ONE partition per call, so the only
+                        // identifier available here is the key.
+                        let partition =
+                            format!("key 0x{}", hex::encode(self.partition_key.as_bytes()));
+                        return MarkerOutcome::Refused(range_marker_error::range_marker_refused(
+                            e,
+                            &partition,
+                            offset,
+                            next_offset,
+                        ));
                     }
                     MarkerOutcome::Advanced(next_offset)
                 }
+                // A marker that cannot be PARSED yields no resume offset: a genuine
+                // framing terminator (truncated body / refill), unchanged.
                 Err(_) => MarkerOutcome::Stop,
             }
         } else {

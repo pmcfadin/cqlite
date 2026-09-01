@@ -47,13 +47,30 @@ pub(super) fn row_write_timestamp(row_header_opt: &Option<RowHeader>) -> i64 {
 }
 
 /// How the driver should advance after a policy handled a range-tombstone marker.
+///
+/// `Stop` and `Refused` are the two halves of what one signal used to conflate
+/// (issue #3721), and the distinction is a FRAMING one, not a severity judgement:
+///
+/// * `Stop` — the marker could not be PARSED, so there is no resume offset. That is
+///   a genuine framing terminator: on a non-final chunk it means "the marker body
+///   is truncated here, refill", and on the final chunk it means the body is only
+///   partly observed. `compaction::CompactionPolicy::on_range_marker` produces
+///   exactly this case and MUST keep its meaning.
+/// * `Refused` — the marker WAS parsed (a resume offset exists and the partition
+///   body continues there) and the policy cannot represent it. Corruption with a
+///   valid resume point, which no refill can fix; reporting it as `Stop` truncated
+///   the partition and returned `Ok`.
 pub(super) enum MarkerOutcome {
     /// The marker was consumed; continue the row loop at this offset.
     Advanced(usize),
-    /// The marker could not be represented/parsed faithfully — terminate the
+    /// The marker could not be PARSED — no resume offset exists. Terminate the
     /// partition (the driver flushes buffered rows on the final chunk, else
     /// returns `NeedMore`), mirroring the pre-K1 `break`/`NeedMore` behaviour.
     Stop,
+    /// The marker was PARSED but cannot be represented faithfully (issue #3721):
+    /// corruption at a known resume point. Propagated to the caller of the read —
+    /// see [`super::range_marker_error::range_marker_refused`].
+    Refused(Error),
 }
 
 /// Per-consumer policy for the bounded sliding-window partition skeleton
@@ -273,11 +290,15 @@ impl V5CompressedLegacyParser {
                     }
                     MarkerOutcome::Stop => {
                         if at_final_chunk {
-                            // Unrepresentable marker: body only partly observed.
+                            // Unparseable marker: body only partly observed.
                             return flush_and_emitted!(offset, false);
                         }
                         return Ok(ParseStep::NeedMore);
                     }
+                    // Issue #3721: the marker parsed and the body continues past
+                    // it, so no refill can help and truncating the partition would
+                    // report `Ok` with rows missing. Propagate.
+                    MarkerOutcome::Refused(e) => return Err(e),
                 }
             }
 

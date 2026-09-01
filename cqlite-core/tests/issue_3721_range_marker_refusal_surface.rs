@@ -404,3 +404,31 @@ async fn d1_cell_metadata_scan_surfaces_the_marker_refusal() {
     ))
     .await;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// D5 — `timestamp_policy`: the bounded STREAMING scan, whose marker refusal used
+// to become `MarkerOutcome::Stop` -> `flush_and_emitted!(offset, false)` -> `Ok`
+// with a truncated partition.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn d5_streaming_scan_surfaces_the_marker_refusal() {
+    let query = format!("SELECT COUNT(*) FROM {KEYSPACE}.{TABLE}");
+    let clean = run(&query, false)
+        .await
+        .unwrap_or_else(|e| panic!("`{query}` must succeed over the UNPATCHED fixture: {e}"));
+    let rendered = format!("{clean:?}");
+    assert!(
+        rendered.contains(&LIVE_CLUSTERING.len().to_string()),
+        "the UNPATCHED streaming aggregate must count both live rows; got: {clean:#?}"
+    );
+
+    match run(&query, true).await {
+        Ok(rows) => panic!(
+            "`{query}` returned Ok over a fixture whose range-tombstone marker carries an \
+             unrepresentable bound kind — the partition was silently TRUNCATED and the \
+             count reported as success (issue #3721). Rows: {rows:#?}"
+        ),
+        Err(e) => assert_marker_refusal(&e, &query),
+    }
+}
