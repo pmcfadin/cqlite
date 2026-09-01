@@ -313,6 +313,52 @@ rs "$R4C" verdict c --issue 710
 rc_is 0 "noglob CONTROL: a multi-word value still reduces to its FIRST WORD (PASS)"
 has "RESULT: PASS " "noglob CONTROL: the reduced token is PASS"
 
+# --- 4d. EXACTLY ONE column-zero `result:` line (round 3, G2) --------------------
+# Round 2 anchored `classify_report` at column zero and stopped there, leaving `grep -m1`:
+# the FIRST of several anchored lines won. So a stale `result: PASS` followed by an APPENDED
+# `result: FINDINGS` classified as PASS, and a merge proceeded over recorded blocking
+# findings. Order is not a rule — it is whichever line happened to come first.
+#
+# THIS IS THE SECOND FINDING AT THIS SEAM IN TWO ROUNDS, and the fix is a CONSOLIDATION:
+# `premerge-assert.sh`'s `_c_verdict_awk` already COUNTED its anchored lines and refused
+# several as AMBIGUOUS while this reader took the first. Two readers of one shape holding two
+# opinions is the divergence this repo pins, so they are now held to the same rule and
+# `scripts/tests/test_premerge_assert.sh`'s DIFFERENTIAL section drives BOTH over one shared
+# table of adversarial inputs — a second implementation's agreement is only knowable by
+# testing it, never by care.
+R4D="$(newrepo)"
+rs "$R4D" open c --issue 470 --agent spec-auditor
+rc_is 0 "several: the stage opens (the fixture)"
+AP4D="$(REPORT_OF "$R4D" 470 c)"
+# THE REVIEWER'S SCENARIO, VERBATIM: a stale PASS, then an appended FINDINGS.
+printf 'result: PASS\n\nan earlier round found nothing.\n\nresult: FINDINGS\n\nthe later round found a blocker.\n' >"$AP4D"
+rs "$R4D" verdict c --issue 470
+rc_is 5 "several: a stale PASS followed by an appended FINDINGS is NOT-RUN, never PASS"
+has "column-zero 'result:' lines" "several: the cause names that there were SEVERAL, not that there were none"
+hasnt "RESULT: PASS " "several: the stale first line does NOT win"
+hasnt "RESULT: FINDINGS " "several: nor does the last one — several candidates is refused, not resolved"
+# AND THE OTHER ORDER, because a LAST-WINS reader would pass the case above. Neither order may
+# resolve: the refusal comes from the COUNT.
+printf 'result: FINDINGS\n\nblocker.\n\nresult: PASS\n\nsomeone appended a pass.\n' >"$AP4D"
+rs "$R4D" verdict c --issue 470
+rc_is 5 "several: the REVERSE order is refused too (a last-wins reader would have passed)"
+has "column-zero 'result:' lines" "several: the reverse order names the same cause"
+# ZERO AND SEVERAL STAY DISTINCT CAUSES. The operator action differs ("your agent wrote no
+# verdict" / "this report records two"), and a fix folding either into the other would pass one
+# of these two cases alone.
+printf '# a report with prose only\n\nnothing recordable here.\n' >"$AP4D"
+rs "$R4D" verdict c --issue 470
+rc_is 5 "several: ZERO anchored lines is still its own cause"
+has "no 'result:' line" "several: zero is reported as 'no result: line', not as a count"
+hasnt "column-zero 'result:' lines" "several: the zero cause does not borrow the several cause's text"
+# THE CONTROL, and it is the load-bearing half: an INDENTED copy is DATA, so a report with one
+# column-zero line and any number of quoted/indented/fenced copies still reads its verdict.
+# Without this, a fix that refused every report holding the word twice would pass the negatives.
+printf 'result: PASS\n\nquoting another stage for context:\n\n    result: FINDINGS\n\n> result: NOT-RUN\n' >"$AP4D"
+rs "$R4D" verdict c --issue 470
+rc_is 0 "several CONTROL: one column-zero line plus indented and quoted copies still reads PASS"
+has "RESULT: PASS " "several CONTROL: the single record is read"
+
 # --- 5. the path is verified gitignored, fail-closed ----------------------------
 # (a) an explicit --report that git does NOT confirm ignored.
 R3="$(newrepo)"

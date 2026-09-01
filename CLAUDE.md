@@ -1121,7 +1121,20 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   DESIGN — the sentinel must show the agent the spelling — so while indentation was tolerated the
   template's own examples were valid records held off by `grep -m1` ORDER alone, and deleting the
   column-zero sentinel then appending a verdict read the TEMPLATE's `PASS` (measured; #3312's rule
-  — anchor the control token where the payload cannot reach, never pick a rarer delimiter); `status` reports elapsed/deadline and is **advisory, never a
+  — anchor the control token where the payload cannot reach, never pick a rarer delimiter), **and
+  EXACTLY ONE of them** (round 3, G2): anchoring without COUNTING left `grep -m1` deciding by
+  ORDER, so a stale `result: PASS` followed by an APPENDED `result: FINDINGS` classified as PASS
+  and a merge proceeded over recorded blocking findings — several column-zero records is now
+  `NOT-RUN (… N column-zero 'result:' lines …)`, refused rather than resolved by order in EITHER
+  direction. That fix is a CONSOLIDATION, not a patch: `premerge-assert.sh`'s `_c_verdict_awk`
+  already counted its own anchored lines and refused several as AMBIGUOUS, so the two readers of
+  one shape had diverged TWICE in two rounds, once per axis, each time with a reviewer naming one
+  side. Their agreement is now MECHANICALLY CHECKED — a DIFFERENTIAL test
+  (`scripts/tests/test_premerge_assert.sh` §44g) drives BOTH readers over ONE shared table of
+  adversarial inputs (indented, several, zero, CRLF, a token with trailing junk, a `result:`
+  inside a fenced block, a glob-ish value) and asserts they agree per row AND reach the expected
+  disposition, because agreement on a wrong answer is not correctness and a second
+  implementation's correctness is only knowable by testing it against the first; `status` reports elapsed/deadline and is **advisory, never a
   verdict input**. `NOT-RUN` always names ONE OF SIX causes (`no report written`, `report absent`,
   `report unreadable`, `report empty`, `report ungrammatical: <what>`, `stage never opened`) because
   the operator action differs per cause — `report unreadable` was added in round 2 rather than folded

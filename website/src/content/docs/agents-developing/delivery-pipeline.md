@@ -598,7 +598,20 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   example verdict lines BY DESIGN (the sentinel must show the agent the spelling), so while indentation
   was tolerated the template's own examples were valid records held off by `grep -m1` ORDER alone and
   deleting the column-zero sentinel then appending a verdict read the TEMPLATE's `PASS` (measured —
-  #3312: anchor the control token where the payload cannot reach, never pick a rarer delimiter);
+  #3312: anchor the control token where the payload cannot reach, never pick a rarer delimiter) —
+  **and EXACTLY ONE of them** (round 3, G2). Anchoring without COUNTING left `grep -m1` deciding
+  by ORDER, so a stale `result: PASS` followed by an APPENDED `result: FINDINGS` classified as
+  PASS and a merge proceeded over recorded blocking findings; several column-zero records is now
+  refused as AMBIGUOUS in EITHER direction, because a last-wins read is no better than a
+  first-wins one. **That was a CONSOLIDATION, not a patch, and the reason matters more than the
+  fix:** `premerge-assert.sh`'s `_c_verdict_awk` was ALREADY counting its own anchored lines, so
+  two readers of one shape had diverged TWICE in two review rounds — once per axis, each time
+  with a reviewer naming one side — and patching whichever side was named is what let the second
+  divergence exist. Their agreement is now mechanically checked by a DIFFERENTIAL test
+  (`scripts/tests/test_premerge_assert.sh` §44g) that drives BOTH readers over ONE shared table
+  of adversarial inputs (indented, several, zero, CRLF, a token with trailing junk, a `result:`
+  inside a fenced block, a glob-ish value), asserting they agree per row AND that both reach the
+  EXPECTED disposition — agreement alone is satisfiable by both being wrong in the same way.
   `status` reports
   elapsed/deadline and is **advisory, never a verdict input**. `NOT-RUN` always names ONE OF SIX causes
   (`no report written`, `report absent`, `report unreadable`, `report empty`,

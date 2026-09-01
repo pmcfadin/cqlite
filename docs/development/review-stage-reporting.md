@@ -145,7 +145,19 @@ Three further declared limits of the mechanism itself:
   held off only by `grep -m1` ORDER, and deleting the column-zero sentinel then appending a
   verdict read the TEMPLATE's `PASS` — measured, #3312's family: an artifact that DESCRIBES the
   escape hatch becoming it. The examples now also sit behind a `| ` gutter, so neither the anchor
-  nor the rendering is load-bearing alone. Judging whether the working is
+  nor the rendering is load-bearing alone. **And there must be EXACTLY ONE such line** (round 3,
+  G2): anchoring without COUNTING still left `grep -m1` deciding by ORDER, so a stale
+  `result: PASS` followed by an APPENDED `result: FINDINGS` classified as PASS and a merge
+  proceeded over recorded blocking findings. Several column-zero records is `NOT-RUN`, in EITHER
+  order — a last-wins read is no better than a first-wins one, so the refusal comes from the
+  COUNT. That fix is a **CONSOLIDATION**: `premerge-assert.sh`'s `_c_verdict_awk` was already
+  counting its own anchored `REVIEW-STAGE: ` lines, so two readers of ONE shape had diverged
+  TWICE in two rounds — once per axis, each time with a reviewer naming one side — and patching
+  the named side is what let the second divergence happen. Their agreement is now mechanically
+  checked: `scripts/tests/test_premerge_assert.sh` §44g drives BOTH readers over ONE shared table
+  of adversarial shapes and asserts they agree per row AND reach the EXPECTED disposition
+  (agreement alone is satisfiable by both being wrong identically, which is the state the section
+  exists to detect). Judging whether the working is
   real is a human's job — and for the author-performed substitute, requiring the working to be
   recorded is the whole point.
 - **The deadline is advisory and changes nothing.** A late report is still a report; a stage

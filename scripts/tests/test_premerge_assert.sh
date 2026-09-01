@@ -3130,6 +3130,147 @@ if [ -n "$SHAPE_REPO" ]; then
   fi
 fi
 
+# --- 44g: THE DIFFERENTIAL — two readers, one shared table (round 3, G2) ------
+# TWO READERS READ THE SAME SHAPE. `review-stage.sh`'s `classify_report` locates the report's
+# `result:` record; `premerge-assert.sh`'s `_c_verdict_awk` + `c_parse_verdict` locates the
+# verdict stream's `REVIEW-STAGE:` record. Neither reads the other's file, but BOTH answer the
+# same three questions: is the candidate line at COLUMN ZERO, is there EXACTLY ONE of them, and
+# is the token in the CLOSED set.
+#
+# THEY DIVERGED, TWICE IN TWO ROUNDS, and each time a reviewer named one side: round 2 (B1) that
+# `classify_report` was not column-zero anchored while `_c_verdict_awk` was; round 3 (G2) that
+# `_c_verdict_awk` COUNTED its anchored lines and refused several while `classify_report`
+# first-won. Patching whichever side the reviewer happened to name is what let the second
+# divergence exist, so the rule is now MECHANICALLY CHECKED rather than maintained by care:
+# one table, both readers, agreement asserted per row.
+#
+# THE DISPOSITION IS THE LOCATION VERDICT, NOT THE MERGE OUTCOME — three values, because
+# "accept/refuse" would fuse two different questions and the readers legitimately differ on the
+# second. NO-RECORD: the reader found zero, or several, column-zero candidates. TOKEN-REJECTED:
+# it located exactly one and the token is not in the closed set. READ: it located one and the
+# token is in the set. An output matching none of those is UNCLASSIFIED and is a FAILURE — a
+# positive verdict requires an affirmative measurement, so a case that cannot be read must not
+# be counted as agreement.
+#
+# EXPECTED IS ASSERTED BESIDE AGREEMENT. Agreement alone is satisfiable by BOTH readers being
+# wrong in the same way, which is exactly the state this section exists to detect.
+diff_disp_a() {
+  case "$1" in
+    *"RESULT: PASS "* | *"RESULT: FINDINGS "*)       printf 'READ\n' ;;
+    *"column-zero 'result:' lines"*)                 printf 'NO-RECORD\n' ;;
+    *"no 'result:' line"*)                           printf 'NO-RECORD\n' ;;
+    *"unrecognised result token"*)                   printf 'TOKEN-REJECTED\n' ;;
+    *)                                               printf 'UNCLASSIFIED\n' ;;
+  esac
+}
+diff_disp_b() {
+  if [ "${2:-1}" -eq 0 ]; then printf 'READ\n'; return 0; fi
+  case "$1" in
+    *"holds NO verdict line"*)              printf 'NO-RECORD\n' ;;
+    *"verdict lines"*AMBIGUOUS*)            printf 'NO-RECORD\n' ;;
+    *"verdict token:"*)                     printf 'TOKEN-REJECTED\n' ;;
+    *)                                      printf 'UNCLASSIFIED\n' ;;
+  esac
+}
+
+# THE TABLE. One row per adversarial shape, each spelled for BOTH readers by
+# `diff_row_body_a` / `diff_row_line_b` — the SAME shape, in each reader's own grammar. Written
+# with printf so a row can plant something neither producer would ever emit, which is the point.
+DIFF_ROWS="plain indented several zero crlf token-junk fenced globish"
+DIFF_EXPECT_plain=READ
+DIFF_EXPECT_indented=NO-RECORD
+DIFF_EXPECT_several=NO-RECORD
+DIFF_EXPECT_zero=NO-RECORD
+DIFF_EXPECT_crlf=READ
+DIFF_EXPECT_token_junk=TOKEN-REJECTED
+DIFF_EXPECT_fenced=NO-RECORD
+DIFF_EXPECT_globish=TOKEN-REJECTED
+diff_expect() {
+  # Row names carry '-', which is not a shell identifier character, so the lookup translates it.
+  local key
+  key="DIFF_EXPECT_$(printf '%s' "$1" | tr '-' '_')"
+  eval "printf '%s\n' \"\${$key}\""
+}
+diff_row_body_a() {
+  case "$1" in
+    plain)      printf 'result: PASS\n\nreviewed the whole diff.\n' ;;
+    indented)   printf '  result: PASS\n\nreviewed the whole diff.\n' ;;
+    several)    printf 'result: PASS\n\nan earlier round.\n\nresult: FINDINGS\n\na later one.\n' ;;
+    zero)       printf '# a report with prose only\n\nnothing recordable here.\n' ;;
+    crlf)       printf 'result: PASS\r\n\r\nreviewed the whole diff.\r\n' ;;
+    token-junk) printf 'result: PASSNOW\n\nan invented token.\n' ;;
+    fenced)     printf '```\nresult: PASS\n```\n\nresult: PASS\n' ;;
+    globish)    printf 'result: *\n\na glob where a token belongs.\n' ;;
+  esac
+}
+diff_row_line_b() {
+  local pfx='REVIEW-STAGE: c RESULT:' sfx='elapsed=1 deadline=1800 agent=spec-auditor report=/p/c.md'
+  case "$1" in
+    plain)      printf '%s PASS %s\n' "$pfx" "$sfx" ;;
+    indented)   printf '  %s PASS %s\n' "$pfx" "$sfx" ;;
+    several)    printf '%s PASS %s\n%s FINDINGS %s\n' "$pfx" "$sfx" "$pfx" "$sfx" ;;
+    zero)       printf 'a capture holding prose only, with no anchored line.\n' ;;
+    crlf)       printf '%s PASS %s\r\n' "$pfx" "$sfx" ;;
+    token-junk) printf '%s PASSNOW %s\n' "$pfx" "$sfx" ;;
+    fenced)     printf '```\n%s PASS %s\n```\n%s PASS %s\n' "$pfx" "$sfx" "$pfx" "$sfx" ;;
+    globish)    printf '%s * %s\n' "$pfx" "$sfx" ;;
+  esac
+}
+
+# A CASE FLOOR ON THE TABLE ITSELF (#3544's lesson): an emptied or shrunken table yields a loop
+# that runs fewer times and reports `failed: 0`, which is a green tally over a shrunken suite.
+DIFF_ROW_COUNT=$(printf '%s\n' $DIFF_ROWS | grep -c .)
+if [ "$DIFF_ROW_COUNT" -ge 8 ]; then
+  ok "differential: the shared table holds $DIFF_ROW_COUNT adversarial shapes (floor 8)"
+else
+  bad "differential: the shared table holds only $DIFF_ROW_COUNT rows, below the floor of 8 — a row was lost and agreement over an empty table is not agreement"
+fi
+
+DIFF_REPO="$T/diff-readers"
+DIFF_OK=""
+if mkdir -p "$DIFF_REPO" && git init -q "$DIFF_REPO" >/dev/null 2>&1 &&
+  printf '.review-stage/\n' >"$DIFF_REPO/.gitignore"; then
+  DIFF_OK=1
+  ok "differential: a scratch worktree for the report reader was built"
+else
+  bad "differential: could not build the scratch worktree — the section would be vacuous"
+fi
+
+if [ -n "$DIFF_OK" ]; then
+  DIFF_N=900
+  for DROW in $DIFF_ROWS; do
+    DIFF_N=$((DIFF_N + 1))
+    DEXP=$(diff_expect "$DROW")
+    # READER A — review-stage.sh's classify_report, through the shipped subcommand.
+    if ! (cd "$DIFF_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue "$DIFF_N" \
+      --agent spec-auditor >/dev/null 2>&1); then
+      bad "differential/$DROW: could not open the stage — this row is vacuous"
+      continue
+    fi
+    diff_row_body_a "$DROW" >"$DIFF_REPO/.review-stage/issue-$DIFF_N/c.md"
+    DOUT_A=$(cd "$DIFF_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" verdict c \
+      --issue "$DIFF_N" 2>&1) || true
+    DA=$(diff_disp_a "$DOUT_A")
+    # READER B — premerge-assert.sh's _c_verdict_awk + c_parse_verdict, through --c-verdict.
+    DFILE="$T/diff-verdict-$DROW.txt"
+    diff_row_line_b "$DROW" >"$DFILE"
+    DOUT_B=$(PATH="$BIN:$PATH" bash "$NEUTRAL_ASSERT" 2421 "$CERTIFIED" "$GOOD" \
+      --c-verdict "$DFILE" 2>&1)
+    DRC_B=$?
+    DB=$(diff_disp_b "$DOUT_B" "$DRC_B")
+    if [ "$DA" = "$DB" ]; then
+      ok "differential/$DROW: the two readers AGREE ($DA)"
+    else
+      bad "differential/$DROW: the readers DISAGREE — classify_report says $DA, _c_verdict_awk says $DB. Two readers of one shape must not hold two opinions (A: $DOUT_A) (B: $DOUT_B)"
+    fi
+    if [ "$DA" = "$DEXP" ] && [ "$DB" = "$DEXP" ]; then
+      ok "differential/$DROW: and both reach the EXPECTED disposition ($DEXP)"
+    else
+      bad "differential/$DROW: expected $DEXP, got A=$DA B=$DB — agreement on a WRONG answer is not correctness (A: $DOUT_A) (B: $DOUT_B)"
+    fi
+  done
+fi
+
 # --- case floor (#3544) ------------------------------------------------------
 # A span-replacing edit once silently deleted FOUR cases from a suite in this repo
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a

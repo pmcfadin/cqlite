@@ -514,6 +514,17 @@ refuse_no_c_verdict() {
 # so two verdicts in one file are AMBIGUOUS and refusable rather than last-wins.
 # ANSI is stripped as belt (#3400: colour survives redirection).
 #
+# THE OTHER READER OF THIS SHAPE IS `review-stage.sh`'s `classify_report`, which
+# locates the REPORT's `result:` record. Neither reads the other's file, but both
+# answer the same three questions — column zero, exactly one, a closed token set —
+# and they DIVERGED TWICE in two review rounds, once per axis, each time with a
+# reviewer naming one side (round 2: `classify_report` was not anchored; round 3:
+# it did not count). Patching whichever side was named is what let the second
+# divergence exist, so their agreement is MECHANICALLY CHECKED: section 44g of
+# scripts/tests/test_premerge_assert.sh drives BOTH over ONE shared table of
+# adversarial inputs and asserts they agree per row AND reach the expected
+# disposition. Change the rule here and that test tells you the other side moved.
+#
 # IT REPORTS THE WHOLE GRAMMAR, NOT JUST THE TOKEN (#3751 round 1, F2). The
 # documented line is
 #

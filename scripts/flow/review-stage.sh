@@ -56,8 +56,8 @@
 # reduced to its FIRST WORD and matched by STRING EQUALITY, and any unrecognised value is
 # `NOT-RUN`, never passed through. `PASS-BUT-UNMEASURED` must not satisfy a `PASS*` test.
 #
-# AND THE `result:` LINE IS READ AT COLUMN ZERO ONLY (#3751 round 2, B1)
-# ---------------------------------------------------------------------
+# AND THE `result:` LINE IS READ AT COLUMN ZERO ONLY, EXACTLY ONCE (round 2 B1, round 3 G2)
+# -----------------------------------------------------------------------------------------
 # The report body is AUTHOR-CONTROLLED text that CONTAINS example verdict lines by design —
 # the sentinel has to show the agent the exact spelling, and a review report routinely quotes
 # another report's line. An INDENTED, quoted or bulleted `result: PASS` is therefore DATA, and
@@ -68,6 +68,15 @@
 # sentinel and appending a verdict read the TEMPLATE's `PASS` (measured). Belt as well as
 # braces: the template now renders those examples behind a `| ` gutter, so they do not begin
 # with the token even if this anchor were ever loosened again.
+#
+# THE ANCHOR ALONE WAS NOT ENOUGH, WHICH IS G2. `grep -m1` was still deciding by ORDER among
+# the anchored lines, so a stale `result: PASS` followed by an APPENDED `result: FINDINGS`
+# classified as PASS and a merge proceeded over recorded blocking findings. So the reader
+# requires EXACTLY ONE column-zero record: zero and several are DISTINCT `NOT-RUN` causes (the
+# operator action differs), and several is refused in EITHER order, because a last-wins rule is
+# no better than a first-wins one. The consolidation half — and the sibling reader in
+# `premerge-assert.sh`, plus the DIFFERENTIAL test that keeps the two honest — is stated at
+# `classify_report` itself, beside the code the rule lives in.
 #
 # `NOT-RUN` carries one of SIX named causes, because the operator action differs per cause
 # and one token for six states is the collapse this issue is about:
@@ -745,10 +754,10 @@ cmd_open() {
     printf '\n'
     printf '## How to complete this stage\n'
     printf '\n'
-    printf 'THIS FILE is your report of record, not your returned message. Replace the\n'
-    printf '`result:` line above -- AT COLUMN ZERO, the only place this tool reads it -- with\n'
-    printf 'EXACTLY ONE of the two values in the gutter below (write the value, not the\n'
-    printf 'leading "| "):\n'
+    printf 'THIS FILE is your report of record, not your returned message. REPLACE the\n'
+    printf '`result:` line above -- AT COLUMN ZERO, the only place this tool reads it, and there\n'
+    printf 'must be EXACTLY ONE such line -- with EXACTLY ONE of the two values in the gutter\n'
+    printf 'below (write the value, not the leading "| "):\n'
     printf '\n'
     printf '    | result: PASS        # you reviewed the subject and found no blocking finding\n'
     printf '    | result: FINDINGS    # you reviewed the subject and found >=1 blocking finding\n'
@@ -756,6 +765,10 @@ cmd_open() {
     printf 'then write your findings below. The token is matched by STRING EQUALITY on its\n'
     printf 'first word against a closed set, so an invented value (e.g. PASS-BUT-UNMEASURED)\n'
     printf 'is read as NOT-RUN, never as a pass.\n'
+    printf '\n'
+    printf 'REPLACE it -- do NOT append a second verdict below this one. SEVERAL column-zero\n'
+    printf '`result:` lines is read as NOT-RUN (AMBIGUOUS), in either order: resolving two\n'
+    printf 'records by which came first is not a rule, so neither value is reported.\n'
     printf '\n'
     printf 'THE GUTTER IS DELIBERATE, and it is defence in depth: this file is AUTHOR-CONTROLLED\n'
     printf 'text that has to SHOW you the verdict spelling, so an example rendered as a valid\n'
@@ -789,8 +802,10 @@ cmd_open() {
 REPORT OF RECORD (mandatory): write your report to
   $rpath
 That FILE is your report of record, not your returned message. Write it INCREMENTALLY as
-you go, not at the end. When you finish, replace its \`result:\` line — the one at COLUMN
-ZERO, which is the only place this is read; an indented or quoted copy is data — with exactly
+you go, not at the end. When you finish, REPLACE its \`result:\` line — the one at COLUMN
+ZERO, which is the only place this is read; an indented or quoted copy is data, and there must be
+EXACTLY ONE such line, so replace it rather than appending a second verdict below it (several is
+read as NOT-RUN, in either order) — with exactly
 one of \`result: PASS\` (no blocking finding) or \`result: FINDINGS\` (>=1 blocking finding),
 and put your findings below it. If that line still reads \`result: NOT-RUN\` when you stop, this
 stage is recorded as NOT-RUN and BLOCKS the merge — an absent review is not a clean one, and
@@ -846,10 +861,40 @@ classify_report() {
   # and the same anchor `premerge-assert.sh`'s `_c_verdict_awk` uses on `/^REVIEW-STAGE: /`.
   # Case-insensitivity is KEPT: `Result:` at column zero is one author's spelling of the
   # control line, not a payload posing as one.
-  line="$(LC_ALL=C grep -m1 -i '^result:' "$rpath" 2>/dev/null || true)"
-  if [ -z "$line" ]; then
+  #
+  # AND EXACTLY ONE OF THEM (#3751 round 3, G2). Anchoring without COUNTING left `grep -m1`
+  # deciding by ORDER: a stale `result: PASS` followed by an APPENDED `result: FINDINGS`
+  # classified as PASS, so a merge proceeded over recorded blocking findings. Order is not a
+  # rule — it is whichever line happened to come first — and a LAST-wins read is no better,
+  # which is why the refusal comes from the COUNT and both orders are pinned. Zero and several
+  # are DISTINCT causes because the operator action differs ("your agent wrote no verdict" /
+  # "this report records two").
+  #
+  # THE OTHER READER OF THIS SHAPE IS `premerge-assert.sh`'s `_c_verdict_awk`, which counts its
+  # own column-zero `REVIEW-STAGE: ` lines and refuses several as AMBIGUOUS. Neither reads the
+  # other's file, but both answer the same three questions (column zero / exactly one / a closed
+  # token set) — and they have now DIVERGED TWICE, once per axis, each time with a reviewer
+  # naming one side. So the agreement is MECHANICALLY CHECKED, not maintained by care:
+  # `scripts/tests/test_premerge_assert.sh`'s section 44g drives BOTH readers over ONE shared
+  # table of adversarial inputs and asserts they agree per row AND reach the expected
+  # disposition. If you change the rule here, that test is what tells you the other side moved
+  # too — a second implementation's correctness is only knowable by testing it against the first.
+  local cands ncand=0
+  cands="$( { LC_ALL=C grep -i '^result:' "$rpath"; } 2>/dev/null || true)"
+  if [ -n "$cands" ]; then
+    ncand="$(printf '%s\n' "$cands" | LC_ALL=C grep -c . 2>/dev/null || true)"
+    case "$ncand" in
+      "" | *[!0-9]* ) ncand=0 ;;
+    esac
+  fi
+  if [ "$ncand" -eq 0 ]; then
     printf "NOT-RUN|report ungrammatical: no 'result:' line\n"; return 0
   fi
+  if [ "$ncand" -gt 1 ]; then
+    printf "NOT-RUN|report ungrammatical: %s column-zero 'result:' lines (AMBIGUOUS — several records is refused, never resolved by order)\n" "$ncand"
+    return 0
+  fi
+  line="$cands"
   value="$(one_line "${line#*:}")"
   if [ -z "$value" ]; then
     printf "NOT-RUN|report ungrammatical: empty 'result:' value\n"; return 0

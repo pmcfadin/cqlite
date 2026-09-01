@@ -16,7 +16,9 @@ report?" but "what does the report say?".
   go, never only at the end.
 - **That FILE is your verdict of record, not your returned message.** When you finish, replace
   its `result:` line — the one at COLUMN ZERO, which is the only place it is read; an indented
-  or quoted copy is data — with EXACTLY ONE of `result: PASS` (no blocking finding) or
+  or quoted copy is data, and there must be EXACTLY ONE such line (several is refused as
+  AMBIGUOUS, so REPLACE the sentinel rather than appending a second verdict below it) — with
+  EXACTLY ONE of `result: PASS` (no blocking finding) or
   `result: FINDINGS` (at least one blocking finding), then put your findings below it. The
   token is matched by STRING EQUALITY on its first word against a closed set, so an invented
   value (`PASS-BUT-UNMEASURED`, `NOT-APPLICABLE`) is read as `NOT-RUN`, never as a pass.
