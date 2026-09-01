@@ -2078,17 +2078,21 @@ PYINNER
 
   # P1-5: two sessions in one work directory. The second must be refused BEFORE
   # it can truncate the first's ledger.
-  mkdir -p "$TMP/w-locked/results" "$TMP/w-locked/.session-lock"
-  printf '{"arm":"base","replicate":1,"file":"base-r01.jsonl"}\n' \
-    > "$TMP/w-locked/results/runs.jsonl"
+  # RESTRUCTURE DEBRIS, FOUND BY SWEEPING RATHER THAN BY A RED: this case used to
+  # assert that a lock-refused session did not truncate `results/runs.jsonl`. The
+  # driver stopped writing there in round 4, so the assertion became trivially
+  # true and the case proved nothing. The property worth asserting now is that a
+  # refused session leaves NOTHING -- which is why the lock is taken before the
+  # session directory is created.
+  mkdir -p "$TMP/w-locked/.session-lock"
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --work-dir "$TMP/w-locked" --min-corpus-bytes 1 --min-sstables 1 \
     --repo "$SCRATCH"
   check_driver "a second session in a work directory already in use" 2 work-dir-busy
-  if [ -s "$TMP/w-locked/results/runs.jsonl" ]; then
-    ok "the refused session did not truncate the running session's ledger"
+  if [ -z "$(find "$TMP/w-locked" -maxdepth 1 -type d -name 'run-*' 2>/dev/null)" ]; then
+    ok "a session refused by the lock leaves no directory behind at all"
   else
-    bad "a refused session destroyed the other session's run ledger"
+    bad "a lock-refused session created a session directory before checking the lock"
   fi
 
   # P1-7: a worktree at the right commit but carrying uncommitted edits builds
@@ -2135,16 +2139,20 @@ PYINNER
     bad "a replicate file was written where another session could see it"
   fi
 
-  # Nothing under the run directory is written before pre-flight passes, so a
-  # pre-flight abort in a FRESH work directory leaves no manifest at all -- and
-  # the analyzer refuses that rather than reading a stale one.
-  if [ ! -f "$TMP/w-badref/results/manifest.json" ]; then
-    ok "a pre-flight abort in a fresh work directory writes no manifest at all"
+  # ALSO RESTRUCTURE DEBRIS: this checked `results/manifest.json`, a path the
+  # driver no longer writes, so it passed by looking at nothing. A pre-flight
+  # abort now writes a truthful manifest into ITS OWN session directory recording
+  # zero runs, and the analyzer must refuse THAT rather than read it as a result.
+  BADREF_DIR="$(find "$TMP/w-badref" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$BADREF_DIR" ] && [ -f "$BADREF_DIR/manifest.json" ]; then
+    ok "a pre-flight abort writes a truthful manifest into its own session directory"
   else
-    bad "a pre-flight abort wrote a manifest before the session had begun"
+    bad "a pre-flight abort left no manifest to be refused"
   fi
-  run_analyzer "$TMP/w-badref/results"
-  check_verdict "the analyzer refuses an absent manifest" UNMEASURED 7
+  if [ -n "$BADREF_DIR" ]; then
+    run_analyzer "$BADREF_DIR"
+    check_verdict "the analyzer refuses a session that completed no replicate" UNMEASURED 7
+  fi
 fi
 
 echo

@@ -336,20 +336,23 @@ REPO="$REPO_TOP"
 SESSION_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 RUN_DIR="$WORK_DIR/run-$SESSION_ID"
 LOG_DIR="$RUN_DIR/logs"
-mkdir -p "$RUN_DIR" "$LOG_DIR"
 RUNS_JSONL="$RUN_DIR/runs.jsonl"
-: > "$RUNS_JSONL"
 
-# The lock survives, RE-JUSTIFIED: it is no longer a data-integrity guard (per
-# session directories made that unnecessary) but a MEASUREMENT-VALIDITY one. Two
-# concurrent sessions on one box contend for CPU and page cache and invalidate
-# each other's numbers, which no amount of file isolation fixes.
+# The lock is taken BEFORE this session's directory exists, so a session refused
+# here leaves nothing at all behind -- not even an empty directory. It survives
+# the per-session restructure RE-JUSTIFIED: it is no longer a data-integrity
+# guard (separate directories made that unnecessary) but a MEASUREMENT-VALIDITY
+# one. Two concurrent sessions on one box contend for CPU and page cache and
+# invalidate each other's numbers, which no amount of file isolation fixes.
 SESSION_LOCK="$WORK_DIR/.session-lock"
+mkdir -p "$WORK_DIR"
 mkdir "$SESSION_LOCK" 2>/dev/null || {
   warn "cause work-dir-busy"
   warn "cause-detail another session holds $SESSION_LOCK. This is not about files -- each session now writes only to its own directory -- it is about CPU: two measurement sessions on one box invalidate each other. If nothing is running, remove that directory."
   exit 2
 }
+mkdir -p "$RUN_DIR" "$LOG_DIR"
+: > "$RUNS_JSONL"
 
 # ---------------------------------------------------------------------------
 # Cleanup. Registered NOW, before the resources it frees can exist -- this repo

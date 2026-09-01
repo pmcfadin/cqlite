@@ -312,7 +312,7 @@ bash ab-throughput.sh \
   --ramp 1 --replicates 5 --step-duration 60s \
   --max-concurrent-scans 16 --batch-size 8192 \
   --server-cpus 0,2 --client-cpus 1,3
-python3 analyze-ab.py --single-stream /data/ab-3649/control-null/results/manifest.json \
+python3 analyze-ab.py --single-stream /data/ab-3649/control-null/run-<session-id>/manifest.json \
   | tee control-null.txt
 ```
 
@@ -344,7 +344,7 @@ bash ab-throughput.sh \
   --ramp 1 --replicates 5 --step-duration 60s \
   --max-concurrent-scans 16 --batch-size 8192 \
   --server-cpus 0,2 --client-cpus 1,3
-python3 analyze-ab.py --single-stream /data/ab-3649/control-sens/results/manifest.json \
+python3 analyze-ab.py --single-stream /data/ab-3649/control-sens/run-<session-id>/manifest.json \
   | tee control-sensitivity.txt
 ```
 
@@ -432,11 +432,14 @@ pre-flight through the same grammar the load generator uses**, so a value it
 accepts — including a bare `60`, which means seconds — can never be refused later
 by the analyzer once the data exists.
 
-**Re-using a work directory is safe now.** Nothing under `<work-dir>/results` is
-written until pre-flight has passed **and both arms have built**; until then the
-ledger is unarmed, and an abort says plainly that any manifest present belongs to
-an earlier session and was not modified. The run prints `ledger armed` at the
-moment the directory starts describing the current session.
+**Re-using a work directory is safe now, and not because of sequencing.** Every
+session writes to its **own** directory, `<work-dir>/run-<session-id>/`, which no
+other session can name — so nothing is ever promoted, truncated or overwritten,
+and an earlier session's results stay byte-identical whatever happens to this
+one. The work-directory lock still exists, but it is now a
+**measurement-validity** guard rather than a data one: two sessions on one box
+contend for CPU and invalidate each other's numbers. A session refused by the
+lock leaves nothing behind at all.
 
 ### ⏱ Check the corroboration line after EACH pass, not at the end
 
