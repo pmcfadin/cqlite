@@ -749,3 +749,72 @@ fn a_udt_field_length_of_i32_min_is_refused_without_overflowing() {
         .expect_err("i32::MIN is not a legal component length");
     assert!(err.to_string().contains("negative length"), "got: {}", err);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE THIRD SITE — `parse_udt_field_value`, the field decoder a TOP-LEVEL frozen-UDT
+// column takes (`parse_udt_value` -> here).
+//
+// The issue names two arms; this file's subject is one of them
+// (`parse_simple_udt_field_value`). A THIRD arm in the same file had the identical
+// shape — a closed set of primitives and `_ => Value::Blob` — and it is the one a
+// DIRECT `frozen<unhashable_fields>` column would take. The committed corpus has no
+// such column (which is why acceptance criterion 3's parenthetical "the direct
+// `unhashable_fields` column" has no fixture to point at), so nothing else in the
+// suite would have noticed it staying broken while the nested spelling was fixed.
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn a_collection_field_of_a_top_level_frozen_udt_column_also_decodes_structurally() {
+    let column = crate::schema::Column {
+        name: "u".to_string(),
+        data_type: "frozen<unhashable_fields>".to_string(),
+        nullable: true,
+        default: None,
+        is_static: false,
+    };
+    let udt_def = UdtTypeDef {
+        keyspace: "test_udt_collision".to_string(),
+        name: "unhashable_fields".to_string(),
+        fields: vec![
+            UdtFieldDef {
+                name: "label".to_string(),
+                field_type: CqlType::Text,
+                nullable: true,
+            },
+            UdtFieldDef {
+                name: "m".to_string(),
+                field_type: CqlType::Frozen(Box::new(CqlType::Map(
+                    Box::new(CqlType::Text),
+                    Box::new(CqlType::Int),
+                ))),
+                nullable: true,
+            },
+        ],
+    };
+    // `UserType`'s framing for `{label: "x", m: {"a": 1}}`: `[i32 size][bytes]` per
+    // field, with `m`'s body being the fixture's own 17 golden bytes.
+    let mut data = udt_field(b"x");
+    data.extend_from_slice(&udt_field(MAP_A_1_GOLDEN_BYTES));
+
+    let (value, consumed) = parser()
+        .parse_udt_value(&data, 0, &udt_def, &column)
+        .expect("the top-level frozen-UDT column path must decode");
+    assert_eq!(consumed, data.len(), "every byte must be accounted for");
+
+    match unfrozen(&value) {
+        Value::Udt(udt) => {
+            assert_eq!(udt.fields[0].value, Some(Value::text("x")));
+            let m = udt.fields[1]
+                .value
+                .as_ref()
+                .expect("`m` must not decode NULL");
+            assert_eq!(
+                unfrozen(m),
+                &Value::Map(vec![(Value::text("a"), Value::Integer(1))]),
+                "the THIRD blob-fallback arm must decode from the declared type too, \
+                 not hand back the field's 17 serialized bytes (issue #3631)"
+            );
+        }
+        other => panic!("expected Udt, got {:?}", other),
+    }
+}

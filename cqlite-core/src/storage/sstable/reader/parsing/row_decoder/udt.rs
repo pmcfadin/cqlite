@@ -660,17 +660,18 @@ impl V5CompressedLegacyParser {
                 let (value, _) = self.parse_udt_value(data, 0, &nested_def, &dummy_column)?;
                 Ok(value)
             }
-            _ => {
-                // For other types, return as blob
-                tracing::debug!(
-                    "V5CompressedLegacy: UDT field type {:?} parsed as blob ({} bytes)",
-                    field_type,
-                    data.len()
-                );
-                Ok(Value::Blob(
-                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
-                ))
-            }
+            // Issue #3631 instance B, THIRD site: this arm used to hand back
+            // `Value::Blob` for every remaining declared type, exactly as
+            // `parse_simple_udt_field_value` did. It is the field decoder for
+            // `parse_udt_value`, i.e. the one a TOP-LEVEL frozen-UDT column takes, so
+            // leaving it would have fixed the nested spelling
+            // (`set<tuple<frozen<udt>,int>>`, which the fixture happens to carry) and
+            // left the direct one degrading — the "patch a site, the family
+            // regenerates" failure #3504 and this issue were both filed about. The
+            // depth starts at 0 because each entry here peels one `CqlType` layer of a
+            // FINITE declared type; the delegate then threads and enforces the limit
+            // across every layer it adds.
+            other => self.parse_typed_value(data, other, "UDT field", 0),
         }
     }
 
