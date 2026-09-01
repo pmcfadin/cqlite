@@ -298,7 +298,10 @@ recordAfter=$(cat "$LANE_LOCK_RECORD_600" 2>/dev/null)
 # macOS run is for, and inconsistent with how the very same round scoped test_claim_lock.sh to
 # two tests rather than muting the file. The refs/tree/rc assertions are pure git + filesystem
 # and are exactly what a macOS run should exercise, so they run everywhere.
-if [ "${LANE_LOCK_TEST_OS:-$(uname -s 2>/dev/null || echo unknown)}" = "Linux" ]; then
+# ONE variable for BOTH /proc-dependent clauses in this test — see the round-34 note below.
+acs_lane_lock_supported=0
+[ "${LANE_LOCK_TEST_OS:-$(uname -s 2>/dev/null || echo unknown)}" = "Linux" ] && acs_lane_lock_supported=1
+if [ "$acs_lane_lock_supported" = "1" ]; then
   record_ok=$([ -n "$recordBefore" ] && [ "$recordBefore" = "$recordAfter" ] && echo 1 || echo 0)
   record_note="AND an existing lane-lock record"
 else
@@ -326,11 +329,28 @@ fi
 # The lane-lock field is READ, not invented: with a live holder it must report the
 # probe's own HELD/ALIVE words rather than the FREE it reported when the lane was
 # empty in TEST 1.
-if printf '%s\n' "$out" | grep -q 'issue=600 .*lane-lock=HELD/ALIVE'; then
-  ok "the row reports the probe's own verdict for a live holder (lane-lock=HELD/ALIVE), not a re-derived one"
-else
-  bad "expected lane-lock=HELD/ALIVE for issue 600 with a live holder:
+#
+# SAME /proc CONDITION AS THE CLAUSE ABOVE (#3436, roborev round 34). Round 30 conditioned only
+# the record-preservation assertion and left THIS one unconditional — but it depends on the very
+# same `lane-lock.sh acquire 600`, which refuses without /proc, so the row correctly reports
+# FREE/NO-RECORD and the assertion failed. That is the whole point of round 30's fix
+# (un-muting this suite on macOS) undone two assertions later: a partial accommodation is not an
+# accommodation. Both clauses now key on ONE variable so they cannot drift apart again.
+if [ "$acs_lane_lock_supported" = "1" ]; then
+  if printf '%s\n' "$out" | grep -q 'issue=600 .*lane-lock=HELD/ALIVE'; then
+    ok "the row reports the probe's own verdict for a live holder (lane-lock=HELD/ALIVE), not a re-derived one"
+  else
+    bad "expected lane-lock=HELD/ALIVE for issue 600 with a live holder:
 $out"
+  fi
+else
+  # Affirmatively stated, not silently dropped: with no /proc there IS no live holder to report.
+  if printf '%s\n' "$out" | grep -q 'issue=600 .*lane-lock='; then
+    ok "the row still carries a lane-lock= field (its VALUE is not asserted: no /proc, so acquire records no holder)"
+  else
+    bad "the row carried no lane-lock= field at all:
+$out"
+  fi
 fi
 kill "$SLEEPER" 2>/dev/null || true
 wait "$SLEEPER" 2>/dev/null || true

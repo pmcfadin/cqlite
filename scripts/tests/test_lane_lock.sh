@@ -2153,99 +2153,90 @@ kill_sleeper "$S46"
 rm -rf "$D46"
 
 # ===========================================================================
-echo "TEST 47: a SET-but-EMPTY identity env var is a usage error, not 'unset' (roborev round 32)"
+echo "TEST 47: a SET-but-EMPTY LANE_LOCK_PID is refused WHERE IT IS CONSUMED (roborev rounds 32/34)"
 # ===========================================================================
-# `LANE_LOCK_X="$var"` with an UNSET var is the classic spelling, and `${X:-default}` silently
-# turns it into the default -- so the caller believes it named an identity while the lock
-# records another. For LANE_LOCK_PID that meant falling through to the ancestor walk and
-# acquiring under a DIFFERENT process, reopening the shared-parent re-entrancy hole an explicit
-# pid exists to close. resolve_pid's own `''` case arm was written to refuse it and was
-# UNREACHABLE, because the `-n`/`:-` gate above had already excluded the empty case.
-# All three vars are token components (machine, actor, pid), so a wrong one is a wrong HOLDER;
-# enumerated for the reason TEST 46 enumerates subcommands -- a spot-check passes a partial fix.
+# `LANE_LOCK_PID="$pid"` with an UNSET var is the classic spelling, and `${X:-}` silently turned
+# it into "no explicit pid", so resolve_pid fell through to the ancestor walk and acquired under
+# a DIFFERENT process -- the shared-parent re-entrancy hole an explicit pid exists to close.
+# resolve_pid's own `''` case arm was written to refuse it and was UNREACHABLE behind the `-n`
+# gate: a refusal that could never fire. Fixed with `+set` (presence) instead of `:-`.
+#
+# SCOPE, AND WHY IT SHRANK (round 34). Round 32 ALSO added a blanket guard over
+# PID/ACTOR/MACHINE, placed first at the subcommand dispatch and then at prepare_identity's top.
+# Both broke correct input -- the dispatch refused `release --force`, the documented break-glass;
+# prepare_identity's top ran BEFORE source precedence, so an explicit `--pid` could not override
+# an empty inherited var -- and it still missed `status`. Three findings from one guard, so it
+# was REMOVED, not moved again: subtraction cannot introduce a false pass.
+# ACTOR and MACHINE are deliberately NOT guarded: an empty value yields the SAME result as unset
+# (measured -- this_machine returns the hostname for both), so the hazard is a caller who meant
+# something else, not a divergence. Tracked with the identical CLAIM_* shape in #3884.
 D47="$(mktemp -d)"; mkdir -p "$D47/lane-910"
-# `acquire`, NOT `probe` -- FOR THE SECOND TIME IN THIS SUITE. The guard lives in
-# prepare_identity (round 33), and probe on a FREE lane returns before resolving any identity,
-# so these cases passed VACUOUSLY against it. The numeric case below hit the identical trap one
-# round earlier. THE RULE: when asserting that a guard fires, pick an invocation that provably
-# REACHES it, and let the RED arm prove the assertion is not self-satisfying.
-for v47 in LANE_LOCK_PID LANE_LOCK_ACTOR LANE_LOCK_MACHINE; do
-  o47="$(LANE_ROOT="$D47" env "$v47=" bash "$LL" acquire 910 --lane-dir "$D47/lane-910" 2>&1)"; rc47=$?
-  if [ "$rc47" -eq 64 ] && printf '%s' "$o47" | grep -q 'SET but EMPTY'; then
-    ok "($v47) set-but-empty is a usage error (rc=64), not a silent fallback to the default"
-  else
-    bad "($v47) set-but-empty was accepted: rc=$rc47
+o47="$(LANE_ROOT="$D47" LANE_LOCK_PID= bash "$LL" acquire 910 --lane-dir "$D47/lane-910" 2>&1)"; rc47=$?
+if [ "$rc47" -eq 64 ] && printf '%s' "$o47" | grep -q 'must be numeric'; then
+  ok "(pid) a SET-but-EMPTY LANE_LOCK_PID is a usage error, not a silent fallback to the ancestor walk"
+else
+  bad "(pid) set-but-empty LANE_LOCK_PID was accepted: rc=$rc47
 $o47"
-  fi
-done
-# The numeric arm was DEAD CODE before this change; assert it is live now.
-# `acquire`, NOT `probe`: probe on a FREE lane returns without resolving an identity at all,
-# so the numeric arm never runs and the case passed vacuously (caught by it failing here).
+fi
 o47n="$(LANE_ROOT="$D47" LANE_LOCK_PID=abc bash "$LL" acquire 910 --lane-dir "$D47/lane-910" 2>&1)"; rc47n=$?
 if [ "$rc47n" -eq 64 ] && printf '%s' "$o47n" | grep -q 'must be numeric'; then
-  ok "(numeric) a non-numeric LANE_LOCK_PID is still refused — the case arm is reachable"
+  ok "(numeric) a non-numeric LANE_LOCK_PID is refused — the same case arm, still reachable"
 else
   bad "(numeric) expected a numeric refusal; got rc=$rc47n
 $o47n"
 fi
-# CONTROLS. Without these the three refusals above would also pass if the guard refused
-# EVERYTHING, which would brick every ordinary invocation.
-o47u="$(LANE_ROOT="$D47" bash "$LL" probe 910 2>&1)"; rc47u=$?
-if [ "$rc47u" -eq 0 ] || printf '%s' "$o47u" | grep -q 'LANE-LOCK:'; then
-  ok "(control) genuinely UNSET vars still take the documented default"
-else
-  bad "(control) an ordinary invocation with no env vars was refused: rc=$rc47u
-$o47u"
-fi
-o47h="$(LANE_ROOT="$D47" LANE_LOCK_PID= bash "$LL" --help 2>&1)"; rc47h=$?
-if [ "$rc47h" -eq 0 ]; then
-  ok "(control) --help stays EXEMPT, as it is for require_lane_root_abs — usage must print on a misconfigured box"
-else
-  bad "(control) --help was refused over an env var it does not read: rc=$rc47h"
-fi
+# `acquire`, NOT `probe`: probe on a FREE lane returns before resolving any identity, so the
+# assertion would pass VACUOUSLY. This trap has now been hit twice in this suite -- when
+# asserting a guard fires, pick an invocation that provably REACHES it.
+# NOT-GUARDED, ASSERTED AS SUCH so the scope is visible rather than merely absent (#3884).
+for v47 in LANE_LOCK_ACTOR LANE_LOCK_MACHINE; do
+  o47x="$(LANE_ROOT="$D47" env "$v47=" bash "$LL" status 2>&1)"; rc47x=$?
+  if [ "$rc47x" -eq 0 ]; then
+    ok "($v47) empty is NOT refused — deliberate: it yields the same value as unset (#3884)"
+  else
+    bad "($v47) empty was refused; the blanket guard was supposed to be removed: rc=$rc47x
+$o47x"
+  fi
+done
 rm -rf "$D47"
 
 # ===========================================================================
-echo "TEST 48: the identity-env guard EXEMPTS the break-glass and status (roborev round 33)"
+echo "TEST 48: the pid check respects PRECEDENCE and leaves identity-free commands alone (round 34)"
 # ===========================================================================
-# TEST 47's guard was first placed at the SUBCOMMAND DISPATCH, so it ran for everything -- and
-# that broke `release --force`, which round 5 had already established MUST NOT NEED AN IDENTITY
-# (see cmd_release's own comment). An inherited empty var then made the break-glass refuse, so
-# the one command that clears a stuck lane could not run: a guard reding on correct input, on
-# the recovery path. It now lives in prepare_identity, which IS the thing that resolves an
-# identity -- cmd_status never calls it and cmd_release skips it under --force -- so the
-# exemption falls out of who actually consumes an identity rather than from a list.
-# BOTH DIRECTIONS ARE ASSERTED TOGETHER: the exemptions alone would pass if the guard were
-# simply deleted, and the refusals alone are what TEST 47 already covers.
+# The three ways the removed blanket guard was wrong, pinned so it cannot come back:
+#   (a) `--pid <live>` must WIN over an empty inherited LANE_LOCK_PID -- the documented
+#       precedence is --pid, else the env, else the ancestor walk. resolve_pid's `elif` is
+#       precedence-correct BY CONSTRUCTION because the explicit branch above already claimed
+#       that case; a chokepoint check ran before precedence and could not be.
+#   (b) `release --force` is the break-glass and needs NO identity (established round 5, in
+#       cmd_release's own comment). A guard that refuses it cannot clear a stuck lane.
+#   (c) `status` resolves no identity either.
+# All three are CORRECT INPUT, and a guard that reds on correct input is the guard agents learn
+# to waive -- which is worse than the narrow hole it was closing.
 D48="$(mktemp -d)"; mkdir -p "$D48/lane-920"
-o48a="$(LANE_ROOT="$D48" LANE_LOCK_PID= bash "$LL" release 920 --force 2>&1)"; rc48a=$?
-if [ "$rc48a" -eq 0 ] && printf '%s' "$o48a" | grep -q 'RELEASED'; then
-  ok "(a) release --force works with an inherited EMPTY identity var — the break-glass is exempt"
+sleeper; S48="$REPLY_SLEEPER"
+o48a="$(LANE_ROOT="$D48" LANE_LOCK_PID= bash "$LL" acquire 920 --pid "$S48" --lane-dir "$D48/lane-920" 2>&1)"; rc48a=$?
+if [ "$rc48a" -eq 0 ] && printf '%s' "$o48a" | grep -q 'ACQUIRED issue=920'; then
+  ok "(a) an explicit --pid OVERRIDES an empty inherited LANE_LOCK_PID — precedence is respected"
 else
-  bad "(a) the break-glass was refused over an env var it does not use: rc=$rc48a
+  bad "(a) explicit --pid was refused because of an env var it overrides: rc=$rc48a
 $o48a"
 fi
-o48b="$(LANE_ROOT="$D48" LANE_LOCK_ACTOR= bash "$LL" status 2>&1)"; rc48b=$?
-if [ "$rc48b" -eq 0 ] && printf '%s' "$o48b" | grep -q 'STATUS'; then
-  ok "(b) status works with an empty identity var — it resolves no identity, so it needs none"
+o48b="$(LANE_ROOT="$D48" LANE_LOCK_PID= bash "$LL" release 920 --force 2>&1)"; rc48b=$?
+if [ "$rc48b" -eq 0 ] && printf '%s' "$o48b" | grep -q 'RELEASED'; then
+  ok "(b) release --force works with an empty identity var — the break-glass needs no identity"
 else
-  bad "(b) status was refused over an env var it does not use: rc=$rc48b
+  bad "(b) the break-glass was refused over an env var it does not use: rc=$rc48b
 $o48b"
 fi
-o48c="$(LANE_ROOT="$D48" LANE_LOCK_PID= bash "$LL" acquire 920 --lane-dir "$D48/lane-920" 2>&1)"; rc48c=$?
-if [ "$rc48c" -eq 64 ] && printf '%s' "$o48c" | grep -q 'SET but EMPTY'; then
-  ok "(c) acquire STILL refuses — moving the boundary did not delete the guard"
+o48c="$(LANE_ROOT="$D48" LANE_LOCK_PID= bash "$LL" status 2>&1)"; rc48c=$?
+if [ "$rc48c" -eq 0 ] && printf '%s' "$o48c" | grep -q 'STATUS'; then
+  ok "(c) status works with an empty identity var — it resolves no identity"
 else
-  bad "(c) acquire no longer refuses an empty identity var: rc=$rc48c
+  bad "(c) status was refused over an env var it does not use: rc=$rc48c
 $o48c"
 fi
-o48d="$(LANE_ROOT="$D48" LANE_LOCK_ACTOR= bash "$LL" verify 920 2>&1)"; rc48d=$?
-if [ "$rc48d" -eq 64 ] && printf '%s' "$o48d" | grep -q 'SET but EMPTY'; then
-  ok "(d) verify STILL refuses — it compares our token, so it does consume an identity"
-else
-  bad "(d) verify no longer refuses an empty identity var: rc=$rc48d
-$o48d"
-fi
+kill_sleeper "$S48"
 rm -rf "$D48"
 
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
