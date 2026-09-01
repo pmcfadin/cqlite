@@ -635,4 +635,34 @@ mod tests {
             );
         }
     }
+
+    /// roborev round 7: a ZERO-LENGTH null field and a `-1` null field must be ONE
+    /// representation, because `UdtField::value`'s `None` MEANS null.
+    ///
+    /// This issue's own empty-value fix made `Value::Null` reachable as a decoded
+    /// field value, and wrapping it in `Some` created a second spelling of null:
+    /// derived `PartialEq`/`Hash` on `UdtValue` then told the two apart, while the
+    /// collection comparator treated them as equal. Asserted on the NORMALIZER so
+    /// the property is pinned wherever a field is constructed.
+    #[test]
+    fn a_decoded_null_collapses_to_the_none_spelling_of_null() {
+        assert_eq!(
+            V5CompressedLegacyParser::udt_field_value(Value::Null),
+            None,
+            "a decoded Value::Null must become UdtField::value = None, or a \
+             zero-length null and a -1 null hash differently"
+        );
+        // Control: a real value must survive untouched.
+        assert_eq!(
+            V5CompressedLegacyParser::udt_field_value(Value::Integer(7)),
+            Some(Value::Integer(7)),
+            "a non-null value must pass through unchanged"
+        );
+        assert_eq!(
+            V5CompressedLegacyParser::udt_field_value(Value::text(String::new())),
+            Some(Value::text(String::new())),
+            "an EMPTY STRING is a value, not a null — text is one of the four types \
+             with a genuine empty instance"
+        );
+    }
 }

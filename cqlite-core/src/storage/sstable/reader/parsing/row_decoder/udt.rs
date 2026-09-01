@@ -547,7 +547,11 @@ impl V5CompressedLegacyParser {
                     "V5CompressedLegacy: UDT field '{}' is empty",
                     field_def.name
                 );
-                Some(self.parse_udt_field_value(&[], &field_def.field_type, depth)?)
+                Self::udt_field_value(self.parse_udt_field_value(
+                    &[],
+                    &field_def.field_type,
+                    depth,
+                )?)
             } else {
                 // Field with data. `checked_component_len` owns BOTH the negative
                 // rejection and the bounds test, so no loop can have one without
@@ -781,7 +785,7 @@ impl V5CompressedLegacyParser {
                 // un-threaded site in this family, which is why the guard is now a
                 // behavioural deep-chain test and not per-site trust).
                 let value = self.parse_udt_field_value(&[], &field_def.field_type, depth)?;
-                Some(value)
+                Self::udt_field_value(value)
             } else {
                 let field_len = Self::checked_component_len(
                     field_len,
@@ -971,7 +975,7 @@ impl V5CompressedLegacyParser {
             } else if field_len == 0 {
                 // Empty value
                 let value = self.parse_udt_field_value(&[], field_type, depth)?;
-                Some(value)
+                Self::udt_field_value(value)
             } else {
                 let field_len =
                     Self::checked_component_len(field_len, field_name, current_offset, data.len())?;
@@ -990,6 +994,15 @@ impl V5CompressedLegacyParser {
                             depth + 1,
                         )?
                     }
+                    // A MANUAL Frozen<Udt> unwrap consumes TWO nesting levels — the
+                    // `Frozen` and the `Udt` — so these branches increment by 2. The
+                    // consolidated decoder charges both (its `Frozen` arm recurses at
+                    // +1 and its `Udt` arm again at +1), and charging only one here made
+                    // acceptance AT the budget depend on which route a value took and how
+                    // long its payload was (roborev round 7 on #3722). Routing the whole
+                    // field type through `parse_udt_field_value` and deleting these
+                    // special branches is the deeper fix; it would restructure the
+                    // registry loops, so it is deliberately NOT done here.
                     CqlType::Frozen(inner) => match inner.as_ref() {
                         CqlType::Udt(nested_name, nested_fields) if !nested_fields.is_empty() => {
                             // Frozen nested UDT - unwrap and parse
@@ -997,7 +1010,7 @@ impl V5CompressedLegacyParser {
                                 field_data,
                                 nested_name,
                                 nested_fields,
-                                depth + 1,
+                                depth + 2,
                             )?;
                             Value::Frozen(Box::new(inner_value))
                         }
@@ -1619,11 +1632,18 @@ mod tests {
         match value {
             Value::Udt(udt) => {
                 assert_eq!(udt.fields[0].value, Some(Value::Integer(7)), "{ctx}: i");
+                // `None`, NOT `Some(Value::Null)`. An empty varint IS null
+                // (IntegerSerializer.java:33) and never an opaque Value::Blob
+                // (#3722 AC1) — and `UdtField::value`'s `None` is what null MEANS
+                // here, so a 0-length null and a -1 null must be ONE
+                // representation. This assertion originally expected
+                // `Some(Value::Null)`, which roborev round 7 showed made the two
+                // hash and compare differently under derived `UdtValue` equality.
                 assert_eq!(
-                    udt.fields[1].value,
-                    Some(Value::Null),
-                    "{ctx}: an EMPTY varint field is null (IntegerSerializer.java:33), \
-                     and never an opaque Value::Blob (#3722 AC1)"
+                    udt.fields[1].value, None,
+                    "{ctx}: an EMPTY varint field is null (IntegerSerializer.java:33) \
+                     and must use the SAME `None` spelling a -1 field uses, never \
+                     `Some(Value::Null)` and never an opaque Value::Blob (#3722 AC1)"
                 );
             }
             other => panic!("{ctx}: expected a Udt, got {other:?}"),

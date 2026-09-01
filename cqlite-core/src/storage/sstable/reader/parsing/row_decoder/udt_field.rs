@@ -318,6 +318,23 @@ impl V5CompressedLegacyParser {
         }
     }
 
+    /// Normalize a decoded field value into `UdtField::value`.
+    ///
+    /// `UdtField::value` is an `Option<Value>` whose `None` MEANS null, so a
+    /// decoded `Value::Null` must collapse to `None`. Otherwise a zero-length null
+    /// field (which decodes to `Value::Null`, per Cassandra's serializers) and a
+    /// `-1` null field (which is `None`) are TWO representations of the same thing,
+    /// and derived `PartialEq`/`Hash` on `UdtValue` treat them as different — even
+    /// though the collection comparator considers them equivalent (roborev round 7
+    /// on #3722; introduced by this issue's own empty-value fix, which is what made
+    /// `Value::Null` reachable as a field value at all).
+    pub(super) fn udt_field_value(decoded: Value) -> Option<Value> {
+        match decoded {
+            Value::Null => None,
+            other => Some(other),
+        }
+    }
+
     /// Strict fixed-width field length check: EXACTLY `expected` bytes.
     ///
     /// Not `<`: a wrong-length fixed-width field is corruption, and decoding from

@@ -749,7 +749,11 @@ impl V5CompressedLegacyParser {
                         // (issue #3722) — the helper this used to call answered
                         // most types with an opaque `Value::Blob`.
                         tracing::debug!("Frozen UDT field '{}' is empty", field_def.name);
-                        Some(self.parse_udt_field_value(&[], &field_def.field_type, depth)?)
+                        Self::udt_field_value(self.parse_udt_field_value(
+                            &[],
+                            &field_def.field_type,
+                            depth,
+                        )?)
                     } else {
                         // Field with data. Routed through the shared guard (issue
                         // #3612, R3-F1/N1) so this loop cannot drift from the other
@@ -841,7 +845,7 @@ impl V5CompressedLegacyParser {
                                                 field_data,
                                                 udt_name,
                                                 inline_fields,
-                                                depth + 1,
+                                                depth + 2,
                                             )?;
                                             Value::Frozen(Box::new(inner_value))
                                         } else {
@@ -862,7 +866,7 @@ impl V5CompressedLegacyParser {
                                         field_data,
                                         udt_name,
                                         inline_fields,
-                                        depth + 1,
+                                        depth + 2,
                                     )?
                                 }
                                 CqlType::Frozen(inner) => match inner.as_ref() {
@@ -873,7 +877,7 @@ impl V5CompressedLegacyParser {
                                             field_data,
                                             udt_name,
                                             inline_fields,
-                                            depth + 1,
+                                            depth + 2,
                                         )?;
                                         Value::Frozen(Box::new(inner_value))
                                     }
