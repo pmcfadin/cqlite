@@ -163,6 +163,13 @@ impl Transcript {
     /// Both fields belong to this store, so the transition is ONE method on it
     /// and there is no interleaving point left to observe. `failure` is `None`
     /// for a reader that ended at EOF.
+    ///
+    /// WHAT THIS DOES **NOT** ENFORCE, stated rather than implied: nothing here
+    /// stops a handle appending a record AFTER its terminal transition. That a
+    /// failed reader appends nothing more is a property of `spawn_reader`, whose
+    /// `Err` arm `break`s out of the read loop immediately — it is not enforced by
+    /// this type, and a future caller that recorded after failing would produce a
+    /// record on a stream this store already calls finished.
     fn reader_ended(&mut self, stream: Stream, failure: Option<String>) {
         if let Some(note) = failure {
             self.read_failures.push((stream, note));
