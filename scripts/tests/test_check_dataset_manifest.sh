@@ -2544,10 +2544,23 @@ JESTSTUB
   # The opt-out excuses missing fixtures, not an unanswered question.
   nbg_log=$(_nbgate_run rc2opt 2 1)
   nbg_v=$(_nbgate_verdict "$nbg_log")
-  if [ "$nbg_v" = FAIL ] && grep -q 'TOOLING failure, not a corpus verdict' "$nbg_log"; then
-    ok "case 100: manifest rc 2 under the #2078 opt-out -> node-bindings FAIL as a TOOLING failure (the opt-out excuses missing fixtures, not an unanswered question)"
+  # ...and, from the SAME recorded marker case 102 uses (roborev #3642, round 2, finding 2):
+  # the verdict and the diagnostic together still do not say the SUITE WAS NOT RUN. Remove
+  # the early return after the tooling failure and the component would print this exact
+  # message, run the whole jest suite over a corpus no checker vouched for, and leave this
+  # case green. So assert the same two halves as case 102: npm was reached AT ALL in this
+  # run (`ci`/`run build`/`run typecheck` all precede the manifest check, so a missing
+  # `test` line means "not reached", not "the marker was never written"), and `npm test`
+  # was NOT.
+  nbg_argv2="$WORK/nbgate-rc2opt.npm-argv"
+  nbg_live2=0; nbg_test2=0
+  grep -qE '^(ci|install)( |$)' "$nbg_argv2" 2>/dev/null && nbg_live2=1
+  grep -qE '^test( |$)' "$nbg_argv2" 2>/dev/null && nbg_test2=1
+  if [ "$nbg_v" = FAIL ] && grep -q 'TOOLING failure, not a corpus verdict' "$nbg_log" \
+     && [ "$nbg_live2" = 1 ] && [ "$nbg_test2" = 0 ]; then
+    ok "case 100: manifest rc 2 under the #2078 opt-out -> node-bindings FAIL as a TOOLING failure AND the suite is not run (npm ci recorded, 'npm test' not) — the opt-out excuses missing fixtures, not an unanswered question"
   else
-    bad "case 100: manifest rc 2 under the opt-out gave verdict '${nbg_v:-<none>}' without the tooling-failure diagnostic; a malfunctioning checker would be read as a judged corpus. Log: $nbg_log"
+    bad "case 100: manifest rc 2 under the opt-out gave verdict '${nbg_v:-<none>}', tooling diagnostic $(grep -c 'TOOLING failure, not a corpus verdict' "$nbg_log" 2>/dev/null), npm ci/install recorded: $nbg_live2, 'npm test' recorded: $nbg_test2 (argv: $(tr '\n' '|' < "$nbg_argv2" 2>/dev/null || echo '<no argv log>')). Either a malfunctioning checker is read as a judged corpus, or the run continued into the suite anyway. Log: $nbg_log"
   fi
 fi
 
