@@ -2680,16 +2680,26 @@ apply_schemas_preflight() {
 #                                        DEFAULT object format, which is why a sha256 baseline
 #                                        advertisement is refused at the ref oracle rather than
 #                                        failing here as a mystery transfer error (job 309).
-#     git rev-parse --verify --quiet <rev>
+#     git rev-parse --verify --quiet <rev>^{commit}
 #                                        resolves a sha to a COMMIT in the isolated repository —
-#                                        the transfer assert and HEAD's own sha. Commits are
-#                                        never filtered out of a clone.
+#                                        the transfer assert, and the PEEL of HEAD's own sha
+#                                        (#3757: the LIVE side resolves the ref and does not peel
+#                                        it, so the only object read is here). Commits are never
+#                                        filtered out of a clone.
 #     git merge-base --is-ancestor       walks commit parents only.
 #     git rev-parse --is-shallow-repository / --git-path shallow / --git-path objects
 #                                        repository STATE reads (is the history truncated? where
 #                                        is the object store, so it can be offered to the
 #                                        isolated repo as an ALTERNATE?); no object access, no
 #                                        remote contact.
+#     git rev-parse --verify --quiet HEAD
+#                                        HEAD resolved to a sha, UNPEELED (#3757). A REF read, not
+#                                        an OBJECT read: measured in a promisor clone whose HEAD
+#                                        object was absent, this form invoked the remote helper
+#                                        ZERO times while the peeled `HEAD^{commit}` form it
+#                                        replaced invoked it TWICE (a lazy fetch under the LIVE
+#                                        repository's own config). The peel and the "is it a
+#                                        commit" validation happen in the isolated repository.
 #
 #   LOCAL UTILITIES (no network, no spawn, bounded work). THE AUTHORITATIVE SET IS
 #     `declared_externals` in scripts/tests/test_agent_gate_component_set.sh, which is checked
@@ -2745,8 +2755,14 @@ apply_schemas_preflight() {
 #     redefined.
 #
 # The rule that generalises all five: THIS PRE-FLIGHT ONLY EVER RESOLVES A URL INSIDE THE
-# ISOLATED SCRATCH REPOSITORY, AND ONLY EVER READS OBJECTS BY SHA IN THE LIVE ONE. A change that
-# breaks either half re-opens this list and belongs in review, not in a follow-up.
+# ISOLATED SCRATCH REPOSITORY, AND SINCE #3757 IT READS NO OBJECT IN THE LIVE ONE AT ALL — the
+# live repository is asked only for REFS, CONFIG and repository STATE, and every object read runs
+# BY SHA in the isolated repository with the lane's store attached as an ALTERNATE. The previous
+# wording — "only ever READS OBJECTS BY SHA in the live one" — is what licensed the peel #3757
+# removed: a sha-addressed read is still an OBJECT read, and in a promisor clone a missing object
+# is answered from the NETWORK under the live repository's own config, which is the one thing this
+# enumeration exists to forbid. A change that breaks either half re-opens this list and belongs in
+# review, not in a follow-up.
 
 # Probe state, set by _component_set_probe and read by the pure verdict/line helpers.
 # Globals rather than a parsed multi-line stdout: the probe does real I/O (fetch, git
@@ -2764,8 +2780,10 @@ _CS_READ_DIR=""    # THE REPOSITORY EVERY BASELINE/HEAD OBJECT READ RUNS IN (#35
 _CS_READ_ENV=()    # env fragment for those reads: `GIT_ALTERNATE_OBJECT_DIRECTORIES=<lane
                    # objects>` when reading in the scratch (HEAD's objects live in the lane),
                    # else EMPTY
-_CS_HEAD_SHA=""    # HEAD resolved to a sha IN THIS CHECKOUT, so the scratch can be asked about
-                   # it: `HEAD` inside the scratch would mean the SCRATCH's own unborn HEAD
+_CS_HEAD_SHA=""    # HEAD as a COMMIT sha, so the scratch can be asked about it: `HEAD` inside the
+                   # scratch would mean the SCRATCH's own unborn HEAD. The REF is resolved in this
+                   # checkout (unpeeled) and PEELED in the scratch (#3757) — peeling reads an
+                   # object, and in the live repository that read can lazily fetch
 _CS_SCRATCH_DIR="" # the isolated scratch repo the baseline fetch ran in (#3544 / job 242)
 _CS_BASE_OBJ=""    # HOW the baseline COMMIT was obtained: reused (already in this repository)
                    # | fetched (the isolated hop + verified transfer) — job 258
@@ -5146,15 +5164,74 @@ _component_set_probe_inner() {
   # is BOUNDED, because the objects it reads come from the shared store.
   # HEAD IS RESOLVED TO A SHA IN THIS CHECKOUT FIRST, because the ancestry walk now runs in
   # `$_CS_READ_DIR` — and inside the isolated scratch the ref `HEAD` would mean the SCRATCH's own
-  # (unborn) HEAD, silently answering a different question. Commit objects are never omitted by any
-  # partial-clone filter, so resolving it is genuinely local; an unresolvable HEAD (unborn, or a
+  # (unborn) HEAD, silently answering a different question. An unresolvable HEAD (unborn, or a
   # broken detached HEAD) is INDETERMINATE below, exactly as an unanswerable probe was before.
   # BOUNDED, not annotated local-only (job 312): same config read, same FIFO exposure; and the
   # `|| true` would have turned a kill into an empty sha, taking the rc=128 branch below with a
   # cause that names HEAD rather than the blocked read.
-  _cs_live_git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}"
-  if _cs_live_refuse "HEAD's commit sha"; then return 0; fi
-  _CS_HEAD_SHA="$_CS_LIVE_OUT"
+  #
+  # THE LIVE CALL RESOLVES THE REF AND DOES NOT PEEL IT (#3757). It used to ask for
+  # `HEAD^{commit}`, and a PEEL is an OBJECT READ in the LIVE repository: in a promisor clone a
+  # missing object is answered by a LAZY FETCH under that repository's OWN local config, where a
+  # `url.*.insteadOf` rewrite invokes a remote HELPER — the route jobs 268/299 removed from every
+  # other read in this pre-flight. The comment this replaces argued the read was "genuinely local"
+  # because no partial-clone filter omits COMMITS; that is true and it answers the wrong question,
+  # because the hazard is what happens when the object is absent for any OTHER reason (a pruned or
+  # corrupted store, a hand-written ref, a peer lane's edit to the SHARED `.git`).
+  # `GIT_NO_LAZY_FETCH=1` is carried in `_CS_GIT_ENV` as a BELT (git >= 2.36, silently absent on an
+  # older supported host), which is exactly why it cannot BE the control.
+  #
+  # MEASURED, with a discriminating control, rather than reasoned from the docs. Promisor clones of
+  # a local bare origin (`--filter=blob:none` AND `--filter=tree:0`, `uploadpack.allowfilter=true`),
+  # HEAD pointed at a commit present on the remote and ABSENT locally (absence confirmed with
+  # `GIT_NO_LAZY_FETCH=1 cat-file -e`), the promisor URL replaced by an `ext::` recorder script that
+  # logs every invocation; git 2.43.0, both filters behaving identically:
+  #
+  #   rev-parse --verify --quiet HEAD              rc=0    4ms   helper invocations: 0  (sha printed)
+  #   rev-parse --verify --quiet 'HEAD^{commit}'   rc=1   10ms   helper invocations: 2  (LAZY FETCH)
+  #   cat-file -t <that sha>                       rc=128        helper invocations: 1  (LAZY FETCH)
+  #
+  # A second measurement separates the OBJECT READ from the network, in a plain repository with a
+  # FIFO planted at HEAD's LOOSE object path (this pre-flight's own FIFO idiom):
+  #
+  #   rev-parse --verify --quiet HEAD              rc=0    3ms   (sha printed)
+  #   rev-parse --verify --quiet 'HEAD^{commit}'   BLOCKED       (bound fired at 3s)
+  #
+  # So the unpeeled form resolves the REF without reading the OBJECT it names, and that is what
+  # makes the peel movable. The peel — and the "is it a COMMIT" validation — happen below, in the
+  # ISOLATED scratch, which configures no promisor and reaches HEAD's objects only through an
+  # alternate: pure object storage, no config, nothing for a helper to be invoked from.
+  _cs_live_git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet HEAD
+  if _cs_live_refuse "HEAD's sha (the ref only — no object is peeled in the live repository)"; then return 0; fi
+  local head_unpeeled="$_CS_LIVE_OUT" peel_rc=0
+  if [ -n "$head_unpeeled" ]; then
+    # PEEL + COMMIT-VALIDATE IN THE ISOLATED SCRATCH, and BOUNDED there for the reason job 315
+    # recorded for the ancestry walk: this reads a commit object out of the LANE's SHARED object
+    # store through the alternate, and a LOOSE object is read as a stream, so a FIFO planted at an
+    # object path by a PEER LANE hangs it. 124/137/`$_CS_UNBOUNDABLE_RC` therefore take the SAME
+    # `repo-read-blocked` / UNBOUNDED refusals as every other read here — a missing capability must
+    # never inherit the permissive branch.
+    #
+    # The capture triple is already memoized IN THE PARENT by the earlier DIRECT `_cs_live_git`
+    # calls (the git-directory read at the top of this function), so this command substitution
+    # cannot leave capture files behind with nobody holding their paths — the leak
+    # `_cs_live_git`'s header records, and the same reasoning the slow path's `cssha=$( … )` relies on.
+    _CS_HEAD_SHA=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" rev-parse --verify --quiet "${head_unpeeled}^{commit}" 2>/dev/null); peel_rc=$?
+    if [ "$peel_rc" -eq 124 ] || [ "$peel_rc" -eq 137 ] || [ "$peel_rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+      _CS_KIND=repo-read-blocked
+      if [ "$peel_rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+        _CS_DETAIL="peeling HEAD ($head_unpeeled) to a commit could not be BOUNDED on this host (no timeout, no gtimeout, no sleep for the bash watchdog, or no capture file) — refusing to run an UNBOUNDED read of the lane's object store, which could hang the gate outright; a missing capability must not inherit the permissive branch"
+      else
+        _CS_DETAIL="peeling HEAD ($head_unpeeled) to a commit EXCEEDED its ${_CS_BOUND_HINT}s bound reading that object from this lane's SHARED object store — the read never returned. A LOOSE object there is read as a stream, so a FIFO planted at an object path hangs it, and on this fleet that store is shared by every lane on the box. Inspect it by resolving the object directory with \`git rev-parse --git-path objects\` and searching that directory for FIFOs with \`find <objdir> -type p\`"
+      fi
+      return 0
+    fi
+    # A PEEL THAT FAILED IS INDETERMINATE, NEVER A FALSE `BEHIND` — the rc=128 semantics below are
+    # unchanged. HEAD names no commit this run can READ: an unborn or broken HEAD, a ref naming a
+    # non-commit, or an object genuinely absent from the lane's store. Deliberately NOT fetched: a
+    # missing HEAD object is a broken checkout, not a reason for a pre-flight whose whole premise is
+    # that it reaches no network to reach one.
+  fi
   if [ -z "$_CS_HEAD_SHA" ]; then
     rc=128
   else
