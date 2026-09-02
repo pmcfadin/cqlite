@@ -1036,6 +1036,26 @@ mod d6_compaction {
 // would be pinning `column_decode`/`end-of-partition` behaviour, not this fix.
 // The refusal that IS specific to this fix is asserted where it is decided.)
 //
+// ## What pre-fix actually did — measured, not assumed
+//
+// Reverting ONLY the marker hunk (the sibling column-decode bound of the same
+// commit left in place) makes all six defect cases below fail, and the way they
+// fail is the point: the marker parse returns `Ok`, and the corruption then
+// surfaces LATER, misattributed to a subject that has nothing to do with it.
+//
+// * too small — `column 'v' (column type text) failed to decode ... invalid cell
+//   flags 0x87 ... offset misalignment`: the caller resumed INSIDE the marker, so
+//   the marker's own trailing byte was read as the next unfiltered's row header and
+//   the report blames a column of a row that does not exist;
+// * too large — `marker_body_size=48 at pos=6 exceeds data length 7` for a marker
+//   at a bogus partition: the caller resumed one byte PAST the next unfiltered's
+//   flags byte, and the cascade re-emerges as an unrelated marker's size guard.
+//
+// So each case asserts the parser's own cause TEXT, not merely that an error
+// occurred — the pre-fix cascade also errors here, and an error naming the wrong
+// subject is what stops the next person looking. The `Ok` arm still panics, so a
+// return to the fully silent behaviour fails these tests too.
+//
 // Both drivers here run at `at_final_chunk = true` over the whole data section,
 // so an unparseable marker is corruption rather than a window boundary — the
 // non-final half of that decision belongs to a different lane and is pinned in
