@@ -1648,69 +1648,141 @@ else
   fi
 fi
 
-# --- 44(e): UNVERIFIABLE — rc 1 in a SHALLOW clone is NOT a verdict ----------
+# --- 44(e): rc 1 IN A SHALLOW CLONE IS NOT A VERDICT (rebuilt, roborev job 410) -
+#
 # The subtlest arm, and the reason the check is three-valued at all (#3544):
-# `--is-ancestor` exits 1 both for "not an ancestor" and for "the connecting
-# history is absent". A shallow clone that HOLDS both objects but not the history
-# between them produces rc 1 on a pair whose real relationship is unknown, so it
-# must be UNVERIFIABLE (exit 3) and NOT the exit-2 refusal.
-SHALLOW="$T/anc-shallow"
+# `--is-ancestor` exits 1 both for "not an ancestor" AND for "the connecting
+# history is absent".
+#
+# THE PREVIOUS VERSION OF THIS ARM WAS VACUOUS, and that is what job 410 caught.
+# It compared `$R_FOREIGN`, which is genuinely NOT an ancestor even in the
+# complete repository — so rc 1 was the CORRECT answer and the arm never
+# exercised the ambiguous case at all. It passed without testing its own subject,
+# which is the class this whole issue treats as must-fix: a green that proves
+# nothing is worse than a missing test.
+#
+# WHAT THE CASE ACTUALLY REQUIRES is a TRUE ancestor that returns rc 1 SOLELY
+# because the connecting commits are gone. So: a 6-commit history, a shallow
+# clone holding only the tip, then a `--depth 1` fetch of a branch at the OLDEST
+# commit — which brings that endpoint in as its own shallow boundary while
+# c1..c4 stay absent. Both endpoints present, the path between them missing.
+#
+# AND THE ASSERTION IS THE DIFFERENTIAL, twice over, because either half alone
+# proves nothing:
+#   git level   : complete repo -> rc 0 (TRUE ancestor) | shallow -> rc 1
+#   guard level : complete repo -> exit 0 + BOUND       | shallow -> exit 3
+# The second pair is the one that matters: the SAME anchor/certified pair must be
+# BOUND where the history is complete and UNVERIFIABLE where it is not.
+SH_REPO="$T/shallow-src"
+SH_CLONE="$T/shallow-clone"
 shallow_shape=0
-if [ "$anc_shape" -eq 1 ] &&
-   git clone -q --depth 2 --no-local --branch feature "file://$ANC_REPO" "$SHALLOW" >/dev/null 2>&1 &&
-   git -C "$SHALLOW" fetch -q --depth 1 origin other:refs/remotes/origin/other >/dev/null 2>&1; then
-  if [ "$(git -C "$SHALLOW" rev-parse --is-shallow-repository 2>/dev/null)" = true ] &&
-     git -C "$SHALLOW" cat-file -e "$R_FOREIGN^{commit}" >/dev/null 2>&1 &&
-     git -C "$SHALLOW" cat-file -e "$R_CERT^{commit}" >/dev/null 2>&1; then
+SH_A=""; SH_C=""
+mkdir -p "$SH_REPO"
+if git init -q -b main "$SH_REPO" >/dev/null 2>&1; then
+  git -C "$SH_REPO" config user.email t@t
+  git -C "$SH_REPO" config user.name t
+  _sh_ok=1
+  for _i in 0 1 2 3 4 5; do
+    printf 'c%s\n' "$_i" >"$SH_REPO/f$_i"
+    git -C "$SH_REPO" add -- "f$_i" >/dev/null 2>&1 &&
+      git -C "$SH_REPO" commit -q -m "c$_i" >/dev/null 2>&1 || _sh_ok=0
+  done
+  if [ "$_sh_ok" -eq 1 ]; then
+    SH_A=$(git -C "$SH_REPO" rev-parse main~5 2>/dev/null) || SH_A=""
+    SH_C=$(git -C "$SH_REPO" rev-parse main 2>/dev/null) || SH_C=""
+    # a branch at the OLDEST commit, so the endpoint can be fetched at depth 1
+    # without needing uploadpack.allowAnySHA1InWant on the source.
+    [ -n "$SH_A" ] && git -C "$SH_REPO" branch old "$SH_A" >/dev/null 2>&1
+  fi
+fi
+if [ -n "$SH_A" ] && [ -n "$SH_C" ] && [ "$SH_A" != "$SH_C" ] &&
+   git clone -q --depth 1 --no-local --branch main "file://$SH_REPO" "$SH_CLONE" >/dev/null 2>&1 &&
+   git -C "$SH_CLONE" fetch -q --depth 1 origin old:refs/remotes/origin/old >/dev/null 2>&1; then
+  # FIXTURE SELF-CONSISTENCY: shallow, BOTH endpoints present, the CONNECTING
+  # commit absent. Without the third condition the fixture is not the shape the
+  # case claims, which is exactly how the previous version went vacuous.
+  _sh_mid=$(git -C "$SH_REPO" rev-parse main~2 2>/dev/null) || _sh_mid=""
+  if [ "$(git -C "$SH_CLONE" rev-parse --is-shallow-repository 2>/dev/null)" = true ] &&
+     git -C "$SH_CLONE" cat-file -e "$SH_A^{commit}" >/dev/null 2>&1 &&
+     git -C "$SH_CLONE" cat-file -e "$SH_C^{commit}" >/dev/null 2>&1 &&
+     [ -n "$_sh_mid" ] &&
+     ! git -C "$SH_CLONE" cat-file -e "$_sh_mid^{commit}" >/dev/null 2>&1; then
     shallow_shape=1
   fi
 fi
 if [ "$shallow_shape" -eq 1 ]; then
-  ok "ancestry shallow fixture: a SHALLOW clone that holds BOTH objects (so rc 1 is not a verdict)"
-  OUT=$(cd "$SHALLOW" && PATH="$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
-    bash "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RFORFULL" "$RFORDELTA" 2>&1)
+  ok "shallow fixture: shallow clone holds BOTH endpoints and NOT the connecting commit"
+  # THE GIT-LEVEL DIFFERENTIAL, which is what makes rc 1 ambiguous rather than a
+  # verdict. Both halves asserted: either alone would prove nothing.
+  if git -C "$SH_REPO" merge-base --is-ancestor "$SH_A" "$SH_C" >/dev/null 2>&1; then
+    ok "shallow differential (git): in the COMPLETE repo the pair IS an ancestor (rc 0)"
+  else
+    bad "shallow differential (git): the pair is not an ancestor even in the complete repo — the fixture cannot exercise the ambiguous case (this was the previous arm's defect)"
+    shallow_shape=0
+  fi
+  if git -C "$SH_CLONE" merge-base --is-ancestor "$SH_A" "$SH_C" >/dev/null 2>&1; then
+    bad "shallow differential (git): the SHALLOW clone still reports the pair as an ancestor — rc 1 is not being produced, so the arm proves nothing"
+    shallow_shape=0
+  else
+    ok "shallow differential (git): in the SHALLOW clone the SAME pair returns rc 1 — history absent, not 'not an ancestor'"
+  fi
+fi
+if [ "$shallow_shape" -eq 1 ]; then
+  SHFULL="$T/shallow-full.txt"
+  SHDELTA="$T/shallow-delta.txt"
+  full_summary "$SHFULL" "$(printf '%.7s' "$SH_A")" "$(printf '%.12s' "$SH_A")" PASS PASS
+  delta_summary "$SHDELTA" "$SH_A" "$(printf '%.7s' "$SH_C")" "$(printf '%.12s' "$SH_C")" \
+    PASS PASS "MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION — anchor $SH_A)"
+  # GUARD LEVEL, half 1: the COMPLETE repository must BIND the same pair. Without
+  # this the shallow refusal below could be any unrelated refusal.
+  OUT=$(cd "$SH_REPO" && PATH="$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$SH_C OPEN" \
+    bash "$NEUTRAL_ASSERT" 2421 "$SH_C" "$SHFULL" "$SHDELTA" 2>&1)
+  RC=$?
+  if [ "$RC" -eq 0 ] && [ "${OUT#*anchor-ancestry: BOUND}" != "$OUT" ]; then
+    ok "shallow differential (guard): the COMPLETE repo BINDS the pair (exit 0, anchor-ancestry: BOUND)"
+  else
+    bad "shallow differential (guard): the complete repo did not BIND the pair (exit $RC) — the shallow half below would prove nothing (got: $OUT)"
+  fi
+  # GUARD LEVEL, half 2: the SHALLOW clone must refuse UNVERIFIABLE, NOT exit 2.
+  OUT=$(cd "$SH_CLONE" && PATH="$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$SH_C OPEN" \
+    bash "$NEUTRAL_ASSERT" 2421 "$SH_C" "$SHFULL" "$SHDELTA" 2>&1)
   RC=$?
   if [ "$RC" -ne 3 ]; then
-    bad "ancestry shallow: rc 1 in a shallow clone must be exit 3, not a verdict (got $RC: $OUT)"
+    bad "shallow (guard): a TRUE ancestor whose history is absent must be exit 3, never the exit-2 verdict (got $RC: $OUT)"
   else
-    ok "ancestry shallow: rc 1 in a repository NOT proven complete -> exit 3, never the exit-2 refusal"
+    ok "shallow (guard): the SAME pair in a shallow clone is exit 3, never the exit-2 refusal"
     case "$OUT" in
       *"PREMERGE: ANCHOR-UNVERIFIABLE"*)
-        ok "ancestry shallow: the shallow case carries the ANCHOR-UNVERIFIABLE marker" ;;
-      *) bad "ancestry shallow: expected the ANCHOR-UNVERIFIABLE marker (got: $OUT)" ;;
+        ok "shallow (guard): carries the ANCHOR-UNVERIFIABLE marker" ;;
+      *) bad "shallow (guard): expected the ANCHOR-UNVERIFIABLE marker (got: $OUT)" ;;
     esac
     case "$OUT" in
       *"NOT PROVEN COMPLETE"*)
-        ok "ancestry shallow: the refusal names shallowness as the cause, not 'not an ancestor'" ;;
-      *) bad "ancestry shallow: the refusal must name the incomplete history (got: $OUT)" ;;
+        ok "shallow (guard): the refusal names the incomplete history, not 'not an ancestor'" ;;
+      *) bad "shallow (guard): the refusal must name the incomplete history (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"is NOT on the certified sha's history"*)
+        bad "shallow (guard): a TRUE ancestor was reported as NOT on the history — the exact false verdict this arm exists to prevent (got: $OUT)" ;;
+      *) ok "shallow (guard): a TRUE ancestor is NOT reported as 'not on the history'" ;;
     esac
     case "$OUT" in
       *"git fetch --unshallow"*)
-        ok "ancestry shallow: the shallow cause carries its own remedy (git fetch --unshallow)" ;;
-      *) bad "ancestry shallow: the shallow cause must carry the unshallow remedy (got: $OUT)" ;;
+        ok "shallow (guard): the shallow cause carries its own remedy (git fetch --unshallow)" ;;
+      *) bad "shallow (guard): the shallow cause must carry the unshallow remedy (got: $OUT)" ;;
     esac
   fi
 else
-  # A DECLARED SKIP — visible, named, and NON-FATAL. Two rules pull against each
-  # other here and both are the repo's:
-  #   * a bare skip that prints nothing is refused — an unexercised arm must SAY
-  #     it was not taken, or the suite's green tally silently covers less than it
-  #     did yesterday;
-  #   * a lane that REDS on correct input is the lane agents learn to waive — and
-  #     an old or unusual git that cannot build a `--depth` clone over `file://`
-  #     is a property of the HOST, not a defect in the tree under test.
-  # So it reports on the suite's own `ok` channel (the `SKIPPED (...)` idiom Case
-  # 35 already uses for the root/mode-bit case) and additionally prints an
-  # affirmative `ARM NOT TAKEN` line, so an operator reading the output can see
-  # WHICH coverage was not taken and why. The arm itself is unchanged: on every
-  # host that CAN build the fixture it runs and asserts as before.
-  printf 'ARM NOT TAKEN: ancestry shallow (rc-1-is-three-valued) — this host could not build the\n'
-  printf 'ARM NOT TAKEN: fixture: a --depth 2 --no-local clone over file:// plus a --depth 1 fetch of\n'
-  printf 'ARM NOT TAKEN: the sibling branch, yielding a SHALLOW repo holding BOTH objects. The\n'
-  printf 'ARM NOT TAKEN: shallow branch of assert_anchor_on_history is therefore UNEXERCISED on this\n'
-  printf 'ARM NOT TAKEN: run. Non-fatal by design: an old/unusual git is a host property, not a\n'
-  printf 'ARM NOT TAKEN: defect in the tree under test.\n'
-  ok "ancestry shallow: SKIPPED (fixture unbuildable on this host — see the ARM NOT TAKEN lines; arm UNEXERCISED, declared not silent)"
+  # DECLARED, not silently skipped, and non-fatal: a host whose git cannot build a
+  # `--depth` clone over `file://` plus a `--depth 1` branch fetch is a HOST
+  # property, not a defect in the tree under test. A lane that reds on correct
+  # input is the lane agents learn to waive.
+  printf 'ARM NOT TAKEN: shallow rc-1-ambiguity (job 410) — this host could not build the fixture: a\n'
+  printf 'ARM NOT TAKEN: 6-commit history, a --depth 1 clone over file://, and a --depth 1 fetch of a\n'
+  printf 'ARM NOT TAKEN: branch at the OLDEST commit, yielding a shallow repo that holds BOTH endpoints\n'
+  printf 'ARM NOT TAKEN: and NOT the connecting commits. Without it rc 1 cannot be made ambiguous, so\n'
+  printf 'ARM NOT TAKEN: the shallow branch of assert_anchor_on_history is UNEXERCISED on this run.\n'
+  ok "shallow: SKIPPED (differential fixture unbuildable — arm UNEXERCISED, declared not silent)"
 fi
 
 # --- 44(f): A GRAFT MUST NOT BE ABLE TO MANUFACTURE `BOUND` (roborev job 355) -
@@ -2387,6 +2459,23 @@ to_run_arm() {
         | *"could not be resolved"* | *"scratch root"* | *"could not initialise"*)
         bad "hung-read ($label): a timeout was misreported as another cause — the operator would get the WRONG remedy (got: $out)" ;;
       *) ok "hung-read ($label): a timeout borrows NO other cause's remedy (not work-tree, TMPDIR, absent-object, shallow or NOT-ANCESTOR)" ;;
+    esac
+    # AND THE TIMEOUT MESSAGE MUST NAME ITS OWN SUBJECT (roborev job 410). The
+    # shared diagnostic used to assert "this is NOT about your TMPDIR" and send the
+    # operator to the OBJECT STORE — while being the destination for timeouts that
+    # occurred canonicalising TMPDIR, running `mktemp`, or canonicalising the
+    # scratch. Both halves are asserted here rather than per-arm, so every timeout
+    # arm covers the class: a SUBJECT line must be present, and the old
+    # object-store-only remedy must be gone.
+    case "$out" in
+      *"SUBJECT: the timed-out operation was acting on: "*)
+        ok "hung-read ($label): the timeout names the SUBJECT it was acting on" ;;
+      *) bad "hung-read ($label): the timeout must name its subject, or a TMPDIR-side hang reads as an object-store problem (got: $out)" ;;
+    esac
+    case "$out" in
+      *"check the object store under this repository"*)
+        bad "hung-read ($label): the refusal still sends the operator to the OBJECT STORE unconditionally (job 410) (got: $out)" ;;
+      *) ok "hung-read ($label): the remedy points at the named subject, not unconditionally at the object store" ;;
     esac
   fi
   # NO LEAK ASSERTION HERE ANY MORE (job 381). Reaping is covered by the

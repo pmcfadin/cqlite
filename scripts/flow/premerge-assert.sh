@@ -833,24 +833,45 @@ _anchor_run() {
   _anchor_bounded git "${ANCHOR_GIT_OPTS[@]}" "$@"
 }
 
-# _anchor_refuse_timeout <anchor> <head> <what> — THE ONE timeout refusal, shared
-# by EVERY bounded call (roborev job 374). It exists so a new call site cannot
-# invent a different wording, and so a timeout can never borrow another cause's
+# _anchor_refuse_timeout <anchor> <head> <what> [<subject>] — THE ONE timeout
+# refusal, shared by EVERY bounded call (roborev job 374). One wording, so a new
+# call site cannot invent its own, and so a timeout never borrows another cause's
 # REMEDY: the whole reason this script splits exit 2 from exit 3 is to hand the
-# operator the right action, and "not inside a git work tree" sends someone to
-# check their cwd when the real answer is a stalled filesystem. A misleading
-# diagnostic is worse than a vague one.
+# operator the right ACTION, and "not inside a git work tree" sends someone to
+# check their cwd when the real answer is a stalled filesystem.
+#
+# THE BODY IS NEUTRAL AND NAMES ITS SUBJECT, and that is the job-410 fix: the text
+# used to assert "this is NOT a statement about your cwd, your TMPDIR or your
+# object paths" and send the operator to the OBJECT STORE — while being the shared
+# destination for timeouts that occurred canonicalising TMPDIR, running `mktemp`,
+# or canonicalising the created scratch. So the job-395 change (route all five
+# canonicalisations here) moved the misleading-remedy defect one layer DOWN rather
+# than removing it: third instance of the class, after jobs 374 and 395.
+#
+# A NEUTRAL MESSAGE THAT NAMES THE SUBJECT beats five bespoke strings — it is less
+# to keep correct, and the "keep it correct" part is exactly what failed twice.
+# `<subject>` is the path or store the timed-out operation actually touched; when a
+# caller has none to give, the message says so rather than guessing one.
 _anchor_refuse_timeout() {
+  local subject="${4:-}"
+  # An EMPTY 4th arg must not become a blank indented line in the refusal, so the
+  # subject is passed as a possibly-empty ARRAY rather than an interpolated string.
+  # `${arr[@]+"${arr[@]}"}` is the bash 3.2-safe expansion of a possibly-empty
+  # array under `set -u`.
+  local subj_lines=()
+  [ -n "$subject" ] && subj_lines=("SUBJECT: the timed-out operation was acting on: $subject")
   refuse_anchor_unverifiable "$1" "$2" \
     "$3 timed out after ${ADVISORY_TIMEOUT_SECS}s (+${ADVISORY_KILL_GRACE}s kill grace)" \
-    "The call did not return. These reads touch the SHARED object store and the" \
-    "repository metadata beside it, where a malformed loose object (a FIFO) or a" \
-    "stalled mount stops them; a hang here would leave the merge guard with no" \
-    "verdict at all, which the bound converts into this one." \
-    "This is NOT a statement about your cwd, your TMPDIR or your object paths —" \
-    "those causes have their own wording, and a timeout no longer borrows them." \
-    "REMEDY: check the object store under this repository's objects directory and" \
-    "the mount it lives on, then re-run this assert."
+    "The call did not return. Every bounded operation here touches a filesystem —" \
+    "the SHARED object store, the repository metadata beside it, or TMPDIR where" \
+    "the scratch lives — and a stalled mount or a malformed loose object (a FIFO)" \
+    "stops any of them. A hang would leave the merge guard with NO verdict at all," \
+    "which the bound converts into this one." \
+    ${subj_lines[@]+"${subj_lines[@]}"} \
+    "REMEDY: check that subject and the filesystem it lives on, then re-run this" \
+    "assert. This says nothing about whether your chain is correct (that would be" \
+    "exit 2) and nothing about the OTHER paths this script reads — only the one" \
+    "named above timed out."
 }
 
 # _anchor_timed_out <rc> — TRUE when the runner terminated the call rather than
@@ -1005,12 +1026,14 @@ _anchor_build_scratch() {
   rc=0
   toplevel=$(_anchor_lane rev-parse --show-toplevel 2>/dev/null) || rc=$?
   if _anchor_timed_out "$rc"; then
-    _anchor_refuse_timeout "$anchor" "$head" "the work-tree root probe (rev-parse --show-toplevel)"
+    _anchor_refuse_timeout "$anchor" "$head" "the work-tree root probe (rev-parse --show-toplevel)" \
+      "this checkout (the current working directory's repository)"
   fi
   rc=0
   commondir=$(_anchor_lane rev-parse --git-common-dir 2>/dev/null) || rc=$?
   if _anchor_timed_out "$rc"; then
-    _anchor_refuse_timeout "$anchor" "$head" "the git common-directory probe (rev-parse --git-common-dir)"
+    _anchor_refuse_timeout "$anchor" "$head" "the git common-directory probe (rev-parse --git-common-dir)" \
+      "this checkout (the current working directory's repository)"
   fi
   # A non-timeout failure, or an empty answer, keeps its ORIGINAL cause below:
   # those are real states (an unusable repository) with their own remedy.
@@ -1021,12 +1044,14 @@ _anchor_build_scratch() {
   rc=0
   repo_canon=$(_anchor_canon "$toplevel") || rc=$?
   if _anchor_timed_out "$rc"; then
-    _anchor_refuse_timeout "$anchor" "$head" "canonicalising the work-tree root (cd + pwd -P)"
+    _anchor_refuse_timeout "$anchor" "$head" "canonicalising the work-tree root (cd + pwd -P)" \
+      "$toplevel"
   fi
   rc=0
   common_canon=$(_anchor_canon "$commondir") || rc=$?
   if _anchor_timed_out "$rc"; then
-    _anchor_refuse_timeout "$anchor" "$head" "canonicalising the git common directory (cd + pwd -P)"
+    _anchor_refuse_timeout "$anchor" "$head" "canonicalising the git common directory (cd + pwd -P)" \
+      "$commondir"
   fi
   if [ -z "$repo_canon" ] || [ -z "$common_canon" ]; then
     ANCHOR_SCRATCH_ERR="the work-tree root and/or git common directory could not be resolved, so a scratch location cannot be proven outside them"
@@ -1036,7 +1061,8 @@ _anchor_build_scratch() {
   rc=0
   tmp_canon=$(_anchor_canon "$tmp_req") || rc=$?
   if _anchor_timed_out "$rc"; then
-    _anchor_refuse_timeout "$anchor" "$head" "canonicalising TMPDIR (cd + pwd -P)"
+    _anchor_refuse_timeout "$anchor" "$head" "canonicalising TMPDIR (cd + pwd -P)" \
+      "$tmp_req"
   fi
   if [ -z "$tmp_canon" ]; then
     ANCHOR_SCRATCH_ERR="the scratch root TMPDIR=$tmp_req could not be resolved (absent, unreadable, or not a directory)"
@@ -1052,7 +1078,8 @@ _anchor_build_scratch() {
   rc=0
   ANCHOR_SCRATCH=$(_anchor_bounded mktemp -d "$tmp_canon/premerge-anchor.XXXXXX" 2>/dev/null) || rc=$?
   if _anchor_timed_out "$rc"; then
-    _anchor_refuse_timeout "$anchor" "$head" "creating the scratch directory (mktemp -d)"
+    _anchor_refuse_timeout "$anchor" "$head" "creating the scratch directory (mktemp -d)" \
+      "$tmp_canon"
   fi
   # No `[ -d … ]` stat here: `_anchor_canon` below is BOUNDED and returns empty
   # unless the path is a directory this process can `cd` into, which is a strictly
@@ -1065,7 +1092,8 @@ _anchor_build_scratch() {
   rc=0
   created_canon=$(_anchor_canon "$ANCHOR_SCRATCH") || rc=$?
   if _anchor_timed_out "$rc"; then
-    _anchor_refuse_timeout "$anchor" "$head" "canonicalising the created scratch directory (cd + pwd -P)"
+    _anchor_refuse_timeout "$anchor" "$head" "canonicalising the created scratch directory (cd + pwd -P)" \
+      "$ANCHOR_SCRATCH"
   fi
   if [ -z "$created_canon" ]; then
     ANCHOR_SCRATCH_ERR="the created scratch directory could not be canonicalized"
@@ -1100,7 +1128,8 @@ _anchor_build_scratch() {
   rc=0
   lane_objects=$(_anchor_lane rev-parse --git-path objects 2>/dev/null) || rc=$?
   if _anchor_timed_out "$rc"; then
-    _anchor_refuse_timeout "$anchor" "$head" "the object-directory probe (rev-parse --git-path objects)"
+    _anchor_refuse_timeout "$anchor" "$head" "the object-directory probe (rev-parse --git-path objects)" \
+      "this checkout (the current working directory's repository)"
   fi
   [ "$rc" -eq 0 ] || lane_objects=""
   # MADE ABSOLUTE: `--git-path` answers RELATIVE TO THE WORK-TREE ROOT for a
@@ -1123,7 +1152,8 @@ _anchor_build_scratch() {
   rc=0
   lane_objects_canon=$(_anchor_canon "$lane_objects") || rc=$?
   if _anchor_timed_out "$rc"; then
-    _anchor_refuse_timeout "$anchor" "$head" "canonicalising the object directory (cd + pwd -P)"
+    _anchor_refuse_timeout "$anchor" "$head" "canonicalising the object directory (cd + pwd -P)" \
+      "$lane_objects"
   fi
   if [ -z "$lane_objects_canon" ]; then
     ANCHOR_SCRATCH_ERR="this repository's object directory ($lane_objects) is not a readable directory"
@@ -1142,7 +1172,8 @@ _anchor_build_scratch() {
   rc=0
   _anchor_run init -q --template= "$ANCHOR_SCRATCH_REPO" >/dev/null 2>&1 || rc=$?
   if _anchor_timed_out "$rc"; then
-    _anchor_refuse_timeout "$anchor" "$head" "initialising the isolated scratch repository (git init)"
+    _anchor_refuse_timeout "$anchor" "$head" "initialising the isolated scratch repository (git init)" \
+      "$ANCHOR_SCRATCH_REPO"
   fi
   # THE `[ -d "$ANCHOR_SCRATCH_REPO/.git" ]` CHECK IS DELETED (job 382), not
   # bounded: it was an UNBOUNDED builtin stat, and it was redundant for
@@ -1217,7 +1248,8 @@ assert_anchor_on_history() {
   rc=0
   _anchor_lane rev-parse --git-dir >/dev/null 2>&1 || rc=$?
   if _anchor_timed_out "$rc"; then
-    _anchor_refuse_timeout "$anchor" "$head" "the git work-tree probe (rev-parse --git-dir)"
+    _anchor_refuse_timeout "$anchor" "$head" "the git work-tree probe (rev-parse --git-dir)" \
+      "this checkout (the current working directory's repository)"
   fi
   if [ "$rc" -ne 0 ]; then
     refuse_anchor_unverifiable "$anchor" "$head" \
@@ -1260,7 +1292,8 @@ assert_anchor_on_history() {
   rc=0
   _anchor_git cat-file -e "$anchor^{commit}" >/dev/null 2>&1 || rc=$?
   if _anchor_timed_out "$rc"; then
-    _anchor_refuse_timeout "$anchor" "$head" "reading the ANCHOR object"
+    _anchor_refuse_timeout "$anchor" "$head" "reading the ANCHOR object" \
+      "the SHARED object store, read through the scratch alternate"
   fi
   if [ "$rc" -ne 0 ]; then
     refuse_anchor_unverifiable "$anchor" "$head" \
@@ -1273,7 +1306,8 @@ assert_anchor_on_history() {
   rc=0
   _anchor_git cat-file -e "$head^{commit}" >/dev/null 2>&1 || rc=$?
   if _anchor_timed_out "$rc"; then
-    _anchor_refuse_timeout "$anchor" "$head" "reading the CERTIFIED object"
+    _anchor_refuse_timeout "$anchor" "$head" "reading the CERTIFIED object" \
+      "the SHARED object store, read through the scratch alternate"
   fi
   if [ "$rc" -ne 0 ]; then
     refuse_anchor_unverifiable "$anchor" "$head" \
@@ -1290,7 +1324,8 @@ assert_anchor_on_history() {
     return 0
   fi
   if _anchor_timed_out "$rc"; then
-    _anchor_refuse_timeout "$anchor" "$head" "the ancestry walk"
+    _anchor_refuse_timeout "$anchor" "$head" "the ancestry walk" \
+      "the SHARED object store, read through the scratch alternate"
   fi
   if [ "$rc" -ne 1 ]; then
     refuse_anchor_unverifiable "$anchor" "$head" \
@@ -1319,7 +1354,8 @@ assert_anchor_on_history() {
     # Without this a timeout HERE would be reported as "this repository is not
     # proven complete", i.e. it would borrow the shallow cause's remedy
     # (`git fetch --unshallow`) for a stalled mount (job 374).
-    _anchor_refuse_timeout "$anchor" "$head" "the shallowness probe (rev-parse --is-shallow-repository)"
+    _anchor_refuse_timeout "$anchor" "$head" "the shallowness probe (rev-parse --is-shallow-repository)" \
+      "this checkout (the current working directory's repository)"
   fi
   # A non-timeout failure (an old git that does not know the option) legitimately
   # keeps the "not proven complete" cause below — that IS the unmeasured state.
