@@ -182,9 +182,15 @@
 #     set every ambiguity — ownership, an undecodable escape, a build-script env key —
 #     resolves toward CREDITING.
 #   * A gate OUTSIDE that set is NOT SEEN, and such a feature would be reported DEAD.
-#     Two cases are known and neither is lexically resolvable: a cfg whose feature NAME
-#     is produced by MACRO EXPANSION, and a build-script env key CONSTRUCTED AT RUNTIME
-#     (a name joined from fragments).
+#     THREE cases are known and none is lexically resolvable: a cfg whose feature NAME is
+#     produced by MACRO EXPANSION; a build-script env key CONSTRUCTED AT RUNTIME (a name
+#     joined from fragments); and a module reached by an explicit OUT-OF-REPOSITORY
+#     `#[path = "../../outside.rs"]` or `include!`, which the walk never VISITS because it
+#     covers this checkout. Closing that third one means resolving `#[path]`/`include!`,
+#     i.e. module resolution — the unbounded-parsing problem this guard has declined three
+#     times on #1712's precedent. The ADJACENT case is not the same and IS handled: an
+#     out-of-repository SYMLINK inside a target's source tree, file or directory, is a
+#     NAMED REFUSAL rather than a silent skip.
 #   * INCOMPLETE — a DEAD feature can escape. False PASSes are permitted and DECLARED.
 #
 # WHY THE CLAIM IS SCOPED RATHER THAN ABSOLUTE. It was written unqualified
@@ -278,9 +284,10 @@ Features-are-load-bearing guard for the cqlite workspace (issue #1698).
                   nothing), or is named in some target's `required-features`.
   --help          This message.
 
-The success line DECLARES the residual of the method
-(`cfg-site detection: lexical, NON-EXHAUSTIVE`): a cfg produced by MACRO EXPANSION is
-not seen, and an INDIRECTLY redundant dependency-feature edge is not detected.
+The success line states the CONTRACT: no false FAIL for a gate in a RECOGNISED spelling,
+INCOMPLETE (a dead feature can escape, and the routes are listed), and the three NOT-SEEN
+spellings — a feature NAME produced by macro expansion, a build-script env key built at
+runtime, and a module reached by an out-of-repository `#[path]`/`include!`.
 
 Credit flows UP from effects, never DOWN from a parent: a leaf named only by an
 aggregator is dead. Being enumerated (a workflow's `--features`, the gate's clippy
@@ -421,7 +428,7 @@ def prune_dir(dirpath, name):
 #
 # So the claim is bounded by what the scanner RECOGNISES, and the recognised set is
 # enumerated in the line itself: no false FAIL for a gate written in one of those
-# spellings; a gate written outside that set is NOT SEEN, and the two known such cases
+# spellings; a gate written outside that set is NOT SEEN, and the three known such cases
 # are named. Within the recognised set every ambiguity still resolves toward CREDITING.
 # The INCOMPLETE half is unchanged: a dead feature can escape, and the routes are listed.
 #
@@ -433,8 +440,10 @@ CONTRACT_LINE = (
     "#![cfg], cfg!, and cfg_attr (its condition AND a cfg/cfg_attr in its tail), with "
     "whitespace tolerated between # ! [ and Rust string escapes decoded — and INCOMPLETE "
     "(a dead feature can escape). A gate written in a spelling OUTSIDE that set is NOT "
-    "SEEN; two such are known and are not lexically resolvable: a cfg whose feature NAME "
-    "is produced by MACRO EXPANSION, and a build-script env key CONSTRUCTED AT RUNTIME. "
+    "SEEN; three such are known and are not lexically resolvable: a cfg whose feature NAME "
+    "is produced by MACRO EXPANSION; a build-script env key CONSTRUCTED AT RUNTIME; and a "
+    "module reached by an explicit OUT-OF-REPOSITORY #[path]/include!, which is not "
+    "visited, so a feature gated only there can be reported dead. "
     "Escape routes: cfgs inside unexpanded macro bodies; orphan .rs files under a target "
     "source dir; any textual CARGO_FEATURE_* mention in a build-script package's sources "
     "(no API, module or scope analysis; a bare CARGO_FEATURE_ prefix credits every "
@@ -1205,7 +1214,22 @@ for dirpath, dirnames, filenames in os.walk(REPO_ROOT, onerror=_walk_error, foll
     for fname in filenames:
         if not fname.endswith(".rs"):
             continue
-        full = os.path.realpath(os.path.join(dirpath, fname))
+        raw = os.path.join(dirpath, fname)
+        full = os.path.realpath(raw)
+        # THE SAME BOUNDARY, AT THE FILE LEVEL (roborev job 112). The directory refusal
+        # above was half the check: a `.rs` FILE symlinked out of the repository was
+        # canonicalized and opened, walking straight past a boundary the contract line
+        # advertises. A half-applied boundary is worse than either applying it or not
+        # having it, so the same refusal, the same scoping and the same wording apply
+        # here — and it is decided on the LINK, before the file is opened, never on the
+        # resolved path.
+        if os.path.islink(raw) and not (full == REPO_ROOT or full.startswith(REPO_ROOT + os.sep)):
+            if _within_target_tree(raw):
+                fail("the symlinked file %s resolves OUTSIDE this repository, to %s, and it lies inside a workspace target's source tree — so this scan would be reading source from outside the checkout, which a mandatory gate component must not do, and a feature referenced only in there cannot be attributed. NO verdict is available. Remedy: replace the link with a real file inside the repository, move the shared module in-tree, or point the link inside the repository." % (
+                    os.path.relpath(raw, REPO_ROOT), full))
+            # Outside every target source tree: the scan never treated it as source, so
+            # there is nothing to be wrong about. Skipped, as before.
+            continue
         owners = owners_of(full)
         bs_owners = buildscript_owners_of(full)
         if not owners and not bs_owners:

@@ -217,6 +217,11 @@
 #                The control is the point: a guard that reds on `node_modules` is the
 #                guard everyone waives.
 #
+#  55.  RED+GREEN — the same boundary at the FILE level: an out-of-repo symlinked `.rs`
+#                FILE inside a target's source tree is a NAMED refusal (it used to be
+#                canonicalized and opened), while the same link outside every target tree
+#                does not refuse. A half-applied boundary is worse than none.
+#
 #   CASE NUMBERS ARE STABLE IDENTIFIERS, NOT POSITIONS — deleted cases leave gaps (the
 #   convention scripts/tests/test_pub_surface_guard.sh already uses). The suite asserts
 #   the exact NUMBER OF CASES RUN at the end, which is what catches a silent deletion.
@@ -1556,13 +1561,49 @@ ln -s "$OUTSIDE" "$D/vendor_js/node_modules_like"
 expect_green "$D" "case 54 (control)"
 ok "an OUT-OF-REPO symlinked directory inside a target's source tree is a NAMED refusal; the same link outside every target tree does not refuse (the node_modules scoping)"
 
+# --- 55. RED + control: an OUT-OF-REPO symlinked FILE is a NAMED refusal -----
+# The directory refusal (case 54) was only half the boundary: a `.rs` FILE symlinked out of
+# the repository was canonicalized and OPENED, walking straight past a boundary the
+# contract line advertises (roborev job 112). A half-applied boundary is worse than either
+# applying it or not having it, so the same refusal, scoping and wording apply at the file
+# level — decided on the LINK, before the file is opened.
+#
+# BOTH HALVES, as for directories: inside a target's source tree it REFUSES; outside every
+# target tree it does not, because the scan never treated it as source.
+OUTSIDE_FILE_DIR="$TMPROOT/outside-repo-file"
+mkdir -p "$OUTSIDE_FILE_DIR"
+cat >"$OUTSIDE_FILE_DIR/offsite_module.rs" <<'EOF'
+#[cfg(feature = "offsitefilefeat")]
+pub fn only_out_of_repo_file() {}
+EOF
+
+D="$(fixture out-of-repo-symlinked-file)"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'offsitefilefeat = []'
+ln -s "$OUTSIDE_FILE_DIR/offsite_module.rs" "$D/a/src/offsite_module.rs"
+[ -L "$D/a/src/offsite_module.rs" ] || fail_case "case 55: the file symlink was not created"
+run_guard "$D" && { cat "$TMPROOT/out.txt"; fail_case "case 55: an out-of-repo symlinked FILE inside a target's source tree was opened and scanned silently — the boundary the contract advertises was not applied at the file level"; }
+grep -q 'resolves OUTSIDE this repository' "$TMPROOT/out.txt" \
+  || { cat "$TMPROOT/out.txt"; fail_case "case 55: the guard failed but did not NAME the refusal reason — a bare non-zero exit is not evidence"; }
+grep -qF -- "a/src/offsite_module.rs" "$TMPROOT/out.txt" \
+  || { cat "$TMPROOT/out.txt"; fail_case "case 55: the diagnostic does not name the offending file"; }
+grep -q 'declared feature(s) are DEAD' "$TMPROOT/out.txt" \
+  && { cat "$TMPROOT/out.txt"; fail_case "case 55: the guard reported features DEAD instead of refusing"; }
+
+# THE SCOPING CONTROL: same out-of-repo file link, OUTSIDE every target source tree.
+D="$(fixture out-of-repo-symlinked-file-unscanned)"
+mkdir -p "$D/vendor_js"
+ln -s "$OUTSIDE_FILE_DIR/offsite_module.rs" "$D/vendor_js/offsite_module.rs"
+[ -L "$D/vendor_js/offsite_module.rs" ] || fail_case "case 55: the control file symlink was not created"
+expect_green "$D" "case 55 (control)"
+ok "an OUT-OF-REPO symlinked FILE inside a target's source tree is a NAMED refusal; the same link outside every target tree does not refuse (the boundary is applied at BOTH levels)"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=58
+CASE_COUNT_EXPECTED=59
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 
