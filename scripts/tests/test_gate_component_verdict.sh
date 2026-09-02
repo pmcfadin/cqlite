@@ -1028,6 +1028,139 @@ else
       "found $_res_n RESULT: writes, $_bad_order of them followed by something else"
 fi
 
+echo "=== section 20: a summary carrying ESCAPES is REFUSED, never repaired (F6-1) ==="
+# R2-1 WITH THE ARROW REVERSED, and that is why it is indefensible here. R2-1 was `_safe`
+# defusing gate tokens BEFORE stripping controls, so a split token was reassembled into a
+# FORBIDDEN one on the way OUT. This is stripping ANSI BEFORE validating, so a split token is
+# reassembled into a VALID one on the way IN: `RESULT: P<ESC>[31mASS` normalises to exactly
+# `RESULT: PASS`. We fixed the output side and left the input side, in a change whose entire
+# subject is the manufactured pass.
+#
+# THE DOCTRINE TENSION, RESOLVED EXPLICITLY because the next reader will hit it: #3400
+# mandates colour-immunity AT THE PARSE SITE, and its subject is CARGO OUTPUT, which really is
+# coloured and whose colour survives redirection. A SUMMARY BLOCK IS THE GATE'S OWN ARTIFACT,
+# written with plain echo/printf and never coloured — so for a summary parse, stripping buys
+# nothing and can only manufacture tokens. A summary carrying ANSI is not a summary this gate
+# wrote, and the honest answer is a NAMED REFUSAL, not a repair.
+_esc=$(printf '\033')
+SN1="$TMP/ansi-result.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "tree-integrity: PASS"
+  comp_line tooling-tests PASS 1112s
+  printf 'RESULT: P%s[31mASS\n' "$_esc"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$SN1"
+expect "20.1 a RESULT token split by an escape sequence is refused, not normalised into a verdict" \
+  COULD-NOT-MEASURE 4 "escape" -- "$SN1" --mode only --component tooling-tests --run-id run-1
+
+SN2="$TMP/ansi-integrity.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  printf 'tree-integrity: P%s[32mASS\n' "$_esc"
+  echo "mode: PARTIAL (--only tooling-tests) - does NOT count as the gate"
+  comp_line tooling-tests PASS 1112s
+  echo "RESULT: PARTIAL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$SN2"
+expect "20.2 a tree-integrity token split by an escape sequence is refused, not normalised to PASS" \
+  COULD-NOT-MEASURE 4 "escape" -- "$SN2" --mode only --component tooling-tests --run-id run-1
+
+SN3="$TMP/ansi-component.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "tree-integrity: PASS"
+  echo "mode: PARTIAL (--only tooling-tests) - does NOT count as the gate"
+  printf 'tooling-tests:     P%s[32mASS (1112s)  [x]\n' "$_esc"
+  echo "RESULT: PARTIAL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$SN3"
+expect "20.3 a component STATUS split by an escape sequence is refused, not normalised to PASS" \
+  COULD-NOT-MEASURE 4 "escape" -- "$SN3" --mode only --component tooling-tests --run-id run-1
+
+# CONTROL: a clean summary still answers, or the refusal has become refuse-everything.
+expect "20.4 control: a clean summary (no escapes) still reaches a verdict" \
+  PASS 0 "tooling-tests" -- "$S8c" --mode only --component tooling-tests --run-id run-1
+
+# CONTROL: a TAB is TOLERATED. The feature-matrix annotation is free text derived from a real
+# cargo argv, and once nothing is stripped a TAB cannot splice a token — so refusing it would
+# be a false FAIL bought for nothing. Only ESC and the token-splicing C0 controls are refused.
+SN4="$TMP/tab-annotation.txt"
+mk_only_summary "$SN4" run-1 PARTIAL tooling-tests "$(printf 'tooling-tests:     PASS (1112s)  [test\tcqlite-core]')"
+expect "20.5 control: a TAB inside an annotation is tolerated (it cannot splice a token)" \
+  PASS 0 "tooling-tests" -- "$SN4" --mode only --component tooling-tests --run-id run-1
+
+echo "=== section 21: the component must be a REAL component, per the manifest (F6-2) ==="
+# The name was validated only SYNTACTICALLY, so a METADATA line could masquerade as a
+# component line: `launch-nonce: PASS (1s)  [x]` answered PASS though no such component ran.
+#
+# THREAT MODEL, STATED HONESTLY RATHER THAN OVERSTATED: `launch-nonce`'s value comes from
+# AGENT_GATE_LAUNCH_NONCE, which the CALLER sets — so by this repo's own triage rule the party
+# planting it is the party asking the question, i.e. INVOKER-CLASS and out of model. It is
+# fixed anyway for two practical reasons: the fix is an affirmative membership test against a
+# manifest that already exists (#3544), which is cheaper than the lead authorization deferring
+# it would cost; and it turns a TYPO — asking for a component that does not exist — into a
+# named refusal instead of a silent COULD-NOT-MEASURE.
+#
+# VERIFIED that the manifest is genuinely authoritative at HEAD rather than assumed: it is
+# byte-identical to `agent-gate.sh --list` (37 names), the gate ASSERTS it against the running
+# COMPONENTS array on every run (fail-closed `manifest-stale`), and every component-name source
+# reachable in a FULL-marker block is a COMPONENTS member — the three non-manifest names
+# (`scoped-tests`, `node-tests`, `shell-selftests`) are appended only by run_lite/run_delta
+# paths, whose LITE/DELTA markers the mode check already refuses. So this cannot false-FAIL.
+# A FAIL-token block, because that is where the masquerade actually lands: with a PARTIAL
+# token the F4 scope check catches a non-member first, whereas a FAIL-token block legitimately
+# carries no scope line (18.4) and so reaches the component read — the reachable shape.
+SP1="$TMP/metadata-masquerade.txt"
+mk_summary "$SP1" run-1 "FAIL (1 component)" \
+  "$(comp_line tooling-tests PASS 1112s)" "$(comp_line launch-nonce PASS 1s)"
+expect "21.1 component-shaped METADATA cannot produce a PASS (launch-nonce is not a component)" \
+  USAGE 64 "manifest" -- "$SP1" --mode only --component launch-nonce --run-id run-1
+
+expect "21.2 an unknown component name is a NAMED refusal, not a silent COULD-NOT-MEASURE" \
+  USAGE 64 "manifest" -- "$S8c" --mode only --component not-a-real-component --run-id run-1
+
+# CONTROL: EVERY name in the manifest is accepted by the membership test, derived from the
+# committed file rather than spot-checked, so a parser that rejected a real component reds.
+_man="$REPO_ROOT/scripts/agent-gate.components"
+_rejected=""
+while IFS= read -r _n; do
+  case "$_n" in ''|'#'*) continue ;; esac
+  _o=$(bash "$VERDICT" "$TMP/nope-21.txt" --mode only --component "$_n" 2>&1)
+  printf '%s' "$_o" | grep -q '^gate-verdict: USAGE' && _rejected="$_rejected $_n"
+done < "$_man"
+if [ -z "$_rejected" ]; then
+  ok "21.3 control: every name in the committed manifest is accepted by the membership test"
+else
+  bad "21.3 control: every name in the committed manifest is accepted by the membership test" \
+      "rejected:$_rejected"
+fi
+
+# The manifest is resolved from the script's OWN directory with NO env override — the
+# constrained party must not choose its own authority (#3312) — so the resolution is asserted
+# structurally, not just behaviourally.
+if grep -q 'MANIFEST="\$HERE/agent-gate.components"' "$VERDICT" \
+   && ! grep -qE 'MANIFEST="\$\{[A-Z_]+:-' "$VERDICT"; then
+  ok "21.4 the manifest is resolved from the script's own directory, with no env override"
+else
+  bad "21.4 the manifest is resolved from the script's own directory, with no env override"
+fi
+
+# An UNREADABLE manifest is a REFUSAL, never a skip: a membership test that silently stops
+# testing is the permissive branch this whole change exists to refuse. Substituted by copying
+# the script into a scratch dir WITHOUT the manifest beside it (the artifact-substitution
+# idiom, never a settable path).
+_sub=$(mktemp -d "${TMPDIR:-/tmp}/gcv-nomanifest.XXXXXX")
+cp "$VERDICT" "$READER" "$_sub/" 2>/dev/null
+_o=$(bash "$_sub/gate-component-verdict.sh" "$S8c" --mode only --component tooling-tests --run-id run-1 2>&1); _rc=$?
+if [ "$_rc" = 64 ] && printf '%s' "$_o" | grep -q '^gate-verdict: USAGE.*manifest'; then
+  ok "21.5 an unreadable manifest is a fail-closed refusal, never a silently skipped test"
+else
+  bad "21.5 an unreadable manifest is a fail-closed refusal, never a silently skipped test" \
+      "rc=$_rc out=$(printf '%s' "$_o" | head -1)"
+fi
+rm -rf "$_sub"
+
 # ---------------------------------------------------------------------------
 # CASE FLOORS (#3544). A span-replacing edit once silently deleted four cases from a
 # sibling suite and it reported `failed: 0` at 102 instead of 105 for a whole round — a
