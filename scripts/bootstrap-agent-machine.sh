@@ -3085,15 +3085,37 @@ fi
 # Establishing the precondition first is what this section already does for `timeout` and `sudo`;
 # sccache was the one prerequisite checked only downstream.
 #
-# DELIBERATELY THE AMBIENT PATH, and that is NOT round 6's mistake: it decides only whether this box
-# has sccache AT ALL — a cheap precondition — and never which binary is authoritative, which is
-# still asked of each session context. A box whose invoking shell lacks sccache while a session has
-# one now reports UNMEASURED instead of certifying; that is the fail-closed direction and it is
-# declared below.
+# AND THE AMBIENT PATH MAY ONLY ANSWER FOR THE CONTEXT IT IS (roborev job 399, f1 — the FOURTH
+# correction on this one axis, after rounds 6, 7 and 9). Under the DOCUMENTED
+# `sudo bash scripts/bootstrap-agent-machine.sh` the ambient PATH is sudo's `secure_path`, which on
+# stock Ubuntu omits the invoking user's ~/.cargo/bin — where `cargo install sccache`, the install
+# this script's own section 2 prints, puts the binary. So on the documented invocation of a standard
+# toolchain box this precondition said "no sccache on this box" and `--fix-sccache-cap` silently
+# repaired nothing: a false ABSENCE, reported about a tool that is installed.
+#
+# THE PRECONDITION NOW ASKS ONLY WHERE IT IS ENTITLED TO. When `$EUID` is numeric and NON-ZERO we
+# ARE the account a gate runs as, so our own PATH is a sound proxy for "does this box have sccache
+# at all" and a genuine absence stops the section before it resolves privilege — the property
+# test_perf_capability_bootstrap.sh pins. When we are root (or `$EUID` is unreadable) the ambient
+# PATH belongs to a context nobody launches gates from, so availability is decided BY THE SESSIONS,
+# exactly where every other binary question in this section is asked; `scc_resolve_binary` already
+# reports a genuinely absent tool as `unresolved:no launch context resolved an sccache at all`, and
+# an unresolvable identity is UNMEASURED before any probe runs, so the bypass cannot buy a false
+# certification and cannot make a privileged call on a box with no identity to probe.
+#
+# DECLARED RESIDUAL, in the fail-closed direction: a NON-root run whose own PATH lacks sccache while
+# its `sudo -i` login session has it still reports UNMEASURED here. That is a wrong ANSWER, never a
+# wrong CERTIFICATION, and closing it would mean probing before knowing there is anything to probe.
+scc_pre_euid="${EUID-}"
+case "$scc_pre_euid" in ''|*[!0-9]*) scc_pre_euid="" ;; esac
 if [ "$SCC_SECTION_OK" = 1 ] && ! have sccache; then
-  warn "sccache-cap: UNMEASURED (no 'sccache' on this box's PATH, so there is no cap to verify and nothing to persist for: the value->bytes oracle, the running server and the agreed binary are all questions about a tool that is not installed)"
-  info "install sccache first (section 2 above prints the command); this section makes no privileged call at all when the tool is absent"
-  SCC_SECTION_OK=0
+  if [ -n "$scc_pre_euid" ] && [ "$scc_pre_euid" != 0 ]; then
+    warn "sccache-cap: UNMEASURED (no 'sccache' on this box's PATH, so there is no cap to verify and nothing to persist for: the value->bytes oracle, the running server and the agreed binary are all questions about a tool that is not installed)"
+    info "install sccache first (section 2 above prints the command); this section makes no privileged call at all when the tool is absent"
+    SCC_SECTION_OK=0
+  else
+    info "note: no 'sccache' on THIS process's PATH, but this process is root${SUDO_UID:+ under sudo from uid $SUDO_UID} — and sudo's secure_path routinely omits the invoking user's ~/.cargo/bin, where 'cargo install sccache' puts it. So the ambient PATH is NOT authoritative here and availability is decided by the SESSION contexts below; a genuinely absent tool is reported there, by the same check that names which context could not run it"
+  fi
 fi
 
 # `$EUID` — bash's own readonly — NEVER a PATH-resolved `id`, and a nonnumeric value is

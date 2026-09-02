@@ -4618,6 +4618,35 @@ else
     printf '%s\n' "$scc_sl_ns" | head -6
   fi
 
+  # 12b-f1b. THE AMBIENT PRECONDITION MAY ONLY ANSWER FOR THE CONTEXT IT IS (roborev job 399, f1).
+  #          Under the documented `sudo bash <this script>` the ambient PATH is sudo's secure_path,
+  #          which omits ~/.cargo/bin — where section 2's own `cargo install sccache` puts the
+  #          binary — so the precondition above reported "no sccache on this box" for an installed
+  #          tool and --fix-sccache-cap repaired nothing. It is now gated on being the account a
+  #          gate runs as: a numeric NON-ZERO EUID.
+  #
+  #          THE BEHAVIOURAL HALF IS 12b-f ABOVE (this suite runs as an ordinary user, EUID != 0, so
+  #          it takes the answering branch and must still refuse without asking for privilege).
+  #          THE ROOT HALF IS NOT EXERCISABLE HERE, AND IS LABELLED AS SUCH RATHER THAN DRESSED UP:
+  #          `$EUID` is bash's own readonly and this suite is not root, so no fixture can make that
+  #          branch execute — a `sudo`/`unshare` fixture would test a different box and a SKIP here
+  #          is policed by case 13. So it is asserted STRUCTURALLY over the SHIPPED source: the
+  #          absence verdict must be EUID-gated, and the bypass must exist and say why the ambient
+  #          PATH is not authoritative. Structural, not behavioural — it proves the gate is written,
+  #          never that it fires.
+  scc_pre_src=$(sed -n '/^scc_pre_euid=/,/^fi$/p' "$PIN_BS")
+  if out_has "$scc_pre_src" -E '^scc_pre_euid="\$\{EUID-\}"$' \
+     && out_has "$scc_pre_src" -E "^case \"\\\$scc_pre_euid\" in ''\|\*\[!0-9\]\*\)" \
+     && out_has "$scc_pre_src" -E '^  if \[ -n "\$scc_pre_euid" \] && \[ "\$scc_pre_euid" != 0 \]; then$' \
+     && out_has "$scc_pre_src" 'no cap to verify' \
+     && out_has "$scc_pre_src" 'secure_path' \
+     && out_has "$scc_pre_src" 'decided by the SESSION contexts'; then
+    ok "sccache-cap: the ambient-absence verdict is gated on a numeric non-zero EUID, and root bypasses it to the session contexts (structural: this suite cannot be root)"
+  else
+    bad "sccache-cap: the ambient precondition is not EUID-gated — under 'sudo bash bootstrap' a cargo-installed sccache reads as absent and --fix-sccache-cap repairs nothing"
+    printf '%s\n' "$scc_pre_src" | head -8
+  fi
+
   # 12b-f2. THE BINARY IS PART OF THE OBJECT (issue #3727 roborev round 6, f1). Round 3 moved the
   #         ROUTING into the measured session and kept the binary ours; "ours" is bootstrap's ambient
   #         PATH, which under `sudo bash bootstrap` is ROOT's — so the section could ask one sccache
