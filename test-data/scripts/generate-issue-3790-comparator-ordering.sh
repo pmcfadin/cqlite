@@ -284,11 +284,10 @@ for line in sys.stdin:
       lines=$(wc -l < "$jsonl_file" | tr -d ' ')
       log "  OK: $jsonl_file ($lines partitions)"
     fi
-  # SCOPED TO THIS TABLE (roborev job 53, finding 2). Keyspace-wide would rewrite a
-  # sibling table's committed sidecars if the output keyspace ever holds more than
-  # `collection_order` -- the generator only owns what it just wrote.
-  done < <(find "$sstables_dir/$KEYSPACE" -type f -path "*/${TABLE}-*/*" \
-            -name "*-Data.db" -not -name "._*" -print0 \
+  # SCOPED TO THE ONE CAPTURED GENERATION DIRECTORY (roborev jobs 53 + 63): the
+  # generator only owns what it just wrote, and `$GEN_DIR` is the exact
+  # <TABLE>-<32-hex> path validated at export — not a re-glob with a looser rule.
+  done < <(find "$GEN_DIR" -type f -name "*-Data.db" -not -name "._*" -print0 \
             2>/dev/null || true)
 }
 
@@ -437,6 +436,30 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
       shopt -u nullglob
       cp -r "$TMPDIR_EXPORT/data/$KEYSPACE/." "$OUT_DIR/$KEYSPACE/"
       log "$KEYSPACE SSTables placed in $OUT_DIR/$KEYSPACE"
+
+      # CAPTURE THE ONE EXPORTED GENERATION DIRECTORY, ONCE (roborev job 63).
+      # The deletion loop above requires an exact <TABLE>-<32-hex> basename, but the
+      # post-export passes used to re-glob `${TABLE}-*`, which is LOOSER: a
+      # preserved unrelated directory (say `collection_order-scratch`) that the
+      # deletion deliberately leaves alone could still be counted, cleaned,
+      # selected as the golden, or staged. The two halves disagreed about what a
+      # generation directory IS. Resolve it by naming the directory once, here,
+      # from the same exact shape — then every later pass uses THAT path instead of
+      # re-deriving it with a different rule.
+      shopt -s nullglob
+      _gens=()
+      for _cand in "$OUT_DIR/$KEYSPACE/$TABLE"-*; do
+        [[ -d "$_cand" && ! -L "$_cand" ]] || continue
+        [[ "$(basename "$_cand")" =~ ^${TABLE}-[0-9a-f]{32}$ ]] || continue
+        _gens+=("$_cand")
+      done
+      shopt -u nullglob
+      case "${#_gens[@]}" in
+        1) GEN_DIR="${_gens[0]}" ;;
+        0) fail "no <$TABLE>-<32-hex> generation directory under $OUT_DIR/$KEYSPACE after export" ;;
+        *) fail "expected ONE generation directory after export, found ${#_gens[@]}: ${_gens[*]}" ;;
+      esac
+      log "generation directory: $GEN_DIR"
     else
       fail "Expected $TMPDIR_EXPORT/data/$KEYSPACE but it was not found. Export failed."
     fi
@@ -486,14 +509,13 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     else
       log "  WARNING: Empty statistics for $rel"
     fi
-  # Both scoped to this table (roborev job 53, finding 2): the statistics pass WRITES
-  # a *-Statistics.db.txt beside every match and the cleanup pass DELETES, so a
-  # keyspace-wide sweep could truncate or remove a sibling table's committed files.
-  done < <(find "$OUT_DIR/$KEYSPACE" -path "*/${TABLE}-*/*" \
-            -name "*-Data.db" -not -name "._*" -print0)
+  # Both scoped to the ONE captured generation directory (roborev jobs 53 + 63):
+  # the statistics pass WRITES a *-Statistics.db.txt beside every match and the
+  # cleanup pass DELETES, so anything broader than what this run exported could
+  # truncate or remove a file the generator does not own.
+  done < <(find "$GEN_DIR" -name "*-Data.db" -not -name "._*" -print0)
 
-  find "$OUT_DIR/$KEYSPACE" -path "*/${TABLE}-*/*" \
-    \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
+  find "$GEN_DIR" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
 
   # Every ordering-bearing value must actually appear in the golden, or the
   # fixture does not carry the subject of issue #3790. Checked per VALUE rather
@@ -542,16 +564,22 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   echo "  git -C '$REPO_ROOT' add -A -- \\"
   echo "    '$OUT_DIR'/$KEYSPACE"
   echo ""
+  # The ADD paths name the ONE generation directory this run exported (roborev job
+  # 63), not `$KEYSPACE/*/`: a keyspace-wide glob would force-add files from any
+  # other directory that happens to sit there, including one the deletion pass
+  # deliberately preserved. The `add -A` above is deliberately keyspace-scoped
+  # instead, because its whole job is to stage the PREVIOUS generation's deletion,
+  # and that directory no longer exists to be named.
   echo "  # Force-add the .db binaries (gitignored — MUST use -f):"
   echo "  git -C '$REPO_ROOT' add -f \\"
-  echo "    '$OUT_DIR'/$KEYSPACE/*/*.db"
+  echo "    '$GEN_DIR'/*.db"
   echo ""
   echo "  # Add the sidecars normally (not gitignored):"
   echo "  git -C '$REPO_ROOT' add \\"
-  echo "    '$OUT_DIR'/$KEYSPACE/*/*.jsonl \\"
-  echo "    '$OUT_DIR'/$KEYSPACE/*/*TOC.txt \\"
-  echo "    '$OUT_DIR'/$KEYSPACE/*/*.crc32 \\"
-  echo "    '$OUT_DIR'/$KEYSPACE/*/*.db.txt \\"
+  echo "    '$GEN_DIR'/*.jsonl \\"
+  echo "    '$GEN_DIR'/*TOC.txt \\"
+  echo "    '$GEN_DIR'/*.crc32 \\"
+  echo "    '$GEN_DIR'/*.db.txt \\"
   echo "    '$REPO_ROOT'/test-data/schemas/issue-3790-comparator-ordering.cql \\"
   echo "    '$REPO_ROOT'/test-data/scripts/generate-issue-3790-comparator-ordering.sh"
   echo ""
