@@ -543,6 +543,36 @@ That is a pass derived from the absence of a bad signal, in the one check added
 to stop exactly that, and it is why there is a fourth token: `UNRECOGNISED` is
 disclosed as *not known to be local*, distinctly from `NOT-MEASURABLE`.
 
+**THE DRIVER'S REFUSALS PROTECT ONLY SESSIONS THE DRIVER CREATED.** Three
+consecutive rounds found one boundary from three angles — the ticket recorded
+but not pinned, the arms pinned in the driver and unchecked in the analyzer, the
+workload validated at pre-flight and trusted at analysis — and each was patched
+where it was shown. The analyzer treats manifests as untrusted data everywhere
+*except* for the properties a driver was told to enforce, so a hand-made or
+edited manifest walked straight past them: `grep -c ticket_content
+analyze-ab.py` was **0**, and the file's only mention of the pinned commit was
+its own **docstring**. A requirement stated in prose with no check behind it —
+the same shape as the `nproc` comment, one file over.
+
+The fix is an **enumeration** rather than two patches: every property that gates
+a verdict, each required to have an analyzer-side refusal. Twenty of them, and
+the enumeration found no members nobody had thought of, which is itself the
+result worth recording — the boundary was systematic, the omissions were not.
+
+**The list is curated and says so.** There is no mechanical way to derive *the
+set of properties a verdict depends on* from source, so it can be wrong by
+OMISSION; what **is** derived is whether each named property still has a
+refusal, so it can never be wrong by staleness. That is the honest half of a
+guard whose subject cannot be computed, and stating which half is which is the
+difference between a census and a claim.
+
+**AND THE PLANTS FOUND THAT ALL THREE FIXES HAD NO CASES AT ALL.** Fixed,
+green, and untested — the suite passed unchanged with every fix reverted. That
+is the second consecutive round where planting found a gap in the coverage
+rather than in the code, and it is the argument for planting over re-reading: a
+fix and its case feel like one act while writing them, and only reverting the
+fix distinguishes them.
+
 **THE SHARPEST INSTANCE OF THE LABEL-VERSUS-PROPERTY CLASS IS THE ONE THAT
 LOOKED LIKE ITS FIX.** The narrow-rig gate began as an instance-type string;
 that was correctly rejected as a *label* and replaced with `nproc`, described in
