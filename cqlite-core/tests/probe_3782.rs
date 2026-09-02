@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use cqlite_core::ingestion::{ingest, IngestionConfig};
+use cqlite_core::query::result::StreamingConfig;
 use cqlite_core::Database;
 
 fn datasets_root() -> PathBuf {
@@ -30,30 +31,46 @@ async fn setup(keyspace: &str, schema_file: &str, data_dir: PathBuf) -> Database
 /// of WELL-FORMED corpus tables produce?
 #[tokio::test]
 async fn q4_wellformed_corpus_broad_read() {
+    for streaming_leg in [false, true] {
+    cqlite_core::probe3782::reset();
     let root = datasets_root().join("sstables");
     let cases: &[(&str, &str, &[&str])] = &[
         ("test_basic", "basic-types.cql", &["simple_table", "composite_key_table", "multi_partition_table", "uncompressed_table", "static_columns_table", "compression_test_table", "ttl_test_table"]),
         ("test_wide_rows", "wide-rows.cql", &["wide_partition_table", "many_columns_table", "large_blob_table", "chat_messages", "document_versions", "product_catalog", "sparse_data_table", "multi_metric_timeseries"]),
         ("test_timeseries", "time-series.cql", &["sensor_data", "app_metrics", "user_activity", "stock_prices", "log_entries", "event_store", "user_sessions", "tick_data", "time_bucketed_counters"]),
-        ("test_collections", "collections.cql", &["list_table", "set_table", "map_table", "nested_collections", "frozen_collections", "tuple_table", "udt_table", "complex_nested_table"]),
+        ("test_collections", "collections.cql", &["collection_table", "large_collections_table", "nested_collections_table", "collections_with_udts", "frozen_collections_table", "typed_collections_table", "empty_collections_table", "collection_clustering_table"]),
         ("test_comp", "compression-parity.cql", &["lz4_table", "snappy_table", "deflate_table", "zstd_table", "uncompressed_table", "short_final_chunk"]),
         ("test_da", "da-test.cql", &["simple_table", "collection_table", "ttl_table"]),
         ("test_big", "wide-table-bti.cql", &["wide_partition"]),
     ];
-    cqlite_core::probe3782::reset();
     let mut total_rows = 0usize;
     let mut read = 0usize;
+    let mut stream_rows = 0usize;
     for (ks, schema, tables) in cases {
         if !root.join(ks).exists() { eprintln!("PROBE3782 SKIP keyspace {ks}"); continue; }
         let db = setup(ks, schema, root.clone()).await;
         for t in *tables {
-            match db.execute(&format!("SELECT * FROM {ks}.{t}")).await {
+            let sql = format!("SELECT * FROM {ks}.{t}");
+            if streaming_leg { } else {
+            match db.execute(&sql).await {
                 Ok(r) => { total_rows += r.rows.len(); read += 1; eprintln!("PROBE3782 read {ks}.{t} rows={}", r.rows.len()); }
                 Err(e) => eprintln!("PROBE3782 ERR {ks}.{t}: {e}"),
             }
+            }
+            if streaming_leg {
+            // Streaming (windowed) leg: buffer_size=1 forces per-row backpressure.
+            for bufsz in [1usize, 8] {
+                let cfg = StreamingConfig { buffer_size: bufsz, ..Default::default() };
+                match db.execute_streaming(&sql, cfg).await {
+                    Ok(mut it) => { let mut n = 0usize; while let Some(item) = it.next_async().await { if item.is_ok() { n += 1; } } stream_rows += n; }
+                    Err(e) => eprintln!("PROBE3782 STREAM ERR {ks}.{t}: {e}"),
+                }
+            }
+            }
         }
     }
-    eprintln!("PROBE3782 total tables read={read} total_rows={total_rows}");
-    assert!(total_rows > 0, "0-rows-when-present guard");
-    cqlite_core::probe3782::dump("q4-wellformed");
+    eprintln!("PROBE3782 total tables read={read} total_rows={total_rows} stream_rows={stream_rows}");
+    assert!(total_rows > 0 || streaming_leg, "0-rows-when-present guard");
+    cqlite_core::probe3782::dump(if streaming_leg { "q4-STREAMING" } else { "q4-MATERIALIZING" });
+    }
 }

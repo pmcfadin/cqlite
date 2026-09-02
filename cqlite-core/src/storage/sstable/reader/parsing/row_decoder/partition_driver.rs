@@ -205,6 +205,7 @@ impl V5CompressedLegacyParser {
         // Issue #1046: per-PARTITION resolution build (this driver is re-entered
         // once per partition by the sliding-window caller; allocations scale with
         // partition count, not row count). Borrows header strings + schema.
+        crate::probe3782::hit("partition_driver:ENTER", if at_final_chunk { "at_final_chunk=true" } else { "at_final_chunk=false" });
         let resolution = RowColumnResolution::build(schema, reader);
 
         // Finding 1 (#827): buffer this partition's rows locally and forward them
