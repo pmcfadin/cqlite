@@ -99,11 +99,7 @@ pub use compaction_row::{
 // Re-export V5CompressedLegacyParser for integration testing (Issue #166 regression tests)
 #[doc(hidden)]
 pub use parsing::PublicV5CompressedLegacyParser as V5CompressedLegacyParser;
-// Issue #3782 (roborev job 52): the buffer-extent contract those parses take.
-// `doc(hidden)` mirrors the parser it parameterises — rustdoc would otherwise
-// show a type whose only consumers are hidden — but the contract itself is
-// documented ON the type (`row_decoder::buffer_extent`), which is where a
-// caller reading the signature lands.
+// #3782: the extent those public `parse_block*` REQUIRE (contract on the type).
 #[doc(hidden)]
 pub use parsing::PublicBufferExtent as BufferExtent;
 
