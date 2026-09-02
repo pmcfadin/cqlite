@@ -14789,7 +14789,7 @@ run_pub_surface() {
 # differentially against awk over every live pid. Hermetic; one bounded nested
 # `--only file-size` for wiring evidence (cannot select tooling-tests, so no recursion).
 # Also runs scripts/tests/test_gate_component_verdict.sh (#3750), the non-vacuity proof
-# for the split of COMPLETION from VERDICT: 87 cases (per-section floors) over
+# for the split of COMPLETION from VERDICT: 96 cases (per-section floors) over
 # scripts/gate-component-verdict.sh
 # and the two DOCUMENTED text-completion grammars. Pins the case the lead named — a
 # COMPLETED `--only` run whose component SKIPped is NOT a pass, because a SKIP means the

@@ -576,9 +576,13 @@ expect "10.5 a summary-integrity line (only ever FAIL) invalidates the block too
 # CONTROL: the check is TOKEN-terminated, not whole-value equality — the gate emits
 # `tree-integrity: PASS (selftest)` and `PASS (lockfile-settled: …)`.
 SA6="$TMP/ti-detail.txt"
+# The scope line is present because F4 requires it of any PARTIAL block — and no emitter
+# produces a PARTIAL token without one, so a fixture lacking it was never realistic. This
+# case's subject is the tree-integrity TOKEN, not the scope line.
 { echo "==== AGENT-GATE SUMMARY ===="
   echo "run-id: run-1"
   echo "tree-integrity: PASS (lockfile-settled: Cargo.lock)"
+  echo "mode: PARTIAL (--only tooling-tests) - does NOT count as the gate"
   comp_line tooling-tests PASS 1112s
   echo "RESULT: PARTIAL"
   echo "==== END AGENT-GATE SUMMARY ===="
@@ -1042,12 +1046,14 @@ fi
 # (the taxonomy descope replaced one code-taxonomy case with four liveness-silence ones)
 # and added section 14, so the total rose 63 -> 67; round 3 added section 15 (the third
 # per-mode completion grammar), 67 -> 78; round 4 added sections 16 (the mode filter over
-# the reader's token) and 17 (the anchored two-emitter line shape), 78 -> 87. Raised
+# the reader's token) and 17 (the anchored line shape), 78 -> 87; round 5 grew 17 by one and
+# added 18 (a PARTIAL token requires its scope line) and 19 (meta reads stop at RESULT:),
+# 87 -> 96. Raised
 # DELIBERATELY each time: the total is a
 # `-lt` floor, so leaving it low would let the added cases be deleted while the suite still
 # reported green — this repo's own case-floor lesson.
-SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:7 7:2 8:4 9:5 10:8 11:6 12:5 13:4 14:2 15:11 16:4 17:5"
-FLOOR=87
+SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:7 7:2 8:4 9:5 10:8 11:6 12:5 13:4 14:2 15:11 16:4 17:6 18:5 19:3"
+FLOOR=96
 for _sf in $SECTION_FLOORS; do
   _sec=${_sf%%:*}; _min=${_sf##*:}
   eval "_got=\${SEC_$_sec:-0}"

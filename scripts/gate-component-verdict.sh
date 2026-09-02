@@ -373,6 +373,34 @@ if ! sed -n "${_o},${_c}p" "$SNAP" > "$BLOCK" 2>/dev/null; then
 fi
 
 # ---------------------------------------------------------------------------
+# AND THE BLOCK STILL HAS A TAIL — so every META read stops at `RESULT:` (F5).
+#
+# A RESIDUAL OF B1'S OWN FIX, and the same class as it: B1 bounded reads to the BLOCK,
+# and a line sitting between `RESULT:` and the closing marker is inside the block and
+# AFTER the verdict. A stale or injected component line there was being accepted as this
+# run's verdict.
+#
+# MEASURED rather than assumed: every one of the shipped gate's nine `echo "RESULT: …`
+# writes is IMMEDIATELY followed by `$SUMMARY_END_MARKER`, so nothing legitimate is ever
+# written between them and truncating there cannot drop real content. The suite asserts
+# that premise BY DERIVATION over agent-gate.sh (case 19.3), so it cannot rot silently.
+#
+# $BODY is what every META read uses — the integrity lines, the `--only` scope line and
+# the component lines. Only the RESULT token itself is read from $BLOCK, since that is the
+# line $BODY stops at.
+BODY="$SNAPDIR/body"
+_res_ln=$(grep -n '^RESULT: ' "$BLOCK" | head -1 | cut -d: -f1)
+case "$_res_ln" in
+  ''|*[!0-9]*) cnm "block-body-unmeasurable; the block's RESULT line number could not be read, so the meta section cannot be bounded" ;;
+esac
+if [ "$_res_ln" -le 1 ]; then
+  cnm "block-body-empty; the block's RESULT line is at line $_res_ln, leaving no meta section to read"
+fi
+if ! sed -n "1,$(( _res_ln - 1 ))p" "$BLOCK" > "$BODY" 2>/dev/null; then
+  cnm "block-body-unmeasurable; the meta section could not be sliced out of the block"
+fi
+
+# ---------------------------------------------------------------------------
 # ENFORCE THE MODE AGAINST THE ARTIFACT (not merely against the flag).
 #
 # `--only` uses the FULL-gate markers (only --lite/--delta swap them, agent-gate.sh's
@@ -405,7 +433,7 @@ esac
 # Checked BEFORE the component read, because they are the stronger statement and the more
 # actionable cause. Token compare exactly as premerge-assert.sh does it.
 # ---------------------------------------------------------------------------
-_n_ti=$(_count_re '^tree-integrity:[[:space:]]' "$BLOCK") \
+_n_ti=$(_count_re '^tree-integrity:[[:space:]]' "$BODY") \
   || cnm "tree-integrity-unmeasurable; the scan for the tree-integrity line failed"
 if [ "$_n_ti" -eq 0 ]; then
   cnm "tree-integrity-absent; the block carries no tree-integrity line, so whether the tree was stable during the run cannot be established — never assumed benign (#2926)"
@@ -413,7 +441,7 @@ fi
 if [ "$_n_ti" -gt 1 ]; then
   cnm "tree-integrity-ambiguous; the block carries $_n_ti tree-integrity lines, and ambiguity is never resolved in favour of PASS"
 fi
-_ti=$(_key_token tree-integrity "$BLOCK")
+_ti=$(_key_token tree-integrity "$BODY")
 case "$_ti" in
   PASS) ;;
   FAIL)
@@ -423,7 +451,7 @@ case "$_ti" in
   *)
     cnm "tree-integrity token '${_ti:-<unreadable>}' is outside the closed set PASS|FAIL|SKIP|PENDING, so it is never read as a pass" ;;
 esac
-_n_si=$(_count_re '^summary-integrity:[[:space:]]' "$BLOCK") \
+_n_si=$(_count_re '^summary-integrity:[[:space:]]' "$BODY") \
   || cnm "summary-integrity-unmeasurable; the scan for the summary-integrity line failed"
 if [ "$_n_si" -gt 1 ]; then
   cnm "summary-integrity-ambiguous; the block carries $_n_si summary-integrity lines"
@@ -431,7 +459,7 @@ fi
 if [ "$_n_si" -eq 1 ]; then
   # agent-gate.sh emits this line ONLY on detection, and only ever with a FAIL token — so
   # its mere PRESENCE is the non-certifying signal. An unexpected token is still not a pass.
-  _si=$(_key_token summary-integrity "$BLOCK")
+  _si=$(_key_token summary-integrity "$BODY")
   case "$_si" in
     FAIL) notpass "summary-integrity FAIL — a mid-run summary clobber was detected (#2874), so the block is non-certifying and NO component verdict in it can be read as a pass — including this one, whose own line this check deliberately has not read" ;;
     *)    cnm "summary-integrity token '${_si:-<unreadable>}' is unrecognised; the gate emits this line only on detection, so its presence is never benign" ;;
@@ -472,60 +500,88 @@ esac
 # be discarded in a subshell (#3400), and grep's status is CHECKED: rc >= 2 is a failed
 # measurement, not "no match".
 # ---------------------------------------------------------------------------
-# FULLY ANCHORED, AND AN ALTERNATION OVER THE **TWO** REAL EMITTED SHAPES.
+# FULLY ANCHORED, AND REQUIRING THE **ANNOTATED** SHAPE — the round-5 correction.
 # Validating only a PREFIX accepted `fmt: PASS (1s) arbitrary text` as a genuine component
-# verdict (F2). Anchored at BOTH ends now — and the alternation is load-bearing, so do NOT
-# "tidy" it into one branch:
+# verdict (F2). Anchored at BOTH ends now, AND against ONE shape rather than two:
 #
-#   annotated    agent-gate.sh's `_fm_summary_line`:        printf '%-18s %s (%s)  %s'
-#                -> TWO spaces after the duration, then a non-empty annotation
+#   annotated    agent-gate.sh's `_fm_summary_line`:          printf '%-18s %s (%s)  %s'
+#                -> TWO spaces after the duration, then a non-empty annotation. ACCEPTED.
 #   unannotated  agent-gate.sh's `_tree_boundary_meta_lines`: printf '%-18s %s (%ss)\n'
-#                -> NOTHING after the duration; this is the shape a tree-integrity
-#                   BOUNDARY block carries, and it is a legitimate component line
+#                -> NOTHING after the duration. REJECTED HERE, because it is unreachable.
 #
-# Requiring the annotation — the obvious tightening, since `_fm_summary_line` always emits
-# one — assumes a single emitter and would REJECT every boundary-emitted component line: a
-# false FAIL on correct input, and a tool that reds on correct input is the tool lanes learn
-# to waive. The suite's 17.3 is the regression guard for exactly that, and 17.5 asserts BY
-# DERIVATION that the shipped gate still has exactly these two formats, so a THIRD emitter
-# reds rather than silently matching neither branch.
+# ROUND 4 ACCEPTED BOTH AND THAT WAS WRONG — not about the emitter, about the ORDER OF THE
+# CHECKS. The unannotated shape is real (this lane's own tree-mutated run emitted
+# `tooling-tests:     FAIL (512s)`), but it can never reach this regex. MEASURED from source,
+# all four legs: `_tree_boundary_meta_lines` has EXACTLY ONE caller (`_tree_boundary_fail`);
+# that caller requires TREE_GUARDED=1, so no SKIP path coexists; it calls
+# `_tree_detection_mark` immediately before, whose BOTH arms route to `_tree_fail_closed`,
+# which sets `tree-integrity: FAIL`; and `_emit_terminal_summary` names none of
+# `_tree_finalize`/`_tree_meta_array`/`TREE_INTEGRITY_LINE`, so nothing resets it to PASS in
+# between. So the unannotated shape occurs ONLY in `tree-integrity: FAIL` blocks — which the
+# integrity precondition ABOVE rejects before the component read. Accepting it here was DEAD
+# permissiveness, the same root cause as the `mode:` skip above.
+#
+# THE SUITE KEEPS BOTH GUARDS AGAINST GETTING THIS WRONG AGAIN: 17.3 pins the real boundary
+# block being rejected ON INTEGRITY (the reachable behaviour), and 17.5 asserts BY DERIVATION
+# that the shipped gate still has exactly TWO component-line emitters — so if a third appears,
+# or if the boundary emitter ever starts appearing in an integrity-PASS block, it reds rather
+# than silently widening what counts as certifying evidence.
 #
 # DECLARED RESIDUAL: the annotation is FREE TEXT containing spaces (`[test cqlite-core
 # --features cli-helpers]`), so garbage APPENDED to an annotation is indistinguishable from
-# annotation content and the annotated branch must stay permissive after the two spaces.
-# What the anchoring closes is the SINGLE-space tail, which no emitter can produce.
-_COMP_LINE_RE="^${COMP_RE}: +[A-Za-z][A-Za-z-]* \([0-9]+s\)(  .+)?$"
-COMP_LINES=$(grep -E "$_COMP_LINE_RE" "$BLOCK"); _grc=$?
+# annotation content and the tail must stay permissive after the two spaces. What the
+# anchoring closes is the SINGLE-space tail, which no emitter can produce.
+_COMP_LINE_RE="^${COMP_RE}: +[A-Za-z][A-Za-z-]* \([0-9]+s\)  .+$"
+COMP_LINES=$(grep -E "$_COMP_LINE_RE" "$BODY"); _grc=$?
 if [ "$_grc" -ge 2 ]; then
   cnm "component-scan-failed; the scan for this component's line failed (rc=$_grc), and a failed measurement is never reported as an absence"
 fi
 COMP_N=0
 [ -n "$COMP_LINES" ] && COMP_N=$(printf '%s\n' "$COMP_LINES" | grep -c '^')
 
-# WHERE THE BLOCK STATES ITS `--only` SCOPE, the component must be in it — checked only
-# when a component LINE was found, so the honest "absent" answer below is preserved for a
-# component the run simply did not select (which is a NOT-PASS, not a refusal).
+# A `PARTIAL` RUN TOKEN **REQUIRES** ITS `--only` SCOPE LINE (F4), and then the component
+# must be in it.
 #
-# TWO TRAPS, both respected or this trades a false PASS for a false FAIL:
-#   * `--only` takes a COMMA-SEPARATED LIST, so equality would red a correct
-#     `--only fmt,clippy`. Membership uses the gate's OWN predicate — comma to space,
-#     then a whole-word match (agent-gate.sh's `grep -qw "$name" <<<"${ONLY//,/ }"`) — so
-#     the two agree by construction and any looseness can only widen membership.
-#   * the tree-integrity BOUNDARY emit writes NO `mode:` line at all, so requiring one
-#     unconditionally would red a legitimate `--only` block. Absent line ⇒ not checked.
-if [ "$COMP_N" -ge 1 ]; then
-  _n_mode=$(_count_re '^mode: PARTIAL \(--only ' "$BLOCK") \
-    || cnm "mode-scope-unmeasurable; the scan for the block's --only scope failed"
-  if [ "$_n_mode" -gt 1 ]; then
-    cnm "mode-scope-ambiguous; the block states $_n_mode --only scopes"
+# The old rule skipped the check when no `mode:` line was present, justified by the
+# tree-integrity BOUNDARY emit writing none. THAT JUSTIFICATION IS VOID, and this is the
+# same root cause as the component-shape tightening below: B3's integrity precondition
+# landed UPSTREAM of here, which made the justifying case unreachable at the point of use,
+# and the permissiveness went dead without anyone re-deriving it.
+#
+# MEASURED from source, not inherited: `OVERALL=PARTIAL` has EXACTLY ONE site in the gate
+# (its `--only` demotion), and the `mode: PARTIAL (--only …)` line is appended TWO LINES
+# ABOVE IT INSIDE THE SAME `if [ -n "$ONLY" ]` block — so a PARTIAL token and its scope line
+# are inseparable BY CONSTRUCTION. No other emitter publishes a PARTIAL token. The only
+# component-line-bearing blocks with no `mode:` line are the boundary FAIL blocks, whose
+# token is FAIL, and which the integrity gate above rejects regardless.
+#
+# TRAP 2 THEREFORE SURVIVES, NARROWED TO WHAT IS REAL: the scope line is required only where
+# the RUN TOKEN says the run was scoped. A FAIL-token block with no `mode:` line is still
+# answerable, so this cannot red a legitimate boundary-shaped block.
+#
+# TRAP 1 IS UNCHANGED: `--only` takes a COMMA-SEPARATED LIST, so equality would red a
+# correct `--only fmt,clippy`. Membership uses the gate's OWN predicate — comma to space,
+# then a whole-word match (agent-gate.sh's `grep -qw "$name" <<<"${ONLY//,/ }"`) — so the two
+# agree by construction and any looseness can only widen membership.
+_n_mode=$(_count_re '^mode: PARTIAL \(--only ' "$BODY") \
+  || cnm "mode-scope-unmeasurable; the scan for the block's --only scope failed"
+if [ "$_n_mode" -gt 1 ]; then
+  cnm "mode-scope-ambiguous; the block states $_n_mode --only scopes, and ambiguity is never resolved in favour of PASS"
+fi
+if [ "$RUN_TOKEN" = PARTIAL ] && [ "$_n_mode" -ne 1 ]; then
+  cnm "mode-scope-missing; the run token is PARTIAL, which the gate emits ONLY from its --only demotion, and that demotion appends the 'mode: PARTIAL (--only …)' line in the same block — so a PARTIAL token with $_n_mode scope lines is a shape no emitter produces"
+fi
+if [ "$_n_mode" -eq 1 ]; then
+  _scope=$(sed -n 's/^mode: PARTIAL (--only \([^)]*\)).*/\1/p' "$BODY" | head -1)
+  # An EMPTY scope is not a scope: the gate's `--only` argument cannot be empty, so this is
+  # a malformed line and never a licence to skip the membership test.
+  if [ -z "${_scope// /}" ]; then
+    cnm "mode-scope-malformed; the block's --only scope is empty, which the gate cannot emit"
   fi
-  if [ "$_n_mode" -eq 1 ]; then
-    _scope=$(sed -n 's/^mode: PARTIAL (--only \([^)]*\)).*/\1/p' "$BLOCK" | head -1)
-    # `-F`: the name is DATA here, not a pattern. Every other site interpolates the
-    # `.`-escaped COMP_RE; a raw `$COMPONENT` as a BRE would make `a.b` match `axb`.
-    if ! grep -Fqw -- "$COMPONENT" <<<"${_scope//,/ }"; then
-      cnm "mode-scope-contradiction; the block states it ran only '$_scope', yet carries a component line for '$COMPONENT' — the block's own scope and its content disagree, and which to believe cannot be established"
-    fi
+  # `-F`: the name is DATA here, not a pattern. Every other site interpolates the
+  # `.`-escaped COMP_RE; a raw `$COMPONENT` as a BRE would make `a.b` match `axb`.
+  if [ "$COMP_N" -ge 1 ] && ! grep -Fqw -- "$COMPONENT" <<<"${_scope//,/ }"; then
+    cnm "mode-scope-contradiction; the block states it ran only '$_scope', yet carries a component line for '$COMPONENT' — the block's own scope and its content disagree, and which to believe cannot be established"
   fi
 fi
 
@@ -538,7 +594,7 @@ if [ "$COMP_N" -eq 0 ]; then
   # single-extent: the component was not selected, or it crashed before recording. Either
   # way the check did not pass, and this must never soften to "probably fine".
   _hint=""
-  if grep -qE "^${COMP_RE}: " "$BLOCK"; then
+  if grep -qE "^${COMP_RE}: " "$BODY"; then
     _hint=" (a non-component line with that prefix exists — a META line carries no (Ns) duration field and is not a verdict)"
   fi
   notpass "component-absent; the run completed and its block does not name this component as a component${_hint}; run-result=$RUN_TOKEN"
