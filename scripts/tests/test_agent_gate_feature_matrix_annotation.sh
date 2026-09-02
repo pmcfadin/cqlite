@@ -163,13 +163,29 @@ else
   # Derived, so a FUTURE dynamic append joins this check with no edit here. Only literal
   # appends are derivable; the `NAMES+=("$var")` sites are the COMPONENTS-driven paths already
   # covered by comps_arr, so nothing is silently dropped.
-  dyn_names=$(grep -oE 'NAMES\+=\("[a-z0-9][a-z0-9-]*"\)' "$GATE" \
-    | sed -E 's/.*\("(.*)"\)/\1/' | sort -u)
+  # TWO DERIVED SOURCES, because the emit path has two — and this table was widened to
+  # match the census guard's, which had already been corrected (roborev job 401).
+  #   (1) the run_delta_* helpers' `NAMES+=("<literal>")` appends;
+  #   (2) any `record_result "<literal>"` call, from a NON-COMMENT line.
+  # Enumerating only (1) is how `tree-selftest` — the #2926 hook, which reaches a row through
+  # record_result and appears in NEITHER static set — stayed undeclared here and rendered
+  # [UNCLASSIFIED] once #3625 routed the boundary block through _fm_summary_line. The census
+  # guard hit the identical defect in its own domain and fixed it; the tables then DRIFTED,
+  # because only one of two derivations over the same name space had been widened. The
+  # asymmetry was the defect, not either table.
+  #
+  # Kept SPELLED THE SAME WAY as scripts/tests/test_agent_gate_census.sh's derivation, so a
+  # future widening is visibly one edit in two places rather than two different ideas.
+  dyn_names=$( { grep -oE 'NAMES\+=\("[a-z0-9][a-z0-9-]*"\)' "$GATE" | sed -E 's/.*\("(.*)"\)/\1/'
+                 grep -E '^[^#]*record_result "[a-z0-9][a-z0-9-]*"' "$GATE" \
+                   | sed -E 's/.*record_result "([a-z0-9][a-z0-9-]*)".*/\1/'; } | sort -u)
   dyn_n=$(printf '%s\n' "$dyn_names" | grep -c . || true)
-  # Fail-closed on a broken derivation: an empty set would silently shrink the domain back to
-  # COMPONENTS and re-open exactly this finding. There are 3 such names today.
-  if [ "${dyn_n:-0}" -lt 1 ]; then
-    bad "A0b: derivation of the dynamic summary-name set from $GATE yielded ${dyn_n:-0} names — the domain would silently collapse to COMPONENTS (this is how job 277 F2 escaped)"
+  # Fail-closed on a broken derivation: an empty — or merely SHRUNKEN — set would silently
+  # narrow the domain back toward COMPONENTS and re-open exactly this finding. Floor of 4,
+  # the same discipline and the same number as the census guard: node-tests, scoped-tests,
+  # shell-selftests, tree-selftest.
+  if [ "${dyn_n:-0}" -lt 4 ]; then
+    bad "A0b: derivation of the dynamic summary-name set from $GATE yielded ${dyn_n:-0} names (expected at least the 4 known: node-tests, scoped-tests, shell-selftests, tree-selftest) — the domain would silently narrow toward COMPONENTS, which is how job 277 F2 escaped and how job 401 escaped again"
   else
     ok "A0b: dynamic summary-name set DERIVED from the emit path: ${dyn_n} name(s) [$(printf '%s' "$dyn_names" | tr '\n' ' ')]"
   fi

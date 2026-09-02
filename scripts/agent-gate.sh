@@ -6452,6 +6452,21 @@ _fm_component_class() {
     # python test.
     file-size|roborev-lints|pub-surface|binding-unwind-profile|delivery-telemetry)
       printf 'no-cargo' ;;
+    # tree-selftest: the #2926 hidden hook, which reaches a SUMMARY row via
+    # `record_result "tree-selftest" PASS 0` and NOT via COMPONENTS or a `NAMES+=` append —
+    # so it was undeclared here and rendered [UNCLASSIFIED] once #3625 routed the boundary
+    # block through this renderer (roborev job 401).
+    #
+    # `no-cargo` AND NOT `unobservable:<why>`, and the distinction is the one this table
+    # already draws elsewhere. `unobservable` is for a component that shells out to children
+    # this shell cannot see — tooling-tests' ~60 nested scripts, shell-selftests' arbitrary
+    # guards — where "no cargo ran" is a claim nobody can support. This hook is the opposite:
+    # a FIXED, fully readable code path in this very script (`_tree_selftest_mutate`,
+    # `_tree_finalize`, `_tree_commit_meta`, `_emit_terminal_summary`), file and git work
+    # only, invoking no child script at all. Verified: zero non-comment `cargo` in the hook's
+    # whole block. So the affirmative claim is available and `unobservable` would UNDER-claim
+    # — asserting nothing where the code can be read end to end.
+    tree-selftest) printf 'no-cargo' ;;
     # indirect: the extension is built by a driver that invokes cargo internally, so no
     # cargo argv passes through this shell. Naming the DRIVER is structural (it is the
     # command the component runs); the feature set is NOT claimed.
