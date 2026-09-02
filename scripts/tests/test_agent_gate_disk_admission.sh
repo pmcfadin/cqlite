@@ -870,11 +870,14 @@ else
   skip "I1 CONTROL: none of this host's $i_awks awk(s) reproduces the %d defect — reachability not demonstrable here"
 fi
 
-# --- I2/I3: the accepted bar range is STATED, and an over-range bar CLAMPS DOWN. ---
-# I3 is the anti-loosening assertion: discarding an over-range bar in favour of the
-# 40GiB default would turn a refusal into an ADMISSION of this same 200GiB payload.
-bar_case i-max      '1048576GiB(pinned)'      CQLITE_GATE_MIN_FREE_GB=1048576
-bar_case i-overmax  '1048576GiB(out-of-range)' CQLITE_GATE_MIN_FREE_GB="$I_BAR_HUGE"
+# --- I2/I3: the accepted bar range is STATED, and an over-range bar is FAIL-CLOSED. ---
+#
+# Round 5 rejected DISCARDING an over-range bar for the 40GiB default because that loosens
+# a bar the operator set high. Right, and incomplete: CLAMPING DOWN loosens it too, just
+# less — a requested 2 PiB floor on a multi-PiB filesystem with 1.5 PiB free would PASS
+# (roborev job 367). The honest answer is a named refusal, so I2 pins the largest bar that
+# IS representable and I3 pins the refusal one step above it.
+bar_case i-max '1048576GiB(pinned)' CQLITE_GATE_MIN_FREE_GB=1048576
 
 i3_script=$(df_script i3 "$HIGH")
 run_stub_gate i3 "$i3_script" \
@@ -884,14 +887,36 @@ i3_sum=$RS_SUMMARY; i3_err=$RS_ERR
 watch_until_exit "$RS_PID" "$RS_RUNDIR" 60; i3_status=$WX_STATUS; i3_markers=$WX_MARKERS
 assert_no_timeout "I3 over-range bar"
 if [ "$i3_status" -ne 0 ] && [ "$i3_markers" -eq 0 ]; then
-  ok "I3: an over-range bar still REFUSES a 200GiB filesystem — clamped DOWN, never defaulted (defaulting would ADMIT)"
+  ok "I3: an over-range bar REFUSES and never begins work — no substituted floor, high or low"
 else
   bad "I3: an over-range bar ADMITTED a 200GiB filesystem (exit $i3_status, markers $i3_markers) — the bar was loosened"
 fi
-if grep -q 'was NOT used AS SET (out-of-range)' "$i3_err" 2>/dev/null; then
-  ok "I3: the unusable bar is named on stderr as an operator action, with the accepted range"
+i3_line=$(grep_line "$i3_err" '^agent-gate: disk-admission: ')
+case "$i3_line" in
+  *'BAR-UNREPRESENTABLE-FAIL-CLOSED (#3755)'*"bar ${I_BAR_HUGE}GiB(out-of-range)"*)
+    ok "I3: its OWN verdict token, and the bar is reported AS TYPED rather than as a substitute" ;;
+  *"bar 1048576GiB"*)
+    bad "I3: the bar was silently CLAMPED DOWN to the maximum — a quieter floor nobody asked for: $i3_line" ;;
+  *) bad "I3: expected BAR-UNREPRESENTABLE-FAIL-CLOSED naming the typed bar, got: ${i3_line:-<none>}" ;;
+esac
+# Three refusal causes, three tokens: free space / fix the directory / fix the variable.
+if ! grep -q 'BAR-UNREPRESENTABLE' "$a_subj_sum" 2>/dev/null \
+   && grep -q '^disk-admission: FAIL-CLOSED (#3755)' "$a_subj_sum" 2>/dev/null; then
+  ok "I3: the below-bar refusal does NOT carry the bar-unrepresentable token (the three causes stay distinct)"
 else
-  bad "I3: no stderr note naming the out-of-range bar"
+  bad "I3: the refusal tokens are not distinct"
+fi
+if grep -q 'exceeds the largest representable bar' "$i3_err" 2>/dev/null; then
+  ok "I3: the remedy names the representable maximum, so the operator knows what to set"
+else
+  bad "I3: no stderr line naming the representable maximum"
+fi
+# It refuses BEFORE measuring: a configuration constant cannot be rescued by a reading, and
+# the run must not take a slot it was always going to hand back.
+if [ "$(df_calls i3)" -eq 0 ]; then
+  ok "I3: refused BEFORE any df call — an unusable bar needs no measurement"
+else
+  bad "I3: measured $(df_calls i3) time(s) before refusing on a bar that no reading could satisfy"
 fi
 
 # ===========================================================================
@@ -1723,6 +1748,98 @@ if df_operands_all k-build-td "$k_bt"; then
   ok "operand-guard: the same assertion PASSES the unmutated gate — it discriminates in both directions"
 else
   bad "operand-guard: the assertion reds the correct gate too"
+fi
+
+# ===========================================================================
+# Case U (roborev job 367, Medium): the MEASURED filesystem is the USED one —
+# the resolved target dir is PINNED as CARGO_TARGET_DIR for every later cargo.
+#
+# Only the side lane reused the resolution; MAIN-lane cargo re-resolved config
+# for itself, so an ancestor .cargo/config.toml or a CARGO_HOME change landing
+# after the metadata call sent the build to an UNMEASURED filesystem. Two
+# resolutions that have to agree is a TOCTOU hope; one the builds are pinned to
+# is structural.
+#
+# Asserted against the REAL functions, extracted verbatim from the shipped gate.
+# ===========================================================================
+u_extract() { sed -n "/^$1() {/,/^}$/p" "$GATE"; }
+for u_fn in _gate_disk_admission_pin_target_dir _gate_disk_admission_dispose; do
+  if [ -n "$(u_extract "$u_fn")" ]; then
+    ok "pin: extracted the REAL $u_fn from the shipped gate"
+  else
+    bad "pin: could not extract $u_fn — this case would be testing nothing"
+  fi
+done
+
+# u_dispose_pin <target-dir>: run the REAL disposer on an OK measurement and print the
+# CARGO_TARGET_DIR it leaves behind. Only the line renderer and the refuser are stubbed,
+# and neither is the subject.
+u_dispose_pin() {
+  (
+    set -uo pipefail
+    _DA_TARGET_DIR="$1"; _DA_STATE=OK; _DA_WHY=""
+    CARGO_TARGET_DIR="SENTINEL-UNSET"
+    DISK_ADMISSION_LINE=""
+    _gate_disk_admission_line() { DISK_ADMISSION_LINE="line"; }
+    _gate_disk_admission_refuse() { printf 'REFUSED'; exit 0; }
+    eval "$(u_extract _gate_disk_admission_pin_target_dir)"
+    eval "$(u_extract _gate_disk_admission_dispose)"
+    _gate_disk_admission_dispose "note" "detail" 2>/dev/null
+    printf '%s' "$CARGO_TARGET_DIR"
+  ) 2>/dev/null
+}
+u_got=$(u_dispose_pin /some/resolved/target)
+if [ "$u_got" = /some/resolved/target ]; then
+  ok "pin: a binding resolution EXPORTS CARGO_TARGET_DIR=<resolved dir> for every later cargo"
+else
+  bad "pin: expected CARGO_TARGET_DIR=/some/resolved/target, got '${u_got:-<empty>}'"
+fi
+# CHECK 3 of the brief: pin NOTHING when the resolution itself failed — inventing a target
+# dir from a failed resolution would move the build somewhere nobody chose.
+u_none=$(u_dispose_pin "")
+if [ "$u_none" = SENTINEL-UNSET ]; then
+  ok "pin: an UNRESOLVED target dir pins NOTHING — the caller's value is left untouched"
+else
+  bad "pin: a failed resolution still wrote CARGO_TARGET_DIR='$u_none'"
+fi
+
+# CHECK 1 of the brief: DEMONSTRATED, not reasoned. The pinned value came from cargo, so on
+# a lane with no target-dir configuration it must be exactly what cargo chooses unaided.
+u_unaided=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
+  | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])' 2>/dev/null)
+if [ -n "$u_unaided" ]; then
+  u_repinned=$(CARGO_TARGET_DIR="$u_unaided" cargo metadata --no-deps --format-version 1 2>/dev/null \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])' 2>/dev/null)
+  if [ "$u_repinned" = "$u_unaided" ]; then
+    ok "pin: NO-OP in the normal case — pinning cargo's own answer resolves to the same path ($u_unaided)"
+  else
+    bad "pin: pinning changed the resolution ($u_unaided -> ${u_repinned:-<none>}) — it is not a no-op"
+  fi
+else
+  skip "pin: cargo metadata unavailable here — the no-op demonstration could not run"
+fi
+
+# CHECK 2 of the brief: NESTED CHILDREN. A nested gate inherits the exported value; the
+# property that must survive is that the child MEASURES what it will BUILD into. Driven for
+# real: a stub gate run with CARGO_TARGET_DIR already set, exactly as a nested child sees it.
+u_inherited="$tmp/u-inherited-target"; mkdir -p "$u_inherited"
+u_script=$(df_script u "$HIGH")
+run_stub_gate u "$u_script" \
+  CARGO_TARGET_DIR="$u_inherited" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/u-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+u_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; u_status=$WX_STATUS
+assert_no_timeout "u nested inheritance"
+u_line=$(grep_line "$u_err" '^agent-gate: disk-admission: ')
+case "$u_line" in
+  *"target-dir $u_inherited (via cargo metadata)"*)
+    ok "pin/nested: a child that INHERITS the pin measures the inherited directory — measured==used holds for the child too" ;;
+  *) bad "pin/nested: the child measured something other than its inherited target dir: ${u_line:-<none>}" ;;
+esac
+if df_operands_all u "$u_inherited"; then
+  ok "pin/nested: and every df call was made against that same inherited directory"
+else
+  bad "pin/nested: df measured '$(df_operands u | sed -n 1p)', not the inherited $u_inherited"
 fi
 
 printf '\n%s\n' "-----------------------------------------------"

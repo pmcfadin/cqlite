@@ -19207,10 +19207,10 @@ _GATE_MIN_FREE_GB_DEFAULT=40
 # 1048576 GiB = 1099511627776 KiB is exactly representable both as an IEEE-754 double
 # and as a 64-bit integer, so nothing in the comparison chain can round or wrap it.
 #
-# A bar ABOVE it is CLAMPED DOWN to it and reported `out-of-range` — deliberately NOT
-# discarded in favour of the 40GiB default, which would LOOSEN a bar the operator set
-# HIGH, turning a refusal into an admission. Clamping keeps the operator's intent
-# (refuse essentially everything) while naming the value as unusable.
+# A bar ABOVE it is a NAMED REFUSAL (`out-of-range`), not a clamp and not a fallback to
+# the default. Both of those LOOSEN a bar the operator set high — the default grossly, a
+# downward clamp merely by less — and a guard may not quietly substitute a floor nobody
+# asked for. See `_gate_min_free_gb`.
 _GATE_MAX_FREE_GB=1048576
 
 # DISK_ADMISSION_LINE and _DA_PROBE_REACHED are declared above emit_summary (see the
@@ -19283,7 +19283,21 @@ _gate_min_free_gb() {
   # — the measurement below then reports `comparison-unavailable`, which is the truth.
   _gate_bar_over_max "$v"; rc=$?
   case "$rc" in
-    0) printf '%s out-of-range' "$_GATE_MAX_FREE_GB"; return 0 ;;
+    0)
+      # OUT OF RANGE IS FAIL-CLOSED, NOT CLAMPED DOWN (roborev job 367).
+      #
+      # It used to clamp to the maximum, so a requested 2 PiB floor on a multi-PiB
+      # filesystem with 1.5 PiB free PASSED. Round 5 rejected DISCARDING an over-range bar
+      # for the 40GiB default because that would loosen a bar the operator set high; that
+      # reasoning was right and INCOMPLETE — clamping down loosens it too, just less. The
+      # operator asked for a floor this machinery cannot represent, and the honest answer
+      # is a named refusal naming the representable maximum, not a quieter floor nobody
+      # asked for. The value is reported AS TYPED (truncated for display only, since the
+      # grammar admits arbitrarily many digits) so the refusal names what was set.
+      #
+      # Low-side clamping to 0 is untouched: that direction cannot admit anything it
+      # should not.
+      printf '%.24s out-of-range' "$v"; return 0 ;;
   esac
   printf '%s pinned' "$v"
 }
@@ -19905,6 +19919,29 @@ _gate_disk_admission_launch() {
   local bar
   bar=$(_gate_min_free_gb)
   _DA_BAR="${bar%% *}"; _DA_BAR_SRC="${bar##* }"
+  # AN UNREPRESENTABLE BAR REFUSES BEFORE ANYTHING IS MEASURED (roborev job 367).
+  #
+  # THE ADVISORY-AT-LAUNCH RULE DOES NOT APPLY HERE, and the distinction is the whole
+  # reason this sits before the measurement rather than in the disposer. That rule exists
+  # because a MEASUREMENT of a changing resource can legitimately improve while we queue —
+  # a peer gate mid-build frees space. A BAR is not a measurement: it is a configuration
+  # constant read from the environment, it cannot self-heal in a queue, and no reading can
+  # rescue it. So refusing immediately is both correct and cheaper — the run never takes a
+  # slot it was always going to hand back.
+  #
+  # Its own verdict token, distinct from a below-bar refusal AND from an unwritable one:
+  # three different operator actions (free space / fix the directory / fix the variable).
+  if [ "$_DA_BAR_SRC" = out-of-range ]; then
+    _DA_EVALUATIONS=0
+    _DA_LAUNCH_RENDER='NOT MEASURED (the bar was refused before any measurement)'
+    _DA_POST_RENDER='NOT MEASURED (the bar was refused before any measurement)'
+    _DA_MOMENT="at LAUNCH (before any measurement: the BAR itself is unusable)"
+    _DA_SLOT_NOTE="no slot was ever requested; NOTHING was built"
+    _DA_REFUSE_VERDICT="BAR-UNREPRESENTABLE-FAIL-CLOSED (#3755)"
+    _DA_REFUSE_LEAD="CQLITE_GATE_MIN_FREE_GB=${_DA_BAR} exceeds the largest representable bar (${_GATE_MAX_FREE_GB}GiB), so the requested floor cannot be applied"
+    _DA_REFUSE_REMEDY="set CQLITE_GATE_MIN_FREE_GB to a value in 0..${_GATE_MAX_FREE_GB} GiB (it is a FLOOR in GiB, not a byte count), then re-run"
+    _gate_disk_admission_refuse            # exits 1 — never returns
+  fi
   _gate_disk_admission_measure
   _DA_EVALUATIONS=1
   _DA_LAUNCH_RENDER=$(_gate_disk_admission_render_state)
@@ -19914,12 +19951,15 @@ _gate_disk_admission_launch() {
   # raw value is stripped of control characters and truncated: it is untrusted input
   # being rendered onto the gate's own stderr.
   #
+  # `out-of-range` is NOT in this list: it refuses above rather than proceeding under a
+  # substituted bar, so there is no "in effect" value to warn about.
+  #
   # Worded "AS SET" rather than the obvious alternative on purpose: the #1699
   # `1699-emit-noverbatim` guard in test_agent_gate_summary.sh scans every EMITTED
   # `echo ` line for that other word, and matching its narrow exclusion string would be
   # gaming a guard rather than satisfying it.
   case "$_DA_BAR_SRC" in
-    invalid|clamped|out-of-range)
+    invalid|clamped)
       echo "agent-gate: WARN: CQLITE_GATE_MIN_FREE_GB='$(printf '%s' "${CQLITE_GATE_MIN_FREE_GB:-}" | tr -d '\000-\037\177' | cut -c1-60)' was NOT used AS SET ($_DA_BAR_SRC); the bar in effect is ${_DA_BAR}GiB (accepted range 0..${_GATE_MAX_FREE_GB} GiB) (#3755)" >&2 ;;
   esac
   if [ "$_DA_STATE" = UNWRITABLE ]; then
@@ -19957,6 +19997,40 @@ _gate_disk_admission_dispose() {
     *)     _gate_disk_admission_line "UNMEASURED (${_DA_WHY:-unknown})" "the bar was NOT APPLIED; the run proceeds UNADMITTED (#3755)" ;;
   esac
   echo "agent-gate: $DISK_ADMISSION_LINE" >&2
+  # THE MEASURED FILESYSTEM BECOMES THE USED ONE, BY CONSTRUCTION (roborev job 367).
+  _gate_disk_admission_pin_target_dir
+  return 0
+}
+
+# _gate_disk_admission_pin_target_dir: export the RESOLVED directory as CARGO_TARGET_DIR
+# for every cargo invocation this run makes.
+#
+# THE DEFECT. Only the SIDE lane reused the resolved directory; MAIN-lane cargo commands
+# re-resolve configuration for themselves, so an ancestor `.cargo/config.toml` or a
+# CARGO_HOME change landing after the metadata call sent them to an UNMEASURED filesystem —
+# and a change landing before `_tree_recapture_after_slot` is absorbed into the new
+# certification baseline rather than flagged. Two resolutions that have to AGREE is a TOCTOU
+# hope; one resolution the builds are PINNED to is a structural guarantee. Same move as the
+# round-6 side-lane consolidation, one lane over: the second resolution is deleted, not
+# defended.
+#
+# ONLY ON A BINDING RESOLUTION. An empty `_DA_TARGET_DIR` means the resolution itself failed
+# (the block reads `target-dir UNRESOLVED`), and inventing a target dir from a failed
+# resolution would move the build somewhere nobody chose. A measurement that failed while
+# the RESOLUTION succeeded still pins: we know where cargo will write, we merely could not
+# read the free space, and pinning is what keeps "measured" and "used" the same place.
+#
+# NO-OP IN THE NORMAL CASE, by construction rather than by hope: the value came from cargo
+# itself, so on a lane with no target-dir configuration it is exactly the path cargo would
+# have chosen unaided (asserted in scripts/tests/test_agent_gate_disk_admission.sh).
+#
+# NESTED CHILDREN INHERIT IT, and that is coherent rather than a side effect to tolerate: a
+# nested `agent-gate.sh` then MEASURES the inherited directory and BUILDS into it, so the
+# measured==used property holds for the child too. Nested self-tests run `--only`/`--lite`/
+# stub gates, which self-exempt from the probe and therefore pin nothing of their own.
+_gate_disk_admission_pin_target_dir() {
+  [ -n "${_DA_TARGET_DIR:-}" ] || return 0
+  export CARGO_TARGET_DIR="$_DA_TARGET_DIR"
   return 0
 }
 
@@ -20018,7 +20092,7 @@ _gate_disk_admission_refuse() {
   _da_meta+=("$(accelerators_line)")
   _da_meta+=("$(cpu_budget_line)")
   _da_meta+=("${TREE_META_LINES[@]}")
-  _da_meta+=("hint: bar override CQLITE_GATE_MIN_FREE_GB=<gib> (source token in the line above says whether the value in effect was default|pinned|invalid|clamped|out-of-range)")
+  _da_meta+=("hint: bar override CQLITE_GATE_MIN_FREE_GB=<gib> (source token in the line above says whether the value in effect was default|pinned|invalid|clamped; out-of-range REFUSES rather than substituting a bar)")
   # Routed through the shared no-clobber terminal contract (#2874), not a bare
   # emit_summary: a refusal is a TERMINAL block and must obey the same live-peer rules
   # as every other one.
