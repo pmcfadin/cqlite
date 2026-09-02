@@ -47,7 +47,7 @@ SUBJECT="$REPO_ROOT/scripts/gate-liveness.sh"
 # Case floor (CLAUDE.md, #3544): a span-replacing edit that silently deletes cases yields a green
 # tally over a shrunken suite. This is ENFORCED (exit 1), not merely printed, and may only go DOWN
 # with a stated reason.
-CASE_FLOOR=15
+CASE_FLOOR=19
 
 pass=0; fail=0; cases=0
 ok()   { cases=$((cases+1)); pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
@@ -110,26 +110,42 @@ print_scope
 violations() {
   local file="$1"
   awk '
+    # QUOTE-CORRECT STRUCTURE (roborev job 36, finding 1). Neutralise `;`, `|` and `&` that sit
+    # INSIDE a single- or double-quoted span, so the structural split below sees only real
+    # separators. Deliberately neutralises ONLY those three characters rather than blanking the
+    # whole span: a blanked span would destroy the READER WORD itself.
+    function destructure(s,   out, i, n, c, q) {
+      out = ""; q = ""; n = length(s)
+      for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (q == "") {
+          if (c == "\047" || c == "\042") q = c
+          out = out c
+        } else {
+          if (c == q) { q = ""; out = out c; continue }
+          if (c == ";" || c == "|" || c == "&") out = out "_"
+          else out = out c
+        }
+      }
+      return out
+    }
     { line = $0 }
     line ~ /^[[:space:]]*#/ { next }
     {
-      # Split the line into COMMAND SEGMENTS first, then test each independently. A writer in one
-      # command and a pipeline in a LATER one are not a hazard (measured false positive: a command
-      # substitution, a semicolon, then an unrelated pipeline into grep -q) -- but a hazard in a
-      # later segment is STILL a hazard, so this must SPLIT rather than TRUNCATE. Truncating at the
-      # first separator was tried and silently dropped a real site; case 9b pins that direction.
-      work = line
+      # Split into COMMAND SEGMENTS, then test each independently. A writer in one command and a
+      # pipeline in a LATER one are not a hazard -- but a hazard in a later segment IS one, so
+      # this SPLITS rather than truncates (truncating silently dropped a real site; case 9b pins
+      # that direction). Structure is read from the DESTRUCTURED line so a quoted `;` cannot
+      # split a command and a quoted `|` cannot pose as a pipe (cases 9d/9e).
+      work = destructure(line)
       gsub(/&&/, ";", work)
-      gsub(/\|\|/, ";", work)          # a logical OR separates commands; it is not a pipe
+      gsub(/\|\|/, ";", work)         # a logical OR separates commands; it is not a pipe
       ncmd = split(work, cmd, ";")
       for (c = 1; c <= ncmd; c++) {
         n = split(cmd[c], seg, "|")
         if (n < 2) continue
-        # The writer must be UPSTREAM of the reader: find the FIRST pipeline stage that is a
-        # builtin writer, and only consider reader stages AFTER it. Testing "this segment has a
-        # writer somewhere" and "some stage has a reader" independently reports
-        # `producer | grep -q x | printf ... ` -- safe, because the writer feeds nothing that
-        # short-circuits. Case 9c pins it.
+        # The writer must be UPSTREAM of the reader: a builtin in the LAST stage feeds nothing
+        # that can short-circuit, so it can never take EPIPE (case 9c pins both directions).
         wstage = 0
         for (i = 1; i <= n; i++) {
           if (seg[i] ~ /(^|[^[:alnum:]_.\/-])(printf|echo)[[:space:]]/) { wstage = i; break }
@@ -142,10 +158,18 @@ violations() {
           sub(/^[[:space:]]+/, "", s)
           if (match(s, /^[A-Za-z_][A-Za-z0-9_.-]*/) == 0) continue
           w = substr(s, 1, RLENGTH)
+          # Long-option spellings are recognised alongside the short clusters (job 36, finding 2):
+          # `grep --quiet` / `--silent` / `--max-count=N` short-circuit exactly as `-q` / `-m` do.
           if (w == "head")                                              hazard = 1
           else if (w == "grep" && s ~ /(^|[[:space:]])-[A-Za-z]*[qm]/)  hazard = 1
+          else if (w == "grep" && s ~ /(^|[[:space:]])--(quiet|silent|max-count)([=[:space:]]|$)/) hazard = 1
           else if (w == "read")                                         hazard = 1
-          else if (w == "sed"  && s ~ /(^|[;\'"'"'"[:space:]])[0-9]*q([;\'"'"'"[:space:]]|$)/) hazard = 1
+          # The underscore is in these classes because destructure maps a QUOTED semicolon
+          # to an underscore, and the sed quit command is normally written inside quotes as
+          # p semicolon q. The previous revision missed that form too, for the mirror reason:
+          # a quoted semicolon used to SPLIT the command. (No apostrophes in this comment:
+          # it lives inside a single-quoted awk program.)
+          else if (w == "sed"  && s ~ /(^|[;_\'"'"'"[:space:]])[0-9]*q([;_\'"'"'"[:space:]]|$)/) hazard = 1
           else if (w == "awk"  && s ~ /exit/)                           hazard = 1
         }
       }
@@ -299,6 +323,33 @@ if [ "$(violations "$tmp/down.sh" | grep -c .)" -eq 0 ] && [ "$(violations "$tmp
 else
   bad "9c writer/reader ordering" "expected down=0 up=1, got down=$(violations "$tmp/down.sh" | grep -c .) up=$(violations "$tmp/up.sh" | grep -c .)"
 fi
+
+# ---------------------------------------------------------------------------
+# 9d-9g. REGRESSION PINS for roborev job 36 (two Mediums, both mine). Each is asserted in the
+#    direction the finding named, and 9d/9f are the FALSE-NEGATIVE half -- the worse direction,
+#    because a missed site means the #3803 channel can be reintroduced under a green gate.
+# ---------------------------------------------------------------------------
+_pin() { # _pin <id> <expected-count> <label> <line-of-bash>
+  local id="$1" want="$2" label="$3" body="$4" got
+  printf '#!/usr/bin/env bash\n%s\n' "$body" >"$tmp/pin_$id.sh"
+  got=$(violations "$tmp/pin_$id.sh" | grep -c .)
+  if [ "$got" -eq "$want" ]; then
+    ok "$id $label (${got}/${want})"
+  else
+    bad "$id $label" "expected $want RECOGNISED, got $got — job 36 finding regressing"
+  fi
+}
+
+# finding 1, false-NEGATIVE half: a quoted `;` must not hide a real hazard.
+_pin 9d 1 "a quoted semicolon does NOT hide a real hazard" 'printf '"'"'x;y\n'"'"' | grep -q x'
+# finding 1, false-POSITIVE half: a quoted `|` is not a pipe.
+_pin 9e 0 "a quoted pipe is NOT read as a pipeline"        'printf '"'"'x | grep -q y\n'"'"''
+# finding 2: long-option short-circuiting spellings must be recognised.
+_pin 9f 3 "grep long options --quiet/--silent/--max-count are recognised" 'printf %s "$t" | grep --quiet a
+printf %s "$t" | grep --silent a
+printf %s "$t" | grep --max-count=1 a'
+# and the sed quit form, which the destructuring had to be taught about explicitly.
+_pin 9g 1 "sed quit inside quotes is still recognised"     'printf %s "$t" | sed -n '"'"'p;q'"'"''
 
 # ---------------------------------------------------------------------------
 # 10. THE ASSERTION. Scan the SHIPPED reader.
