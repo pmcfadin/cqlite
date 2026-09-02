@@ -64,4 +64,6 @@ the code, so they cannot drift from it. Every refusal names its own cause and ca
 if one does not, that is a bug worth filing, not a puzzle worth solving.
 
 Background: #3751 (four read-only review subagents idled without reporting in one delivery — an absent
-review must never read as a clean one). Declared residual, lead-accepted: #3929.
+review must never read as a clean one). Declared residual, lead-accepted: **#3929, whose scope is the
+TOCTOU WINDOW between a check and the open that follows it, and nothing wider** — a symlinked or
+unsearchable path COMPONENT needs no race and is refused outright (#3751 round 20).

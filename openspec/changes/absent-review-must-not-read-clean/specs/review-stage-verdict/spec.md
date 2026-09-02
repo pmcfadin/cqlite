@@ -190,10 +190,47 @@ directory, and any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUI
 - **AND** EVERY artifact a read path opens SHALL carry the test, asserted by a DERIVED census over the
   shipped script (every function reading a file through the one capture boundary), counted over CODE
   and not over prose, so a third reader added later joins the census rather than needing a curated list
-- **AND** the residual SHALL be DECLARED, never claimed closed: a leaf test taken before an open
-  leaves a TOCTOU window bash cannot close (no `openat`, no `O_NOFOLLOW`), which is the family tracked
-  in #3929. What this closes completely is the NON-RACING case — a link planted at any earlier time
-  and simply followed, with no check at all
+
+#### Scenario: EVERY path COMPONENT is validated, not just the leaf
+- **WHEN** any component of a read path below the repository root — `.review-stage/` or
+  `issue-<N>/` — is a SYMLINK, live or dangling
+- **THEN** no artifact under it SHALL be read, and the verdict SHALL be a NON-VERDICT carrying a
+  cause distinct from the leaf one and naming the offending COMPONENT, with its own `status`
+  `state=`, because removing a DIRECTORY link is a different operator action from removing a report
+- **AND** a component whose SEARCHABILITY cannot be established SHALL be its own third outcome
+  (`… path has an unsearchable parent directory`, action `chmod +x`), never folded onto the symlink
+  cause (which would assert a link nothing observed) nor onto `unreadable` (which names a permission
+  on the FILE), because with the components unmeasured the leaf predicates answer `absent` — the
+  permissive state
+- **AND** the walk SHALL be taken BEFORE any `-f`, glob or redirection, and its searchability check
+  SHALL guard the very next `-L` rather than trailing it, since a lagging check leaves one component
+  examined by a predicate that silently answers FALSE
+- **AND** this SHALL be enforced at the merge point too: `premerge-assert.sh --c-verdict AUTO`
+  consumes the verdict LINE, so a FOREIGN `PASS` reached through a symlinked component SHALL be
+  REFUSED there, asserted END TO END rather than predicted from the inheritance
+- **AND** the DERIVED census SHALL require the component walk as well as the leaf test, and SHALL
+  carry a POSITIVE CONTROL that substitutes the artifact (a copy with the walk removed, leaf tests
+  intact) and requires the census to red AND to NAME the read targets
+
+#### Scenario: a caller may not ask a dereferencing question ahead of the reader
+- **WHEN** a DANGLING symlink stands at the stage record's name, or at any directory above it
+- **THEN** the verdict SHALL name the tampering and SHALL NOT be `stage never opened`, which is the
+  permissive state and the one `record-author-performed`'s clobber guard reads as "there is no
+  recorded verdict to destroy"
+- **AND** the existence question SHALL be answered by the ONE reader of that path as its own
+  AFFIRMATIVE status, reachable only AFTER the component walk and the leaf test — the caller's own
+  filesystem predicate SHALL be REMOVED rather than reordered, because two readers of one path are
+  two opinions about whether a stage exists
+- **AND** a genuinely never-opened stage, and a non-regular file standing at the record's name, SHALL
+  still read `stage never opened`, so the refusal is not a mechanism that answers NOT-RUN for
+  everything
+
+- **AND** the residual SHALL be DECLARED, never claimed closed, AND ITS BOUNDARY SHALL BE THE WINDOW
+  AND NOTHING WIDER: a test taken before an open leaves a TOCTOU window bash cannot close (no
+  `openat`, no `O_NOFOLLOW`), which is the family tracked in #3929. The PARENT-COMPONENT case is NOT
+  in that family and SHALL NOT be deferred to it — it needs no race and no timing — so round 19's
+  wider declaration is WITHDRAWN. The governing rule: the existence of an irreducible residual in a
+  neighbourhood is not a licence to defer the reachable cases in it
 
 #### Scenario: the temporary write path cannot be pre-planted
 - **WHEN** `open` or `record-author-performed` writes a record

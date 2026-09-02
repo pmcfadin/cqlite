@@ -5265,7 +5265,7 @@ else
     "$RS" >"$OBS_D2/review-stage.sh" 2>/dev/null || true
   OBS_P2="$(bash "$OBS" "$OBS_D2/review-stage.sh" 2>&1)"; OBS_P2RC=$?
   if [ "$OBS_P2RC" -ne 0 ] && [ "${OBS_P2#*'`report_bytes` reads a stage file inside `cmd_verdict`'}" != "$OBS_P2" ]; then
-    ok "obs-guard/control: a planted report read in `verdict` reds too and is named — the reader set is a LIST"
+    ok 'obs-guard/control: a planted report read in cmd_verdict reds too and is named — the reader set is a LIST'
   else
     bad "obs-guard/control: a planted report_bytes read in cmd_verdict was not caught or not named (rc=$OBS_P2RC; got: $OBS_P2)"
   fi

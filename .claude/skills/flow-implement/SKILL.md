@@ -144,7 +144,12 @@ never gate stdout or review churn.
    action differs per cause — plus `stage record unreadable`, where the RECORD does not name which
    report is current, and (since #3751 round 19) `report is a symlink` / `stage record is a symlink`,
    where the artifact was NOT READ because following a link would decide the stage from a file that
-   is not the one it names. Those two say **remove the link** — not a chmod, not a re-spawn. Do NOT proceed to the PR on a `NOT-RUN` stage: re-spawn
+   is not the one it names. Those two say **remove the link** — not a chmod, not a re-spawn. **Since
+   round 20 the same holds one level up**: `… path has a symlinked parent directory` means a
+   DIRECTORY above the stage (`.review-stage/` or `issue-<N>/`) is a link, so the whole stage
+   directory resolves into another tree — remove the DIRECTORY link, not the report — and
+   `… path has an unsearchable parent directory` means whether it is a link could not be determined
+   at all (`chmod +x` that directory; unverified never reads as clean). Do NOT proceed to the PR on a `NOT-RUN` stage: re-spawn
    (`open --force` KEEPS the original clock, so the elapsed time still reads true, and publishes the
    report under a FRESH NONCE — spawn with the path it PRINTS, because the previous file is no
    longer read, so an idle agent that resumes and writes there cannot certify anything, #3751 rounds

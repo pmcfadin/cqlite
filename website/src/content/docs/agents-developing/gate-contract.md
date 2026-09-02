@@ -161,8 +161,17 @@ carry).
   does not name: measured, `RESULT: PASS` at exit 0 off a link. Both read targets now test the leaf
   with `[ -L ]` BEFORE any dereferencing predicate — the dangling case is why the order matters, since
   `-f` calls a dangling link ABSENT, which is the permissive state — each under its own cause and
-  `state=`. The TOCTOU window a leaf test cannot close is DECLARED (#3929's family), not claimed
-  closed. **And byte equality is not
+  `state=`. **And a leaf test was not enough (#3751 round 20)**: a symlink at `.review-stage/` or at
+  `issue-<N>/` moves a stage's WHOLE DIRECTORY into another tree, so this AUTO validation reached
+  `PREMERGE: OK` with `C-VERDICT PASS … source: AUTO` over a PEER LANE's clean stage — measured end
+  to end. Every read target now validates EVERY PARENT COMPONENT below the repository root, without
+  following links, before any predicate that dereferences one, with one cause per level; and the
+  caller-side `[ ! -f ]` probe that used to run ahead of the reader is REMOVED, because it
+  dereferenced first and read a dangling link as `stage never opened`. This script INHERITS all of
+  it — it consumes the verdict LINE — and that inheritance is asserted end to end rather than
+  predicted. The residual is the TOCTOU WINDOW between a check and its open (#3929's family) and
+  **nothing wider**: round 19's declaration that the parent case belonged to #3929 is WITHDRAWN,
+  since a link planted earlier and simply followed needs no race at all. **And byte equality is not
   IDENTITY (#3751 round 10)** — an ABA replacement (A to a foreign generation B while `verdict`
   reads B, then back to A) leaves two identical observations — so the accepted verdict must also
   NAME the validated generation: its `report=` field carries the report nonce, which must equal the

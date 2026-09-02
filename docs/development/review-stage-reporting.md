@@ -776,13 +776,17 @@ bash scripts/flow/review-stage.sh verdict c --issue 1234
 bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-summary> --c-verdict AUTO
 ```
 
-`NOT-RUN` always carries one of eleven named causes — `no report written`, `report absent`,
+`NOT-RUN` always carries one of fifteen named causes — `no report written`, `report absent`,
 `report unreadable`, `report is a symlink`, `report empty`, `report ungrammatical: <what>`,
 `stage never opened`, `stage record unreadable: <what>`, `stage record is a symlink: <what>`,
+`report path has a symlinked parent directory`, `report path has an unsearchable parent directory`,
+`stage record path has a symlinked parent directory: <what>`,
+`stage record path has an unsearchable parent directory: <what>`,
 `stage record changed mid-read: <what>`, `stage not observed` — because the operator
-action differs per cause, and one token for eleven states is the collapse this issue is about.
-(This said *seven* until round 19; the count had been understated since round 17. The authority is
-the DERIVED drift guard in `scripts/tests/test_review_stage.sh` §7b, never a number in prose.)
+action differs per cause, and one token for fifteen states is the collapse this issue is about.
+(This said *seven* until round 19 and *eleven* until round 20; the count had been understated since
+round 17. The authority is the DERIVED drift guard in `scripts/tests/test_review_stage.sh` §7b,
+never a number in prose.)
 Everything is written under `.review-stage/`, whose ignore status is **verified with
 `git check-ignore`, fail-closed**, so a stage opened mid-run cannot dirty a running gate of
 record (#2926) or make `premerge-assert.sh` refuse on `dirty: yes` (#3648).
@@ -800,10 +804,14 @@ with it — accept a verdict read out of an artifact that is **not the report of
 the shipped script: `RESULT: PASS`, exit 0, off a link into `/tmp`). Both artifacts the read path
 opens now test the leaf affirmatively with `[ -L ]` and refuse under their OWN cause and `state=`:
 
-| artifact | cause | `status` state | operator action |
-|---|---|---|---|
-| the report of record | `report is a symlink` | `report-symlink` | remove the link |
-| the stage record | `stage record is a symlink: <what>` | `stage-record-symlink` | remove the link |
+| artifact | level | cause | `status` state | operator action |
+|---|---|---|---|---|
+| the report of record | leaf | `report is a symlink` | `report-symlink` | remove the link |
+| the stage record | leaf | `stage record is a symlink: <what>` | `stage-record-symlink` | remove the link |
+| the report of record | a parent directory | `report path has a symlinked parent directory` | `report-parent-symlink` | remove the DIRECTORY link |
+| the report of record | a parent directory | `report path has an unsearchable parent directory` | `report-parent-unverifiable` | `chmod +x` that directory |
+| the stage record | a parent directory | `stage record path has a symlinked parent directory: <what>` | `stage-record-parent-symlink` | remove the DIRECTORY link |
+| the stage record | a parent directory | `stage record path has an unsearchable parent directory: <what>` | `stage-record-parent-unverifiable` | `chmod +x` that directory |
 
 The stage record is included because it is what names WHICH generation is authoritative and carries
 the `head-sha:` the stage was opened at, so a link there redirects the decision at its root
@@ -816,21 +824,64 @@ which is `no-such-file`, which is the PERMISSIVE `absent` state the clobber guar
 no recorded verdict to destroy". The dangling case is therefore the one that proves the ordering,
 and it is pinned.
 
-**DECLARED RESIDUAL, NOT A CLOSURE.** A leaf `-L` test taken *before* the open leaves a TOCTOU
-window bash cannot close (no `openat`, no `O_NOFOLLOW`, no `renameat2`) — the same family as the
-write-path parent-component race tracked in **#3929**, and it is declared in the source at both read
-sites. What round 19 closes **completely** is the far larger non-racing case: a link planted at any
-earlier time and simply followed, with no check at all, which needs no race and no timing. The
-residual is stated rather than implied, because a fix that reads as closing more than it delivers is
-the false-assurance shape this whole mechanism exists to remove.
+**ROUND 19's FIX WAS LEAF-SHAPED FOR A PATH-SHAPED PROBLEM (round 20, Z1).** A symlink at
+`.review-stage/` or at `issue-<N>/` moves a stage's WHOLE DIRECTORY into another tree — record,
+nonce and reports together — and every predicate on the leaf then answers about the far end of the
+link. Measured on the round-19 script, both levels: `RESULT: PASS` at exit 0 off a peer tree's clean
+stage, reported under THIS lane's report path; and end to end through
+`premerge-assert.sh --c-verdict AUTO`, `PREMERGE: OK` plus
+`PREMERGE: C-VERDICT PASS … source: AUTO issue=3751`, i.e. another lane's audit clearing this merge.
+Every read target therefore validates EVERY PARENT COMPONENT below the repository root, without
+following links, **before any predicate that dereferences one** (`read_path_parent_symlink`), with
+one cause per LEVEL — a DIRECTORY link is not the same operator action as a file link, and an
+unsearchable parent is a `chmod +x` and not a claim that anything is a link. The record-side refusal
+NAMES the offending component; the report-side arms are unreachable on every decision path today
+(both artifacts are built from `stage_dir`, so their parents are identical and the record is read
+first) and exist so a reader added later cannot inherit a permissive branch.
+
+It is a SECOND walk, not `assert_no_symlink`: that function refuses by `exit`ing, and every read
+caller runs inside a command substitution where an `exit` ends only the subshell — round 2's B7
+measured in this very file — so the read path needs a PREDICATE. The two are pinned to the same
+NOGLOB-split and `[ -L "$cur" ]` shape so they cannot drift on the property both exist for. They
+differ in one respect deliberately: the read walk asks searchability of the directory it is **about
+to look inside**, where the write walk's equivalent check trails by one iteration. That lag is not a
+false pass on the write side (every component is examined before it returns, and the create is
+separately `O_EXCL`), and it WAS one on the read side, where the answer is the verdict — a first
+version that copied the write shape reported the permissive `stage never opened` for a mode-000
+`.review-stage/`, caught by the unsearchable-parent case.
+
+**AND `-L` MUST PRECEDE *EVERY* DEREFERENCING PREDICATE, INCLUDING A CALLER'S (round 20, Z2).**
+`observe_record` gated on its OWN `[ ! -f "$sfile" ]` ahead of the single reader, so a DANGLING link
+at the record's name — and one at any directory above it — answered FALSE and was reported as
+`stage never opened`, the permissive state. Round 19 identified this exact trap and pinned it for
+the REPORT while the RECORD's caller-side probe kept asking the same question in the wrong order;
+that missing matrix cell is why it survived a round. The fix is a **subtraction**: the probe is gone,
+`stage_record_text` is the ONE place that path meets the filesystem, and `absent` is its own
+affirmative status, reachable only after the walk and the leaf test.
+
+**DECLARED RESIDUAL, NOT A CLOSURE — AND ITS BOUNDARY CORRECTED.** What **#3929** owns is the TOCTOU
+window between a check and the open that follows it (no `openat`, no `O_NOFOLLOW`, no `renameat2`),
+and **nothing wider**. Round 19 also declared the PARENT-COMPONENT case as #3929's residual; that is
+**WITHDRAWN**, because a link planted at any earlier moment and simply followed needs no race and no
+timing. The rule that decides it, worth carrying elsewhere: **the existence of an irreducible
+residual in a neighbourhood is not a licence to defer the reachable cases in it — ask whether the
+defect needs a race; if it does not, it is not that issue.** The residual that remains is stated
+rather than implied, because a fix that reads as closing more than it delivers is the
+false-assurance shape this whole mechanism exists to remove.
 
 The structural half is a **DERIVED CENSUS of read targets**: every function that opens a file
-through the one capture boundary (`capture_map_nul`) must carry the leaf test, so a third reader
-added later joins the census instead of needing a curated list — and it counts over **CODE, not
-prose**, which is round 18's X1 lesson inside round 19's own guard: the comment explaining the check
-quotes `[ -L "$p" ]` verbatim, so a whole-body match reported the test as present with the code hunk
-removed. Read targets audited: **2** (`report_bytes`, `stage_record_text`); lacking the test before
-round 19: **2**; after: **0**.
+through the one capture boundary (`capture_map_nul`) must carry the leaf test **and the parent-component
+walk**, so a third reader added later joins the census instead of needing a curated list — and it
+counts over **CODE, not prose**, which is round 18's X1 lesson inside round 19's own guard: the
+comment explaining the check quotes `[ -L "$p" ]` verbatim, so a whole-body match reported the test
+as present with the code hunk removed. Read targets audited: **2** (`report_bytes`,
+`stage_record_text`); lacking the LEAF test before round 19: **2**, after: **0**; lacking the PARENT
+WALK before round 20: **2**, after: **0**. Round 20 gives that census a **positive control** — a
+scratch copy with the walk calls deleted and the leaf tests intact, which the census must red on
+*and* must name both read targets for — because a census that reports CLEAN is evidence only if it
+can be shown to red. The Z2 half has its own control: a scratch copy with the caller-side probe
+restored, required to produce BOTH a structural red and a reproduced permissive READING, since a
+source-shape match is not a behaviour.
  the writes themselves go through an UNPREDICTABLE same-directory temporary file
 (`mktemp -u`) CREATED AND OPENED IN ONE STEP under `set -C` — i.e. `O_CREAT|O_EXCL` — then written
 through the ALREADY-OPEN DESCRIPTOR and `mv -f -T`'d into place (#3751 round 3, G3; the `-T` is

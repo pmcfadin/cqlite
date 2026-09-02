@@ -46,7 +46,12 @@ report?" but "what does the report say?".
   refusal exists because the alternative, measured, was a verdict line naming a SIBLING lane's
   report — so a path you invent there is the peer-artifact defect by hand. If it answers `NOT-RUN (stage never opened)`, write `.review-stage/issue-<N>/<kind>.md`
   inside the worktree, name it in your reply, and say the stage was never opened. Do not silently
-  skip the artifact because nobody asked for it.
+  skip the artifact because nobody asked for it. **But do NOT do that for any cause naming a PATH
+  COMPONENT (#3751 round 20)** — `… path has a symlinked parent directory` or `… path has an
+  unsearchable parent directory` means a DIRECTORY above the stage (`.review-stage/` or
+  `issue-<N>/`) is a link or cannot be examined, so writing that path would land your report in
+  ANOTHER TREE or under a directory nobody can read. Report the refusal verbatim, name the component
+  it names, and stop: it is an environment fault for a human, not a path to work around.
 - **Write to the path your caller NAMED, never a remembered or guessed one (#3751 rounds 5-6).**
   A report path carries a PER-OPEN NONCE (`<kind>.<nonce>.md`), so it is not derivable from the
   kind and the issue: a stage that was re-opened reads only the report its record names, and a
