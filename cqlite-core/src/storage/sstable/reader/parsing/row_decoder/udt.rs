@@ -314,7 +314,9 @@ impl V5CompressedLegacyParser {
     /// Parse a Cassandra type string into a CqlType.
     /// Handles: UTF8Type, Int32Type, ListType(...), SetType(...), MapType(...), UserType(...), FrozenType(...)
     #[allow(dead_code)]
-    fn parse_cassandra_type(type_str: &str) -> Result<CqlType> {
+    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn parse_cassandra_type(
+        type_str: &str,
+    ) -> Result<CqlType> {
         Self::parse_cassandra_type_with_depth(type_str, 0)
     }
 
@@ -386,6 +388,22 @@ impl V5CompressedLegacyParser {
             s if s.ends_with("UTF8Type") => CqlType::Text,
             s if s.ends_with("AsciiType") => CqlType::Ascii,
             s if s.ends_with("Int32Type") => CqlType::Int,
+            // roborev job 97. These three were ABSENT, so a real marshal-form UDT
+            // field of `smallint`/`tinyint`/`counter` parsed to
+            // `CqlType::Custom("…ShortType")` and reached the decoders' `_ =>`
+            // blob default — which meant #3847's empty-buffer rule, keyed on
+            // `fixed_width::width_of`, did not fire on the PRODUCTION path at all.
+            // The unit tests missed it by constructing `CqlType::SmallInt`
+            // directly: a test invariant to the very defect it was meant to pin.
+            //
+            // `raw_value.rs`'s `primitive_marshal_to_cql_short` already maps
+            // `ShortType`->smallint and `ByteType`->tinyint for the scalar path, so
+            // this closes a gap BETWEEN the two type resolvers rather than adding a
+            // new claim. No suffix collision: `BytesType` does not end with
+            // `ByteType` (checked, both directions).
+            s if s.ends_with("ShortType") => CqlType::SmallInt,
+            s if s.ends_with("ByteType") => CqlType::TinyInt,
+            s if s.ends_with("CounterColumnType") => CqlType::Counter,
             s if s.ends_with("LongType") => CqlType::BigInt,
             s if s.ends_with("FloatType") => CqlType::Float,
             s if s.ends_with("DoubleType") => CqlType::Double,

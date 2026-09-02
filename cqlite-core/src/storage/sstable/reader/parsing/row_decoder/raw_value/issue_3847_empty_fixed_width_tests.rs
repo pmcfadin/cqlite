@@ -31,6 +31,7 @@
 //! and cannot pass vacuously on an empty corpus.
 
 use super::super::V5CompressedLegacyParser;
+use crate::schema::CqlType;
 use crate::{Result, Value};
 
 fn parser() -> V5CompressedLegacyParser {
@@ -295,4 +296,103 @@ fn a_zero_length_field_of_a_registry_resolved_udt_decodes_to_null() {
         value,
         "registry-resolved UDT via parse_value_from_raw_bytes",
     );
+}
+
+// ---------------------------------------------------------------------------
+// roborev job 97 (Medium): the tests above were INVARIANT TO THE REAL DEFECT.
+//
+// They build `CqlType::SmallInt` / `CqlType::TinyInt` by hand. Production does
+// not: a marshal-form UDT field arrives as a STRING and
+// `udt.rs::parse_cassandra_type_with_depth` resolves it, and that resolver had no
+// `ShortType` / `ByteType` / `CounterColumnType` arm — so those fields became
+// `CqlType::Custom("…ShortType")`, `fixed_width::width_of` answered `None`, the
+// #3847 empty rule never fired, and a zero-length `smallint` field still decoded
+// to an EMPTY BLOB on the only path a real SSTable takes.
+//
+// This is #3042's blind-spot class inside this issue's own test suite: a test that
+// cannot fail for the defect it exists to pin. The cases below therefore drive the
+// MARSHAL STRING, never a hand-built `CqlType`, and one of them asserts the
+// resolver directly so the two halves cannot drift apart again.
+// ---------------------------------------------------------------------------
+
+/// `nums(s smallint, t tinyint)` in MARSHAL form — the production spelling.
+/// `6e756d73` = "nums", `73` = "s", `74` = "t".
+const MARSHAL_NUMS: &str = "org.apache.cassandra.db.marshal.UserType(issue_3847_ks,6e756d73,\
+73:org.apache.cassandra.db.marshal.ShortType,\
+74:org.apache.cassandra.db.marshal.ByteType)";
+
+/// The RESOLVER, asserted directly: every marshal spelling of a fixed-width scalar
+/// must resolve to a variant `width_of` recognises. A `Custom(_)` here is the job-97
+/// defect, and it is silent — the decode simply returns a blob.
+#[test]
+fn every_fixed_width_marshal_name_resolves_to_a_width_bearing_variant() {
+    use super::super::V5CompressedLegacyParser as P;
+    use super::fixed_width;
+    for (marshal, expect) in [
+        (
+            "org.apache.cassandra.db.marshal.ShortType",
+            CqlType::SmallInt,
+        ),
+        ("org.apache.cassandra.db.marshal.ByteType", CqlType::TinyInt),
+        (
+            "org.apache.cassandra.db.marshal.CounterColumnType",
+            CqlType::Counter,
+        ),
+        ("org.apache.cassandra.db.marshal.Int32Type", CqlType::Int),
+        ("org.apache.cassandra.db.marshal.LongType", CqlType::BigInt),
+        ("org.apache.cassandra.db.marshal.TimeType", CqlType::Time),
+        (
+            "org.apache.cassandra.db.marshal.SimpleDateType",
+            CqlType::Date,
+        ),
+        (
+            "org.apache.cassandra.db.marshal.BooleanType",
+            CqlType::Boolean,
+        ),
+    ] {
+        let resolved = P::parse_cassandra_type(marshal)
+            .unwrap_or_else(|e| panic!("{marshal}: resolver failed: {e:?}"));
+        assert_eq!(
+            resolved, expect,
+            "{marshal} must resolve to {expect:?}, not a Custom(_) the width rule cannot see"
+        );
+        assert!(
+            fixed_width::width_of(&resolved).is_some(),
+            "{marshal} resolved to {resolved:?}, which width_of does not recognise — \
+             the #3847 empty rule would not fire for it"
+        );
+    }
+
+    // BytesType must NOT be captured by the ByteType arm (suffix collision check,
+    // asserted rather than reasoned about).
+    assert_eq!(
+        P::parse_cassandra_type("org.apache.cassandra.db.marshal.BytesType")
+            .expect("resolver failed"),
+        CqlType::Blob,
+        "BytesType is blob; the ByteType arm must not shadow it"
+    );
+}
+
+/// END TO END on the production path: a zero-length `smallint` and a zero-length
+/// `tinyint` field, reached through a MARSHAL type string.
+#[test]
+fn zero_length_smallint_and_tinyint_fields_are_null_through_the_marshal_path() {
+    // [len 0] [len 0] — both fields present and empty.
+    let mut data = 0i32.to_be_bytes().to_vec();
+    data.extend_from_slice(&0i32.to_be_bytes());
+
+    let value = decode(MARSHAL_NUMS, &data).expect("zero-length fields are legal");
+    match value {
+        Value::Udt(udt) => {
+            for (i, name) in ["smallint", "tinyint"].iter().enumerate() {
+                assert_eq!(
+                    udt.fields[i].value,
+                    Some(Value::Null),
+                    "a zero-length {name} field must be NULL through the marshal path, \
+                     not an empty blob (roborev job 97)"
+                );
+            }
+        }
+        other => panic!("expected a UDT, got {other:?}"),
+    }
 }
