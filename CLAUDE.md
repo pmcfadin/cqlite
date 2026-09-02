@@ -705,18 +705,30 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   non-empty ones recognised; the knowingly-uncovered shapes are declared in its header) and resolved
   from the checkout with **no env override**. It parses through the gate's ONE `_ansi_stripped_log`
   (#3400), and an unreadable log is a NAMED `not extractable`, never "no failures found".
-  **The pipeline order is NORMALISE -> REDACT -> BOUND FOR DISPLAY, and it is a safety property, not
-  formatting.** Three defects on this issue were ONE shape — an operation applied to a value before
+  **The pipeline order is NEUTRALISE -> REDACT -> BOUND FOR DISPLAY, and it is a safety property, not
+  formatting.** FOUR defects on this issue were ONE shape — an operation applied to a value before
   the operation that needed the value WHOLE: a 57-char cap before the DEDUP (count undercounted), a
-  cut at the first `:` before the DEDUP (13 distinct asserts named as one tag), and a 60-char display
+  cut at the first `:` before the DEDUP (13 distinct asserts named as one tag), a 60-char display
   elision before the REDACTION, which deleted a URL's `scheme://` and left `TOKEN@host/path` — a
   shape NEITHER redaction rule matches, so a live credential reached a block this repo tells agents
-  to paste into PR comments. So the extractor emits the FULL identity, the single
-  `_component_set_redact_text` call runs at the ONE emit boundary, and every bound (60 per name,
-  300 per field) runs after it. The extractor's one remaining bound is a DECLARED SAFETY bound at
-  4096 chars with its residual stated. **A bound must never be able to change a safety verdict, and
-  a leak check must be made on the RENDERED field — never on extractor stdout, where a token cut by
-  an elision looks absent while never having been redacted.**
+  to paste into PR comments — and the extractor's own 4096-char SAFETY truncation, the same thing at
+  a 68x bound. So the extractor emits the FULL identity and **truncates nothing**: an over-bound
+  identity is published as an affirmative placeholder naming its measured length, never as a prefix,
+  because **declaring a hazard is not removing it** and a truncation must not precede neutralisation
+  at ANY bound. **And the field no longer publishes free text at all (#3765 / roborev job 48).** A
+  redactor that knows only URL userinfo and the scp form let a secret through in a query string, a
+  header or prose — the SIXTH round of that family in this one file — so the ruling taken on the
+  origin diagnostic (`STOP RENDERING THE VALUE, DO NOT SANITISE IT AGAIN`) applies here too: every
+  URL-/authority-/query-shaped or credential-KEYED token is replaced WHOLESALE, by SHAPE, with a
+  fixed placeholder before any bound, and the redactor stays only as defence in depth. Count
+  correctness and publication safety are SEPARATE concerns and neither is traded for the other: the
+  extractor dedupes and counts on the FULL identity, internally, and the emit boundary publishes only
+  the neutralised PROJECTION. Declared residual: a secret in ordinary prose with no authority shape
+  and no credential-named key still passes; over-redaction is the accepted direction. **A bound must
+  never be able to change a safety verdict, and a leak check must be made on the RENDERED field —
+  never on extractor stdout, where a token cut by an elision looks absent while never having been
+  redacted.** The same "one renderer" rule covers the tree-integrity BOUNDARY block, whose two
+  component loops used a second `printf` and so carried neither the bracket nor this field.
 - **Every component line NAMES the feature matrix it ran, in ALL THREE modes (#3453).**
   `core-tests: PASS (412s)  [invocation: test cqlite-core --features cli-helpers]` — read as
   `<subcommand> <scope> <features>`, one entry per distinct invocation, `xN` for repeats. A bare

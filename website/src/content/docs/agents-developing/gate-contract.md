@@ -1250,6 +1250,26 @@ through the gate's ONE `_ansi_stripped_log` and read by redirection, never a pip
 colour survives redirection, and a piped `while read` discards its verdict in a subshell);
 an unreadable log is a NAMED `not extractable`, never "no failures found".
 
+**The published value is a NEUTRALISED PROJECTION, not the identity.** Before any bound and
+before the redactor, every URL-shaped, authority-shaped, query-shaped or credential-KEYED
+token is replaced WHOLESALE with a fixed placeholder (`<url>`, `<authority>`, `<query>`,
+`<secret>`) — by SHAPE, with no attempt to work out which part is the secret. That is the
+`STOP RENDERING THE VALUE, DO NOT SANITISE IT AGAIN` ruling this repo already took on the
+origin diagnostic, applied to the same file one field over: a redactor that knew only URL
+userinfo and the scp form let a secret through in a query string (`?token=…`), a header
+(`Authorization: Bearer …`) or prose. The redactor stays as defence in depth.
+
+**Count correctness and publication safety are separate concerns.** The extractor dedupes and
+counts on the FULL normalised identity, internally; only the projection is published. No bound
+may precede the neutralisation — the extractor's 4096-char SAFETY bound therefore **truncates
+nothing**, publishing `<identity too long to publish safely: N chars>` instead of a prefix,
+because a prefix can sever the very shape every later rule keys on. Declared residual: a secret
+in ordinary prose with no authority shape and no credential-named key still passes; over-
+redaction (an ordinary `name@example.com` renders `<authority>`) is the accepted direction.
+
+Both loops of the tree-integrity **boundary** block render through the same one renderer, so a
+FAIL row published after a mid-run mutation carries the bracket and this field too.
+
 **The pipeline order is NORMALISE → REDACT → BOUND FOR DISPLAY, and it is a safety
 property rather than formatting.** Three defects on #3765 were one shape — an operation
 applied to a value *before* the operation that needed the value whole: a 57-character cap
