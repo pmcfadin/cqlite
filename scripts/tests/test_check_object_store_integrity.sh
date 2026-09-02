@@ -154,7 +154,7 @@ whole_suite_checks() {
 # assertions (the two `command -v` guards and the fixture-construction asserts), so a
 # green run is 81 on any host that can run it at all; a green run BELOW this number
 # means cases were removed or the run was truncated. RAISE IT when you add cases.
-CASE_FLOOR=84
+CASE_FLOOR=94
 
 finish() {
   local rc=$?
@@ -358,12 +358,18 @@ fi
 # A copy of the script with `--connectivity-only` added to the fsck call. Measured on git
 # 2.43.0: that flag walks reachability WITHOUT rehashing content, so it exits 0 on the
 # Case 4 fixture. Two halves: the plant IS the defect described, and it gets Case 4 wrong.
+#
+# THE PLANT IS ON THE ARGV ARRAY, which is where the flags live since round 4 gave the
+# third walk its own mode. The previous plant sed'ed the literal `fsck --no-progress
+# --no-dangling`; when that text moved into `fargs=(...)` the sed matched NOTHING, the
+# mutant became a byte-identical copy of the subject, and the construction assert caught
+# it — which is what a construction assert is for.
 MUT="$T/mutant-connectivity-only.sh"
-sed 's/fsck --no-progress --no-dangling/fsck --no-progress --no-dangling --connectivity-only/' \
+sed 's/^  fargs=(--no-progress --no-dangling)$/  fargs=(--no-progress --no-dangling --connectivity-only)/' \
   "$SUBJECT" >"$MUT"
 if bash -n "$MUT" 2>/dev/null &&
-  grep -q -- '--connectivity-only' "$MUT" &&
-  ! grep -q -- 'fsck --no-progress --no-dangling --connectivity-only' "$SUBJECT" &&
+  grep -q -- 'fargs=(--no-progress --no-dangling --connectivity-only)' "$MUT" &&
+  ! grep -q -- 'fargs=(--no-progress --no-dangling --connectivity-only)' "$SUBJECT" &&
   [ "$(grep -c -- '--connectivity-only' "$MUT")" -gt "$(grep -c -- '--connectivity-only' "$SUBJECT")" ]; then
   ok "connectivity-mutant: the plant IS the defect described (--connectivity-only on the fsck call, absent from the subject)"
 else
@@ -648,11 +654,12 @@ if run 5 "reflog: UNMEASURED not CORRUPT" --repo "$R_REFLOG"; then
   else
     bad "reflog: verdict was '$(verdict_of)', wanted UNMEASURED — a healthy store must not read as corrupt"
   fi
-  if printf '%s\n' "$OUT" | grep -q 'reachability/ref/commit-graph' &&
-    printf '%s\n' "$OUT" | grep -q 'reflog expire'; then
-    ok "reflog: the cause NAMES the class and gives the remedy for it (not the re-clone remedy, which is for damage)"
+  if printf '%s\n' "$OUT" | grep -q 'REFLOG-SCOPED' &&
+    printf '%s\n' "$OUT" | grep -q 'reflog expire' &&
+    printf '%s\n' "$OUT" | grep -q 'pass 3: fsck --no-reflogs'; then
+    ok "reflog: the cause ATTRIBUTES the complaint (a third --no-reflogs walk cleared it => REFLOG-SCOPED) and gives that class's remedy, not the re-clone one"
   else
-    bad "reflog: the UNMEASURED cause does not name the reachability class"
+    bad "reflog: the UNMEASURED cause does not attribute the reachability complaint: $(printf '%s\n' "$OUT" | grep 'unmeasured-cause' | tail -2 | tr '\n' ' ')"
   fi
   if ! printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: object '; then
     ok "reflog: NO 'object' lines — the 40-hex tokens in a reflog diagnostic name INTACT objects, not damaged ones"
@@ -670,17 +677,29 @@ fi
 # THREE ARMS, EACH ONE PROPERTY APART: report-once vs report-always (the condition),
 # and reachability vs damage (the exit bits).
 mk_fsck_shim() {
-  # mk_fsck_shim <dir> <always|once> <rc> <message> <log>
-  local d="$1" when="$2" rc="$3" msg="$4" log="$5"
+  # mk_fsck_shim <dir> <always|once> <rc> <message> <log> [rc-when---no-reflogs]
+  #
+  # THE SIXTH ARGUMENT IS WHAT MAKES THE REACHABILITY-CAUSE ARMS POSSIBLE (#3749 review
+  # round 4). The subject's third walk carries `--no-reflogs`, and the whole question it
+  # asks is whether the complaint SURVIVES that flag — so a shim that answered the same
+  # way to both configurations could not stage either outcome. It defaults to <rc>, which
+  # is what every pre-round-4 arm wants (a shim that has no opinion about reflogs).
+  local d="$1" when="$2" rc="$3" msg="$4" log="$5" nrl_rc="${6:-$3}"
   mk_bin "$d" timeout gtimeout
   rm -f "$d/git"
   {
     printf '#!/usr/bin/env bash\n'
-    printf '# Test shim: on `fsck`, report %s and exit %s; delegate everything else.\n' "$when" "$rc"
+    printf '# Test shim: on `fsck`, report %s and exit %s (%s with --no-reflogs); delegate everything else.\n' "$when" "$rc" "$nrl_rc"
+    printf 'nrl=0\n'
+    printf 'for a in "$@"; do [ "$a" = --no-reflogs ] && nrl=1; done\n'
     printf 'for a in "$@"; do\n'
     printf '  if [ "$a" = fsck ]; then\n'
     printf '    printf "call\\n" >>%s\n' "$(printf '%q' "$log")"
     printf '    n=$(grep -c . %s 2>/dev/null || printf 0)\n' "$(printf '%q' "$log")"
+    printf '    if [ "$nrl" = 1 ]; then\n'
+    printf '      if [ %s -ne 0 ]; then printf "%%s\\n" %s >&2; fi\n' "$(printf '%q' "$nrl_rc")" "$(printf '%q' "$msg")"
+    printf '      exit %s\n' "$nrl_rc"
+    printf '    fi\n'
     if [ "$when" = always ]; then
       printf '    if [ 1 -eq 1 ]; then\n'
     else
@@ -726,19 +745,78 @@ else
     bad "discriminator(transient): rc=$RC verdict='$(verdict_of)' walks=$(grep -c . "$LOG_ONCE" | tr -d ' ') (wanted 0/VERIFIED/2)"
   fi
   # (b) ONE PROPERTY APART: the same message on EVERY walk. It reproduces, so it is
-  #     non-passing — and still not CORRUPT, because it is the reachability class.
+  #     non-passing — and still not CORRUPT, because with the reflogs EXCLUDED it clears
+  #     (the shim's 6th argument), which is what makes it reflog-scoped rather than
+  #     damage. THREE walks now: sweep, reproduction, attribution.
   SH_ALWAYS="$T/shim-always"
   LOG_ALWAYS="$T/shim-always-calls.txt"
   : >"$LOG_ALWAYS"
-  mk_fsck_shim "$SH_ALWAYS" always 2 "$RL_MSG" "$LOG_ALWAYS"
+  mk_fsck_shim "$SH_ALWAYS" always 2 "$RL_MSG" "$LOG_ALWAYS" 0
   OUT=$(PATH="$SH_ALWAYS:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
   RC=$?
   record_out "discriminator-persistent"
   if [ "$RC" -eq 5 ] && [ "$(verdict_of)" = UNMEASURED ] &&
-    [ "$(grep -c . "$LOG_ALWAYS" | tr -d ' ')" -eq 2 ]; then
-    ok "discriminator: the SAME diagnostic on BOTH walks does not reach VERIFIED — the re-run is a discriminator, not a retry-until-clean"
+    [ "$(grep -c . "$LOG_ALWAYS" | tr -d ' ')" -eq 3 ] &&
+    printf '%s\n' "$OUT" | grep -q 'REFLOG-SCOPED'; then
+    ok "discriminator: the SAME reachability diagnostic on BOTH walks does not reach VERIFIED — and having cleared with --no-reflogs it is attributed REFLOG-SCOPED, not damage (3 walks)"
   else
-    bad "discriminator(persistent): rc=$RC verdict='$(verdict_of)' walks=$(grep -c . "$LOG_ALWAYS" | tr -d ' ') (wanted 5/UNMEASURED/2)"
+    bad "discriminator(persistent): rc=$RC verdict='$(verdict_of)' walks=$(grep -c . "$LOG_ALWAYS" | tr -d ' ') (wanted 5/UNMEASURED/3 naming REFLOG-SCOPED)"
+  fi
+  # (b2) THE ITEM-1 DEFECT, STAGED: one property from (b) — the complaint SURVIVES the
+  #      reflog-excluded walk. Before round 4 this reached UNMEASURED, which the
+  #      supervisor deliberately continues past, so workers kept running against a store
+  #      with an object missing from under a live ref.
+  SH_LIVE="$T/shim-live-reachable"
+  LOG_LIVE="$T/shim-live-reachable-calls.txt"
+  : >"$LOG_LIVE"
+  mk_fsck_shim "$SH_LIVE" always 2 'missing blob 1111111111111111111111111111111111111111' "$LOG_LIVE" 2
+  OUT=$(PATH="$SH_LIVE:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+  RC=$?
+  record_out "discriminator-live-reachable"
+  if [ "$RC" -eq 4 ] && [ "$(verdict_of)" = CORRUPT ] &&
+    [ "$(grep -c . "$LOG_LIVE" | tr -d ' ')" -eq 3 ]; then
+    ok "reachability-attribution: a reachability complaint that SURVIVES --no-reflogs is CORRUPT (exit 4) — the false negative round 4 fixed, staged one property from (b)"
+  else
+    bad "reachability-attribution(live): rc=$RC verdict='$(verdict_of)' walks=$(grep -c . "$LOG_LIVE" | tr -d ' ') (wanted 4/CORRUPT/3)"
+  fi
+  if printf '%s\n' "$OUT" | grep -q 'is the remedy for the OTHER cause' &&
+    ! printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: object '; then
+    ok "reachability-attribution: the CORRUPT remedy says the reflog remedy does NOT apply, and no 40-hex token is labelled an affected 'object' (a broken-link diagnostic names the intact source too)"
+  else
+    bad "reachability-attribution: the CORRUPT branch's remedy/labelling is wrong: $(printf '%s\n' "$OUT" | grep 'verdict-detail' | head -3 | tr '\n' ' ')"
+  fi
+  # (b3) THE ATTRIBUTION ITSELF FAILING is not a licence to pick either verdict: a third
+  #      walk that returns a status this script cannot read leaves the reproduced
+  #      complaint UNATTRIBUTED, which is neither CORRUPT nor clean. One property from
+  #      (b2): the third walk's status.
+  SH_UNATTR="$T/shim-unattributable"
+  LOG_UNATTR="$T/shim-unattributable-calls.txt"
+  : >"$LOG_UNATTR"
+  mk_fsck_shim "$SH_UNATTR" always 2 "$RL_MSG" "$LOG_UNATTR" 128
+  OUT=$(PATH="$SH_UNATTR:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+  RC=$?
+  record_out "discriminator-unattributable"
+  if [ "$RC" -eq 5 ] && [ "$(verdict_of)" = UNMEASURED ] &&
+    printf '%s\n' "$OUT" | grep -q 'could NOT be attributed'; then
+    ok "reachability-attribution: a third walk that produces no usable answer leaves the complaint UNATTRIBUTED and non-passing — never CORRUPT on an unreadable status, never clean"
+  else
+    bad "reachability-attribution(unattributable): rc=$RC verdict='$(verdict_of)' (wanted 5/UNMEASURED naming the failed attribution)"
+  fi
+  # (b4) AND A DAMAGE BIT SEEN ONLY IN THE THIRD WALK has not reproduced across the two
+  #      sweep walks, so it is UNMEASURED too — the third walk can strengthen the
+  #      reachability verdict, it cannot introduce a damage verdict of its own.
+  SH_L8="$T/shim-late-damage"
+  LOG_L8="$T/shim-late-damage-calls.txt"
+  : >"$LOG_L8"
+  mk_fsck_shim "$SH_L8" always 2 "$RL_MSG" "$LOG_L8" 1
+  OUT=$(PATH="$SH_L8:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+  RC=$?
+  record_out "discriminator-late-damage"
+  if [ "$RC" -eq 5 ] && [ "$(verdict_of)" = UNMEASURED ] &&
+    printf '%s\n' "$OUT" | grep -q 'appeared ONLY in the'; then
+    ok "reachability-attribution: a damage bit appearing ONLY in the third walk is UNMEASURED — the attribution walk cannot manufacture a damage verdict the sweep walks never saw"
+  else
+    bad "reachability-attribution(late-damage): rc=$RC verdict='$(verdict_of)' (wanted 5/UNMEASURED naming the third-walk-only damage)"
   fi
   # (c) A DAMAGE class (fsck exit bit 1) seen ONCE and not the second time is
   #     UNMEASURED: neither established damage nor a clean store. One property apart
@@ -1267,4 +1345,122 @@ if [ "$green_st" -ne 0 ]; then
   ok "signal-trap: THIS suite's own trap declarations exit NONZERO ($green_st) on SIGTERM — a signalled run can never be read as a pass with cases unrun"
 else
   bad "signal-trap: this suite's traps exit 0 on SIGTERM — a truncated run reports green"
+fi
+
+# --- Case 27: A MISSING LIVE-REACHABLE OBJECT IS CORRUPT (real fixtures) ----
+# THE DEFECT THIS CASE EXISTS FOR (#3749 review round 4, item 1). fsck raises
+# ERROR_REACHABLE (exit bit 2) for BOTH a stale reflog entry — routine on a store eight
+# lanes write — and an object that is genuinely ABSENT while a live ref still needs it.
+# The round-2/3 classifier put both on UNMEASURED, which is deliberately NON-FATAL to the
+# supervisor's loop, so a demonstrably damaged store went on spawning workers and the
+# journal called it "not measured". That is a false negative on real corruption, the one
+# direction this whole control exists to prevent.
+#
+# TWO REAL FIXTURES, ONE PROPERTY APART, AND THE PROPERTY IS *WHAT STILL NEEDS THE
+# OBJECT*. Both are built by the same code path and both have exactly one loose object
+# deleted; in the first, HEAD's tree names it, and in the second only the reflog does.
+# No shim: the round-4 arms in Case 17 stage the same two outcomes with a shim, which
+# proves the classifier reacts to the flag, while these prove that REAL GIT answers the
+# two configurations differently in the way the classifier depends on.
+mk_missing_obj_repo() {
+  # mk_missing_obj_repo <name> <live|reflog> -> path
+  local r="$T/$1" mode="$2" victim=""
+  mkdir -p "$r"
+  git init -q "$r" >/dev/null 2>&1
+  g "$r" config user.email t@t
+  g "$r" config user.name t
+  printf 'content aaa\n' >"$r/f1"
+  g "$r" add f1 >/dev/null
+  g "$r" -c user.email=t@t -c user.name=t commit -q -m c1 >/dev/null
+  printf 'content bbb\n' >"$r/f2"
+  g "$r" add f2 >/dev/null
+  g "$r" -c user.email=t@t -c user.name=t commit -q -m c2 >/dev/null
+  if [ "$mode" = live ]; then
+    # The blob HEAD's tree still names.
+    victim=$(g "$r" rev-parse HEAD:f2 2>/dev/null)
+  else
+    # A commit that ONLY the reflog names: created, then reset away.
+    victim=$(g "$r" rev-parse HEAD 2>/dev/null)
+    g "$r" reset -q --hard HEAD~1 >/dev/null 2>&1
+  fi
+  if [ -n "$victim" ]; then
+    chmod u+w "$(loose_path "$r" "$victim")" 2>/dev/null
+    rm -f "$(loose_path "$r" "$victim")"
+  fi
+  printf '%s' "$r"
+}
+# fsck_status_mode <repo> [--no-reflogs] -> the exit status
+fsck_status_mode() {
+  local r="$1" rc=0
+  if [ "${2:-}" = --no-reflogs ]; then
+    git -C "$r" fsck --no-progress --no-dangling --no-reflogs >/dev/null 2>&1 || rc=$?
+  else
+    git -C "$r" fsck --no-progress --no-dangling >/dev/null 2>&1 || rc=$?
+  fi
+  printf '%s' "$rc"
+}
+R_LIVE_MISS=$(mk_missing_obj_repo missing-live live)
+R_REFLOG_MISS=$(mk_missing_obj_repo missing-reflog reflog)
+LM_WITH=$(fsck_status_mode "$R_LIVE_MISS")
+LM_WITHOUT=$(fsck_status_mode "$R_LIVE_MISS" --no-reflogs)
+RM_WITH=$(fsck_status_mode "$R_REFLOG_MISS")
+RM_WITHOUT=$(fsck_status_mode "$R_REFLOG_MISS" --no-reflogs)
+# THE CONSTRUCTION ASSERT IS ON THE BITS, not on literal numbers, and it asserts the
+# DISCRIMINATING OBSERVABLE: this is what makes the fixtures the two things the case
+# claims. A git that answered the two configurations the same way would red HERE
+# (attributable) rather than passing the cases below (not).
+if [ "$((LM_WITH & 2))" -ne 0 ] && [ "$((LM_WITH & 5))" -eq 0 ] &&
+  [ "$((LM_WITHOUT & 2))" -ne 0 ] &&
+  [ "$((RM_WITH & 2))" -ne 0 ] && [ "$((RM_WITH & 5))" -eq 0 ] &&
+  [ "$RM_WITHOUT" -eq 0 ]; then
+  ok "missing-object-plant: the two fixtures ARE what the case claims (live-reachable: fsck $LM_WITH with reflogs and $LM_WITHOUT without, both ERROR_REACHABLE and no damage bit; reflog-only: $RM_WITH with reflogs and $RM_WITHOUT without)"
+else
+  bad "missing-object-plant: live=$LM_WITH/$LM_WITHOUT reflog-only=$RM_WITH/$RM_WITHOUT — not the two shapes the case is about; the cases below would prove nothing"
+fi
+if run 4 "missing live-reachable object: CORRUPT" --repo "$R_LIVE_MISS"; then
+  if [ "$(verdict_of)" = CORRUPT ]; then
+    ok "missing-live: an object MISSING while HEAD's tree still names it is CORRUPT (exit 4) — it stops the supervisor, where the pre-round-4 UNMEASURED did not"
+  else
+    bad "missing-live: verdict='$(verdict_of)', wanted CORRUPT — real corruption reported as something a consumer continues past"
+  fi
+  if printf '%s\n' "$OUT" | grep -q 'pass 3: fsck --no-reflogs' &&
+    printf '%s\n' "$OUT" | grep -q 'live ref, the index or HEAD' &&
+    printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: finding missing '; then
+    ok "missing-live: the verdict is attributed by a THIRD --no-reflogs walk, says which roots still need the object, and names the diagnostic"
+  else
+    bad "missing-live: the CORRUPT verdict does not show the attribution: $(printf '%s\n' "$OUT" | grep -E 'measured pass|verdict-detail' | head -4 | tr '\n' ' ')"
+  fi
+fi
+# ONE PROPERTY APART: the same deletion, reachable only from the reflog. Non-passing and
+# NOT the fatal branch — so the CORRUPT above is attributable to the LIVE reachability and
+# not merely to "an object is missing".
+if run 5 "missing reflog-only object: UNMEASURED" --repo "$R_REFLOG_MISS"; then
+  if [ "$(verdict_of)" = UNMEASURED ] &&
+    printf '%s\n' "$OUT" | grep -q 'REFLOG-SCOPED'; then
+    ok "missing-reflog-only: an object only the REFLOG names clears with --no-reflogs, so it stays REFLOG-SCOPED and non-passing — never the fatal branch, and never clean"
+  else
+    bad "missing-reflog-only: verdict='$(verdict_of)' — wanted UNMEASURED attributed REFLOG-SCOPED"
+  fi
+fi
+
+# --- Case 28: THE SWEEP WALKS NEVER CARRY `--no-reflogs` (structural) -------
+# `--no-reflogs` belongs to the reachability-CAUSE discriminator and to nothing else.
+# Round 1 proposed it as a way to SUPPRESS the intermittent reflog false positive, the
+# lead measured it and rejected it, and the two uses are one edit apart: put it on the
+# sweep and a real missing object on a store with reflogs stops being reported at all.
+# Behaviour cannot see the difference (both configurations exit 0 on a healthy store), so
+# the guard is structural over the shipped call sites.
+sweep_calls=$(grep -n '^[[:space:]]*fsck_pass ' "$SUBJECT")
+p12_bad=$(printf '%s\n' "$sweep_calls" | grep -E 'fsck_pass p[12]\b' | grep -- '--no-reflogs' | head -1)
+p3_ok=$(printf '%s\n' "$sweep_calls" | grep -cE 'fsck_pass p3 --no-reflogs$' | tr -d ' ')
+n_calls=$(printf '%s\n' "$sweep_calls" | grep -c . | tr -d ' ')
+if [ "$n_calls" -ge 3 ] && [ "$p3_ok" -eq 1 ]; then
+  ok "no-reflogs-plant: the shipped script has $n_calls fsck_pass call sites and exactly one is the p3 --no-reflogs attribution walk — the assert below has a subject"
+else
+  bad "no-reflogs-plant: $n_calls fsck_pass call site(s), p3-with-flag=$p3_ok — the call sites moved; the assert below would be vacuous"
+fi
+if [ -z "$p12_bad" ]; then
+  ok "no-reflogs: passes 1 and 2 — the sweep proper — carry no --no-reflogs, so the flag cannot become a suppressor of the very class it exists to attribute (structural)"
+else
+  bad "no-reflogs: a SWEEP walk carries --no-reflogs: $p12_bad"
 fi

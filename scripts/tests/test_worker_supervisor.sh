@@ -9922,32 +9922,39 @@ test_preflight_reads_the_stop_file_before_the_object_store_sweep() {
 t test_preflight_reads_the_stop_file_before_the_object_store_sweep
 
 # AND THE EXPOSURE IS BOUNDED IN WALL TIME, because the in-flight sweep is NOT
-# interruptible (#3749 review round 3, item 3). Its two walks run in a CHILD process, so
-# no check between them can execute here; the only lever this caller has is how long the
-# two of them may take. The supervisor's default per-walk bound is therefore HALF the
-# sweep script's own, so 2 walks here cost no more than 1 walk at the script's bound.
-# Asserted as a RELATION between the two defaults, read from both shipped files, rather
-# than as two magic numbers that could drift apart silently.
-test_supervisor_sweep_bound_is_half_the_sweep_scripts_own() {
-  local sup_default script_default sweep_sh
+# interruptible (#3749 review round 3, item 3). Its walks run in a CHILD process, so no
+# check between them can execute here; the only lever this caller has is how long they
+# may take in total. The supervisor's default per-walk bound is therefore the sweep
+# script's own bound DIVIDED BY MAX_SWEEP_WALKS, so every walk this caller can pay for
+# still costs no more than 1 walk at the script's bound.
+#
+# ALL THREE NUMBERS ARE READ FROM THE SHIPPED FILES, INCLUDING THE WALK COUNT (#3749
+# review round 4). Round 3 hard-coded the factor 2 in this test, so ADDING A THIRD WALK
+# to the sweep — which is exactly what round 4 did — would have kept this assert green
+# while the supervisor's real worst case rose to 900s. A relation whose own constant is
+# re-typed here is two magic numbers wearing a relation's clothes.
+test_supervisor_sweep_bound_covers_every_walk_the_script_can_take() {
+  local sup_default script_default max_walks sweep_sh
   sweep_sh="$REPO_ROOT/scripts/check-object-store-integrity.sh"
   sup_default="$(sed -n 's/^OBJ_SWEEP_TIMEOUT_SECS="\${OBJ_SWEEP_TIMEOUT_SECS:-\([0-9]*\)}"$/\1/p' "$SUPERVISOR" | head -1)"
   script_default="$(sed -n 's/^BOUND_SECS=\([0-9]*\)$/\1/p' "$sweep_sh" | head -1)"
+  max_walks="$(sed -n 's/^MAX_SWEEP_WALKS=\([0-9]*\)$/\1/p' "$sweep_sh" | head -1)"
   if [[ "$sup_default" =~ ^[0-9]+$ ]] && [[ "$script_default" =~ ^[0-9]+$ ]] &&
-    [[ "$sup_default" -gt 0 ]] && [[ "$script_default" -gt 0 ]]; then
-    pass "sweep-bound-plant: both defaults were read from the shipped files (supervisor $sup_default, sweep script $script_default)"
+    [[ "$max_walks" =~ ^[0-9]+$ ]] &&
+    [[ "$sup_default" -gt 0 ]] && [[ "$script_default" -gt 0 ]] && [[ "$max_walks" -ge 2 ]]; then
+    pass "sweep-bound-plant: all three numbers were read from the shipped files (supervisor $sup_default, sweep script $script_default, MAX_SWEEP_WALKS $max_walks)"
   else
-    fail "sweep-bound-plant: supervisor='$sup_default' script='$script_default' — one of the declarations moved; the assert below would be vacuous"
+    fail "sweep-bound-plant: supervisor='$sup_default' script='$script_default' walks='$max_walks' — one of the declarations moved; the assert below would be vacuous"
     return
   fi
-  if [[ $((sup_default * 2)) -le "$script_default" ]]; then
-    pass "sweep-bound: the supervisor's per-walk bound ($sup_default s) is at most HALF the sweep script's own ($script_default s), so its worst case of TWO walks costs no more than ONE walk at the script's bound — the uninterruptible window did not double when the script's bound was raised"
+  if [[ $((sup_default * max_walks)) -le "$script_default" ]]; then
+    pass "sweep-bound: the supervisor's per-walk bound ($sup_default s) x the sweep's own MAX_SWEEP_WALKS ($max_walks) is at most the script's bound ($script_default s), so its worst case costs no more than ONE walk at the script's bound — adding a walk to the sweep cannot silently widen this caller's uninterruptible window"
   else
-    fail "sweep-bound: 2 x $sup_default > $script_default — the supervisor can block uninterruptibly for longer than one of the sweep script's own bounds"
+    fail "sweep-bound: $max_walks x $sup_default > $script_default — the supervisor can block uninterruptibly for longer than one of the sweep script's own bounds"
   fi
 }
 
-t test_supervisor_sweep_bound_is_half_the_sweep_scripts_own
+t test_supervisor_sweep_bound_covers_every_walk_the_script_can_take
 
 # THE CREATE-ONLY PRIMITIVE ITSELF (#3749 review round 2, BLOCKER 1).
 #

@@ -3060,12 +3060,16 @@ OBJ_SWEEP_SH="$REPO_ROOT/scripts/check-object-store-integrity.sh"
 # one on purpose — a wrapper that expires first would report "the sweep produced no
 # verdict" for a run the sweep was about to classify itself.
 #
-# THE INNER BOUND IS PER WALK, AND THE SWEEP TAKES TWO WHEN THE FIRST IS NOT CLEAN (the
-# #3749 reproduction discriminator), so the outer one has to clear 2x the inner one plus
-# process overhead — sized from a MEASURED range (13-24s warm, 47-80s cold on this
-# fleet's 366M store), not from the single warm number an earlier revision quoted.
+# THE INNER BOUND IS PER WALK, AND THE SWEEP CAN TAKE THREE (MAX_SWEEP_WALKS in the sweep
+# script: the sweep, the reproduction discriminator when walk 1 is not clean, and the
+# `--no-reflogs` reachability-cause discriminator when both walks report ERROR_REACHABLE
+# — #3749 review round 4), so the outer one has to clear 3x the inner one plus process
+# overhead — sized from a MEASURED range (13-24s warm, 47-80s cold on this fleet's 366M
+# store), not from the single warm number an earlier revision quoted. A wrapper that
+# expired first would report "the sweep produced no verdict" for a run the sweep was
+# about to classify itself, which is why it is the LOOSER of the two.
 OBJ_SWEEP_INNER_BOUND=600
-OBJ_SWEEP_OUTER_BOUND=1320
+OBJ_SWEEP_OUTER_BOUND=1980
 OBJ_STORE_CORRUPT=0
 if [ "$SKIP_OBJ_SWEEP" = 1 ]; then
   warn "object-store: OPT-OUT ($SKIP_OBJ_SWEEP_HOW) — this box's SHARED git object store was NOT swept"

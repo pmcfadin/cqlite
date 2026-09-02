@@ -205,25 +205,32 @@ UNVERIFIED_MAX="${UNVERIFIED_MAX:-2}"
 #   no green anywhere — this sweep certifies nothing, it only refuses to run workers over
 #   a store known to be damaged.
 # OBJ_SWEEP_TIMEOUT_SECS — passed through as the sweep's own `--timeout`, and it is the
-#   bound on EACH of the sweep's walks (a non-clean first walk is re-run once as a
-#   discriminator), so the worst-case wall time is TWICE it. The bound exists to stop a
-#   HANG, not to police duration, and a bound that expires on a healthy-but-busy box
-#   yields UNMEASURED noise nobody acts on.
-#   THE SUPERVISOR'S DEFAULT IS HALF THE SWEEP SCRIPT'S OWN (300 vs 600), AND THAT IS
-#   THIS CALLER'S LATENCY BUDGET RATHER THAN A DIFFERENT VIEW OF THE STORE (#3749 review
-#   round 3, item 3). The sweep runs inside a CHILD process, so nothing here can check
-#   the stop file or the wall-clock budget BETWEEN its two walks; the only lever this
-#   caller has is how long those two walks can take. At 300 the worst case is 600s — one
-#   walk at the script's own bound — instead of the 1200s that raising the per-walk bound
-#   to 600 in round 2 silently bought. 300s is still ~3.75x the observed COLD worst case
-#   (47-80s on this fleet's 366M store) and ~12x the warm one, so it costs no realistic
-#   sweep its verdict. The other caller, scripts/bootstrap-agent-machine.sh, keeps 600:
-#   machine onboarding is a one-shot step where nobody is waiting on a stop file.
+#   bound on EACH of the sweep's walks, of which there can be MAX_SWEEP_WALKS (declared
+#   in the sweep script: the sweep, the reproduction discriminator when walk 1 is not
+#   clean, and the `--no-reflogs` reachability-cause discriminator when both walks report
+#   ERROR_REACHABLE). Worst-case wall time is therefore MAX_SWEEP_WALKS x this value. The
+#   bound exists to stop a HANG, not to police duration, and a bound that expires on a
+#   healthy-but-busy box yields UNMEASURED noise nobody acts on.
+#   THE SUPERVISOR'S DEFAULT IS THE SCRIPT'S BOUND DIVIDED BY MAX_SWEEP_WALKS (200 vs
+#   600/3), AND THAT IS THIS CALLER'S LATENCY BUDGET RATHER THAN A DIFFERENT VIEW OF THE
+#   STORE (#3749 review round 3, item 3; re-derived in round 4 when the third walk was
+#   added). The sweep runs inside a CHILD process, so nothing here can check the stop
+#   file or the wall-clock budget BETWEEN its walks; the only lever this caller has is
+#   how long they may take in total. At 200 the worst case stays 600s — one walk at the
+#   script's own bound — which is the property round 3 fixed and round 4 must not undo by
+#   adding a walk. 200s is ~2.5x the observed COLD worst case (47-80s on this fleet's
+#   366M store) and ~12x the warm one; the third walk is the CHEAPEST of the three
+#   (measured 12.5s vs 24s on the live store, because excluding the reflogs is what it
+#   does). The other caller, scripts/bootstrap-agent-machine.sh, keeps 600: machine
+#   onboarding is a one-shot step where nobody is waiting on a stop file.
+#   THE TRADE, STATED: this is stop latency bought with UNMEASURED headroom. A walk that
+#   runs past 200s under load pages UNMEASURED here where it would have completed at 300.
+#   Nothing on this fleet has been observed above 80s, and nothing monitors it either.
 #   STRICTLY POSITIVE: the sweep rejects 0 as a usage error, which would turn the probe
 #   into a permanent UNMEASURED — a silently self-disabling bound, the shape
 #   validate_numeric_knobs exists for.
 OBJ_SWEEP_INTERVAL_HOURS="${OBJ_SWEEP_INTERVAL_HOURS:-6}"
-OBJ_SWEEP_TIMEOUT_SECS="${OBJ_SWEEP_TIMEOUT_SECS:-300}"
+OBJ_SWEEP_TIMEOUT_SECS="${OBJ_SWEEP_TIMEOUT_SECS:-200}"
 # Empty => derived per SHARED STORE in obj_sweep_stamp_path (below), so lanes sharing one
 # object store share one throttle. It also names the CORRUPT latch (`<stamp>.CORRUPT`),
 # so pinning it relocates both files together.
@@ -3391,7 +3398,7 @@ obj_sweep_set_latch() {
 # (#3749 review round 3, item 1a). The question has to be asked again IMMEDIATELY BEFORE
 # every path that lets this lane go on to spawn a worker, because a PEER can latch the
 # box at any moment — including while this lane's own sweep is in flight, which is up to
-# two fsck walks. A lane that swept CLEAN while a peer was recording CORRUPT would
+# MAX_SWEEP_WALKS fsck walks. A lane that swept CLEAN while a peer was recording CORRUPT would
 # otherwise return 0 from a sweep whose answer is already known to be superseded.
 obj_sweep_stop_if_latched() {
   local latch="$1" latch_ts
@@ -3542,7 +3549,7 @@ object_store_sweep() {
   if [[ "$rc" -eq 0 && "$verdict" == "VERIFIED" ]]; then
     log "object-store: VERIFIED — $(printf '%s\n' "$out" | { grep '^OBJECT-STORE: measured ' || true; } | head -1)"
     # RE-ASKED AFTER THE SWEEP, BEFORE RETURNING TO THE SPAWN PATH. This lane's own walk
-    # said VERIFIED, but it took up to two fsck bounds to say it, and a PEER may have
+    # said VERIFIED, but it took up to MAX_SWEEP_WALKS fsck bounds to say it, and a PEER may have
     # latched the box in the meantime. The peer's finding is about the same store and is
     # strictly newer than this measurement, so it wins.
     obj_sweep_stop_if_latched "$latch"
@@ -3665,7 +3672,8 @@ preflight_wait() {
   # inside (see object_store_sweep).
   #
   # THE IN-FLIGHT SWEEP IS STILL NOT INTERRUPTIBLE, AND THAT IS A DELIBERATE LIMIT, NOT
-  # AN OVERSIGHT. The sweep's two fsck walks happen inside a CHILD PROCESS
+  # AN OVERSIGHT. The sweep's fsck walks (up to MAX_SWEEP_WALKS of them) happen inside a
+  # CHILD PROCESS
   # (`bash scripts/check-object-store-integrity.sh`), so "check the stop file between the
   # passes" is not something this function can do: there is no point between them that
   # executes here. Making it interruptible means running the child in its own process
@@ -3673,8 +3681,9 @@ preflight_wait() {
   # lifetime and process-ownership hazards this repo has already paid for once
   # (CLAUDE.md: never signal a process group you no longer own), for a stop-latency win.
   # So the exposure is BOUNDED IN WALL TIME INSTEAD: see OBJ_SWEEP_TIMEOUT_SECS, whose
-  # supervisor default is half the sweep script's own, precisely so that TWO walks here
-  # cost no more than ONE walk at the script's bound. The stop file is re-read the moment
+  # supervisor default is the sweep script's own bound DIVIDED BY MAX_SWEEP_WALKS,
+  # precisely so that every walk this caller can pay for still costs no more than ONE
+  # walk at the script's bound. The stop file is re-read the moment
   # the sweep returns (the loop's first statement, below).
   object_store_sweep
   while true; do

@@ -44,6 +44,16 @@
 # historical warnings (a malformed committer line, a zero-padded file mode) to
 # errors, so it would report CORRUPT on a healthy store — the guard operators learn
 # to waive.
+
+# `--no-reflogs` IS USED, ON THE THIRD WALK ONLY, AND NEVER TO SUPPRESS A COMPLAINT
+# (#3749 review round 4, item 1). Using it on the SWEEP was proposed in round 1 as a
+# way to make the intermittent reflog false positive go away, MEASURED, and REJECTED
+# by the lead — the concurrency transients hit that form too, so it bought nothing and
+# would have hidden a real signal. Using it as a DISCRIMINATOR for a complaint that has
+# ALREADY reproduced twice is a different operation with the opposite effect: it does
+# not decide whether to report, it decides WHICH CAUSE to report, and its answer can
+# only make the verdict STRONGER (UNMEASURED -> CORRUPT). Passes 1 and 2 — the sweep
+# proper — never carry it, and that is asserted structurally by the test suite.
 #
 # THE VOCABULARY IS CHOSEN SO THIS CANNOT BE READ AS A CERTIFICATION
 # ------------------------------------------------------------------
@@ -68,20 +78,31 @@
 # EXIT CODES, AND THE CONSUMER CONTRACT
 # -------------------------------------
 #   0   VERIFIED   — the sweep RAN TO COMPLETION and reported no corruption.
-#   4   CORRUPT    — fsck reported OBJECT/PACK damage (its exit bits 1/4) on TWO
-#                    independent walks. The affected object ids are named.
+#   4   CORRUPT    — damage established on TWO independent walks. Either OBJECT/PACK
+#                    damage (fsck exit bits 1/4), or an object MISSING from the
+#                    reachability walk that is still reachable with reflogs EXCLUDED
+#                    (bit 2, see the reachability discriminator below). The findings
+#                    are named.
 #   5   UNMEASURED — the answer was not obtained: no git, no resolvable object
 #                    store, no usable timeout binary, the bound expired, an fsck
 #                    failure this script cannot classify, a damage class that did
-#                    NOT reproduce, or reachability/ref/commit-graph/multi-pack-index
-#                    complaints that did.
+#                    NOT reproduce, or a reachability/ref/commit-graph/multi-pack-index
+#                    complaint that reproduced but could not be ATTRIBUTED.
 #
-# REACHABILITY IS ITS OWN NON-PASSING STATE, NEITHER CLEAN NOR CORRUPT. fsck's exit
-# bit 2 (ERROR_REACHABLE) fires for a stale reflog entry on a store peer lanes are
-# writing — routine on this fleet, and NOT this script's subject — but also for a
-# genuinely MISSING object, so it can be demoted to neither. It lands on UNMEASURED
-# with a cause that names the class. And NO verdict is fatal on ONE observation:
-# see the discriminator at the sweep below.
+# A REACHABILITY COMPLAINT HAS TWO CAUSES AND THEY GET DIFFERENT VERDICTS (#3749
+# review round 4, item 1). fsck's exit bit 2 (ERROR_REACHABLE) fires for BOTH:
+#   * a stale reflog entry naming an object a peer lane's gc has pruned — routine on
+#     a store eight lanes write, and NOT this script's subject; and
+#   * an object that is genuinely MISSING while a LIVE ref, the index or HEAD still
+#     needs it — which IS corruption of the shared store, in the one direction this
+#     whole control exists to prevent.
+# Reading the class as "unmeasurable" for both was a FALSE NEGATIVE on real damage:
+# UNMEASURED is deliberately non-fatal to the supervisor's loop, so workers kept
+# running against a demonstrably damaged store. The two are separated by a THIRD walk
+# with `--no-reflogs`: a complaint that survives with the reflogs excluded from the
+# reachability roots is not a reflog artefact, and it is CORRUPT. One that clears
+# stays UNMEASURED with the reflog remedy. And NO verdict is fatal on ONE
+# observation: see the discriminator at the sweep below.
 #   2   usage error — and `--help` exits 2 as well, deliberately: exit 0 MEANS
 #                    VERIFIED here, so a run that measured nothing must never
 #                    produce it.
@@ -442,20 +463,32 @@ fi
 # cold worst case, not the ~4x that 300s would give. The bound exists to stop a
 # HANG, not to police duration - an expired bound is UNMEASURED, which is a page
 # nobody can act on, and a bound that fires on a healthy-but-busy box is the guard
-# operators learn to waive. WORST-CASE WALL TIME IS 2x THE BOUND, because a
-# non-clean first pass is re-run once (see the discriminator below); only the rare
-# non-clean path pays it.
+# operators learn to waive. WORST-CASE WALL TIME IS MAX_SWEEP_WALKS x THE BOUND: a
+# non-clean first pass is re-run once (the discriminator below), and a REPRODUCED
+# reachability complaint costs one further walk to attribute (#3749 review round 4).
+# Only those paths pay it; a clean store takes exactly one walk.
 #
 # A CALLER MAY WANT A TIGHTER BOUND THAN THIS DEFAULT, AND ONE DOES. This bound is a
 # property of the WALK; how long a caller may block is a property of the CALLER.
-# scripts/local/worker-supervisor.sh passes 300 rather than accepting 600, because the
-# sweep runs inside a child process and nothing in that supervisor can read its stop
-# file between the two walks - so its worst case of two walks is deliberately capped at
-# one walk's worth of this default (#3749 review round 3). Machine onboarding
-# (bootstrap-agent-machine.sh) keeps 600: nobody is waiting on a stop file there. If you
-# change this number, the supervisor's own default is asserted to stay at most half of
-# it, so that relation reds rather than drifting silently.
+# scripts/local/worker-supervisor.sh passes a smaller number rather than accepting 600,
+# because the sweep runs inside a child process and nothing in that supervisor can read
+# its stop file BETWEEN the walks - so its worst case of MAX_SWEEP_WALKS walks is
+# deliberately capped at one walk's worth of this default (#3749 review round 3, widened
+# for the third walk in round 4). Machine onboarding (bootstrap-agent-machine.sh) keeps
+# 600: nobody is waiting on a stop file there. If you change this number, or
+# MAX_SWEEP_WALKS, the supervisor's own default is asserted to stay at or below
+# BOUND_SECS / MAX_SWEEP_WALKS, so that relation reds rather than drifting silently.
 FINDING_LIST_LIMIT=40
+
+# MAX_SWEEP_WALKS - the most bounded fsck walks ONE invocation can spend, and it is
+# declared here as a NUMBER A CALLER CAN READ because the supervisor's own bound is
+# derived from it by an asserted relation rather than by someone remembering. Raising it
+# raises every caller's worst-case uninterruptible block.
+#   1. the sweep;
+#   2. the reproduction discriminator, when walk 1 was not clean;
+#   3. the reachability-CAUSE discriminator (`--no-reflogs`), when walks 1 and 2 both
+#      reported ERROR_REACHABLE and neither reported damage.
+MAX_SWEEP_WALKS=3
 
 # git fsck's exit BITMASK, from fsck.h and CONFIRMED against the git in use (2.43.0):
 #   1 ERROR_OBJECT   2 ERROR_REACHABLE   4 ERROR_PACK
@@ -468,11 +501,21 @@ FINDING_LIST_LIMIT=40
 FSCK_DAMAGE_MASK=5
 FSCK_KNOWN_MASK=63
 FSCK_NONMASK_FLOOR=124
+# ERROR_REACHABLE alone. It is NOT in FSCK_DAMAGE_MASK because the bit does not by
+# itself say which of its two causes fired (a pruned object named by a reflog, or an
+# object a LIVE ref still needs); the third walk is what attributes it.
+FSCK_REACHABLE_BIT=2
 
-# fsck_pass <tag> - ONE bounded fsck over the shared store. Sets WALK_RC,
-# WALK_ELAPSED, WALK_CLASS, WALK_NFIND and writes $TMPD/<tag>.findings (the
+# fsck_pass <tag> [--no-reflogs] - ONE bounded fsck over the shared store. Sets
+# WALK_RC, WALK_ELAPSED, WALK_CLASS, WALK_NFIND and writes $TMPD/<tag>.findings (the
 # recognised diagnostic lines, verbatim) and $TMPD/<tag>.ids (the 40-hex tokens in
 # them).
+#
+# THE SECOND ARGUMENT IS A CLOSED SET OF ONE, AND AN UNRECOGNISED VALUE IS A REFUSAL,
+# not a silently ignored typo: `--no-reflogs` belongs to the reachability-CAUSE
+# discriminator (walk 3) and to nothing else. Passes 1 and 2 - the sweep proper - pass
+# no mode at all, so a future edit that widened the reachability walk into the sweep
+# would have to change a call site the test suite reads structurally.
 #
 # THE CLASS COMES FROM fsck's EXIT BITMASK, NOT FROM THE TEXT SHAPE OF ITS
 # DIAGNOSTICS, AND THAT IS THE #3749 REVIEW'S CORRECTION. `git fsck` returns a
@@ -526,6 +569,20 @@ fsck_pass() {
   local tag="$1" rc=0 t0 t1 el
   local out="$TMPD/$tag.out" err="$TMPD/$tag.err" all="$TMPD/$tag.all"
   local started="$TMPD/$tag.started"
+  # The argv is built as an ARRAY (never an unquoted string), so an empty mode cannot
+  # word-split and the array is never empty - `"${fargs[@]}"` under `set -u` on bash 3.2
+  # is only safe for a non-empty array, and the two base flags guarantee that.
+  local -a fargs
+  fargs=(--no-progress --no-dangling)
+  case "${2:-}" in
+    '') ;;
+    --no-reflogs) fargs=("${fargs[@]}" --no-reflogs) ;;
+    *)
+      unmeasured "internal: fsck_pass was called with an unsupported walk mode" \
+        "$(sane "${2:-}") - refusing rather than running a walk whose configuration" \
+        "this script cannot describe in its own verdict (#3749)."
+      ;;
+  esac
   rm -f "$started" 2>/dev/null || true
   t0=$(date +%s 2>/dev/null || echo 0)
   # THE LAUNCH IS WRAPPED SO THAT "fsck RAN AND RETURNED A STATUS" CAN BE TOLD APART
@@ -568,13 +625,13 @@ fsck_pass() {
     (
       true >"$started"
       git_isolated nice -n 19 "$TIMEOUT_BIN" --kill-after="$BOUND_KILL_GRACE" "$BOUND_SECS" \
-        git --git-dir="$GIT_COMMON_DIR" fsck --no-progress --no-dangling
+        git --git-dir="$GIT_COMMON_DIR" fsck "${fargs[@]}"
     ) 2>/dev/null >"$out" 2>"$err" || rc=$?
   else
     (
       true >"$started"
       git_isolated nice -n 19 "$TIMEOUT_BIN" "$BOUND_SECS" \
-        git --git-dir="$GIT_COMMON_DIR" fsck --no-progress --no-dangling
+        git --git-dir="$GIT_COMMON_DIR" fsck "${fargs[@]}"
     ) 2>/dev/null >"$out" 2>"$err" || rc=$?
   fi
   t1=$(date +%s 2>/dev/null || echo 0)
@@ -801,21 +858,138 @@ if [ "$FIRST_WALK_CLEAN" -eq 0 ]; then
       "see what it said."
   fi
 
-  # BOTH PASSES NON-CLEAN, NEITHER OBJECT/PACK DAMAGE: reachability, refs,
-  # commit-graph or multi-pack-index complaints that survived a second walk. Its OWN
-  # non-passing state with its OWN cause text - never the fatal branch (this is not
-  # the class this script exists for) and never VERIFIED (a genuinely MISSING object
-  # reports exactly this, so reading it as clean would hide real damage). No `object`
-  # lines: the 40-hex tokens in a reflog diagnostic name INTACT objects.
+  # --- PASS 3: THE REACHABILITY-CAUSE DISCRIMINATOR -------------------------
+  #
+  # THE FALSE NEGATIVE THIS EXISTS FOR (#3749 review round 4, item 1). ERROR_REACHABLE
+  # has two causes and only one of them is benign. A stale reflog entry naming an object
+  # a peer lane pruned is routine on this store; an object that is MISSING while a LIVE
+  # ref, the index or HEAD still needs it is corruption of exactly the kind this control
+  # exists to catch. Both reproduce across walks 1 and 2, so the reproduction
+  # discriminator cannot tell them apart, and both used to land on UNMEASURED - which is
+  # NON-FATAL to the supervisor's loop by design. So a demonstrably damaged store kept
+  # spawning workers, reported as "not measured".
+  #
+  # HOW THEY ARE SEPARATED. `git fsck --no-reflogs` drops the reflogs from the
+  # REACHABILITY ROOTS and keeps everything else, so a complaint that survives it is
+  # reachable from a live root. Measured on git 2.43.0, both directions, on real
+  # fixtures the suite builds:
+  #   * a blob deleted while HEAD's tree still names it: rc 2 WITH reflogs and rc 2
+  #     WITHOUT them -> live-reachable, and CORRUPT;
+  #   * a commit deleted after `reset --hard`, so only the reflog names it: rc 2 WITH
+  #     reflogs and rc 0 WITHOUT -> reflog-scoped, and it stays where it was.
+  #
+  # IT IS NOT A THIRD OPINION ON WHETHER TO REPORT. The class has already reproduced
+  # twice when this runs; this walk decides WHICH CAUSE, and it can only make the
+  # verdict stronger. Nothing here can turn a reported complaint into VERIFIED.
+  if [ "$C1" = nondamage ] && [ "$C2" = nondamage ] &&
+    [ $((RC1 & FSCK_REACHABLE_BIT)) -ne 0 ] && [ $((RC2 & FSCK_REACHABLE_BIT)) -ne 0 ]; then
+    printf '%s note both walks report ERROR_REACHABLE (fsck exit bit 2) and NO object/pack\n' "$P"
+    printf '%s note damage. That bit covers a stale reflog entry AND an object a live ref\n' "$P"
+    printf '%s note still needs, so it is attributed by a third walk with --no-reflogs:\n' "$P"
+    printf '%s note a complaint that survives with the reflogs excluded is reachable from a\n' "$P"
+    printf '%s note LIVE root and is damage; one that clears was reflog-scoped.\n' "$P"
+    fsck_pass p3 --no-reflogs
+    C3="$WALK_CLASS"
+    RC3="$WALK_RC"
+    EL3="$WALK_ELAPSED"
+    N3="$WALK_NFIND"
+    printf '%s measured pass 3: fsck --no-reflogs rc=%s in %ss over %s (reachability attribution)\n' \
+      "$P" "$RC3" "$EL3" "$(sane "$OBJ_DIR")"
+
+    # THE ATTRIBUTION FAILED, so the cause is UNKNOWN - and an unattributed reachability
+    # complaint must not be read as either verdict. `killed`, `launchfail` and
+    # `unclassified` all mean the third walk produced no usable answer; each keeps the
+    # reproduced complaint visible and says which walk went wrong.
+    if [ "$C3" = killed ] || [ "$C3" = launchfail ] || [ "$C3" = unclassified ]; then
+      emit_findings p2 unmeasured-cause
+      unmeasured "git fsck reported reachability problems on BOTH walks (pass 1 rc=$RC1," \
+        "pass 2 rc=$RC2) and the confirming --no-reflogs walk produced no usable answer" \
+        "(class=$C3 rc=$RC3), so the cause could NOT be attributed: a stale reflog entry" \
+        "and an object a LIVE ref still needs report the same bit, and only the second is" \
+        "damage. This is NOT clean. Re-run on an idle box; if the third walk keeps failing," \
+        "run 'git fsck --no-reflogs' by hand and read what it says (#3749)."
+    fi
+
+    # A DAMAGE BIT THAT SHOWS UP FOR THE FIRST TIME IN THE THIRD WALK has not reproduced
+    # either: the two sweep walks both said there was none. Same rule as the one-pass
+    # damage branch above - neither established damage nor a clean store.
+    if [ $((RC3 & FSCK_DAMAGE_MASK)) -ne 0 ]; then
+      emit_findings p3 unmeasured-cause
+      unmeasured "an object/pack damage class (fsck exit bit 1 or 4) appeared ONLY in the" \
+        "third walk (pass 1 rc=$RC1, pass 2 rc=$RC2, pass 3 --no-reflogs rc=$RC3), so it" \
+        "did not reproduce across the two sweep walks. That is neither established damage" \
+        "nor a clean store: re-run on an IDLE box, and if it recurs treat the store as" \
+        "suspect and escalate (#3749)."
+    fi
+
+    # THE FATAL BRANCH FOR THIS CLASS: reproduced across walks 1 and 2, and STILL present
+    # with the reflogs excluded. Something a live ref, the index or HEAD needs is not in
+    # the store.
+    if [ $((RC3 & FSCK_REACHABLE_BIT)) -ne 0 ]; then
+      emit_findings p3 finding
+      printf '%s measured fsck rc=%s then rc=%s then rc=%s --no-reflogs (%ss + %ss + %ss) over %s\n' \
+        "$P" "$RC1" "$RC2" "$RC3" "$EL1" "$EL2" "$EL3" "$(sane "$OBJ_DIR")"
+      printf '%s verdict CORRUPT\n' "$P"
+      printf '%s verdict-detail %s fsck diagnostic(s) name objects MISSING from this box'"'"'s SHARED\n' "$P" "$N3"
+      printf '%s verdict-detail store, on THREE walks - and they are still missing with the reflogs\n' "$P"
+      printf '%s verdict-detail EXCLUDED from the reachability roots, so a live ref, the index or HEAD\n' "$P"
+      printf '%s verdict-detail needs them. That is not a stale reflog and not a concurrent writer.\n' "$P"
+      printf '%s verdict-detail Every lane on this box reads this store, so it can change ANY gate\n' "$P"
+      printf '%s verdict-detail verdict here: do NOT certify anything against this checkout.\n' "$P"
+      printf '%s verdict-detail REMEDY: stop the lanes on this box, then re-obtain the objects from the\n' "$P"
+      printf '%s verdict-detail canonical remote (`git fetch --force origin`, or a fresh clone of\n' "$P"
+      printf '%s verdict-detail pmcfadin/cqlite). An object that only ever existed locally - an\n' "$P"
+      printf '%s verdict-detail unpushed commit - cannot be re-obtained: escalate rather than\n' "$P"
+      printf '%s verdict-detail improvising. `git reflog expire` is the remedy for the OTHER cause of\n' "$P"
+      printf '%s verdict-detail this bit and does nothing here; a local `git gc`/`git repack` cannot\n' "$P"
+      printf '%s verdict-detail repair it either, and may prune what is left (#3749).\n' "$P"
+      # NO `object` lines here, deliberately, and the reason is not the same as the reflog
+      # branch's. A `broken link from <A> to <B>` diagnostic names the INTACT source as
+      # well as the absent target, so labelling every 40-hex token an affected `object`
+      # would be a false claim about half of them. The diagnostics above name them in
+      # context, which is what the operator needs.
+      exit 4
+    fi
+
+    # THE COMPLAINT CLEARED WITH REFLOGS EXCLUDED: reflog-scoped. It stays exactly where
+    # it was before this discriminator existed - NON-PASSING, with the reflog remedy.
+    #
+    # WHY IT IS NOT PROMOTED TO VERIFIED, since walks 1 and 2 did rehash every object and
+    # reported no damage bit: the affirmative verdict in this script means "an fsck in the
+    # configuration this sweep uses ran to completion and found nothing", and that did not
+    # happen. A reflog naming an absent object can also be the SHADOW of an object that
+    # went missing while nothing live needed it any more, which is a fact about this store
+    # an operator is entitled to see. Deriving a pass from a NARROWED question is the
+    # shape CLAUDE.md warns about.
+    emit_findings p2 unmeasured-cause
+    unmeasured "git fsck reported reachability problems on both sweep walks (pass 1 rc=$RC1," \
+      "pass 2 rc=$RC2) which CLEARED when the reflogs were excluded from the reachability" \
+      "roots (pass 3 --no-reflogs rc=$RC3): the complaint is REFLOG-SCOPED, so nothing a" \
+      "live ref, the index or HEAD needs is missing, and this is NOT the damage class." \
+      "It is not certified clean either - an fsck in this sweep's own configuration did" \
+      "not complete quietly. Clear it with 'git reflog expire --expire-unreachable=now" \
+      "--all' on this box's shared repository, then re-run (#3749)."
+  fi
+
+  # WHAT IS LEFT: both passes non-clean, neither carrying object/pack damage, and NOT
+  # the reproduced-reachability shape the third walk above attributes. So this is a
+  # ref, commit-graph or multi-pack-index complaint, or a reachability bit that appeared
+  # in only ONE of the two walks (in which case the class itself did not reproduce and
+  # there is nothing for walk 3 to attribute). Its OWN non-passing state with its OWN
+  # cause text - never the fatal branch (these are not the class this script exists
+  # for) and never VERIFIED (the object-content question is not what these bits answer).
+  # No `object` lines: the 40-hex tokens in these diagnostics name INTACT objects.
   if [ "$C2" != clean ]; then
     emit_findings p2 unmeasured-cause
-    unmeasured "git fsck reported reachability/ref/commit-graph/multi-pack-index problems on BOTH walks" \
-      "(pass 1 class=$C1 rc=$RC1, pass 2 class=$C2 rc=$RC2) and NO object or pack" \
-      "damage. This script's subject is object content, and that question is therefore" \
-      "not answered: a missing object reports the same class. Inspect the diagnostics" \
-      "above; a stale reflog clears with 'git reflog expire --expire-unreachable=now" \
-      "--all', a stale multi-pack-index with 'git multi-pack-index write', and a" \
-      "genuinely absent object with neither."
+    unmeasured "git fsck reported ref/commit-graph/multi-pack-index problems, or a reachability" \
+      "complaint that did not reproduce identically, on BOTH walks (pass 1 class=$C1" \
+      "rc=$RC1, pass 2 class=$C2 rc=$RC2) and NO object or pack damage. This script's" \
+      "subject is object content, and that question is therefore not answered. Inspect" \
+      "the diagnostics above; a stale reflog clears with 'git reflog expire" \
+      "--expire-unreachable=now --all', a stale multi-pack-index with 'git" \
+      "multi-pack-index write', and a genuinely absent object with neither - if an" \
+      "object IS absent, re-run: a reachability bit on both walks is attributed" \
+      "(#3749)."
   fi
 
   # PASS 2 CLEAN, and pass 1 carried no damage class: the first observation did not
