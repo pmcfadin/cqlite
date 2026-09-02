@@ -9906,7 +9906,8 @@ _tree_mode_components() {
 # printf twice, directly under a comment promising "never a second dialect of it".
 #
 # It carries the #3402 status detail. Without it a boundary block rendered
-# `file-size: OPT-OUT (0s)` with the env var, the count and the grown paths STRIPPED — the
+# `file-size: OPT-OUT (0s)` with the env var and the count STRIPPED (the grown PATHS were on
+# the row at the time; they are log-only now) — the
 # invisible opt-out this issue exists to remove, surviving on the one path where a run is
 # already in trouble and the disclosure matters most.
 #
@@ -18113,8 +18114,11 @@ run_file_size() {
       # ratchet was genuinely satisfied, so an override nobody reviewing the PR can see
       # is an override nothing mechanical can catch omitting. `PASS` means "the check ran
       # and was satisfied"; it must never mean "the check was switched off". Hence the
-      # component's OWN status token, plus the count and the file names inline — the same
-      # data this log already holds, PROMOTED rather than recomputed.
+      # component's OWN status token, plus the env var and the COUNT and a pointer to this
+      # log — data this log already holds, PROMOTED rather than recomputed. The file NAMES
+      # stay in the log ONLY; see the removed-cases note in
+      # scripts/tests/test_agent_gate_file_size_log.sh for why rendering them on the row was
+      # tried and withdrawn.
       #
       # THREE STATES, NOT TWO. This branch is the ONLY one that may emit OPT-OUT, and it
       # is keyed on the AFFIRMATIVE `= 1`. A value that is SET BUT NOT 1 (`0`, `true`,

@@ -400,7 +400,10 @@ has "case3b: log carries the terminal verdict" "$log3b" ">>> [file-size] PASS"
 # what was missing is that the SUMMARY — the unit of evidence agents paste into PRs —
 # carried a bare `file-size: PASS (0s)`, byte-indistinguishable from a run where the
 # ratchet was genuinely satisfied. So the component's own status TOKEN is now OPT-OUT, and
-# the row must NAME the env var, the COUNT and the FILES.
+# the row must NAME the env var and the COUNT and POINT AT this log — deliberately NOT the
+# file names, which are log-only (see the removed-cases note below for why rendering them on
+# the row was tried and withdrawn). The asserts below check both directions: the disclosure
+# is present, and no repository path rode onto the row with it.
 # ---------------------------------------------------------------------------
 mkrepo optout cqlite-core/src/big.rs 900 950 main; r4="$REPO"
 out4="$tmp/optout.out"
