@@ -716,22 +716,35 @@ index, and the HEAD of a *prunable* worktree — all three surviving `--no-reflo
 `CORRUPT`. What it does *not* walk is a **linked** worktree's per-worktree refs (`refs/worktree/*`,
 `refs/bisect/*`, `refs/rewritten/*`; the main worktree's live in the common dir and are walked):
 delete an object named only by one and the sweep exits **0 VERIFIED**, because the HEAD reflog echoes
-the id and that echo clears under `--no-reflogs`. Both halves are now measured rather than believed —
-the covered roots are pinned by fixtures, and the gap is closed by a **private-root probe**: not an
-fsck (`git fsck <sha>` *replaces* the default heads, an explicit-head fsck still costs a full rehash,
-and `rev-list <missing-root>` dies 128) but an O(refs) question — list each linked worktree's refs,
-subtract the common ones, ask `cat-file --batch-check` whether the remainder's targets are present
-(0.22 s against the live 15-worktree store). Its enumeration is **filesystem-first because the git
-command is fail-open**: `git worktree list --porcelain` silently drops a worktree whose admin
-`gitdir` file is missing, so `$GIT_COMMON_DIR/worktrees/*` — git's own administrative directory, not
-a guess about lane layout — is the subject set, with the command kept as a cross-check in the
-direction it can fail. A worktree that cannot be inspected is *not* a clean one (a named
-`UNREADABLE` record, never a silent zero-root contribution to `VERIFIED`). And it widens no caller's
-window, **by placement rather than arithmetic**: one bounded child stage immediately before the
-single affirmative branch, and every branch of the reachability block exits, so a run that spent a
-third fsck walk never reaches it — asserted behaviourally against the fixture that really spends
-three walks. Declared residual: it asks whether each private ref's *target* is present, not whether
-its whole closure is. **The mask does not end at
+the id and that echo clears under `--no-reflogs`. The covered roots are pinned by fixtures; **the
+hole is a DECLARED GAP, and the probe built to close it was removed.** Three measurements rule out
+the fsck-shaped fixes and are recorded so nobody re-derives them: `git fsck <sha>` *replaces* the
+default heads (so private roots can never be appended to the sweep walk), an explicit-head fsck
+still scans the whole object directory and so costs a full rehash, and `rev-list <missing-root>`
+dies 128 (so `--missing=print` cannot answer the case that fires). What was built instead was an
+O(refs) question — enumerate each linked worktree's refs, subtract the common ones, ask
+`cat-file --batch-check` whether the remainder's targets are present — and **its first review
+returned three false-`VERIFIED` routes of its own, two of them High**: a present root whose
+reachable *child* is missing is invisible to a target-presence check; a per-worktree ref is
+discarded by the name subtraction when a common ref shares its name, even pointing at a different,
+missing object; and a failed `awk`/`sort`/`comm` degrades to a zero-root census and then permits
+`VERIFIED`. A mechanism added to prevent one false clean produced three new ways to reach one, in
+one review — so #3229's ruling (*a guard with known documented false-PASSes is worse than no guard*),
+its companion (*subtraction cannot introduce a false PASS*) and #3544's own posture (*a check that
+claims nothing false is worth more than one claiming a closure it does not deliver*) all point the
+same way. **The class also has zero instances on this fleet**, measured twice independently on
+2026-09-02: 14 registered worktrees, all three namespaces absent from every linked worktree's admin
+dir and from the common dir, 0 mentions in `packed-refs` — live per-worktree refs would have made
+removal leave a live hole, and the right answer would then have been to fix the three findings.
+**The declaration is emitted on every run**: `declared-gap` lines, on all three verdict classes
+(what a run did not walk does not depend on what it found), in **`1 RECOGNISED`** form rather than a
+bare count, naming the un-walked namespaces, the coverage that is *not* in the gap (the measurement
+above, which is what keeps the gap one namespace wide) and the fleet measurement with its date,
+since "zero instances" expires. One measurement is kept for whoever revisits this:
+**`git worktree list --porcelain` is fail-open** — it silently drops a worktree whose admin `gitdir`
+file is missing (rc 0, no diagnostic) — so any future enumeration must be filesystem-first over
+`$GIT_COMMON_DIR/worktrees/*`, git's own administrative directory, with the command only as a
+cross-check in the direction it can fail. **The mask does not end at
 31, and assuming it did dropped real damage.** A range check over `1..31` — reasoned from 128 being
 `die()` and `127 & 1` being 1 — classified 33 (`32|1`) and 36 (`32|4`) as unclassified and therefore
 `UNMEASURED`, a false negative on genuine object corruption. Measured on git 2.43.0: a truncated

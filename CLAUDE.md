@@ -497,31 +497,38 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `refs/rewritten/*`; the MAIN worktree's live in the common dir and ARE walked). Delete an object
   named only by one and the sweep exits **0 VERIFIED** — the HEAD reflog echoes the id and that echo
   CLEARS under `--no-reflogs`, so the attribution walk calls real damage reflog-scoped. So the
-  finding's premise was wrong and there was a hole one namespace over; **both halves are now
-  measured rather than believed** — the covered roots are PINNED by fixtures (a future git that
-  narrows fsck's enumeration reds a case) and the gap is closed by a **private-root probe**. Three
-  measurements shaped it and are recorded so they are not re-derived: `git fsck <sha>` **REPLACES**
-  the default heads (a missing blob reachable from HEAD went undetected), so private roots can never
-  be appended to the sweep walk; an explicit-head fsck still scans the whole object directory, so it
-  costs a FULL rehash; and `rev-list <missing-root>` dies 128, so `--missing=print` cannot answer the
-  case that fires. The probe is therefore O(refs), not an fsck: list each linked worktree's refs,
-  subtract the common ones, ask `cat-file --batch-check` whether the remainder's targets are present
-  (measured **0.22 s** against the live 15-worktree store; the whole sweep 12.8–15.8 s, unchanged
-  within noise). **Its enumeration is FILESYSTEM-FIRST because the git command is FAIL-OPEN** —
-  `git worktree list --porcelain` SILENTLY DROPS a worktree whose admin `gitdir` file is missing (rc
-  0, no diagnostic), so `$GIT_COMMON_DIR/worktrees/*`, which is git's own administrative directory
-  and not a guess about lane layout, is the subject set and the command is kept only as a
-  cross-check in the direction it can fail (it names MORE than the directory holds ⇒ `UNMEASURED`).
-  A worktree that cannot be inspected is **not a clean one**: it contributes a named `UNREADABLE`
-  record, never a silent zero-root contribution to `VERIFIED`. **And it costs no caller a wider
-  window, by PLACEMENT rather than by arithmetic**: it runs as ONE bounded child stage immediately
-  before the single affirmative branch, and every branch of the reachability block above EXITS, so a
-  run that spent a third fsck walk never reaches it — worst case stays `MAX_SWEEP_WALKS` stages and
-  no derived bound (the supervisor's per-walk default, the claim's recovery bound, bootstrap's outer
-  belt) moves. That is a property of WHERE the call sits, so it is asserted BEHAVIOURALLY against the
-  fixture that really spends three walks. **Declared residual: the probe asks whether each private
-  ref's TARGET is present, not whether its whole CLOSURE is** — an object missing deeper in a
-  per-worktree ref's ancestry and named by nothing else is not recognised. **THE MASK DOES NOT END AT 31, AND
+  finding's premise was wrong and there was a hole one namespace over. The covered roots are
+  PINNED by fixtures (a future git that narrows fsck's enumeration reds a case); **the hole is a
+  DECLARED GAP, and the probe built to close it was REMOVED (review round 8).** Three measurements
+  rule out the fsck-shaped fixes and are recorded so they are not re-derived: `git fsck <sha>`
+  **REPLACES** the default heads (a missing blob reachable from HEAD went undetected), so private
+  roots can never be appended to the sweep walk; an explicit-head fsck still scans the whole object
+  directory, so it costs a FULL rehash; and `rev-list <missing-root>` dies 128, so `--missing=print`
+  cannot answer the case that fires. What was built instead was O(refs) — enumerate each linked
+  worktree's refs, subtract the common ones, ask `cat-file --batch-check` whether the remainder's
+  targets are present — and **its first review returned three false-`VERIFIED` routes of its own,
+  two of them High**: a present root whose reachable **CHILD** is missing is invisible to a
+  target-presence check; a per-worktree ref is DISCARDED by a name subtraction when a common ref
+  shares its name, even pointing at a different, missing object; and a failed `awk`/`sort`/`comm`
+  degrades to a zero-root census and then permits `VERIFIED`. **A mechanism added to prevent one
+  false clean produced three new ways to reach one, in one review** — #3229's ruling (*a guard with
+  known documented false-PASSes is worse than no guard, because it invites reliance it cannot
+  support*), its companion (*subtraction cannot introduce a false PASS*) and #3544's posture on this
+  very subject (*a check that claims nothing false is worth more than one claiming a closure it does
+  not deliver*) all point the same way. **And the class has ZERO INSTANCES on this fleet** —
+  measured twice, independently, 2026-09-02: 14 registered worktrees, all three namespaces absent
+  from every linked worktree's admin dir AND from the common dir, 0 mentions in `packed-refs`. The
+  falsifier was stated before acting: **live per-worktree refs would have made removal leave a live
+  hole**, and the right answer would then have been to fix the three findings instead. **The
+  declaration is EMITTED ON EVERY RUN** — `declared-gap` lines, on all three verdict classes,
+  because what a run did not walk does not depend on what it found — in **`1 RECOGNISED`** form
+  (never a bare count, which reads as a completed census), naming the un-walked namespaces, the
+  coverage that is NOT in the gap (the measurement above, which is what keeps the gap one namespace
+  wide) and the fleet measurement WITH ITS DATE, since "zero instances" expires. One measurement is
+  kept for whoever revisits this: **`git worktree list --porcelain` is FAIL-OPEN** — it silently
+  drops a worktree whose admin `gitdir` file is missing (rc 0, no diagnostic) — so any future
+  enumeration must be filesystem-first over `$GIT_COMMON_DIR/worktrees/*`, git's own administrative
+  directory, with the command only as a cross-check in the direction it can fail. **THE MASK DOES NOT END AT 31, AND
   ASSUMING IT DID DROPPED REAL DAMAGE (review round 2).** A range check over `1..31` — reasoned from
   128 being `die()` and `127 & 1` being 1 — classified **33** (`32|1`) and **36** (`32|4`) as
   unclassified and so `UNMEASURED`: a FALSE NEGATIVE on genuine object corruption, the one direction
