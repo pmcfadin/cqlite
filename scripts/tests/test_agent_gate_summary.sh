@@ -5393,7 +5393,8 @@ fi
 #      57-character prefix — routine for sibling Rust test paths — deduped to ONE and
 #      `count` UNDERCOUNTED (the two lines below reported `count=1`). The accounted count
 #      is half the #3765 flake signature, so a DISPLAY bound must never be able to move
-#      it. This case reds if the dedup is moved back before the truncation.
+#      it. This case pins the DISPLAY half (both names visible and distinguishable); 55s
+#      below is the one that reds if the dedup is moved back before the truncation.
 printf 'test cqlite_core::storage::sstable::bti::rows::tests::verify_root_base_prefix_alpha ... FAILED\ntest cqlite_core::storage::sstable::bti::rows::tests::verify_root_base_prefix_beta ... FAILED\n' > "$fa_dir/collide.log"
 fa_col=$(bash "$fa_tool" "$fa_dir/collide.log" 10 2>/dev/null)
 fa_col_count=$(printf '%s\n' "$fa_col" | sed -n 's/^count=//p' | head -1)
@@ -5424,6 +5425,31 @@ case "$fa_got" in
     ok "3765-collide-render: the SUMMARY field reports the TRUE count for prefix-colliding identities ($fa_got)" ;;
   *) bad "3765-collide-render: expected 'failed-assert: 2 RECOGNISED (assert): …', got '$fa_got'" ;;
 esac
+
+# 55s. THE SAME PROPERTY WHERE THE DISPLAY CANNOT DISAMBIGUATE — this is the case that
+#      actually REDS if the dedup is moved back before the truncation. 55r survives a
+#      truncate-first dedup by accident (the middle elision keeps the two tails distinct,
+#      so even the truncated keys differ), so it pins the DISPLAY property, not the dedup
+#      one. Here the two identities differ ONLY in the ELIDED MIDDLE, so their display
+#      forms are byte-identical: a dedup keyed on the display form collapses them to
+#      `count=1`, and only a dedup keyed on the FULL identity reports the true 2.
+#      A display collision is EXPECTED here and is harmless BY CONSTRUCTION — `count` is
+#      the authority and a name is a pointer — so it is ASSERTED rather than left implied.
+printf 'test cqlite_core::storage::sstable::bti::alpha_variant::tests::verify_root_base_prefix ... FAILED\ntest cqlite_core::storage::sstable::bti::beta_variant::tests::verify_root_base_prefix ... FAILED\n' > "$fa_dir/collide-mid.log"
+fa_mid=$(bash "$fa_tool" "$fa_dir/collide-mid.log" 10 2>/dev/null)
+fa_mid_count=$(printf '%s\n' "$fa_mid" | sed -n 's/^count=//p' | head -1)
+fa_mid_names=$(printf '%s\n' "$fa_mid" | sed -n 's/^name=//p')
+fa_mid_dist=$(printf '%s\n' "$fa_mid_names" | sort -u | grep -c . )
+if [ "${fa_mid_count:-0}" = 2 ]; then
+  ok "3765-collide-mid: two identities that are INDISTINGUISHABLE after display truncation still count as 2 — the dedup key is the FULL identity, not the display form"
+else
+  bad "3765-collide-mid: expected count=2, got count='${fa_mid_count:-<none>}' — the dedup runs BEFORE the truncation, so a display bound is silently changing the count"
+fi
+if [ "${fa_mid_dist:-0}" = 1 ]; then
+  ok "3765-collide-mid-display: the display forms of those two identities are identical, and the TRUE count is reported anyway (count is the authority; a name is a pointer)"
+else
+  bad "3765-collide-mid-display: expected 1 distinct display form for a middle-colliding pair, got $fa_mid_dist — the fixture no longer exercises a display collision, so this case no longer pins the dedup key"
+fi
 
 # TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
 # coordination lead authorised, taken on the evidence below).
@@ -5468,7 +5494,7 @@ esac
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
-# 430 -> 434 on #3765 (fix round): section 55r adds 4 asserts for the prefix-collision
+# 430 -> 436 on #3765 (fix round): sections 55r/55s add 6 asserts for the prefix-collision
 # dedup regression, host-INDEPENDENT for the same reason (bash + awk + the extractor and
 # the --lite-aggregate-selftest hook), so the same "raise by exactly the number added"
 # rule applies and the ~9 margin is preserved.
@@ -5487,7 +5513,7 @@ esac
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=434
+ASSERT_FLOOR=436
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
