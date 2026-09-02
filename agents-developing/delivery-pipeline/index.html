@@ -546,6 +546,20 @@ because the fail-open defect family clustered in that exit-0 path, and being wro
 It claims nothing about lanes that never stamped (a lane run with <code dir="auto">CLAIM_CMD=""</code> is invisible) and
 nothing about other machines — a PID is only checkable where it runs, so <strong>run it ON the suspect
 box</strong>.</p>
+<p><strong>AND ON A SUPERVISOR-LESS FLEET IT ANSWERED ABOUT THE EMPTY SET — supervisor fleets only, DESCOPED
+by owner ruling 2026-09-01 on #3548 (option C; completes #3393).</strong> The subject set is
+<code dir="auto">refs/lane-claims/*</code> plus the legacy <code dir="auto">refs/machine-claims/*</code>, and the only in-tree CALLER that creates
+or refreshes either is <code dir="auto">worker-supervisor.sh</code> (<code dir="auto">stamp</code> is a public subcommand and can be invoked directly). This fleet runs <code dir="auto">/drive-issue</code> lanes, so when #3548 was measured the command
+had no subject and exited 1 — persisted or manually <code dir="auto">stamp</code>ed refs can still produce rows, and either
+way <strong>1 means “nothing was reported”, never a clean bill of health.</strong> The two <em>populated</em> namespaces
+are deliberately not read, both refusals measured: <code dir="auto">refs/claims/issue-&#x3C;N></code> records the transient
+claiming shell’s pid (dead while its lane runs), and <code dir="auto">refs/heartbeats/&#x3C;machine></code> is single-slot per
+machine. <strong>AC4</strong> survives as a counterfactual: were a later change ever to read a non-refreshing
+carrier, a stale pid there must abstain rather than yield <code dir="auto">DEAD-*</code>.</p>
+<p><strong>Everything else is stated once, not here.</strong> What lane liveness on this fleet actually rests on, and
+both board signatures — neither of which is a verdict — live in
+<code dir="auto">docs/development/fleet-runbook.md</code> → <em>Lane liveness on a supervisor-less <code dir="auto">/drive-issue</code> fleet</em>. Seven
+review rounds on #3548 were propagation failures of duplicated prose, so nothing restates it.</p>
 <p>A suspected dead lane still has a diagnostic <strong>order, and it matters</strong> — full procedure in
 <code dir="auto">docs/development/fleet-runbook.md</code>. The one line worth memorising: when a box accepts TCP but sends no SSH
 banner from inside the VPC, <strong>check <code dir="auto">dmesg</code> for an OOM kill before concluding the instance is broken</strong>.
