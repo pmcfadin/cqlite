@@ -759,18 +759,83 @@ refuse_no_c_verdict() {
 # containing a tab or two adjacent spaces is already lossy ON THE PRODUCING SIDE.
 # That is not this reader's to repair — and it does not matter to the binding,
 # whose pattern matches the FILENAME tail. Stated so the limit is not rediscovered.
+#
+# THE ANSI/CR STRIP MAY LOCATE A LINE; IT MAY NOT SUPPLY A VALUE (#3751 round 15, U2).
+# This is round 13's S2 rule at a different byte: *a transform that normalises its
+# input cannot be the thing that validates it.* The strip ran on every line BEFORE
+# the closed grammar was applied to the fields it produced, so a token spelt
+# `PA<ESC>[31mSS` was NORMALISED INTO `PASS` and certified a merge — measured on the
+# shipped parser: a file `grep -c 'RESULT: PASS'` answers 0 for published
+# `token=PASS`. Same shape as the NUL: the read did not lose information, it
+# MANUFACTURED grammar the file does not contain.
+#
+# WHICH READS LEGITIMATELY NEED THE TOLERANCE, AND WHY A VERDICT DOES NOT. The strip
+# exists for #3400 — colour SURVIVES redirection to a file, so a capture taken from a
+# coloured stream still carries escapes, and a reader anchored on a marker line
+# (`/^REVIEW-STAGE: /` here, the four `==== AGENT-GATE … ====` whole-line equalities
+# in `_gate_awk`) would MATCH NOTHING and report "no verdict line" for a document
+# that has one. That is a diagnostic loss and it is worth avoiding: the strip is kept
+# so the line can be FOUND and the refusal can NAME what is wrong with it. What may
+# not rest on it is a VALUE. Every artifact this script reads is produced by `printf`
+# — `review-stage.sh`'s emitter routes every value through `one_line`, which DELETES
+# the whole C0 range, and `agent-gate.sh` writes its summary the same way — so an
+# escape in a value is never legitimate here. Refused BY NAME, naming the transform,
+# so the operator is not sent to look at the token.
+#
+# AND THE LINE BETWEEN AN ESCAPE AND A TRAILING CR IS *SEPARATE VERSUS JOIN*, which is
+# the transferable half: a `\r$` strip removes ONE byte at end of line, where nothing
+# follows, so it can only SEPARATE — `PASS<CR>` is the token `PASS` plus separator
+# whitespace, exactly as `PASS<TAB>` and `PASS   ` are, and the `<key>: <value>` grammar
+# is made of that. A CSI deletion removes bytes from the MIDDLE and JOINS two runs the
+# file keeps apart. The trailing CR therefore stays tolerated (the full ruling, with its
+# three corroborating reasons, is at the check in `c_parse_verdict`).
 _c_verdict_awk() {
   awk '
   BEGIN {
-    n = 0; tok = ""; rep = ""; line = ""; kind = ""; rpos = 0
+    n = 0; tok = ""; rep = ""; line = ""; kind = ""; rpos = 0; rawline = ""
     ke = 0; kd = 0; ka = 0; kr = 0
     ve = ""; vd = ""; va = ""
+    n_esc = 0
   }
-  { gsub(/\033\[[0-9;]*[a-zA-Z]/, ""); sub(/\r$/, "") }
+  # TWO READINGS OF THE LINE, ONE PER JOB (#3751 round 15, U2). `loc` is the line with each
+  # CSI DELETED — the reading everything below parses, and the reading that makes a coloured
+  # capture locatable at all (#3400). `val` is the same line with each CSI replaced by a
+  # SINGLE SPACE, and it is used for ONE question: did a deletion JOIN two runs the file
+  # keeps apart? A CSI that BRACKETS a token leaves that token a whole field of `val`; a CSI
+  # INSIDE a token splits it, so the token `loc` shows appears in `val` NOWHERE. That is the
+  # separate-versus-join rule as a measurement rather than a guess.
+  #
+  # STRICT HERE — EVERY field of the anchored line must survive as a field of `val` — because
+  # a `--c-verdict` artifact has exactly ONE producer, `review-stage.sh verdict > <path>`,
+  # which emits no colour at all (every value goes through `one_line`, which deletes the whole
+  # C0 range). The legitimate coloured capture of #3400 is about the GATE SUMMARY, whose reader
+  # therefore takes the looser value-only form; see `_gate_awk`.
+  {
+    raw = $0
+    loc = raw; gsub(/\033\[[0-9;]*[a-zA-Z]/, "", loc); sub(/\r$/, "", loc)
+    val = raw; gsub(/\033\[[0-9;]*[a-zA-Z]/, " ", val); sub(/\r$/, "", val)
+    lesc = 0
+    if (loc != val) {
+      _nl = split(loc, _LF); _nv = split(val, _VF)
+      for (_i = 1; _i <= _nl; _i++) {
+        _f = 0
+        for (_j = 1; _j <= _nv; _j++) if (_VF[_j] == _LF[_i]) { _f = 1; break }
+        if (_f == 0) { lesc = 1; break }
+      }
+    }
+    $0 = loc
+  }
   /^REVIEW-STAGE: / {
     n++
     if (n == 1) {
+      if (lesc) n_esc = 1
       line = $0
+      # THE RAW LINE, published SEPARATELY and used ONLY by the escape refusal: printing the
+      # NORMALISED line beside "this line contains an escape" would show the operator a clean
+      # `RESULT: PASS` and contradict the sentence above it. A misleading rationale is worse
+      # than none (round 2, B7). Rendered through `c_safe_display`, which turns the ESC into
+      # `?` — the same rendering the review-stage.sh classifier reports it under.
+      rawline = raw
       kind = $2
       if ($3 == "RESULT:") {
         rpos = 1
@@ -797,6 +862,8 @@ _c_verdict_awk() {
     print "kind=" kind; print "rpos=" rpos
     print "ke=" ke; print "kd=" kd; print "ka=" ka; print "kr=" kr
     print "velapsed=" ve; print "vdeadline=" vd; print "vagent=" va
+    print "n_esc=" n_esc
+    print "rawline=" rawline
     print "line=" line
   }
 '
@@ -824,7 +891,7 @@ c_parse_verdict() {
   fi
   CV_N=""; CV_TOKEN=""; CV_REPORT=""; CV_LINE=""
   CV_KIND=""; CV_RPOS=""; CV_KE=""; CV_KD=""; CV_KA=""; CV_KR=""
-  CV_VE=""; CV_VD=""; CV_VA=""
+  CV_VE=""; CV_VD=""; CV_VA=""; CV_ESC=""; CV_RAWLINE=""
   while IFS='=' read -r k v; do
     case "$k" in
       n)      CV_N="$v" ;;
@@ -839,6 +906,8 @@ c_parse_verdict() {
       velapsed)  CV_VE="$v" ;;
       vdeadline) CV_VD="$v" ;;
       vagent)    CV_VA="$v" ;;
+      n_esc)  CV_ESC="$v" ;;
+      rawline) CV_RAWLINE="$v" ;;
       line)   CV_LINE="$v" ;;
     esac
   done <<C_PARSE
@@ -866,6 +935,59 @@ C_PARSE
       "A 'take the last line' rule would let a stale or foreign stage certify this merge."
   fi
   C_TOKEN_LINE="$CV_LINE"
+
+  # THE VERDICT LINE MUST BE WHAT THE FILE HOLDS (#3751 round 15, U2). The strip above
+  # located this line; it may not have SUPPLIED it. Asked BEFORE the grammar checks
+  # below, because every one of them reads a field the normalisation produced — a
+  # refusal placed after them would name the wrong defect (or, for
+  # `PA<ESC>[31mSS`, name nothing at all and certify).
+  #
+  # THE PERMISSIVE VALUE IS THE AFFIRMATIVE `0`, so an unparseable or absent flag
+  # refuses rather than reading as "no escape found": a positive verdict requires an
+  # affirmative measurement, and this file's standing rule is never to derive a pass
+  # from the absence of a bad signal.
+  case "$CV_ESC" in
+    0) ;;
+    1)
+      C_TOKEN_LINE="$CV_RAWLINE"
+      refuse_no_c_verdict \
+        "The $what's verdict line contains an ANSI ESCAPE SEQUENCE (0x1b), so its raw bytes are not" \
+        "the verdict they were read as: stripping the escape would MANUFACTURE a token the file does" \
+        "not contain — a value spelt PA<ESC>[31mSS normalises to PASS, and a transform that" \
+        "normalises its input cannot be the thing that validates it." \
+        "review-stage.sh emits every value through one_line, which deletes the whole C0 range, so an" \
+        "escape here did not come from the emitter. Re-capture the verdict from the tool, not from a" \
+        "coloured terminal log:  review-stage.sh verdict $C_STAGE_KIND --issue <N> > <path>"
+      ;;
+    *)
+      refuse_no_c_verdict \
+        "The $what parse produced no usable escape-sequence measurement — refusing (fail closed)."
+      ;;
+  esac
+  # THE TRAILING CR IS DELIBERATELY *NOT* REFUSED, AND THE LINE BETWEEN THE TWO IS THE
+  # WHOLE RULE (#3751 round 15, U2). A CR is WHITESPACE: `sub(/\r$/, "")` removes ONE
+  # byte at end of line, where nothing follows it, so it can SEPARATE but it can never
+  # JOIN — the token `PASS<CR>` and the token `PASS   ` are the same token followed by
+  # separator whitespace, which is what the `<key>: <value>` grammar is made of.
+  # Deleting a CSI sequence is the opposite operation: it removes bytes from the MIDDLE
+  # and JOINS two runs the file keeps apart, so `PA` + `SS` becomes a token the file
+  # does not contain anywhere. Manufacture, not separation.
+  #
+  # THREE FURTHER REASONS, so this is a ruling and not a tolerance. (1) `review-stage.sh`'s
+  # `classify_report` — the sibling reader of the same shape — ALSO reads a CRLF line as
+  # its token (measured: `result: PASS\r` reports `RESULT: PASS`, exactly as a trailing
+  # TAB or trailing SPACES do, because `one_line` treats all three as whitespace), and
+  # section 44g of scripts/tests/test_premerge_assert.sh exists to stop these two readers
+  # holding two opinions about one shape. Refusing here unilaterally would BE that
+  # divergence. (2) It cannot manufacture a TOKEN even where it changes the last field: for
+  # the CR to sit against the token the line must END at the token, and such a line carries
+  # no `elapsed=`/`deadline=`/`agent=`/`report=` and is refused by the mandatory-field
+  # census below. (3) A MID-line CR is not stripped at all and is not a field separator to
+  # awk, so `RESULT: PA<CR>SS` stays a token the closed set refuses — the fail-closed
+  # direction, at both readers. What would be a REAL divergence is the ESC row, and it was
+  # one: measured on the shipped code, `classify_report` read `PA<ESC>[31mSS` as
+  # `NOT-RUN (unrecognised result token 'PA?[31mSS')` while THIS reader published `PASS`.
+  # The refusal above makes the two agree.
 
   # THE FULL GRAMMAR, VALIDATED (#3751 round 1, F2) — because "somewhere on this
   # line it says RESULT: PASS" is not a verdict about the C stage. Two things were
@@ -1200,8 +1322,12 @@ c_record_bytes() {
 #
 # COLUMN-ZERO ANCHORED (`/^head-sha:[ \t]/`, `/^report-nonce:[ \t]/`) and every anchored line
 # COUNTED, for the same reasons `_c_verdict_awk` above is: a first-wins read of several candidates
-# is the rule this file refuses everywhere else, and an indented copy is DATA. ANSI/CR stripped as
-# belt (#3400). `NF == 2` is required AFFIRMATIVELY of BOTH fields: the documented shapes are
+# is the rule this file refuses everywhere else, and an indented copy is DATA. ANSI/CR stripped to
+# LOCATE the line (#3400), never to SUPPLY its value (#3751 round 15, U2 — see `_c_verdict_awk`
+# for the rule and for why a trailing CR is separator whitespace while a CSI deletion is
+# manufacture): an ESC anywhere on either anchored line is published as `esc=1` and REFUSED by
+# name, because `head-sha: <ESC>[32m<40-hex>` would otherwise normalise into a clean sha and bind
+# a stage to a tree the record does not name. `NF == 2` is required AFFIRMATIVELY of BOTH fields: the documented shapes are
 # exactly `head-sha: <40-hex>` and `report-nonce: <token>`, so an empty value or trailing junk is
 # UNPARSABLE and must not be reduced to its first word — a record that cannot state which tree it
 # audited, or which report of it is current, certifies nothing.
@@ -1214,17 +1340,36 @@ c_record_bytes() {
 # with the content, because a comment that lies is worse than none.
 _c_stage_record_awk() {
   awk '
-  BEGIN { n = 0; v = ""; nn = 0; nv = "" }
-  { gsub(/\033\[[0-9;]*[a-zA-Z]/, ""); sub(/\r$/, "") }
+  BEGIN { n = 0; v = ""; nn = 0; nv = ""; esc = 0 }
+  # THE SAME TWO READINGS AND THE SAME STRICT RULE as `_c_verdict_awk` (#3751 round 15, U2),
+  # for the same reason: this record has ONE producer, `review-stage.sh`, which writes it with
+  # printf through a sanitizer that deletes the whole C0 range, so no colouring of it is
+  # legitimate. `head-sha: <ESC>[32m<40-hex>` would otherwise normalise into a clean sha and
+  # BIND this stage to a tree the record does not name.
+  {
+    raw = $0
+    loc = raw; gsub(/\033\[[0-9;]*[a-zA-Z]/, "", loc); sub(/\r$/, "", loc)
+    val = raw; gsub(/\033\[[0-9;]*[a-zA-Z]/, " ", val); sub(/\r$/, "", val)
+    lesc = 0
+    if (loc != val) {
+      _nl = split(loc, _LF); _nv = split(val, _VF)
+      for (_i = 1; _i <= _nl; _i++) {
+        _f = 0
+        for (_j = 1; _j <= _nv; _j++) if (_VF[_j] == _LF[_i]) { _f = 1; break }
+        if (_f == 0) { lesc = 1; break }
+      }
+    }
+    $0 = loc
+  }
   /^head-sha:[ \t]/ {
     n++
-    if (n == 1 && NF == 2) v = $2
+    if (n == 1) { if (lesc) esc = 1; if (NF == 2) v = $2 }
   }
   /^report-nonce:[ \t]/ {
     nn++
-    if (nn == 1 && NF == 2) nv = $2
+    if (nn == 1) { if (lesc) esc = 1; if (NF == 2) nv = $2 }
   }
-  END { print "n=" n; print "value=" v; print "nn=" nn; print "nonce=" nv }
+  END { print "n=" n; print "value=" v; print "nn=" nn; print "nonce=" nv; print "esc=" esc }
 '
 }
 
@@ -1302,16 +1447,43 @@ c_assert_stage_binds_certified() {
   # `printf '%s\n'` guarantees awk a terminated final line, whatever the file ended with.
   out=$(printf '%s\n' "${C_STAGE_RECORD#*$'\n'}" | _c_stage_record_awk) ||
     refuse_tool_failure awk "the C stage record's head-sha and report-nonce"
+  local esc=""
   while IFS='=' read -r k v; do
     case "$k" in
       n)     n="$v" ;;
       value) value="$v" ;;
       nn)    nn="$v" ;;
       nonce) nonce="$v" ;;
+      esc)   esc="$v" ;;
     esac
   done <<C_STAGE_HEAD_PARSE
 $out
 C_STAGE_HEAD_PARSE
+  # THE STRIP LOCATED THESE LINES; IT MAY NOT HAVE SUPPLIED THEIR VALUES (#3751 round 15, U2).
+  # Asked FIRST, before the counts and the hex/length/equality asserts below, because every one of
+  # them reads a value the normalisation produced — `head-sha: <ESC>[32m<40-hex>` normalises into a
+  # clean 40-hex sha and would BIND this stage to a tree the record does not name. The permissive
+  # value is the affirmative `0`.
+  case "$esc" in
+    0) ;;
+    1)
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' stage record's head-sha:/report-nonce: line contains an ANSI ESCAPE" \
+        "SEQUENCE (0x1b), so its raw bytes are not the value it would be read as — stripping the" \
+        "escape would MANUFACTURE a sha or a nonce the record does not contain, and a transform" \
+        "that normalises its input cannot be the thing that validates it." \
+        "  record: $sfile" \
+        "review-stage.sh writes this record with printf and routes every value through a" \
+        "sanitizer that deletes the whole C0 range, so an escape here did not come from it." \
+        "$C_REOPEN_REMEDY"
+      ;;
+    *)
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' stage record parse produced no usable escape-sequence measurement" \
+        "— refusing (fail closed)." \
+        "  record: $sfile"
+      ;;
+  esac
   # PUBLISHED FROM THIS ONE PARSE, AND DELIBERATELY NOT JUDGED HERE (#3751 round 10, P2). The
   # generation is only ever compared against a value `review-stage.sh verdict` reports back, which
   # does not exist yet — and pre-empting that comparison with a refusal HERE would relabel the
@@ -1967,6 +2139,7 @@ assert_readable_summary() {
 _gate_awk() {
   awk -v WANT="$1" '
   BEGIN {
+    esc = 0
     FULL_S  = "==== AGENT-GATE SUMMARY ===="
     FULL_E  = "==== END AGENT-GATE SUMMARY ===="
     LITE_S  = "==== AGENT-GATE LITE SUMMARY ===="
@@ -1979,20 +2152,60 @@ _gate_awk() {
     v_result = ""; v_ti = ""; v_commit = ""; v_ts = ""; v_dirty = ""
     v_mode = ""; v_anchor = ""
   }
+  # NORMALISE FOR LOCATING ONLY, AND REMEMBER THAT IT HAPPENED (#3751 round 15, U2 — the rule and
+  # the separate-versus-join distinction that keeps the trailing CR tolerated are at
+  # `_c_verdict_awk`). Colour legitimately reaches a captured gate summary (#3400: colour survives
+  # redirection), and WITHOUT the strip a coloured marker line would fail the whole-line equalities
+  # below and this reader would report "no summary block" for a file that has one — so the strip
+  # stays, for LOCATING. It may not SUPPLY a value: `RESULT: PA<ESC>[31mSS` normalises into the
+  # `PASS` this script matches against its closed set, and nothing else here would catch it (the
+  # `RESULT:` value has no mandatory-field census standing behind it, unlike the c-verdict token).
+  # `esc` is set on the lines that CONTRIBUTE — the markers that open/close the selected block and
+  # the value lines inside it — never on a component line, which supplies nothing and would red on
+  # correct input.
+  # THE VALUE-ONLY FORM OF THE SAME RULE (#3751 round 15, U2 — stated at `_c_verdict_awk`).
+  # `esc_joined(v)` answers ONE question about a value the deleting strip produced: does that
+  # value survive as a WHOLE FIELD when each CSI is a SEPARATOR instead? If not, the deletion
+  # JOINED two runs and the value is one the file does not contain — `RESULT: PA<ESC>[31mSS`
+  # normalises into the `PASS` this script matches token-exactly, and nothing else here would
+  # catch it (unlike the c-verdict token, the `RESULT:` value has no mandatory-field census
+  # standing behind it).
+  #
+  # VALUE-ONLY AND NOT STRICT, DELIBERATELY: a coloured GATE SUMMARY capture is
+  # documented-legitimate input (#3400, and Case 24 of scripts/tests/test_premerge_assert.sh
+  # pins it), and real colouring brackets the KEY as readily as the value —
+  # `<ESC>[32mRESULT<ESC>[0m: <ESC>[1;32mPASS<ESC>[0m` — which the strict form would red on.
+  # Asking only about the values is what keeps this guard off correct input while still making
+  # a spliced value unusable.
+  #
+  # DECLARED RESIDUAL: a value spliced by a CSI while the SAME TEXT also appears as another
+  # field of that line (`RESULT: PA<ESC>[31mSS PASS`) satisfies the field-membership test.
+  # Hand-crafting that is INVOKER-class, which this script does not model (see the header);
+  # no colouring tool or transport produces it by accident.
+  function esc_joined(v, val_,   _nv, _j, _B) {
+    if (v == "") return 0
+    if (val_ == "") return 0
+    _nv = split(val_, _B)
+    for (_j = 1; _j <= _nv; _j++) if (_B[_j] == v) return 0
+    return 1
+  }
   {
-    gsub(/\033\[[0-9;]*[a-zA-Z]/, "")
-    sub(/\r$/, "")
+    raw = $0
+    loc = raw; gsub(/\033\[[0-9;]*[a-zA-Z]/, "", loc); sub(/\r$/, "", loc)
+    lval = raw; gsub(/\033\[[0-9;]*[a-zA-Z]/, " ", lval); sub(/\r$/, "", lval)
+    $0 = loc
   }
   $0 == FULL_S  { full++;  if (S == FULL_S)  { blocks++; if (open == 1) unterminated = 1; open = 1 } next }
   $0 == DELTA_S { delta++; if (S == DELTA_S) { blocks++; if (open == 1) unterminated = 1; open = 1 } next }
   $0 == LITE_S  { lite++;  next }
   $0 == E       { if (open == 1) open = 0; next }
   open == 1 {
-    if ($1 == "MODE:")                { n_mode++;   v_mode = $2 }
-    else if ($1 == "RESULT:")         { n_result++; v_result = $2 }
-    else if ($1 == "tree-integrity:") { n_ti++;     v_ti = $2 }
+    if ($1 == "MODE:")                { n_mode++;   v_mode = $2; if (esc_joined($2, lval)) esc = 1 }
+    else if ($1 == "RESULT:")         { n_result++; v_result = $2; if (esc_joined($2, lval)) esc = 1 }
+    else if ($1 == "tree-integrity:") { n_ti++;     v_ti = $2; if (esc_joined($2, lval)) esc = 1 }
     else if ($1 == "tree-start:") {
       n_ts++; v_ts = $2
+      if (esc_joined($2, lval)) esc = 1
       # tree-start: carries its OWN `dirty:`, and it is NOT redundant with the
       # commit: one: commit: renders TREE_END_DIRTY on the normal path
       # (agent-gate.sh:8810), so a run that STARTED dirty and finished clean --
@@ -2001,16 +2214,18 @@ _gate_awk() {
       # executed against uncommitted content (#3648 roborev round 4).
       for (i = 2; i <= NF; i++) if ($i == "dirty:") {
         n_tsdirty++
-        if (n_tsdirty == 1 && i < NF) v_tsdirty = $(i + 1)
+        if (n_tsdirty == 1 && i < NF) { v_tsdirty = $(i + 1); if (esc_joined($(i + 1), lval)) esc = 1 }
       }
     }
     else if ($1 == "nested-under:")   { n_nested++ }
     else if ($1 == "delta-anchor:") {
       n_anchor++; v_anchor = $2
+      if (esc_joined($2, lval)) esc = 1
       for (i = 2; i <= NF; i++) if ($i == "(UNRESOLVED)") anchor_unresolved = 1
     }
     else if ($1 == "commit:") {
       n_commit++; v_commit = $2
+      if (esc_joined($2, lval)) esc = 1
       # COUNT every `dirty:` token and keep the FIRST value, never the last.
       # The old loop assigned on every match, so `dirty: yes dirty: no` reduced
       # to `no` and certified a dirty run (#3648 roborev round 2). That is the
@@ -2019,7 +2234,7 @@ _gate_awk() {
       # occurrence; its value stays empty and refuses on the empty-value path.
       for (i = 2; i <= NF; i++) if ($i == "dirty:") {
         n_dirty++
-        if (n_dirty == 1 && i < NF) v_dirty = $(i + 1)
+        if (n_dirty == 1 && i < NF) { v_dirty = $(i + 1); if (esc_joined($(i + 1), lval)) esc = 1 }
       }
     }
     next
@@ -2049,6 +2264,7 @@ _gate_awk() {
     print "v_tsdirty=" v_tsdirty
     print "v_mode=" v_mode
     print "v_anchor=" v_anchor
+    print "esc=" esc
   }
 '
 }
@@ -2067,7 +2283,7 @@ gate_parse_file() {
   GP_n_mode=""; GP_n_result=""; GP_n_ti=""; GP_n_commit=""; GP_n_ts=""
   GP_n_anchor=""; GP_n_nested=""; GP_anchor_unresolved=""; GP_n_dirty=""; GP_n_tsdirty=""
   GP_v_result=""; GP_v_ti=""; GP_v_commit=""; GP_v_ts=""; GP_v_dirty=""
-  GP_v_mode=""; GP_v_anchor=""; GP_v_tsdirty=""
+  GP_v_mode=""; GP_v_anchor=""; GP_v_tsdirty=""; GP_esc=""
   while IFS='=' read -r gp_k gp_v; do
     case "$gp_k" in
       blocks)       GP_blocks="$gp_v" ;;
@@ -2093,10 +2309,33 @@ gate_parse_file() {
       v_tsdirty)    GP_v_tsdirty="$gp_v" ;;
       v_mode)       GP_v_mode="$gp_v" ;;
       v_anchor)     GP_v_anchor="$gp_v" ;;
+      esc)          GP_esc="$gp_v" ;;
     esac
   done <<GATE_PARSE
 $gp_out
 GATE_PARSE
+  # THE STRIP LOCATED THE BLOCK; IT MAY NOT HAVE SUPPLIED ITS VALUES (#3751 round 15, U2 — the
+  # rule is stated at `_c_verdict_awk`). Asked FIRST, before every count and value assert below,
+  # because each of them reads a field the normalisation produced: `RESULT: PA<ESC>[31mSS`
+  # normalises into the `PASS` this script matches token-exactly, and no census stands behind
+  # that value. The permissive value is the affirmative `0`, never `!= 1`.
+  case "$GP_esc" in
+    0) ;;
+    1)
+      refuse_no_gate \
+        "A marker or value line of the $3 contains an ANSI ESCAPE SEQUENCE (0x1b), so its raw" \
+        "bytes are not the values it would be read as — stripping the escape would MANUFACTURE" \
+        "grammar the file does not contain (a RESULT: value spelt PA<ESC>[31mSS normalises to" \
+        "PASS), and a transform that normalises its input cannot be the thing that validates it." \
+        "agent-gate.sh writes its SUMMARY block with printf, so an escape here means this file is" \
+        "a capture of a COLOURED STREAM rather than the summary file itself. Re-run the gate with" \
+        "AGENT_GATE_SUMMARY_FILE=<path> and pass THAT file, never a terminal or CI log."
+      ;;
+    *)
+      refuse_no_gate \
+        "Gate summary parse produced no usable escape-sequence measurement for the $3 — refusing (fail closed)."
+      ;;
+  esac
   for gp_k in blocks full lite delta unterminated n_mode n_result n_ti n_commit \
               n_ts n_anchor n_nested anchor_unresolved n_dirty n_tsdirty; do
     eval "gp_v=\${GP_$gp_k}"

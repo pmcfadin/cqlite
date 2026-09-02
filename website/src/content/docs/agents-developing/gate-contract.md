@@ -158,7 +158,17 @@ carry).
   it. Routed now, and the caller-side completeness is asserted by
   `scripts/tests/lib/read-boundary-scan.sh` rather than by a sentence in a header — round 13's own
   asserts check the mapping appears exactly ONCE, which is a property of the boundary and not of its
-  callers. Details:
+  callers. **AND THE GATE-OF-RECORD READ CARRIED THE SAME DEFECT AT A SECOND BYTE (#3751 round 15,
+  U2): an ANSI strip may LOCATE a line and may never SUPPLY a value.** `_gate_awk` deleted every CSI
+  sequence before the closed grammar ran on the fields that deletion produced, so
+  `RESULT: PA<ESC>[31mSS` normalised into the `PASS` this script matches token-exactly — and unlike
+  the c-verdict token, that value has no mandatory-field census standing behind it. The strip stays,
+  because a coloured capture is documented-legitimate input here (#3400) and without it a coloured
+  marker line fails the whole-line equality and the block reads as absent; what changed is that the
+  VALUES are now checked against a second reading in which each CSI is a SEPARATOR rather than
+  deleted, so colour that BRACKETS a value passes while colour INSIDE one is refused by name. The
+  trailing-CR strip is kept deliberately: it removes one byte where nothing follows, so it can
+  separate but never join. Details:
   [delivery pipeline](/cqlite/agents-developing/delivery-pipeline/).
   **What a `PREMERGE: OK` does NOT prove (#3650), printed on the success path as `PREMERGE: SCOPE`.**
   It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.

@@ -877,7 +877,29 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   the very defect it exists for** — every text call in these scripts is spelled `LC_ALL=C grep …`, so
   the text before the command word ends in `C` and matched no spelling of "pipeline start" — caught
   by the positive control, which is why the controls plant the EXACT shape and a clean run proves
-  nothing. **The classifier enforces that working too,
+  nothing.
+  **AND THE SAME RULE AT A DIFFERENT BYTE: AN ANSI STRIP MAY *LOCATE* A LINE AND MAY NEVER *SUPPLY*
+  A VALUE (#3751 round 15, U2).** All three of `premerge-assert.sh`'s awk readers deleted every CSI
+  sequence from every line BEFORE the closed grammar was applied to the fields that deletion
+  produced, so a token spelt `PA<ESC>[31mSS` normalised into `PASS` and **certified a merge**
+  (measured: a file whose `grep -c 'RESULT: PASS'` answers `0` published `token=PASS`); the same
+  splice in a gate summary's `RESULT:` reached the merge gate as `PASS`, and in a stage record's
+  `head-sha:` normalised into a clean 40-hex sha that would have bound the stage to a tree the
+  record does not name. **The strip is not gratuitous, so it was SPLIT rather than deleted** — it
+  exists for #3400, colour survives redirection, and without it a coloured capture fails every
+  marker anchor and reads as having no verdict line at all. Each reader now keeps **two readings**
+  of every line: one with each CSI **deleted**, to LOCATE and parse, and one with each CSI replaced
+  by a **single space**, for one question — *did the deletion JOIN two runs the file keeps apart?*
+  **The transferable rule is SEPARATE VERSUS JOIN**: colour that BRACKETS a token leaves it a whole
+  field of the second reading, while colour INSIDE one splits it, so the token the first reading
+  shows appears in the second nowhere. `review-stage.sh`'s own artifacts take the STRICT form (one
+  producer, no colour); the gate summary takes the VALUE-ONLY form, because a coloured capture is
+  legitimate there and real colouring brackets the KEY as readily as the value. **The trailing-CR
+  strip is deliberately KEPT by the same rule** — `\r$` removes one byte where nothing follows, so
+  it can separate but never join — and **the reader differential is what decided it**: it FAILED on
+  the ESC row (`classify_report` reported `unrecognised result token 'PA?[31mSS'` while the awk
+  published `PASS`) and PASSED on the CR row, naming exactly one side as wrong. When a differential
+  says two readers disagree, **consolidate**, and let the measurement pick the side. **The classifier enforces that working too,
   by calling the SAME function the writer does (#3751 round 1).** `verdict` reads HAND-WRITTEN reports by design, and it used to accept any
   NON-EMPTY `performed-by`/`reason`/`evidence` — so `performed-by: nobody`, `reason: x`, `evidence: tbd`
   reached the token that PROCEEDS at the merge point while the writer would have refused all three. A

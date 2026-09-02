@@ -508,6 +508,24 @@ verdict the operator read and an unreadable report is one nobody read.
   matched against a closed set by string equality
 - **AND** the same content WITHOUT the NUL still certifies, so the check does not red on correct input
 
+#### Scenario: a normalising transform does not supply the value it validates
+- **WHEN** a `--c-verdict` file, a gate-of-record summary, or a stage record carries an ANSI escape
+  sequence INSIDE a value the reader validates — a token spelt `PA<ESC>[31mSS`, a `head-sha:` spliced
+  mid-sha
+- **THEN** the read SHALL refuse BY NAME, naming the escape, and SHALL NOT report the value that
+  deleting the escape would produce; in particular `PA<ESC>[31mSS` SHALL NOT read as `PASS`
+- **AND** the refusal SHALL be decided BEFORE the grammar checks that read the normalised fields,
+  since a check placed after them could only report — and for this shape would report nothing, the
+  run having certified
+- **AND** the diagnostic SHALL render what the FILE holds, never the normalised line, so it does not
+  assert a clean `RESULT: PASS` beside a refusal about an escape
+- **AND** colour that BRACKETS a key or a value SHALL still certify, since a coloured gate-summary
+  capture is legitimate input (#3400) and a guard that reds on correct input is the guard agents
+  learn to waive
+- **AND** a trailing CARRIAGE RETURN SHALL remain tolerated at BOTH readers of the shape: it removes
+  one byte where nothing follows, so it can separate but never join, and refusing it at one reader
+  only would be the reader divergence the differential exists to detect
+
 #### Scenario: an unreadable prior verdict is not replaceable
 - **WHEN** the stage's report cannot be READ (permission or I/O) and a substitute is recorded
 - **THEN** the recording is REFUSED under its OWN cause, naming the state that could not be read, and the

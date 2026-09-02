@@ -290,6 +290,43 @@ Three further declared limits of the mechanism itself:
   so the text before the command word ends in `C` and matched no spelling of "pipeline start" —
   caught by the positive control, which is why the controls plant the EXACT shape (an assignment
   prefix, inside a substitution, asserted to really be that shape) rather than a convenient one.
+- **AN ANSI STRIP MAY *LOCATE* A LINE AND MAY NEVER *SUPPLY* A VALUE (#3751 round 15, U2).** The
+  same rule as the NUL, at a different byte, and it was live in all three of `premerge-assert.sh`'s
+  awk readers: each deleted every CSI sequence from every line BEFORE the closed grammar was applied
+  to the fields that deletion produced. Measured on the shipped parser — a `--c-verdict` file whose
+  `LC_ALL=C grep -c 'RESULT: PASS'` answers `0` published `token=PASS`, so a malformed explicit
+  verdict artifact **certified a merge**; the same splice in a gate summary's `RESULT:` reached the
+  merge gate as `PASS`, and in a stage record's `head-sha:` normalised into a clean 40-hex sha that
+  would have BOUND the stage to a tree the record does not name.
+  **The strip is not gratuitous, so it was SPLIT rather than deleted.** It exists for #3400 (colour
+  survives redirection to a file), and a coloured capture without it fails every marker anchor and
+  is reported as having no verdict line at all — a diagnostic loss worth avoiding. Each reader now
+  keeps **two readings** of every line: one with each CSI **deleted**, used to LOCATE and to parse,
+  and one with each CSI replaced by a **single space**, used for ONE question — *did the deletion
+  JOIN two runs the file keeps apart?* **The transferable rule is SEPARATE VERSUS JOIN.** A CSI that
+  BRACKETS a token (which is what a colouring tool emits) leaves that token a whole field of the
+  second reading; a CSI INSIDE one splits it, so the token the first reading shows appears in the
+  second nowhere. The two readers of `review-stage.sh`'s own artifacts take the STRICT form (every
+  field of the anchored line must survive), because those artifacts have ONE producer and it emits
+  no colour; `_gate_awk` takes the VALUE-ONLY form, because a coloured gate-summary capture is
+  documented-legitimate input and real colouring brackets the KEY as readily as the value
+  (`<ESC>[32mRESULT<ESC>[0m:`), which the strict form would red on. Declared residual, invoker-class
+  and therefore out of this script's model: a value spliced by a CSI while the SAME TEXT also
+  appears as another field of that line satisfies the field-membership test.
+  **The trailing-CR strip is DELIBERATELY KEPT, by the same rule, and that is a ruling rather than a
+  tolerance.** `\r$` removes one byte where nothing follows, so it can separate but never join:
+  `PASS<CR>` is the token plus separator whitespace, exactly as `PASS<TAB>` and `PASS   ` are.
+  **The §44g reader differential is what decided it** — it FAILED on the ESC row
+  (`classify_report` reported `NOT-RUN (unrecognised result token 'PA?[31mSS')` while
+  `_c_verdict_awk` published `PASS`) and PASSED on the CR row (measured: `classify_report` reports
+  `RESULT: PASS` for a trailing CR, a trailing TAB and trailing SPACES alike), so exactly one side
+  was wrong and the differential named it. Refusing the CR would have been a UNILATERAL change to
+  one of two readers of one shape, which is the divergence that section exists to detect; the ESC
+  row now asserts the agreement, and the table's floor moved 8 → 9 with it. Two rules for
+  elsewhere: ask of every normalising transform whether it can **join**, not merely whether it
+  changes bytes; and when a differential says two readers disagree, **consolidate** — the fix
+  belongs to whichever side the shared rule condemns, decided by measurement rather than by
+  whichever side a reviewer happened to name.
 - **AND THAT GUARD SHIPPED WITH ITS OWN BLIND SPOT, WHICH IS THE CLASS IT EXISTS FOR (round 9,
   N3).** Its scope was anchored `^[[:space:]]*(printf|echo)[[:space:]]` — the START of a line — so
   every COMPOUND statement was invisible to it, and it reported both scripts CLEAN with **three real

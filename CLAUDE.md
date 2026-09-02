@@ -1412,6 +1412,35 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   spelling of "pipeline start" matched — caught by the positive control, which is why a control that
   plants the EXACT shape (assignment prefix, inside a substitution) is the requirement and a clean
   run is not.
+  **AND THE SAME RULE AT A DIFFERENT BYTE: AN ANSI STRIP MAY *LOCATE* A LINE AND MAY NEVER
+  *SUPPLY* A VALUE (#3751 round 15, U2).** All three of `premerge-assert.sh`'s awk readers deleted
+  every CSI sequence from every line BEFORE the closed grammar was applied to the fields that
+  deletion produced, so **a token spelt `PA<ESC>[31mSS` normalised into `PASS` and certified a
+  merge** — measured: a file whose `grep -c 'RESULT: PASS'` answers `0` published `token=PASS`.
+  Same class as the NUL, and the same sentence: *a transform that normalises its input cannot be
+  the thing that validates it.* **The strip is not gratuitous, so it was SPLIT rather than
+  deleted**: it exists for #3400 (colour survives redirection), and without it a coloured capture
+  fails every marker anchor and reports "no verdict line" for a document that has one. Each reader
+  now keeps **two readings** of each line — one with each CSI **deleted**, used to LOCATE and to
+  parse, and one with each CSI replaced by a **single space**, used for ONE question: *did the
+  deletion JOIN two runs the file keeps apart?* **THE TRANSFERABLE RULE IS SEPARATE VERSUS JOIN.** A
+  CSI that BRACKETS a token (what a colouring tool emits) leaves it a whole field of the second
+  reading; a CSI INSIDE one splits it, so the token the first reading shows appears in the second
+  nowhere. `review-stage.sh`'s two artifacts take the STRICT form (every field must survive), since
+  they have one producer and it emits no colour; the GATE summary takes the VALUE-ONLY form, because
+  a coloured capture is documented-legitimate input there and real colouring brackets the KEY as
+  readily as the value (`<ESC>[32mRESULT<ESC>[0m:`), which the strict form would red on. **And the
+  trailing-CR strip is DELIBERATELY KEPT by the same rule**: `\r$` removes one byte where nothing
+  follows, so it can separate but never join — `PASS<CR>` is the token plus separator whitespace,
+  exactly as `PASS<TAB>` and `PASS   ` are — and the sibling reader `classify_report` reads all
+  three as the token too, so refusing it would have been a unilateral change to one of two readers
+  of one shape. **That reader differential is what made the call**: it FAILED on the ESC row
+  (`classify_report` reported `unrecognised result token 'PA?[31mSS'` while the awk published
+  `PASS`) and PASSED on the CR row, which named exactly one side as wrong. Two rules for elsewhere:
+  ask of every normalising transform whether it can **join**, not merely whether it changes bytes;
+  and when a differential says two readers disagree, **consolidate** — the fix belongs to whichever
+  side the shared rule condemns, and here that was decided by measurement rather than by whichever
+  one a reviewer named.
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies
   already-reviewed code. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
   call site AND no new surface). When in doubt, review.

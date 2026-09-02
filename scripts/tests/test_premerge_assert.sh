@@ -3455,6 +3455,11 @@ diff_disp_b() {
     *"holds NO verdict line"*)              printf 'NO-RECORD\n' ;;
     *"verdict lines"*AMBIGUOUS*)            printf 'NO-RECORD\n' ;;
     *"verdict token:"*)                     printf 'TOKEN-REJECTED\n' ;;
+    # THE ESCAPE REFUSAL IS A TOKEN REJECTION (round 15, U2): the line was LOCATED and the
+    # complaint is that the bytes it carries are not the token they would be read as. Mapped
+    # here rather than left UNCLASSIFIED so this section can assert AGREEMENT with reader A,
+    # which reports the same shape as `unrecognised result token 'PA?[31mSS'`.
+    *"contains an ANSI ESCAPE SEQUENCE"*)   printf 'TOKEN-REJECTED\n' ;;
     *)                                      printf 'UNCLASSIFIED\n' ;;
   esac
 }
@@ -3462,12 +3467,27 @@ diff_disp_b() {
 # THE TABLE. One row per adversarial shape, each spelled for BOTH readers by
 # `diff_row_body_a` / `diff_row_line_b` — the SAME shape, in each reader's own grammar. Written
 # with printf so a row can plant something neither producer would ever emit, which is the point.
-DIFF_ROWS="plain indented several zero crlf token-junk fenced globish"
+DIFF_ROWS="plain indented several zero crlf ansi token-junk fenced globish"
 DIFF_EXPECT_plain=READ
 DIFF_EXPECT_indented=NO-RECORD
 DIFF_EXPECT_several=NO-RECORD
 DIFF_EXPECT_zero=NO-RECORD
 DIFF_EXPECT_crlf=READ
+# THE ROW THE TWO READERS ACTUALLY DISAGREED ON (round 15, U2). Measured on the shipped code
+# BEFORE the fix: `classify_report` reported
+# `NOT-RUN (report ungrammatical: unrecognised result token 'PA?[31mSS')` — fail-closed, because
+# `one_line` renders the ESC as `?` — while `_c_verdict_awk` DELETED the CSI first and published
+# `PASS`, so the merge gate certified a token the file does not contain. TOKEN-REJECTED is the
+# agreed answer, and reaching it is what makes the two readers agree about this shape.
+#
+# NOTE WHAT THIS ROW IS *NOT*: the `crlf` row above stays READ at BOTH readers, deliberately. A
+# trailing CR is separator WHITESPACE — a `\r$` strip removes one byte at end of line, where
+# nothing follows, so it can SEPARATE but never JOIN — exactly as a trailing TAB or trailing
+# SPACES do (measured: all three report `RESULT: PASS` from `classify_report`). A CSI deletion
+# removes bytes from the MIDDLE and JOINS two runs the file keeps apart. Refusing the CR here
+# would have been a UNILATERAL change to one of two readers of one shape, which is the very
+# divergence this section exists to detect.
+DIFF_EXPECT_ansi=TOKEN-REJECTED
 DIFF_EXPECT_token_junk=TOKEN-REJECTED
 DIFF_EXPECT_fenced=NO-RECORD
 DIFF_EXPECT_globish=TOKEN-REJECTED
@@ -3484,6 +3504,7 @@ diff_row_body_a() {
     several)    printf 'result: PASS\n\nan earlier round.\n\nresult: FINDINGS\n\na later one.\n' ;;
     zero)       printf '# a report with prose only\n\nnothing recordable here.\n' ;;
     crlf)       printf 'result: PASS\r\n\r\nreviewed the whole diff.\r\n' ;;
+    ansi)       printf 'result: PA\033[31mSS\n\na token spliced by a colour escape.\n' ;;
     token-junk) printf 'result: PASSNOW\n\nan invented token.\n' ;;
     fenced)     printf '```\nresult: PASS\n```\n\nresult: PASS\n' ;;
     globish)    printf 'result: *\n\na glob where a token belongs.\n' ;;
@@ -3497,6 +3518,7 @@ diff_row_line_b() {
     several)    printf '%s PASS %s\n%s FINDINGS %s\n' "$pfx" "$sfx" "$pfx" "$sfx" ;;
     zero)       printf 'a capture holding prose only, with no anchored line.\n' ;;
     crlf)       printf '%s PASS %s\r\n' "$pfx" "$sfx" ;;
+    ansi)       printf '%s PA\033[31mSS %s\n' "$pfx" "$sfx" ;;
     token-junk) printf '%s PASSNOW %s\n' "$pfx" "$sfx" ;;
     fenced)     printf '```\n%s PASS %s\n```\n%s PASS %s\n' "$pfx" "$sfx" "$pfx" "$sfx" ;;
     globish)    printf '%s * %s\n' "$pfx" "$sfx" ;;
@@ -3506,10 +3528,10 @@ diff_row_line_b() {
 # A CASE FLOOR ON THE TABLE ITSELF (#3544's lesson): an emptied or shrunken table yields a loop
 # that runs fewer times and reports `failed: 0`, which is a green tally over a shrunken suite.
 DIFF_ROW_COUNT=$(printf '%s\n' $DIFF_ROWS | grep -c .)
-if [ "$DIFF_ROW_COUNT" -ge 8 ]; then
-  ok "differential: the shared table holds $DIFF_ROW_COUNT adversarial shapes (floor 8)"
+if [ "$DIFF_ROW_COUNT" -ge 9 ]; then
+  ok "differential: the shared table holds $DIFF_ROW_COUNT adversarial shapes (floor 9)"
 else
-  bad "differential: the shared table holds only $DIFF_ROW_COUNT rows, below the floor of 8 — a row was lost and agreement over an empty table is not agreement"
+  bad "differential: the shared table holds only $DIFF_ROW_COUNT rows, below the floor of 9 — a row was lost and agreement over an empty table is not agreement"
 fi
 
 DIFF_REPO="$T/diff-readers"
@@ -4566,6 +4588,231 @@ else
   bad "s2/pm/structural: the c-verdict file is still fed to awk raw, so a NUL in the token survives to a capture that removes it"
 fi
 
+# --- 44q: the ANSI STRIP may LOCATE a line, never SUPPLY a value (round 15, U2) ---
+# THE FINDING (roborev job 391, U2). `_c_verdict_awk` deleted every CSI sequence BEFORE the closed
+# grammar was applied to the fields that deletion produced, so a token spelt `PA<ESC>[31mSS` was
+# NORMALISED INTO `PASS` and a malformed explicit verdict artifact CERTIFIED A MERGE. That is round
+# 13's S2 rule at a different byte — *a transform that normalises its input cannot be the thing
+# that validates it* — and it is the same shape as the NUL: the read did not lose information, it
+# MANUFACTURED grammar the file does not contain. Measured on the shipped parser before the fix:
+#
+#   $ printf 'REVIEW-STAGE: c RESULT: PA\033[31mSS elapsed=42 …\n' > cv.txt
+#   $ LC_ALL=C grep -c 'RESULT: PASS' cv.txt                       -> 0   (rc 1)
+#   $ awk '{gsub(/\033\[[0-9;]*[a-zA-Z]/,"")} /^REVIEW-STAGE: /{print "token=" $4}' cv.txt
+#     token=PASS
+#
+# THE STRIP IS NOT GRATUITOUS, so it is SPLIT rather than deleted. It exists for #3400 (colour
+# SURVIVES redirection to a file), and without it a reader anchored on a marker line reports "no
+# verdict line" for a document that has one — Case 24 above pins that a coloured GATE SUMMARY still
+# certifies. So each of this script's three awk readers now keeps TWO readings of every line: one
+# with each CSI DELETED, used to LOCATE and to parse, and one with each CSI replaced by a SINGLE
+# SPACE, used for ONE question — did the deletion JOIN two runs the file keeps apart? A CSI that
+# BRACKETS a token leaves it a whole field of the second reading; a CSI INSIDE one splits it, so the
+# token the first reading shows appears in the second NOWHERE. Separate versus join, measured.
+#
+# THE TWO READERS OF REVIEW-STAGE.SH's OWN ARTIFACTS TAKE THE STRICT FORM (every field of the
+# anchored line must survive), because those artifacts have ONE producer and it emits no colour at
+# all. `_gate_awk` takes the VALUE-ONLY form, because a coloured gate-summary capture is
+# documented-legitimate input and real colouring brackets the KEY as readily as the value
+# (`<ESC>[32mRESULT<ESC>[0m:`), which the strict form would red on.
+U2_ESC=$(printf '\033')
+# (a) THE C-VERDICT TOKEN — the reported site.
+U2_CV="$T/u2-c-verdict-spliced.txt"
+printf 'REVIEW-STAGE: c RESULT: PA%s[31mSS elapsed=42 deadline=1800 agent=spec-auditor report=%s\n' \
+  "$U2_ESC" "$T/injected-c-report.md" >"$U2_CV"
+if LC_ALL=C grep -q 'RESULT: PASS' "$U2_CV" 2>/dev/null; then
+  bad "u2/cv PREMISE: the fixture DOES carry the literal token PASS, so the case below proves nothing"
+else
+  ok "u2/cv PREMISE: the fixture carries NO literal 'RESULT: PASS' (MEASURED with grep on the FILE)"
+fi
+c_refused "u2/cv: an ESCAPE-SPLICED token is REFUSED, not read as the PASS the strip manufactured" \
+  "$U2_CV" "ANSI ESCAPE SEQUENCE"
+# AND THE DIAGNOSTIC SHOWS WHAT THE FILE HOLDS. Printing the NORMALISED line beside "this line
+# contains an escape" would show the operator a clean `RESULT: PASS` and contradict its own
+# sentence — a misleading rationale is worse than none (round 2, B7). The ESC renders as `?`,
+# which is the same rendering review-stage.sh's own classifier reports the shape under.
+if run 2 "u2/cv: (re-run to inspect the diagnostic)" 2421 "$CERTIFIED" "$GOOD" --c-verdict "$U2_CV"; then
+  case "$OUT" in
+    *"RESULT: PA?[31mSS"*) ok "u2/cv: the diagnostic prints the RAW line (PA?[31mSS), not the clean PASS the strip produced" ;;
+    *) bad "u2/cv: the diagnostic does not show the raw spliced token (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"verdict line: REVIEW-STAGE: c RESULT: PASS "*)
+      bad "u2/cv: the diagnostic printed the NORMALISED line, asserting a clean PASS beside a refusal about an escape" ;;
+    *) ok "u2/cv: and it never prints the normalised 'RESULT: PASS' beside that refusal" ;;
+  esac
+fi
+# (b) THE GATE SUMMARY's RESULT: value — the sibling site, found by sweeping the class. Nothing
+#     else here would catch it: unlike the c-verdict token, that value has no mandatory-field
+#     census standing behind it.
+U2_G="$T/u2-gate-spliced.txt"
+{
+  printf '==== AGENT-GATE SUMMARY ====\n'
+  printf 'RESULT: PA%s[31mSS\n' "$U2_ESC"
+  printf 'tree-integrity: PASS\n'
+  printf 'commit: %s dirty: no\n' "$C7"
+  printf 'tree-start: %s dirty: no\n' "$C12"
+  printf '==== END AGENT-GATE SUMMARY ====\n'
+} >"$U2_G"
+if LC_ALL=C grep -q 'RESULT: PASS' "$U2_G" 2>/dev/null; then
+  bad "u2/gate PREMISE: the fixture DOES carry the literal 'RESULT: PASS', so the case below proves nothing"
+else
+  ok "u2/gate PREMISE: the fixture carries NO literal 'RESULT: PASS' (MEASURED with grep on the FILE)"
+fi
+if run 2 "u2/gate: an ESCAPE-SPLICED gate RESULT: is REFUSED, not read as PASS" \
+  2421 "$CERTIFIED" "$U2_G" --c-verdict "$C_PASS_FILE"; then
+  case "$OUT" in
+    *"PREMERGE: NO-GATE-OF-RECORD"*) ok "u2/gate: under the gate-of-record refusal" ;;
+    *) bad "u2/gate: expected NO-GATE-OF-RECORD (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"ANSI ESCAPE SEQUENCE"*) ok "u2/gate: and the refusal NAMES the escape rather than complaining about a token nobody wrote" ;;
+    *) bad "u2/gate: the refusal must name the escape (got: $OUT)" ;;
+  esac
+fi
+# (c) THE CONTROL THAT MATTERS MOST — colour that BRACKETS the key and the value, which is what a
+#     colouring tool actually emits and what #3400 makes legitimate input. It must still certify:
+#     a guard that reds on correct input is the guard agents learn to waive. Distinct from Case 24
+#     above, which colours the same fixture: this one asserts the property under THIS section's
+#     rule, so deleting the value-only form here reds locally instead of two thousand lines away.
+U2_GC="$T/u2-gate-bracketed.txt"
+LC_ALL=C sed \
+  -e "s/RESULT: PASS/${U2_ESC}[32mRESULT${U2_ESC}[0m: ${U2_ESC}[1;32mPASS${U2_ESC}[0m/" \
+  -e "s/tree-integrity: PASS/tree-integrity: ${U2_ESC}[32mPASS${U2_ESC}[0m/" \
+  "$GOOD" >"$U2_GC"
+if LC_ALL=C grep -q "$U2_ESC" "$U2_GC" 2>/dev/null; then
+  ok "u2/gate CONTROL: the bracketed-colour fixture really does carry ANSI escapes"
+else
+  bad "u2/gate CONTROL: the fixture carries no escapes — the control below is vacuous"
+fi
+if run 0 "u2/gate CONTROL: colour BRACKETING the key and the value still certifies (exit 0)" \
+  2421 "$CERTIFIED" "$U2_GC" --c-verdict "$C_PASS_FILE"; then
+  case "$OUT" in
+    *"PREMERGE: OK"*) ok "u2/gate CONTROL: and reports PREMERGE: OK — the value survives as a whole field, so nothing was joined" ;;
+    *) bad "u2/gate CONTROL: the bracketed capture did not certify (got: $OUT)" ;;
+  esac
+fi
+# (d) THE STAGE RECORD's head-sha — the third site. A spliced sha normalises into a clean 40-hex
+#     value and would BIND the stage to a tree the record does not name, which is the one thing
+#     round 3's G1 exists to prevent.
+U2_REPO=$(c_repo u2rec design) || U2_REPO=""
+if [ -n "$U2_REPO" ]; then
+  if (cd "$U2_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor >/dev/null 2>&1) &&
+    printf 'result: PASS\n\n## Findings\n\nnone.\n' >"$(SR_REPORT "$U2_REPO" 3751 c)"; then
+    ok "u2/record fixture: a PASSING c stage was opened"
+  else
+    bad "u2/record fixture: could not open the stage — the cases would be vacuous"
+    U2_REPO=""
+  fi
+fi
+if [ -n "$U2_REPO" ]; then
+  U2_REC="$U2_REPO/.review-stage/issue-3751/c.stage"
+  cp "$U2_REC" "$U2_REC.pristine" 2>/dev/null || true
+  # THE CONTROL FIRST, so the section proves the fixture certifies before it is spliced. The
+  # record's own head-sha is the certified commit, so AUTO must reach C-VERDICT PASS.
+  if run_in_repo "$U2_REPO" 0 "u2/record CONTROL: the intact record certifies under AUTO" \
+    --c-verdict AUTO; then
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*) ok "u2/record CONTROL: reaching C-VERDICT PASS, so the splice below is the only difference" ;;
+      *) bad "u2/record CONTROL: expected C-VERDICT PASS (got: $OUT)" ;;
+    esac
+  fi
+  # THE SPLICE, planted through ENVIRON rather than `awk -v`: `-v` PERFORMS ESCAPE PROCESSING on
+  # its value, so a plant carrying `\033` would arrive as something else entirely (round 7's
+  # measured harness defect).
+  if U2_E="$U2_ESC" LC_ALL=C awk '
+      BEGIN { e = ENVIRON["U2_E"] }
+      /^head-sha: / { printf "head-sha: %s%s[32m%s\n", substr($2, 1, 3), e, substr($2, 4); next }
+      { print }
+    ' "$U2_REC.pristine" >"$U2_REC.new" 2>/dev/null && mv -f "$U2_REC.new" "$U2_REC"; then
+    ok "u2/record: the escape was planted INSIDE the head-sha value"
+  else
+    bad "u2/record: could not plant the escape — the case below is vacuous"
+  fi
+  if LC_ALL=C grep -q "^head-sha: $CERTIFIED\$" "$U2_REC" 2>/dev/null; then
+    bad "u2/record PREMISE: the record still carries the certified sha literally, so the case proves nothing"
+  else
+    ok "u2/record PREMISE: the record no longer carries the certified sha as literal bytes (MEASURED with grep on the FILE)"
+  fi
+  if run_in_repo "$U2_REPO" 2 \
+    "u2/record: an ESCAPE-SPLICED head-sha REFUSES, not binds the stage to a tree the record does not name" \
+    --c-verdict AUTO; then
+    # The needle is the phrase that cannot be split by the diagnostic's own line wrapping:
+    # the full sentence "ANSI ESCAPE SEQUENCE (0x1b)" is emitted across two lines here.
+    case "$OUT" in
+      *"ANSI ESCAPE"*) ok "u2/record: and the refusal NAMES the escape" ;;
+      *) bad "u2/record: the refusal must name the escape (got: $OUT)" ;;
+    esac
+  fi
+fi
+# (e) STRUCTURAL — THE SPLIT IS PRESENT IN ALL THREE READERS, AND THE COUNTS ARE PINNED. A reader
+#     that lost its separating reading would go back to validating a value the deletion invented,
+#     while every behavioural case above still passed for its own site.
+U2_DEL=$(LC_ALL=C grep -c 'gsub(/\\033\\\[\[0-9;\]\*\[a-zA-Z\]/, "",' "$ASSERT" || true)
+U2_SEP=$(LC_ALL=C grep -c 'gsub(/\\033\\\[\[0-9;\]\*\[a-zA-Z\]/, " ",' "$ASSERT" || true)
+if [ "$U2_DEL" = "3" ]; then
+  ok "u2/structural: all THREE awk readers keep a DELETING reading (for locating): $U2_DEL"
+else
+  bad "u2/structural: $U2_DEL deleting CSI strips, want 3 (one per awk reader) — a reader lost or gained one"
+fi
+if [ "$U2_SEP" = "3" ]; then
+  ok "u2/structural: and all THREE keep a SEPARATING reading (for the join test): $U2_SEP"
+else
+  bad "u2/structural: $U2_SEP separating CSI substitutions, want 3 — a reader validates values the deletion invented"
+fi
+if [ "$(LC_ALL=C grep -c 'gsub(/\\033\\\[\[0-9;\]\*\[a-zA-Z\]/, "")' "$ASSERT" || true)" = "0" ]; then
+  ok "u2/structural: no reader strips in place with a bare two-argument gsub, which would leave no raw line to compare against"
+else
+  bad "u2/structural: $(LC_ALL=C grep -n 'gsub(/\\033\\\[\[0-9;\]\*\[a-zA-Z\]/, "")' "$ASSERT" | LC_ALL=C tr '\n' ' ')"
+fi
+# THE DECISION IS TAKEN BEFORE THE GRAMMAR IT PROTECTS. A check placed after the asserts that read
+# the normalised fields could only report — for `PA<ESC>[31mSS` it would report nothing at all,
+# because those asserts would have PASSED and the run would have certified.
+U2_CVESC_LN=$(LC_ALL=C grep -n 'case "\$CV_ESC" in' "$ASSERT" | LC_ALL=C head -1 | cut -d: -f1)
+U2_CVKIND_LN=$(LC_ALL=C grep -n 'if \[ "\$CV_KIND" != "\$C_STAGE_KIND" \]' "$ASSERT" | LC_ALL=C head -1 | cut -d: -f1)
+if [ -n "$U2_CVESC_LN" ] && [ -n "$U2_CVKIND_LN" ] && [ "$U2_CVESC_LN" -lt "$U2_CVKIND_LN" ]; then
+  ok "u2/structural: the c-verdict escape decision precedes the first grammar assert (lines $U2_CVESC_LN < $U2_CVKIND_LN)"
+else
+  bad "u2/structural: the c-verdict escape decision is NOT before the grammar asserts (esc=$U2_CVESC_LN kind=$U2_CVKIND_LN)"
+fi
+U2_GPESC_LN=$(LC_ALL=C grep -n 'case "\$GP_esc" in' "$ASSERT" | LC_ALL=C head -1 | cut -d: -f1)
+U2_GPCOUNT_LN=$(LC_ALL=C grep -n 'for gp_k in blocks full lite delta unterminated' "$ASSERT" | LC_ALL=C head -1 | cut -d: -f1)
+if [ -n "$U2_GPESC_LN" ] && [ -n "$U2_GPCOUNT_LN" ] && [ "$U2_GPESC_LN" -lt "$U2_GPCOUNT_LN" ]; then
+  ok "u2/structural: the gate-summary escape decision precedes its count validation (lines $U2_GPESC_LN < $U2_GPCOUNT_LN)"
+else
+  bad "u2/structural: the gate-summary escape decision is NOT before the count validation (esc=$U2_GPESC_LN counts=$U2_GPCOUNT_LN)"
+fi
+# AND EVERY ESCAPE BRANCH SPELLS ITS PERMISSIVE SET AFFIRMATIVELY. `0` and nothing else may
+# proceed; an unparseable or absent measurement takes the fail-closed arm, so a flag this parser
+# stops publishing cannot arrive as "no escape found".
+U2_AFFIRM=0
+for U2_V in CV_ESC GP_esc; do
+  if LC_ALL=C awk -v v="$U2_V" '
+      index($0, "case \"$" v "\" in") > 0 { seen = 1; next }
+      seen == 1 && $0 ~ /^[[:space:]]*0\)/ { hit = 1; seen = 0 }
+      END { exit(hit ? 0 : 1) }
+    ' "$ASSERT"; then
+    U2_AFFIRM=$((U2_AFFIRM + 1))
+  fi
+done
+if [ "$U2_AFFIRM" = "2" ]; then
+  ok "u2/structural: both escape branches key their permissive arm on the AFFIRMATIVE 0, never on != 1"
+else
+  bad "u2/structural: only $U2_AFFIRM of 2 escape branches spell the permissive set affirmatively"
+fi
+# THE TRAILING CR IS DELIBERATELY STILL TOLERATED, AND THE RULING IS PINNED IN THE SOURCE. A CR is
+# separator WHITESPACE — the `\r$` strip removes one byte where nothing follows, so it can separate
+# but never join — and the sibling reader `classify_report` reads a CRLF line as its token too
+# (measured, alongside a trailing TAB and trailing SPACES). Refusing it here would have been a
+# unilateral change to one of two readers of one shape, which is what section 44g detects. The
+# `crlf` row of that table asserts the AGREEMENT; this asserts the reason is written down.
+if LC_ALL=C grep -q 'SEPARATE VERSUS JOIN' "$ASSERT"; then
+  ok "u2/structural: the separate-versus-join ruling that keeps the trailing CR tolerated is stated in the source"
+else
+  bad "u2/structural: nothing in the source states why an escape is refused while a trailing CR is not"
+fi
+
 # --- 44h: THE STRUCTURAL EMIT-BOUNDARY GUARD (round 7, L1b) -------------------
 # The mirror of test_review_stage.sh section 18, for this script. See
 # scripts/tests/lib/emit-boundary-scan.sh for why the guard exists (the boundary was bypassed at a
@@ -5084,7 +5331,20 @@ fi
 # every text call in these scripts is spelled `LC_ALL=C grep …`. The fallback arm is seven bads to
 # match. All need only bash and coreutils, so the floor moves by the SAME 14 and the derived
 # 6-assertion margin for the ONE host-gated block is PRESERVED UNCHANGED.
-ASSERT_FLOOR=467
+#
+# ROUND 15 (U2) ADDS 23, ALL HOST-INDEPENDENT (473 -> 496; floor 467 -> 490, the documented
+# 6-assertion host-gated margin PRESERVED UNCHANGED — every added case needs only bash, git,
+# coreutils and awk): section 44q's 22 (the ANSI strip may LOCATE a line and may not SUPPLY a
+# value — the reported c-verdict site plus the two siblings the class sweep found, the gate
+# summary's `RESULT:` and the stage record's `head-sha:`; each with its premise MEASURED on the
+# file, a control that the intact artifact still certifies, and the control that matters most,
+# a #3400-shaped capture whose colour BRACKETS the key and the value and which must still reach
+# `PREMERGE: OK`; plus eight structural pins over the split readings, the decision order and the
+# affirmative permissive arms), and section 44g's 1 (a new `ansi` row: the two readers of one
+# shape ACTUALLY disagreed there — `classify_report` reported `unrecognised result token
+# 'PA?[31mSS'` while `_c_verdict_awk` published `PASS` — so reaching TOKEN-REJECTED at both is
+# a consolidation, and the table's floor moves 8 -> 9 with it).
+ASSERT_FLOOR=490
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

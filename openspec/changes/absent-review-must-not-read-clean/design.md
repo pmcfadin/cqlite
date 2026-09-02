@@ -328,6 +328,23 @@ draft reported CLEAN on the defect it exists for (every text call here is `LC_AL
 text before the command word ends in `C`), caught by the positive control — which is why the
 controls plant the exact shape rather than a convenient one.
 
+**And the SAME family had a second byte, found one round later (round 15, U2): an ANSI strip may
+LOCATE a line and may never SUPPLY a value.** All three of `premerge-assert.sh`'s awk readers deleted
+every CSI sequence before the closed grammar ran on the fields that deletion produced, so a token
+spelt `PA<ESC>[31mSS` normalised into `PASS` and certified a merge, a gate summary's spliced
+`RESULT:` reached the merge gate as `PASS`, and a stage record's spliced `head-sha:` normalised into
+a clean 40-hex sha that would have bound the stage to a tree the record does not name. The strip is
+NOT gratuitous — #3400: colour survives redirection, and a coloured capture without it fails every
+marker anchor — so it was SPLIT rather than deleted: each reader keeps a DELETING reading to locate
+and parse, and a SEPARATING reading (each CSI replaced by one space) for one question, *did the
+deletion JOIN two runs the file keeps apart?* **Separate versus join is the transferable rule**, and
+it is also what KEEPS the trailing-CR strip: `\r$` removes one byte where nothing follows, so it can
+separate but never join. That call was decided by the §44g reader differential rather than argued —
+it FAILED on the ESC row (`classify_report` reported `unrecognised result token 'PA?[31mSS'` while
+the awk published `PASS`) and PASSED on the CR row, naming exactly one side as wrong. Refusing the
+CR would have been a unilateral change to one of two readers of one shape, which is the divergence
+that section exists to detect.
+
 ## §5 — the agent side, and the limit of what it buys
 
 Every agent whose completion is a pipeline gate gains a report-of-record clause in its definition, and
