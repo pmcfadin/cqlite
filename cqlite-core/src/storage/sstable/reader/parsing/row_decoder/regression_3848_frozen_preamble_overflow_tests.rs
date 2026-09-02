@@ -50,18 +50,21 @@
 //!    form.
 //!
 //! No gate component or CI lane builds a 32-bit target, so a
-//! `#[cfg(target_pointer_width = "32")]` test would execute NOWHERE. These cases
-//! therefore exercise the SHARED GUARD directly with lengths that would truncate
-//! on a 32-bit target, which is target-independent and runs on every lane.
+//! `#[cfg(target_pointer_width = "32")]` test would execute NOWHERE — and at
+//! `usize` width on a 64-bit host the guard and a cast-first implementation
+//! AGREE on every input, so a case that only asserts "an error came back" pins
+//! nothing at all and would stay green if the guard were deleted (#3042).
 //!
-//! **Declared limit of the axis-3 cases.** On a 64-bit host `as usize` is the
-//! identity, so these assertions cannot DISTINGUISH the correct ordering from a
-//! reintroduced cast-first one — no test can, without a 32-bit target or a model
-//! of one. What they pin is the guard's CONTRACT (reject rather than narrow, and
-//! name the raw length), and the fact that there is exactly ONE place to inspect
-//! for the ordering is the point of extracting it. Stated here rather than left
-//! to be assumed, because a case that silently covers less than it appears to is
-//! worse than a declared gap.
+//! The guards are therefore parameterized over the narrowing TARGET WIDTH
+//! (`vuint_length_within_as`, `checked_vuint_length_as`,
+//! `checked_vuint_exact_length_as`, over `crate::parser::vint_narrow::LengthWidth`).
+//! Production code calls the `usize` wrappers and behaves exactly as before; the
+//! cases below instantiate the SAME code at `u32`, which IS the semantics of a
+//! 32-bit `usize`, on any host. There the two implementations differ —
+//! `((1u64 << 32) + 8) as u32 == 8` is accepted by a cast-first check and
+//! rejected by the guard — so every case marked "DISCRIMINATING" below fails if
+//! the guard is replaced by a plain narrowing cast. That was verified by
+//! actually making the substitution and observing the reds, not by reasoning.
 //!
 //! ## The fourth axis: A POST-CAST EQUALITY CHECK IS NOT A GUARD (roborev job 67)
 //!
@@ -77,11 +80,12 @@
 //! truncation whatsoever; it only looks as if it does.
 //!
 //! 4. **Fixed widths** — [`checked_vuint_exact_length`] compares the raw `u64`
-//!    against each allowed size widened `usize -> u64` (lossless), so the
-//!    equality is exact on every target, and narrows only on a match. The
-//!    declared-limit note on axis 3 applies verbatim here: on a 64-bit host
-//!    `as usize` is the identity, so these cases pin the guard's CONTRACT
-//!    (reject, and name the RAW length) rather than distinguishing the ordering.
+//!    against each allowed size widened to `u64` (lossless), so the equality is
+//!    exact on every target, and returns the MATCHED allowed size, narrowing
+//!    nothing. Its cases are made discriminating the same way as axis 3's, by
+//!    instantiating the guard at `u32` width: a cast-first
+//!    `((1u64 << 32) + 4) as u32 == 4` is accepted as a valid 4-byte date, the
+//!    guard rejects it.
 //!
 //! ## Dataset independence
 //!
@@ -92,6 +96,9 @@
 //! builds run with `overflow-checks = true`, so a regressed add would abort the
 //! process here rather than silently wrap.
 
+use super::vuint_length::{
+    checked_vuint_exact_length_as, checked_vuint_length_as, vuint_length_within_as,
+};
 use super::{
     checked_vuint_exact_length, checked_vuint_length, vuint_length_within, V5CompressedLegacyParser,
 };
@@ -214,8 +221,71 @@ fn valid_preamble_decodes_and_advances_offset() {
 /// 8 bytes of a claimed 4 GiB run would be decoded as the whole value.
 const TRUNCATING_LENGTHS: [u64; 4] = [1u64 << 32, (1u64 << 32) + 8, u32::MAX as u64 + 1, u64::MAX];
 
-/// Axis 3: the shared guard rejects a length that `as usize` would truncate,
-/// rather than returning a narrowed value the caller would treat as in-bounds.
+/// Axis 3, DISCRIMINATING: the shared guard instantiated at 32-BIT width — the
+/// semantics of a 32-bit `usize`, reproduced on any host.
+///
+/// **If the guard were replaced by a plain narrowing cast, THIS TEST WOULD
+/// FAIL.** A cast-first check narrows `(1u64 << 32) + 8` to exactly `8u32` and
+/// then finds it within the 8 available bytes, so it returns `Some(8)`; the
+/// asserted `truncated` value below is what such an implementation hands back.
+/// Verified by substitution: with `vuint_length_within_as` rewritten as
+/// `let len = len_raw as T; (len <= available).then_some(len)`, this case reds.
+#[test]
+fn truncating_vuint_lengths_are_rejected_at_32_bit_narrowing_width() {
+    for len_raw in TRUNCATING_LENGTHS {
+        let truncated = len_raw as u32;
+        assert_ne!(
+            u64::from(truncated),
+            len_raw,
+            "case setup: the cast must lose information for {len_raw}"
+        );
+        assert_eq!(
+            vuint_length_within_as::<u32>(len_raw, u32::MAX),
+            None,
+            "length {len_raw} is not representable in 32 bits and must be REJECTED, \
+             not narrowed to {truncated}"
+        );
+    }
+    // The sharpest case, stated explicitly: the declared length narrows to
+    // exactly the number of available bytes, so a post-cast availability check
+    // is SATISFIED and 8 bytes of a claimed 4 GiB run would be decoded as the
+    // whole value.
+    assert_eq!(((1u64 << 32) + 8) as u32, 8, "case setup: the low bits");
+    assert_eq!(
+        vuint_length_within_as::<u32>((1u64 << 32) + 8, 8u32),
+        None,
+        "a length that truncates to exactly the available byte count must be rejected"
+    );
+}
+
+/// Axis 3, DISCRIMINATING, the message half at 32-bit width: the rejection is a
+/// NAMED `Error::Corruption` reporting the RAW `u64`.
+///
+/// **If the guard were replaced by a plain narrowing cast, THIS TEST WOULD
+/// FAIL** — a cast-first check returns `Ok(8)` here and there is no error to
+/// inspect. Verified by substitution.
+#[test]
+fn truncating_vuint_lengths_yield_corruption_at_32_bit_narrowing_width() {
+    let len_raw = (1u64 << 32) + 8;
+    let err = checked_vuint_length_as::<u32>(len_raw, 8u32, "Frozen element", "c", "blob")
+        .expect_err("a length that only FITS once truncated must be rejected");
+    match &err {
+        Error::Corruption(msg) => assert!(
+            msg.contains(&format!("need {len_raw} bytes for blob"))
+                && msg.contains("only 8 available"),
+            "must name the RAW length, not its truncated form (got {msg:?})"
+        ),
+        other => panic!("expected Error::Corruption, got {other:?}"),
+    }
+}
+
+/// Axis 3 at the production `usize` width, for the record: the guard rejects a
+/// length past the available bytes.
+///
+/// DECLARED LIMIT — not a pin. On a 64-bit host `len_raw as usize` is the
+/// identity, so a cast-first implementation rejects these too (as "past the
+/// available bytes"). The discriminating coverage is the 32-bit-width cases
+/// above; this one holds the `usize` wrapper to the same contract.
 #[test]
 fn truncating_vuint_lengths_are_rejected_before_the_usize_cast() {
     for len_raw in TRUNCATING_LENGTHS {
@@ -293,12 +363,53 @@ const FIXED_WIDTH_FIELDS: [(&str, &[usize]); 5] = [
     ("inet", &[4, 16]),
 ];
 
-/// Axis 4, the case that FALSIFIES the "the `!= 4` check catches it" reasoning:
-/// a declared length whose LOW 32 BITS equal the expected fixed width.
+/// Axis 4, DISCRIMINATING, and the case that FALSIFIES the "the `!= 4` check
+/// catches it" reasoning: a declared length whose LOW 32 BITS equal the expected
+/// fixed width, checked at 32-bit narrowing width.
 ///
-/// `(1u64 << 32) + 4` narrows to exactly `4usize`, so the pre-fix
-/// `let date_len = date_len as usize; if date_len != 4 { .. }` shape ACCEPTS it
-/// as a valid 4-byte date. The guard must reject it on the raw `u64`.
+/// **If the guard were replaced by a plain narrowing cast, THIS TEST WOULD
+/// FAIL**: `((1u64 << 32) + 4) as u32 == 4` passes an equality check against the
+/// allowed width, so the corrupt length is ACCEPTED as a valid 4-byte date and
+/// there is no error to inspect. Verified by substitution, not by reasoning.
+#[test]
+fn fixed_width_lengths_colliding_in_the_low_32_bits_are_rejected_at_32_bit_width() {
+    for (what, allowed) in FIXED_WIDTH_FIELDS {
+        let allowed32 = allowed
+            .iter()
+            .map(|&size| size as u32)
+            .collect::<Vec<u32>>();
+        for &width in allowed {
+            let colliding = (1u64 << 32) + width as u64;
+            // What a cast-first implementation computes: EXACTLY the expected
+            // width, so its equality check passes and the corrupt length is
+            // ACCEPTED as a valid field.
+            assert_eq!(
+                colliding as u32, width as u32,
+                "case setup: {colliding} must collide with the {what} width in 32 bits"
+            );
+            let err =
+                checked_vuint_exact_length_as::<u32>(colliding, &allowed32, "Cell", "c", what)
+                    .expect_err(
+                        "a length colliding with the fixed width in its low 32 bits must be \
+                 rejected, not accepted as that width",
+                    );
+            match &err {
+                Error::Corruption(msg) => assert!(
+                    msg.contains(&colliding.to_string()) && msg.contains("Cell 'c'"),
+                    "must name the subject and the RAW length {colliding} (got {msg:?})"
+                ),
+                other => panic!("expected Error::Corruption, got {other:?}"),
+            }
+        }
+    }
+}
+
+/// Axis 4 at the production `usize` width, for the record.
+///
+/// DECLARED LIMIT — not a pin: on a 64-bit host a cast-first implementation
+/// rejects `(1u64 << 32) + 4` too, because `4294967300usize != 4`. The
+/// discriminating case is the 32-bit-width one above; this one holds the `usize`
+/// wrapper to the same contract and message shape.
 #[test]
 fn fixed_width_lengths_colliding_in_the_low_32_bits_are_rejected() {
     for (what, allowed) in FIXED_WIDTH_FIELDS {
@@ -321,17 +432,42 @@ fn fixed_width_lengths_colliding_in_the_low_32_bits_are_rejected() {
     }
 }
 
-/// The same axis at the other truncating lengths: `1 << 32` narrows to `0usize`
-/// (which no fixed-width arm allows, so it would be caught) and `u64::MAX`
-/// narrows to `u32::MAX` — none may be accepted for any width.
+/// The same axis at the other truncating lengths, at BOTH widths: none may be
+/// accepted for any fixed width.
+///
+/// The 32-bit-width half is the one that can fail against a cast-first
+/// implementation (`(1u64 << 32) + 1` narrows to `1u32`, the legal `tinyint`
+/// width); the `usize` half is the wrapper's contract at production width. The
+/// error is matched as a NAMED `Error::Corruption` rather than "some error", so
+/// the case cannot pass for an unrelated reason.
 #[test]
 fn fixed_width_guard_rejects_every_truncating_length() {
     for (what, allowed) in FIXED_WIDTH_FIELDS {
+        let allowed32 = allowed
+            .iter()
+            .map(|&size| size as u32)
+            .collect::<Vec<u32>>();
         for len_raw in TRUNCATING_LENGTHS {
-            assert!(
-                checked_vuint_exact_length(len_raw, allowed, "Frozen element", "c", what).is_err(),
-                "{what}: truncating length {len_raw} must be rejected"
-            );
+            for err in [
+                checked_vuint_exact_length(len_raw, allowed, "Frozen element", "c", what)
+                    .expect_err("truncating length must be rejected at usize width"),
+                checked_vuint_exact_length_as::<u32>(
+                    len_raw,
+                    &allowed32,
+                    "Frozen element",
+                    "c",
+                    what,
+                )
+                .expect_err("truncating length must be rejected at 32-bit width"),
+            ] {
+                match &err {
+                    Error::Corruption(msg) => assert!(
+                        msg.contains(&len_raw.to_string()),
+                        "{what}: rejection of {len_raw} must name the RAW length (got {msg:?})"
+                    ),
+                    other => panic!("{what}: expected Error::Corruption, got {other:?}"),
+                }
+            }
         }
     }
 }

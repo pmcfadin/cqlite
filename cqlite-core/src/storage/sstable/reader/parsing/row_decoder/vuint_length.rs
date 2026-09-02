@@ -22,7 +22,26 @@
 //! sites where a byte-count bound — not a cell-value ceiling — is the right
 //! limit: framing fields, and value arms whose only bound is "the bytes that
 //! remain".
+//!
+//! ## The narrowing TARGET is a type parameter, so the guards are TESTABLE
+//!
+//! Every gate component and every CI lane builds a 64-bit target, where
+//! `len_raw as usize` is the IDENTITY for a `u64` — so at `usize` width a
+//! cast-first implementation and the guard AGREE on every input, and a test that
+//! only observes "an error came back" pins nothing (#3042: a test invariant to
+//! the defect it claims to pin). Deleting the guard would leave such a case
+//! green.
+//!
+//! The comparison-and-narrowing step is therefore generic over the
+//! [`LengthWidth`] target. Production code calls the `usize` wrappers below and
+//! its behaviour is unchanged; the tests ALSO instantiate the generic at `u32` —
+//! exactly the semantics a 32-bit `usize` has — where a plain cast and the guard
+//! give DIFFERENT verdicts (`((1u64 << 32) + 8) as u32 == 8` is "8 of 8 bytes
+//! available", i.e. ACCEPTED, while the guard rejects). That regression is then
+//! caught on every lane that runs, with no 32-bit host and no
+//! `cfg(target_pointer_width)` case that would execute nowhere.
 
+use crate::parser::vint_narrow::{narrow_vuint_len, LengthWidth};
 use crate::{Error, Result};
 
 /// The length as a `usize` if it fits within `available` bytes, else `None`.
@@ -36,11 +55,22 @@ use crate::{Error, Result};
 /// for sites whose diagnostic has a different shape (e.g. the range-tombstone
 /// `marker_body_size`, a framing size rather than a cell value).
 pub(super) fn vuint_length_within(len_raw: u64, available: usize) -> Option<usize> {
-    if len_raw > available as u64 {
+    vuint_length_within_as::<usize>(len_raw, available)
+}
+
+/// [`vuint_length_within`] at an arbitrary target width (see the module docs).
+///
+/// The comparison happens in `u64` space — `available` is WIDENED, never
+/// `len_raw` narrowed — and the conversion that follows is CHECKED, so neither
+/// step can reinterpret an out-of-range length as its low bits.
+pub(super) fn vuint_length_within_as<T: LengthWidth>(len_raw: u64, available: T) -> Option<T> {
+    if len_raw > available.widen() {
         return None;
     }
-    // Lossless on every target: `len_raw <= available`, and `available: usize`.
-    Some(len_raw as usize)
+    // Provably `Some`: `len_raw <= available`, itself a `T`. Still a CHECKED
+    // conversion rather than a cast, so a future edit to the comparison above
+    // cannot turn this into a truncation.
+    narrow_vuint_len(len_raw)
 }
 
 /// [`vuint_length_within`] plus the canonical `Error::corruption` diagnostic.
@@ -55,7 +85,18 @@ pub(super) fn checked_vuint_length(
     name: &str,
     what: &str,
 ) -> Result<usize> {
-    vuint_length_within(len_raw, available).ok_or_else(|| {
+    checked_vuint_length_as::<usize>(len_raw, available, subject, name, what)
+}
+
+/// [`checked_vuint_length`] at an arbitrary target width (see the module docs).
+pub(super) fn checked_vuint_length_as<T: LengthWidth>(
+    len_raw: u64,
+    available: T,
+    subject: &str,
+    name: &str,
+    what: &str,
+) -> Result<T> {
+    vuint_length_within_as(len_raw, available).ok_or_else(|| {
         Error::corruption(format!(
             "{} '{}': need {} bytes for {}, only {} available",
             subject, name, len_raw, what, available
@@ -87,15 +128,13 @@ pub(super) fn checked_vuint_length(
 /// widened `usize -> u64` (always lossless), which makes the equality exact on
 /// every target; the surviving `as usize` cast is provably lossless because the
 /// value equals one of the `allowed` sizes, each itself a `usize`.
-fn vuint_length_exact(len_raw: u64, allowed: &[usize]) -> Option<usize> {
-    if !allowed.iter().any(|&size| len_raw == size as u64) {
-        return None;
-    }
-    // Lossless on every target: `len_raw` equals one of the `allowed: usize`.
-    Some(len_raw as usize)
+fn vuint_length_exact_as<T: LengthWidth>(len_raw: u64, allowed: &[T]) -> Option<T> {
+    // Returns the MATCHED `allowed` entry, so nothing is narrowed at all: the
+    // value handed back is one the caller supplied, already at the target width.
+    allowed.iter().copied().find(|size| len_raw == size.widen())
 }
 
-/// [`vuint_length_exact`] plus the canonical `Error::corruption` diagnostic.
+/// [`vuint_length_exact_as`] plus the canonical `Error::corruption` diagnostic.
 ///
 /// The message keeps the two shapes the fixed-width arms historically used, and
 /// reports the RAW `u64` length so an adversarial prefix is named in full rather
@@ -109,7 +148,20 @@ pub(super) fn checked_vuint_exact_length(
     name: &str,
     what: &str,
 ) -> Result<usize> {
-    vuint_length_exact(len_raw, allowed).ok_or_else(|| {
+    checked_vuint_exact_length_as::<usize>(len_raw, allowed, subject, name, what)
+}
+
+/// [`checked_vuint_exact_length`] at an arbitrary target width (see the module
+/// docs): the width the tests instantiate to make the truncation guard
+/// discriminating on a 64-bit host.
+pub(super) fn checked_vuint_exact_length_as<T: LengthWidth>(
+    len_raw: u64,
+    allowed: &[T],
+    subject: &str,
+    name: &str,
+    what: &str,
+) -> Result<T> {
+    vuint_length_exact_as(len_raw, allowed).ok_or_else(|| {
         let sizes = allowed
             .iter()
             .map(|size| size.to_string())
