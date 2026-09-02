@@ -6811,19 +6811,27 @@ _record_status_detail() {
   printf '%s\n' "$2" 2>/dev/null >"$(_status_detail_file "$1")" || return 0
 }
 
-# _status_detail <component> (#3402): read it back, reduced to ONE line with no control
-# characters at all. This value is interpolated into the SUMMARY block, and every reader
-# of that block parses it LINE-WISE — the #2908/#3041 completion probe, premerge-assert's
-# single-block assert, the #3453 annotation census. A multi-line or CR-bearing detail
-# would INJECT rows into the block, and a detail carrying an ESC would put ANSI into a
-# block that gets pasted into PR comments, so BOTH are removed at this ONE emit boundary
-# rather than trusted of each writer (#3312: neutralise where the value is rendered, not
-# per interpolation site — a per-site escape is a list to keep complete). `[:cntrl:]` is
-# the whole class, deliberately, so a control character nobody enumerated is covered too.
-# DEFENCE IN DEPTH, stated as such rather than implied: the one writer today
-# (run_file_size) renders paths git already quotes, so no REACHABLE input carries a
-# control character — this boundary exists so the NEXT writer cannot reintroduce the
-# row-injection route by not thinking about it.
+# _status_detail <component> (#3402): read it back, reduced to ONE line with the C0 controls
+# and DEL removed. This value is interpolated into the SUMMARY block, and every reader of
+# that block parses it LINE-WISE — the #2908/#3041 completion probe, premerge-assert's
+# single-block assert, the #3453 annotation census. A multi-line or CR-bearing detail would
+# INJECT rows into the block, and a detail carrying an ESC would put ANSI into a block that
+# gets pasted into PR comments; LF, CR and ESC are all C0, so both routes are closed at this
+# ONE emit boundary rather than trusted of each writer (#3312: neutralise where the value is
+# rendered, not per interpolation site — a per-site escape is a list to keep complete).
+#
+# THE SCOPE IS C0 + DEL, NOT "ALL CONTROL CHARACTERS" (roborev job 107). This opening used to
+# claim "no control characters at all" and that `[:cntrl:]` is "the whole class" — which the
+# note further down then correctly contradicted, in the same comment block. A doc block that
+# argues with itself is worse than either half alone, because a reader cannot tell which
+# sentence was written last. The honest scope is stated here and the C1 residual is explained
+# at the LC_ALL=C pin below.
+#
+# DEFENCE IN DEPTH, stated as such rather than implied: the one writer today (run_file_size)
+# emits fixed wording, a count and a bare filename — no repository PATH and no
+# caller-controlled value — so no REACHABLE input carries a control character at all. This
+# boundary exists so the NEXT writer cannot reintroduce the row-injection route by not
+# thinking about it.
 # NOT BEHAVIOURALLY TESTED ON THIS PLATFORM, and that is DECLARED rather than papered over
 # (roborev job 20, L2). A test was written for this pin and then DELETED: GNU `tr` is
 # byte-wise, so for every input any writer here can produce, `[:cntrl:]` selects the same
