@@ -1164,38 +1164,13 @@ if [ -n "$SERVER_CPUS" ]; then
   # from `server_cpus` alone: the requested set and the effective one are
   # different facts, and only the second is a measurement.
   export AB_AFFINITY_STATE="${AB_AFFINITY_STATE:-NOT-REQUESTED}"
-  cpu_sets_disjoint() {
-  python3 - "$SERVER_CPUS" "$CLIENT_CPUS" <<'PYEOF'
-import sys
-
-
-def expand(spec):
-    cpus = set()
-    for part in spec.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            lo, hi = part.split("-", 1)
-            cpus.update(range(int(lo), int(hi) + 1))
-        else:
-            cpus.add(int(part))
-    return cpus
-
-
-server, client = expand(sys.argv[1]), expand(sys.argv[2])
-overlap = sorted(server & client)
-if overlap:
-    sys.stderr.write(
-        "AB-3649: cause cpu-sets-overlap\n"
-        "AB-3649: cause-detail the server and client CPU sets share %s; a shared "
-        "CPU means the measurement includes the load generator competing with the "
-        "engine\n" % (overlap,)
-    )
-    sys.exit(1)
-PYEOF
-  }
-  cpu_sets_disjoint || usage_error "the server and client CPU sets overlap (detail above)"
+  # VALIDATED FOR EVERY PROPERTY, not only overlap. The inline parser called
+  # `int()` on unvalidated input, so a malformed value emitted an UNANCHORED
+  # PYTHON TRACEBACK -- multi-line, unprefixed, and looking like a crash rather
+  # than a refusal -- while empty, reversed and out-of-range sets passed here to
+  # fail at taskset AFTER all three release builds.
+  python3 "$SUPPORT" validate-cpu-sets "$SERVER_CPUS" "$CLIENT_CPUS" \
+    || usage_error "the CPU pinning sets are not usable (the cause is named above)"
   say "pinning server-cpus $SERVER_CPUS client-cpus $CLIENT_CPUS"
 else
   say "pinning none-unpinned -- recorded as an explicit fact, not an absence; RUNBOOK.md recommends pinning after reading the sibling map from sysfs"

@@ -72,6 +72,7 @@ USAGE = [
     "ab_driver_support.py probe-storage <path>",
     "ab_driver_support.py probe-compression <served-dir>",
     "ab_driver_support.py hardware-cpus",
+    "ab_driver_support.py validate-cpu-sets <server-cpus> <client-cpus>",
     "ab_driver_support.py canonical-shape <shape>",
     "ab_driver_support.py parse-listening <server-log>",
     "ab_driver_support.py validate-ramp <ramp>",
@@ -651,6 +652,70 @@ def expand_cpu_list(spec):
         else:
             return None
     return cpus or None
+
+
+def validate_cpu_sets(server_spec, client_spec):
+    """Both pinning sets, checked for EVERY property before any build.
+
+    The pre-flight validated ONE property -- that the sets do not overlap -- so
+    a malformed value reached `int()` and emitted an UNANCHORED PYTHON
+    TRACEBACK, and empty, reversed or out-of-range sets passed to fail at
+    `taskset` AFTER all three release builds. Two defects in one place: an
+    unattributable diagnostic, and the round-19 --port shape (validated for one
+    property, late for the others) in a new spot.
+
+    Every line this emits is anchored, because a reader cannot attribute an
+    unprefixed line and a parser cannot bound it -- and a raw traceback is the
+    worst case, being multi-line, unprefixed, and looking like a crash rather
+    than a refusal.
+    """
+    online, online_detail = hardware_cpu_count()
+    for name, spec in (("--server-cpus", server_spec),
+                       ("--client-cpus", client_spec)):
+        if spec == "":
+            continue
+        # REVERSED ranges first: `expand_cpu_list` builds an EMPTY set from
+        # `3-1` (range(3, 2) is empty) and then returns None for the empty
+        # total, which reports "not a CPU list" for something that IS one and
+        # is merely backwards. A wrong diagnosis sends an operator to the wrong
+        # place, so the specific case gets its specific message.
+        for part in spec.split(","):
+            part = part.strip()
+            if "-" not in part:
+                continue
+            low, _, high = part.partition("-")
+            if re.fullmatch(r"[0-9]+", low) and re.fullmatch(r"[0-9]+", high) \
+                    and int(high) < int(low):
+                err("cause cpu-list-invalid")
+                err("cause-detail %s contains the reversed range %r; taskset "
+                    "would refuse it after every build had completed"
+                    % (name, part))
+                return 1
+        cpus = expand_cpu_list(spec)
+        if cpus is None:
+            err("cause cpu-list-invalid")
+            err("cause-detail %s is %r, which is not a CPU list: comma-separated "
+                "numbers and ascending ranges, for example '0,2' or '0-3'"
+                % (name, spec))
+            return 1
+        if online is not None:
+            too_high = sorted(c for c in cpus if c >= online)
+            if too_high:
+                err("cause cpu-list-invalid")
+                err("cause-detail %s names CPU(s) %s, and this machine has %d "
+                    "online (%s). taskset would refuse them after every build "
+                    "had completed" % (name, too_high, online, online_detail))
+                return 1
+    server = expand_cpu_list(server_spec) or set()
+    client = expand_cpu_list(client_spec) or set()
+    overlap = sorted(server & client)
+    if overlap:
+        err("cause cpu-sets-overlap")
+        err("cause-detail the server and client CPU sets share %s; a shared CPU "
+            "means the measurement includes the load generator competing with "
+            "the engine" % (overlap,))
+        return 1
+    return 0
 
 
 def resolve_served_dir(data_dir, keyspace, table, snapshot):
@@ -1809,6 +1874,11 @@ def main(argv):
             return 1
         sys.stdout.write("%s\n" % label)
         return 0
+    if command == "validate-cpu-sets":
+        if len(rest) != 2:
+            err("usage-error validate-cpu-sets needs <server-cpus> <client-cpus>")
+            return 2
+        return validate_cpu_sets(rest[0], rest[1])
     if command == "hardware-cpus":
         count, detail = hardware_cpu_count()
         if count is None:

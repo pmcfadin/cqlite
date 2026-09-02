@@ -409,16 +409,26 @@ def validate_record_shape(record, path, index, declared_shape):
             "run-record-schema",
             "%s: schema is %r, expected %r" % (where, record.get("schema"), SCHEMA_STEP),
         )
-    for name, kinds in (
-        ("requests_ok", int),
-        ("requests_error", int),
-        ("requests_unavailable", int),
-        ("target_concurrency", int),
-        ("duration_s", (int, float)),
-        ("rows_per_s", (int, float)),
-        ("qps", (int, float)),
-        ("rows_total", int),
-        ("latency_ms", dict),
+    # A TYPE IS A NOUN; A VALID RANGE IS THE PROPERTY. These were type-checked
+    # and not range-checked, so a NEGATIVE requests_error or
+    # requests_unavailable passed validation and contributed to a confident
+    # verdict -- a count of minus three failures is not a count. The mild form
+    # of the standing class, and mild only because the values are implausible
+    # rather than adversarial: nothing downstream would have noticed.
+    #
+    # The third column is the minimum. `None` means no range constraint here --
+    # rates and durations have their own finiteness and positivity checks
+    # further on, and duplicating them would be a second place to disagree.
+    for name, kinds, minimum in (
+        ("requests_ok", int, 0),
+        ("requests_error", int, 0),
+        ("requests_unavailable", int, 0),
+        ("target_concurrency", int, 1),
+        ("duration_s", (int, float), None),
+        ("rows_per_s", (int, float), None),
+        ("qps", (int, float), None),
+        ("rows_total", int, 0),
+        ("latency_ms", dict, None),
     ):
         if name not in record:
             raise Unmeasured(
@@ -430,11 +440,25 @@ def validate_record_shape(record, path, index, declared_shape):
                 "run-record-field",
                 "%s: step record field %r has the wrong type" % (where, name),
             )
+        if minimum is not None and value < minimum:
+            raise Unmeasured(
+                "run-record-field",
+                "%s: step record field %r is %r, below the minimum %d -- a count "
+                "cannot be negative, and a concurrency below 1 is not a step"
+                % (where, name, value, minimum),
+            )
     for percentile in ("p50", "p95", "p99", "max"):
-        if not isinstance(record["latency_ms"].get(percentile), (int, float)):
+        measured = record["latency_ms"].get(percentile)
+        if not isinstance(measured, (int, float)) or isinstance(measured, bool):
             raise Unmeasured(
                 "run-record-field",
                 "%s: latency_ms.%s missing or non-numeric" % (where, percentile),
+            )
+        if measured < 0:
+            raise Unmeasured(
+                "run-record-field",
+                "%s: latency_ms.%s is %r; an elapsed time cannot be negative"
+                % (where, percentile, measured),
             )
     # A request ERROR is a failure, never a load-shedding artifact, and it
     # disqualifies the step in either mode.
