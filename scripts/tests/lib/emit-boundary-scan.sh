@@ -22,6 +22,23 @@
 # non-boundary marker is itself a BYPASS. Whatever `$…` references remain are then checked against
 # the allowlist.
 #
+# WHERE IT LOOKS — ANYWHERE A STATEMENT CAN BEGIN, NOT ONLY AT THE START OF A LINE (#3751 round 9,
+# N3). The first version anchored its scope at `^[[:space:]]*(printf|echo)[[:space:]]`, so every
+# COMPOUND statement was invisible to it and it reported its subject CLEAN with a real bypass in it:
+# the NO-GATE-OF-RECORD block of `premerge-assert.sh` printed the caller-supplied `$delta_file`
+# unrouted, from a line beginning `[ -n "$delta_file" ] &&`. Two more sat in `review-stage.sh` for
+# the same reason (`$extra` behind a `[ -z … ] ||`, `$token` in a one-line `case` arm). A guard with
+# a blind spot invites reliance it cannot support, so the recogniser is POSITIONAL: a command word
+# counts when what precedes it (whitespace trimmed) is nothing, or one of `; && || | & ( { !`, or a
+# `case`-pattern `)`, or one of the keywords `then else elif do`. It is applied to the REDUCED line,
+# which is what keeps a command name inside a command SUBSTITUTION out of it.
+#
+# AND THE SCAN IS BOUNDED AT THAT COMMAND WORD. Only the text from the output command to the end of
+# the logical line is examined. An occurrence BEFORE it — a `[ … ]` guard on a compound line — cannot
+# reach the emitted text, and reporting it would force allowlist entries claiming "test only"; such
+# an entry would ALSO excuse the same variable where it IS printed, which is exactly the kind of
+# claim this guard exists to remove. The cost is stated in the scope block below.
+#
 # ---------------------------------------------------------------------------------------------
 # THE SCOPE, DECLARED — AND WHAT IT DOES NOT COVER
 # ---------------------------------------------------------------------------------------------
@@ -46,6 +63,19 @@
 #     `one_line`/`field_value`/`c_safe_display` is pinned by the two suites' byte-census cases.
 #   * NOT COVERED: a value printed by a script OTHER than these two (`base-staleness.sh` sanitizes
 #     at its own boundary; that is its suite's property, not this one's).
+#   * NOT COVERED: an output command reached by a construct the statement-start recogniser does not
+#     know. The list it DOES know is printed on every run and is closed; a BACKTICK substitution, a
+#     command word produced by expansion, and anything invoked through `eval`/`xargs` are outside
+#     it. Neither subject uses any of those today, and the recogniser is a LIST, so a new spelling
+#     is a gap rather than a false alarm — which is why the list is printed rather than described.
+#   * NOT COVERED: the difference between shell code and an EMBEDDED PROGRAM. This scanner reads the
+#     file as shell text and does not know where a single-quoted `awk`/`sed` body or a heredoc
+#     begins, so an output command at a statement-start position inside one is scanned as though it
+#     were shell. That direction is NOISE (a bypass reported for a value the shell never expands),
+#     never blindness.
+#   * NOT COVERED, and it is the OTHER direction of the bounded scan: a NON-output command placed
+#     AFTER the output command on the same logical line has its values attributed to this emit site.
+#     Noise again, and preferred to the alternative for the reason above.
 #
 # Exit 0 = clean, 1 = at least one BYPASS (each one NAMED, with its file and line), 2 = usage.
 #
@@ -151,16 +181,16 @@ SUBJECT="$1"
 
 case "$(basename "$SUBJECT")" in
   review-stage.sh)
-    SCOPE_RE='^[[:space:]]*(emit|note)[[:space:]]'
-    SCOPE_NAME='emit/note call sites (the REVIEW-STAGE: / [review-stage] channel)'
+    SCOPE_CMDS='emit note'
+    SCOPE_NAME='emit/note call sites (the REVIEW-STAGE: / [review-stage] channel), WHEREVER a statement can begin'
     NOT_COVERED='the stage-record and report FILE writers (own boundary: sanitize_field), the value-returning printf helpers, and die_usage (invoker argv, invoker terminal)'
     ALLOW="$(allow_review_stage)"
     SUBS="$SUBS_REVIEW_STAGE"
     VRET=""
     ;;
   premerge-assert.sh)
-    SCOPE_RE='^[[:space:]]*(printf|echo)[[:space:]]'
-    SCOPE_NAME='every printf/echo statement except the declared value-returning helpers'
+    SCOPE_CMDS='printf echo'
+    SCOPE_NAME='every printf/echo statement except the declared value-returning helpers, WHEREVER a statement can begin'
     NOT_COVERED="the $(value_return_premerge | LC_ALL=C grep -c . || true) value-returning printf helpers, declared by SOURCE TEXT in value_return_premerge (a count DERIVED from that list, never written in prose beside it: the two drifted apart the first time one was added)"
     ALLOW="$(allow_premerge_assert)"
     SUBS="$SUBS_PREMERGE_ASSERT"
@@ -185,6 +215,12 @@ declare_scope() {
   printf '%sNOT COVERED %s\n' "$P" "$NOT_COVERED"
   printf '%sNOT COVERED a positional parameter cannot be resolved to its call sites; $1/$2 are allowlisted\n' "$P"
   printf '%sNOT COVERED whether a boundary function is CORRECT — this is a ROUTING check only\n' "$P"
+  # THE STATEMENT-START LIST IS PRINTED, NOT DESCRIBED (#3751 round 9, N3): it is what decides
+  # whether a compound site is examined at all, so a reader can see the gap rather than infer it.
+  printf '%sstatement-start constructs RECOGNISED: line start | ; | && | || | pipe | & | ( | { | ! | case-pattern ) | then | else | elif | do\n' "$P"
+  printf '%sNOT COVERED an output command reached any OTHER way (a backtick substitution, a command word built by expansion, eval/xargs) — the list above is CLOSED\n' "$P"
+  printf '%sNOT COVERED the scan is BOUNDED at the command word: an occurrence BEFORE it (a [ .. ] guard) is not examined, and a non-output command AFTER it is attributed here (noise, never blindness)\n' "$P"
+  printf '%sNOT COVERED shell code vs an EMBEDDED PROGRAM (a single-quoted awk/sed body, a heredoc) is not distinguished — such a site is scanned as if it were shell (noise)\n' "$P"
 }
 declare_scope
 
@@ -193,7 +229,7 @@ declare_scope
 # effect and the scan reported four bypasses that were not bypasses. Measured while writing this
 # guard; `ENVIRON` does no such processing, so every list travels that way.
 EBS_SUBJECT="$SUBJECT" EBS_BOUNDARIES=" $BOUNDARIES " EBS_ALLOW=" $ALLOW_NAMES " \
-EBS_SUBS=" $SUBS " EBS_SCOPE_RE="$SCOPE_RE" EBS_VRET="$VRET" EBS_PREFIX="$P" \
+EBS_SUBS=" $SUBS " EBS_SCOPE_CMDS="$SCOPE_CMDS" EBS_VRET="$VRET" EBS_PREFIX="$P" \
 LC_ALL=C awk '
 function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
 
@@ -228,10 +264,68 @@ function reduce(s,   pos, q, abs, r, close_, seg, name, rep, best, bestclose, gu
   return s
 }
 
+# is_stmt_start(pre) — could a STATEMENT begin right after the text `pre`? (#3751 round 9, N3)
+#
+# WHY THIS EXISTS. The scope was `^[[:space:]]*(printf|echo)[[:space:]]` — a LINE-START anchor — so
+# every COMPOUND statement was invisible to this guard, and it reported the subject CLEAN with a real
+# bypass in it: the NO-GATE-OF-RECORD block of premerge-assert.sh emitted the caller-supplied
+# `$delta_file` unrouted from a line beginning `[ -n "$delta_file" ] &&`. That is a shape this
+# repository has recorded before — a sweep built to close one blind spot shipping with its own and
+# reporting CLEAN on real sites — so the recogniser is positional rather than line-anchored.
+#
+# IT IS APPLIED TO THE REDUCED LINE, which is what makes it safe: `reduce()` has already collapsed
+# every `$( … )`, so a command name inside a command SUBSTITUTION (a value-returning context —
+# a value-returning `x=$(printf … | tr …)`) is gone before this runs and cannot be mistaken for a
+# statement.
+function is_stmt_start(pre,   p) {
+  p = pre
+  gsub(/[ \t]+$/, "", p)
+  if (p == "") return 1                                   # the start of the logical line
+  if (p ~ /[;&|({!]$/) return 1                           # after ; && || | & ( { !
+  if (p ~ /\)$/) return 1                                 # a case-pattern arm: `*) note …`
+  if (p ~ /(^|[ \t;&|({])(then|else|elif|do)$/) return 1   # after a compound-command keyword
+  return 0
+}
+
+# stmt_cmd_pos(s) — the POSITION of the EARLIEST output command of this subject that appears where
+# a statement can begin, or 0. Word-bounded on both sides, and the trailing side requires whitespace
+# or end-of-line, exactly as the old line-anchored pattern did.
+#
+# THE POSITION, NOT A BOOLEAN, BECAUSE THE SCAN IS BOUNDED BY IT. Everything from that command to
+# the end of the logical line is the EMITTED STATEMENT and is examined; anything BEFORE it — most
+# often a `[ ... ]` guard on a compound line — cannot reach the emitted text, so examining it would
+# report bypasses for values that are never printed and would have to be answered with allowlist
+# entries claiming "test only". Those claims are the thing this guard exists to avoid: an entry is a
+# CLAIM, and a variable that is BOTH tested and printed would then be excused by one. Bounding the
+# scan instead makes the printed occurrence the only one that counts.
+function stmt_cmd_pos(s,   i, nw, w, cmd, base, rest, abs, cstart, pre, best) {
+  nw = split(scope_cmds, w, " ")
+  best = 0
+  for (i = 1; i <= nw; i++) {
+    cmd = w[i]
+    if (cmd == "") continue
+    base = 0
+    while (1) {
+      rest = substr(s, base + 1)
+      if (rest == "") break
+      if (match(rest, "(^|[^A-Za-z0-9_])" cmd "([ \t]|$)") == 0) break
+      abs = base + RSTART
+      if (substr(s, abs, length(cmd)) == cmd) cstart = abs; else cstart = abs + 1
+      pre = substr(s, 1, cstart - 1)
+      if (is_stmt_start(pre)) {
+        if (best == 0 || cstart < best) best = cstart
+        break
+      }
+      base = abs + RLENGTH - 1
+    }
+  }
+  return best
+}
+
 BEGIN {
   prefix = ENVIRON["EBS_PREFIX"]; subject = ENVIRON["EBS_SUBJECT"]
   boundaries = ENVIRON["EBS_BOUNDARIES"]; allow = ENVIRON["EBS_ALLOW"]
-  subs_allow = ENVIRON["EBS_SUBS"]; scope_re = ENVIRON["EBS_SCOPE_RE"]
+  subs_allow = ENVIRON["EBS_SUBS"]; scope_cmds = ENVIRON["EBS_SCOPE_CMDS"]
   bypass = 0; scanned = 0; pending = 0; logical = ""; startline = 0
   n = split(ENVIRON["EBS_VRET"], vr, "\n")
   for (i = 1; i <= n; i++) { t = trim(vr[i]); if (t != "") vrmap[t] = 1 }
@@ -247,11 +341,18 @@ BEGIN {
   if (logical ~ /\\$/) { sub(/\\$/, "", logical); pending = 1; next }
   pending = 0
 
-  if (logical !~ scope_re) next
   if (trim(logical) in vrmap) next             # a declared value-returning helper
-  scanned++
 
+  # REDUCED BEFORE THE SCOPE IS DECIDED (#3751 round 9, N3): the statement-start recogniser must
+  # not see command names that live inside a command SUBSTITUTION, and `reduce()` is what removes
+  # them. A line that cannot be reduced keeps its original text plus a marker, so it is still
+  # CONSIDERED for scope and — if in scope — reported below rather than silently skipped.
   s = reduce(logical)
+  cmdpos = stmt_cmd_pos(s)
+  if (cmdpos == 0) next
+  scanned++
+  # BOUNDED AT THE COMMAND WORD: the emitted statement is what is examined (see stmt_cmd_pos).
+  payload = substr(s, cmdpos)
 
   if (index(s, "@UNBALANCED@") > 0 || index(s, "@RUNAWAY@") > 0) {
     printf "%sBYPASS %s:%d could not be parsed (unbalanced or runaway command substitution) — REFUSING rather than reporting clean\n", prefix, subject, startline
@@ -260,7 +361,7 @@ BEGIN {
   }
 
   # A surviving non-boundary command substitution: its output reaches the line unrouted.
-  t = s
+  t = payload
   while (match(t, /@X:[A-Za-z0-9_]*@/)) {
     nm = substr(t, RSTART + 3, RLENGTH - 4)
     printf "%sBYPASS %s:%d command substitution $(%s ...) reaches an emitted line without a boundary and is not allowlisted\n", prefix, subject, startline, nm
@@ -269,7 +370,7 @@ BEGIN {
   }
 
   # Whatever variable references remain.
-  t = s
+  t = payload
   while (match(t, /\$\{?#?[A-Za-z_][A-Za-z0-9_]*|\$[0-9]|\$[*@]/)) {
     ref = substr(t, RSTART, RLENGTH)
     t = substr(t, RSTART + RLENGTH)

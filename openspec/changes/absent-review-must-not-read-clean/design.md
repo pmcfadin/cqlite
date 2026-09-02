@@ -198,6 +198,19 @@ under `--force` too. One `mv` of residual window remains and is declared at the 
 compare-and-swap rename is reachable from a shell, and a lock cannot help because the counterparty is an
 arbitrary agent writing the report with its own tooling and taking no lock.
 
+### The emit boundary, and the guard over it
+
+Three consecutive rounds found a new unrouted interpolation, so the completeness is asserted
+STRUCTURALLY by `scripts/tests/lib/emit-boundary-scan.sh` rather than site by site (round 7, L1b).
+**That guard then shipped with the very defect it exists to catch (round 9, N3)**: its scope was
+anchored at the START of a line, so every compound statement was invisible and it reported both
+scripts CLEAN with three real bypasses in them — including the caller-supplied `$delta_file` printed
+raw from a line beginning `[ -n "$delta_file" ] &&`. The recogniser is positional now; the constructs
+it accepts are PRINTED as a closed list on every run, the scan is BOUNDED at the command word (so a
+preceding `[ … ]` guard needs no allowlist claim), and each suite carries a control that plants a
+bypass inside a compound statement — a control planting only at a line start cannot tell the widened
+guard from the blind one.
+
 ## §5 — the agent side, and the limit of what it buys
 
 Every agent whose completion is a pipeline gate gains a report-of-record clause in its definition, and

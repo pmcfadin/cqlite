@@ -812,7 +812,10 @@ assert_ignored() {
     emit "$REFUSE_MARKER detail=git does not confirm this path is ignored, and this tool writes it MID-RUN — an untracked-but-not-ignored write dirties a running gate of record (tree-integrity FAIL, #2926) and makes premerge-assert refuse on dirty: yes (#3648). Add .review-stage/ to .gitignore (the shipped .gitignore does, as a DIRECTORY — this tool writes nowhere else)."
     # An optional caller-supplied line, printed only on the refusal path: a refused TEMPORARY
     # path is confusing without it, because the caller never named that path.
-    [ -z "$extra" ] || emit "$REFUSE_MARKER detail=$extra"
+    # ROUTED THROUGH THE ONE BOUNDARY like every other value on an emitted line (#3751 round 9,
+    # N3). It is a script-authored literal at its single call site today, but "the caller passes a
+    # literal" is a claim about every FUTURE caller too, and the emit boundary costs nothing here.
+    [ -z "$extra" ] || emit "$REFUSE_MARKER detail=$(field_value "$extra")"
     exit 2
   fi
 }
@@ -1783,7 +1786,10 @@ cmd_verdict() {
     FINDINGS) exit 4 ;;
     NOT-RUN) exit 5 ;;
     AUTHOR-PERFORMED) exit 6 ;;
-    *) note "unreachable: unclassified token '$token'"; exit 5 ;;
+    # ROUTED, NOT ALLOWLISTED (#3751 round 9, N3). This arm is reached only when the token is NOT
+    # in the closed set, i.e. precisely where the "it comes from a closed set" claim an allowlist
+    # entry would make is false by construction.
+    *) note "unreachable: unclassified token '$(field_value "$token")'"; exit 5 ;;
   esac
 }
 

@@ -268,6 +268,17 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
   time, and is exercised by a POSITIVE CONTROL that plants a bypass in a throwaway copy and requires
   the scanner to red AND to name the planted symbol — because a scanner that flags nothing exits
   exactly as a clean one does
+- **AND** that scanner SHALL examine an output command WHEREVER A STATEMENT CAN BEGIN, not only at the
+  start of a line: anchored at line start it reported both scripts CLEAN while three real bypasses sat
+  in COMPOUND statements (`[ -n "$delta_file" ] && printf … "$delta_file"`, `[ -z "$extra" ] || emit
+  …`, and a one-line `case` arm), which is the same defect class the scanner exists to catch, one level
+  up
+- **AND** the constructs it recognises SHALL be PRINTED as a closed list at run time, and its remaining
+  error directions declared with them — so a construct it does not know is a visible gap rather than an
+  inferred one
+- **AND** it SHALL carry a positive control that plants a bypass inside a COMPOUND statement and
+  requires the scanner to name it, since a control that only plants at the start of a line cannot
+  distinguish the widened scanner from the blind one
 
 #### Scenario: an unmeasurable clock is not a permissive answer
 - **WHEN** `status` reads an `elapsed` or `deadline` value that is not a decimal number of seconds

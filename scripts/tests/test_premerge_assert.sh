@@ -3756,12 +3756,18 @@ fi
 # run: a scanner that flagged nothing would exit 0 exactly as this one does.
 EBS="$SCRIPT_DIR/lib/emit-boundary-scan.sh"
 if [ ! -f "$EBS" ]; then
-  bad "emit-guard: $EBS is missing — the structural guard did not run (1/6)"
-  bad "emit-guard: the same absence (2/6)"
-  bad "emit-guard: the same absence (3/6)"
-  bad "emit-guard: the same absence (4/6)"
-  bad "emit-guard: the same absence (5/6)"
-  bad "emit-guard: the same absence (6/6)"
+  # TEN, matching the ten assertions the else-branch emits, so the case floor is unaffected by
+  # which branch runs (round 9 added the four compound-statement control assertions below).
+  bad "emit-guard: $EBS is missing — the structural guard did not run (1/10)"
+  bad "emit-guard: the same absence (2/10)"
+  bad "emit-guard: the same absence (3/10)"
+  bad "emit-guard: the same absence (4/10)"
+  bad "emit-guard: the same absence (5/10)"
+  bad "emit-guard: the same absence (6/10)"
+  bad "emit-guard: the same absence (7/10)"
+  bad "emit-guard: the same absence (8/10)"
+  bad "emit-guard: the same absence (9/10)"
+  bad "emit-guard: the same absence (10/10)"
 else
   EBS_OUT="$(bash "$EBS" "$ASSERT" 2>&1)"; EBS_RC=$?
   if [ "$EBS_RC" -eq 0 ]; then
@@ -3797,6 +3803,45 @@ else
   case "$EBS_POUT" in
     *PLANTED_BYPASS_VALUE*) ok "emit-guard/control: and it NAMES the offending value, so the red is attributable" ;;
     *) bad "emit-guard/control: the guard red without naming the planted value (got: $EBS_POUT)" ;;
+  esac
+  # (b) THE COMPOUND-STATEMENT POSITIVE CONTROL, REPRODUCING THE INSTANCE THE GUARD MISSED (#3751
+  #     round 9, N3). The plant above is at the START of a line, which the FIRST version of this
+  #     guard could see; its blind spot was every COMPOUND statement, because its scope was anchored
+  #     `^[[:space:]]*(printf|echo)[[:space:]]`. The measured consequence was RIGHT HERE: the
+  #     NO-GATE-OF-RECORD block printed the caller-supplied `$delta_file` unrouted from a line
+  #     beginning `[ -n "$delta_file" ] &&`, and the guard reported this script CLEAN. So this
+  #     control puts that instance back: the routing is stripped from that exact line and the
+  #     planted name put in its place.
+  EBS_C="$T/ebs-compound"; mkdir -p "$EBS_C"
+  # The address narrows to the one refusal line; the substitution swaps the ROUTING call for the
+  # planted name, leaving the compound `[ -n … ] &&` prefix intact — which is the whole point.
+  LC_ALL=C sed -e '/delta summary file/s|"\$(c_safe_display "\$delta_file")"|"\$PLANTED_COMPOUND_BYPASS"|' \
+    "$ASSERT" >"$EBS_C/premerge-assert.sh" 2>/dev/null || true
+  EBS_CLINE="$(LC_ALL=C grep -n 'PLANTED_COMPOUND_BYPASS' "$EBS_C/premerge-assert.sh" 2>/dev/null | LC_ALL=C head -1 || true)"
+  if [ -n "$EBS_CLINE" ]; then
+    ok "emit-guard/compound: the compound plant landed in the scratch copy (asserted, not assumed)"
+  else
+    bad "emit-guard/compound: the compound plant did NOT land, so this control proves nothing"
+  fi
+  # THE PLANT MUST REALLY BE COMPOUND, or this control is a duplicate of (a). Measured from the
+  # planted line itself: its first word must not be the output command.
+  case "$(printf '%s\n' "${EBS_CLINE#*:}" | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]].*//')" in
+    printf | echo)
+      bad "emit-guard/compound: the planted statement BEGINS its line, so a line-anchored scope would have seen it too — this control does not test compound recognition (line: $EBS_CLINE)" ;;
+    "")
+      bad "emit-guard/compound: could not read the planted line's first word" ;;
+    *)
+      ok "emit-guard/compound: the planted statement does NOT begin its line (it is behind a [ … ] &&), which is exactly what the line-anchored scope could not see" ;;
+  esac
+  EBS_COUT="$(bash "$EBS" "$EBS_C/premerge-assert.sh" 2>&1)"; EBS_CRC=$?
+  if [ "$EBS_CRC" -ne 0 ]; then
+    ok "emit-guard/compound: the guard REDS on a bypass inside a COMPOUND statement"
+  else
+    bad "emit-guard/compound: the guard reported CLEAN on a compound-statement bypass — the round-7 blind spot is back (got: $EBS_COUT)"
+  fi
+  case "$EBS_COUT" in
+    *PLANTED_COMPOUND_BYPASS*) ok "emit-guard/compound: and it NAMES the offending value, so the red is attributable" ;;
+    *) bad "emit-guard/compound: the guard red without naming the planted value (got: $EBS_COUT)" ;;
   esac
 fi
 
@@ -3880,7 +3925,16 @@ fi
 # only bash, git and coreutils, so the floor moves by the SAME 16 and the derived 6-assertion
 # margin for the ONE host-gated block is PRESERVED UNCHANGED — still deliberately not the exact
 # 379, for the reason recorded above.
-ASSERT_FLOOR=373
+#
+# ROUND 9's N3 ADDS 4 MORE, ALSO HOST-INDEPENDENT (379 -> 383): section 44h's COMPOUND-STATEMENT
+# positive control, which reproduces the instance the guard MISSED — this script printed the
+# caller-supplied `$delta_file` unrouted from a line beginning `[ -n "$delta_file" ] &&`, and the
+# line-anchored scope reported the file CLEAN. The control strips the routing from that exact line,
+# requires the guard to red AND to NAME the planted symbol (a bare red is not evidence: measured,
+# the OLD scanner reds on this same plant for an UNRELATED reason and never names it), and asserts
+# the planted statement does not begin its line. The fallback arm is ten bads to match. So the
+# floor moves by the SAME 4 and the derived 6-assertion margin is PRESERVED UNCHANGED.
+ASSERT_FLOOR=377
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

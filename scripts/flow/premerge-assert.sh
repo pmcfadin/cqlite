@@ -448,7 +448,11 @@ refuse_no_gate() {
   printf '========================================================\n' >&2
   printf 'PREMERGE: NO-GATE-OF-RECORD — REFUSING TO MERGE\n' >&2
   printf '  summary file: %s\n' "$(c_safe_display "$summary_file")" >&2
-  [ -n "$delta_file" ] && printf '  delta summary file: %s\n' "$delta_file" >&2
+  # ROUTED LIKE ITS SIBLING ONE LINE UP (#3751 round 9, N3). This is the CALLER's fourth
+  # argument, exactly as invoker-supplied as `$summary_file`, and it went out raw for months
+  # because the structural guard could not SEE this line: its scope was anchored at the start of a
+  # line and this statement begins `[ -n … ] &&`. The guard is positional now.
+  [ -n "$delta_file" ] && printf '  delta summary file: %s\n' "$(c_safe_display "$delta_file")" >&2
   printf '  certified sha: %s\n' "$certified" >&2
   while [ "$#" -gt 0 ]; do
     printf '  %s\n' "$1" >&2

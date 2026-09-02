@@ -2437,12 +2437,18 @@ done
 # the same status.
 EBS="$SCRIPT_DIR/lib/emit-boundary-scan.sh"
 if [ ! -f "$EBS" ]; then
-  bad "emit-guard: $EBS is missing — the structural guard did not run (1/6)"
-  bad "emit-guard: the same absence (2/6)"
-  bad "emit-guard: the same absence (3/6)"
-  bad "emit-guard: the same absence (4/6)"
-  bad "emit-guard: the same absence (5/6)"
-  bad "emit-guard: the same absence (6/6)"
+  # TEN, matching the ten assertions the else-branch emits, so the EXACT case floor holds either
+  # way (round 9 added the four compound-statement control assertions below).
+  bad "emit-guard: $EBS is missing — the structural guard did not run (1/10)"
+  bad "emit-guard: the same absence (2/10)"
+  bad "emit-guard: the same absence (3/10)"
+  bad "emit-guard: the same absence (4/10)"
+  bad "emit-guard: the same absence (5/10)"
+  bad "emit-guard: the same absence (6/10)"
+  bad "emit-guard: the same absence (7/10)"
+  bad "emit-guard: the same absence (8/10)"
+  bad "emit-guard: the same absence (9/10)"
+  bad "emit-guard: the same absence (10/10)"
 else
   EBS_OUT="$(bash "$EBS" "$RS" 2>&1)"; EBS_RC=$?
   if [ "$EBS_RC" -eq 0 ]; then
@@ -2484,6 +2490,42 @@ else
   case "$EBS_POUT" in
     *PLANTED_BYPASS_VALUE*) ok "emit-guard/control: and it NAMES the offending value, so the red is attributable" ;;
     *) bad "emit-guard/control: the guard red without naming the planted value (got: $EBS_POUT)" ;;
+  esac
+  # (b) THE COMPOUND-STATEMENT POSITIVE CONTROL (#3751 round 9, N3). The plant above is at the
+  #     START of a line, which the FIRST version of this guard could see. Its blind spot was every
+  #     COMPOUND statement — its scope was anchored `^[[:space:]]*(emit|note)[[:space:]]` — and two
+  #     REAL bypasses sat behind it in this very script (`$extra` behind a `[ -z … ] ||`, `$token`
+  #     in a one-line `case` arm). So this control REPRODUCES one of those instances: the routing is
+  #     removed from the `[ -z "$extra" ] ||` line and the planted name put in its place. A control
+  #     that only plants at a line start could not tell the widened guard from the blind one.
+  EBS_C="$T/ebs-compound"; mkdir -p "$EBS_C"
+  LC_ALL=C sed -e 's|emit "$REFUSE_MARKER detail=$(field_value "$extra")"|emit "$REFUSE_MARKER detail=$PLANTED_COMPOUND_BYPASS"|' \
+    "$RS" >"$EBS_C/review-stage.sh" 2>/dev/null || true
+  EBS_CLINE="$(LC_ALL=C grep -n 'PLANTED_COMPOUND_BYPASS' "$EBS_C/review-stage.sh" 2>/dev/null | LC_ALL=C head -1 || true)"
+  if [ -n "$EBS_CLINE" ]; then
+    ok "emit-guard/compound: the compound plant landed in the scratch copy (asserted, not assumed)"
+  else
+    bad "emit-guard/compound: the compound plant did NOT land, so this control proves nothing"
+  fi
+  # THE PLANT MUST REALLY BE COMPOUND, or this control is a duplicate of (a): the statement must
+  # NOT begin the line. Measured from the planted text itself rather than assumed from the sed.
+  case "$(printf '%s\n' "${EBS_CLINE#*:}" | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]].*//')" in
+    emit | note)
+      bad "emit-guard/compound: the planted statement BEGINS its line, so a line-anchored scope would have seen it too — this control does not test compound recognition (line: $EBS_CLINE)" ;;
+    "")
+      bad "emit-guard/compound: could not read the planted line's first word" ;;
+    *)
+      ok "emit-guard/compound: the planted statement does NOT begin its line (it is behind a [ … ] ||), which is exactly what the line-anchored scope could not see" ;;
+  esac
+  EBS_COUT="$(bash "$EBS" "$EBS_C/review-stage.sh" 2>&1)"; EBS_CRC=$?
+  if [ "$EBS_CRC" -ne 0 ]; then
+    ok "emit-guard/compound: the guard REDS on a bypass inside a COMPOUND statement"
+  else
+    bad "emit-guard/compound: the guard reported CLEAN on a compound-statement bypass — the round-7 blind spot is back (got: $EBS_COUT)"
+  fi
+  case "$EBS_COUT" in
+    *PLANTED_COMPOUND_BYPASS*) ok "emit-guard/compound: and it NAMES the offending value, so the red is attributable" ;;
+    *) bad "emit-guard/compound: the guard red without naming the planted value (got: $EBS_COUT)" ;;
   esac
 fi
 
@@ -3031,7 +3073,16 @@ fi
 # number, and the irreducible residual window is DECLARED in the source). Every branch emits the
 # same number of assertions (`n1_case`'s plant-failed arm emits 5 bads against 5 oks), so the
 # EXACT floor holds.
-ASSERT_FLOOR=601
+#
+# ROUND 9's N3 MOVES IT TO 605. Section 18 gains 4: the COMPOUND-STATEMENT positive control. The
+# guard's scope was anchored at the start of a line, so every compound statement was invisible to
+# it and it reported this script CLEAN with two real bypasses in it (`$extra` behind a
+# `[ -z … ] ||`, `$token` in a one-line `case` arm). The control REPRODUCES one of them in a
+# throwaway copy and requires the guard to red AND to NAME the planted symbol — plus an assertion
+# that the planted statement really does NOT begin its line, without which the case would be a
+# duplicate of the line-start control beside it. The `[ ! -f "$EBS" ]` fallback arm was widened to
+# ten bads to match, so the EXACT floor still holds either way.
+ASSERT_FLOOR=605
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

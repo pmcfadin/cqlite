@@ -208,6 +208,30 @@ Three further declared limits of the mechanism itself:
   the behaviour is pinned behaviourally elsewhere. An allowlist entry is a CLAIM with a stated
   reason, not a measurement, in the shape #1716's `tools/` disposition guard checks that a
   disposition was RECORDED rather than that it is true.
+- **AND THAT GUARD SHIPPED WITH ITS OWN BLIND SPOT, WHICH IS THE CLASS IT EXISTS FOR (round 9,
+  N3).** Its scope was anchored `^[[:space:]]*(printf|echo)[[:space:]]` — the START of a line — so
+  every COMPOUND statement was invisible to it, and it reported both scripts CLEAN with **three real
+  bypasses** in them: `premerge-assert.sh`'s NO-GATE-OF-RECORD block printed the caller-supplied
+  `$delta_file` unrouted from a line beginning `[ -n "$delta_file" ] &&`, and `review-stage.sh` had
+  `$extra` behind a `[ -z … ] ||` and `$token` in a one-line `case` arm. Measured: the old scanner
+  exits `0` with `OK 125` / `OK 44` on exactly those files, while the widened one names all three at
+  their own line numbers. This is the repository's recorded shape — *a sweep built to close one blind
+  spot shipped with its own and reported CLEAN on four real sites* — so the recogniser is POSITIONAL:
+  a command word counts wherever a statement can begin, and the RECOGNISED constructs are **printed
+  as a closed list on every run** rather than described (line start, `;`, `&&`, `||`, a pipe, `&`,
+  `(`, `{`, `!`, a `case`-pattern `)`, and `then`/`else`/`elif`/`do`). It runs on the REDUCED line, so
+  a command name inside a command SUBSTITUTION cannot pose as a statement. **The scan is BOUNDED at
+  the command word**: only the text from there to the end of the logical line is examined, because an
+  occurrence in a preceding `[ … ]` guard cannot reach the emitted text — and reporting it would force
+  allowlist entries claiming "test only", which would ALSO excuse the same variable where it IS
+  printed. Both remaining error directions are NOISE and both are declared at run time: a non-output
+  command placed after the output command has its values attributed to that site, and an embedded
+  program (a single-quoted `awk`/`sed` body, a heredoc) is not distinguished from shell. **Each suite
+  now carries a COMPOUND-STATEMENT positive control that reproduces one of the three real
+  instances**, requires the guard to red AND to NAME the planted symbol, and asserts the planted
+  statement really does not begin its line — without that last assertion it would be a duplicate of
+  the line-start control beside it. A bare red is not evidence and this is not hypothetical: on the
+  premerge plant the OLD scanner also reds, for an unrelated reason, and never names the plant.
 - **Round 7 also made `status`'s `past-deadline=` affirmative.** It guarded with a test for the
   literal `unknown`, so any OTHER non-numeric value read from the record reached
   `[ "$elapsed" -gt "$deadline" ]`, which printed bash's own `integer expression expected` onto
