@@ -768,6 +768,56 @@ def unresolvable_reason(option):
     return reason
 
 
+def parse_uint_flag(name, value, minimum, rust_type, below_min_note=""):
+    """ONE parser for every resolved integer: range-check AND canonical form.
+
+    Returns `(canonical_decimal, problem)`, exactly one of which is None.
+
+    TWO FAILURES THIS CLOSES, and they point opposite ways. `[0-9]+` accepted
+    `08`, which Clap parses happily as 8 -- so the server's startup line echoed
+    `8`, the read-back compared it against the string `08`, and the session died
+    on a MISMATCH THAT WAS NOT ONE. A false red on correct input, after the
+    builds. And an oversized value (`99999999999999999999`) passed every check
+    here and was rejected by Clap only when the server was launched, which is
+    after all three release builds on a metered box.
+
+    So the canonical decimal produced here is what goes into the argv, the
+    manifest and the comparison -- one representation, produced once, rather
+    than a raw string that is equal to itself and unequal to what ran.
+    """
+    if not re.fullmatch(r"[0-9]+", value):
+        return None, ("the resolved %s is %r, which is not a non-negative "
+                      "integer" % (name, value))
+    parsed = int(value)
+    if parsed > U64_MAX:
+        return None, ("the resolved %s is %s, which exceeds %s -- cqlite-flight "
+                      "parses it into a Rust %s, so Clap would refuse it when the "
+                      "server is launched, after every build had completed"
+                      % (name, value, U64_MAX, rust_type))
+    if parsed < minimum:
+        return None, ("the resolved %s is %s, below the minimum %d%s"
+                      % (name, value, minimum, below_min_note))
+    return str(parsed), None
+
+
+# The Rust types the server parses these into (cqlite-flight/src/cli.rs:57-93).
+# `usize` is 64-bit on every host this runs on, so all four share u64's ceiling.
+# The note belongs ONLY to the below-minimum branch: appending it to an overflow
+# message produced "exceeds u64 max; cqlite-flight clamps 0 to one row per
+# batch", which is two unrelated explanations of one number.
+_BATCH_ZERO_NOTE = (
+    "; cqlite-flight clamps 0 to one row per batch, so the manifest would not "
+    "record the value that ran -- and the Arrow batch row cap is the mechanism "
+    "#2820 changed"
+)
+RESOLVED_UINTS = (
+    ("--batch-size", "batch_size_observed", 1, "usize", _BATCH_ZERO_NOTE),
+    ("--max-batch-bytes", "max_batch_bytes_observed", 0, "usize", ""),
+    ("--admission-wait-timeout-ms", "wait_timeout_ms_observed", 0, "u64", ""),
+    ("--max-concurrent-scans", "max_concurrent_scans", 1, "usize", ""),
+)
+
+
 def validate_resolved(batch, maxbytes, wait, scans):
     """Range-check the values a server will ACTUALLY be given.
 
@@ -784,18 +834,20 @@ def validate_resolved(batch, maxbytes, wait, scans):
     Returns a list of problems, empty when the configuration is usable.
     """
     problems = []
-    if not re.fullmatch(r"[0-9]+", batch) or int(batch) < 1:
-        problems.append(
-            "the resolved --batch-size is %r; cqlite-flight clamps 0 to one row "
-            "per batch, so the manifest would not record the value that ran -- and "
-            "the Arrow batch row cap is the mechanism #2820 changed" % batch
-        )
-    if not re.fullmatch(r"[0-9]+", scans) or int(scans) < 1:
-        problems.append("the resolved --max-concurrent-scans is %r" % scans)
-    for name, value in (("--max-batch-bytes", maxbytes),
-                        ("--admission-wait-timeout-ms", wait)):
-        if value != NOT_REQUESTED and not re.fullmatch(r"[0-9]+", value):
-            problems.append("the resolved %s is %r" % (name, value))
+    supplied = {
+        "batch_size_observed": batch,
+        "max_batch_bytes_observed": maxbytes,
+        "wait_timeout_ms_observed": wait,
+        "max_concurrent_scans": scans,
+    }
+    for name, key, minimum, rust_type, note in RESOLVED_UINTS:
+        value = supplied[key]
+        if value == NOT_REQUESTED:
+            # Not passed to the server at all, so there is no value to range-check.
+            continue
+        _, problem = parse_uint_flag(name, value, minimum, rust_type, note)
+        if problem:
+            problems.append(problem)
     return problems
 
 
@@ -871,6 +923,17 @@ def resolve_session(batch, maxbytes, wait, scans, min_bytes, min_sstables,
                 "--admission-wait-timeout-ms", wait, extra),
             "max_concurrent_scans": scans,
         }
+        # CANONICALISED HERE, at the one place a resolved value comes into
+        # existence, so the argv, the manifest and the startup read-back all
+        # carry the SAME representation. `08` and `8` are the same number and
+        # different strings, and the read-back compares strings.
+        for name, key, minimum, rust_type, note in RESOLVED_UINTS:
+            value = resolved[arm][key]
+            if value == NOT_REQUESTED:
+                continue
+            canonical, _ = parse_uint_flag(name, value, minimum, rust_type, note)
+            if canonical is not None:
+                resolved[arm][key] = canonical
         problems += [
             "%s: %s" % (arm, problem)
             for problem in validate_resolved(

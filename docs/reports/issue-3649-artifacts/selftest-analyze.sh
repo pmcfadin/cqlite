@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=397
+CASE_FLOOR=409
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -3297,6 +3297,57 @@ if grep -q '^AB-3649: verdict-detail single-stream HOST whether the box was cont
   ok "an unmeasurable load probe is disclosed as a gap, not scored as a quiet box"
 else
   bad "an unmeasurable load probe was silently read as quiet"
+fi
+
+# ---- resolved integers are parsed, bounded and CANONICAL ---------------------
+# Two failures pointing opposite ways. `[0-9]+` accepted `08`, which Clap parses
+# as 8 -- so the startup line echoed `8`, the read-back compared it against the
+# string `08`, and a CORRECT session died on a mismatch that was not one, after
+# the builds. And an oversized value reached Clap only at server launch, which is
+# also after all three release builds on a metered box.
+resolved_uint_case() { # <name> <batch> <scans> <want-rc> [<canonical-batch>]
+  set +e
+  python3 "$SUPPORT" resolve-session "$2" NOT-REQUESTED NOT-REQUESTED "$3" \
+    268435456 2 1 '' '' '' > "$TMP/rs-out.txt" 2> "$TMP/rs-err.txt"
+  local rc=$?
+  set -e
+  if [ "$rc" != "$4" ]; then
+    bad "resolved uint $1 (exit $rc, expected $4)"
+    return
+  fi
+  if [ -n "${5:-}" ]; then
+    local got
+    got="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base"]["batch_size_observed"])' "$TMP/rs-out.txt" 2>/dev/null || echo PARSE-FAILED)"
+    if [ "$got" != "$5" ]; then
+      bad "resolved uint $1 canonicalised to '$got', expected '$5'"
+      return
+    fi
+  fi
+  ok "resolved uint $1 -> exit $rc${5:+ canonical $5}"
+}
+resolved_uint_case plain             8192 4 0 8192
+# THE FALSE-MISMATCH HALF: a leading zero is a different STRING and the same
+# NUMBER, and the read-back compares strings.
+resolved_uint_case leading-zero      08192 4 0 8192
+resolved_uint_case leading-zeros-only 0008 4 0 8
+resolved_uint_case scans-leading-zero 8192 04 0 8192
+# THE LATE-FAILURE HALF: refused here, not by Clap after three release builds.
+resolved_uint_case batch-over-u64    99999999999999999999 4 1
+resolved_uint_case scans-over-u64    8192 99999999999999999999 1
+resolved_uint_case batch-zero        0 4 1
+resolved_uint_case scans-zero        8192 0 1
+resolved_uint_case batch-not-numeric 8k 4 1
+# u64::MAX itself is in range; one past it is not. The boundary is the thing
+# most likely to be written down wrong, so it is the thing pinned.
+resolved_uint_case batch-at-u64-max  18446744073709551615 4 0 18446744073709551615
+resolved_uint_case batch-past-u64-max 18446744073709551616 4 1
+# The overflow message must NOT carry the zero-clamp explanation: that pairing
+# printed two unrelated explanations of one number.
+if python3 "$SUPPORT" resolve-session 99999999999999999999 NOT-REQUESTED NOT-REQUESTED 4 268435456 2 1 '' '' '' 2>&1 \
+     | grep -q 'exceeds 18446744073709551615.*clamps 0 to one row'; then
+  bad "the overflow message carries the zero-clamp note, which explains a different failure"
+else
+  ok "each resolved-integer failure carries only its own explanation"
 fi
 
 # ---- the ticket validator mirrors the DESERIALISER, both directions ----------
