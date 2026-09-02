@@ -561,6 +561,26 @@ fabricated constant is worse than a flag, because it looks like a measurement* �
 and deriving from the table name is the label mistake again. The declaration is
 irreducibly human.
 
+**TWO NUMBERS IN THIS REPOSITORY LOOK LIKE THAT BOUNDARY AND NEITHER IS ONE —
+this paragraph exists to stop the next person wiring one in.** Searching for a
+definition turns up `"150 rows in single partition (wide row)"` — in
+`docs/research/M5-Stage0-Integration-Tests-Summary.md:24` *and again* in
+`docs/research/M5-Stage0-Test-Report.md:32`, so a search returns it twice and it
+reads as corroborated — and `"a 1 KB wide row"` in
+`docs/research/phase1-5-transport-ingest.md:196`. A reader who finds either will
+reasonably conclude that a boundary *was* published and that this instrument
+simply failed to look, and will "fix" it by wiring the number in. **They measure
+different quantities — row COUNT versus BYTES PER ROW.** Choosing between them is
+not reading a specification; it is writing one. So what is missing is not a
+constant but a *definition*: which quantity the word "wide" ranges over has never
+been decided, and until it is, any threshold an implementer picks is their
+legislation wearing the authority of a citation.
+
+That is the general shape, and it is worth more than this instance: when a
+derivation looks blocked only by a missing number, check whether the candidates
+you find are even commensurable. If they are not, the gap is a definition, and no
+amount of care inside the code supplies one.
+
 **What was wrong was WHEN, and HOW MANY TIMES.** It is declared once, at
 measurement time: the driver *requires* `--profile` with **no default** (a
 default is precisely the defect; the precedent is `--max-concurrent-scans`,
