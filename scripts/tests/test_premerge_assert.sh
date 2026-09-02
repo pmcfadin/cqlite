@@ -97,15 +97,48 @@ suite_cleanup() {
 # that has been recycled into something else is never signalled (job 279:
 # ownership ends at reap, not at exit; on this fleet the inheritor of a released
 # pid is most likely a peer lane's gate). Safe to call any number of times.
+#
+# THREE THINGS THE FIRST VERSION GOT WRONG (roborev job 378):
+#
+#  1. IT CLEARED THE REGISTRATION EVEN WHEN THE PROBE COULD NOT ANSWER. `args=$(ps
+#     …) || args=""` collapses "ps FAILED" onto "the process is GONE", and the
+#     unconditional clear then DISCARDED the registration — so a failed probe
+#     silently leaked the process. That is the fail-open shape this repo names
+#     explicitly: a probe that could not answer taking the permissive branch. And
+#     it is not niche — a failing `ps` is exactly when the registration matters
+#     most. MEASURED, which is what makes the split expressible: `ps -p <gone>`
+#     exits 1 with no output (an AFFIRMATIVE "not found"), while a broken `ps`
+#     exits >= 2. So rc >= 2 KEEPS the registration for a later call; only an
+#     affirmative determination may clear it.
+#  2. IT KILLED WITHOUT REAPING. The decoy is a DIRECT CHILD, so an unreaped
+#     SIGKILL leaves a zombie holding the pid. `wait` follows the kill, and the
+#     clear follows the wait — in that order.
+#  3. It relied on `rm -rf "$T"` as a backstop, which cannot work: REMOVING THE
+#     FIFO DOES NOT UNBLOCK A READER ALREADY BLOCKED ON IT. That is why the reap
+#     runs BEFORE the directory removal in `suite_cleanup`, not after.
+#
+# An EMPTY needle is also a "cannot validate" state: it neither signals nor
+# clears, because `*""*` matches anything and would authorise a blind kill.
 to_kill_decoy() {
-  local args
-  [ -n "$DECOY_CLEANUP_PID" ] || return 0
-  args=$(ps -p "$DECOY_CLEANUP_PID" -o args= 2>/dev/null) || args=""
-  if [ -n "$args" ] && [ -n "$DECOY_CLEANUP_NEEDLE" ] &&
-     [ "${args#*"$DECOY_CLEANUP_NEEDLE"}" != "$args" ]; then
-    kill -KILL "$DECOY_CLEANUP_PID" 2>/dev/null
+  local pid="$DECOY_CLEANUP_PID" args rc=0
+  [ -n "$pid" ] || return 0
+  args=$(ps -p "$pid" -o args= 2>/dev/null) || rc=$?
+  if [ "$rc" -ge 2 ]; then
+    return 0                      # the probe FAILED: keep the registration
   fi
-  DECOY_CLEANUP_PID=""
+  if [ -z "$args" ]; then
+    DECOY_CLEANUP_PID=""          # affirmatively gone (ps ran, found nothing)
+    return 0
+  fi
+  [ -n "$DECOY_CLEANUP_NEEDLE" ] || return 0   # cannot validate: never blind-kill
+  case "$args" in
+    *"$DECOY_CLEANUP_NEEDLE"*)
+      kill -KILL "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null || true          # reap: it is a direct child
+      DECOY_CLEANUP_PID=""
+      ;;
+    *) : ;;                       # RECYCLED: never signalled, never cleared
+  esac
   return 0
 }
 trap 'suite_cleanup' EXIT
@@ -2593,6 +2626,20 @@ DECOY_DIR="$T/leak-decoy"
 DECOY_PID="$T/leak-decoy.pid"
 DECOY_FIFO="$T/leak-decoy.fifo"
 decoy_shape=0
+# THE DECOY IS AN ORDINARY PROCESS ON PURPOSE — NO `trap '' TERM` (roborev job
+# 378). It used to ignore TERM, which was shaping carried over from the KILL-path
+# shim, where ignoring TERM IS the point. Here it bought NOTHING and cost the
+# entire cleanup problem: an unkillable-by-TERM child needs careful management,
+# and four findings in this scaffolding came from managing it.
+#   VERIFIED rather than assumed, because it is the premise of the change:
+#   `to_pid_verdict` contains ZERO `kill` — it only inspects `ps` — so none of the
+#   verdicts this arm tests (LEAK / RECYCLED / GONE / NO-SUBJECT / BAD-PID) needs
+#   the decoy to survive a signal. Nothing in this suite sends the decoy TERM
+#   either; the only TERM senders target `$$`. And on a Ctrl-C the decoy now dies
+#   with the foreground group by itself, which is strictly better.
+# So the hazardous PROPERTY is removed at its source rather than managed: a plain
+# direct child is removable with `kill` + `wait`, which reaps reliably.
+#
 # THE DECOY MUST NOT SPAWN A CHILD, and getting that wrong ONCE is why this
 # comment exists. The first version ran a bare `sleep`, so the decoy was TWO
 # processes: the bash wrapper (which carries the argv the needle matches, and is
@@ -2606,7 +2653,6 @@ rm -f "$DECOY_FIFO"
 if mkdir -p "$DECOY_DIR" 2>/dev/null && mkfifo "$DECOY_FIFO" 2>/dev/null; then
   cat >"$DECOY_DIR/git" <<DECOY
 #!/usr/bin/env bash
-trap '' TERM
 read -r _ < "$DECOY_FIFO"
 DECOY
   chmod +x "$DECOY_DIR/git"
@@ -2673,21 +2719,61 @@ else
   fi
   # (3) a dead pid is GONE, not a false alarm. Killed by pid AFTER validating the
   # argv is our own decoy — the same discipline the real check follows.
-  if [ "$(to_pid_verdict "$DECOY_PID" "$DECOY_DIR/git")" = LEAK ]; then
-    kill -KILL "$decoy_pid" 2>/dev/null
-    wait "$decoy_pid" 2>/dev/null || true
+  # ONE implementation of the validated kill+reap: the arm calls the same helper
+  # the traps do, rather than duplicating it. A second copy is a second place for
+  # the ordering (kill -> wait -> clear) to be wrong.
+  to_kill_decoy
+  if [ -z "$DECOY_CLEANUP_PID" ]; then
+    ok "leak self-test: the validated kill+reap cleared the registration (job 282's second half)"
+  else
+    bad "leak self-test: the registration survived the kill — either the probe could not answer or the argv did not match, and the decoy may still be running"
   fi
-  # Registration cleared once the resource is gone — the other half of job 282's
-  # rule (register the moment it exists, clear the moment it is reaped), so the
-  # exit trap cannot later signal a pid this arm no longer owns.
-  DECOY_CLEANUP_PID=""
   sleep 1
   v=$(to_pid_verdict "$DECOY_PID" "$DECOY_DIR/git")
-  if [ "$v" = GONE ] || [ "$v" = ZOMBIE ]; then
-    ok "leak self-test: once the decoy is dead the verdict is $v — no false alarm"
+  if [ "$v" = GONE ]; then
+    ok "leak self-test: once the decoy is killed the verdict is GONE — no false alarm, and it was REAPED"
+  elif [ "$v" = ZOMBIE ]; then
+    # NOT LOAD-BEARING ON THIS BASH, and said so rather than left to look pinned.
+    # MEASURED: deleting the `wait` from to_kill_decoy leaves this suite at 318/0,
+    # because bash reaps a background child asynchronously and the pid is gone from
+    # `ps` without an explicit wait. So the `wait` is defence in depth — correct,
+    # documented, and required by shells that do not auto-reap — while this arm can
+    # only catch a zombie that some other shell or a future refactor produces. A
+    # fixture that could provoke one would have to suppress bash's own SIGCHLD
+    # bookkeeping, which is not controllable from a script.
+    bad "leak self-test: the decoy is a ZOMBIE — it was killed without being reaped (job 378); it is a direct child, so \`wait\` must follow the kill"
   else
     bad "leak self-test: a dead decoy was reported '$v' — the check would red on a clean run"
   fi
+  # THE FAIL-CLOSED PROBE PROPERTY, which is job 378's core finding: when `ps`
+  # CANNOT ANSWER the registration must be KEPT, never discarded. Exercised with a
+  # `ps` that exits 2 shadowed onto PATH for exactly this call — the shipped
+  # helper is unchanged, only what it can see is.
+  FAILPS="$T/bin-failing-ps"
+  mkdir -p "$FAILPS"
+  printf '#!/bin/sh\nexit 2\n' >"$FAILPS/ps"
+  chmod +x "$FAILPS/ps"
+  DECOY_CLEANUP_PID=424242
+  DECOY_CLEANUP_NEEDLE="$DECOY_DIR/git"
+  _kd_path="$PATH"
+  PATH="$FAILPS:$PATH"
+  to_kill_decoy
+  PATH="$_kd_path"
+  if [ "$DECOY_CLEANUP_PID" = 424242 ]; then
+    ok "leak self-test: a FAILED ps probe KEEPS the registration — a probe that cannot answer never takes the permissive branch (job 378)"
+  else
+    bad "leak self-test: a failed ps probe DISCARDED the registration — the process would leak silently, which is the fail-open shape this repo forbids"
+  fi
+  # ...and the affirmative counterpart: a working `ps` that finds nothing DOES
+  # clear it, or the registration would pile up forever.
+  DECOY_CLEANUP_PID=424242
+  to_kill_decoy
+  if [ -z "$DECOY_CLEANUP_PID" ]; then
+    ok "leak self-test: an AFFIRMATIVE 'not found' clears the registration (rc 1 with no output)"
+  else
+    bad "leak self-test: an affirmatively-gone pid left the registration set — it would never be released"
+  fi
+  DECOY_CLEANUP_NEEDLE=""
   # (the no-child property is asserted at the fixture, while the decoy is still
   # alive — see `decoy_kids` above. A post-hoc census for a `sleep` argv, which
   # is what stood here, became VACUOUS the moment the decoy stopped spawning one:
