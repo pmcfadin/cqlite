@@ -39,10 +39,15 @@
 # cargo `error: test failed…` epilogue never displaces the test names above it.
 #
 #   TIER `assert` — a named test case / assertion identity.
-#     A1  `FAIL - <name>[: detail]`     the repo's bash test-suite convention: the
+#     A1  `FAIL - <identity>`           the repo's bash test-suite convention: the
 #                                       `bad()` helper in scripts/tests/*.sh, which the
 #                                       tooling-tests component executes (~16 suites).
 #                                       MEASURED: this is the #3765 subject line shape.
+#                                       The identity is the WHOLE payload, detail
+#                                       included — NOT the tag before the first `:`. A
+#                                       tag is routinely SHARED (13 `FAIL - F2: …` lines
+#                                       in one measured suite), so tag-only dedup
+#                                       UNDERCOUNTS and names nothing.
 #     A2  `FAIL: <detail>` (col 0)      the other bash-suite spelling (8 measured sites,
 #                                       e.g. "FAIL: guard did NOT trip on …"). Anchored
 #                                       at column zero so `>>> [x] FAIL: …` (a gate
@@ -148,11 +153,20 @@ awk -v max="$max" '
     c = ++n[tier]
     if (c <= max) hit[tier SUBSEP c] = disp(id)
   }
-  function head(s) { sub(/:.*$/, "", s); return s }
-
   # ---- TIER assert ----
+  # The A1 identity is the WHOLE payload after `FAIL - `, detail INCLUDED. It used to be
+  # `head(s)` — everything before the first `:` — on the assumption that the leading tag
+  # IS the test name. MEASURED FALSIFICATION (roborev job 45): scripts/tests/
+  # test_ws0_round_metadata.sh emits THIRTEEN `FAIL - F2: <different assertion>` lines, so
+  # the tag is a CATEGORY shared by many distinct asserts. Truncating first collapsed them
+  # to one `seen[]` key, and the field reported `1 RECOGNISED (assert): F2` — an
+  # UNDERCOUNT naming something that identifies neither failure. That is the same
+  # truncate-before-dedup defect add() was already fixed for, one level up: the fix there
+  # moved the DISPLAY cap after the dedup, and this one was applied OUTSIDE add(), so
+  # add() never saw the full payload. Dedup on the FULL identity; the middle elision in disp()
+  # keeps the leading tag AND the distinguishing tail visible.
   /^[[:space:]]*FAIL - / {
-    s = $0; sub(/^[[:space:]]*FAIL - /, "", s); add("assert", head(s)); next
+    s = $0; sub(/^[[:space:]]*FAIL - /, "", s); add("assert", s); next
   }
   /^FAIL: / { s = $0; sub(/^FAIL: /, "", s); add("assert", s); next }
   /^[[:space:]]*test .* \.\.\. FAILED/ {
@@ -167,6 +181,15 @@ awk -v max="$max" '
   }
 
   # ---- TIER guard ----
+  # CHECKED FOR THE A1 DEFECT AND DELIBERATELY UNCHANGED (roborev job 45). B1/B2 key on
+  # `<label> (<VERDICT>)` and drop the trailing prose, which LOOKS like the same
+  # truncate-before-dedup shape and is not: what A1 discarded was a NAME (a shared tag
+  # standing in for many distinct asserts), whereas what B1/B2 discard is an EXPLANATION
+  # of one verdict by one named guard — two lines with the same label and the same verdict
+  # ARE one guard verdict, and folding the prose in would inflate the count with restated
+  # detail. A2/A3/A4/A5 and B3 already pass their FULL payload to add(). The residual is
+  # DECLARED: a guard that emits the same label+verdict for two genuinely different
+  # failures counts as one.
   /^\[FAIL\][[:space:]]/ {
     s = $0; sub(/^\[FAIL\][[:space:]]+/, "", s); add("guard", s); next
   }

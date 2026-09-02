@@ -5208,9 +5208,9 @@ esac
 _fa_run many "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/many.log" PASS
 fa_got=$(_fa_line fmt)
 case "$fa_got" in
-  *"failed-assert: 5 RECOGNISED (assert): alpha, beta, gamma (+2 more)"*)
+  *"failed-assert: 5 RECOGNISED (assert): alpha: x, beta: y, gamma: z (+2 more)"*)
     ok "3765-many: count is the TRUE total, first 3 named, remainder declared ($fa_got)" ;;
-  *) bad "3765-many: expected '5 RECOGNISED (assert): alpha, beta, gamma (+2 more)', got '$fa_got'" ;;
+  *) bad "3765-many: expected '5 RECOGNISED (assert): alpha: x, beta: y, gamma: z (+2 more)', got '$fa_got'" ;;
 esac
 
 # 55c. LOG READ, NOTHING RECOGNISED: `0 RECOGNISED`, never a bare 0, and the scan's own
@@ -5451,6 +5451,50 @@ else
   bad "3765-collide-mid-display: expected 1 distinct display form for a middle-colliding pair, got $fa_mid_dist — the fixture no longer exercises a display collision, so this case no longer pins the dedup key"
 fi
 
+# 55v. SHARED-TAG COLLAPSE: the A1 identity is the FULL payload, not the tag before the
+#      first `:`. REGRESSION, reproduced from a real in-tree producer, not predicted.
+#      `add()` was fixed to dedup on the full identity (55r/55s) — and the A1 rule then
+#      applied its OWN truncation OUTSIDE add() (`add("assert", head(s))`, head() = strip
+#      from the first `:`), so add() never saw the full payload and the defect survived
+#      one level down. scripts/tests/test_ws0_round_metadata.sh emits THIRTEEN
+#      `FAIL - F2: <different assertion>` lines, so the tag is a CATEGORY, not a name:
+#      two distinct failing asserts reported `1 RECOGNISED (assert): F2`, an UNDERCOUNT
+#      naming something that identifies neither.
+printf 'FAIL - F2: the round metadata is missing the anchor\nFAIL - F2: the round metadata names the wrong sha\n' > "$fa_dir/sametag.log"
+fa_st=$(bash "$fa_tool" "$fa_dir/sametag.log" 10 2>/dev/null)
+fa_st_count=$(printf '%s\n' "$fa_st" | sed -n 's/^count=//p' | head -1)
+if [ "${fa_st_count:-0}" = 2 ]; then
+  ok "3765-sametag-count: two asserts sharing a leading tag count as 2 (the identity is the FULL payload, not the tag)"
+else
+  bad "3765-sametag-count: expected count=2 for a same-tag pair, got count='${fa_st_count:-<none>}' — the A1 rule truncates at the first ':' BEFORE dedup, so distinct asserts collapse and the count UNDERCOUNTS"
+fi
+fa_st_names=$(printf '%s\n' "$fa_st" | sed -n 's/^name=//p')
+fa_st_n=$(printf '%s\n' "$fa_st_names" | grep -c .)
+fa_st_d=$(printf '%s\n' "$fa_st_names" | sort -u | grep -c .)
+if [ "$fa_st_n" = 2 ] && [ "$fa_st_d" = 2 ]; then
+  ok "3765-sametag-names: both same-tag identities are named and the two names are DISTINCT (a reader can tell which assert failed)"
+else
+  bad "3765-sametag-names: expected 2 distinct name= lines for the same-tag pair, got $fa_st_n line(s) / $fa_st_d distinct — the field names a tag that identifies neither failure"
+fi
+_fa_run sametag "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/sametag.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *"failed-assert: 2 RECOGNISED (assert): F2: the round metadata is missing"*"F2: the round metadata names the wrong sha"*)
+    ok "3765-sametag-render: the SUMMARY field reports both same-tag identities and the TRUE count ($fa_got)" ;;
+  *) bad "3765-sametag-render: expected '2 RECOGNISED (assert): F2: …, F2: …', got '$fa_got'" ;;
+esac
+# GROUNDING: the fixture above is a real shape, measured across the suites tooling-tests
+# executes — not a shape invented for this test. A tag shared by two or more DISTINCT
+# payloads is what makes tag-only dedup wrong.
+fa_st_ground=$(grep -hoE '(fail|bad) "[A-Za-z0-9][A-Za-z0-9_.-]*: [^"]+' "$SCRIPT_DIR"/*.sh 2>/dev/null \
+  | sed -E 's/^(fail|bad) "//' | sort -u \
+  | awk -F': ' '{c[$1]++} END{m=0; for (k in c) if (c[k] > m) m = c[k]; print m+0}')
+if [ "${fa_st_ground:-0}" -ge 2 ]; then
+  ok "3765-sametag-ground: a real in-tree suite shares one FAIL tag across $fa_st_ground distinct assertions, so tag-only dedup would collapse them"
+else
+  bad "3765-sametag-ground: could not measure a shared-tag producer under $SCRIPT_DIR (got '${fa_st_ground:-<none>}') — the fixture above is no longer grounded in a real shape"
+fi
+
 # 55t/55u. STRUCTURAL, and labelled as such: the --delta node-tests runner must keep its jest
 #          log inside a PRIVATE mktemp -d and must delete that DIRECTORY. #3765 routed that
 #          log through _failassert_record, which strips it through _ansi_stripped_log, and the
@@ -5520,6 +5564,10 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
+# 438 -> 442 on #3765 (roborev job 45): section 55v adds 4 asserts for the shared-tag
+# A1 collapse (the truncate-before-dedup defect surviving one level below add()), all
+# host-INDEPENDENT for the same reason as the rest of section 55, so the same "raise by
+# exactly the number added" rule applies and the ~9 margin is preserved.
 # 430 -> 436 on #3765 (fix round): sections 55r/55s add 6 asserts for the prefix-collision
 # dedup regression, host-INDEPENDENT for the same reason (bash + awk + the extractor and
 # the --lite-aggregate-selftest hook), so the same "raise by exactly the number added"
@@ -5539,7 +5587,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=438
+ASSERT_FLOOR=442
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
