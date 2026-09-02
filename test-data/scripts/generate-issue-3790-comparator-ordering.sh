@@ -284,7 +284,11 @@ for line in sys.stdin:
       lines=$(wc -l < "$jsonl_file" | tr -d ' ')
       log "  OK: $jsonl_file ($lines partitions)"
     fi
-  done < <(find "$sstables_dir/$KEYSPACE" -type f -name "*-Data.db" -not -name "._*" -print0 \
+  # SCOPED TO THIS TABLE (roborev job 53, finding 2). Keyspace-wide would rewrite a
+  # sibling table's committed sidecars if the output keyspace ever holds more than
+  # `collection_order` -- the generator only owns what it just wrote.
+  done < <(find "$sstables_dir/$KEYSPACE" -type f -path "*/${TABLE}-*/*" \
+            -name "*-Data.db" -not -name "._*" -print0 \
             2>/dev/null || true)
 }
 
@@ -482,9 +486,14 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     else
       log "  WARNING: Empty statistics for $rel"
     fi
-  done < <(find "$OUT_DIR/$KEYSPACE" -name "*-Data.db" -not -name "._*" -print0)
+  # Both scoped to this table (roborev job 53, finding 2): the statistics pass WRITES
+  # a *-Statistics.db.txt beside every match and the cleanup pass DELETES, so a
+  # keyspace-wide sweep could truncate or remove a sibling table's committed files.
+  done < <(find "$OUT_DIR/$KEYSPACE" -path "*/${TABLE}-*/*" \
+            -name "*-Data.db" -not -name "._*" -print0)
 
-  find "$OUT_DIR/$KEYSPACE" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
+  find "$OUT_DIR/$KEYSPACE" -path "*/${TABLE}-*/*" \
+    \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
 
   # Every ordering-bearing value must actually appear in the golden, or the
   # fixture does not carry the subject of issue #3790. Checked per VALUE rather
