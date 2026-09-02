@@ -1,0 +1,209 @@
+-- issue-3805-empty-fixedwidth-map-key.cql — Cassandra 5.0 reference schema for
+-- the EMPTY FIXED-WIDTH MULTICELL MAP KEY fixture (issue #3805).
+--
+-- WHY THIS EXISTS
+-- A non-frozen `map<K,V>` is MULTICELL: each entry is its own cell, and the KEY
+-- travels in that cell's CellPath as `[VInt length][bare serialized key]`. A
+-- ZERO-LENGTH cell path therefore means the key's serialized form is the EMPTY
+-- buffer. For a VARIABLE-width key type that is unremarkable, and issue #3747
+-- already covers it (text/ascii/blob). This fixture is about the case the repo
+-- has been treating as impossible: an empty cell path under a FIXED-WIDTH key
+-- type. CQLite currently refuses those keys or falls back to an opaque blob.
+--
+-- WHY AN EMPTY FIXED-WIDTH KEY IS LEGAL DATA AND NOT CORRUPTION
+-- Cassandra's fixed-width serializers do NOT spell their width check as a bare
+-- `size != N`. They spell it `size != N && !isEmpty`, so the EMPTY buffer is
+-- explicitly exempted, and `deserialize` maps it to null rather than throwing.
+-- Read at the pinned tag — the format authority here is Cassandra source, never
+-- CQLite's own code (CLAUDE.md, "Format authority"):
+--
+--   Int32Serializer.java:42-43     `if (accessor.size(value) != 4 && !accessor.isEmpty(value))`
+--                                  throw "Expected 4 or 0 byte int (%d)"
+--   LongSerializer.java:42-43      `if (accessor.size(value) != 8 && !accessor.isEmpty(value))`
+--                                  throw "Expected 8 or 0 byte long (%d)"
+--   UUIDSerializer.java:44-45      `if (accessor.size(value) != 16 && !accessor.isEmpty(value))`
+--                                  throw "UUID should be 16 or 0 bytes (%d)"
+--   BooleanSerializer.java:48-49   `if (accessor.size(value) > 1)`
+--                                  throw "Expected 1 or 0 byte value (%d)"
+--   InetAddressSerializer.java:54  `if (accessor.isEmpty(value)) return;`  (early return)
+--
+-- Note the error MESSAGES: Cassandra itself documents "0 byte" as an accepted
+-- width. That is the whole claim this fixture makes empirically.
+--
+-- ---------------------------------------------------------------------------
+-- A CORRECTION TO COMMITTED DOCTRINE: `decimal` IS NOT CORRUPT WHEN EMPTY
+--
+-- Issue #3805's own body, the owner ruling on it, and PR #3783's test all state
+-- that an empty `decimal` is corrupt data. THAT IS WRONG, and Cassandra says so
+-- in its own error string. At cassandra-5.0.8:
+--
+--   DecimalSerializer.java:33      `if (value == null || accessor.isEmpty(value))
+--                                       return null;`
+--   DecimalSerializer.java:61-62   `if (!accessor.isEmpty(value) && accessor.size(value) < 4)
+--                                       throw new MarshalException(
+--                                         String.format("Expected 0 or at least 4 bytes (%d)", ...));`
+--
+-- "Expected 0 OR AT LEAST 4 bytes" — zero is named as legal in the message of
+-- the very check said to reject it. Verified by fetching that file at the tag,
+-- and corroborated on the write side: `blobAsDecimal(0x)` is ACCEPTED by cqlsh
+-- (measured against cassandra:5.0.2). `m_dec` exists in this fixture to pin
+-- that correction with Cassandra-written bytes, so the doctrine cannot quietly
+-- revert to "corrupt".
+-- ---------------------------------------------------------------------------
+--
+-- HOW AN EMPTY FIXED-WIDTH KEY IS EXPRESSED IN CQL
+-- Via `blobAsX(0x)`, usable directly as a map-literal key. There is no other
+-- CQL literal for it — `''` is a text literal and no fixed-width type accepts
+-- one. Measured ACCEPTED for: int, bigint, float, double, timestamp, uuid,
+-- timeuuid, boolean, inet, counter, decimal, varint, text.
+--
+-- WHY IT IS CASSANDRA-WRITTEN AND NOT A CQLITE ROUND-TRIP
+-- A CQLite-written + CQLite-read subject is INVARIANT to a uniform error on
+-- both sides (CLAUDE.md, #3042): CQLite's writer would have to choose how to
+-- encode an empty key, and if it chose the same wrong thing the reader does,
+-- the round-trip would close and stay green while real Cassandra data still
+-- read wrong. The owner ruling on #3805 says it directly — "a CQLite round-trip
+-- proves nothing here". Only Cassandra-written bytes settle what the on-disk
+-- encoding IS.
+--
+-- ============================================================================
+-- WHAT EACH COLUMN IS FOR — none is interchangeable filler
+--
+--   m_int     map<int,int>      — THE HEADLINE SUBJECT and the 4-BYTE family.
+--                                 `blobAsInt(0x)` must decode as an empty/null
+--                                 int key, not be refused and not be blobbed.
+--
+--   m_bigint  map<bigint,int>   — the 8-BYTE family. Present so the fixture is
+--                                 not evidence about ONE width: a fix keyed on
+--                                 "4 bytes or empty" passes m_int and reds
+--                                 here.
+--
+--   m_uuid    map<uuid,int>     — the 16-BYTE family, and the widest fixed
+--                                 width in the set. Guards against a fix that
+--                                 special-cases small widths.
+--
+--   m_bool    map<boolean,int>  — the `size > 1` family, which is SPELLED
+--                                 DIFFERENTLY from every other column here
+--                                 (BooleanSerializer has no `!= N && !isEmpty`
+--                                 conjunction at all; it bounds an upper size).
+--                                 A fix that pattern-matches the conjunction
+--                                 misses this one.
+--
+--   m_inet    map<inet,int>     — THE REGRESSION CONTROL. This is the family
+--                                 CQLite ALREADY decodes empty today, via
+--                                 InetAddressSerializer's early return. A
+--                                 change that "fixes" the other families by
+--                                 breaking inet REDS HERE. It must never be
+--                                 described as a second instance of the defect.
+--
+--                                 IT ALSO CORRECTS #3747. That issue's schema
+--                                 states of inet: "CQL has NO literal that
+--                                 expresses one, so a CASSANDRA-WRITTEN fixture
+--                                 cannot carry it." `blobAsInet(0x)` is a
+--                                 counterexample; it is accepted by cqlsh and
+--                                 this fixture carries the result. #3747's
+--                                 "NOT COVERED" note was correct in FORM
+--                                 (declare what a fixture cannot contain) and
+--                                 wrong in PREMISE. Recorded here so the false
+--                                 premise does not outlive its own refutation.
+--
+--   m_dec     map<decimal,int>  — the doctrine correction described above. Also
+--                                 the only VARIABLE-width type in the set whose
+--                                 minimum is non-zero (`0 or >= 4`), so it is a
+--                                 third distinct spelling of the width rule.
+--
+--   m_text    map<text,int>     — the ALREADY-WORKING variable-width case,
+--                                 present so "an empty key decodes at all"
+--                                 stays distinguishable from "this fixture's
+--                                 NEW fixed-width families decode". Without it,
+--                                 a total failure of the empty-key path and a
+--                                 fixed-width-only failure look identical.
+--
+--   m_frozen  frozen<map<int,int>>
+--                               — THE ENCODING CONTROL, and deliberately keyed
+--                                 on `int` rather than on #3747's `text`. A
+--                                 frozen map is ONE inline length-prefixed
+--                                 cell, decoded by a completely different path
+--                                 (`frozen.rs::parse_frozen_map_value_raw`,
+--                                 an i32 key length that rejects only
+--                                 NEGATIVE) — there is no CellPath involved at
+--                                 all. Keying it on `int` makes its job
+--                                 distinct from #3747's frozen control: it
+--                                 discriminates the MULTICELL fixed-width path
+--                                 (this issue) from the FROZEN fixed-width path
+--                                 (not this issue), so a fix cannot be credited
+--                                 to the wrong decoder.
+-- ============================================================================
+--
+-- ============================================================================
+-- NOT COVERED, AND WHY — the four STRICT families
+--
+-- `tinyint`, `smallint`, `date` and `time` are ABSENT from this fixture on
+-- purpose, and their absence is itself a measured finding rather than an
+-- omission.
+--
+-- Those four are exactly the serializers that spell the width check as a BARE
+-- `size != N`, with NO `&& !isEmpty` escape:
+--
+--   ByteSerializer.java:42-43        `if (accessor.size(value) != 1)`
+--                                     "Expected 1 byte for a tinyint (%d)"
+--   ShortSerializer.java:42-43       `if (accessor.size(value) != 2)`
+--                                     "Expected 2 bytes for a smallint (%d)"
+--   SimpleDateSerializer.java:120-121 `if (accessor.size(value) != 4)`
+--                                     "Expected 4 byte long for date (%d)"
+--   TimeSerializer.java:73-74        `if (accessor.size(value) != 8)`
+--                                     "Expected 8 byte long for time (%d)"
+--
+-- And the write side agrees exactly: `blobAsTinyint(0x)`, `blobAsSmallint(0x)`,
+-- `blobAsDate(0x)` and `blobAsTime(0x)` are each REFUSED by cqlsh with
+-- "value 0x is not a valid binary representation for type X" — measured against
+-- cassandra:5.0.2, and refused for precisely those four and no others in the
+-- probed set. The source-side prediction and the write-side refusal name the
+-- SAME four types, which is the strongest corroboration available for the width
+-- table above.
+--
+-- So CQL cannot construct such a key, and therefore a CASSANDRA-WRITTEN fixture
+-- CANNOT CARRY ONE. Claiming coverage for those families from this fixture would
+-- be a false claim. Note the asymmetry, because it bounds what the absence
+-- means: each of those four still returns null from `deserialize` on an empty
+-- buffer — the strictness lives only in `validate`, which is what `blobAsX`
+-- calls. So an empty tinyint key is unreachable through CQL but is not proven
+-- unreachable on disk; this fixture simply says nothing about it.
+-- ============================================================================
+--
+-- ROWS (see the generator for the inserted values):
+--   id 1 — THE SUBJECT. Every map column carries an EMPTY key ALONGSIDE a
+--          NON-EMPTY sibling. The sibling is what makes a failure legible: the
+--          map comes back short exactly one entry rather than absent, so
+--          "entry dropped" is distinguishable from "column missing" — different
+--          causes, and only one of them is this issue.
+--   id 2 — THE CONTRAST. No empty key anywhere. Pins that any fix is a property
+--          of the empty-key path and not of the data; this row must decode
+--          identically before and after.
+--
+-- Every INSERT pins `USING TIMESTAMP 1000`, which stabilises `liveness_info`
+-- and the collection tombstones' `marked_deleted`. It does NOT make the golden
+-- BYTE-REPRODUCIBLE: an INSERT of a whole NON-FROZEN collection REPLACES it, so
+-- Cassandra emits a collection tombstone per multicell column whose
+-- `local_delete_time` is a WALL CLOCK no CQL clause can pin (observed here:
+-- "2026-09-02T23:18:52Z"). Only `m_frozen`, being a single inline cell, escapes
+-- it. Consequences, both load-bearing: never byte-compare this golden across
+-- regenerations, and the consuming test MUST NOT assert on `local_delete_time`.
+--
+-- Generator: test-data/scripts/generate-issue-3805-empty-fixedwidth-map-key.sh
+-- Backs: issue #3805.
+
+CREATE KEYSPACE IF NOT EXISTS test_empty_fixedwidth_key
+  WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+
+CREATE TABLE IF NOT EXISTS test_empty_fixedwidth_key.empty_fixedwidth_map_key (
+    id       int PRIMARY KEY,
+    m_int    map<int, int>,
+    m_bigint map<bigint, int>,
+    m_uuid   map<uuid, int>,
+    m_bool   map<boolean, int>,
+    m_inet   map<inet, int>,
+    m_dec    map<decimal, int>,
+    m_text   map<text, int>,
+    m_frozen frozen<map<int, int>>
+);
