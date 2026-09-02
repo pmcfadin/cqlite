@@ -418,3 +418,62 @@ expansion, errors `invalid variable name`, and **abandons the enclosing block**.
 `--emit-summary-selftest` fell straight through into a real 37-component gate. `run_delta`'s own
 keys loop carries a comment describing exactly this, five hundred lines away. The correct idiom is
 a count check (`[ "${#arr[@]}" -gt 0 ]`), now used at all five zips and pinned by case Q5.
+
+---
+
+## roborev round 4 (job 376) — two Lows, both in the test harnesses
+
+The census and aggregate code came back clean this round; both findings were in the guards.
+
+### Finding 1 — the feature-matrix harness passed without executing its subject
+
+`run_scoped_tests` gained calls to `_census_scoped_record`, `_census_finalize` and
+`_status_is_nonfailing`. `test_agent_gate_feature_matrix_annotation.sh` extracts the REAL
+`run_scoped_tests` out of the shipped gate but extracted none of those three, so inside `py_run`
+they were `command not found`, the diagnostics went to `2>&1 >/dev/null`, and — no `set -e` in
+that subshell — every P-case still PASSED. **A test that passes without executing what it claims
+to, with the evidence of that redirected away, is the defect class this whole issue exists to
+close, sitting inside the fix's own harness.**
+
+Fixed by EXTRACTING the whole census closure from the shipped gate (17 functions), not by
+stubbing: a stub is a second implementation whose agreement with the original is only knowable by
+testing it.
+
+**The property, not the three names.** Case P6 asserts two independent halves:
+
+- **Definedness (DERIVED, and it covers code paths this run never executes).** Every top-level
+  gate function name that the shipped `run_scoped_tests` BODY mentions must resolve to a function
+  inside `py_run`'s subshell — extracted, or explicitly stubbed there. It is word membership
+  against the gate's own function-name set (no shell parsing), comment lines stripped, and it
+  carries a floor of 8 so a broken derivation cannot report "none undefined" having examined
+  nothing. Measured: 11 referenced functions today.
+- **Stderr (behavioural, covers what actually ran).** `py_run` captures stderr instead of
+  discarding it, and no `command not found` may appear — which also catches an unfound EXTERNAL
+  command, and anything word-membership cannot see.
+
+So a FUTURE helper added to `run_scoped_tests` and left unextracted reds this suite either way.
+RED arm: the three names removed from the extraction list and nothing else → P6 fails naming all
+three, P6b likewise.
+
+### Finding 2 — a fourth status token, and three-token literals left behind
+
+`VACUOUS` joined PASS/FAIL/SKIP, so every hard-coded three-token alternation became wrong the
+moment it landed — and wrong in the direction hardest to notice, because such a pattern stops
+SEEING exactly the rows that report a component verified nothing. The sweep found **three** sites,
+one cited:
+
+| site | consequence |
+|---|---|
+| `test_agent_gate_tree_provenance.sh` boundary `n_rows` (**cited**) | REDS ON CORRECT INPUT: a legitimate VACUOUS boundary row went uncounted while the annotation count beside it counted it, so the consistency assert failed on a healthy block |
+| `test_agent_gate_summary.sh` 3453-annot-b (UNDECLARED/UNCLASSIFIED screen) | blind to VACUOUS rows — the rows most worth screening |
+| `test_agent_gate_summary.sh` 3453-annot-c (RESULT:-embedding screen) | same |
+
+Two sites were deliberately NOT changed, because they are different artifacts' vocabularies:
+`test_roborev_review_guard.sh` (the roborev block's verdict grammar, which continues past those
+three) and `test-data/scripts/nightly-docker-parity.sh` (its own leg vocabulary).
+
+Case **R1** is the standing guard: no script may contain the bare three-token group. Its needle is
+**split** so the guard cannot match its own source — it did on the first run, and a self-matching
+grep is a guard that is always red, which is the guard nobody keeps. **R2** proves the needle
+discriminates the bare three from the roborev grammar's longer one, so it cannot red a correct
+artifact. RED arm: a planted three-token literal under `scripts/` → R1 fails naming the file.

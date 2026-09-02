@@ -826,6 +826,14 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   first two rendered its row `FAIL` in a real self-test block. Guard: `scripts/tests/test_agent_gate_census.sh`
   (`tooling-tests`), which plants a no-op in a real component under `--only`, requires the block
   to NAME it, and carries a positive control on the same lane differing in ONE property.
+  **ADDING A STATUS TOKEN INVALIDATES EVERY HARD-CODED STATUS-SET LITERAL, including the ones in
+  the test suites**: three `(PASS|FAIL|SKIP)` alternations survived `VACUOUS`'s arrival, and the
+  failure direction is the nasty one — such a pattern stops SEEING exactly the rows that report a
+  component verified nothing (one of them then REDDENED A CORRECT boundary block, because a
+  sibling count did see them). `test_agent_gate_census.sh` case R1 is the standing sweep; its
+  needle is deliberately SPLIT so the guard cannot match its own source, and case R2 proves it
+  discriminates the bare three from the roborev block's longer verdict vocabulary, which
+  legitimately begins with the same tokens.
   **Two lessons from its review worth carrying elsewhere. (1) A "present-and-zero" tally has more
   than one spelling, and keying on the GOOD word misses all the others**: the pytest reader matched
   `N passed`, so every terminal summary reporting zero passed WITHOUT that word — `61 skipped in
