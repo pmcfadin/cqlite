@@ -117,6 +117,7 @@ pub(in crate::storage::sstable::reader) use model::DECOMPRESS_CALLS;
 use super::source::ScanCursor;
 use super::SSTableReader;
 use crate::parser::DataFormat;
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use std::io::SeekFrom;
@@ -231,10 +232,7 @@ impl SSTableReader {
         let stitched_buffer = self
             .stitch_all_chunks_cancellable(cursor, scan_cancel)
             .await?;
-        // #3782: EVERY chunk of the data section — see `with_complete_buffer`.
-        let parser = self
-            .build_v5_parser(read_shadowing)
-            .with_complete_buffer(true);
+        let parser = self.build_v5_parser(read_shadowing);
 
         // Get schema (use provided schema or reader's schema)
         let reader_schema;
@@ -246,7 +244,9 @@ impl SSTableReader {
         };
 
         // Parse the stitched decompressed buffer
-        let entries = parser.parse_block(&stitched_buffer, table_schema, self)?;
+        // #3782: EVERY chunk of the data section — see `BufferExtent`.
+        let entries =
+            parser.parse_block(&stitched_buffer, BufferExtent::Complete, table_schema, self)?;
         tracing::debug!(
             "stitch_and_parse_all_chunks: Parsed {} entries from stitched buffer",
             entries.len()
@@ -273,8 +273,7 @@ impl SSTableReader {
         )>,
     > {
         let stitched_buffer = self.stitch_all_chunks(cursor).await?;
-        // #3782: whole stitched data section — see `with_complete_buffer`.
-        let parser = self.build_v5_parser(true).with_complete_buffer(true);
+        let parser = self.build_v5_parser(true);
 
         let reader_schema;
         let table_schema = if let Some(s) = schema {
@@ -285,7 +284,13 @@ impl SSTableReader {
         };
 
         let entries =
-            parser.parse_block_with_cell_metadata(&stitched_buffer, table_schema, self)?;
+            // #3782: whole stitched data section — see `BufferExtent`.
+            parser.parse_block_with_cell_metadata(
+                &stitched_buffer,
+                BufferExtent::Complete,
+                table_schema,
+                self,
+            )?;
         tracing::debug!(
             "stitch_and_parse_all_chunks_with_metadata: Parsed {} entries with metadata",
             entries.len()

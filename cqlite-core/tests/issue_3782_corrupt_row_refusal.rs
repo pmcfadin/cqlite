@@ -54,54 +54,55 @@ mod datasets_root;
 #[path = "support/corrupt_clustering_fixture.rs"]
 mod fixture;
 
-use fixture::{comp_file, FIX_KS, FIX_TABLE, SCHEMA_FILE};
+use fixture::{comp_file, FixtureSpec, BIG_COMPOSITE, BTI_MULTICLUSTERING, FIX_KS, FIX_TABLE};
 
 /// The corrupted fixture's directory, resolved per TABLE (#3220) so a root that
 /// holds the keyspace but not this table cannot silently win the selection.
-fn fixture_dir() -> PathBuf {
-    let root = match datasets_root::sstables_root_for_table(FIX_KS, FIX_TABLE) {
+fn fixture_dir(spec: &FixtureSpec) -> PathBuf {
+    let (ks, table) = (spec.keyspace, spec.table);
+    let root = match datasets_root::sstables_root_for_table(ks, table) {
         Some(r) => r,
         None => panic!(
-            "committed fixture {FIX_KS}.{FIX_TABLE} not found; {}",
-            datasets_root::describe_search(FIX_KS, FIX_TABLE)
+            "committed fixture {ks}.{table} not found; {}",
+            datasets_root::describe_search(ks, table)
         ),
     };
-    let dir = root.join(FIX_KS);
+    let dir = root.join(ks);
     for e in std::fs::read_dir(&dir)
         .expect("read keyspace dir")
         .flatten()
     {
         let n = e.file_name().to_string_lossy().to_string();
-        if n.starts_with(&format!("{FIX_TABLE}-")) && e.path().is_dir() {
+        if n.starts_with(&format!("{table}-")) && e.path().is_dir() {
             return e.path();
         }
     }
-    panic!("fixture {FIX_KS}.{FIX_TABLE} not found under {dir:?}");
+    panic!("fixture {ks}.{table} not found under {dir:?}");
 }
 
-fn schema_file() -> PathBuf {
-    datasets_root::schema_path(SCHEMA_FILE).expect("committed CQL schema (#3148)")
+fn schema_file(spec: &FixtureSpec) -> PathBuf {
+    datasets_root::schema_path(spec.schema_file).expect("committed CQL schema (#3148)")
 }
 
-fn table_schema() -> cqlite_core::schema::TableSchema {
-    let cql = std::fs::read_to_string(schema_file()).expect("read schema");
+fn table_schema(spec: &FixtureSpec) -> cqlite_core::schema::TableSchema {
+    let cql = std::fs::read_to_string(schema_file(spec)).expect("read schema");
     let start = cql
-        .find(&format!("CREATE TABLE IF NOT EXISTS {FIX_TABLE}"))
+        .find(&format!("CREATE TABLE IF NOT EXISTS {}", spec.table))
         .expect("CREATE TABLE statement");
     let end = start + cql[start..].find(';').expect("statement terminator") + 1;
     let mut t = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end])
         .expect("parse CREATE TABLE");
-    t.keyspace = FIX_KS.to_string();
+    t.keyspace = spec.keyspace.to_string();
     t
 }
 
-async fn open_db(data_dir: PathBuf) -> Database {
+async fn open_db(spec: &FixtureSpec, data_dir: PathBuf) -> Database {
     ingest(IngestionConfig {
-        schema_paths: vec![schema_file()],
+        schema_paths: vec![schema_file(spec)],
         data_dir,
         version_hint: None,
         core_config: cqlite_core::Config::default(),
-        table_directory_filter: Some(format!("/{FIX_KS}/")),
+        table_directory_filter: Some(format!("/{}/", spec.keyspace)),
     })
     .await
     .expect("ingest")
@@ -120,10 +121,10 @@ async fn open_reader(dir: &Path) -> SSTableReader {
 /// 23 of 100 rows, on BOTH the materializing and the streaming surface.
 #[tokio::test]
 async fn read_path_refuses_a_corrupt_row_instead_of_truncating() {
-    let staged = fixture::stage_control_and_mutated(&fixture_dir(), "read");
+    let staged = fixture::stage_control_and_mutated(&fixture_dir(&BIG_COMPOSITE), "read");
     let sql = format!("SELECT * FROM {FIX_KS}.{FIX_TABLE}");
 
-    let control = open_db(staged.control_root.clone())
+    let control = open_db(&BIG_COMPOSITE, staged.control_root.clone())
         .await
         .execute(&sql)
         .await
@@ -135,7 +136,7 @@ async fn read_path_refuses_a_corrupt_row_instead_of_truncating() {
         "0-rows-when-present: the control read must return rows"
     );
 
-    let db = open_db(staged.mutated_root.clone()).await;
+    let db = open_db(&BIG_COMPOSITE, staged.mutated_root.clone()).await;
     match db.execute(&sql).await {
         Err(_) => {}
         Ok(r) => panic!(
@@ -174,8 +175,8 @@ async fn read_path_refuses_a_corrupt_row_instead_of_truncating() {
 /// than the control while losing two real partitions and fabricating three.
 #[tokio::test]
 async fn compaction_refuses_a_corrupt_row_and_never_loses_or_fabricates_partitions() {
-    let staged = fixture::stage_control_and_mutated(&fixture_dir(), "compact");
-    let schema = table_schema();
+    let staged = fixture::stage_control_and_mutated(&fixture_dir(&BIG_COMPOSITE), "compact");
+    let schema = table_schema(&BIG_COMPOSITE);
 
     let control_reader = open_reader(&staged.control_dir).await;
     let control_rows = control_reader
@@ -319,5 +320,152 @@ async fn corpus_wide_well_formed_tables_still_decode_without_refusal() {
     assert!(
         with_rows > 0,
         "0-rows-when-present: {scanned} tables scanned and none yielded a partition"
+    );
+}
+
+/// AC2 on the BTI (`da`) full scan — roborev job 48.
+///
+/// The BIG lane above exercises `sequential_scan` → `stitch_and_parse_all_chunks`,
+/// which already declared its stitched buffer complete. A `da` reader takes a
+/// DIFFERENT route to the same parse: `sequential_scan`/`get_all_entries` both
+/// delegate to `bti_scan_with_metadata_cancellable`, which stitches the whole
+/// data section itself and calls `parse_block_with_cell_metadata`. That call did
+/// NOT state the buffer's extent, so it inherited the tolerant break and the
+/// `da` scan kept silently truncating after the fix landed for BIG.
+///
+/// Observed RED before the fix: `get_all_entries` returned `Ok` with FEWER rows
+/// than the control instead of surfacing the decode error.
+#[tokio::test]
+async fn bti_scan_refuses_a_corrupt_row_instead_of_truncating() {
+    let spec = &BTI_MULTICLUSTERING;
+    let staged = fixture::stage_spec(spec, &fixture_dir(spec), "bti");
+
+    let control = open_reader(&staged.control_dir).await;
+    let control_entries = control
+        .get_all_entries()
+        .await
+        .expect("the pristine BTI fixture must read cleanly");
+    assert!(
+        !control_entries.is_empty(),
+        "0-rows-when-present: the BTI control read must return rows"
+    );
+
+    let mutated = open_reader(&staged.mutated_dir).await;
+    match mutated.get_all_entries().await {
+        Err(e) => assert_corruption_kind(&e, "BTI get_all_entries"),
+        Ok(rows) => panic!(
+            "the BTI scan must REFUSE a corrupt row, not truncate: got Ok with {} of {} rows \
+             (one compressed byte flipped; {} decompressed positions changed from offset {})",
+            rows.len(),
+            control_entries.len(),
+            staged.mutated_span,
+            staged.mutated_offset
+        ),
+    }
+
+    // The user-facing SELECT surface takes the same route with
+    // `read_shadowing = true`, so it must refuse too.
+    let sql = format!("SELECT * FROM {}.{}", spec.keyspace, spec.table);
+    let control_rows = open_db(spec, staged.control_root.clone())
+        .await
+        .execute(&sql)
+        .await
+        .expect("the pristine BTI fixture must SELECT cleanly")
+        .rows
+        .len();
+    assert!(
+        control_rows > 0,
+        "0-rows-when-present: the BTI control SELECT must return rows"
+    );
+    match open_db(spec, staged.mutated_root.clone())
+        .await
+        .execute(&sql)
+        .await
+    {
+        Err(_) => {}
+        Ok(r) => panic!(
+            "the BTI SELECT must REFUSE a corrupt row: got Ok with {} of {control_rows} rows",
+            r.rows.len()
+        ),
+    }
+}
+
+/// AC6 on the STITCHED compaction/verifier entry points.
+///
+/// `distinct_partition_keys` and `partition_verify_scan` do not use the
+/// per-chunk sliding stream the two `*_for_compaction` surfaces use: each
+/// stitches the whole data section and parses it in one shot. Their refusal
+/// therefore rests on a different contract (`at_final_chunk = true` passed by
+/// `parse_block_for_compaction*`), and nothing pinned it — so this case pins
+/// BOTH that they refuse and, if they ever answer `Ok` again, that the answer
+/// neither loses nor fabricates a partition key.
+#[tokio::test]
+async fn stitched_verifier_scans_refuse_and_never_lose_or_fabricate_partitions() {
+    let staged = fixture::stage_control_and_mutated(&fixture_dir(&BIG_COMPOSITE), "stitched");
+
+    let control = open_reader(&staged.control_dir).await;
+    let control_keys: BTreeSet<Vec<u8>> = control
+        .distinct_partition_keys()
+        .await
+        .expect("the pristine fixture must enumerate partition keys")
+        .into_iter()
+        .collect();
+    assert!(
+        !control_keys.is_empty(),
+        "0-rows-when-present: the control must enumerate partition keys"
+    );
+    assert!(
+        !control
+            .partition_verify_scan()
+            .await
+            .expect("the pristine fixture must verify-scan cleanly")
+            .is_empty(),
+        "0-rows-when-present: the control verify scan must yield partitions"
+    );
+
+    let mutated = open_reader(&staged.mutated_dir).await;
+    match mutated.distinct_partition_keys().await {
+        Err(e) => assert_corruption_kind(&e, "distinct_partition_keys"),
+        Ok(keys) => {
+            let got: BTreeSet<Vec<u8>> = keys.into_iter().collect();
+            let lost = control_keys.difference(&got).count();
+            let fabricated = got.difference(&control_keys).count();
+            panic!(
+                "the stitched key enumeration must refuse a corrupt row: got Ok with {} keys \
+                 (control {}), {lost} LOST and {fabricated} FABRICATED",
+                got.len(),
+                control_keys.len()
+            );
+        }
+    }
+
+    match mutated.partition_verify_scan().await {
+        Err(e) => assert_corruption_kind(&e, "partition_verify_scan"),
+        Ok(rows) => {
+            let got: BTreeSet<Vec<u8>> = rows.into_iter().map(|(k, _ldt)| k).collect();
+            let lost = control_keys.difference(&got).count();
+            let fabricated = got.difference(&control_keys).count();
+            panic!(
+                "the stitched verify scan must refuse a corrupt row: got Ok with {} partitions \
+                 (control {}), {lost} LOST and {fabricated} FABRICATED",
+                got.len(),
+                control_keys.len()
+            );
+        }
+    }
+}
+
+/// AC1 — assert the decode error's KIND, not a message substring.
+///
+/// A message check alone (`e.to_string().contains("clustering_key2")`) stays
+/// green through a refactor that re-wraps the decode error in a different
+/// variant while forwarding the text, which is the no-heuristics shape: it reads
+/// bytes of a rendered string instead of the authoritative discriminant. The
+/// kind IS the thing #3782 AC1 preserves, so it is asserted structurally.
+fn assert_corruption_kind(e: &cqlite_core::Error, surface: &str) {
+    assert!(
+        matches!(e, cqlite_core::Error::Corruption(_)),
+        "{surface}: the refusal must carry the DECODE error's own kind \
+         (Error::Corruption), not a re-wrapped generic; got {e:?}"
     );
 }

@@ -783,19 +783,13 @@ pub struct V5CompressedLegacyParser {
     /// decided uniformly regardless of which block parsed it). Only consulted when
     /// `read_shadowing` is `true`; physical consumers ignore it and stay byte-unchanged.
     now_secs: i64,
-    /// Issue #3782: the caller GUARANTEES every buffer it hands the block-emit
-    /// paths is COMPLETE (the whole stitched data section), so no further bytes
-    /// exist that could finish a row and a row decode error is data loss.
-    /// The block-emit paths have no `NeedMore`/refill vocabulary (unlike
-    /// `drive_partition_sliding`'s `at_final_chunk`), so tolerance there cannot be
-    /// decided inside the parse: a caller handing a chunk-covering WINDOW whose
-    /// tail cuts a following partition's row MUST keep the tolerant break, which
-    /// is why `false` is the default. See [`Self::with_complete_buffer`].
-    complete_buffer: bool,
 }
 
 mod block_emit;
 mod block_emit_windowed;
+// Issue #3782: the explicit buffer-extent contract the block-emit parses take.
+mod buffer_extent;
+pub use buffer_extent::BufferExtent;
 mod cell_kind;
 mod cell_value;
 // campsite split of `cell_value` (issue #1795): scalar arms + complex ladder.
@@ -905,7 +899,6 @@ impl V5CompressedLegacyParser {
             // Issue #1741 (F2): sample the read clock ONCE per parser (== once per
             // read/scan operation); every block/partition below reuses this value.
             now_secs: now_epoch_secs(),
-            complete_buffer: false,
         }
     }
 
@@ -914,17 +907,6 @@ impl V5CompressedLegacyParser {
     /// the default (`false`) for physical/verification/compaction/delta reads.
     pub fn with_read_shadowing(mut self, on: bool) -> Self {
         self.read_shadowing = on;
-        self
-    }
-
-    /// Issue #3782: declare that every buffer handed to the block-emit paths
-    /// through this parser is COMPLETE, so a row that fails to decode is
-    /// corruption/truncation and must be REPORTED, never swallowed as
-    /// end-of-partition. Only set it where completeness is PROVEN (the fully
-    /// stitched decompressed data section); leave the default (`false`) wherever
-    /// the buffer is a window that may cut a row.
-    pub fn with_complete_buffer(mut self, on: bool) -> Self {
-        self.complete_buffer = on;
         self
     }
 

@@ -1,5 +1,7 @@
 //! Issue #3782 — stage a REAL Cassandra 5.0 fixture twice: pristine (`control`)
-//! and with ONE byte of a `text` CLUSTERING-key value flipped (`mutated`).
+//! and with ONE COMPRESSED byte of a `text` CLUSTERING-key value flipped
+//! (`mutated`). Two fixtures are staged by the same code path: BIG (`nb`) and
+//! BTI (`da`) — see [`BIG_COMPOSITE`] and [`BTI_MULTICLUSTERING`].
 //!
 //! Shared by the `#[ignore]`d measurement probe (`probe_3782.rs`) and the
 //! committed regression lane (`issue_3782_corrupt_row_refusal.rs`) so the two
@@ -7,13 +9,14 @@
 //!
 //! # Why this oracle and not a CQLite-written one (#3042)
 //!
-//! Every byte here comes from a Cassandra-written SSTable
-//! (`test_basic.composite_key_table`, `nb`/BIG, LZ4, `clustering_key2 TEXT`).
-//! The corruption is applied to the LZ4 **literal** carrying the value and the
-//! chunk's trailing CRC32 is then recomputed, so the change is
-//! length-preserving, provably a single DECOMPRESSED byte (asserted here), and
-//! invisible to integrity checks. A CQLite-written round-trip fixture could not
-//! evidence this at all: both legs would share any framing mistake.
+//! Every byte here comes from a Cassandra-written SSTable. The corruption is
+//! applied to the LZ4 **literal** carrying the value and the chunk's trailing
+//! CRC32 is then recomputed, so it is length-preserving (asserted here) and
+//! invisible to integrity checks. One compressed byte is what real bit-rot
+//! changes; LZ4 back-references replicate it into 1..N decompressed positions,
+//! every one of which is asserted to hold the flipped value. A CQLite-written
+//! round-trip fixture could not evidence this at all: both legs would share any
+//! framing mistake.
 //!
 //! The expectations the consuming tests assert are derived from the FORMAT (a
 //! `text` clustering value whose length prefix no longer frames a decodable
@@ -31,6 +34,54 @@ pub const SCHEMA_FILE: &str = "basic-types.cql";
 /// also appears exactly once as a verbatim LZ4 literal is the mutation target.
 const NEEDLES: &[&[u8]] = &[b"necessary", b"purpose", b"artist", b"region", b"glass"];
 
+/// Which Cassandra-written fixture to stage, and how to find its mutation site.
+///
+/// `needles` is an OPTIMISATION, not a requirement: it names values a human
+/// already knows to be unique in that fixture. When none of them is a clean
+/// single-byte literal (the BTI fixture's clustering values repeat hundreds of
+/// times, so LZ4 emits them as back-references), the site is DERIVED from the
+/// fixture's own bytes instead — see [`mutate_text_literal`]. Either way the
+/// mutation is ACCEPTED only after decompressing and observing that exactly ONE
+/// decompressed byte changed, so the site is established by measurement rather
+/// than by the needle list being trusted.
+pub struct FixtureSpec {
+    pub keyspace: &'static str,
+    pub table: &'static str,
+    pub schema_file: &'static str,
+    pub needles: &'static [&'static [u8]],
+}
+
+/// `test_basic.composite_key_table` — Cassandra 5.0 `nb`/BIG, LZ4,
+/// `clustering_key2 TEXT`.
+pub const BIG_COMPOSITE: FixtureSpec = FixtureSpec {
+    keyspace: FIX_KS,
+    table: FIX_TABLE,
+    schema_file: SCHEMA_FILE,
+    needles: NEEDLES,
+};
+
+/// `test_da.multiclustering_table` — Cassandra 5.0 `da`/BTI, LZ4,
+/// `bucket TEXT` + `seq INT` clustering, `payload TEXT`.
+///
+/// The BTI counterpart matters because the `da` full scan takes a DIFFERENT
+/// route to the same parse: `bti_scan_with_metadata_cancellable` stitches the
+/// whole data section and calls `parse_block_with_cell_metadata` (issue #3782,
+/// roborev job 48), where BIG goes through `sequential_scan`/`parse_block`.
+///
+/// The needle carries the clustering value's 2-byte length prefix
+/// (`0x0017` = 23 = `len("charlie-extended-bucket")`) because the same text also
+/// appears INSIDE every `payload` value of that partition, and a `payload`
+/// mutation is NOT a decode error on this reader (measured: the row still
+/// decodes, carrying the invalid byte). Pinning the prefix pins the CLUSTERING
+/// field, whose decode does validate — the same corruption class the BIG lane
+/// uses.
+pub const BTI_MULTICLUSTERING: FixtureSpec = FixtureSpec {
+    keyspace: "test_da",
+    table: "multiclustering_table",
+    schema_file: "multiclustering-table-bti.cql",
+    needles: &[b"\x00\x17charlie-extended-bucket"],
+};
+
 /// A staged control/mutated pair. Each `*_root` is an ingestion data root — the
 /// directory holding `<keyspace>/<table>-<uuid>/`, which is what
 /// `IngestionConfig::data_dir` expects.
@@ -39,8 +90,12 @@ pub struct Staged {
     pub mutated_root: PathBuf,
     pub control_dir: PathBuf,
     pub mutated_dir: PathBuf,
-    /// The DECOMPRESSED Data.db offset whose byte was flipped to `0xFF`.
+    /// The FIRST DECOMPRESSED Data.db offset that reads `0xFF` after the flip.
     pub mutated_offset: usize,
+    /// How many decompressed positions the ONE compressed-byte flip changed.
+    /// `1` when the literal is referenced nowhere else; more when LZ4
+    /// back-references replicate it (every one of them holds the same `0xFF`).
+    pub mutated_span: usize,
 }
 
 /// The first component in `dir` whose file name ends with `suffix`.
@@ -60,9 +115,10 @@ pub fn comp_file(dir: &Path, suffix: &str) -> PathBuf {
     }
 }
 
-/// `CompressionInfo.db` → (algorithm, chunk_offsets). Parsed independently of the
-/// code under test so the chunk layout is an on-disk fact, not a derived one.
-fn parse_compression_info(p: &Path) -> (String, Vec<u64>) {
+/// `CompressionInfo.db` → (algorithm, chunk_length, chunk_offsets). Parsed
+/// independently of the code under test so the chunk layout is an on-disk fact,
+/// not a derived one.
+fn parse_compression_info(p: &Path) -> (String, usize, Vec<u64>) {
     let b = std::fs::read(p).expect("read CompressionInfo.db");
     let be16 = |o: usize| u16::from_be_bytes([b[o], b[o + 1]]) as usize;
     let be32 = |o: usize| {
@@ -80,6 +136,7 @@ fn parse_compression_info(p: &Path) -> (String, Vec<u64>) {
         let vl = be16(o);
         o += 2 + vl;
     }
+    let chunk_length = be32(o);
     o += 4 + 4 + 8; // chunk_length, max_compressed_length, data_length
     let n = be32(o);
     o += 4;
@@ -92,14 +149,40 @@ fn parse_compression_info(p: &Path) -> (String, Vec<u64>) {
             )
         })
         .collect();
-    (alg, offs)
+    (alg, chunk_length, offs)
 }
 
-/// Flip ONE byte of the LZ4 literal carrying one of [`NEEDLES`] to `0xFF` in the
-/// already-copied fixture at `dir`, and fix the chunk CRC32. Returns the changed
-/// DECOMPRESSED offset. Asserts length-preservation and a single-byte change.
-fn mutate_clustering_utf8(dir: &Path) -> usize {
-    let (alg, offs) = parse_compression_info(&comp_file(dir, "-CompressionInfo.db"));
+/// Flip ONE byte of the COMPRESSED chunk — a byte carried verbatim inside an
+/// LZ4 literal — to `0xFF`, fix that chunk's trailing CRC32, and report where
+/// the change lands in the DECOMPRESSED data section.
+///
+/// # Why a COMPRESSED-domain flip
+///
+/// This is the corruption model real bit-rot produces: what rots is the bytes on
+/// disk, which for a compressed SSTable are the compressed ones. A single
+/// compressed literal byte is replicated into every decompressed position that
+/// LZ4 back-references it from, so the decompressed change is 1..N positions —
+/// each holding the SAME flipped value. That is asserted, not assumed: the
+/// candidate is accepted only after re-decompressing and observing (a) the
+/// decompressed LENGTH is unchanged, so no framing was disturbed, and (b) EVERY
+/// changed position reads `0xFF`. A candidate that fails either check is
+/// reverted and the next one tried.
+///
+/// `0xFF` is never a valid UTF-8 byte in any position, so a `text` value
+/// carrying it is a decode error by the FORMAT (Cassandra stores UTF8Type as
+/// UTF-8), never by CQLite's prior behaviour.
+///
+/// # Why the needle must pin the FIELD, not just the text
+///
+/// Measured on `test_da.multiclustering_table`: a `payload` (regular cell) byte
+/// flipped to `0xFF` is NOT refused — the row still decodes and carries the
+/// invalid byte — while the same flip inside a CLUSTERING value is a decode
+/// error. So each spec's needle names the on-disk spelling of a clustering
+/// value (its length prefix included where the same text also occurs in a
+/// regular cell), and the caller's test asserts the refusal, so a needle that
+/// stopped pinning the right field fails loudly rather than passing quietly.
+fn mutate_text_literal(dir: &Path, spec: &FixtureSpec) -> (usize, usize) {
+    let (alg, chunk_length, offs) = parse_compression_info(&comp_file(dir, "-CompressionInfo.db"));
     assert!(
         alg.to_uppercase().contains("LZ4"),
         "expected an LZ4-compressed fixture, got {alg}"
@@ -108,46 +191,70 @@ fn mutate_clustering_utf8(dir: &Path) -> usize {
     let mut data = std::fs::read(&data_path).expect("read Data.db");
     let file_len = data.len() as u64;
 
-    for needle in NEEDLES {
-        for (i, &start) in offs.iter().enumerate() {
-            let end = offs.get(i + 1).copied().unwrap_or(file_len);
-            let (lo, hi) = (start as usize, (end - 4) as usize);
-            let before =
-                lz4_flex::decompress_size_prepended(&data[lo..hi]).expect("decompress chunk");
-            let dhits: Vec<usize> = (0..before.len().saturating_sub(needle.len()))
-                .filter(|&k| &before[k..k + needle.len()] == *needle)
-                .collect();
-            let chits: Vec<usize> = (0..(hi - lo).saturating_sub(needle.len()))
-                .filter(|&k| &data[lo + k..lo + k + needle.len()] == *needle)
-                .collect();
-            if dhits.len() != 1 || chits.len() != 1 {
+    for (i, &start) in offs.iter().enumerate() {
+        let end = offs.get(i + 1).copied().unwrap_or(file_len);
+        let (lo, hi) = (start as usize, (end - 4) as usize);
+        let before = lz4_flex::decompress_size_prepended(&data[lo..hi]).expect("decompress chunk");
+        if before.is_empty() {
+            continue;
+        }
+        // Chunks are fixed-size in the DECOMPRESSED domain (`chunk_length` from
+        // CompressionInfo.db), so the reported offset is the position within
+        // the whole stitched data section.
+        let chunk_base = i * chunk_length;
+        for flip_at in candidate_literal_sites(&data[lo..hi], spec.needles) {
+            let abs = lo + flip_at;
+            let orig = data[abs];
+            if !orig.is_ascii_graphic() {
                 continue;
             }
-            let (dpos, flip_at) = (dhits[0], lo + chits[0]);
-            let orig = data[flip_at];
-            data[flip_at] = 0xFF;
-            let after =
-                lz4_flex::decompress_size_prepended(&data[lo..hi]).expect("re-decompress chunk");
-            assert_eq!(
-                before.len(),
-                after.len(),
-                "the mutation must be length-preserving"
-            );
-            let diffs: Vec<usize> = (0..before.len())
-                .filter(|&k| before[k] != after[k])
-                .collect();
-            if diffs.as_slice() != [dpos] {
-                data[flip_at] = orig; // not a clean single-byte change; try the next needle
+            data[abs] = 0xFF;
+            let after = match lz4_flex::decompress_size_prepended(&data[lo..hi]) {
+                Ok(a) => a,
+                Err(_) => {
+                    data[abs] = orig;
+                    continue;
+                }
+            };
+            let diffs: Vec<usize> = if after.len() == before.len() {
+                (0..before.len())
+                    .filter(|&k| before[k] != after[k])
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if diffs.is_empty() || !diffs.iter().all(|&k| after[k] == 0xFF) {
+                data[abs] = orig; // not a clean replicated flip; try the next site
                 continue;
             }
-            assert_eq!(after[dpos], 0xFF);
             let crc = crc32fast::hash(&data[lo..hi]).to_be_bytes();
             data[hi..hi + 4].copy_from_slice(&crc);
             std::fs::write(&data_path, &data).expect("write mutated Data.db");
-            return dpos;
+            return (chunk_base + diffs[0], diffs.len());
         }
     }
-    panic!("no needle occurs exactly once as a verbatim LZ4 literal in any chunk");
+    panic!(
+        "no needle of {}.{} is carried verbatim as a flippable LZ4 literal",
+        spec.keyspace, spec.table
+    );
+}
+
+/// Compressed-chunk byte positions worth flipping: for each needle that occurs
+/// EXACTLY ONCE in the compressed chunk (hence verbatim in a literal), the last
+/// byte of its VALUE. Needles may carry a length prefix to pin a field, so the
+/// last byte is used rather than the first — it is inside the value for both
+/// spellings.
+fn candidate_literal_sites(comp: &[u8], needles: &[&[u8]]) -> impl Iterator<Item = usize> {
+    let mut sites: Vec<usize> = Vec::new();
+    for needle in needles {
+        let hits: Vec<usize> = (0..comp.len().saturating_sub(needle.len()))
+            .filter(|&k| &comp[k..k + needle.len()] == *needle)
+            .collect();
+        if let [k] = hits.as_slice() {
+            sites.push(k + needle.len() - 1);
+        }
+    }
+    sites.into_iter()
 }
 
 fn copy_dir(src: &Path, dst: &Path) {
@@ -159,9 +266,16 @@ fn copy_dir(src: &Path, dst: &Path) {
     }
 }
 
-/// Stage a pristine copy and a single-byte-mutated copy of the fixture directory
-/// `src` under a `tag`-unique temp root.
+/// Stage a pristine copy and a single-byte-mutated copy of the BIG fixture
+/// directory `src` under a `tag`-unique temp root.
 pub fn stage_control_and_mutated(src: &Path, tag: &str) -> Staged {
+    stage_spec(&BIG_COMPOSITE, src, tag)
+}
+
+/// [`stage_control_and_mutated`] for an explicit [`FixtureSpec`], so the BTI
+/// (`da`) lane stages its own Cassandra-written fixture through exactly the same
+/// mutation + measurement path (no second implementation to drift).
+pub fn stage_spec(spec: &FixtureSpec, src: &Path, tag: &str) -> Staged {
     let name = src
         .file_name()
         .expect("fixture directory has a name")
@@ -170,16 +284,17 @@ pub fn stage_control_and_mutated(src: &Path, tag: &str) -> Staged {
     let _ = std::fs::remove_dir_all(&root);
     let control_root = root.join("ctl").join("sstables");
     let mutated_root = root.join("mut").join("sstables");
-    let control_dir = control_root.join(FIX_KS).join(&name);
-    let mutated_dir = mutated_root.join(FIX_KS).join(&name);
+    let control_dir = control_root.join(spec.keyspace).join(&name);
+    let mutated_dir = mutated_root.join(spec.keyspace).join(&name);
     copy_dir(src, &control_dir);
     copy_dir(src, &mutated_dir);
-    let mutated_offset = mutate_clustering_utf8(&mutated_dir);
+    let (mutated_offset, mutated_span) = mutate_text_literal(&mutated_dir, spec);
     Staged {
         control_root,
         mutated_root,
         control_dir,
         mutated_dir,
         mutated_offset,
+        mutated_span,
     }
 }

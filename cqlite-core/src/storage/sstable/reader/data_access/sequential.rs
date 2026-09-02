@@ -23,6 +23,7 @@ use super::model::{
     sort_by_token_order, sort_by_token_order_with_meta, table_ids_match, SCAN_FOR_KEY_CALLS,
 };
 use crate::storage::scan_cancel::ScanCancel;
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use std::io::SeekFrom;
@@ -393,10 +394,14 @@ impl SSTableReader {
             // build the parser with read_shadowing = true. The stitch/parse split
             // (issue #1411) is preserved: CRC/decompress failures already surfaced
             // via `stitch_all_chunks` above; only `parse_block` may soft-miss.
+            let parser = self.build_v5_parser(true);
             // #3782: `stitch_all_chunks` returned the WHOLE data section.
-            let parser = self.build_v5_parser(true).with_complete_buffer(true);
-            let all_entries = match parser.parse_block(&stitched_buffer, schema_opt.as_ref(), self)
-            {
+            let all_entries = match parser.parse_block(
+                &stitched_buffer,
+                BufferExtent::Complete,
+                schema_opt.as_ref(),
+                self,
+            ) {
                 Ok(entries) => entries,
                 // Issue #1411 (roborev): the scan path (`stitch_and_parse_all_chunks`)
                 // propagates EVERY `parse_block` error via `?`. Mirror that here so

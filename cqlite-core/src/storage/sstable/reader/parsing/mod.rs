@@ -36,6 +36,8 @@ mod value_parsing_schema_type_tests;
 
 // Re-export V5CompressedLegacy parser for internal use
 pub(in crate::storage::sstable::reader) use row_decoder::V5CompressedLegacyParser;
+// Issue #3782: the buffer-extent contract every block-emit parse call states.
+pub(in crate::storage::sstable::reader) use row_decoder::BufferExtent;
 // ComplexColumnMeta is used internally within row_decoder.rs;
 // delta_scan.rs accesses it via the parse_block_emit_delta closure type
 // without needing an explicit re-export (Issue #700, DS4).

@@ -33,6 +33,7 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_emit_windowed<F>(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         row_body_window: Option<(usize, usize)>,
@@ -610,8 +611,8 @@ impl V5CompressedLegacyParser {
                                 // corrupted clustering byte return 23 of 100 rows.
                                 // Otherwise the tolerant break STAYS: a chunk-covering
                                 // window can legitimately cut a row at its tail. See
-                                // `with_complete_buffer`.
-                                if self.complete_buffer {
+                                // `BufferExtent`.
+                                if extent.is_complete() {
                                     return Err(e);
                                 }
                                 break; // End of valid data in partition
