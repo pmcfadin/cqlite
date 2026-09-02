@@ -69,8 +69,8 @@ flight_lib_state() {
 # --- RESOLVE THE PRELOADED LIBRARY ONCE, BEFORE ANY MEASUREMENT (#3551) ---------------------
 # Echoes the resolved absolute path; refuses (rc 1, diagnostic on stderr) otherwise. Called
 # ABOVE the argument boundary because it reads nothing but file metadata and because "refusing a
-# value after acting on it is not refusing it" — the same rule --bin-dir and --profile-out follow
-# a few lines up. An unusable candidate is a REFUSAL naming it, never a skip to the next one: a
+# value after acting on it is not refusing it" — the rule --bin-dir and --profile-out follow in
+# the driver. An unusable candidate is a REFUSAL naming it, never a skip to the next one: a
 # silently skipped unreadable library is how a host with jemalloc installed reports that it has
 # none.
 resolve_flight_allocator_lib() {
@@ -124,25 +124,25 @@ resolve_flight_allocator_lib() {
 # `none (...)` is a positive statement rather than an empty field: "no library" and "nobody wrote
 # the field down" must not look the same in an artifact the report cites.
 record_flight_allocator_facts() {
-if [[ "$FLIGHT_ALLOCATOR" == "jemalloc" ]]; then
-  FLIGHT_ALLOCATOR_LIB="$(resolve_flight_allocator_lib)" || return 1
-  FLIGHT_ALLOCATOR_LIB_RECORDED="$FLIGHT_ALLOCATOR_LIB"
-  FLIGHT_ALLOCATOR_LIB_BASENAME="${FLIGHT_ALLOCATOR_LIB##*/}"
-  # WHAT IS ASSERTED PER REP, recorded verbatim into the pin record so the report's allocator
-  # line cites a mechanism rather than a label. It also states its OWN LIMIT, in the record, for
-  # the reason `provenance` does: the per-rep files are written where the observation is made and
-  # NOTHING AT REPORT TIME requires them to be present.
-  FLIGHT_ALLOCATOR_VERIFICATION="per rep, AFTER await_server_ready: /proc/<server-pid>/maps is READ and must carry a mapping whose path contains '$FLIGHT_ALLOCATOR_LIB_BASENAME'; an absent mapping is FATAL for that rep, and an unreadable/empty maps file is FATAL as COULD-NOT-MEASURE (never read as verified). Necessary because glibc prints 'object ... cannot be preloaded ... ignored' and CONTINUES with system malloc, which would make this arm a byte-identical duplicate of the system arm under a label saying otherwise. Each rep's outcome is written to <tag>.allocator.status by scripts/perf/lib-flight-arm.sh verify_flight_allocator_mapping. DECLARED LIMIT: the driver ABORTS on a failure, and nothing at REPORT time requires those per-rep files to exist — that completeness check is the boundary-observation shape (#3272 round 22) and is NOT implemented for the allocator (#3551)."
-else
-  FLIGHT_ALLOCATOR_LIB=""
-  FLIGHT_ALLOCATOR_LIB_RECORDED="none (system malloc; any inherited LD_PRELOAD is EMPTIED for the server launch, and the absence of a jemalloc mapping is asserted per rep)"
-  FLIGHT_ALLOCATOR_LIB_BASENAME=""
-  # THE NEGATIVE IS ASSERTED TOO. A control arm silently running jemalloc — an operator with
-  # `LD_PRELOAD` exported in their shell — would INVERT the comparison, so it is refused rather
-  # than assumed: the launch EMPTIES `LD_PRELOAD` and the absence of a jemalloc mapping is then
-  # OBSERVED. Same declared limit as the jemalloc branch.
-  FLIGHT_ALLOCATOR_VERIFICATION="per rep, AFTER await_server_ready: /proc/<server-pid>/maps is READ and must carry NO jemalloc mapping; one present is FATAL, and an unreadable/empty maps file is FATAL as COULD-NOT-MEASURE (never read as verified). LD_PRELOAD is EMPTIED for the server launch rather than trusted to be unset, because a control arm quietly running jemalloc inverts the whole result. Each rep's outcome is written to <tag>.allocator.status by scripts/perf/lib-flight-arm.sh verify_flight_allocator_mapping. DECLARED LIMIT: the driver ABORTS on a failure, and nothing at REPORT time requires those per-rep files to exist — that completeness check is the boundary-observation shape (#3272 round 22) and is NOT implemented for the allocator (#3551)."
-fi
+  if [[ "$FLIGHT_ALLOCATOR" == "jemalloc" ]]; then
+    FLIGHT_ALLOCATOR_LIB="$(resolve_flight_allocator_lib)" || return 1
+    FLIGHT_ALLOCATOR_LIB_RECORDED="$FLIGHT_ALLOCATOR_LIB"
+    FLIGHT_ALLOCATOR_LIB_BASENAME="${FLIGHT_ALLOCATOR_LIB##*/}"
+    # WHAT IS ASSERTED PER REP, recorded verbatim into the pin record so the report's allocator
+    # line cites a mechanism rather than a label. It also states its OWN LIMIT, in the record, for
+    # the reason `provenance` does: the per-rep files are written where the observation is made and
+    # NOTHING AT REPORT TIME requires them to be present.
+    FLIGHT_ALLOCATOR_VERIFICATION="per rep, AFTER await_server_ready: /proc/<server-pid>/maps is READ and must carry a mapping whose path contains '$FLIGHT_ALLOCATOR_LIB_BASENAME'; an absent mapping is FATAL for that rep, and an unreadable/empty maps file is FATAL as COULD-NOT-MEASURE (never read as verified). Necessary because glibc prints 'object ... cannot be preloaded ... ignored' and CONTINUES with system malloc, which would make this arm a byte-identical duplicate of the system arm under a label saying otherwise. Each rep's outcome is written to <tag>.allocator.status by scripts/perf/lib-flight-arm.sh verify_flight_allocator_mapping. DECLARED LIMIT: the driver ABORTS on a failure, and nothing at REPORT time requires those per-rep files to exist — that completeness check is the boundary-observation shape (#3272 round 22) and is NOT implemented for the allocator (#3551)."
+  else
+    FLIGHT_ALLOCATOR_LIB=""
+    FLIGHT_ALLOCATOR_LIB_RECORDED="none (system malloc; any inherited LD_PRELOAD is EMPTIED for the server launch, and the absence of a jemalloc mapping is asserted per rep)"
+    FLIGHT_ALLOCATOR_LIB_BASENAME=""
+    # THE NEGATIVE IS ASSERTED TOO. A control arm silently running jemalloc — an operator with
+    # `LD_PRELOAD` exported in their shell — would INVERT the comparison, so it is refused rather
+    # than assumed: the launch EMPTIES `LD_PRELOAD` and the absence of a jemalloc mapping is then
+    # OBSERVED. Same declared limit as the jemalloc branch.
+    FLIGHT_ALLOCATOR_VERIFICATION="per rep, AFTER await_server_ready: /proc/<server-pid>/maps is READ and must carry NO jemalloc mapping; one present is FATAL, and an unreadable/empty maps file is FATAL as COULD-NOT-MEASURE (never read as verified). LD_PRELOAD is EMPTIED for the server launch rather than trusted to be unset, because a control arm quietly running jemalloc inverts the whole result. Each rep's outcome is written to <tag>.allocator.status by scripts/perf/lib-flight-arm.sh verify_flight_allocator_mapping. DECLARED LIMIT: the driver ABORTS on a failure, and nothing at REPORT time requires those per-rep files to exist — that completeness check is the boundary-observation shape (#3272 round 22) and is NOT implemented for the allocator (#3551)."
+  fi
 }
 
 # --- THE FLIGHT ARM'S PIN, VERIFIED WITH THE SAME RIGOUR AS THE SERVER'S (#3551) -----------
@@ -167,22 +167,22 @@ fi
 # about `--server-cpus` and a misleading one printed under a flight label. The substance of the
 # flight verification is the pin-mode echo below, which is captured and RECORDED.
 verify_flight_arm_pin() {
-verify_cpus_online "$FLIGHT_SERVER_CPUS" "flight server" >/dev/null || return 1
-echo "flight server CPUs: $FLIGHT_SERVER_CPUS -> verified present and ONLINE"
-case "$FLIGHT_PIN_MODE" in
-  siblings)
-    WS0_FLIGHT_PIN_VERIFIED="$(verify_sibling_pair "$FLIGHT_SERVER_CPUS" "flight server")" || return 1 ;;
-  distinct-cores)
-    WS0_FLIGHT_PIN_VERIFIED="$(verify_distinct_cores "$FLIGHT_SERVER_CPUS" "flight server")" || return 1 ;;
-  *)
-    echo "FATAL: --flight-pin-mode '$FLIGHT_PIN_MODE' reached the topology stage unhandled." >&2
-    echo "       The argument loop refuses every value but siblings|distinct-cores, so this is" >&2
-    echo "       an internal inconsistency. It stops the run rather than defaulting to either" >&2
-    echo "       assertion: which property was VERIFIED is what the report claims (#3551)." >&2
-    return 1 ;;
-esac
-echo "$WS0_FLIGHT_PIN_VERIFIED"
-verify_disjoint "$FLIGHT_SERVER_CPUS" "$CLIENT_CPUS" || return 1
+  verify_cpus_online "$FLIGHT_SERVER_CPUS" "flight server" >/dev/null || return 1
+  echo "flight server CPUs: $FLIGHT_SERVER_CPUS -> verified present and ONLINE"
+  case "$FLIGHT_PIN_MODE" in
+    siblings)
+      WS0_FLIGHT_PIN_VERIFIED="$(verify_sibling_pair "$FLIGHT_SERVER_CPUS" "flight server")" || return 1 ;;
+    distinct-cores)
+      WS0_FLIGHT_PIN_VERIFIED="$(verify_distinct_cores "$FLIGHT_SERVER_CPUS" "flight server")" || return 1 ;;
+    *)
+      echo "FATAL: --flight-pin-mode '$FLIGHT_PIN_MODE' reached the topology stage unhandled." >&2
+      echo "       The argument loop refuses every value but siblings|distinct-cores, so this is" >&2
+      echo "       an internal inconsistency. It stops the run rather than defaulting to either" >&2
+      echo "       assertion: which property was VERIFIED is what the report claims (#3551)." >&2
+      return 1 ;;
+  esac
+  echo "$WS0_FLIGHT_PIN_VERIFIED"
+  verify_disjoint "$FLIGHT_SERVER_CPUS" "$CLIENT_CPUS" || return 1
 }
 
 # ---------------------------------------------------------------------------
