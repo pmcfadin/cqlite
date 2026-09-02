@@ -18,7 +18,25 @@
 //!    as fabrication (roborev job 57 finding 1; duplication is how the measured
 //!    pre-fix compaction result grew to 102 rows while losing two partitions).
 //!
-//! # DECLARED GAP 1 of 2 — point and full do NOT yet agree here (#3782, #3922)
+//! # The change's tracked residuals — TWO are declared here, THREE exist
+//!
+//! The "GAP N of 2" labels below count the gaps declared IN THIS LANE, not
+//! #3782's residuals in total: #3782 has **three** tracked residuals touching
+//! read routes, and the third is declared where its route is exercised rather
+//! than duplicated here.
+//!
+//! | residual | route | declared in |
+//! |----------|-------|-------------|
+//! | **#3922** | the POINT read path still answers `Ok` short | GAP 1 of 2 below |
+//! | **#3928** | the partition-HEADER arm still resyncs one byte | GAP 2 of 2 below |
+//! | **#3949** | AC2 half (b): the index-random-read refusal still arrives via #2302's Signal-B WARN + sequential re-walk | `issue_3782_corrupt_row_refusal.rs` module doc |
+//!
+//! Nothing in this lane reaches #3949's route: both arms here go through
+//! `Database::execute` under a forced read path, never
+//! `SSTableReader::iterate_all_partitions`, so declaring it as a third gap of
+//! THIS case would claim a coverage boundary this case does not have.
+//!
+//! # DECLARED GAP 1 of 2 (in this lane) — point and full do NOT yet agree here (#3782, #3922)
 //!
 //! The POINT arm still answers `Ok` with a SHORT row set for the damaged
 //! partition. That is not an oversight in the fix: the BIG-promoted and BTI point
@@ -48,7 +66,7 @@
 //! — the two read paths agreeing on the corrupt fixture — stays untested
 //! forever behind a green suite.
 //!
-//! # DECLARED GAP 2 of 2 — the partition-HEADER arm still resyncs (#3928)
+//! # DECLARED GAP 2 of 2 (in this lane) — the partition-HEADER arm still resyncs (#3928)
 //!
 //! #3782 fixes the ROW arm: on a proven-complete buffer a row that fails to
 //! decode is refused. The partition-HEADER arm is UNCHANGED and still
