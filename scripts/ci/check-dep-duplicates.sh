@@ -265,6 +265,26 @@ baseline_unusable() {
   exit 4
 }
 
+# require_base_count <value> <lineno> <what>: the closed grammar's COUNT rule, in ONE
+# place. A value validated only as "all digits" is still not a NUMBER to the shell: a
+# leading zero selects base 8, so `010` would compare and sum as 8 and `08` would abort
+# the parse outright with "value too great for base". The generator never emits a leading
+# zero, so a canonical baseline is unaffected — but the baseline is a COMPARISON KEY, and
+# a key with two spellings for one value is a key that guesses. So a leading zero is
+# REFUSED BY NAME rather than normalised with `10#`, which would silently accept both
+# spellings of one count. A bare `0` stays legal: a workspace with no duplicates at all is
+# a legitimate measurement the generator can publish.
+require_base_count() {
+  case "$1" in
+    ''|*[!0-9]*) baseline_unusable baseline-garbage "line $2: '$1' is not $3" ;;
+  esac
+  case "$1" in
+    0) return 0 ;;
+    0*) baseline_unusable baseline-garbage "line $2: '$1' has a leading zero — the count grammar is canonical decimal, and to the shell a leading zero means base 8 ('010' would sum as 8, '08' aborts). Regenerate the baseline rather than hand-editing it." ;;
+  esac
+  return 0
+}
+
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dep-duplicates.XXXXXX")"
 cleanup() { rm -rf "$WORK_DIR"; return 0; }
 trap cleanup EXIT
@@ -581,19 +601,19 @@ while IFS= read -r line || [ -n "$line" ]; do
     instances)
       [ "$#" -eq 2 ] || baseline_unusable baseline-garbage "line $lineno: 'instances' takes exactly one value: '$line'"
       [ -z "$base_instances" ] || baseline_unusable baseline-garbage "line $lineno: a second 'instances' line"
-      case "$2" in ''|*[!0-9]*) baseline_unusable baseline-garbage "line $lineno: '$2' is not a count" ;; esac
+      require_base_count "$2" "$lineno" "a count"
       base_instances="$2"
       ;;
     crates)
       [ "$#" -eq 2 ] || baseline_unusable baseline-garbage "line $lineno: 'crates' takes exactly one value: '$line'"
       [ -z "$base_crates" ] || baseline_unusable baseline-garbage "line $lineno: a second 'crates' line"
-      case "$2" in ''|*[!0-9]*) baseline_unusable baseline-garbage "line $lineno: '$2' is not a count" ;; esac
+      require_base_count "$2" "$lineno" "a count"
       base_crates="$2"
       ;;
     crate)
       [ "$#" -eq 3 ] || baseline_unusable baseline-garbage "line $lineno: 'crate' takes a name and a count: '$line'"
       case "$2" in ''|*[!A-Za-z0-9_.-]*) baseline_unusable baseline-garbage "line $lineno: '$2' is not a crate name" ;; esac
-      case "$3" in ''|*[!0-9]*) baseline_unusable baseline-garbage "line $lineno: '$3' is not a count" ;; esac
+      require_base_count "$3" "$lineno" "a count"
       [ "$3" -ge 2 ] || baseline_unusable baseline-garbage "line $lineno: '$2' is recorded $3 time(s) — a DUPLICATE needs at least 2"
       census_get "$BASE_CENSUS" "$2" >/dev/null && baseline_unusable baseline-garbage "line $lineno: '$2' is recorded twice"
       printf '%s %s\n' "$2" "$3" >>"$BASE_CENSUS"

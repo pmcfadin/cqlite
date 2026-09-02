@@ -518,6 +518,33 @@ crate foo 1
 crate bar 3
 ' 'a DUPLICATE needs at least 2'
 
+# THE COUNT GRAMMAR IS CANONICAL DECIMAL (roborev round 7, Low). "All digits" is NOT "is a
+# number" to the shell: a leading zero selects base 8, so a hand-edited `010` would be
+# COMPARED AND SUMMED AS 8 — a baseline silently reading LOWER than it says, which is the
+# permissive direction — and `08` aborts the parse outright with "value too great for
+# base". The generator never emits either spelling, so these are hand-edit and bad-merge
+# shapes; they are REFUSED BY NAME rather than normalised with `10#`, because the baseline
+# is a COMPARISON KEY and a key with two spellings for one value is a key that guesses.
+# A bare `0` stays legal, and P6 above is the case that pins it.
+p11_case "a leading zero on 'instances' (base 8: '010' would compare as 8)" \
+  'instances 010
+crates 2
+crate foo 5
+crate bar 5
+' 'leading zero'
+p11_case "a leading zero on 'crates' ('08' aborts shell arithmetic outright)" \
+  'instances 8
+crates 08
+crate foo 4
+crate bar 4
+' 'leading zero'
+p11_case "a leading zero on a 'crate' count" \
+  'instances 8
+crates 2
+crate foo 010
+crate bar 4
+' 'leading zero'
+
 # --- P17/P18/P19: THE MEASUREMENT PARSER IS AS STRICT AS THE BASELINE PARSER ------
 # THE ASYMMETRY THIS CLOSES (roborev, #1700): the BASELINE reader already refuses a
 # `crate x 1` ("a DUPLICATE needs at least 2") and refuses any line outside its closed
@@ -1118,67 +1145,79 @@ exit 55')
     bad "G0/G1/G2: could not build the standalone planted fixture ($(tail -1 "$TMPROOT/fixture.log" 2>/dev/null)) — a fixture this suite builds from committed source and a local path remote needs no network and no host capability beyond git, so a failure here is a defect and not a host property"
   fi
 
-  # G3 — THE LIVE COMPONENT, AND THE SUITE'S ONE LIVE PROBE (round 4 consolidation; see
-  # the L1 note above). It has to prove the COMMITTED component, the COMMITTED guard and
-  # the COMMITTED baseline agree on a REAL tree — so the assertion is affirmative — but
-  # every outcome the component is DESIGNED to produce here is accepted:
-  #   PASS + NO-INCREASE       the ratchet holds
-  #   PASS + ADVISORY-INCREASE the ratchet grew; ADVISORY, non-failing BY MANDATE
-  #   SKIP + a named cause     nothing could be measured on this host (reported SKIPPED)
-  # A FAIL, a missing component line, or a PASS with no echoed measurement remain
-  # failures: those are states the component must never reach.
+  # G3 — THE LIVE PROBE, AND IT INVOKES THE GUARD DIRECTLY (roborev round 7, Medium 1).
+  # It used to run `agent-gate.sh --only dep-duplicates`, i.e. a WHOLE NESTED GATE, which
+  # paid the #3544 component-set pre-flight a SECOND time (a live `git ls-remote`) and a
+  # bounded-but-up-to-600s cargo probe INSIDE mandatory `tooling-tests`. That is #3958's
+  # own finding pointed at the one call site I had told the implementer to leave alone.
+  # Nothing here needs the gate: the component's LINE RENDERING and its #3453 annotation
+  # are asserted on the planted fixture by G1a, against an input this suite CONTROLS, and
+  # structurally by test_agent_gate_feature_matrix_annotation.sh's COMPONENTS-derived B11
+  # loop. What only the REAL workspace can answer is whether the COMMITTED guard and the
+  # COMMITTED baseline agree on it — so that, and only that, is what this case asks.
   #
-  # ONE EXCEPTION TO "EVERY NAMED CAUSE IS A SKIP", inherited from L1: a
-  # SKIP-BASELINE-UNUSABLE cause (baseline-missing / baseline-garbage) is NOT a property of
-  # this host — it means the COMMITTED baseline in THIS checkout is absent, truncated,
-  # hand-edited or badly merged. That is a repository defect and the one thing L1 existed to
-  # catch, so it stays a test FAILURE. Every other named cause (no cargo, no bounded probe,
-  # cargo tree failed, unparseable output) is genuinely host-dependent and is SKIPPED.
+  # THE CAUSE SET IS NOW CLASSIFIED AFFIRMATIVELY, WHICH IS THE SAME FINDING'S OTHER HALF
+  # (Medium 2). This case used to accept EVERY skip except a baseline error — a permissive
+  # branch keyed on `!= bad` instead of `= OK`, the sixth instance in this file of that one
+  # family — so a cause nobody had classified, a changed `cargo tree` output shape, or a
+  # missing workspace manifest each left mandatory `tooling-tests` GREEN having measured
+  # nothing. Every one of the guard's twelve cause tokens is classified below BY NAME, and
+  # an absent or UNRECOGNISED cause is a FAILURE: a cause added to the guard later must be
+  # classified here deliberately instead of inheriting a pass.
+  #
+  # DECLARED RESIDUAL, exactly one cause wide: a STALE COMMITTED `Cargo.lock` lands in
+  # `cargo-tree-failed`, because the guard probes `--locked --offline`, and is therefore
+  # SKIPPED here rather than failed. It is indistinguishable from the genuine host property
+  # sharing that token — a cold offline registry cache — without either a SECOND live cargo
+  # probe (the very cost this rewrite removes) or a parse of cargo's English stderr
+  # (#3400's fragility class). And nothing else in the gate closes it: the gate's own cargo
+  # components deliberately run WITHOUT `--locked`, so they would silently RE-RESOLVE a
+  # stale lockfile rather than red (see the tree-capture note in agent-gate.sh; adding
+  # `--locked` there is follow-up #2962). Declared, not papered over.
   if [ -z "$(type -P cargo || true)" ]; then
-    skipped "G3: no cargo on PATH — the live component would SKIP for an unrelated reason"
+    skipped "G3: no cargo on PATH — the live guard would report cargo-absent for a reason unrelated to this suite"
   else
-    g3_sum="$TMPROOT/g3-summary.txt"
     g3_log="$TMPROOT/g3.log"
-    ( cd "$REPO_ROOT" && AGENT_GATE_SUMMARY_FILE="$g3_sum" AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
-        bash "$GATE" --only dep-duplicates ) >"$g3_log" 2>&1
-    g3_line="$(grep -E '^dep-duplicates: +(PASS|FAIL|SKIP)' "$g3_sum" 2>/dev/null | head -1)"
-    case "$g3_line" in
-      '')
-        bad "G3: no dep-duplicates component line in the SUMMARY — the component did not run" ;;
-      *FAIL*)
-        bad "G3: the component recorded FAIL, which it may never do (#1700 AC2): $g3_line" ;;
-      *SKIP*)
-        # L1's ASYMMETRY, folded in: a broken COMMITTED baseline is a repository defect,
-        # never a host property, so it FAILS here where every other named cause SKIPS.
-        if grep -q 'SKIP-BASELINE-UNUSABLE' "$g3_log" 2>/dev/null; then
-          bad "G3/L1: the COMMITTED baseline $BASELINE_REL does not parse in this checkout: $(grep -o 'cause=[a-z-]* detail=.*' "$g3_log" | head -1)"
-        else
-          skipped "G3: the live workspace could not be measured here ($(grep -o 'cause=[a-z-]*' "$g3_log" | head -1)) — a SKIP is a documented, correct outcome and not a failure"
-        fi ;;
-      *PASS*)
+    ( cd "$REPO_ROOT" && bash "$GUARD" ) >"$g3_log" 2>&1
+    g3_rc=$?
+    g3_cause="$(sed -n 's/.*cause=\([a-z-]*\).*/\1/p' "$g3_log" | head -1)"
+    case "$g3_rc" in
+      0)
         if grep -qE 'dep-duplicates: (0 INCREASE RECOGNISED|ADVISORY-INCREASE)' "$g3_log"; then
-          ok "G3: the live component records PASS and echoes an AFFIRMATIVE reading ($(grep -oE 'verdict (NO-INCREASE|ADVISORY-INCREASE)' "$g3_log" | head -1))"
+          ok "G3: the committed guard measures the real workspace and prints an AFFIRMATIVE reading ($(grep -oE 'verdict (NO-INCREASE|ADVISORY-INCREASE)' "$g3_log" | head -1))"
         else
-          bad "G3: PASS with NEITHER an affirmative '0 INCREASE RECOGNISED' nor an ADVISORY-INCREASE in the log — that is the vacuous pass this component must never emit"
+          bad "G3: exit 0 with NEITHER an affirmative '0 INCREASE RECOGNISED' nor an ADVISORY-INCREASE — that is the vacuous pass this guard must never emit"
         fi
-        # L1's property in the AFFIRMATIVE direction: the committed baseline was really
-        # READ and COMPARED against, not merely present. The guard prints its comparison
-        # as `… vs baseline <instances>/<crates>`, so that line is the evidence.
-        if grep -qE 'dep-duplicates: .*vs baseline [0-9]+/[0-9]+' "$g3_log"; then
-          ok "G3/L1: the COMMITTED baseline was READ and COMPARED on the real workspace ($(grep -oE 'vs baseline [0-9]+/[0-9]+' "$g3_log" | head -1)) — the property L1 used to buy with a second live probe"
+        # L1's property: the committed baseline was really READ and COMPARED against, not
+        # merely present. The guard prints its comparison as `… vs baseline <inst>/<crates>`.
+        if grep -qE 'vs baseline [0-9]+/[0-9]+' "$g3_log"; then
+          ok "G3/L1: the COMMITTED baseline was READ and COMPARED on the real workspace ($(grep -oE 'vs baseline [0-9]+/[0-9]+' "$g3_log" | head -1))"
         else
-          bad "G3/L1: PASS with no '… vs baseline <n>/<m>' comparison in the log — the committed baseline was not evidenced as read"
+          bad "G3/L1: exit 0 with no '… vs baseline <n>/<m>' comparison — the committed baseline was not evidenced as read"
         fi
-        case "$g3_line" in
-          *UNDECLARED*|*UNCLASSIFIED*)
-            bad "G3: the live annotation reads UNDECLARED/UNCLASSIFIED — the declared class does not match how cargo is really invoked (#3453): $g3_line" ;;
-          *'via check-dep-duplicates.sh'*'feature set NOT observed'*)
-            ok "G3: the live annotation NAMES the driver and claims no feature set (#3453 indirect class)" ;;
-          *)  bad "G3: unexpected live annotation: $g3_line" ;;
-        esac
         ;;
+      3)
+        case "$g3_cause" in
+          # HOST properties: this box lacks a capability. A skip is the correct outcome.
+          cargo-absent|probe-unboundable|cargo-tree-failed|ansi-strip-failed)
+            skipped "G3: the live workspace could not be measured on this host (cause=$g3_cause) — a documented HOST property, so a SKIP is correct and not a failure" ;;
+          # NOT host properties. `workspace-manifest-absent` at the committed workspace root
+          # is a repository defect; the five parser causes mean the PINNED toolchain's
+          # `cargo tree -d` output no longer matches this guard's closed grammar, which is
+          # precisely the signal this suite exists to surface rather than swallow.
+          workspace-manifest-absent|unrecognised-section-header|unrecognised-line|malformed-record|unparseable-output|implausible-census)
+            bad "G3: cause=$g3_cause is NOT a host property — it means the committed tree or the pinned toolchain's cargo output does not match the guard's closed grammar, so nothing was measured and that must not read green: $(grep -o 'cause=.*' "$g3_log" | head -1)" ;;
+          '')
+            bad "G3: the guard exited 3 (unmeasurable) with NO cause token — an unmeasured state must always name itself: $(tail -1 "$g3_log")" ;;
+          *)
+            bad "G3: cause=$g3_cause is not classified by this case. A new cause must be added to the HOST allowlist or the failing set DELIBERATELY — inheriting a pass is the permissive default this rewrite removed" ;;
+        esac ;;
+      4)
+        # L1's ASYMMETRY: a broken COMMITTED baseline is a repository defect, never a host
+        # property, so it FAILS here where every host-class cause skips.
+        bad "G3/L1: the COMMITTED baseline $BASELINE_REL does not parse in this checkout: $(grep -o 'cause=[a-z-]* detail=.*' "$g3_log" | head -1)" ;;
       *)
-        bad "G3: unrecognised component status: $g3_line" ;;
+        bad "G3: the guard exited $g3_rc — on a plain invocation of the committed tree it may only ever exit 0 (measured), 3 (unmeasurable) or 4 (baseline unusable); 1 is an internal ERROR and 2 a usage error, and neither is reachable here: $(tail -1 "$g3_log")" ;;
     esac
   fi
 fi
@@ -1207,7 +1246,13 @@ echo "dep-duplicates ratchet self-test: $PASS passed, $FAIL failed"
 # #3958 ADDS TWO AND MOVES THE FLOOR BY ZERO, for the same reason: G0a (the pin took) and
 # G0b (the pre-flight was exercised) both need git AND the gate copy, so they are G-class
 # and cannot be counted on a host where the G block does not build. Measured 73 here.
-CASE_FLOOR=46
+# ROUND 8: G3 sheds its duplicate annotation verdict (G1a owns that property on a
+# CONTROLLED input) and gains none, so the G-class total falls by one while the three new
+# planted P11 shapes add three host-independent ones. Measured 75 here.
+# ROUND 8 ADDS THREE AND MOVES THE FLOOR BY THREE: the P11 leading-zero shapes are
+# planted (shim cargo + plant_timeout), so they are host-independent BY CONSTRUCTION and
+# a deletion of them must red. 46 + 3 = 49.
+CASE_FLOOR=49
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): cases are being skipped or dying silently.\n' \
     "$((PASS + FAIL))" "$CASE_FLOOR" >&2
