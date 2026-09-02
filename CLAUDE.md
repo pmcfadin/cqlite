@@ -129,7 +129,14 @@ named setup failure instead of 14 separate `beforeAll` throws and closes `parity
 placeholder — the one corpus-conditional path in that suite that would pass silently. (An earlier draft
 of this paragraph said those suites `describe.skip`; **measured, none does** — the repo's Node
 convention THROWS. A false rationale in a gate log is worse than none, because it is what stops the
-next person looking.) The durable question is the same one shape up: for each workspace member, **which component
+next person looking.) **The throwing helper was NAMED `skipIfNoDatasets()` until #3641** — a
+skip-named function that could not skip, believed by design work until someone measured it (an empty
+root gives `prepared.test.js` 16 FAILED of 16, not 16 skipped). It is now
+`assertDatasetsAvailable()`, the three suites that had copied its body verbatim call it, and its
+contract — throws on an absent corpus, in BOTH strict-mode directions, never skips — is asserted in
+`bindings/node/__test__/helpers.test.js` rather than only described in a doc comment. **A name is a
+claim about behaviour, and this repo's gate design consumed that claim**; the doc comment that said
+otherwise sat two lines above the throw and did not travel to a single one of the 14 call sites. The durable question is the same one shape up: for each workspace member, **which component
 EXECUTES it** — recorded, member by member, in `scripts/tests/workspace-test-disposition.txt`
 (`EXECUTED`/`PARTIAL`/`NOT-EXECUTED`, a closed label set enforced under `tooling-tests`), so a new
 crate cannot join the unexecuted set unannounced. Each record also carries a CLASS — `silent` (no

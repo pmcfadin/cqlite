@@ -17,7 +17,7 @@
  */
 
 const { Database } = require('../lib/index.js');
-const { skipIfNoDatasets } = require('./helpers.js');
+const { assertDatasetsAvailable } = require('./helpers.js');
 
 // Helper to check if value is a Date (works across realms)
 const isDate = (value) =>
@@ -55,7 +55,7 @@ describe('Type Conversion Tests (Issue #308)', () => {
   let dbCollections = null;
 
   beforeAll(async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
 
     // Open databases for different keyspaces
     dbBasic = await Database.open(global.testPaths.SSTABLES_DIR, {
