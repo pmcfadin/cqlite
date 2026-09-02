@@ -760,3 +760,60 @@ guard's output.** Every consumer of both guards' stdout was then checked, by bre
 
 So the family is closed at one defective instance, and the difference between the broken consumer
 and the safe ones is exactly **whether the parse is anchored before it substitutes**.
+
+---
+
+## roborev round 10 (job 396) — a failed enumeration is not an empty diff
+
+`files=$(git diff --name-only --diff-filter=d …)` discarded its exit status. With no `set -e`, a
+failed enumeration left `files` empty — **indistinguishable from "no `.rs` changed"** — so the
+census emitted `NO-SUBJECT the diff changed no .rs file` and the component PASSED while
+affirmatively claiming it had measured an empty diff.
+
+This is the named **`1699-find-tristate`** shape CLAUDE.md records: *"`[ -z "$(find …)" ]`
+collapses 'the scan FAILED' onto 'no match' — a three-valued signal read two-valued"*, with the
+unmeasured state taking the permissive branch.
+
+### The split as shipped — four states, checked in this order
+
+| state | condition | contract line | status |
+|---|---|---|---|
+| enumeration **FAILED** | `files_rc != 0` (checked FIRST — it makes every number below meaningless) | `NOT-MEASURED the changed-.rs enumeration FAILED (git diff exited N) …` | PASS, never read as verified |
+| a selected file uncountable | `n_uncounted > 0` | `NOT-MEASURED <n> of <m> …` | PASS |
+| nothing selected | `n_selected == 0` | `NO-SUBJECT …` | PASS (correct: a docs-only diff) |
+| all counted | otherwise | `<n> changed .rs file(s) measured …` | PASS |
+
+`files` is also forced empty on a failed enumeration, so the ratchet cannot iterate a partial
+result while the census reports the failure.
+
+**Regression case15** fails ONLY `git diff --name-only --diff-filter=d` — uniquely this
+component's enumeration — and delegates every other git call to the real binary, so a red cannot
+come from a differently-broken fixture. RED arm: discard the rc again and case15 reports
+`AGENT-GATE-CENSUS: NO-SUBJECT the diff changed no .rs file` for a run whose enumeration exited 7
+— the finding verbatim. 3 of 4 asserts discriminate; the control holds in both arms by design.
+
+### Why the existing lint did not catch it (for #3162, not fixed here)
+
+The `1699-find-tristate` lint's subject is the literal `find`
+(`test_agent_gate_summary.sh` matches `[ -z "$(find …)" ]`), while the SHAPE is
+command-agnostic — any command substitution whose emptiness is read without its rc. Widening the
+lint's subject set is #3162 follow-up work and deliberately not done on this branch.
+
+### The fourth-instance audit, requested before it was needed
+
+Every command substitution in the `emitted`-lane code, and how its failure is handled:
+
+| site | on failure | verdict |
+|---|---|---|
+| `files=$(git diff …)` | rc captured, `files` cleared, `NOT-MEASURED` | **fixed this round** |
+| `cur=$(wc -l <"$f" …)` | validated as an integer; else counted as uncounted | fixed in job 389 |
+| `base=$(git merge-base …)` | rc checked by `&&`; empty base → the pre-existing declared "advisory only" path | not an instance |
+| `base_n=$(git show … \| wc -l)` → `${base_n:-0}` | a failed read yields 0, which makes the file report as GROWN — the **fail-closed** direction | not an instance (conservative, and pre-existing) |
+| `src=$(_ansi_stripped_log …) \|\| src=""` | `NOT-MEASURED` | already fail-closed |
+| `et=$(_census_emitted_tally …) \|\| et=""` | falls to the `*)` arm → `NOT-MEASURED` | already fail-closed |
+| the awk inside `_census_emitted_tally` | non-integer or empty unit → `NONE` → `NOT-MEASURED` | already fail-closed |
+| `printf … "$OPEN_COUNT"` in `check-pub-surface.sh` | `OPEN_COUNT` is the guard's own validated value, and the guard refuses on zero | not an instance |
+
+**No fourth instance found.** The one adjacent item is already declared residual 18 (a run whose
+base ref is unavailable degrades to advisory while the census still counts the files it measured
+— the count stays true, it just does not distinguish ratcheted from advisory).
