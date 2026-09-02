@@ -322,9 +322,18 @@ fn kinds_match(canon: &Canon, ty: &CqlType, egress: Egress, null_here: NullHere)
     match ty {
         CqlType::Numeric(_) => matches!(canon, Canon::Num(_)),
         CqlType::Boolean => match egress {
-            // `Canon::for_csv` renders a boolean as its TEXT spelling.
             Egress::Json => matches!(canon, Canon::Bool(_)),
-            Egress::Csv => matches!(canon, Canon::Bool(_) | Canon::Text(_)),
+            // CSV: `Canon::for_csv` renders a boolean as `Canon::Text(b.to_string())`, so the
+            // text form is legal here — but ONLY the two spellings it can produce. Accepting
+            // every `Canon::Text` let `"not-a-bool"` qualify as a decoded boolean and be
+            // suppressed (roborev job 72). Authority for the pair: `cassandra-5.0.8`
+            // `BooleanSerializer.toString` returns `value.toString()`, i.e. `true`/`false`,
+            // and `for_csv` uses Rust's `bool::to_string`, which is the same two words.
+            Egress::Csv => match canon {
+                Canon::Bool(_) => true,
+                Canon::Text(text) => text == "true" || text == "false",
+                _ => false,
+            },
         },
         CqlType::Text(_) | CqlType::Blob | CqlType::Timestamp | CqlType::Opaque(_) => {
             matches!(canon, Canon::Text(_))

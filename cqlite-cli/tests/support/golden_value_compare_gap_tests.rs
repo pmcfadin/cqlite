@@ -951,6 +951,50 @@ fn the_undecoded_golden_gap_reports_a_wrong_kind_member() {
     );
 }
 
+/// CSV's boolean text form is EXACTLY `true`/`false` — arbitrary text does not qualify as a
+/// decoded boolean (roborev job 72, issue #3726).
+///
+/// `Canon::for_csv` renders a boolean as `Canon::Text(b.to_string())`, so the text form is
+/// legal under CSV and NOT under JSON. Accepting every `Canon::Text` there let `"not-a-bool"`
+/// pass as a well-formed boolean and be suppressed by the undecoded-golden gap. Authority for
+/// the pair: `cassandra-5.0.8 BooleanSerializer.toString` returns `value.toString()`, and
+/// `for_csv` uses Rust's `bool::to_string` — the same two words.
+#[test]
+fn the_csv_boolean_kind_accepts_only_true_and_false() {
+    let gap = Divergence::NestedFrozenValueLeftUndecodedByGolden;
+    let inner = CqlType::Set(Box::new(CqlType::Boolean));
+    let golden_hex = json!("000000020000001100000005616c706861");
+    let ask = |cli: &Value, egress: Egress| {
+        gap.matched(
+            &golden_hex,
+            cli,
+            Position {
+                ty: &inner,
+                egress,
+                depth: Depth::TopLevel,
+                kinding: Kinding::Natural,
+                map_key_spelling: MapKeySpelling::ToJsonString,
+            },
+        )
+    };
+    assert!(
+        ask(&json!(["true"]), Egress::Csv),
+        "CSV renders a boolean as its text spelling, so `true` IS a decoded boolean"
+    );
+    assert!(
+        !ask(&json!(["not-a-bool"]), Egress::Csv),
+        "arbitrary text is not a spelling `bool::to_string` can produce, so it is malformed \
+         output and must be reported rather than suppressed"
+    );
+    // And the JSON lane never accepts the text form at all — a boolean column keeps its
+    // declared type's JSON kind there.
+    assert!(
+        !ask(&json!(["true"]), Egress::Json),
+        "JSON requires the raw boolean"
+    );
+    assert!(ask(&json!([true]), Egress::Json), "…which this is");
+}
+
 /// THE OTHER RETIREMENT AXIS: a golden whose keys ARE decoded.
 ///
 /// The gap's golden half requires every key to be UNDECODED — not a document the
