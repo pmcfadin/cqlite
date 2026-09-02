@@ -396,3 +396,114 @@ fn zero_length_smallint_and_tinyint_fields_are_null_through_the_marshal_path() {
         other => panic!("expected a UDT, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// roborev job 98 (Medium) — and the reason this test exists rather than a sixth
+// one-line arm.
+//
+// Jobs 97 and 98 are the SAME defect twice: this repository has TWO marshal-name
+// resolvers, and they were out of sync. Job 97 was `ShortType`/`ByteType`; job 98
+// was `VarcharType`. Enumerating both tables by hand at that point showed SIX
+// divergences, so rounds 6, 7 and 8 would have found the rest one at a time.
+//
+// A per-instance fix cannot close that: the two tables are independent `ends_with`
+// chains and nothing compares them. This case DOES compare them, over the whole
+// marshal-name set, so a future omission on either side fails HERE instead of in
+// someone's review round. Every remaining divergence is DECLARED below with its
+// reason — a declared exception is a decision; an undeclared one is a bug waiting.
+// ---------------------------------------------------------------------------
+
+/// The two resolvers must agree for every marshal name, except where a divergence
+/// is DECLARED. Left = what `primitive_marshal_to_cql_short` answers (canonical CQL
+/// short form); right = what `parse_cassandra_type` must answer.
+#[test]
+fn the_two_marshal_resolvers_agree_or_declare_their_divergence() {
+    use super::super::V5CompressedLegacyParser as P;
+    const PREFIX: &str = "org.apache.cassandra.db.marshal.";
+
+    // (marshal name, expected CqlType from the UDT resolver, declared-divergence note)
+    let cases: &[(&str, CqlType, Option<&str>)] = &[
+        ("UTF8Type", CqlType::Text, None),
+        ("VarcharType", CqlType::Text, None),
+        ("AsciiType", CqlType::Ascii, None),
+        ("Int32Type", CqlType::Int, None),
+        ("LongType", CqlType::BigInt, None),
+        ("ShortType", CqlType::SmallInt, None),
+        ("ByteType", CqlType::TinyInt, None),
+        ("FloatType", CqlType::Float, None),
+        ("DoubleType", CqlType::Double, None),
+        ("BooleanType", CqlType::Boolean, None),
+        ("UUIDType", CqlType::Uuid, None),
+        ("LexicalUUIDType", CqlType::Uuid, None),
+        ("TimestampType", CqlType::Timestamp, None),
+        ("SimpleDateType", CqlType::Date, None),
+        ("TimeType", CqlType::Time, None),
+        ("DecimalType", CqlType::Decimal, None),
+        ("IntegerType", CqlType::Varint, None),
+        ("DurationType", CqlType::Duration, None),
+        ("InetAddressType", CqlType::Inet, None),
+        ("BytesType", CqlType::Blob, None),
+        // ---- DECLARED DIVERGENCES ----
+        (
+            "TimeUUIDType",
+            CqlType::Uuid,
+            Some(
+                "sibling says `timeuuid`, this resolver says Uuid. Both are 16 bytes so the \
+                 #3847 width rule is unaffected; the loss is only that a timeuuid field is \
+                 reported as uuid. Not changed here — it is a type-fidelity question, not an \
+                 empty-buffer one.",
+            ),
+        ),
+        (
+            "CounterColumnType",
+            CqlType::Counter,
+            Some(
+                "sibling normalises to `bigint`; this resolver answers Counter. Same 8-byte \
+                 width and the reporting path shares one arm for `bigint`/`counter`, so they \
+                 are behaviourally equivalent. Counter is the more faithful variant, so this \
+                 resolver is kept as the stricter of the two.",
+            ),
+        ),
+        (
+            "DateType",
+            CqlType::Date,
+            Some(
+                "REAL LATENT DEFECT, out of #3847's scope and reported for follow-up: legacy \
+                 `DateType` is an 8-byte millis-since-epoch value (the sibling resolver maps it \
+                 to `timestamp` and says so), but this resolver answers Date, whose width is 4. \
+                 A non-empty legacy DateType UDT field therefore fails the exact-width check \
+                 instead of decoding. Fixing it changes NON-EMPTY decode behaviour and needs its \
+                 own corpus measurement, so it is declared here rather than changed under an \
+                 empty-buffer issue.",
+            ),
+        ),
+    ];
+
+    for (name, expected, divergence) in cases {
+        let full = format!("{PREFIX}{name}");
+        let resolved = P::parse_cassandra_type(&full)
+            .unwrap_or_else(|e| panic!("{full}: UDT resolver failed: {e:?}"));
+        assert_eq!(
+            &resolved,
+            expected,
+            "{full}: UDT resolver must answer {expected:?}{}",
+            match divergence {
+                Some(note) => format!(" — DECLARED DIVERGENCE: {note}"),
+                None => String::new(),
+            }
+        );
+        assert!(
+            !matches!(resolved, CqlType::Custom(_)),
+            "{full}: resolved to Custom(_). A marshal name the SIBLING resolver knows must never \
+             reach Custom here — that is the job-97/98 defect, and it is silent: the decode \
+             quietly returns a blob."
+        );
+        // Every name the sibling recognises must be recognised here. This is the
+        // cross-check that actually closes the class.
+        assert!(
+            P::primitive_marshal_to_cql_short(&full).is_some(),
+            "{full}: the SIBLING resolver does not know this name — if a name is added here, \
+             add it there too, or this table has drifted the other way."
+        );
+    }
+}

@@ -385,7 +385,14 @@ impl V5CompressedLegacyParser {
 
         // Handle primitive types
         Ok(match type_str {
-            s if s.ends_with("UTF8Type") => CqlType::Text,
+            // roborev job 98. `VarcharType` is the marshal spelling of CQL `varchar`,
+            // which is an ALIAS of `text` — the sibling resolver
+            // (`raw_value.rs::primitive_marshal_to_cql_short`) maps it to `text` and
+            // the field decoders gained `CqlType::Varchar` in b05d4913, so this
+            // resolver was the last place that still answered `Custom(_)` for it.
+            s if s.ends_with("UTF8Type") || s.ends_with("VarcharType") => CqlType::Text,
+            s if s.ends_with("DurationType") => CqlType::Duration,
+            s if s.ends_with("LexicalUUIDType") => CqlType::Uuid,
             s if s.ends_with("AsciiType") => CqlType::Ascii,
             s if s.ends_with("Int32Type") => CqlType::Int,
             // roborev job 97. These three were ABSENT, so a real marshal-form UDT
