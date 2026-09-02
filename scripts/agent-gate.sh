@@ -1888,11 +1888,54 @@ _fixture_status() {
 # #3522 widened node-bindings from one jest file to the WHOLE suite via `npm test`,
 # and #1465 had wired its exception-path/abandoned-iterator LEAK BUDGETS in as a
 # SECOND jest invocation (`npm run test:leaks`). Composed naively that runs the leak
-# budgets TWICE per component. MEASURED with `./node_modules/.bin/jest --listTests`
-# under the two-project jest config #1465 introduced: the all-projects list is 28
-# files with NO duplicates and it INCLUDES leak-paths.test.js, so #3522's whole-suite
-# run already executes the leak budgets exactly once. The second invocation was pure
-# duplication.
+# budgets TWICE per component. Under the two-project jest config #1465 introduced a
+# bare `npm test` runs BOTH projects, and the `testPathIgnorePatterns` entry in the
+# `default` project hands leak-paths.test.js to the `leaks` project ALONE -- so exactly
+# one project matches it, #3522's whole-suite run already executes the leak budgets
+# exactly once, and the second invocation was pure duplication.
+#
+# THAT "EXACTLY ONCE" IS GROUNDED IN THE CONFIG PLUS TWO RUN-TIME CHECKS, AND
+# DELIBERATELY NOT IN `--listTests` (#3772). An earlier draft of this very comment
+# cited the `--listTests` set as the evidence -- while the paragraph below it explains
+# that `--listTests` DEDUPLICATES and therefore cannot see a double execution at all.
+# The evidence is: the project exclusion above (config), `check_jest_suites_ran`'s
+# suite-TOTAL comparison, and the JSON affirmation's refusal on two suites at the leak
+# path (both run time). Naming the wrong oracle is the exact defect this issue is
+# about, so it is worth saying twice: reason about execution multiplicity from the
+# RUN, never from the listing.
+#
+# NO FILE COUNT IS QUOTED HERE, DELIBERATELY (issue #3772). This argument used to rest
+# on a one-off measurement -- a hard-coded file count, asserted as "no duplicates" -- and
+# the suite then grew past it while the sentence stood still. A stale number inside the
+# rationale for a composition decision is the failure mode CLAUDE.md names: a false
+# statement in a gate log (or in the comment a reader checks it against) is worse than
+# none, because it is what stops the next person looking. Writing today's count here
+# instead would only restart the same clock, so no number appears -- not the old one,
+# not the current one, and not as an illustration inside this explanation.
+#
+# The number was never load-bearing, because both halves of the claim are DERIVED and
+# ENFORCED on every run -- which is what makes deleting it safe rather than a loss:
+#   * the COUNT is reconciled in run_node_bindings from two INDEPENDENT oracles (a
+#     recursive find over __test__/ vs `jest --listTests`) and PRINTED as
+#     `suite set RECONCILED: N *.test.js file(s)`;
+#   * DOUBLE EXECUTION is caught by check_jest_suites_ran's `s_total -eq expected`:
+#     `expected` is the DEDUPLICATED inventory, so a file BOTH projects match makes
+#     jest report one suite MORE than the inventory holds, and FAILs;
+#   * leak-paths.test.js being executed EXACTLY ONCE is enforced by the affirmation
+#     below, which refuses outright on `suites.length !== 1` at that path.
+#
+# AND THE DELETED SENTENCE NAMED THE WRONG ORACLE, which is the better reason to
+# delete it than the stale count (measured on jest 29.7.0, #3772 -- two projects whose
+# testMatch both select one file):
+#     jest --listTests  ->  __test__/probe.test.js          (ONE line)
+#     jest             ->  Test Suites: 2 passed, 2 total   (executed TWICE)
+# `--listTests` DEDUPLICATES across projects, so it can never report the duplicate it
+# was cited as having ruled out; and the `sort -u` normalisation in run_node_bindings'
+# reconciliation would erase one anyway. Verified against this package too: deleting
+# the `testPathIgnorePatterns` entry that hands the leak file to the `leaks` project
+# leaves `--listTests` unchanged. So "no duplicates, measured via --listTests" was
+# unfalsifiable by its own stated method -- the run's suite TOTAL is the only oracle
+# that sees it. A number nobody re-measures is the smaller half of that defect.
 #
 # So there is ONE executor -- #3522's `npm test` -- and #1465 keeps the thing that
 # made its lane merge-gating rather than decorative: the NAMED-BUDGET AFFIRMATION,
@@ -1933,10 +1976,13 @@ abandoned streaming iterators stay under the leak budget"
 _NODE_LEAK_BUDGET_TITLE_SUFFIX="stay under the leak budget"
 
 # The SUITE the budget tests must live in. Load-bearing since the recomposition
-# (#1465 round 10, roborev R2): the affirmation now reads the WHOLE-SUITE report (28
-# suites), so a title namespace that was private to one file became shared. Without
-# this scope a same-titled `passed` test in ANY other suite would satisfy the
-# affirmation for a leak test that was skipped or failed.
+# (#1465 round 10, roborev R2): the affirmation now reads the WHOLE-SUITE report (every
+# suite, not just this one), so a title namespace that was private to one file became
+# shared. Without this scope a same-titled `passed` test in ANY other suite would
+# satisfy the affirmation for a leak test that was skipped or failed. (The suite count
+# is deliberately not quoted -- see the composition header above, issue #3772: what
+# makes the scope necessary is that the report covers OTHER suites at all, not how
+# many.)
 #
 # REPO-RELATIVE and matched with a LEADING SLASH (round 11, T1): a bare
 # `__test__/leak-paths.test.js` tail was satisfied by a file of that name in ANOTHER
@@ -1960,9 +2006,10 @@ _node_leak_lane_note() { # <RUN|SKIP-OPTOUT|NO-NODE|NOT-REACHED|ENTERED-FAILED|
                          # `AGENT_GATE_ALLOW_MISSING_FIXTURES=1 && !
                          # _node_bindings_corpus_present` branch governs, ALONE. It is
                          # strictly earlier (before `npm ci`) and strictly coarser (it
-                         # skips all 28 suites), so a second, lane-level dataset gate
-                         # could only ever be unreachable code that looks like a
-                         # control. #1465's own `_node_leak_lane_status` predicate was
+                         # skips the WHOLE suite, not just this lane -- #3772: no
+                         # count quoted, the coarseness is what matters), so a
+                         # second, lane-level dataset gate could only ever be
+                         # unreachable code that looks like a control. #1465's own `_node_leak_lane_status` predicate was
                          # therefore DELETED, not kept as a decoration; what remains is
                          # this note, which that branch writes as SKIP-OPTOUT so the
                          # SUMMARY still declares the leak budgets did not run.
@@ -2033,8 +2080,8 @@ _node_leak_lane_affirm() { # <note-file> <json-file>
           process.exit(1);
         }
         // SUITE-SCOPED (roborev R2): only assertions from the leak suite count. The
-        // report covers all 28 suites, so an unscoped title match would let another
-        // suite satisfy this check.
+        // report covers the WHOLE suite, so an unscoped title match would let another
+        // suite satisfy this check. (No file count quoted -- #3772.)
         const anchored = `/${suiteFile}`;
         const suites = (report.testResults || []).filter((s) =>
           typeof s.name === "string" && s.name.endsWith(anchored)
@@ -9838,9 +9885,10 @@ export -f check_unittest_targets_ran
 #
 # The jest ANALOGUE of check_unittest_targets_ran (issue #3522). A green `npm test` exit
 # is not evidence that anything ran: a suite whose every TEST is `test.skip`ped is
-# reported as a PASSED suite, so `Test Suites: 27 passed, 27 total` is reachable over
-# zero real assertions — the vacuous green this whole issue exists to remove, arriving
-# through the widened lane's own plumbing. (Jest's suite-level `skipped` count is a
+# reported as a PASSED suite, so a `Test Suites: N passed, N total` line covering EVERY
+# suite is reachable over zero real assertions — the vacuous green this whole issue
+# exists to remove, arriving through the widened lane's own plumbing. (The illustration
+# named a literal count until #3772; it was stale, and an EXAMPLE does not need one.) (Jest's suite-level `skipped` count is a
 # DIFFERENT and weaker signal: it catches a whole FILE being skipped, not a file whose
 # every test was. That is why the two are separate directions below rather than one.)
 #
@@ -10615,6 +10663,20 @@ EOF
 # full suite adds ~15–35s on top of it — 504 passing tests across 27/27 suites, green
 # on two consecutive runs. That is not a cost worth 26 suites of blindness.
 #
+# THE COUNTS IN THE TWO PARAGRAPHS ABOVE ARE DATED MEASUREMENTS AND ARE KEPT ON PURPOSE
+# (issue #3772, which removed the stale ones elsewhere in this file). The line #3772
+# draws, so that a later reader does not "finish the job" by deleting these too:
+#   * a claim about WHAT IS TRUE NOW ("the list is N files", "they agree at N today")
+#     decays the moment a test file is added, so it is never written down -- every such
+#     claim in this component is DERIVED at run time instead;
+#   * a claim about WHAT WAS MEASURED THEN, attributed to the change that measured it
+#     (#1255 narrowed to 1 of 27; #3522 measured 504 passing tests across 27/27 and
+#     ~15-35s), is a dated record of a past state. It stays true however the suite
+#     grows, exactly like the measurement in a commit message, and deleting it would
+#     destroy the evidence for a decision rather than refresh it.
+# If you are unsure which kind you are writing: if adding one test file would make the
+# sentence false, it is the first kind -- derive it or drop it.
+#
 # THE CORPUS HALF IS NOW HONOURED, NOT AVOIDED — AND THE REASON IS NOT THE ONE THIS
 # COMMENT FIRST GAVE (roborev/rust-reviewer round 1, B4). 14 of the suite's files gate on
 # dataset availability, so node-bindings IS now in DATASET_COMPONENTS (it was NOT before,
@@ -10788,9 +10850,22 @@ run_node_bindings() {
   census+=("  AFFIRMED BY NAME (#1465): the 2 exception-path/abandoned-iterator LEAK BUDGET tests")
   census+=("       inside leak-paths.test.js, checked from this run's own jest --json report. The")
   census+=("       suite guards judge the file set and per-suite work; only this one knows WHICH")
-  census+=("       tests must have passed. ONE executor: the npm test above (measured — the")
-  census+=("       all-projects jest --listTests is 28 files with no duplicates and includes the")
-  census+=("       leak file), so npm run test:leaks is a human/debug entry point, not a lane.")
+  census+=("       tests must have passed. ONE executor: the npm test above (a bare npm test runs")
+  census+=("       both jest projects, and the config hands the leak file to exactly one of")
+  census+=("       them), so npm run test:leaks is a human/debug entry point, not a lane. What")
+  census+=("       THIS RUN establishes, rather than asserts: the reconciled file count, printed")
+  census+=("       below as \"suite set RECONCILED: N\"; and that the leak file executed EXACTLY")
+  census+=("       ONCE — zero or twice would fail check_jest_suites_ran (jest reported total vs")
+  census+=("       the DEDUPLICATED disk inventory) and the affirmation itself (suites.length")
+  census+=("       !== 1 at the leak path). No guard reads a jest PROJECT identity; that both")
+  census+=("       projects ran follows from the config plus the COMPLETE per-suite results —")
+  census+=("       the leak file evidences the leaks project, and the OTHER reconciled suites")
+  census+=("       evidence the default one. Neither half evidences the other. This line used")
+  census+=("       to carry a hard-coded")
+  census+=("       file count asserted as duplicate-free; it had gone stale as the suite grew,")
+  census+=("       and its cited oracle could not see a duplicate anyway (jest --listTests")
+  census+=("       DEDUPES across projects — measured, #3772). No count is printed here now, in")
+  census+=("       either direction: a fresh one would only restart the same decay.")
   census+=("       Budgets run STRICT here: CQLITE_LEAK_BUDGET_RELAX is UNSET for every node")
   census+=("       invocation of this component (#1465 V1), so no inherited value — including a")
   census+=("       CI runner env — can double a ceiling in the gate of record.")
@@ -10816,9 +10891,11 @@ run_node_bindings() {
   # WHY TWO, AND WHY ONE WAS NOT ENOUGH (roborev round 3, D1). `jest --listTests` is the
   # right oracle for the ACTUAL set — it applies this package's `testMatch`
   # (`**/__test__/**/*.test.js`, RECURSIVE) and jest's ignore patterns, which a
-  # `find -maxdepth 1` cannot reproduce (it agrees at 27 today and would silently
-  # UNDERCOUNT the day a subdirectory appears, false-redding healthy code). That argument
-  # stands and is why the find below is RECURSIVE and is NOT used to select what runs.
+  # `find -maxdepth 1` cannot reproduce: it agrees with jest's list for as long as
+  # __test__/ stays flat, and would silently UNDERCOUNT the day a subdirectory appears,
+  # false-redding healthy code. That argument stands and is why the find below is
+  # RECURSIVE and is NOT used to select what runs. (No count stated -- #3772: a
+  # "they agree at N today" is a claim about TODAY, and this one had gone stale.)
   #
   # But using it as the EXPECTED count too made the guard SELF-REFERENTIAL: the expectation
   # and the run both flow from jest's configuration, so a `testMatch` narrowing or an added
@@ -11167,8 +11244,9 @@ run_node_bindings() {
       cd "'"$REPO_ROOT"'/bindings/node"
       npm test -- --json --outputFile="$CQLITE_JEST_JSON"' >>"$log" 2>&1; then
     # A green `npm test` is NOT sufficient: jest reports a suite whose every describe
-    # was skipped as PASSED, so the exit code alone cannot distinguish 27 suites of
-    # assertions from 27 suites of nothing.
+    # was skipped as PASSED, so the exit code alone cannot distinguish a full suite of
+    # assertions from the same number of suites containing nothing. (The argument never
+    # needed a count and no longer states one -- #3772.)
     # BOTH halves are required and neither implies the other (roborev round 5, F1):
     # check_jest_suites_ran judges the FILE SET and the aggregate counts;
     # check_jest_per_suite_passed judges whether EACH reconciled suite did any work. A suite
