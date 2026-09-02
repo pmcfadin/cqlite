@@ -177,6 +177,15 @@
 #   * The base is the MERGE-BASE, never `origin/main`'s TIP (#3392). A tip
 #     comparison reports another lane's newly-landed change as a difference of
 #     THIS branch, which reds a correct oracle-driven PR.
+#   * THE PATHSPEC IS ROOT-ANCHORED (`:(top)`), so the answer does NOT depend on
+#     the caller's WORKING DIRECTORY (#3751 round 11, Q1). A bare pathspec is
+#     interpreted relative to the cwd, so run from a repository subdirectory this
+#     measurement returned EMPTY and a design-routed branch merged with NO C
+#     verdict. `diff.relative=false` does NOT cover this — it controls the OUTPUT
+#     path prefix, not pathspec interpretation — so BOTH are pinned, and neither
+#     substitutes for the other. (The stage LOOKUP has always been
+#     cwd-independent, via `c_stage_root`'s `--show-toplevel`; the routing
+#     measurement was the one half that was not.)
 #   * It measures the CERTIFIED sha, not this checkout's HEAD — the same rule the
 #     base-staleness advisory follows: a report about a different tree than the one
 #     being merged is the "satisfied and wrong" shape.
@@ -348,6 +357,8 @@ usage() {
   printf '                              OUT (byte-identical, verdict read from the other\n' >&2
   printf '                              generation) REFUSES too. A legacy record with no\n' >&2
   printf '                              report-nonce: cannot be bound and REFUSES (#3751).\n' >&2
+  printf '                              The routing measure is ROOT-ANCHORED, so it does\n' >&2
+  printf '                              not depend on your working directory (#3751).\n' >&2
   printf '         --c-verdict <path>   a file holding a captured verdict line, i.e.\n' >&2
   printf '                              scripts/flow/review-stage.sh verdict c --issue <N> > <path>\n' >&2
   printf '                              Capture it WHOLE: the stage KIND, every mandatory key\n' >&2
@@ -882,12 +893,27 @@ c_measure_routing() {
     C_ROUTING_DETAIL="no merge-base between $C_ROUTING_BASE_REF and the certified commit"
     return 0
   fi
-  # `diff.renames`/`diff.relative` pinned OFF at the invocation, for the reasons
-  # scripts/flow/base-staleness.sh records in full: `diff.relative` is INVOKER
-  # config and would make the answer a function of cwd. NUL-delimited, then
-  # translated: a path containing a newline would split into two entries, and both
-  # halves then fail the `archive/` prefix test, which counts as DESIGN-ROUTED —
-  # the fail-closed direction.
+  # THE PATHSPEC IS ROOT-ANCHORED WITH `:(top)`, AND THAT IS NOT WHAT
+  # `diff.relative=false` DOES (#3751 round 11, Q1). A bare `-- openspec/changes/`
+  # pathspec is interpreted RELATIVE TO THE CALLER'S CWD, so this script run from a
+  # repository SUBDIRECTORY got an EMPTY diff, measured `NOT-APPLICABLE` on a
+  # genuinely design-routed branch, and let the merge proceed with NO C verdict —
+  # the exact escape `--c-verdict` exists to close, reached by nothing more exotic
+  # than the working directory. `:(top)` is git's pathspec magic for "match from the
+  # top of the working tree", so the answer no longer depends on where we were
+  # invoked from. `diff.relative` is a DIFFERENT axis: it controls the OUTPUT PATH
+  # PREFIX, not pathspec interpretation (measured: from a subdirectory,
+  # `-c diff.relative=false diff … -- openspec/changes/` is still empty, while
+  # `-- ':(top)openspec/changes/'` finds the path). So BOTH are needed and neither
+  # substitutes for the other, and BOTH must stay: `:(top)` anchors what is
+  # SELECTED, `diff.relative=false` keeps what is PRINTED root-relative, which the
+  # `archive/` prefix test and the slug extraction below both depend on.
+  #
+  # `diff.renames` pinned OFF for the reason F4 records below (and which
+  # scripts/flow/base-staleness.sh records in full for its own scan). NUL-delimited,
+  # then translated: a path containing a newline would split into two entries, and
+  # both halves then fail the `archive/` prefix test, which counts as DESIGN-ROUTED
+  # — the fail-closed direction.
   #
   # DELETIONS ARE NOT A ROUTING SIGNAL (`--diff-filter=d`, lowercase = EXCLUDE
   # deletions; #3751 round 1, F4). Because rename detection is pinned off — and it
@@ -901,7 +927,7 @@ c_measure_routing() {
   # MODIFIED path under a live `openspec/changes/<slug>/` still routes to C, which
   # is the fail-closed half and is pinned by its own case in the suite.
   out=$(git -c diff.renames=false -c diff.relative=false \
-    diff --diff-filter=d --name-only -z "$base" "$certified" -- openspec/changes/ 2>/dev/null |
+    diff --diff-filter=d --name-only -z "$base" "$certified" -- ':(top)openspec/changes/' 2>/dev/null |
     tr '\0' '\n') ||
     rc=$?
   if [ "$rc" -ne 0 ]; then

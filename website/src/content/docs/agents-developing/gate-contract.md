@@ -114,7 +114,12 @@ carry).
   pure deletions — a real
   archive MOVE is a deletion plus an addition under `archive/`, and counting the deletion refused every
   finalize PR — between the merge-base with `origin/main` and the certified sha) rather than
-  trusting the caller, an `UNMEASURED`
+  trusting the caller. That pathspec is ROOT-ANCHORED (`:(top)openspec/changes/`) because
+  `diff.relative=false` does **not** do that (#3751 round 11): a bare pathspec is interpreted
+  relative to the caller's CWD, so from a repository subdirectory the diff came back EMPTY, a
+  design-routed branch measured `NOT-APPLICABLE` and the merge PROCEEDED with no C verdict —
+  `diff.relative` governs the OUTPUT path prefix, not pathspec interpretation, so both pins are
+  needed and neither substitutes for the other. An `UNMEASURED`
   measurement is treated as REQUIRED, and only `PASS` and `AUTHOR-PERFORMED` proceed — the second under its
   own `PREMERGE: C-VERDICT` token, never folded into `PREMERGE: OK`. Three bindings tie the verdict to the
   merge (#3751 rounds 1 and 3): under `AUTO` this worktree's `HEAD` must EQUAL the certified commit before a
@@ -164,7 +169,9 @@ carry).
   (gap 2 of 2, beside the dependency-closure gap), and the two path sources are pinned
   **rename-symmetric and root-relative** — porcelain `git diff` honours `diff.renames`/`diff.relative`
   and plumbing `git diff-tree` does not, so unpinned, a PR that renames a path would lose the old path
-  and report `blast-radius 0 RECOGNISED` on a genuinely stale base (a fail-open). **It is
+  and report `blast-radius 0 RECOGNISED` on a genuinely stale base (a fail-open). Those pins are the
+  whole cwd story for *this* scan only because it passes **no pathspec**; where a pathspec is passed,
+  cwd-independence needs `:(top)` as well (#3751 round 11, above). **It is
   information, not a verdict** — it cannot change `premerge-assert.sh`'s exit code, and an absent,
   failing, timed-out or `UNMEASURED` advisory is reported and non-fatal. Its 60s bound carries a
   **SIGKILL escalation** (`--kill-after`), because plain `timeout <secs>` only SIGTERMs and then waits,

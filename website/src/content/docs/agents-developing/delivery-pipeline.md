@@ -193,7 +193,17 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   sibling lanes' in-flight change directories, so every branch would read design-routed and the
   "measurement" would be vacuous — and the base is the **MERGE-BASE, never `origin/main`'s TIP** (#3392: a
   tip comparison reports another lane's newly-landed change as a difference of THIS branch and reds a
-  correct oracle-driven PR). **Any failure to measure — no git, no `origin/main`, the certified commit
+  correct oracle-driven PR). **AND THE PATHSPEC IS ROOT-ANCHORED — `:(top)openspec/changes/` —
+  BECAUSE `diff.relative=false` DOES NOT DO THAT (#3751 round 11).** A bare pathspec is interpreted
+  relative to the CALLER'S CWD, so run from a repository subdirectory the routing diff came back
+  EMPTY, a genuinely design-routed branch measured `NOT-APPLICABLE`, and the merge PROCEEDED with no
+  C verdict at all — reached by nothing more exotic than the working directory (measured:
+  `PREMERGE: OK`, exit 0, from `cqlite-core/src/storage`, where the root invocation on the same
+  repository, sha and argv refuses with `routing: REQUIRED`). `diff.relative` is a DIFFERENT AXIS —
+  it governs the OUTPUT PATH PREFIX, not pathspec interpretation — so both are pinned and neither
+  substitutes for the other: `:(top)` anchors what is SELECTED, `diff.relative=false` keeps what is
+  PRINTED root-relative. Generalise it: **a pinned config option is a claim about ONE axis, and "cwd
+  cannot change this answer" needs the axis your call actually uses.** **Any failure to measure — no git, no `origin/main`, the certified commit
   absent from this checkout — is `UNMEASURED` and is TREATED AS REQUIRED**: never derive a pass from the
   absence of a bad signal. There is deliberately NO spelling of the flag that means "not applicable": a
   supplied PATH can only carry a review-stage verdict token, so a file asserting `NOT-APPLICABLE` is

@@ -119,8 +119,9 @@ the branch's own DIFF between merge-base(`origin/main`, `<certified>`) and `<cer
 `openspec/changes/archive/**` — non-empty ⇒ design-routed ⇒ C required; empty ⇒ C not applicable,
 reported affirmatively. A plain LISTING of `openspec/changes/` SHALL NOT be used: `origin/main` carries
 `archive` plus sibling lanes' in-flight change directories, so a listing reads design-routed for EVERY
-branch and measures nothing. The base SHALL be the MERGE-BASE, never `origin/main`'s tip (#3392), and
-any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
+branch and measures nothing. The base SHALL be the MERGE-BASE, never `origin/main`'s tip (#3392), the
+pathspec SHALL be REPOSITORY-ROOT-ANCHORED so the answer does not depend on the caller's working
+directory, and any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
 
 #### Scenario: an absent C verdict cannot reach a merge on a design-routed branch
 - **WHEN** the branch's diff against the merge-base touches `openspec/changes/` outside `archive/**`
@@ -131,6 +132,21 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
 - **WHEN** the branch's diff against the merge-base touches no `openspec/changes/` path outside `archive/**`
 - **THEN** the script reports `c-verdict: NOT-APPLICABLE (no openspec change on branch)` affirmatively
 - **AND** no caller-supplied flag value can declare C inapplicable on a branch that carries one
+
+#### Scenario: the routing answer does not depend on the caller's working directory
+- **WHEN** `premerge-assert.sh --c-verdict AUTO` is invoked from a SUBDIRECTORY of the repository on a
+  branch that touches `openspec/changes/` outside `archive/**`
+- **THEN** the routing measure reports `REQUIRED`, naming the change it found, exactly as it does from
+  the repository root, and the merge still REFUSES for want of a C verdict
+- **AND** the pathspec SHALL carry git's `:(top)` root anchor: `diff.relative=false` governs the OUTPUT
+  path prefix and NOT pathspec interpretation, so it is NOT a substitute — a bare pathspec is
+  interpreted relative to the caller's cwd, which made a design-routed branch measure
+  `NOT-APPLICABLE` and PROCEED with no C verdict
+- **AND** `diff.renames=false` and `diff.relative=false` SHALL both REMAIN pinned: `:(top)` anchors what
+  is SELECTED, `diff.relative=false` keeps what is PRINTED root-relative, which the `archive/**`
+  exclusion and the slug extraction depend on
+- **AND** an ORACLE-routed branch invoked from a subdirectory SHALL still report `NOT-APPLICABLE` (the
+  fail-open control: anchoring the pathspec must not widen the measure)
 
 #### Scenario: a missing flag is loud
 - **WHEN** `--c-verdict` is omitted entirely

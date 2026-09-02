@@ -296,7 +296,28 @@ Three further declared limits of the mechanism itself:
   on whitespace, so a value containing a space never arrives whole at that reader, and asserting a
   charset would be a claim about a shape it cannot see. So a sibling stage's `PASS` line (a
   `rust-review` verdict, say) can no longer certify C; what it cannot check is the ISSUE, because the line carries no sha. The
-  report path is printed on the success line so a human can see which stage answered. `AUTO` is
+  report path is printed on the success line so a human can see which stage answered.
+- **AUTO's ROUTING MEASURE IS ROOT-ANCHORED, AND `diff.relative=false` IS NOT WHAT DOES THAT
+  (#3751 round 11, Q1).** The measure is `git diff <merge-base(origin/main, certified)>
+  <certified> -- ':(top)openspec/changes/'`. A BARE pathspec is interpreted relative to the
+  CALLER'S CWD, so `premerge-assert.sh` invoked from a repository SUBDIRECTORY got an EMPTY diff, a
+  genuinely design-routed branch measured `NOT-APPLICABLE`, and the merge proceeded with NO C
+  verdict at all — the escape `--c-verdict` exists to close, reached by nothing more exotic than the
+  working directory (measured: `PREMERGE: OK`, exit 0, from `cqlite-core/src/storage`, where the
+  root invocation on the same repository, sha and argv refuses with `routing: REQUIRED`).
+  `diff.relative` is a DIFFERENT AXIS — it controls the OUTPUT PATH PREFIX, not pathspec
+  interpretation (measured: from a subdirectory `-c diff.relative=false diff … --
+  openspec/changes/` is still empty, while `-- ':(top)openspec/changes/'` finds the path) — so BOTH
+  are pinned and neither substitutes for the other: `:(top)` anchors what is SELECTED,
+  `diff.relative=false` keeps what is PRINTED root-relative, which the `archive/` prefix test and
+  the slug extraction both depend on. **The generalisation: a pinned config option is a claim about
+  ONE axis, and "cwd cannot change this answer" needs the axis your call actually uses.**
+  `scripts/flow/base-staleness.sh` carries the identical pin and does NOT share the defect —
+  measured, that scan passes no pathspec at all, taking the diff's paths wholesale and intersecting
+  them in shell, so there the pin IS the whole cwd story. The stage LOOKUP was cwd-independent from
+  the start (`c_stage_root` resolves `--show-toplevel`); the routing measure was the one half that
+  was not.
+- `AUTO` is
   the intended form because its binding is MECHANICAL: it locates the stage in this worktree,
   refuses two stage records as ambiguous, and applies **TWO independent bindings, because they
   answer different questions**. (a) This worktree's **HEAD must EQUAL the certified commit** —

@@ -347,7 +347,10 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    affirmatively; an absent or `NOT-RUN` C on a design-routed branch REFUSES the merge, naming
    the stage and the cause; and a routing it cannot MEASURE is treated as REQUIRED. There is no
    value you can pass that means "C does not apply here" — that exemption is the escape hatch
-   #3751 removes, and routing is measurable from the branch.
+   #3751 removes, and routing is measurable from the branch. The routing pathspec is
+   ROOT-ANCHORED (`:(top)`), so the answer does NOT depend on which directory you run the assert
+   from — it used to (a bare pathspec is cwd-relative, and from a subdirectory a design-routed
+   branch measured `NOT-APPLICABLE` and merged with no C verdict at all: #3751 round 11).
    **RUN IT IN THE LANE YOU CERTIFIED.** Under `AUTO` the stage is located in the CURRENT
    worktree, so this worktree's `HEAD` must EQUAL `<certified-sha>` or the assert REFUSES,
    naming the divergence: every lane on this box is a worktree of ONE shared `.git`, so a peer

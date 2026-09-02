@@ -4062,6 +4062,173 @@ else
   bad "p2/structural: the byte re-comparison was removed or is no longer called"
 fi
 
+# --- 44k: the ROUTING PATHSPEC must be repository-root-anchored (round 11, Q1) ---
+# `git diff … -- openspec/changes/` interprets its pathspec RELATIVE TO THE CALLER'S
+# CWD. Invoked from a repository SUBDIRECTORY the diff therefore came back EMPTY, a
+# genuinely design-routed branch measured `NOT-APPLICABLE`, and the merge proceeded
+# with NO C verdict at all — the exact escape `--c-verdict` exists to close, reached
+# by nothing more exotic than the caller's working directory.
+#
+# `diff.relative=false` DOES NOT FIX IT, and believing it did is what left the hole:
+# that option controls the OUTPUT PATH PREFIX, not how a PATHSPEC is INTERPRETED.
+# Measured, in a scratch repository, from a subdirectory:
+#     git diff --name-only A B -- openspec/changes/                      -> (empty)
+#     git -c diff.relative=false diff … -- openspec/changes/             -> (empty)
+#     git -c diff.relative=false diff … -- ':(top)openspec/changes/'     -> openspec/changes/foo/spec.md
+# So BOTH are needed and neither substitutes for the other: `:(top)` anchors the
+# pathspec at the root, `diff.relative=false` keeps the emitted paths root-relative
+# (which the `archive/` prefix test and the slug extraction below both depend on).
+#
+# A FIXTURE OF ITS OWN, never 44d's, so this section cannot inherit or leak a stage
+# record (the round-3 sr_plant lesson). It is design-routed AND carries a
+# subdirectory to invoke from.
+c_repo_subdir() {
+  local d="$T/c-repo-q1-subdir"
+  mkdir -p "$d"
+  git init -q -b mainline "$d" >/dev/null 2>&1 || return 1
+  git -C "$d" config user.email t@t
+  git -C "$d" config user.name t
+  printf '.review-stage/\n' >"$d/.gitignore"
+  printf 'seed\n' >"$d/README.md"
+  mkdir -p "$d/cqlite-core/src/storage"
+  printf 'fn seed() {}\n' >"$d/cqlite-core/src/storage/mod.rs"
+  git -C "$d" add -A >/dev/null 2>&1 || return 1
+  git -C "$d" commit -q -m seed >/dev/null 2>&1 || return 1
+  git -C "$d" update-ref refs/remotes/origin/main mainline || return 1
+  git -C "$d" checkout -q -b feature || return 1
+  mkdir -p "$d/openspec/changes/a-subdir-routed-slug"
+  printf 'the design proposal\n' >"$d/openspec/changes/a-subdir-routed-slug/proposal.md"
+  git -C "$d" add -A >/dev/null 2>&1 || return 1
+  git -C "$d" commit -q -m "the PR" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$d"
+}
+
+# run_in_subdir <repo> <subdir-relative-path> <expected-exit> <desc> <args...> —
+# `run_in_repo`, but the invocation cwd is a SUBDIRECTORY of the repository rather
+# than its root. Sets $OUT/$RC/$C_REPO_SHA exactly as run_in_repo does.
+run_in_subdir() {
+  local d="$1" sub="$2" want="$3" desc="$4"
+  shift 4
+  local sha f
+  sha=$(git -C "$d" rev-parse HEAD 2>/dev/null) || sha=""
+  if [ -z "$sha" ]; then
+    bad "$desc: could not resolve the synthetic repository's HEAD"
+    return 1
+  fi
+  if [ ! -d "$d/$sub" ]; then
+    bad "$desc: the subdirectory $sub does not exist — the case would be vacuous"
+    return 1
+  fi
+  f="$d/../gate-$(basename "$d")-sub.txt"
+  emit_summary_block "$FULL_S" "$FULL_E" "-" \
+    "$(printf '%.7s' "$sha")" "$(printf '%.12s' "$sha")" PASS PASS >"$f"
+  OUT=$(cd "$d/$sub" && PATH="$BIN:$PATH" MOCK_GH_OUT="$sha OPEN" MOCK_GH_FAIL=0 \
+    bash "$NEUTRAL_ASSERT" 2421 "$sha" "$f" "$@" 2>&1)
+  RC=$?
+  C_REPO_SHA="$sha"
+  if [ "$RC" -ne "$want" ]; then
+    bad "$desc (exit $RC, wanted $want)"
+    printf '     output: %s\n' "$OUT"
+    return 1
+  fi
+  return 0
+}
+
+Q1_REPO=$(c_repo_subdir) || Q1_REPO=""
+if [ -n "$Q1_REPO" ]; then
+  ok "q1 fixture: a design-routed repository with a subdirectory to invoke from was built"
+else
+  bad "q1 fixture: could not build it — the subdirectory cases would be vacuous"
+fi
+
+# THE CONTROL FIRST, so the RED below is attributable to the CWD and not to the
+# fixture: from the repository ROOT the same branch measures REQUIRED and refuses.
+if [ -n "$Q1_REPO" ] &&
+  run_in_repo "$Q1_REPO" 2 "q1/control: from the repository ROOT the branch measures REQUIRED" \
+    --c-verdict AUTO; then
+  case "$OUT" in
+    *"routing: REQUIRED"*"openspec/changes/a-subdir-routed-slug"*)
+      ok "q1/control: the root invocation names the change it found" ;;
+    *) bad "q1/control: the root invocation must measure REQUIRED (got: $OUT)" ;;
+  esac
+fi
+
+# THE FINDING. Same repository, same certified sha, same argv — only the cwd differs.
+# A subdirectory invocation must reach the SAME routing verdict, and must therefore
+# still REFUSE (this branch has no stage opened).
+if [ -n "$Q1_REPO" ] &&
+  run_in_subdir "$Q1_REPO" cqlite-core/src/storage 2 \
+    "q1/subdir: a SUBDIRECTORY invocation on a design-routed branch still REFUSES" \
+    --c-verdict AUTO; then
+  case "$OUT" in
+    *"routing: REQUIRED"*"openspec/changes/a-subdir-routed-slug"*)
+      ok "q1/subdir: the routing is measured from the repository ROOT, not from the cwd" ;;
+    *) bad "q1/subdir: a design-routed branch must measure REQUIRED from a subdirectory (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"NOT-APPLICABLE"*)
+      bad "q1/subdir: the cwd made a design-routed branch read NOT-APPLICABLE — C is escaped by chdir" ;;
+    *) ok "q1/subdir: NOT-APPLICABLE is never reached by changing directory" ;;
+  esac
+fi
+
+# TWO LEVELS DOWN, and from a subdirectory of `openspec/` ITSELF — the shape where a
+# cwd-relative pathspec is not merely empty but could match a DIFFERENT tree
+# (`openspec/changes/openspec/changes/…`). Both must land on the same answer.
+if [ -n "$Q1_REPO" ] &&
+  run_in_subdir "$Q1_REPO" openspec/changes 2 \
+    "q1/subdir-openspec: invoked from inside openspec/changes itself -> still REQUIRED" \
+    --c-verdict AUTO; then
+  case "$OUT" in
+    *"routing: REQUIRED"*"openspec/changes/a-subdir-routed-slug"*)
+      ok "q1/subdir-openspec: the slug is still extracted from a ROOT-relative path" ;;
+    *) bad "q1/subdir-openspec: must measure REQUIRED with the slug named (got: $OUT)" ;;
+  esac
+fi
+
+# THE OTHER DIRECTION STAYS TRUE FROM A SUBDIRECTORY TOO: anchoring the pathspec must
+# not turn an ORACLE-routed branch into a design-routed one. Without this, `:(top)`
+# could have been widened to match everything and every case above would still pass.
+Q1_ORACLE=""
+if [ -n "$C_ORACLE" ]; then
+  Q1_ORACLE="$T/c-repo-q1-oracle"
+  if cp -R "$C_ORACLE" "$Q1_ORACLE" >/dev/null 2>&1 &&
+    mkdir -p "$Q1_ORACLE/cqlite-core/src/storage"; then
+    ok "q1 oracle fixture: an oracle-routed copy with a subdirectory was built"
+  else
+    bad "q1 oracle fixture: could not build it — the fail-open direction would be untested"
+    Q1_ORACLE=""
+  fi
+fi
+if [ -n "$Q1_ORACLE" ] &&
+  run_in_subdir "$Q1_ORACLE" cqlite-core/src/storage 0 \
+    "q1/oracle-subdir: an ORACLE-routed branch is still NOT-APPLICABLE from a subdirectory" \
+    --c-verdict AUTO; then
+  case "$OUT" in
+    *"PREMERGE: C-VERDICT NOT-APPLICABLE"*"no openspec change on branch"*)
+      ok "q1/oracle-subdir: the anchored pathspec did not widen the measure" ;;
+    *) bad "q1/oracle-subdir: must still report NOT-APPLICABLE (got: $OUT)" ;;
+  esac
+fi
+
+# STRUCTURAL: the pathspec carries the `:(top)` magic prefix, and BOTH pins stay.
+# Behavioural cases only cover the cwds someone thought of; this pins the mechanism.
+if LC_ALL=C grep -q "':(top)openspec/changes/'" "$ASSERT"; then
+  ok "q1/structural: the routing pathspec carries the :(top) root anchor"
+else
+  bad "q1/structural: the routing pathspec is not root-anchored — a subdirectory invocation escapes C"
+fi
+if [ "$(LC_ALL=C grep -c -- '-- openspec/changes/ 2' "$ASSERT" || true)" -eq 0 ]; then
+  ok "q1/structural: no unanchored openspec/changes/ pathspec survives in the routing diff"
+else
+  bad "q1/structural: a cwd-relative openspec/changes/ pathspec is still passed to git diff"
+fi
+if LC_ALL=C grep -q 'diff.renames=false -c diff.relative=false' "$ASSERT"; then
+  ok "q1/structural: diff.renames=false and diff.relative=false are BOTH still pinned"
+else
+  bad "q1/structural: a routing pin was dropped — renames off (F4) and root-relative output are both load-bearing"
+fi
+
 # --- 44h: THE STRUCTURAL EMIT-BOUNDARY GUARD (round 7, L1b) -------------------
 # The mirror of test_review_stage.sh section 18, for this script. See
 # scripts/tests/lib/emit-boundary-scan.sh for why the guard exists (the boundary was bypassed at a
@@ -4269,9 +4436,25 @@ fi
 # is invoked with kind and issue ONLY, so H2's deleted `--report` channel is not rebuilt from the
 # other end; and round 9's byte comparison is still called, as defence in depth rather than
 # superseded). All need only bash, git and coreutils, so the floor moves by the SAME 28 and the
-# derived 6-assertion margin for the ONE host-gated block is PRESERVED UNCHANGED — still
-# deliberately not the exact 411, for the reason recorded above.
-ASSERT_FLOOR=405
+# derived 6-assertion margin for the ONE host-gated block is PRESERVED UNCHANGED.
+#
+# ROUND 11 (Q1) ADDS 10, ALL HOST-INDEPENDENT (411 -> 421): section 44k's 10 — the routing pathspec
+# must be repository-ROOT-anchored. `git diff … -- openspec/changes/` interprets its pathspec
+# relative to the CALLER'S CWD, so invoked from a subdirectory the diff came back EMPTY, a
+# design-routed branch measured NOT-APPLICABLE and the merge PROCEEDED with no C verdict at all
+# (measured: `PREMERGE: OK 95052a5e…` from `cqlite-core/src/storage`, exit 0 where the root
+# invocation on the SAME repository, sha and argv refuses with `routing: REQUIRED`). Its own
+# fixture, a ROOT-invocation control so the red is attributable to the cwd, two subdirectory depths
+# (including inside `openspec/changes` itself, where a cwd-relative pathspec would look for
+# `openspec/changes/openspec/changes/…`), the fail-OPEN direction (an oracle-routed branch must stay
+# NOT-APPLICABLE, without which `:(top)` could have been widened to match everything), and three
+# structural pins — the `:(top)` anchor is PRESENT, no unanchored `openspec/changes/` pathspec
+# survives, and BOTH `diff.renames=false` and `diff.relative=false` are still pinned (they are
+# different axes: `:(top)` anchors what is SELECTED, `diff.relative` only what is PRINTED). All need
+# only bash, git and coreutils, so the floor moves by the SAME 10 and the derived 6-assertion margin
+# for the ONE host-gated block is PRESERVED UNCHANGED — still deliberately not the exact 421, for
+# the reason recorded above.
+ASSERT_FLOOR=415
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

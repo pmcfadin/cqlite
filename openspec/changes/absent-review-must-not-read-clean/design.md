@@ -181,6 +181,15 @@ premerge-assert.sh <pr> <certified-sha> <gate-summary> [<delta-summary>] --c-ver
 - **The routing question is answered from committed state, not from the caller's word.** A caller-supplied
   "C doesn't apply here" is exactly the escape hatch this issue is about; a directory listing is a
   measurement.
+- **AND THE MEASUREMENT MUST NOT DEPEND ON THE CALLER'S WORKING DIRECTORY (round 11, Q1).** The
+  pathspec is root-anchored with git's `:(top)` magic, because a BARE `-- openspec/changes/` is
+  interpreted relative to the cwd: invoked from a repository subdirectory the diff came back empty, a
+  design-routed branch measured `NOT-APPLICABLE`, and the merge proceeded with no C verdict — a
+  chdir-shaped escape past the very check this change adds. `diff.relative=false` does **not** cover
+  it (it governs the output path prefix, not pathspec interpretation), so both pins stay and neither
+  substitutes for the other. Generalised: **a pinned config option is a claim about one axis, and
+  "cwd cannot change this answer" needs the axis your call actually uses** — `base-staleness.sh`'s
+  identical pin is sufficient there only because that scan passes no pathspec at all.
 - `AUTHOR-PERFORMED` is accepted **only** when §4's form is satisfied, and is reported under its own token
   on the `PREMERGE:` line — never folded into `OK`. A reader grepping for a clean pre-merge must be able to
   see that the intent audit was performed by the diff's author.

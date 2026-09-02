@@ -1871,7 +1871,22 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `archive` PLUS two sibling lanes' in-flight change directories, so every branch would read
   design-routed and the "measurement" would be vacuous), and the base is the **MERGE-BASE, never
   `origin/main`'s TIP** (#3392: a tip comparison reports another lane's newly-landed change as a
-  difference of THIS branch and reds a correct oracle-driven PR). **Any failure to measure — no git,
+  difference of THIS branch and reds a correct oracle-driven PR). **AND THE PATHSPEC IS
+  ROOT-ANCHORED — `:(top)openspec/changes/` — BECAUSE `diff.relative=false` DOES NOT DO THAT
+  (#3751 round 11).** A bare pathspec is interpreted relative to the CALLER'S CWD, so run from a
+  repository subdirectory the routing diff came back EMPTY, a genuinely design-routed branch
+  measured `NOT-APPLICABLE`, and the merge PROCEEDED with no C verdict at all — the exact escape
+  `--c-verdict` exists to close, reached by nothing more exotic than the working directory
+  (measured: `PREMERGE: OK`, exit 0, from `cqlite-core/src/storage` on the same repository, sha and
+  argv where the root invocation refuses with `routing: REQUIRED`). `diff.relative` is a DIFFERENT
+  AXIS: it controls the OUTPUT PATH PREFIX, not pathspec interpretation — measured, from a
+  subdirectory `-c diff.relative=false diff … -- openspec/changes/` is STILL empty while
+  `-- ':(top)openspec/changes/'` finds the path — so BOTH are pinned and neither substitutes for
+  the other: `:(top)` anchors what is SELECTED, `diff.relative=false` keeps what is PRINTED
+  root-relative (which the `archive/` prefix test and the slug extraction depend on). The
+  generalisation: **a pinned config option is a claim about ONE axis, and "cwd cannot change this
+  answer" needs the axis your call actually uses** — `base-staleness.sh`'s identical pin IS the
+  whole cwd story there only because that scan passes NO pathspec at all. **Any failure to measure — no git,
   no `origin/main`, the certified commit absent from this checkout — is `UNMEASURED` and is TREATED
   AS REQUIRED**: never derive a pass from the absence of a bad signal. There is deliberately NO
   spelling of the flag that means "not applicable": a supplied PATH can only carry a review-stage
@@ -1981,7 +1996,11 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   is the same class and is worse because the INVOKER controls it: set, porcelain run from a
   subdirectory strips the prefix, making the count a function of cwd. Both are pinned off on the
   porcelain call; **do NOT add `-M` to the `diff-tree` call**, which would reintroduce the asymmetry
-  from the other direction. `premerge-assert.sh` prints the finding on
+  from the other direction. **That pin is the WHOLE cwd story here ONLY because this scan passes no
+  PATHSPEC** — it takes the diff's paths wholesale and intersects them in shell. Where a pathspec IS
+  passed, `diff.relative=false` does NOT make the call cwd-independent (it governs the printed
+  prefix, not pathspec interpretation) and `:(top)` is needed as well; that gap merged unnoticed
+  into the C-routing measure and is recorded under `--c-verdict AUTO` above (#3751 round 11). `premerge-assert.sh` prints the finding on
   `PREMERGE: ADVISORY` lines and **can never fail on it** — an absent, failing or `UNMEASURED`
   advisory is REPORTED and is not fatal in slice 1 — and the three `PREMERGE: SCOPE` lines are
   RETAINED, because slice 1 does not close the gap they disclose. Three properties to carry:
