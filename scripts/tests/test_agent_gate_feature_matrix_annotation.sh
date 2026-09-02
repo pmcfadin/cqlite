@@ -195,12 +195,19 @@ fi
 # ---------------------------------------------------------------------------
 # (B) UNIFORMITY across the six emit sites
 # ---------------------------------------------------------------------------
-n_raw=$(grep -c "printf '%-18s %s (%s)'" "$GATE")
+# #3765 (roborev job 48, blocker 9): the needle is the FORMAT PREFIX, not one exact format
+# string. The old needle was the full `printf '%-18s %s (%s)'`, and the two tree-integrity
+# boundary loops spelled theirs `printf '%-18s %s (%ss)\n'` — one character different, so
+# the guard reported "no raw printf site remains" while two of them did, and a FAIL row
+# published from a boundary block carried neither the invocation bracket nor the #3765
+# failed-assert field. Count every `%-18s` row formatter; exactly one may exist, and it is
+# _fm_summary_line's own.
+n_raw=$(( $(grep -c "printf '%-18s" "$GATE") - 1 ))
 n_render=$(grep -c '_fm_summary_line "' "$GATE")
 if [ "$n_raw" -eq 0 ]; then
   ok "B1: no per-component SUMMARY line is emitted by a raw printf (all route through _fm_summary_line)"
 else
-  bad "B1: $n_raw raw per-component printf site(s) remain — that mode's block would carry NO feature matrix"
+  bad "B1: $n_raw raw per-component printf site(s) remain besides _fm_summary_line — that block would carry NO feature matrix and NO failed-assert field"
 fi
 # 6 emit sites + the definition itself is not matched (it uses positional args).
 if [ "$n_render" -ge 6 ]; then

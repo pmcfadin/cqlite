@@ -558,6 +558,55 @@ else
 fi
 ( cd "$r2" && git checkout -q -- README.md )
 
+# --- BOUNDARY BLOCK ROWS GO THROUGH THE ONE RENDERER (#3765, roborev job 48 blocker 9) ---
+# The boundary block's component table was formatted by a bare
+# `printf '%-18s %s (%ss)\n'` in BOTH of _tree_boundary_meta_lines' loops, bypassing
+# _fm_summary_line — so a FAIL row published from a tree-integrity boundary carried
+# NEITHER the labelled `[invocation: …]` bracket (#3453) NOR the `failed-assert:` identity
+# (#3765). That is the exact "a second formatter, so one mode renders a block the others do
+# not" failure the renderer exists to prevent, on the ONE block a reader reaches after a
+# mid-run mutation. Driven with a real FAIL row and a real component log, so the whole
+# chain runs: record_result -> _failassert_record -> the extractor -> the sidecar -> the
+# renderer -> the boundary block.
+r_fa=$(mkrepo failassert-repo)
+mkdir -p "$r_fa/scripts/ci"
+cp "$SCRIPT_DIR/../ci/gate-failed-assert.sh" "$r_fa/scripts/ci/gate-failed-assert.sh"
+printf 'ok   - a: fine\nFAIL - 3765-boundary-row: the boundary table must render through the ONE renderer\n' \
+  > "$tmp/boundary-fa.log"
+sum="$tmp/hook-boundary-fa.txt"; out="$tmp/hook-boundary-fa.out"
+( cd "$r_fa" && env AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=boundary \
+    AGENT_GATE_TREE_SELFTEST_MUTATE=README.md \
+    AGENT_GATE_TREE_SELFTEST_STATUS=FAIL \
+    AGENT_GATE_TREE_SELFTEST_LOG="$tmp/boundary-fa.log" \
+    bash "$r_fa/scripts/agent-gate.sh" >"$out" 2>&1 ); rc=$?
+fa_row=$(grep -E '^tree-selftest: +FAIL' "$sum" 2>/dev/null | head -1)
+if [ -n "$fa_row" ]; then
+  ok "3765-boundary-row: the boundary block's component table carries the FAIL row (rc=$rc)"
+else
+  bad "3765-boundary-row: no 'tree-selftest: FAIL' row in the boundary block (rc=$rc)"
+  cat "$sum" 2>/dev/null
+fi
+case "$fa_row" in
+  *"[invocation: "*) ok "3765-boundary-bracket: the boundary row carries the LABELLED invocation bracket (#3453), i.e. it went through _fm_summary_line" ;;
+  *) bad "3765-boundary-bracket: the boundary row has no '[invocation: …]' bracket ('$fa_row') — it is rendered by a SECOND formatter" ;;
+esac
+case "$fa_row" in
+  *"failed-assert: 1 RECOGNISED (assert): 3765-boundary-row"*)
+    ok "3765-boundary-failassert: the boundary row NAMES the failing assert — #3765's fix applies on this block too" ;;
+  *) bad "3765-boundary-failassert: the boundary row carries no failed-assert identity ('$fa_row')" ;;
+esac
+# The mode selector validates the two seams STRICTLY: a typo must be a named refusal, never
+# a silently-PASSing row (the same rule the AGENT_GATE_TREE_SELFTEST selector itself follows).
+sum_bad="$tmp/hook-boundary-badstatus.txt"
+( cd "$r_fa" && env AGENT_GATE_SUMMARY_FILE="$sum_bad" AGENT_GATE_TREE_SELFTEST=boundary \
+    AGENT_GATE_TREE_SELFTEST_STATUS=PASSS \
+    bash "$r_fa/scripts/agent-gate.sh" >"$tmp/badstatus.out" 2>&1 ); rc=$?
+if [ "$rc" = 2 ] && grep -q 'invalid AGENT_GATE_TREE_SELFTEST_STATUS' "$tmp/badstatus.out"; then
+  ok "3765-boundary-seam-strict: an invalid AGENT_GATE_TREE_SELFTEST_STATUS is a NAMED refusal (exit 2), not a silently-defaulted row"
+else
+  bad "3765-boundary-seam-strict: an invalid status was not refused (rc=$rc)"
+fi
+
 # --- SIDE lane: marker survives the drain, never a mid-run emit -----------------
 sum="$tmp/hook-side.txt"; out="$tmp/hook-side.out"
 ( cd "$r2" && env AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=side \

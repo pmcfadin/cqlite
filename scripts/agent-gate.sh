@@ -6551,6 +6551,48 @@ _fm_annotate_body() {
 # found". The extractor reads by REDIRECTION, never a pipe.
 FAILASSERT_SHOW=3
 
+# Exported (`export -f`) because the cli-tests component body runs under `bash -c`
+# and must see the SAME implementation rather than a second copy of it.
+# _ansi_stripped_log <logfile> — echo a path to <logfile> with ANSI escapes removed.
+#
+# roborev round-15 finding (HIGH), and the premise checked out: `.github/workflows/gate.yml`
+# (the nightly FULL gate) sets `CARGO_TERM_COLOR: always`, as do 17 other workflows under
+# .github/workflows/ (18 in total, measured — an earlier version of this comment said 8, which was
+# never measured) and scripts/local/pre-merge.sh. Cargo then emits
+#     ESC[1mESC[92m     RunningESC[0m unittests src/lib.rs (...)
+# with the reset sequence sitting BETWEEN `Running` and the path — so every parser keyed on
+# the literal text sees nothing. MEASURED on both guards, and the two directions differ:
+#   * check_unittest_targets_ran  -> FALSE FAIL: the new lanes would red on every clean
+#     nightly run, reporting "no Running unittests line" about a perfectly healthy log.
+#   * check_no_unexpected_zero_tests -> VACUOUS PASS: a target running ZERO tests is never
+#     associated with its result, so the #2039 guard silently reports OK. That one is
+#     PRE-EXISTING and affects its OTHER CALLER on nightly CI too — which is `cli-tests`, both
+#     of whose passes call it. An earlier version of this comment also named `core-tests`;
+#     core-tests does NOT call this guard, and that claim was never measured. Filed as #3400.
+#
+# Stripping is done ONCE into a sibling file, not per line and not through a pipe. A pipe
+# would put the reading loop in a SUBSHELL and its accumulated verdict variables would be
+# discarded — which for these guards means silently passing, the exact failure they exist to
+# prevent. The ESC byte is injected via printf rather than written as `\x1b`, because BSD sed
+# does not honour `\x` escapes and macOS is a first-class gate host.
+_ansi_stripped_log() {
+  local logfile="$1" out esc
+  # FAIL CLOSED on an unreadable log (roborev round-25, Medium). Returning the original path let the
+  # caller parse a file it had just failed to read, and a guard that parses nothing reports nothing
+  # wrong. The caller's own fail-closed branch is what should decide, so tell it the truth.
+  [ -r "$logfile" ] || return 1
+  esc=$(printf '\033')
+  out="$logfile.ansi-stripped"
+  if sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" "$logfile" > "$out" 2>/dev/null; then
+    printf '%s' "$out"
+  else
+    # A FAILED normalisation is not "use the coloured original": under CARGO_TERM_COLOR the
+    # coloured original is exactly what the parsers cannot read (round 15), so silently handing it
+    # back converts a normalisation failure into a vacuous PASS. Non-zero, and the caller FAILs.
+    return 1
+  fi
+}
+
 # The recogniser set lives in ONE named place, scripts/ci/gate-failed-assert.sh, with a
 # stated rule per entry, MEASURED against the 174 real FAILed component logs retained on
 # a fleet box. Resolved from the checkout with NO env override: the party the field
@@ -7145,6 +7187,20 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       echo "            $TREE_SELFTEST_FIXTURE_MARKER marker — refusing to write into a live checkout (#2926)" >&2
       exit 2
     fi
+  fi
+  # #3765 (roborev job 48, blocker 9): the boundary block's component table must be
+  # exercised with a FAIL row, because a FAIL row is the only one that carries the
+  # `failed-assert:` field. STRICTLY validated here, with the mode selector, so a typo is a
+  # named refusal rather than a silently-PASSing row.
+  case "${AGENT_GATE_TREE_SELFTEST_STATUS:-PASS}" in
+    PASS|FAIL|SKIP) : ;;
+    *)
+      echo "agent-gate: invalid AGENT_GATE_TREE_SELFTEST_STATUS='${AGENT_GATE_TREE_SELFTEST_STATUS}' (expected PASS, FAIL or SKIP) (#3765)" >&2
+      exit 2 ;;
+  esac
+  if [ -n "${AGENT_GATE_TREE_SELFTEST_LOG:-}" ] && [ ! -r "${AGENT_GATE_TREE_SELFTEST_LOG}" ]; then
+    echo "agent-gate: AGENT_GATE_TREE_SELFTEST_LOG='${AGENT_GATE_TREE_SELFTEST_LOG}' is not readable (#3765)" >&2
+    exit 2
   fi
   # shellcheck disable=SC2086  # intentional word-split over the space-separated list
   for _tsp in ${AGENT_GATE_TREE_SELFTEST_MUTATE:-}; do
@@ -8951,7 +9007,15 @@ _tree_boundary_meta_lines() {
     [ -f "$_rf" ] || continue
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
-    printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
+    # #3765 (roborev job 48, blocker 9): THROUGH THE ONE RENDERER. These two loops used to
+    # format the row with a bare printf, so a FAIL row published from a tree-integrity
+    # boundary block carried NEITHER the labelled `[invocation: …]` bracket NOR the
+    # `failed-assert:` field — i.e. this issue's own fix silently did not apply on the one
+    # block a reader reaches after a mid-run mutation, which is exactly the "no second
+    # formatter, so no mode can render a block the others do not" rule stated at
+    # _fm_summary_line. `.result` still holds exactly two whitespace fields; only the
+    # RENDERING moved.
+    printf '%s\n' "$(_fm_summary_line "$_c" "$_st" "${_secs}s")"
     _seen="$_seen $_c "
     _done=$(( _done + 1 ))
   done
@@ -8961,7 +9025,15 @@ _tree_boundary_meta_lines() {
     case "$_seen" in *" $_c "*) continue ;; esac
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
-    printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
+    # #3765 (roborev job 48, blocker 9): THROUGH THE ONE RENDERER. These two loops used to
+    # format the row with a bare printf, so a FAIL row published from a tree-integrity
+    # boundary block carried NEITHER the labelled `[invocation: …]` bracket NOR the
+    # `failed-assert:` field — i.e. this issue's own fix silently did not apply on the one
+    # block a reader reaches after a mid-run mutation, which is exactly the "no second
+    # formatter, so no mode can render a block the others do not" rule stated at
+    # _fm_summary_line. `.result` still holds exactly two whitespace fields; only the
+    # RENDERING moved.
+    printf '%s\n' "$(_fm_summary_line "$_c" "$_st" "${_secs}s")"
     _done=$(( _done + 1 ))
   done
   # Selected-count via the bash-3.2 empty-array-safe idiom used throughout this script
@@ -9490,6 +9562,11 @@ record_result() { # <name> <status> <seconds>
 #              "<file>|<escaped-path>". Pins the escaped-path lookup (#2926 review G2).
 # AGENT_GATE_TREE_SELFTEST_MUTATE is a space-separated list of repo-relative files to
 # append to; AGENT_GATE_TREE_SELFTEST_COMMIT=1 additionally commits (moving HEAD).
+# AGENT_GATE_TREE_SELFTEST_STATUS (PASS|FAIL|SKIP, default PASS) and
+# AGENT_GATE_TREE_SELFTEST_LOG (a component log to seed) drive the boundary block's own
+# component table with a real FAIL row (#3765) — the only row that carries a
+# `failed-assert:` field, and the row the two boundary loops used to render with a bare
+# printf that bypassed the ONE renderer. Both are validated at the mode selector.
 if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
   # #2926 review B5: the mutating modes WRITE INTO — and with …_COMMIT=1 COMMIT INTO —
   # $REPO_ROOT. Requiring only an explicit summary path did not stop that from being a
@@ -9567,7 +9644,13 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
     clean|boundary|terminal)
       [ "$AGENT_GATE_TREE_SELFTEST" = clean ] || _tree_selftest_mutate
       if [ "$AGENT_GATE_TREE_SELFTEST" != terminal ]; then
-        record_result "tree-selftest" PASS 0     # MAIN lane: may emit + exit 1
+        # #3765: the caller may supply this component's STATUS and its component LOG, so the
+        # boundary block's table can be driven with a real FAIL row (the only row that
+        # carries a failed-assert field). Both default to today's behaviour.
+        if [ -n "${AGENT_GATE_TREE_SELFTEST_LOG:-}" ]; then
+          cp "$AGENT_GATE_TREE_SELFTEST_LOG" "$LOG_DIR/tree-selftest.log" 2>/dev/null || true
+        fi
+        record_result "tree-selftest" "${AGENT_GATE_TREE_SELFTEST_STATUS:-PASS}" 0   # MAIN lane: may emit + exit 1
       fi
       _tree_finalize || true
       # The REAL production stamp (#2926 review C1) — these hooks drive the same
@@ -9748,47 +9831,10 @@ run_roborev_lints_cmd() {
 # INTEGRATION `--test` targets. A `--lib` unit-test run prints "Running unittests
 # src/lib.rs", which this deliberately does not claim to cover.
 #
-# Exported (`export -f`) because the cli-tests component body runs under `bash -c`
-# and must see the SAME implementation rather than a second copy of it.
-# _ansi_stripped_log <logfile> — echo a path to <logfile> with ANSI escapes removed.
-#
-# roborev round-15 finding (HIGH), and the premise checked out: `.github/workflows/gate.yml`
-# (the nightly FULL gate) sets `CARGO_TERM_COLOR: always`, as do 17 other workflows under
-# .github/workflows/ (18 in total, measured — an earlier version of this comment said 8, which was
-# never measured) and scripts/local/pre-merge.sh. Cargo then emits
-#     ESC[1mESC[92m     RunningESC[0m unittests src/lib.rs (...)
-# with the reset sequence sitting BETWEEN `Running` and the path — so every parser keyed on
-# the literal text sees nothing. MEASURED on both guards, and the two directions differ:
-#   * check_unittest_targets_ran  -> FALSE FAIL: the new lanes would red on every clean
-#     nightly run, reporting "no Running unittests line" about a perfectly healthy log.
-#   * check_no_unexpected_zero_tests -> VACUOUS PASS: a target running ZERO tests is never
-#     associated with its result, so the #2039 guard silently reports OK. That one is
-#     PRE-EXISTING and affects its OTHER CALLER on nightly CI too — which is `cli-tests`, both
-#     of whose passes call it. An earlier version of this comment also named `core-tests`;
-#     core-tests does NOT call this guard, and that claim was never measured. Filed as #3400.
-#
-# Stripping is done ONCE into a sibling file, not per line and not through a pipe. A pipe
-# would put the reading loop in a SUBSHELL and its accumulated verdict variables would be
-# discarded — which for these guards means silently passing, the exact failure they exist to
-# prevent. The ESC byte is injected via printf rather than written as `\x1b`, because BSD sed
-# does not honour `\x` escapes and macOS is a first-class gate host.
-_ansi_stripped_log() {
-  local logfile="$1" out esc
-  # FAIL CLOSED on an unreadable log (roborev round-25, Medium). Returning the original path let the
-  # caller parse a file it had just failed to read, and a guard that parses nothing reports nothing
-  # wrong. The caller's own fail-closed branch is what should decide, so tell it the truth.
-  [ -r "$logfile" ] || return 1
-  esc=$(printf '\033')
-  out="$logfile.ansi-stripped"
-  if sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" "$logfile" > "$out" 2>/dev/null; then
-    printf '%s' "$out"
-  else
-    # A FAILED normalisation is not "use the coloured original": under CARGO_TERM_COLOR the
-    # coloured original is exactly what the parsers cannot read (round 15), so silently handing it
-    # back converts a normalisation failure into a vacuous PASS. Non-zero, and the caller FAILs.
-    return 1
-  fi
-}
+# _ansi_stripped_log lives EARLIER in this file (just above the failed-assert helpers), so
+# that the AGENT_GATE_TREE_SELFTEST hooks — which call record_result, and therefore
+# _failassert_record, from the mode dispatch — reach a DEFINED function rather than a
+# "command not found" that renders as `not extractable` (#3765).
 
 # check_test_targets_observed <label> <logfile> <expected-id>... — every expected integration
 # target must appear as a `Running` banner in the log.

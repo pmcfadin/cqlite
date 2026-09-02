@@ -5664,6 +5664,21 @@ else
   bad "3765-order-record-nobound: _failassert_record applies $fa_rec_bound length bound(s) of its own, upstream of the ONE redaction (F6)"
 fi
 
+# 55za. NO SECOND FORMATTER, INCLUDING ON THE TREE-INTEGRITY BOUNDARY BLOCK (roborev job
+#       48, blocker 9). Both component loops in _tree_boundary_meta_lines rendered their
+#       rows with a bare `printf '%-18s %s (%ss)\n'`, bypassing _fm_summary_line — so a FAIL
+#       row published from a mid-run mutation carried NEITHER the labelled `[invocation: …]`
+#       bracket NOR this issue's `failed-assert:` field, on the ONE block a reader reaches
+#       after a mutation. `%-18s` may appear exactly once in the gate: inside the renderer.
+#       (The behavioural half — a real boundary FAIL row carrying both — is in
+#       scripts/tests/test_agent_gate_tree_integrity.sh, which has the fixture repo.)
+fa_raw_rows=$(grep -c "printf '%-18s" "$GATE")
+if [ "${fa_raw_rows:-0}" = 1 ]; then
+  ok "3765-boundary-one-formatter: exactly one site in the gate formats a component row (_fm_summary_line) — the tree-integrity boundary loops render through it too"
+else
+  bad "3765-boundary-one-formatter: $fa_raw_rows site(s) format a '%-18s' component row (expected exactly 1) — a second formatter renders a block without the invocation bracket and without the failed-assert field"
+fi
+
 # 55t/55u. STRUCTURAL, and labelled as such: the --delta node-tests runner must keep its jest
 #          log inside a PRIVATE mktemp -d and must delete that DIRECTORY. #3765 routed that
 #          log through _failassert_record, which strips it through _ansi_stripped_log, and the
@@ -5733,6 +5748,10 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
+# 458 -> 459 on #3765 (roborev job 48, blocker 9): section 55za adds 1 structural assert —
+# `%-18s` may be formatted in exactly ONE place, so the tree-integrity boundary block's rows
+# cannot be rendered by a second formatter that omits the invocation bracket and this
+# issue's failed-assert field. Host-INDEPENDENT (a grep over the gate script).
 # 447 -> 458 on #3765 (roborev job 46, blocker 6): sections 55x/55y add 4 asserts for a
 # credential SPANNING the display boundary (55w certified only the safe side of it) and 4
 # STRUCTURAL asserts pinning the order normalise -> redact -> bound-for-display, plus 2
@@ -5765,7 +5784,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=458
+ASSERT_FLOOR=459
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
