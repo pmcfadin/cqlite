@@ -151,7 +151,12 @@ carry).
   measured as not consulted for this call and deliberately left alone.
   **Then the boundary is DECLARED, not enumerated again** (the #3746 / job-311 precedent, after three
   rounds found three routes into one mechanism): every Case B success line carries one constant —
-  `ancestry over this box's SHARED object store: objects+metadata TRUSTED, not verified (#3746)`. It
+  `ancestry over this box's SHARED object store and SCRATCH namespace: objects, metadata and scratch
+  TRUSTED, not verified (#3746) — closes accident/drift, NOT a same-UID peer`. **That is the terminus of
+  the hardening line (job 390):** all lanes run as one user, so a peer can write the scratch as well as the
+  object store (it can plant a graft in the scratch between `git init` and the walk), no permission
+  boundary exists, so the claim is narrowed and the hazard assigned to #3746. A later same-UID-peer
+  instance is that declared boundary, not a new defect. It
   proves ancestry over what this box's shared store presents; it does NOT prove the anchor is on the PR
   as GitHub sees it, nor anything against a peer that can WRITE that store. A further route in the family
   is a residual under that declaration rather than a false claim here.

@@ -222,7 +222,12 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   **And there the enumeration STOPS and the boundary is DECLARED** (#3746 / job 311's precedent, after
   three rounds produced three routes into one mechanism — #3544 job 264's "one axis closed, space
   declared done" shape): every Case B success line ends with one constant, `ancestry over this box's
-  SHARED object store: objects+metadata TRUSTED, not verified (#3746)`. The binding proves ancestry over
+  SHARED object store and SCRATCH namespace: objects, metadata and scratch TRUSTED, not verified (#3746)
+  — closes accident/drift, NOT a same-UID peer`. **Terminus (job 390):** every lane runs as the same user,
+  so a peer can write our scratch as well as the object store — planting a graft there between `git init`
+  and the walk reproduces the very attack the scratch exists to stop — and no permission boundary is
+  available, so the claim is narrowed and the hazard assigned to #3746. A later same-UID-peer instance is
+  that declared boundary, not a new defect. The binding proves ancestry over
   the objects and metadata this box's shared store presents, isolated with a positive control from
   grafts, replace refs, an inherited `GIT_DIR`, an ambient template and the commit-graph; it does NOT
   prove the anchor is on the PR as GitHub sees it, nor anything against a peer that can WRITE that store.

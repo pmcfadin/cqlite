@@ -1807,7 +1807,16 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   *"one axis closed, space declared done"* shape, and #3746 / job 311 already ruled on the unclosable
   version: DECLARE it in the emitted line and hand the subject to the issue that owns it. So every Case B
   success line ends with one constant — `ancestry over this box's SHARED object store: objects+metadata
-  TRUSTED, not verified (#3746)` — folded into the ONE renderer, never per-arm. What the binding proves:
+  and SCRATCH namespace: objects, metadata and scratch TRUSTED, not verified (#3746) — closes
+  accident/drift, NOT a same-UID peer` — folded into the ONE renderer, never per-arm. **THAT IS THE
+  TERMINUS OF THIS HARDENING LINE (job 390).** Every lane on this fleet runs as the same user, so a peer
+  can write the shared object store AND our scratch — it can drop `.git/info/grafts` into the scratch
+  between `git init` and the walk, reproducing the graft attack inside the thing built to prevent it — and
+  no mode or ownership can admit this process while excluding a peer. So the CLAIM is narrowed rather than
+  the hole patched, and the hazard is assigned to **#3746**, which already owns "lanes share an object
+  store". **A later same-UID-peer instance is that declared boundary, not a new defect** — which is what
+  #3653 asked for, since its own text says the hostile route is largely closed elsewhere and the defect was
+  the constraint not being stated where the guard is read. What the binding proves:
   ancestry over the objects and commit metadata this box's shared store presents, isolated (each with a
   positive control) from grafts, replace refs, an inherited `GIT_DIR`, an ambient template, and the
   commit-graph. What it does not: that the anchor is on the PR **as GitHub sees it**, and anything against
