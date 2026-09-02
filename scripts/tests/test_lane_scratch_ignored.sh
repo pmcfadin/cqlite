@@ -11,21 +11,48 @@
 # mid-gate. The repair is a reserved namespace so the NEXT name is covered by
 # construction; this guard is what keeps that true.
 #
-# WHAT IT ASSERTS (all against the committed .gitignore):
-#   1. novel `.lane-*` names are ignored — including the two names the #3414
-#      incident actually wanted, spelled in the new namespace — at repo root,
-#      nested, and directory-shaped;
-#   2. every LEGACY enumerated scratch name is STILL ignored, so a future
+# WHAT IT ASSERTS (all against the WORKING-TREE .gitignore of this checkout —
+# deliberately not `git show HEAD:.gitignore`, because the gate certifies the
+# working tree, so the working tree is the subject whose ignore rules decide
+# whether a mid-run write is visible):
+#   1. the reserved NAMESPACE itself: the winning pattern for a `.lane-*` path is
+#      textually `.lane-*` — un-anchored and un-negated — plus a GENERATIVE case
+#      using a name invented at run time, so the assertion cannot be satisfied by
+#      any enumeration of names someone already thought of. Four literal samples
+#      (including the two the #3414 incident actually wanted, spelled in the new
+#      namespace) cover root, nested and directory-shaped spellings;
+#   2. the namespace is not OVER-broad: the near misses `lane-foo` (no dot) and
+#      `.lanes-foo` stay visible;
+#   3. the reservation's PRECONDITION — no TRACKED file anywhere in the
+#      repository lives under a `.lane-*` path. This is the entire safety
+#      argument for omitting a `!.lane-*/` negation; unenforced, a later
+#      `tools/x/.lane-runtime/mod.rs` would be invisible to
+#      `git ls-files --others --exclude-standard`, to `dirty:` and to
+#      tree-integrity, re-opening roborev job 209's subtree-wide false-clean;
+#   4. every LEGACY enumerated scratch name is STILL ignored, so a future
 #      tidy-up cannot silently drop one;
-#   3. the `.lane-*` SUBTREE is genuinely invisible to
+#   5. the `.lane-*` SUBTREE is genuinely invisible to
 #      `git ls-files --others --exclude-standard` (the enumeration
 #      tree-integrity uses) — MEASURED, because omitting a `!.lane-*/`
 #      negation is a deliberate choice and the inverse of roborev job 209's;
-#   4. the CONTRAST: a path under a `!<path>/`-negated `.agent-gate-*` name IS
+#   6. the CONTRAST: a path under a `!<path>/`-negated `.agent-gate-*` name IS
 #      visible, so the two behaviours are pinned as a deliberate PAIR and a
 #      future blanket-negation edit reds here;
-#   5. a positive control — a tracked source path is NOT ignored — so the guard
+#   7. a positive control — a tracked source path is NOT ignored — so the guard
 #      is demonstrably capable of failing.
+#
+# AN IGNORE VERDICT IS NEVER READ OFF rc 0 OR NON-EMPTY OUTPUT. `git check-ignore
+# -v` exits 0 and PRINTS the winning pattern when that pattern is a NEGATION —
+# measured: `.gitignore:2:!.review-keep.md` for a path that is NOT ignored — so a
+# single appended `!.drive-issue-state.md` would make that name visible while a
+# rc-only guard reported PASS. Every ignored-ness verdict here therefore requires
+# the winning pattern to be attributed to .gitignore AND not to begin with `!`.
+#
+# DECLARED RESIDUAL, not closed: this pins the two re-inclusion shapes it names
+# (a blanket `!.lane-*/`, and a `.lane-*` subtree that stays swallowed). A LATER,
+# NARROW re-inclusion — say `!.lane-bar/` for one specific name — would NOT red
+# here. Declaring it is deliberate: enumerating every re-inclusion someone might
+# write is the same losing game as the enumeration this issue replaced.
 #
 # THIS SCRIPT CREATES NO FILES IN THE WORKTREE UNDER TEST. Writing scratch into
 # the lane is the very defect being repaired, and this guard runs inside the
@@ -54,9 +81,31 @@ if [ ! -f "$GITIGNORE" ]; then
 fi
 
 # ---------------------------------------------------------------- fixture ----
+# The fixture root MUST lie outside the worktree under test. A box exporting a
+# repo-local TMPDIR would otherwise make this guard write its fixture INTO the
+# lane mid-gate — the very defect under repair, and the same class as the
+# TMPDIR-at/below-the-target hazard already recorded at scripts/agent-gate.sh:596
+# (a capture list under the deletion target was eaten by the rm -rf, which then
+# read as "nothing to restore"). Refuse rather than fall back: a silent fallback
+# to /tmp would hide a misconfigured box that other tooling still trusts.
+tmp_root="${TMPDIR:-/tmp}"
+tmp_root_abs="$(cd "$tmp_root" 2>/dev/null && pwd -P)"
+repo_root_abs="$(cd "$REPO_ROOT" && pwd -P)"
+if [ -z "$tmp_root_abs" ]; then
+  echo "FAIL: TMPDIR '$tmp_root' does not resolve to a usable directory"
+  exit 1
+fi
+if [ "$tmp_root_abs" = "$repo_root_abs" ] || [ "${tmp_root_abs#"$repo_root_abs"/}" != "$tmp_root_abs" ]; then
+  echo "FAIL: TMPDIR '$tmp_root_abs' is at or below the worktree under test ($repo_root_abs)."
+  echo "      This guard would then write its fixture INTO the lane — mid-gate that is"
+  echo "      'tree-integrity: FAIL (tree-mutated-midrun)' (#2926), the defect #3760 repairs."
+  echo "REMEDY: export a TMPDIR outside the repository (e.g. TMPDIR=/tmp) and re-run."
+  exit 1
+fi
+
 # TERMINAL-XXXXXX template (macOS mktemp substitutes only a trailing run of X's).
-fixture="$(mktemp -d "${TMPDIR:-/tmp}/lane-scratch-ignore-XXXXXX")" || {
-  echo "FAIL: could not create a temp fixture dir"
+fixture="$(mktemp -d "$tmp_root_abs/lane-scratch-ignore-XXXXXX")" || {
+  echo "FAIL: could not create a temp fixture dir under '$tmp_root_abs'"
   exit 1
 }
 cleanup() { rm -rf "$fixture"; }
@@ -66,7 +115,7 @@ trap 'cleanup; exit 143' TERM
 trap 'cleanup; exit 129' HUP
 
 # Neutralise every ignore source that is not the file under test, so a PASS can
-# only come from the committed .gitignore.
+# only come from this checkout's .gitignore.
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
 
@@ -82,59 +131,157 @@ g() { git -C "$fixture" "$@"; }
 
 # check-ignore --no-index: decide purely from the ignore RULES, never from index
 # state, and report the matching source:line:pattern so the verdict can be
-# attributed to the seeded .gitignore.
-ignore_source() { g check-ignore --no-index -v -- "$1" 2>/dev/null; }
+# attributed to this checkout's .gitignore.
+#
+# THREE-VALUED, on purpose. `git check-ignore` exits 0 (a pattern decided the
+# path), 1 (no pattern matched) or 128 (error). Collapsing 128 onto "no match" is
+# the `1699-find-tristate` shape: a git without --no-index, an unreadable
+# fixture, any failure at all would make the ONE assertion whose job is to prove
+# this guard can fail pass VACUOUSLY. So the rc is captured, stderr is kept, and
+# anything outside {0,1} is a named FAIL rather than an answer.
+IGN_OUT=""      # first line of check-ignore -v output (empty when rc 1)
+IGN_ERR=""      # stderr, reported on an unexpected rc
+IGN_RC=0
+ignore_source() {
+  local err_file="$fixture/.git/lane-scratch-check-ignore.err"
+  IGN_OUT="$(g check-ignore --no-index -v -- "$1" 2>"$err_file")"
+  IGN_RC=$?
+  IGN_ERR="$(cat "$err_file" 2>/dev/null)"
+  rm -f "$err_file"
+  [ "$IGN_RC" -eq 0 ] || [ "$IGN_RC" -eq 1 ]
+}
 
-# assert_ignored <path> [required-pattern-prefix]
+# assert_ignored <path> [exact-required-pattern]
+#
+# An "ignored" verdict requires ALL of: rc 0, a winning pattern attributed to
+# .gitignore, and that pattern NOT being a NEGATION. The last is load-bearing and
+# is not deducible from the exit code: git exits 0 and prints the pattern when a
+# `!`-pattern wins, so `!.drive-issue-state.md` appended to .gitignore makes that
+# name VISIBLE while rc stays 0 — an untracked-and-visible scratch name is
+# exactly what voids a gate of record (#2926/#3414).
 assert_ignored() {
-  local path="$1" want_prefix="${2:-}" out src pat
-  out="$(ignore_source "$path")"
-  if [ -z "$out" ]; then
+  local path="$1" want_exact="${2:-}" head src pat
+  if ! ignore_source "$path"; then
+    fail "'$path': git check-ignore failed (rc $IGN_RC) — verdict UNKNOWN, not 'ignored'${IGN_ERR:+: $IGN_ERR}"
+    return
+  fi
+  if [ "$IGN_RC" -ne 0 ] || [ -z "$IGN_OUT" ]; then
     fail "'$path' is NOT ignored (a lane writing it mid-gate voids the gate of record)"
     return
   fi
   # format: <source>:<linenum>:<pattern>\t<pathname>. Strip the two leading
   # fields from the FRONT rather than taking the last colon-field, so a pattern
   # that itself contains a colon is still reported whole.
-  out="${out%%$'\t'*}"
-  src="${out%%:*}"
-  pat="${out#*:}"
+  head="${IGN_OUT%%$'\t'*}"
+  src="${head%%:*}"
+  pat="${head#*:}"
   pat="${pat#*:}"
   if [ "$src" != ".gitignore" ]; then
-    fail "'$path' is ignored, but by '$src', not the committed .gitignore"
+    fail "'$path' is ignored, but by '$src', not this checkout's .gitignore"
     return
   fi
-  if [ -n "$want_prefix" ] && [ "${pat#"$want_prefix"}" = "$pat" ]; then
-    fail "'$path' is ignored by pattern '$pat', not by the reserved '$want_prefix' namespace"
+  case "$pat" in
+    '!'*)
+      fail "'$path' is NOT ignored: the winning pattern '$pat' is a NEGATION (git still exits 0 and prints it)"
+      return
+      ;;
+  esac
+  if [ -n "$want_exact" ] && [ "$pat" != "$want_exact" ]; then
+    fail "'$path' is ignored by pattern '$pat', not by the reserved namespace pattern '$want_exact' (an ENUMERATION of sample names is not the namespace)"
     return
   fi
   pass "'$path' is ignored (.gitignore pattern '$pat')"
 }
 
+# assert_not_ignored <path> <why> — a path that MUST stay visible.
 assert_not_ignored() {
-  local path="$1" out
-  out="$(ignore_source "$path")"
-  if [ -n "$out" ]; then
-    fail "positive control broke: '$path' IS ignored (${out%%$'\t'*}) — real source would be invisible"
+  local path="$1" why="$2" head pat
+  if ! ignore_source "$path"; then
+    fail "'$path': git check-ignore failed (rc $IGN_RC) — verdict UNKNOWN, not 'visible'${IGN_ERR:+: $IGN_ERR}"
     return
   fi
-  pass "'$path' is NOT ignored (positive control: the guard can fail)"
+  if [ "$IGN_RC" -eq 0 ] && [ -n "$IGN_OUT" ]; then
+    head="${IGN_OUT%%$'\t'*}"
+    pat="${head#*:}"
+    pat="${pat#*:}"
+    # A negation WINNING here means the path is visible, which is what we want.
+    case "$pat" in
+      '!'*)
+        pass "'$path' is NOT ignored ($why; re-included by '$pat')"
+        return
+        ;;
+    esac
+    fail "'$path' IS ignored by '$head' — $why"
+    return
+  fi
+  pass "'$path' is NOT ignored ($why)"
 }
 
-# --- 1. the reserved namespace covers novel scratch names -------------------
+# --- 1. the reserved NAMESPACE, not four names someone thought of -----------
+# Each verdict must be attributed to the pattern text `.lane-*` EXACTLY, so
+# replacing the wildcard with an enumeration of these very sample names reds
+# here instead of passing — an enumeration is the defect this issue removed, and
+# a guard satisfied by one would certify #3414 all over again.
 # The first two are the names the #3414 incident actually wanted, spelled in the
 # new namespace; then a nested path and a directory-shaped one.
+LANE_PATTERN='.lane-*'
 for p in \
   ".lane-gate-of-record-sha.txt" \
   ".lane-rescue-wip.patch" \
   "some/dir/.lane-notes.md" \
   ".lane-3760/scratch.txt"; do
-  assert_ignored "$p" ".lane-"
+  assert_ignored "$p" "$LANE_PATTERN"
 done
 
-# --- 2. legacy enumerated scratch names are STILL ignored -------------------
+# GENERATIVE case — the one that actually closes the class. The name is invented
+# at RUN TIME, so no enumeration of names anyone anticipated can satisfy it; this
+# is the property "the NEXT scratch name is covered by construction" stated as a
+# test rather than as a comment.
+# Extension-free on purpose: a suffix like `.tmp` or `.log` is matched by other
+# rules in this .gitignore, so the verdict would no longer be attributable to the
+# namespace alone.
+generated=".lane-$$-${RANDOM}-${RANDOM}-generated"
+assert_ignored "$generated" "$LANE_PATTERN"
+assert_ignored "nested/dir/$generated" "$LANE_PATTERN"
+
+# --- 2. the namespace is not OVER-broad -------------------------------------
+# Near misses that must stay VISIBLE: a reserved prefix that quietly swallowed
+# neighbouring names would hide real files from tree-integrity for the opposite
+# reason. `lane-foo` lacks the leading dot; `.lanes-foo` differs after it.
+assert_not_ignored "lane-foo" "no leading dot — outside the reserved namespace"
+assert_not_ignored ".lanes-foo" "differs after the dot — outside the reserved namespace"
+
+# --- 3. the reservation's PRECONDITION: no TRACKED file under .lane-* -------
+# "Source may never live under a `.lane-*` path" is the entire safety argument
+# for omitting a `!.lane-*/` negation, and prose enforces nothing. Because the
+# pattern is un-anchored and git does not descend into an ignored directory, a
+# later `tools/x/.lane-runtime/mod.rs` would be invisible to
+# `git ls-files --others --exclude-standard`, to `dirty:` and to tree-integrity
+# — roborev job 209's subtree-wide false-clean, re-opened. Census over the REAL
+# repository index (read-only; -z so a path containing a newline cannot split a
+# record). Measured when written: 0 matches, so this costs nothing to keep true.
+tracked_under_lane="$(git -C "$REPO_ROOT" ls-files -z \
+  | tr '\0' '\n' | grep -E '(^|/)\.lane-' || true)"
+if [ -n "$tracked_under_lane" ]; then
+  fail "TRACKED file(s) live under a reserved '.lane-*' path — the no-negation decision's precondition is broken"
+  printf '  %s\n' $tracked_under_lane
+  echo "  REMEDY: move them out of '.lane-*'. That namespace is reserved for lane-local"
+  echo "          scratch; git does not descend into an ignored directory, so source there"
+  echo "          is invisible to ls-files --others, to 'dirty:' and to tree-integrity."
+else
+  pass "no TRACKED file lives under a reserved '.lane-*' path (precondition of the no-negation decision)"
+fi
+
+# --- 4. legacy enumerated scratch names are STILL ignored -------------------
 # They stay for compatibility (#3760 sanctions this); pinning them stops a
 # future tidy-up silently dropping one while their writers still exist.
+#
+# RETIREMENT CONDITION (so this cannot red on correct input): each entry here is
+# owed to a WRITER that still emits that name. When a writer migrates to the
+# `.lane-*` namespace and the enumerated `.gitignore` line is legitimately
+# deleted, DELETE ITS ASSERTION IN THE SAME COMMIT. Removing the line while
+# leaving the assertion would red a correct change, which is the guard agents
+# learn to waive.
 for p in \
   ".drive-issue-state.md" \
   ".impl-x-verdict.md" \
@@ -144,7 +291,7 @@ for p in \
   assert_ignored "$p"
 done
 
-# --- 3. the .lane-* SUBTREE is invisible to the tree-integrity enumeration --
+# --- 5. the .lane-* SUBTREE is invisible to the tree-integrity enumeration --
 # MEASURED, not assumed: this is the inverse of roborev job 209's assert and is
 # the whole justification for omitting a `!.lane-*/` negation.
 mkdir -p "$fixture/.lane-foo/deep"
@@ -167,7 +314,7 @@ else
   pass ".lane-foo/ subtree is invisible to ls-files --others --exclude-standard (no negation, by design)"
 fi
 
-# --- 4. the deliberate CONTRAST: job 209's negated names DO surface ---------
+# --- 6. the deliberate CONTRAST: job 209's negated names DO surface ---------
 # `/.agent-gate-summary.txt.launch-lock` is followed by `!/...launch-lock/`, so
 # the DIRECTORY is re-included and source under it stays visible. Pinning both
 # behaviours together means a future blanket `!.lane-*/` edit — or deleting a
@@ -182,8 +329,8 @@ else
   fail "'$neg/inner.rs' is invisible — the job-209 '!<path>/' negation was lost"
 fi
 
-# --- 5. positive control: real source is not ignored ------------------------
-assert_not_ignored "cqlite-core/src/lib.rs"
+# --- 7. positive control: real source is not ignored ------------------------
+assert_not_ignored "cqlite-core/src/lib.rs" "tracked source must never be invisible"
 
 # ------------------------------------------------------------------ verdict --
 echo
@@ -196,7 +343,11 @@ if [ "$fails" -ne 0 ]; then
   echo "        NO '!.lane-*/' negation (a lane scratch DIRECTORY must be swallowed whole —"
   echo "        re-including it would surface its contents as untracked and stamp"
   echo "        'dirty: yes' / 'tree-mutated-midrun', i.e. reproduce issue #3760)."
+  echo "        The namespace is RESERVED: no tracked source may live under a '.lane-*'"
+  echo "        path — that reservation is the precondition the no-negation decision rests on."
   echo "        Verify a name before writing it mid-gate: git check-ignore -v <path>"
+  echo "        (rc 0 alone is NOT proof: git exits 0 and prints the pattern when a '!'"
+  echo "        negation wins, i.e. when the path is visible.)"
   exit 1
 fi
 echo "PASS: lane-scratch ignore guard (#3760)"
