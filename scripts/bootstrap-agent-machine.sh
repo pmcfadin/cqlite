@@ -3891,7 +3891,33 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     if [ "${SCC_START_RACED:-0}" = 1 ]; then
       info "note: this run attempted a start and another server answered with a different cap — that is a lost race, not an sccache fault, and the remedy below applies to the server that won it"
     fi
-    info "remedy:  sccache --stop-server    (the next compile restarts it, and the new server reads SCCACHE_CACHE_SIZE then). Do NOT edit the value — it is already correct and already visible; what is stale is the SERVER"
+    # THE REMEDY MUST NAME THE SERVER WE MEASURED (roborev job 393, f1). That server was located
+    # THROUGH THE PROBED SESSION's routing, and the operator is running this script as root under
+    # the documented `sudo bash scripts/bootstrap-agent-machine.sh` — a context that carries none
+    # of it. A bare `sccache --stop-server` there resolves whatever sccache is on ROOT's PATH and
+    # talks to ROOT's default location, so it stops a DIFFERENT server, or none, while the operator
+    # believes the remedy was applied. That is worse than printing no remedy, for the same reason
+    # the `--fix-sccache-cap` hint is withheld when the literal is unusable: a remedy that appears
+    # to have been complied with is what stops them looking. So the command is REBUILT FROM THE
+    # MEASUREMENT — the agreed binary, run as the probed user, carrying exactly the routing
+    # variables that session reported as SET and no others.
+    scc_stop_env=""
+    case "$SCC_SESSION_SET" in *d*) scc_stop_env="$scc_stop_env SCCACHE_DIR=$(printf '%q' "$SCC_SESSION_DIR")" ;; esac
+    case "$SCC_SESSION_SET" in *p*) scc_stop_env="$scc_stop_env SCCACHE_SERVER_PORT=$(printf '%q' "$SCC_SESSION_PORT")" ;; esac
+    if [ -n "${SCC_SELF_USER:-}" ] && [ -n "${SCC_SCCACHE_BIN:-}" ]; then
+      if [ -n "$scc_stop_env" ]; then
+        info "remedy:  sudo -n -u $(printf '%q' "$SCC_SELF_USER") env$scc_stop_env $(printf '%q' "$SCC_SCCACHE_BIN") --stop-server"
+      else
+        info "remedy:  sudo -n -u $(printf '%q' "$SCC_SELF_USER") $(printf '%q' "$SCC_SCCACHE_BIN") --stop-server"
+      fi
+      info "remedy: run it AS PRINTED — it reproduces the context the stale server was MEASURED in (the agreed binary, the probed user${scc_stop_env:+, and the routing that session reported}). Adding an SCCACHE_DIR or SCCACHE_SERVER_PORT of your own, or dropping the sudo, points it at a different server${scc_stop_env:+; this session sets$scc_stop_env}"
+    else
+      # NEITHER HALF IS GUESSED. Without an agreed binary or a resolved user there is no command
+      # this run can name truthfully, so it prints the CONTEXT to reproduce instead of a command
+      # that might stop the wrong server — the same choice as every other unmeasurable state here.
+      info "remedy: stop the server THAT SESSION routes to — run its own sccache with '--stop-server' as ${SCC_SELF_USER:-the user the gate runs as}${scc_stop_env:+, with exactly:$scc_stop_env}${scc_stop_env:-, with no SCCACHE_DIR or SCCACHE_SERVER_PORT set}. This run cannot name the command itself (probed user='${SCC_SELF_USER:-<unresolved>}', agreed binary='${SCC_SCCACHE_BIN:-<none>}'), and will not print one it cannot vouch for"
+    fi
+    info "the next compile restarts it, and the new server reads SCCACHE_CACHE_SIZE then. Do NOT edit the value — it is already correct and already visible; what is stale is the SERVER"
     if [ "$SCC_FILE_HAS_LINE" = yes ] && [ "$SCC_FILE_VALUE" != "$scc_probe_seen" ]; then
       info "note: the session value is NOT coming from $SCC_ENV_FILE — that file sets SCCACHE_CACHE_SIZE='$SCC_FILE_VALUE' while this session sees '$scc_probe_seen', so a sudo- or user-specific source is overriding it; fix that override too, or the two will keep disagreeing"
     fi

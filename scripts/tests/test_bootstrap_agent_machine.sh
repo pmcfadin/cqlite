@@ -4461,16 +4461,25 @@ else
 
   # 12b-b. NOT-HONOURED — the #3727 state itself: the value is persisted, visible and accepted,
   #        and the RUNNING server enforces something else because it predates the value. The
-  #        remedy must be `sccache --stop-server` and must NOT tell the operator to edit a value
-  #        that is already correct (a remedy the operator has already complied with is worse
+  #        remedy must stop THE SERVER THAT WAS MEASURED and must NOT tell the operator to edit a
+  #        value that is already correct (a remedy the operator has already complied with is worse
   #        than none, because it stops them looking).
+  #        SINCE roborev job 393 f1 THE REMEDY IS A CONTEXT-CARRYING COMMAND, not the bare
+  #        `sccache --stop-server` this case used to pin: the server was located through the PROBED
+  #        SESSION's routing, while the operator is root under this script's documented sudo invocation,
+  #        so a bare invocation there resolves root's PATH and root's default location — a different
+  #        server, or none, with the operator believing they applied it. So the assertion is on the
+  #        PROPERTY: it names the probed user, the agreed binary and --stop-server, and it is NOT
+  #        the bare form.
   scc_out_nh=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=10737418240 SCC_STUB_LOG="$scc_log")
   scc_sl_nh=$(scc_slice "$scc_out_nh")
   if out_has "$scc_sl_nh" -E '\[warn\].*sccache-cap: NOT-HONOURED' \
-     && out_has "$scc_sl_nh" 'sccache --stop-server' \
+     && out_has "$scc_sl_nh" -E 'remedy: +sudo -n -u .*--stop-server' \
+     && out_has "$scc_sl_nh" -E "remedy: +sudo .*$scc_shims_v/sccache --stop-server" \
+     && ! out_has "$scc_sl_nh" -E 'remedy: +sccache --stop-server' \
      && ! out_has "$scc_sl_nh" -E '\[ok\].*sccache-cap' \
      && ! out_has "$scc_sl_nh" 'fix the VALUE'; then
-    ok "sccache-cap: a stale server is NOT-HONOURED whose remedy is 'sccache --stop-server', never editing the value"
+    ok "sccache-cap: a stale server is NOT-HONOURED whose remedy stops THE MEASURED server (probed user + agreed binary + --stop-server), never the bare form and never editing the value"
   else
     bad "sccache-cap: the stale-server state did not report NOT-HONOURED with the stop-server remedy"
     printf '%s\n' "$scc_sl_nh" | head -6
@@ -4737,7 +4746,7 @@ else
     SCC_STUB_LOG="$scc_log_race" --fix-sccache-cap)
   scc_sl_race=$(scc_slice "$scc_out_race")
   if out_has "$scc_sl_race" -E '\[warn\].*sccache-cap: NOT-HONOURED' \
-     && out_has "$scc_sl_race" 'sccache --stop-server' \
+     && out_has "$scc_sl_race" -E 'remedy: +sudo -n -u .*--stop-server' \
      && out_has "$scc_sl_race" 'lost race' \
      && ! out_has "$scc_sl_race" 'THIS RUN STARTED' \
      && ! out_has "$scc_sl_race" 'sccache-level inconsistency' \
