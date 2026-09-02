@@ -463,17 +463,47 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   quarter to a half of all runs — so recognising damage from the TEXT SHAPE of a diagnostic
   (`/^error/p`) made a healthy box page high, stop its supervisor and fail `--strict` bootstrap.
   The class now comes from fsck's exit **BITMASK**: bits `1 ERROR_OBJECT` / `4 ERROR_PACK` are this
-  sweep's subject; `2 ERROR_REACHABLE` / `8 ERROR_REFS` / `16 ERROR_COMMIT_GRAPH` are **not demoted
-  to clean** (a genuinely MISSING object reports bit 2) but land on their own non-passing
-  `UNMEASURED` cause; a status outside `1..31` is not a bitmask at all (128 is git's `die()`) and is
-  unclassified. And **no non-clean walk is fatal on ONE observation**: it is re-run exactly ONCE as
+  sweep's subject; `2 ERROR_REACHABLE` / `8 ERROR_REFS` / `16 ERROR_COMMIT_GRAPH` /
+  `32 ERROR_MULTI_PACK_INDEX` are **not demoted to clean** (a genuinely MISSING object reports bit
+  2) but land on their own non-passing `UNMEASURED` cause. **THE MASK DOES NOT END AT 31, AND
+  ASSUMING IT DID DROPPED REAL DAMAGE (review round 2).** A range check over `1..31` — reasoned from
+  128 being `die()` and `127 & 1` being 1 — classified **33** (`32|1`) and **36** (`32|4`) as
+  unclassified and so `UNMEASURED`: a FALSE NEGATIVE on genuine object corruption, the one direction
+  this control exists to prevent. Measured on git 2.43.0 rather than read off a header: a truncated
+  `multi-pack-index` exits 32, and that same store with one corrupted blob exits 35. So the **damage
+  bits are tested INDEPENDENTLY, and FIRST**, before any completeness check on the rest of the
+  status, and an unrelated bit can therefore never MASK damage — it only travels with it. Only a
+  status at or above **124** (the timeout/shell conventions, and `die()`/signal deaths above them) is
+  refused bit-testing outright, and a status carrying a bit OUTSIDE the supported mask is
+  `unclassified` rather than folded into a class whose remedy would be wrong. That is what makes it
+  **degrade safely** as git adds bits: a new bit alongside damage is still damage, a new bit alone is
+  non-passing, and widening `FSCK_KNOWN_MASK` is then a wording change rather than a correctness fix. And **no non-clean walk is fatal on ONE observation**: it is re-run exactly ONCE as
   a **discriminator** — a concurrency artefact does not survive a second independent walk, real
   damage does — never a retry-until-clean loop, and a damage class seen once and not twice is
   `UNMEASURED`, neither established damage nor a clean store. **The `CORRUPT` verdict is PERSISTED
-  in the box-wide throttle stamp**, because a timestamp-only stamp let the detecting lane stop while
-  its three peers saw a fresh stamp, skipped their own sweep for the whole interval and kept
-  spawning workers over the damaged store; the latch does not expire (corruption is
-  non-self-clearing) and is cleared by hand with the `rm -f <stamp>` the remedy names.
+  for the box in its OWN CREATE-ONLY FILE** (`<stamp>.CORRUPT`), because a timestamp-only stamp let
+  the detecting lane stop while its three peers saw a fresh stamp, skipped their own sweep for the
+  whole interval and kept spawning workers over the damaged store. **PUTTING THE VERDICT IN THE
+  THROTTLE STAMP WAS THE FIRST FIX FOR THAT AND WAS ITSELF A DEFECT (round 2):** stamp writes are
+  unsynchronised overwrites, so a lane whose sweep STARTED before the detection can finish AFTER it
+  and replace `CORRUPT` with `VERIFIED`, after which the peers throttle on a fresh non-corrupt stamp
+  and keep working — the same harm through a different door. **Two consecutive rounds found a defect
+  in that ONE shared mutable cell, so the channel is REMOVED rather than serialised** (CLAUDE.md's
+  standing ruling for this family): the latch's only transition is ABSENT -> PRESENT, created under
+  `set -C` so the KERNEL arbitrates and a losing writer cannot overwrite the winner, while the
+  timestamp stays a freely overwritable cell because moving a timestamp backwards costs one extra
+  sweep and nothing else. **A LOCK WAS CONSIDERED AND REJECTED**, and the reason generalises: it
+  makes the read-modify-write atomic but leaves a value any writer can move BACKWARDS, so "CORRUPT is
+  sticky" would rest on every present and future writer remembering to honour it — plus a lock has
+  its own could-not-acquire path that must then not silently skip the latch. The latch does not
+  expire (corruption is non-self-clearing) and is cleared by hand with the `rm -f <latch>` that every
+  message naming it prints; a create that could not happen is REPORTED, never read as a latched box.
+  **And the stamp's KEY is resolved by the sweep script itself (`--print-store`), never by a `git`
+  call in the supervisor:** a bare `git rev-parse --git-common-dir` inherits the caller's
+  environment, so an inherited `GIT_DIR`/`GIT_COMMON_DIR` keyed the stamp — and hence the latch — on
+  ANOTHER repository, which is roborev job 276's "the allowlist did not reach the sites the fix
+  added" at a site the same round left behind. ONE resolver, in the file that owns the `env -i`
+  allowlist, so a future caller has no un-isolated shape available to it.
   because a hygiene probe could not run is a self-DoS). **That sweep is PERIODIC, NOT PER-READ, so
   the emitted clause still says `store TRUSTED, not verified (#3749)` — do not inflate it.**
   **THREE ALTERNATIVES WERE REJECTED and the reasons are recorded so they are not re-derived:**

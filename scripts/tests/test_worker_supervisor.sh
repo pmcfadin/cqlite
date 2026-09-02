@@ -9363,8 +9363,14 @@ t test_lane_lock_failure_cause_is_not_inferred_from_later_state
 # The optional 5th argument is a shell line the stub runs BEFORE printing its verdict —
 # used by the monotonicity case to have a PEER LANE latch the box while this lane's sweep
 # is still in flight, which is the only way to stage the stale-writer race in one process.
+#
+# The optional 6th is the store path the stub answers `--print-store` with, i.e. the ONE
+# isolated resolver the supervisor now keys its stamp on. Empty (the default) means the
+# stub answers NOTHING, which is the unresolvable-store state. A `--print-store` call is
+# deliberately NOT written to the call log: it resolves, it does not sweep, and the cases
+# that count sweeps must not be made to count resolutions.
 obj_sweep_tree() {
-  local d="$1" verdict="$2" rc="$3" calllog="${4:-}" during="${5:-}" root="$d/root"
+  local d="$1" verdict="$2" rc="$3" calllog="${4:-}" during="${5:-}" storeline="${6:-}" root="$d/root"
   mkdir -p "$root/scripts/local" "$root/scripts/lib"
   git -C "$root" init -q 2>/dev/null
   git -C "$root" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
@@ -9375,6 +9381,12 @@ obj_sweep_tree() {
   {
     printf '#!/usr/bin/env bash\n'
     printf '# STUB sweep: record the invocation, print one anchored verdict, exit with its code.\n'
+    printf 'for a in "$@"; do\n'
+    printf '  if [ "$a" = --print-store ]; then\n'
+    [[ -n "$storeline" ]] && printf '    printf "OBJECT-STORE: store %%s\\n" %s\n' "$(printf '%q' "$storeline")"
+    printf '    exit 0\n'
+    printf '  fi\n'
+    printf 'done\n'
     [[ -n "$calllog" ]] && printf 'printf "called\\n" >>%s\n' "$(printf '%q' "$calllog")"
     [[ -n "$during" ]] && printf '%s\n' "$during"
     printf 'printf "OBJECT-STORE: measured stub\\n"\n'
@@ -9798,6 +9810,88 @@ test_object_store_set_latch_is_create_only() {
 }
 
 t test_object_store_set_latch_is_create_only
+
+# THE STAMP KEY COMES FROM THE ISOLATED RESOLVER, NOT FROM AN AMBIENT `git`
+# (#3749 review round 2, BLOCKER 2).
+#
+# THE DEFECT: obj_sweep_stamp_path resolved `--git-common-dir` with a BARE `git`,
+# inheriting the caller's environment, while the sweep it keys runs every git call under
+# `env -i` + one allowlist. An inherited `GIT_DIR`/`GIT_COMMON_DIR` therefore selected
+# ANOTHER repository's stamp — so the real store's sweep is throttled away, or its verdict
+# recorded under the wrong key, on a box where the key is also what a peer lane's CORRUPT
+# is found by. The resolution now has ONE implementation, in the file that owns the
+# allowlist, and this supervisor ASKS for it.
+#
+# The cases above all pin OBJ_SWEEP_STAMP, so none of them exercises the resolver at all.
+# This one unsets it, which is the production shape.
+test_object_store_stamp_key_comes_from_the_resolver() {
+  local d root counter calls rc fake other key_fake key_other stamp_fake stamp_other bare
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-resolver"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  unset OBJ_SWEEP_STAMP
+  fake="$d/resolved-store/objects"
+  mkdir -p "$fake"
+  # A REAL repository: git refuses an empty directory as a common dir and answers with
+  # nothing at all, which would make the construction assert below unfalsifiable rather
+  # than false.
+  git init -q "$d/injected-store" >/dev/null 2>&1
+  other="$d/injected-store/.git"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls" "" "$fake")"
+  # The stamp names both files (`<stamp>` and `<stamp>.CORRUPT`), derived exactly as
+  # obj_sweep_stamp_path derives them, so the assertions below name a path rather than
+  # globbing a shared /tmp that peer lanes are also writing.
+  key_fake="$(printf '%s' "${fake//\//_}" | tr -c 'A-Za-z0-9._-' '_')"
+  key_other="$(printf '%s' "${other//\//_}" | tr -c 'A-Za-z0-9._-' '_')"
+  stamp_fake="/tmp/cqlite-object-store-sweep.${key_fake}.stamp"
+  stamp_other="/tmp/cqlite-object-store-sweep.${key_other}.stamp"
+  rm -f "$stamp_fake" "$stamp_other"
+  # CONSTRUCTION: a BARE git in this environment really does answer with the INJECTED
+  # directory, so a green below is the resolver and not an inert variable. This is the
+  # exact call the supervisor used to make.
+  bare="$(GIT_COMMON_DIR="$other" git -C "$root" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [[ "$bare" == "$other" ]]; then
+    pass "obj-sweep(resolver-plant): a BARE git in this environment resolves to the INJECTED repository — the mis-keying the case is about is really available here"
+  else
+    fail "obj-sweep(resolver-plant): a bare git answered '$bare', not the injected '$other' — the case below would prove nothing"
+  fi
+  env LANE_ID=objsweep-test GIT_COMMON_DIR="$other" \
+    bash "$root/scripts/local/worker-supervisor.sh" >"$d/resolver.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && -e "$stamp_fake" && ! -e "$stamp_other" ]]; then
+    pass "obj-sweep(resolver): the stamp is keyed on the store the SWEEP SCRIPT resolved, and an inherited GIT_COMMON_DIR cannot move it to another repository's key"
+  else
+    fail "obj-sweep(resolver): rc=$rc resolved-key=$([[ -e "$stamp_fake" ]] && echo yes || echo no) injected-key=$([[ -e "$stamp_other" ]] && echo yes || echo no) (see $d/resolver.log)"
+  fi
+  rm -f "$stamp_fake" "$stamp_other" "$stamp_fake.CORRUPT" "$stamp_other.CORRUPT"
+
+  # ONE PROPERTY APART: the resolver answers NOTHING (an unresolvable store). The lane
+  # must NOT throttle at all — the old fallback collapsed every unresolvable store on a
+  # box onto ONE name, so two checkouts shared a 6-hour throttle and one suppressed the
+  # other's sweep, which is a MISSED sweep. Measured as two consecutive runs BOTH
+  # sweeping, which is the observable that distinguishes "no throttle" from "throttled".
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-unresolvable"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  unset OBJ_SWEEP_STAMP
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/unres1.log" 2>&1
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/unres2.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && "$(obj_sweep_calls "$calls")" -eq 2 ]]; then
+    pass "obj-sweep(resolver): a store the resolver cannot name does NOT throttle — both runs swept, so no unresolvable store can suppress another's sweep through a shared fallback name"
+  else
+    fail "obj-sweep(resolver-unresolvable): rc=$rc sweeps=$(obj_sweep_calls "$calls") (wanted 2)"
+  fi
+}
+
+t test_object_store_stamp_key_comes_from_the_resolver
 
 # ---------------------------------------------------------------------------
 # Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.

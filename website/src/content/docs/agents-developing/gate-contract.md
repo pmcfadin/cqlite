@@ -688,14 +688,36 @@ this fleet: `invalid reflog entry` naming a different branch each run, on a quar
 runs), so recognising damage from the *text shape* of a diagnostic made a healthy box page high, stop
 its supervisor and fail `--strict` bootstrap. The class comes from fsck's exit **bitmask** — bits
 `1 ERROR_OBJECT`/`4 ERROR_PACK` are the subject; `2 ERROR_REACHABLE`/`8 ERROR_REFS`/
-`16 ERROR_COMMIT_GRAPH` are *not* demoted to clean (a genuinely missing object reports bit 2) but get
-their own non-passing `UNMEASURED` cause; a status outside `1..31` is not a bitmask at all. And no
-non-clean walk is fatal on one observation: it is re-run **once** as a discriminator — a concurrency
-artefact does not survive a second independent walk, damage does — never a retry-until-clean loop.
-The `CORRUPT` verdict is **persisted** in the box-wide throttle stamp, because a timestamp-only stamp
-let the detecting lane stop while its peers skipped their own sweep for the interval and kept
-spawning workers over the damaged store; the latch does not expire and is cleared by hand
-(`rm -f <stamp>`, named in the remedy).
+`16 ERROR_COMMIT_GRAPH`/`32 ERROR_MULTI_PACK_INDEX` are *not* demoted to clean (a genuinely missing
+object reports bit 2) but get their own non-passing `UNMEASURED` cause. **The mask does not end at
+31, and assuming it did dropped real damage.** A range check over `1..31` — reasoned from 128 being
+`die()` and `127 & 1` being 1 — classified 33 (`32|1`) and 36 (`32|4`) as unclassified and therefore
+`UNMEASURED`, a false negative on genuine object corruption. Measured on git 2.43.0: a truncated
+`multi-pack-index` exits 32, and that store with one corrupted blob exits 35. So the damage bits are
+tested **independently, and first**, and an unrelated bit can never mask them; only a status at or
+above 124 (timeout/shell conventions, `die()` and signal deaths above them) is refused bit-testing
+outright, and a status carrying a bit outside the supported mask is unclassified rather than folded
+into a class whose remedy would be wrong — which is how it degrades safely as git adds bits.
+
+And no non-clean walk is fatal on one observation: it is re-run **once** as a discriminator — a
+concurrency artefact does not survive a second independent walk, damage does — never a
+retry-until-clean loop. The `CORRUPT` verdict is **persisted for the box in its own create-only
+file** (`<stamp>.CORRUPT`), because a timestamp-only stamp let the detecting lane stop while its
+peers skipped their own sweep for the interval and kept spawning workers over the damaged store.
+Putting the verdict *in* that stamp was the first fix and was itself a defect: stamp writes are
+unsynchronised overwrites, so a lane whose sweep started before the detection could finish after it
+and replace `CORRUPT` with `VERIFIED`. Two consecutive review rounds found a defect in that one
+shared mutable cell, so the channel is **removed rather than serialised** — the latch's only
+transition is ABSENT → PRESENT, created under `set -C` so the kernel arbitrates and a losing writer
+cannot overwrite the winner, while the timestamp stays freely overwritable because moving a
+timestamp backwards costs one extra sweep. A lock was considered and rejected: it makes the
+read-modify-write atomic but leaves a value any writer can move backwards, so "CORRUPT is sticky"
+would rest on every future writer remembering to honour it. The latch does not expire and is cleared
+by hand (`rm -f <latch>`, named in every message that mentions it); a create that could not happen
+is reported, never read as a latched box. The stamp's **key** is resolved by the sweep script itself
+(`--print-store`), never by a `git` call in the supervisor — a bare `git rev-parse
+--git-common-dir` inherits the caller's environment, so an inherited `GIT_DIR` keyed the stamp on
+another repository.
 
 Three alternatives were **rejected** by the same ruling, recorded so they are not re-derived:
 per-lane full clones (a permanent multi-GB tax for an out-of-model threat); per-read rehashing (the
