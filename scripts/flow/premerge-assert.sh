@@ -623,6 +623,15 @@ refuse_anchor_unverifiable() {
 # DELETED as redundant with it rather than bounded; `rm -rf` became RUNNER-bounded
 # and target-revalidated; and the `anchor-reads:` token was corrected twice — once
 # for overclaiming, once for UNDERclaiming after these fixes.
+#
+# AND WHAT THE NEXT ROUND CHANGED, kept in the same honest register (job 387): the
+# cleanup's revalidation had a TOCTOU the audit did not see — it canonicalised
+# first and deleted the RESOLVED path, so a symlink to another `premerge-anchor.*`
+# child passed validation and redirected the recursive delete at that directory,
+# plausibly a concurrent lane's scratch. This is a REFINEMENT of a row the audit
+# correctly LISTED and had just hardened, not a row it missed. The fix deletes the
+# RECORDED path with `rm -rf --`, requires it to canonicalise TO ITSELF, and adds
+# the device+inode identity above with its measured limits.
 
 # --- THE ISOLATED HOP'S ENVIRONMENT (roborev job 358) -----------------------
 # See the header for the two measured routes and the ADMIT/CLEAR line. Built
@@ -804,6 +813,32 @@ ANCHOR_SCRATCH=""
 # make cleanup delete anything.
 ANCHOR_SCRATCH_ROOT=""
 ANCHOR_SCRATCH_PREFIX="premerge-anchor."
+# The created directory's IDENTITY (device + inode), recorded at create time and
+# re-verified immediately before the delete (roborev job 387). Empty when no
+# usable `stat` form exists on this box, which is a DECLARED conditional gap in
+# the audit table rather than a silent one.
+ANCHOR_SCRATCH_ID=""
+
+# _anchor_dir_id <dir> — "<dev> <inode>", or EMPTY when it cannot be established.
+#
+# THE PROBE VALIDATES THE OUTPUT SHAPE, NOT JUST THE EXIT CODE, and that is not
+# defensiveness — it is measured. GNU `stat -f` is a FILESYSTEM query, not BSD's
+# format flag: on GNU coreutils `stat -f '%d %i' <dir>` EXITS 0 and prints
+# multi-line filesystem information. A fallback keyed on the exit code alone would
+# accept that as an "identity", and comparing it later would be a check that
+# passes on noise. So each candidate form must produce exactly digits-and-a-space.
+_anchor_dir_id() {
+  local out
+  [ -n "$1" ] || return 0
+  for _fmt in -c -f; do
+    out=$(_anchor_bounded stat "$_fmt" '%d %i' -- "$1" 2>/dev/null) || out=""
+    case "$out" in
+      ''|*[!0-9\ ]*) continue ;;
+      *' '*) printf '%s\n' "$out"; return 0 ;;
+    esac
+  done
+  return 0
+}
 
 # _anchor_cleanup — remove the scratch dir. BOUNDED, and its TARGET REVALIDATED
 # immediately before the delete (roborev job 384; both findings were here).
@@ -836,16 +871,44 @@ _anchor_cleanup() {
       "$target" >&2
     return 0
   fi
+  # THE RECORDED PATH IS DELETED, NEVER THE RESOLVED ONE (roborev job 387). The
+  # previous version canonicalised first and deleted `$canon`, so replacing the
+  # scratch with a SYMLINK to another `premerge-anchor.*` direct child passed every
+  # validation and the recursive delete landed on THAT directory — plausibly a
+  # concurrent lane's scratch, which is the cross-lane damage class this fleet
+  # cares about most. The planter is a peer lane on the shared box.
+  #
+  # THE ASYMMETRY THAT MAKES THIS SIMPLE, measured rather than assumed:
+  #   rm -rf -- <symlink-to-dir>   removes the LINK; the target survives intact
+  #   rm -rf -- "$(canon <link>)"  removes the TARGET
+  # So the whole bug was resolving first. `--` and no trailing slash matter: a
+  # trailing slash would make `rm` follow the link.
   canon=$(_anchor_canon "$target")
-  base="${canon##*/}"
-  if [ -z "$canon" ] || [ "$canon" = "/" ] ||
-     [ "$canon" != "$root/$base" ] ||
+  base="${target##*/}"
+  # SELF-CANONICALISING: a symlink resolves ELSEWHERE and a moved directory
+  # resolves to its new place, so requiring canon == the recorded path detects
+  # both, rather than merely declining to follow them.
+  if [ -z "$canon" ] || [ "$canon" = "/" ] || [ "$canon" != "$target" ] ||
+     [ "$target" != "$root/$base" ] ||
      [ "$base" = "${base#"$ANCHOR_SCRATCH_PREFIX"}" ]; then
-    printf 'PREMERGE: NOTE scratch dir %s left in place: it is no longer a %s* direct child of %s\n' \
+    printf 'PREMERGE: NOTE scratch dir %s left in place: it no longer canonicalises to itself as a %s* direct child of %s\n' \
       "$target" "$ANCHOR_SCRATCH_PREFIX" "$root" >&2
     return 0
   fi
-  _anchor_bounded rm -rf "$canon" >/dev/null 2>&1 || true
+  # IDENTITY, so a swap is DETECTED and not merely not-followed. Only enforced when
+  # an identity was established at create time; when it was not (no usable `stat`
+  # form) the path checks above stand alone — declared in the audit table.
+  if [ -n "$ANCHOR_SCRATCH_ID" ]; then
+    if [ "$(_anchor_dir_id "$target")" != "$ANCHOR_SCRATCH_ID" ]; then
+      printf 'PREMERGE: NOTE scratch dir %s left in place: its device+inode identity changed or could not be re-read (recorded %s)\n' \
+        "$target" "$ANCHOR_SCRATCH_ID" >&2
+      return 0
+    fi
+  fi
+  # An undeleted scratch dir under TMPDIR is a LEAK; deleting the wrong directory
+  # is DAMAGE. Those are not comparable costs, which is why every branch above
+  # leaves it in place and says so.
+  _anchor_bounded rm -rf -- "$target" >/dev/null 2>&1 || true
   return 0
 }
 trap '_anchor_cleanup' EXIT
@@ -973,6 +1036,7 @@ _anchor_build_scratch() {
   # revalidates against it rather than trusting this moment.
   ANCHOR_SCRATCH="$created_canon"
   ANCHOR_SCRATCH_ROOT="$tmp_canon"
+  ANCHOR_SCRATCH_ID=$(_anchor_dir_id "$created_canon")
 
   # THE LANE'S OBJECT DIRECTORY, resolved rather than assumed — and this is the
   # ONE read that still happens in the live repository, mirroring the reference
