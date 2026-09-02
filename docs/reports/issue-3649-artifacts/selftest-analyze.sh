@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=500
+CASE_FLOOR=501
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -3260,6 +3260,48 @@ PYINNER
     bad "the sensitivity control could not run (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '
 ' ' ')"
   fi
+  # ROUND 18 FINDING 2, THE CASE THAT WOULD HAVE CAUGHT IT. workload.* was
+  # populated from the GLOBAL options, so IDENTICAL per-arm extras ran both
+  # servers at 1 while the manifest said 8192 -- and after round 17 the manifest
+  # is THE SOURCE for the target band, so every field in it that can lie is
+  # load-bearing. This session sets the same override on BOTH arms, which is
+  # exactly the case a "record it when the arms agree" reconciliation would also
+  # have got wrong, since the arms DO agree -- with each other, and not with the
+  # global.
+  run_e2e "$TMP/e2e-both" --ramp 1 --no-prewarm --control both-arms-overridden \
+    --base-server-extra '--max-batch-bytes 1' --head-server-extra '--max-batch-bytes 1'
+  BOTH_DIR="$(find "$TMP/e2e-both" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$BOTH_DIR" ] && [ -f "$BOTH_DIR/manifest.json" ]; then
+    if python3 - "$BOTH_DIR/manifest.json" <<'PYINNER'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+problems = []
+for arm in ("base", "head"):
+    got = manifest["expected_server_config"][arm]["max_batch_bytes_observed"]
+    if got != "1":
+        problems.append("expected_server_config.%s records %r, but that arm was "
+                        "launched with --max-batch-bytes 1" % (arm, got))
+# The global field must not exist at all: its presence is the defect, and a
+# CORRECT value in it would still be a second source that can drift later.
+for gone in ("max_batch_bytes", "batch_size", "admission_wait_timeout_ms"):
+    if gone in manifest["workload"]:
+        problems.append("workload.%s still exists; a per-arm overridable option "
+                        "recorded globally is a second source" % gone)
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+    then
+      ok "per-arm overrides are recorded per arm, and no global copy of them exists"
+    else
+      bad "the manifest misrecords a per-arm override (see above)"
+    fi
+  else
+    bad "the both-arms-overridden session produced no manifest"
+  fi
+
   CTL_DIR="$(find "$TMP/e2e-ctl" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
   if [ -n "$CTL_DIR" ]; then
     set +e
