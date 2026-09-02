@@ -2470,7 +2470,7 @@ fi
 # classifier, extracted verbatim from the gate.
 # ===========================================================================
 aa_cls="$tmp/aa-classifier.py"
-sed -n '/^import errno, os, sys$/,/^sys.stdout.write("OK")$/p' "$GATE" > "$aa_cls"
+sed -n '/^import errno, os, sys$/,/^    sys.stdout.write("OK")$/p' "$GATE" > "$aa_cls"
 if [ -s "$aa_cls" ] && grep -q 'CANNOT-WRITE' "$aa_cls"; then
   ok "errno-source: extracted the SHIPPED write-probe classifier from the gate"
 else
@@ -2616,6 +2616,138 @@ if [ "$ab_low_status" -ne 0 ] && [ "$ab_low_markers" -eq 0 ]; then
   ok "blocking-setup: below-bar on the blocking-failure path REFUSES — the reading taken after the block is BINDING"
 else
   bad "blocking-setup: built below the bar after a blocking cap-setup failure (exit $ab_low_status, markers $ab_low_markers)"
+fi
+
+# ===========================================================================
+# Case AC (roborev job 395, Medium): ONE error boundary around the whole write
+# probe — including close() — and a failed unlink DECLARES rather than refuses.
+#
+# On NFS and quota-enforced filesystems a write error is NOT reported at write();
+# it surfaces at close(). fsync narrows that window but does not shut it. With
+# close() errors discarded the probe printed OK after a write that never landed.
+#
+# This was the THIRD consecutive round in this one mechanism (--locked, the errno
+# allowlist, now close/unlink), so it is fixed as a CONSOLIDATION: makedirs, the
+# isdir check, open, write, fsync and close sit inside a SINGLE try where any
+# OSError is CANNOT-WRITE. Branch count went 11 -> 5, which is the check that it
+# was consolidated and not carved again.
+# ===========================================================================
+ac_cls="$tmp/ac-classifier.py"
+sed -n '/^import errno, os, sys$/,/^    sys.stdout.write("OK")$/p' "$GATE" > "$ac_cls"
+if python3 -c "compile(open('$ac_cls').read(),'c','exec')" 2>/dev/null; then
+  ok "one-boundary: extracted the SHIPPED classifier and it compiles"
+else
+  bad "one-boundary: the extracted classifier does not compile — every case below would test nothing"
+fi
+# STRUCTURAL: exactly ONE `except OSError` in the classifier. A second one means a call site
+# has started deciding fatality for itself again, which is the shape this round consolidated.
+ac_boundaries=$(grep -c '^except OSError as e:' "$ac_cls" 2>/dev/null); ac_boundaries="${ac_boundaries%%$'\n'*}"
+case "$ac_boundaries" in ''|*[!0-9]*) ac_boundaries=0 ;; esac
+if [ "$ac_boundaries" -eq 1 ]; then
+  ok "one-boundary: exactly ONE 'except OSError' boundary in the probe (no call site decides fatality for itself)"
+else
+  bad "one-boundary: found $ac_boundaries 'except OSError' clauses — the probe has been re-carved into per-call handling"
+fi
+ac_branches=$(grep -cE '^\s*(try:|except|finally:)' "$ac_cls" 2>/dev/null); ac_branches="${ac_branches%%$'\n'*}"
+case "$ac_branches" in ''|*[!0-9]*) ac_branches=99 ;; esac
+if [ "$ac_branches" -le 6 ]; then
+  ok "one-boundary: $ac_branches error branches (was 11 before the consolidation — fewer, not more)"
+else
+  bad "one-boundary: $ac_branches error branches; the consolidation should have REDUCED them"
+fi
+
+# (a) A FORCED close() FAILURE IS BINDING, with the pre-fix behaviour shown emitting OK.
+mkdir -p "$tmp/ac-close"
+cat > "$tmp/ac-close/sitecustomize.py" <<'ACSC'
+import os, errno
+_real = os.close
+def boom(fd):
+    _real(fd)
+    raise OSError(errno.EIO, "simulated deferred write error at close")
+os.close = boom
+ACSC
+ac_got=$(PYTHONPATH="$tmp/ac-close" python3 "$ac_cls" "$tmp/ac-target" 2>/dev/null)
+# THE POSITIVE CONTROL: the PRE-FIX shape, reproduced verbatim — close() inside a `finally`
+# with its error swallowed — on the SAME forced failure. It must print OK, which is the
+# false admission.
+ac_pre=$(PYTHONPATH="$tmp/ac-close" python3 - "$tmp/ac-pre-target" <<'ACPRE' 2>/dev/null
+import os, sys
+p = sys.argv[1]
+os.makedirs(p, exist_ok=True)
+w = os.path.join(p, "." + os.urandom(12).hex() + ".probe")
+fd = None
+try:
+    fd = os.open(w, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.write(fd, b"\0")
+    os.fsync(fd)
+except OSError:
+    sys.stdout.write("CANNOT-WRITE"); sys.exit(0)
+finally:
+    if fd is not None:
+        try: os.close(fd)
+        except Exception: pass
+    try: os.unlink(w)
+    except Exception: pass
+sys.stdout.write("OK")
+ACPRE
+)
+if [ "$ac_pre" = OK ]; then
+  ok "one-boundary CONTROL: the PRE-FIX shape prints OK on a forced close() failure — a write that never landed, admitted"
+else
+  bad "one-boundary CONTROL: the pre-fix shape gave '$ac_pre'; this case does not demonstrate the defect"
+fi
+case "$ac_got" in
+  'CANNOT-WRITE EIO')
+    ok "one-boundary: the SHIPPED probe calls a forced close() failure CANNOT-WRITE — close is inside the boundary" ;;
+  OK*) bad "one-boundary: the shipped probe still printed '$ac_got' after a failed close() — the false admission survives" ;;
+  *) bad "one-boundary: unexpected classification '$ac_got'" ;;
+esac
+
+# (b) A FORCED unlink() FAILURE STILL ADMITS, AND NAMES THE ARTIFACT. Deliberate: everything
+#     before it succeeded, so the filesystem IS writable, which is the only question the
+#     probe answers. Refusing would red correct input; the leftover is DECLARED instead.
+mkdir -p "$tmp/ac-unlink"
+cat > "$tmp/ac-unlink/sitecustomize.py" <<'ACSU'
+import os, errno
+def boom(*a, **k):
+    raise OSError(errno.EPERM, "simulated immutable directory")
+os.unlink = boom
+ACSU
+ac_ul=$(PYTHONPATH="$tmp/ac-unlink" python3 "$ac_cls" "$tmp/ac-ul-target" 2>/dev/null)
+case "$ac_ul" in
+  'OK-LEFTOVER '*'.agent-gate-writeprobe')
+    ok "one-boundary: a failed unlink AFTER a successful write still answers OK and reports the artifact path" ;;
+  'CANNOT-WRITE'*)
+    bad "one-boundary: a failed unlink REFUSED the run — the filesystem was proven writable, so this reds correct input: $ac_ul" ;;
+  *) bad "one-boundary: unexpected unlink classification '$ac_ul'" ;;
+esac
+# END TO END: the run admits and the emitted line NAMES the leftover, so it cannot be
+# absorbed into the certification baseline unseen.
+ac_script=$(df_script ac "$HIGH")
+run_stub_gate ac "$ac_script" \
+  PYTHONPATH="$tmp/ac-unlink" CARGO_TARGET_DIR="$tmp/ac-e2e-target" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/ac-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+ac_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 180; ac_status=$WX_STATUS; ac_markers=$WX_MARKERS
+assert_no_timeout "ac unlink end-to-end"
+ac_line=$(grep_line "$ac_err" '^agent-gate: disk-admission: ')
+if [ "$ac_status" -eq 0 ] && [ "$ac_markers" -ge 1 ]; then
+  ok "one-boundary: a leftover artifact does NOT refuse the run (exit 0, work began)"
+else
+  bad "one-boundary: a leftover artifact refused the run (exit $ac_status, markers $ac_markers)"
+fi
+case "$ac_line" in
+  *'write-probe artifact LEFT BEHIND'*"$tmp/ac-e2e-target/."*)
+    ok "one-boundary: the emitted line DECLARES the leftover and names its exact path" ;;
+  *'write-probe artifact LEFT BEHIND'*)
+    bad "one-boundary: the leftover is declared but its path is not named: $ac_line" ;;
+  *) bad "one-boundary: the leftover was not declared in the line: ${ac_line:-<none>}" ;;
+esac
+# ...and a clean run must NOT carry that declaration, or it would be noise rather than a signal.
+if grep -q 'write-probe artifact LEFT BEHIND' "$n_pass_err" 2>/dev/null; then
+  bad "one-boundary: a CLEAN run also declares a leftover — the declaration is noise, not a signal"
+else
+  ok "one-boundary: a clean run carries no leftover declaration (it fires only when there is one)"
 fi
 
 printf '\n%s\n' "-----------------------------------------------"
