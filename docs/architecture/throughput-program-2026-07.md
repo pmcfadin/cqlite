@@ -474,7 +474,15 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
   central 1.35) pending M0. **L3's disposition is resolved conditionally** (§4): ~1.10× at the assumed
   central `o`, so it does **not** earn the #2 headline slot. **Dep:** none. **Unblocks:** M7 (#2822).
 
-- **M10 (#2824) — madvise(WILLNEED) respec (NEW, P3).** Flip `Auto` to issue the already-built
+- **M10 (#2824) — madvise(WILLNEED) respec (NEW, P3).** *[RE-SCOPED 2026-09-01, lead ruling on
+  REQ-2824-03: **not shipped**. Priority had been raised P3 → P2 by the 2026-08-30 adjudication; the
+  lever was then built, measured and rejected. `Auto` still maps to `None`, so the "currently gated
+  off" clause below remains accurate. Advising at open fires whole-file read-ahead for every SSTable
+  of every table of every keyspace, because `SSTableManager::new` opens them all at `Database::open`
+  — a confirmed regression vector for point-lookup-only workloads. Both halves need scan-lifetime
+  plumbing that does not exist, so #2824's deliverable became the priced re-scope; the plumbing is
+  filed separately for the i4i rig. Evidence: `docs/reports/issue-2824-artifacts/RESULTS.md`.]* Flip
+  `Auto` to issue the already-built
   `madvise(MADV_WILLNEED)` at open (`reader/mod.rs:1052`, currently gated off by `PrefetchMode::Auto →
   None`) + `MADV_DONTNEED` post-scan-once; keep `posix_fadvise` only behind an explicit
   buffered/direct backend. **Do NOT reach for `MADV_SEQUENTIAL`** (the #1143 ~2× p99 drop-behind

@@ -1,0 +1,142 @@
+{
+  "binary": "/data/ws0-3445-build/perfprof/release/ws0-3299-scan-worker",
+  "fingerprint_vs_dwarf": {
+    "f2_anchors_total": 138,
+    "f2_anchors_inside_dwarf_vint": 133,
+    "f2_anchors_outside_dwarf_vint": 5,
+    "bswap_total": 315,
+    "bswap_inside_dwarf_vint": 122,
+    "anchors_outside_symbols": [
+      "cqlite_core::parser::repair_metadata::try_skip_improved_min_max",
+      "cqlite_core::storage::sstable::bti::parser::rows::read_unsigned_vint_from_slice"
+    ]
+  },
+  "rebase_selfcheck": {
+    "addresses_checked": 4260,
+    "mismatches": 0,
+    "mismatch_pct": 0.0,
+    "verdict": "PASS",
+    "coverage": {
+      "what": "PIE rebase self-check addresses",
+      "kept": 4260,
+      "skipped": 0,
+      "pct_skipped": 0.0,
+      "examples": []
+    }
+  },
+  "cycle_weighted": {
+    "cycles_total_all_dsos": 27440211597,
+    "cycles_in_binary": 12175382628,
+    "vint_cycles": 374605619,
+    "no_chain_cycles": 0,
+    "no_chain_pct_of_in_binary": 0.0,
+    "sample_rows": {
+      "what": "perf sample rows",
+      "kept": 137199,
+      "skipped": 0,
+      "pct_skipped": 0.0,
+      "examples": []
+    },
+    "unattributable_cycles": 0,
+    "vint_pct_of_total": 1.3651703000750735,
+    "vint_pct_of_in_binary": 3.0767461725474736,
+    "by_opcode_caveat": "UNSHIFTED, non-precise sample IPs (no PEBS on this host). Indicative of where cycles land within the region; NOT evidence of per-instruction concentration.",
+    "by_opcode": [
+      {
+        "opcode": "bswap",
+        "cycles": 264203963,
+        "pct_of_vint": 70.52856380138815
+      },
+      {
+        "opcode": "mov",
+        "cycles": 55200828,
+        "pct_of_vint": 14.735718099305926
+      },
+      {
+        "opcode": "movzbl",
+        "cycles": 13600204,
+        "pct_of_vint": 3.630539241857982
+      },
+      {
+        "opcode": "cmp",
+        "cycles": 13000195,
+        "pct_of_vint": 3.4703683929524827
+      },
+      {
+        "opcode": "xor",
+        "cycles": 10400156,
+        "pct_of_vint": 2.776294714361986
+      },
+      {
+        "opcode": "not",
+        "cycles": 5000075,
+        "pct_of_vint": 1.3347570742124932
+      },
+      {
+        "opcode": "test",
+        "cycles": 3200048,
+        "pct_of_vint": 0.8542445274959958
+      },
+      {
+        "opcode": "lea",
+        "cycles": 2800042,
+        "pct_of_vint": 0.7474639615589963
+      },
+      {
+        "opcode": "add",
+        "cycles": 2600039,
+        "pct_of_vint": 0.6940736785904965
+      },
+      {
+        "opcode": "inc",
+        "cycles": 1200018,
+        "pct_of_vint": 0.3203416978109984
+      },
+      {
+        "opcode": "bsr",
+        "cycles": 1200018,
+        "pct_of_vint": 0.3203416978109984
+      },
+      {
+        "opcode": "je",
+        "cycles": 800012,
+        "pct_of_vint": 0.21356113187399894
+      },
+      {
+        "opcode": "sub",
+        "cycles": 600009,
+        "pct_of_vint": 0.1601708489054992
+      },
+      {
+        "opcode": "or",
+        "cycles": 600009,
+        "pct_of_vint": 0.1601708489054992
+      },
+      {
+        "opcode": "shl",
+        "cycles": 200003,
+        "pct_of_vint": 0.053390282968499736
+      }
+    ],
+    "by_caller": [
+      {
+        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_row_metadata",
+        "cycles": 257203858,
+        "pct_of_vint": 68.65990389749065,
+        "pct_of_total": 0.9373246160686303
+      },
+      {
+        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::read_vint_length_prefixed_bytes",
+        "cycles": 107601614,
+        "pct_of_vint": 28.723972237052855,
+        "pct_of_total": 0.3921311379820553
+      },
+      {
+        "caller": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_clustering_prefix",
+        "cycles": 9800147,
+        "pct_of_vint": 2.616123865456487,
+        "pct_of_total": 0.035714546024387936
+      }
+    ]
+  }
+}

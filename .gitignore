@@ -350,3 +350,12 @@ trino-connector/docker/field-repro-artifacts/
 
 # Cross-binding parity harness artifacts (issue #1455)
 bindings/parity/out/
+
+# /drive-issue subagent terminal reports (session scratch, never deliverable).
+# The pattern is the ROLE-AGNOSTIC shape `<role>-<issue>-report.md`, not one hard-coded
+# role: `.impl-*-report.md` alone let a read-only auditor's `.census-audit-report.md`
+# into a working tree, which is one edit away from a scratch report entering a PR diff.
+.*-report.md
+# Sidecar files of the per-lane drive-issue state marker (#3822): the flock lockfile and
+# the atomic-replace temporaries. The marker itself is ignored above.
+.drive-issue-state.md.*

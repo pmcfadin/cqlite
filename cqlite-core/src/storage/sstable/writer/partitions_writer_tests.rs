@@ -955,3 +955,54 @@ fn partition_leaf_rows_offset_roundtrips() {
         }
     }
 }
+
+/// An EMPTY partition key is written at the ring MINIMUM, so the reader — which
+/// derives its probe token from `cassandra_murmur3_token` — finds it (issue #3633).
+///
+/// This is a genuine WRITER/READER DIFFERENTIAL, not a self-consistent
+/// round-trip: the two sides reach the minimum token by different code paths
+/// (the writer's inlined `is_empty()` guard vs. the reader's helper call), and
+/// the VALUE is pinned to the Cassandra oracle in
+/// `cassandra_murmur3::tests::empty_partition_key_token_is_cassandra_minimum`.
+/// Before the writer carried the guard it stored this leaf at
+/// `normalize(h1) == 0` while the reader probed at `i64::MIN`, so the lookup
+/// returned `None` — this test fails without the fix.
+#[test]
+fn empty_partition_key_is_written_at_cassandra_minimum_token() {
+    let mut w = PartitionsTrieWriter::new();
+    w.add_partition_with_payload(b"", PartitionPayload::DataOffset(7));
+    // A non-empty sibling, so this is not a degenerate single-leaf trie.
+    w.add_partition_with_payload(b"a", PartitionPayload::DataOffset(9));
+    let bytes = w.finish().expect("finish");
+
+    let mut cur = Cursor::new(bytes);
+    let loc = lookup_raw_key_in_bti_partitions_db(&mut cur, b"")
+        .expect("lookup must not error")
+        .expect("the empty key must be found at the MINIMUM token");
+    match loc {
+        BtiPartitionLocation::DataOffset(o) => assert_eq!(o, 7),
+        BtiPartitionLocation::RowsOffset(o) => {
+            panic!("expected DataOffset(7), got RowsOffset({o})")
+        }
+    }
+
+    // The non-empty sibling is unaffected by the guard.
+    let mut cur = Cursor::new(w2_bytes());
+    let loc = lookup_raw_key_in_bti_partitions_db(&mut cur, b"a")
+        .expect("lookup must not error")
+        .expect("the non-empty key must still be found");
+    match loc {
+        BtiPartitionLocation::DataOffset(o) => assert_eq!(o, 9),
+        BtiPartitionLocation::RowsOffset(o) => {
+            panic!("expected DataOffset(9), got RowsOffset({o})")
+        }
+    }
+}
+
+/// Rebuild the same two-leaf trie as above (a `finish()` consumes the writer).
+fn w2_bytes() -> Vec<u8> {
+    let mut w = PartitionsTrieWriter::new();
+    w.add_partition_with_payload(b"", PartitionPayload::DataOffset(7));
+    w.add_partition_with_payload(b"a", PartitionPayload::DataOffset(9));
+    w.finish().expect("finish")
+}

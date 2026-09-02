@@ -11,6 +11,36 @@ rust-version.workspace = true
 description = "Core engine for CQLite — read Apache Cassandra 5.0 SSTables locally without a cluster"
 readme = "../README.md"
 
+# Not packaged: this integration test reads a fixture that lives at REPO ROOT
+# (`test-data/datasets/…`), outside this package, so `cargo package` cannot carry it.
+# The test fails CLOSED on a missing fixture by design (#3220) — committed source is
+# never legitimately absent in a checkout — so shipping it in the published crate
+# would make `cargo test` fail for a consumer who can never satisfy it.
+#
+# Excluding it from the PACKAGE is the fix that keeps both properties: fail-closed in
+# a repository checkout, and absent (rather than skipping) where the fixture cannot
+# exist. A skip would reintroduce exactly the vacuous green #3220 removed, and a
+# "am I a git checkout?" runtime probe would be the environment heuristic #28 forbids.
+#
+# Measured effective, not assumed: `cargo package -p cqlite-core --no-verify --list`
+# lists 1015 files, 0 of them this test, and 454 other `tests/` entries survive — so the
+# key drops exactly one target and nothing else. (There is no `include` key, which would
+# make cargo ignore `exclude` entirely.) Note this does NOT assert the crate packages
+# end-to-end: `readme = "../README.md"` also points outside the package, so a full
+# `cargo package` may fail on that first. Packageability is #3677's, not this lane's.
+#
+# This test JOINS a pre-existing class rather than creating it. #3677 measured 106
+# `cqlite-core` integration tests reading repo-root `test-data/datasets`, 104 of which
+# already fail hard rather than skip. Fixing the class — its recommended option (a),
+# `exclude = ["tests/**"]` — is a packaging call it holds open deliberately, so the
+# narrow single-file exclusion here is scoped to what this lane may decide.
+#
+# An earlier draft of this comment said "454 sibling integration tests have the same
+# repo-root-fixture property". 454 is a real number and it is the one above — packaged
+# `tests/` ENTRIES, most of which read no fixture at all — attached to a claim about a
+# property it does not measure. The two counts answer different questions.
+exclude = ["tests/issue_3358_bti_query_token_bound.rs"]
+
 # docs.rs build: document the commonly used features. Deliberately excludes
 # `wasm` (wasm32-only deps would fail the default x86_64 docs.rs target).
 [package.metadata.docs.rs]

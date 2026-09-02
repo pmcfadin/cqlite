@@ -522,9 +522,17 @@ STUB
       bad "case8: /dev/full did not behave as required (truncate-ok + append-rejected) — the case proves nothing"
     fi
     assert_verdict "case8: rejected appends make the component FAIL" "$d8" FAIL
-    # 3 emitted lines on a clean tree: thresholds, base ref, "no changed .rs files over
-    # threshold". The EXACT count is the oracle — a fabricated or hardcoded flag cannot
-    # produce it, and the `[ -s ]` check cannot produce a count at all.
+    # 3 emitted lines on a clean tree, and the ENUMERATION is the point — this stays a
+    # derived expectation, never a magic constant:
+    #   1. thresholds
+    #   2. base ref
+    #   3. "no changed .rs files over threshold"
+    # It went 3 -> 4 while #3162's `emitted` census added a contract line here, and back to 3
+    # when that was reverted; BOTH moves were caught by this case, which is the property:
+    # the EXACT count is the oracle — a fabricated or hardcoded flag cannot produce it, and
+    # the `[ -s ]` check cannot produce a count at all. Adding or removing an _fs_emit call
+    # in run_file_size MUST move this number, and the enumeration above says which line is
+    # which so the next person can tell a real regression from an intended emit.
     has "case8: the cause names the EXACT number of rejected writes (the counter, not the -s check)" \
         "$out8" "3 write(s) to it were rejected"
     assert_log_present "case8: the persistence diagnostic sibling is written here too" "$sib8"
@@ -696,6 +704,7 @@ STUB
     fi
   fi
 fi
+
 
 # ---------------------------------------------------------------------------
 printf '\n%s\n' "----------------------------------------"

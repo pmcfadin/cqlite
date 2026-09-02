@@ -11,6 +11,11 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HB="$SCRIPT_DIR/../flow/claim-heartbeat.sh"
+# The process-liveness primitives now live in a library SHARED with
+# drive-issue-state.sh (issue #3822) — one definition, sourced by both. The
+# function-level cases below extract them from THAT file; extracting from $HB would
+# silently find nothing and, since the extracted file would be empty, assert nothing.
+LIVENESS_LIB="$SCRIPT_DIR/../flow/lib/process-liveness.sh"
 
 PASS=0
 FAIL=0
@@ -1470,11 +1475,11 @@ echo "TEST 50: the signal probe decodes EPERM as PRESENT (round 10, Medium)"
 # rather than reimplemented here — the script cannot be sourced, since sourcing runs its
 # dispatch — so this exercises the real code, and it fails outright if the function is gone.
 probe_fn="$T/signal-probe.sh"
-sed -n '/^signal_probe_class()/,/^}/p' "$HB" >"$probe_fn"
+sed -n '/^signal_probe_class()/,/^}/p' "$LIVENESS_LIB" >"$probe_fn"
 if [ -s "$probe_fn" ]; then
   ok "extracted signal_probe_class from the shipped script ($(wc -l <"$probe_fn" | tr -d ' ') lines)"
 else
-  bad "signal_probe_class is missing from $HB — the EPERM decode does not exist"
+  bad "signal_probe_class is missing from $LIVENESS_LIB — the EPERM decode does not exist"
 fi
 # shellcheck disable=SC1090
 . "$probe_fn" 2>/dev/null || true
@@ -1766,8 +1771,8 @@ echo "TEST 54: absence needs the INDEPENDENT probe to affirm it (round 15, Mediu
 # was alone again and could still establish absence: a false DEAD for a live supervisor.
 # Driven by a ps that hides the pid AND a kill whose failure message is unrecognisable.
 pp_body="$T/presence.sh"
-sed -n '/^signal_probe_class()/,/^}/p' "$HB" >"$pp_body"
-sed -n '/^process_presence()/,/^}/p' "$HB" >>"$pp_body"
+sed -n '/^signal_probe_class()/,/^}/p' "$LIVENESS_LIB" >"$pp_body"
+sed -n '/^process_presence()/,/^}/p' "$LIVENESS_LIB" >>"$pp_body"
 # shellcheck disable=SC1090
 . "$pp_body" 2>/dev/null || true
 if [ "$(type -t process_presence 2>/dev/null)" = "function" ]; then
@@ -2216,6 +2221,13 @@ _bad_copy="$T/hdr-probe.sh"
 # line it can never emit. Getting that wrong is what made my first two probe attempts fail.
 { printf '%s\n' '# displaced header line one' '# leaked_marker_67 this line is above the shebang' \
     'leaked_fn() { :; }'; cat "$HB"; } >"$_bad_copy"
+# The copy needs its SIBLING library alongside it (issue #3822): the script sources
+# lib/process-liveness.sh from its OWN directory and — deliberately — fails closed when
+# that file is unreadable, rather than continuing with the liveness predicates
+# undefined. Without this the probe would measure the missing library, not the header
+# leak it is about, and its NON-VACUITY would silently become vacuous.
+mkdir -p "$T/lib"
+cp "$LIVENESS_LIB" "$T/lib/process-liveness.sh"
 # CAPTURED, NOT PIPED. `bash … | grep -q` under this file's `pipefail` is the #3387 flake: grep -q
 # exits at the first match, SIGPIPEs the upstream, and the PIPELINE status becomes 141 — so a
 # SUCCESSFUL match reads as a failed condition, non-deterministically depending on whether the
@@ -3018,8 +3030,79 @@ fi
 kill "${zparent:-0}" 2>/dev/null || true
 
 
+echo
+echo "TEST 81: a NON-REGULAR shared library is REFUSED, never sourced (roborev job 57, Medium)"
+# The regression this pins is one the library extraction INTRODUCED: before it, the liveness
+# predicates were inline in claim-heartbeat.sh and there was no `source` at all. The guard
+# written for the new `source` was `-r` only — and `-r` is TRUE for a FIFO, so `.` BLOCKED
+# FOREVER waiting for a writer. MEASURED before the fix: `timeout 10` -> rc 124 with NO output
+# whatsoever. That is the worst breach available in a script the fleet reaper runs unattended:
+# not a wrong verdict but NO verdict, indefinitely.
+#
+# EVERY CASE IS BOUNDED BY `timeout` AND ASSERTS rc != 124 EXPLICITLY. Unbounded, a regression
+# would not FAIL this suite, it would HANG it, and the thing that noticed would be the gate's
+# stall watchdog minutes later — the same rule drive-issue-state.sh's hang cases follow.
+#
+# The table is over the TYPE, not over one member of it: the fix is `-f`, which is false for a
+# FIFO, a socket, a device and a directory alike, so the class is covered by one predicate
+# rather than by a list of types someone has to keep complete.
+hb81_run() { # hb81_run <case-dir> -> sets HB81_RC / HB81_OUT
+  HB81_RC=0
+  HB81_OUT="$(timeout 10 bash "$1/claim-heartbeat.sh" --help 2>&1)" || HB81_RC=$?
+}
+HB81="$T/nonregular-lib"
+for hb81_kind in fifo directory dangling-symlink symlink-to-device; do
+  rm -rf "$HB81"
+  mkdir -p "$HB81/lib"
+  cp "$HB" "$HB81/claim-heartbeat.sh"
+  hb81_target="$HB81/lib/process-liveness.sh"
+  case "$hb81_kind" in
+    fifo)              mkfifo "$hb81_target" 2>/dev/null || { skip "TEST 81/$hb81_kind: mkfifo unavailable"; continue; } ;;
+    directory)         mkdir -p "$hb81_target" ;;
+    dangling-symlink)  ln -s "$HB81/lib/nothing-here" "$hb81_target" ;;
+    symlink-to-device) [ -c /dev/null ] || { skip "TEST 81/$hb81_kind: no /dev/null char device"; continue; }
+                       ln -s /dev/null "$hb81_target" ;;
+  esac
+  hb81_run "$HB81"
+  if [ "$HB81_RC" -eq 124 ]; then
+    bad "TEST 81/$hb81_kind: the run HUNG (timeout 10 -> rc 124) — the \`source\` guard let a non-regular library be opened. Output: $HB81_OUT"
+  elif [ "$HB81_RC" -eq 0 ]; then
+    bad "TEST 81/$hb81_kind: the run SUCCEEDED (rc=0) with a $hb81_kind at lib/process-liveness.sh — the library was not required to be a regular file"
+  elif printf '%s\n' "$HB81_OUT" | grep -q 'process-liveness.sh as a regular file'; then
+    ok "TEST 81/$hb81_kind: refused (rc=$HB81_RC, not 124) with a diagnostic naming the library and the regular-file requirement"
+  else
+    bad "TEST 81/$hb81_kind: rc=$HB81_RC but the diagnostic does not name the regular-file requirement. Output: $HB81_OUT"
+  fi
+done
+# POSITIVE CONTROL 1 — the same harness with a REAL library must SUCCEED. Without it every case
+# above is satisfied by a script that is simply broken, which is the vacuity this suite's other
+# non-vacuity arms exist to exclude.
+rm -rf "$HB81"; mkdir -p "$HB81/lib"
+cp "$HB" "$HB81/claim-heartbeat.sh"
+cp "$SCRIPT_DIR/../flow/lib/process-liveness.sh" "$HB81/lib/process-liveness.sh"
+hb81_run "$HB81"
+if [ "$HB81_RC" -eq 0 ]; then
+  ok "TEST 81/control: a REGULAR library still sources and --help succeeds — the cases above are about the TYPE, not a broken harness"
+else
+  bad "NON-VACUITY broken: a regular library gave rc=$HB81_RC — TEST 81 cannot attribute its refusals to the guard. Output: $HB81_OUT"
+fi
+# POSITIVE CONTROL 2 — a SYMLINK to a regular library must still WORK. Both `-f` and `-r`
+# FOLLOW a symlink, deliberately: a symlinked checkout is a legitimate layout, and a guard that
+# reds on correct input is the guard agents learn to waive.
+rm -rf "$HB81"; mkdir -p "$HB81/lib"
+cp "$HB" "$HB81/claim-heartbeat.sh"
+cp "$SCRIPT_DIR/../flow/lib/process-liveness.sh" "$HB81/lib/real-liveness.sh"
+ln -s "$HB81/lib/real-liveness.sh" "$HB81/lib/process-liveness.sh"
+hb81_run "$HB81"
+if [ "$HB81_RC" -eq 0 ]; then
+  ok "TEST 81/symlink-to-regular: a symlinked library is FOLLOWED and still works — the refusal is about the resolved TYPE, not about links"
+else
+  bad "TEST 81/symlink-to-regular: a symlink to a regular library was refused (rc=$HB81_RC) — that is a false refusal on a legitimate layout. Output: $HB81_OUT"
+fi
+rm -rf "$HB81"
+
 # ===========================================================================
-echo "TEST 81: --help carries the REDUCED #3548 scope contract, phrase by phrase"
+echo "TEST 82: --help carries the REDUCED #3548 scope contract, phrase by phrase"
 # ===========================================================================
 # The owner ruling of 2026-09-01 (option C) is a DOCUMENTATION deliverable, so it is only worth
 # something if it is still there next month. A wording pass that deletes the scope statement leaves
@@ -3067,13 +3150,13 @@ require_help_phrase "refs/claims/issue-<N> refusal (transient claiming-shell pid
   '`refs/claims/issue-<N>` records the TRANSIENT CLAIMING SHELL'
 require_help_phrase "refs/heartbeats/<machine> refusal (single-slot per machine)" \
   '`refs/heartbeats/<machine>` is SINGLE-SLOT PER MACHINE'
-require_help_phrase "exclusion-IS-the-abstention mechanism (what TEST 82 proves)" \
+require_help_phrase "exclusion-IS-the-abstention mechanism (what TEST 83 proves)" \
   'Being UNENUMERATED is the abstention: neither yields a row or a verdict of any kind'
 require_help_phrase "AC4 as a COUNTERFACTUAL about a non-refreshing carrier" \
   'WERE a later change ever to read a NON-REFRESHING carrier, a stale pid there must never yield a `DEAD-*` verdict'
 
 # ===========================================================================
-echo "TEST 82: NAMESPACE CONTAINMENT — a dead pid in refs/claims/issue-<N> yields NO verdict (#3548 AC4)"
+echo "TEST 83: NAMESPACE CONTAINMENT — a dead pid in refs/claims/issue-<N> yields NO verdict (#3548 AC4)"
 # ===========================================================================
 # THE PROPERTY THAT STOPS THE OBVIOUS "FIX". `refs/claims/issue-<N>` is populated on every
 # /drive-issue box and carries a pid — but it is the TRANSIENT CLAIMING SHELL's, never
@@ -3150,7 +3233,7 @@ else
 $ns_out"
 fi
 # NON-VACUITY, the other direction: the SAME pid in the SAME shape, in the namespace this
-# command DOES read, is reported DEAD. So TEST 82 pins the NAMESPACE boundary, not a fixture
+# command DOES read, is reported DEAD. So TEST 83 pins the NAMESPACE boundary, not a fixture
 # that simply fails to be detectable.
 craft_lane_claim "$ns_work" "nsBox" 8802 "$ABSENT_PID" 30
 nsd_out=$(cd "$ns_work" && HEARTBEAT_MACHINE=nsBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
@@ -3164,7 +3247,7 @@ $nsd_out"
 fi
 
 # ===========================================================================
-echo "TEST 83: ONE canonical signature statement, and no site contradicts it (#3548)"
+echo "TEST 84: ONE canonical signature statement, and no site contradicts it (#3548)"
 # ===========================================================================
 # CONSOLIDATION, NOT A CLEVERER GUARD (roborev job 58). One statement about the two board signatures
 # was duplicated across five sites and produced a review finding at jobs 38, 40, 41, 47 and 55 — every
@@ -3220,7 +3303,7 @@ for _f in "$_rb" "$_cl" "$_wb"; do
   [ -r "$_f" ] || missing83="$missing83 $_f"
 done
 if [ -n "$missing83" ]; then
-  bad "TEST 83 cannot run: committed source unreadable —$missing83 (fail-closed: absence is not a pass)"
+  bad "TEST 84 cannot run: committed source unreadable —$missing83 (fail-closed: absence is not a pass)"
 else
   rb83n=$(_norm <"$_rb"); cl83n=$(_norm <"$_cl"); wb83n=$(_norm <"$_wb")
   # --- THE CANONICAL LOCATION CARRIES THE FULL STATEMENT. These are the load-bearing clauses: that

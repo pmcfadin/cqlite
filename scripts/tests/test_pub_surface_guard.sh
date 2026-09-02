@@ -236,6 +236,43 @@ bench_add_inner_gate() { # <scratch root>
 # HAND with the guard's own success line and with `agent-gate.sh`'s `pub-surface`
 # component — a wording change must land in all three at once (#1712 descope).
 MEASURED_RE='^pub-surface: [0-9]+ crate-root declarations scanned in cqlite-core/src/lib\.rs \([0-9]+ pub mod, of which [1-9][0-9]* unconditional\); [1-9][0-9]* module-file prologues read from source; 0 inconsistent$'
+
+# ps_measured_field <what> <file> <sed-body> — pull ONE integer out of the guard's OWN
+# measurement line, and REFUSE anything else.
+#
+# THIS FILE WAS INCONSISTENT WITH ITSELF, and it cost a gate of record. `MEASURED_RE` above
+# is properly line-anchored, while the extractions below were `sed -E 's/.*of which
+# ([0-9]+) unconditional.*/\1/'` over the WHOLE output — the SUBSTITUTE form, which passes
+# every NON-matching line through UNCHANGED. The guard's output is multi-line, so the moment
+# `check-pub-surface.sh` gained a second line carrying the word `unconditional` (#3162's
+# `AGENT-GATE-CENSUS:` contract line, which had no `of which` — since reverted, but the
+# anchoring stands on its own and the guard's output will gain lines again), the result became a
+# TWO-LINE string beginning `AGENT-GATE-CENSUS: 14 unconditional …`; `$((base_open + 1))`
+# then read `AGENT` as a variable name and `set -u` made it fatal:
+#     test_pub_surface_guard.sh: line 403: AGENT: unbound variable
+# The defect is an UNANCHORED PARSE OF MULTI-LINE OUTPUT — #3400's parse-site rule, one
+# directory over — not the wording of the new line. Rewording the guard to dodge a colliding
+# word would trade a descriptive census for a taboo, and the next colliding word brings it
+# straight back.
+#
+# So: `-n … p` (print ONLY matching lines, never pass-through), anchored to the guard's own
+# `^pub-surface: ` line, and the result VALIDATED as a single integer before any caller does
+# arithmetic on it. A non-integer or a multi-line result is a NAMED failure here instead of a
+# bash arithmetic error thirty lines away.
+#
+# NOTE the contrast with the gate's own consumer, which is SAFE and must not be "fixed" to
+# match: `run_pub_surface` greps the anchored MEASURED_RE into a single-line `$measured`
+# FIRST and only then seds that one line. Anchoring first is what makes the substitute form
+# harmless there.
+ps_measured_field() {
+  local what="$1" f="$2" body="$3" v
+  v="$(sed -nE "s/^pub-surface: ${body}/\1/p" "$f")"
+  case "$v" in
+    ''|*[!0-9]*)
+      fail_case "extraction of '$what' from $f did not yield a single integer (got: $(printf '%s' "$v" | tr '\n' '|')). The guard's measurement line is missing, reshaped, or another line matched — an unanchored parse of multi-line output is what broke this suite once (#3162)." ;;
+  esac
+  printf '%s' "$v"
+}
 # ---------------------------------------------------------------------------
 # 5. USAGE first — it is the cheapest and needs no worktree.
 # ---------------------------------------------------------------------------
@@ -264,6 +301,48 @@ fi
 grep -qE "$MEASURED_RE" "$TMPROOT/green.out" \
   || fail_case "the guard passed but printed no affirmative measurement line matching the WHOLE success shape; got: $(cat "$TMPROOT/green.out")"
 echo "OK (1): real tree verifies clean — $(cat "$TMPROOT/green.out")"
+base_open_probe="$(ps_measured_field 'baseline unconditional count' "$TMPROOT/green.out" '.*of which ([0-9]+) unconditional.*')"
+base_read_probe="$(ps_measured_field 'baseline prologues-read count' "$TMPROOT/green.out" '.*; ([0-9]+) module-file prologues read.*')"
+# ---------------------------------------------------------------------------
+# 1b. THE EXTRACTION SURVIVES A SECOND LINE CARRYING THE SAME KEYWORD (#3162).
+#
+#     This is the durable half of the fix, and the reason it is a case rather than a
+#     comment: the guard's output is MULTI-LINE and will gain lines again. What must hold
+#     is not "no other line says `unconditional`" — that is a taboo on wording, and the
+#     next colliding word reinstates the bug — but that the extraction READS ONLY THE
+#     GUARD'S OWN MEASUREMENT LINE.
+#
+#     The first decoy is the line that HISTORICALLY broke this suite — #3162's
+#     `AGENT-GATE-CENSUS:` contract line, since reverted, so it is now synthetic. That is
+#     the right shape for this case and not a weakening: the property is about ANY second
+#     line carrying the keyword, and pinning it to a line that still exists would make the
+#     case lapse the moment that line changed again. The second decoy carries
+#     `module-file prologues read` so BOTH extractions are exercised. The RED half is
+#     inline and explicit — the OLD
+#     substitute form is run over the same input and required to produce something OTHER
+#     than the integer — because a green here would otherwise prove nothing about whether
+#     the anchoring is what is doing the work.
+# ---------------------------------------------------------------------------
+{
+  printf 'AGENT-GATE-CENSUS: 14 unconditional crate-root pub mod declaration(s) verified against their module prologues\n'
+  printf 'note: 99 module-file prologues read from source (a decoy, not the guard line)\n'
+  cat "$TMPROOT/green.out"
+} >"$TMPROOT/decoyed.out"
+d_open="$(ps_measured_field 'decoyed unconditional count' "$TMPROOT/decoyed.out" '.*of which ([0-9]+) unconditional.*')"
+d_read="$(ps_measured_field 'decoyed prologues-read count' "$TMPROOT/decoyed.out" '.*; ([0-9]+) module-file prologues read.*')"
+if [ "$d_open" = "$base_open_probe" ] && [ "$d_read" = "$base_read_probe" ]; then
+  echo "OK (1b): both extractions ignore decoy lines carrying the same keywords and read only the \`pub-surface: \` measurement line ($d_open unconditional, $d_read prologues)"
+else
+  fail_case "case 1b — a decoy line changed the extracted counts (unconditional $base_open_probe -> $d_open, prologues $base_read_probe -> $d_read). The parse is not confined to the guard's own line."
+fi
+# RED control: the pre-fix unanchored SUBSTITUTE form over the SAME input. It must NOT
+# yield the integer — otherwise the anchoring above is not what makes 1b pass.
+old_form="$(sed -E 's/.*of which ([0-9]+) unconditional.*/\1/' "$TMPROOT/decoyed.out")"
+if [ "$old_form" = "$base_open_probe" ]; then
+  fail_case "case 1b RED — the pre-fix unanchored form ALSO returned '$old_form' on the decoyed input, so this case does not demonstrate that anchoring is load-bearing"
+else
+  echo "OK (1b RED): the pre-fix unanchored form returns a multi-line, non-integer value on the same input — the anchoring is what carries the correctness"
+fi
 # ---------------------------------------------------------------------------
 # 2. RED — the consistency assert, against the pre-#1712 source shape.
 # ---------------------------------------------------------------------------
@@ -398,8 +477,8 @@ grep -q "probe_phantom" "$TMPROOT/case10.out" \
 grep -qE "$MEASURED_RE" "$TMPROOT/case10.out" \
   || fail_case "case 10 — the guard exited 0 without its affirmative measurement line; got: $(cat "$TMPROOT/case10.out")"
 # The declaration counts must have MOVED, or the three shapes were not read at all.
-base_open="$(sed -E 's/.*of which ([0-9]+) unconditional.*/\1/' "$TMPROOT/green.out")"
-case10_open="$(sed -E 's/.*of which ([0-9]+) unconditional.*/\1/' "$TMPROOT/case10.out")"
+base_open="$(ps_measured_field 'baseline unconditional count' "$TMPROOT/green.out" '.*of which ([0-9]+) unconditional.*')"
+case10_open="$(ps_measured_field 'case-10 unconditional count' "$TMPROOT/case10.out" '.*of which ([0-9]+) unconditional.*')"
 [ "$case10_open" -eq "$((base_open + 1))" ] \
   || fail_case "case 10 — adding one unconditional (\`probe_trailing\`) and one gated (\`probe_multiline\`) declaration moved the unconditional count from $base_open to $case10_open, expected $((base_open + 1)). The shapes were not read as intended."
 echo "OK (10): multi-line attrs join, trailing comments strip, block-commented decls stay phantoms"
@@ -1970,8 +2049,8 @@ set -e
 }
 grep -qE "$MEASURED_RE" "$TMPROOT/case36.out" \
   || fail_case "case 36 — the guard exited 0 without its affirmative measurement line; got: $(cat "$TMPROOT/case36.out")"
-c36_open="$(sed -E 's/.*of which ([0-9]+) unconditional.*/\1/' "$TMPROOT/case36.out")"
-c36_read="$(sed -E 's/.*; ([0-9]+) module-file prologues read.*/\1/' "$TMPROOT/case36.out")"
+c36_open="$(ps_measured_field 'case-36 unconditional count' "$TMPROOT/case36.out" '.*of which ([0-9]+) unconditional.*')"
+c36_read="$(ps_measured_field 'case-36 prologues-read count' "$TMPROOT/case36.out" '.*; ([0-9]+) module-file prologues read.*')"
 [ "$c36_open" -eq "$((base_open + 1))" ] \
   || fail_case "case 36 — the added unconditional declaration did not move the count ($base_open -> $c36_open), so \`probe_oracle\` was never examined and the green is vacuous"
 [ "$c36_read" -eq "$c36_open" ] \

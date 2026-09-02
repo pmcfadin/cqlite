@@ -186,16 +186,16 @@
 //! `List([Integer(x)])`, so two distinct cell paths become one logical key and can
 //! collapse a Python map entry.
 //!
-//! WHY IT IS NOT FIXED HERE, measured rather than asserted. The root cause is that
-//! `parse_value_from_raw_bytes` has NO consumption channel at all — it returns a
-//! `Value` — so no caller could check even if it wanted to. Adding one is a
-//! recursive signature change across that function's ~45 call sites plus 8 further
-//! decoders in the same path (`parse_raw_type_value`, `parse_udt_value`,
-//! `parse_nested_udt_from_registry`, `parse_inline_udt_value`,
-//! `parse_tuple_elements_raw`, `parse_frozen_sequence_value_raw`,
-//! `parse_frozen_map_value_raw`, `read_frozen_element`), ~100 sites in total. That
-//! is a shared-decoder tightening with its own oracle, i.e. its own PR — NOT the
-//! one map-key path this module consolidated, which is two call sites.
+//! WHY IT WAS NOT FIXED HERE, measured rather than asserted: the root cause was
+//! that `parse_value_from_raw_bytes` had NO consumption channel at all — it
+//! returned a `Value` — so no caller could check even if it wanted to. That was
+//! a shared-decoder tightening with its own oracle, i.e. its own PR, and it has
+//! since LANDED as **issue #3811**: that function is now a thin wrapper over
+//! `parse_value_from_raw_bytes_reporting` plus `require_fully_consumed_raw`, so
+//! every bounded caller of the short name inherits the rule and the collapse
+//! described above no longer occurs. This module's own enforcement is retained
+//! (it also owns the fixed-width ALLOWED-width table below), and the two are to
+//! be UNIFIED — see the `#3820` note beside `require_fully_consumed_raw`.
 //!
 //! It is also deliberately NOT patched with a second framing walk here: a
 //! call-site validator that must know about every decoder is precisely the shape
@@ -468,8 +468,9 @@ impl V5CompressedLegacyParser {
     /// frozen list/set/map keys and `duration`, plus a partial trailing header —
     /// because a validator at the call site has to know about every decoder, and
     /// this one knew about two. Every composite decoder ALREADY reports a consumed
-    /// offset and `parse_value_from_raw_bytes` merely DISCARDS it (`let (val, _)`),
-    /// so the correct shape is to keep that offset instead of re-deriving it.
+    /// offset, which `parse_value_from_raw_bytes` used to DISCARD (`let (val, _)`)
+    /// until #3811 gave it a reporting twin; the correct shape is to keep that
+    /// offset instead of re-deriving it.
     ///
     /// # The `None` arms are exact, not unchecked
     /// `None` is returned only where the arm's contract IS "the entire slice is the
