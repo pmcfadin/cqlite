@@ -42,6 +42,32 @@
 //! the untouched fixture, and the mutated leg differs from it by exactly one
 //! decompressed byte. No CQLite-written SSTable is involved, so a uniform
 //! framing mistake could not make this pass.
+//!
+//! # DECLARED GAP — AC2 SPLITS: half (a) is delivered, half (b) is #3949
+//!
+//! AC2 has two halves, and only the first is deliverable inside #3782:
+//!
+//! - **(a) "the error surfaces rather than truncating" — DELIVERED**, and
+//!   pinned here on every read surface: `Database::execute`,
+//!   `Database::execute_streaming`, and (the route the issue is titled for)
+//!   `SSTableReader::iterate_all_partitions` over the index-random-read path.
+//! - **(b) "no WARN-and-fall-back-to-sequential-scan detour" — NOT DELIVERED,
+//!   and not deliverable in this issue.** On the index-random-read route the
+//!   refusal arrives only AFTER issue #2302's Signal-B detour: the materialising
+//!   arm answers a corrupt partition body with `Ok(None)` — that issue's
+//!   DESIGNATED routing for this exact condition — so the caller WARNs and
+//!   re-walks Data.db sequentially before the `Err` finally surfaces. Removing
+//!   the detour means changing #2302's routing in `partition_lookup.rs` /
+//!   `full_index_scan.rs`: a src change in another subsystem, out of scope for
+//!   #3782. Tracked as **#3949**.
+//!
+//! `index_random_read_path_refuses_a_corrupt_row_carrying_the_decode_errors_kind`
+//! below therefore asserts the detour WARN's PRESENCE, so half (b) cannot be
+//! silently lost behind a green suite; **flipping that assertion to `!contains`
+//! is #3949's completion signal**. Two further residuals of this change are
+//! declared in the differential lane
+//! (`point_vs_full_differential/issue_3782_corrupt_agreement.rs`): the point
+//! read path (#3922) and the partition-HEADER resync arm (#3928).
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
 use std::collections::BTreeSet;
@@ -223,36 +249,48 @@ const INDEX_DETOUR_WARN: &str = "falling back to a full sequential scan";
 /// `Err(Error::Corruption)` and never an `Ok` with a short partition set
 /// (pre-fix on this fixture: `Ok`, 23 of 100).
 ///
-/// It does NOT pin `full_index_scan.rs`'s `BufferExtent::Complete` parse, and
-/// the reason is a property of the route rather than of this test: the
+/// It does NOT pin the `BufferExtent::Complete` parse this change added at
+/// `full_index_scan.rs:311`. **That line is not what makes this test pass:
+/// reverting it to `BufferExtent::Window` does NOT red this case** (measured
+/// 2026-09-02), so a green run here may never be read as that line's pin.
+///
+/// The reason is a property of the route rather than of this test: the
 /// per-entry coverage oracle `partition_slice_fully_consumed` runs FIRST and
 /// already answers `false` for the corrupt partition (its structure-only drive
-/// stops at the undecodable clustering value, so `consumed < raw.len()`), so the
-/// walk returns `Ok(None)` BEFORE reaching the parse below it. Measured: with
-/// that parse reverted to `BufferExtent::Window`, this case still passes — the
-/// corrupt partition never reaches it. No corrupt fixture available here can
-/// reach it either, since any decode error that would fire there also stops the
+/// stops at the undecodable clustering value, so `consumed < raw.len()`), so
+/// the walk returns `Ok(None)` BEFORE reaching the parse below it — line 311 is
+/// UNREACHABLE with a decode error. No corrupt fixture available here can reach
+/// it either, since any decode error that would fire there also stops the
 /// structure-only drive one step earlier.
 ///
-/// # DECLARED GAP — the refusal arrives via the #2302 Signal-B detour
+/// # DECLARED GAP — AC2 half (b): the refusal arrives via the #2302 Signal-B detour (#3949)
 ///
 /// AC2's second half ("no WARN-and-fall-back-to-sequential-scan detour") is
-/// therefore NOT satisfied on this route, and it is not an oversight in the
-/// #3782 fix: the `Ok(None)` above is issue #2302's **Signal B**, whose
-/// exhaustive exit table (`full_index_scan.rs` module doc, roborev jobs
-/// 1609/1610) DESIGNATES "a corrupt/truncated partition body" as an
-/// `incomplete Ok(None)` that the caller reports LOUDLY and then re-walks
-/// sequentially. What #3782 changed is the destination: that sequential re-walk
-/// now REFUSES instead of returning 23 rows.
+/// NOT satisfied on this route, and it is not an oversight in the #3782 fix:
+/// the `Ok(None)` above is issue #2302's **Signal B**, whose exhaustive exit
+/// table (`full_index_scan.rs` module doc, roborev jobs 1609/1610) DESIGNATES
+/// "a corrupt/truncated partition body" as an `incomplete Ok(None)` that the
+/// caller reports LOUDLY and then re-walks sequentially. What #3782 changed is
+/// the DESTINATION: that sequential re-walk now REFUSES instead of returning 23
+/// rows.
 ///
-/// So the composed behaviour measured here is WARN → full sequential re-scan →
-/// `Err`. The WARN's PRESENCE is asserted rather than left unstated, because a
-/// gap this file does not name is a gap the next reader cannot find: making the
-/// error surface directly means changing #2302's documented Signal-B routing
-/// (the materialising arm's `Ok(None)`, versus the streaming sibling's
-/// `Err::corruption` at `full_index_stream.rs:356`), which is a routing decision
-/// for #2302's owner and not a test-only change. When that lands, THIS
-/// ASSERTION MUST FLIP to `!contains` and this comment must go with it.
+/// The route measured end to end, which is the behaviour this case composes:
+/// `partition_slice_fully_consumed` ⇒ `Ok(None)` (`full_index_scan.rs`) → the
+/// detour WARN at `partition_lookup.rs:671` → a full sequential re-walk of
+/// Data.db → `Err`, kind preserved.
+///
+/// So half (a) of AC2 — "the error surfaces rather than truncating" — is
+/// delivered and pinned by the match below, and half (b) is neither delivered
+/// nor deliverable in #3782: making the error surface directly means changing
+/// #2302's documented Signal-B routing (the materialising arm's `Ok(None)`,
+/// versus the streaming sibling's `Err::corruption` on the same predicate at
+/// `full_index_stream.rs:356`), a src change in another subsystem. Tracked as
+/// **#3949**.
+///
+/// The WARN's PRESENCE is therefore asserted rather than left unstated, because
+/// a gap this file does not name is a gap the next reader cannot find. That
+/// assertion pins the gap's PRESENCE only; **flipping it to `!contains` is
+/// #3949's completion signal**, and this comment goes with it.
 ///
 /// The capture is a THREAD-LOCAL dispatcher (`set_default`), never a global one:
 /// the sibling corpus case in this target calls `iterate_all_partitions` over
@@ -317,16 +355,18 @@ async fn index_random_read_path_refuses_a_corrupt_row_carrying_the_decode_errors
         ),
     }
 
-    // The DECLARED GAP above, asserted so it cannot be silently lost. This also
-    // proves the capture is non-vacuous: the substring is the #2302 WARN this
-    // very route emits, so a sink that saw nothing would red here.
+    // The DECLARED GAP above (AC2 half (b), tracked as #3949), asserted so it
+    // cannot be silently lost. This also proves the capture is non-vacuous: the
+    // substring is the #2302 WARN this very route emits, so a sink that saw
+    // nothing would red here. Flipping this to `!contains` is #3949's
+    // completion signal.
     let logs = sink.text();
     assert!(
         logs.contains(INDEX_DETOUR_WARN),
-        "declared gap (#2302 Signal B): today the index-random-read refusal arrives AFTER the \
-         documented WARN + sequential re-walk, so that WARN must be observable here. If it is \
-         gone, the routing changed — flip this assertion to `!contains` and update the case \
-         doc, which is AC2's second half. Captured WARN output was:\n{logs}"
+        "declared gap #3949 (#2302 Signal B): today the index-random-read refusal arrives \
+         AFTER the documented WARN + sequential re-walk, so that WARN must be observable \
+         here. If it is gone, the routing changed — flip this assertion to `!contains` and \
+         update the case doc, which is AC2's second half. Captured WARN output was:\n{logs}"
     );
 }
 
