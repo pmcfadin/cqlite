@@ -316,6 +316,26 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   never on a hand-written list of bad characters, which drifts from the renderer the first time the
   renderer changes. A space is unaffected, which is the control that keeps it from redding correct
   input.
+  **And a decision must rest on ONE observation — the third instance of one shape, so the fix is a
+  mechanism (#3751 round 17).** Two earlier rounds fixed the same shape at their own sites: a merge
+  assert that validated one field from one read of a record and another from a second read, and a
+  classifier that read its subject eight times. The third: the hand-audit recorder read the REPORT
+  using the generation loaded earlier and then read the RECORD independently, so a concurrent
+  re-open publishing generation **B** between those reads left BOTH final re-verifications satisfied
+  — an unchanged report **A**, an unchanged record **B** — and it published the merge-proceeding
+  token over B **without ever inspecting B's verdict**, with no force flag, and with a trace naming
+  **A** (measured: exit 0 while B held a blocking `FINDINGS`). **A trace that names the wrong
+  generation is worse than no trace.** The rules to carry: **two reads of one subject are one
+  observation only if something re-verifies between them**; **publish a defect as a closed KIND
+  beside its detail sentence**, because a consumer keyed on the prose is reading a diagnostic as a
+  control (two legitimate sentences shared a keyword and a text match routed the wrong refusal);
+  **delete the parameter a function no longer uses**, so a second read becomes unexpressible rather
+  than merely untaken; and **a state that was never established gets its own cause on every
+  surface**, since "read it again" and "repair the file" are different operator actions. Mechanized
+  as a third boundary scanner (one file per property, beside the emit and read ones) which
+  attributes every reader call to the function it appears in, requires each decision path to observe
+  exactly once, declares what it does not cover on every run, and refuses an undeclared subject
+  rather than reporting it clean.
  "Somewhere on this line it says
   `RESULT: PASS`" is not a verdict about C: measured on #3751's own branch, a sibling `code-review`
   stage's PASS line satisfied `--c-verdict`, and a truncated capture with no
@@ -907,7 +927,7 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   held the sentinel. The byte never has to defeat the COUNTER to defeat the READER; it only has to
   make the current record unparseable while a stale artifact is still on disk. (2) `_gate_awk` read
   the GATE-OF-RECORD summary raw, so `RESULT: PA<NUL>SS` reached the merge gate as `PASS`. Both are
-  routed, and `count_field_lines` is now three-valued (read faithfully / read failed / not
+  routed, and the record-line counter is now three-valued (counted / not countable / not
   representable) with the permissive set spelled AFFIRMATIVELY as `0` at both callers and its own
   refusal token for the third state, because the operator action differs (rewrite the record, never a
   chmod). **Three consecutive rounds have found the same shape — a boundary exists and one path

@@ -666,3 +666,45 @@ subcommand inherits the refusal and no subcommand publishes a report path that c
 - **WHEN** an environment variable is sought to proceed anyway
 - **THEN** none SHALL exist: a checkout is always renamable, so an escape hatch could only buy a
   published path that cannot be opened
+
+### Requirement: Every decision SHALL rest on ONE coherent observation of the stage
+
+The stage record and the report of record SHALL be observed TOGETHER — the record's bytes, the
+generation those bytes name, and THAT generation's report — by one primitive that RE-VERIFIES the
+record between the two captures. Every decision path (`verdict`, `status`,
+`record-author-performed`) SHALL reason from one such observation and SHALL NOT read a stage file
+for itself.
+
+#### Scenario: a generation published between the two reads cannot be superseded unseen
+- **WHEN** an `open --force` publishes a new generation B between the read that names the current
+  report and the read of the record that a recording will republish
+- **THEN** `record-author-performed` SHALL REFUSE, naming the CHANGE, and SHALL write NOTHING that
+  is published — the stage record SHALL still name B and `verdict` SHALL still report B's verdict
+- **AND** it SHALL NOT record that any other generation was superseded: a
+  `supersedes-report-nonce:` trace naming a generation this call did not inspect is worse than no
+  trace, because it makes the audit trail affirmatively false
+- **AND** `--force` SHALL NOT cover it: `--force` authorizes replacing the verdict the operator
+  READ, never one that arrived afterwards in a generation nobody read
+
+#### Scenario: a record that moves inside the observation is a NAMED refusal
+- **WHEN** the record changes between the capture of its bytes and the read of the report those
+  bytes name
+- **THEN** the observation SHALL be DISCARDED and reported as `stage record changed mid-read`, with
+  its own `state=stage-record-changed` and its own write-side `reason=stage-record-changed-mid-read`
+- **AND** it SHALL NOT be reported as `stage record unreadable`: the record was perfectly readable,
+  and the operator action is to read it again rather than to repair or chmod it
+
+#### Scenario: the trace names the generation actually superseded (the control)
+- **WHEN** an undisturbed `--force` supersession runs over a recorded verdict
+- **THEN** it SHALL succeed, SHALL record `replaced-verdict:` and SHALL name in
+  `supersedes-report-nonce:` EXACTLY the generation it inspected, both on its `RECORD-OK` line and
+  in the published report's own trace
+
+#### Scenario: no decision path may read a stage file for itself
+- **WHEN** a decision path is given a read of the stage record or the report of its own
+- **THEN** a structural guard SHALL FAIL, naming the reader, the function and the line, unless that
+  statement is DECLARED in the guard with its reason
+- **AND** each decision path SHALL take exactly ONE observation: none means it reasons from an
+  observation it did not take, several means two observations
+- **AND** the guard SHALL declare what it does not cover on every run, and SHALL REFUSE a subject
+  for which no primitive is declared rather than reporting it clean

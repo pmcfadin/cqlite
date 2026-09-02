@@ -547,3 +547,54 @@ whose whole promise is the absolute report-of-record path.
   with the whole path published AND that path required to EXIST.
 - **No opt-out.** A checkout is always renamable, so an escape hatch could only buy a published path
   that cannot be opened.
+
+## Round 17 (W1) — the record and the report must be ONE observation
+
+`record-author-performed` read the REPORT using the generation loaded earlier and then read the
+STAGE RECORD independently. An `open --force` publishing generation **B** between those reads left
+**both** final re-verifications satisfied — an unchanged report **A**, an unchanged record **B**,
+each individually consistent — so the recording published `AUTHOR-PERFORMED` over **B** *without
+ever inspecting B's verdict*, without `--force`, and with a `supersedes-report-nonce:` trace naming
+**A**. Measured on the shipped script: `RECORD-OK … supersedes-report-nonce=<A>` at exit 0 while B
+held `result: FINDINGS`, and `verdict` then reported AUTHOR-PERFORMED. **Falsifying the audit trail
+is the worst failure this tool can have**, and it is the harm this change exists to prevent,
+committed by the mechanism itself.
+
+- **THIRD INSTANCE OF ONE SHAPE ⇒ MECHANISM, NOT A THIRD PATCH.** Round 9's N2 (`head-sha` from one
+  read of the record, the nonce from a second) and round 12's R2 (`classify_report` reading its
+  subject eight times) were the first two, each fixed where it was found. The consolidation is ONE
+  primitive: `observe_record` is the only place the stage record FILE is read — the reader path used
+  to open it SEVEN times and `open` five more — and `observe_stage` pairs that capture with the
+  report of *the generation those bytes name*, then re-reads the record and requires it
+  byte-identical. All three decision paths reason from one such observation.
+- **Two reads are one observation only if something re-verifies between them.** Without the
+  re-read, "nothing changed" is a claim each read makes about itself — which is precisely how two
+  internally-consistent halves came to describe two different generations.
+- **A defect is published as a closed KIND beside its detail sentence.** A consumer keyed on the
+  prose reads a diagnostic as a control (#3312), and it fired during implementation: two legitimate
+  sentences both contain the words `report-nonce`, so a text match routed a read-level failure to
+  the refusal that says "this record names two".
+- **Delete the parameter a function no longer uses.** With the observation required,
+  `classify_report`'s report path had no remaining use, and a parameter a function does not use is
+  an invitation to read again: removed, so a second observation is *unexpressible*. An unobserved
+  caller gets the named non-verdict `stage not observed`, never a fresh read.
+- **A moved record is its own cause on every surface** (`stage record changed mid-read`,
+  `state=stage-record-changed`, `reason=stage-record-changed-mid-read`), because the operator action
+  is *read it again* and not *repair the record or chmod it*. A perfectly readable record reported
+  as unreadable is round 2's B7 false rationale.
+- **Mechanized: `scripts/tests/lib/observation-boundary-scan.sh`**, a sibling of the round-7 emit
+  scanner and the round-14 read scanner rather than a mode of either — one file per property,
+  because this one asks about the CALLER (may this function read at all) and needs function-boundary
+  tracking the read scanner has no notion of. It attributes every stage-file reader call to its
+  function, requires the owner to be the primitive or a statement declared WITH ITS REASON (the two
+  in-window re-verifications are declared: being fresh is their whole purpose), and requires each
+  decision path to observe exactly once. **Its allowlist carries no in-band delimiter** — the first
+  draft used `<function>|<statement>` and the very first entry, the record re-verification with its
+  `||`, was truncated and excused nothing, the same defect `read-boundary-scan.sh` hit with its
+  reason field — so the channel was REMOVED (an `@in <function>` scope directive) rather than the
+  delimiter made rarer.
+- **Deleted with a stated replacement:** the file-reading `read_field` (every record field now comes
+  from the one capture), the file-reading half of the line counter, and
+  `record-author-performed`'s second pair of record-read refusals — which had always been
+  unreachable, because the observation refuses on both states earlier under the same reason token.
+  Subtraction cannot introduce a false pass.

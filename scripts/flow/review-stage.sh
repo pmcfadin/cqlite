@@ -1045,7 +1045,7 @@ stage_file() { printf '%s/%s.stage\n' "$(stage_dir "$1")" "$2"; }
 # THE NONCE IS VALIDATED BY ITS PRODUCER, IN THE PARENT SHELL — never by a helper called
 # from a substitution. Every call here is `$(report_path …)`, so a `die_usage` inside this
 # function would exit only the SUBSTITUTION (round 2's B6 lesson) and leave the caller with an
-# empty path; so `cmd_open` and `load_stage` each test the value with `nonce_is_valid` where they
+# empty path; so `cmd_open` and `observe_record` each test the value with `nonce_is_valid` where they
 # compute it, with no subshell in between. The `case` below is a BELT whose only reachable effect
 # inside a substitution is the diagnostic plus an empty value — which then fails closed at
 # `assert_ignored` (git cannot confirm an empty path) rather than writing anywhere.
@@ -1063,7 +1063,7 @@ report_path() {
 
 # nonce_is_valid <token> — the ONE predicate for a usable report nonce. A PREDICATE, not a
 # `die_usage`, because both producers call it in the parent shell and each maps a rejection to its
-# own outcome (a named refusal at `open`, a record defect at `load_stage`). Alphanumeric only, so
+# own outcome (a named refusal at `open`, a record defect at `observe_record`). Alphanumeric only, so
 # the token cannot introduce a path separator, a `.` (which would make `<kind>.<nonce>` ambiguous)
 # or anything a line-oriented record could not carry; the length floor is what stops a truncated
 # or hand-edited one-character value being accepted as unique.
@@ -1501,12 +1501,13 @@ commit_write() {
 # (#3751 round 12, R2): the FIRST such line's value, flattened to one line. Empty output means
 # "absent or empty", which every caller treats as unmeasured.
 #
-# IT READS TEXT, NOT A FILE, which is what lets `classify_report` classify every field of the
-# report from ONE snapshot instead of re-reading the file per field — the defect R2 names. The
-# file-reading `read_field` below is a THIN WRAPPER that delegates here, deliberately rather than
-# keeping its own `grep`-on-file copy: a second implementation of this grammar is a second place
-# for it to drift, its agreement with the first is only knowable by TESTING it rather than by care,
-# and this grammar is what decides whether a merge-proceeding token has its working.
+# IT READS TEXT AND NOTHING ELSE, which is what lets `classify_report` classify every field of the
+# report from ONE snapshot instead of re-reading the file per field — the defect R2 names. Since
+# round 17 (W1) there is NO file-reading sibling at all: the file-reading `read_field` wrapper is
+# DELETED, because every field of the stage record is now parsed from the ONE capture
+# `observe_record` takes. That is subtraction rather than a second implementation of this grammar,
+# which would be a second place for it to drift — and this grammar is what decides whether a
+# merge-proceeding token has its working.
 #
 # A HERE-STRING, NOT A PIPE. `grep -m1` stops at the first match and closes its input, so a
 # `printf … | grep -m1` pipeline can leave `printf` killed by SIGPIPE — a status `pipefail` would
@@ -1519,110 +1520,78 @@ read_field_from() {
   one_line "$line"
 }
 
-# read_field <file> <key> — the same grammar, applied to a file's contents.
-#
-# ONE READ, THEN THE SHARED GRAMMAR. An unreadable file yields empty text, which is the same
-# "absent or empty" every caller already treats as unmeasured — the read-failed-vs-field-absent
-# distinction is drawn by `count_field_lines` and `report_bytes`, where it decides something
-# (#3751 round 6, K1). Reading the whole file also removes a `grep` artifact this shape had: GNU
-# `grep` prints `Binary file … matches` INSTEAD of the line when the file holds a NUL.
-#
-# AND IT READS THROUGH THE ONE CAPTURE BOUNDARY (#3751 round 13, S2). This capture DISCARDED NUL
-# bytes, and `one_line` then stripped them from the value too — which was described here as
-# harmless and was not: it FORGED a valid token out of an invalid one. Measured, a record whose
-# `report-nonce:` value was `STALE\0PASS1` (not a nonce: a NUL is not alphanumeric) was read as the
-# valid `STALEPASS1`, so `verdict` reported a STALE report's `PASS` for a stage whose own current
-# report held the sentinel — a data file redirecting a reader, which is round 4's H2 defect through
-# a different door. Through `capture_map_nul` the NUL arrives as SOH, `one_line` renders it `?`, and
-# the value fails `nonce_is_valid` — a RECORD DEFECT that derives no path at all.
-read_field() {
-  local file="$1" key="$2" text
-  [ -f "$file" ] || return 0
-  text="$( { capture_map_nul "$file"; } 2>/dev/null || true )"
-  read_field_from "$text" "$key"
-}
+# `read_field <file> <key>` IS GONE (#3751 round 17, W1). It read the record FILE per field, so
+# `load_stage` alone opened the record SEVEN times and `cmd_open` five more — and a record replaced
+# between any two of those reads yielded a stage description assembled from generations that never
+# coexisted. That is round 12's R2 one level up, and it is the class W1 names. Every field of the
+# record now comes from the ONE capture `observe_record` takes, parsed with `read_field_from`
+# above; the report's fields already came from ONE capture. Nothing delegates to a file reader
+# here any more, which is why this is a deletion and not a rewrite: subtraction cannot introduce a
+# false pass. The routing property round 13's S2 established survives on `stage_record_text` and
+# `report_bytes`, the only two readers left.
 
-# count_field_lines <file> <key> — HOW MANY TIMES <key> APPEARS, AS AN AFFIRMATIVE MEASUREMENT.
-# Prints the count and returns 0 ONLY when the file was READ FAITHFULLY. THREE statuses, because
-# there are three facts and only one of them is permissive:
+# count_field_lines_from <text> <key> — HOW MANY TIMES <key> APPEARS IN AN ALREADY-CAPTURED
+# RECORD, AS AN AFFIRMATIVE MEASUREMENT. Prints the count and returns 0 ONLY when the text is a
+# text record at all. THREE statuses, because there are three facts and only one of them is
+# permissive:
 #
-#   0  read, faithful, counted            — the count is printed; the caller may act on it
-#   1  the read FAILED                    — permission, I/O, a truncated read (nothing printed)
-#   2  read, but NOT REPRESENTABLE        — the file holds a NUL 0x00 or SOH 0x01 byte
+#   0  counted                            — the count is printed; the caller may act on it
+#   1  the count could not be TAKEN        — `grep` itself failed, or a non-numeric result
+#   2  NOT REPRESENTABLE                   — the text holds the mapped NUL/SOH byte
 #
 # Every caller branches on that status with the PERMISSIVE set spelled AFFIRMATIVELY (`0` alone),
 # so a status added here later refuses at every call site by construction rather than inheriting
 # a `!= 1` test.
 #
-# IT READS THROUGH THE ONE CAPTURE BOUNDARY, AND THAT WAS THE THIRD TIME A BOUNDARY WAS INTRODUCED
-# WITH ONE PATH LEFT BYPASSING IT (#3751 round 14, T1; round 7's emit sites and round 13's record
-# reads are the first two). Round 13 routed `read_field` and `report_bytes` through
-# `capture_map_nul` and left THIS reader reading the file directly with `grep`. `grep` is a FAITHFUL
-# reader — it is the answer that is not: a record whose bytes are `report-<NUL>nonce: CURRENTX1`
-# holds no `report-nonce:` line at all, so the count was a truthful `0`, which is exactly the value
-# that means "a pre-nonce record, whose single report is the LEGACY bare `<kind>.md`". Measured on
-# the shipped script: a stale legacy `c.md` recording `result: PASS` beside a current
-# `c.CURRENTX1.md` holding the sentinel reported `RESULT: PASS` at exit 0, from the stale file.
-# So the byte does not have to defeat the counter to defeat the reader — it only has to make the
-# CURRENT record unparseable while a stale artifact is still on disk, and `0` is not a safe
-# reading of a document we could not read as text.
+# IT TAKES TEXT, NOT A FILE (#3751 round 17, W1). It used to read the record file itself, which
+# made it the SECOND independent read of that record beside `read_field`'s per-field reads — the
+# class W1 names, where a record replaced between two reads yields a stage description assembled
+# from generations that never coexisted. The read now happens ONCE, in `observe_record`, through
+# `stage_record_text`; this function counts over that capture. The idiom is `read_field`'s, one
+# function up: ONE implementation of a grammar, applied to text a caller already holds.
+#
+# WHY THE COUNT AT ALL, AND WHY IT IS NOT FIRST-WINS: `report-nonce:` decides WHICH ARTIFACT IS
+# AUTHORITATIVE, and picking one of two answers by order is not a rule. Zero and several are
+# DISTINCT facts with distinct operator actions ("a pre-nonce record, whose single report is the
+# LEGACY bare `<kind>.md`" / "this record names two").
+#
+# THE UNREPRESENTABLE STATUS IS WHAT ROUND 14's T1 WAS ABOUT, AND IT MOVES HERE UNCHANGED. `grep`
+# is a FAITHFUL reader — it is the ANSWER that is not: a record whose bytes are
+# `report-<NUL>nonce: CURRENTX1` holds no `report-nonce:` line, so the count was a truthful `0`,
+# which is exactly the value that means "a pre-nonce record". Measured on the shipped script: a
+# stale legacy `c.md` recording `result: PASS` beside a current `c.CURRENTX1.md` holding the
+# sentinel reported `RESULT: PASS` at exit 0, from the stale file. So the byte does not have to
+# defeat the counter to defeat the reader — it only has to make the CURRENT record unparseable
+# while a stale artifact is still on disk. `capture_map_nul` maps the byte in the STREAM, so it
+# arrives here as SOH and is NAMED rather than counted over. (`stage_record_text` refuses such a
+# record first, so this arm is a belt; it stays because this function must not be the one place
+# that reads a mapped byte as ordinary text.)
 #
 # Its own STATUS rather than a folded-in `1`, for round 2's B7 reason: the operator action differs
 # (rewrite the record or re-open the stage, never a chmod), and a refusal saying "permission or
 # I/O" about a file whose permissions are fine is a FALSE RATIONALE, which is worse than none.
 #
-# THE `|| true` THAT USED TO BE HERE WAS THE DEFECT (#3751 round 6, K1). `grep` separates the two
-# facts this reader depends on with its EXIT STATUS: 1 means "the file was READ and holds no such
-# line" (and it prints `0`), >= 2 means "the file could NOT BE READ" (permission, I/O — and it
-# prints nothing). Swallowing the status with `|| true` and then mapping a non-numeric value to 0
-# collapsed the second onto the first, so an UNREADABLE stage record was indistinguishable from a
-# record with no field and took the LEGACY reading — reporting an OLD report's `PASS` as the
-# current verdict while WHICH report is current was unknown.
-#
-# *read failed* and *read fine, field absent* are DIFFERENT FACTS, and only the second one is
-# legitimately permissive: every earlier version of this tool wrote exactly one report, at the
-# bare `<kind>.md`, so an ABSENT field is an affirmative measurement of THAT shape. A read failure
-# measures nothing at all, so it takes the fail-closed branch at every caller — the write side
-# REFUSES and the read side reports `stage record unreadable`.
-#
 # The count itself is required to be numeric as well: a count we cannot read is not a count, and
 # `""` would otherwise arrive at an arithmetic `[` test as a syntax error rather than a refusal.
-count_field_lines() {
-  local file="$1" key="$2" text="" out="" rrc=0 grc=0
-  # ONE READ, THROUGH THE ONE MAPPING, WITH THE COMPLETE READ ASSERTED BY *TWO* SIGNALS — the same
-  # pair, for the same reasons, as `report_bytes`: the sentinel `E` survives a refactor that folds
-  # this assignment into its `local` declaration (where the STATUS would silently become `local`'s),
-  # and the STATUS catches what the sentinel cannot, a read that fails after delivering a prefix
-  # whose last byte happens to BE an `E`. A TRUNCATED read matters here as much as a failed one: a
-  # prefix that stops before the `report-nonce:` line counts `0` and takes the LEGACY reading.
-  # `|| rrc=$?`, never `if ! …; then rrc=$?`, which reads 0.
-  text="$( { capture_map_nul "$file" && printf 'E'; } 2>/dev/null )" || rrc=$?
-  [ "$rrc" -eq 0 ] || return 1
-  case "$text" in
-    *E) ;;
-    *) return 1 ;;
-  esac
-  text="${text%E}"
+count_field_lines_from() {
+  local text="${1:-}" key="$2" out="" grc=0
   # A byte the capture cannot carry is its OWN status, so the caller can name it (see the header).
   case "$text" in
     *"$CAPTURE_NUL_BYTE"*) return 2 ;;
   esac
-  # COUNTED OVER THE SNAPSHOT, BY A HERE-STRING RATHER THAN A PIPE. `grep -m1`'s SIGPIPE hazard
-  # (recorded at `read_field_from`) does not apply to `-c`, but a here-string keeps the two readers
-  # of this grammar in the same shape — and it also TERMINATES the final line, so a record whose
-  # last line has no newline is counted exactly as reading the file directly counted it.
+  # COUNTED BY A HERE-STRING RATHER THAN A PIPE, the same shape `read_field_from` uses — which
+  # also TERMINATES the final line, so a record whose last line has no newline is counted exactly
+  # as reading the file directly counted it.
   #
-  # `grep`'s remaining statuses still separate two facts: 1 is "read, no such line" (it prints
-  # `0`), >= 2 is a failure of grep itself, which measures nothing. The `|| true` that used to
-  # swallow this was round 6's K1 defect — it made an unreadable record indistinguishable from a
-  # record with no field, so the record took the LEGACY reading and reported an OLD report's `PASS`.
+  # `grep`'s statuses still separate two facts: 1 is "read, no such line" (it prints `0`), >= 2 is
+  # a failure of grep itself, which measures nothing. The `|| true` that used to swallow this was
+  # round 6's K1 defect — it made an unreadable record indistinguishable from a record with no
+  # field, so the record took the LEGACY reading and reported an OLD report's `PASS`.
   out="$(LC_ALL=C grep -c -i "^[[:space:]]*${key}:" <<<"$text" 2>/dev/null)" || grc=$?
   case "$grc" in
     0 | 1) ;;
     *) return 1 ;;
   esac
-  # The count itself is required to be numeric: a count we cannot read is not a count, and `""`
-  # would otherwise arrive at an arithmetic `[` test as a syntax error rather than a refusal.
   case "$out" in
     "" | *[!0-9]* ) return 1 ;;
   esac
@@ -1681,7 +1650,7 @@ stage_record_text() {
 # of one grammar are two opinions about which line names the current report, and a divergence there
 # is a reader taking a nonce this writer did not write.
 #
-# SEVERAL SUCH LINES CANNOT REACH HERE — `load_stage` reports that record as a DEFECT and the
+# SEVERAL SUCH LINES CANNOT REACH HERE — `observe_record` reports that record as a DEFECT and the
 # caller refuses on it before anything is written — but the substitution is written to collapse
 # them to ONE anyway, because a rewrite that could emit two `report-nonce:` lines would produce a
 # record every reader then refuses, i.e. this tool bricking its own stage.
@@ -1779,8 +1748,17 @@ cmd_open() {
     note "this checkout's HEAD does not resolve to a commit, so the stage records head-sha: unresolved — premerge-assert.sh will REFUSE to let this stage certify a merge until it is re-opened in a checkout with a resolvable HEAD"
   fi
 
-  if [ -f "$sfile" ]; then
-    prior_iso="$(read_field "$sfile" spawned-at)"
+  # THE RECORD IS OBSERVED ONCE, AND EVERY FIELD BELOW COMES OUT OF THAT ONE CAPTURE (#3751 round
+  # 17, W1). This used to be FIVE independent reads of the record file — `spawned-at`, the
+  # `report-nonce` count, its value, `spawned-epoch`, `reopen-count` — so a record replaced between
+  # any two of them produced an `already-open` refusal naming one generation's report beside
+  # another's clock, and under `--force` copied a `spawned-at` and a `spawned-epoch` that were never
+  # in one record together. `observe_record` is the record HALF of the primitive: `open` is a
+  # WRITER and consults no report, so it deliberately does not take the report observation.
+  observe_record "$issue" "$kind"
+  if [ "$STAGE_OPEN" -eq 1 ]; then
+    prior_iso="$STAGE_SPAWNED_ISO"
+    [ "$prior_iso" != unknown ] || prior_iso=""
     # THE PRIOR NONCE, READ BEFORE ANY REFUSAL, so the `already-open` refusal can name the
     # report that is CURRENT rather than the one a re-open would create. COUNTED, not first-wins:
     # this field decides WHICH ARTIFACT COUNTS, and "several records is refused, never resolved by
@@ -1794,43 +1772,38 @@ cmd_open() {
     # re-open would silently restart a clock a reader is using and destroy the only evidence of
     # which report the previous agent holds. The remedy is a human reading the record.
     #
-    # THE READ IS VERIFIED AFFIRMATIVELY (#3751 round 6, K1). `count_field_lines` returns non-zero
-    # when the record could not be READ at all, which is a different fact from "read fine, no such
-    # field" — the second is the legacy shape, the first measures nothing.
-    #
-    # AND THE PERMISSIVE SET IS SPELLED AFFIRMATIVELY (#3751 round 14, T1): only status `0` — read
-    # FAITHFULLY — may proceed. Status 2, a record holding a byte the capture cannot carry, gets its
-    # OWN refusal because the operator action differs (rewrite the record or re-open the stage, never
-    # a chmod), and the `*)` arm takes the fail-closed word so a status added to that helper later
-    # cannot inherit a permissive branch here.
-    local cfl_rc=0
-    nnonce_lines="$(count_field_lines "$sfile" report-nonce)" || cfl_rc=$?
-    case "$cfl_rc" in
-      0) ;;
-      2)
+    # THE READ IS VERIFIED AFFIRMATIVELY (#3751 round 6, K1), AND ITS VERDICT NOW COMES FROM THE
+    # ONE OBSERVATION (round 17, W1). `observe_record` sets `STAGE_RECORD_DEFECT` only when the
+    # record could not be READ AS TEXT or does not name ONE valid generation, which is a different
+    # fact from "read fine, no such field" — the second is the legacy shape, the first measures
+    # nothing. The byte case keeps its OWN refusal token because the operator action differs
+    # (rewrite the record or re-open the stage, never a chmod), and it is distinguished by the
+    # defect's own text rather than by a second read of the file.
+    nnonce_lines="$STAGE_NONCE_LINES"
+    case "$STAGE_RECORD_DEFECT_KIND" in
+      "") ;;
+      unrepresentable)
         emit "$REFUSE_MARKER reason=stage-record-unrepresentable kind=$kind issue=$issue record=$(field_value "$sfile")"
         emit "$REFUSE_MARKER detail=this stage's record holds a NUL 0x00 or SOH 0x01 byte, which no text record may contain, so it could not be read as one and NOTHING was written. A shell capture silently DROPS a NUL, so a reader would judge lines this file does not hold — a record whose key is spelt report-<NUL>nonce holds NO report-nonce line, which counts as ZERO and is exactly the value that means a pre-nonce record whose single report is the LEGACY bare name. That is how a STALE report's PASS gets reported as this stage's verdict. Rewrite the record as text, or remove the stage directory and open a fresh stage. This is NOT a permission problem: do not chmod it."
         exit 2
         ;;
+      nonce-ambiguous | nonce-invalid)
+        # FAIL-CLOSED, AND IT REFUSES rather than reading the legacy bare name: that name may be a
+        # report an EARLIER agent still holds, and reporting it as this stage's current report is
+        # exactly the false certification the nonce closes. The remedy is a human reading the
+        # record, so the refusal says so. The counts and the raw value come from the SAME
+        # observation the defect came from, so this line cannot describe a different record.
+        emit "$REFUSE_MARKER reason=report-nonce-unreadable kind=$kind issue=$issue record=$(field_value "$sfile") lines=$nnonce_lines value=$(field_value "${STAGE_NONCE_RAW:-<none>}")"
+        emit "$REFUSE_MARKER detail=the stage record's report-nonce must be exactly ONE line carrying an alphanumeric token; it names which report of this stage is current, so a guess could name a report an earlier agent still holds. Read the record and repair it, or remove the stage directory and open a fresh stage."
+        exit 2
+        ;;
       *)
-        emit "$REFUSE_MARKER reason=stage-record-unreadable kind=$kind issue=$issue record=$(field_value "$sfile")"
+        emit "$REFUSE_MARKER reason=stage-record-unreadable kind=$kind issue=$issue record=$(field_value "$sfile") defect=$(field_value "$STAGE_RECORD_DEFECT")"
         emit "$REFUSE_MARKER detail=this stage's record EXISTS and could not be READ, so which report of this stage is current could not be measured and NOTHING was written. That is not the same as a record with no report-nonce (which reads as the original single report): an unmeasured record may not take the permissive reading, because it is also a record whose spawned-at cannot be read, so a forced re-open would silently restart a clock a reader is using. Fix the record's permissions, or remove the stage directory and open a fresh stage."
         exit 2
         ;;
     esac
-    prior_nonce=""
-    if [ "$nnonce_lines" -eq 1 ]; then
-      prior_nonce="$(read_field "$sfile" report-nonce)"
-    fi
-    if [ "$nnonce_lines" -gt 1 ] || { [ "$nnonce_lines" -eq 1 ] && ! nonce_is_valid "$prior_nonce"; }; then
-      # FAIL-CLOSED, AND IT REFUSES rather than reading the legacy bare name: that name may be a
-      # report an EARLIER agent still holds, and reporting it as this stage's current report is
-      # exactly the false certification the nonce closes. The remedy is a human reading the
-      # record, so the refusal says so.
-      emit "$REFUSE_MARKER reason=report-nonce-unreadable kind=$kind issue=$issue record=$(field_value "$sfile") lines=$nnonce_lines value=$(field_value "${prior_nonce:-<none>}")"
-      emit "$REFUSE_MARKER detail=the stage record's report-nonce must be exactly ONE line carrying an alphanumeric token; it names which report of this stage is current, so a guess could name a report an earlier agent still holds. Read the record and repair it, or remove the stage directory and open a fresh stage."
-      exit 2
-    fi
+    prior_nonce="$STAGE_NONCE"
     rpath="$(report_path "$issue" "$kind" "$prior_nonce")"
     if [ "$force" -ne 1 ]; then
       emit "$REFUSE_MARKER reason=already-open kind=$kind issue=$issue spawned-at=$(field_value "${prior_iso:-unknown}") report=$(field_value "$rpath")"
@@ -1844,7 +1817,7 @@ cmd_open() {
     if [ -n "$prior_iso" ]; then
       spawned_iso="$prior_iso"
       local prior_epoch
-      prior_epoch="$(read_field "$sfile" spawned-epoch)"
+      prior_epoch="$(read_field_from "$STAGE_RECORD_TEXT" spawned-epoch)"
       # COMPARABLE, NOT MERELY NUMERIC (#3751 round 8). This value is copied FORWARD into the
       # fresh record, so an out-of-range or zero-padded one used to be re-written and outlive the
       # edit that introduced it — every later `status` then subtracted it in `$(( ))`, which
@@ -1857,7 +1830,7 @@ cmd_open() {
       fi
     fi
     local prior_count
-    prior_count="$(read_field "$sfile" reopen-count)"
+    prior_count="$(read_field_from "$STAGE_RECORD_TEXT" reopen-count)"
     # SAME PREDICATE, SAME REASON (#3751 round 8): this one goes through `$(( prior_count + 1 ))`,
     # and a record carrying `reopen-count: 99999999999999999999` wrapped to
     # `7766279631452241920`, which was then WRITTEN BACK — a fabricated number made durable, on a
@@ -2195,20 +2168,29 @@ report_state() {
   esac
 }
 
-# classify_report <report-path> <stage-open:0|1> [<record-defect>] [<observation>] — print
+# classify_report <stage-open:0|1> <record-defect> <observation> <record-defect-kind> — print
 # "<token>|<cause>" and return 0.
+#
+# IT TAKES NO PATH, AND THAT IS DELIBERATE (#3751 round 17, W1). It used to take the report path
+# and read the file itself when no observation was supplied — a classifier that can read for
+# itself is a classifier whose token may describe a different instant from the bytes its caller is
+# guarding on, which is this round's whole subject. With the observation REQUIRED, the path had no
+# remaining use, and a parameter a function does not use is an invitation to read again: removed
+# rather than left standing, so a second observation is UNEXPRESSIBLE here. `observe_stage` is the
+# one place a report path becomes report bytes.
 # ONE place decides the token, so `status` and `verdict` can never form two opinions about
 # the same file (the divergence #3564 records one directory over) — AND it decides from ONE
 # OBSERVATION of that file, so the token cannot describe a state the file never held (round 12, R2).
-# THE FOURTH ARGUMENT IS AN OBSERVATION THE CALLER ALREADY TOOK, NOT A LOCATION (#3751 round 12,
-# R2). It carries the report's CONTENT in `report_bytes`' grammar, so `$rpath` still decides WHICH
-# file this is about and nothing can redirect a reader — the channel round 4 (H2) removed by
-# deleting `--report` stays removed, because a path is not expressible here. Its one purpose is to
-# let `record-author-performed` make its byte snapshot and its classification ONE observation
-# instead of two. Omitted, this function takes its own; a value that is not that grammar is a
-# NON-VERDICT, never a permissive fall-through.
+# THE OBSERVATION IS AN ARGUMENT, NOT A LOCATION (#3751 round 12, R2; round 17, W1). It carries the
+# report's CONTENT in `report_bytes`' grammar and NOTHING can redirect a reader, because no path is
+# expressible here at all — the channel round 4 (H2) removed by deleting `--report` stays removed,
+# by construction rather than by validation. Its purpose is that every caller's byte snapshot and
+# its classification are ONE observation instead of two. An EMPTY value is a caller that did not
+# observe, and it is a NAMED non-verdict; a value that is not that grammar is a NON-VERDICT too,
+# never a permissive fall-through.
 classify_report() {
-  local rpath="$1" open="$2" record_defect="${3:-}" obs="${4:-}" line value tok cause body defect nl
+  local open="$1" record_defect="${2:-}" obs="${3:-}" defect_kind="${4:-}"
+  local line value tok cause body defect nl
 
   # THE RECORD IS ASKED FIRST, BECAUSE IT NAMES WHICH REPORT TO READ (#3751 round 5, J1). A record
   # whose `report-nonce:` cannot be read yields no path at all, so there is nothing to
@@ -2216,7 +2198,22 @@ classify_report() {
   # ungrammatical` would each assert something about a FILE THAT WAS NEVER IDENTIFIED, and the
   # operator action is different again (repair the record, or open a fresh stage).
   if [ -n "$record_defect" ]; then
-    printf 'NOT-RUN|stage record unreadable: %s\n' "$record_defect"; return 0
+    # TWO CAUSES, SELECTED BY THE OBSERVER'S CLOSED KIND (#3751 round 17, W1) — never by matching
+    # the detail sentence, which is a diagnostic and not a control (#3312). A record that MOVED
+    # between the two captures of one observation was perfectly readable, so reporting it as
+    # `stage record unreadable` would be affirmatively FALSE about the file and would name the
+    # wrong operator action (chmod or repair, rather than "read it again"): round 2's B7 and round
+    # 4's H4, which is the entire reason `classify_report` names its causes at all.
+    #
+    # The `*)` arm takes the ORIGINAL cause. It is unreachable while the observer is the only
+    # producer (its kinds are a closed set), and it is not a third invented cause: whichever
+    # prefix is printed, the observer's DETAIL SENTENCE is interpolated after it and says exactly
+    # what happened, so an unforeseen kind cannot leave the operator with a bare wrong rationale.
+    case "$defect_kind" in
+      moved) printf 'NOT-RUN|stage record changed mid-read: %s\n' "$record_defect" ;;
+      *)     printf 'NOT-RUN|stage record unreadable: %s\n' "$record_defect" ;;
+    esac
+    return 0
   fi
   if [ "$open" -ne 1 ]; then
     printf 'NOT-RUN|stage never opened\n'; return 0
@@ -2249,7 +2246,15 @@ classify_report() {
   # affirmatively — so a file that opens and then fails mid-read is `report unreadable` here
   # instead of the `report empty` the old `tr` read would have produced, which named the wrong
   # operator action (`chmod`, versus the AGENT).
-  [ -n "$obs" ] || obs="$(report_bytes "$rpath")"
+  # THE OBSERVATION IS SUPPLIED, NOT TAKEN HERE (#3751 round 17, W1). This used to fall back to
+  # its own `report_bytes` read when the argument was omitted, which is precisely the silent second
+  # opinion W1 is about: a classifier that can read for itself is a classifier whose token may
+  # describe a different instant from the bytes its caller is guarding on. All three decision paths
+  # take the observation from `observe_stage`, so an EMPTY value here is not a state to be measured
+  # — it is a caller that did not observe, and it is a NAMED non-verdict rather than a fresh read.
+  if [ -z "$obs" ]; then
+    printf 'NOT-RUN|stage not observed\n'; return 0
+  fi
   nl='
 '
   # THE STATE WORD COMES FROM THE ONE READER OF THAT GRAMMAR (#3751 round 13, S1). This `case`
@@ -2399,9 +2404,43 @@ classify_report() {
   esac
 }
 
-# load_stage <issue> <kind> — set the STAGE_* globals from the stage record, or mark it
-# never-opened. Fields that cannot be read are `unknown`, never a fabricated 0 (a counter
-# not observed is an error, never an invented value).
+# --- THE ONE COHERENT STAGE OBSERVATION (#3751 round 17, W1) -----------------------------------
+# THE CLASS, NOT THE SITE. Three review rounds of this issue found the same shape — a decision
+# assembled from SEVERAL independent reads of the same subject, so that it could describe a state
+# that never existed at any instant:
+#
+#   * round 9's N2: `premerge-assert.sh` validated `head-sha` from one read of the stage record and
+#     consumed a SECOND read for the nonce;
+#   * round 12's R2: `classify_report` read the report EIGHT times, so a verdict could be assembled
+#     from field values drawn from versions that never coexisted;
+#   * round 17's W1: `record-author-performed` read the REPORT using the generation loaded earlier
+#     and then read the RECORD independently. An `open --force` publishing generation B between
+#     those reads left both final re-verifications satisfied — an unchanged report A, an unchanged
+#     record B — so the recording published `AUTHOR-PERFORMED` over B WITHOUT EVER INSPECTING B's
+#     verdict, without `--force`, and with a `supersedes-report-nonce:` trace naming A. A blocking
+#     `FINDINGS` in B stopped being the stage's verdict silently, and the audit trail said the
+#     wrong thing about which generation that was. Falsifying the audit trail is the worst failure
+#     this tool can have: the harm #3751 exists to prevent, committed by the mechanism itself.
+#
+# Each was fixed at its own site. This is the consolidation: ONE primitive, and every decision path
+# reasons from ONE of its observations. `observe_record` is the ONLY place the stage record FILE is
+# read; `observe_stage` is the ONLY place the REPORT file is read outside the in-window
+# re-verifications, and it pairs the record with the report OF THE GENERATION THOSE BYTES NAME.
+#
+# THE RE-VERIFICATION IS WHAT MAKES IT ONE OBSERVATION RATHER THAN TWO. The record and the report
+# cannot be read in a single syscall, so `observe_stage` reads the record, reads that generation's
+# report, then READS THE RECORD AGAIN and requires it to be byte-identical. A record that moved is a
+# NAMED refusal (`stage record changed mid-read`) — never a silent second opinion, and never folded
+# onto `stage record unreadable`, because the operator action differs: read it again, versus repair
+# the record or chmod it (round 4's H4).
+#
+# THE GLOBALS ARE THE OBSERVATION. `STAGE_RECORD_TEXT` and `STAGE_REPORT_OBS` are the two byte
+# captures; everything else is DERIVED FROM THEM and from nothing else. A consumer that needs the
+# record's bytes (the rewrite in `record-author-performed`) or the report's bytes (its clobber
+# guard) takes them from here rather than reading again — that is the whole point.
+#
+# Fields that cannot be read are `unknown`, never a fabricated 0 (a counter not observed is an
+# error, never an invented value).
 #
 # THE REPORT PATH IS DERIVED HERE, NOT READ FROM THE RECORD (#3751 round 4, H2). It used to be
 # read from the record's `report:` line, so the record was a CONTROL channel naming which file
@@ -2430,15 +2469,42 @@ classify_report() {
 #                                    round 6, K1): *read failed* and *read fine, field absent* are
 #                                    different facts, and a `|| true` that collapsed them let an
 #                                    unreadable record report an old report's PASS.
-# COUNTED rather than first-wins, for the same reason the `result:` reader counts: this field
-# decides which artifact is authoritative, and picking one of two answers by order is not a rule.
 STAGE_OPEN=0; STAGE_AGENT=unknown; STAGE_DEADLINE=unknown; STAGE_REPORT=""
 STAGE_SPAWNED_ISO=unknown; STAGE_ELAPSED=unknown; STAGE_REOPEN=unknown
-STAGE_NONCE=""; STAGE_RECORD_DEFECT=""
-load_stage() {
-  local issue="$1" kind="$2" sfile epoch now
+STAGE_NONCE=""; STAGE_RECORD_DEFECT=""; STAGE_RECORD_DEFECT_KIND=""
+STAGE_RECORD_TEXT=""; STAGE_NONCE_LINES=0; STAGE_NONCE_RAW=""
+STAGE_REPORT_OBS=""; STAGE_REPORT_STATE=""
+
+# THE DEFECT IS PUBLISHED AS A CLOSED KIND *BESIDE* ITS DETAIL SENTENCE (#3751 round 17, W1).
+# `STAGE_RECORD_DEFECT` is the sentence an operator reads; `STAGE_RECORD_DEFECT_KIND` is what a
+# consumer BRANCHES on, from this closed set:
+#
+#   unrepresentable   the record holds a byte no text record may contain
+#   unreadable        the read itself failed (permission, I/O, truncation)
+#   count-unmeasured  the record was read, but the generation-naming lines could not be COUNTED
+#   nonce-ambiguous   several such lines — which artifact is authoritative is not decidable
+#   nonce-invalid     one line, but not an alphanumeric generation token
+#   moved             the record CHANGED between the two captures of one observation
+#
+# TWO VALUES RATHER THAN A MATCH ON THE SENTENCE, because a consumer keyed on the prose would be
+# reading a DIAGNOSTIC as a CONTROL — #3312's rule, and it fired immediately: the count-unmeasured
+# sentence and the nonce-ambiguous one both legitimately contain the words `report-nonce`, so a
+# text match sent a read-level failure to the refusal that says "this record names two". The kind
+# is the channel; the sentence carries no decision.
+
+# observe_record <issue> <kind> — THE RECORD HALF OF ONE OBSERVATION, and the ONLY place the stage
+# record FILE is read. `open` uses this one: it is a WRITER, so it needs the record's own fields and
+# never a report's verdict, and giving it the full `observe_stage` would make it read a report it
+# does not consult (a prior report that is a symlink to a pipe would then be read by an `open` that
+# has no business touching it).
+observe_record() {
+  local issue="$1" kind="$2" sfile text="" rc=0 nlines="" cfl_rc=0 nval v
   sfile="$(stage_file "$issue" "$kind")"
-  STAGE_NONCE=""; STAGE_RECORD_DEFECT=""
+  STAGE_OPEN=0; STAGE_AGENT=unknown; STAGE_DEADLINE=unknown; STAGE_REPORT=""
+  STAGE_SPAWNED_ISO=unknown; STAGE_ELAPSED=unknown; STAGE_REOPEN=unknown
+  STAGE_NONCE=""; STAGE_RECORD_DEFECT=""; STAGE_RECORD_DEFECT_KIND=""
+  STAGE_RECORD_TEXT=""; STAGE_NONCE_LINES=0; STAGE_NONCE_RAW=""
+  STAGE_REPORT_OBS=""; STAGE_REPORT_STATE=""
   if [ ! -f "$sfile" ]; then
     # NEVER OPENED: there is no record to name a report, so the path reported is the LEGACY bare
     # one. It is a path nobody has written, which is what `stage never opened` says.
@@ -2446,38 +2512,51 @@ load_stage() {
     return 0
   fi
   STAGE_OPEN=1
-  local nnonce nval cfl_rc=0
-  # THE READ IS VERIFIED AFFIRMATIVELY, AND A FAILED READ IS ITS OWN DEFECT (#3751 round 6, K1).
-  # `count_field_lines` returns non-zero only when the record could not be READ; "read fine, no
-  # such field" prints 0 and returns 0. The two were collapsed by a `|| true`, so an unreadable
-  # record fell through to the LEGACY reading and an OLD report's `PASS` was reported as the
-  # current verdict. The legacy reading below is reserved for a record that WAS read.
+  # THE ONE READ, ROUTED AND VERIFIED AFFIRMATIVELY. `stage_record_text` returns 0 only when the
+  # record was read FAITHFULLY and COMPLETELY (it asserts the complete read with two signals and
+  # reads through `capture_map_nul`), 2 when it holds a byte no text record may contain, and 1 when
+  # the read failed. `|| rc=$?`, never `if ! …; then rc=$?`, which reads 0.
   #
-  # THE PERMISSIVE SET IS `0` AND NOTHING ELSE (#3751 round 14, T1). Status 2 — the record holds a
-  # byte the capture cannot carry — is its own defect with its own next action; every other non-zero
-  # status takes the read-failed branch, so a status added to that helper later cannot arrive here
-  # as "read fine, no such field". THAT is the branch this issue turns on: a record spelt
-  # `report-<NUL>nonce:` holds no `report-nonce:` line, so a faithful `grep` counted a truthful ZERO
-  # — which means "a pre-nonce record whose single report is the LEGACY bare name" — and a stale
-  # legacy `c.md` recording `result: PASS` was then reported as this stage's verdict.
-  nnonce="$(count_field_lines "$sfile" report-nonce)" || cfl_rc=$?
-  if [ "$cfl_rc" -eq 2 ]; then
-    STAGE_RECORD_DEFECT="the record holds a NUL 0x00 or SOH 0x01 byte, which no text record may contain, so it could not be read as text and which report is current was never measured (rewrite the record or open a fresh stage — NOT a chmod)"
-  elif [ "$cfl_rc" -ne 0 ]; then
-    STAGE_RECORD_DEFECT="the record EXISTS and could not be READ, so which report is current was never measured (permission or I/O — not the same as a record with no report-nonce)"
-  elif [ "$nnonce" -gt 1 ]; then
-    STAGE_RECORD_DEFECT="report-nonce appears $nnonce times (AMBIGUOUS — several records is refused, never resolved by order)"
-  elif [ "$nnonce" -eq 0 ]; then
-    STAGE_NONCE=""
-  else
-    # READ ONLY WHERE IT IS USED, and only after the count above established that the record can
-    # be read at all: `read_field` reports "absent or empty" for an unreadable file too, so its
-    # empty value is only meaningful once the read itself is known to have succeeded.
-    nval="$(read_field "$sfile" report-nonce)"
-    if nonce_is_valid "$nval"; then
-      STAGE_NONCE="$nval"
+  # THE PERMISSIVE SET IS `0` AND NOTHING ELSE (#3751 round 14, T1). Status 2 is its own defect with
+  # its own next action; every other non-zero status takes the read-failed branch, so a status added
+  # to that helper later cannot arrive here as "read fine, no such field".
+  text="$(stage_record_text "$sfile")" || rc=$?
+  case "$rc" in
+    0) STAGE_RECORD_TEXT="$text" ;;
+    2) STAGE_RECORD_DEFECT_KIND=unrepresentable
+       STAGE_RECORD_DEFECT="the record holds a NUL 0x00 or SOH 0x01 byte, which no text record may contain, so it could not be read as text and which report is current was never measured (rewrite the record or open a fresh stage — NOT a chmod)" ;;
+    *) STAGE_RECORD_DEFECT_KIND=unreadable
+       STAGE_RECORD_DEFECT="the record EXISTS and could not be READ, so which report is current was never measured (permission or I/O — not the same as a record with no report-nonce)" ;;
+  esac
+  if [ -z "$STAGE_RECORD_DEFECT" ]; then
+    # COUNTED OVER THE CAPTURE, never re-read: this field decides which artifact is authoritative,
+    # and picking one of two answers by order is not a rule.
+    nlines="$(count_field_lines_from "$STAGE_RECORD_TEXT" report-nonce)" || cfl_rc=$?
+    if [ "$cfl_rc" -eq 2 ]; then
+      STAGE_RECORD_DEFECT_KIND=unrepresentable
+      STAGE_RECORD_DEFECT="the record holds a NUL 0x00 or SOH 0x01 byte, which no text record may contain, so it could not be read as text and which report is current was never measured (rewrite the record or open a fresh stage — NOT a chmod)"
+    elif [ "$cfl_rc" -ne 0 ]; then
+      STAGE_RECORD_DEFECT_KIND=count-unmeasured
+      STAGE_RECORD_DEFECT="the record was read but its report-nonce lines could not be COUNTED, so which report is current was never measured (a count nobody took is not a zero)"
     else
-      STAGE_RECORD_DEFECT="report-nonce is not an alphanumeric token of $NONCE_MIN_LEN-$NONCE_MAX_LEN characters ($(field_value "${nval:-<empty>}"))"
+      STAGE_NONCE_LINES="$nlines"
+      if [ "$nlines" -gt 1 ]; then
+        STAGE_RECORD_DEFECT_KIND=nonce-ambiguous
+        STAGE_RECORD_DEFECT="report-nonce appears $nlines times (AMBIGUOUS — several records is refused, never resolved by order)"
+      elif [ "$nlines" -eq 1 ]; then
+        # READ FROM THE SAME CAPTURE the count was taken over, so the count and the value describe
+        # ONE document. Read from the FILE per field — as this did until round 17's W1 — they were
+        # two observations, and a replacement between them could assemble a "valid" nonce out of a
+        # record that never held one.
+        nval="$(read_field_from "$STAGE_RECORD_TEXT" report-nonce)"
+        STAGE_NONCE_RAW="$nval"
+        if nonce_is_valid "$nval"; then
+          STAGE_NONCE="$nval"
+        else
+          STAGE_RECORD_DEFECT_KIND=nonce-invalid
+          STAGE_RECORD_DEFECT="report-nonce is not an alphanumeric token of $NONCE_MIN_LEN-$NONCE_MAX_LEN characters ($(field_value "${nval:-<empty>}"))"
+        fi
+      fi
     fi
   fi
   if [ -n "$STAGE_RECORD_DEFECT" ]; then
@@ -2489,16 +2568,20 @@ load_stage() {
   else
     STAGE_REPORT="$(report_path "$issue" "$kind" "$STAGE_NONCE")"
   fi
-  local v
-  v="$(read_field "$sfile" agent)";         [ -z "$v" ] || STAGE_AGENT="$v"
-  v="$(read_field "$sfile" deadline-secs)"; [ -z "$v" ] || STAGE_DEADLINE="$v"
-  v="$(read_field "$sfile" spawned-at)";    [ -z "$v" ] || STAGE_SPAWNED_ISO="$v"
+  # EVERY DISPLAY FIELD FROM THE SAME CAPTURE. When the record could not be read as text the
+  # capture is EMPTY, so they are all `unknown` — which is the honest answer and a CHANGE from the
+  # per-field file reads: those returned values out of a document this tool had just refused to
+  # read, i.e. it reported fields as measured out of a record it said was unmeasurable.
+  v="$(read_field_from "$STAGE_RECORD_TEXT" agent)";         [ -z "$v" ] || STAGE_AGENT="$v"
+  v="$(read_field_from "$STAGE_RECORD_TEXT" deadline-secs)"; [ -z "$v" ] || STAGE_DEADLINE="$v"
+  v="$(read_field_from "$STAGE_RECORD_TEXT" spawned-at)";    [ -z "$v" ] || STAGE_SPAWNED_ISO="$v"
   # THE REOPEN COUNTER IS READ, NOT DERIVED, and is `unknown` when the record does not carry it —
   # a record written before the field existed, which is a fact about that record and not a zero
   # (#3751 round 9, N4: `status` reports what the record HOLDS, so the saturation is visible on
   # both surfaces and not only where it was written).
-  v="$(read_field "$sfile" reopen-count)";  [ -z "$v" ] || STAGE_REOPEN="$v"
-  epoch="$(read_field "$sfile" spawned-epoch)"
+  v="$(read_field_from "$STAGE_RECORD_TEXT" reopen-count)";  [ -z "$v" ] || STAGE_REOPEN="$v"
+  local epoch now
+  epoch="$(read_field_from "$STAGE_RECORD_TEXT" spawned-epoch)"
   now="$(now_epoch)"
   # BOTH OPERANDS, AND THE BOUND IS THE POINT (#3751 round 8). `$(( ))` does not fail on an
   # unusable operand — it WRAPS, silently — so an out-of-range or zero-padded `spawned-epoch` in
@@ -2512,6 +2595,42 @@ load_stage() {
     [ "$STAGE_ELAPSED" -ge 0 ] || STAGE_ELAPSED=0
   else
     STAGE_ELAPSED=unknown
+  fi
+}
+
+# observe_stage <issue> <kind> — THE WHOLE OBSERVATION: the record's bytes, the generation those
+# bytes name, THAT generation's report bytes, and a RE-VERIFICATION that the record did not move
+# between the two captures. The three DECISION paths (`verdict`, `status`,
+# `record-author-performed`) call this and nothing else; `premerge-assert.sh` consumes the verdict
+# LINE this observation produces, and takes its own single record capture with its own
+# re-verification (round 9's N2, round 16's V1).
+observe_stage() {
+  local issue="$1" kind="$2" sfile again="" arc=0
+  sfile="$(stage_file "$issue" "$kind")"
+  observe_record "$issue" "$kind"
+  [ "$STAGE_OPEN" -eq 1 ] || return 0
+  # A record we could not read names no generation, so there is no report to pair with it. The
+  # defect is already set and every consumer refuses on it; reading a guessed path here is exactly
+  # the permissive branch round 5's J1 removed.
+  [ -z "$STAGE_RECORD_DEFECT" ] || return 0
+  STAGE_REPORT_OBS="$(report_bytes "$STAGE_REPORT")"
+  STAGE_REPORT_STATE="$(report_state "$STAGE_REPORT_OBS")"
+  # THE RE-VERIFICATION. Without it these two captures are just two reads: an `open --force` landing
+  # between them publishes a generation B whose report NOBODY HERE HAS READ, while every field
+  # derived above still describes A — and a caller comparing "the record has not changed" against
+  # ITS OWN later read of the record would find B unchanged and proceed. That is W1 exactly.
+  #
+  # A MOVED RECORD IS ITS OWN CAUSE. The `moved` KIND selects the `stage record changed
+  # mid-read` prefix at `classify_report`, because "read it again" is a different operator action
+  # from "repair the record" and a false rationale is worse than a vague one (round 2 B7, round 4
+  # H4). The report observation is DISCARDED with it: it belongs to a generation this observation
+  # can no longer claim is current, and publishing it would be the second opinion this primitive
+  # exists to remove.
+  again="$(stage_record_text "$sfile")" || arc=$?
+  if [ "$arc" -ne 0 ] || [ "$again" != "$STAGE_RECORD_TEXT" ]; then
+    STAGE_RECORD_DEFECT_KIND=moved
+    STAGE_RECORD_DEFECT="the record CHANGED between the read that named this stage's current report and the read of that report (most likely a concurrent open --force publishing a fresh generation), so the record and the report would describe DIFFERENT generations and neither describes this stage at any instant — nothing is claimed about either"
+    STAGE_REPORT_OBS=""; STAGE_REPORT_STATE=""; STAGE_REPORT=""
   fi
 }
 
@@ -2532,9 +2651,12 @@ parse_kind_issue() {
 cmd_verdict() {
   require_repo_root
   parse_kind_issue "$@"
-  load_stage "$KI_ISSUE" "$KI_KIND"
+  # ONE COHERENT OBSERVATION, AND THE VERDICT IS READ FROM IT (#3751 round 17, W1): the report
+  # bytes classified here are the ones taken for the generation THIS record names, with the record
+  # re-verified across the pair, so this line cannot describe a state the stage never held.
+  observe_stage "$KI_ISSUE" "$KI_KIND"
   local cls token cause rendered
-  cls="$(classify_report "$STAGE_REPORT" "$STAGE_OPEN" "$STAGE_RECORD_DEFECT")"
+  cls="$(classify_report "$STAGE_OPEN" "$STAGE_RECORD_DEFECT" "$STAGE_REPORT_OBS" "$STAGE_RECORD_DEFECT_KIND")"
   token="${cls%%|*}"
   cause="${cls#*|}"
   rendered="$token"
@@ -2605,9 +2727,12 @@ cmd_verdict() {
 cmd_status() {
   require_repo_root
   parse_kind_issue "$@"
-  load_stage "$KI_ISSUE" "$KI_KIND"
+  # THE SAME ONE OBSERVATION `verdict` reads (#3751 round 17, W1), so the two surfaces cannot form
+  # two opinions about the same stage — which is what `classify_report` being the single classifier
+  # buys, and it is only true if both callers hand it the same KIND of observation.
+  observe_stage "$KI_ISSUE" "$KI_KIND"
   local cls token cause state past=unknown reopen_disp
-  cls="$(classify_report "$STAGE_REPORT" "$STAGE_OPEN" "$STAGE_RECORD_DEFECT")"
+  cls="$(classify_report "$STAGE_OPEN" "$STAGE_RECORD_DEFECT" "$STAGE_REPORT_OBS" "$STAGE_RECORD_DEFECT_KIND")"
   token="${cls%%|*}"
   cause="${cls#*|}"
   # --- STATUS-CAUSE-MAP-BEGIN -------------------------------------------------------------
@@ -2639,6 +2764,14 @@ cmd_status() {
         "report ungrammatical"*) state=report-ungrammatical ;;
         "stage never opened") state=never-opened ;;
         "stage record unreadable"*) state=stage-record-unreadable ;;
+        # ITS OWN STATE, because the operator action is "read it again" and not "repair the record
+        # or chmod it" (#3751 round 17, W1). Folding it onto stage-record-unreadable would report a
+        # perfectly readable record as unreadable — a false rationale, which is what stops the next
+        # person looking (round 2, B7).
+        "stage record changed mid-read"*) state=stage-record-changed ;;
+        # A CALLER THAT DID NOT OBSERVE. Unreachable while every decision path goes through
+        # `observe_stage`; enumerated so it cannot be mislabelled as a cause the REPORT recorded.
+        "stage not observed") state=stage-not-observed ;;
         *) state=not-run-self-reported ;;
       esac
       ;;
@@ -2702,6 +2835,13 @@ cmd_status() {
     # THE FIX IS THE RECORD, NOT THE AGENT AND NOT A chmod — a distinct next action, which is the
     # whole reason each cause gets its own state (#3751 round 4, H4).
     emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE the STAGE RECORD cannot be read for the field that names which report is current ($(field_value "$STAGE_RECORD_DEFECT")) — so NOTHING is claimed about any report, and no report path is reported. Repair the record, or open a fresh stage: $prog open $KI_KIND --issue $KI_ISSUE --agent <type> --force"
+  elif [ "$state" = stage-record-changed ]; then
+    # THE NEXT ACTION IS TO READ IT AGAIN, which is why this is not the record-unreadable note
+    # (#3751 round 17, W1). Nothing is wrong with the file; something published a new generation
+    # while this stage was being observed, so the observation was discarded rather than mixed.
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE the STAGE RECORD CHANGED while this stage was being observed ($(field_value "$STAGE_RECORD_DEFECT")) — nothing is wrong with the file and there is nothing to repair: the record and the report would have described DIFFERENT generations, so NOTHING is claimed about either. Read it again: $prog status $KI_KIND --issue $KI_ISSUE"
+  elif [ "$state" = stage-not-observed ]; then
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE internal: this stage was classified without an observation, so NOTHING is claimed about any report. Re-run: $prog status $KI_KIND --issue $KI_ISSUE"
   elif [ "$state" = never-opened ]; then
     emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE no stage was ever opened for this kind — there is nothing to wait for. Open one BEFORE spawning: $prog open $KI_KIND --issue $KI_ISSUE --agent <type>"
   fi
@@ -2773,7 +2913,23 @@ cmd_record_author_performed() {
   reason_tok="$(sanitize_field "$reason")"
   evidence_tok="$(sanitize_field "$evidence")"
 
-  load_stage "$issue" "$kind"
+  # ONE COHERENT OBSERVATION — THE RECORD'S BYTES, THE GENERATION THEY NAME, AND THAT
+  # GENERATION'S REPORT — CAPTURED TOGETHER (#3751 round 17, W1).
+  #
+  # THE FINDING THIS CLOSES. This call used to read the REPORT using the generation loaded here and
+  # then read the STAGE RECORD independently, further down, for the rewrite. An `open --force`
+  # publishing generation B between those two reads left BOTH final re-verifications satisfied — an
+  # unchanged report A, an unchanged record B — so `AUTHOR-PERFORMED` was published over B WITHOUT
+  # EVER INSPECTING B's verdict, with no `--force`, and with a `supersedes-report-nonce:` trace
+  # naming A. Measured on the shipped script: `RECORD-OK … supersedes-report-nonce=<A>` at exit 0
+  # while generation B held `result: FINDINGS`, and `verdict` then reported AUTHOR-PERFORMED. A
+  # trace that names the wrong generation is worse than no trace, and it is the harm #3751 exists
+  # to prevent, committed by the mechanism itself.
+  #
+  # So the record text this call REPUBLISHES, the report bytes it is GUARDED on, and the generation
+  # its TRACE names all come from this one call — see `observe_stage`, which re-verifies the record
+  # across the pair and refuses `stage record changed mid-read` if it moved.
+  observe_stage "$issue" "$kind"
   if [ "$STAGE_OPEN" -ne 1 ]; then
     # A recording needs the stage's identity (agent, deadline, spawned-at) to produce a
     # verdict line at all, and a substitute recorded for a stage nobody ever opened has no
@@ -2788,6 +2944,17 @@ cmd_record_author_performed() {
   # and the guess (the bare name) is the path an earlier agent may still hold. Refused BEFORE the
   # already-recorded check below, because that check reads a report this stage cannot locate.
   if [ -n "$STAGE_RECORD_DEFECT" ]; then
+    # A MOVED RECORD IS ITS OWN REASON TOKEN, because the operator action differs (#3751 round 17,
+    # W1): nothing is wrong with the record and there is nothing to repair — something published a
+    # fresh generation while this stage was being observed, so the right next step is to read it
+    # again and decide against what is there NOW. Reporting it as `stage-record-unreadable` would
+    # be affirmatively false about the file and would send the operator to repair or chmod it,
+    # which is round 2's B7 and round 4's H4.
+    if [ "$STAGE_RECORD_DEFECT_KIND" = moved ]; then
+      emit "AUTHOR-REFUSED reason=stage-record-changed-mid-read kind=$kind issue=$issue record=$(field_value "$(stage_file "$issue" "$kind")") defect=$(field_value "$STAGE_RECORD_DEFECT")"
+      emit "AUTHOR-REFUSED detail=the stage record CHANGED while this stage was being observed, so the record and the report would describe DIFFERENT generations and NOTHING was written — this recording never inspected the verdict of the generation it would have superseded. Nothing is wrong with the record: read it again and decide against what is current now ($prog verdict $kind --issue $issue). Most likely a concurrent $prog open $kind --issue $issue --agent <type> --force published a fresh generation."
+      exit 2
+    fi
     emit "AUTHOR-REFUSED reason=stage-record-unreadable kind=$kind issue=$issue record=$(field_value "$(stage_file "$issue" "$kind")") defect=$(field_value "$STAGE_RECORD_DEFECT")"
     emit "AUTHOR-REFUSED detail=the stage record does not name which report of this stage is current, so this recording has no destination and NOTHING was written. Repair the record, or open a fresh stage: $prog open $kind --issue $issue --agent <type> --force"
     exit 2
@@ -2846,9 +3013,12 @@ cmd_record_author_performed() {
   # stage record immediately before its own `prepare_write`.
   assert_no_symlink "$STAGE_REPORT" report-of-record
   local prior_cls prior_token prior_obs prior_state replaced=""
-  prior_obs="$(report_bytes "$STAGE_REPORT")"
-  prior_state="$(report_state "$prior_obs")"
-  prior_cls="$(classify_report "$STAGE_REPORT" 1 "" "$prior_obs")"
+  # FROM THE ONE OBSERVATION, never re-read here (#3751 round 17, W1): these bytes are the ones
+  # paired with the record text this call is about to republish, and the equality guard below
+  # compares against THEM.
+  prior_obs="$STAGE_REPORT_OBS"
+  prior_state="$STAGE_REPORT_STATE"
+  prior_cls="$(classify_report 1 "" "$prior_obs" "")"
   prior_token="${prior_cls%%|*}"
   case "$prior_state" in
     absent | present) ;;
@@ -2905,28 +3075,25 @@ cmd_record_author_performed() {
   # *unknown* is not *absent* — and it refuses even though nothing would be destroyed, since a
   # recording that supersedes a verdict nobody could read is still a merge-proceeding token
   # published over an unknown one.
-  local sfile dir rec_text srt_rc=0
+  local sfile dir rec_text
   sfile="$(stage_file "$issue" "$kind")"
   dir="$(dirname "$sfile")"
-  # THE RECORD'S OWN BYTES, READ BEFORE ANYTHING IS WRITTEN. The rewrite below substitutes exactly
-  # one line of them, so every other field — `head-sha:` above all — comes out unchanged. A
-  # `load_stage` that already reported no `STAGE_RECORD_DEFECT` does not make this read redundant:
-  # it is the text that will be WRITTEN BACK, and a read that failed or was truncated must not
-  # become the whole record.
-  rec_text="$(stage_record_text "$sfile")" || srt_rc=$?
-  case "$srt_rc" in
-    0) ;;
-    2)
-      emit "AUTHOR-REFUSED reason=stage-record-unrepresentable kind=$kind issue=$issue record=$(field_value "$sfile")"
-      emit "AUTHOR-REFUSED detail=this stage's record holds a NUL 0x00 or SOH 0x01 byte, which no text record may contain, so it could not be read as text and NOTHING was written. This recording has to REPUBLISH the record naming a fresh report generation, and a record that cannot be read as text cannot be rewritten without making that byte durable. Rewrite the record as text, or remove the stage directory and open a fresh stage. This is NOT a permission problem: do not chmod it."
-      exit 2
-      ;;
-    *)
-      emit "AUTHOR-REFUSED reason=stage-record-unreadable kind=$kind issue=$issue record=$(field_value "$sfile")"
-      emit "AUTHOR-REFUSED detail=this stage's record EXISTS and could not be READ, so the record this recording must REPUBLISH could not be measured and NOTHING was written. A truncated or failed read must not be written back as the whole record — that would silently drop the head-sha this stage is bound to. Fix the record's permissions, or remove the stage directory and open a fresh stage."
-      exit 2
-      ;;
-  esac
+  # THE RECORD'S OWN BYTES — FROM THE ONE OBSERVATION, NOT A SECOND READ (#3751 round 17, W1). The
+  # rewrite below substitutes exactly one line of them, so every other field — `head-sha:` above
+  # all — comes out unchanged.
+  #
+  # THIS WAS THE SECOND READ, AND IT WAS THE DEFECT. It used to be `stage_record_text "$sfile"`
+  # right here, taken AFTER the report had been read from the generation the EARLIER record read
+  # named — so the two halves of this call's decision could come from DIFFERENT generations: the
+  # clobber guard validated report A while the rewrite carried record B, each internally
+  # consistent, and the substitute superseded B while the trace named A. There is now nothing to
+  # reconcile, because there is nothing to read twice. Its two refusals
+  # (`stage-record-unrepresentable`, `stage-record-unreadable`) are DELETED rather than moved: the
+  # observation above refuses on both states EARLIER, under `reason=stage-record-unreadable` with
+  # the byte named in its detail — which is why that second pair had always been unreachable — and
+  # a truncated or failed read still cannot become the whole record, because `stage_record_text`
+  # asserts its complete read with two signals inside the observation.
+  rec_text="$STAGE_RECORD_TEXT"
 
   # THE FRESH GENERATION, CLAIMED ATOMICALLY (#3751 round 12, R1) — the same call `open` makes,
   # with the same two named causes, because the operator action differs: a token that could not be
@@ -3065,7 +3232,7 @@ cmd_record_author_performed() {
     # `now_obs` rather than by a fresh read (#3751 round 12, R2), so the bytes that FAILED the
     # comparison and the verdict this line reports are the same observation — a re-read could
     # otherwise name a third state, and "what arrived" would be a claim about none of them.
-    now_cls="$(classify_report "$STAGE_REPORT" 1 "" "$now_obs")"
+    now_cls="$(classify_report 1 "" "$now_obs" "")"
     emit "$REFUSE_MARKER reason=report-changed-mid-write kind=$kind issue=$issue report=$(field_value "$STAGE_REPORT") now-verdict=$(field_value "${now_cls%%|*}")"
     emit "$REFUSE_MARKER detail=the report of record CHANGED between the already-recorded check and this publication, so NOTHING was published — the stage record still names the report it named before, and whatever is in that report now is intact and untouched. This is the interleaving that guard exists to stop: a review landing a verdict while a substitute was being prepared must not be superseded by the merge-proceeding AUTHOR-PERFORMED token with no trace. READ what is there now ($prog verdict $kind --issue $issue) and decide again; --force does not cover it, because it authorizes replacing the verdict you read, not one that arrived afterwards. The substitute written at the fresh generation is left on disk as history and nothing reads it."
     exit 2

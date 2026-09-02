@@ -2784,243 +2784,6 @@ for pair in 'STAGE_ELAPSED" -gt "$STAGE_DEADLINE:the past-deadline comparison' \
     bad "secs/structural: $label is GONE from the script — this round's subject moved and the guard above is now vacuous"
   fi
 done
-# --- 30. A CHECKOUT PATH THIS GRAMMAR CANNOT CARRY IS REFUSED AT THE BOUNDARY (round 17, W2) ------
-# THE FINDING (roborev job 396, W2). Every line this tool emits is a ONE-LINE record, and the
-# `report=` field on it carries an ABSOLUTE path whose only variable component is the REPOSITORY
-# ROOT. A root containing a NEWLINE is therefore not merely awkward — the two commands lie
-# DIFFERENTLY about it:
-#
-#   * `open` prints the raw report path on its own line, so the value SPLIT across two physical
-#     lines: the second carried NO `REVIEW-STAGE: ` prefix, which is the anchor every consumer of
-#     this grammar reads, and the paste-ready spawn clause handed the agent two broken fragments.
-#   * `verdict` flattens it through `remainder_value`, publishing `…/lane two/…` — a DIFFERENT,
-#     NONEXISTENT path — on the one line whose whole promise is the absolute report-of-record path.
-#     Measured on the shipped script in a checkout named `lane<LF>two`:
-#       REVIEW-STAGE: c RESULT: NOT-RUN (…) … report=/…/lane two/.review-stage/issue-700/c.<n>.md
-#     while the real file was at `/…/lane` + LF + `two/…`.
-#
-# ROUND 11 DECLARED THIS UNREPRESENTABLE AND LEFT IT ("a path containing a NEWLINE is not
-# representable on a one-line grammar and never arrives"). THAT DECLARATION IS WITHDRAWN: the
-# premise was false — such a path DOES arrive, because git resolves the root of whatever checkout
-# the tool is run in — and silently publishing a wrong path is not an acceptable resting state for
-# the value this grammar promises. So the refusal is AT THE BOUNDARY, at the ONE place the root is
-# resolved, which is why every subcommand inherits it.
-#
-# AND IT IS THE MEASURED PROPERTY, NOT A CHARACTER LIST. `one_line` is what renders these values,
-# so the question asked is *does this root survive it UNCHANGED* — a rendering that differs is a
-# published path that does not exist, whatever byte caused it. A curated list of bad characters is
-# a list to keep complete; this one cannot drift from the renderer, because it IS the renderer. The
-# LF/CR case keeps its OWN detail line, because its harm is different in kind (the grammar itself
-# breaks: a value that spans lines cannot be a field of a one-line record at any rendering).
-W2_D="$T/w2"; mkdir -p "$W2_D"
-
-# w2_repo <dirname> — a git checkout at a literal directory name, or empty when this filesystem
-# cannot hold it. NOTHING is asserted from a fixture that did not build: a case that silently ran
-# in an ordinary directory would pass for the wrong reason (test_premerge_assert.sh §44's lesson).
-w2_repo() {
-  local d="$W2_D/$1"
-  mkdir -p "$d" 2>/dev/null || return 1
-  git -C "$d" init -q >/dev/null 2>&1 || return 1
-  printf '.review-stage/\n' >"$d/.gitignore" 2>/dev/null || return 1
-  printf '%s\n' "$d"
-}
-
-W2_LF=""
-W2_LF_NAME="lane
-two"
-if W2_LF="$(w2_repo "$W2_LF_NAME")" && [ -n "$W2_LF" ] && [ -d "$W2_LF" ]; then
-  case "$W2_LF" in
-    *"
-"*) ok "w2 fixture: a git checkout whose PATH contains a literal LF was built (asserted, not assumed)" ;;
-    *) bad "w2 fixture: the fixture path carries NO newline, so every case below would be vacuous ($W2_LF)"; W2_LF="" ;;
-  esac
-else
-  bad "w2 fixture: a newline-bearing checkout could not be built on this filesystem — the cases below are UNMEASURED"
-  W2_LF=""
-fi
-
-if [ -n "$W2_LF" ]; then
-  # (a) `open` REFUSES, and it refuses BEFORE anything is written.
-  rs "$W2_LF" open c --issue 700 --agent spec-auditor
-  rc_is 64 "w2/open: a newline-bearing checkout is REFUSED (usage class, exactly as an unresolvable worktree is)"
-  has "cannot be represented" "w2/open: and the refusal says the path cannot be REPRESENTED on this one-line grammar"
-  has "NEWLINE" "w2/open: naming the newline specifically, because its harm is different in kind (the value spans lines)"
-  if [ -d "$W2_LF/.review-stage" ]; then
-    bad "w2/open: the refused open created the stage directory anyway"
-  else
-    ok "w2/open: NOTHING was written — no stage directory, so no report and no record"
-  fi
-  # (b) `verdict` REFUSES, and — the property that matters — it publishes NO path at all. A wrong
-  #     path on this line is worse than no line, because the line is what a consumer binds to.
-  rs "$W2_LF" verdict c --issue 700
-  rc_is 64 "w2/verdict: the same refusal at the same boundary, so the two commands cannot disagree"
-  hasnt "report=" "w2/verdict: and NO report= field is published — a nonexistent path is never advertised"
-  hasnt "RESULT:" "w2/verdict: nor any RESULT: token, so nothing can read a verdict off a checkout we cannot name"
-  # (c) `status` and (d) `record-author-performed` inherit it, because the check is at the ONE
-  #     resolution site rather than in `open`.
-  rs "$W2_LF" status c --issue 700
-  rc_is 64 "w2/status: status inherits the refusal (the check is at the root resolution, not per subcommand)"
-  rs "$W2_LF" record-author-performed c --issue 700 --reason 'no peer agent available on this box' \
-    --evidence 'docs/round-artifacts/issue-3751-hand-c.md' --performed-by author
-  rc_is 64 "w2/author: and so does record-author-performed, which would otherwise WRITE under that path"
-fi
-
-# (e) A CARRIAGE RETURN IS THE SAME CLASS AND IS REFUSED THE SAME WAY. `one_line` maps CR to a
-#     space exactly as it maps LF, so a CR-bearing root publishes a nonexistent path too — and a
-#     guard keyed on LF alone would be the character list this case exists to rule out.
-W2_CR=""
-W2_CR_NAME="$(printf 'lane\rtwo')"
-if W2_CR="$(w2_repo "$W2_CR_NAME")" && [ -n "$W2_CR" ] && [ -d "$W2_CR" ] &&
-  case "$W2_CR" in *"$(printf '\r')"*) true ;; *) false ;; esac; then
-  ok "w2 fixture: a CR-bearing checkout was built"
-  rs "$W2_CR" open c --issue 701 --agent spec-auditor
-  rc_is 64 "w2/cr: a CR-bearing checkout is REFUSED as well"
-  has "NEWLINE" "w2/cr: under the same named cause (CR and LF are one class here: both break the line)"
-else
-  ok "w2 fixture: SKIPPED the CR variant — this filesystem or shell could not hold the name; nothing is asserted about a case that did not run"
-  ok "w2 fixture: (the same, second half — the case emits a fixed number of assertions either way)"
-  ok "w2 fixture: (the same, third half)"
-fi
-
-# (f) A TAB IS NOT A NEWLINE AND IS STILL UNPUBLISHABLE. `one_line` maps it to a space, so the
-#     published path does not exist — the SAME harm, a DIFFERENT cause, and it is why the check is
-#     the renderer's own answer rather than a two-character test.
-W2_TAB=""
-W2_TAB_NAME="$(printf 'lane\ttwo')"
-if W2_TAB="$(w2_repo "$W2_TAB_NAME")" && [ -n "$W2_TAB" ] && [ -d "$W2_TAB" ] &&
-  case "$W2_TAB" in *"$(printf '\t')"*) true ;; *) false ;; esac; then
-  ok "w2 fixture: a TAB-bearing checkout was built"
-  rs "$W2_TAB" open c --issue 702 --agent spec-auditor
-  rc_is 64 "w2/tab: a TAB-bearing checkout is REFUSED — the published path would not exist"
-  has "cannot be represented" "w2/tab: under the representability cause"
-  hasnt "NEWLINE" "w2/tab: and NOT under the newline one, because that would be a false rationale about this path"
-else
-  ok "w2 fixture: SKIPPED the TAB variant — this filesystem could not hold the name"
-  ok "w2 fixture: (the same, second half)"
-  ok "w2 fixture: (the same, third half)"
-  ok "w2 fixture: (the same, fourth half)"
-fi
-
-# (g) CONTROL — A SINGLE SPACE STILL WORKS, END TO END. Round 11's Q3 exists because a path may
-#     LEGALLY contain a space and `premerge-assert.sh` reads `report=` as the line remainder for
-#     exactly that reason. A refusal that caught this would red on correct input and be the guard
-#     agents learn to waive, so the control asserts the FULL path is published AND that it EXISTS.
-W2_SP=""
-if W2_SP="$(w2_repo "work tree")" && [ -n "$W2_SP" ]; then
-  ok "w2 CONTROL: a SPACE-bearing checkout was built"
-  rs "$W2_SP" open c --issue 703 --agent spec-auditor
-  rc_is 0 "w2 CONTROL: a space-bearing checkout is NOT refused — a space survives one_line unchanged"
-  W2_SP_REP="$(REPORT_OF "$W2_SP" 703 c)"
-  rs "$W2_SP" verdict c --issue 703
-  has "report=$W2_SP_REP" "w2 CONTROL: and verdict publishes the WHOLE space-bearing path, spaces included"
-  if [ -f "$W2_SP_REP" ]; then
-    ok "w2 CONTROL: which names a file that EXISTS (the published value is the real report of record)"
-  else
-    bad "w2 CONTROL: the published path does not exist: $W2_SP_REP"
-  fi
-else
-  bad "w2 CONTROL: a space-bearing checkout could not be built — the false-refusal control is UNMEASURED"
-  bad "w2 CONTROL: (the same absence, 2/4)"
-  bad "w2 CONTROL: (the same absence, 3/4)"
-  bad "w2 CONTROL: (the same absence, 4/4)"
-fi
-
-# (h) STRUCTURAL — THE CHECK IS AT THE ONE RESOLUTION SITE, which is what makes "every entry
-#     inherits it" a property of the code rather than of this test's enumeration. Two pins: the
-#     root is resolved exactly once in the script, and the refusal sits in that same function
-#     BEFORE the global is set (a check after the assignment would let a subcommand build a path
-#     from a root it had already accepted).
-W2_RESOLVE="$(LC_ALL=C grep -c 'rev-parse --show-toplevel' "$RS" || true)"
-if [ "$W2_RESOLVE" -eq 1 ]; then
-  ok "w2/structural: the repository root is resolved in exactly ONE place, so one check covers every subcommand"
-else
-  bad "w2/structural: the root is resolved at $W2_RESOLVE sites — a second resolution would bypass the check"
-fi
-W2_RRR="$(LC_ALL=C sed -n '/^require_repo_root() {$/,/^}$/p' "$RS")"
-if [ -n "$W2_RRR" ]; then
-  ok "w2/structural: require_repo_root was extracted (the pins below are not vacuous)"
-else
-  bad "w2/structural: require_repo_root could not be extracted — the pins below are UNMEASURED"
-fi
-W2_REJ_LN="$(printf '%s\n' "$W2_RRR" | LC_ALL=C grep -n 'cannot be represented' | LC_ALL=C head -1 | cut -d: -f1)"
-W2_SET_LN="$(printf '%s\n' "$W2_RRR" | LC_ALL=C grep -n 'REPO_ROOT="\$root"' | LC_ALL=C head -1 | cut -d: -f1)"
-if [ -n "$W2_REJ_LN" ] && [ -n "$W2_SET_LN" ] && [ "$W2_REJ_LN" -lt "$W2_SET_LN" ]; then
-  ok "w2/structural: the refusal is raised BEFORE the root is published to the rest of the script (lines $W2_REJ_LN < $W2_SET_LN)"
-else
-  bad "w2/structural: the representability refusal is not before REPO_ROOT is set (reject=$W2_REJ_LN set=$W2_SET_LN)"
-fi
-# AND IT IS THE RENDERER'S OWN ANSWER, NOT A CHARACTER LIST. A test keyed on a hand-written class
-# would drift from `one_line` the day `one_line` changes; the check compares the rendering to the
-# raw value, so it cannot.
-case "$W2_RRR" in
-  *'one_line "$root"'*)
-    ok "w2/structural: the representability test asks the RENDERER (one_line) itself, so it cannot drift from it" ;;
-  *) bad "w2/structural: the check does not compare against the renderer's own output, so it is a character list that can drift" ;;
-esac
-# AND THE RENDERER IT ASKS IS THE ONE THE PUBLISHED FIELD GOES THROUGH. The probe calls `one_line`
-# rather than `remainder_value` so that section 29's '='-exemption confinement pin keeps counting
-# EMIT sites only (a probe is not an emit) — which is sound exactly while the two agree, so that is
-# asserted BEHAVIOURALLY over the shipped functions rather than left to the comment.
-W2_AGREE_OK=0
-if W2_OL="$(LC_ALL=C awk '/^one_line\(\) \{/,/^\}/' "$RS")" &&
-  W2_RV="$(LC_ALL=C awk '/^remainder_value\(\) \{/,/^\}/' "$RS")" &&
-  [ -n "$W2_OL" ] && [ -n "$W2_RV" ]; then
-  W2_AGREE_OK=1
-  ok "w2/structural: both renderers were extracted (the agreement check below is not vacuous)"
-else
-  bad "w2/structural: a renderer could not be extracted — the agreement between probe and emit is UNMEASURED"
-fi
-if [ "$W2_AGREE_OK" -eq 1 ]; then
-  W2_SAMPLE='a=b	c  d
-e'
-  W2_A="$(printf '%s\n%s\n' "$W2_OL" 'one_line "$1"' | bash -s "$W2_SAMPLE" 2>/dev/null || true)"
-  W2_B="$(printf '%s\n%s\n%s\n' "$W2_OL" "$W2_RV" 'remainder_value "$1"' | bash -s "$W2_SAMPLE" 2>/dev/null || true)"
-  if [ -n "$W2_A" ] && [ "$W2_A" = "$W2_B" ]; then
-    ok "w2/structural: the probe's renderer and the published field's renderer AGREE on a sample carrying a tab, a whitespace run, an '=' and a newline"
-  else
-    bad "w2/structural: probe and emit renderers DISAGREE (one_line='$W2_A' remainder_value='$W2_B') — the probe would accept a root the verdict line then corrupts"
-  fi
-fi
-# AND THERE IS NO OPT-OUT. A checkout is always renamable, so an escape hatch could only buy a
-# published path that does not exist — the same reasoning as the missing-schemas check's absence of
-# one.
-if [ "$(LC_ALL=C grep -c -E 'REVIEW_STAGE_ALLOW_[A-Z_]*PATH|ALLOW_UNREPRESENTABLE' "$RS" || true)" -eq 0 ]; then
-  ok "w2/structural: no environment variable opts out of it — a renamable checkout needs no escape hatch"
-else
-  bad "w2/structural: an opt-out env var exists, which could only buy a published path that does not exist"
-fi
-# THE WITHDRAWN ROUND-11 DECLARATION MAY NOT SURVIVE ANYWHERE. It said such a path is not
-# representable and NEVER ARRIVES; the second half was false, and a stale declaration is what stops
-# the next person looking. Needles SPLIT so this guard cannot match its own source line.
-W2_N1="a path containing a NEWLINE is not repr""esentable"
-W2_N2="there is no newline to split a record line on"
-W2_N3="no newline to split"
-w2_carries_withdrawn() { LC_ALL=C grep -qiF -e "$W2_N1" -e "$W2_N2" -e "$W2_N3" "$1"; }
-W2_SWEPT=0; W2_STALE=0; W2_STALE_WHERE=""
-for W2_F in "$RS" "$SCRIPT_DIR/../flow/premerge-assert.sh" \
-  "$SCRIPT_DIR/../../CLAUDE.md" "$SCRIPT_DIR/../../docs/development/review-stage-reporting.md"; do
-  [ -f "$W2_F" ] || continue
-  W2_SWEPT=$((W2_SWEPT + 1))
-  if w2_carries_withdrawn "$W2_F"; then
-    W2_STALE=$((W2_STALE + 1)); W2_STALE_WHERE="$W2_STALE_WHERE $W2_F"
-  fi
-done
-if [ "$W2_STALE" -eq 0 ] && [ "$W2_SWEPT" -eq 4 ]; then
-  ok "w2/structural: round 11's WITHDRAWN declaration (a newline-bearing path is unrepresentable and never arrives) survives nowhere ($W2_SWEPT site(s) swept)"
-else
-  bad "w2/structural: $W2_STALE of $W2_SWEPT swept site(s) still carry it (want 0 of 4):$W2_STALE_WHERE"
-fi
-# A POSITIVE CONTROL: a sweep that matches nothing is indistinguishable from a sweep that cannot
-# match. This repository has the incident where a scan built to close one blind spot shipped with
-# its own and reported CLEAN on four real sites.
-W2_PLANT="$T/w2-withdrawn-plant.md"
-printf 'prose, then the withdrawn claim: %s, stated as a residual\n' "$W2_N1" >"$W2_PLANT" 2>/dev/null || true
-if [ -f "$W2_PLANT" ] && w2_carries_withdrawn "$W2_PLANT"; then
-  ok "w2/structural CONTROL: the sweep DOES find the withdrawn declaration when it is present"
-else
-  bad "w2/structural CONTROL: the sweep did not find a PLANTED copy — the clean result above proves nothing"
-fi
-
 # --- case floor ---------------------------------------------------------------
 # --- 21. THE CLOBBER GUARD MUST PREVENT, NOT REPORT (round 9, N1) ----------------
 # THE FINDING (roborev job 382, N1). Round 2's B2 made `record-author-performed` refuse to
@@ -3086,11 +2849,13 @@ n1_case() {
   hasnt "result: AUTHOR-PERFORMED" "n1/$label: and the merge-proceeding token was NOT installed over it"
 }
 
-# (a) the EARLIEST point in the window — immediately after the B2 check, before this call reads
-#     the stage record it is going to republish. The anchor moved in round 15 (U1): the path
-#     asserts it used to sit on are now a READ-side guard placed BEFORE the check, so anchoring
-#     there would plant OUTSIDE the window and prove nothing.
-n1_case early 'rec_text="$(stage_record_text "$sfile")" || srt_rc=$?' early 640
+# (a) the EARLIEST point in the window — immediately after the B2 check, where this call takes the
+#     record text it is going to republish. The anchor moved in round 15 (U1) because the path
+#     asserts it used to sit on became a READ-side guard placed BEFORE the check, and again in
+#     round 17 (W1) because that record text is no longer READ here: it comes from the ONE
+#     observation, so the anchor is the line that consumes it. The case is unchanged in meaning —
+#     a verdict landing at the earliest point of the window is REFUSED, not overwritten.
+n1_case early 'rec_text="$STAGE_RECORD_TEXT"' early 640
 # (b) the LATEST point THE CHECK CAN COVER — after the substitute is fully written AND committed
 #     at its fresh generation, immediately before the re-observation that guards the publication.
 #     This is the instant a check placed anywhere earlier cannot see, and the anchor is
@@ -3934,9 +3699,21 @@ case "$S25_CLS" in
   *) bad "s1/structural: the classifier matches the observation grammar itself, so it and the clobber guard can form two opinions about whether the report was read" ;;
 esac
 S25_RAP="$(LC_ALL=C sed -n '/^cmd_record_author_performed() {/,/^}$/p' "$RS" 2>/dev/null || true)"
+# RETARGETED IN ROUND 17 (W1), AND STRICTLY STRONGER. This pinned that the clobber guard called
+# `report_state "$prior_obs"` itself, i.e. that it consulted the STATE at all. Since W1 the guard
+# reads nothing: both the bytes and their state come from the ONE `observe_stage` observation, so
+# the property to pin is that BINDING — a guard that re-derived the state from a read of its own
+# would be the second observation W1 removes, and one that ignored the state would be round 13's S1
+# again. Both halves are asserted, and the observer is pinned as the caller that derives it through
+# the named reader.
 case "$S25_RAP" in
-  *'report_state "$prior_obs"'*) ok "s1/structural: the clobber guard reads the state through the same helper" ;;
+  *'prior_state="$STAGE_REPORT_STATE"'*) ok "s1/structural: the clobber guard takes the observation STATE from the ONE observation, not from a read of its own" ;;
   *) bad "s1/structural: the clobber guard does not consult the observation STATE, so 'could not read it' is indistinguishable from 'nothing is recorded'" ;;
+esac
+S25_OBS="$(LC_ALL=C sed -n '/^observe_stage() {/,/^}$/p' "$RS" 2>/dev/null || true)"
+case "$S25_OBS" in
+  *'report_state "$STAGE_REPORT_OBS"'*) ok "s1/structural: and the observation derives it through report_state, the ONE named reader of that grammar" ;;
+  *) bad "s1/structural: the observation does not derive the report state through report_state, so two readers of that grammar can form two opinions" ;;
 esac
 case "$S25_RAP" in
   *'absent | present)'*) ok "s1/structural: and its permissive set is keyed AFFIRMATIVELY on the two measured states, so a state added later refuses by construction" ;;
@@ -4076,11 +3853,20 @@ case "$S26_RB" in
   *'capture_map_nul "$p"'*) ok "s2/structural: report_bytes reads through the mapping" ;;
   *) bad "s2/structural: report_bytes still captures the file raw, so a NUL is silently dropped from the verdict's subject" ;;
 esac
-S26_RF="$(LC_ALL=C sed -n '/^read_field() {/,/^}$/p' "$RS" 2>/dev/null || true)"
+# RETARGETED IN ROUND 17 (W1). The subject was `read_field`, the FILE-reading field reader; it is
+# DELETED, because every field of the stage record now comes from the ONE capture `observe_record`
+# takes. The property is unchanged and its subject moved to the reader that survived — and it is
+# stronger, because there is now exactly ONE record-file reader to route rather than two.
+S26_RF="$(LC_ALL=C sed -n '/^stage_record_text() {/,/^}$/p' "$RS" 2>/dev/null || true)"
 case "$S26_RF" in
-  *'capture_map_nul "$file"'*) ok "s2/structural: read_field reads through the same mapping" ;;
-  *) bad "s2/structural: read_field still captures the file raw, so a NUL can forge a field value" ;;
+  *'capture_map_nul "$file"'*) ok "s2/structural: the ONE stage-record file reader (stage_record_text) reads through the same mapping" ;;
+  *) bad "s2/structural: the record file reader still captures raw, so a NUL can forge a field value" ;;
 esac
+if [ "$(LC_ALL=C grep -c '^read_field() {' "$RS" || true)" -eq 0 ]; then
+  ok "s2/structural: and no FILE-reading field reader remains at all — the second read is unexpressible, not merely unused"
+else
+  bad "s2/structural: a file-reading read_field is back, so a caller can read the record per field again"
+fi
 S26_CAT="$(LC_ALL=C grep -c 'cat -- "\$' "$RS" 2>/dev/null || true)"
 case "$S26_CAT" in
   0) ok "s2/structural: NO capture of file content bypasses the mapping (zero raw \`cat -- \"\$…\"\` reads remain)" ;;
@@ -4164,41 +3950,57 @@ if [ -n "$R2_BODY" ]; then
 else
   bad "r2/structural: could not locate classify_report() — the assertions below would be vacuous"
 fi
-R2_NRP="$(printf '%s\n' "$R2_BODY" | LC_ALL=C grep -o '"\$rpath"' | LC_ALL=C grep -c . || true)"
-if [ "$R2_NRP" = "1" ]; then
-  ok "r2/structural: the report path is used EXACTLY ONCE in the classifier — one observation, by construction"
+# RETARGETED IN ROUND 17 (W1), AND STRICTLY STRONGER. These pinned that the classifier used the
+# report PATH exactly once and that the one use was `report_bytes` — i.e. that it took at most ONE
+# observation of its own. W1 removed the path parameter altogether and made the observation
+# REQUIRED, so the property is no longer "one read" but "NO read": a classifier that cannot name a
+# path cannot take a second observation, and a caller that supplies none gets a NAMED non-verdict
+# rather than a fresh read. A parameter a function does not use is an invitation to read again,
+# which is why it was removed rather than left standing.
+R2_NRP="$(printf '%s\n' "$R2_BODY" | LC_ALL=C grep -o 'rpath' | LC_ALL=C grep -c . || true)"
+if [ "$R2_NRP" = "0" ]; then
+  ok "r2/structural: the classifier names NO report path at all — a second observation is unexpressible, not merely untaken"
 else
-  bad "r2/structural: the classifier names \$rpath $R2_NRP time(s); every use after the first is a second observation the verdict can be assembled across"
+  bad "r2/structural: the classifier still names a report path $R2_NRP time(s), so it can read the file for itself"
 fi
-case "$R2_BODY" in
-  *'report_bytes "$rpath"'*) ok "r2/structural: and that one use is the shared single-observation helper, not a private read" ;;
-  *) bad "r2/structural: the classifier does not take its observation through report_bytes, so two readers of the report state can form two opinions" ;;
+# JUDGED OVER CODE, NOT THE PROSE BESIDE IT: this function's comments legitimately NAME
+# `report_bytes` (they explain whose grammar the observation is in), so a whole-body match would
+# red on a correct script — the shape this repository calls a guard that reds on correct input.
+R2_CODE="$(printf '%s\n' "$R2_BODY" | LC_ALL=C grep -v '^[[:space:]]*#' || true)"
+case "$R2_CODE" in
+  *'report_bytes'*) bad "r2/structural: the classifier still calls report_bytes, so it can take an observation of its own" ;;
+  *) ok "r2/structural: and it calls no file reader, so its token always describes the caller's own observation" ;;
 esac
 case "$R2_BODY" in
-  *'read_field "$rpath"'* | *'<"$rpath"'* | *'-- "$rpath"'*)
-    bad "r2/structural: the classifier still reads the file directly for a field" ;;
-  *) ok "r2/structural: no field is read from the file a second time" ;;
+  *"NOT-RUN|stage not observed"*)
+    ok "r2/structural: an unobserved caller is a NAMED non-verdict, never a fresh read" ;;
+  *) bad "r2/structural: an empty observation has no named refusal, so it could fall back to reading the file" ;;
 esac
-# THE FIELD GRAMMAR IS ONE IMPLEMENTATION. A snapshot reader written beside the file reader would
-# be a SECOND implementation of `<key>: <value>`, and a second implementation's agreement is only
-# knowable by testing it — so `read_field` delegates to the text reader rather than duplicating it.
-R2_RF="$(LC_ALL=C sed -n '/^read_field() {$/,/^}$/p' "$RS")"
-case "$R2_RF" in
-  *'read_field_from'*) ok "r2/structural: read_field delegates to the ONE field-grammar implementation" ;;
-  *) bad "r2/structural: read_field carries its own copy of the field grammar, so the file and snapshot readers can drift" ;;
-esac
+# THE FIELD GRAMMAR IS ONE IMPLEMENTATION. A snapshot reader written beside a file reader would be
+# a SECOND implementation of `<key>: <value>`, and a second implementation's agreement is only
+# knowable by testing it. Round 12 satisfied that by having the file-reading `read_field` DELEGATE
+# to `read_field_from`; round 17 (W1) satisfies it by SUBTRACTION — the file-reading sibling is
+# gone, so `read_field_from` is the only implementation there is, and the same now holds for the
+# LINE COUNTER (`count_field_lines_from`), which had a second spelling inline at the record-rewrite
+# verification.
+if [ "$(LC_ALL=C grep -c '^read_field_from() {' "$RS" || true)" -eq 1 ] &&
+  [ "$(LC_ALL=C grep -c '^count_field_lines_from() {' "$RS" || true)" -eq 1 ]; then
+  ok "r2/structural: the field grammar and the line counter each have EXACTLY ONE implementation, over TEXT"
+else
+  bad "r2/structural: the field grammar or the line counter is defined more than once (or not at all), so two spellings can drift"
+fi
 # AND THE ONE DOWNSTREAM CONSUMER SHARES THE SNAPSHOT. `record-author-performed` takes a byte
 # observation to guard its write (round 9, N1) and a verdict to decide whether it may replace what
 # is there; read separately those are two observations, so the token guarding the write could
 # classify a state the guarded bytes never held. Both call sites are pinned, including the refusal
 # path's diagnostic — a re-read there would name a THIRD state and "what arrived" would be a claim
 # about none of them.
-if LC_ALL=C grep -q 'classify_report "\$STAGE_REPORT" 1 "" "\$prior_obs"' "$RS"; then
+if LC_ALL=C grep -q 'classify_report 1 "" "\$prior_obs" ""' "$RS"; then
   ok "r2/structural: the write guard's bytes and its verdict are ONE observation"
 else
   bad "r2/structural: record-author-performed classifies by a SECOND read, so its verdict need not describe the bytes it guards ($(LC_ALL=C grep -n 'classify_report "\$STAGE_REPORT"' "$RS" | LC_ALL=C tr '\n' ' '))"
 fi
-if LC_ALL=C grep -q 'classify_report "\$STAGE_REPORT" 1 "" "\$now_obs"' "$RS"; then
+if LC_ALL=C grep -q 'classify_report 1 "" "\$now_obs" ""' "$RS"; then
   ok "r2/structural: and the refusal diagnostic names the state that FAILED the comparison, not a third one"
 else
   bad "r2/structural: the refusal diagnostic re-reads the report, so it can name a state neither observation held"
@@ -4548,15 +4350,26 @@ if LC_ALL=C grep -q '\*"\$CAPTURE_NUL_BYTE"\*) return 2' "$RS"; then
 else
   bad "t1/structural: the unrepresentable case has no distinct status, so its refusal must borrow another cause's rationale"
 fi
-if [ "$(LC_ALL=C grep -c 'nnonce_lines="\$(count_field_lines "\$sfile" report-nonce)" || cfl_rc=\$?' "$RS" || true)" -eq 1 ]; then
-  ok "t1/structural: the open caller captures the STATUS (|| cfl_rc=\$?), never 'if ! …' which reads 0"
+# RETARGETED IN ROUND 17 (W1). These pinned the fail-closed status idiom at the TWO callers that
+# read the record file per question (`cmd_open` and `load_stage`). W1 collapsed both into ONE
+# capture inside `observe_record`, so there is one call site to pin instead of two — which is the
+# stronger property, and the reason the retarget is not a weakening: a status captured by
+# `if ! …` (which can only see zero-vs-nonzero) would still lose the unrepresentable case, and now
+# it would lose it for every caller at once, so the pin matters more than before.
+if [ "$(LC_ALL=C grep -c 'text="\$(stage_record_text "\$sfile")" || rc=\$?' "$RS" || true)" -eq 1 ]; then
+  ok "t1/structural: the ONE record capture takes the STATUS (|| rc=\$?), never 'if ! …' which reads 0"
 else
-  bad "t1/structural: the open caller does not capture count_field_lines' status the fail-closed way"
+  bad "t1/structural: the one record capture does not take stage_record_text's status the fail-closed way"
 fi
-if [ "$(LC_ALL=C grep -c 'nnonce="\$(count_field_lines "\$sfile" report-nonce)" || cfl_rc=\$?' "$RS" || true)" -eq 1 ]; then
-  ok "t1/structural: and so does the load_stage caller, from the same idiom"
+if [ "$(LC_ALL=C grep -c 'nlines="\$(count_field_lines_from "\$STAGE_RECORD_TEXT" report-nonce)" || cfl_rc=\$?' "$RS" || true)" -eq 1 ]; then
+  ok "t1/structural: and the line count over that capture takes its status the same way"
 else
-  bad "t1/structural: the load_stage caller does not capture count_field_lines' status the fail-closed way"
+  bad "t1/structural: the line count does not take count_field_lines_from's status the fail-closed way"
+fi
+if [ "$(LC_ALL=C grep -c 'again="\$(stage_record_text "\$sfile")" || arc=\$?' "$RS" || true)" -eq 1 ]; then
+  ok "t1/structural: and so does the RE-VERIFICATION that makes the record and the report one observation"
+else
+  bad "t1/structural: the observation's re-verification does not take its read status the fail-closed way"
 fi
 if [ "$(LC_ALL=C grep -c 'if ! nnonce' "$RS" || true)" -eq 0 ]; then
   ok "t1/structural: no caller branches on a bare 'if ! …' any more, which could only see zero-vs-nonzero"
@@ -4602,7 +4415,7 @@ else
   #              file inside a `$( … )` behind an `LC_ALL=C` assignment prefix. All three of those
   #              details were what made the real defect invisible to the first draft of the guard.
   RBS_D="$T/rbs-grep"; mkdir -p "$RBS_D"
-  LC_ALL=C sed -e '/^count_field_lines() {/a\  PLANTED_OUT="$(LC_ALL=C grep -c -i "^x:" "$PLANTED_RECORD_READ")"' \
+  LC_ALL=C sed -e '/^count_field_lines_from() {/a\  PLANTED_OUT="$(LC_ALL=C grep -c -i "^x:" "$PLANTED_RECORD_READ")"' \
     "$RS" >"$RBS_D/review-stage.sh" 2>/dev/null || true
   RBS_LINE="$(LC_ALL=C grep -n 'PLANTED_RECORD_READ' "$RBS_D/review-stage.sh" 2>/dev/null | LC_ALL=C head -1 || true)"
   if [ -n "$RBS_LINE" ]; then
@@ -4628,7 +4441,7 @@ else
   esac
   # CONTROL (b): A DIFFERENT READING COMMAND, to prove the recogniser is a LIST and not one pattern.
   RBS_C="$T/rbs-cat"; mkdir -p "$RBS_C"
-  LC_ALL=C sed -e '/^count_field_lines() {/a\  PLANTED_OUT="$(LC_ALL=C cat "$PLANTED_CAT_READ")"' \
+  LC_ALL=C sed -e '/^count_field_lines_from() {/a\  PLANTED_OUT="$(LC_ALL=C cat "$PLANTED_CAT_READ")"' \
     "$RS" >"$RBS_C/review-stage.sh" 2>/dev/null || true
   RBS_COUT="$(bash "$RBS" "$RBS_C/review-stage.sh" 2>&1)"; RBS_CRC=$?
   if [ "$RBS_CRC" -ne 0 ] && [ "${RBS_COUT#*"\`cat\` starts a pipeline"}" != "$RBS_COUT" ]; then
@@ -4855,6 +4668,576 @@ if [ "$V2_FN_OK" -eq 1 ]; then
     bad "v2/structural: remainder_value lets a newline through — a second line is a forged record (got: $V2_NL_R)"
   fi
 fi
+
+# --- 30. A CHECKOUT PATH THIS GRAMMAR CANNOT CARRY IS REFUSED AT THE BOUNDARY (round 17, W2) ------
+# THE FINDING (roborev job 396, W2). Every line this tool emits is a ONE-LINE record, and the
+# `report=` field on it carries an ABSOLUTE path whose only variable component is the REPOSITORY
+# ROOT. A root containing a NEWLINE is therefore not merely awkward — the two commands lie
+# DIFFERENTLY about it:
+#
+#   * `open` prints the raw report path on its own line, so the value SPLIT across two physical
+#     lines: the second carried NO `REVIEW-STAGE: ` prefix, which is the anchor every consumer of
+#     this grammar reads, and the paste-ready spawn clause handed the agent two broken fragments.
+#   * `verdict` flattens it through `remainder_value`, publishing `…/lane two/…` — a DIFFERENT,
+#     NONEXISTENT path — on the one line whose whole promise is the absolute report-of-record path.
+#     Measured on the shipped script in a checkout named `lane<LF>two`:
+#       REVIEW-STAGE: c RESULT: NOT-RUN (…) … report=/…/lane two/.review-stage/issue-700/c.<n>.md
+#     while the real file was at `/…/lane` + LF + `two/…`.
+#
+# ROUND 11 DECLARED THIS UNREPRESENTABLE AND LEFT IT ("a path containing a NEWLINE is not
+# representable on a one-line grammar and never arrives"). THAT DECLARATION IS WITHDRAWN: the
+# premise was false — such a path DOES arrive, because git resolves the root of whatever checkout
+# the tool is run in — and silently publishing a wrong path is not an acceptable resting state for
+# the value this grammar promises. So the refusal is AT THE BOUNDARY, at the ONE place the root is
+# resolved, which is why every subcommand inherits it.
+#
+# AND IT IS THE MEASURED PROPERTY, NOT A CHARACTER LIST. `one_line` is what renders these values,
+# so the question asked is *does this root survive it UNCHANGED* — a rendering that differs is a
+# published path that does not exist, whatever byte caused it. A curated list of bad characters is
+# a list to keep complete; this one cannot drift from the renderer, because it IS the renderer. The
+# LF/CR case keeps its OWN detail line, because its harm is different in kind (the grammar itself
+# breaks: a value that spans lines cannot be a field of a one-line record at any rendering).
+W2_D="$T/w2"; mkdir -p "$W2_D"
+
+# w2_repo <dirname> — a git checkout at a literal directory name, or empty when this filesystem
+# cannot hold it. NOTHING is asserted from a fixture that did not build: a case that silently ran
+# in an ordinary directory would pass for the wrong reason (test_premerge_assert.sh §44's lesson).
+w2_repo() {
+  local d="$W2_D/$1"
+  mkdir -p "$d" 2>/dev/null || return 1
+  git -C "$d" init -q >/dev/null 2>&1 || return 1
+  printf '.review-stage/\n' >"$d/.gitignore" 2>/dev/null || return 1
+  printf '%s\n' "$d"
+}
+
+W2_LF=""
+W2_LF_NAME="lane
+two"
+if W2_LF="$(w2_repo "$W2_LF_NAME")" && [ -n "$W2_LF" ] && [ -d "$W2_LF" ]; then
+  case "$W2_LF" in
+    *"
+"*) ok "w2 fixture: a git checkout whose PATH contains a literal LF was built (asserted, not assumed)" ;;
+    *) bad "w2 fixture: the fixture path carries NO newline, so every case below would be vacuous ($W2_LF)"; W2_LF="" ;;
+  esac
+else
+  bad "w2 fixture: a newline-bearing checkout could not be built on this filesystem — the cases below are UNMEASURED"
+  W2_LF=""
+fi
+
+if [ -n "$W2_LF" ]; then
+  # (a) `open` REFUSES, and it refuses BEFORE anything is written.
+  rs "$W2_LF" open c --issue 700 --agent spec-auditor
+  rc_is 64 "w2/open: a newline-bearing checkout is REFUSED (usage class, exactly as an unresolvable worktree is)"
+  has "cannot be represented" "w2/open: and the refusal says the path cannot be REPRESENTED on this one-line grammar"
+  has "NEWLINE" "w2/open: naming the newline specifically, because its harm is different in kind (the value spans lines)"
+  if [ -d "$W2_LF/.review-stage" ]; then
+    bad "w2/open: the refused open created the stage directory anyway"
+  else
+    ok "w2/open: NOTHING was written — no stage directory, so no report and no record"
+  fi
+  # (b) `verdict` REFUSES, and — the property that matters — it publishes NO path at all. A wrong
+  #     path on this line is worse than no line, because the line is what a consumer binds to.
+  rs "$W2_LF" verdict c --issue 700
+  rc_is 64 "w2/verdict: the same refusal at the same boundary, so the two commands cannot disagree"
+  hasnt "report=" "w2/verdict: and NO report= field is published — a nonexistent path is never advertised"
+  hasnt "RESULT:" "w2/verdict: nor any RESULT: token, so nothing can read a verdict off a checkout we cannot name"
+  # (c) `status` and (d) `record-author-performed` inherit it, because the check is at the ONE
+  #     resolution site rather than in `open`.
+  rs "$W2_LF" status c --issue 700
+  rc_is 64 "w2/status: status inherits the refusal (the check is at the root resolution, not per subcommand)"
+  rs "$W2_LF" record-author-performed c --issue 700 --reason 'no peer agent available on this box' \
+    --evidence 'docs/round-artifacts/issue-3751-hand-c.md' --performed-by author
+  rc_is 64 "w2/author: and so does record-author-performed, which would otherwise WRITE under that path"
+fi
+
+# (e) A CARRIAGE RETURN IS THE SAME CLASS AND IS REFUSED THE SAME WAY. `one_line` maps CR to a
+#     space exactly as it maps LF, so a CR-bearing root publishes a nonexistent path too — and a
+#     guard keyed on LF alone would be the character list this case exists to rule out.
+W2_CR=""
+W2_CR_NAME="$(printf 'lane\rtwo')"
+if W2_CR="$(w2_repo "$W2_CR_NAME")" && [ -n "$W2_CR" ] && [ -d "$W2_CR" ] &&
+  case "$W2_CR" in *"$(printf '\r')"*) true ;; *) false ;; esac; then
+  ok "w2 fixture: a CR-bearing checkout was built"
+  rs "$W2_CR" open c --issue 701 --agent spec-auditor
+  rc_is 64 "w2/cr: a CR-bearing checkout is REFUSED as well"
+  has "NEWLINE" "w2/cr: under the same named cause (CR and LF are one class here: both break the line)"
+else
+  ok "w2 fixture: SKIPPED the CR variant — this filesystem or shell could not hold the name; nothing is asserted about a case that did not run"
+  ok "w2 fixture: (the same, second half — the case emits a fixed number of assertions either way)"
+  ok "w2 fixture: (the same, third half)"
+fi
+
+# (f) A TAB IS NOT A NEWLINE AND IS STILL UNPUBLISHABLE. `one_line` maps it to a space, so the
+#     published path does not exist — the SAME harm, a DIFFERENT cause, and it is why the check is
+#     the renderer's own answer rather than a two-character test.
+W2_TAB=""
+W2_TAB_NAME="$(printf 'lane\ttwo')"
+if W2_TAB="$(w2_repo "$W2_TAB_NAME")" && [ -n "$W2_TAB" ] && [ -d "$W2_TAB" ] &&
+  case "$W2_TAB" in *"$(printf '\t')"*) true ;; *) false ;; esac; then
+  ok "w2 fixture: a TAB-bearing checkout was built"
+  rs "$W2_TAB" open c --issue 702 --agent spec-auditor
+  rc_is 64 "w2/tab: a TAB-bearing checkout is REFUSED — the published path would not exist"
+  has "cannot be represented" "w2/tab: under the representability cause"
+  hasnt "NEWLINE" "w2/tab: and NOT under the newline one, because that would be a false rationale about this path"
+else
+  ok "w2 fixture: SKIPPED the TAB variant — this filesystem could not hold the name"
+  ok "w2 fixture: (the same, second half)"
+  ok "w2 fixture: (the same, third half)"
+  ok "w2 fixture: (the same, fourth half)"
+fi
+
+# (g) CONTROL — A SINGLE SPACE STILL WORKS, END TO END. Round 11's Q3 exists because a path may
+#     LEGALLY contain a space and `premerge-assert.sh` reads `report=` as the line remainder for
+#     exactly that reason. A refusal that caught this would red on correct input and be the guard
+#     agents learn to waive, so the control asserts the FULL path is published AND that it EXISTS.
+W2_SP=""
+if W2_SP="$(w2_repo "work tree")" && [ -n "$W2_SP" ]; then
+  ok "w2 CONTROL: a SPACE-bearing checkout was built"
+  rs "$W2_SP" open c --issue 703 --agent spec-auditor
+  rc_is 0 "w2 CONTROL: a space-bearing checkout is NOT refused — a space survives one_line unchanged"
+  W2_SP_REP="$(REPORT_OF "$W2_SP" 703 c)"
+  rs "$W2_SP" verdict c --issue 703
+  has "report=$W2_SP_REP" "w2 CONTROL: and verdict publishes the WHOLE space-bearing path, spaces included"
+  if [ -f "$W2_SP_REP" ]; then
+    ok "w2 CONTROL: which names a file that EXISTS (the published value is the real report of record)"
+  else
+    bad "w2 CONTROL: the published path does not exist: $W2_SP_REP"
+  fi
+else
+  bad "w2 CONTROL: a space-bearing checkout could not be built — the false-refusal control is UNMEASURED"
+  bad "w2 CONTROL: (the same absence, 2/4)"
+  bad "w2 CONTROL: (the same absence, 3/4)"
+  bad "w2 CONTROL: (the same absence, 4/4)"
+fi
+
+# (h) STRUCTURAL — THE CHECK IS AT THE ONE RESOLUTION SITE, which is what makes "every entry
+#     inherits it" a property of the code rather than of this test's enumeration. Two pins: the
+#     root is resolved exactly once in the script, and the refusal sits in that same function
+#     BEFORE the global is set (a check after the assignment would let a subcommand build a path
+#     from a root it had already accepted).
+W2_RESOLVE="$(LC_ALL=C grep -c 'rev-parse --show-toplevel' "$RS" || true)"
+if [ "$W2_RESOLVE" -eq 1 ]; then
+  ok "w2/structural: the repository root is resolved in exactly ONE place, so one check covers every subcommand"
+else
+  bad "w2/structural: the root is resolved at $W2_RESOLVE sites — a second resolution would bypass the check"
+fi
+W2_RRR="$(LC_ALL=C sed -n '/^require_repo_root() {$/,/^}$/p' "$RS")"
+if [ -n "$W2_RRR" ]; then
+  ok "w2/structural: require_repo_root was extracted (the pins below are not vacuous)"
+else
+  bad "w2/structural: require_repo_root could not be extracted — the pins below are UNMEASURED"
+fi
+W2_REJ_LN="$(printf '%s\n' "$W2_RRR" | LC_ALL=C grep -n 'cannot be represented' | LC_ALL=C head -1 | cut -d: -f1)"
+W2_SET_LN="$(printf '%s\n' "$W2_RRR" | LC_ALL=C grep -n 'REPO_ROOT="\$root"' | LC_ALL=C head -1 | cut -d: -f1)"
+if [ -n "$W2_REJ_LN" ] && [ -n "$W2_SET_LN" ] && [ "$W2_REJ_LN" -lt "$W2_SET_LN" ]; then
+  ok "w2/structural: the refusal is raised BEFORE the root is published to the rest of the script (lines $W2_REJ_LN < $W2_SET_LN)"
+else
+  bad "w2/structural: the representability refusal is not before REPO_ROOT is set (reject=$W2_REJ_LN set=$W2_SET_LN)"
+fi
+# AND IT IS THE RENDERER'S OWN ANSWER, NOT A CHARACTER LIST. A test keyed on a hand-written class
+# would drift from `one_line` the day `one_line` changes; the check compares the rendering to the
+# raw value, so it cannot.
+case "$W2_RRR" in
+  *'one_line "$root"'*)
+    ok "w2/structural: the representability test asks the RENDERER (one_line) itself, so it cannot drift from it" ;;
+  *) bad "w2/structural: the check does not compare against the renderer's own output, so it is a character list that can drift" ;;
+esac
+# AND THE RENDERER IT ASKS IS THE ONE THE PUBLISHED FIELD GOES THROUGH. The probe calls `one_line`
+# rather than `remainder_value` so that section 29's '='-exemption confinement pin keeps counting
+# EMIT sites only (a probe is not an emit) — which is sound exactly while the two agree, so that is
+# asserted BEHAVIOURALLY over the shipped functions rather than left to the comment.
+W2_AGREE_OK=0
+if W2_OL="$(LC_ALL=C awk '/^one_line\(\) \{/,/^\}/' "$RS")" &&
+  W2_RV="$(LC_ALL=C awk '/^remainder_value\(\) \{/,/^\}/' "$RS")" &&
+  [ -n "$W2_OL" ] && [ -n "$W2_RV" ]; then
+  W2_AGREE_OK=1
+  ok "w2/structural: both renderers were extracted (the agreement check below is not vacuous)"
+else
+  bad "w2/structural: a renderer could not be extracted — the agreement between probe and emit is UNMEASURED"
+fi
+if [ "$W2_AGREE_OK" -eq 1 ]; then
+  W2_SAMPLE='a=b	c  d
+e'
+  W2_A="$(printf '%s\n%s\n' "$W2_OL" 'one_line "$1"' | bash -s "$W2_SAMPLE" 2>/dev/null || true)"
+  W2_B="$(printf '%s\n%s\n%s\n' "$W2_OL" "$W2_RV" 'remainder_value "$1"' | bash -s "$W2_SAMPLE" 2>/dev/null || true)"
+  if [ -n "$W2_A" ] && [ "$W2_A" = "$W2_B" ]; then
+    ok "w2/structural: the probe's renderer and the published field's renderer AGREE on a sample carrying a tab, a whitespace run, an '=' and a newline"
+  else
+    bad "w2/structural: probe and emit renderers DISAGREE (one_line='$W2_A' remainder_value='$W2_B') — the probe would accept a root the verdict line then corrupts"
+  fi
+fi
+# AND THERE IS NO OPT-OUT. A checkout is always renamable, so an escape hatch could only buy a
+# published path that does not exist — the same reasoning as the missing-schemas check's absence of
+# one.
+if [ "$(LC_ALL=C grep -c -E 'REVIEW_STAGE_ALLOW_[A-Z_]*PATH|ALLOW_UNREPRESENTABLE' "$RS" || true)" -eq 0 ]; then
+  ok "w2/structural: no environment variable opts out of it — a renamable checkout needs no escape hatch"
+else
+  bad "w2/structural: an opt-out env var exists, which could only buy a published path that does not exist"
+fi
+# THE WITHDRAWN ROUND-11 DECLARATION MAY NOT SURVIVE ANYWHERE. It said such a path is not
+# representable and NEVER ARRIVES; the second half was false, and a stale declaration is what stops
+# the next person looking. Needles SPLIT so this guard cannot match its own source line.
+W2_N1="a path containing a NEWLINE is not repr""esentable"
+W2_N2="there is no newline to split a record line on"
+W2_N3="no newline to split"
+w2_carries_withdrawn() { LC_ALL=C grep -qiF -e "$W2_N1" -e "$W2_N2" -e "$W2_N3" "$1"; }
+W2_SWEPT=0; W2_STALE=0; W2_STALE_WHERE=""
+for W2_F in "$RS" "$SCRIPT_DIR/../flow/premerge-assert.sh" \
+  "$SCRIPT_DIR/../../CLAUDE.md" "$SCRIPT_DIR/../../docs/development/review-stage-reporting.md"; do
+  [ -f "$W2_F" ] || continue
+  W2_SWEPT=$((W2_SWEPT + 1))
+  if w2_carries_withdrawn "$W2_F"; then
+    W2_STALE=$((W2_STALE + 1)); W2_STALE_WHERE="$W2_STALE_WHERE $W2_F"
+  fi
+done
+if [ "$W2_STALE" -eq 0 ] && [ "$W2_SWEPT" -eq 4 ]; then
+  ok "w2/structural: round 11's WITHDRAWN declaration (a newline-bearing path is unrepresentable and never arrives) survives nowhere ($W2_SWEPT site(s) swept)"
+else
+  bad "w2/structural: $W2_STALE of $W2_SWEPT swept site(s) still carry it (want 0 of 4):$W2_STALE_WHERE"
+fi
+# A POSITIVE CONTROL: a sweep that matches nothing is indistinguishable from a sweep that cannot
+# match. This repository has the incident where a scan built to close one blind spot shipped with
+# its own and reported CLEAN on four real sites.
+W2_PLANT="$T/w2-withdrawn-plant.md"
+printf 'prose, then the withdrawn claim: %s, stated as a residual\n' "$W2_N1" >"$W2_PLANT" 2>/dev/null || true
+if [ -f "$W2_PLANT" ] && w2_carries_withdrawn "$W2_PLANT"; then
+  ok "w2/structural CONTROL: the sweep DOES find the withdrawn declaration when it is present"
+else
+  bad "w2/structural CONTROL: the sweep did not find a PLANTED copy — the clean result above proves nothing"
+fi
+
+# --- 31. THE RECORD AND THE REPORT MUST BE *ONE* OBSERVATION (round 17, W1) -----------------------
+# THE FINDING (roborev job 396, W1). `record-author-performed` read the REPORT using the generation
+# loaded EARLIER and then read the STAGE RECORD independently. An `open --force` publishing
+# generation B between those two reads left the final re-verifications comparing an unchanged
+# report **A** against an unchanged record **B** — each individually consistent — so the recording
+# published `AUTHOR-PERFORMED` over **B** without ever inspecting B's verdict, without requiring
+# `--force`, and with a trace claiming **A** was superseded when **B** was. A blocking `FINDINGS`
+# in B stopped being the stage's verdict silently, and the audit trail said the wrong thing about
+# which generation that was. Falsifying the audit trail is the worst failure this tool can have: it
+# is the harm #3751 exists to prevent, committed by the mechanism itself.
+#
+# THIS IS THE THIRD INSTANCE OF ONE SHAPE IN THIS ISSUE, and that is why the fix is a MECHANISM and
+# not a third patch: round 9's N2 (`premerge-assert` validated `head-sha` from one read and consumed
+# a second read for the nonce), round 12's R2 (`classify_report` read its fields independently, so a
+# verdict could be assembled from versions that never coexisted), and now the record and the report
+# read from DIFFERENT generations. Each was fixed at its own site. The consolidation is ONE
+# primitive — `observe_stage` — that captures the record's bytes, derives the generation THOSE bytes
+# name, reads THAT generation's report, and RE-VERIFIES the record has not moved between the two;
+# anything inconsistent is a NAMED refusal, never a silent second opinion. Every decision path
+# (`verdict`, `status`, `record-author-performed`) reasons from one such observation.
+W1_D="$T/w1"; mkdir -p "$W1_D"
+W1_REASON='no peer agent available on this box; hand C against the spec deltas'
+W1_EV='docs/round-artifacts/issue-3751-hand-c.md'
+
+# THE INTERLEAVE: a concurrent `open --force` that publishes a NEW generation, into whose report a
+# reviewer then lands a BLOCKING verdict. Driven by running the SHIPPED script (baked in at build
+# time — the scratch copy under test must not be the one that opens the stage, or the case would be
+# measuring the mutant) and then writing into the generation the record now names. SIMULATED, NOT
+# RACED: one injected line at a fixed point, nothing concurrent, no timing dependence.
+W1_INJECTION='  { bash '"'$RS'"' open c --issue "$issue" --agent spec-auditor --force >/dev/null 2>&1; W1_B="$(LC_ALL=C sed -n '"'"'s/^report-nonce:[[:space:]]*//p'"'"' "$sfile" | LC_ALL=C head -1)"; printf '"'"'result: FINDINGS\n\n### [BLOCKER] N1_LATE_REVIEWER landed this in generation B\n'"'"' >"$(dirname "$sfile")/$kind.$W1_B.md"; } || true'
+
+# The anchor is the LAST `dir="$(dirname "$sfile")"` — the one inside `record-author-performed`
+# (cmd_open holds the first) — so the plant lands after the already-recorded check, AFTER `sfile` is
+# assigned (the injected line reads it, and an unset one would make the plant a no-op that looked
+# like a case), and BEFORE this call reads the record it is going to republish. It is deliberately a
+# line that exists in BOTH the pre- and post-fix shapes, so the same case measures both.
+if n1_build_last "$W1_D/interleave.sh" 'dir="$(dirname "$sfile")"' "$W1_INJECTION"; then
+  ok "w1/interleave: the plant landed at the last dirname assignment (asserted, not assumed)"
+else
+  bad "w1/interleave: the plant did NOT land, so this case proves nothing"
+fi
+R31="$(newrepo)"
+rs "$R31" open c --issue 710 --agent spec-auditor
+W1_A_NONCE="$(RECORD_NONCE "$R31" 710 c)"
+if [ -n "$W1_A_NONCE" ]; then
+  ok "w1/interleave PREMISE: generation A was opened and the record names it ($W1_A_NONCE)"
+else
+  bad "w1/interleave PREMISE: no generation A nonce — the case below cannot distinguish the generations"
+fi
+OUT="$(cd "$R31" && bash "$W1_D/interleave.sh" record-author-performed c --issue 710 \
+  --reason "$W1_REASON" --evidence "$W1_EV" --performed-by author 2>&1)"; RC=$?
+# GENERATION B IS FOUND ON DISK, NOT PREDICTED: its nonce is generated by the interleaved
+# `open --force` and is unknowable to this test, so it is located by the reviewer's own marker.
+# Reading the RECORD for it would be wrong — pre-fix the record ends up naming the SUBSTITUTE's
+# generation, which is the defect, not the premise.
+W1_BFILE="$(LC_ALL=C grep -rl 'N1_LATE_REVIEWER' "$R31/.review-stage/issue-710" 2>/dev/null | LC_ALL=C head -1)"
+W1_B_NONCE=""
+if [ -n "$W1_BFILE" ]; then
+  W1_B_NONCE="$(basename "$W1_BFILE")"; W1_B_NONCE="${W1_B_NONCE#c.}"; W1_B_NONCE="${W1_B_NONCE%.md}"
+fi
+# THE INTERLEAVE PREMISE, MEASURED ON DISK: generation B exists, is DIFFERENT from A, and really
+# holds the blocking verdict. Without this the case could pass because nothing happened at all.
+if [ -n "$W1_B_NONCE" ] && [ "$W1_B_NONCE" != "$W1_A_NONCE" ]; then
+  ok "w1/interleave PREMISE: the plant published a DIFFERENT generation B ($W1_B_NONCE != $W1_A_NONCE)"
+else
+  bad "w1/interleave PREMISE: no second generation was published (A=$W1_A_NONCE B=${W1_B_NONCE:-<none>}) — the interleave did not happen"
+fi
+if [ -n "$W1_BFILE" ] && LC_ALL=C grep -q '^result: FINDINGS' "$W1_BFILE" 2>/dev/null; then
+  ok "w1/interleave PREMISE: and a BLOCKING verdict really is recorded in generation B"
+else
+  bad "w1/interleave PREMISE: generation B holds no blocking verdict, so nothing dangerous was on offer"
+fi
+rc_is 2 "w1/interleave: the recording is REFUSED — the generation it would supersede is not the one it inspected"
+has "changed" "w1/interleave: and the refusal says something CHANGED between the reads (never a silent second opinion)"
+hasnt "supersedes-report-nonce=$W1_A_NONCE" "w1/interleave: NOTHING records that generation A was superseded — A is not what this call would have taken over from"
+hasnt "RECORD-OK" "w1/interleave: no successful recording is reported"
+# THE RECORD STILL NAMES B, so the generation whose verdict was never inspected is still current.
+W1_NOW_NONCE="$(RECORD_NONCE "$R31" 710 c)"
+if [ -n "$W1_B_NONCE" ] && [ "$W1_NOW_NONCE" = "$W1_B_NONCE" ]; then
+  ok "w1/interleave: the stage record still names generation B — nothing was published over it"
+else
+  bad "w1/interleave: the record now names '$W1_NOW_NONCE', not generation B ('$W1_B_NONCE') — a substitute was published over a verdict nobody inspected"
+fi
+# THE PROPERTY THAT MATTERS: the blocking verdict in generation B is STILL THIS STAGE'S VERDICT.
+rs "$R31" verdict c --issue 710
+rc_is 4 "w1/interleave: the stage still reports FINDINGS — the blocking verdict in generation B did not become history"
+has "RESULT: FINDINGS" "w1/interleave: naming the blocking token"
+hasnt "AUTHOR-PERFORMED" "w1/interleave: and the merge-proceeding token was NOT published over a verdict nobody inspected"
+
+# CONTROL — AN UNDISTURBED `--force` SUPERSESSION STILL WORKS AND NAMES THE RIGHT GENERATION. The
+# refusal above is satisfiable by a tool that refuses every supersession, and the trace is
+# satisfiable by one that records nothing, so both halves are asserted here on the path B2
+# deliberately leaves open.
+R31C="$(newrepo)"
+rs "$R31C" open c --issue 711 --agent spec-auditor
+W1_C_NONCE="$(RECORD_NONCE "$R31C" 711 c)"
+printf 'result: FINDINGS\n\n### [BLOCKER] a real gap the author is superseding by hand\n' \
+  >"$(REPORT_OF "$R31C" 711 c)"
+rs "$R31C" record-author-performed c --issue 711 --reason "$W1_REASON" --evidence "$W1_EV" \
+  --performed-by author --force
+rc_is 0 "w1 CONTROL: an undisturbed forced supersession still records"
+has "replaced-verdict=FINDINGS" "w1 CONTROL: naming the token it replaced"
+has "supersedes-report-nonce=$W1_C_NONCE" "w1 CONTROL: and the generation it took over from is EXACTLY the one it inspected"
+W1_C_NEW="$(REPORT_OF "$R31C" 711 c)"
+OUT="$(cat "$W1_C_NEW" 2>/dev/null || printf '<absent>\n')"; RC=0
+has "supersedes-report-nonce: $W1_C_NONCE" "w1 CONTROL: the published report carries the same generation in its own trace"
+has "replaced-verdict: FINDINGS" "w1 CONTROL: and the replaced token, so an operator can follow both"
+
+# CONTROL — THE ORDINARY PATH IS UNTOUCHED: a sentinel-only report is still freely replaceable,
+# because a guard that reds on correct input is the guard agents learn to waive.
+R31S="$(newrepo)"
+rs "$R31S" open c --issue 712 --agent spec-auditor
+W1_S_NONCE="$(RECORD_NONCE "$R31S" 712 c)"
+rs "$R31S" record-author-performed c --issue 712 --reason "$W1_REASON" --evidence "$W1_EV" \
+  --performed-by author
+rc_is 0 "w1 CONTROL: the normal recording over a sentinel still succeeds"
+has "supersedes-report-nonce=$W1_S_NONCE" "w1 CONTROL: naming the sentinel's own generation"
+hasnt "replaced-verdict" "w1 CONTROL: and claiming NO replacement, because nothing was recorded there"
+
+# THE INTERLEAVE *INSIDE* THE OBSERVATION. The case above lands between the observation and the
+# publication; this one lands between the two halves of the observation itself — after the record's
+# bytes are captured and before the report of the generation they name is read — which is the span
+# the primitive's own re-verification exists for. The anchor is the report read INSIDE the
+# primitive, so on a script that has no such single site the plant cannot land and this case fails
+# CLOSED (4 bads) rather than passing vacuously.
+if n1_build "$W1_D/inside.sh" 'STAGE_REPORT_OBS="$(report_bytes "$STAGE_REPORT")"' "$W1_INJECTION"; then
+  ok "w1/inside: the plant landed between the record capture and the report read"
+  R31I="$(newrepo)"
+  rs "$R31I" open c --issue 713 --agent spec-auditor
+  OUT="$(cd "$R31I" && bash "$W1_D/inside.sh" record-author-performed c --issue 713 \
+    --reason "$W1_REASON" --evidence "$W1_EV" --performed-by author 2>&1)"; RC=$?
+  rc_is 2 "w1/inside: a record that MOVED between the two halves of one observation is a NAMED refusal"
+  has "changed" "w1/inside: the refusal says the record changed while it was being observed"
+  rs "$R31I" verdict c --issue 713
+  rc_is 4 "w1/inside: and the blocking verdict that arrived in the new generation is still the stage's verdict"
+else
+  bad "w1/inside: the plant did NOT land — there is no single record-then-report observation to interleave"
+  bad "w1/inside: (the same absence, 2/4)"
+  bad "w1/inside: (the same absence, 3/4)"
+  bad "w1/inside: (the same absence, 4/4)"
+fi
+
+# AND A RECORD THAT MOVED IS NOT REPORTED AS UNREADABLE. `status`/`verdict` must name the CHANGE,
+# because the operator action differs: read it again, versus repair the record or chmod it. A false
+# rationale is worse than none (round 2, B7; round 4, H4).
+if n1_build "$W1_D/read-moved.sh" 'STAGE_REPORT_OBS="$(report_bytes "$STAGE_REPORT")"' "$W1_INJECTION"; then
+  ok "w1/read: the plant landed for the READ-side case too"
+  R31R="$(newrepo)"
+  rs "$R31R" open c --issue 714 --agent spec-auditor
+  OUT="$(cd "$R31R" && bash "$W1_D/read-moved.sh" verdict c --issue 714 2>&1)"; RC=$?
+  rc_is 5 "w1/read: verdict over a record that moved mid-observation is a NON-VERDICT (NOT-RUN)"
+  has "stage record changed mid-read" "w1/read: naming the CHANGE, not an unreadable record — the operator action is to read it again"
+  OUT="$(cd "$R31R" && bash "$W1_D/read-moved.sh" status c --issue 714 2>&1)"; RC=$?
+  has "state=stage-record-changed" "w1/read: and status maps it to its OWN state, not onto stage-record-unreadable"
+else
+  bad "w1/read: the plant did NOT land for the read-side case"
+  bad "w1/read: (the same absence, 2/5)"
+  bad "w1/read: (the same absence, 3/5)"
+  bad "w1/read: (the same absence, 4/5)"
+  bad "w1/read: (the same absence, 5/5)"
+fi
+
+# (c) THE STRUCTURAL GUARD OVER THE OBSERVATION BOUNDARY, WITH ITS POSITIVE CONTROLS. The
+#     behavioural cases above prove the interleave is refused TODAY; they cannot see a NEW second
+#     read added tomorrow in a place none of them drives. That is the same argument round 14 made
+#     for `read-boundary-scan.sh` — three rounds of "a boundary exists and one path bypasses it" —
+#     so the answer is a mechanism, `scripts/tests/lib/observation-boundary-scan.sh`, which
+#     attributes every STAGE-FILE READER call to the function it appears in and requires the owner
+#     to be the primitive (or a statement declared in the scanner WITH ITS REASON).
+OBS="$SCRIPT_DIR/lib/observation-boundary-scan.sh"
+if [ ! -f "$OBS" ]; then
+  bad "obs-guard: $OBS is missing — the structural guard did not run (1/9)"
+  bad "obs-guard: the same absence (2/9)"
+  bad "obs-guard: the same absence (3/9)"
+  bad "obs-guard: the same absence (4/9)"
+  bad "obs-guard: the same absence (5/9)"
+  bad "obs-guard: the same absence (6/9)"
+  bad "obs-guard: the same absence (7/9)"
+  bad "obs-guard: the same absence (8/9)"
+  bad "obs-guard: the same absence (9/9)"
+else
+  OBS_OUT="$(bash "$OBS" "$RS" 2>&1)"; OBS_RC=$?
+  if [ "$OBS_RC" -eq 0 ]; then
+    ok "obs-guard: the SHIPPED review-stage.sh is CLEAN — no decision path reads a stage file for itself"
+  else
+    bad "obs-guard: the shipped review-stage.sh has an observation-boundary violation: $OBS_OUT"
+  fi
+  case "$OBS_OUT" in
+    *"NOT COVERED"*) ok "obs-guard: the scan DECLARES what it does not cover, on every run" ;;
+    *) bad "obs-guard: the scan did not declare its scope (got: $OBS_OUT)" ;;
+  esac
+  case "$OBS_OUT" in
+    *"reader call(s) attributed"*) ok "obs-guard: and it reports its COUNTS — attributed calls and declared reads, not an adjective" ;;
+    *) bad "obs-guard: the scan did not report its subject counts (got: $OBS_OUT)" ;;
+  esac
+  # CONTROL (a): AN INDEPENDENT SECOND READ OF THE RECORD in the decision path that had the defect.
+  #              This is the pre-fix shape itself: `record-author-performed` reading the record for
+  #              its rewrite after the report had been read from the earlier generation.
+  OBS_D="$T/obs-plant"; mkdir -p "$OBS_D"
+  LC_ALL=C sed -e '/^cmd_record_author_performed() {/a\  PLANTED_SECOND="$(stage_record_text "$sfile")"' \
+    "$RS" >"$OBS_D/review-stage.sh" 2>/dev/null || true
+  if LC_ALL=C grep -q 'PLANTED_SECOND' "$OBS_D/review-stage.sh" 2>/dev/null; then
+    ok "obs-guard/control: the second-read plant landed in the scratch copy (asserted, not assumed)"
+  else
+    bad "obs-guard/control: the plant did NOT land, so the control below proves nothing"
+  fi
+  OBS_POUT="$(bash "$OBS" "$OBS_D/review-stage.sh" 2>&1)"; OBS_PRC=$?
+  if [ "$OBS_PRC" -ne 0 ]; then
+    ok "obs-guard/control: the guard REDS on an independent second read in a decision path"
+  else
+    bad "obs-guard/control: the guard reported CLEAN on a planted second read — it proves nothing (got: $OBS_POUT)"
+  fi
+  # A BARE RED IS NOT EVIDENCE EITHER: an unrelated breakage produces the same exit code, so the
+  # guard must NAME the reader, the function and the line.
+  case "$OBS_POUT" in
+    *'`stage_record_text` reads a stage file inside `cmd_record_author_performed`'*)
+      ok "obs-guard/control: and it NAMES the reader and the function, so the red is attributable" ;;
+    *) bad "obs-guard/control: the guard red without naming the reader and its function (got: $OBS_POUT)" ;;
+  esac
+  OBS_PLINE="$(LC_ALL=C grep -n 'PLANTED_SECOND' "$OBS_D/review-stage.sh" | LC_ALL=C head -1 | cut -d: -f1)"
+  case "$OBS_POUT" in
+    *"review-stage.sh:$OBS_PLINE "*)
+      ok "obs-guard/control: and it names the planted LINE, not just the file" ;;
+    *) bad "obs-guard/control: the guard did not name the planted line $OBS_PLINE (got: $OBS_POUT)" ;;
+  esac
+  # CONTROL (b): A DIFFERENT READER, in a DIFFERENT decision path — so the reader set is a declared
+  #              LIST and the attribution is not one hard-coded pair.
+  OBS_D2="$T/obs-plant2"; mkdir -p "$OBS_D2"
+  LC_ALL=C sed -e '/^cmd_verdict() {/a\  PLANTED_RB="$(report_bytes "$STAGE_REPORT")"' \
+    "$RS" >"$OBS_D2/review-stage.sh" 2>/dev/null || true
+  OBS_P2="$(bash "$OBS" "$OBS_D2/review-stage.sh" 2>&1)"; OBS_P2RC=$?
+  if [ "$OBS_P2RC" -ne 0 ] && [ "${OBS_P2#*'`report_bytes` reads a stage file inside `cmd_verdict`'}" != "$OBS_P2" ]; then
+    ok "obs-guard/control: a planted report read in `verdict` reds too and is named — the reader set is a LIST"
+  else
+    bad "obs-guard/control: a planted report_bytes read in cmd_verdict was not caught or not named (rc=$OBS_P2RC; got: $OBS_P2)"
+  fi
+  # CONTROL (c): A DECISION PATH THAT DOES NOT OBSERVE AT ALL. Without this, the guard would be
+  #              satisfied by a script whose paths read nothing and decide from globals a previous
+  #              call left behind — which is not "one observation", it is none.
+  OBS_D3="$T/obs-plant3"; mkdir -p "$OBS_D3"
+  LC_ALL=C sed -e '/^  observe_stage "\$KI_ISSUE" "\$KI_KIND"$/d' "$RS" >"$OBS_D3/review-stage.sh" 2>/dev/null || true
+  OBS_P3="$(bash "$OBS" "$OBS_D3/review-stage.sh" 2>&1)"; OBS_P3RC=$?
+  if [ "$OBS_P3RC" -ne 0 ] && [ "${OBS_P3#*"calls \`observe_stage\` 0 time(s)"}" != "$OBS_P3" ]; then
+    ok "obs-guard/control: a decision path that takes NO observation is a named FAIL, not a clean run"
+  else
+    bad "obs-guard/control: a decision path with no observation was not caught (rc=$OBS_P3RC; got: $OBS_P3)"
+  fi
+  # CONTROL (d): TWO OBSERVATIONS IN ONE PATH — the defect itself, wearing the primitive's name.
+  OBS_D4="$T/obs-plant4"; mkdir -p "$OBS_D4"
+  LC_ALL=C sed -e '/^cmd_status() {/a\  observe_stage "$KI_ISSUE" "$KI_KIND"' "$RS" >"$OBS_D4/review-stage.sh" 2>/dev/null || true
+  OBS_P4="$(bash "$OBS" "$OBS_D4/review-stage.sh" 2>&1)"; OBS_P4RC=$?
+  if [ "$OBS_P4RC" -ne 0 ] && [ "${OBS_P4#*"calls \`observe_stage\` 2 time(s)"}" != "$OBS_P4" ]; then
+    ok "obs-guard/control: TWO observations in one decision path is a named FAIL — the primitive's name is not a licence"
+  else
+    bad "obs-guard/control: two observations in one path were not caught (rc=$OBS_P4RC; got: $OBS_P4)"
+  fi
+  # CONTROL (e): A STALE ALLOWLIST ENTRY is its own failure. An entry matching nothing excuses
+  #              nothing — and it is the signal that the read it described has CHANGED, which is why
+  #              entries are matched on SOURCE TEXT and never by line number.
+  OBS_D5="$T/obs-stale"; mkdir -p "$OBS_D5"
+  LC_ALL=C sed -e 's|now_obs="\$(report_bytes "\$STAGE_REPORT")"|now_obs="$(report_bytes "${STAGE_REPORT}")"|' \
+    "$RS" >"$OBS_D5/review-stage.sh" 2>/dev/null || true
+  OBS_P5="$(bash "$OBS" "$OBS_D5/review-stage.sh" 2>&1)"
+  case "$OBS_P5" in
+    *"STALE allowlist entry"*) ok "obs-guard/stale: an allowlist entry whose source text has CHANGED is reported STALE by name, never kept as a standing excusal" ;;
+    *) bad "obs-guard/stale: the guard did not report a stale entry when the declared re-verification was reworded (got: $OBS_P5)" ;;
+  esac
+  # CONTROL (f): AN UNKNOWN SUBJECT IS REFUSED, NOT REPORTED CLEAN. A scanner with no declared
+  #              primitive for a script knows nothing about it, and `premerge-assert.sh` is the
+  #              subject someone will reach for first — it is DECLARED as not covered, with its
+  #              reason, rather than silently passing.
+  OBS_P6="$(bash "$OBS" "$SCRIPT_DIR/../flow/premerge-assert.sh" 2>&1)"; OBS_P6RC=$?
+  if [ "$OBS_P6RC" -eq 2 ] && [ "${OBS_P6#*"no observation primitive is declared"}" != "$OBS_P6" ]; then
+    ok "obs-guard/subject: an undeclared subject is REFUSED by name (exit 2), never reported clean"
+  else
+    bad "obs-guard/subject: an undeclared subject was not refused (rc=$OBS_P6RC; got: $OBS_P6)"
+  fi
+fi
+
+# (d) STRUCTURAL — THE OBSERVATION IS ONE READ OF EACH FILE, AND THE RE-VERIFICATION IS INSIDE IT.
+#     The scanner above says WHO may read; these say the primitive is shaped the way its contract
+#     claims, which the scanner deliberately does not check.
+W1_OBSR="$(LC_ALL=C sed -n '/^observe_record() {/,/^}$/p' "$RS" 2>/dev/null || true)"
+W1_OBSS="$(LC_ALL=C sed -n '/^observe_stage() {/,/^}$/p' "$RS" 2>/dev/null || true)"
+if [ -n "$W1_OBSR" ] && [ -n "$W1_OBSS" ]; then
+  ok "w1/structural: both halves of the primitive were extracted (the pins below are not vacuous)"
+else
+  bad "w1/structural: a half of the primitive could not be extracted — the pins below are UNMEASURED"
+fi
+# COUNTED OVER CODE, NOT THE PROSE BESIDE IT. The primitive's comments legitimately NAME its
+# reader (they state what its three statuses mean), so a whole-body count reds on a correct script
+# — a guard that reds on correct input is the guard agents learn to waive, and this is the second
+# place in this round where the fix was to strip comments before judging.
+W1_OBSR_CODE="$(printf '%s\n' "$W1_OBSR" | LC_ALL=C grep -v '^[[:space:]]*#' || true)"
+W1_NRD="$(printf '%s\n' "$W1_OBSR_CODE" | LC_ALL=C grep -c 'stage_record_text' || true)"
+if [ "$W1_NRD" = "1" ]; then
+  ok "w1/structural: the record half reads the record file EXACTLY ONCE — every field is parsed from that capture"
+else
+  bad "w1/structural: the record half reads the record file $W1_NRD time(s); more than one is the class W1 names"
+fi
+if [ "$(printf '%s\n' "$W1_OBSR" | LC_ALL=C grep -c 'read_field_from "\$STAGE_RECORD_TEXT"' || true)" -ge 4 ]; then
+  ok "w1/structural: and its display fields come from that capture (read_field_from over the text), not from the file"
+else
+  bad "w1/structural: the record half still reads fields from somewhere other than its own capture"
+fi
+# THE RE-VERIFICATION IS AFTER THE REPORT READ, which is the whole property: before it, it would
+# compare the record with itself and see nothing.
+W1_RB_LN="$(printf '%s\n' "$W1_OBSS" | LC_ALL=C grep -n 'report_bytes "\$STAGE_REPORT"' | LC_ALL=C head -1 | cut -d: -f1)"
+W1_RV_LN="$(printf '%s\n' "$W1_OBSS" | LC_ALL=C grep -n 'again="\$(stage_record_text' | LC_ALL=C head -1 | cut -d: -f1)"
+if [ -n "$W1_RB_LN" ] && [ -n "$W1_RV_LN" ] && [ "$W1_RV_LN" -gt "$W1_RB_LN" ]; then
+  ok "w1/structural: the re-verification is taken AFTER the report read (lines $W1_RB_LN < $W1_RV_LN) — before it, it would compare the record with itself"
+else
+  bad "w1/structural: the re-verification is not after the report read (report=$W1_RB_LN reverify=$W1_RV_LN)"
+fi
+# AND A MOVED RECORD DISCARDS THE REPORT OBSERVATION. Keeping it would publish bytes belonging to a
+# generation the observation can no longer claim is current — the second opinion in person.
+case "$W1_OBSS" in
+  *'STAGE_REPORT_OBS=""; STAGE_REPORT_STATE=""'*)
+    ok "w1/structural: a moved record DISCARDS the report observation rather than publishing it beside a defect" ;;
+  *) bad "w1/structural: the report observation survives a moved record, so a consumer could still read it" ;;
+esac
+# AND THE DEFECT KIND IS A CLOSED TOKEN, NOT A MATCH ON THE DETAIL SENTENCE. A consumer keyed on
+# the prose would be reading a DIAGNOSTIC as a CONTROL (#3312), and it fired immediately while this
+# was being written: two legitimate detail sentences both contain the words `report-nonce`, so a
+# text match sent a read-level failure to the refusal that says "this record names two".
+if [ "$(LC_ALL=C grep -c 'STAGE_RECORD_DEFECT_KIND=' "$RS" || true)" -ge 6 ] &&
+  LC_ALL=C grep -q 'case "\$STAGE_RECORD_DEFECT_KIND" in' "$RS"; then
+  ok "w1/structural: the record defect is published as a CLOSED KIND beside its sentence, and consumers branch on the kind"
+else
+  bad "w1/structural: the defect kind is missing or nobody branches on it, so a consumer must match the detail prose"
+fi
+
 
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
@@ -5210,7 +5593,38 @@ fi
 # itself, a BEHAVIOURAL agreement between the probe's renderer and the published field's, and no
 # opt-out env var. Every one needs only bash, git and coreutils; none branches on the host, and the
 # CR/TAB fixtures emit a fixed number of assertions whether or not the filesystem can hold them.
-ASSERT_FLOOR=886
+#
+# ROUND 17's W1 MOVES IT TO 937. Section 31 adds 51: THE RECORD AND THE REPORT MUST BE *ONE*
+# OBSERVATION. `record-author-performed` read the REPORT using the generation loaded earlier and
+# then read the STAGE RECORD independently, so an `open --force` publishing generation B between
+# those reads left BOTH final re-verifications satisfied — an unchanged report A, an unchanged
+# record B — and the recording published `AUTHOR-PERFORMED` over B without ever inspecting B's
+# verdict, without `--force`, and with a trace claiming A was superseded. Measured on the shipped
+# script (17 failures before the fix, 0 after): `RECORD-OK … supersedes-report-nonce=<A>` at exit 0
+# while B held `result: FINDINGS`, and `verdict` then reported AUTHOR-PERFORMED. THREE PREMISE
+# assertions measure the fixture on disk — generation A named by the record, a DIFFERENT generation
+# B published by the plant (located by the reviewer's own marker, because its nonce is unknowable to
+# the test and reading the RECORD for it would read the defect instead of the premise), and a real
+# blocking verdict in B — then the refusal, the ABSENCE of a trace naming A, the record still naming
+# B, and `verdict` still reporting FINDINGS. Two further interleaves land INSIDE the observation
+# (between the record capture and the report read), where the primitive's own re-verification is what
+# refuses, and the read side asserts the cause is `stage record changed mid-read` with its OWN
+# `state=`, never `stage-record-unreadable` — a perfectly readable record reported as unreadable is a
+# false rationale, and the operator action differs (read it again). THREE CONTROLS keep the
+# legitimate paths open: an undisturbed `--force` supersession still records AND names EXACTLY the
+# generation it inspected (in the RECORD-OK line and in the published report's own trace), and an
+# ordinary recording over a sentinel still succeeds while claiming no replacement. TWELVE assertions
+# cover the new `scripts/tests/lib/observation-boundary-scan.sh`, whose six controls plant an
+# independent second read in the decision path that HAD the defect (requiring the guard to red AND
+# to name the reader, the function and the LINE), a different reader in a different path, a decision
+# path that observes zero times, one that observes twice, a reworded declared re-verification
+# (STALE), and an undeclared subject (REFUSED, never reported clean). Six structural pins over the
+# primitive itself, which the scanner deliberately does not check: one record read, display fields
+# from that capture, the re-verification AFTER the report read (before it, it would compare the
+# record with itself), a moved record DISCARDING the report observation, and the defect published as
+# a CLOSED KIND beside its sentence rather than matched as prose. Every one needs only bash, git and
+# coreutils; none branches on the host.
+ASSERT_FLOOR=937
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

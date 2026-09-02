@@ -1421,6 +1421,40 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   that keeps this from redding correct input (round 11's Q3 exists for space-bearing checkouts).
   No opt-out, and none may be added: a checkout is always renamable, so an escape hatch could only
   buy a published path that does not exist.
+  **AND A DECISION MUST REST ON *ONE* OBSERVATION — THE THIRD INSTANCE OF ONE SHAPE, SO THE FIX IS A
+  MECHANISM AND NOT A THIRD PATCH (#3751 round 17, W1).** Round 9's N2 (`premerge-assert` validated
+  `head-sha` from one read of the stage record and consumed a SECOND read for the nonce), round 12's
+  R2 (`classify_report` read the report EIGHT times, so a verdict could be assembled from versions
+  that never coexisted), and now: `record-author-performed` read the REPORT using the generation
+  loaded earlier and then read the RECORD independently. An `open --force` publishing generation B
+  between those reads left **both** final re-verifications satisfied — an unchanged report **A**, an
+  unchanged record **B**, each individually consistent — so `AUTHOR-PERFORMED` was published over B
+  **without ever inspecting B's verdict**, with no `--force`, and with a `supersedes-report-nonce:`
+  trace naming **A**. Measured: `RECORD-OK … supersedes-report-nonce=<A>` at exit 0 while B held
+  `result: FINDINGS`, and `verdict` then reported AUTHOR-PERFORMED. **A trace that names the wrong
+  generation is worse than no trace** — falsifying the audit trail is the worst failure this tool can
+  have, and it is the harm #3751 exists to prevent, committed by the mechanism itself. The fix is ONE
+  primitive: `observe_record` is the only place the stage record FILE is read (it used to be read
+  SEVEN times by the reader path and five more by `open`), and `observe_stage` pairs it with the
+  report of **the generation those bytes name** and then **RE-READS the record and requires it to be
+  byte-identical** — a record that moved is the NAMED refusal `stage record changed mid-read`, never
+  folded onto `stage record unreadable`, because the operator action differs (read it again, versus
+  repair or chmod). Three rules generalise. **(1) Two reads of one subject are one observation only
+  if something re-verifies between them**; without that, "nothing changed" is a claim each read makes
+  about itself. **(2) Publish a defect as a CLOSED KIND beside its detail sentence** — a consumer
+  keyed on the prose is reading a diagnostic as a control (#3312), and that fired immediately: two
+  legitimate detail sentences both contain the words `report-nonce`, so a text match sent a
+  read-level failure to the refusal that says "this record names two". **(3) Delete the parameter a
+  function no longer uses** — `classify_report` takes no report path at all now, so a second
+  observation is *unexpressible* rather than merely untaken, and an unobserved caller gets a named
+  non-verdict instead of a fresh read. Mechanized, in the same spirit as round 14's read boundary:
+  `scripts/tests/lib/observation-boundary-scan.sh` attributes every stage-file reader call to the
+  function it appears in and requires the owner to be the primitive (or a statement declared in the
+  scanner **with its reason** — the two in-window re-verifications are, because their whole purpose
+  is to be fresh), and requires each decision path to observe **exactly once** (none means it
+  reasons from an observation it did not take; several means two). It declares what it does not
+  cover on every run, and its six controls plant each violation class and require the guard to red
+  **and to name** the reader, the function and the line.
   **AND "EVERY READ GOES THROUGH THE BOUNDARY" WAS FALSE FOR TWO READERS FOR A WHOLE ROUND — SO
   THE CLASS IS NOW MECHANIZED, NOT ASSERTED (#3751 round 14).** Round 13 routed three of the five
   non-boundary read sites and left two reading files directly, and **both** were found by the next
@@ -1432,8 +1466,8 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   CURRENT report held the sentinel. **The byte never has to defeat the counter to defeat the reader
   — it only has to make the current record unparseable while a stale artifact is still on disk.**
   (2) `_gate_awk` read the GATE-OF-RECORD summary raw, so `RESULT: PA<NUL>SS` became `PASS` at the
-  merge gate. Both are routed; `count_field_lines` is now **three-valued** (read faithfully / read
-  failed / not representable) with the permissive set spelled affirmatively as `0` at both callers,
+  merge gate. Both are routed; the record-line counter is now **three-valued** (counted / not
+  countable / not representable) with the permissive set spelled affirmatively as `0` at every caller,
   and the unrepresentable case carries its OWN refusal because the operator action differs (rewrite
   the record, never a chmod). **THREE CONSECUTIVE ROUNDS FOUND THE SAME SHAPE — a boundary exists
   and one path bypasses it** (round 7's emit sites, round 13's record reads, round 14's remaining

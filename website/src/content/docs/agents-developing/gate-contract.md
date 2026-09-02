@@ -135,7 +135,16 @@ carry).
   was validated on one read while `review-stage.sh verdict` re-read the record to pick which report is
   current, so a replacement in between produced a verdict from a different GENERATION under a binding
   checked on the old one; the record is now captured once, the `head-sha` parsed from that capture, and the
-  capture required to be byte-identical before the token is parsed. **And byte equality is not
+  capture required to be byte-identical before the token is parsed. **That was the FIRST of three
+  instances of one shape, and the third made it a mechanism (#3751 round 17)**: `review-stage.sh`
+  itself read the report using the generation loaded earlier and then read the record independently,
+  so a concurrent `open --force` left BOTH re-verifications satisfied — an unchanged report A, an
+  unchanged record B — and published a merge-proceeding token over B **without inspecting B's
+  verdict**, with a trace naming A. Two reads of one subject are one observation only if something
+  RE-VERIFIES between them; that tool now has ONE primitive that captures the record, reads the
+  report of the generation those bytes name, and re-reads the record, with a structural guard
+  (`scripts/tests/lib/observation-boundary-scan.sh`) requiring every decision path to reason from
+  one such observation and to read no stage file for itself. **And byte equality is not
   IDENTITY (#3751 round 10)** — an ABA replacement (A to a foreign generation B while `verdict`
   reads B, then back to A) leaves two identical observations — so the accepted verdict must also
   NAME the validated generation: its `report=` field carries the report nonce, which must equal the

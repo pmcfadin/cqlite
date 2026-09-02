@@ -166,8 +166,9 @@ Three further declared limits of the mechanism itself:
   (measured). A verdict is a statement about a document; assembled across two documents it is a
   statement about neither. It now takes ONE observation through `report_bytes` and classifies every
   field from that text, with the `<key>: <value>` grammar in ONE implementation
-  (`read_field_from`, which the file-reading `read_field` delegates to — a second implementation's
-  agreement is only knowable by testing it), and an observation it cannot classify is a NON-VERDICT
+  (`read_field_from` — since round 17's W1 the ONLY implementation there is, because the
+  file-reading `read_field` is DELETED; a second implementation's agreement is only knowable by
+  testing it, and subtraction removes the question), and an observation it cannot classify is a NON-VERDICT
   reported as UNREADABLE rather than ungrammatical, because the bytes were never obtained and
   nothing may be asserted about content that was not observed. `record-author-performed` PASSES ITS
   OWN snapshot in, so the bytes its write is guarded on and the verdict it decides by are the same
@@ -263,9 +264,9 @@ Three further declared limits of the mechanism itself:
   to prevent. **The byte never has to defeat the counter to defeat the reader: it only has to make
   the current record unparseable while a stale artifact is still on disk, because `0` is not a safe
   reading of a document we could not read as text.** (2) `_gate_awk` read the gate-of-record summary
-  raw, so `RESULT: PA<NUL>SS` reached the merge gate as `PASS`. `count_field_lines` is now
-  **three-valued** — read faithfully (`0`) / read failed (`1`) / not representable (`2`) — with the
-  permissive set spelled AFFIRMATIVELY as `0` at both callers, so a status added later refuses by
+  raw, so `RESULT: PA<NUL>SS` reached the merge gate as `PASS`. That counter is now
+  **three-valued** — counted (`0`) / not countable (`1`) / not representable (`2`) — with the
+  permissive set spelled AFFIRMATIVELY as `0` at every caller, so a status added later refuses by
   construction; status 2 carries its own refusal token `stage-record-unrepresentable`, because the
   operator action differs (rewrite the record or re-open the stage, never a chmod) and a permission
   diagnosis about a file whose permissions are fine is round 2's B7 false rationale.
@@ -466,6 +467,51 @@ Three further declared limits of the mechanism itself:
   whole space-bearing path is published and that the published path EXISTS. No opt-out env var,
   and none may be added: a checkout is always renamable, so an escape hatch could only buy a
   published path that cannot be opened.
+  **AND EVERY DECISION RESTS ON *ONE* OBSERVATION, WHICH IS NOW A MECHANISM (#3751 round 17, W1).**
+  This is the THIRD instance of one shape in this issue — round 9's N2 (`premerge-assert` validated
+  `head-sha` from one record read and consumed a SECOND read for the nonce) and round 12's R2
+  (`classify_report` read the report EIGHT times) were the first two, each fixed at its own site.
+  The third: `record-author-performed` read the REPORT using the generation loaded earlier and then
+  read the RECORD independently, so an `open --force` publishing generation **B** between those
+  reads left BOTH final re-verifications satisfied — an unchanged report **A**, an unchanged record
+  **B**, each individually consistent — and the recording published `AUTHOR-PERFORMED` over B
+  **without ever inspecting B's verdict**, with no `--force`, and with a `supersedes-report-nonce:`
+  trace naming **A**. Measured on the shipped script: `RECORD-OK … supersedes-report-nonce=<A>` at
+  exit 0 while B held `result: FINDINGS`, and `verdict` then reported AUTHOR-PERFORMED. A trace that
+  names the wrong generation is worse than no trace.
+  **The consolidation:** `observe_record` is the ONLY place the stage record FILE is read — the
+  reader path used to open it SEVEN times (a count, a nonce value and five display fields) and
+  `open` five more — and `observe_stage` pairs that capture with the report of **the generation
+  those bytes name**, then RE-READS the record and requires it byte-identical. All three decision
+  paths (`verdict`, `status`, `record-author-performed`) reason from one such observation, and
+  `premerge-assert.sh` consumes the verdict LINE it produces while taking its own single record
+  capture with its own re-verification (round 9's N2 plus round 16's V1). Four properties worth
+  carrying elsewhere:
+  1. **Two reads of one subject are one observation only if something re-verifies between them.**
+     Otherwise "nothing changed" is a claim each read makes about itself, which is exactly how two
+     internally-consistent halves described two different generations.
+  2. **A defect is published as a CLOSED KIND beside its detail sentence.** A consumer keyed on the
+     prose reads a diagnostic as a control (#3312), and it fired while this was being written: two
+     legitimate sentences both contain the words `report-nonce`, so a text match routed a read-level
+     failure to the refusal that says "this record names two".
+  3. **A parameter a function no longer uses is deleted.** `classify_report` takes no report path,
+     so a second observation is *unexpressible* rather than untaken; an unobserved caller gets the
+     named non-verdict `stage not observed`, never a fresh read.
+  4. **A moved record is its own cause, on every surface** — `stage record changed mid-read`,
+     `state=stage-record-changed`, `reason=stage-record-changed-mid-read` — because the operator
+     action is *read it again*, not *repair the record or chmod it*, and a perfectly readable record
+     reported as unreadable is round 2's B7 false rationale.
+  **Mechanized, not asserted:** `scripts/tests/lib/observation-boundary-scan.sh` (the sibling of
+  round 7's emit scanner and round 14's read scanner — one file per property) attributes every
+  stage-file reader call to the function it appears in, requires the owner to be the primitive or a
+  statement DECLARED in the scanner with its reason (the two in-window re-verifications are declared,
+  because being fresh is their whole purpose), and requires each decision path to call the observer
+  EXACTLY ONCE. Its allowlist carries no in-band delimiter: the first draft used
+  `<function>|<statement>` and the very first entry — the record re-verification, which contains a
+  `||` — was truncated and excused nothing, the identical defect `read-boundary-scan.sh` hit with
+  its reason field, so the channel was removed (an `@in <function>` scope directive) rather than the
+  delimiter made rarer. Six controls plant each violation class and require the guard to red AND to
+  name the reader, the function and the line; an undeclared subject is REFUSED, never reported clean.
 - `agent=` is written through
   `sanitize_field`, whose character class excludes whitespace, so it cannot legitimately carry one; a
   hand-edited record could, and that value truncates — a truncated DIAGNOSTIC, never a wrong verdict,
@@ -664,7 +710,8 @@ Three further declared limits of the mechanism itself:
   (measured by grep — no agent definition, no skill, no script, no call site), and it was the
   caller-controlled component behind a finding cluster across four review rounds. Two of those were
   round 4's: the path was written RAW into the LINE-oriented stage record, so a LEGAL
-  newline-bearing filename split across lines and the reader (`read_field`) took only the PREFIX —
+  newline-bearing filename split across lines and the reader (then `read_field`, now
+  `observe_record`) took only the PREFIX —
   which could name a DIFFERENT, pre-existing report recording `PASS` while the sentinel went to the
   newline-bearing name; and the report's parent directory was created BEFORE repository containment
   and ignore status were verified, so a REFUSED outside-the-repository path still created
@@ -894,7 +941,7 @@ answer at exit 0:
 | read | file content | what the reader saw | result |
 |---|---|---|---|
 | `report_bytes` | `res\0ult: PASS` (no column-zero `result:` line — `grep -c '^result:'` exits 1) | `result: PASS` | `RESULT: PASS`, exit 0 |
-| `read_field` | `report-nonce: STALE\0PASS1` (not a valid token: NUL is not alphanumeric) | the valid token `STALEPASS1` | a STALE report's `PASS` |
+| `read_field` (the file-reading record reader, DELETED in round 17's W1 — the read now happens once, in `observe_record`) | `report-nonce: STALE\0PASS1` (not a valid token: NUL is not alphanumeric) | the valid token `STALEPASS1` | a STALE report's `PASS` |
 | `premerge-assert.sh` `c_parse_verdict` | `RESULT: PA\0SS` (a token the closed set must refuse) | `PASS` | `PREMERGE: OK`, exit 0 |
 
 The third is the merge gate itself: gawk passes a NUL through a field, and the capture of awk's

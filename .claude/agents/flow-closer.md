@@ -269,7 +269,11 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    means your auditor woke up and delivered: NOTHING was published, so read the verdict it wrote
    rather than re-running the recording. It refuses `reason=stage-record-changed-mid-write` for the
    same reason one level up: someone re-opened the stage under you, so re-read it rather than
-   re-recording. **Nothing this subcommand does OVERWRITES a report (#3751 round 15):** the
+   re-recording. And it refuses `reason=stage-record-changed-mid-read` (#3751 round 17) when the
+   record moves while the stage is being OBSERVED — the record and the report would describe
+   DIFFERENT generations, so this call never inspected the verdict of the one it would have
+   superseded. Nothing is wrong with the record and there is nothing to repair: read it again
+   (`review-stage.sh verdict c --issue <N>`) and decide against what is current NOW. **Nothing this subcommand does OVERWRITES a report (#3751 round 15):** the
    substitute lands in a fresh generation and the stage record publishes it, so a verdict that
    arrives at any instant is still on disk in its own generation, named by
    `supersedes-report-nonce:` on the `RECORD-OK` line. Read it there before deciding anything.
