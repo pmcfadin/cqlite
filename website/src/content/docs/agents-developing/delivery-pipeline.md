@@ -452,8 +452,8 @@ box**.
 
 **AND ON A SUPERVISOR-LESS FLEET IT ANSWERED ABOUT THE EMPTY SET — supervisor fleets only, DESCOPED
 by owner ruling 2026-09-01 on #3548 (option C; completes #3393).** The subject set is
-`refs/lane-claims/*` plus the legacy `refs/machine-claims/*`, and the only writer of either in the tree
-is `worker-supervisor.sh`. This fleet runs `/drive-issue` lanes, so when #3548 was measured the command
+`refs/lane-claims/*` plus the legacy `refs/machine-claims/*`, and the only in-tree CALLER that writes
+either is `worker-supervisor.sh` (`stamp` is a public subcommand and can be invoked directly). This fleet runs `/drive-issue` lanes, so when #3548 was measured the command
 had no subject and exited 1 — persisted or manually `stamp`ed refs can still produce rows, and either
 way **1 means "nothing was reported", never a clean bill of health.** The two *populated* namespaces
 are deliberately not read, both refusals measured: `refs/claims/issue-<N>` records the transient

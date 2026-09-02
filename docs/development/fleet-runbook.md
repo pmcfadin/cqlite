@@ -872,7 +872,7 @@ machine + heartbeat age (issue #2089). Interpretation:
   `project-board-sync` 30-min cron's `reap-claims` job reaps on the SAME predicate server-side (age >
   4h AND no open PR AND, for a local claim, PID-dead) — so a supervisor that dies overnight gets its
   claim reaped by CI without waiting for a human to run flow-board (issue #2655). **`worker-supervisor.sh`
-  is the ONLY writer of `refs/lane-claims/*` in the tree**, so on this fleet — `/drive-issue` lanes, zero
+  is the only IN-TREE CALLER that writes `refs/lane-claims/*`**, so on this fleet — `/drive-issue` lanes, zero
   production supervisors — that namespace is EMPTY (measured on all three boxes) and neither the
   `reap-claims` job nor `dead-lanes` has a subject. What IS populated here is the per-issue lock
   `refs/claims/issue-<N>` and the per-MACHINE heartbeat `refs/heartbeats/<machine>`; see *Lane liveness on
@@ -915,7 +915,7 @@ carries at most a one-line summary and a pointer here. Five review rounds on #35
 rather than guarded. Edit the signatures HERE and nowhere else.
 
 Why: `dead-lanes` enumerates `refs/lane-claims/<machine>/<lane-id>` plus the legacy
-`refs/machine-claims/<machine>`, and **the only writer of either in the whole tree is
+`refs/machine-claims/<machine>`, and **the only IN-TREE CALLER that writes either is
 `scripts/local/worker-supervisor.sh`**. This fleet runs `/drive-issue` lanes, not supervisors.
 **Measured on 2026-09-01, on all three boxes:** `lane-claims=0 machine-claims=0`, production
 supervisors ZERO, while `claims=6 heartbeats=20` — so the detector had no subject and exited 1.

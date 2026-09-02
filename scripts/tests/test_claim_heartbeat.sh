@@ -3060,7 +3060,7 @@ require_help_phrase() {  # <the guarantee this phrase carries> <the COMPLETE phr
 require_help_phrase "supervisor-fleets-only scope, with the ruling cited" \
   'SUPERVISOR FLEETS ONLY — DESCOPED (owner ruling 2026-09-01 on #3548, option C; completes #3393)'
 require_help_phrase "only-writer relationship" \
-  'the ONLY writer of either in this tree is `scripts/local/worker-supervisor.sh`'
+  'The only IN-TREE CALLER that writes either is `scripts/local/worker-supervisor.sh`'
 require_help_phrase "exit-1-is-not-a-clean-bill-of-health rule (#3467)" \
   'EXIT 1 MEANS "NOTHING WAS REPORTED", NEVER a clean bill of health'
 require_help_phrase "refs/claims/issue-<N> refusal (transient claiming-shell pid)" \
@@ -3194,6 +3194,18 @@ echo "TEST 83: ONE canonical signature statement, and no site contradicts it (#3
 #
 # Text is NORMALISED before matching — whitespace flattened (every file wraps) and markdown emphasis
 # characters removed — because the same sentence is `**bold**` in one file and plain in another.
+#
+# SECOND DECLARED GAP (roborev job 63): this case does NOT enforce the "ONE canonical statement"
+# contract it is named for. Copying the canonical text verbatim into another covered file would PASS
+# — the negative half rejects a bounded set of contradictory phrasings, not duplication — and the
+# positive half scans each whole file rather than the canonical SECTION, so it cannot see drift
+# between two occurrences inside one document. DECLARED, NOT FIXED, and deliberately: enforcing
+# uniqueness of a prose passage mechanically means extracting sections by heading and diffing
+# normalised prose, which is the unbounded-parsing shape this repo has twice removed a guard for
+# (#3229's census-exclusion, #1716's cargo cross-check) — a guard with known false PASSes invites
+# reliance it cannot support. What this case DOES prove is plant-verified in both directions: the
+# canonical statement is present in full in the canonical file, and no covered file re-asserts a
+# definite label for either signature. Read the gap as the boundary of the claim, not an oversight.
 _rb="$SCRIPT_DIR/../../docs/development/fleet-runbook.md"
 _cl="$SCRIPT_DIR/../../CLAUDE.md"
 _wb="$SCRIPT_DIR/../../website/src/content/docs/agents-developing/delivery-pipeline.md"

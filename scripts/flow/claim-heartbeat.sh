@@ -250,8 +250,10 @@
 # SCOPE OF `dead-lanes`: SUPERVISOR FLEETS ONLY — DESCOPED (owner ruling 2026-09-01 on
 # #3548, option C; completes #3393)
 #   The subject set is `refs/lane-claims/<machine>/<lane-id>` plus the legacy
-#   `refs/machine-claims/<machine>`, and the ONLY writer of either in this tree is
-#   `scripts/local/worker-supervisor.sh` (through `stamp`). EXIT 1 MEANS "NOTHING WAS
+#   `refs/machine-claims/<machine>`. The only IN-TREE CALLER that writes either is
+#   `scripts/local/worker-supervisor.sh` (through `stamp`) — but `stamp` is a PUBLIC
+#   subcommand and can be invoked directly, so a manually stamped fleet legitimately
+#   carries refs; the legacy namespace has no current writer at all. EXIT 1 MEANS "NOTHING WAS
 #   REPORTED", NEVER a clean bill of health (#3467) — including when the subject set is
 #   empty, as it was on this fleet when #3548 was measured (see the runbook below).
 #   The two POPULATED namespaces are deliberately NOT read, and both refusals are measured:

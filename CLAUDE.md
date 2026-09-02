@@ -1962,7 +1962,7 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   value a cron reads. Restoring it is tracked separately, carrying the family census forward.
   **AND ON THIS FLEET IT ANSWERED ABOUT THE EMPTY SET — SUPERVISOR FLEETS ONLY, DESCOPED by owner
   ruling 2026-09-01 on #3548 (option C; completes #3393).** The subject set is `refs/lane-claims/*`
-  (+ legacy `refs/machine-claims/*`) and its ONLY writer in the tree is `worker-supervisor.sh`, so on
+  (+ legacy `refs/machine-claims/*`) and its only IN-TREE CALLER is `worker-supervisor.sh` (`stamp` is public and can be called directly), so on
   this supervisor-less `/drive-issue` fleet it had nothing to report when measured (persisted or
   manually `stamp`ed refs can still produce rows) — and **exit 1 still means "nothing was reported",
   never a clean bill of health.** The populated `refs/claims/issue-<N>` and `refs/heartbeats/<machine>`
