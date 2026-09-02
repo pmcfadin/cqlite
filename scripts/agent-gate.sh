@@ -9731,7 +9731,30 @@ record_result() { # <name> <status> <seconds>
   # sidecars, before the integrity asserts — because this write is what PUBLISHES the
   # component to every reader, including a concurrent lane's boundary renderer (#3765
   # blocker 14).
-  printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"
+  # ATOMIC, because plain `>` redirection CREATES the file before printf fills it, so a
+  # concurrent boundary renderer could discover a zero-length or partial .result and render
+  # a malformed row (#3765 blocker 16). Blocker 14 moved this write AFTER the sidecars, which
+  # narrowed that window without closing it — and the note above CLAIMS this write publishes
+  # the component, so the write has to actually be indivisible. Write to a temp in the SAME
+  # directory (so the rename cannot cross a filesystem), verify it is non-empty, then mv.
+  #
+  # There is no `set -e` here (`set -uo pipefail`), so every step is tested explicitly. On
+  # failure the verdict is still published by the old direct write and the degradation is
+  # NAMED on stderr: losing the component from the summary entirely is worse than a window
+  # that only a concurrent reader can observe, and a silent fallback would be a third
+  # instance of this issue's own "absence reported as a measurement" defect.
+  local _rr_tmp
+  _rr_tmp=$(mktemp "$LOG_DIR/.result.XXXXXX" 2>/dev/null) || _rr_tmp=""
+  if [ -n "$_rr_tmp" ] \
+     && printf '%s %s\n' "$2" "$3" > "$_rr_tmp" 2>/dev/null \
+     && [ -s "$_rr_tmp" ] \
+     && mv -f "$_rr_tmp" "$LOG_DIR/$1.result" 2>/dev/null; then
+    :
+  else
+    [ -n "$_rr_tmp" ] && rm -f "$_rr_tmp" 2>/dev/null
+    echo "agent-gate: WARNING — atomic publish of $1.result failed; fell back to a direct write (#3765 blocker 16)" >&2
+    printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"
+  fi
   # #2874: every component records its verdict through here, so this is the natural
   # component-boundary chokepoint for the mid-run summary-integrity guard.
   _assert_summary_integrity "$1"

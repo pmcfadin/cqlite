@@ -6259,6 +6259,58 @@ if printf '%s\n' "$fa_dg_body" | grep -q 'digest(t)' \
 else
   bad "3765-digest-in-key: key() does not include a digest of the full identity, so the oversize key is windowed again (blocker 15)"
 fi
+# 55x. BLOCKER 17 — pubid() must NOT strip trailing IDENTIFIER characters. `_` and `-` are
+#      valid in a Rust test path and a bash suite tag, so stripping them published
+#      `module::test_` as `module::test` — a DIFFERENT, possibly real test. The count was
+#      always right (it is taken on the full identity); the PUBLISHED identifier is what a
+#      reader matches a flake against, which is the whole purpose of this field.
+printf 'test module::test_ ... FAILED\ntest module::test ... FAILED\n' > "$fa_dir/trailid.log"
+fa_ti=$(bash "$fa_tool" "$fa_dir/trailid.log" 10)
+fa_ti_count=$(printf '%s\n' "$fa_ti" | sed -n 's/^count=//p' | head -1)
+fa_ti_names=$(printf '%s\n' "$fa_ti" | sed -n 's/^name=//p' | sort | tr '\n' ' ')
+if [ "$fa_ti_count" = 2 ]; then
+  ok "3765-trailid-count: module::test_ and module::test are TWO distinct identities"
+else
+  bad "3765-trailid-count: expected count=2, got '${fa_ti_count:-<none>}' — a trailing identifier character is being stripped before dedup (blocker 17)"
+fi
+case "$fa_ti_names" in
+  *"module::test_"*)
+    ok "3765-trailid-published: the trailing underscore SURVIVES publication, so the two are distinguishable to a reader" ;;
+  *) bad "3765-trailid-published: expected 'module::test_' among the published identifiers, got '$fa_ti_names' — pubid() strips a valid identifier character (blocker 17)" ;;
+esac
+# STRUCTURAL, labelled as such: pin the charset that pubid() strips, so a future edit cannot
+# quietly re-add `_` or `-` to it. A behavioural case only covers the shapes someone thought of.
+fa_pub_body=$(awk '/^  function pubid\(/,/^  }/' "$fa_tool")
+if printf '%s\n' "$fa_pub_body" | grep -qE 'sub\(/\[\.:\]\+\$/' ; then
+  ok "3765-trailid-charset: pubid() strips ONLY trailing . and : — identifier characters are preserved"
+else
+  bad "3765-trailid-charset: pubid() does not strip exactly [.:]+ — if _ or - is back in that class, blocker 17 has regressed"
+fi
+
+# 55y. BLOCKER 16 — .result is the PUBLICATION signal, so the write must be INDIVISIBLE.
+#      Plain `>` redirection creates the file before printf fills it, so a concurrent
+#      boundary renderer can read a zero-length or partial result. Blocker 14 moved this
+#      write after the sidecars, which narrowed the window without closing it.
+#      STRUCTURAL: the race itself is not controllable, so assert the mechanism, and label
+#      it a structural assert rather than dressing it up as behavioural.
+fa_rr_body=$(awk '/^record_result\(\) \{/,/^\}/' "$GATE")
+if printf '%s\n' "$fa_rr_body" | grep -q 'mktemp "$LOG_DIR/.result' \
+   && printf '%s\n' "$fa_rr_body" | grep -q 'mv -f "$_rr_tmp" "$LOG_DIR/$1.result"'; then
+  ok "3765-result-atomic: .result is published by writing a temp in the SAME directory and renaming it, so no reader can observe a partial result"
+else
+  bad "3765-result-atomic: record_result does not publish .result via a same-directory temp + mv — a plain redirection creates the file before it is filled (blocker 16)"
+fi
+if printf '%s\n' "$fa_rr_body" | grep -q '\[ -s "$_rr_tmp" \]'; then
+  ok "3765-result-verified: the temp is VERIFIED non-empty before it is renamed into place"
+else
+  bad "3765-result-verified: the temp is renamed without checking it was actually written — there is no set -e here, so an unwritten temp would publish an EMPTY result (blocker 16)"
+fi
+if printf '%s\n' "$fa_rr_body" | grep -q 'WARNING — atomic publish'; then
+  ok "3765-result-degradation-named: a failed atomic publish is NAMED on stderr, not silently downgraded"
+else
+  bad "3765-result-degradation-named: a failed atomic publish falls back silently — an unannounced degradation is this issue's own defect class"
+fi
+
 # CODE lines only: the digest note NAMES those binaries while explaining why it does not use
 # them, and a scan over the comments would read that explanation as the defect.
 if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -qE '(sha256sum|md5sum|cksum|openssl dgst)'; then
@@ -6515,7 +6567,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=526
+ASSERT_FLOOR=533
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
