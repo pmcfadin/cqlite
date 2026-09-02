@@ -67,7 +67,8 @@
 #       rests on. Fields are otherwise kept VERBATIM: an object id or a path that
 #       has been masked is useless to the operator who has to act on it.
 #   (c) The verdict appears ONLY on an `OBJECT-STORE: verdict ` line, and its token
-#       is from the CLOSED set {VERIFIED, CORRUPT, UNMEASURED}. Continuation prose
+#       is from the CLOSED set {VERIFIED, CORRUPT, UNMEASURED, UNSWEEPABLE}.
+#       Continuation prose
 #       goes on `verdict-detail` lines, so the verdict line's token position can
 #       never hold a word.
 #   (d) This script's own STATIC TEMPLATE TEXT contains no other verdict
@@ -84,10 +85,18 @@
 #                    (bit 2, see the reachability discriminator below). The findings
 #                    are named.
 #   5   UNMEASURED — the answer was not obtained: no git, no resolvable object
-#                    store, no usable timeout binary, the bound expired, an fsck
-#                    failure this script cannot classify, a damage class that did
-#                    NOT reproduce, or a reachability/ref/commit-graph/multi-pack-index
-#                    complaint that reproduced but could not be ATTRIBUTED.
+#                    store, no usable timeout binary, the bound expired, the fsck
+#                    could not be STARTED, an fsck failure this script cannot
+#                    classify, a damage class that did NOT reproduce, or a
+#                    reachability/ref/commit-graph/multi-pack-index complaint that
+#                    reproduced but could not be ATTRIBUTED.
+#   6   UNSWEEPABLE — git fsck RAN and DIED without finishing, on TWO independent
+#                    walks (its own `die()` or a signal death: a status at or above
+#                    128, which is never read as its error bitmask). NO CAUSE IS
+#                    CLAIMED: the store's object content is UNKNOWN, and no lane on
+#                    this box can obtain an affirmative sweep of it. It is a STOPPING
+#                    verdict, and it is NOT the same fact as UNMEASURED - see the
+#                    branch at PASS 2 for why only one of the two is permissive.
 #
 # A REACHABILITY COMPLAINT HAS TWO CAUSES AND THEY GET DIFFERENT VERDICTS (#3749
 # review round 4, item 1). fsck's exit bit 2 (ERROR_REACHABLE) fires for BOTH:
@@ -668,6 +677,27 @@ MAX_SWEEP_WALKS=3
 FSCK_DAMAGE_MASK=5
 FSCK_KNOWN_MASK=63
 FSCK_NONMASK_FLOOR=124
+# FSCK_FATAL_FLOOR splits the non-bitmask range in TWO, because "we could not run it" and
+# "it ran and reproducibly died" are DIFFERENT FACTS and only the first is a property of
+# this box's tooling (#3749 review round 10, item 1).
+#
+#   124..127 — the timeout and shell EXEC conventions. 124 is `timeout`'s own "I killed
+#              it" (handled as `killed` above this test), 125 is `timeout` itself failing,
+#              126 "found but not executable", 127 "not found". Every one of them means
+#              the fsck did NOT run: no store was read, nothing about it was learned.
+#   128+     — git's own `die()` (exactly 128) and signal deaths (128+N; 137 SIGKILL is
+#              the bound's escalation and is handled as `killed`). Something in the exec
+#              chain RAN and then failed fatally.
+#
+# THE STATUS SPACE IS SHARED, SO THE SPLIT IS ARGUED FROM THE EXEC CHAIN, NOT ASSUMED. The
+# chain is `env -i <allowlist> nice -n 19 timeout <bound> git --git-dir=... fsck ...`, and
+# every wrapper in it reports its OWN failures inside 125..127 (coreutils' documented
+# convention for `env`, `nice` and `timeout` alike). 128 and above therefore cannot be a
+# wrapper refusing to exec: it is the innermost command having actually started. Combined
+# with the `.started` marker (RULE 0 below), which establishes that the redirections took
+# and the group body ran, a status at or above this floor is an AFFIRMATIVE observation
+# that `git fsck` ran and died without finishing.
+FSCK_FATAL_FLOOR=128
 # ERROR_REACHABLE alone. It is NOT in FSCK_DAMAGE_MASK because the bit does not by
 # itself say which of its two causes fired (a pruned object named by a reflog, or an
 # object a LIVE ref still needs); the third walk is what attributes it.
@@ -720,10 +750,13 @@ FSCK_REACHABLE_BIT=2
 # callers and never bit-tested.
 #
 # THE THREE RULES BELOW, IN THIS ORDER, AND THE ORDER IS THE POINT:
-#   1. A status at or above 124 IS NOT A BITMASK. 124/125/126/127 are the
-#      timeout/shell conventions (this fsck runs under `timeout`), 128+N is git's
-#      `die()` and signal deaths. Testing bits in that range is how `127 & 1` reads as
-#      object damage. `unclassified`, never bit-tested.
+#   1. A status at or above 124 IS NOT A BITMASK, and it splits in two. Testing bits in
+#      that range is how `127 & 1` reads as object damage, so NEITHER half is ever
+#      bit-tested — but they are DIFFERENT FACTS and they get different classes:
+#      124..127 (the timeout/exec conventions) => `unrunnable`, the fsck never ran;
+#      128 and above (git's `die()`, a signal death) => `fatal`, it RAN and did not
+#      finish. See FSCK_FATAL_FLOOR for why the boundary is where it is, and the PASS 2
+#      dispatch for why only one of the two is permissive.
 #   2. THE DAMAGE BITS ARE TESTED INDEPENDENTLY, before any completeness check on the
 #      rest of the status. An unrelated bit - one git added after this was written -
 #      can then never MASK object or pack damage; it only travels with it.
@@ -828,9 +861,20 @@ fsck_pass() {
   #   error: <sha>: hash-path mismatch, found at: <path>    (content != its own name)
   #   missing blob|tree|commit|tag <sha>
   #   broken link from ... to ...
+  #   fatal: loose object <sha> (stored in <path>) is corrupt   (git DIED here)
   # Anything containing `corrupt` is included too, wherever git puts it. WARNINGS
   # ARE NOT MATCHED: `warning in commit <sha>: missingSpaceBeforeEmail` is
   # legitimate historical sloppiness and fsck exits 0 on it.
+  #
+  # `^fatal` IS MATCHED FOR THE OPERATOR, AND IT DECIDES NOTHING (#3749 review round 10,
+  # item 1). When fsck dies its LAST line is the only account of why, and some of those
+  # lines match none of the shapes above (measured on git 2.43.0: a repository-local
+  # `fsck.<msgid>=ignore` for an id this git does not know exits 128 with `fatal:
+  # Unhandled message id`, and nothing else). A stopping verdict that leaves the operator
+  # with no text at all is the round-9 defect in a new place. THE CLASS STILL COMES FROM
+  # THE EXIT BITMASK AND NEVER FROM THIS TEXT: matching here only decides what is PRINTED,
+  # which is why it is not round 1's `/^error/p` classifier coming back — that pattern
+  # DECIDED the verdict, and this one cannot reach any branch.
   #
   # A DIAGNOSTIC IS READ WHOLE, NOT LINE BY LINE. git permits newlines in paths and
   # quotes them verbatim, so `sed` would split such a diagnostic in two and the
@@ -840,7 +884,7 @@ fsck_pass() {
   # one, and the whole thing is escaped by sane() at print time.
   : >"$TMPD/$tag.findings"
   awk '
-    /^error/ || /^missing / || /^broken link/ || /corrupt/ {
+    /^error/ || /^missing / || /^broken link/ || /^fatal/ || /corrupt/ {
       if (have) printf "%s%c", buf, 0
       buf = $0; have = 1; next
     }
@@ -861,8 +905,10 @@ fsck_pass() {
     WALK_CLASS=clean
   elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
     WALK_CLASS=killed
+  elif [ "$rc" -ge "$FSCK_FATAL_FLOOR" ]; then
+    WALK_CLASS=fatal
   elif [ "$rc" -ge "$FSCK_NONMASK_FLOOR" ]; then
-    WALK_CLASS=unclassified
+    WALK_CLASS=unrunnable
   elif [ $((rc & FSCK_DAMAGE_MASK)) -ne 0 ]; then
     WALK_CLASS=damage
   elif [ $((rc & ~FSCK_KNOWN_MASK)) -ne 0 ]; then
@@ -1032,6 +1078,97 @@ if [ "$FIRST_WALK_CLEAN" -eq 0 ]; then
     exit 4
   fi
 
+  # BOTH PASSES RAN AND BOTH DIED FATALLY: the store cannot be SWEPT, and that is its own
+  # verdict. THE FINDING THIS EXISTS FOR (#3749 review round 10, item 1).
+  #
+  # Real commit-object corruption in the shared store makes `git fsck` DIE rather than
+  # report a bit. MEASURED on git 2.43.0, on fixtures the suite builds: overwrite the
+  # loose object a live ref points AT with unparseable bytes and fsck prints `fatal: loose
+  # object <sha> ... is corrupt` and exits **128**; overwrite a blob, or the same commit
+  # with a VALID object of the wrong name, and it exits 3 (bits 2|1). So the exact damage
+  # this control exists to catch has a shape that lands OUTSIDE the bitmask range, where
+  # the previous version called it `unclassified` -> UNMEASURED -> the supervisor writes a
+  # fresh throttle stamp and keeps spawning workers. A FALSE NEGATIVE on genuine
+  # corruption, one status range over from round 4's.
+  #
+  # WHY THIS DOES NOT CLAIM CORRUPTION, AND WHY THAT IS THE STRONGER FIX. The alternative
+  # was to read the `fatal:` diagnostic for an object-damage signature and emit the fatal
+  # damage verdict. That is round 1's classifier again — narrower, and with two costs the
+  # bit-based rule does not have: git's fatal-message space is prose this script would
+  # have to enumerate, and every wording it did not enumerate would fall back to the SAME
+  # permissive state, so the fix would close only the cases somebody thought of. A status
+  # at or above FSCK_FATAL_FLOOR closes the whole class regardless of cause, and it needs
+  # no parsing at all: what it asserts is exactly what was observed.
+  #
+  # WHAT IS AFFIRMATIVELY ESTABLISHED, and it is why this is not the permissive state:
+  #   * the `.started` marker proves the redirections took and the group body ran (RULE 0);
+  #   * every wrapper in the exec chain reports its own failures in 125..127, so a status
+  #     at or above 128 is the innermost command having actually started (FSCK_FATAL_FLOOR);
+  #   * it happened TWICE, on two independent walks, so it is not a concurrent writer.
+  # "The probe could not run" and "the probe ran, twice, and reproducibly died on this
+  # store" were sharing one verdict. They are different facts: the first is a property of
+  # this box's tooling and is deliberately permissive (see the UNMEASURED reasoning), while
+  # every cause of the second is a persistent property of the REPOSITORY - its objects, its
+  # refs, its own local config. A store no lane can ever obtain an affirmative sweep of is
+  # not a hygiene probe that could not run, so this one STOPS the box.
+  #
+  # AND IT PRINTS NO REPAIR INSTRUCTION, DELIBERATELY. No cause was established, and round
+  # 9's lesson is that the text a human gets when the box has stopped must match what was
+  # measured: a repair chosen for the wrong cause is worse than none.
+  if [ "$C1" = fatal ] && [ "$C2" = fatal ]; then
+    emit_findings p2 finding
+    printf '%s measured fsck rc=%s then rc=%s (%ss + %ss) over %s\n' \
+      "$P" "$RC1" "$RC2" "$EL1" "$EL2" "$(sane "$OBJ_DIR")"
+    printf '%s verdict UNSWEEPABLE\n' "$P"
+    printf '%s verdict-detail git fsck RAN and DIED without finishing, on TWO independent\n' "$P"
+    printf '%s verdict-detail walks over the SHARED store (exit %s then %s: a fatal error from git\n' "$P" "$RC1" "$RC2"
+    printf '%s verdict-detail itself or a signal death, not its error bitmask), so it never rehashed the\n' "$P"
+    printf '%s verdict-detail store to the end. This is NOT a concurrent writer - a transient does not\n' "$P"
+    printf '%s verdict-detail survive a second independent walk - and it is NOT the same fact as a\n' "$P"
+    printf '%s verdict-detail probe that could not START: the launch was established affirmatively and\n' "$P"
+    printf '%s verdict-detail every wrapper in the chain reports its own failures below 128.\n' "$P"
+    printf '%s verdict-detail NO CAUSE IS CLAIMED HERE. The object content of this store is UNKNOWN,\n' "$P"
+    printf '%s verdict-detail which is not clean: every lane on this box reads it, so do NOT certify\n' "$P"
+    printf '%s verdict-detail anything against this checkout until a sweep of it completes.\n' "$P"
+    printf '%s verdict-detail REMEDY: stop the lanes on this box, then run the walk BY HAND and read\n' "$P"
+    printf '%s verdict-detail what it says - the `fatal:` line is the account git gives of why it\n' "$P"
+    printf '%s verdict-detail stopped, and any diagnostics it managed to print are quoted above:\n' "$P"
+    printf '%s verdict-detail   git --git-dir=%s fsck --no-progress --no-dangling\n' "$P" "$(sane "$GIT_COMMON_DIR")"
+    printf '%s verdict-detail ACT ON WHAT THAT LINE NAMES, and on nothing else. This sweep prints no\n' "$P"
+    printf '%s verdict-detail repair instruction because it established no cause, and a repair chosen\n' "$P"
+    printf '%s verdict-detail for the wrong one is worse than none: re-obtaining objects cannot fix a\n' "$P"
+    printf '%s verdict-detail malformed local config, and a config edit cannot fix damaged bytes.\n' "$P"
+    printf '%s verdict-detail THEN re-run this sweep and require its affirmative verdict before\n' "$P"
+    printf '%s verdict-detail clearing any latch or resuming the lanes: "I think I fixed it" is not an\n' "$P"
+    printf '%s verdict-detail exit condition (#3749).\n' "$P"
+    exit 6
+  fi
+
+  # A FATAL DEATH IN EXACTLY ONE PASS: it did not reproduce, so it is neither an
+  # established un-sweepable store nor a clean one. Same rule as the one-pass damage
+  # branch below, and the same reason: one observation cannot separate a transient from a
+  # durable fact on a store eight lanes are writing.
+  if [ "$C1" = fatal ] || [ "$C2" = fatal ]; then
+    emit_findings p2 unmeasured-cause
+    unmeasured "git fsck RAN and DIED without finishing (a fatal error from git itself, or a" \
+      "signal death - not its error bitmask) in ONE of two walks and did not reproduce (pass 1" \
+      "class=$C1 rc=$RC1, pass 2 class=$C2 rc=$RC2). Nothing about the store's object" \
+      "content was established, so this is NOT clean. Re-run on an IDLE box; if it recurs" \
+      "the second walk will confirm it and this sweep will stop the box (#3749)."
+  fi
+
+  # THE FSCK NEVER RAN, IN EITHER PASS: 124..127 are the timeout and shell EXEC
+  # conventions, so no store was read. Its own cause text, because the fatal branch above
+  # would claim a walk that never started and the bitmask text below would name a class
+  # that was never established.
+  if [ "$C1" = unrunnable ] || [ "$C2" = unrunnable ]; then
+    unmeasured "the fsck could not be RUN (pass 1 class=$C1 rc=$RC1, pass 2 class=$C2" \
+      "rc=$RC2): a status of 125, 126 or 127 is the timeout/exec convention for 'the" \
+      "command was not started', not an fsck status, so nothing about this store was" \
+      "measured. Usual causes: no usable timeout binary, a git that is not executable, or" \
+      "a PATH that does not reach one. Fix the tooling on this box and re-run (#3749)."
+  fi
+
   # A DAMAGE CLASS IN EXACTLY ONE PASS: non-passing, and NOT the fatal branch. It is
   # neither established damage (it did not reproduce) nor a clean store (something
   # named an object as unhashable once).
@@ -1099,7 +1236,14 @@ if [ "$FIRST_WALK_CLEAN" -eq 0 ]; then
     # complaint must not be read as either verdict. `killed`, `launchfail` and
     # `unclassified` all mean the third walk produced no usable answer; each keeps the
     # reproduced complaint visible and says which walk went wrong.
-    if [ "$C3" = killed ] || [ "$C3" = launchfail ] || [ "$C3" = unclassified ]; then
+    # ENUMERATED FROM THE USABLE SIDE, so a class added to fsck_pass later cannot join the
+    # usable set by default: `killed`, `launchfail`, `unrunnable`, `fatal` and
+    # `unclassified` all mean this walk produced no usable answer (#3749 rounds 4 and 10).
+    case "$C3" in
+    clean | nondamage | damage) C3_USABLE=1 ;;
+    *) C3_USABLE=0 ;;
+    esac
+    if [ "$C3_USABLE" -eq 0 ]; then
       emit_findings p2 unmeasured-cause
       unmeasured "git fsck reported reachability problems on BOTH walks (pass 1 rc=$RC1," \
         "pass 2 rc=$RC2) and the confirming --no-reflogs walk produced no usable answer" \
