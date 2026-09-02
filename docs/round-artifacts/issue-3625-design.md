@@ -129,6 +129,12 @@ The design was followed. Four deltas, each with its reason:
    record it directly via `_census_declare`. Without this they would have been gaps for a
    reason that is not a real limitation.
 
+   > **SUPERSEDED FOR `node-tests` by roborev job 383 (round 6, below).** Both halves of that
+   > rationale turned out wrong for the jest lane: deleting the log was an implementation
+   > CHOICE, not a constraint, and the "exact subject count" it held was of the files it had
+   > SELECTED, not of the work jest did. It is `indirect:jest` now. `shell-selftests` remains
+   > `self:`, and the ruling for why is recorded at its declaration in `_census_kind`.
+
 3. **`UNDECLARED` is fatal (status → `FAIL`), not a `VACUOUS`.** The design said
    fail-closed but did not name the terminal state. `VACUOUS` means *measured, and the
    subject count is zero*; an undeclared component was never measured at all, so calling it
@@ -141,19 +147,28 @@ The design was followed. Four deltas, each with its reason:
 
 ### The census, as declared today (37 components + 3 dynamic delta names)
 
+**RE-DERIVED FROM THE CODE at the end of every round that moves a declaration, and this table
+was stale once already** — it still read `self: 2 | node-tests, shell-selftests` four hundred
+lines above its own round-6 section saying otherwise, directly beneath the sentence warning
+that a number in prose decays like a stale comment. Recorded rather than quietly corrected,
+because the failure it demonstrates is the one this document is about.
+
 | kind | n | components |
 |---|---|---|
 | `libtest` | 18 | core-tests, tombstones-scan, scan-offload-guard, work-counters-guard, byte-budget-guard, arrow-parity-guard, memory-budget, format-compat, write-tests, cli-tests, compaction-byte-parity, bti-multiclustering, query-semantics-oracle, flight-query-semantics-oracle, flight-tests, legacy-heuristics, binding-rust-tests, kit-dashboard-drift |
 | `compile` | 3 | feature-iso-parquet, feature-iso-delta-scan, minimal-build |
 | `both` | 1 | integration-tests |
-| `runtime:<why>` | 1 | scoped-tests (moved off `both` by the census audit — see below) |
-| `indirect:<driver>` | 2 | python-bindings (pytest), node-bindings (jest) |
-| `self:<unit>` | 2 | node-tests, shell-selftests |
-| `gap:<reason>` | 14 | fmt, clippy, all-features-check, oom-audit, parity-report, operator-metrics-doc, smoke, file-size, roborev-lints, pub-surface, binding-unwind-profile, delivery-telemetry, tooling-tests, tree-selftest |
+| `runtime:<why>` | 1 | scoped-tests — no statically correct kind; it records what the diff ROUTED to |
+| `indirect:<driver>` | 3 | python-bindings (pytest), node-bindings (jest), node-tests (jest) |
+| `emitted` | 2 | file-size, pub-surface — the guard prints `AGENT-GATE-CENSUS: <n> <unit>` and the census reads it |
+| `self:<unit>` | 1 | shell-selftests — selected == executed, and no per-script tally exists to prefer |
+| `gap:<reason>` | 12 | fmt, clippy, all-features-check, oom-audit, parity-report, operator-metrics-doc, smoke, roborev-lints, binding-unwind-profile, delivery-telemetry, tooling-tests, tree-selftest |
 
 > **These counts are DERIVED, and the derivation is the authority, not this table**: case A2
 > of `scripts/tests/test_agent_gate_census.sh` prints them from the shipped `_census_kind` on
-> every run. A number written in prose decays exactly like a stale comment.
+> every run, and the line above was copied from its output —
+> `libtest=18 compile=3 both=1 self=1 indirect=3 runtime=1 emitted=2 gap=12`. A number written
+> in prose decays exactly like a stale comment.
 
 Every `libtest`/`compile`/`both` declaration was verified AT ITS CALL SITE to write its
 cargo output into `$LOG_DIR/<name>.log` — directly, via `run_component`'s redirect, or (for
@@ -161,7 +176,7 @@ cargo output into `$LOG_DIR/<name>.log` — directly, via `run_component`'s redi
 `record_result`. A mis-declaration is the one failure mode this subsystem must not have: it
 would make a legitimately green component measure `ZERO` and read `VACUOUS`.
 
-The 14 gaps are a real, declared reduction in coverage. They print their reason on every
+The 12 gaps are a real, declared reduction in coverage. They print their reason on every
 run and are counted separately on the aggregate `census:` line as `N DECLARED-GAP
 (RECOGNISED)`; none of them is one of the components the issue's two-run table names.
 
@@ -592,3 +607,53 @@ assumed:
 census records a COUNT, not a TRUTH (the #1716/#3522 precedent); each script's own case floor is
 what covers that. U1 fails if `_run_shell_selftest_files` ever grows a skip path, because premise
 (1) would no longer hold and the lane would then need `node-tests`' treatment.
+
+---
+
+## Pre-gate round — the C intent audit's findings (#3162)
+
+The C audit returned **AC2, AC3, AC4 satisfied; AC1 partial**, measured against 400 real
+historical SUMMARY blocks rather than argued from source. Three fixes, and the sequencing matters
+for one of them.
+
+### 1. The printed residual named a CLOSED issue
+
+`_census_kind`'s gap strings said `(#3625 phase 2)` on up to 10 component rows of **every full
+gate** — and #3625 was closed `NOT_PLANNED`, absorbed into the OPEN umbrella **#3162**. An
+operator following that pointer lands on a dead ticket and the residual then belongs to nobody.
+Re-pointed at #3162, here and in this document.
+
+**Sequencing, not preference:** this edits `scripts/agent-gate.sh`, which is in
+`GATE_GLOBAL_PATTERNS` and which `--delta` refuses, so it **cannot** be batched after the gate of
+record. It had to land before it.
+
+### 2. `emitted` shipped for the two cheapest lanes — the AC1 partial itself
+
+The audit's measurement: **`fmt` (49 of 400 blocks) and `file-size` (45 of 400) are the two most
+frequent `PASS (0s)` rows on this fleet**, and both were gaps. `fmt`'s is defensible on the oracle
+(`cargo fmt --check` emits no per-file tally). `file-size`'s was not: it already walks a file set
+and `wc -l`s every member.
+
+Shipped for `file-size` and `pub-surface` only. The other six guards stay declared gaps under
+#3162 — that descope stands, and a fabricated count would be worse than an honest gap.
+
+**The two lanes are NOT the same case, and treating them alike would have reddened correct input
+on the commonest diff shape there is:**
+
+| lane | subject | is zero legitimate? |
+|---|---|---|
+| `file-size` | the changed `.rs` files it measured against the thresholds | **YES** — a docs- or scripts-only diff changes none. Emits `AGENT-GATE-CENSUS: NO-SUBJECT …`, which renders `NOT-APPLICABLE` and PRESERVES `PASS`. Measured, not assumed: every `--lite` round of this branch changed zero `.rs` files. |
+| `pub-surface` | the unconditional crate-root `pub mod` declarations verified against their module prologues | **NO** — the guard already REFUSES a crate root with none, so its zero is real vacuity and couples to `VACUOUS` |
+
+Guard cases V1 (the four contract states), V2 (both shipped guards really print the line, and
+`file-size`'s count is derived from the set it walked), V3 (**live** — runs the real
+`check-pub-surface.sh` and censuses its actual output, not a fixture of it).
+
+**RED arm, and it corrected the guard:** deleting the `printf` from the shipped
+`check-pub-surface.sh` red V3 — but NOT V2, because V2's grep matched the *comment explaining the
+contract line*. The artifact describing a rule read as compliance with it, the same shape as T5.
+V2 is comment-blind now, and the re-run reds both.
+
+### 3. The kind table was stale about its own last change
+
+See the note above the table. Every count in it is now copied from case A2's run-time output.
