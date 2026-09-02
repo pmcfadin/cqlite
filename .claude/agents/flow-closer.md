@@ -364,6 +364,12 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    refusal prints. A record with no `head-sha:`, several of them, or a value that is not a 40-hex
    sha refuses by name, never silently: an audit of an older tree may not certify a newer one,
    which is the gate-of-record rule applied to the intent audit.
+   **AND DO NOT RE-OPEN THE STAGE WHILE THE ASSERT IS RUNNING (#3751 round 9).** That binding
+   rests on ONE observation of the record: the assert reads it once, `review-stage.sh verdict`
+   re-reads it to resolve which report is current, and the assert then requires it to be
+   byte-identical — so a `--force` re-open landing mid-check REFUSES naming the change, because a
+   verdict from a generation nothing validated may not certify. Nothing is lost: re-run the assert
+   once the stage is quiescent.
    Pass an explicit
    `--c-verdict <path>` (a captured `review-stage.sh verdict … > <path>` line) only where AUTO
    cannot locate the stage — and capture the **`c`** stage's own line: the assert validates the

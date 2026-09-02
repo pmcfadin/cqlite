@@ -174,6 +174,16 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
   `.git`, so a peer lane's certified commit resolves from any lane and resolvability is not provenance
 - **AND** the same stage at the worktree's own `HEAD` certifies (the positive control)
 
+#### Scenario: the accepted verdict comes from the record the binding was validated on
+- **WHEN** the stage record is replaced between the `head-sha:` validation and the read that resolves
+  which report is current
+- **THEN** `premerge-assert.sh` REFUSES, naming that the record changed while its verdict was being read
+  — two reads of one record are two different facts, so a verdict from a different GENERATION (possibly
+  bound to a different commit) may not be accepted under a binding checked on the old one
+- **AND** the `head-sha:` SHALL be parsed from the SAME observation the comparison is made against,
+  never from a second read of the file
+- **AND** an undisturbed record still certifies (the positive control)
+
 #### Scenario: a stage record is bound to the commit it was opened at
 - **WHEN** `open` creates or `--force` re-stamps a stage record
 - **THEN** the record carries a `head-sha:` field holding the commit `HEAD` resolved to at that moment

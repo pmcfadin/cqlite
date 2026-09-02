@@ -126,7 +126,11 @@ carry).
   missing, duplicated or non-sha field is a NAMED refusal rather than a skip (the gate-of-record rule
   applied to the intent audit: an audit of an older tree may not certify a newer one); and the
   verdict line is held to its WHOLE grammar, with the stage KIND compared by string equality, so a sibling
-  stage's `PASS` cannot certify C. Details:
+  stage's `PASS` cannot certify C. **The record binding rests on ONE OBSERVATION (#3751 round 9)** — it
+  was validated on one read while `review-stage.sh verdict` re-read the record to pick which report is
+  current, so a replacement in between produced a verdict from a different GENERATION under a binding
+  checked on the old one; the record is now captured once, the `head-sha` parsed from that capture, and the
+  capture required to be byte-identical before the token is parsed. Details:
   [delivery pipeline](/cqlite/agents-developing/delivery-pipeline/).
   **What a `PREMERGE: OK` does NOT prove (#3650), printed on the success path as `PREMERGE: SCOPE`.**
   It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.

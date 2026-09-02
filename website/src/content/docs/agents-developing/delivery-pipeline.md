@@ -220,7 +220,20 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   readable as certifying. **The fail-closed direction is deliberate** — this is the gate-of-record
   rule (any change after the gate INVALIDATES it) applied to the intent audit, and an audit of an
   older tree may not certify a newer one; every one of those refusals prints the same remedy, which
-  is to re-open the stage with `--force` at this commit and re-run C. Third binding: the
+  is to re-open the stage with `--force` at this commit and re-run C. **AND THAT BINDING RESTS ON
+  ONE OBSERVATION OF THE RECORD (#3751 round 9, N2)**: `head-sha` was validated from one read, and
+  `review-stage.sh verdict` then RE-READ the record to find which report is current (the nonce
+  below) — two reads of one record are two different facts, so a replacement in between handed back
+  a verdict from a different GENERATION of the stage, possibly bound to a different commit, under a
+  binding checked on the old one. Measured, the success line read `C-VERDICT PASS …
+  stage-head=273cd3dff12c … report: …/c.decoygenerationB.md` — a binding it never read, beside a
+  generation whose own `head-sha` was forty zeros — which defeats this binding and the nonce IN
+  COMBINATION, i.e. exactly the pair that stops a stale audit certifying a new tree. So the record
+  is captured ONCE, the `head-sha` is parsed from THAT capture rather than a second read, and the
+  capture must still be byte-identical before the token is parsed. **A handoff was the wrong fix**:
+  resolving the report in `premerge-assert.sh` and passing it to `verdict` would rebuild from the
+  other end the control channel round 4 (H2) deleted with `--report` — nothing outside
+  `review-stage.sh` may name which file holds a verdict. Third binding: the
   verdict line is validated against its WHOLE documented grammar — `REVIEW-STAGE: <kind> RESULT:
   <token> elapsed=<n> deadline=<n> agent=<t> report=<abs>` — with the **stage KIND compared by
   STRING EQUALITY**, each mandatory key required EXACTLY ONCE, **and each one's VALUE measured**

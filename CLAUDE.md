@@ -1818,7 +1818,16 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   them, or a value that is not a 40-hex sha is a NAMED refusal, never a skip — an older record
   predating the field must not read as certifying, which is the gate-of-record rule (any change
   after the gate INVALIDATES it) applied to the intent audit; the remedy printed is always to
-  re-open the stage with `--force` and re-run C.
+  re-open the stage with `--force` and re-run C. **AND AUTO RESTS ON ONE OBSERVATION OF THAT
+  RECORD (#3751 round 9).** The `head-sha` was validated from one read and `review-stage.sh verdict`
+  then RE-READ the record to pick which report is current, so a replacement in between yielded a
+  verdict from a different GENERATION of the stage — measured, a success line naming
+  `stage-head=<the validated sha>` beside a report belonging to a generation whose own `head-sha`
+  was forty zeros. Two reads of one record are two different facts: the record is captured ONCE, the
+  `head-sha` is parsed from that capture rather than a second read, and the capture must still be
+  byte-identical before the token is parsed. A HANDOFF is deliberately not the fix — resolving the
+  report here and passing it to `verdict` would rebuild the control channel round 4 deleted with
+  `--report`, since nothing outside `review-stage.sh` may name which file holds a verdict.
   Before arming `gh pr merge --auto` the closer runs the scripted pre-merge assert
   `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>] --c-verdict <path|AUTO>`
   (#2456/#3465/#3751) — refusing to merge unless the PR head still equals the certified SHA **AND** a

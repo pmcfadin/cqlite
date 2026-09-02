@@ -291,7 +291,23 @@ Three further declared limits of the mechanism itself:
   fail-closed direction is deliberate: this is the gate-of-record rule (any change after the
   gate INVALIDATES it) applied to the intent audit, and an audit of an older tree may not
   certify a newer one. The remedy every one of those refusals prints is the same: re-open the
-  stage with `--force` at this commit and re-run C.
+  stage with `--force` at this commit and re-run C. (c) **AUTO rests on ONE OBSERVATION of that
+  record (#3751 round 9, N2).** (b) validated `head-sha` from one read, and `review-stage.sh
+  verdict` then RE-READ the record to find which report is current (the nonce below) — two reads
+  of one record are two different facts, so an atomic replacement in between handed back a verdict
+  from a different GENERATION of the stage, possibly bound to a different commit, under a binding
+  checked on the old one. Measured: the success line read `C-VERDICT PASS … stage-head=273cd3dff12c
+  … report: …/c.decoygenerationB.md`, asserting a binding to a generation it never read, while the
+  decoy's own `head-sha` was forty zeros. That defeats (b) and the nonce IN COMBINATION — the pair
+  that stops a stale audit certifying a new tree. The record is therefore captured ONCE, the
+  `head-sha` is parsed from THAT capture rather than from a second read of the file, and the
+  capture is re-required to be BYTE-IDENTICAL before the token is parsed (a check after the parse
+  could only report where the token came from). **A HANDOFF WAS THE WRONG FIX**: resolving the
+  report in `premerge-assert.sh` and passing it to `verdict` would rebuild, from the other end, the
+  control channel round 4 (H2) deleted with `--report` — nothing outside `review-stage.sh` may name
+  which file holds a verdict. What the comparison does NOT claim: the REPORT can still change after
+  `verdict` classified it. A verdict is a snapshot of a file at a time; this is about the record's
+  GENERATION.
 - **The report path is NONCE-BOUND, so a resumed agent cannot write into the current report
   (round 5 J1, round 6 K2).** `open --force` reset the report to the sentinel and re-stamped
   `head-sha:` **at the same path**, so the PREVIOUS, idle agent could wake up after the reset and

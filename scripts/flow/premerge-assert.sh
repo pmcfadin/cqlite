@@ -225,6 +225,19 @@
 #       one. Every one of those refusals prints the same remedy — re-open the stage
 #       at this commit with `--force` (which RE-STAMPS `head-sha`, deliberately
 #       unlike `spawned-at`) and re-run C.
+#   (c) ONE OBSERVATION (#3751 round 9, N2). (b) validates `head-sha` from the stage
+#       record, and `review-stage.sh verdict` then RE-READS that record to find which
+#       report is current — two reads of one record are TWO DIFFERENT FACTS. An atomic
+#       replacement in between yields a verdict from a different GENERATION of the
+#       stage, possibly bound to a different commit, under a binding checked on the
+#       old one: measured, the success line named `stage-head=<validated>` beside a
+#       report belonging to a generation whose own head-sha was forty zeros. So the
+#       record is captured ONCE (the `head-sha` is parsed from that capture, not from a
+#       second read) and is re-required to be BYTE-IDENTICAL before the token is
+#       parsed. A handoff — resolving the report here and passing it to `verdict` —
+#       is deliberately NOT the fix: round 4 (H2) deleted `--report` so that nothing
+#       outside `review-stage.sh` can name which file holds a verdict, and a path
+#       argument would rebuild that channel from the other end.
 #   WHICH REPORT the record names is NOT this script's question (#3751 round 5 J1,
 #   round 6 K2). The record also carries a `report-nonce:`, and the report path
 #   INCLUDES it (`<kind>.<nonce>.md`; a bare `<kind>.md` only for a record written
@@ -303,6 +316,9 @@ usage() {
   printf '                              WRITING INTO THE PATH THAT open PRINTS: a --force\n' >&2
   printf '                              re-open publishes a report under a FRESH NONCE, so\n' >&2
   printf '                              the previous file is no longer read (#3751).\n' >&2
+  printf '                              The record is read ONCE and must still be\n' >&2
+  printf '                              byte-identical when the verdict comes back: a\n' >&2
+  printf '                              generation swapped in mid-check REFUSES (#3751).\n' >&2
   printf '         --c-verdict <path>   a file holding a captured verdict line, i.e.\n' >&2
   printf '                              scripts/flow/review-stage.sh verdict c --issue <N> > <path>\n' >&2
   printf '                              Capture it WHOLE: the stage KIND, every mandatory key\n' >&2
@@ -945,6 +961,38 @@ c_stage_root() {
   printf '%s\n' "$root"
 }
 
+# c_record_bytes <path> — ONE OBSERVATION OF THE STAGE RECORD (#3751 round 9, N2), in a form two
+# reads can be compared for equality: a STATE marker on the first line, the file's bytes after it.
+# Prints only that, never dies, so it is safe from any command substitution.
+#
+# THE COMPLETE READ IS ASSERTED AFFIRMATIVELY, not inferred from an exit status that is easy to
+# lose inside a substitution: the sentinel `E` is printed by a SECOND command joined with `&&`, so
+# a truncated or failed read cannot produce a value ending in it. A positive verdict requires an
+# affirmative measurement, and "this record is the one that was validated" is a positive verdict.
+#
+# THE STATE MARKER EXISTS SO THAT "ABSENT" AND "EMPTY" ARE DIFFERENT OBSERVATIONS: both are the
+# empty string once read, and they are not the same fact.
+#
+# `review-stage.sh` has a sibling function (`report_bytes`) over the REPORT. They are deliberately
+# NOT a shared implementation, and the reason is that no agreement between them is required: each
+# is used for EQUALITY WITHIN ONE PROCESS, over a DIFFERENT file, so a divergence cannot make the
+# two tools disagree about anything — unlike `_c_verdict_awk` and `classify_report`, which read the
+# same grammar and are therefore mechanically reconciled (section 44g).
+#
+# DECLARED LIMIT: bash DISCARDS NUL bytes in a command substitution, so a change consisting only of
+# NUL bytes is not represented here. The stage record is text written by `review-stage.sh` and its
+# every field is validated on the read side; stated rather than left as an unexamined blind spot.
+c_record_bytes() {
+  local p="$1" body
+  if [ ! -f "$p" ]; then printf 'state=no-such-file\n'; return 0; fi
+  body="$( { LC_ALL=C cat -- "$p" && printf 'E'; } 2>/dev/null )"
+  case "$body" in
+    *E) ;;
+    *) printf 'state=unreadable\n'; return 0 ;;
+  esac
+  printf 'state=present\n%s' "${body%E}"
+}
+
 # _c_stage_head_awk — read a STAGE RECORD on stdin, print `key=value` lines.
 #
 # COLUMN-ZERO ANCHORED (`/^head-sha:[ \t]/`) and every anchored line COUNTED, for the same
@@ -987,6 +1035,10 @@ _c_stage_head_awk() {
 # STRICTER than that writer's own `read_field` (column zero, exactly one line, 40 hex or
 # refuse), so a format drift refuses rather than passing — the fail-closed direction.
 C_STAGE_HEAD=""
+# THE OBSERVATION THE BINDING WAS VALIDATED AGAINST. Set by the assert below, consumed by
+# `c_assert_stage_record_unchanged`. Empty means the binding never ran, which that function
+# refuses rather than reading as "unchanged".
+C_STAGE_RECORD=""
 c_assert_stage_binds_certified() {
   local issue="$1" sfile out k v n="" value=""
   sfile="$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.stage"
@@ -998,7 +1050,27 @@ c_assert_stage_binds_certified() {
       "opened at, so without it nothing binds the audit to the tree being merged." \
       "$C_REOPEN_REMEDY"
   fi
-  out=$(_c_stage_head_awk <"$sfile") || refuse_tool_failure awk "the C stage record's head-sha"
+  # ONE READ OF THE RECORD, AND EVERY QUESTION IS ASKED OF THAT ONE OBSERVATION (#3751 round 9,
+  # N2). The head-sha used to be parsed by reading `$sfile` again here; that is a SECOND read, and
+  # two reads of one record are two different facts — so the value the binding validated could
+  # already have come from a generation other than the one the re-verification below compares.
+  # Capturing the bytes and parsing THOSE makes the binding and the comparison the same fact.
+  C_STAGE_RECORD="$(c_record_bytes "$sfile")"
+  case "$C_STAGE_RECORD" in
+    'state=present'*) ;;
+    *)
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' stage record for issue $issue could not be READ, so nothing binds the" \
+        "audit to the tree being merged:" \
+        "  record: $sfile" \
+        "This is a permission or an I/O failure, not a missing stage — the file exists. It is a" \
+        "NON-measurement, and a non-measurement is never read as a pass." \
+        "$C_REOPEN_REMEDY"
+      ;;
+  esac
+  # `printf '%s\n'` guarantees awk a terminated final line, whatever the file ended with.
+  out=$(printf '%s\n' "${C_STAGE_RECORD#*$'\n'}" | _c_stage_head_awk) ||
+    refuse_tool_failure awk "the C stage record's head-sha"
   while IFS='=' read -r k v; do
     case "$k" in
       n)     n="$v" ;;
@@ -1067,6 +1139,59 @@ C_STAGE_HEAD_PARSE
       "$C_REOPEN_REMEDY"
   fi
   C_STAGE_HEAD="$value"
+}
+
+# c_assert_stage_record_unchanged <issue> — THE CERTIFICATION RESTS ON ONE OBSERVATION OF THE
+# RECORD (#3751 round 9, N2).
+#
+# THE DEFECT. `c_assert_stage_binds_certified` validates `head-sha` from the stage record; AUTO
+# then invokes `review-stage.sh verdict`, which RE-READS that record to find which report is
+# current (the `report-nonce:` of round 6's K2). An atomic replacement between the two reads makes
+# the ACCEPTED verdict come from a different GENERATION of the stage — and potentially a different
+# commit — than the `head-sha` that was validated. Measured: with a second generation swapped in,
+# the success line read `C-VERDICT PASS ... stage-head=273cd3dff12c ... report:
+# .../c.decoygenerationB.md`, i.e. it asserted a binding to a generation it never read, while the
+# decoy's own head-sha was forty zeros. That defeats G1 and the nonce IN COMBINATION, which is the
+# pair that stops a stale audit certifying a new tree.
+#
+# WHY A COMPARISON AND NOT A HANDOFF. The obvious alternative is to resolve the report ONCE here
+# and pass it to `review-stage.sh verdict`. That is refused: round 4 (H2) DELETED `--report`
+# precisely so that no caller and no data file can name which file holds a verdict, and
+# re-introducing a path argument would rebuild that control channel from the other end. So the
+# record is re-read and required to be BYTE-IDENTICAL to the observation the binding validated. The
+# property that buys: either the record never changed (so `verdict` read the validated one), or it
+# changed and this refuses. A change-and-change-back to IDENTICAL BYTES is harmless by definition —
+# identical bytes mean the same nonce and the same head-sha, hence the same report.
+#
+# WHAT IT DOES NOT CLAIM: the REPORT could still change after `verdict` classified it. A verdict is
+# a snapshot of a file at a time; that is inherent to reading one, and `review-stage.sh`'s own
+# write path is what makes each such read atomic. This function is about the RECORD's generation.
+#
+# CHECKED BEFORE THE TOKEN IS PARSED, never after: a check placed after the token was produced
+# could only report that the token came from somewhere unvalidated.
+c_assert_stage_record_unchanged() {
+  local issue="$1" sfile now
+  sfile="$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.stage"
+  if [ -z "$C_STAGE_RECORD" ]; then
+    # FAIL CLOSED: no captured observation means the binding assert did not run, so there is
+    # nothing to compare and no basis for a pass. Never read as "unchanged".
+    refuse_tool_failure "c_assert_stage_record_unchanged (no captured stage-record observation)" \
+      "the C stage verdict"
+  fi
+  now="$(c_record_bytes "$sfile")"
+  if [ "$now" != "$C_STAGE_RECORD" ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage record for issue $issue CHANGED while its verdict was being read:" \
+      "  record: $sfile" \
+      "The head-sha binding was validated against ONE observation of that record, and" \
+      "review-stage.sh then read it AGAIN to find which report is current — so a replacement in" \
+      "between hands back a verdict from a DIFFERENT generation of the stage, possibly bound to a" \
+      "different commit, under a binding that was checked on the old one. Two reads of one record" \
+      "are two different facts, and NOTHING is accepted from the second." \
+      "The ordinary cause is a concurrent 'review-stage.sh open --force' (or a hand edit) landing" \
+      "mid-check. Re-run this assert once the stage is quiescent." \
+      "$C_REOPEN_REMEDY"
+  fi
 }
 
 # c_auto_locate_issue — find THE open C stage in this worktree, by its stage
@@ -1197,6 +1322,11 @@ c_evaluate() {
       refuse_tool_failure "review-stage.sh verdict $C_STAGE_KIND --issue $issue (exit $rc, no output)" \
         "the C stage verdict"
     fi
+    # ONE OBSERVATION, RE-VERIFIED BEFORE THE TOKEN EXISTS (#3751 round 9, N2). `verdict` re-read
+    # the record to pick which report is current, so this requires that record to still be the one
+    # whose head-sha was validated above; otherwise the token below would come from a generation
+    # nothing bound to the certified tree — and the success line would name a binding it never read.
+    c_assert_stage_record_unchanged "$issue"
     # The SOURCE names the verified binding, so a pasted success line shows that the stage
     # was bound to the certified tree rather than merely found in this directory.
     C_SOURCE="AUTO issue=$issue stage=$C_STAGE_KIND stage-head=${C_STAGE_HEAD:0:12} (routing $C_ROUTING)"

@@ -125,6 +125,15 @@ review-stage.sh open <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--
   literal `unresolved` — an honest non-measurement, refused at the merge point by name, because `open`
   must still work in a checkout with no commits (a guard that reds on correct input is the guard agents
   learn to waive) while a non-measurement is never a pass.
+- **The merge point rests on ONE OBSERVATION of that record** (#3751 round 9, N2). The `head-sha`
+  binding was validated from one read while `review-stage.sh verdict` re-read the record to resolve
+  which report is current, so a replacement in between yielded a verdict from a different GENERATION,
+  possibly bound to a different commit, under a binding checked on the old one — measured, a success
+  line naming `stage-head=<the validated sha>` beside a report from a generation carrying forty zeros.
+  So `premerge-assert.sh` captures the record ONCE, parses `head-sha` from that capture rather than a
+  second read, and requires it to be byte-identical before the token is parsed. A HANDOFF (resolving
+  the report and passing it to `verdict`) is deliberately not the fix: it would rebuild from the other
+  end the control channel round 4 (H2) deleted with `--report`.
 - Prints, on stdout, the absolute path **and the exact clause to paste into the spawn prompt**, so the
   contract reaches the agent verbatim rather than being paraphrased per lane.
 

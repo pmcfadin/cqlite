@@ -3557,6 +3557,197 @@ if [ -n "$DIFF_OK" ]; then
   done
 fi
 
+# --- 44i: AUTO must rest on ONE OBSERVATION of the stage record (round 9, N2) ---
+# THE FINDING (roborev job 382, N2). AUTO validated `head-sha` from the stage record
+# (`c_assert_stage_binds_certified`, round 3's G1) and then invoked `review-stage.sh verdict`,
+# which RE-READS that record to find which report is current (the nonce, round 6's K2). Two reads
+# of one record are TWO DIFFERENT FACTS: an atomic replacement in between makes the ACCEPTED
+# verdict come from a different GENERATION of the stage — and potentially a different commit —
+# than the `head-sha` that was validated, which defeats G1 and the nonce in combination, and that
+# pair is what stops a stale audit certifying a new tree.
+#
+# THE INTERLEAVING IS SIMULATED, NOT RACED: one line is injected into a SCRATCH COPY of the assert
+# immediately before it invokes `review-stage.sh verdict`, so the replacement is deterministic and
+# cannot flake. The ARTIFACT is substituted (#3312's corollary for tests); there is no seam.
+N2_DIR="$T/n2/flow"
+mkdir -p "$N2_DIR"
+n2_ok=1
+cp "$ASSERT" "$N2_DIR/premerge-assert.sh" 2>/dev/null || n2_ok=0
+cp "$SCRIPT_DIR/../flow/review-stage.sh" "$N2_DIR/review-stage.sh" 2>/dev/null || n2_ok=0
+printf '%s\n' "$NEUTRAL_ADV" >"$N2_DIR/base-staleness.sh" 2>/dev/null || n2_ok=0
+chmod +x "$N2_DIR/base-staleness.sh" 2>/dev/null || true
+# Every list travels through ENVIRON: `awk -v` performs ESCAPE PROCESSING on its value, which
+# round 7 measured turning a `\n` in an injected line into a real newline.
+N2_ANCHOR='out=$(bash "$rs" verdict "$C_STAGE_KIND" --issue "$issue"'
+n2_build() {
+  local dest="$1" inj="$2"
+  [ "$n2_ok" -eq 1 ] || return 1
+  N2_A="$N2_ANCHOR" N2_I="$inj" LC_ALL=C awk '
+    BEGIN { a = ENVIRON["N2_A"]; inj = ENVIRON["N2_I"]; done = 0 }
+    index($0, a) > 0 && done == 0 { print inj; done = 1 }
+    { print }
+  ' "$N2_DIR/premerge-assert.sh" >"$dest" 2>/dev/null || return 1
+  [ -s "$dest" ] || return 1
+  LC_ALL=C grep -q 'N2_INTERLEAVE' "$dest" || return 1
+  return 0
+}
+# n2_run <script> <repo> <want> <desc> — `run_in_repo`, against a named scratch assert.
+n2_run() {
+  local script="$1" d="$2" want="$3" desc="$4" sha f
+  sha=$(git -C "$d" rev-parse HEAD 2>/dev/null) || sha=""
+  if [ -z "$sha" ]; then bad "$desc: could not resolve the fixture HEAD"; return 1; fi
+  f="$d/../gate-n2-$(basename "$script").txt"
+  emit_summary_block "$FULL_S" "$FULL_E" "-" \
+    "$(printf '%.7s' "$sha")" "$(printf '%.12s' "$sha")" PASS PASS >"$f"
+  OUT=$(cd "$d" && PATH="$BIN:$PATH" MOCK_GH_OUT="$sha OPEN" MOCK_GH_FAIL=0 \
+    bash "$script" 2421 "$sha" "$f" --c-verdict AUTO 2>&1)
+  RC=$?
+  if [ "$RC" -ne "$want" ]; then
+    bad "$desc (exit $RC, wanted $want)"
+    printf '     output: %s\n' "$OUT"
+    return 1
+  fi
+  return 0
+}
+
+# n2_restore — put the stage back to "opened at HEAD, report records PASS". EVERY case starts
+# from it, because a case that leaves the DECOY installed makes the next one refuse at the
+# head-sha BINDING (the decoy's sha is forty zeros) and never reach the read the case is about —
+# which is exactly the cross-case leakage round 3 recorded in `sr_plant`, one section over.
+n2_restore() {
+  (cd "$N2_REPO" && bash "$N2_DIR/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor --force >/dev/null 2>&1) || return 1
+  printf 'result: PASS\n\n## Findings\n\nnone.\n' >"$(SR_REPORT "$N2_REPO" 3751 c)" || return 1
+  return 0
+}
+
+N2_REPO=$(c_repo n2 design) || N2_REPO=""
+N2_REC="$N2_REPO/.review-stage/issue-3751/c.stage"
+N2_DECOY="$N2_REPO/.review-stage/issue-3751/c.decoy"
+N2_ZERO=0000000000000000000000000000000000000000
+if [ -n "$N2_REPO" ] && [ "$n2_ok" -eq 1 ] &&
+  (cd "$N2_REPO" && bash "$N2_DIR/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor >/dev/null 2>&1) &&
+  printf 'result: PASS\n\n## Findings\n\nnone.\n' >"$(SR_REPORT "$N2_REPO" 3751 c)"; then
+  ok "n2 fixture: a PASSING c stage was opened at the fixture head"
+else
+  bad "n2 fixture: could not open the stage — every case below would be vacuous"
+  N2_REPO=""
+fi
+if [ -n "$N2_REPO" ]; then
+  # THE DECOY IS A SECOND GENERATION OF THE SAME STAGE: another nonce, another report, and a
+  # head-sha that is NOT the certified commit. It is what an `open --force` (or a hand edit)
+  # leaves behind, and it is the bait the second read would follow.
+  LC_ALL=C sed -e "s|^head-sha:.*|head-sha: $N2_ZERO|" -e 's|^report-nonce:.*|report-nonce: decoygenerationB|' \
+    "$N2_REC" >"$N2_DECOY" 2>/dev/null || true
+  printf 'result: PASS\n\n## Findings\n\nan audit of a DIFFERENT tree.\n' \
+    >"$N2_REPO/.review-stage/issue-3751/c.decoygenerationB.md" 2>/dev/null || true
+  # THE BAIT MUST BE VALID, or a refusal below could come from the decoy being broken rather than
+  # from the interleaving being caught.
+  if LC_ALL=C grep -q "^head-sha: $N2_ZERO\$" "$N2_DECOY" 2>/dev/null &&
+    LC_ALL=C grep -q '^report-nonce: decoygenerationB$' "$N2_DECOY" 2>/dev/null &&
+    LC_ALL=C grep -q '^result: PASS$' "$N2_REPO/.review-stage/issue-3751/c.decoygenerationB.md" 2>/dev/null; then
+    ok "n2 fixture: the decoy generation is VALID BAIT (its own nonce, its own PASSING report, a head-sha that is not the certified commit)"
+  else
+    bad "n2 fixture: the decoy generation is not valid bait, so the cases below prove nothing"
+  fi
+
+  # (a) THE DEFECT: the record is REPLACED between the validated read and the verdict read.
+  if n2_restore; then
+    ok "n2/swap: the stage was restored to opened-at-HEAD before the case (no leakage from a sibling)"
+  else
+    bad "n2/swap: the stage could not be restored, so this case starts from an unknown state"
+  fi
+  if n2_build "$N2_DIR/swap.sh" '    cp "$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.decoy" "$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.stage" 2>/dev/null || true   # N2_INTERLEAVE'; then
+    ok "n2/swap: the interleaving plant landed in the scratch assert (asserted, not assumed)"
+  else
+    bad "n2/swap: the plant did NOT land, so this case proves nothing"
+  fi
+  if n2_run "$N2_DIR/swap.sh" "$N2_REPO" 2 \
+    "n2/swap: a verdict read from a DIFFERENT generation of the record must NOT certify"; then
+    case "$OUT" in
+      *"PREMERGE: NO-C-VERDICT"*) ok "n2/swap: refused under the NO-C-VERDICT verdict" ;;
+      *) bad "n2/swap: must refuse with NO-C-VERDICT (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *CHANGED*) ok "n2/swap: the refusal names the interleaving, not a downstream symptom" ;;
+      *) bad "n2/swap: the refusal must name the record change (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*)
+        bad "n2/swap: a verdict from an unvalidated generation certified the merge — the N2 defect is live" ;;
+      *) ok "n2/swap: no PASS token is emitted for a verdict read from an unvalidated record" ;;
+    esac
+  fi
+
+  # (b) THE RECORD VANISHES in the same window. This refuses either way — with the record gone
+  #     `verdict` reports NOT-RUN — so what is asserted is the CAUSE: the refusal must name the
+  #     interleaving it observed, not the downstream symptom, because the operator action differs
+  #     ("a peer replaced your stage" is not "your auditor produced nothing").
+  if n2_restore; then
+    ok "n2/unlink: the stage was restored before the case"
+  else
+    bad "n2/unlink: the stage could not be restored"
+  fi
+  if n2_build "$N2_DIR/unlink.sh" '    rm -f "$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.stage" 2>/dev/null || true   # N2_INTERLEAVE'; then
+    ok "n2/unlink: the plant landed"
+  else
+    bad "n2/unlink: the plant did NOT land"
+  fi
+  if n2_run "$N2_DIR/unlink.sh" "$N2_REPO" 2 \
+    "n2/unlink: a record REMOVED in the window refuses"; then
+    case "$OUT" in
+      *CHANGED*) ok "n2/unlink: and it names the interleaving rather than the NOT-RUN it produced" ;;
+      *) bad "n2/unlink: the refusal must name the record change (got: $OUT)" ;;
+    esac
+  fi
+  if n2_restore; then
+    ok "n2/CONTROL: the stage was restored before the control"
+  else
+    bad "n2/CONTROL: the stage could not be restored"
+  fi
+  # (c) CONTROL — THE SAME SCRATCH MACHINERY WITH A NO-OP INJECTION STILL CERTIFIES. Without it
+  #     both refusals are satisfiable by a scratch copy that is simply broken, or by a check that
+  #     refuses every AUTO run.
+  if n2_build "$N2_DIR/noop.sh" '    : N2_INTERLEAVE no-op'; then
+    ok "n2/CONTROL: the no-op plant landed at the same anchor"
+  else
+    bad "n2/CONTROL: the no-op plant did NOT land"
+  fi
+  if n2_run "$N2_DIR/noop.sh" "$N2_REPO" 0 \
+    "n2/CONTROL: an UNDISTURBED record still certifies (the refusals come from the interleaving)"; then
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*) ok "n2/CONTROL: and it still reports C-VERDICT PASS" ;;
+      *) bad "n2/CONTROL: must report C-VERDICT PASS (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *CHANGED*) bad "n2/CONTROL: it claimed an interleaving that did not happen (got: $OUT)" ;;
+      *) ok "n2/CONTROL: and claims no interleaving that did not happen" ;;
+    esac
+  fi
+fi
+# (d) STRUCTURAL — THE RE-OBSERVATION IS INSIDE THE WINDOW IT CERTIFIES: after the verdict is
+#     obtained and BEFORE it is parsed into a token, so an unvalidated observation never produces
+#     a token at all. A check placed after `c_parse_verdict` could only report.
+N2_VERDICT_LN="$(LC_ALL=C grep -n 'out=\$(bash "\$rs" verdict' "$ASSERT" | LC_ALL=C head -1 | cut -d: -f1)"
+N2_PARSE_LN="$(LC_ALL=C grep -n 'c_parse_verdict text "\$out"' "$ASSERT" | LC_ALL=C head -1 | cut -d: -f1)"
+N2_RECHECK_LN="$(LC_ALL=C grep -n 'c_assert_stage_record_unchanged' "$ASSERT" | LC_ALL=C tail -1 | cut -d: -f1)"
+if [ -n "$N2_VERDICT_LN" ] && [ -n "$N2_PARSE_LN" ] && [ -n "$N2_RECHECK_LN" ] &&
+  [ "$N2_RECHECK_LN" -gt "$N2_VERDICT_LN" ] && [ "$N2_RECHECK_LN" -lt "$N2_PARSE_LN" ]; then
+  ok "n2/structural: the re-observation sits between the verdict read and the token parse (lines $N2_VERDICT_LN < $N2_RECHECK_LN < $N2_PARSE_LN)"
+else
+  bad "n2/structural: the re-observation is NOT between the verdict read and the token parse (verdict=$N2_VERDICT_LN recheck=$N2_RECHECK_LN parse=$N2_PARSE_LN)"
+fi
+# AND THE VALIDATED OBSERVATION IS THE ONE THE head-sha WAS TAKEN FROM — one read of the file,
+# every question asked of that value. A second `<"$sfile"` read for the head-sha would make the
+# comparison below compare something the binding never saw.
+if [ "$(LC_ALL=C grep -c '_c_stage_head_awk <"\$sfile"' "$ASSERT" || true)" -eq 0 ] &&
+  LC_ALL=C grep -q 'C_STAGE_RECORD=' "$ASSERT"; then
+  ok "n2/structural: head-sha is parsed from the CAPTURED observation, not from a second read of the file"
+else
+  bad "n2/structural: the head-sha is still parsed by re-reading the record, so the captured observation is a different fact"
+fi
+
 # --- 44h: THE STRUCTURAL EMIT-BOUNDARY GUARD (round 7, L1b) -------------------
 # The mirror of test_review_stage.sh section 18, for this script. See
 # scripts/tests/lib/emit-boundary-scan.sh for why the guard exists (the boundary was bypassed at a
@@ -3673,7 +3864,23 @@ fi
 # the ONE host-gated block (Case 41's TERM-ignoring escalation, which needs a real
 # `timeout`/`gtimeout` supporting `--kill-after`) is PRESERVED UNCHANGED — still deliberately not
 # the exact 363, for the reason recorded above.
-ASSERT_FLOOR=357
+#
+# ROUND 9 (N2) ADDS 16, ALL HOST-INDEPENDENT (363 -> 379): section 44i's 16 — AUTO must rest on ONE
+# observation of the stage record. The `head-sha` binding was validated on one read and
+# `review-stage.sh verdict` then RE-READ the record to pick which report is current, so a
+# replacement in between handed back a verdict from a different GENERATION (measured: the success
+# line named `stage-head=<validated>` beside `report: …/c.decoygenerationB.md`, whose own head-sha
+# was forty zeros). The interleaving is SIMULATED by one line injected into a scratch copy of the
+# assert immediately before it invokes `verdict`: a decoy-generation SWAP, an UNLINK (which refuses
+# either way, so what is asserted is that the CAUSE names the interleaving and not the downstream
+# NOT-RUN), a per-case RESTORE so no case inherits a sibling's plant, a valid-BAIT assertion so a
+# refusal cannot come from a broken decoy, a NO-OP-injection CONTROL that still certifies, and two
+# STRUCTURAL pins (the re-observation sits between the verdict read and the token parse; the
+# head-sha is parsed from the CAPTURED observation rather than a second read of the file). All need
+# only bash, git and coreutils, so the floor moves by the SAME 16 and the derived 6-assertion
+# margin for the ONE host-gated block is PRESERVED UNCHANGED — still deliberately not the exact
+# 379, for the reason recorded above.
+ASSERT_FLOOR=373
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

@@ -136,6 +136,7 @@ printf '%s\n' "$root"
 printf 'AMBIGUOUS|%s|%s\n' "$count" "$root"
 printf '%s\n' "$found"
 printf '%s\n' "$c"
+printf 'state=present\n%s' "${body%E}"
 EOF
 }
 
@@ -160,7 +161,7 @@ case "$(basename "$SUBJECT")" in
   premerge-assert.sh)
     SCOPE_RE='^[[:space:]]*(printf|echo)[[:space:]]'
     SCOPE_NAME='every printf/echo statement except the declared value-returning helpers'
-    NOT_COVERED='the 5 value-returning printf helpers, declared by source text in value_return_premerge'
+    NOT_COVERED="the $(value_return_premerge | LC_ALL=C grep -c . || true) value-returning printf helpers, declared by SOURCE TEXT in value_return_premerge (a count DERIVED from that list, never written in prose beside it: the two drifted apart the first time one was added)"
     ALLOW="$(allow_premerge_assert)"
     SUBS="$SUBS_PREMERGE_ASSERT"
     VRET="$(value_return_premerge)"
