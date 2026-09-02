@@ -157,9 +157,28 @@ if [ -z "$f" ]; then
   printf '%s' "$f" >"$d/.last-view"
 fi
 [ -f "$f" ] || { echo "gh: no fixture $f" >&2; exit 1; }
+# An `!ABSENT` fixture reproduces GitHub'"'"'s OWN not-found diagnostic. That text is the
+# only thing separating ISSUE-ABSENT from a could-not-ask, because `gh issue view`
+# exits 1 for BOTH — the two-valued predicate the oracle exists to refuse.
+if [ "$(head -c 7 "$f" 2>/dev/null)" = "!ABSENT" ]; then
+  echo "GraphQL: Could not resolve to an issue or pull request with the number of $3." >&2
+  exit 1
+fi
 cat "$f"
 GH
 chmod +x "$BIN/gh"
+
+# issue_state_fixture <n> <state|!ABSENT> — the gh mock `cat`s fixtures verbatim and
+# the oracle asks with `--jq '"\(.number) \(.state)"'`, so the fixture holds that
+# rendered line rather than a JSON object. Omitting a fixture entirely is a THIRD
+# case (an unrecognised diagnostic => could-not-ask), used deliberately below.
+issue_state_fixture() {
+  if [ "$2" = "!ABSENT" ]; then
+    printf '!ABSENT\n' >"$MOCK_GH_DIR/issue-$1.json"
+  else
+    printf '%s %s' "$1" "$2" >"$MOCK_GH_DIR/issue-$1.json"
+  fi
+}
 
 cat >"$BIN/roborev" <<'RB'
 #!/usr/bin/env bash
@@ -772,6 +791,13 @@ if [ -z "$f" ]; then
   exit 0
 fi
 [ -f "$f" ] || { echo "gh: no fixture $f" >&2; exit 1; }
+# Same `!ABSENT` support as the first mock. THIS mock replaces that one for every
+# case below its heredoc, so a capability added only there is invisible here —
+# the trap that cost a debugging round already.
+if [ "$(head -c 7 "$f" 2>/dev/null)" = "!ABSENT" ]; then
+  echo "GraphQL: Could not resolve to an issue or pull request with the number of $3." >&2
+  exit 1
+fi
 printf '%s' "$f" >"$d/.last-view"
 cat "$f"
 GH2
@@ -1597,6 +1623,9 @@ MB_MAIN=$(cd "$WORK" && git rev-parse main)
 pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 612)" pmcfadin \
   "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 612 'both filed and lead-deferred')"
 roborev_job 612 "$MB_MAIN" "$HEAD_AFTER" F
+# `issues=` names two tracking issues, so BOTH must be OPEN issues GitHub confirms.
+issue_state_fixture 3602 OPEN
+issue_state_fixture 3613 OPEN
 if run_binding 0 "result: FINDINGS + an authorized deferral DOES bind" \
   review-binding 1 o/r "$HEAD_AFTER"; then
   case "$OUT" in
@@ -1613,6 +1642,58 @@ if run_binding 0 "result: FINDINGS + an authorized deferral DOES bind" \
     *"count= half is NOT re-verified here"*)
       ok "result: the block DECLARES the count half is not re-verified, rather than implying it" ;;
     *) bad "result: the deferred bind did not declare its unverified half (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"issues= half names was verified"*)
+      ok "result: the block declares the issues= half WAS verified, so the two halves are distinguished" ;;
+    *) bad "result: the deferred bind did not declare the issues= half verified (got: $OUT)" ;;
+  esac
+fi
+
+# --- G3: an authorized deferral naming a CLOSED issue must NOT bind -----------
+# `gh issue view` EXITS 0 for a closed issue, so a number-only test made "the
+# finding is tracked" satisfiable by an issue closed as a duplicate weeks ago —
+# the finding permanently untracked while the block asserted it was filed.
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 614)" pmcfadin \
+  "$(defer_marker 3602 1 "$MB_MAIN" "$HEAD_AFTER" 614 'filed and lead-deferred')"
+roborev_job 614 "$MB_MAIN" "$HEAD_AFTER" F
+issue_state_fixture 3602 CLOSED
+if run_binding 4 "result: a deferral naming a CLOSED issue does not bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"ISSUE-CLOSED"*)
+      ok "result: the CLOSED refusal is named as its own state, not folded into 'unauthorized'" ;;
+    *) bad "result: a closed tracking issue was accepted or misnamed (got: $OUT)" ;;
+  esac
+fi
+
+# --- G3: an authorized deferral naming a NON-EXISTENT issue must NOT bind -----
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 615)" pmcfadin \
+  "$(defer_marker 4242 1 "$MB_MAIN" "$HEAD_AFTER" 615 'filed and lead-deferred')"
+roborev_job 615 "$MB_MAIN" "$HEAD_AFTER" F
+issue_state_fixture 4242 '!ABSENT'
+if run_binding 4 "result: a deferral naming a NON-EXISTENT issue does not bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"ISSUE-ABSENT"*)
+      ok "result: ABSENT is distinguished from could-not-ask, though gh exits 1 for both" ;;
+    *) bad "result: a non-existent tracking issue was accepted or misnamed (got: $OUT)" ;;
+  esac
+fi
+
+# --- G3: an issue whose state could NOT BE ASKED must NOT bind ----------------
+# No fixture at all => the mock fails with a diagnostic that does NOT say the
+# issue is missing. That is a could-not-ask, and a could-not-ask never grants.
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 616)" pmcfadin \
+  "$(defer_marker 3777 1 "$MB_MAIN" "$HEAD_AFTER" 616 'filed and lead-deferred')"
+roborev_job 616 "$MB_MAIN" "$HEAD_AFTER" F
+rm -f "$MOCK_GH_DIR/issue-3777.json"
+if run_binding 4 "result: an UNASKABLE issue state does not bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"ISSUE-UNVERIFIABLE"*)
+      ok "result: a could-not-ask is a refusal, never read as verified" ;;
+    *) bad "result: an unverifiable tracking issue was accepted or misnamed (got: $OUT)" ;;
   esac
 fi
 
@@ -1713,7 +1794,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=112
+CASE_FLOOR=116
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

@@ -1382,7 +1382,14 @@ roborev_absence_waiver_lookup() {
 # three non-granting ones. It never returns non-zero, because a two-valued RETURN would re-import the
 # very collapse this function exists to remove.
 roborev_issue_retrievability() {
-  local issue="$1" out errfile errtext folded ok num state
+  # SECOND POSITIONAL, OPTIONAL: an owner/repo SLUG. Unset (the wrapper's call) keeps the
+  # historical behaviour exactly — `gh` resolves the issue from `$REPO`'s own remote. Set (the
+  # merge gate's `premerge-review-binding.sh` call, which holds a slug rather than a path)
+  # names the repository EXPLICITLY, so the answer cannot come from whatever remote the cwd
+  # happens to carry. The declaration line above is deliberately unchanged: the guard suite
+  # patches this function by matching it, and a signature reflow would silently stop it
+  # patching anything.
+  local issue="$1" repo_slug="${2:-}" out errfile errtext folded ok num state
   ROBOREV_ISSUE_STATE="unverifiable"
   ROBOREV_ISSUE_DETAIL="'gh issue view $issue' was never asked"
   if ! command -v gh >/dev/null 2>&1; then
@@ -1397,7 +1404,13 @@ roborev_issue_retrievability() {
   # is an exact string comparison instead of a regex over JSON. (The COMMENTS payload is deliberately
   # NOT read through `--jq`: there, author and body must stay separate FIELDS of one object so no body
   # can forge its author. Here there is no association to preserve — only two scalars.)
-  if out="$(cd "$REPO" && gh issue view "$issue" --json number,state --jq '"\(.number) \(.state)"' 2>"$errfile")"; then
+  if [ -n "$repo_slug" ]; then
+    if out="$(cd "$REPO" && gh issue view "$issue" --repo "$repo_slug" --json number,state --jq '"\(.number) \(.state)"' 2>"$errfile")"; then
+      ok=1
+    else
+      ok=0
+    fi
+  elif out="$(cd "$REPO" && gh issue view "$issue" --json number,state --jq '"\(.number) \(.state)"' 2>"$errfile")"; then
     ok=1
   else
     ok=0

@@ -96,11 +96,17 @@
 #      sufficient and declared the verdict a residual — a false-green route in a
 #      merge gate, since a block naming a FAILED or in-progress job whose range
 #      matched bound the merge.
+#      A deferral's `issues=` half IS re-verified here, by CALLING the one
+#      shared four-valued oracle (`roborev_issue_retrievability`): only an OPEN
+#      issue GitHub confirms may grant, because `gh issue view` exits 0 for a
+#      CLOSED issue and a deferral naming an issue closed weeks ago would
+#      otherwise bind with the finding permanently untracked.
 #      STILL NOT RE-VERIFIED HERE, and declared rather than implied: the
 #      deferral marker's `count=` half, which is matched against the findings
 #      count OBSERVED BY THE REVIEW. This leg never ran the review and the
 #      record carries no count, so there is nothing here to compare against;
-#      that half is enforced at review time, by the wrapper.
+#      that half is enforced at review time, by the wrapper. It is the ONLY
+#      unverified half, and the emitted block says so.
 #   2. It does NOT model roborev's exclusion set, and it does not re-derive the
 #      wrapper's own asserts. It answers ONE question: is the commit a recorded
 #      review actually covered an ancestor of the tree about to merge, with no
@@ -363,7 +369,24 @@ record_verdict_class() {
 # `findings: DEFERRED` text would be circular. So the SAME scanner the wrapper
 # uses is called, on the SAME marker, under all the same channel rules.
 #
-# WHAT IS NOT RE-VERIFIED, DECLARED RATHER THAN IMPLIED: the `count=` half. It
+# THE `issues=` HALF *IS* RE-VERIFIED HERE, AND THE ORACLE IS CALLED, NOT COPIED.
+# `roborev_issue_retrievability` (in roborev-review-oracles.sh) is the ONE
+# implementation, asked FOUR-VALUED: only a payload affirmatively naming the
+# number AND an OPEN state is `present` and may grant; `closed`, `absent` and
+# `unverifiable` are textually distinct and NONE of them grants. A second copy
+# of an authorization rule is a second place for it to diverge, and a divergence
+# there is an authorization bypass (#3626), so it is sourced in a SUBSHELL —
+# which also stops the oracles file shadowing this leg's own globals.
+#
+# WHY IT MATTERS AT MERGE TIME rather than only at review time: `issues=` is what
+# records that a deferred finding is TRACKED. `gh issue view` EXITS 0 FOR A CLOSED
+# ISSUE, so without the state half a deferral could name an issue closed as a
+# duplicate weeks ago and still bind — the finding permanently untracked while
+# the block asserted it was filed. An allowlisted human deferring against a
+# since-closed issue is an ACCIDENT route, and by #3312's triage rule an accident
+# route is a defect, not an out-of-model invoker bypass.
+#
+# WHAT IS STILL NOT RE-VERIFIED, DECLARED RATHER THAN IMPLIED: the `count=` half. It
 # is matched against the findings count OBSERVED BY THE REVIEW, and this leg
 # never ran the review — the job record carries a verdict LETTER and no count.
 # So the scanner is called in its `findings-deferral-authorization` mode, which
@@ -373,9 +396,33 @@ record_verdict_class() {
 # affirmative assert over an unmeasured value; comparing the marker's count with
 # itself would be a tautology. The count is enforced at REVIEW time, where the
 # measurement exists.
+# issue_state_of <issue> <repo-slug> — prints one of the oracle's four states.
+# Sourced in a SUBSHELL: the oracles file is pure definitions, but it also
+# assigns globals (REPO, CODE_FREE_*, ROBOREV_*) and this leg has its own `P`,
+# `causes` and friends — a subshell makes shadowing structurally impossible
+# instead of merely unlikely. A failure to source, or any missing output, is
+# `unverifiable`: a could-not-ask is NEVER read as verified.
+issue_state_of() {
+  local issue="$1" slug="$2" state
+  state=$(
+    REPO=$(git rev-parse --show-toplevel 2>/dev/null) || REPO="$PWD"
+    export REPO
+    # shellcheck source=/dev/null
+    . "$ORACLES_FILE" >/dev/null 2>&1 || exit 0
+    command -v roborev_issue_retrievability >/dev/null 2>&1 || exit 0
+    roborev_issue_retrievability "$issue" "$slug" >/dev/null 2>&1 || exit 0
+    printf '%s' "${ROBOREV_ISSUE_STATE:-}"
+  )
+  case "$state" in
+    present | closed | absent | unverifiable) printf '%s' "$state" ;;
+    *) printf 'unverifiable' ;;
+  esac
+}
+
 DEFERRAL_AUTHOR=""
+DEFERRAL_ISSUE_REFUSAL=""
 deferral_authorized() {
-  local job="$1" base="$2" head="$3" tmp="$4" allow result state
+  local job="$1" base="$2" head="$3" tmp="$4" repo_slug="$5" allow result state
   DEFERRAL_AUTHOR=""
   [ -f "$WAIVER_SCAN_TOOL" ] || return 1
   allow=$(waiver_authors) || return 1
@@ -387,6 +434,52 @@ deferral_authorized() {
   # never judged is not a grant.
   [ "$state" = "granted-authorization" ] || return 1
   DEFERRAL_AUTHOR=$(printf '%s\n' "$result" | sed -n 's/^author=//p' | head -1)
+
+  # ===== EVERY DECLARED ISSUE MUST BE AN OPEN ISSUE GITHUB CONFIRMS =====
+  # The backstop COUNTS VERIFICATIONS PERFORMED rather than testing the string,
+  # because `issues=","` is non-empty, splits into ZERO words, and would leave a
+  # grant standing with not one issue checked — #3626's own lesson, which is
+  # exactly the upstream dependency a backstop must not have.
+  local issues verified=0 declared=0 num rest st
+  issues=$(printf '%s\n' "$result" | sed -n 's/^issues=//p' | head -1)
+  if [ -z "$issues" ]; then
+    DEFERRAL_ISSUE_REFUSAL="the deferral names NO tracking issue, so nothing records where the findings went"
+    return 1
+  fi
+  rest="$issues"
+  while [ -n "$rest" ]; do
+    num="${rest%%,*}"
+    if [ "$num" = "$rest" ]; then rest=""; else rest="${rest#*,}"; fi
+    declared=$((declared + 1))
+    case "$num" in
+      "" | *[!0-9]*)
+        DEFERRAL_ISSUE_REFUSAL="the deferral declares '$(sane "$num")', which is not an issue number"
+        return 1
+        ;;
+    esac
+    st=$(issue_state_of "$num" "$repo_slug")
+    verified=$((verified + 1))
+    case "$st" in
+      present) : ;;
+      closed)
+        DEFERRAL_ISSUE_REFUSAL="ISSUE-CLOSED — GitHub answered that issue #$(sane "$num") is CLOSED, so it does not track a deferred finding"
+        return 1
+        ;;
+      absent)
+        DEFERRAL_ISSUE_REFUSAL="ISSUE-ABSENT — GitHub answered that issue #$(sane "$num") DOES NOT EXIST in this repository"
+        return 1
+        ;;
+      *)
+        DEFERRAL_ISSUE_REFUSAL="ISSUE-UNVERIFIABLE — whether issue #$(sane "$num") exists and is OPEN could NOT BE ASKED, and a could-not-ask is never read as verified"
+        return 1
+        ;;
+    esac
+  done
+  # The count of verifications PERFORMED must equal the count DECLARED.
+  if [ "$verified" -ne "$declared" ] || [ "$declared" -eq 0 ]; then
+    DEFERRAL_ISSUE_REFUSAL="the declared issue list yielded $verified verification(s) for $declared field(s), so it was not fully checked"
+    return 1
+  fi
   return 0
 }
 
@@ -570,13 +663,22 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         return 0
         ;;
       findings)
-        if deferral_authorized "$j" "$RH_BASE" "$RH_HEAD" "$tmp"; then
+        DEFERRAL_ISSUE_REFUSAL=""
+        if deferral_authorized "$j" "$RH_BASE" "$RH_HEAD" "$tmp" "$repo"; then
           # A DISTINCT TOKEN, deliberately: nobody grepping this log for a
           # clean bind can match a deferred one.
-          RESULT_NOTE="record verdict is FINDINGS, deferral AUTHORIZED by @$(sane "$DEFERRAL_AUTHOR")"
+          RESULT_NOTE="record verdict is FINDINGS, deferral AUTHORIZED by @$(sane "$DEFERRAL_AUTHOR") (tracking issues VERIFIED OPEN)"
           return 0
         fi
-        RESULT_NOTE="record verdict is FINDINGS and no authorized deferral covers this job"
+        # The issue-state refusal is NAMED when there was one: "the deferral is
+        # not authorized" and "it is authorized but names a CLOSED issue" are
+        # different operator actions, and collapsing them would send a lead to
+        # re-post a marker that was already fine.
+        if [ -n "$DEFERRAL_ISSUE_REFUSAL" ]; then
+          RESULT_NOTE="record verdict is FINDINGS and its deferral cannot stand: $DEFERRAL_ISSUE_REFUSAL"
+        else
+          RESULT_NOTE="record verdict is FINDINGS and no authorized deferral covers this job"
+        fi
         return 1
         ;;
       *)
@@ -734,9 +836,14 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         detail "THAT BIND RESTS ON AN AUTHORIZED DEFERRAL, not on a clean review. The"
         detail "authorization was re-verified here from the PR's top-level comments (marker"
         detail "form, sole content, column-zero, structured authorship, hard-coded allowlist,"
-        detail "base/head/job scope). The marker's count= half is NOT re-verified here and is"
-        detail "not claimed to be: it is matched against the findings count OBSERVED BY THE"
-        detail "REVIEW, which this leg never ran, and it is enforced at review time."
+        detail "base/head/job scope), and EVERY issue its issues= half names was verified to"
+        detail "be an OPEN issue GitHub confirms — asked four-valued, so a CLOSED issue, a"
+        detail "non-existent one, and one that could NOT BE ASKED are each a refusal and none"
+        detail "of them grants. The marker's count= half is NOT re-verified here and is not"
+        detail "claimed to be: it is matched against the findings count OBSERVED BY THE"
+        detail "REVIEW, which this leg never ran, and it is enforced at review time. That is"
+        detail "the ONE unverified half of this authorization, and it is named rather than"
+        detail "left for a reader to discover."
         ;;
     esac
     exit 0
