@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=516
+CASE_FLOOR=517
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -3179,7 +3179,7 @@ PYINNER
     # manifest RECORDS, and the manifest recorded the mutable original. Both
     # halves are needed: an instrument that runs the right ticket and documents
     # a different one is not self-describing.
-    if python3 - "$E2E_TICKET_DIR" <<'PYINNER'
+    if AB_SELFTEST_EXPECTED_TICKET="$TMP/e2e-ticket.json" python3 - "$E2E_TICKET_DIR" <<'PYINNER'
 import json
 import os
 import sys
@@ -3191,10 +3191,20 @@ recorded = workload.get("ticket_template", "")
 problems = []
 if os.path.realpath(recorded) != os.path.realpath(os.path.join(run_dir, "ticket.json")):
     problems.append("workload.ticket_template is %r, not the frozen copy" % recorded)
+# THE EXEMPTION, CHECKED RATHER THAN ASSERTED. The static census exempts
+# AB_TICKET_ORIGINAL by a naming rule, which records an INTENT; this checks the
+# VALUE the intent claims -- that it is exactly the template the session was
+# given. "Exempt because it is named _ORIGINAL" and "provably the requested
+# path" are different guarantees, and only the second survives an edit.
 original = workload.get("ticket_original", "")
+expected_original = os.environ.get("AB_SELFTEST_EXPECTED_TICKET", "")
 if not original or os.path.realpath(original) == os.path.realpath(recorded):
     problems.append("ticket_original is absent or equal to the frozen path, so "
                     "provenance is lost")
+elif expected_original and os.path.realpath(original) != os.path.realpath(
+        expected_original):
+    problems.append("ticket_original is %r but the session was given %r"
+                    % (original, expected_original))
 for problem in problems:
     sys.stderr.write("AB-3649: %s\n" % problem)
 raise SystemExit(1 if problems else 0)
@@ -3705,7 +3715,7 @@ fi
 # class is what let the second one sit in the same file, introduced by the same
 # round. This derives every `export AB_X="$VAR"` from the driver and requires
 # VAR to have no later assignment.
-if python3 - "$DRIVER" <<'PYINNER'
+EXPORT_CENSUS="$(python3 - "$DRIVER" <<'PYINNER'
 import re
 import sys
 
@@ -3742,10 +3752,23 @@ if seen < 20:
                     % seen)
 for problem in problems:
     sys.stderr.write("AB-3649: %s\n" % problem)
+# THE SUBJECT SET IS PRINTED, because a guard whose subject nobody can see is
+# one that can silently shrink. The count is PER VARIABLE, not per line: a
+# single `export AB_A="$a" AB_B="$b"` is two subjects, which is the count that
+# matters here and not the one a grep for `export AB_` returns.
+sys.stdout.write("%d\n" % seen)
 raise SystemExit(1 if problems else 0)
 PYINNER
-then
-  ok "no AB_* export names a variable that is reassigned after it"
+)"
+if [ -n "$EXPORT_CENSUS" ]; then
+  ok "no AB_* export names a variable reassigned after it ($EXPORT_CENSUS subjects, counted per variable)"
+  # WHAT THIS CENSUS CANNOT SEE, said here rather than left to be assumed. It
+  # answers "is this export STALE", and that is not "is this export measuring
+  # the RIGHT THING": AB_PROCESS_CPUS is a command substitution with no later
+  # reassignment, so this guard passes it -- and the value it captured was the
+  # wrong subject entirely, which was round 19 finding (A). Reporting the first
+  # as though it covered the second is the shape this whole lane has been about.
+  ok "the census declares its scope: staleness only, never whether the captured value is the right subject"
 else
   bad "an AB_* export precedes its variable's final value (see above)"
 fi
