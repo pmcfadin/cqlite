@@ -1204,6 +1204,9 @@ echo "dep-duplicates ratchet self-test: $PASS passed, $FAIL failed"
 # it not at all: L1 was host-dependent (it needed cargo) and never counted toward this
 # floor, and its verdict is replaced one-for-one by G3's `G3/L1` assertion, which is
 # G-class for the same reason. Measured 71 here, unchanged by the consolidation.
+# #3958 ADDS TWO AND MOVES THE FLOOR BY ZERO, for the same reason: G0a (the pin took) and
+# G0b (the pre-flight was exercised) both need git AND the gate copy, so they are G-class
+# and cannot be counted on a host where the G block does not build. Measured 73 here.
 CASE_FLOOR=46
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): cases are being skipped or dying silently.\n' \
