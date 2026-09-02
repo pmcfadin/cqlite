@@ -1322,6 +1322,120 @@ else
 fi
 rm -rf "$_sub"
 
+echo "=== section 22: MALFORMED is its own refusal, never ABSENT (the recognizer class) ==="
+# ONE DEFECT, FIVE APPEARANCES IN THIS FILE, so this section tests the CLASS rather than the
+# two instances a reviewer happened to name. Every reserved-line recognizer counted its line
+# with the FULL accepted grammar, so a line that is PRESENT BUT MALFORMED was invisible and
+# the block read as if the line were not there — and "absent" is the permissive branch. That
+# is this repo's affirmative-measurement rule broken in its own favour: key the permissive
+# branch on the AFFIRMATIVE value, never on `!= <bad>`.
+#
+# The uniform fix is two steps per reserved line: (1) COUNT BY BARE PREFIX `^<name>:`, with no
+# assumption about what follows; (2) validate that single line against the exact accepted
+# grammar, and treat MALFORMED as its own named refusal.
+#
+# THREE OF THESE WERE MEASURED AS LITERAL FALSE PASSES before the fix, and one of them was
+# introduced by the round that fixed #3951 — which is why the class, not the instance.
+_mkres() {  # <path> [line...] — a clean full-marker block plus the caller's extra lines
+  local path="$1"; shift
+  { echo "==== AGENT-GATE SUMMARY ===="
+    echo "run-id: run-1"
+    local l; for l in "$@"; do printf '%s\n' "$l"; done
+    echo "mode: PARTIAL (--only tooling-tests) - does NOT count as the gate"
+    comp_line tooling-tests PASS 1112s
+    echo "RESULT: PARTIAL"
+    echo "==== END AGENT-GATE SUMMARY ===="
+  } > "$path"
+}
+
+# FALSE PASS 1 — `summary-integrity:FAIL` with no space was IGNORED, so the block read as
+# certifying though the gate had declared it clobbered (#2874). New in the #3951 round.
+_mkres "$TMP/mal-si.txt" "tree-integrity: PASS" "summary-integrity:FAIL (foreign run-id observed)"
+expect "22.1 a space-less summary-integrity:FAIL is not invisible (measured false PASS)" \
+  COULD-NOT-MEASURE 4 "malformed" -- "$TMP/mal-si.txt" --mode only --component tooling-tests --run-id run-1
+
+# FALSE PASS 2 — a VALID tree-integrity line beside a MALFORMED one counted as ONE, so the
+# malformed non-certifying declaration was dropped and the valid PASS carried the block.
+_mkres "$TMP/mal-ti-dup.txt" "tree-integrity: PASS" "tree-integrity:FAIL (tree-mutated-midrun)"
+expect "22.2 a valid tree-integrity line beside a MALFORMED one is AMBIGUOUS (measured false PASS)" \
+  COULD-NOT-MEASURE 4 "tree-integrity" -- "$TMP/mal-ti-dup.txt" --mode only --component tooling-tests --run-id run-1
+
+# FALSE PASS 3 — duplicate detection counted only fully valid annotated rows, so one valid
+# PASS row plus a same-component row in a shape no emitter produces left the count at 1.
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "tree-integrity: PASS"
+  echo "mode: PARTIAL (--only tooling-tests) - does NOT count as the gate"
+  comp_line tooling-tests PASS 1112s
+  printf '%-18s %s (%ss)\n' 'tooling-tests:' FAIL 9
+  echo "RESULT: PARTIAL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$TMP/mal-row-dup.txt"
+expect "22.3 a valid component row beside a MALFORMED same-component row is AMBIGUOUS (measured false PASS)" \
+  COULD-NOT-MEASURE 4 "" -- "$TMP/mal-row-dup.txt" --mode only --component tooling-tests --run-id run-1
+
+# PRECISION, not a false pass: a LONE malformed reserved line must name itself MALFORMED
+# rather than being reported as absent, because those are different facts and only one of
+# them is actionable.
+_mkres "$TMP/mal-ti-lone.txt" "tree-integrity:PASS"
+expect "22.4 a LONE malformed tree-integrity line is named malformed, not reported absent" \
+  COULD-NOT-MEASURE 4 "malformed" -- "$TMP/mal-ti-lone.txt" --mode only --component tooling-tests --run-id run-1
+
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "tree-integrity: PASS"
+  echo "mode:PARTIAL(--only tooling-tests)"
+  comp_line tooling-tests PASS 1112s
+  echo "RESULT: PARTIAL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$TMP/mal-mode.txt"
+expect "22.5 a malformed --only scope line is named malformed, not treated as no scope at all" \
+  COULD-NOT-MEASURE 4 "malformed" -- "$TMP/mal-mode.txt" --mode only --component tooling-tests --run-id run-1
+
+# CONTROL: a clean block still PASSes, or every case above is satisfied by a
+# refuse-everything reader and proves nothing.
+expect "22.6 control: a clean block is unaffected by the two-step (not refuse-everything)" \
+  PASS 0 "tooling-tests" -- "$S8c" --mode only --component tooling-tests --run-id run-1
+
+# CONTROL / CENSUS: `RESULT:` was ALREADY correct before this change — a malformed RESULT line
+# lands on a named refusal rather than being read as absent — so the sweep must leave it alone
+# and this case says which recognizers were already right.
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "tree-integrity: PASS"
+  comp_line tooling-tests PASS 1112s
+  echo "RESULT:PARTIAL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$TMP/mal-result.txt"
+expect "22.7 control: RESULT: was already correct — a malformed one refuses, never reads as absent" \
+  COULD-NOT-MEASURE 4 "" -- "$TMP/mal-result.txt" --mode only --component tooling-tests --run-id run-1
+
+# EVERY OUTPUT LINE IS ANCHORED, INCLUDING ON THE mktemp PATH. `mktemp` writes its OWN
+# unprefixed stderr before the anchored response, so the header's every-line invariant was
+# violated by the one branch that could not route through the sanitizer. Same family as the
+# round-6 `--help` finding: the artifact breaking the invariant it documents.
+_mo=$(TMPDIR=/nonexistent-dir-3951-guard bash "$VERDICT" "$S8c" --mode only --component tooling-tests 2>&1)
+_mu=$(printf '%s\n' "$_mo" | grep -vE '^gate-verdict: ' | grep -v '^$' || true)
+if [ -z "$_mu" ]; then
+  ok "22.8 the mktemp-failure path emits no unanchored line (stderr included)"
+else
+  bad "22.8 the mktemp-failure path emits no unanchored line (stderr included)" \
+      "unanchored: $(printf '%s' "$_mu" | head -2)"
+fi
+
+# STRUCTURAL: the two-step must be the ONLY way a reserved line is counted, enumerated in ONE
+# place, so a future reserved line cannot join without it. Behavioural cases only cover the
+# lines someone already thought of.
+_bad_recognizers=$(grep -cE "_count_re '\^[a-z-]+:\[\[:space:\]\]" "$VERDICT" || true)
+if grep -q '^_count_prefix()' "$VERDICT" \
+   && grep -q '^# _RESERVED_LINES' "$VERDICT" \
+   && [ "${_bad_recognizers:-0}" = 0 ]; then
+  ok "22.9 reserved lines are enumerated in ONE place and counted by BARE PREFIX only"
+else
+  bad "22.9 reserved lines are enumerated in ONE place and counted by BARE PREFIX only" \
+      "full-grammar counters still present: ${_bad_recognizers:-?}"
+fi
+
 # ---------------------------------------------------------------------------
 # CASE FLOORS (#3544). A span-replacing edit once silently deleted four cases from a
 # sibling suite and it reported `failed: 0` at 102 instead of 105 for a whole round — a
