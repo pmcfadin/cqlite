@@ -209,6 +209,10 @@ names it, correct that entry in the same diff or the exemption silently becomes 
 you widen or narrow, measure first** — the #1255 narrowing outlived its own premise (the widened
 component measures **138s**, dominated by the `release-unwind` LTO build it already paid), so the
 speed argument that justified the hole had stopped being true long before anyone re-checked it.
+That figure is the POST-REBASE build of PR #3555, the one that merged; **133s** appears in that
+PR's body and is the same measurement taken on its PRE-REBASE build. Two real measurements of two
+builds, not a discrepancy — cite the number with the build it describes, and do not average them
+or quote one as the other (#3642).
 
 **AND "DOES EVERY TEST RUN" IS NOT "IS THE CORPUS COMPLETE" (#3493).** #3522's census answers the
 first; it cannot answer the second, and neither can its per-suite guard. The Node parity cases
