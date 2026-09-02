@@ -86,7 +86,9 @@ impl V5CompressedLegacyParser {
     /// implements each scalar's on-disk byte layout. Deliberately exhaustive over
     /// `CqlType` with no wildcard, so a NEW variant is a compile error here rather
     /// than a silent blob at run time.
-    pub(super) fn cql_scalar_short_form(ty: &CqlType) -> Option<&'static str> {
+    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn cql_scalar_short_form(
+        ty: &CqlType,
+    ) -> Option<&'static str> {
         Some(match ty {
             CqlType::Boolean => "boolean",
             CqlType::TinyInt => "tinyint",
