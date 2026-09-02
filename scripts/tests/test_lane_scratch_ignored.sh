@@ -193,6 +193,25 @@ assert_ignored() {
   pass "'$path' is ignored (.gitignore pattern '$pat')"
 }
 
+# untracked_enumeration — `git ls-files --others --exclude-standard` in the
+# fixture, rc-CHECKED. This is the exact enumeration tree-integrity uses. Its rc
+# was previously discarded, so a failing invocation returned an empty list and
+# the "subtree is invisible" assert would have PASSED on it, its red delegated to
+# the neighbouring control-file assert — the coupling CLAUDE.md records as a
+# latent false pass (#3564: ask of every key what fails the run if THIS key alone
+# goes bad). Sets OTHERS; returns non-zero when the enumeration itself failed.
+OTHERS=""
+untracked_enumeration() {
+  local rc=0
+  OTHERS="$(g ls-files --others --exclude-standard 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "git ls-files --others --exclude-standard failed (rc $rc) — the visibility measurement was NOT taken${OTHERS:+: $OTHERS}"
+    OTHERS=""
+    return 1
+  fi
+  return 0
+}
+
 # assert_not_ignored <path> <why> — a path that MUST stay visible.
 assert_not_ignored() {
   local path="$1" why="$2" head pat
@@ -258,19 +277,62 @@ assert_not_ignored ".lanes-foo" "differs after the dot — outside the reserved 
 # later `tools/x/.lane-runtime/mod.rs` would be invisible to
 # `git ls-files --others --exclude-standard`, to `dirty:` and to tree-integrity
 # — roborev job 209's subtree-wide false-clean, re-opened. Census over the REAL
-# repository index (read-only; -z so a path containing a newline cannot split a
-# record). Measured when written: 0 matches, so this costs nothing to keep true.
-tracked_under_lane="$(git -C "$REPO_ROOT" ls-files -z \
-  | tr '\0' '\n' | grep -E '(^|/)\.lane-' || true)"
-if [ -n "$tracked_under_lane" ]; then
-  fail "TRACKED file(s) live under a reserved '.lane-*' path — the no-negation decision's precondition is broken"
-  printf '  %s\n' $tracked_under_lane
-  echo "  REMEDY: move them out of '.lane-*'. That namespace is reserved for lane-local"
-  echo "          scratch; git does not descend into an ignored directory, so source there"
-  echo "          is invisible to ls-files --others, to 'dirty:' and to tree-integrity."
+# repository index (read-only). Measured when written: 0 matches, so this costs
+# nothing to keep true.
+#
+# THREE-VALUED, like the check-ignore probe above, and for the same reason. The
+# first version of this census ended `... | grep -E '(^|/)\.lane-' || true`: an
+# unreadable index produced empty output, grep exited 1, `|| true` swallowed it
+# and the guard AFFIRMATIVELY reported that the precondition HOLDS — a positive
+# verdict derived from the ABSENCE of a bad signal (the `1699-find-tristate`
+# shape), inside the one assertion enforcing the precondition the whole
+# no-negation decision rests on. "The precondition is broken" and "I could not
+# measure it" are different operator actions and are worded differently below.
+#
+# The measurement is taken in its OWN step so its exit status is observable, and
+# is written to a FILE outside the worktree under test: `-z` output carries NUL
+# separators, and bash silently DROPS NUL bytes in a command substitution, which
+# would give back the very property `-z` was chosen for. The scan is then a shell
+# `case` glob over NUL-delimited records read by REDIRECTION (never a pipe, whose
+# subshell would discard the result). Using no `grep` removes grep's own
+# rc-2 failure mode rather than adding a branch for it.
+census_out="$fixture/.git/lane-scratch-census.z"
+census_err="$fixture/.git/lane-scratch-census.err"
+census_rc=0
+git -C "$REPO_ROOT" ls-files -z >"$census_out" 2>"$census_err" || census_rc=$?
+census_err_text="$(cat "$census_err" 2>/dev/null)"
+
+if [ "$census_rc" -ne 0 ]; then
+  fail "the tracked-file census COULD NOT BE TAKEN (git ls-files -z rc $census_rc) — the '.lane-*' reservation is UNVERIFIED, NOT confirmed${census_err_text:+: $census_err_text}"
 else
-  pass "no TRACKED file lives under a reserved '.lane-*' path (precondition of the no-negation decision)"
+  lane_violations=()
+  censused=0
+  while IFS= read -r -d '' censused_path; do
+    censused=$((censused + 1))
+    case "$censused_path" in
+      .lane-* | */.lane-*) lane_violations+=("$censused_path") ;;
+    esac
+  done <"$census_out"
+
+  if [ "$censused" -eq 0 ]; then
+    # Zero tracked files is not a clean bill of health, it is an empty subject:
+    # the census would then "pass" over nothing at all.
+    fail "the tracked-file census saw ZERO tracked files under $REPO_ROOT — the '.lane-*' reservation is UNVERIFIED, NOT confirmed (is this a checkout of the repository?)"
+  elif [ "${#lane_violations[@]}" -ne 0 ]; then
+    fail "TRACKED file(s) live under a reserved '.lane-*' path — the no-negation decision's precondition is BROKEN"
+    # Quoted iteration: a violating path containing a space must be reported as
+    # ONE path, not word-split into two bogus ones.
+    for censused_path in "${lane_violations[@]}"; do
+      printf '  %s\n' "$censused_path"
+    done
+    echo "  REMEDY: move them out of '.lane-*'. That namespace is reserved for lane-local"
+    echo "          scratch; git does not descend into an ignored directory, so source there"
+    echo "          is invisible to ls-files --others, to 'dirty:' and to tree-integrity."
+  else
+    pass "no TRACKED file lives under a reserved '.lane-*' path ($censused tracked files censused; precondition of the no-negation decision)"
+  fi
 fi
+rm -f "$census_out" "$census_err"
 
 # --- 4. legacy enumerated scratch names are STILL ignored -------------------
 # They stay for compatibility (#3760 sanctions this); pinning them stops a
@@ -301,17 +363,18 @@ echo scratch >"$fixture/.lane-foo/deep/note.md"
 # result below is a real ignore and not a broken invocation.
 echo control >"$fixture/lane-scratch-visible-control.txt"
 
-others="$(g ls-files --others --exclude-standard)"
-if ! printf '%s\n' "$others" | grep -qx 'lane-scratch-visible-control.txt'; then
-  fail "ls-files --others --exclude-standard did not see the control file — the measurement is void"
-else
-  pass "ls-files --others --exclude-standard sees the un-ignored control file"
-fi
-if printf '%s\n' "$others" | grep -q '^\.lane-foo/'; then
-  fail ".lane-foo/ contents are VISIBLE to ls-files --others (a mid-gate write there would stamp dirty/tree-mutated)"
-  printf '%s\n' "$others" | grep '^\.lane-foo/'
-else
-  pass ".lane-foo/ subtree is invisible to ls-files --others --exclude-standard (no negation, by design)"
+if untracked_enumeration; then
+  if ! printf '%s\n' "$OTHERS" | grep -qx 'lane-scratch-visible-control.txt'; then
+    fail "ls-files --others --exclude-standard did not see the control file — the measurement is void"
+  else
+    pass "ls-files --others --exclude-standard sees the un-ignored control file"
+  fi
+  if printf '%s\n' "$OTHERS" | grep -q '^\.lane-foo/'; then
+    fail ".lane-foo/ contents are VISIBLE to ls-files --others (a mid-gate write there would stamp dirty/tree-mutated)"
+    printf '%s\n' "$OTHERS" | grep '^\.lane-foo/'
+  else
+    pass ".lane-foo/ subtree is invisible to ls-files --others --exclude-standard (no negation, by design)"
+  fi
 fi
 
 # --- 6. the deliberate CONTRAST: job 209's negated names DO surface ---------
@@ -322,11 +385,12 @@ fi
 neg=".agent-gate-summary.txt.launch-lock"
 mkdir -p "$fixture/$neg"
 echo source >"$fixture/$neg/inner.rs"
-others="$(g ls-files --others --exclude-standard)"
-if printf '%s\n' "$others" | grep -qx "$neg/inner.rs"; then
-  pass "job-209 negated '$neg/' still exposes its contents (deliberate contrast)"
-else
-  fail "'$neg/inner.rs' is invisible — the job-209 '!<path>/' negation was lost"
+if untracked_enumeration; then
+  if printf '%s\n' "$OTHERS" | grep -qx "$neg/inner.rs"; then
+    pass "job-209 negated '$neg/' still exposes its contents (deliberate contrast)"
+  else
+    fail "'$neg/inner.rs' is invisible — the job-209 '!<path>/' negation was lost"
+  fi
 fi
 
 # --- 7. positive control: real source is not ignored ------------------------
