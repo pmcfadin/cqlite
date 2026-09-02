@@ -673,11 +673,11 @@ expect "10.12 a DUPLICATED summary-integrity line is ambiguous even under a PASS
 # be UNDISTURBED by this change, so both are re-asserted right beside it.
 _mk_si "$TMP/si-none-skip.txt" "SKIP (no capture)"
 expect "10.13 control: tree-integrity SKIP ALONE is still COULD-NOT-MEASURE (mapping undisturbed)" \
-  COULD-NOT-MEASURE 4 "tree-integrity" -- "$TMP/si-none-skip.txt" --mode only --component tooling-tests --run-id run-1
+  COULD-NOT-MEASURE 4 "the tree check never ran" -- "$TMP/si-none-skip.txt" --mode only --component tooling-tests --run-id run-1
 
 _mk_si "$TMP/si-with-ti-fail.txt" "FAIL (tree-mutated-midrun; detected-after-component: fmt)" "$_SI_FAIL"
 expect "10.14 control: tree-integrity FAIL keeps naming the TREE cause (its verdict is already certain)" \
-  NOT-PASS 1 "tree-integrity" -- "$TMP/si-with-ti-fail.txt" --mode only --component tooling-tests --run-id run-1
+  NOT-PASS 1 "tree mutation" -- "$TMP/si-with-ti-fail.txt" --mode only --component tooling-tests --run-id run-1
 
 echo "=== section 11: --help obeys the SAME four invariants as every verdict (B4) ==="
 # CLAUDE.md #3312 instance 2, verbatim: the artifact that DESCRIBED the escape hatch became
@@ -1345,12 +1345,14 @@ rm -rf "$_sub"
 # 87 -> 96; round 6 added 20 (escapes are refused, not normalised) and 21 (the name must be a
 # real component), 96 -> 106; the C (spec-auditor) round added 6.8 (the gate's exit mapping,
 # derived from source) and 15.12 (no site may scope the RECORD grammar to --delta),
-# 106 -> 108. Raised
+# 106 -> 108; #3951 grew section 10 by eight (an uncertain tree-integrity must not mask a
+# certain summary-integrity FAIL, plus four controls for the mappings that must NOT move),
+# 108 -> 116. Raised
 # DELIBERATELY each time: the total is a
 # `-lt` floor, so leaving it low would let the added cases be deleted while the suite still
 # reported green — this repo's own case-floor lesson.
-SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:8 7:2 8:4 9:5 10:8 11:6 12:5 13:4 14:2 15:12 16:4 17:6 18:5 19:3 20:5 21:5"
-FLOOR=108
+SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:8 7:2 8:4 9:5 10:16 11:6 12:5 13:4 14:2 15:12 16:4 17:6 18:5 19:3 20:5 21:5"
+FLOOR=116
 for _sf in $SECTION_FLOORS; do
   _sec=${_sf%%:*}; _min=${_sf##*:}
   eval "_got=\${SEC_$_sec:-0}"

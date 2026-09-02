@@ -495,12 +495,40 @@ esac
 # Checked BEFORE the component read, because they are the stronger statement and the more
 # actionable cause. Token compare exactly as premerge-assert.sh does it.
 # ---------------------------------------------------------------------------
+# MEASURED FIRST, ACTED ON BELOW (#3951). The two integrity lines are INDEPENDENT
+# declarations, and the tree-integrity branch returns EARLY — so with the summary-integrity
+# line read only afterwards, an UNCERTAIN tree verdict (SKIP / PENDING / absent / ambiguous /
+# unrecognised) refused with COULD-NOT-MEASURE and never consulted a `summary-integrity: FAIL`
+# sitting beside it, which the header documents as NOT-PASS. NEVER LET A "CANNOT TELL" MASK A
+# "DEFINITELY NOT": `summary-integrity: FAIL` is affirmatively established and block-wide
+# (#2874 — a foreign run-id clobbered the path mid-run), so it outranks an unmeasured tree
+# reading. This is a MEASUREMENT only: no verdict is taken here, so the ORDER of the verdicts
+# below is unchanged and `tree-integrity: FAIL` keeps its own, already-certain cause.
+#
+# Neither ordering can produce a false PASS — every branch involved is a refusal — so what
+# this buys is the PRECISION of the refusal, and a header that agrees with its code.
+_n_si=$(_count_re '^summary-integrity:[[:space:]]' "$BODY") \
+  || cnm "summary-integrity-unmeasurable; the scan for the summary-integrity line failed"
+_si=""
+[ "$_n_si" -eq 1 ] && _si=$(_key_token summary-integrity "$BODY")
+
+# _si_preempt <what-was-unmeasured>: promote an UNCERTAIN tree refusal to the certain
+# summary-integrity one, and ONLY on an unambiguous FAIL. A duplicated or unrecognised
+# summary-integrity line is itself unmeasurable, so it promotes nothing — ambiguity is never a
+# guess in either direction. Returns (no-op) when there is nothing affirmative to promote.
+_si_preempt() {
+  [ "$_n_si" -eq 1 ] && [ "$_si" = FAIL ] || return 0
+  notpass "summary-integrity FAIL — a mid-run summary clobber was detected (#2874), so the block is non-certifying and NO component verdict in it can be read as a pass. Reported IN PREFERENCE to the tree-integrity reading, which was itself UNMEASURED here ($1): an affirmatively established failure outranks a cannot-tell (#3951)"
+}
+
 _n_ti=$(_count_re '^tree-integrity:[[:space:]]' "$BODY") \
   || cnm "tree-integrity-unmeasurable; the scan for the tree-integrity line failed"
 if [ "$_n_ti" -eq 0 ]; then
+  _si_preempt "the block carries no tree-integrity line"
   cnm "tree-integrity-absent; the block carries no tree-integrity line, so whether the tree was stable during the run cannot be established — never assumed benign (#2926)"
 fi
 if [ "$_n_ti" -gt 1 ]; then
+  _si_preempt "the block carries $_n_ti tree-integrity lines"
   cnm "tree-integrity-ambiguous; the block carries $_n_ti tree-integrity lines, and ambiguity is never resolved in favour of PASS"
 fi
 _ti=$(_key_token tree-integrity "$BODY")
@@ -509,19 +537,20 @@ case "$_ti" in
   FAIL)
     notpass "tree-integrity FAIL — the gate declared this run NON-CERTIFYING (a mid-run tree mutation invalidates EVERY component in the block, #2926), so NO component verdict in this block can be read as a pass — including this one, whose own line this check deliberately has not read" ;;
   SKIP|PENDING)
+    _si_preempt "tree-integrity read '$_ti'"
     cnm "tree-integrity '$_ti' — the tree check never ran (SKIP) or the run never reached its terminal emit (PENDING), so tree stability is UNMEASURED. Deliberately NOT a FAIL: an unmeasured check is not a failed one" ;;
   *)
+    _si_preempt "the tree-integrity token '${_ti:-<unreadable>}' is outside its closed set"
     cnm "tree-integrity token '${_ti:-<unreadable>}' is outside the closed set PASS|FAIL|SKIP|PENDING, so it is never read as a pass" ;;
 esac
-_n_si=$(_count_re '^summary-integrity:[[:space:]]' "$BODY") \
-  || cnm "summary-integrity-unmeasurable; the scan for the summary-integrity line failed"
+# The tree verdict is PASS by the time we reach here, so this is the summary-integrity line's
+# own verdict, read from the values measured above (#3951: measured once, acted on twice).
 if [ "$_n_si" -gt 1 ]; then
   cnm "summary-integrity-ambiguous; the block carries $_n_si summary-integrity lines"
 fi
 if [ "$_n_si" -eq 1 ]; then
   # agent-gate.sh emits this line ONLY on detection, and only ever with a FAIL token — so
   # its mere PRESENCE is the non-certifying signal. An unexpected token is still not a pass.
-  _si=$(_key_token summary-integrity "$BODY")
   case "$_si" in
     FAIL) notpass "summary-integrity FAIL — a mid-run summary clobber was detected (#2874), so the block is non-certifying and NO component verdict in it can be read as a pass — including this one, whose own line this check deliberately has not read" ;;
     *)    cnm "summary-integrity token '${_si:-<unreadable>}' is unrecognised; the gate emits this line only on detection, so its presence is never benign" ;;
