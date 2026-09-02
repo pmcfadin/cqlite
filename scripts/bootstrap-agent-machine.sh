@@ -345,6 +345,128 @@ brew_or_cargo() {
   fi
 }
 
+# ---- ONE ANSWER TO "WHICH sccache DOES THIS BOX HAVE" (issue #3727, roborev job 413) ----
+#
+# EVERY SITE IN THIS SCRIPT THAT DECIDES SCCACHE PRESENCE IN ITS OWN PROCESS CALLS THIS ONE
+# FUNCTION — the section-2 accelerator check and section 5b2's precondition, which were the
+# only two. Job 411 had already found the GATE disagreeing with this script about one box;
+# two more `have sccache` sites in here were the same defect one file over, and the fix for
+# it is one rule per execution context, never a third copy of the rule. Section 5b2's
+# `scc_resolve_binary` is the OTHER context (a probed sudo SESSION, which expands its own
+# `$HOME`) and stays where it is; the rule below is the same two stages, asked here.
+#
+# THE RULE, byte-for-byte agent-gate.sh's `_gate_sccache_bin`: STAGE 1 the ambient PATH;
+# STAGE 2 <the invoking account's home>/.cargo/bin/sccache — where `cargo install sccache`,
+# the install section 2 itself prints, puts the binary, and exactly the directory the gate
+# falls back to. `-f` as well as `-x`, because `[ -x <dir> ]` is TRUE for a directory: a
+# directory named `sccache` must not resolve as a binary. Stage 1 answers the BARE name
+# (what a PATH-resolved call here already runs); stage 2 answers the ABSOLUTE path, the only
+# runnable form in that layout.
+#
+# WHY THE HOME IS RESOLVED AND NOT TAKEN FROM `$HOME` — THIS IS THE CRUX. The documented
+# invocation is `sudo bash scripts/bootstrap-agent-machine.sh`, so this process's own `$HOME`
+# is ROOT's: `$HOME/.cargo/bin` evaluated HERE would probe /root/.cargo/bin and answer about
+# an account nobody runs gates as. `scc_resolve_binary` sidesteps that by leaving `$HOME`
+# SINGLE-QUOTED for the probed session to expand — these two checks run in bootstrap's own
+# process, both BEFORE privilege is resolved, so the home is resolved here instead: from the
+# PASSWD DATABASE, keyed on a VALIDATED SUDO_UID, never by assuming /home/<user>. No
+# privileged call is made (a declared TEST MODE run with no proven sandbox must make none at
+# all, and section 2 runs long before any identity or sudo probe).
+#
+# AND AN UNRESOLVABLE HOME IS ITS OWN ANSWER, NEVER AN ABSENCE. "Both locations were checked
+# and neither holds one" (rc 1) and "stage 2 could not be identified" (rc 2) are different
+# facts, and only the first licenses the MISSING warning `--strict` reads as a failure. That
+# is the whole shape of job 413's finding, one layer up: a PATH-only check reported MISSING
+# for a binary the gate resolves and uses, and the false warning failed the strict verify.
+SCCACHE_BIN=""            # the resolved binary: the bare name, or an absolute path
+SCCACHE_BIN_WHERE=""      # `PATH`, or the directory stage 2 found it in
+SCCACHE_FALLBACK_DIR=""   # the stage-2 directory, whenever it could be identified
+SCCACHE_FALLBACK_WHY=""   # why it could not be, when it could not
+
+# invoker_cargo_bin <euid>: sets SCCACHE_FALLBACK_DIR to the ~/.cargo/bin of the account a
+# gate runs as (rc 0), or rc 1 with SCCACHE_FALLBACK_WHY saying which fact was missing.
+#
+# The EUID is a PARAMETER, not a read: the only caller passes bash's own `$EUID` (never a
+# PATH-resolved `id -u`, which a shim can answer for), and passing it is what lets the tests
+# drive the root branch on a suite that cannot BE root — a readonly `$EUID` cannot be set,
+# and inventing an environment seam for it would hand a real invoker a way to redirect the
+# lookup.
+invoker_cargo_bin() {
+  local euid="$1" uid="" name="" pwline="" home=""
+  SCCACHE_FALLBACK_DIR=""; SCCACHE_FALLBACK_WHY=""
+  case "$euid" in ''|*[!0-9]*) euid="" ;; esac
+  if [ -z "$euid" ]; then
+    SCCACHE_FALLBACK_WHY="\$EUID is unreadable, so the account a gate runs as cannot be established"
+    return 1
+  fi
+  if [ "$euid" != 0 ]; then
+    # We ARE that account, so this process's own $HOME is exactly what the gate's fallback
+    # expands — and preferring it matters: an agent box may run with a HOME that is not the
+    # one passwd records, and the gate would use THAT one.
+    if [ -n "${HOME:-}" ]; then
+      SCCACHE_FALLBACK_DIR="$HOME/.cargo/bin"
+      return 0
+    fi
+    uid="$euid"
+  else
+    # Root: the subject is the INVOKING account. SUDO_UID is the authority and SUDO_USER must
+    # AGREE with it — the identity rule sections 5b/5b2 already resolve by, for the same
+    # reason: a stale or spoofed SUDO_USER would name a different account's home.
+    uid="${SUDO_UID-}"
+    case "$uid" in ''|*[!0-9]*) uid="" ;; esac
+    if [ -z "$uid" ]; then
+      SCCACHE_FALLBACK_WHY="this process is root with no usable SUDO_UID (absent or non-numeric), so the invoking account whose ~/.cargo/bin is in question is unknown"
+      return 1
+    fi
+    if [ "$uid" = 0 ]; then
+      SCCACHE_FALLBACK_WHY="SUDO_UID is 0, so sudo was invoked BY root — there is no invoking user account whose ~/.cargo/bin could be checked"
+      return 1
+    fi
+    name="${SUDO_USER-}"
+    if [ -n "$name" ] && [ "$(id -u "$name" 2>/dev/null || echo none)" != "$uid" ]; then
+      SCCACHE_FALLBACK_WHY="INCONSISTENT sudo metadata — SUDO_USER '$name' does not resolve to SUDO_UID $uid, so whose home to check is ambiguous"
+      return 1
+    fi
+  fi
+  # THE HOME COMES FROM THE PASSWD DATABASE, never from /home/<name>: an account's home is
+  # whatever passwd says it is, and guessing the path would probe a directory that may not be
+  # that account's at all. `getent` first (it answers for NSS-backed accounts too), /etc/passwd
+  # second, and the lookup is BOUNDED — an NSS backend (LDAP, SSSD) can block, and this is boot
+  # path code. Keyed on the UID, which is the authority; the name is only ever cross-checked.
+  if have getent; then
+    pwline=$(bounded 5 getent passwd "$uid" 2>/dev/null || true)
+  fi
+  if [ -z "$pwline" ] && [ -r /etc/passwd ]; then
+    pwline=$(awk -F: -v u="$uid" '$3 == u { print; exit }' /etc/passwd 2>/dev/null || true)
+  fi
+  home=$(printf '%s\n' "$pwline" | awk -F: 'NF >= 6 { print $6; exit }')
+  case "$home" in
+    /*) SCCACHE_FALLBACK_DIR="$home/.cargo/bin"; return 0 ;;
+  esac
+  SCCACHE_FALLBACK_WHY="uid $uid has no absolute home directory in the passwd database (neither getent nor /etc/passwd names one), so the ~/.cargo/bin the gate falls back to cannot be located"
+  return 1
+}
+
+# sccache_bin: THREE outcomes, and a caller may claim an ABSENCE only on rc 1.
+#   rc 0 — SCCACHE_BIN is what to run, SCCACHE_BIN_WHERE says which stage answered.
+#   rc 1 — BOTH locations were checked and neither holds an sccache.
+#   rc 2 — stage 1 found none and stage 2 could not be identified (SCCACHE_FALLBACK_WHY).
+sccache_bin() {
+  SCCACHE_BIN=""; SCCACHE_BIN_WHERE=""
+  if have sccache; then
+    SCCACHE_BIN=sccache
+    SCCACHE_BIN_WHERE=PATH
+    return 0
+  fi
+  invoker_cargo_bin "${EUID-}" || return 2
+  if [ -f "$SCCACHE_FALLBACK_DIR/sccache" ] && [ -x "$SCCACHE_FALLBACK_DIR/sccache" ]; then
+    SCCACHE_BIN="$SCCACHE_FALLBACK_DIR/sccache"
+    SCCACHE_BIN_WHERE="$SCCACHE_FALLBACK_DIR"
+    return 0
+  fi
+  return 1
+}
+
 # ---- mold link accelerator helpers (Linux only, issue #2859) ----
 # mold is the fast Linux linker; linking is the one build cost sccache cannot
 # cache, so every --lite round and full gate re-links every test binary from
@@ -502,11 +624,25 @@ fi
 # ---- 2. Accelerators (mirror scripts/agent-gate.sh ACCEL_* detection, #1848) ----
 hdr "Gate accelerators (issue #1848)"
 
-# sccache — mirrors agent-gate.sh "sccache auto-detect" (ACCEL_SCCACHE).
-if have sccache; then
-  ok "sccache present ($(sccache --version 2>/dev/null | head -1)) — cross-worktree compile cache"
+# sccache — mirrors agent-gate.sh "sccache auto-detect" (ACCEL_SCCACHE), THROUGH THE ONE
+# TWO-STAGE RESOLVER (issue #3727, roborev job 413). A PATH-only check here reported
+# `sccache MISSING` for the very binary the gate resolves from ~/.cargo/bin and uses — and
+# under `--strict` that false warning failed a healthy machine. The MISSING line is emitted
+# only when BOTH locations were checked and neither holds one; an unidentifiable stage 2 is
+# reported as the UNKNOWN it is, because "not installed" is a claim this run cannot make.
+scc_accel_rc=0
+sccache_bin || scc_accel_rc=$?
+if [ "$scc_accel_rc" -eq 0 ] && [ "$SCCACHE_BIN_WHERE" = PATH ]; then
+  ok "sccache present ($("$SCCACHE_BIN" --version 2>/dev/null | head -1)) — cross-worktree compile cache"
+elif [ "$scc_accel_rc" -eq 0 ]; then
+  ok "sccache present ($("$SCCACHE_BIN" --version 2>/dev/null | head -1)) at '$SCCACHE_BIN' — not on this process's PATH, resolved from the invoking account's ~/.cargo/bin, which is the same fallback agent-gate.sh applies before it detects sccache, so a gate WILL use it — cross-worktree compile cache"
+elif [ "$scc_accel_rc" -eq 2 ]; then
+  # NO install line here, and deliberately: `--yes` would RUN it, and installing a tool whose
+  # presence this run could not determine is a side effect taken on an unknown state.
+  warn "sccache UNKNOWN — none on this process's PATH, and the ~/.cargo/bin that agent-gate.sh also falls back to could not be located ($SCCACHE_FALLBACK_WHY), so this run cannot tell an absent sccache from an installed one"
+  info "check by hand as the account gates run as: 'command -v sccache || ls -l ~/.cargo/bin/sccache' — and if it is absent, $(brew_or_cargo sccache sccache)"
 else
-  warn "sccache MISSING — ~25.6% slower fresh builds (gate stamps sccache=absent)"
+  warn "sccache MISSING — ~25.6% slower fresh builds (gate stamps sccache=absent); checked this process's PATH and '$SCCACHE_FALLBACK_DIR/sccache' (where 'cargo install sccache' writes, and the gate's own fallback)"
   # shellcheck disable=SC2046
   run_or_print sccache $(brew_or_cargo sccache sccache)
 fi
@@ -3096,27 +3232,58 @@ fi
 # repaired nothing: a false ABSENCE, reported about a tool that is installed.
 #
 # THE PRECONDITION NOW ASKS ONLY WHERE IT IS ENTITLED TO. When `$EUID` is numeric and NON-ZERO we
-# ARE the account a gate runs as, so our own PATH is a sound proxy for "does this box have sccache
-# at all" and a genuine absence stops the section before it resolves privilege — the property
-# test_perf_capability_bootstrap.sh pins. When we are root (or `$EUID` is unreadable) the ambient
-# PATH belongs to a context nobody launches gates from, so availability is decided BY THE SESSIONS,
-# exactly where every other binary question in this section is asked; `scc_resolve_binary` already
-# reports a genuinely absent tool as `unresolved:no launch context resolved an sccache at all`, and
-# an unresolvable identity is UNMEASURED before any probe runs, so the bypass cannot buy a false
-# certification and cannot make a privileged call on a box with no identity to probe.
+# ARE the account a gate runs as, so what THIS process can resolve is a sound proxy for "does this
+# box have sccache at all" and a genuine absence stops the section before it resolves privilege —
+# the property test_perf_capability_bootstrap.sh pins. When we are root (or `$EUID` is unreadable)
+# the ambient PATH belongs to a context nobody launches gates from, so availability is decided BY
+# THE SESSIONS, exactly where every other binary question in this section is asked;
+# `scc_resolve_binary` already reports a genuinely absent tool as `unresolved:no launch context
+# resolved an sccache at all`, and an unresolvable identity is UNMEASURED before any probe runs, so
+# the bypass cannot buy a false certification and cannot make a privileged call on a box with no
+# identity to probe.
 #
-# DECLARED RESIDUAL, in the fail-closed direction: a NON-root run whose own PATH lacks sccache while
-# its `sudo -i` login session has it still reports UNMEASURED here. That is a wrong ANSWER, never a
-# wrong CERTIFICATION, and closing it would mean probing before knowing there is anything to probe.
+# AND "WHAT THIS PROCESS CAN RESOLVE" IS THE TWO-STAGE `sccache_bin`, NOT `have sccache` (roborev
+# job 413, f1 — the FIFTH correction on this axis, and the same defect as job 411's one file over).
+# `have sccache` alone made the non-root branch stop the section on the STANDARD layout — a system
+# cargo plus the documented `cargo install sccache` in the invoking account's ~/.cargo/bin — so a
+# box the gate accelerates had its cap neither persisted nor verified. The shared resolver checks
+# that directory too, resolving the account's home from the passwd database rather than from this
+# process's `$HOME` (which under `sudo bash <this script>` is root's).
+#
+# THE THREE-VALUED RESULT IS LOAD-BEARING: only "both locations checked, neither holds one" (rc 1)
+# is an absence. An UNIDENTIFIABLE stage 2 (rc 2) leaves the section running, because a pass — or a
+# refusal — derived from a measurement that could not be taken is the one thing this section is not
+# allowed to do.
+#
+# DECLARED RESIDUAL, in the fail-closed direction and now NARROWER: a NON-root run that resolves no
+# sccache in either of those two locations, while its `sudo -i` LOGIN session has one somewhere a
+# shell profile puts on PATH, still reports UNMEASURED here. That is a wrong ANSWER, never a wrong
+# CERTIFICATION, and closing it would mean probing before knowing there is anything to probe.
 scc_pre_euid="${EUID-}"
 case "$scc_pre_euid" in ''|*[!0-9]*) scc_pre_euid="" ;; esac
-if [ "$SCC_SECTION_OK" = 1 ] && ! have sccache; then
-  if [ -n "$scc_pre_euid" ] && [ "$scc_pre_euid" != 0 ]; then
-    warn "sccache-cap: UNMEASURED (no 'sccache' on this box's PATH, so there is no cap to verify and nothing to persist for: the value->bytes oracle, the running server and the agreed binary are all questions about a tool that is not installed)"
+# THE SAME RESOLVER SECTION 2 USES, not a second `have sccache` (roborev job 413, f1). A
+# PATH-only precondition SKIPPED THIS ENTIRE SECTION — no cap persistence, no verification —
+# on the standard layout where cargo is a system package and sccache is the documented
+# `cargo install sccache` under the invoking account's ~/.cargo/bin: a box the gate happily
+# accelerates, reported here as having no sccache at all.
+scc_pre_rc=0
+if [ "$SCC_SECTION_OK" = 1 ]; then
+  sccache_bin || scc_pre_rc=$?
+fi
+if [ "$SCC_SECTION_OK" = 1 ] && [ "$scc_pre_rc" -ne 0 ]; then
+  if [ "$scc_pre_rc" -eq 1 ] && [ -n "$scc_pre_euid" ] && [ "$scc_pre_euid" != 0 ]; then
+    warn "sccache-cap: UNMEASURED (no 'sccache' for the account gates run as — neither on this process's PATH nor at '$SCCACHE_FALLBACK_DIR/sccache' — so there is no cap to verify and nothing to persist for: the value->bytes oracle, the running server and the agreed binary are all questions about a tool that is not installed)"
     info "install sccache first (section 2 above prints the command); this section makes no privileged call at all when the tool is absent"
     SCC_SECTION_OK=0
+  elif [ -n "$scc_pre_euid" ] && [ "$scc_pre_euid" != 0 ]; then
+    # rc 2: stage 1 found none and stage 2 could not be IDENTIFIED. That is not an absence,
+    # so it may not stop the section — availability falls to the session probes below, which
+    # is where every other binary question in this section is asked anyway.
+    info "note: no 'sccache' on this process's PATH, and the ~/.cargo/bin fallback could not be located ($SCCACHE_FALLBACK_WHY) — so ABSENCE is NOT established and this section continues; availability is decided by the SESSION contexts below"
+  elif [ "$scc_pre_rc" -eq 1 ]; then
+    info "note: no 'sccache' on THIS process's PATH and none at '$SCCACHE_FALLBACK_DIR/sccache' either, but this process is root${SUDO_UID:+ under sudo from uid $SUDO_UID} — sudo's secure_path routinely omits the invoking user's ~/.cargo/bin, and a login session's PATH can name a directory neither of those two locations covers. So the ambient PATH is NOT authoritative here and availability is decided by the SESSION contexts below; a genuinely absent tool is reported there, by the same check that names which context could not run it"
   else
-    info "note: no 'sccache' on THIS process's PATH, but this process is root${SUDO_UID:+ under sudo from uid $SUDO_UID} — and sudo's secure_path routinely omits the invoking user's ~/.cargo/bin, where 'cargo install sccache' puts it. So the ambient PATH is NOT authoritative here and availability is decided by the SESSION contexts below; a genuinely absent tool is reported there, by the same check that names which context could not run it"
+    info "note: no 'sccache' on THIS process's PATH, and the invoking account's ~/.cargo/bin could not be located ($SCCACHE_FALLBACK_WHY) while this process is root${SUDO_UID:+ under sudo from uid $SUDO_UID}. So the ambient PATH is NOT authoritative here and availability is decided by the SESSION contexts below; a genuinely absent tool is reported there, by the same check that names which context could not run it"
   fi
 fi
 
@@ -3393,6 +3560,14 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # when the ~/.cargo/bin retry is what answered would be a false sentence in an operator-facing
   # line — the defect class this section has been bleeding findings on.
   SCC_BIN_PROVENANCE=""
+  # THE SIBLING OF `sccache_bin` (near the top of this script), which answers the same question for
+  # BOOTSTRAP'S OWN PROCESS — section 2's accelerator check and this section's precondition. Two
+  # contexts, ONE rule (ambient PATH, then ~/.cargo/bin), and neither is a copy of the other's code:
+  # a session cannot be asked from in-process without a privileged call, and an in-process check
+  # cannot expand a session's `$HOME`. What must never diverge is the DIRECTORY, which is pinned
+  # across all three sites (here, `sccache_bin`, and agent-gate.sh's `_gate_sccache_bin`) by
+  # test_agent_gate_summary.sh's `accel-sccache-agree` assert.
+  #
   # scc_resolve_binary: ask the probed session which sccache it would run. Two bounded sudo calls at
   # most, deliberately taken BEFORE the persist decision, because the literal oracle that AUTHORIZES
   # the write must not run on a binary the session does not have.

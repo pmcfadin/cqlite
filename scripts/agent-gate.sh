@@ -1207,6 +1207,46 @@ _SCC_SIZE_NULL=0          # sccache reported `"cache_size":null` (measured state
 # wraps NEGATIVE, which is what #3727 round 10 (f3) found in the percentage.
 _SCC_MUL100_MAX=92233720368547758
 
+# _scc_uint_fits_i64 <digits>: rc 0 when the unsigned decimal string is <= 2^63-1
+# (9223372036854775807 — the largest value signed 64-bit shell arithmetic can HOLD, while
+# sccache reports both readings as JSON UNSIGNED integers, so a larger one is representable
+# in the payload and not in `$(( ))`).
+#
+# THE CHECK IS LEXICAL BECAUSE ARITHMETIC ON THE VALUE IS EXACTLY WHAT IS BEING GUARDED
+# (roborev job 413, f2). A `[ "$v" -gt 9223372036854775807 ]` evaluates $v as a shell integer
+# first, so an out-of-range value has ALREADY wrapped negative by the time it is compared
+# and the comparison answers `no, it is smaller` — the guard would license the very
+# arithmetic it exists to refuse. So nothing here evaluates the digits: leading zeros are
+# stripped by string surgery, the MAGNITUDE is the string LENGTH, and the one ambiguous
+# length (19 digits, where 2^63-1 itself lives) is decided by splitting the string into a
+# 10-digit and a 9-digit half, each of which provably fits and can therefore be compared
+# arithmetically. `10#` is explicit so a half carrying leading zeros is never read as octal.
+# A non-digit input is rc 1 as well: no caller can produce one (both readings are validated
+# unsigned), and refusing is the fail-closed answer if one ever did.
+_scc_uint_fits_i64() {
+  local d="$1" hi lo
+  case "$d" in ''|*[!0-9]*) return 1 ;; esac
+  while :; do
+    case "$d" in 0?*) d="${d#0}" ;; *) break ;; esac
+  done
+  if [ "${#d}" -lt 19 ]; then
+    return 0
+  fi
+  if [ "${#d}" -gt 19 ]; then
+    return 1
+  fi
+  hi="${d%?????????}"
+  lo="${d#??????????}"
+  # 9223372036 | 854775807 are the two halves of 9223372036854775807 at that same split.
+  if [ "$(( 10#$hi ))" -lt 9223372036 ]; then
+    return 0
+  fi
+  if [ "$(( 10#$hi ))" -gt 9223372036 ]; then
+    return 1
+  fi
+  [ "$(( 10#$lo ))" -le 854775807 ]
+}
+
 # _sccache_pct <used> <cap>: floor(100 * used / cap) rendered as `<N>%` — EXACTLY, or the
 # named non-measurement `pct-inexact-overflow`. Caller guarantees cap > 0.
 #
@@ -1236,6 +1276,18 @@ _SCC_MUL100_MAX=92233720368547758
 # bound is named rather than multiplied (reachable only for a cap of a handful of bytes).
 _sccache_pct() {
   local used="$1" cap="$2" whole rem frac d t
+  # THE OPERANDS ARE RANGE-CHECKED BEFORE ANY ARITHMETIC (roborev job 413, f2). Both come
+  # from `sccache --show-stats --stats-format json`, whose byte counts are JSON UNSIGNED
+  # integers, and every `$(( ))` below is SIGNED 64-bit: a cap above 2^63-1 wraps NEGATIVE
+  # on its first use, so a 12 EiB cap holding 4 EiB rendered `-100%` — a number, in a token
+  # whose whole premise is measured bytes honestly reported. The pre-existing bounds guard
+  # intermediate products; this one guards the INPUTS, and it is lexical for the reason
+  # given on _scc_uint_fits_i64. Named with the state that already exists for "no exact
+  # answer is reachable in 64-bit shell arithmetic"; no new state is introduced.
+  if ! _scc_uint_fits_i64 "$used" || ! _scc_uint_fits_i64 "$cap"; then
+    printf 'pct-inexact-overflow'
+    return 0
+  fi
   whole=$(( used / cap ))
   rem=$(( used % cap ))
   if [ "$whole" -ge "$_SCC_MUL100_MAX" ]; then
