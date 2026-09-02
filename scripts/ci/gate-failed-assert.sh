@@ -311,6 +311,16 @@ awk -v max="$max" '
   # makes the one-rule structural guard mean something (it caught this while it was being
   # written). Returns the pubid() fallback for anything not matching the closed shape, so the
   # rule never publishes a half-parsed line.
+  # pubsh() — the PUBLISHED IDENTIFIER for a delta shell-test verdict (#3765, roborev job 67).
+  # A5 emits `shell-selftest: scripts/tests/foo.sh FAIL`, whose identity is a repo-relative
+  # PATH, so pubid() rejected it for the `/` and published a placeholder instead of naming the
+  # failing script. Same shape as the doctest case, same remedy: a CLOSED grammar rather than a
+  # widened charset. The value must be a path in a charset with no `:` and no `@`, ending `.sh`,
+  # so a URL cannot satisfy it. Anything else falls back to pubid().
+  function pubsh(t) {
+    if (t ~ /^[A-Za-z0-9._\/-]+\.sh$/) return "shell-test " t
+    return pubid(tagof(t))
+  }
   function pubdoc(s,   dp, di, dl) {
     dp = s; sub(/ - .*$/, "", dp)
     di = s; sub(/^[^ ]+ - /, "", di); sub(/ \(line [0-9]+\)$/, "", di)
@@ -424,7 +434,7 @@ awk -v max="$max" '
   }
   /^shell-selftest: .* FAIL$/ {
     s = $0; sub(/^shell-selftest: /, "", s); sub(/ FAIL$/, "", s)
-    add("assert", s, pubid(tagof(norm(s))), 0); next
+    add("assert", s, pubsh(norm(s)), 0); next
   }
 
   # ---- TIER guard ----

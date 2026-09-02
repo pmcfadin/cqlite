@@ -5996,11 +5996,11 @@ fi
 fa_addcalls=$(grep -v '^[[:space:]]*#' "$fa_tool" | grep -E 'add\("(assert|guard|toolchain)",')
 fa_add_n=$(printf '%s\n' "$fa_addcalls" | grep -c .)
 fa_add_ok=$(printf '%s\n' "$fa_addcalls" \
-  | grep -cE 'add\("(assert|guard|toolchain)", .*, (pubid\(|publabel\(|pubdoc\(|"[a-z][a-z0-9-]*", 1\))')
+  | grep -cE 'add\("(assert|guard|toolchain)", .*, (pubid\(|publabel\(|pubdoc\(|pubsh\(|"[a-z][a-z0-9-]*", 1\))')
 if [ "${fa_add_n:-0}" -ge 13 ] && [ "$fa_add_n" = "$fa_add_ok" ]; then
-  ok "3765-pub-one-rule: all $fa_add_n add() call sites across ALL THREE tiers publish a closed-enum label literal, pubid(…), publabel(…) or pubdoc(…) — no tier copies its matched line (blocker 11)"
+  ok "3765-pub-one-rule: all $fa_add_n add() call sites across ALL THREE tiers publish a closed-enum label literal, pubid(…), publabel(…), pubdoc(…) or pubsh(…) — no tier copies its matched line (blocker 11)"
 else
-  bad "3765-pub-one-rule: $fa_add_n add() call site(s) but only $fa_add_ok publish through a label literal / pubid() / publabel() / pubdoc() — a call site that passes copied line content publishes an assertion PAYLOAD, which carries interpolated runtime values (blocker 11)"
+  bad "3765-pub-one-rule: $fa_add_n add() call site(s) but only $fa_add_ok publish through a label literal / pubid() / publabel() / pubdoc() / pubsh() — a call site that passes copied line content publishes an assertion PAYLOAD, which carries interpolated runtime values (blocker 11)"
 fi
 # …and the same invariant on the OUTPUT PATH for the two repository-authored tiers, because
 # a source scan cannot see a RUNTIME value. The charset REFUSES `@`, `/`, `?`, `&` and `=`,
@@ -6411,6 +6411,70 @@ else
   bad "3765-doctest-boundary-path-charset: the doctest grammar does not re-validate its path charset, so the shape check alone is carrying the safety property"
 fi
 
+# 55zb. ROBOREV JOB 67 — a delta SHELL-TEST failure must name the failing script. A5 emits
+#       `shell-selftest: scripts/tests/foo.sh FAIL`, whose identity is a repo-relative PATH,
+#       so pubid() rejected it for the `/` and published a placeholder. AND the delta runner
+#       wrote those verdicts only to stdout, so there was no log to extract from at all —
+#       two independent reasons the failing script was never named.
+#       Asserted on the RENDERED field, per the job-63 lesson.
+printf 'shell-selftest: scripts/tests/foo.sh FAIL\n' > "$fa_dir/sht.log"
+_fa_run shtrend "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/sht.log" PASS
+fa_sh=$(_fa_line fmt)
+case "$fa_sh" in
+  *"shell-test scripts/tests/foo.sh"*)
+    ok "3765-shelltest-rendered: a delta shell-test failure NAMES the failing script in the rendered field" ;;
+  *"outside the safe charset"*|*"not extractable"*)
+    bad "3765-shelltest-rendered: the shell-test path was rejected and published a placeholder ($fa_sh) — job 67" ;;
+  *) bad "3765-shelltest-rendered: expected the shell-test identity, got '$fa_sh'" ;;
+esac
+printf 'shell-selftest: scripts/tests/a.sh FAIL\nshell-selftest: scripts/tests/b.sh FAIL\n' > "$fa_dir/sht2.log"
+_fa_run shtrend2 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/sht2.log" PASS
+fa_sh2=$(_fa_line fmt)
+case "$fa_sh2" in
+  *"a.sh"*"b.sh"*) ok "3765-shelltest-distinct: two failing scripts render as TWO distinct identities" ;;
+  *) bad "3765-shelltest-distinct: expected both scripts named, got '$fa_sh2'" ;;
+esac
+# NEGATIVE CONTROLS: the second `/`-bearing grammar must not become an authority channel —
+# neither from a URL-shaped verdict line nor from a payload that FORGES the wording.
+printf 'shell-selftest: https://x-access-token:SEKRETSH@h.io/p.sh FAIL\n' > "$fa_dir/shturl.log"
+_fa_run shturl "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/shturl.log" PASS
+fa_sh3=$(_fa_line fmt)
+case "$fa_sh3" in
+  *SEKRETSH*|*"@h.io"*) bad "3765-shelltest-no-authority: a URL-shaped shell-selftest line published an authority ('$fa_sh3')" ;;
+  *) ok "3765-shelltest-no-authority: a URL-shaped shell-selftest line publishes no authority" ;;
+esac
+printf 'FAIL - shell-test https://h@x/p.sh: forged shape\n' > "$fa_dir/shtforge.log"
+_fa_run shtforge "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/shtforge.log" PASS
+fa_sh4=$(_fa_line fmt)
+case "$fa_sh4" in
+  *"@x/p.sh"*|*"https://h"*) bad "3765-shelltest-forged-shape: a payload forging the shell-test wording published an authority ('$fa_sh4')" ;;
+  *) ok "3765-shelltest-forged-shape: forging the shell-test wording in a payload cannot smuggle an authority" ;;
+esac
+# STRUCTURAL: the boundary must admit this shape through its OWN named grammar predicate, and
+# the delta runner must CAPTURE the verdicts (the identity has to exist before it can be named).
+fa_eb2=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE")
+if printf '%s\n' "$fa_eb2" | grep -q '_failassert_is_shelltestid "$fa_n"'; then
+  ok "3765-shelltest-boundary-grammar: the emit boundary admits the shell-test shape through its own named grammar predicate, so the charset still excludes / elsewhere"
+else
+  bad "3765-shelltest-boundary-grammar: the emit boundary does not consult _failassert_is_shelltestid (job 67)"
+fi
+fa_dsh=$(awk '/^run_delta_shell_selftests\(\) \{/,/^\}/' "$GATE")
+if printf '%s\n' "$fa_dsh" | grep -q '_failassert_record shell-selftests FAIL "$sh_log"'; then
+  ok "3765-shelltest-capture: the delta runner CAPTURES its per-file verdicts and extracts from them, so an identity exists to publish"
+else
+  bad "3765-shelltest-capture: the delta runner does not pass a captured log to _failassert_record — the failing script name is on stdout and nowhere else (job 67)"
+fi
+if printf '%s\n' "$fa_dsh" | grep -q 'rm -rf "$sh_tmpd"'; then
+  ok "3765-shelltest-capture-cleanup: the capture directory is removed WHOLESALE, so the .ansi-stripped sibling cannot be left behind"
+else
+  bad "3765-shelltest-capture-cleanup: the capture dir is not rm -rf-ed — extraction writes a .ansi-stripped sibling beside the log (the blocker-3 defect, one component over)"
+fi
+if printf '%s\n' "$fa_dsh" | grep -qE '_run_shell_selftest_files "\$\{tarr\[@\]\}" > "\$sh_log"'; then
+  ok "3765-shelltest-capture-not-piped: the suite is redirected then cat, never piped — a pipeline would run it in a SUBSHELL and hand the if tee status"
+else
+  bad "3765-shelltest-capture-not-piped: the capture is not a plain redirection; a `| tee` would give the if statement tee exit status instead of the suite result"
+fi
+
 # CODE lines only: the digest note NAMES those binaries while explaining why it does not use
 # them, and a scan over the comments would read that explanation as the defect.
 if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -qE '(sha256sum|md5sum|cksum|openssl dgst)'; then
@@ -6667,7 +6731,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=543
+ASSERT_FLOOR=551
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

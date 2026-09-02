@@ -6883,6 +6883,21 @@ _failassert_is_doctest_id() {
   return 0
 }
 
+# _failassert_is_shelltestid <value>: the SECOND closed grammar that may carry a `/` —
+# `shell-test <repo-relative path ending .sh>`, as produced by the extractor projection pubsh()
+# (#3765, roborev job 67). Same reasoning as _failassert_is_doctest_id: the safety property is
+# carried by the SHAPE, not by the charset, so a URL cannot satisfy it. Two grammars, listed
+# explicitly at the one boundary — never a widened charset, which would readmit every URL path.
+_failassert_is_shelltestid() {
+  local v="${1:-}" p
+  case "$v" in shell-test\ *) ;; *) return 1 ;; esac
+  p=${v#shell-test }
+  [ -n "$p" ] || return 1
+  case "$p" in *.sh) ;; *) return 1 ;; esac
+  case "$p" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  return 0
+}
+
 # _failassert_record <component> <status> [logfile]: THE extraction site. Only a FAIL has
 # a failing assert, so PASS/SKIP record nothing and render no field.
 _failassert_record() {
@@ -6989,7 +7004,7 @@ _failassert_record() {
       *)
         # ONE exception to the charset, and it is a GRAMMAR rather than a widening: a doctest
         # identifier carries a path, so it carries `/`. See _failassert_is_doctest_id.
-        if _failassert_is_doctest_id "$fa_n"; then
+        if _failassert_is_doctest_id "$fa_n" || _failassert_is_shelltestid "$fa_n"; then
           :
         else
           case "$fa_n" in
@@ -17979,15 +17994,43 @@ run_delta_shell_selftests() {
   n_targets=${#tarr[@]}
   echo ">>> [shell-selftests] executing $n_targets changed scripts/tests/*.sh"
   start=$(date +%s)
-  if _run_shell_selftest_files "${tarr[@]}"; then status=PASS; else status=FAIL; OVERALL=FAIL; fi
+  # #3765 roborev job 67: CAPTURE the per-file verdicts so an identity exists to extract. The
+  # verdicts were previously written straight to stdout and nowhere else, so this component had
+  # no log and published `not extractable` while the failing script name was right there.
+  #
+  # Redirect-then-cat, NOT `| tee`: a pipeline would run _run_shell_selftest_files in a SUBSHELL
+  # and hand the `if` tee's status instead of the suite's. The stdout contract is preserved by
+  # printing the log immediately afterwards, so the `shell-selftest: <file> PASS|FAIL` lines
+  # still appear exactly where a reader expects them.
+  #
+  # A PRIVATE 0700 dir, removed WHOLESALE: _ansi_stripped_log writes a `<log>.ansi-stripped`
+  # sibling during extraction, and removing only the log would leave it behind in /tmp — the
+  # blocker-3 defect, one component over.
+  local sh_tmpd sh_log=""
+  sh_tmpd=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-shsel.XXXXXX" 2>/dev/null) || sh_tmpd=""
+  if [ -n "$sh_tmpd" ]; then
+    chmod 700 "$sh_tmpd" 2>/dev/null
+    sh_log="$sh_tmpd/verdicts.log"
+  fi
+  if [ -n "$sh_log" ]; then
+    if _run_shell_selftest_files "${tarr[@]}" > "$sh_log" 2>&1; then status=PASS; else status=FAIL; OVERALL=FAIL; fi
+    cat "$sh_log"
+  else
+    if _run_shell_selftest_files "${tarr[@]}"; then status=PASS; else status=FAIL; OVERALL=FAIL; fi
+  fi
   end=$(date +%s)
   # #3765 DECLARED GAP, recorded rather than left silent: this runner captures each
   # script's output to a private mktemp it prints and then DELETES, so there is no
   # component log to scan and no identity to extract. Saying so affirmatively is the
   # contract; an absent field would be indistinguishable from a defect in the extractor.
   if [ "$status" = FAIL ]; then
-    _failassert_write shell-selftests "not extractable (this component keeps no component log; its per-file 'shell-selftest: <file> FAIL' verdicts go to the gate's stdout)"
+    if [ -n "$sh_log" ] && [ -s "$sh_log" ]; then
+      _failassert_record shell-selftests FAIL "$sh_log"
+    else
+      _failassert_write shell-selftests "not extractable (the per-file verdicts could not be captured to a log for this run)"
+    fi
   fi
+  [ -n "$sh_tmpd" ] && rm -rf "$sh_tmpd"
   NAMES+=("shell-selftests"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   DELTA_EXECUTORS="${DELTA_EXECUTORS:+$DELTA_EXECUTORS }shell-selftests($n_targets)"
   echo ">>> [shell-selftests] $status ($((end - start))s)"
