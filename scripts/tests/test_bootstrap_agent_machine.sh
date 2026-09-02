@@ -1500,6 +1500,58 @@ else
   bad "obj: CORRUPT lacks a remedy line or the summary restatement"
 fi
 
+# 7o-d2. A SWEEP THAT RAN AND REPRODUCIBLY DIED IS ITS OWN [warn], AND IT CLAIMS NO CAUSE
+#   (#3749 review round 10, item 1). Real commit-object corruption makes `git fsck` DIE
+#   (exit 128 on git 2.43.0) rather than report a bit, and that status used to land on
+#   UNMEASURED — which in the sibling supervisor means "write a fresh throttle stamp and
+#   keep spawning workers". A false negative on genuine corruption of the shared store.
+#
+#   A REAL FIXTURE, one property apart from 7o-c above: the damaged object is the COMMIT
+#   the ref names rather than a blob. The construction is asserted with git — the type,
+#   and the fatal status — because a case that could not tell a broken fixture from a
+#   broken subject proves nothing.
+repo7od2="$tmp/repo7od2"; mk_push_repo "$repo7od2" "file://$bare7pa"
+# The sandbox repo is deliberately OBJECTLESS (see mk_push_repo), so the fixture makes its
+# own commit first — exactly as 7o-c above does.
+(
+  cd "$repo7od2" || exit 1
+  printf 'aaa\n' >objf3
+  git -c user.email=t@t -c user.name=t add objf3 >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -q -m obj-fatal-fixture >/dev/null 2>&1
+) || true
+od2_sha=$(git -C "$repo7od2" rev-parse HEAD 2>/dev/null)
+od2_type=$(git -C "$repo7od2" cat-file -t "$od2_sha" 2>/dev/null)
+if [ -n "$od2_sha" ]; then
+  od2_p="$repo7od2/.git/objects/${od2_sha:0:2}/${od2_sha:2}"
+  chmod u+w "$od2_p" 2>/dev/null
+  printf 'not zlib at all, definitely garbage bytes' >"$od2_p" 2>/dev/null
+fi
+od2_rc=0
+git -C "$repo7od2" fsck --no-progress --no-dangling >/dev/null 2>&1 || od2_rc=$?
+if [ "$od2_type" = commit ] && [ "$od2_rc" -ge 128 ]; then
+  ok "obj: the plant IS the shape described (the COMMIT object the ref names is unparseable, and git exits $od2_rc — a fatal death, not a bitmask status)"
+else
+  bad "obj: type='$od2_type' fsck-status=$od2_rc — not the fatal-death shape; the case below would prove nothing"
+fi
+run_push "$repo7od2" "$bin7pa" "$gc7pa" --skip-push-probe --strict
+if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: UNSWEEPABLE' &&
+  ! push_green "$push_out" && [ "$push_rc" -ne 0 ]; then
+  ok "obj: a store whose sweep RUNS and reproducibly DIES is reported UNSWEEPABLE, withholds green and fails --strict — never the permissive 'not measured' that let every lane carry on"
+else
+  bad "obj: a fatal sweep did not produce an UNSWEEPABLE verdict (rc=$push_rc)"
+  push_plain "$push_out" | grep -F 'object-store:' | head -4
+fi
+# IT MUST NOT CLAIM DAMAGE, and it must be restated in the banner under its OWN wording:
+# nothing here established a cause, so the CORRUPT text and its measured re-clone remedy
+# would be a confidently-wrong instruction (round 9's class).
+if printf '%s' "$push_out" | grep -q 'COULD NOT BE SWEPT' &&
+  ! printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
+  ! printf '%s' "$push_out" | grep -q 'SHARED OBJECT STORE CORRUPT'; then
+  ok "obj: UNSWEEPABLE is restated in the summary banner under its own wording and claims NO damage — a different fact from CORRUPT, with a different remedy"
+else
+  bad "obj: UNSWEEPABLE either lacks its banner restatement or claims damage nothing established"
+  push_plain "$push_out" | grep -F 'OBJECT STORE' | head -4
+fi
 # 7o-e/f. THE TWO CHANNELS MUST AGREE BEFORE CORRUPT IS CLAIMED (#3749 review round 4,
 #   item 2). This reader used to accept `rc == 4 || verdict == CORRUPT` while its own
 #   comment asserted the conjunction, so an exit 4 with NO verdict line — or a stray
