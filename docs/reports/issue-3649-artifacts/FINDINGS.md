@@ -475,7 +475,7 @@ is worth recording as a result rather than a shortfall**:
 |---|---|
 | compressed corpus | **enforced**, driver and analyzer |
 | required ticket fields (`version`, `keyspace`, `table`, `ddl`) | **enforced** at pre-flight, mirrored from `ticket.rs:225-256` |
-| corpus on local NVMe, not network storage | **enforced on AWS, declared elsewhere** — an affirmative match on the device model; the driver warns at pre-flight and the analyzer refuses the verdict |
+| corpus on local NVMe, not network storage | **enforced on AWS, declared elsewhere** — an affirmative match on the device model; the driver warns at pre-flight and the analyzer refuses any verdict not known to be `LOCAL` |
 | an uncontended box | **disclosed** — measured against `nproc/2` and reported beside the verdict |
 | the `i4i` label itself | **declared** — not derivable from a host string, and the two properties it stood for are checked directly instead |
 
@@ -542,6 +542,29 @@ NFS-backed loop device or another cloud's network volume passed as a local disk.
 That is a pass derived from the absence of a bad signal, in the one check added
 to stop exactly that, and it is why there is a fourth token: `UNRECOGNISED` is
 disclosed as *not known to be local*, distinctly from `NOT-MEASURABLE`.
+
+**A FOUR-STATE CLASSIFIER IS ONLY AS GOOD AS THE FOUR-WAY DISPOSITION DOWNSTREAM
+OF IT.** The classifier was fixed to stop calling a SAN LUN `LOCAL`; the analyzer
+then handed that correctly-labelled `UNRECOGNISED` device a verdict anyway,
+because only the affirmative `NETWORK` value was refused one layer down. The
+producer was fixed and verified across all five tokens, and the consumer was
+assumed — so the defect survived its own fix, wearing the fix as evidence.
+
+The rule that follows: **the acceptance criteria require local NVMe, and "we
+could not tell" does not satisfy a requirement.** `NOT-MEASURABLE` and
+`UNRECOGNISED` refuse. The earlier reasoning — that a probe which could not run
+is a gap and should be disclosed rather than refused — is right about
+*disclosure* and wrong about a *verdict*, and the distinction is the finding.
+
+**`--attest-local-storage` covers IGNORANCE, NEVER EVIDENCE.** An operator may
+assert that an unrecognised device is local; nobody may assert that an
+*identified* network device is not. Without that asymmetry the override would
+turn off precisely the thing the check exists to refuse — so the attestation is
+consulted only *after* the `NETWORK` refusal and can never reach it, in the
+driver and again in the analyzer. It is recorded in the manifest, its reason is
+placeholder-refused, and it prints beside the verdict saying the local-NVMe
+requirement was **not independently verified** — so the attestation travels with
+the number rather than sitting in a file nobody opens.
 
 **The refusal belongs where the false claim would be made, and finding that out
 was the useful part.** It was written into the driver's pre-flight first, and the
@@ -826,6 +849,32 @@ Two things worth carrying:
   its own passing tests, composed into an unusable whole. The case that catches
   it runs the control end to end under the shims — and it exists because
   §15 (the driver was never executed) had already made that possible.
+
+**The EIGHTH instance was wrong in BOTH directions at once, and that pairing is
+the diagnosis.** The ticket validator demanded `version` — which carries
+`#[serde(default = "default_ticket_version")]`, so the consumer accepts a ticket
+without it — while letting `"predicates": {}` through to fail after all three
+release builds. Too strict and too loose simultaneously, which is exactly what a
+validator written from *a reading of the field list* rather than *the
+deserialiser's behaviour* produces: the four fields someone looked at were
+over-constrained and the nine they did not look at were unconstrained. The fix is
+the whole struct, field for field from `ticket.rs:225-290`, with serde-equivalent
+defaults, `PredicateOp`'s variant set, and unknown fields **ignored** because
+`FlightTicket` is not `deny_unknown_fields` — rejecting one would refuse a newer
+connector's ticket that the server reads fine.
+
+**The too-strict half matters more than its severity suggests**, and it is the
+half a reviewer is least likely to file: it reds a *correct* ticket, and on a
+metered rig the available waiver is `--control`, which disclaims the verdict. A
+guard that reds on correct input is the guard an operator waives — and here
+waiving it costs the session's whole purpose.
+
+**It also separated two checks that had been fused.** The schema half mirrors the
+deserialiser and applies to *every* session including controls — a control that
+cannot be deserialised wastes the same three builds — while the full-ring
+restriction is the target band's own and applies only to measurements. The
+control branch had been checking merely that the file was JSON, which widened the
+gap the schema check exists to close.
 
 **A validator that disagrees with its consumer is now FIVE instances, and the
 count is the argument.** The duration grammar, the census enumeration, the census
