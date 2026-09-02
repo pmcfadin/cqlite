@@ -444,6 +444,16 @@ pub(crate) const CASES: &[Case] = &[
     // Cassandra `FloatSerializer` -> `Float.toString`) spells `1.67`. That
     // divergence lived in a README note instead of a test for exactly that reason.
     //
+    // "ONLY" is stated with its reason, because the obvious candidate is NOT this
+    // one: `test_basic.simple_table` (test-data/schemas/basic-types.cql) declares
+    // `height FLOAT` and is the very table #3777's smoke golden and oracle quote.
+    // This lane cannot take it — its committed dump carries `ttl` liveness keys,
+    // which `golden_dump_shapes::unsupported_shapes` refuses as
+    // `Unsupported::Ttl`, so the golden reader would reject the case rather than
+    // compare it. Measured, not assumed: three `ttl` occurrences in that table's
+    // `nb-1-big-Data.db.jsonl`. If TTL ever becomes comparable here, that table is
+    // a second FLOAT case and this note is what says so.
+    //
     // `temperature`/`humidity` are FLOAT and carry the full 7-9 significant digits
     // an f32 holds (`92.88221`, `-16.172066`, `1.5052613`), so a widened spelling
     // cannot pass as a rounding coincidence; `pressure DOUBLE` sits beside them, so
