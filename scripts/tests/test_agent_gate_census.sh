@@ -1154,6 +1154,14 @@ fi
 # EVERY caller, not just run_component. The two legitimate exceptions are run_scoped_tests'
 # own terminal paths, which never reach record_result and reassign `$status` from
 # _census_finalize themselves — so they are excluded BY FUNCTION, not by count.
+# FAIL CLOSED WITHOUT python3, found while answering the case-floor question (round 14).
+# This is the suite's ONLY environment dependency, and it was the vacuous shape this whole
+# file polices: with python3 absent the derivation printed nothing, `$p_raw` was empty, and
+# P2 reported "no progress line prints the pre-census status" having examined NOTHING. The
+# case count did not change, which is why a floor could never have caught it. `tooling-tests`
+# SKIPs this component without python3 so the gate never saw it, but a direct run on a lean
+# box did.
+p_rc=0
 p_raw=$(python3 - "$GATE" <<'PYX'
 import sys
 lines = open(sys.argv[1], encoding='utf-8').read().split('\n')
@@ -1163,8 +1171,10 @@ bad = [i + 1 for i, l in enumerate(lines)
        if '>>> [$name] $status (' in l and not (start <= i <= end)]
 print(' '.join(str(b) for b in bad))
 PYX
-)
-if [ -z "$p_raw" ]; then
+) || p_rc=$?
+if [ "$p_rc" -ne 0 ]; then
+  bad "P2: the derivation could not run (python3 exited $p_rc, or is absent), so NO progress line was examined — an empty result here is 'not measured', never 'none found'"
+elif [ -z "$p_raw" ]; then
   ok "P2: no progress line outside run_scoped_tests prints the pre-census \$status — all ~115 print the finalized RECORDED_STATUS"
 else
   bad "P2: progress line(s) still printing the PRE-census status at line(s): $p_raw"
@@ -1663,6 +1673,95 @@ if grep -q 'SELECTED == EXECUTED' <<<"$u_decl" && grep -q 'DECLARED RESIDUAL' <<
 else
   bad "U2: the shell-selftests ruling is not recorded at _census_kind, so the question has no answer in the code"
 fi
+# ---------------------------------------------------------------------------
+# (W) A LOST SIDECAR WRITE MUST NOT BUY A GREEN — roborev job 400.
+#
+# `_census_write` is deliberately BEST-EFFORT, inherited from `_fm_note`, whose comment
+# argues it correctly: "a failed append must never fail the component whose matrix it
+# describes — the consequence of a lost append is a visibly incomplete annotation, never a
+# wrong one." THAT REASONING WAS TRUE FOR THE FEATURE MATRIX AND IS FALSE FOR THE CENSUS,
+# because the census now drives a VERDICT: the `self:`/`runtime:` paths computed a record,
+# threw the value away, and finalized by RE-READING the sidecar — so a failed write turned a
+# computed ZERO into NOT-MEASURED, and NOT-MEASURED preserves PASS. A filesystem hiccup
+# bought a false green in a merge gate.
+#
+# It is CLAUDE.md's recorded shape one directory over: a fail-closed argument holds only for
+# the consumers that existed when it was written, and a NEW consumer for which the permissive
+# direction is unsafe inverts it SILENTLY.
+#
+# The write is made to fail the way a real one would — the sidecar PATH is occupied by a
+# DIRECTORY, so the `printf >` redirect cannot create it — rather than by stubbing
+# `_census_write`, which would test a double instead of the shipped best-effort helper.
+# ---------------------------------------------------------------------------
+LOG_DIR="$tmp/writefail"; mkdir -p "$LOG_DIR"
+w_side="$(_census_sidecar shell-selftests)"
+rm -rf "$w_side"; mkdir -p "$w_side"
+# The sabotage must actually bite, or everything below proves nothing.
+if _census_write shell-selftests 'probe' && [ ! -f "$w_side" ] && ! _census_read shell-selftests >/dev/null 2>&1; then
+  ok "W0 (control): the sidecar write is genuinely failing and unreadable at '$w_side' — the case below exercises the lost-write path"
+else
+  bad "W0: the sabotage did not take effect — _census_write could still persist a record, so W1/W2 would prove nothing"
+fi
+w_rec=$(_census_declare shell-selftests 0 'changed scripts/tests/*.sh executed')
+if [ "$w_rec" = 'ZERO changed scripts/tests/*.sh executed' ]; then
+  ok "W1: the producer RETURNS the record it computed, so the value survives a write it could not persist"
+else
+  bad "W1: _census_declare returned '$w_rec' (want the computed ZERO record) — the value is still being thrown away"
+fi
+w_st=$(_census_finalize shell-selftests PASS "$w_rec")
+if [ "$w_st" = VACUOUS ] && ! _status_is_nonfailing "$w_st"; then
+  ok "W2 (job 400): a computed ZERO still becomes VACUOUS when the sidecar write FAILED — the verdict comes from the value, not from a re-read of a best-effort file"
+else
+  bad "W2: got '$w_st' (want VACUOUS, and it must be failing) — a lost write is still converting a computed ZERO into a PASS"
+fi
+# RED control, inline: the PRE-FIX call shape — finalize WITHOUT the computed value, so it
+# re-reads the sidecar that does not exist. It must NOT yield VACUOUS, or W2 is passing for
+# a reason unrelated to the fix.
+w_old=$(_census_finalize shell-selftests PASS)
+if [ "$w_old" = VACUOUS ]; then
+  bad "W2 RED: the pre-fix shape (re-reading the sidecar) ALSO returned VACUOUS, so this case does not demonstrate that finalizing from the value is what fixes it"
+else
+  ok "W2 RED: the pre-fix shape (re-read, no computed value) returns '$w_old' on the same lost write — PASS-preserving, which is exactly the false green job 400 found"
+fi
+# …and the CONTROL that the fix did not simply hard-wire VACUOUS: a real COUNT still passes
+# through the same lost-write path.
+w_rec2=$(_census_declare shell-selftests 4 'changed scripts/tests/*.sh executed')
+w_st2=$(_census_finalize shell-selftests PASS "$w_rec2")
+if [ "$w_st2" = PASS ]; then
+  ok "W3 (control): a real COUNT through the SAME failed-write path still PASSes — W2 is the ZERO, not the lost write reddening everything"
+else
+  bad "W3: got '$w_st2' (want PASS)"
+fi
+rm -rf "$w_side"
+# The runtime: producer must return its record too — same defect, same fix, different lane.
+LOG_DIR="$tmp/writefail2"; mkdir -p "$LOG_DIR"
+w_side2="$(_census_sidecar scoped-tests)"
+rm -rf "$w_side2"; mkdir -p "$w_side2"
+printf 'Compiling cqlite-py v0.1.0\n61 skipped in 1.20s\n' > "$LOG_DIR/scoped-tests.log"
+w_rec3=$(_census_scoped_record scoped-tests 0 1 'python-tier: PASS (…)')
+w_st3=$(_census_finalize scoped-tests PASS "$w_rec3")
+case "$w_rec3|$w_st3" in
+  'ZERO pytest tests'*'|VACUOUS')
+    ok "W4: the runtime: producer also RETURNS its record, so an all-skipped python tier is still VACUOUS when its sidecar write failed" ;;
+  *) bad "W4: got record '$w_rec3' / status '$w_st3' (want a ZERO record and VACUOUS)" ;;
+esac
+rm -rf "$w_side2"
+# STRUCTURAL: no verdict path may finalize by re-reading what it just computed.
+w_struct=()
+grep -q '_census_finalize "$name" "$status" "$_cen_rec"' <<<"$(sed -n '/^run_scoped_tests() {/,/^}$/p' "$GATE")" \
+  || w_struct+=("run_scoped_tests-finalizes-without-its-computed-record")
+grep -q '_census_finalize shell-selftests "$status" "$_cen_rec"' <<<"$(sed -n '/^run_delta_shell_selftests() {/,/^}$/p' "$GATE")" \
+  || w_struct+=("shell-selftests-finalizes-without-its-computed-record")
+# …and the producers must PRINT what they wrote, or the callers have nothing to pass.
+grep -qE '^[^#]*printf .%s. "\$line"' <<<"$(sed -n '/^_census_declare() {/,/^}$/p' "$GATE")" \
+  || w_struct+=("_census_declare-does-not-return-its-record")
+grep -qE '^[^#]*printf .%s. "\$line"' <<<"$(sed -n '/^_census_scoped_record() {/,/^}$/p' "$GATE")" \
+  || w_struct+=("_census_scoped_record-does-not-return-its-record")
+if [ "${#w_struct[@]}" -eq 0 ]; then
+  ok "W5: both self:/runtime: producers return their computed record and both callers finalize from it — the sidecar is rendering-only on the verdict path"
+else
+  bad "W5: ${w_struct[*]}"
+fi
 echo
 echo "component census guard: $PASS passed, $FAIL failed"
 # A COUNT FLOOR beside the abort trap (the idiom of test_agent_gate_summary.sh and
@@ -1670,7 +1769,18 @@ echo "component census guard: $PASS passed, $FAIL failed"
 # extraction that broke, a subshell dying quietly — shrinks the subject set WITHOUT
 # aborting, and "failed: 0" over a shrunken set is the vacuous pass this whole file is
 # about. Set just below the full-host figure so it reds on a structural loss.
-CENSUS_CASE_FLOOR=88
+# MEASURED, and the reason is recorded here so it is not re-litigated (roborev job 400's
+# side question). 117 cases on a fully-equipped host — and the count is ENVIRONMENT-INVARIANT:
+# this suite has NO `skip` path, NO `command -v` guard and NO corpus/node/cargo dependency
+# (verified by grep; the only external tool is python3 at the P2 derivation, which now FAILS
+# CLOSED rather than dropping a case). So there is no lean-host figure to sit below.
+#
+# The earlier value of 88 was NOT an environment measurement — it was set by subtracting from
+# the count when the `emitted` section was removed, which is exactly the move that hides a
+# future shrink, and the honest answer to the question is that it gave away headroom for no
+# reason. Raised to sit just under the measured count; the 7-case margin covers a lean host
+# I have NOT measured (bash 3.2 on macOS, which this repo supports), not a known drop.
+CENSUS_CASE_FLOOR=110
 CENSUS_REACHED_END=1
 if [ $((PASS + FAIL)) -lt "$CENSUS_CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): sections are being skipped or dying silently, and a "0 failed" over a shrunken subject set certifies nothing.\n' \

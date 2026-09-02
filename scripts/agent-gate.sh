@@ -6967,15 +6967,20 @@ _census_read() {
 # which knows its own subject count. `0` is recorded as ZERO, not as a COUNT of zero --
 # an affirmative measurement of nothing is still nothing.
 _census_declare() {
-  local n
+  local n line
   case "$2" in ''|*[!0-9]*) n="" ;; *) n="$2" ;; esac
   if [ -z "$n" ]; then
-    _census_write "$1" "NOT-MEASURED the component offered a non-numeric subject count"
+    line="NOT-MEASURED the component offered a non-numeric subject count"
   elif [ "$n" -eq 0 ]; then
-    _census_write "$1" "ZERO $3"
+    line="ZERO $3"
   else
-    _census_write "$1" "COUNT $n $3"
+    line="COUNT $n $3"
   fi
+  # RETURNED, not merely written (roborev job 400). The caller must finalize from THIS
+  # VALUE; see the note on _census_measure's third parameter for why re-reading the
+  # sidecar is unsafe now that the census drives a verdict.
+  _census_write "$1" "$line"
+  printf '%s' "$line"
 }
 
 # ---------------------------------------------------------------------------
@@ -7303,13 +7308,33 @@ _census_classify() {
 # _census_measure <component> <status>: resolve the DECLARED kind and take the census,
 # RETURNING the record line on stdout (the caller needs the value even if the sidecar
 # write fails) as well as writing it to the sidecar for the parent's renderer.
-_census_measure() {
+_census_measure() { # <component> <status> [<already-computed-record>]
   local comp="$1" st="$2" rec line
+  # THE THIRD PARAMETER EXISTS BECAUSE THE SIDECAR IS BEST-EFFORT AND THE CENSUS NOW DRIVES A
+  # VERDICT (roborev job 400). `_census_write` is deliberately non-fatal, inherited from
+  # `_fm_note`, whose comment argues it correctly: "a failed append must never fail the
+  # component whose matrix it describes — the consequence of a lost append is a visibly
+  # incomplete annotation, never a wrong one." THAT REASONING WAS TRUE FOR THE FEATURE
+  # MATRIX AND IS FALSE HERE: a lost annotation is cosmetic, but a lost CENSUS record turned
+  # a computed ZERO into NOT-MEASURED on the re-read, and NOT-MEASURED preserves PASS — so a
+  # filesystem hiccup bought a false green in a merge gate. It is CLAUDE.md's recorded shape
+  # one directory over: a fail-closed argument holds only for the consumers that existed when
+  # it was written, and a new consumer for which the permissive direction is unsafe inverts
+  # it SILENTLY.
+  #
+  # So the `self:`/`runtime:` producers RETURN what they computed and their callers pass it
+  # here; the sidecar is for RENDERING ONLY on those paths. (The log-measured kinds never had
+  # the problem: `_census_measure_kind` prints the value it computed, so its caller already
+  # finalizes from the value even when the write fails.)
+  if [ "$#" -ge 3 ]; then
+    rec="$3"
+  else
+    rec=$(_census_read "$comp") || rec=""
+  fi
   # The classification is DELEGATED (roborev job 379) so this path and the render-time
   # fallback cannot drift: the declaration/status/kind order, and every state text, live in
   # _census_classify. What is local to THIS path is the permission to read the component
   # log and the duty to persist the answer.
-  rec=$(_census_read "$comp") || rec=""
   line=$(_census_classify "$comp" "$st" "$rec" 1)
   case "$line" in
     MEASURE\ *) _census_measure_kind "$comp" "${line#MEASURE }"; return 0 ;;
@@ -7341,21 +7366,26 @@ _census_measure() {
 #       a silent PASS, and deliberately NOT `VACUOUS`: the lane did not fail to verify its
 #       subject, it HAD no executable subject, and reddening a correct `--lite` round is
 #       the failure this whole fix exists to remove.
+# RETURNS the record it computed, for the reason on _census_measure's third parameter
+# (roborev job 400): the caller finalizes from this VALUE, never from a re-read of the
+# best-effort sidecar.
 _census_scoped_record() {
-  local comp="$1" npkgs="$2" pydiff="$3" note="${4:-}"
+  local comp="$1" npkgs="$2" pydiff="$3" note="${4:-}" line
   if [ "${npkgs:-0}" -gt 0 ]; then
-    _census_measure_kind "$comp" both >/dev/null
+    _census_measure_kind "$comp" both
     return 0
   fi
   if [ "${pydiff:-0}" -eq 1 ]; then
     if _python_tier_ran "$note"; then
-      _census_measure_kind "$comp" indirect:pytest >/dev/null
+      _census_measure_kind "$comp" indirect:pytest
     else
-      _census_write "$comp" "NOT-APPLICABLE the diff routed ONLY to the python tier and the tier did not run (${note:-python-tier: not run}), so this lane had no executable subject"
+      line="NOT-APPLICABLE the diff routed ONLY to the python tier and the tier did not run (${note:-python-tier: not run}), so this lane had no executable subject"
+      _census_write "$comp" "$line"; printf '%s' "$line"
     fi
     return 0
   fi
-  _census_write "$comp" "NOT-APPLICABLE the diff routed to no rust package and no python tier, so this lane had no executable subject"
+  line="NOT-APPLICABLE the diff routed to no rust package and no python tier, so this lane had no executable subject"
+  _census_write "$comp" "$line"; printf '%s' "$line"
 }
 
 # _census_status_for <status> <census-line>: the AC2 coupling. AFFIRMATIVE by
@@ -7396,9 +7426,13 @@ _census_status_for() {
 # _census_finalize <component> <status>: measure, then print the possibly-adjusted
 # status. THE ONE call every verdict path makes -- record_result for the 37 components,
 # and run_scoped_tests, which appends to NAMES directly and never reaches record_result.
-_census_finalize() {
+_census_finalize() { # <component> <status> [<already-computed-record>]
   local line
-  line=$(_census_measure "$1" "$2")
+  if [ "$#" -ge 3 ]; then
+    line=$(_census_measure "$1" "$2" "$3")
+  else
+    line=$(_census_measure "$1" "$2")
+  fi
   _census_status_for "$2" "$line"
 }
 
@@ -17790,7 +17824,7 @@ run_file_size() {
 # rust-only diffs are unaffected; a mixed diff runs BOTH the rust-scoped targets
 # AND the python tier. See PYTHON_LITE_TIER_CMD / classify_scoped_plan above.
 run_scoped_tests() {
-  local name=scoped-tests
+  local name=scoped-tests _cen_rec
   # #3453: attribute this lane's cargo invocations to `scoped-tests` (the name it appends
   # to NAMES), NOT to whichever component ran before it. run_lite calls this AFTER
   # run_component roborev-lints, so without this the blast-radius cargo runs would have
@@ -18118,8 +18152,8 @@ run_scoped_tests() {
   # The RECORD comes first, from the same routing variables the dispatch was made from
   # (#3625 census audit BLOCKER 1): this lane's census kind is `runtime:`, so nothing else
   # can know whether its subject was cargo, the python tier, or nothing at all.
-  _census_scoped_record "$name" "${#pkgs[@]}" "$python_diff" "$PYTHON_TIER_NOTE"
-  status=$(_census_finalize "$name" "$status")
+  _cen_rec=$(_census_scoped_record "$name" "${#pkgs[@]}" "$python_diff" "$PYTHON_TIER_NOTE")
+  status=$(_census_finalize "$name" "$status" "$_cen_rec")
   _status_is_nonfailing "$status" || OVERALL=FAIL
   NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   echo ">>> [$name] $status ($((end - start))s)"
@@ -18331,7 +18365,7 @@ run_delta_node_tests() {
 # scripts/tests/*.sh self-test scripts verbatim. No-op when none changed. Appends a
 # shell-selftests verdict to NAMES; a failing script sets OVERALL=FAIL.
 run_delta_shell_selftests() {
-  local allowed="$1" targets f start end status n_targets
+  local allowed="$1" targets f start end status n_targets _cen_rec
   targets=$(printf '%s\n' "$allowed" | _delta_shell_targets)
   [ -n "$(printf '%s' "$targets" | awk 'NF')" ] || return 0
   local -a tarr=()
@@ -18343,10 +18377,10 @@ run_delta_shell_selftests() {
   end=$(date +%s)
   # #3625: same as node-tests — this lane's children write to the run log, not to a
   # per-component log, and it already holds its exact subject count.
-  _census_declare shell-selftests "$n_targets" "changed scripts/tests/*.sh executed"
+  _cen_rec=$(_census_declare shell-selftests "$n_targets" "changed scripts/tests/*.sh executed")
   # …and COUPLE it, for the reason spelled out on node-tests above (#3625 census audit
   # BLOCKER 2).
-  status=$(_census_finalize shell-selftests "$status")
+  status=$(_census_finalize shell-selftests "$status" "$_cen_rec")
   _status_is_nonfailing "$status" || OVERALL=FAIL
   NAMES+=("shell-selftests"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   DELTA_EXECUTORS="${DELTA_EXECUTORS:+$DELTA_EXECUTORS }shell-selftests($n_targets)"
