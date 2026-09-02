@@ -872,7 +872,18 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   (kind × status × sidecar) matrix requiring identical output wherever the log is not needed —
   because **a second implementation's agreement is only knowable by testing it**. Generalised:
   when two functions answer one question, converging them and pinning the agreement ends the
-  class; patching the sixth label does not.
+  class; patching the sixth label does not. **(5) AND A COUNT OF INPUTS IS STILL A PROXY** — the
+  delta `node-tests` lane censused *the number of changed files it selected*, which is this
+  doctrine's own premise ("a duration is a proxy for work; a count IS the work") violated inside
+  its implementation, and wrong in BOTH directions at once: jest EXITS 0 when every selected test
+  is skipped, so an all-skipped run reported a confident count and kept its PASS, while a changed
+  HELPER runs the WHOLE suite and was censused as one file. The subject must be what the DRIVER
+  reports it did, so that lane is `indirect:jest` like `node-bindings` — one tally, not two. **The
+  sibling question is answered AT THE DECLARATION rather than left for the next reviewer**:
+  `shell-selftests` keeps "scripts executed" because `_run_shell_selftest_files` invokes every file
+  unconditionally (selected == executed, which is exactly what was NOT true of jest) and because no
+  uniform per-script assertion tally exists to prefer; its residual — a script that runs and
+  asserts nothing — is declared there too.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a

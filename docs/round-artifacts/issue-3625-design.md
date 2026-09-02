@@ -537,3 +537,58 @@ divergence, S2/S2b reproduce the finding verbatim, S4 names the missing delegati
   so F2 fired for a reason unrelated to the status. Now it extracts the status field. Same lesson
   as Q1's status-claim check — a word scan over a line that legitimately names other statuses is a
   guard that reds on correct input.
+
+---
+
+## roborev round 6 (job 383) — the census measured its INPUTS, not its work
+
+### The finding, and why it is this issue's own thesis
+
+`node-tests` censused `n_targets` — **the number of changed files the lane selected**. #3625's
+premise is *"a duration is a proxy for work; a count is the work"*, and a count of INPUTS is
+simply a better proxy. It was wrong in **both directions at once**:
+
+| situation | old census | truth |
+|---|---|---|
+| every selected test SKIPPED (jest exits 0) | `COUNT 2 changed jest test file(s)`, status **PASS** | nothing was verified — the vacuous run this subsystem exists to catch |
+| a changed HELPER (non-`*.test.js`) | `COUNT 1 changed jest test file(s)` | jest ran the WHOLE suite — 137 tests |
+
+Both reproduced in the RED arm, verbatim.
+
+### The fix reuses the existing tally
+
+`node-tests` is now **`indirect:jest`** — the same path `node-bindings` takes — so there is ONE
+implementation of "what did jest report". The old `self:` rationale ("it deletes its log, so no
+log-reading measurer could census it") was an **implementation choice, not a constraint**: the lane
+writes to `$LOG_DIR/node-tests.log` like every other component and keeps it, which also puts its
+output in the `logs:` bundle instead of discarding the evidence right after tailing 40 lines of it.
+It inherits the present-and-zero rule for free — a `Tests:` line reporting zero passed is `ZERO` →
+`VACUOUS`; an absent tally stays `NOT-MEASURED`. `n_targets` remains the `DELTA_EXECUTORS` figure,
+which is a statement about what was DISPATCHED and is correct as one.
+
+**Regression tests (T1–T5)** drive the REAL `run_delta_node_tests`: `_delta_node_targets` is
+stubbed (it is the diff classifier, not the subject) and `node` is a PATH shim emitting a chosen
+jest summary — so the two arms differ in exactly ONE property, the tally jest reports. T1
+all-skipped → `VACUOUS` + `OVERALL=FAIL`; T2 positive control → `PASS` + `COUNT 41`; T3 the
+helper direction → `COUNT 137`, not `1`; T4 both jest lanes share the declaration; T5 structural
+(logs into `$LOG_DIR`, keeps it, no self-declared input count — comment-blind, because the body now
+carries a comment explaining the removal and a bare substring test would read that explanation as
+the thing it forbids).
+
+### The `shell-selftests` ruling — its subject genuinely IS the script
+
+Recorded at the declaration in `_census_kind`, and its premise is MEASURED (case U1) rather than
+assumed:
+
+1. **SELECTED == EXECUTED.** `_run_shell_selftest_files` invokes every file it is handed,
+   unconditionally — no skip layer, no filter. That is the fact that distinguishes it from
+   `node-tests`, whose count was of SELECTIONS while jest decided separately how many to run.
+2. **No uniform per-script assertion tally exists to prefer.** These are arbitrary shell guards
+   with differing terminal lines (`passed=N failed=M`, `N passed, M failed`, `ok - …`); deriving
+   one number across them would be the curation this census refuses — the same reason
+   `tooling-tests` is a declared gap.
+
+**Declared residual:** a script that runs and asserts nothing is invisible to this count. The
+census records a COUNT, not a TRUTH (the #1716/#3522 precedent); each script's own case floor is
+what covers that. U1 fails if `_run_shell_selftest_files` ever grows a skip path, because premise
+(1) would no longer hold and the lane would then need `node-tests`' treatment.
