@@ -107,7 +107,18 @@ impl V5CompressedLegacyParser {
             CqlType::Set(_) => "set",
             CqlType::Map(_, _) => "map",
             CqlType::Tuple(_) => "tuple",
-            CqlType::Udt(_, _) | CqlType::Custom(_) => "udt",
+            CqlType::Udt(_, _) => "udt",
+            // A `Custom` is a UDT NAME or an unmappable marshal reference; label it
+            // the way `parse_typed_value_reporting` ROUTES it, so a consumption
+            // refusal cannot say "udt" about a type that never went down that arm
+            // (roborev job 68, finding 1).
+            CqlType::Custom(name) => {
+                if Self::custom_is_marshal_type_reference(name) {
+                    "unknown"
+                } else {
+                    "udt"
+                }
+            }
             scalar => Self::cql_scalar_short_form(scalar).unwrap_or("unknown"),
         }
     }
