@@ -3071,6 +3071,7 @@ OBJ_SWEEP_SH="$REPO_ROOT/scripts/check-object-store-integrity.sh"
 OBJ_SWEEP_INNER_BOUND=600
 OBJ_SWEEP_OUTER_BOUND=1980
 OBJ_STORE_CORRUPT=0
+OBJ_STORE_UNSWEEPABLE=0
 if [ "$SKIP_OBJ_SWEEP" = 1 ]; then
   warn "object-store: OPT-OUT ($SKIP_OBJ_SWEEP_HOW) — this box's SHARED git object store was NOT swept"
   info "this run cannot certify that the store every lane here reads is intact; drop the opt-out to measure it"
@@ -3145,13 +3146,38 @@ else
       info "  Re-run it by hand for the full remedy:  bash scripts/check-object-store-integrity.sh"
       info "  A LOCAL 'git gc'/'git repack' CANNOT repair this — escalate rather than improvising (#3749)."
     fi
-  elif [ "$obj_rc" -eq 4 ] || [ "$obj_verdict" = CORRUPT ]; then
+  elif [ "$obj_rc" -eq 6 ] && [ "$obj_verdict" = UNSWEEPABLE ]; then
+    # THE SWEEP RAN AND REPRODUCIBLY DIED WITHOUT FINISHING (#3749 review round 10, item
+    # 1). A [warn] like CORRUPT — it withholds "All checks green.", fails --strict and is
+    # restated in the banner — but it CLAIMS NO CAUSE, and the difference is the whole
+    # point of the verdict: "the probe could not START" (UNMEASURED, below, permissive
+    # because it is a fact about this box's tooling) and "the probe RAN, twice, and died
+    # on this store" are different facts. No damage was established here, so this branch
+    # names none and quotes the sweep's own guidance instead of restating a repair.
+    OBJ_STORE_UNSWEEPABLE=1
+    warn "object-store: UNSWEEPABLE — git fsck RAN and reproducibly DIED without finishing over the SHARED git object store on this box, so its integrity is UNKNOWN, not ok. NO GATE RUN HERE CAN BE TRUSTED. No cause was established."
+    printf '%s\n' "$obj_out" | { grep -E '^OBJECT-STORE: (finding|object) ' || true; } | head -20 | while IFS= read -r obj_line; do
+      info "$obj_line"
+    done
+    obj_remedy=$(printf '%s\n' "$obj_out" | { grep '^OBJECT-STORE: verdict-detail ' || true; } | head -40)
+    if [ -n "$obj_remedy" ]; then
+      printf '%s\n' "$obj_remedy" | while IFS= read -r obj_line; do
+        info "$obj_line"
+      done
+    else
+      # FAIL-CLOSED ON THE DIAGNOSTIC, and deliberately WITHOUT a repair instruction: this
+      # verdict established no cause, so naming one would be the round-9 defect (a printed
+      # remedy that does not match what was measured).
+      info "REMEDY: this sweep printed no operator guidance (an older or stubbed check-object-store-integrity.sh)."
+      info "  Re-run it by hand and act on what its 'fatal:' line names:  bash scripts/check-object-store-integrity.sh"
+    fi
+  elif [ "$obj_rc" -eq 4 ] || [ "$obj_rc" -eq 6 ] || [ "$obj_verdict" = CORRUPT ] || [ "$obj_verdict" = UNSWEEPABLE ]; then
     # EXACTLY ONE CHANNEL SAYS CORRUPT (the conjunction above has already failed), so this
     # run neither established damage nor ruled it out. NAMED rather than folded into the
     # generic UNMEASURED message below, which would read as an ordinary missing line — and
     # deliberately NOT escalated to CORRUPT: see the conjunction note above for why an
     # unrecognised or incomplete sweep must not be able to produce that verdict.
-    warn "object-store: UNMEASURED — INCONSISTENT sweep result (rc=$obj_rc verdict='${obj_verdict:-<none>}'): exactly ONE of the exit status and the anchored verdict line says CORRUPT, so damage was neither established nor ruled out"
+    warn "object-store: UNMEASURED — INCONSISTENT sweep result (rc=$obj_rc verdict='${obj_verdict:-<none>}'): exactly ONE of the exit status and the anchored verdict line reports a STOPPING verdict, or the two name different ones, so nothing was established nor ruled out"
     printf '%s\n' "$obj_out" | { grep -E '^OBJECT-STORE: (unmeasured-cause|finding|object) ' || true; } | head -8 | while IFS= read -r obj_line; do
       info "$obj_line"
     done
@@ -3200,6 +3226,12 @@ hdr "Bootstrap summary"
 # already withholds green and fails --strict; this is the loudness half.
 if [ "${OBJ_STORE_CORRUPT:-0}" = 1 ]; then
   printf '  \033[31mSHARED OBJECT STORE CORRUPT.\033[0m Do NOT run a gate on this box until it is resolved (section 5d above, #3749).\n'
+fi
+# ITS OWN LINE, NOT FOLDED INTO THE ONE ABOVE (#3749 review round 10, item 1): the store
+# could not be SWEPT and NO cause was established, so claiming damage in the banner would
+# be exactly the confidently-wrong text this verdict exists to avoid.
+if [ "${OBJ_STORE_UNSWEEPABLE:-0}" = 1 ]; then
+  printf '  \033[31mSHARED OBJECT STORE COULD NOT BE SWEPT.\033[0m Its integrity is UNKNOWN and no cause was established: do NOT run a gate on this box until it is resolved (section 5d above, #3749).\n'
 fi
 if [ "$WARNINGS" -eq 0 ]; then
   printf '  \033[32mAll checks green.\033[0m This machine is ready for CQLite agent work.\n'

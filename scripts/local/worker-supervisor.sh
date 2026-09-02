@@ -232,8 +232,8 @@ UNVERIFIED_MAX="${UNVERIFIED_MAX:-2}"
 OBJ_SWEEP_INTERVAL_HOURS="${OBJ_SWEEP_INTERVAL_HOURS:-6}"
 OBJ_SWEEP_TIMEOUT_SECS="${OBJ_SWEEP_TIMEOUT_SECS:-200}"
 # Empty => derived per SHARED STORE in obj_sweep_stamp_path (below), so lanes sharing one
-# object store share one throttle. It also names the CORRUPT latch (`<stamp>.CORRUPT`),
-# so pinning it relocates both files together.
+# object store share one throttle. It also names the STOP latch (`<stamp>.STOP`), so
+# pinning it relocates both files together.
 OBJ_SWEEP_STAMP="${OBJ_SWEEP_STAMP:-}"
 # issue #2670 (roborev 1813): before escalating a non-merged PR state to a
 # mismatch, re-read gh a few times to absorb read-after-merge lag. Env-tunable so
@@ -3354,13 +3354,30 @@ obj_sweep_stamp_path() {
   printf '%s' "${dir}/cqlite-object-store-sweep.${key}.stamp"
 }
 
-# obj_sweep_latch_path <stamp-path> — the CORRUPT latch that belongs to that stamp.
-# Derived from the stamp so the two always live in the same box-wide directory and a
-# pinned OBJ_SWEEP_STAMP relocates both.
+# obj_sweep_latch_path <stamp-path> — the STOP latch that belongs to that stamp. Derived
+# from the stamp so the two always live in the same box-wide directory and a pinned
+# OBJ_SWEEP_STAMP relocates both.
+#
+# ONE FILE, ONE QUESTION: "is this box stopped?" — AND ITS NAME CLAIMS NO CAUSE (#3749
+# review round 10, item 1). It was `<stamp>.CORRUPT`, which was accurate while damage was
+# the only stopping verdict. It is not any more: a sweep that RAN and reproducibly DIED
+# without finishing also stops the box, and it establishes NO cause — so a file called
+# `.CORRUPT` would have been a confidently-wrong claim in the one artifact an operator
+# finds on disk, and every message naming that path would have sent them to the re-clone
+# remedy for a store nothing observed damage in. That is round 9's defect (a printed
+# remedy that does not match what was measured) arriving through a file name.
+#
+# WHICH verdict was recorded is therefore CONTENT, read affirmatively by
+# obj_sweep_latch_verdict, and it is safe as content for a reason the throttle stamp's
+# verdict field was not: this file is CREATE-ONLY, so its bytes are written once by the
+# lane that wins the create and no later writer can move them (see obj_sweep_set_latch).
+# TWO FILES WERE THE OTHER OPTION and were rejected: the latch question is answered in
+# four values already, and asking it of two paths multiplies those states (present-here,
+# present-there, both, one-unreadable) for no gain — a lane reading either must stop.
 obj_sweep_latch_path() {
   local stamp="$1"
   [[ -n "$stamp" ]] || return 0
-  printf '%s.CORRUPT' "$stamp"
+  printf '%s.STOP' "$stamp"
 }
 
 # obj_sweep_latch_state <latch-path> — the latch question, answered in FOUR values on
@@ -3704,17 +3721,49 @@ obj_sweep_stamp_is_fresh() {
 #     expire either; the operator who repairs the store removes the file, and every
 #     message that mentions the latch names that exact command.
 #
-# THE VERDICT IS THE FILE'S EXISTENCE, ASKED AFTERWARDS — never this call's own exit
+# THE LATCH IS THE FILE'S EXISTENCE, ASKED AFTERWARDS — never this call's own exit
 # status, which cannot tell "a peer got there first" (fine, the box is latched) from
 # "the directory is unwritable" (not fine, and the caller must say so out loud).
+#
+# THE SECOND ARGUMENT IS THE STOPPING VERDICT, FROM A CLOSED SET OF TWO, AND AN
+# UNRECOGNISED VALUE CREATES NOTHING (#3749 review round 10, item 1). A latch whose
+# content a reader cannot recognise can only be reported as a cause-free stop, so writing
+# one would record a fact nobody can act on; refusing instead makes the caller take its
+# own could-not-persist path, which is journalled and forces the throttle stamp stale.
+# Validated here rather than at the two call sites, so a third caller cannot invent a
+# token, and asserted structurally by the suite.
 obj_sweep_set_latch() {
-  local latch="$1"
+  local latch="$1" verdict="${2:-}"
   [[ -n "$latch" ]] || return 1
+  case "$verdict" in
+    CORRUPT | UNSWEEPABLE) ;;
+    *) return 1 ;;
+  esac
   (
     set -C
-    printf '%s\nCORRUPT\n' "$(date +%s)" >"$latch"
+    printf '%s\n%s\n' "$(date +%s)" "$verdict" >"$latch"
   ) 2>/dev/null || true
   obj_sweep_latch_present "$latch"
+}
+
+# obj_sweep_latch_verdict <latch-path> — WHICH stopping verdict the latch records, on
+# stdout: `CORRUPT`, `UNSWEEPABLE`, or `UNRECOGNISED`.
+#
+# AFFIRMATIVE RECOGNITION, AND NOTHING ELSE (CLAUDE.md: a positive verdict requires an
+# affirmative measurement). Only a second line that IS one of the two tokens is reported
+# as that token. Anything else — an empty file, a dangling symlink, a latch written by a
+# newer supervisor, a truncated write — is `UNRECOGNISED`, which its caller reports as a
+# cause-free stop. It is never guessed at and never defaulted to CORRUPT: that would name
+# a cause the box may not have, which is the whole reason the file is no longer called
+# `.CORRUPT`.
+obj_sweep_latch_verdict() {
+  local latch="$1" line
+  line="$(sed -n '2p' "$latch" 2>/dev/null || true)"
+  case "$line" in
+    CORRUPT) printf 'CORRUPT' ;;
+    UNSWEEPABLE) printf 'UNSWEEPABLE' ;;
+    *) printf 'UNRECOGNISED' ;;
+  esac
 }
 
 # obj_sweep_stop_if_latched <latch-path> — ASK THE LATCH QUESTION AND STOP UNLESS THE
@@ -3755,7 +3804,7 @@ obj_sweep_set_latch() {
 # integrity.sh` — an ordinary state on any branch cut before #3749 merged — halt every lane
 # on the box for want of a hygiene probe, which is the self-DoS CLAUDE.md rules out.
 obj_sweep_stop_if_latched() {
-  local latch="$1" latch_ts state
+  local latch="$1" latch_ts state latch_verdict stop_reason
   state="$(obj_sweep_latch_state "$latch")"
   case "$state" in
     absent)
@@ -3769,32 +3818,69 @@ obj_sweep_stop_if_latched() {
       return 0
       ;;
     unknown)
-      notify "high" "worker-supervisor: object-store CORRUPT latch UNREADABLE" \
-        "the directory holding this box's CORRUPT latch ($latch) exists and cannot be searched, so a recorded CORRUPT verdict may be sitting there unread. Stopping this lane rather than spawning a worker on an unknown store. This is NOT a corruption finding."
-      log "object-store: the CORRUPT latch state could NOT be read at $latch (its directory exists and is not searchable) — stopping. UNKNOWN is not clean: a peer's verdict may be unread. This is NOT a corruption finding; fix the directory's permissions (#3749)."
+      notify "high" "worker-supervisor: object-store STOP latch UNREADABLE" \
+        "the directory holding this box's object-store STOP latch ($latch) exists and cannot be searched, so a recorded stopping verdict may be sitting there unread. Stopping this lane rather than spawning a worker on an unknown store. This is NOT a corruption finding."
+      log "object-store: the STOP latch state could NOT be read at $latch (its directory exists and is not searchable) — stopping. UNKNOWN is not clean: a peer's verdict may be unread. This is NOT a corruption finding; fix the directory's permissions (#3749)."
       finalize_exit "object-store-latch-unreadable" 1
       ;;
   esac
   latch_ts="$(head -1 "$latch" 2>/dev/null || true)"
   [[ "$latch_ts" =~ ^[0-9]+$ ]] || latch_ts="<unrecorded>"
-  notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT (latched)" \
-    "a sweep on this box recorded CORRUPT for the shared git object store every lane here reads. Stopping without re-sweeping. Repair the store, then re-run the sweep and require its affirmative verdict BEFORE removing $latch."
-  log "object-store: CORRUPT (cached at $latch_ts by a sweep on this box) — stopping; no worker may certify against a damaged shared store (#3749)."
+  # WHICH STOPPING VERDICT WAS RECORDED DECIDES WHAT THIS LANE SAYS, AND IT IS READ
+  # AFFIRMATIVELY (#3749 review round 10, item 1). This lane did NOT sweep — that is the
+  # point of the latch — so everything it can say about the store comes from the file. A
+  # latch recording that the store could not be SWEPT must not be reported as damage: the
+  # detecting sweep established no cause, and repeating a claim it did not make would send
+  # an operator to re-clone a store nothing observed damage in (round 9's defect class).
+  # An unrecognised token is a cause-free stop, never a default to the damage text.
+  latch_verdict="$(obj_sweep_latch_verdict "$latch")"
+  case "$latch_verdict" in
+    CORRUPT)
+      notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT (latched)" \
+        "a sweep on this box recorded CORRUPT for the shared git object store every lane here reads. Stopping without re-sweeping. Repair the store, then re-run the sweep and require its affirmative verdict BEFORE removing $latch."
+      log "object-store: CORRUPT (cached at $latch_ts by a sweep on this box) — stopping; no worker may certify against a damaged shared store (#3749)."
+      stop_reason="object-store-corrupt"
+      ;;
+    UNSWEEPABLE)
+      notify "high" "worker-supervisor: SHARED OBJECT STORE could not be SWEPT (latched)" \
+        "a sweep on this box recorded that git fsck RAN and reproducibly DIED without finishing over the shared git object store every lane here reads, so its integrity is UNKNOWN and NO cause was established. Stopping without re-sweeping. Run 'bash scripts/check-object-store-integrity.sh' by hand, act on what its fatal line names, and require its affirmative verdict BEFORE removing $latch."
+      log "object-store: UNSWEEPABLE (cached at $latch_ts by a sweep on this box) — git fsck ran and reproducibly died without finishing over this store, so its object content is UNKNOWN, not clean. Stopping. NO cause was established: this is NOT a damage finding (#3749)."
+      stop_reason="object-store-unsweepable"
+      ;;
+    *)
+      notify "high" "worker-supervisor: shared object store LATCHED (verdict unrecognised)" \
+        "a sweep on this box latched the shared git object store with a stopping verdict this supervisor does not recognise (an older or newer check-object-store-integrity.sh, or a latch that could not be read). Stopping rather than guessing which verdict it was. Run 'bash scripts/check-object-store-integrity.sh' by hand and require its affirmative verdict BEFORE removing $latch."
+      log "object-store: LATCHED with an UNRECOGNISED stopping verdict at $latch (cached at $latch_ts) — stopping. NO cause is claimed: this supervisor will not guess whether damage was found (#3749)."
+      stop_reason="object-store-latch-unrecognised"
+      ;;
+  esac
   # THE REMEDY NAMES WHAT ACTUALLY REPAIRS THE STORE (#3749 review round 9, item 2). It
   # used to say "re-obtain the objects from the canonical remote", which read as
   # `git fetch --force origin` — the instruction the sweep itself used to print, and
   # measured to repair NOTHING: `--force` only permits non-fast-forward REF updates and
   # re-downloads no objects at all. This lane did NOT sweep (that is the point of the
-  # latch), so it has no damage class and no fsck output to quote: it names the two things
-  # that are true for every class, points at the sweep for the class-specific text, and
-  # makes a successful sweep — not a belief — the condition for clearing the latch.
-  log "object-store: REMEDY — stop every lane on this box, then repair the shared store. 'git fetch --force origin' does NOT repair it (--force only permits non-fast-forward REF updates; it re-downloads no objects), and neither does a local 'git gc'/'git repack'. Run 'bash scripts/check-object-store-integrity.sh' for the measured remedy for the damage class it finds (#3749)."
+  # latch), so it has no damage class and no fsck output to quote: for the damage verdict
+  # it names the two things that are true of every damage class, for the others it names
+  # nothing at all (see the branch), it points at the sweep for the class-specific text,
+  # and it makes a successful sweep — not a belief — the condition for clearing the latch.
+  if [[ "$latch_verdict" == CORRUPT ]]; then
+    log "object-store: REMEDY — stop every lane on this box, then repair the shared store. 'git fetch --force origin' does NOT repair it (--force only permits non-fast-forward REF updates; it re-downloads no objects), and neither does a local 'git gc'/'git repack'. Run 'bash scripts/check-object-store-integrity.sh' for the measured remedy for the damage class it finds (#3749)."
+  else
+    # NO REPAIR INSTRUCTION WHERE NO CAUSE WAS ESTABLISHED. The two other verdicts this
+    # latch can carry say the store could not be swept, or say something this supervisor
+    # cannot recognise; naming a repair for either would be a second confidently-wrong
+    # instruction, which is the class round 9 removed. The one thing that is true for all
+    # of them is where to get the class-specific text: the sweep itself.
+    log "object-store: REMEDY — stop every lane on this box, then run 'bash scripts/check-object-store-integrity.sh' by hand and act on what IT names. NO repair instruction is given here because the latched verdict established no cause, and a repair chosen for the wrong cause is worse than none (#3749)."
+  fi
   log "object-store: CLEAR THE LATCH ONLY AFTER that sweep completes and reports its affirmative verdict — 'I think I fixed it' is not an exit condition: rm -f $latch"
-  finalize_exit "object-store-corrupt" 1
+  # PER-VERDICT, so the journal records WHICH stopping fact ended this lane rather than a
+  # generic "it was latched" a reader would have to correlate by timestamp.
+  finalize_exit "$stop_reason" 1
 }
 
 object_store_sweep() {
-  local script stamp latch claim claim_stale rc out verdict
+  local script stamp latch claim claim_stale rc out verdict stop_verdict
   # ---------------------------------------------------------------------------
   # THE ENTRY LATCH READ. IT IS ABOVE EVERY BRANCH IN THIS FUNCTION, AND THE LINES
   # BEFORE IT ARE ASSIGNMENTS ONLY — NO `if`, NO `return`, NOTHING THAT CAN LEAVE
@@ -3981,16 +4067,45 @@ object_store_sweep() {
   # properly. A disagreement therefore falls through to the UNMEASURED path below, which
   # is non-passing, journalled, and paged once — and it is named explicitly there, so the
   # signal is not swallowed on the way past.
+  # ONE STOPPING PATH FOR BOTH STOPPING VERDICTS, AND THAT IS DELIBERATE (#3749 review
+  # round 10, item 1). `UNSWEEPABLE` (the sweep RAN and reproducibly DIED without
+  # finishing; see the sweep script's PASS 2 branch) has to stop this box for the same
+  # reason CORRUPT does — a peer must not throttle past a durable finding — so it goes
+  # through the SAME latch-then-stamp ordering rather than a second copy of it. Four
+  # review rounds hardened that ordering (round 3's latch-before-stamp, round 4's
+  # two-channel conjunction, round 9's stamp gated on a CONFIRMED latch); a copied branch
+  # would inherit none of them, and the structural write-order assert reads THIS body.
+  # Only the operator-facing text differs, and it differs where a `case` says so.
+  stop_verdict=""
   if [[ "$rc" -eq 4 && "$verdict" == "CORRUPT" ]]; then
-    local findings latched=0
+    stop_verdict=CORRUPT
+  elif [[ "$rc" -eq 6 && "$verdict" == "UNSWEEPABLE" ]]; then
+    stop_verdict=UNSWEEPABLE
+  fi
+  if [[ -n "$stop_verdict" ]]; then
+    local findings latched=0 stop_headline stop_title stop_body stop_reason
+    case "$stop_verdict" in
+      CORRUPT)
+        stop_headline="CORRUPT — stopping loudly; no worker may certify against a damaged shared store (#3749)."
+        stop_title="worker-supervisor: SHARED OBJECT STORE CORRUPT"
+        stop_body="git fsck reports damaged objects in this box's shared git object store — every lane here reads it, so NO gate verdict on this box can be trusted. Stopping."
+        stop_reason="object-store-corrupt"
+        ;;
+      *)
+        stop_headline="UNSWEEPABLE — git fsck RAN and reproducibly DIED without finishing over this box's shared store, so its object content is UNKNOWN, not clean. Stopping. NO cause was established: this is NOT a damage finding (#3749)."
+        stop_title="worker-supervisor: SHARED OBJECT STORE could not be SWEPT"
+        stop_body="git fsck ran and DIED without finishing on TWO independent walks over this box's shared git object store — every lane here reads it, so NO gate verdict on this box can be trusted. Stopping. NO cause was established; act on what the sweep's fatal line names."
+        stop_reason="object-store-unsweepable"
+        ;;
+    esac
     # LATCH FIRST, THEN EVERYTHING ELSE. A failure to persist it is REPORTED, never
     # silent: this lane stops either way, but without the latch the peers on this box
     # will re-run their own sweep and rediscover the damage rather than inheriting the
     # verdict, and an operator reading only this journal would otherwise never learn that.
     if [[ -z "$latch" ]]; then
-      log "object-store: the CORRUPT verdict could NOT be latched — this box's shared store could not be resolved, so there is no box-wide file to record it in. Peer lanes will re-sweep and rediscover it (#3749)."
+      log "object-store: the $stop_verdict verdict could NOT be latched — this box's shared store could not be resolved, so there is no box-wide file to record it in. Peer lanes will re-sweep and rediscover it (#3749)."
     else
-      obj_sweep_set_latch "$latch" || true
+      obj_sweep_set_latch "$latch" "$stop_verdict" || true
       # CONFIRMED BY ASKING THE FILE AFTERWARDS, NEVER BY THE CREATE'S EXIT STATUS — the
       # same test obj_sweep_set_latch itself ends on, and for the same reason: a create's
       # status cannot tell "a peer got there first" (fine, the box IS latched) from "the
@@ -3999,7 +4114,7 @@ object_store_sweep() {
       if obj_sweep_latch_present "$latch"; then
         latched=1
       else
-        log "object-store: the CORRUPT verdict could NOT be latched at $latch (unwritable?) — peer lanes will re-sweep and rediscover it rather than inheriting this verdict (#3749)."
+        log "object-store: the $stop_verdict verdict could NOT be latched at $latch (unwritable?) — peer lanes will re-sweep and rediscover it rather than inheriting this verdict (#3749)."
       fi
     fi
     # THE THROTTLE STAMP IS WRITTEN ONLY WHEN THE LATCH IS CONFIRMED IN PLACE (#3749
@@ -4015,9 +4130,9 @@ object_store_sweep() {
       obj_sweep_force_stamp_stale "$stamp"
     fi
     findings="$(printf '%s\n' "$out" | { grep -E '^OBJECT-STORE: (finding|object) ' || true; } | head -6 | tr '\n' ';' | cut -c1-600)"
-    notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT" \
-      "git fsck reports damaged objects in this box's shared git object store — every lane here reads it, so NO gate verdict on this box can be trusted. Stopping. ${findings:-<no findings captured>}"
-    log "object-store: CORRUPT — stopping loudly; no worker may certify against a damaged shared store (#3749). ${findings:-<no findings captured>}"
+    notify "high" "$stop_title" \
+      "$stop_body ${findings:-<no findings captured>}"
+    log "object-store: $stop_headline ${findings:-<no findings captured>}"
     # THE REMEDY IS QUOTED FROM THE SWEEP, NEVER RESTATED (#3749 review round 9, item 2).
     # This lane HAS the sweep's output, and the sweep knows which damage class it found —
     # the repair differs by class, and it was measured there. Restating it here is how the
@@ -4041,7 +4156,7 @@ object_store_sweep() {
     else
       log "object-store: there is NO latch to clear (this verdict could not be recorded box-wide) — repair the store, then re-run the sweep and require its affirmative verdict before resuming any lane (#3749)."
     fi
-    finalize_exit "object-store-corrupt" 1
+    finalize_exit "$stop_reason" 1
   fi
 
   # THE STAMP IS WRITTEN FOR EVERY OUTCOME. It bounds how often this box SPENDS the
@@ -4077,8 +4192,8 @@ object_store_sweep() {
   # the other did not, so this run neither established damage nor ruled it out — and the
   # generic UNMEASURED line below would read as an ordinary "could not measure". Loud
   # enough to investigate, and still not a latch (see the CORRUPT branch for why).
-  if [[ "$rc" -eq 4 || "$verdict" == "CORRUPT" ]]; then
-    log "object-store: INCONSISTENT sweep result (rc=$rc verdict='${verdict:-<none>}') — exactly ONE of the exit status and the anchored verdict line says CORRUPT. Treated as UNMEASURED and NOT latched: an incomplete or unrecognised sweep must not stop every lane on this box (#3749). If the next sweep reproduces damage it will latch it; investigate the sweep itself."
+  if [[ "$rc" -eq 4 || "$rc" -eq 6 || "$verdict" == "CORRUPT" || "$verdict" == "UNSWEEPABLE" ]]; then
+    log "object-store: INCONSISTENT sweep result (rc=$rc verdict='${verdict:-<none>}') — exactly ONE of the exit status and the anchored verdict line reports a STOPPING verdict, or the two name different ones. Treated as UNMEASURED and NOT latched: an incomplete or unrecognised sweep must not stop every lane on this box (#3749). If the next sweep reproduces the finding it will latch it; investigate the sweep itself."
   fi
   log "object-store: UNMEASURED (rc=$rc verdict='${verdict:-<none>}') — the shared store was NOT rehashed, so its integrity is UNKNOWN, not clean. Continuing: a hygiene probe that cannot run must not stop the fleet (#3749)."
   printf '%s\n' "$out" | { grep '^OBJECT-STORE: unmeasured-cause ' || true; } | head -4 | while IFS= read -r obj_line; do

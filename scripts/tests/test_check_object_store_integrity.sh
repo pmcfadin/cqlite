@@ -88,7 +88,7 @@ record_out() {
         tok=${line#'OBJECT-STORE: verdict '}
         tok=${tok%% *}
         case "$tok" in
-          VERIFIED | CORRUPT | UNMEASURED) ;;
+          VERIFIED | CORRUPT | UNMEASURED | UNSWEEPABLE) ;;
           *) printf '%s\t%s\n' "$tag" "$line" >>"$VERDICT_BAD" ;;
         esac
         ;;
@@ -122,11 +122,11 @@ whole_suite_checks() {
     ok "anchor: the whole-suite assertion inspects $nonempty output lines from every run"
   fi
   cov_missing=""
-  for needle in 'verdict VERIFIED' 'verdict CORRUPT' 'verdict UNMEASURED' 'USAGE'; do
+  for needle in 'verdict VERIFIED' 'verdict CORRUPT' 'verdict UNMEASURED' 'verdict UNSWEEPABLE' 'USAGE'; do
     grep -q "$needle" "$ALL_OUT" || cov_missing="$cov_missing '$needle'"
   done
   if [ -z "$cov_missing" ]; then
-    ok "anchor: the accumulated output covers all THREE verdicts AND the usage path"
+    ok "anchor: the accumulated output covers all FOUR verdicts AND the usage path"
   else
     bad "anchor: accumulated output missing:$cov_missing — narrower than the suite claims"
   fi
@@ -138,7 +138,7 @@ whole_suite_checks() {
   if [ -s "$VERDICT_BAD" ]; then
     bad "anchor: a 'verdict ' line carries a token outside the closed set; first: $(head -1 "$VERDICT_BAD")"
   else
-    ok "anchor: every 'verdict ' token is from {VERIFIED, CORRUPT, UNMEASURED}"
+    ok "anchor: every 'verdict ' token is from {VERIFIED, CORRUPT, UNMEASURED, UNSWEEPABLE}"
   fi
   [ "$INSPECTED_RECORDS" -lt 0 ] && INSPECTED_RECORDS=$RECORD_CALLS
 }
@@ -158,7 +158,7 @@ whole_suite_checks() {
 # restated constant is a magic number wearing a relation's clothes. RAISE IT when you add
 # cases; LOWER IT when you deliberately remove them, never "for safety" — a floor above
 # the real count is a permanently red suite.
-CASE_FLOOR=120
+CASE_FLOOR=128
 
 finish() {
   local rc=$?
@@ -609,7 +609,8 @@ all_lines=$(grep -c . "$SUBJECT" | tr -d ' ')
 if [ "$code_lines" -lt "$all_lines" ] && [ "$code_lines" -gt 60 ] &&
   grep -q 'verdict VERIFIED' "$T/subject-code.txt" &&
   grep -q 'verdict CORRUPT' "$T/subject-code.txt" &&
-  grep -q 'verdict UNMEASURED' "$T/subject-code.txt"; then
+  grep -q 'verdict UNMEASURED' "$T/subject-code.txt" &&
+  grep -q 'verdict UNSWEEPABLE' "$T/subject-code.txt"; then
   ok "template: the comment-stripped source ($code_lines of $all_lines lines) still holds the output templates"
 else
   bad "template: the comment strip left no usable template text ($code_lines of $all_lines) — the case would be vacuous"
@@ -623,7 +624,7 @@ for tok in PASS 'RESULT:' OK; do
 done
 [ "$tmpl_bad" -eq 0 ] &&
   ok "template: the static text carries none of PASS, OK, RESULT: — its output can never be pasted as a gate/roborev block"
-own_bad=$(grep -nE 'VERIFIED|CORRUPT|UNMEASURED' "$T/subject-code.txt" | grep -v 'verdict ' | head -1)
+own_bad=$(grep -nE 'VERIFIED|CORRUPT|UNMEASURED|UNSWEEPABLE' "$T/subject-code.txt" | grep -v 'verdict ' | head -1)
 if [ -z "$own_bad" ]; then
   ok "template: its OWN verdict tokens appear only on 'verdict ' templates (structural)"
 else
@@ -1128,12 +1129,23 @@ if [ -n "${REAL_GIT:-}" ]; then
     fi
   done
 
-  # --- Case 23: AND THE NON-BITMASK PATH STILL REFUSES ---------------------
+  # --- Case 23: AND THE NON-BITMASK PATH STILL REFUSES TO BIT-TEST ---------
   # The control for Case 22, and the half of the round-1 reasoning that was RIGHT: 128 is
-  # git's `die()` and 127 a missing binary, and `127 & 1` is 1. Neither may be bit-tested.
-  # ONE property from the arms above: the status, which is at or above the floor where
-  # shell and `die()` conventions live.
-  for _nb in 127 128; do
+  # git's `die()` and 127 a missing binary, and `127 & 1` is 1. NEITHER MAY BE
+  # BIT-TESTED, and that has not changed.
+  #
+  # WHAT DID CHANGE (#3749 review round 10, item 1): they no longer share a VERDICT. Both
+  # arms used to assert exit 5 / UNMEASURED — and UNMEASURED means the supervisor writes a
+  # fresh throttle stamp and keeps spawning workers, so this case was pinning a false
+  # negative on real commit-object corruption (Case 32 builds that fixture). "The probe
+  # could not START" and "the probe RAN, twice, and reproducibly DIED" are different
+  # facts, so each arm now asserts the verdict that belongs to it, and each is ONE
+  # PROPERTY — the status — from the others.
+  #   127 -> the exec convention: nothing ran, permissive UNMEASURED with its own cause.
+  #   128 -> git's own die(): it RAN and did not finish, so the stopping verdict.
+  #    64 -> a bit outside the supported mask: still the "cannot read as its error
+  #          bitmask" cause, which is the text this case has always pinned.
+  for _nb in 127 128 64; do
     SH_NB="$T/shim-nonmask$_nb"
     LOG_NB="$T/shim-nonmask$_nb-calls.txt"
     : >"$LOG_NB"
@@ -1141,13 +1153,34 @@ if [ -n "${REAL_GIT:-}" ]; then
     OUT=$(PATH="$SH_NB:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
     RC=$?
     record_out "nonmask-$_nb"
-    if [ "$RC" -eq 5 ] && [ "$(verdict_of)" = UNMEASURED ] &&
-      printf '%s\n' "$OUT" | grep -q 'cannot read as its error'; then
-      ok "non-bitmask($_nb): a status outside the mask is UNMEASURED with its OWN cause — never bit-tested into CORRUPT, and never described as a reachability problem it never reported"
+    case "$_nb" in
+      127) NB_RC=5 NB_V=UNMEASURED NB_TXT='could not be RUN' ;;
+      128) NB_RC=6 NB_V=UNSWEEPABLE NB_TXT='RAN and DIED without finishing' ;;
+      *) NB_RC=5 NB_V=UNMEASURED NB_TXT='cannot read as its error' ;;
+    esac
+    if [ "$RC" -eq "$NB_RC" ] && [ "$(verdict_of)" = "$NB_V" ] &&
+      printf '%s\n' "$OUT" | grep -q "$NB_TXT"; then
+      ok "non-bitmask($_nb): a status outside the mask is $NB_V with its OWN cause naming what happened — never bit-tested into CORRUPT, and never described as a reachability problem it never reported"
     else
-      bad "non-bitmask($_nb): rc=$RC verdict='$(verdict_of)' (wanted 5/UNMEASURED naming the unreadable status)"
+      bad "non-bitmask($_nb): rc=$RC verdict='$(verdict_of)' (wanted $NB_RC/$NB_V naming '$NB_TXT')"
     fi
   done
+  # AND THE STOPPING VERDICT STILL NEEDS THE CLASS TO REPRODUCE. ONE property from the
+  # 128 arm above: the shim dies fatally on its FIRST call only. A fatal death that does
+  # not survive a second independent walk is not an established fact about the store.
+  SH_NB1="$T/shim-nonmask-once"
+  LOG_NB1="$T/shim-nonmask-once-calls.txt"
+  : >"$LOG_NB1"
+  mk_fsck_shim "$SH_NB1" once 128 "$DMG_MSG2" "$LOG_NB1"
+  OUT=$(PATH="$SH_NB1:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+  RC=$?
+  record_out "nonmask-once"
+  if [ "$(grep -c . "$LOG_NB1" | tr -d ' ')" -ge 2 ] && [ "$RC" -eq 5 ] &&
+    [ "$(verdict_of)" = UNMEASURED ]; then
+    ok "non-bitmask(once): a fatal death in ONE of two walks is UNMEASURED, not the stopping verdict — reproduction is required for it too, and the shim really was called twice"
+  else
+    bad "non-bitmask(once): rc=$RC verdict='$(verdict_of)' calls=$(grep -c . "$LOG_NB1" | tr -d ' ') (wanted 5/UNMEASURED after two calls)"
+  fi
 fi
 
 # --- Case 24: `--print-store` IS THE ONE ISOLATED RESOLVER ------------------
@@ -1801,4 +1834,102 @@ if [ -z "$DG_VEST" ]; then
   ok "declared-gap(no-vestige): neither the sweep nor its two consumers carry a private-root probe mode, flag or census key — the gap is declared in ONE place and claimed nowhere"
 else
   bad "declared-gap(no-vestige): probe remnants in$DG_VEST — if the gap has been CLOSED, change this case and the declaration together; if not, the remnant is dead code claiming coverage the declaration denies"
+fi
+
+# --- Case 32: A CORRUPT **COMMIT** OBJECT IS UNSWEEPABLE, NOT "NOT MEASURED" -
+# THE FALSE NEGATIVE THIS CASE EXISTS FOR (#3749 review round 10, item 1). Real
+# commit-object corruption makes `git fsck` DIE rather than report a bit. Case 21's own
+# comment records the fact ("corrupting the COMMIT object instead makes git `die()`, exit
+# 128") and Case 23 then ASSERTED that 128 is UNMEASURED — so the fixture recipe below
+# produced, on the previous version, a false negative on genuine corruption of the shared
+# store: exit 5, the supervisor writes a fresh throttle stamp, and every lane on the box
+# carries on. The same class as round 4's missing-live-object High, one status range over.
+#
+# WHAT THE VERDICT MAY AND MAY NOT SAY. UNSWEEPABLE is a STOPPING verdict that claims NO
+# cause: what was established is that the walk RAN and reproducibly DIED without
+# finishing, which is not the same fact as "the probe could not start" (UNMEASURED, and
+# deliberately permissive — a hygiene probe that cannot run must not stop the fleet). So
+# this case asserts BOTH halves: that it stops, and that it names no repair.
+#
+# A REAL FIXTURE, NOT A SHIM. Case 23's arms stage statuses with a git shim, which can
+# show the classifier maps 128 somewhere but cannot show that REAL corruption produces
+# 128 on the git in use. This one damages a real commit object in a real store and
+# MEASURES the status with git before the subject runs.
+mk_corrupt_commit_repo() {
+  local r
+  r=$(newrepo "$1")
+  local sha p
+  # The commit a live ref points AT, named explicitly. The distinction is load-bearing
+  # and measured (git 2.43.0): unparseable bytes under the HEAD commit's name exit 128
+  # (`fatal: loose object ... is corrupt`), while the same damage to a BLOB, or a VALID
+  # object stored under the commit's name, exits 3 (bits 2|1) and is Cases 3/4's subject.
+  sha=$(g "$r" rev-parse HEAD 2>/dev/null)
+  [ -n "$sha" ] || { printf '%s' "$r"; return 0; }
+  p=$(loose_path "$r" "$sha")
+  chmod u+w "$p" 2>/dev/null
+  printf 'not zlib at all, definitely garbage bytes' >"$p"
+  printf '%s' "$r"
+}
+R_CC_TWIN=$(newrepo corrupt-commit-twin)
+CC_SHA=$(g "$R_CC_TWIN" rev-parse HEAD 2>/dev/null)
+CC_TYPE=$(g "$R_CC_TWIN" cat-file -t "$CC_SHA" 2>/dev/null)
+CC_REF=$(g "$R_CC_TWIN" rev-parse HEAD 2>/dev/null)
+R_CC=$(mk_corrupt_commit_repo corrupt-commit)
+S_CC=$(fsck_status "$R_CC")
+S_CC_TWIN=$(fsck_status "$R_CC_TWIN")
+# CONSTRUCTION, THREE THINGS, because each one is a way this case could pass while
+# measuring something else: the damaged object really is a COMMIT, it really is the one a
+# live ref names, and on THIS git that damage really does produce a status at or above
+# the fatal floor (and NOT a bitmask status, which would make it Case 3's subject).
+if [ "$CC_TYPE" = commit ] && [ -n "$CC_REF" ] && [ "$CC_SHA" = "$CC_REF" ] &&
+  [ "$S_CC" -ge 128 ] && [ "$S_CC_TWIN" -eq 0 ]; then
+  ok "corrupt-commit-plant: the damaged object is the COMMIT object HEAD names ($CC_TYPE), git 2.43 exits $S_CC on it (at or above the fatal floor, so NOT a bitmask status), and the byte-identical twin exits $S_CC_TWIN"
+else
+  bad "corrupt-commit-plant: type='$CC_TYPE' sha='$CC_SHA' ref='$CC_REF' damaged-status=$S_CC twin-status=$S_CC_TWIN — not the shape this case is about; the asserts below would prove nothing"
+fi
+if run 6 "corrupt commit: UNSWEEPABLE, not UNMEASURED" --repo "$R_CC"; then
+  if [ "$(verdict_of)" = UNSWEEPABLE ] && [ "$(verdict_lines)" -eq 1 ]; then
+    ok "corrupt-commit: a store whose fsck RUNS and reproducibly DIES yields exactly one 'verdict UNSWEEPABLE' line and exit 6 — a STOPPING verdict, where the previous classifier said 'not measured' and let every lane carry on"
+  else
+    bad "corrupt-commit: verdict='$(verdict_of)' on $(verdict_lines) verdict line(s), wanted UNSWEEPABLE"
+  fi
+  # IT RAN TWICE. A stopping verdict on ONE observation is what the reproduction
+  # discriminator exists to prevent, so the two measured passes are required to be there.
+  if printf '%s\n' "$OUT" | grep -q "^OBJECT-STORE: measured pass 1: fsck rc=$S_CC " &&
+    printf '%s\n' "$OUT" | grep -q "^OBJECT-STORE: measured pass 2: fsck rc=$S_CC "; then
+    ok "corrupt-commit: the verdict rests on TWO independent walks, both reported with the status they returned ($S_CC)"
+  else
+    bad "corrupt-commit: the two walks are not both reported — a stopping verdict on one observation cannot separate a transient from a durable fact"
+  fi
+  # THE OPERATOR GETS git's OWN LAST WORD. `fatal:` matches none of the other recognised
+  # diagnostic shapes, and a stopping verdict that leaves a human with no text is round
+  # 9's defect in a new place.
+  if printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: finding fatal: '; then
+    ok "corrupt-commit: git's own 'fatal:' line — the only account of why it stopped — reaches the operator as a finding"
+  else
+    bad "corrupt-commit: the fatal diagnostic was dropped: $(printf '%s\n' "$OUT" | grep -c '^OBJECT-STORE: finding ') finding line(s)"
+  fi
+  # AND IT CLAIMS NO CAUSE. No cause was established, so no repair may be printed: the
+  # re-clone/--refetch instructions belong to the damage verdict, which measured its
+  # class. It must still tell the operator what to DO (run the walk by hand).
+  CC_BAD=""
+  for CC_TOK in refetch 'clone' 'reflog expire' 'multi-pack-index write'; do
+    printf '%s\n' "$OUT" | grep -qi -- "$CC_TOK" && CC_BAD="$CC_BAD [$CC_TOK]"
+  done
+  if [ -z "$CC_BAD" ] && printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: verdict-detail REMEDY' &&
+    printf '%s\n' "$OUT" | grep -q 'fsck --no-progress --no-dangling'; then
+    ok "corrupt-commit: the remedy names the walk to run BY HAND and carries NONE of the class-specific repairs (no re-clone, no --refetch, no reflog expire) — the printed text matches what was established"
+  else
+    bad "corrupt-commit: forbidden repair token(s)$CC_BAD, or no hand-run instruction — a repair chosen for a cause nobody established is worse than none"
+  fi
+fi
+# ONE PROPERTY APART: the BYTE-IDENTICAL twin, built by the same `newrepo` with the same
+# pinned clock and NOT damaged. It must be VERIFIED, so the verdict above is attributable
+# to the planted damage and not to the fixture recipe.
+if run 0 "corrupt-commit twin: still VERIFIED" --repo "$R_CC_TWIN"; then
+  if [ "$(verdict_of)" = VERIFIED ]; then
+    ok "corrupt-commit-control: the undamaged twin of that fixture is VERIFIED — the stopping verdict is the planted commit damage, not the recipe"
+  else
+    bad "corrupt-commit-control: verdict='$(verdict_of)' on the CLEAN twin, wanted VERIFIED"
+  fi
 fi
