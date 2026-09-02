@@ -434,9 +434,67 @@ fn ac5_no_native_scalar_reaches_the_residual_custom_path() {
                 name
             );
         }
+    }
+}
+
+/// `supports_ordering()` for the scalars that may actually OCCUPY an ordering
+/// position — deliberately a SEPARATE audit from AC5 above, and deliberately not
+/// a blanket "every scalar orders" assertion (roborev job 44).
+///
+/// The two questions are different and only one of them is AC5's: "does this type
+/// avoid the residual string-compare path" is about #3790's fix, while "may this
+/// type sit in an ordering position" is about the predicate's own contract. An
+/// earlier version asserted the second over EVERY scalar in one loop, which
+/// CODIFIED `ComparatorType::Duration::supports_ordering() == true` — behaviour
+/// this issue does not fix and should not freeze.
+///
+/// **`Duration` is excluded, and the reason is not obvious.** At the marshal level
+/// `DurationType` really is byte-comparable — pinned `cassandra-5.0.8`,
+/// `src/java/org/apache/cassandra/db/marshal/DurationType.java:46`:
+/// `super(ComparisonType.BYTE_ORDER);`. But CQL FORBIDS a `duration` in any
+/// ordering position: it cannot be a partition or clustering key, nor a set
+/// element or map key. That is what `DurationType.referencesDuration()` (line 96)
+/// exists to let the validation layer detect and reject.
+///
+/// So the predicate is ambiguous: under "Cassandra defines a byte order for this
+/// type" `Duration` is `true`; under "this type may occupy an ordering position"
+/// it is `false`. #3790 adopted the SECOND reading for `inet`/`time` (both are
+/// legal clustering-column types, which is why they now report `true`), and under
+/// that reading `Duration` reporting `true` is inconsistent. Resolving it means
+/// changing a shared predicate for an unrelated type on a decision this issue did
+/// not make, so it is filed as a follow-up rather than changed here (1:1:1:1).
+/// This test therefore asserts only what #3790 settled and stays silent on
+/// `Duration` rather than pinning either answer.
+#[test]
+fn orderable_native_scalars_report_supports_ordering() {
+    let orderable = [
+        CqlType::Boolean,
+        CqlType::TinyInt,
+        CqlType::SmallInt,
+        CqlType::Int,
+        CqlType::BigInt,
+        CqlType::Counter,
+        CqlType::Float,
+        CqlType::Double,
+        CqlType::Decimal,
+        CqlType::Text,
+        CqlType::Ascii,
+        CqlType::Varchar,
+        CqlType::Blob,
+        CqlType::Timestamp,
+        CqlType::Date,
+        CqlType::Time,
+        CqlType::Uuid,
+        CqlType::TimeUuid,
+        CqlType::Inet,
+        CqlType::Varint,
+    ];
+    for cql in orderable {
+        let c = ComparatorType::from_cql_type(&cql).expect("comparator for native scalar");
         assert!(
             c.supports_ordering(),
-            "native scalar {:?} must support ordering",
+            "native scalar {:?} may occupy an ordering position and must report \
+             supports_ordering() == true",
             cql
         );
     }
