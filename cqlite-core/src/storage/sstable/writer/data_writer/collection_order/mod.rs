@@ -19,6 +19,12 @@
 //! provides the crate imports and sibling helpers re-exported from
 //! `data_writer/mod.rs` (notably `serialize_value`). No emitted bytes change for
 //! types whose comparator is unsigned-lexicographic.
+//!
+//! Issue #3935 corrected the `time` arm from signed to `TimeType`'s
+//! `ComparisonType.BYTE_ORDER`. That moves emitted bytes ONLY for an
+//! out-of-range NEGATIVE nanos (outside `0..=86_399_999_999_999`), where the two
+//! orders diverge; every in-range `time` collection is byte-identical before and
+//! after, because over that range byte, unsigned and signed order coincide.
 
 use super::*;
 use std::cmp::Ordering;
@@ -30,13 +36,21 @@ mod scalar;
 /// element/key type's Cassandra `AbstractType.compare` (issue #1275, composites
 /// #1296).
 ///
-/// For most types (text/ascii/blob/boolean/inet/date) that comparator IS
-/// unsigned-lexicographic over the serialized bytes, so raw byte order is
-/// correct (see the per-type audit on the fallback arm below). The SCALAR types
-/// that order differently (signed integers, float/double, varint, decimal, uuid)
-/// are handled by [`scalar`]; the COMPOSITE types that compare field/element-wise
-/// (tuple, UDT, nested frozen set/list/map) are handled RECURSIVELY by
-/// [`composite`], whose leaves call back into this function.
+/// For many types (text/ascii/blob/inet/date, and `boolean` for every
+/// canonically-serialized value) that comparator IS unsigned-lexicographic over
+/// the serialized bytes, so raw byte order is correct — see the per-type audit
+/// on the fallback arm below, which names each type's `ComparisonType` and
+/// declares the one residual. The SCALAR types that order differently (signed
+/// integers, `timestamp`, float/double, varint, decimal, uuid) are handled by the
+/// explicit arms and [`scalar`]; the COMPOSITE types that compare
+/// field/element-wise (tuple, UDT, nested frozen set/list/map) are handled
+/// RECURSIVELY by [`composite`], whose leaves call back into this function.
+///
+/// The two temporal types do NOT share a comparator, despite both serializing as
+/// an 8-byte big-endian long: `timestamp` is signed (`TimestampType` is CUSTOM ->
+/// `LongType.compareLongs`) and `time` is unsigned byte order (`TimeType` is
+/// `ComparisonType.BYTE_ORDER`). See the two arms below for the pinned citations;
+/// conflating them was issue #3935.
 ///
 /// The ordering oracle is Cassandra's per-type `AbstractType.compare`
 /// (`org.apache.cassandra.db.marshal`). The decision is driven ENTIRELY by the
@@ -55,9 +69,42 @@ pub(crate) fn compare_collection_elements(a: &Value, b: &Value) -> Ordering {
         (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
         (Value::BigInt(x), Value::BigInt(y)) => x.cmp(y),
         (Value::Counter(x), Value::Counter(y)) => x.cmp(y),
-        // Temporal longs (TimestampType/TimeType extend/share LongType).
+        // `timestamp` — SIGNED 64-bit order. `TimestampType` is
+        // `ComparisonType.CUSTOM` and its `compareCustom` body is exactly
+        // `return LongType.compareLongs(left, accessorL, right, accessorR);`,
+        // which compares the SIGNED first byte (Java `getByte` is signed) and
+        // then the unsigned tail. So a pre-epoch (negative) timestamp sorts
+        // BELOW every non-negative one, and `i64::cmp` is that order verbatim.
+        // Authority (never a CQLite file:line, #3041), pinned `cassandra-5.0.8`:
+        // `db/marshal/TimestampType.java:56` `super(ComparisonType.CUSTOM)` +
+        // `:69-71` `compareCustom` -> `LongType.compareLongs`.
         (Value::Timestamp(x), Value::Timestamp(y)) => x.cmp(y),
-        (Value::Time(x), Value::Time(y)) => x.cmp(y),
+        // `time` — UNSIGNED BIG-ENDIAN BYTE ORDER, *not* signed numeric order.
+        // `TimeType` is `ComparisonType.BYTE_ORDER`, i.e.
+        // `ByteBufferUtil.compareUnsigned` over the serialized 8-byte
+        // big-endian nanos-since-midnight long. Authority, pinned
+        // `cassandra-5.0.8`: `db/marshal/TimeType.java:48`
+        // `private TimeType() {super(ComparisonType.BYTE_ORDER);}`. `TimeType`
+        // has no `validate` override, and `serializers/TimeSerializer.java:71-75`
+        // `validate` checks the SIZE ONLY (`accessor.size(value) != 8`) — the
+        // range check lives only in `timeStringToLong` (`:50`), the CQL
+        // string-literal/JSON path — so an 8-byte binary out-of-range `time`
+        // passes Cassandra's validation, is stored, and is ordered BYTE_ORDER.
+        //
+        // Over `time`'s valid range (`0..=86_399_999_999_999`) every value is
+        // non-negative, so byte order, unsigned order and signed numeric order
+        // COINCIDE and no in-range on-disk ordering moves. They diverge only for
+        // an out-of-range NEGATIVE nanos, whose sign bit makes the leading byte
+        // `0xFF`: BYTE_ORDER sorts it ABOVE every non-negative value, where
+        // `i64::cmp` sorted it below (issue #3935).
+        //
+        // Comparing `to_be_bytes()` is the serialized form verbatim, which makes
+        // this whole-collection path agree with BOTH of the sites it must:
+        //   * the per-element write path, `schema_helpers::compare_cell_paths`,
+        //     which compares the raw serialized cell-path bytes unsigned; and
+        //   * the read comparator `types::comparator::custom` `Custom("time")`
+        //     (#3790), which already compares `to_be_bytes()`.
+        (Value::Time(x), Value::Time(y)) => x.to_be_bytes().cmp(&y.to_be_bytes()),
         // Floating point — Float.compare / Double.compare total order.
         (Value::Float32(x), Value::Float32(y)) => scalar::compare_f32_java(*x, *y),
         (Value::Float(x), Value::Float(y)) => scalar::compare_f64_java(*x, *y),
@@ -102,18 +149,42 @@ pub(crate) fn compare_collection_elements(a: &Value, b: &Value) -> Ordering {
         //     `ComparisonType.BYTE_ORDER` — UTF-8 / 7-bit ASCII bytes sort
         //     unsigned-lexicographically, which equals codepoint order.
         //   * `blob` (BytesType): BYTE_ORDER, raw bytes.
-        //   * `boolean` (BooleanType): BYTE_ORDER over the single serialized byte
-        //     (0x00 false < 0x01 true), which is the natural order.
+        //   * `boolean` (BooleanType): `ComparisonType.CUSTOM`, NOT BYTE_ORDER
+        //     (`db/marshal/BooleanType.java:39`). Its `compareCustom` (`:53-60`)
+        //     normalizes each operand to `getByte(v, 0) == 0 ? 0 : 1` — "false is
+        //     0, true is ANYTHING else" — before comparing. DECLARED RESIDUAL,
+        //     not fixed here: for a CANONICAL serialization (`0x00` / `0x01`) the
+        //     byte fallback agrees with Cassandra exactly, and for a NON-canonical
+        //     truthy byte it does not (Cassandra: `0x02` compares EQUAL to `0x01`;
+        //     the byte fallback: `0x02` sorts GREATER than `0x01`). CQLite
+        //     serializes `Value::Boolean` canonically, so the divergence needs a
+        //     non-canonical serialized boolean to observe; that is out of scope
+        //     for issue #3935 and is stated rather than left implicit.
         //   * `inet` (InetAddressType): BYTE_ORDER — IPv4 (4 bytes) sorts before
         //     any IPv6 (16 bytes) by length-then-byte, matching Cassandra.
         //   * `date` (SimpleDateType): stored as an UNSIGNED 32-bit day count
         //     offset by 2^31, compared `ByteBufferUtil.compareUnsigned`, i.e.
         //     unsigned big-endian bytes — exactly raw-byte order.
-        //   * `duration` (DurationType): Cassandra makes duration NON-comparable
-        //     (`isEmptyValueMeaningless`/no total order) and FORBIDS it as a set
-        //     element or map key, so a `Value::Duration` cannot legitimately reach
-        //     this comparator; the fallback keeps the sort total/panic-free if one
-        //     somehow does, but it is not an ordering Cassandra would ever emit.
+        //   * `duration` (DurationType): BYTE_ORDER
+        //     (`db/marshal/DurationType.java:46` `super(ComparisonType.BYTE_ORDER)`).
+        //     An earlier revision of this audit claimed Cassandra makes duration
+        //     NON-comparable; that was FALSE. The CONCLUSION survives for a
+        //     different and better reason: CQL FORBIDS `duration` as a set element
+        //     or a map key outright — `cql3/CQL3Type.java:830-838` throws
+        //     "Durations are not allowed inside sets" and "Durations are not
+        //     allowed as map keys" — so a `Value::Duration` cannot legitimately
+        //     reach this comparator at all. The fallback keeps the sort
+        //     total/panic-free if one somehow does.
+        //   * `counter` (CounterColumnType): `ComparisonType.NOT_COMPARABLE`
+        //     (`db/marshal/CounterColumnType.java:38`) — THIS is the type
+        //     Cassandra makes non-comparable, and it is also forbidden inside a
+        //     collection (`cql3/CQL3Type.java:827` "Counters are not allowed
+        //     inside collections", `:836` for map keys). So a `Value::Counter`
+        //     cannot legitimately be a set element or map key either. The
+        //     `Value::Counter` arm ABOVE compares signed rather than falling
+        //     through; it exists solely to keep the sort TOTAL for a value shape
+        //     Cassandra would never emit, and asserts nothing about Cassandra's
+        //     ordering (there is none to match).
         // A mixed/unsupported variant pair also lands here (byte fallback keeps
         // the sort total) — including a composite whose element/field type
         // metadata is unavailable, where the no-heuristics mandate (#28) forbids
