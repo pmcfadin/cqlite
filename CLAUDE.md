@@ -1239,7 +1239,18 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   it used to write unconditionally, so a recorded blocking `FINDINGS` became a merge-PROCEEDING
   `AUTHOR-PERFORMED` with no flag and no trace, while `open` refuses to re-stamp an already-open
   stage for the far smaller harm of restarting a clock: the worse clobber had the weaker guard, and
-  an overwrite that leaves no trace is the audit-trail failure this mechanism exists to remove. **The CLASSIFIER enforces that working too, by calling the
+  an overwrite that leaves no trace is the audit-trail failure this mechanism exists to remove.
+  **AND THAT CHECK PREVENTS RATHER THAN REPORTS (#3751 round 9).** As first built it read the
+  recorded verdict and only THEN prepared and renamed its replacement, so a late reviewer landing
+  `FINDINGS` in that window was overwritten anyway — with no `--force` and no trace, i.e. the exact
+  harm under the new guard. A check placed before the act it guards, with a window in between, can
+  only report; so the observation the decision was made on (the report's BYTES, not just its token —
+  one `FINDINGS` replaced by ANOTHER leaves the token equal) is RE-TAKEN immediately before the
+  rename and any change REFUSES by name, `--force` included: `--force` authorizes replacing the
+  verdict the operator READ, never one that arrived afterwards. The residual is one `mv` wide and is
+  DECLARED at the check, because no compare-and-swap rename is reachable from a shell — and a lock
+  would not close it either, since the counterparty is an arbitrary agent writing the report with
+  its own tooling and taking no lock. **The CLASSIFIER enforces that working too, by calling the
   SAME function the writer does (#3751 round 1)** — `verdict` reads HAND-WRITTEN reports by design,
   and it used to accept any NON-EMPTY `performed-by`/`reason`/`evidence`, so `performed-by: nobody`,
   `reason: x`, `evidence: tbd` reached the token that PROCEEDS at the merge point while the writer

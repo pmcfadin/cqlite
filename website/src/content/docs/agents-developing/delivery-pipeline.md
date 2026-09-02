@@ -705,7 +705,13 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   `--force`, and a forced replacement NAMES the token it replaced (#3751 round 2)** — it used to write
   unconditionally, so a recorded blocking `FINDINGS` became a merge-PROCEEDING `AUTHOR-PERFORMED` with no
   flag and no trace, while `open` refuses to re-stamp an already-open stage for the far smaller harm of
-  restarting a clock: the worse clobber had the weaker guard. **The classifier enforces that working too,
+  restarting a clock: the worse clobber had the weaker guard. **AND IT PREVENTS RATHER THAN REPORTS
+  (#3751 round 9)**: the observation the decision was made on — the report's BYTES, since one `FINDINGS`
+  replaced by ANOTHER leaves the token equal — is RE-TAKEN immediately before the atomic rename, and any
+  change refuses (`reason=report-changed-mid-write`), `--force` included, because `--force` authorizes
+  replacing the verdict the operator READ and not one that arrived while the substitute was being
+  prepared. The residual is one `mv` wide and is declared at the check: no compare-and-swap rename is
+  reachable from a shell, and a lock would not help, since the counterparty takes none. **The classifier enforces that working too,
   by calling the SAME function the writer does (#3751 round 1).** `verdict` reads HAND-WRITTEN reports by design, and it used to accept any
   NON-EMPTY `performed-by`/`reason`/`evidence` — so `performed-by: nobody`, `reason: x`, `evidence: tbd`
   reached the token that PROCEEDS at the merge point while the writer would have refused all three. A

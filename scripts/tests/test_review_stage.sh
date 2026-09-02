@@ -2718,6 +2718,154 @@ for pair in 'STAGE_ELAPSED" -gt "$STAGE_DEADLINE:the past-deadline comparison' \
   fi
 done
 # --- case floor ---------------------------------------------------------------
+# --- 21. THE CLOBBER GUARD MUST PREVENT, NOT REPORT (round 9, N1) ----------------
+# THE FINDING (roborev job 382, N1). Round 2's B2 made `record-author-performed` refuse to
+# replace a RECORDED verdict without `--force`. It checked the CURRENT verdict, then prepared a
+# temporary file, wrote the substitute into it and renamed it into place — so a late reviewer
+# landing `result: FINDINGS` ANYWHERE IN THAT WINDOW was silently overwritten by the
+# merge-proceeding AUTHOR-PERFORMED token, with no `--force` and no `replaced-verdict:` trace.
+# The guard REPORTED the state it found; it did not PREVENT the state it exists to stop, and
+# CLAUDE.md's rule is that a check placed before the act it guards, with a window in between,
+# only reports — the control has to be that the bad state cannot be REACHED.
+#
+# THE WINDOW IS SIMULATED, NOT RACED. Both cases below run a SCRATCH COPY of the shipped script
+# with ONE line injected INSIDE the window — at its EARLIEST point (before the symlink assert)
+# and at its LATEST point (immediately before the rename) — so the interleaving is deterministic,
+# cannot flake, and covers both ends of the span rather than one convenient instant. The
+# ARTIFACT is substituted; there is no settable seam in the shipped script (#3312's corollary for
+# tests). It is a SIMULATION of the race: nothing here is concurrent, and the case makes no claim
+# about timing.
+N1_D="$T/n1"; mkdir -p "$N1_D"
+# `awk -v` PERFORMS ESCAPE PROCESSING on its value, so an injected line containing `\n` would
+# arrive carrying REAL NEWLINES and be planted as several broken lines (round 7's measured
+# harness defect). Every value travels through ENVIRON, which does no such processing.
+n1_build() {
+  local dest="$1" anchor="$2" inj="$3"
+  N1_ANCHOR="$anchor" N1_INJ="$inj" LC_ALL=C awk '
+    BEGIN { a = ENVIRON["N1_ANCHOR"]; inj = ENVIRON["N1_INJ"]; done = 0 }
+    index($0, a) > 0 && done == 0 { print inj; done = 1 }
+    { print }
+  ' "$RS" >"$dest" 2>/dev/null || return 1
+  [ -s "$dest" ] || return 1
+  LC_ALL=C grep -q 'N1_LATE_REVIEWER' "$dest" || return 1
+  return 0
+}
+# The interleaving itself: a late reviewer replacing the report with a BLOCKING verdict. Single
+# quotes so the `$STAGE_REPORT` reference is resolved by the SCRATCH SCRIPT at run time, not here.
+N1_INJECTION='  printf '"'"'result: FINDINGS\n\n### [BLOCKER] N1_LATE_REVIEWER landed this inside the window\n'"'"' >"$STAGE_REPORT"'
+N1_REASON='no peer agent available on this box; hand C against the spec deltas'
+N1_EV='docs/round-artifacts/issue-3751-hand-c.md'
+
+n1_case() {
+  # <label> <anchor> — build the scratch script, open a stage with the SHIPPED script, then run
+  # `record-author-performed` with the scratch one. The stage is opened by the shipped script on
+  # purpose: only the recording path is under test.
+  local label="$1" anchor="$2" prog="$N1_D/$3.sh" repo issue="$4" rep
+  if ! n1_build "$prog" "$anchor" "$N1_INJECTION"; then
+    bad "n1/$label: the interleaving plant did NOT land, so this case proves nothing"
+    bad "n1/$label: (the same absence, 2/5)"
+    bad "n1/$label: (the same absence, 3/5)"
+    bad "n1/$label: (the same absence, 4/5)"
+    bad "n1/$label: (the same absence, 5/5)"
+    return 0
+  fi
+  ok "n1/$label: the interleaving plant landed in the scratch copy (asserted, not assumed)"
+  repo="$(newrepo)"
+  rs "$repo" open c --issue "$issue" --agent spec-auditor
+  rep="$(REPORT_OF "$repo" "$issue" c)"
+  OUT="$(cd "$repo" && bash "$prog" record-author-performed c --issue "$issue" \
+    --reason "$N1_REASON" --evidence "$N1_EV" --performed-by author 2>&1)"; RC=$?
+  rc_is 2 "n1/$label: a verdict recorded INSIDE the window is REFUSED, not overwritten"
+  has "reason=report-changed-mid-write" "n1/$label: the refusal names the cause"
+  OUT="$(cat "$rep" 2>/dev/null || printf '<absent>\n')"; RC=0
+  has "result: FINDINGS" "n1/$label: the late reviewer's FINDINGS SURVIVES"
+  hasnt "result: AUTHOR-PERFORMED" "n1/$label: and the merge-proceeding token was NOT installed over it"
+}
+
+# (a) the EARLIEST point in the window — immediately after the B2 check, before the path asserts.
+n1_case early 'assert_no_symlink "$STAGE_REPORT" report-of-record' early 640
+# (b) the LATEST point THE CHECK CAN COVER — after the substitute is fully written to the
+#     temporary file, immediately before the re-observation that guards the rename. This is the
+#     instant a check placed anywhere earlier cannot see, and the anchor is deliberately the
+#     re-observation itself: delete that line and this case cannot plant, which fails closed (5
+#     bads) rather than passing vacuously. The span AFTER the re-observation is the DECLARED
+#     RESIDUAL WINDOW named in the script — one `mv` wide, irreducible in a shell — and it is
+#     deliberately NOT asserted here: a case requiring the clobber to happen would red the day
+#     someone closes it.
+n1_case late 'now_obs="$(report_bytes "$STAGE_REPORT")"' late 641
+
+# (c) FORCED IS NOT A BLANKET AUTHORIZATION. `--force` authorizes replacing the verdict the
+#     operator READ; a DIFFERENT verdict arriving afterwards was never authorized, so the
+#     interleaving is refused under `--force` too.
+if n1_build "$N1_D/forced.sh" 'now_obs="$(report_bytes "$STAGE_REPORT")"' "$N1_INJECTION"; then
+  ok "n1/forced: the plant landed"
+else
+  bad "n1/forced: the plant did NOT land"
+fi
+R21F="$(newrepo)"
+rs "$R21F" open c --issue 642 --agent spec-auditor
+R21F_REP="$(REPORT_OF "$R21F" 642 c)"
+printf 'result: PASS\n\nreviewed, no blocking finding\n' >"$R21F_REP"
+OUT="$(cd "$R21F" && bash "$N1_D/forced.sh" record-author-performed c --issue 642 \
+  --reason "$N1_REASON" --evidence "$N1_EV" --performed-by author --force 2>&1)"; RC=$?
+rc_is 2 "n1/forced: --force does NOT authorize replacing a verdict that arrived after the check"
+has "reason=report-changed-mid-write" "n1/forced: and it names the same cause"
+OUT="$(cat "$R21F_REP" 2>/dev/null || printf '<absent>\n')"; RC=0
+has "result: FINDINGS" "n1/forced: the verdict that arrived in the window survives"
+
+# (d) CONTROL — THE SAME SCRATCH MACHINERY, WITH A NO-OP INJECTION, STILL RECORDS. Without this
+#     the refusals above are satisfiable by a scratch copy that is simply broken, or by a check
+#     that refuses every recording.
+if n1_build "$N1_D/noop.sh" 'now_obs="$(report_bytes "$STAGE_REPORT")"' '  : N1_LATE_REVIEWER no-op'; then
+  ok "n1/CONTROL: the no-op plant landed at the same anchor"
+else
+  bad "n1/CONTROL: the no-op plant did NOT land"
+fi
+R21C="$(newrepo)"
+rs "$R21C" open c --issue 643 --agent spec-auditor
+R21C_REP="$(REPORT_OF "$R21C" 643 c)"
+OUT="$(cd "$R21C" && bash "$N1_D/noop.sh" record-author-performed c --issue 643 \
+  --reason "$N1_REASON" --evidence "$N1_EV" --performed-by author 2>&1)"; RC=$?
+rc_is 0 "n1/CONTROL: an UNDISTURBED report is still recorded (the refusal comes from the interleaving, not from the scratch copy)"
+has "RECORD-OK" "n1/CONTROL: the normal path still reports RECORD-OK"
+hasnt "report-changed-mid-write" "n1/CONTROL: and claims no interleaving that did not happen"
+OUT="$(cat "$R21C_REP" 2>/dev/null || printf '<absent>\n')"; RC=0
+has "result: AUTHOR-PERFORMED" "n1/CONTROL: the substitute really was installed"
+
+# (e) CONTROL — the SHIPPED script's forced replacement still works end to end, so the new
+#     re-verification did not red the one path B2 deliberately leaves open.
+R21S="$(newrepo)"
+rs "$R21S" open c --issue 644 --agent spec-auditor
+R21S_REP="$(REPORT_OF "$R21S" 644 c)"
+printf 'result: FINDINGS\n\n### [BLOCKER] a real gap\n' >"$R21S_REP"
+rs "$R21S" record-author-performed c --issue 644 --reason "$N1_REASON" --evidence "$N1_EV" \
+  --performed-by author --force
+rc_is 0 "n1/CONTROL: the SHIPPED forced replacement is unaffected"
+has "replaced-verdict=FINDINGS" "n1/CONTROL: and still records what it replaced"
+
+# (f) STRUCTURAL — THE CHECK IS INSIDE THE WINDOW IT CERTIFIES. A re-verification that drifted
+#     back above `prepare_write` would restore the reported-not-prevented shape while every
+#     behavioural case above still passed (the injection anchors would move with it), so the
+#     ORDER is pinned from source: the second observation must be taken AFTER the substitute is
+#     written and BEFORE the rename.
+N1_PREP_LN="$(LC_ALL=C grep -n 'prepare_write "\$STAGE_REPORT" report-of-record' "$RS" | LC_ALL=C head -1 | cut -d: -f1)"
+N1_COMMIT_LN="$(LC_ALL=C grep -n 'commit_write "\$STAGE_REPORT" report-of-record' "$RS" | LC_ALL=C head -1 | cut -d: -f1)"
+N1_RECHECK_LN="$(LC_ALL=C grep -n 'report_bytes "\$STAGE_REPORT"' "$RS" | LC_ALL=C tail -1 | cut -d: -f1)"
+if [ -n "$N1_PREP_LN" ] && [ -n "$N1_COMMIT_LN" ] && [ -n "$N1_RECHECK_LN" ] &&
+  [ "$N1_RECHECK_LN" -gt "$N1_PREP_LN" ] && [ "$N1_RECHECK_LN" -lt "$N1_COMMIT_LN" ]; then
+  ok "n1/structural: the re-observation is taken after the write and BEFORE the rename (lines $N1_PREP_LN < $N1_RECHECK_LN < $N1_COMMIT_LN)"
+else
+  bad "n1/structural: the re-observation is NOT between the write and the rename (prepare=$N1_PREP_LN recheck=$N1_RECHECK_LN commit=$N1_COMMIT_LN)"
+fi
+# AND THE RESIDUAL WINDOW IS DECLARED IN THE CODE, because it cannot be removed: there is no
+# compare-and-swap rename reachable from a shell. A comment naming it is what stops the next
+# reader believing the check is atomic.
+if LC_ALL=C grep -q 'RESIDUAL WINDOW' "$RS"; then
+  ok "n1/structural: the irreducible residual window is DECLARED in the source, not left implicit"
+else
+  bad "n1/structural: nothing in the source declares the residual window"
+fi
+
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
 # which is this issue's own subject inside a test file.
@@ -2869,7 +3017,21 @@ done
 # substring, because `reopen-count=1` is a prefix of `reopen-count=16` and a `has` assertion would
 # have passed on the octal defect this section is about. Every assertion is unconditional — each
 # `if`/`case` calls exactly one of `ok`/`bad` — so the EXACT floor holds by the two shapes above.
-ASSERT_FLOOR=578
+#
+# ROUND 9 (roborev job 382) MOVES IT TO 601. Section 21 adds 23: the clobber guard must PREVENT,
+# not report. Round 2's B2 checked the recorded verdict and then spent a `mktemp`, an `O_EXCL`
+# create, a `date` and a dozen `printf`s before installing its replacement, so a verdict landing
+# in that window was overwritten by the merge-proceeding AUTHOR-PERFORMED token with no `--force`
+# and no trace. The interleaving is SIMULATED deterministically — one line injected into a SCRATCH
+# COPY of the script at the EARLIEST point of the window and at the LATEST point the check can
+# cover — plus the `--force` case (which authorizes replacing the verdict the operator READ, never
+# one that arrives afterwards), three CONTROLS (the same scratch machinery with a NO-OP injection
+# still records; the shipped forced replacement is unaffected; the substitute really is installed)
+# and two STRUCTURAL pins (the re-observation sits between the write and the rename, by line
+# number, and the irreducible residual window is DECLARED in the source). Every branch emits the
+# same number of assertions (`n1_case`'s plant-failed arm emits 5 bads against 5 oks), so the
+# EXACT floor holds.
+ASSERT_FLOOR=601
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

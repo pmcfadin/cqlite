@@ -249,6 +249,10 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    ```
    That reports the DISTINCT token `AUTHOR-PERFORMED`, never `PASS`, and premerge-assert prints
    it on its own line — an author's hand audit is not an independent one; weight it accordingly.
+   It REFUSES if the report already RECORDS a verdict (read it first; `--force` replaces it and
+   records the replaced token), and it refuses `reason=report-changed-mid-write` if a verdict
+   lands WHILE the substitute is being written — that means your auditor woke up and delivered:
+   NOTHING was installed, so read the verdict it wrote rather than re-running the recording.
 3. **Final roborev confirmation pass — this GATES arming auto-merge.** Because review-first
    already ran, this should converge to **clean-on-arrival**. Run the ONLY sanctioned
    invocation (#2964), with the certified tip **PUSHED** (the wrapper asserts it) and **BOTH**

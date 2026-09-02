@@ -479,6 +479,25 @@ definitions, two skills, the OpenSpec delta and both website pages). This subcom
 case where NO independent audit can be obtained, i.e. the author's own, and removing `peer` makes
 its name true.
 
+**The already-recorded refusal PREVENTS rather than REPORTS (#3751 round 9, N1).** Round 2 (B2) made
+`record-author-performed` refuse to replace a recorded `PASS`/`FINDINGS` without `--force`; it checked the
+verdict and THEN spent a `mktemp`, an `O_EXCL` create, a `date` and a dozen `printf`s before installing
+its replacement, so a late reviewer recording `FINDINGS` anywhere in that span was silently overwritten by
+the merge-proceeding token — with no `--force` and no `replaced-verdict:` trace, i.e. the exact harm the
+guard was added for. A check placed before the act it guards, with a window in between, can only report.
+So the observation the decision rests on is RE-TAKEN immediately before the rename and compared for
+equality; any difference refuses with `reason=report-changed-mid-write` and installs nothing. Three
+properties worth knowing: it compares the report's BYTES, not its classified token, because with `--force`
+one `FINDINGS` replaced by a DIFFERENT `FINDINGS` leaves the token equal while the report the operator
+read is gone; the bytes are captured BEFORE the classification (which re-reads the file), so a change
+either read could see is caught by the comparison; and `--force` does NOT cover it, since `--force`
+authorizes replacing the verdict the operator READ, never one that arrived afterwards. **The residual is
+DECLARED because it cannot be removed**: the rename itself is not conditional — coreutils `mv` exposes
+neither `RENAME_EXCHANGE` nor `RENAME_NOREPLACE`, and `mv -n` is the wrong predicate (the destination
+legitimately exists) — so one fork/exec of `mv` remains open, and a LOCK would not close it even if it
+were free, because the counterparty is an arbitrary agent writing the report with its own tooling and
+taking no lock. Only a unilateral compare-and-swap could, and that is what is unavailable.
+
 That reports the DISTINCT token `AUTHOR-PERFORMED`, never `PASS`, and `premerge-assert.sh`
 prints it on its own `PREMERGE: C-VERDICT` line — never folded into `PREMERGE: OK` — for the same
 reason the roborev wrapper's `WAIVED` is textually distinct from `PASS`: **nobody grepping the

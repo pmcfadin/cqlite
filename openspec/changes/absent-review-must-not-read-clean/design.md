@@ -180,6 +180,15 @@ So the recording **requires the working**: a substantive `--reason`, a named `--
 is `AUTHOR-PERFORMED`, textually distinct from `PASS`, for the reason `WAIVED` is distinct in the roborev
 wrapper: nobody grepping the passing token may read a substitute as the real thing.
 
+Round 2 (B2) added the refusal to replace a RECORDED verdict without `--force`; round 9 (N1) made that
+refusal PREVENT rather than REPORT. The check read the verdict and only then prepared and renamed its
+replacement, so a verdict landing in that window was overwritten anyway — the same harm, now under a
+guard. The observation is therefore re-verified immediately before the rename, on the report's BYTES
+rather than its token (one `FINDINGS` replaced by another leaves the token equal), and any change refuses
+under `--force` too. One `mv` of residual window remains and is declared at the check: no
+compare-and-swap rename is reachable from a shell, and a lock cannot help because the counterparty is an
+arbitrary agent writing the report with its own tooling and taking no lock.
+
 ## §5 — the agent side, and the limit of what it buys
 
 Every agent whose completion is a pipeline gate gains a report-of-record clause in its definition, and

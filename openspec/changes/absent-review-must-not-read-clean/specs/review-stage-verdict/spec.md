@@ -307,13 +307,24 @@ the AUTHOR and a peer audit stated as an author's is a false verdict — SHALL r
 report the DISTINCT token `AUTHOR-PERFORMED` — never `PASS`. The recorded disclosure SHALL carry the
 form: *"an author's hand audit is not an independent one; weight it accordingly."* It SHALL NOT
 replace a report that already RECORDS a verdict (`PASS` or `FINDINGS`) unless `--force` is passed, and
-a forced replacement SHALL record the replaced token in the new report.
+a forced replacement SHALL record the replaced token in the new report. That check SHALL PREVENT the
+replacement rather than report it: the observation it decides on SHALL be re-verified immediately before
+the report is installed, and any change to the report in between SHALL refuse by name — including under
+`--force`.
 
 #### Scenario: a recorded verdict is not silently replaced
 - **WHEN** the stage's report already records `FINDINGS` and a substitute is recorded without `--force`
 - **THEN** the recording is REFUSED, naming the recorded token, and the report is left intact
 - **AND** with `--force` the new report NAMES the token it replaced, so the substitution is auditable
 - **AND** a sentinel-only report is replaced with no `--force` (the normal path is unaffected)
+
+#### Scenario: a verdict recorded while the substitute is being prepared is not overwritten
+- **WHEN** a verdict is recorded into the report AFTER the already-recorded check and BEFORE the
+  substitute is installed
+- **THEN** the recording is REFUSED naming that interleaving, NOTHING is installed, and the verdict that
+  arrived survives
+- **AND** `--force` does not authorize it, because `--force` authorizes replacing the verdict the operator
+  read, not one that arrived afterwards
 
 #### Scenario: a substitute is distinguishable from an independent audit
 - **WHEN** an author-performed C is recorded and the verdict is read

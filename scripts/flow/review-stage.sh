@@ -301,6 +301,12 @@
 #         that leaves no trace turns a recorded refusal into a proceed at the merge point,
 #         which is the audit-trail failure this whole tool exists to remove. A
 #         sentinel-only report is freely replaceable: that is the normal path.
+#         THAT CHECK PREVENTS RATHER THAN REPORTS (#3751 round 9, N1): the observation it
+#         decides on is RE-TAKEN immediately before the atomic rename, and any change refuses
+#         (`reason=report-changed-mid-write`) — under `--force` too, since `--force`
+#         authorizes replacing the verdict the operator READ, never one that arrives while the
+#         substitute is being prepared. The irreducible residual is one `mv` wide and is
+#         declared at the check; see `report_bytes`.
 #
 # EXIT CODES
 #   0   success (OPEN-OK, STATUS, RECORD-OK, verdict PASS)
@@ -1439,6 +1445,43 @@ CLAUSE
 }
 
 # --- verdict machinery -------------------------------------------------------
+# report_bytes <path> — ONE OBSERVATION OF THE REPORT OF RECORD, in a form two reads can be
+# compared for equality (#3751 round 9, N1). Prints a STATE marker plus the file's bytes; never
+# dies, prints nothing else, so it is safe to call from any command substitution (round 2's B6
+# rule).
+#
+# WHY BYTES AND NOT THE CLASSIFIED TOKEN. The token is the thing `record-author-performed`
+# DECIDES on, but it is not a sufficient IDENTITY: with `--force`, a concurrent replacement of one
+# `FINDINGS` by a DIFFERENT `FINDINGS` leaves the token equal while the report the operator
+# actually read is gone. Content equality catches that; the token cannot. It is also strictly
+# cheaper to be right about — `classify_report` reads its subject five times, so it is not an
+# identity of any single instant.
+#
+# THE STATE MARKER EXISTS SO THAT "ABSENT" AND "EMPTY" ARE DIFFERENT OBSERVATIONS. Both are the
+# empty string once read, and they are not the same fact.
+#
+# THE COMPLETE READ IS ASSERTED AFFIRMATIVELY, not inferred from `cat` having exited 0 inside a
+# substitution whose status is easy to lose: the sentinel `E` is printed by a SECOND command
+# joined with `&&`, so a truncated or failed read cannot produce a value ending in it. A positive
+# verdict requires an affirmative measurement, and "the bytes are unchanged" is a positive verdict.
+#
+# DECLARED LIMIT: bash DISCARDS NUL bytes in a command substitution, so a change consisting only
+# of NUL bytes is not represented here. The report of record is text written by an agent (and by
+# this script), the classification below is compared alongside this value at its one call site,
+# and nothing in this tool writes a NUL — stated rather than left as an unexamined blind spot.
+report_bytes() {
+  local p="$1" body
+  if [ ! -f "$p" ]; then printf 'state=no-such-file\n'; return 0; fi
+  # Measured BY ATTEMPTING THE READ rather than with `[ -r ]`, which answers TRUE for root and
+  # cannot see an I/O error — the same reason `classify_report` probes with a redirection.
+  body="$( { LC_ALL=C cat -- "$p" && printf 'E'; } 2>/dev/null )"
+  case "$body" in
+    *E) ;;
+    *) printf 'state=unreadable\n'; return 0 ;;
+  esac
+  printf 'state=present bytes:\n%s' "${body%E}"
+}
+
 # classify_report <report-path> <stage-open:0|1> — print "<token>|<cause>" and return 0.
 # ONE place decides the token, so `status` and `verdict` can never form two opinions about
 # the same file (the divergence #3564 records one directory over).
@@ -1944,7 +1987,14 @@ cmd_record_author_performed() {
   # cannot stand in for that disclosure. A SENTINEL-ONLY report stays freely replaceable —
   # that is the normal path, and a guard that reds on correct input is the guard agents learn
   # to waive.
-  local prior_cls prior_token replaced=""
+  #
+  # THE OBSERVATION IS TAKEN BEFORE THE DECISION IS MADE ON IT (#3751 round 9, N1), and in that
+  # ORDER deliberately: `classify_report` re-reads the file, so a change landing between these two
+  # calls is one the classification would see and this snapshot would not. Taking the bytes FIRST
+  # means every content change from the EARLIEST observation onward is caught by the
+  # re-verification below, whichever of the two reads saw it.
+  local prior_cls prior_token prior_obs replaced=""
+  prior_obs="$(report_bytes "$STAGE_REPORT")"
   prior_cls="$(classify_report "$STAGE_REPORT" 1)"
   prior_token="${prior_cls%%|*}"
   case "$prior_token" in
@@ -1991,6 +2041,41 @@ cmd_record_author_performed() {
     printf 'is sanctioned at all because an audit whose working is shown is auditable,\n'
     printf 'whereas an absent one is not.\n'
   } >&9
+  # RE-VERIFIED IMMEDIATELY BEFORE THE RENAME (#3751 round 9, N1). The check above REPORTED the
+  # verdict it found and then spent a `mktemp`, an `O_EXCL` create, a `date` and a dozen `printf`s
+  # before installing its replacement — so a late reviewer recording FINDINGS anywhere in that
+  # span was silently overwritten by the merge-proceeding AUTHOR-PERFORMED token, with no
+  # `--force` and no `replaced-verdict:` trace. A check placed before the act it guards, with a
+  # window in between, can only REPORT; the control has to be that the bad state cannot be
+  # REACHED. So the observation the decision was made on is re-taken HERE, after the substitute is
+  # fully written to the temporary file and before anything is installed at the destination.
+  #
+  # ONE RULE, NOT A MATRIX: the report must be BYTE-IDENTICAL to the observation this call
+  # decided on. Any change at all refuses — including under `--force`, because `--force`
+  # authorizes replacing the verdict the operator READ, and a different verdict arriving
+  # afterwards was never authorized by anyone.
+  #
+  # RESIDUAL WINDOW, DECLARED BECAUSE IT CANNOT BE REMOVED: the rename itself is not conditional.
+  # There is no compare-and-swap rename reachable from a shell — coreutils `mv` exposes neither
+  # `RENAME_EXCHANGE` nor `RENAME_NOREPLACE`, and `mv -n` is the wrong predicate (it refuses ANY
+  # existing destination, and the destination here legitimately exists — it is the sentinel). So
+  # what remains open is the span between this read and the `rename(2)` inside the single `mv`
+  # below: one fork/exec, with nothing else in between, and it is the minimum this language can
+  # express. A declared narrow window is acceptable; a silent one is not. Note also that a LOCK
+  # would not help even if one were free: the counterparty is an ARBITRARY AGENT writing the
+  # report with its own tooling and taking no lock, so only a unilateral compare-and-swap could
+  # close it, which is exactly what is unavailable.
+  local now_obs now_cls
+  now_obs="$(report_bytes "$STAGE_REPORT")"
+  if [ "$now_obs" != "$prior_obs" ]; then
+    # The classification is re-read HERE, on the refusal path ONLY: it is a DIAGNOSTIC naming
+    # what arrived, never an input to the decision, which was made on the byte comparison above.
+    # Keeping it off the success path is also what keeps the window minimal.
+    now_cls="$(classify_report "$STAGE_REPORT" 1)"
+    emit "$REFUSE_MARKER reason=report-changed-mid-write kind=$kind issue=$issue report=$(field_value "$STAGE_REPORT") now-verdict=$(field_value "${now_cls%%|*}")"
+    emit "$REFUSE_MARKER detail=the report of record CHANGED between the already-recorded check and this write, so NOTHING was installed — the prepared substitute is discarded and whatever is in the report now is intact. This is the interleaving that guard exists to stop: a review landing a verdict while a substitute was being prepared would otherwise be replaced by the merge-proceeding AUTHOR-PERFORMED token with no trace. READ what is there now ($prog verdict $kind --issue $issue) and decide again; --force does not cover it, because it authorizes replacing the verdict you read, not one that arrived afterwards."
+    exit 2
+  fi
   commit_write "$STAGE_REPORT" report-of-record
 
   emit "RECORD-OK kind=$kind issue=$issue result=AUTHOR-PERFORMED performed-by=$performed_by reason=$reason_tok evidence=$evidence_tok${replaced:+ replaced-verdict=$replaced} report=$(field_value "$STAGE_REPORT")"
