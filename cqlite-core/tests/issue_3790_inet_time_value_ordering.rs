@@ -462,9 +462,10 @@ fn ac5_no_native_scalar_reaches_the_residual_custom_path() {
 /// legal clustering-column types, which is why they now report `true`), and under
 /// that reading `Duration` reporting `true` is inconsistent. Resolving it means
 /// changing a shared predicate for an unrelated type on a decision this issue did
-/// not make, so it is filed as a follow-up rather than changed here (1:1:1:1).
+/// not make, so it is filed as **#3917** rather than changed here (1:1:1:1).
 /// This test therefore asserts only what #3790 settled and stays silent on
-/// `Duration` rather than pinning either answer.
+/// `Duration` rather than pinning either answer, so #3917 can decide either way
+/// without fighting a test.
 #[test]
 fn orderable_native_scalars_report_supports_ordering() {
     let orderable = [
