@@ -789,6 +789,20 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   persists the value and VERIFIES it by correlating the `/etc/environment` line, the value a fresh
   non-login PAM session sees, that value in BYTES (asked of an ISOLATED sccache, never
   reimplemented) and the BYTES the running server enforces (only VERIFIED is an `[ok]`).
+  **And every one of those sccache calls is made by the DROPPED-PRIVILEGE session, because
+  bootstrap's documented invocation is `sudo bash scripts/bootstrap-agent-machine.sh` while the
+  binary it resolves is `<the invoking account's home>/.cargo/bin/sccache` (#3727, roborev job
+  415): a binary resolved from a location the invoking account can WRITE must never be executed
+  by root** — on this fleet the planter is a PEER LANE sharing `/home/ubuntu`, a non-invoker
+  route, and root-exec'ing it is arbitrary code execution as root. Refusing beats testing the
+  file's ownership, which is a TOCTOU race against the exec that follows it. Section 2's
+  accelerator report runs before any identity/sudo probe and so has no session to drop into: it
+  executes NOTHING as root and reports the `--version` line as unread, with the reason. The two
+  sanctioned routes are the only ones, enforced by a derived run-time census
+  (`sccache-exec` in `scripts/tests/test_bootstrap_agent_machine.sh`) that FAILs by name on a
+  third. `agent-gate.sh` is NOT exposed: `_gate_sccache_bin` reads the running process's OWN
+  `$HOME`, so the binary is always in the same account's home as the process running it, and
+  nothing runs the gate as root (`systemd-run --user`, `bash scripts/agent-gate.sh`).
   **Declared residual:** a LOGIN shell can see a different value (on this fleet `/etc/profile.d`
   runs after `pam_env` — #3727's own root cause) and that context is no longer measured, so the
   verdict is scoped to the non-login session in its own scope note.
