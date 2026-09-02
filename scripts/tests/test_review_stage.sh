@@ -5917,6 +5917,174 @@ else
   bad "z1/structural: the read-path walk declares $Z1_DECL of 2 (the #3929 window boundary, the withdrawal of round 19's wider claim)"
 fi
 
+
+# --- 35. `-L` BEFORE ANY DEREFERENCING PREDICATE, AT *EVERY* READ SITE (round 20, Z2) -------------
+# THE FINDING (roborev job 411, half B): `observe_record` gated on its OWN `[ ! -f "$sfile" ]`
+# BEFORE calling `stage_record_text`, i.e. before that function's `[ -L ]` test and (after half A)
+# before its component walk. `-f` DEREFERENCES, and for a DANGLING link it answers FALSE — so a
+# dangling symlink at the record's name was reported as `stage never opened`, which is the
+# PERMISSIVE state and the one `record-author-performed`'s clobber guard reads as "there is no
+# recorded verdict to destroy". Round 19 identified exactly this trap and pinned it for the REPORT
+# (`-L` before `-f` in `report_bytes`); the RECORD's caller-side probe kept asking the same question
+# in the wrong order, which is why it survived a round.
+#
+# THE FIX IS A SUBTRACTION: the caller's probe is REMOVED and `stage_record_text` — the single
+# reader of that path — answers `absent` as its own status, reachable only AFTER the walk and the
+# leaf test. Two readers of one path are two opinions about whether a stage exists.
+#
+# THE CELLS. This section holds every DANGLING cell of the {leaf, parent} x {live, dangling} matrix
+# that only became reachable once the order was fixed, plus the UNSEARCHABLE-parent cell for the
+# same reason (`-f` under a mode-000 directory also answers false). The LIVE cells are in section 32
+# (leaf) and section 34 (parent).
+
+# (a) THE RECORD'S LEAF, DANGLING — the cell round 19 left unpinned. Round 19 pinned the dangling
+#     REPORT and not the dangling RECORD, and that missing cell is the whole reason this survived.
+R35="$(newrepo)"
+rs "$R35" open c --issue 1908 --agent spec-auditor
+rc_is 0 "z2: the stage opened"
+printf 'result: FINDINGS\n\none blocking gap.\n' >"$(REPORT_OF "$R35" 1908 c)"
+rs "$R35" verdict c --issue 1908
+rc_is 4 "z2/control: with a real record the stage reads its verdict normally (exit 4)"
+R35_SFILE="$R35/.review-stage/issue-1908/c.stage"
+rm -f "$R35_SFILE"
+if ln -s "$T/z2-nowhere-$$" "$R35_SFILE" 2>/dev/null && [ -L "$R35_SFILE" ] && [ ! -f "$R35_SFILE" ]; then
+  ok "z2/record-leaf-dangling: PREMISE — a DANGLING link stands at the record's name, and \`-f\` really answers false for it"
+else
+  bad "z2/record-leaf-dangling: PREMISE — could not plant it; the assertions below would be vacuous"
+fi
+rs "$R35" verdict c --issue 1908
+rc_is 5 "z2/record-leaf-dangling: a NON-VERDICT (exit 5)"
+has "RESULT: NOT-RUN (stage record is a symlink" "z2/record-leaf-dangling: reported as a symlinked RECORD — the tampering — and not as an absence"
+hasnt "stage never opened" "z2/record-leaf-dangling: NOT 'stage never opened', which is the PERMISSIVE state and is exactly what the pre-fix script reported here"
+rs "$R35" status c --issue 1908
+has "state=stage-record-symlink" "z2/record-leaf-dangling/status: its own state word, not never-opened"
+hasnt "state=never-opened" "z2/record-leaf-dangling/status: and never-opened is not reported for a path that exists as a link"
+# AND THE CLOBBER GUARD IS THE HARM: `absent` is its permissive branch, so a dangling record used
+# to make a substitute recordable over a stage nobody could read.
+rs "$R35" record-author-performed c --issue 1908 \
+  --reason "no independent auditor was available on this lane" \
+  --evidence "docs/round-artifacts/z2-note.md" --performed-by author
+rc_is 2 "z2/record-leaf-dangling: record-author-performed REFUSES rather than recording over an unreadable stage"
+has "reason=stage-record-is-a-symlink" "z2/record-leaf-dangling: with the symlink reason, not the never-opened one"
+hasnt "reason=stage-never-opened" "z2/record-leaf-dangling: and NOT 'stage-never-opened' — the path is there, it is a link"
+
+# (b) PARENT, DANGLING. This is the cell that proves the walk must precede EVERY dereferencing
+#     predicate, not just the leaf's: for a dangling link `-f` on the leaf answers FALSE, which is
+#     `stage never opened` — the PERMISSIVE state, and the one a clobber guard reads as "there is
+#     no recorded verdict to destroy". Measured on the pre-fix script: exactly that.
+R34C="$(newrepo)"
+mkdir -p "$R34C/.review-stage"
+if ln -s "$T/z1-nowhere-$$" "$R34C/.review-stage/issue-1906" 2>/dev/null \
+   && [ -L "$R34C/.review-stage/issue-1906" ] && [ ! -f "$R34C/.review-stage/issue-1906/c.stage" ]; then
+  ok "z1/parent-dangling: PREMISE — a DANGLING issue-<N>/ link is planted, and \`-f\` on the record really answers false through it"
+else
+  bad "z1/parent-dangling: PREMISE — could not plant a dangling parent link; the next assertions are vacuous"
+fi
+rs "$R34C" verdict c --issue 1906
+rc_is 5 "z1/parent-dangling: still a NON-VERDICT (exit 5)"
+has "RESULT: NOT-RUN (stage record path has a symlinked parent directory" "z1/parent-dangling: reported as a symlinked parent, NOT excused as 'stage never opened'"
+hasnt "stage never opened" "z1/parent-dangling: 'never opened' is the PERMISSIVE state and is exactly what the pre-fix script reported here"
+
+# (c) PARENT, DANGLING, at `.review-stage/` — the top level, same reasoning.
+R34D="$(newrepo)"
+if ln -s "$T/z1-nowhere-top-$$" "$R34D/.review-stage" 2>/dev/null && [ -L "$R34D/.review-stage" ]; then
+  ok "z1/parent-dangling-2: PREMISE — a DANGLING .review-stage/ link is planted"
+else
+  bad "z1/parent-dangling-2: PREMISE — could not plant it; the next assertion is vacuous"
+fi
+rs "$R34D" verdict c --issue 1905
+has "RESULT: NOT-RUN (stage record path has a symlinked parent directory" "z1/parent-dangling-2: a dangling top-level link is refused as a symlinked parent, not read as never-opened"
+
+# (d) THE UNVERIFIABLE PARENT — "cannot tell" must not take the permissive branch. A mode-000
+#     directory is not effective for root, so the case asserts the mapping only where the walk
+#     really cannot see through it, and says which branch it took; BOTH branches emit the SAME
+#     number of assertions, so the EXACT case floor does not move.
+R34G="$(newrepo)"
+rs "$R34G" open c --issue 1907 --agent spec-auditor
+rc_is 0 "z1/unverifiable: the stage opened"
+printf 'result: PASS\n\nreviewed.\n' >"$(REPORT_OF "$R34G" 1907 c)"
+chmod 000 "$R34G/.review-stage" 2>/dev/null || true
+if [ -x "$R34G/.review-stage" ] || ( : <"$R34G/.review-stage/issue-1907/c.stage" ) 2>/dev/null; then
+  chmod 755 "$R34G/.review-stage" 2>/dev/null || true
+  ok "z1/unverifiable: SKIPPED — this user can search a mode-000 directory (root); nothing is asserted about a state that was not reached"
+  ok "z1/unverifiable: (the same, second half — the case emits a fixed number of assertions either way)"
+  ok "z1/unverifiable: (the same, third half)"
+else
+  rs "$R34G" verdict c --issue 1907
+  has "RESULT: NOT-RUN (stage record path has an unsearchable parent directory" "z1/unverifiable: an unverifiable parent is its OWN cause — never folded onto the symlink one (which would assert a link nothing observed)"
+  hasnt "RESULT: PASS" "z1/unverifiable: and the PASS that IS in this stage's own report is not reported, because nothing could be verified"
+  rs "$R34G" status c --issue 1907
+  has "state=stage-record-parent-unverifiable" "z1/unverifiable: with its own state word and its own (chmod +x) action"
+  chmod 755 "$R34G/.review-stage" 2>/dev/null || true
+fi
+chmod 755 "$R34G/.review-stage" 2>/dev/null || true
+
+# (e) STRUCTURAL — THE ORDER IS THE PROPERTY, AND THE PROBE IS GONE. `observe_record` must not
+#     perform ANY filesystem predicate on the record path: the whole fix is that there is ONE
+#     reader of it. Asserted over a COMMENT-STRIPPED body, because the paragraph that explains the
+#     removal quotes `[ ! -f "$sfile" ]` verbatim — round 18's X1 lesson, which has now fired
+#     inside two consecutive rounds' own guards.
+Z2_OR="$(LC_ALL=C awk '/^observe_record\(\) \{/ { inf = 1 } inf { print } inf && /^\}/ { exit }' "$RS")"
+Z2_OR_CODE="$(printf '%s\n' "$Z2_OR" | LC_ALL=C grep -v '^[[:space:]]*#')"
+if printf '%s\n' "$Z2_OR_CODE" | LC_ALL=C grep -q -e '\[ *! *-f "\$sfile" \]' -e '\[ *-f "\$sfile" \]' -e '\[ *-e "\$sfile" \]' -e '\[ *-L "\$sfile" \]'; then
+  bad "z2/structural: observe_record still performs its OWN filesystem predicate on the record path — two readers of one path are two opinions about whether a stage exists, and the caller's probe is the one that dereferences first"
+else
+  ok "z2/structural: observe_record performs NO filesystem predicate on the record path — the single reader answers existence too, so nothing can dereference before the walk and the leaf test"
+fi
+# AND `absent` IS AN AFFIRMATIVE STATUS OF THAT READER, taken the fail-closed way. A `!= 0` test
+# here would fold the new status onto the read-failed branch and the never-opened state would
+# become unreachable — a guard that reds on correct input.
+if printf '%s\n' "$Z2_OR_CODE" | LC_ALL=C grep -q '\[ "\$rc" -eq 6 \]'; then
+  ok "z2/structural: the never-opened branch is keyed on the reader's AFFIRMATIVE absent status (6), not on 'the read did not succeed'"
+else
+  bad "z2/structural: the never-opened branch is not keyed on the affirmative absent status"
+fi
+# THE READER'S OWN ORDER: the walk, then the leaf `-L`, then — and only then — the `-f` that
+# measures absence. A `-f` above either check is the defect.
+Z2_SRT="$(LC_ALL=C awk '/^stage_record_text\(\) \{/ { inf = 1 } inf { print } inf && /^\}/ { exit }' "$RS" \
+  | LC_ALL=C grep -v '^[[:space:]]*#')"
+Z2_W="$(printf '%s\n' "$Z2_SRT" | LC_ALL=C grep -n 'read_path_parent_symlink "\$' | LC_ALL=C head -1 | cut -d: -f1)"
+Z2_L="$(printf '%s\n' "$Z2_SRT" | LC_ALL=C grep -n '\[ -L "\$file" \]' | LC_ALL=C head -1 | cut -d: -f1)"
+Z2_F="$(printf '%s\n' "$Z2_SRT" | LC_ALL=C grep -n '\[ ! -f "\$file" \]' | LC_ALL=C head -1 | cut -d: -f1)"
+if [ -n "$Z2_W" ] && [ -n "$Z2_L" ] && [ -n "$Z2_F" ] && [ "$Z2_W" -lt "$Z2_L" ] && [ "$Z2_L" -lt "$Z2_F" ]; then
+  ok "z2/structural: in the single reader the order is walk ($Z2_W) -> leaf -L ($Z2_L) -> the -f that measures absence ($Z2_F), so a FALSE from that -f is a MEASURED absence"
+else
+  bad "z2/structural: the reader's order is walk=$Z2_W leaf=$Z2_L absence=$Z2_F — a dereferencing predicate above either check makes 'absent' a permissive guess"
+fi
+# THE POSITIVE CONTROL. The order is restored to the pre-fix shape in a scratch copy — the caller's
+# own `-f` probe put back ahead of the reader — and the structural asserts above must red on it. A
+# bare red is not evidence, so the control requires the ORDER assert to name the offending site.
+Z2_FAKE="$T/z2-probe-first-review-stage.sh"
+LC_ALL=C awk '
+  /^observe_record\(\) \{/ { print; inf = 1; next }
+  inf && /text="\$\(stage_record_text "\$sfile"\)" \|\| rc=\$\?/ {
+    print "  if [ ! -f \"$sfile\" ]; then STAGE_REPORT=\"$(report_path \"$issue\" \"$kind\" \"\")\"; return 0; fi"
+    print; inf = 0; next
+  }
+  { print }
+' "$RS" >"$Z2_FAKE"
+if LC_ALL=C grep -q '\[ ! -f "\$sfile" \]; then STAGE_REPORT=' "$Z2_FAKE"; then
+  ok "z2/positive-control: PREMISE — a scratch copy with the caller's own \`-f\` probe restored AHEAD of the single reader"
+else
+  bad "z2/positive-control: could not build the pre-fix-order copy — the control would be vacuous"
+fi
+Z2_FAKE_OR="$(LC_ALL=C awk '/^observe_record\(\) \{/ { inf = 1 } inf { print } inf && /^\}/ { exit }' "$Z2_FAKE" \
+  | LC_ALL=C grep -v '^[[:space:]]*#')"
+if printf '%s\n' "$Z2_FAKE_OR" | LC_ALL=C grep -q '\[ *! *-f "\$sfile" \]'; then
+  ok "z2/positive-control: the structural assert REDS on that copy and names the caller-side probe — so a clean report over the shipped script is evidence"
+else
+  bad "z2/positive-control: the structural assert cannot see a restored caller-side probe, so it cannot detect the defect it exists for"
+fi
+# AND THE COPY REALLY MISBEHAVES, which is what makes the structural assert worth having: the same
+# dangling record it refuses above is reported as the PERMISSIVE never-opened state by that copy.
+# BEHAVIOURAL, not structural — the two halves answer different questions and a source-shape match
+# is not a behaviour.
+Z2_FAKE_OUT="$(cd "$R35" && bash "$Z2_FAKE" verdict c --issue 1908 2>&1 || true)"
+case "$Z2_FAKE_OUT" in
+  *"stage never opened"*) ok "z2/positive-control: and the pre-fix-order copy really does report the dangling record as 'stage never opened' — the defect reproduced, not merely described" ;;
+  *) bad "z2/positive-control: the pre-fix-order copy did not reproduce the permissive reading (got: $Z2_FAKE_OUT)" ;;
+esac
+
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
 # which is this issue's own subject inside a test file.
@@ -6386,7 +6554,26 @@ fi
 # reports CLEAN is evidence only if it can be shown to red. Every assertion needs only bash, git,
 # `ln -s` and coreutils; the premise assertions call `bad`, i.e. a RED run and never a displaced
 # count.
-ASSERT_FLOOR=1045
+#
+# ROUND 20's Z2 (HALF B) MOVES IT TO 1072. Section 35 adds 27: `observe_record` gated on its OWN
+# `[ ! -f "$sfile" ]` BEFORE the single reader, i.e. before that reader's `[ -L ]` test and before
+# its component walk — and `-f` DEREFERENCES, so a DANGLING link at the record's name (or at any
+# DIRECTORY above it) was reported as `stage never opened`, the PERMISSIVE state and the one the
+# clobber guard reads as "there is no recorded verdict to destroy". Round 19 identified exactly
+# this trap and pinned it for the REPORT; the RECORD's caller-side probe kept asking the same
+# question in the wrong order, which is the missing matrix cell this round exists to close (12 of
+# these assertions RED with the caller-side probe restored, 0 after). The fix is a SUBTRACTION —
+# the probe is gone and `absent` is the reader's own affirmative status, reachable only after the
+# walk and the leaf test — so the structural half asserts that `observe_record` performs NO
+# filesystem predicate on the record path at all, and the reader's order is pinned as
+# walk -> leaf `-L` -> the `-f` that measures absence. Every DANGLING cell of
+# {leaf, parent} x {live, dangling} lives here (the LIVE cells are in sections 32 and 34), plus
+# the UNSEARCHABLE-parent cell, which is host-gated and whose skip branch emits the SAME count.
+# The positive control substitutes the artifact (a scratch copy with the probe restored) and
+# requires BOTH a structural red AND a reproduced permissive READING — a source-shape match is not
+# a behaviour. That control earned its place immediately: it is what caught an off-by-one in half
+# A's own walk, whose searchability check trailed by one iteration the `-L` it is meant to guard.
+ASSERT_FLOOR=1072
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

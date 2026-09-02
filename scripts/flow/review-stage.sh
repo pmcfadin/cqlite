@@ -149,6 +149,15 @@
 # PARENT COMPONENT below the repository root, without following links, BEFORE any predicate that
 # dereferences one (`read_path_parent_symlink`), with one cause per LEVEL.
 #
+# AND THE ORDER MATTERS AT EVERY READ SITE, NOT ONLY INSIDE THE READERS (#3751 round 20, Z2).
+# `observe_record` gated on its OWN `[ ! -f "$sfile" ]` ahead of the single reader, and `-f`
+# DEREFERENCES — so a DANGLING link at the record's name, or at any directory above it, answered
+# FALSE and was reported as `stage never opened`: the PERMISSIVE state, and the one
+# `record-author-performed`'s clobber guard reads as "there is no recorded verdict to destroy".
+# The probe is REMOVED rather than reordered: `stage_record_text` is now the ONE place the record's
+# path meets the filesystem, and `absent` is its own affirmative status, reachable only AFTER the
+# walk and the leaf test. Two readers of one path are two opinions about whether a stage exists.
+#
 # THE RESIDUAL, AND ITS BOUNDARY CORRECTED. What #3929 owns is the TOCTOU WINDOW between a check
 # and the open that follows it (bash has no `openat` / `O_NOFOLLOW`) — and NOTHING WIDER. Round 19
 # declared the PARENT-COMPONENT case as #3929's residual as well; that is WITHDRAWN, because a link
@@ -1773,7 +1782,7 @@ count_field_lines_from() {
 # `absent` state that `record-author-performed`'s clobber guard reads as "no recorded verdict to
 # destroy".
 read_path_parent_symlink() {
-  local path="$1" dir root rel comp cur parent oldifs
+  local path="$1" dir root rel comp cur oldifs
   # THE PARENT DIRECTORY, LEXICALLY. Every path this tool reads is built by `stage_dir` /
   # `stage_file` / `report_path` from (repo root, issue, kind, nonce) and is absolute with no
   # trailing slash and no `//`, so stripping the last component is exact — and `${path%/*}` is a
@@ -1788,7 +1797,6 @@ read_path_parent_symlink() {
     *) return 0 ;;
   esac
   cur="$root"
-  parent="$root"
   oldifs="$IFS"
   # NOGLOB while splitting: `set -- $rel` is an UNQUOTED expansion, so a component containing a
   # glob character would be pathname-expanded and the walk would inspect other files entirely.
@@ -1800,11 +1808,21 @@ read_path_parent_symlink() {
   set +f
   for comp in "$@"; do
     [ -n "$comp" ] || continue
-    if [ -e "$parent" ] && [ ! -x "$parent" ]; then
-      printf '%s' "$parent"
+    # THE SEARCHABILITY CHECK GUARDS THE VERY NEXT `-L`, WHICH IS WHY IT IS ON `$cur` AND NOT ON A
+    # LAGGING `parent` (#3751 round 20, Z1). We are about to ask `-L` about `$cur/$comp`, and that
+    # question needs `$cur` searchable: without the mode bit, `-L` and `-e` on the child answer
+    # FALSE for a component that may well be a link — a two-valued predicate collapsing the unknown
+    # onto the permissive answer. MEASURED WHILE WRITING THIS: a first version carried the write
+    # path's `parent` variable, whose check trails by one iteration the `-L` it should precede, so
+    # a mode-000 `.review-stage/` was never examined at all and the read reported the PERMISSIVE
+    # `stage never opened`. (In `assert_no_symlink` that lag is NOT a false pass — every component
+    # is examined before it returns, only in a different order, and the write it guards is
+    # separately `O_EXCL` — so that function is deliberately left exactly as it is. Here the answer
+    # IS the verdict, so the order is load-bearing.)
+    if [ -e "$cur" ] && [ ! -x "$cur" ]; then
+      printf '%s' "$cur"
       return 2
     fi
-    parent="$cur"
     cur="$cur/$comp"
     # THE NON-RACING CASE, CLOSED HERE COMPLETELY: a link planted at any earlier moment and simply
     # followed. What remains is the WINDOW between this walk and the open that follows it, and that
@@ -1833,9 +1851,29 @@ read_path_parent_symlink() {
 #   5  NOT READ AT ALL         — a PARENT COMPONENT could not be VERIFIED (its own parent is not
 #                                searchable), so whether it is a link is UNKNOWN and unknown may
 #                                not take the permissive branch; the component is printed
+#   6  VERIFIED ABSENT         — no regular file stands at this path, AND that answer was reached
+#                                only after every component above it was verified and the leaf was
+#                                verified not to be a link, so it is a MEASURED absence and not a
+#                                dereference (#3751 round 20, Z2)
 #
 # Callers spell the permissive set AFFIRMATIVELY as `0`, so a status added here later refuses by
 # construction rather than inheriting a `!= 1` test.
+#
+# STATUS 6 IS THE *ONLY* PERMISSIVE ANSWER THIS FUNCTION GIVES, AND IT EXISTS SO THAT NO CALLER
+# ASKS THE QUESTION ITSELF (#3751 round 20, Z2). `observe_record` used to gate on its own
+# `[ ! -f "$sfile" ]` BEFORE calling this function, and `-f` DEREFERENCES: a DANGLING symlink at
+# the record's name answers FALSE, so the caller reported `stage never opened` — the PERMISSIVE
+# state, the one `record-author-performed`'s clobber guard reads as "there is no recorded verdict
+# to destroy" — for what is in fact a tampered path. Measured on the round-19 script: a dangling
+# link at `c.stage` yielded `RESULT: NOT-RUN (stage never opened)` and `state=never-opened`, and a
+# DANGLING PARENT component did the same, bypassing the walk above entirely. The fix is a
+# SUBTRACTION: the caller's probe is gone, this function is the ONE place the record's path meets
+# the filesystem, and `absent` is reachable only AFTER the component walk and the leaf `-L` test.
+#
+# THE `-f` PREDICATE IS KEPT for the absence test itself, deliberately: at that point the leaf is
+# verified not to be a link, so `-f` answers about the file at this path and nothing else — and a
+# DIRECTORY (or any non-regular file) standing there is still `stage never opened`, which is the
+# behaviour it has always had and is the honest answer (there is verifiably no record here).
 #
 # WHY THE WHOLE TEXT AND NOT THE PARSED FIELDS. `record-author-performed` has to publish a record
 # naming a NEW report generation, and everything else about the stage must come out unchanged —
@@ -1883,6 +1921,11 @@ stage_record_text() {
   # close (no `openat`, no `O_NOFOLLOW`). It does NOT own the PARENT-COMPONENT case, which round 19
   # declared as its residual: that needs no race at all and is closed above.
   if [ -L "$file" ]; then return 3; fi
+  # AND ONLY NOW MAY ABSENCE BE MEASURED (#3751 round 20, Z2). Every component above is verified
+  # and the leaf is verified not to be a link, so this `-f` cannot be answering about another
+  # tree's file or about a link's missing target: a FALSE here is a MEASURED absence, which is the
+  # one permissive answer this function is allowed to give.
+  if [ ! -f "$file" ]; then return 6; fi
   text="$( { capture_map_nul "$file" && printf 'E'; } 2>/dev/null )" || rrc=$?
   [ "$rrc" -eq 0 ] || return 1
   case "$text" in
@@ -2854,9 +2897,27 @@ observe_record() {
   STAGE_NONCE=""; STAGE_RECORD_DEFECT=""; STAGE_RECORD_DEFECT_KIND=""
   STAGE_RECORD_TEXT=""; STAGE_NONCE_LINES=0; STAGE_NONCE_RAW=""
   STAGE_REPORT_OBS=""; STAGE_REPORT_STATE=""
-  if [ ! -f "$sfile" ]; then
-    # NEVER OPENED: there is no record to name a report, so the path reported is the LEGACY bare
-    # one. It is a path nobody has written, which is what `stage never opened` says.
+  # THE EXISTENCE QUESTION IS ASKED BY THE ONE READER, NOT HERE (#3751 round 20, Z2).
+  #
+  # THE FINDING (roborev job 411, half B). This used to be `if [ ! -f "$sfile" ]`, taken BEFORE
+  # `stage_record_text` and therefore before that function's `[ -L ]` test and before its component
+  # walk. `-f` DEREFERENCES, and for a DANGLING link it answers FALSE — so a dangling symlink at the
+  # record's name, and a dangling symlink at any DIRECTORY above it, were both reported as
+  # `stage never opened`: the PERMISSIVE state, and the one `record-author-performed`'s clobber
+  # guard reads as "there is no recorded verdict to destroy". Round 19 pinned exactly this trap for
+  # the REPORT (`-L` before `-f` in `report_bytes`) and left the RECORD's caller-side probe asking
+  # the same question in the wrong order, which is why it survived.
+  #
+  # THE FIX IS A SUBTRACTION, not a second test: the probe is REMOVED and `stage_record_text` — the
+  # single reader of this path — answers `absent` as its own status 6, reachable only after the walk
+  # and the leaf test. Two readers of one path are two opinions about whether a stage exists, and
+  # this file's whole doctrine is that there be one.
+  text="$(stage_record_text "$sfile")" || rc=$?
+  if [ "$rc" -eq 6 ]; then
+    # NEVER OPENED — a MEASURED absence: no regular file stands at this path, every component above
+    # it was verified, and the leaf was verified not to be a link. There is no record to name a
+    # report, so the path reported is the LEGACY bare one. It is a path nobody has written, which
+    # is what `stage never opened` says.
     STAGE_REPORT="$(report_path "$issue" "$kind" "")"
     return 0
   fi
@@ -2868,8 +2929,9 @@ observe_record() {
   #
   # THE PERMISSIVE SET IS `0` AND NOTHING ELSE (#3751 round 14, T1). Status 2 is its own defect with
   # its own next action; every other non-zero status takes the read-failed branch, so a status added
-  # to that helper later cannot arrive here as "read fine, no such field".
-  text="$(stage_record_text "$sfile")" || rc=$?
+  # to that helper later cannot arrive here as "read fine, no such field". The read itself is
+  # ABOVE, because its status also decides the never-opened branch: ONE call, so the existence
+  # answer and the content answer describe one observation of one path (#3751 round 20, Z2).
   case "$rc" in
     0) STAGE_RECORD_TEXT="$text" ;;
     2) STAGE_RECORD_DEFECT_KIND=unrepresentable
