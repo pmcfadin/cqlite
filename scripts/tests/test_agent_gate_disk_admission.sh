@@ -2516,7 +2516,7 @@ fi
 # classifier, extracted verbatim from the gate.
 # ===========================================================================
 aa_cls="$tmp/aa-classifier.py"
-sed -n '/^import errno, os, sys$/,/^    sys.stdout.write("OK")$/p' "$GATE" > "$aa_cls"
+sed -n '/^import errno, os, sys$/,/^# END-WRITE-PROBE$/p' "$GATE" > "$aa_cls"
 if [ -s "$aa_cls" ] && grep -q 'CANNOT-WRITE' "$aa_cls"; then
   ok "errno-source: extracted the SHIPPED write-probe classifier from the gate"
 else
@@ -2567,7 +2567,7 @@ aa_got2=$(PYTHONPATH="$tmp/aa-pre2" python3 "$aa_cls" "$tmp/aa-target2" 2>/dev/n
 case "$aa_got2" in
   'CANNOT-WRITE ESTALE')
     ok "errno-source: a forced ESTALE from the OPEN half is binding too (both halves of the probe, not just creation)" ;;
-  'CANNOT-WRITE-LEFTOVER ESTALE'*)
+  'CANNOT-WRITE ESTALE LEFTOVER '*)
     bad "errno-source: a stray was DECLARED although open() failed, so no file was ever created — a false statement about an artifact that does not exist: $aa_got2" ;;
   *) bad "errno-source: the open/write half gave '$aa_got2', expected CANNOT-WRITE ESTALE" ;;
 esac
@@ -2692,7 +2692,7 @@ fi
 # was consolidated and not carved again.
 # ===========================================================================
 ac_cls="$tmp/ac-classifier.py"
-sed -n '/^import errno, os, sys$/,/^    sys.stdout.write("OK")$/p' "$GATE" > "$ac_cls"
+sed -n '/^import errno, os, sys$/,/^# END-WRITE-PROBE$/p' "$GATE" > "$ac_cls"
 if python3 -c "compile(open('$ac_cls').read(),'c','exec')" 2>/dev/null; then
   ok "one-boundary: extracted the SHIPPED classifier and it compiles"
 else
@@ -2727,20 +2727,39 @@ if [ "$ac_failcalls" -eq 1 ]; then
 else
   bad "one-boundary: $ac_failcalls call sites invoke fail() — fatality is being decided in more than one place again"
 fi
-ac_unclass=$(ad_count 'sys.stdout.write("UNCLASSIFIED'); case "$ac_unclass" in ''|*[!0-9]*) ac_unclass=0 ;; esac
+ac_unclass=$(ad_count 'verdict("UNCLASSIFIED'); case "$ac_unclass" in ''|*[!0-9]*) ac_unclass=0 ;; esac
 if [ "$ac_unclass" -eq 1 ]; then
   ok "one-boundary: exactly ONE internal-fault arm (the non-OSError case), so a cleanup problem can never report as one"
 else
   bad "one-boundary: $ac_unclass UNCLASSIFIED emissions, expected 1"
 fi
-# The CLOSED SET of things the probe can say. Six, named, so a seventh cannot appear
-# unannounced and no cleanup handler can start emitting a verdict of its own.
+# THE EMIT BOUNDARY IS NOW TWO FUNCTIONS, WHICH IS A STRONGER INVARIANT THAN THE OLD COUNT
+# (roborev job 416). Job 395 pinned "exactly 6 `sys.stdout.write(` sites" as a closed payload
+# set; the verdict-first restructure routes EVERY emission through `verdict()` (the one verdict
+# boundary) or `leftover()` (the one suffix boundary), so the property is now expressible
+# directly: exactly TWO raw write sites exist, and they are those two functions. A cleanup arm
+# that starts emitting a verdict of its own would raise the count.
 ac_says=$(grep -cE 'sys\.stdout\.write\(' "$ac_cls" 2>/dev/null); ac_says="${ac_says%%$'\n'*}"
 case "$ac_says" in ''|*[!0-9]*) ac_says=0 ;; esac
-if [ "$ac_says" -eq 6 ]; then
-  ok "one-boundary: the probe emits a CLOSED SET of 6 payloads (CANNOT-WRITE, CANNOT-WRITE-LEFTOVER, ENOTDIR, UNCLASSIFIED, OK-LEFTOVER, OK)"
+if [ "$ac_says" -eq 2 ]; then
+  ok "one-boundary: exactly TWO raw stdout writes remain — the ONE verdict boundary and the ONE leftover-suffix boundary"
 else
-  bad "one-boundary: $ac_says emission sites, expected 6 — the payload set changed and the shell parser may not know about it"
+  bad "one-boundary: $ac_says raw stdout write sites, expected 2 (verdict() and leftover()) — an emission has escaped the two boundaries"
+fi
+# ...and the verdict TOKENS are a closed set of four, all emitted through verdict().
+ac_verdicts=$(grep -cE '^ *verdict\("' "$ac_cls" 2>/dev/null); ac_verdicts="${ac_verdicts%%$'\n'*}"
+case "$ac_verdicts" in ''|*[!0-9]*) ac_verdicts=0 ;; esac
+if [ "$ac_verdicts" -eq 4 ]; then
+  ok "one-boundary: the probe emits a CLOSED SET of 4 verdicts (CANNOT-WRITE <code>, CANNOT-WRITE ENOTDIR, UNCLASSIFIED unknown, OK)"
+else
+  bad "one-boundary: $ac_verdicts verdict() call sites, expected 4 — the verdict set changed and the shell parser may not know about it"
+fi
+# THE INVARIANT THIS ROUND EXISTS FOR, ASSERTED ON THE SOURCE: every verdict is FLUSHED, and
+# the flush lives inside the one boundary rather than at any call site.
+if grep -qE '^ *sys\.stdout\.flush\(\)$' "$ac_cls"; then
+  ok "one-boundary: the emit boundary FLUSHES — without it a verdict never reaches a caller that kills the probe mid-cleanup"
+else
+  bad "one-boundary: no explicit flush in the probe — a hung cleanup would discard the verdict again"
 fi
 
 # (a) A FORCED close() FAILURE IS BINDING, with the pre-fix behaviour shown emitting OK.
@@ -2802,7 +2821,7 @@ os.unlink = boom
 ACSU
 ac_ul=$(PYTHONPATH="$tmp/ac-unlink" python3 "$ac_cls" "$tmp/ac-ul-target" 2>/dev/null)
 case "$ac_ul" in
-  'OK-LEFTOVER '*'.agent-gate-writeprobe')
+  'OK LEFTOVER '*'.agent-gate-writeprobe')
     ok "one-boundary: a failed unlink AFTER a successful write still answers OK and reports the artifact path" ;;
   'CANNOT-WRITE'*)
     bad "one-boundary: a failed unlink REFUSED the run — the filesystem was proven writable, so this reds correct input: $ac_ul" ;;
@@ -2845,7 +2864,7 @@ fi
 #   3  leftovers ACCUMULATE across both evaluations, so a two-probe run declares BOTH
 # ===========================================================================
 ad_cls="$tmp/ad-classifier.py"
-sed -n '/^import errno, os, sys$/,/^    sys.stdout.write("OK")$/p' "$GATE" > "$ad_cls"
+sed -n '/^import errno, os, sys$/,/^# END-WRITE-PROBE$/p' "$GATE" > "$ad_cls"
 if python3 -c "compile(open('$ad_cls').read(),'c','exec')" 2>/dev/null; then
   ok "emit-path: extracted the SHIPPED classifier and it compiles"
 else
@@ -2917,8 +2936,8 @@ os.unlink = bu
 ADSB
 ad_v2=$(PYTHONPATH="$tmp/ad-both" python3 "$ad_cls" "$tmp/ad-t2" 2>/dev/null)
 case "$ad_v2" in
-  'CANNOT-WRITE-LEFTOVER EIO '*'.agent-gate-writeprobe')
-    ok "refusal-cleanup: cleanup failing too keeps the REFUSAL and names the stray (symmetrical with OK-LEFTOVER)" ;;
+  'CANNOT-WRITE EIO LEFTOVER '*'.agent-gate-writeprobe')
+    ok "refusal-cleanup: cleanup failing too keeps the REFUSAL and names the stray, as a SUFFIX to a complete verdict (symmetrical with OK LEFTOVER)" ;;
   'OK'*) bad "refusal-cleanup: a cleanup problem SOFTENED the refusal to '$ad_v2' — the exact route this must not open" ;;
   *) bad "refusal-cleanup: unexpected payload '$ad_v2'" ;;
 esac
@@ -3026,6 +3045,215 @@ if [ "$ad2_status" -eq 0 ]; then
   ok "leftover-accumulates: still non-fatal — a declaration, not a verdict"
 else
   bad "leftover-accumulates: leftovers refused the run (exit $ad2_status)"
+fi
+
+# ===========================================================================
+# Case AE (roborev job 416, F1): ONCE THE VERDICT IS DECIDED, NOTHING THAT RUNS
+# LATER MAY WEAKEN IT — not an exception, not a hang, not a bound expiring.
+#
+# THE DEFECT, and it was INTRODUCED BY ROUND 19's OWN FIX. Job 398 moved cleanup
+# AHEAD of the exit so a refusal would not litter, and left the stdout write AFTER
+# the unlink. python3's stdout is BLOCK-BUFFERED onto a file (which is what
+# `_component_set_bounded` captures into), so nothing reaches the capture until the
+# process exits. If that unlink HANGS — a dead NFS mount, a stale handle — the outer
+# bound fires, the probe produces NO OUTPUT AT ALL, and the shell reads rc=124 as
+# "cannot tell" -> non-fatal UNMEASURED -> THE GATE PROCEEDS ON A FILESYSTEM THAT
+# DEFINITIVELY COULD NOT BE WRITTEN. A false admission, which is the exact class this
+# whole change exists to remove.
+#
+# THE FIX HAS TWO HALVES AND BOTH ARE ASSERTED HERE:
+#   (1) python: the verdict is written AND FLUSHED before any cleanup runs, so the
+#       grammar is `<verdict>[ LEFTOVER <path>]` — a COMPLETE PREFIX plus an optional
+#       SUFFIX, never two mutually exclusive leading tokens.
+#   (2) shell: a timed-out bounded call whose captured stdout ALREADY carries a
+#       definitive REFUSAL is honoured as that refusal — and a PERMISSIVE `OK`
+#       recovered the same way is STILL DISCARDED to UNMEASURED.
+#
+# MEASURED PREMISE for (2), because it is not obvious and the design rests on it:
+# `_component_set_bounded` captures the child's stdout into a REGULAR FILE and replays
+# it after the child completes, so partial stdout DOES survive a kill —
+#   flushed-then-hang, timeout arm: rc=124 out=[CANNOT-WRITE EIO]  (16 bytes)
+#   flushed-then-hang, bash arm:    rc=124 out=[CANNOT-WRITE EIO]  (16 bytes)
+#   UNflushed-then-hang:            rc=124 out=[]                  (0 bytes)
+# The third reading is why half (1) is a PREREQUISITE for half (2) rather than a tidy-up
+# beside it: without the explicit flush there is nothing to honour.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# da_py_shim <dir> <prelude-file>: install a PATH `python3` that runs the gate's
+# WRITE PROBE under a hostile prelude and passes every other python3 call through.
+#
+# WHY NOT `PYTHONPATH` + `sitecustomize.py`, which cases AA/AC/AD used: the shipped
+# probes now run `python3 -I -S`, so that technique reaches nothing — and that is the
+# POINT of the isolation fix, not an obstacle to testing it. This replacement
+# CONSTRUCTS the hostile interpreter itself, so the full ability to force any errno is
+# retained while the shipped argv stays free to be isolated (which Case AF then
+# asserts as a differential). Strictly better coverage, not a workaround.
+#
+# The probe is recognised by its own artifact marker, NEVER by an argument count: the
+# shipped argv gained two flags this round, and a count-keyed shim goes silently inert
+# — reporting a green that measured nothing.
+# ---------------------------------------------------------------------------
+DA_REAL_PY=$(command -v python3 2>/dev/null || printf '/nonexistent/python3')
+da_py_shim() {
+  local dir="$1" prelude="$2"
+  mkdir -p "$dir"
+  cat > "$dir/python3" <<SHIM
+#!/usr/bin/env bash
+REAL='$DA_REAL_PY'
+PRELUDE='$prelude'
+orig=("\$@")
+body=""; seen=0
+declare -a rest=()
+while [ "\$#" -gt 0 ]; do
+  if [ "\$1" = -c ]; then
+    shift; body="\${1-}"; shift; rest=("\$@"); seen=1; break
+  fi
+  shift
+done
+if [ "\$seen" -eq 1 ]; then
+  case "\$body" in
+    *agent-gate-writeprobe*)
+      exec "\$REAL" -I -S -c "\$(cat "\$PRELUDE")
+\$body" \${rest[@]+"\${rest[@]}"} ;;
+  esac
+fi
+exec "\$REAL" \${orig[@]+"\${orig[@]}"}
+SHIM
+  chmod +x "$dir/python3"
+}
+
+# The shipped write-probe body, extracted between its two anchors.
+ae_cls="$tmp/ae-classifier.py"
+sed -n '/^import errno, os, sys$/,/^# END-WRITE-PROBE$/p' "$GATE" > "$ae_cls"
+if [ -s "$ae_cls" ] && grep -q 'agent-gate-writeprobe' "$ae_cls"; then
+  ok "verdict-first: extracted the SHIPPED write probe between its declared anchors"
+else
+  bad "verdict-first: could not extract the write probe (anchors changed?) — every case below would test nothing"
+fi
+
+# The hostile prelude: close() reports a deferred write error (the definitive refusal),
+# and unlink() HANGS FOREVER (the cleanup that must not be able to discard it).
+cat > "$tmp/ae-prelude-refuse.py" <<'AEPR'
+import os, errno, time
+_c = os.close
+def bc(fd):
+    _c(fd)
+    raise OSError(errno.EIO, "simulated deferred write error at close")
+def bu(*a, **k):
+    time.sleep(600)
+os.close = bc
+os.unlink = bu
+AEPR
+# ...and the permissive counterpart: nothing fails, only the cleanup hangs.
+cat > "$tmp/ae-prelude-ok.py" <<'AEPO'
+import os, time
+def bu(*a, **k):
+    time.sleep(600)
+os.unlink = bu
+AEPO
+
+# (a) HALF ONE, DIRECTLY: with the cleanup hung, does the DEFINITIVE VERDICT reach the
+#     caller at all? Run under a real external bound, exactly as the gate does.
+# Run DIRECTLY, capturing into a file rather than through `$( )`: a substitution runs in
+# a SUBSHELL, so an rc recorded into a variable there is discarded — the same trap this
+# file records for `watch_until_exit`, and it cost a round here too.
+timeout --kill-after=1 5 "$DA_REAL_PY" -I -S -c "$(cat "$tmp/ae-prelude-refuse.py")
+$(cat "$ae_cls")" "$tmp/ae-t-refuse" >"$tmp/ae-refuse.payload" 2>/dev/null
+ae_rc=$?
+ae_got=$(cat "$tmp/ae-refuse.payload" 2>/dev/null)
+if [ "$ae_rc" -eq 124 ] || [ "$ae_rc" -eq 137 ]; then
+  ok "verdict-first: the hung cleanup really does hit the bound (rc=$ae_rc), so this case exercises the defect's condition"
+else
+  bad "verdict-first: the planted hang did not reach the bound (rc=$ae_rc) — the case models nothing"
+fi
+case "$ae_got" in
+  'CANNOT-WRITE EIO'*)
+    ok "verdict-first: the definitive refusal SURVIVES a hung cleanup ('$ae_got') — the verdict is written and flushed before cleanup runs" ;;
+  '')
+    bad "verdict-first: rc=$ae_rc with NO OUTPUT AT ALL — the definitive CANNOT-WRITE was discarded by the hung cleanup, so the shell reads 'cannot tell' and ADMITS" ;;
+  *) bad "verdict-first: unexpected survivor '$ae_got'" ;;
+esac
+# THE POSITIVE CONTROL: the PRE-FIX ORDERING, reproduced verbatim — cleanup first, write
+# afterwards — on the SAME planted hang. It must produce NOTHING, or the case above
+# proves less than it claims.
+cat > "$tmp/ae-prefix-body.py" <<'AEPB'
+import errno, os, sys
+p = sys.argv[1]
+os.makedirs(p, exist_ok=True)
+w = os.path.join(p, "." + os.urandom(12).hex() + ".agent-gate-writeprobe")
+fd = os.open(w, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+try:
+    os.write(fd, b"\0")
+    os.fsync(fd)
+    os.close(fd)
+except OSError as e:
+    code = errno.errorcode.get(e.errno, "unknown")
+    try:
+        os.unlink(w)          # round 19's ordering: cleanup BEFORE the write
+    except Exception:
+        pass
+    sys.stdout.write("CANNOT-WRITE " + code)
+    sys.exit(0)
+AEPB
+ae_pre=$(timeout --kill-after=1 5 "$DA_REAL_PY" -I -S -c "$(cat "$tmp/ae-prelude-refuse.py")
+$(cat "$tmp/ae-prefix-body.py")" "$tmp/ae-t-prefix" 2>/dev/null); ae_prerc=$?
+if [ -z "$ae_pre" ] && { [ "$ae_prerc" -eq 124 ] || [ "$ae_prerc" -eq 137 ]; }; then
+  ok "verdict-first CONTROL: the PRE-FIX ordering yields rc=$ae_prerc and an EMPTY payload on the same hang — the defect was reachable"
+else
+  bad "verdict-first CONTROL: the pre-fix ordering gave rc=$ae_prerc payload '$ae_pre'; this case does not demonstrate the defect"
+fi
+
+# (b) HALF TWO, END TO END: the recovered refusal is HONOURED. A REAL gate run whose
+#     write probe times out with `CANNOT-WRITE` already in its capture must REFUSE.
+da_py_shim "$tmp/ae-bin-refuse" "$tmp/ae-prelude-refuse.py"
+RS_PATH_PREFIX="$tmp/ae-bin-refuse"
+run_stub_gate ae-refuse "$(df_script ae-refuse "$HIGH")" \
+  CARGO_TARGET_DIR="$tmp/ae-e2e-refuse" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/ae-refuse-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+RS_PATH_PREFIX=""
+ae_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 300; ae_status=$WX_STATUS; ae_markers=$WX_MARKERS
+assert_no_timeout "ae refusal recovered from a timed-out probe"
+ae_line=$(grep_line "$ae_err" '^agent-gate: disk-admission: ')
+if [ "$ae_status" -ne 0 ] && [ "$ae_markers" -eq 0 ]; then
+  ok "verdict-first: a refusal recovered from a TIMED-OUT probe REFUSES the run (exit $ae_status) and no work ever began"
+else
+  bad "verdict-first: the run PROCEEDED (exit $ae_status, markers $ae_markers) although its own write probe had definitively refused — a false admission"
+fi
+case "$ae_line" in
+  *'UNWRITABLE-FAIL-CLOSED (#3755)'*)
+    ok "verdict-first: ...under the UNWRITABLE verdict token, not a generic timeout" ;;
+  *'UNMEASURED (target-dir-mkdir-timeout)'*)
+    bad "verdict-first: the recovered CANNOT-WRITE was downgraded to UNMEASURED: $ae_line" ;;
+  *) bad "verdict-first: unexpected rendering: ${ae_line:-<none>}" ;;
+esac
+
+# (c) THE ASYMMETRY, WHICH IS THE POINT: an `OK` recovered from a timed-out probe is
+#     STILL DISCARDED. A refusal recovered from a partial write is fail-closed and safe;
+#     an ADMISSION recovered the same way would be deriving a pass from a process we
+#     killed. So this run must proceed as UNMEASURED — never as PASS.
+da_py_shim "$tmp/ae-bin-ok" "$tmp/ae-prelude-ok.py"
+RS_PATH_PREFIX="$tmp/ae-bin-ok"
+run_stub_gate ae-ok "$(df_script ae-ok "$HIGH")" \
+  CARGO_TARGET_DIR="$tmp/ae-e2e-ok" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/ae-ok-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+RS_PATH_PREFIX=""
+ae2_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 300; ae2_status=$WX_STATUS; ae2_markers=$WX_MARKERS
+assert_no_timeout "ae permissive token recovered from a timed-out probe"
+ae2_line=$(grep_line "$ae2_err" '^agent-gate: disk-admission: ')
+case "$ae2_line" in
+  *'disk-admission: PASS'*)
+    bad "verdict-first: an OK recovered from a KILLED probe was honoured as an admission — a pass derived from a process we terminated: $ae2_line" ;;
+  *'UNMEASURED (target-dir-mkdir-timeout)'*)
+    ok "verdict-first: a PERMISSIVE token recovered from a timed-out probe is DISCARDED to UNMEASURED (the bound may only keep or strengthen a refusal, never soften one)" ;;
+  *) bad "verdict-first: unexpected rendering for the permissive-recovery case: ${ae2_line:-<none>}" ;;
+esac
+if [ "$ae2_status" -eq 0 ] && [ "$ae2_markers" -ge 1 ]; then
+  ok "verdict-first: ...and UNMEASURED stays NON-FATAL, so the discard does not red a run whose filesystem was never shown to be bad"
+else
+  bad "verdict-first: the discard turned into a refusal (exit $ae2_status, markers $ae2_markers) — UNMEASURED must stay non-fatal"
 fi
 
 printf '\n%s\n' "-----------------------------------------------"

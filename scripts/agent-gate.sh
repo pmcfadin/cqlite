@@ -19683,7 +19683,7 @@ sys.stdout.write(p)
 # (bounded `mkdir -p`) rather than approximated by an ancestor. See the body: that removed
 # a two-valued predicate that could admit on the wrong filesystem.
 _gate_disk_admission_subject() {
-  local r td e out _cwl
+  local r td e out _cwv _cwl
   r=$(_gate_resolve_target_dir)
   case "$r" in
     'OK '*) td="${r#OK }" ;;
@@ -19762,38 +19762,73 @@ p = sys.argv[1]
 # probe could print OK after a write that never landed -- a false admission.
 #
 # The errno is reported for the operator; it no longer decides anything.
+#
+# ---- THE ONE INVARIANT OF THIS EMIT PATH (roborev job 416) --------------------------------
+#
+# ONCE THE VERDICT IS DECIDED, NOTHING THAT RUNS LATER MAY WEAKEN IT -- not an exception, not
+# a hang, not the outer bound expiring. That is stronger than the job 398 rule "cleanup may only
+# APPEND", and it had to be, because the job 398 fix VIOLATED it: it computed the verdict
+# first (correct) and WROTE it after `os.unlink`, and python3 stdout is BLOCK-BUFFERED onto
+# the regular file `_component_set_bounded` captures into -- so nothing reaches the caller
+# until the process EXITS. A hung unlink (dead NFS mount, stale handle) therefore made the
+# outer bound fire with NO OUTPUT AT ALL, the shell read rc=124 as "cannot tell", and the
+# gate PROCEEDED on a filesystem that had DEFINITIVELY refused its own write probe. MEASURED,
+# on this body, with unlink() patched to sleep: rc=124, 0 bytes of payload.
+#
+# SO THE VERDICT IS WRITTEN **AND FLUSHED** BEFORE ANY CLEANUP RUNS. Two consequences that
+# shape everything below:
+#
+#   * THE GRAMMAR IS `<verdict-token>[ LEFTOVER <path>]` -- a COMPLETE PREFIX plus an
+#     OPTIONAL SUFFIX. The old grammar had two mutually exclusive LEADING tokens
+#     (`CANNOT-WRITE <code>` vs `CANNOT-WRITE-LEFTOVER <code> <path>`), which cannot be
+#     emitted verdict-first at all: whether to write the first byte depended on how the
+#     cleanup would turn out. A verdict that is a prefix is what makes a partial payload
+#     READABLE, so this is a correctness property of the grammar, not a formatting choice.
+#   * EVERY EMISSION GOES THROUGH ONE OF EXACTLY TWO FUNCTIONS. `verdict()` is the single
+#     verdict boundary and `leftover()` the single suffix boundary, so a future cleanup arm
+#     cannot start emitting a verdict of its own -- the structural point job 395/398 kept
+#     having to re-establish by counting write sites.
+#
+# The flush is EXPLICIT and not left to interpreter exit, which is precisely the thing a hang
+# prevents from happening.
+def verdict(tok):
+    sys.stdout.write(tok)
+    sys.stdout.flush()
+
+def leftover(path):
+    sys.stdout.write(" LEFTOVER " + path)
+    sys.stdout.flush()
+
 def fail(e, w):
-    # CLEAN UP, THEN REFUSE -- AND THE CLEANUP MAY NEVER SOFTEN THE VERDICT (roborev job 398).
-    #
-    # THE DEFECT. This exited immediately, so a failure of write/fsync/close AFTER the probe
-    # file was created left that file behind and never mentioned it. The verdict was right
-    # and the refusal littered -- and a disk-admission guard must not add to the exhaustion
-    # it measures, least of all on the path where an inode is least affordable.
-    #
-    # THE ORDERING IS THE WHOLE POINT: the verdict is decided from the ORIGINAL error, before
-    # any cleanup runs, and cleanup can only ever APPEND a declaration. There is no branch by
-    # which a close() or unlink() problem turns CANNOT-WRITE into anything else.
+    # REFUSE, **THEN** CLEAN UP. The reverse order is the defect above. `created` and `fd` are
+    # read as globals rather than taken as parameters so this stays the one-call-site
+    # `fail(e, w)` the suite asserts structurally.
     code = "unknown"
     if isinstance(e, OSError) and e.errno is not None:
         code = errno.errorcode.get(e.errno, "E%s" % (e.errno,))
+    verdict("CANNOT-WRITE " + code)
+    # NOTHING ABOVE THIS LINE MAY TOUCH THE FILESYSTEM, AND NOTHING BELOW IT MAY DECIDE A
+    # VERDICT. close() is attempted here (it moved INSIDE fail() this round, from the handler
+    # above): a descriptor left open keeps the inode alive and makes the unlink pointless on
+    # some filesystems -- but on the OLD ordering a close() that HUNG discarded the verdict
+    # exactly as a hung unlink did, so it belongs after the emission, not before it. Its own
+    # failure is swallowed: the verdict is already decided and process exit releases the fd.
+    if fd is not None:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
     # ONLY A FILE THAT WAS ACTUALLY CREATED CAN BE A STRAY. `w` is the intended PATH; it is
     # set before os.open, so when open() ITSELF fails nothing exists there and the unlink
     # legitimately fails with ENOENT. Keying the declaration on `w` therefore named an
-    # artifact that never existed -- a false statement in a certification artifact, the same
-    # class as the target-dir one this round also fixes, and a defect introduced by the first
-    # draft of this very cleanup. Keyed on `created` instead: set only after os.open returns.
-    stray = ""
+    # artifact that never existed -- a false statement in a certification artifact, and a
+    # defect introduced by the first draft of this cleanup. Keyed on `created` instead: set
+    # only after os.open returns.
     if created:
         try:
             os.unlink(w)
         except Exception:
-            stray = w
-    if stray:
-        # Symmetrical with the success path OK-LEFTOVER: same fact, same shape, reported on
-        # the refusal path too so a refusal cannot litter silently.
-        sys.stdout.write("CANNOT-WRITE-LEFTOVER " + code + " " + stray)
-    else:
-        sys.stdout.write("CANNOT-WRITE " + code)
+            leftover(w)
     sys.exit(0)
 w = ""
 fd = None
@@ -19801,7 +19836,7 @@ created = False
 try:
     os.makedirs(p, exist_ok=True)
     if not os.path.isdir(p):
-        sys.stdout.write("CANNOT-WRITE ENOTDIR")
+        verdict("CANNOT-WRITE ENOTDIR")
         sys.exit(0)
     w = os.path.join(p, "." + os.urandom(12).hex() + ".agent-gate-writeprobe")
     fd = os.open(w, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -19811,17 +19846,13 @@ try:
     os.close(fd)
     fd = None
 except OSError as e:
-    # close() is attempted here and NOT inside fail(), because a descriptor left open would
-    # keep the inode alive and make the unlink pointless on some filesystems. Its own failure
-    # is swallowed deliberately: the verdict is already decided, and the fd is released by
-    # process exit a few lines later regardless.
-    if fd is not None:
-        try:
-            os.close(fd)
-        except Exception:
-            pass
     fail(e, w)
 except Exception:
+    # THE INTERNAL-FAULT ARM, emitted FIRST for the same reason. Its cleanup declares
+    # NOTHING, deliberately: UNCLASSIFIED already maps to the "cannot tell" branch of the shell,
+    # whose protocol response carries no leftover field, so a declaration here would be a
+    # fact with nowhere to go. Widening that protocol is not the subject of this round.
+    verdict("UNCLASSIFIED unknown")
     if fd is not None:
         try:
             os.close(fd)
@@ -19832,7 +19863,6 @@ except Exception:
             os.unlink(w)
         except Exception:
             pass
-    sys.stdout.write("UNCLASSIFIED unknown")
     sys.exit(0)
 # THE ONE DELIBERATE EXCEPTION, AND IT IS OUTSIDE THE BOUNDARY ON PURPOSE.
 #
@@ -19844,16 +19874,28 @@ except Exception:
 # But a leftover artifact could be absorbed into the certification baseline unnoticed, so it
 # is resolved by DECLARING rather than by refusing: the path is reported to the caller and
 # named in the emitted SUMMARY line. Visible, attributable, and not a verdict.
-left = ""
+verdict("OK")
 try:
     os.unlink(w)
 except Exception:
-    left = w
-if left:
-    sys.stdout.write("OK-LEFTOVER " + left)
-else:
-    sys.stdout.write("OK")
+    leftover(w)
+sys.exit(0)
+# The line below is the EXTRACTION END ANCHOR that
+# scripts/tests/test_agent_gate_disk_admission.sh matches (with `^import errno, os, sys$`
+# above it) to run THIS body verbatim under planted failures. It is LOAD-BEARING and must
+# stay EXACTLY that text on a line of its own: a suite that cannot find its subject reports
+# a green having measured nothing.
+# END-WRITE-PROBE
 ' "$td" 2>/dev/null); e=$?
+  # ---- ONE PARSE OF THE ONE GRAMMAR: `<verdict-token>[ LEFTOVER <path>]` (job 416) ----
+  #
+  # Done BEFORE the rc dispatch because the rc dispatch now has to consult it (see the
+  # 124|137 arm). Split on the FIRST ` LEFTOVER `: no verdict token contains that substring,
+  # so the split is exact even for a target dir that happens to.
+  _cwv="$out"; _cwl=""
+  case "$out" in
+    *' LEFTOVER '*) _cwv="${out%% LEFTOVER *}"; _cwl="${out#* LEFTOVER }" ;;
+  esac
   case "$e" in
     0) ;;
     # EVERY POST-RESOLUTION FAILURE STILL CARRIES `td` (roborev job 398). These arms are all
@@ -19863,24 +19905,57 @@ else:
     # `_gate_disk_admission_pin_target_dir` and forfeited round 367's measured-fs-is-used-fs
     # guarantee on exactly these paths. The measurement failed; the RESOLUTION did not.
     127) printf 'UNRESOLVED\ttarget-dir-mkdir-no-classifier\t%s' "$td"; return 0 ;;
-    124|137) printf 'UNRESOLVED\ttarget-dir-mkdir-timeout\t%s' "$td"; return 0 ;;
+    124|137)
+      # ---- A BOUND EXPIRING MAY ONLY KEEP OR STRENGTHEN A REFUSAL, NEVER SOFTEN ONE ----
+      #
+      # THE DEFECT THIS CLOSES (roborev job 416, the shell half). The probe can decide
+      # CANNOT-WRITE and then HANG in its own cleanup — a dead NFS mount, a stale handle.
+      # Discarding the whole payload on rc=124 turned that DEFINITIVE REFUSAL into a
+      # non-fatal UNMEASURED and the gate proceeded on a filesystem that had just proven
+      # itself unwritable. So a refusal already present in the capture is HONOURED: control
+      # falls through to the grammar parse below, exactly as on rc=0.
+      #
+      # MEASURED PREMISE, because the whole arm rests on it and it is not obvious:
+      # `_component_set_bounded` captures the child stdout into a REGULAR FILE and replays it
+      # AFTER the child completes, so partial stdout SURVIVES a kill. On this host, with a
+      # child that writes+flushes a token and then hangs — timeout arm rc=124 out=16 bytes;
+      # bash-watchdog arm rc=124 out=16 bytes; and with the flush REMOVED, 0 bytes. The third
+      # reading is why the python flush is a PREREQUISITE and not a tidy-up.
+      #
+      # THE ASYMMETRY IS DELIBERATE AND LOAD-BEARING: a PERMISSIVE token (`OK`) recovered the
+      # same way is STILL DISCARDED to UNMEASURED by falling into the `*)` arm. A refusal
+      # recovered from a partial write is FAIL-CLOSED and therefore safe; an ADMISSION
+      # recovered from a process WE KILLED would be deriving a pass from an incomplete
+      # measurement, which is the one thing this whole guard exists to forbid. Do not
+      # "simplify" this into honouring whatever the capture holds.
+      #
+      # THE HONOURING NEEDS THE COMPLETE VERDICT PREFIX. An unrecognisable fragment
+      # (`CANNOT-WRI`) takes the discard branch, which is what "cannot tell" means; the
+      # verdict is one short `write()` so a torn payload is not a case seen in practice.
+      #
+      # DECLARED RESIDUAL: when the cleanup was KILLED mid-unlink, the probe file remains and
+      # its name — chosen inside the child and never printed — is unknowable here, so this
+      # path declares NO leftover. It is a REFUSAL, and its remedy line already sends the
+      # operator to that directory.
+      case "$_cwv" in
+        'CANNOT-WRITE '*) ;;
+        *) printf 'UNRESOLVED\ttarget-dir-mkdir-timeout\t%s' "$td"; return 0 ;;
+      esac ;;
     "$_CS_UNBOUNDABLE_RC") printf 'UNRESOLVED\ttarget-dir-mkdir-unboundable\t%s' "$td"; return 0 ;;
+    # NOT honoured, deliberately, and the distinction from 124/137 is the point: rc 198 says
+    # OUR OWN READ of the capture failed, so the bytes in `$out` are known-unusable rather
+    # than known-partial. A verdict may be recovered from a measurement we CUT SHORT; it may
+    # not be recovered from one we could not READ.
     "$_CS_REPLAY_RC") printf 'UNRESOLVED\ttarget-dir-mkdir-output-truncated\t%s' "$td"; return 0 ;;
     *) printf 'UNRESOLVED\ttarget-dir-mkdir-classifier-failed\t%s' "$td"; return 0 ;;
   esac
-  case "$out" in
-    OK) printf 'OK\t%s\t%s\t' "$td" "$td"; return 0 ;;
-    # OK-LEFTOVER: the write SUCCEEDED and the cleanup did not. Writability is answered YES
-    # -- that is the only question here -- so this is NOT a refusal; the artifact is carried
-    # out as the fourth field and DECLARED in the emitted line (job 395).
-    'OK-LEFTOVER '*) printf 'OK\t%s\t%s\t%s' "$td" "$td" "${out#OK-LEFTOVER }"; return 0 ;;
-    'CANNOT-WRITE '*) printf 'UNWRITABLE\t%s\t%s\t' "${out#CANNOT-WRITE }" "$td"; return 0 ;;
-    # A refusal that could not clean up after itself (job 398): the verdict is unchanged and
-    # the stray rides out in the leftover field, symmetrically with OK-LEFTOVER.
-    'CANNOT-WRITE-LEFTOVER '*)
-      _cwl="${out#CANNOT-WRITE-LEFTOVER }"
-      printf 'UNWRITABLE\t%s\t%s\t%s' "${_cwl%% *}" "$td" "${_cwl#* }"; return 0 ;;
-    'UNCLASSIFIED '*) printf 'UNRESOLVED\ttarget-dir-uncreatable-%s\t%s' "${out#UNCLASSIFIED }" "$td"; return 0 ;;
+  case "$_cwv" in
+    # The leftover field is the same fourth field on BOTH dispositions now, because the
+    # payload says the same thing in the same place on both: writability is answered by the
+    # verdict PREFIX, and the stray — if any — is an independent fact appended after it.
+    OK) printf 'OK\t%s\t%s\t%s' "$td" "$td" "$_cwl"; return 0 ;;
+    'CANNOT-WRITE '*) printf 'UNWRITABLE\t%s\t%s\t%s' "${_cwv#CANNOT-WRITE }" "$td" "$_cwl"; return 0 ;;
+    'UNCLASSIFIED '*) printf 'UNRESOLVED\ttarget-dir-uncreatable-%s\t%s' "${_cwv#UNCLASSIFIED }" "$td"; return 0 ;;
     *) printf 'UNRESOLVED\ttarget-dir-mkdir-unrecognised\t%s' "$td"; return 0 ;;
   esac
 }
