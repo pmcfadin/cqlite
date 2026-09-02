@@ -244,17 +244,15 @@ impl V5CompressedLegacyParser {
                     FixedWidthCell::Bytes => Ok((Value::TinyInt(data[0] as i8), 1)),
                 }
             }
-            "timestamp" => {
-                match Self::require_fixed_width(data, 8, "timestamp", column_name)? {
-                    FixedWidthCell::Null => Ok((Value::Null, 0)),
-                    FixedWidthCell::Bytes => Ok((
-                        Value::Timestamp(i64::from_be_bytes([
-                            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                        ])),
-                        8,
-                    )),
-                }
-            }
+            "timestamp" => match Self::require_fixed_width(data, 8, "timestamp", column_name)? {
+                FixedWidthCell::Null => Ok((Value::Null, 0)),
+                FixedWidthCell::Bytes => Ok((
+                    Value::Timestamp(i64::from_be_bytes([
+                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                    ])),
+                    8,
+                )),
+            },
             "date" => match Self::require_fixed_width(data, 4, "date", column_name)? {
                 FixedWidthCell::Null => Ok((Value::Null, 0)),
                 FixedWidthCell::Bytes => {

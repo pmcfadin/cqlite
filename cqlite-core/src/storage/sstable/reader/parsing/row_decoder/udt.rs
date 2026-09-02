@@ -1,53 +1,16 @@
 use super::*;
-// Issue #3847: the ONE statement of which widths a fixed-width CQL scalar admits
-// on the read path and what an EMPTY buffer means. Lives under `raw_value`
-// because that is #3847's named subject; these two field decoders are reconciled
-// TO it so the two families cannot hold two opinions about a width.
-use super::raw_value::fixed_width::{self, FixedWidthCell};
 
 // Issue #3811: the inline-field UDT decoder, split out under the campsite rule
 // and carrying the consumption contract census finding C left open.
 mod inline;
 
-// Issue #3847: the empty buffer is a legal fixed-width UDT field value meaning
-// null. Registered here (not in `mod.rs`, which is over the campsite file-size
-// ratchet ceiling) because it drives THIS file's two field decoders and their
-// three framing call sites.
-#[cfg(test)]
-#[path = "udt/issue_3847_empty_fixed_width_tests.rs"]
-mod issue_3847_empty_fixed_width_tests;
+// Issue #3847 / epic #1116: what a single UDT FIELD's bytes mean — the two scalar
+// field decoders, the fixed-width rule they share and the zero-length router —
+// split out of this file, which is well over the campsite source target. This
+// file keeps UDT FRAMING.
+mod field_value;
 
 impl V5CompressedLegacyParser {
-    /// The width rule for a fixed-width scalar UDT FIELD (issue #3847).
-    ///
-    /// A UDT field's slice is exactly bounded by its `[i32 BE len]` component
-    /// header, and neither of this file's two field decoders reports consumption,
-    /// so the accepted set is checked here IN FULL: `{n, 0}` — `n` bytes, or the
-    /// EMPTY buffer, which is Cassandra's on-the-wire spelling of `null`. Anything
-    /// else is corruption.
-    ///
-    /// Oracle: `docs/round-artifacts/issue-3847-cassandra-oracle.md` (pinned
-    /// `cassandra-5.0.8`); the rule itself, and why `deserialize()` rather than
-    /// `validate()` governs a read path, is stated once in
-    /// [`super::raw_value::fixed_width`]. A [`FixedWidthCell::Null`] MUST be
-    /// decoded to [`Value::Null`] by the caller — before #3847 both decoders
-    /// spelled this `data.len() != n` and refused a legal empty field, which is
-    /// what `parse_nested_udt_from_registry`, `parse_inline_udt_value` and
-    /// `raw_type_value.rs`'s UDT framing all hit on a zero-length field.
-    ///
-    /// `what` and the singular/plural of `byte` reproduce the pre-#3847 message
-    /// wording exactly, so a caller matching on the text is unaffected.
-    fn require_udt_field_width(data: &[u8], n: usize, what: &str) -> Result<FixedWidthCell> {
-        fixed_width::admissible_exactly(data, n).ok_or_else(|| {
-            Error::corruption(format!(
-                "{} field requires {} byte{}, got {}",
-                what,
-                n,
-                if n == 1 { "" } else { "s" },
-                data.len()
-            ))
-        })
-    }
     /// Issue #1080: is this on-disk SerializationHeader marshal type a TOP-LEVEL
     /// frozen (or bare) UDT — `FrozenType(UserType(...))` or `UserType(...)` — that
     /// may be decoded as a single UDT blob via `decode_frozen_udt_from_header_type`?
@@ -584,134 +547,6 @@ impl V5CompressedLegacyParser {
         Ok((Value::Udt(Box::new(udt_value)), current_offset))
     }
 
-    /// Parse a UDT field value based on its CqlType.
-    fn parse_udt_field_value(&self, data: &[u8], field_type: &CqlType) -> Result<Value> {
-        match field_type {
-            CqlType::Text | CqlType::Ascii => {
-                std::str::from_utf8(data)
-                    .map_err(|e| Error::corruption(format!("Invalid UTF-8 in UDT field: {}", e)))?;
-                Ok(Value::Text(
-                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
-                ))
-            }
-            CqlType::Int => match Self::require_udt_field_width(data, 4, "Int")? {
-                FixedWidthCell::Null => Ok(Value::Null),
-                FixedWidthCell::Bytes => {
-                    let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                    Ok(Value::Integer(v))
-                }
-            },
-            CqlType::BigInt => match Self::require_udt_field_width(data, 8, "BigInt")? {
-                FixedWidthCell::Null => Ok(Value::Null),
-                FixedWidthCell::Bytes => {
-                    let v = i64::from_be_bytes([
-                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                    ]);
-                    Ok(Value::BigInt(v))
-                }
-            },
-            CqlType::Float => match Self::require_udt_field_width(data, 4, "Float")? {
-                FixedWidthCell::Null => Ok(Value::Null),
-                FixedWidthCell::Bytes => {
-                    let bits = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                    Ok(Value::Float32(f32::from_bits(bits)))
-                }
-            },
-            CqlType::Double => match Self::require_udt_field_width(data, 8, "Double")? {
-                FixedWidthCell::Null => Ok(Value::Null),
-                FixedWidthCell::Bytes => {
-                    let bits = u64::from_be_bytes([
-                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                    ]);
-                    Ok(Value::Float(f64::from_bits(bits)))
-                }
-            },
-            CqlType::Boolean => match Self::require_udt_field_width(data, 1, "Boolean")? {
-                FixedWidthCell::Null => Ok(Value::Null),
-                FixedWidthCell::Bytes => Ok(Value::Boolean(data[0] != 0)),
-            },
-            CqlType::Uuid => match Self::require_udt_field_width(data, 16, "UUID")? {
-                FixedWidthCell::Null => Ok(Value::Null),
-                FixedWidthCell::Bytes => {
-                    let uuid_bytes: [u8; 16] = data[0..16]
-                        .try_into()
-                        .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
-                    Ok(Value::Uuid(uuid_bytes))
-                }
-            },
-            CqlType::Timestamp => match Self::require_udt_field_width(data, 8, "Timestamp")? {
-                FixedWidthCell::Null => Ok(Value::Null),
-                FixedWidthCell::Bytes => {
-                    let millis = i64::from_be_bytes([
-                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                    ]);
-                    Ok(Value::Timestamp(millis))
-                }
-            },
-            CqlType::Date => match Self::require_udt_field_width(data, 4, "Date")? {
-                FixedWidthCell::Null => Ok(Value::Null),
-                FixedWidthCell::Bytes => {
-                    let days = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                    Ok(Value::Date(days as i32))
-                }
-            },
-            CqlType::Blob => Ok(Value::Blob(
-                crate::storage::sstable::reader::value_borrow::borrow_active(data),
-            )),
-            CqlType::Inet => Ok(Value::Inet(
-                crate::storage::sstable::reader::value_borrow::borrow_active(data),
-            )),
-            CqlType::Frozen(inner) => {
-                // Parse the inner type and wrap in Frozen
-                let inner_value = self.parse_udt_field_value(data, inner)?;
-                Ok(Value::Frozen(Box::new(inner_value)))
-            }
-            CqlType::Udt(name, field_defs) => {
-                // Nested UDT - recursively parse
-                let mut nested_def = UdtTypeDef::new("".to_string(), name.clone());
-                for (field_name, field_type) in field_defs {
-                    nested_def =
-                        nested_def.with_field(field_name.clone(), field_type.clone(), true);
-                }
-                let dummy_column = crate::schema::Column {
-                    name: name.clone(),
-                    data_type: "udt".to_string(),
-                    nullable: true,
-                    default: None,
-                    is_static: false,
-                };
-                let (value, n) = self.parse_udt_value(data, 0, &nested_def, &dummy_column)?;
-                // #3811 (finding C): the 4th discarding bounded caller of the pair
-                // roborev named; `data` here is one exactly-bounded UDT field.
-                Self::require_fully_consumed_raw(n, data.len(), &nested_def.name, "nested UDT")?;
-                Ok(value)
-            }
-            _ => {
-                // For other types, return as blob
-                tracing::debug!(
-                    "V5CompressedLegacy: UDT field type {:?} parsed as blob ({} bytes)",
-                    field_type,
-                    data.len()
-                );
-                Ok(Value::Blob(
-                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
-                ))
-            }
-        }
-    }
-
-    /// Create an empty value for a given CQL type.
-    pub(super) fn create_empty_value_for_type(cql_type: &CqlType) -> Value {
-        match cql_type {
-            CqlType::Text | CqlType::Ascii => Value::text(String::new()),
-            CqlType::Blob => Value::blob(Vec::new()),
-            CqlType::List(_) => Value::List(Vec::new()),
-            CqlType::Set(_) => Value::Set(Vec::new()),
-            CqlType::Map(_, _) => Value::Map(Vec::new()),
-            _ => Value::blob(Vec::new()),
-        }
-    }
-
     /// Parse a CounterContext structure and return the total counter value.
     ///
     /// Counter cells in Cassandra store a CounterContext, not a raw i64 value.
@@ -846,94 +681,6 @@ impl V5CompressedLegacyParser {
         let consumed = HEADER_SIZE_LENGTH + indices_size + body_size;
 
         Ok((total, consumed))
-    }
-
-    /// Parse a UDT field value without requiring SSTableReader.
-    /// This is a simplified version of parse_udt_field_value for use in frozen collection contexts.
-    ///
-    /// Limitation: Complex nested types (nested UDTs, nested collections) are returned as blobs.
-    /// For full UDT support with nested types, use parse_udt_field_value with a reader.
-    pub(super) fn parse_simple_udt_field_value(data: &[u8], field_type: &CqlType) -> Result<Value> {
-        match field_type {
-            CqlType::Text | CqlType::Ascii => {
-                std::str::from_utf8(data)
-                    .map_err(|e| Error::corruption(format!("Invalid UTF-8 in UDT field: {}", e)))?;
-                Ok(Value::Text(
-                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
-                ))
-            }
-            CqlType::Int => match Self::require_udt_field_width(data, 4, "Int")? {
-                FixedWidthCell::Null => Ok(Value::Null),
-                FixedWidthCell::Bytes => {
-                    let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                    Ok(Value::Integer(v))
-                }
-            },
-            CqlType::BigInt => match Self::require_udt_field_width(data, 8, "BigInt")? {
-                FixedWidthCell::Null => Ok(Value::Null),
-                FixedWidthCell::Bytes => {
-                    let v = i64::from_be_bytes([
-                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                    ]);
-                    Ok(Value::BigInt(v))
-                }
-            },
-            CqlType::Boolean => match Self::require_udt_field_width(data, 1, "Boolean")? {
-                FixedWidthCell::Null => Ok(Value::Null),
-                FixedWidthCell::Bytes => Ok(Value::Boolean(data[0] != 0)),
-            },
-            CqlType::Float => match Self::require_udt_field_width(data, 4, "Float")? {
-                FixedWidthCell::Null => Ok(Value::Null),
-                FixedWidthCell::Bytes => {
-                    let bits = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                    Ok(Value::Float32(f32::from_bits(bits)))
-                }
-            },
-            CqlType::Double => match Self::require_udt_field_width(data, 8, "Double")? {
-                FixedWidthCell::Null => Ok(Value::Null),
-                FixedWidthCell::Bytes => {
-                    let bits = u64::from_be_bytes([
-                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                    ]);
-                    Ok(Value::Float(f64::from_bits(bits)))
-                }
-            },
-            CqlType::Uuid | CqlType::TimeUuid => {
-                match Self::require_udt_field_width(data, 16, "UUID")? {
-                    FixedWidthCell::Null => Ok(Value::Null),
-                    FixedWidthCell::Bytes => {
-                        let uuid_bytes: [u8; 16] = data[0..16]
-                            .try_into()
-                            .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
-                        Ok(Value::Uuid(uuid_bytes))
-                    }
-                }
-            }
-            CqlType::Timestamp => match Self::require_udt_field_width(data, 8, "Timestamp")? {
-                FixedWidthCell::Null => Ok(Value::Null),
-                FixedWidthCell::Bytes => {
-                    let millis = i64::from_be_bytes([
-                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                    ]);
-                    Ok(Value::Timestamp(millis))
-                }
-            },
-            CqlType::Blob => Ok(Value::Blob(
-                crate::storage::sstable::reader::value_borrow::borrow_active(data),
-            )),
-            _ => {
-                // For complex types (nested UDTs, collections, etc.), return as blob
-                // These require SSTableReader for full parsing
-                tracing::debug!(
-                    "UDT field type {:?} in frozen context parsed as blob ({} bytes)",
-                    field_type,
-                    data.len()
-                );
-                Ok(Value::Blob(
-                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
-                ))
-            }
-        }
     }
 
     /// Parse a nested UDT from registry definition (Issue #238)
