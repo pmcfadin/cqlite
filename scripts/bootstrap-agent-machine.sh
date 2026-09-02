@@ -451,17 +451,22 @@ mold_write_block() {
     # hands `mv` that very symlink. Whatever the route, the no-clobber guarantee is about
     # `$write_target`, so it is asserted ON `$write_target` — a check on an input cannot speak
     # for an output that was computed from it.
-    # ONLY A REGULAR FILE OR A NONEXISTENT PATH IS A WRITE TARGET (#3756 roborev round 7, HIGH).
-    # `not a symlink and not a directory` is not the same set as `a config file`: it also admits
-    # FIFOs, sockets and DEVICE NODES, and the legacy-link selection added in round 2 is exactly
-    # what routes `~/.cargo/config -> /dev/null` (or a user-owned FIFO) here — where a
-    # sufficiently privileged run would replace the special file with a regular one. Enumerating
-    # the types to REJECT is the permissive shape this repo keeps finding, so the test is
-    # affirmative: nonexistent, or `-f`. Anything else is refused by name.
-    if [ -L "$write_target" ] || { [ -e "$write_target" ] && [ ! -f "$write_target" ]; }; then
-      warn "$cfg_file resolves to $write_target, which is not a regular file (a symlink, directory, FIFO, socket or device node) — skipping mold linker config rather than replacing it"
-      return 0
-    fi
+  fi
+  # ONLY A REGULAR FILE OR A NONEXISTENT PATH IS A WRITE TARGET (#3756 roborev rounds 7 and 8,
+  # both HIGH). "not a symlink and not a directory" is not the same set as "a config file": it
+  # also admits FIFOs, sockets and DEVICE NODES, and `mv -f` replaces whichever one it finds.
+  # Enumerating the types to REJECT is the permissive shape this repo keeps finding, so the test
+  # is affirmative — nonexistent, or `-f` — and anything else is refused by name.
+  #
+  # AND IT SITS OUTSIDE THE SYMLINK BRANCH, which is round 8's correction to round 7's fix.
+  # Scoped to `[ -L "$cfg_file" ]` it only ever examined targets reached THROUGH a link, so a
+  # `~/.cargo/config.toml` that is ITSELF a FIFO, socket or directory reached `mv -f` unchecked.
+  # The property is about the path being WRITTEN, not about how that path was arrived at — the
+  # same reason the check moved onto `$write_target` in round 6 — so it now guards every route
+  # into the write, and the two routes are pinned by separate cases (6z symlinked, 6aa direct).
+  if [ -L "$write_target" ] || { [ -e "$write_target" ] && [ ! -f "$write_target" ]; }; then
+    warn "$write_target is not a regular file (a symlink, directory, FIFO, socket or device node) — skipping mold linker config rather than replacing it"
+    return 0
   fi
   preserved=$(mktemp) || { warn "mktemp failed — skipping mold linker config"; return 0; }
   if [ -f "$write_target" ]; then

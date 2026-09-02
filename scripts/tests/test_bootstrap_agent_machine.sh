@@ -1094,7 +1094,7 @@ if command -v mkfifo >/dev/null 2>&1; then
     outZ=$(PATH="$stubO:$PATH" HOME="$sbZ" CARGO_HOME="$sbZ/.cargo" \
       "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
     if [ -p "$sbZ/special/pipe" ] && [ -L "$sbZ/.cargo/config" ] \
-       && printf '%s' "$outZ" | grep -q "which is not a regular file"; then
+       && printf '%s' "$outZ" | grep -q "is not a regular file"; then
       ok "mold/symlink: a config symlink pointing at a SPECIAL FILE (FIFO) is refused by name — the special file keeps its type and the link is untouched; only a regular file or a nonexistent path is a write target"
     else
       bad "mold/symlink: the special-file target was not refused (still-fifo=$([ -p "$sbZ/special/pipe" ] && echo yes || echo NO) still-link=$([ -L "$sbZ/.cargo/config" ] && echo yes || echo no))"
@@ -1107,6 +1107,51 @@ if command -v mkfifo >/dev/null 2>&1; then
   fi
 else
   skip "mold/symlink: special-file target case — no mkfifo on this host"
+fi
+
+# 6aa. A SPECIAL FILE REACHED DIRECTLY — NOT THROUGH A SYMLINK (#3756 roborev round 8, HIGH).
+#      6z's fix was scoped to the `[ -L "$cfg_file" ]` branch, so it only examined targets
+#      reached THROUGH a link: a `~/.cargo/config.toml` that IS a FIFO went straight to `mv -f`
+#      unchecked. The property is about the path being WRITTEN, not how it was arrived at, so
+#      the check is unconditional and BOTH routes get a case — this is the direct one, and its
+#      existence is what stops the check being re-scoped into a branch later.
+if command -v mkfifo >/dev/null 2>&1; then
+  sbAA=$(mktemp -d "$tmp/moldAA.XXXXXX"); mkdir -p "$sbAA/.cargo"
+  mkfifo "$sbAA/.cargo/config.toml" 2>/dev/null
+  if [ -p "$sbAA/.cargo/config.toml" ]; then
+    outAA=$(PATH="$stubO:$PATH" HOME="$sbAA" CARGO_HOME="$sbAA/.cargo" \
+      "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+    if [ -p "$sbAA/.cargo/config.toml" ] \
+       && printf '%s' "$outAA" | grep -q "is not a regular file"; then
+      ok "mold/symlink: a config.toml that IS a FIFO — reached directly, with no symlink anywhere — is refused by name and keeps its type; the write-target type check guards every route, not just the symlink branch"
+    else
+      bad "mold/symlink: a DIRECT special-file config.toml was not refused (still-fifo=$([ -p "$sbAA/.cargo/config.toml" ] && echo yes || echo NO))"
+      ls -l "$sbAA/.cargo/config.toml" 2>&1 | head -2
+      printf '%s\n' "$outAA" | grep -i 'mold\|regular file' | head -5
+    fi
+  else
+    skip "mold/symlink: direct special-file case — mkfifo did not produce a FIFO on this filesystem, so the subject does not exist"
+  fi
+else
+  skip "mold/symlink: direct special-file case — no mkfifo on this host"
+fi
+
+# 6ab. ...and a DIRECTORY at config.toml is refused too, by the same unconditional check. A
+#      directory is the route where the old code did not merely replace the wrong thing: `mv`
+#      would have moved the temp file INSIDE it and the run would have reported success.
+sbAB=$(mktemp -d "$tmp/moldAB.XXXXXX"); mkdir -p "$sbAB/.cargo/config.toml"
+outAB=$(PATH="$stubO:$PATH" HOME="$sbAB" CARGO_HOME="$sbAB/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+# `ls -A` STATUS AND OUTPUT, both — never `[ -z "$(find …)" ]`, which collapses "the scan
+# FAILED" onto "no match" and always picks the permissive answer (this repo lints that shape as
+# `1699-find-tristate`). An unreadable directory must not read as an empty one.
+ab_listing=$(ls -A "$sbAB/.cargo/config.toml" 2>/dev/null); ab_ls_rc=$?
+if [ -d "$sbAB/.cargo/config.toml" ] && [ "$ab_ls_rc" -eq 0 ] && [ -z "$ab_listing" ] \
+   && printf '%s' "$outAB" | grep -q "is not a regular file"; then
+  ok "mold/symlink: a DIRECTORY at config.toml is refused by name and left empty — nothing is moved inside it and no success is reported"
+else
+  bad "mold/symlink: a directory at config.toml was not refused (still-dir=$([ -d "$sbAB/.cargo/config.toml" ] && echo yes || echo no) ls-rc=$ab_ls_rc contents=[$(printf '%s' "$ab_listing" | tr '\n' ' ')])"
+  printf '%s\n' "$outAB" | grep -i 'mold\|regular file' | head -5
 fi
 
 # --- 7. git push credentials (issue #2942) ---------------------------------
