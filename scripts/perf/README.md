@@ -20,6 +20,7 @@ scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096
 | `lib-args.sh` | numeric + duration validation: positive, bounded to the reporter's cap, decimal |
 | `ws0_report.py` | aggregation → `results.json` + a human summary |
 | `ws0_validate.py` | the fail-closed layer: what the reporter is ALLOWED to aggregate |
+| `lib-measure.sh` | one rep of each arm — and, since #3551, WHICH ALLOCATOR the measured server is really running |
 
 Full method, the traps, the recorded pinning and the residual caveats:
 **`docs/reports/ws0-3096-artifacts/measurement-method.md`** — read it before
@@ -99,6 +100,45 @@ dirs and perf CSVs — no cargo, `perf`, `sudo`, corpus or network).
 There is deliberately **no environment variable that relaxes any of this.** An
 escape hatch on a measurement guard can only ever buy a confident wrong number.
 
+## The flight arm can be moved ONE property at a time (issue #3551)
+
+Three flags change the **Flight arm only**; the bare-scan arm always stays on
+`--server-cpus` and on the system allocator, which is what makes it a
+**code-identical AND pin-identical** leg in the same session — §3b step 3's drift
+control, which this rig has never had.
+
+```bash
+# arm B vs a Flight server on two DISTINCT physical cores (SMT unpin), bare scan unchanged
+scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096   --flight-server-cpus 2,3 --flight-pin-mode distinct-cores
+
+# arm C: the same binary, the Flight SERVER PROCESS ONLY under jemalloc
+scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096 --flight-allocator jemalloc
+```
+
+* **Omitting all of them changes nothing.** `--flight-server-cpus` defaults to
+  `--server-cpus`, the mode defaults to `siblings` and the allocator to `system`, so
+  every pre-#3551 invocation produces the same `taskset` lists, the same `perf -C`
+  domains and the same recorded manifest values.
+* **`--flight-pin-mode` is not a relaxation of the sibling guard.** Both values are
+  read from the real `thread_siblings_list` and both fail closed: `siblings` REFUSES a
+  distinct-core set, `distinct-cores` REFUSES a sibling pair — and refuses a single-CPU
+  list, over which "pairwise distinct" compares nothing.
+* **The counting domain follows the arm.** `perf stat -C` counts where each arm's server
+  actually ran; counting `--server-cpus` while the Flight server ran elsewhere would
+  divide another core's cycles by this rep's rows.
+* **`--flight-allocator jemalloc` is VERIFIED FROM THE RUNNING PROCESS, per rep.**
+  `LD_PRELOAD` fails open — glibc prints `object ... cannot be preloaded ...: ignored`
+  and continues with system malloc, exit 0 — so without reading `/proc/<pid>/maps` arm C
+  would be a byte-identical duplicate of arm B under a label saying otherwise. The
+  **negative** is asserted on the system arm too (no jemalloc mapping, and any inherited
+  `LD_PRELOAD` is emptied for the launch), because a control arm quietly running the
+  allocator under test does not add noise — it inverts the comparison.
+* **Everything above is recorded in `pinning-verification.json` and asserted where it is
+  used**: the manifest's flight pin must EQUAL the list the driver verified (the #3272-F6
+  substitution check, at the new field), and `ws0_report.py` prints the property that was
+  actually read — a `distinct-cores` pin is never described as `physical-core siblings`.
+  Guards: `scripts/tests/test_ws0_flight_arm_guards.sh` (in the gate's `tooling-tests`).
+
 ## No cross-session absolutes, and NO DRIFT CONTROL — read every difference as uncontrolled
 
 **Measured on the delivery box in one day: the untouched warm bare scan read
@@ -109,8 +149,16 @@ changed on the measured path.** So this rig produces **no reusable absolute**.
 that would make a cross-arm comparison readable — same-session interleaved A/B/C
 with a drift control code-identical across arms, "or NO COMPARISON".
 
-**That control is NOT IMPLEMENTED OR ENFORCED by this rig, and the rig makes NO
-INTERLEAVING CLAIM (#3272 review round 4).** What `ws0-baseline.sh` does have is a
+**#3551 supplies the CONTROL LEG of that specification and NOT the interleaving.**
+The bare-scan arm is now mechanically guaranteed to be code-identical AND pin-identical
+across a comparison whose only moving part is the Flight pin or the Flight allocator
+(above), which is step 3. Steps 1, 2 and 4 — one rep at a time, rotate the arm order,
+difference WITHIN a round — remain **operator procedure that nothing verifies**, so the
+paragraph below is unchanged in substance: no session-ordering property is established
+by any artifact this rig writes.
+
+**The interleaving control is NOT IMPLEMENTED OR ENFORCED by this rig, and the rig makes
+NO INTERLEAVING CLAIM (#3272 review round 4).** What `ws0-baseline.sh` does have is a
 loop ordered rounds-outside/arms-inside with the arm order rotated by round and the
 bare scan rotating as a peer — a reasonable ordering, but **not a verified control**:
 nothing downstream establishes that a session ran that way. An earlier round of

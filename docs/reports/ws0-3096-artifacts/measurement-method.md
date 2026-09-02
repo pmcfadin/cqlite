@@ -263,6 +263,36 @@ committed rig, and this subsection exists because the two were being conflated.
   one of those lands, steps 1–6 above are the manual procedure an operator must run
   and record; they are not automated here.
 
+### 3b.2 What issue #3551 DID add: step 3's control leg, and nothing else
+
+`--flight-server-cpus`, `--flight-pin-mode` and `--flight-allocator` move the **Flight
+arm only**. The bare-scan arm always runs the same program on `--server-cpus` under the
+system allocator, so a comparison whose only moving part is the Flight pin or the Flight
+allocator now carries, **mechanically**, the code-identical and pin-identical drift
+control **step 3** asks for — the one thing above that used to be entirely the
+operator's to remember.
+
+Read the boundary precisely, because it is narrow:
+
+* **This is step 3 ONLY.** Steps 1, 2 and 4 (one rep at a time, rotate the arm order,
+  difference within a round) are still procedure that **nothing in the rig verifies**, and
+  §3b.1's conclusion is unchanged: **read every cross-arm difference as UNCONTROLLED FOR
+  DRIFT.** No artifact establishes a session's ordering.
+* **What IS established, per rep, and recorded** in `pinning-verification.json`: which
+  CPUs each arm was pinned to and which PROPERTY of them was read out of
+  `thread_siblings_list` (one core's siblings, or pairwise distinct cores); that the CPU-wide
+  counting domain was the CPUs that arm's server actually ran on; and, from
+  `/proc/<pid>/maps` after readiness, which allocator the Flight server process was really
+  running — including the negative on the control arm, since `LD_PRELOAD` fails open and a
+  control arm silently running jemalloc would invert the result rather than add noise.
+* **One declared gap, stated because the record states it too:** each rep's allocator
+  outcome is written to `<tag>.allocator.status` where the observation is made, and the
+  driver ABORTS the run on a failure — but **nothing at report time requires those per-rep
+  files to be present.** That completeness check is the boundary-observation shape (#3272
+  round 22) and is not implemented for the allocator. The field
+  `flight_allocator_verification` declares this limit inside the artifact rather than
+  leaving a reader to assume coverage.
+
 ---
 
 ## 4. Known caveats, stated rather than hidden

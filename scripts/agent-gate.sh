@@ -468,6 +468,29 @@
 #                      a readiness TIMEOUT fatal, an unanswerable prober stopping the run.
 #                      Hermetic: fake sysfs + a loopback listener under $TMPDIR; no
 #                      perf/sudo/taskset/root/hardware.
+#                      Also runs scripts/tests/test_ws0_flight_arm_guards.sh (#3551) —
+#                      the FLIGHT arm's own pin and allocator, split from the file above
+#                      (at the ~1500-line target) along a RESPONSIBILITY seam: that one
+#                      asks whether the pinned CPUs are one physical core, this one asks
+#                      what DIFFERS between two arms that no longer run the same way.
+#                      --flight-pin-mode selects between two AFFIRMATIVE assertions and
+#                      relaxes neither, so distinct-cores REFUSES a sibling pair (naming
+#                      both CPUs and the sysfs answer) and siblings REFUSES a distinct
+#                      one, proved over the SAME two inputs; a single-CPU list is refused
+#                      because pairwise-distinct over one element compares nothing.
+#                      --flight-allocator is verified from the RUNNING PROCESS because
+#                      LD_PRELOAD FAILS OPEN (glibc prints "cannot be preloaded ...:
+#                      ignored" and continues with system malloc, exit 0), so arm C would
+#                      otherwise be a byte-identical duplicate of arm B under a label
+#                      saying otherwise; the absent-mapping branch and the EMPTY/ABSENT
+#                      maps files are driven against synthetic maps, the last two as
+#                      COULD-NOT-MEASURE refusals rather than "no mapping present"
+#                      (measured on a mutant: `system VERIFIED ... (0 mappings read)`).
+#                      Plus the #3272-F6 substitution at the new pin, the record's closed
+#                      grammars, and a ONE-FIELD report differential proving a
+#                      distinct-cores pin is never described as physical-core siblings.
+#                      Hermetic: fake sysfs, synthetic maps/session dirs/corpus under
+#                      $TMPDIR, every driver call through ws0_driver_run.
 #                      Also runs scripts/tests/test_ws0_perf_invocation_lint.sh (#3272
 #                      item 10) — the THIRD structural guard, split out of the file above
 #                      under the campsite rule (it reached 1607 lines against the ~1500
@@ -16886,6 +16909,38 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_cpu_pinning_guards.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (ws0 cpu-pinning / server-ownership guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 FLIGHT-ARM GUARDS (#3551) — the pin MODE, the ALLOCATOR and what the report
+  # may SAY about either. Its own file because the suite above is at the ~1500-line
+  # test target and this is a different subject: not "are the pinned CPUs one physical
+  # core" but "the two arms no longer run the same way, so what exactly differs, and is
+  # the difference the one the label claims". `--flight-pin-mode` selects between TWO
+  # AFFIRMATIVE assertions (each read from a fake thread_siblings_list) rather than
+  # relaxing one, so distinct-cores must REFUSE a sibling pair and siblings must REFUSE a
+  # distinct one — proved over the SAME two inputs — and a single-CPU list is refused
+  # because "pairwise distinct" over one element compares nothing. `--flight-allocator`
+  # is verified from the RUNNING PROCESS because LD_PRELOAD FAILS OPEN (glibc prints
+  # "cannot be preloaded ...: ignored" and continues with system malloc, exit 0), so the
+  # absent-mapping branch — the one the check exists for — is driven against synthetic
+  # /proc/<pid>/maps files, as are the EMPTY and ABSENT maps files, which must read as
+  # COULD-NOT-MEASURE refusals and never as "no jemalloc mapping present" (measured on a
+  # mutant: `system VERIFIED ... (0 mappings read)`). Plus the #3272-F6 substitution at
+  # the new pin, the record's closed grammars, and a ONE-FIELD report differential
+  # proving a distinct-cores pin is never described as `physical-core siblings`.
+  # Hermetic: fake sysfs, synthetic maps + session dirs + a few-KB corpus under $TMPDIR;
+  # every driver call through ws0_driver_run. No cargo, perf, sudo, taskset, root,
+  # libjemalloc, server, corpus or network.
+  echo ">>> [$name] bash scripts/tests/test_ws0_flight_arm_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_flight_arm_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 flight-arm pin/allocator guards); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

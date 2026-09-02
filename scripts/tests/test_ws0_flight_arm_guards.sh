@@ -189,7 +189,9 @@ if [ "$rc" -ne 0 ] && grep -q "names only 1 CPU" <<<"$out" && grep -q "VACUOUS" 
 else
   fail "distinct-cores must refuse a 1-CPU list with its own diagnostic (rc=$rc, out: $out)"
 fi
-if ! grep -q "SAME physical core" <<<"$out"; then
+# `rc` too, deliberately: without it this check passes VACUOUSLY on a mutant that refuses
+# nothing (measured — a disabled n<2 bound left this line green while its primary above failed).
+if [ "$rc" -ne 0 ] && ! grep -q "SAME physical core" <<<"$out"; then
   pass "distinct-cores: the single-CPU refusal is NOT the collision message (different cause, different remedy)"
 else
   fail "distinct-cores: the 1-CPU case must not reuse the collision diagnostic (out: $out)"
