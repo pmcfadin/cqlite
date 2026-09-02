@@ -861,7 +861,18 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   no status word, and the two status-derived figures are counted from the status. **Ask of
   every label: is this word derived from the state I am rendering, or from an assumption about
   which states get here?** And prefer *deriving* the qualifier to deleting it — `(did not
-  PASS)` carries real information when it is true.
+  PASS)` carries real information when it is true. **(4) THE SAME ROOT APPEARED A THIRD TIME, IN
+  THE RENDER-TIME FALLBACK, AND THE ANSWER WAS CONVERGENCE RATHER THAN A SIXTH PATCH.**
+  `_census_measure` (verdict time) and `_census_record` (render time) answer the same question —
+  what is the truthful census state for (component, status)? — and answered it differently for
+  five rounds, because the fallback *took no status* and dispatched on kind alone: a gap-declared
+  component that CRASHED before `record_result` rendered its GAP reason. Both now delegate to one
+  `_census_classify`, with exactly one declared asymmetry (only the measurer may read the
+  component log), and `test_agent_gate_census.sh` case S1 drives BOTH over the same 64-cell
+  (kind × status × sidecar) matrix requiring identical output wherever the log is not needed —
+  because **a second implementation's agreement is only knowable by testing it**. Generalised:
+  when two functions answer one question, converging them and pinning the agreement ends the
+  class; patching the sixth label does not.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a

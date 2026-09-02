@@ -477,3 +477,63 @@ Case **R1** is the standing guard: no script may contain the bare three-token gr
 grep is a guard that is always red, which is the guard nobody keeps. **R2** proves the needle
 discriminates the bare three from the roborev grammar's longer one, so it cannot red a correct
 artifact. RED arm: a planted three-token literal under `scripts/` → R1 fails naming the file.
+
+---
+
+## roborev round 5 (job 379) — one Low, and the convergence that makes the class unexpressible
+
+### The finding, and why it was one defect half-fixed
+
+`_census_measure` (verdict time) carried the batch-2 LOW fix, with a comment stating the rule:
+*"a component that did not PASS has no PASS to affirm, and that is true whatever its kind."*
+`_census_record` — the render-time fallback — **took no status at all** and dispatched on kind
+alone, so it reproduced that defect verbatim: a gap-declared component that CRASHED before
+`record_result` (synthetic `FAIL`, no sidecar) rendered its GAP reason and was counted as
+`DECLARED-GAP`.
+
+The two functions answer the SAME question and answered it differently for five rounds, because
+they were two implementations of it. And the fix could not have landed in the second one, because
+**it was not given the status** — the same structural root as job 371 one function over: *a
+function required to reason about status that is not handed the status.*
+
+### What changed
+
+`_census_classify <component> <status> <recorded-line> <may-measure>` is now the ONE classifier;
+both paths call it. The declaration/status/kind order and every state text live there once.
+
+**The one surviving asymmetry, declared rather than assumed:** the measurer may read the component
+log and write a sidecar; the renderer runs in the parent after the component's lane is gone and
+must do neither. So the classifier returns `MEASURE <kind>` for the single cell that genuinely
+needs the log — `PASS` × a log-measured kind — and the callers differ only there.
+
+**A regression the convergence guard caught before it shipped.** The first version treated
+`VACUOUS` as an ordinary non-`PASS`, so a vacuous row rendered
+`{no census: component ended VACUOUS}` — discarding the very state that CAUSED the status, on the
+line that exists to explain it. `VACUOUS` is the census's own verdict, so it now returns the
+record (or says it cannot explain the status), and never `NOT-APPLICABLE`.
+
+### The guard that pins their agreement
+
+Case **S1** drives both paths over the same **64-cell** (kind × status × sidecar) matrix and
+requires byte-identical output everywhere the classifier does not say `MEASURE`; the 8 `MEASURE`
+cells must be exactly the declared asymmetry (`PASS` × a log-measured kind). **S2/S2b** assert the
+cited cell by name on both the row and the aggregate, **S3** is the PASS control, **S4** is
+structural (both paths delegate; the renderer is denied `may-measure`; the status reaches the
+per-row annotation). Q1's table was rebuilt to choose a subject **per cell** so a state is only
+tested on a kind that can reach it, and it now covers the **no-sidecar fallback** for a `gap:`, a
+log-measured and an undeclared kind — the row that let this through the round-4 sweep.
+
+RED arms, one property each: revert `_census_record` to the status-less form → S1 names the
+divergence, S2/S2b reproduce the finding verbatim, S4 names the missing delegation; remove the
+`VACUOUS` arm → F1/F2/G1/Q1 red.
+
+### Two things the round's own guards caught in my work
+
+- **P6 (added last round) fired on this round's change**: `_census_classify` went into the gate and
+  not into the feature-matrix harness's extraction list, and the stderr half named it. The guard
+  built for job 376 caught a job-379 omission — which is the property it was built for.
+- **F2 was scanning for the word `PASS`, not the status field.** Its own RED arm exposed it: with
+  the `VACUOUS` arm removed, the row reads `… no PASS to affirm`, whose PROSE contains `" PASS "`,
+  so F2 fired for a reason unrelated to the status. Now it extracts the status field. Same lesson
+  as Q1's status-claim check — a word scan over a line that legitimately names other statuses is a
+  guard that reds on correct input.
