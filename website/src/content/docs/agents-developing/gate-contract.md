@@ -825,6 +825,33 @@ said `VERIFIED` returned toward a spawn without re-reading the latch, so a peer 
 *during* that lane's two fsck walks was never seen. Both are ordering fixes, neither needs a lock:
 latch first, stamp second, and one `obj_sweep_stop_if_latched` helper before the throttled,
 `VERIFIED` and `UNMEASURED` returns alike — one rule instead of a set of paths to audit.
+**And ordering was not enough: the stamp is written only if the latch is CONFIRMED present, else it
+is forced stale (round 9, item 1).** "Latch first, stamp second" left the stamp unconditional, so on
+the one branch where the latch could not be *persisted* — a writable stamp inside a directory that is
+not writable, so creating `<stamp>.CORRUPT` fails while rewriting `<stamp>` succeeds — the detecting
+lane stopped (correct) and still advertised a freshly swept box (not correct): its peers read the
+fresh stamp, skipped their own sweep for the whole interval, and kept working against a store already
+confirmed damaged. The stamp write is now gated on `obj_sweep_latch_present`, the afterwards-existence
+check and never the create's exit status (which cannot tell "a peer got there first" from "the
+directory is unwritable"); where the latch is missing the stamp is forced to epoch `0`, because a peer
+whose sweep started earlier can finish *during* this one and write a fresh timestamp. Forcing can only
+cause MORE sweeping, so it cannot manufacture a false clean.
+
+**And the printed remedy has to work, which it did not (round 9, item 2).** All three copies of the
+repair instruction said `git fetch --force origin`, which repairs nothing: `--force` only permits
+non-fast-forward *ref* updates and re-downloads no objects, so with the advertised tips unchanged the
+negotiation can transfer nothing — an operator following it exactly kept the corruption and gained the
+impression of a repair. Measured on git 2.43.0 against planted damage, by the sweep's own verdict:
+`--force` leaves a corrupt loose object, a flipped pack byte and a missing object untouched;
+`git fetch --refetch origin` (git 2.36+) restores a MISSING object but not damaged content, whose bytes
+stay in the object directory where fsck still finds them — so content damage needs the pack or loose
+object deleted first, after which `--refetch` verifies clean. A fresh clone works, but only **from the
+canonical remote over the network**: `git clone <local path>` hardlinks the object files, so a clone of
+the damaged repository is damaged too. Hence the sweep owns the text (it knows the damage class, and
+the measurements live beside it) and both consumers QUOTE its `verdict-detail` lines instead of
+paraphrasing, with a fail-closed fallback so a stopped box is never left with no remedy — and clearing
+the latch is gated on a re-run of the sweep reporting its affirmative verdict.
+
 **That rule was still a set of SITES, and round 5 found the fourth — so the read is now at ENTRY,
 above every branch.** The documented opt-out `OBJ_SWEEP_INTERVAL_HOURS=0` returned before any latch
 read, so switching the sweep off also switched off an already-recorded `CORRUPT` verdict. Patching
