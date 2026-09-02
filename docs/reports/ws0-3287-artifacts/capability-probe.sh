@@ -256,6 +256,27 @@ else
   done
   [ "$CPUSET_OK" = 1 ] || note_fail "Gate D: no COMPLETE sibling group is both online and permitted by this process's affinity mask — refusing to guess a CPU set (the #3217 hardcoded-core-table defect)"
 fi
+# THE BENCHMARK'S IDENTITY IS RECORDED (roborev job 413). The optional second
+# argument accepts any C file, and job 318's field check only compares the
+# benchmark's SELF-REPORT — a different revision can print the expected
+# arm/buffer/accesses lines while chasing differently, and every number here would
+# be attributed to a source nobody can identify afterwards. A self-report is not an
+# identity, so the content hash goes into the capture; a non-default source is
+# declared loudly rather than silently accepted.
+{ echo; echo "== benchmark source identity =="
+  echo "path: $SRC"
+  if command -v sha256sum >/dev/null 2>&1 && [ -r "$SRC" ]; then
+    echo "sha256: $(sha256sum "$SRC" | awk '{print $1}')"
+  else
+    echo "sha256: UNAVAILABLE (no sha256sum or unreadable source) — the numbers below cannot be tied to a known benchmark revision"
+  fi
+  case "$SRC" in
+    docs/reports/ws0-3224-artifacts/cache-hostile.c|*/docs/reports/ws0-3224-artifacts/cache-hostile.c)
+      echo "provenance: the committed #3224 benchmark (default)" ;;
+    *) echo "provenance: NON-DEFAULT SOURCE SUPPLIED — every reading below belongs to THIS file, not to #3224's benchmark; the field checks confirm what it CLAIMS to have run, not which program ran" ;;
+  esac
+} >> "$D/capability-probe.txt" 2>&1
+
 { echo; echo "== Gate D: pinned CPU set =="
   echo "cpuset: ${CPUSET:-<UNDERIVED>}  (${CPU_TOPO_NOTE:-no source})"
   echo "NOTE: this is ONE complete sibling group, enough for the capability"
@@ -475,10 +496,26 @@ else
              echo cycle_activity.stalls_l3_miss; echo LLC-load-misses)
   for e in $(printf '%s\n' $_semlist | sort -u); do
     { echo "== $e =="
-      if def=$(awk -v e="  ${e}" '$0==e{f=1;print;next} f&&/^  [^ ]/{exit} f{print}' <<<"$PLD") && [ -n "$def" ]; then
+      # FOUND requires an ENCODING LINE in the entry's body, not merely a matching
+      # heading (roborev job 413). A heading alone made `def` non-empty, so a
+      # detail-free or truncated entry was marked FOUND and kept OUT of
+      # SEM_UNVERIFIED — the check reported verification it had not performed, which
+      # is the false-assurance shape this whole artefact argues against.
+      #
+      # "Encoding line" is matched structurally, not by a fixed key: perf renders it
+      # as `cpu/event=0xa3,cmask=6,.../` for a raw event and
+      # `cpu/legacy-hardware-config=0/` for an alias like `cycles`. Keying on
+      # `cpu/event=` (an earlier draft of mine) would have called `cycles` unverified.
+      def=$(awk -v e="  ${e}" '$0==e{f=1;print;next} f&&/^  [^ ]/{exit} f{print}' <<<"$PLD")
+      if [ -n "$def" ] && grep -qE '^[[:space:]]*[a-zA-Z0-9_-]+/[^[:space:]]*=[^[:space:]]*/[[:space:]]*$' <<<"$def"; then
         echo "$def"; echo "[semantics: FOUND]"
       else
-        echo "[semantics: NOT-LISTED on this host — no definition to verify against]"
+        if [ -n "$def" ]; then
+          echo "$def"
+          echo "[semantics: ENTRY-WITHOUT-ENCODING on this host — the event is listed but no encoding line is printed, so there is nothing to verify against]"
+        else
+          echo "[semantics: NOT-LISTED on this host — no definition to verify against]"
+        fi
         # A DIFFERENTIAL event with no host definition is evidence whose encoding
         # AC4 cannot verify. It is NOT silently published as though it were
         # verified, and it is NOT dropped either — see the declaration emitted into
@@ -606,6 +643,38 @@ if [ "$GATE_OK" = 1 ]; then
   fi
 fi
 
+# THE ARMS' PREMISE IS VERIFIED AGAINST THIS HOST'S CACHES, NOT ASSUMED (roborev
+# job 413). The working sets below are hard-coded (256 KiB "L2-resident", 2 GiB
+# "many times L3") while the report states both properties as fact. On a host whose
+# caches violate them — a 256 KiB L2, or an L3 of several GiB as some server parts
+# now have — the differential would still run and would still be described as
+# L2-resident vs DRAM, which is a confidently wrong capability answer: exactly what
+# #3224's positive-control discipline exists to stop. Read from sysfs (per-cpu, so
+# it is the L2 the pinned core actually has) rather than lscpu's aggregate.
+_l2b=0; _l3b=0
+for _ix in /sys/devices/system/cpu/cpu0/cache/index*; do
+  [ -r "$_ix/level" ] && [ -r "$_ix/size" ] || continue
+  _lv=$(cat "$_ix/level" 2>/dev/null); _sz=$(cat "$_ix/size" 2>/dev/null)
+  case "$_sz" in *K) _b=$(( ${_sz%K} * 1024 ));; *M) _b=$(( ${_sz%M} * 1048576 ));; *) _b=0;; esac
+  [ "$_lv" = 2 ] && [ "$_b" -gt "$_l2b" ] && _l2b=$_b
+  [ "$_lv" = 3 ] && [ "$_b" -gt "$_l3b" ] && _l3b=$_b
+done
+if [ "$_l2b" -le 0 ] || [ "$_l3b" -le 0 ]; then
+  note_fail "arm premise: could not read L2/L3 sizes from sysfs (L2=${_l2b}B L3=${_l3b}B) — the arms' L2-resident / many-times-L3 premise is UNVERIFIABLE here, so no differential may rest on it"
+else
+  # 256 KiB must fit in L2, and the 2 GiB buffer must be at least 4x L3.
+  if [ 262144 -gt "$_l2b" ]; then
+    note_fail "arm premise VIOLATED: the friendly arm's 256 KiB working set does NOT fit this host's L2 ($_l2b B) — it is not L2-resident here, so the friendly/hostile contrast does not mean what this probe reports"
+  fi
+  if [ $(( 2147483648 / 4 )) -lt "$_l3b" ]; then
+    note_fail "arm premise VIOLATED: the 2 GiB hostile buffer is not >=4x this host's L3 ($_l3b B) — it may be substantially L3-resident, so a low L3-miss reading would be EXPECTED rather than evidence of a stuck counter"
+  fi
+  { echo; echo "== arm premise (verified, not assumed) =="
+    echo "L2(per-cpu)=$_l2b B  L3=$_l3b B"
+    echo "friendly working set 262144 B <= L2 : $([ 262144 -le "$_l2b" ] && echo yes || echo NO)"
+    echo "hostile buffer 2147483648 B >= 4x L3: $([ $((2147483648/4)) -ge "$_l3b" ] && echo yes || echo NO) (ratio $(( 2147483648 / (_l3b>0?_l3b:1) ))x)"
+  } >> "$D/capability-probe.txt" 2>&1
+fi
 ARMS=(friendly-L2resident:512:256:20000000 hostile-512m:512:0:20000000 hostile-2g:2048:0:8000000)
 if [ "$GATE_OK" = 1 ]; then
   for spec in "${ARMS[@]}"; do

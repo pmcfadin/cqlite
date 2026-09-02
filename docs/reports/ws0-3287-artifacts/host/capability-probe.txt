@@ -1,6 +1,6 @@
 
 == date -u ==
-Wed Sep  2 17:53:54 UTC 2026
+Wed Sep  2 18:16:43 UTC 2026
 [rc=0] date -u
 
 == uname -a ==
@@ -80,7 +80,7 @@ Vulnerability Vmscape:                   Not affected
 available: 1 nodes (0)
 node 0 cpus: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
 node 0 size: 31549 MB
-node 0 free: 6027 MB
+node 0 free: 4515 MB
 node distances:
 node   0 
   0:  10 
@@ -88,6 +88,11 @@ node   0
 
 == uncore devices (Gate C) ==
 [uncore: ABSENT — AC3's bandwidth source and AC5's saturation verdict are unreachable here. A measured ANSWER, not a probe failure.]
+
+== benchmark source identity ==
+path: docs/reports/ws0-3224-artifacts/cache-hostile.c
+sha256: 8a67dd67db0256d3a9e7ca78d71999a0d953d94770f11c736adfa11eaac30cfd
+provenance: the committed #3224 benchmark (default)
 
 == Gate D: pinned CPU set ==
 cpuset: 0,8  (complete sibling group from cpu0, all members online AND in this process's Cpus_allowed_list)
@@ -99,3 +104,8 @@ complete sibling groups ONLINE and ALLOWED to this process: 8 <-- judge #3224's 
   (each group = one physical core; enumerated: 0,8 1,9 2,10 3,11 4,12 5,13 6,14 7,15)
 physical-core count, MACHINE-WIDE (NOT process-allowed; do not read as usable): 8
 END-OF-RECORD: capability-probe complete
+
+== arm premise (verified, not assumed) ==
+L2(per-cpu)=2097152 B  L3=110100480 B
+friendly working set 262144 B <= L2 : yes
+hostile buffer 2147483648 B >= 4x L3: yes (ratio 19x)

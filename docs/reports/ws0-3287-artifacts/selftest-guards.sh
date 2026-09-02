@@ -427,9 +427,13 @@ d="$TMP/c5"; mkdir -p "$d/out/host"
 printf '# stale\n999999999,,cycle_activity.stalls_l3_miss:u,1,100.00,,\n' > "$d/out/host/arm-friendly-L2resident-stalls.csv"
 printf '# stale\n888888888,,cycle_activity.stalls_l3_miss:u,1,100.00,,\n' > "$d/out/host/arm-hostile-512m-stalls.csv"
 rc=$(SHIM_TMA=absent run_probe "$d")
-if ! grep -rq '999999999\|888888888' "$d/out/host/"*.csv 2>/dev/null; then
-  ok "stale arm CSVs purged before this run reports (job 312 f2: another host's numbers under COMPLETE)"
-else bad "stale CSVs from a previous run survived into this run's verdict" "$d"; fi
+# rc and verdict asserted too (roborev job 413): checking only that the planted
+# numbers are gone would pass a regression that purges correctly and then aborts
+# every run — the files would be clean and the probe useless.
+if [ "$rc" = 0 ] && grep -q 'VERDICT: COMPLETE' <<<"$(verdict "$d")" \
+   && ! grep -rq '999999999\|888888888' "$d/out/host/"*.csv 2>/dev/null; then
+  ok "stale arm CSVs purged AND the run still completes (job 312 f2; outcome asserted per job 413)"
+else bad "stale CSVs survived, or the purge broke the run (rc=$rc, $(verdict "$d"))" "$d"; fi
 
 # --- 4c. the event promoted into the differential must be MEASURED, not just probed
 # roborev job 410. Job 405 moved offcore_requests.all_data_rd out of "disposition
@@ -611,9 +615,20 @@ echo "cases: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 # A case FLOOR, on #3544's precedent: a span-replacing edit once silently deleted
 # four cases and the suite reported failed:0 over a shrunken set. A green tally
 # over fewer cases is not a green suite.
-FLOOR=22
-if [ $((PASS+FAIL+SKIP)) -lt $FLOOR ]; then
-  echo "FAIL: only $((PASS+FAIL+SKIP)) cases were reached, floor is $FLOOR — cases were deleted, not fixed"
+FLOOR=23
+TOTAL=$((PASS+FAIL+SKIP))
+if [ "$TOTAL" -lt $FLOOR ]; then
+  echo "FAIL: only $TOTAL cases were reached, floor is $FLOOR — cases were deleted, not fixed"
+  exit 1
+fi
+# AND THE FLOOR MUST NOT LAG THE SUITE (roborev job 413). It sat at 22 while 23 cases
+# ran, so deleting one still satisfied the guard whose entire purpose is detecting
+# deletion — the counting guard defeated by a counting mistake, mine, made while
+# adding a case. A floor below the reachable count is now FATAL rather than silent,
+# so the only way to leave it stale is to ignore a red suite.
+if [ "$TOTAL" -gt $FLOOR ]; then
+  echo "FAIL: $TOTAL cases ran but FLOOR is $FLOOR — the deletion guard is weaker than the suite."
+  echo "      Bump FLOOR to $TOTAL in the same change that added the case(s)."
   exit 1
 fi
 # A SKIP is counted for the floor but must never substitute for verification. These
@@ -621,7 +636,7 @@ fi
 # whole-suite precondition above, their topology requirement is satisfied too, so if
 # any failed to RUN it is the suite that is wrong and not the machine. They are NOT
 # "host-independent" in general; that claim was false and is corrected (job 324).
-SHIM_FLOOR=19
+SHIM_FLOOR=20
 if [ "$PASS" -lt $SHIM_FLOOR ] && [ "$FAIL" = 0 ]; then
   echo "FAIL: only $PASS cases PASSed with 0 failures; $SHIM_FLOOR are host-independent and must always run"
   exit 1
