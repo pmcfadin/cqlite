@@ -691,7 +691,7 @@ verdict and THEN spent a `mktemp`, an `O_EXCL` create, a `date` and a dozen `pri
 its replacement, so a late reviewer recording `FINDINGS` anywhere in that span was silently overwritten by
 the merge-proceeding token — with no `--force` and no `replaced-verdict:` trace, i.e. the exact harm the
 guard was added for. A check placed before the act it guards, with a window in between, can only report.
-So the observation the decision rests on is RE-TAKEN immediately before the rename and compared for
+So the observation the decision rests on is RE-TAKEN immediately before the publication and compared for
 equality; any difference refuses with `reason=report-changed-mid-write` and installs nothing. Three
 properties worth knowing: it compares the report's BYTES, not its classified token, because with `--force`
 one `FINDINGS` replaced by a DIFFERENT `FINDINGS` leaves the token equal while the report the operator
@@ -699,12 +699,51 @@ read is gone; the bytes are captured BEFORE the decision is made on them, and si
 classification is made FROM THAT SAME SNAPSHOT rather than from a second read of the file, so the
 bytes this write is guarded on and the verdict read from them are ONE observation; and `--force`
 does NOT cover it, since `--force`
-authorizes replacing the verdict the operator READ, never one that arrived afterwards. **The residual is
-DECLARED because it cannot be removed**: the rename itself is not conditional — coreutils `mv` exposes
-neither `RENAME_EXCHANGE` nor `RENAME_NOREPLACE`, and `mv -n` is the wrong predicate (the destination
-legitimately exists) — so one fork/exec of `mv` remains open, and a LOCK would not close it even if it
-were free, because the counterparty is an arbitrary agent writing the report with its own tooling and
-taking no lock. Only a unilateral compare-and-swap could, and that is what is unavailable.
+authorizes replacing the verdict the operator READ, never one that arrived afterwards.
+
+**AND NARROWING WAS NOT ENOUGH — THE OVERWRITE IS NOW UNEXPRESSIBLE (#3751 round 15, U1).** Round 9
+DECLARED the remainder as a residual it could not remove: the rename is not conditional (coreutils `mv`
+exposes neither `RENAME_EXCHANGE` nor `RENAME_NOREPLACE`, and `mv -n` is the wrong predicate, since the
+destination legitimately exists), a LOCK would not close it either because the counterparty is an
+arbitrary agent writing the report with its own tooling and taking no lock, and only a unilateral
+compare-and-swap could — which a shell does not have. **That declaration is WITHDRAWN.** All of it was
+true about the shell and wrong about the harm: the party who loses a verdict in that span is not a
+hostile racer, it is **a slow reviewer** — and this mechanism exists *because* delegated reviewers are
+slow and return late — so the loss was produced by this system's own normal behaviour, and what was lost
+was a recorded review verdict, exactly the harm #3751 was filed to prevent. A declared boundary is not
+acceptable for that.
+
+So `record-author-performed` no longer writes to the report of record AT ALL. It reserves a **fresh
+generation** (round 6's nonce + round 12's atomic reservation), writes the substitute there, and the
+**stage record — written LAST, the publication marker (round 4's H1) — names it**; the pins are that no
+`prepare_write`/`commit_write` in the script has `$STAGE_REPORT` as its destination and that BOTH report
+writers claim their path through `reserve_report_path`. Measured before the fix, with the interleaving
+driven at that instant: `RECORD-OK … result=AUTHOR-PERFORMED` at exit 0, no `--force`, no
+`replaced-verdict:`, and the blocking `result: FINDINGS` **gone from disk entirely** (`grep -r` across the
+stage directory found nothing). After it, the same interleaving leaves that `FINDINGS` readable in its own
+generation while the published verdict is the substitute. **The window is not closed; DESTRUCTION is** —
+what lands in it is SUPERSEDED, and the new report names the generation it took over from
+(`supersedes-report-nonce:`) so the surviving verdict is findable.
+
+Four consequences worth knowing. (1) Whether the command may PROCEED over a prior verdict is a SEPARATE
+question and keeps its rule — refuse without `--force`; under `--force` record `replaced-verdict:` **plus**
+`supersedes-report-nonce:` — and because nothing is overwritten, a wrong decision there is now recoverable
+and auditable rather than silent. (2) The **stage record** is held to the same mid-write rule
+(`reason=stage-record-changed-mid-write`), since this call now rewrites it: a concurrent `open --force`
+that published a newer generation must not be reverted by a rewrite of bytes read before it. (3) The
+rewrite (`stage_record_text` + `record_text_with_nonce`) substitutes exactly ONE line and carries every
+other byte through VERBATIM — `head-sha:` is NOT re-stamped (that would bind a substitute to a tree the
+stage was never opened at, round 5's J1 harm) and `reopen-count:` is not incremented (no agent was
+re-spawned) — and the result is MEASURED before it is written (exactly one `report-nonce:` line, reading
+back as the generation just reserved; anything else is `reason=record-rewrite-unverified`), because a
+record this tool published and every reader then refuses would be the tool bricking its own stage. (4) The
+F5 path walk on `$STAGE_REPORT` REMAINS, as a **read**-side guard: a symlink there would make the decision
+rest on another file's content, and a directory there answers `report_bytes`' `[ ! -f ]` probe as
+`no-such-file` — the PERMISSIVE `absent` state — so an unmeasurable report would read as "no recorded
+verdict to supersede". `assert_ignored` on that path is gone with the write it existed for.
+
+**The generalisable rule:** when a check can only NARROW a window, ask whether the harm can be made
+UNEXPRESSIBLE instead — and never declare a residual whose victim is your own system's normal behaviour.
 
 **AND "COULD NOT READ IT" IS NOT "NOTHING IS RECORDED" (#3751 round 13, S1).** Round 12's R2 gave
 `classify_report` an UNREADABLE observation state, and this guard branched on the classified TOKEN

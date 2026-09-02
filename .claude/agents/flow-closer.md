@@ -251,10 +251,16 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    ```
    That reports the DISTINCT token `AUTHOR-PERFORMED`, never `PASS`, and premerge-assert prints
    it on its own line — an author's hand audit is not an independent one; weight it accordingly.
-   It REFUSES if the report already RECORDS a verdict (read it first; `--force` replaces it and
-   records the replaced token), and it refuses `reason=report-changed-mid-write` if a verdict
-   lands WHILE the substitute is being written — that means your auditor woke up and delivered:
-   NOTHING was installed, so read the verdict it wrote rather than re-running the recording.
+   It REFUSES if the report already RECORDS a verdict (read it first; `--force` supersedes it and
+   records both the replaced token and the generation it came from), and it refuses
+   `reason=report-changed-mid-write` if a verdict lands WHILE the substitute is being written — that
+   means your auditor woke up and delivered: NOTHING was published, so read the verdict it wrote
+   rather than re-running the recording. It refuses `reason=stage-record-changed-mid-write` for the
+   same reason one level up: someone re-opened the stage under you, so re-read it rather than
+   re-recording. **Nothing this subcommand does OVERWRITES a report (#3751 round 15):** the
+   substitute lands in a fresh generation and the stage record publishes it, so a verdict that
+   arrives at any instant is still on disk in its own generation, named by
+   `supersedes-report-nonce:` on the `RECORD-OK` line. Read it there before deciding anything.
 3. **Final roborev confirmation pass — this GATES arming auto-merge.** Because review-first
    already ran, this should converge to **clean-on-arrival**. Run the ONLY sanctioned
    invocation (#2964), with the certified tip **PUSHED** (the wrapper asserts it) and **BOTH**

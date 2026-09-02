@@ -825,8 +825,24 @@ printf 'result: FINDINGS\n\n### [BLOCKER] a real gap\n' >"$R9B_REPORT"
 rs "$R9B" record-author-performed c --issue 620 --reason "$AP_REASON" --evidence "$AP_EV" --performed-by author --force
 rc_is 0 "clobber: --force is accepted"
 has "replaced-verdict=FINDINGS" "clobber: the forced RECORD-OK line names the token it replaced"
+has "supersedes-report-nonce=" "clobber: and names the GENERATION it took over from, so the replaced report can be read"
+# THE SUBSTITUTE IS A FRESH GENERATION (round 15, U1), so the current report is the one the
+# RECORD now names — not the path this test opened with, which is the SUPERSEDED one.
+R9B_SUPERSEDED="$R9B_REPORT"
+R9B_REPORT="$(REPORT_OF "$R9B" 620 c)"
+if [ "$R9B_REPORT" != "$R9B_SUPERSEDED" ]; then
+  ok "clobber: the recording published a DIFFERENT report path — the prior generation was not written over"
+else
+  bad "clobber: the recording re-used the prior report path (want a fresh generation): $R9B_REPORT"
+fi
 OUT="$(cat "$R9B_REPORT")"; RC=0
 has "replaced-verdict: FINDINGS" "clobber: the REPORT itself records the replaced token, so the substitution is auditable"
+has "supersedes-report-nonce: " "clobber: and the report names the generation it superseded"
+# AND THE SUPERSEDED VERDICT IS STILL ON DISK. This is the whole of U1: a recorded verdict is
+# SUPERSEDED, never DESTROYED, so the audit trail survives the substitution.
+OUT="$(cat "$R9B_SUPERSEDED" 2>/dev/null || printf '<absent>\n')"; RC=0
+has "result: FINDINGS" "clobber: the SUPERSEDED report still records the FINDINGS it recorded — nothing was destroyed"
+has "[BLOCKER] a real gap" "clobber: including the reviewer's own prose, readable in its own generation"
 rs "$R9B" verdict c --issue 620
 rc_is 6 "clobber: after a forced replacement the verdict is AUTHOR-PERFORMED (exit 6)"
 
@@ -2338,11 +2354,20 @@ fi
 rs "$R19C" record-author-performed c --issue 992 --reason no-independent-auditor-available \
   --evidence docs/round-artifacts/issue-3751-l2.md --performed-by author
 rc_is 0 "rename CONTROL: an ordinary recording succeeds"
-if [ -f "$L2_RP3" ] && LC_ALL=C grep -q '^result: AUTHOR-PERFORMED' "$L2_RP3" &&
-  ! LC_ALL=C grep -q '^result: NOT-RUN' "$L2_RP3"; then
-  ok "rename CONTROL: the destination was REPLACED atomically — the new record is there and no line of the old one survives"
+# THE DESTINATION IS THE FRESH GENERATION (round 15, U1), read from the RECORD rather than
+# predicted: `record-author-performed` no longer renames over the report it read, so the
+# atomic-replacement property is asserted about the name it DID write.
+L2_RP4="$(REPORT_OF "$R19C" 992 c)"
+if [ "$L2_RP4" != "$L2_RP3" ]; then
+  ok "rename CONTROL: the recording published a FRESH generation, so the sentinel's name was never a rename destination"
 else
-  bad "rename CONTROL: the destination was not cleanly replaced (content: $(LC_ALL=C head -3 "$L2_RP3" 2>/dev/null))"
+  bad "rename CONTROL: the recording re-used the sentinel's path $L2_RP3"
+fi
+if [ -f "$L2_RP4" ] && LC_ALL=C grep -q '^result: AUTHOR-PERFORMED' "$L2_RP4" &&
+  ! LC_ALL=C grep -q '^result: NOT-RUN' "$L2_RP4"; then
+  ok "rename CONTROL: the destination holds exactly the new record — the temporary file was renamed onto the exact name, whole, with no line of a previous document in it"
+else
+  bad "rename CONTROL: the destination was not cleanly written (content: $(LC_ALL=C head -3 "$L2_RP4" 2>/dev/null))"
 fi
 L2_LEFTOVER="$(find "$(dirname "$L2_RP3")" -name '.rs-*' -o -name '*.tmp*' 2>/dev/null | LC_ALL=C wc -l | LC_ALL=C tr -d ' ')"
 if [ "$L2_LEFTOVER" = "0" ]; then
@@ -2824,16 +2849,19 @@ n1_case() {
   hasnt "result: AUTHOR-PERFORMED" "n1/$label: and the merge-proceeding token was NOT installed over it"
 }
 
-# (a) the EARLIEST point in the window — immediately after the B2 check, before the path asserts.
-n1_case early 'assert_no_symlink "$STAGE_REPORT" report-of-record' early 640
-# (b) the LATEST point THE CHECK CAN COVER — after the substitute is fully written to the
-#     temporary file, immediately before the re-observation that guards the rename. This is the
-#     instant a check placed anywhere earlier cannot see, and the anchor is deliberately the
-#     re-observation itself: delete that line and this case cannot plant, which fails closed (5
-#     bads) rather than passing vacuously. The span AFTER the re-observation is the DECLARED
-#     RESIDUAL WINDOW named in the script — one `mv` wide, irreducible in a shell — and it is
-#     deliberately NOT asserted here: a case requiring the clobber to happen would red the day
-#     someone closes it.
+# (a) the EARLIEST point in the window — immediately after the B2 check, before this call reads
+#     the stage record it is going to republish. The anchor moved in round 15 (U1): the path
+#     asserts it used to sit on are now a READ-side guard placed BEFORE the check, so anchoring
+#     there would plant OUTSIDE the window and prove nothing.
+n1_case early 'rec_text="$(stage_record_text "$sfile")" || srt_rc=$?' early 640
+# (b) the LATEST point THE CHECK CAN COVER — after the substitute is fully written AND committed
+#     at its fresh generation, immediately before the re-observation that guards the publication.
+#     This is the instant a check placed anywhere earlier cannot see, and the anchor is
+#     deliberately the re-observation itself: delete that line and this case cannot plant, which
+#     fails closed (5 bads) rather than passing vacuously. The span AFTER the re-observation is the
+#     remaining window, and since round 15 (U1) what lands in it is SUPERSEDED rather than
+#     DESTROYED — asserted positively in (g) below, which is the case round 9 said could not be
+#     written.
 n1_case late 'now_obs="$(report_bytes "$STAGE_REPORT")"' late 641
 
 # (c) FORCED IS NOT A BLANKET AUTHORIZATION. `--force` authorizes replacing the verdict the
@@ -2871,8 +2899,12 @@ OUT="$(cd "$R21C" && bash "$N1_D/noop.sh" record-author-performed c --issue 643 
 rc_is 0 "n1/CONTROL: an UNDISTURBED report is still recorded (the refusal comes from the interleaving, not from the scratch copy)"
 has "RECORD-OK" "n1/CONTROL: the normal path still reports RECORD-OK"
 hasnt "report-changed-mid-write" "n1/CONTROL: and claims no interleaving that did not happen"
-OUT="$(cat "$R21C_REP" 2>/dev/null || printf '<absent>\n')"; RC=0
+# THE SUBSTITUTE IS AT THE FRESH GENERATION THE RECORD NOW NAMES (round 15, U1) — read from the
+# record, never from the path the stage was opened at, which is the SUPERSEDED one.
+OUT="$(cat "$(REPORT_OF "$R21C" 643 c)" 2>/dev/null || printf '<absent>\n')"; RC=0
 has "result: AUTHOR-PERFORMED" "n1/CONTROL: the substitute really was installed"
+OUT="$(cat "$R21C_REP" 2>/dev/null || printf '<absent>\n')"; RC=0
+has "result: NOT-RUN" "n1/CONTROL: and the sentinel it superseded is still on disk, untouched"
 
 # (e) CONTROL — the SHIPPED script's forced replacement still works end to end, so the new
 #     re-verification did not red the one path B2 deliberately leaves open.
@@ -2885,27 +2917,165 @@ rs "$R21S" record-author-performed c --issue 644 --reason "$N1_REASON" --evidenc
 rc_is 0 "n1/CONTROL: the SHIPPED forced replacement is unaffected"
 has "replaced-verdict=FINDINGS" "n1/CONTROL: and still records what it replaced"
 
+# (g) THE WINDOW ROUND 9 DECLARED IRREDUCIBLE — DRIVEN, AND NO LONGER DESTRUCTIVE (round 15, U1).
+#     Round 9 narrowed the clobber window to the span between the re-observation and the
+#     `rename(2)` inside one `mv`, then DECLARED the remainder, arguing that a shell has no
+#     compare-and-swap rename. That was true about the shell and wrong about the harm: the party
+#     who loses a verdict in that span is A SLOW REVIEWER — the population #3751 exists for — so
+#     the loss was caused by this system's own normal behaviour, and what was lost was a recorded
+#     review verdict. `record-author-performed` therefore no longer writes to `$STAGE_REPORT` at
+#     all: the substitute lands in a FRESHLY RESERVED generation and the stage record publishes
+#     it. The window is still there; DESTRUCTION is not.
+#
+#     THE INJECTION IS AT THE LAST INSTANT BEFORE PUBLICATION — inside that remaining window,
+#     AFTER the re-observation, which is precisely the case round 9 said could not be written
+#     ("a case requiring the clobber to happen would red the day someone closes it"). It can be
+#     written now because the assertion is no longer that a clobber happens: it is that the late
+#     verdict SURVIVES. SIMULATED, NOT RACED — one injected line at a fixed point in a scratch
+#     copy of the shipped script, nothing concurrent, no timing dependence.
+#
+#     The anchor is the LAST occurrence of the record commit, because `cmd_open` holds the first.
+n1_build_last() {
+  local dest="$1" anchor="$2" inj="$3"
+  N1_ANCHOR="$anchor" N1_INJ="$inj" LC_ALL=C awk '
+    BEGIN { a = ENVIRON["N1_ANCHOR"]; inj = ENVIRON["N1_INJ"] }
+    NR == FNR { if (index($0, a) > 0) last = FNR; next }
+    FNR == last { print inj }
+    { print }
+  ' "$RS" "$RS" >"$dest" 2>/dev/null || return 1
+  [ -s "$dest" ] || return 1
+  LC_ALL=C grep -q 'N1_LATE_REVIEWER' "$dest" || return 1
+  return 0
+}
+if n1_build_last "$N1_D/window.sh" 'commit_write "$sfile" stage-record' "$N1_INJECTION"; then
+  ok "n1/window: the plant landed at the LAST instant before publication (inside the remaining window)"
+else
+  bad "n1/window: the plant did NOT land, so this case proves nothing"
+fi
+R21W="$(newrepo)"
+rs "$R21W" open c --issue 645 --agent spec-auditor
+R21W_PRIOR="$(REPORT_OF "$R21W" 645 c)"
+OUT="$(cd "$R21W" && bash "$N1_D/window.sh" record-author-performed c --issue 645 \
+  --reason "$N1_REASON" --evidence "$N1_EV" --performed-by author 2>&1)"; RC=$?
+rc_is 0 "n1/window: the recording completes (the interleaving lands after every check, by construction)"
+R21W_NEW="$(REPORT_OF "$R21W" 645 c)"
+if [ "$R21W_NEW" != "$R21W_PRIOR" ]; then
+  ok "n1/window: and the published report is a DIFFERENT generation from the one the reviewer wrote into"
+else
+  bad "n1/window: the recording published the SAME path the reviewer wrote into: $R21W_NEW"
+fi
+OUT="$(cat "$R21W_PRIOR" 2>/dev/null || printf '<absent>\n')"; RC=0
+has "result: FINDINGS" "n1/window: THE LATE REVIEWER'S BLOCKING VERDICT IS STILL ON DISK — superseded, never destroyed"
+has "N1_LATE_REVIEWER" "n1/window: including the reviewer's own prose, readable in its own generation"
+OUT="$(cat "$R21W_NEW" 2>/dev/null || printf '<absent>\n')"; RC=0
+has "result: AUTHOR-PERFORMED" "n1/window: the published generation holds the substitute"
+has "supersedes-report-nonce: " "n1/window: which NAMES the generation it took over from, so the surviving verdict is findable"
+# THE RED THIS REPLACES, ASSERTED RATHER THAN REMEMBERED: the pre-U1 shape wrote the substitute AT
+# `$STAGE_REPORT`, so the same interleaving DESTROYED the verdict. Reconstructed by planting the
+# same injection at the pre-U1 anchor in a copy whose write destination is forced back to
+# `$STAGE_REPORT` — without this control the assertions above are satisfiable by a script that
+# simply refuses, and a "superseded, not destroyed" claim about a tool that writes nowhere is
+# vacuous.
+if n1_build_last "$N1_D/preu1.sh" 'commit_write "$new_rpath" report-of-record' "$N1_INJECTION" &&
+  LC_ALL=C sed -e 's|commit_write "\$new_rpath" report-of-record|commit_write "$STAGE_REPORT" report-of-record|' \
+      -e 's|prepare_write "\$new_rpath" report-of-record|prepare_write "$STAGE_REPORT" report-of-record|' \
+      "$N1_D/preu1.sh" >"$N1_D/preu1b.sh" &&
+  LC_ALL=C grep -q 'commit_write "\$STAGE_REPORT" report-of-record' "$N1_D/preu1b.sh"; then
+  ok "n1/window RED-CONTROL: the pre-U1 write destination was reconstructed (the substitute goes back to \$STAGE_REPORT)"
+else
+  bad "n1/window RED-CONTROL: could not reconstruct the pre-U1 write destination"
+fi
+R21P="$(newrepo)"
+rs "$R21P" open c --issue 646 --agent spec-auditor
+R21P_REP="$(REPORT_OF "$R21P" 646 c)"
+OUT="$(cd "$R21P" && bash "$N1_D/preu1b.sh" record-author-performed c --issue 646 \
+  --reason "$N1_REASON" --evidence "$N1_EV" --performed-by author 2>&1)"; RC=$?
+N1_SURVIVES="$(LC_ALL=C grep -rl 'N1_LATE_REVIEWER' "$R21P/.review-stage" 2>/dev/null | LC_ALL=C wc -l | LC_ALL=C tr -d ' ')"
+if [ "$N1_SURVIVES" = "0" ]; then
+  ok "n1/window RED-CONTROL: with the pre-U1 destination the late verdict is GONE FROM DISK ENTIRELY — the differential can see the defect"
+else
+  bad "n1/window RED-CONTROL: the late verdict survived the pre-U1 destination too ($N1_SURVIVES file(s)), so the case above proves nothing"
+fi
+
 # (f) STRUCTURAL — THE CHECK IS INSIDE THE WINDOW IT CERTIFIES. A re-verification that drifted
-#     back above `prepare_write` would restore the reported-not-prevented shape while every
+#     back above the substitute's write would restore the reported-not-prevented shape while every
 #     behavioural case above still passed (the injection anchors would move with it), so the
 #     ORDER is pinned from source: the second observation must be taken AFTER the substitute is
-#     written and BEFORE the rename.
-N1_PREP_LN="$(LC_ALL=C grep -n 'prepare_write "\$STAGE_REPORT" report-of-record' "$RS" | LC_ALL=C head -1 | cut -d: -f1)"
-N1_COMMIT_LN="$(LC_ALL=C grep -n 'commit_write "\$STAGE_REPORT" report-of-record' "$RS" | LC_ALL=C head -1 | cut -d: -f1)"
+#     committed at its fresh generation and BEFORE the stage record is published.
+N1_SUBCOMMIT_LN="$(LC_ALL=C grep -n 'commit_write "\$new_rpath" report-of-record' "$RS" | LC_ALL=C head -1 | cut -d: -f1)"
+N1_PUBLISH_LN="$(LC_ALL=C grep -n 'commit_write "\$sfile" stage-record' "$RS" | LC_ALL=C tail -1 | cut -d: -f1)"
 N1_RECHECK_LN="$(LC_ALL=C grep -n 'report_bytes "\$STAGE_REPORT"' "$RS" | LC_ALL=C tail -1 | cut -d: -f1)"
-if [ -n "$N1_PREP_LN" ] && [ -n "$N1_COMMIT_LN" ] && [ -n "$N1_RECHECK_LN" ] &&
-  [ "$N1_RECHECK_LN" -gt "$N1_PREP_LN" ] && [ "$N1_RECHECK_LN" -lt "$N1_COMMIT_LN" ]; then
-  ok "n1/structural: the re-observation is taken after the write and BEFORE the rename (lines $N1_PREP_LN < $N1_RECHECK_LN < $N1_COMMIT_LN)"
+if [ -n "$N1_SUBCOMMIT_LN" ] && [ -n "$N1_PUBLISH_LN" ] && [ -n "$N1_RECHECK_LN" ] &&
+  [ "$N1_RECHECK_LN" -gt "$N1_SUBCOMMIT_LN" ] && [ "$N1_RECHECK_LN" -lt "$N1_PUBLISH_LN" ]; then
+  ok "n1/structural: the re-observation is taken after the substitute is committed and BEFORE the publication (lines $N1_SUBCOMMIT_LN < $N1_RECHECK_LN < $N1_PUBLISH_LN)"
 else
-  bad "n1/structural: the re-observation is NOT between the write and the rename (prepare=$N1_PREP_LN recheck=$N1_RECHECK_LN commit=$N1_COMMIT_LN)"
+  bad "n1/structural: the re-observation is NOT between the substitute's commit and the publication (subcommit=$N1_SUBCOMMIT_LN recheck=$N1_RECHECK_LN publish=$N1_PUBLISH_LN)"
 fi
-# AND THE RESIDUAL WINDOW IS DECLARED IN THE CODE, because it cannot be removed: there is no
-# compare-and-swap rename reachable from a shell. A comment naming it is what stops the next
-# reader believing the check is atomic.
-if LC_ALL=C grep -q 'RESIDUAL WINDOW' "$RS"; then
-  ok "n1/structural: the irreducible residual window is DECLARED in the source, not left implicit"
+# THE OVERWRITE MUST BE UNEXPRESSIBLE, NOT MERELY UNTAKEN (round 15, U1). The whole of U1 is that
+# no write in this script has `$STAGE_REPORT` as its destination; a single line reintroducing one
+# would restore the destructive shape while (g) above still passed, because (g) asserts about the
+# generation the RECORD names.
+N1_CLOBBER="$(LC_ALL=C grep -c -E '^[^#]*(prepare_write|commit_write) "\$STAGE_REPORT"' "$RS" || true)"
+if [ "$N1_CLOBBER" = "0" ]; then
+  ok "n1/structural: NO write in the script targets \$STAGE_REPORT — the report of record is never a rename destination"
 else
-  bad "n1/structural: nothing in the source declares the residual window"
+  bad "n1/structural: $N1_CLOBBER write(s) target \$STAGE_REPORT: $(LC_ALL=C grep -n -E '^[^#]*(prepare_write|commit_write) "\$STAGE_REPORT"' "$RS")"
+fi
+# AND THE SUBSTITUTE'S DESTINATION IS *RESERVED*, never merely generated (round 12, R1): a
+# predictable fresh name could land on a HISTORICAL report of this stage, destroying the audit
+# trail through the other door.
+if LC_ALL=C grep -q '^[^#]*reserve_report_path "\$issue" "\$kind" "\$dir"' "$RS" &&
+  [ "$(LC_ALL=C grep -c '^[^#]*reserve_report_path "\$issue" "\$kind" "\$dir"' "$RS" || true)" = "2" ]; then
+  ok "n1/structural: BOTH writers of a report path (open and record-author-performed) claim it through reserve_report_path"
+else
+  bad "n1/structural: record-author-performed does not claim its report path through reserve_report_path (found $(LC_ALL=C grep -c '^[^#]*reserve_report_path "\$issue" "\$kind" "\$dir"' "$RS" || true) call(s), want 2)"
+fi
+# AND THE REMAINING WINDOW IS DECLARED IN THE CODE, with its ACTUAL consequence. A comment naming
+# it is what stops the next reader believing the publication is atomic.
+if LC_ALL=C grep -q 'THE REMAINING WINDOW IS DECLARED' "$RS"; then
+  ok "n1/structural: the remaining window is DECLARED in the source, not left implicit"
+else
+  bad "n1/structural: nothing in the source declares the remaining window"
+fi
+# AND ROUND 9's WITHDRAWN CLAIM MAY NOT SURVIVE ANYWHERE. It said a recorded verdict could be LOST
+# in that span and that this was irreducible; it is neither, and a stale declaration is what stops
+# the next person looking. Swept over the script, both boundary scanners' subjects, the suite and
+# the doctrine sites.
+# THE NEEDLES ARE SPLIT so this guard cannot match its own source line — the idiom
+# `test_roborev_review_guard.sh` uses for the same reason: a self-matching scan reds on a healthy
+# tree and is the guard agents learn to waive.
+N1_STALE=0
+N1_STALE_WHERE=""
+N1_N1="one \`m""v\` wide"
+N1_N2="one m""v wide"
+N1_N3="RESIDUAL WINDOW, DECLARED BECAUSE IT ""CANNOT BE REMOVED"
+n1_carries_withdrawn() { LC_ALL=C grep -qiF -e "$N1_N1" -e "$N1_N2" -e "$N1_N3" "$1"; }
+N1_SWEPT=0
+for N1_F in "$RS" "$SCRIPT_DIR/../flow/premerge-assert.sh" "${BASH_SOURCE[0]}" \
+  "$SCRIPT_DIR/../../CLAUDE.md" "$SCRIPT_DIR/../../docs/development/review-stage-reporting.md"; do
+  [ -f "$N1_F" ] || continue
+  N1_SWEPT=$((N1_SWEPT + 1))
+  if n1_carries_withdrawn "$N1_F"; then
+    N1_STALE=$((N1_STALE + 1)); N1_STALE_WHERE="$N1_STALE_WHERE $N1_F"
+  fi
+done
+if [ "$N1_STALE" = "0" ] && [ "$N1_SWEPT" -eq 5 ]; then
+  ok "n1/structural: round 9's WITHDRAWN residual declaration (a narrow irreducible rename span in which a recorded verdict could be lost) survives nowhere ($N1_SWEPT site(s) swept)"
+else
+  bad "n1/structural: $N1_STALE of $N1_SWEPT swept site(s) still carry round 9's withdrawn residual declaration (want 0 of 5):$N1_STALE_WHERE"
+fi
+# A POSITIVE CONTROL, because a sweep that matches nothing is indistinguishable from a sweep that
+# cannot match: a searcher needs one, and this repository has the incident where a scan built to
+# close one blind spot shipped with its own and reported CLEAN on four real sites.
+N1_PLANT="$T/n1-withdrawn-plant.md"
+{
+  printf 'prose that mentions the check, then the withdrawn claim:\n'
+  printf 'the irreducible residual is %s and is declared at the check\n' "$N1_N1"
+} >"$N1_PLANT" 2>/dev/null || true
+if [ -f "$N1_PLANT" ] && n1_carries_withdrawn "$N1_PLANT"; then
+  ok "n1/structural CONTROL: the sweep DOES find the withdrawn declaration when it is present"
+else
+  bad "n1/structural CONTROL: the sweep did not find a PLANTED copy of the withdrawn declaration — the clean result above proves nothing"
 fi
 
 # --- 22. AN AUDIT COUNTER AT ITS CEILING MUST NOT RESTART (round 9, N4) -----------
@@ -4534,7 +4704,21 @@ fi
 # declared read, requiring the guard to red AND to name the command / the STALE entry. That is not a
 # formality: written without an assignment-prefix stripper the scanner reported CLEAN on the real
 # defect and on a planted `cat "$file"`, because every text call here is spelled `LC_ALL=C grep …`.
-ASSERT_FLOOR=813
+#
+# ROUND 15 ADDED 20 HOST-INDEPENDENT ASSERTIONS (813 -> 833), all in section 21 and section 9b, for
+# U1 — the overwrite made UNEXPRESSIBLE rather than narrowed. Section 21 gains case (g), which
+# drives the interleaving at the LAST instant before publication (inside the span round 9 declared
+# irreducible, AFTER the re-observation — the case round 9 said could not be written, writable now
+# because the assertion is that the late verdict SURVIVES rather than that a clobber happens), its
+# RED-CONTROL reconstructing the pre-U1 write destination and requiring the late verdict to be GONE
+# FROM DISK there, four structural pins (the re-observation sits between the substitute's commit and
+# the publication; NO write in the script targets `$STAGE_REPORT`; BOTH report writers claim their
+# path through `reserve_report_path`; the remaining window is declared with its ACTUAL consequence),
+# and a doctrine sweep — with its own positive control — that round 9's WITHDRAWN residual
+# declaration survives at none of the five sites that carried it. Section 9b gains the property
+# itself: the superseded generation still records the FINDINGS, prose included. Every one needs only
+# bash, git and coreutils; none branches on the host.
+ASSERT_FLOOR=833
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

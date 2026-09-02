@@ -117,6 +117,9 @@ agent|sanitize_field via reject_placeholder: a closed charset with '=' excluded
 spawned_iso|now_iso: generated here, ISO-8601
 head_sha|40-hex from git rev-parse, or a closed token when it cannot be resolved
 nonce|nonce_is_valid: alphanumeric, 6-64 chars
+new_nonce|nonce_is_valid: alphanumeric, 6-64 chars (record-author-performed's freshly RESERVED generation)
+prior_gen|STAGE_NONCE (nonce_is_valid: alphanumeric) or the script literal 'legacy' for a pre-nonce record
+rtwn_rc|the stage-record rewrite's exit status, an integer
 STAGE_ELAPSED|`unknown`, or the result of integer arithmetic performed here — never text read from the record
 rendered|a closed-set token plus a cause ALREADY routed through field_value
 state|a script-authored closed token set (the STATUS cause map)

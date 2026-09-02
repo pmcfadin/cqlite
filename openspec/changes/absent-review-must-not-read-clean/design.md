@@ -246,9 +246,26 @@ refusal PREVENT rather than REPORT. The check read the verdict and only then pre
 replacement, so a verdict landing in that window was overwritten anyway — the same harm, now under a
 guard. The observation is therefore re-verified immediately before the rename, on the report's BYTES
 rather than its token (one `FINDINGS` replaced by another leaves the token equal), and any change refuses
-under `--force` too. One `mv` of residual window remains and is declared at the check: no
-compare-and-swap rename is reachable from a shell, and a lock cannot help because the counterparty is an
-arbitrary agent writing the report with its own tooling and taking no lock.
+under `--force` too. Round 9 then DECLARED the remaining span — between the re-observation and the
+`rename(2)` inside one `mv` — as an irreducible residual: no compare-and-swap rename is reachable from a
+shell, and a lock cannot help because the counterparty is an arbitrary agent writing the report with its
+own tooling and taking no lock.
+
+**Round 15 (U1) WITHDRAWS that declaration and removes the overwrite instead.** The reasoning is about
+WHOSE verdict is lost: the party who writes into that span is not a hostile racer, it is a SLOW REVIEWER
+— the population this whole change exists for — so the loss was produced by the system's own normal
+behaviour, and what was lost was a recorded review verdict. A declared boundary is not acceptable for
+that. `record-author-performed` therefore writes to no existing report at all: it reserves a FRESH
+generation with the machinery already here (round 6's nonce, round 12's atomic reservation), writes the
+substitute there, and the stage record — written LAST, the publication marker of round 4's H1 — names it.
+A late reviewer's verdict in the previous generation is then SUPERSEDED rather than DESTROYED: it stays on
+disk, readable, and the new report names the generation it took over from (`supersedes-report-nonce:`).
+The window is not closed; destruction is. Whether the command may PROCEED over a prior verdict stays a
+separate question with its existing rule, and the record rewrite carries every byte but `report-nonce:`
+through verbatim — `head-sha:` is not re-stamped, because re-stamping it would bind a substitute to a
+tree the stage was never opened at, which is round 5's own J1 harm. The transferable rule: **when a check
+can only NARROW a window, ask whether the harm can be made UNEXPRESSIBLE instead — and never declare a
+residual whose victim is your own system's normal behaviour.**
 
 Round 13 (S1) closed the third defect in the same guard, created by round 12's own fix: the guard branched
 on the classified TOKEN, and the UNREADABLE observation state R2 introduced arrives there as `NOT-RUN`,

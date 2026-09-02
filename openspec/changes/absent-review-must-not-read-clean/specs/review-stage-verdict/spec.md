@@ -475,11 +475,27 @@ verdict the operator read and an unreadable report is one nobody read.
 
 #### Scenario: a verdict recorded while the substitute is being prepared is not overwritten
 - **WHEN** a verdict is recorded into the report AFTER the already-recorded check and BEFORE the
-  substitute is installed
-- **THEN** the recording is REFUSED naming that interleaving, NOTHING is installed, and the verdict that
+  substitute is published
+- **THEN** the recording is REFUSED naming that interleaving, NOTHING is published, and the verdict that
   arrived survives
 - **AND** `--force` does not authorize it, because `--force` authorizes replacing the verdict the operator
   read, not one that arrived afterwards
+- **AND** the STAGE RECORD is held to the same rule under its own cause, since the recording rewrites it:
+  a concurrent re-open that published a newer generation SHALL NOT be reverted by a rewrite of bytes read
+  before it
+
+#### Scenario: a recorded verdict is SUPERSEDED, never OVERWRITTEN
+- **WHEN** `record-author-performed` records a substitute for a stage whose report holds any content
+- **THEN** the substitute SHALL be written to a FRESHLY RESERVED report generation and the stage record —
+  written LAST — SHALL name it, so no write of this tool has the report of record as its destination
+- **AND** the previous generation's report SHALL remain on disk, readable, whatever it holds — including a
+  verdict a late reviewer wrote at an instant after every check has run
+- **AND** the new report and the `RECORD-OK` line SHALL name the generation superseded
+  (`supersedes-report-nonce:`), so the surviving verdict is findable rather than merely retained
+- **AND** the record rewrite SHALL carry every other field through VERBATIM — `head-sha:` SHALL NOT be
+  re-stamped and `reopen-count:` SHALL NOT be incremented — and SHALL be MEASURED before it is written
+  (exactly one `report-nonce:` line, reading back as the generation reserved), refusing under its own
+  cause otherwise
 
 #### Scenario: a byte the capture cannot carry does not become a verdict
 - **WHEN** the report of record, or the stage record, or a `--c-verdict` file holds a NUL byte

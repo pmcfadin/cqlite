@@ -780,11 +780,34 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   flag and no trace, while `open` refuses to re-stamp an already-open stage for the far smaller harm of
   restarting a clock: the worse clobber had the weaker guard. **AND IT PREVENTS RATHER THAN REPORTS
   (#3751 round 9)**: the observation the decision was made on — the report's BYTES, since one `FINDINGS`
-  replaced by ANOTHER leaves the token equal — is RE-TAKEN immediately before the atomic rename, and any
+  replaced by ANOTHER leaves the token equal — is RE-TAKEN immediately before the publication, and any
   change refuses (`reason=report-changed-mid-write`), `--force` included, because `--force` authorizes
   replacing the verdict the operator READ and not one that arrived while the substitute was being
-  prepared. The residual is one `mv` wide and is declared at the check: no compare-and-swap rename is
-  reachable from a shell, and a lock would not help, since the counterparty takes none.
+  prepared.
+  **AND NARROWING THAT WINDOW WAS NOT ENOUGH — THE OVERWRITE IS NOW UNEXPRESSIBLE (#3751 round 15,
+  U1)**: round 9 declared the remaining span (between the re-observation and the `rename(2)` inside one
+  `mv`) as a narrow, irreducible residual — no compare-and-swap rename is reachable from a shell, and a
+  lock would not help since the counterparty takes none — accepting that a verdict landing there would
+  be LOST. **That declaration is WITHDRAWN.** It was right about the shell and wrong about the harm: the
+  party who loses a verdict in that span is not a hostile racer, it is **a slow reviewer** — and this
+  mechanism exists *because* delegated reviewers are slow and return late — so the loss came from the
+  system's own normal behaviour, and what was lost was a recorded review verdict. So
+  `record-author-performed` no longer writes to the report of record at all: it reserves a FRESH
+  generation (round 6's nonce + round 12's atomic reservation), writes the substitute there, and the
+  stage record — written LAST, the publication marker — names it. Measured before the fix, with the
+  interleaving driven at that instant: `RECORD-OK … result=AUTHOR-PERFORMED` at exit 0, no `--force`, no
+  `replaced-verdict:`, and the blocking `result: FINDINGS` **gone from disk entirely**; after it, the
+  same interleaving leaves that `FINDINGS` readable in its own generation, named by
+  `supersedes-report-nonce:`, while the published verdict is the substitute. The window is not closed;
+  **destruction is**. Whether the command may PROCEED over a prior verdict is a separate question and
+  keeps its rule (refuse without `--force`; under `--force` record `replaced-verdict:` plus the
+  generation it came from) — and because nothing is overwritten, a wrong decision there is recoverable
+  and auditable rather than silent. The stage record is held to the same mid-write rule
+  (`reason=stage-record-changed-mid-write`), since this call now rewrites it, and that rewrite carries
+  every other byte through VERBATIM: `head-sha:` is NOT re-stamped and `reopen-count:` is not
+  incremented. **The generalisable rule: when a check can only NARROW a window, ask whether the harm can
+  be made UNEXPRESSIBLE instead — and never declare a residual whose victim is your own system's normal
+  behaviour.**
   **AND "COULD NOT READ IT" IS NOT "NOTHING IS RECORDED" (#3751 round 13, S1)**: round 12's
   single-observation classifier introduced an UNREADABLE state, and this guard branched on the
   TOKEN — where that state arrives as `NOT-RUN`, the REPLACEABLE side — so a report whose recorded

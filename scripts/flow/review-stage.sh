@@ -365,18 +365,26 @@
 #         Placeholders are refused exactly as `claim.sh --reason` refuses them — by the same
 #         function `verdict` classifies a HAND-WRITTEN report with, so the two sides cannot
 #         hold the same value to two different strengths.
-#         REFUSES to overwrite a report that already RECORDS a verdict (`PASS`/`FINDINGS`)
+#         REFUSES to supersede a report that already RECORDS a verdict (`PASS`/`FINDINGS`)
 #         without `--force`, and a forced replacement RECORDS the token it replaced
-#         (`replaced-verdict:`) in the new report and on the RECORD-OK line — an overwrite
-#         that leaves no trace turns a recorded refusal into a proceed at the merge point,
-#         which is the audit-trail failure this whole tool exists to remove. A
+#         (`replaced-verdict:`) plus the GENERATION it came from
+#         (`supersedes-report-nonce:`) in the new report and on the RECORD-OK line — a
+#         replacement that leaves no trace turns a recorded refusal into a proceed at the
+#         merge point, which is the audit-trail failure this whole tool exists to remove. A
 #         sentinel-only report is freely replaceable: that is the normal path.
-#         THAT CHECK PREVENTS RATHER THAN REPORTS (#3751 round 9, N1): the observation it
-#         decides on is RE-TAKEN immediately before the atomic rename, and any change refuses
+#         AND NOTHING IS EVER WRITTEN OVER (#3751 round 15, U1): the substitute lands in a
+#         FRESHLY RESERVED generation and the stage record — written LAST — publishes it, so
+#         no write in this script has the report of record as its destination. A verdict a
+#         late reviewer lands at any instant of this call is therefore SUPERSEDED, never
+#         DESTROYED: it stays on disk in its own generation, named by
+#         `supersedes-report-nonce:`. Round 9 (N1) narrowed the overwrite window and declared
+#         the remainder; that declaration is WITHDRAWN, because the overwrite is gone.
+#         THE DECISION IS STILL GUARDED (#3751 round 9, N1): the observation it decides on is
+#         RE-TAKEN immediately before the publication, and any change refuses
 #         (`reason=report-changed-mid-write`) — under `--force` too, since `--force`
 #         authorizes replacing the verdict the operator READ, never one that arrives while the
-#         substitute is being prepared. The irreducible residual is one `mv` wide and is
-#         declared at the check; see `report_bytes`.
+#         substitute is being prepared. The stage record is held to the same rule
+#         (`reason=stage-record-changed-mid-write`), because this call now rewrites it.
 #         AND AN UNREADABLE PRIOR REPORT IS *UNKNOWN*, NOT *ABSENT* (#3751 round 13, S1):
 #         the guard branched on the TOKEN, where an unreadable report arrives as `NOT-RUN`,
 #         i.e. on the REPLACEABLE side, so a possibly-blocking verdict nobody could read was
@@ -1492,6 +1500,78 @@ count_field_lines() {
     "" | *[!0-9]* ) return 1 ;;
   esac
   printf '%s\n' "$out"
+}
+
+# stage_record_text <file> — THE STAGE RECORD'S OWN BYTES, for a rewrite that must PRESERVE every
+# field this version does not know about (#3751 round 15, U1). THREE statuses, the same closed set
+# and the same reasons as `count_field_lines` above:
+#
+#   0  read, faithful          — the text is printed (with trailing newlines stripped by the
+#                                caller's capture, which the rewrite re-terminates)
+#   1  the read FAILED         — permission, I/O, a truncated read (nothing printed)
+#   2  read, NOT REPRESENTABLE — the file holds a NUL 0x00 or SOH 0x01 byte
+#
+# Callers spell the permissive set AFFIRMATIVELY as `0`, so a status added here later refuses by
+# construction rather than inheriting a `!= 1` test.
+#
+# WHY THE WHOLE TEXT AND NOT THE PARSED FIELDS. `record-author-performed` has to publish a record
+# naming a NEW report generation, and everything else about the stage must come out unchanged —
+# `head-sha:` above all, because re-stamping it would let a substitute certify a tree the stage was
+# never opened at, which is round 5's J1 harm. A rewrite assembled from the fields THIS version
+# knows would silently DROP any field it does not (one a newer version writes, or one a human
+# added), and a record that loses a field on every recording is an audit trail that erodes. So the
+# bytes are carried through verbatim and exactly one line is substituted.
+#
+# IT READS THROUGH THE ONE CAPTURE BOUNDARY, with the two-signal completeness assertion
+# (`report_bytes`' pair, for its reasons): the sentinel `E` survives a refactor folding the
+# assignment into its `local` declaration, and the STATUS catches a read that dies on a prefix
+# whose last byte happens to BE an `E` — and here a TRUNCATED read is the worst case of all,
+# because a prefix that stops early would be WRITTEN BACK as the whole record.
+stage_record_text() {
+  local file="$1" text="" rrc=0
+  text="$( { capture_map_nul "$file" && printf 'E'; } 2>/dev/null )" || rrc=$?
+  [ "$rrc" -eq 0 ] || return 1
+  case "$text" in
+    *E) ;;
+    *) return 1 ;;
+  esac
+  text="${text%E}"
+  # A byte the capture cannot carry is its OWN status, so the caller can name it — and it must
+  # never be written back, because after the mapping a NUL and a literal SOH are indistinguishable
+  # and the rewrite would make the mapped byte durable.
+  case "$text" in
+    *"$CAPTURE_NUL_BYTE"*) return 2 ;;
+  esac
+  printf '%s' "$text"
+}
+
+# record_text_with_nonce <record-text> <nonce> — the record's own text with its `report-nonce:`
+# line REPLACED (or APPENDED, when the record predates the field), every other byte carried
+# through VERBATIM (#3751 round 15, U1).
+#
+# THE GRAMMAR IS THE READERS' GRAMMAR, not a second spelling of it: `^[[:space:]]*report-nonce:`,
+# case-insensitive, exactly as `read_field_from` and `count_field_lines` anchor it. Two spellings
+# of one grammar are two opinions about which line names the current report, and a divergence there
+# is a reader taking a nonce this writer did not write.
+#
+# SEVERAL SUCH LINES CANNOT REACH HERE — `load_stage` reports that record as a DEFECT and the
+# caller refuses on it before anything is written — but the substitution is written to collapse
+# them to ONE anyway, because a rewrite that could emit two `report-nonce:` lines would produce a
+# record every reader then refuses, i.e. this tool bricking its own stage.
+#
+# THE CANONICAL SPELLING IS WRITTEN BACK (no leading whitespace, one space after the colon), for
+# the one line whose value this function chooses. Nothing else is re-spelled.
+record_text_with_nonce() {
+  local text="$1" nonce="$2"
+  printf '%s\n' "$text" | RTWN_NONCE="$nonce" LC_ALL=C awk '
+    BEGIN { n = ENVIRON["RTWN_NONCE"]; done = 0 }
+    tolower($0) ~ /^[ \t]*report-nonce:/ {
+      if (done == 0) { printf "report-nonce: %s\n", n; done = 1 }
+      next
+    }
+    { print }
+    END { if (done == 0) printf "report-nonce: %s\n", n }
+  '
 }
 
 now_epoch() { date -u +%s; }
@@ -2613,6 +2693,22 @@ cmd_record_author_performed() {
   # coverable by it: `--force` authorizes replacing THE VERDICT THE OPERATOR READ, and nobody read
   # this one — and refusing strands no one, because `open <kind> --force` moves the stage to a fresh
   # report at a fresh nonce and leaves the unreadable file on disk as history.
+  # THE PATH WALK IS NOW A *READ*-SIDE GUARD, AND IT IS STILL REQUIRED (#3751 round 15, U1). Round
+  # 1's F5 walk ran here because this subcommand WROTE `$STAGE_REPORT`; since U1 it writes a fresh
+  # generation instead and never touches this path — but it still READS THE PRIOR VERDICT FROM IT,
+  # and two of the states the walk refuses would corrupt that reading:
+  #   a SYMLINK  -> the decision would be made on ANOTHER FILE's content, and the
+  #                 `supersedes-report-nonce:` trail this recording leaves would name a generation
+  #                 whose content lives somewhere else entirely;
+  #   a DIRECTORY (or any non-regular file) -> `report_bytes`' `[ ! -f ]` probe answers
+  #                 `no-such-file`, i.e. the PERMISSIVE `absent` state, so a report nobody could
+  #                 measure would be read as "no recorded verdict to supersede". "Cannot tell" must
+  #                 not take the permissive branch, and that is what this walk stops here.
+  # `assert_ignored` is deliberately NOT called on this path any more: its reason is that this tool
+  # WRITES the file mid-run (#2926/#3648), and it no longer does. The two paths this call does write
+  # are each verified where they are claimed — the fresh report inside `reserve_report_path`, the
+  # stage record immediately before its own `prepare_write`.
+  assert_no_symlink "$STAGE_REPORT" report-of-record
   local prior_cls prior_token prior_obs prior_state replaced=""
   prior_obs="$(report_bytes "$STAGE_REPORT")"
   prior_state="$(report_state "$prior_obs")"
@@ -2630,25 +2726,118 @@ cmd_record_author_performed() {
     PASS | FINDINGS)
       if [ "$force" -ne 1 ]; then
         emit "AUTHOR-REFUSED reason=verdict-already-recorded kind=$kind issue=$issue recorded-verdict=$prior_token report=$(field_value "$STAGE_REPORT")"
-        emit "AUTHOR-REFUSED detail=this stage already RECORDS a verdict, and replacing it here would destroy it with no trace — a recorded FINDINGS would become a merge-proceeding AUTHOR-PERFORMED. Read it first ($prog verdict $kind --issue $issue). If the substitute really does supersede it, pass --force: the replaced token is then RECORDED in the new report."
+        emit "AUTHOR-REFUSED detail=this stage already RECORDS a verdict, and superseding it here without saying so would report a merge-proceeding AUTHOR-PERFORMED over a verdict somebody wrote — a recorded FINDINGS would stop blocking. Read it first ($prog verdict $kind --issue $issue). If the substitute really does supersede it, pass --force: the replaced token AND the generation it came from are then RECORDED in the new report, and that generation's report stays on disk as history."
         exit 2
       fi
       replaced="$prior_token"
-      note "--force: REPLACING a recorded $prior_token verdict with AUTHOR-PERFORMED; the replaced token is recorded in the report"
+      note "--force: SUPERSEDING a recorded $prior_token verdict with AUTHOR-PERFORMED; the replaced token and the generation it came from are recorded in the new report, and that generation's report is left on disk as history"
       ;;
   esac
 
-  assert_no_symlink "$STAGE_REPORT" report-of-record
-  assert_ignored "$STAGE_REPORT" report-of-record
+  # THE SUBSTITUTE LANDS IN A FRESH GENERATION — THE PRIOR REPORT IS NEVER WRITTEN OVER (#3751
+  # round 15, U1).
+  #
+  # THE FINDING, AND WHY ROUND 9's DECLARED RESIDUAL WAS NOT ACCEPTABLE. Every earlier version of
+  # this subcommand wrote the substitute AT `$STAGE_REPORT`, so the last act of the recording was a
+  # `rename(2)` OVER the report of record. Round 9 (N1) narrowed the window by re-observing the
+  # bytes immediately before that rename and DECLARED the remainder as a narrow, irreducible span
+  # (a shell has no compare-and-swap rename), accepting that a verdict landing in it would be
+  # lost. That was true about the shell and wrong about the HARM. The party who loses their verdict in that span is not a hostile racer: it is A SLOW
+  # REVIEWER, and #3751 exists BECAUSE delegated reviewers are slow and return late. So the loss
+  # was caused by this population's own normal behaviour, and what was lost was a RECORDED REVIEW
+  # VERDICT — precisely the harm this issue was filed to prevent. Measured on the shipped script
+  # with the interleaving driven at that instant: `RECORD-OK … result=AUTHOR-PERFORMED` at exit 0,
+  # no `--force`, no `replaced-verdict:`, and the blocking `result: FINDINGS` GONE FROM DISK
+  # ENTIRELY (`grep -r` across the stage directory found nothing).
+  #
+  # SO THE OVERWRITE IS MADE STRUCTURALLY IMPOSSIBLE INSTEAD OF NARROWED. This uses the generation
+  # machinery that already exists — round 6's nonce and round 12's atomic reservation: the
+  # substitute is written to a FRESHLY RESERVED report path, and the stage record (the publication
+  # marker, written LAST — round 4's H1) is what names it. Nothing writes to `$STAGE_REPORT` at
+  # all, so a late reviewer's `FINDINGS` in the previous generation IS NEVER DESTROYED: it stays on
+  # disk, readable, in its own generation, which is what an audit trail is for. That is the same
+  # subtraction round 6 made for `open --force` (J1), applied to the one write path that still
+  # clobbered.
+  #
+  # WHAT IS STILL A SEPARATE QUESTION, AND KEEPS ITS EXISTING RULE: whether the command may PROCEED
+  # when a prior verdict exists. Protecting the BYTES does not authorize the ACT, so the guard
+  # above is unchanged — refuse without `--force`, and under `--force` record the `replaced-verdict:`
+  # trace naming the prior token AND the prior generation. Since nothing is overwritten, a wrong
+  # decision there is now RECOVERABLE and AUDITABLE rather than silent.
+  #
+  # ROUND 13's S1 RULE IS UNCHANGED TOO: an UNREADABLE prior verdict still refuses, because
+  # *unknown* is not *absent* — and it refuses even though nothing would be destroyed, since a
+  # recording that supersedes a verdict nobody could read is still a merge-proceeding token
+  # published over an unknown one.
+  local sfile dir rec_text srt_rc=0
+  sfile="$(stage_file "$issue" "$kind")"
+  dir="$(dirname "$sfile")"
+  # THE RECORD'S OWN BYTES, READ BEFORE ANYTHING IS WRITTEN. The rewrite below substitutes exactly
+  # one line of them, so every other field — `head-sha:` above all — comes out unchanged. A
+  # `load_stage` that already reported no `STAGE_RECORD_DEFECT` does not make this read redundant:
+  # it is the text that will be WRITTEN BACK, and a read that failed or was truncated must not
+  # become the whole record.
+  rec_text="$(stage_record_text "$sfile")" || srt_rc=$?
+  case "$srt_rc" in
+    0) ;;
+    2)
+      emit "AUTHOR-REFUSED reason=stage-record-unrepresentable kind=$kind issue=$issue record=$(field_value "$sfile")"
+      emit "AUTHOR-REFUSED detail=this stage's record holds a NUL 0x00 or SOH 0x01 byte, which no text record may contain, so it could not be read as text and NOTHING was written. This recording has to REPUBLISH the record naming a fresh report generation, and a record that cannot be read as text cannot be rewritten without making that byte durable. Rewrite the record as text, or remove the stage directory and open a fresh stage. This is NOT a permission problem: do not chmod it."
+      exit 2
+      ;;
+    *)
+      emit "AUTHOR-REFUSED reason=stage-record-unreadable kind=$kind issue=$issue record=$(field_value "$sfile")"
+      emit "AUTHOR-REFUSED detail=this stage's record EXISTS and could not be READ, so the record this recording must REPUBLISH could not be measured and NOTHING was written. A truncated or failed read must not be written back as the whole record — that would silently drop the head-sha this stage is bound to. Fix the record's permissions, or remove the stage directory and open a fresh stage."
+      exit 2
+      ;;
+  esac
 
-  prepare_write "$STAGE_REPORT" report-of-record
+  # THE FRESH GENERATION, CLAIMED ATOMICALLY (#3751 round 12, R1) — the same call `open` makes,
+  # with the same two named causes, because the operator action differs: a token that could not be
+  # GENERATED means this box has no usable `mktemp`; tokens that could not be CLAIMED mean the
+  # directory cannot be written. NO FALLBACK to an unreserved name: that is exactly the value the
+  # reservation removes, and a predictable substitute would let this recording land on a
+  # HISTORICAL report of this stage — destroying the audit trail through the other door.
+  local rrc=0 new_nonce new_rpath
+  reserve_report_path "$issue" "$kind" "$dir" || rrc=$?
+  if [ "$rrc" -ne 0 ]; then
+    if [ "$rrc" -eq 1 ]; then
+      emit "AUTHOR-REFUSED reason=report-nonce-not-generated kind=$kind issue=$issue value=$(field_value "${REPORT_NONCE:-<none>}")"
+      emit "AUTHOR-REFUSED detail=an unpredictable report nonce could not be generated, so NO fresh report path was derived and NOTHING was written. The nonce comes from mktemp -u's name substitution, so this box has no usable mktemp. There is deliberately no fallback to a predictable token: a substitute recorded at a name this tool can guess is a substitute that can land on a HISTORICAL report of this stage."
+    else
+      emit "AUTHOR-REFUSED reason=report-nonce-not-reserved kind=$kind issue=$issue attempts=$RESERVE_ATTEMPTS"
+      emit "AUTHOR-REFUSED detail=a fresh report path could not be CLAIMED in $RESERVE_ATTEMPTS attempt(s), so NOTHING was written and the stage record still names the report it named before. Each attempt generates a fresh nonce and creates that path O_EXCL, so a name already on disk is retried rather than written through. Either this stage directory is not writable, or something is occupying the names generated."
+    fi
+    exit 2
+  fi
+  new_nonce="$REPORT_NONCE"
+  new_rpath="$REPORT_RESERVED"
+  # WHICH GENERATION THIS SUBSTITUTE TAKES OVER FROM. `legacy` is the affirmative reading of a
+  # PRE-NONCE record (the one report every earlier version of this tool wrote, at the bare
+  # `<kind>.md`), not a placeholder for something unmeasured — a record we could not read has
+  # already refused above.
+  local prior_gen="${STAGE_NONCE:-legacy}"
+
+  prepare_write "$new_rpath" report-of-record
   {
     printf '# review stage: %s — issue #%s (AUTHOR-PERFORMED substitute)\n' "$kind" "$issue"
     printf '\n'
     printf 'result: AUTHOR-PERFORMED\n'
     printf '\n'
+    # WHICH GENERATION THIS FILE IS. A human-facing note, exactly as the sentinel report carries
+    # one: an agent (or an operator) holding a SUPERSEDED file can see that it is not the current
+    # one. It is NOT a location and no reader takes the path from it — readers take the nonce from
+    # the STAGE RECORD and nothing else, because a report is author-controlled text (round 4, H2).
+    printf 'report-nonce: %s\n' "$new_nonce"
+    # AND WHICH GENERATION IT TOOK OVER FROM — always a fact, so always printed (#3751 round 15,
+    # U1). It is what an operator follows to the report that was current before this recording,
+    # which is STILL ON DISK: this substitute was written to a fresh generation and overwrote
+    # nothing.
+    printf 'supersedes-report-nonce: %s\n' "$prior_gen"
     # THE TRACE. Emitted only when something was actually replaced, so its ABSENCE is not a
-    # claim: a normal recording over the sentinel says nothing about a replacement.
+    # claim: a normal recording over the sentinel says nothing about a replacement. It names the
+    # TOKEN that stopped being this stage's verdict; the generation it lived in is on the line
+    # above, so the two together say exactly where to read what was superseded.
     [ -z "$replaced" ] || printf 'replaced-verdict: %s\n' "$replaced"
     printf 'performed-by: %s\n' "$performed_by"
     printf 'reason: %s\n' "$reason_tok"
@@ -2669,32 +2858,69 @@ cmd_record_author_performed() {
     printf 'Peer review is preferred; a hand audit is the sanctioned fallback only, and it\n'
     printf 'is sanctioned at all because an audit whose working is shown is auditable,\n'
     printf 'whereas an absent one is not.\n'
+    printf '\n'
+    printf 'THIS FILE IS A FRESH GENERATION. It overwrote nothing: the report that was current\n'
+    printf 'before this recording is still on disk, under the nonce named by\n'
+    printf '`supersedes-report-nonce:` above, and a verdict a late reviewer wrote into it is\n'
+    printf 'readable there. A superseded report is HISTORY, which is what an audit trail is for.\n'
   } >&9
-  # RE-VERIFIED IMMEDIATELY BEFORE THE RENAME (#3751 round 9, N1). The check above REPORTED the
-  # verdict it found and then spent a `mktemp`, an `O_EXCL` create, a `date` and a dozen `printf`s
-  # before installing its replacement — so a late reviewer recording FINDINGS anywhere in that
-  # span was silently overwritten by the merge-proceeding AUTHOR-PERFORMED token, with no
-  # `--force` and no `replaced-verdict:` trace. A check placed before the act it guards, with a
-  # window in between, can only REPORT; the control has to be that the bad state cannot be
-  # REACHED. So the observation the decision was made on is re-taken HERE, after the substitute is
-  # fully written to the temporary file and before anything is installed at the destination.
+  commit_write "$new_rpath" report-of-record
+
+  # THE STAGE RECORD, WRITTEN LAST: its content is what PUBLISHES which report of this stage is
+  # current (#3751 round 4, H1), so it must not name the substitute until the substitute is
+  # actually on disk. Reversed, a record naming a generation that does not exist yet is a
+  # `report absent` non-verdict — which is a refusal, not a false certification — and that is the
+  # partial state this order chooses.
   #
-  # ONE RULE, NOT A MATRIX: the report must be BYTE-IDENTICAL to the observation this call
-  # decided on. Any change at all refuses — including under `--force`, because `--force`
-  # authorizes replacing the verdict the operator READ, and a different verdict arriving
-  # afterwards was never authorized by anyone.
+  # EVERY OTHER BYTE OF THE RECORD IS CARRIED THROUGH VERBATIM (see `record_text_with_nonce`).
+  # `head-sha:` in particular is NOT re-stamped: this recording is not a re-open, and re-stamping
+  # it would bind a substitute to a tree the stage was never opened at — round 5's J1 harm. Nor is
+  # `reopen-count:` incremented: no agent was re-spawned, and that counter answers a different
+  # question.
+  local new_rec rtwn_rc=0 nonce_lines=0 nonce_back=""
+  new_rec="$(record_text_with_nonce "$rec_text" "$new_nonce")" || rtwn_rc=$?
+  # THE REWRITE IS MEASURED, NOT ASSUMED. A record that came out with no `report-nonce:` line, or
+  # with several, or with a value that is not the generation just reserved, would publish a stage
+  # every reader then refuses — this tool bricking its own stage — so a positive verdict here
+  # requires an affirmative measurement, taken over the TEXT ABOUT TO BE WRITTEN and read with the
+  # readers' own grammar rather than a second spelling of it.
+  if [ "$rtwn_rc" -eq 0 ]; then
+    nonce_lines="$(LC_ALL=C grep -c -i '^[[:space:]]*report-nonce:' <<<"$new_rec" 2>/dev/null || true)"
+    nonce_back="$(read_field_from "$new_rec" report-nonce)"
+  fi
+  if [ "$rtwn_rc" -ne 0 ] || [ "$nonce_lines" != 1 ] || [ "$nonce_back" != "$new_nonce" ]; then
+    emit "AUTHOR-REFUSED reason=record-rewrite-unverified kind=$kind issue=$issue record=$(field_value "$sfile") rewrite-rc=$rtwn_rc nonce-lines=$(field_value "$nonce_lines") nonce-read-back=$(field_value "${nonce_back:-<none>}") want=$(field_value "$new_nonce")"
+    emit "AUTHOR-REFUSED detail=the stage record could not be rewritten to name the fresh report generation, so NOTHING was published and the record still names the report it named before. The substitute report was written at the fresh generation and is left on disk as history, exactly as a superseded report is; nothing was destroyed. Read the record and repair it, or remove the stage directory and open a fresh stage."
+    exit 2
+  fi
+  assert_ignored "$sfile" stage-record
+  prepare_write "$sfile" stage-record
+  printf '%s\n' "$new_rec" >&9
+  # RE-VERIFIED IMMEDIATELY BEFORE THE PUBLICATION (#3751 round 9, N1; retargeted in round 15,
+  # U1). Round 9 put this check immediately before the rename that OVERWROTE the report, because
+  # the harm it guarded was destruction. Destruction is now impossible by construction, so what
+  # this check guards is the DECISION: the recording was authorized against the verdict the
+  # operator READ, and if a different one arrived since, nobody authorized superseding THAT.
   #
-  # RESIDUAL WINDOW, DECLARED BECAUSE IT CANNOT BE REMOVED: the rename itself is not conditional.
-  # There is no compare-and-swap rename reachable from a shell — coreutils `mv` exposes neither
-  # `RENAME_EXCHANGE` nor `RENAME_NOREPLACE`, and `mv -n` is the wrong predicate (it refuses ANY
-  # existing destination, and the destination here legitimately exists — it is the sentinel). So
-  # what remains open is the span between this read and the `rename(2)` inside the single `mv`
-  # below: one fork/exec, with nothing else in between, and it is the minimum this language can
-  # express. A declared narrow window is acceptable; a silent one is not. Note also that a LOCK
-  # would not help even if one were free: the counterparty is an ARBITRARY AGENT writing the
-  # report with its own tooling and taking no lock, so only a unilateral compare-and-swap could
-  # close it, which is exactly what is unavailable.
-  local now_obs now_cls
+  # ONE RULE, NOT A MATRIX: the report must be BYTE-IDENTICAL to the observation this call decided
+  # on. Any change at all refuses — `--force` included, because `--force` authorizes replacing the
+  # verdict the operator read, not one that arrived afterwards.
+  #
+  # AND THE RECORD MUST STILL BE THE RECORD THIS REWRITE WAS DERIVED FROM. This call now WRITES the
+  # record, which round 9's version did not, so it owes the same guarantee about it: a concurrent
+  # `open --force` that published a new generation in the meantime would otherwise be silently
+  # reverted by a rewrite of the bytes this process read before it.
+  #
+  # THE REMAINING WINDOW IS DECLARED, AND ITS CONSEQUENCE IS NOT DESTRUCTION. The span between
+  # these reads and the `rename(2)` inside the single `mv` below is still one fork/exec wide, and
+  # there is still no compare-and-swap rename reachable from a shell (coreutils `mv` exposes
+  # neither `RENAME_EXCHANGE` nor `RENAME_NOREPLACE`). What lands in it is a verdict that gets
+  # SUPERSEDED rather than DESTROYED: it stays on disk in its own generation and `verdict` reports
+  # the published one. Round 9 declared this span as irreducible and accepted that a recorded
+  # review verdict could be LOST in it; that declaration is WITHDRAWN, because the harm was the
+  # overwrite and the overwrite is gone. The window itself is not closed, and no site may claim
+  # a lost verdict is still possible here.
+  local now_obs now_cls now_rec_obs
   now_obs="$(report_bytes "$STAGE_REPORT")"
   if [ "$now_obs" != "$prior_obs" ]; then
     # The classification is produced HERE, on the refusal path ONLY: it is a DIAGNOSTIC naming
@@ -2705,12 +2931,18 @@ cmd_record_author_performed() {
     # otherwise name a third state, and "what arrived" would be a claim about none of them.
     now_cls="$(classify_report "$STAGE_REPORT" 1 "" "$now_obs")"
     emit "$REFUSE_MARKER reason=report-changed-mid-write kind=$kind issue=$issue report=$(field_value "$STAGE_REPORT") now-verdict=$(field_value "${now_cls%%|*}")"
-    emit "$REFUSE_MARKER detail=the report of record CHANGED between the already-recorded check and this write, so NOTHING was installed — the prepared substitute is discarded and whatever is in the report now is intact. This is the interleaving that guard exists to stop: a review landing a verdict while a substitute was being prepared would otherwise be replaced by the merge-proceeding AUTHOR-PERFORMED token with no trace. READ what is there now ($prog verdict $kind --issue $issue) and decide again; --force does not cover it, because it authorizes replacing the verdict you read, not one that arrived afterwards."
+    emit "$REFUSE_MARKER detail=the report of record CHANGED between the already-recorded check and this publication, so NOTHING was published — the stage record still names the report it named before, and whatever is in that report now is intact and untouched. This is the interleaving that guard exists to stop: a review landing a verdict while a substitute was being prepared must not be superseded by the merge-proceeding AUTHOR-PERFORMED token with no trace. READ what is there now ($prog verdict $kind --issue $issue) and decide again; --force does not cover it, because it authorizes replacing the verdict you read, not one that arrived afterwards. The substitute written at the fresh generation is left on disk as history and nothing reads it."
     exit 2
   fi
-  commit_write "$STAGE_REPORT" report-of-record
+  now_rec_obs="$(stage_record_text "$sfile" 2>/dev/null || printf '<unreadable>')"
+  if [ "$now_rec_obs" != "$rec_text" ]; then
+    emit "$REFUSE_MARKER reason=stage-record-changed-mid-write kind=$kind issue=$issue record=$(field_value "$sfile")"
+    emit "$REFUSE_MARKER detail=the STAGE RECORD changed between the read this rewrite was derived from and this publication, so NOTHING was published. Writing the rewrite now would revert whatever landed — most likely a concurrent open --force that moved this stage to a newer generation — back to the record this process read before it. Read the record ($prog status $kind --issue $issue) and decide again. The substitute written at the fresh generation is left on disk as history and nothing reads it."
+    exit 2
+  fi
+  commit_write "$sfile" stage-record
 
-  emit "RECORD-OK kind=$kind issue=$issue result=AUTHOR-PERFORMED performed-by=$performed_by reason=$reason_tok evidence=$evidence_tok${replaced:+ replaced-verdict=$replaced} report=$(field_value "$STAGE_REPORT")"
+  emit "RECORD-OK kind=$kind issue=$issue result=AUTHOR-PERFORMED performed-by=$performed_by reason=$reason_tok evidence=$evidence_tok report-nonce=$new_nonce supersedes-report-nonce=$prior_gen${replaced:+ replaced-verdict=$replaced} report=$(field_value "$new_rpath")"
   emit "RECORD-NOTE kind=$kind issue=$issue $AUTHOR_DISCLOSURE"
   exit 0
 }
