@@ -6649,6 +6649,53 @@ assert_says 'case (mp20b) and the declared read limit, because a read is claimed
 assert_lacks 'case (mp20b) and it is not a could-not-check' 'no thread was read'
 reset_stub
 
+printf '== (mp21) #3759 r7: NO linked issues + a FAILING repository resolution is still no-subject ==\n'
+# ROUND-7 FINDING 1, AND IT COST CORRECTNESS RATHER THAN A CALL. The current repository used to be
+# resolved BEFORE the relation was read, so a PR with NO linked issues at all still depended on
+# `gh repo view` — and when that call failed while the relation was perfectly readable, the probe
+# reported "could NOT be checked" where the truthful answer was the definitive `no-subject`. A
+# could-not-tell reported WHERE AN ANSWER EXISTS is the exact inverse of the collapse this path is
+# built against, and just as wrong: it hides a finished check behind an apparent infrastructure fault.
+reset_stub
+mp_waiver_fixture
+STUB_GH_REPO_RC=1
+run_wrapper "$w_work"
+assert_verdict 'case (mp21)' FAIL 1
+assert_no_marker_form 'case (mp21)'
+assert_says 'case (mp21) the definitive answer survives an unrelated resolution failure' \
+  'no linked issue is declared on this PR, so no linked-issue thread was checked'
+assert_lacks 'case (mp21) and it is NOT reported as a could-not-check' 'could NOT be checked'
+assert_lacks 'case (mp21) nor does it name a resolution the answer never needed' \
+  'gh repo view --json nameWithOwner'
+# MEASURED, NOT INFERRED: the call is NOT MADE, not merely ignored — which is the only version an
+# invocation log can distinguish, and the same standard the probe's own reachability is held to.
+if grep -qE 'gh repo view' "$INVOKED"; then
+  bad 'case (mp21): the repository was resolved for a PR with no linked references at all — the answer does not depend on it, so the call must not be made'
+else
+  ok 'case (mp21): no repository resolution was performed (checked against the stub invocation record)'
+fi
+reset_stub
+
+printf '== (mp21b) #3759 r7: WITH references, the resolution IS required and its failure IS reported ==\n'
+# The control: one variable changes — a reference now exists — and the same failing resolution becomes
+# load-bearing, so it must be reported rather than swallowed. Without this, (mp21) would pass
+# identically if the repository resolution had simply been deleted.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_REPO_RC=1
+run_wrapper "$w_work"
+assert_verdict 'case (mp21b)' FAIL 1
+assert_says 'case (mp21b) with references to classify, the failed resolution is the cause' \
+  "the linked-issue thread could NOT be checked: 'gh repo view --json nameWithOwner' failed"
+assert_lacks 'case (mp21b) and it is not misreported as no-subject' 'no linked issue is declared on this PR'
+if grep -qE 'gh repo view' "$INVOKED"; then
+  ok 'case (mp21b): the repository WAS resolved once a reference needed classifying (the ordering is conditional, not removed)'
+else
+  bad 'case (mp21b): the repository was never resolved even with a reference to classify, so (mp21) proves nothing about ordering'
+fi
+reset_stub
+
 printf '== (mp12) #3759 MUTANT: probing on EVERY state reds — the escalation is only from none ==\n'
 # A CASE THAT PASSES AGAINST BOTH THE REAL CODE AND ITS NAIVE FORM MEASURES NOTHING. The naive form
 # here is "probe whatever the PR-side state was", which overwrites a precise STALE with a vaguer
@@ -8181,6 +8228,42 @@ fi
 # "simplification" would quietly undo. Neither substitutes for the other — a structural assert cannot
 # see a granting path built some other way, and a behavioural case cannot see a granting path nobody
 # fixtured.
+printf '== structural (#3759 r7): the documented output-state contracts list every state ==\n'
+# A COMMENT NAMING A MECHANISM IS A CLAIM ABOUT CODE and decays exactly like any other. These two
+# headers enumerate what their function can emit, and a CLOSED list missing states is worse than no
+# list, because a caller trusts it — the waiver's omitted `unauthorized` predates #3759 and had gone
+# unnoticed for exactly that reason. Asserted against the states the code can actually assign.
+# EXTRACTED TO FILES, NEVER PIPED INTO `grep -q` (#3387). The polarity here is fail-CLOSED in the
+# noisy direction — `grep -q` exits at its first match, SIGPIPEs the upstream `sed`, this file's
+# `pipefail` takes the 141, and a state that IS documented reads as missing. Caught in review of this
+# very block: two consecutive runs reported DIFFERENT states missing, which is the race and not the
+# contract. A guard that reds at random is one agents learn to ignore, so it is removed rather than
+# tolerated.
+_sc_bad=""
+_sc_wh="$tmp/state-contract-waiver.txt"
+_sc_dh="$tmp/state-contract-deferral.txt"
+# THE VALUE LINES ONLY, NOT THE HEADER PARAGRAPH AROUND THEM. Caught by this block's own mutant: with
+# the whole header extracted, the PROSE explaining which states had been missing named those states,
+# so deleting them from the CONTRACT still read as clean — a check about code satisfied by a comment,
+# which is the shape this repository already lints for elsewhere. The extraction now runs from the
+# state key to the next key and stops.
+awk '/^#   ROBOREV_WAIVER_STATE/{f=1} f&&/^#   ROBOREV_WAIVER_AUTHOR/{exit} f' "$ORACLES" >"$_sc_wh" || true
+awk '/^#   ROBOREV_DEFERRAL_STATE/{f=1} f&&/^#   ROBOREV_DEFERRAL_AUTHOR/{exit} f' "$ORACLES" >"$_sc_dh" || true
+[ -s "$_sc_wh" ] || _sc_bad="$_sc_bad waiver-header-not-found"
+[ -s "$_sc_dh" ] || _sc_bad="$_sc_bad deferral-header-not-found"
+for _sc_state in granted unauthorized stale malformed none misplaced unavailable; do
+  grep -qF -- "$_sc_state" "$_sc_wh" || _sc_bad="$_sc_bad waiver-header-missing:$_sc_state"
+done
+for _sc_state in granted unauthorized stale malformed none misplaced count-mismatch \
+                 issue-absent issue-closed issue-unverifiable unavailable; do
+  grep -qF -- "$_sc_state" "$_sc_dh" || _sc_bad="$_sc_bad deferral-header-missing:$_sc_state"
+done
+if [ -z "$_sc_bad" ]; then
+  ok 'structural (#3759): both lookup headers enumerate every state their function can emit, misplaced included'
+else
+  bad "structural (#3759): a documented output-state contract is incomplete —$_sc_bad. An inaccurate contract on a security-relevant function is what stops the next reader looking, and a closed list missing a state is worse than no list because a caller trusts it"
+fi
+
 printf '== structural (#3759 r6): the ONE name grammar means the SAME THING to both consumers ==\n'
 # ROUND-6 FINDING, AND IT FALSIFIED A STATED INVARIANT rather than adding an edge case. Hoisting the
 # grammar into one definition was supposed to deliver ONE GRAMMAR WITH ONE MEANING; it delivered one

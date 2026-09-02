@@ -240,6 +240,15 @@ a re-pointed relation is a diagnostic naming the wrong issue, or none, and the r
 relation must go with it**; that boundary SHALL be written in the source beside the call, because a
 future edit adding a granting consumer reads the code before it reads a design document.
 
+**THE RELATION SHALL BE READ BEFORE THE REPOSITORY IS RESOLVED, AND AN EMPTY RELATION SHALL BE
+ANSWERED WITHOUT RESOLVING IT AT ALL.** The repository identity exists only to classify references, so
+a pull request declaring **none** SHALL reach the definitive *no linked issue* outcome without that
+call being made — not merely without its result being used. Resolving first made a **failure of a call
+the answer never needed** report *"could not be checked"* where a definitive answer existed: a
+could-not-tell reported **where an answer exists**, which is the inverse of the collapse this path is
+built against and equally wrong, because it hides a completed check behind an apparent infrastructure
+fault.
+
 **THE RESOLVER SHALL BE A SEPARATE, LATER CALL, AND THE GRANTING PATH'S PAYLOAD SHALL NOT CHANGE
 SHAPE.** The existing single `gh pr view --json comments` call SHALL remain **exactly as it is**. The
 relation SHALL NOT be folded into it as
@@ -370,6 +379,14 @@ SHALL say so.
 #### Scenario: The granting call is unchanged and the resolver is a separate call
 - **WHEN** this change is applied
 - **THEN** the existing `gh pr view --json comments` invocation is unchanged, no invocation requests `comments,closingIssuesReferences` together, and the relation is fetched by its own later call
+
+#### Scenario: No linked issue, and the repository resolution fails
+- **WHEN** a pull request declares no closing reference and the call that resolves the current repository would fail
+- **THEN** the outcome is the definitive *no linked issue is declared* result, not a could-not-check, and the repository resolution is not performed at all
+
+#### Scenario: With references to classify, a failed repository resolution is reported
+- **WHEN** a pull request declares a closing reference and the repository resolution fails
+- **THEN** the outcome is a could-not-check naming that resolution, so the ordering above is shown to be conditional rather than the resolution having been removed
 
 #### Scenario: The relation is never fetched on a state that already granted or already diagnosed
 - **WHEN** the PR-side scan returns `granted`, `unauthorized`, `stale`, `malformed`, `count-mismatch` or `unavailable`
@@ -628,6 +645,10 @@ grep SHALL be recorded in the pull-request body.
 #### Scenario: An agent reads the residual after this change
 - **WHEN** an agent or lead reads the waiver or deferral residual in `CLAUDE.md`
 - **THEN** it names the linked-issue thread as the most probable misplacement alongside a review body and a review-thread reply, and records that a misplaced marker is reported `MISPLACED` and grants nothing
+
+#### Scenario: The documented output-state contracts are complete
+- **WHEN** either lookup's header comment enumerates the states it can emit
+- **THEN** every state the function can actually assign is listed — `misplaced` included — and the test reads the contract's own value lines rather than the surrounding prose, so a paragraph mentioning a state cannot satisfy a check about the contract
 
 #### Scenario: The in-source residuals match the doctrine
 - **WHEN** an implementer reads the two RESIDUALS comment blocks in `roborev-review-oracles.sh` and the `--help` output

@@ -1237,19 +1237,26 @@ ROBOREV_GH_NAME_RE='[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456
 # LIST? Sets, and never returns non-zero:
 #   ROBOREV_JSONF_OK     1 (affirmatively yes) | 0 (anything else)
 #   ROBOREV_JSONF_CAUSE  the reason, when 0
+#   ROBOREV_JSONF_LEN    the LIST's length, when 1 — reported here because this function has already
+#                        parsed the payload, so a caller needing the count gets it without a SECOND
+#                        parse site, which is what the chokepoint exists to prevent. Affirmatively
+#                        validated as digits before it is published: an unreadable count is not a
+#                        count, and a caller must not be handed one it cannot trust.
 #
 # THE ONLY PLACE A PAYLOAD SHAPE IS JUDGED on this path. A missing key, an explicit `null`, a non-list
 # value, a non-object top level and an unparseable body are ONE answer here — none of them is the
 # shape we require — but they are never the PERMISSIVE answer, which is the whole point: `gh` always
 # returns the field it was asked for, so any of these is a broken payload and never an empty result.
 roborev_json_list_field() { # <json> <field>
+  local _jsonf_out
   ROBOREV_JSONF_OK=0
   ROBOREV_JSONF_CAUSE="the payload was never examined"
+  ROBOREV_JSONF_LEN=""
   if ! command -v python3 >/dev/null 2>&1; then
     ROBOREV_JSONF_CAUSE="python3 is not on PATH, so the payload's shape could not be established"
     return 0
   fi
-  if printf '%s' "$1" | ROBOREV_JSONF_FIELD="$2" python3 -c '
+  if _jsonf_out="$(printf '%s' "$1" | ROBOREV_JSONF_FIELD="$2" python3 -c '
 import json, os, sys
 field = os.environ.get("ROBOREV_JSONF_FIELD", "")
 try:
@@ -1265,9 +1272,19 @@ if field not in data:
     sys.exit(1)
 if not isinstance(data[field], list):
     sys.exit(1)
-' 2>/dev/null; then
+sys.stdout.write("%d" % len(data[field]))
+' 2>/dev/null)"; then
+    case "$_jsonf_out" in
+      ''|*[!0-9]*)
+        # The shape passed but the count did not arrive as digits, so the payload was parsed and its
+        # size was not established. Keyed on the AFFIRMATIVE value, like every other test here.
+        ROBOREV_JSONF_CAUSE="the payload was a JSON object carrying a $2 LIST, but its length could not be established"
+        return 0
+        ;;
+    esac
     ROBOREV_JSONF_OK=1
     ROBOREV_JSONF_CAUSE=""
+    ROBOREV_JSONF_LEN="$_jsonf_out"
     return 0
   fi
   ROBOREV_JSONF_CAUSE="the payload was not a JSON object carrying a $2 LIST (it was empty, unparseable, a non-object, missing that key, or null)"
@@ -1420,7 +1437,7 @@ roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-fi
   local rel_errfile rel_json rel_errtext numbers declared probed=0 skipped_cross=0
   local issue read_ok=() unread=() comments state
   local issue_errfile issue_errtext read_list unread_list bound_clause cross_clause suffix read_limit
-  local repo_nwo repo_errfile repo_errtext
+  local repo_nwo repo_errfile repo_errtext _probe_tokens
   ROBOREV_PROBE_OUTCOME="could-not-check"
   # THE STRUCTURED VALUE, KEPT BESIDE THE RENDERED ONE ON PURPOSE. `_DETAIL` is prose for a human;
   # `_ISSUE` is the number as data, so a later consumer (or a test) never has to parse the number back
@@ -1455,38 +1472,8 @@ roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-fi
   # SO IT IS AN EXPLICIT, DECLARED SKIP (R5), counted and named in the rendering, NEVER a silent one:
   # a probe that omits coverage silently is indistinguishable from one that covers it.
   #
-  # `gh repo view --json nameWithOwner` is the RIGHT oracle rather than a convenient one: it answers
-  # exactly the question asked — which repository does `gh` resolve HERE — using the same base-repo
-  # resolution `gh issue view <N>` uses. Deriving it by parsing the PR's own URL would be a second,
-  # weaker implementation of that resolution. A failure is a could-not-check: with the current
-  # repository unknown, "same repository" cannot be established AFFIRMATIVELY for any reference, and
-  # an unestablished identity must never inherit the probing branch.
-  if ! repo_errfile="$(mktemp 2>/dev/null)"; then
-    rm -f "$rel_errfile"
-    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: no temporary file could be created to capture the 'gh' diagnostic"
-    return 0
-  fi
-  if ! repo_nwo="$(cd "$REPO" && gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>"$repo_errfile")"; then
-    repo_errtext="$(tr -d '\r' <"$repo_errfile" | tr '\n' ' ')"
-    rm -f "$repo_errfile" "$rel_errfile"
-    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: 'gh repo view --json nameWithOwner' failed (${repo_errtext:-no diagnostic was produced}), so which repository a closing reference points at could not be established"
-    return 0
-  fi
-  rm -f "$repo_errfile"
-  # AFFIRMATIVE SHAPE TEST on the identity itself, for the same reason each issue number gets one: it
-  # is remote text, and it is the value every same-repository decision below is compared against.
-  # A BARE `*/*` IS TOO LOOSE, AND ITS FAILURE MODE IS THE WORST ONE ON THIS PATH (#3759 r2, found
-  # while fixing the class): `x/`, `/x`, `a/b/c` and a whitespace- or newline-bearing answer all match
-  # it, and an identity that matches nothing then makes EVERY reference compare unequal — so the probe
-  # renders a confident "these references point at another repository" DECLARED SKIP, an answer about
-  # the pull request derived from an identity nobody established. The pattern is therefore exactly one
-  # `owner/name` pair over GitHub's own character set, so anything else takes the could-not-check
-  # branch with the rest of the class.
-  if [[ ! "$repo_nwo" =~ ^${ROBOREV_GH_NAME_RE}/${ROBOREV_GH_NAME_RE}$ ]]; then
-    rm -f "$rel_errfile"
-    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: 'gh repo view --json nameWithOwner' did not answer with a single owner/name pair, so which repository a closing reference points at could not be established"
-    return 0
-  fi
+  # THE REPOSITORY IS RESOLVED FURTHER DOWN, only once the relation has produced references that
+  # actually need classifying (#3759 round 7) — see the block after the empty-relation answer.
   # ===== THE LINKED ISSUE COMES FROM THE STRUCTURED RELATION, NEVER FROM THE PR BODY (#3626) =====
   # #3626 DELETED a PR-body link requirement, and not because Markdown is hard to parse: A PULL-REQUEST
   # BODY IS EDITABLE AT ANY TIME BY ANYONE WITH WRITE ACCESS, WITH NO PER-EDIT ATTRIBUTION, while a
@@ -1533,6 +1520,52 @@ roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-fi
   roborev_json_list_field "$rel_json" closingIssuesReferences
   if [ "$ROBOREV_JSONF_OK" -ne 1 ]; then
     ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: $ROBOREV_JSONF_CAUSE — that is a broken payload, NOT an empty relation, and the two must never render alike"
+    return 0
+  fi
+  declared="$ROBOREV_JSONF_LEN"
+  # ===== NO REFERENCES ⇒ THE ANSWER IS DEFINITIVE, AND NOTHING ELSE NEED BE ASKED (#3759 round 7) ====
+  # THE ORDERING DEFECT THIS CLOSES, and it cost CORRECTNESS and not merely a call: the current
+  # repository used to be resolved BEFORE the relation was read, so a pull request with NO linked
+  # issues at all still depended on `gh repo view` — and if that call failed while the relation was
+  # perfectly readable, the probe reported "could NOT be checked" where the truthful answer was the
+  # definitive `no-subject`. That is a could-not-tell reported WHERE AN ANSWER EXISTS: the exact
+  # inverse of the collapse this path is built against, and just as wrong. The relation is read FIRST,
+  # an empty one is answered immediately, and the repository is resolved ONLY when there are
+  # references to classify — so on a PR with no links that call is NOT MADE, not merely ignored, which
+  # is the only version an invocation-log assert can measure.
+  if [ "$declared" -eq 0 ]; then
+    ROBOREV_PROBE_OUTCOME="no-subject"
+    ROBOREV_PROBE_DETAIL="no linked issue is declared on this PR, so no linked-issue thread was checked"
+    return 0
+  fi
+  # `gh repo view --json nameWithOwner` is the RIGHT oracle rather than a convenient one: it answers
+  # exactly the question asked — which repository does `gh` resolve HERE — using the same base-repo
+  # resolution `gh issue view <N>` uses. Deriving it by parsing the PR's own URL would be a second,
+  # weaker implementation of that resolution. A failure is a could-not-check: with the current
+  # repository unknown, "same repository" cannot be established AFFIRMATIVELY for any reference, and
+  # an unestablished identity must never inherit the probing branch.
+  if ! repo_errfile="$(mktemp 2>/dev/null)"; then
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: no temporary file could be created to capture the 'gh' diagnostic"
+    return 0
+  fi
+  if ! repo_nwo="$(cd "$REPO" && gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>"$repo_errfile")"; then
+    repo_errtext="$(tr -d '\r' <"$repo_errfile" | tr '\n' ' ')"
+    rm -f "$repo_errfile"
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: 'gh repo view --json nameWithOwner' failed (${repo_errtext:-no diagnostic was produced}), so which repository a closing reference points at could not be established"
+    return 0
+  fi
+  rm -f "$repo_errfile"
+  # AFFIRMATIVE SHAPE TEST on the identity itself, for the same reason each issue number gets one: it
+  # is remote text, and it is the value every same-repository decision below is compared against.
+  # A BARE `*/*` IS TOO LOOSE, AND ITS FAILURE MODE IS THE WORST ONE ON THIS PATH (#3759 r2, found
+  # while fixing the class): `x/`, `/x`, `a/b/c` and a whitespace- or newline-bearing answer all match
+  # it, and an identity that matches nothing then makes EVERY reference compare unequal — so the probe
+  # renders a confident "these references point at another repository" DECLARED SKIP, an answer about
+  # the pull request derived from an identity nobody established. The pattern is therefore exactly one
+  # `owner/name` pair over GitHub's own character set, so anything else takes the could-not-check
+  # branch with the rest of the class.
+  if [[ ! "$repo_nwo" =~ ^${ROBOREV_GH_NAME_RE}/${ROBOREV_GH_NAME_RE}$ ]]; then
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: 'gh repo view --json nameWithOwner' did not answer with a single owner/name pair, so which repository a closing reference points at could not be established"
     return 0
   fi
   if ! numbers="$(printf '%s' "$rel_json" | PROBE_REPO_NWO="$repo_nwo" PROBE_NAME_RE="$ROBOREV_GH_NAME_RE" python3 -c '
@@ -1617,11 +1650,14 @@ for ref in refs:
     ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: the closingIssuesReferences payload was not readable as a JSON object carrying a closingIssuesReferences LIST (it was unparseable, a non-object, missing that key, or null) — that is a broken payload, NOT an empty relation, and the two must never render alike"
     return 0
   fi
-  declared=0
-  for issue in $numbers; do declared=$(( declared + 1 )); done
-  if [ "$declared" -eq 0 ]; then
-    ROBOREV_PROBE_OUTCOME="no-subject"
-    ROBOREV_PROBE_DETAIL="no linked issue is declared on this PR, so no linked-issue thread was checked"
+  # `declared` came from the validated read, so the classification must have produced exactly one
+  # token per reference. ASSERTED rather than recomputed: the count the bound arithmetic uses and the
+  # count the payload actually carried must not silently be two different numbers, and a mismatch is a
+  # could-not-check rather than a quietly smaller set.
+  _probe_tokens=0
+  for issue in $numbers; do _probe_tokens=$(( _probe_tokens + 1 )); done
+  if [ "$_probe_tokens" -ne "$declared" ]; then
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: the relation declared $declared reference(s) but their classification produced $_probe_tokens, so the declared set was never established"
     return 0
   fi
   # PROBED IN GITHUB'S RETURNED ORDER — not sorted. Any sort is a policy nobody asked for, and the
@@ -1798,7 +1834,12 @@ for ref in refs:
 
 # roborev_absence_waiver_lookup <base-sha> <head-sha> <job-id>: does the PR for this branch carry a
 # waiver for THIS REVIEW? Sets, and never returns non-zero:
-#   ROBOREV_WAIVER_STATE   granted | stale | malformed | none | unavailable
+#   ROBOREV_WAIVER_STATE   granted | unauthorized | stale | malformed | none | misplaced |
+#                          unavailable
+#     (`unauthorized` predates #3759 and was missing from this list; `misplaced` is #3759's
+#      non-granting linked-issue diagnostic. A CLOSED state list that is missing states is worse than
+#      no list, because a caller trusts it — and a comment naming a mechanism is a claim about code
+#      that decays exactly like any other, which is why these are corrected rather than left.)
 #   ROBOREV_WAIVER_AUTHOR / _SCOPE / _REASON / _DETAIL
 #
 # THE MARKER — a DEDICATED LINE of a PR comment, anchored at column zero, all four fields required:
@@ -2112,8 +2153,11 @@ roborev_issue_retrievability() {
 # roborev_findings_deferral_lookup <base-sha> <head-sha> <job-id> <observed-findings-count>:
 # does the PR for this branch carry a findings deferral for THIS REVIEW, covering exactly this many
 # findings, with every named issue an OPEN issue GitHub confirms? Sets, and never returns non-zero:
-#   ROBOREV_DEFERRAL_STATE   granted | unauthorized | stale | malformed | none | count-mismatch |
-#                            issue-absent | issue-closed | issue-unverifiable | unavailable
+#   ROBOREV_DEFERRAL_STATE   granted | unauthorized | stale | malformed | none | misplaced |
+#                            count-mismatch | issue-absent | issue-closed | issue-unverifiable |
+#                            unavailable
+#     (`misplaced` is #3759's non-granting linked-issue diagnostic; see the waiver's copy of this
+#      note for why an incomplete closed list is worse than none.)
 #   ROBOREV_DEFERRAL_AUTHOR / _SCOPE / _REASON / _DETAIL / _ISSUES / _COUNT
 #
 # FAIL-CLOSED EVERYWHERE: no `gh`, no PR, a `gh` error, an unusable scanner, a marker for another
