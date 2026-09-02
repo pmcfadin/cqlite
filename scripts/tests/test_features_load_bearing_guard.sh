@@ -197,9 +197,11 @@
 #
 #
 #   ROUND 11 (roborev job 72) — the last fix round:
-#  51.  GREEN  — a UNICODE feature name is credited from its DERIVED env spelling. The
-#                scan no longer extracts a suffix and so no longer models cargo's
-#                feature-name grammar, which it had been wrong about three times.
+#  51.  RED    — the env spelling is cargo's EXACT transform, asserted as a RED with a
+#                DEAD SIBLING so the blanket unattributable-mention fallback cannot carry
+#                the case: three non-ASCII names (incl. `straße` -> `STRASSE`) must be
+#                credited and ONLY the unmentioned sibling reported dead. The keys are the
+#                ones cargo really exports, measured with a probe crate.
 #  52.  GREEN  — a dependency KEY is package-local: activations are (package, key) PAIRS.
 #                Pins the MODEL, not a verdict flip — a verdict-flipping fixture is not
 #                constructible, because activating a dependency is itself an effect.
@@ -1388,31 +1390,49 @@ append_after_line "$D/a/src/lib.rs" 'pub fn always() {}' 'pub mod exotic;'
 expect_green "$D" "case 50"
 ok "SOUNDNESS: vertical tab, form feed, NEL and LINE SEPARATOR between \`#\` and \`[\` are Rust whitespace and are recognised"
 
-# --- 51. GREEN: a UNICODE feature name is credited from its env spelling -----
-# The build-script scan used to extract a SUFFIX after `CARGO_FEATURE_` and so had to model
-# cargo's feature-name grammar — wrong three times running (ASCII-only, punctuation, then
-# Unicode: `CARGO_FEATURE_CAFÉ` captured as `CAF`, reporting a live `café` dead). It now
-# DERIVES each declared name's exact env spelling from the metadata and searches for that
-# literal, so there is no grammar to guess. `cargo metadata` accepts non-ASCII feature
-# names — measured, which is why this case can exist at all.
+# --- 51. RED: the env spelling is cargo's EXACT transform, with a dead sibling -
+# THE ASSERTION IS A RED, DELIBERATELY, and that is what makes it a differential
+# (roborev job 87). The package declares three non-ASCII features that ARE mentioned with
+# the keys cargo really exports, plus `deadsibling`, which is mentioned nowhere. A correct
+# guard credits the three and reports ONLY `deadsibling` dead. A guard whose spelling
+# transform is wrong produces an unattributable `CARGO_FEATURE_` occurrence, the blanket
+# "credits every feature of the package" fallback fires, the run PASSES — and this case
+# FAILS. The earlier green-only version could not tell those apart: the fallback carried it.
+#
+# THE KEYS ARE THE ONES CARGO ACTUALLY EXPORTS, measured with a probe crate built by the
+# pinned toolchain (cargo 1.98.0) whose build script dumped its own environment — not read
+# off cargo's source and not assumed. `straße` -> `CARGO_FEATURE_STRASSE` is the decisive
+# name: ß expands to TWO characters, which only a full-Unicode uppercase does, so an
+# ASCII-only transform (`STRAßE`) cannot match it.
 D="$(fixture unicode-feature-name)"
 python3 - "$D/a/Cargo.toml" <<'PYEOF'
 import io, sys
 p = sys.argv[1]
 s = io.open(p, encoding="utf-8").read()
-s = s.replace('tfeat = []', 'tfeat = []\n"café" = []\n"naïve-mode" = []')
+s = s.replace('tfeat = []',
+              'tfeat = []\n"café" = []\n"naïve-mode" = []\n"straße" = []\ndeadsibling = []')
 io.open(p, "w", encoding="utf-8").write(s)
 PYEOF
+grep -q 'deadsibling = \[\]' "$D/a/Cargo.toml" || fail_case "case 51: fixture edit did not plant the features"
 python3 - "$D/a/build.rs" <<'PYEOF'
 import io, sys
+# Exactly the keys cargo exports for `café`, `naïve-mode` and `straße`. `deadsibling` is
+# NOT mentioned — it is the differential.
 with io.open(sys.argv[1], "w", encoding="utf-8") as fh:
     fh.write("fn main() {\n")
-    fh.write('    if std::env::var("CARGO_FEATURE_CAFÉ").is_ok() { println!("cargo:rustc-cfg=cafe"); }\n')
-    fh.write('    if std::env::var("CARGO_FEATURE_NAÏVE_MODE").is_ok() { println!("cargo:rustc-cfg=naive"); }\n')
+    for key in ("CARGO_FEATURE_CAFÉ", "CARGO_FEATURE_NAÏVE_MODE", "CARGO_FEATURE_STRASSE"):
+        fh.write('    if std::env::var("%s").is_ok() { println!("cargo:rustc-cfg=on"); }\n' % key)
     fh.write("}\n")
 PYEOF
-expect_green "$D" "case 51"
-ok "a UNICODE feature name (\`café\`, and \`naïve-mode\` with its \`-\` normalized) is credited from its DERIVED env spelling"
+expect_red_naming "$D" "deadsibling" "case 51"
+for lively in 'café' 'naïve-mode' 'straße'; do
+  grep -qF -- "  $lively " "$TMPROOT/out.txt" \
+    && { cat "$TMPROOT/out.txt"; fail_case "case 51: '$lively' was reported DEAD — its env spelling was not derived the way cargo derives it"; }
+done
+# And the fallback must NOT have carried the run: exactly ONE feature may be dead.
+grep -q '^❌ features-load-bearing: 1 declared feature(s) are DEAD' "$TMPROOT/out.txt" \
+  || { cat "$TMPROOT/out.txt"; fail_case "case 51: expected EXACTLY ONE dead feature (deadsibling). More means the derivation missed a name; the run PASSING instead would mean the unattributable-mention fallback credited everything, which is the defect this case exists to detect."; }
+ok "the env spelling is cargo's EXACT transform (full-Unicode uppercase incl. ß->SS, \`-\` -> \`_\`): three non-ASCII names credited, and ONLY the unmentioned sibling reported dead"
 
 # --- 52. GREEN: a dependency KEY is package-local ----------------------------
 # Two members declare the SAME key `dup` for DIFFERENT packages, and one of them activates

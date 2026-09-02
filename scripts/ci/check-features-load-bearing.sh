@@ -856,11 +856,34 @@ def cargo_feature_mentions(raw_text, features):
 
 
 def cargo_feature_env_name(feature):
-    """cargo's build-script env spelling: UPPERCASED with `-` -> `_`, and nothing else.
+    """cargo's build-script env spelling: FULL-UNICODE uppercase with `-` -> `_`.
 
-    This is cargo's own rule, applied to a name taken from the metadata — never a grammar
-    this script guesses at. `str.upper()` is full Unicode, as Rust's `to_uppercase()` is,
-    so `café` -> `CAFÉ`.
+    DO NOT "FIX" THIS TO ASCII-ONLY UPPERCASING. It mirrors cargo's own `envify`, which is
+    `s.chars().flat_map(char::to_uppercase)` followed by `-` -> `_` — full Unicode, not
+    `to_ascii_uppercase`. Python's `str.upper()` implements the same Unicode mapping,
+    including the multi-character expansions, so it reproduces cargo exactly.
+
+    MEASURED, not read off cargo's source (roborev job 87 asserted ASCII-only; the
+    measurement says otherwise). A probe crate with four non-ASCII feature names, built by
+    the pinned toolchain (cargo 1.98.0), whose build script dumped its own environment:
+
+        feature       cargo exported            str.upper()   ascii-only upper
+        café          CARGO_FEATURE_CAFÉ        MATCH         CARGO_FEATURE_CAFé   MISMATCH
+        naïve-mode    CARGO_FEATURE_NAÏVE_MODE  MATCH         ...NAïVE_MODE        MISMATCH
+        straße        CARGO_FEATURE_STRASSE     MATCH         ...STRAßE            MISMATCH
+        ünïcode       CARGO_FEATURE_ÜNÏCODE     MATCH         ...üNïCODE           MISMATCH
+
+    `straße` -> `STRASSE` is the decisive one: ß expands to two characters, which only a
+    full-Unicode uppercase does. ASCII-only would mismatch ALL FOUR, and every mismatch
+    reports a LIVE feature dead. Pinned by case 51, which includes that name.
+
+    ORDER IS IRRELEVANT: cargo uppercases then maps `-`, this maps then uppercases. No
+    character uppercases to `-` or `_`, so the two agree (asserted for the cases above).
+
+    RESIDUAL, stated rather than implied: both sides consult a Unicode table, so a
+    character whose mapping differs between the Rust std cargo was built with and this
+    python3 would diverge. That is a table-version difference, not a rule difference, and
+    it fails in the crediting-a-wrong-name direction only for such a character.
     """
     return feature.replace("-", "_").upper()
 
