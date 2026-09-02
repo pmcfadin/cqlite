@@ -292,11 +292,26 @@ BRANCH_ISSUES=""    # unique issue numbers, one per line
 # direction, in the one tool whose output is only ever a positive detection.
 # A missing `timeout` is NOT a reason to skip the read (that would lose the fact entirely); it
 # runs unbounded, exactly as the probe does, and for the same stated reason.
+# TIMEOUT_CMD — `timeout`, else macOS's `gtimeout`, else empty (#3436, roborev round 36).
+# GNU coreutils on macOS installs its tools g-prefixed by default (Homebrew does not shadow
+# BSD userland), so a bare `command -v timeout` finds NOTHING on a first-class macOS gate host
+# and every network read there ran UNBOUNDED — the exact hazard round 35 added the bound for,
+# reintroduced on the one platform that most needed it. Resolved ONCE at load, not per call:
+# a per-call probe is three chances to get the fallback order wrong.
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_CMD=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_CMD=gtimeout
+fi
+
 net_read() {
   local label="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 45 "$@"
+  if [ -n "$TIMEOUT_CMD" ]; then
+    "$TIMEOUT_CMD" 45 "$@"
   else
+    # Still NOT a reason to skip the read: losing the fact entirely is worse than an
+    # unbounded one, and the caller turns any failure into a named UNMEASURABLE.
     "$@"
   fi
 }
@@ -451,10 +466,16 @@ probe_lane() {
   if [ -z "$LANE_LOCK_SH" ] || [ ! -f "$LANE_LOCK_SH" ] || [ ! -r "$LANE_LOCK_SH" ]; then
     ROW_LL_STATE="unmeasured(lane-lock-script-unreadable)"; return 0
   fi
-  # BOUNDED when `timeout` exists; a missing timeout is not a reason to skip the
-  # field, since the probe reads local files only (no git, no gh, no network).
-  if command -v timeout >/dev/null 2>&1; then
-    out="$(timeout 20 bash "$LANE_LOCK_SH" probe "$issue" 2>/dev/null)" || rc=$?
+  # BOUNDED through the RESOLVED command, not a bare `timeout` (#3436, roborev round 36 +
+  # the self-sweep that followed it). This probe predates net_read and had the identical
+  # macOS defect: stock macOS has no `timeout`, GNU coreutils installs it as `gtimeout`, so
+  # `command -v timeout` finds nothing and the bound silently vanished on that host. Fixing
+  # the three network reads and leaving their SIBLING here would have been the same
+  # half-applied rule this change has been caught by repeatedly.
+  # A missing resolver is still not a reason to skip the field, since the probe reads local
+  # files only (no git, no gh, no network).
+  if [ -n "$TIMEOUT_CMD" ]; then
+    out="$("$TIMEOUT_CMD" 20 bash "$LANE_LOCK_SH" probe "$issue" 2>/dev/null)" || rc=$?
   else
     out="$(bash "$LANE_LOCK_SH" probe "$issue" 2>/dev/null)" || rc=$?
   fi

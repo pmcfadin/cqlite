@@ -274,6 +274,17 @@ die_usage() { echo "$prog: $*" >&2; exit 64; }
 # A bare path or an ssh-style `git@host:org/repo` has no `://userinfo@` and passes through
 # unchanged. `sed -E` is honoured by GNU and BSD sed alike (macOS is a first-class gate
 # host), and the class is POSIX so no GNU-only escape is involved.
+# TIMEOUT_CMD — `timeout`, else macOS's `gtimeout`, else empty (#3436, roborev round 36).
+# Stock macOS has no `timeout`; GNU coreutils installs it g-prefixed. Both lane-lock calls
+# below were bounded with a bare `timeout`, so on a first-class macOS host the bound silently
+# vanished and a hung probe could stall a claim indefinitely. Resolved ONCE, used by both.
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_CMD=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_CMD=gtimeout
+fi
+
 redact_urls() {
   # LC_ALL=C IS LOAD-BEARING, exactly as it is for sanitize_field above (#3436, roborev round
   # 33). In a UTF-8 locale BSD/macOS sed REJECTS invalid byte sequences, and a remote name, a
@@ -756,8 +767,8 @@ lane_lock_probe() {
   # BOUNDED: a hung probe must never hang a claim. `timeout` is used when present
   # and skipped when absent — a missing timeout is not a reason to skip the
   # report, and the probe reads local files only (no git, no gh, no network).
-  if command -v timeout >/dev/null 2>&1; then
-    out="$(timeout 20 bash "$LANE_LOCK_SH" probe "$issue" --actor "$actor" 2>/dev/null)" || rc=$?
+  if [ -n "$TIMEOUT_CMD" ]; then
+    out="$("$TIMEOUT_CMD" 20 bash "$LANE_LOCK_SH" probe "$issue" --actor "$actor" 2>/dev/null)" || rc=$?
   else
     out="$(bash "$LANE_LOCK_SH" probe "$issue" --actor "$actor" 2>/dev/null)" || rc=$?
   fi
@@ -1019,8 +1030,8 @@ lane_local_evidence() {
   # (a) SELF — the only subcommand that can answer "this very session". The actor is
   # passed through for the same reason the probe's is (#3436 FIX 13g): it is part of the
   # holder identity, so verifying under the wrong actor cannot match our own lock.
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 20 bash "$LANE_LOCK_SH" verify "$issue" --actor "$actor" >/dev/null 2>&1 || rc=$?
+  if [ -n "$TIMEOUT_CMD" ]; then
+    "$TIMEOUT_CMD" 20 bash "$LANE_LOCK_SH" verify "$issue" --actor "$actor" >/dev/null 2>&1 || rc=$?
   else
     bash "$LANE_LOCK_SH" verify "$issue" --actor "$actor" >/dev/null 2>&1 || rc=$?
   fi

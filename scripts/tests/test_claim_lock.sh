@@ -1460,7 +1460,22 @@ echo 'TEST: a credential-bearing CLAIM_REMOTE is REDACTED in claim.sh output (ro
 # regression either way. Exercised through the REAL emit path, not by sourcing the function: the
 # property that matters is what a user actually sees on stdout.
 # Deliberately OUTSIDE the CLAIM_TEST_OS guard above -- redaction has nothing to do with /proc.
-o_red="$( cd /tmp && timeout 30 env CLAIM_REMOTE='https://user:ghp_TESTSECRET123@example.invalid/o/r.git' \
+# BOUND THESE TWO through a RESOLVED command, never a bare `timeout` (#3436, roborev round 36).
+# Stock macOS has no `timeout`; GNU coreutils installs it as `gtimeout`. A bare `timeout` in a
+# gate-wired suite is therefore a FAILURE on a first-class macOS host -- and only the
+# /proc-dependent cases above are skipped there, so these two would red `tooling-tests` on a
+# platform this repo supports. An EMPTY resolver runs the command unbounded rather than skipping
+# the case: the assertion is about REDACTION, the bound is only insurance against a DNS stall,
+# and losing the redaction coverage would be the worse trade.
+T_TO=""
+if command -v timeout >/dev/null 2>&1; then T_TO=timeout
+elif command -v gtimeout >/dev/null 2>&1; then T_TO=gtimeout
+fi
+bounded_claim() {  # bounded_claim <env-assignments...> -- runs $CLAIM with them
+  if [ -n "$T_TO" ]; then ( cd /tmp && "$T_TO" 30 env "$@" ); else ( cd /tmp && env "$@" ); fi
+}
+
+o_red="$( bounded_claim CLAIM_REMOTE='https://user:ghp_TESTSECRET123@example.invalid/o/r.git' \
           GIT_TERMINAL_PROMPT=0 bash "$CLAIM" status 999 2>&1 )"
 if ! printf '%s' "$o_red" | grep -q 'ghp_TESTSECRET123' \
    && printf '%s' "$o_red" | grep -q '\*\*\*@example.invalid'; then
@@ -1474,7 +1489,7 @@ fi
 # echo still exits 0, printing a bare `CLAIM: ` and silently losing the whole verdict (round 33).
 # LC_ALL=C makes the match byte-oriented. Asserted as "the line still carries its content",
 # which is the property; the locale pin is the mechanism.
-o_utf="$( cd /tmp && timeout 30 env CLAIM_REMOTE="$(printf 'https://user:tok@ex\xff\xfeample.invalid/o/r.git')" \
+o_utf="$( bounded_claim CLAIM_REMOTE="$(printf 'https://user:tok@ex\xff\xfeample.invalid/o/r.git')" \
           LC_ALL=en_US.UTF-8 GIT_TERMINAL_PROMPT=0 bash "$CLAIM" status 999 2>&1 )"
 if printf '%s' "$o_utf" | grep -q 'ls-remote-unreachable-on' \
    && ! printf '%s' "$o_utf" | grep -qE '^CLAIM: *$'; then
