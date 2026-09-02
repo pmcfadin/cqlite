@@ -84,12 +84,43 @@ describe('assertDatasetsAvailable() (issue #3641)', () => {
   });
 });
 
-describe('the dataset assertion is not duplicated (issue #3641)', () => {
+// The files allowed to contain the helper's error-message literal, each with the
+// reason it is allowed (issue #3772). Add an entry ONLY when a suite quotes the
+// message in order to ASSERT ON IT -- never to silence a fresh inline copy of the
+// helper's body, which is the single thing this guard exists to catch. State which
+// of the two it is in the reason, so the next reader can tell a legitimate quoter
+// from a waived offender without re-deriving it.
+//
+// A named map rather than the inline `rel !== 'helpers.test.js'` self-exclusion it
+// replaces: a guard with no exemption path reds on correct input the first time a
+// suite legitimately needs the string, and a guard that reds on correct input is
+// the guard agents learn to waive (CLAUDE.md). `dataset-guard.test.js` is the
+// anticipated case -- it spawns child jest processes and asserts on their output,
+// so it may one day need the literal -- and is DELIBERATELY NOT pre-added: it does
+// not contain the string today (verified), and an entry that excuses a file needing
+// no excuse only widens the hole.
+const MESSAGE_LITERAL_ALLOWED = new Map([
+  [
+    'helpers.test.js',
+    'quotes the message to assert on it in the assertDatasetsAvailable() tests above',
+  ],
+]);
+
+describe('the helper error message is not inlined by another suite (issue #3641)', () => {
   // Three suites (conversion-budget, leak-paths, and event-loop-latency via a
   // local `requireData()`) used to carry a verbatim copy of the helper's body,
   // which is why the "14 dataset-gated suites" doctrine count did not match the
   // 11 files that actually called it. They now call the helper. A fourth copy
   // would silently re-open that gap, so it is a RED here.
+  //
+  // DECLARED GAP, and the reason this describe is titled after its MECHANISM
+  // rather than after "is not duplicated" (issue #3772): the check matches the
+  // EXACT error-message literal, so a fourth copy carrying a REWORDED message
+  // evades it entirely. The property actually enforced is "no other suite
+  // inlines this literal", which is strictly weaker than "the assertion is not
+  // duplicated" -- and the block used to claim the stronger one. Nothing here
+  // detects a semantic duplicate; that would need a shape/AST check, and a title
+  // asserting more than its test delivers is the defect #3641 itself was about.
   test('no test file inlines the helper error message', () => {
     // RECURSIVE, matching jest's configured scope (`__test__/**/*.test.js`).
     // A flat readdir scans only this directory, so a nested suite could inline
@@ -106,15 +137,32 @@ describe('the dataset assertion is not duplicated (issue #3641)', () => {
       });
     const offenders = walk(__dirname)
       .map((full) => path.relative(__dirname, full))
-      // Outside this file the literal only ever appears as a COPY of the
-      // helper's message; this file quotes it in the assertions above, which
-      // is why it excludes itself.
-      .filter((rel) => rel !== 'helpers.test.js')
+      // Outside the allow-list the literal only ever appears as a COPY of the
+      // helper's message. The reason each allowed file is allowed lives beside
+      // its entry in MESSAGE_LITERAL_ALLOWED, not here.
+      .filter((rel) => !MESSAGE_LITERAL_ALLOWED.has(rel))
       .filter((rel) =>
         fs
           .readFileSync(path.join(__dirname, rel), 'utf8')
           .includes('Test data not available')
       );
     expect(offenders).toEqual([]);
+  });
+
+  // The allow-list is CURATED -- it encodes a human judgement that cannot be
+  // derived -- so the one thing that CAN be checked is that it stays TRUTHFUL
+  // (issue #3772). Without this, an entry outlives the file it excused, or the
+  // file stops quoting the literal, and the list quietly becomes a place where
+  // excuses accumulate: a stale curated claim, which is the same decay this
+  // issue removed from the gate census.
+  test('every allow-list entry is still necessary and still explained', () => {
+    for (const [rel, reason] of MESSAGE_LITERAL_ALLOWED) {
+      const full = path.join(__dirname, rel);
+      expect(fs.existsSync(full)).toBe(true);
+      // If an allowed file no longer contains the literal, the entry is dead
+      // and must be REMOVED -- keeping it would excuse a future inline copy.
+      expect(fs.readFileSync(full, 'utf8')).toContain('Test data not available');
+      expect(reason.trim().length).toBeGreaterThan(0);
+    }
   });
 });
