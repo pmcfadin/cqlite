@@ -305,6 +305,20 @@ awk -v max="$max" '
   # and the widest bash-suite tag measured in scripts/tests/*.sh is 41. 256 leaves headroom
   # for both; anything longer is not an identifier. The gate then MIDDLE-elides to 60 for
   # display, after the redaction, which is safe on a charset that cannot hold an authority.
+  # pubdoc() — the PUBLISHED IDENTIFIER for a doctest. A THIRD projection beside pubid() and
+  # publabel(), and it exists so the doctest rule does not hand add() a string it assembled
+  # itself: every published value goes through exactly one named projection, which is what
+  # makes the one-rule structural guard mean something (it caught this while it was being
+  # written). Returns the pubid() fallback for anything not matching the closed shape, so the
+  # rule never publishes a half-parsed line.
+  function pubdoc(s,   dp, di, dl) {
+    dp = s; sub(/ - .*$/, "", dp)
+    di = s; sub(/^[^ ]+ - /, "", di); sub(/ \(line [0-9]+\)$/, "", di)
+    dl = s; sub(/^.*\(line /, "", dl); sub(/\)$/, "", dl)
+    if (dp ~ /^[A-Za-z0-9._\/-]+$/ && di ~ /^[A-Za-z0-9._:-]+$/ && dl ~ /^[0-9]+$/)
+      return "doctest " dp " line " dl " (" di ")"
+    return pubid(tagof(norm(s)))
+  }
   function pubid(t) {
     # ONLY `.` and `:` are stripped. `_` and `-` are VALID IDENTIFIER CHARACTERS, and
     # stripping them made `module::test_` publish as `module::test` — a DIFFERENT, possibly
@@ -382,6 +396,23 @@ awk -v max="$max" '
   /^FAIL: / {
     s = $0; sub(/^FAIL: /, "", s)
     add("assert", s, pubid(tagof(norm(s))), 0); next
+  }
+  # A3a DOCTEST, and it MUST precede the generic libtest rule A3 below (#3765, roborev job 61).
+  # A doctest failure is `test src/lib.rs - item (line 10) ... FAILED`. Under A3 alone, tagof()
+  # cut at the first space and yielded `src/lib.rs`, which pubid() then REJECTED because `/` is
+  # outside the safe charset — so the field published `<identifier outside the safe charset>`
+  # and named nothing. `core-tests` runs `cargo test --doc` (agent-gate.sh:18725), so this is a
+  # class of failure the gate ACTUALLY RUNS, and the whole point of this field is to name it.
+  #
+  # `/` IS PUBLISHED HERE AND ONLY HERE, and it is safe for a stated reason rather than by
+  # assumption: the rule is a CLOSED, FULLY ANCHORED grammar. The whole line must match
+  # `test <path> - <item> (line <n>) ... FAILED`, the path is re-validated against a charset
+  # that admits NO `:` and NO `@`, and the item and line are matched separately. A URL cannot
+  # satisfy that shape, so admitting `/` cannot readmit an authority — which is the property
+  # the charset exists to guarantee, not the charset itself.
+  /^[[:space:]]*test [^:@]+ - .+ \(line [0-9]+\) \.\.\. FAILED/ {
+    s = $0; sub(/^[[:space:]]*test /, "", s); sub(/ \.\.\. FAILED.*$/, "", s)
+    add("assert", s, pubdoc(s), 0); next
   }
   /^[[:space:]]*test .* \.\.\. FAILED/ {
     s = $0; sub(/^[[:space:]]*test /, "", s); sub(/ \.\.\. FAILED.*$/, "", s)

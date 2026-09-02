@@ -5996,11 +5996,11 @@ fi
 fa_addcalls=$(grep -v '^[[:space:]]*#' "$fa_tool" | grep -E 'add\("(assert|guard|toolchain)",')
 fa_add_n=$(printf '%s\n' "$fa_addcalls" | grep -c .)
 fa_add_ok=$(printf '%s\n' "$fa_addcalls" \
-  | grep -cE 'add\("(assert|guard|toolchain)", .*, (pubid\(|publabel\(|"[a-z][a-z0-9-]*", 1\))')
+  | grep -cE 'add\("(assert|guard|toolchain)", .*, (pubid\(|publabel\(|pubdoc\(|"[a-z][a-z0-9-]*", 1\))')
 if [ "${fa_add_n:-0}" -ge 13 ] && [ "$fa_add_n" = "$fa_add_ok" ]; then
-  ok "3765-pub-one-rule: all $fa_add_n add() call sites across ALL THREE tiers publish a closed-enum label literal, pubid(…) or publabel(…) — no tier copies its matched line (blocker 11)"
+  ok "3765-pub-one-rule: all $fa_add_n add() call sites across ALL THREE tiers publish a closed-enum label literal, pubid(…), publabel(…) or pubdoc(…) — no tier copies its matched line (blocker 11)"
 else
-  bad "3765-pub-one-rule: $fa_add_n add() call site(s) but only $fa_add_ok publish through a label literal / pubid() / publabel() — a call site that passes copied line content publishes an assertion PAYLOAD, which carries interpolated runtime values (blocker 11)"
+  bad "3765-pub-one-rule: $fa_add_n add() call site(s) but only $fa_add_ok publish through a label literal / pubid() / publabel() / pubdoc() — a call site that passes copied line content publishes an assertion PAYLOAD, which carries interpolated runtime values (blocker 11)"
 fi
 # …and the same invariant on the OUTPUT PATH for the two repository-authored tiers, because
 # a source scan cannot see a RUNTIME value. The charset REFUSES `@`, `/`, `?`, `&` and `=`,
@@ -6311,6 +6311,48 @@ else
   bad "3765-result-degradation-named: a failed atomic publish falls back silently — an unannounced degradation is this issue's own defect class"
 fi
 
+# 55z. ROBOREV JOB 61 — a DOCTEST failure must be NAMED. `core-tests` runs `cargo test --doc`,
+#      and under the generic libtest rule alone tagof() reduced
+#      `test src/lib.rs - item (line 10) ... FAILED` to `src/lib.rs`, which pubid() rejected
+#      for the `/`, so the field published `<identifier outside the safe charset>` and named
+#      nothing — this field failing at its one job, for a class the gate actually runs.
+printf 'test src/lib.rs - item (line 10) ... FAILED\n' > "$fa_dir/doct.log"
+fa_dt=$(bash "$fa_tool" "$fa_dir/doct.log" 10 | sed -n 's/^name=//p' | head -1)
+case "$fa_dt" in
+  *"src/lib.rs"*|*"line 10"*)
+    ok "3765-doctest-named: a doctest failure publishes a NAMED identity ($fa_dt), not a charset placeholder" ;;
+  *) bad "3765-doctest-named: expected the path and line in the published identity, got '$fa_dt' — the doctest shape is falling through to the generic libtest rule (job 61)" ;;
+esac
+# Two doctests in ONE file at DIFFERENT lines are DIFFERENT failures: the line number has to be
+# part of the identity or they collapse — the identity-fidelity class, one shape further on.
+printf 'test src/lib.rs - a (line 10) ... FAILED\ntest src/lib.rs - b (line 42) ... FAILED\n' > "$fa_dir/doct2.log"
+fa_dt2=$(bash "$fa_tool" "$fa_dir/doct2.log" 10 | sed -n 's/^count=//p' | head -1)
+if [ "$fa_dt2" = 2 ]; then
+  ok "3765-doctest-distinct: two doctests in one file at different lines count as TWO"
+else
+  bad "3765-doctest-distinct: expected count=2, got '${fa_dt2:-<none>}' — the line number is not part of the doctest identity, so distinct doctest failures collapse"
+fi
+# NEGATIVE CONTROL, and it is the load-bearing case: the doctest rule is the ONLY place `/` is
+# published, so a URL-shaped line must not be able to satisfy that shape and smuggle an
+# authority into the field. The rule is anchored and re-validates the path against a charset
+# admitting no `:` and no `@`, so such a line must fall through to the generic rule.
+printf 'test https://x-access-token:SEKRETDOC@h.io/p - item (line 10) ... FAILED\n' > "$fa_dir/doct3.log"
+fa_dt3=$(bash "$fa_tool" "$fa_dir/doct3.log" 10 | sed -n 's/^name=//p' | head -1)
+case "$fa_dt3" in
+  *SEKRETDOC*|*"@h.io"*)
+    bad "3765-doctest-no-authority: a URL-shaped line satisfied the doctest rule and published an authority ('$fa_dt3') — admitting / for doctests must not readmit a host" ;;
+  *) ok "3765-doctest-no-authority: a URL-shaped line does NOT satisfy the doctest grammar and publishes no authority ($fa_dt3)" ;;
+esac
+# STRUCTURAL: the doctest rule must PRECEDE the generic libtest rule, or the generic rule
+# consumes the line with `next` and the specific rule never runs.
+fa_doc_at=$(grep -nF 'test [^:@]+ - .+ \(line [0-9]+\) \.\.\. FAILED/ {' "$fa_tool" | head -1 | cut -d: -f1)
+fa_gen_at=$(grep -nF 'test .* \.\.\. FAILED/ {' "$fa_tool" | head -1 | cut -d: -f1)
+if [ -n "$fa_doc_at" ] && [ -n "$fa_gen_at" ] && [ "$fa_doc_at" -lt "$fa_gen_at" ]; then
+  ok "3765-doctest-rule-order: the doctest recogniser (line $fa_doc_at) precedes the generic libtest rule (line $fa_gen_at), so the generic rule cannot consume a doctest line first"
+else
+  bad "3765-doctest-rule-order: the doctest rule must precede the generic libtest rule (doctest at '${fa_doc_at:-<none>}', generic at '${fa_gen_at:-<none>}') — order decides which rule sees the line"
+fi
+
 # CODE lines only: the digest note NAMES those binaries while explaining why it does not use
 # them, and a scan over the comments would read that explanation as the defect.
 if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -qE '(sha256sum|md5sum|cksum|openssl dgst)'; then
@@ -6567,7 +6609,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=533
+ASSERT_FLOOR=537
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
