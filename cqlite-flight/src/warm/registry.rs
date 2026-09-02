@@ -776,77 +776,6 @@ impl WarmTableRegistry {
             .all(|r| super::rebuild::reader_backing_present(r))
     }
 
-    /// Install the test-only swap rendezvous (see the field doc).
-    #[cfg(test)]
-    pub(crate) fn set_swap_barrier(&self, f: Arc<dyn Fn() + Send + Sync>) {
-        *self
-            .swap_barrier
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(f);
-    }
-
-    /// Invoke the swap rendezvous if one is installed (clone the `Arc` out first
-    /// so it is called WITHOUT holding the `swap_barrier` lock).
-    #[cfg(test)]
-    fn run_swap_barrier(&self) {
-        let hook = self
-            .swap_barrier
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        if let Some(f) = hook {
-            f();
-        }
-    }
-
-    /// Install the test-only per-open rendezvous (see the field doc).
-    #[cfg(test)]
-    pub(crate) fn set_open_barrier(&self, f: Arc<dyn Fn() + Send + Sync>) {
-        *self
-            .open_barrier
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(f);
-    }
-
-    /// Invoke the per-open rendezvous if one is installed. `pub(super)` for
-    /// [`super::rebuild::WarmTableRegistry::open_added`] (campsite split).
-    #[cfg(test)]
-    pub(super) fn run_open_barrier(&self) {
-        let hook = self
-            .open_barrier
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        if let Some(f) = hook {
-            f();
-        }
-    }
-
-    /// Install the test-only pre-parse rendezvous (see the field doc).
-    #[cfg(test)]
-    pub(crate) fn set_open_parse_barrier(&self, f: Arc<dyn Fn() + Send + Sync>) {
-        *self
-            .open_parse_barrier
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(f);
-    }
-
-    /// Invoke the pre-parse rendezvous if one is installed. The `Arc` is cloned
-    /// out first so the hook runs WITHOUT holding the `open_parse_barrier` lock
-    /// (same discipline as [`Self::run_swap_barrier`]). `pub(super)` for
-    /// [`super::rebuild::WarmTableRegistry::open_added`] (campsite split).
-    #[cfg(test)]
-    pub(super) fn run_open_parse_barrier(&self) {
-        let hook = self
-            .open_parse_barrier
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        if let Some(f) = hook {
-            f();
-        }
-    }
-
     /// Test-only: the total accounted footprint (`used_bytes`).
     #[cfg(test)]
     pub(crate) fn debug_used_bytes(&self) -> u64 {
@@ -877,6 +806,14 @@ impl WarmTableRegistry {
 
 // `reader_backing_present` + `open_one_reader` moved to [`super::rebuild`]
 // (issue #2383, campsite split).
+
+// Test-only rendezvous plumbing (swap / per-open / pre-parse barriers), in a
+// separate file (campsite rule, epic #1116) loaded here: `registry.rs` is over
+// the 800-line source threshold, so the hooks live beside the tests that drive
+// them rather than in the middle of the production impl (issue #3940).
+#[cfg(test)]
+#[path = "registry_test_hooks.rs"]
+mod registry_test_hooks;
 
 // Registry integration tests over real in-process SSTables (issue #2310), in a
 // separate file (campsite rule) loaded here.
