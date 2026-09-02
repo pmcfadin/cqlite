@@ -158,7 +158,7 @@ whole_suite_checks() {
 # restated constant is a magic number wearing a relation's clothes. RAISE IT when you add
 # cases; LOWER IT when you deliberately remove them, never "for safety" — a floor above
 # the real count is a permanently red suite.
-CASE_FLOOR=128
+CASE_FLOOR=151
 
 finish() {
   local rc=$?
@@ -1932,4 +1932,253 @@ if run 0 "corrupt-commit twin: still VERIFIED" --repo "$R_CC_TWIN"; then
   else
     bad "corrupt-commit-control: verdict='$(verdict_of)' on the CLEAN twin, wanted VERIFIED"
   fi
+fi
+
+# --- Case 33: THE STORE'S OWN `fsck.*` CONFIG CANNOT PRODUCE A FALSE VERDICT -
+#
+# THE FINDING (#3749 review round 11, item 1). Round 3 put every git call under `env -i`
+# plus one allowlist, which closes the ENVIRONMENT sources of git config. It cannot close
+# the repository's OWN config, because that is a FILE in the store and not a variable —
+# and `git fsck` is configurable: `fsck.skipList` drops the validation messages of the
+# objects it names, and `fsck.<msg-id>=ignore` downgrades an individual diagnostic. Both
+# change the EXIT STATUS this script reads its verdict from, so a DAMAGED store reported
+# `VERIFIED`, exit 0. The shared `/data/lanes/repo/.git/config` is written by peer lanes
+# and by accident (someone works around one known-bad object in history), so this is in
+# model, and it produces the one failure this whole control exists to prevent.
+#
+# THE PLANT, MEASURED FIRST AND ASSERTED WITH GIT (git 2.43.0, 2026-09-02): a commit
+# object whose author line carries no email is an ERROR-severity fsck message, so a plain
+# `git fsck` exits 1 — ERROR_OBJECT, this script's own damage bit. That is the CONTROL
+# arm. Add either fsck.* form and the SAME repository exits 0.
+#
+# THREE ARMS, EACH ONE PROPERTY FROM THE FIRST:
+#   (a) damage, no fsck config          -> CORRUPT   (the plant is detected at all)
+#   (b) damage + fsck.<msg-id>=ignore   -> not VERIFIED
+#   (c) damage + fsck.skipList          -> not VERIFIED
+# and a CLEAN store carrying only the config, to show the refusal is the config and not
+# the damage.
+mk_missingemail_repo() {
+  # A repo whose ref names a commit with no author email. Built from `newrepo` so the
+  # fixture recipe is the suite's one path, then given a second ref to the bad commit —
+  # the object must be REACHABLE or fsck never looks at it.
+  local name="$1" r tree bad
+  r=$(newrepo "$name")
+  tree=$(git -C "$r" rev-parse 'HEAD^{tree}' 2>/dev/null)
+  [ -n "$tree" ] || { printf '%s' "$r"; return 0; }
+  bad=$(printf 'tree %s\nauthor NoEmail 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\n\nbad\n' "$tree" |
+    git -C "$r" hash-object -t commit -w --stdin --literally 2>/dev/null)
+  [ -n "$bad" ] && git -C "$r" update-ref refs/heads/bad "$bad" >/dev/null 2>&1
+  printf '%s' "$r"
+}
+
+R_FP_A=$(mk_missingemail_repo fsckpolicy-a)
+R_FP_B=$(mk_missingemail_repo fsckpolicy-b)
+R_FP_C=$(mk_missingemail_repo fsckpolicy-c)
+FP_SKIP="$T/fsckpolicy-skip.txt"
+FP_BAD_SHA=$(git -C "$R_FP_C" rev-parse refs/heads/bad 2>/dev/null)
+printf '%s\n' "$FP_BAD_SHA" >"$FP_SKIP"
+git -C "$R_FP_B" config fsck.missingEmail ignore >/dev/null 2>&1
+git -C "$R_FP_C" config fsck.skipList "$FP_SKIP" >/dev/null 2>&1
+
+# CONSTRUCTION, with git and not with the subject: the damage must be REAL (rc 1, the
+# damage bit) and each suppression must ACTUALLY SUPPRESS (rc 0 on the same repository).
+# Without this the arms below could pass against a plant that no longer plants, or a
+# config form git has stopped honouring — in which case the case would be about nothing.
+FP_RC_A=0; git -C "$R_FP_A" fsck --no-progress --no-dangling >/dev/null 2>&1 || FP_RC_A=$?
+FP_RC_B=0; git -C "$R_FP_B" fsck --no-progress --no-dangling >/dev/null 2>&1 || FP_RC_B=$?
+FP_RC_C=0; git -C "$R_FP_C" fsck --no-progress --no-dangling >/dev/null 2>&1 || FP_RC_C=$?
+if [ -n "$FP_BAD_SHA" ] && [ "$((FP_RC_A & 1))" -eq 1 ] && [ "$FP_RC_B" -eq 0 ] && [ "$FP_RC_C" -eq 0 ]; then
+  ok "fsck-policy-plant: the damage is real (plain fsck rc=$FP_RC_A, carrying ERROR_OBJECT) and BOTH config forms genuinely suppress it to rc=0 on the same repository — the arms below are about a live suppression route"
+else
+  bad "fsck-policy-plant: plain=$FP_RC_A msgid=$FP_RC_B skiplist=$FP_RC_C sha='$FP_BAD_SHA' — the arms below would prove nothing"
+fi
+
+# (a) THE CONTROL: the same damage with NO fsck config is detected. This is what makes
+#     (b) and (c) attributable to the configuration rather than to the fixture.
+if run 4 "fsck-policy(control): damage with no fsck config is CORRUPT" --repo "$R_FP_A"; then
+  if [ "$(verdict_of)" = CORRUPT ] &&
+    printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: measured fsck-policy: no fsck\.\* key'; then
+    ok "fsck-policy(control): with no fsck.* key the sweep WALKS, reports the affirmative policy measurement, and calls the planted damage CORRUPT"
+  else
+    bad "fsck-policy(control): verdict='$(verdict_of)' — the plant is not otherwise detected, so the refusal arms below are unattributable"
+  fi
+fi
+
+# (b) and (c): the SAME damage under each suppression form. The property asserted first is
+#     the one the finding is about — NOT VERIFIED, NOT exit 0 — and only then the verdict
+#     it does produce.
+for FP_ARM in msgid skiplist; do
+  case "$FP_ARM" in
+    msgid) FP_REPO="$R_FP_B"; FP_KEY='fsck.missingemail' ;;
+    *)     FP_REPO="$R_FP_C"; FP_KEY='fsck.skiplist' ;;
+  esac
+  OUT=$(bash "$SUBJECT" --repo "$FP_REPO" 2>&1)
+  RC=$?
+  record_out "fsck-policy-$FP_ARM"
+  if [ "$RC" -ne 0 ] && [ "$(verdict_of)" != VERIFIED ]; then
+    ok "fsck-policy($FP_ARM): a store whose own config can suppress the damage it holds does NOT report VERIFIED (rc=$RC) — the false affirmative verdict this item exists to remove"
+  else
+    bad "fsck-policy($FP_ARM): rc=$RC verdict='$(verdict_of)' — a DAMAGED store reported clean because its own configuration suppressed the diagnostic"
+  fi
+  if [ "$RC" -eq 6 ] && [ "$(verdict_of)" = UNSWEEPABLE ]; then
+    ok "fsck-policy($FP_ARM): it is the STOPPING verdict (exit 6/UNSWEEPABLE), not the permissive one — an fsck policy is a persistent property of the repository, so 'measure again in 6h' would mean detection is off on this box until somebody reads a journal line"
+  else
+    bad "fsck-policy($FP_ARM): rc=$RC verdict='$(verdict_of)' (wanted 6/UNSWEEPABLE)"
+  fi
+  if printf '%s\n' "$OUT" | grep -q "^OBJECT-STORE: finding fsck policy key(s): .*$FP_KEY"; then
+    ok "fsck-policy($FP_ARM): the offending key is NAMED ($FP_KEY) — an operator cannot act on 'something in your config'"
+  else
+    bad "fsck-policy($FP_ARM): the key is not named: [$(printf '%s\n' "$OUT" | grep '^OBJECT-STORE: finding ' | tr '\n' '|')]"
+  fi
+  # IT MUST NOT CLAIM DAMAGE, and it must say how to INSPECT. Nothing was rehashed here —
+  # no walk ran at all — so the damage verdict's measured repairs would be round 9's
+  # confidently-wrong text, and the class-specific tokens are asserted ABSENT.
+  FP_FORBID=""
+  for FP_TOK in refetch 'git clone' 'reflog expire' 'multi-pack-index write'; do
+    printf '%s\n' "$OUT" | grep -qi -- "$FP_TOK" && FP_FORBID="$FP_FORBID [$FP_TOK]"
+  done
+  if [ -z "$FP_FORBID" ] &&
+    printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: verdict-detail NO DAMAGE IS CLAIMED' &&
+    printf '%s\n' "$OUT" | grep -q 'config --list --show-origin --name-only'; then
+    ok "fsck-policy($FP_ARM): it claims NO damage, carries none of the repair instructions that belong to a measured damage class, and names the command that lists the keys with the scopes this sweep reads"
+  else
+    bad "fsck-policy($FP_ARM): forbidden repair token(s)$FP_FORBID, or no no-damage statement, or no inspection command"
+  fi
+  # AND NO WALK RAN. The refusal is BEFORE the sweep, so there must be no pass
+  # measurement at all — a run that walked and then refused would have spent two fsck
+  # bounds and could have printed a measurement nobody may trust.
+  if ! printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: measured pass '; then
+    ok "fsck-policy($FP_ARM): NO walk was run (no 'measured pass' line) — the refusal is a precondition, not a post-hoc downgrade of a measurement"
+  else
+    bad "fsck-policy($FP_ARM): a walk ran under an fsck policy this script cannot trust"
+  fi
+done
+
+# (d) A CLEAN store carrying ONLY the config. One property from the control in the other
+#     direction: no damage at all, and it still refuses — because the refusal is about
+#     what the sweep can TRUST, not about what it found. Without this arm the verdict
+#     above could be read as a damage finding wearing a different token.
+R_FP_D=$(newrepo fsckpolicy-d)
+git -C "$R_FP_D" config fsck.missingEmail ignore >/dev/null 2>&1
+OUT=$(bash "$SUBJECT" --repo "$R_FP_D" 2>&1)
+RC=$?
+record_out "fsck-policy-clean-store"
+if [ "$RC" -eq 6 ] && [ "$(verdict_of)" = UNSWEEPABLE ]; then
+  ok "fsck-policy(clean-store): an UNDAMAGED store whose config sets fsck.* also refuses — the verdict is about the trustworthiness of the measurement, not about a finding"
+else
+  bad "fsck-policy(clean-store): rc=$RC verdict='$(verdict_of)' (wanted 6/UNSWEEPABLE)"
+fi
+
+# (e) `--print-store` MUST STILL WORK ON SUCH A STORE, and this is not cosmetic: the
+#     supervisor asks for the store KEY to find the very latch that records the stop. A
+#     refusal here would leave a stopped box unable to name the file recording why.
+OUT=$(bash "$SUBJECT" --repo "$R_FP_D" --print-store 2>&1)
+RC=$?
+record_out "fsck-policy-print-store"
+if [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: store ' &&
+  ! printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: verdict '; then
+  ok "fsck-policy(print-store): the resolver still answers for a store the sweep refuses — it runs no fsck, and the caller needs the key to read the latch that records the stop"
+else
+  bad "fsck-policy(print-store): rc=$RC output=[$(printf '%s\n' "$OUT" | tr '\n' '|')]"
+fi
+
+# --- Case 34: "COULD NOT ASK" IS PERMISSIVE, AND IT IS NOT `VERIFIED` -------
+#
+# The probe is the sole oracle for the policy, so a probe that fails leaves the policy
+# UNREAD — and CLAUDE.md's standing rule is that a verdict may never be derived from the
+# absence of a bad signal. Two shapes, each with its own cause text, and BOTH must be
+# non-passing while NEITHER stops the box: an unreadable policy is a "could not measure"
+# fact of the same kind as the `unrunnable` class, not a persistent property of the store.
+#
+# A `git config` SHIM is the lever. The store cannot be made to fail that call without
+# also breaking the `rev-parse` that resolves it (an unparseable config fails both), which
+# would refuse one step earlier and prove nothing about this branch.
+if [ -n "${REAL_GIT:-}" ]; then
+  for FP_U in fails empty; do
+    SH_FP="$T/shim-cfg-$FP_U"
+    mk_bin "$SH_FP" timeout gtimeout
+    rm -f "$SH_FP/git"
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf '# Test shim: `config --list` %s; everything else delegates to the real git.\n' "$FP_U"
+      printf 'for a in "$@"; do\n'
+      printf '  if [ "$a" = config ]; then\n'
+      if [ "$FP_U" = fails ]; then
+        printf '    printf "shim: config unavailable\\n" >&2\n'
+        printf '    exit 128\n'
+      else
+        printf '    exit 0\n'
+      fi
+      printf '  fi\n'
+      printf 'done\n'
+      printf 'exec %s "$@"\n' "$(printf '%q' "$REAL_GIT")"
+    } >"$SH_FP/git"
+    chmod +x "$SH_FP/git"
+    # CONSTRUCTION: the shim really does what the arm needs, and it really does NOT break
+    # the resolution the sweep does first — otherwise the refusal below would be the
+    # store-resolution branch and not this one.
+    FP_CFG_RC=0
+    PATH="$SH_FP:$PATH" "$SH_FP/git" --git-dir="$R_CLEAN/.git" config --list --name-only >"$T/cfg-$FP_U.out" 2>/dev/null || FP_CFG_RC=$?
+    FP_RP=$(PATH="$SH_FP:$PATH" "$SH_FP/git" -C "$R_CLEAN" rev-parse --git-common-dir 2>/dev/null)
+    if [ "$FP_U" = fails ]; then FP_WANT_RC=128; else FP_WANT_RC=0; fi
+    if [ "$FP_CFG_RC" -eq "$FP_WANT_RC" ] && [ ! -s "$T/cfg-$FP_U.out" ] && [ -n "$FP_RP" ]; then
+      ok "fsck-policy-unknown-plant($FP_U): the shim answers 'config --list' with rc=$FP_CFG_RC and no keys while 'rev-parse --git-common-dir' still resolves — the arm below is about the policy probe and not about store resolution"
+    else
+      bad "fsck-policy-unknown-plant($FP_U): cfg-rc=$FP_CFG_RC keys=$(wc -c <"$T/cfg-$FP_U.out" | tr -d ' ') rev-parse='$FP_RP' — the arm below would prove nothing"
+    fi
+    OUT=$(PATH="$SH_FP:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+    RC=$?
+    record_out "fsck-policy-unknown-$FP_U"
+    if [ "$RC" -eq 5 ] && [ "$(verdict_of)" = UNMEASURED ] &&
+      printf '%s\n' "$OUT" | grep -q 'fsck POLICY of this store'; then
+      ok "fsck-policy-unknown($FP_U): an unread policy is UNMEASURED with its own cause — non-passing (it can never be VERIFIED) and permissive (it does not stop the box), because 'could not ask' is a fact about this run, not about the store"
+    else
+      bad "fsck-policy-unknown($FP_U): rc=$RC verdict='$(verdict_of)' (wanted 5/UNMEASURED naming the policy)"
+    fi
+    if ! printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: measured pass '; then
+      ok "fsck-policy-unknown($FP_U): no walk was run — an affirmative verdict is unobtainable under an unread policy, so spending two fsck bounds to reach one would be waste"
+    else
+      bad "fsck-policy-unknown($FP_U): a walk ran under a policy this run could not read"
+    fi
+  done
+fi
+
+# --- Case 35: THE PROBE ASKS ABOUT THE CONFIG THE WALK WILL ACTUALLY READ ---
+#
+# STRUCTURAL, over the shipped source, and it is the one property behaviour cannot show:
+# a probe that read a DIFFERENT git dir, or ran a BARE `git` (inheriting the caller's
+# GIT_CONFIG_* and so a different policy), would answer correctly on every fixture in this
+# suite and be wrong in production. Round 2's BLOCKER 2 was exactly that shape one
+# function over — the supervisor resolving the store with an un-isolated git — so the
+# invariant is asserted rather than believed.
+FP_PROBE=$(sed -n '/^fsck_policy_probe() {/,/^}/p' "$SUBJECT")
+if [ -n "$FP_PROBE" ] &&
+  printf '%s\n' "$FP_PROBE" | grep -q 'git_isolated git --git-dir="\$dir" config --list --name-only'; then
+  ok "fsck-policy(structure): the probe runs under git_isolated, with --git-dir, on the same store the walks use — so it reads the configuration the fsck will read"
+else
+  bad "fsck-policy(structure): the probe's git call is not the isolated --git-dir form: [$(printf '%s\n' "$FP_PROBE" | grep -n 'git ' | tr '\n' '|')]"
+fi
+# COMMENT LINES ARE STRIPPED FIRST: this file's own prose says `git` repeatedly, and a
+# census that counted it would answer about the documentation rather than the code.
+FP_CODE=$(printf '%s\n' "$FP_PROBE" | sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d')
+# AND THE CENSUS IS OVER COMMAND POSITIONS, NOT OVER THE TOKEN `git`: two of the probe's
+# lines carry `git ...` inside a DIAGNOSTIC STRING (the cause text an operator reads), and
+# counting those would make this assert answer about prose. A command position is a line
+# start, a command substitution, a pipe, a `&&` or a `;` — the shapes that EXECUTE.
+FP_GIT_ALL=$(printf '%s\n' "$FP_CODE" | grep -c -E '(^[[:space:]]*|\$\(|\|[[:space:]]*|&&[[:space:]]*|;[[:space:]]*)git[ _]' | tr -d ' ')
+FP_GIT_ISO=$(printf '%s\n' "$FP_CODE" | grep -c 'git_isolated git ' | tr -d ' ')
+if [ "$FP_GIT_ALL" -ge 1 ] && [ "$FP_GIT_ALL" -eq "$FP_GIT_ISO" ]; then
+  ok "fsck-policy(structure): EVERY git call in the probe is isolated ($FP_GIT_ISO of $FP_GIT_ALL) — an un-isolated one would read another policy than the walk does (round 2's BLOCKER 2, one function over)"
+else
+  bad "fsck-policy(structure): $FP_GIT_ALL git line(s) in the probe body, $FP_GIT_ISO of them isolated"
+fi
+# AND THE AFFIRMATIVE STATE IS THE ONLY ONE THAT PROCEEDS. `none` must be set only after
+# keys were actually read: an rc-0 answer with an empty listing is `unknown`, not an empty
+# policy, because every git repository's own config declares core.repositoryformatversion.
+if printf '%s\n' "$FP_PROBE" | grep -q 'FSCK_POLICY_STATE=unknown' &&
+  printf '%s\n' "$FP_PROBE" | grep -B4 'FSCK_POLICY_STATE=none' | grep -q 'hits' &&
+  printf '%s\n' "$FP_PROBE" | grep -q 'if \[ -z "\$out" \]'; then
+  ok "fsck-policy(structure): the probe starts at 'unknown' and reaches 'none' only by having COUNTED keys — an empty listing is an unread policy, never an empty one"
+else
+  bad "fsck-policy(structure): the probe's default state or its empty-listing branch is not the affirmative shape"
 fi
