@@ -165,6 +165,7 @@ impl V5CompressedLegacyParser {
                 || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE)
                 || offset + header_min_size > data.len()
             {
+                crate::probe3782::hit("block_emit_windowed:169_skip_bad_partition_header", "");
                 tracing::warn!(
                     "V5CompressedLegacy: Skipping malformed partition header at offset {} \
                      (flags=0x{:02x}, key_len={}, need {} bytes, have {}, partition={}): header validation failed",
@@ -591,6 +592,7 @@ impl V5CompressedLegacyParser {
                                 );
                             }
                             Err(e) => {
+                                crate::probe3782::hit("block_emit_windowed:593_row_err_break", &format!("row_count={} {e}", row_count));
                                 // End of valid data in partition
                                 debug!(
                                     "V5CompressedLegacy: Partition {} ended after {} rows: {}",

@@ -304,6 +304,7 @@ async fn q2_compaction_path_mutated_clustering_text() {
         t
     };
 
+    let mut comp_keys: std::collections::BTreeMap<&str, Vec<Vec<u8>>> = Default::default();
     for (label, dir) in [("CONTROL", &ctl), ("MUTATED", &stage)] {
         let data_db = comp_file(dir, "-Data.db");
         let reader = SSTableReader::open(&data_db, &config, platform.clone())
@@ -312,7 +313,10 @@ async fn q2_compaction_path_mutated_clustering_text() {
         cqlite_core::probe3782::reset();
         let before = String::from_utf8_lossy(&sink.0.lock().unwrap().clone()).lines().count();
         match reader.iterate_all_partitions_for_compaction(Some(&schema)).await {
-            Ok(rows) => eprintln!("PROBE3782 Q2 {label} compaction -> Ok compaction_rows={}", rows.len()),
+            Ok(rows) => {
+                eprintln!("PROBE3782 Q2 {label} compaction -> Ok compaction_rows={}", rows.len());
+                comp_keys.insert(label, rows.iter().map(|r| r.key.as_bytes().to_vec()).collect());
+            }
             Err(e) => eprintln!("PROBE3782 Q2 {label} compaction -> Err {e}"),
         }
         let after = String::from_utf8_lossy(&sink.0.lock().unwrap().clone()).lines().count();
@@ -330,6 +334,14 @@ async fn q2_compaction_path_mutated_clustering_text() {
         eprintln!("PROBE3782 Q2 {label} index-fallback-warn total-so-far = {}",
             logs.matches("falling back to a full sequential scan").count());
         cqlite_core::probe3782::dump(&format!("q2-{label}-iterate"));
+    }
+    if let (Some(c), Some(m)) = (comp_keys.get("CONTROL"), comp_keys.get("MUTATED")) {
+        let cset: std::collections::BTreeSet<_> = c.iter().cloned().collect();
+        let mset: std::collections::BTreeSet<_> = m.iter().cloned().collect();
+        let lost: Vec<_> = cset.difference(&mset).collect();
+        let spurious: Vec<_> = mset.difference(&cset).collect();
+        eprintln!("PROBE3782 Q2 COMPACTION KEY DIFF control_rows={} mutated_rows={} control_distinct={} mutated_distinct={} LOST_KEYS={} SPURIOUS_KEYS={}",
+            c.len(), m.len(), cset.len(), mset.len(), lost.len(), spurious.len());
     }
     let logs = String::from_utf8_lossy(&sink.0.lock().unwrap().clone()).to_string();
     std::fs::write("/tmp/p3782/q2-warns.log", &logs).unwrap();
