@@ -2696,7 +2696,18 @@ supervisor_lock_take() {
     if ! rm -f -- "$marker" 2>/dev/null; then
       log "$(supervisor_one_line "startup: could not remove our own ownership marker $(supervisor_shell_quote "$marker") after acquiring the lock. Harmless to this run — the lock is held and its release removes the directory wholesale — but a non-recursive manual clear of that lock would refuse until the marker is gone (#3601).")"
     fi
-    trap 'supervisor_lock_release' EXIT
+    # THE CLAIM IS RELEASED BEFORE THE LOCK, AND IT IS REGISTERED HERE RATHER THAN AT ITS
+    # CREATE SITE (#3749 review round 5, item 2; CLAUDE.md's roborev-job-282 ruling that a
+    # fix which ADDS a resource inherits that resource's lifetime bugs). The trap is
+    # installed before any sweep can run, so the handler exists before the resource does,
+    # and the resource's identity travels in OBJ_SWEEP_CLAIM_OWNED — empty until a claim is
+    # created, cleared the moment it is released, so this is a no-op on every other path.
+    # KNOWN AND NOT CLOSED HERE: this file installs no INT/TERM handlers, so a SIGNALLED
+    # supervisor releases neither its claim nor its lock. For the claim that is a delay and
+    # not a wedge — a peer recovers it once it ages past the staleness bound — and adding
+    # signal handlers to this process is a change to the LOCK's lifetime too, which is
+    # #3683's subject and not this one's.
+    trap 'obj_sweep_claim_release "$OBJ_SWEEP_CLAIM_OWNED"; supervisor_lock_release' EXIT
     return 0
   fi
   SUPERVISOR_LOCK_TAKE_CAUSE="$pub"
@@ -3248,6 +3259,19 @@ acquire_lock() {
 OBJ_SWEEP_ANNOUNCED=0
 OBJ_SWEEP_UNMEASURED_NOTIFIED=0
 OBJ_SWEEP_NOSTAMP_NOTIFIED=0
+OBJ_SWEEP_CLAIM_NOTIFIED=0
+# The in-progress claim this process currently owns, or empty. Read by the EXIT trap, so
+# it is assigned before anything can create a claim (`set -u`), and it is what makes the
+# claim a REGISTERED resource rather than one whose lifetime nobody owns (CLAUDE.md's
+# roborev-job-282 ruling: a fix that adds a resource inherits that resource's lifetime
+# bugs, so register it the moment it exists and clear it the moment it is released).
+OBJ_SWEEP_CLAIM_OWNED=""
+OBJ_SWEEP_CLAIM_STATE=""
+# SLACK on the claim-staleness bound: what a sweep spends OUTSIDE its bounded fsck walks —
+# process startup, the `--print-store` resolution, output capture, and the notify/journal
+# writes. It is additive to a DERIVED product (see obj_sweep_claim_stale_secs) rather than
+# a bound in its own right, which is why it is a small constant and not a measurement.
+OBJ_SWEEP_CLAIM_SLACK_SECS=60
 
 # obj_sweep_digest <value> — a COLLISION-RESISTANT, filesystem-safe fingerprint of
 # <value>, 16 lowercase hex characters, or nothing (exit 1) when this host has no usable
@@ -3443,6 +3467,181 @@ obj_sweep_write_stamp() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# THE IN-PROGRESS CLAIM: ONE SWEEP PER BOX AT A TIME (#3749 review round 5, item 2 —
+# raised as a Low in round 1, recorded as "not disposed of" in round 2, returned as a
+# Medium with a consequence attached in round 5).
+#
+# THE DEFECT. The throttle read and the sweep invocation are unsynchronised, and the stamp
+# is written at the END of a sweep — so when the interval expires EVERY lane on the box
+# reads the same stale stamp and starts its own full-store `git fsck`. On a four-lane box
+# that is four concurrent rehashes of one 366M store, and the consequence is not merely
+# CPU: the walks are I/O-bound (17-19s of user time inside an 80s wall), so contention
+# pushes them toward the per-walk bound — and an expired bound is UNMEASURED. That is a
+# CORRELATED loss of the measurement on every lane at once, which is the state this whole
+# feature exists to prevent.
+#
+# THE CLAIM IS A DIRECTORY CREATED WITH `mkdir`: the same kernel-arbitrated create-only
+# primitive as the CORRUPT latch, for the same reason — exactly one caller can win and
+# there is no read-modify-write to serialise. NOT `flock`: this file's single-instance lock
+# is an atomic mkdir + pid-liveness precisely because MACOS SHIPS NO `flock(1)` (see the
+# SUPERVISOR_LOCK header), and a second locking mechanism in one file is a second set of
+# failure modes.
+#
+# A LOSER DOES NOT WAIT. It skips this iteration's sweep and carries on, after the usual
+# latch read: the sweep is a 6-hourly hygiene probe, so "a peer is doing it right now" is a
+# complete answer, and waiting would put the box's whole spawn path behind one fsck.
+# ---------------------------------------------------------------------------
+
+# obj_sweep_claim_path <stamp-path> — the claim that belongs to that stamp. Derived from
+# the stamp, so it is keyed on the SHARED STORE (the resource being contended) and a pinned
+# OBJ_SWEEP_STAMP relocates the stamp, the latch and the claim together.
+obj_sweep_claim_path() {
+  local stamp="$1"
+  [[ -n "$stamp" ]] || return 0
+  printf '%s.sweeping' "$stamp"
+}
+
+# obj_sweep_claim_stale_secs <sweep-script> — the age at which a claim may be TAKEN OVER;
+# nothing (exit 1) when it cannot be derived.
+#
+# DERIVED, NOT A CONSTANT, BECAUSE THE HAZARD IS REAL IN BOTH DIRECTIONS. A lane killed
+# mid-sweep leaves its claim behind, and with no recovery no lane on the box ever sweeps
+# again — strictly worse than the herd. But a threshold shorter than a legitimate sweep
+# would let a peer take over a claim whose sweep is still running, which is the herd back
+# again with a stolen claim on top. So: one invocation spends at most MAX_SWEEP_WALKS
+# bounded walks — DECLARED in the sweep script and READ FROM IT here rather than re-typed
+# (round 4's lesson: a relation whose own constant is restated in its consumer is two magic
+# numbers wearing a relation's clothes) — and each walk is bounded by the
+# OBJ_SWEEP_TIMEOUT_SECS this supervisor passes. The earliest safe threshold is their
+# PRODUCT, plus OBJ_SWEEP_CLAIM_SLACK_SECS for what is not inside a walk. With the shipped
+# defaults that is 3 x 200 + 60 = 660s.
+#
+# IF IT CANNOT BE DERIVED, NO CLAIM IS TAKEN AT ALL and the caller announces it once. That
+# is the non-wedging direction: without a bound a stale claim could never be recovered, and
+# an unrecoverable claim is worse than the herd it prevents, so the mechanism degrades to
+# exactly the previous behaviour instead of inventing a number nobody measured.
+obj_sweep_claim_stale_secs() {
+  local script="$1" walks
+  [[ -n "$script" && -r "$script" ]] || return 1
+  walks="$({ grep -m1 '^MAX_SWEEP_WALKS=' "$script" || true; } 2>/dev/null)"
+  walks="${walks#MAX_SWEEP_WALKS=}"
+  walks="${walks%%[!0-9]*}"
+  [[ "$walks" =~ ^[0-9]+$ ]] || return 1
+  [[ "$walks" -ge 1 ]] || return 1
+  printf '%s' "$((walks * OBJ_SWEEP_TIMEOUT_SECS + OBJ_SWEEP_CLAIM_SLACK_SECS))"
+}
+
+# obj_sweep_claim_acquire <claim-dir> <stale-secs> — try to become the one lane sweeping
+# this store. Sets OBJ_SWEEP_CLAIM_STATE to exactly one of:
+#
+#   acquired    — this lane created the claim and owns it
+#   taken       — this lane RECOVERED a stale claim and owns it
+#   held        — a peer lane is sweeping; this lane must skip
+#   unavailable — no claim could be taken at all (no key, or no derivable recovery bound),
+#                 so the caller sweeps unserialised exactly as it did before this existed
+#
+# IT SETS GLOBALS RATHER THAN PRINTING, deliberately: a command substitution would run it
+# in a SUBSHELL, and OBJ_SWEEP_CLAIM_OWNED — the registration the EXIT trap reads — would
+# be lost with that subshell. The registration must happen in THIS shell, on the line after
+# the create, or a lane killed a moment later leaves a claim its own exit will not release.
+obj_sweep_claim_acquire() {
+  local claim="$1" stale="$2" now started age
+  OBJ_SWEEP_CLAIM_STATE=unavailable
+  [[ -n "$claim" ]] || return 0
+  [[ "$stale" =~ ^[0-9]+$ ]] || return 0
+  now="$(date +%s)"
+  if mkdir "$claim" 2>/dev/null; then
+    OBJ_SWEEP_CLAIM_OWNED="$claim"
+    obj_sweep_claim_mark_started "$claim" "$now"
+    OBJ_SWEEP_CLAIM_STATE=acquired
+    return 0
+  fi
+  # Not ours, and not creatable. If there is no directory there at all, this is not
+  # contention — it is a name we cannot use (an unwritable parent, a file in the way) — and
+  # claiming nothing is the honest answer rather than reading it as a peer.
+  [[ -d "$claim" ]] || return 0
+  # THE AGE COMES FROM A FILE THIS CODE WROTE, NOT FROM mtime. `stat` is GNU-vs-BSD
+  # incompatible (the same reason bootstrap verifies a mode with `find -perm`), and the
+  # throttle stamp beside it already records an epoch this way.
+  started=""
+  { read -r started || true; } <"$claim/started" 2>/dev/null || true
+  if [[ "$started" =~ ^[0-9]+$ ]] && [[ "$started" -le "$now" ]]; then
+    age=$((now - started))
+    if [[ "$age" -le "$stale" ]]; then
+      OBJ_SWEEP_CLAIM_STATE=held
+      return 0
+    fi
+  fi
+  # NO PARSEABLE START TIME — OR ONE IN THE FUTURE — COUNTS AS STALE, and the direction is
+  # deliberate. Its cause is a lane killed in the microseconds between the `mkdir` and the
+  # `started` write (or a clock that moved), and the alternative reading — "keep it" —
+  # wedges the box's sweep FOREVER on a file nobody can age. Cost of this direction: if a
+  # peer is taken over inside that microsecond window, two lanes sweep once. One extra
+  # sweep is recoverable; an unrecoverable claim is not. The throttle stamp treats a future
+  # timestamp the same way, for the same reason.
+  #
+  # `mv` THEN `mkdir`: rename(2) is atomic, so of N lanes finding one stale claim exactly
+  # ONE can move it aside — and the `mkdir` that follows is the arbiter of ownership
+  # anyway, so a lane whose rename lost still ends up `held` rather than sweeping beside
+  # the winner.
+  mv "$claim" "$claim.stale.$$" 2>/dev/null || true
+  rm -rf "$claim.stale.$$" 2>/dev/null || true
+  if mkdir "$claim" 2>/dev/null; then
+    OBJ_SWEEP_CLAIM_OWNED="$claim"
+    obj_sweep_claim_mark_started "$claim" "$now"
+    OBJ_SWEEP_CLAIM_STATE=taken
+    return 0
+  fi
+  OBJ_SWEEP_CLAIM_STATE=held
+  return 0
+}
+
+# obj_sweep_claim_mark_started <claim-dir> <epoch> — record WHEN the sweep this claim
+# represents began, which is the only thing that makes the claim recoverable. A failed
+# write is not fatal and is not silent: the claim still serialises, and a peer will read it
+# as unageable and therefore stale, which is the recoverable direction.
+obj_sweep_claim_mark_started() {
+  local claim="$1" epoch="$2"
+  printf '%s\n' "$epoch" 2>/dev/null >"$claim/started" ||
+    log "object-store sweep: could not record a start time in the sweep claim $claim — a peer will read it as unageable and may sweep beside this lane (#3749)"
+  return 0
+}
+
+# obj_sweep_claim_release <claim-dir> — give the claim up. Called BOTH from the sweep path
+# (so the next interval is contended honestly) AND from the EXIT trap (so a lane that stops
+# mid-iteration does not make its peers wait out the staleness bound). Removing a claim that
+# is no longer ours is not a hazard the way it is for the supervisor lock: a claim is
+# advisory, its only effect is to make a peer skip ONE 6-hourly probe, and this only ever
+# runs for the exact path this process recorded in OBJ_SWEEP_CLAIM_OWNED.
+obj_sweep_claim_release() {
+  local claim="$1"
+  [[ -n "$claim" ]] || return 0
+  rm -rf -- "$claim" 2>/dev/null || true
+  [[ "$OBJ_SWEEP_CLAIM_OWNED" != "$claim" ]] || OBJ_SWEEP_CLAIM_OWNED=""
+  return 0
+}
+
+# obj_sweep_stamp_is_fresh <stamp-path> — 0 when this box swept inside the interval.
+#
+# ONE implementation, because the throttle is now read TWICE: once before contending for
+# the claim, and again after winning it — the winner of a race may have finished sweeping
+# and written the stamp while this lane was deciding, and re-reading is what stops the
+# claim from converting a herd into a queue of redundant sweeps.
+#
+# A stamp in the FUTURE (clock skew, a hand-edited file, a restored snapshot) must not park
+# the sweep forever: it reads as never-swept. It does NOT clear the CORRUPT latch, which is
+# a fact about the store rather than about when it was last measured.
+obj_sweep_stamp_is_fresh() {
+  local stamp="$1" now last=0 ts=""
+  [[ -n "$stamp" && -r "$stamp" ]] || return 1
+  now="$(date +%s)"
+  { read -r ts || true; } <"$stamp" 2>/dev/null || true
+  [[ "$ts" =~ ^[0-9]+$ ]] && last="$ts"
+  [[ "$last" -gt "$now" ]] && last=0
+  [[ $((now - last)) -lt $((OBJ_SWEEP_INTERVAL_HOURS * 3600)) ]]
+}
+
 # obj_sweep_set_latch <latch-path> — record MONOTONICALLY that this box's shared object
 # store has been found damaged. Exits 0 when the latch is in place AFTERWARDS (whether
 # this call created it or found a peer's), 1 when it could not be persisted at all.
@@ -3554,7 +3753,7 @@ obj_sweep_stop_if_latched() {
 }
 
 object_store_sweep() {
-  local script stamp latch latch_ts now last rc out verdict stamp_ts
+  local script stamp latch claim claim_stale rc out verdict
   # ---------------------------------------------------------------------------
   # THE ENTRY LATCH READ. IT IS ABOVE EVERY BRANCH IN THIS FUNCTION, AND THE LINES
   # BEFORE IT ARE ASSIGNMENTS ONLY — NO `if`, NO `return`, NOTHING THAT CAN LEAVE
@@ -3622,20 +3821,6 @@ object_store_sweep() {
   # THE STAMP AND LATCH WERE RESOLVED AT ENTRY, ABOVE, and the "no box-wide key" state is
   # announced there by obj_sweep_stop_if_latched's `unkeyed` branch — the one place that
   # can say it, because it is the branch that could not ask the latch question.
-  now="$(date +%s)"
-  last=0
-  if [[ -n "$stamp" && -r "$stamp" ]]; then
-    stamp_ts=""
-    { read -r stamp_ts || true; } <"$stamp" 2>/dev/null || true
-    last="$stamp_ts"
-  fi
-  [[ "$last" =~ ^[0-9]+$ ]] || last=0
-  # A stamp in the FUTURE (clock skew, a hand-edited file, a restored snapshot) must not
-  # park the sweep forever: treat it as never-swept. It does NOT clear the CORRUPT latch,
-  # which is a fact about the store rather than about when it was last measured — and,
-  # since round 2, is not even in this file.
-  [[ "$last" -gt "$now" ]] && last=0
-
   # A LATCHED BOX STOPS THIS LANE WITHOUT RE-SWEEPING, AND IT IGNORES THE INTERVAL —
   # WHICH IS WHY THE READ THAT ENFORCES IT IS AT THE TOP OF THIS FUNCTION AND NOT HERE.
   #
@@ -3660,10 +3845,48 @@ object_store_sweep() {
   # below: nothing between them can change the latch except a peer, in the microseconds it
   # takes to stat one file, and the reads that DO cover a real window (this lane's own
   # multi-walk sweep) are the ones after it.
-  if [[ -n "$stamp" ]] && [[ $((now - last)) -lt $((OBJ_SWEEP_INTERVAL_HOURS * 3600)) ]]; then
+  if obj_sweep_stamp_is_fresh "$stamp"; then
     # RE-ASKED ON THE THROTTLED PATH. Cheap (one stat), and it keeps ONE rule —
     # "no return that leads to a spawn without a fresh latch read" — instead of a set of
     # paths someone has to remember to audit individually.
+    obj_sweep_stop_if_latched "$latch"
+    return 0
+  fi
+
+  # --- ONE SWEEP PER BOX AT A TIME (#3749 review round 5, item 2) -------------
+  # The throttle alone cannot prevent the herd: the stamp is written at the END of a sweep,
+  # so every lane reads the same stale stamp at the same moment and all of them start their
+  # own full-store fsck. See the obj_sweep_claim_* header for the mechanism and for why the
+  # loser skips instead of waiting.
+  claim="$(obj_sweep_claim_path "$stamp")"
+  claim_stale="$(obj_sweep_claim_stale_secs "$script" || true)"
+  obj_sweep_claim_acquire "$claim" "$claim_stale"
+  case "$OBJ_SWEEP_CLAIM_STATE" in
+    held)
+      log "object-store sweep: SKIPPED — a peer lane on this box holds the sweep claim ($claim), so the shared store is being rehashed by that lane right now. Not waiting, and not sweeping beside it: the sweep is a 6-hourly hygiene probe and one lane paying for it is the whole box's answer (#3749)."
+      obj_sweep_stop_if_latched "$latch"
+      return 0
+      ;;
+    taken)
+      log "object-store sweep: RECOVERED a stale sweep claim ($claim, older than ${claim_stale}s = the sweep's own MAX_SWEEP_WALKS x this supervisor's per-walk bound + slack, so the sweep it represented cannot still be running) — the lane holding it was killed mid-sweep. Sweeping (#3749)."
+      ;;
+    unavailable)
+      # ANNOUNCED ONCE, never inferred from missing lines: without a claim the herd is back,
+      # and that is a property of the box (no box-wide key, or a sweep script whose
+      # MAX_SWEEP_WALKS could not be read to derive a recovery bound), not of the iteration.
+      if [[ "$OBJ_SWEEP_CLAIM_NOTIFIED" -eq 0 ]]; then
+        log "object-store sweep: NO in-progress claim is being taken — there is no box-wide key for this store, or the sweep's own MAX_SWEEP_WALKS could not be read to derive a recovery bound. Every lane on this box may sweep at once when the interval expires (#3749)."
+        OBJ_SWEEP_CLAIM_NOTIFIED=1
+      fi
+      ;;
+  esac
+  # RE-READ THE THROTTLE UNDER THE CLAIM, AND THAT SECOND READ IS WHAT MAKES THE CLAIM
+  # WORTH TAKING. The winner of the race may have finished its sweep and written the stamp
+  # between this lane's first read and its own acquire, so without this the claim would
+  # merely convert N simultaneous sweeps into N sequential ones.
+  if [[ "$OBJ_SWEEP_CLAIM_STATE" != unavailable ]] && obj_sweep_stamp_is_fresh "$stamp"; then
+    log "object-store sweep: SKIPPED — a peer lane finished sweeping this store while this lane was taking the claim, so the box is inside the interval again (#3749)."
+    obj_sweep_claim_release "$claim"
     obj_sweep_stop_if_latched "$latch"
     return 0
   fi
@@ -3744,6 +3967,12 @@ object_store_sweep() {
   # every iteration — and it says nothing about what was found. What a peer lane must
   # not throttle past is recorded separately, and monotonically, by the latch above.
   obj_sweep_write_stamp "$stamp"
+  # AND ONLY THEN THE CLAIM, IN THAT ORDER: a peer that acquires the claim next reads the
+  # stamp this lane just wrote and throttles, instead of paying for a sweep that has just
+  # happened. The CORRUPT branch above does not reach this line — it ends the process — and
+  # the EXIT trap releases the claim there, which is why the claim is registered in
+  # OBJ_SWEEP_CLAIM_OWNED on the line after it is created rather than here.
+  obj_sweep_claim_release "$claim"
 
   if [[ "$rc" -eq 0 && "$verdict" == "VERIFIED" ]]; then
     log "object-store: VERIFIED — $(printf '%s\n' "$out" | { grep '^OBJECT-STORE: measured ' || true; } | head -1)"

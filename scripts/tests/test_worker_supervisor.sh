@@ -9381,6 +9381,12 @@ obj_sweep_tree() {
   {
     printf '#!/usr/bin/env bash\n'
     printf '# STUB sweep: record the invocation, print one anchored verdict, exit with its code.\n'
+    # THE STUB DECLARES MAX_SWEEP_WALKS BECAUSE THE REAL SCRIPT DOES, and the supervisor
+    # READS it out of whatever sweep script the checkout holds to derive the recovery bound
+    # for the in-progress claim (#3749 review round 5, item 2). A stub without it is a
+    # different, also-real state — no derivable bound, therefore no claim — and the case
+    # that covers THAT deletes this line rather than the stub omitting it silently here.
+    printf 'MAX_SWEEP_WALKS=3\n'
     printf 'for a in "$@"; do\n'
     printf '  if [ "$a" = --print-store ]; then\n'
     [[ -n "$storeline" ]] && printf '    printf "OBJECT-STORE: store %%s\\n" %s\n' "$(printf '%q' "$storeline")"
@@ -10123,6 +10129,259 @@ test_object_store_latch_unreadable_is_not_absent() {
 }
 
 t test_object_store_latch_unreadable_is_not_absent
+
+# THE THUNDERING HERD: ONE SWEEP PER BOX AT A TIME (#3749 review round 5, item 2 — a Low in
+# round 1, "not disposed of" in round 2, a Medium with a consequence in round 5).
+#
+# THE DEFECT. The throttle stamp is written at the END of a sweep, so when the interval
+# expires every lane on the box reads the same stale stamp and starts its own full-store
+# fsck. The consequence is not only CPU: the walks are I/O-bound, so contention pushes them
+# toward the per-walk bound, and an expired bound is UNMEASURED — a CORRELATED loss of the
+# measurement on every lane at once.
+#
+# THIS IS A GENUINELY CONCURRENT TEST, NOT A STAGED ONE. The first supervisor's sweep stub
+# BLOCKS until this case releases it, so the second supervisor provably runs while the first
+# is inside its sweep — a fixture that merely started two processes and counted would pass
+# just as well when the second happened to start after the first had finished and written
+# the stamp, i.e. for the throttle's reason and not the claim's.
+test_object_store_sweep_claim_prevents_the_herd() {
+  local d root calls counter1 counter2 rc waited lane_a
+  d="$(new_case_dir)"; calls="$d/calls"; counter1="$d/counter1"; counter2="$d/counter2"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker1.sh" "$counter1"
+  write_finalize_stub "$d/bin/worker2.sh" "$counter2"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  # The `during` hook: announce that the sweep is IN FLIGHT, then block until this case
+  # says go (bounded, so a wedged fixture fails the run rather than hanging it).
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls" \
+    "printf in >$(printf '%q' "$d/sweeping"); i=0; while [ ! -f $(printf '%q' "$d/go") ] && [ \$i -lt 200 ]; do sleep 0.05; i=\$((i+1)); done")"
+  # THROUGH `fixture_bg`, never a bare `&`: it makes the job a process-group leader and
+  # REGISTERS the group, which is what lets the harness reap whatever the supervisor forks
+  # (its sweep stub sits in a bounded wait loop). A bare `&` would leak that tree onto a
+  # four-lane box, and the suite's own leak assert would catch it as an unattributable
+  # failure at the very end of the run.
+  # EACH LANE GETS ITS OWN SINGLE-INSTANCE LOCK, which is what two lanes on one box
+  # legitimately have (per lane since #3467). `common_env` pins ONE SUPERVISOR_LOCK for the
+  # case, and inheriting it would make lane B refuse to start as "another instance" — a
+  # refusal about the LOCK, not about the sweep claim this case is measuring.
+  fixture_bg env WORKER_CMD="$d/bin/worker1.sh" LANE_ID=objsweep-a \
+    SUPERVISOR_LOCK="$d/lock-a" \
+    bash "$root/scripts/local/worker-supervisor.sh" >"$d/a.log" 2>&1
+  lane_a="$FIXTURE_LAST_PID"
+  waited=0
+  while [[ ! -f "$d/sweeping" && "$waited" -lt 200 ]]; do sleep 0.05; waited=$((waited + 1)); done
+  # CONSTRUCTION ASSERT: lane A really is inside its sweep, and it really is holding the
+  # claim. Without both, the assert below would be about a sequential pair of runs.
+  if [[ -f "$d/sweeping" && -d "$OBJ_SWEEP_STAMP.sweeping" ]]; then
+    pass "obj-sweep(herd-plant): lane A is INSIDE its sweep and holds the claim $OBJ_SWEEP_STAMP.sweeping — lane B below runs genuinely concurrently"
+  else
+    touch "$d/go"; fixture_wait "$lane_a" >/dev/null 2>&1 || true
+    fail "obj-sweep(herd-plant): in-sweep=$([[ -f "$d/sweeping" ]] && echo yes || echo no) claim=$([[ -d "$OBJ_SWEEP_STAMP.sweeping" ]] && echo yes || echo no) after ${waited} polls — the concurrency could not be staged"
+    return
+  fi
+  WORKER_CMD="$d/bin/worker2.sh" env LANE_ID=objsweep-b SUPERVISOR_LOCK="$d/lock-b" \
+    bash "$root/scripts/local/worker-supervisor.sh" >"$d/b.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && -f "$counter2" ]] &&
+    grep -q 'object-store sweep: SKIPPED — a peer lane on this box holds the sweep claim' "$d/b.log"; then
+    pass "obj-sweep(herd): a second lane whose peer is MID-SWEEP skips the sweep, names the claim, does not wait, and still runs its worker"
+  else
+    fail "obj-sweep(herd): rc=$rc spawned=$([[ -f "$counter2" ]] && echo yes || echo no) (see $d/b.log)"
+  fi
+  touch "$d/go"
+  fixture_wait "$lane_a" >/dev/null 2>&1 || true
+  if [[ "$(obj_sweep_calls "$calls")" -eq 1 ]]; then
+    pass "obj-sweep(herd): exactly ONE fsck sweep was spent across the two concurrent lanes (measured invocations, not inferred)"
+  else
+    fail "obj-sweep(herd): $(obj_sweep_calls "$calls") sweeps across two concurrent lanes, wanted 1 (see $calls)"
+  fi
+  # AND THE CLAIM IS GIVEN UP, so the NEXT interval is contended honestly rather than
+  # inherited by whoever swept last.
+  if [[ ! -e "$OBJ_SWEEP_STAMP.sweeping" ]]; then
+    pass "obj-sweep(herd): the sweeping lane RELEASED its claim on the way out"
+  else
+    fail "obj-sweep(herd-release): the claim $OBJ_SWEEP_STAMP.sweeping outlived the sweep that took it"
+  fi
+  # THE CONTROL, ONE PROPERTY APART: the same lane B, same stub, with NO peer holding a
+  # claim and a stale stamp. It must SWEEP — so the skip above is the claim and not lane B
+  # having lost the ability to sweep at all.
+  d="$(new_case_dir)"; calls="$d/calls-control"; counter1="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter1"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/control.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && "$(obj_sweep_calls "$calls")" -eq 1 ]] &&
+    ! grep -q 'holds the sweep claim' "$d/control.log"; then
+    pass "obj-sweep(herd-control): with no peer holding the claim the same lane sweeps normally"
+  else
+    fail "obj-sweep(herd-control): rc=$rc calls=$(obj_sweep_calls "$calls") (see $d/control.log)"
+  fi
+}
+
+t test_object_store_sweep_claim_prevents_the_herd
+
+# THE OTHER HALF, AND THE HAZARD THE CLAIM INTRODUCES: A STALE CLAIM MUST NOT WEDGE THE BOX
+# (#3749 review round 5, item 2). A lane killed mid-sweep leaves its claim behind, and
+# without recovery no lane on the box ever sweeps again — strictly worse than the herd.
+#
+# The recovery bound is DERIVED (see obj_sweep_claim_stale_secs) and the derivation itself
+# is asserted below, from the shipped files, so this case does not re-type it either.
+test_object_store_sweep_claim_recovers_when_stale() {
+  local d root calls counter rc claim bound fns walks per_walk want got
+  # (a) THE BOUND'S DERIVATION, read out of the two shipped files. A test that re-typed
+  #     `3 x 200 + 60` would keep passing after either declaration moved — round 4's
+  #     MAX_SWEEP_WALKS lesson, one function over.
+  d="$(new_case_dir)"
+  fns="$d/extracted.sh"
+  sed -n '/^obj_sweep_claim_stale_secs() {/,/^}/p' "$SUPERVISOR" >"$fns"
+  walks="$({ grep -m1 '^MAX_SWEEP_WALKS=' "$REPO_ROOT/scripts/check-object-store-integrity.sh" || true; } 2>/dev/null)"
+  walks="${walks#MAX_SWEEP_WALKS=}"
+  per_walk="$({ grep -m1 '^OBJ_SWEEP_TIMEOUT_SECS=' "$SUPERVISOR" || true; } 2>/dev/null)"
+  per_walk="${per_walk#*:-}"; per_walk="${per_walk%%\}*}"
+  bound="$({ grep -m1 '^OBJ_SWEEP_CLAIM_SLACK_SECS=' "$SUPERVISOR" || true; } 2>/dev/null)"
+  bound="${bound#OBJ_SWEEP_CLAIM_SLACK_SECS=}"
+  if grep -q '^obj_sweep_claim_stale_secs() {' "$fns" &&
+    [[ "$walks" =~ ^[0-9]+$ && "$per_walk" =~ ^[0-9]+$ && "$bound" =~ ^[0-9]+$ ]]; then
+    pass "obj-sweep(claim-bound-plant): all three declarations were read from the shipped files (MAX_SWEEP_WALKS $walks, per-walk bound $per_walk s, slack $bound s)"
+  else
+    fail "obj-sweep(claim-bound-plant): walks='$walks' per_walk='$per_walk' slack='$bound' — the assert below would be vacuous"
+    return
+  fi
+  want=$((walks * per_walk + bound))
+  got="$(bash -c 'set -uo pipefail; OBJ_SWEEP_TIMEOUT_SECS="'"$per_walk"'"; OBJ_SWEEP_CLAIM_SLACK_SECS="'"$bound"'"; . "$1"; obj_sweep_claim_stale_secs "$2"' _ "$fns" "$REPO_ROOT/scripts/check-object-store-integrity.sh" 2>&1)"
+  if [[ "$got" == "$want" ]]; then
+    pass "obj-sweep(claim-bound): the recovery bound is the sweep's own MAX_SWEEP_WALKS x this supervisor's per-walk bound + slack (${want}s) — a claim cannot be called stale while the sweep it represents could still be running"
+  else
+    fail "obj-sweep(claim-bound): the shipped function answered '$got', the shipped declarations give '$want'"
+  fi
+  # (b) A CLAIM OLDER THAN THE BOUND IS RECOVERED and the sweep runs.
+  d="$(new_case_dir)"; calls="$d/calls-stale"; counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  claim="$OBJ_SWEEP_STAMP.sweeping"
+  mkdir -p "$claim"
+  printf '%s\n' "$(( $(date +%s) - want - 10 ))" >"$claim/started"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/stale.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && "$(obj_sweep_calls "$calls")" -eq 1 && -f "$counter" ]] &&
+    grep -q 'RECOVERED a stale sweep claim' "$d/stale.log"; then
+    pass "obj-sweep(claim-stale): a claim left behind by a lane killed mid-sweep is RECOVERED and the box sweeps again — a stale claim is a delay, never a wedge"
+  else
+    fail "obj-sweep(claim-stale): rc=$rc calls=$(obj_sweep_calls "$calls") (see $d/stale.log)"
+  fi
+  # (c) CONTROL, one property apart: the same claim with a FRESH start time. It must be
+  #     respected — so (b) is the AGE and not the recovery firing unconditionally.
+  d="$(new_case_dir)"; calls="$d/calls-fresh"; counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  claim="$OBJ_SWEEP_STAMP.sweeping"
+  mkdir -p "$claim"
+  printf '%s\n' "$(date +%s)" >"$claim/started"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/fresh.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && ! -s "$calls" && -f "$counter" ]] &&
+    grep -q 'holds the sweep claim' "$d/fresh.log"; then
+    pass "obj-sweep(claim-fresh-control): a claim younger than the bound is respected — the recovery is age-driven, not unconditional"
+  else
+    fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") (see $d/fresh.log)"
+  fi
+  # (d) A CLAIM WITH NO PARSEABLE START TIME is treated as STALE — the deliberate
+  #     direction, because its cause is a lane killed between the mkdir and the `started`
+  #     write, and the other reading wedges the sweep forever on a file nobody can age.
+  d="$(new_case_dir)"; calls="$d/calls-unaged"; counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  claim="$OBJ_SWEEP_STAMP.sweeping"
+  mkdir -p "$claim"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/unaged.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && "$(obj_sweep_calls "$calls")" -eq 1 ]] &&
+    grep -q 'RECOVERED a stale sweep claim' "$d/unaged.log"; then
+    pass "obj-sweep(claim-unaged): a claim carrying no start time is recovered rather than trusted — an unageable claim must not be able to wedge the box"
+  else
+    fail "obj-sweep(claim-unaged): rc=$rc calls=$(obj_sweep_calls "$calls") (see $d/unaged.log)"
+  fi
+  # (e) NO DERIVABLE BOUND ⇒ NO CLAIM AT ALL, announced. One property apart from (b): the
+  #     sweep script carries no MAX_SWEEP_WALKS declaration, so the recovery bound cannot
+  #     be derived — and a claim that could never be recovered is worse than the herd it
+  #     prevents, so none is taken and the previous behaviour is restored explicitly.
+  d="$(new_case_dir)"; calls="$d/calls-nobound"; counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  sed -i '/^MAX_SWEEP_WALKS=/d' "$root/scripts/check-object-store-integrity.sh"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/nobound.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && "$(obj_sweep_calls "$calls")" -eq 1 && ! -e "$OBJ_SWEEP_STAMP.sweeping" ]] &&
+    grep -q 'NO in-progress claim is being taken' "$d/nobound.log"; then
+    pass "obj-sweep(claim-nobound): a sweep script whose MAX_SWEEP_WALKS cannot be read yields NO claim, announced in the journal, and the sweep still runs"
+  else
+    fail "obj-sweep(claim-nobound): rc=$rc calls=$(obj_sweep_calls "$calls") claim=$([[ -e "$OBJ_SWEEP_STAMP.sweeping" ]] && echo present || echo absent) (see $d/nobound.log)"
+  fi
+}
+
+t test_object_store_sweep_claim_recovers_when_stale
+
+# THE CLAIM IS A REGISTERED RESOURCE, NOT ONE WHOSE LIFETIME NOBODY OWNS (#3749 review
+# round 5, item 2; CLAUDE.md's roborev-job-282 ruling that a fix which ADDS a resource
+# inherits that resource's lifetime bugs). The CORRUPT path ends the process instead of
+# returning, so the claim it took has to be released by the EXIT trap — otherwise the
+# detecting lane's peers would wait out the staleness bound before they could sweep.
+test_object_store_sweep_claim_is_released_on_the_exit_path() {
+  local d root calls counter rc claim
+  d="$(new_case_dir)"; calls="$d/calls-corrupt"; counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  claim="$OBJ_SWEEP_STAMP.sweeping"
+  root="$(obj_sweep_tree "$d" CORRUPT 4 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/corrupt.log" 2>&1
+  rc=$?
+  # CONSTRUCTION: the run really took the CORRUPT exit path (so the claim really was taken
+  # and really was NOT released by the normal post-sweep release, which that path skips).
+  if [[ "$rc" -eq 1 && -e "$OBJ_SWEEP_STAMP.CORRUPT" && -s "$calls" ]]; then
+    pass "obj-sweep(claim-exit-plant): the run swept, found CORRUPT and left via finalize_exit — the path that never reaches the post-sweep release"
+  else
+    fail "obj-sweep(claim-exit-plant): rc=$rc latched=$([[ -e "$OBJ_SWEEP_STAMP.CORRUPT" ]] && echo yes || echo no) — the assert below would be vacuous"
+    return
+  fi
+  if [[ ! -e "$claim" ]]; then
+    pass "obj-sweep(claim-exit): the EXIT trap released the sweep claim even though that path ends the process — a stopping lane does not make its peers wait out the staleness bound"
+  else
+    fail "obj-sweep(claim-exit): the claim $claim outlived a lane that exited through finalize_exit"
+  fi
+}
+
+t test_object_store_sweep_claim_is_released_on_the_exit_path
 
 # AND THE BEHAVIOURAL HALF THE ORDERING SERVES: on the CORRUPT path BOTH files exist
 # when the lane stops, so the state a peer inherits is complete rather than half-written.
