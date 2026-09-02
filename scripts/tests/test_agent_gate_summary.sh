@@ -5996,11 +5996,11 @@ fi
 fa_addcalls=$(grep -v '^[[:space:]]*#' "$fa_tool" | grep -E 'add\("(assert|guard|toolchain)",')
 fa_add_n=$(printf '%s\n' "$fa_addcalls" | grep -c .)
 fa_add_ok=$(printf '%s\n' "$fa_addcalls" \
-  | grep -cE 'add\("(assert|guard|toolchain)", .*, (pubid\(|publabel\(|pubdoc\(|pubsh\(|"[a-z][a-z0-9-]*", 1\))')
+  | grep -cE 'add\("(assert|guard|toolchain)", .*, (pubid\(|publabel\(|pubdoc\(|pubsh\(|pubtagged\(|"[a-z][a-z0-9-]*", 1\))')
 if [ "${fa_add_n:-0}" -ge 13 ] && [ "$fa_add_n" = "$fa_add_ok" ]; then
-  ok "3765-pub-one-rule: all $fa_add_n add() call sites across ALL THREE tiers publish a closed-enum label literal, pubid(…), publabel(…), pubdoc(…) or pubsh(…) — no tier copies its matched line (blocker 11)"
+  ok "3765-pub-one-rule: all $fa_add_n add() call sites across ALL THREE tiers publish a closed-enum label literal, pubid(…), publabel(…), pubdoc(…), pubsh(…) or pubtagged(…) — no tier copies its matched line (blocker 11)"
 else
-  bad "3765-pub-one-rule: $fa_add_n add() call site(s) but only $fa_add_ok publish through a label literal / pubid() / publabel() / pubdoc() / pubsh() — a call site that passes copied line content publishes an assertion PAYLOAD, which carries interpolated runtime values (blocker 11)"
+  bad "3765-pub-one-rule: $fa_add_n add() call site(s) but only $fa_add_ok publish through a label literal / pubid() / publabel() / pubdoc() / pubsh() / pubtagged() — a call site that passes copied line content publishes an assertion PAYLOAD, which carries interpolated runtime values (blocker 11)"
 fi
 # …and the same invariant on the OUTPUT PATH for the two repository-authored tiers, because
 # a source scan cannot see a RUNTIME value. The charset REFUSES `@`, `/`, `?`, `&` and `=`,
@@ -6084,7 +6084,12 @@ esac
 # AN OUT-OF-CHARSET TAG IS REPLACED WHOLESALE, NEVER TRIMMED. The charset excludes `@` and
 # `/` precisely so an scp-form authority in the TAG position cannot be published — and the
 # refusal is affirmative, so the reader knows a tag stood there.
-printf 'FAIL - SEKRETX4@h.io/p failed to clone\n' > "$fa_pubdir/x4.log"
+# A LIBTEST shape, deliberately: since job 70 the free-form `FAIL - ` rule routes through
+# pubtagged(), whose own grammar rejects untagged prose BEFORE pubid()'s charset check can
+# fire — so an untagged fixture would exercise the no-identifier path and leave the CHARSET
+# refusal uncovered. The libtest rule still projects through pubid(), so this keeps the
+# charset path under test. Its safety assertion is unchanged and is the load-bearing half.
+printf 'test SEKRETX4@h.io/p ... FAILED\n' > "$fa_pubdir/x4.log"
 _fa_run pubx4 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_pubdir/x4.log" PASS
 fa_got=$(_fa_line fmt)
 case "$fa_got" in
@@ -6526,6 +6531,65 @@ case "$fa_niu" in
   *) ok "3765-doctest-no-item-no-authority: the item-less doctest form still admits no authority" ;;
 esac
 
+# 55zd. ROBOREV JOB 70 — UNTAGGED PROSE MUST NOT BE PUBLISHED AS AN IDENTITY. The `FAIL - `
+#       and `FAIL: ` rules published the first whitespace-delimited word unconditionally.
+#       MEASURED against this repository: 810 of 3155 bad() messages in scripts/tests/*.sh are
+#       untagged prose, so a QUARTER of real failures published a word like `could`, `the`, or
+#       `PASS` — which on a FAILING component reads as a status. That is the misidentification
+#       this issue exists to remove, recreated by its own fix: a reader searches the tracker
+#       for `PASS` exactly as the lead searched it for `ws0-corpus-gen`.
+#       Fixtures are REAL messages taken verbatim from the repo suites, per the finding.
+printf 'FAIL - PASS 1 does NOT enumerate a glob-derived default target set\n' > "$fa_dir/untag.log"
+_fa_run untag "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/untag.log" PASS
+fa_ut=$(_fa_line fmt)
+case "$fa_ut" in
+  *"(assert): PASS"*)
+    bad "3765-untagged-not-a-word: untagged prose published the word 'PASS' as the failing assert identity ($fa_ut) — on a FAILING line that reads as a status, and is the job-70 misidentification" ;;
+  *"<no identifier in the failure text"*)
+    ok "3765-untagged-not-a-word: untagged prose is reported AFFIRMATIVELY as carrying no identifier, rather than publishing its first word" ;;
+  *) bad "3765-untagged-not-a-word: expected the no-identifier placeholder, got '$fa_ut'" ;;
+esac
+printf 'FAIL - could not locate the cli-tests dispatch block in /x/agent-gate.sh\n' > "$fa_dir/untag2.log"
+_fa_run untag2 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/untag2.log" PASS
+fa_ut2=$(_fa_line fmt)
+case "$fa_ut2" in
+  *"(assert): could"*) bad "3765-untagged-second: untagged prose published 'could' as an identity ($fa_ut2)" ;;
+  *"<no identifier in the failure text"*) ok "3765-untagged-second: a second real untagged message also reports no identifier" ;;
+  *) bad "3765-untagged-second: expected the no-identifier placeholder, got '$fa_ut2'" ;;
+esac
+# THE COUNT MUST STILL BE TRUE even when no identity can be named — naming nothing is not the
+# same as counting nothing, and conflating them would undo F1/F5.
+printf 'FAIL - the first untagged failure\nFAIL - a second untagged failure\n' > "$fa_dir/untag3.log"
+_fa_run untag3 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/untag3.log" PASS
+fa_ut3=$(_fa_line fmt)
+case "$fa_ut3" in
+  *"2 RECOGNISED"*) ok "3765-untagged-count-true: two untagged failures still COUNT as two — naming nothing is not counting nothing" ;;
+  *) bad "3765-untagged-count-true: expected '2 RECOGNISED' for two untagged failures, got '$fa_ut3'" ;;
+esac
+# THE TAGGED SHAPES MUST BE UNTOUCHED: the repository convention `<tag>: <prose>`, and a bare
+# single-token tag with no colon at all.
+_fa_run tagkept "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/one.log" PASS
+fa_tk=$(_fa_line fmt)
+case "$fa_tk" in
+  *"1465-skip-declares"*) ok "3765-tagged-kept: the repository convention <tag>: <prose> still publishes its tag (the motivating instance)" ;;
+  *) bad "3765-tagged-kept: the tagged convention regressed — got '$fa_tk'" ;;
+esac
+printf 'FAIL - 1465-skip-declares\n' > "$fa_dir/baretag.log"
+_fa_run baretag "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/baretag.log" PASS
+fa_bt=$(_fa_line fmt)
+case "$fa_bt" in
+  *"1465-skip-declares"*) ok "3765-baretag-kept: a bare single-token tag with no colon is still an identifier and is still published" ;;
+  *) bad "3765-baretag-kept: a bare tag was rejected as prose — got '$fa_bt'" ;;
+esac
+# STRUCTURAL: the two free-form rules must route through pubtagged(), not pubid(tagof(...)),
+# or the first-word projection is back.
+fa_ff=$(grep -v '^[[:space:]]*#' "$fa_tool" | grep -A2 -E '\^\[\[:space:\]\]\*FAIL - |\^FAIL: ' | grep 'add("assert"')
+if [ -n "$fa_ff" ] && ! printf '%s\n' "$fa_ff" | grep -q 'pubid(tagof('; then
+  ok "3765-freeform-grammar: the FAIL - and FAIL: rules publish through pubtagged(), so an untagged payload cannot yield a first-word identity"
+else
+  bad "3765-freeform-grammar: a free-form rule still publishes pubid(tagof(...)) — the unconditional first-word projection is back (job 70)"
+fi
+
 # CODE lines only: the digest note NAMES those binaries while explaining why it does not use
 # them, and a scan over the comments would read that explanation as the defect.
 if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -qE '(sha256sum|md5sum|cksum|openssl dgst)'; then
@@ -6782,7 +6846,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=556
+ASSERT_FLOOR=562
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

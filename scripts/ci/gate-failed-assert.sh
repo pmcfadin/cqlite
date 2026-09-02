@@ -317,6 +317,29 @@ awk -v max="$max" '
   # failing script. Same shape as the doctest case, same remedy: a CLOSED grammar rather than a
   # widened charset. The value must be a path in a charset with no `:` and no `@`, ending `.sh`,
   # so a URL cannot satisfy it. Anything else falls back to pubid().
+  # pubtagged() — the PUBLISHED IDENTIFIER for the free-form `FAIL - ` / `FAIL: ` shapes
+  # (#3765, roborev job 70). Those rules used to publish the FIRST WHITESPACE-DELIMITED WORD
+  # unconditionally, and MEASURED against this repository: **810 of 3155** bad() messages in
+  # scripts/tests/*.sh are UNTAGGED prose, so a quarter of all real failures published a word
+  # like `could`, `the` — or `PASS`, which on a FAILING component reads as a status. That is
+  # THE MISIDENTIFICATION THIS ISSUE EXISTS TO REMOVE, recreated by its own fix: a reader
+  # searches the tracker for `PASS` exactly as the lead searched it for `ws0-corpus-gen`.
+  #
+  # A word is only published when the payload actually carries an identifier, under a CLOSED
+  # grammar with two admitted shapes:
+  #   `<identifier>: <prose>`  the repository convention -> the tag before the colon
+  #   `<identifier>`           a bare single token, no whitespace -> itself
+  # Anything else is UNTAGGED PROSE and gets an AFFIRMATIVE placeholder. Naming nothing is
+  # strictly better than naming a word that is not an identity: the count is still true, and
+  # the reader is told to read the log rather than sent to search for `the`.
+  function pubtagged(t,   head) {
+    if (t ~ /^[A-Za-z0-9._:\/-]+:/) {
+      head = t; sub(/:.*$/, "", head)
+      if (head != "") return pubid(head)
+    }
+    if (t ~ /^[A-Za-z0-9._:\/-]+$/) return pubid(t)
+    return "<no identifier in the failure text - read the component log>"
+  }
   function pubsh(t) {
     if (t ~ /^[A-Za-z0-9._\/-]+\.sh$/) return "shell-test " t
     return pubid(tagof(t))
@@ -405,11 +428,11 @@ awk -v max="$max" '
   # values, and 205 measured `bad "…"` messages interpolate them).
   /^[[:space:]]*FAIL - / {
     s = $0; sub(/^[[:space:]]*FAIL - /, "", s)
-    add("assert", s, pubid(tagof(norm(s))), 0); next
+    add("assert", s, pubtagged(norm(s)), 0); next
   }
   /^FAIL: / {
     s = $0; sub(/^FAIL: /, "", s)
-    add("assert", s, pubid(tagof(norm(s))), 0); next
+    add("assert", s, pubtagged(norm(s)), 0); next
   }
   # A3a DOCTEST, and it MUST precede the generic libtest rule A3 below (#3765, roborev job 61).
   # A doctest failure is `test src/lib.rs - item (line 10) ... FAILED`. Under A3 alone, tagof()
