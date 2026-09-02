@@ -403,13 +403,13 @@ fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
 /// Cassandra order, and the element/key `cell_path` IS that serialized form, so
 /// ordering by raw `cell_path` bytes matches Cassandra exactly and needs no
 /// decode round-trip (roborev 1631/1632). Until #3790 the scalar `Custom` arm
-/// ordered them by FORMATTED string, diverging from a single-generation
-/// `SELECT`; this path was — and remains — correct either way:
-///   * `inet` (`InetAddressType`): raw address bytes, e.g. `9.0.0.1` = `[9,0,0,1]`
-///     precedes `10.0.0.1` = `[10,0,0,1]` (formatted-string order is the reverse).
-///   * `time` (`TimeType`): 8-byte big-endian nanoseconds-of-day, always
-///     non-negative, so byte order == numeric order (formatted `HH:MM:...` string
-///     order misorders, e.g. any value whose text form sorts against its magnitude).
+/// ordered both by FORMATTED string; correct either way here, but only `inet`
+/// actually diverged (roborev job 67):
+///   * `inet` (`InetAddressType`): raw address bytes — `9.0.0.1` = `[9,0,0,1]`
+///     precedes `10.0.0.1`, the REVERSE of string order: a real misordering.
+///   * `time` (`TimeType`): big-endian nanos-of-day, always non-negative, so byte
+///     order == numeric; and `fmt_time` zero-pads, so over the VALID range string
+///     order EQUALS it — the old comparator was already right (no counterexample).
 ///
 /// Branches on the DECLARED type only (no-heuristics, issue #28); recurses through
 /// `Frozen` defensively though neither inet nor time is ever frozen here.
