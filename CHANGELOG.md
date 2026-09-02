@@ -85,6 +85,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Instance A of the same issue — a non-frozen `map<frozen<udt>,int>` cell-path key —
   was fixed separately by #3612.
 
+  **Marshal-form UDT fields that never decoded at all.** A UDT read from its on-disk
+  `UserType(...)` marshal string resolved each field type through a table that
+  covered 16 marshal suffixes, so a field Cassandra CAN write — `duration`
+  (`DurationType`), `smallint` (`ShortType`), `tinyint` (`ByteType`), `counter`
+  (`CounterColumnType`) or a `tuple<…>` (`TupleType(...)`, which is STRUCTURAL and
+  needs parsing, not a name match) — surfaced as a blob. All of them now decode; the
+  table is one arm per `CQL3Type.Native` constant at the pinned `cassandra-5.0.8`
+  tag, and there is now ONE such table rather than two that disagreed. Two mappings
+  were also WRONG: legacy `DateType` (an 8-byte millis value, `asCQL3Type() ->
+  TIMESTAMP`) was read as CQL `date` because a `ends_with("DateType")` arm also
+  matches `SimpleDateType`, and `TimeUUIDType` was collapsed onto `uuid`. Matching is
+  now EXACT on the marshal class's simple name, so a third-party `AbstractType` is no
+  longer suffix-matched into `blob`. A marshal type CQLite genuinely cannot express
+  (`EmptyType`, `VectorType(...)`, a foreign class) is refused BY NAME instead of
+  being reported as a user-defined type with a missing field list.
+
+  **A malformed `inet` is refused.** An `inet` value is 4 bytes (IPv4) or 16 (IPv6),
+  or empty meaning null (`InetAddressSerializer`); any other width was accepted and
+  handed back as a `Value::Inet` no address can be built from. It is now
+  `Error::corruption`, the same class and wording every other bad-width scalar gets.
+
 - **Both bindings (observable): a JSON number above `i64::MAX` no longer loses
   precision, and neither binding fabricates a substitute value (#3505).** A
   `Value::Json` cell's number was classified inline in each binding as
