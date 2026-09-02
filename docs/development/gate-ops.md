@@ -173,9 +173,26 @@ goes. Read the number, and read `sccache-cap: VERIFIED` from
   `sccache-health` renders `na` for.
 - `sccache-used=<bytes>(<N>%)` — occupancy, and the fill against the enforced cap. `(cap-zero)`
   where the cap is a legal 0; `pct-<why>` where the occupancy is real but the ratio is not
-  available. It does **not** claim eviction is happening: sccache exposes no eviction counter, so
+  available — including `pct-inexact-overflow`, where the ratio cannot be taken EXACTLY in 64-bit
+  shell arithmetic (a cap above ~184 PiB filled somewhere in its middle). The percentage is
+  **exact or named, never approximated**: an earlier overflow branch divided by `floor(cap / 100)`
+  and over-reported (at a 4 EiB cap with `used = cap - 1` it read `100%` where the exact value is
+  99%), which contradicts the token's own premise of measured bytes honestly reported. It does **not** claim eviction is happening: sccache exposes no eviction counter, so
   that would be an inference, not a measurement (#3727 — this issue's own title made exactly that
   inference), and the near-capacity WARN that used to say so is gone with the rest of the advice.
+
+**Which sccache the gate runs, and why bootstrap must agree.** `cargo install sccache` — the
+install bootstrap documents — writes to `~/.cargo/bin`, and the gate's PATH prepend fires only when
+**`cargo` itself** is absent. So on a box with a SYSTEM cargo and sccache only in `~/.cargo/bin`,
+bootstrap's two-stage `scc_resolve_binary` resolved that binary, started its server and reported
+`VERIFIED` while the gate reported it ABSENT — a false `[ok]` for a binary the gate would not run.
+The gate now resolves sccache through ONE helper (`_gate_sccache_bin`): PATH first, then
+`$HOME/.cargo/bin/sccache`, and every site that answers *"is sccache available"* — the
+`RUSTC_WRAPPER` detection, the health probe and the capacity probe — consults it, so the three
+cannot drift into three answers. PATH is **not** touched: widening the `cargo` prepend would change
+which cargo/toolchain a gate uses. `RUSTC_WRAPPER` carries the ABSOLUTE path when the fallback is
+what found it (a bare `sccache` is unrunnable exactly then). **Declared residual:** neither side
+honours a non-default `CARGO_HOME`; both look in `~/.cargo/bin` (#3955).
 
 **`sccache-health` cannot answer any of this.** It is the sum of four ERROR counters with **no**
 capacity, occupancy or eviction input, so a `warn` there can never be cleared by raising the cap, and
