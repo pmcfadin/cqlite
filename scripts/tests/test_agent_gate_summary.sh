@@ -5208,9 +5208,9 @@ esac
 _fa_run many "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/many.log" PASS
 fa_got=$(_fa_line fmt)
 case "$fa_got" in
-  *"failed-assert: 5 RECOGNISED (assert): alpha: x, beta: y, gamma: z (+2 more)"*)
-    ok "3765-many: count is the TRUE total, first 3 named, remainder declared ($fa_got)" ;;
-  *) bad "3765-many: expected '5 RECOGNISED (assert): alpha: x, beta: y, gamma: z (+2 more)', got '$fa_got'" ;;
+  *"failed-assert: 5 RECOGNISED (assert): alpha, beta, gamma (+2 more)"*)
+    ok "3765-many: count is the TRUE total, first 3 named by TAG, remainder declared ($fa_got)" ;;
+  *) bad "3765-many: expected '5 RECOGNISED (assert): alpha, beta, gamma (+2 more)', got '$fa_got'" ;;
 esac
 
 # 55c. LOG READ, NOTHING RECOGNISED: `0 RECOGNISED`, never a bare 0, and the scan's own
@@ -5435,7 +5435,11 @@ esac
 # the redaction. Observing it on extractor stdout (as this case used to) would re-pin the
 # pre-redaction truncation F6 removed. Split on `,`: these two fixture identities are Rust
 # module paths and carry none.
+# The tier's affirmative "identifiers only; the assertion DETAIL is not published" suffix
+# is PROSE this field appends after the last name, not a name — strip it before splitting,
+# or the final element carries it and the cap assertion measures the wrong string.
 fa_disp=${fa_got#*"(assert): "}
+fa_disp=${fa_disp%%" - identifiers only;"*}
 fa_col_over=$(printf '%s\n' "$fa_disp" | tr ',' '\n' | sed 's/^ *//' | awk 'length($0) > 60' | grep -c . )
 if [ "${fa_col_over:-1}" = 0 ]; then
   ok "3765-collide-cap: the per-name display cap (60) still holds in the RENDERED field — a SEPARATE bound from the gate 300-char field cap"
@@ -5470,6 +5474,7 @@ fi
 _fa_run collidemid "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/collide-mid.log" PASS
 fa_got=$(_fa_line fmt)
 fa_mid_disp=${fa_got#*"(assert): "}
+fa_mid_disp=${fa_mid_disp%%" - identifiers only;"*}
 fa_mid_rdist=$(printf '%s\n' "$fa_mid_disp" | tr ',' '\n' | sed 's/^ *//' | sort -u | grep -c . )
 if [ "${fa_mid_count:-0}" = 2 ] && [ "${fa_mid_rdist:-0}" = 1 ]; then
   ok "3765-collide-mid-display: the two rendered display forms are identical and the TRUE count (2) is reported anyway (count is the authority; a name is a pointer)"
@@ -5510,9 +5515,9 @@ fi
 _fa_run sametag "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/sametag.log" PASS
 fa_got=$(_fa_line fmt)
 case "$fa_got" in
-  *"failed-assert: 2 RECOGNISED (assert): F2: the round metadata is missing"*"F2: the round metadata names the wrong sha"*)
-    ok "3765-sametag-render: the SUMMARY field reports both same-tag identities and the TRUE count ($fa_got)" ;;
-  *) bad "3765-sametag-render: expected '2 RECOGNISED (assert): F2: …, F2: …', got '$fa_got'" ;;
+  *"failed-assert: 2 RECOGNISED (assert): F2#1, F2#2"*)
+    ok "3765-sametag-render: the SUMMARY field reports the TRUE count and two DISTINGUISHABLE published names for a shared tag, publishing neither payload ($fa_got)" ;;
+  *) bad "3765-sametag-render: expected '2 RECOGNISED (assert): F2#1, F2#2', got '$fa_got' — a shared tag must be ORDINALISED (two distinct asserts rendering as one string is the misidentification #3765 exists to remove) and the DETAIL must not be published (blocker 11)" ;;
 esac
 # GROUNDING: the fixture above is a real shape, measured across the suites tooling-tests
 # executes — not a shape invented for this test. A tag shared by two or more DISTINCT
@@ -5654,26 +5659,31 @@ esac
 #      (b) inside _failassert_clean the ONE redactor call precedes the per-name display
 #          bound, which precedes the 300-char field cap;
 #      (c) _failassert_record — which runs BEFORE the emit boundary — bounds nothing.
-fa_bounds=$(grep -oE 'length\([A-Za-z_]+\)[[:space:]]*>[[:space:]]*[0-9]+' "$fa_tool" \
-              | grep -oE '[0-9]+$' | sort -n | head -1)
-if [ -n "$fa_bounds" ] && [ "$fa_bounds" -ge 1024 ]; then
-  ok "3765-order-no-early-bound: the smallest length bound in the extractor is $fa_bounds (>= 1024) — it is a SAFETY bound, not a display bound that could split a credential"
-elif [ -z "$fa_bounds" ]; then
-  ok "3765-order-no-early-bound: the extractor applies no length bound at all, so no bound can precede the redaction"
+# (a) THE BOUND SIZE IS NO LONGER THE PROPERTY — THE BOUND'S BEHAVIOUR IS (blocker 11).
+#     This used to require every extractor bound to be >= 1024, as a PROXY for "a bound
+#     cannot split a credential". That proxy stopped being the right question once the
+#     extractor began publishing charset-constrained IDENTIFIERS bounded at 256 (a tag /
+#     test path) and 70 (a guard label): a small bound is now fine, and what must hold is
+#     that NO bound retains a PREFIX. So the assert is over the CLASS directly — every
+#     `length(x) > N` bound in the extractor must resolve to an affirmative placeholder.
+fa_bnd_all=$(grep -cE 'length\([A-Za-z_]+\)[[:space:]]*>[[:space:]]*[0-9]+' "$fa_tool")
+fa_bnd_ph=$(grep -E 'length\([A-Za-z_]+\)[[:space:]]*>[[:space:]]*[0-9]+' "$fa_tool" \
+              | grep -c 'too long to publish safely')
+if [ "${fa_bnd_all:-0}" -ge 1 ] && [ "$fa_bnd_all" = "$fa_bnd_ph" ]; then
+  ok "3765-order-no-early-bound: all $fa_bnd_all length bound(s) in the extractor resolve to an affirmative 'too long to publish safely' placeholder — none retains a prefix, whatever its size"
 else
-  bad "3765-order-no-early-bound: the extractor applies a length bound of $fa_bounds — a bound that small is a DISPLAY bound running upstream of the redaction (F6), and a bound must never be able to change a safety verdict"
+  bad "3765-order-no-early-bound: $fa_bnd_all length bound(s) in the extractor but only $fa_bnd_ph publish a placeholder — a bound that keeps a PREFIX severs the shape every later rule keys on (blocker 8), and a bound must never be able to change a safety verdict"
 fi
-# The remaining bound must be declared a SAFETY bound AND must not truncate: a declared
-# hazard is not a removed one (roborev job 48, blocker 8 — the FOURTH instance of the
-# truncate-before-neutralise shape). safety() must retain NO prefix of an over-bound
-# identity, so there is nothing for a bound to sever a credential out of.
-fa_safety=$(awk '/function safety\(/,/^  }/' "$fa_tool")
-if grep -q 'SAFETY BOUND, NOT A DISPLAY BOUND' "$fa_tool" \
-   && printf '%s\n' "$fa_safety" | grep -q 'too long to publish safely' \
-   && ! printf '%s\n' "$fa_safety" | grep -qE 'substr\(|cut -c'; then
-  ok "3765-order-safety-declared: the extractor's remaining bound is a declared SAFETY bound that TRUNCATES NOTHING — an over-bound identity becomes a placeholder, never a prefix"
+# (b) THE TWO PUBLICATION PROJECTIONS REPLACE, THEY NEVER TRIM. pubid()/publabel() are the
+#     only functions that produce a published identifier for a repository-authored tier, so
+#     a `substr(`/`cut -c` inside either would be a prefix on the publication path.
+fa_pubfns=$(awk '/function pubid\(/,/^  }/' "$fa_tool"; awk '/function publabel\(/,/^  }/' "$fa_tool")
+if printf '%s\n' "$fa_pubfns" | grep -q 'too long to publish safely' \
+   && printf '%s\n' "$fa_pubfns" | grep -q 'outside the safe charset' \
+   && ! printf '%s\n' "$fa_pubfns" | grep -qE 'substr\(|cut -c'; then
+  ok "3765-order-safety-declared: pubid()/publabel() REPLACE an out-of-charset or over-bound identifier with an affirmative placeholder and contain no substr/cut — nothing on the publication path retains a prefix"
 else
-  bad "3765-order-safety-declared: $fa_tool's safety bound still retains a PREFIX of an over-bound identity (or is no longer declared a SAFETY bound) — a truncation upstream of the neutralisation is blocker 8"
+  bad "3765-order-safety-declared: a publication projection in $fa_tool trims instead of replacing (or no longer declares its charset/bound refusals) — a truncation upstream of the neutralisation is blocker 8"
 fi
 fa_ord=$(awk '/^_failassert_clean\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#' | grep -nE '_component_set_redact_text|substr\(t, 1, head\)|cut -c1-300')
 fa_ord_red=$(printf '%s\n' "$fa_ord" | grep -n '_component_set_redact_text' | head -1 | cut -d: -f1)
@@ -5788,14 +5798,18 @@ case "$fa_got" in
 esac
 _fa_run neuprose "file-size:FAIL fmt:PASS clippy:PASS" "file-size=$fa_dir/one.log" PASS
 fa_got=$(_fa_line file-size)
+# The motivating instance must publish the TAG — the issue's own proposed sketch is
+# `failed-assert: 1465-skip-declares (accounted 419/420, floor 410)` — and must publish it
+# UNTOUCHED by any placeholder: a charset/bound placeholder standing where the tag should be
+# would make the field useless for the citation it exists to support.
 case "$fa_got" in
-  *"1465-skip-declares: the opt"*"declare the leak-lane state"*)
+  *"1 RECOGNISED (assert): 1465-skip-declares -"*)
     case "$fa_got" in
-      *"<url>"*|*"<authority>"*|*"<query>"*|*"<secret>"*)
-        bad "3765-neu-prose-survives: a placeholder replaced part of the motivating instance ('$fa_got')" ;;
-      *) ok "3765-neu-prose-survives: the #3765 motivating instance still renders IDENTIFIABLY (tag AND distinguishing tail) through the neutralisation" ;;
+      *"<url>"*|*"<authority>"*|*"<query>"*|*"<secret>"*|*"<identifier"*)
+        bad "3765-neu-prose-survives: a placeholder replaced the motivating instance's tag ('$fa_got')" ;;
+      *) ok "3765-neu-prose-survives: the #3765 motivating instance publishes its TAG verbatim, matching the issue's own sketch" ;;
     esac ;;
-  *) bad "3765-neu-prose-survives: the motivating instance no longer renders identifiably, got '$fa_got'" ;;
+  *) bad "3765-neu-prose-survives: the motivating instance does not publish '1465-skip-declares' as its identifier, got '$fa_got'" ;;
 esac
 
 # STRUCTURAL, and labelled as such: EVERY BOUND, not just the display one (blocker 8 is the
@@ -5891,18 +5905,22 @@ printf 'FAIL - neu-a: cloning https://x-access-token:SEKRETINDIA@h.io/p failed\n
 printf 'FAIL - neu-b: SEKRETJULIET@h.io:pmcfadin/cqlite.git denied\n'             > "$fa_tcdir/a-scp.log"
 printf 'FAIL - neu-c: fetch h.io/pkg?token=SEKRETKILO failed\n'                   > "$fa_tcdir/a-qry.log"
 printf 'FAIL - neu-d: Authorization: Bearer SEKRETLIMA\n'                         > "$fa_tcdir/a-hdr.log"
-for fa_probe in a-url:SEKRETINDIA:'<url>' a-scp:SEKRETJULIET:'<authority>' a-qry:SEKRETKILO:'<query>' a-hdr:SEKRETLIMA:'Bearer <secret>'; do
+for fa_probe in a-url:SEKRETINDIA:neu-a a-scp:SEKRETJULIET:neu-b a-qry:SEKRETKILO:neu-c a-hdr:SEKRETLIMA:neu-d; do
   fa_probe_f=${fa_probe%%:*}; fa_probe_rest=${fa_probe#*:}
-  fa_probe_tok=${fa_probe_rest%%:*}; fa_probe_mark=${fa_probe_rest#*:}
+  fa_probe_tok=${fa_probe_rest%%:*}; fa_probe_tag=${fa_probe_rest#*:}
   _fa_run "neu$fa_probe_f" "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_tcdir/$fa_probe_f.log" PASS
   fa_got=$(_fa_line fmt)
   case "$fa_got" in
-    *"$fa_probe_tok"*) bad "3765-neu-retained-$fa_probe_f: $fa_probe_tok reached the rendered field on the RETAINED assert tier ('$fa_got') — the neutralisation is gone from the tier that still publishes its payload" ;;
-    *) ok "3765-neu-retained-$fa_probe_f: the neutralisation still fires on the retained assert tier (no $fa_probe_tok in the field)" ;;
+    *"$fa_probe_tok"*) bad "3765-neu-retained-$fa_probe_f: $fa_probe_tok reached the rendered field on the assert tier ('$fa_got')" ;;
+    *) ok "3765-neu-retained-$fa_probe_f: no $fa_probe_tok in the field — the credential sat in the DETAIL, which the assert tier no longer publishes (blocker 11), with the neutraliser behind it as defence in depth" ;;
   esac
+  # AND THE FIELD IS NOT MERELY SILENT: it publishes the repo-authored TAG. A dropped value
+  # and a projected one are different facts, and only the second is a measurement — the
+  # detail's absence is DECLARED by the tier suffix asserted at 3765-affirm-assert below.
   case "$fa_got" in
-    *"$fa_probe_mark"*) ok "3765-neu-retained-marker-$fa_probe_f: the '$fa_probe_mark' placeholder is published, so the retained tier reports WHAT stood there rather than dropping it" ;;
-    *) bad "3765-neu-retained-marker-$fa_probe_f: expected '$fa_probe_mark' in the field, got '$fa_got' — a silently dropped value is not a neutralisation" ;;
+    *"RECOGNISED (assert): $fa_probe_tag -"*)
+      ok "3765-neu-retained-marker-$fa_probe_f: the field publishes the tag '$fa_probe_tag' and no fragment of the credential-bearing detail" ;;
+    *) bad "3765-neu-retained-marker-$fa_probe_f: expected the tag '$fa_probe_tag' as the published identifier, got '$fa_got' — a silently emptied field is not a projection" ;;
   esac
 done
 
@@ -5915,7 +5933,7 @@ done
 # value).
 fa_tc_sec=$(awk '/---- TIER toolchain ----/,/^  END \{/' "$fa_tool" | grep -v '^[[:space:]]*#')
 fa_tc_calls=$(printf '%s\n' "$fa_tc_sec" | grep -c 'add("toolchain"')
-fa_tc_lab=$(printf '%s\n' "$fa_tc_sec" | grep -cE 'add\("toolchain", [^,]+, "[a-z][a-z0-9-]*"\)')
+fa_tc_lab=$(printf '%s\n' "$fa_tc_sec" | grep -cE 'add\("toolchain", [^,]+, "[a-z][a-z0-9-]*", 1\)')
 if [ "${fa_tc_calls:-0}" -ge 5 ] && [ "$fa_tc_calls" = "$fa_tc_lab" ]; then
   ok "3765-toolchain-all-labelled: all $fa_tc_calls toolchain recognisers publish a closed-enum LABEL LITERAL (none copies its matched line)"
 else
@@ -5928,15 +5946,48 @@ else
   bad "3765-toolchain-no-bare-add: $fa_tc_bare toolchain add() call(s) pass only two arguments, so the matched LINE becomes the published value (blocker 10)"
 fi
 fa_add_body=$(awk '/function add\(tier, id, pub/,/^  }/' "$fa_tool" | grep -v '^[[:space:]]*#')
-if printf '%s\n' "$fa_add_body" | grep -q 'pub == "" ? safety(full) : pub'; then
-  ok "3765-toolchain-projection: add() publishes the LABEL when one is supplied and the identity otherwise — the projection is one expression in one place"
+if printf '%s\n' "$fa_add_body" | grep -q 'if (pub == "") pub = "<no published identifier'; then
+  ok "3765-toolchain-projection: add() publishes its pub argument and NEVER falls back to the identity — a recogniser that supplies nothing gets an affirmative placeholder, not the payload (blocker 11 removed the empty-means-publish-the-payload default)"
 else
-  bad "3765-toolchain-projection: add() no longer projects the published value through the pub argument — a tier that supplies a label would publish its identity anyway"
+  bad "3765-toolchain-projection: add() no longer publishes the pub argument unconditionally — an empty pub that falls back to the identity re-opens the payload channel for every tier at once (blocker 11)"
 fi
 if printf '%s\n' "$fa_add_body" | grep -q '(tier SUBSEP full) in seen'; then
   ok "3765-toolchain-count-on-identity: the DEDUP key is still the FULL identity, so projecting the published value cannot change the count (F5 stays fixed)"
 else
   bad "3765-toolchain-count-on-identity: add() no longer dedups on the full identity — the count is now over the projection, which is F5 again"
+fi
+# ===== THE ONE STRUCTURAL RULE, OVER ALL THREE TIERS (blocker 11, the lead's item 4) =====
+# The publication policy used to be an ASYMMETRY — toolchain published a label, assert and
+# guard published their payloads — and the rationale for the second half was measurably
+# FALSE: 205 `bad "…"` messages in this very file interpolate RUNTIME values, so an assert
+# payload is a repo-authored TEMPLATE carrying runtime text, not a constant. Now every tier
+# publishes a PROJECTION, so the structural rule is ONE rule and covers all three: every
+# add() call site passes an explicit third argument, and that argument is one of exactly
+# three things — a closed-enum label LITERAL, pubid(…) or publabel(…). Nothing else may
+# reach the publication path, and a new recogniser cannot join without choosing one.
+# WHOLE LINES, and `grep -o` is deliberately NOT used here: a bracket expression cannot
+# express "not a newline" portably — `[^\n]` is the class {backslash, n} under a POSIX ERE,
+# so an extraction keyed on it TRUNCATED at the first `n` and read `add("toolchain", $0, "`
+# for the `npm-error` site, which then failed this very assert (measured while writing it).
+# grep is line-oriented, so `.*` is both correct and sufficient.
+fa_addcalls=$(grep -v '^[[:space:]]*#' "$fa_tool" | grep -E 'add\("(assert|guard|toolchain)",')
+fa_add_n=$(printf '%s\n' "$fa_addcalls" | grep -c .)
+fa_add_ok=$(printf '%s\n' "$fa_addcalls" \
+  | grep -cE 'add\("(assert|guard|toolchain)", .*, (pubid\(|publabel\(|"[a-z][a-z0-9-]*", 1\))')
+if [ "${fa_add_n:-0}" -ge 13 ] && [ "$fa_add_n" = "$fa_add_ok" ]; then
+  ok "3765-pub-one-rule: all $fa_add_n add() call sites across ALL THREE tiers publish a closed-enum label literal, pubid(…) or publabel(…) — no tier copies its matched line (blocker 11)"
+else
+  bad "3765-pub-one-rule: $fa_add_n add() call site(s) but only $fa_add_ok publish through a label literal / pubid() / publabel() — a call site that passes copied line content publishes an assertion PAYLOAD, which carries interpolated runtime values (blocker 11)"
+fi
+# …and the same invariant on the OUTPUT PATH for the two repository-authored tiers, because
+# a source scan cannot see a RUNTIME value. The charset REFUSES `@`, `/`, `?`, `&` and `=`,
+# i.e. exactly the shapes this field's six-round credential family travelled on.
+fa_rec_id=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
+if printf '%s\n' "$fa_rec_id" | grep -q 'an identifier failed the safe-charset shape check' \
+   && printf '%s\n' "$fa_rec_id" | grep -q 'A-Za-z0-9'; then
+  ok "3765-pub-outputpath-guard: the emit path REFUSES an assert/guard name outside the safe identifier charset — the invariant is checked on the OUTPUT, not only in the source"
+else
+  bad "3765-pub-outputpath-guard: _failassert_record does not shape-check assert/guard names before publishing them — a runtime value can carry what no source scan sees"
 fi
 fa_rec_tc=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
 if printf '%s\n' "$fa_rec_tc" | grep -q 'a toolchain kind label failed the closed-label shape check' \
@@ -5944,6 +5995,111 @@ if printf '%s\n' "$fa_rec_tc" | grep -q 'a toolchain kind label failed the close
   ok "3765-toolchain-outputpath-guard: the emit path REFUSES a toolchain name that is not a bare label token — the invariant is checked on the OUTPUT, not only in the source"
 else
   bad "3765-toolchain-outputpath-guard: _failassert_record does not shape-check toolchain names before publishing them — a runtime value can carry what no source scan sees"
+fi
+
+# 55ab. BLOCKER 11 (roborev job 49): EVERY TIER PUBLISHES AN IDENTIFIER, NEVER ITS PAYLOAD.
+#
+#       THE RATIONALE THAT WAS REMOVED, AND WHY. Tiers `assert`/`guard` used to publish the
+#       COMPLETE payload of the matched line, justified as "repository-authored text:
+#       in-tree, reviewed, diffed by every PR". MEASURED FALSIFICATION: in THIS file alone,
+#       205 `bad "…"` messages INTERPOLATE RUNTIME VALUES —
+#           bad "leaked-child: caller-known summary file '$caller_file' was not produced"
+#       — so an assert payload is a repo-authored TEMPLATE carrying runtime text, not a
+#       constant, and this repository's own gate interpolates ORIGIN URLS into diagnostics
+#       (that is what `_component_set_safe_detail` exists for). The neutraliser's DECLARED
+#       residual — it cannot see a space-separated `api_key SECRET` or a bare unmarked token
+#       — therefore applied to the assert tier too.
+#
+#       AND PUBLISHING THE PAYLOAD WAS NEVER WHAT #3765 ASKED FOR. The issue's own sketch is
+#       the TAG: `failed-assert: 1465-skip-declares (accounted 419/420, floor 410)`. F5
+#       required full-payload DEDUP; it never required full-payload PUBLICATION, and the two
+#       are now separate — count on the identity, publish a projection of it.
+#
+#       METHOD, both halves of which have caught this issue's authors out before:
+#       (a) NEVER leak-check EXTRACTOR STDOUT — it neither redacts nor neutralises, so a
+#           token a bound cut looks "absent" there while never having been neutralised.
+#           Every assertion below is on the RENDERED field.
+#       (b) tiers are FIRST-MATCH-WINS, so every fixture here is SINGLE-TIER, and SHORT, so
+#           no bound can hide a token.
+fa_pubdir="$fa_dir/pub"; mkdir -p "$fa_pubdir"
+# The two shapes the neutraliser MEASURABLY cannot see, in the DETAIL position — which is
+# where an interpolated runtime value actually lands in a `bad "<tag>: <detail>"` template.
+printf 'FAIL - pub-a: api_key SEKRETX1 revoked\n'     > "$fa_pubdir/x1.log"
+printf 'FAIL - pub-b: SEKRETX2 is not a valid ref\n'  > "$fa_pubdir/x2.log"
+for fa_probe in x1:SEKRETX1:pub-a x2:SEKRETX2:pub-b; do
+  fa_probe_f=${fa_probe%%:*}; fa_probe_rest=${fa_probe#*:}
+  fa_probe_tok=${fa_probe_rest%%:*}; fa_probe_tag=${fa_probe_rest#*:}
+  _fa_run "pub$fa_probe_f" "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_pubdir/$fa_probe_f.log" PASS
+  fa_got=$(_fa_line fmt)
+  case "$fa_got" in
+    *"$fa_probe_tok"*) bad "3765-pub-noleak-$fa_probe_f: $fa_probe_tok reached the RENDERED field ('$fa_got') — the assert tier is publishing its payload, and a keyword/shape recogniser over interpolated text does not close (blocker 11)" ;;
+    *) ok "3765-pub-noleak-$fa_probe_f: no $fa_probe_tok substring in the field — the DETAIL is not published, so the two shapes the neutraliser cannot see have no channel on this tier either" ;;
+  esac
+  case "$fa_got" in
+    *"RECOGNISED (assert): $fa_probe_tag -"*)
+      ok "3765-pub-tag-$fa_probe_f: the field publishes the repo-authored TAG '$fa_probe_tag' — a projection, not a silently emptied field" ;;
+    *) bad "3765-pub-tag-$fa_probe_f: expected the tag '$fa_probe_tag' as the published identifier, got '$fa_got'" ;;
+  esac
+done
+# THE PROPERTY IS "THE PAYLOAD IS NOT PUBLISHED", NOT "SECRETS ARE SCRUBBED". A non-secret
+# distinguishing token must be absent too, or the case would pass for a sanitiser rather
+# than for the removed channel.
+printf 'FAIL - pub-c: DISTINCTIVEDETAILTOKEN in the message\n' > "$fa_pubdir/x3.log"
+_fa_run pubx3 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_pubdir/x3.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *DISTINCTIVEDETAILTOKEN*) bad "3765-pub-nodetail: the assertion DETAIL reached the field ('$fa_got') — the tier publishes an identifier, so ANY detail token is a channel, secret-shaped or not" ;;
+  *) ok "3765-pub-nodetail: an ordinary (non-secret) detail token is absent from the field too — the channel is removed, not sanitised" ;;
+esac
+# …AND THE WITHHOLDING IS DECLARED, as the toolchain tier already declares its own. A field
+# that quietly drops what it did not publish is the silence this whole issue exists to remove.
+case "$fa_got" in
+  *"- identifiers only; the assertion DETAIL is not published (see the component log)"*)
+    ok "3765-affirm-assert: the assert tier states AFFIRMATIVELY that it published identifiers only and where the detail is" ;;
+  *) bad "3765-affirm-assert: expected the affirmative 'identifiers only; the assertion DETAIL is not published' statement, got '$fa_got'" ;;
+esac
+# AN OUT-OF-CHARSET TAG IS REPLACED WHOLESALE, NEVER TRIMMED. The charset excludes `@` and
+# `/` precisely so an scp-form authority in the TAG position cannot be published — and the
+# refusal is affirmative, so the reader knows a tag stood there.
+printf 'FAIL - SEKRETX4@h.io/p failed to clone\n' > "$fa_pubdir/x4.log"
+_fa_run pubx4 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_pubdir/x4.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETX4*) bad "3765-pub-charset: an scp-form authority in the TAG position reached the field ('$fa_got') — the charset is not being enforced, or is being enforced by trimming" ;;
+  *) ok "3765-pub-charset: an out-of-charset tag (an scp-form authority) publishes no fragment of itself" ;;
+esac
+case "$fa_got" in
+  *"outside the safe charset"*)
+    ok "3765-pub-charset-affirm: the refusal is an affirmative placeholder naming what happened, not a dropped name" ;;
+  *) bad "3765-pub-charset-affirm: expected an 'outside the safe charset' placeholder, got '$fa_got'" ;;
+esac
+# GUARD TIER: label + verdict, which is already STRUCTURED — the explanatory prose is not
+# published. (Its identity drops the prose too, and that is DECLARED in the extractor: two
+# lines with the same label AND verdict are one guard verdict.)
+printf 'arrow-parity-guard: FAIL — 0 tests ran under DISTINCTIVEGUARDPROSE\n' > "$fa_pubdir/g1.log"
+_fa_run pubg1 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_pubdir/g1.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *"1 RECOGNISED (guard): arrow-parity-guard (FAIL)"*)
+    ok "3765-pub-guard-label: the guard tier publishes its label and verdict ($fa_got)" ;;
+  *) bad "3765-pub-guard-label: expected '1 RECOGNISED (guard): arrow-parity-guard (FAIL)', got '$fa_got'" ;;
+esac
+case "$fa_got" in
+  *DISTINCTIVEGUARDPROSE*) bad "3765-pub-guard-noprose: the guard line's explanatory PROSE reached the field ('$fa_got')" ;;
+  *) ok "3765-pub-guard-noprose: the guard line's prose is not published — the value is the structured label + verdict" ;;
+esac
+# A4 (nextest) PUBLISHES THE TEST PATH, NOT THE PACKAGE. nextest prints `<pkg> <test>`, so a
+# naive leading-token projection would publish `cqlite-core` for every failure in the crate
+# and ordinalise them all — a pointer that points nowhere. The identity stays the whole
+# payload; the published identifier is the test.
+printf 'FAIL [   0.123s] cqlite-core storage::bti::tests::alpha\nFAIL [   0.456s] cqlite-core storage::bti::tests::beta\n' > "$fa_pubdir/nx.log"
+fa_nx=$(bash "$fa_tool" "$fa_pubdir/nx.log" 10 2>/dev/null)
+fa_nx_count=$(printf '%s\n' "$fa_nx" | sed -n 's/^count=//p' | head -1)
+fa_nx_names=$(printf '%s\n' "$fa_nx" | sed -n 's/^name=//p' | tr '\n' ' ')
+if [ "${fa_nx_count:-0}" = 2 ] && [ "$fa_nx_names" = "storage::bti::tests::alpha storage::bti::tests::beta " ]; then
+  ok "3765-pub-nextest: nextest's two failures count as 2 and publish their TEST paths, not the shared package name"
+else
+  bad "3765-pub-nextest: expected count=2 with the two test paths, got count='${fa_nx_count:-<none>}' names='$fa_nx_names' — publishing the package would ordinalise every failure in one crate"
 fi
 
 # 55za. NO SECOND FORMATTER, INCLUDING ON THE TREE-INTEGRITY BOUNDARY BLOCK (roborev job
@@ -6030,6 +6186,19 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
+# 492 -> 514 on #3765 (roborev job 49, blockers 11/12/13): sections 55ab/55ac/55ad add 22
+# asserts and 55y/55aa are re-pointed at the new invariants. 55ab (14) pins that EVERY tier
+# publishes an IDENTIFIER and not its payload — the two shapes the neutraliser measurably
+# cannot see (`api_key SEKRET`, a bare token) in the DETAIL position, a non-secret detail
+# token (so the case cannot pass for a sanitiser), the out-of-charset tag refusal, the
+# guard label+verdict projection, and nextest's test-path-not-package projection. 55ac (4)
+# pins blocker 13: an over-long guard label is COUNTED with a bounded placeholder, the
+# field never reads `0 RECOGNISED` for a line a recogniser matched, and the GUARD tier
+# still wins on a mixed log (the half a count-only case cannot see). 55ad (3) pins
+# blocker 12: bounding the dedup key before retention did not cost distinctness, the bound
+# does not leak into the published value, and 200 oversized identities are counted exactly.
+# Slack stays 10, for the reason the paragraph above gives.
+#
 # 470 -> 492 on #3765 (roborev round 5, blocker 10): section 55aa adds 22 asserts — 8
 # behavioural probes on TOOLCHAIN-ONLY fixtures (the lead's four measured survivors: a
 # space-separated `api_key SEKRET`, a bare unmarked secret, and the two keyed forms that
@@ -6080,7 +6249,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=492
+ASSERT_FLOOR=505
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

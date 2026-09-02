@@ -5,39 +5,27 @@
 # WHY THIS EXISTS. A failing component's SUMMARY line used to name only the #3453
 # invocation annotation:
 #     tooling-tests:  FAIL (1149s)  [test ws0-corpus-gen default-features | + …]
-# The bracket is test-SHAPED, so a reader identifies `ws0-corpus-gen` as the failing
-# test — which is wrong; the real assert (`FAIL - 1465-skip-declares: …`) lived only in
-# the component log. CLAUDE.md forbids reading gate.log ("the SUMMARY block is the ONLY
-# gate text an agent retains") while simultaneously requiring a flake citation to match
-# the ASSERT rather than the component, so the two rules were unsatisfiable for a FAIL.
+# The bracket is test-SHAPED, so a reader identifies `ws0-corpus-gen` as the failing test —
+# which is wrong; the real assert (`FAIL - 1465-skip-declares: …`) lived only in the
+# component log. CLAUDE.md forbids reading gate.log ("the SUMMARY block is the ONLY gate
+# text an agent retains") while simultaneously requiring a flake citation to match the
+# ASSERT rather than the component, so the two rules were unsatisfiable for a FAIL.
 #
 # CONTRACT
 #   usage: gate-failed-assert.sh <ansi-normalised-log> [max-names]
 #   stdout (line-oriented, in this order; absent when nothing was recognised):
 #       tier=<assert|guard|toolchain>
 #       count=<N>                 total DISTINCT identities recognised (never capped).
-#                                 DISTINCT is judged on the FULL normalised identity, so
-#                                 no bound anywhere can change the count.
-#       name=<published value>    at most <max-names> lines, in file order, DISTINCT. What
-#                                 a name IS depends on the TIER, and that split is the F7
-#                                 fix (see PUBLICATION POLICY below):
-#                                   assert/guard -> the FULL normalised identity (repo-
-#                                     authored test/guard text). NOT display-capped and NOT
-#                                     truncated at all: the DISPLAY bound lives in the gate,
-#                                     after the neutralisation and the redaction (see the
-#                                     ORDER note at add()), and the one bound here REPLACES
-#                                     an over-long identity with a placeholder rather than
-#                                     keeping a prefix of it (see safety()).
-#                                   toolchain    -> a CLOSED-ENUM KIND LABEL chosen by this
-#                                     file. NO log text is copied. `count` is still the true
-#                                     number of DISTINCT log identities; the names are their
-#                                     DISTINCT kinds, so `count` may exceed the name count.
+#                                 DISTINCT is judged on the FULL identity (bounded only by
+#                                 the internal, never-published dedup key at key()), so no
+#                                 publication policy and no bound can change the count.
+#       name=<published value>    at most <max-names> lines, in file order. A NAME IS AN
+#                                 IDENTIFIER, NEVER A PAYLOAD — see PUBLICATION POLICY.
 #
 #       THIS STDOUT IS INTERNAL, NOT PUBLICATION. Its only consumer is agent-gate.sh's
-#       `_failassert_record`, which passes every name through the ONE emit boundary
-#       (`_failassert_clean`: NEUTRALISE -> REDACT -> bound). Nothing here is rendered into a
-#       SUMMARY block as it stands, which is what lets the count be computed on the full
-#       identity (F5) while only a neutralised PROJECTION of it is ever published (F7).
+#       `_failassert_record`, which validates every name against its tier's shape on the
+#       OUTPUT PATH and passes it through the ONE emit boundary (`_failassert_clean`:
+#       NEUTRALISE -> REDACT -> bound for display).
 #   exit 0 — the log was read and scanned (whether or not anything matched)
 #   exit 2 — usage error / the log could not be read: the CALLER must render this as a
 #            named `not extractable`, never as "no failures found". A guard that could
@@ -52,57 +40,84 @@
 # into awk, never a pipe (#3400: a piped `while read` runs in a subshell and its verdict
 # is discarded).
 #
+# ===== PUBLICATION POLICY — EVERY TIER PUBLISHES AN IDENTIFIER, NEVER ITS PAYLOAD =====
+# ONE rule for all three tiers (roborev job 49, blocker 11). This is a SAFETY boundary and
+# ALSO a simplification back toward what #3765 asked for, whose own sketch is the TAG:
+#     failed-assert: 1465-skip-declares (accounted 419/420, floor 410)
+#
+# WHAT WENT WRONG BEFORE, AND WHY THE OLD RATIONALE WAS FALSE. Tiers `assert`/`guard` used
+# to publish the COMPLETE payload of the matched line, justified as "repository-authored
+# text: in-tree, reviewed, diffed by every PR". MEASURED FALSIFICATION: in
+# scripts/tests/test_agent_gate_summary.sh alone, 205 `bad "…"` messages INTERPOLATE
+# RUNTIME VALUES —
+#     bad "leaked-child: caller-known summary file '$caller_file' was not produced"
+#     bad "relative-path: summary not created at caller CWD ($rel_caller_dir/$rel_name)"
+# — so an assert payload is a repo-authored TEMPLATE carrying runtime values, not a
+# constant. This repository's own gate interpolates ORIGIN URLS into diagnostics (that is
+# why `_component_set_safe_detail` exists), so a credential-bearing value can reach a
+# `FAIL - ` payload, and the neutraliser's DECLARED residual (it cannot see `api_key SECRET`
+# or a bare unmarked token) then applies to it.
+#
+# THE SPLIT THAT RESOLVES IT — count on the payload, publish only an identifier:
+#   * DEDUP and COUNT run on the FULL identity (that is F1/F5 and it must not regress: a
+#     57-char cap before the dedup collapsed two sibling tests; a cut at the first `:`
+#     before the dedup named 13 distinct asserts as one tag).
+#   * PUBLICATION is a PROJECTION of that identity onto one of exactly three shapes:
+#       pubid(...)     a TAG / test-path IDENTIFIER: the first whitespace-delimited token,
+#                      cut at the first single `:` (a `::` module separator is kept),
+#                      constrained to a NAMED charset and bounded. The tag position is the
+#                      repo-authored CONSTANT of a `bad "<tag>: <detail>"` template; the
+#                      runtime values live in the DETAIL, which is no longer published.
+#       publabel(...)  a GUARD LABEL: already structured (`<label> (<VERDICT>)`), charset-
+#                      constrained and bounded.
+#       "<literal>"    a CLOSED-ENUM KIND LABEL chosen by this file (tier toolchain only),
+#                      never derived from the log at all.
+#   * FREE-FORM DETAIL STAYS IN THE COMPONENT LOG, and the field SAYS SO affirmatively
+#     rather than leaving a reader to guess whether the harness looked.
+#
+# NEITHER BOUND NOR CHARSET EVER RETAINS A PREFIX. An identifier that fails its charset or
+# its bound is replaced WHOLESALE by an affirmative `<…>` placeholder naming what happened —
+# never by its first N characters. That is the class fixed on blocker 8: a truncation must
+# not precede neutralisation at ANY bound, however large, because a severed `scheme://` or
+# `@host` defeats every later rule (see the ORDER note at add()).
+#
+# DISAMBIGUATION WITHOUT DETAIL. Distinct identities routinely share a tag (13
+# `FAIL - F2: …` lines in one measured suite), and two distinct asserts must never render
+# as one string — that is the misidentification #3765 exists to remove. So a shared
+# published identifier is ORDINALISED in FILE ORDER (`F2#1`, `F2#2`), which is a pointer
+# into the component log and carries no payload. `#` is excluded from every identifier
+# charset, so an ordinal can never be forged by log content. The COUNT is unaffected: it
+# was taken from the full identity before any projection ran.
+#
 # ===== THE RECOGNISER TABLE — one place, one stated rule per entry =====
 # Three TIERS, most specific first; the FIRST tier that matches at least once wins, so a
 # cargo `error: test failed…` epilogue never displaces the test names above it.
-#
-# ===== PUBLICATION POLICY — WHICH TIERS MAY PUBLISH THEIR PAYLOAD, AND WHY IT DIFFERS =====
-# This is a SAFETY boundary, not a formatting choice, and the asymmetry is deliberate: do
-# NOT "consistently" widen the toolchain tier or narrow the other two to match it (blocker
-# 10, roborev round 5).
-#
-#   assert / guard  — PUBLISH THE IDENTITY. Their payloads are REPOSITORY-AUTHORED text: a
-#     `bad "…"` message in scripts/tests/*.sh, a libtest/nextest test path, a named guard
-#     verdict. That text is in-tree, reviewed, and diffed by every PR; a credential
-#     committed there is a different and already-lost problem, not something this field
-#     can contain. Publishing it IS the point of #3765 — the field must NAME the assert.
-#
-#   toolchain       — PUBLISH A LABEL ONLY, NEVER THE LINE. Its payload is ENVIRONMENT-
-#     controlled free text (a registry URL, a resolved remote, a shell diagnostic, a
-#     temp path), and this field is rendered into a SUMMARY block that this repo's own
-#     doctrine tells agents to paste into PUBLIC PR comments. Six rounds of this file's
-#     credential-leak family were each an IMPROVED SANITISER (227 raw URL, 234 flattened-
-#     not-redacted, 239 redacted-not-flattened, 264 scp form, 282 query strings, and the
-#     shape neutraliser added for job 48); a keyword/shape recogniser over free text does
-#     not close — `api_key SEKRET` (space-separated) and a bare unmarked secret both
-#     survived it, MEASURED on the rendered field. CLAUDE.md's standing ruling for this
-#     family is STOP RENDERING THE VALUE, DO NOT SANITISE IT AGAIN, so the CHANNEL is
-#     removed here rather than narrowed a seventh time: each toolchain recogniser publishes
-#     a fixed KIND LABEL from the closed enum below, chosen by this file and never copied
-#     from the log. #3765 asks for a DEFECT IDENTITY and prescribes saying so affirmatively
-#     where none exists; a raw `npm error …` line is a diagnostic, not an identity, so
-#     publishing it was beyond what the issue asked for. The text stays in the component
-#     log, which the field points at.
 #
 #   TIER `assert` — a named test case / assertion identity.
 #     A1  `FAIL - <identity>`           the repo's bash test-suite convention: the
 #                                       `bad()` helper in scripts/tests/*.sh, which the
 #                                       tooling-tests component executes (~16 suites).
 #                                       MEASURED: this is the #3765 subject line shape.
-#                                       The identity is the WHOLE payload, detail
-#                                       included — NOT the tag before the first `:`. A
-#                                       tag is routinely SHARED (13 `FAIL - F2: …` lines
-#                                       in one measured suite), so tag-only dedup
-#                                       UNDERCOUNTS and names nothing.
+#                                       Identity = the WHOLE payload (dedup/count).
+#                                       Published = pubid(tagof(payload)), i.e. the tag.
 #     A2  `FAIL: <detail>` (col 0)      the other bash-suite spelling (8 measured sites,
 #                                       e.g. "FAIL: guard did NOT trip on …"). Anchored
 #                                       at column zero so `>>> [x] FAIL: …` (a gate
 #                                       progress line) and `oom-audit: FAIL (…)` (tier
-#                                       `guard`) are not swallowed here.
+#                                       `guard`) are not swallowed here. This spelling
+#                                       carries NO tag by convention, so its published
+#                                       identifier is the leading token — a weak pointer,
+#                                       DECLARED as such.
 #     A3  `test <name> ... FAILED`      libtest's per-test line. Also the source of the
 #                                       `failures:` block below it, which is therefore
-#                                       NOT a separate rule (it would double-count).
-#     A4  `FAIL [ <t>s] <pkg> <test>`   cargo-nextest's per-test line.
+#                                       NOT a separate rule (it would double-count). A
+#                                       Rust module path has no whitespace and keeps its
+#                                       `::` separators, so it publishes in full.
+#     A4  `FAIL [ <t>s] <pkg> <test>`   cargo-nextest's per-test line. Identity = the whole
+#                                       `<pkg> <test>` payload; published = the TEST path
+#                                       (the last token), which is the identifier a reader
+#                                       needs — the package alone would ordinalise every
+#                                       failure in one crate.
 #     A5  `shell-selftest: <f> FAIL`    _run_shell_selftest_files' per-file verdict.
 #
 #   TIER `guard` — a named guard/component verdict, when no test-case name is available.
@@ -116,46 +131,31 @@
 #                                       flight-tests, legacy-heuristics,
 #                                       binding-rust-tests, all-features-check.
 #     B3  `[FAIL] <detail>`             the smoke script's convention (its own [FAIL]/
-#                                       [PASS] prefixes). MEASURED on smoke, where the
-#                                       whole line IS the identity.
+#                                       [PASS] prefixes). MEASURED on smoke. The whole
+#                                       line is the IDENTITY; the published value is the
+#                                       leading token of the detail, since this spelling
+#                                       has no label — the same DECLARED weak-pointer
+#                                       residual as A2.
 #
 #   TIER `toolchain` — NO assert identity exists. The matched line is COUNTED (it is the
 #   dedup key, so the count stays true) and its KIND is published; the line itself is NOT.
 #   The kind is the CLOSED ENUM below — five labels, one per recogniser, each named after
 #   the SHAPE it matched rather than the producer it is guessed to come from, because a
-#   producer claim would be exactly the heuristic this repo forbids.
+#   producer claim would be exactly the heuristic this repo forbids. This tier is
+#   deliberately MANY-TO-ONE (17 `npm error` lines publish one `npm-error`), so it passes
+#   `collapse=1` and is never ordinalised.
 #     C1  `error[E….]: …` / `error: …`  -> kind `rustc-cargo-error`
-#                                       rustc/cargo/clippy. First-N in FILE ORDER, so
-#                                       the real diagnostic precedes cargo's own
-#                                       `error: could not compile …` epilogue with no
-#                                       exclusion list to curate.
-#     C2  `npm error <msg>`             -> kind `npm-error`
-#                                       node-bindings. MEASURED (npm ci ENOENT).
-#     C3  `bash: <msg>`                 -> kind `bash-error`
-#                                       a missing/unexecutable child script. MEASURED
-#                                       (roborev-lints, 18 logs).
+#     C2  `npm error <msg>`             -> kind `npm-error`   (MEASURED: npm ci ENOENT)
+#     C3  `bash: <msg>`                 -> kind `bash-error`  (MEASURED: 18 logs)
 #     C4  `Diff in <path> at line <n>`  -> kind `rustfmt-diff`
-#                                       rustfmt --check's diff header. DECLARED
-#                                       UNMEASURED: all 16 fmt FAILs in the corpus were
-#                                       a cargo-fmt USAGE error (a #3544 fixture with no
-#                                       Cargo.toml), never a formatting diff, so this
-#                                       one entry is derived from rustfmt's documented
-#                                       output rather than observed here.
-#                                       THE PATH IS NO LONGER PUBLISHED. It used to render
-#                                       `rustfmt diff in <path> at line <n>`, which is a
-#                                       DERIVED form rather than a copied line — but the
-#                                       path is still environment-controlled (rustfmt runs
-#                                       over whatever tree it was pointed at, temp dirs
-#                                       included), so keeping it would leave one
-#                                       argued-safe free-text exception inside a channel
-#                                       that was just removed, and the next leak would be
-#                                       in the exception. The count of DISTINCT diff sites
-#                                       survives; the paths are in the component log.
+#                                       DECLARED UNMEASURED: all 16 fmt FAILs in the
+#                                       corpus were a cargo-fmt USAGE error, never a
+#                                       formatting diff, so this entry is derived from
+#                                       rustfmt's documented output rather than observed.
 #     C5  `Error: <msg>`                -> kind `capitalised-error`
-#                                       MEASURED on python-bindings ("Error: [Errno 28]
-#                                       …"), i.e. python/maturin — but the label names the
-#                                       capitalised-`Error:` SHAPE, since node and other
-#                                       tools spell it the same way.
+#                                       MEASURED on python-bindings ("Error: [Errno 28]"),
+#                                       but the label names the capitalised-`Error:` SHAPE,
+#                                       since node and other tools spell it the same way.
 #
 # NON-EXHAUSTIVE BY CONSTRUCTION. This set was derived by MEASUREMENT over the 174 FAILed
 # component logs present in this box's ~4200 retained agent-gate run directories (29
@@ -177,17 +177,18 @@ fi
 awk -v max="$max" '
   # ===== THE ORDER IS: NORMALISE (here) -> REDACT (gate) -> BOUND FOR DISPLAY (gate) =====
   #
-  # THIS EXTRACTOR EMITS THE FULL NORMALISED IDENTITY AND APPLIES NO DISPLAY BOUND. That
-  # is a SAFETY property, not a formatting preference (roborev job 46, blocker 6). It is
-  # the THIRD instance on this issue of ONE shape — an operation applied to a value BEFORE
-  # the operation that needed the value WHOLE:
-  #   F1  a 57-char cap before the DEDUP        -> two sibling tests collapsed, count UNDERCOUNTED
-  #   F5  truncation at the first `:` before the DEDUP -> 13 distinct asserts named as one tag
-  #   F6  a 60-char DISPLAY elision before the REDACTION -> a credential reached the SUMMARY
-  #   F8  a 4096-char SAFETY truncation before the REDACTION -> the same, at a 68x bound
-  # so it is fixed as a CLASS: no bound in this file may precede a step that needs the whole
-  # value, and the one bound left here TRUNCATES NOTHING — it publishes a placeholder instead
-  # of a prefix, so it cannot sever a credential at any offset (see safety()).
+  # NO BOUND IN THIS FILE TRUNCATES, and that is a SAFETY property rather than a formatting
+  # preference. It is the FIFTH instance on this issue of ONE shape — an operation applied
+  # to a value BEFORE the operation that needed the value WHOLE:
+  #   F1  a 57-char cap before the DEDUP                -> two sibling tests collapsed, count UNDERCOUNTED
+  #   F5  a cut at the first `:` before the DEDUP       -> 13 distinct asserts named as one tag
+  #   F6  a 60-char DISPLAY elision before the REDACTION-> a credential reached the SUMMARY
+  #   F8  a 4096-char SAFETY truncation before REDACTION-> the same, at a 68x bound
+  #   F9  the 4096 bound applied AFTER retention        -> unbounded memory (blocker 12)
+  # so it is fixed as a CLASS: every bound here either replaces its value with an
+  # affirmative placeholder (publication) or is applied BEFORE retention and NEVER published
+  # (the dedup key). There is no prefix anywhere on the publication path to sever a
+  # credential out of.
   #
   # MEASURED F6. The middle elision of
   #     npm error 401 Unauthorized while fetching the tarball https://x-access-token:TOK@h.io/p
@@ -197,19 +198,11 @@ awk -v max="$max" '
   # repo tells agents to paste into PR comments. The elision, not the redactor, was the
   # defect: a bound must never be able to change a safety verdict.
   #
-  # WHERE THE DISPLAY BOUND WENT: agent-gate.sh `_failassert_clean`, applied per NAME
-  # AFTER the single `_component_set_redact_text` call. The middle-elision STYLE is
-  # unchanged (head 27 + `...` + tail 30 = 60) and so is its reason, restated there.
+  # WHERE THE DISPLAY BOUND LIVES: agent-gate.sh `_failassert_clean`, applied per NAME
+  # AFTER the single `_component_set_redact_text` call (head 27 + `...` + tail 30 = 60).
   #
   # norm() is the IDENTITY: one line, no control characters, whitespace collapsed. It does
   # NOT truncate.
-  #
-  # DEDUP IS ON THE FULL IDENTITY, AND THAT IS WHY. `add()` used to truncate FIRST and key
-  # `seen[]` on the truncated text, so two DISTINCT identities sharing a 57-character
-  # prefix — routine for a Rust test path, e.g.
-  # `…::bti::rows::tests::verify_root_base_prefix_{alpha,beta}` — collapsed to ONE and
-  # `count` UNDERCOUNTED. The count is the field this whole extractor exists to make
-  # trustworthy (the #3765 flake signature is the assert name AND the accounted count).
   function norm(s,   t) {
     t = s
     gsub(/[\001-\037\177]/, " ", t)          # control chars (a path CAN hold a newline)
@@ -217,105 +210,123 @@ awk -v max="$max" '
     gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
     return t
   }
-  # safety() IS A SAFETY BOUND, NOT A DISPLAY BOUND, and the distinction is the whole
-  # point of the block above. It exists only so a single pathological log line (a minified
-  # bundle, a base64 blob, a megabyte of JSON) is not carried whole through awk, a sidecar
-  # file and three command substitutions.
-  #
-  # IT TRUNCATES NOTHING. An over-bound identity is replaced by a FIXED PLACEHOLDER naming
-  # its measured length — an affirmative "this could not be published safely", which is a
-  # MEASUREMENT and not a silence — never by its first 4096 characters.
-  #
-  # WHY (roborev job 48, blocker 8 — the FOURTH instance of ONE shape on this issue: a 57-char
-  # cap before the DEDUP, truncation at the first `:` before the DEDUP, a 60-char display
-  # elision before the REDACTION, and this bound). It USED to `substr(t, 1, 4096)`, and the
-  # residual was DECLARED: a credential straddling offset 4096 loses its scheme or its
-  # `@host` here, upstream of every neutralisation, and its tail is then displayed. DECLARING
-  # A HAZARD IS NOT REMOVING IT. A truncation must never precede neutralisation at ANY bound,
-  # however large, so the bound stops retaining an unredacted prefix at all: there is no
-  # prefix to sever a credential out of.
-  #
-  # THE COST, stated: two DISTINCT over-bound identities render identically. Harmless by
-  # construction and for the reason the whole extractor is built around — `count` is computed
-  # from the FULL identity before this runs, so the count stays true; a name is a pointer.
-  function safety(t) {
-    return (length(t) > 4096) \
-      ? "<identity too long to publish safely: " length(t) " chars>" : t
+  # tagof() — the TAG position of an identity: its first whitespace-delimited token, cut at
+  # the first SINGLE `:`. A `::` is a Rust module-path separator, not a tag/detail delimiter,
+  # so it is protected by a sentinel first (norm() has already mapped every control
+  # character to a space, so \001 provably cannot occur in the input).
+  function tagof(full,   t) {
+    t = full
+    sub(/[[:space:]].*$/, "", t)
+    gsub(/::/, "\001", t)
+    sub(/:.*$/, "", t)
+    gsub(/\001/, "::", t)
+    return t
   }
-  # add(tier, id, pub) — THE SPLIT BETWEEN COUNTING AND PUBLISHING (blocker 10, F7).
-  #   `id`  is the FULL identity: the DEDUP key, and the thing `count` counts. It is never
-  #         published for a tier that passes a `pub`.
-  #   `pub` is what MAY BE PUBLISHED. Empty means "publish the identity itself" (tiers
-  #         assert/guard — repository-authored text; see PUBLICATION POLICY in the header).
-  #         Non-empty is a CLOSED-ENUM KIND LABEL this file chose (tier toolchain, whose
-  #         payload is environment-controlled free text and is not published at all).
+  # pubid() — the PUBLISHED IDENTIFIER for a tag / test path. A NAMED charset and a bound,
+  # each REPLACING the value rather than trimming it.
+  #
+  # CHARSET `[A-Za-z0-9._:-]`, and every exclusion is load-bearing: no `@` (so an scp-form
+  # `TOKEN@host` cannot be published), no `/` and no `://` (no URL), no `?`/`&`/`=` (no
+  # query string), no whitespace (so a space-separated `api_key SECRET` cannot travel), and
+  # no `#` (so an ordinal can never be forged by log content). A value outside it is
+  # REPLACED, because a partially-scrubbed identifier is the "improve the sanitiser" move
+  # CLAUDE.md forbids for this family.
+  #
+  # BOUND 256, MEASURED: the widest real assert identifier this repo can produce is a
+  # libtest path — module depth 9 plus an 89-character test fn name is ~190 characters —
+  # and the widest bash-suite tag measured in scripts/tests/*.sh is 41. 256 leaves headroom
+  # for both; anything longer is not an identifier. The gate then MIDDLE-elides to 60 for
+  # display, after the redaction, which is safe on a charset that cannot hold an authority.
+  function pubid(t) {
+    sub(/[._:-]+$/, "", t)                   # trailing separators are punctuation, not identity
+    if (t == "") return "<no identifier in the matched line>"
+    if (t ~ /[^A-Za-z0-9._:-]/) return "<identifier outside the safe charset>"
+    if (length(t) > 256) return "<identifier too long to publish safely: " length(t) " chars>"
+    return t
+  }
+  # publabel() — the PUBLISHED IDENTIFIER for a guard label. Same rules, one wider charset:
+  # a real guard label carries spaces and parentheses (`cli-tests Pass 1 (default)`). `:`
+  # and `/` stay OUT, so `https://x: FAIL` publishes a placeholder rather than a URL.
+  #
+  function publabel(t) {
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+    if (t == "") return "<no guard label in the matched line>"
+    if (t ~ /[^A-Za-z0-9 ._()-]/) return "<guard label outside the safe charset>"
+    return t
+  }
+  # lasttok() — the final whitespace-delimited token (A4: nextest prints `<pkg> <test>`).
+  function lasttok(s,   a, n) { n = split(s, a, /[[:space:]]+/); return (n ? a[n] : "") }
+  # add(tier, id, pub, collapse) — THE SPLIT BETWEEN COUNTING AND PUBLISHING.
+  #   `id`       the FULL identity: the thing `count` counts. NEVER published.
+  #   `pub`      the published IDENTIFIER. MANDATORY at every call site — a missing one is
+  #              an affirmative placeholder, never the identity (the old empty-means-publish-
+  #              the-payload default is exactly what blocker 11 removed).
+  #   `collapse` 1 for a MANY-TO-ONE kind label (tier toolchain): a repeated label is named
+  #              once and never ordinalised. 0 for a per-identity identifier, where a shared
+  #              value is ORDINALISED so two distinct asserts never render as one string.
   # COUNT CORRECTNESS AND PUBLICATION SAFETY ARE SEPARATE CONCERNS AND NEITHER IS TRADED
-  # FOR THE OTHER: `n[tier]` counts DISTINCT full identities (so the toolchain count is
-  # still the true number of distinct diagnostic lines), while `m[tier]`/`hit[]` carry the
-  # DISTINCT published values (so seventeen `npm error` lines publish one `npm-error`, not
-  # seventeen). count >= name-count by construction, and the gate declares the remainder.
-  function add(tier, id, pub,   c, full, p) {
+  # FOR THE OTHER: `n[tier]` counts DISTINCT full identities, while the published values are
+  # a projection of them. count >= name-count by construction, and the gate declares the
+  # remainder.
+  function add(tier, id, pub, collapse,   full, idx) {
     full = norm(id)
     if (full == "") return
-    # The dedup key is the FULL identity, never the safety-bounded or projected one: two
-    # identities differing only beyond the bound must still count as two, and two toolchain
-    # lines of the same kind are two lines. `count` is the authority.
     if ((tier SUBSEP full) in seen) return
     seen[tier SUBSEP full] = 1
     n[tier]++
-    p = (pub == "" ? safety(full) : pub)
-    # Published values are deduped SEPARATELY, on the projection, so a repeated kind label
-    # is named once. This cannot affect `count`, which is already incremented above.
-    if ((tier SUBSEP "pub" SUBSEP p) in seenpub) return
-    seenpub[tier SUBSEP "pub" SUBSEP p] = 1
-    c = ++m[tier]
-    if (c <= max) hit[tier SUBSEP c] = p
+    if (pub == "") pub = "<no published identifier: the recogniser supplied none>"
+    if (collapse) {
+      if ((tier SUBSEP pub) in seenpub) return
+      seenpub[tier SUBSEP pub] = 1
+    }
+    idx = ++m[tier]
+    base[tier SUBSEP idx] = pub
+    occ[tier SUBSEP pub]++
   }
   # ---- TIER assert ----
-  # The A1 identity is the WHOLE payload after `FAIL - `, detail INCLUDED. It used to be
-  # `head(s)` — everything before the first `:` — on the assumption that the leading tag
-  # IS the test name. MEASURED FALSIFICATION (roborev job 45): scripts/tests/
-  # test_ws0_round_metadata.sh emits THIRTEEN `FAIL - F2: <different assertion>` lines, so
-  # the tag is a CATEGORY shared by many distinct asserts. Truncating first collapsed them
-  # to one `seen[]` key, and the field reported `1 RECOGNISED (assert): F2` — an
-  # UNDERCOUNT naming something that identifies neither failure. That is the same
-  # truncate-before-dedup defect add() was already fixed for, one level up: the fix there
-  # moved the DISPLAY cap after the dedup, and this one was applied OUTSIDE add(), so
-  # add() never saw the full payload. Dedup on the FULL identity; the middle
-  # elision in the gate keeps the leading tag AND the distinguishing tail visible.
+  # The IDENTITY is the WHOLE payload (F5: a tag is routinely SHARED, so tag-only dedup
+  # UNDERCOUNTS). The PUBLISHED value is the tag (blocker 11: the detail carries runtime
+  # values, and 205 measured `bad "…"` messages interpolate them).
   /^[[:space:]]*FAIL - / {
-    s = $0; sub(/^[[:space:]]*FAIL - /, "", s); add("assert", s); next
+    s = $0; sub(/^[[:space:]]*FAIL - /, "", s)
+    add("assert", s, pubid(tagof(norm(s))), 0); next
   }
-  /^FAIL: / { s = $0; sub(/^FAIL: /, "", s); add("assert", s); next }
+  /^FAIL: / {
+    s = $0; sub(/^FAIL: /, "", s)
+    add("assert", s, pubid(tagof(norm(s))), 0); next
+  }
   /^[[:space:]]*test .* \.\.\. FAILED/ {
     s = $0; sub(/^[[:space:]]*test /, "", s); sub(/ \.\.\. FAILED.*$/, "", s)
-    add("assert", s); next
+    add("assert", s, pubid(tagof(norm(s))), 0); next
   }
   /^[[:space:]]*FAIL \[/ {
-    s = $0; sub(/^[[:space:]]*FAIL \[[^]]*\][[:space:]]*/, "", s); add("assert", s); next
+    s = $0; sub(/^[[:space:]]*FAIL \[[^]]*\][[:space:]]*/, "", s)
+    add("assert", s, pubid(tagof(lasttok(norm(s)))), 0); next
   }
   /^shell-selftest: .* FAIL$/ {
-    s = $0; sub(/^shell-selftest: /, "", s); sub(/ FAIL$/, "", s); add("assert", s); next
+    s = $0; sub(/^shell-selftest: /, "", s); sub(/ FAIL$/, "", s)
+    add("assert", s, pubid(tagof(norm(s))), 0); next
   }
 
   # ---- TIER guard ----
-  # CHECKED FOR THE A1 DEFECT AND DELIBERATELY UNCHANGED (roborev job 45). B1/B2 key on
-  # `<label> (<VERDICT>)` and drop the trailing prose, which LOOKS like the same
-  # truncate-before-dedup shape and is not: what A1 discarded was a NAME (a shared tag
-  # standing in for many distinct asserts), whereas what B1/B2 discard is an EXPLANATION
-  # of one verdict by one named guard — two lines with the same label and the same verdict
-  # ARE one guard verdict, and folding the prose in would inflate the count with restated
-  # detail. A2/A3/A4/A5 and B3 already pass their FULL payload to add(). The residual is
-  # DECLARED: a guard that emits the same label+verdict for two genuinely different
-  # failures counts as one.
+  # B1/B2 publish `<label> (<VERDICT>)`, which is already STRUCTURED — the label is charset-
+  # constrained and bounded by publabel(), the verdict comes from the closed set matched.
+  # Their trailing prose is DROPPED from the identity too, and that is deliberate and NOT
+  # the A1 defect: what A1 discarded was a NAME (a shared tag standing in for many distinct
+  # asserts), whereas what B1/B2 discard is an EXPLANATION of one verdict by one named
+  # guard — two lines with the same label and verdict ARE one guard verdict. The residual is
+  # DECLARED: a guard emitting the same label+verdict for two different failures counts once.
+  # B3 has no label, so it keeps the FULL line as its identity and publishes the leading
+  # token of the detail (the DECLARED weak-pointer residual it shares with A2).
   /^\[FAIL\][[:space:]]/ {
-    s = $0; sub(/^\[FAIL\][[:space:]]+/, "", s); add("guard", s); next
+    s = $0; sub(/^\[FAIL\][[:space:]]+/, "", s)
+    add("guard", s, pubid(tagof(norm(s))), 0); next
   }
   /^\[[^]]+\] FAIL(-CLOSED)?[: ]/ {
     s = $0; v = "FAIL"
     if (s ~ /^\[[^]]+\] FAIL-CLOSED/) v = "FAIL-CLOSED"
     sub(/^\[/, "", s); sub(/\].*$/, "", s)
-    add("guard", s " (" v ")"); next
+    add("guard", s " (" v ")", publabel(norm(s)) " (" v ")", 0); next
   }
   /^[^[:space:]].*: (FAIL-CLOSED|FAIL|REFUSED|STALE)([^A-Za-z0-9-]|$)/ {
     s = $0
@@ -323,23 +334,23 @@ awk -v max="$max" '
       lbl = substr(s, 1, RSTART - 1)
       v = substr(s, RSTART + 2, RLENGTH - 2)
       gsub(/[^A-Za-z-]/, "", v)
-      if (length(lbl) <= 70) add("guard", lbl " (" v ")")
+      if (length(lbl) <= 70) add("guard", lbl " (" v ")", publabel(norm(lbl)) " (" v ")", 0)
     }
     next
   }
 
   # ---- TIER toolchain ----
-  # EVERY rule here passes a THIRD argument: the closed-enum kind label. The matched line
-  # is the dedup key (so the count is true) and is NEVER published. A future rule added
-  # without a label would publish the line, so the shape is pinned STRUCTURALLY in
-  # scripts/tests/test_agent_gate_summary.sh (3765-toolchain-*), and the gate REFUSES to
-  # publish a toolchain name that is not a bare label token — a source scan cannot see a
-  # runtime value, so the invariant is checked on the OUTPUT PATH too.
-  /^error(\[[A-Za-z0-9]+\])?: / { add("toolchain", $0, "rustc-cargo-error"); next }
-  /^npm error / { add("toolchain", $0, "npm-error"); next }
-  /^Error: / { add("toolchain", $0, "capitalised-error"); next }
-  /^bash: / { add("toolchain", $0, "bash-error"); next }
-  /^Diff in .* at line [0-9]+:/ { add("toolchain", $0, "rustfmt-diff"); next }
+  # EVERY rule here passes a CLOSED-ENUM KIND LABEL LITERAL and `collapse=1`. The matched
+  # line is the dedup key (so the count is true) and is NEVER published. A future rule added
+  # without a label would publish the placeholder, not the line — and the shape is pinned
+  # STRUCTURALLY in scripts/tests/test_agent_gate_summary.sh (3765-toolchain-*), with the
+  # gate REFUSING on the OUTPUT PATH any toolchain name that is not a bare label token, since
+  # a source scan cannot see a runtime value.
+  /^error(\[[A-Za-z0-9]+\])?: / { add("toolchain", $0, "rustc-cargo-error", 1); next }
+  /^npm error / { add("toolchain", $0, "npm-error", 1); next }
+  /^Error: / { add("toolchain", $0, "capitalised-error", 1); next }
+  /^bash: / { add("toolchain", $0, "bash-error", 1); next }
+  /^Diff in .* at line [0-9]+:/ { add("toolchain", $0, "rustfmt-diff", 1); next }
 
   END {
     split("assert guard toolchain", order, " ")
@@ -348,11 +359,16 @@ awk -v max="$max" '
       if (!(t in n)) continue
       printf "tier=%s\n", t
       printf "count=%d\n", n[t]
-      # count is over DISTINCT IDENTITIES (n), the names over DISTINCT PUBLISHED values
-      # (m). For assert/guard the two are equal by construction; for toolchain m <= n, and
-      # the gate declares the difference as `(+K more)`.
+      # count is over DISTINCT IDENTITIES (n), the names over the PUBLISHED projections
+      # (m). For a collapsing tier m <= n and the gate declares the difference as
+      # `(+K more)`. A published value shared by two or more DISTINCT identities is
+      # ORDINALISED in file order, so no two distinct identities ever render as one string.
       lim = (m[t] < max ? m[t] : max)
-      for (c = 1; c <= lim; c++) printf "name=%s\n", hit[t SUBSEP c]
+      for (c = 1; c <= lim; c++) {
+        b = base[t SUBSEP c]
+        if (occ[t SUBSEP b] > 1) printf "name=%s#%d\n", b, ++ord[t SUBSEP b]
+        else printf "name=%s\n", b
+      }
       exit 0
     }
   }

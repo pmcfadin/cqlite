@@ -6926,33 +6926,54 @@ _failassert_record() {
     _failassert_write "$name" "$(_failassert_clean --prose "not extractable (extractor reported count=$count for tier $tier but named nothing)")"
     return 0
   fi
-  # ===== THE TOOLCHAIN TIER PUBLISHES LABELS, AND THAT IS CHECKED HERE TOO (blocker 10) =====
-  # The extractor publishes a CLOSED-ENUM KIND LABEL for tier `toolchain` and copies no log
-  # text (see its PUBLICATION POLICY header). This is the same invariant asserted on the
-  # OUTPUT PATH, because the structural assert covers the CODE while a runtime value can
-  # carry what no source scan sees. It checks the SHAPE — a bare `[a-z0-9-]` token — and
-  # deliberately NOT enum MEMBERSHIP: a second copy of the enum here would be a second place
-  # for it to diverge, and a copied log line cannot be a bare token (it carries spaces,
-  # colons, slashes). It REFUSES rather than redacting: for this tier the value is a label,
-  # and a label that is not a label is not something to sanitise into shape.
-  if [ "$tier" = toolchain ]; then
-    for fa_n in "${fa_names[@]}"; do
-      case "$fa_n" in
-        -*|*-|*[!a-z0-9-]*|'')
-          _failassert_write "$name" "not extractable (a toolchain kind label failed the closed-label shape check at the emit boundary - this tier publishes labels, never log text)"
-          return 0 ;;
-      esac
-    done
-  fi
+  # ===== EVERY TIER PUBLISHES AN IDENTIFIER, AND THAT IS CHECKED HERE TOO (blocker 11) =====
+  # The extractor publishes a PROJECTION of each identity — a tag / test path, a guard
+  # label + verdict, or a closed-enum kind label — and copies no payload (see its
+  # PUBLICATION POLICY header). This is the SAME invariant asserted on the OUTPUT PATH,
+  # because a structural assert covers the CODE while a RUNTIME value can carry what no
+  # source scan sees (CLAUDE.md: an invariant over OUTPUT needs a check on the OUTPUT PATH).
+  #
+  # ONE loop, THREE tier shapes, and the asymmetry is only in the charset each tier can
+  # legitimately produce:
+  #   toolchain     a bare `[a-z0-9-]` label token. Deliberately NOT enum MEMBERSHIP: a
+  #                 second copy of the enum here would be a second place for it to diverge,
+  #                 and a copied log line cannot be a bare token anyway.
+  #   assert/guard  an identifier from the extractor charsets plus the `#<n>` ordinal and
+  #                 the `<…>` placeholders. Every EXCLUSION is the load-bearing part: no
+  #                 `@` (no scp-form authority), no `/` (no URL path), no `?`/`&`/`=` (no
+  #                 query string) — so none of the shapes this field's six-round credential
+  #                 family travelled on can be published even if a recogniser regressed.
+  # It REFUSES rather than redacting: the value is supposed to BE an identifier, and an
+  # identifier that is not one is not something to sanitise into shape.
+  for fa_n in "${fa_names[@]}"; do
+    case "$tier" in
+      toolchain)
+        case "$fa_n" in
+          -*|*-|*[!a-z0-9-]*|'')
+            _failassert_write "$name" "not extractable (a toolchain kind label failed the closed-label shape check at the emit boundary - this tier publishes labels, never log text)"
+            return 0 ;;
+        esac ;;
+      *)
+        case "$fa_n" in
+          ''|*[!A-Za-z0-9\ ._\(\):#\<\>-]*)
+            _failassert_write "$name" "not extractable (an identifier failed the safe-charset shape check at the emit boundary - this field publishes identifiers, never assertion payloads)"
+            return 0 ;;
+        esac ;;
+    esac
+  done
   value=""
   [ "$count" -gt "$shown" ] 2>/dev/null && value=" (+$((count - shown)) more)"
-  # THE TOOLCHAIN TIER SAYS AFFIRMATIVELY WHAT IT IS NOT PUBLISHING. #3765 requires the
-  # field to name a DEFECT IDENTITY and to say so affirmatively where none is available to
-  # the harness; a kind label is not an assert name, so the line states that no named assert
-  # exists AND that the text was withheld by policy — never leaving a reader to guess
-  # whether the harness looked. A fixed literal, like the prefix beside it.
-  [ "$tier" = toolchain ] && \
-    value="$value - no named assert exists; the diagnostic TEXT is not published (see the component log)"
+  # EVERY TIER SAYS AFFIRMATIVELY WHAT IT IS NOT PUBLISHING. #3765 requires the field to
+  # name a DEFECT IDENTITY and prescribes saying so affirmatively where none is available;
+  # withholding text SILENTLY is the shape this whole issue exists to remove, so each tier
+  # states what it published and where the rest is. Fixed literals, like the prefix beside
+  # them.
+  case "$tier" in
+    toolchain)
+      value="$value - no named assert exists; the diagnostic TEXT is not published (see the component log)" ;;
+    *)
+      value="$value - identifiers only; the assertion DETAIL is not published (see the component log)" ;;
+  esac
   _failassert_write "$name" \
     "$(_failassert_clean --names "$count RECOGNISED ($tier): " "$value" "${fa_names[@]}")"
   return 0
