@@ -629,14 +629,42 @@ So the observation the decision rests on is RE-TAKEN immediately before the rena
 equality; any difference refuses with `reason=report-changed-mid-write` and installs nothing. Three
 properties worth knowing: it compares the report's BYTES, not its classified token, because with `--force`
 one `FINDINGS` replaced by a DIFFERENT `FINDINGS` leaves the token equal while the report the operator
-read is gone; the bytes are captured BEFORE the classification (which re-reads the file), so a change
-either read could see is caught by the comparison; and `--force` does NOT cover it, since `--force`
+read is gone; the bytes are captured BEFORE the decision is made on them, and since round 12's R2 the
+classification is made FROM THAT SAME SNAPSHOT rather than from a second read of the file, so the
+bytes this write is guarded on and the verdict read from them are ONE observation; and `--force`
+does NOT cover it, since `--force`
 authorizes replacing the verdict the operator READ, never one that arrived afterwards. **The residual is
 DECLARED because it cannot be removed**: the rename itself is not conditional — coreutils `mv` exposes
 neither `RENAME_EXCHANGE` nor `RENAME_NOREPLACE`, and `mv -n` is the wrong predicate (the destination
 legitimately exists) — so one fork/exec of `mv` remains open, and a LOCK would not close it even if it
 were free, because the counterparty is an arbitrary agent writing the report with its own tooling and
 taking no lock. Only a unilateral compare-and-swap could, and that is what is unavailable.
+
+**AND "COULD NOT READ IT" IS NOT "NOTHING IS RECORDED" (#3751 round 13, S1).** Round 12's R2 gave
+`classify_report` an UNREADABLE observation state, and this guard branched on the classified TOKEN
+alone — where an unreadable report arrives as `NOT-RUN`, i.e. on the REPLACEABLE side. So a report
+whose recorded verdict was UNKNOWN, possibly a blocking `FINDINGS`, was overwritten by the
+merge-proceeding `AUTHOR-PERFORMED` with no `--force` and no `replaced-verdict:` trace. Measured
+against the shipped script at `5e3b51a74`: a mode-000 report holding `result: FINDINGS` produced
+`RECORD-OK ... result=AUTHOR-PERFORMED`, exit 0, and the findings text was gone. That is this
+repository's central rule broken inside its own mechanism — *"cannot tell" must never take the
+permissive branch, and unknown is not absent* — and it is the sibling of round 12's own lesson: a
+verdict must describe a state that EXISTED, and a REPLACEMENT may only destroy a state that was
+READ.
+
+Three properties. **The permissive set is AFFIRMATIVE**, naming the two states that were measured —
+`absent` (verified-absent: there is no recorded verdict to destroy, so nothing is destroyed) and
+`present` (readable: the token decides, exactly as before) — because a `!= unreadable` test would
+admit every state added later, which is the shape #3564 records one directory over. **The state
+word has ONE reader**, `report_state`: `classify_report` matched `report_bytes`' prefixes itself
+while this guard did not consult the state at all, and two readers of one grammar are two opinions
+about whether a report was READ. Its `*` arm takes the fail-closed word, so a state added to
+`report_bytes` refuses at both callers by construction rather than by someone remembering to add an
+arm. **And `--force` deliberately does NOT cover it**, for the same reason the re-verification above
+is not coverable by it: `--force` authorizes replacing THE VERDICT THE OPERATOR READ, and nobody
+read this one. Refusing strands no one — `open <kind> --issue <N> --agent <type> --force` supersedes
+the stage with a fresh report at a fresh nonce and leaves the unreadable file on disk as history —
+which is the recovery the refusal's own `detail=` names.
 
 That reports the DISTINCT token `AUTHOR-PERFORMED`, never `PASS`, and `premerge-assert.sh`
 prints it on its own `PREMERGE: C-VERDICT` line — never folded into `PREMERGE: OK` — for the same

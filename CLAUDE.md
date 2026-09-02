@@ -1280,7 +1280,22 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   verdict the operator READ, never one that arrived afterwards. The residual is one `mv` wide and is
   DECLARED at the check, because no compare-and-swap rename is reachable from a shell — and a lock
   would not close it either, since the counterparty is an arbitrary agent writing the report with
-  its own tooling and taking no lock. **The CLASSIFIER enforces that working too, by calling the
+  its own tooling and taking no lock. **AND "COULD NOT READ IT" IS NOT "NOTHING IS RECORDED"
+  (#3751 round 13, S1).** Round 12's single-observation classifier introduced an UNREADABLE state,
+  and this guard branched on the TOKEN — where that state arrives as `NOT-RUN`, i.e. on the
+  REPLACEABLE side — so a report whose recorded verdict was UNKNOWN, possibly a blocking
+  `FINDINGS`, was overwritten by the merge-proceeding `AUTHOR-PERFORMED` with no `--force` and no
+  `replaced-verdict:` trace (measured: a mode-000 report holding `result: FINDINGS` yielded
+  `RECORD-OK result=AUTHOR-PERFORMED` at exit 0, findings gone). *Unknown is not absent*, and
+  "cannot tell" may never take the permissive branch — so the permissive set is now AFFIRMATIVE,
+  the two states that were MEASURED: `absent` (verified-absent, no recorded verdict to destroy) and
+  `present` (read, so the token decides). Both are read through ONE reader of that grammar
+  (`report_state`, shared with the classifier, which used to match `report_bytes`' prefixes itself
+  — two readers being two opinions about whether a report was READ), so a state added to the
+  observation helper later refuses at both callers BY CONSTRUCTION rather than by someone
+  remembering to add an arm. `--force` deliberately does NOT cover it, for the same reason the
+  mid-write re-verification does not, and refusing strands no one: `open <kind> --force` supersedes
+  the stage with a fresh report at a fresh nonce and leaves the unreadable file on disk as history. **The CLASSIFIER enforces that working too, by calling the
   SAME function the writer does (#3751 round 1)** — `verdict` reads HAND-WRITTEN reports by design,
   and it used to accept any NON-EMPTY `performed-by`/`reason`/`evidence`, so `performed-by: nobody`,
   `reason: x`, `evidence: tbd` reached the token that PROCEEDS at the merge point while the writer

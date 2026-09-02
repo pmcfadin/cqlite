@@ -784,7 +784,18 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   change refuses (`reason=report-changed-mid-write`), `--force` included, because `--force` authorizes
   replacing the verdict the operator READ and not one that arrived while the substitute was being
   prepared. The residual is one `mv` wide and is declared at the check: no compare-and-swap rename is
-  reachable from a shell, and a lock would not help, since the counterparty takes none. **The classifier enforces that working too,
+  reachable from a shell, and a lock would not help, since the counterparty takes none.
+  **AND "COULD NOT READ IT" IS NOT "NOTHING IS RECORDED" (#3751 round 13, S1)**: round 12's
+  single-observation classifier introduced an UNREADABLE state, and this guard branched on the
+  TOKEN — where that state arrives as `NOT-RUN`, the REPLACEABLE side — so a report whose recorded
+  verdict was UNKNOWN, possibly a blocking `FINDINGS`, was overwritten by the merge-proceeding
+  `AUTHOR-PERFORMED` with no `--force` and no `replaced-verdict:` trace (measured: a mode-000
+  report holding `result: FINDINGS` yielded `RECORD-OK result=AUTHOR-PERFORMED` at exit 0).
+  *Unknown is not absent.* The permissive set is now AFFIRMATIVE — `absent` (nothing recorded to
+  destroy) and `present` (read, so the token decides) — read through ONE reader of that grammar
+  (`report_state`, shared with the classifier), so a state added later refuses at both callers by
+  construction; `--force` does not cover it, and `open <kind> --force` is the recovery, superseding
+  the stage with a fresh report and leaving the unreadable file on disk as history. **The classifier enforces that working too,
   by calling the SAME function the writer does (#3751 round 1).** `verdict` reads HAND-WRITTEN reports by design, and it used to accept any
   NON-EMPTY `performed-by`/`reason`/`evidence` — so `performed-by: nobody`, `reason: x`, `evidence: tbd`
   reached the token that PROCEEDS at the merge point while the writer would have refused all three. A

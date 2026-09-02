@@ -3422,6 +3422,120 @@ has "2 column-zero 'result:' lines" "r2/causes: two records are still AMBIGUOUS,
 printf 'result: PASS\n\nreviewed.\n' >"$R2E_REP"
 rs "$R2E" verdict c --issue 837
 rc_is 0 "r2/causes: and a real PASS is still a PASS (the positive control for the consolidated read)"
+# --- 25. AN UNREADABLE PRIOR VERDICT IS *UNKNOWN*, NOT *REPLACEABLE* (round 13, S1) ----
+# THE FINDING (roborev job 387, S1). Round 12's R2 correctly gave the classifier an UNREADABLE
+# observation state — but `record-author-performed`'s clobber guard branches on the TOKEN, and an
+# unreadable report classifies as `NOT-RUN`, which is the guard's REPLACEABLE side. So a report
+# whose recorded verdict was UNKNOWN — possibly a blocking `FINDINGS` — was overwritten by the
+# merge-proceeding `AUTHOR-PERFORMED` token with NO `--force` and NO `replaced-verdict:` trace.
+# Measured against the shipped script at 5e3b51a74: a mode-000 report holding `result: FINDINGS`
+# yielded `RECORD-OK ... result=AUTHOR-PERFORMED`, exit 0, and the findings text was gone.
+#
+# That is this repository's central rule violated INSIDE its own mechanism: "cannot tell" must
+# never take the permissive branch, and *unknown* is not *absent*. The guard's permissive side is
+# now keyed AFFIRMATIVELY on the two states that were MEASURED — `absent` (verified-absent: there
+# is no recorded verdict to destroy) and `present` (readable: the token decides) — so any state
+# that does not affirmatively say the report was read refuses, and a state added later joins the
+# refusing side by construction rather than by someone remembering to add an arm.
+#
+# `--force` DELIBERATELY DOES NOT COVER IT, and the reason is the same one round 9's
+# re-verification gives: `--force` authorizes replacing THE VERDICT THE OPERATOR READ, and nobody
+# read this one. Refusing strands nobody — `open <kind> --force` moves the stage to a fresh report
+# at a fresh nonce and leaves the unreadable file on disk as history — which is asserted in
+# section 26, on a subject every host has.
+R25="$(newrepo)"
+rs "$R25" open c --issue 950 --agent spec-auditor
+rc_is 0 "s1: the stage opens"
+R25_REPORT="$(REPORT_OF "$R25" 950 c)"
+S1_REASON='no peer agent available on this box; hand C against the spec deltas'
+S1_EV='docs/round-artifacts/issue-950-hand-c.md'
+printf 'result: FINDINGS\n\n### [BLOCKER] a real gap the substitute would have erased\n' >"$R25_REPORT"
+# THE BAIT IS ASSERTED VALID FIRST (round 9's lesson): a refusal from a broken fixture proves
+# nothing, so the recorded blocking verdict is READ before it is made unreadable.
+rs "$R25" verdict c --issue 950
+rc_is 4 "s1 PREMISE: the report records a real, readable, BLOCKING verdict before the attempt"
+chmod 000 "$R25_REPORT" 2>/dev/null || true
+
+# THE PRECONDITION IS MEASURED BY ATTEMPTING THE READ, not by `[ -r ]` (which answers TRUE for
+# root) — section 11b's idiom. BOTH branches execute ELEVEN assertions, so the suite's EXACT case
+# floor stays host-independent, and the branch with no subject asserts what IS true there rather
+# than passing silently.
+if ( : <"$R25_REPORT" ) 2>/dev/null; then
+  ok "s1: DECLARED GAP — this host still reads a mode-000 file (running as root, or a filesystem ignoring mode bits), so the UNREADABLE prior state has NO SUBJECT here; the eleven assertions below assert what IS true on such a host, namely that the recorded-verdict guard covers this file instead"
+  rs "$R25" verdict c --issue 950
+  rc_is 4 "s1 (no-subject host): the report IS readable, so its own content decides — FINDINGS"
+  has "RESULT: FINDINGS " "s1 (no-subject host): the token is the report's own"
+  rs "$R25" record-author-performed c --issue 950 --reason "$S1_REASON" --evidence "$S1_EV" --performed-by author
+  rc_is 2 "s1 (no-subject host): the recording is REFUSED without --force"
+  has "reason=verdict-already-recorded" "s1 (no-subject host): refused by the RECORDED-VERDICT guard, which is the one with a subject here"
+  has "recorded-verdict=FINDINGS" "s1 (no-subject host): the refusal names the prior token"
+  hasnt "RECORD-OK" "s1 (no-subject host): nothing was recorded"
+  rs "$R25" record-author-performed c --issue 950 --reason "$S1_REASON" --evidence "$S1_EV" --performed-by author --force
+  rc_is 0 "s1 (no-subject host): --force IS legitimate over a verdict that WAS read"
+  has "replaced-verdict=FINDINGS" "s1 (no-subject host): and the replacement is traced"
+  OUT="$(cat "$R25_REPORT" 2>&1)"; RC=0
+  has "result: AUTHOR-PERFORMED" "s1 (no-subject host): the report now records the substitute"
+  has "replaced-verdict: FINDINGS" "s1 (no-subject host): with the destroyed token recorded in it"
+else
+  ok "s1: the precondition holds — this host cannot read the mode-000 report (MEASURED by attempting the read, not by [ -r ], which answers TRUE for root)"
+  rs "$R25" verdict c --issue 950
+  rc_is 5 "s1 PREMISE: the prior verdict is now UNKNOWN — the classifier reports it unreadable"
+  has "NOT-RUN (report unreadable)" "s1 PREMISE: and names that state, not 'no report written'"
+  rs "$R25" record-author-performed c --issue 950 --reason "$S1_REASON" --evidence "$S1_EV" --performed-by author
+  rc_is 2 "s1: a recording over an UNREADABLE prior report is REFUSED (exit 2), not treated as an ordinary NOT-RUN"
+  has "AUTHOR-REFUSED reason=prior-verdict-unreadable" "s1: refused BY NAME, distinctly from verdict-already-recorded — the operator action differs (make the file readable, or open a fresh stage)"
+  has "prior-state=unreadable" "s1: and the refusal names the STATE that could not be read"
+  hasnt "RECORD-OK" "s1: nothing was recorded"
+  rs "$R25" record-author-performed c --issue 950 --reason "$S1_REASON" --evidence "$S1_EV" --performed-by author --force
+  rc_is 2 "s1: --force does NOT cover it — it authorizes replacing the verdict you READ, and nobody read this one"
+  has "AUTHOR-REFUSED reason=prior-verdict-unreadable" "s1: the forced attempt is refused under the SAME cause"
+  chmod 644 "$R25_REPORT" 2>/dev/null || true
+  OUT="$(cat "$R25_REPORT" 2>&1)"; RC=0
+  has "result: FINDINGS" "s1: the report is INTACT after both attempts — the blocking verdict was not destroyed"
+  hasnt "AUTHOR-PERFORMED" "s1: and the merge-proceeding token was never written into it"
+fi
+
+# CONTROL, ON EVERY HOST: a VERIFIED-ABSENT report is still freely replaceable. `absent` is an
+# affirmative measurement — there is no recorded verdict to destroy — so the permissive side is
+# not "everything that is not present", it is a named state. A guard that reds here would red on
+# correct input, which is the guard agents learn to waive.
+R25B="$(newrepo)"
+rs "$R25B" open c --issue 951 --agent spec-auditor
+rc_is 0 "s1 CONTROL: a second stage opens"
+rm -f "$(REPORT_OF "$R25B" 951 c)"
+rs "$R25B" verdict c --issue 951
+rc_is 5 "s1 CONTROL: the deleted report is measured ABSENT"
+has "NOT-RUN (report absent)" "s1 CONTROL: and named absent, not unreadable"
+rs "$R25B" record-author-performed c --issue 951 --reason "$S1_REASON" --evidence "$S1_EV" --performed-by author
+rc_is 0 "s1 CONTROL: recording over an ABSENT report needs no --force — nothing is destroyed"
+has "RECORD-OK" "s1 CONTROL: the normal path is unaffected"
+hasnt "replaced-verdict" "s1 CONTROL: nothing was replaced, so no replacement is claimed"
+
+# STRUCTURAL: ONE READER OF THE OBSERVATION GRAMMAR, AND THE PERMISSIVE SET IS AFFIRMATIVE.
+# The state word is what both the classifier and the clobber guard branch on, and they had no
+# shared reader of it — the classifier matched `report_bytes`' prefixes itself while the guard did
+# not look at the state at all. A second reader of that grammar is a second opinion about whether
+# a report was READ, which is exactly the divergence this finding is.
+S25_SRC="$(cat "$RS" 2>/dev/null || true)"
+case "$S25_SRC" in
+  *"report_state() {"*) ok "s1/structural: report_state() is the named reader of the observation state" ;;
+  *) bad "s1/structural: could not locate report_state() — the assertions below would be vacuous" ;;
+esac
+S25_CLS="$(LC_ALL=C sed -n '/^classify_report() {/,/^}$/p' "$RS" 2>/dev/null || true)"
+case "$S25_CLS" in
+  *'report_state "$obs"'*) ok "s1/structural: the classifier reads the state THROUGH that helper" ;;
+  *) bad "s1/structural: the classifier matches the observation grammar itself, so it and the clobber guard can form two opinions about whether the report was read" ;;
+esac
+S25_RAP="$(LC_ALL=C sed -n '/^cmd_record_author_performed() {/,/^}$/p' "$RS" 2>/dev/null || true)"
+case "$S25_RAP" in
+  *'report_state "$prior_obs"'*) ok "s1/structural: the clobber guard reads the state through the same helper" ;;
+  *) bad "s1/structural: the clobber guard does not consult the observation STATE, so 'could not read it' is indistinguishable from 'nothing is recorded'" ;;
+esac
+case "$S25_RAP" in
+  *'absent | present)'*) ok "s1/structural: and its permissive set is keyed AFFIRMATIVELY on the two measured states, so a state added later refuses by construction" ;;
+  *) bad "s1/structural: the guard's permissive branch is not an affirmative match on absent|present — a '!= unreadable' test lets every future state through" ;;
+esac
+
 
 # (e) STRUCTURAL — ONE READ, PINNED. A behavioural case cannot see that the classifier reads the
 #     file once; a refactor that reintroduced a second read would pass (a) and (b) as long as the
@@ -3696,7 +3810,21 @@ fi
 # from the file, `read_field` delegates to the ONE field grammar, and the downstream consumer
 # (`record-author-performed`) shares the snapshot at both its call sites. Every assertion is
 # unconditional.
-ASSERT_FLOOR=690
+#
+# ROUND 13's S1 MOVES IT TO 713. Section 25 adds 23: an unreadable prior verdict is UNKNOWN, not
+# REPLACEABLE. Round 12's R2 gave the classifier an UNREADABLE observation state, and
+# `record-author-performed`'s clobber guard branched on the TOKEN — where that state arrives as
+# `NOT-RUN`, the REPLACEABLE side — so a report whose recorded verdict was unknown, possibly a
+# blocking `FINDINGS`, was overwritten by the merge-proceeding `AUTHOR-PERFORMED` with no `--force`
+# and no `replaced-verdict:` trace. Two PREMISE assertions read the blocking verdict before it is
+# made unreadable (a refusal from a broken fixture proves nothing), ELEVEN host-branched ones cover
+# the refusal by name, `--force` NOT covering it and the report surviving both attempts — with the
+# no-subject branch (a host that reads a mode-000 file) executing the same ELEVEN, asserting that
+# the recorded-verdict guard covers the file there, so the EXACT floor is host-independent — six
+# CONTROLS keep a verified-ABSENT report freely replaceable, and four STRUCTURAL pins require the
+# single state reader `report_state`, both callers going through it, and the guard's permissive set
+# being an AFFIRMATIVE `absent | present` match rather than a `!= unreadable` test.
+ASSERT_FLOOR=713
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

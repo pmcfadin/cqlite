@@ -352,6 +352,15 @@
 #         authorizes replacing the verdict the operator READ, never one that arrives while the
 #         substitute is being prepared. The irreducible residual is one `mv` wide and is
 #         declared at the check; see `report_bytes`.
+#         AND AN UNREADABLE PRIOR REPORT IS *UNKNOWN*, NOT *ABSENT* (#3751 round 13, S1):
+#         the guard branched on the TOKEN, where an unreadable report arrives as `NOT-RUN`,
+#         i.e. on the REPLACEABLE side, so a possibly-blocking verdict nobody could read was
+#         replaced by the merge-proceeding token with no `--force` and no trace. The
+#         permissive set is AFFIRMATIVE — `absent` (nothing recorded to destroy) and
+#         `present` (read, so the token decides) — read through the ONE state reader
+#         `report_state`; anything else is `reason=prior-verdict-unreadable`, and `--force`
+#         does NOT cover it. Recovery: `open <kind> --force`, which supersedes the stage with
+#         a fresh report and leaves the unreadable file on disk as history.
 #
 # EXIT CODES
 #   0   success (OPEN-OK, STATUS, RECORD-OK, verdict PASS)
@@ -1740,6 +1749,27 @@ report_bytes() {
   printf 'state=present bytes:\n%s' "${body%E}"
 }
 
+# report_state <observation> — THE STATE WORD of a `report_bytes` observation: `absent`,
+# `present`, or `unreadable`. ONE READER OF THAT GRAMMAR (#3751 round 13, S1).
+#
+# WHY IT EXISTS. `classify_report` matched `report_bytes`' prefixes itself and
+# `record-author-performed`'s clobber guard did not look at the state AT ALL — it branched on the
+# TOKEN, where an unreadable report arrives as `NOT-RUN`, i.e. on the REPLACEABLE side. So a report
+# whose recorded verdict was UNKNOWN, possibly a blocking `FINDINGS`, was overwritten by the
+# merge-proceeding `AUTHOR-PERFORMED` with no `--force` and no `replaced-verdict:` trace. Two
+# readers of one grammar are two opinions about whether a report was READ; there is now one.
+#
+# AN UNRECOGNISED OBSERVATION IS `unreadable`, WHICH IS THE FAIL-CLOSED WORD, not a fall-through:
+# unreachable while `report_bytes` is the only producer (its output is a closed set), and here so
+# that a state added to that helper later cannot inherit a permissive branch at either caller.
+report_state() {
+  case "${1:-}" in
+    'state=present bytes:'*) printf 'present\n' ;;
+    'state=no-such-file') printf 'absent\n' ;;
+    *) printf 'unreadable\n' ;;
+  esac
+}
+
 # classify_report <report-path> <stage-open:0|1> [<record-defect>] [<observation>] — print
 # "<token>|<cause>" and return 0.
 # ONE place decides the token, so `status` and `verdict` can never form two opinions about
@@ -1797,14 +1827,26 @@ classify_report() {
   [ -n "$obs" ] || obs="$(report_bytes "$rpath")"
   nl='
 '
+  # THE STATE WORD COMES FROM THE ONE READER OF THAT GRAMMAR (#3751 round 13, S1). This `case`
+  # used to match `report_bytes`' prefixes itself while `record-author-performed`'s clobber guard
+  # did not consult the state at all — two readers, and the second one treated "could not read it"
+  # as "nothing is recorded". `report_state` is now the single reader, so the classifier and the
+  # write guard cannot form two opinions about whether the report was READ. Its `*` arm takes the
+  # fail-closed word, so a state added to `report_bytes` later refuses at both callers.
+  case "$(report_state "$obs")" in
+    absent) printf 'NOT-RUN|report absent\n'; return 0 ;;
+    unreadable) printf 'NOT-RUN|report unreadable\n'; return 0 ;;
+    present) ;;
+    *) printf 'NOT-RUN|report unreadable\n'; return 0 ;;
+  esac
   case "$obs" in
     "state=present bytes:$nl"*) body="${obs#"state=present bytes:$nl"}" ;;
     # An EMPTY report: `report_bytes` emits the prefix and no bytes, and the command substitution
     # that captured it stripped the trailing newline. Distinct arm rather than a `*` catch, so a
     # genuinely empty file is measured as empty rather than as unrecognised.
     "state=present bytes:") body="" ;;
-    "state=no-such-file") printf 'NOT-RUN|report absent\n'; return 0 ;;
-    "state=unreadable") printf 'NOT-RUN|report unreadable\n'; return 0 ;;
+    # A `present` observation whose bytes marker this reader does not recognise. Unreachable while
+    # `report_bytes` is the only producer; refused rather than defaulted, for the same reason.
     *) printf 'NOT-RUN|report unreadable\n'; return 0 ;;
   esac
   # "empty" means nothing RECORDABLE — a file of blank lines is empty in every sense a
@@ -2318,10 +2360,38 @@ cmd_record_author_performed() {
   # about the guard and left a smaller hole in the VERDICT: the token guarding this write could be
   # a classification of a state the snapshot never held. So the snapshot is PASSED IN, and the
   # pair (the bytes this write is guarded on, the verdict read from them) is ONE observation.
-  local prior_cls prior_token prior_obs replaced=""
+  #
+  # AND "COULD NOT READ IT" IS NOT "NOTHING IS RECORDED" (#3751 round 13, S1). This guard branched
+  # on the TOKEN alone, where an UNREADABLE report — the state round 12's R2 introduced — arrives
+  # as `NOT-RUN`, i.e. on the REPLACEABLE side. So a report whose recorded verdict was UNKNOWN,
+  # possibly a blocking `FINDINGS`, was overwritten by the merge-proceeding `AUTHOR-PERFORMED`
+  # token with no `--force` and no `replaced-verdict:` trace (measured: a mode-000 report holding
+  # `result: FINDINGS` yielded `RECORD-OK result=AUTHOR-PERFORMED`, exit 0, findings gone). That is
+  # this repository's central rule broken inside its own mechanism: "cannot tell" must never take
+  # the permissive branch, and *unknown* is not *absent*.
+  #
+  # THE PERMISSIVE SET IS THEREFORE AFFIRMATIVE — the two states that were MEASURED, named: `absent`
+  # (verified-absent, so there is no recorded verdict to destroy) and `present` (read, so the token
+  # below decides). A `!= unreadable` test would admit every state added later; this way a new state
+  # refuses by construction.
+  #
+  # `--force` DELIBERATELY DOES NOT COVER IT, for the same reason the re-verification below is not
+  # coverable by it: `--force` authorizes replacing THE VERDICT THE OPERATOR READ, and nobody read
+  # this one — and refusing strands no one, because `open <kind> --force` moves the stage to a fresh
+  # report at a fresh nonce and leaves the unreadable file on disk as history.
+  local prior_cls prior_token prior_obs prior_state replaced=""
   prior_obs="$(report_bytes "$STAGE_REPORT")"
+  prior_state="$(report_state "$prior_obs")"
   prior_cls="$(classify_report "$STAGE_REPORT" 1 "" "$prior_obs")"
   prior_token="${prior_cls%%|*}"
+  case "$prior_state" in
+    absent | present) ;;
+    *)
+      emit "AUTHOR-REFUSED reason=prior-verdict-unreadable kind=$kind issue=$issue prior-state=$(field_value "$prior_state") report=$(field_value "$STAGE_REPORT")"
+      emit "AUTHOR-REFUSED detail=the report of record could NOT BE READ, so whether it already records a verdict is UNKNOWN — possibly a blocking FINDINGS — and NOTHING was written. An unreadable prior verdict is not an absent one, so it cannot be known to be replaceable. Make the file readable and read it first ($prog verdict $kind --issue $issue), or supersede the stage with a FRESH report ($prog open $kind --issue $issue --agent <type> --force), which leaves this file on disk as history. --force does NOT cover this: it authorizes replacing the verdict you READ."
+      exit 2
+      ;;
+  esac
   case "$prior_token" in
     PASS | FINDINGS)
       if [ "$force" -ne 1 ]; then

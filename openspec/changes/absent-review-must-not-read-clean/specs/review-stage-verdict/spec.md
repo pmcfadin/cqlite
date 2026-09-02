@@ -415,7 +415,10 @@ replace a report that already RECORDS a verdict (`PASS` or `FINDINGS`) unless `-
 a forced replacement SHALL record the replaced token in the new report. That check SHALL PREVENT the
 replacement rather than report it: the observation it decides on SHALL be re-verified immediately before
 the report is installed, and any change to the report in between SHALL refuse by name — including under
-`--force`.
+`--force`. And it SHALL treat an UNREADABLE prior report as a verdict that is UNKNOWN rather than absent:
+the replacement SHALL proceed only where the prior state was AFFIRMATIVELY measured as absent or present,
+and SHALL otherwise refuse by its own name — `--force` included, since `--force` authorizes replacing the
+verdict the operator read and an unreadable report is one nobody read.
 
 #### Scenario: a recorded verdict is not silently replaced
 - **WHEN** the stage's report already records `FINDINGS` and a substitute is recorded without `--force`
@@ -430,6 +433,15 @@ the report is installed, and any change to the report in between SHALL refuse by
   arrived survives
 - **AND** `--force` does not authorize it, because `--force` authorizes replacing the verdict the operator
   read, not one that arrived afterwards
+
+#### Scenario: an unreadable prior verdict is not replaceable
+- **WHEN** the stage's report cannot be READ (permission or I/O) and a substitute is recorded
+- **THEN** the recording is REFUSED under its OWN cause, naming the state that could not be read, and the
+  report is left byte-intact
+- **AND** `--force` does not authorize it either, because `--force` authorizes replacing the verdict the
+  operator read, and an unreadable report is one nobody read
+- **AND** a VERIFIED-ABSENT report is still replaced with no `--force` (nothing recorded is destroyed), so
+  the permissive branch is a named measurement and not "everything that is not present"
 
 #### Scenario: a substitute is distinguishable from an independent audit
 - **WHEN** an author-performed C is recorded and the verdict is read

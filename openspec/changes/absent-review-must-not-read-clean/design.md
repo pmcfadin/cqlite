@@ -250,6 +250,16 @@ under `--force` too. One `mv` of residual window remains and is declared at the 
 compare-and-swap rename is reachable from a shell, and a lock cannot help because the counterparty is an
 arbitrary agent writing the report with its own tooling and taking no lock.
 
+Round 13 (S1) closed the third defect in the same guard, created by round 12's own fix: the guard branched
+on the classified TOKEN, and the UNREADABLE observation state R2 introduced arrives there as `NOT-RUN`,
+i.e. on the REPLACEABLE side — so a report whose recorded verdict was UNKNOWN, possibly a blocking
+`FINDINGS`, was replaced by the merge-proceeding token with no `--force` and no trace. *Unknown is not
+absent*, so the permissive set is keyed AFFIRMATIVELY on the two measured states (`absent`, `present`),
+read through ONE reader of the observation grammar (`report_state`, shared with the classifier) so a
+later state refuses at both callers by construction. `--force` does not cover it — it authorizes
+replacing the verdict the operator READ — and the recovery is `open --force`, which supersedes the stage
+with a fresh report and leaves the unreadable file on disk as history.
+
 ### The emit boundary, and the guard over it
 
 Three consecutive rounds found a new unrouted interpolation, so the completeness is asserted
