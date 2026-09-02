@@ -210,6 +210,31 @@ awk -v max="$max" '
     gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
     return t
   }
+  # key() — THE DEDUP KEY. BOUNDED BEFORE RETENTION, AND NEVER PUBLISHED (blocker 12).
+  #
+  # The full identity used to become an associative-array key BEFORE any bound applied, so
+  # a log full of long minified lines could consume unbounded memory and kill the extractor
+  # — or the gate — before any summary was produced. The bound is therefore applied HERE,
+  # on the way IN.
+  #
+  # IT IS SAFE TO RETAIN A WINDOW HERE, AND ONLY HERE, because this value is provably never
+  # published: add() derives the published value from its `pub` PARAMETER alone and never
+  # from `full`/`k`, and the emit path re-validates every name against its tier shape. So
+  # the blocker-8 rule (no truncation upstream of neutralisation) is not weakened: nothing
+  # downstream can render this string.
+  #
+  # DISTINCTNESS, which is F1/F5 and must not regress: an oversized identity keys on its
+  # EXACT length plus a 1024-char head AND a 1024-char tail. Two DISTINCT identities collide
+  # only if they agree on their first 1024 characters, their last 1024 characters and their
+  # total length — not a realistic case for a test path, an assertion message or a compiler
+  # diagnostic, and DECLARED here rather than left implied. Chosen over a hand-rolled digest
+  # deliberately: a digest would need a collision argument about a hash nobody here can
+  # vouch for, and this needs none.
+  function key(t,   L) {
+    L = length(t)
+    if (L <= 4096) return t
+    return "<oversize:" L ">" substr(t, 1, 1024) "<...>" substr(t, L - 1023)
+  }
   # tagof() — the TAG position of an identity: its first whitespace-delimited token, cut at
   # the first SINGLE `:`. A `::` is a Rust module-path separator, not a tag/detail delimiter,
   # so it is protected by a sentinel first (norm() has already mapped every control
@@ -268,11 +293,12 @@ awk -v max="$max" '
   # FOR THE OTHER: `n[tier]` counts DISTINCT full identities, while the published values are
   # a projection of them. count >= name-count by construction, and the gate declares the
   # remainder.
-  function add(tier, id, pub, collapse,   full, idx) {
+  function add(tier, id, pub, collapse,   full, k, idx) {
     full = norm(id)
     if (full == "") return
-    if ((tier SUBSEP full) in seen) return
-    seen[tier SUBSEP full] = 1
+    k = key(full)                            # bounded BEFORE retention; never published
+    if ((tier SUBSEP k) in seen) return
+    seen[tier SUBSEP k] = 1
     n[tier]++
     if (pub == "") pub = "<no published identifier: the recogniser supplied none>"
     if (collapse) {

@@ -5685,6 +5685,28 @@ if printf '%s\n' "$fa_pubfns" | grep -q 'too long to publish safely' \
 else
   bad "3765-order-safety-declared: a publication projection in $fa_tool trims instead of replacing (or no longer declares its charset/bound refusals) — a truncation upstream of the neutralisation is blocker 8"
 fi
+# (c) BLOCKER 12: THE DEDUP KEY IS BOUNDED BEFORE IT IS RETAINED. The full identity used to
+#     become an associative-array key with the bound applied only afterwards, so many
+#     distinct oversized recognised lines could consume unbounded memory and kill the
+#     extractor — or the gate — before any summary was produced.
+fa_add_src=$(awk '/function add\(tier, id, pub/,/^  }/' "$fa_tool" | grep -v '^[[:space:]]*#' | grep -n .)
+fa_keyln=$(printf '%s\n' "$fa_add_src" | grep -n 'k = key(full)' | head -1 | cut -d: -f1)
+fa_seenln=$(printf '%s\n' "$fa_add_src" | grep -n 'in seen)' | head -1 | cut -d: -f1)
+if [ -n "$fa_keyln" ] && [ -n "$fa_seenln" ] && [ "$fa_keyln" -lt "$fa_seenln" ] \
+   && printf '%s\n' "$fa_add_src" | grep -q 'seen\[tier SUBSEP k\] = 1' \
+   && ! printf '%s\n' "$fa_add_src" | grep -q 'seen\[tier SUBSEP full\]'; then
+  ok "3765-order-key-bounded-first: the dedup key is BOUNDED by key() before it is retained (key at $fa_keyln, retention at $fa_seenln) — an oversized identity can no longer be held whole in an array key (blocker 12)"
+else
+  bad "3765-order-key-bounded-first: add() retains the UNBOUNDED identity as its array key (key='${fa_keyln:-<none>}' seen='${fa_seenln:-<none>}') — a log of long minified lines then consumes unbounded memory upstream of any summary (blocker 12)"
+fi
+# (d) …AND THAT BOUNDED KEY IS NEVER PUBLISHED, which is what makes retaining a window in it
+#     safe at all. The published value must derive from the `pub` PARAMETER alone.
+fa_key_pub=$(printf '%s\n' "$fa_add_src" | grep -cE 'base\[tier SUBSEP idx\] = (full|k)\b')
+if [ "${fa_key_pub:-1}" = 0 ] && printf '%s\n' "$fa_add_src" | grep -q 'base\[tier SUBSEP idx\] = pub'; then
+  ok "3765-order-key-never-published: the published value derives from the pub parameter alone — the bounded dedup key and the full identity are never named"
+else
+  bad "3765-order-key-never-published: add() publishes the identity or its dedup key ($fa_key_pub site(s)) — the window key() retains is only safe because nothing downstream can render it"
+fi
 fa_ord=$(awk '/^_failassert_clean\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#' | grep -nE '_component_set_redact_text|substr\(t, 1, head\)|cut -c1-300')
 fa_ord_red=$(printf '%s\n' "$fa_ord" | grep -n '_component_set_redact_text' | head -1 | cut -d: -f1)
 fa_ord_disp=$(printf '%s\n' "$fa_ord" | grep -n 'substr(t, 1, head)' | head -1 | cut -d: -f1)
@@ -5951,8 +5973,9 @@ if printf '%s\n' "$fa_add_body" | grep -q 'if (pub == "") pub = "<no published i
 else
   bad "3765-toolchain-projection: add() no longer publishes the pub argument unconditionally — an empty pub that falls back to the identity re-opens the payload channel for every tier at once (blocker 11)"
 fi
-if printf '%s\n' "$fa_add_body" | grep -q '(tier SUBSEP full) in seen'; then
-  ok "3765-toolchain-count-on-identity: the DEDUP key is still the FULL identity, so projecting the published value cannot change the count (F5 stays fixed)"
+if printf '%s\n' "$fa_add_body" | grep -q 'k = key(full)' \
+   && printf '%s\n' "$fa_add_body" | grep -q '(tier SUBSEP k) in seen'; then
+  ok "3765-toolchain-count-on-identity: the DEDUP key is still derived from the FULL identity (through the bounded, never-published key()), so projecting the published value cannot change the count (F5 stays fixed)"
 else
   bad "3765-toolchain-count-on-identity: add() no longer dedups on the full identity — the count is now over the projection, which is F5 again"
 fi
@@ -6102,6 +6125,50 @@ else
   bad "3765-pub-nextest: expected count=2 with the two test paths, got count='${fa_nx_count:-<none>}' names='$fa_nx_names' — publishing the package would ordinalise every failure in one crate"
 fi
 
+# 55ad. BLOCKER 12 (roborev job 49): THE DEDUP KEY IS BOUNDED BEFORE IT IS RETAINED. The
+#       full identity used to become an awk associative-array key with the 4096 bound applied
+#       only AFTERWARDS, so many distinct oversized recognised lines could consume unbounded
+#       memory and kill the extractor — or the gate — before any summary was produced. A
+#       component log full of long minified lines is not exotic.
+#
+#       THE PROPERTY UNDER TEST IS THAT BOUNDING THE KEY DID NOT COST DISTINCTNESS (F1/F5):
+#       two DISTINCT oversized identities must still count as 2. The extractor keys an
+#       oversized identity on its EXACT length plus a 1024-char head AND a 1024-char tail, so
+#       the DECLARED residual is a pair agreeing on all three — not a realistic shape for a
+#       test path or an assertion message, and stated in the extractor rather than implied.
+awk 'BEGIN {
+  pad = sprintf("%6000s", ""); gsub(/ /, "z", pad)
+  printf "FAIL - big-a: %s tail-alpha\n", pad
+  printf "FAIL - big-b: %s tail-beta\n", pad
+}' > "$fa_pubdir/oversize.log"
+fa_ov=$(bash "$fa_tool" "$fa_pubdir/oversize.log" 10 2>/dev/null)
+fa_ov_count=$(printf '%s\n' "$fa_ov" | sed -n 's/^count=//p' | head -1)
+if [ "${fa_ov_count:-0}" = 2 ]; then
+  ok "3765-oversize-distinct: two DISTINCT oversized (6000-char) identities still count as 2 — bounding the dedup key before retention did not collapse them (F1/F5 intact)"
+else
+  bad "3765-oversize-distinct: expected count=2 for two distinct oversized identities, got count='${fa_ov_count:-<none>}' — the bounded key is collapsing distinct identities, which is F5 again"
+fi
+# And the tags are SHORT, so the published values are the tags: the oversize is a property of
+# the IDENTITY (the dedup key), and it must not leak into the publication decision.
+fa_ov_names=$(printf '%s\n' "$fa_ov" | sed -n 's/^name=//p' | tr '\n' ' ')
+if [ "$fa_ov_names" = "big-a big-b " ]; then
+  ok "3765-oversize-published: an oversized identity with a short TAG still publishes that tag — the key bound is internal and does not reach the published value"
+else
+  bad "3765-oversize-published: expected 'big-a big-b', got '$fa_ov_names' — the internal key bound is leaking into the publication path"
+fi
+# The behavioural half of the memory bound: many distinct long recognised lines must be
+# scanned to completion with an exact count, rather than the extractor dying before it can
+# report anything. Bounded work (200 x 4200 chars ~= 840KB) so this stays a fast case.
+awk 'BEGIN { pad = sprintf("%4200s", ""); gsub(/ /, "q", pad)
+  for (i = 1; i <= 200; i++) printf "FAIL - mem-%03d: %s%d\n", i, pad, i }' > "$fa_pubdir/manylong.log"
+fa_ml=$(bash "$fa_tool" "$fa_pubdir/manylong.log" 10 2>/dev/null); fa_ml_rc=$?
+fa_ml_count=$(printf '%s\n' "$fa_ml" | sed -n 's/^count=//p' | head -1)
+if [ "$fa_ml_rc" = 0 ] && [ "${fa_ml_count:-0}" = 200 ]; then
+  ok "3765-oversize-manylines: 200 DISTINCT oversized identities are scanned to completion and counted exactly (rc=0, count=200)"
+else
+  bad "3765-oversize-manylines: expected rc=0 count=200, got rc=$fa_ml_rc count='${fa_ml_count:-<none>}' — the extractor is retaining whole oversized identities and dying before it can report"
+fi
+
 # 55za. NO SECOND FORMATTER, INCLUDING ON THE TREE-INTEGRITY BOUNDARY BLOCK (roborev job
 #       48, blocker 9). Both component loops in _tree_boundary_meta_lines rendered their
 #       rows with a bare `printf '%-18s %s (%ss)\n'`, bypassing _fm_summary_line — so a FAIL
@@ -6249,7 +6316,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=505
+ASSERT_FLOOR=510
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
