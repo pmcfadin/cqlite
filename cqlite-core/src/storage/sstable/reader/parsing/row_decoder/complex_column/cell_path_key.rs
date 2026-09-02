@@ -163,75 +163,69 @@
 //! | duration | measured from its own three-VInt framing (the decoder ignores the remainder) |
 //! | unknown type → opaque `Value::Blob` | whole slice by construction; also raises the caller-aggregated opaque-key signal (the `warn!` is the caller's — see above) |
 //!
-//! ## The residual: NESTED CONSUMPTION IS UNCHECKED AT EVERY LEVEL BELOW THE FIRST
+//! ## The residual, CLOSED at this layer by #3811 — what is left is a DISPOSITION
 //!
-//! Stated broadly because an earlier revision stated it too narrowly — it named
-//! only fixed-width scalars, and roborev round 9 was right that the class is
-//! wider. The consumption rule above applies to the OUTER value only. A nested
-//! value is bounded by its own `[i32 BE len]` prefix, the parent advances by that
-//! DECLARED length, and nothing compares it with what the child actually read. So
-//! trailing bytes inside any nested value are silently ignored:
+//! An earlier revision recorded a live residual: the consumption rule above
+//! applied to the OUTER value only, a nested value was bounded by its own
+//! `[i32 BE len]` prefix, the parent advanced by that DECLARED length, and
+//! nothing compared it with what the child read — so trailing bytes inside any
+//! nested value were silently ignored. Four classes were named: fixed-width
+//! scalars (`data.len() < N`, not `!= N`), nested tuples and UDTs, nested
+//! collections, and `duration`.
 //!
-//! * **fixed-width scalars** — `parse_value_from_raw_bytes`'s guards are
-//!   `data.len() < N`, not `!= N`, so a 5-byte `int` element decodes from its
-//!   first 4 bytes;
-//! * **nested tuples and UDTs** — the decoders iterate the DECLARED components and
-//!   stop, leaving any extra components unread;
-//! * **nested collections** — the element loop runs the DECLARED count and stops;
-//! * **`duration`** — reads three VInts and ignores whatever follows.
+//! **All four are now REFUSED, and it is a MEASURED claim, not a reading of the
+//! diff.** Issue **#3811** gave `parse_value_from_raw_bytes` a consumption
+//! channel — it is a thin wrapper over `parse_value_from_raw_bytes_reporting`
+//! plus `require_fully_consumed_raw`, and every bounded caller of the short name
+//! inherits the assert without being able to opt out. Composed with each
+//! fixed-width arm's own `require_fixed_width` (`data.len() < n`), the accepted
+//! set for a fixed-width element is exactly `{n}`; every other arm reports its
+//! real consumption, including `duration`'s three-VInt walk. Each class is pinned
+//! in `raw_value/issue_3811_consumption_demo_tests.rs`
+//! (`bounded_int_over_width_is_refused`, `bounded_tuple_with_trailing_byte_is_refused`,
+//! `nested_udt_trailing_garbage_is_refused`, `bounded_list_with_trailing_byte_is_refused`),
+//! and `raw_value/nested_fixed_width_length_tests.rs` re-asserts the fixed-width
+//! half at EVERY nesting position for every fixed-width type.
 //!
-//! Consequence, and it is this PR's own headline symptom one level down: for
-//! `frozen<list<int>>` the byte strings `[count=1][len=4][4B]` and
-//! `[count=1][len=5][5B]` both satisfy the OUTER rule and decode to the same
-//! `List([Integer(x)])`, so two distinct cell paths become one logical key and can
-//! collapse a Python map entry.
+//! So the consequence this section used to record is gone: as `frozen<list<int>>`
+//! cell paths, `[count=1][len=4][4B]` (12 bytes) and `[count=1][len=5][5B]` (13
+//! bytes) no longer both decode to `Frozen(List([Integer(7)])))` — the 13-byte
+//! form is REFUSED, its `int` element's declared length being 5.
 //!
-//! WHY IT WAS NOT FIXED HERE, measured rather than asserted: the root cause was
-//! that `parse_value_from_raw_bytes` had NO consumption channel at all — it
-//! returned a `Value` — so no caller could check even if it wanted to. That was
-//! a shared-decoder tightening with its own oracle, i.e. its own PR, and it has
-//! since LANDED as **issue #3811**: that function is now a thin wrapper over
-//! `parse_value_from_raw_bytes_reporting` plus `require_fully_consumed_raw`, so
-//! every bounded caller of the short name inherits the rule and the collapse
-//! described above no longer occurs. This module's own enforcement is retained
-//! (it also owns the fixed-width ALLOWED-width table below), and the two are to
-//! be UNIFIED — see the `#3820` note beside `require_fully_consumed_raw`.
+//! This module's OWN enforcement is retained (it also owns the fixed-width
+//! ALLOWED-width table below) and the two are to be UNIFIED — see the `#3820`
+//! note beside `require_fully_consumed_raw`. It is deliberately NOT patched with
+//! a second framing walk here either: a call-site validator that must know every
+//! decoder is precisely the shape this module replaced.
 //!
-//! It is also deliberately NOT patched with a second framing walk here: a
-//! call-site validator that must know about every decoder is precisely the shape
-//! this module replaced.
+//! ### What IS still open: the refusal's DISPOSITION (issue #3778)
 //!
-//! Tracked as issue **#3723**. Worth recording for whoever takes it: nothing found
-//! depends on the lenient acceptance, so the tightening looks SAFE in principle —
-//! Cassandra cannot drop a UDT field (`AlterTypeStatement` at `cassandra-5.0.8`
-//! offers only `AddField`, `RenameFields`, `AlterField`), so schema evolution
-//! yields SHORT encodings, which are legal and already handled, never trailing
-//! ones. The blocker is scope and oracle, not risk.
+//! Being refused is not the same as being observable, and it is the second that
+//! is missing. #3811's refusal is an `Error::Corruption` — the pre-existing
+//! TOLERATED class — which the multicell complex-column caller in `row_data.rs`
+//! absorbs into a partial-row `break`; and an element the #1741 per-element
+//! shadow/TTL filter DROPS is `continue`d before any decode runs, so its bytes
+//! are never width-checked at all. Both are CHARACTERISED (not endorsed) by
+//! `raw_value/dropped_element_tests.rs`, each case carrying a live-path control
+//! proving the width violation is real.
 //!
-//! ## SYMPTOM: A PYTHON READ CAN SILENTLY LOSE A MAP ENTRY (issue #3612, R6-F1)
+//! Issue **#3723** was opened to close that with a dedicated FATAL variant; that
+//! mechanism was superseded by #3811 and removed, and the disposition question is
+//! #3778's. Worth recording: nothing found depends on the lenient acceptance, so
+//! the tightening looks SAFE in principle — Cassandra cannot drop a UDT field
+//! (`AlterTypeStatement` at `cassandra-5.0.8` offers only `AddField`,
+//! `RenameFields`, `AlterField`), so schema evolution yields SHORT encodings,
+//! legal and already handled, never trailing ones. The blocker is scope and
+//! oracle, not risk.
 //!
-//! Stated symptom-first and in the LOSING direction on purpose. If you arrived
-//! here because a `map<frozen<list<...>>, ...>` came back from the Python binding
-//! with FEWER ENTRIES than `sstabledump` shows, this is the reason, and #3723 is
-//! the issue. The lead ruling on it is ACCEPT-AND-DOCUMENT, so nothing below is a
-//! justification for the loss — it is the record of it.
+//! ## SYMPTOM, HISTORICAL: A PYTHON READ COULD LOSE A MAP ENTRY (#3612, R6-F1)
 //!
-//! Two cell paths that differ only in a nested element's declared length collapse
-//! to ONE decoded key. Where `origin/main` returned two distinct opaque keys and
-//! Python kept two dict entries, HEAD returns one key and **Python keeps one
-//! entry: the other is gone, with no error and no warning.**
-//!
-//! Recorded because the earlier statement of this residual described only the
-//! collapse and not what the collapse costs, and the difference is a behaviour
-//! change this diff introduces:
-//!
-//! * At HEAD, `[count=1][len=4][4B]` (12 bytes) and `[count=1][len=5][5B]`
-//!   (13 bytes) as `frozen<list<int>>` cell paths BOTH decode to
-//!   `Frozen(List([Integer(7)])))` — equal. On `origin/main` they decoded to two
-//!   DISTINCT `Value::Blob`s of 12 and 13 bytes. (Both measured, each with a
-//!   control proving distinct payloads still compare unequal.)
-//! * Entry count per surface, for two colliding keys — Python is the ONLY one
-//!   that loses an entry:
+//! Kept symptom-first, because the symptom is what a reader arrives with. If a
+//! `map<frozen<list<...>>, ...>` comes back from the Python binding with FEWER
+//! ENTRIES than `sstabledump` shows, start here — but the fixed-width route below
+//! is CLOSED, so a live instance means a route not recorded here. Two cell paths
+//! differing only in a nested element's declared length used to collapse to ONE
+//! decoded key, and Python was the ONLY surface that lost an entry to it:
 //!
 //!   | surface | entries | why |
 //!   |---|---|---|
@@ -241,15 +235,21 @@
 //!   | Node | 2 | a JS `Map` keyed by OBJECT IDENTITY, so equal shapes stay two |
 //!   | **Python** | **1** | the hashable projection makes both one `dict` key |
 //!
-//! **Scope, from Cassandra rather than from judgement:** that 13-byte path cannot
-//! occur in a well-formed SSTable. `ListSerializer.validate` (5.0.8) validates
-//! every element with its own type's `validate` — so a 5-byte `int` element is
-//! rejected by `Int32Serializer` — and then throws
-//! `"Unexpected extraneous bytes after list value"`. So the collapse needs input
-//! Cassandra ITSELF refuses to read, on which `main` returned two opaque keys and
-//! HEAD returns one merged key; neither matches Cassandra, which errors. That is
-//! why #3723's fix is STRICT REJECTION of such a path, not preserving the
-//! distinctness of two corrupt encodings.
+//! The three dispositions the `frozen<list<int>>` pair has had, each measured
+//! when current: before #3612 the 12- and 13-byte paths decoded to two DISTINCT
+//! `Value::Blob`s and Python kept two entries; #3612 made both decode to
+//! `Frozen(List([Integer(7)])))` and Python kept one; since #3811 the 13-byte
+//! form is refused.
+//!
+//! **Scope, from Cassandra rather than from judgement** — retained because it is
+//! the argument that says refusing is right: that 13-byte path cannot occur in a
+//! well-formed SSTable. `ListSerializer.validate` (5.0.8) validates every element
+//! with its own type's `validate` — so a 5-byte `int` element is rejected by
+//! `Int32Serializer` — then throws `"Unexpected extraneous bytes after list
+//! value"`. The collapse needed input Cassandra ITSELF refuses to read: pre-#3612
+//! CQLite returned two opaque keys and post-#3612 one merged key, and NEITHER
+//! matched Cassandra, which errors. #3811 matches it by REJECTING, not by
+//! preserving the distinctness of two corrupt encodings.
 //!
 //! # Presenting the key EXACTLY as the FROZEN spelling does (issue #3612, R3-F2/R7)
 //!
