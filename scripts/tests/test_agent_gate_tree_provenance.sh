@@ -493,19 +493,21 @@ SEEDSTUB
     bad "B2 (#3402): the boundary row DROPPED the status detail — the opt-out is invisible here"
     grep -E '^file-size: ' "$sum" 2>/dev/null
   fi
-  # The mutant: drop the detail from _tree_boundary_row's own printf. A row still prints, so
-  # only the DETAIL can distinguish the two — which is what makes the assertion above
+  # The mutant: drop the detail suffix from `_fm_summary_line`'s printf — i.e. restore the
+  # pre-#3402 line exactly. A row still prints, with its feature matrix and census, so only
+  # the DETAIL can distinguish the two, which is what makes the assertion above
   # discriminating rather than incidental.
   #
-  # IT TARGETS THE FUNCTION BODY, NOT THE CALL SITE (roborev job 76). The call site was
-  # `_tree_boundary_row "$_c" …` until the renderer became a parameter (`"$_render" …`), at
-  # which point this mutant's target vanished and `gate_replace_line` correctly reported
-  # VACUOUS rather than passing over a mutation that never happened. The printf is the thing
-  # whose behaviour is under test, and it does not move when the caller is refactored.
+  # IT TARGETS THE RENDERER'S BODY, NOT A CALL SITE. This mutant has been retargeted TWICE by
+  # refactors that moved its subject — first when the boundary loops stopped calling a
+  # dedicated row helper, then when #3625 routed them through `_fm_summary_line` — and on both
+  # occasions `gate_replace_line` reported VACUOUS rather than passing over a mutation that
+  # never happened. That is the guard working, and the reason it keeps working is that the
+  # replacement target is always the printf whose behaviour is under test.
   mut="$tmp/gate-mutant-boundary-detail.sh"
   if gate_replace_line "$GATE" "$mut" \
-       'printf '"'"'%-18s %s (%ss)%s\n'"'"' "$1:" "$2" "$3" "${_d:+ — $_d}"' \
-       "printf '%-18s %s (%ss)\\n' \"\$1:\" \"\$2\" \"\$3\""; then
+       'printf '"'"'%-18s %s (%s)  %s  %s%s'"'"' "$1:" "$2" "$3" "$(_fm_annotate "$1")" "$(_census_annotate "$1" "$2")" "${_detail:+ — $_detail}"' \
+       "printf '%-18s %s (%s)  %s  %s' \"\$1:\" \"\$2\" \"\$3\" \"\$(_fm_annotate \"\$1\")\" \"\$(_census_annotate \"\$1\" \"\$2\")\""; then
     r_b2m=$(mkrepo_from b2-detail-mutant-repo "$mut")
     sum="$tmp/b2-detail-mutant.txt"; out="$tmp/b2-detail-mutant.out"
     ( cd "$r_b2m" && PATH="$seedbin:$STUBBIN:$PATH" env SEED_DETAIL="$seed_detail" \
@@ -518,7 +520,7 @@ SEEDSTUB
       ok "B2 mutant: the pre-#3402 printf drops the detail (proved discriminating)"
     fi
   else
-    bad "B2 mutant: _tree_boundary_row's printf was not found — the mutant is vacuous"
+    bad "B2 mutant: _fm_summary_line's printf was not found — the mutant is vacuous"
   fi
 fi
 

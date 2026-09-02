@@ -7938,10 +7938,17 @@ census_summary_line() { # <name> <status> [<name> <status>]...
 # PERMISSIVE branch. That is the exact shape CLAUDE.md forbids ("key a permissive
 # branch on the AFFIRMATIVE value, never on != <bad>"), and it is what a new
 # non-passing token like VACUOUS would otherwise have walked straight through.
+# #3402 adds OPT-OUT to the set, EXPLICITLY. An acknowledged growth override is a disclosed
+# waiver, not a failure — that is the whole point of the token — but note what changed here:
+# the original #3402 design rested on "every aggregator fails only on an EXACT `FAIL`", i.e.
+# on the PERMISSIVE default this function exists to abolish. #3625 closed that default, and it
+# was right to: a token that means "do not fail the run" must SAY so in the one closed set,
+# not inherit it from the absence of a match. So the claim is now checked rather than assumed,
+# and a future non-passing token cannot ride in the way OPT-OUT would have.
 _status_is_nonfailing() {
   case "$1" in
-    PASS|SKIP) return 0 ;;
-    *)         return 1 ;;
+    PASS|SKIP|OPT-OUT) return 0 ;;
+    *)                 return 1 ;;
   esac
 }
 # ==== END component census (#3625) ====
@@ -9929,27 +9936,6 @@ _tree_mode_components() {
   fi
 }
 
-# _tree_boundary_row <name> <status> <secs> (#3402, roborev round 1 M1): ONE spelling of
-# the boundary table's row, for BOTH loops below — which previously hand-rolled the same
-# printf twice, directly under a comment promising "never a second dialect of it".
-#
-# It carries the #3402 status detail. Without it a boundary block rendered
-# `file-size: OPT-OUT (0s)` with the env var and the count STRIPPED (the grown PATHS were on
-# the row at the time; they are log-only now) — the
-# invisible opt-out this issue exists to remove, surviving on the one path where a run is
-# already in trouble and the disclosure matters most.
-#
-# It deliberately does NOT call _fm_summary_line: the boundary block has never carried the
-# #3453 feature-matrix annotation, and adding it here would change the shape of every
-# boundary block for a reason unrelated to this issue. So the two renderers still differ —
-# in the ANNOTATION — while agreeing BY CONSTRUCTION on the detail, because both obtain it
-# from the same _status_detail boundary. Unifying them is a separate question and a
-# separate change.
-_tree_boundary_row() {
-  local _d; _d=$(_status_detail "$1")
-  printf '%-18s %s (%ss)%s\n' "$1:" "$2" "$3" "${_d:+ — $_d}"
-}
-
 # _completed_component_rows (#3402, roborev job 26): every component that has RECORDED a
 # verdict, one row each, in canonical order for the RUNNING mode, then a sweep for any
 # recorded result no static list names. Sets `_CCR_COUNT` to the number of rows printed.
@@ -9961,16 +9947,13 @@ _tree_boundary_row() {
 # That is round 1's boundary finding one emit site over, and the shape recurs because each
 # early-exit emit hand-builds its own meta list. Any emit that can happen AFTER components
 # may have run must carry this.
-_completed_component_rows() { # <row-renderer>
-  # THE RENDERER IS THE CALLER'S CHOICE, and the two callers legitimately differ (roborev
-  # job 76). A funnel-appended row lands in an ORDINARY summary block, where #3453's contract
-  # is that EVERY component line names the feature matrix it ran — so it must render through
-  # `_fm_summary_line`. A BOUNDARY block has never carried that annotation, and forcing it
-  # there would both reshape every boundary block for an unrelated reason and print
-  # `[UNCLASSIFIED — not declared in _fm_component_class]` for the `tree-selftest` hook, which
-  # is a self-test name and not a component at all. So: annotated at the funnel, plain at the
-  # boundary, one traversal.
-  local _render="${1:?_completed_component_rows needs a row renderer}"
+_completed_component_rows() {
+  # ONE RENDERER, `_fm_summary_line`, the same as every other block (#3453/#3625). This took a
+  # renderer ARGUMENT for one round, because the boundary table used a plain unannotated row
+  # while the funnel needed an annotated one — until #3625 routed the boundary loops through
+  # `_fm_summary_line` too, on the same reasoning, leaving one renderer and a parameter with a
+  # single possible value. Removed rather than kept "for symmetry": an unused seam is a second
+  # dialect waiting for a caller, which is the drift this issue kept tripping over.
   local _c _rf _st _secs _seen=" "
   _CCR_COUNT=0
   for _c in $(_tree_mode_components); do
@@ -9978,7 +9961,7 @@ _completed_component_rows() { # <row-renderer>
     [ -f "$_rf" ] || continue
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
-    "$_render" "$_c" "$_st" "$_secs"
+    _fm_summary_line "$_c" "$_st" "${_secs}s"
     _seen="$_seen $_c "
     _CCR_COUNT=$(( _CCR_COUNT + 1 ))
   done
@@ -9988,7 +9971,7 @@ _completed_component_rows() { # <row-renderer>
     case "$_seen" in *" $_c "*) continue ;; esac
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
-    "$_render" "$_c" "$_st" "$_secs"
+    _fm_summary_line "$_c" "$_st" "${_secs}s"
     _CCR_COUNT=$(( _CCR_COUNT + 1 ))
   done
 }
@@ -10001,14 +9984,9 @@ _completed_component_rows() { # <row-renderer>
 # argument, so a captured multi-line block renders as the rows it contains. Empty output is
 # deliberately an EMPTY STRING and the callers guard on it, because a bare "" argument would
 # emit a blank line into the block.
-# _fm_recorded_row <name> <status> <secs>: the funnel's renderer — `_fm_summary_line` with
-# the unit appended, since that helper takes a fully-formed time string while `.result` stores
-# a bare number.
-_fm_recorded_row() { _fm_summary_line "$1" "$2" "${3}s"; }
-
 _recorded_component_rows_block() {
   local _rows _n
-  _rows=$(_completed_component_rows _fm_recorded_row)
+  _rows=$(_completed_component_rows)
   [ -n "$_rows" ] || return 0
   # COUNT THE ROWS THAT WILL PRINT, never `_CCR_COUNT`. The capture above runs in a COMMAND
   # SUBSTITUTION — a subshell — so the count the helper assigns is discarded, and reading it
@@ -10165,10 +10143,11 @@ _tree_boundary_fail() {
   # here, or it would overwrite this block's component-named verdict line.
   local -a _meta=()
   while IFS= read -r _l; do _meta+=("$_l"); done < <(_tree_boundary_meta_lines)
-  # The SECOND row dialect (#3402/job 74). _tree_boundary_meta_lines renders rows through
-  # _tree_boundary_row, not _fm_summary_line, so without this the funnel would append a
-  # duplicate table under a block that already has one. The read loop runs in THIS shell, so
-  # the assignment lands where _emit_meta_lines will see it.
+  # The boundary block builds its OWN table (#3402/job 74), so without this the funnel would
+  # append a duplicate one under a block that already has it. Both render through
+  # `_fm_summary_line`, so the two tables cannot differ in SHAPE — this flag is only about not
+  # printing it twice. The read loop runs in THIS shell, so the assignment lands where
+  # _emit_meta_lines will see it.
   _SUMMARY_ROWS_BUILT=1
   _meta+=("detected-after-component: $comp")
   _emit_terminal_summary FAIL "${_meta[@]}" || true
@@ -18156,9 +18135,12 @@ run_file_size() {
       # states. Keying the permissive branch on `!= <bad>` would let a typo buy a green,
       # which is the false-PASS route this issue must not open while closing another.
       #
-      # NON-FAILING BY CONSTRUCTION: `status` is not FAIL, and all three aggregators
-      # (full gate, aggregate_lite_components, run_delta) set OVERALL=FAIL only on an
-      # EXACT `FAIL`, so OPT-OUT rides to a PASS RESULT without a special case.
+      # NON-FAILING BY DECLARATION, not by default: OPT-OUT is a member of
+      # `_status_is_nonfailing`, the ONE closed set every aggregator consults (#3625). This
+      # used to say "by construction … only an EXACT FAIL fails", which was true of the old
+      # permissive `!= FAIL` aggregations and became FALSE the moment #3625 replaced them with
+      # an affirmative set — correctly, since a permissive branch keyed on `!= <bad>` is the
+      # shape CLAUDE.md forbids. The token now says it is non-failing where that is decided.
       status=OPT-OUT
       # NO REPOSITORY CONTENT ON THIS ROW — env var + COUNT + a pointer to the log, which is
       # exactly what the issue asks for (#3402: "OPT-OUT (CQLITE_ALLOW_FILE_GROWTH=1; N

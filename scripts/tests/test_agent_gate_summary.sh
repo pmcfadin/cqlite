@@ -5206,8 +5206,14 @@ fi
 # ` — <detail>` suffix); the behavioural half — that the gate actually PRODUCES this row,
 # and only for an override of exactly `1` — is scripts/tests/test_agent_gate_file_size_log.sh,
 # asserted registered below rather than duplicated here.
-fm_optout_row='file-size:         OPT-OUT (0s)  [no-cargo] — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); 1 over-threshold file(s) grown: cqlite-core/src/big.rs'
-fm_plain_row='fmt:               PASS (1s)  [fmt --all]'
+# The samples carry ALL THREE suffixes in the shipped order — `[<matrix>]  {<census>}` then
+# #3402's optional ` — <detail>`. They were written before #3625's census landed and then
+# matched 0 of 2, because the annotation anchor now REQUIRES the census: a sample that lags
+# the real render turns this section into a test of an obsolete shape, which is worse than no
+# sample at all. Kept as literals rather than generated, so a change to the render must be
+# reflected here deliberately.
+fm_optout_row='file-size:         OPT-OUT (0s)  [no-cargo]  {no census: component ended OPT-OUT, so there is no PASS to affirm} — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); 1 over-threshold file(s) grown — see file-size.log under logs:'
+fm_plain_row='fmt:               PASS (1s)  [fmt --all]  {AFFIRMED 1 target}'
 fm_rowfile="$tmp/3402-rows.txt"
 printf '%s\n%s\n' "$fm_plain_row" "$fm_optout_row" >"$fm_rowfile"
 fm_n_row=$(grep -cE "$FM_ROW_RE" "$fm_rowfile")

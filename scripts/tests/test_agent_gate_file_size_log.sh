@@ -443,8 +443,19 @@ lacks "case4 (#3402): the row renders NO repository path — the whole mangling 
     "$sumrow4" "cqlite-core/src/big.rs"
 has "case4 (#3402): the row keeps its feature-matrix annotation ahead of the detail" \
     "$sumrow4" "[no-cargo]"
-lacks "case4 (#3402): the row does not ALSO read PASS — a reader greps one token, not two" \
-    "$sumrow4" "PASS"
+# ANCHORED ON THE TOKEN POSITION, not on the substring (#3625 interaction). A bare
+# `lacks "PASS"` began matching the census suffix's own wording — `{no census: component
+# ended OPT-OUT, so there is no PASS to affirm}` — so it reported the row "ALSO reads PASS"
+# on a perfectly correct line. The property wanted is that the STATUS FIELD is not PASS, and
+# only a position-anchored pattern says that; a substring test over a line that now carries
+# three suffixes was always going to collide with one of them eventually.
+if [ ! -s "$sumrow4" ]; then
+  bad "case4 (#3402): no file-size row captured — the token check could not run"
+elif grep -qE '^file-size: +PASS ' "$sumrow4"; then
+  bad "case4 (#3402): the row's STATUS FIELD reads PASS — a reader greps one token, not two"
+else
+  ok "case4 (#3402): the row's STATUS FIELD is not PASS — a reader greps one token, not two"
+fi
 # NON-FAILING, measured through the gate's own verdict rather than asserted of the source.
 # In `--only` mode a passing run is promoted to RESULT: PARTIAL and exits 3, while any
 # component FAIL leaves RESULT: FAIL and exit 1 — so this pair distinguishes exactly the
@@ -611,8 +622,12 @@ else
   # it would satisfy "the disclosure is present" while losing the execution evidence beside
   # it — and the first version of this assert PINNED that incomplete shape, which is how a
   # test stops being a check and starts being a ratchet on a defect.
-  has "case4i (#3402): the preflight-FAIL block carries the OPT-OUT row with its detail" \
-      "$pf_sum" "OPT-OUT (0s)  [no-cargo] — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); 1 over-threshold file(s) grown"
+  # The row's tail is `[<matrix>]  {<census>} — <detail>` after #3625 landed its census
+  # suffix, so matrix and detail are no longer adjacent. Asserted as an ORDERED pattern rather
+  # than a literal: the three suffixes must appear in that order, and a future fourth cannot
+  # silently displace the disclosure without this failing.
+  has_re "case4i (#3402): the preflight-FAIL block carries the OPT-OUT row, its matrix and its detail" \
+      "$pf_sum" '^file-size: +OPT-OUT \(0s\)  \[no-cargo\].*CQLITE_ALLOW_FILE_GROWTH=1 \(ratchet NOT enforced\); 1 over-threshold file\(s\) grown'
   # The count must AGREE with the rows printed. It did not: the helper assigns its count
   # inside a command substitution, so the caller read 0 beside one row — a count
   # contradicting its own table, which is the invariant
