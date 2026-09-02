@@ -543,6 +543,25 @@ That is a pass derived from the absence of a bad signal, in the one check added
 to stop exactly that, and it is why there is a fourth token: `UNRECOGNISED` is
 disclosed as *not known to be local*, distinctly from `NOT-MEASURABLE`.
 
+**CLEANUP REGISTRATION PRECEDES RESOURCE CREATION — the fourth instance in this
+repository and the first in this file.** The session lock was acquired ~80 lines
+before the trap that frees it, so any failure in between left `.session-lock`
+behind and blocked *every later session permanently*; on a metered rig that ends
+with an operator deleting a lock file they do not understand, which is the worst
+possible remedy for a guard whose whole job is stopping two sessions sharing a
+box. The comment directly beneath the acquisition asserted the very ordering the
+code violated — **a comment is not a check**, which is this lane's own recurring
+finding pointed at itself.
+
+**The obvious fix is wrong, and it has its own case.** With the trap armed
+first, `cleanup` also runs on the path where acquisition *failed because a peer
+holds the directory* — so keying the removal on the directory existing would
+delete the **peer's** lock, turning a leak into a silent mutual-exclusion
+failure. Strictly worse, and invisible. The release is conditional on a flag set
+only by the branch that created the directory. And the case that proves the fix
+is not "the directory is gone" but "the next session actually runs", because
+that is the property an operator has.
+
 **A FOUR-STATE CLASSIFIER IS ONLY AS GOOD AS THE FOUR-WAY DISPOSITION DOWNSTREAM
 OF IT.** The classifier was fixed to stop calling a SAN LUN `LOCAL`; the analyzer
 then handed that correctly-labelled `UNRECOGNISED` device a verdict anyway,
@@ -875,6 +894,35 @@ cannot be deserialised wastes the same three builds — while the full-ring
 restriction is the target band's own and applies only to measurements. The
 control branch had been checking merely that the file was JSON, which widened the
 gap the schema check exists to close.
+
+**THE NINTH INSTANCE WAS THE SAME DEFECT ONE FIELD OVER, WHICH IS THE REAL
+LESSON OF THE EIGHTH.** Round 13 fixed `predicates: {}`; round 14 found
+`filter: {}` and `aggregation: {}` still checked only for *being objects*. **A
+fix that does not generalise to its siblings is half a fix** — so the mirror is
+now the whole tagged grammar (`PredicateExpr` is `#[serde(tag = "type")]` with
+six variants, validated recursively so a malformed leaf inside a well-formed
+tree is caught; `Aggregation`/`AggregateSpec`/`AggFunc` likewise), depth-bounded
+so a deep tree is a named refusal rather than a `RecursionError`.
+
+It also caught a fixture *this lane wrote one round earlier*: the "well-formed"
+filter narrowing was `{"Compare": {…}}`, serde's **externally** tagged spelling,
+written from a guess at the representation instead of a reading of it. The same
+mistake the finding is about, inside the test for the finding.
+
+**AND THE STRUCTURAL FIX FOR A DUPLICATE VALIDATOR IS TO DELETE ONE, NOT TO
+CORRECT BOTH.** The driver's replicate check and the analyzer's record check
+were two implementations of one schema; the driver's looked at five fields, so
+it accepted records the analyzer refuses, and a malformed `latency_ms` reached
+`.get` on a non-dict and produced an unanchored traceback. The obvious repair —
+add the missing checks to the driver — would have been *correct today and wrong
+in two rounds*, because the drift presents exactly as the symptom being fixed.
+So the analyzer's validators are public and the driver **calls** them, carrying
+the analyzer's own cause into its message so the operator sees the exact refusal
+the analysis would give while the rig is still up. The cases assert **agreement**
+rather than a list of rejections, because agreement is the property; a
+structural guard pins that the schema constant and the percentile names are not
+re-derived. Same move as one duration grammar, one resolver, one canonical
+findings section.
 
 **A validator that disagrees with its consumer is now FIVE instances, and the
 count is the argument.** The duration grammar, the census enumeration, the census
