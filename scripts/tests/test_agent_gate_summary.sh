@@ -6815,6 +6815,52 @@ else
   bad "3765-path-one-normaliser-boundary: the boundary predicates do not share one normalisation"
 fi
 
+# 55zh. ROBOREV JOB 77, two findings.
+#  (a) A PARAMETERISED pytest id can contain ` - ` INSIDE its brackets, so the short-summary
+#      separator is the first one at BRACKET DEPTH ZERO. Cutting at the first occurrence
+#      truncated `test_x[a - one]` and `test_x[a - two]` to the same prefix: ONE identity
+#      instead of two, published as a placeholder.
+printf 'FAILED tests/t.py::test_x[a - one]\nFAILED tests/t.py::test_x[a - two]\n' > "$fa_dir/pydash.log"
+_fa_run pydash "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pydash.log" PASS
+fa_pd=$(_fa_line fmt)
+case "$fa_pd" in
+  *"2 RECOGNISED"*) ok "3765-pytest-dash-in-param: a ` - ` inside a parameter id is not the message separator — the two ids stay two failures" ;;
+  *) bad "3765-pytest-dash-in-param: expected 2 RECOGNISED, got '$fa_pd' — the separator is being found inside the brackets (job 77)" ;;
+esac
+# CONTROL: a REAL trailing message must still be dropped, so the depth-zero rule did not simply
+# stop finding the separator at all.
+_fa_run pydash2 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pymsg.log" PASS
+fa_pd2=$(_fa_line fmt)
+case "$fa_pd2" in
+  *AssertionError*|*boom*) bad "3765-pytest-dash-control: the trailing message survived ('$fa_pd2') — the depth-zero separator scan stopped finding a real separator" ;;
+  *) ok "3765-pytest-dash-control: a real ` - <message>` suffix is still dropped" ;;
+esac
+#  (b) THIS REPOSITORY CONFIGURES TWO NAMED JEST PROJECTS (bindings/node/jest.config.js), so
+#      jest 29 emits `FAIL default <path>` and `FAIL leaks <path>` — neither of which the bare
+#      `FAIL <path>` form matched, so a real jest failure was named not at all. The path is
+#      located by EXTENSION, not position, because jest also appends a ` (5.123 s)` suffix.
+printf 'FAIL default __test__/w.test.js\n' > "$fa_dir/jproj.log"
+_fa_run jproj "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/jproj.log" PASS
+fa_jp1=$(_fa_line fmt)
+case "$fa_jp1" in
+  *"jest-suite __test__/w.test.js"*) ok "3765-jest-project-name: a project-qualified jest FAIL line names its suite" ;;
+  *) bad "3765-jest-project-name: expected the jest suite identity, got '$fa_jp1' — the project display name is not accepted (job 77)" ;;
+esac
+printf 'FAIL leaks __test__/leak-paths.test.js (5.123 s)\n' > "$fa_dir/jtime.log"
+_fa_run jtime "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/jtime.log" PASS
+fa_jp2=$(_fa_line fmt)
+case "$fa_jp2" in
+  *"jest-suite __test__/leak-paths.test.js"*) ok "3765-jest-timing-suffix: a project name AND a timing suffix both present — the path is found by extension, not position" ;;
+  *) bad "3765-jest-timing-suffix: expected the jest suite identity, got '$fa_jp2'" ;;
+esac
+# The BARE form must still work — the project name is OPTIONAL, not required.
+_fa_run jplain "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/jst.log" PASS
+fa_jp3=$(_fa_line fmt)
+case "$fa_jp3" in
+  *"jest-suite __test__/write-readback.test.js"*) ok "3765-jest-bare-still-works: the unqualified `FAIL <path>` form still names its suite" ;;
+  *) bad "3765-jest-bare-still-works: the bare jest form regressed — got '$fa_jp3'" ;;
+esac
+
 # CODE lines only: the digest note NAMES those binaries while explaining why it does not use
 # them, and a scan over the comments would read that explanation as the defect.
 if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -qE '(sha256sum|md5sum|cksum|openssl dgst)'; then
@@ -7082,7 +7128,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=582
+ASSERT_FLOOR=587
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

@@ -336,6 +336,21 @@ awk -v max="$max" '
   # real failure in either published `0 RECOGNISED` (roborev job 71) — including the node-tests
   # delta log this change only just started capturing. Closed grammars, same rule as pubdoc and
   # pubsh: a path charset with no `:` beyond the `::` separator and no `@`, so no authority.
+  # nodeid_end() — where a pytest node id ENDS. pytest short-summary appends ` - <message>`,
+  # but a PARAMETERISED id can contain ` - ` INSIDE its brackets (roborev job 77), and cutting
+  # at the first occurrence truncated `test_x[a - one]` and `test_x[a - two]` to the same
+  # prefix: one identity instead of two, published as a placeholder. So the separator is the
+  # first ` - ` at BRACKET DEPTH ZERO; with none, the whole remainder is the node id.
+  function nodeid_end(t,   i, d, c) {
+    d = 0
+    for (i = 1; i <= length(t); i++) {
+      c = substr(t, i, 1)
+      if (c == "[") d++
+      else if (c == "]") { if (d > 0) d-- }
+      else if (d == 0 && substr(t, i, 3) == " - ") return i - 1
+    }
+    return length(t)
+  }
   function pubpytest(pth, rest) {
     if (!relpath_ok(pth) || pth !~ /\.py$/) return "<no identifier in the failure text - read the component log>"
     # A PARAMETERISED id carries the parameter VALUE, which is arbitrary text and can hold an
@@ -521,8 +536,7 @@ awk -v max="$max" '
     # `test_x[a`, which BOTH undercounted (one identity instead of two) and published a
     # placeholder. pytest short-summary appends ` - <message>` after the node id, so cut
     # there; with no message the whole remainder IS the node id.
-    if (match(s, / - /)) s = substr(s, 1, RSTART - 1)
-    else sub(/[[:space:]]+$/, "", s)
+    s = substr(s, 1, nodeid_end(s)); sub(/[[:space:]]+$/, "", s)
     jp_p = s; sub(/::.*$/, "", jp_p)
     # substr, NOT sub(/^.*::/): that pattern is GREEDY and cut at the LAST `::`, dropping the
     # class scope, so `file.py::TestA::test_x` published as `file.py::test_x` — identical to a
@@ -533,9 +547,16 @@ awk -v max="$max" '
   }
   # A7 jest: `FAIL <suite path>`. The `● <test name>` line is deliberately NOT used: a jest
   # test name is free-form prose, and publishing it is exactly the job-70 defect.
-  /^FAIL [^:@[:space:]]+\.(test\.)?(js|mjs|cjs|ts)([[:space:]]|$)/ {
-    s = $0; sub(/^FAIL /, "", s); sub(/[[:space:]].*$/, "", s)
-    add("assert", s, pubjest(s), 0); next
+  # An optional PROJECT DISPLAY NAME precedes the suite path: this repository configures TWO
+  # named jest projects (bindings/node/jest.config.js), so jest 29 emits `FAIL default <path>`
+  # and `FAIL leaks <path>` (roborev job 77) — neither of which the bare `FAIL <path>` form
+  # matched, so a real jest failure was named not at all. The path is located by EXTENSION
+  # rather than by position, because jest also appends a timing suffix like ` (5.123 s)`.
+  /^FAIL ([A-Za-z0-9_-]+[[:space:]]+)?[^:@[:space:]]+\.(test\.)?(js|mjs|cjs|ts)([[:space:]]|$)/ {
+    s = $0; sub(/^FAIL /, "", s); sub(/[[:space:]]+$/, "", s)
+    jn = split(s, jf, /[[:space:]]+/); jpath = ""
+    for (ji = 1; ji <= jn; ji++) if (jf[ji] ~ /\.(test\.)?(js|mjs|cjs|ts)$/) { jpath = jf[ji]; break }
+    add("assert", s, pubjest(jpath), 0); next
   }
   /^shell-selftest: .* FAIL$/ {
     s = $0; sub(/^shell-selftest: /, "", s); sub(/ FAIL$/, "", s)
