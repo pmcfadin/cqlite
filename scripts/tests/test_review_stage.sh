@@ -2253,6 +2253,177 @@ printf 'result: PASS\n' >"$(printed_report_path)" 2>/dev/null || true
 rs "$R17B" verdict c --issue 981
 has "deadline=1234 agent=spec-auditor" "boundary/record CONTROL: an ordinary record's values pass through the boundary UNCHANGED"
 
+# --- 19. THE RENAME MUST REPLACE THE EXACT DESTINATION NAME (round 7, L2) --------
+# THE FINDING. `commit_write` ended in `mv -f "$WRITE_TMP" "$dest"`, and a plain `mv` does NOT
+# promise to replace the NAME `dest`: if `dest` is — or BECOMES — a directory, or a symlink to one,
+# `mv` puts the temporary file INSIDE it and EXITS 0. The write then lands outside the path this
+# script verified while the tool reports success. `mv -T` (`--no-target-directory`) makes that an
+# error, and `rename(2)` does not follow a symlink for the destination, so `-T` closes the LEAF.
+#
+# THE NARROWEST TRUE CLAIM ABOUT THIS COVERAGE, stated rather than implied. `-T` is DEFENCE IN
+# DEPTH for a TOCTOU WINDOW: the pre-existing checks (`assert_no_symlink`, and the
+# `path-not-a-regular-file` refusal) already refuse a destination that is a directory or a symlink
+# AT THE TIME THEY RUN, so a PRE-PLANTED one never reaches `mv` at all, and the window in which it
+# could — between those checks and the rename — is not inducible from outside this process without
+# a timing race, which would be a flaky test. So the coverage here is deliberately of three
+# different kinds, and none of them pretends to be the fourth:
+#   (a) the END-TO-END OUTCOME for both plants — REFUSE, and nothing lands inside the plant. Which
+#       LAYER refuses is named in the assertions, so the case does not claim to exercise `mv -T`.
+#   (b) the HOST PROPERTY `-T` relies on, MEASURED on this box rather than assumed.
+#   (c) a STRUCTURAL pin that `commit_write` uses `-T` and that no un-`-T`'d `mv` survives in the
+#       script — which is the only expressible assertion about the window itself.
+# This is a LEAF-level property and stays inside the boundary of the escalated J2 residual (the
+# parent-DIRECTORY-component substitution): nothing here asserts anything about the parents.
+
+# (a) DESTINATION PRE-REPLACED BY A DIRECTORY. The subject is the REPORT half, reached through
+#     `record-author-performed`, because that is the write whose destination the RECORD names.
+R19="$(newrepo)"
+rs "$R19" open c --issue 990 --agent spec-auditor
+rc_is 0 "rename: the stage opened"
+L2_RP="$(printed_report_path)"
+rm -f "$L2_RP" 2>/dev/null || true
+mkdir -p "$L2_RP" 2>/dev/null || true
+if [ -d "$L2_RP" ]; then
+  ok "rename: a DIRECTORY now stands at the report's exact destination name (the case has a subject)"
+else
+  bad "rename: could not plant a directory at $L2_RP — the assertions below would be vacuous"
+fi
+rs "$R19" record-author-performed c --issue 990 --reason no-independent-auditor-available \
+  --evidence docs/round-artifacts/issue-3751-l2.md --performed-by author
+rc_is 2 "rename: the write REFUSES rather than landing somewhere else"
+has "AUTHOR-REFUSED reason=path-not-a-regular-file" "rename: and it refuses by NAME — today at the pre-rename check, which is the layer that sees a PRE-planted directory (mv -T covers the window AFTER it)"
+L2_INSIDE="$(find "$L2_RP" -type f 2>/dev/null | LC_ALL=C wc -l | LC_ALL=C tr -d ' ')"
+if [ "$L2_INSIDE" = "0" ]; then
+  ok "rename: NOTHING was written INSIDE the planted directory"
+else
+  bad "rename: $L2_INSIDE file(s) landed inside the planted directory — the write escaped the verified path"
+fi
+
+# (b) DESTINATION PRE-REPLACED BY A SYMLINK TO A DIRECTORY.
+R19B="$(newrepo)"
+rs "$R19B" open c --issue 991 --agent spec-auditor
+rc_is 0 "rename/symlink: the stage opened"
+L2_RP2="$(printed_report_path)"
+mkdir -p "$R19B/elsewhere" 2>/dev/null || true
+rm -f "$L2_RP2" 2>/dev/null || true
+ln -s "$R19B/elsewhere" "$L2_RP2" 2>/dev/null || true
+if [ -L "$L2_RP2" ] && [ -d "$L2_RP2" ]; then
+  ok "rename/symlink: a symlink TO A DIRECTORY now stands at the report's destination name"
+else
+  bad "rename/symlink: could not plant a symlink-to-directory at $L2_RP2 — the assertions below would be vacuous"
+fi
+rs "$R19B" record-author-performed c --issue 991 --reason no-independent-auditor-available \
+  --evidence docs/round-artifacts/issue-3751-l2.md --performed-by author
+rc_is 2 "rename/symlink: the write REFUSES"
+has "AUTHOR-REFUSED reason=path-is-symlink" "rename/symlink: and by NAME, at the symlink check"
+L2_INSIDE2="$(find "$R19B/elsewhere" -type f 2>/dev/null | LC_ALL=C wc -l | LC_ALL=C tr -d ' ')"
+if [ "$L2_INSIDE2" = "0" ]; then
+  ok "rename/symlink: NOTHING was written through the link"
+else
+  bad "rename/symlink: $L2_INSIDE2 file(s) landed through the link — the write escaped the verified path"
+fi
+
+# (c) THE CONTROL. An ordinary replacement still succeeds, and it REPLACES rather than appending or
+#     leaving a stale file beside it — without this every assertion above is satisfiable by a script
+#     that refuses every write.
+R19C="$(newrepo)"
+rs "$R19C" open c --issue 992 --agent spec-auditor
+rc_is 0 "rename CONTROL: the stage opened"
+L2_RP3="$(printed_report_path)"
+if [ -f "$L2_RP3" ] && LC_ALL=C grep -q '^result: NOT-RUN' "$L2_RP3"; then
+  ok "rename CONTROL: the sentinel report was written at the exact destination name (a regular file, not a directory)"
+else
+  bad "rename CONTROL: the sentinel was not written at $L2_RP3"
+fi
+rs "$R19C" record-author-performed c --issue 992 --reason no-independent-auditor-available \
+  --evidence docs/round-artifacts/issue-3751-l2.md --performed-by author
+rc_is 0 "rename CONTROL: an ordinary recording succeeds"
+if [ -f "$L2_RP3" ] && LC_ALL=C grep -q '^result: AUTHOR-PERFORMED' "$L2_RP3" &&
+  ! LC_ALL=C grep -q '^result: NOT-RUN' "$L2_RP3"; then
+  ok "rename CONTROL: the destination was REPLACED atomically — the new record is there and no line of the old one survives"
+else
+  bad "rename CONTROL: the destination was not cleanly replaced (content: $(LC_ALL=C head -3 "$L2_RP3" 2>/dev/null))"
+fi
+L2_LEFTOVER="$(find "$(dirname "$L2_RP3")" -name '.rs-*' -o -name '*.tmp*' 2>/dev/null | LC_ALL=C wc -l | LC_ALL=C tr -d ' ')"
+if [ "$L2_LEFTOVER" = "0" ]; then
+  ok "rename CONTROL: and no temporary file was left behind"
+else
+  bad "rename CONTROL: $L2_LEFTOVER temporary file(s) left behind"
+fi
+
+# (d) THE HOST PROPERTY `-T` RELIES ON, MEASURED HERE rather than assumed — because the whole fix
+#     rests on it, and a claim about a tool's behaviour is exactly the kind that decays silently.
+L2_D="$T/mvt"; mkdir -p "$L2_D/dir" 2>/dev/null || true
+printf 'payload\n' >"$L2_D/src" 2>/dev/null || true
+if mv -f -T "$L2_D/src" "$L2_D/dir" 2>/dev/null; then
+  bad "rename/host: 'mv -f -T <file> <dir>' SUCCEEDED on this host — -T does not have the property commit_write relies on"
+else
+  ok "rename/host: 'mv -f -T <file> <dir>' FAILS on this host, which is the property commit_write relies on"
+fi
+if [ -f "$L2_D/src" ] && [ ! -f "$L2_D/dir/src" ]; then
+  ok "rename/host: and it leaves the source in place rather than moving it INSIDE the directory"
+else
+  bad "rename/host: -T moved the file into the directory (or lost it) — the fix's premise does not hold here"
+fi
+
+# (f) A HOST WITHOUT `-T` GETS A NAMED REFUSAL, NOT A SILENT FALLBACK. Simulated with a
+#     PATH-shadowed `mv` that rejects the option exactly as a BSD/macOS `mv` does — the ARTIFACT is
+#     substituted, not a settable seam in the script. This is the assertion behind "REQUIRED, not
+#     attempted": the write must fail, name the missing option, and write NOTHING.
+L2_BIN="$T/l2bin"; mkdir -p "$L2_BIN"
+cat >"$L2_BIN/mv" <<'L2SHIM'
+#!/usr/bin/env bash
+# A `mv` with no -T, the way a stock BSD/macOS one behaves: the option parse fails and nothing moves.
+for a in "$@"; do
+  case "$a" in
+    -T | --no-target-directory) printf 'mv: illegal option -- T\n' >&2; exit 64 ;;
+    -*T*) printf 'mv: illegal option -- T\n' >&2; exit 64 ;;
+  esac
+done
+exec /bin/mv "$@"
+L2SHIM
+chmod +x "$L2_BIN/mv" 2>/dev/null || true
+R19D="$(newrepo)"
+if [ -x "$L2_BIN/mv" ] && ! PATH="$L2_BIN:$PATH" mv -T /dev/null /dev/null 2>/dev/null; then
+  ok "rename/no-T: the shimmed mv rejects -T (the simulated host is real, not assumed)"
+else
+  bad "rename/no-T: the shim did not take effect — the assertions below would be vacuous"
+fi
+OUT="$(cd "$R19D" && PATH="$L2_BIN:$PATH" bash "$RS" open c --issue 993 --agent spec-auditor 2>&1)"; RC=$?
+rc_is 2 "rename/no-T: a host whose mv has no -T REFUSES the write"
+has "reason=write-failed" "rename/no-T: under the existing write-failed marker"
+has "NO -T / --no-target-directory" "rename/no-T: and the detail NAMES the missing option, so the operator is not sent to look at permissions"
+if [ ! -e "$R19D/.review-stage/issue-993/c.stage" ]; then
+  ok "rename/no-T: and NOTHING was recorded — no fallback to a plain mv"
+else
+  bad "rename/no-T: a stage record was written on a host whose mv has no -T"
+fi
+
+# (e) STRUCTURAL: the only expressible assertion about the TOCTOU window itself.
+if LC_ALL=C grep -q 'mv -f -T "\$WRITE_TMP" "\$dest"' "$RS"; then
+  ok "rename/structural: commit_write renames with 'mv -f -T'"
+else
+  bad "rename/structural: commit_write no longer uses 'mv -f -T' — the L2 property is gone"
+fi
+# No `mv` anywhere in the script may lack -T. Counted over EXECUTABLE lines (comments quote the
+# option by name, and a comment is not a call), because a silent fallback is the one outcome L2
+# forbids.
+L2_BAREMV="$(LC_ALL=C grep -n '^[^#]*[^A-Za-z_-]mv ' "$RS" | LC_ALL=C grep -vc -- '-T' || true)"
+if [ "$L2_BAREMV" = "0" ]; then
+  ok "rename/structural: no executable line runs an 'mv' without -T — there is no fallback to reintroduce the defect"
+else
+  bad "rename/structural: $L2_BAREMV executable line(s) run 'mv' without -T: $(LC_ALL=C grep -n '^[^#]*[^A-Za-z_-]mv ' "$RS" | LC_ALL=C grep -v -- '-T')"
+fi
+# THE THREE-VALUED PROBE exists and is three-valued: `unknown` is not `no`, and only the probe's
+# `no` arm may say this host lacks the option.
+for L2_TOK in "printf 'yes" "printf 'no" "printf 'unknown"; do
+  if LC_ALL=C grep -q "$L2_TOK" "$RS"; then
+    ok "rename/structural: mv_T_supported can answer \"${L2_TOK#printf \'}\" — a could-not-measure is not a not-supported"
+  else
+    bad "rename/structural: mv_T_supported cannot answer \"${L2_TOK#printf \'}\""
+  fi
+done
+
 # --- 18. THE STRUCTURAL EMIT-BOUNDARY GUARD (round 7, L1b) ----------------------
 # WHY A GUARD AND NOT A FOURTH PATCH. The boundary was bypassed at a NEW site in three consecutive
 # review rounds (round 2's S1, round 5's J3, round 7's L1). Every fix was correct and the class kept

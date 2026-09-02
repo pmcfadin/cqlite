@@ -305,7 +305,15 @@
 #   64  usage error
 #
 # CONSTRAINTS
-#   macOS bash 3.2 compatible (no associative arrays, no readarray/mapfile).
+#   macOS bash 3.2 compatible in LANGUAGE (no associative arrays, no readarray/mapfile).
+#   REQUIRES GNU coreutils `mv` — specifically `mv -T` / `--no-target-directory` (#3751 round 7,
+#   L2). This is a HOST PRECONDITION, and it is not satisfied by a stock BSD/macOS `mv`. The
+#   reason it is required rather than attempted is in `commit_write`: without `-T`, a destination
+#   that is or BECOMES a directory (or a symlink to one) receives the temporary file INSIDE it
+#   while `mv` exits 0, so the write lands outside the path this script verified and the tool
+#   reports success. A host without `-T` gets a NAMED refusal from every write and writes nothing;
+#   there is deliberately no fallback, which would restore the defect exactly where it cannot be
+#   detected. The fleet is Linux, so the requirement costs nothing here.
 #   `set -euo pipefail`, written to the same conventions as claim.sh. (NOT verified
 #   shellcheck-clean: shellcheck is not installed on this fleet's boxes and no gate component
 #   runs it, so the claim is not made.) All informative output is prefixed `REVIEW-STAGE:`;
@@ -896,7 +904,7 @@ prepare_write() {
     # running gate. The SHIPPED `.gitignore` ignores `.review-stage/` as a DIRECTORY, so this
     # never fires here.
     assert_ignored "$cand" "$what-tempfile" \
-      "this is the TEMPORARY file the write goes through (an unpredictable same-directory temp, created O_EXCL and written through a held descriptor, plus an atomic mv -f, so no path is re-resolved between validation and writing and no reader sees a half-written result: line). It is a real file in the tree for the duration of the write, so it is held to the same bar as the destination. A .gitignore pattern that ignores the report by EXTENSION does not match it: ignore the DIRECTORY instead, as the shipped .gitignore does for .review-stage/."
+      "this is the TEMPORARY file the write goes through (an unpredictable same-directory temp, created O_EXCL and written through a held descriptor, plus an atomic mv -f -T, so no path is re-resolved between validation and writing and no reader sees a half-written result: line). It is a real file in the tree for the duration of the write, so it is held to the same bar as the destination. A .gitignore pattern that ignores the report by EXTENSION does not match it: ignore the DIRECTORY instead, as the shipped .gitignore does for .review-stage/."
     # CREATE AND OPEN IN ONE STEP. `set -C` (noclobber) makes this `O_CREAT|O_EXCL`, so it
     # refuses an existing path — INCLUDING a symlink, dangling or not — instead of following it.
     # The caller's noclobber setting is preserved: this script does not set it, but a future
@@ -915,16 +923,63 @@ prepare_write() {
   emit "$REFUSE_MARKER detail=an unpredictable temporary file could not be created EXCLUSIVELY beside this path in $attempt attempt(s), so NOTHING was written. Either the directory is not writable, or mktemp is unavailable. There is deliberately no fallback to a predictable name: that is the TOCTOU this write path exists to remove (a peer lane can plant a symlink at a guessable temp name), so refusing is the fail-closed answer."
   exit 2
 }
+# mv_T_supported — does this host's `mv` have `-T` / `--no-target-directory`? ANSWERED BY
+# PERFORMING IT on two throwaway files, never by scanning `--help` text: "the option is listed" and
+# "the option works" are different claims and only the second one is a measurement.
+#
+# CONSULTED ONLY ON A FAILURE PATH, so the success path pays nothing for it. THREE-VALUED — `yes`,
+# `no`, `unknown` — because "there is no writable temp area to measure in" is not "the option is
+# missing", and the two send an operator to different places. It never decides whether to write:
+# see `commit_write` for why the fail-closed behaviour needs no probe at all.
+mv_T_supported() {
+  local d
+  d="$(mktemp -d 2>/dev/null)" || { printf 'unknown\n'; return 0; }
+  if [ -z "$d" ] || [ ! -d "$d" ]; then printf 'unknown\n'; return 0; fi
+  if ! : >"$d/a" 2>/dev/null || ! : >"$d/b" 2>/dev/null; then
+    rm -rf "$d" 2>/dev/null || true
+    printf 'unknown\n'; return 0
+  fi
+  if mv -f -T "$d/a" "$d/b" 2>/dev/null; then printf 'yes\n'; else printf 'no\n'; fi
+  rm -rf "$d" 2>/dev/null || true
+}
+
 commit_write() {
-  local dest="$1" what="$2"
+  local dest="$1" what="$2" tsup
   # THE DESCRIPTOR IS CLOSED BEFORE THE RENAME, so the record is complete on disk and the fd is
   # not carried into the next write (the number is reused for both files a stage writes).
   exec 9>&- 2>/dev/null || true
-  if ! mv -f "$WRITE_TMP" "$dest" 2>/dev/null; then
+  # `-T` IS LOAD-BEARING AND IS REQUIRED, NOT ATTEMPTED (#3751 round 7, L2). A plain `mv -f SRC
+  # DEST` does not promise to replace the NAME `DEST`: if `DEST` is — or BECOMES — a directory, or a
+  # symlink to one, `mv` puts the temporary file INSIDE it and EXITS 0. The write then lands outside
+  # the path this script verified while the tool reports success, which is the one outcome this
+  # whole write path exists to prevent. `-T` (`--no-target-directory`) makes that case an ERROR:
+  # measured on this fleet, `mv -T src dir` fails with `cannot overwrite directory 'dir' with
+  # non-directory` and LEAVES THE SOURCE IN PLACE. It closes the LEAF properly for a second reason
+  # too: `rename(2)` does not follow a symlink for the destination.
+  #
+  # WHAT ITS ABSENCE MEANS: `-T` is GNU coreutils; a BSD/macOS `mv` does not have it, and there
+  # such an `mv` FAILS THE OPTION PARSE, moves nothing, and this function REFUSES — so the
+  # fail-closed behaviour needs no probe and there is deliberately NO FALLBACK to a plain `mv -f`,
+  # which would restore the defect on exactly the hosts that cannot detect it. The probe below runs
+  # ONLY on that refusal path, and only to NAME the cause: "this host's mv has no -T" and "the
+  # rename was refused" are the same exit status and two completely different operator actions.
+  # The requirement is recorded in this file's CONSTRAINTS block.
+  if ! mv -f -T "$WRITE_TMP" "$dest" 2>/dev/null; then
     rm -f "$WRITE_TMP" 2>/dev/null || true
     WRITE_TMP=""
+    tsup="$(mv_T_supported)"
     emit "$REFUSE_MARKER reason=write-failed what=$what path=$(field_value "$dest")"
-    emit "$REFUSE_MARKER detail=the record was written to a temporary file but could not be moved into place, so NOTHING was recorded. The temporary file has been removed; an unexplained leftover would be indistinguishable from a crashed write."
+    case "$tsup" in
+      no)
+        emit "$REFUSE_MARKER detail=this host's mv has NO -T / --no-target-directory (it is GNU coreutils; a BSD/macOS mv lacks it), so NOTHING was written. That option is REQUIRED, not attempted: without it a destination that is or becomes a directory receives the temporary file INSIDE it while mv exits 0 — a write outside the verified path, reported as success. Install GNU coreutils (or run this on a Linux box, which the fleet is); there is deliberately no fallback."
+        ;;
+      unknown)
+        emit "$REFUSE_MARKER detail=the record was written to a temporary file but could not be moved into place, so NOTHING was recorded — and whether this host's mv supports -T could NOT be measured (no writable temp area), so the cause is not attributed. The temporary file has been removed; an unexplained leftover would be indistinguishable from a crashed write."
+        ;;
+      *)
+        emit "$REFUSE_MARKER detail=the record was written to a temporary file but could not be moved into place, so NOTHING was recorded (this host's mv does support -T, so the rename itself was refused — a destination that is not a plain replaceable name, a full or read-only filesystem, or a cross-device path). The temporary file has been removed; an unexplained leftover would be indistinguishable from a crashed write."
+        ;;
+    esac
     exit 2
   fi
   WRITE_TMP=""
