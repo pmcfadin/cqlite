@@ -288,25 +288,160 @@ impl V5CompressedLegacyParser {
             return Ok(CqlType::Map(Box::new(key_type), Box::new(val_type)));
         }
 
-        // Handle primitive types
-        Ok(match type_str {
-            s if s.ends_with("UTF8Type") => CqlType::Text,
-            s if s.ends_with("AsciiType") => CqlType::Ascii,
-            s if s.ends_with("Int32Type") => CqlType::Int,
-            s if s.ends_with("LongType") => CqlType::BigInt,
-            s if s.ends_with("FloatType") => CqlType::Float,
-            s if s.ends_with("DoubleType") => CqlType::Double,
-            s if s.ends_with("BooleanType") => CqlType::Boolean,
-            s if s.ends_with("UUIDType") || s.ends_with("TimeUUIDType") => CqlType::Uuid,
-            s if s.ends_with("TimestampType") => CqlType::Timestamp,
-            s if s.ends_with("DateType") || s.ends_with("SimpleDateType") => CqlType::Date,
-            s if s.ends_with("TimeType") => CqlType::Time,
-            s if s.ends_with("DecimalType") => CqlType::Decimal,
-            s if s.ends_with("IntegerType") => CqlType::Varint,
-            s if s.ends_with("BytesType") => CqlType::Blob,
-            s if s.ends_with("InetAddressType") => CqlType::Inet,
-            _ => CqlType::Custom(type_str.to_string()),
+        // TupleType — STRUCTURAL, so it is PARSED and not name-matched: its marshal
+        // string is `getClass().getName() + stringifyTypeParameters(types, true)`
+        // (cassandra-5.0.8 TupleType.java:557), i.e. a parenthesised, comma-separated
+        // component list. `depth + 1` like every other structural arm — a reset here
+        // would make `MAX_TYPE_NESTING_DEPTH` bound nothing across a
+        // tuple-inside-collection-inside-tuple chain.
+        if type_str.starts_with("org.apache.cassandra.db.marshal.TupleType(") {
+            let inner_start = "org.apache.cassandra.db.marshal.TupleType(".len();
+            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
+            let parts = Self::split_type_args(&inner)?;
+            if parts.is_empty() {
+                return Err(Error::schema(format!(
+                    "TupleType requires at least one component type: {}",
+                    type_str
+                )));
+            }
+            // `parts.len()` is bounded by the length of a type string that came out of
+            // the SerializationHeader, not by a length field inside a value, so this
+            // reserve cannot be inflated by a corrupt count.
+            let mut components = Vec::with_capacity(parts.len());
+            for part in &parts {
+                components.push(Self::parse_cassandra_type_with_depth(part, depth + 1)?);
+            }
+            return Ok(CqlType::Tuple(components));
+        }
+
+        // ReversedType — a COMPARISON wrapper with no layout of its own:
+        // `ReversedType.asCQL3Type()` and `getSerializer()` both delegate to
+        // `baseType` (cassandra-5.0.8 ReversedType.java:138,144), so the value of a
+        // `ReversedType(X)` is byte-for-byte the value of an `X`.
+        if type_str.starts_with("org.apache.cassandra.db.marshal.ReversedType(") {
+            let inner_start = "org.apache.cassandra.db.marshal.ReversedType(".len();
+            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
+            return Self::parse_cassandra_type_with_depth(&inner, depth + 1);
+        }
+
+        // A native (non-parameterised) marshal type, else `Custom` — which the
+        // DECODER refuses by name (issue #3631 criterion 5). Nothing here guesses
+        // from bytes (#28): the mapping is keyed on the DECLARED marshal name only.
+        Ok(Self::native_marshal_to_cql_type(type_str)
+            .unwrap_or_else(|| CqlType::Custom(Self::canonical_marshal_class_name(type_str))))
+    }
+
+    /// The name Cassandra itself would resolve `type_str` to:
+    /// `TypeParser.getAbstractType` (cassandra-5.0.8 TypeParser.java:450) loads
+    /// `compareWith.contains(".") ? compareWith : "org.apache.cassandra.db.marshal." +
+    /// compareWith`, so inside a marshal type string an UNQUALIFIED name IS a class in
+    /// the marshal package.
+    ///
+    /// Recording the resolved form is what lets the decoder tell an unmappable marshal
+    /// type from a UDT NAME: both are [`CqlType::Custom`], and only the qualified
+    /// spelling is unambiguous (roborev job 68, finding 1). Every field type in a real
+    /// `SerializationHeader` already arrives qualified, so this is the tolerated
+    /// hand-written / `TypeParser`-legal bare spelling, normalised by Cassandra's own
+    /// rule rather than by a guess about which names are class names.
+    fn canonical_marshal_class_name(type_str: &str) -> String {
+        let name = type_str.trim();
+        if name.contains('.') {
+            return name.to_string();
+        }
+        format!("org.apache.cassandra.db.marshal.{name}")
+    }
+
+    /// The marshal-class-name -> [`CqlType`] table: the ONE place a Cassandra native
+    /// `AbstractType` is bound to a CQLite type. `None` for a parameterised form (the
+    /// structural arms above own those) and for a native type [`CqlType`] cannot
+    /// express — see this module's header for the per-name authority and for the
+    /// names deliberately left unmapped.
+    ///
+    /// # Why the SIMPLE name is matched EXACTLY rather than by suffix
+    /// `TypeParser.getAbstractType` (cassandra-5.0.8 TypeParser.java:450) resolves a
+    /// name as `compareWith.contains(".") ? compareWith : "org.apache.cassandra.db.
+    /// marshal." + compareWith` — so a marshal name is EITHER a fully-qualified class
+    /// name OR a bare simple name in the marshal package, and the simple name is
+    /// therefore the whole identity. A suffix match is both too loose and too tight:
+    /// `ends_with("DateType")` also matches `SimpleDateType` (so CQL `date` read as an
+    /// 8-byte `timestamp` depended on arm ORDER), and `ends_with("BytesType")` maps a
+    /// third-party `com.acme.MyBytesType` to `blob`, decoding an unknown type's bytes
+    /// as if the type were known.
+    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn native_marshal_to_cql_type(
+        marshal_type: &str,
+    ) -> Option<CqlType> {
+        let name = marshal_type.trim();
+        // A parameterised form is structural; the arms above are its only decoders.
+        if name.contains('(') {
+            return None;
+        }
+        // `rsplit` always yields at least one item, so this is the text after the last
+        // `.` (or the whole name when unqualified).
+        let simple = name.rsplit('.').next().unwrap_or(name);
+        Some(match simple {
+            // -- CQL3Type.Native, one arm per enum constant --------------------
+            "AsciiType" => CqlType::Ascii,
+            "LongType" => CqlType::BigInt,
+            "BytesType" => CqlType::Blob,
+            "BooleanType" => CqlType::Boolean,
+            "CounterColumnType" => CqlType::Counter,
+            "SimpleDateType" => CqlType::Date,
+            "DecimalType" => CqlType::Decimal,
+            "DoubleType" => CqlType::Double,
+            "DurationType" => CqlType::Duration,
+            "FloatType" => CqlType::Float,
+            "InetAddressType" => CqlType::Inet,
+            "Int32Type" => CqlType::Int,
+            "ShortType" => CqlType::SmallInt,
+            "UTF8Type" => CqlType::Text,
+            "TimeType" => CqlType::Time,
+            "TimestampType" => CqlType::Timestamp,
+            "TimeUUIDType" => CqlType::TimeUuid,
+            "ByteType" => CqlType::TinyInt,
+            "UUIDType" => CqlType::Uuid,
+            "IntegerType" => CqlType::Varint,
+            // -- Not in that enum; each mapped from its own authority ----------
+            // `DateType.asCQL3Type()` -> `TIMESTAMP`: the LEGACY 8-byte millis type.
+            "DateType" => CqlType::Timestamp,
+            // An alias `TypeParser` resolves to `UTF8Type`.
+            "VarcharType" => CqlType::Text,
+            // `LexicalUUIDType.Serializer extends UUIDSerializer`, 16 bytes fixed.
+            "LexicalUUIDType" => CqlType::Uuid,
+            // `LegacyTimeUUIDType extends AbstractTimeUUIDType<UUID>`: a timeuuid's
+            // value layout, differing only in comparison.
+            "LegacyTimeUUIDType" => CqlType::TimeUuid,
+            _ => return None,
         })
+    }
+
+    /// Whether a [`CqlType::Custom`] payload is a **marshal type REFERENCE** — a
+    /// Cassandra `AbstractType` class name, or a structural marshal fragment — rather
+    /// than the NAME OF A UDT.
+    ///
+    /// `CqlType::Custom` carries both (see `crate::schema::is_udt_identifier`), and
+    /// the typed decoder has to route them differently: a UDT name goes to the
+    /// nested-UDT decoder, while a marshal reference has no field list and never
+    /// will, so reporting it as a UDT with a missing field list misattributes the
+    /// cause (roborev job 68, finding 1).
+    ///
+    /// The qualified package prefix is the discriminator because it is the single
+    /// shape real `SerializationHeader`s carry — the same fact
+    /// `marshal_is_top_level_frozen_udt` and `parse_udt_type_definition_with_depth`
+    /// already key on (roborev jobs 1359/1361). This reads a DECLARED type string's
+    /// own syntax; it infers nothing from value bytes (#28).
+    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn custom_is_marshal_type_reference(
+        name: &str,
+    ) -> bool {
+        const PKG: &str = "org.apache.cassandra.";
+        let name = name.trim();
+        // A structural fragment: no UDT name can carry a parameter list.
+        if name.contains('(') || name.contains(',') || name.contains('<') {
+            return true;
+        }
+        // `str::get` yields `None` on a non-char-boundary index, so this cannot panic
+        // on a multi-byte name.
+        name.get(..PKG.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(PKG))
     }
 
     /// Extract the contents inside parentheses, respecting nesting.

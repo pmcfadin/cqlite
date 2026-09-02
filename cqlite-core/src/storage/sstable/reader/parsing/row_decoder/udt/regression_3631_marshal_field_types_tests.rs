@@ -230,7 +230,8 @@ fn a_third_party_marshal_class_is_not_silently_a_blob() {
 /// the type was not a UDT at all.
 #[test]
 fn an_unmappable_marshal_type_is_refused_as_an_undecodable_type_not_as_a_missing_udt() {
-    let err = decode_field("EmptyType", &[]).expect_err("EmptyType has no decoding rule");
+    let err =
+        decode_field(&format!("{PKG}EmptyType"), &[]).expect_err("EmptyType has no decoding rule");
     let msg = err.to_string();
     assert!(
         msg.contains("EmptyType") && msg.contains("no decoding rule"),
@@ -252,6 +253,24 @@ fn a_structural_marshal_type_with_no_cqltype_is_refused_by_name() {
     assert!(
         msg.contains("VectorType") && !msg.contains("nested user-defined type"),
         "{msg}"
+    );
+}
+
+/// The SAME type spelled BARE. `TypeParser.getAbstractType` (TypeParser.java:450)
+/// resolves an unqualified name against the marshal package, so CQLite records the
+/// resolved class name and the refusal is identical — a bare spelling must not be
+/// mistaken for a UDT name.
+#[test]
+fn a_bare_unmappable_marshal_name_is_resolved_against_the_marshal_package() {
+    assert_eq!(
+        field_type_of("EmptyType"),
+        CqlType::Custom(format!("{PKG}EmptyType")),
+    );
+    let err = decode_field("EmptyType", &[]).expect_err("still no decoding rule");
+    assert!(
+        err.to_string().contains("no decoding rule")
+            && !err.to_string().contains("nested user-defined type"),
+        "{err}"
     );
 }
 

@@ -543,7 +543,17 @@ impl V5CompressedLegacyParser {
             }
             // A UDT nested inside a collection / tuple / another UDT. Delegated so
             // the per-field `[i32 size][bytes]` framing has ONE implementation.
-            CqlType::Custom(name) => self.parse_typed_udt(data, name, &[], ctx, depth),
+            //
+            // `Custom` carries a UDT NAME *or* a marshal type reference the type-string
+            // parser had no `CqlType` for (`EmptyType`, `VectorType(...)`, a
+            // third-party `AbstractType`), so only the former may be routed here:
+            // an unroutable marshal name falls through to the `scalar` arm below and is
+            // refused as an undecodable DECLARED TYPE, which is what it is. Routing it
+            // here reported "nested user-defined type … field list is not available",
+            // misattributing the cause (roborev job 68, finding 1).
+            CqlType::Custom(name) if !Self::custom_is_marshal_type_reference(name) => {
+                self.parse_typed_udt(data, name, &[], ctx, depth)
+            }
             CqlType::Udt(name, inline_fields) => {
                 self.parse_typed_udt(data, name, inline_fields, ctx, depth)
             }
