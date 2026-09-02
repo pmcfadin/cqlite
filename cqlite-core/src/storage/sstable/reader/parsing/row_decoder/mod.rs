@@ -826,7 +826,7 @@ use row_framing::PartitionHeaderReadiness;
 use row_framing::BoundaryPeek;
 // #3848: validate an untrusted VUInt length in `u64` space BEFORE narrowing it
 // to `usize`. Named here so the `use super::*` sibling modules see them.
-use vuint_length::{checked_vuint_length, vuint_length_within};
+use vuint_length::{checked_vuint_exact_length, checked_vuint_length, vuint_length_within};
 
 #[cfg(test)]
 mod test_support;

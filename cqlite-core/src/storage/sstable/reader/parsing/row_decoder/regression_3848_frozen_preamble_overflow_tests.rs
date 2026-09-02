@@ -63,6 +63,26 @@
 //! to be assumed, because a case that silently covers less than it appears to is
 //! worse than a declared gap.
 //!
+//! ## The fourth axis: A POST-CAST EQUALITY CHECK IS NOT A GUARD (roborev job 67)
+//!
+//! The round-2 fix skipped the FIXED-WIDTH arms (`date`, `time`, `inet`,
+//! `smallint`, `tinyint`) on the reasoning that "a truncated length fails the
+//! `!= 4` equality check, so the cast is safe". That reasoning is WRONG, and it
+//! is worth stating why in the test file that falsifies it: truncation is not a
+//! randomising operation. An attacker CHOOSES the declared length so that its
+//! low 32 bits equal the expected size — `(1u64 << 32) + 4` narrows to exactly
+//! `4usize` on a 32-bit target and PASSES `!= 4`. The corrupt length is then
+//! silently ACCEPTED as a valid 4-byte field and the following bytes are
+//! misparsed. An equality test after the cast provides no protection against
+//! truncation whatsoever; it only looks as if it does.
+//!
+//! 4. **Fixed widths** — [`checked_vuint_exact_length`] compares the raw `u64`
+//!    against each allowed size widened `usize -> u64` (lossless), so the
+//!    equality is exact on every target, and narrows only on a match. The
+//!    declared-limit note on axis 3 applies verbatim here: on a 64-bit host
+//!    `as usize` is the identity, so these cases pin the guard's CONTRACT
+//!    (reject, and name the RAW length) rather than distinguishing the ordering.
+//!
 //! ## Dataset independence
 //!
 //! These tests call the associated function DIRECTLY. It needs no
@@ -72,7 +92,9 @@
 //! builds run with `overflow-checks = true`, so a regressed add would abort the
 //! process here rather than silently wrap.
 
-use super::{checked_vuint_length, vuint_length_within, V5CompressedLegacyParser};
+use super::{
+    checked_vuint_exact_length, checked_vuint_length, vuint_length_within, V5CompressedLegacyParser,
+};
 use crate::error::Error;
 use crate::parser::vint::encode_vuint;
 use crate::storage::sstable::reader::parsing::row_decoder::MAX_CELL_VALUE_LENGTH;
@@ -257,4 +279,101 @@ fn vuint_length_guard_accepts_a_legitimate_length() {
 fn vuint_length_guard_rejects_one_byte_past_the_available_bytes() {
     assert_eq!(vuint_length_within(9, 8), None, "9 of 8 bytes must not fit");
     assert_eq!(vuint_length_within(1, 0), None, "no bytes remain");
+}
+
+/// The fixed-width fields of the scalar/frozen decode arms, as
+/// `(what, allowed widths)`. Derived from the arms that route through
+/// [`checked_vuint_exact_length`]: `date` (4), `time` (8), `smallint` (2),
+/// `tinyint` (1) and `inet` (4 or 16).
+const FIXED_WIDTH_FIELDS: [(&str, &[usize]); 5] = [
+    ("date", &[4]),
+    ("time", &[8]),
+    ("smallint", &[2]),
+    ("tinyint", &[1]),
+    ("inet", &[4, 16]),
+];
+
+/// Axis 4, the case that FALSIFIES the "the `!= 4` check catches it" reasoning:
+/// a declared length whose LOW 32 BITS equal the expected fixed width.
+///
+/// `(1u64 << 32) + 4` narrows to exactly `4usize`, so the pre-fix
+/// `let date_len = date_len as usize; if date_len != 4 { .. }` shape ACCEPTS it
+/// as a valid 4-byte date. The guard must reject it on the raw `u64`.
+#[test]
+fn fixed_width_lengths_colliding_in_the_low_32_bits_are_rejected() {
+    for (what, allowed) in FIXED_WIDTH_FIELDS {
+        for &width in allowed {
+            // The collision: identical to `width` in the low 32 bits, so every
+            // post-cast comparison against `width` is satisfied on a 32-bit target.
+            let colliding = (1u64 << 32) + width as u64;
+            let err = checked_vuint_exact_length(colliding, allowed, "Cell", "c", what).expect_err(
+                "a length colliding with the fixed width in its low 32 bits \
+                             must be rejected, not accepted as that width",
+            );
+            match &err {
+                Error::Corruption(msg) => assert!(
+                    msg.contains(&colliding.to_string()) && msg.contains("Cell 'c'"),
+                    "must name the subject and the RAW length {colliding} (got {msg:?})"
+                ),
+                other => panic!("expected Error::Corruption, got {other:?}"),
+            }
+        }
+    }
+}
+
+/// The same axis at the other truncating lengths: `1 << 32` narrows to `0usize`
+/// (which no fixed-width arm allows, so it would be caught) and `u64::MAX`
+/// narrows to `u32::MAX` — none may be accepted for any width.
+#[test]
+fn fixed_width_guard_rejects_every_truncating_length() {
+    for (what, allowed) in FIXED_WIDTH_FIELDS {
+        for len_raw in TRUNCATING_LENGTHS {
+            assert!(
+                checked_vuint_exact_length(len_raw, allowed, "Frozen element", "c", what).is_err(),
+                "{what}: truncating length {len_raw} must be rejected"
+            );
+        }
+    }
+}
+
+/// The happy path per guarded width, so the guard cannot be trivially
+/// over-strict: every width the format allows converts to itself.
+#[test]
+fn fixed_width_guard_accepts_every_allowed_width() {
+    for (what, allowed) in FIXED_WIDTH_FIELDS {
+        for &width in allowed {
+            assert_eq!(
+                checked_vuint_exact_length(width as u64, allowed, "Cell", "c", what)
+                    .expect("an allowed width must be accepted"),
+                width,
+                "{what}: width {width} is the on-disk size and must be accepted"
+            );
+        }
+    }
+}
+
+/// The ordinary-corruption direction, so the accept case above is not passing
+/// because the guard accepts everything: a width the format does not allow is
+/// rejected, and the two message shapes name the allowed size(s).
+#[test]
+fn fixed_width_guard_rejects_a_disallowed_width_naming_the_allowed_sizes() {
+    let date = checked_vuint_exact_length(3, &[4], "Cell", "c", "date")
+        .expect_err("3 is not a legal date length");
+    match &date {
+        Error::Corruption(msg) => assert!(
+            msg.contains("expected date length 4, got 3"),
+            "single-width shape must name the required size (got {msg:?})"
+        ),
+        other => panic!("expected Error::Corruption, got {other:?}"),
+    }
+
+    let inet = checked_vuint_exact_length(5, &[4, 16], "Cell", "c", "inet")
+        .expect_err("5 is neither an IPv4 nor an IPv6 address length");
+    match &inet {
+        Error::Corruption(msg) => assert!(
+            msg.contains("invalid inet length 5, expected 4 or 16"),
+            "multi-width shape must name every allowed size (got {msg:?})"
+        ),
+        other => panic!("expected Error::Corruption, got {other:?}"),
+    }
 }

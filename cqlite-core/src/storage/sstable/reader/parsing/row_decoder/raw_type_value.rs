@@ -241,21 +241,25 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let date_len = date_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if date_len != 4 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': expected date length 4, got {}",
-                        column_name, date_len
-                    )));
-                }
+                // #3848: compare the RAW `u64` against the required width. A
+                // `date_len as usize` first would let `(1 << 32) + 4` pass the
+                // `== 4` test on a 32-bit target (truncation is chosen, not random).
+                let date_len = checked_vuint_exact_length(
+                    date_len,
+                    &[4],
+                    "Frozen element",
+                    column_name,
+                    "date",
+                )?;
 
-                if offset + 4 > data.len() {
+                if date_len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 4 bytes for date, only {} available",
+                        "Frozen element '{}': need {} bytes for date, only {} available",
                         column_name,
+                        date_len,
                         data.len() - offset
                     )));
                 }
@@ -280,21 +284,23 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let time_len = time_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if time_len != 8 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': expected time length 8, got {}",
-                        column_name, time_len
-                    )));
-                }
+                // #3848: raw-`u64` width check before the narrowing (see `date`).
+                let time_len = checked_vuint_exact_length(
+                    time_len,
+                    &[8],
+                    "Frozen element",
+                    column_name,
+                    "time",
+                )?;
 
-                if offset + 8 > data.len() {
+                if time_len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 8 bytes for time, only {} available",
+                        "Frozen element '{}': need {} bytes for time, only {} available",
                         column_name,
+                        time_len,
                         data.len() - offset
                     )));
                 }
@@ -394,18 +400,19 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let len = len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if len != 4 && len != 16 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': invalid inet length {}, expected 4 or 16",
-                        column_name, len
-                    )));
-                }
+                // #3848: raw-`u64` width check before the narrowing (see `date`).
+                let len = checked_vuint_exact_length(
+                    len,
+                    &[4, 16],
+                    "Frozen element",
+                    column_name,
+                    "inet",
+                )?;
 
-                if offset + len > data.len() {
+                if len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
                         "Frozen element '{}': need {} bytes for inet, only {} available",
                         column_name,

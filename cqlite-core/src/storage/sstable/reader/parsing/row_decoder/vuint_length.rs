@@ -62,3 +62,69 @@ pub(super) fn checked_vuint_length(
         ))
     })
 }
+
+/// A FIXED-WIDTH field's declared length, validated in `u64` space against the
+/// sizes the on-disk format allows, and narrowed only on success.
+///
+/// # Why an equality check AFTER the cast is not a guard (issue #3848)
+///
+/// The historical shape at these sites was
+///
+/// ```text
+/// let date_len = date_len as usize;      // raw u64 -> usize
+/// if date_len != 4 { return Err(...) }   // "so a truncated value is caught"
+/// ```
+///
+/// That reasoning is WRONG. Truncation is not a randomising operation: an
+/// adversary chooses the length so its LOW BITS are the expected size. On a
+/// 32-bit target `((1u64 << 32) + 4) as usize == 4usize`, which PASSES
+/// `!= 4` — so a corrupt length is silently ACCEPTED as a valid 4-byte field
+/// instead of being rejected, and the following bytes are misparsed. The
+/// equality check provides no protection against truncation whatsoever; it only
+/// looks as if it does.
+///
+/// So the comparison happens in `u64` space. `allowed` holds `usize` sizes,
+/// widened `usize -> u64` (always lossless), which makes the equality exact on
+/// every target; the surviving `as usize` cast is provably lossless because the
+/// value equals one of the `allowed` sizes, each itself a `usize`.
+fn vuint_length_exact(len_raw: u64, allowed: &[usize]) -> Option<usize> {
+    if !allowed.iter().any(|&size| len_raw == size as u64) {
+        return None;
+    }
+    // Lossless on every target: `len_raw` equals one of the `allowed: usize`.
+    Some(len_raw as usize)
+}
+
+/// [`vuint_length_exact`] plus the canonical `Error::corruption` diagnostic.
+///
+/// The message keeps the two shapes the fixed-width arms historically used, and
+/// reports the RAW `u64` length so an adversarial prefix is named in full rather
+/// than in its truncated form:
+/// - one allowed size: `"<subject> '<name>': expected <what> length 4, got 17"`
+/// - several:          `"<subject> '<name>': invalid <what> length 17, expected 4 or 16"`
+pub(super) fn checked_vuint_exact_length(
+    len_raw: u64,
+    allowed: &[usize],
+    subject: &str,
+    name: &str,
+    what: &str,
+) -> Result<usize> {
+    vuint_length_exact(len_raw, allowed).ok_or_else(|| {
+        let sizes = allowed
+            .iter()
+            .map(|size| size.to_string())
+            .collect::<Vec<_>>()
+            .join(" or ");
+        if allowed.len() == 1 {
+            Error::corruption(format!(
+                "{} '{}': expected {} length {}, got {}",
+                subject, name, what, sizes, len_raw
+            ))
+        } else {
+            Error::corruption(format!(
+                "{} '{}': invalid {} length {}, expected {}",
+                subject, name, what, len_raw, sizes
+            ))
+        }
+    })
+}
