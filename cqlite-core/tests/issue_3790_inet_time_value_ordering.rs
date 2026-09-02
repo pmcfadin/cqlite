@@ -448,7 +448,9 @@ fn ac5_no_native_scalar_reaches_the_residual_custom_path() {
 /// CODIFIED `ComparatorType::Duration::supports_ordering() == true` — behaviour
 /// this issue does not fix and should not freeze.
 ///
-/// **`Duration` is excluded, and the reason is not obvious.** At the marshal level
+/// **`Duration` AND `Counter` are both excluded** (see the inline note on
+/// `Counter`); the `Duration` reasoning below is the worked example, and the
+/// reason is not obvious. At the marshal level
 /// `DurationType` really is byte-comparable — pinned `cassandra-5.0.8`,
 /// `src/java/org/apache/cassandra/db/marshal/DurationType.java:46`:
 /// `super(ComparisonType.BYTE_ORDER);`. But CQL FORBIDS a `duration` in any
@@ -474,7 +476,14 @@ fn orderable_native_scalars_report_supports_ordering() {
         CqlType::SmallInt,
         CqlType::Int,
         CqlType::BigInt,
-        CqlType::Counter,
+        // `Counter` is EXCLUDED for exactly the same reason as `Duration`
+        // (roborev job 45): Cassandra forbids a counter column in a primary or
+        // clustering key and in a collection ordering position, so under the
+        // "may occupy an ordering position" reading it should report `false`,
+        // while it reports `true` today. #3917 already names `Counter` as part of
+        // its audit, so asserting either answer here would pre-empt that
+        // decision — the same trap this test avoided for `Duration` one round
+        // earlier, in the very list that was supposed to have avoided it.
         CqlType::Float,
         CqlType::Double,
         CqlType::Decimal,
