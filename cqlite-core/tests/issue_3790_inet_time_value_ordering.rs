@@ -112,8 +112,8 @@ fn inet_differing_length_compares_leading_bytes_unsigned() {
 /// so for all IN-RANGE values the formatted-string order happens to coincide
 /// with numeric order. There is therefore no in-range string-vs-value
 /// counterexample to pin; this test pins the ordering property directly, and
-/// `time_byte_order_places_negative_nanos_above_zero` below pins the case where
-/// the formatted string genuinely does disagree.
+/// `time_negative_nanos_order_signed_matching_the_writer_not_byte_order` below
+/// pins the out-of-range case and the tradeoff taken there.
 #[test]
 fn time_orders_by_nanos() {
     let c = time_cmp();
@@ -137,34 +137,50 @@ fn time_orders_by_nanos() {
     }
 }
 
-/// AC2, the case where the formatted string DOES disagree, and the case that
-/// distinguishes Cassandra's `BYTE_ORDER` from a plain SIGNED `i64::cmp`.
+/// Out-of-range NEGATIVE nanos: the comparator agrees with the WRITER (signed),
+/// not with Cassandra's `BYTE_ORDER`. This pins a deliberate, measured tradeoff —
+/// see `comparator::custom::compare_time` and issue #3920.
 ///
-/// `TimeType` is `ComparisonType.BYTE_ORDER` over the 8-byte big-endian long, so
-/// an out-of-range NEGATIVE nanos has its sign bit set, giving a leading `0xFF`
-/// byte, and sorts ABOVE every non-negative value. Both a signed `i64::cmp`
-/// (`-1 < 0`) and the formatted string (`'-' < '0'`) answer `Less` here.
+/// An earlier revision of #3790 compared `to_be_bytes()`, making a negative sort
+/// ABOVE every non-negative value, which is what `TimeType`'s
+/// `ComparisonType.BYTE_ORDER` specifies. That was reverted (roborev jobs 45/46)
+/// because NOTHING in CQLite validates the `time` range — decode is
+/// `map(be_i64, Value::Time)`, encode writes the bytes verbatim — while `Value`'s
+/// `PartialOrd` (which writer/memtable paths order through) compares SIGNED. An
+/// unsigned comparator therefore let CQLite write a negative `time` in one order
+/// and read it back in another. For every value Cassandra can actually produce
+/// (`0..=86_399_999_999_999`, all non-negative) signed and byte order COINCIDE, so
+/// nothing observable against real Cassandra data changes either way.
+///
+/// This test exists so the tradeoff cannot be silently reversed: flipping the
+/// comparator back to byte order reds it, and #3920 (which owns unifying
+/// validation + ordering) must update it deliberately.
 #[test]
-fn time_byte_order_places_negative_nanos_above_zero() {
+fn time_negative_nanos_order_signed_matching_the_writer_not_byte_order() {
     let neg = Value::Time(-1);
     let zero = Value::Time(0);
+    let c = time_cmp();
 
-    // Preconditions: both of the WRONG answers really are `Less`.
-    assert_eq!((-1i64).cmp(&0i64), Ordering::Less, "signed cmp says Less");
-    assert!(
-        format!("{}", neg) < format!("{}", zero),
-        "formatted-string order says Less"
+    // Signed: -1 < 0. Byte order would say Greater (0xFF.. leads).
+    assert_eq!(c.compare(&neg, &zero).unwrap(), Ordering::Less);
+    assert_eq!(c.compare(&zero, &neg).unwrap(), Ordering::Greater);
+
+    // Agrees with `Value`'s own PartialOrd, which is the whole point: the writer
+    // orders through that, so the two must not disagree.
+    assert_eq!(
+        neg.partial_cmp(&zero),
+        Some(Ordering::Less),
+        "Value::PartialOrd must agree with the comparator for time"
     );
 
-    let c = time_cmp();
-    assert_eq!(c.compare(&neg, &zero).unwrap(), Ordering::Greater);
-    assert_eq!(c.compare(&zero, &neg).unwrap(), Ordering::Less);
-    // Among negatives, byte order is still ascending in the unsigned reading:
-    // -2 (0xFFFF..FE) < -1 (0xFFFF..FF).
+    // Among negatives, signed is ascending: -2 < -1.
+    assert_eq!(c.compare(&Value::Time(-2), &neg).unwrap(), Ordering::Less);
+
+    // The in-range property is untouched and is what real data exercises.
     assert_eq!(
-        c.compare(&Value::Time(-2), &neg).unwrap(),
-        Ordering::Less,
-        "-2 precedes -1 under unsigned byte order"
+        c.compare(&Value::Time(0), &Value::Time(86_399_999_999_999))
+            .unwrap(),
+        Ordering::Less
     );
 }
 
@@ -275,10 +291,28 @@ fn set_and_map_carry_the_corrected_leaf_comparator() {
     .expect("map comparator");
     match &map_cmp {
         ComparatorType::Map(key, _) => {
+            // The property this case is about is that the MAP KEY LEAF carries the
+            // corrected time comparator at all. Pin it with IN-RANGE values, which
+            // is what real data exercises: before #3790 this leaf ordered by the
+            // formatted string. The out-of-range negative edge case, and the
+            // signed-vs-byte-order tradeoff taken there, are pinned by the
+            // dedicated `time_negative_nanos_order_signed_matching_the_writer_not_byte_order`
+            // test — asserting it here too would duplicate that decision in a
+            // second place and give #3920 two tests to update instead of one.
             assert_eq!(
-                key.compare(&Value::Time(-1), &Value::Time(0)).unwrap(),
+                key.compare(&Value::Time(0), &Value::Time(86_399_999_999_999))
+                    .unwrap(),
+                Ordering::Less,
+                "map key leaf must order time by value"
+            );
+            assert_eq!(
+                key.compare(
+                    &Value::Time(45_296_000_000_007),
+                    &Value::Time(3_600_000_000_000)
+                )
+                .unwrap(),
                 Ordering::Greater,
-                "map key leaf must use TimeType BYTE_ORDER"
+                "map key leaf must order time by value"
             );
         }
         other => panic!("expected Map comparator, got {:?}", other),
