@@ -789,7 +789,7 @@ mod block_emit;
 mod block_emit_windowed;
 // Issue #3782: the explicit buffer-extent contract the block-emit parses take.
 mod buffer_extent;
-pub use buffer_extent::BufferExtent;
+pub(crate) use buffer_extent::BufferExtent;
 mod cell_kind;
 mod cell_value;
 // campsite split of `cell_value` (issue #1795): scalar arms + complex ladder.

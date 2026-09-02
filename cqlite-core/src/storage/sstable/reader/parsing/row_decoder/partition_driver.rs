@@ -715,6 +715,12 @@ mod tests {
                 collected.len()
             ),
         };
+        // KIND first: a re-wrap that forwarded the text would satisfy the message
+        // check below while destroying the property AC1 is about.
+        assert!(
+            matches!(err, Error::Corruption(_)),
+            "the POLICY's error KIND must reach the caller unchanged, got: {err:?}"
+        );
         assert!(
             err.to_string().contains(STUB_ERR_TEXT),
             "the POLICY's error must reach the caller unchanged, got: {err}"

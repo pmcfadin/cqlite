@@ -15,7 +15,7 @@
 //! 2. Neither arm ever FABRICATES: any partition either arm still answers `Ok`
 //!    for must return exactly the pristine fixture's rows for that partition.
 //!
-//! # DECLARED GAP — point and full do NOT yet agree here (#3782)
+//! # DECLARED GAP 1 of 2 — point and full do NOT yet agree here (#3782, #3922)
 //!
 //! The POINT arm still answers `Ok` with a SHORT row set for the damaged
 //! partition. That is not an oversight in the fix: the BIG-promoted and BTI point
@@ -24,13 +24,33 @@
 //! truncated mid-partition … pull the next chunk" — so refusing there would
 //! break a legitimate, load-bearing control flow rather than fix a defect. They
 //! decode a chunk-covering WINDOW, not a proven-complete buffer, so the
-//! `with_complete_buffer` contract the stitched read path uses does not apply.
+//! `BufferExtent::Complete` contract the stitched read path uses does not apply
+//! (they declare `BufferExtent::Window`, which is the truth about their buffer).
 //! Closing it needs the point readers bounded to the target partition's own
-//! extent first; that is a separate change to a different subsystem, and it is
-//! declared here rather than left to be rediscovered from a green suite.
+//! extent first; that is a separate change to a different subsystem, tracked as
+//! **#3922**, and it is declared here rather than left to be rediscovered from a
+//! green suite.
 //!
 //! Assertion 2 is written so it stays TRUE after that follow-up (a refusing arm
 //! simply never enters the `Ok` branch), so this case does not pin the gap.
+//!
+//! # DECLARED GAP 2 of 2 — the partition-HEADER arm still resyncs (#3928)
+//!
+//! #3782 fixes the ROW arm: on a proven-complete buffer a row that fails to
+//! decode is refused. The partition-HEADER arm is UNCHANGED and still
+//! `tracing::warn!`s and advances ONE byte to resynchronise
+//! (`block_emit_windowed.rs`, and the same shape in
+//! `partition_driver.rs`'s `PartitionHeaderReadiness::Malformed` arm). So a
+//! corrupted header byte in a proven-complete section can still both DROP that
+//! partition and FABRICATE one by landing the resync on misaligned bytes — the
+//! same "2 lost / 3 fabricated" mechanism this issue measured — while returning
+//! `Ok`. On the #3782 measurement probe, 15 of the 35 corrupted-fixture losses
+//! were attributable to that header arm against 20 to the row arm.
+//!
+//! **So #3782's guarantee is scoped to ROW framing**, and the header half is
+//! tracked in **#3928**. It is stated here because a gap our own doctrine
+//! implies is covered is a false certification: nothing else in this change
+//! would tell a reader that a header-byte corruption is still swallowed.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -159,6 +179,7 @@ async fn full_read_refuses_a_corrupt_partition_and_neither_arm_fabricates() {
 
     let mut full_errored = 0usize;
     let mut named_the_column = false;
+    let mut carried_the_kind = false;
     for key in &keys {
         let sql = format!(
             "SELECT * FROM {}.{} WHERE partition_key = {key}",
@@ -180,6 +201,13 @@ async fn full_read_refuses_a_corrupt_partition_and_neither_arm_fabricates() {
         match full.execute(&sql).await {
             Err(e) => {
                 full_errored += 1;
+                // AC1 is about the error's KIND, so assert the VARIANT — a message
+                // substring stays green through a refactor that re-wraps the decode
+                // error in another variant while forwarding the text (and reading
+                // bytes of a rendered string to decide a property is the
+                // no-heuristics shape). The column name is kept as an ADDITIONAL,
+                // weaker signal: it is what tells a human WHICH decode failed.
+                carried_the_kind |= matches!(e, cqlite_core::Error::Corruption(_));
                 named_the_column |= e.to_string().contains("clustering_key2");
             }
             Ok(r) => assert_eq!(
@@ -206,8 +234,13 @@ async fn full_read_refuses_a_corrupt_partition_and_neither_arm_fabricates() {
         keys.len()
     );
     assert!(
+        carried_the_kind,
+        "the refusal must carry the DECODE error's own KIND (Error::Corruption), not a \
+         re-wrapped generic — that preservation is the whole of #3782 AC1"
+    );
+    assert!(
         named_the_column,
-        "the refusal must carry the DECODE error's own kind (naming clustering_key2), not a \
-         generic end-of-partition collapse — that preservation is the whole of #3782 AC1"
+        "the refusal should also NAME the offending clustering column, so a human can \
+         locate the damage; the KIND assert above is the load-bearing one"
     );
 }

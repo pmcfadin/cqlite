@@ -20,13 +20,12 @@
 //! unrepresentable: a new call site cannot compile without answering the
 //! question, and the answer sits beside the buffer it describes rather than
 //! several builder calls away.
-/// `pub` only because `V5CompressedLegacyParser` is re-exported (`doc(hidden)`)
-/// for integration tests, so a `pub fn` taking this type needs it at least as
-/// visible. Every production caller is in-crate. A downstream caller can still
-/// state either variant — what it can no longer do is INHERIT the lossy one by
-/// saying nothing, which is the defect this type exists for.
+/// Deliberately `pub(crate)`: every caller is in-crate, and the flag this
+/// replaced was `pub` on a type re-exported (`doc(hidden)`) for integration
+/// tests, so an out-of-crate caller could have declared a chunk-covering window
+/// complete and turned legitimate straddling rows into hard errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BufferExtent {
+pub(crate) enum BufferExtent {
     /// The buffer holds EVERY byte of the extent being decoded — the whole
     /// stitched data section, a partition slice already proven fully consumed,
     /// or a standalone buffer with no continuation. No further bytes can arrive
@@ -44,7 +43,7 @@ pub enum BufferExtent {
 impl BufferExtent {
     /// `true` only for [`BufferExtent::Complete`] — the affirmative value, so a
     /// permissive branch is never keyed on "not the bad one".
-    pub fn is_complete(self) -> bool {
+    pub(crate) fn is_complete(self) -> bool {
         matches!(self, BufferExtent::Complete)
     }
 }
