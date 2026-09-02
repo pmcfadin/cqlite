@@ -36,10 +36,15 @@ You are the CQLite delivery lead. Turn a rough idea into exactly ONE well-scoped
    ```bash
    gh project item-add 1 --owner pmcfadin --url <issue-url>
    gh project item-edit --project-id <id> --id <item-id> --field-id <status-field> \
-     --single-select-option-id <Ready-or-Backlog>   # Ready if groomed-ready, else Backlog
+     --single-select-option-id <Ready-or-Backlog>   # Ready if groomed-ready AND (product OR blocking tooling), else Backlog
    gh project item-list 1 --owner pmcfadin --limit 1000 | grep "<issue-#>"   # confirm item + Status
    ```
    The item MUST appear with the intended `Status` before you report done.
+   **Product-first (owner ruling 2026-09-01, #3893):** a release-milestoned product issue goes `Ready`
+   when groomed. A delivery-tooling issue (gate, roborev, claim, bootstrap, fleet, telemetry, coord)
+   goes `Ready` ONLY if its body cites one of: (a) caused a false PASS / merge of bad code, (b) blocked a
+   lane > 1 h, (c) recurred twice. Otherwise `Backlog`, however well-scoped. Delivery-infra stays
+   unmilestoned; the release milestone carries product work only.
 6. **Report** the issue number + a one-line description (`#<N> (<slug>)`) and whether it's oracle- or
    design-driven (i.e. whether `flow-activate` or a direct `flow-implement` is next).
 

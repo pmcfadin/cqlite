@@ -15,8 +15,11 @@ sequence workers with **signed issue comments**. That's it.
 ## Your only two channels
 1. **Board Ready column = the dispatch queue (the sole authority — Path A, #1886).** Move an issue to
    Ready by setting its **board `Status`**, not a label (`status:*` labels are decorative and are NOT how
-   workers select). Workers take the **oldest board-`Status=Ready`** item with no `issue-N-*` lock on
-   origin. A dependent issue stays **out of Ready** (hard gate) until its prerequisite merges — or goes to
+   workers select). Workers take the **oldest release-milestoned product item** at board-`Status=Ready`
+   with no claim on origin, and a delivery-tooling item only when no product item is Ready (#3893).
+   **You may move a tooling issue to Ready ONLY if its body cites a blocking cause** — a false PASS /
+   merge of bad code, a lane blocked > 1 h, or a second recurrence; otherwise it stays Backlog, however
+   well-scoped (owner ruling 2026-09-01). A dependent issue stays **out of Ready** (hard gate) until its prerequisite merges — or goes to
    Ready with a `HOLD` comment (soft gate) if you want it built early but merged late.
 2. **Signed issue comments = work orders.** Start every order with the marker so workers parse you, not
    human chatter:

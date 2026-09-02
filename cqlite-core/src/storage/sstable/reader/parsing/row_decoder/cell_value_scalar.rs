@@ -306,21 +306,20 @@ impl V5CompressedLegacyParser {
                         column.name, e
                     ))
                 })?;
-                let date_len = date_len as usize;
                 let bytes_consumed = data[off..].len() - remaining.len();
                 off += bytes_consumed;
 
-                if date_len != 4 {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': expected date length 4, got {}",
-                        column.name, date_len
-                    )));
-                }
+                // #3848: compare the RAW `u64` against the required width, then
+                // narrow. Casting first would let `(1 << 32) + N` pass the `== N`
+                // test on a 32-bit target (truncation is chosen, not random).
+                let date_len =
+                    checked_vuint_exact_length(date_len, &[4], "Cell", &column.name, "date")?;
 
-                if off + 4 > data.len() {
+                if date_len > data.len().saturating_sub(off) {
                     return Err(Error::corruption(format!(
-                        "Cell '{}': need 4 bytes for date, only {} available",
+                        "Cell '{}': need {} bytes for date, only {} available",
                         column.name,
+                        date_len,
                         data.len() - off
                     )));
                 }
@@ -430,21 +429,19 @@ impl V5CompressedLegacyParser {
                         column.name, e
                     ))
                 })?;
-                let len = len as usize;
                 let bytes_consumed = data[off..].len() - remaining.len();
                 off += bytes_consumed;
 
-                if len != 2 {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': expected smallint length 2, got {}",
-                        column.name, len
-                    )));
-                }
+                // #3848: compare the RAW `u64` against the required width, then
+                // narrow. Casting first would let `(1 << 32) + N` pass the `== N`
+                // test on a 32-bit target (truncation is chosen, not random).
+                let len = checked_vuint_exact_length(len, &[2], "Cell", &column.name, "smallint")?;
 
-                if off + 2 > data.len() {
+                if len > data.len().saturating_sub(off) {
                     return Err(Error::corruption(format!(
-                        "Cell '{}': need 2 bytes for smallint, only {} available",
+                        "Cell '{}': need {} bytes for smallint, only {} available",
                         column.name,
+                        len,
                         data.len() - off
                     )));
                 }
@@ -469,18 +466,15 @@ impl V5CompressedLegacyParser {
                         column.name, e
                     ))
                 })?;
-                let len = len as usize;
                 let bytes_consumed = data[off..].len() - remaining.len();
                 off += bytes_consumed;
 
-                if len != 1 {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': expected tinyint length 1, got {}",
-                        column.name, len
-                    )));
-                }
+                // #3848: compare the RAW `u64` against the required width, then
+                // narrow. Casting first would let `(1 << 32) + N` pass the `== N`
+                // test on a 32-bit target (truncation is chosen, not random).
+                let len = checked_vuint_exact_length(len, &[1], "Cell", &column.name, "tinyint")?;
 
-                if off >= data.len() {
+                if len > data.len().saturating_sub(off) {
                     return Err(Error::corruption(format!(
                         "Cell '{}': need 1 byte for tinyint, only {} available",
                         column.name,
@@ -507,19 +501,18 @@ impl V5CompressedLegacyParser {
                         column.name, e
                     ))
                 })?;
-                let time_len = time_len as usize;
                 let bytes_consumed = data[off..].len() - remaining.len();
                 off += bytes_consumed;
-                if time_len != 8 {
+                // #3848: compare the RAW `u64` against the required width, then
+                // narrow. Casting first would let `(1 << 32) + N` pass the `== N`
+                // test on a 32-bit target (truncation is chosen, not random).
+                let time_len =
+                    checked_vuint_exact_length(time_len, &[8], "Cell", &column.name, "time")?;
+                if time_len > data.len().saturating_sub(off) {
                     return Err(Error::corruption(format!(
-                        "Cell '{}': expected time length 8, got {}",
-                        column.name, time_len
-                    )));
-                }
-                if off + 8 > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': need 8 bytes for time value, only {} available",
+                        "Cell '{}': need {} bytes for time value, only {} available",
                         column.name,
+                        time_len,
                         data.len() - off
                     )));
                 }
@@ -552,18 +545,15 @@ impl V5CompressedLegacyParser {
                         column.name, e
                     ))
                 })?;
-                let len = len as usize;
                 let bytes_consumed = data[off..].len() - remaining.len();
                 off += bytes_consumed;
 
-                if len != 4 && len != 16 {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': invalid inet length {}, expected 4 or 16",
-                        column.name, len
-                    )));
-                }
+                // #3848: compare the RAW `u64` against the required width, then
+                // narrow. Casting first would let `(1 << 32) + N` pass the `== N`
+                // test on a 32-bit target (truncation is chosen, not random).
+                let len = checked_vuint_exact_length(len, &[4, 16], "Cell", &column.name, "inet")?;
 
-                if off + len > data.len() {
+                if len > data.len().saturating_sub(off) {
                     return Err(Error::corruption(format!(
                         "Cell '{}': need {} bytes for inet, only {} available",
                         column.name,

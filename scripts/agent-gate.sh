@@ -2743,16 +2743,26 @@ apply_schemas_preflight() {
 #                                        DEFAULT object format, which is why a sha256 baseline
 #                                        advertisement is refused at the ref oracle rather than
 #                                        failing here as a mystery transfer error (job 309).
-#     git rev-parse --verify --quiet <rev>
+#     git rev-parse --verify --quiet <rev>^{commit}
 #                                        resolves a sha to a COMMIT in the isolated repository —
-#                                        the transfer assert and HEAD's own sha. Commits are
-#                                        never filtered out of a clone.
+#                                        the transfer assert, and the PEEL of HEAD's own sha
+#                                        (#3757: the LIVE side resolves the ref and does not peel
+#                                        it, so the only object read is here). Commits are never
+#                                        filtered out of a clone.
 #     git merge-base --is-ancestor       walks commit parents only.
 #     git rev-parse --is-shallow-repository / --git-path shallow / --git-path objects
 #                                        repository STATE reads (is the history truncated? where
 #                                        is the object store, so it can be offered to the
 #                                        isolated repo as an ALTERNATE?); no object access, no
 #                                        remote contact.
+#     git rev-parse --verify --quiet HEAD
+#                                        HEAD resolved to a sha, UNPEELED (#3757). A REF read, not
+#                                        an OBJECT read: measured in a promisor clone whose HEAD
+#                                        object was absent, this form invoked the remote helper
+#                                        ZERO times while the peeled `HEAD^{commit}` form it
+#                                        replaced invoked it TWICE (a lazy fetch under the LIVE
+#                                        repository's own config). The peel and the "is it a
+#                                        commit" validation happen in the isolated repository.
 #
 #   LOCAL UTILITIES (no network, no spawn, bounded work). THE AUTHORITATIVE SET IS
 #     `declared_externals` in scripts/tests/test_agent_gate_component_set.sh, which is checked
@@ -2808,27 +2818,68 @@ apply_schemas_preflight() {
 #     redefined.
 #
 # The rule that generalises all five: THIS PRE-FLIGHT ONLY EVER RESOLVES A URL INSIDE THE
-# ISOLATED SCRATCH REPOSITORY, AND ONLY EVER READS OBJECTS BY SHA IN THE LIVE ONE. A change that
-# breaks either half re-opens this list and belongs in review, not in a follow-up.
+# ISOLATED SCRATCH REPOSITORY, AND SINCE #3757 IT READS NO OBJECT IN THE LIVE ONE AT ALL — the
+# live repository is asked only for REFS, CONFIG and repository STATE, and every object read runs
+# BY SHA in the isolated repository with the lane's store attached as an ALTERNATE. The previous
+# wording — "only ever READS OBJECTS BY SHA in the live one" — is what licensed the peel #3757
+# removed: a sha-addressed read is still an OBJECT read, and in a promisor clone a missing object
+# is answered from the NETWORK under the live repository's own config, which is the one thing this
+# enumeration exists to forbid. A change that breaks either half re-opens this list and belongs in
+# review, not in a follow-up.
 
 # Probe state, set by _component_set_probe and read by the pure verdict/line helpers.
 # Globals rather than a parsed multi-line stdout: the probe does real I/O (fetch, git
 # show, a baseline `--list`), and routing its result through `$( )` would add a
 # newline-stripping value path for no benefit (the #3148 lesson, one guard over).
 _CS_KIND=""        # ok | no-tool | no-git | no-remote | unboundable | fetch-failed | baseline-*
-                   # | manifest-* | head-set-unmeasured
+                   # | manifest-* | head-set-unmeasured | repo-read-blocked
+                   # | read-dir-unisolated
 _CS_SHA="-"        # the origin/main sha40 the comparison actually used
 _CS_MISSING=""     # baseline components ABSENT from this tree's set (space separated)
 _CS_EXTRA=""       # branch-only components (NOT skew; recorded for audit only)
 _CS_UNCOMMITTED="" # of _CS_MISSING, those still PRESENT in the gate script AT HEAD, i.e.
                    # removed by an UNCOMMITTED working-tree edit (#3544 / job 215)
-_CS_READ_DIR=""    # THE REPOSITORY EVERY BASELINE/HEAD OBJECT READ RUNS IN (#3544 / job 268).
-                   # The isolated scratch when one exists, else this checkout.
+# THE "NOT ESTABLISHED YET" VALUE FOR `_CS_READ_DIR`, AND IT IS A NON-TRAVERSABLE PATH ON PURPOSE
+# (#3757). The obvious sentinels are both UNSAFE, measured rather than assumed (git 2.43.0, in a
+# real worktree):
+#   git -C ""            rev-parse --git-dir  -> rc 0, prints the LIVE worktree's git dir
+#   git -C ""            cat-file -e HEAD^{commit} -> rc 0  (a LIVE OBJECT READ)
+#   git -C <nonexistent> rev-parse --git-dir  -> rc 128, "cannot change to '…': No such file"
+# IT IS UNDER `/dev/null/` AND NOT A MERELY-ABSENT PATH (roborev job 372). An absent path is
+# absent only until someone creates it: `/nonexistent/` is not reserved, so root could make the
+# sentinel RESOLVE and a consumer reached before the scratch exists would then read a real
+# repository instead of failing. `/dev/null` is a CHARACTER DEVICE, so every path under it is
+# ENOTDIR for everyone including root — `mkdir /dev/null` itself fails "Not a directory" — which
+# makes the objection unexpressible rather than merely unlikely. Measured, same worktree:
+#   git -C /dev/null/<x> rev-parse --git-dir           -> rc 128, "cannot change to '…': Not a directory"
+#   git -C /dev/null/<x> cat-file -e HEAD^{commit}     -> rc 128, same
+#   git -C /dev/null/<x> merge-base --is-ancestor …    -> rc 128, same
+# NOTE this is defence in depth, NOT the control: the control is the AFFIRMATIVE test in
+# `_cs_read_dir_isolated_or_refuse`, which permits ONLY `$_CS_SCRATCH_DIR/repo`, so any other
+# value — resolvable or not — is already refused.
+# `-C ""` leaves the working directory UNCHANGED, so an EMPTY value silently MEANS this checkout —
+# the exact read the region's execution-route enumeration forbids — while a non-existent path
+# makes any consumer reached before the scratch exists fail CLOSED without touching the live
+# repository. The named refusal below still exists and is what a reader sees at the peel; this
+# value is what bounds every OTHER consumer, including the ones whose bodies are defined earlier
+# in this file than the assignment (lexical position is not execution order for a function body,
+# so no source scan can decide that ordering — the sentinel makes it moot).
+_CS_READ_DIR_UNSET='/dev/null/agent-gate-component-set-read-dir-not-established'
+_CS_READ_DIR="$_CS_READ_DIR_UNSET"
+                   # THE REPOSITORY EVERY BASELINE/HEAD OBJECT READ RUNS IN (#3544 / job 268).
+                   # ALWAYS the isolated scratch — "else this checkout" was written here while
+                   # the pre-flight still read objects live, and since #3757 it reads NONE
+                   # there, so that clause licensed exactly what the enumeration above forbids.
+                   # Set to `$_CS_READ_DIR_UNSET` at every probe entry (see above) and to the
+                   # scratch once it exists; a consumer must REFUSE any other value rather than
+                   # pass it to git — see `_cs_read_dir_isolated_or_refuse` (#3757).
 _CS_READ_ENV=()    # env fragment for those reads: `GIT_ALTERNATE_OBJECT_DIRECTORIES=<lane
                    # objects>` when reading in the scratch (HEAD's objects live in the lane),
                    # else EMPTY
-_CS_HEAD_SHA=""    # HEAD resolved to a sha IN THIS CHECKOUT, so the scratch can be asked about
-                   # it: `HEAD` inside the scratch would mean the SCRATCH's own unborn HEAD
+_CS_HEAD_SHA=""    # HEAD as a COMMIT sha, so the scratch can be asked about it: `HEAD` inside the
+                   # scratch would mean the SCRATCH's own unborn HEAD. The REF is resolved in this
+                   # checkout (unpeeled) and PEELED in the scratch (#3757) — peeling reads an
+                   # object, and in the live repository that read can lazily fetch
 _CS_SCRATCH_DIR="" # the isolated scratch repo the baseline fetch ran in (#3544 / job 242)
 _CS_BASE_OBJ=""    # HOW the baseline COMMIT was obtained: reused (already in this repository)
                    # | fetched (the isolated hop + verified transfer) — job 258
@@ -4552,11 +4603,58 @@ _cs_live_refuse() {
   return 1
 }
 
+# _cs_read_dir_isolated_or_refuse <what>: assert that `$_CS_READ_DIR` names the ISOLATED scratch
+# before its value is handed to git, and set a NAMED refusal if it does not. Returns 0 when it SET
+# a refusal (the caller must return), 1 otherwise — the same contract as `_cs_live_refuse`, so the
+# two read alike at a call site.
+#
+# WHY A REFUSAL AND NOT AN ASSERTION-BY-COMMENT (#3757): a wrong value here silently redirects an
+# OBJECT read into the live repository, which is the one thing the execution-route enumeration at
+# the head of this region forbids.
+#
+# AND WHY IT IS AFFIRMATIVE, NOT A LIST OF BAD STATES (roborev job 339, item 5). The first version
+# enumerated three: empty (because `git -C ""` leaves the working directory unchanged, so it MEANS
+# this checkout), the UNSET sentinel, and `$REPO_ROOT`. That was sound for the three assignment
+# sites that exist and NOTHING PINNED THE NUMBER OF SITES, so a future fourth
+# `_CS_READ_DIR=<some live-ish path>` would pass the `*)` arm silently — the permissive-default
+# shape this pre-flight keeps ruling against. The question is now asked the other way round: the
+# value must BE the scratch this run created. `_CS_SCRATCH_DIR` is set from `$csdir` at the top of
+# the scratch block, before `_CS_READ_DIR="$csdir/repo"` in the same function, so the two are
+# derived from one value and comparing them cannot go stale; a probe that never got that far
+# leaves them unequal and is refused. The three named states survive only as DIAGNOSTIC TEXT, so
+# an operator still reads a cause rather than a bare mismatch.
+_cs_read_dir_isolated_or_refuse() {
+  local why
+  if [ -n "$_CS_SCRATCH_DIR" ] && [ "$_CS_READ_DIR" = "$_CS_SCRATCH_DIR/repo" ]; then
+    return 1
+  fi
+  case "$_CS_READ_DIR" in
+    "")                        why="EMPTY, and git reads \`-C \"\"\` as 'leave the working directory unchanged' — i.e. the LIVE checkout" ;;
+    "$_CS_READ_DIR_UNSET")     why="still the 'not established' sentinel ($_CS_READ_DIR), so the isolated scratch was never created" ;;
+    "$REPO_ROOT")              why="the LIVE checkout ($_CS_READ_DIR)" ;;
+    *)                         why="'$_CS_READ_DIR', which is not the scratch this run created (\$_CS_SCRATCH_DIR is ${_CS_SCRATCH_DIR:-EMPTY})" ;;
+  esac
+  _CS_KIND=read-dir-unisolated
+  _CS_DETAIL="refusing to $1: the isolated read repository was never established (\$_CS_READ_DIR is $why), and an object read in the live repository can be answered from the NETWORK by a promisor remote under that repository's own config. This is a code-path defect in the pre-flight, not a state of your checkout: the scratch assignment was skipped or removed"
+  return 0
+}
+
 _component_set_probe_inner() {
   # `_CS_READ_ENV` now carries ONLY what is specific to a read location (the alternate). The
   # neutralisers — `GIT_NO_LAZY_FETCH`, `GIT_NO_REPLACE_OBJECTS`, the config suppressors — live in
   # the ONE allowlist (`_CS_GIT_ENV`) that every git call in this pre-flight now runs under.
-  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=(); _CS_HEAD_SHA=""
+  # `_CS_READ_DIR` STARTS AT THE UNSET SENTINEL, NOT AT `$REPO_ROOT` (#3757). The old initialiser
+  # made THE LIVE CHECKOUT the value every consumer would see if the scratch assignment were ever
+  # skipped, so "this pre-flight reads no object in the live repository" held only because every
+  # earlier failure `return 0`s before that assignment — an ORDERING property nothing checked.
+  # Job 314 rejected the same reasoning in this same function ("relying on 'the parent happens to
+  # go first'... is made explicit instead"). There is no reachable route to it today; this is
+  # HARDENING, and it is made real by three things rather than by tracing: the sentinel (a
+  # non-existent path, so an unguarded consumer fails CLOSED instead of reading live — see its
+  # measurement above), the named runtime refusal at the peel
+  # (`_cs_read_dir_isolated_or_refuse`), and a structural assert over this function's own body in
+  # scripts/tests/test_agent_gate_component_set.sh (`3757-read-dir-shape`).
+  _CS_READ_DIR="$_CS_READ_DIR_UNSET"; _CS_READ_ENV=(); _CS_HEAD_SHA=""
   _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""; _CS_UNCOMMITTED=""
   _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
   _CS_HEAD_SET=""; _CS_HEAD_ERR=""; _CS_BASE_SRC=""; _CS_HEAD_SRC=""; _CS_BASE_OBJ=""
@@ -4962,6 +5060,26 @@ _component_set_probe_inner() {
   _cs_alt_q="${lane_objects//\\/\\\\}"; _cs_alt_q="${_cs_alt_q//\"/\\\"}"
   _CS_READ_DIR="$csdir/repo"
   _CS_READ_ENV=("GIT_ALTERNATE_OBJECT_DIRECTORIES=\"$_cs_alt_q\"")
+  # THE ISOLATION ASSERTION LIVES HERE, WHERE IT DOMINATES EVERY CONSUMER (roborev job 347). It
+  # used to sit immediately before the HEAD peel, and that was the repo's own standing error: a
+  # check placed AFTER the harmful effect can only REPORT it, never PREVENT it — the same family as
+  # job 264's transfer hop (where the sha assert sat downstream of the fetch it was meant to
+  # validate) and job 290's certification window. FOUR object reads run BEFORE the peel — the fast
+  # path's `cat-file -e` and `rev-list`, and the manifest `ls-tree`/`show` at the baseline rev — so
+  # an unisolated value performed prohibited LIVE reads and only then got reported.
+  #
+  # ONE PLACEMENT, NOT N SCATTERED ASSERTS, and this is the one line where that is expressible:
+  # `_CS_READ_DIR` is assigned in exactly three places (the global initialiser, the probe's own
+  # reset, and this line), nothing reassigns it afterwards, and every consumer — in this function
+  # and in the two helpers it calls — runs after this point. So a single assert here is a
+  # DOMINATOR: there is no path from an unisolated value to a git call.
+  #
+  # NOT MERELY A RESTATEMENT OF THE LINE ABOVE IT. What it catches is the assignment itself being
+  # wrong rather than absent: `$csdir` empty (the value would be the plausible-looking `/repo`),
+  # a future edit pointing it at the live checkout, or a stale `_CS_SCRATCH_DIR` from an earlier
+  # probe in the same process. The `-n "$_CS_SCRATCH_DIR"` half is what makes the empty-`csdir`
+  # case a refusal instead of an accidental match.
+  if _cs_read_dir_isolated_or_refuse "read objects for the component-set comparison"; then return 0; fi
 
   # ---- DO WE ALREADY HOLD THAT COMMIT? -----------------------------------------------------
   # If this repository already has the object, there is NOTHING to fetch: a git object is
@@ -5209,15 +5327,100 @@ _component_set_probe_inner() {
   # is BOUNDED, because the objects it reads come from the shared store.
   # HEAD IS RESOLVED TO A SHA IN THIS CHECKOUT FIRST, because the ancestry walk now runs in
   # `$_CS_READ_DIR` — and inside the isolated scratch the ref `HEAD` would mean the SCRATCH's own
-  # (unborn) HEAD, silently answering a different question. Commit objects are never omitted by any
-  # partial-clone filter, so resolving it is genuinely local; an unresolvable HEAD (unborn, or a
+  # (unborn) HEAD, silently answering a different question. An unresolvable HEAD (unborn, or a
   # broken detached HEAD) is INDETERMINATE below, exactly as an unanswerable probe was before.
   # BOUNDED, not annotated local-only (job 312): same config read, same FIFO exposure; and the
   # `|| true` would have turned a kill into an empty sha, taking the rc=128 branch below with a
   # cause that names HEAD rather than the blocked read.
-  _cs_live_git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}"
-  if _cs_live_refuse "HEAD's commit sha"; then return 0; fi
-  _CS_HEAD_SHA="$_CS_LIVE_OUT"
+  #
+  # THE LIVE CALL RESOLVES THE REF AND DOES NOT PEEL IT (#3757). It used to ask for
+  # `HEAD^{commit}`, and a PEEL is an OBJECT READ in the LIVE repository: in a promisor clone a
+  # missing object is answered by a LAZY FETCH under that repository's OWN local config, where a
+  # `url.*.insteadOf` rewrite invokes a remote HELPER — the route jobs 268/299 removed from every
+  # other read in this pre-flight. The comment this replaces argued the read was "genuinely local"
+  # because no partial-clone filter omits COMMITS; that is true and it answers the wrong question,
+  # because the hazard is what happens when the object is absent for any OTHER reason (a pruned or
+  # corrupted store, a hand-written ref, a peer lane's edit to the SHARED `.git`).
+  # `GIT_NO_LAZY_FETCH=1` is carried in `_CS_GIT_ENV` as a BELT (git >= 2.36, silently absent on an
+  # older supported host), which is exactly why it cannot BE the control.
+  #
+  # MEASURED, with a discriminating control, rather than reasoned from the docs. Promisor clones of
+  # a local bare origin (`--filter=blob:none` AND `--filter=tree:0`, `uploadpack.allowfilter=true`),
+  # HEAD pointed at a commit present on the remote and ABSENT locally (absence confirmed with
+  # `GIT_NO_LAZY_FETCH=1 cat-file -e`), the promisor URL replaced by an `ext::` recorder script that
+  # logs every invocation; git 2.43.0, both filters behaving identically:
+  #
+  #   rev-parse --verify --quiet HEAD              rc=0    4ms   helper invocations: 0  (sha printed)
+  #   rev-parse --verify --quiet 'HEAD^{commit}'   rc=1   10ms   helper invocations: 2  (LAZY FETCH)
+  #   cat-file -t <that sha>                       rc=128        helper invocations: 1  (LAZY FETCH)
+  #
+  # A second measurement separates the OBJECT READ from the network, in a plain repository with a
+  # FIFO planted at HEAD's LOOSE object path (this pre-flight's own FIFO idiom):
+  #
+  #   rev-parse --verify --quiet HEAD              rc=0    3ms   (sha printed)
+  #   rev-parse --verify --quiet 'HEAD^{commit}'   BLOCKED       (bound fired at 3s)
+  #
+  # So the unpeeled form resolves the REF without reading the OBJECT it names, and that is what
+  # makes the peel movable. The peel — and the "is it a COMMIT" validation — happen below, in the
+  # ISOLATED scratch, which configures no promisor and reaches HEAD's objects only through an
+  # alternate: pure object storage, no config, nothing for a helper to be invoked from.
+  #
+  # THE ARGUMENT MUST STAY A BARE REF NAME, and this is the contract a future caller inherits: the
+  # measurement above says a REF resolution reads no object, and it says nothing about a rev
+  # EXPRESSION. `HEAD^{commit}`, `HEAD~1`, `<tag>^{}` and a tag name all DEREFERENCE — i.e. read
+  # objects — so any of them here re-opens the lazy-fetch route this replaced, whatever the
+  # `--verify --quiet` spelling suggests. A caller needing a peeled or walked rev must ask the
+  # SCRATCH, exactly as the block below does. `scripts/tests/test_agent_gate_component_set.sh::
+  # 3757-live-call-allowlist` fails the suite if any live call grows a peel operator (or any other
+  # undeclared argument shape).
+  _cs_live_git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet HEAD
+  if _cs_live_refuse "HEAD's sha (the ref only, unpeeled)"; then return 0; fi
+  local head_unpeeled="$_CS_LIVE_OUT" peel_rc=0
+  if [ -n "$head_unpeeled" ]; then
+    # THE READ REPOSITORY IS ASSERTED, NOT ASSUMED (#3757) — and the assertion is UPSTREAM, at the
+    # scratch assignment, not here (roborev job 347). A check at this consumer could only report a
+    # prohibited read that the four earlier consumers had already performed. See the assertion at
+    # the `_CS_READ_DIR="$csdir/repo"` assignment for why one placement there dominates all of
+    # them; there is deliberately no second check at this site, because two checks on one property
+    # is the drift this region keeps removing.
+    # PEEL + COMMIT-VALIDATE IN THE ISOLATED SCRATCH, and BOUNDED there for the reason job 315
+    # recorded for the ancestry walk: this reads a commit object out of the LANE's SHARED object
+    # store through the alternate, and a LOOSE object is read as a stream, so a FIFO planted at an
+    # object path by a PEER LANE hangs it. 124/137/`$_CS_UNBOUNDABLE_RC` therefore take the SAME
+    # `repo-read-blocked` / UNBOUNDED refusals as every other read here — a missing capability must
+    # never inherit the permissive branch.
+    #
+    # The capture triple is already memoized IN THE PARENT by the earlier DIRECT `_cs_live_git`
+    # calls (the git-directory read at the top of this function), so this command substitution
+    # cannot leave capture files behind with nobody holding their paths — the leak
+    # `_cs_live_git`'s header records, and the same reasoning the slow path's `cssha=$( … )` relies on.
+    _CS_HEAD_SHA=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" rev-parse --verify --quiet "${head_unpeeled}^{commit}" 2>/dev/null); peel_rc=$?
+    if [ "$peel_rc" -eq 124 ] || [ "$peel_rc" -eq 137 ] || [ "$peel_rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+      _CS_KIND=repo-read-blocked
+      if [ "$peel_rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+        # `repo-read-blocked`, NOT `unboundable`, AND THE PRECEDENT IS THE ADJACENT ANCESTRY WALK
+        # (roborev job 325, nit 4). Every `_cs_live_git` call maps this same condition to
+        # `unboundable`, and that kind's own comment argues against "a second spelling... two
+        # names for one fact" — so the choice is stated rather than left to be inferred. Two
+        # reasons for following the walk instead of the wrapper: this is a read of the LANE's
+        # SHARED OBJECT STORE (the walk's subject), not of the live repository's config (the
+        # wrapper's), so an operator reading the detail is being sent to `find <objdir> -type p`
+        # and not to `git config --get-all include.path`; and the walk 15 lines below already
+        # spells an unboundable object read this way, so matching the wrapper here would put TWO
+        # spellings on the SAME condition inside one block. No verdict changes either way —
+        # both kinds are non-`ok`, hence UNMEASURED.
+        _CS_DETAIL="peeling HEAD ($head_unpeeled) to a commit could not be BOUNDED on this host (no timeout, no gtimeout, no sleep for the bash watchdog, or no capture file) — refusing to run an UNBOUNDED read of the lane's object store, which could hang the gate outright; a missing capability must not inherit the permissive branch"
+      else
+        _CS_DETAIL="peeling HEAD ($head_unpeeled) to a commit EXCEEDED its ${_CS_BOUND_HINT}s bound reading that object from this lane's SHARED object store — the read never returned. A LOOSE object there is read as a stream, so a FIFO planted at an object path hangs it, and on this fleet that store is shared by every lane on the box. Inspect it by resolving the object directory with \`git rev-parse --git-path objects\` and searching that directory for FIFOs with \`find <objdir> -type p\`"
+      fi
+      return 0
+    fi
+    # A PEEL THAT FAILED IS INDETERMINATE, NEVER A FALSE `BEHIND` — the rc=128 semantics below are
+    # unchanged. HEAD names no commit this run can READ: an unborn or broken HEAD, a ref naming a
+    # non-commit, or an object genuinely absent from the lane's store. Deliberately NOT fetched: a
+    # missing HEAD object is a broken checkout, not a reason for a pre-flight whose whole premise is
+    # that it reaches no network to reach one.
+  fi
   if [ -z "$_CS_HEAD_SHA" ]; then
     rc=128
   else
@@ -17468,7 +17671,7 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
@@ -17479,6 +17682,7 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_perf_capability_bootstrap.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_claim_lock.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_claim_heartbeat.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_drive_issue_state.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/flow/tests/claim-resume.test.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_premerge_assert.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_base_staleness.sh" >>"$log" 2>&1 &&

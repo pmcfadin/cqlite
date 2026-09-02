@@ -809,13 +809,13 @@ impl V5CompressedLegacyParser {
         };
         let (row_header, row_size) =
             self.parse_row_metadata(data, row_metadata_offset, row_flags, extended_flags)?;
-        let next_offset = (row_metadata_offset + row_header.row_size_vint_len) + row_size as usize;
-        if next_offset > data.len() {
+        let body_start = row_metadata_offset + row_header.row_size_vint_len;
+        if row_size > data.len().saturating_sub(body_start) as u64 {
             return Err(Error::corruption(
                 "prime_shadow: row framing extends past decompressed block".to_string(),
             ));
         }
-        Ok(next_offset)
+        Ok(body_start + row_size as usize)
     }
 
     /// Parse all partitions in a decompressed block, returning per-row timestamps.
