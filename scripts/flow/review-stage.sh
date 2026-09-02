@@ -1364,8 +1364,11 @@ commit_write() {
   # delete the PUBLISHED report. It is done BEFORE the line below because that line is the write
   # boundary section 11f instruments — an interruption AT the boundary is an interruption AFTER the
   # rename, and the reservation is already fulfilled at that instant. Matched by PATH, so no caller
-  # has to remember, and a no-op for every write whose destination was never reserved (the stage
-  # record, and `record-author-performed`'s replacement of an existing report).
+  # has to remember, and a no-op for every write whose destination was never reserved — the stage
+  # record. (This parenthetical also named `record-author-performed`'s replacement of an existing
+  # report until #3751 round 15, U1: that write now lands in a freshly RESERVED generation rather
+  # than over the current report, so the de-registration correctly FIRES for it. Corrected here
+  # rather than left standing, because a comment asserting a mechanism decays exactly like code.)
   [ "$dest" != "$RESERVED_PATH" ] || RESERVED_PATH=""
   WRITE_TMP=""
 }
