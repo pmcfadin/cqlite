@@ -16086,7 +16086,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
