@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=567
+CASE_FLOOR=568
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -5172,6 +5172,56 @@ ticket_case version-bool       '{"keyspace":"ks","table":"t","ddl":"d","version"
 # reason a control can be schema-checked without being forced to be a full scan.
 ticket_case narrowed-limit     '{"version":2,"keyspace":"ks","table":"t","ddl":"d","limit":10}' 0 1
 ticket_case narrowed-columns   '{"version":2,"keyspace":"ks","table":"t","ddl":"d","columns":["a"]}' 0 1
+
+# THE FROZEN TICKET IS RE-VERIFIED AROUND EVERY INVOCATION -- pinned
+# STRUCTURALLY, and labelled as such. A mid-session swap cannot be induced from
+# outside the driver: the frozen copy is created during the run, so there is no
+# moment at which this suite can replace it between the two checks. What IS
+# checkable is that both checks exist at every invocation site, which is the
+# property the finding is about. Found by a plant that removed one call and
+# produced no red at all.
+if python3 - "$DRIVER" <<'PYINNER'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+lines = source.splitlines()
+problems = []
+if "verify_frozen_ticket()" not in source:
+    problems.append("the driver has no verify_frozen_ticket helper")
+# The helper must REFUSE, not warn: a mutated measurement input is not a nit.
+body = re.search(r"verify_frozen_ticket\(\) \{.*?\n  \}", source, re.S)
+if not body:
+    problems.append("verify_frozen_ticket's body was not found")
+elif "die ticket-mutated" not in body.group(0):
+    problems.append("verify_frozen_ticket does not die on a mismatch")
+# Every load-generator invocation must be BRACKETED by a check.
+invocations = [i for i, line in enumerate(lines)
+               if '"$LOADGEN_BIN" --endpoint' in line]
+if len(invocations) < 2:
+    problems.append("only %d load-generator invocations were found; the "
+                    "derivation has broken" % len(invocations))
+for index in invocations:
+    before = any("verify_frozen_ticket" in lines[j]
+                 for j in range(max(0, index - 6), index))
+    after = any("verify_frozen_ticket" in lines[j]
+                for j in range(index, min(len(lines), index + 12)))
+    if not before:
+        problems.append("the invocation at line %d has no digest check BEFORE it"
+                        % (index + 1))
+    if not after:
+        problems.append("the invocation at line %d has no digest check AFTER it "
+                        "-- a before-only check cannot see a swap DURING the run"
+                        % (index + 1))
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "every load-generator invocation is bracketed by a frozen-ticket digest check"
+else
+  bad "a load-generator invocation is not bracketed by a digest check (see above)"
+fi
 
 # THE EXPORT INTERVAL, PINNED STRUCTURALLY. `die` writes a manifest, so any
 # abort between the freeze and the export of AB_TICKET_TEMPLATE records a ticket
