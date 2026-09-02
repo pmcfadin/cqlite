@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=518
+CASE_FLOOR=540
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -203,6 +203,10 @@ main()
 PYEOF
 
 mkfixture() { python3 "$TMP/mkfixture.py" "$@"; }
+
+# Sha padding, so the arm cases read as shas rather than as string arithmetic.
+ZEROS31="0000000000000000000000000000000"
+ONES31="1111111111111111111111111111111"
 
 # A CompressionInfo.db header, written from the definitive guide's layout
 # (appendix-g-compression-chunk-formats.md 34-70; authority
@@ -3867,6 +3871,70 @@ else
   bad "an AB_* export precedes its variable's final value (see above)"
 fi
 
+# ---- the analyzer enforces the arms and the ticket ---------------------------
+# ROUND 20 findings 1 and 2. The driver refused both and the analyzer trusted
+# the manifest for both, so a hand-made or edited manifest received a #2820
+# band verdict over any two commits and any narrowed template. These are
+# fixture cases because that is precisely the input the driver never produced.
+arms_case() { # <name> <base-commit> <head-commit> <want-verdict> <want-exit>
+  mkfixture "$TMP/arms" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  AB_B="$2" AB_H="$3" python3 - "$TMP/arms/manifest.json" <<'PYINNER'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["arms"]["base"]["commit"] = os.environ["AB_B"]
+manifest["arms"]["head"]["commit"] = os.environ["AB_H"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/arms"
+  check_verdict "$1" "$4" "$5" single-stream
+}
+arms_case "the #2820 pair" "cfa93fe98${ZEROS31}" "cfa93fe99${ONES31}" MEETS-TARGET 0
+# UNRELATED commits: a verdict authoritative about something never measured.
+arms_case "arms that are not #2820 at all" "aaaaaaaa1${ZEROS31}" "bbbbbbbb2${ONES31}" UNMEASURED 7
+check_cause "arms that are not the #2820 pair" arms-not-2820
+# REVERSED: the head arm is the parent, which inverts the ratio's meaning.
+arms_case "the pair REVERSED" "cfa93fe99${ONES31}" "cfa93fe98${ZEROS31}" UNMEASURED 7
+check_cause "the #2820 pair reversed" arms-not-2820
+# Base equal to head is not a comparison at all.
+arms_case "both arms identical" "cfa93fe99${ONES31}" "cfa93fe99${ONES31}" UNMEASURED 7
+check_cause "both arms identical" arms-not-2820
+
+ticket_manifest_case() { # <name> <python-mutation> <want-verdict> <want-exit>
+  mkfixture "$TMP/tkm" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/tkm/manifest.json" <<PYINNER
+import json
+
+path = "$TMP/tkm/manifest.json"
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+ticket = manifest["workload"]["ticket_content"]
+$2
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/tkm"
+  check_verdict "$1" "$3" "$4" single-stream
+}
+# `shape: full` is a NOUN standing in for an ADJECTIVE: Shape::Full preserves
+# the template's bounds, projections, predicates, filters and aggregations, so
+# every one of these satisfies the label and violates the property.
+ticket_manifest_case "a recorded ticket carrying a LIMIT"      'ticket["limit"] = 10' UNMEASURED 7
+check_cause "a recorded ticket carrying a LIMIT" ticket-not-full-ring
+ticket_manifest_case "a recorded ticket projecting columns"    'ticket["columns"] = ["a"]' UNMEASURED 7
+check_cause "a recorded ticket projecting columns" ticket-not-full-ring
+ticket_manifest_case "a recorded ticket with a predicate"      'ticket["predicates"] = [{"column": "a", "op": "Gt", "value": 1}]' UNMEASURED 7
+check_cause "a recorded ticket with a predicate" ticket-not-full-ring
+ticket_manifest_case "a recorded ticket narrowing the token range" 'ticket["token_start"] = 42' UNMEASURED 7
+check_cause "a recorded ticket narrowing the token range" ticket-not-full-ring
+ticket_manifest_case "a manifest recording NO ticket"          'manifest["workload"]["ticket_content"] = None' UNMEASURED 7
+check_cause "a manifest recording no ticket at all" ticket-unrecorded
+
 # ---- the machine's CPUs, not the process's ----------------------------------
 # ROUND 19 FINDING A. `nproc` reports CPUs available to the PROCESS: on this box
 # `nproc` is 16 and `taskset -c 0-3 nproc` is 4, while the sysfs online set is
@@ -4308,6 +4376,80 @@ PYINNER
     bad "a header truncated to $cut bytes was accepted"
   fi
 done
+
+# ROUND 20 FINDING 3, BOTH DIRECTIONS. The mirror of pathsafe::assert_within was
+# wrong two ways: too STRICT per file (immediate-parent equality, so a symlink
+# resolving deeper INSIDE the served directory was omitted from the size and
+# compression checks) and ABSENT for the directory itself (so a served dir whose
+# canonical target escapes --data-dir passed pre-flight and the server then
+# refused every request -- a FALSE ACCEPT, which costs the whole session).
+rm -rf "$TMP/deepcorpus" && mkdir -p "$TMP/deepcorpus/sub"
+truncate -s 1000 "$TMP/deepcorpus/sub/real-Data.db"
+mkcompressioninfo "$TMP/deepcorpus/sub/real-CompressionInfo.db" LZ4Compressor
+truncate -s 1000 "$TMP/deepcorpus/nb-1-big-Data.db"
+mkcompressioninfo "$TMP/deepcorpus/nb-1-big-CompressionInfo.db" LZ4Compressor
+# A symlink whose target is DEEPER INSIDE the served directory. assert_within is
+# ANCESTOR containment, so the server SERVES this; the old mirror omitted it.
+ln -sf "sub/real-Data.db" "$TMP/deepcorpus/nb-2-big-Data.db"
+mkcompressioninfo "$TMP/deepcorpus/nb-2-big-CompressionInfo.db" LZ4Compressor
+DEEP="$(python3 "$SUPPORT" probe-compression "$TMP/deepcorpus")"
+if [ "${DEEP%% *}" = "LZ4" ] && printf '%s' "$DEEP" | grep -q '2 served'; then
+  ok "a symlink resolving deeper INSIDE the served dir is counted, as the server counts it"
+else
+  bad "an in-tree symlink was omitted from the census ($DEEP)"
+fi
+# ...and its companion is found beside the SYMLINK, not beside the target: the
+# server opens the entry as enumerated. Removing the symlink's own
+# CompressionInfo must be detected even though the TARGET still has one.
+rm -f "$TMP/deepcorpus/nb-2-big-CompressionInfo.db"
+DEEP="$(python3 "$SUPPORT" probe-compression "$TMP/deepcorpus")"
+if [ "${DEEP%% *}" = "MISSING" ]; then
+  ok "a symlinked SSTable's companion is looked for beside the SYMLINK, not the target"
+else
+  bad "the companion was resolved against the canonical target ($DEEP)"
+fi
+# A symlink ESCAPING the served directory is still excluded, as before.
+rm -rf "$TMP/outside" && mkdir -p "$TMP/outside"
+truncate -s 1000 "$TMP/outside/escapee-Data.db"
+rm -f "$TMP/deepcorpus/nb-2-big-Data.db"
+ln -sf "$TMP/outside/escapee-Data.db" "$TMP/deepcorpus/nb-3-big-Data.db"
+DEEP="$(python3 "$SUPPORT" probe-compression "$TMP/deepcorpus")"
+if printf '%s' "$DEEP" | grep -q '1 served'; then
+  ok "a symlink escaping the served dir is still excluded, as the server excludes it"
+else
+  bad "an escaping symlink was counted ($DEEP)"
+fi
+# CONTAINMENT IS COMPONENT-WISE: /a/bc must not be treated as inside /a/b.
+if python3 - "$HERE" <<'PYINNER'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+
+cases = [("/a/b", "/a/b", True), ("/a/b", "/a/b/c", True),
+         ("/a/b", "/a/bc", False), ("/a/b", "/a", False),
+         ("/a/b/", "/a/b/c", True)]
+problems = []
+for root, target, want in cases:
+    got = S._canonically_within(root, target)
+    if got != want:
+        problems.append("within(%r, %r) -> %r, expected %r" % (root, target, got, want))
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "containment is component-wise: /a/bc is not inside /a/b"
+else
+  bad "containment is string-wise, so a prefix-sharing sibling counts as inside"
+fi
+# THE DIRECTORY-LEVEL CHECK, which the mirror omitted entirely.
+rm -rf "$TMP/escaperoot" && mkdir -p "$TMP/escaperoot/ks" "$TMP/elsewhere/tbl"
+truncate -s 1000 "$TMP/elsewhere/tbl/nb-1-big-Data.db"
+ln -sfn "$TMP/elsewhere/tbl" "$TMP/escaperoot/ks/tbl"
+printf '{"version":2,"keyspace":"ks","table":"tbl","ddl":"CREATE TABLE ks.tbl (a int PRIMARY KEY)","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' > "$TMP/escape-ticket.json"
+run_support census-served "$TMP/escaperoot" "$TMP/escape-ticket.json"
+check_support "a served directory whose canonical target escapes --data-dir" 1 served-dir-escapes
 
 # THE AGGREGATE: checked per FILE, so one wrong table among right ones refuses.
 rm -rf "$TMP/mixedcorpus" && mkdir -p "$TMP/mixedcorpus"
