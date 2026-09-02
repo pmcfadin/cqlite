@@ -276,9 +276,34 @@ done
 # ONE network call for the whole fleet — never one call per issue.
 BRANCH_PAIRS=""     # lines: <issue><TAB><ref>
 BRANCH_ISSUES=""    # unique issue numbers, one per line
+# net_read <label> <cmd...> — a NETWORK read, BOUNDED (#3436, roborev round 35).
+#
+# The three reads below (git ls-remote x2, gh project item-list) reach the network and were
+# UNBOUNDED, while the lane-lock probe in this same file has been bounded since it was written.
+# GIT_TERMINAL_PROMPT=0 and --no-optional-locks stop an interactive PROMPT; they do nothing about
+# a DNS black-hole, a TCP connect that never completes, or a server that accepts and then stalls.
+# This tool's entire contract is that it never gives a clean bill of health -- and a HANG is
+# strictly worse than the UNMEASURABLE it promises, because an unattended sweep then produces no
+# verdict at all instead of a loud "could not tell". CLAUDE.md makes the same call for the gate's
+# baseline fetch: a probe that cannot be bounded is not run.
+#
+# 45s, not the probe's 20s: these cross a network, and a bound tight enough to fire on an
+# ordinary slow response would convert working runs into UNMEASURABLE — the false-negative
+# direction, in the one tool whose output is only ever a positive detection.
+# A missing `timeout` is NOT a reason to skip the read (that would lose the fact entirely); it
+# runs unbounded, exactly as the probe does, and for the same stated reason.
+net_read() {
+  local label="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 45 "$@"
+  else
+    "$@"
+  fi
+}
+
 scan_branches() {
   local raw line ref rest num
-  if ! raw="$(git ls-remote --heads "$REMOTE" 'issue-*' 2>/dev/null)"; then
+  if ! raw="$(net_read issue-branches git ls-remote --heads "$REMOTE" 'issue-*' 2>/dev/null)"; then
     return 1
   fi
   while IFS= read -r line; do
@@ -308,7 +333,7 @@ EOF
 CLAIM_ISSUES=""
 scan_claims() {
   local raw line ref num
-  if ! raw="$(git ls-remote "$REMOTE" 'refs/claims/issue-*' 2>/dev/null)"; then
+  if ! raw="$(net_read claim-refs git ls-remote "$REMOTE" 'refs/claims/issue-*' 2>/dev/null)"; then
     return 1
   fi
   while IFS= read -r line; do
@@ -341,7 +366,7 @@ scan_board() {
   # can only ever HIDE rows. So every row is emitted (a draft as the literal `null`),
   # READY_PAGE_ROWS counts them all, and the numeric filter happens below in bash, where
   # it belongs. One API call, no second page read.
-  if ! raw="$(gh project item-list "$BOARD_NUMBER" --owner "$BOARD_OWNER" \
+  if ! raw="$(net_read board-status gh project item-list "$BOARD_NUMBER" --owner "$BOARD_OWNER" \
                  --query 'status:Ready' --format json -L "$BOARD_LIMIT" \
                  --jq '.items[]|[(.content.type // "null"),(.content.repository // "null"),(.content.number // "null")]|join("|")' 2>/dev/null)"; then
     return 1

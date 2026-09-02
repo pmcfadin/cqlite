@@ -344,7 +344,9 @@
 #           delete the record. Without --force it requires our exact token
 #           (RELEASE-REFUSED otherwise); --force deletes unconditionally (reaper).
 #           Releasing a free lane is RELEASED (already free), exit 0 — idempotent, so
-#           cleanup paths are safe to run twice or after a crash.
+#           cleanup paths are safe to run twice or after a crash. With --expect that line
+#           also carries `precondition=NOT-EVALUATED`: the lane is free either way, but no
+#           lease was compared, and a caller must not read it as a satisfied CAS.
 #           --expect <lease>: OPTIONAL compare-and-swap, the same discipline as reclaim.
 #           The record's CURRENT lease must equal it exactly or the release is REFUSED
 #           (RELEASE-LOST reason=lease-mismatch, exit 2) rather than deleting a lock that
@@ -1730,7 +1732,20 @@ _release_locked() {
   if ! parse_record "$G_RECORD"; then
     # IDEMPOTENT on purpose: cleanup paths (trap handlers, a supervisor's teardown, a
     # second operator) must be safe to run twice or after a crash.
-    emit "RELEASED (already free) issue=$G_ISSUE record=absent lane-dir=$G_LANE"
+    # --expect NAMES AN INCARNATION, AND THERE IS NONE TO COMPARE (#3436, roborev round 35).
+    # Exit stays 0: idempotence is documented and depended on by the cleanup paths (trap
+    # handlers, supervisor teardown, a second operator), and finalize legitimately runs
+    # `release --expect` where a crash may already have removed the record. But reporting a
+    # bare "already free" to a caller who asked for COMPARE-AND-SWAP claims a precondition
+    # that was never evaluated — the absence of a bad signal read as a good one, which is the
+    # shape this repo refuses everywhere else. So the verdict NAMES what was not checked.
+    # It is DECLARED, not failed: a caller whose lease was reclaimed by someone else can see
+    # it in the line, and one that simply ran twice is unaffected.
+    if [ -n "$expect" ]; then
+      emit "RELEASED (already free) issue=$G_ISSUE record=absent expect=$expect precondition=NOT-EVALUATED (no record existed, so the lease you named was NOT compared; the lane is free either way) lane-dir=$G_LANE"
+    else
+      emit "RELEASED (already free) issue=$G_ISSUE record=absent lane-dir=$G_LANE"
+    fi
     return 0
   fi
   prev_token="$(record_token)"
@@ -1820,7 +1835,12 @@ cmd_release() {
   # creating the root (a release must not have to make a directory to say "already
   # free"). The check moved from the lane dir to the lock root with the files.
   if [ ! -d "$(lock_root)" ]; then
-    emit "RELEASED (already free) issue=$issue record=absent lane-dir=$lane"
+    if [ -n "$expect" ]; then
+      # Same as the in-lock path below: exit 0, but never claim a comparison that did not happen.
+      emit "RELEASED (already free) issue=$issue record=absent expect=$expect precondition=NOT-EVALUATED (no lock root existed, so the lease you named was NOT compared; the lane is free either way) lane-dir=$lane"
+    else
+      emit "RELEASED (already free) issue=$issue record=absent lane-dir=$lane"
+    fi
     return 0
   fi
   # --force IS THE BREAK-GLASS AND MUST NOT NEED AN IDENTITY (#3436, roborev round 5).

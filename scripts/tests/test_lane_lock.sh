@@ -2239,5 +2239,55 @@ fi
 kill_sleeper "$S48"
 rm -rf "$D48"
 
+# ===========================================================================
+echo "TEST 49: release --expect on an ABSENT record declares the precondition unevaluated (round 35)"
+# ===========================================================================
+# `--expect` asks for COMPARE-AND-SWAP. With no record there is nothing to compare, and the old
+# line said a bare "RELEASED (already free)" -- reporting a satisfied precondition that was never
+# evaluated, i.e. deriving a pass from the ABSENCE of a bad signal. Exit stays 0 because
+# idempotence is documented and depended on (trap handlers, supervisor teardown, and finalize
+# itself runs `release --expect` where a crash may already have removed the record), so the fix
+# is to DECLARE, not to fail. BOTH early-returns are covered: one fires before the lock root
+# exists, the other after -- round 35 named the first and the second was its sibling.
+D49="$(mktemp -d)"
+o49a="$(LANE_ROOT="$D49" bash "$LL" release 940 --expect 'x#1' 2>&1)"; rc49a=$?
+if [ "$rc49a" -eq 0 ] && printf '%s' "$o49a" | grep -q 'precondition=NOT-EVALUATED'; then
+  ok "(a) no lock root + --expect: exit 0 AND the line says the lease was not compared"
+else
+  bad "(a) expected an exit-0 declaration; got rc=$rc49a
+$o49a"
+fi
+mkdir -p "$D49/.lane-locks"
+o49b="$(LANE_ROOT="$D49" bash "$LL" release 940 --expect 'x#1' 2>&1)"; rc49b=$?
+if [ "$rc49b" -eq 0 ] && printf '%s' "$o49b" | grep -q 'precondition=NOT-EVALUATED'; then
+  ok "(b) lock root present but no record + --expect: same declaration (the sibling path)"
+else
+  bad "(b) the second early-return still claimed an unevaluated precondition: rc=$rc49b
+$o49b"
+fi
+# CONTROL: without --expect nothing changes. Without this, (a) and (b) would also pass if the
+# text were printed unconditionally, which would be noise on every ordinary cleanup release.
+o49c="$(LANE_ROOT="$D49" bash "$LL" release 940 2>&1)"; rc49c=$?
+if [ "$rc49c" -eq 0 ] && printf '%s' "$o49c" | grep -q 'RELEASED (already free)' \
+   && ! printf '%s' "$o49c" | grep -q 'precondition='; then
+  ok "(control) a plain release is untouched — no precondition= noise when none was asked for"
+else
+  bad "(control) a plain release changed shape: rc=$rc49c
+$o49c"
+fi
+# CONTROL: a REAL mismatch must still REFUSE (exit 2), or (a)/(b) would look like --expect is inert.
+sleeper; S49="$REPLY_SLEEPER"
+mkdir -p "$D49/lane-941"
+LANE_ROOT="$D49" LANE_LOCK_PID=$S49 bash "$LL" acquire 941 --lane-dir "$D49/lane-941" >/dev/null 2>&1
+o49d="$(LANE_ROOT="$D49" LANE_LOCK_PID=$S49 bash "$LL" release 941 --expect 'not-the-lease#1' 2>&1)"; rc49d=$?
+if [ "$rc49d" -ne 0 ] && printf '%s' "$o49d" | grep -q 'RELEASE-LOST.*lease-mismatch'; then
+  ok "(control) a PRESENT record with a wrong lease is still REFUSED — --expect is not inert"
+else
+  bad "(control) a real lease mismatch was accepted: rc=$rc49d
+$o49d"
+fi
+kill_sleeper "$S49"
+rm -rf "$D49"
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi
