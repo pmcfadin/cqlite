@@ -7,6 +7,21 @@ use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::query::result::StreamingConfig;
 use cqlite_core::Database;
 
+/// Collect WARN/ERROR tracing output into a shared buffer.
+#[derive(Clone, Default)]
+struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+    type Writer = LogSink;
+    fn make_writer(&'a self) -> LogSink { self.clone() }
+}
+
 fn datasets_root() -> PathBuf {
     PathBuf::from(std::env::var("CQLITE_DATASETS_ROOT").expect("CQLITE_DATASETS_ROOT"))
 }
@@ -192,6 +207,12 @@ async fn q1_read_path_mutated_clustering_text() {
     for e in std::fs::read_dir(&src).unwrap().flatten() {
         std::fs::copy(e.path(), ctl.join(e.file_name())).unwrap();
     }
+    let sink = LogSink::default();
+    let _ = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .try_init();
     let dpos = mutate_clustering_utf8(&src, &stage, &[b"necessary", b"purpose", b"artist", b"region", b"glass", b"unit", b"chair"]);
     eprintln!("PROBE3782 Q1 mutated decompressed offset {dpos}");
 
@@ -203,6 +224,7 @@ async fn q1_read_path_mutated_clustering_text() {
         Err(e) => { eprintln!("PROBE3782 Q1 CONTROL execute -> Err {e}"); 0 }
     };
     cqlite_core::probe3782::dump("q1-control-execute");
+    eprintln!("PROBE3782 Q1 log-lines-after-CONTROL={}", String::from_utf8_lossy(&sink.0.lock().unwrap().clone()).lines().count());
 
     // MUTATED: materializing
     cqlite_core::probe3782::reset();
@@ -212,6 +234,7 @@ async fn q1_read_path_mutated_clustering_text() {
         Err(e) => eprintln!("PROBE3782 Q1 MUTATED execute -> Err {e}"),
     }
     cqlite_core::probe3782::dump("q1-mutated-execute");
+    eprintln!("PROBE3782 Q1 log-lines-after-MUTATED-execute={}", String::from_utf8_lossy(&sink.0.lock().unwrap().clone()).lines().count());
 
     // MUTATED: streaming (windowed) path
     cqlite_core::probe3782::reset();
@@ -228,4 +251,86 @@ async fn q1_read_path_mutated_clustering_text() {
         Err(e) => eprintln!("PROBE3782 Q1 MUTATED streaming -> Err {e}"),
     }
     cqlite_core::probe3782::dump("q1-mutated-streaming");
+    let logs = String::from_utf8_lossy(&sink.0.lock().unwrap().clone()).to_string();
+    let mut shapes: std::collections::BTreeMap<String, usize> = Default::default();
+    for l in logs.lines() {
+        // strip the leading RFC3339 timestamp, keep level+target+message head
+        let rest = l.splitn(2, ' ').nth(1).unwrap_or(l);
+        let k: String = rest.chars().take(150).collect();
+        *shapes.entry(k).or_insert(0) += 1;
+    }
+    eprintln!("PROBE3782 Q1 WARN/ERROR log lines total={} distinct={}", logs.lines().count(), shapes.len());
+    for (k, v) in shapes { eprintln!("PROBE3782 Q1 LOG {v:>4}  {k}"); }
+    std::fs::write("/tmp/p3782/q1-warns.log", &logs).unwrap();
+    eprintln!("PROBE3782 Q1 fallback-warn-count={}", logs.matches("falling back to a full sequential scan").count());
+}
+
+/// Q2: drive the SAME mutated fixture through the COMPACTION entry point, and
+/// through `iterate_all_partitions` (the #2302 index-random-read path).
+#[tokio::test]
+async fn q2_compaction_path_mutated_clustering_text() {
+    use std::sync::Arc;
+    use cqlite_core::platform::Platform;
+    use cqlite_core::storage::sstable::SSTableReader;
+
+    let sink = LogSink::default();
+    let _ = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .try_init();
+
+    let src = fixture_dir(FIX_KS, FIX_TABLE);
+    let tmp = std::env::temp_dir().join(format!("p3782-q2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let stage = tmp.join("mut");
+    let ctl = tmp.join("ctl");
+    std::fs::create_dir_all(&ctl).unwrap();
+    for e in std::fs::read_dir(&src).unwrap().flatten() {
+        std::fs::copy(e.path(), ctl.join(e.file_name())).unwrap();
+    }
+    mutate_clustering_utf8(&src, &stage, &[b"necessary", b"purpose", b"artist", b"region"]);
+
+    let config = cqlite_core::Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+
+    // Schema from the committed CQL fixture, parsed the way ingestion does.
+    let schema = {
+        let cql = std::fs::read_to_string(schemas_dir().join("basic-types.cql")).unwrap();
+        let start = cql.find(&format!("CREATE TABLE IF NOT EXISTS {FIX_TABLE}")).expect("table stmt");
+        let end = start + cql[start..].find(';').expect("stmt terminator") + 1;
+        let mut t = cqlite_core::schema::cql_parser::parse_cql_schema(&cql[start..end]).expect("parse schema");
+        t.keyspace = FIX_KS.to_string();
+        t
+    };
+
+    for (label, dir) in [("CONTROL", &ctl), ("MUTATED", &stage)] {
+        let data_db = comp_file(dir, "-Data.db");
+        let reader = SSTableReader::open(&data_db, &config, platform.clone())
+            .await
+            .expect("open reader");
+        cqlite_core::probe3782::reset();
+        let before = String::from_utf8_lossy(&sink.0.lock().unwrap().clone()).lines().count();
+        match reader.iterate_all_partitions_for_compaction(Some(&schema)).await {
+            Ok(rows) => eprintln!("PROBE3782 Q2 {label} compaction -> Ok compaction_rows={}", rows.len()),
+            Err(e) => eprintln!("PROBE3782 Q2 {label} compaction -> Err {e}"),
+        }
+        let after = String::from_utf8_lossy(&sink.0.lock().unwrap().clone()).lines().count();
+        eprintln!("PROBE3782 Q2 {label} compaction warn/error log lines = {}", after - before);
+        cqlite_core::probe3782::dump(&format!("q2-{label}-compaction"));
+
+        cqlite_core::probe3782::reset();
+        let before = String::from_utf8_lossy(&sink.0.lock().unwrap().clone()).lines().count();
+        match reader.iterate_all_partitions().await {
+            Ok(rows) => eprintln!("PROBE3782 Q2 {label} iterate_all_partitions -> Ok partitions={}", rows.len()),
+            Err(e) => eprintln!("PROBE3782 Q2 {label} iterate_all_partitions -> Err {e}"),
+        }
+        let logs = String::from_utf8_lossy(&sink.0.lock().unwrap().clone()).to_string();
+        eprintln!("PROBE3782 Q2 {label} iterate warn/error log lines = {}", logs.lines().count() - before);
+        eprintln!("PROBE3782 Q2 {label} index-fallback-warn total-so-far = {}",
+            logs.matches("falling back to a full sequential scan").count());
+        cqlite_core::probe3782::dump(&format!("q2-{label}-iterate"));
+    }
+    let logs = String::from_utf8_lossy(&sink.0.lock().unwrap().clone()).to_string();
+    std::fs::write("/tmp/p3782/q2-warns.log", &logs).unwrap();
 }
