@@ -415,9 +415,17 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     const reference = JSON.parse(fs.readFileSync(PARITY_FACTS, 'utf8'));
     const expected = reference.udts;
 
+    // Every entry is DERIVED from this binding's own output; nothing here is a
+    // literal. `cm`/`tm` (MULTICELL: the key lives in the CELL PATH) sit beside
+    // `fcm`/`ftm` (FROZEN: a single value cell) because those are two different
+    // decoders in cqlite-core and only the frozen one used to reach a UDT at all
+    // (#3612). Carrying both makes this case a parity control in TWO directions
+    // at once: cross-BINDING, as every entry here is, and cross-DECODE-PATH.
     const observed = {
       'row1.c': facts(rows.get(1).c),
       'row1.p': facts(rows.get(1).p),
+      'row1.cm_key': facts(soleEntry(rows.get(1).cm)[0]),
+      'row1.tm_key': facts(soleEntry(rows.get(1).tm)[0]),
       'row1.fcm_key': facts(soleEntry(rows.get(1).fcm)[0]),
       'row1.ftm_key': facts(soleEntry(rows.get(1).ftm)[0]),
       'row1.fs_0': facts([...rows.get(1).fs][0]),
@@ -431,8 +439,24 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     expect(Object.keys(observed).sort()).toEqual(Object.keys(expected).sort());
     expect(observed).toEqual(expected);
 
-    expect(soleEntry(rows.get(1).fcm)[1]).toBe(reference.map_values['row1.fcm_value']);
-    expect(soleEntry(rows.get(1).ftm)[1]).toBe(reference.map_values['row1.ftm_value']);
+    // The map VALUES, one per map column, also derived from this binding.
+    const mapValues = reference.map_values;
+    expect(soleEntry(rows.get(1).cm)[1]).toBe(mapValues['row1.cm_value']);
+    expect(soleEntry(rows.get(1).tm)[1]).toBe(mapValues['row1.tm_value']);
+    expect(soleEntry(rows.get(1).fcm)[1]).toBe(mapValues['row1.fcm_value']);
+    expect(soleEntry(rows.get(1).ftm)[1]).toBe(mapValues['row1.ftm_value']);
+    // ...and those four values must be PAIRWISE DISTINCT in the reference, which
+    // is what makes the four assertions above discriminating. The four map
+    // columns hold the SAME key by construction, so a case that read the wrong
+    // column's cell -- exactly the confusion a multicell/frozen pair invites --
+    // would pass unnoticed against equal values.
+    const declaredMapValues = [
+      mapValues['row1.cm_value'],
+      mapValues['row1.tm_value'],
+      mapValues['row1.fcm_value'],
+      mapValues['row1.ftm_value'],
+    ];
+    expect(new Set(declaredMapValues).size).toBe(declaredMapValues.length);
 
     // Non-vacuity: the reference must actually carry the colliding subjects, or
     // an emptied/renamed file would let this pass having compared nothing. Both
@@ -443,5 +467,401 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     expect(expected['row1.c'].fields._type).toBe('user-supplied-type');
     expect(ownField(expected['row1.c'].fields, '__proto__')).toBe('user-supplied-proto');
     expect(expected['row1.c'].typeName).toBe('collide');
+    // ...and the reference states the CROSS-DECODE-PATH identity in its own
+    // right: the multicell key facts EQUAL the frozen ones, which is #3612's
+    // property (a caller cannot tell the two spellings of one map apart). Stated
+    // here so the committed FILE remains a valid control on its own -- the
+    // per-binding case that measures this within one binding lives above, and
+    // this file is what compares the two bindings.
+    expect(expected['row1.cm_key']).toEqual(expected['row1.fcm_key']);
+    expect(expected['row1.tm_key']).toEqual(expected['row1.ftm_key']);
+  });
+
+  // ==========================================================================
+  // AC5 — the committed fixture resolves CHECKOUT-RELATIVE, never through
+  // CQLITE_DATASETS_ROOT (#3131/#3148; issue #3724 AC5)
+  // ==========================================================================
+
+  test('the fixture and the parity reference resolve checkout-relative, not via the datasets-root env var', () => {
+    // The file docstring and the reference's `note_on_paths` DOCUMENT this
+    // contract; nothing ASSERTED it. `assertFixturePresent` cannot: it checks
+    // existence at the ALREADY-RESOLVED path, so it would pass unchanged if
+    // resolution became env-routed and the env root happened to hold the file.
+    // MEASURED: with `FIXTURE_ROOT` re-anchored on the env-routed
+    // `TEST_DATA_ROOT` and `CQLITE_DATASETS_ROOT` pointed at a symlink to the
+    // checkout's `test-data`, all 13 other tests here — the guard and the
+    // cross-binding parity case included — stay GREEN and only this one reds.
+    const { spawnSync } = require('child_process');
+    const os = require('os');
+
+    // The AMBIENT value, appended to every failure below. Half 1's discriminating
+    // power depends on it: SET (as every gate run has it) and an env-routed
+    // resolution reds on the equality alone; UNSET (the usual local run) and only
+    // Half 2 can see it. A maintainer reading a failure needs to know which run
+    // they are looking at, and neither state is the "right" one to run under.
+    const ambientNote =
+      `ambient CQLITE_DATASETS_ROOT: ` + // CONTROL: names the variable under test, diagnostic label only
+      `${process.env.CQLITE_DATASETS_ROOT === undefined ? '(unset)' : process.env.CQLITE_DATASETS_ROOT}`; // CONTROL: the AMBIENT read, diagnostic only
+    // jest matchers take no message argument, so the note is added by RETHROWING:
+    // the matcher's own diff is preserved and the ambient value is appended to it.
+    const withAmbient = (assertions) => {
+      try {
+        assertions();
+      } catch (err) {
+        err.message = `${err.message}\n${ambientNote}`;
+        throw err;
+      }
+    };
+
+    // Half 1 — AFFIRMATIVE EQUALITY against a `__dirname`-derived repo root. A
+    // "the env value is not a prefix" check would go vacuous whenever the
+    // variable is unset or coincidentally equals the checkout: a pass derived
+    // from the absence of a bad signal.
+    const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
+    const expectedRoot = path.join(REPO_ROOT, 'test-data', 'fixtures', 'issue_3504');
+    const expectedFacts = path.join(expectedRoot, 'binding-parity-facts.json');
+    withAmbient(() => {
+      expect(FIXTURE_ROOT).toBe(expectedRoot);
+      expect(PARITY_FACTS).toBe(expectedFacts);
+    });
+    // SCHEMA is pinned to the RESOLVED schemas dir, not to the checkout:
+    // `CQLITE_SCHEMAS_ROOT` legitimately relocates that directory
+    // (`setup.js:67-102`, the gate-validated #3148 contract), so pinning it to
+    // the checkout would red a correct out-of-tree run. Only the FIXTURE corpus
+    // and the parity facts are in AC5's scope.
+    const expectedSchema = path.join(
+      global.testPaths.SCHEMAS_DIR,
+      'issue-3504-udt-collision.cql'
+    );
+    withAmbient(() => expect(SCHEMA).toBe(expectedSchema));
+
+    // Half 2 — BEHAVIOURAL INVARIANCE, MEASURED IN A CHILD PROCESS.
+    //
+    // Module-level constants freeze at load, so reloading a NEIGHBOURING module
+    // in-process cannot observe a resolution that reads the variable DIRECTLY
+    // at load time: such a check stays green whenever the variable happened to
+    // be unset when this file was first imported. Jest forbids re-requiring a
+    // test file mid-run (its `describe` would re-register), so the probe is a
+    // fresh `node` that stubs `describe` to a no-op, requires `setup.js` and
+    // then THIS file, and reads the constants back off `module.exports`.
+    //
+    // It asserts a PAIR, because the invariant alone would be satisfiable by an
+    // environment the child never saw:
+    //   * the POSITIVE CONTROL — the child echoes the perturbed value back, and
+    //     `SSTABLES_DIR`, whose documented contract IS to follow the variable
+    //     (`setup.js:23-25`), HAS moved onto the bogus root;
+    //   * the INVARIANT — the fixture root and parity-facts path are unmoved and
+    //     checkout-derived, and the fixture still reads its three rows.
+    //
+    // Nothing in the parent process is mutated: no env var, no global, no module
+    // registry. The pollution risk is removed rather than managed.
+    const bogus = fs.mkdtempSync(path.join(os.tmpdir(), 'cqlite-3724-no-corpus-'));
+    const outPath = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'cqlite-3724-probe-')),
+      'probe.json'
+    );
+    try {
+      expect(fs.readdirSync(bogus)).toEqual([]);
+
+      const childEnv = { ...process.env, CQLITE_DATASETS_ROOT: bogus }; // CONTROL: the perturbation itself
+      // Cleared for the CHILD only: `setup.js:246-251` makes a corpus-less root
+      // a hard throw under either strict-fixture flag (as the gate's
+      // node-bindings lane sets them), which would leave the probe unable to run
+      // rather than able to measure.
+      delete childEnv.CQLITE_REQUIRE_FIXTURES;
+      delete childEnv.CQLITE_PARITY_REQUIRE_DATASETS;
+
+      const probe = spawnSync(
+        process.execPath,
+        ['-e', RESOLUTION_PROBE, __dirname, __filename, outPath],
+        { env: childEnv, encoding: 'utf8', timeout: PROBE_TIMEOUT_MS }
+      );
+
+      // AFFIRMATIVE COMPLETION ASSERT, before a single byte of the payload is
+      // read. A timed-out, unspawnable or dead probe must fail NAMING that, and
+      // must never fall through into comparing absent output against an
+      // expected path: that either misleads (a "path mismatch" for a hang) or,
+      // with no payload written at all, risks a comparison that passes having
+      // measured nothing.
+      const failure = probeCompletionFailure(probe, PROBE_TIMEOUT_MS, outPath);
+      if (failure !== null) {
+        throw new Error(failure);
+      }
+      const payload = JSON.parse(fs.readFileSync(outPath, 'utf8'));
+
+      withAmbient(() => {
+        // POSITIVE CONTROL — the perturbation really was in effect, and a
+        // constant whose contract is to follow the variable really did move onto
+        // it.
+        expect(payload.envSeen).toBe(bogus);
+        expect(payload.controlEnvRouted).toBe(path.join(bogus, 'sstables'));
+        expect(payload.controlEnvRouted).not.toBe(global.testPaths.SSTABLES_DIR); // CONTROL
+
+        // THE INVARIANT — unmoved, checkout-derived, and BOTH artifacts read.
+        expect(payload.projectRoot).toBe(REPO_ROOT);
+        expect(payload.fixtureRoot).toBe(expectedRoot);
+        expect(payload.parityFacts).toBe(expectedFacts);
+        // The schemas dir must not move either: it follows CQLITE_SCHEMAS_ROOT,
+        // which the probe leaves exactly as this process has it.
+        expect(payload.schemasDir).toBe(global.testPaths.SCHEMAS_DIR);
+        expect(payload.schema).toBe(expectedSchema);
+        // A read failure is REPORTED without a cause being claimed: the
+        // `beforeAll` guard has already ruled out a broken checkout, but a
+        // decoder regression or a lost force-added binary would look identical
+        // here, and naming one would assert what this test has not established.
+        expect(payload.readError).toBeNull();
+        expect(payload.rowIds).toEqual([1, 2, 3]);
+        // AC5 covers the parity-facts FILE as much as the corpus, so the probe
+        // OPENED it rather than only recording its path. Non-vacuity: an emptied
+        // or renamed reference would otherwise let the path equality above stand
+        // in for a file nobody opened. Asserted NON-ZERO rather than at an exact
+        // count, which is #3724's own subject to widen.
+        expect(payload.parityFactsError).toBeNull();
+        expect(payload.parityFactsUdts).toBeGreaterThan(0);
+      });
+    } finally {
+      fs.rmSync(bogus, { recursive: true, force: true });
+      fs.rmSync(path.dirname(outPath), { recursive: true, force: true });
+    }
+  });
+
+  test('this file names no env-routed corpus constant outside its positive control', () => {
+    // THE CLASS THIS CLOSES, WHICH THE ENVIRONMENT CASES ONLY SAMPLE. The test
+    // above pins the CONSTANTS this module resolves today. A future test added to
+    // this file that builds its OWN path from `setup.js`'s env-routed corpus
+    // constants is invisible to it: that path would resolve through
+    // `CQLITE_DATASETS_ROOT` while every assertion above stayed green, because
+    // those assertions are about `FIXTURE_ROOT`/`PARITY_FACTS` and not about the
+    // file's other consumers. This repository has ALREADY paid for exactly that
+    // defect, in this very directory — `setup.js`'s round-10 note records
+    // `write.test.js` and `write-smoke.test.js` building the schemas path
+    // themselves and BYPASSING the resolver, so the variable was honoured by part
+    // of the suite and ignored by the rest.
+    //
+    // Answered from THIS FILE'S OWN SOURCE. The needles are SPLIT, and here that
+    // split is the MECHANISM rather than belt-and-braces: unlike the Python
+    // sibling, which tokenizes and so can ignore strings by type, this scan is
+    // textual, so an unsplit literal would match its own source and the test
+    // could never pass.
+    //
+    // Two line classes are exempt, both deliberately:
+    //   * a PURE COMMENT line (trimmed, starts with `//`, `*` or `/*`) — this
+    //     file discusses the env-routed constants at length in prose, and prose
+    //     is not a consumer;
+    //   * a line carrying the `CONTROL` marker — the positive control legitimately
+    //     READS the env-routed constant, in the test above and in the probe
+    //     source. Requiring it to SAY so is what stops the exemption silently
+    //     growing into a consumer.
+    //
+    // A SECOND NEEDLE, closing the cheap half of what this guard used to merely
+    // declare (roborev #3724 round 4): the env VARIABLE NAME itself. A future test
+    // that skips the corpus constants and reads `process.env.<var>` DIRECTLY names
+    // none of the constants above, so the first needle cannot see it — but such a
+    // read must contain the variable's name as a literal, and a literal in this
+    // file's source plainly IS checkable. Same two exemptions, same count assert.
+    //
+    // WHAT THE TWO GUARDS COVER, AND WHAT NOTHING HERE COVERS. This paragraph used
+    // to say the residual "stays the child-process probe's job — whatever route a
+    // consumer took to read it". That was FALSE, and correcting it is the point of
+    // this note (roborev N-C1): the probe records and compares only the constants
+    // this module EXPORTS — `FIXTURE_ROOT`, `PARITY_FACTS`, `SCHEMA`, `QUERY`, see
+    // `module.exports` at the foot of this file — so it cannot observe a path that
+    // some other test builds inside its own body. Stated as it actually is:
+    //   * THIS SCAN catches the env variable's name written as a LITERAL, in any
+    //     spelling (it is a substring test, so quoting is irrelevant), plus any of
+    //     the named corpus constants;
+    //   * THE CHILD PROBE above proves those EXPORTED CONSTANTS stay
+    //     checkout-anchored while `CQLITE_DATASETS_ROOT` is perturbed;
+    //   * NEITHER covers an INDIRECT read — a helper that returns the value, a
+    //     COMPUTED or concatenated variable name (`process.env[someVar]`), or an
+    //     alias bound to `process.env` — used by a FUTURE TEST IN THIS FILE to
+    //     build its OWN path. That is an UNCOVERED RESIDUAL, not a covered one:
+    //     the read names neither a constant nor the literal, so this scan is
+    //     blind, and such a path never reaches an exported constant, so the probe
+    //     is blind to it as well.
+    //
+    // Deliberately NOT closed by widening either guard. These two already exceed
+    // what AC5 asks for, and a recogniser over computed names is the unbounded
+    // shape this repository keeps having to delete — it accumulates false PASSes
+    // and an exemption list that grows every round, and a guard with known false
+    // PASSes is worse than no guard. A narrow guard that says what it does NOT
+    // cover is worth more than a broad one implying completeness it cannot deliver.
+    const forbidden = ['SSTABLES' + '_DIR', 'TEST_DATA' + '_ROOT', 'DATASETS' + '_AVAILABLE'];
+    const envVar = 'CQLITE_' + 'DATASETS_ROOT';
+    const needles = [...forbidden, envVar];
+    const source = fs.readFileSync(__filename, 'utf8');
+
+    const offenders = [];
+    source.split('\n').forEach((line, index) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) {
+        return;
+      }
+      if (line.includes('CONTROL')) {
+        return;
+      }
+      for (const name of needles) {
+        if (line.includes(name)) {
+          offenders.push(`${index + 1}: ${trimmed}`);
+          return;
+        }
+      }
+    });
+
+    expect(offenders).toEqual([]);
+
+    // NON-VACUITY, and it is load-bearing: every needle is split, so a typo in a
+    // split would silently make the scan look for a name that occurs nowhere and
+    // the test would pass having checked nothing. The two known control lines
+    // must therefore be FOUND — by the same `includes` the scan uses.
+    const controlLinesFor = (names) =>
+      source
+        .split('\n')
+        .filter((line) => line.includes('CONTROL') && names.some((n) => line.includes(n)));
+    expect(controlLinesFor(forbidden).length).toBe(2);
+    // The env-var needle's own control set, counted SEPARATELY: folding the two
+    // into one total would let a typo in either split hide behind the other's
+    // matches. MEASURED at 4 -- the ambient diagnostic's label and read, the
+    // perturbation, and the probe's echo of it.
+    expect(controlLinesFor([envVar]).length).toBe(4);
   });
 });
+
+// The child bound for the AC5 probe below. MEASURED, not picked: jest's resolved
+// `testTimeout` here is 30000ms — `globalConfig.testTimeout` from
+// `jest.config.js`, with BOTH project entries null, read via
+// `npx jest --showConfig` on jest 29.7.0 — and this file sets no per-test
+// override. `spawnSync` BLOCKS the event loop, so jest physically cannot
+// interrupt it while it runs; the bound must therefore stay strictly BELOW
+// jest's, so the call always returns first and jest's deadline remains the outer
+// enforcing authority instead of being silently unenforceable. This is half of
+// it, and ~300x the probe's measured warm runtime (~50ms), so a loaded box
+// cannot flake on it. Do NOT raise jest's timeout to accommodate this bound —
+// that inverts the fix.
+const PROBE_TIMEOUT_MS = 15000;
+
+/**
+ * Why the probe did not complete, as a message naming the cause — or `null` when
+ * it completed and left a payload.
+ *
+ * The states are the ones `spawnSync` actually reports, measured on this node
+ * rather than assumed: a timeout is `error.code === 'ETIMEDOUT'` with
+ * `status === null` and `signal === 'SIGTERM'`; an ordinary failure is a numeric
+ * non-zero `status` with no `error`; and an exit-0 child that wrote nothing is
+ * `status === 0`, which only the payload check below can catch.
+ *
+ * @param {import('child_process').SpawnSyncReturns<string>} result
+ * @param {number} timeoutMs
+ * @param {string} outPath
+ * @returns {string|null}
+ */
+function probeCompletionFailure(result, timeoutMs, outPath) {
+  const detail =
+    `--- child stdout ---\n${result.stdout === undefined ? '(none)' : result.stdout}\n` +
+    `--- child stderr ---\n${result.stderr === undefined ? '(none)' : result.stderr}`;
+  if (result.error && result.error.code === 'ETIMEDOUT') {
+    return (
+      `resolution probe TIMED OUT after ${timeoutMs}ms (spawnSync ETIMEDOUT, killed with ` +
+      `${String(result.signal)}). It normally completes in well under a second, so this is a ` +
+      `hang, not a slow box — nothing about path resolution was measured.\n${detail}`
+    );
+  }
+  if (result.error) {
+    return (
+      `resolution probe could not be spawned: ` +
+      `${result.error.code || result.error.message} (bound ${timeoutMs}ms)\n${detail}`
+    );
+  }
+  if (result.signal !== null && result.signal !== undefined) {
+    return (
+      `resolution probe was KILLED by ${String(result.signal)} (bound ${timeoutMs}ms)\n${detail}`
+    );
+  }
+  if (typeof result.status !== 'number') {
+    return (
+      `resolution probe did not exit normally (status=${String(result.status)}, ` +
+      `signal=${String(result.signal)}, bound ${timeoutMs}ms)\n${detail}`
+    );
+  }
+  if (result.status !== 0) {
+    return `resolution probe exited ${result.status} (bound ${timeoutMs}ms)\n${detail}`;
+  }
+  if (!fs.existsSync(outPath)) {
+    return (
+      `resolution probe exited 0 but wrote no payload to ${outPath} — nothing was ` +
+      `measured, so no path comparison below would mean anything\n${detail}`
+    );
+  }
+  return null;
+}
+
+// The child-process probe for the AC5 behavioural half above. Run as
+// `node -e <this> <testsDir> <thisFile> <outPath>` with a perturbed
+// `CQLITE_DATASETS_ROOT`, it re-resolves `setup.js` AND this module from scratch
+// and records BOTH the paths this suite resolves and a path that legitimately
+// DOES follow that variable, so the parent can prove the perturbation was in
+// effect. `describe` is the only jest global it stubs: this file registers its
+// suite at module scope, and with the callback never invoked no other one is
+// reached.
+const RESOLUTION_PROBE = `
+global.describe = () => {};
+const fsProbe = require('fs');
+const pathProbe = require('path');
+const [testsDir, modulePath, outPath] = process.argv.slice(1);
+require(pathProbe.join(testsDir, 'setup.js'));
+const mod = require(modulePath);
+const payload = {
+  // The POSITIVE CONTROL pair: what the child actually saw, and a constant
+  // whose documented contract IS to follow it.
+  envSeen: process.env.CQLITE_DATASETS_ROOT, // CONTROL: the probe echoes the perturbed value back
+  controlEnvRouted: global.testPaths.SSTABLES_DIR, // CONTROL: env-routed BY CONTRACT, never a consumer
+  // The INVARIANT: this suite's own resolved constants.
+  projectRoot: global.testPaths.PROJECT_ROOT,
+  schemasDir: global.testPaths.SCHEMAS_DIR,
+  fixtureRoot: mod.FIXTURE_ROOT,
+  parityFacts: mod.PARITY_FACTS,
+  schema: mod.SCHEMA,
+  rowIds: null,
+  readError: null,
+  parityFactsUdts: null,
+  parityFactsError: null,
+};
+
+// AC5 covers the parity-facts FILE as much as the corpus, so the probe OPENS it
+// rather than only recording its path — otherwise that half is path-equality
+// only while the corpus half is path-equality PLUS a read-back. Synchronous, so
+// it is recorded before the payload is written below.
+try {
+  payload.parityFactsUdts = Object.keys(
+    JSON.parse(fsProbe.readFileSync(mod.PARITY_FACTS, 'utf8')).udts
+  ).length;
+} catch (err) {
+  payload.parityFactsError = String((err && err.stack) || err);
+}
+// The read is attempted AFTER the paths are recorded, and its failure is
+// REPORTED rather than thrown: an env-routed resolution makes the open fail, and
+// the parent must be able to name the path mismatch that caused it instead of
+// reporting only a dead child.
+(async () => {
+  try {
+    const { Database } = require(pathProbe.join(testsDir, '..', 'lib', 'index.js'));
+    const db = await Database.open(mod.FIXTURE_ROOT, { schema: mod.SCHEMA });
+    try {
+      const result = await db.executeNative(mod.QUERY);
+      payload.rowIds = result.rows.map((row) => row.id).sort();
+    } finally {
+      await db.close();
+    }
+  } catch (err) {
+    payload.readError = String((err && err.stack) || err);
+  }
+  fsProbe.writeFileSync(outPath, JSON.stringify(payload));
+})();
+`;
+
+// Exported for that probe, and ONLY for it. Reading the constants off
+// `module.exports` is what makes the probe measure THIS file's resolution rather
+// than a re-derivation of it — a re-derivation would assert nothing about the
+// constants the suite actually uses, which is precisely the vacuity this
+// replaced. Harmless to jest: a test file may carry exports.
+module.exports = { FIXTURE_ROOT, SCHEMA, PARITY_FACTS, QUERY };
