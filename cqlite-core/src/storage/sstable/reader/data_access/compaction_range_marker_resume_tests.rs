@@ -318,7 +318,8 @@ async fn range_marker_resumes_across_window_refill_byte_identical() {
 // NON-final chunk and CORRUPTION on the final one.
 //
 // `CompactionPolicy::on_range_marker` used to answer every marker parse failure
-// with `MarkerOutcome::Stop`, which both compaction drivers convert on the final
+// with the since-REMOVED `MarkerOutcome::Stop`, which both compaction drivers
+// converted on the final
 // chunk into a SUCCESSFUL partition completion — the marker silently dropped from
 // output that is WRITTEN, resurrecting the rows it shadowed.
 //

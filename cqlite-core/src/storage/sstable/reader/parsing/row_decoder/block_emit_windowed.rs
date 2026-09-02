@@ -1,5 +1,7 @@
 use super::*;
 
+use range_marker_error::unparseable_marker_in_buffered_block as unparseable;
+
 impl V5CompressedLegacyParser {
     /// Within-partition clustering-slice variant of [`parse_block_emit`] (Issue
     /// #954, Epic #951).
@@ -382,12 +384,11 @@ impl V5CompressedLegacyParser {
                                         offset = next_offset;
                                         continue; // Continue to next row/marker
                                     }
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            "V5CompressedLegacy: Failed to parse range tombstone marker at offset {}: {}",
-                                            offset, e
-                                        );
-                                        break; // Can't parse marker, end partition
+                                    // Issue #3721 (job 78): corruption, never a
+                                    // terminator (`range_marker_error` docs). The
+                                    // cause used to be dropped into `debug!`.
+                                    Err(cause) => {
+                                        return Err(unparseable(cause, &partition_index, offset))
                                     }
                                 }
                             }
@@ -396,12 +397,9 @@ impl V5CompressedLegacyParser {
                                     offset = next_offset;
                                     continue;
                                 }
-                                Err(e) => {
-                                    tracing::debug!(
-                                        "V5CompressedLegacy: Failed to skip range tombstone marker at offset {}: {}",
-                                        offset, e
-                                    );
-                                    break;
+                                // Same decision on the PHYSICAL path (no shadowing).
+                                Err(cause) => {
+                                    return Err(unparseable(cause, &partition_index, offset))
                                 }
                             }
                         }

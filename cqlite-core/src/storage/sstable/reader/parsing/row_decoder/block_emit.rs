@@ -146,7 +146,21 @@ impl V5CompressedLegacyParser {
                                 offset = next_offset;
                                 continue;
                             }
-                            Err(_) => break,
+                            // Issue #3721 (roborev job 78): a marker that
+                            // cannot be PARSED is corruption here, never a
+                            // framing terminator — this block is fully buffered,
+                            // so no refill can complete it, and `break` reported
+                            // `Ok` with the tombstone AND every later row of the
+                            // partition gone. See `range_marker_error`'s docs.
+                            Err(cause) => {
+                                return Err(
+                                    range_marker_error::unparseable_marker_in_buffered_block(
+                                        cause,
+                                        &partition_index,
+                                        offset,
+                                    ),
+                                )
+                            }
                         }
                     }
                     match self.skip_range_tombstone_marker(data, offset, schema) {
@@ -154,7 +168,14 @@ impl V5CompressedLegacyParser {
                             offset = next_offset;
                             continue;
                         }
-                        Err(_) => break,
+                        // Same decision on the PHYSICAL path (no shadowing).
+                        Err(cause) => {
+                            return Err(range_marker_error::unparseable_marker_in_buffered_block(
+                                cause,
+                                &partition_index,
+                                offset,
+                            ))
+                        }
                     }
                 }
 

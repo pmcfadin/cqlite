@@ -18,6 +18,75 @@
 //! compaction.rs           _ => { /* Unknown bound kind: skip it */ }   (#3808)
 //! ```
 //!
+//! # The SECOND census, one arm over — the marker-PARSE arms (roborev job 78)
+//!
+//! Fixing the arms above left their SIBLING arm — the one taken when the marker
+//! cannot be PARSED at all — answering with the framing terminator:
+//!
+//! ```text
+//! timestamp_policy.rs:148/156   Err(_) => MarkerOutcome::Stop
+//! block_emit.rs:149/157         Err(_) => break
+//! block_emit_windowed.rs:385/399 Err(e) => { tracing::debug!(..); break; }
+//! ```
+//!
+//! Every one of those is a SUCCESSFUL, incomplete partition on the user-facing
+//! read path: the marker and every later row of the partition vanish and `SELECT`
+//! returns `Ok`. There is no downstream guard —
+//! [`super::block_emit`]'s `partition_complete` flag gates only the #3095
+//! static-only emission and never rejects an incomplete partition.
+//!
+//! The rationale that had been written beside them ("a genuine framing
+//! terminator") is the SAME one this issue already disproved for
+//! `compaction.rs`. Two facts settle it, and neither is a byte pattern:
+//!
+//! 1. the branch is entered only when `is_range_tombstone_marker(data[offset])`,
+//!    with `is_end_of_partition` handled SEPARATELY one branch above — so a parse
+//!    failure here is abnormal data, never an end-of-partition signal. Authority:
+//!    `UnfilteredSerializer.deserializeOne` (cassandra-5.0.8:458-483) ends a
+//!    partition on `isEndOfPartition(flags)` ALONE (returning `null`); the marker
+//!    kind then deserializes the bound + `deserializeMarkerBody`, whose failure
+//!    throws `IOException` and propagates — Cassandra never converts it into
+//!    "the partition ended", and throws explicitly on corrupt flags;
+//! 2. in `block_emit` the ROW `Err` arm already routes through
+//!    [`super::column_decode_error::end_of_partition_or_bail`] while the MARKER
+//!    arm 120 lines above it just `break`s — rows protected, markers not, inside
+//!    one function.
+//!
+//! Fix 1 of this issue (a marker body must be consumed EXACTLY,
+//! `row_framing::parse_range_tombstone_marker_with_ldt`) makes that hole MORE
+//! reachable, since a body-size mismatch now returns `Err`.
+//!
+//! ## What replaces it, by path kind
+//!
+//! * **buffered** (`parse_block_emit_with_metadata`, `parse_block_emit_windowed`)
+//!   — the whole block is already materialised, so NO refill is possible and the
+//!   failure is unambiguously corruption:
+//!   [`unparseable_marker_in_buffered_block`];
+//! * **streaming policy** ([`super::timestamp_policy`], driven by
+//!   `drive_partition_sliding`, which holds `at_final_chunk`) — the cause is
+//!   carried in [`super::partition_driver::MarkerOutcome::Unparseable`] and the
+//!   DRIVER decides: `NeedMore` on a non-final chunk (unchanged behaviour, since a
+//!   marker body may simply straddle the window boundary) and the preserved cause
+//!   propagated on the final chunk, via
+//!   [`unparseable_marker_at_final_chunk`].
+//!
+//! `MarkerOutcome::Stop` — the variant that expressed "this parse failure IS a
+//! framing terminator" — is GONE with those arms rather than left available: it
+//! had exactly one meaning, that meaning was wrong for every real policy, and a
+//! variant a future policy could reach for is how this defect was written twice.
+//! There is now ONE answer to a marker parse failure: carry the cause and let
+//! whoever holds the finality decide.
+//!
+//! ## Two sites deliberately UNCHANGED, and why
+//!
+//! * `block_emit`'s DELTA-SCAN loop (`:462`) already propagates with `?`,
+//!   wrapping (not discarding) the cause;
+//! * `block_emit_windowed::prime_shadow_before_window` (`:750`) returns `false`,
+//!   which means "cannot prime, decode the FULL partition instead" — a fail-safe
+//!   fallback that drops no rows. The same marker is re-encountered by the full
+//!   decode, where the arms above now refuse it. Turning it into an error would
+//!   remove a legitimate fallback and change nothing about the outcome.
+//!
 //! The fourth site is the COMPACTION policy, and it is the most consequential of
 //! the four (issue #3808): its rows are WRITTEN, so omitting an unrepresentable
 //! deletion marker resurrects the rows that marker shadowed DURABLY, on disk —
@@ -65,8 +134,8 @@
 //!
 //! The discriminator above turns on the marker being FRAMED. A marker that does
 //! not parse has no resume offset, so it is not that case — and it was handled by
-//! [`super::partition_driver::MarkerOutcome::Stop`], which the drivers convert on
-//! the FINAL chunk into a successful partition completion. For the COMPACTION
+//! the (now REMOVED) `MarkerOutcome::Stop`, which the drivers converted on the
+//! FINAL chunk into a successful partition completion. For the COMPACTION
 //! policy that is the same durable harm wearing different clothes: a corrupt or
 //! truncated tombstone is dropped and the output SSTable is still written, so the
 //! rows it shadowed come back.
@@ -150,6 +219,34 @@ pub(super) fn range_marker_unparseable(
     Error::corruption(format!(
         "range-tombstone marker at offset {offset} of partition {partition} could not be PARSED, \
          so no resume point exists (issue #3721): {cause}"
+    ))
+}
+
+/// The buffered counterpart of [`unparseable_marker_at_final_chunk`] (issue
+/// #3721, roborev job 78): the whole block is ALREADY materialised in `data`, so
+/// finality is established by the BUFFER rather than by a driver's chunking state
+/// and no refill can ever complete this marker.
+///
+/// Composes [`range_marker_unparseable`] so the cause chain and its wording live
+/// in one place, and logs at `warn!` — unlike the streaming builder, where the
+/// condition may still be an ordinary window boundary, here it is a finding the
+/// moment it is constructed.
+pub(super) fn unparseable_marker_in_buffered_block(
+    cause: Error,
+    partition: &dyn std::fmt::Display,
+    offset: usize,
+) -> Error {
+    let inner = range_marker_unparseable(cause, partition, offset);
+    tracing::warn!(
+        "V5CompressedLegacy: range-tombstone marker is unparseable in a FULLY BUFFERED block, \
+         so it cannot be a window boundary: {}",
+        inner
+    );
+    Error::corruption(format!(
+        "the whole block is already buffered, so no further data can complete this \
+         range-tombstone marker: it is corrupt or truncated, not a chunk boundary. Ending the \
+         partition here would report SUCCESS while dropping the tombstone AND every later row \
+         of the partition from the read (issue #3721): {inner}"
     ))
 }
 

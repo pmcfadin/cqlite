@@ -48,21 +48,26 @@ pub(super) fn row_write_timestamp(row_header_opt: &Option<RowHeader>) -> i64 {
 
 /// How the driver should advance after a policy handled a range-tombstone marker.
 ///
-/// `Stop`, `Unparseable` and `Refused` are the three states ONE signal
-/// used to conflate (issue #3721), and every distinction between them is a FRAMING
-/// one, decided from state the caller already holds — never a severity judgement
-/// and never a byte pattern:
+/// `Unparseable` and `Refused` are two of the three states ONE signal used to
+/// conflate (issue #3721), and the distinction between them is a FRAMING one,
+/// decided from state the caller already holds — never a severity judgement and
+/// never a byte pattern:
 ///
-/// * `Stop` — the marker could not be PARSED, so there is no resume offset. That is
-///   a genuine framing terminator: on a non-final chunk it means "the marker body
-///   is truncated here, refill", and on the final chunk the driver completes the
-///   partition with the body it observed. `timestamp_policy` produces it (the read
-///   path, whose final-chunk leniency this issue does NOT change).
-/// * `Unparseable` — the same parse failure, with the cause PRESERVED, from a
-///   policy whose output is written: `NeedMore` on a non-final chunk (a refill
-///   may still complete the marker) and the preserved error propagated on the
-///   FINAL chunk, where no refill is coming and a silent completion would drop a
-///   tombstone from the output (roborev job 16).
+/// * `Unparseable` — the marker could not be PARSED, so there is no resume
+///   offset, and the cause is PRESERVED: `NeedMore` on a non-final chunk (a
+///   refill may still complete the marker) and the preserved error propagated on
+///   the FINAL chunk, where no refill is coming and completing the partition
+///   would report success with the marker — and every later row — missing.
+///
+///   The third state, `Stop`, is GONE (roborev job 78). It expressed "this parse
+///   failure IS a framing terminator", which let the FINAL chunk complete the
+///   partition SUCCESSFULLY without the marker: a silently truncated `SELECT` on
+///   the read path, and a dropped tombstone in WRITTEN output on the compaction
+///   path (roborev job 16). Both policies produced it and the meaning was wrong
+///   for both, so the variant is REMOVED rather than left available — a variant a
+///   future policy can reach for is how this defect came to be written twice. See
+///   `range_marker_error`'s module docs for the two facts that settle it and the
+///   Cassandra authority.
 /// * `Refused` — the marker WAS parsed (a resume offset exists and the partition
 ///   body continues there) and the policy cannot represent it. Corruption with a
 ///   valid resume point, which no refill can fix; reporting it as `Stop` truncated
@@ -73,31 +78,34 @@ pub(super) fn row_write_timestamp(row_header_opt: &Option<RowHeader>) -> i64 {
 pub(super) enum MarkerOutcome {
     /// The marker was consumed; continue the row loop at this offset.
     Advanced(usize),
-    /// The marker could not be PARSED — no resume offset exists. Terminate the
-    /// partition (the driver flushes buffered rows on the final chunk, else
-    /// returns `NeedMore`), mirroring the pre-K1 `break`/`NeedMore` behaviour.
-    Stop,
-    /// The marker could not be PARSED either — but the policy REQUIRES the
-    /// failure to survive to the end of the data, so the parse error is carried
-    /// here rather than discarded (issue #3721).
+    /// The marker could not be PARSED — no resume offset exists — and the parse
+    /// error is carried here rather than discarded (issue #3721).
     ///
     /// The driver, which is the only holder of the chunking state, then decides
     /// on a FRAMING fact and never on a byte pattern:
     ///
     /// * **non-final chunk** — the marker body may simply straddle the window
     ///   boundary, which is the one explanation a refill can fix, so this is
-    ///   `NeedMore` exactly like [`MarkerOutcome::Stop`];
+    ///   `NeedMore` — the behaviour the removed `Stop` variant had on a non-final
+    ///   chunk, the one half of its meaning that was right;
     /// * **final chunk** — no further bytes can arrive, so "cannot parse this
     ///   marker" is corrupt or truncated data and NOT a boundary. The preserved
     ///   cause is propagated instead of being converted into a successful
     ///   partition completion.
     ///
-    /// `compaction::CompactionPolicy` produces this from its marker-PARSE-failure
-    /// arm because its rows are WRITTEN: completing the partition without the
-    /// marker omits a range tombstone from a new SSTable and resurrects the rows
-    /// it shadowed, durably — the same harm as the unrecognised bound kind
-    /// [`MarkerOutcome::Refused`] covers (#3808), for a parse failure instead of
-    /// an unrepresentable kind.
+    /// EVERY policy produces this from its marker-PARSE-failure arm, and the harm
+    /// it prevents is NOT scoped to written output:
+    ///
+    /// * `timestamp_policy` — the USER-FACING read. Completing the partition here
+    ///   returns `Ok` with the tombstone and every later row of the partition
+    ///   missing, and nothing downstream rejects it (`block_emit`'s
+    ///   `partition_complete` flag gates only the #3095 static-only emission). A
+    ///   silently truncated `SELECT` is this issue's PRIMARY harm (roborev job 78).
+    /// * `compaction::CompactionPolicy` — the same omission in output that is
+    ///   WRITTEN, so the rows the dropped tombstone shadowed come back durably, on
+    ///   disk (roborev job 16) — the same harm as the unrecognised bound kind
+    ///   [`MarkerOutcome::Refused`] covers (#3808), for a parse failure instead of
+    ///   an unrepresentable kind.
     Unparseable(Error),
     /// The marker was PARSED but cannot be represented faithfully (issue #3721):
     /// corruption at a known resume point. Propagated to the caller of the read —
@@ -320,15 +328,7 @@ impl V5CompressedLegacyParser {
                         offset = next_offset;
                         continue;
                     }
-                    MarkerOutcome::Stop => {
-                        if at_final_chunk {
-                            // Unparseable marker: body only partly observed.
-                            return flush_and_emitted!(offset, false);
-                        }
-                        return Ok(ParseStep::NeedMore);
-                    }
-                    // Issue #3721 (roborev job 16): the same parse failure from a
-                    // policy that REQUIRES it to survive to the end of the data.
+                    // Issue #3721 (roborev jobs 16 + 78): a marker parse failure.
                     // A non-final chunk may simply have cut the marker body in
                     // half, so a refill is still the right answer; the FINAL chunk
                     // has nothing left to arrive, so completing the partition here
@@ -491,7 +491,8 @@ mod tests {
     /// Test-only [`SlidingPartitionPolicy`] over a synthetic buffer. It exercises
     /// the driver's framing skeleton WITHOUT any real row decode: each
     /// [`STUB_ROW_BYTE`] is one row (buffered into `pending`, consuming 1 byte),
-    /// any range-tombstone marker is answered with [`MarkerOutcome::Stop`], and
+    /// any range-tombstone marker is answered with
+    /// [`MarkerOutcome::Unparseable`], and
     /// `buffered` records how many rows were pushed into `pending` — so a test can
     /// prove a row WAS buffered even when the driver forwards ZERO rows.
     #[cfg(feature = "write-support")]
@@ -521,9 +522,11 @@ mod tests {
             _schema: &TableSchema,
             _pending: &mut Vec<Self::Row>,
         ) -> MarkerOutcome {
-            // Mirror the pre-K1 `break`/`NeedMore` behaviour: a marker the policy
-            // cannot represent faithfully terminates the partition.
-            MarkerOutcome::Stop
+            // A marker this stub cannot parse. The NON-final half of that
+            // decision (a refill request) is what these framing tests pin.
+            MarkerOutcome::Unparseable(crate::error::Error::corruption(
+                "stub policy: unparseable marker",
+            ))
         }
 
         fn on_data_row(
@@ -672,25 +675,27 @@ mod tests {
         );
     }
 
-    /// (c) A range-tombstone marker the policy answers with `MarkerOutcome::Stop`
-    /// on a NON-final chunk yields `NeedMore` with NO emission — mirroring the
-    /// pre-K1 `break`/`NeedMore` terminate-partition behaviour — and discards any
-    /// rows already buffered before the marker.
+    /// (c) A range-tombstone marker the policy answers with
+    /// `MarkerOutcome::Unparseable` on a NON-final chunk yields `NeedMore` with NO
+    /// emission — the marker body may simply straddle the window boundary, the one
+    /// explanation a refill can fix — and discards any rows already buffered
+    /// before the marker. This half of the decision is UNCHANGED by issue #3721
+    /// (job 78); only the FINAL-chunk half became a propagated error.
     #[cfg(feature = "write-support")]
     #[tokio::test]
-    async fn marker_stop_non_final_chunk_needmore_no_emit() {
+    async fn marker_unparseable_non_final_chunk_needmore_no_emit() {
         // One row, then a marker byte (IS_MARKER set, END_OF_PARTITION clear).
         let data = synthetic_partition(&[STUB_ROW_BYTE, STUB_MARKER_BYTE]);
         let (step, buffered, collected) = drive(&data, false).await;
         assert_eq!(
             step,
             ParseStep::NeedMore,
-            "on_range_marker -> Stop on a non-final chunk requests more bytes"
+            "on_range_marker -> Unparseable on a non-final chunk requests more bytes"
         );
         assert_eq!(buffered, 1, "the pre-marker row was buffered into pending");
         assert!(
             collected.is_empty(),
-            "a marker Stop discards pending and forwards nothing"
+            "a marker Unparseable discards pending and forwards nothing"
         );
     }
 }

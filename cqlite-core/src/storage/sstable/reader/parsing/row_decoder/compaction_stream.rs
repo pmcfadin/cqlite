@@ -220,17 +220,6 @@ impl V5CompressedLegacyParser {
                     }
                     return Ok(PartitionStreamStep::Consumed(next_offset));
                 }
-                // `CompactionPolicy::on_range_marker` no longer produces `Stop`
-                // (issue #3721): its marker-PARSE failures arrive as
-                // `Unparseable` below. The arm stays for the shared trait's other
-                // implementors and keeps the pre-#3721 meaning.
-                MarkerOutcome::Stop => {
-                    if at_final_chunk {
-                        state.reset();
-                        return Ok(PartitionStreamStep::PartitionDone(0));
-                    }
-                    return Ok(PartitionStreamStep::NeedMore);
-                }
                 // Issue #3721 (roborev job 16): the marker could not be PARSED.
                 // On a NON-final chunk that may be nothing worse than a marker
                 // body straddling the window boundary, which is exactly what
