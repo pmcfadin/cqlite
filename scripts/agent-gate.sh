@@ -9932,7 +9932,16 @@ _tree_boundary_row() {
 # That is round 1's boundary finding one emit site over, and the shape recurs because each
 # early-exit emit hand-builds its own meta list. Any emit that can happen AFTER components
 # may have run must carry this.
-_completed_component_rows() {
+_completed_component_rows() { # <row-renderer>
+  # THE RENDERER IS THE CALLER'S CHOICE, and the two callers legitimately differ (roborev
+  # job 76). A funnel-appended row lands in an ORDINARY summary block, where #3453's contract
+  # is that EVERY component line names the feature matrix it ran — so it must render through
+  # `_fm_summary_line`. A BOUNDARY block has never carried that annotation, and forcing it
+  # there would both reshape every boundary block for an unrelated reason and print
+  # `[UNCLASSIFIED — not declared in _fm_component_class]` for the `tree-selftest` hook, which
+  # is a self-test name and not a component at all. So: annotated at the funnel, plain at the
+  # boundary, one traversal.
+  local _render="${1:?_completed_component_rows needs a row renderer}"
   local _c _rf _st _secs _seen=" "
   _CCR_COUNT=0
   for _c in $(_tree_mode_components); do
@@ -9940,7 +9949,7 @@ _completed_component_rows() {
     [ -f "$_rf" ] || continue
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
-    _tree_boundary_row "$_c" "$_st" "$_secs"
+    "$_render" "$_c" "$_st" "$_secs"
     _seen="$_seen $_c "
     _CCR_COUNT=$(( _CCR_COUNT + 1 ))
   done
@@ -9950,7 +9959,7 @@ _completed_component_rows() {
     case "$_seen" in *" $_c "*) continue ;; esac
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
-    _tree_boundary_row "$_c" "$_st" "$_secs"
+    "$_render" "$_c" "$_st" "$_secs"
     _CCR_COUNT=$(( _CCR_COUNT + 1 ))
   done
 }
@@ -9963,9 +9972,14 @@ _completed_component_rows() {
 # argument, so a captured multi-line block renders as the rows it contains. Empty output is
 # deliberately an EMPTY STRING and the callers guard on it, because a bare "" argument would
 # emit a blank line into the block.
+# _fm_recorded_row <name> <status> <secs>: the funnel's renderer — `_fm_summary_line` with
+# the unit appended, since that helper takes a fully-formed time string while `.result` stores
+# a bare number.
+_fm_recorded_row() { _fm_summary_line "$1" "$2" "${3}s"; }
+
 _recorded_component_rows_block() {
   local _rows _n
-  _rows=$(_completed_component_rows)
+  _rows=$(_completed_component_rows _fm_recorded_row)
   [ -n "$_rows" ] || return 0
   # COUNT THE ROWS THAT WILL PRINT, never `_CCR_COUNT`. The capture above runs in a COMMAND
   # SUBSTITUTION — a subshell — so the count the helper assigns is discarded, and reading it

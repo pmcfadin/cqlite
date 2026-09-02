@@ -603,8 +603,13 @@ else
     bad "case4i: the run did not reach the corpus preflight — the early-exit path is UNMEASURED"
     grep -E '^(preflight|component-set|RESULT):' "$pf_sum" 2>/dev/null | head -3
   fi
+  # The annotation is REQUIRED, not incidental (roborev job 76). #3453's contract is that
+  # EVERY component line names the feature matrix it ran; a funnel-appended row that omitted
+  # it would satisfy "the disclosure is present" while losing the execution evidence beside
+  # it — and the first version of this assert PINNED that incomplete shape, which is how a
+  # test stops being a check and starts being a ratchet on a defect.
   has "case4i (#3402): the preflight-FAIL block carries the OPT-OUT row with its detail" \
-      "$pf_sum" "OPT-OUT (0s) — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); 1 over-threshold file(s) grown"
+      "$pf_sum" "OPT-OUT (0s)  [no-cargo] — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); 1 over-threshold file(s) grown"
   # The count must AGREE with the rows printed. It did not: the helper assigns its count
   # inside a command substitution, so the caller read 0 beside one row — a count
   # contradicting its own table, which is the invariant
