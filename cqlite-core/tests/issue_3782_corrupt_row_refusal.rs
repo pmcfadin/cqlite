@@ -67,7 +67,10 @@ fn fixture_dir() -> PathBuf {
         ),
     };
     let dir = root.join(FIX_KS);
-    for e in std::fs::read_dir(&dir).expect("read keyspace dir").flatten() {
+    for e in std::fs::read_dir(&dir)
+        .expect("read keyspace dir")
+        .flatten()
+    {
         let n = e.file_name().to_string_lossy().to_string();
         if n.starts_with(&format!("{FIX_TABLE}-")) && e.path().is_dir() {
             return e.path();
