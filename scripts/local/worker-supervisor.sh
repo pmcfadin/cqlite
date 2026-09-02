@@ -3709,7 +3709,13 @@ obj_sweep_claim_mark_owner() {
 obj_sweep_claim_owner_state() {
   local claim="$1" tok=""
   [[ -n "$claim" ]] || { printf 'gone'; return 0; }
-  { read -r tok || true; } <"$claim/owner" 2>/dev/null || tok=""
+  # `2>/dev/null` PRECEDES the input redirection, and the order is load-bearing: bash
+  # applies redirections left to right, so with it second an ABSENT owner file makes the
+  # shell print its own `No such file or directory` on the REAL stderr — an unanchored
+  # diagnostic from a function whose ordinary case (a double release: the sweep path, then
+  # the EXIT trap) has no file there at all. That is round 1's NIT 4, one file over, and a
+  # RED arm for item 2 is what surfaced it.
+  { read -r tok || true; } 2>/dev/null <"$claim/owner" || tok=""
   if [[ -n "$tok" && -n "$OBJ_SWEEP_CLAIM_TOKEN" && "$tok" == "$OBJ_SWEEP_CLAIM_TOKEN" ]]; then
     printf 'ours'
     return 0

@@ -11372,8 +11372,13 @@ test_object_store_sweep_claim_release_requires_ownership() {
   #     because a double release (sweep path then EXIT trap) is ordinary.
   rm -rf "$claim"
   out="$(bash -c 'set -uo pipefail; log() { printf "LOG %s\n" "$1"; }; OBJ_SWEEP_CLAIM_OWNED="$2"; OBJ_SWEEP_CLAIM_TOKEN="$3"; . "$1"; printf "state=%s\n" "$(obj_sweep_claim_owner_state "$2")"; obj_sweep_claim_release "$2"' _ "$fns" "$claim" "$tok_a" 2>&1)"
-  if printf '%s' "$out" | grep -q 'state=gone' && ! printf '%s' "$out" | grep -q 'LOG '; then
-    pass "obj-sweep(claim-gone): an already-released claim reads 'gone' and is reported as nothing — a double release is the ordinary case (the sweep path and then the EXIT trap), not a fault to page about"
+  # THE WHOLE OUTPUT IS COMPARED, not just the absence of a LOG line: with the input
+  # redirection ordered before `2>/dev/null` the shell itself printed `No such file or
+  # directory` on the real stderr for exactly this (ordinary) shape — an UNANCHORED
+  # diagnostic in the supervisor's journal, round 1's NIT 4 one file over, which a
+  # `grep -q 'LOG '` test could not see. A RED arm for this item is what surfaced it.
+  if [[ "$out" == "state=gone" ]]; then
+    pass "obj-sweep(claim-gone): an already-released claim reads 'gone' and produces NO output at all — neither a journal line nor an unanchored shell error; a double release is the ordinary case (the sweep path and then the EXIT trap), not a fault to page about"
   else
     fail "obj-sweep(claim-gone): [$(printf '%s' "$out" | tr '\n' '|')]"
   fi
