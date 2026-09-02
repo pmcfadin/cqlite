@@ -343,3 +343,48 @@ fn the_cql_short_form_projection_inherits_the_package_rule() {
         );
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Boundary-safe indexing: a type string is attacker-influenced input.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The package rule and the `UserType(` locator both step through the string by
+/// BYTE offset (`char_indices`), and so do the paren walks they replaced. Both
+/// walks used to index with a CHARACTER index — `extract_inner_parens("é)")`
+/// sliced `s[..1]` inside a 2-byte `é` and PANICKED — so a multi-byte character
+/// anywhere in a `SerializationHeader` type string was a panic in the read path.
+///
+/// A type string is attacker-influenced, so this must be a clean refusal (or a
+/// clean parse), never a panic.
+#[test]
+fn a_multibyte_character_in_a_type_string_does_not_panic() {
+    for ty in [
+        "com.acmé.Int32Type",
+        &format!("{PKG}ListType(é)"),
+        &format!("{PKG}FrozenType(çà)"),
+        "é)",
+        &format!("{PKG}UserType(é)"),
+    ] {
+        // Either outcome is fine; only a panic is not.
+        let _ = field_type_of(ty);
+        let _ = V5CompressedLegacyParser::parse_udt_type_definition(ty);
+        let _ = V5CompressedLegacyParser::udt_field_marshal_types(ty);
+        let _ = V5CompressedLegacyParser::extract_inner_parens(ty);
+    }
+}
+
+/// The one case above whose OUTCOME is determinate: an unbalanced parameter list
+/// carrying a multi-byte character is an unbalanced-parens refusal, not a panic
+/// and not a silent empty parse.
+#[test]
+fn extract_inner_parens_refuses_an_unbalanced_multibyte_argument_list() {
+    let err =
+        V5CompressedLegacyParser::extract_inner_parens("é").expect_err("no closing paren at all");
+    assert!(err.to_string().contains("Unbalanced parentheses"), "{err}");
+    assert_eq!(
+        V5CompressedLegacyParser::extract_inner_parens("é)")
+            .expect("a multi-byte argument then a close paren is well-formed"),
+        "é",
+        "the inner text must come back whole, not sliced mid-character",
+    );
+}

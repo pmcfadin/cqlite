@@ -437,32 +437,31 @@ impl V5CompressedLegacyParser {
     }
 
     /// Extract the contents inside parentheses, respecting nesting.
+    ///
+    /// Indexed by `char_indices`, i.e. by BYTE offset. This used to collect a
+    /// `Vec<char>` and slice `s[..i]` with the CHARACTER index `i`, which for any
+    /// type string carrying a multi-byte character before the closing paren is
+    /// either the wrong slice or — when the index lands mid-character — a PANIC
+    /// (`extract_inner_parens("é)")` sliced `s[..1]` inside a 2-byte `é`). A
+    /// SerializationHeader type string is attacker-influenced input, so the read
+    /// path must not panic on it.
     pub(super) fn extract_inner_parens(s: &str) -> Result<String> {
-        let mut depth = 1;
-        let mut end_idx = 0;
-        let chars: Vec<char> = s.chars().collect();
-
-        for (i, c) in chars.iter().enumerate() {
+        let mut depth = 1usize;
+        for (offset, c) in s.char_indices() {
             match c {
                 '(' => depth += 1,
                 ')' => {
                     depth -= 1;
                     if depth == 0 {
-                        end_idx = i;
-                        break;
+                        return Ok(s[..offset].to_string());
                     }
                 }
                 _ => {}
             }
         }
-
-        if depth != 0 {
-            return Err(Error::schema(format!(
-                "Unbalanced parentheses in type: {}",
-                s
-            )));
-        }
-
-        Ok(s[..end_idx].to_string())
+        Err(Error::schema(format!(
+            "Unbalanced parentheses in type: {}",
+            s
+        )))
     }
 }
