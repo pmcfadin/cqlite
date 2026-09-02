@@ -716,7 +716,7 @@
 #                      fail here as noise, not leakage. No opt-out.
 #                      Also runs scripts/tests/test_features_load_bearing_guard.sh
 #                      (#1698), the non-vacuity proof for the
-#                      features-load-bearing component: 56 cases over throwaway
+#                      features-load-bearing component: 57 cases over throwaway
 #                      fixture workspaces, each criterion pinned by a green/red
 #                      differential pair, every negative case requiring the
 #                      diagnostic to NAME the planted feature, and an EXACT case
@@ -15045,7 +15045,7 @@ run_features_load_bearing() {
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
 # Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
-# proof for the features-load-bearing component: 56 cases over throwaway fixture
+# proof for the features-load-bearing component: 57 cases over throwaway fixture
 # workspaces, each criterion of the predicate pinned by a green/red differential pair,
 # every negative case required to NAME the planted feature, and an EXACT case count (a
 # floor below the real count lets one case be deleted silently — #3544's lesson applied
@@ -16548,7 +16548,10 @@ run_tooling_tests() {
   # build-script scan DERIVES each declared name's env spelling from the metadata instead of
   # parsing a suffix (so a Unicode name is credited, and cargo's grammar is no longer
   # modelled at all), and dependency activations are tracked as (package, key) PAIRS because
-  # a key is package-local. Every fixture is a LOCAL path workspace with no registry dependency and every
+  # a key is package-local. Job 93 closes the last ownership hole: a `.rs` file that NO
+  # TARGET covers credits EVERY workspace member, not just its containing members — a
+  # shared module outside every member directory had no container and so was credited to
+  # nobody. Still no `#[path]`/`include!` resolution, by design. Every fixture is a LOCAL path workspace with no registry dependency and every
   # in-place edit goes through python3 helpers rather than `sed -i`, so the suite runs
   # offline (verified under CARGO_NET_OFFLINE=1) and portably — this component is mandatory
   # and must depend on neither a network nor a GNU userland.

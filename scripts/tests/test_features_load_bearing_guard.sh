@@ -135,7 +135,12 @@
 #   soundness fixes, and 35 pins the ASYMMETRY they both rest on.
 #  33.  GREEN  — SOUNDNESS: a module included from OUTSIDE any target root
 #                (`#[path = "../gated.rs"]`) still credits its feature. No tree covered
-#                it, so it had NO owner and its feature was reported dead.
+#                it, so it had NO owner and its feature was reported dead. Stays INSIDE
+#                `a/`; case 53 is the outside-every-member half.
+#  53.  GREEN  — SOUNDNESS: a shared module OUTSIDE EVERY member directory (at the
+#                workspace root, `#[path]`-included by `a`) credits its feature. The
+#                containment rule credited it to nobody (job 93). Still no module
+#                resolution — a file no target covers credits every member.
 #  34.  GREEN  — SOUNDNESS: a HELPER MODULE under the nested member's directory, reached
 #                by the OUTER target, credits the outer member. Case 17 only covered an
 #                exact target FILE, which is why this survived three rounds.
@@ -1478,13 +1483,42 @@ grep -q '^weak_on_dup = ' "$D/b/Cargo.toml" || fail_case "case 52: fixture edit 
 expect_green "$D" "case 52"
 ok "a dependency KEY is package-local: two members using the same key for different packages certify, and activations are tracked as (package, key) pairs"
 
+# --- 53. GREEN (SOUNDNESS): a shared module OUTSIDE every member directory ---
+# `#[path]` and `include!` can pull a module in from anywhere, including outside every
+# member's package directory — a shared helper at the WORKSPACE ROOT. The earlier rule
+# credited such a file to its CONTAINING members, and this file has none, so it was
+# credited to nobody and the feature gated there read DEAD (roborev job 93). Case 33
+# covers the shape INSIDE `a/`, which the containment rule already handled; this one is
+# outside every member, which it did not — the two are deliberately separate so a
+# regression names which half broke.
+#
+# NO MODULE RESOLUTION IS INVOLVED, by design: the guard does not read the `#[path]` and
+# does not need to. A file no target covers credits EVERY workspace member, because any
+# of them could be the one including it.
+D="$(fixture root-shared-module)"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'sharedfeat = []'
+# Physically at the workspace root: outside a/, outside b/, outside optdep/, outside the
+# nested member a/tests/ — contained by NO member directory (this fixture workspace has no
+# root package, which is what makes "no container" reachable at all).
+cat >"$D/shared_gate.rs" <<'EOF'
+#[cfg(feature = "sharedfeat")]
+pub fn shared_only() {}
+EOF
+append_after_line "$D/a/src/lib.rs" 'pub fn always() {}' '#[path = "../../shared_gate.rs"]
+pub mod shared_gate;'
+grep -q 'shared_gate' "$D/a/src/lib.rs" || fail_case "case 53: fixture edit did not add the #[path] module"
+[ -f "$D/shared_gate.rs" ] || fail_case "case 53: the shared module was not created at the workspace root"
+expect_green "$D" "case 53"
+assert_contract_declares "a .rs file that NO TARGET COVERS credits EVERY workspace member" "case 53"
+ok "SOUNDNESS: a shared module OUTSIDE every member directory (#[path] from the workspace root) credits its feature — no module resolution needed"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=56
+CASE_COUNT_EXPECTED=57
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 

@@ -220,11 +220,15 @@
 #     narrower rules each reported a live feature dead (see E1); this one cannot.
 #   * AN UNDECODABLE STRING ESCAPE in a cfg predicate credits EVERY feature of the
 #     package, because recording a wrong name would report the real feature dead.
-#   * A `.rs` FILE WITH NO UNAMBIGUOUS OWNER credits EVERY candidate package — every
-#     member whose package directory contains it — and a file beneath a NESTED member's
-#     directory credits the OUTER member too. A module included from outside any target
-#     root (`#[path = "../gated.rs"]`, `include!`) is reachable by a target this scan
-#     cannot trace, and subtracting an owner reported a feature used only there as dead.
+#   * A `.rs` FILE THAT NO TARGET COVERS credits EVERY WORKSPACE MEMBER, and a file
+#     beneath a NESTED member's directory credits the OUTER member too. `#[path]` and
+#     `include!` can pull a module in from anywhere — including outside every member
+#     directory — and this scan does not resolve them, so any member could be the one
+#     compiling it. Crediting the file's CONTAINING members was the narrower earlier rule
+#     and it had a hole (job 93): a shared module outside every member directory has no
+#     container, so it was credited to nobody, and in a workspace with a root package it
+#     went to that root package alone while the member that actually includes it got
+#     nothing — a live feature reported dead either way.
 #   * INDIRECTLY redundant dependency-feature edges — `dep/x` where the declaration
 #     enables some feature that itself enables `x`. Deciding it needs the dependency's
 #     own feature table, which `--no-deps` does not carry for external crates.
@@ -435,9 +439,10 @@ CONTRACT_LINE = (
     "source dir; any textual CARGO_FEATURE_* mention in a build-script package's sources "
     "(no API, module or scope analysis; a bare CARGO_FEATURE_ prefix credits every "
     "feature of that package); an undecodable string escape credits every feature of the "
-    "package; a .rs file with no unambiguous owner credits EVERY candidate package, and "
-    "one under a nested member's dir credits the outer member too; indirectly redundant "
-    "dependency edges."
+    "package; a .rs file that NO TARGET COVERS credits EVERY workspace member (any of them "
+    "could reach it via #[path]/include!, which this scan does not resolve), and one under "
+    "a nested member's dir credits the outer member too; indirectly redundant dependency "
+    "edges."
 )
 
 STR_SENTINEL = "\x01"   # every byte of a string literal, in the cleaned text
@@ -1085,14 +1090,8 @@ def buildscript_owners_of(path):
     return out
 
 
-def containment_candidates(path):
-    """Members whose PACKAGE DIRECTORY contains this file."""
-    return {name for name, rec in members.items()
-            if path == rec["dir"] or path.startswith(rec["dir"] + os.sep)}
-
-
 def owners_of(path):
-    """Every candidate owner — AMBIGUITY RESOLVES TOWARD CREDITING (roborev job 58, F2).
+    """Every possible owner — AMBIGUITY RESOLVES TOWARD CREDITING (roborev jobs 58, 93).
 
     Three layers, and none of them SUBTRACTS:
 
@@ -1103,13 +1102,23 @@ def owners_of(path):
         shared helper), and dropping the outer owner reported a feature used only there
         as DEAD. A file two targets can reach genuinely references both packages'
         features, so it credits BOTH;
-      * failing both, every member whose PACKAGE DIRECTORY contains the file. That is
-        what covers a module included from OUTSIDE any target root
-        (`#[path = "../gated.rs"]`, `include!`), which no tree covers and which
-        therefore had no owner at all — again a live feature reported dead.
+      * failing both — a file NO TARGET COVERS — EVERY workspace member, because
+        `#[path]` and `include!` can pull a module in from anywhere, and this scan does
+        not resolve them (that is module resolution, the unbounded-parsing problem this
+        guard declines by design; see the header).
 
-    Only a file under no member's directory has no owner, and then there is nothing it
-    could possibly be compiled into.
+    THE LAST LAYER USED TO BE "every member whose package DIRECTORY contains the file",
+    and that was the job-93 hole. A shared module OUTSIDE every member directory has no
+    containing member, so "credit the containers" credited NOBODY and the file was
+    effectively skipped — while in a workspace with a ROOT package (this one) the
+    directory rule is even quieter: the root package's directory IS the repository root,
+    so such a module was attributed to the root package ALONE and a `cqlite-core` feature
+    gated there read DEAD. Both halves are the same defect, and crediting every member
+    closes both without resolving a single `#[path]`.
+
+    Over-crediting is the permitted direction (a dead feature can escape; the contract
+    line declares it) and it is bounded: the file set is what the walk found, and a file
+    no target covers cannot be attributed more precisely without parsing.
     """
     owners = set(exact_owners.get(path, ()))
     for tree_dir, name in tree_owners:
@@ -1118,7 +1127,7 @@ def owners_of(path):
         if path == tree_dir or path.startswith(tree_dir + os.sep):
             owners.add(name)
     if not owners:
-        owners = containment_candidates(path)
+        owners = set(members)
     return owners
 
 
