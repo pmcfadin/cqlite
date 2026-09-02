@@ -3431,6 +3431,42 @@ obj_sweep_write_stamp() {
   return 0
 }
 
+# obj_sweep_force_stamp_stale <path> — make the throttle stamp read as EXPIRED, so no lane
+# on this box can throttle past a CORRUPT verdict that could NOT be latched (#3749 review
+# round 9, item 1).
+#
+# THE DEFECT IT EXISTS FOR. The CORRUPT branch wrote the throttle stamp unconditionally,
+# INCLUDING on the path where the latch could not be persisted (a stamp that is writable
+# inside a directory that is not — so the create of `<stamp>.CORRUPT` fails while the
+# rewrite of `<stamp>` succeeds). The detecting lane stopped, correctly; its peers then
+# read that FRESH stamp, skipped their own sweep for the whole interval, and kept spawning
+# workers over a store already confirmed damaged. That is round 1's harm surviving in the
+# one branch that never got round 1's treatment: the latch is what a peer must not
+# throttle past, and where there is no latch the ONLY thing that stops a peer is a stamp
+# it reads as expired.
+#
+# WHY IT FORCES RATHER THAN MERELY LEAVING THE STAMP ALONE. Not writing would be enough
+# for the stamp THIS lane read as stale — but a peer whose own sweep started earlier can
+# finish DURING this one and write a fresh timestamp, and then "leave it alone" throttles
+# every lane for the full interval on that peer's stamp. `0` is an affirmative statement
+# that this box's last sweep is to be treated as expired, and obj_sweep_stamp_is_fresh
+# reads it as expired for any plausible clock.
+#
+# IT CANNOT MANUFACTURE A FALSE CLEAN. Its only effect is MORE sweeping: every lane
+# re-measures the store, reproduces the damage and stops on its own finding. The cost is a
+# repeated sweep per lane per iteration until an operator repairs the store, which is the
+# correct price for a corruption verdict that has nowhere durable to live.
+obj_sweep_force_stamp_stale() {
+  local path="$1"
+  [[ -n "$path" ]] || return 0
+  if printf '0\n' 2>/dev/null >"$path"; then
+    log "object-store: the throttle stamp $path has been FORCED STALE (epoch 0) because the CORRUPT verdict could not be latched — every lane on this box will re-sweep, reproduce the damage and stop on its own finding rather than throttling past it (#3749)."
+  else
+    log "object-store: the throttle stamp $path could NEITHER be advanced nor forced stale, so peer lanes will throttle on whatever it already holds. If it is fresh they will skip their own sweep for up to ${OBJ_SWEEP_INTERVAL_HOURS}h over a store found DAMAGED: stop every lane on this box by hand (#3749)."
+  fi
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # THE IN-PROGRESS CLAIM: ONE SWEEP PER BOX AT A TIME (#3749 review round 5, item 2 —
 # raised as a Low in round 1, recorded as "not disposed of" in round 2, returned as a
@@ -3905,19 +3941,38 @@ object_store_sweep() {
   # is non-passing, journalled, and paged once — and it is named explicitly there, so the
   # signal is not swallowed on the way past.
   if [[ "$rc" -eq 4 && "$verdict" == "CORRUPT" ]]; then
-    local findings
+    local findings latched=0
     # LATCH FIRST, THEN EVERYTHING ELSE. A failure to persist it is REPORTED, never
     # silent: this lane stops either way, but without the latch the peers on this box
     # will re-run their own sweep and rediscover the damage rather than inheriting the
     # verdict, and an operator reading only this journal would otherwise never learn that.
     if [[ -z "$latch" ]]; then
       log "object-store: the CORRUPT verdict could NOT be latched — this box's shared store could not be resolved, so there is no box-wide file to record it in. Peer lanes will re-sweep and rediscover it (#3749)."
-    elif ! obj_sweep_set_latch "$latch"; then
-      log "object-store: the CORRUPT verdict could NOT be latched at $latch (unwritable?) — peer lanes will re-sweep and rediscover it rather than inheriting this verdict (#3749)."
+    else
+      obj_sweep_set_latch "$latch" || true
+      # CONFIRMED BY ASKING THE FILE AFTERWARDS, NEVER BY THE CREATE'S EXIT STATUS — the
+      # same test obj_sweep_set_latch itself ends on, and for the same reason: a create's
+      # status cannot tell "a peer got there first" (fine, the box IS latched) from "the
+      # directory is unwritable" (not fine). One extra stat, and it makes the gate below
+      # a property of the file rather than of a return value.
+      if obj_sweep_latch_present "$latch"; then
+        latched=1
+      else
+        log "object-store: the CORRUPT verdict could NOT be latched at $latch (unwritable?) — peer lanes will re-sweep and rediscover it rather than inheriting this verdict (#3749)."
+      fi
     fi
-    # ONLY NOW the throttle stamp: it says "this box paid for a sweep", and a peer
-    # reading it will also read the latch that is already there.
-    obj_sweep_write_stamp "$stamp"
+    # THE THROTTLE STAMP IS WRITTEN ONLY WHEN THE LATCH IS CONFIRMED IN PLACE (#3749
+    # review round 9, item 1). A fresh stamp tells every peer on this box "somebody swept
+    # recently, do not spend another fsck" — which is safe ONLY because the latch they
+    # will also read stops them. With no latch there is nothing to stop them, so
+    # advertising a swept box would buy six hours of silence over a store confirmed
+    # damaged. See obj_sweep_force_stamp_stale for why the stamp is forced expired rather
+    # than merely left alone.
+    if [[ "$latched" -eq 1 ]]; then
+      obj_sweep_write_stamp "$stamp"
+    else
+      obj_sweep_force_stamp_stale "$stamp"
+    fi
     findings="$(printf '%s\n' "$out" | { grep -E '^OBJECT-STORE: (finding|object) ' || true; } | head -6 | tr '\n' ';' | cut -c1-600)"
     notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT" \
       "git fsck reports damaged objects in this box's shared git object store — every lane here reads it, so NO gate verdict on this box can be trusted. Stopping. ${findings:-<no findings captured>}"

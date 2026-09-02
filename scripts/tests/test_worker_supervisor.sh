@@ -10438,6 +10438,128 @@ test_object_store_corrupt_leaves_both_the_latch_and_the_stamp() {
 
 t test_object_store_corrupt_leaves_both_the_latch_and_the_stamp
 
+# AN UNLATCHABLE CORRUPT VERDICT MUST NOT REFRESH THE THROTTLE STAMP (#3749 review round
+# 9, item 1) — the round-1 harm surviving in the ONE branch that never got round 1's
+# treatment.
+#
+# THE DEFECT. The CORRUPT branch wrote the throttle stamp unconditionally. On the path
+# where the latch could NOT be persisted but the stamp COULD — a writable stamp inside a
+# directory that is not writable, so creating `<stamp>.CORRUPT` fails while rewriting
+# `<stamp>` succeeds — the detecting lane stopped (correct) and advertised a freshly swept
+# box to its peers (not correct). Those peers then read a fresh stamp, skipped their own
+# sweep for the whole interval, and kept spawning workers over a store already confirmed
+# damaged. Round 2's note that an unpersistable latch is "journalled and this lane still
+# stops" is true and says nothing about the peers, which is the half that matters.
+#
+# THE FIXTURE IS THE SCENARIO, not a stub of it: a real directory whose write bit is off
+# with a real stamp file inside it, and the two construction asserts prove BOTH halves of
+# the premise (the latch create really fails, the stamp rewrite really succeeds) before
+# anything is asserted about the supervisor. Permission bits are advisory for root, so the
+# case skips there rather than passing vacuously.
+test_object_store_unlatchable_corrupt_does_not_refresh_the_throttle() {
+  local d root counter calls rc box stamp latch
+  if [[ "$(id -u)" -eq 0 ]]; then
+    skip "obj-sweep(unlatchable): needs a directory this process cannot write to; permission bits are advisory for root"
+    return
+  fi
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-unlatchable"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  box="$d/box"; mkdir -p "$box"
+  export OBJ_SWEEP_STAMP="$box/sweep.stamp"
+  stamp="$OBJ_SWEEP_STAMP"; latch="$stamp.CORRUPT"
+  # An EXPIRED stamp, so this lane sweeps; then close the directory for writing.
+  printf '1\n' >"$stamp"
+  chmod 0500 "$box"
+  # CONSTRUCTION (a): the latch really cannot be created here.
+  if ! (printf 'x\n' >"$latch") 2>/dev/null && [[ ! -e "$latch" ]]; then
+    pass "obj-sweep(unlatchable-plant): the latch path really cannot be created in this directory"
+  else
+    chmod 0700 "$box"
+    fail "obj-sweep(unlatchable-plant): a latch WAS creatable at $latch — the case would be about nothing"
+    return
+  fi
+  # CONSTRUCTION (b): the stamp really can still be rewritten — this is what made the
+  # defect reachable, and without it the assert below would pass for the wrong reason.
+  if (printf '1\n' >"$stamp") 2>/dev/null && [[ "$(cat "$stamp")" == 1 ]]; then
+    pass "obj-sweep(unlatchable-plant): the stamp inside it really IS still writable — the defect's precondition holds"
+  else
+    chmod 0700 "$box"
+    fail "obj-sweep(unlatchable-plant): the stamp was not writable either — the case would not reach the branch"
+    return
+  fi
+  root="$(obj_sweep_tree "$d" CORRUPT 4 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/unlatchable.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 1 && ! -f "$counter" && ! -e "$latch" ]] &&
+    grep -q 'could NOT be latched' "$d/unlatchable.log"; then
+    pass "obj-sweep(unlatchable-plant): the run detected CORRUPT, stopped, and really did fail to latch — the state the assert below is about"
+  else
+    chmod 0700 "$box"
+    fail "obj-sweep(unlatchable-plant): rc=$rc latch=$([[ -e "$latch" ]] && echo yes || echo no) spawned=$([[ -f "$counter" ]] && echo yes || echo no) (see $d/unlatchable.log)"
+    return
+  fi
+  # THE PROPERTY: the stamp does NOT read as freshly swept. It is forced to `0`, which
+  # obj_sweep_stamp_is_fresh reads as expired for any plausible clock.
+  if [[ "$(sed -n 1p "$stamp" 2>/dev/null)" == 0 ]] &&
+    grep -q 'FORCED STALE' "$d/unlatchable.log"; then
+    pass "obj-sweep(unlatchable): an unlatchable CORRUPT verdict FORCES the throttle stamp stale instead of advertising a freshly swept box"
+  else
+    fail "obj-sweep(unlatchable): stamp='$(tr '\n' '/' <"$stamp" 2>/dev/null)' — a peer reading it can throttle past a confirmed-corrupt store (see $d/unlatchable.log)"
+  fi
+  # AND THE CONSEQUENCE, MEASURED ON A PEER: same box, same stamp, INSIDE the interval.
+  # It must re-sweep (the stub records its invocations) and stop on its own finding.
+  calls="$d/calls-unlatchable-peer"
+  root="$(obj_sweep_tree "$d" CORRUPT 4 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/unlatchable-peer.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 1 && -s "$calls" && ! -f "$counter" ]]; then
+    pass "obj-sweep(unlatchable): a PEER lane inside the interval RE-SWEEPS, reproduces the damage and stops — it does not inherit six hours of silence from the stamp"
+  else
+    fail "obj-sweep(unlatchable-peer): rc=$rc reswept=$([[ -s "$calls" ]] && echo yes || echo no) spawned=$([[ -f "$counter" ]] && echo yes || echo no) (see $d/unlatchable-peer.log)"
+  fi
+  chmod 0700 "$box"
+  # THE CONTROL, ONE PROPERTY APART: the same fixture with the directory WRITABLE. The
+  # latch is created, the stamp carries a real epoch (NOT 0), and a peer then stops
+  # WITHOUT re-sweeping. So the forced-stale stamp above is attributable to the failed
+  # latch and not to the CORRUPT verdict alone.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-unlatchable-control"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  box="$d/box"; mkdir -p "$box"
+  export OBJ_SWEEP_STAMP="$box/sweep.stamp"
+  stamp="$OBJ_SWEEP_STAMP"; latch="$stamp.CORRUPT"
+  printf '1\n' >"$stamp"
+  root="$(obj_sweep_tree "$d" CORRUPT 4 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/control-latchable.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 1 && -e "$latch" ]] &&
+    [[ "$(sed -n 1p "$stamp" 2>/dev/null)" =~ ^[0-9]+$ ]] &&
+    [[ "$(sed -n 1p "$stamp" 2>/dev/null)" -gt 1 ]] &&
+    ! grep -q 'FORCED STALE' "$d/control-latchable.log"; then
+    pass "obj-sweep(unlatchable-control): with the latch WRITABLE the same CORRUPT run advances the stamp normally and forces nothing — the stale-forcing is the missing latch, not the verdict"
+  else
+    fail "obj-sweep(unlatchable-control): latch=$([[ -e "$latch" ]] && echo yes || echo no) stamp='$(tr '\n' '/' <"$stamp" 2>/dev/null)' (see $d/control-latchable.log)"
+  fi
+  calls="$d/calls-unlatchable-control-peer"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/control-peer.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 1 && ! -s "$calls" ]]; then
+    pass "obj-sweep(unlatchable-control): and its peer stops on the LATCH without re-sweeping — the two arms differ in one property, the write bit on one directory"
+  else
+    fail "obj-sweep(unlatchable-control-peer): rc=$rc reswept=$([[ -s "$calls" ]] && echo yes || echo no) (see $d/control-peer.log)"
+  fi
+}
+
+t test_object_store_unlatchable_corrupt_does_not_refresh_the_throttle
+
 # THE STOP FILE AND THE WALL-CLOCK BUDGET ARE READ BEFORE THE SWEEP, NOT AFTER IT
 # (#3749 review round 3, item 3).
 #
