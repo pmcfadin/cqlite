@@ -9371,6 +9371,10 @@ t test_lane_lock_failure_cause_is_not_inferred_from_later_state
 # that count sweeps must not be made to count resolutions.
 obj_sweep_tree() {
   local d="$1" verdict="$2" rc="$3" calllog="${4:-}" during="${5:-}" storeline="${6:-}" root="$d/root"
+  # $7 (optional) — one `verdict-detail` line for the stub to print. The consumers are
+  # required to QUOTE the sweep's operator guidance rather than restate it (#3749 review
+  # round 9, item 2), and a planted token is the only way to measure that end to end.
+  local detail="${7:-}"
   mkdir -p "$root/scripts/local" "$root/scripts/lib"
   git -C "$root" init -q 2>/dev/null
   git -C "$root" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
@@ -9408,6 +9412,7 @@ obj_sweep_tree() {
     # between its verdict print and its exit, or an older/stubbed script, leaves behind.
     # An empty string would print `verdict ` with an empty token, which is a DIFFERENT
     # (and unreachable) shape.
+    [[ -z "$detail" ]] || printf 'printf "OBJECT-STORE: verdict-detail %%s\\n" %s\n' "$(printf '%q' "$detail")"
     [[ "$verdict" == NONE ]] || printf 'printf "OBJECT-STORE: verdict %s\\n"\n' "$verdict"
     printf 'exit %s\n' "$rc"
   } >"$root/scripts/check-object-store-integrity.sh"
@@ -10559,6 +10564,89 @@ test_object_store_unlatchable_corrupt_does_not_refresh_the_throttle() {
 }
 
 t test_object_store_unlatchable_corrupt_does_not_refresh_the_throttle
+
+# THE OPERATOR REMEDY IS QUOTED FROM THE SWEEP, NOT RESTATED HERE (#3749 review round 9,
+# item 2).
+#
+# THE DEFECT. Three files carried their own copy of the repair instruction and all three
+# said `git fetch --force origin`, which repairs nothing — `--force` only permits
+# non-fast-forward REF updates and re-downloads no objects, so with the advertised tips
+# unchanged the negotiation can transfer nothing at all. An operator following it exactly
+# kept the corruption and gained the impression of a repair. The measurements are recorded
+# beside the text in check-object-store-integrity.sh; what THIS case pins is the plumbing
+# that makes one correction enough: the sweep owns the words, and this consumer prints them.
+#
+# WHY THIS IS NOT A STRING TAUTOLOGY. It does not assert what the remedy SAYS (which would
+# be a test of its own fixture). It plants a token no consumer could know and requires the
+# consumer to have PASSED IT THROUGH — so deleting the quote, or replacing it with a fresh
+# paraphrase, reds this case whatever the paraphrase happens to say.
+test_object_store_corrupt_quotes_the_sweeps_own_remedy() {
+  local d root counter calls rc token detail_out
+  token="REMEDY: PLANTED-REPAIR-TEXT-item2-$$"
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-remedy"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  root="$(obj_sweep_tree "$d" CORRUPT 4 "$calls" "" "" "$token")"
+  # CONSTRUCTION: the stub really does print that line, and the supervisor cannot have
+  # obtained the token any other way.
+  # CAPTURED FIRST, NOT PIPED: this suite runs with `pipefail` and the stub sweep EXITS 4
+  # by design, so a pipeline's status would be the stub's and not grep's — which decides
+  # the construction assert the wrong way (and, for its negated sibling below, decides it
+  # the wrong way in the PERMISSIVE direction).
+  detail_out="$(bash "$root/scripts/check-object-store-integrity.sh" 2>/dev/null || true)"
+  if printf '%s\n' "$detail_out" | grep -qF "OBJECT-STORE: verdict-detail $token"; then
+    pass "obj-sweep(remedy-plant): the stub sweep really prints the planted verdict-detail remedy line"
+  else
+    fail "obj-sweep(remedy-plant): the stub prints no such line — the assert below would be vacuous"
+    return
+  fi
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/remedy.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 1 ]] && grep -qF "$token" "$d/remedy.log"; then
+    pass "obj-sweep(remedy): the stopping lane QUOTES the sweep's own operator remedy verbatim — one correction, in the file that measured it, reaches the journal"
+  else
+    fail "obj-sweep(remedy): rc=$rc — the sweep's remedy text did not reach the journal (see $d/remedy.log)"
+  fi
+  # AND IT NAMES THE CONDITION FOR CLEARING THE LATCH: a successful re-run, not a belief.
+  if grep -q 'CLEAR THE LATCH ONLY AFTER' "$d/remedy.log"; then
+    pass "obj-sweep(remedy): clearing the latch is gated on a re-run of the sweep reporting its affirmative verdict"
+  else
+    fail "obj-sweep(remedy): the stop does not say what must be true before the latch is cleared (see $d/remedy.log)"
+  fi
+  # THE FALLBACK ARM, one property apart: a sweep that prints NO guidance at all (an older
+  # or stubbed script — the ordinary state on any branch cut before #3749). A stopping lane
+  # must never leave an operator with no remedy, so the consumer supplies one naming the
+  # sweep to run by hand.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-remedy-none"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  root="$(obj_sweep_tree "$d" CORRUPT 4 "$calls")"
+  detail_out="$(bash "$root/scripts/check-object-store-integrity.sh" 2>/dev/null || true)"
+  if ! printf '%s\n' "$detail_out" | grep -q 'verdict-detail'; then
+    pass "obj-sweep(remedy-fallback-plant): this stub really prints no verdict-detail guidance at all"
+  else
+    fail "obj-sweep(remedy-fallback-plant): the stub does print guidance — the arm below is not the fallback"
+    return
+  fi
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/remedy-none.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 1 ]] && grep -q 'object-store: REMEDY' "$d/remedy-none.log" &&
+    grep -q 'check-object-store-integrity.sh' "$d/remedy-none.log"; then
+    pass "obj-sweep(remedy-fallback): with nothing to quote the lane still prints a remedy that names the sweep to run by hand — the diagnostic fails closed"
+  else
+    fail "obj-sweep(remedy-fallback): rc=$rc — a stopping lane was left with no remedy (see $d/remedy-none.log)"
+  fi
+}
+
+t test_object_store_corrupt_quotes_the_sweeps_own_remedy
 
 # THE STOP FILE AND THE WALL-CLOCK BUDGET ARE READ BEFORE THE SWEEP, NOT AFTER IT
 # (#3749 review round 3, item 3).

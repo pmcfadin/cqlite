@@ -992,11 +992,43 @@ if [ "$FIRST_WALK_CLEAN" -eq 0 ]; then
     printf '%s verdict-detail times), so this is damage and not a concurrent writer. Every lane on\n' "$P"
     printf '%s verdict-detail this box reads it, so it can change ANY gate verdict here: do NOT\n' "$P"
     printf '%s verdict-detail certify anything against this checkout.\n' "$P"
-    printf '%s verdict-detail REMEDY: stop the lanes on this box, then re-obtain the objects from the\n' "$P"
-    printf '%s verdict-detail canonical remote (a fresh clone of pmcfadin/cqlite, or\n' "$P"
-    printf '%s verdict-detail `git fetch --force origin` if the damage is confined to fetched packs).\n' "$P"
+    # THE REMEDY IS MEASURED, NOT ASSERTED (#3749 review round 9, item 2). It used to say
+    # `git fetch --force origin`, which repairs NOTHING: `--force` only permits
+    # non-fast-forward REF updates, and with the advertised tips unchanged the negotiation
+    # can transfer no objects at all — so an operator who followed the instruction exactly
+    # was left with the corruption intact AND the impression they had repaired it. That is
+    # this repo's false-rationale class landing on the one text a human gets at the moment
+    # the box has stopped, which is why it is now measured on scratch repositories with
+    # planted damage before being printed. git 2.43.0, 2026-09-02, fsck rc per arm:
+    #
+    #   damage class                     --force   --refetch   delete + --refetch
+    #   corrupt loose object content      3 (no)    3 (no)      0  (repaired)
+    #   flipped byte inside a .pack       4 (no)    4 (no)      0  (repaired)
+    #   object MISSING under live HEAD    2 (no)    0 (yes)     -
+    #
+    # And the fourth arm, which is why "a fresh clone" is not enough on its own: a
+    # `git clone <local path>` of the damaged repository HARDLINKS its object files and the
+    # copy is damaged too (fsck rc 3). The clone must come from the canonical remote over
+    # the network. The harness is recorded in the round-9 report.
+    printf '%s verdict-detail REMEDY: stop the lanes on this box, then REPLACE the damaged objects.\n' "$P"
+    printf '%s verdict-detail `git fetch --force origin` DOES NOT DO IT: --force only permits\n' "$P"
+    printf '%s verdict-detail non-fast-forward REF updates and re-downloads no objects at all, so with\n' "$P"
+    printf '%s verdict-detail the advertised tips unchanged it can transfer nothing (measured on git\n' "$P"
+    printf '%s verdict-detail 2.43: a corrupt loose object and a flipped pack byte both survive it).\n' "$P"
+    printf '%s verdict-detail EITHER (a) clone pmcfadin/cqlite AFRESH FROM THE CANONICAL REMOTE over\n' "$P"
+    printf '%s verdict-detail the network and rebuild the lanes from it - never `git clone` a path on\n' "$P"
+    printf '%s verdict-detail THIS box, which HARDLINKS the object files and inherits the damage\n' "$P"
+    printf '%s verdict-detail (measured) - OR (b) DELETE the damaged pack (its .pack, .idx and .rev)\n' "$P"
+    printf '%s verdict-detail or loose object named above, THEN `git fetch --refetch origin` (git\n' "$P"
+    printf '%s verdict-detail 2.36+), which re-obtains what a fresh clone would. Deleting FIRST is\n' "$P"
+    printf '%s verdict-detail required: --refetch adds good copies and leaves the damaged bytes in the\n' "$P"
+    printf '%s verdict-detail object directory, where fsck still finds them (measured).\n' "$P"
     printf '%s verdict-detail A LOCAL `git gc`/`git repack` CANNOT REPAIR THIS - it rewrites the same\n' "$P"
-    printf '%s verdict-detail damaged content, or refuses. Escalate rather than improvising (#3749).\n' "$P"
+    printf '%s verdict-detail damaged content, or refuses. Content that only ever existed locally - an\n' "$P"
+    printf '%s verdict-detail unpushed commit - cannot be re-obtained: escalate rather than\n' "$P"
+    printf '%s verdict-detail improvising. THEN re-run this sweep and require its affirmative verdict\n' "$P"
+    printf '%s verdict-detail before clearing any latch or resuming the lanes: "I think I fixed it" is\n' "$P"
+    printf '%s verdict-detail not an exit condition (#3749).\n' "$P"
     exit 4
   fi
 
@@ -1103,13 +1135,22 @@ if [ "$FIRST_WALK_CLEAN" -eq 0 ]; then
       printf '%s verdict-detail needs them. That is not a stale reflog and not a concurrent writer.\n' "$P"
       printf '%s verdict-detail Every lane on this box reads this store, so it can change ANY gate\n' "$P"
       printf '%s verdict-detail verdict here: do NOT certify anything against this checkout.\n' "$P"
-      printf '%s verdict-detail REMEDY: stop the lanes on this box, then re-obtain the objects from the\n' "$P"
-      printf '%s verdict-detail canonical remote (`git fetch --force origin`, or a fresh clone of\n' "$P"
-      printf '%s verdict-detail pmcfadin/cqlite). An object that only ever existed locally - an\n' "$P"
-      printf '%s verdict-detail unpushed commit - cannot be re-obtained: escalate rather than\n' "$P"
-      printf '%s verdict-detail improvising. `git reflog expire` is the remedy for the OTHER cause of\n' "$P"
-      printf '%s verdict-detail this bit and does nothing here; a local `git gc`/`git repack` cannot\n' "$P"
-      printf '%s verdict-detail repair it either, and may prune what is left (#3749).\n' "$P"
+      printf '%s verdict-detail REMEDY: stop the lanes on this box, then RE-OBTAIN the missing objects.\n' "$P"
+      printf '%s verdict-detail `git fetch --force origin` DOES NOT DO IT: --force only permits\n' "$P"
+      printf '%s verdict-detail non-fast-forward REF updates and re-downloads nothing, and negotiation\n' "$P"
+      printf '%s verdict-detail transfers nothing while the advertised tips are unchanged (measured on\n' "$P"
+      printf '%s verdict-detail git 2.43: the object stayed missing). Use `git fetch --refetch origin`\n' "$P"
+      printf '%s verdict-detail (git 2.36+), which re-obtains what a fresh clone would and restored\n' "$P"
+      printf '%s verdict-detail exactly this shape in measurement; or clone pmcfadin/cqlite AFRESH FROM\n' "$P"
+      printf '%s verdict-detail THE CANONICAL REMOTE over the network and rebuild the lanes - never\n' "$P"
+      printf '%s verdict-detail `git clone` a path on THIS box, which HARDLINKS the object files and\n' "$P"
+      printf '%s verdict-detail inherits the damage (measured). An object that only ever existed\n' "$P"
+      printf '%s verdict-detail locally - an unpushed commit - cannot be re-obtained: escalate rather\n' "$P"
+      printf '%s verdict-detail than improvising. `git reflog expire` is the remedy for the OTHER cause\n' "$P"
+      printf '%s verdict-detail of this bit and does nothing here; a local `git gc`/`git repack` cannot\n' "$P"
+      printf '%s verdict-detail repair it either, and may prune what is left. THEN re-run this sweep\n' "$P"
+      printf '%s verdict-detail and require its affirmative verdict before clearing any latch or\n' "$P"
+      printf '%s verdict-detail resuming the lanes (#3749).\n' "$P"
       # NO `object` lines here, deliberately, and the reason is not the same as the reflog
       # branch's. A `broken link from <A> to <B>` diagnostic names the INTACT source as
       # well as the absent target, so labelling every 40-hex token an affected `object`

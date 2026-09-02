@@ -1514,12 +1514,16 @@ fi
 #   invoker can set (CLAUDE.md #3312 corollary). Two arms, one property apart — WHICH of
 #   the two channels says CORRUPT.
 mk_sweep_stub() {
-  # mk_sweep_stub <sandbox> <verdict-or-NONE> <exit>
-  local sandbox="$1" verdict="$2" rc="$3" f="$1/scripts/check-object-store-integrity.sh"
+  # mk_sweep_stub <sandbox> <verdict-or-NONE> <exit> [verdict-detail-line]
+  # The 4th argument is optional and exists for ONE property (#3749 review round 9, item
+  # 2): this section must QUOTE the sweep's operator remedy rather than restate it, and a
+  # planted token is the only way to measure a pass-through end to end.
+  local sandbox="$1" verdict="$2" rc="$3" detail="${4:-}" f="$1/scripts/check-object-store-integrity.sh"
   {
     printf '#!/usr/bin/env bash\n'
     printf 'for a in "$@"; do [ "$a" = --print-store ] && exit 0; done\n'
     printf 'printf "OBJECT-STORE: measured stub\\n"\n'
+    [ -z "$detail" ] || printf 'printf "OBJECT-STORE: verdict-detail %%s\\n" %s\n' "$(printf '%q' "$detail")"
     [ "$verdict" = NONE ] || printf 'printf "OBJECT-STORE: verdict %s\\n"\n' "$verdict"
     printf 'exit %s\n' "$rc"
   } >"$f"
@@ -1573,6 +1577,50 @@ if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: UNMEASURED' &&
   ok "obj: an unmeasurable store is a [warn] UNMEASURED with no [ok] anywhere — unmeasured is never certified"
 else
   bad "obj: an unmeasurable store did not warn, or produced an [ok]"
+  push_plain "$push_out" | grep -F 'object-store:' | head -4
+fi
+
+# 7o-e. THE REMEDY IS QUOTED FROM THE SWEEP, NOT RESTATED HERE (#3749 review round 9,
+#   item 2). This section used to carry its own copy of the repair instruction, and it
+#   said `git fetch --force origin` — measured to repair NOTHING (`--force` only permits
+#   non-fast-forward REF updates; it re-downloads no objects), so an operator who followed
+#   it exactly kept the corruption and believed it fixed. The measurements live beside the
+#   text in check-object-store-integrity.sh; what this case pins is that ONE correction
+#   there reaches the operator here.
+#
+#   NOT A STRING TAUTOLOGY: it asserts nothing about what the remedy SAYS. It plants a
+#   token this file could not otherwise produce and requires the section to have passed it
+#   through, so deleting the quote — or writing a fresh paraphrase — reds this case
+#   whatever the paraphrase says.
+repo7oe2="$tmp/repo7oe-remedy"; mk_push_repo "$repo7oe2" "file://$bare7pa"
+_rtok="REMEDY: PLANTED-REPAIR-TEXT-7oe-$$"
+mk_sweep_stub "$repo7oe2" CORRUPT 4 "$_rtok"
+_rout=$(bash "$repo7oe2/scripts/check-object-store-integrity.sh" --repo "$repo7oe2" 2>&1 || true)
+if printf '%s' "$_rout" | grep -qF "OBJECT-STORE: verdict-detail $_rtok"; then
+  ok "obj: the remedy plant IS the shape described (the stub sweep prints that verdict-detail line)"
+else
+  bad "obj: the remedy plant did not take — the case below would prove nothing (stub said: $(printf '%s' "$_rout" | tr '\n' ';'))"
+fi
+run_push "$repo7oe2" "$bin7pa" "$gc7pa" --skip-push-probe --strict
+if printf '%s' "$push_out" | grep -qF "$_rtok" &&
+  printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
+  ! push_green "$push_out"; then
+  ok "obj: the CORRUPT report QUOTES the sweep's own operator remedy verbatim — the guidance is owned by the file that measured it"
+else
+  bad "obj: the sweep's remedy text did not reach the bootstrap output"
+  push_plain "$push_out" | grep -F 'object-store:' | head -4
+fi
+# THE FALLBACK, one property apart: a sweep that prints NO guidance (an older or stubbed
+# script). A stopped box must never be left with no remedy at all.
+repo7oe3="$tmp/repo7oe-remedy-none"; mk_push_repo "$repo7oe3" "file://$bare7pa"
+mk_sweep_stub "$repo7oe3" CORRUPT 4
+run_push "$repo7oe3" "$bin7pa" "$gc7pa" --skip-push-probe --strict
+if printf '%s' "$push_out" | grep -q 'REMEDY' &&
+  printf '%s' "$push_out" | grep -q 'check-object-store-integrity.sh' &&
+  ! push_green "$push_out"; then
+  ok "obj: with nothing to quote, CORRUPT still carries a remedy naming the sweep to run by hand — the diagnostic fails closed"
+else
+  bad "obj: a CORRUPT verdict with no quotable guidance left the operator with no remedy"
   push_plain "$push_out" | grep -F 'object-store:' | head -4
 fi
 

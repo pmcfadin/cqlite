@@ -3124,9 +3124,27 @@ else
     printf '%s\n' "$obj_out" | { grep -E '^OBJECT-STORE: (finding|object) ' || true; } | head -20 | while IFS= read -r obj_line; do
       info "$obj_line"
     done
-    info "REMEDY: stop every lane on this box, then re-obtain the objects from the canonical remote"
-    info "  (a fresh clone of pmcfadin/cqlite, or 'git fetch --force origin' if only fetched packs are damaged)."
-    info "  A LOCAL 'git gc'/'git repack' CANNOT repair this — escalate rather than improvising (#3749)."
+    # THE REMEDY IS QUOTED FROM THE SWEEP, NOT RESTATED HERE (#3749 review round 9, item
+    # 2). This section used to carry its own paraphrase, and it said `git fetch --force
+    # origin` — which repairs nothing: `--force` only permits non-fast-forward REF updates
+    # and re-downloads no objects, so an operator who followed it exactly kept the
+    # corruption and believed it fixed. A remedy duplicated in three files is a remedy
+    # that will be corrected in one of them, and this file already carries the ruling for
+    # exactly that (#3369: a diagnostic improved in one file and thrown away by its
+    # consumer is a defect this repo has paid for). So the sweep owns the text, where the
+    # measurements that justify it live beside it, and this consumer prints it verbatim.
+    obj_remedy=$(printf '%s\n' "$obj_out" | { grep '^OBJECT-STORE: verdict-detail ' || true; } | head -40)
+    if [ -n "$obj_remedy" ]; then
+      printf '%s\n' "$obj_remedy" | while IFS= read -r obj_line; do
+        info "$obj_line"
+      done
+    else
+      # FAIL-CLOSED ON THE DIAGNOSTIC: an older, newer or stubbed sweep may print no
+      # guidance at all, and a stopped box must never be left with none.
+      info "REMEDY: this sweep printed no operator guidance (an older or stubbed check-object-store-integrity.sh)."
+      info "  Re-run it by hand for the full remedy:  bash scripts/check-object-store-integrity.sh"
+      info "  A LOCAL 'git gc'/'git repack' CANNOT repair this — escalate rather than improvising (#3749)."
+    fi
   elif [ "$obj_rc" -eq 4 ] || [ "$obj_verdict" = CORRUPT ]; then
     # EXACTLY ONE CHANNEL SAYS CORRUPT (the conjunction above has already failed), so this
     # run neither established damage nor ruled it out. NAMED rather than folded into the

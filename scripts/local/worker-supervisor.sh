@@ -3746,9 +3746,18 @@ obj_sweep_stop_if_latched() {
   latch_ts="$(head -1 "$latch" 2>/dev/null || true)"
   [[ "$latch_ts" =~ ^[0-9]+$ ]] || latch_ts="<unrecorded>"
   notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT (latched)" \
-    "a sweep on this box recorded CORRUPT for the shared git object store every lane here reads. Stopping without re-sweeping. Repair the store, then remove $latch."
+    "a sweep on this box recorded CORRUPT for the shared git object store every lane here reads. Stopping without re-sweeping. Repair the store, then re-run the sweep and require its affirmative verdict BEFORE removing $latch."
   log "object-store: CORRUPT (cached at $latch_ts by a sweep on this box) — stopping; no worker may certify against a damaged shared store (#3749)."
-  log "object-store: REMEDY — stop every lane on this box and re-obtain the objects from the canonical remote; a local 'git gc'/'git repack' CANNOT repair it. THEN CLEAR THE LATCH: rm -f $latch"
+  # THE REMEDY NAMES WHAT ACTUALLY REPAIRS THE STORE (#3749 review round 9, item 2). It
+  # used to say "re-obtain the objects from the canonical remote", which read as
+  # `git fetch --force origin` — the instruction the sweep itself used to print, and
+  # measured to repair NOTHING: `--force` only permits non-fast-forward REF updates and
+  # re-downloads no objects at all. This lane did NOT sweep (that is the point of the
+  # latch), so it has no damage class and no fsck output to quote: it names the two things
+  # that are true for every class, points at the sweep for the class-specific text, and
+  # makes a successful sweep — not a belief — the condition for clearing the latch.
+  log "object-store: REMEDY — stop every lane on this box, then repair the shared store. 'git fetch --force origin' does NOT repair it (--force only permits non-fast-forward REF updates; it re-downloads no objects), and neither does a local 'git gc'/'git repack'. Run 'bash scripts/check-object-store-integrity.sh' for the measured remedy for the damage class it finds (#3749)."
+  log "object-store: CLEAR THE LATCH ONLY AFTER that sweep completes and reports its affirmative verdict — 'I think I fixed it' is not an exit condition: rm -f $latch"
   finalize_exit "object-store-corrupt" 1
 }
 
@@ -3977,7 +3986,20 @@ object_store_sweep() {
     notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT" \
       "git fsck reports damaged objects in this box's shared git object store — every lane here reads it, so NO gate verdict on this box can be trusted. Stopping. ${findings:-<no findings captured>}"
     log "object-store: CORRUPT — stopping loudly; no worker may certify against a damaged shared store (#3749). ${findings:-<no findings captured>}"
-    log "object-store: REMEDY — stop every lane on this box and re-obtain the objects from the canonical remote; a local 'git gc'/'git repack' CANNOT repair it.${latch:+ THEN CLEAR THE LATCH: rm -f $latch}"
+    # THE REMEDY IS QUOTED FROM THE SWEEP, NEVER RESTATED (#3749 review round 9, item 2).
+    # This lane HAS the sweep's output, and the sweep knows which damage class it found —
+    # the repair differs by class, and it was measured there. Restating it here is how the
+    # wrong instruction ('git fetch --force origin', which re-downloads no objects and
+    # repairs nothing) survived in three files at once.
+    printf '%s\n' "$out" | { grep '^OBJECT-STORE: verdict-detail ' || true; } | head -40 | while IFS= read -r obj_line; do
+      log "object-store: $obj_line"
+    done
+    # FAIL-CLOSED ON THE DIAGNOSTIC: an older, newer or stubbed sweep may print no
+    # guidance, and a stopping lane must never leave an operator with none.
+    if ! printf '%s\n' "$out" | grep -q '^OBJECT-STORE: verdict-detail REMEDY'; then
+      log "object-store: REMEDY — this sweep printed no operator guidance (an older or stubbed check-object-store-integrity.sh). Stop every lane on this box and run 'bash scripts/check-object-store-integrity.sh' by hand for the measured remedy; 'git fetch --force origin' does NOT repair a damaged store and neither does a local 'git gc'/'git repack' (#3749)."
+    fi
+    log "object-store: CLEAR THE LATCH ONLY AFTER a re-run of that sweep reports its affirmative verdict — 'I think I fixed it' is not an exit condition.${latch:+ rm -f $latch}"
     finalize_exit "object-store-corrupt" 1
   fi
 
