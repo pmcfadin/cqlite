@@ -47,6 +47,14 @@
 
 use super::*;
 
+// Issue #3631: the blob-fallback arm's replacement, at the DECODER's own level.
+// Covers acceptance criteria 4 and 5 with bytes derived from cassandra-5.0.8 source;
+// the fixture-backed parity oracle is
+// `cqlite-core/tests/issue_3631_structured_values_not_blobs.rs`.
+#[cfg(test)]
+#[path = "regression_3631_typed_value_tests.rs"]
+mod regression_3631_typed_value_tests;
+
 impl V5CompressedLegacyParser {
     /// Assert a bounded decode consumed its entire slice.
     ///
