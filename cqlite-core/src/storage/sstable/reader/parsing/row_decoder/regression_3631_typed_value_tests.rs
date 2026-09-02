@@ -1150,3 +1150,106 @@ fn zero_length_fields_of_a_marshal_form_udt_decode_from_their_declared_type() {
     );
     assert_eq!(udt.fields[1].value, Some(Value::text("")));
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// roborev job 68, finding 2 — `inet` bypassed the width gate.
+//
+// `inet` is not FIXED-width, so it was classified variable-width and skipped the
+// check entirely; the delegated type-string decoder's `"inet"` arm then borrows
+// whatever slice it is handed (`raw_value/reporting.rs`), so a five-byte field
+// became a `Value::Inet` nobody can turn into an address.
+//
+// THE RULE ALREADY EXISTS IN THIS REPOSITORY, once, and these cases hold this
+// decoder to it: `complex_column/cell_path_key.rs`'s `cql_short_allowed_widths`
+// row is `"inet" => &[0, 4, 16]`, citing
+// `cassandra-5.0.8:src/java/org/apache/cassandra/serializers/InetAddressSerializer.java`
+// `validate`, which RETURNS EARLY on an empty buffer and otherwise delegates to
+// `InetAddress.getByAddress` — a 4- or 16-byte address, its `MarshalException`
+// reading "Expected 4 or 16 byte inetaddress". `deserialize` in the same file is
+// `if (accessor.isEmpty(value)) return null`, and
+// `InetAddressType.isEmptyValueMeaningless()` (line 51) is `true`: so EMPTY is
+// NULL, which is what `empty_is_a_value("inet") == false` already encodes.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Cassandra writes `10.0.0.1` as the 4 bytes `InetAddress.getAddress()` returns.
+const IPV4_10_0_0_1: &[u8] = &[10, 0, 0, 1];
+
+#[test]
+fn a_four_byte_inet_udt_field_is_an_ipv4_address() {
+    assert_eq!(
+        parser()
+            .parse_simple_udt_field_value_at(IPV4_10_0_0_1, &CqlType::Inet, 0)
+            .expect("4 bytes is a legal IPv4 inet"),
+        Value::inet(IPV4_10_0_0_1.to_vec()),
+    );
+}
+
+#[test]
+fn a_sixteen_byte_inet_udt_field_is_an_ipv6_address() {
+    let mut v6 = vec![0x20, 0x01, 0x0d, 0xb8];
+    v6.extend_from_slice(&[0u8; 11]);
+    v6.push(1);
+    assert_eq!(v6.len(), 16);
+    assert_eq!(
+        parser()
+            .parse_simple_udt_field_value_at(&v6, &CqlType::Inet, 0)
+            .expect("16 bytes is a legal IPv6 inet"),
+        Value::inet(v6),
+    );
+}
+
+/// `InetAddressSerializer.deserialize`: `if (accessor.isEmpty(value)) return null`.
+#[test]
+fn an_empty_inet_udt_field_is_null_per_cassandras_serializer() {
+    assert_eq!(
+        parser()
+            .parse_simple_udt_field_value_at(&[], &CqlType::Inet, 0)
+            .expect("an empty inet is Cassandra's NULL, not an error"),
+        Value::Null,
+    );
+}
+
+/// The finding's own case: five bytes is neither address width, and
+/// `InetAddress.getByAddress` would throw. It must be refused with the SAME
+/// diagnostic family every other over-wide scalar gets ("N bytes wide"), not
+/// surfaced as a `Value::Inet`.
+#[test]
+fn a_five_byte_inet_udt_field_is_refused_not_accepted_as_an_address() {
+    let err = parser()
+        .parse_simple_udt_field_value_at(&[10, 0, 0, 1, 0], &CqlType::Inet, 0)
+        .expect_err("5 bytes is not an IPv4 or IPv6 address");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("'inet'") && msg.contains("4 or 16 bytes wide"),
+        "the refusal must name the two legal widths, as the fixed-width arm names \
+         its one: {msg}"
+    );
+}
+
+/// 15 and 17 bytes prove the gate is SET MEMBERSHIP and not a minimum — a `>= 4`
+/// check would accept both.
+#[test]
+fn near_miss_inet_widths_are_refused_too() {
+    for len in [1usize, 3, 5, 15, 17] {
+        let decoded = parser().parse_simple_udt_field_value_at(&vec![0u8; len], &CqlType::Inet, 0);
+        let err = match decoded {
+            Err(e) => e,
+            Ok(v) => panic!("{len} bytes is not an address width, but decoded to {v:?}"),
+        };
+        assert!(
+            err.to_string().contains("4 or 16 bytes wide"),
+            "{len} bytes: {err}"
+        );
+    }
+}
+
+/// Reached through a collection ELEMENT as well — the width gate lives in the one
+/// typed decoder, so `list<inet>` inherits it rather than re-implementing it.
+#[test]
+fn a_malformed_inet_inside_a_frozen_list_is_refused() {
+    let ty = CqlType::Frozen(Box::new(CqlType::List(Box::new(CqlType::Inet))));
+    let err = parser()
+        .parse_simple_udt_field_value_at(&pack(&[vec![0u8; 5]]), &ty, 0)
+        .expect_err("a 5-byte inet element must be refused");
+    assert!(err.to_string().contains("4 or 16 bytes wide"), "{err}");
+}
