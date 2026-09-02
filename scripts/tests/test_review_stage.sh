@@ -5537,6 +5537,172 @@ else
 fi
 
 
+# --- 33. THE RECORDED-VERDICT GUARD IS KEYED ON A PROPERTY, NOT A TOKEN LIST (round 19, Y3) --------
+# THE FINDING: the clobber guard enumerated `PASS | FINDINGS`, so `AUTHOR-PERFORMED` — a token of
+# the same closed grammar, and the only other one that PROCEEDS at the merge point — inherited the
+# PERMISSIVE branch: an existing author-performed verdict was superseded with NO `--force` and NO
+# `replaced-verdict:` trace, contradicting this command's own documented protection.
+#
+# THE CLASS: a guard that enumerates the states it will REFUSE lets any state nobody listed through.
+# Round 13's S1 fixed this same guard for the UNREADABLE state and left the token half a list. The
+# fix is to key on the AFFIRMATIVE property — a verdict is RECORDED, i.e. the prior token is NOT
+# `NOT-RUN` — so a token added to the grammar later is protected by construction.
+R33="$(newrepo)"
+rs "$R33" open c --issue 1903 --agent spec-auditor
+rc_is 0 "y3: the stage opened"
+# (a) PREMISE: the FIRST recording lands over a sentinel-only stage, so `AUTHOR-PERFORMED` really is
+#     recorded before the supersede attempt (otherwise the case measures nothing).
+rs "$R33" record-author-performed c --issue 1903 \
+  --reason "no independent auditor was available on this lane" \
+  --evidence "docs/round-artifacts/y3-first.md" --performed-by author
+rc_is 0 "y3: PREMISE — the first author-performed recording succeeds over a sentinel-only stage"
+rs "$R33" verdict c --issue 1903
+rc_is 6 "y3: PREMISE — and the stage now RECORDS AUTHOR-PERFORMED (exit 6)"
+has "RESULT: AUTHOR-PERFORMED" "y3: PREMISE — read back as the recorded verdict"
+Y3_GEN1="$(RECORD_NONCE "$R33" 1903 c)"
+if [ -n "$Y3_GEN1" ]; then
+  ok "y3: PREMISE — the recorded generation is nameable, so the trace below has a subject"
+else
+  bad "y3: PREMISE — could not read the recorded generation from the stage record"
+fi
+
+# (b) THE FINDING ITSELF: a second recording with NO --force.
+rs "$R33" record-author-performed c --issue 1903 \
+  --reason "a second hand audit superseding the first" \
+  --evidence "docs/round-artifacts/y3-second.md" --performed-by author
+rc_is 2 "y3: a recorded AUTHOR-PERFORMED is NOT silently replaceable — refused without --force"
+has "reason=verdict-already-recorded" "y3: with the same reason token the PASS/FINDINGS states get"
+has "recorded-verdict=AUTHOR-PERFORMED" "y3: and the refusal NAMES the token it protected"
+hasnt "RECORD-OK" "y3: nothing was recorded"
+rs "$R33" verdict c --issue 1903
+has "report=$(REPORT_OF "$R33" 1903 c)" "y3: and the stage still names the generation it named before"
+if [ "$(RECORD_NONCE "$R33" 1903 c)" = "$Y3_GEN1" ]; then
+  ok "y3: the published generation is UNCHANGED by the refusal"
+else
+  bad "y3: the refusal moved the stage's published generation"
+fi
+
+# (c) CONTROL: `--force` still supersedes it, AND records the trace naming the prior token. Without
+#     this the fix could be a mechanism that simply refuses everything.
+rs "$R33" record-author-performed c --issue 1903 --force \
+  --reason "a second hand audit superseding the first" \
+  --evidence "docs/round-artifacts/y3-second.md" --performed-by author
+rc_is 0 "y3/control: --force STILL supersedes a recorded AUTHOR-PERFORMED"
+has "replaced-verdict=AUTHOR-PERFORMED" "y3/control: and the RECORD-OK line records the replaced token"
+has "supersedes-report-nonce=$Y3_GEN1" "y3/control: naming the generation it came from"
+Y3_NEW="$(REPORT_OF "$R33" 1903 c)"
+if LC_ALL=C grep -q '^replaced-verdict: AUTHOR-PERFORMED$' "$Y3_NEW"; then
+  ok "y3/control: and the trace is IN THE NEW REPORT, at column zero, naming AUTHOR-PERFORMED"
+else
+  bad "y3/control: the new report carries no replaced-verdict: AUTHOR-PERFORMED line ($Y3_NEW)"
+fi
+if [ -f "$R33/.review-stage/issue-1903/c.$Y3_GEN1.md" ]; then
+  ok "y3/control: and the superseded generation is still on disk as history"
+else
+  bad "y3/control: the superseded generation was destroyed"
+fi
+
+# (d) THE TWO STATES THAT WERE ALREADY RIGHT still are, so the re-keying did not lose them.
+R33B="$(newrepo)"
+rs "$R33B" open c --issue 1904 --agent spec-auditor
+rc_is 0 "y3/regression: the stage opened"
+printf 'result: FINDINGS\n\none blocking gap.\n' >"$(REPORT_OF "$R33B" 1904 c)"
+rs "$R33B" record-author-performed c --issue 1904 \
+  --reason "no independent auditor was available on this lane" \
+  --evidence "docs/round-artifacts/y3-note.md" --performed-by author
+rc_is 2 "y3/regression: a recorded FINDINGS is still refused without --force"
+has "recorded-verdict=FINDINGS" "y3/regression: naming FINDINGS"
+printf 'result: PASS\n\nreviewed.\n' >"$(REPORT_OF "$R33B" 1904 c)"
+rs "$R33B" record-author-performed c --issue 1904 \
+  --reason "no independent auditor was available on this lane" \
+  --evidence "docs/round-artifacts/y3-note.md" --performed-by author
+rc_is 2 "y3/regression: and a recorded PASS is still refused without --force"
+has "recorded-verdict=PASS" "y3/regression: naming PASS"
+
+# (e) AND THE PERMISSIVE STATE IS STILL REACHABLE — a sentinel-only stage records with no --force.
+#     This is the assertion that makes the fix a re-keying rather than a blanket refusal.
+R33C="$(newrepo)"
+rs "$R33C" open c --issue 1905 --agent spec-auditor
+rc_is 0 "y3/permissive: the stage opened"
+rs "$R33C" record-author-performed c --issue 1905 \
+  --reason "no independent auditor was available on this lane" \
+  --evidence "docs/round-artifacts/y3-note.md" --performed-by author
+rc_is 0 "y3/permissive: a SENTINEL-ONLY stage still records with no --force (NOT-RUN is the one permissive token)"
+hasnt "replaced-verdict" "y3/permissive: and no replaced-verdict trace is emitted, so its ABSENCE still means nothing was replaced"
+# A GRAMMATICAL-BUT-VERDICTLESS report is NOT-RUN too, and must stay replaceable.
+R33D="$(newrepo)"
+rs "$R33D" open c --issue 1906 --agent spec-auditor
+rc_is 0 "y3/permissive: a second stage opened"
+printf 'reviewed, but no verdict line.\n' >"$(REPORT_OF "$R33D" 1906 c)"
+rs "$R33D" record-author-performed c --issue 1906 \
+  --reason "no independent auditor was available on this lane" \
+  --evidence "docs/round-artifacts/y3-note.md" --performed-by author
+rc_is 0 "y3/permissive: an UNGRAMMATICAL report is NOT-RUN, so it is still replaceable without --force"
+
+# (f) STRUCTURAL — THE PROPERTY, NOT THE INSTANCE. A behavioural case can only cover the tokens
+#     someone thought of; what has to hold is that the permissive branch is an AFFIRMATIVE match on
+#     the one token that means "nothing is recorded", so a token added to the grammar later refuses
+#     by construction. Extracted from the shipped script, comments stripped, because a `case` arm
+#     quoted in prose is not a `case` arm.
+Y3_RAP="$(LC_ALL=C awk '
+  /^cmd_record_author_performed\(\) \{/ { inf = 1 } inf { print } inf && /^\}/ { exit }
+' "$RS" | LC_ALL=C grep -v '^[[:space:]]*#')"
+case "$Y3_RAP" in
+  "") bad "y3/structural: could not extract cmd_record_author_performed — the assertions below would be vacuous" ;;
+  *) ok "y3/structural: the recording command was located in the shipped script" ;;
+esac
+Y3_CASE="$(printf '%s\n' "$Y3_RAP" | LC_ALL=C sed -n '/case "\$prior_token" in/,/esac/p')"
+case "$Y3_CASE" in
+  *'NOT-RUN)'*) ok "y3/structural: the guard's permissive arm is the AFFIRMATIVE 'NOT-RUN)' — the one token that means no verdict is recorded" ;;
+  *) bad "y3/structural: the guard's permissive arm is not an affirmative NOT-RUN match (got: $Y3_CASE)" ;;
+esac
+case "$Y3_CASE" in
+  *'PASS | FINDINGS)'* | *'PASS|FINDINGS)'*)
+    bad "y3/structural: the guard still enumerates the RECORDED tokens, so a token nobody listed inherits the permissive branch — the defect, verbatim" ;;
+  *) ok "y3/structural: and it no longer enumerates the recorded tokens, so AUTHOR-PERFORMED (and any token added later) is protected by default" ;;
+esac
+case "$Y3_CASE" in
+  *'*)'*) ok "y3/structural: everything that is not NOT-RUN takes the refusing arm" ;;
+  *) bad "y3/structural: the guard has no catch-all refusing arm, so an unforeseen token falls out of the case entirely" ;;
+esac
+# THE ARGUMENT MUST BE IN THE SOURCE. This is the third time one guard in this file has been
+# re-keyed off a list; a fix nobody can read the reasoning for is a fix that gets re-listed.
+Y3_RAP_ALL="$(LC_ALL=C awk '
+  /^cmd_record_author_performed\(\) \{/ { inf = 1 } inf { print } inf && /^\}/ { exit }
+' "$RS")"
+case "$Y3_RAP_ALL" in
+  *'AFFIRMATIVE PROPERTY'*) ok "y3/structural: the source states WHY the guard is keyed on the property rather than on a token list" ;;
+  *) bad "y3/structural: nothing at the branch records the reasoning, so the next change can quietly re-introduce a list" ;;
+esac
+# AND THE SIBLING TOKEN-KEYED DECISIONS ARE IN THE AFFIRMATIVE FORM TOO — the audit this finding
+# asked for, pinned so a regression at any of them reds here rather than needing to be re-audited.
+Y3_SITES=0; Y3_BADSITES=""
+Y3_CLS="$(LC_ALL=C awk '/^classify_report\(\) \{/ { inf = 1 } inf { print } inf && /^\}/ { exit }' "$RS")"
+case "$Y3_CLS" in
+  *"unrecognised result token"*) Y3_SITES=$((Y3_SITES + 1)) ;;
+  *) Y3_BADSITES="$Y3_BADSITES classify_report" ;;
+esac
+Y3_VER="$(LC_ALL=C awk '/^cmd_verdict\(\) \{/ { inf = 1 } inf { print } inf && /^\}/ { exit }' "$RS")"
+case "$Y3_VER" in
+  *"unclassified token"*) Y3_SITES=$((Y3_SITES + 1)) ;;
+  *) Y3_BADSITES="$Y3_BADSITES cmd_verdict" ;;
+esac
+Y3_RST="$(LC_ALL=C awk '/^report_state\(\) \{/ { inf = 1 } inf { print } inf && /^\}/ { exit }' "$RS")"
+case "$Y3_RST" in
+  *"*) printf 'unreadable"*) Y3_SITES=$((Y3_SITES + 1)) ;;
+  *) Y3_BADSITES="$Y3_BADSITES report_state" ;;
+esac
+case "$Y3_RAP" in
+  *'absent | present)'*) Y3_SITES=$((Y3_SITES + 1)) ;;
+  *) Y3_BADSITES="$Y3_BADSITES prior_state" ;;
+esac
+if [ "$Y3_SITES" -eq 4 ] && [ -z "$Y3_BADSITES" ]; then
+  ok "y3/structural: the FOUR sibling token/state decisions (classify_report's token case, cmd_verdict's exit map, report_state's state map, the prior-state gate) all carry a fail-closed catch-all — audited with this finding, pinned so a regression reds here"
+else
+  bad "y3/structural: $Y3_SITES of 4 sibling decisions carry a fail-closed catch-all; missing:$Y3_BADSITES"
+fi
+
+
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
 # which is this issue's own subject inside a test file.
@@ -5972,7 +6138,22 @@ fi
 # assertion needs only bash, git, `ln -s` and coreutils; none branches on the host, and the two
 # PREMISE assertions that could fail on a filesystem without symlinks call `bad` (a red run, never
 # a displaced count).
-ASSERT_FLOOR=980
+#
+# ROUND 19's Y3 MOVES IT TO 1012. Section 33 adds 32: the recorded-verdict guard ENUMERATED
+# `PASS | FINDINGS`, so `AUTHOR-PERFORMED` — a token of the same closed grammar, and the only other
+# one that PROCEEDS at the merge point — inherited the PERMISSIVE branch and was superseded with NO
+# `--force` and NO `replaced-verdict:` trace, contradicting this command's own documented
+# protection (11 of this section's assertions RED with the one `case` arm reverted, 0 after). Round
+# 13's S1 had fixed the same guard for the UNREADABLE state and left the token half a list, which
+# is why the fix is a RE-KEYING onto the affirmative property — the prior token is `NOT-RUN`, i.e.
+# nothing is recorded — rather than one more entry. Both halves are asserted: the FINDINGS and PASS
+# regressions still refuse, and the permissive states (sentinel-only, ungrammatical) still record,
+# so the fix is not a blanket refusal. The structural half pins the property (an affirmative
+# `NOT-RUN)` arm, no token enumeration, a catch-all) over a COMMENT-STRIPPED extraction — a `case`
+# arm quoted in prose is not a `case` arm — plus the FOUR sibling token/state decisions this
+# finding's audit covered, so a regression at any of them reds here instead of needing to be
+# re-audited. Every assertion needs only bash, git and coreutils; none branches on the host.
+ASSERT_FLOOR=1012
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

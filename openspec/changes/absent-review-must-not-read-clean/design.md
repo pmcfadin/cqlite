@@ -290,6 +290,16 @@ later state refuses at both callers by construction. `--force` does not cover it
 replacing the verdict the operator READ — and the recovery is `open --force`, which supersedes the stage
 with a fresh report and leaves the unreadable file on disk as history.
 
+**And the TOKEN half of the same guard was still a list (round 19, Y3).** S1 keyed the STATE
+affirmatively and left the token `case` enumerating `PASS | FINDINGS`, so `AUTHOR-PERFORMED` — the one
+other token that PROCEEDS at the merge point — inherited the permissive branch and was superseded with
+no `--force` and no `replaced-verdict:` trace (measured, exit 0). Same shape, one field over: **a guard
+that enumerates the states it will refuse lets through any state nobody listed.** So the guard is
+re-keyed onto the affirmative property (the prior token is `NOT-RUN`, i.e. nothing is recorded); adding
+`AUTHOR-PERFORMED` to the list would have been the same defect with one more entry. The other four
+token/state decisions in this grammar were audited with it and were already in that form, and are now
+pinned structurally.
+
 Round 13 (S2) is the same round's second finding and a rule rather than a byte: **a capture that
 normalises its input cannot be the thing that validates it.** A command substitution SILENTLY
 DISCARDS NUL bytes, so every `$(…)` read of an untrusted file here could MANUFACTURE grammar its

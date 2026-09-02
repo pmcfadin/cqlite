@@ -533,8 +533,10 @@ artifact and `--performed-by author` — the ONLY accepted performer, since the 
 the AUTHOR and a peer audit stated as an author's is a false verdict — SHALL refuse placeholder values, and SHALL cause `verdict` to
 report the DISTINCT token `AUTHOR-PERFORMED` — never `PASS`. The recorded disclosure SHALL carry the
 form: *"an author's hand audit is not an independent one; weight it accordingly."* It SHALL NOT
-replace a report that already RECORDS a verdict (`PASS` or `FINDINGS`) unless `--force` is passed, and
-a forced replacement SHALL record the replaced token in the new report. That check SHALL PREVENT the
+replace a report that already RECORDS A VERDICT unless `--force` is passed, and
+a forced replacement SHALL record the replaced token in the new report. That guard SHALL be keyed on
+the AFFIRMATIVE property — the prior verdict is `NOT-RUN`, i.e. nothing is recorded — and NEVER on a
+list of recorded tokens, so a token added to the grammar later is protected by construction. That check SHALL PREVENT the
 replacement rather than report it: the observation it decides on SHALL be re-verified immediately before
 the report is installed, and any change to the report in between SHALL refuse by name — including under
 `--force`. And it SHALL treat an UNREADABLE prior report as a verdict that is UNKNOWN rather than absent:
@@ -547,6 +549,20 @@ verdict the operator read and an unreadable report is one nobody read.
 - **THEN** the recording is REFUSED, naming the recorded token, and the report is left intact
 - **AND** with `--force` the new report NAMES the token it replaced, so the substitution is auditable
 - **AND** a sentinel-only report is replaced with no `--force` (the normal path is unaffected)
+
+#### Scenario: EVERY recorded token is protected, including one nobody enumerated
+- **WHEN** the stage's report already records `AUTHOR-PERFORMED` and a substitute is recorded without
+  `--force`
+- **THEN** the recording is REFUSED naming `recorded-verdict=AUTHOR-PERFORMED`, nothing is written, and
+  the stage's published generation is UNCHANGED
+- **AND** under `--force` it is superseded AND the new report records `replaced-verdict: AUTHOR-PERFORMED`
+  at column zero beside the generation it superseded
+- **AND** the guard SHALL be keyed on the AFFIRMATIVE property (the prior token is `NOT-RUN`) rather
+  than on a list of recorded tokens, asserted STRUCTURALLY over the shipped script, so a token added to
+  the grammar later refuses by construction — the enumeration is what let this token through
+- **AND** the states that ARE replaceable SHALL stay replaceable with no `--force` (a sentinel-only
+  report, and a grammatical report with no verdict line), so the fix is a re-keying and not a blanket
+  refusal
 
 #### Scenario: a verdict recorded while the substitute is being prepared is not overwritten
 - **WHEN** a verdict is recorded into the report AFTER the already-recorded check and BEFORE the

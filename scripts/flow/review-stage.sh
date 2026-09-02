@@ -428,7 +428,10 @@
 #         Placeholders are refused exactly as `claim.sh --reason` refuses them — by the same
 #         function `verdict` classifies a HAND-WRITTEN report with, so the two sides cannot
 #         hold the same value to two different strengths.
-#         REFUSES to supersede a report that already RECORDS a verdict (`PASS`/`FINDINGS`)
+#         REFUSES to supersede a report that already RECORDS A VERDICT — keyed on the
+#         AFFIRMATIVE property (the prior verdict is `NOT-RUN`, i.e. nothing is recorded), never on
+#         a LIST of recorded tokens, so `AUTHOR-PERFORMED` and any token added to the grammar later
+#         are protected by construction (#3751 round 19, Y3) —
 #         without `--force`, and a forced replacement RECORDS the token it replaced
 #         (`replaced-verdict:`) plus the GENERATION it came from
 #         (`supersedes-report-nonce:`) in the new report and on the RECORD-OK line — a
@@ -3209,11 +3212,39 @@ cmd_record_author_performed() {
       exit 2
       ;;
   esac
+  # THE GUARD IS KEYED ON THE AFFIRMATIVE PROPERTY — *NO VERDICT IS RECORDED* — AND NOT ON A LIST OF
+  # RECORDED TOKENS (#3751 round 19, Y3).
+  #
+  # THE FINDING, AND IT IS THIS REPOSITORY'S MOST-REPEATED SHAPE. This `case` enumerated
+  # `PASS | FINDINGS`, so every token nobody listed inherited the PERMISSIVE branch — and
+  # `AUTHOR-PERFORMED` was never added to the list. Measured on the shipped script: a stage already
+  # recording `AUTHOR-PERFORMED` was superseded by a second `record-author-performed` with NO
+  # `--force`, exit 0, and NO `replaced-verdict:` anywhere on disk — contradicting this command's
+  # own documented recorded-verdict protection. Round 13's S1 fixed the same guard for the
+  # UNREADABLE state (the `prior_state` gate above); the token half was left as a list.
+  #
+  # SO THE PERMISSIVE VALUE IS NAMED, AND IT IS EXACTLY ONE: `NOT-RUN`. That is the token
+  # `classify_report` returns for every state in which there IS no recorded verdict to destroy —
+  # sentinel-only, absent, empty, ungrammatical, self-recorded — and the two states that are
+  # `unknown` rather than `absent` never reach here, because `prior_state` refuses them above. Every
+  # OTHER token, INCLUDING one added to the grammar after this was written, therefore refuses
+  # without `--force` and records the `replaced-verdict:` trace under it, BY CONSTRUCTION rather than
+  # by someone remembering to extend a list. A `!= PASS && != FINDINGS` test would have the same
+  # defect spelt differently; matching by string equality on the affirmative value is the whole fix.
+  #
+  # THE VERDICT GRAMMAR'S OTHER TOKEN-KEYED DECISIONS WERE AUDITED WITH THIS ONE and are already in
+  # this form: `classify_report`'s own token `case` and `cmd_verdict`'s exit map are ALLOWLISTS whose
+  # `*)` arm is the fail-closed `NOT-RUN`/exit 5; `cmd_status`'s map keys `NOT-RUN` affirmatively and
+  # sends everything else to `state=reported`, which is correct for any new verdict token AND is
+  # advisory besides; `report_state`'s permissive set is the two measured states with a fail-closed
+  # `*`; and `premerge-assert.sh`'s C gate admits `PASS | AUTHOR-PERFORMED` and refuses every other
+  # token by name. This was the one site still keyed on a list of tokens rather than on a property.
   case "$prior_token" in
-    PASS | FINDINGS)
+    NOT-RUN) ;;
+    *)
       if [ "$force" -ne 1 ]; then
-        emit "AUTHOR-REFUSED reason=verdict-already-recorded kind=$kind issue=$issue recorded-verdict=$prior_token report=$(field_value "$STAGE_REPORT")"
-        emit "AUTHOR-REFUSED detail=this stage already RECORDS a verdict, and superseding it here without saying so would report a merge-proceeding AUTHOR-PERFORMED over a verdict somebody wrote — a recorded FINDINGS would stop blocking. Read it first ($prog verdict $kind --issue $issue). If the substitute really does supersede it, pass --force: the replaced token AND the generation it came from are then RECORDED in the new report, and that generation's report stays on disk as history."
+        emit "AUTHOR-REFUSED reason=verdict-already-recorded kind=$kind issue=$issue recorded-verdict=$(field_value "$prior_token") report=$(field_value "$STAGE_REPORT")"
+        emit "AUTHOR-REFUSED detail=this stage already RECORDS a verdict, and superseding it here without saying so would report a merge-proceeding AUTHOR-PERFORMED over a verdict somebody wrote — a recorded FINDINGS would stop blocking, and a recorded AUTHOR-PERFORMED would have its reason and evidence silently replaced. Read it first ($prog verdict $kind --issue $issue). If the substitute really does supersede it, pass --force: the replaced token AND the generation it came from are then RECORDED in the new report, and that generation's report stays on disk as history."
         exit 2
       fi
       replaced="$prior_token"

@@ -890,7 +890,8 @@ case where NO independent audit can be obtained, i.e. the author's own, and remo
 its name true.
 
 **The already-recorded refusal PREVENTS rather than REPORTS (#3751 round 9, N1).** Round 2 (B2) made
-`record-author-performed` refuse to replace a recorded `PASS`/`FINDINGS` without `--force`; it checked the
+`record-author-performed` refuse to replace a recorded verdict without `--force` (a list of
+`PASS`/`FINDINGS` at the time — re-keyed onto the affirmative property in round 19, below); it checked the
 verdict and THEN spent a `mktemp`, an `O_EXCL` create, a `date` and a dozen `printf`s before installing
 its replacement, so a late reviewer recording `FINDINGS` anywhere in that span was silently overwritten by
 the merge-proceeding token — with no `--force` and no `replaced-verdict:` trace, i.e. the exact harm the
@@ -961,7 +962,36 @@ permissive branch, and unknown is not absent* — and it is the sibling of round
 verdict must describe a state that EXISTED, and a REPLACEMENT may only destroy a state that was
 READ.
 
-Three properties. **The permissive set is AFFIRMATIVE**, naming the two states that were measured —
+**AND THE TOKEN HALF OF THE SAME GUARD WAS STILL A LIST (#3751 round 19, Y3).** S1 keyed the
+observation STATE affirmatively and left the token `case` enumerating `PASS | FINDINGS` — so
+`AUTHOR-PERFORMED`, a token of the same closed grammar and the only other one that PROCEEDS at the
+merge point, inherited the permissive branch. Measured on the shipped script: an existing
+`AUTHOR-PERFORMED` verdict was superseded by a second `record-author-performed` with **no `--force`**,
+exit 0, and **no `replaced-verdict:` anywhere on disk** — contradicting this subcommand's own
+documented protection, and losing the prior recording's `reason`/`evidence` as the stage's answer.
+
+This is the same shape as S1 one field over: **a guard that enumerates the states it will REFUSE lets
+through any state nobody listed.** The fix is therefore a RE-KEYING, not one more entry: the
+permissive branch is the AFFIRMATIVE `NOT-RUN)` — the one token `classify_report` returns for every
+state in which there IS no recorded verdict to destroy (sentinel-only, absent, empty, ungrammatical,
+self-recorded) — and everything else refuses without `--force` and records the `replaced-verdict:`
+trace under it. Adding `AUTHOR-PERFORMED` to the list would have been the same defect with one more
+entry; a `!= PASS && != FINDINGS` test would be the same defect spelt differently.
+
+**The audit that came with it, stated per site**, because "the same shape elsewhere" is the question a
+finding like this actually asks. Five decisions in this grammar are keyed on a token or a state, and
+four were already in the affirmative form: `classify_report`'s own token `case` (allowlist, `*)` →
+`report ungrammatical: unrecognised result token`), `cmd_verdict`'s exit map (allowlist, `*)` → exit
+5 with a `note`), `report_state`'s state map (`*)` → the fail-closed `unreadable`), and this guard's
+`prior_state` gate (`absent | present)`, S1's own fix). `cmd_status`'s map keys `NOT-RUN`
+affirmatively and sends everything else to `state=reported`, which is CORRECT for any new verdict
+token and advisory besides. `premerge-assert.sh`'s C gate admits `PASS | AUTHOR-PERFORMED` and
+refuses every other token by name. **One site of five was keyed on a list, and it is the one this
+finding names.** All four sibling decisions are now pinned structurally in
+`scripts/tests/test_review_stage.sh` §33, so a regression at any of them reds the suite rather than
+waiting to be re-audited.
+
+Three properties of the state half. **The permissive set is AFFIRMATIVE**, naming the two states that were measured —
 `absent` (verified-absent: there is no recorded verdict to destroy, so nothing is destroyed) and
 `present` (readable: the token decides, exactly as before) — because a `!= unreadable` test would
 admit every state added later, which is the shape #3564 records one directory over. **The state

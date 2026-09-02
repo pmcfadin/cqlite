@@ -154,7 +154,15 @@ carry).
   RE-VERIFIES between them; that tool now has ONE primitive that captures the record, reads the
   report of the generation those bytes name, and re-reads the record, with a structural guard
   (`scripts/tests/lib/observation-boundary-scan.sh`) requiring every decision path to reason from
-  one such observation and to read no stage file for itself. **And byte equality is not
+  one such observation and to read no stage file for itself. **And a coherent observation of the
+  WRONG ARTIFACT is still wrong (#3751 round 19)** — every reader of the report and the stage record
+  DEREFERENCED (`[ -f ]` and an input redirection both follow links), so a symlink planted at either
+  name made `verdict`, and this AUTO validation with it, accept a verdict read out of a file the stage
+  does not name: measured, `RESULT: PASS` at exit 0 off a link. Both read targets now test the leaf
+  with `[ -L ]` BEFORE any dereferencing predicate — the dangling case is why the order matters, since
+  `-f` calls a dangling link ABSENT, which is the permissive state — each under its own cause and
+  `state=`. The TOCTOU window a leaf test cannot close is DECLARED (#3929's family), not claimed
+  closed. **And byte equality is not
   IDENTITY (#3751 round 10)** — an ABA replacement (A to a foreign generation B while `verdict`
   reads B, then back to A) leaves two identical observations — so the accepted verdict must also
   NAME the validated generation: its `report=` field carries the report nonce, which must equal the
