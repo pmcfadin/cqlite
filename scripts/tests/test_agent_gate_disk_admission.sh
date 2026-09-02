@@ -2459,6 +2459,165 @@ else
   unset LOCPATH
 fi
 
+# ===========================================================================
+# Case AA (roborev job 394, Medium): EVERY OSError from the write probe is
+# binding — the errno's membership in a list does not decide fatality.
+#
+# There used to be an allowlist, so EIO, ESTALE and ENODEV — definitive write
+# failures — fell through to non-fatal UNMEASURED and the build proceeded AFTER
+# ITS OWN WRITE PROBE HAD FAILED. Driven with a REAL forced errno rather than a
+# reasoned one: sitecustomize.py makes os.makedirs raise EIO inside the SHIPPED
+# classifier, extracted verbatim from the gate.
+# ===========================================================================
+aa_cls="$tmp/aa-classifier.py"
+sed -n '/^import errno, os, sys$/,/^sys.stdout.write("OK")$/p' "$GATE" > "$aa_cls"
+if [ -s "$aa_cls" ] && grep -q 'CANNOT-WRITE' "$aa_cls"; then
+  ok "errno-source: extracted the SHIPPED write-probe classifier from the gate"
+else
+  bad "errno-source: could not extract the classifier — this case would test nothing"
+fi
+mkdir -p "$tmp/aa-pre"
+cat > "$tmp/aa-pre/sitecustomize.py" <<'AASC'
+import os, errno
+def boom(*a, **k):
+    raise OSError(errno.EIO, "simulated I/O error")
+os.makedirs = boom
+AASC
+aa_got=$(PYTHONPATH="$tmp/aa-pre" python3 "$aa_cls" "$tmp/aa-target" 2>/dev/null)
+# THE POSITIVE CONTROL: the PRE-FIX allowlist, reproduced verbatim, on the SAME errno. It
+# must classify EIO as UNCLASSIFIED — i.e. non-fatal — or this case is not a differential.
+aa_pre=$(python3 - <<'AAPRE' 2>/dev/null
+import errno, sys
+B = set()
+for n in ("ENOSPC","EDQUOT","EROFS","EACCES","EPERM","ENOTDIR","EEXIST","ELOOP","ENAMETOOLONG"):
+    v = getattr(errno, n, None)
+    if v is not None: B.add(v)
+e = errno.EIO
+sys.stdout.write(("CANNOT-WRITE " if e in B else "UNCLASSIFIED ") + errno.errorcode[e])
+AAPRE
+)
+case "$aa_pre" in
+  'UNCLASSIFIED EIO')
+    ok "errno-source CONTROL: the PRE-FIX allowlist classified EIO as UNCLASSIFIED — non-fatal, so the build proceeded after a failed write probe" ;;
+  *) bad "errno-source CONTROL: the pre-fix allowlist gave '$aa_pre'; this case does not demonstrate the defect" ;;
+esac
+case "$aa_got" in
+  'CANNOT-WRITE EIO')
+    ok "errno-source: the SHIPPED classifier calls a forced EIO CANNOT-WRITE — the SOURCE of the error decides, not a list" ;;
+  'UNCLASSIFIED'*)
+    bad "errno-source: an OSError from the write probe is still UNCLASSIFIED ('$aa_got') — the build would proceed after its own probe failed" ;;
+  *) bad "errno-source: unexpected classification '$aa_got'" ;;
+esac
+# And the same for a forced failure of the OPEN/WRITE half, not just the creation.
+mkdir -p "$tmp/aa-pre2"
+cat > "$tmp/aa-pre2/sitecustomize.py" <<'AASC2'
+import os, errno
+_real = os.open
+def boom(*a, **k):
+    raise OSError(errno.ESTALE, "simulated stale handle")
+os.open = boom
+AASC2
+aa_got2=$(PYTHONPATH="$tmp/aa-pre2" python3 "$aa_cls" "$tmp/aa-target2" 2>/dev/null)
+case "$aa_got2" in
+  'CANNOT-WRITE ESTALE')
+    ok "errno-source: a forced ESTALE from the OPEN half is binding too (both halves of the probe, not just creation)" ;;
+  *) bad "errno-source: the open/write half gave '$aa_got2', expected CANNOT-WRITE ESTALE" ;;
+esac
+# NOT AN OVER-CORRECTION: a writable directory must still come back OK.
+aa_ok=$(python3 "$aa_cls" "$tmp/aa-good" 2>/dev/null)
+if [ "$aa_ok" = OK ] && [ -d "$tmp/aa-good" ]; then
+  ok "errno-source: a writable target still classifies OK (the rule did not become 'always refuse')"
+else
+  bad "errno-source: a writable target classified '$aa_ok'"
+fi
+
+# ===========================================================================
+# Case AB (roborev job 394, Medium): the BLOCKING cap setup happens BEFORE the
+# binding measurement, so a slow `mkdir` cannot make the bound reading stale.
+#
+# Round 329's rule binds the launch reading on cap-inactive paths BECAUSE no time
+# has elapsed between it and the build. A blocking `mkdir -p "$CQLITE_GATE_SLOTS_DIR"`
+# — a network-backed dir is the obvious case — broke that premise. Fixed by
+# ORDER, and the order is asserted from OBSERVED SIDE-EFFECT SEQUENCE, not from
+# reading the source: both `mkdir` and `df` are shimmed to append to one log, and
+# the slots-dir mkdir must appear BEFORE the first df.
+# ===========================================================================
+ab_seq="$tmp/ab-sequence.log"; : > "$ab_seq"
+mkdir -p "$tmp/ab-bin"
+cat > "$tmp/ab-bin/mkdir" <<'ABMK'
+#!/usr/bin/env bash
+# Log + delay + FAIL only for the slots dir under test; pass everything else through.
+for a in "$@"; do
+  case "$a" in
+    *"$AB_SLOTS_MARKER"*)
+      printf 'mkdir-slots\n' >> "$AB_SEQ"
+      sleep 2
+      exit 1 ;;
+  esac
+done
+exec /bin/mkdir "$@"
+ABMK
+cat > "$tmp/ab-bin/df" <<'ABDF'
+#!/usr/bin/env bash
+printf 'df\n' >> "$AB_SEQ"
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf '/dev/shim 999999999 1 209715200 1%% /shimfs\n'
+ABDF
+chmod +x "$tmp/ab-bin/mkdir" "$tmp/ab-bin/df"
+ab_slots="$tmp/ab-slots-BLOCKY"
+RS_PATH_PREFIX="$tmp/ab-bin"
+run_stub_gate ab "$(df_script ab "$HIGH")" \
+  AB_SEQ="$ab_seq" AB_SLOTS_MARKER="ab-slots-BLOCKY" \
+  CQLITE_GATE_SLOTS_DIR="$ab_slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+RS_PATH_PREFIX=""
+ab_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 180; ab_status=$WX_STATUS; ab_markers=$WX_MARKERS
+assert_no_timeout "ab blocking slot dir"
+# The fixture must actually have exercised the blocking-failure path.
+if grep -q 'cannot create slot dir' "$ab_err" 2>/dev/null && grep -q '^mkdir-slots$' "$ab_seq"; then
+  ok "blocking-setup setup: the slots-dir mkdir really was reached, blocked and failed"
+else
+  bad "blocking-setup setup: the blocking mkdir path was not exercised — the ordering assertion below would prove nothing"
+fi
+ab_first=$(sed -n 1p "$ab_seq" 2>/dev/null)
+if [ "$ab_first" = mkdir-slots ]; then
+  ok "blocking-setup: the BLOCKING mkdir ran BEFORE the first df — the bound reading is taken after it, never before"
+else
+  bad "blocking-setup: the first side effect was '$ab_first', so the measurement precedes the blocking call and the bound reading can be stale"
+fi
+ab_line=$(grep_line "$ab_err" '^agent-gate: disk-admission: ')
+case "$ab_line" in
+  *'evaluated 1x'*'NOT RE-MEASURED'*'slot dir uncreatable'*)
+    ok "blocking-setup: reported as ONE binding evaluation naming the cap-off cause" ;;
+  *) bad "blocking-setup: unexpected rendering: ${ab_line:-<none>}" ;;
+esac
+if [ "$ab_status" -eq 0 ] && [ "$ab_markers" -ge 1 ]; then
+  ok "blocking-setup: an above-bar reading after the blocking failure still PROCEEDS (the order change does not red correct input)"
+else
+  bad "blocking-setup: the run was refused despite an above-bar reading (exit $ab_status)"
+fi
+# And the binding half: below-bar on that same blocking-failure path must REFUSE.
+: > "$ab_seq"
+RS_PATH_PREFIX="$tmp/ab-bin"
+cat > "$tmp/ab-bin/df" <<'ABDF2'
+#!/usr/bin/env bash
+printf 'df\n' >> "$AB_SEQ"
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf '/dev/shim 999999999 1 10485760 90%% /shimfs\n'
+ABDF2
+chmod +x "$tmp/ab-bin/df"
+run_stub_gate ab-low "$(df_script ab-low "$LOW")" \
+  AB_SEQ="$ab_seq" AB_SLOTS_MARKER="ab-slots-BLOCKY" \
+  CQLITE_GATE_SLOTS_DIR="$ab_slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=2
+RS_PATH_PREFIX=""
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 180; ab_low_status=$WX_STATUS; ab_low_markers=$WX_MARKERS
+assert_no_timeout "ab-low"
+if [ "$ab_low_status" -ne 0 ] && [ "$ab_low_markers" -eq 0 ]; then
+  ok "blocking-setup: below-bar on the blocking-failure path REFUSES — the reading taken after the block is BINDING"
+else
+  bad "blocking-setup: built below the bar after a blocking cap-setup failure (exit $ab_low_status, markers $ab_low_markers)"
+fi
+
 printf '\n%s\n' "-----------------------------------------------"
 printf 'passed: %d  failed: %d  skipped: %d\n' "$PASS" "$FAIL" "$SKIP"
 [ "$FAIL" -eq 0 ] || exit 1

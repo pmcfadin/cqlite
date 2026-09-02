@@ -19733,21 +19733,25 @@ _gate_disk_admission_subject() {
   out=$(_component_set_bounded "$_GATE_DF_BOUND_SECS" python3 -c '
 import errno, os, sys
 p = sys.argv[1]
-# Each name is here because it ESTABLISHES the build cannot write to this path:
-#   ENOSPC/EDQUOT  the filesystem or quota is full   (this issue is about exactly this)
-#   EROFS          read-only mount
-#   EACCES/EPERM   we are not permitted to create it
-#   ENOTDIR        a path component is not a directory
-#   EEXIST         with exist_ok=True this can only mean "exists and is NOT a directory"
-#   ELOOP/ENAMETOOLONG  the path itself is unusable, not merely absent
-B = set()
-for n in ("ENOSPC", "EDQUOT", "EROFS", "EACCES", "EPERM", "ENOTDIR", "EEXIST", "ELOOP", "ENAMETOOLONG"):
-    v = getattr(errno, n, None)
-    if v is not None:
-        B.add(v)
+# THE SOURCE OF THE ERROR DECIDES FATALITY, NOT THE ERRNO ITS MEMBERSHIP (roborev job 394).
+#
+# There used to be an ALLOWLIST of errnos here, and anything outside it fell through to
+# UNCLASSIFIED -> UNMEASURED -> non-fatal. So EIO, ESTALE and ENODEV — definitive write
+# failures — let the build proceed AFTER ITS OWN WRITE PROBE HAD FAILED. That inverted
+# round 357s own principle: an OSError raised BY THE WRITE ATTEMPT is not an absence of
+# information, it is an affirmative failure to write. The allowlist quietly turned "nobody
+# enumerated this errno" into "the build is fine" — a pass derived from the absence of a
+# RECOGNISED bad signal.
+#
+# The rule is now SMALLER, not larger: EVERY OSError from the creation or from the
+# open/write/fsync probe is CANNOT-WRITE. The errno is still reported for the operator; it
+# just no longer decides fatality. UNCLASSIFIED is reserved for failures that are NOT about
+# writability, which here means only a non-OSError internal fault — the cases that genuinely
+# establish nothing (the bound firing, no bounding mechanism, python3 absent, an unparsable
+# payload) are decided by EXIT STATUS in the shell above, never here.
 def report(e):
     code = errno.errorcode.get(e.errno, "E%s" % (e.errno,))
-    sys.stdout.write(("CANNOT-WRITE " if e.errno in B else "UNCLASSIFIED ") + code)
+    sys.stdout.write("CANNOT-WRITE " + code)
     sys.exit(0)
 try:
     os.makedirs(p, exist_ok=True)
@@ -19765,6 +19769,10 @@ if not os.path.isdir(p):
 # cargo then failed on its first artifact. The bar does not cover it either: a
 # quota-exhausted user on a spacious volume sees plenty of free space in df, so both
 # checks together said PASS on a target that provably cannot be written.
+#
+# ANY OSError FROM THIS PROBE IS BINDING (job 394): its whole purpose is to ATTEMPT a write,
+# so a failure of it establishes that the build cannot write, whichever errno came back. The
+# classifier says why an allowlist was the wrong shape.
 #
 # TRY IT, DO NOT ASK. os.access() reports on permission BITS and establishes nothing under
 # ACLs, a read-only mount or a quota. O_EXCL with an UNPREDICTABLE name because peer lanes
@@ -20098,7 +20106,11 @@ _gate_disk_admission_line() {
 # reds on correct input, which is the guard agents learn to waive. What the launch
 # reading IS for is the second half of AC3: it is the baseline the post-slot reading is
 # read against, so a queue that ate 137G is visible as such in the block.
-_gate_disk_admission_launch() {
+# _gate_disk_admission_bar: resolve and VALIDATE the bar. Split out of the launch
+# measurement (roborev job 394) so an unusable bar refuses INSTANTLY — it is a pure
+# environment read with no I/O, and it must not sit behind the potentially blocking cap
+# setup that now precedes the measurement.
+_gate_disk_admission_bar() {
   local bar
   bar=$(_gate_min_free_gb)
   _DA_BAR="${bar%% *}"; _DA_BAR_SRC="${bar##* }"
@@ -20136,10 +20148,6 @@ _gate_disk_admission_launch() {
       fi
       _gate_disk_admission_refuse ;;       # exits 1 — never returns
   esac
-  _gate_disk_admission_measure
-  _DA_EVALUATIONS=1
-  _DA_LAUNCH_RENDER=$(_gate_disk_admission_render_state)
-  _DA_POST_RENDER='NOT MEASURED (the slot was never granted)'
   # A bar the operator SET but the gate did not use AS SET is an operator action that
   # needs an operator response, so it is named on stderr as well as in the block. The
   # raw value is stripped of control characters and truncated: it is untrusted input
@@ -20156,6 +20164,17 @@ _gate_disk_admission_launch() {
     invalid|clamped)
       echo "agent-gate: WARN: CQLITE_GATE_MIN_FREE_GB='$(printf '%s' "${CQLITE_GATE_MIN_FREE_GB:-}" | tr -d '\000-\037\177' | cut -c1-60)' was NOT used AS SET ($_DA_BAR_SRC); the bar in effect is ${_DA_BAR}GiB (accepted range 0..${_GATE_MAX_FREE_GB} GiB) (#3755)" >&2 ;;
   esac
+  return 0
+}
+
+# _gate_disk_admission_launch: THE FIRST MEASUREMENT. Called AFTER the cap setup (see
+# acquire_gate_slot) so that nothing which can BLOCK stands between it and either the queue
+# or the build. Assumes _gate_disk_admission_bar has already run.
+_gate_disk_admission_launch() {
+  _gate_disk_admission_measure
+  _DA_EVALUATIONS=1
+  _DA_LAUNCH_RENDER=$(_gate_disk_admission_render_state)
+  _DA_POST_RENDER='NOT MEASURED (the slot was never granted)'
   if [ "$_DA_STATE" = UNWRITABLE ]; then
     echo "agent-gate: WARN: the build output directory ${_DA_TARGET_DIR:-<unresolved>} cannot be created at LAUNCH (${_DA_WHY:-unknown}) — ADVISORY *only if a slot grant follows* (a queued peer may free space or inodes); the binding check is re-taken at slot grant (#3755)" >&2
   fi
@@ -20323,34 +20342,61 @@ acquire_gate_slot() {
   [ "$LITE" -eq 1 ] && return 0
   [ "$DELTA" -eq 1 ] && return 0
   [ -n "$ONLY" ] && return 0
-  # #3755: the LAUNCH evaluation. Placed AFTER the exemptions and BEFORE everything
-  # else in this function, so it is reached by exactly the run class that queues and
-  # then builds — the full gate — and by nothing else. ADVISORY (see the function).
+  # #3755: reached by exactly the run class that queues and then builds — the full gate —
+  # and by nothing else, because the exemptions above have already returned.
   _DA_PROBE_REACHED=1
-  _gate_disk_admission_launch
+
+  # ---- ORDER: BAR, then the BLOCKING CAP SETUP, then the MEASUREMENT (roborev job 394) ----
+  #
+  # THE HOLE THIS CLOSES was in round 329's own rule, not a new axis. That rule reads: the
+  # measurement immediately preceding the build is ALWAYS fail-closed, and a launch
+  # measurement is advisory ONLY when a slot grant will follow it. Its justification for
+  # BINDING the launch reading on the cap-inactive paths was that NO TIME HAD ELAPSED
+  # between the reading and the build. But `mkdir -p "$dir"` can BLOCK — a network-backed
+  # `CQLITE_GATE_SLOTS_DIR` is the obvious case — and if it blocks and then FAILS, the gate
+  # bound a reading taken an arbitrarily long interval earlier. Stale in exactly the way a
+  # post-queue reading is stale, which is the whole subject of this issue.
+  #
+  # FIXED BY ORDER, NOT BY RE-MEASURING ON EACH FAILURE PATH. One measurement in the right
+  # place keeps the invariant statable; N measurements patched onto N paths is how the
+  # invariant stops being checkable. So everything that can block or fail in the cap setup
+  # happens FIRST and only records WHY the cap is off; the measurement is taken after it, so
+  # nothing which can block stands between the reading and either the queue or the build.
+  #
+  # The BAR is resolved before both, because it is a pure environment read that can refuse
+  # instantly and must not sit behind a blocking mkdir.
+  _gate_disk_admission_bar
+
+  local n dir poll daemon ready cap_off=""
   if [ "${CQLITE_GATE_DISABLE_CAP:-0}" = 1 ]; then
-    _gate_disk_admission_bind_launch "cap force-disabled"; return 0
-  fi
-  if ! command -v python3 >/dev/null 2>&1; then
+    cap_off="cap force-disabled"
+  elif ! command -v python3 >/dev/null 2>&1; then
     echo "agent-gate: python3 unavailable -- full-gate concurrency cap DISABLED (#1825)" >&2
-    _gate_disk_admission_bind_launch "python3 unavailable"
+    cap_off="python3 unavailable"
+  else
+    n=$(_gate_max_concurrency)
+    dir="${CQLITE_GATE_SLOTS_DIR:-${TMPDIR:-/tmp}/cqlite-gate-slots}"
+    poll="${CQLITE_GATE_POLL_SECS:-2}"
+    daemon="$REPO_ROOT/scripts/lib/gate_slot_daemon.py"
+    if [ ! -f "$daemon" ]; then
+      echo "agent-gate: slot daemon $daemon missing -- concurrency cap DISABLED (#1825)" >&2
+      cap_off="slot daemon missing"
+    elif ! mkdir -p "$dir" 2>/dev/null; then
+      # The potentially BLOCKING call, and it is now upstream of the measurement.
+      echo "agent-gate: cannot create slot dir $dir -- concurrency cap DISABLED (#1825)" >&2
+      cap_off="slot dir uncreatable"
+    fi
+  fi
+
+  # THE LAUNCH MEASUREMENT. Advisory when a grant follows (the queue can free space);
+  # BINDING when the cap is off, which is sound precisely because the blocking setup above
+  # has already happened and nothing between here and the build can take time.
+  _gate_disk_admission_launch
+  if [ -n "$cap_off" ]; then
+    _gate_disk_admission_bind_launch "$cap_off"
     return 0
   fi
-  local n dir poll daemon ready
-  n=$(_gate_max_concurrency)
-  dir="${CQLITE_GATE_SLOTS_DIR:-${TMPDIR:-/tmp}/cqlite-gate-slots}"
-  poll="${CQLITE_GATE_POLL_SECS:-2}"
-  daemon="$REPO_ROOT/scripts/lib/gate_slot_daemon.py"
-  if [ ! -f "$daemon" ]; then
-    echo "agent-gate: slot daemon $daemon missing -- concurrency cap DISABLED (#1825)" >&2
-    _gate_disk_admission_bind_launch "slot daemon missing"
-    return 0
-  fi
-  if ! mkdir -p "$dir" 2>/dev/null; then
-    echo "agent-gate: cannot create slot dir $dir -- concurrency cap DISABLED (#1825)" >&2
-    _gate_disk_admission_bind_launch "slot dir uncreatable"
-    return 0
-  fi
+
   ready="$LOG_DIR/gate-slot.ready"
   rm -f "$ready" 2>/dev/null || true
   # Start the background lock-holder for THIS gate (pid $$). It writes $ready once
