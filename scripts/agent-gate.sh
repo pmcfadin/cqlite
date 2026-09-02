@@ -2109,24 +2109,18 @@ apply_fixture_preflight() {
       echo "agent-gate: remedy: bash test-data/scripts/fetch-datasets.sh  (or point CQLITE_DATASETS_ROOT at a checkout that has it)" >&2
       echo "agent-gate: intentional opt-out (SKIP, stamped in the SUMMARY): AGENT_GATE_ALLOW_MISSING_FIXTURES=1" >&2
       _tree_meta_array   # #2926: every emitted block carries the tree provenance
-      # #3800 (roborev job 358): this block is emitted AFTER `run_file_size`, so a verdict may
-      # already be recorded and the old "no component has run" exemption was false. The
-      # attribution is appended when there IS something to attribute, and omitted when there is
-      # not -- an empty subject set could only render a vacuous "0 RECOGNISED ... (0/0 PASS)",
-      # which is what the exemption was right about and the only part of it that survives.
-      _dx_pairs="$(_disk_recorded_pairs)"; _dx_meta=()
-      # A `case` on the SUBJECT SET, never an `if`/`&&` around the CALL: the attribution must
-      # never sit inside a conditional whose value could influence a verdict, and
-      # `test_agent_gate_disk_exhaustion.sh`'s 15-attribution guard enforces that syntactically.
-      case "$_dx_pairs" in
-        ?*) _dx_meta+=("$(_disk_exhaustion_line $_dx_pairs)") ;;
-      esac
+      # #3800 (roborev jobs 358, 365): this block is emitted AFTER `run_file_size`, so a verdict
+      # may already be recorded and the old "no component has run" exemption was false. The
+      # decision is over ALL THREE subject kinds, taken in ONE shell context (so a note recorded
+      # while gathering survives), and it lives in `_disk_preflight_meta` rather than being copied
+      # to each of the three pre-flight sites.
+      _disk_preflight_meta
       emit_summary FAIL \
         "preflight: FAIL (canonical corpus $CANONICAL_FIXTURE_KEYSPACE absent under $CQLITE_DATASETS_ROOT/sstables — only committed byte-parity refs present)" \
         "missing-fixtures: FAIL-CLOSED (#2078) — dataset-dependent components would SKIP; overall verdict FAIL" \
         "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
-        "${_dx_meta[@]+"${_dx_meta[@]}"}" \
+        "${DISK_PREFLIGHT_META[@]+"${DISK_PREFLIGHT_META[@]}"}" \
         "hint: bash test-data/scripts/fetch-datasets.sh  (opt-out: AGENT_GATE_ALLOW_MISSING_FIXTURES=1 restores SKIP + stamps this block)"
       exit 1 ;;
   esac
@@ -2555,19 +2549,18 @@ apply_schemas_preflight() {
       return 1
     fi
     _tree_meta_array   # #2926
-    # #3800 (roborev job 358): emitted AFTER run_file_size -- see the fixtures site for why the
-    # "no component has run" exemption was false. Appended only when a verdict exists.
-    _dx_pairs="$(_disk_recorded_pairs)"; _dx_meta=()
-    # `case` on the subject set, not `if`/`&&` around the call -- see the fixtures site.
-    case "$_dx_pairs" in
-      ?*) _dx_meta+=("$(_disk_exhaustion_line $_dx_pairs)") ;;
-    esac
+    # #3800 (roborev jobs 358, 365): this block is emitted AFTER `run_file_size`, so a verdict
+    # may already be recorded and the old "no component has run" exemption was false. The
+    # decision is over ALL THREE subject kinds, taken in ONE shell context (so a note recorded
+    # while gathering survives), and it lives in `_disk_preflight_meta` rather than being copied
+    # to each of the three pre-flight sites.
+    _disk_preflight_meta
     emit_summary FAIL \
       "preflight: FAIL ($reject)" \
       "$marker" \
       "$(_component_set_meta)" \
       "${TREE_META_LINES[@]}" \
-      "${_dx_meta[@]+"${_dx_meta[@]}"}" \
+      "${DISK_PREFLIGHT_META[@]+"${DISK_PREFLIGHT_META[@]}"}" \
       "hint: export a clean ABSOLUTE CQLITE_SCHEMAS_ROOT, or unset it to use $root"
     exit 1
   fi
@@ -2591,21 +2584,18 @@ apply_schemas_preflight() {
         return 1
       fi
       _tree_meta_array   # #2926: every emitted block carries the tree provenance
-      # #3800 (roborev job 358): emitted AFTER run_file_size -- see the fixtures site for why the
-      # "no component has run" exemption was false. Appended only when a verdict exists.
-      _dx_pairs="$(_disk_recorded_pairs)"; _dx_meta=()
-      # A `case` on the SUBJECT SET, never an `if`/`&&` around the CALL: the attribution must
-      # never sit inside a conditional whose value could influence a verdict, and
-      # `test_agent_gate_disk_exhaustion.sh`'s 15-attribution guard enforces that syntactically.
-      case "$_dx_pairs" in
-        ?*) _dx_meta+=("$(_disk_exhaustion_line $_dx_pairs)") ;;
-      esac
+      # #3800 (roborev jobs 358, 365): this block is emitted AFTER `run_file_size`, so a verdict
+      # may already be recorded and the old "no component has run" exemption was false. The
+      # decision is over ALL THREE subject kinds, taken in ONE shell context (so a note recorded
+      # while gathering survives), and it lives in `_disk_preflight_meta` rather than being copied
+      # to each of the three pre-flight sites.
+      _disk_preflight_meta
       emit_summary FAIL \
         "preflight: FAIL (committed CQL schema fixtures unreadable under $root — missing: $missing)" \
         "missing-schemas: FAIL-CLOSED (#3148) — dataset-backed components would panic on an absent .cql; overall verdict FAIL" \
         "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
-        "${_dx_meta[@]+"${_dx_meta[@]}"}" \
+        "${DISK_PREFLIGHT_META[@]+"${DISK_PREFLIGHT_META[@]}"}" \
         "hint: expected $root/${missing%% *} — unset CQLITE_SCHEMAS_ROOT, or: git -C $REPO_ROOT restore --source=HEAD -- test-data/schemas"
       exit 1 ;;
   esac
@@ -6716,14 +6706,45 @@ _disk_scan_subject() {
 #
 # It reads through the ONE aggregation wrapper, and disposes with `|| true` because these blocks
 # are ALREADY FAIL and a renderer must not own a verdict.
+#
+# IT FILLS AN ARRAY AND PRINTS NOTHING, WHICH IS NOT A STYLE CHOICE (roborev job 365). The first
+# version echoed the pairs, so every call site ran it inside `$( )` -- a SUBSHELL -- and any
+# `_disk_note_unread_verdict` it recorded on the way (an absent, unreadable or MALFORMED `.result`
+# is exactly what ENOSPC leaves) was LOST at the subshell boundary before `_disk_exhaustion_line`
+# ran. The gate has this same lesson recorded for `record_result`'s SIDE-lane note; it applies to
+# any helper whose job is partly to RECORD.
+DISK_RECORDED_PAIRS=()
+DISK_PREFLIGHT_META=()
 _disk_recorded_pairs() {
+  DISK_RECORDED_PAIRS=()
   local c rf
   for c in "${COMPONENTS[@]+"${COMPONENTS[@]}"}"; do
     rf="${LOG_DIR:-}/$c.result"
     [ -f "$rf" ] || continue
     _disk_verdict_read_aggregate "$c" "$rf" || true
-    printf '%s %s\n' "$c" "$DISK_VERDICT_ST"
+    DISK_RECORDED_PAIRS+=("$c" "$DISK_VERDICT_ST")
   done
+}
+
+# _disk_preflight_meta: the pre-flight blocks' one decision, in ONE place instead of three copies.
+#
+# THE TEST IS "IS THERE ANY SUBJECT", NOT "ARE THERE COMPONENT PAIRS" (roborev job 365). Gating on
+# the pairs alone was a FALSE NEGATIVE on this issue's own headline scenario: if ENOSPC stops
+# `file-size.result` from being CREATED there are no pairs at all, while `record_result` has
+# already recorded its write failure on the in-memory channel -- so the attribution was omitted
+# from precisely the run that had the answer. All three subject kinds count, which is the same rule
+# the emitted `scan:` field already declares. An empty set of ALL THREE still appends nothing,
+# since a vacuous "0 RECOGNISED ... (0/0 PASS)" is worse than silence.
+_disk_preflight_meta() {
+  DISK_PREFLIGHT_META=()
+  _disk_recorded_pairs
+  local n=$(( ${#DISK_RECORDED_PAIRS[@]} + ${#DISK_MEM_SUBJECTS[@]} + ${#DISK_UNREAD_VERDICTS[@]} ))
+  # `case` on the SUBJECT COUNT, never an `if`/`&&` around the CALL: the attribution must not sit
+  # inside a conditional whose value could influence a verdict, and 15-attribution enforces that.
+  case "$n" in
+    0) ;;
+    *) DISK_PREFLIGHT_META+=("$(_disk_exhaustion_line "${DISK_RECORDED_PAIRS[@]+"${DISK_RECORDED_PAIRS[@]}"}")") ;;
+  esac
 }
 
 _disk_exhaustion_line() {

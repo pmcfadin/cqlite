@@ -438,9 +438,18 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   was FALSE (job 358): `run_file_size` executes BEFORE both preflights** — deliberately, since
   it needs no dataset and those guards exit when the corpus is absent — so a `file-size` that
   died of ENOSPC was named by neither the block's contents nor any attribution. **This issue's
-  opening defect, inside an exemption written for this issue.** They now attribute over the
-  verdicts recorded so far and omit the line only when that set is **empty**, which is the one
-  part of the old rationale that survives. The remaining **15** (the `component-set` FAIL, the
+  opening defect, inside an exemption written for this issue.** They now attribute over **all three
+  subject kinds** — component verdicts recorded so far, the in-memory capture-failure channel, and
+  unread verdicts — and omit the line only when **every** kind is empty, which is the one part of
+  the old rationale that survives. **Gating on the component pairs alone was a FALSE NEGATIVE on
+  this issue's headline scenario (job 365):** if ENOSPC stops `file-size.result` being CREATED
+  there are no pairs at all, while `record_result` has already recorded its write failure in
+  memory — so the attribution was omitted from exactly the run that had the answer. **And the
+  gathering happens in the PARENT shell, not in `$( )`** — the first version echoed its pairs, so
+  every site gathered inside a subshell and any unread-verdict note recorded on the way (an
+  absent, unreadable or MALFORMED `.result` is what ENOSPC leaves) was lost at the boundary before
+  the line was rendered. Same lesson as `record_result`'s SIDE-lane note, and it applies to **any
+  helper whose job is partly to RECORD**. The remaining **15** (the `component-set` FAIL, the
   two summary-integrity FAILs, the shared forwarder, the five self-test hooks, the four
   `--delta` usage ERRORs, the two `--delta` refused-**before-execution** blocks) are emitted
   before any component *can* have recorded a verdict, so they have **nothing to attribute** —

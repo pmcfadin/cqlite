@@ -87,6 +87,8 @@ EXTRACT_OK=1
   # not READ -- plus the ONE reader every `.result` site now routes through, and
   # `record_result` itself so the in-memory arm of the fix is measured as shipped.
   grep -m1 '^DISK_UNREAD_VERDICTS=()$' "$GATE"
+  grep -m1 '^DISK_RECORDED_PAIRS=()$' "$GATE"
+  grep -m1 '^DISK_PREFLIGHT_META=()$' "$GATE"
   # `record_result` needs its OWN anchor: its shipped header line carries a trailing
   # `# <name> <status> <seconds>` comment, so the loop's `[{]$` anchor would extract NOTHING
   # and the fail-closed check below would fire. Anchored without the end-of-line assertion.
@@ -97,7 +99,7 @@ EXTRACT_OK=1
   for fn in _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg \
             _disk_free_field _disk_scan_field _disk_note_capture_failure \
             _disk_note_unread_verdict _disk_secs_is_int _disk_verdict_read \
-            _disk_verdict_read_aggregate _disk_recorded_pairs \
+            _disk_verdict_read_aggregate _disk_recorded_pairs _disk_preflight_meta \
             _disk_scan_subject _disk_exhaustion_line \
             _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file _tree_hex_id_ok \
             _tree_digest_ok _tree_manifest_ok _tree_mtime _tree_identity \
@@ -111,6 +113,7 @@ for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _d
             _disk_df_probe _disk_gib _disk_free_leg _disk_free_field _disk_scan_field \
             _disk_note_capture_failure _disk_note_unread_verdict _disk_secs_is_int \
             _disk_verdict_read _disk_verdict_read_aggregate _disk_recorded_pairs \
+            _disk_preflight_meta \
             record_result _disk_scan_subject _disk_exhaustion_line \
             _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file _tree_hex_id_ok \
             _tree_digest_ok _tree_manifest_ok _tree_mtime _tree_identity \
@@ -664,6 +667,16 @@ END {
           if (match(line[k], /< <\(([A-Za-z_][A-Za-z0-9_]*)\)/)) {
             fn = substr(line[k], RSTART + 4, RLENGTH - 5)
             if (_marking_fn(fn)) { verdict = "MARKED-VIA-RENDERER-" fn; break }
+          }
+          # A BARE CALL to a function that appends the line. Three pre-flight sites share one
+          # helper (`_disk_preflight_meta`) rather than copying the decision, so the append lives
+          # in a FUNCTION and the upward walk for `NAME+=(...)` cannot see it -- it censused as a
+          # GAP while attributing correctly. This is the same allowance `< <(fn)` already gets,
+          # for the same reason: what matters is that SOME reachable code appends the line to the
+          # array this site expands, not the syntax by which it does.
+          if (line[k] !~ /^[ \t]*#/ && match(line[k], /^[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*$/)) {
+            fn = line[k]; gsub(/^[ \t]+|[ \t]+$/, "", fn)
+            if (_marking_fn(fn)) { verdict = "MARKED-VIA-HELPER-" fn; break }
           }
         }
         if (verdict != "GAP") break
@@ -1560,9 +1573,19 @@ fi
 d="$tmp/c20c"; mkdir -p "$d"
 o20c=$(
   . "$EX"; . "$EX_AGG"; LOG_DIR="$d"; _disk_env
+  # The shipped aggregator asks `_pool_selected` whether an ABSENT .result was skipped by --only or
+  # is a measurement failure (job 358). It is not part of the extracted set, and a missing command
+  # returns 127 -- which would take the `|| continue` branch and silently make every absence a
+  # skip, i.e. the pre-fix behaviour. Stubbed to the real predicate's semantics.
+  _pool_selected() { [ -z "${ONLY:-}" ] && return 0; case " ${ONLY//,/ } " in *" $1 "*) return 0 ;; esac; return 1; }
   printf 'PASS 3\n'   > "$d/file-size.result"
   printf 'PASS abc\n' > "$d/fmt.result"
   : > "$d/clippy.result"
+  # ONLY names exactly the three components with a .result, so this case measures the WRAPPER's
+  # disposition of an UNREAD verdict and not job 358's separate rule that a SELECTED component with
+  # NO .result fails the run -- which would otherwise fail the run via roborev-lints and make the
+  # mutation control below unable to discriminate.
+  ONLY="file-size,fmt,clippy"
   OVERALL=PASS; NAMES=(); STATUSES=(); TIMES=()
   aggregate_lite_components
   printf 'OVERALL %s\n' "$OVERALL"
@@ -1589,7 +1612,9 @@ fi
 # green 20c proves only that the aggregator sets OVERALL somewhere.
 o20cm=$(
   . "$EX"; . "$EX_AGG"; LOG_DIR="$d"; _disk_env
+  _pool_selected() { [ -z "${ONLY:-}" ] && return 0; case " ${ONLY//,/ } " in *" $1 "*) return 0 ;; esac; return 1; }
   _disk_verdict_read_aggregate() { _disk_verdict_read "$1" "$2" || true; return 0; }
+  ONLY="file-size,fmt,clippy"
   OVERALL=PASS; NAMES=(); STATUSES=(); TIMES=()
   aggregate_lite_components
   printf 'OVERALL %s\n' "$OVERALL"
@@ -1946,9 +1971,9 @@ fi
 # ...and the three pre-flight sites must be MARKED, not exempt. Derived from the census output so it
 # cannot drift from the classifier the rest of case 14 uses.
 _pf_exempt=$(disk_census | awk -F'\t' '$1 == "EXEMPT" && $3 ~ /emit_summary FAIL/ { n++ } END { print n+0 }')
-_pf_marked=$(disk_census | grep -c '^MARKED-VIA-_dx_meta' || true)
+_pf_marked=$(disk_census | grep -c '^MARKED-VIA-HELPER-_disk_preflight_meta' || true)
 if [ "$_pf_marked" = 3 ]; then
-  ok "26a-preflight-marked: all 3 FULL-gate pre-flight FAIL blocks append the attribution via _dx_meta (census-derived), so an ENOSPC that killed file-size before the corpus guard is named instead of hidden behind missing-fixtures:"
+  ok "26a-preflight-marked: all 3 FULL-gate pre-flight FAIL blocks append the attribution through the shared _disk_preflight_meta helper (census-derived), so an ENOSPC that killed file-size before the corpus guard is named instead of hidden behind missing-fixtures:"
 else
   bad "26a-preflight-marked: $_pf_marked of 3 pre-flight blocks append the attribution (still-exempt emit_summary FAIL sites: $_pf_exempt)"
 fi
@@ -1962,16 +1987,44 @@ o26b=$(
   COMPONENTS=(file-size fmt clippy)
   printf 'FAIL 3\n' > "$d/file-size.result"
   echo 'error: No space left on device' > "$d/file-size.log"
-  printf 'PAIRS [%s]\n' "$(_disk_recorded_pairs | tr '\n' ' ')"
-  printf 'LINE %s\n' "$(_disk_exhaustion_line $(_disk_recorded_pairs))"
+  _disk_preflight_meta
+  printf 'PAIRS %s\n' "${#DISK_RECORDED_PAIRS[@]}"
+  printf 'LINE %s\n' "${DISK_PREFLIGHT_META[0]:-<none>}"
+  # (b) NO `.result` AT ALL -- the shape ENOSPC leaves when the verdict write never lands -- with
+  # the in-memory channel carrying record_result's own failure. Pairs are EMPTY here, so gating on
+  # pairs alone omitted the attribution from exactly the run that had the answer (job 365).
   rm -f "$d/file-size.result"
-  printf 'EMPTY [%s]\n' "$(_disk_recorded_pairs)"
+  DISK_MEM_SUBJECTS=("component verdict write (file-size.result)|bash: line 1: No space left on device")
+  _disk_preflight_meta
+  printf 'MEMPAIRS %s\n' "${#DISK_RECORDED_PAIRS[@]}"
+  printf 'MEMLINE %s\n' "${DISK_PREFLIGHT_META[0]:-<none>}"
+  # (c) NO subject of ANY kind -> still no line, so a vacuous 0/0 can never be rendered.
+  DISK_MEM_SUBJECTS=(); DISK_UNREAD_VERDICTS=()
+  _disk_preflight_meta
+  printf 'NONE %s\n' "${#DISK_PREFLIGHT_META[@]}"
+  # (d) a MALFORMED `.result` -- the note is recorded while GATHERING, which the first version lost
+  # because it gathered inside a command substitution. The log's signature is REMOVED here so the
+  # UNMEASURED arm is what is measured: with it present the line correctly renders RECOGNISED (a
+  # match outranks, and the unread subject is still declared as "N further subject(s)"), which
+  # would have tested the wrong arm.
+  printf 'PASS abc\n' > "$d/file-size.result"
+  echo 'nothing of interest' > "$d/file-size.log"
+  DISK_MEM_SUBJECTS=(); DISK_UNREAD_VERDICTS=()
+  _disk_preflight_meta
+  printf 'UNREAD %s\n' "${#DISK_UNREAD_VERDICTS[@]}"
+  printf 'UNREADLINE %s\n' "${DISK_PREFLIGHT_META[0]:-<none>}"
 )
 l26b=$(printf '%s\n' "$o26b" | sed -n 's/^LINE //p')
-if case "$o26b" in *"PAIRS [file-size FAIL ]"*) true ;; *) false ;; esac \
+m26b=$(printf '%s\n' "$o26b" | sed -n 's/^MEMLINE //p')
+u26b=$(printf '%s\n' "$o26b" | sed -n 's/^UNREADLINE //p')
+if case "$o26b" in *"PAIRS 2"*) true ;; *) false ;; esac \
    && case "$l26b" in "disk-exhaustion: RECOGNISED (#3800)"*"component 'file-size'"*"file-size.log:1"*) true ;; *) false ;; esac \
-   && case "$o26b" in *"EMPTY []"*) true ;; *) false ;; esac; then
-  ok "26b-preflight-runtime: a file-size verdict recorded before the corpus guard is RECOGNISED and named with its log line, and an empty recorded set produces NO pairs (so the site appends no line and cannot render a vacuous 0/0)"
+   && case "$o26b" in *"MEMPAIRS 0"*) true ;; *) false ;; esac \
+   && case "$m26b" in "disk-exhaustion: RECOGNISED (#3800)"*) true ;; *) false ;; esac \
+   && case "$o26b" in *"NONE 0"*) true ;; *) false ;; esac \
+   && case "$o26b" in *"UNREAD 1"*) true ;; *) false ;; esac \
+   && case "$u26b" in "disk-exhaustion: UNMEASURED (#3800)"*) true ;; *) false ;; esac; then
+  ok "26b-preflight-runtime: all four pre-flight shapes -- a recorded FAILing verdict (RECOGNISED at its log line), NO .result with the in-memory channel carrying record_result's own ENOSPC (RECOGNISED with ZERO pairs, the false negative job 365 found), no subject of any kind (no line at all, so no vacuous 0/0), and a MALFORMED .result whose unread note survives the gather (UNMEASURED)"
 else
   bad "26b-preflight-runtime: the pre-flight attribution path is wrong:
 $o26b"
@@ -2016,7 +2069,7 @@ fi
 # body and produced no output at all).
 o25b=$(
   ${DISK_TIMEOUT:+$DISK_TIMEOUT 60} bash -c '
-    . "$1"; LOG_DIR="$2"; _disk_env
+    . "$1"; LOG_DIR="$2"
     _big="decoy first line
 $(tail -1 "$3")"
     rc=0; _disk_scan_subject text "$_big" || rc=$?
