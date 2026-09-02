@@ -6850,6 +6850,20 @@ _failassert_clean() {
   printf '%s' "$_red" | tr -d '\000' | tr '\001-\037\177' ' ' | tr -s ' ' | cut -c1-300
 }
 
+# _failassert_relpath_ok <path>: the boundary mirror of the extractor's relpath_ok (roborev job
+# 75). Repo-relative and normalised: no leading slash, no empty component, no `.`/`..` segment,
+# safe characters only. Without it the four path grammars admitted `/etc/shadow` and
+# `../../outside/x.sh` — an absolute or traversal-shaped runtime path in a pasted summary.
+_failassert_relpath_ok() {
+  local p="${1:-}"
+  [ -n "$p" ] || return 1
+  case "$p" in /*) return 1 ;; esac
+  case "$p" in *//*) return 1 ;; esac
+  case "/$p/" in */../*|*/./*) return 1 ;; esac
+  case "$p" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  return 0
+}
+
 # _failassert_is_doctest_id <value>: does this value match the ONE closed grammar that may
 # legitimately carry a `/` — `doctest <path> line <n> (<item>)`, as produced by the extractor
 # projection pubdoc()? (#3765, roborev job 63.)
@@ -6885,7 +6899,7 @@ _failassert_is_doctest_id() {
   esac
   [ -n "$p" ] && [ -n "$n" ] || return 1
   if [ -n "$i" ]; then case "$i" in *[!A-Za-z0-9._:-]*) return 1 ;; esac; fi
-  case "$p" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  _failassert_relpath_ok "$p" || return 1
   case "$n" in *[!0-9]*) return 1 ;; esac
   return 0
 }
@@ -6901,7 +6915,7 @@ _failassert_is_shelltestid() {
   p=${v#shell-test }
   [ -n "$p" ] || return 1
   case "$p" in *.sh) ;; *) return 1 ;; esac
-  case "$p" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  _failassert_relpath_ok "$p" || return 1
   return 0
 }
 
@@ -6924,7 +6938,7 @@ _failassert_is_pytestid() {
   tst=${rest#*::}
   [ -n "$pth" ] && [ -n "$tst" ] || return 1
   case "$pth" in *.py) ;; *) return 1 ;; esac
-  case "$pth" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  _failassert_relpath_ok "$pth" || return 1
   # The remainder is `::`-joined segments, each optionally carrying the FIXED `[...]` parameter
   # marker (roborev job 74). Strip the literal marker, then require the rest to be identifier
   # characters and `:` only — so `@` and `/` stay excluded and a real parameter VALUE (which
@@ -6938,7 +6952,7 @@ _failassert_is_jestid() {
   pth=${v#jest-suite }
   [ -n "$pth" ] || return 1
   case "$pth" in *.js|*.mjs|*.cjs|*.ts) ;; *) return 1 ;; esac
-  case "$pth" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  _failassert_relpath_ok "$pth" || return 1
   return 0
 }
 

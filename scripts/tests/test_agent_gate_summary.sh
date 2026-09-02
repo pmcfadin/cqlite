@@ -6000,11 +6000,11 @@ fi
 fa_addcalls=$(grep -v '^[[:space:]]*#' "$fa_tool" | grep -E 'add\("(assert|guard|toolchain)",')
 fa_add_n=$(printf '%s\n' "$fa_addcalls" | grep -c .)
 fa_add_ok=$(printf '%s\n' "$fa_addcalls" \
-  | grep -cE 'add\("(assert|guard|toolchain)", .*, (pubid\(|publabel\(|pubdoc\(|pubsh\(|pubtagged\(|pubpytest\(|pubjest\(|"[a-z][a-z0-9-]*", 1\))')
+  | grep -cE 'add\("(assert|guard|toolchain)", .*, (pubid\(|publabel\(|pubdoc\(|pubsh\(|pubtagged\(|pubpytest\(|pubjest\(|pubunittest\(|"[a-z][a-z0-9-]*", 1\))')
 if [ "${fa_add_n:-0}" -ge 13 ] && [ "$fa_add_n" = "$fa_add_ok" ]; then
-  ok "3765-pub-one-rule: all $fa_add_n add() call sites across ALL THREE tiers publish a closed-enum label literal, pubid(…), publabel(…), pubdoc(…), pubsh(…), pubtagged(…), pubpytest(…) or pubjest(…) — no tier copies its matched line (blocker 11)"
+  ok "3765-pub-one-rule: all $fa_add_n add() call sites across ALL THREE tiers publish a closed-enum label literal, pubid(…), publabel(…), pubdoc(…), pubsh(…), pubtagged(…), pubpytest(…), pubjest(…) or pubunittest(…) — no tier copies its matched line (blocker 11)"
 else
-  bad "3765-pub-one-rule: $fa_add_n add() call site(s) but only $fa_add_ok publish through a label literal / pubid() / publabel() / pubdoc() / pubsh() / pubtagged() / pubpytest() / pubjest() — a call site that passes copied line content publishes an assertion PAYLOAD, which carries interpolated runtime values (blocker 11)"
+  bad "3765-pub-one-rule: $fa_add_n add() call site(s) but only $fa_add_ok publish through a label literal / pubid() / publabel() / pubdoc() / pubsh() / pubtagged() / pubpytest() / pubjest() / pubunittest() — a call site that passes copied line content publishes an assertion PAYLOAD, which carries interpolated runtime values (blocker 11)"
 fi
 # …and the same invariant on the OUTPUT PATH for the two repository-authored tiers, because
 # a source scan cannot see a RUNTIME value. The charset REFUSES `@`, `/`, `?`, `&` and `=`,
@@ -6414,10 +6414,12 @@ if printf '%s\n' "$fa_eb" | grep -q '_failassert_is_doctest_id "$fa_probe"'; the
 else
   bad "3765-doctest-boundary-grammar: the emit boundary does not consult _failassert_is_doctest_id — if / was added to the charset instead, every URL path is publishable again (job 63)"
 fi
-if printf '%s\n' "$(awk '/^_failassert_is_doctest_id\(\) \{/,/^\}/' "$GATE")" | grep -q 'A-Za-z0-9._/-' ; then
-  ok "3765-doctest-boundary-path-charset: the grammar re-validates the path against a charset admitting no : and no @"
+# Since job 75 the charset lives in the ONE shared normaliser, so the doctest predicate is
+# asserted to DELEGATE to it rather than to carry its own copy of the character class.
+if printf '%s\n' "$(awk '/^_failassert_is_doctest_id\(\) \{/,/^\}/' "$GATE")" | grep -q '_failassert_relpath_ok "$p"' ; then
+  ok "3765-doctest-boundary-path-charset: the doctest grammar delegates its path check to the one shared normaliser (no : , no @, no leading slash, no ..)"
 else
-  bad "3765-doctest-boundary-path-charset: the doctest grammar does not re-validate its path charset, so the shape check alone is carrying the safety property"
+  bad "3765-doctest-boundary-path-charset: the doctest grammar neither carries nor delegates a path check, so the shape check alone is carrying the safety property"
 fi
 
 # 55zb. ROBOREV JOB 67 — a delta SHELL-TEST failure must name the failing script. A5 emits
@@ -6712,6 +6714,72 @@ else
   bad "3765-pytest-no-greedy-cut: a greedy ^.*:: cut is back — it drops the class scope and publishes the identity of a DIFFERENT test (job 74)"
 fi
 
+# 55zg. ROBOREV JOB 75, three findings.
+#  (a) A PARAMETER VALUE MAY CONTAIN SPACES, so the pytest node id does not end at the first
+#      whitespace: `test_x[a one]` and `test_x[a two]` both truncated to `test_x[a`, which
+#      BOTH undercounted (one identity instead of two) and published a placeholder.
+printf 'FAILED tests/t.py::test_x[a one]\nFAILED tests/t.py::test_x[a two]\n' > "$fa_dir/pysp.log"
+_fa_run pysp "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pysp.log" PASS
+fa_sp=$(_fa_line fmt)
+case "$fa_sp" in
+  *"2 RECOGNISED"*"test_x[...]"*)
+    ok "3765-pytest-param-spaces: parameter values containing spaces stay TWO distinct failures and publish the fixed marker" ;;
+  *) bad "3765-pytest-param-spaces: expected 2 RECOGNISED with the [...] marker, got '$fa_sp' — the node id is being cut at the first whitespace (job 75)" ;;
+esac
+# pytest short-summary appends ` - <message>`; the node id ends there, not at a space inside [].
+printf 'FAILED tests/t.py::test_x[a one] - AssertionError: boom\n' > "$fa_dir/pymsg.log"
+_fa_run pymsg "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pymsg.log" PASS
+fa_pm=$(_fa_line fmt)
+case "$fa_pm" in
+  *AssertionError*|*boom*) bad "3765-pytest-msg-dropped: the pytest failure MESSAGE reached the field ('$fa_pm') — only the node id is an identity" ;;
+  *"test_x[...]"*) ok "3765-pytest-msg-dropped: the ` - <message>` suffix is dropped and only the node id is published" ;;
+  *) bad "3765-pytest-msg-dropped: expected the node id, got '$fa_pm'" ;;
+esac
+#  (b) UNITTEST: `FAIL: <method> (<dotted.qualname>)` is the format the delivery-telemetry
+#      component produces, and A2 correctly rejected it as untagged prose — so the field
+#      reported a recognised failure while naming no test at all.
+printf 'FAIL: test_method (module.Class.test_method)\n' > "$fa_dir/ut.log"
+_fa_run ut "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/ut.log" PASS
+fa_ut=$(_fa_line fmt)
+case "$fa_ut" in
+  *"unittest module.Class.test_method"*)
+    ok "3765-unittest-named: a unittest failure publishes its dotted qualified name" ;;
+  *"<no identifier"*)
+    bad "3765-unittest-named: a unittest failure still names no test ($fa_ut) — job 75" ;;
+  *) bad "3765-unittest-named: expected the unittest qualified name, got '$fa_ut'" ;;
+esac
+#  (c) THE PATH GRAMMARS MUST REQUIRE A NORMALISED REPO-RELATIVE PATH. They admitted a leading
+#      slash and `..`, so an absolute or traversal-shaped RUNTIME path could be published —
+#      exactly what job 69 established must not reach a pasted summary.
+printf 'test /etc/shadow - item (line 10) ... FAILED\n' > "$fa_dir/absp.log"
+_fa_run absp "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/absp.log" PASS
+fa_ap=$(_fa_line fmt)
+case "$fa_ap" in
+  *"/etc/shadow"*) bad "3765-path-absolute-refused: an ABSOLUTE path was published ('$fa_ap') — the path grammars must require a normalised repo-relative path (job 75)" ;;
+  *) ok "3765-path-absolute-refused: an absolute path does not satisfy any path grammar" ;;
+esac
+printf 'shell-selftest: ../../outside/x.sh FAIL\n' > "$fa_dir/trav.log"
+_fa_run trav "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/trav.log" PASS
+fa_tv=$(_fa_line fmt)
+case "$fa_tv" in
+  *".."*) bad "3765-path-traversal-refused: a traversal-shaped path was published ('$fa_tv')" ;;
+  *) ok "3765-path-traversal-refused: a `..` component does not satisfy any path grammar" ;;
+esac
+# STRUCTURAL: ONE shared normalisation on each side, so a fifth path grammar inherits it rather
+# than re-deriving the rule (and getting it wrong in a new place).
+if grep -q 'function relpath_ok(p)' "$fa_tool" \
+   && [ "$(grep -c 'relpath_ok(' "$fa_tool")" -ge 5 ]; then
+  ok "3765-path-one-normaliser-extractor: every extractor path projection shares one relpath_ok()"
+else
+  bad "3765-path-one-normaliser-extractor: the path projections do not share one normalisation — a fifth grammar would re-derive it"
+fi
+if grep -q '_failassert_relpath_ok()' "$GATE" \
+   && [ "$(grep -c '_failassert_relpath_ok "' "$GATE")" -ge 4 ]; then
+  ok "3765-path-one-normaliser-boundary: every boundary path predicate shares one _failassert_relpath_ok"
+else
+  bad "3765-path-one-normaliser-boundary: the boundary predicates do not share one normalisation"
+fi
+
 # CODE lines only: the digest note NAMES those binaries while explaining why it does not use
 # them, and a scan over the comments would read that explanation as the defect.
 if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -qE '(sha256sum|md5sum|cksum|openssl dgst)'; then
@@ -6968,7 +7036,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=574
+ASSERT_FLOOR=582
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

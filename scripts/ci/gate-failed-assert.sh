@@ -337,7 +337,7 @@ awk -v max="$max" '
   # delta log this change only just started capturing. Closed grammars, same rule as pubdoc and
   # pubsh: a path charset with no `:` beyond the `::` separator and no `@`, so no authority.
   function pubpytest(pth, rest) {
-    if (pth !~ /^[A-Za-z0-9._\/-]+\.py$/) return "<no identifier in the failure text - read the component log>"
+    if (!relpath_ok(pth) || pth !~ /\.py$/) return "<no identifier in the failure text - read the component log>"
     # A PARAMETERISED id carries the parameter VALUE, which is arbitrary text and can hold an
     # authority — so the value is replaced by a FIXED marker rather than sanitised, the same
     # ruling as every other free-text field here. Dedup and the COUNT still run on the FULL
@@ -349,7 +349,7 @@ awk -v max="$max" '
     return "pytest " pth "::" rest
   }
   function pubjest(pth) {
-    if (pth ~ /^[A-Za-z0-9._\/-]+\.(test\.)?(js|mjs|cjs|ts)$/) return "jest-suite " pth
+    if (relpath_ok(pth) && pth ~ /\.(test\.)?(js|mjs|cjs|ts)$/) return "jest-suite " pth
     return "<no identifier in the failure text - read the component log>"
   }
   function pubtagged(t,   head) {
@@ -368,15 +368,32 @@ awk -v max="$max" '
     if (head ~ /^[A-Za-z0-9._-]+(::[A-Za-z0-9._-]+)*$/) return pubid(head)
     return "<no identifier in the failure text - read the component log>"
   }
+  # relpath_ok() — the ONE path test shared by every `/`-bearing projection (roborev job 75).
+  # Segments of safe characters joined by single slashes: NO leading slash (an absolute path is
+  # not repo-relative), NO empty component, and NO `.`/`..` component. Without this the grammars
+  # admitted `/etc/shadow` and `../../outside/x.sh`, i.e. an absolute or traversal-shaped
+  # runtime path published into the summary — which is precisely what job 69 established must
+  # not happen.
+  function relpath_ok(p) {
+    if (p !~ /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/) return 0
+    if (p ~ /(^|\/)\.\.?(\/|$)/) return 0
+    return 1
+  }
+  # pubunittest() — the PUBLISHED IDENTIFIER for a unittest failure: the dotted qualified name,
+  # which is already an identifier. A closed grammar, no path and no free text.
+  function pubunittest(q) {
+    if (q ~ /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/) return "unittest " q
+    return "<no identifier in the failure text - read the component log>"
+  }
   function pubsh(t) {
-    if (t ~ /^[A-Za-z0-9._\/-]+\.sh$/) return "shell-test " t
+    if (relpath_ok(t) && t ~ /\.sh$/) return "shell-test " t
     return pubid(tagof(t))
   }
   function pubdoc(s,   dp, di, dl) {
     dp = s; sub(/ - .*$/, "", dp)
     di = s; sub(/^[^ ]+ - /, "", di); sub(/ ?\(line [0-9]+\)$/, "", di)
     dl = s; sub(/^.*\(line /, "", dl); sub(/\)$/, "", dl)
-    if (dp !~ /^[A-Za-z0-9._\/-]+$/ || dl !~ /^[0-9]+$/) return pubid(tagof(norm(s)))
+    if (!relpath_ok(dp) || dl !~ /^[0-9]+$/) return pubid(tagof(norm(s)))
     # THE ITEM IS OPTIONAL: rustdoc reports an unnamed example as `<path> - (line N)`, which
     # under a mandatory-item rule fell through to the generic rule and published a charset
     # placeholder instead of naming the failing doctest (roborev job 69).
@@ -458,6 +475,15 @@ awk -v max="$max" '
     s = $0; sub(/^[[:space:]]*FAIL - /, "", s)
     add("assert", s, pubtagged(norm(s)), 0); next
   }
+  # A8 unittest: `FAIL: <method> (<dotted.qualname>)`, the format the delivery-telemetry
+  # component produces (roborev job 75). BEFORE A2, whose pubtagged() correctly rejects it as
+  # untagged prose — so the field reported a recognised failure while naming no test at all.
+  # The qualified name is the identity: dotted segments of identifier characters, nothing else.
+  /^FAIL: [A-Za-z0-9_]+ \([A-Za-z0-9_.]+\)[[:space:]]*$/ {
+    s = $0; sub(/^FAIL: /, "", s)
+    ut_q = s; sub(/^[^(]*\(/, "", ut_q); sub(/\).*$/, "", ut_q)
+    add("assert", s, pubunittest(ut_q), 0); next
+  }
   /^FAIL: / {
     s = $0; sub(/^FAIL: /, "", s)
     add("assert", s, pubtagged(norm(s)), 0); next
@@ -489,7 +515,14 @@ awk -v max="$max" '
   }
   # A6 pytest: `FAILED <path>.py::<test>`. AFTER A1/A2 so `FAIL - `/`FAIL: ` still win.
   /^FAILED [^:@[:space:]]+\.py::[^[:space:]]+/ {
-    s = $0; sub(/^FAILED /, "", s); sub(/[[:space:]].*$/, "", s)
+    s = $0; sub(/^FAILED /, "", s)
+    # A PARAMETER VALUE MAY CONTAIN SPACES, so the node id does NOT end at the first
+    # whitespace (roborev job 75): `test_x[a one]` and `test_x[a two]` both truncated to
+    # `test_x[a`, which BOTH undercounted (one identity instead of two) and published a
+    # placeholder. pytest short-summary appends ` - <message>` after the node id, so cut
+    # there; with no message the whole remainder IS the node id.
+    if (match(s, / - /)) s = substr(s, 1, RSTART - 1)
+    else sub(/[[:space:]]+$/, "", s)
     jp_p = s; sub(/::.*$/, "", jp_p)
     # substr, NOT sub(/^.*::/): that pattern is GREEDY and cut at the LAST `::`, dropping the
     # class scope, so `file.py::TestA::test_x` published as `file.py::test_x` — identical to a
