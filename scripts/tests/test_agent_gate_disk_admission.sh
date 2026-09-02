@@ -59,6 +59,36 @@ bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # derived from a control's absence is the shape this repo's doctrine exists to forbid.
 skip() { printf 'skip - %s\n' "$1"; SKIP=$((SKIP + 1)); }
 
+# ---------------------------------------------------------------------------
+# PORTABLE DIGEST (roborev job 392) — following `_tree_digest_file`'s in-repo ladder
+# rather than inventing one: sha256sum -> shasum -> `git hash-object`, with the same
+# rationale, that a guard must never go inert for want of a hashing tool.
+#
+# THE DEFECT IT REPLACES. `sha256sum` is GNU-only, and macOS with Python — a supported
+# configuration — ships `shasum` instead. There, BOTH the before and the after digest came
+# out EMPTY and compared EQUAL, so the immutability assertions PASSED having measured
+# nothing: a vacuous pass wearing a comparison's clothes, and the same host-dependent
+# regression class as round 13's `$HOME` finding. So an unavailable tool is a NAMED REFUSAL
+# below, never an empty string.
+DA_SHA_TOOL=none
+if command -v sha256sum >/dev/null 2>&1;   then DA_SHA_TOOL=sha256sum
+elif command -v shasum >/dev/null 2>&1;    then DA_SHA_TOOL=shasum
+elif command -v git >/dev/null 2>&1;       then DA_SHA_TOOL=git-hash-object
+fi
+# da_digest: hash STDIN. Prints the digest and returns 0, or prints nothing and returns 1 —
+# so a caller can never mistake "could not measure" for a value.
+da_digest() {
+  local d
+  case "$DA_SHA_TOOL" in
+    sha256sum)       d=$(sha256sum | awk '{print $1}') ;;
+    shasum)          d=$(shasum -a 256 | awk '{print $1}') ;;
+    git-hash-object) d=$(git --no-optional-locks hash-object --no-filters --stdin) ;;
+    *) return 1 ;;
+  esac
+  [ -n "$d" ] || return 1
+  printf '%s' "$d"
+}
+
 # df_operands <case-label>: the OPERAND of each `df -Pk <path>` the shim received, one per
 # line, in call order. The shim answers regardless of what it is asked, so without this the
 # suite pins what was RENDERED and not what was MEASURED — and "measure the right
@@ -2256,16 +2286,21 @@ fi
 # (b) BEHAVIOURAL: the digest of Cargo.lock, and the whole tracked-file census, across a
 #     REAL admission run. Asserted from the artifacts themselves, never from the absence of
 #     a complaint.
-y_lock_before=$(sha256sum "$y_repo/Cargo.lock" 2>/dev/null | cut -d' ' -f1)
-y_status_before=$(cd "$y_repo" && git status --porcelain 2>/dev/null | sha256sum | cut -d' ' -f1)
+if [ "$DA_SHA_TOOL" = none ]; then
+  bad "lockfile: NO digest tool (sha256sum / shasum / git hash-object) — the immutability assertions cannot be made, and must not be reported as passing"
+else
+  ok "lockfile: digest tool resolved ($DA_SHA_TOOL) via _tree_digest_file's ladder — portable off GNU coreutils"
+fi
+y_lock_before=$(da_digest < "$y_repo/Cargo.lock" 2>/dev/null) || y_lock_before=""
+y_status_before=$( (cd "$y_repo" && git status --porcelain 2>/dev/null) | da_digest 2>/dev/null ) || y_status_before=""
 y_script=$(df_script y "$HIGH")
 run_stub_gate y "$y_script" \
   CQLITE_GATE_SLOTS_DIR="$tmp/y-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
 y_err=$RS_ERR
 watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; y_status=$WX_STATUS
 assert_no_timeout "y lockfile immutability"
-y_lock_after=$(sha256sum "$y_repo/Cargo.lock" 2>/dev/null | cut -d' ' -f1)
-y_status_after=$(cd "$y_repo" && git status --porcelain 2>/dev/null | sha256sum | cut -d' ' -f1)
+y_lock_after=$(da_digest < "$y_repo/Cargo.lock" 2>/dev/null) || y_lock_after=""
+y_status_after=$( (cd "$y_repo" && git status --porcelain 2>/dev/null) | da_digest 2>/dev/null ) || y_status_after=""
 # The run must have actually reached the probe, or "nothing changed" proves nothing.
 if [ "$(df_calls y)" -ge 1 ]; then
   ok "lockfile CONTROL: the run reached the admission probe ($(df_calls y) df call(s)) — so an unchanged lockfile means something"
@@ -2279,7 +2314,9 @@ elif [ -z "$y_lock_before" ]; then
 else
   bad "lockfile: Cargo.lock CHANGED across admission — the gate mutated a tracked file before its own certification window opened"
 fi
-if [ "$y_status_before" = "$y_status_after" ]; then
+if [ -z "$y_status_before" ] || [ -z "$y_status_after" ]; then
+  bad "lockfile: the tracked-file census could not be digested (before='${y_status_before:-<none>}' after='${y_status_after:-<none>}') — two empty strings compare EQUAL, which is the vacuous pass this must never be"
+elif [ "$y_status_before" = "$y_status_after" ]; then
   ok "lockfile: the whole tracked-file census is unchanged across admission (broader than Cargo.lock, which is the property that matters)"
 else
   bad "lockfile: admission changed the tracked-file census — some tracked path was written before the certification window opened"
@@ -2302,6 +2339,124 @@ if [ -f "$y_farm/Cargo.lock" ]; then
   ok "lockfile CONTROL: the PRE-FIX invocation CREATED Cargo.lock from absent — the defect is reachable and the assertions above are a differential"
 else
   skip "lockfile CONTROL: the pre-fix invocation did NOT write Cargo.lock even with the file ABSENT — reachability is not demonstrable on this cargo, so (a) is what carries the guarantee"
+fi
+
+# ===========================================================================
+# Case Z (roborev job 392, Medium): no verdict and no rendered number varies with
+# the locale.
+#
+# awk converts and formats numbers under LC_NUMERIC. A guard may not have a
+# verdict that depends on LANG — the same reasoning that made the mkdir
+# classifier report `errno.errorcode` instead of parsing mkdir's message.
+#
+# No comma-decimal locale is INSTALLED here, so one is BUILT privately with
+# `localedef` + `LOCPATH`; where that is impossible the case reports a `skip -`
+# naming what could not be exercised, as with quota and Case Y's reachability.
+# ===========================================================================
+z_loc="$tmp/z-locale"; mkdir -p "$z_loc"
+z_have_locale=0
+if command -v localedef >/dev/null 2>&1 && [ -f /usr/share/i18n/locales/de_DE ]; then
+  if localedef -i de_DE -f UTF-8 "$z_loc/de_DE.UTF-8" >/dev/null 2>&1; then z_have_locale=1; fi
+fi
+if [ "$z_have_locale" -eq 0 ]; then
+  skip "locale: no comma-decimal locale is installed and none could be built (localedef or /usr/share/i18n/locales/de_DE absent) — the locale axis could not be exercised on this host"
+else
+  ok "locale: built a private comma-decimal locale to test against (none is installed here)"
+  # EXPORTED, not passed as a prefix: without it in the environment before the assignment,
+  # bash's own setlocale fails and emits a `warning: setlocale` line for every case below —
+  # noise in the gate log. The locale is equally active either way (measured).
+  export LOCPATH="$z_loc"
+
+  # (a) THE CONTROL: find an awk that ACTUALLY mis-renders under that locale, so a pass
+  #     below is a differential and not a property of every awk. Measured across all of
+  #     them: mawk emits `200,0`; gawk, nawk and busybox emit `200.0`.
+  z_bad_awk=""
+  for z_a in mawk awk nawk busybox; do
+    command -v "$z_a" >/dev/null 2>&1 || continue
+    case "$z_a" in busybox) z_cmd="busybox awk" ;; *) z_cmd="$z_a" ;; esac
+    z_out=$(LOCPATH="$z_loc" LC_ALL=de_DE.UTF-8 $z_cmd 'BEGIN{printf "%.1f", 209715200/1048576}' 2>/dev/null)
+    if [ "$z_out" = "200,0" ]; then z_bad_awk="$z_cmd"; break; fi
+  done
+  if [ -n "$z_bad_awk" ]; then
+    ok "locale CONTROL: '$z_bad_awk' renders 200,0 under that locale when UNPINNED — the defect is real and this fixture reaches it"
+  else
+    skip "locale CONTROL: no awk on this host mis-renders under the built locale — the render half is not demonstrable here (the pin is still asserted below)"
+  fi
+
+  # (b) THE SHIPPED RENDERER, extracted verbatim, must be immune.
+  # THE IN-SHAPE CONTROL. The z_bad_awk probe above used a bare awk command; this proves the
+  # locale is active in the EXACT shape case (b) uses — a shell function called with a
+  # prefix assignment — so a pass below is the PIN working and not the fixture failing to
+  # reach the defect. (Measured: the unpinned form yields 200,0GiB here.)
+  if [ -n "$z_bad_awk" ]; then
+    mkdir -p "$tmp/z-awkbin-ctl"
+    printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$z_bad_awk" > "$tmp/z-awkbin-ctl/awk"
+    chmod +x "$tmp/z-awkbin-ctl/awk"
+    z_unpinned=$(
+      _z_unpinned_render() { awk -v k="$1" 'BEGIN { printf "%.1fGiB", k/1048576 }'; }
+      PATH="$tmp/z-awkbin-ctl:$PATH" LC_ALL=de_DE.UTF-8 _z_unpinned_render 209715200
+    )
+    if [ "$z_unpinned" = "200,0GiB" ]; then
+      ok "locale CONTROL: an UNPINNED renderer in the SAME invocation shape emits 200,0GiB — the locale really is active in case (b) below"
+    else
+      bad "locale CONTROL: the unpinned renderer emitted '$z_unpinned' in this shape, so the locale is NOT active here and case (b) would pass vacuously"
+    fi
+  fi
+  z_render=$(
+    eval "$(sed -n '/^_gate_gib_render() {/,/^}$/p' "$GATE")"
+    PATH="${z_bad_awk:+$tmp/z-awkbin-ctl:}$PATH" LC_ALL=de_DE.UTF-8 _gate_gib_render 209715200
+  )
+  if [ "$z_render" = "200.0GiB" ]; then
+    ok "locale: the SHIPPED _gate_gib_render emits 200.0GiB under a comma locale (LC_ALL=C is pinned at the site)"
+  else
+    bad "locale: the shipped renderer emitted '$z_render' under a comma locale — the number in the SUMMARY varies with LANG"
+  fi
+
+  # (c) THE SHIPPED COMPARATORS must be immune too. 40.25GiB free against a 40.5GiB bar
+  #     must REFUSE (rc 1) whatever the locale; a truncation of the bar to 40 would admit.
+  z_cmp=$(
+    eval "$(sed -n '/^_gate_disk_admission_clears_bar() {/,/^}$/p' "$GATE")"
+    PATH="${z_bad_awk:+$tmp/z-awkbin-ctl:}$PATH" LC_ALL=de_DE.UTF-8 \
+      _gate_disk_admission_clears_bar 42204528 40.5; printf '%s' "$?"
+  )
+  if [ "$z_cmp" = 1 ]; then
+    ok "locale: the SHIPPED comparator still refuses 40.25GiB against a 40.5GiB bar under a comma locale"
+  else
+    bad "locale: the comparator returned rc=$z_cmp — a fractional bar was mis-parsed, which admits a filesystem below the floor"
+  fi
+
+  # (d) END TO END, through the implementation that actually mis-renders: a real gate run
+  #     with that awk first on PATH and the comma locale active must still PASS and still
+  #     print a dot-decimal reading.
+  if [ -n "$z_bad_awk" ]; then
+    mkdir -p "$tmp/z-awkbin"
+    printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$z_bad_awk" > "$tmp/z-awkbin/awk"
+    chmod +x "$tmp/z-awkbin/awk"
+    z_script=$(df_script z "$HIGH")
+    RS_PATH_PREFIX="$tmp/z-awkbin"
+    LOCPATH="$z_loc" LC_ALL=de_DE.UTF-8 run_stub_gate z "$z_script" \
+      CQLITE_GATE_SLOTS_DIR="$tmp/z-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+    RS_PATH_PREFIX=""
+    z_err=$RS_ERR
+    watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; z_status=$WX_STATUS; z_markers=$WX_MARKERS
+    assert_no_timeout "z locale end-to-end"
+    z_line=$(grep_line "$z_err" '^agent-gate: disk-admission: ')
+    case "$z_line" in
+      *'200.0GiB'*)
+        ok "locale: a REAL gate run under a comma locale with '$z_bad_awk' as awk reports 200.0GiB and behaves normally" ;;
+      *'200,0GiB'*)
+        bad "locale: a real gate run emitted 200,0GiB — the pin does not reach every render site: $z_line" ;;
+      *) bad "locale: unexpected rendering under a comma locale: ${z_line:-<none>}" ;;
+    esac
+    if [ "$z_status" -eq 0 ] && [ "$z_markers" -ge 1 ]; then
+      ok "locale: ...and the run proceeded normally (exit 0), so the pin costs nothing"
+    else
+      bad "locale: the run under a comma locale did not complete normally (exit $z_status)"
+    fi
+  else
+    skip "locale: end-to-end not run — no awk here mis-renders, so it would exercise nothing the extracted-renderer case above does not"
+  fi
+  unset LOCPATH
 fi
 
 printf '\n%s\n' "-----------------------------------------------"

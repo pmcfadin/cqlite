@@ -19338,10 +19338,30 @@ _gate_min_free_gb() {
   printf '%s pinned' "$v"
 }
 
+# ---- EVERY NUMERIC CONVERSION AND RENDERING RUNS UNDER `LC_ALL=C` (roborev job 392) ----
+#
+# A guard may not have a verdict that varies with `LANG`. Numeric text and message text are
+# both locale-dependent, which is the same reasoning that made the mkdir classifier report
+# `errno.errorcode` instead of parsing `mkdir`'s output (job 357).
+#
+# MEASURED, across every awk on this host, against a PRIVATE comma-decimal locale built with
+# `localedef` (none is installed, so this had to be constructed to test at all):
+#   INPUT  conversion of the dot-decimal string `40.5` -> CORRECT (81 for g*2) on gawk, mawk,
+#          nawk and busybox awk, in default AND `--posix` modes. So the false-admission
+#          direction the finding describes is NOT reachable on any awk here.
+#   OUTPUT rendering `printf "%.1f"` -> **mawk emits `200,0`** under that locale; gawk, nawk
+#          and busybox emit `200.0`. That one IS real: it corrupts the operator-facing number
+#          in the SUMMARY and it reds this suite on a mawk-default box, the same host-
+#          dependent class as the GNU-only digest tool in the same round.
+#
+# So `LC_ALL=C` fixes one demonstrated defect (the render) and forecloses the other direction
+# on implementations this host cannot exercise. It costs nothing: C is already the effective
+# locale for every measurement above.
+
 # _gate_bar_over_max <gib>: rc 0 = ABOVE the accepted maximum, 1 = within it, other =
 # could not be compared (no awk). Floating point, never an integer conversion.
 _gate_bar_over_max() {
-  awk -v g="$1" -v m="$_GATE_MAX_FREE_GB" 'BEGIN { exit (g + 0 > m + 0) ? 0 : 1 }' \
+  LC_ALL=C awk -v g="$1" -v m="$_GATE_MAX_FREE_GB" 'BEGIN { exit (g + 0 > m + 0) ? 0 : 1 }' \
     </dev/null 2>/dev/null
 }
 
@@ -19361,7 +19381,7 @@ _gate_bar_over_max() {
 # accepted bar tops out at 1.0995e12 KiB and any real filesystem is far below 2^53), so
 # the comparison is exact and no implementation's printf enters the chain.
 _gate_disk_admission_clears_bar() {
-  awk -v k="$1" -v g="$2" 'BEGIN { exit ((k + 0) >= (g * 1048576)) ? 0 : 1 }' \
+  LC_ALL=C awk -v k="$1" -v g="$2" 'BEGIN { exit ((k + 0) >= (g * 1048576)) ? 0 : 1 }' \
     </dev/null 2>/dev/null
 }
 
@@ -19419,7 +19439,6 @@ _gate_disk_admission_clears_bar() {
 #
 #   NO FILESYSTEM ACCESS — deliberately NOT bounded, and each stated so the next reader
 #   does not have to re-derive it:
-#     dirname          pure string arithmetic on its argument
 #     awk              reads a shell STRING through a pipe (df output, or nothing at all
 #                      in the two BEGIN-block comparators) — never a path
 #     tr, cut          pure string filters over a variable, in the stderr WARN only
@@ -19446,6 +19465,71 @@ _gate_disk_admission_clears_bar() {
 #   capture triple   written under `$LOG_DIR` for the same reason (job 349).
 #
 # A new command belongs in this list too, with what it writes and where.
+#
+# ---- THIRD AXIS: THE ENVIRONMENTAL-ASSUMPTIONS CENSUS (roborev job 392) -------------
+#
+# WHY A CENSUS AND NOT ANOTHER FIX. Five findings in a row have been one family — an
+# assumption about the EXECUTION ENVIRONMENT, each in a NEW direction: an inherited
+# `CARGO_TARGET_DIR`, awk's `%d` differing by implementation, `$HOME`/cargo-config, a
+# GNU-only `sha256sum`, a comma-decimal locale. Closing them one at a time regenerated the
+# family five times. So the assumptions are enumerated: what is assumed, whether the
+# assumption is ENFORCED (pinned or isolated) or merely HELD, and what happens when it is
+# false. The point is that the next finding here is a LOOKUP rather than a discovery.
+#
+# BINARIES INVOKED (all four also appear in the bounding axis above):
+#   cargo      HELD on PATH. False -> rc 127 -> `target-dir-cargo-unavailable`, UNMEASURED,
+#              declared, non-fatal.
+#   python3    HELD. False -> rc 127 -> `target-dir-no-json-reader` /
+#              `target-dir-mkdir-no-classifier`, UNMEASURED, declared.
+#   df         HELD. False -> rc 127 -> `df-unavailable`, UNMEASURED, declared.
+#   awk        HELD. False -> the render degrades to `<n>KiB` and the comparators return
+#              neither 0 nor 1 -> `comparison-unavailable`, UNMEASURED, declared.
+#   timeout / gtimeout / bash+sleep   ENFORCED three-valued by `_component_set_bounded`:
+#              no mechanism -> `_CS_UNBOUNDABLE_RC` -> the `*-unboundable` causes, declared,
+#              and the command is NOT RUN rather than run unbounded.
+#   tr, cut    HELD, and verdict-irrelevant: they format one stderr WARN.
+#   NOTE every "false" above lands in the DECLARED "cannot tell" branch. None of them can
+#   produce a false ADMISSION, which is the property that matters.
+#
+# ENVIRONMENT VARIABLES READ:
+#   CQLITE_GATE_MIN_FREE_GB   ENFORCED: validated, and the value in effect is reported with
+#              a source token (default|pinned|invalid|clamped|out-of-range|too-precise).
+#   LC_ALL / LC_NUMERIC / LANG   ENFORCED: every numeric conversion and rendering runs under
+#              `LC_ALL=C` (job 392). Nothing here reads a locale-formatted number.
+#   CARGO_TARGET_DIR / CARGO_BUILD_TARGET_DIR / CARGO_HOME / HOME
+#              READ BY CARGO, NOT BY US, and that is the design ("ask cargo, do not model
+#              cargo"). HELD, and BENIGN BY CONSTRUCTION: whatever cargo resolves from them
+#              is where the build will write, and after a binding resolution we EXPORT
+#              `CARGO_TARGET_DIR` so measured == used. Contrast the SUITE, which must
+#              ISOLATE all four — a test's subject is the precedence itself, so an inherited
+#              value there decides the answer before the case does.
+#   PATH       HELD, and unavoidable: it selects which cargo/df/python3/awk runs. A shim
+#              ahead of the real tool is measured through. Not closable by this code.
+#   TMPDIR     NOT read on this path: the bounded runner's capture triple is assigned under
+#              `$LOG_DIR` (job 349), so nothing here depends on $TMPDIR.
+#
+# CONFIG FILES CONSULTED:
+#   .cargo/config.toml in the cwd, EVERY ANCESTOR, and `$CARGO_HOME`
+#              consulted BY CARGO, deliberately. HELD and correct for the same reason as the
+#              variables above: the build reads the same files.
+#   Cargo.toml / Cargo.lock   read by `cargo metadata`; `--locked` forbids WRITING the lock
+#              (job 390). A lockfile cargo will not accept ->
+#              `target-dir-lockfile-stale-or-metadata-failed`, UNMEASURED, declared.
+#
+# LOCALE-SENSITIVE CONVERSIONS:
+#   awk numeric in/out        ENFORCED (`LC_ALL=C`, 4 sites).
+#   `df -Pk` output           HELD: `-P` pins the COLUMN LAYOUT, the sizes are integers with
+#              no decimal separator, and the anchor is the `^[0-9]+%$` Capacity field. An
+#              implementation rendering that field differently yields `df-unparsable` ->
+#              UNMEASURED, declared — it fails SAFE, it cannot admit.
+#   errno -> symbol           ENFORCED by mechanism: `errno.errorcode` is a numeric table
+#              lookup. No message text is parsed anywhere on this path, by design (job 357).
+#
+# WHAT THE CENSUS DID *NOT* SURFACE: no new false-admission route. Every HELD assumption
+# above either degrades to a declared UNMEASURED or is benign because the build reads the
+# same source we do. The two irreducible ones are PATH selecting the tools and the
+# unisolable ancestor `.cargo/config.toml` — and both are shared with the build itself, so
+# they cannot make the measurement disagree with what the build does.
 _GATE_DF_BOUND_SECS=15
 
 # ---- CAPTURE OWNERSHIP FOR THE BOUNDED CALLS (roborev job 349, Low) -------------------
@@ -19755,7 +19839,7 @@ sys.stdout.write("OK")
 # back to the defective parse in precisely the cases that defeat the anchor would
 # reinstate the false pass under a fix that claims to have removed it.
 _gate_disk_admission_parse() {
-  awk '
+  LC_ALL=C awk '
     END {
       cap = 0; n = 0
       for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+%$/) { cap = i; n++ }
@@ -19869,7 +19953,7 @@ _gate_disk_admission_probe() {
 }
 
 # _gate_gib_render <kib> -> "<n.n>GiB" (display only). Empty when awk cannot answer.
-_gate_gib_render() { awk -v k="$1" 'BEGIN { printf "%.1fGiB", k/1048576 }' 2>/dev/null; }
+_gate_gib_render() { LC_ALL=C awk -v k="$1" 'BEGIN { printf "%.1fGiB", k/1048576 }' 2>/dev/null; }
 
 # _gate_disk_admission_measure: ONE evaluation of the ONE predicate. Sets _DA_STATE
 # (OK | BELOW | UNWRITABLE | UNMEASURED), _DA_VALUE (rendered GiB), _DA_MOUNT, _DA_WHY. Both
