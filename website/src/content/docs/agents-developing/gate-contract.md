@@ -1273,19 +1273,21 @@ ci-pins: DATASET_TAG: <tag>  DATASET_ASSET: <asset>  DATASET_SHA256: <sha>
 tree-start: <head-sha12> dirty: yes|no digest: <digest12>
 tree-end:   <head-sha12> dirty: yes|no digest: <digest12>
 tree-integrity: PASS
-fmt:               PASS|FAIL (<Ns>)  [fmt workspace default-features]
-clippy:            PASS|FAIL (<Ns>)  [clippy workspace(excl 5) --all-features | clippy cqlite-core --features 33:all-compression,arrow,bench-internals,+30 more | ...]
-core-tests:        PASS|FAIL (<Ns>)  [test cqlite-core --features cli-helpers]
-integration-tests: PASS|FAIL (<Ns>)  [test cqlite-integration-tests default-features x2]
-write-tests:       PASS|FAIL (<Ns>)  [test cqlite-core --features write-support x3]
-cli-tests:         PASS|FAIL (<Ns>)  [test cqlite-cli default-features | test cqlite-cli --features write-support]
-minimal-build:     PASS|FAIL (<Ns>)  [build cqlite-core --no-default-features --features all-compression | test cqlite-core --no-default-features --features all-compression]
-all-features-check: PASS|FAIL (<Ns>)  [check cqlite-core --all-features | clippy cqlite-core --all-features]
-pub-surface:       PASS|FAIL (<Ns>)  [no-cargo]
-dep-duplicates:    PASS|SKIP (<Ns>)  [via check-dep-duplicates.sh (cargo tree -d --workspace --target all; a metadata probe, compiles nothing): feature set NOT observed]
-python-bindings:   PASS|SKIP (<Ns>)  [via maturin: feature set NOT observed]
-tooling-tests:     PASS|FAIL (<Ns>)  [cargo not observable: cargo may run inside ~60 nested test scripts (child processes)]
-smoke:             PASS|FAIL (<Ns>)  [build cqlite-cli default-features]
+census: <A>/<N> components AFFIRMED a count; <G> DECLARED-GAP (RECOGNISED); <U> NOT-MEASURED (RECOGNISED); <Z> measured-ZERO (RECOGNISED); <X> not-applicable (component did not PASS); <Y> no-subject (PASSed; the run had nothing to measure); <D> UNDECLARED; <W> unrecognised; <V> row(s) carry a VACUOUS status. NON-EXHAUSTIVE: the gap set is CURATED, so an unaffirmed component is UNMEASURED, never verified (#3625; the remaining gaps are tracked in #3162).
+fmt:               PASS|FAIL|VACUOUS (<Ns>)  [fmt workspace features=n/a]  {no census — cargo fmt --all --check emits no per-file tally to count}
+clippy:            PASS|FAIL|VACUOUS (<Ns>)  [clippy workspace(excl 5) --all-features | clippy cqlite-core --features 33:all-compression,arrow,bench-internals,+30 more | ...]  {no census — cargo clippy emits a per-crate tally only COLD; a warm run prints Finished alone}
+core-tests:        PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-core --features cli-helpers]  {verified: <n> tests passed (across <k> result line(s))}
+format-compat:     PASS|FAIL|VACUOUS (<Ns>)  [test format-compatibility-tests default-features]  {verified: 10 tests passed (across 1 result line(s))}
+integration-tests: PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-integration-tests default-features x2]  {verified: <n> tests passed and <k> test binaries built/verified}
+write-tests:       PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-core --features write-support x3]  {verified: <n> tests passed (across <k> result line(s))}
+cli-tests:         PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-cli default-features | test cqlite-cli --features write-support]  {verified: <n> tests passed (across <k> result line(s))}
+minimal-build:     PASS|FAIL|VACUOUS (<Ns>)  [build cqlite-core --no-default-features --features all-compression | test cqlite-core --no-default-features --features all-compression]  {verified: <n> test binaries built/verified}
+all-features-check: PASS|FAIL|VACUOUS (<Ns>)  [check cqlite-core --all-features | clippy cqlite-core --all-features]  {no census — cargo check/clippy passes execute no tests; the subject is a feature set, not a count}
+pub-surface:       PASS|FAIL|VACUOUS (<Ns>)  [no-cargo]  {no census — shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)}
+dep-duplicates:    PASS|SKIP (<Ns>)  [via check-dep-duplicates.sh (cargo tree -d --workspace --target all; a metadata probe, compiles nothing): feature set NOT observed]  {no census — the guard emits its own MEASURED/verdict lines, not an AGENT-GATE-CENSUS contract line (#3162)}
+python-bindings:   PASS|SKIP (<Ns>)  [via maturin: feature set NOT observed]  {verified: <n> pytest tests passed}
+tooling-tests:     FAIL (<Ns>)  [test ws0-corpus-gen default-features | + cargo not observable: cargo may run inside ~60 nested test scripts (child processes)]  {no census: component ended FAIL, so there is no PASS to affirm}
+smoke:             PASS|FAIL|VACUOUS (<Ns>)  [build cqlite-cli default-features]  {no census — smoke-test-all-tables.sh prints no machine-readable table count (#3162)}
 logs: /tmp/agent-gate.<random>
 summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PASS
