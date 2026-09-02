@@ -281,6 +281,23 @@ path whose entire justification is that it grants nothing and only selects a thr
 incident this mechanism exists for is a same-repository coordination thread; and skipping is the
 fail-closed direction, whose worst case is a `NONE` that declares the skip.
 
+**AND "DEFINED ONCE" SHALL MEAN "INTERPRETED IDENTICALLY", WHICH IS A TESTED PROPERTY AND NOT A
+CONSEQUENCE OF SHARING A STRING.** The grammar is consumed by two engines — a POSIX bracket expression
+in the shell and Python's `re` — and a **range** inside a bracket expression is resolved by the
+**locale's collation** in the first and by **codepoint** in the second. Measured: under
+`LC_ALL=en_US.utf8` the shell matches `é`, `ǅ`, `İ` and `ß` against `^[A-Za-z0-9._-]+$` while Python
+refuses all four. A malformed current-repository identity could therefore pass the shell check and
+fail the reference check, and a **same-repository** reference would be reported as a cross-repository
+declared skip — the probe silently declining to examine the one thread that matters.
+
+The grammar SHALL therefore be **enumerated rather than ranged**, so no collation is consulted by
+either consumer, and a test SHALL assert **both** that it contains no range **and** that the two
+consumers agree on a corpus including non-ASCII inputs, in every locale the host provides, declaring
+its own non-exhaustiveness where the host offers no locale that could expose a divergence. *A second
+implementation is correct only insofar as it is differentially tested against the first, and sharing
+one definition does not exempt it — which is what this finding proved. A documented invariant that is
+untrue is worse than one that was never claimed.*
+
 **BOTH COMPONENTS OF A REFERENCE'S IDENTITY SHALL BE HELD TO THE SAME CONSTRAINT AS THE CURRENT
 REPOSITORY, FROM ONE SHARED GRAMMAR.** The owner login and the repository name SHALL each satisfy the
 same character grammar the current-repository identity satisfies, and that grammar SHALL be defined
@@ -329,6 +346,10 @@ SHALL say so.
 #### Scenario: A reference identity that fails the name grammar is not a cross-repository skip
 - **WHEN** a reference's repository object carries an owner login or a name that does not satisfy the shared owner/name grammar
 - **THEN** the reference is could-not-check, not a declared cross-repository skip, and the grammar it was judged against is the same one, defined once, that the current-repository identity is judged against
+
+#### Scenario: The one name grammar means the same thing to both of its consumers
+- **WHEN** the shared owner/name grammar is evaluated by the shell and by Python over the same corpus of ASCII-valid, ASCII-invalid and non-ASCII inputs, in every locale the host provides
+- **THEN** the two agree on every input, and the grammar contains no character range — a ranged class is resolved by locale collation in one engine and by codepoint in the other, which lets a same-repository reference be misreported as a cross-repository skip
 
 #### Scenario: A newline-bearing identity fails the grammar
 - **WHEN** a reference's repository name or owner login ends with a newline

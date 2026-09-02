@@ -8181,6 +8181,64 @@ fi
 # "simplification" would quietly undo. Neither substitutes for the other — a structural assert cannot
 # see a granting path built some other way, and a behavioural case cannot see a granting path nobody
 # fixtured.
+printf '== structural (#3759 r6): the ONE name grammar means the SAME THING to both consumers ==\n'
+# ROUND-6 FINDING, AND IT FALSIFIED A STATED INVARIANT rather than adding an edge case. Hoisting the
+# grammar into one definition was supposed to deliver ONE GRAMMAR WITH ONE MEANING; it delivered one
+# STRING with two meanings, because a RANGE inside a bracket expression is resolved by the LOCALE's
+# collation in POSIX regex and by CODEPOINT in Python. A malformed current-repository identity could
+# then pass the shell check and fail `ref_repo()`, and a SAME-repository reference would be reported
+# as a cross-repository DECLARED SKIP — the feature silently declining to probe the one thread that
+# matters. A documented invariant that is untrue is worse than one never claimed, so it is tested
+# rather than asserted in prose.
+#
+# THE GRAMMAR IS EXTRACTED FROM THE SHIPPED FILE, never re-typed here: a test that re-types its
+# subject tests its own copy of it, which is the second-implementation hazard one directory over.
+_gr_re=$(sed -n "s/^ROBOREV_GH_NAME_RE='\(.*\)'\$/\1/p" "$ORACLES" | head -1)
+if [ -z "$_gr_re" ]; then
+  bad 'structural (#3759): the shared name grammar could not be extracted from the oracles, so neither its shape nor its agreement was measured — a failure to measure, not a measurement'
+else
+  # (a) NO RANGES. Deterministic on every host, and it is the property that makes (b) hold everywhere
+  #     rather than only where this box happens to have a locale that exposes the divergence.
+  if printf '%s' "$_gr_re" | grep -qE '[A-Za-z0-9]-[A-Za-z0-9]'; then
+    bad 'structural (#3759): the shared name grammar contains a RANGE, which POSIX regex resolves by locale collation and Python resolves by codepoint — so its two consumers can disagree and a same-repository reference can be misreported as a cross-repository skip. Enumerate the class (#3759 round 6)'
+  else
+    ok 'structural (#3759): the shared name grammar is enumerated, so no locale collation can give its two consumers different meanings'
+  fi
+  # (b) THE DIFFERENTIAL, which is the invariant itself: bash and python must AGREE on every probe in
+  #     every locale this host has. A second implementation is correct only insofar as it is
+  #     differentially tested against the first — this repository's standing ruling — and "one
+  #     definition" does not exempt it, which is exactly what round 6 proved.
+  _gr_locales="C"
+  for _gr_l in $(locale -a 2>/dev/null | grep -iE 'utf-?8$' | head -4); do
+    _gr_locales="$_gr_locales $_gr_l"
+  done
+  # The corpus deliberately mixes ASCII-valid, ASCII-invalid and NON-ASCII: the divergence lives only
+  # in the third group (measured on this fleet: under en_US.utf8 bash matched é, ǅ, İ and ß against
+  # the old ranged class while Python refused all four), so a corpus without it would agree vacuously.
+  _gr_bad=""
+  _gr_pairs=0
+  for _gr_l in $_gr_locales; do
+    for _gr_s in 'cqlite' 'pmcfadin' 'a.b_c-d' '0' 'a b' 'a/b' 'a:b' 'é' 'ǅ' 'İ' 'ß' 'Ω' 'cqlite␤'; do
+      _gr_s=${_gr_s/␤/$'\n'}
+      _gr_b=$(LC_ALL="$_gr_l" bash -c 'RE=$1; [[ $2 =~ ^${RE}$ ]] && echo M || echo n' _ "$_gr_re" "$_gr_s" 2>/dev/null)
+      _gr_p=$(LC_ALL="$_gr_l" python3 -c 'import re,sys; print("M" if re.compile(sys.argv[1]).fullmatch(sys.argv[2]) else "n")' "$_gr_re" "$_gr_s" 2>/dev/null)
+      _gr_pairs=$((_gr_pairs + 1))
+      [ "$_gr_b" = "$_gr_p" ] || _gr_bad="$_gr_bad ${_gr_l}:$(printf '%s' "$_gr_s" | tr -d '\n')(bash=$_gr_b,py=$_gr_p)"
+    done
+  done
+  if [ -z "$_gr_bad" ]; then
+    ok "structural (#3759): the shell and python consumers of the one name grammar AGREE on every probe, across $_gr_pairs locale/input pairs"
+  else
+    bad "structural (#3759): the two consumers of the ONE name grammar DISAGREE —$_gr_bad. 'Defined once' is not 'interpreted identically', and a divergence here misreports a same-repository reference as a cross-repository skip (#3759 round 6)"
+  fi
+  # DECLARED NON-EXHAUSTIVENESS, because the differential can only exercise locales this host HAS. On
+  # a box with no non-C UTF-8 locale the loop above agrees vacuously, so the range check (a) is what
+  # carries the property there — stated rather than left to be assumed from a green line.
+  if [ "$_gr_locales" = "C" ]; then
+    printf 'NOTICE - structural (#3759): only the C locale is installed here, so the differential could not exercise a collation that exposes a ranged class; clause (a) is what holds the property on this host\n'
+  fi
+fi
+
 printf '== structural (#3759 r3): EVERY payload read on the probe path goes through ONE helper ==\n'
 # WHY THIS ASSERT EXISTS RATHER THAN A FOURTH SITE FIX. Three review rounds produced 3, then 1, then 2
 # findings, and EVERY one was the same class — an input reaching a conclusion without an affirmative
@@ -8246,9 +8304,15 @@ done
 #     identity validations where only one constrained anything, so the character class is defined once
 #     and BOTH the shell's check and the python leg's `ref_repo` consume that one definition. A literal
 #     class re-appearing in the executable text is the drift this forbids.
-grep -qF "ROBOREV_GH_NAME_RE='[A-Za-z0-9._-]+'" "$_chk_exec" || _chk_bad="$_chk_bad name-grammar-not-defined-once"
+grep -qE "^ROBOREV_GH_NAME_RE='\[[A-Za-z0-9._-]+\]\+'$" "$_chk_exec" || _chk_bad="$_chk_bad name-grammar-not-defined-once"
 grep -qF 'PROBE_NAME_RE="$ROBOREV_GH_NAME_RE"' "$_chk_exec" || _chk_bad="$_chk_bad name-grammar-not-passed-to-the-python-leg"
-if [ "$(grep -cF '[A-Za-z0-9._-]+' "$_chk_exec" || true)" != "1" ]; then
+# ONE SPELLING, matched against the value the file actually defines rather than a literal repeated
+# here — a hard-coded copy would have to be edited in lockstep with the grammar, which is the drift
+# this clause exists to forbid.
+_chk_re_val=$(sed -n "s/^ROBOREV_GH_NAME_RE='\(.*\)'$/\1/p" "$ORACLES" | head -1)
+if [ -z "$_chk_re_val" ]; then
+  _chk_bad="$_chk_bad name-grammar-value-unreadable"
+elif [ "$(grep -cF -- "$_chk_re_val" "$_chk_exec" || true)" != "1" ]; then
   _chk_bad="$_chk_bad name-grammar-spelled-more-than-once"
 fi
 

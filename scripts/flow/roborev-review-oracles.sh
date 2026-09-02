@@ -1209,7 +1209,29 @@ WAIVER_SCAN_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/roborev-waiver-s
 # one grammar drift, and a drift here produces a CONFIDENT declared skip from an unvalidated identity,
 # which is the false confidence this whole feature exists to remove. So the pattern is written here
 # and is the only one either side uses: the shell interpolates it, and the python leg receives it.
-ROBOREV_GH_NAME_RE='[A-Za-z0-9._-]+'
+#
+# ===== AND "DEFINED ONCE" IS NOT "INTERPRETED IDENTICALLY" (#3759 round 6) =====
+# THE FALSIFICATION OF THE INVARIANT ABOVE, which is why this is a fix and not an edge case bolted on.
+# The class used to be `[A-Za-z0-9._-]+`, i.e. RANGES — and a range inside a bracket expression is
+# resolved by the LOCALE's collation in POSIX regex, while Python's `re` resolves it by CODEPOINT.
+# MEASURED ON THIS FLEET, not theorised: under `LC_ALL=en_US.utf8`, bash matches `é`, `ǅ`, `İ` and `ß`
+# against `^[A-Za-z0-9._-]+$`; Python refuses all four. So a malformed current-repository identity
+# could pass the shell check and then fail `ref_repo()`, and a SAME-repository reference would be
+# reported as a cross-repository DECLARED SKIP — the feature silently declining to probe the one
+# thread that matters. One definition with two meanings is precisely the second-implementation hazard
+# this hoist was supposed to remove, and a documented invariant that is untrue is worse than one never
+# claimed.
+#
+# THE CLASS IS THEREFORE ENUMERATED, NOT RANGED: with no range there is no collation to consult, so
+# both consumers read exactly these bytes in every locale.
+#
+# WHY NOT `LC_ALL=C` INSTEAD, which would also fix it: it fixes the shell side by changing the
+# ENVIRONMENT rather than the DATA, and this function runs `gh` and `python3` as children. A locale
+# forced for a regex would have to be scoped so it cannot reach them — `gh`'s and the scanner's output
+# and diagnostics are consumed here — and a scoping that must not leak is a thing to get wrong later,
+# for a benefit an enumerated class delivers with no environment at all. Verbosity is the whole cost.
+# `-` is LAST so it is a literal in both grammars, and `.` is literal inside a bracket in both.
+ROBOREV_GH_NAME_RE='[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+'
 
 # roborev_json_list_field <json> <field>: is this payload a top-level JSON OBJECT whose <field> is a
 # LIST? Sets, and never returns non-zero:
