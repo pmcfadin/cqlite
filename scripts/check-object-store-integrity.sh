@@ -963,9 +963,11 @@ if [ "$FIRST_WALK_CLEAN" -eq 0 ]; then
     # shape CLAUDE.md warns about.
     emit_findings p2 unmeasured-cause
     unmeasured "git fsck reported reachability problems on both sweep walks (pass 1 rc=$RC1," \
-      "pass 2 rc=$RC2) which CLEARED when the reflogs were excluded from the reachability" \
-      "roots (pass 3 --no-reflogs rc=$RC3): the complaint is REFLOG-SCOPED, so nothing a" \
-      "live ref, the index or HEAD needs is missing, and this is NOT the damage class." \
+      "pass 2 rc=$RC2) and the ERROR_REACHABLE bit CLEARED when the reflogs were excluded" \
+      "from the reachability roots (pass 3 --no-reflogs rc=$RC3, that bit absent): the" \
+      "reachability complaint is REFLOG-SCOPED, so nothing a live ref, the index or HEAD" \
+      "needs is missing, and this is NOT the damage class. Any other non-damage bit in" \
+      "pass 3's status is named by the diagnostics above." \
       "It is not certified clean either - an fsck in this sweep's own configuration did" \
       "not complete quietly. Clear it with 'git reflog expire --expire-unreachable=now" \
       "--all' on this box's shared repository, then re-run (#3749)."
