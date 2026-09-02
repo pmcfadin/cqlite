@@ -91,6 +91,28 @@ bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # `rm -rf "$tmp"` on an unverified path is the same hazard, hence the ordering. Non-empty AND a
 # directory: a diagnostic printed on stdout would pass the emptiness test alone.
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/roborev-guard-test.XXXXXX") || tmp=''
+
+# ===== `<producer> | grep -q` IS FAIL-OPEN UNDER `pipefail`, SO IT IS UNAVAILABLE HERE (#3387) =====
+# `grep -q` exits at its FIRST match and closes the pipe; the producer's next write takes SIGPIPE; and
+# this file's `pipefail` hands the PIPELINE a 141. So a genuine MATCH can report a NON-match, and
+# every assert built on that shape reds or greens BY BYTE POSITION and scheduler timing.
+#
+# THIS IS NOT THEORETICAL AND IT IS NOT NEW: the pre-existing assert "the waiver is looked up EXACTLY
+# ONCE, inside the absence branch" red once in five consecutive runs on an unrelated, clean diff, and
+# a guard added earlier in this same change reported DIFFERENT states missing on consecutive runs.
+# `tooling-tests` is a component of the GATE OF RECORD, so a 1-in-5 flake there can red a certifying
+# gate on a clean tree — and a lane must not waive a red it cannot attribute.
+#
+# The shape is therefore REMOVED rather than fixed site by site: the text is materialised and the FILE
+# is grepped, so there is no pipe to break. A structural assert below forbids reintroducing the shape,
+# because a rule this mechanical is one a future edit will otherwise re-add by habit.
+STR_MATCH_FILE="$tmp/str-match-subject.txt"
+str_matches() { # str_matches <text> <grep-args...>  -> grep's own status, with no pipeline
+  local _sm_text="$1"
+  shift
+  printf '%s\n' "$_sm_text" >"$STR_MATCH_FILE" || return 2
+  grep "$@" "$STR_MATCH_FILE" >/dev/null 2>&1
+}
 if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
   printf 'FAIL - mktemp -d did not yield a usable temp directory (got: %s) — refusing to run rather than resolving every "$tmp/..." fixture path under /\n' "${tmp:-<empty>}"
   exit 1
@@ -1837,7 +1859,7 @@ assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" HEAD base-exec-head-plain
 assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" "$cx3h_base" head-exec-base-plain 100644
 assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" HEAD head-exec-base-plain 100755
 assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" "$cx3h_base" base-only-exec 100755
-if git -C "$cx3h_work" ls-tree HEAD -- ':(literal)base-only-exec' | grep -q .; then
+if [ -n "$(git -C "$cx3h_work" ls-tree HEAD -- ':(literal)base-only-exec')" ]; then
   bad 'case (cx3h): base-only-exec still exists at HEAD, so the BASE-only combination is not reproduced'
 else
   ok 'case (cx3h): base-only-exec is absent from HEAD (the BASE-only combination is reproduced)'
@@ -1958,7 +1980,7 @@ cx3j_shape() { # cx3j_shape <file> [funcname]
     inf { print }
   ' "$file" | grep -vE '^[[:space:]]*#' | grep -vE '^[[:space:]]*$')
   if [ -z "$body" ]; then printf 'NOT-FOUND\n'; return 0; fi
-  if printf '%s\n' "$body" | grep -qE '(^|[^[:alnum:]_])(break|continue)([^[:alnum:]_]|$)'; then
+  if str_matches "$body" -E '(^|[^[:alnum:]_])(break|continue)([^[:alnum:]_]|$)'; then
     printf 'HAS-BREAK-OR-CONTINUE\n'; return 0
   fi
   nret=$(printf '%s\n' "$body" | grep -cE '(^|[^[:alnum:]_])return([^[:alnum:]_]|$)' || true)
@@ -2043,7 +2065,9 @@ cx3j_pred=$(awk '
 if [ -z "$cx3j_pred" ]; then
   bad 'case (cx3j): _roborev_mode_exec_state_at was not found, so its range-blindness was not checked'
 else
-  if ! printf '%s\n' "$cx3j_pred" | grep -vE '^[[:space:]]*#' | grep -qE 'RANGE_BASE_SHA|BASE_TIP_SHA|\bHEAD\b'; then
+  _cx3j_exec="$tmp/cx3j-pred-exec.txt"
+  printf '%s\n' "$cx3j_pred" | grep -vE '^[[:space:]]*#' >"$_cx3j_exec" || true
+  if ! grep -qE 'RANGE_BASE_SHA|BASE_TIP_SHA|\bHEAD\b' "$_cx3j_exec"; then
     ok 'case (cx3j): the per-endpoint predicate names no endpoint (range-blind, so it cannot encode an ordering)'
   else
     bad 'case (cx3j): _roborev_mode_exec_state_at references a specific endpoint — it can encode a precedence again'
@@ -7021,7 +7045,7 @@ fi
 _unq_callers=$(grep -nE '(^|[^#])roborev_unquote_path ' "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL" \
   | grep -v '^[^:]*:[0-9]*: *#' || true)
 _unq_caller_files=$(printf '%s\n' "$_unq_callers" | sed -n 's|^\([^:]*\):.*|\1|p' | sort -u | wc -l | tr -d '[:space:]')
-if [ "${_unq_caller_files:-0}" -eq 1 ] && printf '%s' "$_unq_callers" | grep -qF 'roborev-review-oracles.sh'; then
+if [ "${_unq_caller_files:-0}" -eq 1 ] && str_matches "$_unq_callers" -F 'roborev-review-oracles.sh'; then
   ok 'structural: roborev_unquote_path is called ONLY from the oracles file (one boundary)'
 else
   bad "structural: roborev_unquote_path is called from $_unq_caller_files file(s) — a second consumer normalises on its own"
@@ -7054,7 +7078,9 @@ fi
 # COMMENT LINES ARE EXEMPT: the file DOCUMENTS what was retired and why, which is the
 # record that keeps a future edit from reintroducing it. Only executable lines are checked.
 for _pat in 'diff --git a/\[\^ \]' 'promptpaths' 'grep -Fxq'; do
-  if grep -nE -- "$_pat" "$CHECKS_FILE" 2>/dev/null | grep -qv '^[0-9]*: *#'; then
+  _retired_hits="$tmp/retired-mechanism-hits.txt"
+  grep -nE -- "$_pat" "$CHECKS_FILE" >"$_retired_hits" 2>/dev/null || true
+  if grep -qv '^[0-9]*: *#' "$_retired_hits" 2>/dev/null; then
     bad "structural: roborev-review-checks.sh still EXECUTES the retired mechanism '$_pat'"
   else
     ok "structural: the retired mechanism '$_pat' is not executed by roborev-review-checks.sh"
@@ -7071,7 +7097,9 @@ fi
 #     grow a second, subtly different idea of the extended-header run. It therefore does no
 #     `diff --git` scanning of its own at all. Only a SCAN counts — the key's ERROR prose
 #     legitimately says the words "diff --git" when it explains what was looked for.
-if grep -nE '(grep|awk|sed|case)[^#]*diff --git' "$CHECKS_FILE" 2>/dev/null | grep -qv '^[0-9]*: *#'; then
+_dg_hits="$tmp/checks-diffgit-hits.txt"
+grep -nE '(grep|awk|sed|case)[^#]*diff --git' "$CHECKS_FILE" >"$_dg_hits" 2>/dev/null || true
+if grep -qv '^[0-9]*: *#' "$_dg_hits" 2>/dev/null; then
   bad 'structural: roborev-review-checks.sh EXECUTES its own diff --git scan — header-shape knowledge must stay with the matcher in the oracles file'
 else
   ok 'structural: roborev-review-checks.sh does no diff --git scanning of its own'
@@ -7241,7 +7269,7 @@ else
   _ac2_hits=$(_cls_hits "$_cls_all")
   _ac2_leaked=""
   for _ac2_tok in $_ac2_prose; do
-    printf '%s\n' "$_ac2_hits" | grep -qxF "$_ac2_tok" && _ac2_leaked="$_ac2_leaked $_ac2_tok"
+    str_matches "$_ac2_hits" -xF "$_ac2_tok" && _ac2_leaked="$_ac2_leaked $_ac2_tok"
   done
   if [ -z "$_ac2_leaked" ]; then
     ok "structural (#3367 AC2): the real wrapper's doctrine prose names$_ac2_prose and NONE of them is in the scanned token list — recording what was deleted cannot be a violation, with no heredoc exemption needed to make that true"
@@ -7377,9 +7405,9 @@ _pc_start=$(grep -nE '^roborev_check_prompt_content\(\) \{' "$CHECKS_FILE" | hea
 _pc_end=$(awk -v s="${_pc_start:-0}" 'NR>s && /^}/ {print NR; exit}' "$CHECKS_FILE")
 _pc_body=$(sed -n "${_pc_start:-1},${_pc_end:-1}p" "$CHECKS_FILE")
 _pc_exec=$(printf '%s\n' "$_pc_body" | grep -v '^[[:space:]]*#')
-if printf '%s\n' "$_pc_exec" | grep -qF 'roborev_absence_waiver_lookup "${RANGE_BASE_SHA:-}" "${HEAD_SHA:-}" "${JOB:-}"' \
+if str_matches "$_pc_exec" -F 'roborev_absence_waiver_lookup "${RANGE_BASE_SHA:-}" "${HEAD_SHA:-}" "${JOB:-}"' \
   && [ "$(printf '%s\n' "$_pc_exec" | grep -cF 'roborev_absence_waiver_lookup')" -eq 1 ] \
-  && printf '%s\n' "$_pc_body" | grep -qF 'PROMPT_CONTENT="WAIVED ('; then
+  && str_matches "$_pc_body" -F 'PROMPT_CONTENT="WAIVED ('; then
   ok 'structural: the waiver is looked up EXACTLY ONCE, inside the absence branch, so it can excuse only that verdict (constraint (c))'
 else
   bad 'structural: the absence waiver is not confined to the absence branch — a lookup anywhere else could excuse a verdict the ruling says it may never touch (#3312 ruling (4c))'
@@ -7772,10 +7800,10 @@ fi
 # test, and none of them is a fall-through. PASS requires every code census path to have been FOUND;
 # FAIL is the absence; WAIVED is the absence plus a complete human provenance. A `0/0` is still never a
 # pass, which is the one case where "nothing to measure" must not read as "measured fine".
-if printf '%s\n' "$_pc_body" | grep -qF 'PROMPT_CONTENT="PASS (${#checked_paths[@]}/$census_total code census paths present)"' \
-  && printf '%s\n' "$_pc_body" | grep -qF 'PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from the prompt)"' \
-  && printf '%s\n' "$_pc_body" | grep -qF 'a 0/0 is never a pass' \
-  && printf '%s\n' "$_pc_body" | grep -qF 'FAIL (prompt unretrievable'; then
+if str_matches "$_pc_body" -F 'PROMPT_CONTENT="PASS (${#checked_paths[@]}/$census_total code census paths present)"' \
+  && str_matches "$_pc_body" -F 'PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from the prompt)"' \
+  && str_matches "$_pc_body" -F 'a 0/0 is never a pass' \
+  && str_matches "$_pc_body" -F 'FAIL (prompt unretrievable'; then
   ok 'structural: prompt-content has exactly its three affirmative outcomes (present PASS / absent FAIL / absent+provenance WAIVED), plus the 0/0 and unretrievable-prompt refusals'
 else
   bad 'structural: prompt-content no longer reaches its outcomes affirmatively — a missing absent-FAIL, a missing 0/0 refusal or a missing unretrievable-prompt refusal each turns an unmeasured prompt into a pass (#3312 ruling (4))'
@@ -7785,17 +7813,17 @@ fi
 # a bare positional test is exactly blocker 1 reintroduced.
 if [ -n "$_matcher_start" ] && [ -n "${_matcher_end:-}" ]; then
   _m_body=$(sed -n "${_matcher_start},${_matcher_end}p" "$ORACLES")
-  if printf '%s\n' "$_m_body" | grep -qE '\[ -n "\$from_tok" \] && \[ -n "\$to_tok" \]'; then
+  if str_matches "$_m_body" -E '\[ -n "\$from_tok" \] && \[ -n "\$to_tok" \]'; then
     ok 'structural: the matcher resolves a rename/copy header from its from/to path tokens first'
   else
     bad 'structural: the matcher no longer resolves from the rename/copy from/to tokens — ambiguity would be guessed positionally again (#3229 blocker 1)'
   fi
-  if printf '%s\n' "$_m_body" | grep -qE '"a/\$want b/"\*'; then
+  if str_matches "$_m_body" -E '"a/\$want b/"\*'; then
     bad 'structural: the matcher is back to the PREFIX test `case $rest in "a/$want b/"*` — a tracked file named `foo b/x` would make the unrelated path `foo` read PRESENT (#3229 blocker 1)'
   else
     ok 'structural: the retired `"a/$want b/"*` prefix test is gone from the matcher'
   fi
-  if printf '%s\n' "$_m_body" | grep -qE 'eq_seen'; then
+  if str_matches "$_m_body" -E 'eq_seen'; then
     ok 'structural: an ambiguous non-rename header is decided by the EQUAL split, not by position'
   else
     bad 'structural: the matcher has no equal-split resolution for an ambiguous header'
@@ -7818,12 +7846,12 @@ if [ -n "$_census_start" ]; then
   else
     ok "structural: the census body bounds resolved (lines $_census_start-$_census_end)"
     _census_body=$(sed -n "${_census_start},${_census_end}p" "$ORACLES")
-    if printf '%s\n' "$_census_body" | grep -q 'roborev_unquote_path '; then
+    if str_matches "$_census_body" -e 'roborev_unquote_path '; then
       bad 'structural: the census normalises inside its own loop — it must read raw paths instead (-z)'
     else
       ok 'structural: the census classifies the RAW path (no unquoting inside the census loop)'
     fi
-    if printf '%s\n' "$_census_body" | grep -qF 'read -r -d '; then
+    if str_matches "$_census_body" -F 'read -r -d '; then
       ok 'structural: the census reads NUL-terminated records (a newline-bearing path survives)'
     else
       bad 'structural: the census does not read NUL-terminated records — a newline-bearing path would split'
@@ -7893,8 +7921,13 @@ fi
 _fin_start=$(grep -nE '^finish\(\) \{' "$WRAPPER_REAL" | head -1 | cut -d: -f1)
 _fin_end=""
 [ -z "$_fin_start" ] || _fin_end=$(awk -v s="$_fin_start" 'NR>s && /^}/ {print NR; exit}' "$WRAPPER_REAL")
+_fin_body_f="$tmp/finish-body.txt"
+: >"$_fin_body_f"
+if [ -n "$_fin_start" ] && [ -n "$_fin_end" ]; then
+  sed -n "${_fin_start},${_fin_end}p" "$WRAPPER_REAL" >"$_fin_body_f" || true
+fi
 if [ -n "$_fin_start" ] && [ -n "$_fin_end" ] \
-  && sed -n "${_fin_start},${_fin_end}p" "$WRAPPER_REAL" | grep -q 'roborev_safe_line'; then
+  && grep -q 'roborev_safe_line' "$_fin_body_f"; then
   ok "structural: finish neutralises every DETAILS line (lines $_fin_start-$_fin_end)"
 else
   bad 'structural: finish does not neutralise DETAILS lines'
@@ -7915,11 +7948,13 @@ _rl_end=""
 if [ -z "$_rl_start" ] || [ -z "$_rl_end" ]; then
   bad 'structural: could not locate roborev_safe_line() to inspect the keyword denylist — a failure to measure, not a measurement'
 else
-  sed -n "${_rl_start},${_rl_end}p" "$WRAPPER_REAL" | grep -q 'ROBOREV_MARKER_REDACTION' \
+  _rl_body_f="$tmp/safe-line-body.txt"
+  sed -n "${_rl_start},${_rl_end}p" "$WRAPPER_REAL" >"$_rl_body_f" || true
+  grep -q 'ROBOREV_MARKER_REDACTION' "$_rl_body_f" \
     || _rd_bad="$_rd_bad wrapper-boundary-does-not-redact"
   # The word boundary is part of the rule, not an optimisation: without it the scanner's own file name
   # is mangled in the `waiver: UNAVAILABLE (... tool: <path>)` cause (case wv31).
-  sed -n "${_rl_start},${_rl_end}p" "$WRAPPER_REAL" | grep -qF '[^a-zA-Z]|$' \
+  grep -qF '[^a-zA-Z]|$' "$_rl_body_f" \
     || _rd_bad="$_rd_bad wrapper-redaction-has-no-word-boundary"
   # EVERY other mention is a per-site escape — the definition line is the one exception.
   _rd_out=$(grep -n 'ROBOREV_MARKER_REDACTION' "$WRAPPER_REAL" \
@@ -7983,17 +8018,17 @@ if [ -z "$_scan_block" ] || [ -z "$_scan_keys" ] || [ -z "$_scan_case" ]; then
   bad 'structural: could not locate the wrapper verdict scan STATEMENT (for scan_keyed in … case … done) to inspect'
 else
   ok "structural: the verdict scan is a single case over the per-check keys (lines $_scan_start-$_scan_end)"
-  if printf '%s\n' "$_scan_keys" | grep -qE '; do[[:space:]]*$'; then
+  if str_matches "$_scan_keys" -E '; do[[:space:]]*$'; then
     ok 'structural: the extracted key list is the complete for-statement (terminates at "; do")'
   else
     bad 'structural: the extracted verdict-scan key list does not terminate at "; do" — the extraction is truncated, so the per-key asserts below would be unreliable'
   fi
-  if printf '%s\n' "$_scan_case" | grep -qE 'case "\$verdict_token" in FAIL\|FINDINGS\|ERROR\|INCONSISTENT\)'; then
+  if str_matches "$_scan_case" -E 'case "\$verdict_token" in FAIL\|FINDINGS\|ERROR\|INCONSISTENT\)'; then
     ok 'structural: the failing-capable set is exactly FAIL|FINDINGS|ERROR|INCONSISTENT'
   else
     bad 'structural: the failing-capable verdict set is not the expected FAIL|FINDINGS|ERROR|INCONSISTENT'
   fi
-  if printf '%s\n' "$_scan_case" | grep -q 'NOTICE'; then
+  if str_matches "$_scan_case" -e 'NOTICE'; then
     bad 'structural: NOTICE appears in the failing-capable verdict scan — an advisory vacuity-tier1 NOTICE would red RESULT:'
   else
     ok 'structural: NOTICE is absent from the failing-capable verdict scan'
@@ -8003,12 +8038,12 @@ else
   # reject unplanned values would accept any value merely BEGINNING with a planned token.
   # Pinned structurally as well as behaviourally (cases cx28b/cx28c) because a future edit
   # could restore the globs while every behavioural case but those two stayed green.
-  if printf '%s\n' "$_scan_block" | grep -qE '^[[:space:]]*verdict_token="\$\{verdict%% \*\}"'; then
+  if str_matches "$_scan_block" -E '^[[:space:]]*verdict_token="\$\{verdict%% \*\}"'; then
     ok 'structural: the scan reduces each value to its VERDICT TOKEN (up to the first space) before classifying'
   else
     bad 'structural: the verdict scan does not extract a verdict token — it is classifying the whole value, so a token followed by anything is matched by prefix (#3229 M3)'
   fi
-  if printf '%s\n' "$_scan_block" | grep -qE '(PASS|FAIL|SKIP|NOTICE|UNAVAILABLE|DEGRADED|NONE|PRESENT|UNKNOWN)\*'; then
+  if str_matches "$_scan_block" -E '(PASS|FAIL|SKIP|NOTICE|UNAVAILABLE|DEGRADED|NONE|PRESENT|UNKNOWN)\*'; then
     bad 'structural: a PREFIX GLOB (TOKEN*) survives in the verdict scan — PASSthisNeverRan would match PASS* and inherit the non-failing branch (#3229 M3)'
   else
     ok 'structural: the verdict scan carries NO prefix globs — every token is matched exactly'
@@ -8032,7 +8067,7 @@ else
   _scan_fallthrough=$(printf '%s\n' "$_scan_block" \
     | awk '/PASS\|WAIVED\|SKIP\|NOTICE/ { inb = 1 } inb { print } inb && /esac/ { exit }' \
     | grep -A 3 -E '^[[:space:]]*\*\)' || printf '')
-  if printf '%s\n' "$_scan_fallthrough" | grep -qE '^[[:space:]]*failed=1[[:space:]]*$'; then
+  if str_matches "$_scan_fallthrough" -E '^[[:space:]]*failed=1[[:space:]]*$'; then
     ok 'structural: the positive arm FAILS CLOSED on an unrecognised value (its *) sets failed=1)'
   else
     bad 'structural: the verdict scan positive arm does not fail closed — an unrecognised value would be accepted silently, which is the shape this sweep closed'
@@ -8162,7 +8197,7 @@ else
   # rather than assumed: a leftover `"$CENSUS_EXCLUSION"` in the key list would be a permanently
   # EMPTY value, which the closed grammar (correctly) FAILs — i.e. the residue of an incomplete
   # deletion would red every run, and it must be caught here rather than in the field.
-  if printf '%s\n' "$_scan_keys" | grep -qE 'CENSUS_EXCLUSION'; then
+  if str_matches "$_scan_keys" -E 'CENSUS_EXCLUSION'; then
     bad 'structural: the deleted CENSUS_EXCLUSION key is still named in the verdict-scan key list — it would hold a permanently empty value and red every run'
   else
     ok 'structural: the deleted census-exclusion key is absent from the verdict-scan key list'
@@ -8228,6 +8263,37 @@ fi
 # "simplification" would quietly undo. Neither substitutes for the other — a structural assert cannot
 # see a granting path built some other way, and a behavioural case cannot see a granting path nobody
 # fixtured.
+printf '== structural (#3387/#3759 r7): the fail-open `grep -q` PIPE SHAPE is gone from this file ==\n'
+# CLOSED AS A SHAPE, NOT AS A LINE. `grep -q` exits at its first match and closes the pipe; the
+# producer's next write takes SIGPIPE; `pipefail` hands the pipeline a 141 — so a genuine MATCH reports
+# a NON-match, and the assert built on it flips with scheduler timing and byte position. This file
+# documented the hazard in several places and still carried THIRTY instances of it, one of which — the
+# pre-existing "the waiver is looked up EXACTLY ONCE" assert — red once in five consecutive runs on a
+# clean, unrelated diff. `tooling-tests` is a component of the GATE OF RECORD, so that is a certifying
+# gate reddening spuriously, and a lane must not waive a red it cannot attribute.
+#
+# Every site now materialises its subject and greps the FILE (`str_matches` for the common
+# text-in-a-variable case). This guard stops the shape coming back by habit, which is the only way a
+# rule this mechanical survives. COMMENTS ARE EXCLUDED deliberately: the blocks above and below EXPLAIN
+# the hazard by naming it, and a guard that made writing the reasoning down a violation would be the
+# job-18 census mistake. THE NEEDLE IS SPLIT so this guard cannot match its own line — a self-matching
+# grep is a guard that can only ever be red.
+_pq_exec="$tmp/test-self-exec.txt"
+grep -v '^[[:space:]]*#' "$TEST_SELF" >"$_pq_exec" || true
+# THE NEEDLE CARRIES A LEADING SPACE, which is what separates a PIPE from a logical OR: this file has
+# legitimate `|| grep -qF … <file>` clauses (an OR into a grep OF A FILE, with no pipeline at all), and
+# a bare `| grep -q` needle matches the second bar of those too. Measured: it flagged two such lines
+# before the space was added — a guard reporting a violation that is not one, which is the same
+# false-claim shape this whole change is about.
+_pq_needle=' | grep -'"q"
+if [ ! -s "$_pq_exec" ]; then
+  bad 'structural (#3387): this suite could not be read to check for the fail-open pipe shape — a failure to measure, not a measurement'
+elif grep -qF -- "$_pq_needle" "$_pq_exec"; then
+  bad "structural (#3387): an executable line of this suite pipes into 'grep -q' again. Under pipefail that is fail-open BY BYTE POSITION: grep exits at its first match, SIGPIPEs the producer, and a real match reports as absent. Materialise the subject and grep the FILE (str_matches does this for text in a variable)"
+else
+  ok 'structural (#3387): no executable line pipes into a short-circuiting grep -q, so no assert in this gate-of-record component can flip on a SIGPIPE race'
+fi
+
 printf '== structural (#3759 r7): the documented output-state contracts list every state ==\n'
 # A COMMENT NAMING A MECHANISM IS A CLAIM ABOUT CODE and decays exactly like any other. These two
 # headers enumerate what their function can emit, and a CLOSED list missing states is worse than no
@@ -8282,7 +8348,7 @@ if [ -z "$_gr_re" ]; then
 else
   # (a) NO RANGES. Deterministic on every host, and it is the property that makes (b) hold everywhere
   #     rather than only where this box happens to have a locale that exposes the divergence.
-  if printf '%s' "$_gr_re" | grep -qE '[A-Za-z0-9]-[A-Za-z0-9]'; then
+  if str_matches "$_gr_re" -E '[A-Za-z0-9]-[A-Za-z0-9]'; then
     bad 'structural (#3759): the shared name grammar contains a RANGE, which POSIX regex resolves by locale collation and Python resolves by codepoint — so its two consumers can disagree and a same-repository reference can be misreported as a cross-repository skip. Enumerate the class (#3759 round 6)'
   else
     ok 'structural (#3759): the shared name grammar is enumerated, so no locale collation can give its two consumers different meanings'
@@ -8427,7 +8493,9 @@ if [ ! -s "$_mps_sites" ]; then
 fi
 # GRANT-SHAPED TOKENS beside the state: the verdicts a grant produces (`WAIVED`, `DEFERRED`) and the
 # admission variable. None of them may appear on a line that also mentions `misplaced`.
-if grep -nE 'misplaced' "$_mps_sites" | grep -qE 'WAIVED|DEFERRED \(|deferral_admits|= "granted"'; then
+_mps_lines="$tmp/mps-misplaced-lines.txt"
+grep -nE 'misplaced' "$_mps_sites" >"$_mps_lines" 2>/dev/null || true
+if grep -qE 'WAIVED|DEFERRED \(|deferral_admits|= "granted"' "$_mps_lines"; then
   _mps_ok=0; _mps_why="$_mps_why misplaced-on-a-granting-line;"
 fi
 if [ "$_mps_ok" -eq 1 ]; then
