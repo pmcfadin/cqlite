@@ -229,8 +229,22 @@ UNVERIFIED_MAX="${UNVERIFIED_MAX:-2}"
 #   STRICTLY POSITIVE: the sweep rejects 0 as a usage error, which would turn the probe
 #   into a permanent UNMEASURED — a silently self-disabling bound, the shape
 #   validate_numeric_knobs exists for.
+# OBJ_SWEEP_CLAIM_POLL_SECS — the poll granularity of the WAIT a claim loser does on a peer
+#   lane's in-flight sweep (#3749 review round 12). NOT a bound: the bound is the claim's own
+#   DERIVED staleness threshold. This value is how often the waiting lane re-reads the STOP
+#   latch, the throttle stamp, the claim and the stop file, so it is also that lane's stop
+#   latency for as long as it waits — and, unlike the sweep itself, a wait IS interruptible
+#   because it runs in this shell rather than in the sweep's child process. STRICTLY POSITIVE
+#   for the opposite reason to the knobs above: a 0 does not disable the wait, it converts it
+#   into a busy spin over the whole derived budget.
 OBJ_SWEEP_INTERVAL_HOURS="${OBJ_SWEEP_INTERVAL_HOURS:-6}"
 OBJ_SWEEP_TIMEOUT_SECS="${OBJ_SWEEP_TIMEOUT_SECS:-200}"
+# POLL GRANULARITY for waiting on a PEER lane's in-flight sweep (#3749 review round 12) —
+# NOT a bound. The bound is derived (obj_sweep_claim_stale_secs); this is only how often the
+# waiting lane re-reads the latch, the throttle stamp, the claim and the stop file while it
+# waits, so it is also this lane's STOP LATENCY during a wait. STRICTLY POSITIVE: a 0 would
+# turn a bounded wait into a busy spin for up to the whole derived budget.
+OBJ_SWEEP_CLAIM_POLL_SECS="${OBJ_SWEEP_CLAIM_POLL_SECS:-5}"
 # Empty => derived per SHARED STORE in obj_sweep_stamp_path (below), so lanes sharing one
 # object store share one throttle. It also names the STOP latch (`<stamp>.STOP`), so
 # pinning it relocates both files together.
@@ -3272,11 +3286,29 @@ OBJ_SWEEP_CLAIM_OWNED=""
 # claim is created; empty until then, and an empty token can never match anything.
 OBJ_SWEEP_CLAIM_TOKEN=""
 OBJ_SWEEP_CLAIM_STATE=""
+# THE OUTCOME OF THE LAST WAIT ON A PEER'S IN-FLIGHT SWEEP (#3749 review round 12). A GLOBAL
+# and not stdout, for the same reason OBJ_SWEEP_CLAIM_STATE is one, plus a sharper one: the
+# wait STOPS THIS LANE from inside (obj_sweep_stop_if_latched -> finalize_exit) the moment a
+# peer latches the box, and a `$(...)` command substitution would confine that exit to a
+# SUBSHELL — the wait would appear to return normally and the lane would carry on to spawn a
+# worker on a box it had just seen condemned. That is the defect this wait exists to close,
+# reintroduced by the plumbing.
+OBJ_SWEEP_CLAIM_WAIT_STATE=""
+OBJ_SWEEP_CLAIM_WAIT_UNMEASURED_NOTIFIED=0
 # SLACK on the claim-staleness bound: what a sweep spends OUTSIDE its bounded fsck walks —
 # process startup, the `--print-store` resolution, output capture, and the notify/journal
 # writes. It is additive to a DERIVED product (see obj_sweep_claim_stale_secs) rather than
 # a bound in its own right, which is why it is a small constant and not a measurement.
-OBJ_SWEEP_CLAIM_SLACK_SECS=60
+# ENV-OVERRIDABLE SINCE #3749 REVIEW ROUND 12, AND THE REASON IS TESTABILITY, STATED HERE SO
+# IT IS NOT MISREAD AS AN OPERATOR TUNING KNOB. Round 12 made a claim LOSER wait out this
+# derived bound before giving up, so the "a peer holds a claim that never completes" state
+# now costs a real wait — and with a hard-coded 60s slack the shortest such wait expressible
+# in a test was ~61s, which is a minute of pure sleeping inside a suite that must stay fast.
+# The bound itself is still DERIVED (walks x per-walk + slack) and this term is still additive
+# slack rather than a bound in its own right; 0 is a legitimate value (no slack) and is
+# therefore validated in the NON-NEGATIVE group, not the strictly-positive one, with the trade
+# that a sweep whose overhead lands outside its walks could be taken over just as it finishes.
+OBJ_SWEEP_CLAIM_SLACK_SECS="${OBJ_SWEEP_CLAIM_SLACK_SECS:-60}"
 
 # obj_sweep_stamp_path <sweep-script> — the THROTTLE stamp: WHEN this box last SPENT a
 # sweep. Keyed on the SHARED OBJECT STORE, not on the lane, so four lanes of one box
@@ -3542,9 +3574,19 @@ obj_sweep_force_stamp_stale() {
 # SUPERVISOR_LOCK header), and a second locking mechanism in one file is a second set of
 # failure modes.
 #
-# A LOSER DOES NOT WAIT. It skips this iteration's sweep and carries on, after the usual
-# latch read: the sweep is a 6-hourly hygiene probe, so "a peer is doing it right now" is a
-# complete answer, and waiting would put the box's whole spawn path behind one fsck.
+# A LOSER *DOES* WAIT, AND THAT REVERSES THE ORIGINAL DESIGN (#3749 review round 12). It
+# used to skip its sweep and carry straight on to the spawn path after one latch read, on
+# the argument that "a peer is doing it right now" is a complete answer for a 6-hourly
+# hygiene probe. It is a complete answer about the SWEEP and it is not an answer about the
+# SPAWN: the loser knows a sweep is IN FLIGHT — that is precisely why its claim failed — and
+# the verdict of that sweep can be CORRUPT or UNSWEEPABLE, in which case the peer latches
+# the box. Skipping immediately spends the peer's whole sweep duration walking toward a
+# worker start on a box that is being condemned as it reads: MEASURED 13-80s of wall clock
+# on this fleet's 366M store, and up to MAX_SWEEP_WALKS x OBJ_SWEEP_TIMEOUT_SECS (600s at
+# the shipped defaults) by construction. So the loser waits for the peer, polling the latch,
+# the stamp and the claim — see obj_sweep_claim_wait for the bound and the four outcomes.
+# The cost is paid ONLY when a sweep is genuinely running, which the throttle makes at most
+# once per interval per lane.
 # ---------------------------------------------------------------------------
 
 # obj_sweep_claim_path <stamp-path> — the claim that belongs to that stamp. Derived from
@@ -3777,6 +3819,146 @@ obj_sweep_claim_release() {
   return 0
 }
 
+# obj_sweep_claim_wait <claim-dir> <stale-secs> <latch-path> <stamp-path> <overall-deadline>
+# — WAIT for the peer lane holding this claim to finish its sweep, and STOP THIS LANE from
+# inside the moment that peer latches the box. Sets OBJ_SWEEP_CLAIM_WAIT_STATE to exactly
+# one of:
+#
+#   completed — the throttle stamp went FRESH, so that peer finished a sweep and advertised
+#               it; the box is inside the interval again
+#   vacated   — the claim is GONE with no fresh stamp: the peer ended without advertising a
+#               sweep (killed mid-sweep, or it stopped on a verdict it could not latch and
+#               FORCED the stamp stale on purpose so that every lane re-sweeps)
+#   expired   — the claim outlived the DERIVED staleness bound while still present, so it is
+#               recoverable now and the caller's next acquire takes it over and sweeps
+#   exhausted — this ITERATION's whole wait budget is spent (or this lane cannot wait at
+#               all), so the caller must stop waiting
+#
+# THE DEFECT IT EXISTS FOR (#3749 review round 12). The `held` branch read the latch ONCE and
+# returned toward the spawn path while the peer's sweep was still running. The residual note
+# at the bottom of this file described the remaining race as the narrow gap between a lane's
+# last latch read and its worker start; for the claim loser that was wrong by orders of
+# magnitude — the gap was the peer's ENTIRE sweep. A comment that understates the window it
+# exists to disclose is worse than no comment, because it is what stops the next person
+# looking, so both the behaviour and the note were fixed together.
+#
+# THE BOUND IS NOT A NEW CONSTANT. It is the claim's OWN staleness bound, `stale`, the value
+# obj_sweep_claim_stale_secs derives from the shipped sweep's MAX_SWEEP_WALKS x this
+# supervisor's per-walk bound + slack. That is deliberate and it is the whole reason a dead
+# peer cannot wedge this wait: the same threshold that says "this claim can be TAKEN OVER"
+# says "stop waiting for it". A second, independently chosen wait bound could drift from the
+# sweep's real worst case in either direction — too short and a live peer is abandoned
+# mid-sweep, too long and a dead one is waited out past the point where the claim was already
+# recoverable — which is round 4's "a relation whose own constant is restated is two magic
+# numbers wearing a relation's clothes", one file over.
+#
+# TWO DEADLINES, AND THE CALLER OWNS THE OUTER ONE. Per PASS this function recomputes the
+# CLAIM's deadline from the `started` file, so a TAKEOVER by a third lane mid-wait extends
+# the wait to that lane's own bound instead of abandoning a sweep that has just begun. The
+# caller's `overall` deadline caps the sum of all of it at one `stale` from the top of the
+# iteration, which is what makes a chain of takeovers terminate.
+#
+# `expired` IS THE NON-PERMISSIVE OUTCOME, AND IT IS THE ONE THE REVIEW ASKED ABOUT. When the
+# peer neither finishes nor vacates, the claim it holds is by construction STALE at this
+# deadline — the bound above is exactly the age at which "the sweep it represents cannot
+# still be running" — so the answer is not "carry on unmeasured": the caller loops, the next
+# acquire RECOVERS that claim, and this lane MEASURES the store itself. The loser becomes the
+# sweeper.
+#
+# THE STOP FILE AND THE WALL-CLOCK BUDGET ARE RE-READ ON EVERY PASS. Unlike the sweep itself
+# — whose fsck walks run in a child process and are therefore not interruptible from here —
+# this wait executes in THIS shell, so it can and does honour a stop requested while it
+# waits. Stop latency during a wait is one OBJ_SWEEP_CLAIM_POLL_SECS.
+obj_sweep_claim_wait() {
+  local claim="$1" stale="$2" latch="$3" stamp="$4" overall="$5"
+  local now started deadline started_at elapsed
+  # DEFAULT `exhausted`: every early return here means "this lane did not, or could not,
+  # wait", and the caller must treat that as a spent budget rather than as progress. The
+  # permissive-looking states (`completed`, `vacated`, `expired`) are only ever reached by an
+  # AFFIRMATIVE observation below.
+  OBJ_SWEEP_CLAIM_WAIT_STATE=exhausted
+  [[ -n "$claim" ]] || return 0
+  [[ "$stale" =~ ^[0-9]+$ ]] || return 0
+  # NO OUTER DEADLINE MEANS NO WAIT, and it restores exactly the pre-round-12 behaviour for
+  # that box rather than inventing a budget: the caller could not derive one, which is the
+  # same condition under which no claim is taken at all.
+  [[ "$overall" =~ ^[0-9]+$ ]] || return 0
+  started_at="$(date +%s)"
+  log "object-store sweep: WAITING for the peer lane that holds the sweep claim ($claim) to finish its sweep before this lane goes anywhere near a worker spawn — a sweep in flight can end in a verdict that latches this box, and 13-80s is the measured range on this fleet. Polling every ${OBJ_SWEEP_CLAIM_POLL_SECS}s (stop file and wall-clock budget included), bounded by the claim's own derived staleness bound of ${stale}s (#3749)."
+  while true; do
+    # THE STOP FILE FIRST. An operator who touches it while this lane is parked behind a
+    # peer's fsck is entitled to be obeyed within one poll.
+    preflight_stop_or_budget
+    # THEN THE LATCH — THE ENTIRE POINT OF THIS FUNCTION. It never returns if the box has
+    # been latched; see the global's comment for why this must not be called in a subshell.
+    obj_sweep_stop_if_latched "$latch"
+    # THEN COMPLETION, IN THE PEER'S OWN WRITE ORDER. A stopping peer creates the LATCH,
+    # then writes the stamp, then exits (its EXIT trap releases the claim); a non-stopping
+    # one writes the stamp, then releases. So a fresh stamp or an absent claim observed
+    # AFTER the latch read above can only belong to a peer whose latch, if any, was already
+    # in place when that read happened — which is what makes these two checks safe to treat
+    # as "the sweep is over and this box is not latched".
+    if obj_sweep_stamp_is_fresh "$stamp"; then
+      OBJ_SWEEP_CLAIM_WAIT_STATE=completed
+      break
+    fi
+    if [[ ! -d "$claim" ]]; then
+      OBJ_SWEEP_CLAIM_WAIT_STATE=vacated
+      break
+    fi
+    now="$(date +%s)"
+    # THE CLAIM'S OWN DEADLINE, RE-READ EVERY PASS so a mid-wait takeover by a third lane is
+    # waited out on that lane's bound. `stat` is not used for the same GNU-vs-BSD reason
+    # obj_sweep_claim_acquire gives; an unreadable or future `started` falls back to the
+    # caller's outer deadline rather than to a made-up one, and the outer deadline is the
+    # ceiling in every case.
+    started=""
+    { read -r started || true; } 2>/dev/null <"$claim/started" || started=""
+    if [[ "$started" =~ ^[0-9]+$ ]] && [[ "$started" -le "$now" ]]; then
+      deadline=$((started + stale))
+    else
+      deadline="$overall"
+    fi
+    [[ "$deadline" -le "$overall" ]] || deadline="$overall"
+    # STRICTLY GREATER, AND IT MATCHES obj_sweep_claim_acquire'S TAKEOVER TEST EXACTLY. That
+    # function holds a claim while `age <= stale` and takes it over only when `age > stale`,
+    # so an expiry at `age >= stale` would return `expired` for one second during which the
+    # caller's re-acquire still answers `held` — a tight loop between the two, brief but real.
+    # The two comparisons are two halves of one threshold and they have to agree on the
+    # boundary, not merely on the number.
+    if [[ "$now" -gt "$deadline" ]]; then
+      if [[ "$now" -gt "$overall" ]]; then
+        OBJ_SWEEP_CLAIM_WAIT_STATE=exhausted
+      else
+        OBJ_SWEEP_CLAIM_WAIT_STATE=expired
+      fi
+      break
+    fi
+    # A FAILING `sleep` MUST NOT BECOME A BUSY SPIN over the whole derived budget, which is
+    # what `sleep ... || true` would buy on a host without it. It ends the wait instead, in
+    # the state that says the budget cannot be spent — announced, because a box that cannot
+    # wait has lost this protection and nothing else would say so.
+    if ! sleep "$OBJ_SWEEP_CLAIM_POLL_SECS" 2>/dev/null; then
+      log "object-store sweep: cannot WAIT for the peer lane's sweep — 'sleep $OBJ_SWEEP_CLAIM_POLL_SECS' failed on this host, so this lane will not poll for the peer's verdict and loses the protection that wait provides (#3749)."
+      OBJ_SWEEP_CLAIM_WAIT_STATE=exhausted
+      break
+    fi
+  done
+  elapsed=$(( $(date +%s) - started_at ))
+  case "$OBJ_SWEEP_CLAIM_WAIT_STATE" in
+    completed)
+      log "object-store sweep: the peer lane holding $claim FINISHED its sweep after ${elapsed}s of waiting and advertised it in the throttle stamp; this box is not latched (#3749)."
+      ;;
+    vacated)
+      log "object-store sweep: the peer lane holding $claim GAVE THE CLAIM UP after ${elapsed}s without advertising a sweep — it was killed mid-sweep, or it stopped on a verdict it could not latch and forced the throttle stamp stale so every lane re-sweeps. This box is not latched; this lane will contend for the claim again (#3749)."
+      ;;
+    expired)
+      log "object-store sweep: the peer lane holding $claim has neither finished nor given it up in ${elapsed}s, and that claim is now older than the derived ${stale}s recovery bound, so the sweep it represents cannot still be running. This lane will RECOVER the claim and measure the store itself rather than carry on unmeasured (#3749)."
+      ;;
+  esac
+  return 0
+}
+
 # obj_sweep_stamp_is_fresh <stamp-path> — 0 when this box swept inside the interval.
 #
 # ONE implementation, because the throttle is now read TWICE: once before contending for
@@ -3994,7 +4176,7 @@ obj_sweep_stop_if_latched() {
 }
 
 object_store_sweep() {
-  local script stamp latch claim claim_stale rc out verdict stop_verdict
+  local script stamp latch claim claim_stale wait_until rc out verdict stop_verdict
   # ---------------------------------------------------------------------------
   # THE ENTRY LATCH READ. IT IS ABOVE EVERY BRANCH IN THIS FUNCTION, AND THE LINES
   # BEFORE IT ARE ASSIGNMENTS ONLY — NO `if`, NO `return`, NOTHING THAT CAN LEAVE
@@ -4101,10 +4283,52 @@ object_store_sweep() {
   # loser skips instead of waiting.
   claim="$(obj_sweep_claim_path "$stamp")"
   claim_stale="$(obj_sweep_claim_stale_secs "$script" || true)"
-  obj_sweep_claim_acquire "$claim" "$claim_stale"
+  # THE ITERATION'S OVERALL WAIT BUDGET, AND IT IS THE SAME DERIVED VALUE AS THE STALENESS
+  # BOUND — not a second constant (#3749 review round 12). Any single claim can be at most
+  # `claim_stale` seconds from being recoverable, so one `claim_stale` from here is enough to
+  # outlast the claim this lane found AND to bound a chain of takeovers by peers. Where the
+  # bound could not be derived there is no budget and no wait, which is the same box on which
+  # no claim is taken at all.
+  wait_until=""
+  if [[ "$claim_stale" =~ ^[0-9]+$ ]]; then
+    wait_until=$(($(date +%s) + claim_stale))
+  fi
+  # ACQUIRE, AND IF A PEER IS SWEEPING, WAIT FOR IT — THEN CONTEND AGAIN.
+  #
+  # THE LOOP TERMINATES, and here is why rather than a hope. `held` is the only state that
+  # loops: every other one breaks immediately. A `held` costs a call to obj_sweep_claim_wait,
+  # which returns only on an affirmative observation (`completed`/`vacated`), on the claim
+  # having aged past its DERIVED recovery bound (`expired`, after which the very next acquire
+  # takes it over), or on the ITERATION's overall budget being spent (`exhausted`, which
+  # breaks out). It cannot spin: a claim that is present with no readable start time is waited
+  # out on the outer deadline rather than being read as instantly expired, and every pass of
+  # the wait sleeps.
+  #
+  # NOTHING BETWEEN THE WAIT AND THE RE-ACQUIRE NEEDS A LATCH READ: the wait itself reads the
+  # latch on every pass and does not return if the box is latched.
+  while true; do
+    obj_sweep_claim_acquire "$claim" "$claim_stale"
+    [[ "$OBJ_SWEEP_CLAIM_STATE" == held ]] || break
+    obj_sweep_claim_wait "$claim" "$claim_stale" "$latch" "$stamp" "$wait_until"
+    [[ "$OBJ_SWEEP_CLAIM_WAIT_STATE" != exhausted ]] || break
+  done
   case "$OBJ_SWEEP_CLAIM_STATE" in
     held)
-      log "object-store sweep: SKIPPED — a peer lane on this box holds the sweep claim ($claim), so the shared store is being rehashed by that lane right now. Not waiting, and not sweeping beside it: the sweep is a 6-hourly hygiene probe and one lane paying for it is the whole box's answer (#3749)."
+      # REACHED ONLY WITH THE WAIT BUDGET SPENT (or on a box that cannot wait at all): a peer
+      # lane is sweeping and this lane has already waited out one full derived staleness bound
+      # watching claims change hands. It is NOT a clean result and it is not reported as one —
+      # nothing here read the store, so its integrity is UNKNOWN, and the box gets a page once
+      # per run because a claim that keeps changing hands for that long is an anomaly, not a
+      # cadence. The lane does not stop: a peer sweeping is also the shape of a HEALTHY box
+      # recovering a wedged claim, and stopping four lanes on a hygiene probe's contention is
+      # the self-DoS this file refuses everywhere else. The residual this leaves is stated in
+      # full at the bottom of this file, per path, with its magnitude.
+      log "object-store sweep: NOT SWEPT AND NOT MEASURED — a peer lane still holds the sweep claim ($claim) after this lane waited out the whole derived ${claim_stale}s budget, so the claim has changed hands or overrun rather than completing. This box's store integrity is UNKNOWN, not clean, for this iteration (#3749)."
+      if [[ "$OBJ_SWEEP_CLAIM_WAIT_UNMEASURED_NOTIFIED" -eq 0 ]]; then
+        notify "high" "worker-supervisor: object-store sweep never got a turn" \
+          "a peer lane held the sweep claim for this box's shared object store for longer than the whole derived recovery bound (${claim_stale}s) — the store was NOT rehashed on this iteration and its integrity is UNKNOWN, not clean. Check for a wedged sweep on this box."
+        OBJ_SWEEP_CLAIM_WAIT_UNMEASURED_NOTIFIED=1
+      fi
       obj_sweep_stop_if_latched "$latch"
       return 0
       ;;
@@ -4328,35 +4552,62 @@ object_store_sweep() {
   return 0
 }
 
-# THE RESIDUAL WINDOW, STATED PRECISELY BECAUSE IT IS NOT CLOSED (#3749 review round 3,
-# item 1b — DELIBERATELY DEFERRED to its own issue, not papered over).
+# THE RESIDUAL WINDOWS, PER PATH, WITH THEIR REAL MAGNITUDES (#3749 review rounds 3 and 12).
 #
-# WHAT THE ORDERING ABOVE BUYS: no lane advertises "this box has been swept" before the
-# CORRUPT finding is durable, and no lane returns from this function toward a spawn
-# without having re-read the latch. That strictly shrinks the window; it does not remove
-# it.
+# THE PREVIOUS VERSION OF THIS NOTE WAS WRONG, AND IN THE DIRECTION THAT MATTERS. It gave
+# ONE figure for every path — "a peer can create the latch in the gap between this lane's
+# last latch read and the moment its worker actually starts", "ONE worker is spawned on a box
+# that was latched corrupt MOMENTS earlier" — and round 12's review found that for the
+# CLAIM-LOSER path this understated the window by orders of magnitude: it was never the
+# post-read gap, it was the peer's ENTIRE sweep — 13-80s measured on this fleet's 366M store
+# and up to MAX_SWEEP_WALKS x OBJ_SWEEP_TIMEOUT_SECS = 600s at the shipped defaults. A note
+# that understates the very window it exists to disclose is worse than no note, because it is
+# what stops the next person looking. So the magnitudes below are stated PER PATH and each is
+# derived from a shipped default or from a measurement, never from the word "moments".
 #
-# WHAT REMAINS RACY. The latch read and the worker spawn are two separate operations
-# with no synchronisation between them, so a peer can create the latch in the gap
-# between this lane's last `obj_sweep_stop_if_latched` and the moment its worker
-# actually starts — and that gap is not small: after this function returns, the caller
-# still runs the whole preflight hold loop (load, leftover processes, disk), which can
-# poll for minutes. A peer's sweep completing anywhere inside that stretch is
-# unobserved by this lane.
+# WHAT THE ORDERING AND THE WAIT BUY. No lane advertises "this box has been swept" before a
+# stopping finding is durable; no lane returns from object_store_sweep toward a spawn without
+# having re-read the latch; and a lane that LOSES the sweep claim now waits for the peer's
+# verdict, re-reading the latch every OBJ_SWEEP_CLAIM_POLL_SECS, instead of walking off with
+# one stale read.
 #
-# THE WORST OUTCOME, NAMED: ONE worker is spawned on a box that was latched corrupt
-# moments earlier. It is not silent and it is not durable — that lane's NEXT iteration
-# begins with `object_store_sweep`, whose first act is the latch read at the top, so it
-# stops there and its own worker exits at the end of its current issue. Nothing certifies
-# a merge in that window without a full gate, and a full gate on a latched box is exactly
-# what the next iteration refuses.
+# PATH 1 — THE CLAIM LOSER. CLOSED as a distinct window (round 12). It WAS the peer's whole
+# sweep: 13-80s measured, 600s by construction. It is now bounded by the poll granularity —
+# the waiting lane observes the latch within one OBJ_SWEEP_CLAIM_POLL_SECS (5s at the
+# shipped default) of its creation and stops there. One sub-case survives: if the derived
+# 660s wait budget is spent with peers still handing the claim around, the lane carries on
+# UNMEASURED — journalled and paged, never counted as clean — and from that point its
+# exposure is PATH 3's, below.
 #
-# WHY IT IS NOT CLOSED HERE. An atomic "no worker may start after any peer latches"
-# guarantee needs per-store synchronisation shared by the sweep and the spawn decision
-# (a lock held across both, or a spawn-time re-check inside whatever holds that lock) —
-# a redesign of the boundary between this function and the spawn path, not an ordering
-# change. It is split to its own issue. Do NOT describe the race as closed: it is
-# narrowed, and the residual above is what a reader is entitled to know.
+# PATH 2 — THIS LANE'S OWN SWEEP. Covered, not residual. The entry latch read and the
+# post-sweep reads bracket it, so a peer latching the box during this lane's own walks (up to
+# 600s) is caught by the read on the way out.
+#
+# PATH 3 — THE LAST LATCH READ TO THE WORKER SPAWN. STILL OPEN, AND IT IS THE LARGEST OF THE
+# THREE. object_store_sweep returns, and the caller then runs the preflight hold loop, which
+# does NOT re-read the latch: on a clear box the gap is milliseconds, but every hold sleeps
+# HOLD_POLL_SECS and the loop tolerates up to BUILD_HOLD_MAX of them, so at the shipped
+# defaults the gap is up to 12 x 300s = 3600s — ONE HOUR, not "moments" (the leftover-worker
+# family is bounded at LEFTOVER_HOLD_MAX x HOLD_POLL_SECS = 900s). A peer's sweep completing
+# anywhere inside that stretch is unobserved by this lane, and ONE worker then starts on a
+# box that is already latched.
+#
+# THE BOUND ON THE HARM, unchanged and still true for every path. It is not silent and not
+# durable: that lane's NEXT iteration begins with object_store_sweep, whose first act is the
+# entry latch read, so it stops there and its worker exits at the end of its current issue.
+# Nothing certifies a merge inside that window without a full gate, and a full gate on a
+# latched box is exactly what the next iteration refuses.
+#
+# WHY PATH 3 IS NOT CLOSED HERE. An atomic "no worker may start after any peer latches"
+# guarantee needs per-store synchronisation shared by the sweep and the spawn decision (a
+# lock held across both, or a spawn-time re-check inside whatever holds that lock) — a
+# redesign of the boundary between this function and the spawn path, not an ordering change.
+# It is split to its own issue, and so is the cheapest partial (a latch read inside the hold
+# loop, which would cut 3600s down to one HOLD_POLL_SECS): that read belongs with the
+# redesign rather than smuggled into a fix for path 1, where it would arrive untested and
+# would tempt exactly the "narrowed, so basically closed" reading this note was rewritten to
+# remove. PATH 1 IS CLOSED; PATH 3 IS OPEN AND ITS MAGNITUDE IS ABOVE. Do not describe the
+# race as gone.
 
 # ---------------------------------------------------------------------------
 # Preflight: fail-closed, wait-don't-spin. Returns a hold reason on stdout, or
@@ -4435,6 +4686,11 @@ preflight_wait() {
   # precisely so that every walk this caller can pay for still costs no more than ONE
   # walk at the script's bound. The stop file is re-read the moment
   # the sweep returns (the loop's first statement, below).
+  #
+  # ONE PART OF IT IS INTERRUPTIBLE, AND IT IS THE NEW PART (#3749 review round 12): when a
+  # PEER lane holds the sweep claim this lane now WAITS for that peer's verdict, and that
+  # wait runs in THIS shell rather than in the sweep's child, so it re-reads the stop file,
+  # the wall-clock budget and the STOP latch on every poll.
   object_store_sweep
   while true; do
     preflight_stop_or_budget
@@ -5108,7 +5364,7 @@ validate_numeric_knobs() {
               MAX_ITER_SECS STUCK_POLL_SECS STUCK_TAIL_LINES LEFTOVER_HOLD_MAX \
               UNVERIFIED_MAX MISMATCH_RETRIES MISMATCH_RETRY_WAIT_SECS \
               PENDING_AUTOMERGE_MAX PENDING_AUTOMERGE_MIN_SECS \
-              OBJ_SWEEP_INTERVAL_HOURS; do
+              OBJ_SWEEP_INTERVAL_HOURS OBJ_SWEEP_CLAIM_SLACK_SECS; do
     val="${!name}"
     [[ "$val" =~ ^[0-9]+$ ]] || _bad_knob "$name" "$val" "a non-negative integer"
   done
@@ -5132,6 +5388,16 @@ validate_numeric_knobs() {
     val="${!name}"
     [[ "$val" =~ ^[0-9]+$ ]] || _bad_knob "$name" "$val" "a positive integer"
     [[ "$val" -ge 1 ]] || _bad_knob "$name" "$val" "a positive integer (the sweep rejects 0, which would make every run UNMEASURED)"
+  done
+  # OBJ_SWEEP_CLAIM_POLL_SECS (#3749 review round 12) is the same class again, in the other
+  # direction: it is the sleep between passes of the wait on a PEER lane's in-flight sweep,
+  # so a 0 does not disable the wait — it turns a bounded wait into a BUSY SPIN for up to the
+  # whole derived staleness bound, on a box that is already spending an fsck. Its own group
+  # because the message has to say that.
+  for name in OBJ_SWEEP_CLAIM_POLL_SECS; do
+    val="${!name}"
+    [[ "$val" =~ ^[0-9]+$ ]] || _bad_knob "$name" "$val" "a positive integer"
+    [[ "$val" -ge 1 ]] || _bad_knob "$name" "$val" "a positive integer (0 would busy-spin the wait on a peer's sweep instead of polling it)"
   done
   # SIGNED integer knobs — the two with a documented `<=0 disables` contract.
   for name in BUILD_HOLD_MAX MISMATCH_GRACE_CAP_SECS; do

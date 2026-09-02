@@ -10188,6 +10188,10 @@ test_object_store_sweep_claim_prevents_the_herd() {
   export MAX_ISSUES=1
   export OBJ_SWEEP_INTERVAL_HOURS=6
   export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  # POLL EVERY SECOND, because since #3749 review round 12 the loser WAITS for the peer's
+  # verdict instead of skipping immediately: the poll is what bounds how quickly it notices
+  # the peer finished. It is granularity, not the wait BOUND (which stays derived).
+  export OBJ_SWEEP_CLAIM_POLL_SECS=1
   # The `during` hook: announce that the sweep is IN FLIGHT, then block until this case
   # says go (bounded, so a wedged fixture fails the run rather than hanging it).
   root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls" \
@@ -10219,11 +10223,17 @@ test_object_store_sweep_claim_prevents_the_herd() {
   WORKER_CMD="$d/bin/worker2.sh" env LANE_ID=objsweep-b SUPERVISOR_LOCK="$d/lock-b" \
     bash "$root/scripts/local/worker-supervisor.sh" >"$d/b.log" 2>&1
   rc=$?
+  # SINCE #3749 REVIEW ROUND 12 THE LOSER WAITS, so what this asserts changed with the
+  # behaviour: lane B must NAME the claim, WAIT for that peer's verdict rather than walking
+  # off toward a spawn while an fsck is in flight, observe the peer's completion, and only
+  # then run its worker. The old assert required the opposite ("does not wait"), which is the
+  # very defect round 12 fixed — a peer's sweep can end in a verdict that latches this box.
   if [[ "$rc" -eq 0 && -f "$counter2" ]] &&
-    grep -q 'object-store sweep: SKIPPED — a peer lane on this box holds the sweep claim' "$d/b.log"; then
-    pass "obj-sweep(herd): a second lane whose peer is MID-SWEEP skips the sweep, names the claim, does not wait, and still runs its worker"
+    grep -q 'object-store sweep: WAITING for the peer lane that holds the sweep claim' "$d/b.log" &&
+    grep -q 'FINISHED its sweep after' "$d/b.log"; then
+    pass "obj-sweep(herd): a second lane whose peer is MID-SWEEP does not sweep beside it — it names the claim, WAITS for that peer's verdict, observes the completion, and then runs its worker"
   else
-    fail "obj-sweep(herd): rc=$rc spawned=$([[ -f "$counter2" ]] && echo yes || echo no) (see $d/b.log)"
+    fail "obj-sweep(herd): rc=$rc spawned=$([[ -f "$counter2" ]] && echo yes || echo no) waited=$(grep -c 'WAITING for the peer lane' "$d/b.log" 2>/dev/null || true) (see $d/b.log)"
   fi
   touch "$d/go"
   fixture_wait "$lane_a" >/dev/null 2>&1 || true
@@ -10262,6 +10272,176 @@ test_object_store_sweep_claim_prevents_the_herd() {
 
 t test_object_store_sweep_claim_prevents_the_herd
 
+# THE CLAIM LOSER MUST NOT SPAWN A WORKER WHILE THE PEER'S SWEEP IS STILL IN FLIGHT (#3749
+# review round 12).
+#
+# THE DEFECT. `held` read the STOP latch once and returned toward the spawn path. The lane
+# therefore committed to spawning at a moment when the only thing it knew was that a
+# full-store fsck was RUNNING — and if that fsck ends in CORRUPT or UNSWEEPABLE, the peer
+# latches the box and the loser has already started a worker on it. The window was the peer's
+# ENTIRE sweep (13-80s measured on this fleet, up to MAX_SWEEP_WALKS x OBJ_SWEEP_TIMEOUT_SECS
+# by construction), not the narrow post-read gap the residual note used to describe.
+#
+# TWO ARMS, ONE PROPERTY APART, AND THE CONTROL IS LOAD-BEARING. Arm (a) has the peer latch
+# the box mid-sweep and requires the loser NOT to spawn. On its own that arm is also passed by
+# a lane that never spawns at all, so arm (b) is the same staging with the peer finishing
+# CLEAN, where the loser MUST proceed and run its worker. Only the peer's verdict differs.
+test_object_store_sweep_claim_loser_waits_for_the_peer_verdict() {
+  local d root calls counter1 counter2 rc waited lane_a lane_b verdict rcode arm
+  for arm in corrupt clean; do
+    if [[ "$arm" == corrupt ]]; then verdict=CORRUPT; rcode=4; else verdict=VERIFIED; rcode=0; fi
+    d="$(new_case_dir)"; calls="$d/calls"; counter1="$d/counter1"; counter2="$d/counter2"
+    common_env "$d"
+    write_finalize_stub "$d/bin/worker1.sh" "$counter1"
+    write_finalize_stub "$d/bin/worker2.sh" "$counter2"
+    export MAX_ISSUES=1
+    export OBJ_SWEEP_INTERVAL_HOURS=6
+    export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+    # POLL EVERY SECOND so the arm is seconds rather than tens of seconds; the WAIT BOUND is
+    # still the derived one (3 x 1 + 60 = 63s here), which is what has to comfortably exceed
+    # the staging below — if it did not, the wait would expire and the loser would carry on
+    # for a reason that has nothing to do with the property under test.
+    export OBJ_SWEEP_CLAIM_POLL_SECS=1
+    export OBJ_SWEEP_TIMEOUT_SECS=1
+    root="$(obj_sweep_tree "$d" "$verdict" "$rcode" "$calls" \
+      "printf in >$(printf '%q' "$d/sweeping"); i=0; while [ ! -f $(printf '%q' "$d/go") ] && [ \$i -lt 400 ]; do sleep 0.05; i=\$((i+1)); done")"
+    # LANE A: takes the claim and parks INSIDE its sweep until this case says go. Through
+    # fixture_bg (never a bare `&`) so the harness owns the process group, and with its own
+    # single-instance lock, which is what two lanes of one box legitimately have.
+    fixture_bg env WORKER_CMD="$d/bin/worker1.sh" LANE_ID=objsweep-wait-a \
+      SUPERVISOR_LOCK="$d/lock-a" \
+      bash "$root/scripts/local/worker-supervisor.sh" >"$d/a.log" 2>&1
+    lane_a="$FIXTURE_LAST_PID"
+    waited=0
+    while [[ ! -f "$d/sweeping" && "$waited" -lt 400 ]]; do sleep 0.05; waited=$((waited + 1)); done
+    if [[ -f "$d/sweeping" && -d "$OBJ_SWEEP_STAMP.sweeping" && ! -e "$OBJ_SWEEP_STAMP.STOP" ]]; then
+      pass "obj-sweep(loser-wait-plant/$arm): lane A is INSIDE its sweep, holds the claim, and the box is NOT yet latched — so lane B below meets a genuinely in-flight sweep"
+    else
+      touch "$d/go"; fixture_wait "$lane_a" >/dev/null 2>&1 || true
+      fail "obj-sweep(loser-wait-plant/$arm): in-sweep=$([[ -f "$d/sweeping" ]] && echo yes || echo no) claim=$([[ -d "$OBJ_SWEEP_STAMP.sweeping" ]] && echo yes || echo no) latch=$([[ -e "$OBJ_SWEEP_STAMP.STOP" ]] && echo present || echo absent) after $waited polls"
+      continue
+    fi
+    # LANE B: the claim LOSER. Backgrounded, because the whole point is that it now BLOCKS.
+    fixture_bg env WORKER_CMD="$d/bin/worker2.sh" LANE_ID=objsweep-wait-b \
+      SUPERVISOR_LOCK="$d/lock-b" \
+      bash "$root/scripts/local/worker-supervisor.sh" >"$d/b.log" 2>&1
+    lane_b="$FIXTURE_LAST_PID"
+    waited=0
+    while ! grep -q 'WAITING for the peer lane that holds the sweep claim' "$d/b.log" 2>/dev/null &&
+      [[ "$waited" -lt 600 ]]; do sleep 0.05; waited=$((waited + 1)); done
+    # CONSTRUCTION ASSERT, AND IT IS THE ONE THAT MAKES THE ARM MEAN ANYTHING: B is parked on
+    # the peer BEFORE any verdict exists — no latch, no worker of its own. Without this, arm
+    # (a) would also be passed by a lane that simply read an ALREADY-latched box, which is
+    # the pre-existing behaviour and not the fix.
+    if grep -q 'WAITING for the peer lane that holds the sweep claim' "$d/b.log" 2>/dev/null &&
+      [[ ! -e "$OBJ_SWEEP_STAMP.STOP" && ! -f "$counter2" ]]; then
+      pass "obj-sweep(loser-wait-parked/$arm): lane B is WAITING on the peer's in-flight sweep with no latch yet recorded and no worker of its own started"
+    else
+      touch "$d/go"
+      fixture_wait "$lane_a" >/dev/null 2>&1 || true
+      fixture_wait "$lane_b" >/dev/null 2>&1 || true
+      fail "obj-sweep(loser-wait-parked/$arm): waiting=$(grep -c 'WAITING for the peer lane' "$d/b.log" 2>/dev/null || true) latch=$([[ -e "$OBJ_SWEEP_STAMP.STOP" ]] && echo present || echo absent) spawned=$([[ -f "$counter2" ]] && echo yes || echo no) after $waited polls (see $d/b.log)"
+      continue
+    fi
+    # RELEASE LANE A: its sweep now prints its verdict and lane A acts on it.
+    touch "$d/go"
+    fixture_wait "$lane_a" >/dev/null 2>&1 || true
+    fixture_wait "$lane_b" >/dev/null 2>&1
+    # FIXTURE_WAIT_STATUS, NEVER `$?`: fixture_wait ALWAYS returns 0 (it goes on to release
+    # ownership of the group), and reading `$?` here made the corrupt arm assert `rc -ne 0`
+    # against a constant 0 — a case that could never pass, found by running it.
+    rc="$FIXTURE_WAIT_STATUS"
+    if [[ "$arm" == corrupt ]]; then
+      # `CORRUPT (cached at` IS THE ATTRIBUTION. That wording is printed only by
+      # obj_sweep_stop_if_latched — i.e. only by a lane that READ a latch a peer recorded —
+      # while the sweeping lane prints "CORRUPT — stopping loudly". The journal and the
+      # notify log are shared by both lanes of this case, so a bare reason grep could not
+      # tell lane B's stop from lane A's.
+      if [[ "$rc" -ne 0 && ! -f "$counter2" ]] &&
+        grep -q 'object-store: CORRUPT (cached at' "$d/b.log"; then
+        pass "obj-sweep(loser-wait/corrupt): a lane parked on a peer's sweep that ends in CORRUPT STOPS on the latch and never spawns a worker — the window that was the peer's whole sweep"
+      else
+        fail "obj-sweep(loser-wait/corrupt): rc=$rc spawned=$([[ -f "$counter2" ]] && echo yes || echo no) latch=$([[ -e "$OBJ_SWEEP_STAMP.STOP" ]] && echo present || echo absent) (see $d/b.log, $d/a.log)"
+      fi
+      # AND IT IS THE PEER'S LATCH IT STOPPED ON: the verdict was recorded box-wide, and the
+      # page lane B raised is the LATCHED-box one, which only the latch reader emits.
+      if [[ -e "$OBJ_SWEEP_STAMP.STOP" ]] &&
+        grep -q 'SHARED OBJECT STORE CORRUPT (latched)' "$NOTIFY_LOG" 2>/dev/null; then
+        pass "obj-sweep(loser-wait/corrupt): the peer's verdict was recorded box-wide and the waiting lane paged for a LATCHED store rather than for one it swept itself"
+      else
+        fail "obj-sweep(loser-wait/corrupt-page): latch=$([[ -e "$OBJ_SWEEP_STAMP.STOP" ]] && echo present || echo absent) notify=$(grep -c 'latched' "$NOTIFY_LOG" 2>/dev/null || true)"
+      fi
+    else
+      if [[ "$rc" -eq 0 && -f "$counter2" ]] &&
+        grep -q 'FINISHED its sweep after' "$d/b.log" &&
+        [[ "$(obj_sweep_calls "$calls")" -eq 1 ]]; then
+        pass "obj-sweep(loser-wait/clean-control): the SAME staging with a peer that finishes CLEAN lets the loser proceed and run its worker after ONE sweep across both lanes — so the corrupt arm is the verdict, not a lane that stopped spawning"
+      else
+        fail "obj-sweep(loser-wait/clean-control): rc=$rc spawned=$([[ -f "$counter2" ]] && echo yes || echo no) calls=$(obj_sweep_calls "$calls") (see $d/b.log)"
+      fi
+    fi
+    unset OBJ_SWEEP_CLAIM_POLL_SECS OBJ_SWEEP_TIMEOUT_SECS
+  done
+}
+
+t test_object_store_sweep_claim_loser_waits_for_the_peer_verdict
+
+# TWO STRUCTURAL PROPERTIES OF THE WAIT THAT NO BEHAVIOURAL CASE CAN SEE (#3749 review round
+# 12). Both are about how the wait is WIRED, and each has a specific way of failing silently.
+#
+# 1. IT MUST NOT BE CALLED IN A COMMAND SUBSTITUTION. The wait stops the lane from inside
+#    (obj_sweep_stop_if_latched -> finalize_exit) the moment a peer latches the box. Inside
+#    `$(...)` that exit is confined to a SUBSHELL: the wait would appear to return normally
+#    and the lane would carry on to spawn a worker on a box it had just seen condemned — the
+#    exact defect the wait exists to close, reintroduced by the plumbing, and INVISIBLE to a
+#    test that stages a latch, because the state would look right in every log line. It is
+#    the same trap obj_sweep_claim_acquire documents for OBJ_SWEEP_CLAIM_OWNED.
+# 2. THE WAIT BOUND MUST BE THE CLAIM'S OWN DERIVED STALENESS BOUND, not a second constant.
+#    A wait bound that drifts from the sweep's real worst case is wrong in both directions
+#    (too short abandons a live peer mid-sweep; too long waits out a claim that was already
+#    recoverable), and a literal would still pass every behavioural case here because the
+#    fixtures pin the knobs anyway.
+test_object_store_sweep_claim_wait_is_wired_correctly() {
+  local body call_line wait_line subst
+  body="$(awk '/^object_store_sweep\(\) \{$/,/^\}$/' "$SUPERVISOR")"
+  if [[ -n "$body" ]] && grep -q 'obj_sweep_claim_wait ' <<<"$body" &&
+    grep -q 'obj_sweep_claim_stale_secs ' <<<"$body"; then
+    pass "obj-sweep(wait-wiring-plant): object_store_sweep was extracted from the shipped supervisor and calls both obj_sweep_claim_wait and obj_sweep_claim_stale_secs"
+  else
+    fail "obj-sweep(wait-wiring-plant): the extracted body is $(wc -l <<<"$body") lines and does not carry both calls — the asserts below would be vacuous"
+    return
+  fi
+  # (1) EVERY call site, and the test is over COMMAND POSITIONS: a mention inside a comment
+  #     or a log string is prose, not a call.
+  subst="$(grep -n 'obj_sweep_claim_wait' <<<"$body" | grep -v '^\s*[0-9]*:\s*#' |
+    { grep -E '\$\(\s*obj_sweep_claim_wait|`obj_sweep_claim_wait' || true; })"
+  if [[ -z "$subst" ]]; then
+    pass "obj-sweep(wait-no-subshell): obj_sweep_claim_wait is never called in a command substitution, so the stop it performs on a peer's latch cannot be confined to a subshell [STRUCTURAL]"
+  else
+    fail "obj-sweep(wait-no-subshell): called inside a command substitution — its finalize_exit would only exit that subshell: $subst"
+  fi
+  # AND THE FUNCTION ITSELF MUST NOT PUBLISH ITS OUTCOME ON STDOUT, which is what would
+  # invite such a call site in the first place.
+  if ! sed -n '/^obj_sweep_claim_wait() {/,/^}/p' "$SUPERVISOR" |
+    { grep -E '^\s*(printf|echo) ' || true; } | grep -q .; then
+    pass "obj-sweep(wait-no-stdout): obj_sweep_claim_wait publishes its outcome in a GLOBAL and prints nothing, so there is no reason for a caller to reach for a command substitution [STRUCTURAL]"
+  else
+    fail "obj-sweep(wait-no-stdout): it writes to stdout, which invites the command-substitution call site the assert above forbids"
+  fi
+  # (2) THE BOUND'S PROVENANCE. The call must pass the DERIVED value, and the iteration's
+  #     outer budget must be computed FROM that same value — neither may be a literal.
+  wait_line="$({ grep -E '^\s*obj_sweep_claim_wait ' <<<"$body" || true; } | head -1)"
+  call_line="$({ grep -E '^\s*wait_until=\$\(\(' <<<"$body" || true; } | head -1)"
+  if [[ "$wait_line" == *'"$claim_stale"'* ]] && [[ "$call_line" == *'claim_stale'* ]] &&
+    [[ ! "$wait_line" =~ [0-9]{2,} ]]; then
+    pass "obj-sweep(wait-bound-derived): the wait is bounded by the claim's OWN derived staleness value (obj_sweep_claim_stale_secs), and the iteration's outer budget is computed from it — no second, driftable constant [STRUCTURAL]"
+  else
+    fail "obj-sweep(wait-bound-derived): call='$wait_line' budget='$call_line' — the wait bound must be the derived claim_stale, never a literal"
+  fi
+}
+
+t test_object_store_sweep_claim_wait_is_wired_correctly
+
 # THE OTHER HALF, AND THE HAZARD THE CLAIM INTRODUCES: A STALE CLAIM MUST NOT WEDGE THE BOX
 # (#3749 review round 5, item 2). A lane killed mid-sweep leaves its claim behind, and
 # without recovery no lane on the box ever sweeps again — strictly worse than the herd.
@@ -10280,8 +10460,12 @@ test_object_store_sweep_claim_recovers_when_stale() {
   walks="${walks#MAX_SWEEP_WALKS=}"
   per_walk="$({ grep -m1 '^OBJ_SWEEP_TIMEOUT_SECS=' "$SUPERVISOR" || true; } 2>/dev/null)"
   per_walk="${per_walk#*:-}"; per_walk="${per_walk%%\}*}"
+  # PARSED THE SAME WAY AS THE PER-WALK BOUND ABOVE, because since #3749 review round 12 the
+  # slack term is an env-overridable default (`"${VAR:-60}"`) rather than a bare literal — it
+  # is what lets the wait cases below compress this derived bound instead of sleeping a
+  # minute. Read the SHIPPED default out of the declaration, never re-typed here.
   bound="$({ grep -m1 '^OBJ_SWEEP_CLAIM_SLACK_SECS=' "$SUPERVISOR" || true; } 2>/dev/null)"
-  bound="${bound#OBJ_SWEEP_CLAIM_SLACK_SECS=}"
+  bound="${bound#*:-}"; bound="${bound%%\}*}"
   if grep -q '^obj_sweep_claim_stale_secs() {' "$fns" &&
     [[ "$walks" =~ ^[0-9]+$ && "$per_walk" =~ ^[0-9]+$ && "$bound" =~ ^[0-9]+$ ]]; then
     pass "obj-sweep(claim-bound-plant): all three declarations were read from the shipped files (MAX_SWEEP_WALKS $walks, per-walk bound $per_walk s, slack $bound s)"
@@ -10318,6 +10502,14 @@ test_object_store_sweep_claim_recovers_when_stale() {
   fi
   # (c) CONTROL, one property apart: the same claim with a FRESH start time. It must be
   #     respected — so (b) is the AGE and not the recovery firing unconditionally.
+  #
+  #     WHAT ROUND 12 CHANGED HERE, AND WHY THE BOUND IS COMPRESSED. A fresh claim is no
+  #     longer skipped past: the lane WAITS for the peer that holds it, and this plant is a
+  #     claim NOBODY WILL EVER FINISH, so the wait can only end by exhausting the whole
+  #     derived budget. At the shipped defaults that is 660s of sleeping, so this case pins
+  #     OBJ_SWEEP_TIMEOUT_SECS and the (now env-overridable) slack term to make the SAME
+  #     derived relation come out at a few seconds. The property under test is unchanged;
+  #     only its price is.
   d="$(new_case_dir)"; calls="$d/calls-fresh"; counter="$d/counter"
   common_env "$d"
   write_finalize_stub "$d/bin/worker.sh" "$counter"
@@ -10325,6 +10517,9 @@ test_object_store_sweep_claim_recovers_when_stale() {
   export MAX_ISSUES=1
   export OBJ_SWEEP_INTERVAL_HOURS=6
   export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  export OBJ_SWEEP_TIMEOUT_SECS=1
+  export OBJ_SWEEP_CLAIM_SLACK_SECS=2
+  export OBJ_SWEEP_CLAIM_POLL_SECS=1
   claim="$OBJ_SWEEP_STAMP.sweeping"
   mkdir -p "$claim"
   printf '%s\n' "$(date +%s)" >"$claim/started"
@@ -10332,11 +10527,47 @@ test_object_store_sweep_claim_recovers_when_stale() {
   env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/fresh.log" 2>&1
   rc=$?
   if [[ "$rc" -eq 0 && ! -s "$calls" && -f "$counter" ]] &&
-    grep -q 'holds the sweep claim' "$d/fresh.log"; then
-    pass "obj-sweep(claim-fresh-control): a claim younger than the bound is respected — the recovery is age-driven, not unconditional"
+    grep -q 'WAITING for the peer lane that holds the sweep claim' "$d/fresh.log" &&
+    grep -q 'NOT SWEPT AND NOT MEASURED' "$d/fresh.log"; then
+    pass "obj-sweep(claim-fresh-control): a claim younger than the bound is respected — the lane WAITS for it instead of sweeping beside it, and a peer that never finishes ends the wait as NOT MEASURED rather than as a clean skip"
   else
-    fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") (see $d/fresh.log)"
+    fail "obj-sweep(claim-fresh-control): rc=$rc calls=$(obj_sweep_calls "$calls") waited=$(grep -c 'WAITING for the peer lane' "$d/fresh.log" 2>/dev/null || true) (see $d/fresh.log)"
   fi
+  unset OBJ_SWEEP_TIMEOUT_SECS OBJ_SWEEP_CLAIM_SLACK_SECS OBJ_SWEEP_CLAIM_POLL_SECS
+  # (c2) THE `expired` PATH, WHICH IS ROUND 12'S NON-PERMISSIVE OUTCOME AND ONE PROPERTY
+  #      FROM (c): the same never-finishing claim, planted OLD ENOUGH that its own derived
+  #      deadline falls INSIDE the wait. The lane must not carry on unmeasured — it recovers
+  #      the claim the moment that deadline passes and MEASURES the store itself. The loser
+  #      becomes the sweeper.
+  d="$(new_case_dir)"; calls="$d/calls-expired"; counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  export OBJ_SWEEP_TIMEOUT_SECS=1
+  export OBJ_SWEEP_CLAIM_SLACK_SECS=4
+  export OBJ_SWEEP_CLAIM_POLL_SECS=1
+  claim="$OBJ_SWEEP_STAMP.sweeping"
+  mkdir -p "$claim"
+  # Derived from the pinned knobs, never re-typed: MAX_SWEEP_WALKS(3) x 1 + 4 = 7s, planted
+  # 4s old, so the claim's own deadline is ~3s out while the outer budget is ~7s — the one
+  # arrangement in which `expired` and not `exhausted` is the outcome.
+  printf '%s\n' "$(( $(date +%s) - 4 ))" >"$claim/started"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/expired.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && "$(obj_sweep_calls "$calls")" -eq 1 && -f "$counter" ]] &&
+    grep -q 'WAITING for the peer lane that holds the sweep claim' "$d/expired.log" &&
+    grep -q 'will RECOVER the claim and measure the store itself' "$d/expired.log" &&
+    grep -q 'RECOVERED a stale sweep claim' "$d/expired.log" &&
+    ! grep -q 'NOT SWEPT AND NOT MEASURED' "$d/expired.log"; then
+    pass "obj-sweep(claim-wait-expired): when the peer neither finishes nor gives the claim up, the waiting lane RECOVERS it at the derived deadline and measures the store itself — the non-permissive outcome, not a carry-on"
+  else
+    fail "obj-sweep(claim-wait-expired): rc=$rc calls=$(obj_sweep_calls "$calls") (see $d/expired.log)"
+  fi
+  unset OBJ_SWEEP_TIMEOUT_SECS OBJ_SWEEP_CLAIM_SLACK_SECS OBJ_SWEEP_CLAIM_POLL_SECS
   # (d) A CLAIM WITH NO PARSEABLE START TIME is treated as STALE — the deliberate
   #     direction, because its cause is a lane killed between the mkdir and the `started`
   #     write, and the other reading wedges the sweep forever on a file nobody can age.

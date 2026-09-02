@@ -929,9 +929,26 @@ merely a CPU cost: the walks are I/O-bound, so contention pushes them toward the
 an expired bound is `UNMEASURED`, a correlated loss of the measurement on every lane at once. The
 serialiser is a per-store claim **directory** created with `mkdir` (the latch's kernel-arbitrated
 create-only primitive, and deliberately not `flock`, since this file's single-instance lock is
-mkdir-based precisely because macOS ships no `flock(1)`). A loser does not wait — it skips that
-iteration's probe and carries on after the usual latch read — and the throttle is **re-read after
-acquiring**, which is what stops the claim converting a herd into a queue of redundant sweeps. A
+mkdir-based precisely because macOS ships no `flock(1)`). **A loser *does* wait, which reverses the
+original design.** It used to skip that iteration's probe and carry straight on to the spawn path
+after one latch read, on the argument that "a peer is doing it right now" is a complete answer for a
+6-hourly hygiene sweep — a complete answer about the SWEEP and no answer at all about the SPAWN,
+because the loser knows a full-store fsck is in flight (that is why its claim failed) and that fsck
+can end in `CORRUPT` or `UNSWEEPABLE`, latching the box. The window it discarded was the peer's
+**entire sweep**: 13-80s measured on this fleet, up to `MAX_SWEEP_WALKS` × `OBJ_SWEEP_TIMEOUT_SECS`
+(600s at the shipped defaults) by construction — not the narrow post-read spawn gap the residual
+note described. The loser now waits, re-reading the latch, the stamp, the claim and the stop file
+every `OBJ_SWEEP_CLAIM_POLL_SECS` (granularity, not a bound), **bounded by the claim's own derived
+staleness value**: the same 660s that says "this claim may be taken over" says "stop waiting for
+it", so a dead peer cannot wedge the wait and there is no second, driftable constant. A timeout is
+not a clean result and does not carry on — when the peer neither finishes nor vacates, that claim is
+stale by construction at the deadline, so the next acquire recovers it and **the loser becomes the
+sweeper**; only where peers keep handing the claim around for the whole budget does the lane skip,
+journalled and paged as `NOT SWEPT AND NOT MEASURED`, never as clean, and never as a stop (a peer
+sweeping is also the shape of a healthy box recovering a wedged claim, and stopping four lanes over a
+hygiene probe's contention is the self-DoS that file refuses everywhere else). The throttle is
+**re-read after acquiring**, which is what stops the claim converting a herd into a queue of
+redundant sweeps. A
 stale claim must not wedge the box, which would be worse than the herd, so the recovery threshold is
 **derived**: a claim cannot be stale while the sweep it represents could still be running, so it is
 the sweep's own `MAX_SWEEP_WALKS` (read from that script) × this supervisor's per-walk bound + slack
@@ -941,12 +958,22 @@ and where the bound cannot be derived **no claim is taken at all** and the previ
 restored, announced. The claim is a registered resource released by the EXIT trap, so the `CORRUPT`
 path — which ends the process — does not leave peers waiting out the bound. Not closed, and
 pre-existing: this file installs no INT/TERM handlers, so a signalled supervisor releases neither
-its claim nor its lock; for the claim that is a delay, not a wedge. **What is
-not closed:** the latch read and the worker spawn are still unsynchronised, and the preflight hold
-loop can poll for minutes between them, so one worker can still start on a box latched moments
-earlier. It is bounded (that lane's next iteration reads the latch at the top of its sweep and
-stops) and the atomic guarantee needs per-store synchronisation shared by the sweep and the spawn
-decision, which is split to its own issue. The sweep is also **not interruptible** — its two walks
+its claim nor its lock; for the claim that is a delay, not a wedge. **What is not closed, per path
+and with its real magnitude** — the earlier version of this text gave one figure for every path
+("one worker can still start on a box latched *moments* earlier") and it was wrong twice. **Path 1,
+the claim loser: closed** — it was the peer's whole sweep (13-80s measured, 600s by construction),
+now bounded by one `OBJ_SWEEP_CLAIM_POLL_SECS`. **Path 2, a lane's own sweep: covered** by the entry
+read plus the post-sweep reads. **Path 3, the last latch read to the worker spawn: open, and the
+largest of the three** — `object_store_sweep` returns and the caller then runs the preflight hold
+loop, which does *not* re-read the latch: milliseconds on a clear box, but every hold sleeps
+`HOLD_POLL_SECS` and the loop tolerates up to `BUILD_HOLD_MAX` of them, so at the shipped defaults
+the gap is up to 12 × 300s = **3600s, one hour** (the leftover-worker family bounds at
+`LEFTOVER_HOLD_MAX` × `HOLD_POLL_SECS` = 900s), and "minutes" understated it by 12x. It is bounded
+in harm (that lane's next iteration reads the latch at the top of its sweep and stops, and nothing
+certifies a merge in that window without a full gate, which a latched box refuses), and the atomic
+guarantee needs per-store synchronisation shared by the sweep and the spawn decision, which is split
+to its own issue — as is the cheapest partial, a latch read inside the hold loop that would cut
+3600s to one `HOLD_POLL_SECS`. Path 1 is closed; path 3 is open; the race is not gone. The sweep is also **not interruptible** — its two walks
 run in a child process — so the supervisor checks the stop file and the wall-clock budget
 immediately *before* the sweep, and bounds the exposure in wall time: its per-walk default is the
 sweep script's own bound **divided by `MAX_SWEEP_WALKS`** (200 vs 600/3), so every walk it can pay
