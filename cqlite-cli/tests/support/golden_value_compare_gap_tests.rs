@@ -767,7 +767,12 @@ fn the_float_tie_break_gap_rejects_a_spelling_neither_formatter_produces() {
         Divergence::Float32TieBreakSpellingDiffersFromJava,
     )];
     let golden = vec![row(&[("id", json!(1)), ("temperature", json!(36.601562))])];
-    let tie: f32 = 36.6015625;
+    // 36.6015625 exactly, written as the fraction 4685/128 (both operands are
+    // exactly representable, so the division is exact). A decimal literal here
+    // trips `clippy::excessive_precision`, whose suggested truncation is
+    // `36.601563` — one of the two spellings UNDER TEST — which would make the
+    // fixture read as the Display side rather than as the exact f32.
+    let tie: f32 = 4685.0 / 128.0;
 
     for spelling in NON_FORMATTER_TIE_SPELLINGS {
         // The case data is self-checked: each spelling really is the SAME f32, so
