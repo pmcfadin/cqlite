@@ -603,22 +603,14 @@ impl V5CompressedLegacyParser {
                                         partition_index, offset, e
                                     );
                                 }
-                                // Issue #3782: when the caller PROVED the buffer is
-                                // complete (`with_complete_buffer`), no further bytes
-                                // exist that could complete this row, so the failure
-                                // is truncation or corruption — DATA LOSS — and is
-                                // reported. Swallowing it here is what made a SELECT
-                                // over a fixture with ONE corrupted clustering byte
-                                // return 23 of 100 rows, silently.
-                                //
-                                // Without that guarantee the break STAYS: this path
-                                // has no refill vocabulary, and a caller handing a
-                                // chunk-covering window can legitimately cut a row at
-                                // the tail (`big_decode_clustering_window` with no
-                                // row-body window reads past its target partition by
-                                // design). Deciding tolerance from inside the parse is
-                                // exactly what this issue removed from the sliding
-                                // driver; here the knowledge lives with the caller.
+                                // Issue #3782: on a PROVEN-complete buffer no further
+                                // bytes can finish this row, so the failure is
+                                // truncation/corruption — DATA LOSS — and is reported;
+                                // swallowing it made a SELECT over a fixture with ONE
+                                // corrupted clustering byte return 23 of 100 rows.
+                                // Otherwise the tolerant break STAYS: a chunk-covering
+                                // window can legitimately cut a row at its tail. See
+                                // `with_complete_buffer`.
                                 if self.complete_buffer {
                                     return Err(e);
                                 }

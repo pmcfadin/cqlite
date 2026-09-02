@@ -231,9 +231,7 @@ impl SSTableReader {
         let stitched_buffer = self
             .stitch_all_chunks_cancellable(cursor, scan_cancel)
             .await?;
-        // Issue #3782: the buffer is EVERY chunk of the data section, so no further
-        // bytes exist — a row that fails to decode is corruption/truncation and must
-        // be reported, not silently truncate the scan.
+        // #3782: EVERY chunk of the data section — see `with_complete_buffer`.
         let parser = self
             .build_v5_parser(read_shadowing)
             .with_complete_buffer(true);
@@ -275,7 +273,7 @@ impl SSTableReader {
         )>,
     > {
         let stitched_buffer = self.stitch_all_chunks(cursor).await?;
-        // Issue #3782: whole stitched data section — see `stitch_and_parse_all_chunks`.
+        // #3782: whole stitched data section — see `with_complete_buffer`.
         let parser = self.build_v5_parser(true).with_complete_buffer(true);
 
         let reader_schema;

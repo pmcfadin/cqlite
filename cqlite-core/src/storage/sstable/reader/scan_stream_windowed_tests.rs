@@ -386,6 +386,13 @@ mod fixture_drain {
     /// the current thread (the function is synchronous); the bounded channel
     /// is pre-filled and its sender dropped so `blocking_recv` never blocks.
     fn drain_count(reader: &SSTableReader, chunks: &[Vec<u8>], io_failed: bool) -> usize {
+        drain_result(reader, chunks, io_failed).expect("drain_scan_window_blocking")
+    }
+
+    /// As [`drain_count`], but hands back the parse half's `Result` so a test can
+    /// assert a REFUSAL (issue #3782: a terminal drain over a TRUNCATED window now
+    /// returns the decode error instead of emitting a partial trailing partition).
+    fn drain_result(reader: &SSTableReader, chunks: &[Vec<u8>], io_failed: bool) -> Result<usize> {
         let ctx = WindowParseCtx {
             now_secs: None,
             start_key: None,
@@ -411,16 +418,14 @@ mod fixture_drain {
         // that `blocking_send` never blocks here; count rows ACROSS batches.
         let (out_tx, mut out_rx) = mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(4096);
         let flag = Arc::new(AtomicBool::new(io_failed));
-        reader
-            .drain_scan_window_blocking(ctx, raw_rx, out_tx, flag)
-            .expect("drain_scan_window_blocking");
+        reader.drain_scan_window_blocking(ctx, raw_rx, out_tx, flag)?;
         let mut n = 0usize;
         while let Ok(item) = out_rx.try_recv() {
             if let Ok(rows) = item {
                 n += rows.len();
             }
         }
-        n
+        Ok(n)
     }
 
     /// Build the same `WindowParseCtx` the I/O half resolves for this fixture.
@@ -817,30 +822,50 @@ mod fixture_drain {
         let reader = Arc::new(reader);
         let r1 = Arc::clone(&reader);
         let t1 = truncated.to_vec();
-        let clean = tokio::task::spawn_blocking(move || drain_count(&r1, &t1, false))
+        let clean = tokio::task::spawn_blocking(move || drain_result(&r1, &t1, false))
             .await
             .expect("clean drain task");
         let r2 = Arc::clone(&reader);
         let t2 = truncated.to_vec();
-        let failed = tokio::task::spawn_blocking(move || drain_count(&r2, &t2, true))
+        let failed = tokio::task::spawn_blocking(move || drain_result(&r2, &t2, true))
             .await
             .expect("failed drain task");
 
         eprintln!(
-                "Issue #1143 terminal-drain guard: truncated window emitted clean(io_failed=false)={clean} \
-                 rows vs failed(io_failed=true)={failed} rows"
-            );
+            "Issue #1143 terminal-drain guard: truncated window clean(io_failed=false)={:?} \
+             vs failed(io_failed=true)={:?}",
+            clean.as_ref().map_err(|e| e.to_string()),
+            failed.as_ref().map_err(|e| e.to_string())
+        );
 
-        // The clean run MUST have something to lose: its terminal drain parses
-        // the truncated trailing window into at least one extra partition.
-        // (If this fails the fixture's last chunk ended exactly on a partition
-        // boundary — pick a fixture whose tail straddles a chunk.)
+        // Issue #1143's property is UNCHANGED and the discriminator is now sharper.
+        // The clean run RUNS the terminal drain over the truncated trailing window;
+        // since #3782 that drive is `at_final_chunk = true` over bytes whose last row
+        // is cut, so it REFUSES with the decode error rather than emitting a partial
+        // trailing partition. (Before #3782 it emitted those partial rows and the
+        // guard compared row COUNTS — the silent-truncation shape this fixture was
+        // built to expose, asserted from the wrong side.)
+        let err = match clean {
+            Err(e) => e,
+            Ok(n) => panic!(
+                "Issue #1143/#3782 REGRESSION: the clean run's terminal drain accepted a \
+                 TRUNCATED window and emitted {n} rows; a cut trailing row at the final \
+                 chunk is data loss and must surface"
+            ),
+        };
         assert!(
-            clean > failed,
-            "Issue #1143 REGRESSION: io_failed did NOT skip the terminal drain — \
-                 truncated window emitted the SAME {failed} rows with and without the \
-                 io_failed gate. A mid-stream read error must NOT surface the partial \
-                 trailing partition (clean={clean}, failed={failed})."
+            matches!(err, Error::Corruption { .. }),
+            "the refusal must carry the decode error's own kind, got: {err}"
+        );
+
+        // The io_failed run SKIPS that terminal drain entirely, so it neither emits
+        // the partial partition NOR surfaces its error — the #1143 gate, intact.
+        let failed = failed.unwrap_or_else(|e| {
+            panic!("io_failed did NOT skip the terminal drain: it surfaced {e}")
+        });
+        eprintln!(
+            "Issue #1143 terminal-drain guard: io_failed skipped the drain and confirmed \
+             {failed} rows from the prefix"
         );
     }
 }

@@ -393,8 +393,7 @@ impl SSTableReader {
             // build the parser with read_shadowing = true. The stitch/parse split
             // (issue #1411) is preserved: CRC/decompress failures already surfaced
             // via `stitch_all_chunks` above; only `parse_block` may soft-miss.
-            // Issue #3782: `stitch_all_chunks` above returned the WHOLE data section,
-            // so a row that fails to decode cannot be a row awaiting later bytes.
+            // #3782: `stitch_all_chunks` returned the WHOLE data section.
             let parser = self.build_v5_parser(true).with_complete_buffer(true);
             let all_entries = match parser.parse_block(&stitched_buffer, schema_opt.as_ref(), self)
             {
