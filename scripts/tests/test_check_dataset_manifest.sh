@@ -21,6 +21,24 @@ set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 GATE="$SCRIPT_DIR/../agent-gate.sh"
 
+# The nested `agent-gate.sh --only node-bindings` runs below (cases 97-102) each execute the
+# gate's component-set pre-flight, which is unrelated to anything they assert -- and which
+# contacts `origin` when `origin` names the CANONICAL upstream. This suite's header claims it
+# is NETWORK-FREE, and with a scratch tree whose `origin` was the real one that claim was
+# false: measured, each nested run made two DNS lookups plus two TLS connects to
+# github.com:443 (the pre-flight runs once before the gate slot and once inside the certified
+# window), so four runs made eight probes and could have added ~2 minutes on a stalled
+# network at the pre-flight's 15s lenient bound (roborev #3642, job 100).
+#
+# The sanctioned fix is the one the other gate self-tests already use: give the fixture its
+# OWN LOCAL origin and SUBSTITUTE THE ARTIFACT -- rewrite the canonical-identity literal in
+# the fixture's own scratch COPY of agent-gate.sh so that local origin is canonical FOR THAT
+# COPY -- never a settable seam in the shipped script, which would be one more thing a real
+# invoker can set (#3312). Same helper, same call shape as test_agent_gate_delta.sh,
+# test_agent_gate_tree_integrity.sh and test_agent_gate_component_set.sh.
+# shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.bash
+. "$SCRIPT_DIR/lib/agent-gate-canonical-pin.bash"
+
 # #2751 defense-in-depth: this self-test drives nested `agent-gate.sh --only
 # node-bindings` runs. Each case pins its own AGENT_GATE_SUMMARY_FILE, but scrub
 # any inherited value up front so a standalone run can never clobber the caller's.
@@ -53,31 +71,19 @@ bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 WORK=$(mktemp -d) || { echo "FAIL: mktemp -d failed; refusing to run with an unset work dir" >&2; exit 1; }
 [ -n "$WORK" ] && [ -d "$WORK" ] || {
   echo "FAIL: mktemp -d produced no usable directory (got '${WORK:-<empty>}')" >&2; exit 1; }
-# A scratch git worktree is REGISTERED IN REPOSITORY METADATA, so deleting its directory
-# is not cleanup -- an interrupt between `worktree add` and `worktree remove` leaves a
-# registered-but-missing worktree behind in the real repo (roborev #3493 round 25).
-# Tracked here and unregistered from the trap, which also covers INT/TERM.
-SCRATCH_WORKTREE=""
-SCRATCH_WORKTREE_REPO=""
+# NOTHING THIS SCRIPT CREATES IS REGISTERED IN REPOSITORY METADATA ANY MORE, so `rm -rf
+# "$WORK"` IS complete cleanup. Cases 97-102 used to build their scratch tree with
+# `git worktree add`, which is registered in the real repo -- an interrupt between the add
+# and the remove left a registered-but-missing worktree behind (roborev #3493 round 25), the
+# remove could not be replaced by a repository-wide `worktree prune` without risking a PEER
+# LANE's registration on this multi-lane box (round 27), and the remove had to be idempotent
+# because the INT/TERM handlers reach _cleanup twice (round 29). That scratch tree is now a
+# `git clone --local --shared` living entirely inside $WORK (issue #3642): it needs a LOCAL
+# `origin` so the gate's component-set pre-flight cannot reach the network, and a clone gets
+# one where a worktree -- which shares the real repo's config, and so its real `origin` --
+# cannot. All three hazards are therefore ELIMINATED rather than guarded: there is no
+# registration to leak, nothing to prune, and nothing for a second cleanup pass to retry.
 _cleanup() {
-  # NO repository-wide `worktree prune` (roborev #3493 round 27). Pruning unregisters
-  # every worktree git currently considers stale -- including a PEER LANE's whose
-  # directory is temporarily unavailable -- so a cleanup for one scratch tree could
-  # deregister someone else's work. This machine runs several lanes concurrently, so that
-  # is a live hazard, not a theoretical one. Remove only what this script registered, and
-  # SAY SO if that fails rather than reaching for a broader hammer.
-  # IDEMPOTENT (roborev #3493 round 29): the INT/TERM handlers call _cleanup and then
-  # re-raise, which runs the EXIT trap and calls _cleanup a SECOND time. Without clearing
-  # the tracking on success, that second pass tried to remove an already-removed worktree
-  # and printed a false "could not remove" warning -- a cleanup path inventing a problem
-  # it had just fixed.
-  if [ -n "$SCRATCH_WORKTREE" ] && [ -n "$SCRATCH_WORKTREE_REPO" ]; then
-    if git -C "$SCRATCH_WORKTREE_REPO" worktree remove --force "$SCRATCH_WORKTREE" >/dev/null 2>&1; then
-      SCRATCH_WORKTREE=""; SCRATCH_WORKTREE_REPO=""
-    else
-      echo "WARN: could not remove scratch worktree $SCRATCH_WORKTREE (left registered; run 'git worktree prune' by hand if it is stale)" >&2
-    fi
-  fi
   rm -rf "$WORK"
 }
 # INT/TERM get their OWN traps that clean up and then EXIT with the conventional
@@ -2367,12 +2373,16 @@ fi
 # BEHAVIOURAL AND HERMETIC AT ~3s PER CASE, which is why it is affordable where the rest
 # of this component's behaviour is not. The expensive half of run_node_bindings (npm ci,
 # the napi build, typecheck, the jest run) is satisfied by STUBS on PATH; the manifest
-# script itself is SUBSTITUTED in a scratch git worktree so it exits with the code the
+# script itself is SUBSTITUTED in a scratch tree so it exits with the code the
 # case chose. Substituting the ARTIFACT, never adding a seam to agent-gate.sh: a
 # test-only environment hook would be one more thing a real invoker can set (#3312).
 #
-# The scratch worktree gets the WORKING TREE's agent-gate.sh copied over the checked-out
-# one, so the subject is the script being changed rather than the last commit's.
+# The scratch tree is a LOCAL `git clone --local --shared` of this checkout, and it gets the
+# WORKING TREE's agent-gate.sh copied over the cloned one, so the subject is the script being
+# changed rather than the last commit's. A clone rather than a linked worktree because the
+# clone's `origin` is a LOCAL PATH: pinned as canonical for that copy (see the construction
+# below), the nested gate's component-set pre-flight reads its baseline locally instead of
+# probing the canonical remote twice per run (issue #3642, roborev job 100).
 #
 # Case 101 is the positive control. Without it, cases 97-99 could all be satisfied by a
 # component that FAILs or SKIPs for some reason upstream of the manifest entirely.
@@ -2391,18 +2401,56 @@ elif [ ! -f "$GATE_SRC4" ]; then
   echo "info - agent-gate.sh unreadable; skipping the manifest exit-code mapping cases (97-102)"
 else
   nbgate_repo=$(cd "$(dirname "$GATE")/.." && pwd)
-  nbgate_wt="$WORK/nb-gate-wt"
-  if git -C "$nbgate_repo" worktree add --detach "$nbgate_wt" HEAD >"$WORK/nb-gate-wt.log" 2>&1; then
-    SCRATCH_WORKTREE="$nbgate_wt"; SCRATCH_WORKTREE_REPO="$nbgate_repo"
+  nbgate_wt="$WORK/nb-gate-tree"
+  # A LOCAL `--shared` CLONE, NOT `git worktree add` (issue #3642, roborev job 100). A linked
+  # worktree shares the real repository's config, so its `origin` IS the canonical upstream and
+  # the nested gate's component-set pre-flight went to the network twice per run; a clone's
+  # `origin` is this local path, which is what the pin below then makes canonical FOR THE
+  # SCRATCH COPY of the gate. `--shared` (alternates) rather than the default hardlink/copy
+  # because $WORK is a `mktemp -d` and is routinely on a DIFFERENT FILESYSTEM from the
+  # checkout, where `git clone --local` fails outright with `Invalid cross-device link`
+  # (measured) and `--no-hardlinks` would copy the whole object store. Measured at 0.6s, i.e.
+  # the same cost as the `worktree add` it replaces, and it leaves nothing registered in the
+  # real repo for cleanup to unregister.
+  if git clone --local --shared --quiet "$nbgate_repo" "$nbgate_wt" >"$WORK/nb-gate-tree.log" 2>&1; then
     nbgate_ok=1
   else
-    bad "cases 97-102: could not create a scratch git worktree for the exit-code mapping cases: $(tail -1 "$WORK/nb-gate-wt.log" 2>/dev/null)"
+    bad "cases 97-102: could not clone a scratch tree for the exit-code mapping cases: $(tail -1 "$WORK/nb-gate-tree.log" 2>/dev/null)"
   fi
 fi
 
 if [ "$nbgate_ok" = 1 ]; then
   # The SUBJECT: this checkout's agent-gate.sh, not HEAD's.
   cp "$GATE_SRC4" "$nbgate_wt/scripts/agent-gate.sh"
+
+  # NETWORK-FREE PRE-FLIGHT, FAIL-CLOSED. Two fixture-construction steps, both through the
+  # shared helper the other gate self-tests use (scripts/tests/lib/agent-gate-canonical-pin.bash):
+  #
+  #   * the components manifest is DERIVED FROM THE COPY, because the copy is the WORKING
+  #     TREE's gate while the cloned `scripts/agent-gate.components` is HEAD's -- a COMPONENTS
+  #     change in the working tree would otherwise stop the pre-flight at `manifest-stale`
+  #     instead of at the baseline it is being pointed at;
+  #   * the canonical-identity literal is pinned to THIS CLONE'S OWN `origin` (the local
+  #     checkout path), so the pre-flight reads its baseline from that local path -- measured
+  #     `component-set: ADVISORY-PASS (37/37 names vs origin/main <sha>) ... objects: baseline
+  #     REUSED`, with ZERO external connects under `strace -f -e trace=connect`, against two
+  #     DNS lookups + two connects to github.com:443 per run before the change.
+  #
+  # A FAILED PIN IS A `bad`, NOT A SHRUG: it means the shipped constant was renamed, and the
+  # silent consequence is that these four runs quietly go back to probing the network on every
+  # `tooling-tests` run on every lane. Neither step can change what cases 97-102 assert -- the
+  # pre-flight is lenient under `--only` and decides no node-bindings verdict -- so this is
+  # hermeticity, not part of any case's subject.
+  if ! agent_gate_install_components_manifest "$nbgate_wt/scripts/agent-gate.sh" 2>"$WORK/nb-gate-manifest.err"; then
+    nbgate_ok=0
+    bad "cases 97-102: could not derive the scratch tree's agent-gate.components: $(tail -1 "$WORK/nb-gate-manifest.err" 2>/dev/null)"
+  elif ! agent_gate_pin_canonical_remote "$nbgate_wt/scripts/agent-gate.sh" "$nbgate_repo" 2>"$WORK/nb-gate-pin.err"; then
+    nbgate_ok=0
+    bad "cases 97-102: could not pin the scratch gate copy's canonical origin to the local clone source, so the nested runs would contact the canonical remote: $(tail -1 "$WORK/nb-gate-pin.err" 2>/dev/null)"
+  fi
+fi
+
+if [ "$nbgate_ok" = 1 ]; then
 
   # Substituted manifest: exits with the code the case picks, and says so in the log so a
   # case can prove the component actually reached it.
