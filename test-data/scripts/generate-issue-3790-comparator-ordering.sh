@@ -592,18 +592,25 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   # `git add` only ever ADDS. Regeneration produces a NEW `<uuid>` directory, so
   # adding just the new files leaves the OLD directory still tracked and still
   # committed -- two generations of the same table in the corpus, after which the
-  # test's fixture lookup would be resolved by filesystem order. `git add -A --`
-  # on the keyspace path stages deletions of tracked files (including the
-  # force-added, otherwise-ignored .db binaries), which is exactly what is needed
-  # and what a bare `git add` cannot do.
+  # test's fixture lookup would be resolved by filesystem order. `git add -u --`
+  # on the keyspace path stages modifications and DELETIONS of TRACKED files
+  # (including the force-added, otherwise-ignored .db binaries), which is exactly
+  # what is needed and what a bare `git add` cannot do.
+  #
+  # `-u`, NOT `-A` (roborev job 68): `-A` would additionally stage every UNTRACKED
+  # file under the keyspace — including a directory the deletion pass deliberately
+  # preserved, and any unrelated work in progress there — so following the printed
+  # instructions could commit artifacts the operator never intended. `-u` touches
+  # only paths git already tracks, which is the whole requirement here: the file
+  # being staged is a DELETION of something previously committed.
   echo "  # FIRST: stage the removal of any previous generation (git add only ADDS):"
-  echo "  git -C '$REPO_ROOT' add -A -- \\"
+  echo "  git -C '$REPO_ROOT' add -u -- \\"
   echo "    '$OUT_DIR'/$KEYSPACE"
   echo ""
   # The ADD paths name the ONE generation directory this run exported (roborev job
   # 63), not `$KEYSPACE/*/`: a keyspace-wide glob would force-add files from any
   # other directory that happens to sit there, including one the deletion pass
-  # deliberately preserved. The `add -A` above is deliberately keyspace-scoped
+  # deliberately preserved. The `add -u` above is deliberately keyspace-scoped
   # instead, because its whole job is to stage the PREVIOUS generation's deletion,
   # and that directory no longer exists to be named.
   echo "  # Force-add the .db binaries (gitignored — MUST use -f):"
