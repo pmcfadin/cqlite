@@ -6572,7 +6572,7 @@ _failassert_write() {
 # repository-controlled paths, and git PERMITS a newline in one — an unsanitised value
 # would emit a SUMMARY line with no key at all.
 _failassert_clean() {
-  printf '%s' "$1" | tr -d '\000' | tr '\001-\037\177' ' ' | tr -s ' ' | cut -c1-240
+  printf '%s' "$1" | tr -d '\000' | tr '\001-\037\177' ' ' | tr -s ' ' | cut -c1-300
 }
 
 # _failassert_record <component> <status> [logfile]: THE extraction site. Only a FAIL has
@@ -6614,9 +6614,13 @@ _failassert_record() {
     _failassert_write "$name" "0 RECOGNISED (component log scanned; no recogniser matched - the recogniser set is NON-EXHAUSTIVE)"
     return 0
   fi
-  names=$(printf '%s\n' "$out" | sed -n 's/^name=//p' | head -"$FAILASSERT_SHOW" | paste -sd '|' -)
-  shown=$(printf '%s\n' "$out" | sed -n 's/^name=//p' | head -"$FAILASSERT_SHOW" | grep -c .)
-  value="$count RECOGNISED ($tier): $(printf '%s' "$names" | sed 's/|/, /g')"
+  # Joined by awk, NOT by `paste -sd|` + `sed s/|/, /`: a recognised identity may itself
+  # contain a `|` (a toolchain error line routinely does), and that round-trip would turn
+  # one name into two.
+  names=$(printf '%s\n' "$out" | sed -n 's/^name=//p' | head -n "$FAILASSERT_SHOW" \
+            | awk 'NR>1{printf ", "} {printf "%s", $0} END{if (NR) print ""}')
+  shown=$(printf '%s\n' "$out" | sed -n 's/^name=//p' | head -n "$FAILASSERT_SHOW" | grep -c .)
+  value="$count RECOGNISED ($tier): $names"
   [ "$count" -gt "$shown" ] 2>/dev/null && value="$value (+$((count - shown)) more)"
   _failassert_write "$name" "$(_failassert_clean "$value")"
   return 0

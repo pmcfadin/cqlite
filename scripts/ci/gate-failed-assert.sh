@@ -105,7 +105,7 @@ awk -v max="$max" '
     gsub(/[\001-\037\177]/, " ", t)          # control chars (a path CAN hold a newline)
     gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
     gsub(/[[:space:]]+/, " ", t)
-    if (length(t) > 70) t = substr(t, 1, 67) "..."
+    if (length(t) > 60) t = substr(t, 1, 57) "..."
     return t
   }
   function add(tier, id,   c) {
