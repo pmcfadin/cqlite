@@ -5387,6 +5387,44 @@ else
   bad "3765-extractor-failclosed: expected exit 2 on a missing log, got $fa_rc"
 fi
 
+# 55r. PREFIX COLLISION: DEDUP IS ON THE FULL IDENTITY, NOT ON THE DISPLAY FORM.
+#      REGRESSION, reproduced not predicted. add() used to truncate FIRST and key its
+#      `seen[]` map on the TRUNCATED text, so two DISTINCT failing tests sharing a
+#      57-character prefix — routine for sibling Rust test paths — deduped to ONE and
+#      `count` UNDERCOUNTED (the two lines below reported `count=1`). The accounted count
+#      is half the #3765 flake signature, so a DISPLAY bound must never be able to move
+#      it. This case reds if the dedup is moved back before the truncation.
+printf 'test cqlite_core::storage::sstable::bti::rows::tests::verify_root_base_prefix_alpha ... FAILED\ntest cqlite_core::storage::sstable::bti::rows::tests::verify_root_base_prefix_beta ... FAILED\n' > "$fa_dir/collide.log"
+fa_col=$(bash "$fa_tool" "$fa_dir/collide.log" 10 2>/dev/null)
+fa_col_count=$(printf '%s\n' "$fa_col" | sed -n 's/^count=//p' | head -1)
+if [ "${fa_col_count:-0}" = 2 ]; then
+  ok "3765-collide-count: two identities sharing a 57-char prefix count as 2 (dedup is on the FULL identity)"
+else
+  bad "3765-collide-count: expected count=2 for two prefix-colliding identities, got count='${fa_col_count:-<none>}' — the dedup key is the TRUNCATED display form and the count UNDERCOUNTS"
+fi
+fa_col_names=$(printf '%s\n' "$fa_col" | sed -n 's/^name=//p')
+fa_col_uniq=$(printf '%s\n' "$fa_col_names" | grep -c . )
+fa_col_dist=$(printf '%s\n' "$fa_col_names" | sort -u | grep -c . )
+if [ "$fa_col_uniq" = 2 ] && [ "$fa_col_dist" = 2 ]; then
+  ok "3765-collide-names: both identities are named and the two displayed names are DISTINCT (the elision is in the MIDDLE, so the distinguishing tail survives)"
+else
+  bad "3765-collide-names: expected 2 distinct name= lines, got $fa_col_uniq line(s) / $fa_col_dist distinct — a tail elision prints two different failing tests as one string"
+fi
+fa_col_over=$(printf '%s\n' "$fa_col_names" | awk 'length($0) > 60' | grep -c . )
+if [ "${fa_col_over:-1}" = 0 ]; then
+  ok "3765-collide-cap: the per-name display cap (60) still holds — it is a SEPARATE bound from the gate 300-char field cap"
+else
+  bad "3765-collide-cap: $fa_col_over displayed name(s) exceed the 60-char display cap"
+fi
+# And end to end: the rendered SUMMARY field carries the TRUE count, not the deduped one.
+_fa_run collide "clippy:FAIL file-size:PASS fmt:PASS" "clippy=$fa_dir/collide.log" PASS
+fa_got=$(_fa_line clippy)
+case "$fa_got" in
+  *"failed-assert: 2 RECOGNISED (assert): "*)
+    ok "3765-collide-render: the SUMMARY field reports the TRUE count for prefix-colliding identities ($fa_got)" ;;
+  *) bad "3765-collide-render: expected 'failed-assert: 2 RECOGNISED (assert): …', got '$fa_got'" ;;
+esac
+
 # TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
 # coordination lead authorised, taken on the evidence below).
 #
@@ -5430,6 +5468,10 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
+# 430 -> 434 on #3765 (fix round): section 55r adds 4 asserts for the prefix-collision
+# dedup regression, host-INDEPENDENT for the same reason (bash + awk + the extractor and
+# the --lite-aggregate-selftest hook), so the same "raise by exactly the number added"
+# rule applies and the ~9 margin is preserved.
 # 410 -> 430 on #3765: section 55 adds 20 asserts, host-INDEPENDENT for the same reason
 # (bash plus --lite-aggregate-selftest/--emit-summary-selftest and the extractor script; no
 # cargo, python3, jq, network or datasets), so the same "raise by exactly the number added"
@@ -5445,7 +5487,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=430
+ASSERT_FLOOR=434
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

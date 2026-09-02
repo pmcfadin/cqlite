@@ -15,8 +15,11 @@
 #   usage: gate-failed-assert.sh <ansi-normalised-log> [max-names]
 #   stdout (line-oriented, in this order; absent when nothing was recognised):
 #       tier=<assert|guard|toolchain>
-#       count=<N>                 total DISTINCT identities recognised (never capped)
-#       name=<identity>           at most <max-names> lines (default 10), in file order
+#       count=<N>                 total DISTINCT identities recognised (never capped).
+#                                 DISTINCT is judged on the FULL normalised identity, so
+#                                 the display cap below can never change the count.
+#       name=<identity>           at most <max-names> lines (default 10), in file order,
+#                                 each DISPLAY-CAPPED at 60 chars (57 + `...`)
 #   exit 0 — the log was read and scanned (whether or not anything matched)
 #   exit 2 — usage error / the log could not be read: the CALLER must render this as a
 #            named `not extractable`, never as "no failures found". A guard that could
@@ -100,21 +103,50 @@ if [ -z "$log" ] || [ ! -f "$log" ] || [ ! -r "$log" ]; then
 fi
 
 awk -v max="$max" '
-  function clean(s,   t) {
+  # norm() is the IDENTITY: one line, no control characters, whitespace collapsed. It
+  # does NOT truncate. disp() is the DISPLAY form, and it is derived from norm().
+  #
+  # THE TWO ARE SEPARATE BECAUSE DEDUP AND DISPLAY ARE DIFFERENT QUESTIONS. `add()` used
+  # to truncate FIRST and key `seen[]` on the truncated text, so two DISTINCT identities
+  # sharing a 57-character prefix — routine for a Rust test path, e.g.
+  # `…::bti::rows::tests::verify_root_base_prefix_{alpha,beta}` — collapsed to ONE and
+  # `count` UNDERCOUNTED. The count is the field this whole extractor exists to make
+  # trustworthy (the #3765 flake signature is the assert name AND the accounted count),
+  # so a display bound must never be able to change it. Dedup on the FULL identity;
+  # truncate only what is printed.
+  function norm(s,   t) {
     t = s
     gsub(/[\001-\037\177]/, " ", t)          # control chars (a path CAN hold a newline)
-    gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
     gsub(/[[:space:]]+/, " ", t)
-    if (length(t) > 60) t = substr(t, 1, 57) "..."
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+    return t
+  }
+  # 60 is the per-NAME display cap of THIS extractor. It is a SEPARATE bound from the
+  # 300-char `_failassert_clean` cap the gate applies to the whole rendered field; do not
+  # collapse the two.
+  #
+  # THE ELISION IS IN THE MIDDLE, not at the tail, and that is load-bearing. A Rust test
+  # identity is a MODULE PATH: the distinguishing token is the LAST one, and the first 57
+  # characters of two sibling tests are routinely identical. A tail elision therefore
+  # printed two DIFFERENT failing tests as the same visible string — re-creating, inside
+  # the field, the very misidentification #3765 exists to remove. Head 27 + `...` +
+  # tail 30 = 60, so the cap and the `...` marker are unchanged.
+  #
+  # A DISPLAY COLLISION IS STILL POSSIBLE (two identities differing only in an elided
+  # middle) and is harmless BY CONSTRUCTION: `count` is computed from the FULL identity
+  # in add(), so the count stays true whatever the display does. The count is the
+  # authority; a name is a pointer.
+  function disp(t) {
+    if (length(t) > 60) t = substr(t, 1, 27) "..." substr(t, length(t) - 29)
     return t
   }
   function add(tier, id,   c) {
-    id = clean(id)
+    id = norm(id)
     if (id == "") return
     if ((tier SUBSEP id) in seen) return
     seen[tier SUBSEP id] = 1
     c = ++n[tier]
-    if (c <= max) hit[tier SUBSEP c] = id
+    if (c <= max) hit[tier SUBSEP c] = disp(id)
   }
   function head(s) { sub(/:.*$/, "", s); return s }
 
