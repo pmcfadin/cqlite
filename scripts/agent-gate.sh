@@ -6837,6 +6837,9 @@ _census_sidecar() { printf '%s/%s.census' "${LOG_DIR:-}" "$1"; }
 #                  its verdict is finalized. `scoped-tests` is the case: a python-only
 #                  diff dispatches no cargo at all, so a static `both` measured ZERO and
 #                  reddened a CORRECT --lite/--delta (#3625 census audit BLOCKER 1).
+#   emitted        the component's own guard prints `AGENT-GATE-CENSUS: <n> <unit>` (or
+#                  `AGENT-GATE-CENSUS: NO-SUBJECT <why>`) and the census reads it — for
+#                  guards that already walk their subject set and know the number.
 #   indirect:<drv> the subject count comes from a DRIVER's own report in the component
 #                  log (pytest's `N passed`, jest's `Tests: … N passed`). ONE RULE
 #                  DIFFERS HERE and it is deliberate: an ABSENT tally is NOT-MEASURED,
@@ -6927,7 +6930,19 @@ _census_kind() {
     # honest while the reason is actionable.
     oom-audit|parity-report|operator-metrics-doc) printf 'gap:xtask/report driver prints no machine-readable subject count (#3162)' ;;
     smoke)          printf 'gap:smoke-test-all-tables.sh prints no machine-readable table count (#3162)' ;;
-    file-size|roborev-lints|pub-surface|binding-unwind-profile|delivery-telemetry|tooling-tests)
+    # ---- emitted: the guard ALREADY walks its subject set and knows the number, so it
+    # prints the contract line and the census reads it. Only the two cheapest instances are
+    # shipped; the remaining six guards stay declared gaps under #3162, deliberately (each
+    # would need its own count derived, and a fabricated number is worse than an honest gap).
+    #   file-size    — the changed `.rs` files it measured against the thresholds. It emits
+    #                  NO-SUBJECT when the diff changed none, which is CORRECT and common
+    #                  (any docs- or scripts-only change) and must not read as vacuity.
+    #   pub-surface  — the unconditional crate-root `pub mod` declarations it verified. Zero
+    #                  is not a legitimate outcome there: the guard already REFUSES on a
+    #                  crate root with no unconditional declarations, so ZERO -> VACUOUS is
+    #                  the right coupling and cannot fire on correct input.
+    file-size|pub-surface) printf 'emitted' ;;
+    roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests)
                     printf 'gap:shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)' ;;
     *) return 1 ;;
   esac
@@ -7055,6 +7070,42 @@ _census_compile_tally() {
   ' < "$1"
 }
 
+# _census_emitted_tally <stripped-log> -> "COUNT <n> <unit>" | "ZERO <unit>" | "NO-SUBJECT <why>" | "NONE"
+#
+# THE `emitted` CONTRACT: a component's own guard prints ONE line
+#   AGENT-GATE-CENSUS: <n> <unit>            -- n subjects verified
+#   AGENT-GATE-CENSUS: NO-SUBJECT <why>      -- this run legitimately had nothing to verify
+# and the census reads it. Used where the component ALREADY walks its subject set and knows
+# the number, so the count is derived from the work rather than re-derived here.
+#
+# THE `NO-SUBJECT` FORM IS NOT DECORATION, it is what keeps this kind off correct input.
+# `file-size` measures the CHANGED `.rs` files, and a docs- or scripts-only diff legitimately
+# changes none — the commonest shape on this branch. Without a way to say "the subject set was
+# empty and that is correct", an honest zero would become `ZERO` -> `VACUOUS` and red every
+# such run. A component that has nothing to measure has not failed to measure it.
+#
+# LAST match wins (a guard that reprints its line is scored on the final one), and the line is
+# read from the ANSI-normalised copy like every other parser even though it is OUR text and
+# carries no escapes — the #3400 rule is that the property is LOCAL to the parse, not inherited
+# from who happens to print it.
+_census_emitted_tally() {
+  awk '
+    /^[[:space:]]*AGENT-GATE-CENSUS:[[:space:]]/ {
+      sub(/^[[:space:]]*AGENT-GATE-CENSUS:[[:space:]]+/, "")
+      payload = $0; seen = 1
+    }
+    END {
+      if (seen != 1) { print "NONE"; exit }
+      if (payload ~ /^NO-SUBJECT[[:space:]]/) { print payload; exit }
+      n = payload; sub(/[[:space:]].*$/, "", n)
+      if (n !~ /^[0-9]+$/) { print "NONE"; exit }
+      unit = payload; sub(/^[0-9]+[[:space:]]+/, "", unit)
+      if (unit == "") { print "NONE"; exit }
+      if (n + 0 == 0) { printf "ZERO %s\n", unit } else { printf "COUNT %s %s\n", n, unit }
+    }
+  ' < "$1"
+}
+
 # _census_driver_tally <driver> <stripped-log> -> "COUNT <n>" | "ZERO" | "NONE"
 #
 # The driver's OWN summary, read from the component log. Both drivers write theirs at the
@@ -7141,6 +7192,17 @@ _census_measure_kind() {
     _census_write "$comp" "$line"; printf '%s' "$line"; return 0
   fi
   case "$kind" in
+    emitted)
+      local et
+      et=$(_census_emitted_tally "$src" 2>/dev/null) || et=""
+      rm -f "$src" 2>/dev/null || true
+      case "$et" in
+        COUNT\ *)      line="$et" ;;
+        ZERO\ *)       line="$et — the component's own AGENT-GATE-CENSUS line reports none" ;;
+        NO-SUBJECT\ *) line="NOT-APPLICABLE ${et#NO-SUBJECT }" ;;
+        *)             line="NOT-MEASURED $comp printed no 'AGENT-GATE-CENSUS: <n> <unit>' contract line, so its own count could not be read" ;;
+      esac
+      _census_write "$comp" "$line"; printf '%s' "$line"; return 0 ;;
     indirect:*)
       local drv="${kind#indirect:}" dt
       dt=$(_census_driver_tally "$drv" "$src" 2>/dev/null) || dt=""
@@ -7499,7 +7561,7 @@ census_summary_line() { # <name> <status> [<name> <status>]...
       *)              unk=$((unk + 1)) ;;
     esac
   done
-  printf 'census: %d/%d components AFFIRMED a count; %d DECLARED-GAP (RECOGNISED); %d NOT-MEASURED (RECOGNISED); %d measured-ZERO (RECOGNISED); %d not-applicable (component did not PASS); %d no-subject (PASSed; nothing executable was dispatched); %d UNDECLARED; %d unrecognised; %d row(s) carry a VACUOUS status. NON-EXHAUSTIVE: the gap set is CURATED, so an unaffirmed component is UNMEASURED, never verified (#3625).' \
+  printf 'census: %d/%d components AFFIRMED a count; %d DECLARED-GAP (RECOGNISED); %d NOT-MEASURED (RECOGNISED); %d measured-ZERO (RECOGNISED); %d not-applicable (component did not PASS); %d no-subject (PASSed; the run had nothing to measure); %d UNDECLARED; %d unrecognised; %d row(s) carry a VACUOUS status. NON-EXHAUSTIVE: the gap set is CURATED, so an unaffirmed component is UNMEASURED, never verified (#3625).' \
     "$aff" "$n" "$gapn" "$nm" "$zero" "$na_np" "$na_pass" "$und" "$unk" "$vac"
 }
 
@@ -17535,6 +17597,23 @@ run_file_size() {
   _fs_emit "$log" ">>> [$name] thresholds: src=$SRC_LIMIT test=$TEST_LIMIT (total lines, inline tests included)"
   if [ -n "$base" ]; then
     _fs_emit "$log" ">>> [$name] base ref: $base (via $base_src)"
+  fi
+  # #3162 (the `emitted` census): this component ALREADY walked the changed `.rs` set and
+  # measured every file in it, so the affirmative count is in hand and is emitted through the
+  # SAME sink as everything else here — both stdout and the component log, so the census can
+  # read it. NO-SUBJECT rather than 0 when the diff changed no `.rs` file at all: the ratchet
+  # then correctly had nothing to measure, and reporting that as a measured zero would make
+  # every docs- or scripts-only change read VACUOUS. `n_scanned` counts the files MEASURED
+  # (each one `wc -l`-ed above), not the files selected — the #3625/job-383 distinction.
+  local n_scanned=0 f_scanned
+  while IFS= read -r f_scanned; do
+    [ -n "$f_scanned" ] && [ -f "$f_scanned" ] || continue
+    n_scanned=$((n_scanned + 1))
+  done <<<"$files"
+  if [ "$n_scanned" -eq 0 ]; then
+    _fs_emit "$log" "AGENT-GATE-CENSUS: NO-SUBJECT the diff changed no .rs file, so the ratchet had nothing to measure"
+  else
+    _fs_emit "$log" "AGENT-GATE-CENSUS: $n_scanned changed .rs file(s) measured against the thresholds"
   fi
   if [ "${#over[@]}" -eq 0 ]; then
     _fs_emit "$log" ">>> [$name] no changed .rs files over threshold"

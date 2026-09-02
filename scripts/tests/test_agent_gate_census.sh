@@ -60,7 +60,7 @@ trap _on_exit EXIT
 # ---------------------------------------------------------------------------
 for fn in _ansi_stripped_log _census_sidecar _census_kind _census_write _census_read \
           _census_declare _census_libtest_tally _census_compile_tally \
-          _census_driver_tally _census_measure_kind _census_measure \
+          _census_driver_tally _census_emitted_tally _census_measure_kind _census_measure \
           _census_scoped_record _python_tier_ran \
           _census_status_for _census_finalize _census_classify _census_record _census_annotate \
           _status_is_nonfailing run_delta_node_tests \
@@ -118,7 +118,7 @@ fi
 
 undeclared=()
 badkind=()
-n_libtest=0; n_compile=0; n_both=0; n_self=0; n_indirect=0; n_runtime=0; n_gap=0
+n_libtest=0; n_compile=0; n_both=0; n_self=0; n_indirect=0; n_runtime=0; n_emitted=0; n_gap=0
 for c in ${comps_arr[@]+"${comps_arr[@]}"} $dyn_names; do
   if k=$(_census_kind "$c"); then
     case "$k" in
@@ -128,6 +128,7 @@ for c in ${comps_arr[@]+"${comps_arr[@]}"} $dyn_names; do
       self:?*)     n_self=$((n_self + 1)) ;;
       indirect:?*) n_indirect=$((n_indirect + 1)) ;;
       runtime:?*)  n_runtime=$((n_runtime + 1)) ;;
+      emitted)     n_emitted=$((n_emitted + 1)) ;;
       gap:?*)      n_gap=$((n_gap + 1)) ;;
       *)        badkind+=("$c=$k") ;;
     esac
@@ -141,9 +142,9 @@ else
   bad "A1: undeclared in _census_kind — a component cannot join the gate with a blank census (#3625): ${undeclared[*]}"
 fi
 if [ "${#badkind[@]}" -eq 0 ]; then
-  ok "A2: every declared kind is in the CLOSED set (libtest=$n_libtest compile=$n_compile both=$n_both self=$n_self indirect=$n_indirect runtime=$n_runtime gap=$n_gap)"
+  ok "A2: every declared kind is in the CLOSED set (libtest=$n_libtest compile=$n_compile both=$n_both self=$n_self indirect=$n_indirect runtime=$n_runtime emitted=$n_emitted gap=$n_gap)"
 else
-  bad "A2: declared with a kind outside the closed set {libtest,compile,both,self:<unit>,indirect:<driver>,runtime:<why>,gap:<reason>}: ${badkind[*]}"
+  bad "A2: declared with a kind outside the closed set {libtest,compile,both,self:<unit>,indirect:<driver>,runtime:<why>,emitted,gap:<reason>}: ${badkind[*]}"
 fi
 # The subject the ISSUE names must actually be measured, not gapped away. These are the
 # components the two-run comparison caught at 0s, plus the lane doctrine already records
@@ -1432,7 +1433,7 @@ s_cells=0
 s_measure_cells=0
 # One representative component per declared kind, DERIVED so a new kind cannot skip the
 # matrix: every kind _census_kind can return must have a subject here.
-s_subjects='fmt:gap tombstones-scan:libtest feature-iso-parquet:compile integration-tests:both python-bindings:indirect shell-selftests:self scoped-tests:runtime a-brand-new-component:undeclared'
+s_subjects='fmt:gap tombstones-scan:libtest feature-iso-parquet:compile integration-tests:both python-bindings:indirect shell-selftests:self scoped-tests:runtime pub-surface:emitted a-brand-new-component:undeclared'
 for s_pair in $s_subjects; do
   s_comp=${s_pair%%:*}; s_kindname=${s_pair##*:}
   for s_st in PASS FAIL SKIP VACUOUS; do
@@ -1455,7 +1456,7 @@ for s_pair in $s_subjects; do
             s_bad+=("[$s_comp/$s_kindname $s_st $s_side] the measure path wants the LOG on a non-PASS row — the status check is not above the kind dispatch")
           fi
           case "$s_kindname" in
-            libtest|compile|both|indirect) ;;
+            libtest|compile|both|indirect|emitted) ;;
             *) s_bad+=("[$s_comp/$s_kindname $s_st $s_side] a NON-log-measured kind asked to read the log") ;;
           esac ;;
         *)
@@ -1466,8 +1467,8 @@ for s_pair in $s_subjects; do
   done
 done
 rm -f "$(_census_sidecar fmt)" "$(_census_sidecar tombstones-scan)" "$(_census_sidecar python-bindings)"
-if [ "$s_cells" -ne 64 ]; then
-  bad "S1: only $s_cells of the 64 (kind x status x sidecar) cells were exercised — the matrix is not iterating, so a green here would certify nothing"
+if [ "$s_cells" -ne 72 ]; then
+  bad "S1: only $s_cells of the 72 (kind x status x sidecar) cells were exercised — the matrix is not iterating, so a green here would certify nothing"
 elif [ "${#s_bad[@]}" -eq 0 ]; then
   ok "S1 (job 379, the convergence): across all $s_cells (kind x status x sidecar) cells the verdict-time and render-time paths produce IDENTICAL state, except the $s_measure_cells cells that are the declared asymmetry (PASS x a log-measured kind, where only the measurer may read the log)"
 else
@@ -1660,6 +1661,77 @@ if grep -q 'SELECTED == EXECUTED' <<<"$u_decl" && grep -q 'DECLARED RESIDUAL' <<
 else
   bad "U2: the shell-selftests ruling is not recorded at _census_kind, so the question has no answer in the code"
 fi
+# ---------------------------------------------------------------------------
+# (V) THE `emitted` KIND — the AC1 residual's two cheapest instances (#3162).
+#
+# The C audit measured 400 historical SUMMARY blocks: `fmt` (49) and `file-size` (45) are the
+# two most frequent `PASS (0s)` rows on this fleet, and both were declared gaps. `fmt`'s gap
+# is defensible on the oracle — `cargo fmt --check` genuinely emits no per-file tally — but
+# `file-size` ALREADY walks a file set and measures every member, so its count was one
+# contract line away. `pub-surface` likewise already knows how many declarations it verified.
+#
+# THE TWO LANES ARE NOT THE SAME CASE, and getting that wrong would have reddened correct
+# input on the commonest diff shape there is:
+#   * file-size measures the CHANGED `.rs` files, and a docs- or scripts-only diff changes
+#     NONE. That is a correct run with an empty subject set, not a vacuous one — so the
+#     contract has a `NO-SUBJECT` form and this lane uses it. Measured, not assumed: every
+#     `--lite` round of this very branch changed zero `.rs` files.
+#   * pub-surface's zero is NOT legitimate — the guard already REFUSES a crate root with no
+#     unconditional declarations — so its zero is real vacuity and couples to VACUOUS.
+# ---------------------------------------------------------------------------
+LOG_DIR="$tmp/emitlogs"; mkdir -p "$LOG_DIR"
+v_bad=()
+v_probe() { # <component> <log-body> <expected record prefix> <expected status>
+  rm -f "$(_census_sidecar "$1")"
+  printf '%b' "$2" > "$LOG_DIR/$1.log"
+  local g s2
+  g=$(_census_measure "$1" PASS); s2=$(_census_status_for PASS "$g")
+  case "$g|$s2" in
+    "$3"*"|$4") ;;
+    *) v_bad+=("[$1] got '$g' / '$s2' (want '$3…' / '$4')") ;;
+  esac
+}
+v_probe file-size   'AGENT-GATE-CENSUS: 3 changed .rs file(s) measured against the thresholds\n' 'COUNT 3 changed .rs file(s)' PASS
+v_probe file-size   'AGENT-GATE-CENSUS: NO-SUBJECT the diff changed no .rs file, so the ratchet had nothing to measure\n' 'NOT-APPLICABLE the diff changed no .rs file' PASS
+v_probe pub-surface 'AGENT-GATE-CENSUS: 14 unconditional crate-root pub mod declaration(s) verified against their module prologues\n' 'COUNT 14 unconditional crate-root pub mod' PASS
+v_probe pub-surface 'AGENT-GATE-CENSUS: 0 unconditional crate-root pub mod declaration(s) verified against their module prologues\n' 'ZERO unconditional crate-root pub mod' VACUOUS
+v_probe pub-surface 'the guard printed prose but no contract line\n' 'NOT-MEASURED pub-surface printed no' PASS
+if [ "${#v_bad[@]}" -eq 0 ]; then
+  ok "V1: the emitted kind reads a guard's own AGENT-GATE-CENSUS line — a count affirms, a PRESENT zero is VACUOUS, an absent line is NOT-MEASURED, and NO-SUBJECT preserves PASS (which is what stops file-size reddening every docs-only diff)"
+else
+  bad "V1: ${v_bad[*]}"
+fi
+# BOTH GUARDS REALLY PRINT IT. Structural on the shipped source, because a contract the
+# component does not honour would render NOT-MEASURED on every run and look like a gap.
+v_struct=()
+grep -q "AGENT-GATE-CENSUS: " "$REPO_ROOT/scripts/ci/check-pub-surface.sh" \
+  || v_struct+=("check-pub-surface.sh-prints-no-contract-line")
+grep -qE '^[^#]*AGENT-GATE-CENSUS: \$n_scanned changed \.rs file' "$GATE" \
+  || v_struct+=("run_file_size-prints-no-contract-line")
+grep -qE '^[^#]*AGENT-GATE-CENSUS: NO-SUBJECT' "$GATE" \
+  || v_struct+=("run_file_size-has-no-NO-SUBJECT-arm")
+# …and the count must come from the files MEASURED, not from a re-derivation here.
+grep -q 'n_scanned=$((n_scanned + 1))' <<<"$(sed -n '/^run_file_size() {/,/^}$/p' "$GATE")" \
+  || v_struct+=("file-size-count-not-derived-from-the-scanned-set")
+if [ "${#v_struct[@]}" -eq 0 ]; then
+  ok "V2: both shipped guards print the contract line, and file-size's count is derived from the file set it walked (with a NO-SUBJECT arm for the empty one)"
+else
+  bad "V2: ${v_struct[*]}"
+fi
+# THE LIVE GUARD, end to end: run the real pub-surface checker and census its real output.
+v_live="$tmp/pubsurface-live.log"
+if bash "$REPO_ROOT/scripts/ci/check-pub-surface.sh" > "$v_live" 2>&1; then
+  rm -f "$(_census_sidecar pub-surface)"
+  cp "$v_live" "$LOG_DIR/pub-surface.log"
+  v_got=$(_census_measure pub-surface PASS)
+  case "$v_got" in
+    'COUNT '[0-9]*' unconditional crate-root pub mod declaration(s) verified'*)
+      ok "V3 (live): the REAL check-pub-surface.sh run censuses as '${v_got%% (*}' — the contract is exercised against the shipped guard's actual output, not a fixture of it" ;;
+    *) bad "V3 (live): the real guard's output censused as '$v_got'" ;;
+  esac
+else
+  bad "V3 (live): check-pub-surface.sh did not pass on this tree, so the live census could not be exercised"
+fi
 echo
 echo "component census guard: $PASS passed, $FAIL failed"
 # A COUNT FLOOR beside the abort trap (the idiom of test_agent_gate_summary.sh and
@@ -1667,7 +1739,7 @@ echo "component census guard: $PASS passed, $FAIL failed"
 # extraction that broke, a subshell dying quietly — shrinks the subject set WITHOUT
 # aborting, and "failed: 0" over a shrunken set is the vacuous pass this whole file is
 # about. Set just below the full-host figure so it reds on a structural loss.
-CENSUS_CASE_FLOOR=90
+CENSUS_CASE_FLOOR=93
 CENSUS_REACHED_END=1
 if [ $((PASS + FAIL)) -lt "$CENSUS_CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): sections are being skipped or dying silently, and a "0 failed" over a shrunken subject set certifies nothing.\n' \
