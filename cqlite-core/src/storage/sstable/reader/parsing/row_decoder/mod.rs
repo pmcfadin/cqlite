@@ -810,6 +810,7 @@ mod raw_value;
 mod row_data;
 mod row_framing;
 mod udt;
+mod vuint_length;
 
 use partition_driver::{row_write_timestamp, MarkerOutcome, SlidingPartitionPolicy};
 // Per-column decode dispatch tag (Epic J / issue #1635). Imported into this
@@ -823,6 +824,9 @@ use row_framing::PartitionHeaderReadiness;
 // #1641 (K2): non-allocating partition-boundary peek result, used to reimplement
 // `peek_is_partition_header` without a per-row header try-parse.
 use row_framing::BoundaryPeek;
+// #3848: validate an untrusted VUInt length in `u64` space BEFORE narrowing it
+// to `usize`. Named here so the `use super::*` sibling modules see them.
+use vuint_length::{checked_vuint_length, vuint_length_within};
 
 #[cfg(test)]
 mod test_support;

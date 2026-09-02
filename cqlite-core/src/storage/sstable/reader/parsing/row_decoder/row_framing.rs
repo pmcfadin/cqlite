@@ -355,16 +355,17 @@ impl V5CompressedLegacyParser {
         pos += body_size_vint_len;
 
         // Skip marker_body_size bytes (prev_size + deletion time(s))
-        let body_end = pos.saturating_add(marker_body_size as usize);
-        if body_end > data.len() {
-            return Err(Error::corruption(format!(
-                "V5CompressedLegacy: marker_body_size={} at pos={} exceeds data length {}",
-                marker_body_size,
-                pos,
-                data.len()
-            )));
-        }
-        pos = body_end;
+        // #3848: framing size, not a cell value — bound the raw `u64` first.
+        let body_len = vuint_length_within(marker_body_size, data.len().saturating_sub(pos))
+            .ok_or_else(|| {
+                Error::corruption(format!(
+                    "V5CompressedLegacy: marker_body_size={} at pos={} exceeds data length {}",
+                    marker_body_size,
+                    pos,
+                    data.len()
+                ))
+            })?;
+        pos += body_len;
 
         tracing::debug!(
             "V5CompressedLegacy: Skipped range tombstone marker, advanced from {} to {}",
@@ -1169,15 +1170,14 @@ impl V5CompressedLegacyParser {
         })?;
         pos += data[pos..].len() - remaining.len();
 
-        let body_end = pos.saturating_add(marker_body_size as usize);
-        if body_end > data.len() {
-            return Err(Error::corruption(format!(
-                "V5CompressedLegacy: marker_body_size={} at pos={} exceeds data length {} (compaction)",
-                marker_body_size,
-                pos,
-                data.len()
-            )));
-        }
+        let body_len = vuint_length_within(marker_body_size, data.len().saturating_sub(pos))
+            .ok_or_else(|| {
+                Error::corruption(format!(
+                    "V5CompressedLegacy: marker_body_size={} at pos={} exceeds data length {} (compaction)",
+                    marker_body_size, pos, data.len()
+                ))
+            })?;
+        let body_end = pos + body_len;
 
         // prev_unfiltered_size VUInt — skip.
         let (remaining2, _prev_size) = parse_vuint(&data[pos..]).map_err(|e| {
@@ -1386,23 +1386,23 @@ impl V5CompressedLegacyParser {
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 let len_offset = offset + bytes_consumed;
 
-                if len as usize > data.len().saturating_sub(len_offset) {
-                    return Err(Error::corruption(format!(
-                        "V5CompressedLegacy: Clustering '{}': need {} bytes for text, only {} available",
-                        col.name,
-                        len,
-                        data.len() - len_offset
-                    )));
-                }
+                let len = checked_vuint_length(
+                    len,
+                    data.len() - len_offset,
+                    "V5CompressedLegacy: Clustering",
+                    &col.name,
+                    "text",
+                )?;
 
-                let text = String::from_utf8(data[len_offset..len_offset + len as usize].to_vec())
-                    .map_err(|e| {
+                let text = String::from_utf8(data[len_offset..len_offset + len].to_vec()).map_err(
+                    |e| {
                         Error::corruption(format!(
                             "V5CompressedLegacy: Clustering '{}': invalid UTF-8: {:?}",
                             col.name, e
                         ))
-                    })?;
-                Ok((Value::Text(text.into()), len_offset + len as usize))
+                    },
+                )?;
+                Ok((Value::Text(text.into()), len_offset + len))
             }
 
             "int" => {
@@ -1483,18 +1483,17 @@ impl V5CompressedLegacyParser {
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 let len_offset = offset + bytes_consumed;
 
-                if len as usize > data.len().saturating_sub(len_offset) {
-                    return Err(Error::corruption(format!(
-                        "V5CompressedLegacy: Clustering '{}': need {} bytes, only {} available",
-                        col.name,
-                        len,
-                        data.len() - len_offset
-                    )));
-                }
+                let len = checked_vuint_length(
+                    len,
+                    data.len() - len_offset,
+                    "V5CompressedLegacy: Clustering",
+                    &col.name,
+                    "value",
+                )?;
 
                 Ok((
-                    Value::blob(data[len_offset..len_offset + len as usize].to_vec()),
-                    len_offset + len as usize,
+                    Value::blob(data[len_offset..len_offset + len].to_vec()),
+                    len_offset + len,
                 ))
             }
         }
