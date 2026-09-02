@@ -492,6 +492,13 @@ FSCK_NONMASK_FLOOR=124
 # `multi-pack-index` exits 32, and the same repo with one loose object overwritten
 # exits 35 (32|2|1).
 #
+# RULE 0, AND IT COMES BEFORE ALL OF THEM: A STATUS IS ONLY READ AS A BITMASK IF WE
+# ESTABLISHED, AFFIRMATIVELY, THAT fsck WAS ACTUALLY LAUNCHED AND ITS OUTPUT CAPTURED
+# (#3749 review round 3). The shell's status space overlaps fsck's, and a failed
+# capture redirection exits 1 - fsck's ERROR_OBJECT bit. See the launch block inside
+# fsck_pass: marker absent => WALK_CLASS=launchfail, routed to UNMEASURED by the
+# callers and never bit-tested.
+#
 # THE THREE RULES BELOW, IN THIS ORDER, AND THE ORDER IS THE POINT:
 #   1. A status at or above 124 IS NOT A BITMASK. 124/125/126/127 are the
 #      timeout/shell conventions (this fsck runs under `timeout`), 128+N is git's
@@ -508,21 +515,75 @@ FSCK_NONMASK_FLOOR=124
 fsck_pass() {
   local tag="$1" rc=0 t0 t1 el
   local out="$TMPD/$tag.out" err="$TMPD/$tag.err" all="$TMPD/$tag.all"
+  local started="$TMPD/$tag.started"
+  rm -f "$started" 2>/dev/null || true
   t0=$(date +%s 2>/dev/null || echo 0)
+  # THE LAUNCH IS WRAPPED SO THAT "fsck RAN AND RETURNED A STATUS" CAN BE TOLD APART
+  # FROM "WE NEVER GOT AS FAR AS RUNNING IT" (#3749 review round 3, item 2).
+  #
+  # THE DEFECT THIS EXISTS FOR. The two capture redirections are part of the command,
+  # so if opening `$out` or `$err` FAILS - a full scratch filesystem, a `$TMPDIR`
+  # reaped by a tmp cleaner mid-run, an unwritable scratch dir - bash never execs
+  # anything and the status is **1**. 1 is also fsck's ERROR_OBJECT bit. The
+  # classifier below then reads that 1 as object damage, BOTH passes fail the same
+  # way, both "reproduce", and the sweep emits **CORRUPT** on a store it never opened.
+  # That is round 1's BLOCKER B - a false CORRUPT on a healthy box - coming back
+  # through a different door: this time the borrowed bit comes from the shell, not
+  # from a concurrent writer.
+  #
+  # IT CANNOT BE INFERRED FROM THE STATUS, WHICH IS THE WHOLE POINT: fsck's status
+  # space and the shell's overlap, so no value of `rc` distinguishes them. The
+  # evidence is AFFIRMATIVE instead, and it is the `.started` marker:
+  #   * the marker is written INSIDE the redirected group, as its FIRST statement, so
+  #     it exists only if bash established BOTH capture redirections - a redirection
+  #     error on a compound command means the body does not execute at all (verified
+  #     on bash 5.2: the group's status is 1 and nothing inside it runs);
+  #   * `$out` and `$err` are required to EXIST afterwards for the same reason.
+  # So marker present => the capture was established and control reached the fsck
+  # invocation; marker absent => we could not launch or could not capture, and the
+  # status is NOT a bitmask. The latter becomes WALK_CLASS=launchfail, which is routed
+  # to UNMEASURED by its callers and is never bit-tested.
+  #
+  # WHAT THIS DOES NOT PROVE, STATED RATHER THAN IMPLIED: the marker proves the
+  # redirections took and the group ran, not that `env`/`nice`/`timeout`/`git` were
+  # successfully exec'd. That residual is already covered from the other side - an
+  # exec failure exits 126/127, which is at or above FSCK_NONMASK_FLOOR and therefore
+  # `unclassified` (UNMEASURED), never damage.
+  #
+  # `2>/dev/null` PRECEDES the capture redirections deliberately (the NIT-4 lesson,
+  # one file over): bash applies redirections LEFT TO RIGHT and reports a failure on
+  # the stderr in effect at that moment, so without it a failed `>"$out"` would print
+  # bash's own UNANCHORED error and break output property (a) for every consumer.
   if [ "$TIMEOUT_KILL_AFTER" -eq 1 ]; then
-    git_isolated nice -n 19 "$TIMEOUT_BIN" --kill-after="$BOUND_KILL_GRACE" "$BOUND_SECS" \
-      git --git-dir="$GIT_COMMON_DIR" fsck --no-progress --no-dangling \
-      >"$out" 2>"$err" || rc=$?
+    (
+      true >"$started"
+      git_isolated nice -n 19 "$TIMEOUT_BIN" --kill-after="$BOUND_KILL_GRACE" "$BOUND_SECS" \
+        git --git-dir="$GIT_COMMON_DIR" fsck --no-progress --no-dangling
+    ) 2>/dev/null >"$out" 2>"$err" || rc=$?
   else
-    git_isolated nice -n 19 "$TIMEOUT_BIN" "$BOUND_SECS" \
-      git --git-dir="$GIT_COMMON_DIR" fsck --no-progress --no-dangling \
-      >"$out" 2>"$err" || rc=$?
+    (
+      true >"$started"
+      git_isolated nice -n 19 "$TIMEOUT_BIN" "$BOUND_SECS" \
+        git --git-dir="$GIT_COMMON_DIR" fsck --no-progress --no-dangling
+    ) 2>/dev/null >"$out" 2>"$err" || rc=$?
   fi
   t1=$(date +%s 2>/dev/null || echo 0)
   el=$((t1 - t0))
   [ "$el" -ge 0 ] || el=0
   WALK_RC="$rc"
   WALK_ELAPSED="$el"
+
+  # ASKED BEFORE ANYTHING ELSE READS `rc`, and before any file under $TMPD is written:
+  # on this path the scratch dir may be exactly what is broken, so an unguarded
+  # `: >"$TMPD/..."` here would itself emit an unanchored bash error. The callers go
+  # straight to `unmeasured` on this class without calling emit_findings, so the
+  # findings/ids files are deliberately not created.
+  if [ ! -f "$started" ] || [ ! -f "$out" ] || [ ! -f "$err" ]; then
+    WALK_NFIND=0
+    WALK_CLASS=launchfail
+    return 0
+  fi
+
   cat "$out" "$err" >"$all" 2>/dev/null || : >"$all"
 
   # The recognised diagnostic shapes, kept for the OPERATOR (the class above is
@@ -611,6 +672,20 @@ if [ "$C1" = killed ]; then
     "clean result. Re-run with a larger --timeout on an idle box."
 fi
 
+# LAUNCH/CAPTURE FAILURE: fsck NEVER RAN, so there is nothing to classify and NO SECOND
+# PASS (a walk that did not happen has nothing to reproduce, and the second attempt
+# would fail on the same broken scratch dir). This is the one branch whose status is
+# deliberately NOT read as a bitmask - it is the shell's, not fsck's.
+if [ "$C1" = launchfail ]; then
+  unmeasured "the fsck could not be LAUNCHED, or its output could not be CAPTURED (pass 1," \
+    "shell status $RC1): the scratch capture files under $(sane "$TMPD") were not" \
+    "established, so NO fsck status was produced. That status is the SHELL's, and a" \
+    "failed redirection exits 1 - which is also fsck's ERROR_OBJECT bit, so reading it" \
+    "as a bitmask would report DAMAGE about a store this run never opened (#3749)." \
+    "Usual cause: the scratch filesystem is full, unwritable, or was reaped mid-run." \
+    "Free space under $(sane "${TMPDIR:-/tmp}") and re-run."
+fi
+
 if [ "$C1" = clean ]; then
   FIRST_WALK_CLEAN=1
 else
@@ -656,6 +731,16 @@ if [ "$FIRST_WALK_CLEAN" -eq 0 ]; then
     unmeasured "pass 1 was not clean (class=$C1, rc=$RC1) and the confirming pass exceeded" \
       "its ${BOUND_SECS}s bound (rc=$RC2) after ${EL2}s, so the first observation could" \
       "not be confirmed or dismissed. Re-run with a larger --timeout on an idle box."
+  fi
+
+  # Same rule on the confirming pass: an unlaunchable second walk confirms and dismisses
+  # nothing, and its shell status must not join the bitmask reasoning below.
+  if [ "$C2" = launchfail ]; then
+    unmeasured "pass 1 was not clean (class=$C1, rc=$RC1) and the confirming pass could not" \
+      "be LAUNCHED or CAPTURED (shell status $RC2, not an fsck status), so the first" \
+      "observation was neither confirmed nor dismissed. Usual cause: the scratch" \
+      "filesystem under $(sane "${TMPDIR:-/tmp}") is full, unwritable, or was reaped" \
+      "mid-run. Clear it and re-run (#3749)."
   fi
 
   # BOTH PASSES SAW OBJECT/PACK DAMAGE: the fatal branch, and the only path to it.

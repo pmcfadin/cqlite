@@ -146,7 +146,15 @@ whole_suite_checks() {
 # THE CASE FLOOR is a MINIMUM, not an equality: adding cases must not require editing it,
 # while a span-replacing edit that DELETES cases reds the suite instead of reporting a
 # green tally over a shrunken suite (#3544's own subject, inside its own test file).
-CASE_FLOOR=34
+#
+# IT IS SET TO THE EXACT CURRENT COUNT, and the slack it used to carry was itself a
+# defect (#3749 review round 3, item 4): a floor of 34 against 74 actual meant HALF the
+# suite could vanish — or be cut short by a signal — and still report green. Every
+# host-dependent branch in this file emits a `bad` rather than silently running fewer
+# assertions (the two `command -v` guards and the fixture-construction asserts), so a
+# green run is 81 on any host that can run it at all; a green run BELOW this number
+# means cases were removed or the run was truncated. RAISE IT when you add cases.
+CASE_FLOOR=84
 
 finish() {
   local rc=$?
@@ -176,8 +184,19 @@ finish() {
 }
 # EXIT *and* the signals: bash runs no EXIT trap for a signal left at its default
 # disposition, so an interrupted run would strand the scratch tree.
+# THE SIGNAL TRAPS SET AN EXPLICIT NONZERO STATUS AND LET **EXIT** DO THE CLEANUP
+# (#3749 review round 3, item 4). They used to call `finish` directly, and `finish`
+# derives its exit status from `$?` — which at trap time is the status of whatever
+# command was interrupted, routinely **0**. So a signal arriving mid-suite ran the
+# cleanup, reported the cases that had passed SO FAR, and **exited 0** with every later
+# case never run: a green tally over a shrunken suite, which is this repository's own
+# recorded incident class (#3544) inside a file whose header claims to guard against it.
+# `exit <128+signo>` makes the EXIT trap run with a nonzero `$?`, so `finish` reports
+# FAIL, and the shell's conventional status for the signal is preserved.
 trap finish EXIT
-trap 'finish' INT TERM HUP
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- fixtures ---------------------------------------------------------------
 g() { local r="$1"; shift; git -C "$r" "$@"; }
@@ -1059,4 +1078,193 @@ if [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: store '; th
   ok "print-store: a host with no timeout binary can still NAME the store (the bound is the sweep's requirement, not the resolver's)"
 else
   bad "print-store(no-timeout): rc=$RC out=[$(printf '%s\n' "$OUT" | tr '\n' '|')]"
+fi
+
+# --- Case 25: A FAILED LAUNCH/CAPTURE IS UNMEASURED, NEVER CORRUPT ----------
+# THE DEFECT (#3749 review round 3, item 2). The two capture redirections are part of
+# the fsck command, so if opening the scratch output file FAILS bash never execs
+# anything and the status is 1 — which is also fsck's ERROR_OBJECT bit. Both passes
+# then fail identically, both "reproduce", and the sweep emitted **CORRUPT** about a
+# store it never opened. That is a false CORRUPT on a healthy box: the same class as
+# round 1's BLOCKER B, arriving through the shell instead of through a concurrent
+# writer, and it pages high + stops the supervisor + fails --strict bootstrap.
+#
+# THE LEVER IS A `mktemp` SHIM, and it is WHITE-BOX ON PURPOSE. The failure has to be
+# staged at the exact place the subject writes, so the shim plants a DIRECTORY at the
+# capture paths the subject uses for its two passes: `> <dir>` fails with EISDIR for
+# EVERY uid, so this case does not depend on permission bits (a chmod-based plant is
+# inert as root, and this suite must not silently skip there). The coupling to the
+# `p1.out`/`p2.out` names is deliberate and is asserted: if fsck_pass renames its
+# capture files the CONSTRUCTION assert below reds, which is attributable, rather than
+# the case passing against a plant that no longer plants anything.
+if [ -z "${REAL_GIT:-}" ]; then
+  bad "launch-capture: no real git on PATH — the shim arms cannot be built"
+else
+  REAL_MKTEMP=$(command -v mktemp 2>/dev/null) || REAL_MKTEMP=""
+  # mk_mktemp_shim <dir> <entry...> — a `mktemp` that delegates, then creates <entry...>
+  # inside the directory it just made. With no entries it is a pure pass-through, which
+  # is the CONTROL arm.
+  mk_mktemp_shim() {
+    local d="$1"
+    shift
+    mkdir -p "$d"
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf '# Test shim: delegate to the real mktemp, then plant entries in the result.\n'
+      printf 'out=$(%s "$@") || exit $?\n' "$(printf '%q' "$REAL_MKTEMP")"
+      printf 'if [ -d "$out" ]; then\n'
+      local e
+      for e in "$@"; do
+        printf '  mkdir -p "$out"/%s 2>/dev/null || true\n' "$(printf '%q' "$e")"
+      done
+      printf 'fi\n'
+      printf 'printf "%%s\\n" "$out"\n'
+    } >"$d/mktemp"
+    chmod +x "$d/mktemp"
+  }
+  if [ -z "$REAL_MKTEMP" ]; then
+    bad "launch-capture: no mktemp on PATH — the shim arms cannot be built"
+  else
+    # (a) CONSTRUCTION, asserted before the subject runs, in THREE parts. The shim must
+    #     really plant the directory; a redirection into it must really FAIL; and that
+    #     failure's status must really be 1 — the value that carries ERROR_OBJECT. If
+    #     the third stopped being true the whole case would be about nothing.
+    SH_CAP="$T/shim-capture"
+    mk_mktemp_shim "$SH_CAP" p1.out p2.out
+    PROBE_D=$(PATH="$SH_CAP:$PATH" mktemp -d "$T/capture-probe.XXXXXX" 2>/dev/null || true)
+    probe_rc=0
+    if [ -n "$PROBE_D" ] && [ -d "$PROBE_D" ]; then
+      (true >"$PROBE_D/p1.out") 2>/dev/null || probe_rc=$?
+    fi
+    if [ -n "$PROBE_D" ] && [ -d "$PROBE_D/p1.out" ] && [ -d "$PROBE_D/p2.out" ] &&
+      [ "$probe_rc" -eq 1 ]; then
+      ok "launch-capture-plant: the shim IS the defect described (a DIRECTORY at both capture paths; redirecting into it fails with status 1 — fsck's ERROR_OBJECT bit)"
+    else
+      bad "launch-capture-plant: dir='$PROBE_D' p1=$([ -d "$PROBE_D/p1.out" ] && echo dir || echo no) redirect-rc=$probe_rc — the case below would prove nothing"
+    fi
+    # (b) THE SUBJECT: a CLEAN store, an unopenable capture path. UNMEASURED (exit 5),
+    #     and the cause must say the fsck was never launched/captured rather than
+    #     describing the store.
+    OUT=$(PATH="$SH_CAP:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+    RC=$?
+    record_out "launch-capture-failed"
+    if [ "$RC" -eq 5 ] && [ "$(verdict_of)" = UNMEASURED ]; then
+      ok "launch-capture: a failed capture redirection is UNMEASURED (exit 5) — the shell's status 1 is NOT read as fsck's ERROR_OBJECT bit"
+    else
+      bad "launch-capture: rc=$RC verdict='$(verdict_of)' (wanted 5/UNMEASURED) — a launch failure is being classified as object damage"
+    fi
+    if [ "$(verdict_of)" != CORRUPT ] && [ "$RC" -ne 4 ]; then
+      ok "launch-capture: the healthy store is NOT reported CORRUPT — the false-CORRUPT class (round 1 BLOCKER B) does not return through the shell"
+    else
+      bad "launch-capture: a HEALTHY store was reported CORRUPT because the capture failed"
+    fi
+    if printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: unmeasured-cause .*could not be LAUNCHED'; then
+      ok "launch-capture: the cause NAMES the launch/capture failure, so an operator is sent to the scratch filesystem and not to a re-clone"
+    else
+      bad "launch-capture: no launch/capture cause line — the operator gets UNMEASURED with the wrong or no explanation"
+    fi
+    if ! printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: object '; then
+      ok "launch-capture: NO 'object' lines — nothing was rehashed, so naming object ids would be a fabricated finding"
+    else
+      bad "launch-capture: object ids reported for a walk that never ran"
+    fi
+    # (c) THE CONTROL, ONE PROPERTY APART: the same shim mechanism, planting a name the
+    #     subject never opens. Without this, (b) could be passing because ANY mktemp
+    #     shim breaks the run.
+    SH_CAP_OK="$T/shim-capture-control"
+    mk_mktemp_shim "$SH_CAP_OK" unused-by-the-subject
+    OUT=$(PATH="$SH_CAP_OK:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+    RC=$?
+    record_out "launch-capture-control"
+    if [ "$RC" -eq 0 ] && [ "$(verdict_of)" = VERIFIED ]; then
+      ok "launch-capture-control: the SAME shim planting a name the subject never opens is VERIFIED — the UNMEASURED above is the capture failure, not the shim"
+    else
+      bad "launch-capture-control: rc=$RC verdict='$(verdict_of)' (wanted 0/VERIFIED) — the shim itself is breaking the run"
+    fi
+    # (d) THE CONFIRMING PASS has the same rule. Plant ONLY the second pass's capture
+    #     path and make the first walk non-clean (the reflog shim), so pass 1 runs and
+    #     pass 2 cannot be launched: neither confirmed nor dismissed => UNMEASURED, and
+    #     never the fatal branch on a status the shell produced.
+    SH_CAP_P2="$T/shim-capture-p2"
+    mk_mktemp_shim "$SH_CAP_P2" p2.out
+    LOG_CAP="$T/shim-capture-calls.txt"
+    : >"$LOG_CAP"
+    mk_fsck_shim "$T/shim-capture-git" always 2 "$RL_MSG" "$LOG_CAP"
+    # mk_bin populated that dir with SYMLINKS to the real tools, so the shim must
+    # REPLACE the link rather than be copied through it (a `cp` onto a symlink writes
+    # the TARGET — /usr/bin/mktemp — which fails, loudly and unanchored).
+    rm -f "$T/shim-capture-git/mktemp"
+    cp "$SH_CAP_P2/mktemp" "$T/shim-capture-git/mktemp"
+    OUT=$(PATH="$T/shim-capture-git:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+    RC=$?
+    record_out "launch-capture-pass2"
+    if [ "$RC" -eq 5 ] && [ "$(verdict_of)" = UNMEASURED ] &&
+      printf '%s\n' "$OUT" | grep -q 'confirming pass could not'; then
+      ok "launch-capture: an unlaunchable CONFIRMING pass is UNMEASURED naming itself — the discriminator cannot be satisfied by a walk that never ran"
+    else
+      bad "launch-capture(pass2): rc=$RC verdict='$(verdict_of)' (wanted 5/UNMEASURED naming the confirming pass)"
+    fi
+  fi
+fi
+
+# --- Case 26: A SIGNALLED RUN OF **THIS SUITE** CANNOT EXIT GREEN -----------
+# THE DEFECT (#3749 review round 3, item 4). The signal traps used to be
+# `trap 'finish' INT TERM HUP`. `finish` takes its exit status from `$?`, and at trap
+# time `$?` is the status of whatever was interrupted — routinely **0** — so a signal
+# arriving mid-suite ran the cleanup, printed the tally of the cases that had run SO
+# FAR, and **exited 0**, with every later case never executed. Combined with a case
+# floor of 34 against 74 actual, half this suite could be silently skipped and the run
+# still read as a pass. That is precisely the "green tally over a shrunken suite" class
+# this file's own header claims to guard against.
+#
+# THE TRAP DECLARATIONS ARE EXTRACTED FROM THIS FILE AT RUN TIME, never restated: a
+# case that re-typed them would go on passing after someone changed the real ones. The
+# harness supplies only the `$?`-derived exit rule that `finish` itself applies, and
+# busy-waits on a command whose status is 0 so the trap fires with `$? == 0` — the
+# condition under which the defect is silent.
+TRAP_SRC="$T/trap-lines.txt"
+grep -n '^trap ' "${BASH_SOURCE[0]}" | sed 's/^[0-9]*://' >"$TRAP_SRC"
+trap_n=$(grep -c . "$TRAP_SRC" | tr -d ' ')
+if [ "$trap_n" -ge 4 ] && grep -qx 'trap finish EXIT' "$TRAP_SRC" &&
+  ! grep -q "^trap 'finish'" "$TRAP_SRC"; then
+  ok "signal-trap-plant: this file declares $trap_n top-level traps including 'trap finish EXIT', and none delegates a SIGNAL straight to finish"
+else
+  bad "signal-trap-plant: extracted $trap_n trap line(s) [$(tr '\n' ';' <"$TRAP_SRC")] — the case below would prove nothing"
+fi
+# mk_trap_harness <path> <trap-file> — the real `finish`'s status rule plus <trap-file>'s
+# declarations, then a loop whose last command exits 0.
+mk_trap_harness() {
+  local path="$1" traps="$2"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'finish() { local rc=$?; if [ "$rc" -ne 0 ]; then exit 1; fi; exit 0; }\n'
+    cat "$traps"
+    printf 'while :; do :; done\n'
+  } >"$path"
+  chmod +x "$path"
+}
+# term_status <harness> -> the exit status after a SIGTERM 0.3s in.
+term_status() {
+  local h="$1" pid st=0
+  bash "$h" >/dev/null 2>&1 &
+  pid=$!
+  sleep 0.3
+  kill -TERM "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null || st=$?
+  printf '%s' "$st"
+}
+mk_trap_harness "$T/trap-green.sh" "$TRAP_SRC"
+printf 'trap finish EXIT\ntrap %s INT TERM HUP\n' "'finish'" >"$T/trap-red-lines.txt"
+mk_trap_harness "$T/trap-red.sh" "$T/trap-red-lines.txt"
+green_st=$(term_status "$T/trap-green.sh")
+red_st=$(term_status "$T/trap-red.sh")
+if [ "$red_st" -eq 0 ]; then
+  ok "signal-trap-control: the OLD form (a signal delegating straight to finish) really does exit 0 on SIGTERM — the harness can see the defect"
+else
+  bad "signal-trap-control: the old form exited $red_st, not 0 — a green below would prove nothing"
+fi
+if [ "$green_st" -ne 0 ]; then
+  ok "signal-trap: THIS suite's own trap declarations exit NONZERO ($green_st) on SIGTERM — a signalled run can never be read as a pass with cases unrun"
+else
+  bad "signal-trap: this suite's traps exit 0 on SIGTERM — a truncated run reports green"
 fi
