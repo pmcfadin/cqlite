@@ -657,3 +657,56 @@ V2 is comment-blind now, and the re-run reds both.
 ### 3. The kind table was stale about its own last change
 
 See the note above the table. Every count in it is now copied from case A2's run-time output.
+
+---
+
+## roborev round 8 (job 389) — the count claimed a measurement that never happened
+
+This one is different in kind from the label family. Every earlier finding was a label asserting
+the wrong *state*; **this was the COUNT itself claiming verification that did not happen**, which
+is the one thing a census must never do. `n_scanned` was derived by a second pass re-asking
+`[ -f "$path" ]`. `[ -f ]` answers *does this path exist right now*; the census claims *I counted
+this file's lines*. A selected-but-unreadable file satisfied the predicate and was reported as
+MEASURED. **A count that includes files nobody counted is a duration with extra steps.**
+
+### The fix
+
+The count is incremented **in the original loop, immediately after a `wc -l` that produced a
+validated number** — never from a predicate about the path, never from a second pass. The
+existence test no longer decides the numerator: a selected file that cannot be read is counted as
+*uncounted*, so it can leave neither the numerator nor the denominator silently.
+
+**Three states, kept distinct** — and the middle one is new, because collapsing it into either
+neighbour is the "could not tell → permissive" slide:
+
+| situation | contract line | renders | status |
+|---|---|---|---|
+| nothing selected | `NO-SUBJECT <why>` | `NOT-APPLICABLE` | PASS (correct: a docs-only diff) |
+| something selected, some/all uncountable | `NOT-MEASURED <n> of <m> …` | `NOT-MEASURED` | PASS, never read as verified |
+| all counted | `<n> <unit>` | `COUNT` | PASS |
+
+**Why `NOT-MEASURED` rather than a hard FAIL**, since the choice was offered: the ratchet ALREADY
+skipped an unreadable file before this change — the arithmetic comparison simply failed on an
+empty value — so that coverage hole is **pre-existing in `run_file_size`, not introduced by the
+census**. Converting it to a component failure would change `file-size`'s verdict semantics as a
+side effect of adding a census, with a red-on-correct-input risk on any transient FS hiccup. The
+census's job is to never claim verification that did not happen, and `NOT-MEASURED` naming the
+counts does exactly that. **The underlying ratchet gap is declared as a residual rather than fixed
+by accident.**
+
+### The guard, and its RED arm
+
+`test_agent_gate_file_size_log.sh` case14 drives the REAL component over a fixture whose selected
+`.rs` file is `chmod 000`, with a positive control differing in exactly one property (whether the
+file can be read), and a precondition probe so a root or permissive-FS host skips per-assert
+rather than passing vacuously.
+
+**The RED arm fails for the right reason** — checked, after V2's lesson last round: with the count
+reverted to the existence predicate, case14 reports
+`AGENT-GATE-CENSUS: 1 changed .rs file(s) measured against the thresholds` **for a file that was
+never read**, which is the finding verbatim. Two of the four asserts discriminate; the other two
+(the control, and the no-collapse check) hold in both arms by design and are stated as such.
+
+Unit-level: V1 covers all four contract states, **V1b** asserts `NO-SUBJECT` and `NOT-MEASURED`
+render *distinctly* — both preserve PASS, so a status-only assert could not tell them apart — and
+V2 now also fails if the increment ever sits beside an existence predicate again.
