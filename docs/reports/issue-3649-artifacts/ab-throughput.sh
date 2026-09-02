@@ -648,6 +648,9 @@ manifest = {
         and env("AB_TEMPERATURE", "") == "warm",
         "prewarm_requested": env("AB_PREWARM", "0") == "1",
         "server_cpus": env("AB_SERVER_CPUS", "none-unpinned"),
+        # The EFFECTIVE state, beside the requested set. VERIFIED only when a
+        # run read the server's own Cpus_allowed_list and it matched.
+        "affinity_state": env("AB_AFFINITY_STATE", "NOT-RECORDED"),
         "client_cpus": env("AB_CLIENT_CPUS", "none-unpinned"),
         "temperature": env("AB_TEMPERATURE", ""),
         "ticket_template": env("AB_TICKET_TEMPLATE", ""),
@@ -1133,6 +1136,10 @@ say "arm head ref $HEAD_REF commit $HEAD_SHA"
 
 if [ -n "$SERVER_CPUS" ]; then
   export AB_SERVER_CPUS="$SERVER_CPUS" AB_CLIENT_CPUS="$CLIENT_CPUS"
+  # NOT-REQUESTED until a run VERIFIES it. A manifest must never imply a pin
+  # from `server_cpus` alone: the requested set and the effective one are
+  # different facts, and only the second is a measurement.
+  export AB_AFFINITY_STATE="${AB_AFFINITY_STATE:-NOT-REQUESTED}"
   cpu_sets_disjoint() {
   python3 - "$SERVER_CPUS" "$CLIENT_CPUS" <<'PYEOF'
 import sys
@@ -1433,8 +1440,13 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   # nothing else in this driver would notice.
   if [ -n "$SERVER_CPUS" ]; then
     local affinity
-    affinity="$(python3 "$SUPPORT" check-affinity "$srv" "$SERVER_CPUS")" || die affinity-mismatch \
-      "$tag: the server is not pinned to $SERVER_CPUS (the cause is named above)"
+    # UNVERIFIABLE is now a REFUSAL, so this dies on it -- the named cause is
+    # already printed by the helper and distinguishes "not pinned where asked"
+    # from "could not tell". The STATE is recorded either way, so the analyzer
+    # cannot be handed a manifest claiming a pin nothing established.
+    affinity="$(python3 "$SUPPORT" check-affinity "$srv" "$SERVER_CPUS")" || die affinity-unverified \
+      "$tag: the server's effective pinning to $SERVER_CPUS was not established (the cause is named above)"
+    export AB_AFFINITY_STATE="$affinity"
     say "run $tag server affinity $affinity requested $SERVER_CPUS"
   fi
 

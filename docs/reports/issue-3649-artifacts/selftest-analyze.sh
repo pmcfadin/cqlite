@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=540
+CASE_FLOOR=552
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -135,8 +135,10 @@ def main():
             # The HEAD arm must be the #2820 commit: the analyzer now enforces
             # what its docstring always claimed, so a placeholder sha is a
             # session measuring something else.
-            "base": {"commit": "cfa93fe98" + "0" * 31, "ref": "cfa93fe99^"},
-            "head": {"commit": "cfa93fe99" + "1" * 31, "ref": "cfa93fe99"},
+            "base": {"commit": "674cffa9da917a3a1ee3146d4a4ae718f58612d7",
+                     "ref": "cfa93fe99^"},
+            "head": {"commit": "cfa93fe99a51be2b132a5d0fb57c75f3c3555731",
+                     "ref": "cfa93fe99"},
         },
         "loadgen": {"commit": "2" * 40, "ref": "cfa93fe99"},
         "workload": {
@@ -158,6 +160,8 @@ def main():
             "ramp": ramp,
             "prewarm": True,
             "server_cpus": "0,2",
+            # A requested pin the analyzer will only accept as VERIFIED.
+            "affinity_state": "VERIFIED",
             "client_cpus": "1,3",
             "temperature": "warm",
             "merge_path": "merge",
@@ -205,6 +209,13 @@ PYEOF
 mkfixture() { python3 "$TMP/mkfixture.py" "$@"; }
 
 # Sha padding, so the arm cases read as shas rather than as string arithmetic.
+# THE REAL OBJECT IDS. The fixtures used to be `cfa93fe98…`/`cfa93fe99…`, which
+# passed BECAUSE the check was a prefix test -- so the cases meant to prove the
+# arm gate instantiated the defect they were testing for, exactly as the
+# 512-zero-byte CompressionInfo.db did for compression. A fixture that satisfies
+# a weaker check than the one shipped proves nothing about the shipped check.
+PIN_HEAD="cfa93fe99a51be2b132a5d0fb57c75f3c3555731"
+PIN_BASE="674cffa9da917a3a1ee3146d4a4ae718f58612d7"
 ZEROS31="0000000000000000000000000000000"
 ONES31="1111111111111111111111111111111"
 
@@ -3006,8 +3017,8 @@ manifest["host"]["process_cpus"] = 4
 # #2820 commit; the analyzer's arm gate has its own fixture cases. What these
 # cases are for is the driver->analyzer PIPELINE, and a host or provenance
 # variable that differs per box is noise in that subject, not the subject.
-manifest["arms"]["base"]["commit"] = "cfa93fe98" + "0" * 31
-manifest["arms"]["head"]["commit"] = "cfa93fe99" + "1" * 31
+manifest["arms"]["base"]["commit"] = "674cffa9da917a3a1ee3146d4a4ae718f58612d7"
+manifest["arms"]["head"]["commit"] = "cfa93fe99a51be2b132a5d0fb57c75f3c3555731"
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(manifest, handle, indent=1, sort_keys=True)
 PYINNER
@@ -3871,6 +3882,58 @@ else
   bad "an AB_* export precedes its variable's final value (see above)"
 fi
 
+# ---- a requested pin that nothing verified is not a pin ----------------------
+# ROUND 21 FINDING 2. check_affinity returned SUCCESS on three unverifiable
+# paths -- unreadable /proc, absent Cpus_allowed_list, unparsable value -- under
+# a comment saying an unreadable /proc is "never 'pinned correctly'". So the
+# driver recorded the REQUESTED set and the analyzer reported it as pinning.
+affinity_case() { # <name> <server-cpus> <state> <want-verdict> <want-exit>
+  mkfixture "$TMP/aff" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  AB_CPUS="$2" AB_STATE="$3" python3 - "$TMP/aff/manifest.json" <<'PYINNER'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["workload"]["server_cpus"] = os.environ["AB_CPUS"] or None
+manifest["workload"]["affinity_state"] = os.environ["AB_STATE"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/aff"
+  check_verdict "$1" "$4" "$5" single-stream
+}
+affinity_case "a verified pin"                    "0,2" VERIFIED       MEETS-TARGET 0
+# THE DEFECT: a requested pin the helper could not establish.
+affinity_case "a requested pin recorded UNVERIFIABLE" "0,2" UNVERIFIABLE UNMEASURED 7
+check_cause "a requested pin nothing verified" affinity-unverified
+affinity_case "a requested pin with no state at all" "0,2" NOT-RECORDED UNMEASURED 7
+check_cause "a requested pin with no recorded state" affinity-unverified
+# No pin requested is not a defect: there is nothing to verify.
+affinity_case "no pin requested"                  ""    NOT-REQUESTED  MEETS-TARGET 0
+# THE HELPER ITSELF: every unverifiable path must be a REFUSAL, not a success.
+# pid 1 is not our server and its Cpus_allowed_list will not match, so this
+# exercises the mismatch arm; a pid that cannot exist exercises the unreadable
+# arm, which is the one that used to exit 0.
+# NOT via check_support: this subcommand prints a VALUE on stdout (the state
+# token), which is deliberately unanchored the way parse-startup's value is, so
+# the anchor assertion does not apply to it. The DIAGNOSTIC on stderr is
+# anchored, and that is what is checked.
+run_support check-affinity 2147483647 0-3
+if [ "$RC" = 1 ] && grep -q '^AB-3649: cause affinity-unverified$' "$TMP/err.txt"; then
+  ok "an unreadable /proc is a REFUSAL, not a success printing UNVERIFIABLE"
+else
+  bad "an unreadable /proc returned $RC; it used to be 0, which is the finding"
+fi
+run_support check-affinity 2147483647 not-a-cpu-list
+if [ "$RC" = 1 ] && grep -q '^AB-3649: cause affinity-unverifiable$' "$TMP/err.txt"; then
+  ok "an unparsable requested CPU list is refused with its own cause"
+else
+  bad "an unparsable requested CPU list returned $RC"
+fi
+
 # ---- the analyzer enforces the arms and the ticket ---------------------------
 # ROUND 20 findings 1 and 2. The driver refused both and the analyzer trusted
 # the manifest for both, so a hand-made or edited manifest received a #2820
@@ -3894,16 +3957,25 @@ PYINNER
   run_analyzer "$TMP/arms"
   check_verdict "$1" "$4" "$5" single-stream
 }
-arms_case "the #2820 pair" "cfa93fe98${ZEROS31}" "cfa93fe99${ONES31}" MEETS-TARGET 0
+arms_case "the real #2820 pair" "$PIN_BASE" "$PIN_HEAD" MEETS-TARGET 0
 # UNRELATED commits: a verdict authoritative about something never measured.
 arms_case "arms that are not #2820 at all" "aaaaaaaa1${ZEROS31}" "bbbbbbbb2${ONES31}" UNMEASURED 7
 check_cause "arms that are not the #2820 pair" arms-not-2820
 # REVERSED: the head arm is the parent, which inverts the ratio's meaning.
-arms_case "the pair REVERSED" "cfa93fe99${ONES31}" "cfa93fe98${ZEROS31}" UNMEASURED 7
+arms_case "the pair REVERSED" "$PIN_HEAD" "$PIN_BASE" UNMEASURED 7
 check_cause "the #2820 pair reversed" arms-not-2820
 # Base equal to head is not a comparison at all.
-arms_case "both arms identical" "cfa93fe99${ONES31}" "cfa93fe99${ONES31}" UNMEASURED 7
+arms_case "both arms identical" "$PIN_HEAD" "$PIN_HEAD" UNMEASURED 7
 check_cause "both arms identical" arms-not-2820
+# THE PREFIX CASE, which is the finding: an object id that merely BEGINS with
+# the pinned abbreviation is a different commit, and a fabricated manifest can
+# simply say so.
+arms_case "a head that only PREFIX-matches the pin" "$PIN_BASE" "cfa93fe99${ONES31}" UNMEASURED 7
+check_cause "a head that only prefix-matches" arms-not-2820
+# ...and the BASE was read but never pinned, so a real head with an invented
+# parent passed. This is the half the message described and the check omitted.
+arms_case "the real head with a fabricated base" "aaaaaaaa1${ZEROS31}" "$PIN_HEAD" UNMEASURED 7
+check_cause "a fabricated base beside the real head" arms-not-2820
 
 ticket_manifest_case() { # <name> <python-mutation> <want-verdict> <want-exit>
   mkfixture "$TMP/tkm" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"

@@ -38,10 +38,20 @@ from ab_input import validate_record_shape, validate_record_usable
 
 NOT_OBSERVED = "NOT-OBSERVED"
 
-#: The #2820 commit, as ONE literal shared by the driver's pre-flight pin and
-#: the analyzer's verdict gate. Two copies would be two claims about which
-#: commit this instrument is about, and they would drift.
-AB3649_PIN_SHA = "cfa93fe99"
+#: The #2820 comparison, as COMPLETE object ids shared by the driver's
+#: pre-flight pin and the analyzer's verdict gate. Two copies would be two
+#: claims about which commit this instrument is about, and they would drift.
+#:
+#: COMPLETE, and compared for EXACT EQUALITY. An abbreviation compared by prefix
+#: is not an identity: `startswith("cfa93fe99")` admits any object whose id
+#: begins with those nine characters, and a fabricated manifest can simply say
+#: so. It also admitted this suite's own fixture values, so the cases meant to
+#: prove the arm gate passed BY CONSTRUCTION.
+AB3649_PIN_HEAD = "cfa93fe99a51be2b132a5d0fb57c75f3c3555731"
+AB3649_PIN_BASE = "674cffa9da917a3a1ee3146d4a4ae718f58612d7"
+#: The abbreviation, for the DRIVER's ref resolution only -- `git rev-parse` is
+#: given a rev to resolve, and what it resolves is then compared as a full id.
+AB3649_PIN_SHA = AB3649_PIN_HEAD[:9]
 
 USAGE = [
     "ab_driver_support.py pair-order <replicate>",
@@ -557,6 +567,29 @@ def validate_ticket(path, full_ring=True):
         return 1
     return 0
 
+def _affinity_unverified(detail):
+    """UNVERIFIABLE is a REFUSAL, and it used to be exit 0.
+
+    Three paths -- an unreadable /proc, an absent Cpus_allowed_list, an
+    unparsable value -- all returned SUCCESS while printing UNVERIFIABLE, under
+    a comment reading "an unreadable /proc is UNVERIFIABLE, never 'pinned
+    correctly'". The comment stated the property and the return value
+    implemented the opposite, so the driver recorded the REQUESTED set and the
+    analyzer reported it as pinning that nothing had established.
+
+    Refused HERE, at pre-flight, because that is before the expensive step -- and
+    the state is ALSO recorded, so an analyzer handed a manifest from elsewhere
+    cannot be told a pin was verified when it was not.
+    """
+    sys.stdout.write("UNVERIFIABLE\n")
+    err("cause affinity-unverified")
+    err("cause-detail %s. Pinning was REQUESTED, so a session that cannot "
+        "confirm it would record a pin nothing established -- which is a claim, "
+        "not a measurement. Drop --server-cpus, or run on a host that exposes "
+        "the effective affinity." % detail)
+    return 1
+
+
 def check_affinity(pid, expected):
     """Is the server actually pinned where we asked? Requested and effective are
     different facts, and a mis-pinned server invalidates the measurement without
@@ -570,19 +603,18 @@ def check_affinity(pid, expected):
     try:
         with open(path, encoding="utf-8") as handle:
             text = handle.read()
-    except OSError:
-        # Not every platform exposes this; an unreadable /proc is UNVERIFIABLE,
-        # never "pinned correctly".
-        sys.stdout.write("UNVERIFIABLE\n")
-        return 0
+    except OSError as exc:
+        return _affinity_unverified(
+            "%s could not be read (%s)" % (path, exc.strerror or exc))
     match = re.search(r"^Cpus_allowed_list:\s*(\S+)", text, re.MULTILINE)
     if not match:
-        sys.stdout.write("UNVERIFIABLE\n")
-        return 0
+        return _affinity_unverified(
+            "%s exposes no Cpus_allowed_list line" % path)
     have = expand_cpu_list(match.group(1))
     if have is None:
-        sys.stdout.write("UNVERIFIABLE\n")
-        return 0
+        return _affinity_unverified(
+            "%s reports Cpus_allowed_list %r, which is not a CPU list"
+            % (path, match.group(1)))
     if have != want:
         err("cause affinity-mismatch")
         err(

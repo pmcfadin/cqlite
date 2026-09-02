@@ -92,6 +92,11 @@ RECORD_FIELD_DISPOSITION = {
 #: constrains a step record. Same completeness case, other direction.
 WORKLOAD_DISPOSITION = {
     "shape": ("constrains", "record.shape"),
+    "affinity_state": ("excused",
+                       "the EFFECTIVE pinning state, beside the requested set. "
+                       "VERIFIED only when a run read the server's own "
+                       "Cpus_allowed_list and it matched; the analyzer refuses a "
+                       "requested pin recorded as anything else"),
     "shape_requested": ("excused",
                         "the spelling the operator typed, before canonicalisation; "
                         "it constrains no record field because the records carry "

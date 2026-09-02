@@ -72,7 +72,7 @@ from ab_common import (
     err,
     out,
 )
-from ab_driver_support import AB3649_PIN_SHA, ticket_problems
+from ab_driver_support import AB3649_PIN_BASE, AB3649_PIN_HEAD, ticket_problems
 from ab_input import (
     MODE_SINGLE_STREAM,
     MODE_UTILIZATION,
@@ -583,23 +583,44 @@ def analyze(mode, path, opts):
         arms = manifest.get("arms", {})
         base_sha = (arms.get("base") or {}).get("commit", "")
         head_sha = (arms.get("head") or {}).get("commit", "")
-        pinned_head = AB3649_PIN_SHA
-        if not (isinstance(head_sha, str) and head_sha.startswith(pinned_head)):
+        # EXACT EQUALITY ON COMPLETE OBJECT IDS, both arms. The first version
+        # compared the head by PREFIX and read the base without pinning it at
+        # all -- so a fabricated pair passed, and the refusal message directly
+        # beneath it correctly described a property the check did not enforce.
+        # An abbreviation compared by prefix is not an identity.
+        if head_sha != AB3649_PIN_HEAD or base_sha != AB3649_PIN_BASE:
             raise Unmeasured(
                 "arms-not-2820",
-                "the head arm is %r and this analyzer renders the #2820 verdict, "
-                "which is defined for commit %s. A session comparing other "
-                "commits -- or the same pair reversed, which inverts the ratio -- "
-                "would be authoritative about something it did not measure. Label "
-                "the session --control to compare other commits"
-                % (head_sha, pinned_head),
+                "this session's arms are base=%r head=%r, and this analyzer "
+                "renders the #2820 verdict, which is defined for exactly "
+                "base=%s head=%s. A session comparing other commits -- or the "
+                "same pair reversed, which inverts the ratio -- would be "
+                "authoritative about something it did not measure. Label the "
+                "session --control to compare other commits"
+                % (base_sha, head_sha, AB3649_PIN_BASE, AB3649_PIN_HEAD),
             )
-        if not isinstance(base_sha, str) or not base_sha or base_sha == head_sha:
+
+    # A REQUESTED PIN THAT NOTHING VERIFIED IS NOT A PIN. `server_cpus` records
+    # what was ASKED FOR; only `affinity_state` records what was established.
+    # The helper used to return SUCCESS on three unverifiable paths, so a
+    # manifest could carry a requested set the analyzer then reported as
+    # pinning -- the requested-versus-effective split, one field over.
+    if not control:
+        # BOTH FIELDS LIVE IN `workload`, NOT `host`. The first version of this
+        # check read them from `host`, so it got None for each and could never
+        # fire -- a no-op check written in the round about checks that do not
+        # enforce what they say. The case below is what distinguishes the two.
+        requested_cpus = manifest.get("workload", {}).get("server_cpus")
+        affinity_state = manifest.get("workload", {}).get("affinity_state")
+        if requested_cpus and requested_cpus != "none-unpinned" \
+                and affinity_state != "VERIFIED":
             raise Unmeasured(
-                "arms-not-2820",
-                "the base arm is %r, which is empty or equal to the head arm; the "
-                "#2820 comparison is %s^ against %s"
-                % (base_sha, pinned_head, pinned_head),
+                "affinity-unverified",
+                "the manifest requests server CPUs %r and records the effective "
+                "affinity as %r. A requested pin that nothing established is a "
+                "claim, not a measurement, and a server running off the cores "
+                "the manifest names is measuring something else"
+                % (requested_cpus, affinity_state),
             )
 
     # THE TICKET, through the DRIVER'S OWN VALIDATOR -- one validator, two
