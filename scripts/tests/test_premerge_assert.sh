@@ -3680,7 +3680,13 @@ if [ -n "$N2_REPO" ]; then
   else
     bad "n2/swap: the stage could not be restored, so this case starts from an unknown state"
   fi
-  if n2_build "$N2_DIR/swap.sh" '    cp "$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.decoy" "$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.stage" 2>/dev/null || true   # N2_INTERLEAVE'; then
+  # THE PLANT READS THE ROOT FROM THE GLOBAL, exactly as the shipped code does (#3751 round 18,
+  # X1). `c_stage_root` no longer PRINTS — it assigns `C_STAGE_ROOT` — so a `$(c_stage_root)`
+  # here would expand to the EMPTY string, `cp` would fail into its `|| true`, and this case
+  # would report a green over a plant that never landed. That is the harness-that-never-reached-
+  # the-code class the fixture assert below exists for; it fired for real when the resolver
+  # changed, which is the assert paying out.
+  if n2_build "$N2_DIR/swap.sh" '    c_stage_root; cp "$C_STAGE_ROOT/.review-stage/issue-$issue/$C_STAGE_KIND.decoy" "$C_STAGE_ROOT/.review-stage/issue-$issue/$C_STAGE_KIND.stage" 2>/dev/null || true   # N2_INTERLEAVE'; then
     ok "n2/swap: the interleaving plant landed in the scratch assert (asserted, not assumed)"
   else
     bad "n2/swap: the plant did NOT land, so this case proves nothing"
@@ -3711,7 +3717,7 @@ if [ -n "$N2_REPO" ]; then
   else
     bad "n2/unlink: the stage could not be restored"
   fi
-  if n2_build "$N2_DIR/unlink.sh" '    rm -f "$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.stage" 2>/dev/null || true   # N2_INTERLEAVE'; then
+  if n2_build "$N2_DIR/unlink.sh" '    c_stage_root; rm -f "$C_STAGE_ROOT/.review-stage/issue-$issue/$C_STAGE_KIND.stage" 2>/dev/null || true   # N2_INTERLEAVE'; then
     ok "n2/unlink: the plant landed"
   else
     bad "n2/unlink: the plant did NOT land"
@@ -3799,7 +3805,11 @@ chmod +x "$P2_DIR/base-staleness.sh" 2>/dev/null || true
 # Every injected line travels through ENVIRON, never `awk -v`, which performs ESCAPE PROCESSING
 # on its value (round 7 measured a `\n` in an injected line becoming a real newline).
 P2_ANCHOR='out=$(bash "$rs" verdict "$C_STAGE_KIND" --issue "$issue"'
-P2_SD='"$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND'
+# FROM THE GLOBAL, NOT A CAPTURE (#3751 round 18, X1): `c_stage_root` assigns and prints
+# nothing, so `$(c_stage_root)` would inject an EMPTY root and the plant would silently not land.
+# Each injected line calls the resolver first; see `P2_SD_SET`.
+P2_SD_SET='c_stage_root; '
+P2_SD='"$C_STAGE_ROOT/.review-stage/issue-$issue/$C_STAGE_KIND'
 # p2_build <dest> <pre> <post> — the same anchor as 44i, but a line on EACH side of it.
 p2_build() {
   local dest="$1" pre="$2" post="$3"
@@ -3877,8 +3887,8 @@ if [ -n "$P2_REPO" ]; then
     bad "p2/aba: the stage could not be restored, so this case starts from an unknown state"
   fi
   if p2_build "$P2_DIR/aba.sh" \
-    "    cp $P2_SD.stage\" $P2_SD.genA\" 2>/dev/null && cp $P2_SD.decoy\" $P2_SD.stage\" 2>/dev/null || true   # P2_ABA_PRE" \
-    "    cp $P2_SD.genA\" $P2_SD.stage\" 2>/dev/null || true   # P2_ABA_POST"; then
+    "    $P2_SD_SET cp $P2_SD.stage\" $P2_SD.genA\" 2>/dev/null && cp $P2_SD.decoy\" $P2_SD.stage\" 2>/dev/null || true   # P2_ABA_PRE" \
+    "    $P2_SD_SET cp $P2_SD.genA\" $P2_SD.stage\" 2>/dev/null || true   # P2_ABA_POST"; then
     ok "p2/aba: both halves of the A->B->A plant landed in the scratch assert (asserted, not assumed)"
   else
     bad "p2/aba: the plant did NOT land, so this case proves nothing"
@@ -5070,6 +5080,284 @@ case "$V1_FNBODY" in
   *) bad "v1/structural: the re-validation does not call c_evaluate — the binding is implemented twice" ;;
 esac
 
+# --- 44s: A CAPTURED PATH IS NOT THE PATH (round 18, X1) ----------------------
+# THE FINDING (roborev job 397, premerge-assert.sh:1316). `c_stage_root` captured
+# `git rev-parse --show-toplevel` in a command substitution, and every one of its four callers
+# captured `c_stage_root` in a SECOND one — so a trailing newline was stripped TWICE. A checkout
+# whose DIRECTORY NAME ends in an LF therefore resolved to a DIFFERENT, EXISTING SIBLING path, and
+# the AUTO path located, bound and read THAT directory's stage records. It is #3616's
+# peer-artifact class reached through a lossy capture instead of a recency scan, and
+# `c_assert_head_binds_certified` cannot see it: HEAD is read in the CWD — the real lane, so it
+# binds — while the ARTIFACT comes from the sibling.
+#
+# ROUND 13 (S2) ENUMERATED TRAILING-NEWLINE STRIPPING AND DECLARED IT HARMLESS. That was right
+# about the stage RECORD's CONTENT (every grammar here is per-line and column-zero anchored) and
+# wrong about a PATH, whose stripped bytes are part of its identity. The rule this section pins: a
+# lossy-capture conclusion must be RE-DERIVED PER CONSUMER, never carried.
+#
+# HOW THE ROOT IS MADE OBSERVABLE. `No 'c' stage was ever OPENED` prints no root, so a bare
+# before/after on the exit code would prove nothing about WHICH directory was searched. So the
+# sibling is given TWO stage records: the AMBIGUOUS refusal is the ONE branch that PRINTS the root
+# it enumerated. With the fix the real root is searched (0 records, `never OPENED`); without it the
+# sibling is (2 records, AMBIGUOUS, naming the sibling path). Textually distinct, and the text
+# names the directory.
+X1_D="$T/x1"
+mkdir -p "$X1_D"
+X1_FLOW="$X1_D/flow"
+mkdir -p "$X1_FLOW"
+x1_ok=1
+cp "$ASSERT" "$X1_FLOW/premerge-assert.sh" 2>/dev/null || x1_ok=0
+cp "$SCRIPT_DIR/../flow/review-stage.sh" "$X1_FLOW/review-stage.sh" 2>/dev/null || x1_ok=0
+printf '%s\n' "$NEUTRAL_ADV" >"$X1_FLOW/base-staleness.sh" 2>/dev/null || x1_ok=0
+chmod +x "$X1_FLOW/base-staleness.sh" 2>/dev/null || true
+
+# x1_repo <outvar> <dirname> — a synthetic DESIGN-ROUTED repository at a LITERAL directory name,
+# ASSIGNED to <outvar>. `c_repo` above PRINTS its path, so it carries the very defect under test
+# and cannot build this fixture: a trailing-LF name would arrive as its sibling and the case would
+# run in an ordinary directory, passing for the wrong reason. `printf -v` is byte-faithful.
+x1_repo() {
+  local out="$1" d="$X1_D/$2"
+  printf -v "$out" '%s' '' 2>/dev/null || return 1
+  mkdir -p "$d" 2>/dev/null || return 1
+  git init -q -b mainline "$d" >/dev/null 2>&1 || return 1
+  git -C "$d" config user.email t@t >/dev/null 2>&1 || return 1
+  git -C "$d" config user.name t >/dev/null 2>&1 || return 1
+  printf '.review-stage/\n' >"$d/.gitignore" 2>/dev/null || return 1
+  printf 'seed\n' >"$d/README.md" 2>/dev/null || return 1
+  git -C "$d" add -A >/dev/null 2>&1 || return 1
+  git -C "$d" commit -q -m seed >/dev/null 2>&1 || return 1
+  git -C "$d" update-ref refs/remotes/origin/main mainline >/dev/null 2>&1 || return 1
+  git -C "$d" checkout -q -b feature >/dev/null 2>&1 || return 1
+  mkdir -p "$d/openspec/changes/a-design-routed-slug" 2>/dev/null || return 1
+  printf 'the PR content\n' >"$d/openspec/changes/a-design-routed-slug/proposal.md" 2>/dev/null || return 1
+  git -C "$d" add -A >/dev/null 2>&1 || return 1
+  git -C "$d" commit -q -m "the PR" >/dev/null 2>&1 || return 1
+  printf -v "$out" '%s' "$d"
+  return 0
+}
+
+# x1_run <script> <repo> <want> <desc> — `run_in_repo` with the repository passed as a VALUE
+# rather than resolved from a substitution, and against a named scratch assert.
+x1_run() {
+  local script="$1" d="$2" want="$3" desc="$4" sha f
+  sha=$(git -C "$d" rev-parse HEAD 2>/dev/null) || sha=""
+  if [ -z "$sha" ]; then bad "$desc: could not resolve the fixture HEAD"; return 1; fi
+  f="$X1_D/gate-$(basename "$script").txt"
+  emit_summary_block "$FULL_S" "$FULL_E" "-" \
+    "$(printf '%.7s' "$sha")" "$(printf '%.12s' "$sha")" PASS PASS >"$f"
+  OUT=$(cd "$d" && PATH="$BIN:$PATH" MOCK_GH_OUT="$sha OPEN" MOCK_GH_FAIL=0 \
+    bash "$script" 2421 "$sha" "$f" --c-verdict AUTO 2>&1)
+  RC=$?
+  if [ "$RC" -ne "$want" ]; then
+    bad "$desc (exit $RC, wanted $want)"
+    printf '     output: %s\n' "$OUT"
+    return 1
+  fi
+  return 0
+}
+
+X1_TR=""      # the real lane: a checkout whose directory name ENDS in an LF
+X1_SIB=""     # the sibling the stripped capture names
+X1_TR_NAME="lanetrail
+"
+if [ "$x1_ok" -eq 1 ] && x1_repo X1_TR "$X1_TR_NAME" && [ -n "$X1_TR" ] &&
+  case "$X1_TR" in *"
+") true ;; *) false ;; esac; then
+  ok "x1 fixture: a design-routed checkout whose path ENDS in an LF was built (asserted on the path, not assumed)"
+else
+  bad "x1 fixture: the trailing-LF checkout could not be built — every case below is UNMEASURED"
+  X1_TR=""
+fi
+# THE SIBLING GETS TWO STAGE RECORDS, so enumerating it is AMBIGUOUS and therefore PRINTS the root.
+# `$'\n'` and NOT `"$(printf '\n')"`: the latter is itself a trailing-newline-stripping capture and
+# expands to the EMPTY string, so the suffix removal would remove nothing — this section's own
+# subject, one line deep.
+if [ -n "$X1_TR" ] && x1_repo X1_SIB "lanetrail" && [ -n "$X1_SIB" ] &&
+  [ "$X1_SIB" = "${X1_TR%$'\n'}" ]; then
+  X1_SHA=$(git -C "$X1_SIB" rev-parse HEAD 2>/dev/null) || X1_SHA=""
+  mkdir -p "$X1_SIB/.review-stage/issue-3751" "$X1_SIB/.review-stage/issue-9999" 2>/dev/null || true
+  for X1_I in 3751 9999; do
+    printf 'kind: c\nissue: %s\nagent: spec-auditor\nspawned-at: 2026-09-01T00:00:00Z\nspawned-epoch: 1\ndeadline-secs: 1800\nhead-sha: %s\nreport-nonce: peergenA%s\nreopen-count: 0\n' \
+      "$X1_I" "$X1_SHA" "$X1_I" >"$X1_SIB/.review-stage/issue-$X1_I/c.stage" 2>/dev/null || true
+    printf 'result: PASS\n\n## Findings\n\nnone.\n' \
+      >"$X1_SIB/.review-stage/issue-$X1_I/c.peergenA$X1_I.md" 2>/dev/null || true
+  done
+  if [ -f "$X1_SIB/.review-stage/issue-3751/c.stage" ] &&
+    [ -f "$X1_SIB/.review-stage/issue-9999/c.stage" ]; then
+    ok "x1 fixture: the SIBLING holds TWO peer stage records (so enumerating it is AMBIGUOUS, the one refusal that PRINTS the root)"
+  else
+    bad "x1 fixture: the sibling's peer records were not written — the before/after below cannot distinguish the two roots"
+    X1_TR=""
+  fi
+else
+  bad "x1 fixture: the sibling is missing or is not the stripped form of the real path — the peer-read case proves nothing"
+  X1_TR=""
+fi
+
+# THE RED CONTROL, BUILT BY SUBSTITUTING THE ARTIFACT (#3312's corollary for tests — never a
+# settable seam). A scratch copy of the assert gets the PRE-FIX lossy resolver appended after the
+# real one, so the later definition wins while the call sites are untouched. A green above proves
+# nothing unless this control REDS in the pre-fix direction and NAMES the sibling.
+# BESIDE `review-stage.sh`, not in the parent: this script locates the enforcer at
+# `$self_dir/review-stage.sh`, so a scratch assert one directory up refuses as TOOL-FAILURE
+# (exit 3) and the control would measure the harness rather than the resolver. Caught by the
+# expected-exit assert in `x1_run`, which is why that assert names the code it wanted.
+X1_LOSSY="$X1_FLOW/lossy.sh"
+X1_LOSSY_OK=0
+if [ "$x1_ok" -eq 1 ]; then
+  X1_OVERRIDE='c_stage_root() { local r; r=$(git rev-parse --show-toplevel 2>/dev/null) || r=""; [ -n "$r" ] || r="$PWD"; C_STAGE_ROOT="$r"; }   # X1_LOSSY_PLANT'
+  X1_ANCHOR='# c_record_bytes <path> — ONE OBSERVATION OF THE STAGE RECORD'
+  X1_A="$X1_ANCHOR" X1_O="$X1_OVERRIDE" LC_ALL=C awk '
+    BEGIN { a = ENVIRON["X1_A"]; o = ENVIRON["X1_O"]; done = 0 }
+    index($0, a) > 0 && done == 0 { print o; print ""; print $0; done = 1; next }
+    { print }
+  ' "$X1_FLOW/premerge-assert.sh" >"$X1_LOSSY" 2>/dev/null || true
+  if [ -s "$X1_LOSSY" ] && LC_ALL=C grep -q 'X1_LOSSY_PLANT' "$X1_LOSSY"; then
+    X1_LOSSY_OK=1
+    ok "x1 control: the pre-fix lossy resolver was planted into a scratch assert (asserted, not assumed)"
+  else
+    bad "x1 control: the plant did NOT land, so the green case below is unattributable"
+  fi
+else
+  bad "x1 control: the scratch assert could not be prepared"
+fi
+
+if [ -n "$X1_TR" ] && [ "$X1_LOSSY_OK" -eq 1 ]; then
+  # (a) RED: with the lossy capture, AUTO enumerates the SIBLING and says so.
+  if x1_run "$X1_LOSSY" "$X1_TR" 2 \
+    "x1/red: the pre-fix lossy capture refuses — but for the WRONG reason, having read another lane"; then
+    case "$OUT" in
+      *"stage records exist under $X1_SIB/.review-stage/"*)
+        ok "x1/red: it enumerated the SIBLING lane, and the refusal NAMES that directory — the peer-artifact defect, reproduced" ;;
+      *) bad "x1/red: the lossy capture did not name the sibling, so the control does not reproduce the finding (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"No 'c' stage was ever OPENED"*)
+        bad "x1/red: the control reported the REAL root's answer, so it is not reproducing the pre-fix behaviour" ;;
+      *) ok "x1/red: and it did NOT report the real root's answer, so the two directions are textually distinguishable" ;;
+    esac
+  else
+    bad "x1/red: the control did not refuse at all (2/3)"
+    bad "x1/red: the control did not refuse at all (3/3)"
+  fi
+  # (b) GREEN: the shipped resolver searches the REAL root, finds nothing there, and never names
+  #     the sibling. `never OPENED` is the correct answer for this lane: the trailing-LF checkout
+  #     cannot open a stage at all, because `review-stage.sh` REFUSES such a root outright.
+  if x1_run "$X1_FLOW/premerge-assert.sh" "$X1_TR" 2 \
+    "x1/green: the shipped resolver refuses — naming THIS lane's absence, not a peer's records"; then
+    case "$OUT" in
+      *"No 'c' stage was ever OPENED"*)
+        ok "x1/green: the AUTO locator searched the REAL root (the trailing LF survived the resolution)" ;;
+      *) bad "x1/green: the refusal does not name this lane's own absence (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"$X1_SIB/.review-stage/"*)
+        bad "x1/green: the sibling's directory is still named — a peer lane's stage is still reachable" ;;
+      *) ok "x1/green: and the SIBLING lane is never named, so no peer artifact was enumerated" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: OK"* | *"C-VERDICT PASS"* | *"C-VERDICT AUTHOR-PERFORMED"*)
+        bad "x1/green: a merge-proceeding verdict was emitted off a checkout whose root could not be carried" ;;
+      *) ok "x1/green: and NO merge-proceeding verdict is emitted" ;;
+    esac
+  else
+    bad "x1/green: the shipped assert did not refuse (2/4)"
+    bad "x1/green: the shipped assert did not refuse (3/4)"
+    bad "x1/green: the shipped assert did not refuse (4/4)"
+  fi
+  # (c) The peer's records are untouched: this lane neither read them as its own nor wrote to them.
+  if [ -f "$X1_SIB/.review-stage/issue-3751/c.stage" ] &&
+    [ -f "$X1_SIB/.review-stage/issue-9999/c.stage" ] &&
+    [ ! -e "$X1_SIB/.review-stage/issue-2421" ]; then
+    ok "x1/green: the peer lane's stage records are intact and no new directory was created in it"
+  else
+    bad "x1/green: the peer lane's .review-stage was modified"
+  fi
+else
+  bad "x1: UNMEASURED (1/8) — fixture or control absent"
+  bad "x1: UNMEASURED (2/8)"
+  bad "x1: UNMEASURED (3/8)"
+  bad "x1: UNMEASURED (4/8)"
+  bad "x1: UNMEASURED (5/8)"
+  bad "x1: UNMEASURED (6/8)"
+  bad "x1: UNMEASURED (7/8)"
+  bad "x1: UNMEASURED (8/8)"
+fi
+
+# (d) STRUCTURAL — THE CHANNEL IS REMOVED, NOT MADE FAITHFUL. `c_stage_root` assigns a global and
+#     prints nothing, so there is nothing for a fifth call site to capture. That is stronger than
+#     one more careful capture: it makes the defect UNEXPRESSIBLE at the call sites.
+X1_SRC="$SCRIPT_DIR/../flow/premerge-assert.sh"
+# THE CODE IS READ FROM A FILE, AND EVERY PIN GREPS THAT FILE — NEVER `printf … | grep -q`.
+# Under this suite's `pipefail`, a MATCHING `grep -q` exits immediately, printf takes SIGPIPE, and
+# the PIPELINE status becomes 141 — so a pin over a >64KiB body FAILED exactly when its needle was
+# PRESENT, and only intermittently, since a body that fits the pipe buffer completes first. Two of
+# these pins flaked that way before the read moved to a file. It is the same family as #3400's
+# "read by redirection, never a pipe", one shell feature over.
+X1_CODE_F="$T/x1-shipped-code.txt"
+LC_ALL=C sed -e 's/^[[:space:]]*#.*$//' "$X1_SRC" >"$X1_CODE_F" 2>/dev/null || : >"$X1_CODE_F"
+X1_CODE=""
+[ -s "$X1_CODE_F" ] && X1_CODE=present
+if [ -n "$X1_CODE" ]; then
+  ok "x1/structural: the shipped assert's code was extracted (the pins below are not vacuous)"
+else
+  bad "x1/structural: the shipped assert could not be read — the pins below are UNMEASURED"
+fi
+# Needle SPLIT so this guard cannot match its own source line.
+X1_CAP="\$(c_stage""_root)"
+if [ -n "$X1_CODE" ] && ! LC_ALL=C grep -qF "$X1_CAP" "$X1_CODE_F"; then
+  ok "x1/structural: the root is never CAPTURED — no call site can strip a byte off it"
+else
+  bad "x1/structural: a command substitution of the resolver survives, which strips the trailing newline back off the path"
+fi
+if LC_ALL=C grep -q 'C_STAGE_ROOT="\$root"' "$X1_CODE_F"; then
+  ok "x1/structural: the resolver publishes the root by ASSIGNMENT to the shared global"
+else
+  bad "x1/structural: the resolver does not assign C_STAGE_ROOT — the one-resolution property is gone"
+fi
+# The four consumers must READ the global. Counted, so a new consumer that resolves for itself is
+# visible as a count that no longer matches its call sites.
+X1_READS="$(LC_ALL=C grep -c '"\$C_STAGE_ROOT' "$X1_CODE_F" || true)"
+X1_CALLS="$(LC_ALL=C grep -c '^[[:space:]]*c_stage_root$' "$X1_CODE_F" || true)"
+if [ "$X1_READS" -eq 4 ] && [ "$X1_CALLS" -eq 4 ]; then
+  ok "x1/structural: all 4 consumers CALL the resolver and READ the global (4 calls, 4 reads)"
+else
+  bad "x1/structural: $X1_CALLS resolver calls against $X1_READS global reads (want 4 and 4) — a consumer resolves or captures for itself"
+fi
+# THE SENTINEL IS WHAT MAKES THE CAPTURE FAITHFUL, and its completeness is asserted by TWO signals
+# (round 13's lesson): the sentinel AND the status, the latter captured with `|| rc=$?` rather than
+# an `if ! …` that can only ever read zero.
+X1_FN="$(LC_ALL=C sed -n '/^c_stage_root() {$/,/^}$/p' "$X1_SRC" 2>/dev/null || true)"
+case "$X1_FN" in
+  *"printf 'E'; } )\" || rc=\$?"*)
+    ok "x1/structural: the resolver's capture carries the sentinel AND captures git's status with || rc=\$?" ;;
+  *) bad "x1/structural: the resolver's capture is not the two-signal form (got: $X1_FN)" ;;
+esac
+case "$X1_FN" in
+  *'root="${raw%$'*)
+    ok "x1/structural: and it removes EXACTLY ONE trailing newline — git's own terminator, never the directory name's" ;;
+  *) bad "x1/structural: the resolver does not strip exactly one trailing newline" ;;
+esac
+# AND THE SAME CLASS AT THE SECOND SITE THIS SWEEP FOUND: the script's own directory, which is how
+# `review-stage.sh` — the ENFORCER of the verdict this script refuses to merge without — is
+# located. `${BASH_SOURCE[0]%/*}` is pure parameter expansion and cannot lose a byte.
+X1_DN="\$(dir""name \"\${BASH_SOURCE[0]}\")"
+if [ -n "$X1_CODE" ] && ! LC_ALL=C grep -qF "$X1_DN" "$X1_CODE_F"; then
+  ok "x1/structural: the script's own directory is no longer resolved through a dirname substitution"
+else
+  bad "x1/structural: self_dir still goes through \$(dirname …), which strips a trailing newline and names a SIBLING"
+fi
+# BOTH HALVES, because either alone is satisfiable without the property: the source has to be
+# bound by expansion AND the directory taken by expansion. The first draft pinned a spelling the
+# code does not use (`${BASH_SOURCE[0]%/*}` in one step) and red on a correct fix — the guard that
+# reds on correct input is the guard agents learn to waive.
+if LC_ALL=C grep -qF 'self_src="${BASH_SOURCE[0]:-}"' "$X1_CODE_F" &&
+  LC_ALL=C grep -qF 'self_dir_rel="${self_src%/*}"' "$X1_CODE_F"; then
+  ok "x1/structural: it takes the source AND its directory by parameter expansion, which is byte-faithful by construction"
+else
+  bad "x1/structural: the byte-faithful expansion is absent, so the enforcer's location can still be mislocated"
+fi
+
 # --- 44h: THE STRUCTURAL EMIT-BOUNDARY GUARD (round 7, L1b) -------------------
 # The mirror of test_review_stage.sh section 18, for this script. See
 # scripts/tests/lib/emit-boundary-scan.sh for why the guard exists (the boundary was bypassed at a
@@ -5636,7 +5924,31 @@ fi
 # `=`-mapping boundary, or a hand-edited record could forge a `report=` pair AHEAD of the measured
 # one and the remainder rule would read the FORGED value (the reader takes the FIRST occurrence).
 # Its behavioural counterpart is section 29(b) of test_review_stage.sh.
-ASSERT_FLOOR=514
+#
+# ROUND 18's X1 MOVES IT TO 531 (+17, of which 537 execute — the documented 6-assertion host-gated
+# margin is preserved). The new section 44s: a CAPTURED PATH IS NOT THE PATH. `c_stage_root`
+# captured `git rev-parse --show-toplevel`, and each of its four callers captured `c_stage_root`
+# again, so a trailing newline was stripped TWICE and a checkout whose DIRECTORY NAME ends in an
+# LF resolved to an EXISTING SIBLING — whose stage records the AUTO path then located, bound and
+# read. `c_assert_head_binds_certified` cannot see it: HEAD is read in the CWD (the real lane, so
+# it binds) while the ARTIFACT comes from the sibling. The channel is REMOVED rather than made
+# faithful — the resolver assigns a global and prints nothing — so a fifth call site cannot
+# reintroduce it. The root is made OBSERVABLE by giving the sibling TWO stage records, because
+# AMBIGUOUS is the one refusal that PRINTS the directory it enumerated: the RED CONTROL plants the
+# pre-fix lossy resolver into a scratch copy of the assert (the ARTIFACT substituted, never a
+# settable seam) and must NAME the sibling, while the shipped one must name THIS lane's own
+# absence and never the sibling, emit no merge-proceeding verdict, and leave the peer's records
+# intact. EIGHT structural pins: no capture of the resolver anywhere (needle SPLIT so the guard
+# cannot match its own line), assignment to the shared global, 4 calls against 4 global reads, the
+# two-signal completeness form, exactly-one-trailing-newline removal, and — the SECOND instance of
+# the class, found by sweeping rather than by fixing the site the finding named — the script's own
+# directory no longer resolved through `$(dirname "${BASH_SOURCE[0]}")`, which is how
+# `review-stage.sh`, the ENFORCER of the verdict this script refuses to merge without, is located.
+# Two of these pins initially FLAKED: `printf … | grep -q` short-circuits on a match, printf takes
+# SIGPIPE, and under `pipefail` the pipeline status is 141 — so a pin over a >64KiB body failed
+# exactly when its needle was PRESENT. They read a FILE now (#3400's "by redirection, never a
+# pipe", one shell feature over). Every one needs only bash, git and coreutils.
+ASSERT_FLOOR=531
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

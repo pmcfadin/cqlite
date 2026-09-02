@@ -941,8 +941,58 @@ validate_secs() {
 # worktree.
 REPO_ROOT=""
 require_repo_root() {
-  local root="" rendered=""
-  root="$(git rev-parse --show-toplevel 2>/dev/null)" || root=""
+  local raw="" root="" rendered="" rc=0
+  # A CAPTURED PATH IS NOT THE PATH (#3751 round 18, X1).
+  #
+  # THE FINDING (roborev job 397). `root="$(git rev-parse --show-toplevel)"` strips EVERY
+  # trailing newline, so a checkout whose DIRECTORY NAME ends in an LF resolved to a
+  # DIFFERENT, EXISTING SIBLING path — `/lanes/lane<LF>` was captured as `/lanes/lane`. The
+  # value then holds no newline, so round 17's representability refusal below never fires:
+  # the tool proceeds silently against the sibling. Measured on the shipped script in a
+  # checkout named `lanetrail<LF>`, with a PEER lane's clean report at the truncated path:
+  #   REVIEW-STAGE: c RESULT: PASS … report=/…/lanetrail/.review-stage/issue-700/c.<n>.md
+  # — exit 0, the #3616 peer-artifact class reached through the capture rather than through
+  # a recency scan. A stage this lane never opened certified this lane's merge.
+  #
+  # ROUND 13 (S2) ENUMERATED TRAILING-NEWLINE STRIPPING AND DECLARED IT HARMLESS. That
+  # conclusion was CORRECT about REPORT CONTENT — every grammar here is per-line and
+  # column-zero anchored, so trailing newlines create no `result:` line — and it is FALSE
+  # about a PATH, where the stripped bytes are part of the value's IDENTITY and a shorter
+  # string names a different file. The durable rule: a lossy-capture conclusion must be
+  # RE-DERIVED PER CONSUMER, never carried from the consumer it was reasoned about.
+  #
+  # THE FIX IS IN THE CAPTURE, and it keeps git's own framing rather than guessing. A
+  # SENTINEL is appended INSIDE the substitution, so the stripping has nothing of ours to
+  # eat; the sentinel is removed, and then EXACTLY ONE newline — git's own terminator for
+  # `--show-toplevel` — and nothing else. What survives is byte-faithful, so a trailing-LF
+  # root reaches the representability refusal below and is NAMED instead of silently
+  # resolving elsewhere.
+  #
+  # COMPLETENESS IS ASSERTED BY TWO SIGNALS, round 13's own lesson: the sentinel AND git's
+  # exit status. Either alone is defeatable — a value whose last byte happens to be the
+  # sentinel is textually indistinguishable from a complete read, and a status captured with
+  # `if ! x=$(…)` reads 0.
+  raw="$( { git rev-parse --show-toplevel 2>/dev/null && printf 'E'; } )" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    raw=""
+  else
+    case "$raw" in
+      *E) raw="${raw%E}" ;;
+      # No sentinel on a zero status is not an output shape this parses; treated as
+      # unresolved, which is the fail-closed direction (the refusal below).
+      *) raw="" ;;
+    esac
+  fi
+  if [ -n "$raw" ]; then
+    # EXACTLY ONE TRAILING NEWLINE IS REMOVED — git's terminator — because any further one
+    # belongs to the DIRECTORY NAME. A value with none is not `--show-toplevel`'s documented
+    # shape, so it is REFUSED rather than accepted as-is: guessing at an unrecognised shape is
+    # what produced this finding.
+    case "$raw" in
+      *$'\n') root="${raw%$'\n'}" ;;
+      *) die_usage "internal: git printed a worktree root with no terminating newline, which is not the output shape this tool parses. Nothing was read or written" ;;
+    esac
+  fi
   [ -n "$root" ] || die_usage "not inside a git worktree (this tool writes into the lane's worktree on purpose — see the header)"
   # AND THE ROOT MUST BE CARRIABLE ON THIS TOOL'S ONE-LINE GRAMMAR (#3751 round 17, W2).
   #

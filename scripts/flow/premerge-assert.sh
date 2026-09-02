@@ -1307,15 +1307,63 @@ c_assert_head_binds_certified() {
   fi
 }
 
-# c_stage_root — the worktree root the AUTO stage lookup is relative to. ONE resolution,
-# shared by the locator and the binding assert below, so the two cannot form two opinions
-# about WHICH `.review-stage/` they are talking about. Called from a command substitution by
-# the locator, so it reports and never refuses.
+# THE WORKTREE ROOT THE AUTO STAGE LOOKUP IS RELATIVE TO. ONE resolution, shared by the
+# locator and the binding asserts below, so the two cannot form two opinions about WHICH
+# `.review-stage/` they are talking about.
+#
+# IT IS A GLOBAL, AND IT IS NEVER PRINTED — A CAPTURED PATH IS NOT THE PATH (#3751 round 18, X1).
+#
+# THE FINDING (roborev job 397). This resolver captured `git rev-parse --show-toplevel` in a
+# command substitution, and every one of its four callers then captured `c_stage_root` in a
+# SECOND one — so the trailing newline was stripped TWICE. A checkout whose DIRECTORY NAME ends
+# in an LF therefore resolved to a DIFFERENT, EXISTING SIBLING path, and the AUTO path located,
+# bound and read THAT directory's stage record: a peer lane's `PASS` certifying this lane's
+# merge. Measured, from a checkout named `lanetrail<LF>`, the captured root was
+# `…/red2/lanetrail` and the locator's glob found `…/red2/lanetrail/.review-stage/issue-900/`.
+# It is the #3616 peer-artifact class reached through a lossy capture instead of a recency scan,
+# and `c_assert_head_binds_certified` cannot see it: HEAD is read in the CWD (the real lane, so
+# it binds) while the ARTIFACT comes from the sibling.
+#
+# ROUND 13 (S2) enumerated trailing-newline stripping and declared it harmless. That was CORRECT
+# about the stage RECORD's content — every grammar here is per-line and column-zero anchored —
+# and FALSE about a PATH, whose stripped bytes are part of its identity. A lossy-capture
+# conclusion must be RE-DERIVED PER CONSUMER, never carried.
+#
+# SO THERE IS NO SUBSTITUTION LEFT TO STRIP ANYTHING: the resolver assigns a GLOBAL and prints
+# nothing, and each call site reads `$C_STAGE_ROOT` directly. Removing the channel beats making
+# one more capture faithful — a fifth call site added later cannot reintroduce the defect by
+# writing `$(c_stage_root)`, because there is nothing to capture. Pinned structurally by
+# section 44i of scripts/tests/test_premerge_assert.sh.
+#
+# It still REPORTS rather than refuses (it falls back to `$PWD`), which is unchanged: an
+# unresolvable root is the "no stage was ever opened" state the locator's caller names, and
+# every value this script prints goes through `c_safe_display`, so a newline-bearing root cannot
+# break the `PREMERGE:` anchor the way it breaks review-stage.sh's one-line verdict grammar.
+C_STAGE_ROOT=""
 c_stage_root() {
-  local root
-  root=$(git rev-parse --show-toplevel 2>/dev/null) || root=""
+  local raw="" root="" rc=0
+  # A SENTINEL INSIDE THE SUBSTITUTION, so the stripping has nothing of ours to eat; then the
+  # sentinel, then EXACTLY ONE newline — git's own terminator for `--show-toplevel` — and
+  # nothing else. Any further trailing newline belongs to the DIRECTORY NAME and is kept.
+  #
+  # COMPLETENESS BY TWO SIGNALS (round 13's own lesson): the sentinel AND git's exit status.
+  # A value whose last byte happens to be the sentinel is indistinguishable from a complete
+  # read, and `if ! x=$(…)` reads the status as 0.
+  raw="$( { git rev-parse --show-toplevel 2>/dev/null && printf 'E'; } )" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    case "$raw" in
+      *E) raw="${raw%E}" ;;
+      *) raw="" ;;
+    esac
+    # No terminator is not `--show-toplevel`'s documented shape; treated as unresolved rather
+    # than guessed at, which is what falls back to `$PWD` below.
+    case "$raw" in
+      *$'\n') root="${raw%$'\n'}" ;;
+      *) root="" ;;
+    esac
+  fi
   [ -n "$root" ] || root="$PWD"
-  printf '%s\n' "$root"
+  C_STAGE_ROOT="$root"
 }
 
 # c_record_bytes <path> — ONE OBSERVATION OF THE STAGE RECORD (#3751 round 9, N2), in a form two
@@ -1456,7 +1504,11 @@ C_STAGE_NONCE=""
 C_STAGE_NONCE_N=""
 c_assert_stage_binds_certified() {
   local issue="$1" sfile out k v n="" value="" nn="" nonce=""
-  sfile="$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.stage"
+  # THE ROOT IS READ FROM THE GLOBAL, NEVER CAPTURED (#3751 round 18, X1): a
+  # `$(c_stage_root)` here would strip a trailing newline back off the directory name and
+  # point this read at a sibling path. See `c_stage_root`.
+  c_stage_root
+  sfile="$C_STAGE_ROOT/.review-stage/issue-$issue/$C_STAGE_KIND.stage"
   if [ ! -f "$sfile" ]; then
     refuse_no_c_verdict \
       "The '$C_STAGE_KIND' stage record for issue $issue is not a readable file:" \
@@ -1632,7 +1684,11 @@ C_STAGE_HEAD_PARSE
 # could only report that the token came from somewhere unvalidated.
 c_assert_stage_record_unchanged() {
   local issue="$1" sfile now
-  sfile="$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.stage"
+  # THE ROOT IS READ FROM THE GLOBAL, NEVER CAPTURED (#3751 round 18, X1): a
+  # `$(c_stage_root)` here would strip a trailing newline back off the directory name and
+  # point this read at a sibling path. See `c_stage_root`.
+  c_stage_root
+  sfile="$C_STAGE_ROOT/.review-stage/issue-$issue/$C_STAGE_KIND.stage"
   if [ -z "$C_STAGE_RECORD" ]; then
     # FAIL CLOSED: no captured observation means the binding assert did not run, so there is
     # nothing to compare and no basis for a pass. Never read as "unchanged".
@@ -1708,7 +1764,11 @@ c_assert_stage_record_unchanged() {
 # this invocation never bound, i.e. asserting a relationship between two unrelated facts.
 c_assert_verdict_from_validated_generation() {
   local issue="$1" sfile
-  sfile="$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.stage"
+  # THE ROOT IS READ FROM THE GLOBAL, NEVER CAPTURED (#3751 round 18, X1): a
+  # `$(c_stage_root)` here would strip a trailing newline back off the directory name and
+  # point this read at a sibling path. See `c_stage_root`.
+  c_stage_root
+  sfile="$C_STAGE_ROOT/.review-stage/issue-$issue/$C_STAGE_KIND.stage"
   if [ -z "$C_STAGE_RECORD" ]; then
     # FAIL CLOSED: no captured observation means the binding assert did not run, so there is no
     # validated generation to bind to. Never read as bound.
@@ -1816,7 +1876,11 @@ c_assert_verdict_from_validated_generation() {
 # a status, and the CALLER refuses explicitly.
 c_auto_locate_issue() {
   local root d n count=0 found=""
-  root=$(c_stage_root)
+  # FROM THE GLOBAL, NEVER A CAPTURE (#3751 round 18, X1) — this is the site the finding
+  # was measured at: the captured value named an existing SIBLING directory, so the glob
+  # below enumerated a PEER lane's stage records. See `c_stage_root`.
+  c_stage_root
+  root="$C_STAGE_ROOT"
   for d in "$root"/.review-stage/issue-*/"$C_STAGE_KIND".stage; do
     [ -f "$d" ] || continue
     n=$(basename "$(dirname "$d")")
@@ -2136,9 +2200,39 @@ c_revalidate() {
 # documented 0/2/3 set, from a line that only feeds a NON-BLOCKING advisory. An
 # unresolvable directory degrades to the ABSENT branch below, which is reported
 # and not fatal, exactly like a deleted advisory.
+#
+# AND IT IS RESOLVED WITHOUT LOSING A BYTE OF THE PATH (#3751 round 18, X1, swept). This is the
+# SECOND instance of the round-18 class in this file, found by sweeping every path-bearing
+# command substitution rather than by fixing the one the finding named. It was
+# `$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)` — TWO nested substitutions, each stripping
+# trailing newlines — so if the directory holding this script were named with a trailing LF,
+# `dirname` produced `…/flow<LF>`, the capture ate the LF, and `cd` landed on an EXISTING
+# SIBLING. What that mislocates is `review-stage.sh`, i.e. the ENFORCER of the C verdict this
+# script refuses to merge without (#3312: the constrained party must not choose its own
+# enforcer — nor may a lossy capture choose it for us), plus `base-staleness.sh`.
+#
+# NO CAPTURE AT ALL FOR THE DIRECTORY PART: `${BASH_SOURCE[0]%/*}` is pure parameter expansion,
+# which is byte-faithful, and it degrades to `.` for a bare filename exactly as `dirname` does.
+# The absolutisation still needs a subshell (a `cd` in THIS shell would move the cwd every git
+# command below reads), so it carries the same SENTINEL as `c_stage_root`. Here the format is
+# OURS, so there is no terminator to remove and the sentinel alone is faithful — unlike git's
+# `--show-toplevel`, whose own newline must be removed and exactly one of them.
 self_dir=""
-if ! self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"; then
-  self_dir=""
+self_src="${BASH_SOURCE[0]:-}"
+if [ -n "$self_src" ]; then
+  self_dir_rel="${self_src%/*}"
+  [ "$self_dir_rel" != "$self_src" ] || self_dir_rel="."
+  self_dir_raw=""
+  self_dir_rc=0
+  self_dir_raw="$( { cd -- "$self_dir_rel" 2>/dev/null && printf '%sE' "$PWD"; } )" || self_dir_rc=$?
+  if [ "$self_dir_rc" -eq 0 ]; then
+    case "$self_dir_raw" in
+      *E) self_dir="${self_dir_raw%E}" ;;
+      # No sentinel on a zero status is not a shape this parses; degrade to the reported
+      # ABSENT branch below rather than guess, which is the non-fatal, named direction.
+      *) self_dir="" ;;
+    esac
+  fi
 fi
 if [ -n "$self_dir" ]; then
   advisory_script="$self_dir/base-staleness.sh"

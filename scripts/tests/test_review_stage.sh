@@ -4699,21 +4699,37 @@ fi
 # breaks: a value that spans lines cannot be a field of a one-line record at any rendering).
 W2_D="$T/w2"; mkdir -p "$W2_D"
 
-# w2_repo <dirname> — a git checkout at a literal directory name, or empty when this filesystem
-# cannot hold it. NOTHING is asserted from a fixture that did not build: a case that silently ran
-# in an ordinary directory would pass for the wrong reason (test_premerge_assert.sh §44's lesson).
+# w2_repo <outvar> <dirname> — a git checkout at a LITERAL directory name, ASSIGNED to <outvar>.
+# Returns non-zero (leaving <outvar> empty) when this filesystem cannot hold the name. NOTHING is
+# asserted from a fixture that did not build: a case that silently ran in an ordinary directory
+# would pass for the wrong reason (test_premerge_assert.sh §44's lesson).
+#
+# THE PATH IS ASSIGNED, NEVER PRINTED — A TEST HELPER THAT TRANSPORTS A PATH THROUGH A COMMAND
+# SUBSTITUTION CANNOT CONSTRUCT ITS OWN SUBJECT (#3751 round 18, X1).
+#
+# This helper used to `printf '%s\n' "$d"` and every call site was `W2_x="$(w2_repo …)"` — so it
+# had the EXACT blind spot round 17's subject has: `$( )` strips every trailing newline, so a
+# fixture named with a TRAILING LF arrived at the case as its SIBLING path. Round 17's LF case
+# passed only because its name is `lane<LF>two`, where the newline is EMBEDDED and survives; the
+# trailing-LF shape — which is the one that defeats the shipped resolver, because a truncated path
+# carries no newline for the representability refusal to see — could not be presented AT ALL. The
+# harness therefore reported a refusal it had never actually tested against its worst input, which
+# is this repository's harness-that-never-reached-the-code class inside the guard for a lossy
+# capture. `printf -v` is byte-faithful and there is no substitution left to strip anything.
 w2_repo() {
-  local d="$W2_D/$1"
+  local out="$1" d="$W2_D/$2"
+  printf -v "$out" '%s' '' 2>/dev/null || return 1
   mkdir -p "$d" 2>/dev/null || return 1
   git -C "$d" init -q >/dev/null 2>&1 || return 1
   printf '.review-stage/\n' >"$d/.gitignore" 2>/dev/null || return 1
-  printf '%s\n' "$d"
+  printf -v "$out" '%s' "$d" 2>/dev/null || return 1
+  return 0
 }
 
 W2_LF=""
 W2_LF_NAME="lane
 two"
-if W2_LF="$(w2_repo "$W2_LF_NAME")" && [ -n "$W2_LF" ] && [ -d "$W2_LF" ]; then
+if w2_repo W2_LF "$W2_LF_NAME" && [ -n "$W2_LF" ] && [ -d "$W2_LF" ]; then
   case "$W2_LF" in
     *"
 "*) ok "w2 fixture: a git checkout whose PATH contains a literal LF was built (asserted, not assumed)" ;;
@@ -4750,12 +4766,116 @@ if [ -n "$W2_LF" ]; then
   rc_is 64 "w2/author: and so does record-author-performed, which would otherwise WRITE under that path"
 fi
 
+# (a2) A *TRAILING* NEWLINE IS THE SHAPE THAT DEFEATED THE RESOLVER, AND IT IS THE PEER-ARTIFACT
+#      CLASS (#3751 round 18, X1; roborev job 397).
+#
+# THE FINDING. `require_repo_root` captured the root with `root="$(git rev-parse
+# --show-toplevel)"`, and a command substitution strips EVERY trailing newline. So a checkout whose
+# DIRECTORY NAME ends in an LF resolved to a DIFFERENT, EXISTING SIBLING path — and the captured
+# value then carries NO newline, so the representability refusal above never fires. The tool
+# proceeds, silently, against the sibling's `.review-stage/`: measured on the shipped script,
+# `verdict` reported `REVIEW-STAGE: c RESULT: PASS … report=…/lanetrail/.review-stage/…` at exit 0
+# off a report THIS LANE NEVER OPENED. That is #3616's peer-artifact class reached through a lossy
+# capture rather than through a recency scan, and it is why the case below asserts the PEER's
+# verdict is not reported, not merely that something refused.
+#
+# WHY ROUND 17's OWN LF CASE COULD NOT SEE IT. Its fixture is named `lane<LF>two`, where the
+# newline is EMBEDDED and therefore survives `$( )`; and `w2_repo` itself returned the fixture path
+# through a command substitution, so the trailing-LF shape could not be presented AT ALL. The
+# helper now ASSIGNS (see `w2_repo`), which is what makes this case constructible.
+#
+# ROUND 13 (S2) ENUMERATED TRAILING-NEWLINE STRIPPING AND DECLARED IT HARMLESS — correctly, about
+# REPORT CONTENT, where every grammar is per-line and column-zero anchored. It is FALSE about a
+# PATH, whose stripped bytes are part of its identity. The durable rule this case pins: a
+# lossy-capture conclusion must be RE-DERIVED PER CONSUMER, never carried from the consumer it was
+# reasoned about.
+W2_TR=""        # the real lane: a checkout whose directory name ENDS in an LF
+W2_TR_SIB=""    # the sibling the stripped capture named
+W2_TR_PEER=""   # the peer report the stripped capture would have certified
+W2_TR_NAME="lanetrail
+"
+if w2_repo W2_TR "$W2_TR_NAME" && [ -n "$W2_TR" ] && [ -d "$W2_TR" ] &&
+  case "$W2_TR" in *"
+") true ;; *) false ;; esac; then
+  ok "w2 fixture: a git checkout whose path ENDS in an LF was built (asserted on the path, not assumed)"
+else
+  bad "w2 fixture: a TRAILING-LF checkout could not be built — every case below is UNMEASURED"
+  W2_TR=""
+fi
+# THE SIBLING IS THE PATH THE STRIPPED CAPTURE NAMES, and it must be a REAL, WORKING lane holding a
+# CLEAN verdict — otherwise a refusal below could come from the sibling being broken rather than
+# from the root being resolved faithfully.
+#
+# `$'\n'` AND NOT `"$(printf '\n')"`: the first draft of this line used the substitution and it
+# expanded to the EMPTY STRING, because a command substitution strips every trailing newline — so
+# the suffix removal removed NOTHING and the equality failed on a correctly-built fixture. The
+# subject of this case, reproduced inside the case, in one line. `test_premerge_assert.sh` records
+# the same trap at its own §44.
+if [ -n "$W2_TR" ] && w2_repo W2_TR_SIB "lanetrail" && [ -n "$W2_TR_SIB" ] &&
+  [ "$W2_TR_SIB" = "${W2_TR%$'\n'}" ]; then
+  ok "w2 fixture: the sibling at the STRIPPED path exists and is exactly the trailing-LF path minus its last byte"
+else
+  bad "w2 fixture: the sibling path could not be built or is not the stripped form of the real one — the peer-read case proves nothing"
+  W2_TR=""
+fi
+if [ -n "$W2_TR" ]; then
+  rs "$W2_TR_SIB" open c --issue 704 --agent spec-auditor
+  W2_TR_PEER="$(REPORT_OF "$W2_TR_SIB" 704 c)"
+  printf 'result: PASS\n\n## Findings\n\nnone.\n' >"$W2_TR_PEER" 2>/dev/null || true
+  rs "$W2_TR_SIB" verdict c --issue 704
+  case "$OUT" in
+    *"RESULT: PASS"*) ok "w2 fixture: the sibling's stage is VALID BAIT — read from the sibling ITSELF it reports RESULT: PASS" ;;
+    *) bad "w2 fixture: the sibling's stage does not report PASS, so a refusal below is not evidence about the peer read (got: $OUT)"; W2_TR="" ;;
+  esac
+else
+  bad "w2 fixture: the peer bait was not attempted, because the fixture above did not build"
+fi
+if [ -n "$W2_TR" ]; then
+  W2_TR_PEER_BEFORE="$(LC_ALL=C cat "$W2_TR_PEER" 2>/dev/null || printf '<unreadable>')"
+  # (i) `open` REFUSES — a DIFFERENT issue number, so a write that landed in EITHER root is visible
+  #     as a directory that did not exist before.
+  rs "$W2_TR" open c --issue 705 --agent spec-auditor
+  rc_is 64 "w2/trailing-lf/open: a checkout whose path ENDS in an LF is REFUSED, not resolved to its sibling"
+  has "NEWLINE" "w2/trailing-lf/open: under the newline cause, which is now REACHABLE — before the fix the captured value held no newline at all"
+  if [ -d "$W2_TR/.review-stage/issue-705" ]; then
+    bad "w2/trailing-lf/open: the refused open wrote under the real root anyway"
+  else
+    ok "w2/trailing-lf/open: nothing was written under the REAL root"
+  fi
+  if [ -d "$W2_TR_SIB/.review-stage/issue-705" ]; then
+    bad "w2/trailing-lf/open: the refused open wrote into the SIBLING lane — the peer-artifact defect is live on the write side"
+  else
+    ok "w2/trailing-lf/open: and nothing was written into the SIBLING lane"
+  fi
+  # (ii) `verdict` REFUSES, and — the property that matters — it does not report the PEER's clean
+  #      verdict. This is the exact measured false PASS.
+  rs "$W2_TR" verdict c --issue 704
+  rc_is 64 "w2/trailing-lf/verdict: the same refusal at the same boundary (the check is at the ONE root resolution)"
+  hasnt "report=" "w2/trailing-lf/verdict: NO report= field is published — the sibling's path is never advertised as this lane's report of record"
+  hasnt "RESULT:" "w2/trailing-lf/verdict: and NO RESULT: token at all, so the PEER's PASS is not reported as this lane's verdict"
+  W2_TR_PEER_AFTER="$(LC_ALL=C cat "$W2_TR_PEER" 2>/dev/null || printf '<unreadable>')"
+  if [ "$W2_TR_PEER_BEFORE" = "$W2_TR_PEER_AFTER" ]; then
+    ok "w2/trailing-lf: the peer lane's report is byte-unchanged — the refusal neither read it as ours nor wrote over it"
+  else
+    bad "w2/trailing-lf: the peer lane's report CHANGED, so this lane wrote into another lane's stage"
+  fi
+else
+  bad "w2/trailing-lf: UNMEASURED (1/8) — the fixture did not build"
+  bad "w2/trailing-lf: UNMEASURED (2/8)"
+  bad "w2/trailing-lf: UNMEASURED (3/8)"
+  bad "w2/trailing-lf: UNMEASURED (4/8)"
+  bad "w2/trailing-lf: UNMEASURED (5/8)"
+  bad "w2/trailing-lf: UNMEASURED (6/8)"
+  bad "w2/trailing-lf: UNMEASURED (7/8)"
+  bad "w2/trailing-lf: UNMEASURED (8/8)"
+fi
+
 # (e) A CARRIAGE RETURN IS THE SAME CLASS AND IS REFUSED THE SAME WAY. `one_line` maps CR to a
 #     space exactly as it maps LF, so a CR-bearing root publishes a nonexistent path too — and a
 #     guard keyed on LF alone would be the character list this case exists to rule out.
 W2_CR=""
 W2_CR_NAME="$(printf 'lane\rtwo')"
-if W2_CR="$(w2_repo "$W2_CR_NAME")" && [ -n "$W2_CR" ] && [ -d "$W2_CR" ] &&
+if w2_repo W2_CR "$W2_CR_NAME" && [ -n "$W2_CR" ] && [ -d "$W2_CR" ] &&
   case "$W2_CR" in *"$(printf '\r')"*) true ;; *) false ;; esac; then
   ok "w2 fixture: a CR-bearing checkout was built"
   rs "$W2_CR" open c --issue 701 --agent spec-auditor
@@ -4772,7 +4892,7 @@ fi
 #     the renderer's own answer rather than a two-character test.
 W2_TAB=""
 W2_TAB_NAME="$(printf 'lane\ttwo')"
-if W2_TAB="$(w2_repo "$W2_TAB_NAME")" && [ -n "$W2_TAB" ] && [ -d "$W2_TAB" ] &&
+if w2_repo W2_TAB "$W2_TAB_NAME" && [ -n "$W2_TAB" ] && [ -d "$W2_TAB" ] &&
   case "$W2_TAB" in *"$(printf '\t')"*) true ;; *) false ;; esac; then
   ok "w2 fixture: a TAB-bearing checkout was built"
   rs "$W2_TAB" open c --issue 702 --agent spec-auditor
@@ -4791,7 +4911,7 @@ fi
 #     exactly that reason. A refusal that caught this would red on correct input and be the guard
 #     agents learn to waive, so the control asserts the FULL path is published AND that it EXISTS.
 W2_SP=""
-if W2_SP="$(w2_repo "work tree")" && [ -n "$W2_SP" ]; then
+if w2_repo W2_SP "work tree" && [ -n "$W2_SP" ]; then
   ok "w2 CONTROL: a SPACE-bearing checkout was built"
   rs "$W2_SP" open c --issue 703 --agent spec-auditor
   rc_is 0 "w2 CONTROL: a space-bearing checkout is NOT refused — a space survives one_line unchanged"
@@ -4815,7 +4935,14 @@ fi
 #     root is resolved exactly once in the script, and the refusal sits in that same function
 #     BEFORE the global is set (a check after the assignment would let a subcommand build a path
 #     from a root it had already accepted).
-W2_RESOLVE="$(LC_ALL=C grep -c 'rev-parse --show-toplevel' "$RS" || true)"
+# COUNTED OVER CODE, NOT OVER PROSE (#3751 round 18, X1). A whole-file `grep -c` counted the
+# idiom wherever it appeared, INCLUDING the comment in which round 18 quotes the lossy capture it
+# replaced — so writing down what was fixed reported a second resolution site. That is the
+# stale-prose failure inverted: a structural assert must be about the CODE, and a doctrine comment
+# has to be able to NAME the idiom it retired. Full-line comments are blanked first (every
+# occurrence in this file's subject is a full-line `  # …`), so a real second resolution — which
+# is necessarily code — still reds.
+W2_RESOLVE="$(LC_ALL=C sed -e 's/^[[:space:]]*#.*$//' "$RS" | LC_ALL=C grep -c 'rev-parse --show-toplevel' || true)"
 if [ "$W2_RESOLVE" -eq 1 ]; then
   ok "w2/structural: the repository root is resolved in exactly ONE place, so one check covers every subcommand"
 else
@@ -5624,7 +5751,36 @@ fi
 # record with itself), a moved record DISCARDING the report observation, and the defect published as
 # a CLOSED KIND beside its sentence rather than matched as prose. Every one needs only bash, git and
 # coreutils; none branches on the host.
-ASSERT_FLOOR=937
+#
+# ROUND 18's X1 MOVES IT TO 948. Section 30 adds 11: a CAPTURED PATH IS NOT THE PATH.
+# `require_repo_root` captured the root with `root="$(git rev-parse --show-toplevel)"`, and a
+# command substitution strips EVERY trailing newline — so a checkout whose DIRECTORY NAME ends in
+# an LF resolved to a DIFFERENT, EXISTING SIBLING, and the captured value then held no newline for
+# round 17's representability refusal to see. Measured on the shipped script: `verdict` reported
+# `RESULT: PASS … report=…/lanetrail/.review-stage/issue-704/c.<nonce>.md` at exit 0 off a report
+# THIS LANE NEVER OPENED, and the refused `open` created a directory INSIDE the peer lane — the
+# #3616 peer-artifact class reached through a lossy capture rather than a recency scan (6 failures
+# with the hunk reverted, 0 after). Round 17's own LF case could not see it twice over: its
+# fixture is `lane<LF>two`, where the newline is EMBEDDED and survives `$( )`, and `w2_repo`
+# ITSELF returned the fixture path through a command substitution, so the trailing-LF shape could
+# not be presented at all — the harness-that-never-reached-the-code class inside the guard for a
+# lossy capture. The helper now ASSIGNS through `printf -v`, which is what makes the case
+# constructible, and the four existing call sites were converted with it (RE-VERIFIED against the
+# PRE-round-17 script, where 16 of round 17's own assertions red, so they measure the refusal and
+# not the helper). FOUR PREMISE assertions measure the fixture on the path — the trailing LF is
+# really the last byte, the sibling really is that path minus that byte, and the sibling's stage is
+# VALID BAIT because read from the sibling ITSELF it reports `RESULT: PASS` — then the refusal on
+# `open` (a DIFFERENT issue number, so a write landing in either root is a directory that did not
+# exist), on `verdict` with NO `report=` and NO `RESULT:` at all, and the peer's report BYTE-
+# UNCHANGED afterwards. Round 13 (S2) enumerated trailing-newline stripping and declared it
+# harmless: correct about REPORT CONTENT, where every grammar is per-line and column-zero
+# anchored, and false about a PATH, whose stripped bytes are part of its identity — so the durable
+# rule is that a lossy-capture conclusion must be RE-DERIVED PER CONSUMER, never carried. The
+# structural pin that counts resolution sites is also corrected to count over CODE rather than
+# prose: a whole-file `grep -c` counted the idiom in the comment that RECORDS the retired capture,
+# so writing down the fix reported a second resolution site. Every one needs only bash, git and
+# coreutils; none branches on the host.
+ASSERT_FLOOR=948
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"
