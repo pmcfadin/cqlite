@@ -1809,14 +1809,30 @@ cmd_status() {
     if [ "$STAGE_ELAPSED" -gt "$STAGE_DEADLINE" ]; then past=yes; else past=no; fi
   fi
 
+  # THE `s` UNIT BELONGS ONLY TO A VALUE THAT IS A COUNT OF SECONDS. `unknown` is a legitimate
+  # value for both of these (a stage record whose spawned-epoch or deadline-secs bash cannot
+  # compare yields `unknown` rather than a silently wrapped number), and appending the unit
+  # unconditionally rendered `unknowns` on the advisory line a human actually reads. Computed
+  # HERE, before the branch chain below, because both arms consume it and an assignment inside
+  # one arm leaves the other unbound under `set -u`. The comparable case is bare digits and needs
+  # no sanitising; the value is sanitised AT THE EMIT SITE like every other, through
+  # `field_value`, the one boundary — round 7 made that routing structural, and this comment is
+  # here because the guard correctly red my first attempt at this fix. Reuses
+  # `int_is_comparable` rather than re-deriving the predicate: two spellings of "is this a number
+  # bash can compare" is two places for it to drift.
+  elapsed_disp="$STAGE_ELAPSED"
+  deadline_disp="$STAGE_DEADLINE"
+  if int_is_comparable "$STAGE_ELAPSED"; then elapsed_disp="${STAGE_ELAPSED}s"; fi
+  if int_is_comparable "$STAGE_DEADLINE"; then deadline_disp="${STAGE_DEADLINE}s"; fi
+
   emit "STATUS kind=$KI_KIND issue=$KI_ISSUE state=$state elapsed=$STAGE_ELAPSED deadline=$(field_value "$STAGE_DEADLINE") past-deadline=$past agent=$(field_value "$STAGE_AGENT") spawned-at=$(field_value "$STAGE_SPAWNED_ISO") report=$(field_value "${STAGE_REPORT:-unresolved}")"
   if [ "$state" = sentinel-only ] && [ "$past" = yes ]; then
     # A STAGE THAT IS WAITING MUST NOT LOOK LIKE ONE THAT IS HUNG (the gate's
     # `waiting for gate slot` idiom): name the elapsed time AND the fact that nothing was
     # produced, so the operator does not have to infer either.
-    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE PAST DEADLINE: ${STAGE_ELAPSED}s elapsed against a $(field_value "$STAGE_DEADLINE")s deadline and NOTHING has been produced — the report is still the pre-spawn sentinel. This is ADVISORY: the deadline never changes the verdict, and a report arriving later is still a report. Read the verdict with: $prog verdict $KI_KIND --issue $KI_ISSUE"
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE PAST DEADLINE: $(field_value "$elapsed_disp") elapsed against a $(field_value "$deadline_disp") deadline and NOTHING has been produced — the report is still the pre-spawn sentinel. This is ADVISORY: the deadline never changes the verdict, and a report arriving later is still a report. Read the verdict with: $prog verdict $KI_KIND --issue $KI_ISSUE"
   elif [ "$state" = sentinel-only ]; then
-    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE inside deadline: ${STAGE_ELAPSED}s of $(field_value "$STAGE_DEADLINE")s elapsed and nothing produced yet — the report is still the pre-spawn sentinel, which is NOT a verdict."
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE inside deadline: $(field_value "$elapsed_disp") of $(field_value "$deadline_disp") elapsed and nothing produced yet — the report is still the pre-spawn sentinel, which is NOT a verdict."
   elif [ "$state" = not-run-self-reported ]; then
     # THE AGENT'S OWN CAUSE IS THE ACTIONABLE PART, so it is passed through — via `field_value`,
     # the one emit boundary, because it is report-supplied DATA on a line carrying `key=value`
