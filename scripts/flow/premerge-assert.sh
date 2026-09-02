@@ -841,8 +841,13 @@ ANCHOR_SCRATCH=""
 # that lets this process delete its own scratch while denying a peer the ability
 # to swap it. Removal or nothing, not a tuning problem.
 #
-# THE TRADE, stated because it is a real cost and not a free win: one small
-# directory per Case B merge is left under TMPDIR — an object-less `git init` on
+# THE TRADE, stated because it is a real cost and not a free win, and MEASURED
+# rather than estimated: one small directory per Case B INVOCATION is left under
+# TMPDIR. Note INVOCATION, not merge — the test suite exercises Case B dozens of
+# times per run, and 240 such directories accumulated on this box during one round
+# of development before that was noticed. A caller that invokes this repeatedly
+# should point TMPDIR at a directory it owns and removes wholesale (which is what
+# scripts/tests/test_premerge_assert.sh now does); for an actual merge it is one — an object-less `git init` on
 # the RARE path (Case B is #1892's post-gate-polish route, not the ordinary
 # merge) — and the OS reaps TMPDIR. Against that: a recursive delete that can land
 # on a concurrent lane's directory. Not comparable, which is the same reasoning

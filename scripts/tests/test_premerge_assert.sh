@@ -102,6 +102,20 @@ suite_cleanup() {
   rm -rf "$T"
 }
 
+# EVERY CHILD GETS $T AS ITS TMPDIR (found while measuring job 388). The shipped
+# assert creates its scratch under TMPDIR and, since the delete was removed, LEAVES
+# IT THERE. This suite exercises Case B dozens of times per run and runs in the
+# gate's tooling-tests, so with the ambient /tmp it accumulated scratch dirs
+# without bound — 240 measured on this box after a round of development, not the
+# "one per Case B merge" the removal's trade was stated against.
+#
+# Pointing TMPDIR at $T contains them WITHOUT reinstating any per-path delete in
+# the shipped script: the suite already owns $T and removes it WHOLESALE, which is
+# safe precisely because it is this run's own mktemp directory rather than a
+# peer-mutable path. Exported after $T is validated, so the suite's own mktemp
+# above still used the ambient TMPDIR.
+export TMPDIR="$T"
+
 trap 'suite_cleanup' EXIT
 trap 'suite_cleanup; trap - INT;  kill -INT  $$' INT
 trap 'suite_cleanup; trap - TERM; kill -TERM $$' TERM
