@@ -608,21 +608,17 @@ impl V5CompressedLegacyParser {
             let (val, off) = self.parse_raw_type_value(data, 0, type_str, column_name, depth)?;
             return Ok((val, Some(off)));
         }
-        // `duration` USED to be measured here from its own three-VInt framing,
-        // because `parse_value_from_raw_bytes` discarded the count its own arm
-        // already had. It no longer does: #3811 gave that function a reporting twin
-        // and made the short name assert `consumed == data.len()`, and its
-        // `"duration"` arm reports where the third VInt actually ended. So a
-        // trailing byte after a duration key is refused BY THE CALLEE, one layer
-        // down, before control returns here — which makes a second framing walk at
-        // this level dead code that only appears to be doing the work. Folded out
-        // as part of the ONE-implementation unification (#3631; the obligation was
-        // recorded beside `require_fully_consumed`). The refusal message is the
-        // shared "decoded only N of M byte(s)" class either way, which is why the
-        // pinned assertions in `cell_path_key_tests` are unaffected.
-        //
-        // Everything reaching here consumes the whole slice by construction (see
-        // above) or is enforced by the callee, so there is nothing left to compare.
+        // `duration`'s own three-VInt walk USED to live here, and was live only
+        // while `parse_value_from_raw_bytes` discarded the count its arm already
+        // had. #3811 made the short name assert `consumed == data.len()` and made
+        // that arm report where the third VInt ended, so the callee refuses a
+        // trailing byte one layer down and the walk here could never fire — dead
+        // code that only appeared to do the work. Folded out under #3631's
+        // ONE-implementation ruling (recorded beside `require_fully_consumed`);
+        // both layers refuse in the shared "decoded only N of M byte(s)" class, so
+        // `cell_path_key_tests`'s pinned assertions are unaffected. Everything
+        // reaching here consumes the whole slice by construction (see above) or is
+        // enforced by the callee: nothing left to compare.
         Ok((
             self.parse_value_from_raw_bytes(data, type_str, column_name, depth)?,
             None,
