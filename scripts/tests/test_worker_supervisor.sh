@@ -10515,6 +10515,22 @@ test_object_store_unlatchable_corrupt_does_not_refresh_the_throttle() {
   else
     fail "obj-sweep(unlatchable): stamp='$(tr '\n' '/' <"$stamp" 2>/dev/null)' — a peer reading it can throttle past a confirmed-corrupt store (see $d/unlatchable.log)"
   fi
+  # AND THE ARM THAT MAKES *FORCING* NECESSARY RATHER THAN MERELY LEAVING THE STAMP ALONE:
+  # a PEER whose own sweep started earlier finishes DURING this one and writes a FRESH
+  # timestamp. Staged with the `during` hook (a side effect inside the sweep stub — the
+  # only way to place that write between this lane's read and its own write
+  # deterministically), which is the round-2 stale-writer idiom. "Leave the stamp alone"
+  # passes the arm above and FAILS here: the peer's fresh stamp survives and every lane on
+  # the box throttles for the interval over a store confirmed damaged.
+  calls="$d/calls-unlatchable-during"
+  root="$(obj_sweep_tree "$d" CORRUPT 4 "$calls" "printf '%s\\n' \"\$(date +%s)\" >$(printf '%q' "$stamp")")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/during.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 1 && ! -e "$latch" ]] && [[ "$(sed -n 1p "$stamp" 2>/dev/null)" == 0 ]]; then
+    pass "obj-sweep(unlatchable): a peer's FRESH stamp written mid-sweep is overwritten to expired — an unlatchable finding is not undone by a concurrent writer"
+  else
+    fail "obj-sweep(unlatchable-during): rc=$rc latch=$([[ -e "$latch" ]] && echo yes || echo no) stamp='$(sed -n 1p "$stamp" 2>/dev/null)' — a peer's mid-sweep stamp survived an unlatchable CORRUPT verdict (see $d/during.log)"
+  fi
   # AND THE CONSEQUENCE, MEASURED ON A PEER: same box, same stamp, INSIDE the interval.
   # It must re-sweep (the stub records its invocations) and stop on its own finding.
   calls="$d/calls-unlatchable-peer"
