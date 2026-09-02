@@ -50,6 +50,7 @@
 use std::cmp::Ordering;
 
 use crate::storage::sstable::reader::parsing::comparator_value_parsing::parse_value_with_comparator;
+use crate::storage::sstable::writer::data_writer::collection_order::compare_collection_elements;
 use crate::types::{ComparatorType, Value};
 use crate::{Error, Result};
 
@@ -203,8 +204,26 @@ pub(super) fn compare_composite(
         ComparatorType::Custom(name) if name == "inet" || name == "time" => {
             compare_byte_order_custom(name, left, right, cmp)
         }
-        // Every other scalar routes through the single owner of scalar ordering.
-        scalar => scalar.compare(left, right),
+        // Every other scalar leaf routes through the write path's Cassandra-correct
+        // scalar comparator — NOT `ComparatorType::compare` (roborev job 57).
+        //
+        // WHY NOT `ComparatorType::compare`: its `varint` arm compares raw bytes
+        // (so `0` sorts before `-1`), its `decimal` arm is a PLACEHOLDER STRING
+        // comparison, and its `uuid` arm is raw byte order — none of which is
+        // Cassandra's order. A tuple/UDT carrying any of those as a component was
+        // therefore ordered differently from Cassandra on the merged-read arm.
+        //
+        // WHY THIS FUNCTION: `collection_order::compare_collection_elements` is
+        // the repository's EXISTING owner of Cassandra element ordering (#1275
+        // scalars, #1296 composites) — signed integers, Java `Float/Double.compare`
+        // total order, signed `varint`, scale-aware `decimal` and `UUIDType`, with
+        // an unsigned-byte fallback that is correct for text/ascii/blob/boolean/
+        // inet/date. Reusing it is deliberate: a second implementation of an
+        // ordering is a second thing to drift, and the reviewer named this exact
+        // function as the reuse target. It dispatches on the `Value` VARIANT —
+        // authoritative type metadata carried by the value — never on a byte
+        // pattern (no-heuristics, #28).
+        _ => Ok(compare_collection_elements(left, right)),
     }
 }
 

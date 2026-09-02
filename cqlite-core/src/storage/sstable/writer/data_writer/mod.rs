@@ -246,7 +246,12 @@ pub(super) struct OrderedCols {
 }
 
 mod cells;
-mod collection_order;
+// `pub(crate)` (not private) so the READ path can reuse this ordering instead of
+// reimplementing it: `write_engine::merge::read_assembly_composite` delegates its
+// composite scalar LEAVES to `compare_collection_elements` (roborev job 57 on #2339).
+// `ComparatorType::compare`'s varint/decimal/uuid arms are not Cassandra's order, and a
+// second implementation of an ordering is a second thing to drift.
+pub(crate) mod collection_order;
 /// Schema-constant ordered column lists memoized once per writer (issue #1674,
 /// R3). See [`column_cache`].
 mod column_cache;

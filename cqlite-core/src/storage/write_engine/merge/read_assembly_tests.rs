@@ -679,6 +679,38 @@ fn set_of_unresolved_udt_still_fails_closed() {
     );
 }
 
+/// **roborev job 57 — a `varint` COMPONENT of a composite must order as Cassandra does.**
+///
+/// `compare_composite`'s scalar leaves used to delegate to `ComparatorType::compare`,
+/// whose `varint` arm compares RAW BYTES. Two's-complement `-1` is `0xFF` and `0`
+/// is `0x00`, so raw-byte order puts **`0` before `-1`** — the reverse of the signed
+/// numeric order Cassandra's `IntegerType` gives. `decimal` (a placeholder string
+/// compare) and `uuid` (raw bytes) were wrong the same way.
+///
+/// The leaves now delegate to `collection_order::compare_collection_elements`, the
+/// repository's existing owner of Cassandra element ordering, which compares varints
+/// as signed big integers.
+///
+/// RED BEFORE THE FIX: this asserted `Less` and got `Greater`.
+#[test]
+fn varint_component_of_a_composite_orders_signed_not_by_raw_bytes() {
+    let cmp = ComparatorType::Tuple(vec![ComparatorType::Varint]);
+    let minus_one = Value::Tuple(vec![Value::Varint(vec![0xFF].into())]);
+    let zero = Value::Tuple(vec![Value::Varint(vec![0x00].into())]);
+
+    assert_eq!(
+        compare_composite(&minus_one, &zero, &cmp).unwrap(),
+        std::cmp::Ordering::Less,
+        "a varint component must order -1 BEFORE 0 (signed, per Cassandra IntegerType); \
+         raw-byte order would put 0 first because 0xFF > 0x00"
+    );
+    assert_eq!(
+        compare_composite(&zero, &minus_one, &cmp).unwrap(),
+        std::cmp::Ordering::Greater,
+        "and the comparison must be antisymmetric"
+    );
+}
+
 /// **roborev job 52 / G2 — the NESTED unresolved UDT must fail closed too.**
 ///
 /// The guard used to test only the comparator `unwrap_frozen_comparator` returns,
