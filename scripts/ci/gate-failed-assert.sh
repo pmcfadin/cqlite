@@ -18,13 +18,20 @@
 #       count=<N>                 total DISTINCT identities recognised (never capped).
 #                                 DISTINCT is judged on the FULL normalised identity, so
 #                                 no bound anywhere can change the count.
-#       name=<identity>           at most <max-names> lines (default 10), in file order,
-#                                 each the FULL normalised identity. NOT display-capped and
-#                                 NOT truncated at all: the DISPLAY bound lives in the gate,
-#                                 after the neutralisation and the redaction (see the ORDER
-#                                 note at add()), and the one bound here REPLACES an
-#                                 over-long identity with a placeholder rather than keeping
-#                                 a prefix of it (see safety()).
+#       name=<published value>    at most <max-names> lines, in file order, DISTINCT. What
+#                                 a name IS depends on the TIER, and that split is the F7
+#                                 fix (see PUBLICATION POLICY below):
+#                                   assert/guard -> the FULL normalised identity (repo-
+#                                     authored test/guard text). NOT display-capped and NOT
+#                                     truncated at all: the DISPLAY bound lives in the gate,
+#                                     after the neutralisation and the redaction (see the
+#                                     ORDER note at add()), and the one bound here REPLACES
+#                                     an over-long identity with a placeholder rather than
+#                                     keeping a prefix of it (see safety()).
+#                                   toolchain    -> a CLOSED-ENUM KIND LABEL chosen by this
+#                                     file. NO log text is copied. `count` is still the true
+#                                     number of DISTINCT log identities; the names are their
+#                                     DISTINCT kinds, so `count` may exceed the name count.
 #
 #       THIS STDOUT IS INTERNAL, NOT PUBLICATION. Its only consumer is agent-gate.sh's
 #       `_failassert_record`, which passes every name through the ONE emit boundary
@@ -48,6 +55,34 @@
 # ===== THE RECOGNISER TABLE — one place, one stated rule per entry =====
 # Three TIERS, most specific first; the FIRST tier that matches at least once wins, so a
 # cargo `error: test failed…` epilogue never displaces the test names above it.
+#
+# ===== PUBLICATION POLICY — WHICH TIERS MAY PUBLISH THEIR PAYLOAD, AND WHY IT DIFFERS =====
+# This is a SAFETY boundary, not a formatting choice, and the asymmetry is deliberate: do
+# NOT "consistently" widen the toolchain tier or narrow the other two to match it (blocker
+# 10, roborev round 5).
+#
+#   assert / guard  — PUBLISH THE IDENTITY. Their payloads are REPOSITORY-AUTHORED text: a
+#     `bad "…"` message in scripts/tests/*.sh, a libtest/nextest test path, a named guard
+#     verdict. That text is in-tree, reviewed, and diffed by every PR; a credential
+#     committed there is a different and already-lost problem, not something this field
+#     can contain. Publishing it IS the point of #3765 — the field must NAME the assert.
+#
+#   toolchain       — PUBLISH A LABEL ONLY, NEVER THE LINE. Its payload is ENVIRONMENT-
+#     controlled free text (a registry URL, a resolved remote, a shell diagnostic, a
+#     temp path), and this field is rendered into a SUMMARY block that this repo's own
+#     doctrine tells agents to paste into PUBLIC PR comments. Six rounds of this file's
+#     credential-leak family were each an IMPROVED SANITISER (227 raw URL, 234 flattened-
+#     not-redacted, 239 redacted-not-flattened, 264 scp form, 282 query strings, and the
+#     shape neutraliser added for job 48); a keyword/shape recogniser over free text does
+#     not close — `api_key SEKRET` (space-separated) and a bare unmarked secret both
+#     survived it, MEASURED on the rendered field. CLAUDE.md's standing ruling for this
+#     family is STOP RENDERING THE VALUE, DO NOT SANITISE IT AGAIN, so the CHANNEL is
+#     removed here rather than narrowed a seventh time: each toolchain recogniser publishes
+#     a fixed KIND LABEL from the closed enum below, chosen by this file and never copied
+#     from the log. #3765 asks for a DEFECT IDENTITY and prescribes saying so affirmatively
+#     where none exists; a raw `npm error …` line is a diagnostic, not an identity, so
+#     publishing it was beyond what the issue asked for. The text stays in the component
+#     log, which the field points at.
 #
 #   TIER `assert` — a named test case / assertion identity.
 #     A1  `FAIL - <identity>`           the repo's bash test-suite convention: the
@@ -84,22 +119,43 @@
 #                                       [PASS] prefixes). MEASURED on smoke, where the
 #                                       whole line IS the identity.
 #
-#   TIER `toolchain` — no assert identity exists; report the defect line itself.
-#     C1  `error[E….]: …` / `error: …`  rustc/cargo/clippy. First-N in FILE ORDER, so
+#   TIER `toolchain` — NO assert identity exists. The matched line is COUNTED (it is the
+#   dedup key, so the count stays true) and its KIND is published; the line itself is NOT.
+#   The kind is the CLOSED ENUM below — five labels, one per recogniser, each named after
+#   the SHAPE it matched rather than the producer it is guessed to come from, because a
+#   producer claim would be exactly the heuristic this repo forbids.
+#     C1  `error[E….]: …` / `error: …`  -> kind `rustc-cargo-error`
+#                                       rustc/cargo/clippy. First-N in FILE ORDER, so
 #                                       the real diagnostic precedes cargo's own
 #                                       `error: could not compile …` epilogue with no
 #                                       exclusion list to curate.
-#     C2  `npm error <msg>`             node-bindings. MEASURED (npm ci ENOENT).
-#     C3  `bash: <msg>`                 a missing/unexecutable child script. MEASURED
+#     C2  `npm error <msg>`             -> kind `npm-error`
+#                                       node-bindings. MEASURED (npm ci ENOENT).
+#     C3  `bash: <msg>`                 -> kind `bash-error`
+#                                       a missing/unexecutable child script. MEASURED
 #                                       (roborev-lints, 18 logs).
-#     C4  `Diff in <path> at line <n>`  rustfmt --check's diff header. DECLARED
+#     C4  `Diff in <path> at line <n>`  -> kind `rustfmt-diff`
+#                                       rustfmt --check's diff header. DECLARED
 #                                       UNMEASURED: all 16 fmt FAILs in the corpus were
 #                                       a cargo-fmt USAGE error (a #3544 fixture with no
 #                                       Cargo.toml), never a formatting diff, so this
 #                                       one entry is derived from rustfmt's documented
 #                                       output rather than observed here.
-#     C5  `Error: <msg>`                python/maturin's capitalised spelling. MEASURED
-#                                       on python-bindings ("Error: [Errno 28] …").
+#                                       THE PATH IS NO LONGER PUBLISHED. It used to render
+#                                       `rustfmt diff in <path> at line <n>`, which is a
+#                                       DERIVED form rather than a copied line — but the
+#                                       path is still environment-controlled (rustfmt runs
+#                                       over whatever tree it was pointed at, temp dirs
+#                                       included), so keeping it would leave one
+#                                       argued-safe free-text exception inside a channel
+#                                       that was just removed, and the next leak would be
+#                                       in the exception. The count of DISTINCT diff sites
+#                                       survives; the paths are in the component log.
+#     C5  `Error: <msg>`                -> kind `capitalised-error`
+#                                       MEASURED on python-bindings ("Error: [Errno 28]
+#                                       …"), i.e. python/maturin — but the label names the
+#                                       capitalised-`Error:` SHAPE, since node and other
+#                                       tools spell it the same way.
 #
 # NON-EXHAUSTIVE BY CONSTRUCTION. This set was derived by MEASUREMENT over the 174 FAILed
 # component logs present in this box's ~4200 retained agent-gate run directories (29
@@ -186,15 +242,34 @@ awk -v max="$max" '
     return (length(t) > 4096) \
       ? "<identity too long to publish safely: " length(t) " chars>" : t
   }
-  function add(tier, id,   c, full) {
+  # add(tier, id, pub) — THE SPLIT BETWEEN COUNTING AND PUBLISHING (blocker 10, F7).
+  #   `id`  is the FULL identity: the DEDUP key, and the thing `count` counts. It is never
+  #         published for a tier that passes a `pub`.
+  #   `pub` is what MAY BE PUBLISHED. Empty means "publish the identity itself" (tiers
+  #         assert/guard — repository-authored text; see PUBLICATION POLICY in the header).
+  #         Non-empty is a CLOSED-ENUM KIND LABEL this file chose (tier toolchain, whose
+  #         payload is environment-controlled free text and is not published at all).
+  # COUNT CORRECTNESS AND PUBLICATION SAFETY ARE SEPARATE CONCERNS AND NEITHER IS TRADED
+  # FOR THE OTHER: `n[tier]` counts DISTINCT full identities (so the toolchain count is
+  # still the true number of distinct diagnostic lines), while `m[tier]`/`hit[]` carry the
+  # DISTINCT published values (so seventeen `npm error` lines publish one `npm-error`, not
+  # seventeen). count >= name-count by construction, and the gate declares the remainder.
+  function add(tier, id, pub,   c, full, p) {
     full = norm(id)
     if (full == "") return
-    # The dedup key is the FULL identity, never the safety-bounded one: two identities
-    # differing only beyond the bound must still count as two. `count` is the authority.
+    # The dedup key is the FULL identity, never the safety-bounded or projected one: two
+    # identities differing only beyond the bound must still count as two, and two toolchain
+    # lines of the same kind are two lines. `count` is the authority.
     if ((tier SUBSEP full) in seen) return
     seen[tier SUBSEP full] = 1
-    c = ++n[tier]
-    if (c <= max) hit[tier SUBSEP c] = safety(full)
+    n[tier]++
+    p = (pub == "" ? safety(full) : pub)
+    # Published values are deduped SEPARATELY, on the projection, so a repeated kind label
+    # is named once. This cannot affect `count`, which is already incremented above.
+    if ((tier SUBSEP "pub" SUBSEP p) in seenpub) return
+    seenpub[tier SUBSEP "pub" SUBSEP p] = 1
+    c = ++m[tier]
+    if (c <= max) hit[tier SUBSEP c] = p
   }
   # ---- TIER assert ----
   # The A1 identity is the WHOLE payload after `FAIL - `, detail INCLUDED. It used to be
@@ -254,13 +329,17 @@ awk -v max="$max" '
   }
 
   # ---- TIER toolchain ----
-  /^error(\[[A-Za-z0-9]+\])?: / { add("toolchain", $0); next }
-  /^npm error / { add("toolchain", $0); next }
-  /^Error: / { add("toolchain", $0); next }
-  /^bash: / { add("toolchain", $0); next }
-  /^Diff in .* at line [0-9]+:/ {
-    s = $0; sub(/^Diff in /, "", s); sub(/:$/, "", s); add("toolchain", "rustfmt diff in " s); next
-  }
+  # EVERY rule here passes a THIRD argument: the closed-enum kind label. The matched line
+  # is the dedup key (so the count is true) and is NEVER published. A future rule added
+  # without a label would publish the line, so the shape is pinned STRUCTURALLY in
+  # scripts/tests/test_agent_gate_summary.sh (3765-toolchain-*), and the gate REFUSES to
+  # publish a toolchain name that is not a bare label token — a source scan cannot see a
+  # runtime value, so the invariant is checked on the OUTPUT PATH too.
+  /^error(\[[A-Za-z0-9]+\])?: / { add("toolchain", $0, "rustc-cargo-error"); next }
+  /^npm error / { add("toolchain", $0, "npm-error"); next }
+  /^Error: / { add("toolchain", $0, "capitalised-error"); next }
+  /^bash: / { add("toolchain", $0, "bash-error"); next }
+  /^Diff in .* at line [0-9]+:/ { add("toolchain", $0, "rustfmt-diff"); next }
 
   END {
     split("assert guard toolchain", order, " ")
@@ -269,7 +348,10 @@ awk -v max="$max" '
       if (!(t in n)) continue
       printf "tier=%s\n", t
       printf "count=%d\n", n[t]
-      lim = (n[t] < max ? n[t] : max)
+      # count is over DISTINCT IDENTITIES (n), the names over DISTINCT PUBLISHED values
+      # (m). For assert/guard the two are equal by construction; for toolchain m <= n, and
+      # the gate declares the difference as `(+K more)`.
+      lim = (m[t] < max ? m[t] : max)
       for (c = 1; c <= lim; c++) printf "name=%s\n", hit[t SUBSEP c]
       exit 0
     }

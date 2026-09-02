@@ -5546,9 +5546,19 @@ case "$fa_got" in
   *SEKRETALPHA*) bad "3765-cred-url: the URL userinfo credential is rendered VERBATIM into the SUMMARY field ('$fa_got') — SUMMARY blocks are pasted into PR comments" ;;
   *) ok "3765-cred-url: a URL-userinfo credential in a toolchain line does NOT reach the rendered field" ;;
 esac
+# THE MARKER PROPERTY CHANGED WITH BLOCKER 10 AND IS NOW STRONGER. This fixture is a
+# `bash: ` line, i.e. TIER TOOLCHAIN, whose payload is environment text and is no longer
+# published AT ALL — so the field carries the closed-enum KIND LABEL and no placeholder,
+# because there is no rendered value left to place a placeholder in. Asserted positively
+# (the label IS there — a silently dropped field is not a fix) and negatively (no fragment
+# of the line survives, not just no token).
 case "$fa_got" in
-  *"<url>"*) ok "3765-cred-url-marker: the NEUTRALISATION placeholder is present, so the field reports that a url stood there rather than dropping the line" ;;
-  *) bad "3765-cred-url-marker: expected '<url>' in the field, got '$fa_got' — a silently dropped value is not a neutralisation" ;;
+  *"RECOGNISED (toolchain): bash-error"*)
+    case "$fa_got" in
+      *h.io*|*"not found"*) bad "3765-cred-url-marker: a FRAGMENT of the toolchain line reached the field ('$fa_got') — the tier must publish the label ONLY" ;;
+      *) ok "3765-cred-url-marker: the toolchain tier publishes the closed-enum label 'bash-error' and NO fragment of the line" ;;
+    esac ;;
+  *) bad "3765-cred-url-marker: expected the closed-enum kind label 'bash-error', got '$fa_got' — a silently dropped field is not a neutralisation" ;;
 esac
 _fa_run credscp "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/cred-scp.log" PASS
 fa_got=$(_fa_line fmt)
@@ -5557,8 +5567,12 @@ case "$fa_got" in
   *) ok "3765-cred-scp: an scp-form (user@host:path) credential does NOT reach the rendered field" ;;
 esac
 case "$fa_got" in
-  *"<authority>"*) ok "3765-cred-scp-marker: the authority placeholder is present, so the diagnostic is still reported" ;;
-  *) bad "3765-cred-scp-marker: expected '<authority>' in the field, got '$fa_got'" ;;
+  *"RECOGNISED (toolchain): capitalised-error"*)
+    case "$fa_got" in
+      *h.io*|*cqlite.git*|*denied*) bad "3765-cred-scp-marker: a FRAGMENT of the toolchain line reached the field ('$fa_got')" ;;
+      *) ok "3765-cred-scp-marker: the toolchain tier publishes the label 'capitalised-error' and no fragment of the line, so the scp form has no channel to travel" ;;
+    esac ;;
+  *) bad "3765-cred-scp-marker: expected the closed-enum kind label 'capitalised-error', got '$fa_got'" ;;
 esac
 # STRUCTURAL, and labelled as such: the redaction must be the EXISTING one redactor,
 # called from the ONE clean function. A second implementation is the drift this repo
@@ -5608,8 +5622,12 @@ case "$fa_got" in
   *) ok "3765-cred-long-url: a URL credential spanning the display boundary does NOT reach the rendered field" ;;
 esac
 case "$fa_got" in
-  *"<url>"*) ok "3765-cred-long-url-marker: the placeholder survives the display bound, so the field still reports the diagnostic" ;;
-  *) bad "3765-cred-long-url-marker: expected '<url>' in the field, got '$fa_got' — a silently dropped value is not a neutralisation" ;;
+  *"RECOGNISED (toolchain): npm-error"*)
+    case "$fa_got" in
+      *tarball*|*fetching*|*h.io*) bad "3765-cred-long-url-marker: a FRAGMENT of the toolchain line reached the field ('$fa_got')" ;;
+      *) ok "3765-cred-long-url-marker: an over-long toolchain line publishes the label 'npm-error' only — the display bound has nothing to elide, so it cannot sever a shape either" ;;
+    esac ;;
+  *) bad "3765-cred-long-url-marker: expected the closed-enum kind label 'npm-error', got '$fa_got'" ;;
 esac
 _fa_run credlongscp "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/cred-long-scp.log" PASS
 fa_got=$(_fa_line fmt)
@@ -5618,8 +5636,12 @@ case "$fa_got" in
   *) ok "3765-cred-long-scp: an scp-form credential spanning the display boundary does NOT reach the rendered field" ;;
 esac
 case "$fa_got" in
-  *"<authority>"*) ok "3765-cred-long-scp-marker: the authority placeholder survives the display bound" ;;
-  *) bad "3765-cred-long-scp-marker: expected '<authority>' in the field, got '$fa_got'" ;;
+  *"RECOGNISED (toolchain): capitalised-error"*)
+    case "$fa_got" in
+      *rejected*|*denied*|*h.io*) bad "3765-cred-long-scp-marker: a FRAGMENT of the toolchain line reached the field ('$fa_got')" ;;
+      *) ok "3765-cred-long-scp-marker: an over-long scp-form toolchain line publishes the label only" ;;
+    esac ;;
+  *) bad "3765-cred-long-scp-marker: expected the closed-enum kind label 'capitalised-error', got '$fa_got'" ;;
 esac
 
 # 55y. THE ORDER IS ASSERTED STRUCTURALLY: normalise -> redact -> bound for display.
@@ -5691,10 +5713,17 @@ printf "npm error request failed: Authorization: Bearer SEKRETGOLF\n" > "$fa_dir
 # `…deploy-user:SEKRETHOTEL` — no `@`, no scheme, no `?…=` — which every shape rule and
 # both redaction rules legitimately pass, after which the 60-char middle elision publishes
 # the token in its tail. That is why the bound may not truncate at all.
+#
+# ON THE `assert` TIER, DELIBERATELY (blocker 10). This fixture used to be an `npm error`
+# line, i.e. tier toolchain — which no longer publishes its payload at all, so the case
+# would have passed for a reason that has nothing to do with the bound and the safety
+# placeholder would have become untested. `assert` is the tier that still publishes its
+# identity, so it is the tier where a truncating bound could still sever a shape, and that
+# is where the property must be measured.
 awk 'BEGIN {
   pad = sprintf("%4063s", ""); gsub(/ /, "x", pad)
   tail = sprintf("%100s", ""); gsub(/ /, "y", tail)
-  printf "npm error %sdeploy-user:SEKRETHOTEL@h.io/pkg%s\n", pad, tail
+  printf "FAIL - %sdeploy-user:SEKRETHOTEL@h.io/pkg%s\n", pad, tail
 }' > "$fa_dir/neu-span.log"
 printf 'Diff in /repo/cqlite-core/src/storage/sstable/reader.rs at line 12:\n' > "$fa_dir/neu-path.log"
 
@@ -5705,8 +5734,12 @@ case "$fa_got" in
   *) ok "3765-neu-query: a query-string secret (?token=…) does NOT reach the rendered field" ;;
 esac
 case "$fa_got" in
-  *"<query>"*) ok "3765-neu-query-marker: the query placeholder is present, so the field still reports that a query-bearing token stood there" ;;
-  *) bad "3765-neu-query-marker: expected '<query>' in the field, got '$fa_got' — a silently dropped value is not a neutralisation" ;;
+  *"RECOGNISED (toolchain): npm-error"*)
+    case "$fa_got" in
+      *pkg*|*Unauthorized*) bad "3765-neu-query-marker: a FRAGMENT of the toolchain line reached the field ('$fa_got')" ;;
+      *) ok "3765-neu-query-marker: a query-bearing toolchain line publishes the label 'npm-error' only — the shape the redactor cannot see has no channel at all" ;;
+    esac ;;
+  *) bad "3765-neu-query-marker: expected the closed-enum kind label 'npm-error', got '$fa_got'" ;;
 esac
 
 _fa_run neuheader "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/neu-header.log" PASS
@@ -5716,8 +5749,12 @@ case "$fa_got" in
   *) ok "3765-neu-header: a header-form credential does NOT reach the rendered field" ;;
 esac
 case "$fa_got" in
-  *"Authorization: Bearer <secret>"*) ok "3765-neu-header-marker: the KEY and the scheme word are kept and only the VALUE is neutralised, so the diagnostic still says what kind of field it was" ;;
-  *) bad "3765-neu-header-marker: expected 'Authorization: Bearer <secret>' in the field, got '$fa_got'" ;;
+  *"RECOGNISED (toolchain): npm-error"*)
+    case "$fa_got" in
+      *Authorization*|*Bearer*|*request*) bad "3765-neu-header-marker: a FRAGMENT of the toolchain line reached the field ('$fa_got')" ;;
+      *) ok "3765-neu-header-marker: a header-form toolchain line publishes the label 'npm-error' only (the KEY-kept form is now asserted on the RETAINED assert tier, in 55aa)" ;;
+    esac ;;
+  *) bad "3765-neu-header-marker: expected the closed-enum kind label 'npm-error', got '$fa_got'" ;;
 esac
 
 _fa_run neuspan "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/neu-span.log" PASS
@@ -5731,24 +5768,23 @@ case "$fa_got" in
   *) bad "3765-neu-span-marker: expected 'too long to publish safely' in the field, got '$fa_got' — the bound is still retaining a prefix" ;;
 esac
 
-# THE NEUTRALISATION MUST NOT EAT THE SUBJECT. Two survivals, both from the issue itself:
-# a rustfmt diff names a PATH (no authority), and the #3765 motivating instance is ordinary
-# prose. A rule that blanked either would make the field useless, which is the failure mode
-# opposite to the leak and just as fatal to this issue's purpose.
+# THE RUSTFMT PATH IS NOT PUBLISHED EITHER (blocker 10). It used to render
+# `rustfmt diff in <path> at line <n>`, and that form was defensible on one ground — it is
+# DERIVED, not a copied line. It is dropped anyway: the path is still ENVIRONMENT-controlled
+# (rustfmt formats whatever tree it was pointed at, temp dirs included), so keeping it would
+# leave exactly one argued-safe free-text exception inside a channel that was just removed —
+# and the next leak in this six-round family would be in the exception. What survives is what
+# a reader needs: the KIND, and the true COUNT of distinct diff sites (asserted at 55aa-count).
 _fa_run neupath "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/neu-path.log" PASS
 fa_got=$(_fa_line fmt)
-# The 60-char per-name DISPLAY elision still applies (it is a separate, pre-existing bound,
-# and it runs AFTER all of this) — so the property asserted is that the neutralisation
-# CHANGED NOTHING: the head and the distinguishing tail are the path's own, and no
-# placeholder appears.
 case "$fa_got" in
-  *"rustfmt diff in /repo/cqlit"*"sstable/reader.rs at line 12"*)
+  *"RECOGNISED (toolchain): rustfmt-diff"*)
     case "$fa_got" in
-      *"<url>"*|*"<authority>"*|*"<query>"*|*"<secret>"*)
-        bad "3765-neu-path-survives: a placeholder replaced part of an ordinary path ('$fa_got') — the neutralisation is eating paths" ;;
-      *) ok "3765-neu-path-survives: 'rustfmt diff in <path>' survives the neutralisation untouched (a path carries no authority)" ;;
+      *reader.rs*|*/repo/*|*"at line"*)
+        bad "3765-neu-path-notpublished: the rustfmt PATH reached the rendered field ('$fa_got') — an environment-controlled value in a channel that is supposed to publish labels only" ;;
+      *) ok "3765-neu-path-notpublished: a rustfmt diff publishes the label 'rustfmt-diff' and NOT the path (the path is environment-controlled; the component log keeps it)" ;;
     esac ;;
-  *) bad "3765-neu-path-survives: expected the rustfmt path identity (head + tail) intact, got '$fa_got'" ;;
+  *) bad "3765-neu-path-notpublished: expected the closed-enum kind label 'rustfmt-diff', got '$fa_got'" ;;
 esac
 _fa_run neuprose "file-size:FAIL fmt:PASS clippy:PASS" "file-size=$fa_dir/one.log" PASS
 fa_got=$(_fa_line file-size)
@@ -5792,6 +5828,124 @@ if ! grep -qE 'cut -c|head -c' "$fa_tool"; then
 else
   bad "3765-order-extractor-nocut: the extractor character-cuts its output, upstream of the neutralisation (blocker 8's class)"
 fi
+# 55aa. THE TOOLCHAIN TIER PUBLISHES A CLOSED-ENUM LABEL AND NO FREE TEXT (blocker 10,
+#       roborev round 5). 55w/55x/55z each improved the SANITISER and each was followed by
+#       a round finding a shape it did not know — six of them in this file's family. The
+#       coordination lead then MEASURED two survivors on the RENDERED field:
+#           Error: api_key SEKRETAK3 revoked      -> published VERBATIM (space-separated key)
+#           Error: SEKRETPLAIN4 is not a valid ref-> published VERBATIM (unmarked secret)
+#       An unmarked secret is undetectable in principle, so the seventh sanitiser round was
+#       refused and the CHANNEL removed instead: tier `toolchain` publishes a kind LABEL.
+#
+#       METHOD, and both halves of it caught the lead out, so they are restated here:
+#       (a) never assert a leak check on EXTRACTOR STDOUT — the extractor neither redacts
+#           nor neutralises, so a token a bound cut looks "absent" there while never having
+#           been neutralised. Every assertion below is on the RENDERED field.
+#       (b) tiers are FIRST-MATCH-WINS, so a fixture containing any `FAIL - ` line makes the
+#           ASSERT tier win and the toolchain lines are never emitted — a leak test with a
+#           mixed fixture passes for the wrong reason. Every fixture here is TOOLCHAIN-ONLY,
+#           and SHORT, so the 60-char display bound cannot hide a token either.
+fa_tcdir="$fa_dir/tc"; mkdir -p "$fa_tcdir"
+printf 'Error: token=SEKRETEQ1 rejected\n'          > "$fa_tcdir/p1.log"
+printf 'Error: password: SEKRETPW2 invalid\n'       > "$fa_tcdir/p2.log"
+printf 'Error: api_key SEKRETAK3 revoked\n'         > "$fa_tcdir/p3.log"
+printf 'Error: SEKRETPLAIN4 is not a valid ref\n'   > "$fa_tcdir/p4.log"
+fa_probe_i=0
+for fa_probe in p1:SEKRETEQ1 p2:SEKRETPW2 p3:SEKRETAK3 p4:SEKRETPLAIN4; do
+  fa_probe_f=${fa_probe%%:*}; fa_probe_tok=${fa_probe#*:}
+  fa_probe_i=$((fa_probe_i + 1))
+  _fa_run "tc$fa_probe_f" "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_tcdir/$fa_probe_f.log" PASS
+  fa_got=$(_fa_line fmt)
+  case "$fa_got" in
+    *"$fa_probe_tok"*) bad "3765-tc-noleak-$fa_probe_f: the secret $fa_probe_tok reached the RENDERED field ('$fa_got') — a keyword/shape recogniser over environment free text does not close; the channel must stay removed" ;;
+    *) ok "3765-tc-noleak-$fa_probe_f: probe $fa_probe_i publishes no $fa_probe_tok substring (the two space-separated/unmarked forms are the ones that leaked before blocker 10)" ;;
+  esac
+  case "$fa_got" in
+    *"RECOGNISED (toolchain): capitalised-error - no named assert exists; the diagnostic TEXT is not published (see the component log)"*)
+      ok "3765-tc-affirm-$fa_probe_f: the field states the KIND, that no named assert exists, and that the text was WITHHELD BY POLICY — affirmative, never a silence" ;;
+    *) bad "3765-tc-affirm-$fa_probe_f: expected the closed-enum label plus the affirmative 'no named assert exists; the diagnostic TEXT is not published' statement, got '$fa_got'" ;;
+  esac
+done
+# THE COUNT IS STILL THE TRUE NUMBER OF DISTINCT IDENTITIES, which is the property F5 exists
+# for and the one a projection could silently have destroyed: three DISTINCT `npm error`
+# lines are three, published as ONE kind (their distinct kind set), with the remainder
+# DECLARED. Count and publication are separate concerns and neither is traded for the other.
+printf 'npm error one\nnpm error two\nnpm error three\nbash: /x/y.sh: No such file\n' > "$fa_tcdir/count.log"
+_fa_run tccount "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_tcdir/count.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *"4 RECOGNISED (toolchain): npm-error, bash-error (+2 more)"*)
+    ok "3765-tc-count: 4 distinct toolchain identities count as 4 and publish their 2 distinct KINDS with the remainder declared — the projection did not corrupt the count" ;;
+  *) bad "3765-tc-count: expected '4 RECOGNISED (toolchain): npm-error, bash-error (+2 more)', got '$fa_got' — either the count is now over kinds (F5 regressed) or a kind is published twice" ;;
+esac
+
+# THE NEUTRALISER IS RETAINED FOR THE `assert`/`guard` TIERS, AND THAT IS WHERE IT IS NOW
+# MEASURED. Their payloads are REPOSITORY-AUTHORED (a `bad "…"` message, a test path, a
+# named guard verdict): in-tree, reviewed, diffed by every PR, and publishing them IS the
+# subject of #3765. So the channel is KEPT there and the shape neutralisation stays as
+# defence in depth over it — DECLARED as a REDUCTION, never a guarantee (an unmarked secret
+# in prose is undetectable in principle; see _failassert_neutralise's header). These four
+# cases pin the four rules on the tier that still publishes, so removing the neutraliser
+# would red here rather than silently affecting only repo-authored text.
+printf 'FAIL - neu-a: cloning https://x-access-token:SEKRETINDIA@h.io/p failed\n' > "$fa_tcdir/a-url.log"
+printf 'FAIL - neu-b: SEKRETJULIET@h.io:pmcfadin/cqlite.git denied\n'             > "$fa_tcdir/a-scp.log"
+printf 'FAIL - neu-c: fetch h.io/pkg?token=SEKRETKILO failed\n'                   > "$fa_tcdir/a-qry.log"
+printf 'FAIL - neu-d: Authorization: Bearer SEKRETLIMA\n'                         > "$fa_tcdir/a-hdr.log"
+for fa_probe in a-url:SEKRETINDIA:'<url>' a-scp:SEKRETJULIET:'<authority>' a-qry:SEKRETKILO:'<query>' a-hdr:SEKRETLIMA:'Bearer <secret>'; do
+  fa_probe_f=${fa_probe%%:*}; fa_probe_rest=${fa_probe#*:}
+  fa_probe_tok=${fa_probe_rest%%:*}; fa_probe_mark=${fa_probe_rest#*:}
+  _fa_run "neu$fa_probe_f" "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_tcdir/$fa_probe_f.log" PASS
+  fa_got=$(_fa_line fmt)
+  case "$fa_got" in
+    *"$fa_probe_tok"*) bad "3765-neu-retained-$fa_probe_f: $fa_probe_tok reached the rendered field on the RETAINED assert tier ('$fa_got') — the neutralisation is gone from the tier that still publishes its payload" ;;
+    *) ok "3765-neu-retained-$fa_probe_f: the neutralisation still fires on the retained assert tier (no $fa_probe_tok in the field)" ;;
+  esac
+  case "$fa_got" in
+    *"$fa_probe_mark"*) ok "3765-neu-retained-marker-$fa_probe_f: the '$fa_probe_mark' placeholder is published, so the retained tier reports WHAT stood there rather than dropping it" ;;
+    *) bad "3765-neu-retained-marker-$fa_probe_f: expected '$fa_probe_mark' in the field, got '$fa_got' — a silently dropped value is not a neutralisation" ;;
+  esac
+done
+
+# STRUCTURAL, and labelled as such (the lead's requirement, and this class has now recurred
+# five times): a future edit must not be able to reintroduce free text into the toolchain
+# tier. A behavioural case only covers the shapes someone already thought of, so the
+# MECHANISM is asserted — every toolchain recogniser passes a LABEL LITERAL, add() publishes
+# that label instead of the identity, the identity is still the DEDUP key, and the gate
+# refuses a non-label toolchain name on the OUTPUT PATH (a source scan cannot see a runtime
+# value).
+fa_tc_sec=$(awk '/---- TIER toolchain ----/,/^  END \{/' "$fa_tool" | grep -v '^[[:space:]]*#')
+fa_tc_calls=$(printf '%s\n' "$fa_tc_sec" | grep -c 'add("toolchain"')
+fa_tc_lab=$(printf '%s\n' "$fa_tc_sec" | grep -cE 'add\("toolchain", [^,]+, "[a-z][a-z0-9-]*"\)')
+if [ "${fa_tc_calls:-0}" -ge 5 ] && [ "$fa_tc_calls" = "$fa_tc_lab" ]; then
+  ok "3765-toolchain-all-labelled: all $fa_tc_calls toolchain recognisers publish a closed-enum LABEL LITERAL (none copies its matched line)"
+else
+  bad "3765-toolchain-all-labelled: $fa_tc_calls toolchain add() call(s) but only $fa_tc_lab pass a label literal — an unlabelled call publishes the LOG LINE, which is the removed free-text channel (blocker 10)"
+fi
+fa_tc_bare=$(grep -cE 'add\("toolchain", [^,]*\)' "$fa_tool")
+if [ "${fa_tc_bare:-1}" = 0 ]; then
+  ok "3765-toolchain-no-bare-add: nowhere in the extractor does a toolchain add() omit its label argument"
+else
+  bad "3765-toolchain-no-bare-add: $fa_tc_bare toolchain add() call(s) pass only two arguments, so the matched LINE becomes the published value (blocker 10)"
+fi
+fa_add_body=$(awk '/function add\(tier, id, pub/,/^  }/' "$fa_tool" | grep -v '^[[:space:]]*#')
+if printf '%s\n' "$fa_add_body" | grep -q 'pub == "" ? safety(full) : pub'; then
+  ok "3765-toolchain-projection: add() publishes the LABEL when one is supplied and the identity otherwise — the projection is one expression in one place"
+else
+  bad "3765-toolchain-projection: add() no longer projects the published value through the pub argument — a tier that supplies a label would publish its identity anyway"
+fi
+if printf '%s\n' "$fa_add_body" | grep -q '(tier SUBSEP full) in seen'; then
+  ok "3765-toolchain-count-on-identity: the DEDUP key is still the FULL identity, so projecting the published value cannot change the count (F5 stays fixed)"
+else
+  bad "3765-toolchain-count-on-identity: add() no longer dedups on the full identity — the count is now over the projection, which is F5 again"
+fi
+fa_rec_tc=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
+if printf '%s\n' "$fa_rec_tc" | grep -q 'a toolchain kind label failed the closed-label shape check' \
+   && printf '%s\n' "$fa_rec_tc" | grep -q '\*\[!a-z0-9-\]\*'; then
+  ok "3765-toolchain-outputpath-guard: the emit path REFUSES a toolchain name that is not a bare label token — the invariant is checked on the OUTPUT, not only in the source"
+else
+  bad "3765-toolchain-outputpath-guard: _failassert_record does not shape-check toolchain names before publishing them — a runtime value can carry what no source scan sees"
+fi
+
 # 55za. NO SECOND FORMATTER, INCLUDING ON THE TREE-INTEGRITY BOUNDARY BLOCK (roborev job
 #       48, blocker 9). Both component loops in _tree_boundary_meta_lines rendered their
 #       rows with a bare `printf '%-18s %s (%ss)\n'`, bypassing _fm_summary_line — so a FAIL
@@ -5876,6 +6030,17 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
+# 470 -> 492 on #3765 (roborev round 5, blocker 10): section 55aa adds 22 asserts — 8
+# behavioural probes on TOOLCHAIN-ONLY fixtures (the lead's four measured survivors: a
+# space-separated `api_key SEKRET`, a bare unmarked secret, and the two keyed forms that
+# did neutralise), each asserting BOTH no-leak AND the affirmative label+withheld-text
+# statement; 1 that the projection did not corrupt the COUNT (4 identities, 2 kinds,
+# remainder declared); 8 that the neutraliser is RETAINED and still fires on the `assert`
+# tier, whose payload is repo-authored and is still published; and 5 STRUCTURAL ones
+# pinning the mechanism (every toolchain recogniser passes a label literal, no two-argument
+# toolchain add(), the projection is one expression, the dedup key is still the full
+# identity, and the gate refuses a non-label toolchain name on the OUTPUT path).
+# Host-INDEPENDENT for the same reason as the rest of section 55.
 # 458 -> 470 on #3765 (roborev job 48, blockers 7/8/9): section 55z adds 12 asserts — 6
 # behavioural leak cases the REDACTOR cannot see (a query string, a header form, a
 # credential straddling the extractor safety bound, each with its placeholder), 2 survivals
@@ -5915,7 +6080,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=470
+ASSERT_FLOOR=492
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

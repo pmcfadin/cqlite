@@ -6637,11 +6637,26 @@ _failassert_write() {
 #       (`Authorization: Bearer X`, where the scheme word `bearer`/`basic` passes the mark on).
 #       The KEY is kept — a reader needs to know a credential-shaped field was there.
 #
-# DECLARED RESIDUAL, because a shape rule cannot be a secrecy oracle: a secret in ORDINARY
-# PROSE, with no authority shape and no credential-named key (`npm error the passphrase was
-# hunter2`), still passes. That is deliberate — the alternative is publishing nothing, and the
-# whole subject of #3765 is that a FAIL line must NAME its failing assert. What is closed is
-# the shape that carries credentials in the measured corpus.
+# WHAT THIS IS NOW FOR, AFTER BLOCKER 10 (roborev round 5). This function is NO LONGER what
+# stands between an environment-controlled diagnostic and a PR comment: the `toolchain` tier —
+# the ONLY tier whose payload is environment text — stopped publishing free text ALTOGETHER
+# and publishes a closed-enum KIND LABEL instead (see the PUBLICATION POLICY header in
+# scripts/ci/gate-failed-assert.sh). This stays as DEFENCE IN DEPTH over the two RETAINED
+# tiers, `assert` and `guard`, whose payloads are REPOSITORY-AUTHORED test-assertion and
+# guard-verdict text: in-tree, reviewed, diffed by every PR, and a secret committed there is a
+# different and already-lost problem. Publishing that text IS the subject of #3765.
+# DO NOT "consistently" widen the toolchain tier back, and do not narrow assert/guard to
+# match it — the asymmetry IS the fix, and its two halves have different reasons.
+#
+# DECLARED RESIDUAL — THIS IS A REDUCTION, NEVER A GUARANTEE, and the wording matters because
+# a guarantee this code cannot deliver must not be implied. A shape/keyword rule is not a
+# secrecy oracle: it CANNOT recognise an unmarked secret. MEASURED on the rendered field, both
+# directions: `token=SEKRET` and `password: SEKRET` neutralise, while `api_key SEKRET`
+# (credential-named key, SPACE-separated, no `:`/`=`) and a bare `SEKRETPLAIN` in prose do
+# NOT. Adding `api_key`-with-space to the key set would be the seventh improvement to a
+# sanitiser in a family whose standing ruling is STOP RENDERING THE VALUE, DO NOT SANITISE IT
+# AGAIN — the list does not close, which is exactly why the toolchain CHANNEL was removed
+# instead. For the retained tiers the residual is accepted: the text is repo-authored.
 #
 # OVER-REDACTION IS THE ACCEPTED DIRECTION: an ordinary `name@example.com` in an assert message
 # renders `<authority>`, and a test whose text is `token=42` renders `token=<secret>`. Under-
@@ -6874,6 +6889,24 @@ _failassert_record() {
     _failassert_write "$name" "0 RECOGNISED (component log scanned; no recogniser matched - the recogniser set is NON-EXHAUSTIVE)"
     return 0
   fi
+  # BOTH INTERPOLATED PROTOCOL FIELDS ARE VALIDATED AGAINST A CLOSED SHAPE BEFORE THEY ARE
+  # PUBLISHED, and neither is echoed back on refusal. `$tier` and `$count` are rendered
+  # VERBATIM into the field's prefix (`<count> RECOGNISED (<tier>): `), so an extractor that
+  # printed anything else would publish it. They come from an in-tree extractor resolved with
+  # no env override, so this is defence in depth — but the whole point of blocker 10 is that
+  # this field must not carry a value nobody constrained, and a source scan cannot see a
+  # RUNTIME value (CLAUDE.md: an invariant over OUTPUT needs a check on the OUTPUT PATH).
+  case "$tier" in
+    assert|guard|toolchain) ;;
+    *)
+      _failassert_write "$name" "not extractable (the extractor named a tier outside this field's closed set of three - refused rather than published)"
+      return 0 ;;
+  esac
+  case "$count" in
+    ''|*[!0-9]*)
+      _failassert_write "$name" "not extractable (the extractor's count is not a number - refused rather than published)"
+      return 0 ;;
+  esac
   # THE NAMES ARE PASSED AS SEPARATE ARGUMENTS, not pre-joined into one string, because
   # the per-name display bound must be applied INSIDE _failassert_clean — after the
   # redaction — and a joined string has no name boundaries left to bound (a recognised
@@ -6893,8 +6926,33 @@ _failassert_record() {
     _failassert_write "$name" "$(_failassert_clean --prose "not extractable (extractor reported count=$count for tier $tier but named nothing)")"
     return 0
   fi
+  # ===== THE TOOLCHAIN TIER PUBLISHES LABELS, AND THAT IS CHECKED HERE TOO (blocker 10) =====
+  # The extractor publishes a CLOSED-ENUM KIND LABEL for tier `toolchain` and copies no log
+  # text (see its PUBLICATION POLICY header). This is the same invariant asserted on the
+  # OUTPUT PATH, because the structural assert covers the CODE while a runtime value can
+  # carry what no source scan sees. It checks the SHAPE — a bare `[a-z0-9-]` token — and
+  # deliberately NOT enum MEMBERSHIP: a second copy of the enum here would be a second place
+  # for it to diverge, and a copied log line cannot be a bare token (it carries spaces,
+  # colons, slashes). It REFUSES rather than redacting: for this tier the value is a label,
+  # and a label that is not a label is not something to sanitise into shape.
+  if [ "$tier" = toolchain ]; then
+    for fa_n in "${fa_names[@]}"; do
+      case "$fa_n" in
+        -*|*-|*[!a-z0-9-]*|'')
+          _failassert_write "$name" "not extractable (a toolchain kind label failed the closed-label shape check at the emit boundary - this tier publishes labels, never log text)"
+          return 0 ;;
+      esac
+    done
+  fi
   value=""
   [ "$count" -gt "$shown" ] 2>/dev/null && value=" (+$((count - shown)) more)"
+  # THE TOOLCHAIN TIER SAYS AFFIRMATIVELY WHAT IT IS NOT PUBLISHING. #3765 requires the
+  # field to name a DEFECT IDENTITY and to say so affirmatively where none is available to
+  # the harness; a kind label is not an assert name, so the line states that no named assert
+  # exists AND that the text was withheld by policy — never leaving a reader to guess
+  # whether the harness looked. A fixed literal, like the prefix beside it.
+  [ "$tier" = toolchain ] && \
+    value="$value - no named assert exists; the diagnostic TEXT is not published (see the component log)"
   _failassert_write "$name" \
     "$(_failassert_clean --names "$count RECOGNISED ($tier): " "$value" "${fa_names[@]}")"
   return 0

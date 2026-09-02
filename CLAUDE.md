@@ -715,16 +715,31 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   a 68x bound. So the extractor emits the FULL identity and **truncates nothing**: an over-bound
   identity is published as an affirmative placeholder naming its measured length, never as a prefix,
   because **declaring a hazard is not removing it** and a truncation must not precede neutralisation
-  at ANY bound. **And the field no longer publishes free text at all (#3765 / roborev job 48).** A
-  redactor that knows only URL userinfo and the scp form let a secret through in a query string, a
-  header or prose — the SIXTH round of that family in this one file — so the ruling taken on the
-  origin diagnostic (`STOP RENDERING THE VALUE, DO NOT SANITISE IT AGAIN`) applies here too: every
-  URL-/authority-/query-shaped or credential-KEYED token is replaced WHOLESALE, by SHAPE, with a
-  fixed placeholder before any bound, and the redactor stays only as defence in depth. Count
-  correctness and publication safety are SEPARATE concerns and neither is traded for the other: the
-  extractor dedupes and counts on the FULL identity, internally, and the emit boundary publishes only
-  the neutralised PROJECTION. Declared residual: a secret in ordinary prose with no authority shape
-  and no credential-named key still passes; over-redaction is the accepted direction. **A bound must
+  at ANY bound. **And the ONE tier whose payload is environment-controlled publishes NO free text at
+  all — it publishes a CLOSED-ENUM KIND LABEL (#3765 / roborev job 48 + round 5).** A redactor that
+  knows only URL userinfo and the scp form let a secret through in a query string, a header or prose
+  — the SIXTH round of that family in this one file — and the shape neutraliser written for it was
+  the SEVENTH: measured on the rendered field, `token=X` and `password: X` neutralised while
+  `api_key X` (credential-named key, SPACE-separated) and a bare unmarked secret did NOT. **An
+  unmarked secret is undetectable in principle, so a keyword/shape recogniser over free text NEVER
+  closes** and the ruling taken on the origin diagnostic (`STOP RENDERING THE VALUE, DO NOT SANITISE
+  IT AGAIN`) is applied literally: tier `toolchain` (rustc/cargo `error:`, `npm error`, `bash:`,
+  `Error:`, a rustfmt diff) COUNTS its matched lines and publishes only a label this repo chose —
+  `npm-error`, `rustfmt-diff` — plus the affirmative statement that no named assert exists and the
+  text was withheld; the diagnostic stays in the component log. **The asymmetry with tiers
+  `assert`/`guard` IS the fix and neither half may be "consistently" widened or narrowed**: their
+  payloads are repository-authored test/guard text — in-tree, reviewed, diffed by every PR, and
+  publishing them is what #3765 asks for — so the channel is retained there and the shape
+  neutralisation (URL/authority/query/credential-keyed token -> fixed placeholder, before any bound)
+  stays over it as **a REDUCTION, never a guarantee**, with the redactor behind it as defence in
+  depth. Even the *derived* `rustfmt diff in <path>` form went: a path is environment-controlled, and
+  one argued-safe exception inside a removed channel is where the next leak lands. Count correctness
+  and publication safety are SEPARATE concerns and neither is traded for the other: the extractor
+  dedupes and counts on the FULL identity, internally, and the emit boundary publishes only the
+  PROJECTION — so a toolchain count may exceed its label count and the remainder is DECLARED. The
+  label invariant is checked BOTH structurally (every recogniser passes a label literal) and on the
+  OUTPUT PATH (a name that is not a bare label token is REFUSED, not sanitised), because a source
+  scan cannot see a runtime value. **A bound must
   never be able to change a safety verdict, and a leak check must be made on the RENDERED field —
   never on extractor stdout, where a token cut by an elision looks absent while never having been
   redacted.** The same "one renderer" rule covers the tree-integrity BOUNDARY block, whose two
