@@ -413,8 +413,17 @@ const CASES: &[Case] = &[
             ("time_map", Multicell::Map),
             ("pair_set", Multicell::Set),
         ],
-        // Two MEASURED rendering divergences, neither of them ordering: ORDER is
-        // compared by position and is NOT excused by either skip.
+        // Two MEASURED rendering divergences, neither of them ordering. What each
+        // skip costs for ORDER differs, and saying "order is still compared" of
+        // both would be false (roborev job 69):
+        //   * inet_set: the matcher proves the two sides are the SAME address, so a
+        //     reordered set fails — element [0] would pair ::1 against 9.0.0.1.
+        //   * pair_set: NestedFrozenValueLeftUndecodedByGolden compares no content,
+        //     so THIS LANE would not notice the tuples being reordered with the
+        //     count preserved. That order is pinned instead by
+        //     cqlite-core/tests/issue_3790_collection_order_cassandra_golden.rs,
+        //     which asserts pair_set's cell-path sequence (inet-major, time-minor,
+        //     both partitions) directly against the same golden.
         skips: &[
             Skip {
                 path: "inet_set",
@@ -432,7 +441,7 @@ const CASES: &[Case] = &[
                 path: "pair_set",
                 formats: BOTH,
                 divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
-                why: "golden leaves the frozen tuple<inet, time> as colon-joined text while the CLI decodes it; only the SHAPE is checked",
+                why: "golden leaves the frozen tuple<inet, time> as colon-joined text while the CLI decodes it; only the SHAPE is checked — so a REORDERING of the tuples is NOT detected here either, and pair_set's order is pinned by issue_3790_collection_order_cassandra_golden.rs instead",
             },
         ],
     },
