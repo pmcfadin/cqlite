@@ -620,10 +620,18 @@ else
       ok "F1 (AC3): the planted no-op reports VACUOUS and the line NAMES '$PLANT_COMPONENT' as having verified nothing — not a bare red" ;;
     *) bad "F1 (AC3): the planted no-op did not report a NAMED VACUOUS state: $plant_line" ;;
   esac
-  case "$plant_line" in
-    *' PASS '*) bad "F2 (AC2): the planted component still reports PASS — a component that verified nothing must not pass: $plant_line" ;;
-    *) ok "F2 (AC2): the planted component does NOT report PASS" ;;
-  esac
+  # THE STATUS FIELD, not a scan for the word. A bare `* PASS *` was the wrong instrument
+  # and this suite's own RED arm proved it: with the VACUOUS arm removed the row reads
+  # `… {no census: component ended VACUOUS, so there is no PASS to affirm}`, whose PROSE
+  # contains " PASS ", so F2 fired for a reason unrelated to the status. Same lesson as
+  # Q1's status-claim check — a word scan over a line that legitimately names other
+  # statuses is a guard that reds on correct input.
+  plant_st=$(printf '%s' "$plant_line" | awk '{print $2}')
+  if [ "$plant_st" = PASS ]; then
+    bad "F2 (AC2): the planted component still reports PASS — a component that verified nothing must not pass: $plant_line"
+  else
+    ok "F2 (AC2): the planted component's STATUS FIELD is '$plant_st', not PASS"
+  fi
   # `%-18s` pads the name field, so the status is matched after arbitrary spaces rather
   # than assumed adjacent — an assertion that depends on the padding width would red on a
   # rename of any longer component.
