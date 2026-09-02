@@ -736,3 +736,70 @@ fn the_float_tie_break_gap_does_not_cover_a_different_f32() {
     );
     assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
 }
+
+/// Decimals inside the SAME f32 rounding interval that NEITHER formatter produces
+/// (roborev, issue #3777). 36.6015625's interval spans roughly
+/// (36.6015606, 36.6015644), so each of these parses to the same f32 as the real
+/// pair — and none of them is Rust `Display`'s `36.601563` or serde_json's
+/// `36.601562`, so the tie-break gap must NOT suppress them.
+///
+/// A named const with a floor asserted below, not an inline list: a span-replacing
+/// edit that deletes cases leaves a green run over a shrunken set (#3544).
+const NON_FORMATTER_TIE_SPELLINGS: &[&str] = &["36.6015624", "36.601564", "36.601561"];
+
+/// f32-equality is NOT the gap: the two sides must be the SPELLINGS THE TWO
+/// FORMATTERS PRODUCE. A third decimal in the same rounding interval is a value
+/// nothing on either side of this comparison can emit, so suppressing it would make
+/// the gap a blind spot for the whole cell instead of the declared Java-vs-Rust
+/// tie-break.
+#[test]
+fn the_float_tie_break_gap_rejects_a_spelling_neither_formatter_produces() {
+    assert!(
+        NON_FORMATTER_TIE_SPELLINGS.len() >= 3,
+        "case floor: at least three non-formatter spellings must be exercised"
+    );
+    let schema = schema_of(
+        "CREATE TABLE t (id int PRIMARY KEY, temperature float);",
+        "t",
+    );
+    let gap = [(
+        "temperature",
+        Divergence::Float32TieBreakSpellingDiffersFromJava,
+    )];
+    let golden = vec![row(&[("id", json!(1)), ("temperature", json!(36.601562))])];
+    let tie: f32 = 36.6015625;
+
+    for spelling in NON_FORMATTER_TIE_SPELLINGS {
+        // The case data is self-checked: each spelling really is the SAME f32, so
+        // the only thing making it an ordinary diff is that no formatter emits it.
+        let parsed: f32 = spelling
+            .parse()
+            .unwrap_or_else(|e| panic!("{spelling} is not an f32: {e}"));
+        assert_eq!(
+            parsed.to_bits(),
+            tie.to_bits(),
+            "{spelling} must lie in 36.6015625's rounding interval, or it tests \
+             nothing about the formatter pair"
+        );
+        assert_ne!(*spelling, tie.to_string(), "that IS Display's spelling");
+        assert_ne!(
+            *spelling,
+            serde_json::to_string(&tie).expect("serialize f32"),
+            "that IS serde_json's spelling"
+        );
+
+        let cli = vec![row(&[("id", json!(1)), ("temperature", json!(spelling))])];
+        let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &gap, Egress::Csv);
+        assert_eq!(
+            report.diffs.len(),
+            1,
+            "{spelling} is not a formatter spelling and must be reported: {:?}",
+            report.diffs
+        );
+        assert!(
+            report.diffs[0].contains("NOT the divergence"),
+            "{:?}",
+            report.diffs
+        );
+    }
+}

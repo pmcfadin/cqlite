@@ -213,9 +213,14 @@ pub enum Divergence {
     /// 36.6015625, where four 8-digit decimals round-trip and `36.601562` /
     /// `36.601563` are equidistant. The golden carries `36.601562`.
     ///
-    /// EGRESS SHAPE: a decimal rendering of the SAME f32 — both sides parse to
-    /// identical f32 bits — spelled differently. That equality is the whole
-    /// content of the gap: nothing is lost, only the tie-break digit differs,
+    /// EGRESS SHAPE: the FORMATTER PAIR for one f32 — the golden side is exactly
+    /// serde_json's f32 rendering (tie-to-even, `Float.toString`'s rule) and the CSV
+    /// side exactly Rust's `f32` `Display` (tie away from zero, what
+    /// `format_float32` renders through), both DERIVED from the parsed f32 and both
+    /// parsing to identical f32 bits. Pinning the PAIR rather than mere f32-equality
+    /// is what keeps the gap from covering the whole cell: a third decimal inside
+    /// the same rounding interval (`36.6015624`) is not a spelling either formatter
+    /// emits, so it is reported. Nothing is lost, only the tie-break digit differs,
     /// because `cqlite_core::util::value_fmt::ValueFormatter::format_float32` renders
     /// through Rust's `f32` `Display`, which rounds a tie away from zero. This is the
     /// same "Rust float formatting is not Java's" family as `total_cmp` vs
@@ -392,7 +397,7 @@ impl Divergence {
                 let _ = (depth, kinding);
                 egress == Egress::Csv
                     && matches!(ty, CqlType::Numeric(name) if name == "float")
-                    && same_f32_spelled_differently(golden, cli)
+                    && same_f32_with_both_formatter_spellings(golden, cli)
             }
             Divergence::ContainerMapKeyNotPairableByThisLane => {
                 // DDL ONLY. No value is read — deliberately, and this is the whole
@@ -407,14 +412,37 @@ impl Divergence {
     }
 }
 
-/// Do these two renderings spell the SAME f32 with DIFFERENT text?
+/// Are these two renderings the SPELLINGS THE TWO FORMATTERS PRODUCE for one and
+/// the same f32?
 ///
-/// The golden side is a JSON number and the CSV side is the field's text, so each
-/// is reduced to its decimal rendering and both are parsed as `f32`. Equal bits is
-/// what makes the divergence a spelling one: a different f32 — any genuine value
-/// error — is not this gap. Non-finite is refused outright (identical spellings, a
-/// `NaN` that never equals itself, and a different variant's subject).
-fn same_f32_spelled_differently(golden: &Value, cli: &Value) -> bool {
+/// f32-equality alone is NOT enough, and accepting it made this gap a blind spot
+/// for the whole cell: `36.6015624` and `36.601564` also parse to 36.6015625, and
+/// neither is a spelling either formatter can emit, so suppressing them would
+/// excuse a regression the gap can never legitimately describe — the very thing
+/// [`Divergence::NestedFrozenValueLeftUndecodedByGolden`]'s doc condemns a few
+/// lines up (roborev, issue #3777).
+///
+/// So the predicate pins the FORMATTER PAIR, both spellings DERIVED from the parsed
+/// f32 rather than hard-coded, so it travels to any other tie cell unchanged:
+///
+///   * the CLI/CSV side must equal Rust's `f32` `Display` of that f32 — what
+///     `cqlite_core::util::value_fmt::ValueFormatter::format_float32` renders
+///     through, and the half that rounds a tie away from zero; and
+///   * the golden side must equal serde_json's f32 rendering of that same f32 —
+///     the Ryū-family tie-to-EVEN form, which is `Float.toString`'s rule and so
+///     what `sstabledump` writes.
+///
+/// Plus the guards that were already here: the two texts must DIFFER, both must be
+/// finite (a `NaN` never equals itself, and a non-finite token is a different
+/// variant's subject), and both must parse to identical f32 BITS — so every genuine
+/// value error stays an ordinary diff.
+///
+/// Anything the pair does not describe — a third decimal inside the same rounding
+/// interval, an exponent-form spelling neither formatter chose here, a rounded
+/// value — falls through to the ordinary comparison and is REPORTED. That is the
+/// fail-closed direction: an unrecognised pair costs a diff to read, never a
+/// silent suppression.
+fn same_f32_with_both_formatter_spellings(golden: &Value, cli: &Value) -> bool {
     let text = |v: &Value| match v {
         Value::Number(n) => Some(n.to_string()),
         Value::String(s) => Some(s.clone()),
@@ -429,7 +457,17 @@ fn same_f32_spelled_differently(golden: &Value, cli: &Value) -> bool {
     let (Ok(g), Ok(c)) = (g_text.parse::<f32>(), c_text.parse::<f32>()) else {
         return false;
     };
-    g.is_finite() && c.is_finite() && g.to_bits() == c.to_bits()
+    if !g.is_finite() || !c.is_finite() || g.to_bits() != c.to_bits() {
+        return false;
+    }
+    // The two formatters' own output for THIS f32. serde_json's f32 serializer is
+    // the only path in that crate which formats an f32 as an f32 (its `Number`
+    // stores an f64); an error there — unreachable for a finite f32 — is treated as
+    // "not this gap" rather than unwrapped.
+    let Ok(tie_to_even) = serde_json::to_string(&g) else {
+        return false;
+    };
+    g_text == tie_to_even && c_text == g.to_string()
 }
 
 /// CQL's blob literal: `0x` and an EVEN number of hex digits (a byte string), and
