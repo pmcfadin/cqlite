@@ -2402,7 +2402,10 @@ PYINNER
   else
     bad "a lock-refused session DELETED the lock another session holds"
   fi
-  rmdir "$TMP/w-locked/.session-lock"
+  # Tolerant on purpose: if the assertion above FAILED the driver already
+  # removed this, and an unconditional rmdir would abort the whole suite under
+  # `set -e` -- turning one reported failure into no report at all.
+  rmdir "$TMP/w-locked/.session-lock" 2>/dev/null || true
 
   # THE LEAK ITSELF: a session that fails AFTER taking the lock must release it,
   # or the work directory is permanently unusable. `--corpus` naming nothing is a
