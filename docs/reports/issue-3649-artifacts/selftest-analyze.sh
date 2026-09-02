@@ -2706,6 +2706,18 @@ def opt(name, default=None):
     return args[args.index(name) + 1] if name in args else default
 
 
+# EVERY TICKET PATH THIS SHIM IS HANDED IS RECORDED. The freeze's property is
+# not "a frozen copy exists" -- it is "every run READ the frozen copy", and only
+# the invocation can answer that. Asserting the artifact instead of the
+# behaviour is what let the first version of these cases pass under a plant that
+# pointed every run back at the mutable original.
+import os
+
+ticket_log = os.environ.get("AB_SELFTEST_TICKET_LOG")
+if ticket_log:
+    with open(ticket_log, "a", encoding="utf-8") as handle:
+        handle.write("%s\n" % opt("--ticket-template", "NONE"))
+
 endpoint = opt("--endpoint", "")
 host, _, port = endpoint.replace("http://", "").partition(":")
 # Proves the driver handed us a real, live address -- the whole point of the
@@ -2871,6 +2883,7 @@ PYINNER
     set +e
     AB_SELFTEST_SHIMBIN="$SHIMBIN" \
     AB_SELFTEST_CARGO_LOG="$TMP/cargo-argv.log" \
+    AB_SELFTEST_TICKET_LOG="$TMP/ticket-paths.log" \
     PATH="$SHIMBIN:$PATH" \
       bash "$DRIVER" \
         --corpus "$TMP/e2e-corpus" --ticket-template "$TMP/e2e-ticket.json" \
@@ -2962,11 +2975,20 @@ PYINNER
     else
       bad "the manifest does not carry the ticket content"
     fi
-    # ...and the driver must not read the original after the copy.
-    if grep -q 'ticket-template "\$TICKET_ORIGINAL"' "$DRIVER"; then
-      bad "the driver still passes the ORIGINAL ticket path to a run"
+    # THE BEHAVIOUR, not the artifact: every load-generator invocation must have
+    # been handed a path inside a session run directory. A source grep for the
+    # original's literal name passed under a plant that redirected the VARIABLE,
+    # which is the difference between checking what the code says and checking
+    # what it did.
+    if [ -s "$TMP/ticket-paths.log" ]; then
+      OFFENDERS="$(grep -cv '/run-[^/]*/ticket\.json$' "$TMP/ticket-paths.log" || true)"
+      if [ "$OFFENDERS" = 0 ]; then
+        ok "every load-generator invocation read a frozen per-session ticket ($(wc -l < "$TMP/ticket-paths.log") runs)"
+      else
+        bad "$OFFENDERS load-generator invocation(s) read a ticket outside the session directory: $(grep -v '/run-[^/]*/ticket\.json$' "$TMP/ticket-paths.log" | head -1)"
+      fi
     else
-      ok "no run is invoked with the original ticket path"
+      bad "no load-generator invocation was recorded, so the freeze proves nothing"
     fi
   else
     bad "the session did not freeze a ticket copy into its run directory"
