@@ -3322,6 +3322,10 @@ object_store_sweep() {
     cached="$stamp_verdict"
   fi
   [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  # A stamp in the FUTURE (clock skew, a hand-edited file, a restored snapshot) must not
+  # park the sweep forever: treat it as never-swept. It does NOT clear a recorded CORRUPT,
+  # which is a fact about the store rather than about when it was last measured.
+  [[ "$last" -gt "$now" ]] && last=0
   # Only the exact token is honoured; anything else is treated as no cached verdict.
   [[ "$cached" == "CORRUPT" ]] || cached=""
 
