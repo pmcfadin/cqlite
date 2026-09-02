@@ -90,13 +90,21 @@
 #                    classify, a damage class that did NOT reproduce, or a
 #                    reachability/ref/commit-graph/multi-pack-index complaint that
 #                    reproduced but could not be ATTRIBUTED.
-#   6   UNSWEEPABLE — git fsck RAN and DIED without finishing, on TWO independent
-#                    walks (its own `die()` or a signal death: a status at or above
-#                    128, which is never read as its error bitmask). NO CAUSE IS
-#                    CLAIMED: the store's object content is UNKNOWN, and no lane on
-#                    this box can obtain an affirmative sweep of it. It is a STOPPING
-#                    verdict, and it is NOT the same fact as UNMEASURED - see the
-#                    branch at PASS 2 for why only one of the two is permissive.
+#   6   UNSWEEPABLE — no lane on this box can obtain an affirmative sweep of this
+#                    store. It is a STOPPING verdict, it is NOT the same fact as
+#                    UNMEASURED (see the branch at PASS 2 for why only one of the two
+#                    is permissive), and it has TWO CAUSES:
+#                      * git fsck RAN and DIED without finishing, on TWO independent
+#                        walks (its own `die()` or a signal death: a status at or
+#                        above 128, never read as its error bitmask). NO CAUSE IS
+#                        CLAIMED there - the store's object content is UNKNOWN.
+#                      * the store's OWN CONFIGURATION sets `fsck.*` keys, which can
+#                        suppress or downgrade the very diagnostics this sweep reads
+#                        its verdict from, so NO WALK IS RUN at all. The offending
+#                        keys ARE named; no damage is claimed, because nothing was
+#                        rehashed (#3749 review round 11, item 1).
+#                    Both are persistent properties of the REPOSITORY, which is why
+#                    they stop the box rather than being reported and passed over.
 #
 # A REACHABILITY COMPLAINT HAS TWO CAUSES AND THEY GET DIFFERENT VERDICTS (#3749
 # review round 4, item 1). fsck's exit bit 2 (ERROR_REACHABLE) fires for BOTH:
@@ -232,6 +240,14 @@ set -uo pipefail
 #   GIT_CONFIG_SYSTEM        can carry `fsck.*` severities, alternates and
 #                            `url.*.insteadOf`; HOME is shared on this fleet, so a
 #                            peer lane's edit there is not the invoker's.
+#
+# WHAT THIS ALLOWLIST DOES NOT AND CANNOT CLOSE, SAID HERE RATHER THAN IMPLIED: the
+# REPOSITORY'S OWN config. It is a FILE in the store, not an environment variable, so
+# no environment can neutralise it - and it can carry `fsck.*` keys that change the
+# exit status this script's verdict comes from. That is REFUSED rather than overridden,
+# and the refusal (with its measurements, its verdict choice and the shapes rejected)
+# is the `fsck_policy_probe` block below. Read no claim of total configuration
+# isolation into this list: it isolates the ENVIRONMENT.
 #   everything else          CLEARED - notably GIT_DIR, GIT_COMMON_DIR,
 #                            GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES,
 #                            GIT_INDEX_FILE, GIT_CEILING_DIRECTORIES,
@@ -374,7 +390,9 @@ usage() {
   printf '%s USAGE the ONE isolated resolver callers key a throttle/latch on, so no\n' "$P" >&2
   printf '%s USAGE caller has to run its own un-isolated git to name the store.\n' "$P" >&2
   printf '%s USAGE Every run DECLARES what it does not walk (`declared-gap` lines).\n' "$P" >&2
-  printf '%s USAGE Exits 0 verified / 4 corrupt / 5 unmeasured / 2 usage.\n' "$P" >&2
+  printf '%s USAGE Exits 0 verified / 4 corrupt / 5 unmeasured / 6 unsweepable /\n' "$P" >&2
+  printf '%s USAGE 2 usage. Exit 6 is a STOPPING verdict: the store cannot be swept\n' "$P" >&2
+  printf '%s USAGE (git fsck died reproducibly, or the store config sets fsck.* keys).\n' "$P" >&2
   printf '%s USAGE A CONSUMER MUST NOT READ EXIT 5 AS CLEAN (nothing was measured).\n' "$P" >&2
   printf '%s USAGE Scope is ACCIDENTAL corruption. Deliberate peer forgery is\n' "$P" >&2
   printf '%s USAGE invoker-class and OUT OF MODEL (#3749 owner ruling, #3312 triage).\n' "$P" >&2
@@ -607,6 +625,215 @@ printf '%s declared-gap NOT in the gap, measured rather than assumed: every regi
 printf '%s declared-gap worktree private HEAD and INDEX (prunable worktrees included) and\n' "$P"
 printf '%s declared-gap the COMMON refs ARE walked, and a missing object needed by one is\n' "$P"
 printf '%s declared-gap reported. That is what makes this gap one namespace wide.\n' "$P"
+
+
+# --- THE STORE'S OWN fsck POLICY: REFUSED, NOT OVERRIDDEN --------------------
+#
+# THE FINDING (#3749 review round 11, item 1). Everything above closes the git
+# ENVIRONMENT. It cannot close the store's own config, because A LOCAL CONFIG IS A
+# FILE IN THE REPOSITORY, NOT AN ENVIRONMENT VARIABLE — the same distinction
+# CLAUDE.md records for the transport hop ("only the *environment* is sanitisable — a
+# `.git/config` is a file"). And `git fsck` is CONFIGURABLE: `fsck.skipList` names
+# objects whose validation messages are dropped, and `fsck.<msg-id>=ignore` downgrades
+# an individual diagnostic. Both change the EXIT STATUS this script reads its verdict
+# from, in the one direction that matters.
+#
+# MEASURED, git 2.43.0, 2026-09-02, on a fixture the suite builds (a commit object
+# whose author line carries no email — an ERROR-severity fsck message, exit bit 1,
+# this script's own damage class):
+#   plain                                 -> rc 1  => CORRUPT
+#   -c fsck.missingEmail=ignore           -> rc 0  => a FALSE `VERIFIED`
+#   -c fsck.skipList=<file naming the id> -> rc 0  => a FALSE `VERIFIED`
+# A false affirmative verdict is precisely the failure this whole control exists to
+# prevent, and it is reported about a store every lane on the box certifies against.
+#
+# IT IS IN MODEL, not invoker-class. The file in question is the SHARED
+# `/data/lanes/repo/.git/config`, so its writer is a PEER LANE and not the invoker
+# (#3312's triage rule: a non-invoker route, or an accidental one, is a defect). The
+# accidental path is the likelier one: somebody adds a `fsck.skipList` to work around
+# one known-bad object in history, and every lane's corruption sweep silently stops
+# detecting that class forever, with nothing saying so.
+#
+# WHY IT REFUSES INSTEAD OF NEUTRALISING. `fsck.<msg-id>` is an OPEN-ENDED KEY SPACE:
+# one key per fsck message id, and new ids arrive with new git versions. A `-c
+# fsck.<id>=error` for each is a list that is wrong the moment git adds a message, and
+# neutralising ONE axis (forcing `fsck.skipList=` empty and leaving the ids) is the
+# "one axis closed, space declared done" shape this issue has already hit five times.
+# CLAUDE.md's precedent for exactly this situation is to REFUSE rather than enumerate
+# (the protocol-allowlist case: "a protocol allowlist is not expressible either ... So
+# there is no import at all"). Refusing is also the HONEST answer: under an unknown
+# fsck policy this script cannot make a trustworthy statement about the store, and
+# saying so is worth more than a verdict that might mean nothing.
+#
+# TWO OTHER SHAPES WERE CONSIDERED AND REJECTED, recorded so they are not re-derived:
+#   * sweeping through a scratch repository that has a clean config and reaches the
+#     real objects (an alternate, or GIT_OBJECT_DIRECTORY). It loses round 7's
+#     measured reachability roots — the registered worktrees' private HEADs and
+#     INDEXes are roots only for the REAL repository — so it would have to
+#     reconstruct git's administrative layout, which is a second implementation of it
+#     and comes with its own false-clean routes (round 8's ruling);
+#   * running the walk anyway and downgrading only the affirmative verdict. That keeps
+#     a `VERIFIED` path alive under a policy nobody read, one edit away from being
+#     reachable, and buys nothing this refusal does not.
+#
+# WHY THIS IS `UNSWEEPABLE` (STOP) AND NOT `UNMEASURED` (CONTINUE) — the disposition
+# argument, since a token is what every consumer keys disposition on:
+#   1. It is a PERSISTENT PROPERTY OF THE REPOSITORY, not of this box's tooling. It
+#      does not clear itself, and every sweep by every lane will hit it forever: the
+#      permissive reading is not "measure again later", it is "detection is OFF on this
+#      box until somebody happens to read a journal line".
+#   2. THE SAME CAUSE ALREADY STOPS THE BOX in one of its variants, and splitting them
+#      would be incoherent: an `fsck.<msg-id>` naming an id THIS git does not know makes
+#      git exit 128 (`fatal: Unhandled message id`, measured), which reproduces on both
+#      walks and is the fatal UNSWEEPABLE branch below. So a config key that merely
+#      breaks fsck stops the box while one that SUPPRESSES REAL DAMAGE would not.
+#   3. The remedy is local, cheap and needs no repair of anything: remove or relocate
+#      the key and re-run. Nothing legitimately needs an `fsck.*` key here — measured
+#      2026-09-02 on this fleet's shared store: ZERO such keys — so this cannot stop a
+#      box that is doing something reasonable.
+#   4. It fits UNSWEEPABLE's meaning exactly: the store's object content is UNKNOWN and
+#      no lane on this box can obtain an affirmative sweep of it. It differs from the
+#      fatal branch only in whether a cause is known, and here one IS: the keys are
+#      named. It claims NO corruption — nothing was rehashed.
+#
+# AND "COULD NOT ASK" IS ITS OWN, PERMISSIVE STATE. A probe that fails, or answers with
+# no keys at all, means this run does not know the policy — which is a "could not
+# measure" fact of the same kind as the `unrunnable` class below, so it lands on
+# UNMEASURED with its own cause and does NOT stop the box. It can never reach
+# `VERIFIED`: the affirmative verdict requires the policy to have been READ and found
+# empty of `fsck.*`, which is an affirmative measurement rather than the absence of a
+# bad signal (CLAUDE.md's standing rule).
+#
+# THE PROBE ASKS ABOUT THE CONFIGURATION THE WALK WILL ACTUALLY READ, and that is the
+# whole of its correctness: same `--git-dir`, same `git_isolated` environment (so
+# global and system config are /dev/null on both sides), and `git config --list` there
+# reports the local file, ANY `include.path`/`includeIf` it pulls in, and the
+# per-worktree `config.worktree` scope — all three verified on git 2.43.0.
+#
+# `--name-only`: the VALUES are not needed, and a config value may contain a literal
+# newline, which would let a value's continuation line pose as a key. Keys cannot —
+# git's parser reads a section header and a variable name on one line — so a
+# line-oriented read of names is exact where a read of `--list` would not be.
+FSCK_POLICY_KEY_LIMIT=8
+FSCK_POLICY_STATE=""
+FSCK_POLICY_KEYS=""
+FSCK_POLICY_KEY_COUNT=0
+FSCK_POLICY_READ_COUNT=0
+FSCK_POLICY_CAUSE=""
+
+# fsck_policy_probe <git-dir> — sets FSCK_POLICY_STATE to exactly one of:
+#   none     — the configuration was READ and carries no `fsck.*` key (affirmative)
+#   present  — it carries at least one; FSCK_POLICY_KEYS names up to FSCK_POLICY_KEY_LIMIT
+#   unknown  — the question could not be asked; FSCK_POLICY_CAUSE says why
+# Globals rather than stdout: `unknown` has to carry its cause, and a command
+# substitution would also have to encode WHICH state it is in one string.
+fsck_policy_probe() {
+  local dir="$1" out="" rc=0 line pre n=0 hits=0
+  FSCK_POLICY_STATE=unknown
+  FSCK_POLICY_KEYS=""
+  FSCK_POLICY_KEY_COUNT=0
+  FSCK_POLICY_READ_COUNT=0
+  FSCK_POLICY_CAUSE=""
+  out=$(git_isolated git --git-dir="$dir" config --list --name-only 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    FSCK_POLICY_CAUSE="git --git-dir=$(sane "$dir") config --list --name-only exited $rc"
+    return 0
+  fi
+  # RC 0 WITH NO KEYS IS NOT AN EMPTY POLICY, IT IS AN UNREAD ONE. Every git repository's
+  # own config declares at least core.repositoryformatversion (git init writes four keys),
+  # so an empty listing means this run did not read a config it can reason about — the
+  # affirmative-measurement rule again: `none` must come from having read something.
+  if [ -z "$out" ]; then
+    FSCK_POLICY_CAUSE="the probe exited 0 but listed NO configuration key at all for $(sane "$dir"), so no policy was read (a git repository's own config always declares core.repositoryformatversion)"
+    return 0
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    n=$((n + 1))
+    # git lowercases the section and variable names it prints, but the match is made
+    # case-insensitively anyway: this decides whether the box stops, so it does not rest
+    # on a rendering convention. Only the first 5 characters are folded — the rest of the
+    # line is a subsection whose case git PRESERVES and which is printed verbatim below.
+    pre=$(printf '%s' "${line:0:5}" | tr 'A-Z' 'a-z')
+    case "$pre" in
+      'fsck.')
+        hits=$((hits + 1))
+        if [ "$hits" -le "$FSCK_POLICY_KEY_LIMIT" ]; then
+          FSCK_POLICY_KEYS="${FSCK_POLICY_KEYS}${FSCK_POLICY_KEYS:+ }$(sane "$line")"
+        fi
+        ;;
+    esac
+  done <<POLICY_KEYS
+$out
+POLICY_KEYS
+  FSCK_POLICY_READ_COUNT="$n"
+  FSCK_POLICY_KEY_COUNT="$hits"
+  if [ "$hits" -gt 0 ]; then
+    FSCK_POLICY_STATE=present
+  else
+    FSCK_POLICY_STATE=none
+  fi
+  return 0
+}
+
+fsck_policy_probe "$GIT_COMMON_DIR"
+case "$FSCK_POLICY_STATE" in
+  present)
+    printf '%s finding fsck policy: %s key(s) set in the configuration this sweep reads\n' \
+      "$P" "$FSCK_POLICY_KEY_COUNT"
+    printf '%s finding fsck policy key(s): %s\n' "$P" "$FSCK_POLICY_KEYS"
+    if [ "$FSCK_POLICY_KEY_COUNT" -gt "$FSCK_POLICY_KEY_LIMIT" ]; then
+      printf '%s finding (+%s further fsck.* key(s), not listed)\n' \
+        "$P" "$((FSCK_POLICY_KEY_COUNT - FSCK_POLICY_KEY_LIMIT))"
+    fi
+    printf '%s measured fsck-policy present: %s of %s configuration key(s) are fsck.* over %s\n' \
+      "$P" "$FSCK_POLICY_KEY_COUNT" "$FSCK_POLICY_READ_COUNT" "$(sane "$OBJ_DIR")"
+    printf '%s verdict UNSWEEPABLE\n' "$P"
+    printf '%s verdict-detail this store CANNOT BE SWEPT TO A TRUSTWORTHY VERDICT while its own\n' "$P"
+    printf '%s verdict-detail configuration sets fsck.* keys, so NO WALK WAS RUN. git fsck is\n' "$P"
+    printf '%s verdict-detail configurable: fsck.skipList drops the validation messages of the objects\n' "$P"
+    printf '%s verdict-detail it names, and fsck.<msg-id>=ignore downgrades an individual diagnostic -\n' "$P"
+    printf '%s verdict-detail both change the EXIT STATUS this sweep reads its verdict from. Measured on\n' "$P"
+    printf '%s verdict-detail git 2.43.0: a damaged object reported as fsck exit bit 1 becomes exit 0,\n' "$P"
+    printf '%s verdict-detail i.e. a FALSE affirmative verdict about a store every lane on this box\n' "$P"
+    printf '%s verdict-detail reads. The keys are NAMED above.\n' "$P"
+    printf '%s verdict-detail NO DAMAGE IS CLAIMED HERE: nothing was rehashed, so nothing is known\n' "$P"
+    printf '%s verdict-detail about this store one way or the other. Its object content is UNKNOWN,\n' "$P"
+    printf '%s verdict-detail which is NOT clean - do NOT certify anything against this checkout until\n' "$P"
+    printf '%s verdict-detail a sweep of it completes.\n' "$P"
+    printf '%s verdict-detail WHY THIS IS NOT OVERRIDDEN INSTEAD: fsck.<msg-id> is one key per fsck\n' "$P"
+    printf '%s verdict-detail message id and new ids arrive with new git versions, so a -c override for\n' "$P"
+    printf '%s verdict-detail each is a list that is wrong the moment git adds a message. A partial\n' "$P"
+    printf '%s verdict-detail override would leave a suppression route open under a line claiming there\n' "$P"
+    printf '%s verdict-detail was none.\n' "$P"
+    printf '%s verdict-detail REMEDY: INSPECT the keys, with the same scopes this sweep reads -\n' "$P"
+    printf '%s verdict-detail   git --git-dir=%s config --list --show-origin --name-only\n' "$P" "$(sane "$GIT_COMMON_DIR")"
+    printf '%s verdict-detail (the origin column names the FILE: the local config, an include it pulls\n' "$P"
+    printf '%s verdict-detail in, or a per-worktree config.worktree). Then REMOVE or RELOCATE every\n' "$P"
+    printf '%s verdict-detail fsck.* key from the scopes of this repository - `git --git-dir=%s\n' "$P" "$(sane "$GIT_COMMON_DIR")"
+    printf '%s verdict-detail config --unset-all <key>` - and re-run this sweep. If a key is there\n' "$P"
+    printf '%s verdict-detail deliberately, move it to the ONE command that needs it (`git -c\n' "$P"
+    printf '%s verdict-detail fsck.<id>=... fsck`) instead of the shared repository config, which every\n' "$P"
+    printf '%s verdict-detail lane on this box reads.\n' "$P"
+    printf '%s verdict-detail THEN require this sweep to report its affirmative verdict before\n' "$P"
+    printf '%s verdict-detail clearing any latch or resuming the lanes: "I think I fixed it" is not an\n' "$P"
+    printf '%s verdict-detail exit condition (#3749).\n' "$P"
+    exit 6
+    ;;
+  unknown)
+    unmeasured "the fsck POLICY of this store's own configuration could not be read" \
+      "($FSCK_POLICY_CAUSE), so no walk was run: git fsck is configurable" \
+      "(fsck.skipList, fsck.<msg-id>=ignore) and under an unread policy an affirmative" \
+      "verdict could mean nothing. This is a 'could not ask', not a finding - nothing" \
+      "was rehashed and no damage is claimed. Check that the repository's config is" \
+      "readable and parseable ('git --git-dir=$(sane "$GIT_COMMON_DIR") config --list" \
+      "--show-origin --name-only') and re-run (#3749)."
+    ;;
+esac
+# THE AFFIRMATIVE HALF IS STAMPED, so a pasted run shows the check RAN rather than
+# leaving its silence to be read as coverage.
+printf '%s measured fsck-policy: no fsck.* key among %s configuration key(s) read from the scopes this sweep reads (local + includes + per-worktree; global and system are /dev/null under this run)\n' \
+  "$P" "$FSCK_POLICY_READ_COUNT"
 
 # --- THE SWEEP --------------------------------------------------------------
 #

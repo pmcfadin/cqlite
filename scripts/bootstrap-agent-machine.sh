@@ -3147,15 +3147,17 @@ else
       info "  A LOCAL 'git gc'/'git repack' CANNOT repair this — escalate rather than improvising (#3749)."
     fi
   elif [ "$obj_rc" -eq 6 ] && [ "$obj_verdict" = UNSWEEPABLE ]; then
-    # THE SWEEP RAN AND REPRODUCIBLY DIED WITHOUT FINISHING (#3749 review round 10, item
-    # 1). A [warn] like CORRUPT — it withholds "All checks green.", fails --strict and is
-    # restated in the banner — but it CLAIMS NO CAUSE, and the difference is the whole
-    # point of the verdict: "the probe could not START" (UNMEASURED, below, permissive
-    # because it is a fact about this box's tooling) and "the probe RAN, twice, and died
-    # on this store" are different facts. No damage was established here, so this branch
-    # names none and quotes the sweep's own guidance instead of restating a repair.
+    # THE STORE COULD NOT BE SWEPT TO AN AFFIRMATIVE VERDICT (#3749 review round 10, item
+    # 1; two causes since round 11, item 1 — a reproducible fatal death, or a store whose
+    # own config sets fsck.* keys, in which case no walk is run at all). A [warn] like
+    # CORRUPT — it withholds "All checks green.", fails --strict and is restated in the
+    # banner — but it CLAIMS NO DAMAGE, and the difference is the whole point of the
+    # verdict: "the probe could not START" (UNMEASURED, below, permissive because it is a
+    # fact about this box's tooling) and "no affirmative sweep of this store is obtainable"
+    # are different facts. Nothing was established about the objects here, so this branch
+    # asserts no mechanism of its own and quotes the sweep's own guidance instead.
     OBJ_STORE_UNSWEEPABLE=1
-    warn "object-store: UNSWEEPABLE — git fsck RAN and reproducibly DIED without finishing over the SHARED git object store on this box, so its integrity is UNKNOWN, not ok. NO GATE RUN HERE CAN BE TRUSTED. No cause was established."
+    warn "object-store: UNSWEEPABLE — the sweep could NOT obtain an affirmative verdict for the SHARED git object store on this box, so its integrity is UNKNOWN, not ok. NO GATE RUN HERE CAN BE TRUSTED. No damage was established; the sweep's own lines below name the cause."
     printf '%s\n' "$obj_out" | { grep -E '^OBJECT-STORE: (finding|object) ' || true; } | head -20 | while IFS= read -r obj_line; do
       info "$obj_line"
     done
@@ -3169,7 +3171,7 @@ else
       # verdict established no cause, so naming one would be the round-9 defect (a printed
       # remedy that does not match what was measured).
       info "REMEDY: this sweep printed no operator guidance (an older or stubbed check-object-store-integrity.sh)."
-      info "  Re-run it by hand and act on what its 'fatal:' line names:  bash scripts/check-object-store-integrity.sh"
+      info "  Re-run it by hand and act on what THAT run reports:  bash scripts/check-object-store-integrity.sh"
     fi
   elif [ "$obj_rc" -eq 4 ] || [ "$obj_rc" -eq 6 ] || [ "$obj_verdict" = CORRUPT ] || [ "$obj_verdict" = UNSWEEPABLE ]; then
     # EXACTLY ONE CHANNEL SAYS CORRUPT (the conjunction above has already failed), so this

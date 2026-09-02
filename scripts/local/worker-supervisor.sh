@@ -3266,6 +3266,11 @@ OBJ_SWEEP_CLAIM_NOTIFIED=0
 # roborev-job-282 ruling: a fix that adds a resource inherits that resource's lifetime
 # bugs, so register it the moment it exists and clear it the moment it is released).
 OBJ_SWEEP_CLAIM_OWNED=""
+# THE OWNERSHIP TOKEN THIS PROCESS WRITES INTO ITS OWN CLAIM (#3749 review round 11, item
+# 2). It is what makes a release ASK before deleting: the path alone cannot tell this
+# lane's claim from a SUCCESSOR's claim at the same path. Set once, on the line after the
+# claim is created; empty until then, and an empty token can never match anything.
+OBJ_SWEEP_CLAIM_TOKEN=""
 OBJ_SWEEP_CLAIM_STATE=""
 # SLACK on the claim-staleness bound: what a sweep spends OUTSIDE its bounded fsck walks —
 # process startup, the `--print-store` resolution, output capture, and the notify/journal
@@ -3602,6 +3607,7 @@ obj_sweep_claim_acquire() {
   now="$(date +%s)"
   if mkdir "$claim" 2>/dev/null; then
     OBJ_SWEEP_CLAIM_OWNED="$claim"
+    obj_sweep_claim_mark_owner "$claim"
     obj_sweep_claim_mark_started "$claim" "$now"
     OBJ_SWEEP_CLAIM_STATE=acquired
     return 0
@@ -3638,6 +3644,7 @@ obj_sweep_claim_acquire() {
   rm -rf "$claim.stale.$$" 2>/dev/null || true
   if mkdir "$claim" 2>/dev/null; then
     OBJ_SWEEP_CLAIM_OWNED="$claim"
+    obj_sweep_claim_mark_owner "$claim"
     obj_sweep_claim_mark_started "$claim" "$now"
     OBJ_SWEEP_CLAIM_STATE=taken
     return 0
@@ -3657,17 +3664,110 @@ obj_sweep_claim_mark_started() {
   return 0
 }
 
-# obj_sweep_claim_release <claim-dir> — give the claim up. Called BOTH from the sweep path
-# (so the next interval is contended honestly) AND from the EXIT trap (so a lane that stops
-# mid-iteration does not make its peers wait out the staleness bound). Removing a claim that
-# is no longer ours is not a hazard the way it is for the supervisor lock: a claim is
-# advisory, its only effect is to make a peer skip ONE 6-hourly probe, and this only ever
-# runs for the exact path this process recorded in OBJ_SWEEP_CLAIM_OWNED.
-obj_sweep_claim_release() {
+# obj_sweep_claim_mark_owner <claim-dir> — write THIS process's ownership token into the
+# claim it has just created, and remember it in OBJ_SWEEP_CLAIM_TOKEN.
+#
+# WHY THE CLAIM CARRIES AN OWNER AT ALL (#3749 review round 11, item 2). The release used
+# to `rm -rf` the claim PATH unconditionally, and a path is not an identity: round 5 gave
+# this claim a stale-recovery route, so the directory at that path may be a SUCCESSOR's
+# claim by the time the original owner releases — a lane whose sweep overran the staleness
+# bound, or one on the `unavailable` path that never owned the claim at all and still ran
+# the release at the end of its own sweep. Deleting it then permits a second concurrent
+# full-store fsck, which is exactly the herd the claim exists to prevent.
+#
+# THE TOKEN IS WRITTEN BEFORE `started`, and that ordering is the one property worth
+# having: `started` is what makes a claim AGEABLE by a peer, so writing the owner first
+# means a claim a peer can age is a claim that also names its owner. The only way to get
+# `started` without `owner` is a write failure, which is reported.
+#
+# IT IS NOT A SECURITY BOUNDARY. `$$` plus the epoch plus `$RANDOM` distinguishes
+# concurrent and successive lanes on one box, which is the entire question here; a peer
+# that wanted to forge it could simply write the file, and a same-host peer able to do
+# that is invoker-class (#3312's triage rule).
+obj_sweep_claim_mark_owner() {
   local claim="$1"
+  OBJ_SWEEP_CLAIM_TOKEN="$$.$(date +%s).${RANDOM}${RANDOM}"
+  printf '%s\n' "$OBJ_SWEEP_CLAIM_TOKEN" 2>/dev/null >"$claim/owner" || {
+    # THE TOKEN IS DROPPED, NOT KEPT, when it could not be recorded: keeping it would make
+    # every later ownership test answer `unknown` for a claim this lane does own, and the
+    # honest state is "this lane cannot prove ownership of that claim". The consequence is
+    # named: this lane will not delete it, so peers wait out the staleness bound once.
+    OBJ_SWEEP_CLAIM_TOKEN=""
+    log "object-store sweep: could not record an ownership token in the sweep claim $claim — this lane will NOT remove that claim when it finishes (it cannot prove the claim is still its own), so peer lanes will skip their sweep until the claim ages past the recovery bound (#3749)"
+  }
+  return 0
+}
+
+# obj_sweep_claim_owner_state <claim-dir> — FOUR-VALUED, on stdout:
+#   ours     — the token in that claim is the one THIS process wrote (affirmative)
+#   other    — a token was read and it is NOT ours: a successor owns this claim
+#   gone     — there is no claim at that path (nothing to release)
+#   unknown  — the token could not be read while something IS at that path
+# Only `ours` licenses a delete. `other`, `gone` and `unknown` are all non-deleting, so a
+# probe that fails cannot destroy a peer's claim — the cost of that direction is a claim
+# left behind, which round 5's stale recovery already handles.
+obj_sweep_claim_owner_state() {
+  local claim="$1" tok=""
+  [[ -n "$claim" ]] || { printf 'gone'; return 0; }
+  { read -r tok || true; } <"$claim/owner" 2>/dev/null || tok=""
+  if [[ -n "$tok" && -n "$OBJ_SWEEP_CLAIM_TOKEN" && "$tok" == "$OBJ_SWEEP_CLAIM_TOKEN" ]]; then
+    printf 'ours'
+    return 0
+  fi
+  if [[ -n "$tok" ]]; then
+    printf 'other'
+    return 0
+  fi
+  # NO TOKEN READ. Distinguish "the claim is not there" from "it is there and its token
+  # could not be read" — same answer (do not delete), different journal line, and the
+  # unreadable case is the one worth seeing. `-e` is asked SECOND and only to choose the
+  # message, so its own two-valuedness cannot make a delete happen.
+  if [[ -e "$claim" || -L "$claim" ]]; then
+    printf 'unknown'
+  else
+    printf 'gone'
+  fi
+  return 0
+}
+
+# obj_sweep_claim_release <claim-dir> — give the claim up, IF IT IS STILL OURS. Called BOTH
+# from the sweep path (so the next interval is contended honestly) AND from the EXIT trap
+# (so a lane that stops mid-iteration does not make its peers wait out the staleness
+# bound).
+#
+# WHAT THIS GUARANTEES, AND WHAT IT DOES NOT (#3749 review round 11, item 2). It removes
+# the claim only after reading an ownership token that is this process's own, so the
+# "delete a successor's claim" route is closed for every case except one: the read and the
+# `rm` are two operations, so a takeover landing BETWEEN them is still deleted. That window
+# is microseconds wide and needs a claim to be taken over in it; the previous behaviour was
+# to delete unconditionally, always. THIS IS NOT ATOMIC and is not claimed to be — a
+# rename-then-verify would make the removal atomic but would move a successor's claim
+# aside before it could be checked, and restoring it is not atomic either (and `mv` onto an
+# existing directory moves INTO it). The harm bound is unchanged from the claim's own
+# design: a wrongly-removed claim costs a second concurrent 6-hourly probe, never a wrong
+# verdict.
+obj_sweep_claim_release() {
+  local claim="$1" state
   [[ -n "$claim" ]] || return 0
-  rm -rf -- "$claim" 2>/dev/null || true
-  [[ "$OBJ_SWEEP_CLAIM_OWNED" != "$claim" ]] || OBJ_SWEEP_CLAIM_OWNED=""
+  state="$(obj_sweep_claim_owner_state "$claim")"
+  case "$state" in
+    ours)
+      rm -rf -- "$claim" 2>/dev/null || true
+      OBJ_SWEEP_CLAIM_TOKEN=""
+      ;;
+    other)
+      log "object-store sweep: NOT removing the sweep claim $claim — it carries another lane's ownership token, so this claim was taken over after this lane acquired it (its sweep overran the recovery bound, or this lane never owned it). Removing it would permit a second concurrent full-store fsck (#3749)."
+      ;;
+    unknown)
+      log "object-store sweep: NOT removing the sweep claim $claim — its ownership token could not be read, so this lane cannot tell its own claim from a successor's. Leaving it for the staleness bound to recover (#3749)."
+      ;;
+  esac
+  # THE REGISTRATION IS CLEARED FOR EVERY STATE EXCEPT `unknown`, where the read itself may
+  # have failed transiently and the EXIT trap gets one more attempt. `other` and `gone` are
+  # settled answers: there is nothing at that path for this lane to release.
+  if [[ "$state" != unknown ]]; then
+    [[ "$OBJ_SWEEP_CLAIM_OWNED" != "$claim" ]] || OBJ_SWEEP_CLAIM_OWNED=""
+  fi
   return 0
 }
 
@@ -3842,9 +3942,17 @@ obj_sweep_stop_if_latched() {
       stop_reason="object-store-corrupt"
       ;;
     UNSWEEPABLE)
+      # THE LATCH RECORDS THE TOKEN AND NOTHING ELSE, so this text may only assert what is
+      # true of EVERY cause of that token — and since #3749 review round 11 there are two
+      # (git fsck ran and reproducibly died; or the store's own config sets fsck.* keys, so
+      # no walk was run at all). The earlier wording named the first mechanism as though it
+      # were the only one, which on the second cause is a confidently-wrong sentence in the
+      # one place an operator reads when the box has stopped. What the reader knows is the
+      # DISPOSITION, so that is all it says; the CAUSE is named by the sweep that recorded
+      # it, in the journal of the lane that stopped.
       notify "high" "worker-supervisor: SHARED OBJECT STORE could not be SWEPT (latched)" \
-        "a sweep on this box recorded that git fsck RAN and reproducibly DIED without finishing over the shared git object store every lane here reads, so its integrity is UNKNOWN and NO cause was established. Stopping without re-sweeping. Run 'bash scripts/check-object-store-integrity.sh' by hand, act on what its fatal line names, and require its affirmative verdict BEFORE removing $latch."
-      log "object-store: UNSWEEPABLE (cached at $latch_ts by a sweep on this box) — git fsck ran and reproducibly died without finishing over this store, so its object content is UNKNOWN, not clean. Stopping. NO cause was established: this is NOT a damage finding (#3749)."
+        "a sweep on this box recorded that the shared git object store every lane here reads could NOT be swept to an affirmative verdict, so its integrity is UNKNOWN and NO damage was established. Stopping without re-sweeping. Run 'bash scripts/check-object-store-integrity.sh' by hand, act on what THAT run reports, and require its affirmative verdict BEFORE removing $latch."
+      log "object-store: UNSWEEPABLE (cached at $latch_ts by a sweep on this box) — that sweep could not obtain an affirmative verdict for this store, so its object content is UNKNOWN, not clean. Stopping. NO damage was established: this is NOT a damage finding, and this reader knows only the verdict, not which of its causes fired (#3749)."
       stop_reason="object-store-unsweepable"
       ;;
     *)
@@ -4092,9 +4200,13 @@ object_store_sweep() {
         stop_reason="object-store-corrupt"
         ;;
       *)
-        stop_headline="UNSWEEPABLE — git fsck RAN and reproducibly DIED without finishing over this box's shared store, so its object content is UNKNOWN, not clean. Stopping. NO cause was established: this is NOT a damage finding (#3749)."
+        # ONE TOKEN, TWO CAUSES (#3749 review round 11, item 1): the fatal-death branch and
+        # the refusal to walk a store whose own config sets fsck.* keys. This text is
+        # derived from the TOKEN, so it asserts only the disposition; the sweep's own
+        # verdict-detail lines are quoted verbatim below and they name the cause.
+        stop_headline="UNSWEEPABLE — this box's shared store could NOT be swept to an affirmative verdict, so its object content is UNKNOWN, not clean. Stopping. NO damage was established: this is NOT a damage finding, and the sweep's own lines below say what it observed (#3749)."
         stop_title="worker-supervisor: SHARED OBJECT STORE could not be SWEPT"
-        stop_body="git fsck ran and DIED without finishing on TWO independent walks over this box's shared git object store — every lane here reads it, so NO gate verdict on this box can be trusted. Stopping. NO cause was established; act on what the sweep's fatal line names."
+        stop_body="the sweep could NOT obtain an affirmative verdict for this box's shared git object store — every lane here reads it, so NO gate verdict on this box can be trusted. Stopping. NO damage was established; act on what the sweep reported."
         stop_reason="object-store-unsweepable"
         ;;
     esac
