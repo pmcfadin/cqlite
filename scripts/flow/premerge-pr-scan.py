@@ -70,6 +70,7 @@ override, because an override is settable by the party it constrains.
 
 import json
 import re
+import os
 import sys
 from datetime import datetime, timezone
 
@@ -228,7 +229,25 @@ def sane(value):
     return " ".join(str(value).split())
 
 
-def collect_marker_events(payload, events, unparsed):
+def thread_label(path):
+    """A human name for a thread, for the report only.
+
+    THE KEY IS THE PATH, NEVER THIS LABEL (issue #3752, roborev job 78 finding
+    F3). The leg writes exactly one payload file per thread, so distinct paths
+    ARE distinct threads and no parsing can mislabel one onto another. Only the
+    display name is derived from the basename, so an unrecognised shape costs a
+    prettier string and never merges two threads into one bucket.
+    """
+    base = os.path.basename(path)
+    if base == "pr.json":
+        return "the PR"
+    m = re.match(r"^issue-(\d+)\.json$", base)
+    if m:
+        return "issue #%s" % m.group(1)
+    return base
+
+
+def collect_marker_events(payload, events, unparsed, thread_key, label):
     """Read HOLD / GO markers out of ONE thread payload, structurally."""
     if not isinstance(payload, dict):
         unparsed.append("a thread payload was not a JSON object")
@@ -307,15 +326,15 @@ def collect_marker_events(payload, events, unparsed):
             continue
         for line in body.splitlines():
             if HOLD_MARKER.match(line):
-                events.append(("hold", stamp, login))
+                events.append(("hold", stamp, login, thread_key, label))
                 break
         for line in body.splitlines():
             if RELEASE_MARKER.match(line):
-                events.append(("release", stamp, login))
+                events.append(("release", stamp, login, thread_key, label))
                 break
 
 
-def collect_disarm_events(payload, window, now, events, unparsed):
+def collect_disarm_events(payload, window, now, events, unparsed, thread_key, label):
     if not isinstance(payload, list):
         unparsed.append("the timeline payload was not a JSON list")
         return
@@ -335,7 +354,7 @@ def collect_disarm_events(payload, window, now, events, unparsed):
         actor = item.get("actor")
         login = actor["login"] if isinstance(actor, dict) and isinstance(
             actor.get("login"), str) else ""
-        events.append(("disarm", stamp, login))
+        events.append(("disarm", stamp, login, thread_key, label))
 
 
 def _norm_author(comment):
@@ -466,7 +485,9 @@ def cmd_hold(argv):
     if pr_payload is None:
         fail(why)
         return 5
-    collect_marker_events(pr_payload, events, unparsed)
+    # The PR body/comments and the PR timeline are ONE thread: a disarm is a
+    # PR-level act, so it belongs in the PR's own bucket.
+    collect_marker_events(pr_payload, events, unparsed, "pr", thread_label(argv[1]))
 
     # EVERY page, decoded BEFORE anything is evaluated.
     pages, why = load_stream(argv[2])
@@ -474,17 +495,18 @@ def cmd_hold(argv):
         fail(why)
         return 5
     for page in pages:
-        collect_disarm_events(page, window, now, events, unparsed)
+        collect_disarm_events(page, window, now, events, unparsed, "pr", "the PR")
 
     for path in argv[3:]:
         thread, why = load(path)
         if thread is None:
             fail(why)
             return 5
-        collect_marker_events(thread, events, unparsed)
+        collect_marker_events(thread, events, unparsed, path, thread_label(path))
 
-    for kind, stamp, login in sorted(events, key=lambda e: e[1]):
-        sys.stdout.write("event=%s:%s:%s\n" % (kind, stamp.isoformat(), sane(login)))
+    for kind, stamp, login, _key, label in sorted(events, key=lambda e: e[1]):
+        sys.stdout.write("event=%s:%s:%s:%s\n"
+                         % (kind, stamp.isoformat(), sane(login), sane(label)))
 
     if unparsed:
         for reason in unparsed:
@@ -493,35 +515,59 @@ def cmd_hold(argv):
              "cannot be decided; this is UNMEASURED and a consumer must treat it as a hold")
         return 5
 
-    # `latest wins`, with the two directions kept asymmetric: a release counts
-    # only from an allowlisted author, so a hold cannot be lifted by the party
-    # it constrains. A release from anyone else is REPORTED and then ignored.
-    latest_stop = None
-    latest_release = None
-    for kind, stamp, login in events:
+    # `latest wins` PER THREAD, with the two directions kept asymmetric: a
+    # release counts only from an allowlisted author, so a hold cannot be lifted
+    # by the party it constrains. A release from anyone else is REPORTED and
+    # then ignored.
+    #
+    # RESOLVED PER THREAD, AND THE LEG REFUSES WHILE **ANY** THREAD IS HELD
+    # (issue #3752, roborev job 78 finding F3). Every marker used to land in ONE
+    # global timeline, so an authorized `GO:` on one closing issue cleared an
+    # unrelated, newer `HOLD:` on another thread merely by being later — a
+    # release nobody wrote for that thread. There is deliberately NO cross-thread
+    # release mechanism: if one is ever wanted it needs its own explicit design,
+    # and the conservative direction is to refuse.
+    threads = {}
+    for kind, stamp, login, key, label in events:
+        bucket = threads.setdefault(key, {"label": label, "stop": None, "release": None})
         if kind in ("hold", "disarm"):
-            if latest_stop is None or stamp > latest_stop[1]:
-                latest_stop = (kind, stamp, login)
+            if bucket["stop"] is None or stamp > bucket["stop"][1]:
+                bucket["stop"] = (kind, stamp, login)
         elif kind == "release":
             if login in RELEASE_AUTHORS:
-                if latest_release is None or stamp > latest_release[1]:
-                    latest_release = (kind, stamp, login)
+                if bucket["release"] is None or stamp > bucket["release"][1]:
+                    bucket["release"] = (kind, stamp, login)
             else:
-                fail("a %s marker from @%s is IGNORED: releasing a hold is the PERMISSIVE "
-                     "direction and is honoured only from the hard-coded allowlist"
-                     % ("GO/RELEASE", sane(login) or "<no author recorded>"))
+                fail("a %s marker from @%s on %s is IGNORED: releasing a hold is the "
+                     "PERMISSIVE direction and is honoured only from the hard-coded allowlist"
+                     % ("GO/RELEASE", sane(login) or "<no author recorded>", sane(label)))
 
-    if latest_stop is None:
+    held = []
+    for key in sorted(threads):
+        bucket = threads[key]
+        stop = bucket["stop"]
+        if stop is None:
+            continue
+        release = bucket["release"]
+        if release is not None and release[1] > stop[1]:
+            fail("on %s the latest %s at %s is superseded by an authorized release at %s"
+                 % (sane(bucket["label"]), stop[0], stop[1].isoformat(),
+                    release[1].isoformat()))
+            continue
+        held.append((bucket["label"], stop))
+
+    if not held:
         sys.stdout.write("state=clear\n")
         return 0
-    if latest_release is not None and latest_release[1] > latest_stop[1]:
-        fail("the latest %s at %s is superseded by an authorized release at %s"
-             % (latest_stop[0], latest_stop[1].isoformat(), latest_release[1].isoformat()))
-        sys.stdout.write("state=clear\n")
-        return 0
-    fail("the latest stop order is a %s at %s by @%s, and no authorized release is newer"
-         % (latest_stop[0], latest_stop[1].isoformat(),
-            sane(latest_stop[2]) or "<no author recorded>"))
+    # NAME every held thread, so the operator knows where to post the release —
+    # a release on the wrong thread is now a no-op and must not look like one
+    # that failed for another reason.
+    for label, stop in held:
+        fail("%s is HELD: the latest stop order there is a %s at %s by @%s, and no "
+             "authorized release on THAT thread is newer"
+             % (sane(label), stop[0], stop[1].isoformat(),
+                sane(stop[2]) or "<no author recorded>"))
+    fail("a release clears only the thread it is posted on; there is no cross-thread release")
     sys.stdout.write("state=hold\n")
     return 4
 

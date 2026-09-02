@@ -1500,6 +1500,92 @@ if run_hold 4 "issues: a HOLD on the CLOSED ISSUE's thread stops the merge (posi
   esac
 fi
 
+# ==============================================================================
+# FINDING F3 (roborev job 78) — A RELEASE CLEARS ONLY ITS OWN THREAD
+# ==============================================================================
+# Every marker used to land in ONE global timeline, and `latest wins` was
+# computed across the pool. So an authorized `GO:` on one closing issue cleared
+# an unrelated, NEWER `HOLD:` on another thread purely by being later — a
+# release nobody ever wrote for the thread that was held. Resolution is now per
+# thread and the leg refuses while ANY thread is held. There is deliberately no
+# cross-thread release.
+
+# --- a newer authorized GO on issue B does NOT clear a HOLD on issue A --------
+timeline_payload '[]'
+raw_pr_hold "$MOCK_GH_DIR/pr-hold.json" \
+  '{"body":"","comments":[],"closingIssuesReferences":[{"number":9101},{"number":9102}]}'
+python3 - "$MOCK_GH_DIR/issue-9101.json" "$(iso_ago 900)" <<'PYA'
+import json, sys
+json.dump({"body": "", "comments": [
+    {"author": {"login": "pmcfadin"}, "createdAt": sys.argv[2],
+     "body": "HOLD: merge after #9999"}]}, open(sys.argv[1], "w"))
+PYA
+python3 - "$MOCK_GH_DIR/issue-9102.json" "$(iso_ago 60)" <<'PYB'
+import json, sys
+json.dump({"body": "", "comments": [
+    {"author": {"login": "pmcfadin"}, "createdAt": sys.argv[2],
+     "body": "GO: unrelated thread, cleared here"}]}, open(sys.argv[1], "w"))
+PYB
+if run_hold 4 "threads: a newer GO on ANOTHER issue does not clear this issue's HOLD"; then
+  case "$OUT" in
+    *"issue #9101 is HELD"*)
+      ok "threads: the held thread is NAMED, so the operator knows where to post the release" ;;
+    *) bad "threads: the cross-thread release cleared an unrelated hold (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"no cross-thread release"*)
+      ok "threads: the report states a release clears only its own thread" ;;
+    *) bad "threads: the refusal did not explain thread scoping (got: $OUT)" ;;
+  esac
+fi
+
+# --- CONTROL: a newer authorized GO on the SAME thread DOES clear it ----------
+# Without this the case above is satisfied by "a GO never clears anything".
+rm -f "$MOCK_GH_DIR/issue-9102.json"
+raw_pr_hold "$MOCK_GH_DIR/pr-hold.json" \
+  '{"body":"","comments":[],"closingIssuesReferences":[{"number":9101}]}'
+python3 - "$MOCK_GH_DIR/issue-9101.json" "$(iso_ago 900)" "$(iso_ago 60)" <<'PYC'
+import json, sys
+json.dump({"body": "", "comments": [
+    {"author": {"login": "pmcfadin"}, "createdAt": sys.argv[2],
+     "body": "HOLD: merge after #9999"},
+    {"author": {"login": "pmcfadin"}, "createdAt": sys.argv[3],
+     "body": "GO: cleared on the same thread"}]}, open(sys.argv[1], "w"))
+PYC
+if run_hold 0 "threads: a newer GO on the SAME thread does clear its own HOLD (control)"; then
+  case "$OUT" in
+    *"NO-HOLD-RECOGNISED"*)
+      ok "threads: an in-thread release still works, so the scoping is not a mute button" ;;
+    *) bad "threads: an in-thread release failed to clear (got: $OUT)" ;;
+  esac
+fi
+
+# --- a PR-level GO does NOT clear an ISSUE-level HOLD -------------------------
+rm -f "$MOCK_GH_DIR/issue-9101.json"
+raw_pr_hold "$MOCK_GH_DIR/pr-hold.json" \
+  "$(python3 -c '
+import json, sys
+json.dump({"body": "", "comments": [
+    {"author": {"login": "pmcfadin"}, "createdAt": sys.argv[1],
+     "body": "GO: from the PR thread"}],
+    "closingIssuesReferences": [{"number": 9103}]}, sys.stdout)
+' "$(iso_ago 60)")"
+python3 - "$MOCK_GH_DIR/issue-9103.json" "$(iso_ago 900)" <<'PYD'
+import json, sys
+json.dump({"body": "", "comments": [
+    {"author": {"login": "pmcfadin"}, "createdAt": sys.argv[2],
+     "body": "HOLD: merge after #9999"}]}, open(sys.argv[1], "w"))
+PYD
+if run_hold 4 "threads: a PR-level GO does not clear an issue-level HOLD"; then
+  case "$OUT" in
+    *"issue #9103 is HELD"*)
+      ok "threads: a PR release does not reach the issue thread it never named" ;;
+    *) bad "threads: a PR-level GO cleared an issue-level hold (got: $OUT)" ;;
+  esac
+fi
+
+rm -f "$MOCK_GH_DIR/issue-9103.json"
+
 # The three unreadable SHAPES. Each is a payload that DECODES as JSON, so the
 # leg's own `gh`/JSON guards do not fire: the only thing standing between them
 # and a false clearance is the extractor refusing a shape it cannot read.
@@ -2032,7 +2118,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=125
+CASE_FLOOR=135
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

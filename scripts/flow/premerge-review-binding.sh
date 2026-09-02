@@ -901,7 +901,25 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   # out of `roborev list --limit`. Demanding retrievability of every historical
   # record would red a correct multi-round PR, so the finding's subject — KNOWN
   # newer results being ignored — is what is closed here.
-  if [ "${#cov_job[@]}" -gt 0 ]; then
+  if [ "${#cov_job[@]}" -eq 1 ]; then
+    # EXACTLY ONE covering round: there is no ordering question, so no
+    # chronology is required. Demanding an order key to sort a set of one would
+    # be gratuitous strictness that reds correct input the moment a real record
+    # lacks the field — and F2's defect needs TWO covering rounds by
+    # construction (an older favourable one outvoting a newer adverse one).
+    if [ "${cov_ok[0]}" -eq 1 ]; then
+      bound=1
+      BOUND_NOTE="${cov_note[0]}"
+    else
+      say "latest job $(sane "${cov_job[0]}") is the only covering round and it CANNOT bind:"
+      say "latest $(sane "${cov_note[0]}")"
+      case "${cov_class[0]}" in
+        unconcluded) unconcluded=1 ;;
+        findings) findings_unauthorized=1 ;;
+        *) verdict_unknown=1 ;;
+      esac
+    fi
+  elif [ "${#cov_job[@]}" -gt 1 ]; then
     local n=0 best=-1 st
     while [ "$n" -lt "${#cov_job[@]}" ]; do
       st="${cov_start[$n]}"

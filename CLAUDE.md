@@ -2023,7 +2023,10 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   recorded round that covers suffices" and stopped the scan at the first bindable record — so an
   earlier CLEAN round stayed sufficient even when a LATER recorded round at the same certified head
   reported findings or failure, i.e. a **known, newer, adverse review result was ignored because an
-  older favourable one was encountered first**. Chronology comes from the record's own `started_at`,
+  older favourable one was encountered first**. With exactly ONE covering round there is no ordering question and no chronology is
+  required — F2's defect needs two covering rounds by construction, and demanding an order key to
+  sort a set of one reds correct input the moment a real record lacks the field. With more than one,
+  chronology comes from the record's own `started_at`,
   never from PR-comment order (a comment can be posted out of order or edited) and never from the job
   id (nothing guarantees ids are monotonic across agents); ordering is lexicographic, so the
   fixed-width ISO-8601 UTC form is CHECKED and anything else is `UNMEASURED` rather than sorted
@@ -2064,7 +2067,13 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   An unrecognised payload shape REFUSES rather than yielding a shorter comment list, because a
   short thread is indistinguishable from a quiet one. A `clear` derived from a partially
   read signal is a false clearance on exactly the scenario this leg exists for. **`PREMERGE: HOLD-CHECK`** — the machine-readable
-  half of the `HOLD:` re-read (below). **Markers are ordered by `updatedAt`, not `createdAt`** —
+  half of the `HOLD:` re-read (below). **Resolved PER THREAD, and it refuses while ANY thread is
+  held (#3752, roborev job 78):** every marker used to land in one global timeline, so an authorized
+  `GO:` on one closing issue cleared an unrelated, NEWER `HOLD:` on another thread purely by being
+  later — a release nobody wrote for the thread that was held. A release now clears only the thread
+  it is posted on, the report NAMES each held thread so the operator knows where to post one, and
+  there is deliberately **no cross-thread release**: if one is ever wanted it needs its own explicit
+  design, and the conservative direction is to refuse. **Markers are ordered by `updatedAt`, not `createdAt`** —
   what a reader SEES is the current text, so an OLD comment EDITED to carry `HOLD:` must not lose
   to a `GO:` posted before that edit; a marker-bearing comment whose edit timestamp is unreadable
   cannot be ordered against its siblings and is `UNMEASURED`. **The third argument is
