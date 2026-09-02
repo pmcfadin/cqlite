@@ -938,3 +938,44 @@ shape this very file polices — with python3 absent the derivation printed noth
 empty, and P2 reported *"no progress line prints the pre-census status"* **having examined
 nothing**. A case floor could never have caught it, because the case count does not change. It now
 fails closed on the derivation's exit status.
+
+---
+
+## roborev round 13 (job 401) — the sibling table had the defect the census already fixed
+
+`_fm_component_class` did not declare `tree-selftest`, so once #3625 routed the boundary block
+through `_fm_summary_line` that row rendered `[UNCLASSIFIED]`. The feature-matrix completeness
+census could not see it, because it derived only literal `NAMES+=` entries.
+
+**Round 4 found this exact defect in the census's own domain** — `tree-selftest` reaches a row via
+`record_result` and appears in NEITHER static set — and widened that derivation to read both emit
+sources with a floor of 4. **The sibling table was left as it was**, so two derivations over one
+name space drifted. *The asymmetry was the defect, not either table.* And the trigger was the r2
+one-renderer fix: routing the boundary block through `_fm_summary_line` is what first made
+`tree-selftest` reach `_fm_annotate` at all.
+
+### The class, and why it is `no-cargo` rather than `unobservable:<why>`
+
+`unobservable` is for a component that shells out to children this shell cannot see —
+`tooling-tests`' ~60 nested scripts, `shell-selftests`' arbitrary guards — where *"no cargo ran"*
+is a claim nobody can support. The hook is the opposite: a **fixed, fully readable code path in
+this very script** (`_tree_selftest_mutate`, `_tree_finalize`, `_tree_commit_meta`,
+`_emit_terminal_summary`), file and git work only, invoking **no child script at all**. Verified:
+zero non-comment `cargo` in the hook's whole block. So the affirmative claim is available, and
+`unobservable` would **under-claim** — asserting nothing where the code can be read end to end.
+
+### The durable half
+
+The feature-matrix domain derivation now reads both emit sources — `NAMES+=("<literal>")` and
+non-comment `record_result "<literal>"` — **spelled identically to the census guard's**, verified
+byte-for-byte modulo indentation, with the same **floor of 4**. So a future widening is visibly
+one edit in two places rather than two different ideas, and neither domain can silently narrow.
+
+### The generalisation
+
+**Two sibling guards over the same name domain drifted because only one was widened.** This is the
+second pair in this issue to need reconciling; the first was `_census_measure` vs `_census_record`,
+which converged onto one classifier in round 5. These two are *not* converged — they answer
+different questions and share only their key space — but their **domain derivations** are now
+identical by construction. When widening a domain derivation, the question to ask is: *what else
+derives this same domain?*
