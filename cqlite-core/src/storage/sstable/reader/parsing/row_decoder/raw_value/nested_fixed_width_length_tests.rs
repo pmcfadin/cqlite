@@ -452,7 +452,7 @@ fn admissible_widths_match_the_pinned_serializers() {
     // would — proving they do not silently share one of the arms above.
     for t in ["text", "blob", "varint", "inet"] {
         assert!(
-            p.parse_value_from_raw_bytes(&vec![0x31u8; 17], t, "col", 0)
+            p.parse_value_from_raw_bytes(&[0x31u8; 17], t, "col", 0)
                 .is_ok(),
             "{} must not be width-constrained",
             t

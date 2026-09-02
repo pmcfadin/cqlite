@@ -296,7 +296,7 @@ fn a_wrong_width_dropped_element_is_not_validated_today_known_gap_3778() {
     // (set, shadowed) — a 3-byte `int` member.
     let short_member = build_set_cell_bytes(&[0x00, 0x00, 0x07]);
     assert!(
-        decode_set(&[short_member.clone()], None).is_err(),
+        decode_set(std::slice::from_ref(&short_member), None).is_err(),
         "live-path control: a 3-byte `int` set member IS refused by #3811's width rule"
     );
     assert_eq!(
@@ -318,7 +318,7 @@ fn a_wrong_width_dropped_element_is_not_validated_today_known_gap_3778() {
     // (map, shadowed) — a key whose single nested `int` element declares 3 bytes.
     let short_key_entry = cell(&frozen_list_int_key(3), &7i32.to_be_bytes());
     assert!(
-        decode_map(&[short_key_entry.clone()], None).is_err(),
+        decode_map(std::slice::from_ref(&short_key_entry), None).is_err(),
         "live-path control: a 3-byte nested `int` map key IS refused"
     );
     assert_eq!(
@@ -331,7 +331,7 @@ fn a_wrong_width_dropped_element_is_not_validated_today_known_gap_3778() {
     // (UDT, shadowed) — a 3-byte `int` field value.
     let short_field = cell(&field_path(0), &[0x00, 0x00, 0x07]);
     assert!(
-        decode_udt(&[short_field.clone()], None).is_err(),
+        decode_udt(std::slice::from_ref(&short_field), None).is_err(),
         "live-path control: a 3-byte `int` UDT field value IS refused"
     );
     let (value, filtered) = decode_udt(&[short_field], Some(shadow_everything()))
