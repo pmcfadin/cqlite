@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=424
+CASE_FLOOR=435
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -732,7 +732,7 @@ check_support() { # <description> <expected-exit> [expected-cause]
 # after two release builds and a full measurement pass.
 rm -f "$TMP/ramp.jsonl"
 for c in 1 2 4 8; do mkstep "$TMP/ramp.jsonl" base-r01 "$c"; done
-run_support validate-replicate "$TMP/ramp.jsonl" base-r01 1,2,4,8
+run_support validate-replicate "$TMP/ramp.jsonl" base-r01 1,2,4,8 full 60s
 check_support "a four-step replicate against a four-step ramp" 0
 if [ "$(grep -c '^AB-3649: run base-r01 step ' "$TMP/out.txt")" = "4" ]; then
   ok "every step of a ramp replicate is reported, not just the first"
@@ -741,24 +741,24 @@ else
 fi
 
 rm -f "$TMP/one.jsonl"; mkstep "$TMP/one.jsonl" base-r01 1
-run_support validate-replicate "$TMP/one.jsonl" base-r01 1
+run_support validate-replicate "$TMP/one.jsonl" base-r01 1 full 60s
 check_support "a one-step replicate against a --ramp 1 session" 0
 
-run_support validate-replicate "$TMP/one.jsonl" base-r01 1,2,4,8
+run_support validate-replicate "$TMP/one.jsonl" base-r01 1,2,4,8 full 60s
 check_support "one record where the ramp declares four" 1 replicate-invalid
-run_support validate-replicate "$TMP/ramp.jsonl" base-r01 1
+run_support validate-replicate "$TMP/ramp.jsonl" base-r01 1 full 60s
 check_support "four records where the ramp declares one" 1 replicate-invalid
 
-run_support validate-replicate "$TMP/ramp.jsonl" head-r01 1,2,4,8
+run_support validate-replicate "$TMP/ramp.jsonl" head-r01 1,2,4,8 full 60s
 check_support "a replicate whose round label names the other arm" 1 replicate-invalid
 
 rm -f "$TMP/wrongc.jsonl"
 for c in 1 2 4 16; do mkstep "$TMP/wrongc.jsonl" base-r01 "$c"; done
-run_support validate-replicate "$TMP/wrongc.jsonl" base-r01 1,2,4,8
+run_support validate-replicate "$TMP/wrongc.jsonl" base-r01 1,2,4,8 full 60s
 check_support "a step whose concurrency is not the declared one" 1 replicate-invalid
 
 rm -f "$TMP/shed1.jsonl"; mkstep "$TMP/shed1.jsonl" base-r01 1 100000 4
-run_support validate-replicate "$TMP/shed1.jsonl" base-r01 1
+run_support validate-replicate "$TMP/shed1.jsonl" base-r01 1 full 60s
 check_support "a shed at single-stream concurrency is fatal to the driver" 1 replicate-invalid
 
 # On a ramp the analyzer EXCLUDES shed steps, so the driver must not contradict
@@ -768,7 +768,7 @@ mkstep "$TMP/shedr.jsonl" base-r01 1
 mkstep "$TMP/shedr.jsonl" base-r01 2
 mkstep "$TMP/shedr.jsonl" base-r01 4
 mkstep "$TMP/shedr.jsonl" base-r01 8 100000 6
-run_support validate-replicate "$TMP/shedr.jsonl" base-r01 1,2,4,8
+run_support validate-replicate "$TMP/shedr.jsonl" base-r01 1,2,4,8 full 60s
 check_support "a shed ramp step is reported, not fatal, so the two agree" 0
 if grep -q '^AB-3649: run base-r01 step 3 concurrency 8 SHED requests-unavailable 6' "$TMP/out.txt"; then
   ok "the driver names the shed step and says the analyzer will exclude it"
@@ -790,7 +790,7 @@ record = {
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     handle.write(json.dumps(record) + "\n")
 PYINNER
-run_support validate-replicate "$TMP/inf.jsonl" base-r01 1
+run_support validate-replicate "$TMP/inf.jsonl" base-r01 1 full 60s
 check_support "a non-finite rate refused by the driver too" 1 replicate-invalid
 
 # The duration grammar MIRRORS flight-loadgen's (tools/flight-loadgen/src/ramp.rs:224).
@@ -3302,6 +3302,126 @@ if grep -q '^AB-3649: verdict-detail single-stream HOST whether the box was cont
   ok "an unmeasurable load probe is disclosed as a gap, not scored as a quiet box"
 else
   bad "an unmeasurable load probe was silently read as quiet"
+fi
+
+# ---- ONE validator for one record schema -------------------------------------
+# ROUND 14 FINDING 4. The driver used to check five fields by hand and nothing
+# else, so it ACCEPTED records the analyzer later refuses -- and a malformed
+# `latency_ms` reached `.get` on a non-dict and produced an UNANCHORED
+# TRACEBACK. It now CALLS the analyzer's typed validation. The property under
+# test is therefore AGREEMENT, not a list of rejections: for each malformed
+# record, the driver must refuse it AND the analyzer must refuse it, because a
+# second validator drifting from the first is the defect being closed.
+record_agreement_case() { # <name> <python-mutation>
+  python3 - "$TMP/agree.jsonl" <<PYINNER
+import json
+
+record = {
+    "schema": "flight-loadgen.step/v1", "round": "base-r01",
+    "endpoint": "http://127.0.0.1:8815", "ts_unix_ms": 1780000000000,
+    "seed": 42, "step": 0, "target_concurrency": 1, "shape": "full",
+    "duration_s": 60.0, "requests_ok": 5, "requests_unavailable": 0,
+    "requests_error": 0, "error_codes": {}, "qps": 5 / 60.0,
+    "rows_per_s": 100000.0, "rows_total": 6000000,
+    "latency_ms": {"p50": 1.0, "p95": 2.0, "p99": 3.0, "max": 4.0},
+}
+$2
+with open("$TMP/agree.jsonl", "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYINNER
+  set +e
+  python3 "$SUPPORT" validate-replicate "$TMP/agree.jsonl" base-r01 1 full 60s \
+    > "$TMP/agree-out.txt" 2> "$TMP/agree-err.txt"
+  local driver_rc=$?
+  set -e
+  if [ "$driver_rc" = 0 ]; then
+    bad "record $1 was ACCEPTED by the driver; the analyzer refuses it"
+    return
+  fi
+  if grep -q 'Traceback' "$TMP/agree-err.txt"; then
+    bad "record $1 produced an unanchored traceback instead of a named refusal"
+    return
+  fi
+  if ! grep -q '^AB-3649: cause replicate-invalid$' "$TMP/agree-err.txt"; then
+    bad "record $1 was refused without the driver's own anchored cause"
+    return
+  fi
+  # The analyzer's cause is carried through, so the operator sees the exact
+  # refusal the analysis would give while the rig is still up.
+  if ! grep -q 'the analyzer refuses this with cause ' "$TMP/agree-err.txt"; then
+    bad "record $1 was refused without naming the analyzer's cause"
+    return
+  fi
+  ok "record $1 is refused by the driver, naming the analyzer's own cause"
+}
+# THE TRACEBACK: a non-dict latency_ms used to reach `.get` in the print path.
+record_agreement_case latency-not-dict   'record["latency_ms"] = "fast"'
+record_agreement_case latency-missing-p50 'del record["latency_ms"]["p50"]'
+record_agreement_case latency-p50-string 'record["latency_ms"]["p50"] = "1.0"'
+# SCHEMA, SHAPE, DURATION AND CONSISTENCY -- none of which the driver checked.
+record_agreement_case wrong-schema       'record["schema"] = "flight-loadgen.step/v2"'
+record_agreement_case wrong-shape        'record["shape"] = "point"'
+record_agreement_case duration-from-elsewhere 'record["duration_s"] = 1.5'
+record_agreement_case rows-inconsistent  'record["rows_total"] = 17'
+record_agreement_case missing-qps        'del record["qps"]'
+record_agreement_case duration-not-number 'record["duration_s"] = "60"'
+# ...and a well-formed record still passes, or the above proves only that
+# everything is refused.
+python3 - "$TMP/agree-ok.jsonl" <<'PYINNER'
+import json
+import sys
+
+record = {
+    "schema": "flight-loadgen.step/v1", "round": "base-r01",
+    "endpoint": "http://127.0.0.1:8815", "ts_unix_ms": 1780000000000,
+    "seed": 42, "step": 0, "target_concurrency": 1, "shape": "full",
+    "duration_s": 60.0, "requests_ok": 5, "requests_unavailable": 0,
+    "requests_error": 0, "error_codes": {}, "qps": 5 / 60.0,
+    "rows_per_s": 100000.0, "rows_total": 6000000,
+    "latency_ms": {"p50": 1.0, "p95": 2.0, "p99": 3.0, "max": 4.0},
+}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+PYINNER
+run_support validate-replicate "$TMP/agree-ok.jsonl" base-r01 1 full 60s
+check_support "a well-formed record passes the shared validator" 0
+
+# STRUCTURAL: there must be exactly ONE implementation. A driver that re-derived
+# these checks would drift from the analyzer within two rounds, and the drift
+# presents as the driver accepting what the analysis rejects -- after the rig is
+# gone. So the call is asserted, and so is the absence of a second copy.
+if python3 - "$HERE" <<'PYINNER'
+import re
+import sys
+
+source = open("%s/ab_driver_support.py" % sys.argv[1], encoding="utf-8").read()
+problems = []
+if "from ab_input import validate_record_shape, validate_record_usable" not in source:
+    problems.append("ab_driver_support does not import the analyzer's validators")
+body = re.search(r"def validate_replicate\(.*?\n(?=\n\n[A-Za-z_#])", source, re.S)
+if not body:
+    problems.append("validate_replicate was not found")
+else:
+    text = body.group(0)
+    for call in ("validate_record_shape(", "validate_record_usable("):
+        if call not in text:
+            problems.append("validate_replicate does not call %s" % call)
+    # A re-derived copy would look like this: the analyzer owns the schema
+    # constant and the latency percentile names, so neither belongs here.
+    for smell, why in (
+        ("flight-loadgen.step/v1", "the record schema constant"),
+        ('"p95"', "the latency percentile names"),
+    ):
+        if smell in text:
+            problems.append("validate_replicate re-derives %s" % why)
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "the driver CALLS the analyzer's record validation and keeps no second copy"
+else
+  bad "there is more than one implementation of the record schema (see stderr above)"
 fi
 
 # ---- resolved integers are parsed, bounded and CANONICAL ---------------------

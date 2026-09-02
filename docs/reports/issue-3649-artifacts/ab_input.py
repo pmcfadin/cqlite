@@ -315,7 +315,16 @@ def _read_records(path):
     return records
 
 
-def _validate_shape(record, path, index, declared_shape):
+def validate_record_shape(record, path, index, declared_shape):
+    """PUBLIC because `ab_driver_support.validate_replicate` calls it.
+
+    ONE VALIDATOR FOR ONE RECORD SCHEMA. The driver used to check a handful of
+    fields by hand, so it accepted records the analyzer later refused -- and a
+    malformed `latency_ms` reached a `.get` on a non-dict and produced an
+    UNANCHORED TRACEBACK. A second validator would drift from this one within
+    two rounds, and the drift would present exactly as that symptom: the driver
+    passing what the analyzer rejects, after the rig is gone.
+    """
     where = "%s record %d" % (path, index)
     # RECONCILED, like every other shared field: a manifest declaring `full` must
     # not reference records produced under a narrowed shape and still receive a
@@ -370,7 +379,7 @@ def _validate_shape(record, path, index, declared_shape):
         )
 
 
-def _validate_usable(record, path, index, expected_concurrency, declared_duration_s):
+def validate_record_usable(record, path, index, expected_concurrency, declared_duration_s):
     """A step that is being COUNTED must carry real work, and must describe the
     step the manifest says it is."""
     where = "%s record %d" % (path, index)
@@ -466,7 +475,7 @@ def load_run(path, mode, declared_steps, expected_round, declared_duration_s,
             "%s)" % (path, len(records), expected, declared_steps),
         )
     for index, record in enumerate(records, start=1):
-        _validate_shape(record, path, index, declared_shape)
+        validate_record_shape(record, path, index, declared_shape)
         # The round label is stamped by the driver from the (arm, replicate) it
         # is running, so a file listed under the wrong entry is caught here
         # rather than silently analysed as the arm it is filed under.
@@ -488,7 +497,7 @@ def load_run(path, mode, declared_steps, expected_round, declared_duration_s,
                 "measurement of merge throughput"
                 % (path, record["requests_unavailable"], record["target_concurrency"]),
             )
-        _validate_usable(record, path, 1, 1, declared_duration_s)
+        validate_record_usable(record, path, 1, 1, declared_duration_s)
         return RunPoint(record["rows_per_s"], records, 1, (1,), ())
 
     # Utilization: exclude shed steps, report each exclusion, peak over the rest.
@@ -510,7 +519,7 @@ def load_run(path, mode, declared_steps, expected_round, declared_duration_s,
                 (record["target_concurrency"], record["requests_unavailable"])
             )
             continue
-        _validate_usable(record, path, index, expected_concurrency, declared_duration_s)
+        validate_record_usable(record, path, index, expected_concurrency, declared_duration_s)
         surviving.append(record)
     if not surviving:
         raise Unmeasured(

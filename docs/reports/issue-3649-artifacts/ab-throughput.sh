@@ -1241,7 +1241,11 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   # replicate must stop the session while the rig is still up, not surface hours
   # later. The validator is ramp-aware -- flight-loadgen emits ONE record per
   # ramp step -- and it is an executable file so the self-test can drive it.
-  python3 "$SUPPORT" validate-replicate "$jsonl" "$tag" "$RAMP" \
+  # It CALLS the analyzer's typed record validation rather than reimplementing
+  # it, so the driver cannot accept a record the analysis will later refuse --
+  # which is the one failure this check exists to prevent and the one a second
+  # validator would eventually cause.
+  python3 "$SUPPORT" validate-replicate "$jsonl" "$tag" "$RAMP" "$SHAPE" "$STEP_DURATION" \
     || die replicate-invalid "the $tag JSONL is not a usable replicate (see the cause-detail above)"
 
   python3 - "$RUNS_JSONL" "$arm" "$rep" "$tag.jsonl" "$TEMPERATURE" "$cpu0" "$cpu1" "$hz" \

@@ -33,7 +33,8 @@ import re
 import subprocess
 import sys
 
-from ab_common import MIN_CORPUS_BYTES_FLOOR, MIN_SSTABLES_FLOOR, err, out
+from ab_common import MIN_CORPUS_BYTES_FLOOR, MIN_SSTABLES_FLOOR, Unmeasured, err, out
+from ab_input import validate_record_shape, validate_record_usable
 
 NOT_OBSERVED = "NOT-OBSERVED"
 
@@ -52,7 +53,8 @@ USAGE = [
     "ab_driver_support.py validate-ticket <template.json>",
     "ab_driver_support.py validate-ticket-schema <template.json>",
     "ab_driver_support.py check-affinity <pid> <cpu-list>",
-    "ab_driver_support.py validate-replicate <jsonl> <round-label> <ramp>",
+    "ab_driver_support.py validate-replicate <jsonl> <round-label> <ramp> "
+    "<shape> <step-duration-s>",
     "ab_driver_support.py parse-startup <server-log> "
     "<scans|source|batch-size|max-batch-bytes|wait-timeout-ms>",
 ]
@@ -1136,7 +1138,28 @@ def validate_ramp(raw_ramp):
     return 0
 
 
-def validate_replicate(path, tag, raw_ramp):
+def validate_replicate(path, tag, raw_ramp, shape, step_duration_s):
+    """Validate a replicate's records BY CALLING THE ANALYZER'S VALIDATOR.
+
+    ONE VALIDATOR FOR ONE RECORD SCHEMA. This function used to check a handful
+    of fields by hand -- round, target_concurrency, requests_error, requests_ok,
+    rows_per_s -- and nothing else, so it accepted records the analyzer would
+    later refuse (wrong `schema`, wrong `shape`, a `duration_s` from another
+    session, `rows_per_s x duration_s` disagreeing with `rows_total`), and a
+    malformed `latency_ms` reached `.get` on a non-dict and produced an
+    unanchored traceback in the printing code below.
+
+    A SECOND VALIDATOR WOULD DRIFT FROM THE FIRST WITHIN TWO ROUNDS, and the
+    drift presents exactly as the symptom being fixed: the driver accepting what
+    the analyzer rejects, discovered after the rig is gone. So the analyzer's
+    typed validation is CALLED, not reimplemented -- the same move as one
+    duration grammar, one resolver and one canonical findings section.
+
+    What stays here is what the analyzer does NOT do at record level: the round
+    tag (the analyzer reconciles it a layer up), the error count, and the
+    single-stream shed refusal -- which exists precisely because the driver runs
+    while the rig is still up and the pin can still be corrected.
+    """
     steps = parse_ramp(raw_ramp)
     if steps is None:
         err("cause replicate-invalid")
@@ -1176,28 +1199,26 @@ def validate_replicate(path, tag, raw_ramp):
             return 1
 
         expected_concurrency = steps[position]
+        # THE ANALYZER'S OWN VALIDATION, called. Its cause is carried into the
+        # detail so an operator sees the exact refusal the analysis would give,
+        # while the driver keeps its own cause vocabulary.
+        try:
+            validate_record_shape(record, path, position + 1, shape)
+            validate_record_usable(
+                record, path, position + 1, expected_concurrency, step_duration_s)
+        except Unmeasured as exc:
+            err("cause replicate-invalid")
+            err("cause-detail %s record %d: %s (the analyzer refuses this with "
+                "cause %s)" % (path, position + 1, exc.detail, exc.cause))
+            return 1
+
         problems = []
         if record.get("round") != tag:
             problems.append(
                 "round is %r, expected %r" % (record.get("round"), tag)
             )
-        if record.get("target_concurrency") != expected_concurrency:
-            problems.append(
-                "target_concurrency is %r, expected %d for ramp position %d"
-                % (record.get("target_concurrency"), expected_concurrency, position)
-            )
         if record.get("requests_error", 0):
             problems.append("requests_error=%s" % record["requests_error"])
-        if not record.get("requests_ok", 0):
-            problems.append("requests_ok=0")
-        rate = record.get("rows_per_s", 0)
-        if not isinstance(rate, (int, float)) or isinstance(rate, bool):
-            problems.append("rows_per_s is not a number")
-        elif not rate > 0 or rate != rate or rate in (float("inf"), float("-inf")):
-            problems.append(
-                "rows_per_s is %r -- not a positive finite rate; the scan returned "
-                "no rows, or the duration was degenerate" % rate
-            )
         if problems:
             err("cause replicate-invalid")
             for problem in problems:
@@ -1476,10 +1497,15 @@ def main(argv):
             return 2
         return check_affinity(rest[0], rest[1])
     if command == "validate-replicate":
-        if len(rest) != 3:
-            err("usage-error validate-replicate needs <jsonl> <round-label> <ramp>")
+        if len(rest) != 5:
+            err("usage-error validate-replicate needs <jsonl> <round-label> "
+                "<ramp> <shape> <step-duration-s>")
             return 2
-        return validate_replicate(rest[0], rest[1], rest[2])
+        seconds = parse_duration_seconds(rest[4])
+        if seconds is None or seconds <= 0:
+            err("usage-error validate-replicate needs a positive <step-duration-s>")
+            return 2
+        return validate_replicate(rest[0], rest[1], rest[2], rest[3], seconds)
     if command == "parse-startup":
         if len(rest) != 2 or rest[1] not in STARTUP_FIELDS:
             err("usage-error parse-startup needs <server-log> <%s>"
