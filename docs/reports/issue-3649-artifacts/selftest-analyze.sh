@@ -132,13 +132,27 @@ def main():
         "generated_utc": "2026-09-01T00:00:00Z",
         "replicates_requested": requested,
         "arms": {
-            "base": {"commit": "0" * 40, "ref": "cfa93fe99^"},
-            "head": {"commit": "1" * 40, "ref": "cfa93fe99"},
+            # The HEAD arm must be the #2820 commit: the analyzer now enforces
+            # what its docstring always claimed, so a placeholder sha is a
+            # session measuring something else.
+            "base": {"commit": "cfa93fe98" + "0" * 31, "ref": "cfa93fe99^"},
+            "head": {"commit": "cfa93fe99" + "1" * 31, "ref": "cfa93fe99"},
         },
         "loadgen": {"commit": "2" * 40, "ref": "cfa93fe99"},
         "workload": {
             "shape": "full",
             "profile": "narrow",
+            # The analyzer validates the recorded ticket through the DRIVER'S
+            # validator, so a fixture must carry one that is actually a
+            # full-ring scan -- `shape: full` is a noun standing in for the
+            # adjective and no longer suffices.
+            "ticket_content": {
+                "version": 2, "keyspace": "ks", "table": "tbl",
+                "ddl": "CREATE TABLE ks.tbl (a int PRIMARY KEY)",
+                "snapshot": None, "token_start": None, "token_end": None,
+                "wraparound": False, "columns": None, "predicates": [],
+                "filter": None, "aggregation": None, "limit": None,
+            },
             "step_duration": "60s",
             "step_duration_seconds": 60.0,
             "ramp": ramp,
@@ -2959,6 +2973,9 @@ STUBEOF
   # coverage that found the exit-127 defect -- and a conditional assertion
   # ("verdict on a 4-core box, refusal elsewhere") would be non-deterministic,
   # which is the thing this suite refuses to be.
+  # Neutralises the host and provenance variables these cases do not test. Named
+  # for the host half historically; it now covers the arms as well, and both are
+  # covered by dedicated fixture cases elsewhere.
   e2e_narrow_profile() { # <work-dir>
     # The work directory is checked FIRST because `set -o pipefail` is in force:
     # `find` on a path that does not exist yet fails, and the failure propagates
@@ -2980,6 +2997,13 @@ except (OSError, ValueError):
     raise SystemExit(0)
 manifest["host"]["hardware_cpus"] = 4
 manifest["host"]["process_cpus"] = 4
+# THE ARMS TOO, for the same reason and with the same limit. These sessions run
+# against a throwaway repository, so their real shas cannot start with the
+# #2820 commit; the analyzer's arm gate has its own fixture cases. What these
+# cases are for is the driver->analyzer PIPELINE, and a host or provenance
+# variable that differs per box is noise in that subject, not the subject.
+manifest["arms"]["base"]["commit"] = "cfa93fe98" + "0" * 31
+manifest["arms"]["head"]["commit"] = "cfa93fe99" + "1" * 31
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(manifest, handle, indent=1, sort_keys=True)
 PYINNER

@@ -189,7 +189,7 @@ LOADGEN_REF=''
 #: co-designed with #2765 (#3659)". ONE literal, so the default refs and the
 #: measurement pin cannot drift apart into two claims about which commit this
 #: instrument is about.
-AB3649_PIN='cfa93fe99'
+AB3649_PIN="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import ab_driver_support as S; print(S.AB3649_PIN_SHA)' "$(dirname "$SUPPORT")")"
 BASE_REF="${AB3649_PIN}^"
 HEAD_REF="$AB3649_PIN"
 REPLICATES=7

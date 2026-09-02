@@ -72,6 +72,7 @@ from ab_common import (
     err,
     out,
 )
+from ab_driver_support import AB3649_PIN_SHA, ticket_problems
 from ab_input import (
     MODE_SINGLE_STREAM,
     MODE_UTILIZATION,
@@ -567,6 +568,61 @@ def analyze(mode, path, opts):
     # declared and it may never overrule it, so a wrong `--profile` is
     # observable rather than merely wrong.
     resolve_profile(manifest, opts, control, mode)
+    # THE ANALYZER ENFORCES EVERY PROPERTY THAT GATES A VERDICT, not only the
+    # ones a driver-created manifest happens to satisfy. Rounds 18, 19 and 20
+    # each found this boundary from a different angle: the driver's refusals
+    # protect sessions THE DRIVER CREATED, and a hand-made or edited manifest
+    # went straight past them while this file otherwise treats manifests as
+    # untrusted data. Producer pinned, consumer not -- the ticket-freeze lesson
+    # one layer up.
+    #
+    # THE ARMS. Nothing here checked them: this file's only mention of the
+    # commit was its own DOCSTRING, so the header claimed to measure #2820 and
+    # the logic enforced nothing. A requirement in prose with no check behind it.
+    if not control:
+        arms = manifest.get("arms", {})
+        base_sha = (arms.get("base") or {}).get("commit", "")
+        head_sha = (arms.get("head") or {}).get("commit", "")
+        pinned_head = AB3649_PIN_SHA
+        if not (isinstance(head_sha, str) and head_sha.startswith(pinned_head)):
+            raise Unmeasured(
+                "arms-not-2820",
+                "the head arm is %r and this analyzer renders the #2820 verdict, "
+                "which is defined for commit %s. A session comparing other "
+                "commits -- or the same pair reversed, which inverts the ratio -- "
+                "would be authoritative about something it did not measure. Label "
+                "the session --control to compare other commits"
+                % (head_sha, pinned_head),
+            )
+        if not isinstance(base_sha, str) or not base_sha or base_sha == head_sha:
+            raise Unmeasured(
+                "arms-not-2820",
+                "the base arm is %r, which is empty or equal to the head arm; the "
+                "#2820 comparison is %s^ against %s"
+                % (base_sha, pinned_head, pinned_head),
+            )
+
+    # THE TICKET, through the DRIVER'S OWN VALIDATOR -- one validator, two
+    # callers. `workload.shape == "full"` is a NOUN standing in for an
+    # ADJECTIVE: Shape::Full preserves the template's token bounds, projections,
+    # predicates, filters and aggregations, so a narrowed template satisfies the
+    # label and violates the property. The manifest records the frozen ticket's
+    # CONTENT precisely so this can be checked here.
+    if not control:
+        recorded_ticket = manifest.get("workload", {}).get("ticket_content")
+        if recorded_ticket is None:
+            raise Unmeasured(
+                "ticket-unrecorded",
+                "the manifest records no ticket content, so the workload cannot "
+                "be checked to be the full-ring scan the target band is defined "
+                "for. A session that does not say what it served cannot be "
+                "scored against a band that describes one",
+            )
+        cause, problems = ticket_problems(
+            recorded_ticket, "the manifest's recorded ticket", full_ring=True)
+        if cause is not None:
+            raise Unmeasured(cause, "; ".join(problems))
+
     pairs, admission, session = collect_pairs_checked(
         manifest, manifest_dir, mode, declared_steps
     )

@@ -38,6 +38,11 @@ from ab_input import validate_record_shape, validate_record_usable
 
 NOT_OBSERVED = "NOT-OBSERVED"
 
+#: The #2820 commit, as ONE literal shared by the driver's pre-flight pin and
+#: the analyzer's verdict gate. Two copies would be two claims about which
+#: commit this instrument is about, and they would drift.
+AB3649_PIN_SHA = "cfa93fe99"
+
 USAGE = [
     "ab_driver_support.py pair-order <replicate>",
     "ab_driver_support.py effective-flag <flag> <global-value> <extra-string>",
@@ -444,6 +449,76 @@ def validate_ticket_schema(path, ticket):
     return problems
 
 
+def ticket_problems(ticket, where, full_ring=True):
+    """The ONE ticket validator, as a function of a PARSED TICKET.
+
+    -> (cause, [detail, ...]) with cause None when the ticket is acceptable.
+
+    Split out from `validate_ticket` so the ANALYZER can apply the SAME
+    validation to the ticket the manifest records, rather than a second one.
+    The analyzer previously validated the ticket not at all: `grep -c
+    ticket_content analyze-ab.py` was 0, so a hand-made or edited manifest
+    received a full-band verdict over a narrowed template. The driver's refusal
+    only ever protected sessions the driver created.
+    """
+    if not isinstance(ticket, dict):
+        return "ticket-template-unparseable", ["%s: top level is not an object" % where]
+    schema_problems = validate_ticket_schema(where, ticket)
+    if schema_problems:
+        return "ticket-schema-invalid", schema_problems
+    if not full_ring:
+        return None, []
+    cause, problems = _ticket_full_ring_problems(ticket, where)
+    return cause, problems
+
+
+def _ticket_full_ring_problems(ticket, where):
+    """The full-ring half, as a function of a PARSED ticket.
+
+    -> (cause, [detail, ...]); (None, []) when the ticket is a full-ring scan of
+    every column. Lifted out of `validate_ticket` unchanged so the driver and
+    the analyzer share ONE implementation -- two validators of one property is
+    the duplicate this instrument has removed three times already.
+    """
+    problems = []
+    # MIRRORS `pathsafe::validate_snapshot` (cqlite-flight/src/pathsafe.rs:60-73):
+    # present-but-EMPTY is rejected there, at ticket parse time. The census used
+    # to be the only place this was checked, and it accepted an empty name and
+    # then resolved the LIVE directory -- so the session censused one directory,
+    # built both arms, and only then had every request refused by the server's
+    # own ticket validation. `null` remains legal: it means the live directory.
+    snapshot = ticket.get("snapshot")
+    if snapshot is not None and (
+        not isinstance(snapshot, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", snapshot)
+    ):
+        return "ticket-identifier-invalid", [
+            "%s: snapshot is %r; cqlite-flight rejects an empty or "
+            "non-conforming snapshot name at ticket parse time, so this would "
+            "fail every request AFTER both arms had been built"
+            % (where, snapshot)
+        ]
+    for field, why in _TICKET_NARROWING:
+        if ticket.get(field) is not None:
+            problems.append("%s (%s = %r)" % (why, field, ticket[field]))
+    predicates = ticket.get("predicates")
+    if isinstance(predicates, list) and predicates:
+        problems.append("carries %d predicate(s)" % len(predicates))
+    if not _token_range_is_full_ring(ticket):
+        problems.append(
+            "narrows the token range (token_start=%r token_end=%r)"
+            % (ticket.get("token_start"), ticket.get("token_end"))
+        )
+    # `wraparound` is deliberately NOT checked -- see `_token_range_is_full_ring`.
+    if problems:
+        return "ticket-not-full-ring", [
+            "%s is not a full-ring scan of every column -- it %s. The #3649 "
+            "target band is defined for `--shape full` over the whole ring; a "
+            "narrowed ticket would receive a verdict against a band that does "
+            "not describe it" % (where, "; it ".join(problems))
+        ]
+    return None, []
+
+
 def validate_ticket(path, full_ring=True):
     """Refuse a ticket the consumer would reject, and -- for a measurement --
     one that is not a full-ring scan of every column.
@@ -474,49 +549,13 @@ def validate_ticket(path, full_ring=True):
     if not full_ring:
         return 0
 
-    problems = []
-    # MIRRORS `pathsafe::validate_snapshot` (cqlite-flight/src/pathsafe.rs:60-73):
-    # present-but-EMPTY is rejected there, at ticket parse time. The census used
-    # to be the only place this was checked, and it accepted an empty name and
-    # then resolved the LIVE directory -- so the session censused one directory,
-    # built both arms, and only then had every request refused by the server's
-    # own ticket validation. Checked HERE, at pre-flight, because that is before
-    # the expensive step. `null` remains legal: it means the live directory.
-    snapshot = ticket.get("snapshot")
-    if snapshot is not None and (
-        not isinstance(snapshot, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", snapshot)
-    ):
-        err("cause ticket-identifier-invalid")
-        err(
-            "cause-detail %s: snapshot is %r; cqlite-flight rejects an empty or "
-            "non-conforming snapshot name at ticket parse time, so this would fail "
-            "every request AFTER both arms had been built" % (path, snapshot)
-        )
-        return 1
-    for field, why in _TICKET_NARROWING:
-        if ticket.get(field) is not None:
-            problems.append("%s (%s = %r)" % (why, field, ticket[field]))
-    predicates = ticket.get("predicates")
-    if isinstance(predicates, list) and predicates:
-        problems.append("carries %d predicate(s)" % len(predicates))
-    if not _token_range_is_full_ring(ticket):
-        problems.append(
-            "narrows the token range (token_start=%r token_end=%r)"
-            % (ticket.get("token_start"), ticket.get("token_end"))
-        )
-    # `wraparound` is deliberately NOT checked -- see `_token_range_is_full_ring`.
-    if problems:
-        err("cause ticket-not-full-ring")
-        err(
-            "cause-detail %s is not a full-ring scan of every column -- it %s. "
-            "The #3649 target band is defined for `--shape full` over the whole "
-            "ring; a narrowed ticket would receive a verdict against a band that "
-            "does not describe it. Pass --control <label> to run it anyway"
-            % (path, "; it ".join(problems))
-        )
+    cause, problems = _ticket_full_ring_problems(ticket, path)
+    if cause is not None:
+        err("cause %s" % cause)
+        for problem in problems:
+            err("cause-detail %s" % problem)
         return 1
     return 0
-
 
 def check_affinity(pid, expected):
     """Is the server actually pinned where we asked? Requested and effective are
