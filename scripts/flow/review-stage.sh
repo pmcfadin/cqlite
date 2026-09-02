@@ -271,7 +271,12 @@
 #         clause for the spawn prompt, so the contract reaches the agent VERBATIM rather
 #         than being paraphrased per lane — PASTE THE PRINTED PATH, never a remembered one.
 #   status <kind> --issue <N>
-#         Elapsed / deadline / state. ADVISORY ONLY — never changes the verdict. `state=` is a
+#         Elapsed / deadline / state / `reopen-count=`. ADVISORY ONLY — never changes the verdict.
+#         The counter is the record's own, so both surfaces report the same number, and it is
+#         rendered `<n>+` at the ceiling, meaning AT LEAST (#3751 round 9, N4: the widest value
+#         this tool can compare is held rather than incremented past — the increment used to walk
+#         off the bound and the NEXT re-open restarted the count at 1, which is a false audit
+#         trail; see `reopen_display`). `state=` is a
 #         CLOSED set, ONE VALUE PER CAUSE, because the operator action differs per cause:
 #           reported                a verdict is recorded (PASS/FINDINGS/AUTHOR-PERFORMED)
 #           sentinel-only           the report is still the pre-spawn sentinel
@@ -610,7 +615,12 @@ validate_issue() {
 # 2286 — both comfortably beyond any legitimate use of a review timeout whose default is 1800s —
 # while leaving nine orders of magnitude of headroom under int64, so an accepted value can ALWAYS
 # be compared by `[ -gt ]` and `$(( a - b ))` on two accepted values can never wrap.
-MAX_INT_DIGITS=10
+# ONE LITERAL, AND THE WIDTH IS DERIVED FROM IT (#3751 round 9, N4). The ceiling VALUE is needed as
+# well as the width — a counter at the ceiling is HELD there rather than incremented past it — and
+# writing both by hand is two places for one fact to drift, which would make the saturation boundary
+# and the acceptance boundary disagree.
+MAX_INT_VALUE=9999999999
+MAX_INT_DIGITS="${#MAX_INT_VALUE}"
 
 # int_is_comparable <value> — is this a value bash can actually compare and add? 0 = yes.
 #
@@ -641,6 +651,26 @@ MAX_INT_DIGITS=10
 #
 # It NEVER dies and prints nothing, so it is safe to call from any `if`/`&&` in the parent shell
 # (round 2's B6 rule: a `die` inside a command substitution cannot reach the top level).
+# reopen_display <value> — how a reopen counter is RENDERED on an operator-facing line (#3751
+# round 9, N4). ONE renderer, called by `open` and by `status`, because two spellings of "is this
+# counter at its ceiling" is two places for it to drift — and the two surfaces are required to
+# report the same thing about the same record.
+#
+# AT THE CEILING THE VALUE IS SUFFIXED `+`, MEANING AT LEAST. The counter cannot pass ten digits
+# (see `int_is_comparable`), so at `MAX_INT_VALUE` it is HELD rather than incremented — and a held
+# value that rendered as a bare number would assert an exact count it does not have. Below the
+# ceiling, and for a value this tool cannot compare at all, the record's own text is rendered
+# unchanged: the marker has to MEAN something, so it may not appear on a value that can still
+# increase, nor on one no comparison was performed on.
+reopen_display() {
+  local v="${1:-}"
+  if int_is_comparable "$v" && [ "$v" -ge "$MAX_INT_VALUE" ]; then
+    printf '%s+\n' "$v"
+  else
+    printf '%s\n' "$v"
+  fi
+}
+
 int_is_comparable() {
   local v="${1:-}"
   case "$v" in
@@ -1243,10 +1273,22 @@ cmd_open() {
     # field that exists to be read in an audit trail. `017` was read as OCTAL and became 16.
     # An unusable counter falls back to the value an absent one gets; it is never a reason to
     # refuse a spawn.
-    if int_is_comparable "$prior_count"; then
-      reopen_count=$((prior_count + 1))
-    else
+    # AND THE CEILING IS EXPLICIT, BECAUSE THE INCREMENT WALKS OFF IT (#3751 round 9, N4). The
+    # MAXIMUM ACCEPTED value is `MAX_INT_VALUE`; `$(( prior + 1 ))` produced an eleven-digit value
+    # which `int_is_comparable` then REJECTED on the next re-open, so the counter silently RESTARTED
+    # AT 1 — and a counter that restarts is a false audit trail, which is this issue's own subject.
+    # SATURATION, NOT REFUSAL: round 8's ruling for this field is that an unusable counter takes the
+    # value an absent one gets and is "never a reason to refuse a spawn", so refusing a re-open
+    # because a COSMETIC audit number is at its ceiling would block real work over a number — the
+    # guard agents learn to waive. Held, the value means AT LEAST this many, it can never decrease,
+    # and both surfaces render it `+` (see `reopen_display`) so a reader is told which it is.
+    if ! int_is_comparable "$prior_count"; then
       reopen_count=1
+    elif [ "$prior_count" -ge "$MAX_INT_VALUE" ]; then
+      reopen_count="$MAX_INT_VALUE"
+      note "the reopen counter is AT ITS CEILING ($MAX_INT_VALUE, the widest value this tool can compare) and is HELD there rather than restarted: it now means AT LEAST that many re-opens, and is rendered with a trailing + on both the OPEN-OK and STATUS lines"
+    else
+      reopen_count=$((prior_count + 1))
     fi
   fi
 
@@ -1415,7 +1457,9 @@ cmd_open() {
   } >&9
   commit_write "$sfile" stage-record
 
-  emit "OPEN-OK kind=$kind issue=$issue agent=$agent deadline-secs=$deadline spawned-at=$spawned_iso head-sha=$head_sha report-nonce=$nonce reopen-count=$reopen_count report=$(field_value "$rpath")"
+  local reopen_disp
+  reopen_disp="$(reopen_display "$reopen_count")"
+  emit "OPEN-OK kind=$kind issue=$issue agent=$agent deadline-secs=$deadline spawned-at=$spawned_iso head-sha=$head_sha report-nonce=$nonce reopen-count=$(field_value "$reopen_disp") report=$(field_value "$rpath")"
   # THE RAW PATH, ON A LINE OF ITS OWN — deliberately NOT through `field_value`. A caller
   # consumes this line to open the file, so a neutralised '=' would hand back a path that does
   # not exist. Safe for the reason the fields are not: this is a WHOLE LINE with no `key=value`
@@ -1665,7 +1709,7 @@ classify_report() {
 # COUNTED rather than first-wins, for the same reason the `result:` reader counts: this field
 # decides which artifact is authoritative, and picking one of two answers by order is not a rule.
 STAGE_OPEN=0; STAGE_AGENT=unknown; STAGE_DEADLINE=unknown; STAGE_REPORT=""
-STAGE_SPAWNED_ISO=unknown; STAGE_ELAPSED=unknown
+STAGE_SPAWNED_ISO=unknown; STAGE_ELAPSED=unknown; STAGE_REOPEN=unknown
 STAGE_NONCE=""; STAGE_RECORD_DEFECT=""
 load_stage() {
   local issue="$1" kind="$2" sfile epoch now
@@ -1714,6 +1758,11 @@ load_stage() {
   v="$(read_field "$sfile" agent)";         [ -z "$v" ] || STAGE_AGENT="$v"
   v="$(read_field "$sfile" deadline-secs)"; [ -z "$v" ] || STAGE_DEADLINE="$v"
   v="$(read_field "$sfile" spawned-at)";    [ -z "$v" ] || STAGE_SPAWNED_ISO="$v"
+  # THE REOPEN COUNTER IS READ, NOT DERIVED, and is `unknown` when the record does not carry it —
+  # a record written before the field existed, which is a fact about that record and not a zero
+  # (#3751 round 9, N4: `status` reports what the record HOLDS, so the saturation is visible on
+  # both surfaces and not only where it was written).
+  v="$(read_field "$sfile" reopen-count)";  [ -z "$v" ] || STAGE_REOPEN="$v"
   epoch="$(read_field "$sfile" spawned-epoch)"
   now="$(now_epoch)"
   # BOTH OPERANDS, AND THE BOUND IS THE POINT (#3751 round 8). `$(( ))` does not fail on an
@@ -1801,7 +1850,7 @@ cmd_status() {
   require_repo_root
   parse_kind_issue "$@"
   load_stage "$KI_ISSUE" "$KI_KIND"
-  local cls token cause state past=unknown
+  local cls token cause state past=unknown reopen_disp
   cls="$(classify_report "$STAGE_REPORT" "$STAGE_OPEN" "$STAGE_RECORD_DEFECT")"
   token="${cls%%|*}"
   cause="${cls#*|}"
@@ -1871,10 +1920,14 @@ cmd_status() {
   # bash can compare" is two places for it to drift.
   elapsed_disp="$STAGE_ELAPSED"
   deadline_disp="$STAGE_DEADLINE"
+  # RENDERED BY THE SAME FUNCTION `open` USES (#3751 round 9, N4), so the two surfaces cannot form
+  # two opinions about the same record. Incomparable text is displayed VERBATIM and carries no
+  # at-least marker — round 8's disposition: what is affirmative is the COMPARISON, not the display.
+  reopen_disp="$(reopen_display "$STAGE_REOPEN")"
   if int_is_comparable "$STAGE_ELAPSED"; then elapsed_disp="${STAGE_ELAPSED}s"; fi
   if int_is_comparable "$STAGE_DEADLINE"; then deadline_disp="${STAGE_DEADLINE}s"; fi
 
-  emit "STATUS kind=$KI_KIND issue=$KI_ISSUE state=$state elapsed=$STAGE_ELAPSED deadline=$(field_value "$STAGE_DEADLINE") past-deadline=$past agent=$(field_value "$STAGE_AGENT") spawned-at=$(field_value "$STAGE_SPAWNED_ISO") report=$(field_value "${STAGE_REPORT:-unresolved}")"
+  emit "STATUS kind=$KI_KIND issue=$KI_ISSUE state=$state elapsed=$STAGE_ELAPSED deadline=$(field_value "$STAGE_DEADLINE") past-deadline=$past agent=$(field_value "$STAGE_AGENT") spawned-at=$(field_value "$STAGE_SPAWNED_ISO") reopen-count=$(field_value "$reopen_disp") report=$(field_value "${STAGE_REPORT:-unresolved}")"
   if [ "$state" = sentinel-only ] && [ "$past" = yes ]; then
     # A STAGE THAT IS WAITING MUST NOT LOOK LIKE ONE THAT IS HUNG (the gate's
     # `waiting for gate slot` idiom): name the elapsed time AND the fact that nothing was

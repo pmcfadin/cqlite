@@ -368,7 +368,19 @@ Three further declared limits of the mechanism itself:
   a false PASS. The randomness comes from `mktemp -u`'s name substitution — the same source the
   write path's temporary name already uses — and no cryptographic strength is needed or claimed:
   the nonce is a uniqueness token, not a secret. There is deliberately **no fallback generator**; a
-  box that cannot produce one is refused by name. `reopen-count:` remains as the human-readable
+  box that cannot produce one is refused by name. **`reopen-count` SATURATES at the ten-digit
+  ceiling rather than restarting (round 9, N4)**: the `$(( prior + 1 ))` walked off round 8's bound,
+  so the next re-open read an eleven-digit value as incomparable and silently restarted the count at
+  `1` — measured, the record held `10000000000` and then `1`. Refusing the re-open was the other
+  option and is wrong for this field: round 8's own ruling is that an unusable counter takes the
+  value an absent one gets and is *never a reason to refuse a spawn*, so blocking a spawn over a
+  cosmetic audit number would be the guard agents learn to waive. Held, the value means AT LEAST
+  that many, it can never decrease, a `note` NAMES the hold when it happens (and does not fire for
+  an ordinary increment, since it claims a specific event), and **both surfaces render it `<n>+`
+  through ONE renderer** — `open`'s `OPEN-OK` line and `status`, which reports `reopen-count=` for
+  the first time as part of this change. The marker appears only at the ceiling, never on a value
+  that can still increase and never on one no comparison was performed on. `reopen-count:` remains
+  as the human-readable
   audit number, because it answers a different question (how many spawns).
   (5) Superseded reports are LEFT ON DISK as history: nothing reads them, and they are what an
   operator opens to see what the previous agent concluded. Since round 6 nothing DEPENDS on their

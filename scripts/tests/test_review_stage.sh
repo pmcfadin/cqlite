@@ -2908,6 +2908,98 @@ else
   bad "n1/structural: nothing in the source declares the residual window"
 fi
 
+# --- 22. AN AUDIT COUNTER AT ITS CEILING MUST NOT RESTART (round 9, N4) -----------
+# THE FINDING (roborev job 382, N4). Round 8 bounded every value bash has to compare or add at ten
+# decimal digits. `reopen-count` goes through `$(( prior + 1 ))`, so the MAXIMUM ACCEPTED value —
+# `9999999999` — incremented to an ELEVEN-digit one, which `int_is_comparable` then rejects on the
+# NEXT re-open, and the counter silently RESTARTED AT 1. An audit counter that resets is a false
+# audit trail, which is this issue's own subject: `reopen-count` exists to be read beside
+# `reopened-at:` when correlating a surviving report with a re-spawn.
+#
+# THE DISPOSITION IS SATURATION, NOT REFUSAL, and the reason is round 8's own ruling one bullet up:
+# "an unusable counter falls back to the value an absent one gets; it is never a reason to refuse a
+# spawn". Refusing a re-open because a COSMETIC audit field is at its ceiling would block real work
+# over a number, and a guard that reds on correct input is the guard agents learn to waive. Held at
+# the ceiling the value means "at least this many", it can never decrease, and both `open` and
+# `status` RENDER it with a `+` so the reader is told which of the two it is.
+R22="$(newrepo)"
+rs "$R22" open c --issue 950 --agent spec-auditor
+rc_is 0 "reopen/ceiling: the stage opens"
+R22_REC="$R22/.review-stage/issue-950/c.stage"
+
+# (a) THE DEFECT, at the boundary: a counter AT the maximum accepted value.
+PLANT_FIELD "$R22_REC" reopen-count 9999999999 "reopen/ceiling: a counter at the 10-digit ceiling is planted"
+rs "$R22" open c --issue 950 --agent spec-auditor --force
+rc_is 0 "reopen/ceiling: the re-open still SUCCEEDS (a cosmetic counter is not a reason to refuse a spawn)"
+FIELD_IS "reopen-count=9999999999+" "reopen/ceiling: OPEN-OK reports the value HELD at the ceiling, rendered '+' so it reads as AT LEAST"
+has "AT ITS CEILING" "reopen/ceiling: and a note NAMES the ceiling rather than letting the number change silently"
+if LC_ALL=C grep -q '^reopen-count: 9999999999$' "$R22_REC" 2>/dev/null; then
+  ok "reopen/ceiling: the RECORD holds 9999999999 — neither an 11-digit value nor a restart"
+else
+  bad "reopen/ceiling: the record holds '$(LC_ALL=C sed -n 's/^reopen-count: //p' "$R22_REC" 2>/dev/null)' (want 9999999999)"
+fi
+
+# (b) THE HARM ITSELF: a SECOND re-open. Pre-fix the first force wrote an 11-digit value and this
+#     one read it as incomparable and RESTARTED THE COUNTER AT 1 — the false audit trail.
+rs "$R22" open c --issue 950 --agent spec-auditor --force
+rc_is 0 "reopen/ceiling: a second re-open also succeeds"
+FIELD_IS "reopen-count=9999999999+" "reopen/ceiling: and the counter is STILL at the ceiling, not restarted at 1"
+hasnt "reopen-count=1 " "reopen/ceiling: the exact restart the finding names does not happen"
+if LC_ALL=C grep -q '^reopen-count: 9999999999$' "$R22_REC" 2>/dev/null; then
+  ok "reopen/ceiling: and the record still holds it after two re-opens"
+else
+  bad "reopen/ceiling: the record holds '$(LC_ALL=C sed -n 's/^reopen-count: //p' "$R22_REC" 2>/dev/null)' after two re-opens (want 9999999999)"
+fi
+
+# (c) `status` REPORTS WHAT THE RECORD HOLDS — the round's requirement that the chosen behaviour is
+#     what both surfaces say. Before this round `status` did not report the counter at all.
+rs "$R22" status c --issue 950
+rc_is 0 "reopen/ceiling: status is readable"
+FIELD_IS "reopen-count=9999999999+" "reopen/ceiling: STATUS reports the counter, rendered AT-LEAST at the ceiling"
+
+# (d) CONTROL — ONE BELOW THE CEILING STILL COUNTS UP. Without this the assertions above are
+#     satisfiable by a counter that is pinned for every input.
+R22B="$(newrepo)"
+rs "$R22B" open c --issue 951 --agent spec-auditor
+R22B_REC="$R22B/.review-stage/issue-951/c.stage"
+PLANT_FIELD "$R22B_REC" reopen-count 9999999998 "reopen/CONTROL: a counter ONE BELOW the ceiling is planted"
+rs "$R22B" open c --issue 951 --agent spec-auditor --force
+FIELD_IS "reopen-count=9999999999+" "reopen/CONTROL: it INCREMENTS to the ceiling (the counter still counts)"
+# The note claims something SPECIFIC — that a counter was HELD rather than restarted — and nothing
+# was held on this transition, so its absence is part of the property: a note that fired here would
+# claim an event that did not happen (round 2's "an absence is not a claim", inverted).
+hasnt "AT ITS CEILING" "reopen/CONTROL: and no HOLD is claimed for a transition that simply incremented"
+
+# (e) CONTROL — AN ORDINARY COUNTER IS UNTOUCHED, and carries NO `+`: the marker must mean
+#     something, so it may not appear on a value that can still increase.
+R22C="$(newrepo)"
+rs "$R22C" open c --issue 952 --agent spec-auditor
+rs "$R22C" open c --issue 952 --agent spec-auditor --force
+FIELD_IS "reopen-count=1" "reopen/CONTROL: an ordinary first re-open reports 1, with no at-least marker"
+rs "$R22C" open c --issue 952 --agent spec-auditor --force
+FIELD_IS "reopen-count=2" "reopen/CONTROL: and the second reports 2 — the ordinary path is unaffected"
+rs "$R22C" status c --issue 952
+FIELD_IS "reopen-count=2" "reopen/CONTROL: status agrees with the record on an ordinary counter"
+hasnt "AT ITS CEILING" "reopen/CONTROL: and says nothing about a ceiling that was not reached"
+
+# (f) AN INCOMPARABLE COUNTER: displayed VERBATIM, never compared, and never marked at-least —
+#     round 8's disposition (the record's own text stays visible in the audit trail) unchanged.
+PLANT_FIELD "$R22C/.review-stage/issue-952/c.stage" reopen-count 99999999999999999999 \
+  "reopen/incomparable: a 20-digit counter is planted"
+rs "$R22C" status c --issue 952
+FIELD_IS "reopen-count=99999999999999999999" "reopen/incomparable: status DISPLAYS the record's own text, so a hand edit stays visible"
+hasnt "99999999999999999999+" "reopen/incomparable: and does NOT mark it at-least, which would assert a comparison that never ran"
+
+# (g) STRUCTURAL — ONE LITERAL FOR THE BOUND. The ceiling and the digit width are the same fact;
+#     two literals is two places for it to drift, and a drift here would make the saturation
+#     boundary and the acceptance boundary disagree.
+if LC_ALL=C grep -q '^MAX_INT_VALUE=9999999999$' "$RS" &&
+  LC_ALL=C grep -q '^MAX_INT_DIGITS="\?\${#MAX_INT_VALUE}"\?$' "$RS"; then
+  ok "reopen/structural: the digit width is DERIVED from the ceiling value, so the two cannot drift"
+else
+  bad "reopen/structural: MAX_INT_DIGITS is not derived from MAX_INT_VALUE (grep found: $(LC_ALL=C grep -n '^MAX_INT_' "$RS" | LC_ALL=C tr '\n' ' '))"
+fi
+
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
 # which is this issue's own subject inside a test file.
@@ -3082,7 +3174,19 @@ fi
 # that the planted statement really does NOT begin its line, without which the case would be a
 # duplicate of the line-start control beside it. The `[ ! -f "$EBS" ]` fallback arm was widened to
 # ten bads to match, so the EXACT floor still holds either way.
-ASSERT_FLOOR=605
+#
+# ROUND 9's N4 MOVES IT TO 628. Section 22 adds 23: an audit counter at its ceiling must not
+# restart. `reopen-count`'s `$(( prior + 1 ))` walked off round 8's ten-digit bound, so the NEXT
+# re-open read an eleven-digit value as incomparable and silently RESTARTED THE COUNT AT 1
+# (measured: the record held `10000000000`, then `1`). The disposition is SATURATION with the hold
+# NAMED — refusal would contradict round 8's own ruling for this field and would block a spawn over
+# a cosmetic number — so the cases pin the boundary from both sides (AT the ceiling it is held and
+# noted; ONE BELOW it still increments and claims no hold), that `status` reports the counter at all
+# and agrees with `open` about it, that the at-least `+` appears ONLY at the ceiling, that an
+# incomparable counter is displayed VERBATIM and unmarked, and STRUCTURALLY that the digit width is
+# DERIVED from the ceiling value so the acceptance and saturation boundaries cannot drift apart.
+# Every assertion is unconditional.
+ASSERT_FLOOR=628
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

@@ -72,7 +72,7 @@ review-stage.sh open <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--
   race the nonce removes while adding its own failure modes, and subtraction cannot introduce a false
   PASS. The nonce comes from `mktemp -u`'s name substitution (the source the write path's temporary
   name already uses) with no fallback, and no cryptographic strength is needed or claimed — it is a
-  uniqueness token, not a secret. `reopen-count:` remains as the human-readable audit number.
+  uniqueness token, not a secret. `reopen-count:` remains as the human-readable audit number — and it SATURATES at the ten-digit ceiling rather than restarting (#3751 round 9): `$(( prior + 1 ))` walked off round 8's bound, so the next re-open read an eleven-digit value as incomparable and restarted the count at `1` (measured: the record held `10000000000`, then `1`). Refusal was rejected as the fix — round 8's own ruling is that an unusable counter is never a reason to refuse a spawn — so it is HELD, meaning AT LEAST that many, `note`d when the hold happens, and rendered `<n>+` by ONE renderer on both `OPEN-OK` and `status` (which reports the counter as of this change).
   Superseded reports stay on disk as history, and nothing DEPENDS on their existence, so a deleted
   stage record cannot re-issue a path an older agent holds. A `[--report <path>]` override was specified here and shipped, and it is **REMOVED in
   round 4** — a DELIBERATE NARROWING of this design surface, recorded rather than quietly dropped. It

@@ -680,7 +680,7 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   calls can both choose — measured, both printed `c.1.md` and one agent's `FINDINGS` became the
   other's `PASS`. The scan, its attempt bound and its exhaustion refusal are DELETED rather than
   locked: a lock serialises a race a nonce removes and adds its own failure modes, while subtraction
-  cannot introduce a false PASS; `reopen-count:` remains as the human-readable audit number.
+  cannot introduce a false PASS; `reopen-count:` remains as the human-readable audit number — and it SATURATES at the ten-digit ceiling rather than restarting (#3751 round 9): `$(( prior + 1 ))` walked off round 8's bound, so the next re-open read an eleven-digit value as incomparable and restarted the count at `1` (measured: the record held `10000000000`, then `1`). Refusal was rejected as the fix — round 8's own ruling is that an unusable counter is never a reason to refuse a spawn — so it is HELD, meaning AT LEAST that many, `note`d when the hold happens, and rendered `<n>+` by ONE renderer on both `OPEN-OK` and `status` (which reports the counter as of this change).
   Superseded reports stay on disk as HISTORY — nothing reads them, and since round 6 nothing depends
   on their existence either — so **paste the path `open` PRINTS into the spawn prompt, never a
   remembered one**; it carries a nonce and cannot be reconstructed, so where none was named ask

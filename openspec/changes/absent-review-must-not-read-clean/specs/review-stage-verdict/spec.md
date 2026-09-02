@@ -280,6 +280,18 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
   requires the scanner to name it, since a control that only plants at the start of a line cannot
   distinguish the widened scanner from the blind one
 
+#### Scenario: an audit counter at its ceiling does not restart
+- **WHEN** the stage record's re-open counter is at the widest value this tool can compare and the
+  stage is re-opened
+- **THEN** the counter is HELD at that value rather than incremented past the bound, the hold is
+  NAMED in a note, and both the `open` and `status` lines render it as AT LEAST that many — a counter
+  that silently restarts at 1 is a false audit trail
+- **AND** the re-open still SUCCEEDS: a cosmetic audit number at its ceiling is not a reason to
+  refuse a spawn
+- **AND** one below the ceiling still INCREMENTS, and claims no hold (the positive control)
+- **AND** `status` SHALL report the counter the record holds, so the two surfaces cannot disagree
+  about it
+
 #### Scenario: an unmeasurable clock is not a permissive answer
 - **WHEN** `status` reads an `elapsed` or `deadline` value that is not a decimal number of seconds
 - **THEN** it reports `past-deadline=unknown` rather than comparing them — a two-valued guard testing
