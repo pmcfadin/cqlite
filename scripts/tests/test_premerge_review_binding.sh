@@ -1269,6 +1269,74 @@ if run_binding 5 "latest: a non-ISO started_at is UNMEASURED, not sorted as text
   esac
 fi
 
+# --- A TIE AT THE MAXIMUM IS NOT A CHRONOLOGY (roborev job 82) ----------------
+# The selection comparison is STRICT, so on equal `started_at` the FIRST
+# ENCOUNTERED index survived — i.e. PR-record order decided, which is exactly
+# what the case above proves must not happen. Measured on this box, every
+# chronology field the record carries (`enqueued_at`/`started_at`/`finished_at`/
+# `created_at`) is SECOND-resolution and the record `uuid` is v4, so there is no
+# finer key to break a tie with: a tie carrying disagreement must refuse.
+
+# tie, clean vs FINDINGS: must NOT bind
+pr_payload_comments "$MOCK_GH_DIR/pr.json" main "$(roborev_block 720)" "$(roborev_block 721)"
+roborev_job 720 "$B1_MB" "$B1_MB_HEAD" P done 2026-09-02T12:00:00Z
+roborev_job 721 "$B1_MB" "$B1_MB_HEAD" F done 2026-09-02T12:00:00Z
+if run_binding 5 "tie: a clean round tied with a findings round is UNMEASURED" \
+  review-binding 1 pmcfadin/cqlite "$B1_MB_HEAD"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "tie: an equally-stamped adverse round is not outvoted by record order" ;;
+    *) bad "tie: a tied clean round still bound (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *720*721*|*721*720*)
+      ok "tie: BOTH tied job ids are named, so the operator can see the ambiguity" ;;
+    *) bad "tie: the tied jobs were not both named (got: $OUT)" ;;
+  esac
+fi
+
+# tie, clean vs NON-TERMINAL: must NOT bind (the other non-bindable class)
+pr_payload_comments "$MOCK_GH_DIR/pr.json" main "$(roborev_block 722)" "$(roborev_block 723)"
+roborev_job 722 "$B1_MB" "$B1_MB_HEAD" P done    2026-09-02T12:00:00Z
+roborev_job 723 "$B1_MB" "$B1_MB_HEAD" P running 2026-09-02T12:00:00Z
+if run_binding 5 "tie: a clean round tied with a NON-TERMINAL round is UNMEASURED" \
+  review-binding 1 pmcfadin/cqlite "$B1_MB_HEAD"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "tie: an unconcluded tied round also blocks, not just a findings one" ;;
+    *) bad "tie: a tie with an unconcluded round still bound (got: $OUT)" ;;
+  esac
+fi
+
+# tie where EVERY tied round binds: sound, so it must NOT red correct input.
+# Two concurrent reviewers can legitimately start inside one second; with no
+# disagreement there is nothing for an ordering to resolve.
+pr_payload_comments "$MOCK_GH_DIR/pr.json" main "$(roborev_block 724)" "$(roborev_block 725)"
+roborev_job 724 "$B1_MB" "$B1_MB_HEAD" P done 2026-09-02T12:00:00Z
+roborev_job 725 "$B1_MB" "$B1_MB_HEAD" P done 2026-09-02T12:00:00Z
+if run_binding 0 "tie: all-bindable tied rounds still bind (no gratuitous refusal)" \
+  review-binding 1 pmcfadin/cqlite "$B1_MB_HEAD"; then
+  case "$OUT" in
+    *"verdict BOUND"*)
+      ok "tie: a tie with no disagreement is not treated as an ambiguity" ;;
+    *) bad "tie: two clean tied rounds were refused (got: $OUT)" ;;
+  esac
+fi
+
+# CONTROL: the ordinary DISTINCT-stamp path still binds, so none of the above is
+# satisfied by "more than one covering round always refuses".
+pr_payload_comments "$MOCK_GH_DIR/pr.json" main "$(roborev_block 726)" "$(roborev_block 727)"
+roborev_job 726 "$B1_MB" "$B1_MB_HEAD" F done 2026-09-02T12:00:00Z
+roborev_job 727 "$B1_MB" "$B1_MB_HEAD" P done 2026-09-02T12:00:01Z
+if run_binding 0 "tie: a ONE-SECOND gap is a real order and still resolves" \
+  review-binding 1 pmcfadin/cqlite "$B1_MB_HEAD"; then
+  case "$OUT" in
+    *"verdict BOUND"*)
+      ok "tie: the tie rule fires only on EQUAL stamps, not on adjacent ones" ;;
+    *) bad "tie: a distinct-stamp pair was treated as a tie (got: $OUT)" ;;
+  esac
+fi
+
 # Two RESOLVABLE records, the first not covering: the definite refusal is
 # UNBOUND, not UNMEASURED — nothing was unmeasurable.
 pr_payload_comments "$MOCK_GH_DIR/pr.json" main "$(roborev_block 703)" "$(roborev_block 704)"
@@ -2118,7 +2186,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=135
+CASE_FLOOR=140
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

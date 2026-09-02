@@ -664,7 +664,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   # bash 3.2 has no associative arrays and this file must run on the macOS
   # system bash.
   local cov_job=() cov_start=() cov_ok=() cov_note=() cov_class=()
-  local unorderable=0
+  local unorderable=0 ambiguous_latest=0
   BOUND_NOTE=""
 
   # result_permits_binding <job> — 0 when this job's RECORD says its review
@@ -942,20 +942,74 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         fi
         n=$((n + 1))
       done
-      say "latest of ${#cov_job[@]} covering round(s), the LATEST is job"
-      say "latest $(sane "${cov_job[$best]}") (started ${cov_start[$best]}), and that is the one"
-      say "latest that must bind — an older favourable round cannot outvote it."
-      if [ "${cov_ok[$best]}" -eq 1 ]; then
+
+      # A TIE AT THE MAXIMUM MEANS "LATEST" WAS NEVER ESTABLISHED (job 82).
+      # The comparison above is STRICT (`\>`), so on equal stamps `best` keeps
+      # the FIRST-ENCOUNTERED index — i.e. PR-record order, which is not a
+      # chronology at all: whichever block a human pasted first would decide,
+      # and a clean round could outvote an equally-stamped adverse one. That is
+      # F2's own defect one level down, and the same permissive-resolution shape
+      # as every other finding on this issue.
+      #
+      # NO HIGHER-RESOLUTION KEY EXISTS TO BREAK IT WITH. Measured on this box
+      # (`roborev show --json` for jobs 59, 78, 82): every chronology field the
+      # record carries — `enqueued_at`, `started_at`, `finished_at`,
+      # `created_at` — is SECOND-resolution ISO-8601 UTC, and the record's own
+      # `uuid` is v4 (random, not time-ordered), so neither a finer stamp nor a
+      # sortable id is available. The job id is deliberately NOT used as a
+      # tie-break: nothing guarantees it is monotonic across agents, which is
+      # why it was rejected as the primary key in the first place.
+      #
+      # RULE IMPLEMENTED: a tie refuses (UNMEASURED) UNLESS EVERY round tied at
+      # the maximum is independently bindable. When they all bind there is no
+      # disagreement for an order to resolve, so binding is sound and refusing
+      # would red correct input — two concurrent reviewers can legitimately
+      # start inside one second. If ANY tied round is non-bindable the tie is
+      # decisive and unresolvable, so it is UNMEASURED.
+      local ties=0 tie_bad=0 tie_list="" tie_ok_idx=-1
+      n=0
+      while [ "$n" -lt "${#cov_job[@]}" ]; do
+        if [ "${cov_start[$n]}" = "${cov_start[$best]}" ]; then
+          ties=$((ties + 1))
+          tie_list="${tie_list:+$tie_list, }$(sane "${cov_job[$n]}")"
+          if [ "${cov_ok[$n]}" -eq 1 ]; then
+            [ "$tie_ok_idx" -lt 0 ] && tie_ok_idx="$n"
+          else
+            tie_bad=1
+            best="$n"
+          fi
+        fi
+        n=$((n + 1))
+      done
+
+      if [ "$ties" -gt 1 ] && [ "$tie_bad" -eq 1 ]; then
+        say "latest $ties covering rounds share the LATEST started_at"
+        say "latest (${cov_start[$best]}) — jobs $tie_list — and at least one of them"
+        say "latest CANNOT bind, so which round is the latest is UNRESOLVABLE and no"
+        say "latest favourable member of the tie may be taken as the decider."
+        ambiguous_latest=1
+      elif [ "$ties" -gt 1 ]; then
+        say "latest $ties covering rounds share the LATEST started_at"
+        say "latest (${cov_start[$best]}) — jobs $tie_list — and EVERY one of them binds,"
+        say "latest so there is no disagreement for an ordering to resolve."
         bound=1
-        BOUND_NOTE="${cov_note[$best]}"
+        BOUND_NOTE="${cov_note[$tie_ok_idx]}"
       else
-        say "latest job $(sane "${cov_job[$best]}") is the deciding round and it CANNOT bind:"
-        say "latest $(sane "${cov_note[$best]}")"
-        case "${cov_class[$best]}" in
-          unconcluded) unconcluded=1 ;;
-          findings) findings_unauthorized=1 ;;
-          *) verdict_unknown=1 ;;
-        esac
+        say "latest of ${#cov_job[@]} covering round(s), the LATEST is job"
+        say "latest $(sane "${cov_job[$best]}") (started ${cov_start[$best]}), and that is the one"
+        say "latest that must bind — an older favourable round cannot outvote it."
+        if [ "${cov_ok[$best]}" -eq 1 ]; then
+          bound=1
+          BOUND_NOTE="${cov_note[$best]}"
+        else
+          say "latest job $(sane "${cov_job[$best]}") is the deciding round and it CANNOT bind:"
+          say "latest $(sane "${cov_note[$best]}")"
+          case "${cov_class[$best]}" in
+            unconcluded) unconcluded=1 ;;
+            findings) findings_unauthorized=1 ;;
+            *) verdict_unknown=1 ;;
+          esac
+        fi
       fi
     fi
   fi
@@ -1003,6 +1057,13 @@ them carries no readable chronology, so which round is the LATEST cannot be esta
 latest covering round is the one that must bind — an older favourable round must not outvote a \
 newer adverse one — so an unorderable covering set is UNMEASURED rather than resolved by \
 guessing.")
+  fi
+  if [ "$ambiguous_latest" -eq 1 ]; then
+    causes+=("more than one recorded round COVERS the certified head with the SAME latest \
+started_at, and at least one of those tied rounds cannot bind. Every chronology field the job \
+record carries is second-resolution, so which of them is actually the latest cannot be \
+established, and taking the favourable member would let PR-record order decide a merge. REMEDY: \
+run one fresh round at this head so a strictly later round exists.")
   fi
   if [ "$unconcluded" -eq 1 ]; then
     causes+=("a recorded round COVERS the certified head, but its job RECORD does not \

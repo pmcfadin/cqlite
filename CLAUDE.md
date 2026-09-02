@@ -2031,7 +2031,16 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   id (nothing guarantees ids are monotonic across agents); ordering is lexicographic, so the
   fixed-width ISO-8601 UTC form is CHECKED and anything else is `UNMEASURED` rather than sorted
   wrongly, as is a covering round with no readable stamp — **the order is never guessed, because
-  guessing it is what lets an older favourable round win again**. Still true, and orthogonal: every
+  guessing it is what lets an older favourable round win again**. **AND A VALIDATED STAMP IS STILL
+  NOT AN ORDER WHEN TWO ROUNDS SHARE IT (roborev job 82).** The selection comparison is strict, so on
+  EQUAL `started_at` the first-encountered index survived — PR-record order deciding a merge, which
+  is the very thing the sentence above forbids, one level down. There is **no finer key to break it
+  with**: measured on live records, every chronology field the job record carries
+  (`enqueued_at`/`started_at`/`finished_at`/`created_at`) is **second**-resolution and the record's
+  own `uuid` is v4 (random, not time-ordered). So a tie at the maximum refuses as `UNMEASURED`,
+  naming both tied jobs, **unless EVERY round tied there is independently bindable** — with no
+  disagreement there is nothing for an ordering to resolve, and refusing would red the correct input
+  of two reviewers legitimately starting inside one second. Still true, and orthogonal: every
   job on the PR is examined and one unretrievable record cannot end the scan (an unresolved record
   decides only when no covering round decided the question, as `UNMEASURED`). **Declared residual**:
   an unretrievable record could in principle BE a newer adverse round, and that cannot be
