@@ -3727,11 +3727,18 @@ if [ "$wire_shape" -eq 1 ]; then
   # payloads they need: a PR body recording a roborev block, and a job record
   # whose git_ref head IS this fixture's certified sha. That makes this the one
   # case where BOTH shipped helpers are exercised end to end.
+  #
+  # The record carries the structured CLEAN verdict letter, and it must: since
+  # roborev job 59 finding 1 a range match ALONE no longer binds — the job
+  # RECORD has to say affirmatively that its review concluded cleanly (or carry
+  # an authorized deferral). A record with no readable verdict deliberately
+  # reaches UNMEASURED, so omitting it here would red this case on correct
+  # input.
   WIRE_BASE=$(git -C "$WIRE_REPO" rev-parse refs/remotes/origin/main 2>/dev/null)
   WIRE_OUT=$(cd "$WIRE_REPO" &&
     PATH="$BIN:$PATH" MOCK_GH_OUT="$WIRE_SHA OPEN" MOCK_GH_FAIL=0 \
     MOCK_GH_PR_JSON="{\"baseRefName\":\"mainline\",\"body\":\"==== ROBOREV REVIEW SUMMARY ====\\njob: 7\\n==== END ROBOREV REVIEW SUMMARY ====\",\"comments\":[]}" \
-    MOCK_ROBOREV_JSON="{\"id\":7,\"job\":{\"id\":7,\"git_ref\":\"$WIRE_BASE..$WIRE_SHA\",\"status\":\"done\"}}" \
+    MOCK_ROBOREV_JSON="{\"id\":7,\"job\":{\"id\":7,\"git_ref\":\"$WIRE_BASE..$WIRE_SHA\",\"status\":\"done\",\"verdict\":\"P\"}}" \
     bash "$ASSERT" 2421 "$WIRE_SHA" "$WIREGOOD" 2>&1)
   WIRE_RC=$?
   if [ "$WIRE_RC" -ne 0 ]; then

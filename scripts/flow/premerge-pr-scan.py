@@ -6,6 +6,7 @@ writing `key=value` lines a shell can read with `sed`:
 
     premerge-pr-scan.py jobs <pr-json>
     premerge-pr-scan.py hold <window-secs> <pr-json> <timeline-json> [<thread-json>...]
+    premerge-pr-scan.py normalize <view-json> <comments-stream-json> <out-json>
 
 WHY THIS IS PYTHON AND NOT SHELL (#3312, "control and data must not share a
 channel when the data is attacker-controlled). A PR comment body is arbitrary
@@ -30,6 +31,34 @@ indented or mid-sentence copy is inert.
     hold   -> `event=<kind>:<iso>:<login>` for every recognised event, then
               `state=hold|clear`, plus `detail=` lines.
               exit 0 clear / 4 hold / 5 unmeasured.
+
+    normalize -> merges a `gh pr view --json` payload with a PAGINATED REST
+              comment stream and writes ONE payload in the shape every consumer
+              here already expects. exit 0 written / 1 refused.
+
+WHY `normalize` EXISTS (roborev job 59, finding 2). `gh pr view --json comments`
+returns a BOUNDED connection, not the whole thread, so a persistent column-zero
+`HOLD:` outside the returned window yielded a false `NO-HOLD-RECOGNISED` — the
+same defect already fixed for the disarm TIMELINE, still live for the COMMENTS.
+The complete thread is only available from `gh api --paginate`, which speaks
+REST: `created_at`/`updated_at`/`user.login` where `gh pr view --json` speaks
+`createdAt`/`updatedAt`/`author.login`.
+
+THAT SPELLING DIFFERENCE IS A COUPLING THAT GREENS VACUOUSLY IF IGNORED. Feed a
+REST payload to a consumer reading `author.login` and every author reads as
+empty: a deferral authorization silently stops being granted, and a `GO:` from
+the allowlist silently stops releasing. Both are fail-closed and BOTH ARE WRONG
+ON CORRECT INPUT. So the spellings are reconciled ONCE, here, at the fetch
+boundary — the #3229 "normalise once, at the census" rule — and every consumer
+downstream keeps one input contract.
+
+IT REFUSES RATHER THAN RETURNING LESS. A shape this code does not recognise is
+exit 1 with a named cause, never a payload with fewer comments in it: a short
+comment list is indistinguishable from a quiet thread, and that is precisely the
+false clearance being fixed. `body` is passed through VERBATIM — null stays
+null, a non-string stays whatever it is — because the three-valued body
+judgement belongs to `collect_marker_events` and normalising it here would
+destroy the distinction between "no text" and "a shape we cannot read".
 
 THE TWO DIRECTIONS ARE NOT SYMMETRIC, AND THAT IS THE POINT. A HOLD is the
 CONSERVATIVE direction: an unauthorized HOLD costs a stalled merge, which is
@@ -219,7 +248,36 @@ def collect_marker_events(payload, events, unparsed):
         login = ""
         if isinstance(author, dict) and isinstance(author.get("login"), str):
             login = author["login"]
-        stamp = parse_iso(comment.get("createdAt") or comment.get("created_at"))
+        # ===== ORDERED BY `updatedAt`, NOT `createdAt` (roborev job 59, finding 3) =====
+        # `latest wins`, and what a reader SEES is the current text — so the
+        # ordering key has to be when the text last changed. Keyed on creation
+        # time, an OLD comment EDITED to carry `HOLD:` loses to a NEWER `GO:`
+        # that was posted before the edit, and the hold visible on the thread
+        # right now is silently ignored. That is a false clearance in the
+        # permissive direction, which is the one this leg exists to refuse.
+        created_raw = comment.get("createdAt")
+        if created_raw is None:
+            created_raw = comment.get("created_at")
+        updated_raw = comment.get("updatedAt")
+        if updated_raw is None:
+            updated_raw = comment.get("updated_at")
+        if updated_raw is not None:
+            stamp = parse_iso(updated_raw)
+            if stamp is None:
+                # PRESENT BUT UNREADABLE. The comment may have been edited and
+                # we cannot tell WHEN, so a marker inside it cannot be ordered
+                # against its siblings — unmeasurable, never ignored. Reported
+                # only when the body actually carries a marker, so an
+                # unparseable stamp on an ordinary comment does not red the run.
+                edited_unreadable = True
+            else:
+                edited_unreadable = False
+        else:
+            # NO UPDATE METADATA AT ALL. Creation time is then the only key
+            # available; an edit is undetectable rather than mis-ordered, which
+            # is a DECLARED limit of the payload and not a choice made here.
+            stamp = parse_iso(created_raw)
+            edited_unreadable = False
         if not isinstance(body, str):
             # THREE-VALUED, not two (#3752, lane-3752 audit). An ABSENT or null
             # body is a comment with no text, and text is the only thing a
@@ -232,13 +290,19 @@ def collect_marker_events(payload, events, unparsed):
             if body is not None:
                 unparsed.append("a thread comment's body was not a string")
             continue
-        if stamp is None:
+        if stamp is None or edited_unreadable:
             # A marker we cannot ORDER cannot be decided against its siblings.
             # Unmeasurable, never ignored: `latest wins` needs a `latest`.
             for line in body.splitlines():
                 if HOLD_MARKER.match(line) or RELEASE_MARKER.match(line):
-                    unparsed.append(
-                        "a comment carrying a HOLD/GO marker has no readable timestamp")
+                    if edited_unreadable:
+                        unparsed.append(
+                            "a comment carrying a HOLD/GO marker has an unreadable edit "
+                            "timestamp, so whether its current text supersedes a later "
+                            "marker cannot be decided")
+                    else:
+                        unparsed.append(
+                            "a comment carrying a HOLD/GO marker has no readable timestamp")
                     break
             continue
         for line in body.splitlines():
@@ -272,6 +336,111 @@ def collect_disarm_events(payload, window, now, events, unparsed):
         login = actor["login"] if isinstance(actor, dict) and isinstance(
             actor.get("login"), str) else ""
         events.append(("disarm", stamp, login))
+
+
+def _norm_author(comment):
+    """(login, None) or (None, reason). REST says `user`, GraphQL says `author`."""
+    for key in ("author", "user"):
+        if key not in comment:
+            continue
+        value = comment[key]
+        if value is None:
+            # A DELETED ACCOUNT is a legitimate shape, not a broken payload: both
+            # APIs answer null. It yields no login, which is fail-closed for the
+            # two permissive directions (a release and a deferral both require an
+            # allowlisted login) and harmless for the conservative one (a HOLD is
+            # honoured from any author).
+            return "", None
+        if isinstance(value, dict):
+            login = value.get("login")
+            if login is None:
+                return "", None
+            if not isinstance(login, str):
+                return None, "a comment's %s.login was not a string" % key
+            return login, None
+        if isinstance(value, str):
+            return value, None
+        return None, "a comment's %s field was neither an object, a string nor null" % key
+    return "", None
+
+
+def _norm_stamps(comment):
+    """(createdAt, updatedAt, None) or (None, None, reason), spellings reconciled.
+
+    A stamp is carried through as TEXT, unparsed: whether it can be parsed, and
+    what an unparseable one means for a marker-bearing comment, is
+    `collect_marker_events`' three-valued decision and not this function's.
+    """
+    out = []
+    for camel, snake in (("createdAt", "created_at"), ("updatedAt", "updated_at")):
+        value = None
+        for key in (camel, snake):
+            if key in comment and comment[key] is not None:
+                value = comment[key]
+                break
+        if value is None:
+            out.append(None)
+            continue
+        if not isinstance(value, str):
+            return None, None, "a comment's %s was not a string" % camel
+        out.append(value)
+    return out[0], out[1], None
+
+
+def cmd_normalize(argv):
+    if len(argv) != 3:
+        sys.stderr.write(
+            "usage: premerge-pr-scan.py normalize <view-json> <comments-stream-json> "
+            "<out-json>\n")
+        return 2
+    view, why = load(argv[0])
+    if view is None:
+        fail(why)
+        return 1
+    if not isinstance(view, dict):
+        fail("the pull-request view payload was not a JSON object")
+        return 1
+    pages, why = load_stream(argv[1])
+    if pages is None:
+        fail(why)
+        return 1
+    comments = []
+    for page in pages:
+        # A PAGE THAT IS NOT A LIST IS A REFUSAL. `gh api --paginate` on a
+        # comments endpoint emits one ARRAY per page; anything else (an error
+        # object, an unexpected envelope) must not be read as "this page held no
+        # comments", which would silently shorten the thread.
+        if not isinstance(page, list):
+            fail("a comment page was not a JSON list, so the thread could not be read in full")
+            return 1
+        for comment in page:
+            if not isinstance(comment, dict):
+                fail("a comment entry was not a JSON object")
+                return 1
+            login, why = _norm_author(comment)
+            if login is None:
+                fail(why)
+                return 1
+            created, updated, why = _norm_stamps(comment)
+            if why is not None:
+                fail(why)
+                return 1
+            entry = {"author": {"login": login}, "body": comment.get("body")}
+            if created is not None:
+                entry["createdAt"] = created
+            if updated is not None:
+                entry["updatedAt"] = updated
+            comments.append(entry)
+    out = dict(view)
+    out["comments"] = comments
+    try:
+        with open(argv[2], "w") as handle:
+            json.dump(out, handle)
+    except OSError as exc:
+        fail("the normalised payload could not be written (%s)" % exc.__class__.__name__)
+        return 1
+    sys.stdout.write("comments=%d\n" % len(comments))
+    return 0
 
 
 def cmd_hold(argv):
@@ -359,12 +528,14 @@ def cmd_hold(argv):
 
 def main(argv):
     if len(argv) < 2:
-        sys.stderr.write("usage: premerge-pr-scan.py <jobs|hold> ...\n")
+        sys.stderr.write("usage: premerge-pr-scan.py <jobs|hold|normalize> ...\n")
         return 2
     if argv[1] == "jobs":
         return cmd_jobs(argv[2:])
     if argv[1] == "hold":
         return cmd_hold(argv[2:])
+    if argv[1] == "normalize":
+        return cmd_normalize(argv[2:])
     sys.stderr.write("premerge-pr-scan.py: unknown subcommand %r\n" % argv[1])
     return 2
 

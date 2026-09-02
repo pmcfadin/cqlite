@@ -107,20 +107,55 @@ mkdir -p "$BIN"
 cat >"$BIN/gh" <<'GH'
 #!/usr/bin/env bash
 # MOCK_GH_DIR holds one file per response, named by the call shape.
+#
+# SINCE roborev JOB 59 FINDING 2 the leg reads a thread in TWO calls per
+# subject: the VIEW (`pr view`/`issue view --json <fields>`, WITHOUT comments,
+# because that connection is BOUNDED and drops a stop order on a later page)
+# and then the COMPLETE comment list from
+# `gh api --paginate repos/<r>/issues/<n>/comments`.
+#
+# THE COMMENT ENDPOINT IS DERIVED, NOT A SECOND FIXTURE. It re-serves the
+# `comments` array of the fixture this mock answered for the IMMEDIATELY
+# PRECEDING view call — which is exactly the leg's order, view then comments,
+# per subject. So a case still writes ONE payload with its comments inline and
+# needs no companion file and no wiring: every pre-existing case stays
+# byte-identical, and a case added later cannot forget to split its comments
+# out. A case wanting a genuinely MULTI-PAGE stream writes that stream to
+# `$MOCK_GH_DIR/comment-pages.json` and it is served verbatim.
 d="${MOCK_GH_DIR:-}"
-case "$1 $2" in
-  "pr view")
-    case "$*" in
-      *closingIssuesReferences*) f="$d/pr-hold.json" ;;
-      *) f="$d/pr.json" ;;
-    esac ;;
-  "issue view") f="$d/issue-$3.json" ;;
-  "api "*) f="$d/timeline.json" ;;
-  *) f="$d/pr.json" ;;
-esac
+f=""
 case "$*" in
-  api*) f="$d/timeline.json" ;;
+  *"/timeline"*) f="$d/timeline.json" ;;
+  *"/comments"*)
+    if [ -f "$d/comment-pages.json" ]; then
+      cat "$d/comment-pages.json"
+      exit 0
+    fi
+    last=""
+    [ -f "$d/.last-view" ] && last=$(cat "$d/.last-view")
+    python3 -c 'import json,sys
+try:
+    with open(sys.argv[1]) as h:
+        p = json.load(h)
+except Exception:
+    p = {}
+c = p.get("comments") if isinstance(p, dict) else None
+sys.stdout.write(json.dumps(c if isinstance(c, list) else []))' "$last"
+    exit $?
+    ;;
 esac
+if [ -z "$f" ]; then
+  case "$1 $2" in
+    "pr view")
+      case "$*" in
+        *closingIssuesReferences*) f="$d/pr-hold.json" ;;
+        *) f="$d/pr.json" ;;
+      esac ;;
+    "issue view") f="$d/issue-$3.json" ;;
+    *) f="$d/pr.json" ;;
+  esac
+  printf '%s' "$f" >"$d/.last-view"
+fi
 [ -f "$f" ] || { echo "gh: no fixture $f" >&2; exit 1; }
 cat "$f"
 GH
@@ -141,6 +176,7 @@ RB
 chmod +x "$BIN/roborev"
 
 # --- fixture builders ---------------------------------------------------------
+
 # roborev_job <id> <base40> <head40> -- a `roborev show` payload of the REAL
 # shape: the job row NESTED under a "job" key (measured, issue #2964).
 # The 4th argument is the RECORD's structured verdict letter, `P` clean / `F`
@@ -684,15 +720,51 @@ gate_block() { # gate_block <out> <sha>
 }
 
 # The gh mock must also answer the assert's own head/state call.
+#
+# THIS IS THE SECOND `$BIN/gh` IN THIS FILE AND IT REPLACES THE FIRST FOR EVERY
+# CASE BELOW IT. That is a real trap and it cost a debugging round: this mock
+# routed EVERY `api` call to the timeline fixture (`case "$1" in api)`), so when
+# the leg gained its paginated COMMENT fetch (roborev job 59 finding 2) every
+# case after this point silently received the TIMELINE payload as its comment
+# thread — an empty comment list — and five cases failed with correct code.
+# Both mocks must therefore agree on the endpoint routing; the comment endpoint
+# is matched on the ENDPOINT PATH, never on `$1` alone.
 cat >"$BIN/gh" <<'GH2'
 #!/usr/bin/env bash
 d="${MOCK_GH_DIR:-}"
+# Endpoint-path routing FIRST, and `/comments` is derived from the fixture this
+# mock served for the immediately preceding VIEW call — the same contract as the
+# first mock above.
+case "$*" in
+  *"/timeline"*)
+    f="$d/timeline.json"
+    [ -f "$f" ] || { echo "gh: no fixture $f" >&2; exit 1; }
+    cat "$f"
+    exit 0
+    ;;
+  *"/comments"*)
+    if [ -f "$d/comment-pages.json" ]; then
+      cat "$d/comment-pages.json"
+      exit 0
+    fi
+    last=""
+    [ -f "$d/.last-view" ] && last=$(cat "$d/.last-view")
+    python3 -c 'import json,sys
+try:
+    with open(sys.argv[1]) as h:
+        p = json.load(h)
+except Exception:
+    p = {}
+c = p.get("comments") if isinstance(p, dict) else None
+sys.stdout.write(json.dumps(c if isinstance(c, list) else []))' "$last"
+    exit $?
+    ;;
+esac
 case "$*" in
   *closingIssuesReferences*) f="$d/pr-hold.json" ;;
   *baseRefName*) f="$d/pr.json" ;;
   *) f="" ;;
 esac
-case "$1" in api) f="$d/timeline.json" ;; esac
 case "$1 $2" in "issue view") f="$d/issue-$3.json" ;; esac
 if [ -z "$f" ]; then
   printf '%s
@@ -700,6 +772,7 @@ if [ -z "$f" ]; then
   exit 0
 fi
 [ -f "$f" ] || { echo "gh: no fixture $f" >&2; exit 1; }
+printf '%s' "$f" >"$d/.last-view"
 cat "$f"
 GH2
 chmod +x "$BIN/gh"
@@ -1324,6 +1397,159 @@ if run_hold 0 "scanner: a NULL body is a comment with no text, and still clears"
 fi
 
 # ==============================================================================
+# FINDINGS 2 + 3 (roborev job 59) — THE WHOLE THREAD, ORDERED BY EDIT TIME
+# ==============================================================================
+# `gh pr view --json comments` returns a BOUNDED connection, so a persistent
+# column-zero `HOLD:` outside the window produced a false NO-HOLD-RECOGNISED —
+# the same defect already fixed for the disarm TIMELINE, still live for the
+# artifact a lead actually posts a stop order in. And ordering markers by
+# `createdAt` let an OLD comment EDITED to carry `HOLD:` lose to a `GO:` posted
+# before the edit, so the hold visible on the thread right now was ignored.
+
+# --- a HOLD on a LATER PAGE stops the merge -----------------------------------
+# `gh api --paginate` emits ONE ARRAY PER PAGE, CONCATENATED. Page 1 is
+# innocuous; the stop order is on page 2, which a single-page read drops.
+timeline_payload '[]'
+raw_pr_hold "$MOCK_GH_DIR/pr-hold.json" '{"body":"","comments":[],"closingIssuesReferences":[]}'
+printf '%s%s' \
+  "[{\"author\":{\"login\":\"someone\"},\"created_at\":\"$(iso_ago 900)\",\"updated_at\":\"$(iso_ago 900)\",\"body\":\"ordinary chatter\"}]" \
+  "[{\"author\":{\"login\":\"pmcfadin\"},\"created_at\":\"$(iso_ago 600)\",\"updated_at\":\"$(iso_ago 600)\",\"body\":\"HOLD: merge after #9999\"}]" \
+  >"$MOCK_GH_DIR/comment-pages.json"
+if run_hold 4 "pages: a HOLD on the SECOND page stops the merge"; then
+  case "$OUT" in
+    *"verdict HOLD-FOUND"*)
+      ok "pages: every page is decoded, so a stop order past page 1 is not dropped" ;;
+    *) bad "pages: a second-page HOLD was missed (got: $OUT)" ;;
+  esac
+fi
+
+# NON-VACUITY: the same stream WITHOUT the second page must clear, or the case
+# above would pass on any two-page input at all.
+printf '%s' \
+  "[{\"author\":{\"login\":\"someone\"},\"created_at\":\"$(iso_ago 900)\",\"updated_at\":\"$(iso_ago 900)\",\"body\":\"ordinary chatter\"}]" \
+  >"$MOCK_GH_DIR/comment-pages.json"
+if run_hold 0 "pages: page 1 alone genuinely clears (non-vacuity control)"; then
+  case "$OUT" in
+    *"verdict NO-HOLD-RECOGNISED"*)
+      ok "pages: the second-page case proves pagination, not a blanket hold" ;;
+    *) bad "pages: expected a clearance without the second page (got: $OUT)" ;;
+  esac
+fi
+
+# --- a stream that cannot be decoded IN FULL is UNMEASURED --------------------
+printf '%s' \
+  "[{\"author\":{\"login\":\"someone\"},\"created_at\":\"$(iso_ago 900)\",\"body\":\"fine\"}][{tru" \
+  >"$MOCK_GH_DIR/comment-pages.json"
+if run_hold 5 "pages: a stream with an undecodable page is UNMEASURED, not partially read"; then
+  case "$OUT" in
+    *"could not be normalised"* | *"read in full"*)
+      ok "pages: a partially-decodable thread is a hold, never a clearance" ;;
+    *) bad "pages: expected the incomplete-thread cause (got: $OUT)" ;;
+  esac
+fi
+
+# --- REST spellings are accepted (the coupling that would green vacuously) ----
+# `gh api` says `user.login`/`created_at`; `gh pr view --json` says
+# `author.login`/`createdAt`. Read the wrong one and EVERY author is empty, so a
+# `GO:` from the allowlist silently stops releasing and a deferral silently
+# stops being granted — fail-closed, and WRONG ON CORRECT INPUT.
+printf '%s' \
+  "[{\"user\":{\"login\":\"pmcfadin\"},\"created_at\":\"$(iso_ago 600)\",\"updated_at\":\"$(iso_ago 600)\",\"body\":\"HOLD: merge after #9999\"},{\"user\":{\"login\":\"pmcfadin\"},\"created_at\":\"$(iso_ago 300)\",\"updated_at\":\"$(iso_ago 300)\",\"body\":\"GO: cleared\"}]" \
+  >"$MOCK_GH_DIR/comment-pages.json"
+if run_hold 0 "rest-shape: a REST-spelled allowlisted GO releases a REST-spelled HOLD"; then
+  case "$OUT" in
+    *"authorized release"*)
+      ok "rest-shape: user.login is read, so an allowlisted release is still recognised" ;;
+    *) bad "rest-shape: the REST author spelling was not read (got: $OUT)" ;;
+  esac
+fi
+# And the release must still be REFUSED from a non-allowlisted REST author.
+printf '%s' \
+  "[{\"user\":{\"login\":\"pmcfadin\"},\"created_at\":\"$(iso_ago 600)\",\"updated_at\":\"$(iso_ago 600)\",\"body\":\"HOLD: merge after #9999\"},{\"user\":{\"login\":\"stranger\"},\"created_at\":\"$(iso_ago 300)\",\"updated_at\":\"$(iso_ago 300)\",\"body\":\"GO: cleared\"}]" \
+  >"$MOCK_GH_DIR/comment-pages.json"
+if run_hold 4 "rest-shape: a REST-spelled GO from a stranger does NOT release"; then
+  case "$OUT" in
+    *"IGNORED"*)
+      ok "rest-shape: normalising the spelling did not widen who may release" ;;
+    *) bad "rest-shape: a stranger's release was honoured (got: $OUT)" ;;
+  esac
+fi
+
+# --- ORDERED BY EDIT TIME: an old comment EDITED to HOLD beats a newer GO -----
+# The `GO:` was CREATED after the hold comment was created, but the hold
+# comment was EDITED later still, so the currently-visible stop order is the
+# hold. Keyed on createdAt, the GO wins and the merge proceeds.
+printf '%s' \
+  "[{\"user\":{\"login\":\"pmcfadin\"},\"created_at\":\"$(iso_ago 1200)\",\"updated_at\":\"$(iso_ago 60)\",\"body\":\"HOLD: merge after #9999\"},{\"user\":{\"login\":\"pmcfadin\"},\"created_at\":\"$(iso_ago 600)\",\"updated_at\":\"$(iso_ago 600)\",\"body\":\"GO: cleared\"}]" \
+  >"$MOCK_GH_DIR/comment-pages.json"
+if run_hold 4 "edited: a comment EDITED to carry HOLD supersedes an older-created GO"; then
+  case "$OUT" in
+    *"verdict HOLD-FOUND"*)
+      ok "edited: markers are ordered by when the TEXT last changed, which is what a reader sees" ;;
+    *) bad "edited: the edited-in hold was ignored (got: $OUT)" ;;
+  esac
+fi
+
+# --- an unreadable EDIT timestamp on a marker-bearing comment is UNMEASURED ---
+printf '%s' \
+  "[{\"user\":{\"login\":\"pmcfadin\"},\"created_at\":\"$(iso_ago 600)\",\"updated_at\":\"not-a-timestamp\",\"body\":\"HOLD: merge after #9999\"}]" \
+  >"$MOCK_GH_DIR/comment-pages.json"
+if run_hold 5 "edited: an unreadable EDIT timestamp on a marker is UNMEASURED"; then
+  case "$OUT" in
+    *"unreadable edit timestamp"*)
+      ok "edited: a marker that cannot be ORDERED is a refusal naming why, never ignored" ;;
+    *) bad "edited: expected the edit-timestamp cause (got: $OUT)" ;;
+  esac
+fi
+# ...and an unreadable edit timestamp on an ORDINARY comment does not red the run.
+printf '%s' \
+  "[{\"user\":{\"login\":\"someone\"},\"created_at\":\"$(iso_ago 600)\",\"updated_at\":\"not-a-timestamp\",\"body\":\"just chatter\"}]" \
+  >"$MOCK_GH_DIR/comment-pages.json"
+if run_hold 0 "edited: an unreadable edit timestamp on a NON-marker comment still clears"; then
+  case "$OUT" in
+    *"verdict NO-HOLD-RECOGNISED"*)
+      ok "edited: the refusal is scoped to comments that actually carry a marker" ;;
+    *) bad "edited: an ordinary comment's bad stamp red the run (got: $OUT)" ;;
+  esac
+fi
+rm -f "$MOCK_GH_DIR/comment-pages.json"
+
+# --- the normaliser REFUSES a shape it does not recognise --------------------
+# A shorter comment list is indistinguishable from a quiet thread, which is the
+# false clearance being fixed — so an unreadable shape is exit 1, never fewer
+# comments.
+norm_view="$T/norm-view.json"
+norm_pages="$T/norm-pages.json"
+norm_out="$T/norm-out.json"
+printf '%s' '{"body":"","comments":[]}' >"$norm_view"
+for shape in '{"not":"a list"}' '[{"user":{"login":42},"body":"x"}]' '["not an object"]' \
+  '[{"created_at":42,"body":"x"}]'; do
+  printf '%s' "$shape" >"$norm_pages"
+  if python3 "$SCANNER" normalize "$norm_view" "$norm_pages" "$norm_out" >/dev/null 2>&1; then
+    bad "normalize: the unrecognised shape $shape was ACCEPTED (a short thread is a false clearance)"
+  else
+    ok "normalize: the unrecognised shape $shape is REFUSED, not read as fewer comments"
+  fi
+done
+# A DELETED ACCOUNT is a legitimate shape (both APIs answer null) and must not refuse.
+printf '%s' '[{"user":null,"created_at":"2026-09-02T00:00:00Z","body":"x"}]' >"$norm_pages"
+if python3 "$SCANNER" normalize "$norm_view" "$norm_pages" "$norm_out" >/dev/null 2>&1; then
+  ok "normalize: a null author (deleted account) is a legitimate shape, not a refusal"
+else
+  bad "normalize: a null author was refused, which reds correct input"
+fi
+
+# --- STRUCTURAL: the leg no longer asks for the BOUNDED comment connection ---
+assert_src_present \
+  "pages: the leg reads comment threads through \`gh api --paginate\`" \
+  "pages: the leg does not paginate its comment fetch" \
+  "$BINDING" 'gh api --paginate' code
+assert_src_absent \
+  "pages: no fetch asks \`--json\` for the BOUNDED comments connection" \
+  "pages: a fetch still requests --json comments, whose connection is bounded" \
+  "$BINDING" '--json[ ]*[A-Za-z,]*comments' code
+
+# ==============================================================================
 # FINDING 1 (roborev job 59) — A RANGE MATCH ALONE MUST NOT BIND
 # ==============================================================================
 # The leg used to treat a matching `git_ref` as sufficient, with the recorded
@@ -1487,7 +1713,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=97
+CASE_FLOOR=112
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

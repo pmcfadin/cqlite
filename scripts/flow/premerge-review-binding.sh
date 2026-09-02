@@ -247,6 +247,46 @@ classify_paths() {
 }
 
 # ---------------------------------------------------------------------------
+# THE COMPLETE COMMENT THREAD — `--paginate`, AND EVERY PAGE DECODED (#3752,
+# roborev job 59 finding 2)
+# ---------------------------------------------------------------------------
+# `gh pr view --json comments` and `gh issue view --json comments` return a
+# BOUNDED connection, not the thread: a persistent column-zero `HOLD:` outside
+# the returned window produced a false `NO-HOLD-RECOGNISED`. That is the same
+# defect already fixed for the disarm TIMELINE and it was still live for the
+# COMMENTS — the artifact a lead actually posts a stop order in.
+#
+# ONE STREAM SERVES BOTH LEGS. The job-record discovery and the hold scan read
+# the SAME normalised payload, so they can never disagree about what the thread
+# contains; paginating one and leaving the other bounded would put a job block
+# and a stop order on different views of one page range.
+#
+# THE REST/GraphQL SPELLING DIFFERENCE IS RECONCILED IN `normalize`, NOT HERE:
+# `gh api` says `user.login`/`created_at`, `gh pr view --json` says
+# `author.login`/`createdAt`, and a consumer reading the wrong one sees every
+# author as empty — which silently stops granting deferrals and stops honouring
+# an allowlisted release. Fail-closed, and wrong on correct input, so it is
+# fixed once at this boundary rather than per consumer.
+#
+# fetch_thread <out.json> <view-json-fields> <endpoint> <what> — writes a
+# normalised payload, or refuses with UNMEASURED. An incompletely-read thread is
+# a hold, never a clearance.
+fetch_thread() {
+  local out="$1" fields="$2" endpoint="$3" what="$4" tmpdir
+  tmpdir=$(dirname "$out")
+  gh "${GH_VIEW_ARGV[@]}" --json "$fields" >"$out.view" 2>/dev/null ||
+    unmeasured "\`gh $what\` failed (auth/network/no-such-subject), so $what could not be read."
+  gh api --paginate "$endpoint?per_page=100" >"$out.comments" 2>/dev/null ||
+    unmeasured "the comment thread for $what could not be read IN FULL (pagination failed), so" \
+      "a stop order or a recorded review outside the first page could not be ruled out." \
+      "An incompletely-read thread is a hold, never a clearance."
+  python3 "$SCAN_TOOL" normalize "$out.view" "$out.comments" "$out" >/dev/null 2>&1 ||
+    unmeasured "the comment thread for $what could not be normalised into one payload, so its" \
+      "shape is not one this code recognises. A shape we cannot read is a refusal, never a" \
+      "shorter thread — a short comment list is indistinguishable from a quiet one."
+}
+
+# ---------------------------------------------------------------------------
 # WHO MAY AUTHORIZE A DEFERRAL — read as DATA from the ONE committed definition
 # ---------------------------------------------------------------------------
 # The allowlist has exactly one home, `roborev-review-oracles.sh`, and it is
@@ -377,9 +417,9 @@ cmd_review_binding() {
       "the PR diff nor the ancestor test can be evaluated here. Run this assert from the" \
       "lane whose branch carries the certified head."
 
-  gh pr view "$pr" --repo "$repo" --json baseRefName,body,comments >"$tmp/pr.json" 2>/dev/null ||
-    unmeasured "\`gh pr view $pr --repo $repo\` failed (auth/network/no-such-PR), so the PR's" \
-      "own record of its roborev round could not be read."
+  GH_VIEW_ARGV=(pr view "$pr" --repo "$repo")
+  fetch_thread "$tmp/pr.json" baseRefName,body \
+    "repos/$repo/issues/$pr/comments" "pr view $pr --repo $repo"
 
   local base_ref
   base_ref=$(python3 -c 'import json,sys
@@ -860,11 +900,12 @@ cmd_hold_check() {
 
   # Read STRUCTURALLY (`--json`, no `--jq` flattening): author and body stay
   # SEPARATE FIELDS of one object, so a comment body can never forge its own
-  # author record (#3312 instance 4).
-  gh pr view "$pr" --repo "$repo" --json body,comments,closingIssuesReferences \
-    >"$tmp/pr.json" 2>/dev/null ||
-    unmeasured "\`gh pr view $pr --repo $repo\` failed, so the PR thread could not be re-read" \
-      "for a stop order. A thread that cannot be read is a hold, never a clearance."
+  # author record (#3312 instance 4). The COMMENTS come from the paginated
+  # endpoint via `fetch_thread`, because the `--json comments` connection is
+  # bounded and a stop order on a later page must be seen.
+  GH_VIEW_ARGV=(pr view "$pr" --repo "$repo")
+  fetch_thread "$tmp/pr.json" body,closingIssuesReferences \
+    "repos/$repo/issues/$pr/comments" "pr view $pr --repo $repo"
 
   # `--paginate`, AND EVERY PAGE IS DECODED BEFORE ANY VERDICT (#3752 blocker 3).
   # One page of 100 events is not the timeline: on a longer PR a recent
@@ -920,14 +961,14 @@ print("\n".join(out))' \
       "could not be ruled out. Unreadable is a hold, never a clearance."
   while IFS= read -r issue; do
     [ -n "$issue" ] || continue
-    if gh issue view "$issue" --repo "$repo" --json body,comments \
-      >"$tmp/issue-$issue.json" 2>/dev/null; then
-      extra+=("$tmp/issue-$issue.json")
-      say "thread also re-reading issue #$(sane "$issue"), which this PR closes"
-    else
-      unmeasured "issue #$issue (closed by this PR) could not be read, so a stop order posted" \
-        "on the ISSUE thread could not be ruled out. Unreadable is a hold, never a clearance."
-    fi
+    # The ISSUE thread is paginated for the same reason as the PR's: a lead
+    # stop order posted on the issue this PR closes is exactly the artifact a
+    # bounded connection drops.
+    GH_VIEW_ARGV=(issue view "$issue" --repo "$repo")
+    fetch_thread "$tmp/issue-$issue.json" body \
+      "repos/$repo/issues/$issue/comments" "issue view $issue --repo $repo"
+    extra+=("$tmp/issue-$issue.json")
+    say "thread also re-reading issue #$(sane "$issue"), which this PR closes"
   done <<<"$issues"
 
   say "window a lead disarm (auto_merge_disabled) counts as a stop order for"
