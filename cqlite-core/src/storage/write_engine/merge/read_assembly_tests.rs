@@ -70,6 +70,10 @@ fn schema() -> TableSchema {
             // set<frozen<key_part>> — a composite UDT element, resolvable
             // through `registry()` (issue #2339).
             col("kset", "set<frozen<key_part>>"),
+            // roborev job 52 / G2: the NESTED unresolved-UDT case. `key_part` IS in
+            // `registry()`; `ghost_part` deliberately is NOT, and it sits nested
+            // inside the tuple rather than at the top level.
+            col("nset", "set<frozen<tuple<frozen<ghost_part>, int>>>"),
             // The SAME element type by a keyspace-QUALIFIED reference, which is
             // how Cassandra emits a UDT column type and what the CQL parser
             // retains (roborev F2): `CqlType::parse` yields
@@ -672,6 +676,33 @@ fn set_of_unresolved_udt_still_fails_closed() {
         msg.contains("fset") && msg.contains("addr_type") && msg.contains("#2339"),
         "an unresolved composite element must fail closed naming the column and \
          the declared type, got: {msg}"
+    );
+}
+
+/// **roborev job 52 / G2 — the NESTED unresolved UDT must fail closed too.**
+///
+/// The guard used to test only the comparator `unwrap_frozen_comparator` returns,
+/// i.e. the TOP level. `nset set<frozen<tuple<frozen<ghost_part>, int>>>` keeps
+/// `Custom("ghost_part")` at a NESTED position, so that check passed and the
+/// decoder's `_ =>` arm turned the field into an opaque `Value::Blob` — a
+/// plausible-looking wrong value that a multi-generation read then emitted AND
+/// SORTED, instead of failing closed. That is the class #28 forbids, and it also
+/// contradicted this PR's own claim that an unresolvable UDT still fails closed.
+///
+/// RED BEFORE THE FIX: this returned `Ok` with a `Blob` nested in the tuple.
+#[test]
+fn nested_unresolved_udt_fails_closed() {
+    let cells = vec![elem(
+        "nset",
+        Value::blob(Vec::new()),
+        hex("00000004626574610000000400000002"),
+    )];
+    let err = assemble_read_cells(cells, &schema(), None, registry()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("nset") && msg.contains("ghost_part") && msg.contains("#2339"),
+        "an unresolved UDT NESTED inside a tuple must fail closed naming the column \
+         and the nested type — never an opaque Blob, got: {msg}"
     );
 }
 

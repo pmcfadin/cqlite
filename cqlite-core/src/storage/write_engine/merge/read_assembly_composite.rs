@@ -88,7 +88,7 @@ pub(super) fn decode_composite(
     bytes: &[u8],
     cmp: &ComparatorType,
 ) -> Result<Value> {
-    if let ComparatorType::Custom(name) = unwrap_frozen_comparator(cmp) {
+    if let Some(name) = first_unresolved_custom(cmp) {
         return Err(Error::unsupported_format(format!(
             "column '{column}': {kind} type '{name}' did not resolve to a structure \
              — a UDT reference with no definition in the table's UDT registry has no \
@@ -97,6 +97,52 @@ pub(super) fn decode_composite(
         )));
     }
     parse_value_with_comparator(bytes, cmp)
+}
+
+/// The name of the first `Custom` comparator node ANYWHERE in `cmp`'s tree that
+/// `custom_scalar::decode_custom_scalar` cannot decode, or `None` when every
+/// `Custom` node is one it recognises.
+///
+/// **Why this is RECURSIVE, and why a top-level-only check was a silent-wrong-value
+/// bug (roborev job 52, G2).** The guard in [`decode_composite`] originally tested
+/// only the comparator that `unwrap_frozen_comparator` returns, i.e. the top level.
+/// An unresolved UDT reference NESTED inside a tuple, UDT or collection — say
+/// `set<frozen<tuple<frozen<unregistered_udt>, int>>>` — leaves `Custom` at a nested
+/// position, so the guard passed and the decoder's `_ =>` arm turned that field into
+/// an opaque `Value::Blob`. A multi-generation read then emitted AND SORTED a
+/// plausible-looking wrong value instead of failing closed, which is exactly the
+/// class the no-heuristics mandate forbids (#28; the same shape as #3612's
+/// "the blob fallback must not swallow a recognised-but-unhandled composite").
+///
+/// The admitted set is **`time` / `inet` / `json`** because that is precisely what
+/// `custom_scalar::decode_custom_scalar` matches; every other name falls to its
+/// `_ =>` arm and becomes a `Blob`. Read from that function rather than assumed —
+/// if it gains an arm, this list must gain it too, or a decodable type starts
+/// failing closed.
+fn first_unresolved_custom(cmp: &ComparatorType) -> Option<&str> {
+    match cmp {
+        ComparatorType::Custom(name) => {
+            if matches!(name.as_str(), "time" | "inet" | "json") {
+                None
+            } else {
+                Some(name.as_str())
+            }
+        }
+        ComparatorType::Frozen(inner) => first_unresolved_custom(inner),
+        ComparatorType::List(elem) | ComparatorType::Set(elem) => {
+            first_unresolved_custom(elem)
+        }
+        ComparatorType::Map(key, val) => {
+            first_unresolved_custom(key).or_else(|| first_unresolved_custom(val))
+        }
+        ComparatorType::Tuple(fields) => fields.iter().find_map(first_unresolved_custom),
+        ComparatorType::Udt {
+            field_comparators, ..
+        } => field_comparators
+            .iter()
+            .find_map(|(_, c)| first_unresolved_custom(c)),
+        _ => None,
+    }
 }
 
 /// Order two decoded composite keys/elements exactly as Cassandra's type
