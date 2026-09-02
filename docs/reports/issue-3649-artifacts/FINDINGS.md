@@ -543,6 +543,39 @@ That is a pass derived from the absence of a bad signal, in the one check added
 to stop exactly that, and it is why there is a fourth token: `UNRECOGNISED` is
 disclosed as *not known to be local*, distinctly from `NOT-MEASURABLE`.
 
+**THE SHARPEST INSTANCE OF THE LABEL-VERSUS-PROPERTY CLASS IS THE ONE THAT
+LOOKED LIKE ITS FIX.** The narrow-rig gate began as an instance-type string;
+that was correctly rejected as a *label* and replaced with `nproc`, described in
+the code as "the property, and it is recorded". It was not. **`nproc` reports
+the CPUs available to the PROCESS, not the size of the machine** — measured on a
+16-CPU box, `nproc` → 16, `taskset -c 0-3 nproc` → 4, while
+`/sys/devices/system/cpu/online` → `0-15` under both. So a large rig pinned to
+four CPUs satisfied a guard whose own refusal text said pinning must not qualify
+it. The code contradicted its own stated requirement.
+
+**Every property that guard had was true, and none was the one that mattered.**
+It was measured, recorded, non-attestable, self-consistent, and derived from the
+machine rather than from a name — and it answered a question nobody had asked.
+The mistake is one level in from the original: *"this is a measurement"* is not
+*"this is a measurement of the thing the requirement is about."* Rejecting a
+label does not, by itself, get you the property; it only gets you a measurement,
+and which subject that measurement is of is a separate question that has to be
+asked out loud.
+
+**The fix reads the machine's online CPU set, with no fallback to `nproc`** —
+falling back to the value whose wrongness *is* the defect would reintroduce it
+exactly where nobody would look for it — and records `process_cpus` separately,
+because the affinity-limited count is a real and different fact rather than a
+substitute. The manifest key was renamed from `nproc`, since the old name is
+what invited the mistake.
+
+**AND THE CASES COULD NOT HAVE CAUGHT IT EITHER.** Every rig-profile case set
+the hardware and process counts *equal*, so a gate reading the wrong one is
+invisible to all of them. The detecting shape is the defect scenario itself — a
+large machine under a mask — and it existed nowhere until the plant for the fix
+passed green and forced the question. **A case suite that only ever presents
+inputs where two fields agree cannot detect which field is read.**
+
 **A VERDICT MUST NOT BE A FUNCTION OF AN ANALYSIS-TIME FLAG.** `--profile`
 selected the target band when the report was *written*, defaulting to `narrow`,
 so the same data produced different verdicts under different flags and a
