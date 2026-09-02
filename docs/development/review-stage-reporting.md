@@ -303,17 +303,39 @@ Three further declared limits of the mechanism itself:
   survives redirection to a file), and a coloured capture without it fails every marker anchor and
   is reported as having no verdict line at all — a diagnostic loss worth avoiding. Each reader now
   keeps **two readings** of every line: one with each CSI **deleted**, used to LOCATE and to parse,
-  and one with each CSI replaced by a **single space**, used for ONE question — *did the deletion
-  JOIN two runs the file keeps apart?* **The transferable rule is SEPARATE VERSUS JOIN.** A CSI that
-  BRACKETS a token (which is what a colouring tool emits) leaves that token a whole field of the
-  second reading; a CSI INSIDE one splits it, so the token the first reading shows appears in the
-  second nowhere. The two readers of `review-stage.sh`'s own artifacts take the STRICT form (every
-  field of the anchored line must survive), because those artifacts have ONE producer and it emits
-  no colour; `_gate_awk` takes the VALUE-ONLY form, because a coloured gate-summary capture is
+  and a second one used for ONE question — *did the strip CHANGE this line?*
+  **The transferable rule is SEPARATE VERSUS JOIN**, and what it settles is which transforms can be
+  safe at all: `\r$` removes one byte where nothing follows and can only SEPARATE, while a CSI
+  deletion removes bytes from the MIDDLE and JOINS two runs the file keeps apart.
+  **ROUND 15 GOT THE MEASUREMENT WRONG, NOT THE RULE (#3751 round 21, AA2).** It asked the join
+  question as a FIELD-MEMBERSHIP test — every field of the deleted reading must survive as a whole
+  field of a CSI-as-SEPARATOR reading — and **a CSI that BRACKETS a field satisfies that test**,
+  which is exactly what a colouring tool emits. Round 15's own comment said so and read it as
+  benign. It was not: `RESULT: <CSI>PASS<CSI>` normalised into `PASS` with the escape flag at
+  **ZERO** and reached `PREMERGE: OK` — a line the declared producer cannot emit, whose RAW token
+  is not `PASS`, certifying a merge. **The class is "compared the NORMALISED form", not one
+  token**: measured field by field, **all EIGHT fields of the verdict line** (the anchor, the stage
+  kind, the `RESULT:` key, the token, and `elapsed=`/`deadline=`/`agent=`/`report=`) certified when
+  bracketed, and so did the stage record's `head-sha:`, where the splice BOUND a stage to a tree
+  whose record carries no such sha in raw bytes. A bracketed `report-nonce:` got past this reader
+  too and was then caught one layer later by `review-stage.sh`'s own stricter nonce-shape reader —
+  defence in depth paying out, and not a reason to leave this reader permissive.
+  **So the two readers of `review-stage.sh`'s own artifacts ask an IDENTITY**: the parsed line must
+  be BYTE-IDENTICAL to the line on disk minus the one trailing CR. Either the line is refused, or
+  **every mandatory field IS the raw field** and the closed grammar compares bytes nobody
+  transformed — for all fields at once, instead of being re-argued per field. It also closes a
+  shape no join test could reach: an ESC that forms **no CSI at all** (a bare `\033`, `\033(B`) is
+  deleted by NEITHER reading, so the two readings agreed and the join test passed while the token
+  still carried an escape. With the identity in place, round 15's declared residual (a value
+  spliced by a CSI while the SAME TEXT also appears as another field of that line) is
+  **unexpressible in those two readers** rather than declared; it survives, unchanged and
+  invoker-class, for `_gate_awk`.
+  `_gate_awk` keeps the **VALUE-ONLY join** form, because a coloured gate-summary capture is
   documented-legitimate input and real colouring brackets the KEY as readily as the value
-  (`<ESC>[32mRESULT<ESC>[0m:`), which the strict form would red on. Declared residual, invoker-class
-  and therefore out of this script's model: a value spliced by a CSI while the SAME TEXT also
-  appears as another field of that line satisfies the field-membership test.
+  (`<ESC>[32mRESULT<ESC>[0m:`), which the identity form would red on. **State per reader which
+  reads may normalise (to locate) and which may not (to supply a value)** — that sentence is now
+  in the source of both scripts, because the two readers differ on purpose and a reader added later
+  has to know which side it is on.
   **The trailing-CR strip is DELIBERATELY KEPT, by the same rule, and that is a ruling rather than a
   tolerance.** `\r$` removes one byte where nothing follows, so it can separate but never join:
   `PASS<CR>` is the token plus separator whitespace, exactly as `PASS<TAB>` and `PASS   ` are.
@@ -1000,6 +1022,76 @@ verdict to supersede". `assert_ignored` on that path is gone with the write it e
 
 **The generalisable rule:** when a check can only NARROW a window, ask whether the harm can be made
 UNEXPRESSIBLE instead — and never declare a residual whose victim is your own system's normal behaviour.
+
+### Two publishers of one stage must not interleave (#3751 round 21, AA1)
+
+U1 above removed the DESTRUCTION and left the **record's own** publish window. `record-author-performed`
+RE-VERIFIES the stage record (`reason=stage-record-changed-mid-write`) and then publishes its replacement
+with a **separate `mv`**. A concurrent `open --force` landing between those two acts publishes generation
+**B**, after which the recording overwrites B's record with **C** while recording that it superseded **A**.
+Two harms, and both are this issue's core subject rather than side effects:
+
+* the agent the peer `open` has just spawned is writing into an **ORPHANED** report — no record names B, so
+  no reader derives its path, and its eventual `FINDINGS` is read by **nothing**;
+* the audit trail **NAMES THE WRONG PREDECESSOR**, which is a **falsified** record and not merely a missing
+  one. Falsifying the trail is the worst failure this tool can have.
+
+**Measured on the shipped script**, with the interleave planted deterministically at the last instant
+before publication (simulated, not raced — one injected line at a fixed point): **three** generations on
+disk, one of them named by no record, `RECORD-OK … supersedes-report-nonce=<A>` at exit 0 while the record
+had held **B**. After the fix: the peer publisher is refused by name, **two** generations, and the recorded
+predecessor is the generation actually superseded.
+
+**The fix is a per-stage exclusive `flock`, held across each publisher's recheck-and-publish span — and the
+SCOPE of that decision is the whole justification.** This issue rejected a lock **twice**, and both rulings
+stand unchanged:
+
+| earlier ruling | why it stands |
+|---|---|
+| round 6 (K2): a random nonce **instead of** locking the generation choice | a nonce REMOVES that race rather than serialising it, and nothing in this tool selects a name by looking at what is on disk |
+| round 9/15 (N1/U1): no lock for the **late-reviewer** window | the counterparty there is **an arbitrary agent writing its report with its own tooling** — it takes no lock and cannot be made to |
+
+What differs here, and it is the only thing that differs: **both parties are subcommands of
+`review-stage.sh`** (`open --force` and `record-author-performed`), so mutual exclusion between our **own**
+publishers is *available*. The transferable rule: **"we rejected a lock here" is a ruling about a
+COUNTERPARTY, not about locks** — re-ask it whenever the parties change, and record which party the earlier
+ruling was about.
+
+Properties of the lock, because a lock is a new failure surface:
+
+* **The publisher set is DERIVED, not curated.** Two statements commit the stage record (`cmd_open`,
+  `cmd_record_author_performed`); both take the lock, and the guard attributes every such statement to the
+  function it appears in, so a publisher added later in a new subcommand cannot join the set unlocked.
+* **`flock` is REQUIRED, not attempted** — the `mv -T` precedent (round 7, L2). Its absence is
+  `reason=stage-lock-unavailable` before anything is written; there is no silent unlocked fallback, which
+  would restore the defect precisely on the hosts that cannot detect it. It is recorded as a host
+  precondition in the script's CONSTRAINTS block, on the same terms as `mv -T`.
+* **The wait is BOUNDED** (30s) and a timeout is `reason=stage-lock-timeout` naming the remedy. `flock -E 3`
+  makes a conflict its own status, so "a live holder held it for the whole bound" is never reported as
+  "flock itself failed" — the operator action differs.
+* **READERS TAKE NO LOCK.** `verdict` and `status` are lock-free, so a publisher can never BLOCK a read —
+  a tool whose subject is reporting the truth promptly must not learn to hang — and they need none, because
+  W1's coherent observation already detects a record that MOVED between the two halves of one observation
+  and refuses `stage record changed mid-read` on its own. Both halves are pinned: structurally (neither
+  reader function contains a lock call) and behaviourally (a read completes promptly while an external
+  holder holds the lock).
+* **The lock file is gitignored and verified so**, on the same bar as the record: a file written mid-run that
+  git does not confirm ignored dirties a running gate of record (#2926) and makes `premerge-assert.sh` refuse
+  on `dirty: yes` (#3648). Its path is walked for symlinked components first — a symlinked lock path would
+  put two publishers of one stage on two different objects and make the exclusion vacuous while looking
+  present. **Consequence, declared:** a repository that ignores this tool's files by EXTENSION rather than by
+  DIRECTORY must also cover `*.stage.lock`; the shipped `.gitignore` covers `.review-stage/` as a directory,
+  so this never fires here. It is the same declared consequence the write path's temporary file has.
+* **The lock file is never deleted, deliberately.** An `flock` lock lives on the **open file description**, so
+  the kernel drops it when the holder's descriptor closes — SIGKILL included — and a leftover FILE therefore
+  holds no lock. Deleting it would let a peer holding the old inode and a newcomer creating a fresh one lock
+  DIFFERENT objects and both proceed. That one fact also answers two of round 6's three objections to
+  `flock` (a "stale lock file"; "a holder killed mid-open"); the third (a box without `flock`) is the named
+  refusal above.
+
+**Why a lock and not a third re-verification.** A shell has no compare-and-swap rename, so any number of
+re-reads leaves a span between the last one and the rename. Rounds 9 and 15 each narrowed that span and
+declared the remainder; narrowing it again would be the fourth carve in one place.
 
 **AND "COULD NOT READ IT" IS NOT "NOTHING IS RECORDED" (#3751 round 13, S1).** Round 12's R2 gave
 `classify_report` an UNREADABLE observation state, and this guard branched on the classified TOKEN

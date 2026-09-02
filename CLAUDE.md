@@ -1426,7 +1426,41 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   substitute to a tree the stage was never opened at) and `reopen-count:` is not incremented (no
   agent was re-spawned). The generalisable rule: **when a check can only narrow a window, ask
   whether the harm can be made unexpressible instead — and never declare a residual whose victim
-  is your own system's normal behaviour.** **AND "COULD NOT READ IT" IS NOT "NOTHING IS RECORDED"
+  is your own system's normal behaviour.**
+  **AND THE *RECORD* WINDOW HAS A COUNTERPARTY THAT *CAN* BE MADE TO WAIT, WHICH IS WHY IT GETS A
+  LOCK AND THE REPORT WINDOW DOES NOT (#3751 round 21, AA1).** U1 removed the DESTRUCTION and left
+  the record's own publish window: `record-author-performed` RE-VERIFIES the stage record and then
+  publishes its replacement with a separate `mv`, so a concurrent `open --force` landing between
+  them published generation **B**, after which the recording overwrote B's record with **C** while
+  its `supersedes-report-nonce:` trace said **A**. Two harms, both this issue's core subject: the
+  agent the peer `open` had just spawned was left writing into an **ORPHANED** report — no record
+  names B, so nothing derives its path and its eventual `FINDINGS` is read by NOTHING — and the
+  audit trail **NAMED THE WRONG PREDECESSOR**, a FALSIFIED record rather than a missing one.
+  Measured on the shipped script with the interleave planted at the last instant before
+  publication: three generations on disk, one named by no record, `RECORD-OK` at exit 0.
+  **THE FIX IS A PER-STAGE `flock` HELD ACROSS EACH PUBLISHER'S RECHECK-AND-PUBLISH SPAN, AND THE
+  SCOPE OF THAT DECISION IS THE WHOLE POINT — DO NOT GENERALISE IT.** This issue REJECTED a lock
+  twice and both rulings STAND: round 6 (K2) replaced a SCANNED generation with a random nonce
+  *instead of* locking, because a nonce REMOVES that race rather than serialising it; and round
+  9/15 declined one for the LATE-REVIEWER window, because **the counterparty there is an arbitrary
+  agent writing its report with its own tooling, which takes no lock and cannot be made to.** What
+  differs here, and it is the only thing that differs, is that **both parties are subcommands of
+  `review-stage.sh`** (`open --force` and `record-author-performed`), so mutual exclusion between
+  our OWN publishers is AVAILABLE. Two publishers exist, both take it (a DERIVED census, not a
+  curated list), and **READERS TAKE NONE** — `verdict`/`status` stay lock-free, so a publisher can
+  never block a read, and they need no lock because W1's coherent observation already refuses
+  `stage record changed mid-read` on its own. `flock` is **REQUIRED, NOT ATTEMPTED** (the `mv -T`
+  precedent): its absence is `reason=stage-lock-unavailable` and never a silent unlocked fallback,
+  the wait is BOUNDED with `reason=stage-lock-timeout`, and there is no env var to widen or disable
+  it. The three objections round 6 recorded against `flock` are each ANSWERED rather than ignored,
+  and two of them dissolve on one fact about the mechanism: **an `flock` lock lives on the OPEN FILE
+  DESCRIPTION, so the kernel drops it when the holder exits, SIGKILL included** — a leftover lock
+  FILE holds no lock, which is also why the file is deliberately never deleted (deleting it would
+  let a peer holding the old inode and a newcomer creating a fresh one lock DIFFERENT objects and
+  both proceed). The transferable rule: **"we rejected a lock here" is a ruling about a
+  COUNTERPARTY, not about locks** — re-ask it whenever the parties change, and record which party
+  the earlier ruling was about.
+  **AND "COULD NOT READ IT" IS NOT "NOTHING IS RECORDED"
   (#3751 round 13, S1).** Round 12's single-observation classifier introduced an UNREADABLE state,
   and this guard branched on the TOKEN — where that state arrives as `NOT-RUN`, i.e. on the
   REPLACEABLE side — so a report whose recorded verdict was UNKNOWN, possibly a blocking
@@ -1640,14 +1674,31 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   deleted**: it exists for #3400 (colour survives redirection), and without it a coloured capture
   fails every marker anchor and reports "no verdict line" for a document that has one. Each reader
   now keeps **two readings** of each line — one with each CSI **deleted**, used to LOCATE and to
-  parse, and one with each CSI replaced by a **single space**, used for ONE question: *did the
-  deletion JOIN two runs the file keeps apart?* **THE TRANSFERABLE RULE IS SEPARATE VERSUS JOIN.** A
-  CSI that BRACKETS a token (what a colouring tool emits) leaves it a whole field of the second
-  reading; a CSI INSIDE one splits it, so the token the first reading shows appears in the second
-  nowhere. `review-stage.sh`'s two artifacts take the STRICT form (every field must survive), since
-  they have one producer and it emits no colour; the GATE summary takes the VALUE-ONLY form, because
-  a coloured capture is documented-legitimate input there and real colouring brackets the KEY as
-  readily as the value (`<ESC>[32mRESULT<ESC>[0m:`), which the strict form would red on. **And the
+  parse, and a second one used for ONE question: *did the strip CHANGE this line?*
+  **THE TRANSFERABLE RULE IS SEPARATE VERSUS JOIN**, and it decides which transforms are safe at
+  all: a `\r$` strip removes one byte where nothing follows, so it can only SEPARATE, while a CSI
+  deletion removes bytes from the MIDDLE and JOINS two runs the file keeps apart.
+  **WHAT ROUND 15 GOT WRONG WAS THE MEASUREMENT, NOT THE RULE (#3751 round 21, AA2):** it asked
+  the join question as a FIELD-MEMBERSHIP test — each field of the deleted reading must survive as
+  a whole field of a CSI-as-SEPARATOR reading — and **a CSI that BRACKETS a field satisfies that
+  test**, which is precisely what a colouring tool emits. So `RESULT: <CSI>PASS<CSI>` normalised
+  into `PASS` with the escape flag at **ZERO** and reached `PREMERGE: OK`: a line the declared
+  producer cannot emit, whose RAW token is not `PASS`, certifying a merge. **The class was
+  "compared the NORMALISED form", not one token** — all EIGHT fields of the verdict line had the
+  same hole, and so did the stage record's `head-sha:`, where a bracketed splice BOUND a stage to a
+  tree whose record carries no such sha in raw bytes. The two readers of `review-stage.sh`'s own
+  artifacts therefore ask an **IDENTITY** instead: the parsed line must be BYTE-IDENTICAL to the
+  line on disk minus the one trailing CR, so either it is refused or **every mandatory field IS the
+  raw field** and the closed grammar compares bytes nobody transformed — for all fields at once,
+  rather than being re-argued per field. That also closes a shape NO join test could reach: an ESC
+  forming no CSI at all (a bare `\033`, `\033(B`) is deleted by NEITHER reading, so the two agreed
+  while the token still carried an escape. The GATE summary KEEPS the **value-only join** form,
+  because a coloured capture is documented-legitimate input there and real colouring brackets the
+  KEY as readily as the value (`<ESC>[32mRESULT<ESC>[0m:`), which the identity form would red on.
+  Two rules for elsewhere: **state per reader which reads may NORMALISE (to locate) and which may
+  not (to supply a value)**, beside the code; and when a guard's own comment names the case it does
+  not catch — U2's did, calling a bracketing CSI benign — **treat that sentence as an unfiled
+  finding, not as a rationale.** **And the
   trailing-CR strip is DELIBERATELY KEPT by the same rule**: `\r$` removes one byte where nothing
   follows, so it can separate but never join — `PASS<CR>` is the token plus separator whitespace,
   exactly as `PASS<TAB>` and `PASS   ` are — and the sibling reader `classify_report` reads all

@@ -57,6 +57,37 @@ done by the diff's author.
    (`open c --issue <N> --agent spec-auditor --force`) and re-run the audit. That is deliberate: a C audit
    of an older tree may not certify a newer one, which is the gate-of-record rule applied to intent.
 
+### One new host precondition: `flock` (util-linux) must be on PATH
+
+Since round 21 (#3751, AA1) the two subcommands that PUBLISH a stage record — `open` and
+`record-author-performed` — hold a **per-stage lock** across their recheck-and-publish span, so a
+concurrent `open --force` can no longer slip a generation in between and leave the agent you just
+spawned holding a report nothing reads. `flock` is **required, not attempted**, on the same terms as
+`mv -T`: a box without it gets `reason=stage-lock-unavailable` before anything is written, never a
+silent unlocked publish. Every fleet box has it; if yours does not, fix the box.
+
+Two refusals to recognise, neither of which is a defect in your work:
+
+- `reason=stage-lock-timeout` — another `review-stage.sh` publisher for THIS stage held the lock for the
+  whole bounded wait. The lock is held only across a re-verification and one rename, so this means a live
+  publisher is hung: find it and re-run **once**, not in a loop. A DEAD holder releases automatically, so
+  a leftover `.review-stage/issue-<N>/<kind>.stage.lock` file never wedges anything — leave it in place.
+- `reason=stage-lock-unavailable` — the box, as above.
+
+`verdict` and `status` take **no lock**, so a read can never be blocked by a publisher. And if your
+repository ignores this tool's files by EXTENSION rather than by directory, cover `*.stage.lock` too —
+the shipped `.gitignore` ignores `.review-stage/` as a directory, so this never fires here.
+
+### One new refusal on captured verdicts: no ANSI escapes, anywhere on the line
+
+Round 21 (AA2) also made every mandatory field of a captured `--c-verdict` line — and of the stage
+record — compared **RAW**. Any ANSI escape anywhere on that line is refused by name, **including colour
+that merely BRACKETS a value**, which is what a colouring tool emits. Previously such a line normalised
+into a clean `PASS` and certified a merge. `review-stage.sh` emits no colour, so an escape here means the
+line came from a coloured terminal log: **re-capture it by redirecting the command**
+(`review-stage.sh verdict c --issue <N> > <path>`), never by copying from a scrollback. A coloured GATE
+SUMMARY is still fine — that reader is deliberately looser (#3400).
+
 ### If you hit something else
 
 `review-stage.sh --help` and `premerge-assert.sh --help` are authoritative and live in the same file as

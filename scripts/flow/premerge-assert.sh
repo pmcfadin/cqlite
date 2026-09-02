@@ -79,6 +79,18 @@
 # block was recovered from a coloured CAPTURE rather than from the summary file
 # (#3400: colour survives redirection).
 #
+# WHICH READS MAY NORMALISE, PER READER (#3751 round 15 U2, round 21 AA2). The rule
+# is: a read may normalise TO LOCATE a line, and may never normalise TO SUPPLY A
+# VALUE. The GATE SUMMARY reader keeps the looser VALUE-ONLY form of it, because a
+# coloured gate capture is documented-legitimate input and real colouring brackets
+# the KEY as readily as the value. The two readers of `review-stage.sh`'s own
+# artifacts — the `--c-verdict` line and the stage record — are STRICT: the parsed
+# line must be BYTE-IDENTICAL to the line on disk minus one trailing CR, because
+# those artifacts have ONE producer and it emits no control byte at all. Round 15
+# asked that strictness as a field-membership JOIN test, which a CSI BRACKETING a
+# field satisfies, so `RESULT: <CSI>PASS<CSI>` normalised into `PASS` and certified
+# a merge; it is an IDENTITY now, so every mandatory field is compared RAW.
+#
 # TWO RESIDUALS, STATED RATHER THAN FAKED
 # ---------------------------------------
 #  1. `run-id:` CANNOT be verified here. The #2874 reader contract says a reader

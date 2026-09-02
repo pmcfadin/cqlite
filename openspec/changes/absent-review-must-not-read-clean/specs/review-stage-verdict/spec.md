@@ -827,3 +827,88 @@ for itself.
   observation it did not take, several means two observations
 - **AND** the guard SHALL declare what it does not cover on every run, and SHALL REFUSE a subject
   for which no primitive is declared rather than reporting it clean
+
+### Requirement: Every PUBLISHER of a stage record SHALL hold a per-stage lock across its recheck-and-publish span
+
+`record-author-performed` re-verifies the stage record and then publishes its replacement with a
+separate rename. A concurrent `open --force` landing between those two acts publishes a new
+generation, after which the recording overwrites it while recording that it superseded the
+generation before that one — an ORPHANED report handed to the peer's freshly spawned agent, and an
+audit trail naming the WRONG predecessor. A falsified trail is a worse outcome than a missing one.
+
+#### Scenario: a peer publisher cannot publish inside the recheck-and-publish span
+- **WHEN** an `open --force` is driven deterministically into the span between
+  `record-author-performed`'s final re-verification and its publication
+- **THEN** the peer SHALL NOT publish a generation there: it SHALL WAIT, and if a live holder holds
+  the lock for the whole bounded wait it SHALL be REFUSED by name (`reason=stage-lock-timeout`)
+- **AND** NO generation SHALL exist on disk that no stage record ever named
+- **AND** the recording's `supersedes-report-nonce:` SHALL name the generation the record actually
+  held at the instant of publication
+
+#### Scenario: the publisher set is DERIVED, and every member takes the lock
+- **WHEN** a structural census attributes every statement that commits the stage record to the
+  function it appears in
+- **THEN** every such publisher SHALL take the per-stage lock before it publishes, and the lock
+  SHALL have exactly ONE implementation
+- **AND** a publisher added later in a new subcommand SHALL therefore FAIL the census rather than
+  join the set unlocked
+
+#### Scenario: readers SHALL NOT take the lock
+- **WHEN** `verdict` or `status` runs while a publisher holds the lock
+- **THEN** it SHALL complete PROMPTLY and report the stage's verdict: a publisher SHALL NEVER block
+  a read
+- **AND** neither reader function SHALL contain a lock call, asserted structurally as well as
+  behaviourally
+- **AND** the coherent-observation requirement above SHALL continue to detect a record that moved
+  mid-read with no lock at all — that is what makes the lock-free read safe rather than merely fast
+
+#### Scenario: the locking tool is REQUIRED, never attempted
+- **WHEN** the publish runs on a host with no `flock` on PATH
+- **THEN** it SHALL be REFUSED by name (`reason=stage-lock-unavailable`) before anything is written,
+  and NO stage record SHALL be published
+- **AND** there SHALL be no unlocked fallback and no environment variable that widens, shortens or
+  disables the bounded wait
+
+#### Scenario: the lock file SHALL NOT dirty a running gate, and SHALL NOT be deleted
+- **WHEN** the lock is taken
+- **THEN** its path SHALL be verified gitignored and walked for symlinked components first, so a
+  file written mid-run cannot dirty a gate of record and two publishers of one stage cannot lock two
+  different objects
+- **AND** the lock file SHALL be left in place after the run: the lock lives on the open file
+  description and the kernel releases it when the holder exits, so a leftover file holds no lock,
+  while deleting it would let a peer holding the old inode and a newcomer creating a fresh one lock
+  different objects and both proceed
+
+### Requirement: A mandatory field SHALL be compared as the file holds it, never as a strip renders it
+
+An ANSI strip may LOCATE a line and may never SUPPLY a value. Measuring that as a field-membership
+JOIN test is insufficient: a CSI that BRACKETS a field — which is what a colouring tool emits —
+leaves that field a whole field of the separating reading, so `RESULT: <CSI>PASS<CSI>` normalised
+into `PASS` with the escape flag at zero and certified a merge.
+
+#### Scenario: a BRACKETED value is REFUSED in every mandatory field of the verdict line
+- **WHEN** any field of the captured verdict line — the anchor, the stage kind, the `RESULT:` key,
+  the verdict token, or `elapsed=`/`deadline=`/`agent=`/`report=` — is bracketed by a CSI pair
+- **THEN** the merge SHALL be REFUSED, naming the escape, and `PREMERGE: OK` SHALL NOT be reached
+- **AND** the reported diagnostic SHALL print the RAW line, so it does not assert a clean `PASS`
+  beside a refusal about an escape
+
+#### Scenario: a coloured ANCHOR is still LOCATED, then refused by name
+- **WHEN** the anchor of the verdict line is itself coloured
+- **THEN** the line SHALL still be FOUND — the refusal SHALL NOT report that the artifact holds no
+  verdict line — and SHALL then be refused naming the escape
+
+#### Scenario: the stage record is held to the same rule
+- **WHEN** the stage record's `head-sha:` or `report-nonce:` value is bracketed by a CSI pair
+- **THEN** the merge SHALL be REFUSED naming the escape, and a normalised sha SHALL NOT bind the
+  stage to a tree whose record does not name it in raw bytes
+
+#### Scenario: the controls — correct input still certifies
+- **WHEN** a clean verdict, or one transported through a CRLF channel, is presented
+- **THEN** it SHALL certify: a trailing CR SEPARATES and can never JOIN, so refusing it would be a
+  unilateral change to one of two readers of one shape
+- **AND** a coloured GATE SUMMARY (colour bracketing the key and the value) SHALL still parse and
+  still certify: the strictness SHALL be CONFINED to the readers whose artifacts have one producer
+  that emits no control byte
+- **AND** which reads may normalise (to locate) and which may not (to supply a value) SHALL be
+  STATED per reader, beside the code

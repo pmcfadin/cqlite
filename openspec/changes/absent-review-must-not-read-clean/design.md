@@ -285,7 +285,8 @@ replacement, so a verdict landing in that window was overwritten anyway — the 
 guard. The observation is therefore re-verified immediately before the rename, on the report's BYTES
 rather than its token (one `FINDINGS` replaced by another leaves the token equal), and any change refuses
 under `--force` too. Round 9 then DECLARED the remaining span — between the re-observation and the
-`rename(2)` inside one `mv` — as an irreducible residual: no compare-and-swap rename is reachable from a
+`rename(2)` inside one `mv` — as an irreducible residual (its RECORD half is closed in round 21, AA1
+below; what remains is the LATE-REVIEWER half, whose counterparty takes no lock): no compare-and-swap rename is reachable from a
 shell, and a lock cannot help because the counterparty is an arbitrary agent writing the report with its
 own tooling and taking no lock.
 
@@ -702,3 +703,70 @@ committed by the mechanism itself.
   `record-author-performed`'s second pair of record-read refusals — which had always been
   unreachable, because the observation refuses on both states earlier under the same reason token.
   Subtraction cannot introduce a false pass.
+
+## Round 21 (AA1) — two publishers of one stage must not interleave
+
+Round 15's U1 removed the DESTRUCTION and left the **record's own** publish window.
+`record-author-performed` re-verifies the stage record and then publishes its replacement with a
+**separate `mv`**; a concurrent `open --force` landing between them publishes generation **B**,
+after which the recording overwrites B's record with **C** while its `supersedes-report-nonce:`
+trace names **A**. Both consequences are this change's subject rather than side effects: the peer's
+freshly spawned agent is left writing into an **ORPHANED** report (no record names B, so nothing
+derives its path and its eventual `FINDINGS` is read by nothing), and the audit trail **names the
+wrong predecessor** — a *falsified* record, not a missing one.
+
+**The decision, and its scope, which is the whole justification.** A per-stage exclusive `flock` is
+held across each publisher's recheck-and-publish span. This change **rejected a lock twice** and
+both rulings stand: round 6 (K2) replaced a scanned generation with a random nonce *instead of*
+locking, because a nonce REMOVES that race; round 9/15 declined one for the late-reviewer window,
+because the counterparty there is **an arbitrary agent writing its report with its own tooling**,
+which takes no lock and cannot be made to. What differs here — the only thing that differs — is that
+**both parties are subcommands of this script**, so mutual exclusion between our own publishers is
+*available*. Generalised: *"we rejected a lock here" is a ruling about a COUNTERPARTY, not about
+locks*; re-ask it whenever the parties change.
+
+**Properties, because a lock is a new failure surface.** The publisher set is **derived** from the
+source (two statements commit the stage record; both take the lock, attributed to the function they
+appear in, so a publisher added later cannot join unlocked). `flock` is **required, not attempted** —
+its absence is `reason=stage-lock-unavailable` before anything is written, recorded as a host
+precondition on the same terms as `mv -T`. The wait is **bounded** (`reason=stage-lock-timeout`,
+with `flock -E 3` so a conflict is never reported as a broken `flock`). **Readers take no lock**, so
+a publisher can never block a read and W1's coherent observation continues to detect a mid-read
+change on its own. The lock file is gitignored (verified, on the record's bar) with its path walked
+for symlinked components first, and it is **never deleted**: an `flock` lock lives on the open file
+description, so the kernel drops it on exit — SIGKILL included — while deleting the file would let a
+peer holding the old inode and a newcomer creating a fresh one lock different objects and both
+proceed. That one fact answers two of round 6's three objections to `flock`; the third is the named
+refusal.
+
+**Why not a third re-verification.** A shell has no compare-and-swap rename, so any number of
+re-reads leaves a span before the rename. Rounds 9 and 15 each narrowed it and declared the
+remainder; narrowing it again would be the fourth carve in one place.
+
+## Round 21 (AA2) — a mandatory field is compared RAW, never normalised
+
+Round 15's U2 rule is right — *an ANSI strip may LOCATE a line and may never SUPPLY a value* — and
+its **measurement** was wrong. It asked the question as a field-membership JOIN test (each field of
+the CSI-deleted reading must survive as a whole field of a CSI-as-separator reading), and **a CSI
+that BRACKETS a field satisfies that test**, which is precisely what a colouring tool emits. U2's own
+comment said so and treated it as benign. Measured on the shipped parser: `RESULT: <CSI>PASS<CSI>`
+normalised into `PASS` with the escape flag at **zero** and reached `PREMERGE: OK` — a line the
+declared producer cannot emit, whose raw token is not `PASS`, certifying a merge.
+
+**The class is "compared the NORMALISED form", not one token.** Swept field by field, **all eight
+fields** of the verdict line certified when bracketed, and so did the stage record's `head-sha:`,
+where the splice bound a stage to a tree whose record carries no such sha in raw bytes. (A bracketed
+`report-nonce:` also got past this reader and was then caught by `review-stage.sh`'s own stricter
+nonce-shape reader — defence in depth paying out, and not a reason to leave this reader permissive.)
+
+**The fix is an IDENTITY, not a wider join test.** In both readers of `review-stage.sh`'s own
+artifacts the parsed line must be **byte-identical** to the line on disk minus the one trailing CR.
+Either the line is refused, or every mandatory field **is** the raw field and the closed grammar
+compares bytes nobody transformed — for all fields at once instead of per field. It also closes a
+shape no join test could reach: an ESC forming **no CSI at all** is deleted by neither reading, so
+the two agreed while the token still carried an escape. `_gate_awk` keeps the value-only join form,
+because a coloured gate summary is documented-legitimate input (#3400) and real colouring brackets
+the KEY as readily as the value, which the identity form would red on — so **which reads may
+normalise is now stated per reader, in the source of both scripts**. The trailing-CR tolerance is
+untouched: separate versus join is what makes it safe, and refusing it would be a unilateral change
+to one of two readers of one shape (§44g).

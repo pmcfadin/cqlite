@@ -267,10 +267,15 @@
 # overwrites the current verdict, FINDINGS included. A nonce makes that STRUCTURALLY IMPOSSIBLE
 # rather than serialised: two concurrent opens produce two nonces and two records, the record
 # written LAST is the published one (round 4, H1 — the record is the publication marker) and the
-# loser's agent writes where no reader looks. A LOCK would have been the worse answer — it
-# serialises a race a nonce removes, and adds a mechanism (a stale lock file, a box without
-# `flock`, a holder killed mid-open) to a script whose subject is not taking the permissive branch
-# when something cannot be measured. The scan, its 4096-attempt bound and its exhaustion refusal
+# loser's agent writes where no reader looks. A LOCK would have been the worse answer FOR THIS
+# QUESTION — it serialises a race a nonce removes, and adds a mechanism (a stale lock file, a box
+# without `flock`, a holder killed mid-open) to a script whose subject is not taking the permissive
+# branch when something cannot be measured. THAT RULING IS ABOUT SELECTING A NAME AND NOTHING ELSE,
+# and it STANDS: nothing in this script chooses a nonce by looking at what is on disk. A per-stage
+# lock DOES exist since round 21 (AA1), for a DIFFERENT question — mutual exclusion between this
+# tool's own two PUBLISHERS across a read-then-publish sequence, where the counterparty is our own
+# subcommand and so CAN be made to wait — and it answers each of the three mechanisms named above
+# rather than inheriting them; see `lock_stage`. The scan, its 4096-attempt bound and its exhaustion refusal
 # are DELETED: with nothing selected there is nothing to exhaust, and subtraction cannot introduce
 # a false PASS. `reopen-count:` remains as the human-readable audit number — it answers a
 # different question (how many spawns), and the nonce only has to be UNIQUE.
@@ -492,6 +497,16 @@
 #         authorizes replacing the verdict the operator READ, never one that arrives while the
 #         substitute is being prepared. The stage record is held to the same rule
 #         (`reason=stage-record-changed-mid-write`), because this call now rewrites it.
+#         AND THAT RE-VERIFICATION AND THE PUBLICATION ARE ONE SERIALISED SPAN (#3751 round 21,
+#         AA1): a re-check followed by a separate `mv` left a window in which a concurrent
+#         `open --force` published a fresh generation, after which this call overwrote it while
+#         its `supersedes-report-nonce:` trace named the generation BEFORE that one — an
+#         ORPHANED report handed to the peer's freshly spawned agent, plus a FALSIFIED trail.
+#         Both of this tool's PUBLISHERS (`open`, `record-author-performed`) now hold a
+#         per-stage `flock` across their recheck-and-publish span; a peer publisher WAITS, and
+#         a hung one is refused by name (`reason=stage-lock-timeout`). READERS TAKE NO LOCK, so
+#         `verdict`/`status` can never be blocked by a publisher. See `lock_stage` for why a
+#         lock is right for THIS window when rounds 6 and 9/15 rejected one for theirs.
 #         AND AN UNREADABLE PRIOR REPORT IS *UNKNOWN*, NOT *ABSENT* (#3751 round 13, S1):
 #         the guard branched on the TOKEN, where an unreadable report arrives as `NOT-RUN`,
 #         i.e. on the REPLACEABLE side, so a possibly-blocking verdict nobody could read was
@@ -520,6 +535,12 @@
 #   reports success. A host without `-T` gets a NAMED refusal from every write and writes nothing;
 #   there is deliberately no fallback, which would restore the defect exactly where it cannot be
 #   detected. The fleet is Linux, so the requirement costs nothing here.
+#   REQUIRES `flock` (util-linux) ON PATH (#3751 round 21, AA1) — a HOST PRECONDITION on the same
+#   terms as `mv -T`, and for the same reason: it is what serialises this tool's two PUBLISHERS
+#   across their recheck-and-publish span, and a silent unlocked fallback would restore the defect
+#   precisely on the hosts that cannot detect it. Its absence is `reason=stage-lock-unavailable`
+#   before anything is written. Only the two publishers need it; `verdict` and `status` take no
+#   lock at all, so a reader on a box without `flock` still works.
 #   `set -euo pipefail`, written to the same conventions as claim.sh. (NOT verified
 #   shellcheck-clean: shellcheck is not installed on this fleet's boxes and no gate component
 #   runs it, so the claim is not made.) All informative output is prefixed `REVIEW-STAGE:`;
@@ -1225,10 +1246,13 @@ nonce_is_valid() {
 # FINDINGS with PASS. NOTHING IS SELECTED HERE, so nothing races: two concurrent opens produce two
 # different nonces and two different records, the record written LAST is the published one (the
 # record is the publication marker — round 4, H1) and the loser's agent writes to a path no reader
-# derives. That is the J1 property with no lock, and a lock is the worse trade: it would SERIALISE
-# a race a nonce makes impossible, and `flock` is one more mechanism to get right (a stale lock
-# file, a box without flock, a holder killed mid-open) in a script whose whole subject is not
-# taking the permissive branch when something cannot be measured.
+# derives. That is the J1 property with no lock, and a lock is the worse trade HERE: it would
+# SERIALISE a race a nonce makes impossible, and `flock` is one more mechanism to get right (a
+# stale lock file, a box without flock, a holder killed mid-open) in a script whose whole subject is
+# not taking the permissive branch when something cannot be measured. Scoped: this is a ruling
+# about SELECTING A NAME. The per-stage publish lock added in round 21 (AA1) answers a different
+# question, with a counterparty that can be made to wait — see `lock_stage`, which also answers
+# each of those three mechanisms.
 #
 # THE RANDOMNESS COMES FROM `mktemp -u`'s X-substitution — the same source the temporary file name
 # already comes from (`prepare_write`), so this adds no dependency this script did not already
@@ -3856,15 +3880,29 @@ cmd_record_author_performed() {
   # `open --force` that published a new generation in the meantime would otherwise be silently
   # reverted by a rewrite of the bytes this process read before it.
   #
-  # THE REMAINING WINDOW IS DECLARED, AND ITS CONSEQUENCE IS NOT DESTRUCTION. The span between
-  # these reads and the `rename(2)` inside the single `mv` below is still one fork/exec wide, and
-  # there is still no compare-and-swap rename reachable from a shell (coreutils `mv` exposes
-  # neither `RENAME_EXCHANGE` nor `RENAME_NOREPLACE`). What lands in it is a verdict that gets
-  # SUPERSEDED rather than DESTROYED: it stays on disk in its own generation and `verdict` reports
-  # the published one. Round 9 declared this span as irreducible and accepted that a recorded
-  # review verdict could be LOST in it; that declaration is WITHDRAWN, because the harm was the
-  # overwrite and the overwrite is gone. The window itself is not closed, and no site may claim
-  # a lost verdict is still possible here.
+  # THE REMAINING WINDOW IS DECLARED, ITS CONSEQUENCE IS NOT DESTRUCTION, AND SINCE ROUND 21 (AA1)
+  # ITS ONLY OCCUPANT IS A LATE REVIEWER. The span between these reads and the `rename(2)` inside
+  # the single `mv` below is still one fork/exec wide, and there is still no compare-and-swap
+  # rename reachable from a shell (coreutils `mv` exposes neither `RENAME_EXCHANGE` nor
+  # `RENAME_NOREPLACE`).
+  #
+  # WHAT CHANGED IS WHO CAN BE IN IT. This whole sequence — both re-verifications and the
+  # publication — now runs under the per-stage publish lock taken above, so THIS TOOL'S OTHER
+  # PUBLISHER (`open`, with or without `--force`) can no longer land a fresh generation here.
+  # Before the lock it could, and the result was not a superseded verdict but a FALSIFIED one:
+  # the record was overwritten while the `supersedes-report-nonce:` trace named the generation
+  # BEFORE the one actually superseded, and the peer's freshly spawned agent was left holding an
+  # ORPHANED report no record names. See `lock_stage` for why a lock is the right answer for THIS
+  # window when rounds 6 and 9/15 rejected one for theirs.
+  #
+  # WHO REMAINS, AND WHY NO LOCK REACHES THEM: a LATE REVIEWER writing its report with its own
+  # tooling, which takes no lock and cannot be made to (round 9/15's ruling, unchanged). What
+  # lands in the window from that party is a verdict that gets SUPERSEDED rather than DESTROYED —
+  # it stays on disk in its own generation and `verdict` reports the published one. Round 9
+  # declared this span as irreducible and accepted that a recorded review verdict could be LOST in
+  # it; that declaration is WITHDRAWN, because the harm was the overwrite and the overwrite is
+  # gone. The window itself is not closed, and no site may claim a lost verdict is still possible
+  # here.
   local now_obs now_cls now_rec_obs
   now_obs="$(report_bytes "$STAGE_REPORT")"
   if [ "$now_obs" != "$prior_obs" ]; then

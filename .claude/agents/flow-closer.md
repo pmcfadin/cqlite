@@ -292,6 +292,15 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    substitute lands in a fresh generation and the stage record publishes it, so a verdict that
    arrives at any instant is still on disk in its own generation, named by
    `supersedes-report-nonce:` on the `RECORD-OK` line. Read it there before deciding anything.
+   **Two of this tool's subcommands PUBLISH, and they are now SERIALISED against each other (#3751
+   round 21):** `open` and `record-author-performed` each hold a per-stage lock across their
+   recheck-and-publish span, so a peer publisher WAITS rather than slipping a generation in between.
+   Two new refusals to recognise, and neither is a defect in your work: `reason=stage-lock-timeout`
+   means another `review-stage.sh` publisher for THIS stage held the lock for the whole bounded wait
+   — find it and re-run, and do not re-run in a loop; `reason=stage-lock-unavailable` means this box
+   has no `flock` on PATH, which is a broken box (fix the box, exactly as with a missing `mv -T`) and
+   never something to work around. `verdict` and `status` take NO lock, so a read can never be
+   blocked by a publisher — if a read hangs, it is not this.
 3. **Final roborev confirmation pass — this GATES arming auto-merge.** Because review-first
    already ran, this should converge to **clean-on-arrival**. Run the ONLY sanctioned
    invocation (#2964), with the certified tip **PUSHED** (the wrapper asserts it) and **BOTH**
@@ -443,7 +452,14 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    at `/tmp/work tree` no longer makes a correct verdict refuse. A path containing `=` is fine too
    (#3751 round 16): `report=` is the one field EXEMPT from the `=`->`~` map, so the value you are
    handed is the REAL path and you can open it — every OTHER field on the line still maps `=`, so a
-   hand-edited record cannot forge the pair you read.
+   hand-edited record cannot forge the pair you read. **And the capture must be the tool's own bytes,
+   not a terminal log (#3751 round 21):** every mandatory field of that line is compared RAW, so ANY
+   ANSI escape anywhere on it — including colour that merely BRACKETS a value, which is what a
+   colouring tool emits — is refused by name. `review-stage.sh` emits no colour, so an escape here
+   means the line came from a coloured capture; re-capture it by redirecting the command. The same
+   rule covers the stage record, so a coloured `head-sha:` can never normalise into a clean sha and
+   bind the stage to a tree the record does not name. A coloured GATE SUMMARY is still fine (#3400) —
+   that reader is deliberately looser, and only these two artifacts are held to the raw comparison.
    The third argument is **REQUIRED** (an optional one would leave the convention
    honour-system): it is the `AGENT_GATE_SUMMARY_FILE` you already hold from step 1's full
    gate. A `--lite` summary is never acceptable anywhere, and a `--delta` summary is never

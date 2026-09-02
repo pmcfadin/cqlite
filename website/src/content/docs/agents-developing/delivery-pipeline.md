@@ -912,6 +912,32 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   incremented. **The generalisable rule: when a check can only NARROW a window, ask whether the harm can
   be made UNEXPRESSIBLE instead — and never declare a residual whose victim is your own system's normal
   behaviour.**
+  **AND THE *RECORD*'s OWN PUBLISH WINDOW GETS A LOCK, BECAUSE ITS COUNTERPARTY *CAN* BE MADE TO WAIT
+  (#3751 round 21, AA1).** U1 removed the destruction and left this: `record-author-performed`
+  re-verifies the stage record and then publishes its replacement with a **separate `mv`**, so a
+  concurrent `open --force` landing between them publishes generation **B**, after which the recording
+  overwrites B's record with **C** while its `supersedes-report-nonce:` trace names **A**. The peer's
+  freshly spawned agent is then writing into an **orphaned** report — no record names B, so nothing
+  derives its path and its eventual `FINDINGS` is read by nothing — and the audit trail names the
+  **wrong predecessor**, a *falsified* record rather than a missing one. Measured with the interleave
+  planted at the last instant before publication: three generations on disk, one named by no record,
+  `RECORD-OK` at exit 0. **The scope of the fix is the whole justification.** This issue rejected a lock
+  twice and both rulings stand — round 6 replaced a scanned generation with a random nonce *instead of*
+  locking, because a nonce REMOVES that race; round 9/15 declined one for the late-reviewer window,
+  because the counterparty there is an arbitrary agent writing its report with its own tooling, which
+  takes no lock and **cannot be made to**. The only thing that differs here is that **both parties are
+  subcommands of the same script**, so mutual exclusion between our own publishers is available. Both
+  publishers take a per-stage `flock` (a **derived** census, so one added later cannot join unlocked);
+  **readers take none**, so a publisher can never block a read and the coherent observation still
+  detects a mid-read change on its own; `flock` is **required, not attempted**
+  (`reason=stage-lock-unavailable`, a host precondition on the same terms as `mv -T`); and the wait is
+  bounded (`reason=stage-lock-timeout`). The lock file is verified gitignored, its path walked for
+  symlinked components first, and **never deleted** — an `flock` lock lives on the open file
+  description, so the kernel drops it on exit and a leftover file holds no lock, while deleting it
+  would let a peer holding the old inode and a newcomer creating a fresh one lock different objects and
+  both proceed. **The transferable rule: "we rejected a lock here" is a ruling about a COUNTERPARTY,
+  not about locks** — re-ask it whenever the parties change, and record which party the earlier ruling
+  was about.
   **AND "COULD NOT READ IT" IS NOT "NOTHING IS RECORDED" (#3751 round 13, S1)**: round 12's
   single-observation classifier introduced an UNREADABLE state, and this guard branched on the
   TOKEN — where that state arrives as `NOT-RUN`, the REPLACEABLE side — so a report whose recorded
@@ -992,13 +1018,27 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   record does not name. **The strip is not gratuitous, so it was SPLIT rather than deleted** — it
   exists for #3400, colour survives redirection, and without it a coloured capture fails every
   marker anchor and reads as having no verdict line at all. Each reader now keeps **two readings**
-  of every line: one with each CSI **deleted**, to LOCATE and parse, and one with each CSI replaced
-  by a **single space**, for one question — *did the deletion JOIN two runs the file keeps apart?*
-  **The transferable rule is SEPARATE VERSUS JOIN**: colour that BRACKETS a token leaves it a whole
-  field of the second reading, while colour INSIDE one splits it, so the token the first reading
-  shows appears in the second nowhere. `review-stage.sh`'s own artifacts take the STRICT form (one
-  producer, no colour); the gate summary takes the VALUE-ONLY form, because a coloured capture is
-  legitimate there and real colouring brackets the KEY as readily as the value. **The trailing-CR
+  of every line: one with each CSI **deleted**, to LOCATE and parse, and a second one for one
+  question — *did the strip CHANGE this line?*
+  **The transferable rule is SEPARATE VERSUS JOIN**, and it settles which transforms can be safe at
+  all: `\r$` removes one byte where nothing follows and can only SEPARATE, while a CSI deletion
+  removes bytes from the MIDDLE and JOINS two runs the file keeps apart.
+  **Round 15 got the MEASUREMENT wrong, not the rule (#3751 round 21, AA2).** It asked the join
+  question as a FIELD-MEMBERSHIP test, and **colour that BRACKETS a field satisfies that test** —
+  which is exactly what a colouring tool emits. U2's own comment said so and read it as benign. It
+  was not: `RESULT: <CSI>PASS<CSI>` normalised into `PASS` with the escape flag at **zero** and
+  reached `PREMERGE: OK`. The class is *compared the NORMALISED form*, not one token: measured field
+  by field, **all eight fields** of the verdict line certified when bracketed, and so did the stage
+  record's `head-sha:`, binding a stage to a tree whose record carries no such sha in raw bytes. So
+  `review-stage.sh`'s own two artifacts are now held to an **IDENTITY** — the parsed line must be
+  byte-identical to the line on disk minus one trailing CR, so either it is refused or every
+  mandatory field IS the raw field — which also closes a shape no join test could reach (an ESC
+  forming no CSI at all is deleted by neither reading). The gate summary keeps the **value-only
+  join** form, because a coloured capture is legitimate there and real colouring brackets the KEY as
+  readily as the value, which the identity form would red on. Two rules: **state per reader which
+  reads may normalise (to locate) and which may not (to supply a value)**, beside the code; and when
+  a guard's own comment names the case it does not catch, **treat that sentence as an unfiled
+  finding, not as a rationale.** **The trailing-CR
   strip is deliberately KEPT by the same rule** — `\r$` removes one byte where nothing follows, so
   it can separate but never join — and **the reader differential is what decided it**: it FAILED on
   the ESC row (`classify_report` reported `unrecognised result token 'PA?[31mSS'` while the awk

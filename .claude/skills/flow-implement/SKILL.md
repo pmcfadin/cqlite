@@ -157,7 +157,13 @@ never gate stdout or review churn.
    ATOMICALLY RESERVED (`O_EXCL`, a fresh nonce on collision), so neither two concurrent `--force`
    calls nor a repeat of a HISTORICAL report can be handed one path — a nonce that was merely
    generated let an open overwrite an older report and republish its path to the agent still
-   holding it; and since round 10 the merge point REFUSES a verdict that names any
+   holding it; and since **round 21** `open` and `record-author-performed` hold a **per-stage lock**
+   across their recheck-and-publish span, so a re-open cannot slip a generation in between and leave
+   the agent you just spawned holding a report NOTHING reads — two new refusals to recognise:
+   `reason=stage-lock-timeout` (another `review-stage.sh` publisher for THIS stage held the lock for
+   the whole bounded wait — find it and re-run once, never in a loop) and
+   `reason=stage-lock-unavailable` (this box has no `flock`, which is a broken box to fix, not a
+   condition to work around). `verdict`/`status` take NO lock, so a READ can never be blocked; and since round 10 the merge point REFUSES a verdict that names any
    OTHER generation, so writing to a stale path now blocks the merge rather than merely wasting the
    round; and since round 16 the merge point RE-VALIDATES the whole C check immediately before
    arming the merge, so a `--force` landing while `premerge-assert.sh` runs REFUSES too), or read

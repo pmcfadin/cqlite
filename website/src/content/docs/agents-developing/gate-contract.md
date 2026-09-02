@@ -222,7 +222,18 @@ carry).
   VALUES are now checked against a second reading in which each CSI is a SEPARATOR rather than
   deleted, so colour that BRACKETS a value passes while colour INSIDE one is refused by name. The
   trailing-CR strip is kept deliberately: it removes one byte where nothing follows, so it can
-  separate but never join. Details:
+  separate but never join.
+  **THAT LOOSER FORM IS CORRECT *HERE* AND WAS WRONG FOR THE TWO REVIEW-STAGE READERS (#3751 round
+  21, AA2).** A bracketing CSI satisfies the field-membership test by construction, so
+  `RESULT: <CSI>PASS<CSI>` in a `--c-verdict` artifact — and a bracketed `head-sha:` in a stage
+  record — normalised into a clean value with the escape flag at ZERO and reached `PREMERGE: OK`;
+  measured field by field, all eight fields of the verdict line had the same hole. Those two artifacts
+  have ONE producer that emits no control byte, so they are now held to an **identity**: the parsed
+  line must be byte-identical to the line on disk minus one trailing CR, and every mandatory field is
+  compared RAW. The GATE SUMMARY reader is deliberately NOT strictened — a coloured gate capture is
+  documented-legitimate input, and colour brackets the KEY as readily as the value, so the identity
+  form would red on correct input. **Which reads may normalise is therefore stated PER READER, in the
+  source**, and a reader added later has to say which side it is on. Details:
   [delivery pipeline](/cqlite/agents-developing/delivery-pipeline/).
   **What a `PREMERGE: OK` does NOT prove (#3650), printed on the success path as `PREMERGE: SCOPE`.**
   It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.
