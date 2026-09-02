@@ -5649,10 +5649,14 @@ else
     echo 'SCC_SELFRUN_WHY=""'
     printf '%s\n' "$scc415_ok_fn"
     printf '%s\n' "$scc415_run_fn"
+    # STDOUT GOES TO A FILE, NOT A COMMAND SUBSTITUTION. `out=$(scc_selfrun …)` runs the
+    # function in a SUBSHELL, so SCC_SELFRUN_WHY set inside it is lost and every refusal reads
+    # as an empty reason — measured here first, and it is the very trap section 2's caller
+    # documents. A harness that cannot see the reason cannot assert on it.
     cat <<'HEOF'
 r=0
-out=$(scc_selfrun "$1" "$2" --version 2>/dev/null) || r=$?
-printf 'rc=%s|out=%s|why=%s\n' "$r" "$out" "${SCC_SELFRUN_WHY:-}"
+scc_selfrun "$1" "$2" --version >"$3" 2>/dev/null || r=$?
+printf 'rc=%s|out=%s|why=%s\n' "$r" "$(head -1 "$3" 2>/dev/null)" "${SCC_SELFRUN_WHY:-}"
 HEOF
   } >"$scc415_h"
   scc415_mark="$tmp/scc415-exec-marker"
@@ -5662,7 +5666,11 @@ HEOF
     echo 'echo "sccache 9.9.9 (test stub)"'
   } >"$scc415_stub"
   chmod +x "$scc415_stub"
-  scc415_selfrun() { rm -f "$scc415_mark"; SCC415_MARK="$scc415_mark" bash "$scc415_h" "$1" "$scc415_stub"; }
+  scc415_out="$tmp/scc415-selfrun.out"
+  scc415_selfrun() {
+    rm -f "$scc415_mark"
+    SCC415_MARK="$scc415_mark" bash "$scc415_h" "$1" "$scc415_stub" "$scc415_out"
+  }
 
   # NON-ROOT: it MUST run, or every box that is not root silently loses the version line.
   scc415_r=$(scc415_selfrun 1000)
