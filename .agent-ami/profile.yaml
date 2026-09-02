@@ -64,13 +64,10 @@ env:
   # /etc/environment — so the fleet-effective cap was sccache's own 10 GiB DEFAULT on boxes
   # provisioned to hold 50G, and no artifact said so. The persistence that makes it
   # real is `--fix-sccache-cap` in verify.run below, which writes /etc/environment (read by PAM at
-  # session creation) and then VERIFIES it by correlating THREE MEASUREMENTS: the line in that file,
-  # the BYTES sccache resolves the value to (asked of an isolated sccache), and the BYTES the
-  # running server enforces. It probes NO session, so it establishes nothing about what a gate's
-  # own session sees — that claim belongs to #3946 (lead ruling req-3727-w4 removed the session
-  # half). What it does establish is the fact this file's own value depends on: the sccache SERVER
-  # reads the cap at STARTUP, so a server already up keeps its old cap until
-  # `sccache --stop-server`.
+  # session creation) and then VERIFIES the value against a fresh session AND the running sccache
+  # server. Presence in a config file and visibility to the process that reads it are different
+  # facts (#3414), and here there is a third: the sccache SERVER reads this at STARTUP, so a
+  # server already up keeps its old cap until `sccache --stop-server`.
   #
   # THE SPELLING IS PART OF THE VALUE. sccache accepts `<digits>[KkMmGgTt]` (binary multipliers)
   # and SILENTLY DISCARDS anything else — measured, `30GiB` and `30GB` both yield the 10 GiB
@@ -111,17 +108,14 @@ verify:
   # boundary --yes would have crossed. The write is idempotent and NEVER rewrites an existing
   # value, and the verdict still comes from probing a fresh session, so a box that cannot be
   # pinned (no passwordless sudo) stays non-passing and --strict still exits 1.
-  # (That sentence is about --fix-gate-pin, #3414, which DOES probe a session. --fix-sccache-cap
-  # below does not — see its own note.)
   # --fix-sccache-cap (issue #3727) is the THIRD narrow repair, added for the same reason and in
   # the same shape as --fix-credentials and --fix-gate-pin above: the env block's
   # SCCACHE_CACHE_SIZE reaches launcher-created processes only, so without this flag every new
   # instance arrives with an UNPERSISTED cap and its sccache server enforces the 10 GiB default.
   # Persisting an env line is not a toolchain install, so verify stays a verification step. The
-  # write is idempotent and NEVER rewrites an existing value, and the verdict comes from the FILE,
-  # the value->bytes oracle and the RUNNING server — no session probe — so a box whose file cannot
-  # be written, or whose running server enforces something else, stays non-passing and --strict
-  # still exits 1.
+  # write is idempotent and NEVER rewrites an existing value, and the verdict still comes from
+  # probing a fresh session AND the running server, so a box that cannot be capped stays
+  # non-passing and --strict still exits 1.
   run: "bash scripts/bootstrap-agent-machine.sh --fix-credentials --fix-gate-pin --fix-sccache-cap --strict"
   expect: "All checks green."
 hooks:
