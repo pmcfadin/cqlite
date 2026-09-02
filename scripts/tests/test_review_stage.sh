@@ -3236,6 +3236,241 @@ else
   bad "r1/lifetime: the refused open leaked $(ls -A "$R1F/.review-stage/issue-824" 2>/dev/null)"
 fi
 
+
+# --- 24. THE VERDICT MUST DESCRIBE A STATE THAT EXISTED (round 12, R2) -------------
+# THE FINDING (roborev job 386, R2). `classify_report` read the report EIGHT times — existence, a
+# readability probe, the body for emptiness, the `result:` census, the disclosure, then
+# `performed-by`, `reason` and `evidence` each through their own `read_field` — so a report
+# REPLACED between two of those reads let the classifier combine fields drawn from DIFFERENT,
+# INDIVIDUALLY INVALID versions and emit `AUTHOR-PERFORMED` even though NO SINGLE SNAPSHOT of the
+# file ever contained valid working. A verdict is a statement about a document; assembled from two
+# documents it is a statement about neither.
+#
+# THE FIX IS ONE OBSERVATION, which is round 9's N2 property (`premerge-assert.sh` reads the stage
+# record once and parses every field from that capture) applied one level down to the REPORT.
+#
+# IT IS A SIMULATED INTERLEAVE, NOT A RACE. Nothing below is concurrent: one line injected into a
+# SCRATCH COPY of the shipped script swaps the file at a NAMED field read, so the ordering is
+# deterministic, the case cannot flake, and it makes no claim about timing. The ARTIFACT is
+# substituted — there is no settable seam in the shipped script (#3312's corollary for tests).
+R2_D="$T/r2"; mkdir -p "$R2_D"
+# The injected line fires for ONE field key, chosen per case through the environment of the SCRATCH
+# copy. `awk -v` performs escape processing on its value (round 7's measured harness defect), so
+# both the anchor and the replacement travel through ENVIRON.
+#
+# THE ANCHOR IS THE FIELD-GRAMMAR ENTRY (`key="$2"`, FIRST occurrence), which is deliberately the
+# ONE line present in BOTH the pre-fix and post-fix scripts — pre-fix that is `read_field`, which
+# re-read the FILE per field, and post-fix it is `read_field_from`, which reads the caller's
+# SNAPSHOT. So the same plant lands either way and the difference it produces is the property: the
+# swap changes the file, and after the fix the file is not what the fields come from.
+r2_build() {
+  local dest="$1"
+  R2_ANCHOR='key="$2"' \
+  R2_INJ='  if [ "$key" = "${R2_SWAP_KEY:-}" ] && [ -n "${R2_SWAP_SRC:-}" ] && [ -n "${R2_SWAP_DST:-}" ]; then cp -f "$R2_SWAP_SRC" "$R2_SWAP_DST" 2>/dev/null || true; fi # R2_INTERLEAVE' \
+  LC_ALL=C awk '
+    BEGIN { a = ENVIRON["R2_ANCHOR"]; inj = ENVIRON["R2_INJ"]; done = 0 }
+    { print }
+    index($0, a) > 0 && done == 0 { print inj; done = 1 }
+  ' "$RS" >"$dest" 2>/dev/null || return 1
+  [ -s "$dest" ] || return 1
+  LC_ALL=C grep -q 'R2_INTERLEAVE' "$dest" || return 1
+  bash -n "$dest" 2>/dev/null || return 1
+  return 0
+}
+R2_PROG="$R2_D/interleave.sh"
+if r2_build "$R2_PROG"; then
+  ok "r2: the interleave plant landed in the scratch copy (asserted, not assumed)"
+else
+  bad "r2: the interleave plant did NOT land, so the assertions below would be vacuous"
+fi
+R2_GOOD_REASON='no peer agent available on this box; hand C against the spec deltas'
+R2_GOOD_EV='docs/round-artifacts/issue-3751-hand-c.md'
+# The disclosure VERBATIM. A literal here rather than a read of the shipped script: the classifier
+# must require the exact sentence, and a fixture derived from the artifact under test would agree
+# with it however that sentence changed (an oracle sharing a source with its subject).
+R2_DISCLOSURE="an author's hand audit is not an independent one; weight it accordingly"
+
+# THE TWO VERSIONS. Each carries the verbatim disclosure and a column-zero `result:` line, and each
+# is INDIVIDUALLY INVALID — which is asserted below, not assumed, because a refusal that came from
+# a broken fixture would prove nothing.
+R2_VA="$R2_D/version-a.md"
+{
+  printf 'result: AUTHOR-PERFORMED\n\n'
+  printf 'performed-by: author\n'
+  printf 'reason: %s\n' "$R2_GOOD_REASON"
+  printf 'evidence: tbd\n\n'
+  printf '%s\n' "$R2_DISCLOSURE"
+} >"$R2_VA"
+R2_VB="$R2_D/version-b.md"
+{
+  printf 'result: AUTHOR-PERFORMED\n\n'
+  printf 'performed-by: author\n'
+  printf 'reason: x\n'
+  printf 'evidence: %s\n\n' "$R2_GOOD_EV"
+  printf '%s\n' "$R2_DISCLOSURE"
+} >"$R2_VB"
+# A THIRD version, for case (b): it records a NON-VERDICT and carries usable working, so the token
+# and the working provably come from different documents.
+R2_VC="$R2_D/version-c.md"
+{
+  printf 'result: NOT-RUN (the auditor could not read the diff)\n\n'
+  printf 'performed-by: author\n'
+  printf 'reason: %s\n' "$R2_GOOD_REASON"
+  printf 'evidence: %s\n\n' "$R2_GOOD_EV"
+  printf '%s\n' "$R2_DISCLOSURE"
+} >"$R2_VC"
+
+# r2_alone <version-file> <issue> <label> — the SHIPPED script's verdict for ONE version, standing
+# alone. This is the premise of every interleave case: if a version alone already reached the
+# merge-proceeding token, the interleave would be measuring nothing.
+r2_alone() {
+  local ver="$1" issue="$2" label="$3" repo rep
+  repo="$(newrepo)"
+  rs "$repo" open c --issue "$issue" --agent spec-auditor
+  rep="$(printed_report_path)"
+  cp -f "$ver" "$rep"
+  rs "$repo" verdict c --issue "$issue"
+  if [ "$RC" -ne 6 ]; then
+    ok "r2/premise: $label ALONE does not reach AUTHOR-PERFORMED (rc=$RC)"
+  else
+    bad "r2/premise: $label ALONE already reaches AUTHOR-PERFORMED, so the interleave case proves nothing"
+  fi
+}
+r2_alone "$R2_VA" 830 "version A (good reason, placeholder evidence)"
+r2_alone "$R2_VB" 831 "version B (placeholder reason, good evidence)"
+r2_alone "$R2_VC" 832 "version C (a recorded NON-VERDICT with usable working)"
+
+# (a) THE WORKING ASSEMBLED FROM TWO VERSIONS. A is installed; the swap to B fires at the
+#     `evidence` read, so `performed-by` and `reason` come from A and `evidence` from B — a
+#     complete set of valid working that NO SINGLE SNAPSHOT ever held.
+R2A="$(newrepo)"
+rs "$R2A" open c --issue 833 --agent spec-auditor
+rc_is 0 "r2/assembled: the stage opens"
+R2A_REP="$(printed_report_path)"
+cp -f "$R2_VA" "$R2A_REP"
+OUT="$(cd "$R2A" && R2_SWAP_KEY=evidence R2_SWAP_SRC="$R2_VB" R2_SWAP_DST="$R2A_REP" \
+  bash "$R2_PROG" verdict c --issue 833 2>&1)"; RC=$?
+if [ "$RC" -ne 6 ]; then
+  ok "r2/assembled: a verdict is NOT assembled from fields of two different versions (rc=$RC)"
+else
+  bad "r2/assembled: AUTHOR-PERFORMED was reported from working no single snapshot held (out: $OUT)"
+fi
+hasnt "RESULT: AUTHOR-PERFORMED" "r2/assembled: the merge-proceeding token is not reported"
+has "AUTHOR-PERFORMED" "r2/assembled: and the cause still NAMES the token the report asserted, so the operator knows which field to fix"
+
+# (b) THE TOKEN AND THE WORKING FROM DIFFERENT DOCUMENTS. A is installed (AUTHOR-PERFORMED with
+#     unusable working); the swap to C fires at the FIRST field read, so the token and the
+#     disclosure come from A and every field from C — a document that recorded a NON-VERDICT.
+R2B="$(newrepo)"
+rs "$R2B" open c --issue 834 --agent spec-auditor
+rc_is 0 "r2/two-documents: the stage opens"
+R2B_REP="$(printed_report_path)"
+cp -f "$R2_VA" "$R2B_REP"
+OUT="$(cd "$R2B" && R2_SWAP_KEY=performed-by R2_SWAP_SRC="$R2_VC" R2_SWAP_DST="$R2B_REP" \
+  bash "$R2_PROG" verdict c --issue 834 2>&1)"; RC=$?
+if [ "$RC" -ne 6 ]; then
+  ok "r2/two-documents: a token read from one version is not validated by another version's working (rc=$RC)"
+else
+  bad "r2/two-documents: AUTHOR-PERFORMED was reported for a document that recorded a NON-VERDICT (out: $OUT)"
+fi
+hasnt "RESULT: AUTHOR-PERFORMED" "r2/two-documents: the merge-proceeding token is not reported"
+
+# (c) CONTROL — THE SAME SCRATCH MACHINERY, NO SWAP, STILL REACHES THE TOKEN. Without this, (a)
+#     and (b) are satisfiable by a scratch copy that is simply broken, or by a classifier that
+#     refuses every AUTHOR-PERFORMED report.
+R2_VALID="$R2_D/version-valid.md"
+{
+  printf 'result: AUTHOR-PERFORMED\n\n'
+  printf 'performed-by: author\n'
+  printf 'reason: %s\n' "$R2_GOOD_REASON"
+  printf 'evidence: %s\n\n' "$R2_GOOD_EV"
+  printf '%s\n' "$R2_DISCLOSURE"
+} >"$R2_VALID"
+R2C="$(newrepo)"
+rs "$R2C" open c --issue 835 --agent spec-auditor
+R2C_REP="$(printed_report_path)"
+cp -f "$R2_VALID" "$R2C_REP"
+OUT="$(cd "$R2C" && bash "$R2_PROG" verdict c --issue 835 2>&1)"; RC=$?
+rc_is 6 "r2/CONTROL: an UNDISTURBED valid substitute still reaches AUTHOR-PERFORMED through the scratch copy"
+has "RESULT: AUTHOR-PERFORMED" "r2/CONTROL: the token really is reachable, so the refusals above are about the interleave"
+# AND THROUGH THE SHIPPED SCRIPT, so the single-observation read did not red a correct report.
+R2S="$(newrepo)"
+rs "$R2S" open c --issue 836 --agent spec-auditor
+cp -f "$R2_VALID" "$(printed_report_path)"
+rs "$R2S" verdict c --issue 836
+rc_is 6 "r2/CONTROL: and the SHIPPED script reads the same valid substitute as AUTHOR-PERFORMED"
+
+# (d) EVERY OTHER CAUSE STILL COMES FROM THE ONE SNAPSHOT — the reads that were CONSOLIDATED, not
+#     just the AUTHOR-PERFORMED ones. Each is asserted through the SHIPPED script, because
+#     replacing eight reads with one is exactly the change that could silently move a cause.
+R2E="$(newrepo)"
+rs "$R2E" open c --issue 837 --agent spec-auditor
+R2E_REP="$(printed_report_path)"
+rm -f "$R2E_REP"
+rs "$R2E" verdict c --issue 837
+rc_is 5 "r2/causes: a deleted report is still NOT-RUN"
+has "report absent" "r2/causes: and still names 'report absent', not a state derived from an empty read"
+printf '   \n\n\t\n' >"$R2E_REP"
+rs "$R2E" verdict c --issue 837
+has "report empty" "r2/causes: a whitespace-only report is still 'report empty'"
+printf 'no verdict line here at all\n' >"$R2E_REP"
+rs "$R2E" verdict c --issue 837
+has "no 'result:' line" "r2/causes: a report with no record still names the missing line"
+printf 'result: PASS\nresult: FINDINGS\n' >"$R2E_REP"
+rs "$R2E" verdict c --issue 837
+has "2 column-zero 'result:' lines" "r2/causes: two records are still AMBIGUOUS, counted from the snapshot"
+printf 'result: PASS\n\nreviewed.\n' >"$R2E_REP"
+rs "$R2E" verdict c --issue 837
+rc_is 0 "r2/causes: and a real PASS is still a PASS (the positive control for the consolidated read)"
+
+# (e) STRUCTURAL — ONE READ, PINNED. A behavioural case cannot see that the classifier reads the
+#     file once; a refactor that reintroduced a second read would pass (a) and (b) as long as the
+#     new read happened to sit outside the swap point.
+R2_BODY="$(LC_ALL=C sed -n '/^classify_report() {$/,/^}$/p' "$RS")"
+if [ -n "$R2_BODY" ]; then
+  ok "r2/structural: the classifier was located in the shipped script"
+else
+  bad "r2/structural: could not locate classify_report() — the assertions below would be vacuous"
+fi
+R2_NRP="$(printf '%s\n' "$R2_BODY" | LC_ALL=C grep -o '"\$rpath"' | LC_ALL=C grep -c . || true)"
+if [ "$R2_NRP" = "1" ]; then
+  ok "r2/structural: the report path is used EXACTLY ONCE in the classifier — one observation, by construction"
+else
+  bad "r2/structural: the classifier names \$rpath $R2_NRP time(s); every use after the first is a second observation the verdict can be assembled across"
+fi
+case "$R2_BODY" in
+  *'report_bytes "$rpath"'*) ok "r2/structural: and that one use is the shared single-observation helper, not a private read" ;;
+  *) bad "r2/structural: the classifier does not take its observation through report_bytes, so two readers of the report state can form two opinions" ;;
+esac
+case "$R2_BODY" in
+  *'read_field "$rpath"'* | *'<"$rpath"'* | *'-- "$rpath"'*)
+    bad "r2/structural: the classifier still reads the file directly for a field" ;;
+  *) ok "r2/structural: no field is read from the file a second time" ;;
+esac
+# THE FIELD GRAMMAR IS ONE IMPLEMENTATION. A snapshot reader written beside the file reader would
+# be a SECOND implementation of `<key>: <value>`, and a second implementation's agreement is only
+# knowable by testing it — so `read_field` delegates to the text reader rather than duplicating it.
+R2_RF="$(LC_ALL=C sed -n '/^read_field() {$/,/^}$/p' "$RS")"
+case "$R2_RF" in
+  *'read_field_from'*) ok "r2/structural: read_field delegates to the ONE field-grammar implementation" ;;
+  *) bad "r2/structural: read_field carries its own copy of the field grammar, so the file and snapshot readers can drift" ;;
+esac
+# AND THE ONE DOWNSTREAM CONSUMER SHARES THE SNAPSHOT. `record-author-performed` takes a byte
+# observation to guard its write (round 9, N1) and a verdict to decide whether it may replace what
+# is there; read separately those are two observations, so the token guarding the write could
+# classify a state the guarded bytes never held. Both call sites are pinned, including the refusal
+# path's diagnostic — a re-read there would name a THIRD state and "what arrived" would be a claim
+# about none of them.
+if LC_ALL=C grep -q 'classify_report "\$STAGE_REPORT" 1 "" "\$prior_obs"' "$RS"; then
+  ok "r2/structural: the write guard's bytes and its verdict are ONE observation"
+else
+  bad "r2/structural: record-author-performed classifies by a SECOND read, so its verdict need not describe the bytes it guards ($(LC_ALL=C grep -n 'classify_report "\$STAGE_REPORT"' "$RS" | LC_ALL=C tr '\n' ' '))"
+fi
+if LC_ALL=C grep -q 'classify_report "\$STAGE_REPORT" 1 "" "\$now_obs"' "$RS"; then
+  ok "r2/structural: and the refusal diagnostic names the state that FAILED the comparison, not a third one"
+else
+  bad "r2/structural: the refusal diagnostic re-reads the report, so it can name a state neither observation held"
+fi
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
 # which is this issue's own subject inside a test file.
@@ -3441,7 +3676,27 @@ fi
 # name is registered inside the reservation, reaped by the SAME single `trap`, de-registered on
 # fulfilment, and a reserve-then-refuse open leaves the stage directory EMPTY. Every assertion is
 # unconditional — each `if`/`case` calls exactly one of `ok`/`bad` — so the EXACT floor holds.
-ASSERT_FLOOR=663
+#
+# ROUND 12's R2 MOVES IT TO 690. Section 24 adds 27: a verdict must describe a state that existed.
+# `classify_report` read its subject EIGHT times (existence, a readability probe, the body for
+# emptiness, the `result:` census, the disclosure, then `performed-by`, `reason` and `evidence` each
+# through their own `read_field`), so a report replaced between two of those reads let it assemble
+# `AUTHOR-PERFORMED` out of fields drawn from DIFFERENT, INDIVIDUALLY INVALID versions — working no
+# single snapshot ever held. The interleave is SIMULATED, not raced: one line injected into a
+# SCRATCH COPY swaps the file at a NAMED field read, and the anchor is deliberately the ONE line
+# present in BOTH the pre-fix and post-fix scripts (the field-grammar entry `key="$2"`, which was
+# `read_field` re-reading the FILE and is now `read_field_from` reading the caller's SNAPSHOT), so
+# the same plant lands either way. Three PREMISE assertions measure that each version alone does
+# NOT reach the token (a refusal from a broken fixture would prove nothing), two interleave cases
+# cover working assembled across versions and a token validated by another document's working,
+# three CONTROLS (the scratch machinery with no swap, and the SHIPPED script, still reach
+# AUTHOR-PERFORMED), six CAUSE assertions re-pin every consolidated read (absent / empty /
+# no record / two records / a real PASS), and seven STRUCTURAL pins: the report path is named
+# EXACTLY ONCE in the classifier, that use is the shared `report_bytes` helper, no field is re-read
+# from the file, `read_field` delegates to the ONE field grammar, and the downstream consumer
+# (`record-author-performed`) shares the snapshot at both its call sites. Every assertion is
+# unconditional.
+ASSERT_FLOOR=690
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

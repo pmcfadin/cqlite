@@ -660,6 +660,19 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   of adversarial inputs (indented, several, zero, CRLF, a token with trailing junk, a `result:`
   inside a fenced block, a glob-ish value), asserting they agree per row AND that both reach the
   EXPECTED disposition — agreement alone is satisfiable by both being wrong in the same way.
+  **AND THE WHOLE REPORT IS READ EXACTLY ONCE PER VERDICT (round 12, R2):** `classify_report` read
+  its subject EIGHT times — existence, a readability probe, the body for emptiness, the `result:`
+  census, the disclosure, and `performed-by`/`reason`/`evidence` each through their own field read
+  — so a report REPLACED between two of those reads let it assemble `AUTHOR-PERFORMED` from fields
+  drawn from DIFFERENT, INDIVIDUALLY INVALID versions (one version's usable `reason` beside
+  another's usable `evidence`), i.e. working **no single snapshot ever contained**. A verdict is a
+  statement about a document; assembled across two documents it is a statement about neither. One
+  observation now feeds every field, the `<key>: <value>` grammar has ONE implementation shared by
+  the snapshot and file readers, an unclassifiable observation is a NON-VERDICT reported as
+  UNREADABLE (never ungrammatical — the bytes were not obtained, so nothing may be asserted about
+  content), and `record-author-performed` passes its OWN byte snapshot in so the bytes its write is
+  guarded on and the verdict it decides by are one instant. That is round 9's N2 property one level
+  down.
   `status` reports
   elapsed/deadline and is **advisory, never a verdict input** — **which is not licence to answer from
   a comparison that never happened (round 8)**: bash's `[ -gt ]` is a FIXED-WIDTH int64 comparison,

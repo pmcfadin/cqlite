@@ -157,7 +157,23 @@ Three further declared limits of the mechanism itself:
   checked: `scripts/tests/test_premerge_assert.sh` §44g drives BOTH readers over ONE shared table
   of adversarial shapes and asserts they agree per row AND reach the EXPECTED disposition
   (agreement alone is satisfiable by both being wrong identically, which is the state the section
-  exists to detect). Judging whether the working is
+  exists to detect). **AND THE WHOLE REPORT IS READ EXACTLY ONCE PER VERDICT (round 12, R2).**
+  `classify_report` read its subject EIGHT times — existence, a readability probe, the body for
+  emptiness, the `result:` census, the disclosure, and `performed-by`/`reason`/`evidence` each
+  through their own `read_field` — so a report REPLACED between two of those reads let it assemble
+  `AUTHOR-PERFORMED` from fields drawn from DIFFERENT, INDIVIDUALLY INVALID versions: one version's
+  usable `reason` beside another's usable `evidence`, working **no single snapshot ever contained**
+  (measured). A verdict is a statement about a document; assembled across two documents it is a
+  statement about neither. It now takes ONE observation through `report_bytes` and classifies every
+  field from that text, with the `<key>: <value>` grammar in ONE implementation
+  (`read_field_from`, which the file-reading `read_field` delegates to — a second implementation's
+  agreement is only knowable by testing it), and an observation it cannot classify is a NON-VERDICT
+  reported as UNREADABLE rather than ungrammatical, because the bytes were never obtained and
+  nothing may be asserted about content that was not observed. `record-author-performed` PASSES ITS
+  OWN snapshot in, so the bytes its write is guarded on and the verdict it decides by are the same
+  instant — round 9's N1 argument was right about the guard and left this smaller hole in the
+  verdict. This is round 9's N2 property (`premerge-assert.sh` reads the stage record once and
+  parses every field from that capture) one level down. Judging whether the working is
   real is a human's job — and for the author-performed substitute, requiring the working to be
   recorded is the whole point.
 - **`status`'s `state=` is one value PER CAUSE (round 4, H4).** The per-cause contract exists

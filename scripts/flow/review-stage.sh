@@ -83,6 +83,18 @@
 # `premerge-assert.sh`, plus the DIFFERENTIAL test that keeps the two honest — is stated at
 # `classify_report` itself, beside the code the rule lives in.
 #
+# AND THE WHOLE REPORT IS READ EXACTLY ONCE PER VERDICT (#3751 round 12, R2). `classify_report`
+# used to read its subject EIGHT times — existence, a readability probe, the body for emptiness,
+# the `result:` census, the disclosure, and `performed-by`/`reason`/`evidence` each through their
+# own `read_field` — so a report REPLACED between two of those reads let it assemble
+# `AUTHOR-PERFORMED` from fields drawn from DIFFERENT, INDIVIDUALLY INVALID versions: working NO
+# SINGLE SNAPSHOT ever contained. A verdict is a statement about a document, and assembled across
+# two documents it is a statement about neither. It now takes ONE observation through
+# `report_bytes` and classifies every field from that text (`read_field_from`, the one field
+# grammar, which the file-reading `read_field` delegates to), and
+# `record-author-performed` PASSES ITS OWN snapshot in, so the bytes its write is guarded on and
+# the verdict it decides by are the same instant. This is round 9's N2 property one level down.
+#
 # `NOT-RUN` carries one of SEVEN named causes, because the operator action differs per cause
 # and one token for seven states is the collapse this issue is about:
 #   no report written          the stage is open and the report is still the sentinel
@@ -1233,15 +1245,42 @@ commit_write() {
   WRITE_TMP=""
 }
 
-# read_field <file> <key> — the FIRST `<key>: <value>` line's value, flattened to one line.
-# Empty output means "absent or empty", which every caller treats as unmeasured.
-read_field() {
-  local file="$1" key="$2" line
-  [ -f "$file" ] || return 0
-  line="$(LC_ALL=C grep -m1 -i "^[[:space:]]*${key}:" "$file" 2>/dev/null || true)"
+# read_field_from <text> <key> — THE ONE IMPLEMENTATION of the `<key>: <value>` field grammar
+# (#3751 round 12, R2): the FIRST such line's value, flattened to one line. Empty output means
+# "absent or empty", which every caller treats as unmeasured.
+#
+# IT READS TEXT, NOT A FILE, which is what lets `classify_report` classify every field of the
+# report from ONE snapshot instead of re-reading the file per field — the defect R2 names. The
+# file-reading `read_field` below is a THIN WRAPPER that delegates here, deliberately rather than
+# keeping its own `grep`-on-file copy: a second implementation of this grammar is a second place
+# for it to drift, its agreement with the first is only knowable by TESTING it rather than by care,
+# and this grammar is what decides whether a merge-proceeding token has its working.
+#
+# A HERE-STRING, NOT A PIPE. `grep -m1` stops at the first match and closes its input, so a
+# `printf … | grep -m1` pipeline can leave `printf` killed by SIGPIPE — a status `pipefail` would
+# then surface for a read that actually succeeded. A here-string has no upstream process to signal.
+read_field_from() {
+  local text="${1:-}" key="$2" line
+  line="$(LC_ALL=C grep -m1 -i "^[[:space:]]*${key}:" <<<"$text" 2>/dev/null || true)"
   [ -n "$line" ] || return 0
   line="${line#*:}"
   one_line "$line"
+}
+
+# read_field <file> <key> — the same grammar, applied to a file's contents.
+#
+# ONE READ, THEN THE SHARED GRAMMAR. An unreadable file yields empty text, which is the same
+# "absent or empty" every caller already treats as unmeasured — the read-failed-vs-field-absent
+# distinction is drawn by `count_field_lines` and `report_bytes`, where it decides something
+# (#3751 round 6, K1). Reading the whole file also removes a `grep` artifact this shape had: GNU
+# `grep` prints `Binary file … matches` INSTEAD of the line when the file holds a NUL, so a record
+# with a stray NUL used to yield that sentence as the field value; `$( )` discards NULs, and
+# `one_line` strips them from a value anyway.
+read_field() {
+  local file="$1" key="$2" text
+  [ -f "$file" ] || return 0
+  text="$( { LC_ALL=C cat -- "$file"; } 2>/dev/null || true )"
+  read_field_from "$text" "$key"
 }
 
 # count_field_lines <file> <key> — HOW MANY TIMES <key> APPEARS, AS AN AFFIRMATIVE MEASUREMENT.
@@ -1668,8 +1707,11 @@ CLAUSE
 # DECIDES on, but it is not a sufficient IDENTITY: with `--force`, a concurrent replacement of one
 # `FINDINGS` by a DIFFERENT `FINDINGS` leaves the token equal while the report the operator
 # actually read is gone. Content equality catches that; the token cannot. It is also strictly
-# cheaper to be right about — `classify_report` reads its subject five times, so it is not an
-# identity of any single instant.
+# cheaper to be right about. (Until round 12's R2 `classify_report` read its subject EIGHT times,
+# so its token was not an identity of any single instant at all; it now takes ONE observation, and
+# `record-author-performed` passes THIS one into it, so the bytes and the token there describe the
+# same instant. The argument for bytes rather than the token is unchanged: a `FINDINGS` replaced by
+# a different `FINDINGS` leaves the token equal.)
 #
 # THE STATE MARKER EXISTS SO THAT "ABSENT" AND "EMPTY" ARE DIFFERENT OBSERVATIONS. Both are the
 # empty string once read, and they are not the same fact.
@@ -1687,7 +1729,9 @@ report_bytes() {
   local p="$1" body
   if [ ! -f "$p" ]; then printf 'state=no-such-file\n'; return 0; fi
   # Measured BY ATTEMPTING THE READ rather than with `[ -r ]`, which answers TRUE for root and
-  # cannot see an I/O error — the same reason `classify_report` probes with a redirection.
+  # cannot see an I/O error. Since round 12's R2 this is the ONLY place the report's readability is
+  # measured: `classify_report` had its own redirection probe and now takes its whole observation
+  # from here, so there is one answer to "could this file be read" rather than two.
   body="$( { LC_ALL=C cat -- "$p" && printf 'E'; } 2>/dev/null )"
   case "$body" in
     *E) ;;
@@ -1696,11 +1740,20 @@ report_bytes() {
   printf 'state=present bytes:\n%s' "${body%E}"
 }
 
-# classify_report <report-path> <stage-open:0|1> — print "<token>|<cause>" and return 0.
+# classify_report <report-path> <stage-open:0|1> [<record-defect>] [<observation>] — print
+# "<token>|<cause>" and return 0.
 # ONE place decides the token, so `status` and `verdict` can never form two opinions about
-# the same file (the divergence #3564 records one directory over).
+# the same file (the divergence #3564 records one directory over) — AND it decides from ONE
+# OBSERVATION of that file, so the token cannot describe a state the file never held (round 12, R2).
+# THE FOURTH ARGUMENT IS AN OBSERVATION THE CALLER ALREADY TOOK, NOT A LOCATION (#3751 round 12,
+# R2). It carries the report's CONTENT in `report_bytes`' grammar, so `$rpath` still decides WHICH
+# file this is about and nothing can redirect a reader — the channel round 4 (H2) removed by
+# deleting `--report` stays removed, because a path is not expressible here. Its one purpose is to
+# let `record-author-performed` make its byte snapshot and its classification ONE observation
+# instead of two. Omitted, this function takes its own; a value that is not that grammar is a
+# NON-VERDICT, never a permissive fall-through.
 classify_report() {
-  local rpath="$1" open="$2" record_defect="${3:-}" line value tok cause body defect
+  local rpath="$1" open="$2" record_defect="${3:-}" obs="${4:-}" line value tok cause body defect nl
 
   # THE RECORD IS ASKED FIRST, BECAUSE IT NAMES WHICH REPORT TO READ (#3751 round 5, J1). A record
   # whose `report-nonce:` cannot be read yields no path at all, so there is nothing to
@@ -1713,27 +1766,51 @@ classify_report() {
   if [ "$open" -ne 1 ]; then
     printf 'NOT-RUN|stage never opened\n'; return 0
   fi
-  if [ ! -f "$rpath" ]; then
-    printf 'NOT-RUN|report absent\n'; return 0
-  fi
-  # UNREADABLE IS ITS OWN CAUSE, AND IS ASKED BEFORE THE CONTENT (#3751 round 2, B7). The cause
-  # list exists because THE OPERATOR ACTION DIFFERS PER CAUSE, and an unreadable report used to
-  # be reported as `report empty` — which sends the operator to the AGENT when the fix is
-  # `chmod`. Reusing `report ungrammatical` instead would be no better: it asserts something
-  # about CONTENT THAT WAS NEVER OBSERVED, and a false rationale is worse than none, because it
-  # is what stops the next person looking. Measured BY ATTEMPTING THE OPEN rather than with
-  # `[ -r ]`, which answers TRUE for root and cannot see an I/O error; the redirection error is
-  # bash's own, so it is suppressed inside the subshell rather than on `tr` (a raw shell error
-  # beside the verdict line is not a named refusal).
-  if ! ( : <"$rpath" ) 2>/dev/null; then
-    printf 'NOT-RUN|report unreadable\n'; return 0
-  fi
+  # ONE OBSERVATION OF THE REPORT, AND EVERY FIELD IS CLASSIFIED FROM IT (#3751 round 12, R2).
+  #
+  # THE FINDING. This function used to read its subject EIGHT times — existence, a readability
+  # probe, the body for emptiness, the `result:` census, the disclosure, then `performed-by`,
+  # `reason` and `evidence` each through their own `read_field`. A report REPLACED between two of
+  # those reads therefore let the classifier assemble a verdict from fields drawn from DIFFERENT,
+  # INDIVIDUALLY INVALID versions and report `AUTHOR-PERFORMED` although NO SINGLE SNAPSHOT of the
+  # file ever contained valid working. Measured: with `performed-by`/`reason` read from a version
+  # whose `evidence:` was the placeholder `tbd`, and `evidence` read from a version whose `reason:`
+  # was `x`, the classifier reported the merge-proceeding token. A verdict is a statement about a
+  # document; assembled across two documents it is a statement about neither.
+  #
+  # This is round 9's N2 property one level down: `premerge-assert.sh` captures the stage record
+  # ONCE and parses every field from that capture, for the same reason.
+  #
+  # THE THREE STATES ARE READ AFFIRMATIVELY, and an observation this function does not recognise is
+  # a NON-VERDICT rather than a fall-through — unreachable while `report_bytes` is the only
+  # producer (its output is a closed three-state set), and here so that a later change to that
+  # helper cannot inherit a permissive branch. It is reported as `report unreadable` because that
+  # is what it means — the bytes could not be obtained — and NOT as `report ungrammatical`, which
+  # would assert something about content that was never observed (#3751 round 2, B7: a false
+  # rationale is worse than none, because it is what stops the next person looking).
+  #
+  # `report_bytes` also measures readability BY ATTEMPTING THE READ rather than with `[ -r ]`,
+  # which answers TRUE for root and cannot see an I/O error, and it asserts the COMPLETE read
+  # affirmatively — so a file that opens and then fails mid-read is `report unreadable` here
+  # instead of the `report empty` the old `tr` read would have produced, which named the wrong
+  # operator action (`chmod`, versus the AGENT).
+  [ -n "$obs" ] || obs="$(report_bytes "$rpath")"
+  nl='
+'
+  case "$obs" in
+    "state=present bytes:$nl"*) body="${obs#"state=present bytes:$nl"}" ;;
+    # An EMPTY report: `report_bytes` emits the prefix and no bytes, and the command substitution
+    # that captured it stripped the trailing newline. Distinct arm rather than a `*` catch, so a
+    # genuinely empty file is measured as empty rather than as unrecognised.
+    "state=present bytes:") body="" ;;
+    "state=no-such-file") printf 'NOT-RUN|report absent\n'; return 0 ;;
+    "state=unreadable") printf 'NOT-RUN|report unreadable\n'; return 0 ;;
+    *) printf 'NOT-RUN|report unreadable\n'; return 0 ;;
+  esac
   # "empty" means nothing RECORDABLE — a file of blank lines is empty in every sense a
   # reader cares about, and reporting `report ungrammatical` for it would name the wrong
-  # operator action. The redirection is grouped so a read that fails BETWEEN the probe above
-  # and here (a race, a revoked mode) still cannot leak bash's error into the caller's stderr.
-  body="$( { LC_ALL=C tr -d '[:space:]' <"$rpath"; } 2>/dev/null || true )"
-  if [ -z "$body" ]; then
+  # operator action.
+  if [ -z "$(printf '%s' "$body" | LC_ALL=C tr -d '[:space:]' 2>/dev/null || true)" ]; then
     printf 'NOT-RUN|report empty\n'; return 0
   fi
 
@@ -1769,7 +1846,7 @@ classify_report() {
   # disposition. If you change the rule here, that test is what tells you the other side moved
   # too — a second implementation's correctness is only knowable by testing it against the first.
   local cands ncand=0
-  cands="$( { LC_ALL=C grep -i '^result:' "$rpath"; } 2>/dev/null || true)"
+  cands="$( { LC_ALL=C grep -i '^result:' <<<"$body"; } 2>/dev/null || true)"
   if [ -n "$cands" ]; then
     ncand="$(printf '%s\n' "$cands" | LC_ALL=C grep -c . 2>/dev/null || true)"
     case "$ncand" in
@@ -1819,19 +1896,27 @@ classify_report() {
       # pass wearing a rarer name, which is exactly what the distinct token exists to
       # prevent. Refused as ungrammatical (fail-closed: NOT-RUN blocks, AUTHOR-PERFORMED
       # is conditionally acceptable).
-      if ! LC_ALL=C grep -qF -- "$AUTHOR_DISCLOSURE" "$rpath"; then
-        printf 'NOT-RUN|report ungrammatical: AUTHOR-PERFORMED without the required disclosure\n'; return 0
-      fi
+      # A QUOTED `case` PATTERN, not a `grep -qF` on the file: the needle is a script constant
+      # with no newline, so a whole-text substring test is the same question the per-line `grep`
+      # answered — and it asks it of the ONE snapshot. Quoting the expansion makes it literal, so
+      # the disclosure cannot be read as a glob.
+      case "$body" in
+        *"$AUTHOR_DISCLOSURE"*) ;;
+        *) printf 'NOT-RUN|report ungrammatical: AUTHOR-PERFORMED without the required disclosure\n'; return 0 ;;
+      esac
       # THE WORKING IS JUDGED BY THE SAME FUNCTION THE WRITER USES (#3751 round 1, F3).
       # A NON-EMPTINESS test standing in for a validity test is the shape this repo pins:
       # `performed-by: nobody`, `reason: x`, `evidence: tbd` are all non-empty and all
       # unusable, and each one reached the token that PROCEEDS at the merge point while
       # `record-author-performed` would have refused it. The cause NAMES the field and the
       # defect, because the operator action differs per field.
+      # ALL THREE FROM THE ONE SNAPSHOT (R2). Read from the FILE, these were three independent
+      # observations, and a replacement between any two of them assembled valid working out of
+      # versions that never coexisted.
       defect="$(author_working_defect \
-        "$(read_field "$rpath" performed-by)" \
-        "$(read_field "$rpath" reason)" \
-        "$(read_field "$rpath" evidence)")"
+        "$(read_field_from "$body" performed-by)" \
+        "$(read_field_from "$body" reason)" \
+        "$(read_field_from "$body" evidence)")"
       if [ -n "$defect" ]; then
         printf 'NOT-RUN|report ungrammatical: AUTHOR-PERFORMED %s\n' "$(author_defect_prose "$defect")"
         return 0
@@ -2226,14 +2311,16 @@ cmd_record_author_performed() {
   # that is the normal path, and a guard that reds on correct input is the guard agents learn
   # to waive.
   #
-  # THE OBSERVATION IS TAKEN BEFORE THE DECISION IS MADE ON IT (#3751 round 9, N1), and in that
-  # ORDER deliberately: `classify_report` re-reads the file, so a change landing between these two
-  # calls is one the classification would see and this snapshot would not. Taking the bytes FIRST
-  # means every content change from the EARLIEST observation onward is caught by the
-  # re-verification below, whichever of the two reads saw it.
+  # THE OBSERVATION IS TAKEN BEFORE THE DECISION IS MADE ON IT (#3751 round 9, N1) — AND THE
+  # DECISION IS MADE ON THAT SAME OBSERVATION (#3751 round 12, R2). Round 9 read the bytes and then
+  # let `classify_report` re-read the file, arguing that taking the bytes FIRST meant any change
+  # between the two calls was still caught by the re-verification below. That argument was right
+  # about the guard and left a smaller hole in the VERDICT: the token guarding this write could be
+  # a classification of a state the snapshot never held. So the snapshot is PASSED IN, and the
+  # pair (the bytes this write is guarded on, the verdict read from them) is ONE observation.
   local prior_cls prior_token prior_obs replaced=""
   prior_obs="$(report_bytes "$STAGE_REPORT")"
-  prior_cls="$(classify_report "$STAGE_REPORT" 1)"
+  prior_cls="$(classify_report "$STAGE_REPORT" 1 "" "$prior_obs")"
   prior_token="${prior_cls%%|*}"
   case "$prior_token" in
     PASS | FINDINGS)
@@ -2306,10 +2393,13 @@ cmd_record_author_performed() {
   local now_obs now_cls
   now_obs="$(report_bytes "$STAGE_REPORT")"
   if [ "$now_obs" != "$prior_obs" ]; then
-    # The classification is re-read HERE, on the refusal path ONLY: it is a DIAGNOSTIC naming
+    # The classification is produced HERE, on the refusal path ONLY: it is a DIAGNOSTIC naming
     # what arrived, never an input to the decision, which was made on the byte comparison above.
-    # Keeping it off the success path is also what keeps the window minimal.
-    now_cls="$(classify_report "$STAGE_REPORT" 1)"
+    # Keeping it off the success path is also what keeps the window minimal. It is classified FROM
+    # `now_obs` rather than by a fresh read (#3751 round 12, R2), so the bytes that FAILED the
+    # comparison and the verdict this line reports are the same observation — a re-read could
+    # otherwise name a third state, and "what arrived" would be a claim about none of them.
+    now_cls="$(classify_report "$STAGE_REPORT" 1 "" "$now_obs")"
     emit "$REFUSE_MARKER reason=report-changed-mid-write kind=$kind issue=$issue report=$(field_value "$STAGE_REPORT") now-verdict=$(field_value "${now_cls%%|*}")"
     emit "$REFUSE_MARKER detail=the report of record CHANGED between the already-recorded check and this write, so NOTHING was installed — the prepared substitute is discarded and whatever is in the report now is intact. This is the interleaving that guard exists to stop: a review landing a verdict while a substitute was being prepared would otherwise be replaced by the merge-proceeding AUTHOR-PERFORMED token with no trace. READ what is there now ($prog verdict $kind --issue $issue) and decide again; --force does not cover it, because it authorizes replacing the verdict you read, not one that arrived afterwards."
     exit 2

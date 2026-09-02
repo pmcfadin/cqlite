@@ -66,6 +66,22 @@ ORDER is not a rule in either direction.
   over one shared table of adversarial shapes, since two readers of one shape have diverged once per
   axis and a second implementation's agreement is only knowable by testing it
 
+#### Scenario: a verdict describes a state the report actually held
+- **WHEN** the report of record is REPLACED while the verdict is being classified
+- **THEN** the verdict SHALL be derived from ONE observation of that file, so no verdict is assembled
+  from fields drawn from DIFFERENT versions: reading the `result:` token, the disclosure and each of
+  `performed-by`, `reason` and `evidence` as separate observations let `AUTHOR-PERFORMED` be reported
+  from working that NO SINGLE SNAPSHOT contained — one version's usable `reason` beside another's
+  usable `evidence`, each version invalid on its own
+- **AND** an observation of that file that cannot be classified is a NON-VERDICT, never a permissive
+  fall-through, and it is reported as UNREADABLE rather than ungrammatical: the bytes were not
+  obtained, so nothing may be asserted about the content
+- **AND** the `<key>: <value>` field grammar SHALL have ONE implementation, shared by the snapshot
+  reader and the file reader, since a second implementation's agreement is only knowable by testing it
+- **AND** the consumer that guards a write on the report's BYTES and decides by its VERDICT SHALL use
+  the SAME observation for both, so the token guarding the write cannot classify a state those bytes
+  never held
+
 #### Scenario: a stage that produced nothing is never clean and never empty-findings
 - **WHEN** the stage's report is sentinel-only
 - **THEN** the verdict token is `NOT-RUN` and the exit status is non-zero
