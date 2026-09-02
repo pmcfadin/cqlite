@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=465
+CASE_FLOOR=489
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -2101,6 +2101,23 @@ PYINNER
     check_driver "an attestation reason of '$bogus'" 3
   done
 
+  # ROUND 17 FINDING 4: a port above 65535 is an integer and is not a port, and
+  # digits-only let it reach the server launch -- after three release builds.
+  for badport in 65536 99999 4294967296; do
+    run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+      --work-dir "$TMP/w-port" --control selftest --repo "$SCRATCH" --port "$badport"
+    check_driver "a --port of $badport" 3
+  done
+  # ...and the boundary from the other side, or the above proves only that
+  # something was refused.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-port-ok" --min-corpus-bytes 1 --min-sstables 1 --control selftest --repo "$SCRATCH" --port 65535
+  if grep -q '^AB-3649: cause-detail --port 65535 is above 65535' "$TMP/err.txt"; then
+    bad "--port 65535 was refused; the range check is exclusive where it should be inclusive"
+  else
+    ok "--port 65535 is accepted -- the range check is inclusive at the boundary"
+  fi
+
   run_driver --no-such-flag
   check_driver "an unrecognised driver flag exits 3" 3
 
@@ -2802,6 +2819,20 @@ STUBEOF
   printf '{"version":2,"keyspace":"ks","table":"tbl","ddl":"CREATE TABLE ks.tbl (a int PRIMARY KEY)","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' \
     > "$TMP/e2e-ticket.json"
 
+  # ROUND 17 FINDING 2: the ticket is FROZEN into the session directory, and
+  # every run reads that copy. Validate-then-reread was a TOCTOU on the
+  # measurement input -- edit the template mid-session and the arms execute
+  # different filters while every record still says shape `full`. The property
+  # is tested by MUTATING the original after the session and showing the frozen
+  # copy is unchanged and still matches its recorded digest.
+  e2e_ticket_frozen() { # <work-dir>
+    [ -d "$1" ] || return 0
+    local dir
+    dir="$(find "$1" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+    [ -n "$dir" ] || return 0
+    printf '%s\n' "$dir"
+  }
+
   # THE PROFILE GATE IS NOT WHAT THESE CASES TEST. Their subject is the
   # driver->analyzer pipeline: that a real session's manifest and records are
   # consumable end to end. The rig gate has its own dedicated fixtures across
@@ -2889,6 +2920,56 @@ PYINNER
     bad "a real session emitted a line without the AB-3649 anchor"
   else
     ok "every line of a real session carries the anchor"
+  fi
+
+  # THE FREEZE, tested by mutating the original AFTER the session ran.
+  E2E_TICKET_DIR="$(e2e_ticket_frozen "$TMP/e2e-ss")"
+  if [ -n "$E2E_TICKET_DIR" ] && [ -f "$E2E_TICKET_DIR/ticket.json" ]; then
+    ok "the session froze a ticket copy into its own run directory"
+    FROZEN_BEFORE="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$E2E_TICKET_DIR/ticket.json")"
+    RECORDED_SHA="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workload"]["ticket_sha256"])' "$E2E_TICKET_DIR/manifest.json" 2>/dev/null || echo ABSENT)"
+    if [ "$FROZEN_BEFORE" = "$RECORDED_SHA" ]; then
+      ok "the manifest's ticket digest matches the frozen copy on disk"
+    else
+      bad "the manifest records $RECORDED_SHA but the frozen ticket hashes to $FROZEN_BEFORE"
+    fi
+    # Mutate the ORIGINAL, then RESTORE it. The original is shared by every
+    # later e2e session, so leaving it narrowed made all of them die
+    # ticket-not-full-ring -- a case that breaks its successors is a case that
+    # tests the suite's ordering as well as its subject. Saved and put back
+    # rather than parameterised, because the property under test is specifically
+    # that the FROZEN copy does not follow THIS path.
+    cp -- "$TMP/e2e-ticket.json" "$TMP/e2e-ticket.orig"
+    printf '{"version":2,"keyspace":"ks","table":"tbl","ddl":"CREATE TABLE ks.tbl (a int PRIMARY KEY)","limit":7}\n' > "$TMP/e2e-ticket.json"
+    FROZEN_AFTER="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$E2E_TICKET_DIR/ticket.json")"
+    mv -- "$TMP/e2e-ticket.orig" "$TMP/e2e-ticket.json"
+    if [ "$FROZEN_AFTER" = "$FROZEN_BEFORE" ]; then
+      ok "editing the original template does not change the frozen copy the runs read"
+    else
+      bad "the frozen ticket followed an edit to the original -- the freeze is not a freeze"
+    fi
+    # The manifest carries the CONTENT too, so a reader needs no session dir.
+    if python3 - "$E2E_TICKET_DIR/manifest.json" <<'PYINNER'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+content = manifest["workload"].get("ticket_content")
+raise SystemExit(0 if isinstance(content, dict) and content.get("keyspace") else 1)
+PYINNER
+    then
+      ok "the manifest carries the frozen ticket's content, not only its path"
+    else
+      bad "the manifest does not carry the ticket content"
+    fi
+    # ...and the driver must not read the original after the copy.
+    if grep -q 'ticket-template "\$TICKET_ORIGINAL"' "$DRIVER"; then
+      bad "the driver still passes the ORIGINAL ticket path to a run"
+    else
+      ok "no run is invoked with the original ticket path"
+    fi
+  else
+    bad "the session did not freeze a ticket copy into its run directory"
   fi
 
   E2E_DIR="$(find "$TMP/e2e-ss" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
@@ -3782,6 +3863,116 @@ then
   ok "the driver CALLS the analyzer's record validation and keeps no second copy"
 else
   bad "there is more than one implementation of the record schema (see stderr above)"
+fi
+
+# ---- --shape mirrors flight-loadgen's PARSER, aliases and case included ------
+# ROUND 17 FINDING 3. The driver carried the RAW string while the load generator
+# emits the CANONICAL label, so `--shape limit` produced records saying
+# `limit-k` that reconciliation then rejected as a mismatch -- after all three
+# release builds. Read from Shape::parse (tools/flight-loadgen/src/shape.rs:34)
+# rather than from the finding's list, which was right about the aliases and
+# silent about the lowercase match.
+shape_case() { # <input> <want-canonical-or-REFUSE>
+  local got rc
+  set +e
+  got="$(python3 "$SUPPORT" canonical-shape "$1" 2>/dev/null)"
+  rc=$?
+  set -e
+  if [ "$2" = REFUSE ]; then
+    if [ "$rc" != 0 ]; then
+      ok "shape '$1' is refused at preflight, not after three builds"
+    else
+      bad "shape '$1' was accepted and canonicalised to '$got'"
+    fi
+  elif [ "$rc" = 0 ] && [ "$got" = "$2" ]; then
+    ok "shape '$1' -> '$got'"
+  else
+    bad "shape '$1' gave '$got' (rc $rc), expected '$2'"
+  fi
+}
+shape_case full     full
+shape_case limit    limit-k
+shape_case limitk   limit-k
+shape_case limit-k  limit-k
+shape_case ptr      point
+shape_case point    point
+shape_case mix      mixed
+shape_case mixed    mixed
+# CASE-INSENSITIVE, because Shape::parse lowercases. Refusing these would red a
+# session the load generator accepts -- the too-strict half.
+shape_case FULL     full
+shape_case Limit-K  limit-k
+shape_case PtR      point
+# Unknown shapes fail HERE, not at the load generator after the builds.
+shape_case scan     REFUSE
+shape_case ''       REFUSE
+shape_case full-ring REFUSE
+
+# THE ALIAS SET IS DERIVED FROM THE PARSER, not curated here: a new alias in
+# shape.rs that this mirror does not know would silently become an unknown
+# shape refused at preflight -- a correct session red by a stale mirror.
+if python3 - "$HERE" <<'PYINNER'
+import os
+import re
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+
+# Same three-valued locate as the TICKET_SCHEMA completeness guard: out of the
+# repository is DECLARED, a crate present without the file is a FAIL.
+here = os.path.abspath(sys.argv[1])
+shape_rs, saw_crate, probe = None, False, here
+while True:
+    if os.path.isdir(os.path.join(probe, "tools", "flight-loadgen")):
+        saw_crate = True
+    candidate = os.path.join(probe, "tools", "flight-loadgen", "src", "shape.rs")
+    if os.path.isfile(candidate):
+        shape_rs = candidate
+        break
+    parent = os.path.dirname(probe)
+    if parent == probe:
+        break
+    probe = parent
+if shape_rs is None:
+    if saw_crate:
+        sys.stderr.write("AB-3649: flight-loadgen is present but src/shape.rs is "
+                         "not; the parser moved and the mirror cannot be checked\n")
+        raise SystemExit(1)
+    sys.stdout.write("AB-3649: DECLARED-NOT-MEASURABLE outside the repository, so "
+                     "Shape::parse cannot be read from here\n")
+    raise SystemExit(0)
+
+source = open(shape_rs, encoding="utf-8").read()
+body = re.search(r"pub fn parse\(s: &str\).*?\n    \}", source, re.S)
+if body is None:
+    sys.stderr.write("AB-3649: Shape::parse could not be located; the derivation "
+                     "has broken, which is a FAIL and not an empty subject set\n")
+    raise SystemExit(1)
+declared = set()
+for arm in re.finditer(r'^\s*((?:"[a-z-]+"\s*\|\s*)*"[a-z-]+")\s*=>\s*Ok\(',
+                       body.group(0), re.M):
+    for literal in re.findall(r'"([a-z-]+)"', arm.group(1)):
+        declared.add(literal)
+if len(declared) < 4:
+    sys.stderr.write("AB-3649: only %d aliases were derived from Shape::parse; "
+                     "the parse has broken\n" % len(declared))
+    raise SystemExit(1)
+problems = []
+for alias in sorted(declared - set(S.SHAPE_ALIASES)):
+    problems.append("Shape::parse accepts %r and the mirror does not -- a "
+                    "correct session would be refused at preflight" % alias)
+for alias in sorted(set(S.SHAPE_ALIASES) - declared):
+    problems.append("the mirror accepts %r and Shape::parse does not -- it "
+                    "would fail after every build" % alias)
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "the shape mirror covers exactly the aliases Shape::parse accepts"
+else
+  bad "the shape mirror and Shape::parse disagree (see above)"
 fi
 
 # ---- resolved integers are parsed, bounded and CANONICAL ---------------------
