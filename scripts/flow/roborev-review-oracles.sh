@@ -1730,18 +1730,40 @@ for ref in refs:
     ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: read with no matching marker: ${read_list:-none}; NOT read: $unread_list$suffix$read_limit"
     return 0
   fi
-  if [ -z "$read_list" ] && [ -z "$bound_clause" ]; then
-    # NOTHING WAS READ AND NOTHING WAS CUT OFF, so every declared reference was a declared skip. This
-    # is rendering 3's slot — no thread was checked — with the reason named, NOT a fifth outcome and
-    # NOT the bare "no linked issue is declared", which would be false: references ARE declared, they
-    # just do not point here.
-    ROBOREV_PROBE_OUTCOME="no-subject"
-    ROBOREV_PROBE_DETAIL="no linked issue IN THIS REPOSITORY is declared on this PR, so no linked-issue thread was checked$cross_clause"
+  # ===== NOTHING READ IS NEVER `checked`, WHATEVER ELSE HAPPENED (#3759 round 5) =====
+  # THE DEFECT THIS CLOSES: this branch used to be guarded by
+  # `[ -z "$read_list" ] && [ -z "$bound_clause" ]`, so an empty `read_list` with a NON-empty bound
+  # clause — the probe bound exhausted by cross-repository skips BEFORE it reached any
+  # same-repository reference — fell through to the `checked` rendering and printed
+  # `linked issues none checked … no matching marker`: a confident NEGATIVE derived from ZERO reads.
+  # That is the same false confidence the identity grammar and the validated read were each built to
+  # remove, arriving through the RENDERING rather than the VALIDATION. So the empty-`read_list` case
+  # is now decided FIRST and INDEPENDENTLY of the bound, and neither of its forms may carry the
+  # "no matching marker" clause — a claim about content nobody looked at — nor the read limit, which
+  # declares what a READ does not establish and therefore presupposes one.
+  if [ -z "$read_list" ]; then
+    if [ -n "$bound_clause" ]; then
+      # REFERENCES REMAIN UNEXAMINED, so a subject may well exist and we simply never reached it.
+      # That is not `no-subject`, which would assert that none is declared, and it is emphatically not
+      # `checked`. The probe did not check, and the bound clause names how much it did not look at.
+      ROBOREV_PROBE_OUTCOME="could-not-check"
+      ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: no thread was read$suffix"
+    else
+      # NOTHING WAS READ AND NOTHING WAS CUT OFF, so every declared reference was a declared skip.
+      # This is rendering 3's slot — no thread was checked — with the reason named, NOT a fifth
+      # outcome and NOT the bare "no linked issue is declared", which would be false: references ARE
+      # declared, they just do not point here.
+      ROBOREV_PROBE_OUTCOME="no-subject"
+      ROBOREV_PROBE_DETAIL="no linked issue IN THIS REPOSITORY is declared on this PR, so no linked-issue thread was checked$cross_clause"
+    fi
     return 0
   fi
+  # Past this point at least one thread WAS read, so the renderings below may speak about content.
+  # `$read_list` is interpolated with NO `:-none` fallback, deliberately: such a fallback is exactly
+  # what let "none" be reported as checked.
   ROBOREV_PROBE_OUTCOME="checked"
   if [ -n "$suffix" ]; then
-    ROBOREV_PROBE_DETAIL="linked issues ${read_list:-none} checked$suffix: no matching marker$read_limit"
+    ROBOREV_PROBE_DETAIL="linked issues $read_list checked$suffix: no matching marker$read_limit"
     return 0
   fi
   if [ "${#read_ok[@]}" -eq 1 ]; then

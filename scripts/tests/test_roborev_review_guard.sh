@@ -6584,6 +6584,71 @@ assert_says 'case (mp19b) no linked issue means no read is claimed' \
 assert_lacks 'case (mp19b) so the read limit is not declared here' 'NON-EXHAUSTIVE: a thread counts as read'
 reset_stub
 
+printf '== (mp20) #3759 r5: the bound exhausted by SKIPS reads nothing — and never says "checked" ==\n'
+# ROUND-5 FINDING. Three cross-repository references exhaust the probe bound before it reaches the
+# same-repository one, so NOTHING is read — and the rendering used to be guarded on the bound clause
+# being EMPTY, so this fell through to `checked` and printed `linked issues none checked … no matching
+# marker`: a confident NEGATIVE derived from ZERO reads. Same false confidence as the defects the
+# identity grammar and the validated read each closed, arriving this time through the RENDERING.
+# THE FIXTURE PUTS A REAL MARKER ON THE UNEXAMINED THREAD, so "no matching marker" would be false in
+# fact and not merely unwarranted in form. Ordered explicitly via the payload, because the outcome
+# turns on the cross-repository references coming FIRST.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_JSON='{"closingIssuesReferences":[
+  {"number":3544,"repository":{"name":"other-repo","owner":{"login":"other-owner"}}},
+  {"number":3626,"repository":{"name":"other-repo","owner":{"login":"other-owner"}}},
+  {"number":3312,"repository":{"name":"other-repo","owner":{"login":"other-owner"}}},
+  {"number":3710,"repository":{"name":"cqlite","owner":{"login":"pmcfadin"}}}]}'
+STUB_GH_ISSUE_COMMENTS="\002#3710\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp20)' FAIL 1
+assert_no_marker_form 'case (mp20)'
+assert_says 'case (mp20) the outcome says plainly that no thread was read' \
+  'the linked-issue thread could NOT be checked: no thread was read'
+assert_says 'case (mp20) and names how much of the declared set it never looked at' \
+  '3 of 4 declared examined, probe bounded at 3, 1 never looked at'
+assert_says 'case (mp20) and why the three it examined were not read' \
+  '3 cross-repository closing reference\(s\) declared and deliberately NOT probed'
+# THE THREE FALSE CLAIMS THAT MUST NOT APPEAR. "no matching marker" is a statement about CONTENT, and
+# no content was read; "none checked" is the literal shape of the defect; and the read limit declares
+# what a READ does not establish, so it presupposes a read.
+assert_lacks 'case (mp20) it NEVER claims anything about a marker it did not look for' 'no matching marker'
+assert_lacks 'case (mp20) and never renders an empty read list as checked' 'linked issues none checked'
+assert_lacks 'case (mp20) nor carries the read limit, which presupposes a read' 'NON-EXHAUSTIVE: a thread counts as read'
+# AND IT IS NOT MISFILED AS "no linked issue": one IS declared in this repository, unexamined.
+assert_lacks 'case (mp20) a declared-but-unexamined reference is not "no linked issue"' \
+  'no linked issue IN THIS REPOSITORY is declared'
+# MEASURED: the same-repository thread really was never read, so the case is about the bound and not
+# about a read that silently failed.
+if grep -qE 'gh issue view 3710 --json comments' "$INVOKED"; then
+  bad 'case (mp20): the bound was not exhausted — the same-repository thread WAS read, so this case is not exercising the empty-read_list rendering at all'
+else
+  ok 'case (mp20): the same-repository thread was never reached (checked against the stub invocation record)'
+fi
+reset_stub
+
+printf '== (mp20b) #3759 r5: one thread read past the same skips DOES speak about content (control) ==\n'
+# Without this, (mp20) would pass identically if the probe had stopped rendering content claims
+# altogether. Two cross-repository skips instead of three, so the bound reaches the same-repository
+# reference: one variable, and the outcome flips back to a content claim with its declared limit.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_JSON='{"closingIssuesReferences":[
+  {"number":3544,"repository":{"name":"other-repo","owner":{"login":"other-owner"}}},
+  {"number":3626,"repository":{"name":"other-repo","owner":{"login":"other-owner"}}},
+  {"number":3710,"repository":{"name":"cqlite","owner":{"login":"pmcfadin"}}}]}'
+STUB_GH_ISSUE_COMMENTS="\002#3710\n\001pmcfadin\nnothing here\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp20b)' FAIL 1
+assert_says 'case (mp20b) a thread that WAS read is reported as checked, naming it' \
+  'linked issues #3710 checked'
+assert_says 'case (mp20b) with a content claim, because content was read' 'no matching marker'
+assert_says 'case (mp20b) and the declared read limit, because a read is claimed' \
+  'NON-EXHAUSTIVE: a thread counts as read'
+assert_lacks 'case (mp20b) and it is not a could-not-check' 'no thread was read'
+reset_stub
+
 printf '== (mp12) #3759 MUTANT: probing on EVERY state reds — the escalation is only from none ==\n'
 # A CASE THAT PASSES AGAINST BOTH THE REAL CODE AND ITS NAIVE FORM MEASURES NOTHING. The naive form
 # here is "probe whatever the PR-side state was", which overwrites a precise STALE with a vaguer

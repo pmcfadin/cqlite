@@ -379,6 +379,16 @@ coverage silently is indistinguishable from one that covers it* — the reason t
 3. **no subject** — *"no linked issue is declared on this PR, so no linked-issue thread was checked"*.
 4. **could not check** — *"the linked-issue thread could NOT be checked: `<cause>`"*, naming the cause.
 
+**A RENDERING THAT READ NOTHING SHALL NEVER CLAIM ANYTHING ABOUT CONTENT.** Whether any thread was
+read SHALL be decided **independently of** whether the bound cut references off. When no thread was
+read the outcome SHALL say so, and SHALL carry **neither** the *no matching marker* clause — a claim
+about content nobody looked at — **nor** the declared read limit, which states what a *read*
+establishes and therefore presupposes one. Two forms: if references remain **unexamined** the outcome
+is **could not check**, naming that no thread was read and how much was never looked at (it is not
+*no subject*, which would assert that none is declared, and emphatically not *checked*); if nothing was
+cut off, every declared reference was a declared skip and the outcome is the *no subject* rendering
+naming that reason.
+
 A **mixed outcome** — one thread read, another unavailable — SHALL take rendering 4 and name **both**
 halves; it SHALL NOT take rendering 1. *A partial scan reported as a complete one is worse than an
 admitted failure, because it is the version nobody re-checks.*
@@ -481,6 +491,10 @@ means before it can be printed.
 #### Scenario: Every read on the path goes through the one validated helper
 - **WHEN** `scripts/tests/test_roborev_review_guard.sh` runs
 - **THEN** it asserts structurally that every scanner invocation and every `state=` extraction lies inside the validated-read helper, that every payload-shape predicate lies inside the one shape validator, that both granting lookups and the probe route through them, and it fails if any call site reads a payload or the scanner directly
+
+#### Scenario: The bound is exhausted by skips before any thread is read
+- **WHEN** cross-repository references exhaust the probe bound before a declared **same-repository** reference is reached, so no thread is read at all
+- **THEN** the outcome is *could not check* stating that no thread was read and naming both the unexamined remainder and the skips — and it carries neither a *no matching marker* claim, nor a *checked* rendering over an empty read list, nor the declared read limit, nor the *no linked issue* rendering, since one **is** declared and merely unexamined
 
 #### Scenario: A read thread declares what "read" does not establish
 - **WHEN** a probed thread's payload is a well-formed comments **list** whose **elements** are malformed — not objects, or with non-string bodies — so the scanner skips them and reports no authorization
