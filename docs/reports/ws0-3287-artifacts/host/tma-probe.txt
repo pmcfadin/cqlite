@@ -72,3 +72,4 @@ Run 'perf list' for a list of valid events
     -e, --event <event>   event selector. use 'perf list' to list available events
 [rc=129]
 
+END-OF-RECORD: tma-probe complete

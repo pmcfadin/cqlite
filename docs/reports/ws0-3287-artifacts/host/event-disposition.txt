@@ -20,3 +20,4 @@ LLC-loads                                            ABSENT-FROM-PMU
 LLC-load-misses                                      ABSENT-FROM-PMU
 cache-references                                     PROGRAMS
 cache-misses                                         PROGRAMS
+END-OF-RECORD: event-disposition complete

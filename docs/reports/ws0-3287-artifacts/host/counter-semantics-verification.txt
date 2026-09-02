@@ -32,3 +32,4 @@
         coherency messages; again this depends on the design of your CPU.
 [semantics: FOUND]
 
+END-OF-RECORD: counter-semantics complete

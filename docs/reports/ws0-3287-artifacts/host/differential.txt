@@ -6,8 +6,8 @@ SCOPE: this probe RECORDS and VALIDATES; it does not classify (#3870).
 host L3: 105 MiB (1 instance)
 cpuset:  0,8 (complete sibling group from cpu0, all members online AND in this process's Cpus_allowed_list)
 window:  control-FIFO gated to the chase; events counted :u; small groups, 100.00% enabled REQUIRED
-gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.35x (need >=10x, ideal ~100x)
-  absolute, REPORTED not asserted: 6296 instructions for 1e3 accesses
+gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.33x (need >=10x, ideal ~100x)
+  absolute, REPORTED not asserted: 6297 instructions for 1e3 accesses
   (#3224 used a tuned 1e6 ceiling; the scaling property is host-independent.)
 
 -- GATE A: TMA (raw record; #3287 AC1 turns on what tma-probe.txt shows) --
@@ -24,13 +24,13 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.35x (need >=10
   offcore_requests_outstanding.cycles_with_data_rd:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
   offcore_requests.all_data_rd : ABSENT-FROM-PMU (disposition only; not in a differential group)
   offcore_requests_buffer.sq_full : ABSENT-FROM-PMU (disposition only; not in a differential group)
-  l1d_pend_miss.fb_full:u : disposition=PROGRAMS  friendly-L2resident=1364606  hostile-512m=11851751  hostile-2g=5902647
-  l1d_pend_miss.pending:u : disposition=PROGRAMS  friendly-L2resident=143218342  hostile-512m=12215990881  hostile-2g=6985391956
+  l1d_pend_miss.fb_full:u : disposition=PROGRAMS  friendly-L2resident=13590  hostile-512m=143279  hostile-2g=211417
+  l1d_pend_miss.pending:u : disposition=PROGRAMS  friendly-L2resident=140190164  hostile-512m=9584117142  hostile-2g=5717630646
 
 -- GATE C: reproduce #3224's own baseline counters --
   cycle_activity.stalls_l3_miss:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
-  cycle_activity.stalls_l2_miss:u : disposition=PROGRAMS  friendly-L2resident=2322323  hostile-512m=11590642343  hostile-2g=6659890685
-  cycle_activity.stalls_total:u : disposition=PROGRAMS  friendly-L2resident=298536273  hostile-512m=13097882224  hostile-2g=7336567995
+  cycle_activity.stalls_l2_miss:u : disposition=PROGRAMS  friendly-L2resident=8214  hostile-512m=9399902891  hostile-2g=5069333787
+  cycle_activity.stalls_total:u : disposition=PROGRAMS  friendly-L2resident=281132952  hostile-512m=10720184768  hostile-2g=5628485241
   LLC-loads:u : disposition=ABSENT-FROM-PMU  friendly-L2resident=(no value in this run's CSV)  hostile-512m=(no value in this run's CSV)  hostile-2g=(no value in this run's CSV)
   LLC-load-misses:u : disposition=ABSENT-FROM-PMU  friendly-L2resident=(no value in this run's CSV)  hostile-512m=(no value in this run's CSV)  hostile-2g=(no value in this run's CSV)
   cache-references:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
@@ -42,9 +42,9 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.35x (need >=10
     This check catches a nesting VIOLATION (which would invalidate #3224's
     difference-based partition); it cannot catch a silent zero. Only the
     differential can, which is why both are reported.
-    friendly-L2resident: HOLDS (0 <= 2322323 <= 298536273)
-    hostile-512m: HOLDS (0 <= 11590642343 <= 13097882224)
-    hostile-2g: HOLDS (0 <= 6659890685 <= 7336567995)
+    friendly-L2resident: HOLDS (0 <= 8214 <= 281132952)
+    hostile-512m: HOLDS (0 <= 9399902891 <= 10720184768)
+    hostile-2g: HOLDS (0 <= 5069333787 <= 5628485241)
 
 -- GATE D: topology (reported; #3224's geometry needs 6+2 complete cores EXCLUSIVELY) --
   see capability-probe.txt
@@ -63,3 +63,4 @@ VERDICT: COMPLETE (data integrity only — every step executed and every
          data-integrity guard passed. This is NOT a capability claim and
          NOT an answer to any of Gates A-D: this probe records, it does
          not classify (#3870). Read the numbers above.)
+END-OF-REPORT: differential.txt complete
