@@ -51,23 +51,36 @@ impl V5CompressedLegacyParser {
         collection_kind: &str,
         column_name: &str,
     ) -> Result<(usize, usize)> {
-        let (remaining, blob_len) = parse_vuint(&data[*offset..]).map_err(|e| {
+        let (remaining, blob_len_raw) = parse_vuint(&data[*offset..]).map_err(|e| {
             Error::corruption(format!(
                 "Frozen {} '{}': failed to parse blob length: {:?}",
                 collection_kind, column_name, e
             ))
         })?;
-        let blob_len = blob_len as usize;
+        // Issue #3848: cap BEFORE the `as usize` cast. `parse_vuint` yields up to
+        // `u64::MAX` from a 9-byte encoding, so an adversarial `Data.db` length
+        // prefix must be rejected here rather than reaching the bounds add below
+        // (which, unchecked, panics in an overflow-checked build and wraps in
+        // release). Same guard as `parse_tuple_value` on the identical framing.
+        if blob_len_raw > MAX_CELL_VALUE_LENGTH {
+            return Err(Error::corruption(format!(
+                "Frozen {} '{}': blob_len {} exceeds maximum {}",
+                collection_kind, column_name, blob_len_raw, MAX_CELL_VALUE_LENGTH
+            )));
+        }
+        let blob_len = blob_len_raw as usize;
         let bytes_consumed = data[*offset..].len() - remaining.len();
         *offset += bytes_consumed;
 
-        if *offset + blob_len > data.len() {
+        // Issue #3848, second axis: the saturating form cannot overflow for ANY
+        // `blob_len`, so it holds even if the cap above is ever removed.
+        if blob_len > data.len().saturating_sub(*offset) {
             return Err(Error::corruption(format!(
                 "Frozen {} '{}': blob_len {} exceeds available data {}",
                 collection_kind,
                 column_name,
                 blob_len,
-                data.len() - *offset
+                data.len().saturating_sub(*offset)
             )));
         }
 
