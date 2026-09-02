@@ -99,6 +99,21 @@ describe('assertDatasetsAvailable() (issue #3641)', () => {
 // so it may one day need the literal -- and is DELIBERATELY NOT pre-added: it does
 // not contain the string today (verified), and an entry that excuses a file needing
 // no excuse only widens the hole.
+// The needle is ASSEMBLED FROM FRAGMENTS rather than written out, so that this
+// file -- the one file on the allow-list -- does not contain the literal merely by
+// virtue of the guard that scans for it (roborev job 85). With the literal spelled
+// out here, the "is this exemption still necessary" check below was
+// SELF-SATISFYING: the guard's own `.includes(...)`/`.toContain(...)` kept the
+// string present, so the check passed even if the assertDatasetsAvailable()
+// assertions that actually justify the exemption were deleted. A check that cannot
+// fail measures nothing -- the exact defect class issue #3772 exists to remove, and
+// this is the third time in that issue it was reintroduced by its own fix.
+//
+// Assembled this way, the ONLY occurrences of the literal in this file are the
+// `toThrow(/.../)` assertions at the top. Delete those and the allow-list entry
+// stops being necessary and the check below FAILS, which is the property wanted.
+const MESSAGE_LITERAL = ['Test data', 'not available'].join(' ');
+
 const MESSAGE_LITERAL_ALLOWED = new Map([
   [
     'helpers.test.js',
@@ -144,7 +159,7 @@ describe('the helper error message is not inlined by another suite (issue #3641)
       .filter((rel) =>
         fs
           .readFileSync(path.join(__dirname, rel), 'utf8')
-          .includes('Test data not available')
+          .includes(MESSAGE_LITERAL)
       );
     expect(offenders).toEqual([]);
   });
@@ -161,7 +176,7 @@ describe('the helper error message is not inlined by another suite (issue #3641)
       expect(fs.existsSync(full)).toBe(true);
       // If an allowed file no longer contains the literal, the entry is dead
       // and must be REMOVED -- keeping it would excuse a future inline copy.
-      expect(fs.readFileSync(full, 'utf8')).toContain('Test data not available');
+      expect(fs.readFileSync(full, 'utf8')).toContain(MESSAGE_LITERAL);
       expect(reason.trim().length).toBeGreaterThan(0);
     }
   });
