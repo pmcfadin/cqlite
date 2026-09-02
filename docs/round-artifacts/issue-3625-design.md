@@ -710,3 +710,53 @@ never read**, which is the finding verbatim. Two of the four asserts discriminat
 Unit-level: V1 covers all four contract states, **V1b** asserts `NO-SUBJECT` and `NOT-MEASURED`
 render *distinctly* — both preserve PASS, so a status-only assert could not tell them apart — and
 V2 now also fails if the increment ever sits beside an existence predicate again.
+
+---
+
+## Gate of record #1 — FAILED on `tooling-tests`, and what it taught
+
+36 of 37 components PASSed; `tooling-tests` failed on
+`test_pub_surface_guard.sh: line 403: AGENT: unbound variable`. **That file is not in this diff.**
+The `AGENT-GATE-CENSUS:` line added to `check-pub-surface.sh` broke it.
+
+### Mechanism
+
+The test's *assertion* regex `MEASURED_RE` is properly line-anchored; its *extractions* were not —
+`sed -E 's/.*of which ([0-9]+) unconditional.*/\1/'` over the guard's **whole, multi-line** output.
+That is the SUBSTITUTE form, which passes every non-matching line through **unchanged**. The new
+census line carries the word `unconditional` but no `of which`, so it survived the substitution and
+`base_open` became a two-line string starting `AGENT-GATE-CENSUS: 14 unconditional …`.
+`$((base_open + 1))` then read `AGENT` as a variable name, and `set -u` made it fatal.
+
+### The fix is the extraction, not the wording
+
+Rewording the census to dodge `unconditional` would trade a descriptive count for a word taboo, and
+the next colliding word brings the bug straight back. All four extractions now go through
+`ps_measured_field`, which uses `sed -n … p` (matching lines only, never pass-through), anchors on
+the guard's own `^pub-surface: ` line, and **validates the result is a single integer** — so a
+future reshape is a named failure at the extraction rather than a bash arithmetic error thirty
+lines away.
+
+**Case 1b pins the property** — a decoy line carrying the same keyword must not corrupt the
+extraction — **with an inline RED control** running the pre-fix form over the same input and
+requiring it to produce something other than the integer, so the green cannot be passing for an
+unrelated reason. The whole-suite RED arm reproduces the gate failure verbatim
+(`AGENT: unbound variable`).
+
+### The sweep — two instances make a family, so the family was enumerated
+
+Prior instance: `test_agent_gate_file_size_log.sh` case8, where a fourth `_fs_emit` moved a pinned
+rejected-write count 3 → 4. Same shape: **adding output to a guard breaks a test that parses that
+guard's output.** Every consumer of both guards' stdout was then checked, by breakage mode:
+
+| mode | result |
+|---|---|
+| counts LINES of either guard's output | **none** |
+| unanchored substitute-form sed over multi-line output | 6 sites, **all safe** — each is fed by a `grep -oE`/`grep -E`+`head -1` filter that guarantees a single matching line, except case 1b's deliberate RED control |
+| exact-equality on whole output | **none** |
+| CI workflows invoking either guard | **none** |
+| the gate's own `run_pub_surface` | **safe by construction** — it greps the anchored `MEASURED_RE` into a single-line `$measured` FIRST, then seds that one line. Recorded so nobody "fixes" it to match the test |
+| `run_file_size`'s persistence-error sibling and its landed-line-count check | **unaffected** — that block is built from the `msg` array, which the census line does not enter |
+
+So the family is closed at one defective instance, and the difference between the broken consumer
+and the safe ones is exactly **whether the parse is anchored before it substitutes**.
