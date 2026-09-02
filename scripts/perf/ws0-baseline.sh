@@ -128,6 +128,43 @@ source "$HERE/lib-measure.sh"
 CORPUS=""
 SERVER_CPUS="2,10"
 CLIENT_CPUS="4,12,5,13,6,14,7,15"
+# --- THE FLIGHT ARM'S OWN PIN AND ALLOCATOR (#3551) --------------------------------------
+# The rig has never had §3b step 3's DRIFT CONTROL: a leg that is code-identical AND
+# pin-identical across the arms being compared. These three variables are what create one.
+# Everything about the bare-scan arm stays on `$SERVER_CPUS`, so when only the FLIGHT pin (or
+# only the FLIGHT allocator) moves, the bare scan is the same program on the same cores in the
+# same session — the control the comparison needs — and the difference between arms is the ONE
+# property that changed.
+#
+# `FLIGHT_SERVER_CPUS` is EMPTY here and defaults to `$SERVER_CPUS` after the argument loop, so
+# EVERY EXISTING INVOCATION BEHAVES BYTE-IDENTICALLY: same taskset list, same perf counting
+# domain, same recorded manifest value. The default is resolved after the loop rather than here
+# because `--server-cpus` may be given AFTER `--flight-server-cpus` and the loop is
+# order-independent.
+FLIGHT_SERVER_CPUS=""
+# WHICH PROPERTY the flight pin must satisfy — `siblings` (one physical core's hyperthreads, the
+# #3096 default) or `distinct-cores` (one thread per physical core, the SMT-unpin arm). NOT a
+# relaxation: each value selects an EQUALLY AFFIRMATIVE assertion read from the real
+# `thread_siblings_list`, and an unknown value is a usage error rather than a default (see the
+# argument loop).
+FLIGHT_PIN_MODE="siblings"
+# Arm C: the Flight SERVER PROCESS ONLY runs under `LD_PRELOAD=<libjemalloc>`. The binary is
+# byte-identical across arms — that is the point of doing it with a preload rather than a build
+# flag — so nothing else in the rig changes.
+FLIGHT_ALLOCATOR="system"
+# An explicit library path for a host whose libjemalloc is somewhere else. EMPTY = DISCOVER from
+# the standard paths below, and a failed discovery is a NAMED REFUSAL rather than a silent
+# fall-through to the system allocator: a run labelled `jemalloc` that measured system malloc is
+# the instrument-reports-success-without-measuring shape this rig exists to refuse.
+FLIGHT_ALLOCATOR_LIB=""
+# The paths probed when `--jemalloc-lib` is not given. Multi-arch Debian/Ubuntu first (this box),
+# then the two common non-multi-arch layouts. Probed THREE-VALUED (present / verified-absent /
+# could-not-measure) — see resolve_flight_allocator_lib.
+FLIGHT_ALLOCATOR_LIB_CANDIDATES="/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+/usr/lib64/libjemalloc.so.2
+/usr/lib/libjemalloc.so.2
+/usr/local/lib/libjemalloc.so.2"
 REPS=3
 TEMPS="warm cold"
 ARMS="bypass"
@@ -209,6 +246,34 @@ ws0-baseline.sh — issue #3096 same-session Arrow-encode baseline
   --corpus DIR         Corpus root from ws0-corpus-gen (holds ws0/events/). REQUIRED.
   --server-cpus LIST   Pinned physical-core sibling pair for BOTH arms (default $SERVER_CPUS).
   --client-cpus LIST   CPUs for the Flight load generator; must not overlap (default $CLIENT_CPUS).
+  --flight-server-cpus LIST
+                       Pin the FLIGHT SERVER to LIST instead of --server-cpus. Defaults to
+                       --server-cpus, so omitting it changes nothing: same taskset list and
+                       the same CPU-wide counting domain as today. Verified before the first
+                       rep — every CPU present and ONLINE, disjoint from --client-cpus, and
+                       satisfying --flight-pin-mode. The BARE-SCAN arm always stays on
+                       --server-cpus, which is what makes it a pin-identical drift control
+                       across arms that differ only in the flight pin (#3551).
+  --flight-pin-mode WHICH
+                       siblings | distinct-cores (default $FLIGHT_PIN_MODE). NOT a relaxation
+                       of the sibling guard: both are read from the real thread_siblings_list
+                       and both fail closed. `siblings` REFUSES a distinct-core set;
+                       `distinct-cores` REFUSES a sibling pair, and REFUSES a single-CPU list
+                       (pairwise-distinct over one CPU compares nothing). An unknown value is
+                       a usage error, never a default.
+  --flight-allocator WHICH
+                       system | jemalloc (default $FLIGHT_ALLOCATOR). On jemalloc the Flight
+                       SERVER PROCESS ONLY is launched with LD_PRELOAD=<lib>; the binary is
+                       byte-identical across arms. VERIFIED AFTER START from
+                       /proc/<pid>/maps, per rep: glibc prints 'cannot be preloaded ...
+                       ignored' and CONTINUES with system malloc, so without that read arm C
+                       would be a byte-identical duplicate of arm B under a label saying
+                       otherwise. On `system` the NEGATIVE is asserted too (no jemalloc
+                       mapping) and any inherited LD_PRELOAD is emptied for the launch.
+  --jemalloc-lib PATH  The preloaded library, for a host where it is not one of the standard
+                       paths. Must be an existing, readable, regular file. Without it the
+                       path is DISCOVERED and a failed discovery REFUSES (remedy named) —
+                       never a silent fall-through to system malloc.
   --reps N             Reps per (arm, temperature). Median reported, spread printed (default $REPS).
   --temp WHICH         warm | cold | both (default both).
   --arm WHICH          bypass | merge | both (default bypass).
@@ -285,6 +350,21 @@ while [[ $# -gt 0 ]]; do
     --corpus) CORPUS="$2"; shift 2 ;;
     --server-cpus) SERVER_CPUS="$2"; shift 2 ;;
     --client-cpus) CLIENT_CPUS="$2"; shift 2 ;;
+    --flight-server-cpus) FLIGHT_SERVER_CPUS="$2"; shift 2 ;;
+    # A CLOSED SET, like --temp/--arm above: an unrecognised mode must not fall back to the
+    # default, because the whole point of the flag is WHICH property was asserted, and a run
+    # that silently asserted the other one is a measurement of something nobody asked for.
+    --flight-pin-mode)
+      case "$2" in
+        siblings|distinct-cores) FLIGHT_PIN_MODE="$2" ;;
+        *) echo "FATAL: --flight-pin-mode must be siblings|distinct-cores (got '$2')" >&2; exit 2 ;;
+      esac; shift 2 ;;
+    --flight-allocator)
+      case "$2" in
+        system|jemalloc) FLIGHT_ALLOCATOR="$2" ;;
+        *) echo "FATAL: --flight-allocator must be system|jemalloc (got '$2')" >&2; exit 2 ;;
+      esac; shift 2 ;;
+    --jemalloc-lib) FLIGHT_ALLOCATOR_LIB="$2"; shift 2 ;;
     --reps) REPS="$2"; shift 2 ;;
     --temp)
       case "$2" in
@@ -656,13 +736,111 @@ if [[ -n "$BIN_DIR" ]]; then
   done
 fi
 
+# --- THE FLIGHT PIN DEFAULTS TO THE SERVER PIN (#3551) -------------------------------------
+# AFTER the argument loop, because the loop is order-independent: resolving it at declaration
+# would make `--flight-server-cpus` + a later `--server-cpus` silently disagree with the flag the
+# operator wrote last. The equality is what makes this whole feature a NO-OP by default.
+if [[ -z "$FLIGHT_SERVER_CPUS" ]]; then
+  FLIGHT_SERVER_CPUS="$SERVER_CPUS"
+fi
+
+# --- WHAT STATE IS ONE PATH IN? THREE-VALUED, because two-valued always guesses (#3551) -----
+# `present` / `absent` / a NAMED unusable state. A plain `[ -f ]` collapses "this host has no
+# libjemalloc" onto "this host has one I cannot read", and those have different remedies —
+# install it vs fix its permissions — while the permissive reading of either is a run labelled
+# `jemalloc` that measured system malloc. `-L` is tested FIRST because `-e`/`-f` FOLLOW the link,
+# so a DANGLING symlink would otherwise read as `absent`, i.e. as a host with no jemalloc when
+# what it has is a broken install.
+flight_lib_state() {
+  local path="$1"
+  if [[ -L "$path" && ! -e "$path" ]]; then echo "dangling-symlink"; return 1; fi
+  if [[ ! -e "$path" ]]; then echo "absent"; return 1; fi
+  if [[ ! -f "$path" ]]; then echo "not-a-regular-file"; return 1; fi
+  if [[ ! -r "$path" ]]; then echo "unreadable"; return 1; fi
+  echo "present"
+}
+
+# --- RESOLVE THE PRELOADED LIBRARY ONCE, BEFORE ANY MEASUREMENT (#3551) ---------------------
+# Echoes the resolved absolute path; refuses (rc 1, diagnostic on stderr) otherwise. Called
+# ABOVE the argument boundary because it reads nothing but file metadata and because "refusing a
+# value after acting on it is not refusing it" — the same rule --bin-dir and --profile-out follow
+# a few lines up. An unusable candidate is a REFUSAL naming it, never a skip to the next one: a
+# silently skipped unreadable library is how a host with jemalloc installed reports that it has
+# none.
+resolve_flight_allocator_lib() {
+  local cand state
+  if [[ -n "$FLIGHT_ALLOCATOR_LIB" ]]; then
+    state="$(flight_lib_state "$FLIGHT_ALLOCATOR_LIB")" || {
+      echo "FATAL: --jemalloc-lib '$FLIGHT_ALLOCATOR_LIB' is $state, not a readable regular file." >&2
+      echo "       --flight-allocator jemalloc preloads exactly this path into the Flight" >&2
+      echo "       server, so an unusable one has no reachable success: glibc would print" >&2
+      echo "       'object ... cannot be preloaded ... ignored' and CONTINUE with system" >&2
+      echo "       malloc, and the rep would be arm B wearing arm C's label. Refused here," >&2
+      echo "       before any build, cache drop or measurement." >&2
+      echo "       Install it and drop the flag:  sudo apt-get install -y libjemalloc2" >&2
+      return 1
+    }
+    printf '%s\n' "$FLIGHT_ALLOCATOR_LIB"
+    return 0
+  fi
+  while IFS= read -r cand; do
+    [[ -n "$cand" ]] || continue
+    state="$(flight_lib_state "$cand")" && { printf '%s\n' "$cand"; return 0; }
+    if [[ "$state" != "absent" ]]; then
+      echo "FATAL: the candidate jemalloc library '$cand' is $state." >&2
+      echo "       That is a COULD-NOT-MEASURE state, not an absence, so it is refused rather" >&2
+      echo "       than skipped: skipping it would report 'jemalloc is not installed' about a" >&2
+      echo "       host that has it, and the remedy for the two is different (#3551)." >&2
+      echo "       Fix that path, or name a usable one with --jemalloc-lib PATH." >&2
+      return 1
+    fi
+  done <<<"$FLIGHT_ALLOCATOR_LIB_CANDIDATES"
+  echo "FATAL: --flight-allocator jemalloc was requested and no jemalloc library was found." >&2
+  echo "       Probed (each verified ABSENT, not merely unmatched):" >&2
+  while IFS= read -r cand; do
+    [[ -n "$cand" ]] || continue
+    echo "         $cand" >&2
+  done <<<"$FLIGHT_ALLOCATOR_LIB_CANDIDATES"
+  echo "       Remedy:  sudo apt-get install -y libjemalloc2" >&2
+  echo "       (or name the path with --jemalloc-lib PATH). This is a REFUSAL and never a" >&2
+  echo "       fall-through to --flight-allocator system: an arm C that quietly measured" >&2
+  echo "       system malloc would be a byte-identical duplicate of arm B under a label that" >&2
+  echo "       says otherwise (#3551)." >&2
+  return 1
+}
+
+# WHAT IS RECORDED for the allocator, resolved here so the manifest, the pin record and the
+# per-rep verification all read ONE value. `none (...)` is a positive statement rather than an
+# empty field: "no library" and "nobody wrote the field down" must not look the same.
+if [[ "$FLIGHT_ALLOCATOR" == "jemalloc" ]]; then
+  FLIGHT_ALLOCATOR_LIB="$(resolve_flight_allocator_lib)" || exit 2
+  FLIGHT_ALLOCATOR_LIB_RECORDED="$FLIGHT_ALLOCATOR_LIB"
+  FLIGHT_ALLOCATOR_LIB_BASENAME="${FLIGHT_ALLOCATOR_LIB##*/}"
+  # WHAT IS ASSERTED PER REP, recorded verbatim into the pin record so the report's allocator
+  # line cites a mechanism rather than a label. It also states its OWN LIMIT, in the record, for
+  # the reason `provenance` does: the per-rep files are written where the observation is made and
+  # NOTHING AT REPORT TIME requires them to be present.
+  FLIGHT_ALLOCATOR_VERIFICATION="per rep, AFTER await_server_ready: /proc/<server-pid>/maps is READ and must carry a mapping whose path contains '$FLIGHT_ALLOCATOR_LIB_BASENAME'; an absent mapping is FATAL for that rep, and an unreadable/empty maps file is FATAL as COULD-NOT-MEASURE (never read as verified). Necessary because glibc prints 'object ... cannot be preloaded ... ignored' and CONTINUES with system malloc, which would make this arm a byte-identical duplicate of the system arm under a label saying otherwise. Each rep's outcome is written to <tag>.allocator.status by scripts/perf/lib-measure.sh verify_flight_allocator_mapping. DECLARED LIMIT: the driver ABORTS on a failure, and nothing at REPORT time requires those per-rep files to exist — that completeness check is the boundary-observation shape (#3272 round 22) and is NOT implemented for the allocator (#3551)."
+else
+  FLIGHT_ALLOCATOR_LIB=""
+  FLIGHT_ALLOCATOR_LIB_RECORDED="none (system malloc; any inherited LD_PRELOAD is EMPTIED for the server launch, and the absence of a jemalloc mapping is asserted per rep)"
+  FLIGHT_ALLOCATOR_LIB_BASENAME=""
+  # THE NEGATIVE IS ASSERTED TOO. A control arm silently running jemalloc — an operator with
+  # `LD_PRELOAD` exported in their shell — would INVERT the comparison, so it is refused rather
+  # than assumed: the launch EMPTIES `LD_PRELOAD` and the absence of a jemalloc mapping is then
+  # OBSERVED. Same declared limit as the jemalloc branch.
+  FLIGHT_ALLOCATOR_VERIFICATION="per rep, AFTER await_server_ready: /proc/<server-pid>/maps is READ and must carry NO jemalloc mapping; one present is FATAL, and an unreadable/empty maps file is FATAL as COULD-NOT-MEASURE (never read as verified). LD_PRELOAD is EMPTIED for the server launch rather than trusted to be unset, because a control arm quietly running jemalloc inverts the whole result. Each rep's outcome is written to <tag>.allocator.status by scripts/perf/lib-measure.sh verify_flight_allocator_mapping. DECLARED LIMIT: the driver ABORTS on a failure, and nothing at REPORT time requires those per-rep files to exist — that completeness check is the boundary-observation shape (#3272 round 22) and is NOT implemented for the allocator (#3551)."
+fi
+
 if [[ "$VALIDATE_ONLY" == "1" ]]; then
   # `baseline-mode` is in the stamp so the hermetic self-tests can observe WHICH claim the run
   # makes without executing anything. The canonical-corpus COMPARISON itself is necessarily below
   # this boundary (it reads the corpus's recorded identity off disk), like the schema check.
   echo "ARGUMENTS OK (--validate-args-only): reps=$REPS temps=[$TEMPS] arms=[$ARMS]" \
        "port=$PORT scan-passes=$SCAN_PASSES step=$STEP_DURATION cold-step=$COLD_STEP_DURATION" \
-       "baseline-mode=$BASELINE_MODE events=[$EVENTS] bin-dir=[${BIN_DIR:-<default target/release>}]"
+       "baseline-mode=$BASELINE_MODE events=[$EVENTS] bin-dir=[${BIN_DIR:-<default target/release>}]" \
+       "flight-cpus=$FLIGHT_SERVER_CPUS flight-pin-mode=$FLIGHT_PIN_MODE" \
+       "flight-allocator=$FLIGHT_ALLOCATOR jemalloc-lib=[$FLIGHT_ALLOCATOR_LIB_RECORDED]"
   echo "  nothing was executed: no sysctl write, no build, no cache drop, no perf, no measurement."
   exit 0
 fi
@@ -697,6 +875,52 @@ echo "$WS0_SERVER_SIBLINGS"
 # NOT `verify_sibling_pair … || echo` (#3272 round 21) — that `||` swallowed every failure, so an offline/absent CPU was accepted, affinity silently reduced, manifest wrong: see verify_cpus_online.
 verify_cpus_online "$CLIENT_CPUS" "client" || exit 2
 verify_disjoint "$SERVER_CPUS" "$CLIENT_CPUS"
+
+# --- THE FLIGHT ARM'S PIN, VERIFIED WITH THE SAME RIGOUR AS THE SERVER'S (#3551) -----------
+# Three checks, all BEFORE the first rep and all fail-closed, in the order whose diagnostic is
+# most specific:
+#
+#   1. every CPU EXISTS and is ONLINE. `sched_setaffinity` ANDs the requested mask with
+#      `cpu_online_mask`, so an offline member is silently dropped and the manifest then records
+#      CPUs that never ran an instruction (#3272 round 21, one flag over).
+#   2. the requested PIN MODE holds, read from the real `thread_siblings_list`. Two modes, two
+#      affirmative assertions — never a relaxation. The `*` arm is an internal fail-closed guard:
+#      the argument loop already refused every other value, and a mode reaching here unhandled
+#      must stop the run rather than inherit either assertion.
+#   3. DISJOINT from the client set, for the reason the server set is: a client sharing a
+#      physical core with the server puts the client's own cost inside the counted window.
+#
+# `verify_cpus_online`'s stdout is DISCARDED here and its refusal is what this call is for: its
+# success line ends "only the SERVER set must be one physical core", which is a true statement
+# about `--server-cpus` and a misleading one printed under a flight label. The substance of the
+# flight verification is the pin-mode echo below, which is captured and RECORDED.
+verify_cpus_online "$FLIGHT_SERVER_CPUS" "flight server" >/dev/null || exit 2
+echo "flight server CPUs: $FLIGHT_SERVER_CPUS -> verified present and ONLINE"
+case "$FLIGHT_PIN_MODE" in
+  siblings)
+    WS0_FLIGHT_PIN_VERIFIED="$(verify_sibling_pair "$FLIGHT_SERVER_CPUS" "flight server")" || exit 2 ;;
+  distinct-cores)
+    WS0_FLIGHT_PIN_VERIFIED="$(verify_distinct_cores "$FLIGHT_SERVER_CPUS" "flight server")" || exit 2 ;;
+  *)
+    echo "FATAL: --flight-pin-mode '$FLIGHT_PIN_MODE' reached the topology stage unhandled." >&2
+    echo "       The argument loop refuses every value but siblings|distinct-cores, so this is" >&2
+    echo "       an internal inconsistency. It stops the run rather than defaulting to either" >&2
+    echo "       assertion: which property was VERIFIED is what the report claims (#3551)." >&2
+    exit 2 ;;
+esac
+echo "$WS0_FLIGHT_PIN_VERIFIED"
+verify_disjoint "$FLIGHT_SERVER_CPUS" "$CLIENT_CPUS"
+
+# --- THE COUNTING DOMAIN FOLLOWS THE ARM (#3551) -------------------------------------------
+# `perf_stat_c`/`perf_record_c` count CPU-WIDE over `$PERF_COUNT_CPUS`, and the two arms no
+# longer necessarily run on the same CPUs. Counting the SERVER set while the Flight server ran on
+# a DIFFERENT set would collect cycles from cores that served nothing and divide them by this
+# rep's rows — a cycles/row figure of the wrong CPUs, silently, which is the exact defect class
+# the sibling check exists to prevent one level down. So each measurement leg sets this to the
+# CPUs ITS server actually ran on (`lib-measure.sh`), and it is initialised here so no perf
+# invocation can ever see it unset. With the flight pin at its default the value is identical in
+# both arms and every argv is byte-for-byte what it is today.
+PERF_COUNT_CPUS="$SERVER_CPUS"
 
 # ---------------------------------------------------------------------------
 # Server lifecycle — ONLY the process THIS script started (issue #3096 review)
@@ -956,6 +1180,7 @@ WS0_CFG_ARMS="$ARMS" \
 WS0_CFG_SCAN_PASSES="$SCAN_PASSES" \
 WS0_CFG_SERVER_CPUS="$SERVER_CPUS" \
 WS0_CFG_CLIENT_CPUS="$CLIENT_CPUS" \
+WS0_CFG_FLIGHT_SERVER_CPUS="$FLIGHT_SERVER_CPUS" \
 WS0_CFG_STEP_DURATION="$STEP_DURATION/$COLD_STEP_DURATION" \
 WS0_CFG_FLIGHT_ENDPOINT="$FLIGHT_ENDPOINT" \
 WS0_CFG_BASELINE_MODE="$BASELINE_MODE" \
@@ -1049,6 +1274,12 @@ WS0_PIN_SERVER_CPUS="$SERVER_CPUS" \
 WS0_PIN_CLIENT_CPUS="$CLIENT_CPUS" \
 WS0_PIN_SIBLINGS="$WS0_SERVER_SIBLINGS" \
 WS0_PIN_TOPOLOGY_ROOT="$CPU_TOPOLOGY_ROOT" \
+WS0_PIN_FLIGHT_SERVER_CPUS="$FLIGHT_SERVER_CPUS" \
+WS0_PIN_FLIGHT_PIN_MODE="$FLIGHT_PIN_MODE" \
+WS0_PIN_FLIGHT_PIN_VERIFIED="$WS0_FLIGHT_PIN_VERIFIED" \
+WS0_PIN_FLIGHT_ALLOCATOR="$FLIGHT_ALLOCATOR" \
+WS0_PIN_FLIGHT_ALLOCATOR_LIB="$FLIGHT_ALLOCATOR_LIB_RECORDED" \
+WS0_PIN_FLIGHT_ALLOCATOR_VERIFICATION="$FLIGHT_ALLOCATOR_VERIFICATION" \
 python3 -c '
 import json, os, pathlib, socket, sys
 sys.path.insert(0, sys.argv[1])
@@ -1061,6 +1292,21 @@ rec = {
     # read out of thread_siblings_list.
     "server_siblings_expanded": os.environ["WS0_PIN_SIBLINGS"],
     "topology_root": os.environ["WS0_PIN_TOPOLOGY_ROOT"],
+    # THE FLIGHT ARM (#3551). Recorded because the report prints a claim about each of them, and
+    # because a value that exists in no artifact is a claim resting on the operators memory of
+    # what they typed. `flight_server_cpus` is additionally compared against the MANIFEST by
+    # `ws0_pinning.verify_pinning_record`, which is the F6 substitution check extended to the
+    # new pin: a manifest edited to name CPUs no verification ran against is refused rather than
+    # printed as verified.
+    "flight_server_cpus": os.environ["WS0_PIN_FLIGHT_SERVER_CPUS"],
+    "flight_pin_mode": os.environ["WS0_PIN_FLIGHT_PIN_MODE"],
+    # The sysfs ANSWER for the flight pin — `verify_sibling_pair`s or `verify_distinct_cores`s
+    # own output line, carrying the expanded sibling sets it read. The substance of the
+    # verification, not a restatement of the argument.
+    "flight_pin_verified": os.environ["WS0_PIN_FLIGHT_PIN_VERIFIED"],
+    "flight_allocator": os.environ["WS0_PIN_FLIGHT_ALLOCATOR"],
+    "flight_allocator_lib": os.environ["WS0_PIN_FLIGHT_ALLOCATOR_LIB"],
+    "flight_allocator_verification": os.environ["WS0_PIN_FLIGHT_ALLOCATOR_VERIFICATION"],
     "host": socket.gethostname() or "unknown",
     "verified_by": "scripts/perf/lib-cpu.sh verify_sibling_pair + verify_disjoint, fail-closed,"
                    " against the real thread_siblings_list BEFORE the first rep",
@@ -1178,7 +1424,7 @@ perf_record_c() {
   #
   # Defaults on the driver globals, same standalone-extraction rule as perf_stat_c below: two
   # suites text-extract these functions and run them under `set -u`.
-  exec perf record -e cycles -F "${PROFILE_FREQ:-499}" -C "$SERVER_CPUS" -o "$outfile" -- sleep 86400
+  exec perf record -e cycles -F "${PROFILE_FREQ:-499}" -C "$PERF_COUNT_CPUS" -o "$outfile" -- sleep 86400
 }
 
 perf_stat_c() {
@@ -1305,7 +1551,7 @@ perf_stat_c() {
   # Testing the status with `||` suppresses `set -e` for this command only, so the cleanup
   # always runs and the measured status is still propagated by `return $_rc` below.
   local _rc=0
-  perf stat -x, -e "$EVENTS" -C "$SERVER_CPUS" -o "$outfile" -- "$@" || _rc=$?
+  perf stat -x, -e "$EVENTS" -C "$PERF_COUNT_CPUS" -o "$outfile" -- "$@" || _rc=$?
   if [[ -n "$_prof_pid" ]]; then
     # SIGINT, not SIGKILL: perf finalises perf.data on INT and leaves an unreadable stub on KILL.
     # THE PROFILER MUST STILL HAVE BEEN RUNNING, AND ITS EXIT STATUS IS READ (#3248, roborev
