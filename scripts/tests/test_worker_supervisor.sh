@@ -9360,8 +9360,11 @@ t test_lane_lock_failure_cause_is_not_inferred_from_later_state
 # `FATAL: lane-identity-unprovable` when it cannot derive a per-lane identity, and a
 # plain scratch repo is not a lane worktree. Supplying the identity is what the refusal
 # itself recommends, and it keeps the fixture a one-`git init` tree.
+# The optional 5th argument is a shell line the stub runs BEFORE printing its verdict —
+# used by the monotonicity case to have a PEER LANE latch the box while this lane's sweep
+# is still in flight, which is the only way to stage the stale-writer race in one process.
 obj_sweep_tree() {
-  local d="$1" verdict="$2" rc="$3" calllog="${4:-}" root="$d/root"
+  local d="$1" verdict="$2" rc="$3" calllog="${4:-}" during="${5:-}" root="$d/root"
   mkdir -p "$root/scripts/local" "$root/scripts/lib"
   git -C "$root" init -q 2>/dev/null
   git -C "$root" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
@@ -9373,6 +9376,7 @@ obj_sweep_tree() {
     printf '#!/usr/bin/env bash\n'
     printf '# STUB sweep: record the invocation, print one anchored verdict, exit with its code.\n'
     [[ -n "$calllog" ]] && printf 'printf "called\\n" >>%s\n' "$(printf '%q' "$calllog")"
+    [[ -n "$during" ]] && printf '%s\n' "$during"
     printf 'printf "OBJECT-STORE: measured stub\\n"\n'
     printf 'printf "OBJECT-STORE: object deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\\n"\n'
     printf 'printf "OBJECT-STORE: verdict %s\\n"\n' "$verdict"
@@ -9566,21 +9570,32 @@ t test_object_store_sweep_verdicts
 t test_object_store_sweep_throttle_and_disable
 t test_object_store_sweep_knobs
 
-# THE THROTTLE MUST NOT SUPPRESS A PEER LANE'S CORRUPT (#3749 review, BLOCKER A).
+# THE THROTTLE MUST NOT SUPPRESS A PEER LANE'S CORRUPT, AND NOTHING MAY UN-RECORD ONE
+# (#3749 review, BLOCKER A of round 1 and BLOCKER 1 of round 2).
 #
-# THE DEFECT: the stamp is keyed on the SHARED object store and lives in a box-wide
-# directory, and it used to record only a TIMESTAMP — written for every outcome. So the
-# lane that DETECTED corruption stopped, and its three peers then saw a fresh stamp,
-# skipped their own sweep for the whole 6-hour interval, and kept spawning workers against
-# a store known to be damaged: the exact harm the feature exists to prevent, delivered by
-# its own throttle.
+# THE ROUND-1 DEFECT: the stamp is keyed on the SHARED object store and lives in a
+# box-wide directory, and it used to record only a TIMESTAMP — written for every outcome.
+# So the lane that DETECTED corruption stopped, and its three peers then saw a fresh
+# stamp, skipped their own sweep for the whole 6-hour interval, and kept spawning workers
+# against a store known to be damaged: the exact harm the feature exists to prevent,
+# delivered by its own throttle.
 #
-# The two halves are asserted separately, because either alone can pass while the box is
-# still unprotected: (1) a CORRUPT run RECORDS the verdict, and (2) a later lane reading
-# that record STOPS — without re-sweeping, and while the interval is still fresh.
+# THE ROUND-2 DEFECT, WHICH IS THE SAME HARM THROUGH A DIFFERENT DOOR: round 1 fixed it by
+# putting the VERDICT in that same stamp. A stamp write is an unsynchronised overwrite, so
+# a lane whose sweep STARTED before the detection could finish AFTER it and replace
+# `CORRUPT` with `VERIFIED`. Peers then throttle on the fresh non-corrupt stamp and keep
+# working. The verdict therefore no longer lives in a mutable cell at all: it is a
+# SEPARATE CREATE-ONLY file, `<stamp>.CORRUPT`, whose only transition is ABSENT -> PRESENT.
+#
+# The halves are asserted separately, because each can pass while the box is unprotected:
+# (1) a CORRUPT run RECORDS the verdict, (2) a later lane reading that record STOPS,
+# (3) the record NAMES how to clear it, (4) the control shows the stop is the record and
+# not the file's mere presence, (5) A WRITER FINISHING AFTER THE RECORD CANNOT UNDO IT,
+# and (6) the create-only primitive itself is create-only, extracted from the shipped
+# script rather than restated here.
 test_object_store_corrupt_verdict_outlives_the_throttle() {
-  local d root counter calls rc stamp
-  # (1) A CORRUPT sweep records the VERDICT beside the timestamp.
+  local d root counter calls rc stamp latch
+  # (1) A CORRUPT sweep records the verdict in the LATCH, beside a plain-epoch stamp.
   d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-corrupt"
   common_env "$d"
   write_finalize_stub "$d/bin/worker.sh" "$counter"
@@ -9588,20 +9603,21 @@ test_object_store_corrupt_verdict_outlives_the_throttle() {
   export MAX_ISSUES=1
   export OBJ_SWEEP_INTERVAL_HOURS=6
   export OBJ_SWEEP_STAMP="$d/sweep.stamp"
-  stamp="$OBJ_SWEEP_STAMP"
+  stamp="$OBJ_SWEEP_STAMP"; latch="$stamp.CORRUPT"
   root="$(obj_sweep_tree "$d" CORRUPT 4 "$calls")"
   env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/detect.log" 2>&1
   rc=$?
-  if [[ "$rc" -eq 1 ]] && [[ "$(sed -n 2p "$stamp" 2>/dev/null)" == "CORRUPT" ]] &&
-     grep -qE '^[0-9]+$' <(sed -n 1p "$stamp" 2>/dev/null); then
-    pass "obj-sweep(corrupt-latch): the detecting lane RECORDS 'CORRUPT' in the shared stamp, not just an epoch"
+  if [[ "$rc" -eq 1 && -e "$latch" ]] && grep -q '^CORRUPT$' "$latch" &&
+     grep -qE '^[0-9]+$' <(sed -n 1p "$stamp" 2>/dev/null) &&
+     [[ "$(wc -l <"$stamp" | tr -d ' ')" -eq 1 ]]; then
+    pass "obj-sweep(corrupt-latch): the detecting lane creates the box-wide CORRUPT latch, and the throttle stamp stays a plain epoch"
   else
-    fail "obj-sweep(corrupt-latch): rc=$rc stamp='$(tr '\n' '/' <"$stamp" 2>/dev/null)' (wanted an epoch then CORRUPT)"
+    fail "obj-sweep(corrupt-latch): rc=$rc latch='$(tr '\n' '/' <"$latch" 2>/dev/null)' stamp='$(tr '\n' '/' <"$stamp" 2>/dev/null)'"
   fi
   # (2) THE PEER LANE. Same box, same stamp, INSIDE the interval — and ONE property
   #     different from the run above: its sweep stub would report VERIFIED. It must still
   #     stop, and it must NOT re-sweep (the stub records its invocations, so this is
-  #     measured, not inferred) and must name how to clear the latch.
+  #     measured, not inferred).
   calls="$d/calls-peer"
   root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
   env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/peer.log" 2>&1
@@ -9609,18 +9625,18 @@ test_object_store_corrupt_verdict_outlives_the_throttle() {
   if [[ "$rc" -eq 1 && ! -s "$calls" ]] &&
      grep -q '"reason":"object-store-corrupt"' "$JOURNAL_FILE" &&
      grep -q 'object-store: CORRUPT (cached' "$d/peer.log"; then
-    pass "obj-sweep(corrupt-latch): a PEER lane inside the interval STOPS on the cached verdict instead of throttling past it — without re-sweeping"
+    pass "obj-sweep(corrupt-latch): a PEER lane inside the interval STOPS on the latch instead of throttling past it — without re-sweeping"
   else
     fail "obj-sweep(corrupt-latch-peer): rc=$rc reswept=$([[ -s "$calls" ]] && echo yes || echo no) (see $d/peer.log)"
   fi
-  if grep -q "rm -f $stamp" "$d/peer.log"; then
-    pass "obj-sweep(corrupt-latch): the remedy NAMES the file to remove — a latch nobody can clear bricks the box after the repair"
+  if grep -q "rm -f $latch" "$d/peer.log"; then
+    pass "obj-sweep(corrupt-latch): the remedy NAMES the LATCH file to remove — a latch nobody can clear bricks the box after the repair"
   else
     fail "obj-sweep(corrupt-latch): the stop gives no way to clear the latch (see $d/peer.log)"
   fi
-  # (3) THE CONTROL, one property apart from (2): the SAME fresh stamp carrying VERIFIED.
-  #     The lane must proceed and, being inside the interval, must NOT sweep — so (2)'s
-  #     stop is attributable to the recorded verdict and not to the stamp's mere presence.
+  # (3) THE CONTROL, one property apart from (2): the SAME fresh stamp with NO latch
+  #     beside it. The lane must proceed and, being inside the interval, must NOT sweep —
+  #     so (2)'s stop is attributable to the latch and not to the stamp's mere presence.
   d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-control"
   common_env "$d"
   write_finalize_stub "$d/bin/worker.sh" "$counter"
@@ -9628,18 +9644,160 @@ test_object_store_corrupt_verdict_outlives_the_throttle() {
   export MAX_ISSUES=1
   export OBJ_SWEEP_INTERVAL_HOURS=6
   export OBJ_SWEEP_STAMP="$d/sweep.stamp"
-  printf '%s\nVERIFIED\n' "$(date +%s)" >"$OBJ_SWEEP_STAMP"
+  printf '%s\n' "$(date +%s)" >"$OBJ_SWEEP_STAMP"
   root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
   env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/control.log" 2>&1
   rc=$?
   if [[ "$rc" -eq 0 && ! -s "$calls" && -f "$counter" ]]; then
-    pass "obj-sweep(corrupt-latch): the SAME stamp carrying VERIFIED throttles normally and the worker runs — the stop above is the recorded verdict, not the file"
+    pass "obj-sweep(corrupt-latch): the SAME fresh stamp WITHOUT a latch throttles normally and the worker runs — the stop above is the latch, not the file"
   else
     fail "obj-sweep(corrupt-latch-control): rc=$rc swept=$([[ -s "$calls" ]] && echo yes || echo no) spawned=$([[ -f "$counter" ]] && echo yes || echo no) (see $d)"
   fi
 }
 
 t test_object_store_corrupt_verdict_outlives_the_throttle
+
+# THE STALE WRITER (#3749 review round 2, BLOCKER 1). This is the case round 1 did not
+# have, and the one its design could not have passed.
+#
+# THE RACE, STAGED IN ONE PROCESS. Lane B reads no latch and starts a sweep. WHILE it is
+# running, peer lane A finds the store damaged and records CORRUPT. Lane B's sweep then
+# finishes and writes its own result. Under round 1 that write was an overwrite of the one
+# shared cell holding the verdict, so `VERIFIED` replaced `CORRUPT` and every lane on the
+# box — including A's successor — throttled on a fresh, non-corrupt stamp.
+#
+# The sweep stub creates the latch itself, which IS lane A's write: what matters is that
+# it lands after lane B's read and before lane B's write, and a side effect inside the
+# stub is the only way to place it there deterministically (a real second supervisor
+# would race the assertion, not the code).
+test_object_store_latch_survives_a_writer_that_finishes_after_it() {
+  local d root counter calls rc stamp latch after stamp_ts
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-late"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  stamp="$OBJ_SWEEP_STAMP"; latch="$stamp.CORRUPT"
+  # The peer's bytes are DISTINCTIVE, so "unchanged" below is a comparison and not an
+  # existence test: a re-created latch would carry the supervisor's own two lines.
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls" \
+    "printf '1700000000\nCORRUPT\nplanted-by-peer-lane-A\n' >$(printf '%q' "$latch")")"
+  # CONSTRUCTION, asserted before the subject runs: no latch exists yet, so lane B really
+  # does start its sweep unlatched and take the write path at the end.
+  if [[ ! -e "$latch" ]]; then
+    pass "obj-sweep(stale-writer-plant): the box starts UNLATCHED, so the run below really reaches the post-sweep write path"
+  else
+    fail "obj-sweep(stale-writer-plant): a latch already exists at $latch — the case below would prove nothing"
+  fi
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/late.log" 2>&1
+  rc=$?
+  after="$(cat "$latch" 2>/dev/null || true)"
+  stamp_ts="$(sed -n 1p "$stamp" 2>/dev/null || true)"
+  # CONSTRUCTION, second half: the stub really ran (so the write path really executed) and
+  # the latch really appeared DURING it.
+  if [[ "$(obj_sweep_calls "$calls")" -eq 1 && -e "$latch" ]]; then
+    pass "obj-sweep(stale-writer-plant): the sweep ran exactly once and the peer's latch appeared while it was in flight"
+  else
+    fail "obj-sweep(stale-writer-plant): calls=$(obj_sweep_calls "$calls") latch=$([[ -e "$latch" ]] && echo yes || echo no) — the assertions below would prove nothing"
+  fi
+  # THE SUBJECT: the VERIFIED writer that finished after the record did not un-record it.
+  if [[ "$after" == $'1700000000\nCORRUPT\nplanted-by-peer-lane-A' ]]; then
+    pass "obj-sweep(stale-writer): a sweep that FINISHES after a peer recorded CORRUPT cannot overwrite it — the peer's bytes are intact"
+  else
+    fail "obj-sweep(stale-writer): the latch was rewritten by the finishing VERIFIED sweep: '$(printf '%s' "$after" | tr '\n' '/')'"
+  fi
+  # ...and it is not that the writer wrote NOTHING: the throttle cell, which is harmless
+  # to move, DID move. One writer, two cells, exactly one of them mutable — that pairing is
+  # the design, and asserting only the first half would also pass a supervisor that had
+  # simply stopped recording anything.
+  if [[ "$stamp_ts" =~ ^[0-9]+$ ]] && [[ "$stamp_ts" -ge 1700000001 ]]; then
+    pass "obj-sweep(stale-writer): the same writer DID advance the throttle timestamp — the immutability is the latch's, not a supervisor that wrote nothing"
+  else
+    fail "obj-sweep(stale-writer): the throttle stamp reads '$stamp_ts' — the writer never completed its write path, so the case above is vacuous"
+  fi
+  # ...and the harm is prevented END TO END: the next lane on this box stops.
+  calls="$d/calls-successor"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/successor.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 1 && ! -s "$calls" ]] && grep -q 'object-store: CORRUPT (cached' "$d/successor.log"; then
+    pass "obj-sweep(stale-writer): the NEXT lane on the box still stops — the peer's CORRUPT survived a later VERIFIED writer end to end"
+  else
+    fail "obj-sweep(stale-writer-successor): rc=$rc reswept=$([[ -s "$calls" ]] && echo yes || echo no) (see $d/successor.log)"
+  fi
+}
+
+t test_object_store_latch_survives_a_writer_that_finishes_after_it
+
+# THE CREATE-ONLY PRIMITIVE ITSELF (#3749 review round 2, BLOCKER 1).
+#
+# The case above proves the harm is prevented on the path the supervisor takes. This one
+# asks the narrower question the design rests on — can `obj_sweep_set_latch` ever
+# OVERWRITE — and it asks it of the SHIPPED function, extracted from
+# scripts/local/worker-supervisor.sh at run time, so restating the implementation here
+# could not make it pass. Two reachable states are then covered that the supervisor path
+# cannot stage: a latch that already exists (a peer won the race), and one that cannot be
+# created at all (an unwritable directory), which must be reported and never silently read
+# as "latched".
+test_object_store_set_latch_is_create_only() {
+  local d fns rc out latch
+  d="$(new_case_dir)"
+  fns="$d/extracted.sh"
+  sed -n '/^obj_sweep_latch_present() {/,/^}/p;/^obj_sweep_set_latch() {/,/^}/p' \
+    "$SUPERVISOR" >"$fns"
+  # CONSTRUCTION: the extraction really got both functions, and the create-only mechanism
+  # really is in the extracted text. Without this the cases below could be measuring an
+  # empty file (every one of which would `command not found` and be reported as a failure,
+  # but with a cause nobody could attribute).
+  if grep -q '^obj_sweep_set_latch() {' "$fns" && grep -q '^obj_sweep_latch_present() {' "$fns" &&
+     grep -q 'set -C' "$fns"; then
+    pass "obj-sweep(set-latch-plant): both functions were extracted from the shipped supervisor, noclobber included"
+  else
+    fail "obj-sweep(set-latch-plant): the extraction from $SUPERVISOR did not yield the functions — the cases below would prove nothing"
+    return 0
+  fi
+  # (a) ABSENT -> PRESENT: it creates, and reports success.
+  latch="$d/a.CORRUPT"
+  rc=0
+  out="$(bash -c 'set -euo pipefail; . "$1"; obj_sweep_set_latch "$2"' _ "$fns" "$latch" 2>&1)" || rc=$?
+  if [[ "$rc" -eq 0 && -e "$latch" ]] && grep -q '^CORRUPT$' "$latch"; then
+    pass "obj-sweep(set-latch): an absent latch is created and the call reports success"
+  else
+    fail "obj-sweep(set-latch-create): rc=$rc out=[$out] content='$(tr '\n' '/' <"$latch" 2>/dev/null)'"
+  fi
+  # (b) PRESENT -> PRESENT, ONE property apart from (a): the file already exists. It must
+  #     report success (the box IS latched) and leave the incumbent's bytes ALONE.
+  latch="$d/b.CORRUPT"
+  printf 'incumbent\n' >"$latch"
+  rc=0
+  out="$(bash -c 'set -euo pipefail; . "$1"; obj_sweep_set_latch "$2"' _ "$fns" "$latch" 2>&1)" || rc=$?
+  if [[ "$rc" -eq 0 && "$(cat "$latch")" == "incumbent" ]]; then
+    pass "obj-sweep(set-latch): an EXISTING latch is left byte-for-byte alone and still reports latched — the transition is ABSENT -> PRESENT only"
+  else
+    fail "obj-sweep(set-latch-existing): rc=$rc content='$(tr '\n' '/' <"$latch")' out=[$out]"
+  fi
+  # (c) CANNOT PERSIST: an unwritable directory. The call must report FAILURE, because the
+  #     caller has to say so out loud — a create that could not happen must never be read
+  #     as a latched box.
+  if [[ "$(id -u)" == "0" ]]; then
+    skip "obj-sweep(set-latch): running as root, where an unwritable directory is not unwritable — the could-not-persist direction cannot be staged"
+    return 0
+  fi
+  mkdir -p "$d/ro"
+  chmod 500 "$d/ro"
+  rc=0
+  out="$(bash -c 'set -euo pipefail; . "$1"; obj_sweep_set_latch "$2"' _ "$fns" "$d/ro/c.CORRUPT" 2>&1)" || rc=$?
+  chmod 700 "$d/ro"
+  if [[ "$rc" -ne 0 && "$out" != *"No such file"* ]]; then
+    pass "obj-sweep(set-latch): a latch that CANNOT be created reports failure rather than a silently latched box"
+  else
+    fail "obj-sweep(set-latch-unwritable): rc=$rc out=[$out] — a failed create was reported as success"
+  fi
+}
+
+t test_object_store_set_latch_is_create_only
 
 # ---------------------------------------------------------------------------
 # Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.
