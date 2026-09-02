@@ -979,3 +979,59 @@ which converged onto one classifier in round 5. These two are *not* converged �
 different questions and share only their key space — but their **domain derivations** are now
 identical by construction. When widening a domain derivation, the question to ask is: *what else
 derives this same domain?*
+
+---
+
+## roborev round 14 (job 402) — and the r4 sweep's scope was too narrow
+
+### The fix
+
+The `both` arm keyed its "no libtest tally" wording on `total == 0`, which is **also true of a
+tally that is PRESENT and reports zero**. `seen` has existed since job 389 precisely so those two
+can be told apart — the `libtest` arm already used it; `both` was the branch that never consumed
+the second value. No verdict moves: `total` still decides the state, `seen` only decides how it is
+EXPLAINED. All four zero-shapes now describe accurately:
+
+| log | text |
+|---|---|
+| quiet, no tally | `NOT-MEASURED <c>.log has no libtest tally, and <quiet note>` |
+| quiet, tally present saying 0 | `NOT-MEASURED <c>.log has 1 libtest result line(s), all reporting 0 passed, and <quiet note>` |
+| loud, no tally, no Executable | `ZERO tests and test binaries — … no 'Executable' line, and no libtest tally` |
+| loud, tally present saying 0 | `ZERO tests and test binaries — … no 'Executable' line, and 1 libtest result line(s), all reporting 0 passed` |
+
+### The scope correction
+
+Round 4 swept *"every label and counter on the aggregate `census:` line and in `_fm_annotate`'s
+census suffix"* and recorded the family CLOSED. **It was not**: the texts that BUILD the record
+feed the annotation, so they were in the family's blast radius and outside the sweep's stated
+subject. Enumerated now — every string the producers can emit into a record, with the observed
+values that justify it:
+
+| producer | text | justified by |
+|---|---|---|
+| `_census_measure_kind` | `NOT-MEASURED could not read or ANSI-normalise …` | the strip returned empty/unreadable |
+| | `COUNT <n> <drv> tests passed` / `ZERO <drv> tests — the tally … reports none` / `NOT-MEASURED no <drv> tally found` | the driver tally's three-valued result |
+| | `NOT-MEASURED the libtest/nextest (or Executable) tally … could not be computed` | the awk produced nothing |
+| | `ZERO tests — … carries no libtest or nextest result line` | **`seen == 0`** |
+| | `ZERO tests — <seen> result line(s), every one of them reporting 0 passed` | **`seen > 0 && total == 0`** |
+| | `COUNT <total> tests passed (across <seen> result line(s))` | `total > 0` |
+| | `NOT-MEASURED <quiet note>` | `cargo_status == 0` |
+| | `ZERO test binaries — … carries cargo status output but no 'Executable' line` | `cargo_status > 0 && bins == 0` |
+| | `both`, all four arms | **FIXED this round** — now `seen` for the libtest half, `cargo_status`/`bins` for the compile half |
+| | `NOT-MEASURED census kind '<kind>' has no measurer` | an unrecognised kind reached the core |
+| `_census_classify` | `UNDECLARED …` / `NOT-APPLICABLE component ended <st> …` / `GAP <reason>` / the VACUOUS and self:/runtime: `NOT-MEASURED` texts / `no census record was written` | the declaration lookup, `$st`, and whether `rec` is empty — each interpolated from the value it names |
+| `_census_declare` | `COUNT` / `ZERO` / `NOT-MEASURED … non-numeric` | the supplied count, validated |
+| `_census_scoped_record` | the two `NOT-APPLICABLE the diff routed …` texts | `npkgs`, `pydiff`, `_python_tier_ran` |
+
+**Only the `both` arm's two texts asserted a condition they had not established.** Everything else
+is interpolated from the observed value it names.
+
+### Mechanized, as claim-vs-observation
+
+**Case X** supplies 11 logs whose contents are known and asserts each text CONTAINS what those
+contents justify and does NOT contain the specific claim they falsify — the forbidden string is
+derived per row from its own fixture. Deliberately **not** a blanket word scan: one was removed in
+r4 because `{no census: component ended FAIL, so there is no PASS to affirm}` legitimately contains
+"PASS", and a guard that reds on correct prose is the guard agents learn to waive. **Case X2** names
+job 402's cell directly. RED arm: revert the arm to `total` and X1 + X2 both fail naming the false
+claim.
