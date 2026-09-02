@@ -731,4 +731,49 @@ mod tests {
              non-UDT frozen rejects valid values a level early"
         );
     }
+
+    /// roborev job 127: the inline route must enforce `MAX_UDT_FIELD_COUNT` before it
+    /// allocates.
+    ///
+    /// `parse_udt_value` has always capped the field count. When #3722 made the
+    /// `CqlType::Udt` arm call `parse_inline_udt_value` directly, that check stopped
+    /// covering the inline route, so a hostile SerializationHeader could declare an
+    /// unbounded field list and drive both the decode loop and a
+    /// `Vec::with_capacity` sized from it.
+    ///
+    /// Driven at the BOUNDARY: exactly at the cap must still decode, one over must be
+    /// refused. The at-cap case is what proves the guard is not simply rejecting
+    /// everything, and it is why the assertion is not just "oversized errors".
+    #[test]
+    fn the_inline_route_caps_the_field_count_before_allocating() {
+        let p = parser();
+
+        // Every field null (-1), so the payload is valid for any field count and the
+        // refusal can only come from the cap.
+        let at_cap: Vec<(String, CqlType)> = (0..MAX_UDT_FIELD_COUNT)
+            .map(|i| (format!("f{i}"), CqlType::Int))
+            .collect();
+        let at_cap_bytes: Vec<u8> = (0..MAX_UDT_FIELD_COUNT)
+            .flat_map(|_| (-1i32).to_be_bytes())
+            .collect();
+        assert!(
+            p.parse_inline_udt_value(&at_cap_bytes, "wide", &at_cap, 0)
+                .is_ok(),
+            "exactly MAX_UDT_FIELD_COUNT ({MAX_UDT_FIELD_COUNT}) fields must still \
+             decode — a cap that rejects the boundary rejects valid data"
+        );
+
+        let over_cap: Vec<(String, CqlType)> = (0..=MAX_UDT_FIELD_COUNT)
+            .map(|i| (format!("f{i}"), CqlType::Int))
+            .collect();
+        let over_cap_bytes: Vec<u8> = (0..=MAX_UDT_FIELD_COUNT)
+            .flat_map(|_| (-1i32).to_be_bytes())
+            .collect();
+        let got = p.parse_inline_udt_value(&over_cap_bytes, "wide", &over_cap, 0);
+        assert!(
+            got.is_err(),
+            "MAX_UDT_FIELD_COUNT + 1 fields must be refused BEFORE allocating, or a \
+             hostile header drives unbounded work: {got:?}"
+        );
+    }
 }

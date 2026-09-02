@@ -51,6 +51,21 @@ impl V5CompressedLegacyParser {
         }
 
         let mut current_offset = 0;
+        // Issue #3722: enforce the field-count cap BEFORE allocating. `parse_udt_value`
+        // has always checked this; when #3722 made the `CqlType::Udt` arm call
+        // `parse_inline_udt_value` directly, that check stopped covering the inline
+        // route — so a hostile SerializationHeader could declare an unbounded field
+        // list and drive both the loop and this allocation (roborev job 127). The cap
+        // lives here rather than at the call site because this function owns the
+        // allocation, and a call-site check would have to be repeated at each of them.
+        if inline_fields.len() > MAX_UDT_FIELD_COUNT {
+            return Err(Error::corruption(format!(
+                "Inline UDT '{}': field count {} exceeds maximum {}",
+                type_name,
+                inline_fields.len(),
+                MAX_UDT_FIELD_COUNT
+            )));
+        }
         let mut fields = Vec::with_capacity(inline_fields.len());
 
         for (field_name, field_type) in inline_fields {
