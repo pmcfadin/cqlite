@@ -6626,14 +6626,13 @@ _failassert_record() {
 # a FAIL line ONLY — a PASS or SKIP has no failing assert, so the field has no subject
 # there and its absence on those lines is the rule, not a silence.
 _failassert_render() {
-  local f v
+  local f v=""
   [ "${2:-}" = FAIL ] || return 1
   f=$(_failassert_sidecar "$1")
-  if [ -r "$f" ]; then
-    IFS= read -r v < "$f" || v=""
-    if [ -n "$v" ]; then printf 'failed-assert: %s' "$v"; return 0; fi
-  fi
-  printf 'failed-assert: not recorded (no extraction ran for this FAIL line)'
+  if [ -r "$f" ]; then IFS= read -r v < "$f" || v=""; fi
+  # ONE formatter for the field text, so the four states cannot be spelled two ways.
+  [ -n "$v" ] || v="not recorded (no extraction ran for this FAIL line)"
+  printf 'failed-assert: %s' "$v"
   return 0
 }
 # ==== END failed-assert identity (#3765) ====

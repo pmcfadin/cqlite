@@ -5430,7 +5430,7 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
-# 410 -> 428 on #3765: section 55 adds 18 asserts, host-INDEPENDENT for the same reason
+# 410 -> 430 on #3765: section 55 adds 20 asserts, host-INDEPENDENT for the same reason
 # (bash plus --lite-aggregate-selftest/--emit-summary-selftest and the extractor script; no
 # cargo, python3, jq, network or datasets), so the same "raise by exactly the number added"
 # rule applies and the ~9 margin is preserved. #3544's lesson: a green tally over a shrunken
@@ -5445,7 +5445,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=428
+ASSERT_FLOOR=430
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

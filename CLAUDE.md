@@ -687,8 +687,26 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   block's `commit:`/`dirty:` are derived from that verified capture, never a fresh emit-time git
   read. No env var bypasses it; remedy is to re-run on a stable tree (don't edit a worktree while
   its gate runs).
+- **A FAIL line NAMES THE FAILING ASSERT, and the invocation bracket is LABELLED (#3765).**
+  `tooling-tests: FAIL (1149s)  [invocation: test ws0-corpus-gen default-features | + cargo not
+  observable: …]  failed-assert: 1 RECOGNISED (assert): 1465-skip-declares`. The bracket used to be
+  UNLABELLED and is test-SHAPED, so a reader identified `ws0-corpus-gen` as the failing test — it is
+  not; the real assert lived only in the component log, which doctrine forbids reading while
+  simultaneously requiring a flake citation to name the ASSERT. That was unsatisfiable, and it cost
+  a real round (a lead refused a lane's correct flake attribution because the bracket "named a
+  different test"). The field appears on **FAIL lines only** — a PASS/SKIP has no failing assert —
+  and is one of FOUR textually distinct states, never blank: `<N> RECOGNISED (<tier>): a, b, c (+K
+  more)` (the count is the TRUE total; tier ∈ assert|guard|toolchain), `0 RECOGNISED (…)` for a scan
+  that matched nothing (**never a bare `0`** — the recogniser set is documented NON-EXHAUSTIVE),
+  `not extractable (<cause>)` when the log could not be read or normalised, and `not recorded (…)`
+  when no extraction ran at all. **"Found nothing" and "could not look" are never collapsed.** The
+  recogniser set is ONE named file, `scripts/ci/gate-failed-assert.sh`, with a stated rule per entry,
+  derived by MEASUREMENT over the 174 real FAILed component logs on a fleet box (114 of the 136
+  non-empty ones recognised; the knowingly-uncovered shapes are declared in its header) and resolved
+  from the checkout with **no env override**. It parses through the gate's ONE `_ansi_stripped_log`
+  (#3400), and an unreadable log is a NAMED `not extractable`, never "no failures found".
 - **Every component line NAMES the feature matrix it ran, in ALL THREE modes (#3453).**
-  `core-tests: PASS (412s)  [test cqlite-core --features cli-helpers]` — read as
+  `core-tests: PASS (412s)  [invocation: test cqlite-core --features cli-helpers]` — read as
   `<subcommand> <scope> <features>`, one entry per distinct invocation, `xN` for repeats. A bare
   `PASS (412s)` could not distinguish a run that certified the OTLP stack from one that never
   enabled it, which is this issue's whole subject. It is **DERIVED, never curated**: `cargo` and `env` are shell FUNCTIONS in the gate, so a
