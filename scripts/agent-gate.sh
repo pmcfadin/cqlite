@@ -9936,74 +9936,62 @@ _tree_mode_components() {
   fi
 }
 
-# _completed_component_rows (#3402, roborev job 26): every component that has RECORDED a
-# verdict, one row each, in canonical order for the RUNNING mode, then a sweep for any
-# recorded result no static list names. Sets `_CCR_COUNT` to the number of rows printed.
+# _recorded_component_rows_block (#3402): the aggregate `census:` line, a
+# `components-recorded:` count and one row per component that has RECORDED a verdict — as ONE
+# string, or nothing when no component has recorded yet.
 #
-# WHY IT IS SHARED rather than living inside the boundary renderer: `run_file_size` executes
-# BEFORE the dataset and schemas preflights, so an acknowledged growth followed by a
-# fail-closed preflight emitted a terminal block with NO component row at all — the override
-# name and the growth count absent from the very artifact this issue exists to put them in.
-# That is round 1's boundary finding one emit site over, and the shape recurs because each
-# early-exit emit hand-builds its own meta list. Any emit that can happen AFTER components
-# may have run must carry this.
-_completed_component_rows() {
-  # ONE RENDERER, `_fm_summary_line`, the same as every other block (#3453/#3625). This took a
-  # renderer ARGUMENT for one round, because the boundary table used a plain unannotated row
-  # while the funnel needed an annotated one — until #3625 routed the boundary loops through
-  # `_fm_summary_line` too, on the same reasoning, leaving one renderer and a parameter with a
-  # single possible value. Removed rather than kept "for symmetry": an unused seam is a second
-  # dialect waiting for a caller, which is the drift this issue kept tripping over.
-  local _c _rf _st _secs _seen=" "
-  _CCR_COUNT=0
+# WHY IT EXISTS: `run_file_size` executes before the dataset and schemas preflights, and every
+# early-exit `emit_summary` hand-builds its own meta list, so each is an independent chance to
+# omit the table. Three review rounds found the same omission at three different emit sites
+# before it was fixed at the FUNNEL instead of per site.
+#
+# ONE FUNCTION, ONE SHELL, DELIBERATELY. This was a helper pair — a traversal that printed
+# rows plus a wrapper that captured them — and the split cost the same bug TWICE: the traversal
+# assigned its count, and later its census subject set, to globals that the wrapper read across
+# a COMMAND SUBSTITUTION, i.e. across a subshell, so the wrapper saw neither. The first
+# instance rendered `0` beside one printed row; the second silently dropped the census line.
+# Both were caught by RUNNING it, not by reading it. Folded together, the rows, the pairs and
+# the count are produced by the same shell and no global crosses a boundary.
+#
+# The census goes ABOVE the rows because its subject set is only known once the traversal is
+# done — the same shape, and the same reason, as the boundary table.
+_recorded_component_rows_block() {
+  # SAFE AT EVERY EMIT SITE, including blocks emitted from the ARG DISPATCH before LOG_DIR
+  # exists and before COMPONENTS is in scope: an unguarded `"$LOG_DIR"/*.result` with LOG_DIR
+  # empty globs `/*.result`, and `_tree_mode_components` is not yet defined there.
+  [ -n "${LOG_DIR:-}" ] && [ -d "$LOG_DIR" ] || return 0
+  command -v _tree_mode_components >/dev/null 2>&1 || return 0
+  command -v census_summary_line   >/dev/null 2>&1 || return 0
+  local _c _rf _st _secs _seen=" " _rows="" _pairs="" _n=0
   for _c in $(_tree_mode_components); do
     _rf="$LOG_DIR/$_c.result"
     [ -f "$_rf" ] || continue
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
-    _fm_summary_line "$_c" "$_st" "${_secs}s"
+    _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
+"
+    _pairs="$_pairs $_c $_st"
     _seen="$_seen $_c "
-    _CCR_COUNT=$(( _CCR_COUNT + 1 ))
+    _n=$(( _n + 1 ))
   done
+  # …then a SWEEP for any remaining `.result`: a recorded verdict must never be dropped merely
+  # because no static list names it. LOG_DIR is this run's own mktemp directory, so the sweep
+  # can only see verdicts record_result wrote, and the glob is deterministically ordered.
   for _rf in "$LOG_DIR"/*.result; do
     [ -f "$_rf" ] || continue
     _c="${_rf##*/}"; _c="${_c%.result}"
     case "$_seen" in *" $_c "*) continue ;; esac
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
-    _fm_summary_line "$_c" "$_st" "${_secs}s"
-    _CCR_COUNT=$(( _CCR_COUNT + 1 ))
+    _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
+"
+    _pairs="$_pairs $_c $_st"
+    _n=$(( _n + 1 ))
   done
-}
-
-# _recorded_component_rows_block (#3402): the table plus its count line, as ONE string, or
-# nothing when no component has recorded yet. The name says WHAT it renders rather than which
-# caller wanted it — it was `_preflight_component_rows` while three named preflights passed it
-# themselves, and that name became wrong the moment the emit funnel carried it for every block.
-# `emit_summary`, or nothing when no component has recorded yet. emit_summary echoes each
-# argument, so a captured multi-line block renders as the rows it contains. Empty output is
-# deliberately an EMPTY STRING and the callers guard on it, because a bare "" argument would
-# emit a blank line into the block.
-_recorded_component_rows_block() {
-  local _rows _n
-  _rows=$(_completed_component_rows)
   [ -n "$_rows" ] || return 0
-  # COUNT THE ROWS THAT WILL PRINT, never `_CCR_COUNT`. The capture above runs in a COMMAND
-  # SUBSTITUTION — a subshell — so the count the helper assigns is discarded, and reading it
-  # here emitted a count of `0` beside one printed row. That is a
-  # count contradicting its own table: the exact invariant
-  # scripts/tests/test_agent_gate_tree_provenance.sh asserts for the boundary block, and it
-  # was introduced here and caught by running the thing rather than by reading it. The
-  # boundary renderer may use `_CCR_COUNT` because it calls the helper in ITS OWN shell;
-  # this caller cannot, and a shared global that is only valid on one of two call paths is
-  # exactly the trap. Measure the artifact.
-  _n=$(printf '%s\n' "$_rows" | grep -c '^')
-  # WORDING IS EMIT-SITE-NEUTRAL. It read "the run STOPPED at a preflight" — true of the three
-  # callers it had when written, false the moment the funnel carried it for every block, since a
-  # summary-integrity FAIL is not a preflight. A line naming a cause it cannot know is the
-  # false-claim class this whole issue is about.
-  printf 'components-recorded: %s when this block was emitted (a component not listed had recorded no verdict)\n%s' \
-    "$_n" "$_rows"
+  # shellcheck disable=SC2086  # intentional word-split over the name/STATUS pairs
+  printf '%s\ncomponents-recorded: %s when this block was emitted (a component not listed had recorded no verdict)\n%s' \
+    "$(census_summary_line $_pairs)" "$_n" "$_rows"
 }
 
 _tree_boundary_meta_lines() {
