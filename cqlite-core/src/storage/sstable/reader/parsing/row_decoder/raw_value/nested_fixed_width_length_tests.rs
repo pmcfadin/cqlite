@@ -74,7 +74,7 @@
 //! also where the five types and the mechanism are stated in full. Read no
 //! claim here as covering a UDT field.
 //!
-//! CQLite is therefore NARROWER than Cassandra for the six `… or 0` types above,
+//! CQLite is therefore NARROWER than Cassandra for every `… or 0` row of the table above,
 //! whose `validate` admits an EMPTY buffer (`Int32Serializer.java`
 //! `size(value) != 4 && !isEmpty(value)`, deserializing to Java `null`). That
 //! divergence PREDATES both issues, is deliberate, and is tracked as **#3847**;
