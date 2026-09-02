@@ -380,7 +380,13 @@ fi
 r_tbl=$(mkrepo table-repo)
 sum="$tmp/table-boundary.txt"; out="$tmp/table-boundary.out"
 run_selftest "$r_tbl" boundary "$sum" "$out" AGENT_GATE_TREE_SELFTEST_MUTATE=README.md
-n_rows=$(grep -cE '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP) \([0-9]+s\)' "$sum" 2>/dev/null | tr -d ' ')
+# VACUOUS joins PASS/FAIL/SKIP in the component-status vocabulary (#3625). A hard-coded
+# three-token alternation is now WRONG wherever it appears: it stops SEEING the very rows
+# that state a component verified nothing.
+# Here the consequence was a guard that REDS ON CORRECT INPUT: a legitimate VACUOUS boundary
+# row was not counted in n_rows, while the annotation count below (added with the census) did
+# count it, so the two disagreed and the consistency assert failed on a healthy block.
+n_rows=$(grep -cE '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\)' "$sum" 2>/dev/null | tr -d ' ')
 n_done=$(sed -n 's/^components-completed: \([0-9]*\) .*/\1/p' "$sum" | head -1)
 if grep -qE '^tree-selftest: +PASS \([0-9]+s\)' "$sum"; then
   ok "J2: a recorded verdict whose component no static set names still appears in the table (tree-selftest row present)"

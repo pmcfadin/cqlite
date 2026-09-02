@@ -88,6 +88,15 @@ trap _fm_on_exit EXIT
 
 [ -r "$GATE" ] || { echo "FAIL - cannot read $GATE"; exit 1; }
 
+# THE CENSUS CLOSURE IS EXTRACTED TOO (#3625, roborev job 376 finding 1). run_scoped_tests
+# gained calls to _census_scoped_record / _census_finalize / _status_is_nonfailing, and this
+# harness extracted neither them nor their transitive helpers — so inside py_run they were
+# `command not found`, the errors went to `2>&1 >/dev/null`, and (no `set -e` in that
+# subshell) the cases PASSED anyway. A test passing without executing what it claims to,
+# with the evidence redirected away, is the defect class this whole issue exists to close,
+# sitting in the fix's own harness. EXTRACTED, not stubbed: a stub is a second
+# implementation whose agreement with the original is only knowable by testing it.
+#
 # The annotation functions are EXTRACTED OUT OF THE SHIPPED GATE SCRIPT, never copied
 # here — the repo's existing idiom (test_agent_gate_jest_guards.sh,
 # test_cargo_output_parsers.sh): a test that re-implements its subject can only prove that
@@ -101,6 +110,12 @@ for fn in _fm_active _fm_sidecar _fm_note _fm_indirect_desc _fm_unobservable_des
           cargo env \
           _fm_component_class _fm_render _fm_annotate _fm_summary_line \
           _fm_note_if_no_cargo_observed _fm_note_driver _fm_note_maturin_rc \
+          _ansi_stripped_log \
+          _census_sidecar _census_kind _census_write _census_read _census_declare \
+          _census_libtest_tally _census_compile_tally _census_driver_tally \
+          _census_measure_kind _census_measure _census_status_for _census_finalize \
+          _census_record _census_annotate _census_scoped_record _python_tier_ran \
+          _status_is_nonfailing \
           run_scoped_tests run_python_bindings; do
   src=$(sed -n "/^$fn() {/,/^}$/p" "$GATE")
   if [ -z "$src" ]; then
@@ -1005,6 +1020,14 @@ done
 # runs) rather than to this function's argument — the routing then silently fell through to
 # the default `cqlite-core --lib` and all four cases below failed for a reason that had
 # nothing to do with the subject (it did, first try).
+# Shared collection points for the definedness/stderr evidence every py_run call produces
+# (the assert is a separate case below, so a single call cannot silently be the only one
+# checked). Truncated here, appended to by each call.
+FMQ_UNDEFINED="$tmp/py-undefined-fns.txt"
+FMQ_CHECKED="$tmp/py-checked-fns.txt"
+FMQ_NOTFOUND="$tmp/py-command-not-found.txt"
+: > "$FMQ_UNDEFINED"; : > "$FMQ_CHECKED"; : > "$FMQ_NOTFOUND"
+
 py_run() { # <plan-lines> <build-verify-rc> ; prints the rendered scoped-tests annotation
   local py_plan_in="$1" rc="$2"
   # A FRESH scratch (and therefore a fresh sidecar) per call: two calls sharing one
@@ -1041,7 +1064,32 @@ FAKESELF
     export AGENT_GATE_FM_DIR="$scratch/side"
     PATH="$shim_dir:$PATH" FM_SHIM_LOG="$scratch/argv.log"
     export FM_SHIM_LOG="$scratch/argv.log"
-    run_scoped_tests >/dev/null 2>&1
+    # THE DEFINEDNESS CHECK RUNS HERE, inside the subshell, because this is the only scope
+    # where BOTH the top-level extractions and py_run's own stubs are visible. It is
+    # DERIVED, not a list: every top-level function name in the shipped gate that the
+    # shipped run_scoped_tests BODY mentions must resolve to a function here. So a FUTURE
+    # helper added to run_scoped_tests and left unextracted reds this suite — including on
+    # a code path this case never executes, which the stderr capture below cannot see.
+    # Word membership against a known name set; no shell parsing, and comment lines are
+    # stripped so a name mentioned only in prose does not count.
+    _fmq_body=$(sed -n '/^run_scoped_tests() {/,/^}$/p' "$GATE" | sed 's/#.*$//')
+    _fmq_checked=0
+    : > "$scratch/undefined-fns"
+    while IFS= read -r _fmq_fn; do
+      [ -n "$_fmq_fn" ] || continue
+      [ "$_fmq_fn" = run_scoped_tests ] && continue
+      grep -qw -- "$_fmq_fn" <<<"$_fmq_body" || continue
+      _fmq_checked=$((_fmq_checked + 1))
+      [ "$(type -t "$_fmq_fn" 2>/dev/null)" = function ] \
+        || printf '%s\n' "$_fmq_fn" >> "$scratch/undefined-fns"
+    done <<<"$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*\(\) \{' "$GATE" | sed 's/() {$//' | sort -u)"
+    printf '%s\n' "$_fmq_checked" > "$scratch/checked-fns"
+    # STDERR IS CAPTURED, NOT DISCARDED: `command not found` from an unextracted helper is
+    # the evidence, and throwing it away is what let this pass for a round.
+    run_scoped_tests >/dev/null 2>"$scratch/stderr"
+    cp "$scratch/undefined-fns" "$FMQ_UNDEFINED" 2>/dev/null || true
+    cp "$scratch/checked-fns"   "$FMQ_CHECKED"   2>/dev/null || true
+    grep -F 'command not found' "$scratch/stderr" >> "$FMQ_NOTFOUND" 2>/dev/null || true
     _fm_annotate scoped-tests
   )
 }
@@ -1094,6 +1142,54 @@ case "$got" in
     ok "P5: the no-parser fail-closed exit — which bypasses record_result — records that it FAILed before any cargo call, instead of reading UNDECLARED" ;;
   *) bad "P5: got '$got'" ;;
 esac
+
+# (P6) THE HARNESS REALLY RAN WHAT IT CLAIMS TO — roborev job 376, finding 1.
+#
+# THE DEFECT this pins: run_scoped_tests gained three census calls, this file extracted
+# none of them, `2>&1 >/dev/null` swallowed the `command not found`, and with no `set -e` in
+# py_run's subshell every P-case above still PASSED. A test that passes without executing
+# its subject, with the evidence redirected away, is exactly what #3625 exists to remove —
+# so the property is asserted, not merely repaired for three names.
+#
+# TWO INDEPENDENT HALVES, because neither alone is enough:
+#   * DEFINEDNESS (derived, covers code paths this run never takes): every top-level gate
+#     function the shipped run_scoped_tests body mentions must resolve to a function inside
+#     py_run's subshell — extracted from the gate, or explicitly stubbed there.
+#   * STDERR (behavioural, covers what actually executed): no `command not found` may reach
+#     stderr, which catches an unfound EXTERNAL command too, and anything the derivation's
+#     word-membership rule cannot see.
+if [ ! -s "$FMQ_CHECKED" ]; then
+  bad "P6: no py_run invocation recorded a definedness census — the check did not run, so a green here would certify nothing"
+else
+  p6_checked=$(sort -n "$FMQ_CHECKED" | tail -1)
+  p6_undef=$(sort -u "$FMQ_UNDEFINED" 2>/dev/null | grep -c . || true)
+  p6_nf=$(grep -c . "$FMQ_NOTFOUND" 2>/dev/null || true)
+  # A FLOOR on the derivation itself: run_scoped_tests references 11 gate functions today,
+  # and a derivation that suddenly found 0 or 1 would report "no undefined names" having
+  # examined almost nothing — the vacuous shape one level up.
+  if [ "${p6_checked:-0}" -lt 8 ]; then
+    bad "P6: the definedness derivation examined only ${p6_checked:-0} gate function(s) referenced by run_scoped_tests (floor 8) — it is not deriving the name set, so 'none undefined' means nothing"
+  elif [ "${p6_undef:-0}" -ne 0 ]; then
+    bad "P6: run_scoped_tests references gate function(s) this harness neither extracts nor stubs, so py_run does not faithfully execute it: $(sort -u "$FMQ_UNDEFINED" | tr '\n' ' ')"
+  elif [ "${p6_nf:-0}" -ne 0 ]; then
+    bad "P6: py_run's stderr carries $p6_nf 'command not found' line(s) — the harness is passing while part of its subject does not run: $(head -3 "$FMQ_NOTFOUND" | tr '\n' ' ')"
+  else
+    ok "P6: py_run executes run_scoped_tests with all $p6_checked referenced gate function(s) DEFINED (extracted from the shipped gate, or stubbed here) and NO 'command not found' on its stderr"
+  fi
+fi
+# The census closure specifically must be EXTRACTED, not stubbed — a stub is a second
+# implementation whose agreement with the original is only knowable by testing it, and
+# these three are the ones job 376 found missing.
+p6_missing=()
+for fn in _census_scoped_record _census_finalize _status_is_nonfailing; do
+  [ "$(type -t "$fn" 2>/dev/null)" = function ] || p6_missing+=("$fn")
+  grep -q "^ *$fn\b" <<<"$(sed -n "/^$fn() {/,/^}\$/p" "$GATE")" 2>/dev/null || true
+done
+if [ "${#p6_missing[@]}" -eq 0 ]; then
+  ok "P6b: the three census helpers job 376 named are extracted from the SHIPPED gate into this harness, not re-implemented as stubs"
+else
+  bad "P6b: not defined in this harness: ${p6_missing[*]}"
+fi
 
 # ---------------------------------------------------------------------------
 # (PB) THE PYTHON-BINDINGS DRIVER RECORD, DRIVEN END TO END — roborev job 273, F3

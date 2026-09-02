@@ -1315,6 +1315,67 @@ if grep -qF 'for _ci in "${!' "$GATE" && ! grep -qE '^[^#]*for _ci in "\$\{!(NAM
 else
   bad "Q5: a census zip uses the '+' guard on a KEYS expansion — that aborts the block it is in"
 fi
+# ---------------------------------------------------------------------------
+# (R) THE FOURTH STATUS TOKEN REACHES EVERY STATUS-SET LITERAL — roborev job 376, finding 2
+#     and the sweep it prompted.
+#
+# #3625 added VACUOUS to a vocabulary that was PASS/FAIL/SKIP, so every hard-coded
+# three-token alternation became WRONG the moment it landed — and wrong in the direction
+# that is hardest to notice, because such a pattern stops SEEING exactly the rows that
+# report a component verified nothing. Measured at the time of the sweep, THREE sites had
+# it, and only one was cited:
+#   * test_agent_gate_tree_provenance.sh's boundary `n_rows` — CITED. Reds on CORRECT
+#     input: a legitimate VACUOUS boundary row went uncounted there while the annotation
+#     count beside it (added with the census) counted it, so the two disagreed and the
+#     consistency assert failed on a healthy block.
+#   * test_agent_gate_summary.sh's 3453-annot-b UNDECLARED/UNCLASSIFIED screen — blind to
+#     VACUOUS rows, i.e. blind on the rows most worth screening.
+#   * test_agent_gate_summary.sh's 3453-annot-c RESULT:-embedding screen — same.
+#
+# THE GUARD IS THE EXACT THREE-TOKEN GROUP, not "a line mentioning PASS". That distinction
+# is what keeps it off the roborev review-block grammar, whose verdict vocabulary
+# legitimately begins with those three and then continues with NOTICE, UNAVAILABLE and the
+# rest — a different vocabulary for a different artifact, and reddening it would be a guard
+# that fires on correct input.
+#
+# THE NEEDLE IS SPLIT so this guard cannot match its OWN source. It did on the first run:
+# a self-matching grep is a guard that is always red, which is the guard nobody keeps. For
+# the same reason the group is never written out in this file's prose.
+# ---------------------------------------------------------------------------
+r_needle="(PASS|FAIL|""SKIP)"
+r_hits=$(grep -rlF -- "$r_needle" "$REPO_ROOT/scripts" 2>/dev/null | sort || true)
+if [ -z "$r_hits" ]; then
+  ok "R1 (job 376 F2 + sweep): no script enumerates the component-status set as a bare three-token PASS/FAIL/SKIP alternation — VACUOUS is a status now, and a pattern that omits it stops seeing the rows that report a component verified nothing"
+else
+  bad "R1: three-token component-status alternation(s) survive (VACUOUS omitted) in: $(printf '%s' "$r_hits" | tr '\n' ' ') — remedy: add VACUOUS to each, or (if the site is a different artifact's vocabulary) extend that alternation so it is not the bare three"
+fi
+# The guard must be DISCRIMINATING and must not fire on the roborev block's own, longer
+# vocabulary — asserted both ways so a future narrowing or widening of R1 is caught.
+# Line 1 is the DEFECT shape (the bare three), line 2 is the roborev block's LONGER
+# vocabulary, which begins with the same three tokens and must NOT match. Both are composed
+# from fragments so neither this source nor the probe file can be confused for the other.
+r_open="(PASS|FAIL|"
+r_probe="$tmp/r-probe.txt"
+printf '%s\n' "grep -cE '^[a-z-]*: +${r_open}SKIP) '"                > "$r_probe"
+printf '%s\n' "grep -qE '${r_open}SKIP|NOTICE|UNAVAILABLE)'"        >> "$r_probe"
+r_bad=$(grep -cF -- "$r_needle" "$r_probe" || true)
+if [ "$r_bad" = 1 ]; then
+  ok "R2: the R1 needle matches the bare three-token group and NOT the roborev block's longer verdict vocabulary — it cannot red a correct artifact that happens to name the same first three tokens"
+else
+  bad "R2: the R1 needle matched $r_bad of 2 probe lines (want exactly 1) — it is either blind to the defect or firing on the roborev grammar"
+fi
+# …and the two suites that carry the component-row patterns must positively RECOGNISE a
+# VACUOUS row, not merely have had the literal edited.
+r_missing=()
+grep -qE 'PASS\|FAIL\|SKIP\|VACUOUS\) \\\(\[0-9\]\+s' "$REPO_ROOT/scripts/tests/test_agent_gate_tree_provenance.sh" \
+  || r_missing+=("tree-provenance-boundary-row-count")
+grep -qE 'PASS\|FAIL\|SKIP\|VACUOUS\)\.\*\\\[\(UNDECLARED' "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" \
+  || r_missing+=("summary-3453-annot-b-undeclared-screen")
+if [ "${#r_missing[@]}" -eq 0 ]; then
+  ok "R3: the boundary row count and the UNDECLARED screen both recognise a VACUOUS component row"
+else
+  bad "R3: still blind to VACUOUS rows: ${r_missing[*]}"
+fi
 echo
 echo "component census guard: $PASS passed, $FAIL failed"
 # A COUNT FLOOR beside the abort trap (the idiom of test_agent_gate_summary.sh and
@@ -1322,7 +1383,7 @@ echo "component census guard: $PASS passed, $FAIL failed"
 # extraction that broke, a subshell dying quietly — shrinks the subject set WITHOUT
 # aborting, and "failed: 0" over a shrunken set is the vacuous pass this whole file is
 # about. Set just below the full-host figure so it reds on a structural loss.
-CENSUS_CASE_FLOOR=72
+CENSUS_CASE_FLOOR=75
 CENSUS_REACHED_END=1
 if [ $((PASS + FAIL)) -lt "$CENSUS_CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): sections are being skipped or dying silently, and a "0 failed" over a shrunken subject set certifies nothing.\n' \

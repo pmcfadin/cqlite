@@ -5113,12 +5113,15 @@ if AGENT_GATE_SUMMARY_FILE="$fm_sum" bash "$GATE" --emit-summary-selftest >/dev/
     '') bad "3625-census-block: no 'census:' aggregate line in the emitted block" ;;
     *)  bad "3625-census-block: the census line does not carry the required RECOGNISED / status-derived / NON-EXHAUSTIVE wording: $fm_census" ;;
   esac
-  if grep -qE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP).*\[(UNDECLARED|UNCLASSIFIED)' "$fm_sum"; then
+  # VACUOUS included (#3625): omitting it made this screen BLIND to exactly the rows that
+  # report a component verified nothing — the ones most worth checking for a broken
+  # annotation.
+  if grep -qE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS).*\[(UNDECLARED|UNCLASSIFIED)' "$fm_sum"; then
     bad "3453-annot-b: a component line reads UNDECLARED/UNCLASSIFIED in the reference block"
   else
     ok "3453-annot-b: no component line reads UNDECLARED/UNCLASSIFIED in the reference block"
   fi
-  if grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP)' "$fm_sum" | grep -q 'RESULT:'; then
+  if grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS)' "$fm_sum" | grep -q 'RESULT:'; then
     bad "3453-annot-c: an annotation embeds the RESULT: token — it would break the #2908 poll predicate"
   else
     ok "3453-annot-c: no annotation embeds the RESULT: token (the one-RESULT invariant is safe)"
