@@ -1950,11 +1950,20 @@ printf 'PREMERGE: SCOPE the PREMERGE: ADVISORY lines below measure that gap (non
 if [ -n "$advisory_out" ]; then
   printf '%s\n' "$advisory_out"
 fi
+# EVERY DATA VALUE ON AN EMITTED LINE GOES THROUGH THE ONE BOUNDARY (#3751 round 7, L1).
+# `commit:`/`tree-start:`/`dirty:` are hex- and closed-token-validated before this point and
+# the summary path is the invoker's own argv, so none of them is a route on its own — they are
+# routed anyway because ONE rule applied to EVERY value on these lines is what stops the next
+# added field being the one that forgot (round 2's S1 reasoning, and the reason L1 existed at
+# all: three sites in this class have now been found one at a time). Display-only, as ever.
 printf 'PREMERGE: GATE-OF-RECORD commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
-  "$full_commit" "$full_ts" "$full_dirty" "$summary_file"
+  "$(c_safe_display "$full_commit")" "$(c_safe_display "$full_ts")" \
+  "$(c_safe_display "$full_dirty")" "$(c_safe_display "$summary_file")"
 if [ -n "$delta_file" ]; then
   printf 'PREMERGE: DELTA-RECERT anchor: %s commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
-    "$delta_anchor" "$delta_commit" "$delta_ts" "$delta_dirty" "$delta_file"
+    "$(c_safe_display "$delta_anchor")" "$(c_safe_display "$delta_commit")" \
+    "$(c_safe_display "$delta_ts")" "$(c_safe_display "$delta_dirty")" \
+    "$(c_safe_display "$delta_file")"
 fi
 # THE C VERDICT IS REPORTED UNDER ITS OWN TOKEN, NEVER FOLDED INTO `OK` (#3751).
 # `PREMERGE: OK` says the head matches and a gate of record covers it; it says
@@ -1968,8 +1977,17 @@ fi
 # pasted into a PR comment — so it is neutralised exactly as the refusal's is. The token has
 # already been compared by string equality against the closed set at this point, so this is
 # display-only and cannot change the verdict.
+#
+# `C_SOURCE` WAS THE THIRD SITE OF THIS CLASS FOUND ONE AT A TIME (#3751 round 7, L1), and it is
+# NOT merely invoker text: on the `AUTO` path it carries `C_ROUTING_DETAIL`, which interpolates a
+# `openspec/changes/<slug>` path measured out of the certified tree — and GIT PERMITS NEWLINES IN
+# PATHS, exactly the class `base-staleness.sh` sanitizes for. Unrouted, such a path emits a second
+# line with no `PREMERGE: ` prefix inside the one block a human reads as the merge verdict. Hence
+# the STRUCTURAL guard beside this rule — `scripts/tests/lib/emit-boundary-scan.sh`, run by both
+# suites — because patching site three and waiting for site four is the wrong shape.
+# `C_STAGE_KIND` is the ONE unrouted value here and it is a script CONSTANT (`c`), not data.
 printf 'PREMERGE: C-VERDICT %s stage: %s source: %s%s\n' \
-  "$(c_safe_display "$C_TOKEN")" "$C_STAGE_KIND" "$C_SOURCE" \
+  "$(c_safe_display "$C_TOKEN")" "$C_STAGE_KIND" "$(c_safe_display "$C_SOURCE")" \
   "${C_TOKEN_REPORT:+ report: $(c_safe_display "$C_TOKEN_REPORT")}"
 if [ "$C_TOKEN" = AUTHOR-PERFORMED ]; then
   printf 'PREMERGE: C-VERDICT-NOTE the intent audit was performed by the diff'"'"'s AUTHOR, not\n'

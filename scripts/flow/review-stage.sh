@@ -736,7 +736,7 @@ assert_ignored() {
   local path="$1" what="$2" extra="${3:-}" rc=0
   git check-ignore -q -- "$path" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    emit "$REFUSE_MARKER reason=path-not-gitignored what=$what path=$path check-ignore-rc=$rc"
+    emit "$REFUSE_MARKER reason=path-not-gitignored what=$what path=$(field_value "$path") check-ignore-rc=$rc"
     emit "$REFUSE_MARKER detail=git does not confirm this path is ignored, and this tool writes it MID-RUN — an untracked-but-not-ignored write dirties a running gate of record (tree-integrity FAIL, #2926) and makes premerge-assert refuse on dirty: yes (#3648). Add .review-stage/ to .gitignore (the shipped .gitignore does, as a DIRECTORY — this tool writes nowhere else)."
     # An optional caller-supplied line, printed only on the refusal path: a refused TEMPORARY
     # path is confusing without it, because the caller never named that path.
@@ -793,25 +793,25 @@ assert_no_symlink() {
     # child answer FALSE for a component that may well be a symlink — a two-valued predicate
     # collapsing the unknown onto the permissive answer, which is the shape this repo pins.
     if [ -e "$parent" ] && [ ! -x "$parent" ]; then
-      emit "$REFUSE_MARKER reason=path-unverifiable what=$what path=$path component=$parent"
+      emit "$REFUSE_MARKER reason=path-unverifiable what=$what path=$(field_value "$path") component=$(field_value "$parent")"
       emit "$REFUSE_MARKER detail=this directory is not searchable, so whether the next component is a SYMLINK cannot be determined — and a write that follows a link lands outside the verified-gitignored path (#2926/#3648). Refusing rather than guessing: cannot-tell must not take the permissive branch."
       exit 2
     fi
     parent="$cur"
     cur="$cur/$comp"
     if [ -L "$cur" ]; then
-      emit "$REFUSE_MARKER reason=path-is-symlink what=$what path=$path component=$cur"
+      emit "$REFUSE_MARKER reason=path-is-symlink what=$what path=$(field_value "$path") component=$(field_value "$cur")"
       emit "$REFUSE_MARKER detail=git check-ignore verifies a LEXICAL path but a WRITE follows symlinks, so this write would land wherever the link points — possibly a TRACKED file or a path outside the repository — dirtying a running gate of record (tree-integrity FAIL, #2926) and making premerge-assert refuse on dirty: yes (#3648). Remove the link and let this tool create a regular file."
       exit 2
     fi
     if [ -e "$cur" ] && [ ! -d "$cur" ] && [ "$cur" != "$path" ]; then
-      emit "$REFUSE_MARKER reason=path-component-not-a-directory what=$what path=$path component=$cur"
+      emit "$REFUSE_MARKER reason=path-component-not-a-directory what=$what path=$(field_value "$path") component=$(field_value "$cur")"
       emit "$REFUSE_MARKER detail=an intermediate path component exists and is not a directory, so nothing can be written under it."
       exit 2
     fi
   done
   if [ -e "$cur" ] && [ ! -f "$cur" ]; then
-    emit "$REFUSE_MARKER reason=path-not-a-regular-file what=$what path=$path"
+    emit "$REFUSE_MARKER reason=path-not-a-regular-file what=$what path=$(field_value "$path")"
     emit "$REFUSE_MARKER detail=this path exists and is not a regular file (a directory, a fifo, a device). This tool writes a text record; it will not write through anything else."
     exit 2
   fi
@@ -911,7 +911,7 @@ prepare_write() {
       return 0
     fi
   done
-  emit "$REFUSE_MARKER reason=tempfile-not-created what=$what path=$dest attempts=$attempt"
+  emit "$REFUSE_MARKER reason=tempfile-not-created what=$what path=$(field_value "$dest") attempts=$attempt"
   emit "$REFUSE_MARKER detail=an unpredictable temporary file could not be created EXCLUSIVELY beside this path in $attempt attempt(s), so NOTHING was written. Either the directory is not writable, or mktemp is unavailable. There is deliberately no fallback to a predictable name: that is the TOCTOU this write path exists to remove (a peer lane can plant a symlink at a guessable temp name), so refusing is the fail-closed answer."
   exit 2
 }
@@ -923,7 +923,7 @@ commit_write() {
   if ! mv -f "$WRITE_TMP" "$dest" 2>/dev/null; then
     rm -f "$WRITE_TMP" 2>/dev/null || true
     WRITE_TMP=""
-    emit "$REFUSE_MARKER reason=write-failed what=$what path=$dest"
+    emit "$REFUSE_MARKER reason=write-failed what=$what path=$(field_value "$dest")"
     emit "$REFUSE_MARKER detail=the record was written to a temporary file but could not be moved into place, so NOTHING was recorded. The temporary file has been removed; an unexplained leftover would be indistinguishable from a crashed write."
     exit 2
   fi
@@ -1071,7 +1071,7 @@ cmd_open() {
     # when the record could not be READ at all, which is a different fact from "read fine, no such
     # field" — the second is the legacy shape, the first measures nothing.
     if ! nnonce_lines="$(count_field_lines "$sfile" report-nonce)"; then
-      emit "$REFUSE_MARKER reason=stage-record-unreadable kind=$kind issue=$issue record=$sfile"
+      emit "$REFUSE_MARKER reason=stage-record-unreadable kind=$kind issue=$issue record=$(field_value "$sfile")"
       emit "$REFUSE_MARKER detail=this stage's record EXISTS and could not be READ, so which report of this stage is current could not be measured and NOTHING was written. That is not the same as a record with no report-nonce (which reads as the original single report): an unmeasured record may not take the permissive reading, because it is also a record whose spawned-at cannot be read, so a forced re-open would silently restart a clock a reader is using. Fix the record's permissions, or remove the stage directory and open a fresh stage."
       exit 2
     fi
@@ -1084,13 +1084,13 @@ cmd_open() {
       # report an EARLIER agent still holds, and reporting it as this stage's current report is
       # exactly the false certification the nonce closes. The remedy is a human reading the
       # record, so the refusal says so.
-      emit "$REFUSE_MARKER reason=report-nonce-unreadable kind=$kind issue=$issue record=$sfile lines=$nnonce_lines value=$(field_value "${prior_nonce:-<none>}")"
+      emit "$REFUSE_MARKER reason=report-nonce-unreadable kind=$kind issue=$issue record=$(field_value "$sfile") lines=$nnonce_lines value=$(field_value "${prior_nonce:-<none>}")"
       emit "$REFUSE_MARKER detail=the stage record's report-nonce must be exactly ONE line carrying an alphanumeric token; it names which report of this stage is current, so a guess could name a report an earlier agent still holds. Read the record and repair it, or remove the stage directory and open a fresh stage."
       exit 2
     fi
     rpath="$(report_path "$issue" "$kind" "$prior_nonce")"
     if [ "$force" -ne 1 ]; then
-      emit "$REFUSE_MARKER reason=already-open kind=$kind issue=$issue spawned-at=${prior_iso:-unknown} report=$(field_value "$rpath")"
+      emit "$REFUSE_MARKER reason=already-open kind=$kind issue=$issue spawned-at=$(field_value "${prior_iso:-unknown}") report=$(field_value "$rpath")"
       emit "$REFUSE_MARKER detail=a stage is already open for this kind; re-opening would restart a clock a reader is using. Pass --force to re-stamp the report (the original spawned-at is PRESERVED either way), or read it with: $prog verdict $kind --issue $issue"
       exit 2
     fi
@@ -1587,9 +1587,18 @@ cmd_verdict() {
   # closed set matched by string equality.
   [ -z "$cause" ] || rendered="$token ($(field_value "$cause"))"
   # EXACTLY ONE LINE on stdout. Nothing else is printed here, ever: this line is what a
-  # consumer greps, and a second line is a second opinion. BOTH data values on it — the cause
-  # and the caller-influenced report path — go through `field_value`, the one emit boundary.
-  emit "$KI_KIND RESULT: $rendered elapsed=$STAGE_ELAPSED deadline=$STAGE_DEADLINE agent=$STAGE_AGENT report=$(field_value "${STAGE_REPORT:-unresolved}")"
+  # consumer greps, and a second line is a second opinion. EVERY data value on it goes through
+  # `field_value`, the one emit boundary.
+  #
+  # THAT USED TO BE THREE VALUES SHORT (#3751 round 7, L1). `deadline=`, `agent=` and (on the
+  # STATUS line) `spawned-at=` are READ FROM THE STAGE RECORD, and `read_field` routes them
+  # through `one_line` — which neutralises control characters but deliberately does NOT map '='.
+  # So a hand-edited record's `agent: x deadline=0` put a SECOND `deadline=` pair on the line,
+  # ahead of the measured one, for any consumer that scans field by field. `elapsed=` is NOT
+  # routed and does not need to be: it is `unknown` or the result of integer arithmetic here,
+  # never text read from the record. The rule is the one round 2's S1 states — ONE boundary for
+  # EVERY data value on these lines, because the alternative is a per-site list to keep complete.
+  emit "$KI_KIND RESULT: $rendered elapsed=$STAGE_ELAPSED deadline=$(field_value "$STAGE_DEADLINE") agent=$(field_value "$STAGE_AGENT") report=$(field_value "${STAGE_REPORT:-unresolved}")"
   case "$token" in
     PASS) exit 0 ;;
     FINDINGS) exit 4 ;;
@@ -1646,19 +1655,32 @@ cmd_status() {
     *) state=reported ;;
   esac
   # --- STATUS-CAUSE-MAP-END ---------------------------------------------------------------
-  case "$STAGE_ELAPSED:$STAGE_DEADLINE" in
-    unknown:* | *:unknown) past=unknown ;;
-    *) if [ "$STAGE_ELAPSED" -gt "$STAGE_DEADLINE" ]; then past=yes; else past=no; fi ;;
+  # AFFIRMATIVE, NOT "is it the literal `unknown`" (#3751 round 7, L1). `STAGE_DEADLINE` is read
+  # from the stage record and is NOT validated on the read side, so a hand-edited
+  # `deadline-secs: 1800 agent=forged` fell through this guard into `[ ... -gt ... ]`, which
+  # printed bash's own `integer expression expected` onto stderr and then took the `past=no`
+  # branch — a permissive answer derived from a comparison that never happened, and a raw bash
+  # diagnostic inside a block whose every line is supposed to carry the `REVIEW-STAGE: ` anchor.
+  # Only DIGITS may be compared; everything else — `unknown` included — is `unknown`.
+  past=unknown
+  case "$STAGE_ELAPSED" in
+    "" | *[!0-9]*) ;;
+    *)
+      case "$STAGE_DEADLINE" in
+        "" | *[!0-9]*) ;;
+        *) if [ "$STAGE_ELAPSED" -gt "$STAGE_DEADLINE" ]; then past=yes; else past=no; fi ;;
+      esac
+      ;;
   esac
 
-  emit "STATUS kind=$KI_KIND issue=$KI_ISSUE state=$state elapsed=$STAGE_ELAPSED deadline=$STAGE_DEADLINE past-deadline=$past agent=$STAGE_AGENT spawned-at=$STAGE_SPAWNED_ISO report=$(field_value "${STAGE_REPORT:-unresolved}")"
+  emit "STATUS kind=$KI_KIND issue=$KI_ISSUE state=$state elapsed=$STAGE_ELAPSED deadline=$(field_value "$STAGE_DEADLINE") past-deadline=$past agent=$(field_value "$STAGE_AGENT") spawned-at=$(field_value "$STAGE_SPAWNED_ISO") report=$(field_value "${STAGE_REPORT:-unresolved}")"
   if [ "$state" = sentinel-only ] && [ "$past" = yes ]; then
     # A STAGE THAT IS WAITING MUST NOT LOOK LIKE ONE THAT IS HUNG (the gate's
     # `waiting for gate slot` idiom): name the elapsed time AND the fact that nothing was
     # produced, so the operator does not have to infer either.
-    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE PAST DEADLINE: ${STAGE_ELAPSED}s elapsed against a ${STAGE_DEADLINE}s deadline and NOTHING has been produced — the report is still the pre-spawn sentinel. This is ADVISORY: the deadline never changes the verdict, and a report arriving later is still a report. Read the verdict with: $prog verdict $KI_KIND --issue $KI_ISSUE"
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE PAST DEADLINE: ${STAGE_ELAPSED}s elapsed against a $(field_value "$STAGE_DEADLINE")s deadline and NOTHING has been produced — the report is still the pre-spawn sentinel. This is ADVISORY: the deadline never changes the verdict, and a report arriving later is still a report. Read the verdict with: $prog verdict $KI_KIND --issue $KI_ISSUE"
   elif [ "$state" = sentinel-only ]; then
-    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE inside deadline: ${STAGE_ELAPSED}s of ${STAGE_DEADLINE}s elapsed and nothing produced yet — the report is still the pre-spawn sentinel, which is NOT a verdict."
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE inside deadline: ${STAGE_ELAPSED}s of $(field_value "$STAGE_DEADLINE")s elapsed and nothing produced yet — the report is still the pre-spawn sentinel, which is NOT a verdict."
   elif [ "$state" = not-run-self-reported ]; then
     # THE AGENT'S OWN CAUSE IS THE ACTIONABLE PART, so it is passed through — via `field_value`,
     # the one emit boundary, because it is report-supplied DATA on a line carrying `key=value`

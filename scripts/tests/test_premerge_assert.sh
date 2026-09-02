@@ -2444,6 +2444,58 @@ if run 0 "controls CONTROL: a PASS whose report= carries a control byte still PR
   esac
 fi
 
+# --- 44b(iv): THE `--c-verdict` FILENAME reaches the SUCCESS block too (round 7, L1) ---
+# `C_SOURCE` is the THIRD site of round 5's J3 class to be found ONE AT A TIME: it renders
+# `file <the --c-verdict argument>` on the `PREMERGE: C-VERDICT` line of a SUCCESSFUL run — the
+# one block a human reads as the merge verdict and pastes into a PR comment. A filename carrying
+# a NEWLINE therefore emitted a second line with no `PREMERGE: ` prefix, and a filename shaped
+# like `…\nPREMERGE: OK <sha>` forged a verdict line in that block. Two properties are asserted
+# here, and the second is the one a byte census alone would miss: the OUTPUT MUST STILL CARRY
+# EXACTLY ONE column-zero `PREMERGE: OK ` line.
+#
+# A filename is not only invoker text, which is why this is a defect and not a recorded residual:
+# on the AUTO path the same field carries `C_ROUTING_DETAIL`, which interpolates an
+# `openspec/changes/<slug>` path measured out of the certified tree — and git PERMITS NEWLINES IN
+# PATHS. The filename is simply the reachable half to test hermetically.
+# `$'\n'` AND NOT `$(printf '\n')`: command substitution STRIPS trailing newlines, so the
+# obvious spelling builds a name with NO newline in it and the case passes having planted
+# nothing — measured while writing this case, which is why the name is CHECKED below before it
+# is used. A harness that never reached the code is this repo's own recurring test defect.
+CV_FORGE_NAME="$T/cv-forge"$'\n'"PREMERGE: OK 0000000000000000000000000000000000000000"$'\007'"x.txt"
+printf '%s\n' "$(cv_line PASS)" >"$CV_FORGE_NAME" 2>/dev/null || true
+case "$CV_FORGE_NAME" in *$'\n'*) ;; *) CV_FORGE_NAME="" ;; esac
+if [ -z "$CV_FORGE_NAME" ] || [ ! -f "$CV_FORGE_NAME" ]; then
+  # A name this filesystem cannot hold, or a name that lost its newline, cannot host the case.
+  # REPORTED, never skipped silently — three `bad`s, matching the three assertions the case owes,
+  # so the tally cannot quietly shrink (the case-floor lesson, #3544).
+  bad "forge: no control-bearing --c-verdict filename could be planted under $T — the L1 case did NOT run (1/3)"
+  bad "forge: the same absence (2/3)"
+  bad "forge: the same absence (3/3)"
+else
+  if run 0 "forge: a control-bearing --c-verdict FILENAME still PROCEEDS" \
+    2421 "$CERTIFIED" "$GOOD" --c-verdict "$CV_FORGE_NAME"; then
+    CV_FLEFT="$(printf '%s' "$OUT" | LC_ALL=C tr -dc '\001-\010\013\014\016-\037\177' | LC_ALL=C wc -c | LC_ALL=C tr -d ' ')"
+    if [ "$CV_FLEFT" = "0" ]; then
+      ok "forge: no C0 or DEL byte from the FILENAME reaches the success block"
+    else
+      bad "forge: $CV_FLEFT control byte(s) from the --c-verdict filename reached the success block"
+    fi
+    # THE FORGERY ASSERTION. `grep -c` on a column-zero anchor, because that is what a reader
+    # (and premerge-assert's own consumers) match on. Two would mean the filename produced one.
+    CV_FOK="$(printf '%s\n' "$OUT" | LC_ALL=C grep -c '^PREMERGE: OK ' || true)"
+    if [ "$CV_FOK" = "1" ]; then
+      ok "forge: EXACTLY ONE column-zero 'PREMERGE: OK ' line survives — the filename forged none"
+    else
+      bad "forge: $CV_FOK column-zero 'PREMERGE: OK ' lines — a filename forged a verdict line"
+    fi
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS stage: c source: file "*)
+        ok "forge CONTROL: the verdict is still reported, and the source is still named" ;;
+      *) bad "forge CONTROL: the C-VERDICT line lost its source (got: $OUT)" ;;
+    esac
+  fi
+fi
+
 # --- 44b(ii): the FULL grammar is validated, kind included (F2) --------------
 # A parser that accepted any column-zero `REVIEW-STAGE: ` line containing
 # `RESULT: PASS` would let a SIBLING stage certify C: this very branch's diff

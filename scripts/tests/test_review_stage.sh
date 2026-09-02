@@ -2180,6 +2180,79 @@ fi
 rs "$R16" open c --issue 991 --agent spec-auditor
 rc_is 0 "race/no-fallback CONTROL: with a working mktemp the same open succeeds"
 
+# --- 17. EVERY DATA VALUE ON AN EMITTED LINE GOES THROUGH THE ONE BOUNDARY (round 7, L1) ---
+# THE FINDING, one directory over from where round 5 left it. `read_field` routes every value it
+# reads out of the stage record through `one_line`, which neutralises control characters — and
+# deliberately does NOT map the ONE reserved character of these `key=value` lines, '='. That is
+# `field_value`'s job, and three fields never called it: `deadline=`, `agent=` (verdict AND status)
+# and `spawned-at=` (status). So a record whose `agent:` reads `spec-auditor deadline=0` put a
+# SECOND `deadline=` pair on the verdict line, AHEAD of the measured one, for any consumer that
+# scans field by field — which is exactly what `premerge-assert.sh`'s field census does.
+#
+# It is the same class as round 2's S1 (the cause) and round 5's J3 (the control bytes), found for
+# the third time at a new site, which is why round 7 also lands a STRUCTURAL guard
+# (`scripts/tests/lib/emit-boundary-scan.sh`, exercised in section 18) instead of only the fix.
+#
+# THE READ SIDE IS THE SIDE THAT HAS TO BE STRONG: `open` validates `--agent` through
+# `sanitize_field` and `--deadline-secs` as digits, so this shape cannot be WRITTEN by this tool.
+# It arrives from a HAND-EDITED record — and reading hand-written records is what this tool does.
+R17="$(newrepo)"
+rs "$R17" open c --issue 980 --agent spec-auditor
+rc_is 0 "boundary/record: the stage opened"
+L1_RP="$(printed_report_path)"
+L1_SF="$R17/.review-stage/issue-980/c.stage"
+printf 'result: PASS\n' >"$L1_RP" 2>/dev/null || true
+# The three fields are rewritten IN THE RECORD, each carrying a `key=value` pair of its own. The
+# planted pairs name fields a consumer reads (`deadline=`, `agent=`, `elapsed=`), because the harm
+# is a SECOND answer to a question the line already answers.
+if [ -f "$L1_SF" ] && [ -f "$L1_RP" ]; then
+  LC_ALL=C sed -e 's|^agent:.*|agent: spec-auditor deadline=0|' \
+    -e 's|^deadline-secs:.*|deadline-secs: 1800 agent=forged|' \
+    -e 's|^spawned-at:.*|spawned-at: 2026-01-01T00:00:00Z elapsed=999|' "$L1_SF" >"$L1_SF.new" &&
+    mv "$L1_SF.new" "$L1_SF"
+  ok "boundary/record: the record and its report exist and were re-written (the assertions below have a subject)"
+else
+  bad "boundary/record: missing precondition (record=$L1_SF report=$L1_RP) — the assertions below would be vacuous"
+fi
+# COUNTED, NOT MATCHED. `deadline=` appearing twice is the defect; asserting the line "contains
+# deadline=1800" would pass on the broken script too, because it does.
+FIELD_COUNT() { printf '%s' "$1" | LC_ALL=C tr ' ' '\n' | LC_ALL=C grep -c "^$2" || true; }
+rs "$R17" verdict c --issue 980
+rc_is 0 "boundary/record: the verdict is still PASS — a display boundary decides nothing"
+for f in deadline= agent=; do
+  n="$(FIELD_COUNT "$OUT" "$f")"
+  if [ "$n" = "1" ]; then
+    ok "boundary/record: the verdict line carries EXACTLY ONE '$f' pair"
+  else
+    bad "boundary/record: the verdict line carries $n '$f' pairs — a record value forged a field (got: $OUT)"
+  fi
+done
+# The '=' is mapped to '~' rather than dropped, and the surrounding text is untouched, so the
+# audit trail still shows what the record actually said. (Note the SPACE survives: `field_value`
+# preserves prose, and a space is not a reserved character of this grammar — it merely stops the
+# smuggled text being read as a key.)
+has "deadline=1800 agent~forged" "boundary/record: the smuggled '=' is rendered as '~' — neutralised, not dropped, so the audit trail still shows what the record said"
+rs "$R17" status c --issue 980
+rc_is 0 "boundary/record: status still reports"
+has "past-deadline=unknown" "boundary/record: an unmeasurable deadline yields past-deadline=unknown, never a permissive 'no' from a comparison that never ran"
+hasnt "integer expression expected" "boundary/record: and no raw bash diagnostic escapes into the REVIEW-STAGE: block"
+for f in deadline= agent= elapsed= spawned-at=; do
+  n="$(FIELD_COUNT "$OUT" "$f")"
+  if [ "$n" = "1" ]; then
+    ok "boundary/record: the STATUS line carries EXACTLY ONE '$f' pair"
+  else
+    bad "boundary/record: the STATUS line carries $n '$f' pairs — a record value forged a field (got: $OUT)"
+  fi
+done
+# THE CONTROL, without which every assertion above is satisfiable by a script that dropped the
+# fields altogether: an ORDINARY record still reports its own agent and deadline verbatim.
+R17B="$(newrepo)"
+rs "$R17B" open c --issue 981 --agent spec-auditor --deadline-secs 1234
+rc_is 0 "boundary/record CONTROL: an ordinary stage opened"
+printf 'result: PASS\n' >"$(printed_report_path)" 2>/dev/null || true
+rs "$R17B" verdict c --issue 981
+has "deadline=1234 agent=spec-auditor" "boundary/record CONTROL: an ordinary record's values pass through the boundary UNCHANGED"
+
 # --- case floor ---------------------------------------------------------------
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
