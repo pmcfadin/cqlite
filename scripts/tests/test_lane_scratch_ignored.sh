@@ -114,20 +114,66 @@ trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 trap 'cleanup; exit 129' HUP
 
-# Neutralise every ignore source that is not the file under test, so a PASS can
-# only come from this checkout's .gitignore.
-export GIT_CONFIG_GLOBAL=/dev/null
-export GIT_CONFIG_SYSTEM=/dev/null
+# ------------------------------------------------- git environment allowlist --
+# EVERY git call in this file runs under `env -i` PLUS THE ONE ALLOWLIST BELOW.
+# Copied in shape from scripts/agent-gate.sh's component-set pre-flight, which
+# took this same finding twice (#3544 rounds 13 and 276); round 276's lesson is
+# that a per-call-site fix does not reach the sites a LATER change adds, so the
+# rule is one wrapper and no bare `git` anywhere in the file.
+#
+# The exposure is reachable BY ACCIDENT, with no hostile actor: GIT ITSELF
+# exports GIT_DIR and GIT_INDEX_FILE to hooks and to `rebase --exec` / `bisect
+# run` children, so a guard invoked from one of those inherits them. A foreign
+# GIT_INDEX_FILE makes the tracked-file census read ANOTHER index and
+# affirmatively confirm that no tracked `.lane-*` path exists; GIT_DIR /
+# GIT_WORK_TREE redirect the fixture checks away from the intended repository;
+# GIT_CONFIG_COUNT/KEY_*/VALUE_* and GIT_CONFIG_PARAMETERS inject config at
+# command-line precedence, which outranks the fixture's own local config.
+#
+# THE LINE THE ALLOWLIST DRAWS, so a future addition can be judged not argued:
+#   ADMIT  what git needs to RUN AT ALL.
+#   CLEAR  everything that can change WHICH repository, index, object store,
+#          config or template git reads.
+# Anything not listed is cleared by `env -i` — that is what makes this closed:
+# a git environment variable invented tomorrow is cleared BY DEFAULT rather than
+# needing to be discovered here.
+#
+# NOT ADMITTED, deliberately: HOME (this guard needs no keys, no credentials and
+# no global config — nothing it does touches a remote), SSH_*/proxy vars (no
+# network), LANG/LC_* (the C locale is the better one for parsing git's output).
+# Location-specific values are passed EXPLICITLY per call (`-C <dir>`), never
+# inherited.
+GIT_ENV=(
+  # PATH: find `git` itself.
+  "PATH=${PATH:-/usr/bin:/bin}"
+  # LC_ALL: stable, parseable output regardless of the caller's locale.
+  "LC_ALL=C"
+  # TMPDIR: git's own temporary files. The CONTAINMENT-VALIDATED value from
+  # above, never the raw inherited one — git's temp files must not land inside
+  # the worktree under test either.
+  "TMPDIR=$tmp_root_abs"
+  # THE NEUTRALISERS, last so nothing above can shadow them. Belt, not the
+  # control: `env -i` has already removed HOME, so there is no global config to
+  # find; these make the intent explicit and survive a future HOME admission.
+  "GIT_CONFIG_GLOBAL=/dev/null"
+  "GIT_CONFIG_SYSTEM=/dev/null"
+)
 
-if ! git -c init.defaultBranch=main init -q "$fixture" >/dev/null 2>&1; then
+# gg — THE git wrapper. Nothing in this file may call `git` directly.
+gg() { env -i "${GIT_ENV[@]}" git "$@"; }
+
+if ! gg -c init.defaultBranch=main init -q "$fixture" >/dev/null 2>&1; then
   echo "FAIL: could not git-init the throwaway fixture at $fixture"
   exit 1
 fi
 cp "$GITIGNORE" "$fixture/.gitignore"
+# Belt, not the control (the control is the allowlist above): empty the
+# fixture's own info/exclude and point core.excludesFile at /dev/null, so a
+# PASS can only come from this checkout's .gitignore.
 : >"$fixture/.git/info/exclude"
-git -C "$fixture" config core.excludesFile /dev/null
+gg -C "$fixture" config core.excludesFile /dev/null
 
-g() { git -C "$fixture" "$@"; }
+g() { gg -C "$fixture" "$@"; }
 
 # check-ignore --no-index: decide purely from the ignore RULES, never from index
 # state, and report the matching source:line:pattern so the verdict can be
@@ -299,7 +345,7 @@ assert_not_ignored ".lanes-foo" "differs after the dot — outside the reserved 
 census_out="$fixture/.git/lane-scratch-census.z"
 census_err="$fixture/.git/lane-scratch-census.err"
 census_rc=0
-git -C "$REPO_ROOT" ls-files -z >"$census_out" 2>"$census_err" || census_rc=$?
+gg -C "$REPO_ROOT" ls-files -z >"$census_out" 2>"$census_err" || census_rc=$?
 census_err_text="$(cat "$census_err" 2>/dev/null)"
 
 if [ "$census_rc" -ne 0 ]; then
