@@ -5411,11 +5411,17 @@ if [ "$fa_col_uniq" = 2 ] && [ "$fa_col_dist" = 2 ]; then
 else
   bad "3765-collide-names: expected 2 distinct name= lines, got $fa_col_uniq line(s) / $fa_col_dist distinct — a tail elision prints two different failing tests as one string"
 fi
-fa_col_over=$(printf '%s\n' "$fa_col_names" | awk 'length($0) > 60' | grep -c . )
-if [ "${fa_col_over:-1}" = 0 ]; then
-  ok "3765-collide-cap: the per-name display cap (60) still holds — it is a SEPARATE bound from the gate 300-char field cap"
+# THE EXTRACTOR MUST EMIT THE IDENTITY UNTRUNCATED. This is the behavioural half of the
+# F6 order fix (roborev job 46, blocker 6): the extractor used to display-cap each name at
+# 60 chars BEFORE the gate redacted it, and an elision landing inside a `scheme://` left a
+# `<token>@host` fragment that NEITHER redaction rule matches. Both fixture identities are
+# well over 60 characters, so a name of 60 here means a display bound has moved back
+# upstream of the redaction.
+fa_col_max=$(printf '%s\n' "$fa_col_names" | awk '{ if (length($0) > m) m = length($0) } END { print m+0 }')
+if [ "${fa_col_max:-0}" -gt 60 ]; then
+  ok "3765-extractor-untruncated: the extractor emits the FULL identity ($fa_col_max chars), so the display bound cannot precede the redaction"
 else
-  bad "3765-collide-cap: $fa_col_over displayed name(s) exceed the 60-char display cap"
+  bad "3765-extractor-untruncated: the longest extractor identity is ${fa_col_max:-<none>} chars — a DISPLAY bound is being applied inside the extractor, UPSTREAM of the redaction (F6)"
 fi
 # And end to end: the rendered SUMMARY field carries the TRUE count, not the deduped one.
 _fa_run collide "clippy:FAIL file-size:PASS fmt:PASS" "clippy=$fa_dir/collide.log" PASS
@@ -5425,6 +5431,17 @@ case "$fa_got" in
     ok "3765-collide-render: the SUMMARY field reports the TRUE count for prefix-colliding identities ($fa_got)" ;;
   *) bad "3765-collide-render: expected 'failed-assert: 2 RECOGNISED (assert): …', got '$fa_got'" ;;
 esac
+# The per-NAME display cap is observed WHERE IT IS APPLIED — in the RENDERED field, after
+# the redaction. Observing it on extractor stdout (as this case used to) would re-pin the
+# pre-redaction truncation F6 removed. Split on `,`: these two fixture identities are Rust
+# module paths and carry none.
+fa_disp=${fa_got#*"(assert): "}
+fa_col_over=$(printf '%s\n' "$fa_disp" | tr ',' '\n' | sed 's/^ *//' | awk 'length($0) > 60' | grep -c . )
+if [ "${fa_col_over:-1}" = 0 ]; then
+  ok "3765-collide-cap: the per-name display cap (60) still holds in the RENDERED field — a SEPARATE bound from the gate 300-char field cap"
+else
+  bad "3765-collide-cap: $fa_col_over rendered name(s) exceed the 60-char display cap"
+fi
 
 # 55s. THE SAME PROPERTY WHERE THE DISPLAY CANNOT DISAMBIGUATE — this is the case that
 #      actually REDS if the dedup is moved back before the truncation. 55r survives a
@@ -5445,10 +5462,24 @@ if [ "${fa_mid_count:-0}" = 2 ]; then
 else
   bad "3765-collide-mid: expected count=2, got count='${fa_mid_count:-<none>}' — the dedup runs BEFORE the truncation, so a display bound is silently changing the count"
 fi
-if [ "${fa_mid_dist:-0}" = 1 ]; then
-  ok "3765-collide-mid-display: the display forms of those two identities are identical, and the TRUE count is reported anyway (count is the authority; a name is a pointer)"
+# The DISPLAY collision is now asserted in the RENDERED field, which is where the display
+# bound is applied (F6 moved it there, after the redaction). The extractor emits both
+# identities in FULL — so `fa_mid_dist` is legitimately 2 there — and the two rendered
+# names collapse to one visible string, harmlessly, because `count` is computed from the
+# FULL identity and stays true whatever the display does.
+_fa_run collidemid "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/collide-mid.log" PASS
+fa_got=$(_fa_line fmt)
+fa_mid_disp=${fa_got#*"(assert): "}
+fa_mid_rdist=$(printf '%s\n' "$fa_mid_disp" | tr ',' '\n' | sed 's/^ *//' | sort -u | grep -c . )
+if [ "${fa_mid_count:-0}" = 2 ] && [ "${fa_mid_rdist:-0}" = 1 ]; then
+  ok "3765-collide-mid-display: the two rendered display forms are identical and the TRUE count (2) is reported anyway (count is the authority; a name is a pointer)"
 else
-  bad "3765-collide-mid-display: expected 1 distinct display form for a middle-colliding pair, got $fa_mid_dist — the fixture no longer exercises a display collision, so this case no longer pins the dedup key"
+  bad "3765-collide-mid-display: expected count=2 with 1 distinct RENDERED display form, got count='${fa_mid_count:-<none>}' / $fa_mid_rdist distinct — the fixture no longer exercises a display collision, so this case no longer pins the dedup key"
+fi
+if [ "${fa_mid_dist:-0}" = 2 ]; then
+  ok "3765-collide-mid-full: the extractor emits BOTH middle-colliding identities in full, distinct form (it applies no display bound at all)"
+else
+  bad "3765-collide-mid-full: expected 2 distinct extractor identities for the middle-colliding pair, got $fa_mid_dist — the extractor is display-bounding upstream of the redaction (F6)"
 fi
 
 # 55v. SHARED-TAG COLLAPSE: the A1 identity is the FULL payload, not the tag before the
@@ -5533,10 +5564,104 @@ esac
 # called from the ONE clean function. A second implementation is the drift this repo
 # forbids, and here a divergence between two copies IS a credential leak.
 fa_cl=$(awk '/^_failassert_clean\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
-if printf '%s\n' "$fa_cl" | grep -q '_component_set_redact_text'; then
-  ok "3765-cred-one-redactor: _failassert_clean routes the value through the EXISTING _component_set_redact_text (no second redactor)"
+fa_cl_n=$(printf '%s\n' "$fa_cl" | grep -c '_component_set_redact_text')
+if [ "${fa_cl_n:-0}" = 1 ]; then
+  ok "3765-cred-one-redactor: _failassert_clean routes every state of the field through EXACTLY ONE _component_set_redact_text call (no second redactor, and no second call site to drift)"
 else
-  bad "3765-cred-one-redactor: _failassert_clean does not call _component_set_redact_text — either the redaction is gone or it has been re-implemented"
+  bad "3765-cred-one-redactor: _failassert_clean makes $fa_cl_n _component_set_redact_text call(s), expected exactly 1 — the redaction is gone, re-implemented, or split into two paths that can diverge (and a divergence here IS a credential leak)"
+fi
+# The mode token is CONTROL and lives at argv position 1; every call site must pass it as
+# a LITERAL, so no value can forge a mode (#3312 — control and data must not share a
+# channel). Three of the prose call sites pass a bare PATH as their payload.
+fa_cl_calls=$(grep -oE '\$\(_failassert_clean [^ ]+' "$GATE" | grep -vE '_failassert_clean (--prose|--names)$' | grep -c .)
+if [ "${fa_cl_calls:-1}" = 0 ]; then
+  ok "3765-cred-mode-literal: every _failassert_clean call site passes the mode token as a literal (--prose/--names), so a payload cannot forge the mode"
+else
+  bad "3765-cred-mode-literal: $fa_cl_calls _failassert_clean call site(s) do not lead with a literal mode token — external text at argv position 1 shares a channel with control"
+fi
+
+# 55x. THE CREDENTIAL SPANS THE DISPLAY BOUNDARY. REGRESSION, roborev job 46 blocker 6 —
+#      and the case 55w could not see, because 55w deliberately kept its fixtures UNDER
+#      the 60-char cap and therefore certified only the SAFE SIDE of the very boundary
+#      that broke. The defect: the extractor middle-elided each name to 60 chars BEFORE
+#      the gate redacted it, so the elision could DELETE the `https://` scheme and leave
+#      `TOKEN@host/path`, which matches NEITHER rule (rule 1 needs `scheme://…@`, rule 2
+#      needs `@host:`). MEASURED on the first fixture below: the extractor emitted
+#      `npm error 401 Unauthorized ...ess-token:SEKRETCHARLIE@h.io/p` and both redaction
+#      seds left it UNCHANGED.
+#
+#      This is the THIRD instance of one shape on this issue (F1 a 57-char cap before the
+#      DEDUP, F5 truncation at the first `:` before the DEDUP, F6 a display elision before
+#      the REDACTION), so the ORDER itself is asserted structurally in 55y below — a
+#      behavioural case only covers the shapes someone already thought of.
+#
+#      METHOD WARNING, because it is easy to get wrong: the extractor does NOT redact, so
+#      a leak check must NEVER be made on extractor stdout — a long token cut by the
+#      elision looks "absent" there while never having been redacted. Every assertion
+#      below is on the RENDERED field.
+printf 'npm error 401 Unauthorized while fetching the tarball https://x-access-token:SEKRETCHARLIE@h.io/p\n' > "$fa_dir/cred-long-url.log"
+printf 'Error: fatal: SEKRETDELTA@h.io:pmcfadin/cqlite.git remote rejected the push, access denied\n' > "$fa_dir/cred-long-scp.log"
+_fa_run credlongurl "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/cred-long-url.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETCHARLIE*) bad "3765-cred-long-url: a URL credential SPANNING the 60-char display elision is rendered VERBATIM into the SUMMARY field ('$fa_got') — the display bound is running BEFORE the redaction (F6)" ;;
+  *) ok "3765-cred-long-url: a URL credential spanning the display boundary does NOT reach the rendered field" ;;
+esac
+case "$fa_got" in
+  *"<redacted>@h.io"*) ok "3765-cred-long-url-marker: the redaction MARKER survives the display bound, so the field still reports the diagnostic" ;;
+  *) bad "3765-cred-long-url-marker: expected '<redacted>@h.io' in the field, got '$fa_got' — a silently dropped value is not a redaction" ;;
+esac
+_fa_run credlongscp "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/cred-long-scp.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETDELTA*) bad "3765-cred-long-scp: an scp-form credential SPANNING the display elision is rendered VERBATIM into the SUMMARY field ('$fa_got') — under the old order the head-27 window kept the token and elided its '@host:' (roborev job 264's shape, one bound over)" ;;
+  *) ok "3765-cred-long-scp: an scp-form credential spanning the display boundary does NOT reach the rendered field" ;;
+esac
+case "$fa_got" in
+  *"<redacted>@h."*) ok "3765-cred-long-scp-marker: the scp-form redaction MARKER survives the display bound" ;;
+  *) bad "3765-cred-long-scp-marker: expected '<redacted>@h.' in the field, got '$fa_got'" ;;
+esac
+
+# 55y. THE ORDER IS ASSERTED STRUCTURALLY: normalise -> redact -> bound for display.
+#      STRUCTURAL, and labelled as such. Three behavioural instances of one shape have now
+#      been fixed one at a time; a future edit that reintroduces a bound upstream of the
+#      redaction would pass every behavioural case whose fixture happens to sit on the
+#      safe side of it (which is exactly how 55w passed while blocker 6 was live). So:
+#      (a) the extractor carries NO display bound, only a declared SAFETY bound large
+#          enough that it cannot plausibly split a credential;
+#      (b) inside _failassert_clean the ONE redactor call precedes the per-name display
+#          bound, which precedes the 300-char field cap;
+#      (c) _failassert_record — which runs BEFORE the emit boundary — bounds nothing.
+fa_bounds=$(grep -oE 'length\([A-Za-z_]+\)[[:space:]]*>[[:space:]]*[0-9]+' "$fa_tool" \
+              | grep -oE '[0-9]+$' | sort -n | head -1)
+if [ -n "$fa_bounds" ] && [ "$fa_bounds" -ge 1024 ]; then
+  ok "3765-order-no-early-bound: the smallest length bound in the extractor is $fa_bounds (>= 1024) — it is a SAFETY bound, not a display bound that could split a credential"
+elif [ -z "$fa_bounds" ]; then
+  ok "3765-order-no-early-bound: the extractor applies no length bound at all, so no bound can precede the redaction"
+else
+  bad "3765-order-no-early-bound: the extractor applies a length bound of $fa_bounds — a bound that small is a DISPLAY bound running upstream of the redaction (F6), and a bound must never be able to change a safety verdict"
+fi
+if grep -q 'SAFETY BOUND, NOT A DISPLAY BOUND' "$fa_tool" && grep -q 'DECLARED RESIDUAL' "$fa_tool"; then
+  ok "3765-order-safety-declared: the extractor's remaining bound is declared a SAFETY bound and its residual (a credential straddling it) is DECLARED"
+else
+  bad "3765-order-safety-declared: $fa_tool does not declare its remaining bound as a SAFETY bound with a stated residual — an undeclared truncation upstream of the redaction is F6"
+fi
+fa_ord=$(awk '/^_failassert_clean\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#' | grep -nE '_component_set_redact_text|substr\(t, 1, head\)|cut -c1-300')
+fa_ord_red=$(printf '%s\n' "$fa_ord" | grep -n '_component_set_redact_text' | head -1 | cut -d: -f1)
+fa_ord_disp=$(printf '%s\n' "$fa_ord" | grep -n 'substr(t, 1, head)' | head -1 | cut -d: -f1)
+fa_ord_cap=$(printf '%s\n' "$fa_ord" | grep -n 'cut -c1-300' | head -1 | cut -d: -f1)
+if [ -n "$fa_ord_red" ] && [ -n "$fa_ord_disp" ] && [ -n "$fa_ord_cap" ] \
+   && [ "$fa_ord_red" -lt "$fa_ord_disp" ] && [ "$fa_ord_disp" -lt "$fa_ord_cap" ]; then
+  ok "3765-order-redact-first: inside _failassert_clean the ONE redaction precedes the per-name display bound, which precedes the 300-char field cap"
+else
+  bad "3765-order-redact-first: _failassert_clean does not order redact -> display-bound -> field-cap (redact='${fa_ord_red:-<none>}' display='${fa_ord_disp:-<none>}' cap='${fa_ord_cap:-<none>}') — a bound ahead of the redaction is F6"
+fi
+fa_rec_body=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
+fa_rec_bound=$(printf '%s\n' "$fa_rec_body" | grep -cE 'cut -c|substr\(|\$\{[A-Za-z_]+:0:[0-9]+\}')
+if [ "${fa_rec_bound:-1}" = 0 ]; then
+  ok "3765-order-record-nobound: _failassert_record bounds nothing — every bound is applied at the emit boundary, after the redaction"
+else
+  bad "3765-order-record-nobound: _failassert_record applies $fa_rec_bound length bound(s) of its own, upstream of the ONE redaction (F6)"
 fi
 
 # 55t/55u. STRUCTURAL, and labelled as such: the --delta node-tests runner must keep its jest
@@ -5608,6 +5733,11 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
+# 447 -> 458 on #3765 (roborev job 46, blocker 6): sections 55x/55y add 4 asserts for a
+# credential SPANNING the display boundary (55w certified only the safe side of it) and 4
+# STRUCTURAL asserts pinning the order normalise -> redact -> bound-for-display, plus 2
+# that pin the extractor as emitting UNTRUNCATED identities, plus 1 pinning the mode
+# token as literal-only at every call site.
 # 442 -> 447 on #3765 (roborev job 45): section 55w adds 5 asserts for the credential
 # redaction at the field's one emit boundary, host-INDEPENDENT for the same reason as the
 # rest of section 55 (bash + the --lite-aggregate-selftest hook + the extractor script),
@@ -5635,7 +5765,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=447
+ASSERT_FLOOR=458
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

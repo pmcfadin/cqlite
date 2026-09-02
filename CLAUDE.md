@@ -705,6 +705,18 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   non-empty ones recognised; the knowingly-uncovered shapes are declared in its header) and resolved
   from the checkout with **no env override**. It parses through the gate's ONE `_ansi_stripped_log`
   (#3400), and an unreadable log is a NAMED `not extractable`, never "no failures found".
+  **The pipeline order is NORMALISE -> REDACT -> BOUND FOR DISPLAY, and it is a safety property, not
+  formatting.** Three defects on this issue were ONE shape — an operation applied to a value before
+  the operation that needed the value WHOLE: a 57-char cap before the DEDUP (count undercounted), a
+  cut at the first `:` before the DEDUP (13 distinct asserts named as one tag), and a 60-char display
+  elision before the REDACTION, which deleted a URL's `scheme://` and left `TOKEN@host/path` — a
+  shape NEITHER redaction rule matches, so a live credential reached a block this repo tells agents
+  to paste into PR comments. So the extractor emits the FULL identity, the single
+  `_component_set_redact_text` call runs at the ONE emit boundary, and every bound (60 per name,
+  300 per field) runs after it. The extractor's one remaining bound is a DECLARED SAFETY bound at
+  4096 chars with its residual stated. **A bound must never be able to change a safety verdict, and
+  a leak check must be made on the RENDERED field — never on extractor stdout, where a token cut by
+  an elision looks absent while never having been redacted.**
 - **Every component line NAMES the feature matrix it ran, in ALL THREE modes (#3453).**
   `core-tests: PASS (412s)  [invocation: test cqlite-core --features cli-helpers]` — read as
   `<subcommand> <scope> <features>`, one entry per distinct invocation, `xN` for repeats. A bare

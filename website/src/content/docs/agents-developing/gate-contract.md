@@ -1250,6 +1250,22 @@ through the gate's ONE `_ansi_stripped_log` and read by redirection, never a pip
 colour survives redirection, and a piped `while read` discards its verdict in a subshell);
 an unreadable log is a NAMED `not extractable`, never "no failures found".
 
+**The pipeline order is NORMALISE → REDACT → BOUND FOR DISPLAY, and it is a safety
+property rather than formatting.** Three defects on #3765 were one shape — an operation
+applied to a value *before* the operation that needed the value whole: a 57-character cap
+ahead of the DEDUP (the count undercounted), a cut at the first `:` ahead of the DEDUP (13
+distinct asserts named as one shared tag), and a 60-character display elision ahead of the
+REDACTION. That last one deleted a URL's `scheme://` and left `TOKEN@host/path`, which
+**neither** redaction rule matches (one needs `scheme://…@`, the other needs `@host:`), so a
+live credential reached a block this repo tells agents to paste into PR comments. The
+extractor therefore emits the **full** identity, the single `_component_set_redact_text`
+call runs at the one emit boundary, and every bound (60 chars per name, 300 per field) runs
+**after** it; the extractor's one remaining bound is a **declared SAFETY bound** at 4096
+characters with its residual stated in place. Two rules fall out: a bound must never be
+able to change a safety verdict, and a leak check must be made on the **rendered field** —
+never on extractor stdout, where a long token cut by an elision looks absent while never
+having been redacted.
+
 ### Every component line NAMES the feature matrix it ran (#3453)
 
 Owner ruling, 2026-08-30: *"the gate SUMMARY should name the feature matrix each

@@ -6568,10 +6568,19 @@ _failassert_write() {
   return 0
 }
 
-# _failassert_clean <text>: THE ONE EMIT BOUNDARY for this field — credentials redacted,
-# ONE line, no control characters, bounded. Component logs hold repository-controlled
-# paths, and git PERMITS a newline in one — an unsanitised value would emit a SUMMARY line
-# with no key at all.
+# _failassert_clean: THE ONE EMIT BOUNDARY for this field — credentials redacted, ONE
+# line, no control characters, bounded. Component logs hold repository-controlled paths,
+# and git PERMITS a newline in one — an unsanitised value would emit a SUMMARY line with
+# no key at all. TWO FORMS:
+#     _failassert_clean --prose <text>                   a cause; no per-name bound applies
+#     _failassert_clean --names <prefix> <suffix> <name>...
+#                                                        an identity list: each name is
+#                                                        display-bounded AFTER redaction
+#                                                        and joined with `, `
+# The mode token is at argv POSITION 1 and is a LITERAL at every call site in this file —
+# never filled from external text — so a value cannot forge the mode (#3312: control and
+# data must not share a channel; here they share nothing, because position 1 is ours).
+# A missing/unrecognised token is a coding error and is reported as such, never guessed.
 #
 # REDACTION, AND WHY IT IS HERE AND NOT AT THE CALL SITES (roborev job 45, blocker 4 —
 # the SIXTH instance of the credential-leak family this file already documents at
@@ -6594,46 +6603,106 @@ _failassert_write() {
 #
 # REDACT, DO NOT REFUSE: the value is a diagnostic the run must still report.
 #
-# ORDER IS LOAD-BEARING, and it is redact -> control-strip -> squeeze -> cap:
-#   * the CAP MUST BE LAST. `cut -c1-300` applied first can sever a URL between the token
-#     and its `@`, and BOTH redaction rules key on that `@` — so a length bound would
-#     silently defeat the redaction. A bound must never be able to change a safety verdict
-#     (the same reasoning that put the display cap after the dedup in the extractor).
-#   * REDACTION PRECEDES THE CONTROL-CHAR STRIP. `tr '\001-\037\177' ' '` turns a control
-#     character inside userinfo into a SPACE, and both rules exclude `[:space:]` from the
-#     userinfo class — so stripping first can break a match that would otherwise have
-#     fired (`https://u:TOK<0x01>@h` -> `https://u:TOK @h`, no match, token emitted).
-#     Redacting first strictly dominates; the redactor passes control characters through
-#     untouched, so the strip still does its own job afterwards.
+# ===== THE ORDER, AND IT IS THE WHOLE FIX: NORMALISE -> REDACT -> BOUND FOR DISPLAY =====
 #
-# DECLARED RESIDUAL: the extractor display-caps each NAME at 60 chars with a middle
-# elision BEFORE this function sees it, so an elision landing inside a `scheme://` can in
-# principle leave a `<token>@host` fragment that neither rule matches (rule 1 needs the
-# scheme, rule 2 needs a `:` after the host). Narrow, but not zero. Closing it needs the
-# redaction to run before the extractor's truncation, which cannot be done without a
-# second implementation of the rules inside awk — so it is DECLARED here rather than
-# silently accepted.
+# EVERY bound this field applies runs AFTER the one redaction, and no bound anywhere runs
+# before it. That is one rule replacing three separate accidents (roborev job 46,
+# blocker 6 — the THIRD instance on this issue of ONE shape, an operation applied to a
+# value BEFORE the operation that needed the value WHOLE):
+#   F1  a 57-char display cap before the DEDUP   -> two sibling tests collapsed, count UNDERCOUNTED
+#   F5  truncation at the first `:` before the DEDUP -> 13 distinct asserts named as one tag
+#   F6  a 60-char display elision before the REDACTION -> a credential reached the SUMMARY
+#
+# MEASURED F6, end to end. The extractor used to middle-elide each name to 60 chars, so
+#     npm error 401 Unauthorized while fetching the tarball https://x-access-token:TOK@h.io/p
+# arrived here as `npm error 401 Unauthorized ...ess-token:TOK@h.io/p` — the elision had
+# DELETED the `https://`, after which NEITHER redaction rule matches (rule 1 needs
+# `scheme://…@`, rule 2 needs `@host:`) and the token reached a SUMMARY block this repo
+# tells agents to paste into PR comments. The extractor now emits the FULL normalised
+# identity and the per-NAME display bound lives HERE, after the redaction.
+#
+# THE FOUR STEPS, in order, each with the reason it cannot move earlier:
+#   1. REDACT — first, so no later bound can sever a URL between the token and its `@`.
+#      It also PRECEDES THE CONTROL-CHAR STRIP: `tr '\001-\037\177' ' '` turns a control
+#      character inside userinfo into a SPACE, and both rules exclude `[:space:]` from the
+#      userinfo class — so stripping first can break a match that would otherwise have
+#      fired (`https://u:TOK<0x01>@h` -> `https://u:TOK @h`, no match, token emitted).
+#      Redacting first strictly dominates; the redactor passes control characters through
+#      untouched, so the strip still does its own job afterwards.
+#   2. DISPLAY-BOUND each NAME to 60 chars, then join with `, `. The elision is in the
+#      MIDDLE, not at the tail, and that is load-bearing: a Rust test identity is a MODULE
+#      PATH whose distinguishing token is the LAST one, and the first 57 characters of two
+#      sibling tests are routinely identical, so a tail elision printed two DIFFERENT
+#      failing tests as the same visible string — re-creating, inside the field, the very
+#      misidentification #3765 exists to remove. Head 27 + `...` + tail 30 = 60.
+#      A DISPLAY COLLISION IS STILL POSSIBLE (two identities differing only in an elided
+#      middle) and is harmless BY CONSTRUCTION: `count` is computed by the extractor from
+#      the FULL identity, so the count stays true whatever the display does. The count is
+#      the authority; a name is a pointer.
+#   3. FLATTEN — NUL drop, control chars to spaces, squeeze.
+#   4. CAP the whole field at 300 chars, LAST. This is a SEPARATE bound from the 60-char
+#      per-name one; do not collapse the two.
+#
+# ONE REDACTOR, ONE CALL. `--names` passes the prose prefix, the prose suffix and every
+# name to the SINGLE `_component_set_redact_text` invocation, NEWLINE-separated, and the
+# per-name bound is applied to its output. The separator is a boundary the payload
+# PROVABLY cannot reach — the extractor `norm()`s every identity, mapping every control
+# character (0x0A included) to a space, and its stdout protocol is line-oriented — so
+# control and data do not share a delimiter the data can forge (#3312: anchor the control
+# tokens somewhere the payload provably cannot reach, or remove the shared channel). A
+# SECOND redactor, or a second call site, is forbidden: this repo neutralises at the ONE
+# emit boundary, because a divergence between two copies here IS a credential leak.
 _failassert_clean() {
-  printf '%s' "$(_component_set_redact_text "$1")" | tr -d '\000' | tr '\001-\037\177' ' ' | tr -s ' ' | cut -c1-300
+  local _mode="${1:-}" _prefix="" _suffix="" _payload="" _red
+  [ "$#" -ge 1 ] && shift
+  case "$_mode" in
+    --prose) _payload="${1:-}" ;;
+    --names)
+      # prefix on line 1, suffix on line 2, one name per line after that. The newline is a
+      # boundary the payload PROVABLY cannot reach: the extractor norm()s every identity,
+      # mapping every control character (0x0A included) to a space, and its stdout
+      # protocol is line-oriented.
+      _prefix="${1:-}"; _suffix="${2:-}"
+      [ "$#" -ge 2 ] && shift 2
+      _payload=$(printf '%s\n' "$_prefix" "$_suffix" "$@")
+      ;;
+    *)
+      printf 'not recorded (internal: _failassert_clean called with no mode token)'
+      return 0 ;;
+  esac
+  # ===== THE ONE REDACTION. Every state of this field passes through exactly this call. =====
+  _red=$(_component_set_redact_text "$_payload")
+  # THEN, and only then, the per-NAME display bound + the join.
+  if [ "$_mode" = --names ]; then
+    _red=$(printf '%s\n' "$_red" | awk -v head=27 -v tail=30 '
+      NR == 1 { pre = $0; next }
+      NR == 2 { suf = $0; next }
+      { t = $0
+        if (length(t) > head + 3 + tail)
+          t = substr(t, 1, head) "..." substr(t, length(t) - tail + 1)
+        out = out (k++ ? ", " : "") t }
+      END { printf "%s%s%s", pre, out, suf }')
+  fi
+  printf '%s' "$_red" | tr -d '\000' | tr '\001-\037\177' ' ' | tr -s ' ' | cut -c1-300
 }
 
 # _failassert_record <component> <status> [logfile]: THE extraction site. Only a FAIL has
 # a failing assert, so PASS/SKIP record nothing and render no field.
 _failassert_record() {
-  local name="$1" status="${2:-}" log="${3:-}" tool src out rc tier count names shown value
+  local name="$1" status="${2:-}" log="${3:-}" tool src out rc tier count shown value
   [ "$status" = FAIL ] || return 0
   [ -n "$log" ] || log="${LOG_DIR:-}/$name.log"
   tool=$(_failassert_tool)
   if [ ! -r "$tool" ]; then
-    _failassert_write "$name" "not extractable (extractor $(_failassert_clean "$tool") is not readable)"
+    _failassert_write "$name" "not extractable (extractor $(_failassert_clean --prose "$tool") is not readable)"
     return 0
   fi
   if [ ! -e "$log" ]; then
-    _failassert_write "$name" "not extractable (component log $(_failassert_clean "$log") does not exist)"
+    _failassert_write "$name" "not extractable (component log $(_failassert_clean --prose "$log") does not exist)"
     return 0
   fi
   if [ ! -r "$log" ] || [ ! -f "$log" ]; then
-    _failassert_write "$name" "not extractable (component log $(_failassert_clean "$log") is not a readable file)"
+    _failassert_write "$name" "not extractable (component log $(_failassert_clean --prose "$log") is not a readable file)"
     return 0
   fi
   if [ ! -s "$log" ]; then
@@ -6642,7 +6711,7 @@ _failassert_record() {
   fi
   # #3400: normalise through the gate's ONE stripper; its non-zero is a NAMED cause.
   if ! src=$(_ansi_stripped_log "$log" 2>/dev/null) || [ -z "$src" ] || [ ! -r "$src" ]; then
-    _failassert_write "$name" "not extractable (ANSI normalisation of $(_failassert_clean "$log") failed, so nothing could be parsed)"
+    _failassert_write "$name" "not extractable (ANSI normalisation of $(_failassert_clean --prose "$log") failed, so nothing could be parsed)"
     return 0
   fi
   out=$(bash "$tool" "$src" 10 2>/dev/null); rc=$?
@@ -6656,15 +6725,29 @@ _failassert_record() {
     _failassert_write "$name" "0 RECOGNISED (component log scanned; no recogniser matched - the recogniser set is NON-EXHAUSTIVE)"
     return 0
   fi
-  # Joined by awk, NOT by `paste -sd|` + `sed s/|/, /`: a recognised identity may itself
-  # contain a `|` (a toolchain error line routinely does), and that round-trip would turn
-  # one name into two.
-  names=$(printf '%s\n' "$out" | sed -n 's/^name=//p' | head -n "$FAILASSERT_SHOW" \
-            | awk 'NR>1{printf ", "} {printf "%s", $0} END{if (NR) print ""}')
-  shown=$(printf '%s\n' "$out" | sed -n 's/^name=//p' | head -n "$FAILASSERT_SHOW" | grep -c .)
-  value="$count RECOGNISED ($tier): $names"
-  [ "$count" -gt "$shown" ] 2>/dev/null && value="$value (+$((count - shown)) more)"
-  _failassert_write "$name" "$(_failassert_clean "$value")"
+  # THE NAMES ARE PASSED AS SEPARATE ARGUMENTS, not pre-joined into one string, because
+  # the per-name display bound must be applied INSIDE _failassert_clean — after the
+  # redaction — and a joined string has no name boundaries left to bound (a recognised
+  # identity may itself contain `, `). Read into an array by REDIRECTION from a process
+  # substitution, never `… | while read` (#3400: a piped loop runs in a subshell and its
+  # result is discarded).
+  local -a fa_names=()
+  local fa_n
+  while IFS= read -r fa_n; do
+    [ -n "$fa_n" ] && fa_names+=("$fa_n")
+  done < <(printf '%s\n' "$out" | sed -n 's/^name=//p' | head -n "$FAILASSERT_SHOW")
+  shown=${#fa_names[@]}
+  if [ "$shown" -eq 0 ]; then
+    # count>0 with no name is not reachable through the extractor protocol (it prints
+    # min(count,max) >= 1 names); report it affirmatively rather than rendering a field
+    # that claims a count it cannot name.
+    _failassert_write "$name" "$(_failassert_clean --prose "not extractable (extractor reported count=$count for tier $tier but named nothing)")"
+    return 0
+  fi
+  value=""
+  [ "$count" -gt "$shown" ] 2>/dev/null && value=" (+$((count - shown)) more)"
+  _failassert_write "$name" \
+    "$(_failassert_clean --names "$count RECOGNISED ($tier): " "$value" "${fa_names[@]}")"
   return 0
 }
 

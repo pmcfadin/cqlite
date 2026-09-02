@@ -17,9 +17,12 @@
 #       tier=<assert|guard|toolchain>
 #       count=<N>                 total DISTINCT identities recognised (never capped).
 #                                 DISTINCT is judged on the FULL normalised identity, so
-#                                 the display cap below can never change the count.
+#                                 no bound anywhere can change the count.
 #       name=<identity>           at most <max-names> lines (default 10), in file order,
-#                                 each DISPLAY-CAPPED at 60 chars (57 + `...`)
+#                                 each the FULL normalised identity. NOT display-capped:
+#                                 the DISPLAY bound lives in the gate, AFTER redaction
+#                                 (see the ORDER note at add()). Bounded only by the
+#                                 declared SAFETY bound in safety().
 #   exit 0 — the log was read and scanned (whether or not anything matched)
 #   exit 2 — usage error / the log could not be read: the CALLER must render this as a
 #            named `not extractable`, never as "no failures found". A guard that could
@@ -108,17 +111,39 @@ if [ -z "$log" ] || [ ! -f "$log" ] || [ ! -r "$log" ]; then
 fi
 
 awk -v max="$max" '
-  # norm() is the IDENTITY: one line, no control characters, whitespace collapsed. It
-  # does NOT truncate. disp() is the DISPLAY form, and it is derived from norm().
+  # ===== THE ORDER IS: NORMALISE (here) -> REDACT (gate) -> BOUND FOR DISPLAY (gate) =====
   #
-  # THE TWO ARE SEPARATE BECAUSE DEDUP AND DISPLAY ARE DIFFERENT QUESTIONS. `add()` used
-  # to truncate FIRST and key `seen[]` on the truncated text, so two DISTINCT identities
-  # sharing a 57-character prefix — routine for a Rust test path, e.g.
+  # THIS EXTRACTOR EMITS THE FULL NORMALISED IDENTITY AND APPLIES NO DISPLAY BOUND. That
+  # is a SAFETY property, not a formatting preference (roborev job 46, blocker 6). It is
+  # the THIRD instance on this issue of ONE shape — an operation applied to a value BEFORE
+  # the operation that needed the value WHOLE:
+  #   F1  a 57-char cap before the DEDUP        -> two sibling tests collapsed, count UNDERCOUNTED
+  #   F5  truncation at the first `:` before the DEDUP -> 13 distinct asserts named as one tag
+  #   F6  a 60-char DISPLAY elision before the REDACTION -> a credential reached the SUMMARY
+  # so it is fixed as a CLASS: no bound in this file may precede a step that needs the
+  # whole value, and the only bound left here is declared SAFETY (see safety()).
+  #
+  # MEASURED F6. The middle elision of
+  #     npm error 401 Unauthorized while fetching the tarball https://x-access-token:TOK@h.io/p
+  # produced `npm error 401 Unauthorized ...ess-token:TOK@h.io/p`, DELETING the `https://`
+  # scheme — after which NEITHER of the two gate redaction rules matches (rule 1 needs
+  # `scheme://…@`, rule 2 needs `@host:`), so the token reached the SUMMARY block this
+  # repo tells agents to paste into PR comments. The elision, not the redactor, was the
+  # defect: a bound must never be able to change a safety verdict.
+  #
+  # WHERE THE DISPLAY BOUND WENT: agent-gate.sh `_failassert_clean`, applied per NAME
+  # AFTER the single `_component_set_redact_text` call. The middle-elision STYLE is
+  # unchanged (head 27 + `...` + tail 30 = 60) and so is its reason, restated there.
+  #
+  # norm() is the IDENTITY: one line, no control characters, whitespace collapsed. It does
+  # NOT truncate.
+  #
+  # DEDUP IS ON THE FULL IDENTITY, AND THAT IS WHY. `add()` used to truncate FIRST and key
+  # `seen[]` on the truncated text, so two DISTINCT identities sharing a 57-character
+  # prefix — routine for a Rust test path, e.g.
   # `…::bti::rows::tests::verify_root_base_prefix_{alpha,beta}` — collapsed to ONE and
   # `count` UNDERCOUNTED. The count is the field this whole extractor exists to make
-  # trustworthy (the #3765 flake signature is the assert name AND the accounted count),
-  # so a display bound must never be able to change it. Dedup on the FULL identity;
-  # truncate only what is printed.
+  # trustworthy (the #3765 flake signature is the assert name AND the accounted count).
   function norm(s,   t) {
     t = s
     gsub(/[\001-\037\177]/, " ", t)          # control chars (a path CAN hold a newline)
@@ -126,32 +151,27 @@ awk -v max="$max" '
     gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
     return t
   }
-  # 60 is the per-NAME display cap of THIS extractor. It is a SEPARATE bound from the
-  # 300-char `_failassert_clean` cap the gate applies to the whole rendered field; do not
-  # collapse the two.
+  # safety() IS A SAFETY BOUND, NOT A DISPLAY BOUND, and the distinction is the whole
+  # point of the block above. It exists only so a single pathological log line (a minified
+  # bundle, a base64 blob, a megabyte of JSON) is not carried whole through awk, a sidecar
+  # file and three command substitutions. 4096 is ~68x the 60-char display cap and ~13x
+  # the 300-char field cap, so it cannot plausibly split a credential: every
+  # credential-bearing diagnostic shape measured on this fleet is orders under it.
   #
-  # THE ELISION IS IN THE MIDDLE, not at the tail, and that is load-bearing. A Rust test
-  # identity is a MODULE PATH: the distinguishing token is the LAST one, and the first 57
-  # characters of two sibling tests are routinely identical. A tail elision therefore
-  # printed two DIFFERENT failing tests as the same visible string — re-creating, inside
-  # the field, the very misidentification #3765 exists to remove. Head 27 + `...` +
-  # tail 30 = 60, so the cap and the `...` marker are unchanged.
-  #
-  # A DISPLAY COLLISION IS STILL POSSIBLE (two identities differing only in an elided
-  # middle) and is harmless BY CONSTRUCTION: `count` is computed from the FULL identity
-  # in add(), so the count stays true whatever the display does. The count is the
-  # authority; a name is a pointer.
-  function disp(t) {
-    if (length(t) > 60) t = substr(t, 1, 27) "..." substr(t, length(t) - 29)
-    return t
-  }
-  function add(tier, id,   c) {
-    id = norm(id)
-    if (id == "") return
-    if ((tier SUBSEP id) in seen) return
-    seen[tier SUBSEP id] = 1
+  # DECLARED RESIDUAL: a credential STRADDLING offset 4096 of one physical log line would
+  # be cut here, upstream of the redaction — the same shape F6 was, at a bound 68x larger.
+  # Concretely, a secret before 4096 whose `@`/scheme falls after it would survive
+  # unredacted. Narrow, not zero, and DECLARED rather than silently accepted.
+  function safety(t) { return (length(t) > 4096) ? substr(t, 1, 4096) : t }
+  function add(tier, id,   c, full) {
+    full = norm(id)
+    if (full == "") return
+    # The dedup key is the FULL identity, never the safety-bounded one: two identities
+    # differing only beyond the bound must still count as two. `count` is the authority.
+    if ((tier SUBSEP full) in seen) return
+    seen[tier SUBSEP full] = 1
     c = ++n[tier]
-    if (c <= max) hit[tier SUBSEP c] = disp(id)
+    if (c <= max) hit[tier SUBSEP c] = safety(full)
   }
   # ---- TIER assert ----
   # The A1 identity is the WHOLE payload after `FAIL - `, detail INCLUDED. It used to be
@@ -163,8 +183,8 @@ awk -v max="$max" '
   # UNDERCOUNT naming something that identifies neither failure. That is the same
   # truncate-before-dedup defect add() was already fixed for, one level up: the fix there
   # moved the DISPLAY cap after the dedup, and this one was applied OUTSIDE add(), so
-  # add() never saw the full payload. Dedup on the FULL identity; the middle elision in disp()
-  # keeps the leading tag AND the distinguishing tail visible.
+  # add() never saw the full payload. Dedup on the FULL identity; the middle
+  # elision in the gate keeps the leading tag AND the distinguishing tail visible.
   /^[[:space:]]*FAIL - / {
     s = $0; sub(/^[[:space:]]*FAIL - /, "", s); add("assert", s); next
   }
