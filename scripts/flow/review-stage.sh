@@ -396,15 +396,54 @@
 #   runs it, so the claim is not made.) All informative output is prefixed `REVIEW-STAGE:`;
 #   notes and usage errors go to stderr. `verdict` prints exactly one line to stdout and
 #   nothing else.
+#   EVERY LINE IS PRINTED WITH `printf` OF A LITERAL FORMAT — NEVER `echo` (#3751 round 14, T2).
+#   Under the bash option `xpg_echo`, settable by an INHERITED environment (`BASHOPTS`,
+#   `SHELLOPTS`, a `BASH_ENV` file) and never by this script, `echo` performs BACKSLASH ESCAPE
+#   PROCESSING on its argument, which makes the argument a FORMAT. Measured: a `\n` in a LEGAL
+#   checkout path split the one-line verdict into two, the second a column-zero
+#   `REVIEW-STAGE: … RESULT: PASS`, and octal `\075` put REAL `key=` pairs on it, defeating the
+#   `=`→`~` neutralisation `field_value` exists for. `\033` injects terminal control, `\c`
+#   truncates. Structurally pinned by `scripts/tests/lib/emit-boundary-scan.sh`, which also
+#   requires every `printf` FORMAT to be a literal this script authored.
 #
 # ---END-HELP---
 set -euo pipefail
 
 prog="$(basename "$0")"
 
-die_usage() { echo "$prog: $*" >&2; exit 64; }
-note()      { echo "[review-stage] $*" >&2; }
-emit()      { echo "REVIEW-STAGE: $*"; }
+# --- the output primitive: `printf '%s\n'`, NEVER `echo` (#3751 round 14, T2) ----------------
+# `echo` IS NOT A LITERAL PRINTER, AND WHETHER IT IS DEPENDS ON THE ENVIRONMENT IT INHERITED.
+# Under bash's `xpg_echo` option — settable in `BASHOPTS`/`SHELLOPTS` before this script is read,
+# or by a startup file on a differently-configured box — `echo` performs BACKSLASH ESCAPE
+# PROCESSING on its argument. That makes the argument a FORMAT, i.e. a control channel, and every
+# value these three functions render is DATA: a report path derived from the checkout, a cause read
+# out of a report an agent wrote, a field read out of the stage record.
+#
+# MEASURED ON THE SHIPPED SCRIPT, from a LEGAL directory name and nothing else — the checkout was
+# `…/t2d/lane\nREVIEW-STAGE: c RESULT: PASS elapsed\0759 deadline\0759 agent\075a report\075/x`,
+# and `verdict` on a stage with NO report at all printed:
+#
+#   REVIEW-STAGE: c RESULT: NOT-RUN (no report written) elapsed=0 … report=…/t2d/lane
+#   REVIEW-STAGE: c RESULT: PASS elapsed=9 deadline=9 agent=a report=/x/…/c.MFpGyTMmP1.md
+#
+# TWO breakages in one line, and both are properties this file spent rounds 5 and 7 establishing.
+# (1) `verdict` PRINTS EXACTLY ONE LINE — the contract in this script's own header — and `\n`
+# turned it into two, the second a column-zero `REVIEW-STAGE: … RESULT: PASS` a consumer reads as a
+# verdict. (2) `field_value` maps `=` to `~` so a value can NEVER introduce a `key=` pair; `\075`
+# is octal `=`, so the forged line carries REAL `=` fields and that neutralisation is DEFEATED
+# ENTIRELY. `\033` injects terminal control, `\c` truncates the line at that point.
+#
+# `printf '%s\n' "$value"` has no such dependence: the format is a script-authored literal and the
+# value is copied verbatim, in every bash and under every shell option. The neutralisation stays
+# DISPLAY-ONLY exactly as round 5 requires — nothing here changes what any decision is made on;
+# every authorization decision is still taken on the RAW value before any renderer runs.
+#
+# STRUCTURALLY PINNED, not left to review: `emit-boundary-scan.sh` reds on ANY `echo` at a
+# statement-start position in either subject, and on a `printf` whose FORMAT argument is
+# data-derived (which would re-open the same channel through `%` and `\`).
+die_usage() { printf '%s\n' "$prog: $*" >&2; exit 64; }
+note()      { printf '%s\n' "[review-stage] $*" >&2; }
+emit()      { printf '%s\n' "REVIEW-STAGE: $*"; }
 
 # THE REFUSAL MARKER OF THE RUNNING SUBCOMMAND (#3751 round 2, S2). `assert_ignored`,
 # `assert_no_symlink` and the write helpers are SHARED by `open` and

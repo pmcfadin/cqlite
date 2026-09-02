@@ -3796,6 +3796,239 @@ if LC_ALL=C grep -q 'classify_report "\$STAGE_REPORT" 1 "" "\$now_obs"' "$RS"; t
 else
   bad "r2/structural: the refusal diagnostic re-reads the report, so it can name a state neither observation held"
 fi
+
+# --- 27. THE OUTPUT PRIMITIVE MUST BE A LITERAL PRINTER (round 14, T2) --------------
+# `emit`, `note` and `die_usage` used `echo`. Under the bash option `xpg_echo` — settable in
+# `BASHOPTS`/`SHELLOPTS` before this script is read, or by a `BASH_ENV` startup file, so an
+# INHERITED ENVIRONMENT decides it — `echo` performs BACKSLASH ESCAPE PROCESSING on its argument.
+# That makes the argument a FORMAT, i.e. a control channel, and every value these three functions
+# render is DATA: a report path derived from the checkout, a cause read out of a report an agent
+# wrote, a field read out of the stage record.
+#
+# MEASURED ON THE SHIPPED SCRIPT, FROM A LEGAL DIRECTORY NAME AND NOTHING ELSE. With the checkout
+# at `…/lane\nREVIEW-STAGE: c RESULT: PASS elapsed\0759 deadline\0759 agent\075a report\075/x`,
+# `verdict` on a stage with NO REPORT AT ALL printed:
+#
+#   REVIEW-STAGE: c RESULT: NOT-RUN (no report written) elapsed=0 … report=…/lane
+#   REVIEW-STAGE: c RESULT: PASS elapsed=9 deadline=9 agent=a report=/x/…/c.MFpGyTMmP1.md
+#
+# TWO properties broke at once, and this suite pins both elsewhere. (1) `verdict` PRINTS EXACTLY
+# ONE LINE — the contract in the script's own header — and `\n` made it two, the second a
+# column-zero `REVIEW-STAGE: … RESULT: PASS` a consumer reads as a verdict. (2) `\075` is octal
+# `=`, so the forged line carries REAL `key=` pairs and `field_value`'s `=`→`~` map — section 11c's
+# whole subject — was DEFEATED. `\033` injects terminal control; `\c` truncates the line.
+#
+# THE SUBJECT IS THE SHIPPED SOURCE, EXTRACTED AND RUN — the idiom `test_cargo_output_parsers.sh`
+# uses for the gate's cargo parsers. Each definition is pulled out of `$RS` BY TEXT and evaluated
+# in a subshell with `xpg_echo` ON, so reverting one to `echo` REDS this section instead of greening
+# it. A source-text assert alone could not tell a `printf` of a DATA-DERIVED format from a literal
+# one, which is why the source pins below are a BELT and not the check.
+#
+# HOST-BRANCHED, WITH BOTH ARMS THE SAME LENGTH (section 25's idiom), because `xpg_echo` is a fact
+# about the host's shell and not about this script — and the premise is MEASURED by ATTEMPTING it,
+# never inferred from a version number.
+T2_VAL='p\nREVIEW-STAGE: c RESULT: PASS elapsed\0759 agent\075a\033[31m'
+T2_ESC="$(printf '\033')"
+# t2_run <definition-line> <fn> — evaluate one extracted definition with xpg_echo forced ON and
+# call it with the hostile value. stderr is merged because `note`/`die_usage` write there.
+t2_run() {
+  ( shopt -s xpg_echo 2>/dev/null || true
+    prog=review-stage.sh
+    eval "$1"
+    "$2" "report=$T2_VAL" ) 2>&1
+}
+T2_XPG=0
+if ( shopt -s xpg_echo ) >/dev/null 2>&1; then
+  T2_PROBE="$( ( shopt -s xpg_echo; echo "A\nB" ) 2>/dev/null | LC_ALL=C wc -l | LC_ALL=C tr -d ' ' )"
+  [ "$T2_PROBE" = 2 ] && T2_XPG=1
+fi
+T2_DEF_DIE="$(LC_ALL=C sed -n '/^die_usage() /p' "$RS" 2>/dev/null | LC_ALL=C head -1 || true)"
+T2_DEF_NOTE="$(LC_ALL=C sed -n '/^note() /p' "$RS" 2>/dev/null | LC_ALL=C head -1 || true)"
+T2_DEF_EMIT="$(LC_ALL=C sed -n '/^emit() /p' "$RS" 2>/dev/null | LC_ALL=C head -1 || true)"
+if [ "$T2_XPG" -eq 1 ]; then
+  ok "t2 PREMISE: xpg_echo is enableable on this host AND demonstrably changes echo (one argument, two lines) — so a green below is not a green because nothing happened"
+  # THE RED CONTROL. The PRE-FIX definition is reconstructed INLINE and must FAIL the same
+  # assertions, or this section would pass whether or not the fix is present.
+  T2_BAD_OUT="$(t2_run 't2_bad() { echo "REVIEW-STAGE: $*"; }' t2_bad)"
+  if [ "$(printf '%s\n' "$T2_BAD_OUT" | LC_ALL=C wc -l | LC_ALL=C tr -d ' ')" -gt 1 ]; then
+    ok "t2 RED CONTROL: the PRE-FIX 'echo' spelling DOES break the one-line grammar here — the differential can detect the defect"
+  else
+    bad "t2 RED CONTROL: the pre-fix 'echo' spelling produced one line, so the assertions below would pass with or without the fix (got: $T2_BAD_OUT)"
+  fi
+  case "$T2_BAD_OUT" in
+    *"agent=a"*) ok "t2 RED CONTROL: and it manufactured a REAL '=' out of octal \\075, which is the '=' neutralisation being defeated" ;;
+    *) bad "t2 RED CONTROL: the pre-fix spelling did not manufacture an '=' (got: $T2_BAD_OUT)" ;;
+  esac
+  for T2_FN in die_usage note emit; do
+    case "$T2_FN" in
+      die_usage) T2_DEF="$T2_DEF_DIE" ;;
+      note)      T2_DEF="$T2_DEF_NOTE" ;;
+      *)         T2_DEF="$T2_DEF_EMIT" ;;
+    esac
+    T2_OUT="$(t2_run "$T2_DEF" "$T2_FN")"
+    if [ "$(printf '%s\n' "$T2_OUT" | LC_ALL=C wc -l | LC_ALL=C tr -d ' ')" = 1 ]; then
+      ok "t2/$T2_FN: EXACTLY ONE line under xpg_echo, so a '\\n' in a legal path cannot split the grammar"
+    else
+      bad "t2/$T2_FN: the value's '\\n' was interpreted and the output is not one line (got: $T2_OUT)"
+    fi
+    case "$T2_OUT" in
+      *"$T2_ESC"*) bad "t2/$T2_FN: the value's '\\033' became a real ESC byte — terminal control reached the operator channel (got: $T2_OUT)" ;;
+      *) ok "t2/$T2_FN: '\\033' is INERT — no ESC byte reached the output" ;;
+    esac
+    case "$T2_OUT" in
+      *'p\nREVIEW-STAGE:'*) ok "t2/$T2_FN: the backslash sequence is carried VERBATIM, so the neutralisation stays display-only and the value is still readable" ;;
+      *) bad "t2/$T2_FN: the value was not carried verbatim (got: $T2_OUT)" ;;
+    esac
+    case "$T2_OUT" in
+      *"agent=a"*) bad "t2/$T2_FN: octal \\075 manufactured a real '=' — field_value's '=' neutralisation is defeated (got: $T2_OUT)" ;;
+      *'agent\075a'*) ok "t2/$T2_FN: '\\075' is INERT — no 'key=' pair can be manufactured out of an octal escape" ;;
+      *) bad "t2/$T2_FN: neither the inert nor the interpreted form of \\075 is present (got: $T2_OUT)" ;;
+    esac
+  done
+else
+  # THE NO-SUBJECT ARM, DECLARED RATHER THAN SKIPPED. This host's bash cannot be made to interpret
+  # escapes in `echo`, so the defect is not reproducible here and this arm says so. It runs the
+  # SAME extraction over the SAME three definitions — establishing that each is a literal printer
+  # under this host's own `echo` semantics — and emits the SAME COUNT, so the EXACT floor is
+  # host-independent.
+  ok "t2 PREMISE: this host's bash does not honour xpg_echo, so the hostile-environment differential has NO SUBJECT here — declared, and the same three definitions are exercised below under this host's own echo semantics"
+  T2_BAD_OUT="$(t2_run 't2_bad() { echo "REVIEW-STAGE: $*"; }' t2_bad)"
+  if [ "$(printf '%s\n' "$T2_BAD_OUT" | LC_ALL=C wc -l | LC_ALL=C tr -d ' ')" = 1 ]; then
+    ok "t2 RED CONTROL (no subject): the pre-fix 'echo' spelling is indistinguishable here, which is exactly why this arm claims nothing about xpg_echo"
+  else
+    bad "t2 RED CONTROL (no subject): the pre-fix spelling split the line on a host that reported no xpg_echo — the premise probe is wrong (got: $T2_BAD_OUT)"
+  fi
+  case "$T2_BAD_OUT" in
+    *'agent\075a'*) ok "t2 RED CONTROL (no subject): and \\075 stayed inert for it too — the difference this section measures is unavailable on this host" ;;
+    *) bad "t2 RED CONTROL (no subject): \\075 did not stay inert on a host that reported no xpg_echo (got: $T2_BAD_OUT)" ;;
+  esac
+  for T2_FN in die_usage note emit; do
+    case "$T2_FN" in
+      die_usage) T2_DEF="$T2_DEF_DIE" ;;
+      note)      T2_DEF="$T2_DEF_NOTE" ;;
+      *)         T2_DEF="$T2_DEF_EMIT" ;;
+    esac
+    T2_OUT="$(t2_run "$T2_DEF" "$T2_FN")"
+    if [ "$(printf '%s\n' "$T2_OUT" | LC_ALL=C wc -l | LC_ALL=C tr -d ' ')" = 1 ]; then
+      ok "t2/$T2_FN: EXACTLY ONE line (this host's echo semantics; the xpg_echo case is declared unavailable)"
+    else
+      bad "t2/$T2_FN: the output is not one line (got: $T2_OUT)"
+    fi
+    case "$T2_OUT" in
+      *"$T2_ESC"*) bad "t2/$T2_FN: an ESC byte reached the output (got: $T2_OUT)" ;;
+      *) ok "t2/$T2_FN: no ESC byte reached the output" ;;
+    esac
+    case "$T2_OUT" in
+      *'p\nREVIEW-STAGE:'*) ok "t2/$T2_FN: the backslash sequence is carried VERBATIM" ;;
+      *) bad "t2/$T2_FN: the value was not carried verbatim (got: $T2_OUT)" ;;
+    esac
+    case "$T2_OUT" in
+      *"agent=a"*) bad "t2/$T2_FN: a real '=' was manufactured (got: $T2_OUT)" ;;
+      *'agent\075a'*) ok "t2/$T2_FN: '\\075' is INERT" ;;
+      *) bad "t2/$T2_FN: neither form of \\075 is present (got: $T2_OUT)" ;;
+    esac
+  done
+fi
+
+# (b) THE STRUCTURAL GUARD OVER THE PRIMITIVE (round 14, T2). `emit-boundary-scan.sh` already
+#     asserts that every VALUE on an emitted line is routed; it now also asserts that the printing
+#     COMMAND is a literal printer — `echo` is refused outright, with no allowlist, and every
+#     `printf` FORMAT must be a script-authored literal. A routed value is no protection if the
+#     primitive re-interprets what the boundary just neutralised, which is why this is a second
+#     check and not a second allowlist entry.
+if [ ! -f "$EBS" ]; then
+  # TEN, matching the ten assertions the else-branch emits, so the EXACT floor holds either way.
+  bad "primitive-guard: $EBS is missing — the structural guard did not run (1/10)"
+  bad "primitive-guard: the same absence (2/10)"
+  bad "primitive-guard: the same absence (3/10)"
+  bad "primitive-guard: the same absence (4/10)"
+  bad "primitive-guard: the same absence (5/10)"
+  bad "primitive-guard: the same absence (6/10)"
+  bad "primitive-guard: the same absence (7/10)"
+  bad "primitive-guard: the same absence (8/10)"
+  bad "primitive-guard: the same absence (9/10)"
+  bad "primitive-guard: the same absence (10/10)"
+else
+  T2_SOUT="$(bash "$EBS" "$RS" 2>&1)"; T2_SRC=$?
+  if [ "$T2_SRC" -eq 0 ]; then
+    ok "primitive-guard: the SHIPPED review-stage.sh is CLEAN — no echo, and every printf FORMAT is a literal"
+  else
+    bad "primitive-guard: the shipped review-stage.sh FAILS the guard: $T2_SOUT"
+  fi
+  case "$T2_SOUT" in
+    *"printf statement(s)"*) ok "primitive-guard: the check REPORTS how many printf statements it examined — a count, not an adjective" ;;
+    *) bad "primitive-guard: the primitive check reported no subject count, so it may not have run at all (got: $T2_SOUT)" ;;
+  esac
+  case "$T2_SOUT" in
+    *"NOT COVERED (output primitive)"*) ok "primitive-guard: and it DECLARES what the primitive check does not cover, on every run" ;;
+    *) bad "primitive-guard: the primitive check did not declare its own scope (got: $T2_SOUT)" ;;
+  esac
+  # THE POSITIVE CONTROL, on a THROWAWAY COPY (the artifact is substituted, never a settable seam
+  # — #3312's corollary for tests). The plant is deliberately COMPOUND, so it also proves the
+  # primitive walker is POSITIONAL rather than line-anchored (round 9's N3 blind spot).
+  T2_ED="$T/t2-echo"; mkdir -p "$T2_ED"
+  LC_ALL=C sed -e '/^emit() /s|.*|emit()      { [ -n "$*" ] \&\& echo "REVIEW-STAGE: $PLANTED_ECHO_PRIMITIVE"; }|' \
+    "$RS" >"$T2_ED/review-stage.sh" 2>/dev/null || true
+  T2_ELINE="$(LC_ALL=C grep -n 'PLANTED_ECHO_PRIMITIVE' "$T2_ED/review-stage.sh" 2>/dev/null | LC_ALL=C head -1 || true)"
+  if [ -n "$T2_ELINE" ]; then
+    ok "primitive-guard/control: the echo plant landed in the scratch copy (asserted, not assumed)"
+  else
+    bad "primitive-guard/control: the echo plant did NOT land, so the control below proves nothing"
+  fi
+  case "$(printf '%s\n' "${T2_ELINE#*:}" | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]].*//')" in
+    echo)
+      bad "primitive-guard/control: the planted echo BEGINS its statement position at the line start, so this control does not test positional recognition (line: $T2_ELINE)" ;;
+    "")
+      bad "primitive-guard/control: could not read the planted line's first word" ;;
+    *)
+      ok "primitive-guard/control: the planted echo does NOT begin its line (it is behind a [ … ] &&), so the control also tests POSITIONAL recognition" ;;
+  esac
+  T2_EOUT="$(bash "$EBS" "$T2_ED/review-stage.sh" 2>&1)"; T2_ERC=$?
+  if [ "$T2_ERC" -ne 0 ]; then
+    ok "primitive-guard/control: the guard REDS on a planted echo"
+  else
+    bad "primitive-guard/control: the guard reported CLEAN on a planted echo — it proves nothing (got: $T2_EOUT)"
+  fi
+  case "$T2_EOUT" in
+    *"output-primitive bypass"*) ok "primitive-guard/control: and it NAMES the check that failed, so the red is attributable to the primitive rather than to a value" ;;
+    *) bad "primitive-guard/control: the guard red without naming the output-primitive check (got: $T2_EOUT)" ;;
+  esac
+  # THE SECOND PLANT: a printf whose FORMAT is data-derived. The same channel, one step in — a
+  # format carrying '%' or a backslash from data is interpreted exactly as echo's argument was.
+  T2_FD="$T/t2-fmt"; mkdir -p "$T2_FD"
+  LC_ALL=C sed -e '/^emit() /s|.*|emit()      { printf "$PLANTED_FORMAT_PRIMITIVE" "REVIEW-STAGE: $*"; }|' \
+    "$RS" >"$T2_FD/review-stage.sh" 2>/dev/null || true
+  if LC_ALL=C grep -q 'PLANTED_FORMAT_PRIMITIVE' "$T2_FD/review-stage.sh" 2>/dev/null; then
+    ok "primitive-guard/format: the data-derived-format plant landed in the scratch copy"
+  else
+    bad "primitive-guard/format: the format plant did NOT land, so the control below proves nothing"
+  fi
+  T2_FOUT="$(bash "$EBS" "$T2_FD/review-stage.sh" 2>&1)"; T2_FRC=$?
+  if [ "$T2_FRC" -ne 0 ]; then
+    ok "primitive-guard/format: the guard REDS on a printf whose FORMAT came from a variable"
+  else
+    bad "primitive-guard/format: the guard reported CLEAN on a data-derived printf format (got: $T2_FOUT)"
+  fi
+  case "$T2_FOUT" in
+    *PLANTED_FORMAT_PRIMITIVE*) ok "primitive-guard/format: and it NAMES the offending format, so the red is attributable" ;;
+    *) bad "primitive-guard/format: the guard red without naming the planted format (got: $T2_FOUT)" ;;
+  esac
+fi
+
+# (c) THE SOURCE PINS — a BELT beside the behavioural differential, not the check. They name the
+#     exact spelling required, so a reviewer reading the diff sees the rule as well as the guard.
+for T2_FN in die_usage note emit; do
+  case "$T2_FN" in
+    die_usage) T2_DEF="$T2_DEF_DIE" ;;
+    note)      T2_DEF="$T2_DEF_NOTE" ;;
+    *)         T2_DEF="$T2_DEF_EMIT" ;;
+  esac
+  case "$T2_DEF" in
+    *"printf '%s\\n'"*) ok "t2/structural: $T2_FN prints through a printf of the literal format '%s\\n'" ;;
+    "") bad "t2/structural: could not locate the definition of $T2_FN in the shipped script" ;;
+    *) bad "t2/structural: $T2_FN does not print through a literal printf (got: $T2_DEF)" ;;
+  esac
+done
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
 # which is this issue's own subject inside a test file.
@@ -4050,7 +4283,22 @@ fi
 # was written first and discarded for firing on four indented comments, a heredoc opener and the
 # `--help` renderer. Its wall-clock `elapsed=` field is neutralised before comparison, which is not
 # cosmetic: unneutralised it flaked 1 run in 5.
-ASSERT_FLOOR=747
+#
+# ROUND 14's T2 MOVES IT TO 775. Section 27 adds 28: the output primitive must be a LITERAL
+# PRINTER. `emit`, `note` and `die_usage` used `echo`, which under the bash option `xpg_echo` — set
+# by an INHERITED environment (`BASHOPTS`/`SHELLOPTS`, a `BASH_ENV` file), never by this script —
+# performs BACKSLASH ESCAPE PROCESSING on its argument and so makes that argument a FORMAT. Measured
+# on the shipped script from a LEGAL directory name alone: the one-line verdict became TWO lines
+# whose second was a column-zero `REVIEW-STAGE: … RESULT: PASS`, with REAL `key=` pairs on it from
+# octal `\075`, defeating section 11c's `=`→`~` neutralisation outright. The subject is the SHIPPED
+# SOURCE, extracted by text and evaluated with `xpg_echo` forced ON, so reverting one definition
+# REDS the section (measured: 18 failures) — and a RED CONTROL reconstructs the pre-fix `echo`
+# spelling inline, so the differential is proved able to see the defect. Host-branched on a MEASURED
+# premise with both arms the same length, ten assertions over the extended
+# `emit-boundary-scan.sh` (which now refuses `echo` outright and requires every `printf` FORMAT to
+# be a script-authored literal) with a COMPOUND positive control and a data-derived-format control,
+# and three source pins as a belt.
+ASSERT_FLOOR=775
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

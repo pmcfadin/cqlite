@@ -811,7 +811,23 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   a second read). Two further lossy behaviours were enumerated and LEFT with reasons: trailing-newline
   stripping cannot change a per-line column-zero grammar, and locale/encoding is already
   `LC_ALL=C`-pinned at every consumer — now measured by a cross-locale invariance case, after a source
-  scan for unpinned tools was discarded for firing on indented comments and the `--help` renderer. **The classifier enforces that working too,
+  scan for unpinned tools was discarded for firing on indented comments and the `--help` renderer.
+  **AND NEUTRALISING THE VALUE IS WORTHLESS IF THE PRINTING COMMAND RE-INTERPRETS IT — every line is
+  `printf` of a LITERAL FORMAT, never `echo` (#3751 round 14).** `emit`, `note` and `die_usage` used
+  `echo`, and under the bash option `xpg_echo` — settable by an **inherited** environment
+  (`BASHOPTS`, `SHELLOPTS`, a `BASH_ENV` file) and never by the script — `echo` performs BACKSLASH
+  ESCAPE PROCESSING on its argument, which makes that argument a **FORMAT**: a control channel
+  carrying data. Measured from a LEGAL directory name and nothing else — a `\n` in the checkout path
+  split the one-line verdict into **two**, the second a column-zero `REVIEW-STAGE: … RESULT: PASS`
+  for a stage with **no report at all**, and octal `\075` put **real** `key=` pairs on it, so
+  `field_value`'s `=`→`~` map — the thing that makes a value unable to introduce a field — was
+  defeated entirely (`\033` injects terminal control; `\c` truncates). Scoped honestly: the consumer
+  refuses on the LINE COUNT, so no false `PREMERGE: OK` was demonstrated — what is void is the
+  one-line grammar and the neutralisation guarantee. It is #3312's rule at the last hop, **stop
+  sharing the channel rather than escape harder**, and it is pinned structurally: the emit-boundary
+  scanner refuses `echo` outright **with no allowlist** and additionally requires every `printf`
+  FORMAT to be script-authored, over EVERY logical line rather than only the emit sites, with its own
+  declared scope, its own NOT-COVERED set and its own vacuity guard. **The classifier enforces that working too,
   by calling the SAME function the writer does (#3751 round 1).** `verdict` reads HAND-WRITTEN reports by design, and it used to accept any
   NON-EMPTY `performed-by`/`reason`/`evidence` — so `performed-by: nobody`, `reason: x`, `evidence: tbd`
   reached the token that PROCEEDS at the merge point while the writer would have refused all three. A

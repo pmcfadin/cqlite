@@ -145,7 +145,12 @@ carry).
   refuse, since the match is string equality) arrived as `PASS` and this script reported
   `PREMERGE: OK` at exit 0. Every read of untrusted content now maps NUL to SOH IN THE STREAM, which
   the closed-set match then refuses; a separate probe of the same path was rejected because it is a
-  SECOND observation and one direction of its disagreement fails OPEN. Details:
+  SECOND observation and one direction of its disagreement fails OPEN. **And the PRINTING COMMAND is
+  part of that boundary too (#3751 round 14)**: `c_safe_display` neutralises the value, so the command
+  must not re-interpret it — every line is `printf` of a literal format, never `echo`, whose argument
+  is a FORMAT under the inherited-environment option `xpg_echo` (a `\n` splits a line, `\033` injects
+  terminal control, `\c` truncates, octal `\075` manufactures a real `=`). This script uses no `echo`
+  today — measured — and the scanner keeps it that way. Details:
   [delivery pipeline](/cqlite/agents-developing/delivery-pipeline/).
   **What a `PREMERGE: OK` does NOT prove (#3650), printed on the success path as `PREMERGE: SCOPE`.**
   It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.

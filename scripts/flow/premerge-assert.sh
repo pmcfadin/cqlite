@@ -206,6 +206,17 @@
 # `PREMERGE: OK` at exit 0. A capture that normalises its input cannot be the thing
 # that validates it.
 #
+# AND EVERY LINE IS PRINTED WITH `printf` OF A LITERAL FORMAT — NEVER `echo`
+# (#3751 round 14, T2). `c_safe_display` neutralises the VALUE; the printing
+# COMMAND must not re-interpret what it just neutralised. Under the bash option
+# `xpg_echo`, settable by an INHERITED environment (`BASHOPTS`, `SHELLOPTS`, a
+# `BASH_ENV` file) and never by this script, `echo` performs BACKSLASH ESCAPE
+# PROCESSING on its argument, so a `\n` in a legal path splits a line, `\033`
+# injects terminal control, `\c` truncates, and octal `\075` manufactures a REAL
+# `=`. This script uses no `echo` today — measured, zero occurrences — and
+# `scripts/tests/lib/emit-boundary-scan.sh` keeps it that way, also requiring
+# every `printf` FORMAT to be a literal this script authored.
+#
 # ONLY `PASS` AND `AUTHOR-PERFORMED` PROCEED, AND THE SECOND KEEPS ITS OWN TOKEN.
 # `AUTHOR-PERFORMED` is review-stage.sh's disclosed hand-audit substitute; it is
 # reported on its own `PREMERGE: C-VERDICT` line and is NEVER folded into

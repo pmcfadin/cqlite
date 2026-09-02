@@ -288,6 +288,16 @@ preceding `[ … ]` guard needs no allowlist claim), and each suite carries a co
 bypass inside a compound statement — a control planting only at a line start cannot tell the widened
 guard from the blind one.
 
+**And the boundary reaches the printing COMMAND, not only the value (round 14, T2).** `emit`, `note`
+and `die_usage` used `echo`, whose argument is a FORMAT under the inherited-environment option
+`xpg_echo` — so a `\n` in a LEGAL checkout path split the one-line verdict in two (the second line a
+column-zero `REVIEW-STAGE: … RESULT: PASS` for a stage with no report) and octal `\075` put REAL
+`key=` pairs on it, defeating the `=`→`~` neutralisation outright. Every line is `printf` of a
+literal format now, and the scanner gained a second check — over EVERY logical line, since the
+primitive question has one answer everywhere — that refuses `echo` with no allowlist and requires
+every `printf` FORMAT to be script-authored. Its scope, its NOT-COVERED set and its own vacuity
+guard are declared separately from the value check's.
+
 ## §5 — the agent side, and the limit of what it buys
 
 Every agent whose completion is a pipeline gate gains a report-of-record clause in its definition, and

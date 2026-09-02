@@ -4663,6 +4663,99 @@ else
   esac
 fi
 
+# --- 44n: THE OUTPUT PRIMITIVE MUST BE A LITERAL PRINTER (round 14, T2) --------
+# The mirror of test_review_stage.sh section 27, for this script. Section 44h asserts that every
+# VALUE on an emitted line is routed through `c_safe_display`; this one asserts that the printing
+# COMMAND is a literal printer. A routed value is no protection if the primitive re-interprets what
+# the boundary just neutralised — under the bash option `xpg_echo`, set by an INHERITED environment
+# and never by this script, `echo` performs BACKSLASH ESCAPE PROCESSING on its argument, so a `\n`
+# splits a line, a `\033` injects terminal control, a `\c` truncates, and octal `\075` manufactures
+# a REAL `=`. Measured on `review-stage.sh`, whose `emit` had this exact shape: one legal directory
+# name produced a SECOND column-zero `REVIEW-STAGE: … RESULT: PASS` line carrying real `key=` pairs.
+#
+# THIS SCRIPT USES NO `echo` TODAY — measured, zero occurrences — so the check is here to keep it
+# that way, and the POSITIVE CONTROL is the requirement rather than the clean run. Its format
+# arguments are all literals too; the second control plants a data-derived one, which is the same
+# channel one step in (`%` and `\` in a format are interpreted).
+if [ ! -f "$EBS" ]; then
+  # TEN, matching the ten assertions the else-branch emits, so the case floor is unaffected by
+  # which branch runs.
+  bad "primitive-guard: $EBS is missing — the structural guard did not run (1/10)"
+  bad "primitive-guard: the same absence (2/10)"
+  bad "primitive-guard: the same absence (3/10)"
+  bad "primitive-guard: the same absence (4/10)"
+  bad "primitive-guard: the same absence (5/10)"
+  bad "primitive-guard: the same absence (6/10)"
+  bad "primitive-guard: the same absence (7/10)"
+  bad "primitive-guard: the same absence (8/10)"
+  bad "primitive-guard: the same absence (9/10)"
+  bad "primitive-guard: the same absence (10/10)"
+else
+  PG_OUT="$(bash "$EBS" "$ASSERT" 2>&1)"; PG_RC=$?
+  if [ "$PG_RC" -eq 0 ]; then
+    ok "primitive-guard: the SHIPPED premerge-assert.sh is CLEAN — no echo, and every printf FORMAT is a literal"
+  else
+    bad "primitive-guard: the shipped premerge-assert.sh FAILS the guard: $PG_OUT"
+  fi
+  case "$PG_OUT" in
+    *"printf statement(s)"*) ok "primitive-guard: the check REPORTS how many printf statements it examined — a count, not an adjective" ;;
+    *) bad "primitive-guard: the primitive check reported no subject count, so it may not have run at all (got: $PG_OUT)" ;;
+  esac
+  case "$PG_OUT" in
+    *"NOT COVERED (output primitive)"*) ok "primitive-guard: and it DECLARES what the primitive check does not cover, on every run" ;;
+    *) bad "primitive-guard: the primitive check did not declare its own scope (got: $PG_OUT)" ;;
+  esac
+  # PLANT 1: an `echo` on the `PREMERGE: OK ` line — the emitted line this whole file is about —
+  # and deliberately COMPOUND, so the control also proves the primitive walker is POSITIONAL and
+  # not line-anchored (round 9's N3 blind spot, in the check added this round).
+  PG_ED="$T/pg-echo"; mkdir -p "$PG_ED"
+  LC_ALL=C sed -e '/^printf .PREMERGE: OK /s|.*|[ -n "$certified" ] \&\& echo "PREMERGE: OK $PLANTED_ECHO_PRIMITIVE"|' \
+    "$ASSERT" >"$PG_ED/premerge-assert.sh" 2>/dev/null || true
+  PG_ELINE="$(LC_ALL=C grep -n 'PLANTED_ECHO_PRIMITIVE' "$PG_ED/premerge-assert.sh" 2>/dev/null | LC_ALL=C head -1 || true)"
+  if [ -n "$PG_ELINE" ]; then
+    ok "primitive-guard/control: the echo plant landed in the scratch copy (asserted, not assumed)"
+  else
+    bad "primitive-guard/control: the echo plant did NOT land, so the control below proves nothing"
+  fi
+  case "$(printf '%s\n' "${PG_ELINE#*:}" | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]].*//')" in
+    echo)
+      bad "primitive-guard/control: the planted echo begins its line, so this control does not test positional recognition (line: $PG_ELINE)" ;;
+    "")
+      bad "primitive-guard/control: could not read the planted line's first word" ;;
+    *)
+      ok "primitive-guard/control: the planted echo does NOT begin its line (it is behind a [ … ] &&), so the control also tests POSITIONAL recognition" ;;
+  esac
+  PG_EOUT="$(bash "$EBS" "$PG_ED/premerge-assert.sh" 2>&1)"; PG_ERC=$?
+  if [ "$PG_ERC" -ne 0 ]; then
+    ok "primitive-guard/control: the guard REDS on a planted echo"
+  else
+    bad "primitive-guard/control: the guard reported CLEAN on a planted echo — it proves nothing (got: $PG_EOUT)"
+  fi
+  case "$PG_EOUT" in
+    *"output-primitive bypass"*) ok "primitive-guard/control: and it NAMES the check that failed, so the red is attributable to the primitive rather than to a value" ;;
+    *) bad "primitive-guard/control: the guard red without naming the output-primitive check (got: $PG_EOUT)" ;;
+  esac
+  # PLANT 2: a printf whose FORMAT comes from a variable.
+  PG_FD="$T/pg-fmt"; mkdir -p "$PG_FD"
+  LC_ALL=C sed -e '/^printf .PREMERGE: OK /s|.*|printf "$PLANTED_FORMAT_PRIMITIVE" "$certified"|' \
+    "$ASSERT" >"$PG_FD/premerge-assert.sh" 2>/dev/null || true
+  if LC_ALL=C grep -q 'PLANTED_FORMAT_PRIMITIVE' "$PG_FD/premerge-assert.sh" 2>/dev/null; then
+    ok "primitive-guard/format: the data-derived-format plant landed in the scratch copy"
+  else
+    bad "primitive-guard/format: the format plant did NOT land, so the control below proves nothing"
+  fi
+  PG_FOUT="$(bash "$EBS" "$PG_FD/premerge-assert.sh" 2>&1)"; PG_FRC=$?
+  if [ "$PG_FRC" -ne 0 ]; then
+    ok "primitive-guard/format: the guard REDS on a printf whose FORMAT came from a variable"
+  else
+    bad "primitive-guard/format: the guard reported CLEAN on a data-derived printf format (got: $PG_FOUT)"
+  fi
+  case "$PG_FOUT" in
+    *PLANTED_FORMAT_PRIMITIVE*) ok "primitive-guard/format: and it NAMES the offending format, so the red is attributable" ;;
+    *) bad "primitive-guard/format: the guard red without naming the planted format (got: $PG_FOUT)" ;;
+  esac
+fi
+
 # --- case floor (#3544) ------------------------------------------------------
 # A span-replacing edit once silently deleted FOUR cases from a suite in this repo
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a
@@ -4827,7 +4920,19 @@ fi
 # routed through the mapping before awk sees it. All need only bash, git and coreutils, so the floor
 # moves by the SAME 8 and the derived 6-assertion margin for the ONE host-gated block is PRESERVED
 # UNCHANGED.
-ASSERT_FLOOR=443
+#
+# ROUND 14's T2 ADDS 10, ALL HOST-INDEPENDENT (443 -> 453): section 44n's 10 — the output primitive
+# must be a LITERAL PRINTER. Section 44h asserts every VALUE on an emitted line is routed; a routed
+# value is no protection if the printing COMMAND re-interprets what the boundary neutralised, and
+# under the bash option `xpg_echo` (set by an INHERITED environment, never by this script) `echo`
+# processes BACKSLASH ESCAPES in its argument — so a `\n` splits a line, a `\033` injects terminal
+# control and octal `\075` manufactures a REAL `=`. Measured on `review-stage.sh`, whose `emit` had
+# exactly this shape. This script uses no `echo` today, so the value is the POSITIVE CONTROL: an
+# `echo` plant (deliberately COMPOUND, so the control also tests positional recognition) and a
+# data-derived-`printf`-FORMAT plant, each required to red AND to name what failed. The fallback arm
+# is ten bads to match. All need only bash and coreutils, so the floor moves by the SAME 10 and the
+# derived 6-assertion margin for the ONE host-gated block is PRESERVED UNCHANGED.
+ASSERT_FLOOR=453
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

@@ -340,6 +340,21 @@ directory, and any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUI
 - **AND** it SHALL carry a positive control that plants a bypass inside a COMPOUND statement and
   requires the scanner to name it, since a control that only plants at the start of a line cannot
   distinguish the widened scanner from the blind one
+- **AND** the PRINTING COMMAND SHALL be a literal printer, because neutralising the value buys nothing
+  if the primitive re-interprets it: every emitted line is produced by `printf` of a script-authored
+  literal FORMAT and NEVER by `echo`, whose argument is a FORMAT under the inherited-environment
+  option `xpg_echo` — a `\n` in a LEGAL checkout path split the one-line verdict into two whose second
+  was a column-zero `REVIEW-STAGE: … RESULT: PASS` for a stage with no report, and octal `\075` put
+  REAL `key=` pairs on it, defeating the `=`→`~` neutralisation outright
+- **AND** that SHALL be asserted STRUCTURALLY over EVERY logical line of both scripts (the primitive
+  question has one answer everywhere, while the value question is per-channel), with `echo` refused
+  outright and NO allowlist — an entry could only claim that one line's data holds no backslash — and
+  with every `printf` FORMAT required to be script-authored, since a data-derived format re-opens the
+  identical channel through `%`
+- **AND** that check SHALL declare its own scope, its own NOT-COVERED set and its own subject COUNT
+  separately from the value check's, SHALL FAIL rather than report clean when it finds no subject at
+  all, and SHALL be exercised by positive controls that plant a COMPOUND `echo` and a data-derived
+  format and require it to red AND to name what failed
 
 #### Scenario: an audit counter at its ceiling does not restart
 - **WHEN** the stage record's re-open counter is at the widest value this tool can compare and the

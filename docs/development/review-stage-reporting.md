@@ -224,6 +224,32 @@ Three further declared limits of the mechanism itself:
   the behaviour is pinned behaviourally elsewhere. An allowlist entry is a CLAIM with a stated
   reason, not a measurement, in the shape #1716's `tools/` disposition guard checks that a
   disposition was RECORDED rather than that it is true.
+- **AND THE PRINTING COMMAND ITSELF IS PART OF THE BOUNDARY (round 14, T2).** Neutralising the value
+  buys nothing if the primitive re-interprets it. `emit`, `note` and `die_usage` used `echo`, and
+  under the bash option `xpg_echo` — settable by an **inherited** environment (`BASHOPTS`,
+  `SHELLOPTS`, a `BASH_ENV` file), never by the script — `echo` performs BACKSLASH ESCAPE PROCESSING
+  on its argument, making that argument a FORMAT: a control channel carrying data. Measured on the
+  shipped script from a LEGAL directory name and nothing else — checkout
+  `…/lane\nREVIEW-STAGE: c RESULT: PASS elapsed\0759 … agent\075a report\075/x` — `verdict` on a
+  stage with NO report printed TWO lines, the second a column-zero
+  `REVIEW-STAGE: c RESULT: PASS elapsed=9 … agent=a`. Both halves matter: the one-line contract in
+  the script's own header was broken, and because `\075` is octal `=`, `field_value`'s `=`→`~` map —
+  the thing that makes a value unable to introduce a field — was DEFEATED. `\033` injects terminal
+  control; `\c` truncates. **Stated at its true width: the consumer refuses on the line COUNT, so no
+  false `PREMERGE: OK` was demonstrated** — what is broken is the grammar and the neutralisation
+  guarantee, not (yet) a merge. Every line is now `printf` of a literal format. `emit-boundary-scan.sh`
+  gained a SECOND check for it, over EVERY logical line rather than only the emit sites (the primitive
+  question has one answer everywhere, while the value question is per-channel): `echo` is refused
+  outright **with no allowlist** — there is no value for which it beats `printf '%s\n'`, and an entry
+  could only claim that one line's data holds no backslash — and every `printf` FORMAT must be a
+  literal the script authored, which is the same channel one step in through `%`. It declares its own
+  scope and its own NOT-COVERED lines separately from the value check's, since it asks a different
+  question of a wider subject set, and it carries its own vacuity guard (no `printf` found at all is a
+  FAIL, not a clean run). Each suite plants a COMPOUND `echo` and a data-derived format in a throwaway
+  copy and requires the guard to red AND to name what failed. Not covered, declared on every run: a
+  print by another tool (an awk `print`, a `tee`), an `echo` inside a heredoc or a single-quoted
+  awk/sed body (noise, not blindness — neither subject has one), whether a literal format's
+  conversions are CORRECT, and any script other than these two.
 - **AND THAT GUARD SHIPPED WITH ITS OWN BLIND SPOT, WHICH IS THE CLASS IT EXISTS FOR (round 9,
   N3).** Its scope was anchored `^[[:space:]]*(printf|echo)[[:space:]]` — the START of a line — so
   every COMPOUND statement was invisible to it, and it reported both scripts CLEAN with **three real

@@ -1340,6 +1340,24 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   status, because a read that fails after delivering a prefix whose last byte happens to BE an `E` is
   textually indistinguishable from a complete one — and a truncated prefix that drops a SECOND
   `result:` line turns an AMBIGUOUS refusal into a PASS.
+  **AND NEUTRALISING THE VALUE IS WORTHLESS IF THE PRINTING COMMAND RE-INTERPRETS IT — EVERY LINE
+  IS `printf` OF A LITERAL FORMAT, NEVER `echo` (#3751 round 14).** `emit`, `note` and `die_usage`
+  used `echo`, and under the bash option `xpg_echo` — settable by an **inherited** environment
+  (`BASHOPTS`, `SHELLOPTS`, a `BASH_ENV` file) and never by the script — `echo` performs BACKSLASH
+  ESCAPE PROCESSING on its argument, which makes that argument a **FORMAT**, i.e. a control channel
+  carrying data. Measured on the shipped script from a LEGAL directory name and nothing else: a `\n`
+  in the checkout path split the one-line verdict into **two**, the second a column-zero
+  `REVIEW-STAGE: … RESULT: PASS` for a stage with no report at all, and octal `\075` put **real**
+  `key=` pairs on it — so `field_value`'s `=`→`~` map, which exists precisely so a value can never
+  introduce a field, was **defeated entirely**. (`\033` injects terminal control; `\c` truncates the
+  line.) The consumer refuses on the LINE COUNT today, so no false `PREMERGE: OK` was demonstrated —
+  the defect is a broken one-line grammar plus a void neutralisation guarantee, stated at that
+  width. This is #3312's rule at the LAST hop: **the fix is to stop sharing the channel, not to
+  escape harder** — a literal format cannot be data. Pinned structurally by
+  `scripts/tests/lib/emit-boundary-scan.sh`, which now refuses `echo` outright **with no allowlist**
+  (there is no value for which `echo` beats `printf '%s\n'`, and an entry here could only be a claim
+  that one line's data contains no backslash) and additionally requires every `printf` FORMAT to be
+  a literal the script authored — the same channel one step in, through `%`.
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies
   already-reviewed code. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
   call site AND no new surface). When in doubt, review.

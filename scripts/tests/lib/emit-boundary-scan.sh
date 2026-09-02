@@ -223,6 +223,12 @@ declare_scope() {
   printf '%sNOT COVERED an output command reached any OTHER way (a backtick substitution, a command word built by expansion, eval/xargs) — the list above is CLOSED\n' "$P"
   printf '%sNOT COVERED the scan is BOUNDED at the command word: an occurrence BEFORE it (a [ .. ] guard) is not examined, and a non-output command AFTER it is attributed here (noise, never blindness)\n' "$P"
   printf '%sNOT COVERED shell code vs an EMBEDDED PROGRAM (a single-quoted awk/sed body, a heredoc) is not distinguished — such a site is scanned as if it were shell (noise)\n' "$P"
+  # THE SECOND CHECK DECLARES ITSELF SEPARATELY (#3751 round 14, T2): it asks a DIFFERENT question
+  # of a WIDER subject set, and folding its scope into the first one's would misstate both.
+  printf '%soutput-primitive scope %s: EVERY logical line (not only the emit sites) — `echo` is refused outright wherever a statement can begin, and every printf FORMAT must be a script-authored literal\n' "$P" "$(basename "$SUBJECT")"
+  printf '%sNOT COVERED (output primitive) a printf/echo reached any way the statement-start list above does not know, and an `echo` inside a heredoc body or a single-quoted awk/sed program (which would be NOISE, a red for text the shell never runs — neither subject has one today)\n' "$P"
+  printf '%sNOT COVERED (output primitive) a print performed by a DIFFERENT tool — an awk `print`, a sed `p`, a `tee` — and any output from a script other than these two\n' "$P"
+  printf '%sNOT COVERED (output primitive) whether printf is CALLED correctly: a literal format with the wrong conversion count or a stray %%%% in it is a bug this check cannot see\n' "$P"
 }
 declare_scope
 
@@ -300,8 +306,8 @@ function is_stmt_start(pre,   p) {
 # entries claiming "test only". Those claims are the thing this guard exists to avoid: an entry is a
 # CLAIM, and a variable that is BOTH tested and printed would then be excused by one. Bounding the
 # scan instead makes the printed occurrence the only one that counts.
-function stmt_cmd_pos(s,   i, nw, w, cmd, base, rest, abs, cstart, pre, best) {
-  nw = split(scope_cmds, w, " ")
+function stmt_cmd_pos(s, cmds,   i, nw, w, cmd, base, rest, abs, cstart, pre, best) {
+  nw = split(cmds, w, " ")
   best = 0
   for (i = 1; i <= nw; i++) {
     cmd = w[i]
@@ -324,11 +330,92 @@ function stmt_cmd_pos(s,   i, nw, w, cmd, base, rest, abs, cstart, pre, best) {
   return best
 }
 
+# --- THE OUTPUT PRIMITIVE (#3751 round 14, T2) -------------------------------------------------
+#
+# THE CHECK ABOVE ASKS WHETHER EACH INTERPOLATED VALUE IS ROUTED. THIS ONE ASKS A DIFFERENT
+# QUESTION: is the printing COMMAND itself a literal printer? A routed value is no protection if the
+# primitive re-interprets what the boundary just neutralised.
+#
+# `echo` IS REFUSED OUTRIGHT, WITH NO ALLOWLIST. Under the bash option `xpg_echo` — settable in
+# `BASHOPTS`/`SHELLOPTS` before either subject is read, so an inherited environment decides it —
+# `echo` performs BACKSLASH ESCAPE PROCESSING on its argument, which makes the argument a FORMAT.
+# Measured on the shipped `review-stage.sh` from a LEGAL directory name alone: a `\n` in the
+# checkout path split the one-line verdict into TWO lines whose second was a column-zero
+# `REVIEW-STAGE: … RESULT: PASS`, and `\075` (octal `=`) put REAL `key=` pairs on it, defeating
+# the `=`→`~` map of `field_value` entirely. There is no allowlist because there is no value for
+# which `echo` is better than a printf of a literal format, and an allowlist entry here would be a
+# claim that one line of data cannot contain a backslash — which is the class of claim this file
+# to remove.
+#
+# AND THE `printf` FORMAT MUST BE A SCRIPT-AUTHORED LITERAL, for the same reason one step in: a
+# data-derived format re-opens the identical channel through `%` and `\`. A format carrying `$`, or
+# a reduction marker (`@B@`/`@S@`/`@X:…@`, i.e. a command substitution), is a BYPASS. Both subjects
+# pass this today with zero exceptions — measured, not assumed.
+#
+# IT RUNS ON EVERY LOGICAL LINE, not only the in-scope emit sites: the value-returning helpers and
+# the file writers are a different CHANNEL with their own value boundary, but the primitive question
+# has one answer everywhere, and a `printf` whose format came from a report would be no better for
+# being a `return` value.
+function first_word(t,   i, c, q, out) {
+  sub(/^[ \t]+/, "", t)
+  q = ""; out = ""
+  for (i = 1; i <= length(t); i++) {
+    c = substr(t, i, 1)
+    if (q != "") { out = out c; if (c == q) q = ""; continue }
+    if (c == SQ || c == DQ) { q = c; out = out c; continue }
+    if (c == " " || c == "\t") break
+    out = out c
+  }
+  return out
+}
+
+function check_primitive(s, ln,   base, rest, abs, cstart, pre, fmt) {
+  # (1) `echo` anywhere a statement can begin.
+  base = 0
+  while (1) {
+    rest = substr(s, base + 1)
+    if (rest == "") break
+    if (match(rest, /(^|[^A-Za-z0-9_])echo([ \t]|$)/) == 0) break
+    abs = base + RSTART
+    if (substr(s, abs, 4) == "echo") cstart = abs; else cstart = abs + 1
+    pre = substr(s, 1, cstart - 1)
+    if (is_stmt_start(pre)) {
+      printf "%sBYPASS %s:%d echo is used as an output primitive — under xpg_echo it processes BACKSLASH ESCAPES in its argument, so a legal path or a report-derived value becomes a FORMAT (a line break, a terminal control, a truncation, or a real %c from \\075). Use a printf of the literal format %c%%s\\n%c instead\n", prefix, subject, ln, 61, SQ, SQ
+      prim_bypass++
+    }
+    base = cstart + 3
+  }
+  # (2) `printf` with a format this script did not author.
+  base = 0
+  while (1) {
+    rest = substr(s, base + 1)
+    if (rest == "") break
+    if (match(rest, /(^|[^A-Za-z0-9_])printf([ \t]|$)/) == 0) break
+    abs = base + RSTART
+    if (substr(s, abs, 6) == "printf") cstart = abs; else cstart = abs + 1
+    pre = substr(s, 1, cstart - 1)
+    if (is_stmt_start(pre)) {
+      prim_scanned++
+      fmt = first_word(substr(s, cstart + 6))
+      if (fmt ~ /\$/ || index(fmt, "@B@") > 0 || index(fmt, "@S@") > 0 || index(fmt, "@X:") > 0) {
+        printf "%sBYPASS %s:%d the FORMAT argument of printf is data-derived (%s) — a format is a CONTROL channel, so a %% and a backslash in it are interpreted. The format must be a literal this script authored\n", prefix, subject, ln, fmt
+        prim_bypass++
+      }
+    }
+    base = cstart + 5
+  }
+}
+
 BEGIN {
   prefix = ENVIRON["EBS_PREFIX"]; subject = ENVIRON["EBS_SUBJECT"]
   boundaries = ENVIRON["EBS_BOUNDARIES"]; allow = ENVIRON["EBS_ALLOW"]
   subs_allow = ENVIRON["EBS_SUBS"]; scope_cmds = ENVIRON["EBS_SCOPE_CMDS"]
   bypass = 0; scanned = 0; pending = 0; logical = ""; startline = 0
+  prim_bypass = 0; prim_scanned = 0
+  # THE QUOTE CHARACTERS BY CODE POINT: this whole program is a single-quoted shell word, so a
+  # literal apostrophe cannot appear in it. `sprintf("%c", 39)` is the only spelling available and
+  # the double quote is taken the same way so the pair reads as one decision.
+  SQ = sprintf("%c", 39); DQ = sprintf("%c", 34)
   n = split(ENVIRON["EBS_VRET"], vr, "\n")
   for (i = 1; i <= n; i++) { t = trim(vr[i]); if (t != "") vrmap[t] = 1 }
 }
@@ -343,14 +430,19 @@ BEGIN {
   if (logical ~ /\\$/) { sub(/\\$/, "", logical); pending = 1; next }
   pending = 0
 
-  if (trim(logical) in vrmap) next             # a declared value-returning helper
-
   # REDUCED BEFORE THE SCOPE IS DECIDED (#3751 round 9, N3): the statement-start recogniser must
   # not see command names that live inside a command SUBSTITUTION, and `reduce()` is what removes
   # them. A line that cannot be reduced keeps its original text plus a marker, so it is still
   # CONSIDERED for scope and — if in scope — reported below rather than silently skipped.
   s = reduce(logical)
-  cmdpos = stmt_cmd_pos(s)
+
+  # THE OUTPUT-PRIMITIVE CHECK RUNS FIRST AND ON EVERY LINE (#3751 round 14, T2) — before the
+  # value-returning skip and before the scope, because the primitive question has one answer
+  # everywhere in the file, while the value question is per-channel.
+  check_primitive(s, startline)
+
+  if (trim(logical) in vrmap) next             # a declared value-returning helper
+  cmdpos = stmt_cmd_pos(s, scope_cmds)
   if (cmdpos == 0) next
   scanned++
   # BOUNDED AT THE COMMAND WORD: the emitted statement is what is examined (see stmt_cmd_pos).
@@ -385,16 +477,30 @@ BEGIN {
 }
 
 END {
+  failed = 0
   if (scanned == 0) {
     # AN EMPTY SUBJECT SET IS A FAILURE, NOT A PASS (#1699): a scope regex that matches nothing
     # would report CLEAN forever.
     printf "%sFAIL no in-scope emit site was found in %s — the scope matched NOTHING, which is a vacuous pass\n", prefix, subject
-    exit 1
+    failed = 1
+  }
+  # THE PRIMITIVE CHECK HAS ITS OWN VACUITY GUARD, for the same reason (#3751 round 14, T2): a
+  # walker that found no `printf` at all found no subject, and a clean report over no subject is
+  # the vacuous pass this file refuses everywhere else.
+  if (prim_scanned == 0) {
+    printf "%sFAIL no printf statement was found in %s — the output-primitive walker examined NOTHING, which is a vacuous pass\n", prefix, subject
+    failed = 1
   }
   if (bypass > 0) {
     printf "%sFAIL %d bypass(es) over %d in-scope emit site(s) in %s\n", prefix, bypass, scanned, subject
-    exit 1
+    failed = 1
   }
+  if (prim_bypass > 0) {
+    printf "%sFAIL %d output-primitive bypass(es) over %d printf statement(s) in %s\n", prefix, prim_bypass, prim_scanned, subject
+    failed = 1
+  }
+  if (failed) exit 1
   printf "%sOK %d in-scope emit site(s) in %s: every interpolated value is routed or allowlisted\n", prefix, scanned, subject
+  printf "%sOK %d printf statement(s) in %s: no `echo`, and every printf FORMAT is a script-authored literal\n", prefix, prim_scanned, subject
 }
 ' "$SUBJECT"
