@@ -471,12 +471,11 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   # ONE flush => exactly one Data.db. More than one means the inserts did not
   # land in a single memtable flush and the fixture is not the single-SSTable
   # subject the ordering test assumes.
-  tdirs=( "$OUT_DIR/$KEYSPACE/$TABLE"* )
-  if [[ ! -d "${tdirs[0]}" ]]; then
-    fail "$TABLE: no table directory matched under $OUT_DIR/$KEYSPACE/ \
-(glob '$OUT_DIR/$KEYSPACE/$TABLE*' did not expand); export failed"
-  fi
-  cnt=$(find "${tdirs[@]}" -name "*-Data.db" -not -name "._*" 2>/dev/null | wc -l | tr -d ' ')
+  # $GEN_DIR, not a re-glob (roborev jobs 63/65): the directory was already
+  # resolved and validated at export. A `$TABLE*` glob is looser even than
+  # `$TABLE-*` and would let a preserved `collection_order-scratch` change this
+  # count, making the single-SSTable assertion nondeterministic.
+  cnt=$(find "$GEN_DIR" -name "*-Data.db" -not -name "._*" 2>/dev/null | wc -l | tr -d ' ')
   if [[ "$cnt" -ne 1 ]]; then
     fail "$TABLE: expected exactly ONE Data.db, found $cnt."
   fi
@@ -487,7 +486,10 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   # or absent CompressionInfo.db on a table that HAS one makes SELECT return 0
   # rows SILENTLY — the "0-rows-when-present" failure this repo says must never
   # pass. Asserted rather than assumed.
-  if find "${tdirs[@]}" -name "*CompressionInfo.db" -not -name "._*" | grep -q .; then
+  # $GEN_DIR, not "${tdirs[@]}" — that array's assignment was removed with the
+  # loose glob above, and an UNSET array here would make `find` search the CWD
+  # instead of the fixture, so this check would pass or fail on unrelated files.
+  if find "$GEN_DIR" -name "*CompressionInfo.db" -not -name "._*" | grep -q .; then
     fail "$TABLE: a CompressionInfo.db is present; the table was written COMPRESSED."
   fi
   log "  $TABLE: no CompressionInfo.db (uncompressed, OK)"
@@ -521,8 +523,19 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   # fixture does not carry the subject of issue #3790. Checked per VALUE rather
   # than once, because a schema or literal edit that drops one would otherwise
   # leave the fixture silently weaker while the assert still passed on the rest.
-  golden=$(find "$OUT_DIR/$KEYSPACE/$TABLE"* -name "*-Data.db.jsonl" | head -1)
-  [[ -n "$golden" ]] || fail "no $TABLE golden found under $OUT_DIR/$KEYSPACE/$TABLE*"
+  # EXACTLY ONE golden in $GEN_DIR (roborev jobs 63/65). This was
+  # `find "$OUT_DIR/$KEYSPACE/$TABLE"* ... | head -1`, which both re-globbed
+  # loosely AND silently accepted the first of several — so an unrelated preserved
+  # directory could supply the file these value assertions then "verified",
+  # masking a bad generated oracle. `head -1` on a multi-match set is the
+  # three-valued-signal-read-two-valued shape: "one" and "several" must not look
+  # the same to a check whose job is to validate the one.
+  mapfile -t _goldens < <(find "$GEN_DIR" -name "*-Data.db.jsonl" | sort)
+  case "${#_goldens[@]}" in
+    1) golden="${_goldens[0]}" ;;
+    0) fail "no $TABLE golden (*-Data.db.jsonl) in $GEN_DIR" ;;
+    *) fail "expected ONE $TABLE golden in $GEN_DIR, found ${#_goldens[@]}: ${_goldens[*]}" ;;
+  esac
   for col in inet_set inet_map time_set time_map pair_set; do
     grep -q -- "$col" "$golden" \
       || fail "golden $golden does not mention the '$col' column."
