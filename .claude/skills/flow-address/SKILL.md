@@ -76,8 +76,11 @@ Resolve them in the worktree and reply per thread.
    worktree of ONE shared `.git` and a peer lane's certified commit resolves from any lane
    (#3616's class — resolvability is not provenance). And do NOT re-open the stage while the assert
    runs: it binds the verdict to ONE observation of the stage record AND requires the verdict's own
-   `report=` to name that generation's nonce (#3751 rounds 9-10), so a `--force` landing mid-check
-   REFUSES — re-run the assert once the stage is quiescent. If addressing comments changed the SPEC deltas, C has to be re-run — re-open the
+   `report=` to name that generation's nonce (#3751 rounds 9-10) — and since round 16 it RE-RUNS
+   the whole C check immediately before the success emit, after the advisory and the `gh` call, so
+   a supersede landing ANYWHERE in the run REFUSES with a `phase: revalidation` line naming what
+   changed (even a fresh generation that itself PASSES, since the audit that answered is then not
+   the audit that was validated). Re-run the assert once the stage is quiescent. If addressing comments changed the SPEC deltas, C has to be re-run — re-open the
    stage (`review-stage.sh open c --issue <N> --agent spec-auditor --force`, which KEEPS the
    original clock and publishes the report under a FRESH NONCE — spawn the auditor with the path
    that command PRINTS, since the previous report is no longer read and the new name cannot be

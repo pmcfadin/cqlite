@@ -152,8 +152,12 @@ never gate stdout or review churn.
    generated let an open overwrite an older report and republish its path to the agent still
    holding it; and since round 10 the merge point REFUSES a verdict that names any
    OTHER generation, so writing to a stale path now blocks the merge rather than merely wasting the
-   round), or read `status` for how long it has produced nothing — its `report=`
-   field is also the authority when you need the path and do not have the clause. **Never infer a clean review from an idle
+   round; and since round 16 the merge point RE-VALIDATES the whole C check immediately before
+   arming the merge, so a `--force` landing while `premerge-assert.sh` runs REFUSES too), or read
+   `status` for how long it has produced nothing. **For the PATH itself use `verdict`, not
+   `status` (#3751 round 16):** the verdict line's `report=` is exempt from the `=`->`~` map and so
+   is exact even on a checkout whose path contains `=`, where `status` names a file that does not
+   exist. **Never infer a clean review from an idle
    notice** — that is the exact false certification #3751 exists to prevent.
    `review-stage.sh` writes only under `.review-stage/`, which is gitignored and verified so
    fail-closed, so it cannot dirty a running gate (#2926/#3648). **`scripts/flow/roborev-review.sh`

@@ -33,10 +33,15 @@ report?" but "what does the report say?".
   before #3751 the string appeared nowhere in that directory. So your Agent terminal result is
   your only other channel — and it does not survive a killed or idled turn. The file does.
 - If your caller named NO path, ASK THE TOOL rather than guessing one:
-  `bash scripts/flow/review-stage.sh status <kind> --issue <N>` prints `report=<abs path>`, which
-  is the only authoritative location. If it answers `state=never-opened`, write
-  `.review-stage/issue-<N>/<kind>.md` inside the worktree, name it in your reply, and say the
-  stage was never opened. Do not silently skip the artifact because nobody asked for it.
+  `bash scripts/flow/review-stage.sh verdict <kind> --issue <N>` prints `report=<abs path>`, which
+  is the only authoritative location. **Take it from `verdict`, not from `status` (#3751 round
+  16):** the verdict line's `report=` is the ONE field exempt from the `=`->`~` neutralisation, so
+  it is EXACT even on a checkout whose path legally contains `=` — where `status` renders that
+  character as `~` and so names a file that does not exist. Read the LINE, not the exit status:
+  `verdict` exits non-zero for every non-PASS state by design, and it prints the path in all of
+  them. If it answers `NOT-RUN (stage never opened)`, write `.review-stage/issue-<N>/<kind>.md`
+  inside the worktree, name it in your reply, and say the stage was never opened. Do not silently
+  skip the artifact because nobody asked for it.
 - **Write to the path your caller NAMED, never a remembered or guessed one (#3751 rounds 5-6).**
   A report path carries a PER-OPEN NONCE (`<kind>.<nonce>.md`), so it is not derivable from the
   kind and the issue: a stage that was re-opened reads only the report its record names, and a
