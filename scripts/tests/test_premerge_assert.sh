@@ -75,80 +75,31 @@ if ! T=$(mktemp -d "${TMPDIR:-/tmp}/premerge-assert-test.XXXXXX" 2>/dev/null) ||
   printf 'FAIL - every path in this suite would resolve under / instead.\n' >&2
   exit 1
 fi
-# CLEANUP IS UNCONDITIONAL, RUN-SCOPED, AND MAKES NO VERDICT (roborev job 381,
-# firing the stop line). The leak ADJUDICATION that used to live here — deciding
-# LEAK vs RECYCLED vs GONE vs ZOMBIE vs UNMEASURABLE from a two-valued `ps` probe
-# — is DELETED. Six findings in that apparatus, three of them the same fail-open
-# read after three correct fixes, and the standing ruling applies: a guard with a
-# persistent documented false-PASS record is worse than no guard, because it
-# invites reliance it cannot support.
+# NOTHING IN THIS SUITE KILLS ANY PROCESS (roborev job 388). The box-wide sweep
+# that used to live here is DELETED, and for the same reason as every other
+# removal in this apparatus: it killed from a STALE `ps` snapshot, so a pid that
+# had exited and been RECYCLED between the snapshot and the signal got SIGKILLed —
+# on a shared box, most likely a peer lane's process. It was a hazard introduced
+# while removing a different one.
 #
-# WHAT REPLACES IT NEEDS NO ADJUDICATION AT ALL. Every process this suite spawns
-# wears ONE OF TWO run-unique argv shapes, and BOTH are needed — matching only the
-# first was a matcher bug (roborev job 382), not a return of the deleted class:
-#   (a) `$T/…`         the shim paths (the KILL shim blocked on its FIFO wears this)
-#   (b) `$TOSENTINEL`  the TERM shim `exec`s into `sleep <duration>`, which REPLACES
-#                      its argv and ERASES the shim path — so shape (a) misses
-#                      precisely the process the sweep exists to catch, and a
-#                      centuries-long sleep survives.
-# `$T` is a per-run `mktemp -d` and `$TOSENTINEL` is derived from this run's pid, so
-# ANYTHING wearing either IS OURS. That makes the
-# kill safe by CONSTRUCTION (job 279's argv validation, with a needle no peer can
-# produce) instead of by interpreting an exit status. Nothing here decides
-# anything, so nothing here can fail open: if `ps` cannot run, the sweep kills
-# nothing and no assertion depends on it.
+# NARROWING IT WAS NOT AVAILABLE. Holding an ownership handle is impossible here:
+# the shim is spawned by the bounded runner through `timeout`, so it is NOT this
+# suite's direct child and there is no pid this suite legitimately owns.
 #
-# Registered BEFORE any resource exists (CLAUDE.md job 282), signals included,
-# because bash runs no EXIT trap for a signal at its default disposition; each
-# re-raises so the process still dies of what it was sent.
+# SO THE RESOURCE WAS MADE SELF-LIMITING AND THE CODE WENT AWAY WITH THE HAZARD.
+# Every process the arms can leak now terminates ON ITS OWN within ~120s — the
+# sentinel is a bounded fractional sleep, and the TERM-ignoring shim counts
+# bounded 1s sleeps. Nothing needs hunting, nothing is signalled, and the whole
+# recycled-pid class is GONE rather than reduced. 120s is comfortably longer than
+# the arms' 2s+1s bound, so it cannot mask a bound that failed to fire, and short
+# enough in absolute terms that a leak is self-clearing.
 #
-# ORDER IS LOAD-BEARING: the sweep runs BEFORE `rm -rf "$T"`. A shim can be
-# blocked on a FIFO inside $T, and removing the FIFO does NOT unblock a reader
-# already waiting on it.
-# DECLARED EMPTY HERE, ~2000 lines before it is derived, because the traps below
-# read it AT FIRE TIME: under `set -u` a signal arriving before the derivation
-# would error inside the handler. Empty simply means the sentinel arm of the sweep
-# has nothing to match yet — the `$T/` arm still works.
+# The run-unique sentinel argv is KEPT — for diagnostics and for the structural
+# pin at 44(m) — but NOTHING MAY KILL BASED ON IT.
 TOSENTINEL=""
 
 suite_cleanup() {
-  to_sweep_run_processes
-  rm -f "$T/ps-census.txt" 2>/dev/null
   rm -rf "$T"
-}
-
-# to_sweep_run_processes — kill every process whose argv wears one of THIS RUN's
-# two unique shapes (see the block above). Best-effort by design: no status is
-# inspected and no verdict is produced. `wait` follows, for whatever was a direct
-# child (a harmless no-op for the rest).
-#
-# THE SNAPSHOT LIVES INSIDE `$T`, not in shared TMPDIR (roborev job 382). A
-# predictable name under a world-writable directory, truncated by shell
-# redirection, lets a stale or peer-created SYMLINK redirect the write. `$T` is
-# already run-unique and already created — it exists before these traps are
-# installed — so it costs nothing.
-to_sweep_run_processes() {
-  local snap p a hit
-  snap="$T/ps-sweep.txt"
-  ps -eo pid=,args= >"$snap" 2>/dev/null || { rm -f "$snap"; return 0; }
-  while read -r p a; do
-    case "$p" in ''|*[!0-9]*) continue ;; esac
-    # Two needles, tested separately rather than as one `case` alternative: an
-    # EMPTY `$TOSENTINEL` (before it is derived, see above) would otherwise be a
-    # pattern matching an empty argv, and "match nothing" must be explicit rather
-    # than an accident of what `ps` happens to print.
-    hit=0
-    case "$a" in *"$T/"*) hit=1 ;; esac
-    if [ "$hit" -eq 0 ] && [ -n "$TOSENTINEL" ] && [ "$a" = "$TOSENTINEL" ]; then
-      hit=1
-    fi
-    if [ "$hit" -eq 1 ]; then
-      kill -KILL "$p" 2>/dev/null || true
-      wait "$p" 2>/dev/null || true
-    fi
-  done <"$snap"
-  rm -f "$snap"
-  return 0
 }
 
 trap 'suite_cleanup' EXIT
@@ -1197,7 +1148,7 @@ if run_anc 0 "anchored delta pair (full PASS at X + delta at Y) -> exit 0" \
   # names both halves, and this arm pins BOTH — a reworded token that quietly
   # dropped the unbounded half would restore the overclaim.
   case "$OUT" in
-    *"anchor-reads: bounded-"*"external:git,mktemp,sh,rm"*)
+    *"anchor-reads: bounded-"*"external:git,mktemp,sh"*)
       ok "delta pair: the token names WHAT is bounded (the external commands)" ;;
     *) bad "delta pair: the anchor-reads token must name the bounded externals (got: $OUT)" ;;
   esac
@@ -2293,7 +2244,7 @@ to_derive_sentinel() {
   case "$tok" in
     ''|*[!0-9]*) printf '%s\n' "INVALID-TOKEN"; return 0 ;;
   esac
-  printf 'sleep %s\n' "$(printf '9%09d' "$(( tok % 1000000000 ))")"
+  printf 'sleep 120.%s\n' "$(printf '%09d' "$(( tok % 1000000000 ))")"
 }
 TOSENTINEL=$(to_derive_sentinel "$$")
 to_shape=0
@@ -2423,36 +2374,36 @@ TERMSHIM
     chmod +x "$TSH/git"
     to_run_arm "TERM path / exit 124" "$TSH" 124 "$TPID"
 
-    # ARM 2 — the KILL-after-grace path (exit 137). The shim IGNORES TERM and
-    # blocks on opening a writer-less FIFO, which is uninterruptible while TERM is
-    # SIG_IGN and spawns NO child, so nothing else in the process group can die in
-    # its place. The runner must therefore escalate to SIGKILL.
+    # ARM 2 — the KILL-after-grace path (exit 137). The shim IGNORES TERM, so the
+    # runner must escalate to SIGKILL.
+    #
+    # NO FIFO ANY MORE (roborev job 388). It used to block on opening a writer-less
+    # FIFO: uninterruptible, which was the point, but also UNBOUNDED — a leaked
+    # shim blocked forever and needed hunting, which is exactly what the deleted
+    # sweep existed for. It now counts BOUNDED 1s sleeps instead. The shim itself
+    # still ignores TERM (so the escalation fires), each `sleep 1` child is
+    # trivially short, and the whole thing self-terminates in ~120s if leaked.
+    # Measured on this box: runner rc 137 in 3s, the shim survives TERM, and a
+    # leaked one goes away on its own. The mkfifo not-taken branch went with the
+    # FIFO — one fewer host-dependent skip.
     KSH="$T/bin-git-hang-kill"
     mkdir -p "$KSH"
-    KFIFO="$T/hang-kill.fifo"
-    rm -f "$KFIFO"
-    if mkfifo "$KFIFO" 2>/dev/null; then
-      KPID="$T/hang-kill.pid"
-      cat >"$KSH/git" <<KILLSHIM
+    KPID="$T/hang-kill.pid"
+    cat >"$KSH/git" <<KILLSHIM
 #!/usr/bin/env bash
 for a in "\$@"; do
   if [ "\$a" = "--is-ancestor" ]; then
-    printf '%s\n' "\$\$" >"$KPID"
+    printf '%s\\n' "\$\$" >"$KPID"
     trap '' TERM
-    read -r _ < "$KFIFO"
+    _n=0
+    while [ "\$_n" -lt 120 ]; do sleep 1; _n=\$((_n + 1)); done
     exit 0
   fi
 done
 exec "$REALGIT" "\$@"
 KILLSHIM
-      chmod +x "$KSH/git"
-      to_run_arm "KILL after grace / exit 137" "$KSH" 137 "$KPID"
-    else
-      printf 'ARM NOT TAKEN: hung ancestry read, KILL path (job 364) — mkfifo failed on this host, so a\n'
-      printf 'ARM NOT TAKEN: TERM-ignoring block with no child process cannot be constructed. The exit-137\n'
-      printf 'ARM NOT TAKEN: escalation is UNEXERCISED (the TERM/124 arm above still ran).\n'
-      ok "hung-read (KILL path): SKIPPED (mkfifo unavailable — arm UNEXERCISED, declared not silent)"
-    fi
+    chmod +x "$KSH/git"
+    to_run_arm "KILL after grace / exit 137" "$KSH" 137 "$KPID"
 
     # ARM 3 — A HUNG *DISCOVERY* CALL (roborev job 374). Several bounded calls
     # used to discard their status via `|| true` / an empty-value fallback /
@@ -2550,8 +2501,10 @@ fi
 # control per arm); they no longer prove the runner left no process behind.
 printf 'DECLARED LOSS: leak reaping is NO LONGER ASSERTED by this suite (job 381). The hung-read\n'
 printf 'DECLARED LOSS: arms prove the bound fires and names its own cause; they do NOT prove the\n'
-printf 'DECLARED LOSS: bounded runner reaped its child. Strays are swept unconditionally at suite\n'
-printf 'DECLARED LOSS: exit by argv (run-scoped, no verdict), which is HYGIENE, not a check.\n'
+printf 'DECLARED LOSS: bounded runner reaped its child. AND SINCE job 388 nothing sweeps either:\n'
+printf 'DECLARED LOSS: killing from a stale ps snapshot could SIGKILL a RECYCLED pid, so instead\n'
+printf 'DECLARED LOSS: every process these arms can leak is SELF-LIMITING (~120s) and nothing is\n'
+printf 'DECLARED LOSS: signalled at all. A leak is SELF-CLEARING, not detected.\n'
 
 # --- 44(m): THE SENTINEL IS UNIQUE PER RUN (cross-lane blocker) --------------
 #
@@ -2599,10 +2552,10 @@ fi
 #     a short duration could EXPIRE mid-run and make the leak check pass because
 #     the sleep ended, not because the runner reaped it.
 case "$TOSENTINEL" in
-  "sleep "[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
-    ok "sentinel: the derived value has the expected shape (sleep + 10 digits, so it cannot expire mid-run)" ;;
+  "sleep 120."[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
+    ok "sentinel: the derived value has the expected shape (sleep 120.<9 digits> — BOUNDED and run-unique)" ;;
   *)
-    bad "sentinel: unexpected shape '$TOSENTINEL' — a short or non-numeric duration breaks either sleep or the leak check" ;;
+    bad "sentinel: unexpected shape '$TOSENTINEL' — it must be a BOUNDED (self-limiting) and run-unique duration" ;;
 esac
 # (4) The historical SHARED constants must not be hard-coded anywhere in this
 #     file any more — not in a shim, not in a census, not in a comment (a comment
