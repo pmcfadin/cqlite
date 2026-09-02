@@ -58,24 +58,24 @@
 //!      `catch (UnknownHostException)` block below it. Read the whole method, not
 //!      a grep of its `if`s.
 //!
-//!    Encoding the `0` allowances is a FIDELITY fix with no behaviour change: the
-//!    sole caller only decodes a NON-EMPTY `path_bytes`, so a 0-byte slice never
-//!    reaches here. Worth doing anyway, because a table that disagrees with
-//!    Cassandra is a false rejection waiting for the day someone moves the call
-//!    site, and "correct only because the caller filters" is a coupling one file
+//!    #3612 encoded the `0` allowances as a FIDELITY fix with no behaviour change,
+//!    because the caller then decoded only a NON-EMPTY `path_bytes`. It recorded
+//!    why anyway: "correct only because the caller filters" is a coupling one file
 //!    away from being silently broken.
 //!
-//!    **That filter is itself a defect, and the `0` rows do NOT claim otherwise
-//!    (issue #3612, R6-F2).** Because the caller skips an empty cell path, a
-//!    LEGAL empty `text`/`blob` map key — `{'': 1}` is valid CQL, and Cassandra's
-//!    `CollectionSerializer` rejects only a NULL (-1) key, never a zero-length one
-//!    — is not merely left undecoded: the entry is DROPPED from the reconstructed
-//!    `Value::Map`, because the caller's `if let Some(key_value) = decoded_key`
-//!    never fires. So an empty-keyed entry silently disappears from query and
-//!    compaction results. That filter is PRE-EXISTING and governs every complex
-//!    column, so it is filed separately rather than changed under #3612, and the
-//!    empty-key unit tests are labelled UNIT-ONLY so they cannot be read as
-//!    end-to-end support.
+//!    **That day came: the `0` rows are now load-bearing (issue #3747).** The
+//!    filter was the defect #3612 described — a LEGAL empty `text`/`blob` key
+//!    (`{'': 1}` is valid CQL; `CollectionSerializer` rejects only a NULL -1 key)
+//!    was not left undecoded but DROPPED from the reconstructed `Value::Map`,
+//!    because `if let Some(key_value) = decoded_key` never fired. #3612 filed it as
+//!    #3747 rather than change a filter governing every complex column.
+//!
+//!    #3747 REMOVED that guard, so the caller decodes EVERY cell path, this table
+//!    decides an empty key's fate, and the empty-key tests are reached by a real
+//!    read (their UNIT-ONLY labels are gone). One consequence: for the `N`-or-`0`
+//!    families this table ADMITS empty but the downstream decoder still refuses it,
+//!    so those keys error — a two-layer inconsistency #3747 pinned and filed as
+//!    **#3805**, not one the guard removal introduced.
 //!
 //! # When this site may return `Err` — and why the line is drawn at Cassandra
 //!
