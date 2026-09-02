@@ -155,11 +155,12 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_for_compaction(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<Vec<crate::storage::sstable::reader::compaction_row::CompactionRow>> {
         let mut results = Vec::new();
-        self.parse_block_for_compaction_emit(data, schema, reader, |row| {
+        self.parse_block_for_compaction_emit(data, extent, schema, reader, |row| {
             results.push(row);
             Ok(std::ops::ControlFlow::Continue(()))
         })?;
@@ -172,6 +173,7 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_for_compaction_emit<F>(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         mut emit: F,
@@ -209,7 +211,13 @@ impl V5CompressedLegacyParser {
                 &data[offset..],
                 Some(schema),
                 reader,
-                true,
+                // Issue #3782: the caller's DECLARED extent, not a hard-coded
+                // `true`. `at_final_chunk` is what makes a row decode error
+                // fatal here, so baking it in meant this entry point silently
+                // ASSUMED a complete buffer — the mirror of the defaulted flag
+                // #3782 removed, and a window handed in would have produced
+                // false refusals.
+                extent.is_complete(),
                 &mut tracking_emit,
             )? {
                 ParseStep::Emitted(consumed) => {
@@ -250,6 +258,7 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_for_compaction_emit_with_offset<F>(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         mut emit: F,
@@ -302,7 +311,9 @@ impl V5CompressedLegacyParser {
                 &data[offset..],
                 Some(schema),
                 reader,
-                true,
+                // Issue #3782: the caller's DECLARED extent (see the sibling
+                // emit entry point).
+                extent.is_complete(),
                 &mut tagging_emit,
             )? {
                 ParseStep::Emitted(consumed) => {

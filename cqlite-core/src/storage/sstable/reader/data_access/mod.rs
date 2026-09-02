@@ -984,6 +984,14 @@ impl SSTableReader {
 
         // Build a parser (re-using the existing builder so version-gates and
         // UDT registry are threaded through correctly).
+        //
+        // #3782: this buffer IS the whole data section, and no extent has to be
+        // declared for it — the delta-scan consumer is `parse_block_emit_delta`,
+        // which refuses a partition-header or row decode failure
+        // UNCONDITIONALLY (`Error::corruption`, `block_emit.rs`). So there is no
+        // defaulted-lossy behaviour for this site to inherit; adding an extent
+        // argument the parse never consults would assert a contract that does
+        // not exist.
         let parser = self.build_v5_parser(false);
 
         Ok((stitched, parser))
