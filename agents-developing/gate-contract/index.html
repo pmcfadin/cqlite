@@ -829,13 +829,58 @@ cannot fail on it: <code dir="auto">--lite</code> runs every fix round and must 
 <p>Exit codes: <code dir="auto">0</code> = PASS, <code dir="auto">1</code> = FAIL/REFUSED (<code dir="auto">--delta</code>), <code dir="auto">2</code> = usage/anchor error
 (<code dir="auto">--delta</code>), <code dir="auto">3</code> = PARTIAL (<code dir="auto">--only</code> mode).</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="tiered-gate---lite-iterate-full-gate-once-issue-1821">Tiered gate: <code dir="auto">--lite</code> iterate, full gate once (issue #1821)</h2><a class="sl-anchor-link" href="#tiered-gate---lite-iterate-full-gate-once-issue-1821"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Tiered gate: --lite iterate, full gate once (issue #1821)”</span></a></div>
-<p>The gate is tiered. <code dir="auto">scripts/agent-gate.sh --lite</code> runs only the fast subset
-(file-size + fmt + scoped workspace clippy + blast-radius-scoped tests, ~1–5 min).
-It is the <strong>fast iteration loop, NOT the gate of record</strong> — it emits a DISTINCT
-<code dir="auto">==== AGENT-GATE LITE SUMMARY ====</code> block (<code dir="auto">MODE: lite</code>) that must <strong>never</strong> be
-pasted as the full SUMMARY. Iterate on <code dir="auto">--lite</code> every fix round; run the FULL
-<code dir="auto">scripts/agent-gate.sh</code> <strong>exactly once</strong> before merge. <code dir="auto">--lite</code> never replaces the
-full gate.</p>
+<p>The gate is tiered. <code dir="auto">scripts/agent-gate.sh --lite</code> runs only the reduced component
+set (<code dir="auto">LITE_COMPONENTS</code>: file-size + fmt + scoped workspace clippy + <code dir="auto">roborev-lints</code></p>
+<ul>
+<li>blast-radius-scoped tests). It is the <strong>fast iteration loop, NOT the gate of
+record</strong> — it emits a DISTINCT <code dir="auto">==== AGENT-GATE LITE SUMMARY ====</code> block
+(<code dir="auto">MODE: lite</code>) that must <strong>never</strong> be pasted as the full SUMMARY. Iterate on
+<code dir="auto">--lite</code> every fix round; run the FULL <code dir="auto">scripts/agent-gate.sh</code> <strong>exactly once</strong>
+before merge. <code dir="auto">--lite</code> never replaces the full gate.</li>
+</ul>
+<p><strong><code dir="auto">--lite</code> is NOT a flat <code dir="auto">~1–5 min</code> budget — its cost is a FUNCTION of the diff
+(issue #3764).</strong> There are <strong>two cost drivers, and only ONE of them scales with
+your diff.</strong></p>
+<ol>
+<li><strong><code dir="auto">clippy</code> is NOT diff-scoped.</strong> <code dir="auto">--lite</code> dispatches the IDENTICAL <code dir="auto">run_clippy</code>
+the full gate does — <code dir="auto">run_component clippy run_clippy</code> at
+<code dir="auto">scripts/agent-gate.sh:17233</code> and <code dir="auto">:18220</code> respectively — i.e. the issue #1844
+<strong>per-package scoped workspace</strong> matrix at <code dir="auto">:9357</code>, and <code dir="auto">run_clippy</code> never reads
+the diff. (The whole-workspace <code dir="auto">--all-features --all-targets</code> pass is the
+<code dir="auto">CQLITE_CLIPPY_FULL=1</code> path only; do not read the scoped matrix as that one.) So
+<strong>every</strong> <code dir="auto">--lite</code> pays clippy IN FULL whatever the diff: measured over 188
+completed lite runs it is a no-op warm, 2–7 min part-warm, and <strong>16–24 min
+cold</strong>.</li>
+<li><strong><code dir="auto">scoped-tests</code> is diff-scoped, and it has a fan-out leg.</strong> It RUNS the touched
+package’s <code dir="auto">--lib</code> plus the diff’s new <code dir="auto">--test</code> targets (owners by longest-prefix
+path match over <code dir="auto">cargo metadata</code>, from <code dir="auto">merge-base(HEAD, &#x3C;base>)...HEAD</code> — where
+<code dir="auto">&#x3C;base></code> is the FIRST of <code dir="auto">origin/main</code> → <code dir="auto">main</code> → <code dir="auto">origin/master</code> → <code dir="auto">master</code> that
+resolves (<code dir="auto">:16870</code>) — <strong>plus <code dir="auto">git diff HEAD</code>, i.e. the uncommitted diff over
+TRACKED files only, untracked excluded</strong>; defaults to <code dir="auto">cqlite-core --lib</code> when
+no rust package is in the diff) — <strong>and when a changed path is under
+<code dir="auto">cqlite-core/src/</code> it ALSO runs <code dir="auto">cargo test -p &#x3C;pkg> --all-targets --no-run</code> for
+every workspace member that DIRECTLY DECLARES a dependency on <code dir="auto">cqlite-core</code>
+(the <code dir="auto">--no-deps</code> metadata edge) and owns a <code dir="auto">--test</code> target (issue #2658:
+COMPILE-CHECKED, never run).</strong> That leg — not “touched packages”,
+which consult no dependency edge at all — is why a core-src diff annotates 9–11
+package sets, and its <code dir="auto">--all-targets</code> is what balloons <code dir="auto">target/debug/deps</code>
+(<strong>+18 GB in a single round</strong> — reported by another lane in issues #3763/#3764,
+not measured here).
+<strong><code dir="auto">cqlite-core/tests/**</code> does NOT trigger the fan-out; <code dir="auto">cqlite-core/src/**</code>
+does.</strong></li>
+</ol>
+<p><strong>Measured bands</strong> (completed runs, one fleet box): a <strong>narrow, WARM-clippy</strong> diff
+is <strong>median 1.4 min</strong> (n=43) — so the <code dir="auto">~1–5 min</code> this page used to claim is that case
+exactly, a <strong>FLOOR and not a range</strong>; a <strong><code dir="auto">cqlite-core/src/</code></strong> diff is <strong>median 20
+min, range 3.8–43 min</strong> (n=20). <strong>The two bands are marginal over DIFFERENT subsets
+and do not compose</strong> — a 1.4 min run is by construction one that paid no cold clippy,
+so the cold-clippy band is not additive on top of it. Beyond those, lane-3612
+<strong>reports</strong> (not measured here) <strong>up to ~104 min under peer load</strong> in issue #3764.</p>
+<p><strong>And <code dir="auto">--lite</code> is EXEMPT from the issue #1825 gate-slot cap</strong> (as are <code dir="auto">--delta</code> and
+<code dir="auto">--only</code>) — it runs outside slot arbitration entirely, so on a shared box its build
+competes with a peer’s gate of record for disk and CPU with nothing arbitrating it.
+<strong>There is NO admission check for <code dir="auto">--lite</code> today, and issue #3763 owns that gap</strong> —
+read this as a budgeting fact, not as an instruction to apply one yourself.</p>
 <p><strong>Division of labor (issues #1855, #2084).</strong> In the worker → subagent model, an
 implementer subagent (<code dir="auto">sstable-developer</code>) edits, commits, pushes, and verifies
 with <code dir="auto">--lite</code>/targeted tests <strong>only</strong> — it must <strong>never</strong> invoke the full gate. The
