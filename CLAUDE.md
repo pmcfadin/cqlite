@@ -1404,6 +1404,23 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   measured one and the remainder reader takes the FIRST. Control-character neutralisation is
   untouched in the exempt boundary (rounds 5/7/13/14), asserted behaviourally rather than by
   reading the source, so the exemption is the `=` map ALONE.
+  **AND A PATH THIS GRAMMAR CANNOT CARRY IS REFUSED AT THE BOUNDARY, NOT PUBLISHED WRONG (#3751
+  round 17, W2).** The repository root is the one path component derivation does not validate, and
+  a root the one-line renderer rewrites made the two commands lie **DIFFERENTLY** about the same
+  file: `open` prints the RAW path on its own line, so a newline-bearing root **SPLIT** it across
+  two physical lines (the second carrying none of the `REVIEW-STAGE: ` anchor every consumer
+  reads), while `verdict` **FLATTENED** it and published `…/lane two/…`, a path no `open(2)` can
+  resolve. Round 11 declared such a path unrepresentable **and "never arriving"**; the second half
+  was FALSE — git resolves the root of whatever checkout the tool runs in — so that declaration is
+  **WITHDRAWN** and `require_repo_root` REFUSES (exit 64, nothing read or written), at the ONE
+  resolution site, so all four subcommands inherit it. **The rule is the RENDERER's own answer, not
+  a character list**: the root must survive `one_line` UNCHANGED, so it cannot drift from the
+  renderer the way a hand-written class of bad bytes would — with the newline case carrying its own
+  detail because its harm differs in KIND (a value that spans lines cannot be a field of a one-line
+  record under any rendering). A **SPACE** is unaffected and stays supported, which is the control
+  that keeps this from redding correct input (round 11's Q3 exists for space-bearing checkouts).
+  No opt-out, and none may be added: a checkout is always renamable, so an escape hatch could only
+  buy a published path that does not exist.
   **AND "EVERY READ GOES THROUGH THE BOUNDARY" WAS FALSE FOR TWO READERS FOR A WHOLE ROUND — SO
   THE CLASS IS NOW MECHANIZED, NOT ASSERTED (#3751 round 14).** Round 13 routed three of the five
   non-boundary read sites and left two reading files directly, and **both** were found by the next

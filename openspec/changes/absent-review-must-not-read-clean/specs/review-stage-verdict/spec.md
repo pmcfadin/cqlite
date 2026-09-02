@@ -628,3 +628,41 @@ plus a case floor.
 #### Scenario: a shrunken suite is caught
 - **WHEN** the suite's executed case count falls below the committed floor
 - **THEN** the suite FAILS rather than reporting zero failures
+
+### Requirement: A checkout path this grammar cannot carry SHALL be refused, never published wrong
+
+`review-stage.sh` SHALL refuse to operate in a checkout whose resolved repository root does not
+survive the one-line renderer UNCHANGED, at the single site where that root is resolved, so every
+subcommand inherits the refusal and no subcommand publishes a report path that cannot be opened.
+
+#### Scenario: a newline-bearing checkout path is refused by name
+- **WHEN** the repository root contains an LF or a CR
+- **THEN** every subcommand SHALL REFUSE (usage class, exit 64) with NOTHING read and NOTHING
+  written — no stage directory, no report, no record
+- **AND** the refusal SHALL name the NEWLINE specifically, because its harm differs in KIND: such a
+  value SPLITS across physical lines (leaving a line with no `REVIEW-STAGE: ` anchor) as well as
+  being published flattened to a path that does not exist
+- **AND** `verdict` SHALL publish NO `report=` field and NO `RESULT:` token for such a checkout — a
+  wrong path on that line is worse than no line, because that line is what a consumer binds to
+- **AND** round 11's declaration that such a path is unrepresentable *and never arrives* is
+  WITHDRAWN: it DOES arrive, because git resolves the root of whatever checkout the tool runs in
+
+#### Scenario: the rule is the renderer's own answer, not a character list
+- **WHEN** the root holds any other byte or whitespace run the one-line renderer rewrites (a tab,
+  another control character, a run of spaces, a leading or trailing space)
+- **THEN** it SHALL be REFUSED under the representability cause, because the published path would
+  name a file that does not exist whatever byte caused the rewrite
+- **AND** the check SHALL be expressed as *the root survives the renderer unchanged*, so it cannot
+  drift from that renderer the way a hand-written class of characters would
+- **AND** the newline rationale SHALL NOT be reported for such a path (a false rationale is worse
+  than a vague one)
+
+#### Scenario: a space-bearing checkout still works (the false-refusal control)
+- **WHEN** the repository root legally contains a SPACE (a checkout at `.../work tree`)
+- **THEN** the stage SHALL open and `verdict` SHALL publish the WHOLE space-bearing path, spaces
+  included, and that published path SHALL name a file that EXISTS
+
+#### Scenario: there is no opt-out
+- **WHEN** an environment variable is sought to proceed anyway
+- **THEN** none SHALL exist: a checkout is always renamable, so an escape hatch could only buy a
+  published path that cannot be opened

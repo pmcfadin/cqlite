@@ -446,6 +446,26 @@ Three further declared limits of the mechanism itself:
   `AUTHOR-REFUSED`, `report-changed-mid-write` and `RECORD-OK` lines still DISPLAY a
   `~`-substituted path. In every one of those cases it is a diagnostic; the two channels that
   promise the real path are `open`'s raw line and the verdict line.
+  **AND A ROOT THIS GRAMMAR CANNOT CARRY IS REFUSED AT THE BOUNDARY RATHER THAN PUBLISHED WRONG
+  (#3751 round 17, W2).** The `=` case above is the one where the RAW value is fine and only the
+  rendering was wrong; the general case is worse, because the two commands lie **DIFFERENTLY**.
+  A newline-bearing root made `open` — which prints the RAW path on its own line — **SPLIT** the
+  value across two physical lines, the second carrying none of the `REVIEW-STAGE: ` anchor every
+  consumer of this grammar reads, while `verdict` **FLATTENED** it and published `…/lane two/…`,
+  a path no `open(2)` can resolve. Round 11 declared such a path unrepresentable **and "never
+  arriving"**; the second half was false — git resolves the root of whatever checkout the tool is
+  run in — and **that declaration is WITHDRAWN**. `require_repo_root` REFUSES it (exit 64, nothing
+  read and nothing written) at the **ONE** place the root is resolved, so all four subcommands
+  inherit the refusal; the newline case carries its own detail because its harm differs in KIND (a
+  value that spans lines cannot be a field of a one-line record under any rendering), and every
+  other unrenderable root — a tab, another C0 byte, a whitespace run, a leading/trailing space —
+  is refused under the representability cause. **The rule is the RENDERER's own answer, not a
+  character list:** the root must survive `one_line` UNCHANGED, so it cannot drift from the
+  renderer the way a hand-written class would. A **SPACE** is unaffected and stays supported —
+  that is the control which keeps this from redding correct input, and it asserts both that the
+  whole space-bearing path is published and that the published path EXISTS. No opt-out env var,
+  and none may be added: a checkout is always renamable, so an escape hatch could only buy a
+  published path that cannot be opened.
 - `agent=` is written through
   `sanitize_field`, whose character class excludes whitespace, so it cannot legitimately carry one; a
   hand-edited record could, and that value truncates — a truncated DIAGNOSTIC, never a wrong verdict,
@@ -648,8 +668,8 @@ Three further declared limits of the mechanism itself:
   which could name a DIFFERENT, pre-existing report recording `PASS` while the sentinel went to the
   newline-bearing name; and the report's parent directory was created BEFORE repository containment
   and ignore status were verified, so a REFUSED outside-the-repository path still created
-  directories outside the checkout. Derivation closes both BY CONSTRUCTION — no newline to split
-  on, no containment question to answer — and leaves `<kind>` (`[A-Za-z0-9][A-Za-z0-9_-]*`) and
+  directories outside the checkout. Derivation closes both BY CONSTRUCTION — no CALLER-supplied
+  newline, no containment question to answer — and leaves `<kind>` (`[A-Za-z0-9][A-Za-z0-9_-]*`) and
   `<issue>` (digits only) as the whole path-input surface, validated at ONE boundary. The stage
   record no longer carries the path as a readable field either: a second source for a value with
   one derivation is only a second thing to disagree. If a caller ever needs a custom location,

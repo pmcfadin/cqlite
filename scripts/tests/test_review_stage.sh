@@ -2784,6 +2784,243 @@ for pair in 'STAGE_ELAPSED" -gt "$STAGE_DEADLINE:the past-deadline comparison' \
     bad "secs/structural: $label is GONE from the script — this round's subject moved and the guard above is now vacuous"
   fi
 done
+# --- 30. A CHECKOUT PATH THIS GRAMMAR CANNOT CARRY IS REFUSED AT THE BOUNDARY (round 17, W2) ------
+# THE FINDING (roborev job 396, W2). Every line this tool emits is a ONE-LINE record, and the
+# `report=` field on it carries an ABSOLUTE path whose only variable component is the REPOSITORY
+# ROOT. A root containing a NEWLINE is therefore not merely awkward — the two commands lie
+# DIFFERENTLY about it:
+#
+#   * `open` prints the raw report path on its own line, so the value SPLIT across two physical
+#     lines: the second carried NO `REVIEW-STAGE: ` prefix, which is the anchor every consumer of
+#     this grammar reads, and the paste-ready spawn clause handed the agent two broken fragments.
+#   * `verdict` flattens it through `remainder_value`, publishing `…/lane two/…` — a DIFFERENT,
+#     NONEXISTENT path — on the one line whose whole promise is the absolute report-of-record path.
+#     Measured on the shipped script in a checkout named `lane<LF>two`:
+#       REVIEW-STAGE: c RESULT: NOT-RUN (…) … report=/…/lane two/.review-stage/issue-700/c.<n>.md
+#     while the real file was at `/…/lane` + LF + `two/…`.
+#
+# ROUND 11 DECLARED THIS UNREPRESENTABLE AND LEFT IT ("a path containing a NEWLINE is not
+# representable on a one-line grammar and never arrives"). THAT DECLARATION IS WITHDRAWN: the
+# premise was false — such a path DOES arrive, because git resolves the root of whatever checkout
+# the tool is run in — and silently publishing a wrong path is not an acceptable resting state for
+# the value this grammar promises. So the refusal is AT THE BOUNDARY, at the ONE place the root is
+# resolved, which is why every subcommand inherits it.
+#
+# AND IT IS THE MEASURED PROPERTY, NOT A CHARACTER LIST. `one_line` is what renders these values,
+# so the question asked is *does this root survive it UNCHANGED* — a rendering that differs is a
+# published path that does not exist, whatever byte caused it. A curated list of bad characters is
+# a list to keep complete; this one cannot drift from the renderer, because it IS the renderer. The
+# LF/CR case keeps its OWN detail line, because its harm is different in kind (the grammar itself
+# breaks: a value that spans lines cannot be a field of a one-line record at any rendering).
+W2_D="$T/w2"; mkdir -p "$W2_D"
+
+# w2_repo <dirname> — a git checkout at a literal directory name, or empty when this filesystem
+# cannot hold it. NOTHING is asserted from a fixture that did not build: a case that silently ran
+# in an ordinary directory would pass for the wrong reason (test_premerge_assert.sh §44's lesson).
+w2_repo() {
+  local d="$W2_D/$1"
+  mkdir -p "$d" 2>/dev/null || return 1
+  git -C "$d" init -q >/dev/null 2>&1 || return 1
+  printf '.review-stage/\n' >"$d/.gitignore" 2>/dev/null || return 1
+  printf '%s\n' "$d"
+}
+
+W2_LF=""
+W2_LF_NAME="lane
+two"
+if W2_LF="$(w2_repo "$W2_LF_NAME")" && [ -n "$W2_LF" ] && [ -d "$W2_LF" ]; then
+  case "$W2_LF" in
+    *"
+"*) ok "w2 fixture: a git checkout whose PATH contains a literal LF was built (asserted, not assumed)" ;;
+    *) bad "w2 fixture: the fixture path carries NO newline, so every case below would be vacuous ($W2_LF)"; W2_LF="" ;;
+  esac
+else
+  bad "w2 fixture: a newline-bearing checkout could not be built on this filesystem — the cases below are UNMEASURED"
+  W2_LF=""
+fi
+
+if [ -n "$W2_LF" ]; then
+  # (a) `open` REFUSES, and it refuses BEFORE anything is written.
+  rs "$W2_LF" open c --issue 700 --agent spec-auditor
+  rc_is 64 "w2/open: a newline-bearing checkout is REFUSED (usage class, exactly as an unresolvable worktree is)"
+  has "cannot be represented" "w2/open: and the refusal says the path cannot be REPRESENTED on this one-line grammar"
+  has "NEWLINE" "w2/open: naming the newline specifically, because its harm is different in kind (the value spans lines)"
+  if [ -d "$W2_LF/.review-stage" ]; then
+    bad "w2/open: the refused open created the stage directory anyway"
+  else
+    ok "w2/open: NOTHING was written — no stage directory, so no report and no record"
+  fi
+  # (b) `verdict` REFUSES, and — the property that matters — it publishes NO path at all. A wrong
+  #     path on this line is worse than no line, because the line is what a consumer binds to.
+  rs "$W2_LF" verdict c --issue 700
+  rc_is 64 "w2/verdict: the same refusal at the same boundary, so the two commands cannot disagree"
+  hasnt "report=" "w2/verdict: and NO report= field is published — a nonexistent path is never advertised"
+  hasnt "RESULT:" "w2/verdict: nor any RESULT: token, so nothing can read a verdict off a checkout we cannot name"
+  # (c) `status` and (d) `record-author-performed` inherit it, because the check is at the ONE
+  #     resolution site rather than in `open`.
+  rs "$W2_LF" status c --issue 700
+  rc_is 64 "w2/status: status inherits the refusal (the check is at the root resolution, not per subcommand)"
+  rs "$W2_LF" record-author-performed c --issue 700 --reason 'no peer agent available on this box' \
+    --evidence 'docs/round-artifacts/issue-3751-hand-c.md' --performed-by author
+  rc_is 64 "w2/author: and so does record-author-performed, which would otherwise WRITE under that path"
+fi
+
+# (e) A CARRIAGE RETURN IS THE SAME CLASS AND IS REFUSED THE SAME WAY. `one_line` maps CR to a
+#     space exactly as it maps LF, so a CR-bearing root publishes a nonexistent path too — and a
+#     guard keyed on LF alone would be the character list this case exists to rule out.
+W2_CR=""
+W2_CR_NAME="$(printf 'lane\rtwo')"
+if W2_CR="$(w2_repo "$W2_CR_NAME")" && [ -n "$W2_CR" ] && [ -d "$W2_CR" ] &&
+  case "$W2_CR" in *"$(printf '\r')"*) true ;; *) false ;; esac; then
+  ok "w2 fixture: a CR-bearing checkout was built"
+  rs "$W2_CR" open c --issue 701 --agent spec-auditor
+  rc_is 64 "w2/cr: a CR-bearing checkout is REFUSED as well"
+  has "NEWLINE" "w2/cr: under the same named cause (CR and LF are one class here: both break the line)"
+else
+  ok "w2 fixture: SKIPPED the CR variant — this filesystem or shell could not hold the name; nothing is asserted about a case that did not run"
+  ok "w2 fixture: (the same, second half — the case emits a fixed number of assertions either way)"
+  ok "w2 fixture: (the same, third half)"
+fi
+
+# (f) A TAB IS NOT A NEWLINE AND IS STILL UNPUBLISHABLE. `one_line` maps it to a space, so the
+#     published path does not exist — the SAME harm, a DIFFERENT cause, and it is why the check is
+#     the renderer's own answer rather than a two-character test.
+W2_TAB=""
+W2_TAB_NAME="$(printf 'lane\ttwo')"
+if W2_TAB="$(w2_repo "$W2_TAB_NAME")" && [ -n "$W2_TAB" ] && [ -d "$W2_TAB" ] &&
+  case "$W2_TAB" in *"$(printf '\t')"*) true ;; *) false ;; esac; then
+  ok "w2 fixture: a TAB-bearing checkout was built"
+  rs "$W2_TAB" open c --issue 702 --agent spec-auditor
+  rc_is 64 "w2/tab: a TAB-bearing checkout is REFUSED — the published path would not exist"
+  has "cannot be represented" "w2/tab: under the representability cause"
+  hasnt "NEWLINE" "w2/tab: and NOT under the newline one, because that would be a false rationale about this path"
+else
+  ok "w2 fixture: SKIPPED the TAB variant — this filesystem could not hold the name"
+  ok "w2 fixture: (the same, second half)"
+  ok "w2 fixture: (the same, third half)"
+  ok "w2 fixture: (the same, fourth half)"
+fi
+
+# (g) CONTROL — A SINGLE SPACE STILL WORKS, END TO END. Round 11's Q3 exists because a path may
+#     LEGALLY contain a space and `premerge-assert.sh` reads `report=` as the line remainder for
+#     exactly that reason. A refusal that caught this would red on correct input and be the guard
+#     agents learn to waive, so the control asserts the FULL path is published AND that it EXISTS.
+W2_SP=""
+if W2_SP="$(w2_repo "work tree")" && [ -n "$W2_SP" ]; then
+  ok "w2 CONTROL: a SPACE-bearing checkout was built"
+  rs "$W2_SP" open c --issue 703 --agent spec-auditor
+  rc_is 0 "w2 CONTROL: a space-bearing checkout is NOT refused — a space survives one_line unchanged"
+  W2_SP_REP="$(REPORT_OF "$W2_SP" 703 c)"
+  rs "$W2_SP" verdict c --issue 703
+  has "report=$W2_SP_REP" "w2 CONTROL: and verdict publishes the WHOLE space-bearing path, spaces included"
+  if [ -f "$W2_SP_REP" ]; then
+    ok "w2 CONTROL: which names a file that EXISTS (the published value is the real report of record)"
+  else
+    bad "w2 CONTROL: the published path does not exist: $W2_SP_REP"
+  fi
+else
+  bad "w2 CONTROL: a space-bearing checkout could not be built — the false-refusal control is UNMEASURED"
+  bad "w2 CONTROL: (the same absence, 2/4)"
+  bad "w2 CONTROL: (the same absence, 3/4)"
+  bad "w2 CONTROL: (the same absence, 4/4)"
+fi
+
+# (h) STRUCTURAL — THE CHECK IS AT THE ONE RESOLUTION SITE, which is what makes "every entry
+#     inherits it" a property of the code rather than of this test's enumeration. Two pins: the
+#     root is resolved exactly once in the script, and the refusal sits in that same function
+#     BEFORE the global is set (a check after the assignment would let a subcommand build a path
+#     from a root it had already accepted).
+W2_RESOLVE="$(LC_ALL=C grep -c 'rev-parse --show-toplevel' "$RS" || true)"
+if [ "$W2_RESOLVE" -eq 1 ]; then
+  ok "w2/structural: the repository root is resolved in exactly ONE place, so one check covers every subcommand"
+else
+  bad "w2/structural: the root is resolved at $W2_RESOLVE sites — a second resolution would bypass the check"
+fi
+W2_RRR="$(LC_ALL=C sed -n '/^require_repo_root() {$/,/^}$/p' "$RS")"
+if [ -n "$W2_RRR" ]; then
+  ok "w2/structural: require_repo_root was extracted (the pins below are not vacuous)"
+else
+  bad "w2/structural: require_repo_root could not be extracted — the pins below are UNMEASURED"
+fi
+W2_REJ_LN="$(printf '%s\n' "$W2_RRR" | LC_ALL=C grep -n 'cannot be represented' | LC_ALL=C head -1 | cut -d: -f1)"
+W2_SET_LN="$(printf '%s\n' "$W2_RRR" | LC_ALL=C grep -n 'REPO_ROOT="\$root"' | LC_ALL=C head -1 | cut -d: -f1)"
+if [ -n "$W2_REJ_LN" ] && [ -n "$W2_SET_LN" ] && [ "$W2_REJ_LN" -lt "$W2_SET_LN" ]; then
+  ok "w2/structural: the refusal is raised BEFORE the root is published to the rest of the script (lines $W2_REJ_LN < $W2_SET_LN)"
+else
+  bad "w2/structural: the representability refusal is not before REPO_ROOT is set (reject=$W2_REJ_LN set=$W2_SET_LN)"
+fi
+# AND IT IS THE RENDERER'S OWN ANSWER, NOT A CHARACTER LIST. A test keyed on a hand-written class
+# would drift from `one_line` the day `one_line` changes; the check compares the rendering to the
+# raw value, so it cannot.
+case "$W2_RRR" in
+  *'one_line "$root"'*)
+    ok "w2/structural: the representability test asks the RENDERER (one_line) itself, so it cannot drift from it" ;;
+  *) bad "w2/structural: the check does not compare against the renderer's own output, so it is a character list that can drift" ;;
+esac
+# AND THE RENDERER IT ASKS IS THE ONE THE PUBLISHED FIELD GOES THROUGH. The probe calls `one_line`
+# rather than `remainder_value` so that section 29's '='-exemption confinement pin keeps counting
+# EMIT sites only (a probe is not an emit) — which is sound exactly while the two agree, so that is
+# asserted BEHAVIOURALLY over the shipped functions rather than left to the comment.
+W2_AGREE_OK=0
+if W2_OL="$(LC_ALL=C awk '/^one_line\(\) \{/,/^\}/' "$RS")" &&
+  W2_RV="$(LC_ALL=C awk '/^remainder_value\(\) \{/,/^\}/' "$RS")" &&
+  [ -n "$W2_OL" ] && [ -n "$W2_RV" ]; then
+  W2_AGREE_OK=1
+  ok "w2/structural: both renderers were extracted (the agreement check below is not vacuous)"
+else
+  bad "w2/structural: a renderer could not be extracted — the agreement between probe and emit is UNMEASURED"
+fi
+if [ "$W2_AGREE_OK" -eq 1 ]; then
+  W2_SAMPLE='a=b	c  d
+e'
+  W2_A="$(printf '%s\n%s\n' "$W2_OL" 'one_line "$1"' | bash -s "$W2_SAMPLE" 2>/dev/null || true)"
+  W2_B="$(printf '%s\n%s\n%s\n' "$W2_OL" "$W2_RV" 'remainder_value "$1"' | bash -s "$W2_SAMPLE" 2>/dev/null || true)"
+  if [ -n "$W2_A" ] && [ "$W2_A" = "$W2_B" ]; then
+    ok "w2/structural: the probe's renderer and the published field's renderer AGREE on a sample carrying a tab, a whitespace run, an '=' and a newline"
+  else
+    bad "w2/structural: probe and emit renderers DISAGREE (one_line='$W2_A' remainder_value='$W2_B') — the probe would accept a root the verdict line then corrupts"
+  fi
+fi
+# AND THERE IS NO OPT-OUT. A checkout is always renamable, so an escape hatch could only buy a
+# published path that does not exist — the same reasoning as the missing-schemas check's absence of
+# one.
+if [ "$(LC_ALL=C grep -c -E 'REVIEW_STAGE_ALLOW_[A-Z_]*PATH|ALLOW_UNREPRESENTABLE' "$RS" || true)" -eq 0 ]; then
+  ok "w2/structural: no environment variable opts out of it — a renamable checkout needs no escape hatch"
+else
+  bad "w2/structural: an opt-out env var exists, which could only buy a published path that does not exist"
+fi
+# THE WITHDRAWN ROUND-11 DECLARATION MAY NOT SURVIVE ANYWHERE. It said such a path is not
+# representable and NEVER ARRIVES; the second half was false, and a stale declaration is what stops
+# the next person looking. Needles SPLIT so this guard cannot match its own source line.
+W2_N1="a path containing a NEWLINE is not repr""esentable"
+W2_N2="there is no newline to split a record line on"
+W2_N3="no newline to split"
+w2_carries_withdrawn() { LC_ALL=C grep -qiF -e "$W2_N1" -e "$W2_N2" -e "$W2_N3" "$1"; }
+W2_SWEPT=0; W2_STALE=0; W2_STALE_WHERE=""
+for W2_F in "$RS" "$SCRIPT_DIR/../flow/premerge-assert.sh" \
+  "$SCRIPT_DIR/../../CLAUDE.md" "$SCRIPT_DIR/../../docs/development/review-stage-reporting.md"; do
+  [ -f "$W2_F" ] || continue
+  W2_SWEPT=$((W2_SWEPT + 1))
+  if w2_carries_withdrawn "$W2_F"; then
+    W2_STALE=$((W2_STALE + 1)); W2_STALE_WHERE="$W2_STALE_WHERE $W2_F"
+  fi
+done
+if [ "$W2_STALE" -eq 0 ] && [ "$W2_SWEPT" -eq 4 ]; then
+  ok "w2/structural: round 11's WITHDRAWN declaration (a newline-bearing path is unrepresentable and never arrives) survives nowhere ($W2_SWEPT site(s) swept)"
+else
+  bad "w2/structural: $W2_STALE of $W2_SWEPT swept site(s) still carry it (want 0 of 4):$W2_STALE_WHERE"
+fi
+# A POSITIVE CONTROL: a sweep that matches nothing is indistinguishable from a sweep that cannot
+# match. This repository has the incident where a scan built to close one blind spot shipped with
+# its own and reported CLEAN on four real sites.
+W2_PLANT="$T/w2-withdrawn-plant.md"
+printf 'prose, then the withdrawn claim: %s, stated as a residual\n' "$W2_N1" >"$W2_PLANT" 2>/dev/null || true
+if [ -f "$W2_PLANT" ] && w2_carries_withdrawn "$W2_PLANT"; then
+  ok "w2/structural CONTROL: the sweep DOES find the withdrawn declaration when it is present"
+else
+  bad "w2/structural CONTROL: the sweep did not find a PLANTED copy — the clean result above proves nothing"
+fi
+
 # --- case floor ---------------------------------------------------------------
 # --- 21. THE CLOBBER GUARD MUST PREVENT, NOT REPORT (round 9, N1) ----------------
 # THE FINDING (roborev job 382, N1). Round 2's B2 made `record-author-performed` refuse to
@@ -4951,7 +5188,29 @@ fi
 # `remainder_value` does not, and `remainder_value` still renders a C0 byte visibly and still
 # flattens a newline — the exemption is the `=` map ALONE. Every one needs only bash, git and
 # coreutils; none branches on the host.
-ASSERT_FLOOR=856
+#
+# ROUND 17 ADDED 30 HOST-INDEPENDENT ASSERTIONS (856 -> 886), all in the new section 30, for W2 —
+# a checkout path this one-line grammar cannot carry made the two commands lie DIFFERENTLY about
+# the same file: `open` printed the RAW path, so a newline-bearing root SPLIT it across physical
+# lines (the second carrying no `REVIEW-STAGE: ` anchor), while `verdict` FLATTENED it and
+# published `…/lane two/…`, a path no `open(2)` can resolve, on the line whose whole promise is the
+# absolute report-of-record path (measured on the shipped script; 16 failures before the fix, 0
+# after). Round 11 declared such a path unrepresentable and "never arriving"; the second half was
+# FALSE — git resolves the root of whatever checkout the tool runs in — and that declaration is
+# WITHDRAWN, swept with a positive control over four sites. The fixture PREMISE asserts the
+# newline really is in the built path (a case that silently ran in an ordinary directory would pass
+# for the wrong reason), the refusal is asserted on ALL FOUR entries because the check sits at the
+# ONE root resolution, `verdict` is required to publish NO `report=` and NO `RESULT:` at all (a
+# wrong path on that line is worse than no line), and the CR and TAB variants pin that the rule is
+# the RENDERER's own answer rather than a two-character list — with the tab case requiring the
+# NEWLINE rationale to be ABSENT, since a true statement that hides the sharper one is still the
+# wrong one. The controls are what stop it redding correct input: a SPACE-bearing checkout (round
+# 11's own subject) still publishes its whole path AND that path must EXIST. Six structural pins:
+# one resolution site, the refusal BEFORE the global is published, the probe asking `one_line`
+# itself, a BEHAVIOURAL agreement between the probe's renderer and the published field's, and no
+# opt-out env var. Every one needs only bash, git and coreutils; none branches on the host, and the
+# CR/TAB fixtures emit a fixed number of assertions whether or not the filesystem can hold them.
+ASSERT_FLOOR=886
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

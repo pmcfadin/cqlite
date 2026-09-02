@@ -285,11 +285,27 @@
 # and the reader took the PREFIX — which could name a DIFFERENT pre-existing report recording
 # `PASS`; and the report's parent directory was created BEFORE repository containment was
 # verified, so a REFUSED outside-the-repository path still created directories outside the
-# checkout. With the path derived there is no newline to split on and no containment question to
-# answer, and `<kind>`/`<issue>` — validated strictly at ONE boundary — are the whole remaining
-# path-input surface. If a caller ever genuinely needs a custom location, re-add the flag WITH
-# that hardening (a refused CR/LF, containment verified BEFORE any `mkdir`); do not re-add it as
-# it was.
+# checkout. With the path derived no CALLER can supply a newline and there is no containment
+# question to answer, and `<kind>`/`<issue>` — validated strictly at ONE boundary — are the whole
+# remaining path-input surface. If a caller ever genuinely needs a custom location, re-add the flag
+# WITH that hardening (a refused CR/LF, containment verified BEFORE any `mkdir`); do not re-add it
+# as it was.
+#
+# THE REPOSITORY ROOT IS THE ONE COMPONENT DERIVATION DOES NOT VALIDATE, AND IT IS REFUSED WHEN
+# THIS GRAMMAR CANNOT CARRY IT (#3751 round 17, W2)
+# ---------------------------------------------------------------------------------------------
+# Derivation removes the CALLER's newline; the root git resolves may still hold one, and then the
+# two commands lied DIFFERENTLY about the same file: `open` prints the RAW path on its own line, so
+# the value SPLIT across two physical lines — the second carrying none of the `REVIEW-STAGE: `
+# anchor every consumer reads — while `verdict` FLATTENED it and published `…/lane two/…`, a path
+# no `open(2)` can resolve, on the line whose whole promise is the absolute report-of-record path.
+# Round 11 declared such a path unrepresentable and "never arriving"; the second half was FALSE,
+# and that declaration is WITHDRAWN. `require_repo_root` now REFUSES (exit 64, nothing read or
+# written) a root the one-line renderer cannot carry UNCHANGED — the renderer's own answer, not a
+# character list — with the newline case named separately because its harm differs in kind. A
+# checkout named that way cannot use this tool: rename or re-clone it. There is deliberately no
+# opt-out, because a renamable checkout needs no escape hatch. A SPACE is unaffected and stays
+# supported (round 11's Q3 exists for it).
 #
 # BOTH PATHS ARE VERIFIED GITIGNORED, FAIL-CLOSED
 # -----------------------------------------------
@@ -925,9 +941,60 @@ validate_secs() {
 # worktree.
 REPO_ROOT=""
 require_repo_root() {
-  local root=""
+  local root="" rendered=""
   root="$(git rev-parse --show-toplevel 2>/dev/null)" || root=""
   [ -n "$root" ] || die_usage "not inside a git worktree (this tool writes into the lane's worktree on purpose — see the header)"
+  # AND THE ROOT MUST BE CARRIABLE ON THIS TOOL'S ONE-LINE GRAMMAR (#3751 round 17, W2).
+  #
+  # THE FINDING. The repository root is the ONLY variable component of every path this tool
+  # publishes, and a root the renderer cannot carry unchanged made the two commands lie
+  # DIFFERENTLY about the same file: `open` prints the RAW path on its own line, so a
+  # newline-bearing root SPLIT it across two physical lines — the second carrying none of the
+  # `REVIEW-STAGE: ` anchor every consumer of this grammar reads — while `verdict` FLATTENED it
+  # through `remainder_value` and published `…/lane two/…`, a DIFFERENT path that no `open(2)` can
+  # resolve, on the one line whose whole promise is the absolute report-of-record path.
+  #
+  # ROUND 11 DECLARED THIS UNREPRESENTABLE AND LEFT IT ("a newline-bearing path is not
+  # representable on a one-line grammar and never arrives"). THAT DECLARATION IS WITHDRAWN. Its
+  # premise was false — such a path DOES arrive, because git resolves the root of whatever
+  # checkout this tool is run in — and silently publishing a path that does not exist is not an
+  # acceptable resting state for a value the grammar promises. Fail-closed beats a wrong path: a
+  # checkout named this way cannot use the tool, which is a clear, actionable refusal (rename or
+  # re-clone) rather than silent corruption.
+  #
+  # IT IS THE RENDERER'S OWN ANSWER, NOT A CHARACTER LIST. `one_line` is what renders these
+  # values, so the question asked is *does this root survive it UNCHANGED* — a rendering that
+  # differs IS a published path that does not exist, whatever byte caused it (a tab, another C0
+  # byte, a run of whitespace, a leading or trailing space). A hand-written class of bad
+  # characters would be a list to keep complete and would drift from `one_line` the first time
+  # `one_line` changed; this cannot, because it asks `one_line` itself. `remainder_value` is the
+  # `one_line` is the spelling used — the renderer BOTH emit boundaries share — rather than
+  # `remainder_value`, which merely wraps it: this is a PROBE and not an emit, so counting it as an
+  # emit site would blur the '='-map exemption's confinement pin (round 16, V2, which requires that
+  # exemption to have exactly ONE call site). The answer is the same one the verdict line's
+  # `report=` gets, because `remainder_value` IS `one_line`, and the two are pinned to agree by
+  # section 30 of scripts/tests/test_review_stage.sh rather than by this sentence.
+  #
+  # HERE, AT THE ONE RESOLUTION SITE, so every subcommand inherits it: `open` never creates a
+  # directory under such a root, `verdict`/`status` never publish a `report=` for one, and
+  # `record-author-performed` never writes there. `die_usage` for the same reason the
+  # no-worktree case above uses it — this is a property of the CHECKOUT, not of the arguments or
+  # of any artifact, so it is the usage class (exit 64) and not a stage refusal.
+  #
+  # NO OPT-OUT, AND NONE MAY BE ADDED: a checkout is always renamable, so an escape hatch could
+  # only buy a published path that does not exist.
+  rendered="$(one_line "$root")"
+  if [ "$rendered" != "$root" ]; then
+    # A NEWLINE GETS ITS OWN DETAIL, because its harm differs in KIND rather than in degree: a
+    # value that spans lines cannot be a field of a one-line record under ANY rendering, so the
+    # grammar itself breaks (a second physical line with no anchor) as well as the value being
+    # wrong. Naming the general cause for it would be a true statement that hides the sharper one.
+    case "$root" in
+      *$'\n'* | *$'\r'*)
+        die_usage "this checkout's path contains a NEWLINE (LF or CR), so it cannot be represented on this tool's one-line verdict grammar: every line here is one record carrying that path, and such a value would SPLIT across physical lines (leaving a line with no REVIEW-STAGE: anchor) while the verdict line published a FLATTENED path that does not exist. Nothing was read or written. Rename or re-clone the checkout without the newline; there is deliberately no way to proceed, because publishing a path that cannot be opened is worse than refusing" ;;
+    esac
+    die_usage "this checkout's path cannot be represented on this tool's one-line verdict grammar — it holds a character or a whitespace run that the one-line renderer rewrites (a tab, another control character, a run of spaces, or a leading/trailing space), so the report path published on the verdict line would name a file that does not exist. Nothing was read or written. Rename or re-clone the checkout; there is deliberately no opt-out, because a renamable checkout needs no escape hatch"
+  fi
   REPO_ROOT="$root"
 }
 
@@ -948,8 +1015,15 @@ repo_root() {
 # 4, H2/H3). There is no override: `report_path` is THE report of record's location, computed the
 # same way by the writer (`open`) and by every reader (`verdict`, `status`,
 # `record-author-performed`), so the two can never form two opinions about which file a stage
-# means — and no caller-controlled component enters a path, so there is no newline to split a
-# record line on and no repository-containment question to answer.
+# means — and no caller-controlled component enters a path, so no CALLER can put a newline in one
+# and there is no repository-containment question to answer.
+#
+# THE REPOSITORY ROOT IS STILL A VARIABLE COMPONENT, AND IT IS CHECKED AT ITS ONE RESOLUTION SITE
+# (#3751 round 17, W2). Derivation removes the CALLER's newline; it says nothing about the root git
+# resolves, which may legally hold one — and did, publishing a flattened path that does not exist.
+# `require_repo_root` refuses a root the one-line renderer cannot carry unchanged, so every path
+# built here is one this grammar can publish verbatim. See that function for the withdrawal of
+# round 11's "such a path never arrives" declaration.
 stage_dir()  { printf '%s/.review-stage/issue-%s\n' "$(repo_root)" "$1"; }
 stage_file() { printf '%s/%s.stage\n' "$(stage_dir "$1")" "$2"; }
 

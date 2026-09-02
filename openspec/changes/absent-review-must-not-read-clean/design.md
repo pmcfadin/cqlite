@@ -509,3 +509,41 @@ paragraph of reasoning rather than being appended silently.
 `AUTHOR-REFUSED`, `report-changed-mid-write` and `RECORD-OK` lines still *display* a
 `~`-substituted path. Each is a diagnostic; the two channels that promise the real path are `open`'s
 raw line and the verdict line.
+
+## Round 17 (W2) — a checkout path this grammar cannot carry is refused, not published wrong
+
+The `=` case above is the one where the raw value was fine and only the *rendering* was wrong. The
+general case is worse, because **the two commands lie differently about the same file**: `open`
+prints the RAW path on its own line, so a newline-bearing repository root **split** the value across
+two physical lines — the second carrying none of the `REVIEW-STAGE: ` anchor every consumer of this
+grammar reads, and the paste-ready spawn clause handing the agent two fragments — while `verdict`
+**flattened** it and published `…/lane two/…`, a path no `open(2)` can resolve, on the one line
+whose whole promise is the absolute report-of-record path.
+
+- **A residual whose premise is "this input never arrives" is a claim about the world, and this one
+  was false.** Round 11 declared a newline-bearing path unrepresentable *and never arriving*. The
+  first half is true; the second is not, because git resolves the root of whatever checkout the
+  tool is run in, and the root is the ONE path component derivation does not validate. The
+  declaration is **withdrawn**, swept over four sites with a positive control, because a stale
+  declaration is what stops the next person looking.
+- **Refuse at the boundary, and fail closed.** `require_repo_root` — the ONE place the root is
+  resolved — refuses (exit 64, nothing read and nothing written), so all four subcommands inherit
+  it rather than each carrying its own check. A checkout named this way cannot use the tool, which
+  is a clear actionable refusal (rename or re-clone) and strictly better than silent corruption of
+  the value the grammar promises.
+- **Key the check on the RENDERER's own answer, never on a character list.** The rule is *does this
+  root survive `one_line` unchanged* — a rendering that differs IS a published path that does not
+  exist, whatever byte caused it. A hand-written class of bad characters would drift from the
+  renderer the first time the renderer changed. The probe calls `one_line` rather than
+  `remainder_value` so that round 16's exemption-confinement pin keeps counting EMIT sites only,
+  and the two are pinned to agree behaviourally.
+- **The newline keeps its own detail, because its harm differs in KIND.** A value that spans lines
+  cannot be a field of a one-line record under any rendering; every other unrenderable root (a tab,
+  another C0 byte, a whitespace run, a leading/trailing space) is a wrong VALUE on an intact line.
+  Naming the general cause for a newline would be a true statement that hides the sharper one, and
+  the tab case asserts the newline rationale is ABSENT for it.
+- **The control is what keeps it off correct input.** A SPACE-bearing checkout — round 11's own
+  subject, and the reason `report=` is read as the line remainder — must still work end to end,
+  with the whole path published AND that path required to EXIST.
+- **No opt-out.** A checkout is always renamable, so an escape hatch could only buy a published path
+  that cannot be opened.

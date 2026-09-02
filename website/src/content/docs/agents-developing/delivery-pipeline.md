@@ -301,6 +301,21 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   The control that proves the confinement is that a `report=` pair smuggled through `agent=` is
   still neutralised, since unmapped it lands AHEAD of the measured one and the reader takes the
   first. Control-character neutralisation is untouched: the exemption is the `=` map alone.
+  **And a checkout path this grammar cannot carry is REFUSED at the boundary, never published wrong
+  (#3751 round 17).** The repository root is the one path component derivation does not validate,
+  and a root the one-line renderer rewrites made the two commands lie DIFFERENTLY about the same
+  file: `open` prints the RAW path, so a newline-bearing root SPLIT it across two physical lines
+  (the second carrying none of the `REVIEW-STAGE: ` anchor consumers read), while `verdict`
+  FLATTENED it and published `.../lane two/...`, which no `open(2)` resolves. An earlier round had
+  declared such a path unrepresentable **and "never arriving"** — the second half was false, since
+  git resolves the root of whatever checkout the tool runs in — so that declaration is WITHDRAWN
+  and `require_repo_root` refuses (exit 64, nothing read or written) at the ONE resolution site, so
+  every subcommand inherits it. Generalise it two ways: **a residual whose premise is "this input
+  never arrives" is a claim about the world, and it should be re-measured rather than inherited**;
+  and **key such a check on the RENDERER's own answer** (does the value survive it unchanged?),
+  never on a hand-written list of bad characters, which drifts from the renderer the first time the
+  renderer changes. A space is unaffected, which is the control that keeps it from redding correct
+  input.
  "Somewhere on this line it says
   `RESULT: PASS`" is not a verdict about C: measured on #3751's own branch, a sibling `code-review`
   stage's PASS line satisfied `--c-verdict`, and a truncated capture with no
