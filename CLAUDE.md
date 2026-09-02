@@ -726,19 +726,36 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   IT AGAIN`) is applied literally: tier `toolchain` (rustc/cargo `error:`, `npm error`, `bash:`,
   `Error:`, a rustfmt diff) COUNTS its matched lines and publishes only a label this repo chose —
   `npm-error`, `rustfmt-diff` — plus the affirmative statement that no named assert exists and the
-  text was withheld; the diagnostic stays in the component log. **The asymmetry with tiers
-  `assert`/`guard` IS the fix and neither half may be "consistently" widened or narrowed**: their
-  payloads are repository-authored test/guard text — in-tree, reviewed, diffed by every PR, and
-  publishing them is what #3765 asks for — so the channel is retained there and the shape
-  neutralisation (URL/authority/query/credential-keyed token -> fixed placeholder, before any bound)
-  stays over it as **a REDUCTION, never a guarantee**, with the redactor behind it as defence in
-  depth. Even the *derived* `rustfmt diff in <path>` form went: a path is environment-controlled, and
-  one argued-safe exception inside a removed channel is where the next leak lands. Count correctness
-  and publication safety are SEPARATE concerns and neither is traded for the other: the extractor
-  dedupes and counts on the FULL identity, internally, and the emit boundary publishes only the
-  PROJECTION — so a toolchain count may exceed its label count and the remainder is DECLARED. The
-  label invariant is checked BOTH structurally (every recogniser passes a label literal) and on the
-  OUTPUT PATH (a name that is not a bare label token is REFUSED, not sanitised), because a source
+  text was withheld; the diagnostic stays in the component log. **AND THE SAME RULE NOW RUNS OVER
+  ALL THREE TIERS, BECAUSE THE "REPOSITORY-AUTHORED TEXT IS SAFE" RATIONALE WAS MEASURABLY FALSE
+  (#3765 / roborev job 49).** An earlier round kept the payload channel for `assert`/`guard` on the
+  ground that their text is "in-tree, reviewed, diffed by every PR". It is not a CONSTANT: in
+  `scripts/tests/test_agent_gate_summary.sh` alone, **205 `bad "…"` messages INTERPOLATE RUNTIME
+  VALUES** (`bad "leaked-child: … '$caller_file' …"`), so an assert payload is a repo-authored
+  TEMPLATE carrying runtime text — and this gate interpolates ORIGIN URLS into diagnostics, which is
+  what `_component_set_safe_detail` exists for, so the neutraliser's declared residual applied there
+  too. **Publishing the payload was never what #3765 asked for either**: the issue's own sketch is
+  the TAG (`failed-assert: 1465-skip-declares (accounted 419/420, floor 410)`). So every tier
+  publishes an **IDENTIFIER** — a tag / test path (first token, cut at the first single `:`, `::`
+  kept), a guard `<label> (<VERDICT>)`, or a closed-enum kind label — each **charset-constrained and
+  bounded**, with the charset exclusions load-bearing (no `@`, `/`, `?`, `&`, `=`, whitespace or `#`,
+  i.e. exactly the shapes this field's leak family travelled on). The shape neutralisation and the
+  redactor stay behind it as defence in depth, **a REDUCTION, never a guarantee**. Even the *derived*
+  `rustfmt diff in <path>` form went: a path is environment-controlled, and one argued-safe exception
+  inside a removed channel is where the next leak lands. **Count correctness and publication safety
+  are SEPARATE concerns and neither is traded for the other**: the extractor dedupes and COUNTS on
+  the FULL identity, internally, and publishes only the PROJECTION — so `F5`'s full-payload DEDUP is
+  intact while nothing publishes a payload, a toolchain count may exceed its label count, and a
+  published identifier SHARED by two distinct identities is **ORDINALISED** (`F2#1`, `F2#2`) so two
+  distinct asserts never render as one string. **A BOUND MUST BE APPLIED BEFORE RETENTION, NOT AFTER
+  IT**: the full identity used to become an array key with its 4096 bound applied afterwards
+  (unbounded memory on a log of long minified lines), so the dedup key is bounded on the way IN —
+  legitimate only because that key is **provably never published**, which is asserted. **AND AN
+  OVER-BOUND VALUE IS COUNTED, NEVER DROPPED**: an over-long guard label used to be discarded while
+  an unconditional `next` blocked every later tier, so the field read `0 RECOGNISED` — "scanned,
+  nothing matched" — for a line a recogniser HAD matched. The invariant is checked BOTH structurally
+  (every recogniser passes a label literal, `pubid(…)` or `publabel(…)`) and on the OUTPUT PATH (a
+  name outside its tier's shape is REFUSED, not sanitised), because a source
   scan cannot see a runtime value. **A bound must
   never be able to change a safety verdict, and a leak check must be made on the RENDERED field —
   never on extractor stdout, where a token cut by an elision looks absent while never having been
