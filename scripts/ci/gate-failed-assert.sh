@@ -19,10 +19,18 @@
 #                                 DISTINCT is judged on the FULL normalised identity, so
 #                                 no bound anywhere can change the count.
 #       name=<identity>           at most <max-names> lines (default 10), in file order,
-#                                 each the FULL normalised identity. NOT display-capped:
-#                                 the DISPLAY bound lives in the gate, AFTER redaction
-#                                 (see the ORDER note at add()). Bounded only by the
-#                                 declared SAFETY bound in safety().
+#                                 each the FULL normalised identity. NOT display-capped and
+#                                 NOT truncated at all: the DISPLAY bound lives in the gate,
+#                                 after the neutralisation and the redaction (see the ORDER
+#                                 note at add()), and the one bound here REPLACES an
+#                                 over-long identity with a placeholder rather than keeping
+#                                 a prefix of it (see safety()).
+#
+#       THIS STDOUT IS INTERNAL, NOT PUBLICATION. Its only consumer is agent-gate.sh's
+#       `_failassert_record`, which passes every name through the ONE emit boundary
+#       (`_failassert_clean`: NEUTRALISE -> REDACT -> bound). Nothing here is rendered into a
+#       SUMMARY block as it stands, which is what lets the count be computed on the full
+#       identity (F5) while only a neutralised PROJECTION of it is ever published (F7).
 #   exit 0 — the log was read and scanned (whether or not anything matched)
 #   exit 2 — usage error / the log could not be read: the CALLER must render this as a
 #            named `not extractable`, never as "no failures found". A guard that could
@@ -120,8 +128,10 @@ awk -v max="$max" '
   #   F1  a 57-char cap before the DEDUP        -> two sibling tests collapsed, count UNDERCOUNTED
   #   F5  truncation at the first `:` before the DEDUP -> 13 distinct asserts named as one tag
   #   F6  a 60-char DISPLAY elision before the REDACTION -> a credential reached the SUMMARY
-  # so it is fixed as a CLASS: no bound in this file may precede a step that needs the
-  # whole value, and the only bound left here is declared SAFETY (see safety()).
+  #   F8  a 4096-char SAFETY truncation before the REDACTION -> the same, at a 68x bound
+  # so it is fixed as a CLASS: no bound in this file may precede a step that needs the whole
+  # value, and the one bound left here TRUNCATES NOTHING — it publishes a placeholder instead
+  # of a prefix, so it cannot sever a credential at any offset (see safety()).
   #
   # MEASURED F6. The middle elision of
   #     npm error 401 Unauthorized while fetching the tarball https://x-access-token:TOK@h.io/p
@@ -154,15 +164,28 @@ awk -v max="$max" '
   # safety() IS A SAFETY BOUND, NOT A DISPLAY BOUND, and the distinction is the whole
   # point of the block above. It exists only so a single pathological log line (a minified
   # bundle, a base64 blob, a megabyte of JSON) is not carried whole through awk, a sidecar
-  # file and three command substitutions. 4096 is ~68x the 60-char display cap and ~13x
-  # the 300-char field cap, so it cannot plausibly split a credential: every
-  # credential-bearing diagnostic shape measured on this fleet is orders under it.
+  # file and three command substitutions.
   #
-  # DECLARED RESIDUAL: a credential STRADDLING offset 4096 of one physical log line would
-  # be cut here, upstream of the redaction — the same shape F6 was, at a bound 68x larger.
-  # Concretely, a secret before 4096 whose `@`/scheme falls after it would survive
-  # unredacted. Narrow, not zero, and DECLARED rather than silently accepted.
-  function safety(t) { return (length(t) > 4096) ? substr(t, 1, 4096) : t }
+  # IT TRUNCATES NOTHING. An over-bound identity is replaced by a FIXED PLACEHOLDER naming
+  # its measured length — an affirmative "this could not be published safely", which is a
+  # MEASUREMENT and not a silence — never by its first 4096 characters.
+  #
+  # WHY (roborev job 48, blocker 8 — the FOURTH instance of ONE shape on this issue: a 57-char
+  # cap before the DEDUP, truncation at the first `:` before the DEDUP, a 60-char display
+  # elision before the REDACTION, and this bound). It USED to `substr(t, 1, 4096)`, and the
+  # residual was DECLARED: a credential straddling offset 4096 loses its scheme or its
+  # `@host` here, upstream of every neutralisation, and its tail is then displayed. DECLARING
+  # A HAZARD IS NOT REMOVING IT. A truncation must never precede neutralisation at ANY bound,
+  # however large, so the bound stops retaining an unredacted prefix at all: there is no
+  # prefix to sever a credential out of.
+  #
+  # THE COST, stated: two DISTINCT over-bound identities render identically. Harmless by
+  # construction and for the reason the whole extractor is built around — `count` is computed
+  # from the FULL identity before this runs, so the count stays true; a name is a pointer.
+  function safety(t) {
+    return (length(t) > 4096) \
+      ? "<identity too long to publish safely: " length(t) " chars>" : t
+  }
   function add(tier, id,   c, full) {
     full = norm(id)
     if (full == "") return

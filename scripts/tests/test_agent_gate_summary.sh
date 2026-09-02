@@ -5641,10 +5641,17 @@ elif [ -z "$fa_bounds" ]; then
 else
   bad "3765-order-no-early-bound: the extractor applies a length bound of $fa_bounds — a bound that small is a DISPLAY bound running upstream of the redaction (F6), and a bound must never be able to change a safety verdict"
 fi
-if grep -q 'SAFETY BOUND, NOT A DISPLAY BOUND' "$fa_tool" && grep -q 'DECLARED RESIDUAL' "$fa_tool"; then
-  ok "3765-order-safety-declared: the extractor's remaining bound is declared a SAFETY bound and its residual (a credential straddling it) is DECLARED"
+# The remaining bound must be declared a SAFETY bound AND must not truncate: a declared
+# hazard is not a removed one (roborev job 48, blocker 8 — the FOURTH instance of the
+# truncate-before-neutralise shape). safety() must retain NO prefix of an over-bound
+# identity, so there is nothing for a bound to sever a credential out of.
+fa_safety=$(awk '/function safety\(/,/^  }/' "$fa_tool")
+if grep -q 'SAFETY BOUND, NOT A DISPLAY BOUND' "$fa_tool" \
+   && printf '%s\n' "$fa_safety" | grep -q 'too long to publish safely' \
+   && ! printf '%s\n' "$fa_safety" | grep -qE 'substr\(|cut -c'; then
+  ok "3765-order-safety-declared: the extractor's remaining bound is a declared SAFETY bound that TRUNCATES NOTHING — an over-bound identity becomes a placeholder, never a prefix"
 else
-  bad "3765-order-safety-declared: $fa_tool does not declare its remaining bound as a SAFETY bound with a stated residual — an undeclared truncation upstream of the redaction is F6"
+  bad "3765-order-safety-declared: $fa_tool's safety bound still retains a PREFIX of an over-bound identity (or is no longer declared a SAFETY bound) — a truncation upstream of the neutralisation is blocker 8"
 fi
 fa_ord=$(awk '/^_failassert_clean\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#' | grep -nE '_component_set_redact_text|substr\(t, 1, head\)|cut -c1-300')
 fa_ord_red=$(printf '%s\n' "$fa_ord" | grep -n '_component_set_redact_text' | head -1 | cut -d: -f1)
@@ -5664,6 +5671,48 @@ else
   bad "3765-order-record-nobound: _failassert_record applies $fa_rec_bound length bound(s) of its own, upstream of the ONE redaction (F6)"
 fi
 
+# 55z. THE FREE-TEXT CHANNEL IS REMOVED, NOT SANITISED A SIXTH TIME (roborev job 48,
+#      blockers 7 + 8). 55w/55x certified the two shapes the REDACTOR knows (url userinfo,
+#      scp form) — which is precisely the trap: every previous round of this family
+#      improved the sanitiser and the next round found a shape it did not know. Here the
+#      cases are the shapes the redactor CANNOT see (a query string, a header) plus the
+#      bound it cannot survive (a credential straddling the extractor's SAFETY bound), and
+#      the property asserted is that NO free-text payload carrying an authority reaches the
+#      rendered field at all.
+#
+#      METHOD, restated because it is the one that keeps being got wrong: every assertion
+#      below is on the RENDERED field. The extractor does not neutralise and does not
+#      redact, so a token cut by a bound looks "absent" on its stdout while never having
+#      been neutralised — a leak check made there certifies nothing.
+# A credential STRADDLING the extractor's 4096-char SAFETY bound. The `@` is placed at
+# offset 4097 EXACTLY, so a bound that keeps a PREFIX hands the emit boundary
+# `…deploy-user:SEKRETHOTEL` — no `@`, no scheme, no `?…=` — which every shape rule and
+# both redaction rules legitimately pass, after which the 60-char middle elision publishes
+# the token in its tail. That is why the bound may not truncate at all.
+awk 'BEGIN {
+  pad = sprintf("%4063s", ""); gsub(/ /, "x", pad)
+  tail = sprintf("%100s", ""); gsub(/ /, "y", tail)
+  printf "npm error %sdeploy-user:SEKRETHOTEL@h.io/pkg%s\n", pad, tail
+}' > "$fa_dir/neu-span.log"
+
+_fa_run neuspan "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/neu-span.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETHOTEL*) bad "3765-neu-span: a credential STRADDLING the extractor's safety bound is rendered into the SUMMARY field ('$fa_got') — the bound keeps a PREFIX, which severs the shape every later rule keys on (blocker 8)" ;;
+  *) ok "3765-neu-span: a credential straddling the 4096-char safety bound does NOT reach the rendered field" ;;
+esac
+case "$fa_got" in
+  *"too long to publish safely"*) ok "3765-neu-span-marker: an over-bound identity is published as an affirmative placeholder naming its measured length — a measurement, never a silence and never a prefix" ;;
+  *) bad "3765-neu-span-marker: expected 'too long to publish safely' in the field, got '$fa_got' — the bound is still retaining a prefix" ;;
+esac
+
+# …and the SAME property for the one bound that lives upstream, in the extractor: it must
+# neither `cut` nor `substr` its way to a prefix anywhere in the emit path.
+if ! grep -qE 'cut -c|head -c' "$fa_tool"; then
+  ok "3765-order-extractor-nocut: the extractor applies no character-cut of any kind — the only bound it has is the non-truncating safety placeholder"
+else
+  bad "3765-order-extractor-nocut: the extractor character-cuts its output, upstream of the neutralisation (blocker 8's class)"
+fi
 # 55za. NO SECOND FORMATTER, INCLUDING ON THE TREE-INTEGRITY BOUNDARY BLOCK (roborev job
 #       48, blocker 9). Both component loops in _tree_boundary_meta_lines rendered their
 #       rows with a bare `printf '%-18s %s (%ss)\n'`, bypassing _fm_summary_line — so a FAIL
@@ -5748,6 +5797,10 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
+# 459 -> 462 on #3765 (roborev job 48, blocker 8): section 55z adds 3 asserts for the
+# credential STRADDLING the extractor's safety bound (the bound now publishes a placeholder
+# instead of a prefix) plus the structural "no character-cut anywhere in the extractor".
+# Host-INDEPENDENT for the same reason as the rest of section 55.
 # 458 -> 459 on #3765 (roborev job 48, blocker 9): section 55za adds 1 structural assert —
 # `%-18s` may be formatted in exactly ONE place, so the tree-integrity boundary block's rows
 # cannot be rendered by a second formatter that omits the invocation bracket and this
@@ -5784,7 +5837,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=459
+ASSERT_FLOOR=462
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
