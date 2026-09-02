@@ -3,6 +3,10 @@ use super::*;
 // Issue #3811: the inline-field UDT decoder, split out under the campsite rule
 // and carrying the consumption contract census finding C left open.
 mod inline;
+// Issue #3631 / roborev job 76: the ONE package rule for a marshal class name
+// (`org.apache.cassandra.db.marshal.X` or a bare `X`, and nothing else), plus the
+// single `UserType(` locator and structural dispatcher built on it.
+mod marshal_name;
 // Issue #3631: the marshal TYPE-STRING parser (`UserType(...)` -> `UdtTypeDef`,
 // marshal name -> `CqlType`), split out under the same rule.
 mod type_string;
@@ -609,45 +613,13 @@ impl V5CompressedLegacyParser {
     /// [`parse_udt_type_definition`]; the two differ only in that this preserves
     /// the raw type string instead of converting it to a `CqlType`.
     pub(super) fn udt_field_marshal_types(type_str: &str) -> Result<Vec<(String, String)>> {
-        let start_marker = "org.apache.cassandra.db.marshal.UserType(";
-        let type_lower = type_str.to_lowercase();
-        let start_marker_lower = start_marker.to_lowercase();
-        let start_idx = type_lower
-            .find(&start_marker_lower)
-            .ok_or_else(|| Error::schema(format!("Not a UserType: {}", type_str)))?;
-
-        let inner_start = start_idx + start_marker.len();
-        let mut paren_depth = 1;
-        let mut end_idx = inner_start;
-        let chars: Vec<char> = type_str[inner_start..].chars().collect();
-        for (i, c) in chars.iter().enumerate() {
-            match c {
-                '(' => paren_depth += 1,
-                ')' => {
-                    paren_depth -= 1;
-                    if paren_depth == 0 {
-                        end_idx = inner_start + i;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if paren_depth != 0 {
-            return Err(Error::schema(format!(
-                "Unbalanced parentheses in UserType: {}",
-                type_str
-            )));
-        }
-
-        let inner = &type_str[inner_start..end_idx];
-        let parts = Self::split_type_args(inner)?;
-        if parts.len() < 2 {
-            return Err(Error::schema(format!(
-                "UserType requires at least keyspace and name: {}",
-                inner
-            )));
-        }
+        // The ONE `UserType(` locator + argument split (`udt/marshal_name.rs`),
+        // shared with `parse_udt_type_definition_with_depth`. This used to carry an
+        // independent copy of the find-and-walk-parens code, and so an independent
+        // copy of its package-SUFFIX hole: a substring `find` of the qualified
+        // marker accepted `my.org.apache.cassandra.db.marshal.UserType(…)`
+        // (roborev job 76).
+        let parts = Self::marshal_user_type_args(type_str)?;
 
         let mut fields = Vec::with_capacity(parts.len().saturating_sub(2));
         for field_def in parts.iter().skip(2) {

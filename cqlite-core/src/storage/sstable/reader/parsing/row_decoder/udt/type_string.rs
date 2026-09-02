@@ -44,6 +44,16 @@
 //! and `PartitionerDefinedOrder` are deliberately NOT mapped — [`CqlType`] has no
 //! variant that can express them, so they stay [`CqlType::Custom`] and the DECODER
 //! refuses them by name (issue #3631 criterion 5) rather than guessing.
+//!
+//! # The PACKAGE is part of the identity (roborev job 76)
+//!
+//! Every name above is matched under the ONE package rule in
+//! [`marshal_name`](super::marshal_name) — bare, or fully qualified under
+//! `org.apache.cassandra.db.marshal`, and nothing else. A third-party class that
+//! merely SHARES a simple name (`com.acme.Int32Type`, `com.acme.TupleType(...)`) is
+//! refused with [`V5CompressedLegacyParser::foreign_marshal_package_error`], never
+//! decoded as the native type it resembles: CQLite knows nothing about that class's
+//! byte layout, and picking one from a name is a heuristic (#28).
 
 use super::super::*;
 
@@ -89,56 +99,13 @@ impl V5CompressedLegacyParser {
             )));
         }
 
-        // Find the UserType(...) portion (case-insensitive). Match ONLY the
-        // fully-qualified marshal marker — the single shape real SerializationHeaders
-        // carry, and the same marker the nested-field decoder
-        // (`parse_cassandra_type_with_depth`) keys on. Keeping top-level and nested
-        // parsing on the same qualified marker avoids the partial-bare-support
-        // inconsistency that would blob nested UDT fields (roborev jobs 1359/1361).
-        let start_marker = "org.apache.cassandra.db.marshal.UserType(";
-        let type_lower = type_str.to_lowercase();
-        let start_marker_lower = start_marker.to_lowercase();
-        let start_idx = type_lower
-            .find(&start_marker_lower)
-            .ok_or_else(|| Error::schema(format!("Not a UserType: {}", type_str)))?;
-
-        // Find the matching close paren (handling nested types)
-        let inner_start = start_idx + start_marker.len();
-        let mut paren_depth = 1;
-        let mut end_idx = inner_start;
-        let chars: Vec<char> = type_str[inner_start..].chars().collect();
-
-        for (i, c) in chars.iter().enumerate() {
-            match c {
-                '(' => paren_depth += 1,
-                ')' => {
-                    paren_depth -= 1;
-                    if paren_depth == 0 {
-                        end_idx = inner_start + i;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if paren_depth != 0 {
-            return Err(Error::schema(format!(
-                "Unbalanced parentheses in UserType: {}",
-                type_str
-            )));
-        }
-
-        let inner = &type_str[inner_start..end_idx];
-
-        // Split by comma, but respect nested parentheses
-        let parts = Self::split_type_args(inner)?;
-        if parts.len() < 2 {
-            return Err(Error::schema(format!(
-                "UserType requires at least keyspace and name: {}",
-                inner
-            )));
-        }
+        // Locate + split the marshal `UserType(...)` arguments through the ONE
+        // locator (`marshal_name.rs`), which validates the PACKAGE of the marker's
+        // class name rather than substring-matching the qualified literal — a plain
+        // `find` accepted `my.org.apache.cassandra.db.marshal.UserType(…)`, a
+        // package SUFFIX (roborev job 76). `udt_field_marshal_types` shares it, so
+        // the two `UserType(` consumers can no longer drift.
+        let parts = Self::marshal_user_type_args(type_str)?;
 
         // First part is keyspace
         let keyspace = parts[0].trim();
@@ -240,15 +207,14 @@ impl V5CompressedLegacyParser {
         let type_str = type_str.trim();
 
         // Handle FrozenType wrapper
-        if type_str.starts_with("org.apache.cassandra.db.marshal.FrozenType(") {
-            let inner_start = "org.apache.cassandra.db.marshal.FrozenType(".len();
-            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
+        if let Some(args) = Self::marshal_parameterised_inner(type_str, "FrozenType") {
+            let inner = Self::extract_inner_parens(args)?;
             let inner_type = Self::parse_cassandra_type_with_depth(&inner, depth + 1)?;
             return Ok(CqlType::Frozen(Box::new(inner_type)));
         }
 
         // Handle UserType (nested UDT)
-        if type_str.starts_with("org.apache.cassandra.db.marshal.UserType(") {
+        if Self::marshal_parameterised_inner(type_str, "UserType").is_some() {
             let udt_def = Self::parse_udt_type_definition_with_depth(type_str, depth + 1)?;
             let fields: Vec<(String, CqlType)> = udt_def
                 .fields
@@ -259,23 +225,20 @@ impl V5CompressedLegacyParser {
         }
 
         // Handle collection types
-        if type_str.starts_with("org.apache.cassandra.db.marshal.ListType(") {
-            let inner_start = "org.apache.cassandra.db.marshal.ListType(".len();
-            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
+        if let Some(args) = Self::marshal_parameterised_inner(type_str, "ListType") {
+            let inner = Self::extract_inner_parens(args)?;
             let elem_type = Self::parse_cassandra_type_with_depth(&inner, depth + 1)?;
             return Ok(CqlType::List(Box::new(elem_type)));
         }
 
-        if type_str.starts_with("org.apache.cassandra.db.marshal.SetType(") {
-            let inner_start = "org.apache.cassandra.db.marshal.SetType(".len();
-            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
+        if let Some(args) = Self::marshal_parameterised_inner(type_str, "SetType") {
+            let inner = Self::extract_inner_parens(args)?;
             let elem_type = Self::parse_cassandra_type_with_depth(&inner, depth + 1)?;
             return Ok(CqlType::Set(Box::new(elem_type)));
         }
 
-        if type_str.starts_with("org.apache.cassandra.db.marshal.MapType(") {
-            let inner_start = "org.apache.cassandra.db.marshal.MapType(".len();
-            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
+        if let Some(args) = Self::marshal_parameterised_inner(type_str, "MapType") {
+            let inner = Self::extract_inner_parens(args)?;
             let parts = Self::split_type_args(&inner)?;
             if parts.len() != 2 {
                 return Err(Error::schema(format!(
@@ -294,9 +257,8 @@ impl V5CompressedLegacyParser {
         // component list. `depth + 1` like every other structural arm — a reset here
         // would make `MAX_TYPE_NESTING_DEPTH` bound nothing across a
         // tuple-inside-collection-inside-tuple chain.
-        if type_str.starts_with("org.apache.cassandra.db.marshal.TupleType(") {
-            let inner_start = "org.apache.cassandra.db.marshal.TupleType(".len();
-            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
+        if let Some(args) = Self::marshal_parameterised_inner(type_str, "TupleType") {
+            let inner = Self::extract_inner_parens(args)?;
             let parts = Self::split_type_args(&inner)?;
             if parts.is_empty() {
                 return Err(Error::schema(format!(
@@ -318,10 +280,25 @@ impl V5CompressedLegacyParser {
         // `ReversedType.asCQL3Type()` and `getSerializer()` both delegate to
         // `baseType` (cassandra-5.0.8 ReversedType.java:138,144), so the value of a
         // `ReversedType(X)` is byte-for-byte the value of an `X`.
-        if type_str.starts_with("org.apache.cassandra.db.marshal.ReversedType(") {
-            let inner_start = "org.apache.cassandra.db.marshal.ReversedType(".len();
-            let inner = Self::extract_inner_parens(&type_str[inner_start..])?;
+        if let Some(args) = Self::marshal_parameterised_inner(type_str, "ReversedType") {
+            let inner = Self::extract_inner_parens(args)?;
             return Self::parse_cassandra_type_with_depth(&inner, depth + 1);
+        }
+
+        // THE PACKAGE RULE, at the ONE point every non-structural name reaches
+        // (roborev job 76). A name qualified outside Cassandra's marshal package is
+        // a third-party `AbstractType`, and it is refused HERE rather than passed
+        // on as `Custom`, for a reason that is about WHERE THE CONTEXT LIVES: this
+        // function is the only place that knows the string is a MARSHAL type
+        // string, where a dotted name is a Java class name. A `CqlType::Custom`
+        // payload has lost that context — it carries a marshal reference OR a
+        // KEYSPACE-QUALIFIED UDT NAME (`test_ks.address`, a real form on the write
+        // path) — so no downstream predicate can tell `acme.Int32Type` from
+        // `ks.address` without guessing (#28). Structural forms reach this line
+        // too: they match no arm above (each requires the qualified marshal
+        // spelling), so `com.acme.TupleType(…)` is refused here by the same rule.
+        if Self::marshal_simple_name(Self::marshal_head(type_str)).is_none() {
+            return Err(Self::foreign_marshal_package_error(type_str));
         }
 
         // A native (non-parameterised) marshal type, else `Custom` — which the
@@ -348,7 +325,7 @@ impl V5CompressedLegacyParser {
         if name.contains('.') {
             return name.to_string();
         }
-        format!("org.apache.cassandra.db.marshal.{name}")
+        format!("{}{name}", Self::MARSHAL_PACKAGE)
     }
 
     /// The marshal-class-name -> [`CqlType`] table: the ONE place a Cassandra native
@@ -357,16 +334,23 @@ impl V5CompressedLegacyParser {
     /// express — see this module's header for the per-name authority and for the
     /// names deliberately left unmapped.
     ///
-    /// # Why the SIMPLE name is matched EXACTLY rather than by suffix
-    /// `TypeParser.getAbstractType` (cassandra-5.0.8 TypeParser.java:450) resolves a
-    /// name as `compareWith.contains(".") ? compareWith : "org.apache.cassandra.db.
-    /// marshal." + compareWith` — so a marshal name is EITHER a fully-qualified class
-    /// name OR a bare simple name in the marshal package, and the simple name is
-    /// therefore the whole identity. A suffix match is both too loose and too tight:
-    /// `ends_with("DateType")` also matches `SimpleDateType` (so CQL `date` read as an
-    /// 8-byte `timestamp` depended on arm ORDER), and `ends_with("BytesType")` maps a
-    /// third-party `com.acme.MyBytesType` to `blob`, decoding an unknown type's bytes
-    /// as if the type were known.
+    /// # The name is resolved under the ONE package rule, then matched EXACTLY
+    /// [`Self::marshal_simple_name`] (see `marshal_name.rs` for the pinned
+    /// `TypeParser` authority) accepts a marshal name in EXACTLY TWO spellings — a
+    /// bare simple name, or a fully-qualified class name under
+    /// `org.apache.cassandra.db.marshal` — and yields the simple name, which is
+    /// then the whole identity of the type.
+    ///
+    /// Two matching mistakes this closes, both of which shipped:
+    ///
+    /// * A **suffix** match (`ends_with`) is at once too loose and too tight.
+    ///   `ends_with("DateType")` also matches `SimpleDateType` (the real CQL
+    ///   `date`), so whether a `date` field decoded as an 8-byte `timestamp`
+    ///   depended on arm ORDER.
+    /// * Taking the text after the last `.` and ignoring the **package** decoded a
+    ///   third-party `com.acme.Int32Type` as CQL `int` — an unknown class's bytes
+    ///   read as if the class were known (roborev job 76). The rule now returns
+    ///   `None` for it, and the type-string parser refuses it by name.
     pub(in crate::storage::sstable::reader::parsing::row_decoder) fn native_marshal_to_cql_type(
         marshal_type: &str,
     ) -> Option<CqlType> {
@@ -375,9 +359,11 @@ impl V5CompressedLegacyParser {
         if name.contains('(') {
             return None;
         }
-        // `rsplit` always yields at least one item, so this is the text after the last
-        // `.` (or the whole name when unqualified).
-        let simple = name.rsplit('.').next().unwrap_or(name);
+        // THE package rule (`marshal_name.rs`): `Some` only for a bare simple name
+        // or the canonical `org.apache.cassandra.db.marshal.X` spelling, so a
+        // third-party `com.acme.Int32Type` cannot reach the table below by simple
+        // name alone.
+        let simple = Self::marshal_simple_name(name)?;
         Some(match simple {
             // -- CQL3Type.Native, one arm per enum constant --------------------
             "AsciiType" => CqlType::Ascii,
