@@ -4004,9 +4004,19 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
       # ALL of them (no `head -1`): this is a SET, and truncating it to the first line would make two
       # different environments compare equal — the substitution this comparison exists to stop.
       scc_ps_env=$(printf '%s\n' "$__out" | sed -n 's/^cqlite-scc-env=//p')
-      if [ "$__rc" != 124 ] && [ "$__rc" != 137 ] \
-         && printf '%s\n' "$__out" | grep -q '^cqlite-scc-probe-set='; then
-        scc_ps_ok=1
+      # #3862'S CLASS, AND THIS ONE WAS OURS (roborev job 393, f2). Under this script's
+      # `set -o pipefail`, `printf … | grep -q PAT` returns 141 when grep matches and closes the
+      # pipe before the producer has flushed — a RACE against bash's stdio buffer, NOT a byte
+      # threshold, so "the payload is small" is no defence, and a LOGIN shell's stdout (a motd,
+      # someone's .bashrc `echo`) is not bounded by us at all. A perfectly good probe would then
+      # read as unmeasured and could fail `--strict` on a correctly-pinned box.
+      # No pipe, no producer to signal: bash's own pattern match, still ANCHORED at line start —
+      # the leading newline is what makes `*\ncqlite-scc-probe-set=*` equivalent to grep's `^`,
+      # including for a match on the very first line.
+      if [ "$__rc" != 124 ] && [ "$__rc" != 137 ]; then
+        case $'\n'"$__out" in
+          *$'\n'cqlite-scc-probe-set=*) scc_ps_ok=1 ;;
+        esac
       fi
     }
 
