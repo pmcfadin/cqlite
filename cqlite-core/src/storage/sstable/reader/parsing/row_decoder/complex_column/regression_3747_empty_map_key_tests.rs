@@ -168,30 +168,34 @@ fn a_cassandra_valid_but_untyped_empty_key_survives_as_an_opaque_blob() {
     }
 }
 
-/// CASSANDRA-INVALID — dropped, and the assertion that matters is the BLAST RADIUS.
+/// CASSANDRA-INVALID — REFUSED, because that is where the module's committed rule
+/// draws the line, and this is the one place three review rounds disagreed.
 ///
-/// `tinyint`/`smallint`/`date`/`time` are spelled with a strict `!= N` check and
-/// `decimal` needs >= 4 bytes, so an empty buffer is TRUNCATED data, not an empty
-/// value. Those are refused by the width table itself. They must still not take the
-/// row down: row assembly has one `Err` handler and it `break`s the column loop, so
-/// a propagated error costs the map column AND EVERY LATER COLUMN, silently. So the
-/// call returns `Ok` and the map is simply short by one.
+/// `cell_path_key`'s error-budget rule is explicit and it decides both halves:
+///   * **`Err` only where Cassandra's own `validate`/`split` THROWS.** `tinyint`/
+///     `smallint`/`date`/`time` are spelled with a strict `!= N` check and `decimal`
+///     needs >= 4 bytes, so an empty buffer is corrupt ON CASSANDRA'S OWN TERMS.
+///     Refusing adds no availability risk for data Cassandra would have read.
+///   * **NEVER `Err` merely because CQLITE cannot model the type** — that is the
+///     opaque case in the test above.
+///
+/// An earlier revision of this fix swallowed these into a dropped entry, reasoning
+/// that a propagated `Err` costs more (row assembly `break`s, so the column and every
+/// later one vanish). That reasoning is real but it is NOT this module's call to make:
+/// the swallow is a PRE-EXISTING `row_data.rs` defect the module doc tracks
+/// separately, and hiding corruption here to compensate would make an empty malformed
+/// key behave differently from a non-empty one — the inconsistency roborev flagged.
 #[test]
-fn a_cassandra_invalid_empty_key_drops_one_entry_and_never_truncates_the_row() {
+fn a_cassandra_invalid_empty_key_is_refused_like_any_other_corruption() {
     for ty in ["tinyint", "smallint", "date", "time", "decimal"] {
         let map_type = format!("map<{ty},int>");
-        let decoded = decode(&map_type, b"", &7i32.to_be_bytes()).unwrap_or_else(|e| {
-            panic!(
-                "an empty {ty} key is truncated data, but propagating would `break` row \
-                 assembly and lose the column plus every later one; got {e}"
-            )
-        });
-        assert_eq!(
-            decoded,
-            Value::Map(Vec::new()),
-            "the empty {ty} entry is dropped, so the map is short by one and the row \
-             is otherwise intact"
-        );
+        match decode(&map_type, b"", &7i32.to_be_bytes()) {
+            Err(_) => {}
+            Ok(v) => panic!(
+                "Cassandra's {ty} serializer throws on an empty buffer, so an empty {ty} \
+                 key is corruption and must be refused, not decoded; got {v:?}"
+            ),
+        }
     }
 }
 
