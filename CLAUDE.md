@@ -1355,6 +1355,7 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   indistinguishable without a second read and both are control bytes no text record may hold, with
   the same operator action. **Two other lossy behaviours of the same capture were enumerated and
   LEFT, with the reason recorded**: `$( )` strips TRAILING NEWLINES, which cannot change a verdict
+  **for the consumer that conclusion was reasoned about — the REPORT's CONTENT, and no other**
   (every grammar here is per-line and column-zero anchored, so trailing newlines create no `result:`
   line, no field and no disclosure, and a file of only newlines is `report empty` exactly as an empty
   one is); and locale/encoding, where every consumer of the snapshot is already `LC_ALL=C`-pinned —
@@ -1365,6 +1366,30 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   status, because a read that fails after delivering a prefix whose last byte happens to BE an `E` is
   textually indistinguishable from a complete one — and a truncated prefix that drops a SECOND
   `result:` line turns an AMBIGUOUS refusal into a PASS.
+  **AND THAT "HARMLESS" VERDICT DID NOT SURVIVE ITS NEXT CONSUMER — A LOSSY-CAPTURE CONCLUSION MUST
+  BE RE-DERIVED PER CONSUMER, NEVER CARRIED (#3751 round 18).** Round 13's ruling above is right
+  about a report's CONTENT and **false about a PATH**, where the stripped bytes are part of the
+  value's IDENTITY and a shorter string names a DIFFERENT FILE. Both tools resolved the worktree
+  root with `root="$(git rev-parse --show-toplevel)"`, so a checkout whose DIRECTORY NAME ends in an
+  LF resolved to an EXISTING SIBLING — and the captured value then carries no newline, so round 17's
+  representability refusal never fires. Measured on the shipped scripts from a checkout named
+  `lanetrail<LF>` beside a peer lane: `review-stage.sh verdict` reported
+  `RESULT: PASS … report=…/lanetrail/.review-stage/issue-704/c.<nonce>.md` at **exit 0** off a report
+  that lane never opened, a refused `open` created a directory INSIDE the peer lane, and
+  `premerge-assert.sh`'s AUTO path enumerated the same sibling — **#3616's peer-artifact class
+  reached through a lossy capture instead of a recency scan**, and one `c_assert_head_binds_certified`
+  cannot see, because HEAD is read in the CWD (the real lane, so it binds) while the ARTIFACT comes
+  from the sibling. The fix keeps git's own framing: a SENTINEL appended INSIDE the substitution (so
+  the stripping has nothing of ours to eat), then the sentinel, then **exactly one** newline — git's
+  terminator — and nothing else; any further trailing newline belongs to the directory name.
+  `premerge-assert.sh` goes further and **removes the channel** (#3312's standing ruling): its
+  resolver ASSIGNS a global and prints nothing, so no call site can capture it and a fifth one
+  cannot reintroduce the defect. **The sweep found the class twice, which is why the sweep is the
+  rule and not the single fix**: `self_dir` also went through `$(cd "$(dirname "${BASH_SOURCE[0]}")"
+  && pwd)` — two nested strips — mislocating `review-stage.sh`, i.e. the **ENFORCER** of the C
+  verdict that script refuses to merge without. So when a capture is declared lossy-but-harmless,
+  the declaration binds ONE consumer; **ask the question again at every new one, and ask it of every
+  captured value that is a PATH or is used to locate a file.**
   **AND NEUTRALISING THE VALUE IS WORTHLESS IF THE PRINTING COMMAND RE-INTERPRETS IT — EVERY LINE
   IS `printf` OF A LITERAL FORMAT, NEVER `echo` (#3751 round 14).** `emit`, `note` and `die_usage`
   used `echo`, and under the bash option `xpg_echo` — settable by an **inherited** environment

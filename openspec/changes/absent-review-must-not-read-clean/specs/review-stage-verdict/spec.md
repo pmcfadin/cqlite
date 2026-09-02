@@ -667,6 +667,50 @@ subcommand inherits the refusal and no subcommand publishes a report path that c
 - **THEN** none SHALL exist: a checkout is always renamable, so an escape hatch could only buy a
   published path that cannot be opened
 
+### Requirement: A captured path SHALL be byte-faithful to the path
+
+Every command substitution whose result is used to open, read, write, glob or `cd` to a file or
+directory SHALL preserve the path's bytes. `$( )` strips EVERY trailing newline, so a captured
+path may name a DIFFERENT, EXISTING file; where a capture is unavoidable it SHALL frame the value
+with a sentinel appended INSIDE the substitution and SHALL remove ONLY the source command's own
+terminator, and where the capture can be removed it SHALL be removed in favour of a shared
+assignment.
+
+A conclusion that a lossy capture is harmless SHALL be re-derived for each consumer and SHALL NOT
+be carried: round 13's ruling that trailing-newline stripping cannot change a verdict is TRUE of a
+report's per-line, column-zero-anchored CONTENT and FALSE of a PATH, whose stripped bytes are part
+of its identity.
+
+#### Scenario: a checkout path ending in a newline is REFUSED, never resolved to its sibling
+- **GIVEN** a checkout whose directory name ends in an LF, and an existing sibling directory at
+  that path minus its last byte, holding another lane's `.review-stage/` with a PASSING report
+- **WHEN** any subcommand resolves the repository root
+- **THEN** it SHALL REFUSE under the representability cause naming the NEWLINE (exit 64), because
+  the root reaches that check with its trailing byte intact
+- **AND** `verdict` SHALL publish NO `report=` and NO `RESULT:` token, so the SIBLING lane's clean
+  verdict is never reported as this lane's
+- **AND** NOTHING SHALL be written under either root, and the sibling's report SHALL be
+  byte-unchanged
+
+#### Scenario: the AUTO stage lookup SHALL search the resolving worktree, never a sibling
+- **GIVEN** the same trailing-newline checkout, whose sibling holds stage records
+- **WHEN** `premerge-assert.sh --c-verdict AUTO` locates the C stage
+- **THEN** it SHALL enumerate THIS worktree and SHALL NOT name or read the sibling's
+  `.review-stage/`, and SHALL emit no merge-proceeding verdict
+- **AND** the resolver SHALL publish the root by ASSIGNMENT to one shared global, so no call site
+  can capture it and strip the byte back off
+
+#### Scenario: a captured path SHALL NOT mislocate the enforcer
+- **WHEN** the script resolves its own directory in order to locate `review-stage.sh`, the enforcer
+  of the verdict it refuses to merge without
+- **THEN** it SHALL take the source and its directory by parameter expansion, which is
+  byte-faithful, and SHALL NOT resolve them through nested command substitutions
+
+#### Scenario: a fixture helper SHALL NOT transport a path through a command substitution
+- **WHEN** a test builds a checkout at a literal directory name whose last byte is a newline
+- **THEN** the helper SHALL ASSIGN that path to a caller-named variable rather than print it, or
+  the case cannot present its own subject and a passing refusal proves nothing
+
 ### Requirement: Every decision SHALL rest on ONE coherent observation of the stage
 
 The stage record and the report of record SHALL be observed TOGETHER — the record's bytes, the

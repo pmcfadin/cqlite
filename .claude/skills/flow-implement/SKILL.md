@@ -157,7 +157,11 @@ never gate stdout or review churn.
    `status` for how long it has produced nothing. **For the PATH itself use `verdict`, not
    `status` (#3751 round 16):** the verdict line's `report=` is exempt from the `=`->`~` map and so
    is exact even on a checkout whose path contains `=`, where `status` names a file that does not
-   exist. **Never infer a clean review from an idle
+   exist. **And if `open`/`verdict` REFUSES at exit 64 saying this checkout's path cannot be
+   represented on the one-line grammar (#3751 round 18), the LANE DIRECTORY is unusable** — a name
+   carrying a newline, a tab or a trailing space — so rename or re-clone it; never hand the agent a
+   path you constructed instead, because the refusal replaced a measured verdict line that named a
+   SIBLING lane's report. **Never infer a clean review from an idle
    notice** — that is the exact false certification #3751 exists to prevent.
    `review-stage.sh` writes only under `.review-stage/`, which is gitignored and verified so
    fail-closed, so it cannot dirty a running gate (#2926/#3648). **`scripts/flow/roborev-review.sh`

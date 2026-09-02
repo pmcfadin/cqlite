@@ -131,7 +131,17 @@ carry).
   missing, duplicated or non-sha field is a NAMED refusal rather than a skip (the gate-of-record rule
   applied to the intent audit: an audit of an older tree may not certify a newer one); and the
   verdict line is held to its WHOLE grammar, with the stage KIND compared by string equality, so a sibling
-  stage's `PASS` cannot certify C. **The record binding rests on ONE OBSERVATION (#3751 round 9)** — it
+  stage's `PASS` cannot certify C. **A SIBLING can also be reached by a LOSSY CAPTURE, and no sha
+  binding can see that (#3751 round 18).** Both tools resolved the worktree root through
+  `$(git rev-parse --show-toplevel)`, which strips every trailing newline, so a checkout whose
+  DIRECTORY NAME ends in an LF resolved to an existing SIBLING lane and the AUTO path read THAT
+  lane's stage records — while `HEAD == certified` still passed, because HEAD is read in the CWD (the
+  real lane) and only the ARTIFACT came from the sibling. Fixed by framing the capture with a
+  sentinel and removing exactly one newline (git's own terminator), and by removing the capture
+  entirely where the value has a single resolution site. **The transferable rule: a conclusion that
+  a lossy capture is harmless is bound to the consumer it was reasoned about** — round 13 had
+  correctly ruled trailing-newline stripping harmless for a report's per-line grammar, and carrying
+  that ruling to a PATH, whose stripped bytes are its identity, is what left this reachable. **The record binding rests on ONE OBSERVATION (#3751 round 9)** — it
   was validated on one read while `review-stage.sh verdict` re-read the record to pick which report is
   current, so a replacement in between produced a verdict from a different GENERATION under a binding
   checked on the old one; the record is now captured once, the `head-sha` parsed from that capture, and the

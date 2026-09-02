@@ -287,7 +287,9 @@ arrived as `PASS` and printed `PREMERGE: OK` at the merge point. The fix is in t
 probe: a separate probe of the same path is a second observation whose disagreement can fail OPEN,
 so the one read maps NUL to SOH in the stream (one mapping implementation per script, one literal
 with the byte derived from it). Three further behaviours of that capture were enumerated in the same
-breath: trailing-newline stripping cannot change a per-line, column-zero grammar (declared, left);
+breath: trailing-newline stripping cannot change a per-line, column-zero grammar — **declared and
+left, and that conclusion is bound to THAT consumer, the report's CONTENT; round 18 (X1) below
+falsified it for a PATH and every statement of it now names the consumer it was reasoned about**;
 locale/encoding is already `LC_ALL=C`-pinned at every consumer (now measured by a cross-locale
 invariance case rather than asserted); and the completeness sentinel's own aliasing — a failed read
 whose last delivered byte IS the sentinel — is closed by requiring the read's exit status too.
@@ -547,6 +549,60 @@ whose whole promise is the absolute report-of-record path.
   with the whole path published AND that path required to EXIST.
 - **No opt-out.** A checkout is always renamable, so an escape hatch could only buy a published path
   that cannot be opened.
+
+## Round 18 (X1) — a captured path is not the path
+
+The refusal round 17 built was **unreachable for the shape that mattered most**. Both tools resolved
+the worktree root with `root="$(git rev-parse --show-toplevel)"`, and a command substitution strips
+**every** trailing newline — so a checkout whose *directory name* ends in an LF resolved to a
+DIFFERENT, EXISTING SIBLING, and the captured value then carried no newline for the representability
+check to disagree about. Measured on the shipped scripts, from `lanetrail<LF>/` beside a peer lane
+`lanetrail/`: `review-stage.sh verdict` reported
+`RESULT: PASS … report=…/lanetrail/.review-stage/issue-704/c.<nonce>.md` at **exit 0**, off a report
+that lane never opened; a refused `open` created a directory *inside* the peer lane; and
+`premerge-assert.sh`'s AUTO path located, bound and read the same sibling's stage records. It is
+**#3616's peer-artifact class reached through a lossy capture instead of a recency scan**, and
+`c_assert_head_binds_certified` is structurally blind to it, because HEAD is read in the CWD — the
+real lane, so it binds — while the ARTIFACT comes from the sibling.
+
+- **A LOSSY-CAPTURE CONCLUSION MUST BE RE-DERIVED PER CONSUMER, NEVER CARRIED. This is the durable
+  rule, and it is a correction to round 13's own ruling.** Round 13 (S2) enumerated trailing-newline
+  stripping in the same breath as NUL removal and declared it harmless: *"it cannot change a verdict
+  — every grammar here is per-line and column-zero anchored."* That is **true of the report's
+  CONTENT and false of a PATH**, where the stripped bytes are part of the value's IDENTITY and a
+  shorter string names a different file. The conclusion was right about the consumer it was reasoned
+  about and was then carried, unqualified, to a consumer it was never true for. Every doctrine site
+  stating it now names that consumer.
+- **Keep the source's own framing; do not guess at the value.** A SENTINEL is appended INSIDE the
+  substitution, so the stripping has nothing of ours to eat; the sentinel is removed, then **exactly
+  one** newline — git's terminator for `--show-toplevel` — and nothing else, because any further
+  trailing newline belongs to the directory name. A value with NO terminator is not that command's
+  documented shape and is refused rather than accepted. Completeness is asserted by **two** signals,
+  the sentinel AND the exit status — round 13's own lesson, applied to round 13's own blind spot.
+- **Where the capture can be REMOVED, remove it (#3312).** `premerge-assert.sh`'s resolver had four
+  callers and every one captured it a SECOND time, so the newline was stripped twice. It now ASSIGNS
+  a global and prints nothing, which makes the defect *unexpressible* at the call sites rather than
+  merely absent from them: a fifth call site cannot reintroduce it by writing `$(c_stage_root)`,
+  because there is nothing to capture.
+- **The class is "a captured path is not the path", not the resolver the finding named — and the
+  sweep proves it.** 28 path-bearing or file-locating command substitutions were examined (21 in
+  `review-stage.sh`, 7 in `premerge-assert.sh`) and **3** were affected. The third is `self_dir`,
+  which went through `$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)` — two nested strips — and
+  mislocates `review-stage.sh`, i.e. the **ENFORCER** of the C verdict `premerge-assert.sh` refuses
+  to merge without. Fixing only the named site would have left that one live.
+- **A TEST HELPER THAT TRANSPORTS A PATH THROUGH A COMMAND SUBSTITUTION CANNOT CONSTRUCT ITS OWN
+  SUBJECT.** Round 17's W2 case had the identical blind spot: `w2_repo` PRINTED the fixture path, and
+  its LF fixture is `lane<LF>two`, where the newline is EMBEDDED and survives — so the trailing-LF
+  shape, the only one that defeats the resolver, could not be presented at all. A refusal case was
+  green having never been run against its worst input. The helper now ASSIGNS through `printf -v`,
+  and the converted cases were re-verified against the **pre-round-17** script, where 16 of round
+  17's own assertions red — which is how *"these cases pass for their own reason"* is established
+  rather than asserted.
+- **Make the searched directory OBSERVABLE, or a before/after proves nothing.** `premerge-assert.sh`
+  prints no root in its "no stage was ever opened" refusal, so the sibling is given TWO stage
+  records: AMBIGUOUS is the one branch that PRINTS the directory it enumerated. The RED control
+  plants the pre-fix lossy resolver into a scratch copy of the assert (the ARTIFACT substituted,
+  never a settable seam) and must NAME the sibling.
 
 ## Round 17 (W1) — the record and the report must be ONE observation
 

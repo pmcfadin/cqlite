@@ -979,7 +979,9 @@ observation. It CANNOT change a verdict — every grammar here is per-LINE and c
 trailing newlines create no `result:` line, no field and no disclosure, and a file of only newlines is
 `report empty` exactly as an empty one is — so it is DECLARED at `report_bytes` and left. It does mean
 a change consisting only of trailing newlines is invisible to round 9's equality guard; such a report
-is the same document for every question this tool asks of it. (3) **Locale/encoding**: the capture
+is the same document for every question this tool asks of it. **THAT CONCLUSION IS BOUND TO THIS ONE
+CONSUMER — THE REPORT'S CONTENT — AND ROUND 18 FALSIFIED IT FOR THE NEXT ONE; see "A captured path is
+not the path" below.** (3) **Locale/encoding**: the capture
 itself is byte-transparent, but the TOOLS that read the snapshot are not — GNU `grep` handles input it
 considers binary differently, and BSD `tr` ABORTS on an invalid multibyte sequence under a UTF-8
 locale, which under `set -euo pipefail` would kill the script inside a substitution and print no
@@ -996,6 +998,89 @@ whose last byte happens to BE the `E` sentinel is textually indistinguishable fr
 an AMBIGUOUS refusal into a PASS. The complete read is therefore asserted by TWO signals, the sentinel
 AND the read's exit status; the sentinel stays because it survives a refactor folding the assignment
 into its `local` declaration, where the status would silently become `local`'s.
+
+### A captured path is not the path (#3751 round 18, X1)
+
+**The round-13 conclusion above — trailing-newline stripping is lossy but harmless — is CORRECT
+about a report's CONTENT and FALSE about a PATH, and carrying it to the second consumer cost a
+false PASS at the merge point.** A report's grammar is per-line and column-zero anchored, so
+trailing bytes change no verdict. A path has no grammar: its bytes ARE its identity, and a
+truncated one names a DIFFERENT, POSSIBLY EXISTING file.
+
+Both tools resolved the worktree root with `root="$(git rev-parse --show-toplevel)"`. A checkout
+whose DIRECTORY NAME ends in an LF therefore resolved to its SIBLING — and because the captured
+value then carries no newline, round 17's representability refusal (`require_repo_root`) never
+fires. Measured on the shipped scripts, in a scratch tree holding `lanetrail<LF>/` beside a peer
+lane `lanetrail/`:
+
+```
+$ cd 'lanetrail<LF>' && bash scripts/flow/review-stage.sh verdict c --issue 704
+REVIEW-STAGE: c RESULT: PASS elapsed=0 deadline=1800 agent=spec-auditor   report=.../lanetrail/.review-stage/issue-704/c.8OhEMaWtzk.md
+$ echo $?
+0
+```
+
+That is a clean verdict off a report **this lane never opened** — #3616's peer-artifact class,
+reached through a lossy capture instead of a recency scan. The refused `open` also created a
+directory INSIDE the peer lane, and `premerge-assert.sh`'s AUTO path enumerated the same sibling's
+stage records. `c_assert_head_binds_certified` cannot see any of it: HEAD is read in the CWD — the
+REAL lane, so it binds — while the ARTIFACT comes from the sibling.
+
+**The fix keeps git's own framing rather than guessing at it.** A SENTINEL is appended INSIDE the
+substitution, so the stripping has nothing of ours to eat; the sentinel is removed, then **exactly
+one** newline — git's terminator for `--show-toplevel` — and nothing else, because any further
+trailing newline belongs to the directory name. A value with NO terminator is not that command's
+documented shape and is REFUSED rather than accepted. Completeness is asserted by **two** signals,
+the sentinel AND git's exit status, which is round 13's own lesson.
+
+**`premerge-assert.sh` goes one step further and REMOVES THE CHANNEL** (#3312's standing ruling —
+do not pick a rarer delimiter). Its resolver had four callers, every one of which captured it a
+SECOND time, so the newline was stripped twice; now `c_stage_root` ASSIGNS `C_STAGE_ROOT` and
+prints nothing, so there is nothing for a fifth call site to capture and the defect is
+unexpressible at the call sites rather than merely absent from them.
+
+**THE CLASS IS "A CAPTURED PATH IS NOT THE PATH", NOT THIS ONE RESOLVER — and the sweep proved it
+by finding a second instance.** `self_dir` went through `$(cd "$(dirname "${BASH_SOURCE[0]}")" &&
+pwd)`, TWO nested strips, which mislocates `review-stage.sh` — the **ENFORCER** of the C verdict
+`premerge-assert.sh` refuses to merge without. It now takes the source and its directory by
+parameter expansion (`${BASH_SOURCE[0]:-}`, `${self_src%/*}`), which is byte-faithful by
+construction, and absolutises through one sentinel-framed subshell.
+
+**Census of the sweep, with its scope stated because the scope is what makes a count meaningful.**
+Subject: a command substitution whose result is used to open, read, write, glob or `cd` to a file
+or directory, or is assigned to a variable later so used. **28 examined — 21 in `review-stage.sh`,
+7 in `premerge-assert.sh` — and 3 AFFECTED, all fixed**: the two root resolvers, and `self_dir`
+(whose pre-fix form was two nested substitutions, both closed by one edit). Every other one is
+unaffected for a stated reason: the captured value ends in a FIXED LITERAL — `/issue-<N>`,
+`.stage`, `.md`, or an alphanumeric nonce — so there is no trailing newline for `$( )` to eat; or,
+in `stage_dir`/`assert_no_symlink`, it is `$(repo_root)`, which cannot lose a byte because
+`require_repo_root` has already REFUSED any root whose `one_line` rendering differs from itself,
+and that includes every trailing whitespace byte.
+
+**Deliberately EXCLUDED from that count, and why, so the number is not read as wider than it is:**
+substitutions that render a path for DISPLAY (`$(field_value "$path")` and the two
+`$(field_value "$(stage_file …)")` sites) — a rendering cannot mislocate anything, and both
+scripts route every emitted value through a boundary already; and substitutions that capture a
+file's CONTENT rather than its name (`report_bytes`, `capture_map_nul`, `c_record_bytes`), which
+are round 13's own subject and already sentinel-framed.
+
+**One declared residual, unrelated to trailing newlines but found by the same sweep.**
+`premerge-assert.sh`'s routing measurement reads `git diff --name-only -z … | tr '\0' '\n'`, so a
+changed path under `openspec/changes/` that CONTAINS a newline is split into two lines. Every
+outcome of that split is the FAIL-CLOSED direction — a non-empty diff still yields at least one
+hit, so routing still reads `REQUIRED`, and the only wrong value is the `slug` in a diagnostic
+string. Recorded rather than changed: it is a delimiter conversion, not a lossy capture, and no
+route from it reaches a pass.
+
+**The test-side lesson is the sharper one.** Round 17's W2 case could not construct its own
+subject: `w2_repo` returned the fixture path through a command substitution, so it had the
+IDENTICAL blind spot, and its LF fixture is `lane<LF>two` — where the newline is EMBEDDED and
+survives. The trailing-LF shape, the only one that defeats the shipped resolver, could not be
+presented at all, so a passing refusal case had never been tested against its worst input. That is
+this repository's harness-that-never-reached-the-code class, inside the guard for a lossy capture.
+The helper now ASSIGNS through `printf -v`. The converted cases were RE-VERIFIED against the
+pre-round-17 script, where **16 of round 17's own assertions red**, which is how "these cases pass
+for their own reason" is established rather than asserted.
 
 That reports the DISTINCT token `AUTHOR-PERFORMED`, never `PASS`, and `premerge-assert.sh`
 prints it on its own `PREMERGE: C-VERDICT` line — never folded into `PREMERGE: OK` — for the same

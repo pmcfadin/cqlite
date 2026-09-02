@@ -184,7 +184,9 @@
 #     verdict. `diff.relative=false` does NOT cover this — it controls the OUTPUT
 #     path prefix, not pathspec interpretation — so BOTH are pinned, and neither
 #     substitutes for the other. (The stage LOOKUP has always been
-#     cwd-independent, via `c_stage_root`'s `--show-toplevel`; the routing
+#     cwd-independent, via `c_stage_root`'s `--show-toplevel` — captured with a
+#     SENTINEL since #3751 round 18 (X1), because a plain `$( )` strips a
+#     trailing newline off the directory name and lands on a SIBLING lane; the routing
 #     measurement was the one half that was not.)
 #   * It measures the CERTIFIED sha, not this checkout's HEAD — the same rule the
 #     base-staleness advisory follows: a report about a different tree than the one

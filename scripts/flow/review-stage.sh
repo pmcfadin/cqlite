@@ -307,6 +307,24 @@
 # opt-out, because a renamable checkout needs no escape hatch. A SPACE is unaffected and stays
 # supported (round 11's Q3 exists for it).
 #
+# AND THE ROOT MUST REACH THAT CHECK WITH EVERY BYTE INTACT — A CAPTURED PATH IS NOT THE PATH
+# (#3751 round 18, X1)
+# ---------------------------------------------------------------------------------------------
+# The refusal above was UNREACHABLE for the shape that mattered most. `require_repo_root` captured
+# the root with `root="$(git rev-parse --show-toplevel)"`, and a command substitution strips EVERY
+# trailing newline — so a checkout whose DIRECTORY NAME ends in an LF resolved to a DIFFERENT,
+# EXISTING SIBLING, and the captured value then held no newline for the renderer to disagree
+# about. Measured from a checkout named `lanetrail<LF>` beside a peer lane: `verdict` reported
+# `RESULT: PASS … report=…/lanetrail/.review-stage/issue-704/c.<nonce>.md` at exit 0 off a report
+# THIS LANE NEVER OPENED, and a refused `open` created a directory INSIDE the peer lane. That is
+# #3616's peer-artifact class reached through a lossy capture rather than a recency scan. The
+# capture now keeps git's own framing (a sentinel appended INSIDE the substitution, then the
+# sentinel, then EXACTLY ONE newline — git's terminator — and nothing else), so a trailing-LF root
+# REACHES the refusal above. Round 13 (S2) had enumerated trailing-newline stripping and declared
+# it harmless: TRUE of the report's CONTENT, whose grammar is per-line and column-zero anchored,
+# and FALSE of a PATH, whose stripped bytes are its identity. A lossy-capture conclusion must be
+# RE-DERIVED PER CONSUMER, never carried.
+#
 # BOTH PATHS ARE VERIFIED GITIGNORED, FAIL-CLOSED
 # -----------------------------------------------
 # These files are written MID-RUN, routinely while the gate of record is running, and #2926

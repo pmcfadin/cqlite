@@ -235,7 +235,28 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   `.review-stage/` records in *this* directory, which is #3616's peer-artifact class one directory
   over. **Resolvability is not provenance.** Rule 1 already asserts `headRefOid == certified`, so
   HEAD == certified binds the local artifact to THIS PR transitively, and correct input is
-  unaffected (the closer pushes, then asserts, in the lane it just certified). **Second binding: the stage RECORD's own `head-sha:` must equal the certified commit
+  unaffected (the closer pushes, then asserts, in the lane it just certified).
+  **AND THAT BINDING IS STRUCTURALLY BLIND TO ONE ROUTE INTO THE SAME CLASS — A CAPTURED PATH IS NOT
+  THE PATH (#3751 round 18).** Both tools resolved the worktree root with
+  `root="$(git rev-parse --show-toplevel)"`, and a command substitution strips **every** trailing
+  newline — so a checkout whose *directory name* ends in an LF resolved to a DIFFERENT, EXISTING
+  SIBLING, and the captured value then carried no newline for round 17's representability refusal to
+  see. Measured on the shipped scripts from `lanetrail<LF>/` beside a peer lane: `review-stage.sh
+  verdict` reported `RESULT: PASS … report=…/lanetrail/.review-stage/issue-704/c.<nonce>.md` at
+  **exit 0** off a report that lane never opened, a refused `open` created a directory *inside* the
+  peer lane, and `AUTO` enumerated the same sibling's stage records. The HEAD binding cannot catch it
+  because **HEAD is read in the CWD — the real lane, so it binds — while the ARTIFACT comes from the
+  sibling.** The capture now keeps git's own framing (a sentinel appended INSIDE the substitution,
+  then the sentinel, then EXACTLY ONE newline, git's terminator, and nothing else) and
+  `premerge-assert.sh` goes further and **removes the channel**: its resolver ASSIGNS a shared global
+  and prints nothing, so no call site can capture it. **The durable rule is about conclusions, not
+  about newlines: a lossy-capture conclusion must be RE-DERIVED PER CONSUMER, never carried.** Round
+  13 had enumerated trailing-newline stripping and declared it harmless — true of a report's
+  per-line, column-zero-anchored CONTENT, false of a PATH, whose stripped bytes are its identity —
+  and the unqualified conclusion is what left this reachable. The sweep that followed found the class
+  a second time, in the substitution that locates `review-stage.sh`, i.e. the **enforcer** of the
+  verdict this script refuses to merge without: 28 path-bearing or file-locating command
+  substitutions examined, 3 affected. **Second binding: the stage RECORD's own `head-sha:` must equal the certified commit
   (#3751 round 3, G1).** The first binding closes the wrong-LANE axis and cannot see a STALE
   ARTIFACT, because the two answer different questions: HEAD == certified binds the WORKTREE and is
   satisfied BY CONSTRUCTION, since a lane stands at the very commit it is certifying. So a

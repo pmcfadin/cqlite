@@ -39,7 +39,12 @@ report?" but "what does the report say?".
   it is EXACT even on a checkout whose path legally contains `=` — where `status` renders that
   character as `~` and so names a file that does not exist. Read the LINE, not the exit status:
   `verdict` exits non-zero for every non-PASS state by design, and it prints the path in all of
-  them. If it answers `NOT-RUN (stage never opened)`, write `.review-stage/issue-<N>/<kind>.md`
+  them. **One state prints NO path at all, and it is not a bug to work around (#3751 round 18):**
+  if it refuses (exit 64) saying this checkout's path cannot be represented on the one-line
+  grammar, the CHECKOUT is unusable by this tool — a directory name carrying a newline, a tab or a
+  trailing space. Report that refusal verbatim and stop; do not construct a path yourself. The
+  refusal exists because the alternative, measured, was a verdict line naming a SIBLING lane's
+  report — so a path you invent there is the peer-artifact defect by hand. If it answers `NOT-RUN (stage never opened)`, write `.review-stage/issue-<N>/<kind>.md`
   inside the worktree, name it in your reply, and say the stage was never opened. Do not silently
   skip the artifact because nobody asked for it.
 - **Write to the path your caller NAMED, never a remembered or guessed one (#3751 rounds 5-6).**
