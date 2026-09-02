@@ -279,6 +279,9 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     arms = config["arms"]
     server_cpus = config["server_cpus"]
     client_cpus = config["client_cpus"]
+    # WHERE THE FLIGHT SERVER RAN (#3551) — read from the manifest for the same reason as
+    # everything else here, and tied to the driver's recorded verification below.
+    flight_server_cpus = config["flight_server_cpus"]
     step_duration = config["step_duration"]
     # WHICH COUNTERS AND WHICH BINARIES (#3248). Read from the manifest for the same reason as
     # everything above: a value that cannot be supplied cannot disagree. Promoted to the report's
@@ -573,7 +576,9 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     # the check that DID run was against the driver's argv and nothing tied the two together, so
     # a manifest edited to `99,99` printed "verified physical-core siblings" and exited 0. This
     # REQUIRES the driver's recorded sibling verification and requires it to be ABOUT these lists.
-    pinning_verification = verify_pinning_record(d, server_cpus, client_cpus)
+    pinning_verification = verify_pinning_record(
+        d, server_cpus, client_cpus, flight_server_cpus
+    )
     # WHICH BINARIES PRODUCED THIS RATIO (#3272 round 10, M2). `--no-build` accepts any executable
     # already under target/release and nothing recorded the revision or any digest, so a stale
     # artifact could be measured and reported as a result for the current checkout. REQUIRED here;
@@ -653,7 +658,24 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         "pinning": {
             "server_cpus": server_cpus,
             "client_cpus": client_cpus,
-            "counter_mode": f"perf stat -C {server_cpus} (CPU-WIDE; never -p)",
+            # THE FLIGHT ARM'S OWN PIN AND ALLOCATOR (#3551), each carrying what was VERIFIED
+            # rather than what was requested. `flight_pin_claim` is derived from the record's
+            # closed mode set by ws0_pinning, so this document can never describe a
+            # distinct-cores pin in the sibling vocabulary.
+            "flight_server_cpus": flight_server_cpus,
+            "flight_pin_mode": pinning_verification["flight_pin_mode"],
+            "flight_pin_claim": pinning_verification["flight_pin_claim"],
+            "flight_allocator": pinning_verification["flight_allocator"],
+            "flight_allocator_lib": pinning_verification["flight_allocator_lib"],
+            # THE COUNTING DOMAIN IS PER ARM since the flight pin became separable: the bare
+            # scan is counted over the server set and the flight arm over the flight set, which
+            # is where its server actually ran. Stated as two entries rather than one, because a
+            # single `-C {server_cpus}` string was FALSE for the flight arm the moment the two
+            # pins could differ.
+            "counter_mode": (
+                f"perf stat -C {server_cpus} for the bare-scan arm and"
+                f" -C {flight_server_cpus} for the Flight arm (CPU-WIDE; never -p)"
+            ),
             # THE RECORDED OBSERVATION, not the word "verified" over a module name (#3272 F6).
             # This used to read `"verified": "thread_siblings_list, fail-closed
             # (scripts/perf/lib-cpu.sh)"` — an unconditional string, printed about CPU lists the
@@ -853,7 +875,30 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         f" {pinning_verification['server_siblings_expanded'].split('(')[-1].rstrip(')')} verified"
         f" on {pinning_verification['host']} pre-measurement, recorded in"
         f" {pathlib.Path(pinning_verification['source']).name}), client {client_cpus}",
-        f"counters     : perf stat -C {server_cpus}  [CPU-WIDE; no -p anywhere]"
+        # THE FLIGHT ARM'S PIN, IN ITS OWN VOCABULARY (#3551). The claim word comes from
+        # `ws0_pinning.FLIGHT_PIN_CLAIM[mode]`, so a `distinct-cores` pin can NEVER be printed as
+        # `physical-core siblings`: the two are mutually exclusive properties and the report says
+        # which one was actually read out of thread_siblings_list. The expanded sets are the
+        # driver's own echo, sliced the same way the server line slices its own.
+        f"flight pin   : flight server {flight_server_cpus}"
+        f" (verified {pinning_verification['flight_pin_claim']} pre-measurement, recorded in"
+        f" {pathlib.Path(pinning_verification['source']).name})"
+        + ("   [SAME PIN AS THE BARE-SCAN ARM]" if flight_server_cpus == server_cpus
+           else "   [DIFFERENT PIN FROM THE BARE-SCAN ARM — the bare scan is the pin-identical"
+                " drift control; read the flight/scan difference as being about this pin]"),
+        # The driver's OWN echo, verbatim — the expanded sibling sets it read out of sysfs for
+        # each pinned CPU. Printed whole rather than sliced: for `distinct-cores` the substance is
+        # one set PER CPU (that they are pairwise different is the property), so any slice that
+        # showed a single set would be showing less than was verified.
+        f"  read       : {pinning_verification['flight_pin_verified']}",
+        # ...AND THE ALLOCATOR, WITH ITS EVIDENCE (#3551). Never the bare word `jemalloc`: the
+        # preload FAILS OPEN (glibc ignores an unloadable object and continues with system
+        # malloc), so the only thing worth printing is what was OBSERVED in the running process.
+        f"allocator    : flight server ran under {pinning_verification['flight_allocator']}"
+        f" (library: {pinning_verification['flight_allocator_lib']})",
+        f"  evidence   : {pinning_verification['flight_allocator_verification']}",
+        f"counters     : perf stat -C {server_cpus} (bare scan) /"
+        f" -C {flight_server_cpus} (Flight)  [CPU-WIDE; no -p anywhere]"
         f"   events: {','.join(events)}",
         # EVERY FIELD THAT CHANGES HOW A NUMBER SHOULD BE READ, IN THE PRINTED REPORT (#3248,
         # roborev job 80 finding 3). These four were added to results.json and NEVER to the human

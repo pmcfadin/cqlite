@@ -324,6 +324,17 @@ MANIFEST_CONFIG_DISPOSITION: dict[str, str] = {
                    " there.",
     "client_cpus": "as server_cpus: a non-empty recorded STRING, tied to the driver's recorded"
                    " verification by ws0_pinning.verify_pinning_record (#3272 F6)",
+    "flight_server_cpus": "as server_cpus — a non-empty recorded STRING, opaque HERE and tied to"
+                          " a REAL pin verification by ws0_pinning.verify_pinning_record, which"
+                          " requires this value to equal the flight list the driver actually"
+                          " checked against the host topology (#3551). Recorded rather than"
+                          " derived from server_cpus, and that is the substance: the FLIGHT arm"
+                          " can now be pinned differently from the bare-scan arm (the SMT-unpin"
+                          " trial), which changes both where the measured server ran AND the"
+                          " CPU-wide counting domain of every flight rep. A session whose flight"
+                          " pin is not recorded cannot be told apart from one where both arms"
+                          " shared a core, and those are different measurements. It EQUALS"
+                          " server_cpus for every run that does not pass --flight-server-cpus",
     "step_duration": "a non-empty recorded STRING (`<warm>/<cold>`), reported verbatim; the"
                      " DURATIONS that bound a rep were validated by the driver's own argument"
                      " checks (lib-args.sh) before the session ran",
@@ -396,6 +407,7 @@ _MANIFEST_READER_KEYS = (
     "arms",
     "server_cpus",
     "client_cpus",
+    "flight_server_cpus",
     "step_duration",
     "flight_endpoint",
     "baseline_mode",
@@ -595,7 +607,7 @@ def session_manifest_config(
             " was checked for competing load."
         )
     out["quiescence"] = quies
-    for key in ("server_cpus", "client_cpus", "step_duration", "bin_dir"):
+    for key in ("server_cpus", "client_cpus", "flight_server_cpus", "step_duration", "bin_dir"):
         value = config[key]
         if not isinstance(value, str) or not value.strip():
             raise Invalid(
