@@ -25,7 +25,6 @@
 //! crate-internal test hooks (`set_open_barrier`, `debug_*`, `metrics`).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
@@ -326,24 +325,22 @@ fn concurrent_misses_single_flight_one_parse_per_generation() {
 
 /// **Fix C — cancel granularity inside the parse.** Cancelling DURING a large
 /// `Index.db` parse must abort promptly with `WarmError::Cancelled`, not run the
-/// whole O(entries) parse to completion. A single big generation (150k partitions)
-/// makes the parse dominate wall time; the canceller waits until the open has
-/// begun (the open barrier fired), then — after a margin that guarantees the
-/// registry's coarse pre-open cancel check has already passed — trips the flag
-/// mid-parse.
+/// whole O(entries) parse to completion. A single big generation (150k
+/// partitions) keeps that parse the dominant cost of the open being aborted.
 ///
-/// The margin is CALIBRATED against this host's own just-measured cost of fully
-/// opening+parsing this exact fixture (issue #2383 roborev-1653 NIT 5 — "no
-/// wall-clock races in tests"), not a fixed constant: a hardcoded sleep flakes on
-/// a fast host once the full parse completes faster than the constant, and
-/// raising the entry count to force a structural floor was measured to scale
-/// FAR worse than linearly in `SSTableReader::open` (150k → 1.8s, 2M → 5+min;
-/// not this issue's fix surface), so it is not a viable alternative here. A
-/// small, conservative FRACTION of a just-measured baseline instead scales DOWN
-/// automatically with host speed — comfortably past the microsecond-scale
-/// coarse pre-open check (a same-thread, no-I/O comparison) and comfortably
-/// short of the real run's parse, including under page-cache speedup from the
-/// calibration pass warming the OS cache for the timed run.
+/// Positioning is STRUCTURAL, not calibrated (issue #3940). The cancel is
+/// tripped by the OPENING thread itself, from the pre-parse barrier inside the
+/// coalesced real-open closure — downstream of `rebuild`'s pre-rebuild and
+/// pre-open cancel checks, of `open_added`'s per-iteration check and of the
+/// coalescer's follower poll — so no cancel gate but the parse's own
+/// `ScanCancel` polling can observe it. The predecessor of this test slept
+/// `baseline / 20` on a second thread, where `baseline` was a separately-timed
+/// uncancelled warm of the same fixture; that compares two DIFFERENT scheduling
+/// windows and failed the `flight-tests` gate under concurrent-gate CPU
+/// contention (the sleep outlived the parse, so the open returned `Ok`). There
+/// is now no clock, no sleep, no calibration pass and no canceller thread. The
+/// exact discrimination boundary — including what this positioning does NOT
+/// cover — is stated at the assertion site.
 ///
 /// RED pre-#2383-fix-C: neither `parse_all_partition_keys_with_summary` nor
 /// `SSTableReader::open` polled the cancel flag, so once past the coarse
@@ -369,65 +366,70 @@ fn cancel_during_large_index_parse_aborts_promptly() {
     let schema = simple_schema();
     let (_temp, table_dir) = build_big_single_gen(&schema, 150_000);
 
-    // Calibrate: fully open+parse the SAME fixture, uncancelled, once — this also
-    // warms the OS page cache ahead of the timed run below (biasing that run
-    // FASTER, never slower, than this baseline).
-    let calib_start = std::time::Instant::now();
-    WarmTableRegistry::new()
-        .warm_readers(
-            &key(),
-            ddl(),
-            &schema,
-            None,
-            &table_dir,
-            None,
-            &CancelFlag::new(),
-        )
-        .expect("calibration warm (uncancelled) completes");
-    let baseline = calib_start.elapsed();
-    // 1/20th of the measured baseline: tens of ms on every host we've observed,
-    // dwarfing the coarse check's same-thread gap, and a small enough fraction to
-    // stay comfortably inside the timed run even under real page-cache speedup.
-    let margin = baseline / 20;
-
     let reg = WarmTableRegistry::new();
     let cancel = CancelFlag::new();
 
-    // Signal when the (single) open has started; the open barrier fires at the top
-    // of the open loop, immediately BEFORE the registry's coarse pre-open cancel
-    // check — so the canceller waits for it, then adds the calibrated margin so
-    // that coarse check has certainly passed and we are now inside the parse.
-    let open_started = Arc::new(AtomicBool::new(false));
+    // Position the cancel STRUCTURALLY, not temporally (issue #3940).
+    //
+    // The pre-parse barrier fires on the opening thread INSIDE the coalesced
+    // real-open closure: downstream of `rebuild`'s pre-rebuild and pre-open
+    // cancel checks, downstream of `open_added`'s per-iteration check, and
+    // downstream of the coalescer's follower-wait poll (this call is the LEADER,
+    // whose path has no cancel gate of its own). Tripping the flag from the
+    // barrier therefore puts the cancellation in front of the reader open+parse
+    // with NO other observer left between the two.
     {
-        let flag = Arc::clone(&open_started);
-        reg.set_open_barrier(Arc::new(move || flag.store(true, Ordering::SeqCst)));
+        let cancel = cancel.clone();
+        reg.set_open_parse_barrier(Arc::new(move || cancel.cancel()));
     }
 
-    let canceller = {
-        let cancel = cancel.clone();
-        let open_started = Arc::clone(&open_started);
-        thread::spawn(move || {
-            while !open_started.load(Ordering::SeqCst) {
-                thread::yield_now();
-            }
-            // Margin: let the coarse pre-open cancel check run first, so this trip
-            // lands strictly DURING the parse (never at the coarse boundary, which
-            // the unfixed code already honors).
-            thread::sleep(margin);
-            cancel.cancel();
-        })
-    };
-
     let res = reg.warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel);
-    canceller.join().expect("canceller");
 
-    // RED today: the parse ignores the mid-parse cancel and returns Ok. GREEN once
-    // the parse loop polls the cancel flag (fix C) and returns Cancelled promptly.
+    // WHAT REPLACED THE 1/20th CALIBRATED MARGIN, AND WHY IT IS CONTENTION-IMMUNE
+    // (issue #3940).
+    //
+    // This assertion was always `matches!(res, Err(WarmError::Cancelled))` — never
+    // a timing assert. The wall clock was only ever a POSITIONING DEVICE: a
+    // canceller thread slept `baseline / 20` (a separately-measured uncancelled
+    // warm) so its trip would land past the coarse pre-open check and inside the
+    // parse. That compares TWO scheduling windows — the calibration warm and the
+    // timed warm — and under concurrent-gate CPU contention they see different CPU
+    // availability, so `margin` came out longer than the timed parse and the
+    // cancel arrived AFTER the open had already returned `Ok`. Hence the
+    // `flight-tests` flake.
+    //
+    // Positioning is now structural: the cancel is tripped BY the opening thread
+    // itself, at a fixed point in the call graph, before the parse begins. There
+    // is no clock, no sleep, no calibration run and no second thread — so there
+    // are no two scheduling windows to compare and nothing for CPU contention to
+    // skew. The ordering the old margin tried to buy probabilistically is now an
+    // invariant of the control flow.
+    //
+    // WHAT THIS DISCRIMINATES: the `CancelFlag` -> `ScanCancel` bridge
+    // (`open_added`) and the Index.db open/parse's cancel awareness (#2383 fix C,
+    // `IndexReader::open_with_summary_cancellable` ->
+    // `parse_index_data_cancellable`) surfacing `Error::Cancelled` BY VARIANT, and
+    // `rebuild` mapping it to `WarmError::Cancelled` instead of a fail-closed
+    // retain. Verified by positive control: with fix C's parse-side cancel polling
+    // removed, this assertion FAILS with `res == Ok`.
+    //
+    // WHAT IT DOES NOT DISCRIMINATE, stated because a silent narrowing is
+    // indistinguishable from coverage: a cancel positioned at the open boundary is
+    // caught by fix C's coarse PRE-PARSE check, which is behaviourally identical
+    // to the entry-loop's own poll at entry 0 — so removing ONLY the in-loop
+    // `entry_index % CANCEL_POLL_INTERVAL` poll leaves this test GREEN. Landing a
+    // cancel strictly BETWEEN two parsed entries is not reachable from this crate
+    // without a clock (the loop lives in cqlite-core and exposes no progress
+    // signal), so that stride's own coverage belongs to a cqlite-core-local test
+    // beside the loop, not here. Trading a probabilistic in-loop landing for a
+    // deterministic pre-parse one is the deliberate choice of #3940: the old test
+    // did not reliably land in the loop either, it merely failed loudly when it
+    // missed.
     assert!(
         matches!(res, Err(WarmError::Cancelled)),
-        "a cancel tripped DURING a large Index.db parse must abort promptly with \
-         Cancelled (calibrated margin {margin:?} from baseline {baseline:?}), got \
-         {:?} (issue #2383 fix C)",
+        "a cancel tripped on the opening thread immediately before a large \
+         Index.db open+parse must abort with Cancelled, got {:?} (issue #2383 \
+         fix C; positioning per issue #3940)",
         res.map(|w| (w.outcome, w.readers.len()))
     );
 }

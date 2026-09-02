@@ -187,6 +187,17 @@ pub struct WarmTableRegistry {
     /// production. `pub(super)` for [`super::rebuild`] (campsite split).
     #[cfg(test)]
     pub(super) open_barrier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Test-only hook invoked INSIDE the coalesced real-open closure, on the
+    /// leader's own thread, immediately BEFORE `open_one_reader` runs the
+    /// Index.db open+parse — i.e. downstream of EVERY flight-side cancel gate
+    /// (`rebuild`'s pre-rebuild + pre-open checks, `open_added`'s per-iteration
+    /// check, and the coalescer's follower-wait poll), so a cancellation tripped
+    /// from here can only be observed by the parse's own `ScanCancel` polling
+    /// (issue #2383 fix C). That is what lets the mid-parse-cancel test position
+    /// its cancel STRUCTURALLY instead of with a calibrated sleep (issue #3940).
+    /// `None` (a no-op) in production. `pub(super)` for [`super::rebuild`].
+    #[cfg(test)]
+    pub(super) open_parse_barrier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Default for WarmTableRegistry {
@@ -214,6 +225,8 @@ impl WarmTableRegistry {
             swap_barrier: Mutex::new(None),
             #[cfg(test)]
             open_barrier: Mutex::new(None),
+            #[cfg(test)]
+            open_parse_barrier: Mutex::new(None),
         }
     }
 
@@ -801,6 +814,31 @@ impl WarmTableRegistry {
     pub(super) fn run_open_barrier(&self) {
         let hook = self
             .open_barrier
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(f) = hook {
+            f();
+        }
+    }
+
+    /// Install the test-only pre-parse rendezvous (see the field doc).
+    #[cfg(test)]
+    pub(crate) fn set_open_parse_barrier(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .open_parse_barrier
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(f);
+    }
+
+    /// Invoke the pre-parse rendezvous if one is installed. The `Arc` is cloned
+    /// out first so the hook runs WITHOUT holding the `open_parse_barrier` lock
+    /// (same discipline as [`Self::run_swap_barrier`]). `pub(super)` for
+    /// [`super::rebuild::WarmTableRegistry::open_added`] (campsite split).
+    #[cfg(test)]
+    pub(super) fn run_open_parse_barrier(&self) {
+        let hook = self
+            .open_parse_barrier
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
