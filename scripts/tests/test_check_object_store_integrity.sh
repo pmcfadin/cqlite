@@ -856,3 +856,26 @@ if mkdir -p "$R_NLDIR" 2>/dev/null && [ -d "$R_NLDIR" ]; then
 else
   bad "newline-path: could not create a newline-bearing directory (the case cannot run on this filesystem)"
 fi
+
+# --- Case 20: NO `env` REFUSES rather than measuring un-isolated ------------
+# `env -i` is how every git call here gets its allowlisted environment (Case 18), so a
+# host without `env` cannot isolate — and the alternative to refusing is running fsck
+# under the caller's environment, which is exactly the false-VERIFIED Case 18 covers.
+# ONE property against Case 11's control: the same hermetic PATH, minus `env`.
+BIN_NOENV="$T/bin-noenv"
+mk_bin "$BIN_NOENV" git timeout gtimeout
+rm -f "$BIN_NOENV/env"
+if [ ! -e "$BIN_NOENV/env" ] && [ -e "$BIN_NOENV/git" ] && [ -e "$BIN_NOENV/timeout" ]; then
+  ok "no-env-plant: the plant IS the property described (git and timeout present, env absent)"
+else
+  bad "no-env-plant: the hermetic PATH is not the shape the case claims"
+fi
+OUT=$(PATH="$BIN_NOENV" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+RC=$?
+record_out "no-env"
+if [ "$RC" -eq 5 ] && [ "$(verdict_of)" = UNMEASURED ] &&
+  printf '%s\n' "$OUT" | grep -q 'cannot ISOLATE'; then
+  ok "no-env: a host that cannot isolate git's environment is UNMEASURED, never a measurement taken un-isolated"
+else
+  bad "no-env: rc=$RC verdict='$(verdict_of)' (wanted 5/UNMEASURED)"
+fi
