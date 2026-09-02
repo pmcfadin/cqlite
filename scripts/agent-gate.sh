@@ -11800,10 +11800,13 @@ EOF
 # COMMENT FIRST GAVE (roborev/rust-reviewer round 1, B4). 14 of the suite's files gate on
 # dataset availability, so node-bindings IS now in DATASET_COMPONENTS (it was NOT before,
 # and that comment was correct then and would be a stale rationale now). Since #3641 the
-# 14 is checkable rather than remembered: `grep -l 'assertDatasetsAvailable(' __test__/
-# *.test.js` lists exactly those files plus helpers.test.js, the helper's own test. Before
-# #3641 it was 11 callers of `skipIfNoDatasets()` PLUS 3 files carrying a verbatim COPY of
-# its body, so the number in this comment and any grep for it disagreed by three.
+# 14 is checkable rather than remembered: `grep -l 'assertDatasetsAvailable('
+# __test__/*.test.js` lists exactly those plus helpers.test.js, the helper's own test.
+# The OPERAND is kept contiguous on one line deliberately (roborev job 71): split as
+# `__test__/` + `*.test.js` it is two operands, and it does not fail loudly -- measured,
+# it silently lists 2 files and exits 0, so a reader would under-count the gated suites.
+# Before #3641 it was 11 callers of `skipIfNoDatasets()` PLUS 3 files carrying a verbatim
+# COPY of its body, so the number in this comment and any grep for it disagreed by three.
 #
 # The FULL gate additionally exports CQLITE_REQUIRE_FIXTURES=1. What that buys, MEASURED:
 #   * ONE clean, named setup failure (setup.js's `No SSTable fixtures found: …` throw)

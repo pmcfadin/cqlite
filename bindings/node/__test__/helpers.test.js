@@ -91,17 +91,30 @@ describe('the dataset assertion is not duplicated (issue #3641)', () => {
   // 11 files that actually called it. They now call the helper. A fourth copy
   // would silently re-open that gap, so it is a RED here.
   test('no test file inlines the helper error message', () => {
-    const dir = __dirname;
-    const offenders = fs
-      .readdirSync(dir)
-      .filter((name) => name.endsWith('.test.js'))
-      .filter((name) => {
-        const body = fs.readFileSync(path.join(dir, name), 'utf8');
-        // Outside this file the literal only ever appears as a COPY of the
-        // helper's message; this file quotes it in the assertions above, which
-        // is why it excludes itself.
-        return name !== 'helpers.test.js' && body.includes('Test data not available');
+    // RECURSIVE, matching jest's configured scope (`__test__/**/*.test.js`).
+    // A flat readdir scans only this directory, so a nested suite could inline
+    // the message and escape the guard entirely (roborev job 71). There are no
+    // nested suites today, which is exactly why the scope is pinned now rather
+    // than after one appears. `node_modules` is skipped for the same reason
+    // jest ignores it.
+    const walk = (dir) =>
+      fs.readdirSync(dir, { withFileTypes: true }).flatMap((ent) => {
+        if (ent.name === 'node_modules') return [];
+        const full = path.join(dir, ent.name);
+        if (ent.isDirectory()) return walk(full);
+        return ent.name.endsWith('.test.js') ? [full] : [];
       });
+    const offenders = walk(__dirname)
+      .map((full) => path.relative(__dirname, full))
+      // Outside this file the literal only ever appears as a COPY of the
+      // helper's message; this file quotes it in the assertions above, which
+      // is why it excludes itself.
+      .filter((rel) => rel !== 'helpers.test.js')
+      .filter((rel) =>
+        fs
+          .readFileSync(path.join(__dirname, rel), 'utf8')
+          .includes('Test data not available')
+      );
     expect(offenders).toEqual([]);
   });
 });
