@@ -8,7 +8,10 @@
 //! single-partition seek, and clustering-slice narrowing stay in `bti.rs`.
 
 use super::super::SSTableReader;
-use super::model::{bti_lookup_step, table_header_consistent_for_seek, BtiLookupStep};
+use super::model::{
+    bti_lookup_step, point_read_absence_or_remembered, point_read_remember_or_bail,
+    table_header_consistent_for_seek, BtiLookupStep,
+};
 use crate::types::{ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use tracing::debug;
@@ -268,6 +271,9 @@ impl SSTableReader {
         // whole-section fallback `window` is already complete.
         let chunk_targeted = chunk_length.is_some();
 
+        // #3721 (job 80): last parse failure that cannot mean absence.
+        let mut undecodable: Option<Error> = None;
+
         loop {
             // If chunk-targeted, append the next chunk before each parse attempt
             // (the whole-section fallback already has all bytes in `window`).
@@ -303,10 +309,8 @@ impl SSTableReader {
                         window.extend_from_slice(&decompressed_chunk);
                     }
                     None => {
-                        // EOF: no more chunks. If we never parsed a complete
-                        // partition, the partition is treated as absent (matching
-                        // the prior whole-section behaviour for an unparseable tail).
-                        return Ok(None);
+                        // EOF (#3721 job 80: a remembered failure is not absence).
+                        return point_read_absence_or_remembered(&mut undecodable);
                     }
                 }
             }
@@ -393,31 +397,27 @@ impl SSTableReader {
 
             match parse_result {
                 Ok(()) if emitted_our_key => {
-                    // The partition at `within` parsed COMPLETELY: the parser decoded
-                    // our queried partition key from a fully-buffered window. Return
-                    // the row when the table guard also passed (`found`), else `None`
-                    // — a genuine soft-miss (schema-unavailable / benign table-guard
-                    // rejection) the caller resolves via `scan_for_key`.
+                    // The partition at `within` parsed COMPLETELY: our queried key was
+                    // decoded from a fully-buffered window. Return the row when the
+                    // table guard also passed (`found`), else `None` — a genuine
+                    // soft-miss (schema-unavailable / benign table-guard rejection)
+                    // the caller resolves via `scan_for_key`.
                     return Ok(found);
                 }
                 _ => {
-                    // Reached when the parse did NOT decode our queried key: an Err
-                    // (truncated mid-partition), the closure never firing, OR a
-                    // partition emitted whose decoded key is NOT ours. We only parse
-                    // after `bti_partition_key_matches` authoritatively confirmed our
-                    // key's bytes sit at `within`, so a non-matching / failed parse is
-                    // the chunk-STRADDLE case (issue #1572): the partition body crosses
-                    // the chunk boundary and the parser produced a garbage entry from
-                    // the truncated window tail. Pull the next chunk and re-parse the
-                    // now-larger window rather than mistaking truncation for absence —
-                    // treating it as absence wrongly falls back to a whole-file
-                    // `scan_for_key` for a PRESENT key, violating #1572. Terminates at
-                    // EOF, where `chunk_source.chunk()` returns `None` -> `Ok(None)`.
+                    // The parse did NOT decode our key: an `Err`, the closure never
+                    // firing, or a FOREIGN key. Chunk-targeted, the latter two are the
+                    // #1572 STRADDLE case, answered by the next chunk (absence would
+                    // wrongly fall back to a whole-file `scan_for_key`).
+                    // #3721 (job 80): an `Err` is a THIRD state and a decode failure
+                    // is not absence — see `point_read_remember_or_bail`, which also
+                    // says why the straddle retry stays exactly as it was.
+                    point_read_remember_or_bail(parse_result, chunk_targeted, &mut undecodable)?;
                     if chunk_targeted {
                         continue;
                     }
-                    // Whole-section fallback already has every byte: a failure here
-                    // means the partition genuinely could not be parsed -> absent.
+                    // Every byte present, and no absence-ruling-out failure: prior
+                    // behaviour (closure never fired, or a foreign key decoded).
                     return Ok(None);
                 }
             }
