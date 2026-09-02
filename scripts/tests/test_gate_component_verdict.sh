@@ -240,11 +240,13 @@ mk_only_summary "$S8" run-1 PARTIAL fmt-extra "$(comp_line fmt-extra PASS 1s)"
 expect "2.4 requesting the SHORTER name when only the longer one is present => absent" \
   NOT-PASS 1 "absent" -- "$S8" --mode only --component fmt --run-id run-1
 
-# A META line is not a component line. `tree-integrity: PASS` carries no `(<N>s)` field,
-# so the structural grammar (derived from _fm_summary_line) refuses to read it as one —
-# otherwise asking for a mistyped or non-component name would return a confident PASS.
-expect "2.5 a META line (tree-integrity: PASS) is NOT readable as a component verdict" \
-  NOT-PASS 1 "absent" -- "$S2" --mode only --component tree-integrity --run-id run-1
+# A META line is not a component line, and since F6-2 that is refused ONE LAYER EARLIER and
+# more strongly: `tree-integrity` is absent from the gate's component manifest, so the request
+# is refused BY NAME before any block is scanned. The structural grammar (no `(<N>s)`
+# duration field on a meta line) remains as the second layer behind it — 17.1/17.6 pin that —
+# so a component-shaped meta line still cannot answer even for a name that IS in the manifest.
+expect "2.5 a META name (tree-integrity) is refused by name, before any block is scanned" \
+  USAGE 64 "manifest" -- "$S2" --mode only --component tree-integrity --run-id run-1
 
 echo "=== section 3: COMPLETION is a precondition, and the verdict is never DERIVED from it ==="
 # Direction 1: a PASS component line inside a NON-TERMINAL block is not a verdict. The
@@ -1147,13 +1149,18 @@ else
 fi
 
 # An UNREADABLE manifest is a REFUSAL, never a skip: a membership test that silently stops
-# testing is the permissive branch this whole change exists to refuse. Substituted by copying
+# testing is the permissive branch this whole change exists to refuse.
+#
+# THE NEEDLE IS THIS BRANCH'S OWN CAUSE, and that matters — the first version matched
+# `USAGE.*manifest`, which the MEMBERSHIP refusal also satisfies (it says "manifest" and also
+# exits 64), so disabling the readability guard left the case GREEN. Case 8.4's lesson one
+# section over: a needle that any neighbouring refusal satisfies pins nothing. Substituted by copying
 # the script into a scratch dir WITHOUT the manifest beside it (the artifact-substitution
 # idiom, never a settable path).
 _sub=$(mktemp -d "${TMPDIR:-/tmp}/gcv-nomanifest.XXXXXX")
 cp "$VERDICT" "$READER" "$_sub/" 2>/dev/null
 _o=$(bash "$_sub/gate-component-verdict.sh" "$S8c" --mode only --component tooling-tests --run-id run-1 2>&1); _rc=$?
-if [ "$_rc" = 64 ] && printf '%s' "$_o" | grep -q '^gate-verdict: USAGE.*manifest'; then
+if [ "$_rc" = 64 ] && printf '%s' "$_o" | grep -q 'manifest is not readable'; then
   ok "21.5 an unreadable manifest is a fail-closed refusal, never a silently skipped test"
 else
   bad "21.5 an unreadable manifest is a fail-closed refusal, never a silently skipped test" \
@@ -1181,12 +1188,13 @@ rm -rf "$_sub"
 # per-mode completion grammar), 67 -> 78; round 4 added sections 16 (the mode filter over
 # the reader's token) and 17 (the anchored line shape), 78 -> 87; round 5 grew 17 by one and
 # added 18 (a PARTIAL token requires its scope line) and 19 (meta reads stop at RESULT:),
-# 87 -> 96. Raised
+# 87 -> 96; round 6 added 20 (escapes are refused, not normalised) and 21 (the name must be a
+# real component), 96 -> 106. Raised
 # DELIBERATELY each time: the total is a
 # `-lt` floor, so leaving it low would let the added cases be deleted while the suite still
 # reported green — this repo's own case-floor lesson.
-SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:7 7:2 8:4 9:5 10:8 11:6 12:5 13:4 14:2 15:11 16:4 17:6 18:5 19:3"
-FLOOR=96
+SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:7 7:2 8:4 9:5 10:8 11:6 12:5 13:4 14:2 15:11 16:4 17:6 18:5 19:3 20:5 21:5"
+FLOOR=106
 for _sf in $SECTION_FLOORS; do
   _sec=${_sf%%:*}; _min=${_sf##*:}
   eval "_got=\${SEC_$_sec:-0}"

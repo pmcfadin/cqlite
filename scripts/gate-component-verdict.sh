@@ -146,6 +146,10 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 LIVENESS="$HERE/gate-liveness.sh"
+# The gate's OWN component set, as data (#3544). Resolved from THIS script's directory with
+# NO env override: the constrained party must not choose its own authority (#3312), and a
+# settable path is one more thing a caller can point at a list of its own choosing.
+MANIFEST="$HERE/agent-gate.components"
 
 SUMMARY=""; MODE=""; COMPONENT=""; WANT_RUN_ID=""; HB=""
 
@@ -244,6 +248,42 @@ case "$COMPONENT" in
   *[!A-Za-z0-9._-]*)
     usage_refusal "component name is outside the closed grammar [A-Za-z0-9._-]+ (see scripts/agent-gate.components)" ;;
 esac
+# AND THE NAME MUST BE A REAL COMPONENT, not merely a syntactically legal one (F6-2).
+# Validating only the SHAPE let a METADATA line masquerade as a component line: a block
+# carrying `launch-nonce: PASS (1s)  [x]` answered `PASS launch-nonce`, though no such
+# component ran. `launch-nonce`'s value comes from AGENT_GATE_LAUNCH_NONCE, which the CALLER
+# sets — so the planter is the asker, i.e. INVOKER-CLASS and out of the threat model by this
+# repo's own triage rule. It is enforced anyway for two practical reasons, stated rather than
+# dressed up as a vulnerability: the membership test costs nothing because the manifest
+# already exists, and it turns a TYPO into a NAMED REFUSAL instead of a silent
+# COULD-NOT-MEASURE that reads like a broken summary.
+#
+# NOT A SECOND LIST: `scripts/agent-gate.components` IS the gate's own component set as data,
+# and the gate asserts it against its running COMPONENTS array on every run (fail-closed
+# `manifest-stale`, #3544). Parsed with THAT file's own closed grammar — one name per line,
+# blank lines and `#` comments skipped, NO TRIMMING, because a parser that trims is a parser
+# that guesses.
+#
+# CANNOT FALSE-FAIL, measured: every component-name source reachable in a FULL-marker block
+# is a COMPONENTS member, and the three non-manifest names (`scoped-tests`,
+# `node-tests`, `shell-selftests`) are emitted only by run_lite/run_delta paths, whose
+# LITE/DELTA markers the mode check below refuses outright.
+#
+# A REFUSAL, NOT A GUESS: no fuzzy matching and no "did you mean", which would invite acting
+# on a name the caller did not ask for.
+if [ ! -r "$MANIFEST" ]; then
+  # FAIL-CLOSED. A membership test that silently stops testing when its list is missing is
+  # exactly the permissive branch this script exists to refuse.
+  usage_refusal "the component manifest is not readable at $MANIFEST, so '$COMPONENT' cannot be confirmed to be a real component — refusing rather than skipping the check"
+fi
+_in_manifest=0
+while IFS= read -r _mn || [ -n "$_mn" ]; do
+  case "$_mn" in ''|'#'*) continue ;; esac
+  [ "$_mn" = "$COMPONENT" ] && { _in_manifest=1; break; }
+done < "$MANIFEST"
+if [ "$_in_manifest" -ne 1 ]; then
+  usage_refusal "'$COMPONENT' is not a component: it is absent from the gate's own component manifest ($MANIFEST, which the gate asserts against its running component set every run). A component-shaped METADATA line is not a component verdict, and a typo is refused by name rather than answered"
+fi
 # `.` is the one accepted character that is also a regex metacharacter. Escape it rather
 # than trusting it to match itself.
 COMP_RE=$(printf '%s' "$COMPONENT" | sed 's/\./[.]/g')
@@ -277,11 +317,28 @@ _key_token() {
 # (delegated to gate-liveness.sh) and the verdict question below are answered from the
 # SAME snapshot, so the two can never disagree about which run they read.
 #
-# ANSI is stripped at the parse site (#3400). The gate writes this block with plain
-# printf and never colours it, so this is defence rather than a fix — but the rule is
-# stated at the parse site, not at the emitter, and the strip is applied to the one
-# snapshot both assertions read. A FAILED strip is a refusal, never "use the original":
-# handing back unnormalised text converts a normalisation failure into a vacuous read.
+# THE BYTES ARE SNAPSHOTTED UNCHANGED, AND A SUMMARY CARRYING ESCAPES IS REFUSED — NOT
+# NORMALISED (#3750 review round 6, F6-1).
+#
+# This used to strip ANSI here, and NORMALISE-THEN-VALIDATE MANUFACTURES EVIDENCE:
+# `RESULT: P<ESC>[31mASS` strips to exactly `RESULT: PASS`, and so does a split
+# `tree-integrity:` token or a split component status. It is R2-1 with the arrow reversed —
+# that one defused gate tokens BEFORE stripping controls, reassembling a FORBIDDEN token on
+# the way OUT; this reassembled a VALID one on the way IN. Measured as three literal false
+# PASSes before the fix.
+#
+# THE #3400 TENSION, RESOLVED HERE SO NOBODY "RESTORES" THE STRIP ON DOCTRINE GROUNDS:
+# #3400 mandates colour-immunity at the parse site, and ITS SUBJECT IS CARGO OUTPUT — which
+# really is coloured, and whose colour survives redirection to a file. A SUMMARY BLOCK IS THE
+# GATE'S OWN ARTIFACT, written with plain `echo`/`printf` and never coloured. So for a
+# SUMMARY parse, stripping buys nothing and can only manufacture tokens: colour-immunity for
+# cargo output, REFUSAL for our own artifact.
+#
+# A summary carrying an escape is therefore not a summary this gate wrote, and the honest
+# answer is a NAMED REFUSAL rather than a repair. TAB, LF and CR are TOLERATED: the
+# feature-matrix annotation is free text derived from a real cargo argv, and with nothing
+# stripped they cannot splice a token, so refusing them would be a false FAIL bought for
+# nothing.
 # ---------------------------------------------------------------------------
 # The mktemp failure goes through the NORMAL verdict path like every other cause, so it
 # lands on stdout with the `summary:` line: a caller parsing verdicts must not have to read
@@ -298,9 +355,14 @@ fi
 if [ ! -f "$SUMMARY" ] || [ ! -r "$SUMMARY" ]; then
   cnm "summary-unreadable; not a readable regular file"
 fi
-_esc=$(printf '\033')
-if ! sed -E "s/${_esc}\\[[0-9;]*[A-Za-z]//g" "$SUMMARY" > "$SNAP" 2>/dev/null; then
-  cnm "summary-unreadable; could not snapshot/normalise the summary"
+if ! cat "$SUMMARY" > "$SNAP" 2>/dev/null; then
+  cnm "summary-unreadable; could not snapshot the summary"
+fi
+# ESC plus every other C0 control except TAB/LF/CR. `tr -d` then a size compare, so the test
+# needs no regex over binary and cannot itself be steered by the content.
+if [ "$(tr -d '\000-\010\013\014\016-\037\177' < "$SNAP" | wc -c)" \
+     != "$(wc -c < "$SNAP")" ]; then
+  cnm "summary-carries-escapes; this summary contains an escape or control sequence, so it is not an artifact this gate wrote — REFUSED rather than normalised, because stripping the sequence would splice a split token into a valid one (a manufactured verdict). Colour-immunity (#3400) is for CARGO output; a summary block is the gate's own plain-text artifact"
 fi
 
 # ---------------------------------------------------------------------------
