@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=512
+CASE_FLOOR=516
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -3825,6 +3825,51 @@ PYINNER
   check_verdict "$1" "$4" "$5" single-stream
 }
 profile_case "the narrow rig itself"            i4i.xlarge    4   MEETS-TARGET 0
+# THE DEFECT SCENARIO ITSELF, and the only shape that can detect it: a LARGE
+# machine under a four-CPU mask. Every other case sets both counts equal, so a
+# gate reading the wrong one is invisible to them -- which is how the original
+# defect survived, and how my first plant of it passed.
+mkfixture "$TMP/prof-masked" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/prof-masked/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["host"]["instance_type"] = "i4i.8xlarge"
+manifest["host"]["hardware_cpus"] = 32
+manifest["host"]["hardware_cpus_detail"] = "0-31"
+# The mask makes the PROCESS see exactly the narrow count. This is the value
+# `nproc` would have reported, and the value the guard must NOT read.
+manifest["host"]["process_cpus"] = 4
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/prof-masked"
+check_verdict "a 32-CPU machine masked down to 4" UNMEASURED 7 single-stream
+check_cause "a pinned large machine is not the narrow rig" rig-profile-mismatch
+if grep -q "MACHINE of 32 vCPU" "$TMP/err.txt"; then
+  ok "the refusal names the MACHINE's size, not the masked count the process saw"
+else
+  bad "the refusal does not name the machine's size, so it may be reading the process count"
+fi
+# ...and a machine whose size could not be measured is not a pass either.
+mkfixture "$TMP/prof-unmeasured" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/prof-unmeasured/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["host"]["hardware_cpus"] = "NOT-MEASURABLE"
+manifest["host"]["process_cpus"] = 4
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/prof-unmeasured"
+check_cause "a machine whose CPU count could not be measured" rig-profile-mismatch
 # THE FINDING: a wider i4i used to score against a band derived for 4 vCPU.
 profile_case "a wider i4i (8 vCPU)"             i4i.2xlarge   8   UNMEASURED   7
 profile_case "a far wider i4i (128 vCPU)"       i4i.32xlarge  128 UNMEASURED   7
