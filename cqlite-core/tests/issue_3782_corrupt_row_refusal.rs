@@ -58,34 +58,30 @@ use cqlite_core::Database;
 mod datasets_root;
 #[path = "support/corrupt_clustering_fixture.rs"]
 mod fixture;
+#[path = "support/multiset.rs"]
+mod multiset;
 
 use fixture::{comp_file, FixtureSpec, BIG_COMPOSITE, BTI_MULTICLUSTERING, FIX_KS, FIX_TABLE};
 
-/// The fixture's directory, resolved per TABLE (#3220) so a root that holds the
-/// keyspace but not this table cannot silently win the selection. The two specs
-/// live in DIFFERENT roots on a fleet box — the BTI one is git-committed in the
-/// checkout, the BIG one is fetched-corpus-only — so evidence, never a
-/// preference order, decides (#3104).
+/// The fixture's GENERATION directory, resolved per TABLE (#3220) so a root that
+/// holds the keyspace but not this table cannot silently win the selection. The
+/// two specs live in DIFFERENT roots on a fleet box — the BTI one is
+/// git-committed in the checkout, the BIG one is fetched-corpus-only — so
+/// evidence, never a preference order, decides (#3104).
+///
+/// Delegated to [`datasets_root::resolve_table_generation_dir`], which REQUIRES a
+/// `*-Data.db` in the chosen directory and picks deterministically rather than
+/// taking the first `read_dir` hit (roborev job 57 finding 2 — the checkout's
+/// copy of THIS BIG fixture's directory holds sidecars only, so an
+/// order-dependent selection can bind to an unusable generation). "Not found" is
+/// a loud named panic here, never a skip.
 fn fixture_dir(spec: &FixtureSpec) -> PathBuf {
-    let (ks, table) = (spec.keyspace, spec.table);
-    let root = match datasets_root::sstables_root_for_table(ks, table) {
-        Some(r) => r,
-        None => panic!(
-            "fixture {ks}.{table} not found; {}",
-            datasets_root::describe_search(ks, table)
-        ),
-    };
-    let dir = root.join(ks);
-    for e in std::fs::read_dir(&dir)
-        .expect("read keyspace dir")
-        .flatten()
-    {
-        let n = e.file_name().to_string_lossy().to_string();
-        if n.starts_with(&format!("{table}-")) && e.path().is_dir() {
-            return e.path();
-        }
-    }
-    panic!("fixture {ks}.{table} not found under {dir:?}");
+    datasets_root::resolve_table_generation_dir(spec.keyspace, spec.table).unwrap_or_else(|why| {
+        panic!(
+            "fixture {}.{} has no usable generation directory: {why}",
+            spec.keyspace, spec.table
+        )
+    })
 }
 
 fn schema_file(spec: &FixtureSpec) -> PathBuf {
@@ -195,26 +191,47 @@ async fn compaction_refuses_a_corrupt_row_and_never_loses_or_fabricates_partitio
         !control_rows.is_empty(),
         "0-rows-when-present: the control compaction must yield rows"
     );
-    let control_keys: BTreeSet<Vec<u8>> = control_rows
-        .iter()
-        .map(|r| r.key.as_bytes().to_vec())
-        .collect();
+    // MULTISET of partition keys, never a SET (roborev job 57 finding 1): the
+    // #3782 shape is "count goes UP while data is lost", and one of the ways it
+    // goes up is the header-arm resync RE-EMITTING a partition already emitted
+    // (declared gap #3928). A set comparison cannot see a surplus duplicate of a
+    // legitimate key, which is exactly the fabrication this case is named for.
+    let control_counts = multiset::multiset(control_rows.iter().map(|r| r.key.as_bytes().to_vec()));
 
     // AC8: the well-formed partition set is unchanged, and the two compaction
-    // surfaces still agree row-for-row on it.
+    // surfaces still agree row-for-row on it — asserted as MULTISET equality of
+    // the emitted keys, not as a row COUNT. A count can be equal while one key
+    // is dropped and another duplicated, which is the very trade #3782 measured.
     let cancel = cqlite_core::storage::scan_cancel::ScanCancel::new();
-    let mut streamed = 0usize;
+    let mut streamed_keys: Vec<Vec<u8>> = Vec::new();
     control_reader
-        .stream_all_partitions_for_compaction(Some(&schema), &cancel, |_row| {
-            streamed += 1;
+        .stream_all_partitions_for_compaction(Some(&schema), &cancel, |row| {
+            streamed_keys.push(row.key.as_bytes().to_vec());
             Ok(std::ops::ControlFlow::Continue(()))
         })
         .await
         .expect("the pristine fixture must stream-compact cleanly");
+    let streamed_counts = multiset::multiset(streamed_keys.iter().cloned());
     assert_eq!(
-        streamed,
+        streamed_keys.len(),
         control_rows.len(),
         "the buffered and streaming compaction surfaces must agree on a well-formed fixture"
+    );
+    let stream_surplus = multiset::surplus(&streamed_counts, &control_counts);
+    let stream_deficit = multiset::deficit(&streamed_counts, &control_counts);
+    // Reported as bounded surplus/deficit lists rather than `assert_eq!` on the
+    // two maps: an equality failure would dump a whole corpus of keys, and the
+    // two lists ARE the difference a reader needs.
+    assert!(
+        stream_surplus.is_empty() && stream_deficit.is_empty(),
+        "the two compaction surfaces must agree row-for-row on a well-formed fixture: \
+         streaming has {} surplus key occurrence(s) [{}] and {} missing [{}] \
+         (the row COUNTS above can be equal while one key is duplicated and another \
+         dropped, which is why this is a multiset comparison)",
+        stream_surplus.iter().map(|(_, n)| n).sum::<usize>(),
+        multiset::describe(&stream_surplus),
+        stream_deficit.iter().map(|(_, n)| n).sum::<usize>(),
+        multiset::describe(&stream_deficit)
     );
 
     let mutated_reader = open_reader(&staged.mutated_dir).await;
@@ -225,16 +242,22 @@ async fn compaction_refuses_a_corrupt_row_and_never_loses_or_fabricates_partitio
         Err(_) => {}
         Ok(rows) => {
             // If it ever returns Ok again, it may NEVER be the #3782 shape: a
-            // partition silently dropped, or one invented out of misaligned bytes.
-            let keys: BTreeSet<Vec<u8>> = rows.iter().map(|r| r.key.as_bytes().to_vec()).collect();
-            let lost = control_keys.difference(&keys).count();
-            let fabricated = keys.difference(&control_keys).count();
+            // partition silently dropped, or one invented out of misaligned
+            // bytes — INCLUDING a surplus duplicate of a real one, which the
+            // multiset counts below report and a set difference would not.
+            let counts = multiset::multiset(rows.iter().map(|r| r.key.as_bytes().to_vec()));
+            let lost = multiset::deficit(&counts, &control_counts);
+            let fabricated = multiset::surplus(&counts, &control_counts);
             panic!(
                 "compaction must refuse a corrupt row: got Ok with {} rows (control {}), \
-                 {lost} partition keys LOST and {fabricated} FABRICATED \
+                 {} partition-key occurrence(s) LOST [{}] and {} FABRICATED [{}] \
                  (before #3782: 102 rows, 2 lost, 3 fabricated)",
                 rows.len(),
-                control_rows.len()
+                control_rows.len(),
+                lost.iter().map(|(_, n)| n).sum::<usize>(),
+                multiset::describe(&lost),
+                fabricated.iter().map(|(_, n)| n).sum::<usize>(),
+                multiset::describe(&fabricated)
             );
         }
     }
@@ -332,19 +355,15 @@ fn data_files_for_table(keyspace: &str, table: &str) -> Vec<PathBuf> {
         return Vec::new();
     };
     let mut out: Vec<PathBuf> = Vec::new();
-    let prefix = format!("{table}-");
-    if let Ok(entries) = std::fs::read_dir(root.join(keyspace)) {
-        for e in entries.flatten() {
-            let dir = e.path();
-            if !dir.is_dir() || !e.file_name().to_string_lossy().starts_with(&prefix) {
-                continue;
-            }
-            if let Ok(rd) = std::fs::read_dir(&dir) {
-                for f in rd.flatten() {
-                    let p = f.path();
-                    if p.to_string_lossy().ends_with("-Data.db") {
-                        out.push(p);
-                    }
+    // EVERY usable generation directory, deterministically ordered — this case
+    // is the one that deliberately covers all of them, where the staging cases
+    // above take the one defined generation.
+    for dir in datasets_root::table_generation_dirs(&root, keyspace, table) {
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for f in rd.flatten() {
+                let p = f.path();
+                if p.to_string_lossy().ends_with("-Data.db") {
+                    out.push(p);
                 }
             }
         }
@@ -507,14 +526,16 @@ async fn stitched_verifier_scans_refuse_and_never_lose_or_fabricate_partitions()
     let staged = fixture::stage_control_and_mutated(&fixture_dir(&BIG_COMPOSITE), "stitched");
 
     let control = open_reader(&staged.control_dir).await;
-    let control_keys: BTreeSet<Vec<u8>> = control
-        .distinct_partition_keys()
-        .await
-        .expect("the pristine fixture must enumerate partition keys")
-        .into_iter()
-        .collect();
+    // MULTISET again (roborev job 57 finding 1): a duplicated key is fabrication
+    // and a set cannot express it.
+    let control_counts = multiset::multiset(
+        control
+            .distinct_partition_keys()
+            .await
+            .expect("the pristine fixture must enumerate partition keys"),
+    );
     assert!(
-        !control_keys.is_empty(),
+        !control_counts.is_empty(),
         "0-rows-when-present: the control must enumerate partition keys"
     );
     assert!(
@@ -530,14 +551,18 @@ async fn stitched_verifier_scans_refuse_and_never_lose_or_fabricate_partitions()
     match mutated.distinct_partition_keys().await {
         Err(e) => assert_corruption_kind(&e, "distinct_partition_keys"),
         Ok(keys) => {
-            let got: BTreeSet<Vec<u8>> = keys.into_iter().collect();
-            let lost = control_keys.difference(&got).count();
-            let fabricated = got.difference(&control_keys).count();
+            let got = multiset::multiset(keys);
+            let lost = multiset::deficit(&got, &control_counts);
+            let fabricated = multiset::surplus(&got, &control_counts);
             panic!(
-                "the stitched key enumeration must refuse a corrupt row: got Ok with {} keys \
-                 (control {}), {lost} LOST and {fabricated} FABRICATED",
+                "the stitched key enumeration must refuse a corrupt row: got Ok with {} \
+                 distinct keys (control {}), {} occurrence(s) LOST [{}] and {} FABRICATED [{}]",
                 got.len(),
-                control_keys.len()
+                control_counts.len(),
+                lost.iter().map(|(_, n)| n).sum::<usize>(),
+                multiset::describe(&lost),
+                fabricated.iter().map(|(_, n)| n).sum::<usize>(),
+                multiset::describe(&fabricated)
             );
         }
     }
@@ -545,14 +570,18 @@ async fn stitched_verifier_scans_refuse_and_never_lose_or_fabricate_partitions()
     match mutated.partition_verify_scan().await {
         Err(e) => assert_corruption_kind(&e, "partition_verify_scan"),
         Ok(rows) => {
-            let got: BTreeSet<Vec<u8>> = rows.into_iter().map(|(k, _ldt)| k).collect();
-            let lost = control_keys.difference(&got).count();
-            let fabricated = got.difference(&control_keys).count();
+            let got = multiset::multiset(rows.into_iter().map(|(k, _ldt)| k));
+            let lost = multiset::deficit(&got, &control_counts);
+            let fabricated = multiset::surplus(&got, &control_counts);
             panic!(
-                "the stitched verify scan must refuse a corrupt row: got Ok with {} partitions \
-                 (control {}), {lost} LOST and {fabricated} FABRICATED",
+                "the stitched verify scan must refuse a corrupt row: got Ok with {} distinct \
+                 partitions (control {}), {} occurrence(s) LOST [{}] and {} FABRICATED [{}]",
                 got.len(),
-                control_keys.len()
+                control_counts.len(),
+                lost.iter().map(|(_, n)| n).sum::<usize>(),
+                multiset::describe(&lost),
+                fabricated.iter().map(|(_, n)| n).sum::<usize>(),
+                multiset::describe(&fabricated)
             );
         }
     }

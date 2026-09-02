@@ -76,28 +76,17 @@ fn schema_file() -> PathBuf {
     datasets_root::schema_path(SCHEMA_FILE).expect("committed CQL schema (#3148)")
 }
 
-/// The fixture directory, resolved per TABLE across every candidate root
-/// (#3220) — a single env-derived root is a preference ordering, and neither
-/// candidate root is a superset of the other (#3104).
+/// The fixture GENERATION directory, resolved per TABLE across every candidate
+/// root (#3220) — a single env-derived root is a preference ordering, and neither
+/// candidate root is a superset of the other (#3104) — and selected
+/// DETERMINISTICALLY among the generations that actually carry a `*-Data.db`
+/// (roborev job 57 finding 2). The probe and the committed regression lane share
+/// this resolution as well as the mutation harness, so they cannot end up
+/// measuring different bytes.
 fn fixture_dir() -> PathBuf {
-    let root = match datasets_root::sstables_root_for_table(FIX_KS, FIX_TABLE) {
-        Some(r) => r,
-        None => panic!(
-            "fixture {FIX_KS}.{FIX_TABLE} not found; {}",
-            datasets_root::describe_search(FIX_KS, FIX_TABLE)
-        ),
-    };
-    let ks_dir = root.join(FIX_KS);
-    for e in std::fs::read_dir(&ks_dir)
-        .expect("read keyspace dir")
-        .flatten()
-    {
-        let n = e.file_name().to_string_lossy().to_string();
-        if n.starts_with(&format!("{FIX_TABLE}-")) && e.path().is_dir() {
-            return e.path();
-        }
-    }
-    panic!("fixture {FIX_KS}.{FIX_TABLE} not found under {ks_dir:?}");
+    datasets_root::resolve_table_generation_dir(FIX_KS, FIX_TABLE).unwrap_or_else(|why| {
+        panic!("fixture {FIX_KS}.{FIX_TABLE} has no usable generation directory: {why}")
+    })
 }
 
 fn table_schema() -> cqlite_core::schema::TableSchema {

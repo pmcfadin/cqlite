@@ -13,7 +13,10 @@
 //!    fixture, with the decode error's kind preserved (it names the offending
 //!    clustering column), instead of returning a short result set.
 //! 2. Neither arm ever FABRICATES: any partition either arm still answers `Ok`
-//!    for must return exactly the pristine fixture's rows for that partition.
+//!    for must return exactly the pristine fixture's rows for that partition —
+//!    compared as a MULTISET, so a surplus DUPLICATE of a legitimate row counts
+//!    as fabrication (roborev job 57 finding 1; duplication is how the measured
+//!    pre-fix compaction result grew to 102 rows while losing two partitions).
 //!
 //! # DECLARED GAP 1 of 2 — point and full do NOT yet agree here (#3782, #3922)
 //!
@@ -62,6 +65,8 @@ use cqlite_core::Config;
 
 #[path = "../support/corrupt_clustering_fixture.rs"]
 mod fixture;
+#[path = "../support/multiset.rs"]
+mod multiset;
 
 use super::datasets_root;
 
@@ -81,31 +86,27 @@ async fn open_db(root: &Path, schema: &Path, mode: ReadPathMode) -> cqlite_core:
     .database
 }
 
-/// The fixture directory, resolved per TABLE across every candidate root
-/// (#3220) — this BIG subject is a FETCHED fixture (its checkout directory holds
-/// sidecars only), so a checkout-first or env-first preference is wrong for one
-/// root or the other (#3104); evidence decides.
+/// The fixture GENERATION directory, resolved per TABLE across every candidate
+/// root (#3220) — this BIG subject is a FETCHED fixture (its checkout directory
+/// holds sidecars only), so a checkout-first or env-first preference is wrong for
+/// one root or the other (#3104); evidence decides — and selected
+/// DETERMINISTICALLY among the generations that actually carry a `*-Data.db`.
+///
+/// That second half is not theoretical here (roborev job 57 finding 2): the
+/// checkout's `composite_key_table-…/` holds four sidecars and no `Data.db`, so a
+/// selection taking the first `read_dir` hit without requiring the component can
+/// bind to a directory nothing can be read from. Absence is a loud named panic,
+/// never a skip.
 fn fixture_dir() -> std::path::PathBuf {
-    let root = match datasets_root::sstables_root_for_table(fixture::FIX_KS, fixture::FIX_TABLE) {
-        Some(r) => r,
-        None => panic!(
-            "fixture {}.{} not found; {}",
-            fixture::FIX_KS,
-            fixture::FIX_TABLE,
-            datasets_root::describe_search(fixture::FIX_KS, fixture::FIX_TABLE)
-        ),
-    };
-    let ks_dir = root.join(fixture::FIX_KS);
-    let prefix = format!("{}-", fixture::FIX_TABLE);
-    for e in std::fs::read_dir(&ks_dir)
-        .expect("read keyspace dir")
-        .flatten()
-    {
-        if e.path().is_dir() && e.file_name().to_string_lossy().starts_with(&prefix) {
-            return e.path();
-        }
-    }
-    panic!("fixture directory not found under {ks_dir:?}");
+    datasets_root::resolve_table_generation_dir(fixture::FIX_KS, fixture::FIX_TABLE).unwrap_or_else(
+        |why| {
+            panic!(
+                "fixture {}.{} has no usable generation directory: {why}",
+                fixture::FIX_KS,
+                fixture::FIX_TABLE
+            )
+        },
+    )
 }
 
 /// Render a `uuid` partition-key value as the hyphenated CQL literal
@@ -200,6 +201,7 @@ async fn full_read_refuses_a_corrupt_partition_and_neither_arm_fabricates() {
             !expected.is_empty(),
             "0-rows-when-present: control partition {key} yielded no rows"
         );
+        let expected_counts = multiset::multiset(expected.iter().cloned());
 
         match full.execute(&sql).await {
             Err(e) => {
@@ -213,19 +215,35 @@ async fn full_read_refuses_a_corrupt_partition_and_neither_arm_fabricates() {
                 carried_the_kind |= matches!(e, cqlite_core::Error::Corruption(_));
                 named_the_column |= e.to_string().contains("clustering_key2");
             }
+            // `normalize` sorts, so comparing the two Vecs IS exact multiset
+            // equality: neither a missing row nor a surplus DUPLICATE of a
+            // legitimate one can pass here.
             Ok(r) => assert_eq!(
                 normalize(&r.rows),
                 expected,
-                "the FULL path answered partition {key} with a set that is not the pristine one"
+                "the FULL path answered partition {key} with a multiset that is not the \
+                 pristine one"
             ),
         }
 
         if let Ok(r) = point.execute(&sql).await {
-            let got = normalize(&r.rows);
-            let fabricated: Vec<&String> = got.iter().filter(|x| !expected.contains(x)).collect();
+            // MULTISET, not membership (roborev job 57 finding 1). A membership
+            // test asks "is every returned row one the control also has", which
+            // N duplicate copies of a legitimate row satisfy — and duplication
+            // is precisely one of the shapes fabrication takes here: the
+            // partition-HEADER resync (declared gap #3928) advances one byte and
+            // can RE-EMIT a partition already emitted, which is how the measured
+            // pre-fix compaction result reached 102 rows while LOSING two
+            // partitions. Comparing occurrence COUNTS reports the surplus copy;
+            // membership cannot (proved in `support/multiset.rs`).
+            let got = multiset::multiset(normalize(&r.rows));
+            let fabricated = multiset::surplus(&got, &expected_counts);
             assert!(
                 fabricated.is_empty(),
-                "the POINT path FABRICATED rows for partition {key}: {fabricated:?}"
+                "the POINT path FABRICATED rows for partition {key} — {} surplus \
+                 occurrence(s) beyond the pristine multiset: {}",
+                fabricated.iter().map(|(_, n)| n).sum::<usize>(),
+                multiset::describe(&fabricated)
             );
         }
     }
