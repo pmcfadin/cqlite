@@ -139,8 +139,34 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   answer that never fires. The reviewed head comes from the JOB RECORD's `git_ref` (`<base40>..<head40>`),
   never from the `Enqueued job <N> for <sha>` line, which for a range review names only the BASE. A
   code-free PR diff is a loudly DECLARED `NOT-APPLICABLE`, because a code-free diff cannot be
-  roborev-certified at all. `PREMERGE: HOLD-CHECK` re-reads the PR thread and the issue it closes for a
+  roborev-certified at all.
+  **A RANGE MATCH ALONE DOES NOT BIND.** The leg's first draft reported the recorded verdict and
+  derived nothing from it — a false-green route in a merge gate, since a block naming an
+  in-progress, FAILED or findings-bearing job whose range happened to match bound the merge. It is
+  an ACCIDENT route before a hostile one: a lane pasting its own first FAILING round certifies
+  itself. A job binds only when the JOB RECORD's structured verdict — never the PR block's
+  self-reported one, which is untrusted text — says `clean`, or says `findings` AND an allowlisted
+  human authorized deferring them for that exact base/head/job. The verdict is three-valued and an
+  unreadable one is `UNMEASURED`: a range match is not a review. The deferral route exists because
+  roborev RE-REPORTS a lead-deferred finding on every later round, so a record stays `findings`
+  forever once findings were deferred and requiring `clean` outright would make such a merge
+  unobtainable. That authorization is re-verified through the SAME scanner the wrapper uses, under a
+  deliberately narrow kind returning a DISTINCT state, so nothing is decided from the block's text —
+  and the marker's `count=` half is deliberately NOT re-verified, which the output SAYS rather than
+  implies: it is matched against the count OBSERVED BY THE REVIEW, which this leg never ran.
+  `PREMERGE: HOLD-CHECK` re-reads the PR thread and the issue it closes for a
   column-zero `HOLD:` order, and the PR timeline for a lead disarm inside 30 minutes.
+  **The threads are read with `gh api --paginate`, every page decoded before any verdict.**
+  `--json comments` is a BOUNDED connection, so a persistent `HOLD:` outside the first page produced
+  a false `NO-HOLD-RECOGNISED` on the very artifact a lead posts a stop order in. One normalised
+  stream feeds both job discovery and the hold scan, and the REST-vs-GraphQL spelling difference
+  (`user.login`/`created_at` vs `author.login`/`createdAt`) is reconciled once at the fetch
+  boundary: read the wrong one and every author is EMPTY, which silently stops honouring an
+  allowlisted release — fail-closed, and wrong on correct input. An unrecognised payload shape
+  refuses rather than yielding a shorter comment list, because a short thread is indistinguishable
+  from a quiet one. **Markers are ordered by `updatedAt`, not `createdAt`**: what a reader sees is
+  the current text, so an old comment EDITED to carry `HOLD:` must not lose to a `GO:` posted before
+  that edit.
   **How a lead actually stops a merge (AC7):** convert the PR to draft (`gh pr ready --undo`), which
   GitHub enforces, or set a per-tier `ci:` state. **`gh pr merge --disable-auto` alone is NOT a stop** —
   it removes the auto-merge REQUEST and a plain `gh pr merge --squash` succeeds immediately afterward

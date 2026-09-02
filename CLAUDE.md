@@ -2016,10 +2016,40 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   skipped prefix is a COMMIT SET and never a path diff against the recorded base. **ANY recorded
   round that covers suffices** — every job on the PR is examined and one unretrievable record cannot
   end the scan (coverage wins outright; an unresolved record decides only when nothing bound, as
-  `UNMEASURED`). The disarm half is read with `gh api --paginate` and EVERY page is decoded before
-  any verdict: one page of 100 events is not the timeline, and a `clear` derived from a partially
+  `UNMEASURED`). **AND A RANGE MATCH ALONE DOES NOT BIND** — the leg's first draft REPORTED the
+  recorded verdict and derived nothing from it, declaring that a residual, which was a false-green
+  route in a merge gate: a block naming an in-progress, FAILED or findings-bearing job whose range
+  happened to match bound the merge, and it is an ACCIDENT route before a hostile one (a lane
+  pasting its own first FAILING round certifies itself). A job now binds only when the **JOB
+  RECORD's structured verdict** — never the PR block's self-reported one, which is untrusted text —
+  says `clean`, **or** says `findings` AND an allowlisted human authorized deferring them for that
+  exact base/head/job. The verdict is THREE-VALUED and an unreadable one is `UNMEASURED`: a range
+  match is not a review. The deferral route exists because roborev **re-reports** a lead-deferred
+  finding on every later round (#3626), so a record stays `findings` forever once findings were
+  deferred and requiring `clean` with no way out would make such a merge UNOBTAINABLE. That
+  authorization is RE-VERIFIED through the SAME scanner the wrapper uses
+  (`roborev-waiver-scan.py findings-deferral-authorization`, a deliberately narrow kind returning
+  the DISTINCT state `granted-authorization`), so nothing is decided from the block's text.
+  **What that kind deliberately does NOT judge, and the leg's output SAYS so rather than implying
+  it: the marker's `count=` half**, which is matched against the findings count OBSERVED BY THE
+  REVIEW — this leg never ran the review and the record carries a verdict letter and no count, so
+  fabricating one would be an affirmative assert over an unmeasured value and comparing the
+  marker's count with itself would be a tautology. It is enforced at review time, where the
+  measurement exists. **The disarm half AND BOTH COMMENT THREADS are read with `gh api --paginate`,
+  with EVERY page decoded before any verdict**: one page of 100 events is not the timeline, and
+  `--json comments` is a BOUNDED connection — so a persistent `HOLD:` outside the first page
+  produced a false `NO-HOLD-RECOGNISED` on the artifact a lead actually posts a stop order in. ONE
+  normalised stream feeds both job discovery and the hold scan, and the REST-vs-GraphQL spelling
+  difference (`user.login`/`created_at` vs `author.login`/`createdAt`) is reconciled ONCE at the
+  fetch boundary: read the wrong one and every author is EMPTY, which silently stops granting
+  deferrals and stops honouring an allowlisted release — fail-closed, and wrong on correct input.
+  An unrecognised payload shape REFUSES rather than yielding a shorter comment list, because a
+  short thread is indistinguishable from a quiet one. A `clear` derived from a partially
   read signal is a false clearance on exactly the scenario this leg exists for. **`PREMERGE: HOLD-CHECK`** — the machine-readable
-  half of the `HOLD:` re-read (below). **The third argument is
+  half of the `HOLD:` re-read (below). **Markers are ordered by `updatedAt`, not `createdAt`** —
+  what a reader SEES is the current text, so an OLD comment EDITED to carry `HOLD:` must not lose
+  to a `GO:` posted before that edit; a marker-bearing comment whose edit timestamp is unreadable
+  cannot be ordered against its siblings and is `UNMEASURED`. **The third argument is
   REQUIRED, and that is the #3465 mechanism**: verifying the head against a *claimed* certified sha never verified that a
   certified sha EXISTS. **Two distinct escapes, one mechanism.** #3408 = **no gate at all** (merged on
   22 `--lite` PASSes and not one full `scripts/agent-gate.sh` run, because nothing in the merge path
