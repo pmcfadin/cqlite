@@ -1410,7 +1410,7 @@ if [ "$PRP_ABSENT" -gt 0 ]; then
   printf '%s verdict-detail A common-dir `git fsck` does not walk those refs (it walks every\n' "$P"
   printf '%s verdict-detail worktree'"'"'s HEAD, index and reflogs, and the COMMON refs), so the rehash\n' "$P"
   printf '%s verdict-detail above reported nothing about them: this is exactly the missing-object\n' "$P"
-  printf '%s verdict-detail class the reachability discriminator treats as CORRUPT, found at a root\n' "$P"
+  printf '%s verdict-detail class the reachability discriminator treats as damage, found at a root\n' "$P"
   printf '%s verdict-detail that walk never had. Every lane on this box reads this store, so do NOT\n' "$P"
   printf '%s verdict-detail certify anything against this checkout.\n' "$P"
   printf '%s verdict-detail REMEDY: stop the lanes on this box and re-obtain the objects from the\n' "$P"

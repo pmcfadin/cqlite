@@ -154,7 +154,7 @@ whole_suite_checks() {
 # assertions (the two `command -v` guards and the fixture-construction asserts), so a
 # green run is 81 on any host that can run it at all; a green run BELOW this number
 # means cases were removed or the run was truncated. RAISE IT when you add cases.
-CASE_FLOOR=104
+CASE_FLOOR=123
 
 finish() {
   local rc=$?
@@ -1619,4 +1619,256 @@ if [ "$(printf '%s\n' "$OUT" | grep -c '^OBJECT-STORE: ')" = "$(printf '%s\n' "$
   ok "store-key: every line of the newline-path run is still anchored — sane() keeps doing the job it exists for, and the key does the job sane() cannot"
 else
   bad "store-key: an unanchored line appeared for a newline-bearing store path: [$(printf '%s\n' "$OUT" | tr '\n' '|')]"
+fi
+
+# --- Case 30: THE LINKED-WORKTREE ROOTS A COMMON-DIR fsck **DOES** WALK ------
+# THE REVIEW FINDING THIS CASE ANSWERS (#3749 review round 7) claimed that running fsck
+# with `--git-dir=<common>` discards linked worktrees' private administrative context, so
+# an object needed only by a lane's private HEAD or index could be overlooked and the
+# store reported VERIFIED. MEASURED ON git 2.43.0, THAT IS FALSE — and the reason this
+# case exists is that "false today" is not a property anybody had checked: the coverage
+# was BELIEVED, and a future git that narrowed fsck's worktree enumeration would have
+# shrunk this control silently. Now it reds a case.
+#
+# THREE ROOTS, EACH WITH A ONE-PROPERTY CONTROL. Each fixture is built by ONE code path
+# and the arms differ only in whether the object is deleted, and the construction is
+# asserted with git before the subject runs: the object really is gone, and the ONLY
+# thing that names it is the linked worktree.
+mk_wt_root_repo() {
+  # mk_wt_root_repo <name> <head|index|prunable> <delete|keep> -> path
+  # The victim object id is published to "$T/<name>.victim" and NOT to a variable: the
+  # caller uses $( ), which runs this in a SUBSHELL, so an assignment would never be seen
+  # (measured the hard way — it read as an unbound variable under set -u).
+  local r="$T/$1" mode="$2" act="$3" wt="$T/$1-wt" WTR_VICTIM=""
+  : >"$T/$1.victim"
+  mkdir -p "$r"
+  git init -q "$r" >/dev/null 2>&1
+  g "$r" config user.email t@t
+  g "$r" config user.name t
+  printf 'content aaa\n' >"$r/f1"
+  g "$r" add f1 >/dev/null
+  GIT_AUTHOR_DATE="$FIXTURE_DATE" GIT_COMMITTER_DATE="$FIXTURE_DATE" \
+    g "$r" -c user.email=t@t -c user.name=t commit -q -m c1 >/dev/null
+  g "$r" worktree add -q --detach "$wt" HEAD >/dev/null 2>&1 || { printf '%s' "$r"; return 0; }
+  case "$mode" in
+    head | prunable)
+      # A commit that exists ONLY as this linked worktree's detached HEAD.
+      printf 'lane-private\n' >"$wt/u"
+      g "$wt" add u >/dev/null
+      GIT_AUTHOR_DATE="$FIXTURE_DATE" GIT_COMMITTER_DATE="$FIXTURE_DATE" \
+        g "$wt" -c user.email=t@t -c user.name=t commit -q -m lane-only >/dev/null
+      WTR_VICTIM=$(g "$wt" rev-parse HEAD 2>/dev/null)
+      [ "$mode" = prunable ] && rm -rf "$wt"
+      ;;
+    index)
+      # A blob STAGED in the linked worktree and in no commit anywhere.
+      printf 'staged-only\n' >"$wt/s"
+      g "$wt" add s >/dev/null
+      WTR_VICTIM=$(g "$wt" rev-parse :s 2>/dev/null)
+      ;;
+  esac
+  printf '%s' "$WTR_VICTIM" >"$T/$1.victim"
+  if [ "$act" = delete ] && [ -n "$WTR_VICTIM" ]; then
+    chmod u+w "$(loose_path "$r" "$WTR_VICTIM")" 2>/dev/null
+    rm -f "$(loose_path "$r" "$WTR_VICTIM")"
+  fi
+  printf '%s' "$r"
+}
+for WTR_MODE in head index prunable; do
+  R_WTR=$(mk_wt_root_repo "wtroot-$WTR_MODE" "$WTR_MODE" delete)
+  WTR_DEAD=$(cat "$T/wtroot-$WTR_MODE.victim" 2>/dev/null || true)
+  R_WTR_OK=$(mk_wt_root_repo "wtroot-$WTR_MODE-ctl" "$WTR_MODE" keep)
+  WTR_ALIVE=$(cat "$T/wtroot-$WTR_MODE-ctl.victim" 2>/dev/null || true)
+  # CONSTRUCTION, ASSERTED WITH git AND NOT WITH THE SUBJECT: the two arms name the SAME
+  # object (so they differ in one property), the subject arm really has lost it, and the
+  # control really still has it.
+  if [ -n "$WTR_DEAD" ] && [ "$WTR_DEAD" = "$WTR_ALIVE" ] &&
+    ! git -C "$R_WTR" cat-file -e "$WTR_DEAD" 2>/dev/null &&
+    git -C "$R_WTR_OK" cat-file -e "$WTR_ALIVE" 2>/dev/null; then
+    ok "wt-root-plant($WTR_MODE): both arms name the same object $WTR_DEAD, the subject has lost it and the one-property control still holds it"
+  else
+    bad "wt-root-plant($WTR_MODE): dead='$WTR_DEAD' alive='$WTR_ALIVE' — the arms are not one property apart; the two cases below would prove nothing"
+  fi
+  # THE SUBJECT: non-passing, and never VERIFIED. `head` and `prunable` reach the fatal
+  # branch (the complaint survives --no-reflogs); `index` is asserted only as non-clean,
+  # because WHICH non-passing verdict it earns is git's business and not this control's
+  # claim — pinning the stronger one would red on a git that words it differently.
+  OUT=$(bash "$SUBJECT" --repo "$R_WTR" 2>&1)
+  RC=$?
+  record_out "wt-root-$WTR_MODE"
+  if [ "$RC" -ne 0 ] && [ "$(verdict_of)" != VERIFIED ]; then
+    ok "wt-root($WTR_MODE): a common-dir fsck DOES walk a linked worktree's private $WTR_MODE root — an object needed only by it is not reported clean (exit $RC, verdict $(verdict_of))"
+  else
+    bad "wt-root($WTR_MODE): exit $RC verdict='$(verdict_of)' — the sweep called a store VERIFIED while an object a linked worktree's $WTR_MODE root needs is absent"
+  fi
+  OUT=$(bash "$SUBJECT" --repo "$R_WTR_OK" 2>&1)
+  RC=$?
+  record_out "wt-root-$WTR_MODE-control"
+  if [ "$RC" -eq 0 ] && [ "$(verdict_of)" = VERIFIED ]; then
+    ok "wt-root($WTR_MODE-control): the same fixture with the object PRESENT is VERIFIED, so the non-pass above is the missing object and not the worktree"
+  else
+    bad "wt-root($WTR_MODE-control): exit $RC verdict='$(verdict_of)' — the control does not pass, so the subject arm attributes nothing"
+  fi
+done
+
+# --- Case 31: THE ROOT A COMMON-DIR fsck DOES **NOT** WALK ------------------
+# THE REAL HOLE, and it is narrower and sharper than the review finding that led to it.
+# A LINKED worktree's per-worktree refs (`refs/worktree/*`, `refs/bisect/*`,
+# `refs/rewritten/*`) are roots only for an fsck run with THAT worktree's git dir. Delete
+# an object named only by one and a common-dir fsck exits **0**: the worktree's HEAD
+# reflog echoes the id, and that echo CLEARS under `--no-reflogs`, so even the round-4
+# attribution walk reads it as reflog-scoped. The MAIN worktree's per-worktree refs live
+# in the common dir and ARE walked, which is why this fixture uses a LINKED one.
+mk_wt_privateref_repo() {
+  # mk_wt_privateref_repo <name> <delete|keep> -> path; the victim id is published to
+  # "$T/<name>.victim" for the same subshell reason as mk_wt_root_repo above.
+  local r="$T/$1" act="$2" wt="$T/$1-wt" WTP_VICTIM=""
+  : >"$T/$1.victim"
+  mkdir -p "$r"
+  git init -q "$r" >/dev/null 2>&1
+  g "$r" config user.email t@t
+  g "$r" config user.name t
+  printf 'content aaa\n' >"$r/f1"
+  g "$r" add f1 >/dev/null
+  GIT_AUTHOR_DATE="$FIXTURE_DATE" GIT_COMMITTER_DATE="$FIXTURE_DATE" \
+    g "$r" -c user.email=t@t -c user.name=t commit -q -m c1 >/dev/null
+  g "$r" worktree add -q --detach "$wt" HEAD >/dev/null 2>&1 || { printf '%s' "$r"; return 0; }
+  printf 'private-ref-only\n' >"$wt/u"
+  g "$wt" add u >/dev/null
+  GIT_AUTHOR_DATE="$FIXTURE_DATE" GIT_COMMITTER_DATE="$FIXTURE_DATE" \
+    g "$wt" -c user.email=t@t -c user.name=t commit -q -m private-ref >/dev/null
+  WTP_VICTIM=$(g "$wt" rev-parse HEAD 2>/dev/null)
+  g "$wt" update-ref refs/worktree/private "$WTP_VICTIM" >/dev/null 2>&1
+  # Move HEAD off it, and drop the reflogs, so the per-worktree REF is the ONLY thing
+  # left naming the object — which is the whole point of the case.
+  g "$wt" checkout -q --detach HEAD~1 >/dev/null 2>&1
+  rm -f "$r/.git/worktrees/$(basename "$wt")/logs/HEAD" "$r/.git/logs/HEAD" 2>/dev/null
+  rm -rf "$r/.git/logs/refs" 2>/dev/null
+  printf '%s' "$WTP_VICTIM" >"$T/$1.victim"
+  if [ "$act" = delete ] && [ -n "$WTP_VICTIM" ]; then
+    chmod u+w "$(loose_path "$r" "$WTP_VICTIM")" 2>/dev/null
+    rm -f "$(loose_path "$r" "$WTP_VICTIM")"
+  fi
+  printf '%s' "$r"
+}
+R_WTP=$(mk_wt_privateref_repo wtpriv delete)
+WTP_DEAD=$(cat "$T/wtpriv.victim" 2>/dev/null || true)
+R_WTP_OK=$(mk_wt_privateref_repo wtpriv-ctl keep)
+WTP_ALIVE=$(cat "$T/wtpriv-ctl.victim" 2>/dev/null || true)
+WTP_RAW=$(fsck_status_mode "$R_WTP")
+WTP_RAW_NR=0
+git -C "$R_WTP" fsck --no-progress --no-dangling --no-reflogs >/dev/null 2>&1 || WTP_RAW_NR=$?
+# THE CONSTRUCTION ASSERT IS ALSO THE EVIDENCE THAT THE PROBE IS LOAD-BEARING: raw git,
+# in exactly the configuration the sweep's walks use, calls this store CLEAN. Without
+# that, a green below could not distinguish "the probe found it" from "fsck found it".
+if [ -n "$WTP_DEAD" ] && [ "$WTP_DEAD" = "$WTP_ALIVE" ] &&
+  ! git -C "$R_WTP" cat-file -e "$WTP_DEAD" 2>/dev/null &&
+  git -C "$R_WTP_OK" cat-file -e "$WTP_ALIVE" 2>/dev/null &&
+  [ "$(git --git-dir="$R_WTP/.git" rev-parse --verify -q refs/worktree/private 2>/dev/null)" != "$WTP_DEAD" ] &&
+  [ "$(git --git-dir="$R_WTP/.git/worktrees/wtpriv-wt" rev-parse --verify -q refs/worktree/private 2>/dev/null)" = "$WTP_DEAD" ] &&
+  [ "$WTP_RAW" -eq 0 ] && [ "$WTP_RAW_NR" -eq 0 ]; then
+  ok "wt-privateref-plant: $WTP_DEAD is named ONLY by the LINKED worktree's refs/worktree/private (invisible from the common dir), it is absent, the control still holds it, and a raw common-dir fsck calls this store CLEAN with and without reflogs — so anything found below is found by the probe"
+else
+  bad "wt-privateref-plant: dead='$WTP_DEAD' alive='$WTP_ALIVE' raw-fsck=$WTP_RAW/$WTP_RAW_NR — not the shape this case is about; the arms below would prove nothing"
+fi
+if run 4 "wt-privateref: CORRUPT" --repo "$R_WTP"; then
+  if [ "$(verdict_of)" = CORRUPT ] &&
+    printf '%s\n' "$OUT" | grep -q "^OBJECT-STORE: private-root ABSENT $WTP_DEAD .* refs/worktree/private$"; then
+    ok "wt-privateref: an object named only by a LINKED worktree's per-worktree ref is CORRUPT (exit 4) and the missing root is NAMED — the store a raw fsck called clean"
+  else
+    bad "wt-privateref: verdict='$(verdict_of)' — wanted CORRUPT naming $WTP_DEAD: $(printf '%s\n' "$OUT" | grep 'private-root' | head -2 | tr '\n' ' ')"
+  fi
+fi
+if run 0 "wt-privateref-control: VERIFIED" --repo "$R_WTP_OK"; then
+  if [ "$(verdict_of)" = VERIFIED ] &&
+    printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: measured private-roots checked=1 .* absent=0 '; then
+    ok "wt-privateref(control): the SAME fixture with the object present is VERIFIED, and the affirmative branch reports that it CHECKED the private root — so VERIFIED is an affirmative statement about it, not silence"
+  else
+    bad "wt-privateref(control): verdict='$(verdict_of)' census='$(printf '%s\n' "$OUT" | grep 'measured private-roots')' — the control must pass AND must show the root was checked"
+  fi
+fi
+
+# --- Case 32: A WORKTREE THAT CANNOT BE INSPECTED IS NOT A CLEAN ONE --------
+# The permissive direction here would be silent and total: a worktree whose refs cannot
+# be listed contributes ZERO roots, so the probe would report `absent=0` and the sweep
+# would go on to VERIFIED — the exact shape CLAUDE.md names (a multi-state signal whose
+# unmeasured state inherits the permissive branch). It is UNMEASURED instead, and the
+# worktree is NAMED.
+R_WTU=$(mk_wt_root_repo wtunread head keep)
+WTU_ADMIN="$R_WTU/.git/worktrees/wtunread-wt"
+if [ "$(id -u)" = 0 ]; then
+  skipped=1
+  ok "wt-unreadable: SKIPPED as root — permission bits are advisory for uid 0, so a chmod plant would not make the admin dir unreadable and a green would prove nothing"
+elif [ -d "$WTU_ADMIN" ] && chmod 000 "$WTU_ADMIN" 2>/dev/null &&
+  ! git --git-dir="$WTU_ADMIN" for-each-ref >/dev/null 2>&1; then
+  ok "wt-unreadable-plant: the linked worktree's admin dir really is unreadable to this process (git cannot list its refs)"
+  if run 5 "wt-unreadable: UNMEASURED" --repo "$R_WTU"; then
+    if [ "$(verdict_of)" = UNMEASURED ] &&
+      printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: private-root UNREADABLE wtunread-wt ' &&
+      ! printf '%s\n' "$OUT" | grep -q 'verdict VERIFIED'; then
+      ok "wt-unreadable: a registered worktree whose refs cannot be listed is UNMEASURED and is NAMED — never a silent zero-root contribution to VERIFIED"
+    else
+      bad "wt-unreadable: verdict='$(verdict_of)' lines='$(printf '%s\n' "$OUT" | grep 'private-root' | head -2 | tr '\n' ' ')'"
+    fi
+  fi
+  chmod 755 "$WTU_ADMIN" 2>/dev/null
+  # ONE PROPERTY BACK: with the permissions restored the same fixture is VERIFIED, so the
+  # UNMEASURED above is the unreadable admin dir and not the fixture.
+  if run 0 "wt-unreadable-control: VERIFIED" --repo "$R_WTU"; then
+    if [ "$(verdict_of)" = VERIFIED ]; then
+      ok "wt-unreadable(control): restoring ONLY the permission bits makes the same fixture VERIFIED"
+    else
+      bad "wt-unreadable(control): verdict='$(verdict_of)' after restoring permissions"
+    fi
+  fi
+else
+  bad "wt-unreadable-plant: could not make the linked worktree's admin dir unreadable ($WTU_ADMIN) — the case below would prove nothing"
+fi
+
+# --- Case 33: THE PROBE MODE'S OWN CONTRACT --------------------------------
+# The caller requires EXACTLY ONE terminal census line and reads the exit status and that
+# line as a CONJUNCTION (the round-4 two-channel rule, applied to the channel this round
+# adds). If the mode stopped printing the census, or printed two, the caller would report
+# UNMEASURED — so the contract is pinned here, where the failure is attributable.
+OUT=$(bash "$SUBJECT" --repo "$R_WTP_OK" --probe-private-roots 2>&1)
+RC=$?
+record_out "probe-mode"
+PRP_CENSUS_N=$(printf '%s\n' "$OUT" | grep -c '^OBJECT-STORE: private-roots checked=')
+if [ "$RC" -eq 0 ] && [ "$PRP_CENSUS_N" -eq 1 ] &&
+  ! printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: verdict '; then
+  ok "probe-mode: --probe-private-roots exits 0, prints exactly one terminal census line, and emits NO verdict — it is a measurement the sweep consumes, not a certification"
+else
+  bad "probe-mode: rc=$RC census-lines=$PRP_CENSUS_N verdict='$(verdict_of)' — the contract the sweep's caller-side conjunction depends on is broken"
+fi
+if bash "$SUBJECT" --repo "$R_WTP_OK" --probe-private-roots --print-store >/dev/null 2>&1; then
+  bad "probe-mode: --probe-private-roots and --print-store were accepted together — two early-exit modes in one run have no defined output"
+else
+  ok "probe-mode: --probe-private-roots and --print-store are mutually exclusive (usage error, no verdict)"
+fi
+
+# --- Case 34: THE PROBE IS THE THIRD STAGE, NEVER A FOURTH (placement) ------
+# WHY THIS IS A CORRECTNESS CASE AND NOT BOOKKEEPING. Every caller derives its own
+# uninterruptible-block bound from the sweep's declared MAX_SWEEP_WALKS, and that number
+# stayed at 3 only because the reachability-attribution path (3 fsck walks) TERMINATES
+# before the probe can run. That is a property of WHERE the call sits, so no arithmetic
+# can check it: it is measured against the fixture that actually spends three walks.
+OUT=$(bash "$SUBJECT" --repo "$R_LIVE_MISS" 2>&1)
+RC=$?
+record_out "probe-placement-3walk"
+if [ "$RC" -eq 4 ] &&
+  printf '%s\n' "$OUT" | grep -q 'pass 3: fsck --no-reflogs' &&
+  ! printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: private-root'; then
+  ok "probe-placement: the 3-fsck-walk path (reachability attribution) terminates BEFORE the private-root probe, so the worst case is still MAX_SWEEP_WALKS bounded stages and no caller's derived bound moved"
+else
+  bad "probe-placement: rc=$RC — a run that spent THREE fsck walks also ran the probe, which makes every caller's uninterruptible window one stage wider than its bound assumes: $(printf '%s\n' "$OUT" | grep -cE 'measured pass|private-root') marker(s)"
+fi
+# And the complementary half: a run that reaches the affirmative branch DID pay for it,
+# so the stage is real and the case above is not passing because the probe never runs.
+OUT=$(bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+RC=$?
+record_out "probe-placement-clean"
+if [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: measured private-roots '; then
+  ok "probe-placement(control): a run that reaches VERIFIED DOES run the probe — the case above is a placement property, not a probe that never fires"
+else
+  bad "probe-placement(control): rc=$RC — a VERIFIED run did not run the private-root probe at all"
 fi
