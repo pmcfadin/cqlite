@@ -185,8 +185,13 @@ USAGE
 CORPUS=''
 TICKET_TEMPLATE=''
 LOADGEN_REF=''
-BASE_REF='cfa93fe99^'
-HEAD_REF='cfa93fe99'
+#: The #2820 commit: "perf(#2820): batch the k-way merge egress fan-in (L1),
+#: co-designed with #2765 (#3659)". ONE literal, so the default refs and the
+#: measurement pin cannot drift apart into two claims about which commit this
+#: instrument is about.
+AB3649_PIN='cfa93fe99'
+BASE_REF="${AB3649_PIN}^"
+HEAD_REF="$AB3649_PIN"
 REPLICATES=7
 WORK_DIR='/data/ab-3649'
 REPO=''
@@ -628,6 +633,9 @@ manifest = {
     },
     "workload": {
         "shape": env("AB_SHAPE", ""),
+        # The spelling the operator typed, kept because it is what they will
+        # recognise in a diagnostic. `shape` is what the records carry.
+        "shape_requested": env("AB_SHAPE_REQUESTED", ""),
         "profile": env("AB_PROFILE", None),
         "ramp": env("AB_RAMP", ""),
         "step_duration": env("AB_STEP_DURATION", ""),
@@ -705,7 +713,21 @@ manifest = {
     },
     "host": {
         "instance_type": env("AB_INSTANCE_TYPE", "NOT-RECORDED"),
-        "nproc": int(env("AB_NPROC", "0")),
+        # RENAMED from `nproc`, deliberately. The old key invited the mistake it
+        # was part of: it read as "the machine's CPUs" and held "the CPUs this
+        # process may use". Both facts are recorded now, under names that say
+        # which is which.
+        "process_cpus": int(env("AB_PROCESS_CPUS", "0")),
+        # An INTEGER when the machine could be sized, and the explicit
+        # NOT-MEASURABLE string otherwise. Never a numeric-looking string: the
+        # analyzer compares it to a number, and a string that looks like one is
+        # how a comparison silently stops matching.
+        "hardware_cpus": (
+            int(env("AB_HARDWARE_CPUS", ""))
+            if (env("AB_HARDWARE_CPUS", "") or "").isdigit()
+            else "NOT-MEASURABLE"
+        ),
+        "hardware_cpus_detail": env("AB_HARDWARE_CPUS_DETAIL", "NOT-RECORDED"),
         "loadavg1": env("AB_LOADAVG1", "NOT-RECORDED"),
         "load_limit": env("AB_LOAD_LIMIT", "NOT-RECORDED"),
         "contention": env("AB_CONTENTION", "NOT-RECORDED"),
@@ -726,7 +748,14 @@ PYEOF
 export AB_DRIVER_VERSION="$DRIVER_VERSION"
 export AB_REPLICATES="$REPLICATES"
 export AB_BASE_REF="$BASE_REF" AB_HEAD_REF="$HEAD_REF"
-export AB_SHAPE="$SHAPE" AB_RAMP="$RAMP" AB_STEP_DURATION="$STEP_DURATION"
+# AB_SHAPE IS NOT EXPORTED HERE. It names the label the RECORDS will carry, and
+# that label does not exist until `--shape` is canonicalised below. Exporting
+# the raw value produced canonical labels in the JSONL and RAW labels in the
+# manifest, so an accepted alias (`limit` -> `limit-k`) made the analyzer reject
+# a valid COMPLETED session with shape-record-mismatch. The requested spelling
+# is kept under its own name, exactly as the ticket's original path is.
+export AB_SHAPE_REQUESTED="$SHAPE"
+export AB_RAMP="$RAMP" AB_STEP_DURATION="$STEP_DURATION"
 export AB_PROFILE="$PROFILE"
 export AB_STEP_DURATION_SECONDS="$STEP_DURATION_SECONDS"
 export AB_PREWARM="$PREWARM" AB_TEMPERATURE="$TEMPERATURE"
@@ -796,10 +825,22 @@ AB_INSTANCE_TYPE="$(imds_instance_type)"
   || AB_INSTANCE_TYPE="$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || true)"
 [ -n "$AB_INSTANCE_TYPE" ] || AB_INSTANCE_TYPE='NOT-RECORDED'
 export AB_INSTANCE_TYPE
-export AB_NPROC="$(nproc)"
+# TWO DIFFERENT FACTS, RECORDED SEPARATELY. `nproc` is the CPUs available to
+# THIS PROCESS -- it honours the affinity mask, so on a 16-CPU box under
+# `taskset -c 0-3` it reports 4. The rig requirement is about the MACHINE, so
+# the machine's size is read from the sysfs online set, which is unaffected by
+# any mask. Recording only one of these is what let a pinned large rig pass a
+# guard whose own text says pinning must not qualify it.
+export AB_PROCESS_CPUS="$(nproc)"
+AB_HW_RAW="$(python3 "$SUPPORT" hardware-cpus 2>/dev/null || echo 'NOT-MEASURABLE the probe failed')"
+export AB_HARDWARE_CPUS="${AB_HW_RAW%% *}"
+export AB_HARDWARE_CPUS_DETAIL="${AB_HW_RAW#* }"
 export AB_LOADAVG1="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo NOT-RECORDED)"
 export AB_KERNEL="$(uname -sr)"
-say "host instance-type $AB_INSTANCE_TYPE nproc $AB_NPROC loadavg1 $AB_LOADAVG1 kernel $AB_KERNEL"
+say "host instance-type $AB_INSTANCE_TYPE hardware-cpus $AB_HARDWARE_CPUS ($AB_HARDWARE_CPUS_DETAIL) process-cpus $AB_PROCESS_CPUS loadavg1 $AB_LOADAVG1 kernel $AB_KERNEL"
+if [ "$AB_HARDWARE_CPUS" != "NOT-MEASURABLE" ] && [ "$AB_PROCESS_CPUS" != "$AB_HARDWARE_CPUS" ]; then
+  say "host NOTE this process sees $AB_PROCESS_CPUS of the machine's $AB_HARDWARE_CPUS CPUs, so an affinity mask is in force. The rig requirement is about the MACHINE and is checked against the machine's count"
+fi
 # CHECK THE PROPERTY THE LABEL STOOD FOR. The acceptance criteria say "field i4i
 # rig", but they do not care about the string -- they care about what it stood
 # for, and one load-bearing part is an UNCONTENDED host. A co-scheduled build or
@@ -807,7 +848,7 @@ say "host instance-type $AB_INSTANCE_TYPE nproc $AB_NPROC loadavg1 $AB_LOADAVG1 
 # steals it from whichever arm happens to be running, which is noise the pairing
 # cannot cancel. Judged against the core count rather than a constant: loadavg 3
 # is idle on 64 cores and saturated on 4.
-AB_LOAD_LIMIT="$(awk -v n="$AB_NPROC" 'BEGIN { l = n / 2; if (l < 2) l = 2; printf "%.2f", l }')"
+AB_LOAD_LIMIT="$(awk -v n="$AB_PROCESS_CPUS" 'BEGIN { l = n / 2; if (l < 2) l = 2; printf "%.2f", l }')"
 export AB_LOAD_LIMIT
 if [ "$AB_LOADAVG1" = "NOT-RECORDED" ]; then
   AB_CONTENTION='NOT-MEASURABLE'
@@ -829,7 +870,7 @@ if [ "$AB_CONTENTION" = "CONTENDED" ]; then
   # (--control) disclaims the whole verdict, so the refusal would buy nothing and
   # cost the session. Observed directly: this threshold made a DETERMINISTIC test
   # suite flaky on a shared host, crossing the limit between two cases of one run.
-  warn "host contention CONTENDED -- the 1-minute load average is $AB_LOADAVG1 on $AB_NPROC cores (limit $AB_LOAD_LIMIT), so something else was using this host at session start. Co-scheduled work steals CPU from whichever arm is running and the pairing cannot cancel it. This is RECORDED and reported beside the verdict, not refused; confirm the box is yours before reporting the result"
+  warn "host contention CONTENDED -- the 1-minute load average is $AB_LOADAVG1 on $AB_PROCESS_CPUS available CPUs (limit $AB_LOAD_LIMIT), so something else was using this host at session start. Co-scheduled work steals CPU from whichever arm is running and the pairing cannot cancel it. This is RECORDED and reported beside the verdict, not refused; confirm the box is yours before reporting the result"
 fi
 
 # THE SHAPE IS CANONICALISED BEFORE ANYTHING READS IT, controls included. The
@@ -847,6 +888,10 @@ if [ "$SHAPE_CANONICAL" != "$SHAPE" ]; then
   say "shape '$SHAPE' canonicalised to '$SHAPE_CANONICAL' -- flight-loadgen emits the canonical label in every record, so the driver carries the same value the records will"
 fi
 SHAPE="$SHAPE_CANONICAL"
+# EXPORTED ON THE SAME BREATH AS THE ASSIGNMENT, for the reason the ticket
+# export is: `die` writes a manifest, so any interval between the transform and
+# the export is one in which a manifest records the untransformed value.
+export AB_SHAPE="$SHAPE"
 
 [ -f "$TICKET_TEMPLATE" ] || die ticket-template-absent "$TICKET_TEMPLATE does not exist"
 # VALIDATE-THEN-REREAD IS A TOCTOU ON THE MEASUREMENT INPUT. The template was
@@ -1055,6 +1100,28 @@ HEAD_SHA="$(resolve "$HEAD_REF")"
 [ -n "$BASE_SHA" ] || die arm-ref-unresolvable "--base-ref $BASE_REF does not resolve to a commit in $REPO"
 [ -n "$HEAD_SHA" ] || die arm-ref-unresolvable "--head-ref $HEAD_REF does not resolve to a commit in $REPO"
 [ "$BASE_SHA" != "$HEAD_SHA" ] || die arm-refs-identical "both arms resolve to $BASE_SHA"
+# A MEASUREMENT IS THE #2820 COMPARISON OR IT IS A CONTROL. The refs default to
+# the right commits, but an unlabelled session could override them with ANY two
+# distinct commits and the analyzer would still present the result as the #2820
+# verdict -- authoritative about something the session did not measure, which is
+# the profile defect's family. `cfa93fe99` is "perf(#2820): batch the k-way
+# merge egress fan-in (L1), co-designed with #2765 (#3659)".
+#
+# REFUSED, NEVER REORDERED. Swapping the arms to match would invert the ratio's
+# meaning while reporting success -- a silently wrong number, which is worse
+# than any refusal.
+if [ -z "$CONTROL" ]; then
+  PIN_BASE="$(resolve "${AB3649_PIN}^" 2>/dev/null || true)"
+  PIN_HEAD="$(resolve "$AB3649_PIN" 2>/dev/null || true)"
+  if [ -z "$PIN_BASE" ] || [ -z "$PIN_HEAD" ]; then
+    die arm-pin-unresolvable \
+      "the #2820 commit $AB3649_PIN (or its parent) does not resolve in $REPO, so this session cannot confirm it is measuring #2820. Point --repo at a checkout containing it, or run as a --control"
+  fi
+  if [ "$BASE_SHA" != "$PIN_BASE" ] || [ "$HEAD_SHA" != "$PIN_HEAD" ]; then
+    die arm-refs-not-2820 \
+      "this session's arms are base=$BASE_SHA head=$HEAD_SHA, but the #2820 comparison is base=$PIN_BASE ($AB3649_PIN^) head=$PIN_HEAD ($AB3649_PIN), IN THAT ORDER. The analyzer presents an unlabelled session as the #2820 verdict, so measuring another pair -- or the same pair reversed, which inverts the ratio -- would be authoritative about something this session did not measure. The arms are NOT reordered for you: a silently inverted ratio is worse than a refusal. Run it as a --control to compare other commits"
+  fi
+fi
 LOADGEN_SHA_WANTED="$(resolve "${LOADGEN_REF:-$HEAD_REF}")"
 [ -n "$LOADGEN_SHA_WANTED" ] || die arm-ref-unresolvable \
   "--loadgen-ref ${LOADGEN_REF:-$HEAD_REF} does not resolve to a commit in $REPO"

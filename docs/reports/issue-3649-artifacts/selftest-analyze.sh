@@ -170,7 +170,9 @@ def main():
         },
         "host": {
             "instance_type": "i4i.xlarge",
-            "nproc": 4,
+            "process_cpus": 4,
+            "hardware_cpus": 4,
+            "hardware_cpus_detail": "0-3",
             "loadavg1": "0.05",
             "load_limit": "2.00",
             "contention": "QUIET",
@@ -2088,6 +2090,16 @@ else
     git config user.name selftest
     printf 'one\n' > f.txt && git add f.txt && git commit -qm one
     printf 'two\n' > f.txt && git commit -qam two
+    # THE SCRATCH REPO SATISFIES THE #2820 PIN FOR REAL, rather than the driver
+    # check being bypassed for it. Round 19 requires an unlabelled measurement's
+    # arms to be cfa93fe99^ and cfa93fe99, and the sessions here run against a
+    # throwaway repository that cannot contain that commit. Git resolves REFS
+    # and object ids from one namespace, so a tag NAMED cfa93fe99 makes both
+    # `cfa93fe99` and `cfa93fe99^` resolve -- which means these cases exercise
+    # the real resolution path and the real refusal, instead of a manifest
+    # patched after the fact. Making the world satisfy the requirement beats
+    # editing the record of it.
+    git tag cfa93fe99 HEAD
   ) > /dev/null 2>&1
   if [ "$(git -C "$SCRATCH" rev-list --count HEAD 2>/dev/null || echo 0)" -ge 2 ]; then
     ok "the driver-guard cases have a scratch repository, so none of them depends on where this suite lives"
@@ -2921,7 +2933,8 @@ try:
         manifest = json.load(handle)
 except (OSError, ValueError):
     raise SystemExit(0)
-manifest["host"]["nproc"] = 4
+manifest["host"]["hardware_cpus"] = 4
+manifest["host"]["process_cpus"] = 4
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(manifest, handle, indent=1, sort_keys=True)
 PYINNER
@@ -3599,7 +3612,8 @@ path = sys.argv[1]
 with open(path, encoding="utf-8") as handle:
     manifest = json.load(handle)
 manifest["host"]["instance_type"] = os.environ["AB_TYPE"]
-manifest["host"]["nproc"] = int(os.environ["AB_NPROC"])
+manifest["host"]["hardware_cpus"] = int(os.environ["AB_NPROC"])
+manifest["host"]["process_cpus"] = int(os.environ["AB_NPROC"])
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(manifest, handle, indent=1, sort_keys=True)
 PYINNER
@@ -3614,7 +3628,7 @@ profile_case "a narrower host (2 vCPU)"         i4i.large     2   UNMEASURED   7
 check_cause "a host that is not the narrow profile" rig-profile-mismatch
 # The refusal must name the affinity residual, because an operator who pinned a
 # big rig to 4 cores will otherwise read this as a false red.
-if grep -q 'PINNING A LARGER RIG TO 4 CORES DOES NOT SUBSTITUTE' "$TMP/err.txt"; then
+if grep -q 'PINNING A LARGER RIG TO 4 CPUs DOES NOT SUBSTITUTE' "$TMP/err.txt"; then
   ok "the profile refusal states that pinning does not substitute for the machine"
 else
   bad "the profile refusal does not address the pinning case an operator will try"
@@ -3649,7 +3663,8 @@ import sys
 path = sys.argv[1]
 with open(path, encoding="utf-8") as handle:
     manifest = json.load(handle)
-manifest["host"]["nproc"] = 64
+manifest["host"]["hardware_cpus"] = 64
+manifest["host"]["process_cpus"] = 64
 manifest["control"] = "wider-rig-sensitivity"
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(manifest, handle, indent=1, sort_keys=True)

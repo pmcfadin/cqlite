@@ -92,6 +92,10 @@ RECORD_FIELD_DISPOSITION = {
 #: constrains a step record. Same completeness case, other direction.
 WORKLOAD_DISPOSITION = {
     "shape": ("constrains", "record.shape"),
+    "shape_requested": ("excused",
+                        "the spelling the operator typed, before canonicalisation; "
+                        "it constrains no record field because the records carry "
+                        "the canonical label, which is `shape`"),
     "profile": ("excused",
                 "the target band this session declared; it constrains no record "
                 "field because it is about the BAND the ratio is compared to, "
@@ -279,6 +283,27 @@ def load_manifest(path, mode):
                 "manifest.%s.%s is %r, which is not one of %s"
                 % (holder, key, value, "|".join(allowed)),
             )
+
+    # THE MACHINE'S CPU COUNT, required and either an integer or the explicit
+    # NOT-MEASURABLE. A manifest silent about it refuses rather than inheriting
+    # the permissive branch, and NOT-MEASURABLE is not a pass -- the rig
+    # requirement is about the machine, and a machine we could not size is one
+    # we cannot confirm.
+    hardware = manifest["host"].get("hardware_cpus")
+    if hardware is None:
+        raise Unmeasured(
+            "manifest-field",
+            "manifest.host.hardware_cpus is missing; the narrow-rig requirement "
+            "is about the MACHINE, and process_cpus is a different fact",
+        )
+    if not (hardware == "NOT-MEASURABLE"
+            or (isinstance(hardware, int) and not isinstance(hardware, bool)
+                and hardware >= 1)):
+        raise Unmeasured(
+            "manifest-field",
+            "manifest.host.hardware_cpus is %r, expected a positive integer or "
+            "NOT-MEASURABLE" % (hardware,),
+        )
 
     # THE ATTESTATION IS AN AUTHORIZATION, so its shape is checked rather than
     # merely read: a non-string, or a blank string, would otherwise reach the

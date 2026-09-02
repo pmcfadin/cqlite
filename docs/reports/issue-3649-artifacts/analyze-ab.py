@@ -250,10 +250,12 @@ def render_common(manifest, mode, admission, session):
         % (field(manifest, "loadgen", "commit"), field(manifest, "loadgen", "ref"))
     )
     out(
-        "host instance-type %s nproc %s loadavg1 %s kernel %s"
+        "host instance-type %s hardware-cpus %s process-cpus %s loadavg1 %s "
+        "kernel %s"
         % (
             field(manifest, "host", "instance_type"),
-            field(manifest, "host", "nproc"),
+            field(manifest, "host", "hardware_cpus"),
+            field(manifest, "host", "process_cpus"),
             field(manifest, "host", "loadavg1"),
             field(manifest, "host", "kernel"),
         )
@@ -519,24 +521,43 @@ def analyze(mode, path, opts):
     # verdict on 128 vCPU before this check existed. Requiring the INSTANCE TYPE
     # to equal "i4i.xlarge" would enforce the name AWS gives the machine, which
     # is the label-versus-property mistake this instrument already removed for
-    # storage. `nproc` is the property, and it is recorded.
+    # storage.
+    #
+    # AND THE FIRST CORRECTION OF THAT WAS ALSO WRONG, which is why this comment
+    # is long. It read "`nproc` is the property, and it is recorded" -- but
+    # `nproc` reports the CPUs available to the PROCESS, not the size of the
+    # machine, so a 16-CPU box under `taskset -c 0-3` reported 4 and was
+    # ACCEPTED, while the refusal text said pinning must not qualify a larger
+    # rig.
+    # Rejecting the LABEL was right; what replaced it was a measurement OF THE
+    # WRONG SUBJECT. Every property that guard had was true -- measured,
+    # recorded, non-attestable, self-consistent -- and none of them was the one
+    # that mattered, because "this is a measurement" is not "this is a
+    # measurement of the thing the requirement is about".
+    #
+    # So this reads the MACHINE's online CPU count from sysfs, which no affinity
+    # mask can change; `process_cpus` is recorded separately because it is a
+    # real and different fact, not a substitute for this one.
     #
     # NOT ATTESTABLE, for the storage rule's reason: an operator may attest to
     # something we could not measure, never to something we did. A core count is
     # evidence.
-    nproc = manifest["host"].get("nproc")
-    if not control and nproc != S.NARROW_PROFILE_NPROC:
+    hardware = manifest["host"].get("hardware_cpus")
+    if not control and hardware != S.NARROW_PROFILE_NPROC:
         raise Unmeasured(
             "rig-profile-mismatch",
-            "the session ran on a host reporting %r vCPU and the target band is "
+            "the session ran on a MACHINE of %r vCPU and the target band is "
             "defined for the %d-vCPU narrow rig (RUNBOOK.md line 9: i4i.xlarge, "
             "the M0 profile). A wider or narrower machine is a different "
-            "experiment, not a noisier one. NOTE: `nproc` honours the current "
-            "affinity mask, but PINNING A LARGER RIG TO 4 CORES DOES NOT "
-            "SUBSTITUTE -- cache and memory-bandwidth behaviour on a 128-core box "
-            "pinned to 4 is not the M0 machine, so this refusal is correct there "
-            "too. Label the session --control to measure other hardware"
-            % (nproc, S.NARROW_PROFILE_NPROC),
+            "experiment, not a noisier one. This is the MACHINE's online CPU "
+            "count from sysfs, which no affinity mask can change: PINNING A "
+            "LARGER RIG TO 4 CPUs DOES NOT SUBSTITUTE, because cache and "
+            "memory-bandwidth behaviour on a 128-CPU box pinned to 4 is not the "
+            "M0 machine. `nproc` WOULD have accepted such a box -- it reports "
+            "the CPUs available to the PROCESS -- which is why it is recorded "
+            "as process_cpus and is not what this refusal reads. Label the "
+            "session --control to measure other hardware"
+            % (hardware, S.NARROW_PROFILE_NPROC),
         )
     # THE BAND COMES FROM THE MANIFEST, WHICH IS THE ONLY SOURCE. `--profile`
     # used to SELECT it at analysis time with a default of `narrow`, so the same

@@ -48,6 +48,7 @@ USAGE = [
     "ab_driver_support.py census-served <data-dir> <ticket.json>",
     "ab_driver_support.py probe-storage <path>",
     "ab_driver_support.py probe-compression <served-dir>",
+    "ab_driver_support.py hardware-cpus",
     "ab_driver_support.py canonical-shape <shape>",
     "ab_driver_support.py parse-listening <server-log>",
     "ab_driver_support.py validate-ramp <ramp>",
@@ -1557,6 +1558,51 @@ def probe_compression(served_dir):
     return "LZ4", "%d served SSTable(s), all LZ4Compressor" % len(data_files)
 
 
+def hardware_cpu_count():
+    """The MACHINE's online CPU count, independent of any affinity mask.
+
+    -> (count, detail) with count None when it cannot be measured.
+
+    `nproc` REPORTS CPUS AVAILABLE TO THE PROCESS, not the size of the host.
+    Measured on a 16-CPU box: `nproc` -> 16, `taskset -c 0-3 nproc` -> 4, while
+    `/sys/devices/system/cpu/online` -> `0-15` under both. So a large rig pinned
+    to four CPUs passed a guard whose own refusal text says pinning must not
+    qualify it -- the check was measured, recorded, non-attestable and
+    self-consistent, and answered a question nobody asked. Measuring the wrong
+    SUBJECT is the label-versus-property mistake one level in: "this is a
+    measurement" is not "this is a measurement of the thing the requirement is
+    about".
+
+    The sysfs online set is the one source. There is deliberately NO fallback to
+    `nproc`: falling back to the value whose wrongness IS the defect would
+    reintroduce it exactly where nobody would look for it.
+    """
+    path = "/sys/devices/system/cpu/online"
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = handle.read().strip()
+    except OSError as exc:
+        return None, "%s: %s" % (path, exc.strerror or exc)
+    if not raw:
+        return None, "%s is empty" % path
+    total = 0
+    for part in raw.split(","):
+        part = part.strip()
+        if re.fullmatch(r"[0-9]+", part):
+            total += 1
+            continue
+        span = re.fullmatch(r"([0-9]+)-([0-9]+)", part)
+        if not span:
+            return None, "%s holds %r, which is not a CPU range list" % (path, raw)
+        low, high = int(span.group(1)), int(span.group(2))
+        if high < low:
+            return None, "%s holds a descending range %r" % (path, part)
+        total += high - low + 1
+    if total < 1:
+        return None, "%s describes no online CPUs" % path
+    return total, raw
+
+
 def classify_storage_model(model):
     """Sort a device model string into the four storage verdicts.
 
@@ -1625,6 +1671,13 @@ def main(argv):
                 % (rest[0], "|".join(sorted(SHAPE_ALIASES))))
             return 1
         sys.stdout.write("%s\n" % label)
+        return 0
+    if command == "hardware-cpus":
+        count, detail = hardware_cpu_count()
+        if count is None:
+            sys.stdout.write("NOT-MEASURABLE %s\n" % detail)
+            return 0
+        sys.stdout.write("%d %s\n" % (count, detail))
         return 0
     if command == "probe-compression":
         if len(rest) != 1:
