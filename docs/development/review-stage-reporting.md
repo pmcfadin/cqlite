@@ -666,6 +666,72 @@ read this one. Refusing strands no one — `open <kind> --issue <N> --agent <typ
 the stage with a fresh report at a fresh nonce and leaves the unreadable file on disk as history —
 which is the recovery the refusal's own `detail=` names.
 
+**And a capture that NORMALISES its input cannot be the thing that VALIDATES it (#3751 round 13,
+S2).** This is a rule about every `$(…)` read of a file in this mechanism, not a fact about one byte.
+A COMMAND SUBSTITUTION SILENTLY DISCARDS NUL BYTES — bash 5.2 warns on stderr, which every call site
+here redirects to `/dev/null` — so the capture did not merely LOSE information, it MANUFACTURED
+grammar its source does not contain. Three measured instances, each reaching a merge-proceeding
+answer at exit 0:
+
+| read | file content | what the reader saw | result |
+|---|---|---|---|
+| `report_bytes` | `res\0ult: PASS` (no column-zero `result:` line — `grep -c '^result:'` exits 1) | `result: PASS` | `RESULT: PASS`, exit 0 |
+| `read_field` | `report-nonce: STALE\0PASS1` (not a valid token: NUL is not alphanumeric) | the valid token `STALEPASS1` | a STALE report's `PASS` |
+| `premerge-assert.sh` `c_parse_verdict` | `RESULT: PA\0SS` (a token the closed set must refuse) | `PASS` | `PREMERGE: OK`, exit 0 |
+
+The third is the merge gate itself: gawk passes a NUL through a field, and the capture of awk's
+OUTPUT removed it. The second is round 4's H2 defect — a data file redirecting a reader — reached
+through the capture instead of through the deleted `--report` flag.
+
+**THE FIX IS IN THE READ, NOT IN A PROBE, and that choice is the transferable part.** A separate
+`grep -q`/`wc -c` probe of the same path is a SECOND OBSERVATION, and one direction of its
+disagreement is a FALSE PASS: the capture reads the NUL-bearing version while the probe reads a clean
+one, in either order. That is round 12's R2 lesson one layer down. So the ONE read maps NUL to SOH IN
+THE STREAM (`capture_map_nul`, and `c_capture_map_nul` in the sibling script — one per script, each
+the single mapping implementation, deliberately NOT shared for the reason `c_record_bytes` already
+records about its sibling: no agreement between them is required, since each is used within ONE
+process over a DIFFERENT file). Nothing is lost, the byte count is preserved, the forged grammar is
+never created (`res<SOH>ult:` matches no anchor, and `one_line` renders SOH as `?`, which no token
+grammar accepts), and the byte's PRESENCE is observable — so the refusal NAMES it rather than
+reporting a bare `no 'result:' line` that tells the operator nothing about the actual defect.
+
+Three supporting decisions. **ONE literal, with the byte DERIVED from it**: `tr` needs the four
+characters `\001` and a detector needs the byte, and two hand-written spellings are two places to
+diverge — where a divergence means the DETECTOR looks for a byte the MAPPER never writes, a silent
+false PASS. **A literal SOH is refused WITH the NUL, deliberately**: after the mapping the two are
+indistinguishable without a second read of the file, which is exactly what this design refuses to
+take, and both are control bytes no text record may contain with the same operator action; naming
+both in the cause is the honest report, where asserting "NUL" of a file that held a SOH would be the
+false rationale round 2's B7 rules against. **It is `report ungrammatical`, not `report unreadable`**:
+the content WAS observed, and what was observed is that this is not a text record, so the operator
+action is the AGENT's — and it keeps the ONE `report-ungrammatical` status state that every variant
+of that cause shares, for the same reason (round 4, H4).
+
+**The other lossy behaviours of the same capture, enumerated in the same breath — four in total,
+two fixed and two left with their reasons recorded.** (1) **NUL removal**: verdict-changing, fixed
+above. (2) **Trailing-newline stripping**: `$( )` removes them, so `X`, `X\n` and `X\n\n\n` are one
+observation. It CANNOT change a verdict — every grammar here is per-LINE and column-zero anchored, so
+trailing newlines create no `result:` line, no field and no disclosure, and a file of only newlines is
+`report empty` exactly as an empty one is — so it is DECLARED at `report_bytes` and left. It does mean
+a change consisting only of trailing newlines is invisible to round 9's equality guard; such a report
+is the same document for every question this tool asks of it. (3) **Locale/encoding**: the capture
+itself is byte-transparent, but the TOOLS that read the snapshot are not — GNU `grep` handles input it
+considers binary differently, and BSD `tr` ABORTS on an invalid multibyte sequence under a UTF-8
+locale, which under `set -euo pipefail` would kill the script inside a substitution and print no
+verdict line at all. Every consumer was already `LC_ALL=C`-pinned, and that is now MEASURED by a
+cross-locale invariance case (the same report, non-ASCII text and a lone `0xFF` byte, read under `C`
+and under the host's UTF-8 locale, compared byte-for-byte with the wall-clock `elapsed=` field
+neutralised — unneutralised it flaked 1 run in 5, which is the wall-clock-race-in-a-test class
+CLAUDE.md lints for). A SOURCE SCAN for unpinned text tools was written first and DISCARDED: it fired
+on four INDENTED comments, a heredoc opener and the `--help` renderer, none of which reads untrusted
+content, and a guard that reds on correct input is the guard agents learn to waive. (4) **The
+sentinel's own aliasing**, adjacent rather than lossy: a read that FAILS after delivering a prefix
+whose last byte happens to BE the `E` sentinel is textually indistinguishable from a complete one, and
+`${body%E}` would then eat a real byte — a truncated prefix that drops a SECOND `result:` line turns
+an AMBIGUOUS refusal into a PASS. The complete read is therefore asserted by TWO signals, the sentinel
+AND the read's exit status; the sentinel stays because it survives a refactor folding the assignment
+into its `local` declaration, where the status would silently become `local`'s.
+
 That reports the DISTINCT token `AUTHOR-PERFORMED`, never `PASS`, and `premerge-assert.sh`
 prints it on its own `PREMERGE: C-VERDICT` line — never folded into `PREMERGE: OK` — for the same
 reason the roborev wrapper's `WAIVED` is textually distinct from `PASS`: **nobody grepping the

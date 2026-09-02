@@ -260,6 +260,21 @@ later state refuses at both callers by construction. `--force` does not cover it
 replacing the verdict the operator READ — and the recovery is `open --force`, which supersedes the stage
 with a fresh report and leaves the unreadable file on disk as history.
 
+Round 13 (S2) is the same round's second finding and a rule rather than a byte: **a capture that
+normalises its input cannot be the thing that validates it.** A command substitution SILENTLY
+DISCARDS NUL bytes, so every `$(…)` read of an untrusted file here could MANUFACTURE grammar its
+source does not contain — `res\0ult: PASS` (no column-zero `result:` line) reported `RESULT: PASS`,
+a record's `report-nonce: STALE\0PASS1` (not a valid token) was read as `STALEPASS1` and redirected
+the reader to a STALE report's `PASS`, and in `premerge-assert.sh` a `--c-verdict` token of `PA\0SS`
+arrived as `PASS` and printed `PREMERGE: OK` at the merge point. The fix is in the READ, not in a
+probe: a separate probe of the same path is a second observation whose disagreement can fail OPEN,
+so the one read maps NUL to SOH in the stream (one mapping implementation per script, one literal
+with the byte derived from it). Three further behaviours of that capture were enumerated in the same
+breath: trailing-newline stripping cannot change a per-line, column-zero grammar (declared, left);
+locale/encoding is already `LC_ALL=C`-pinned at every consumer (now measured by a cross-locale
+invariance case rather than asserted); and the completeness sentinel's own aliasing — a failed read
+whose last delivered byte IS the sentinel — is closed by requiring the read's exit status too.
+
 ### The emit boundary, and the guard over it
 
 Three consecutive rounds found a new unrouted interpolation, so the completeness is asserted

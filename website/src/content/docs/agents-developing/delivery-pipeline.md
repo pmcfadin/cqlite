@@ -795,7 +795,23 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   destroy) and `present` (read, so the token decides) — read through ONE reader of that grammar
   (`report_state`, shared with the classifier), so a state added later refuses at both callers by
   construction; `--force` does not cover it, and `open <kind> --force` is the recovery, superseding
-  the stage with a fresh report and leaving the unreadable file on disk as history. **The classifier enforces that working too,
+  the stage with a fresh report and leaving the unreadable file on disk as history.
+  **AND A CAPTURE THAT NORMALISES ITS INPUT CANNOT BE THE THING THAT VALIDATES IT (#3751 round 13,
+  S2)** — a rule for every `$(…)` read of a file, not a fact about one byte. A command substitution
+  SILENTLY DISCARDS NUL bytes, so the capture did not merely lose information, it MANUFACTURED
+  grammar: `res<NUL>ult: PASS` holds **no** column-zero `result:` line yet `verdict` reported
+  `RESULT: PASS`; a record's `report-nonce: STALE<NUL>PASS1` (not a valid token) was read as
+  `STALEPASS1` and redirected the reader to a STALE report's `PASS`; and in `premerge-assert.sh` — the
+  merge gate — a `--c-verdict` token of `PA<NUL>SS` arrived as `PASS` and printed `PREMERGE: OK`.
+  **The fix is in the READ, not in a probe**: a separate probe of the same path is a SECOND
+  observation whose disagreement can fail OPEN (the capture reads the NUL-bearing version, the probe a
+  clean one), so the one read maps NUL to SOH IN THE STREAM — nothing lost, the forged grammar never
+  created, the byte's presence observable so the refusal can NAME it. One literal, the byte DERIVED
+  from it, and a literal SOH refused with it (after the mapping the two are indistinguishable without
+  a second read). Two further lossy behaviours were enumerated and LEFT with reasons: trailing-newline
+  stripping cannot change a per-line column-zero grammar, and locale/encoding is already
+  `LC_ALL=C`-pinned at every consumer — now measured by a cross-locale invariance case, after a source
+  scan for unpinned tools was discarded for firing on indented comments and the `--help` renderer. **The classifier enforces that working too,
   by calling the SAME function the writer does (#3751 round 1).** `verdict` reads HAND-WRITTEN reports by design, and it used to accept any
   NON-EMPTY `performed-by`/`reason`/`evidence` — so `performed-by: nobody`, `reason: x`, `evidence: tbd`
   reached the token that PROCEEDS at the merge point while the writer would have refused all three. A

@@ -3536,6 +3536,217 @@ case "$S25_RAP" in
   *) bad "s1/structural: the guard's permissive branch is not an affirmative match on absent|present — a '!= unreadable' test lets every future state through" ;;
 esac
 
+# --- 26. A CAPTURE THAT NORMALISES ITS INPUT CANNOT BE THE THING THAT VALIDATES IT (round 13, S2) --
+# THE FINDING (roborev job 387, S2). Every read of an untrusted file in this tool goes through a
+# COMMAND SUBSTITUTION, and bash SILENTLY DISCARDS NUL bytes there (bash 5.2 emits a warning on
+# stderr, which every call site here redirects to /dev/null, so it is silent in practice). So the
+# capture did not merely LOSE information — it MANUFACTURED grammar the file does not contain:
+#
+#   $ printf 'res\0ult: PASS\n' > "$report"      # the file holds NO column-zero result: line
+#   $ LC_ALL=C grep -c '^result:' "$report"       # -> rc 1, no match: measured, not argued
+#   $ review-stage.sh verdict c --issue 901       # -> RESULT: PASS, exit 0
+#
+# and one file over, the same idiom in `read_field` REDIRECTED A READER: a stage record whose
+# `report-nonce:` value was `STALE<NUL>PASS1` is NOT a valid nonce token, yet the capture read it
+# as the valid `STALEPASS1`, so `verdict` reported a STALE report's `PASS` for a stage whose own
+# current report held the sentinel — round 4's H2 defect (a data file redirecting a reader)
+# reached through the capture instead of through `--report`.
+#
+# THE FIX IS IN THE READ, NOT IN A PROBE. A separate `grep -q`/`wc -c` probe of the same path is a
+# SECOND observation, and one direction of its disagreement is a FALSE PASS (the capture reads the
+# NUL-bearing version while the probe reads a clean one) — round 12's R2 lesson exactly. So the ONE
+# read maps NUL to SOH IN THE STREAM: nothing is lost (the length is preserved), the forged grammar
+# is never created (`res<SOH>ult:` is not a record), and the byte's PRESENCE is observable, so the
+# refusal can NAME it instead of silently judging a transformed document.
+R26="$(newrepo)"
+rs "$R26" open c --issue 960 --agent spec-auditor
+rc_is 0 "s2: the stage opens"
+R26_REPORT="$(REPORT_OF "$R26" 960 c)"
+# CONTROL FIRST: the same bytes WITHOUT the NUL are a real PASS, so the refusal below is about the
+# NUL and not about the fixture being broken some other way.
+printf 'result: PASS\n' >"$R26_REPORT"
+rs "$R26" verdict c --issue 960
+rc_is 0 "s2 CONTROL: the same report without a NUL is a genuine PASS (the fixture is otherwise valid)"
+printf 'res\000ult: PASS\n' >"$R26_REPORT"
+# THE PRECONDITION IS MEASURED: the file really does NOT hold a column-zero `result:` line, so a
+# PASS from it could only have been manufactured by the reader.
+if LC_ALL=C grep -q '^result:' "$R26_REPORT" 2>/dev/null; then
+  bad "s2 PREMISE: the fixture DOES hold a column-zero result: line, so the case below proves nothing"
+else
+  ok "s2 PREMISE: the fixture holds NO column-zero 'result:' line (MEASURED with grep on the FILE, not inferred)"
+fi
+# The size is MEASURED here, not predicted: it is what "byte-intact" is compared against below.
+R26_SIZE="$(LC_ALL=C wc -c <"$R26_REPORT" | LC_ALL=C tr -d ' ')"
+rs "$R26" verdict c --issue 960
+rc_is 5 "s2: a NUL-bearing report is a NON-VERDICT (exit 5), not the PASS the capture manufactured"
+hasnt "RESULT: PASS" "s2: the merge-proceeding token is NOT reported for a document the file does not contain"
+has "NUL" "s2: and the cause NAMES the byte, so an operator knows what is wrong with their file"
+rs "$R26" status c --issue 960
+has "state=report-ungrammatical" "s2: status maps it to the ungrammatical state — deliberately NOT its own, because the operator action is the same as every other variant (rewrite the report as text)"
+
+# AND IT IS REFUSED AT THE WRITE SIDE TOO, WHICH IS S1's PROPERTY ON A SUBJECT EVERY HOST HAS.
+# A NUL-bearing report is one whose recorded verdict could not be READ, so `record-author-performed`
+# may not replace it — and unlike a mode-000 file this holds for root as well.
+S2_REASON='no peer agent available on this box; hand C against the spec deltas'
+S2_EV='docs/round-artifacts/issue-960-hand-c.md'
+rs "$R26" record-author-performed c --issue 960 --reason "$S2_REASON" --evidence "$S2_EV" --performed-by author
+rc_is 2 "s2/s1: a recording over an UNREADABLE-CLASS report is REFUSED on every host"
+has "AUTHOR-REFUSED reason=prior-verdict-unreadable" "s2/s1: under S1's cause"
+has "prior-state=unrepresentable" "s2/s1: and the state names WHY it could not be read — a byte the capture cannot carry, not a permission"
+rs "$R26" record-author-performed c --issue 960 --reason "$S2_REASON" --evidence "$S2_EV" --performed-by author --force
+rc_is 2 "s2/s1: --force does not cover it either"
+if [ "$(LC_ALL=C wc -c <"$R26_REPORT" | LC_ALL=C tr -d ' ')" = "$R26_SIZE" ]; then
+  ok "s2/s1: the report is BYTE-INTACT after both attempts ($R26_SIZE bytes, the NUL included)"
+else
+  bad "s2/s1: the report was modified — $(LC_ALL=C wc -c <"$R26_REPORT") byte(s), expected $R26_SIZE"
+fi
+# AND THE RECOVERY PATH WORKS, so the refusal strands nobody — S1's `--force` ruling rests on it.
+rs "$R26" open c --issue 960 --agent spec-auditor --force
+rc_is 0 "s2/s1 RECOVERY: open --force supersedes the stage with a fresh report"
+rs "$R26" record-author-performed c --issue 960 --reason "$S2_REASON" --evidence "$S2_EV" --performed-by author
+rc_is 0 "s2/s1 RECOVERY: and the substitute is then recorded, so the refusal strands nobody"
+if [ "$(LC_ALL=C wc -c <"$R26_REPORT" | LC_ALL=C tr -d ' ')" = "$R26_SIZE" ]; then
+  ok "s2/s1 RECOVERY: the unreadable report is still on disk as history, untouched"
+else
+  bad "s2/s1 RECOVERY: the superseded report was modified — $(LC_ALL=C wc -c <"$R26_REPORT") byte(s), expected $R26_SIZE"
+fi
+
+# THE SECOND SITE: the STAGE RECORD's own reader. `read_field` is the other capture of untrusted
+# file content in this script, and a NUL in the record's nonce field forged a VALID token out of an
+# invalid one, redirecting the reader to a STALE report.
+R26B="$(newrepo)"
+rs "$R26B" open c --issue 961 --agent spec-auditor
+rc_is 0 "s2/record: a second stage opens"
+R26B_DIR="$R26B/.review-stage/issue-961"
+printf 'result: PASS\n\nstale, from a superseded generation\n' >"$R26B_DIR/c.STALEPASS1.md"
+R26B_NONCE="$(RECORD_NONCE "$R26B" 961 c)"
+if [ -n "$R26B_NONCE" ]; then
+  ok "s2/record: the record's real nonce was read, so the forgery below has a subject"
+else
+  bad "s2/record: could not read the record's nonce — the case below would prove nothing"
+fi
+# The record is rewritten with a NUL INSIDE the nonce value. `python3` is not required: the value
+# is built with printf and the record is rebuilt line by line with the shell.
+{
+  while IFS= read -r RLINE; do
+    case "$RLINE" in
+      report-nonce:*) printf 'report-nonce: STALE\000PASS1\n' ;;
+      *) printf '%s\n' "$RLINE" ;;
+    esac
+  done <"$R26B_DIR/c.stage"
+} >"$R26B_DIR/c.stage.new" && mv -f "$R26B_DIR/c.stage.new" "$R26B_DIR/c.stage"
+if LC_ALL=C grep -q 'report-nonce: STALEPASS1' "$R26B_DIR/c.stage" 2>/dev/null; then
+  bad "s2/record PREMISE: the record holds the LITERAL token STALEPASS1, so the forgery is not the capture's doing"
+else
+  ok "s2/record PREMISE: the record's nonce value is NOT the literal token STALEPASS1 (MEASURED on the FILE) — only a NUL-dropping capture could read it as one"
+fi
+rs "$R26B" verdict c --issue 961
+rc_is 5 "s2/record: the record is a NON-VERDICT (exit 5), not the STALE report's PASS"
+hasnt "RESULT: PASS" "s2/record: no reader is redirected to a report the record does not name"
+has "stage record unreadable" "s2/record: refused as a RECORD defect, which derives no path at all"
+hasnt "c.STALEPASS1.md" "s2/record: and the stale report's path is never even published"
+
+# STRUCTURAL: ONE MAPPING, ONE LITERAL, AND EVERY CAPTURE OF FILE CONTENT GOES THROUGH IT.
+# A second spelling of the marker byte is a second place for it to diverge, and a divergence means
+# the DETECTOR looks for a byte the MAPPER never writes — a silent false PASS. So the tr spelling
+# is the one literal and the byte is DERIVED from it.
+S26_SRC="$(cat "$RS" 2>/dev/null || true)"
+case "$S26_SRC" in
+  *"capture_map_nul() {"*) ok "s2/structural: capture_map_nul() is the ONE mapping implementation" ;;
+  *) bad "s2/structural: could not locate capture_map_nul() — the assertions below would be vacuous" ;;
+esac
+S26_NRAW="$(LC_ALL=C grep -c "tr '\\\\000'" "$RS" 2>/dev/null || true)"
+case "$S26_NRAW" in
+  1) ok "s2/structural: the NUL translation appears EXACTLY ONCE in the script, so no reader can drift from it" ;;
+  *) bad "s2/structural: the NUL translation appears ${S26_NRAW:-0} time(s) — a second copy is a second place for the mapper and the detector to disagree" ;;
+esac
+case "$S26_SRC" in
+  *'CAPTURE_NUL_BYTE="$(printf'*) ok "s2/structural: the marker BYTE is DERIVED from the tr spelling, not written a second time" ;;
+  *) bad "s2/structural: the marker byte is spelled independently of the translation, so the detector can look for a byte the mapper never writes" ;;
+esac
+S26_RB="$(LC_ALL=C sed -n '/^report_bytes() {/,/^}$/p' "$RS" 2>/dev/null || true)"
+case "$S26_RB" in
+  *'capture_map_nul "$p"'*) ok "s2/structural: report_bytes reads through the mapping" ;;
+  *) bad "s2/structural: report_bytes still captures the file raw, so a NUL is silently dropped from the verdict's subject" ;;
+esac
+S26_RF="$(LC_ALL=C sed -n '/^read_field() {/,/^}$/p' "$RS" 2>/dev/null || true)"
+case "$S26_RF" in
+  *'capture_map_nul "$file"'*) ok "s2/structural: read_field reads through the same mapping" ;;
+  *) bad "s2/structural: read_field still captures the file raw, so a NUL can forge a field value" ;;
+esac
+S26_CAT="$(LC_ALL=C grep -c 'cat -- "\$' "$RS" 2>/dev/null || true)"
+case "$S26_CAT" in
+  0) ok "s2/structural: NO capture of file content bypasses the mapping (zero raw \`cat -- \"\$…\"\` reads remain)" ;;
+  *) bad "s2/structural: ${S26_CAT:-?} raw file capture(s) remain, and a capture that normalises its input cannot be the thing that validates it" ;;
+esac
+# AND THE COMPLETE READ IS ASSERTED BY *TWO* SIGNALS, because either alone is defeatable. The
+# sentinel `E` survives a refactor that folds the assignment into its `local` declaration (where
+# the status would become `local`'s); the STATUS catches a truncated read whose last delivered byte
+# happens to BE an `E`, which the sentinel cannot tell from a complete one.
+case "$S26_RB" in
+  *'|| rc=$?'*) ok "s2/structural: report_bytes captures the read's STATUS as well as its sentinel — a truncated read ending in the sentinel byte cannot pass as complete" ;;
+  *) bad "s2/structural: report_bytes relies on the sentinel alone, so a partial read whose last byte is the sentinel is accepted as a complete one" ;;
+esac
+# EVERY CONSUMER OF THE SNAPSHOT IS LOCALE-PINNED — MEASURED, NOT PREDICTED FROM SOURCE SHAPE.
+# `$( )` is byte-faithful apart from NUL and trailing newlines, but the TOOLS that read the snapshot
+# are not locale-independent: GNU `grep` handles input it considers binary differently, and BSD `tr`
+# ABORTS on an invalid multibyte sequence under a UTF-8 locale (`one_line`'s own comment records
+# that, which under `set -euo pipefail` would kill the script inside a substitution and print no
+# verdict line at all). An unpinned consumer would therefore make the verdict a function of the
+# CALLER's environment.
+#
+# A SOURCE SCAN FOR UNPINNED INVOCATIONS WAS WRITTEN FIRST AND DISCARDED: it fired on four INDENTED
+# comments, a heredoc opener and the `--help` renderer — none of which reads untrusted content — and
+# a guard that reds on correct input is the guard agents learn to waive (#3229's ruling). What runs
+# instead is the real thing, twice, over a report carrying non-ASCII text AND an invalid UTF-8 byte.
+R26C="$(newrepo)"
+rs "$R26C" open c --issue 962 --agent spec-auditor
+rc_is 0 "s2/locale: a third stage opens"
+printf 'result: FINDINGS (a caus\303\251 with an em dash \342\200\224 and a lone \377 byte)\n' \
+  >"$(REPORT_OF "$R26C" 962 c)"
+# THE WALL-CLOCK FIELD IS NEUTRALISED BEFORE THE COMPARISON, and this is not cosmetic: the two
+# runs are seconds apart, so `elapsed=` legitimately differs and a raw comparison FLAKED (measured:
+# 1 failure in 5, `elapsed=0` vs `elapsed=1`). That is the wall-clock-race-in-a-test class CLAUDE.md
+# lints for, and `elapsed` is not the property under test — the TOKEN, the CAUSE and the report path
+# are, and those are compared byte-for-byte.
+R26C_STABLE() { printf '%s\n' "$1" | LC_ALL=C sed -e 's/elapsed=[0-9]*/elapsed=<n>/g'; }
+rs "$R26C" verdict c --issue 962
+rc_is 4 "s2/locale: the report reads FINDINGS under the suite's own locale"
+R26C_BASE="$(R26C_STABLE "$OUT")"
+# THE NAME IS TAKEN FROM `locale -a`'s OWN OUTPUT, never from a canonical spelling. glibc PRINTS
+# `C.utf8`/`en_US.utf8` while `setlocale` also accepts `C.UTF-8`, so a fixed candidate list matched
+# NOTHING on this fleet and the case took the no-subject branch on a host that HAS the subject — a
+# test passing for the wrong reason. Selection normalises (lowercase, `-`/`_` removed) and then uses
+# the printed spelling, which is the one guaranteed to be accepted.
+R26C_LOC=""
+while IFS= read -r R26C_CAND; do
+  case "$(printf '%s' "$R26C_CAND" | LC_ALL=C tr 'A-Z' 'a-z' | LC_ALL=C tr -d '_-')" in
+    *utf8) R26C_LOC="$R26C_CAND"; break ;;
+  esac
+done <<EOF_R26C
+$(locale -a 2>/dev/null || true)
+EOF_R26C
+# BOTH branches execute THREE assertions, so the EXACT case floor stays host-independent.
+if [ -n "$R26C_LOC" ]; then
+  ok "s2/locale: a UTF-8 locale is installed on this host ($R26C_LOC), so locale invariance HAS a subject"
+  OUT="$(cd "$R26C" && LC_ALL="$R26C_LOC" bash "$RS" verdict c --issue 962 2>&1)"; RC=$?
+  rc_is 4 "s2/locale: the SAME report reads FINDINGS under $R26C_LOC too"
+  if [ "$(R26C_STABLE "$OUT")" = "$R26C_BASE" ]; then
+    ok "s2/locale: and the verdict line is BYTE-IDENTICAL under both locales — no consumer of the snapshot is locale-sensitive"
+  else
+    bad "s2/locale: the verdict DIFFERS by locale, so some consumer of the snapshot is not pinned (C: $R26C_BASE / $R26C_LOC: $(R26C_STABLE "$OUT"))"
+  fi
+else
+  ok "s2/locale: DECLARED GAP — no UTF-8 locale is installed on this host, so cross-locale invariance has NO SUBJECT here; the two assertions below assert what IS true instead of passing silently"
+  OUT="$(cd "$R26C" && bash "$RS" verdict c --issue 962 2>&1)"; RC=$?
+  rc_is 4 "s2/locale (no-subject host): the non-ASCII report still reads FINDINGS"
+  if [ "$(R26C_STABLE "$OUT")" = "$R26C_BASE" ]; then
+    ok "s2/locale (no-subject host): and the verdict line is reproducible byte-for-byte"
+  else
+    bad "s2/locale (no-subject host): the verdict is not reproducible across two runs of one locale ($R26C_BASE / $(R26C_STABLE "$OUT"))"
+  fi
+fi
+
 
 # (e) STRUCTURAL — ONE READ, PINNED. A behavioural case cannot see that the classifier reads the
 #     file once; a refactor that reintroduced a second read would pass (a) and (b) as long as the
@@ -3824,7 +4035,22 @@ fi
 # CONTROLS keep a verified-ABSENT report freely replaceable, and four STRUCTURAL pins require the
 # single state reader `report_state`, both callers going through it, and the guard's permissive set
 # being an AFFIRMATIVE `absent | present` match rather than a `!= unreadable` test.
-ASSERT_FLOOR=713
+#
+# ROUND 13's S2 MOVES IT TO 747. Section 26 adds 34: a capture that normalises its input cannot be
+# the thing that validates it. Bash DISCARDS NUL bytes in a command substitution, so the capture did
+# not merely lose information, it MANUFACTURED grammar — a report whose bytes are `res\0ult: PASS`
+# holds no column-zero `result:` line and `verdict` reported `RESULT: PASS` at exit 0 — and the same
+# idiom in `read_field` forged a VALID nonce out of `STALE\0PASS1`, redirecting the reader to a STALE
+# report's `PASS`. Both routes are asserted with the premise MEASURED ON THE FILE (grep says the
+# record is not there), a control proving the same bytes without the NUL are a genuine PASS, S1's
+# write-side refusal on a subject EVERY host has (unlike a mode-000 file), the `open --force`
+# recovery, seven STRUCTURAL pins (one mapping implementation, ONE literal with the byte DERIVED
+# from it, both captures routed, zero raw file captures left, and the two-signal completeness
+# assertion), and a BEHAVIOURAL cross-locale invariance case — a source scan for unpinned text tools
+# was written first and discarded for firing on four indented comments, a heredoc opener and the
+# `--help` renderer. Its wall-clock `elapsed=` field is neutralised before comparison, which is not
+# cosmetic: unneutralised it flaked 1 run in 5.
+ASSERT_FLOOR=747
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

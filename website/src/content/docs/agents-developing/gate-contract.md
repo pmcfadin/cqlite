@@ -139,7 +139,13 @@ carry).
   IDENTITY (#3751 round 10)** — an ABA replacement (A to a foreign generation B while `verdict`
   reads B, then back to A) leaves two identical observations — so the accepted verdict must also
   NAME the validated generation: its `report=` field carries the report nonce, which must equal the
-  `report-nonce:` of that same capture. Details:
+  `report-nonce:` of that same capture. **And the CAPTURE must not MANUFACTURE the token it validates
+  (#3751 round 13)** — a command substitution SILENTLY DISCARDS NUL bytes, and gawk passes a NUL
+  through a field, so a `--c-verdict` file whose token was `PA<NUL>SS` (a token the closed set must
+  refuse, since the match is string equality) arrived as `PASS` and this script reported
+  `PREMERGE: OK` at exit 0. Every read of untrusted content now maps NUL to SOH IN THE STREAM, which
+  the closed-set match then refuses; a separate probe of the same path was rejected because it is a
+  SECOND observation and one direction of its disagreement fails OPEN. Details:
   [delivery pipeline](/cqlite/agents-developing/delivery-pipeline/).
   **What a `PREMERGE: OK` does NOT prove (#3650), printed on the success path as `PREMERGE: SCOPE`.**
   It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.

@@ -4495,6 +4495,77 @@ else
   bad "q3/reader-structural: the field-truncating extraction is still present"
 fi
 
+# --- 44m: a CAPTURE must not MANUFACTURE the token it validates (round 13, S2) ---
+# THE FINDING'S SIBLING, one script over (roborev job 387, S2). Bash SILENTLY DISCARDS NUL bytes in
+# a command substitution, so a capture does not merely lose information — it can CREATE grammar its
+# source does not contain. Both of this script's reads of untrusted content are captures:
+# `_c_verdict_awk`'s OUTPUT (awk passes a NUL through; the capture then removes it) and
+# `c_record_bytes`' read of the stage record. Measured with the shipped awk:
+#
+#   $ printf 'REVIEW-STAGE: c RESULT: PA\0SS …\n' > cv.txt
+#   $ awk '/^REVIEW-STAGE: /{printf "token=%s\n", $4}' cv.txt | od -c   ->  t o k e n = P A \0 S S
+#   $ o="$(awk … cv.txt)"; printf %s "$o" | od -c                        ->  t o k e n = P A S S
+#
+# so a file whose token is `PA<NUL>SS` — a token that is NOT `PASS`, and which this script's own
+# closed grammar must therefore refuse — reached the merge point as `PASS`. This is the MERGE GATE,
+# and the token is the whole subject of the flag.
+#
+# THE FIX IS THE SAME ONE, FOR THE SAME REASON: the ONE read maps NUL to SOH in the stream, so the
+# byte count is preserved, nothing is lost, and the transformed token fails the closed-set match by
+# STRING EQUALITY exactly as `PASSthisNeverRan` does. A separate probe of the same path would be a
+# SECOND observation, one direction of whose disagreement is a false PASS.
+C_NUL_TOKEN="$T/c-verdict-nul-token.txt"
+printf 'REVIEW-STAGE: c RESULT: PA\000SS elapsed=42 deadline=1800 agent=spec-auditor report=%s\n' \
+  "$T/injected-c-report.md" >"$C_NUL_TOKEN"
+# THE PREMISE IS MEASURED ON THE FILE: it really does not carry the token `PASS`.
+if LC_ALL=C grep -q 'RESULT: PASS' "$C_NUL_TOKEN" 2>/dev/null; then
+  bad "s2/pm PREMISE: the fixture DOES carry the literal token PASS, so the case below proves nothing"
+else
+  ok "s2/pm PREMISE: the fixture carries NO literal 'RESULT: PASS' (MEASURED with grep on the FILE)"
+fi
+c_refused "s2/pm: a NUL-bearing token is REFUSED, not read as the PASS the capture manufactured" \
+  "$C_NUL_TOKEN" "token"
+# CONTROL: the same line WITHOUT the NUL is accepted, so the refusal is about the byte and not
+# about the fixture being malformed some other way.
+if run 0 "s2/pm CONTROL: the same verdict line without the NUL still certifies (exit 0)" \
+  2421 "$CERTIFIED" "$GOOD" --c-verdict "$C_PASS_FILE"; then
+  case "$OUT" in
+    *"PREMERGE: OK"*) ok "s2/pm CONTROL: and reports PREMERGE: OK, so the guard does not red on correct input" ;;
+    *) bad "s2/pm CONTROL: the clean verdict did not report PREMERGE: OK (got: $OUT)" ;;
+  esac
+fi
+# STRUCTURAL: ONE MAPPING, ONE LITERAL, and every capture of untrusted content routed through it —
+# the same three properties test_review_stage.sh section 26 pins for the sibling script. The two
+# scripts deliberately do NOT share an implementation (no agreement between them is required: each
+# read is used within ONE process, over a DIFFERENT file), so each carries its own, and each
+# carries its own guard.
+if LC_ALL=C grep -q 'c_capture_map_nul() {' "$ASSERT"; then
+  ok "s2/pm/structural: c_capture_map_nul() is the ONE mapping implementation in this script"
+else
+  bad "s2/pm/structural: could not locate c_capture_map_nul() — the assertions below would be vacuous"
+fi
+if [ "$(LC_ALL=C grep -c "tr '\\\\000'" "$ASSERT" || true)" -eq 1 ]; then
+  ok "s2/pm/structural: the NUL translation appears EXACTLY ONCE, so no reader can drift from it"
+else
+  bad "s2/pm/structural: the NUL translation appears $(LC_ALL=C grep -c "tr '\\\\000'" "$ASSERT" || true) time(s) — a second copy is a second place for the mapper and the detector to disagree"
+fi
+if LC_ALL=C grep -q 'C_CAPTURE_NUL_BYTE="\$(printf' "$ASSERT"; then
+  ok "s2/pm/structural: the marker BYTE is DERIVED from the tr spelling, not written a second time"
+else
+  bad "s2/pm/structural: the marker byte is spelled independently of the translation, so the detector can look for a byte the mapper never writes"
+fi
+if [ "$(LC_ALL=C grep -c 'cat -- "\$' "$ASSERT" || true)" -eq 0 ]; then
+  ok "s2/pm/structural: no raw file capture bypasses the mapping"
+else
+  bad "s2/pm/structural: $(LC_ALL=C grep -c 'cat -- "\$' "$ASSERT" || true) raw file capture(s) remain, and a capture that normalises its input cannot be the thing that validates it"
+fi
+if LC_ALL=C grep -q '_c_verdict_awk <(c_capture_map_nul' "$ASSERT" ||
+  LC_ALL=C grep -q 'c_capture_map_nul "$value" | _c_verdict_awk' "$ASSERT"; then
+  ok "s2/pm/structural: the c-verdict FILE read goes through the mapping before awk sees it"
+else
+  bad "s2/pm/structural: the c-verdict file is still fed to awk raw, so a NUL in the token survives to a capture that removes it"
+fi
+
 # --- 44h: THE STRUCTURAL EMIT-BOUNDARY GUARD (round 7, L1b) -------------------
 # The mirror of test_review_stage.sh section 18, for this script. See
 # scripts/tests/lib/emit-boundary-scan.sh for why the guard exists (the boundary was bypassed at a
@@ -4742,7 +4813,21 @@ fi
 # field-truncating form required ABSENT. All need only bash, git and coreutils, so the floor moves
 # by the SAME 20 and the derived 6-assertion margin for the ONE host-gated block is PRESERVED
 # UNCHANGED — still deliberately not the exact 441, for the reason recorded above.
-ASSERT_FLOOR=435
+#
+# ROUND 13 (S2) ADDS 8, ALL HOST-INDEPENDENT (441 -> 449): section 44m's 8 — a capture must not
+# MANUFACTURE the token it validates. Bash SILENTLY DISCARDS NUL bytes in a command substitution,
+# and gawk passes a NUL through a field, so a `--c-verdict` file whose token is `PA\0SS` — a token
+# that is NOT `PASS` and which the closed-set match must refuse — reached the merge point as `PASS`
+# and this script reported `PREMERGE: OK` at exit 0. Measured on the shipped artifacts. The case
+# asserts the premise ON THE FILE (grep finds no literal `RESULT: PASS`), the refusal, a CONTROL
+# that the same line without the NUL still certifies (a guard that reds on correct input is the
+# guard agents learn to waive), and five STRUCTURAL pins: ONE mapping implementation
+# (`c_capture_map_nul`), the NUL translation appearing EXACTLY ONCE, the marker byte DERIVED from
+# the `tr` spelling rather than written twice, no raw file capture left, and the c-verdict FILE read
+# routed through the mapping before awk sees it. All need only bash, git and coreutils, so the floor
+# moves by the SAME 8 and the derived 6-assertion margin for the ONE host-gated block is PRESERVED
+# UNCHANGED.
+ASSERT_FLOOR=443
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

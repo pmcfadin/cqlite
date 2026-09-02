@@ -168,7 +168,7 @@ printf '%s\n' "$root"
 printf 'AMBIGUOUS|%s|%s\n' "$count" "$root"
 printf '%s\n' "$found"
 printf '%s\n' "$c"
-printf 'state=present\n%s' "${body%E}"
+printf 'state=present\n%s' "$body"
 EOF
 }
 

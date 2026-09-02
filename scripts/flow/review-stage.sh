@@ -101,7 +101,11 @@
 #   report absent              the stage is open and its report file is GONE
 #   report unreadable          the report file exists and CANNOT BE READ (permission, I/O)
 #   report empty               the report file exists and holds nothing recordable
-#   report ungrammatical: <w>  a result line that is unrecognised, absent, or unsupported
+#   report ungrammatical: <w>  a result line that is unrecognised, absent, or unsupported —
+#                              INCLUDING a report holding a NUL 0x00 or SOH 0x01 byte, which is not
+#                              a text record (round 13, S2). It keeps this ONE cause, and this one
+#                              `status` state, deliberately: every variant sends the operator to
+#                              the AGENT to rewrite the report.
 #   stage never opened         no stage was ever opened for this <kind>/<issue>
 #   stage record unreadable: <w>  the RECORD does not name which report is current, so no report
 #                                 was identified and nothing is claimed about one (round 5, J1)
@@ -110,6 +114,13 @@
 # cause: an unreadable file is NOT empty (the operator fix is `chmod`, not the agent) and calling
 # it ungrammatical would assert something about content that was never observed. Reuse would have
 # been a false rationale, which is worse than none.
+#
+# EVERY READ OF AN UNTRUSTED FILE GOES THROUGH `capture_map_nul` (#3751 round 13, S2), because a
+# COMMAND SUBSTITUTION SILENTLY DISCARDS NUL BYTES and therefore does not merely lose information —
+# it MANUFACTURES grammar. `res\0ult: PASS` holds NO column-zero `result:` line and was reported as
+# `RESULT: PASS` at exit 0; a record's `report-nonce: STALE\0PASS1`, not a valid token, was read as
+# the valid `STALEPASS1` and redirected the reader to a STALE report's `PASS`. A capture that
+# normalises its input cannot be the thing that validates it.
 #
 # TWO FILES, AND WHY (the never-opened / report-absent distinction needs them)
 # ---------------------------------------------------------------------------
@@ -414,6 +425,50 @@ AUTHOR_DISCLOSURE="an author's hand audit is not an independent one; weight it a
 # Default deadline. Advisory (see the header): it is a reporting threshold, never a verdict
 # input, so the value only has to be a plausible "this should have finished by now".
 DEFAULT_DEADLINE_SECS=1800
+
+# --- the capture boundary ----------------------------------------------------
+# A CAPTURE THAT NORMALISES ITS INPUT CANNOT BE THE THING THAT VALIDATES IT (#3751 round 13, S2).
+#
+# THE FINDING. Every read of an untrusted file in this tool goes through a COMMAND SUBSTITUTION, and
+# bash SILENTLY DISCARDS NUL bytes there (5.2 warns on stderr, which every call site here redirects
+# to /dev/null, so it is silent in practice). That does not merely LOSE information — it MANUFACTURES
+# grammar the file does not contain. Measured: a report whose bytes are `res\0ult: PASS\n` holds NO
+# column-zero `result:` line (`grep -c '^result:'` exits 1 on it), and `verdict` reported
+# `RESULT: PASS` at exit 0. One file over, the same idiom in `read_field` REDIRECTED a reader: a
+# stage record whose `report-nonce:` value was `STALE\0PASS1` — not a valid nonce token, since a NUL
+# is not alphanumeric — was read as the valid `STALEPASS1`, so `verdict` reported a STALE report's
+# `PASS` for a stage whose own current report held the sentinel. That is round 4's H2 defect (a data
+# file redirecting a reader) reached through the capture instead of through `--report`.
+#
+# THE FIX IS IN THE READ, NOT IN A PROBE, and that choice is the whole design. A separate
+# `grep -q`/`wc -c` probe of the same path is a SECOND OBSERVATION, and one direction of its
+# disagreement is a FALSE PASS: the capture reads the NUL-bearing version while the probe reads a
+# clean one, either order. Round 12's R2 lesson, one layer down. So the ONE read maps NUL to SOH IN
+# THE STREAM: nothing is lost (the byte count is preserved), the forged grammar is never created
+# (`res<SOH>ult:` matches no record anchor and `one_line` renders SOH as `?`, which no token grammar
+# accepts), and the byte's PRESENCE is observable — so a reader with a state channel can NAME it
+# rather than silently judging a transformed document.
+#
+# ONE LITERAL, AND THE BYTE IS DERIVED FROM IT. `tr` needs the four characters `\001`; a detector
+# needs the actual byte. Spelling both by hand would be a second place for them to diverge, and a
+# divergence means the DETECTOR looks for a byte the MAPPER never writes — a silent false PASS. So
+# the `tr` spelling is the single literal and the byte comes from `printf %b`.
+#
+# A LITERAL SOH IN THE FILE IS REFUSED WITH THE NUL, DELIBERATELY. After the mapping the two are
+# indistinguishable without a SECOND read of the file, which is exactly what this design refuses to
+# take; and both are control bytes no text record may contain, with the same operator action
+# (rewrite the report as text). Naming both in the cause is the honest report — asserting "NUL" of a
+# file that held a SOH would be a false rationale, which is worse than none (round 2, B7).
+CAPTURE_NUL_TR='\001'
+CAPTURE_NUL_BYTE="$(printf '%b' "$CAPTURE_NUL_TR")"
+
+# capture_map_nul <path> — read <path> for a value that is about to enter a SHELL VARIABLE. The ONE
+# mapping implementation: every capture of untrusted file content in this script goes through it, so
+# no reader can drift from the byte the others expect. Reads by REDIRECTION rather than `cat --`,
+# which also removes the `-`-prefixed-filename question the `--` was there for.
+capture_map_nul() {
+  LC_ALL=C tr '\000' "$CAPTURE_NUL_TR" <"$1"
+}
 
 # --- field hygiene -----------------------------------------------------------
 # sanitize_field <text> — collapse a free-text value into ONE parseable token. Lifted
@@ -1282,13 +1337,20 @@ read_field_from() {
 # "absent or empty" every caller already treats as unmeasured — the read-failed-vs-field-absent
 # distinction is drawn by `count_field_lines` and `report_bytes`, where it decides something
 # (#3751 round 6, K1). Reading the whole file also removes a `grep` artifact this shape had: GNU
-# `grep` prints `Binary file … matches` INSTEAD of the line when the file holds a NUL, so a record
-# with a stray NUL used to yield that sentence as the field value; `$( )` discards NULs, and
-# `one_line` strips them from a value anyway.
+# `grep` prints `Binary file … matches` INSTEAD of the line when the file holds a NUL.
+#
+# AND IT READS THROUGH THE ONE CAPTURE BOUNDARY (#3751 round 13, S2). This capture DISCARDED NUL
+# bytes, and `one_line` then stripped them from the value too — which was described here as
+# harmless and was not: it FORGED a valid token out of an invalid one. Measured, a record whose
+# `report-nonce:` value was `STALE\0PASS1` (not a nonce: a NUL is not alphanumeric) was read as the
+# valid `STALEPASS1`, so `verdict` reported a STALE report's `PASS` for a stage whose own current
+# report held the sentinel — a data file redirecting a reader, which is round 4's H2 defect through
+# a different door. Through `capture_map_nul` the NUL arrives as SOH, `one_line` renders it `?`, and
+# the value fails `nonce_is_valid` — a RECORD DEFECT that derives no path at all.
 read_field() {
   local file="$1" key="$2" text
   [ -f "$file" ] || return 0
-  text="$( { LC_ALL=C cat -- "$file"; } 2>/dev/null || true )"
+  text="$( { capture_map_nul "$file"; } 2>/dev/null || true )"
   read_field_from "$text" "$key"
 }
 
@@ -1730,23 +1792,53 @@ CLAUSE
 # joined with `&&`, so a truncated or failed read cannot produce a value ending in it. A positive
 # verdict requires an affirmative measurement, and "the bytes are unchanged" is a positive verdict.
 #
-# DECLARED LIMIT: bash DISCARDS NUL bytes in a command substitution, so a change consisting only
-# of NUL bytes is not represented here. The report of record is text written by an agent (and by
-# this script), the classification below is compared alongside this value at its one call site,
-# and nothing in this tool writes a NUL — stated rather than left as an unexamined blind spot.
+# THE NUL LIMIT THIS COMMENT USED TO DECLARE IS CLOSED, AND IT WAS NOT MERELY A LIMIT (#3751 round
+# 13, S2). It read "a change consisting only of NUL bytes is not represented here", which understated
+# it in the direction that matters: the capture did not just fail to REPRESENT a NUL, it REMOVED one
+# and thereby MANUFACTURED a `result:` record the file did not contain, reaching `RESULT: PASS` at
+# exit 0. The read now goes through `capture_map_nul` and a NUL-bearing report is the named
+# `state=unrepresentable`.
+#
+# DECLARED LIMIT THAT REMAINS: the OUTER capture at each call site (`obs="$(report_bytes …)"`)
+# strips TRAILING NEWLINES, so `X`, `X\n` and `X\n\n\n` are one observation. Enumerated and left,
+# because it cannot change a verdict — every grammar here is per-LINE and column-zero anchored, so
+# trailing newlines create no `result:` line, no field and no disclosure, and a file of only newlines
+# is `report empty` exactly as an empty one is. It does mean a change consisting ONLY of trailing
+# newlines is invisible to the equality guard below; such a report is the same document for every
+# question this tool asks of it.
 report_bytes() {
-  local p="$1" body
+  local p="$1" body rc=0
   if [ ! -f "$p" ]; then printf 'state=no-such-file\n'; return 0; fi
   # Measured BY ATTEMPTING THE READ rather than with `[ -r ]`, which answers TRUE for root and
   # cannot see an I/O error. Since round 12's R2 this is the ONLY place the report's readability is
   # measured: `classify_report` had its own redirection probe and now takes its whole observation
   # from here, so there is one answer to "could this file be read" rather than two.
-  body="$( { LC_ALL=C cat -- "$p" && printf 'E'; } 2>/dev/null )"
+  #
+  # THROUGH THE ONE CAPTURE BOUNDARY (#3751 round 13, S2): a raw capture DROPPED NUL bytes and so
+  # manufactured records the file did not contain — see `capture_map_nul`.
+  #
+  # THE COMPLETE READ IS ASSERTED BY *TWO* SIGNALS, because either alone is defeatable. The
+  # sentinel `E` survives a refactor that folds this assignment into its `local` declaration, where
+  # the STATUS would silently become `local`'s. The STATUS catches the case the sentinel cannot: a
+  # read that fails after delivering a prefix whose last byte happens to BE an `E` is textually
+  # indistinguishable from a complete one, and `${body%E}` would then eat a real byte — a truncated
+  # prefix that drops a SECOND `result:` line turns an AMBIGUOUS refusal into a PASS. `|| rc=$?`,
+  # never `if ! …; then rc=$?`, which reads 0.
+  body="$( { capture_map_nul "$p" && printf 'E'; } 2>/dev/null )" || rc=$?
+  if [ "$rc" -ne 0 ]; then printf 'state=unreadable\n'; return 0; fi
   case "$body" in
     *E) ;;
     *) printf 'state=unreadable\n'; return 0 ;;
   esac
-  printf 'state=present bytes:\n%s' "${body%E}"
+  body="${body%E}"
+  # A byte the capture cannot carry is its OWN state, so the refusal can name it. Reported here
+  # rather than left to the grammar: without the mapping this was a manufactured PASS, and WITH the
+  # mapping alone it would be a bare `no 'result:' line`, telling the operator nothing about the
+  # actual defect in their file.
+  case "$body" in
+    *"$CAPTURE_NUL_BYTE"*) printf 'state=unrepresentable\n'; return 0 ;;
+  esac
+  printf 'state=present bytes:\n%s' "$body"
 }
 
 # report_state <observation> — THE STATE WORD of a `report_bytes` observation: `absent`,
@@ -1766,6 +1858,9 @@ report_state() {
   case "${1:-}" in
     'state=present bytes:'*) printf 'present\n' ;;
     'state=no-such-file') printf 'absent\n' ;;
+    # ITS OWN WORD, so the write-side refusal can say WHY the report could not be read — a byte the
+    # capture cannot carry, not a permission. It is NOT in the permissive set at either caller.
+    'state=unrepresentable') printf 'unrepresentable\n' ;;
     *) printf 'unreadable\n' ;;
   esac
 }
@@ -1836,6 +1931,11 @@ classify_report() {
   case "$(report_state "$obs")" in
     absent) printf 'NOT-RUN|report absent\n'; return 0 ;;
     unreadable) printf 'NOT-RUN|report unreadable\n'; return 0 ;;
+    # `report ungrammatical`, not `report unreadable`: the content WAS observed, and what was
+    # observed is that this is not a text record — so the operator action is the AGENT's (rewrite
+    # the report), not `chmod`. It keeps the ONE `report-ungrammatical` status state that every
+    # variant of that cause shares, deliberately, for the same reason (round 4, H4).
+    unrepresentable) printf "NOT-RUN|report ungrammatical: holds a NUL 0x00 or SOH 0x01 byte, which no text record may contain — a shell capture silently DROPS a NUL, so a reader would judge a document this file does not contain\n"; return 0 ;;
     present) ;;
     *) printf 'NOT-RUN|report unreadable\n'; return 0 ;;
   esac

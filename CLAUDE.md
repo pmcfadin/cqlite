@@ -1303,6 +1303,43 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   fact checked in two places with two strengths — *an author's hand audit is not an independent one; weight
   it accordingly*, and it is sanctioned at all because *an audit whose working is shown is
   auditable, whereas an absent one is not*.
+  **AND A CAPTURE THAT NORMALISES ITS INPUT CANNOT BE THE THING THAT VALIDATES IT (#3751 round 13,
+  S2) — a rule for every `$(…)` read of a file, not a fact about one byte.** A COMMAND SUBSTITUTION
+  SILENTLY DISCARDS NUL BYTES (bash 5.2 warns on stderr, which these call sites redirect away), so
+  the capture did not merely LOSE information, it MANUFACTURED grammar its source does not contain.
+  Three measured instances, all reaching a merge-proceeding answer at exit 0: a report whose bytes
+  are `res<NUL>ult: PASS` holds **no** column-zero `result:` line (`grep -c '^result:'` exits 1 on
+  it) and `verdict` reported `RESULT: PASS`; a stage record whose `report-nonce:` value was
+  `STALE<NUL>PASS1` — not a valid token, since a NUL is not alphanumeric — was read as the valid
+  `STALEPASS1`, redirecting the reader to a **stale** report's `PASS` (round 4's H2 defect, a data
+  file redirecting a reader, through a different door); and in `premerge-assert.sh`, **the merge gate
+  itself**, a `--c-verdict` file whose token is `PA<NUL>SS` — a token the closed-set match must
+  refuse — arrived as `PASS` and printed `PREMERGE: OK`, because gawk passes a NUL through a field
+  and the capture of awk's OUTPUT then removed it. **THE FIX IS IN THE READ, NOT IN A PROBE**, and
+  that is the transferable part: a separate `grep -q`/`wc -c` probe of the same path is a SECOND
+  OBSERVATION, and one direction of its disagreement is a FALSE PASS (the capture reads the
+  NUL-bearing version while the probe reads a clean one) — round 12's R2 lesson one layer down. So
+  the ONE read maps NUL to SOH **in the stream** (`capture_map_nul` / `c_capture_map_nul`, one per
+  script, each the single mapping implementation, deliberately NOT shared because no agreement
+  between the two is required): the byte count is preserved, the forged grammar is never created,
+  and the byte's PRESENCE becomes observable, so the refusal NAMES it instead of silently judging a
+  transformed document. **ONE literal, with the byte DERIVED from it** — `tr` needs the characters
+  `\001` and a detector needs the byte, so two hand-written spellings are two places to diverge, and
+  a divergence means the detector looks for a byte the mapper never writes: a silent false PASS. A
+  literal SOH is refused WITH the NUL, deliberately, because after the mapping the two are
+  indistinguishable without a second read and both are control bytes no text record may hold, with
+  the same operator action. **Two other lossy behaviours of the same capture were enumerated and
+  LEFT, with the reason recorded**: `$( )` strips TRAILING NEWLINES, which cannot change a verdict
+  (every grammar here is per-line and column-zero anchored, so trailing newlines create no `result:`
+  line, no field and no disclosure, and a file of only newlines is `report empty` exactly as an empty
+  one is); and locale/encoding, where every consumer of the snapshot is already `LC_ALL=C`-pinned —
+  now MEASURED by a cross-locale invariance case rather than asserted, after a source scan for
+  unpinned text tools was written and DISCARDED for firing on four indented comments, a heredoc
+  opener and the `--help` renderer, i.e. reddening on correct input. A fourth, adjacent property came
+  with it: the COMPLETE read is now asserted by TWO signals, the sentinel `E` **and** the read's exit
+  status, because a read that fails after delivering a prefix whose last byte happens to BE an `E` is
+  textually indistinguishable from a complete one — and a truncated prefix that drops a SECOND
+  `result:` line turns an AMBIGUOUS refusal into a PASS.
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies
   already-reviewed code. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
   call site AND no new surface). When in doubt, review.

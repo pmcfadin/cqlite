@@ -406,6 +406,12 @@ directory, and any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUI
 
 ### Requirement: A hand-performed substitute is recorded as author-performed, never as clean
 
+Every read of an untrusted file by these tools SHALL be FAITHFUL to the file's bytes, or SHALL
+refuse: a capture that normalises its input SHALL NOT be the thing that validates it. Since a
+command substitution silently discards NUL bytes, each read SHALL neutralise that byte IN THE
+STREAM — never by a second observation of the same path, one direction of whose disagreement is a
+false pass — and the resulting value SHALL fail every token grammar rather than satisfy one.
+
 `review-stage.sh record-author-performed` SHALL require a substantive `--reason`, a named `--evidence`
 artifact and `--performed-by author` — the ONLY accepted performer, since the reported token names
 the AUTHOR and a peer audit stated as an author's is a false verdict — SHALL refuse placeholder values, and SHALL cause `verdict` to
@@ -433,6 +439,17 @@ verdict the operator read and an unreadable report is one nobody read.
   arrived survives
 - **AND** `--force` does not authorize it, because `--force` authorizes replacing the verdict the operator
   read, not one that arrived afterwards
+
+#### Scenario: a byte the capture cannot carry does not become a verdict
+- **WHEN** the report of record, or the stage record, or a `--c-verdict` file holds a NUL byte
+- **THEN** the verdict is a NON-VERDICT naming that byte, and NO reader is redirected and NO
+  merge-proceeding token is reported — in particular a report whose bytes are `res<NUL>ult: PASS`,
+  which holds no column-zero `result:` line at all, SHALL NOT read as `PASS`
+- **AND** a record whose `report-nonce:` value carries a NUL SHALL be a RECORD defect that derives no
+  path, never a valid token naming another generation's report
+- **AND** `premerge-assert.sh` SHALL refuse a `--c-verdict` token carrying a NUL, since a token is
+  matched against a closed set by string equality
+- **AND** the same content WITHOUT the NUL still certifies, so the check does not red on correct input
 
 #### Scenario: an unreadable prior verdict is not replaceable
 - **WHEN** the stage's report cannot be READ (permission or I/O) and a substitute is recorded

@@ -197,6 +197,15 @@
 # is not in that closed grammar, so a file asserting it is refused as an
 # unrecognised token. Inapplicability is reachable ONLY through AUTO's measurement.
 #
+# EVERY READ OF UNTRUSTED CONTENT GOES THROUGH `c_capture_map_nul` (#3751 round
+# 13, S2), because a COMMAND SUBSTITUTION SILENTLY DISCARDS NUL BYTES and so does
+# not merely lose information — it MANUFACTURES the token this script validates.
+# Measured on the shipped artifacts: gawk passes a NUL through a field, so a
+# `--c-verdict` file whose token is `PA\0SS` — NOT `PASS`, and a token the closed
+# set must therefore refuse — arrived here as `PASS` and this script reported
+# `PREMERGE: OK` at exit 0. A capture that normalises its input cannot be the thing
+# that validates it.
+#
 # ONLY `PASS` AND `AUTHOR-PERFORMED` PROCEED, AND THE SECOND KEEPS ITS OWN TOKEN.
 # `AUTHOR-PERFORMED` is review-stage.sh's disclosed hand-audit substitute; it is
 # reported on its own `PREMERGE: C-VERDICT` line and is NEVER folded into
@@ -534,6 +543,38 @@ refuse_tool_failure() {
 # scripts/flow/review-stage.sh's callers (flow-closer opens `c`). It is a constant
 # and NOT an option: a caller able to choose which stage counts as C could point
 # this check at a stage nobody gates on.
+# --- the capture boundary ----------------------------------------------------
+# A CAPTURE MUST NOT MANUFACTURE THE TOKEN IT VALIDATES (#3751 round 13, S2).
+#
+# THE FINDING, measured on the shipped artifacts: bash SILENTLY DISCARDS NUL bytes in a command
+# substitution, and BOTH of this script's reads of untrusted content are captures — awk's OUTPUT for
+# the `--c-verdict` file, and `c_record_bytes`' read of the stage record. gawk passes a NUL through
+# a field, so a verdict file whose token is `PA\0SS` — a token that is NOT `PASS`, and which the
+# closed-set match must therefore refuse — arrived here as `PASS` and the merge point reported
+# `PREMERGE: OK`. The capture created the very token the flag exists to verify.
+#
+# THE FIX IS IN THE READ, NOT IN A PROBE: a separate `grep -q`/`wc -c` of the same path is a SECOND
+# observation, and one direction of its disagreement is a FALSE PASS (the capture reads the
+# NUL-bearing version while the probe reads a clean one). So the ONE read maps NUL to SOH in the
+# stream. The byte count is preserved, nothing is lost, and `PA<SOH>SS` fails the closed-set match
+# by STRING EQUALITY exactly as `PASSthisNeverRan` does.
+#
+# ONE LITERAL, THE BYTE DERIVED FROM IT — `tr` needs the four characters `\001` and a detector needs
+# the byte, and two hand-written spellings are two places to diverge, where a divergence means the
+# detector looks for a byte the mapper never writes (a silent false PASS).
+#
+# `review-stage.sh` carries the same idiom over its own files and the two are deliberately NOT a
+# shared implementation, for the reason `c_record_bytes` states about its sibling: no agreement
+# between them is required, since each is used within ONE process over a DIFFERENT file.
+C_CAPTURE_NUL_TR='\001'
+C_CAPTURE_NUL_BYTE="$(printf '%b' "$C_CAPTURE_NUL_TR")"
+
+# c_capture_map_nul <path> — read <path> for a value that is about to enter a SHELL VARIABLE (or a
+# tool whose output will). The ONE mapping implementation in this script.
+c_capture_map_nul() {
+  LC_ALL=C tr '\000' "$C_CAPTURE_NUL_TR" <"$1"
+}
+
 C_STAGE_KIND=c
 
 # The stage-verdict grammar this script CONSUMES (scripts/flow/review-stage.sh):
@@ -747,8 +788,16 @@ c_parse_verdict() {
   local kind="$1" value="$2" what="$3" out k v
   local missing dup key kname kcount vbad
   if [ "$kind" = file ]; then
-    out=$(_c_verdict_awk <"$value") || refuse_tool_failure awk "$what"
+    # THROUGH THE ONE CAPTURE BOUNDARY (#3751 round 13, S2): read raw, a NUL inside the token
+    # survived awk and was then REMOVED by the capture of awk's output, manufacturing the very
+    # token this function validates. `pipefail` is set, so an unreadable file still fails the
+    # pipeline and reaches `refuse_tool_failure` exactly as the redirection did.
+    out=$(c_capture_map_nul "$value" | _c_verdict_awk) || refuse_tool_failure awk "$what"
   else
+    # NO MAPPING HERE, AND NOT BECAUSE IT IS UNTESTED: `$value` has ALREADY passed through a shell
+    # variable, so any NUL is long gone and a mapping would be theatre. Its producer is
+    # `review-stage.sh verdict`, whose every emitted value goes through `one_line`, which DELETES
+    # NUL — an affirmative property of the producer, not an absence of evidence about it.
     out=$(printf '%s\n' "$value" | _c_verdict_awk) || refuse_tool_failure awk "$what"
   fi
   CV_N=""; CV_TOKEN=""; CV_REPORT=""; CV_LINE=""
@@ -1099,14 +1148,30 @@ c_stage_root() {
 # NUL bytes is not represented here. The stage record is text written by `review-stage.sh` and its
 # every field is validated on the read side; stated rather than left as an unexamined blind spot.
 c_record_bytes() {
-  local p="$1" body
+  local p="$1" body rc=0
   if [ ! -f "$p" ]; then printf 'state=no-such-file\n'; return 0; fi
-  body="$( { LC_ALL=C cat -- "$p" && printf 'E'; } 2>/dev/null )"
+  # THROUGH THE ONE CAPTURE BOUNDARY (#3751 round 13, S2) — a raw capture DROPPED NUL bytes, so a
+  # record whose `head-sha:`/`report-nonce:` line carried one was parsed as a line it does not
+  # hold. See `c_capture_map_nul`.
+  #
+  # AND THE COMPLETE READ IS ASSERTED BY *TWO* SIGNALS: the sentinel `E` survives a refactor that
+  # folds this assignment into its `local` declaration (where the STATUS would become `local`'s),
+  # and the STATUS catches what the sentinel cannot — a read that fails after delivering a prefix
+  # whose last byte happens to BE an `E` is textually indistinguishable from a complete one, and
+  # `${body%E}` would then eat a real byte. `|| rc=$?`, never `if ! …; then rc=$?`, which reads 0.
+  body="$( { c_capture_map_nul "$p" && printf 'E'; } 2>/dev/null )" || rc=$?
+  if [ "$rc" -ne 0 ]; then printf 'state=unreadable\n'; return 0; fi
   case "$body" in
     *E) ;;
     *) printf 'state=unreadable\n'; return 0 ;;
   esac
-  printf 'state=present\n%s' "${body%E}"
+  body="${body%E}"
+  # ITS OWN STATE, so the refusal names the byte rather than reporting a permission failure that
+  # did not happen: the operator action is to rewrite the record (or re-open the stage), not chmod.
+  case "$body" in
+    *"$C_CAPTURE_NUL_BYTE"*) printf 'state=unrepresentable\n'; return 0 ;;
+  esac
+  printf 'state=present\n%s' "$body"
 }
 
 # _c_stage_record_awk — read a STAGE RECORD on stdin, print `key=value` lines.
@@ -1193,6 +1258,15 @@ c_assert_stage_binds_certified() {
   C_STAGE_RECORD="$(c_record_bytes "$sfile")"
   case "$C_STAGE_RECORD" in
     'state=present'*) ;;
+    'state=unrepresentable')
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' stage record for issue $issue holds a NUL 0x00 or SOH 0x01 byte, so it" \
+        "is not a text record and nothing in it may be read as one:" \
+        "  record: $sfile" \
+        "A shell capture silently DROPS a NUL, so a reader would parse lines this file does not" \
+        "hold — which is how a forged 'report-nonce:' could name another generation's report." \
+        "$C_REOPEN_REMEDY"
+      ;;
     *)
       refuse_no_c_verdict \
         "The '$C_STAGE_KIND' stage record for issue $issue could not be READ, so nothing binds the" \
