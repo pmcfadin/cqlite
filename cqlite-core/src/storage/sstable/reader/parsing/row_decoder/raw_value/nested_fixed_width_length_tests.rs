@@ -45,15 +45,34 @@
 //! `require_fixed_width` (`data.len() < n`), the ACCEPTED SET IS EXACTLY `{n}`:
 //! `len == 0` and `len < n` are refused under-width, while `len > n` leaves
 //! `len - n` bytes unconsumed and is refused by the caller's assert. The property
-//! AC1 and AC3 assert is therefore enforced repo-wide by #3811's mechanism, and
-//! these cases pin it AT EVERY NESTING POSITION for every fixed-width type —
-//! coverage #3811's own tests (`raw_value/issue_3811_consumption_demo_tests.rs`)
-//! do not enumerate. They must fail if either half of that composition is
-//! relaxed.
+//! AC1 and AC3 assert is therefore enforced on THAT PATH by #3811's mechanism,
+//! and these cases pin it for every fixed-width type at the five nesting
+//! positions [`nesting_positions`] enumerates — coverage #3811's own tests
+//! (`raw_value/issue_3811_consumption_demo_tests.rs`) do not enumerate. They
+//! must fail if either half of that composition is relaxed.
 //!
 //! Both halves report `Error::Corruption`, with two distinct wordings — the
 //! under-width one from `require_fixed_width` and the over-width one from
 //! `require_fully_consumed_raw` — and [`is_width_error`] below matches either.
+//!
+//! ## What is COVERED, and what is NOT
+//!
+//! **Covered:** the bounded scalar decoder path — everything that reaches
+//! `V5CompressedLegacyParser::parse_value_from_raw_bytes`, i.e. a frozen
+//! `list`/`set` element, a frozen `map` key or value, a `tuple` field, and the
+//! DIRECT (unnested) scalar position.
+//!
+//! **NOT covered:** a **UDT FIELD**, which does not reach that entry point at
+//! all — `parse_inline_udt_value` / `parse_nested_udt_from_registry` dispatch a
+//! scalar field to `parse_simple_udt_field_value` (`row_decoder/udt.rs`), whose
+//! `_ =>` **blob fallback** applies NO width check to `tinyint`, `smallint`,
+//! `date`, `time` or `counter`. That is a real, open gap, and #3811's
+//! consumption assert is structurally unable to see it (the blob consumes the
+//! whole slice, so `consumed == len`). It is CHARACTERISED at the end of this
+//! file by
+//! `wrong_width_udt_field_of_five_types_is_tolerated_today_known_gap`, which is
+//! also where the five types and the mechanism are stated in full. Read no
+//! claim here as covering a UDT field.
 //!
 //! CQLite is therefore NARROWER than Cassandra for the six `… or 0` types above,
 //! whose `validate` admits an EMPTY buffer (`Int32Serializer.java`
@@ -132,6 +151,12 @@ type BodyBuilder = Box<dyn Fn(&[u8]) -> Vec<u8>>;
 type NestingPosition = (String, String, BodyBuilder);
 
 /// The five nesting positions AC1 enumerates, for one element of type `t`.
+///
+/// These five are the WHOLE of "every nesting position" as this module's cases
+/// use that phrase: they are the positions that reach
+/// `parse_value_from_raw_bytes`. A UDT FIELD is NOT among them and is not
+/// reachable through this helper — see the module header's coverage section and
+/// `wrong_width_udt_field_of_five_types_is_tolerated_today_known_gap`.
 fn nesting_positions(t: &str) -> Vec<NestingPosition> {
     vec![
         (
@@ -186,8 +211,10 @@ fn is_width_error(err: &Error) -> bool {
     is_under_width_error(err) || is_over_width_error(err)
 }
 
-/// AC1: a wrong declared length is REFUSED at every nesting position, with the
-/// NAMED error carrying the type, the expected width and the actual length.
+/// AC1: a wrong declared length is REFUSED at each of the five nesting
+/// positions [`nesting_positions`] enumerates, with the NAMED error carrying
+/// the type, the expected width and the actual length. Scope: the bounded
+/// scalar path only — NOT a UDT field (module header, "What is COVERED").
 #[test]
 fn wrong_declared_length_is_refused_at_every_nesting_position() {
     let p = parser();
@@ -239,7 +266,10 @@ fn wrong_declared_length_is_refused_at_every_nesting_position() {
     }
 }
 
-/// AC2: a ZERO-length fixed-width element is refused at every nesting position.
+/// AC2: a ZERO-length fixed-width element is refused at each of the five
+/// nesting positions [`nesting_positions`] enumerates. A zero-length UDT FIELD
+/// of the five unguarded types is NOT refused — see
+/// `wrong_width_udt_field_of_five_types_is_tolerated_today_known_gap`.
 ///
 /// The four strict serializers (`smallint`, `tinyint`, `date`, `time`) refuse it
 /// per the pinned source. The "or 0" family is refused because `require_fixed_width`
