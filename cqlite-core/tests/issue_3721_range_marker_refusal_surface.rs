@@ -84,6 +84,7 @@ use std::path::{Path, PathBuf};
 
 use cqlite_core::error::ErrorCategory;
 use cqlite_core::ingestion::{ingest, IngestionConfig};
+use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
 use cqlite_core::{Config, Database, Error};
 
 #[path = "support/datasets_root.rs"]
@@ -115,6 +116,29 @@ const MARKER_BODY_SIZE_OFFSET: usize = 0x2b;
 /// The committed fixture's `marker_body_size` at [`MARKER_BODY_SIZE_OFFSET`]: 4
 /// bytes (`prev_size` VUInt + the deletion-time pair).
 const MARKER_BODY_SIZE_ON_DISK: u8 = 0x04;
+/// The four body bytes the committed `marker_body_size` covers, at
+/// [`MARKER_BODY_SIZE_OFFSET`] + 1: `prev_unfiltered_size` VUInt (`0x10`), the
+/// `markedForDeleteAt` delta VUInt (`0x87 0xd0`, a 2-byte encoding) and the
+/// `localDeletionTime` delta VUInt (`0x00`). Asserted before either
+/// body-size patch, because both depend on the body being EXACTLY these four
+/// bytes wide: [`Patch::MarkerBodySizeTooSmall`] must cut the LAST field off, and
+/// [`Patch::MarkerBodySizeTooLarge`] must overrun into the byte after them.
+const MARKER_BODY_ON_DISK: [u8; 4] = [0x10, 0x87, 0xd0, 0x00];
+/// A `marker_body_size` one byte SHORT of the truth — the DOWNWARD corruption.
+/// Bounding the body decode to `body_end` then runs the `localDeletionTime` read
+/// out of bytes; unbounded (pre-fix) it read that field from the NEXT
+/// unfiltered's bytes and returned `Ok` with the cursor left INSIDE the marker.
+const MARKER_BODY_SIZE_TOO_SMALL: u8 = 0x03;
+/// A `marker_body_size` one byte LONG — still inside the buffer, so the upward
+/// guard (`vuint_length_within`) cannot see it. The declared extent then ends one
+/// byte past where the fields do, which only the exact-consumption assert catches;
+/// pre-fix `pos` was OVERWRITTEN with that extent and the next unfiltered's flags
+/// byte at [`NEXT_UNFILTERED_OFFSET`] was skipped.
+const MARKER_BODY_SIZE_TOO_LARGE: u8 = 0x05;
+/// The offset of the unfiltered that FOLLOWS the first marker — the byte a
+/// mis-declared body size makes the caller resume at (one early for the too-small
+/// patch, one late for the too-large one). It is the SECOND marker's flags byte.
+const NEXT_UNFILTERED_OFFSET: usize = 0x30;
 
 /// `CRC.db` layout (`reader::crc::CrcDb::parse`): a 4-byte big-endian chunk-size
 /// header followed by one 4-byte big-endian CRC32 per Data.db chunk.
@@ -159,6 +183,27 @@ enum Patch {
     /// boundary has, which is exactly why the final-vs-non-final decision must come
     /// from the chunking state and never from the bytes.
     TruncatedAtMarker,
+    /// The `marker_body_size` VUInt corrupted DOWNWARD by one byte (issue #3721,
+    /// roborev job 75). Nothing else changes — and because the committed value is
+    /// a SINGLE-byte VUInt the file length does not change either, so every other
+    /// structure of the fixture stays exactly where it was.
+    ///
+    /// The declared body then ends one byte BEFORE the fields do. Decoding the
+    /// body within that extent runs the `localDeletionTime` read out of bytes, so
+    /// the marker cannot be parsed. Pre-fix the fields were read from the WHOLE
+    /// data slice — i.e. the last one came from the NEXT unfiltered's bytes — and
+    /// `pos` was then overwritten with the declared end, so the parse returned
+    /// `Ok` with the cursor left INSIDE this marker.
+    MarkerBodySizeTooSmall,
+    /// The `marker_body_size` VUInt corrupted UPWARD by one byte, staying well
+    /// inside the buffer so the pre-existing upward guard (`vuint_length_within`,
+    /// which only refuses a size exceeding the data) cannot see it.
+    ///
+    /// The fields then end one byte BEFORE the declared extent, which nothing but
+    /// the exact-consumption assert can detect: pre-fix `pos` was overwritten with
+    /// the declared end, so the caller resumed one byte LATE — past the next
+    /// unfiltered's flags byte at [`NEXT_UNFILTERED_OFFSET`].
+    MarkerBodySizeTooLarge,
 }
 
 impl Patch {
@@ -173,6 +218,14 @@ impl Patch {
             }
             Patch::TruncatedAtMarker => {
                 data.truncate(MARKER_BODY_SIZE_OFFSET);
+                data
+            }
+            Patch::MarkerBodySizeTooSmall => {
+                data[MARKER_BODY_SIZE_OFFSET] = MARKER_BODY_SIZE_TOO_SMALL;
+                data
+            }
+            Patch::MarkerBodySizeTooLarge => {
+                data[MARKER_BODY_SIZE_OFFSET] = MARKER_BODY_SIZE_TOO_LARGE;
                 data
             }
         }
@@ -246,6 +299,29 @@ fn assert_marker_grammar(data: &[u8]) {
         data[MARKER_BODY_SIZE_OFFSET], MARKER_BODY_SIZE_ON_DISK,
         "expected the committed marker_body_size VUInt at 0x{MARKER_BODY_SIZE_OFFSET:02x}"
     );
+    // The four body bytes the declared size covers, and the unfiltered that
+    // follows them. BOTH body-size patches depend on this exact layout: too-small
+    // must cut the LAST field off, too-large must overrun by exactly one byte into
+    // the next unfiltered's flags.
+    assert_eq!(
+        &data[MARKER_BODY_SIZE_OFFSET + 1..MARKER_BODY_SIZE_OFFSET + 1 + MARKER_BODY_ON_DISK.len()],
+        &MARKER_BODY_ON_DISK,
+        "expected the marker body (prev_size VUInt + the markedForDeleteAt/localDeletionTime \
+         delta pair) at 0x{:02x}",
+        MARKER_BODY_SIZE_OFFSET + 1
+    );
+    assert_eq!(
+        MARKER_BODY_SIZE_OFFSET + 1 + MARKER_BODY_ON_DISK.len(),
+        NEXT_UNFILTERED_OFFSET,
+        "the declared body must end exactly where the next unfiltered begins, or neither \
+         body-size patch is off by the one byte it claims to be"
+    );
+    assert_eq!(
+        data[NEXT_UNFILTERED_OFFSET], 0x02,
+        "expected the SECOND range-tombstone marker's flags byte at \
+         0x{NEXT_UNFILTERED_OFFSET:02x} — the byte a too-large body size makes the caller skip"
+    );
+
     // The cut must land INSIDE the marker, or `Patch::TruncatedAtMarker` would be
     // cutting somewhere else entirely.
     assert!(
@@ -331,6 +407,58 @@ fn stage(dir: &Path, patch: Patch) -> PathBuf {
         std::fs::write(dest.join(name), bytes).expect("write scratch fixture component");
     }
     dest_root
+}
+
+/// The fixture's schema, as `TableSchema` (the compaction and reader surfaces
+/// take the struct, not CQL text). Mirrors the committed
+/// `test_compaction_tombstone_ttl.rt_cross_gen` DDL.
+///
+/// Lives at the top level (not inside `d6_compaction`) because the reader-driver
+/// cases in `d8_marker_body_size` need it too and are NOT gated on `write-support`.
+fn fixture_table_schema() -> TableSchema {
+    let col = |name: &str, ty: &str| Column {
+        name: name.to_string(),
+        data_type: ty.to_string(),
+        nullable: name == "v",
+        default: None,
+        is_static: false,
+    };
+    TableSchema {
+        keyspace: KEYSPACE.to_string(),
+        table: TABLE.to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }],
+        columns: vec![col("id", "int"), col("ck", "int"), col("v", "text")],
+        comments: Default::default(),
+        dropped_columns: Default::default(),
+    }
+}
+
+/// The staged fixture's `Data.db` (the patched or unpatched copy `stage` wrote).
+fn staged_data_db(data_root: &Path) -> PathBuf {
+    let ks = data_root.join(KEYSPACE);
+    let table_dir = std::fs::read_dir(&ks)
+        .unwrap_or_else(|e| panic!("read {}: {e}", ks.display()))
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .unwrap_or_else(|| panic!("no staged table directory under {}", ks.display()));
+    let data = std::fs::read_dir(&table_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", table_dir.display()))
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().ends_with("-Data.db"))
+        .unwrap_or_else(|| panic!("no staged Data.db under {}", table_dir.display()));
+    data
 }
 
 async fn open_db(data_root: &Path, schema: &Path) -> Database {
@@ -521,7 +649,7 @@ async fn d5_streaming_scan_surfaces_the_marker_refusal() {
 mod d6_compaction {
     use std::path::{Path, PathBuf};
 
-    use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
+    use cqlite_core::schema::TableSchema;
     use cqlite_core::storage::write_engine::merge::{
         compact_sstables, KWayMerger, MergeStep, RowData,
     };
@@ -531,7 +659,10 @@ mod d6_compaction {
     use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
     use cqlite_core::types::Value;
 
-    use super::{assert_marker_refusal_text, stage, Patch, KEYSPACE, LIVE_CLUSTERING, TABLE};
+    use super::{
+        assert_marker_refusal_text, fixture_table_schema as schema, stage, staged_data_db, Patch,
+        KEYSPACE, LIVE_CLUSTERING, TABLE,
+    };
 
     /// Clustering keys covered by the PATCHED marker's range and by NO other
     /// marker of the fixture — which is what makes the resurrection observable.
@@ -555,55 +686,6 @@ mod d6_compaction {
     /// tombstones (3000 / 3001 µs) and than both live rows, so a correct
     /// compaction shadows these rows entirely.
     const OLDER_TS: i64 = 1;
-
-    /// The fixture's schema, as `TableSchema` (the compaction surface takes the
-    /// struct, not CQL text). Mirrors the committed
-    /// `test_compaction_tombstone_ttl.rt_cross_gen` DDL.
-    fn schema() -> TableSchema {
-        let col = |name: &str, ty: &str| Column {
-            name: name.to_string(),
-            data_type: ty.to_string(),
-            nullable: name == "v",
-            default: None,
-            is_static: false,
-        };
-        TableSchema {
-            keyspace: KEYSPACE.to_string(),
-            table: TABLE.to_string(),
-            partition_keys: vec![KeyColumn {
-                name: "id".to_string(),
-                data_type: "int".to_string(),
-                position: 0,
-            }],
-            clustering_keys: vec![ClusteringColumn {
-                name: "ck".to_string(),
-                data_type: "int".to_string(),
-                position: 0,
-                order: ClusteringOrder::Asc,
-            }],
-            columns: vec![col("id", "int"), col("ck", "int"), col("v", "text")],
-            comments: Default::default(),
-            dropped_columns: Default::default(),
-        }
-    }
-
-    /// The staged fixture's `Data.db` (the patched or unpatched copy `stage` wrote).
-    fn staged_data_db(data_root: &Path) -> PathBuf {
-        let ks = data_root.join(KEYSPACE);
-        let table_dir = std::fs::read_dir(&ks)
-            .unwrap_or_else(|e| panic!("read {}: {e}", ks.display()))
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .find(|p| p.is_dir())
-            .unwrap_or_else(|| panic!("no staged table directory under {}", ks.display()));
-        let data = std::fs::read_dir(&table_dir)
-            .unwrap_or_else(|e| panic!("read {}: {e}", table_dir.display()))
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .find(|p| p.to_string_lossy().ends_with("-Data.db"))
-            .unwrap_or_else(|| panic!("no staged Data.db under {}", table_dir.display()));
-        data
-    }
 
     /// Write ONE CQLite SSTable holding the covered rows at [`OLDER_TS`], and
     /// return its `Data.db`.
@@ -835,5 +917,328 @@ mod d6_compaction {
                 );
             }
         }
+    }
+    /// The durable-harm level for the same two patches (#3721, roborev job 75):
+    /// an end-to-end `compact_sstables` must REFUSE, so no output SSTable is
+    /// adopted. `compact_sstables` drives the STREAMING reader driver through the
+    /// merge producer, whose `MergeProducerError::to_error` flattens the cause
+    /// into `Error::Storage(String)` — so the text is asserted and the category is
+    /// not (see `assert_marker_refusal_text`).
+    ///
+    /// Asserted on the OUTPUT rather than on the parser because that is where the
+    /// harm lands: pre-fix the parse returned `Ok` with a resume point one byte
+    /// wrong, so what matters about an `Ok` here is WHAT it wrote.
+    fn compaction_refuses_body_size(patch: Patch, cause: &str) {
+        let (_tmp, schema, outcome) = compact_with_fixture(patch);
+        match outcome {
+            Err(e) => {
+                let rendered = e.to_string();
+                for needle in [
+                    "range-tombstone marker",
+                    "could not be PARSED",
+                    "FINAL chunk",
+                ] {
+                    assert!(
+                        rendered.contains(needle),
+                        "the compaction refusal for {patch:?} must name `{needle}`; got: {rendered}"
+                    );
+                }
+                assert!(
+                    rendered.contains(cause),
+                    "the compaction refusal for {patch:?} must PRESERVE the parser's own cause \
+                     (`{cause}`); got: {rendered}"
+                );
+            }
+            Ok(output) => {
+                let (live, markers) = read_back(output, &schema);
+                let resurrected: Vec<i32> = live
+                    .iter()
+                    .copied()
+                    .filter(|ck| COVERED_CLUSTERING.contains(ck))
+                    .collect();
+                panic!(
+                    "compaction returned Ok over a fixture whose first range-tombstone marker \
+                     declares a `marker_body_size` disagreeing with its own field encodings \
+                     ({patch:?}): the marker's deletion times and its resume point cannot both \
+                     be right, and the output was still WRITTEN (issue #3721). Rows the \
+                     deletion covered that came back: {resurrected:?}. Output rows: {live:?}, \
+                     markers: {markers}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn d8_compaction_refuses_a_body_size_corrupted_downward_and_resurrects_nothing() {
+        compaction_refuses_body_size(
+            Patch::MarkerBodySizeTooSmall,
+            "Failed to parse localDeletionTime in marker body",
+        );
+    }
+
+    #[test]
+    fn d8_compaction_refuses_a_body_size_corrupted_upward_and_resurrects_nothing() {
+        compaction_refuses_body_size(
+            Patch::MarkerBodySizeTooLarge,
+            "declared size and field encodings disagree",
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// D8 (issue #3721, roborev job 75) — the marker's own `marker_body_size` VUInt
+// corrupted by ONE byte, in BOTH directions, over BOTH compaction read drivers.
+//
+// `parse_range_tombstone_marker_with_ldt` read the declared body size, then
+// decoded `prev_unfiltered_size` and the deletion-time pair(s) from the WHOLE
+// data slice — unbounded by the declared extent — and finally OVERWROTE its
+// cursor with that extent. So the size and the field encodings were allowed to
+// disagree silently, in either direction:
+//
+// * declared SHORT: the last field was read from the NEXT unfiltered's bytes and
+//   the caller resumed INSIDE this marker;
+// * declared LONG (still within the buffer, so the pre-existing
+//   `vuint_length_within` guard cannot see it): the fields ended before the
+//   declared extent and the caller resumed one byte PAST the next unfiltered's
+//   flags byte.
+//
+// Both returned `Ok`. On this path that `Ok` is WRITTEN: a tombstone carrying
+// timestamps that are not its own either fails to shadow the rows it covers
+// (resurrection) or shadows rows it does not (data loss), durably on disk.
+//
+// The fix decodes the body within `&data[..body_end]` and requires that extent to
+// be consumed EXACTLY. Each direction is therefore refused by a DIFFERENT half of
+// the fix, and each case asserts the half it exercises by name:
+//
+// | patch | refused by | cause named |
+// |-------|-----------|-------------|
+// | too small | the bounded slice | `Failed to parse localDeletionTime in marker body` |
+// | too large | the exact-consumption assert | `declared size and field encodings disagree` |
+//
+// ## Why these surfaces
+//
+// The two COMPACTION read drivers each own a copy of the marker decision and are
+// both reached through `SSTableReader`'s public compaction API:
+//
+// * BUFFERED — `iterate_all_partitions_for_compaction` -> `parse_block_for_compaction`
+//   -> `parse_one_partition_for_compaction` (used in production by the write
+//   engine's sweep);
+// * STREAMING — `stream_all_partitions_for_compaction` -> `stream_partition_body_incremental`
+//   (the row-granular drain every k-way merge producer thread drives, so it is
+//   also what `compact_sstables` below runs through).
+//
+// The ordinary `SELECT` path does NOT reach this parser: the read-side surfaces
+// call `parse_range_tombstone_marker_full`, whose `_with_ldt` delegate is only
+// reached through `CompactionPolicy::on_range_marker`. (`_full` does call
+// `_with_ldt`, so a `SELECT` inherits the same bound — but it cannot be
+// distinguished there: the size/encoding disagreement makes the marker
+// unparseable, which the read paths already had to answer, so a `SELECT` case
+// would be pinning `column_decode`/`end-of-partition` behaviour, not this fix.
+// The refusal that IS specific to this fix is asserted where it is decided.)
+//
+// Both drivers here run at `at_final_chunk = true` over the whole data section,
+// so an unparseable marker is corruption rather than a window boundary — the
+// non-final half of that decision belongs to a different lane and is pinned in
+// `data_access::compaction_range_marker_resume_tests`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+mod d8_marker_body_size {
+    use std::ops::ControlFlow;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use cqlite_core::error::ErrorCategory;
+    use cqlite_core::storage::scan_cancel::ScanCancel;
+    use cqlite_core::storage::sstable::reader::compaction_row::{CompactionRow, CompactionRowData};
+    use cqlite_core::storage::sstable::SSTableReader;
+    use cqlite_core::{Config, Error, Platform};
+
+    use super::{fixture_table_schema, stage, staged_data_db, Patch};
+
+    /// Which compaction read driver a case drives. Named in every assertion
+    /// message so a failure says WHICH copy of the decision broke.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Driver {
+        /// `iterate_all_partitions_for_compaction` — whole data section decoded in
+        /// one buffered pass.
+        Buffered,
+        /// `stream_all_partitions_for_compaction` — the row-granular sliding-window
+        /// drain the merge producers use.
+        Streaming,
+    }
+
+    impl Driver {
+        fn name(self) -> &'static str {
+            match self {
+                Driver::Buffered => "iterate_all_partitions_for_compaction (buffered)",
+                Driver::Streaming => "stream_all_partitions_for_compaction (streaming)",
+            }
+        }
+    }
+
+    /// Open a reader over the staged copy `stage` wrote (patched or not) and
+    /// confirm it is the `nb` generation this lane hand-decodes.
+    async fn open_staged(data_root: &Path) -> Arc<SSTableReader> {
+        let data_db = staged_data_db(data_root);
+        let cfg = Config::default();
+        let platform = Arc::new(Platform::new(&cfg).await.expect("platform"));
+        let reader = SSTableReader::open(&data_db, &cfg, platform)
+            .await
+            .expect("the staged fixture copy must open (its CRC.db is re-sealed)");
+        assert_eq!(
+            reader.format_version().expect("format version"),
+            "nb",
+            "the hand decode in this lane's module docs is of the `nb` fixture"
+        );
+        Arc::new(reader)
+    }
+
+    /// Run `driver` over a staged copy of the fixture carrying `patch`.
+    async fn run(driver: Driver, patch: Patch) -> Result<Vec<CompactionRow>, Error> {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_root = stage(tmp.path(), patch);
+        let reader = open_staged(&data_root).await;
+        let schema = fixture_table_schema();
+        match driver {
+            Driver::Buffered => {
+                reader
+                    .iterate_all_partitions_for_compaction(Some(&schema))
+                    .await
+            }
+            Driver::Streaming => {
+                let cancel = ScanCancel::default();
+                let mut rows = Vec::new();
+                reader
+                    .stream_all_partitions_for_compaction(Some(&schema), &cancel, |row| {
+                        rows.push(row);
+                        Ok(ControlFlow::Continue(()))
+                    })
+                    .await?;
+                Ok(rows)
+            }
+        }
+    }
+
+    /// How many of `rows` are range-tombstone markers.
+    fn markers(rows: &[CompactionRow]) -> usize {
+        rows.iter()
+            .filter(|r| matches!(r.row_data, CompactionRowData::RangeMarker { .. }))
+            .count()
+    }
+
+    /// The CONTROL, and it is load-bearing twice over: it proves the staged copy
+    /// is readable at all through this driver (so a refusal below is attributable
+    /// to the ONE patched byte and not to the staging or the re-sealed `CRC.db`),
+    /// and it proves the driver really does reach the marker parser — without a
+    /// non-zero marker count the patched halves could be refusing for any reason.
+    async fn control(driver: Driver) {
+        let rows = run(driver, Patch::None).await.unwrap_or_else(|e| {
+            panic!(
+                "{} over the UNPATCHED fixture must succeed: {e}",
+                driver.name()
+            )
+        });
+        assert!(
+            markers(&rows) >= 1,
+            "{} must decode at least one range-tombstone marker from the UNPATCHED fixture, \
+             or the patched cases below prove nothing about the marker parser; got {} rows: \
+             {rows:#?}",
+            driver.name(),
+            rows.len()
+        );
+    }
+
+    /// The parser's own cause each patch direction must produce — the half of the
+    /// fix that direction exercises, asserted by name so the two cases cannot pass
+    /// on each other's refusal.
+    fn expected_cause(patch: Patch) -> &'static str {
+        match patch {
+            // The body slice ends one byte early, so the LAST field of the
+            // deletion-time pair runs out of bytes.
+            Patch::MarkerBodySizeTooSmall => "Failed to parse localDeletionTime in marker body",
+            // The fields end one byte before the declared extent, which only the
+            // exact-consumption assert can see.
+            Patch::MarkerBodySizeTooLarge => "declared size and field encodings disagree",
+            other => panic!("{other:?} is not a marker_body_size patch"),
+        }
+    }
+
+    /// One defect case: the driver must FAIL, naming the marker, the final-chunk
+    /// decision and the parser's own cause for THIS direction.
+    async fn case(driver: Driver, patch: Patch) {
+        control(driver).await;
+
+        match run(driver, patch).await {
+            Ok(rows) => panic!(
+                "{} returned Ok over a fixture whose first range-tombstone marker declares a \
+                 `marker_body_size` that DISAGREES with its own field encodings ({patch:?}). \
+                 The declared size and the encodings are both authoritative and they \
+                 contradict each other, so the deletion times and the resume point cannot \
+                 both be right — and this decode feeds WRITTEN compaction output (issue \
+                 #3721). Rows: {} ({} markers): {rows:#?}",
+                driver.name(),
+                rows.len(),
+                markers(&rows)
+            ),
+            Err(e) => {
+                let rendered = e.to_string();
+                for needle in [
+                    "range-tombstone marker",
+                    "could not be PARSED",
+                    "FINAL chunk",
+                ] {
+                    assert!(
+                        rendered.contains(needle),
+                        "{}'s refusal for {patch:?} must name `{needle}`; got: {rendered}",
+                        driver.name()
+                    );
+                }
+                let cause = expected_cause(patch);
+                assert!(
+                    rendered.contains(cause),
+                    "{}'s refusal for {patch:?} must PRESERVE the parser's own cause (`{cause}`) \
+                     rather than a re-synthesised message — that text is what names WHICH half \
+                     of the size/encoding disagreement fired; got: {rendered}",
+                    driver.name()
+                );
+                assert_eq!(
+                    e.category(),
+                    ErrorCategory::Data,
+                    "a marker whose declared body size contradicts its own encodings is \
+                     damaged data ({}, {patch:?})",
+                    driver.name()
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn buffered_refuses_a_body_size_corrupted_downward() {
+        case(Driver::Buffered, Patch::MarkerBodySizeTooSmall).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_refuses_a_body_size_corrupted_downward() {
+        case(Driver::Streaming, Patch::MarkerBodySizeTooSmall).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn buffered_refuses_a_body_size_corrupted_upward_within_the_buffer() {
+        case(Driver::Buffered, Patch::MarkerBodySizeTooLarge).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_refuses_a_body_size_corrupted_upward_within_the_buffer() {
+        case(Driver::Streaming, Patch::MarkerBodySizeTooLarge).await;
+    }
+
+    /// The control on its own, as its own test: a well-formed marker must still
+    /// decode through BOTH drivers. A fix that refused every marker — or every
+    /// marker at the end of the data — would fail HERE while leaving the four
+    /// cases above green.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn both_drivers_still_decode_the_unpatched_marker() {
+        control(Driver::Buffered).await;
+        control(Driver::Streaming).await;
     }
 }
