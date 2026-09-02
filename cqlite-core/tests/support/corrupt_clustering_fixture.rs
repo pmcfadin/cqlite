@@ -26,6 +26,8 @@
 
 use std::path::{Path, PathBuf};
 
+use tempfile::TempDir;
+
 pub const FIX_KS: &str = "test_basic";
 pub const FIX_TABLE: &str = "composite_key_table";
 pub const SCHEMA_FILE: &str = "basic-types.cql";
@@ -103,6 +105,23 @@ pub const BTI_MULTICLUSTERING: FixtureSpec = FixtureSpec {
 /// A staged control/mutated pair. Each `*_root` is an ingestion data root — the
 /// directory holding `<keyspace>/<table>-<uuid>/`, which is what
 /// `IngestionConfig::data_dir` expects.
+///
+/// # THIS VALUE OWNS THE STAGED BYTES — HOLD IT FOR THE WHOLE TEST (#3950)
+///
+/// `Staged` owns a `tempfile::TempDir`, so **dropping it deletes both staged
+/// generations**. Every path field points INSIDE that directory, so a helper
+/// that copies the paths out and lets the `Staged` go out of scope leaves its
+/// caller holding paths to nothing — a mid-test disappearance, which is a worse
+/// failure than the leak this ownership fixes. Bind it (`let staged = …;`) for
+/// as long as any of its paths is used, and return the whole value from a
+/// staging helper rather than the paths alone.
+///
+/// Before this, the harness staged into a PID-named directory under the system
+/// temp dir and never removed it, so every run of every consuming target left
+/// two complete SSTable generations behind (roborev job 59 finding 1). The
+/// cleanup is pinned by `the_staging_harness_removes_both_generations_on_drop`
+/// in `issue_3782_corrupt_row_refusal.rs`: present while the value is alive,
+/// gone once it drops.
 pub struct Staged {
     pub control_root: PathBuf,
     pub mutated_root: PathBuf,
@@ -114,6 +133,18 @@ pub struct Staged {
     /// `1` when the literal is referenced nowhere else; more when LZ4
     /// back-references replicate it (every one of them holds the same `0xFF`).
     pub mutated_span: usize,
+    /// The staging directory both `*_root`s live under. Held so its `Drop`
+    /// removes the two copied generations when the test that staged them ends;
+    /// read only through `Staged::staging_root`.
+    staging: TempDir,
+}
+
+impl Staged {
+    /// The temp directory both staged generations live under. Exposed so a test
+    /// can assert the cleanup itself (present while alive, gone after drop).
+    pub fn staging_root(&self) -> &Path {
+        self.staging.path()
+    }
 }
 
 /// The first component in `dir` whose file name ends with `suffix`.
@@ -351,7 +382,8 @@ fn copy_dir(src: &Path, dst: &Path) {
 }
 
 /// Stage a pristine copy and a single-byte-mutated copy of the BIG fixture
-/// directory `src` under a `tag`-unique temp root.
+/// directory `src` under a fresh `tag`-prefixed temp root OWNED BY THE RETURNED
+/// [`Staged`] — which the caller must hold for as long as it uses the paths.
 pub fn stage_control_and_mutated(src: &Path, tag: &str) -> Staged {
     stage_spec(&BIG_COMPOSITE, src, tag)
 }
@@ -364,8 +396,17 @@ pub fn stage_spec(spec: &FixtureSpec, src: &Path, tag: &str) -> Staged {
         .file_name()
         .expect("fixture directory has a name")
         .to_owned();
-    let root = std::env::temp_dir().join(format!("cqlite-3782-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    // A `TempDir`, not a PID-named path under the system temp dir: the old form
+    // was never removed, so each run of each consuming target left two whole
+    // SSTable generations behind for ever (roborev job 59 finding 1). The `tag`
+    // stays in the directory NAME so a human watching the temp dir can still
+    // tell the lanes apart while they run. Uniqueness is now the OS's, so the
+    // defensive `remove_dir_all` of a possibly-live sibling run is gone too.
+    let staging = tempfile::Builder::new()
+        .prefix(&format!("cqlite-3782-{tag}-"))
+        .tempdir()
+        .expect("create staging temp dir");
+    let root = staging.path();
     let control_root = root.join("ctl").join("sstables");
     let mutated_root = root.join("mut").join("sstables");
     let control_dir = control_root.join(spec.keyspace).join(&name);
@@ -380,5 +421,6 @@ pub fn stage_spec(spec: &FixtureSpec, src: &Path, tag: &str) -> Staged {
         mutated_dir,
         mutated_offset,
         mutated_span,
+        staging,
     }
 }

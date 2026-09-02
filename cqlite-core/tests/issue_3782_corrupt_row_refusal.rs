@@ -68,7 +68,19 @@
 //! declared in the differential lane
 //! (`point_vs_full_differential/issue_3782_corrupt_agreement.rs`): the point
 //! read path (#3922) and the partition-HEADER resync arm (#3928).
-#![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
+#![cfg(all(
+    feature = "state_machine",
+    feature = "cli-helpers",
+    // EVERY fixture this target reads is LZ4-compressed (the harness ASSERTS it
+    // before mutating), and without the `lz4` feature the production
+    // decompressor answers `Err("LZ4 compression not available")`
+    // (`storage/sstable/compression.rs`) — so with only the two features above
+    // the target still RAN and failed on its PRISTINE CONTROLS, a false FAIL
+    // presenting as a correctness failure (roborev job 59 finding 2, #3950).
+    // `Cargo.toml`'s `required-features` for this target must always agree with
+    // this list.
+    feature = "lz4"
+))]
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -792,6 +804,59 @@ async fn stitched_verifier_scans_refuse_and_never_lose_or_fabricate_partitions()
             );
         }
     }
+}
+
+/// The staging harness must not LEAK the fixtures it copies (roborev job 59
+/// finding 1, #3950).
+///
+/// Every case in this target copies TWO complete SSTable generations into a temp
+/// directory; before this the directory was PID-named and never removed, so
+/// repeated runs accumulated them indefinitely — and these lanes run on fleet
+/// boxes whose disk hygiene is already a live concern.
+///
+/// BOTH halves are pinned, because only the pair distinguishes a fix from a
+/// regression in the other direction: the staged bytes must be READABLE while
+/// the `Staged` value is alive (a guard dropped too early would make the
+/// fixtures vanish mid-test, which is worse than the leak), and the whole
+/// staging root must be GONE once it drops. The `drop` is explicit rather than
+/// end-of-scope so the post-condition can be asserted at all.
+#[test]
+fn the_staging_harness_removes_both_generations_on_drop() {
+    let staged = fixture::stage_control_and_mutated(&fixture_dir(&BIG_COMPOSITE), "cleanup");
+    let root = staged.staging_root().to_path_buf();
+    let control_data = comp_file(&staged.control_dir, "-Data.db");
+    let mutated_data = comp_file(&staged.mutated_dir, "-Data.db");
+
+    // Alive: both generations are real, readable files under the staging root.
+    for staged_data in [&control_data, &mutated_data] {
+        assert!(
+            staged_data.starts_with(&root),
+            "staged {staged_data:?} must live under the harness's own staging root {root:?}"
+        );
+        assert!(
+            std::fs::metadata(staged_data)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false),
+            "the staged fixture {staged_data:?} must be a non-empty file while the Staged \
+             guard is alive"
+        );
+    }
+
+    drop(staged);
+
+    // Dropped: nothing is left behind — not the two generations, not the root.
+    assert!(
+        !root.exists(),
+        "the staging harness leaked {root:?}: dropping Staged must remove both copied \
+         generations (roborev job 59 finding 1, #3950)"
+    );
+    assert!(
+        !control_data.exists() && !mutated_data.exists(),
+        "the staged Data.db files must be gone with their staging root: control {} / \
+         mutated {}",
+        control_data.exists(),
+        mutated_data.exists()
+    );
 }
 
 /// AC1 — assert the decode error's KIND, not a message substring.

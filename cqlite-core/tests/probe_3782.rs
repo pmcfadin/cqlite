@@ -30,7 +30,15 @@
 //!   cargo test -p cqlite-core --features cli-helpers --test probe_3782 \
 //!   -- --ignored --nocapture --test-threads=1
 //! ```
-#![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
+#![cfg(all(
+    feature = "state_machine",
+    feature = "cli-helpers",
+    // The shared harness stages an LZ4-compressed fixture and asserts as much,
+    // and the production decoder is behind `lz4` — see the same note on
+    // `issue_3782_corrupt_row_refusal.rs` (roborev job 59 finding 2, #3950).
+    // Kept in step with `Cargo.toml`'s `required-features`.
+    feature = "lz4"
+))]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -117,14 +125,19 @@ async fn open_db(data_dir: PathBuf) -> Database {
 /// Stage a pristine copy and a single-byte-mutated copy of the fixture, via the
 /// shared harness the committed regression lane uses
 /// (`support/corrupt_clustering_fixture.rs`), so probe and regression can never
-/// measure different mutations. Returns the two TABLE directories.
-fn stage() -> (PathBuf, PathBuf) {
+/// measure different mutations.
+///
+/// Returns the WHOLE [`fixture::Staged`], never the paths alone: it owns the
+/// temp directory the two generations live in (#3950), so returning
+/// `(control_dir, mutated_dir)` would delete the staged bytes here, at this
+/// function's own return, and hand the caller two paths to nothing.
+fn stage() -> fixture::Staged {
     let staged = fixture::stage_control_and_mutated(&fixture_dir(), "probe");
     eprintln!(
         "PROBE3782 mutated decompressed_off={} (chunk CRC32 recomputed)",
         staged.mutated_offset
     );
-    (staged.control_dir, staged.mutated_dir)
+    staged
 }
 
 /// Q1 — the READ path. Control vs mutated row counts through the public
@@ -139,9 +152,9 @@ async fn probe_3782_q1_read_path() {
         .with_ansi(false)
         .try_init();
 
-    let (ctl, mutated) = stage();
-    let ctl_root = ctl.parent().unwrap().parent().unwrap().to_path_buf();
-    let mut_root = mutated.parent().unwrap().parent().unwrap().to_path_buf();
+    let staged = stage();
+    let ctl_root = staged.control_root.clone();
+    let mut_root = staged.mutated_root.clone();
     let sql = format!("SELECT * FROM {FIX_KS}.{FIX_TABLE}");
 
     let control = open_db(ctl_root)
@@ -208,13 +221,16 @@ async fn probe_3782_q2_compaction_and_index_paths() {
         .with_ansi(false)
         .try_init();
 
-    let (ctl, mutated) = stage();
+    let staged = stage();
     let schema = table_schema();
     let config = cqlite_core::Config::default();
     let platform = Arc::new(Platform::new(&config).await.expect("platform"));
     let mut keys: std::collections::BTreeMap<&str, Vec<Vec<u8>>> = Default::default();
 
-    for (label, dir) in [("CONTROL", &ctl), ("MUTATED", &mutated)] {
+    for (label, dir) in [
+        ("CONTROL", &staged.control_dir),
+        ("MUTATED", &staged.mutated_dir),
+    ] {
         let reader = SSTableReader::open(&comp_file(dir, "-Data.db"), &config, platform.clone())
             .await
             .expect("open SSTableReader");
