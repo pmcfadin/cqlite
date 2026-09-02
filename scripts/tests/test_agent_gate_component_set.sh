@@ -937,38 +937,65 @@ fi
 # must update the pin, and the both-directions leg turns a forgotten update into a loud finding
 # rather than a silent hole. That is the same cost the live-call pin has always carried.
 #
-# WHAT IT DOES CLAIM, AND WHAT IT DOES NOT. COVERED: a line naming the live repository by DIRECT
-# expansion, in EITHER spelling — `$REPO_ROOT` or `${REPO_ROOT}`. That pair is closed by bash's
-# grammar (see the partition note below), so a direct-expansion read cannot escape the pins by
-# re-spelling itself.
+# WHAT IT DOES CLAIM, AND WHAT IT DOES NOT — AND THE SCOPE IS DELIBERATELY NARROW.
+# COVERED: a line naming the live repository by DIRECT EXPANSION OF THE NAME `REPO_ROOT`, either
+# unbraced (`$REPO_ROOT`) or braced in ANY form — `${REPO_ROOT}`, `${REPO_ROOT%/}`,
+# `${REPO_ROOT:-.}`, `${REPO_ROOT##*/}`, `${REPO_ROOT:0:5}`, `${REPO_ROOT[0]}`, and so on. That is
+# the WHOLE claim. It rests on the required-prefix property stated at the partition below, NOT on
+# any enumeration of bash's operators, and NOT on a claim that this guard sees every way a line
+# could reach the live repository.
 #
 # NOT COVERED, and these are genuinely open-ended: a live read that names the repository some
 # OTHER way — a path copied into another variable outside this region, an INDIRECT expansion
 # (`${!ref}`), a `cd` plus a bare `git` with no repo-root token, or a `GIT_DIR=` built from an
 # expression that never spells the name at all. Those are real residuals, not covered here, and
 # the runtime `_cs_read_dir_isolated_or_refuse` refusal plus the `/dev/null/` sentinel are what
-# bound them. This paragraph previously excused only "an expression that does not spell
-# `$REPO_ROOT`", which read as covering the braced form while the code did not — a false
-# rationale in a guard is worse than none, because it is what stops the next reader looking.
+# bound them.
+#
+# TWO PRIOR VERSIONS OF THIS PARAGRAPH WERE FALSE, IN THE SAME DIRECTION, AND THAT IS THE POINT
+# OF WRITING IT THIS WAY. The first excused only "an expression that does not spell `$REPO_ROOT`",
+# which READ as covering the braced form while the code did not (roborev job 376). The second
+# asserted the covered set was "closed by bash's grammar" because bash has "exactly two direct
+# expansions of a name" — which is simply untrue, since `${NAME<operator>…}` spans a large
+# operator family, and a read spelled `${REPO_ROOT%/}` walked straight through (roborev job 378).
+# Both times the CODE was narrower than the SENTENCE above it. A false rationale in a guard is
+# worse than none, because it is what stops the next reader looking — so this text now asserts
+# one mechanical property and names what is out of scope, rather than claiming completeness.
 #
 # THE PARTITION IS A SUBSTRING TEST, so the two pins never disagree about a line: a line
 # mentioning `_cs_live_git` is judged by the live-call pin (that is what makes a SECOND wrapper
 # such as `_cs_live_git_quiet` a finding rather than an unpinned stranger); every other
 # repo-root line is judged by the second pin.
 #
-# AND THE PARTITION MATCHES BOTH DIRECT EXPANSIONS, `$REPO_ROOT` AND `${REPO_ROOT}` (roborev job
-# 376). The COMPARISON escaped the tokeniser's disease; the SELECTION step had not. Matching only
-# the unbraced spelling meant `git -C "${REPO_ROOT}" cat-file -e "HEAD^{commit}"` contained
-# neither `_cs_live_git` nor the literal `$REPO_ROOT`, fell through BOTH arms, was never compared
-# against either pin, and so reintroduced a live-repository object read — and its promisor
-# lazy-fetch route — with the suite green. One character's distance, reachable by an ordinary
-# refactor rather than by construction, which is what made it a defect and not a residual.
+# THE SELECTION STEP HAD THE TOKENISER'S DISEASE TWICE, AND THE PREFIX TEST IS WHAT CURES IT.
+# The COMPARISON escaped it (whole-line equality cannot be evaded by rewriting a line), but the
+# SELECTION — which lines are subject to a pin AT ALL — was still a substring guess, and it was
+# wrong twice in the same place:
+#   job 376: matching only `$REPO_ROOT`, so `git -C "${REPO_ROOT}" cat-file -e "HEAD^{commit}"`
+#            matched NEITHER arm (in `${REPO_ROOT}` the `$` is followed by `{`) and was never
+#            compared against either pin — a live object read with the suite green.
+#   job 378: matching `${REPO_ROOT}` with the closing brace, so `${REPO_ROOT%/}`,
+#            `${REPO_ROOT:-.}` and `${REPO_ROOT##*/}` walked through the same hole.
+# Each fix added one more member to an ENUMERATION of spellings, which is exactly the open-ended
+# question the deleted recogniser died of.
 #
-# THIS IS A CLOSED SET, AND THAT IS WHY IT IS NOT THE TOKENISER COMING BACK. Bash has exactly TWO
-# direct expansions of a name — `$NAME` and `${NAME}` — so this enumeration is closed by the
-# LANGUAGE GRAMMAR, not by our imagination about what an author might write. That is the precise
-# difference from the deleted recogniser, which had to enumerate an open-ended space of ways a
-# line could REACH the live repository. Indirect naming stays a declared residual below.
+# SO THE BRACED ARM IS A REQUIRED-PREFIX TEST — `${REPO_ROOT` with NO closing brace — and the
+# argument for it is a property of the SYNTAX, not a list of operators: in a braced expansion
+# bash requires the NAME immediately after `{`, and every operator comes AFTER the name. So any
+# braced expansion that yields this variable's value MUST textually begin `${REPO_ROOT`, whatever
+# follows. New bash operators cannot escape it, because they can only appear after the name.
+#
+# THE ERRORS RUN ONE WAY ONLY, WHICH IS WHY A PREFIX IS ACCEPTABLE HERE. `${REPO_ROOTX}` also
+# matches and so also gets pinned: a line that must be listed in the pin table but arguably need
+# not be — a false FAIL, loud, fixable by pinning it, and NEVER a false PASS. That is the same
+# conservatism the unbraced arm has always carried against `$REPO_ROOT_FOO`.
+#
+# TWO BRACED FORMS DO NOT BEGIN WITH THAT PREFIX, AND NEITHER IS A ROUTE — named so a reader does
+# not read them as missed. `${#REPO_ROOT}` yields the LENGTH of the value (a number: measured `6`
+# for a 6-character root), so it cannot name a repository to `git -C`; `${!REPO_ROOT}` is INDIRECT
+# — it treats the VALUE as a variable name and yields that other variable — so it is part of the
+# indirect residual declared above, not of direct expansion. This guard claims direct expansion of
+# THIS NAME, and nothing more.
 #
 # Both blocks are QUOTED HEREDOCS, so `"`, `$`, `\` and `'` inside the pinned lines need no
 # escaping and cannot drift from the gate's own text through a quoting mistake.
@@ -1016,9 +1043,9 @@ cs_pinned_line_findings() {
         continue ;;
     esac
     case "$raw" in
-      *'$REPO_ROOT'*|*'${REPO_ROOT}'*)
+      *'$REPO_ROOT'*|*'${REPO_ROOT'*)
         grep -Fxq -- "$raw" <<<"$CS_PINNED_REPO_ROOT_LINES" \
-          || printf 'FINDING[repo-root]: %s: this line names the LIVE repository ($REPO_ROOT or ${REPO_ROOT}) and is NOT one of the %s PINNED lines (whole-line equality; the line is not read, only compared): %s\n' "$num" "$cs_pin_rr_n" "$raw" ;;
+          || printf 'FINDING[repo-root]: %s: this line names the LIVE repository (direct expansion of REPO_ROOT, braced or not) and is NOT one of the %s PINNED lines (whole-line equality; the line is not read, only compared): %s\n' "$num" "$cs_pin_rr_n" "$raw" ;;
     esac
   done < <(cs_region_code "$g")
   while IFS= read -r pin; do
@@ -1061,7 +1088,7 @@ fi
 # TEXT, which the finding prints verbatim — so a route is proved reported without the guard
 # pretending to have understood it.
 lc_dir="$tmp/3757-live-call-controls"; mkdir -p "$lc_dir"
-lc_ids=(a b c d e f g h i j k)
+lc_ids=(a b c d e f g h i j k l m n)
 lc_whats=(
   'a dereferencing rev that contains no ^{ (HEAD~1)'
   'the rev held in a VARIABLE, so no rev token appears on the call line'
@@ -1074,6 +1101,9 @@ lc_whats=(
   'a live peel inside a COMMAND SUBSTITUTION on a local declaration (the round-3 High)'
   'an UNDECLARED read SMUGGLED IN FRONT of an allowed live call (roborev 347 item 2)'
   'a live read naming the repo through the BRACED expansion ${REPO_ROOT} (roborev job 376)'
+  'a live read through the braced SUFFIX-STRIP form ${REPO_ROOT%/} (roborev job 378)'
+  'a live read through the braced DEFAULT-VALUE form ${REPO_ROOT:-.} (roborev job 378)'
+  'a live read through the braced GREEDY-PREFIX-STRIP form ${REPO_ROOT##*/} (roborev job 378)'
 )
 # PORTABILITY (roborev job 366): a newline in a sed REPLACEMENT is written as a backslash
 # followed by a LITERAL newline, which POSIX mandates for splitting a line. A GNU-style `\n`
@@ -1093,6 +1123,9 @@ lc_progs=(
 \&|'
   's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _cs_planted_undeclared_read; _cs_live_git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet HEAD|'
   's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "${REPO_ROOT}" cat-file -e "HEAD^{commit}"|'
+  's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "${REPO_ROOT%/}" cat-file -e "HEAD^{commit}"|'
+  's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "${REPO_ROOT:-.}" cat-file -e "HEAD^{commit}"|'
+  's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "${REPO_ROOT##*/}" cat-file -e "HEAD^{commit}"|'
 )
 lc_tooks=(
   'rev-parse --verify --quiet HEAD~1$'
@@ -1106,6 +1139,9 @@ lc_tooks=(
   'local _cs_planted_sha=\$(env'
   '_cs_planted_undeclared_read; _cs_live_git'
   'git -C "\${REPO_ROOT}" cat-file'
+  'git -C "\${REPO_ROOT%/}" cat-file'
+  'git -C "\${REPO_ROOT:-\.}" cat-file'
+  'git -C "\${REPO_ROOT##\*/}" cat-file'
 )
 lc_needles=(
   'HEAD~1'
@@ -1119,6 +1155,9 @@ lc_needles=(
   '_cs_planted_sha'
   '_cs_planted_undeclared_read'
   '-C "${REPO_ROOT}" cat-file'
+  '-C "${REPO_ROOT%/}" cat-file'
+  '-C "${REPO_ROOT:-.}" cat-file'
+  '-C "${REPO_ROOT##*/}" cat-file'
 )
 for lc_i in "${!lc_ids[@]}"; do
   lc_id="${lc_ids[$lc_i]}"
@@ -5496,7 +5535,7 @@ fi
 # property re-expressed as two whole-line pins, so the route set grew from EIGHT to TEN (+2: the
 # round-3 `local sha=$( … )` High and 347's prefix-smuggling item 2) and the second pin brought its
 # own clean case (+1). Net +3; nothing was removed from the case set, only from the mechanism.
-CASE_FLOOR=133
+CASE_FLOOR=136
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"
   FAIL=$((FAIL + 1))
