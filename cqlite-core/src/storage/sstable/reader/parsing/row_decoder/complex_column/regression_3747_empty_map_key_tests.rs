@@ -133,61 +133,59 @@ fn empty_key_decodes_for_the_families_that_admit_it() {
     }
 }
 
-/// DELEGATION, the `empty is REFUSED` direction — MEASURED, and it records an
-/// INCONSISTENCY inside #3612's landed code rather than asserting a tidy rule.
+/// The `empty is NOT REPRESENTABLE` direction — and the assertion that matters is
+/// the BLAST RADIUS, not the error.
 ///
-/// Two DIFFERENT layers refuse, and the distinction is the finding:
+/// roborev job 73 caught what an earlier revision of this fix got wrong. For the
+/// families whose empty representation the downstream decoder does not support,
+/// that revision let the decode error PROPAGATE. That is strictly worse than the
+/// bug #3747 fixes, because row assembly has exactly one `Err` handler and it
+/// `break`s the column loop — so the map column **and every later on-disk column**
+/// vanish from the row, silently (`row_data.rs`; `cell_path_key.rs`'s own module
+/// doc records this, reproduced there with a real `SELECT`).
 ///
-///   * `tinyint`/`smallint`/`date`/`time` are refused by
-///     `cell_path_key_allowed_widths` itself ("Map key … requires exactly N bytes").
-///     Correct: Cassandra spells those with a strict `!= N` check.
-///   * `int`/`float`/`bigint`/`double`/`timestamp`/`uuid`/`timeuuid`/`boolean` are
-///     refused by the DOWNSTREAM structural decoder ("Frozen element … need N
-///     bytes") — **even though the width table deliberately admits `[0,N]` for
-///     them**, because Cassandra's `size != N && !isEmpty` shape makes empty legal.
-///     The table's intent is defeated one layer down.
+/// I had described that to the lead as "pre-fix silently dropped, post-fix errors
+/// visibly". That was wrong in both halves: it is silent either way, and the
+/// post-fix loss was LARGER. So the fix now keeps the PRE-fix behaviour for exactly
+/// these cases — the one entry is dropped — and the two-layer inconsistency behind
+/// it stays #3805's to settle.
 ///
-/// That second group is a genuine internal inconsistency, it is NOT introduced by
-/// #3747 (removing the guard only made the empty case reachable), and fixing it
-/// means changing fixed-width handling for every complex column and frozen element
-/// — out of scope for a guard removal. Filed separately; this test PINS today's
-/// behaviour so the eventual fix is a visible, deliberate change rather than a
-/// silent one.
+/// What this pins, therefore, is that an unrepresentable empty key costs ONE ENTRY
+/// and not the column: the call must return `Ok`, and the map must simply be short.
 #[test]
-fn empty_key_is_refused_for_the_rest_and_the_two_layers_are_distinguishable() {
-    // Refused by the WIDTH TABLE (correct per Cassandra's strict `!= N` families).
-    for ty in ["tinyint", "smallint", "date", "time"] {
-        let map_type = format!("map<{ty},int>");
-        let err = match decode(&map_type, b"", &7i32.to_be_bytes()) {
-            Err(e) => e.to_string(),
-            Ok(v) => panic!("{ty} has a strict width check; empty must error, got {v:?}"),
-        };
-        assert!(
-            err.contains("requires exactly"),
-            "{ty} must be refused by cell_path_key_allowed_widths, not downstream; got: {err}"
-        );
-    }
-
-    // Refused DOWNSTREAM despite the width table admitting empty — the inconsistency.
+fn an_unrepresentable_empty_key_drops_one_entry_and_never_truncates_the_row() {
+    // Both layers are represented: `tinyint`/`smallint`/`date`/`time` are refused by
+    // #3612's width table (strict `!= N`), while `int`/`float`/`bigint`/`double`/
+    // `timestamp`/`uuid`/`boolean` pass that table and are refused downstream. After
+    // this fix the CALLER cannot tell them apart, which is the point — neither may
+    // take the row down.
     for ty in [
+        "tinyint",
+        "smallint",
+        "date",
+        "time",
         "int",
         "float",
         "bigint",
         "double",
         "timestamp",
         "uuid",
+        "timeuuid",
         "boolean",
+        "decimal",
     ] {
         let map_type = format!("map<{ty},int>");
-        let err = match decode(&map_type, b"", &7i32.to_be_bytes()) {
-            Err(e) => e.to_string(),
-            Ok(v) => panic!("today {ty} is refused downstream; got {v:?}"),
-        };
-        assert!(
-            !err.contains("requires exactly"),
-            "{ty} is admitted by the width table, so its refusal must come from the \
-             downstream decoder — if this now says 'requires exactly', the two layers \
-             have been reconciled and this test should be updated; got: {err}"
+        let decoded = decode(&map_type, b"", &7i32.to_be_bytes()).unwrap_or_else(|e| {
+            panic!(
+                "an unrepresentable empty {ty} key must NOT propagate — row assembly \
+                 would `break` and take the column plus every later one with it; got {e}"
+            )
+        });
+        assert_eq!(
+            decoded,
+            Value::Map(Vec::new()),
+            "the empty {ty} entry is dropped, so the map is short by one and the row \
+             is otherwise intact"
         );
     }
 }

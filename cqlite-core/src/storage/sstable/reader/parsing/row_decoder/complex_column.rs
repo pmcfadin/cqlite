@@ -772,26 +772,25 @@ impl V5CompressedLegacyParser {
                 // recorded on the per-element compaction entry and used to build
                 // the collapsed `Value::Map`.
                 //
-                // ISSUE #3747 — DECODED UNCONDITIONALLY. A map cell's cell path IS its key
-                // and Cassandra always writes one, so a ZERO-LENGTH path is an EMPTY KEY —
-                // legal data (`{'': 1}` is valid CQL; empty is DISTINCT from null), never
-                // "no key". The old `!is_empty()` guard dropped it, so a `SELECT` returned
-                // a map SHORT ONE ENTRY. WHICH empties are legal is decided by #3612's
-                // Cassandra-derived `cell_path_key_allowed_widths`, which runs first.
-                tracing::debug!(
-                    "V5CompressedLegacy: Parsing map key for column '{}', key_type='{}', path_len={}",
-                    column.name,
-                    key_type,
-                    cell.path_bytes.len()
-                );
-                // For cell path keys, parse directly without expecting length prefixes
+                // ISSUE #3747 — DECODED UNCONDITIONALLY. A map cell's cell path IS its key,
+                // so a ZERO-LENGTH path is an EMPTY KEY (`{'': 1}` is valid CQL; empty is
+                // DISTINCT from null), never "no key" — the old `!is_empty()` guard dropped
+                // it. Which empties are legal: #3612's `cell_path_key_allowed_widths`.
                 let mut opaque = false;
-                let decoded_key = self.parse_cell_path_key_reporting(
+                let decoded_key = match self.parse_cell_path_key_reporting(
                     &cell.path_bytes,
                     &key_type,
                     &column.name,
                     &mut opaque,
-                )?;
+                ) {
+                    Ok(k) => Some(k),
+                    // EMPTY path with no SUPPORTED empty representation => keep the PRE-fix
+                    // drop of THIS entry; propagating is worse (row assembly `break`s, so
+                    // the column AND ALL LATER ONES vanish — #3805).
+                    Err(_) if cell.path_bytes.is_empty() => None,
+                    // A NON-EMPTY decode failure is corruption and still propagates (AC5).
+                    Err(e) => return Err(e),
+                };
                 if opaque {
                     opaque_key_entries += 1;
                 }
@@ -804,14 +803,15 @@ impl V5CompressedLegacyParser {
                     &mut elements_out,
                     &cell,
                     cell.value.clone(),
-                    Some(decoded_key.clone()),
+                    decoded_key.clone(),
                     row_timestamp,
                 );
 
-                // Every decoded entry reaches the map. A `None` cell value is a
-                // null/tombstoned entry for that key and is kept as (key, Null) —
-                // unchanged from before (issue #493).
-                entries.push((decoded_key, cell.value.unwrap_or(Value::Null)));
+                // Every DECODED entry reaches the map (post-#3747, representable empties
+                // included). `None` cell value stays (key, Null) — issue #493.
+                if let Some(key_value) = decoded_key {
+                    entries.push((key_value, cell.value.unwrap_or(Value::Null)));
+                }
             }
 
             // ONE line per column per row, carrying the COUNT. Content unchanged
