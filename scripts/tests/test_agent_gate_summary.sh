@@ -967,8 +967,16 @@ for tool in env git python3 sed awk head tail tr sort cut wc stat mkdir rm ln mv
 done
 absent_err="$tmp/absent.stderr"
 absent_rc=0
+# HOME IS OVERRIDDEN TO A SCRATCH DIR, AND THAT IS PART OF THE CONSTRUCTION (#3727 job 411,
+# f1). The gate now resolves sccache from `$HOME/.cargo/bin` as well as from PATH — it has to,
+# because bootstrap does and a system cargo used to hide a cargo-installed sccache from the
+# gate alone. So an ABSENCE case must construct absence on BOTH axes: with the host's real
+# HOME this case would report `sccache=on` (correctly) on every fleet box that ever ran
+# `cargo install sccache`, i.e. it would be host-dependent rather than a pinned assertion.
+accel_home="$tmp/accel-home"
+mkdir -p "$accel_home"
 if [ "$accel_link_fail" -eq 0 ]; then
-  PATH="$accel_bin" AGENT_GATE_SUMMARY_FILE="$tmp/absent.txt" \
+  PATH="$accel_bin" HOME="$accel_home" AGENT_GATE_SUMMARY_FILE="$tmp/absent.txt" \
     "$accel_bin/bash" "$GATE" --emit-summary-selftest >/dev/null 2>"$absent_err" || absent_rc=$?
   # Any 'command not found' means the gate now invokes a tool the allowlist
   # lacks — fail loudly and NAME it so the fix is mechanical (add it above).
@@ -1002,6 +1010,102 @@ if [ "$accel_link_fail" -eq 0 ]; then
     bad "accel-absent: missing loud WARN for an absent accelerator"
     echo "------- stderr -------"; cat "$absent_err"; echo "----------------------"
   fi
+fi
+
+# 9b-ii. THE DIVERGENCE BOOTSTRAP COULD CERTIFY AND THE GATE COULD NOT SEE (#3727 job 411, f1).
+#        `cargo install sccache` — the install bootstrap-agent-machine.sh documents — writes to
+#        ~/.cargo/bin, and the gate's ONLY ~/.cargo/bin prepend fires when `cargo` ITSELF is
+#        absent. So on a box with a SYSTEM cargo and sccache only in ~/.cargo/bin, bootstrap's
+#        two-stage `scc_resolve_binary` resolved that binary, started its server and reported
+#        VERIFIED, while the gate reported it ABSENT: a false [ok] for a binary the gate would
+#        not run, which is worse than the absence it replaced because a false [ok] stops anyone
+#        looking.
+#
+#        THE FIXTURE IS EXACTLY THAT LAYOUT, and it reuses 9b's minimal-PATH bindir — which
+#        links a host `cargo` and deliberately NO sccache — with a HOME whose ~/.cargo/bin
+#        holds one. It is the SAME shape as the bootstrap suite's 12b-f3 fixture
+#        (test_bootstrap_agent_machine.sh), and the two sides must answer with the SAME
+#        absolute path; each side's own behaviour is pinned in its own suite, and the
+#        directory they must agree on is pinned below from bootstrap's source.
+#
+#        THE CONSTRUCTION IS ASSERTED, not assumed (RED-arm doctrine): a fixture whose PATH
+#        happened to carry an sccache, or no cargo, would make the case pass for the wrong
+#        reason — stage 1 would answer and the fallback would never run.
+if [ "$accel_link_fail" -eq 0 ]; then
+  scc_cb_home="$tmp/scc-cargobin-home"
+  mkdir -p "$scc_cb_home/.cargo/bin"
+  printf '#!/bin/sh\necho "Cache read errors 0"\n' > "$scc_cb_home/.cargo/bin/sccache"
+  chmod +x "$scc_cb_home/.cargo/bin/sccache"
+  scc_cb_ok=1
+  if [ ! -x "$accel_bin/cargo" ]; then
+    # cargo is OPTIONAL in 9b's link farm (a host without it is a documented difference), and
+    # without it stage 1's own precondition is missing — the case would then prove nothing
+    # about "system cargo present". Reported, never silently skipped into a green.
+    bad "accel-sccache-cargobin: fixture PATH has no cargo, so the SYSTEM-CARGO half of the divergence is absent (install cargo on this host or link it above)"
+    scc_cb_ok=0
+  fi
+  if PATH="$accel_bin" "$accel_bin/bash" -c 'command -v sccache >/dev/null 2>&1'; then
+    bad "accel-sccache-cargobin: fixture PATH resolves an sccache — stage 1 would answer and the ~/.cargo/bin fallback would never be exercised"
+    scc_cb_ok=0
+  fi
+  if [ "$scc_cb_ok" -eq 1 ]; then
+    ok "accel-sccache-cargobin: fixture constructed — cargo ON PATH, sccache ONLY under \$HOME/.cargo/bin"
+    scc_cb_out="$tmp/scc-cargobin.txt"; scc_cb_err="$tmp/scc-cargobin.stderr"; scc_cb_rc=0
+    PATH="$accel_bin" HOME="$scc_cb_home" AGENT_GATE_SUMMARY_FILE="$scc_cb_out" \
+      "$accel_bin/bash" "$GATE" --emit-summary-selftest >/dev/null 2>"$scc_cb_err" || scc_cb_rc=$?
+    if [ "$scc_cb_rc" -ne 0 ]; then
+      bad "accel-sccache-cargobin: selftest exited $scc_cb_rc under the fixture (want 0)"
+      echo "------- stderr -------"; cat "$scc_cb_err"; echo "----------------------"
+    elif grep -qE '^accelerators: sccache=on ' "$scc_cb_out"; then
+      ok "accel-sccache-cargobin: a cargo-installed sccache invisible to PATH is DETECTED (sccache=on), so the gate no longer disagrees with the bootstrap that certified it"
+    else
+      bad "accel-sccache-cargobin: gate reported sccache NOT on with sccache under \$HOME/.cargo/bin — the bootstrap/gate divergence is back"
+      grep '^accelerators:' "$scc_cb_out" 2>/dev/null || cat "$scc_cb_out"
+    fi
+    # The WRAPPER must be the ABSOLUTE path, not the bare name: a bare `sccache` in
+    # RUSTC_WRAPPER is unrunnable in exactly this layout, so the banner naming the resolved
+    # path is what says the gate will run the binary bootstrap certified.
+    if grep -qF "sccache detected at '$scc_cb_home/.cargo/bin/sccache'" "$scc_cb_err"; then
+      ok "accel-sccache-cargobin: the banner names the ABSOLUTE resolved path used for RUSTC_WRAPPER (the same path bootstrap's 12b-f3 reports)"
+    else
+      bad "accel-sccache-cargobin: the banner does not name the resolved ~/.cargo/bin path — a bare 'sccache' RUSTC_WRAPPER is unrunnable in this layout"
+      echo "------- stderr -------"; cat "$scc_cb_err"; echo "----------------------"
+    fi
+    if grep -q 'WARN: sccache not installed' "$scc_cb_err"; then
+      bad "accel-sccache-cargobin: emitted the absent-WARN for an sccache it went on to use"
+    else
+      ok "accel-sccache-cargobin: no absent-WARN for an sccache that IS present under ~/.cargo/bin"
+    fi
+    # And the CAPACITY/HEALTH probes must use the SAME binary — one resolution, not three. The
+    # stub prints a non-JSON line, so a probe that ran it reports `unparsed`; a probe still
+    # keyed on `command -v` would report `no-binary`, which is how the two are told apart.
+    if accel_token_is "$scc_cb_out" sccache-cap 'unmeasured(unparsed)'; then
+      ok "accel-sccache-cargobin: the capacity probe RAN the fallback binary (unparsed stub payload), rather than reporting no-binary"
+    else
+      bad "accel-sccache-cargobin: the capacity probe did not run the ~/.cargo/bin binary — a second, drifted answer to 'is sccache available'"
+      grep '^accelerators:' "$scc_cb_out" 2>/dev/null || cat "$scc_cb_out"
+    fi
+    if accel_health_token_is "$scc_cb_out" ok; then
+      ok "accel-sccache-cargobin: the health probe RAN the fallback binary (0 error counters -> ok), not na"
+    else
+      bad "accel-sccache-cargobin: the health probe did not run the ~/.cargo/bin binary"
+      grep '^accelerators:' "$scc_cb_out" 2>/dev/null || cat "$scc_cb_out"
+    fi
+    assert_accelerators "accel-sccache-cargobin" "$scc_cb_out"
+  fi
+fi
+# THE DIRECTORY THE TWO SIDES MUST AGREE ON, pinned from bootstrap's own source. Each side's
+# behaviour is pinned behaviourally in its own suite (here, and 12b-f3/12b-f4 there); what no
+# single-suite case can catch is one side later moving the fallback directory. Both must name
+# ~/.cargo/bin.
+scc_boot="$(dirname "$GATE")/bootstrap-agent-machine.sh"
+if [ ! -r "$scc_boot" ]; then
+  bad "accel-sccache-agree: cannot read bootstrap-agent-machine.sh — the agreement assert would pass vacuously"
+elif grep -q 'PATH="\$HOME/.cargo/bin:\$PATH"; command -v sccache' "$scc_boot" \
+     && grep -q '\[ -x "\$HOME/.cargo/bin/sccache" \]' "$GATE"; then
+  ok "accel-sccache-agree: bootstrap's retry stage and the gate's fallback name the SAME directory (~/.cargo/bin)"
+else
+  bad "accel-sccache-agree: bootstrap and the gate no longer name the same fallback directory — one side moved, and the #3727 job-411 divergence returns"
 fi
 
 # 9c. sccache cache-health token (issue #2641). The accelerators line carries a
@@ -1121,6 +1225,64 @@ else
   grep '^accelerators:' "$scc_big" 2>/dev/null || cat "$scc_big"
 fi
 assert_accelerators "sccache-used-hugecap" "$scc_big"
+
+# 9c-v-c. THE PERCENTAGE IS EXACT OR IT IS NAMED (#3727 job 411, f2). The overflow branch used
+#         to divide by `cap / 100`, whose own floor OVER-REPORTS: at the 4 EiB cap just above,
+#         with used = cap - 1, it rendered `100%` where the exact value is 99%. This token's
+#         whole premise is measured bytes honestly reported, so an over-reported ratio
+#         contradicts the design — and the honest alternative already lives in this slot
+#         (`cap-zero`). Three cases: the boundary the finding names, the same boundary at
+#         ORDINARY magnitude (the direct multiplication, so the fix is not just a big-number
+#         branch), and a ratio no 64-bit shell arithmetic can take exactly, which must be NAMED
+#         rather than approximated.
+scc_p99="$tmp/scc-used-99-hugecap.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_p99" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=4611686018427387904 \
+  AGENT_GATE_TEST_SCCACHE_USED_BYTES=4611686018427387903 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_p99" sccache-used '4611686018427387903(99%)'; then
+  ok "sccache-used: 4 EiB cap with used = cap-1 renders the EXACT 99%, not the floor(cap/100) division's 100%"
+else
+  bad "sccache-used: expected 4611686018427387903(99%) — an over-reported occupancy at the overflow boundary"
+  grep '^accelerators:' "$scc_p99" 2>/dev/null || cat "$scc_p99"
+fi
+assert_accelerators "sccache-used-99-hugecap" "$scc_p99"
+
+scc_p99s="$tmp/scc-used-99-smallcap.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_p99s" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=10737418240 AGENT_GATE_TEST_SCCACHE_USED_BYTES=10737418239 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_p99s" sccache-used '10737418239(99%)'; then
+  ok "sccache-used: an ordinary 10 GiB cap one byte from full renders 99% (the direct multiplication path, unchanged)"
+else
+  bad "sccache-used: expected 10737418239(99%) at ordinary magnitude"
+  grep '^accelerators:' "$scc_p99s" 2>/dev/null || cat "$scc_p99s"
+fi
+
+# NEITHER SIDE UNDER THE BOUND -> NAMED, NEVER ROUNDED. cap = 2^63-1 filled to 2^62: both
+# `used * 100` and `(cap - used) * 100` overflow a signed 64-bit shell integer, so no exact
+# answer is reachable and the percentage says so. `50%` here would be the removed behaviour
+# (a number produced by an inexact division) and is asserted against explicitly.
+scc_pinx="$tmp/scc-used-inexact.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_pinx" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=9223372036854775807 \
+  AGENT_GATE_TEST_SCCACHE_USED_BYTES=4611686018427387904 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_pinx" sccache-used '4611686018427387904(pct-inexact-overflow)'; then
+  ok "sccache-used: a ratio unreachable in 64-bit shell arithmetic is NAMED pct-inexact-overflow (measured bytes kept, percentage not guessed)"
+else
+  bad "sccache-used: expected 4611686018427387904(pct-inexact-overflow) — an inexact percentage was rendered as a number"
+  grep '^accelerators:' "$scc_pinx" 2>/dev/null || cat "$scc_pinx"
+fi
+if accel_token_is "$scc_pinx" sccache-used '4611686018427387904(50%)'; then
+  bad "sccache-used: rendered an APPROXIMATED percentage (50%) where exactness is unreachable — the f2 defect in the other direction"
+else
+  ok "sccache-used: no approximated numeric percentage where exactness is unreachable"
+fi
+assert_accelerators "sccache-used-inexact" "$scc_pinx"
 
 # 9c-vi. THE UNMEASURABLE STATE HAS ITS OWN TOKEN, and `0` is not an all-clear. A cap that could
 #        not be read must never render blank, never render 0, and never be mistaken for a measured
