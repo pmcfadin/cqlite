@@ -1848,6 +1848,69 @@ rs "$R14" verdict c --issue 954
 rc_is 0 "generation/legacy: a record with no report-generation reads generation 0's report"
 has "report=$(REPORT_GEN_OF "$R14" 954 c 0)" "generation/legacy: and names the bare path that version wrote"
 
+# --- 15. AN UNREADABLE STAGE RECORD IS NOT "no generation field" (round 6, K1) -----
+# THE FINDING. The generation was counted with
+#   ngen="$(grep -c ... "$sfile" 2>/dev/null || true)"; case "$ngen" in ""|*[!0-9]*) ngen=0
+# and `grep` uses its EXIT STATUS to separate the two facts this reader depends on: 1 means "the
+# file was READ and holds no such line", >=2 means "the file could NOT BE READ". `|| true` threw
+# that away, so an unreadable record was INDISTINGUISHABLE from a record with no generation field
+# and took the LEGACY reading — generation 0, the bare `<kind>.md` — so an OLD report recording
+# PASS was reported as the current verdict while which report is current was UNKNOWN. That is the
+# shape this repo names repeatedly: the unmeasured state inheriting the permissive branch.
+#
+# *read failed* and *read fine, field absent* are different facts, and only the SECOND one is
+# legitimately permissive (every earlier version of this tool wrote exactly one report, at the
+# bare name, so ABSENT is an affirmative measurement of that shape — see section 14(h)). A read
+# FAILURE is the existing `stage record unreadable` non-verdict, with no path derived.
+R15K="$(newrepo)"
+rs "$R15K" open c --issue 960 --agent spec-auditor
+rc_is 0 "record-read: the stage opened"
+# THE STALE PASS GOES AT THE LEGACY BARE PATH — the file a "no generation field" reading consults.
+# It is the artifact whose PASS must not be reported while the record cannot be read.
+K1_LEGACY="$(REPORT_GEN_OF "$R15K" 960 c 0)"
+printf 'result: PASS\n\naudited long ago, at a tree nobody can now name.\n' >"$K1_LEGACY"
+K1_SF="$R15K/.review-stage/issue-960/c.stage"
+if [ -f "$K1_SF" ] && [ -f "$K1_LEGACY" ]; then
+  ok "record-read: the record and a stale legacy report both exist (the assertions below have a subject)"
+else
+  bad "record-read: missing precondition (record=$K1_SF legacy=$K1_LEGACY) — the assertions below would be vacuous"
+fi
+chmod 000 "$K1_SF" 2>/dev/null || true
+# MODE 000 IS NOT EFFECTIVE FOR ROOT, so the case asserts the mapping only where the read really
+# is refused, and says which branch it took; BOTH branches emit the SAME NUMBER of assertions, so
+# the exact case floor does not move (the shape section 7b(4) already uses).
+if ( : <"$K1_SF" ) 2>/dev/null; then
+  ok "record-read: SKIPPED the unreadable-record assertions — this user can read a mode-000 file (root); nothing is claimed about a state that was not reached"
+  ok "record-read: (fixed assertion count, 2 of 7)"
+  ok "record-read: (fixed assertion count, 3 of 7)"
+  ok "record-read: (fixed assertion count, 4 of 7)"
+  ok "record-read: (fixed assertion count, 5 of 7)"
+  ok "record-read: (fixed assertion count, 6 of 7)"
+  ok "record-read: (fixed assertion count, 7 of 7)"
+else
+  rs "$R15K" verdict c --issue 960
+  rc_is 5 "record-read: an UNREADABLE record is a NON-VERDICT, not the legacy reading"
+  has "stage record unreadable" "record-read: named as a RECORD defect (the operator action is chmod, not 'your agent wrote a bad line')"
+  hasnt "RESULT: PASS" "record-read: the stale legacy report is NOT reported as the current verdict"
+  has "report=unresolved" "record-read: and no path is fabricated on the line that is otherwise the authority"
+  rs "$R15K" status c --issue 960
+  has "state=stage-record-unreadable" "record-read: status gives it the record-defect state, per the one-state-per-cause rule"
+  # AND THE WRITE SIDE REFUSES TOO: `open` read the same count with the same `|| true`, so it
+  # would have treated an unreadable record as generation 0 and handed a re-spawned agent the
+  # path an earlier agent may still hold.
+  rs "$R15K" open c --issue 960 --agent spec-auditor --force
+  rc_is 2 "record-read: open REFUSES on a record it cannot read rather than guessing the legacy generation"
+  has "reason=stage-record-unreadable" "record-read: and the refusal names the record, by its own reason"
+fi
+chmod 644 "$K1_SF" 2>/dev/null || true
+# CONTROL: readable again, and the stage reads its verdict — so the case cannot pass on a tool
+# that simply refuses everything. The PASS is written to the path `open` PRINTED, which is the
+# file a caller was handed.
+printf 'result: PASS\n\nre-audited.\n' >"$K1_LEGACY"
+rs "$R15K" verdict c --issue 960
+rc_is 0 "record-read CONTROL: a READABLE record reads its report and reports the verdict"
+has "RESULT: PASS" "record-read CONTROL: the recorded PASS is reported once the record can be read"
+
 # --- case floor ---------------------------------------------------------------
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
@@ -1935,7 +1998,14 @@ has "report=$(REPORT_GEN_OF "$R14" 954 c 0)" "generation/legacy: and names the b
 # ordinary punctuation and a non-ASCII em dash still pass through readable. Both are
 # host-independent: they need only bash, git and `tr`, and `tr` is a subject of the assertions
 # rather than a precondition for running them.
-ASSERT_FLOOR=429
+# ROUND 6's FIRST ITEM (K1) ADDS 11 (429 -> 440): section 15 pins that an UNREADABLE stage record
+# is a NON-VERDICT rather than "no generation field" — on the READ side (the verdict, its cause,
+# the absent path, the status state) and on the WRITE side (`open` refuses instead of guessing the
+# legacy generation) — plus the two preconditions and the readable-again CONTROL. One case is
+# host-conditional and takes the FIRST shape the two rules above allow: the mode-000 branch emits
+# the SAME NUMBER of assertions whether or not this user can read a mode-000 file (root can), so
+# the count does not move.
+ASSERT_FLOOR=440
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

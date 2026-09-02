@@ -164,12 +164,20 @@
 # function `open` used, so there is exactly one source of truth for which report counts. It is
 # written in the SAME atomic record as `head-sha:`, so the pair (the tree audited, the artifact
 # that audits it) is published together or not at all.
-# THREE READINGS, and only two of them are a path: exactly one digits-only field is that
+# FOUR READINGS, and only two of them are a path: exactly one digits-only field is that
 # generation; NO field at all is generation 0 (an AFFIRMATIVE reading of a record written before
 # the field existed — that version wrote exactly one report, at `<kind>.md`, so refusing would red
 # on correct input); anything else (several lines, a non-numeric value) is a RECORD DEFECT that
 # derives no path at all and reports `stage record unreadable`, because falling back to generation 0
 # is how a stale generation-0 PASS would be read as the current verdict.
+# AND THE FOURTH IS "THE RECORD COULD NOT BE READ AT ALL", WHICH IS NOT THE SECOND (#3751 round 6,
+# K1). The count was taken with `grep -c … || true`, which threw away the ONE signal separating
+# them — `grep` exits 1 for "read fine, no such line" and >= 2 for "could not read" — so an
+# unreadable record took the LEGACY reading and an OLD report's PASS was reported as the current
+# verdict. `count_field_lines` returns the count ONLY when the file was actually read; a failed
+# read is the `stage record unreadable` non-verdict on the read side and a NAMED refusal
+# (`reason=stage-record-unreadable`) on the write side. *read failed* and *read fine, field absent*
+# are different facts and only the second one is legitimately permissive.
 # OLD GENERATIONS' REPORTS STAY ON DISK as history: nothing reads them, they are what an operator
 # opens to see what the previous agent concluded, and `open` uses their EXISTENCE to avoid handing a
 # new agent a path an old one still holds. Deleting one by hand re-opens exactly that hole.
@@ -844,6 +852,39 @@ read_field() {
   one_line "$line"
 }
 
+# count_field_lines <file> <key> — HOW MANY TIMES <key> APPEARS, AS AN AFFIRMATIVE MEASUREMENT.
+# Prints the count and returns 0 ONLY when the file was actually READ; returns 1, printing
+# nothing, when the read FAILED. Every caller must branch on that status.
+#
+# THE `|| true` THAT USED TO BE HERE WAS THE DEFECT (#3751 round 6, K1). `grep` separates the two
+# facts this reader depends on with its EXIT STATUS: 1 means "the file was READ and holds no such
+# line" (and it prints `0`), >= 2 means "the file could NOT BE READ" (permission, I/O — and it
+# prints nothing). Swallowing the status with `|| true` and then mapping a non-numeric value to 0
+# collapsed the second onto the first, so an UNREADABLE stage record was indistinguishable from a
+# record with no field and took the LEGACY reading — reporting an OLD report's `PASS` as the
+# current verdict while WHICH report is current was unknown.
+#
+# *read failed* and *read fine, field absent* are DIFFERENT FACTS, and only the second one is
+# legitimately permissive: every earlier version of this tool wrote exactly one report, at the
+# bare `<kind>.md`, so an ABSENT field is an affirmative measurement of THAT shape. A read failure
+# measures nothing at all, so it takes the fail-closed branch at every caller — the write side
+# REFUSES and the read side reports `stage record unreadable`.
+#
+# The count itself is required to be numeric as well: a count we cannot read is not a count, and
+# `""` would otherwise arrive at an arithmetic `[` test as a syntax error rather than a refusal.
+count_field_lines() {
+  local file="$1" key="$2" out="" rc=0
+  out="$(LC_ALL=C grep -c -i "^[[:space:]]*${key}:" "$file" 2>/dev/null)" || rc=$?
+  case "$rc" in
+    0 | 1) ;;
+    *) return 1 ;;
+  esac
+  case "$out" in
+    "" | *[!0-9]* ) return 1 ;;
+  esac
+  printf '%s\n' "$out"
+}
+
 now_epoch() { date -u +%s; }
 now_iso()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -930,8 +971,18 @@ cmd_open() {
     # order" is the rule the `result:` reader follows for exactly the same reason. An unreadable
     # value refuses below; an ABSENT one is generation 0 (see the header: that is what every
     # earlier version of this tool wrote).
-    ngen_lines="$(LC_ALL=C grep -c -i '^[[:space:]]*report-generation:' "$sfile" 2>/dev/null || true)"
-    case "$ngen_lines" in "" | *[!0-9]* ) ngen_lines=0 ;; esac
+    #
+    # THE READ IS VERIFIED AFFIRMATIVELY (#3751 round 6, K1). `count_field_lines` returns non-zero
+    # when the record could not be READ at all, which is a different fact from "read fine, no such
+    # field" — the second is the legacy generation-0 shape, the first measures nothing. Guessing
+    # generation 0 from a failed read would hand the re-spawned agent the path an earlier agent may
+    # still hold, so it is its OWN named refusal: the remedy is `chmod`/a repaired record, not a
+    # re-spawn.
+    if ! ngen_lines="$(count_field_lines "$sfile" report-generation)"; then
+      emit "$REFUSE_MARKER reason=stage-record-unreadable kind=$kind issue=$issue record=$sfile"
+      emit "$REFUSE_MARKER detail=this stage's record EXISTS and could not be READ, so which report of this stage is current could not be measured and NOTHING was written. That is not the same as a record with no report-generation (which reads as the original single report): an unmeasured record may not take the permissive reading, because guessing would hand a re-spawned agent the path an earlier agent may still hold. Fix the record's permissions, or remove the stage directory and open a fresh stage."
+      exit 2
+    fi
     prior_gen="$(read_field "$sfile" report-generation)"
     if [ "$ngen_lines" -le 1 ] && { [ -z "$prior_gen" ] || case "$prior_gen" in *[!0-9]*) false ;; *) true ;; esac; }; then
       gen="${prior_gen:-0}"
@@ -1370,14 +1421,23 @@ load_stage() {
   fi
   STAGE_OPEN=1
   local ngen gval
-  ngen="$(LC_ALL=C grep -c -i '^[[:space:]]*report-generation:' "$sfile" 2>/dev/null || true)"
-  case "$ngen" in "" | *[!0-9]* ) ngen=0 ;; esac
-  gval="$(read_field "$sfile" report-generation)"
-  if [ "$ngen" -gt 1 ]; then
+  # THE READ IS VERIFIED AFFIRMATIVELY, AND A FAILED READ IS ITS OWN DEFECT (#3751 round 6, K1).
+  # `count_field_lines` returns non-zero only when the record could not be READ; "read fine, no
+  # such field" prints 0 and returns 0. The two were collapsed by a `|| true`, so an unreadable
+  # record fell through to the LEGACY reading and an OLD report's `PASS` was reported as the
+  # current verdict. The legacy reading below is reserved for a record that WAS read.
+  if ! ngen="$(count_field_lines "$sfile" report-generation)"; then
+    STAGE_RECORD_DEFECT="the record EXISTS and could not be READ, so which report is current was never measured (permission or I/O — not the same as a record with no report-generation)"
+    ngen=0
+  elif [ "$ngen" -gt 1 ]; then
     STAGE_RECORD_DEFECT="report-generation appears $ngen times (AMBIGUOUS — several records is refused, never resolved by order)"
   elif [ "$ngen" -eq 0 ]; then
     STAGE_GENERATION=0
   else
+    # READ ONLY WHERE IT IS USED, and only after the count above established that the record can
+    # be read at all: `read_field` reports "absent or empty" for an unreadable file too, so its
+    # empty value is only meaningful once the read itself is known to have succeeded.
+    gval="$(read_field "$sfile" report-generation)"
     case "$gval" in
       "" | *[!0-9]* ) STAGE_RECORD_DEFECT="report-generation is not a decimal number ($(field_value "${gval:-<empty>}"))" ;;
       *) STAGE_GENERATION="$gval" ;;
