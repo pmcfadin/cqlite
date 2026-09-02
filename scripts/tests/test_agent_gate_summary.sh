@@ -5111,9 +5111,9 @@ fi
 # that makes a blank annotation unrepresentable: every branch that cannot report an
 # observed matrix still prints a NAMED state.
 fm_tokens_missing=()
-grep -q "printf '\[no-cargo\]'" "$GATE" || fm_tokens_missing+=(no-cargo)
+grep -q "printf 'no-cargo'" "$GATE" || fm_tokens_missing+=(no-cargo)   # #3765: the bracket moved to the ONE label site (_fm_annotate)
 grep -q 'feature set NOT observed' "$GATE" || fm_tokens_missing+=(via-driver-not-observed)
-grep -q "printf '\[UNDECLARED\]'" "$GATE" || fm_tokens_missing+=(UNDECLARED)
+grep -q "printf 'UNDECLARED'" "$GATE" || fm_tokens_missing+=(UNDECLARED)   # #3765: ditto
 grep -q 'UNCLASSIFIED' "$GATE" || fm_tokens_missing+=(UNCLASSIFIED)
 grep -q 'component SKIPped' "$GATE" || fm_tokens_missing+=(skipped-before-cargo)
 # …and, since the eight `bash -c` bodies record at EXECUTION time (#3453 roborev job 269
@@ -5142,6 +5142,249 @@ if [ -r "$SCRIPT_DIR/../../$fm_guard" ] && grep -q "$fm_guard" "$GATE"; then
   ok "3453-annot-e: the completeness/no-drift guard exists AND is registered in the gate (tooling-tests)"
 else
   bad "3453-annot-e: $fm_guard missing (looked under $SCRIPT_DIR/../..) or not registered in $GATE — the COMPONENTS completeness census would be silently gone"
+fi
+
+# ============================================================================
+# 55. ISSUE #3765: the FAILING ASSERT IDENTITY on a FAIL line, and the LABELLED
+#     invocation bracket.
+#
+# THE DEFECT. A failing component rendered:
+#     tooling-tests:  FAIL (1149s)  [test ws0-corpus-gen default-features | + …]
+# The bracket is the #3453 INVOCATION annotation, it was UNLABELLED, and it is
+# test-SHAPED — so a reader identifies `ws0-corpus-gen` as the failing test. It is not.
+# The real assert (`FAIL - 1465-skip-declares: …`) lived ONLY in the component log, which
+# CLAUDE.md forbids an agent to read, while the same doctrine requires a flake citation to
+# name the ASSERT rather than the component. Unsatisfiable, and it cost a real round: a
+# coordination lead refused a lane's correct flake attribution because the bracket "named
+# a different test".
+#
+# HERMETIC BY CONSTRUCTION. Every case below drives the REAL chain — component log ->
+# _ansi_stripped_log -> scripts/ci/gate-failed-assert.sh -> the sidecar -> the ONE
+# renderer — through the hidden --lite-aggregate-selftest hook, which seeds a caller
+# -supplied log with AGENT_GATE_TEST_LITE_LOGS and calls the SAME _failassert_record
+# record_result calls. No cargo, no 20-minute gate, and no re-implementation of the
+# subject in this file.
+#
+# THE FOUR STATES ARE ASSERTED AS TEXTUALLY DISTINCT, because they are different operator
+# facts: an identity, a scan that found nothing, a scan that could not happen, and no
+# scan at all. Collapsing any pair is the "positive verdict from the absence of a bad
+# signal" shape this repo keeps paying for.
+# ============================================================================
+fa_dir="$tmp/3765"; mkdir -p "$fa_dir"
+printf 'ok   - a: fine\nFAIL - 1465-skip-declares: the opt-out SKIP branch does not declare the leak-lane state\npassed: 419  failed: 1\n' > "$fa_dir/one.log"
+printf 'FAIL - alpha: x\nFAIL - beta: y\nFAIL - gamma: z\nFAIL - delta: w\nFAIL - epsilon: v\n' > "$fa_dir/many.log"
+printf 'this log says nothing a recogniser knows\njust prose\n' > "$fa_dir/quiet.log"
+: > "$fa_dir/empty.log"
+mkdir -p "$fa_dir/adirectory"
+# #3400: colour SURVIVES redirection to a file, and 18 workflows set CARGO_TERM_COLOR
+# always — so the coloured form of the SAME line must yield the SAME identity.
+printf 'FAIL - \033[1;31m3400-coloured\033[0m: a coloured marker must still be recognised\n' > "$fa_dir/coloured.log"
+# Tier precedence: a real test failure ALSO produces a cargo `error:` epilogue. The
+# assert tier must win, or every libtest failure would report cargo's summary instead.
+printf 'test tests::foo_bar ... FAILED\n\nfailures:\n    tests::foo_bar\n\nerror: test failed, to rerun pass `--lib`\n' > "$fa_dir/tiered.log"
+
+# _fa_run <label> <results> <logs> <scoped> -> emits into $fa_sum
+fa_sum=""
+_fa_run() {
+  fa_sum="$fa_dir/$1.txt"
+  AGENT_GATE_SUMMARY_FILE="$fa_sum" \
+    AGENT_GATE_TEST_LITE_RESULTS="$2" AGENT_GATE_TEST_LITE_LOGS="$3" \
+    AGENT_GATE_TEST_LITE_SCOPED="$4" \
+    bash "$GATE" --lite-aggregate-selftest >/dev/null 2>&1
+}
+_fa_line() { grep -E "^$1: +(PASS|FAIL|SKIP)" "$fa_sum" 2>/dev/null | head -1; }
+
+# 55a. AN IDENTITY IS EXTRACTED — the #3765 subject line, verbatim from the issue.
+_fa_run identity "file-size:FAIL fmt:PASS clippy:PASS" "file-size=$fa_dir/one.log" PASS
+fa_got=$(_fa_line file-size)
+case "$fa_got" in
+  *"failed-assert: 1 RECOGNISED (assert): 1465-skip-declares"*)
+    ok "3765-identity: a FAIL line NAMES the failing assert ($fa_got)" ;;
+  *) bad "3765-identity: expected 'failed-assert: 1 RECOGNISED (assert): 1465-skip-declares', got '$fa_got'" ;;
+esac
+
+# 55b. MANY FAILURES: the COUNT is the true total and the names are capped with the
+#      remainder DECLARED — defect identity, not a full report.
+_fa_run many "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/many.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *"failed-assert: 5 RECOGNISED (assert): alpha, beta, gamma (+2 more)"*)
+    ok "3765-many: count is the TRUE total, first 3 named, remainder declared ($fa_got)" ;;
+  *) bad "3765-many: expected '5 RECOGNISED (assert): alpha, beta, gamma (+2 more)', got '$fa_got'" ;;
+esac
+
+# 55c. LOG READ, NOTHING RECOGNISED: `0 RECOGNISED`, never a bare 0, and the scan's own
+#      non-exhaustiveness DECLARED in the line.
+_fa_run quiet "clippy:FAIL file-size:PASS fmt:PASS" "clippy=$fa_dir/quiet.log" PASS
+fa_got=$(_fa_line clippy)
+case "$fa_got" in
+  *"failed-assert: 0 RECOGNISED (component log scanned; no recogniser matched"*NON-EXHAUSTIVE*)
+    ok "3765-none: a scanned-but-unmatched log reads 0 RECOGNISED and declares the scan NON-EXHAUSTIVE" ;;
+  *) bad "3765-none: expected '0 RECOGNISED (component log scanned; … NON-EXHAUSTIVE)', got '$fa_got'" ;;
+esac
+
+# 55d. AN EMPTY LOG IS ITS OWN MEASUREMENT — 20 of the 174 measured FAIL logs were
+#      zero-length, and "the log was empty" is a different operator fact from "the log
+#      had content none of which matched".
+_fa_run empty "clippy:FAIL file-size:PASS fmt:PASS" "clippy=$fa_dir/empty.log" PASS
+fa_got=$(_fa_line clippy)
+case "$fa_got" in
+  *"failed-assert: 0 RECOGNISED (component log is EMPTY"*)
+    ok "3765-empty: an empty log reads 0 RECOGNISED naming EMPTY, distinct from a no-match scan" ;;
+  *) bad "3765-empty: expected '0 RECOGNISED (component log is EMPTY …)', got '$fa_got'" ;;
+esac
+
+# 55e. THE LOG COULD NOT BE READ: `not extractable` WITH THE CAUSE NAMED, and never
+#      collapsed onto 0 RECOGNISED. A directory at the log path is a readable-but-
+#      unparseable subject, i.e. the "could not look" half of the distinction.
+_fa_run unreadable "clippy:FAIL file-size:PASS fmt:PASS" "clippy=$fa_dir/adirectory" PASS
+fa_got=$(_fa_line clippy)
+case "$fa_got" in
+  *"failed-assert: not extractable ("*"is not a readable file)"*)
+    ok "3765-unreadable: an unparseable log reads 'not extractable' with the cause NAMED" ;;
+  *) bad "3765-unreadable: expected 'not extractable (… is not a readable file)', got '$fa_got'" ;;
+esac
+case "$fa_got" in
+  *"0 RECOGNISED"*) bad "3765-unreadable-distinct: an unreadable log must NEVER report 0 RECOGNISED — that is a scan verdict from a scan that never happened" ;;
+  *) ok "3765-unreadable-distinct: 'could not look' is textually distinct from 'looked and found nothing'" ;;
+esac
+
+# 55f. NO LOG AT ALL: still affirmative, still named.
+_fa_run absent "clippy:FAIL file-size:PASS fmt:PASS" "" PASS
+fa_got=$(_fa_line clippy)
+case "$fa_got" in
+  *"failed-assert: not extractable ("*"does not exist)"*)
+    ok "3765-absent: a missing component log is reported affirmatively, naming the path" ;;
+  *) bad "3765-absent: expected 'not extractable (… does not exist)', got '$fa_got'" ;;
+esac
+
+# 55g. NO EXTRACTION RAN AT ALL (a synthetic line, or a runner that appends to NAMES
+#      without reaching an extraction site): the field is still present and says so.
+#      scoped-tests is exactly that shape in this hook.
+_fa_run notrecorded "file-size:PASS fmt:PASS clippy:PASS" "" FAIL
+fa_got=$(_fa_line scoped-tests)
+case "$fa_got" in
+  *"failed-assert: not recorded ("*)
+    ok "3765-notrecorded: a FAIL line with no extraction record says so, rather than omitting the field" ;;
+  *) bad "3765-notrecorded: expected 'failed-assert: not recorded (…)', got '$fa_got'" ;;
+esac
+
+# 55h. THE FIELD NEVER RENDERS BLANK. Whatever happened, a FAIL line carries a
+#      non-empty value after the label — the same contract the #3453 annotation has.
+fa_blank=()
+for fa_case in identity many quiet empty unreadable absent notrecorded; do
+  fa_sum="$fa_dir/$fa_case.txt"
+  while IFS= read -r fa_l; do
+    case "$fa_l" in
+      *"failed-assert:"*)
+        [ -n "$(printf '%s' "${fa_l##*failed-assert:}" | tr -d '[:space:]')" ] || fa_blank+=("$fa_case:$fa_l") ;;
+    esac
+  done < <(grep -E '^[a-z][a-z-]*: +FAIL' "$fa_sum" 2>/dev/null)
+done
+if [ "${#fa_blank[@]}" -eq 0 ]; then
+  ok "3765-never-blank: every FAIL line's failed-assert field carries a non-empty value"
+else
+  bad "3765-never-blank: blank field(s): ${fa_blank[*]}"
+fi
+
+# 55i. THE FIELD IS FAIL-ONLY. A PASS or SKIP has no failing assert, so the field has no
+#      subject there; its absence on those lines is the stated RULE, not a silence.
+fa_wrong=$(grep -E '^[a-z][a-z-]*: +(PASS|SKIP)' "$fa_dir/identity.txt" 2>/dev/null | grep -c 'failed-assert:')
+if [ "${fa_wrong:-1}" -eq 0 ]; then
+  ok "3765-fail-only: no PASS/SKIP line carries a failed-assert field"
+else
+  bad "3765-fail-only: $fa_wrong PASS/SKIP line(s) carry a failed-assert field"
+fi
+
+# 55j. #3400 AT THE PARSE SITE: the coloured spelling of a marker yields the SAME
+#      identity. Colour survives redirection, so this is not a tty-only concern.
+_fa_run coloured "clippy:FAIL file-size:PASS fmt:PASS" "clippy=$fa_dir/coloured.log" PASS
+fa_got=$(_fa_line clippy)
+case "$fa_got" in
+  *"failed-assert: 1 RECOGNISED (assert): 3400-coloured"*)
+    ok "3765-colour: an ANSI-coloured marker still yields the identity (#3400)" ;;
+  *) bad "3765-colour: colour defeated the recogniser — got '$fa_got'" ;;
+esac
+
+# 55k. TIER PRECEDENCE: a libtest failure also emits cargo's `error:` epilogue. The
+#      named-test tier must win, or every test failure would report cargo's summary.
+_fa_run tiered "clippy:FAIL file-size:PASS fmt:PASS" "clippy=$fa_dir/tiered.log" PASS
+fa_got=$(_fa_line clippy)
+case "$fa_got" in
+  *"failed-assert: 1 RECOGNISED (assert): tests::foo_bar"*)
+    ok "3765-tier: the named-test tier beats the toolchain tier on a log carrying both" ;;
+  *) bad "3765-tier: expected the libtest name, got '$fa_got'" ;;
+esac
+
+# 55l. HALF 2 — THE INVOCATION BRACKET IS LABELLED, on every component line of a real
+#      emitted block, so it can no longer be read as a failure identity.
+fa_lab_sum="$tmp/3765-label.txt"
+if AGENT_GATE_SUMMARY_FILE="$fa_lab_sum" bash "$GATE" --emit-summary-selftest >/dev/null 2>&1; then
+  fa_lines=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\)  \[' "$fa_lab_sum")
+  fa_labelled=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\)  \[invocation: ' "$fa_lab_sum")
+  if [ "$fa_lines" -gt 0 ] && [ "$fa_lines" -eq "$fa_labelled" ]; then
+    ok "3765-label: all $fa_lines component line(s) label the bracket 'invocation:' (it cannot be read as a failure identity)"
+  else
+    bad "3765-label: only $fa_labelled of $fa_lines component lines carry the invocation label"
+  fi
+else
+  bad "3765-label: --emit-summary-selftest exited non-zero"
+fi
+
+# 55m. ONE RENDERER. The field must be produced by the single _fm_summary_line path all
+#      six emit sites share — a second formatter is exactly the drift #3453 removed.
+fa_sl=$(awk '/^_fm_summary_line\(\)/{f=1} f{print} f&&/^\}$/{exit}' "$GATE")
+if body_mentions "$fa_sl" '_failassert_render'; then
+  ok "3765-one-renderer: _fm_summary_line (the ONE renderer) is what emits the field"
+else
+  bad "3765-one-renderer: _fm_summary_line does not call _failassert_render — a second formatter would drift"
+fi
+fa_emitters=$(grep -c "printf 'failed-assert: " "$GATE")
+if [ "$fa_emitters" -eq 1 ]; then
+  ok "3765-one-formatter: exactly one site in the gate formats the field text"
+else
+  bad "3765-one-formatter: $fa_emitters sites format 'failed-assert: ' (expected exactly 1)"
+fi
+
+# 55n. THE EXTRACTION SITE IS record_result — the chokepoint every component passes
+#      through — so a new component is covered with no gate edit.
+fa_rr=$(awk '/^record_result\(\)/{f=1} f{print} f&&/^\}$/{exit}' "$GATE")
+if body_mentions "$fa_rr" '_failassert_record'; then
+  ok "3765-record-site: record_result invokes _failassert_record (every component covered by the chokepoint)"
+else
+  bad "3765-record-site: record_result does not invoke _failassert_record"
+fi
+
+# 55o. `.result` STAYS TWO FIELDS. There is a 2-field `read -r _st _secs` reader that
+#      would silently absorb a third, so the identity MUST ride a sidecar.
+if printf '%s\n' "$fa_rr" | grep -q "printf '%s %s\\\\n' \"\$2\" \"\$3\" > \"\$LOG_DIR/\$1.result\""; then
+  ok "3765-two-fields: record_result still writes exactly two whitespace fields to .result"
+else
+  bad "3765-two-fields: record_result's .result write changed shape — a third field would be silently absorbed by the 2-field reader"
+fi
+
+# 55p. THE RECOGNISER SET LIVES IN ONE NAMED PLACE, resolved from the checkout with NO
+#      env override (the constrained party must not choose its own extractor).
+fa_tool="$SCRIPT_DIR/../ci/gate-failed-assert.sh"
+if [ -r "$fa_tool" ] && grep -q 'scripts/ci/gate-failed-assert.sh' "$GATE"; then
+  ok "3765-tool: the recogniser set is one named file and the gate resolves it from the checkout"
+else
+  bad "3765-tool: $fa_tool missing or not referenced by $GATE"
+fi
+if grep -qE '_failassert_tool\(\).*\$\{[A-Z_]+:-' "$GATE"; then
+  bad "3765-tool-nooverride: the extractor path is env-overridable — the party the field constrains must not choose its own extractor (#3312 job 27)"
+else
+  ok "3765-tool-nooverride: the extractor path has no env override"
+fi
+
+# 55q. THE EXTRACTOR FAILS CLOSED on a subject it cannot read: exit 2, so the caller
+#      renders a NAMED 'not extractable' rather than "no failures found".
+bash "$fa_tool" "$fa_dir/definitely-not-here.log" >/dev/null 2>&1
+fa_rc=$?
+if [ "$fa_rc" -eq 2 ]; then
+  ok "3765-extractor-failclosed: the extractor exits 2 on an unreadable subject (never 0 with no output)"
+else
+  bad "3765-extractor-failclosed: expected exit 2 on a missing log, got $fa_rc"
 fi
 
 # TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
@@ -5187,6 +5430,11 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
+# 410 -> 428 on #3765: section 55 adds 18 asserts, host-INDEPENDENT for the same reason
+# (bash plus --lite-aggregate-selftest/--emit-summary-selftest and the extractor script; no
+# cargo, python3, jq, network or datasets), so the same "raise by exactly the number added"
+# rule applies and the ~9 margin is preserved. #3544's lesson: a green tally over a shrunken
+# suite is a false certification, so the floor RISES with the suite rather than staying put.
 # 405 -> 410 on #3453 (Phase B): section 54 adds 5 asserts, host-INDEPENDENT for the same
 # reason (bash plus --emit-summary-selftest; no cargo/python3/jq/network/datasets), so the
 # same "raise by exactly the number added" rule applies and the ~9 margin is preserved.
@@ -5197,7 +5445,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=410
+ASSERT_FLOOR=428
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
