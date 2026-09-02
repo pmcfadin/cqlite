@@ -730,7 +730,13 @@ export AB_SHAPE="$SHAPE" AB_RAMP="$RAMP" AB_STEP_DURATION="$STEP_DURATION"
 export AB_PROFILE="$PROFILE"
 export AB_STEP_DURATION_SECONDS="$STEP_DURATION_SECONDS"
 export AB_PREWARM="$PREWARM" AB_TEMPERATURE="$TEMPERATURE"
-export AB_TICKET_TEMPLATE="$TICKET_TEMPLATE"
+# AB_TICKET_TEMPLATE IS NOT EXPORTED HERE. It names the ticket THE RUNS READ,
+# which does not exist until the freeze -- and `die` writes a manifest, so an
+# abort before the freeze would otherwise record a path nothing ever read. What
+# IS useful on an early abort is which template was REQUESTED, so that is
+# exported under its own name and the executed-path field stays empty until
+# there is an executed path.
+export AB_TICKET_ORIGINAL="$TICKET_TEMPLATE"
 export AB_CONTROL="$CONTROL"
 export AB_BASE_SERVER_EXTRA="$BASE_SERVER_EXTRA" AB_HEAD_SERVER_EXTRA="$HEAD_SERVER_EXTRA"
 export AB_CORPUS="$CORPUS" AB_MIN_CORPUS_BYTES="$MIN_CORPUS_BYTES"
@@ -860,6 +866,14 @@ cp -- "$TICKET_TEMPLATE" "$TICKET_FROZEN" \
 chmod a-w "$TICKET_FROZEN" 2>/dev/null || true
 TICKET_ORIGINAL="$TICKET_TEMPLATE"
 TICKET_TEMPLATE="$TICKET_FROZEN"
+# EXPORTED ON THE SAME BREATH AS THE ASSIGNMENT, not eleven lines later. `die`
+# writes a manifest, and the digest step below can die -- so a re-export after
+# it left a REACHABLE window, not a latent one, in which a manifest recorded the
+# original while the frozen copy already existed on disk. An interval in which
+# the wrong value is exported should not exist at all rather than be argued to
+# be unreachable.
+export AB_TICKET_TEMPLATE="$TICKET_FROZEN"
+export AB_TICKET_ORIGINAL="$TICKET_ORIGINAL"
 TICKET_SHA="$(python3 - "$TICKET_FROZEN" <<'PYEOF'
 import hashlib
 import sys
@@ -868,14 +882,12 @@ with open(sys.argv[1], "rb") as handle:
     sys.stdout.write(hashlib.sha256(handle.read()).hexdigest())
 PYEOF
 )" || die ticket-template-unreadable "the frozen ticket could not be digested"
-# RE-EXPORTED, because the manifest's variable is exported at line 719 -- BEFORE
-# the freeze -- and would otherwise still name the mutable original. Round 17
-# pinned the EXECUTION and left the RECORD, so a mid-session edit produced a
-# manifest documenting a ticket nobody ran: worse than the original defect,
-# which at least had the honesty of being consistently wrong. One variable now
-# means the executed path, and the original survives only under its own name.
-export AB_TICKET_TEMPLATE="$TICKET_FROZEN"
-export AB_TICKET_ORIGINAL="$TICKET_ORIGINAL" AB_TICKET_SHA="$TICKET_SHA"
+# Round 17 pinned the EXECUTION and left the RECORD, so a mid-session edit
+# produced a manifest documenting a ticket nobody ran -- worse than the original
+# defect, which at least had the honesty of being consistently wrong. The path
+# is exported above, at the assignment; only the digest can be exported here,
+# because only here does it exist.
+export AB_TICKET_SHA="$TICKET_SHA"
 say "ticket frozen into the session directory as $TICKET_FROZEN sha256 $TICKET_SHA -- every run reads this copy, never $TICKET_ORIGINAL"
 # THE WORKLOAD MUST MATCH THE CLAIM THE REPORT WILL MAKE ABOUT IT. The #3649
 # target band is defined for `flight-loadgen --shape full` over the whole ring

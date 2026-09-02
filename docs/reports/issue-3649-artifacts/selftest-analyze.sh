@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=501
+CASE_FLOOR=502
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -4288,6 +4288,59 @@ ticket_case version-bool       '{"keyspace":"ks","table":"t","ddl":"d","version"
 # reason a control can be schema-checked without being forced to be a full scan.
 ticket_case narrowed-limit     '{"version":2,"keyspace":"ks","table":"t","ddl":"d","limit":10}' 0 1
 ticket_case narrowed-columns   '{"version":2,"keyspace":"ks","table":"t","ddl":"d","columns":["a"]}' 0 1
+
+# THE EXPORT INTERVAL, PINNED STRUCTURALLY. `die` writes a manifest, so any
+# abort between the freeze and the export of AB_TICKET_TEMPLATE records a ticket
+# path nothing read -- and the digest step below the copy CAN die, so this was a
+# reachable window and not a latent one. The property is that no such interval
+# exists: the export happens at the assignment, and nothing exports the
+# pre-freeze value at all.
+if python3 - "$DRIVER" <<'PYINNER'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+lines = source.splitlines()
+problems = []
+exports = [i for i, l in enumerate(lines)
+           if re.match(r'\s*export AB_TICKET_TEMPLATE=', l)]
+if len(exports) != 1:
+    problems.append("AB_TICKET_TEMPLATE is exported %d times; it must be exported "
+                    "exactly once, at the assignment" % len(exports))
+else:
+    where = exports[0]
+    if 'TICKET_FROZEN' not in lines[where]:
+        problems.append("the one export of AB_TICKET_TEMPLATE does not name the "
+                        "frozen copy: %s" % lines[where].strip())
+    # It must sit immediately after the assignment, with nothing that can `die`
+    # in between -- comments and other exports only.
+    assign = [i for i, l in enumerate(lines)
+              if re.match(r'\s*TICKET_TEMPLATE="\$TICKET_FROZEN"\s*$', l)]
+    if len(assign) != 1:
+        problems.append("TICKET_TEMPLATE is assigned from TICKET_FROZEN %d times"
+                        % len(assign))
+    elif where < assign[0]:
+        problems.append("AB_TICKET_TEMPLATE is exported before the assignment")
+    else:
+        between = lines[assign[0] + 1:where]
+        for line in between:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("export "):
+                continue
+            problems.append("a statement sits between the assignment and the "
+                            "export, so an abort there records the original: %s"
+                            % stripped)
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "AB_TICKET_TEMPLATE is exported exactly once, at the assignment, with no interval"
+else
+  bad "there is an interval in which AB_TICKET_TEMPLATE names the wrong ticket (see above)"
+fi
 
 # THE COMPLETENESS OF `TICKET_SCHEMA`, DERIVED FROM `ticket.rs` ITSELF.
 # A curated field list is the shape this lane keeps closing: `filter` and
