@@ -5253,9 +5253,9 @@ esac
 _fa_run absent "clippy:FAIL file-size:PASS fmt:PASS" "" PASS
 fa_got=$(_fa_line clippy)
 case "$fa_got" in
-  *"failed-assert: not extractable ("*"does not exist)"*)
-    ok "3765-absent: a missing component log is reported affirmatively, naming the path" ;;
-  *) bad "3765-absent: expected 'not extractable (… does not exist)', got '$fa_got'" ;;
+  *"failed-assert: not extractable (this component kept no log file to scan)"*)
+    ok "3765-absent: a missing component log is reported affirmatively — the CAUSE, and deliberately NOT the path (job 69)" ;;
+  *) bad "3765-absent: expected 'not extractable (this component kept no log file to scan)', got '$fa_got'" ;;
 esac
 
 # 55g. NO EXTRACTION RAN AT ALL (a synthetic line, or a runner that appends to NAMES
@@ -6345,7 +6345,7 @@ case "$fa_dt3" in
 esac
 # STRUCTURAL: the doctest rule must PRECEDE the generic libtest rule, or the generic rule
 # consumes the line with `next` and the specific rule never runs.
-fa_doc_at=$(grep -nF 'test [^:@]+ - .+ \(line [0-9]+\) \.\.\. FAILED/ {' "$fa_tool" | head -1 | cut -d: -f1)
+fa_doc_at=$(grep -nF 'test [^:@]+ - .*\(line [0-9]+\) \.\.\. FAILED/ {' "$fa_tool" | head -1 | cut -d: -f1)
 fa_gen_at=$(grep -nF 'test .* \.\.\. FAILED/ {' "$fa_tool" | head -1 | cut -d: -f1)
 if [ -n "$fa_doc_at" ] && [ -n "$fa_gen_at" ] && [ "$fa_doc_at" -lt "$fa_gen_at" ]; then
   ok "3765-doctest-rule-order: the doctest recogniser (line $fa_doc_at) precedes the generic libtest rule (line $fa_gen_at), so the generic rule cannot consume a doctest line first"
@@ -6474,6 +6474,57 @@ if printf '%s\n' "$fa_dsh" | grep -qE '_run_shell_selftest_files "\$\{tarr\[@\]\
 else
   bad "3765-shelltest-capture-not-piped: the capture is not a plain redirection; a `| tee` would give the if statement tee exit status instead of the suite result"
 fi
+
+# 55zc. ROBOREV JOB 69, three findings.
+#  (a) NO CAUSE MAY PUBLISH A PATH. The `not extractable (...)` causes interpolated the
+#      extractor/log paths, which derive from the checkout location and TMPDIR — externally
+#      influenced, unbounded strings flowing into an artifact this repo pastes into PR
+#      comments, and _failassert_clean is explicitly not a secrecy oracle.
+_fa_run nopath "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/absent-SEKRETPATH/x.log" PASS
+fa_np=$(_fa_line fmt)
+case "$fa_np" in
+  *SEKRETPATH*|*/tmp/*)
+    bad "3765-cause-no-path: a not-extractable cause published a filesystem path ($fa_np) — paths are externally influenced and the cause is what a reader needs" ;;
+  *"not extractable"*)
+    ok "3765-cause-no-path: the cause names WHY without publishing any path" ;;
+  *) bad "3765-cause-no-path: expected a not-extractable cause, got '$fa_np'" ;;
+esac
+# STRUCTURAL: no cause may interpolate $log or $tool again.
+fa_causes=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#' | grep 'not extractable (')
+if ! printf '%s\n' "$fa_causes" | grep -qE '\$\{?(log|tool)\b'; then
+  ok "3765-cause-no-path-structural: no not-extractable cause interpolates the log or extractor path"
+else
+  bad "3765-cause-no-path-structural: a cause still interpolates \$log or \$tool — that is the job-69 finding reintroduced"
+fi
+#  (b) EMPTY OUTPUT IS THE ONLY LEGITIMATE NO-MATCH. The extractor prints tier=/count= only for
+#      a tier it matched and its count is >= 1 by construction, so missing fields or count=0 on
+#      NON-EMPTY output is a protocol violation, not a completed scan that found nothing.
+fa_pv=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE")
+if printf '%s\n' "$fa_pv" | grep -q 'if \[ -z "$out" \]; then' \
+   && printf '%s\n' "$fa_pv" | grep -q 'a protocol violation, refused rather than reported as a completed scan'; then
+  ok "3765-protocol-violation: empty output yields 0 RECOGNISED, while malformed NON-EMPTY output is REFUSED rather than reported as a completed scan"
+else
+  bad "3765-protocol-violation: missing tier/count or count=0 still collapses onto 0 RECOGNISED — a positive verdict from a state that was never measured (job 69)"
+fi
+#  (c) THE DOCTEST ITEM IS OPTIONAL. rustdoc reports an unnamed example as `<path> - (line N)`.
+printf 'test src/lib.rs - (line 10) ... FAILED\n' > "$fa_dir/docni.log"
+_fa_run docni "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/docni.log" PASS
+fa_ni=$(_fa_line fmt)
+case "$fa_ni" in
+  *"doctest src/lib.rs line 10"*)
+    ok "3765-doctest-no-item: an unnamed doctest example is NAMED by path and line, not reduced to a charset placeholder" ;;
+  *"outside the safe charset"*)
+    bad "3765-doctest-no-item: an unnamed doctest example still publishes a charset placeholder ($fa_ni) — job 69" ;;
+  *) bad "3765-doctest-no-item: expected a doctest identity, got '$fa_ni'" ;;
+esac
+printf 'test https://x-access-token:SEKRETD@h.io/p - (line 10) ... FAILED\n' > "$fa_dir/docniurl.log"
+_fa_run docniurl "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/docniurl.log" PASS
+fa_niu=$(_fa_line fmt)
+case "$fa_niu" in
+  *SEKRETD*|*"@h.io"*)
+    bad "3765-doctest-no-item-no-authority: relaxing the item requirement let a URL-shaped line publish an authority ('$fa_niu')" ;;
+  *) ok "3765-doctest-no-item-no-authority: the item-less doctest form still admits no authority" ;;
+esac
 
 # CODE lines only: the digest note NAMES those binaries while explaining why it does not use
 # them, and a scan over the comments would read that explanation as the defect.
@@ -6731,7 +6782,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=551
+ASSERT_FLOOR=556
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

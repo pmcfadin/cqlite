@@ -323,11 +323,15 @@ awk -v max="$max" '
   }
   function pubdoc(s,   dp, di, dl) {
     dp = s; sub(/ - .*$/, "", dp)
-    di = s; sub(/^[^ ]+ - /, "", di); sub(/ \(line [0-9]+\)$/, "", di)
+    di = s; sub(/^[^ ]+ - /, "", di); sub(/ ?\(line [0-9]+\)$/, "", di)
     dl = s; sub(/^.*\(line /, "", dl); sub(/\)$/, "", dl)
-    if (dp ~ /^[A-Za-z0-9._\/-]+$/ && di ~ /^[A-Za-z0-9._:-]+$/ && dl ~ /^[0-9]+$/)
-      return "doctest " dp " line " dl " (" di ")"
-    return pubid(tagof(norm(s)))
+    if (dp !~ /^[A-Za-z0-9._\/-]+$/ || dl !~ /^[0-9]+$/) return pubid(tagof(norm(s)))
+    # THE ITEM IS OPTIONAL: rustdoc reports an unnamed example as `<path> - (line N)`, which
+    # under a mandatory-item rule fell through to the generic rule and published a charset
+    # placeholder instead of naming the failing doctest (roborev job 69).
+    if (di == "") return "doctest " dp " line " dl
+    if (di !~ /^[A-Za-z0-9._:-]+$/) return pubid(tagof(norm(s)))
+    return "doctest " dp " line " dl " (" di ")"
   }
   function pubid(t) {
     # ONLY `.` and `:` are stripped. `_` and `-` are VALID IDENTIFIER CHARACTERS, and
@@ -420,7 +424,7 @@ awk -v max="$max" '
   # that admits NO `:` and NO `@`, and the item and line are matched separately. A URL cannot
   # satisfy that shape, so admitting `/` cannot readmit an authority — which is the property
   # the charset exists to guarantee, not the charset itself.
-  /^[[:space:]]*test [^:@]+ - .+ \(line [0-9]+\) \.\.\. FAILED/ {
+  /^[[:space:]]*test [^:@]+ - .*\(line [0-9]+\) \.\.\. FAILED/ {
     s = $0; sub(/^[[:space:]]*test /, "", s); sub(/ \.\.\. FAILED.*$/, "", s)
     add("assert", s, pubdoc(s), 0); next
   }

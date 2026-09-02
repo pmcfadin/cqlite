@@ -6873,13 +6873,20 @@ _failassert_is_doctest_id() {
   case "$rest" in *" line "*) ;; *) return 1 ;; esac
   p=${rest%% line *}
   rest=${rest#"$p" line }
-  case "$rest" in *" ("*")") ;; *) return 1 ;; esac
-  n=${rest%% (*}
-  i=${rest#*" ("}; i=${i%)}
-  [ -n "$p" ] && [ -n "$n" ] && [ -n "$i" ] || return 1
+  # The item is OPTIONAL: rustdoc reports an unnamed example as `<path> - (line N)`, so the
+  # published form is `doctest <path> line <N>` with no trailing `(item)` (roborev job 69).
+  case "$rest" in
+    *" ("*")")
+      n=${rest%% (*}
+      i=${rest#*" ("}; i=${i%)} ;;
+    *)
+      n=$rest
+      i="" ;;
+  esac
+  [ -n "$p" ] && [ -n "$n" ] || return 1
+  if [ -n "$i" ]; then case "$i" in *[!A-Za-z0-9._:-]*) return 1 ;; esac; fi
   case "$p" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
   case "$n" in *[!0-9]*) return 1 ;; esac
-  case "$i" in *[!A-Za-z0-9._:-]*) return 1 ;; esac
   return 0
 }
 
@@ -6905,16 +6912,23 @@ _failassert_record() {
   [ "$status" = FAIL ] || return 0
   [ -n "$log" ] || log="${LOG_DIR:-}/$name.log"
   tool=$(_failassert_tool)
+  # NO PATH IS PUBLISHED IN A CAUSE (#3765, roborev job 69). These paths derive from the
+  # checkout location and TMPDIR, i.e. from outside this field, and _failassert_clean is
+  # explicitly NOT a secrecy oracle (it cannot recognise an unmarked secret) — so an absolute
+  # path was an unbounded, externally-influenced string flowing into an artifact this repo
+  # pastes into PR comments. The CAUSE is what a reader needs; the path told them nothing they
+  # could use, since it names a directory on another machine. The component NAME is still
+  # published, and that is a repository-defined identifier.
   if [ ! -r "$tool" ]; then
-    _failassert_write "$name" "not extractable (extractor $(_failassert_clean --prose "$tool") is not readable)"
+    _failassert_write "$name" "not extractable (the extractor script is not readable)"
     return 0
   fi
   if [ ! -e "$log" ]; then
-    _failassert_write "$name" "not extractable (component log $(_failassert_clean --prose "$log") does not exist)"
+    _failassert_write "$name" "not extractable (this component kept no log file to scan)"
     return 0
   fi
   if [ ! -r "$log" ] || [ ! -f "$log" ]; then
-    _failassert_write "$name" "not extractable (component log $(_failassert_clean --prose "$log") is not a readable file)"
+    _failassert_write "$name" "not extractable (the component log is not a readable file)"
     return 0
   fi
   if [ ! -s "$log" ]; then
@@ -6923,7 +6937,7 @@ _failassert_record() {
   fi
   # #3400: normalise through the gate's ONE stripper; its non-zero is a NAMED cause.
   if ! src=$(_ansi_stripped_log "$log" 2>/dev/null) || [ -z "$src" ] || [ ! -r "$src" ]; then
-    _failassert_write "$name" "not extractable (ANSI normalisation of $(_failassert_clean --prose "$log") failed, so nothing could be parsed)"
+    _failassert_write "$name" "not extractable (ANSI normalisation of the component log failed, so nothing could be parsed)"
     return 0
   fi
   out=$(bash "$tool" "$src" 10 2>/dev/null); rc=$?
@@ -6931,10 +6945,20 @@ _failassert_record() {
     _failassert_write "$name" "not extractable (extractor scripts/ci/gate-failed-assert.sh exited $rc)"
     return 0
   fi
+  # EMPTY OUTPUT IS THE ONLY LEGITIMATE NO-MATCH (#3765, roborev job 69). The extractor prints
+  # tier=/count= only for a tier it actually matched, and its count is >= 1 by construction, so
+  # its no-match response is NO OUTPUT AT ALL. Collapsing "missing fields" and "count=0" onto
+  # `0 RECOGNISED` therefore reported a PROTOCOL VIOLATION as a completed scan that found
+  # nothing — a positive verdict derived from a state that was never measured, which is the
+  # exact shape this field exists to remove. Malformed non-empty output is now refused.
+  if [ -z "$out" ]; then
+    _failassert_write "$name" "0 RECOGNISED (component log scanned; no recogniser matched - the recogniser set is NON-EXHAUSTIVE)"
+    return 0
+  fi
   tier=$(printf '%s\n' "$out" | sed -n 's/^tier=//p' | head -1)
   count=$(printf '%s\n' "$out" | sed -n 's/^count=//p' | head -1)
   if [ -z "$tier" ] || [ -z "$count" ] || [ "$count" = 0 ]; then
-    _failassert_write "$name" "0 RECOGNISED (component log scanned; no recogniser matched - the recogniser set is NON-EXHAUSTIVE)"
+    _failassert_write "$name" "not extractable (the extractor produced output but no usable tier/count - a protocol violation, refused rather than reported as a completed scan)"
     return 0
   fi
   # BOTH INTERPOLATED PROTOCOL FIELDS ARE VALIDATED AGAINST A CLOSED SHAPE BEFORE THEY ARE
