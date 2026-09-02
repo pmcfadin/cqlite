@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=576
+CASE_FLOOR=591
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -4237,6 +4237,65 @@ else
   bad "an unparsable requested CPU list returned $RC"
 fi
 
+# ---- CPU lists are validated for EVERY property, and anchored ----------------
+# ROUND 24 FINDING 1. The pre-flight checked only OVERLAP, so the inline parser
+# reached int() on unvalidated input and emitted an unanchored traceback, while
+# empty, reversed and out-of-range sets passed to fail at taskset after all
+# three builds.
+cpuset_case() { # <name> <server> <client> <want-rc> [<want-cause>]
+  set +e
+  python3 "$SUPPORT" validate-cpu-sets "$2" "$3" > "$TMP/cs-out.txt" 2> "$TMP/cs-err.txt"
+  local rc=$?
+  set -e
+  if [ "$rc" != "$4" ]; then
+    bad "cpu sets $1 (exit $rc, expected $4)"
+    return
+  fi
+  # EVERY line anchored, stdout and stderr both. An unanchored line cannot be
+  # attributed by a reader or bounded by a parser, and a raw traceback is the
+  # worst case: multi-line, unprefixed, and looking like a crash.
+  if grep -qv '^AB-3649: ' "$TMP/cs-err.txt" 2>/dev/null \
+     && [ -s "$TMP/cs-err.txt" ]; then
+    bad "cpu sets $1 emitted an unanchored line: $(grep -m1 -v '^AB-3649: ' "$TMP/cs-err.txt")"
+    return
+  fi
+  if grep -q 'Traceback' "$TMP/cs-err.txt"; then
+    bad "cpu sets $1 emitted a Python traceback rather than a named refusal"
+    return
+  fi
+  if [ -n "${5:-}" ] && ! grep -q "^AB-3649: cause $5\$" "$TMP/cs-err.txt"; then
+    bad "cpu sets $1 (cause '$5' absent; stderr: $(head -1 "$TMP/cs-err.txt"))"
+    return
+  fi
+  ok "cpu sets $1 -> exit $rc${5:+ cause $5}"
+}
+cpuset_case "disjoint and valid"        "0,2"   "1,3"  0
+cpuset_case "overlapping"               "0,2"   "2,4"  1 cpu-sets-overlap
+# THE TRACEBACK CASES: malformed input used to reach int().
+cpuset_case "a non-numeric server list" "x,2"   "1,3"  1 cpu-list-invalid
+cpuset_case "a non-numeric client list" "0,2"   "1,y"  1 cpu-list-invalid
+cpuset_case "a trailing separator only" ","     "1,3"  1 cpu-list-invalid
+# REVERSED ranges get their OWN message, because expand_cpu_list builds an
+# empty set from 3-1 and would otherwise report "not a CPU list" for something
+# that is one and is merely backwards -- a wrong diagnosis sends an operator to
+# the wrong place.
+cpuset_case "a reversed range"          "3-1"   "5"    1 cpu-list-invalid
+# Captured BEFORE grepping: `set -o pipefail` is in force, so piping a command
+# that exits non-zero into grep yields the COMMAND's status and the test reads
+# backwards. This validator exits 1 by design here.
+set +e
+python3 "$SUPPORT" validate-cpu-sets "3-1" "5" > "$TMP/rev.txt" 2>&1
+set -e
+if grep -q 'reversed range' "$TMP/rev.txt"; then
+  ok "a reversed range is diagnosed as reversed, not as unparsable"
+else
+  bad "a reversed range was misdiagnosed as an unparsable list"
+fi
+# OUT OF RANGE against the machine's actual online count.
+cpuset_case "a CPU beyond the machine"  "0-99999" "1"  1 cpu-list-invalid
+# An unpinned session passes both empty.
+cpuset_case "no pinning at all"         ""      ""     0
+
 # ---- records are SESSION-LOCAL, and the pairs are the DECLARED PLAN ----------
 # ROUND 23. Both properties were encoded in the round-20 enumeration as weaker
 # cousins -- "enough replicates completed" is a FLOOR, and "the records describe
@@ -5064,6 +5123,13 @@ PYINNER
   ok "record $1 is refused by the driver, naming the analyzer's own cause"
 }
 # THE TRACEBACK: a non-dict latency_ms used to reach `.get` in the print path.
+# ROUND 24 FINDING 2: a TYPE is a noun, a VALID RANGE is the property.
+record_agreement_case negative-errors   'record["requests_error"] = -3'
+record_agreement_case negative-shed     'record["requests_unavailable"] = -1'
+record_agreement_case negative-ok       'record["requests_ok"] = -5'
+record_agreement_case negative-rows     'record["rows_total"] = -1'
+record_agreement_case zero-concurrency  'record["target_concurrency"] = 0'
+record_agreement_case negative-latency  'record["latency_ms"]["p95"] = -2.0'
 record_agreement_case latency-not-dict   'record["latency_ms"] = "fast"'
 record_agreement_case latency-missing-p50 'del record["latency_ms"]["p50"]'
 record_agreement_case latency-p50-string 'record["latency_ms"]["p50"] = "1.0"'
