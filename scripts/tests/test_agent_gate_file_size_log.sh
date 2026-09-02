@@ -706,6 +706,73 @@ STUB
   fi
 fi
 
+
+# ---------------------------------------------------------------------------
+# case14 (#3162, roborev job 389): THE CENSUS COUNT COMES FROM THE MEASUREMENT, NOT FROM A
+# PREDICATE ABOUT THE PATH.
+#
+# `n_scanned` was derived by re-asking `[ -f "$path" ]` in a second pass. `[ -f ]` answers
+# "does this path exist right now"; the census claims "I counted this file's lines". A file
+# that is SELECTED but unreadable satisfied the predicate and was reported as MEASURED — the
+# count asserting verification that did not happen, which is the one thing a census must
+# never do. It is now incremented only after a `wc -l` that produced a validated number.
+#
+# THREE STATES, AND THE COLLAPSE THAT MUST NOT HAPPEN: nothing selected is NO-SUBJECT and
+# preserves PASS; *some* selected of which *none* could be counted is NOT-MEASURED. Letting
+# the second borrow the first's affirmative silence is the same "could not tell" -> permissive
+# slide, one lane over — so it is asserted explicitly, not left implied by the happy path.
+# ---------------------------------------------------------------------------
+c14_pre=0
+if [ "$(id -u)" -ne 0 ]; then
+  c14_probe="$tmp/c13-probe"
+  if printf 'x\n' >"$c14_probe" 2>/dev/null && chmod 000 "$c14_probe" 2>/dev/null \
+     && ! ( wc -l <"$c14_probe" ) >/dev/null 2>&1; then
+    c14_pre=1
+  fi
+  chmod 600 "$c14_probe" 2>/dev/null || true
+fi
+if [ "$c14_pre" -ne 1 ]; then
+  # ONE skip PER SKIPPED ASSERT, the case8 precedent — the suite's census is exact.
+  skip "case14: cannot make a file unreadable on this host (root, or a permissive FS) — positive control not run"
+  skip "case14: cannot make a file unreadable on this host — uncountable-file census not asserted"
+  skip "case14: cannot make a file unreadable on this host — NO-SUBJECT collapse not asserted"
+  skip "case14: cannot make a file unreadable on this host — uncounted/selected counts not asserted"
+else
+  # POSITIVE CONTROL FIRST, and it differs from the plant in ONE property: whether the
+  # selected file can be read. Without it a FAIL below could be the fixture, not the census.
+  mkrepo censusread14 cqlite-core/src/big.rs 900 950 main; r14a="$REPO"
+  out14a="$tmp/censusread14.out"
+  run_only_file_size "$r14a" "$out14a"
+  if grep -Fq 'AGENT-GATE-CENSUS: 1 changed .rs file(s) measured against the thresholds' "$out14a"; then
+    ok "case14: control — a READABLE changed .rs file censuses as 1 measured"
+  else
+    bad "case14: control — expected the COUNT form for a readable changed file; got: $(grep -F 'AGENT-GATE-CENSUS:' "$out14a" | head -1)"
+  fi
+
+  mkrepo censusunread14 cqlite-core/src/big.rs 900 950 main; r14b="$REPO"
+  out14b="$tmp/censusunread14.out"
+  chmod 000 "$r14b/cqlite-core/src/big.rs" 2>/dev/null || true
+  run_only_file_size "$r14b" "$out14b"
+  c14_line=$(grep -F 'AGENT-GATE-CENSUS:' "$out14b" | head -1)
+  chmod 600 "$r14b/cqlite-core/src/big.rs" 2>/dev/null || true
+  case "$c14_line" in
+    *'AGENT-GATE-CENSUS: NOT-MEASURED'*'could not be line-counted'*)
+      ok "case14: a SELECTED but unreadable .rs file censuses as NOT-MEASURED, never as measured" ;;
+    *) bad "case14: expected the NOT-MEASURED form for an unreadable selected file; got: ${c14_line:-<no contract line>}" ;;
+  esac
+  # THE COLLAPSE, asserted explicitly: this is NOT the empty-subject state.
+  case "$c14_line" in
+    *NO-SUBJECT*) bad "case14: an unreadable selected file rendered as NO-SUBJECT — 'there was nothing to measure' and 'there was something I could not measure' have collapsed" ;;
+    *) ok "case14: it does NOT render as NO-SUBJECT — the empty-subject state keeps its own meaning" ;;
+  esac
+  # …and the numbers are the real ones, so the line cannot be a fixed string.
+  case "$c14_line" in
+    *'1 of 1 changed .rs file(s)'*)
+      ok "case14: the cause names the EXACT uncounted/selected counts (1 of 1), so the count is derived and not a canned message" ;;
+    *) bad "case14: expected '1 of 1 changed .rs file(s)' in the cause; got: ${c14_line:-<no contract line>}" ;;
+  esac
+fi
+
 # ---------------------------------------------------------------------------
 printf '\n%s\n' "----------------------------------------"
 printf 'file-size component log guard (#3401): %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
@@ -716,7 +783,7 @@ printf 'file-size component log guard (#3401): %d passed, %d failed, %d skipped\
 # precondition failure (an unusable repo, a missing mktemp) short-circuits its case's
 # remaining asserts and lands here too, so the message names both causes rather than
 # misattributing one as the other.
-EXPECTED_CHECKS=75
+EXPECTED_CHECKS=79
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"
