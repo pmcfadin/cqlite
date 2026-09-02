@@ -129,8 +129,8 @@ trap 'rm -rf "$tmp"' EXIT
 # BEFORE the optional Linux-only mold/perf groups rather than appended: that keeps ` perf=` the
 # last token on a Linux line, which is what case 9c-iv's sentinel position depends on, and keeps
 # one grammar serving both a Darwin line (ending at sccache-used) and a Linux one.
-ACCEL_CAP_RE='sccache-cap=([0-9]+\((pinned|default|inherited|stale|invalid|invalid-stale|unattributed)\)|unmeasured\((no-stats|unparsed|not-unique|no-binary|no-size)\)|na\(sccache-not-in-use\))'
-ACCEL_USED_RE='sccache-used=([0-9]+\(([0-9]+%|cap-zero)\)|unmeasured\((no-stats|unparsed|not-unique|no-binary|no-size)\)|na\(sccache-not-in-use\))'
+ACCEL_CAP_RE='sccache-cap=([0-9]+|unmeasured\((no-stats|unparsed|not-unique|no-binary|no-size|no-running-server|unattributed)\)|na\(sccache-not-in-use\))'
+ACCEL_USED_RE='sccache-used=([0-9]+\(([0-9]+%|cap-zero|pct-[a-z-]+)\)|unmeasured\((no-stats|unparsed|not-unique|no-binary|no-size)\)|na\(sccache-not-in-use\))'
 ACCEL_LINE_RE="^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn) $ACCEL_CAP_RE $ACCEL_USED_RE( mold=(linked|overridden|present-unconfigured|absent))?( perf=(ok|kptr-restricted|absent|unknown|paranoid-[0-9]+))?$"
 
 # accel_line_of <file>: print the FIRST `accelerators: ` line of <file> (rc 0), or
@@ -1075,273 +1075,50 @@ else
   grep '^accelerators:' "$tmp/health-na.txt" 2>/dev/null || cat "$tmp/health-na.txt"
 fi
 
-# 9c-v. sccache cache-size cap + occupancy tokens (issue #3727). THE TOKEN THIS SUITE EXISTS FOR:
-#       the fleet ran for months with SCCACHE_CACHE_SIZE declared in .agent-ami/profile.yaml,
-#       never persisted, and every gate SUMMARY silent about the cap actually in force. Each
-#       state is driven by the three #3727 hooks, so no sccache install and no PATH surgery is
-#       needed; the SOURCE classification additionally reads the real SCCACHE_CACHE_SIZE, which
-#       is safe precisely because MAX_BYTES short-circuits any contact with a server.
-#       Rows: <SCCACHE_CACHE_SIZE>|<max_bytes>|<default_bytes>|<expected cap token value>
-for scc_row in \
-  '30G|32212254720|10737418240|32212254720(pinned)' \
-  '|10737418240|10737418240|10737418240(default)' \
-  '|32212254720|10737418240|32212254720(inherited)' \
-  '30G|10737418240|10737418240|10737418240(stale)' \
-  '30GiB|10737418240|10737418240|10737418240(invalid)' \
-  '30GiB|32212254720|10737418240|32212254720(invalid-stale)' \
-  '30GiB|5368709120|10737418240|5368709120(invalid-stale-below)'; do
-  scc_val=${scc_row%%|*}; scc_rest=${scc_row#*|}
-  scc_max=${scc_rest%%|*}; scc_rest=${scc_rest#*|}
-  scc_dflt=${scc_rest%%|*}; scc_want=${scc_rest#*|}
-  # The SOURCE word alone names the file/label: the expected token carries parentheses, and a
-  # path built from it would be legal-but-hostile to read in a failure message.
-  scc_src=${scc_want#*\(}; scc_src=${scc_src%\)}
-  # Two rows share the `invalid-stale` TOKEN and differ only in whether the enforced cap is above
-  # or below sccache's default (issue #3727 roborev round 3, f2), so the row carries a
-  # `-below` suffix for the file/label and the expected token drops it.
-  scc_want=${scc_want/-below)/)}
-  scc_file="$tmp/scc-cap-$scc_src.txt"
-  # An UNSET row must not become an EMPTY one: set-but-empty is a distinct, measured sccache
-  # state (it is silently discarded), so the two are driven through different invocations.
-  if [ -n "$scc_val" ]; then
-    AGENT_GATE_SUMMARY_FILE="$scc_file" \
-      AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
-      AGENT_GATE_TEST_SCCACHE_MAX_BYTES="$scc_max" \
-      AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
-      AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES="$scc_dflt" \
-      SCCACHE_CACHE_SIZE="$scc_val" \
-      bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-cap-$scc_src.stderr"
-  else
-    env -u SCCACHE_CACHE_SIZE \
-      AGENT_GATE_SUMMARY_FILE="$scc_file" \
-      AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
-      AGENT_GATE_TEST_SCCACHE_MAX_BYTES="$scc_max" \
-      AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
-      AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES="$scc_dflt" \
-      bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
-  fi
-  if accel_token_is "$scc_file" sccache-cap "$scc_want"; then
-    ok "sccache-cap: SCCACHE_CACHE_SIZE='$scc_val' + server cap $scc_max -> sccache-cap=$scc_want"
-  else
-    bad "sccache-cap: expected sccache-cap=$scc_want for value '$scc_val' + server cap $scc_max"
-    grep '^accelerators:' "$scc_file" 2>/dev/null || cat "$scc_file"
-  fi
-  assert_accelerators "sccache-cap-$scc_src" "$scc_file"
-done
-
-# 9c-v-b. AND THE `invalid` LABEL MAY NOT BE USED WHERE THE RUNNING CAP IS NOT THE FALLBACK
-#         (issue #3727 roborev finding 3). Env-value validity and running-server provenance are
-#         two INDEPENDENT axes: `invalid` asserts that the discarded value fell back to the cap
-#         printed beside it, which is only true when that cap IS sccache's default. Where it is
-#         not, the label would invent a causal link AND invert the remedy — stopping the server
-#         would LOWER the cap, because the restart discards the value too. The row above pins the
-#         positive; this pins that the weaker label is not reused, which a token-equality assert
-#         cannot see on its own.
-scc_isw="$tmp/scc-cap-invalid-stale.txt"
-if accel_token_is "$scc_isw" sccache-cap '32212254720(invalid)' \
-   || accel_token_is "$scc_isw" sccache-cap '32212254720(stale)'; then
-  bad "sccache-cap: an invalid value beside a non-fallback running cap was labelled invalid/stale (the two axes collapsed)"
-else
-  ok "sccache-cap: an invalid value beside a NON-fallback running cap is neither invalid nor stale (axes kept apart)"
-fi
-# ... and the WARN must name the ordering hazard, not merely the state: an operator who stops the
-# server before fixing the value LOWERS the cap. A label without that sentence is a trap.
-if grep -q 'invalid-stale' "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null \
-   && grep -q 'FIX THE VALUE FIRST' "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null \
-   && grep -q 'would LOWER the cap' "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null; then
-  ok "sccache-cap: the invalid-stale WARN names the ordering hazard (stopping the server first LOWERS the cap)"
-else
-  bad "sccache-cap: the invalid-stale WARN does not warn that stopping the server first lowers the cap"
-  cat "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null | head -3
-fi
-
-# 9c-v-c. THE DIRECTION OF THE CAP CHANGE IS COMPUTED, NOT ASSUMED (issue #3727 roborev round 3).
-#         The invalid-stale WARN tells the operator that a bare `sccache --stop-server` replaces the
-#         enforced cap with sccache's FALLBACK; which WAY that moves depends on whether the running
-#         cap is above or below the default, and the text used to say "LOWER" unconditionally. Both
-#         rows above are re-read here, so a hard-coded direction reds whichever arm it is wrong for.
-if grep -q 'would LOWER the cap' "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null \
-   && ! grep -q 'would RAISE the cap' "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null; then
-  ok "sccache-cap: an enforced cap ABOVE sccache's default warns that a restart would LOWER it"
-else
-  bad "sccache-cap: the above-default arm did not warn about LOWERING the cap"
-  cat "$tmp/scc-cap-invalid-stale.stderr" 2>/dev/null | head -3
-fi
-if grep -q 'would RAISE the cap' "$tmp/scc-cap-invalid-stale-below.stderr" 2>/dev/null \
-   && ! grep -q 'would LOWER the cap' "$tmp/scc-cap-invalid-stale-below.stderr" 2>/dev/null; then
-  ok "sccache-cap: an enforced cap BELOW sccache's default warns that a restart would RAISE it (the direction is read from the comparison)"
-else
-  bad "sccache-cap: the below-default arm still claimed the restart would LOWER the cap"
-  cat "$tmp/scc-cap-invalid-stale-below.stderr" 2>/dev/null | head -3
-fi
-
-# 9c-v-d. NO HARDCODED DEFAULT, AND A MISSING ONE DISCARDS ONLY THE LABELS THAT NEED IT (issue
-#         #3727 roborev rounds 6 f2 and 7 f3). The default used to be a constant measured on sccache
-#         0.17.0 while the fleet installs sccache UNVERSIONED, so another build's default would have
-#         mislabelled `default` as `inherited` and `invalid` as `invalid-stale`, restart guidance
-#         included. It is measured per emit now — and round 7 corrected the ORDER: `pinned`/`stale`
-#         compare the CONFIGURED value against the ENFORCED cap and need no default at all, so a
-#         failed default probe must not discard provenance that WAS established. Both halves are
-#         pinned here: unset ⇒ unattributed (the label genuinely needs the default), valid value ⇒
-#         still classified.
-scc_nodflt="$tmp/scc-cap-nodefault.txt"
-env -u SCCACHE_CACHE_SIZE \
-  AGENT_GATE_SUMMARY_FILE="$scc_nodflt" \
-  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
-  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
-  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=unknown \
-  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-cap-nodefault.stderr"
-if accel_token_is "$scc_nodflt" sccache-cap '32212254720(unattributed)' \
-   && ! accel_token_is "$scc_nodflt" sccache-cap '32212254720(inherited)'; then
-  ok "sccache-cap: with the variable UNSET and sccache's default unmeasurable, the cap is (unattributed) — no constant stands in for it, and (inherited) is not guessed"
-else
-  bad "sccache-cap: an unknown default still produced a default-relative label"
-  grep '^accelerators:' "$scc_nodflt" 2>/dev/null || cat "$scc_nodflt"
-fi
-if [ ! -s "$tmp/scc-cap-nodefault.stderr" ] || ! grep -q 'WARN: sccache-cap' "$tmp/scc-cap-nodefault.stderr"; then
-  ok "sccache-cap: with the default unknown, no WARN quotes a default it does not have"
-else
-  bad "sccache-cap: a WARN fired while sccache's default was unknown"
-  cat "$tmp/scc-cap-nodefault.stderr" | head -3
-fi
-assert_accelerators "sccache-cap-nodefault" "$scc_nodflt"
-scc_nodflt2="$tmp/scc-cap-nodefault-pinned.txt"
-AGENT_GATE_SUMMARY_FILE="$scc_nodflt2" \
-  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
-  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
-  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=unknown SCCACHE_CACHE_SIZE=30G \
-  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
-if accel_token_is "$scc_nodflt2" sccache-cap '32212254720(pinned)'; then
-  ok "sccache-cap: a VALID configured value still classifies as (pinned) with sccache's default unmeasurable — the missing default discards only default-relative labels"
-else
-  bad "sccache-cap: a failed default probe discarded provenance that was established (round 7 f3)"
-  grep '^accelerators:' "$scc_nodflt2" 2>/dev/null || cat "$scc_nodflt2"
-fi
-
-# 9c-v-e. THE NEAR-CAPACITY REMEDY MUST NOT CONTRADICT THE NEIGHBOURING WARN (issue #3727 roborev
-#         round 7, f2). In the migration case this whole issue is about — the environment already at
-#         50G while the running server still enforces 10G — the `stale` WARN correctly says to
-#         restart WITHOUT editing the value, and the fill WARN used to say "raise
-#         SCCACHE_CACHE_SIZE" one line later. Two adjacent warnings giving opposite advice is worse
-#         than one, so the remedy is derived from the SOURCE.
-scc_mig="$tmp/scc-fill-stale.txt"
-AGENT_GATE_SUMMARY_FILE="$scc_mig" \
-  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
-  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=10737418240 AGENT_GATE_TEST_SCCACHE_USED_BYTES=10737418240 \
-  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=10737418240 SCCACHE_CACHE_SIZE=50G \
-  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-fill-stale.stderr"
-if grep -q 'Do NOT edit the value' "$tmp/scc-fill-stale.stderr" 2>/dev/null \
-   && ! grep -q 'Raise SCCACHE_CACHE_SIZE' "$tmp/scc-fill-stale.stderr" 2>/dev/null; then
-  ok "sccache-cap: at capacity with a STALE server the fill WARN says restart, and does NOT contradict it by telling the operator to raise a value that is already larger"
-else
-  bad "sccache-cap: the fill WARN contradicted the stale WARN in the migration case"
-  grep 'WARN' "$tmp/scc-fill-stale.stderr" 2>/dev/null | head -2
-fi
-scc_small="$tmp/scc-fill-pinned.txt"
-AGENT_GATE_SUMMARY_FILE="$scc_small" \
-  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
-  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=32212254720 \
-  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=10737418240 SCCACHE_CACHE_SIZE=30G \
-  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-fill-pinned.stderr"
-if grep -q 'Raise SCCACHE_CACHE_SIZE' "$tmp/scc-fill-pinned.stderr" 2>/dev/null \
-   && ! grep -q 'Do NOT edit the value' "$tmp/scc-fill-pinned.stderr" 2>/dev/null; then
-  ok "sccache-cap: at capacity with a PINNED cap the remedy IS to raise the value (the source-aware branch keeps the useful advice)"
-else
-  bad "sccache-cap: a genuinely too-small pinned cap lost its raise-the-value advice"
-  grep 'WARN' "$tmp/scc-fill-pinned.stderr" 2>/dev/null | head -2
-fi
-
-# 9c-v-f. "THE SHELL CANNOT CLASSIFY THIS" IS NOT "SCCACHE DISCARDS THIS" (issue #3727 roborev
-#         round 8, f2 — retiring a residual this suite declared twice instead of fixing). The
-#         classifier bounded the digits it would multiply and returned INVALID for anything longer,
-#         but sccache does NOT uniformly discard those: measured, a 21-digit value falls back to the
-#         default while a 19-digit one WRAPS and is ACCEPTED (9999999999999999999G ->
-#         2484298143374508032). So an accepted cap was being labelled `invalid`/`invalid-stale`, with
-#         the wrong remediation attached. Such values now report unclassified provenance and no WARN.
-scc_wrap="$tmp/scc-cap-unclassifiable.txt"
-AGENT_GATE_SUMMARY_FILE="$scc_wrap" \
-  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
-  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=2484298143374508032 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1 \
-  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=10737418240 SCCACHE_CACHE_SIZE=9999999999999999999G \
-  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-cap-unclassifiable.stderr"
-if accel_token_is "$scc_wrap" sccache-cap '2484298143374508032(unattributed)' \
-   && ! accel_token_is "$scc_wrap" sccache-cap '2484298143374508032(invalid)' \
-   && ! accel_token_is "$scc_wrap" sccache-cap '2484298143374508032(invalid-stale)'; then
-  ok "sccache-cap: a value bash cannot classify (19 digits, which sccache WRAPS and accepts) reports unclassified provenance, never (invalid)"
-else
-  bad "sccache-cap: an sccache-ACCEPTED cap was labelled invalid because bash could not multiply it"
-  grep '^accelerators:' "$scc_wrap" 2>/dev/null || cat "$scc_wrap"
-fi
-if [ ! -s "$tmp/scc-cap-unclassifiable.stderr" ] || ! grep -q 'WARN: sccache-cap' "$tmp/scc-cap-unclassifiable.stderr"; then
-  ok "sccache-cap: no WARN prescribes a remedy for a value whose effect this gate could not establish"
-else
-  bad "sccache-cap: a WARN gave remediation for an unclassifiable value"
-  cat "$tmp/scc-cap-unclassifiable.stderr" | head -3
-fi
-assert_accelerators "sccache-cap-unclassifiable" "$scc_wrap"
-
-# 9c-v-g. THE DEFAULT PROBE IS ISOLATED FROM THE INHERITED ENVIRONMENT (issue #3727 roborev round
-#         10, f1), and THE FILL PERCENTAGE CANNOT OVERFLOW (f3). Two independent asserts, both
-#         behavioural.
+# 9c-v. THE CAP TOKEN ITSELF (issue #3727). THE TOKEN THIS SUITE EXISTS FOR: the fleet ran for
+#       months with SCCACHE_CACHE_SIZE declared in .agent-ami/profile.yaml, never persisted, and
+#       every gate SUMMARY silent about the cap actually in force. An ATTRIBUTED reading renders
+#       the MEASURED BYTES and nothing else.
 #
-#         ISOLATION: the probe used to unset only SCCACHE_CACHE_SIZE, so any other inherited
-#         SCCACHE_* could shape sccache's reported default and a CONFIGURED cap could then read as
-#         `(default)`. The bootstrap oracle has blanket-unset since round 1; the gate's probe had
-#         not. Driven with a PATH-shim sccache that answers 7516192768 whenever it sees ANY
-#         SCCACHE_* beyond the three the probe itself sets, and 10737418240 otherwise — so a leak
-#         makes the default 7516192768, the hooked cap 10737418240 then differs from it, and an
-#         UNSET variable classifies as `(inherited)` instead of `(default)`. The shim is the only
-#         way to test this: on real sccache 0.17.0 no SCCACHE_* other than the cap itself was
-#         measured to move that number, so the fix is defence against a class rather than a repair
-#         of a demonstrated leak, and a behavioural test needs a tool that DOES leak.
-scc_shimdir="$tmp/scc-dflt-shim"; mkdir -p "$scc_shimdir"
-cat > "$scc_shimdir/sccache" <<'SCCSHIM'
-#!/usr/bin/env bash
-leak=0
-for n in $(compgen -e 2>/dev/null || true); do
-  case "$n" in
-    SCCACHE_DIR|SCCACHE_SERVER_PORT|SCCACHE_CACHE_SIZE) ;;
-    SCCACHE_*) leak=1 ;;
-  esac
-done
-mx=10737418240; [ "$leak" = 1 ] && mx=7516192768
-printf '{"stats":{},"cache_location":"Local disk: \"%s\"","cache_size":null,"max_cache_size":%s,"version":"0.17.0"}
-'   "${SCCACHE_DIR:-/none}" "$mx"
-SCCSHIM
-chmod +x "$scc_shimdir/sccache"
-scc_iso="$tmp/scc-cap-probe-isolated.txt"
-env -u SCCACHE_CACHE_SIZE \
-  AGENT_GATE_SUMMARY_FILE="$scc_iso" PATH="$scc_shimdir:$PATH" \
-  SCCACHE_GHA_ENABLED=true SCCACHE_CONF="$tmp/nonexistent-sccache.toml" \
+#       REDUCED WITH THE CODE (lead ruling req-3727-w4): the 7-state provenance suffix
+#       (pinned/default/inherited/stale/invalid/invalid-stale/unattributed), the value-grammar
+#       classification, the probed default and the four remediation WARNs are GONE, and the cases
+#       that asserted them are DELETED rather than softened — a test asserting a state that no
+#       longer exists must go, not be weakened into vacuity. What is still pinned here is every
+#       property that is a MEASUREMENT: a byte count only when a running server was proven to
+#       answer it (9c-x), the unmeasurable renderings (9c-vi), `na` (9c-vii), the occupancy and its
+#       overflow-safe percentage (9c-viii, 9c-v-b), the independence of health and capacity (9c-ix),
+#       and that a null size cannot move the cap (9c-xi).
+scc_cap="$tmp/scc-cap-measured.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_cap" \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
-  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=10737418240 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
-if accel_token_is "$scc_iso" sccache-cap '10737418240(default)' \
-   && ! accel_token_is "$scc_iso" sccache-cap '10737418240(inherited)'; then
-  ok "sccache-cap: the default probe is isolated from inherited SCCACHE_* — a leaking environment does not turn (default) into (inherited)"
+if accel_token_is "$scc_cap" sccache-cap '32212254720' \
+   && accel_token_is "$scc_cap" sccache-used '1375141619(4%)'; then
+  ok "sccache-cap: an attributed reading renders the measured bytes, with no provenance suffix"
 else
-  bad "sccache-cap: an inherited SCCACHE_* reached the default probe and mislabelled the provenance"
-  grep '^accelerators:' "$scc_iso" 2>/dev/null || cat "$scc_iso"
+  bad "sccache-cap: expected a bare measured byte count (and 4% occupancy)"
+  grep '^accelerators:' "$scc_cap" 2>/dev/null || cat "$scc_cap"
 fi
+assert_accelerators "sccache-cap-measured" "$scc_cap"
 
-# f3: `used * 100` overflows bash's signed 64-bit arithmetic for the large caps round 8 stopped
-#     rejecting — and the failure direction is the SILENT one, a wrapped percentage below 95 that
-#     SUPPRESSES the near-capacity warning. The two decisions are coupled, so the case pins both the
-#     percentage and the warning.
+# 9c-v-b. THE PERCENTAGE MUST NOT OVERFLOW (issue #3727 roborev round 10, f3). `used * 100`
+#         overflows a signed 64-bit shell integer above ~92 PiB, which silently produced a
+#         NEGATIVE percentage. 4 EiB in both, so the multiplication is over the bound and the
+#         other branch must run. The near-capacity WARN this case also used to assert is gone
+#         with the rest of the advice text; the arithmetic is a measurement and stays.
 scc_big="$tmp/scc-used-hugecap.txt"
 AGENT_GATE_SUMMARY_FILE="$scc_big" \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
   AGENT_GATE_TEST_SCCACHE_MAX_BYTES=4611686018427387904 \
   AGENT_GATE_TEST_SCCACHE_USED_BYTES=4611686018427387904 \
-  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=10737418240 SCCACHE_CACHE_SIZE=4T \
-  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/scc-used-hugecap.stderr"
-if accel_token_is "$scc_big" sccache-used '4611686018427387904(100%)' \
-   && grep -q 'AT/NEAR CAPACITY' "$tmp/scc-used-hugecap.stderr" 2>/dev/null; then
-  ok "sccache-used: a 4 EiB cache at its 4 EiB cap renders 100% and still WARNS (used*100 no longer overflows into a suppressed warning)"
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_big" sccache-used '4611686018427387904(100%)'; then
+  ok "sccache-used: a 4 EiB cache at its 4 EiB cap renders 100% (used*100 does not overflow into a negative)"
 else
-  bad "sccache-used: a huge cap produced a wrong percentage or silently lost its near-capacity WARN"
+  bad "sccache-used: a huge cap produced a wrong percentage"
   grep '^accelerators:' "$scc_big" 2>/dev/null || cat "$scc_big"
-  head -2 "$tmp/scc-used-hugecap.stderr" 2>/dev/null
 fi
 assert_accelerators "sccache-used-hugecap" "$scc_big"
 
@@ -1401,10 +1178,13 @@ else
   bad "sccache-used: expected sccache-used=10737418240(100%) for a cache at its cap"
   grep '^accelerators:' "$scc_full" 2>/dev/null || cat "$scc_full"
 fi
-if grep -q 'WARN:.*sccache' "$tmp/scc-used-full.stderr"; then
-  ok "sccache-used: a full cache emits a LOUD WARN (eviction/thrash is actionable)"
+# THE NEAR-CAPACITY WARN IS GONE, DELIBERATELY (lead ruling req-3727-w4): a threshold plus a
+# remedy is an interpretation of the number, and the number is on the line. Asserted the other
+# way round now — the capacity path must emit NO advice — so nobody reintroduces it by reflex.
+if ! grep -q 'WARN:.*sccache' "$tmp/scc-used-full.stderr"; then
+  ok "sccache-used: a full cache reports 100% and emits NO remediation WARN (reporting stays, advising goes)"
 else
-  bad "sccache-used: no WARN for a cache at 100% of its cap"
+  bad "sccache-used: a capacity remedy WARN is back — the ruling removed the advice layer"
   echo "------- stderr -------"; cat "$tmp/scc-used-full.stderr"; echo "----------------------"
 fi
 scc_zero="$tmp/scc-used-zero.txt"
@@ -1453,17 +1233,20 @@ for scc_attr in no unknown; do
   AGENT_GATE_SUMMARY_FILE="$scc_unattr" \
     AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
     AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=1375141619 \
-    AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=10737418240 AGENT_GATE_TEST_SCCACHE_ATTRIBUTED="$scc_attr" \
+    AGENT_GATE_TEST_SCCACHE_ATTRIBUTED="$scc_attr" \
     SCCACHE_CACHE_SIZE=30G \
     bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
-  if accel_token_is "$scc_unattr" sccache-cap '32212254720(unattributed)'; then
-    ok "sccache-cap: attribution '$scc_attr' renders (unattributed), never (pinned)"
+  scc_attr_why=unattributed; [ "$scc_attr" = no ] && scc_attr_why=no-running-server
+  if accel_token_is "$scc_unattr" sccache-cap "unmeasured($scc_attr_why)"; then
+    ok "sccache-cap: attribution '$scc_attr' renders unmeasured($scc_attr_why) — a byte count needs a server proven to answer it"
   else
-    bad "sccache-cap: attribution '$scc_attr' did not render (unattributed)"
+    bad "sccache-cap: attribution '$scc_attr' did not render unmeasured($scc_attr_why)"
     grep '^accelerators:' "$scc_unattr" 2>/dev/null || cat "$scc_unattr"
   fi
-  if accel_token_is "$scc_unattr" sccache-cap '32212254720(pinned)'; then
-    bad "sccache-cap: an unattributed cap read as (pinned) — enforcement asserted with no server proven"
+  # THE FALSE CLAIM THIS EXISTS TO STOP, asserted directly: the number that WAS read must not
+  # appear as the cap. This is the one honesty the ruling kept when it removed the classifier.
+  if grep -q 'sccache-cap=32212254720' "$scc_unattr" 2>/dev/null; then
+    bad "sccache-cap: an unattributed reading was reported as a cap — enforcement asserted with no server proven"
   fi
   assert_accelerators "sccache-cap-unattributed-$scc_attr" "$scc_unattr"
 done
@@ -1479,11 +1262,10 @@ scc_nullsize="$tmp/scc-cap-nullsize.txt"
 AGENT_GATE_SUMMARY_FILE="$scc_nullsize" \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
   AGENT_GATE_TEST_SCCACHE_MAX_BYTES=32212254720 AGENT_GATE_TEST_SCCACHE_USED_BYTES=null \
-  AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES=10737418240 SCCACHE_CACHE_SIZE=30G \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
-if accel_token_is "$scc_nullsize" sccache-cap '32212254720(pinned)' \
+if accel_token_is "$scc_nullsize" sccache-cap '32212254720' \
    && accel_token_is "$scc_nullsize" sccache-used 'unmeasured(no-size)'; then
-  ok "sccache-cap: a null cache_size on an ATTRIBUTED cap stays (pinned) and only the occupancy is unmeasured(no-size)"
+  ok "sccache-cap: a null cache_size on an ATTRIBUTED cap leaves the measured bytes alone and only the occupancy is unmeasured(no-size)"
 else
   bad "sccache-cap: a null cache_size leaked into the cap's classification (the two axes are collapsed again)"
   grep '^accelerators:' "$scc_nullsize" 2>/dev/null || cat "$scc_nullsize"
@@ -5642,7 +5424,18 @@ fi
 # preserved rather than
 # widened. Setting the floor AT the accounted figure would remove that margin, which is what
 # absorbs the host-conditional verdicts enumerated above.
-ASSERT_FLOOR=455
+# 455 -> 429 on the lead's ruling req-3727-w4 (SPLIT, option A). The provenance classifier, the
+# value-grammar map, the probed default and the four remediation WARNs are REMOVED from this PR,
+# and the cases asserting them are DELETED rather than softened. LOWERED DELIBERATELY, and the
+# arithmetic is stated so it cannot be mistaken for accommodating a break: a real run reports
+# `accounted: 439` (was 465), a difference of 26 verdicts, all of them assertions about states
+# that no longer exist — the 5 cap-source rows x2, the invalid label, the direction, the
+# no-hardcoded-default pair, the near-capacity remedy, the unclassifiable-value pair, the
+# probe-isolation assert and their grammar checks. The deliberate ~10 margin below the accounted
+# figure is PRESERVED (439 - 10 = 429), never widened: a floor set AT the count would red on the
+# host-conditional verdicts enumerated above, and a floor further below stops detecting a
+# silently-dying section, which is the only thing it is for.
+ASSERT_FLOOR=429
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

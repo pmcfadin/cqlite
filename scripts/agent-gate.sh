@@ -1083,155 +1083,49 @@ _sccache_health() {
 # WHY THIS IS ON THE LINE AT ALL. `.agent-ami/profile.yaml` declared
 # SCCACHE_CACHE_SIZE and nothing ever persisted it, so the fleet's effective cap was
 # sccache's 10 GiB default for months and NO ARTIFACT SAID SO — the same shape as
-# #3414's `max-concurrency=N(pinned|default)`, and the same fix: report the
-# EFFECTIVE value, with its provenance, in every pasted block.
+# #3414's `max-concurrency=N(pinned|default)`, and the same fix: put the number in
+# the pasted block. Two tokens, and BOTH REPORT MEASURED BYTES:
+#     sccache-cap=<bytes> | unmeasured(<why>) | na(sccache-not-in-use)
+#     sccache-used=<bytes>(<N>%) | unmeasured(<why>) | na(sccache-not-in-use)
 #
-# THE READING IS OF THE RUNNING SERVER, NOT OF THE ENV VAR. sccache reads
-# SCCACHE_CACHE_SIZE at SERVER STARTUP, so the cap is fixed by whichever process
-# started the server and no later client can change it (demonstrated:
-# `env -u SCCACHE_CACHE_SIZE sccache --start-server` then `--show-stats` reports
-# 10 GiB from a session exporting 30G). A token derived from the variable would
-# therefore have printed `30G` on every box in the fleet while the cache evicted at
-# 10 GiB. The variable is consulted ONLY to classify the source, because `pinned`
-# vs `stale` vs `invalid` IS the difference between what the variable says and what
-# the server does.
+# DELIBERATELY NOT A PROVENANCE CLASSIFIER (lead ruling req-3727-w4, option A). An
+# earlier form of this block appended a 7-state source suffix
+# (pinned/default/inherited/stale/invalid/invalid-stale/unattributed), reimplemented
+# sccache's value grammar to compute it, carried a probed default constant, and
+# emitted four remediation WARNs. All of that INTERPRETED the number rather than
+# reporting it, it is where ten review rounds landed, and it is removed. The
+# state-combination knowledge is preserved in the follow-up issue rather than in
+# code. What survives is the rule that made it worth having: NEVER CLAIM A CAP THAT
+# WAS NOT MEASURED.
 #
-# THE JSON FORM, NOT THE TEXT LINE — a MEASURED requirement, not a preference.
-# `--show-stats` renders the cap for humans and the rendering is LOSSY: 1536M
-# (1610612736 bytes) prints as `2 GiB`, 1025M prints as `1 GiB`. `--stats-format
-# json` carries `max_cache_size` and `cache_size` as exact byte integers. #3400's
-# rule about cargo-output parses does not apply MECHANICALLY (sccache is not cargo;
-# CARGO_TERM_COLOR does not reach it, and both output forms measured 0 ESC bytes on
-# this fleet) but applies in SPIRIT, which is why the numeric field is read instead
-# of a rendered status string — and its second half is honoured literally: read by
-# CAPTURE, never a pipe whose leftmost rc is discarded, and require EXACTLY ONE
-# match rather than trusting a first hit. The leading double-quote in the pattern is
-# load-bearing: it is what stops `"cache_size":` matching inside `"max_cache_size":`
-# (measured: one match each).
-#
-# THE SOURCE QUALIFIER NEEDS A VALUE->BYTES MAP, AND THIS IS THE ONE PLACE THAT
-# CANNOT ASK SCCACHE FOR IT. The certifying path (section 5b2 of
-# scripts/bootstrap-agent-machine.sh) asks an ISOLATED THROWAWAY SERVER and never
-# reimplements the grammar, because a certification may not rest on a second
-# implementation. A SUMMARY emit cannot do that: starting a server costs seconds and
-# mutates global state, and there are up to 7 emits per run. So
-# _sccache_value_bytes below applies the MEASURED grammar table (sccache 0.17.0)
-# for CLASSIFICATION ONLY:
-#     30G -> 30 GiB      30g -> 30 GiB      500M -> 500 MiB     1T -> 1 TiB
-#     30GiB -> DISCARDED (10 GiB default)   30GB -> DISCARDED   "30 G" -> DISCARDED
-#     abc/empty/-5G/21-digits -> DISCARDED  100 -> 100 *BYTES*  0G -> 0 bytes
-# What that map can be wrong about is bounded ON PURPOSE: the BYTES printed always
-# come from sccache's own JSON, so a misclassification can only mislabel the
-# PROVENANCE of a measured number and can never manufacture one. Anyone reading
-# this token as a certification of the cap should read `sccache-cap:` from
-# bootstrap instead, which is the check that asks sccache.
-#
-# AND `max_cache_size` IS ONLY THE *SERVER'S* CAP WHILE A SERVER IS ANSWERING —
-# MEASURED, and it is why the sixth source token exists. With no server up,
-# `--show-stats` does NOT start one (measured: nothing listening afterwards, an
-# empty SCCACHE_DIR, and a following `--stop-server` reports "couldn't connect");
-# it answers from the CLIENT's own resolution of SCCACHE_CACHE_SIZE, so
-# `SCCACHE_CACHE_SIZE=7G` reads `"max_cache_size":7516192768` with no server
-# anywhere. Reporting that as `(pinned)` would assert enforcement by a server that
-# does not exist — this issue's own defect, one layer in.
-#
-# `"cache_size":null` IS NOT THE TELL, AND BELIEVING IT WAS COST A ROUND. Measured
-# afterwards: a RUNNING server with an EMPTY cache reports a null size too, and
-# the two payloads are otherwise IDENTICAL (a field-by-field diff of a no-server
-# read against a freshly-started-at-40G read differs only in the values). So
-# attribution is decided by a DIFFERENTIAL, affirmatively: read the cap twice, the
-# second time with SCCACHE_CACHE_SIZE forced to a sentinel whose bytes differ from
-# the first reading. A running server IGNORES the client's env (measured: a server
-# started at 40G answers 42949672960 to a client with the variable unset), so two
-# EQUAL readings mean the number is the server's, and a reading that MOVES means
-# the client is resolving our own env. Unequal, or unmeasurable, renders
-# `<bytes>(unattributed)`: the number is a cap that WILL apply, not one proven to
-# be in force. Named for what is ESTABLISHED rather than `no-server`, because a
-# non-disk backend (the GHA cache in CI) could also defeat the differential and
-# `no-server` would then be a claim we did not measure.
+# THAT ONE HONESTY IS LOAD-BEARING AND STAYS (it is a measurement, not a
+# classification — two states, measured or not). Measured: `sccache --show-stats`
+# NEVER STARTS A SERVER, and with no server running the CLIENT answers
+# `max_cache_size` FROM ITS OWN ENVIRONMENT. So a number is only a cap IN FORCE if a
+# running server produced it, and `cache_size: null` cannot tell the two apart (a
+# running server with an empty cache reports null too — measured). Attribution is
+# therefore a DIFFERENTIAL: read the cap twice, the second time with a sentinel
+# SCCACHE_CACHE_SIZE in the client's environment. A running server's answer does not
+# move; a client resolving its own env does. Unattributed => `unmeasured`, never a
+# byte count.
 #
 # Test hooks (self-test, issue #3727): AGENT_GATE_TEST_SCCACHE_MAX_BYTES /
-# AGENT_GATE_TEST_SCCACHE_USED_BYTES / AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES force
-# the three measured inputs, so every state asserts deterministically with no
-# sccache installed. Each accepts digits, or the literal `unmeasured`; ANYTHING ELSE
-# IS TREATED AS `unmeasured`, NEVER AS 0 — a mis-set hook must not manufacture a
-# measured-looking value. The DEFAULT hook additionally accepts the literal `unknown`,
-# which forces the "sccache's own default could not be measured" branch on a box where
-# the probe would succeed. The USED hook also accepts `null` (a server reporting no
-# cache size), and AGENT_GATE_TEST_SCCACHE_ATTRIBUTED=yes|no|unknown forces the
-# attribution differential's outcome — a separate axis from the size, since the
-# measurement above showed a null size says nothing about whether a server answered.
-#
-# ONE PROBE PER EMIT, AND IT LIVES IN accelerators_line'S OWN BODY. Every call site
-# invokes `$(accelerators_line)`, so a script-scope memo lands in a subshell and is
-# discarded (the same fact the perf block records below). Two `$( )` token functions
-# would therefore mean two sccache execs per emit; instead _sccache_cap_probe
-# assigns into the variables both renderers read. Cost measured: 12 ms.
+# AGENT_GATE_TEST_SCCACHE_USED_BYTES substitute the two readings and
+# AGENT_GATE_TEST_SCCACHE_ATTRIBUTED substitutes the differential's verdict, so every
+# rendering is reachable hermetically with no sccache on the box. A hook that is set
+# but not a plain unsigned integer is REFUSED (an `unmeasured(bad-test-hook)`), never
+# silently treated as absent — a typo in a fixture must not look like a real reading.
+_SCC_CAP_KIND=""     # bytes | unmeasured | na
+_SCC_CAP_BYTES=""
+_SCC_CAP_WHY=""
+_SCC_USED_KIND=""
+_SCC_USED_BYTES=""
+_SCC_USED_PCT=""
+_SCC_USED_WHY=""
 
-# THERE IS NO HARDCODED DEFAULT (issue #3727 roborev round 6, f2 — and it was this issue's
-# own declared residual from round 1, found independently, which is the system working: a
-# declared residual is still a defect if it can MISLABEL). A constant `10737418240` was
-# right for sccache 0.17.0 and this fleet installs sccache UNVERSIONED, so a build with a
-# different default would have reported `(inherited)` for a genuinely-default box and
-# `(invalid-stale)` — with its restart-direction guidance — for a plain `(invalid)` one.
-#
-# It is MEASURED instead, per emit, and it is cheap for the reason this file records above:
-# `--show-stats` does NOT start a server, so asking sccache what it would use with no
-# SCCACHE_CACHE_SIZE set costs ONE client call (~10 ms) against a private, empty
-# SCCACHE_DIR and a private port. Where that cannot be established the provenance labels
-# that DEPEND on it are not produced at all — the cap renders `(unattributed)`, which is
-# exactly what it says: this gate could not attribute the number. Never a constant standing
-# in for a measurement.
-# THE PROBE IS ISOLATED THE WAY BOOTSTRAP'S ORACLE IS — BLANKET-UNSET, NOT ONE VARIABLE (issue
-# #3727 roborev round 10, f1). This unset only SCCACHE_CACHE_SIZE, so any other inherited
-# SCCACHE_* could shape the answer and a configured cap could then read as `(default)`. The
-# bootstrap oracle has blanket-unset since round 1 and records the reason — a backend variable in
-# a future sccache would be missed by any list written today — and the gate's probe never got the
-# same treatment. It does now: every exported SCCACHE_* is cleared (derived from `compgen -e`,
-# never a list), plus BASH_ENV/ENV, plus HOME and XDG_CONFIG_HOME pointed at the empty probe
-# directory so per-user config cannot reach it either.
-#
-# MEASURED, and recorded because it qualifies the finding rather than the fix: the specific
-# `SCCACHE_CONF` route roborev names did NOT reproduce on sccache 0.17.0 — a config file with
-# `[cache.disk] size = 7516192768` left `max_cache_size` at the 10 GiB default. So this is
-# defence against a class, not a repair of a demonstrated leak. It costs one array and nothing at
-# runtime; a system-wide config is deliberately NOT isolated, because a value every context would
-# see IS the default this token means.
-_sccache_default_probe() {   # -> prints the byte count, or nothing
-  local __d __port __json __hits __n
-  local -a __unset=()
-  command -v sccache >/dev/null 2>&1 || return 1
-  __d=$(mktemp -d "${TMPDIR:-/tmp}/cqlite-sccache-dflt.XXXXXX" 2>/dev/null) || return 1
-  for __n in $(compgen -e 2>/dev/null || true); do
-    case "$__n" in SCCACHE_*) __unset+=(-u "$__n") ;; esac
-  done
-  __port=$(( 40000 + (($$ + 5077) % 20000) ))
-  __json=$(env ${__unset[@]+"${__unset[@]}"} -u BASH_ENV -u ENV \
-    HOME="$__d" XDG_CONFIG_HOME="$__d" \
-    SCCACHE_DIR="$__d" SCCACHE_SERVER_PORT="$__port" \
-    sccache --show-stats --stats-format json 2>/dev/null)
-  # The SAME isolation assert the bootstrap oracle uses: a reading answered by somebody
-  # else's server says nothing about sccache's own default. Matched against the RAW JSON
-  # (its inner quotes are escaped).
-  case "$__json" in
-    *"$__d"*) ;;
-    *) rm -rf -- "$__d" 2>/dev/null; return 1 ;;
-  esac
-  __hits=$(printf '%s\n' "$__json" | grep -o '"max_cache_size":[0-9][0-9]*' 2>/dev/null)
-  rm -rf -- "$__d" 2>/dev/null
-  [ -n "$__hits" ] || return 1
-  [ "$(printf '%s\n' "$__hits" | grep -c '^' 2>/dev/null)" = 1 ] || return 1
-  printf '%s' "${__hits##*:}"
-}
-
-# _sccache_hook_uint <raw> <outvar>: read one test hook. Digits -> the value (rc 0).
-# The literal `unmeasured` -> empty (rc 1: simulate an unreadable probe). ANYTHING
-# ELSE -> empty as well, deliberately: a mis-set hook must render `unmeasured(...)`,
-# NEVER 0. Unset is the same as `unmeasured` here; the caller distinguishes them by
-# checking for a non-empty raw value BEFORE calling. The USED hook additionally
-# accepts the literal `null`, handled by its caller: that is a DIFFERENT measured
-# state (a null `cache_size`, i.e. a cap nothing running is proven to enforce) and
-# it must be assertable without a real sccache, like every other state here.
+# _sccache_hook_uint <raw> <outvar>: read one test hook. Digits -> the value (rc 0);
+# anything else, INCLUDING empty, clears the outvar and returns 1 — so a fixture word
+# like `unmeasured` or `null` models an unreadable reading rather than a numeric 0.
 _sccache_hook_uint() {
   local __raw="$1" __out="$2"
   case "$__raw" in
@@ -1241,115 +1135,52 @@ _sccache_hook_uint() {
   return 0
 }
 
-# _sccache_json_uint <json> <field> <outvar>: extract `"<field>":<digits>` from a
-# captured JSON payload, requiring EXACTLY ONE match. rc 0 = one match, 1 = no match
-# (`unparsed`), 2 = more than one (`not-unique`). The leading double-quote in the
-# pattern is what keeps `cache_size` out of `max_cache_size` (see above).
+# _sccache_json_uint <json> <field> <outvar>: extract `"<field>":<digits>` from
+# sccache's own JSON. THREE-VALUED: 0 = one match (the value), 1 = no match, 2 = more
+# than one — because two matches mean the payload is not the shape this parser
+# assumes, and picking the first would be a guess. The leading double-quote in the
+# pattern is load-bearing: without it `max_cache_size` also matches inside a longer
+# key. Not a general JSON parser and does not pretend to be one: a null, absent or
+# duplicated field is a NAMED refusal, never a 0.
 _sccache_json_uint() {
-  local __json="$1" __field="$2" __out="$3" __hits __n
-  eval "$__out="
-  __hits=$(printf '%s\n' "$__json" | grep -o "\"$__field\":[0-9][0-9]*" 2>/dev/null)
-  [ -n "$__hits" ] || return 1
-  __n=$(printf '%s\n' "$__hits" | grep -c '^' 2>/dev/null)
-  [ "$__n" = 1 ] || return 2
-  eval "$__out=\${__hits##*:}"
+  local json="$1" field="$2" out="$3" hits="" n=0
+  hits=$(printf '%s\n' "$json" | grep -o "\"$field\":[0-9][0-9]*" 2>/dev/null) || true
+  [ -n "$hits" ] || return 1
+  n=$(printf '%s\n' "$hits" | grep -c '^' 2>/dev/null) || true
+  [ "$n" = 1 ] || return 2
+  hits=${hits##*:}
+  case "$hits" in ''|*[!0-9]*) return 1 ;; esac
+  eval "$out=\$hits"
   return 0
 }
 
-# _sccache_value_bytes <value> <outvar>: the bytes SCCACHE_CACHE_SIZE's <value>
-# means. rc 0 = sccache ACCEPTS it (<outvar> = bytes); rc 1 = sccache SILENTLY
-# DISCARDS it and falls back to its own default. Classification only — see the
-# block comment above for why this map is allowed to exist here and what it may
-# never be used for.
-# THREE-VALUED, because "sccache would discard this" and "this shell cannot work out what
-# sccache does with it" are different facts (issue #3727 roborev round 8, f2 — and the
-# retirement of a residual this file declared twice rather than fixed):
-#   rc 0 = sccache ACCEPTS it, <outvar> = bytes
-#   rc 1 = SYNTACTICALLY invalid, so sccache discards it (measured: `30GiB`, `30GB`, `30 G`,
-#          `abc`, empty, `-5G` all fall back to the default)
-#   rc 2 = the shape is valid but UNCLASSIFIABLE HERE — the digits exceed what bash can
-#          multiply reliably. Measured, sccache does NOT simply discard those: a 21-digit
-#          value falls back to the default (10737418240) while a 19-digit one WRAPS and is
-#          accepted (`9999999999999999999G` -> 2484298143374508032). So a caller must not
-#          call this `invalid`; it has to report an unclassified provenance, which is the
-#          same rule the rest of this token follows — never assert a state you have not
-#          established. Returning 1 here mislabelled an ACCEPTED cap as `invalid`/
-#          `invalid-stale` and handed the operator the wrong remediation.
-_sccache_value_bytes() {
-  local __v="$1" __out="$2" __num __suf __shift __bytes
-  eval "$__out="
-  [[ $__v =~ ^([0-9]+)([KkMmGgTt]?)$ ]] || return 1
-  __num="${BASH_REMATCH[1]}"; __suf="${BASH_REMATCH[2]}"
-  # Bash arithmetic wraps silently rather than erroring, so the literal is bounded first and
-  # the shift verified afterwards — but BOTH are `unclassifiable`, not `invalid`.
-  [ "${#__num}" -le 18 ] || return 2
-  case "$__suf" in
-    K|k) __shift=10 ;; M|m) __shift=20 ;; G|g) __shift=30 ;; T|t) __shift=40 ;; *) __shift=0 ;;
-  esac
-  # 10#: a leading zero would otherwise be read as OCTAL by bash arithmetic, so
-  # `030G` would silently become 24 GiB.
-  __bytes=$(( (10#$__num) << __shift ))
-  if [ "$__bytes" -lt 0 ] || [ "$(( __bytes >> __shift ))" != "$(( 10#$__num ))" ]; then
-    return 2
-  fi
-  eval "$__out=\$__bytes"
-  return 0
-}
+_SCC_ATTRIBUTED=unknown   # yes | no | unknown — was a RUNNING server proven to answer?
+_SCC_SIZE_NULL=0          # sccache reported `"cache_size":null` (measured state, not a parse fault)
 
-# The probe's outputs. KIND is the three-way state (`bytes` = an affirmative
-# measurement, `unmeasured` = the probe could not answer AND SAYS SO, `na` = sccache
-# is not in use): a positive rendering requires an affirmative measurement, so no arm
-# may fall back to 0 or to blank.
-_SCC_CAP_KIND=""     # bytes | unmeasured | na
-_SCC_CAP_BYTES=""
-_SCC_CAP_SOURCE=""   # pinned | default | inherited | stale | invalid | invalid-stale | unattributed
-_SCC_CAP_WHY=""      # no-stats | unparsed | not-unique | no-binary
-_SCC_USED_KIND=""
-_SCC_USED_BYTES=""
-_SCC_USED_PCT=""     # <N>% | cap-zero
-_SCC_USED_WHY=""
-_SCC_DEFAULT_BYTES=""
-_SCC_SIZE_NULL=0     # `"cache_size":null` was observed (a size, NOT an attribution, signal)
-_SCC_ATTRIBUTED=""   # yes | no | unknown — did the cap come from a RUNNING server?
-_SCC_CFG_BYTES=""    # what the CONFIGURED value means in bytes, when sccache would accept it
-_scc_vb_rc=0         # last _sccache_value_bytes outcome: 0 accepted, 1 invalid, 2 unclassifiable
-
-# _sccache_cap_probe: ONE reading of the running server per SUMMARY emit, assigned
-# into the variables above (never printed — see the one-probe-per-emit note).
+# _sccache_cap_probe: ONE reading of the running server per SUMMARY emit, into the
+# _SCC_* variables above. Called from accelerators_line's own body so an emit costs
+# one `sccache --show-stats` (plus the differential's second read) and not four; the
+# token renderers below never probe.
 _sccache_cap_probe() {
-  _SCC_CAP_KIND=unmeasured; _SCC_CAP_BYTES=""; _SCC_CAP_SOURCE=""; _SCC_CAP_WHY=no-stats
-  _SCC_USED_KIND=unmeasured; _SCC_USED_BYTES=""; _SCC_USED_PCT=""; _SCC_USED_WHY=no-stats
-  _SCC_DEFAULT_BYTES=""; _SCC_SIZE_NULL=0; _SCC_ATTRIBUTED=unknown
+  _SCC_CAP_KIND=""; _SCC_CAP_BYTES=""; _SCC_CAP_WHY=""
+  _SCC_USED_KIND=""; _SCC_USED_BYTES=""; _SCC_USED_PCT=""; _SCC_USED_WHY=""
+  _SCC_ATTRIBUTED=unknown; _SCC_SIZE_NULL=0
 
-  local state="${AGENT_GATE_TEST_SCCACHE_STATE:-${ACCEL_SCCACHE:-absent}}"
-  if [ "$state" != on ]; then
-    # Nothing to probe, exactly as sccache-health=na means (mirrored deliberately:
-    # a cap of 0 would read as a measured value).
-    _SCC_CAP_KIND=na; _SCC_CAP_WHY=""
-    _SCC_USED_KIND=na; _SCC_USED_WHY=""
-    return 0
-  fi
-
-  # The hook wins (so the self-test never depends on this build's constant); otherwise the
-  # default is MEASURED, and a failure leaves it EMPTY — which the classification below reads
-  # as "provenance not establishable" rather than substituting a guess.
-  if ! _sccache_hook_uint "${AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES:-}" _SCC_DEFAULT_BYTES; then
-    # The literal `unknown` forces the unmeasurable branch, so the self-test can drive it on a box
-    # where the probe WOULD succeed — the state has to be assertable, not merely reachable.
-    if [ "${AGENT_GATE_TEST_SCCACHE_DEFAULT_BYTES:-}" = unknown ]; then
-      _SCC_DEFAULT_BYTES=""
-    else
-      _SCC_DEFAULT_BYTES=$(_sccache_default_probe) || _SCC_DEFAULT_BYTES=""
-    fi
-  fi
+  # sccache not in use on this box is a MEASURED state, not a failure to measure — and
+  # it is the same input `sccache-health` renders `na` for, read from the same place.
+  case "${AGENT_GATE_TEST_SCCACHE_STATE:-${ACCEL_SCCACHE:-absent}}" in
+    on) : ;;
+    *) _SCC_CAP_KIND=na; _SCC_USED_KIND=na; return 0 ;;
+  esac
 
   local cap="" used="" why_cap="" why_used=""
   local hook_max="${AGENT_GATE_TEST_SCCACHE_MAX_BYTES:-}"
   local hook_used="${AGENT_GATE_TEST_SCCACHE_USED_BYTES:-}"
   if [ -n "$hook_max" ] || [ -n "$hook_used" ]; then
-    # With the cap forced, NO server is contacted, so the differential cannot run: attribution
-    # defaults to `yes` (the hook is standing in for a real server's answer) and the dedicated
-    # hook overrides it. An unrecognised value is `unknown`, never `yes`.
+    # With the cap forced, NO server is contacted, so the differential cannot run:
+    # attribution defaults to `yes` (the hook is standing in for a real server's
+    # answer) and the dedicated hook overrides it. An unrecognised value is `unknown`,
+    # never `yes`.
     _SCC_ATTRIBUTED="${AGENT_GATE_TEST_SCCACHE_ATTRIBUTED:-yes}"
     case "$_SCC_ATTRIBUTED" in yes|no|unknown) ;; *) _SCC_ATTRIBUTED=unknown ;; esac
     _sccache_hook_uint "$hook_max"  cap  || why_cap=no-stats
@@ -1375,10 +1206,11 @@ _sccache_cap_probe() {
       jrc=0
       _sccache_json_uint "$json" cache_size used || jrc=$?
       case "$jrc" in 1) why_used=unparsed ;; 2) why_used=not-unique ;; esac
-      # A NULL size is its own measured state, not a parse failure: it is what a
-      # client with no running server reports (and what a backend that cannot
-      # report a size reports), so the cap it printed is not attributable to
-      # anything running. Matched on the literal, from the captured payload.
+      # A NULL size is its own measured state, not a parse failure: it is what a client
+      # with no running server reports (and what a backend that cannot report a size
+      # reports). Matched on the literal, from the captured payload. It says NOTHING
+      # about the cap — a RUNNING server with an EMPTY cache reports null too
+      # (measured), so it may not move the cap's own verdict.
       if [ -z "$used" ]; then
         case "$json" in *'"cache_size":null'*) why_used=no-size; _SCC_SIZE_NULL=1 ;; esac
       fi
@@ -1400,158 +1232,46 @@ _sccache_cap_probe() {
     fi
   fi
 
-  if [ -n "$cap" ]; then
-    _SCC_CAP_KIND=bytes; _SCC_CAP_BYTES="$cap"; _SCC_CAP_WHY=""
-    local implied=""
-    _SCC_CFG_BYTES=""
-    # THE CHECKS ARE ORDERED SO A MISSING DEFAULT DISCARDS ONLY THE LABELS THAT NEED IT (issue
-    # #3727 roborev round 7, f3 — a consequence of round 6's own fix). `pinned` and `stale` are
-    # statements about the CONFIGURED value versus the ENFORCED cap and need no default at all,
-    # so testing the default first threw away provenance that WAS established. Attribution
-    # first (nothing else is meaningful without it), then the value-vs-cap comparison, and the
-    # default is required only where the label is stated RELATIVE to it — unset, or discarded.
-    if [ "$_SCC_ATTRIBUTED" != yes ]; then
-      # Nothing running is PROVEN to enforce this number — either the reading moved with
-      # the client's env (no server is answering) or the differential could not be taken —
-      # so no claim about the variable being IN FORCE may be made from it. Fail-closed:
-      # only an affirmative `yes` licenses the other labels (see the block comment).
-      _SCC_CAP_SOURCE=unattributed
-    elif [ -n "${SCCACHE_CACHE_SIZE+set}" ] \
-         && { _sccache_value_bytes "${SCCACHE_CACHE_SIZE}" implied; _scc_vb_rc=$?; [ "$_scc_vb_rc" = 0 ]; }; then
-      # The variable is set AND sccache would accept it, so the question is answerable without
-      # knowing sccache's default: does the server enforce what the value means?
-      _SCC_CFG_BYTES="$implied"
-      if [ "$implied" = "$cap" ]; then
-        _SCC_CAP_SOURCE=pinned
-      else
-        _SCC_CAP_SOURCE=stale
-      fi
-    elif [ "${_scc_vb_rc:-0}" = 2 ]; then
-      # The value is SHAPED like a cap but this shell cannot say what sccache makes of it
-      # (roborev round 8, f2). Measured, such values are NOT uniformly discarded — a 19-digit
-      # one wraps and is ACCEPTED — so calling it `invalid` would assert a state we have not
-      # established and hand the operator the wrong remediation. Unclassified provenance
-      # instead, and no WARN.
-      _SCC_CAP_SOURCE=unattributed
-    elif [ -z "$_SCC_DEFAULT_BYTES" ]; then
-      # Only the labels below need the default, and it could not be measured — so the
-      # provenance is unknown and the WARNs that would quote a default stay silent.
-      _SCC_CAP_SOURCE=unattributed
-    elif [ -z "${SCCACHE_CACHE_SIZE+set}" ]; then
-      # The variable is UNSET: nothing this fleet provisions is in play, so the only
-      # question is whether the server is at sccache's own default or at somebody
-      # else's choice.
-      if [ "$cap" = "$_SCC_DEFAULT_BYTES" ]; then
-        _SCC_CAP_SOURCE=default
-      else
-        _SCC_CAP_SOURCE=inherited
-      fi
-    else
-      # DISCARDED (the variable is set and sccache would NOT accept it) — and "the value is
-      # invalid" and "where the running cap came from" are TWO INDEPENDENT AXES, which one
-      # label used to collapse (#3727 roborev round 3, f3). `invalid` used to be emitted for
-      # both cases below and its WARN claimed the value "fell back to" the running cap. That
-      # is only true where the running cap IS the fallback; where the server enforces
-      # something else the claim invents a causal link, and the remedy inverts. So the two
-      # are named apart. Set-but-EMPTY lands here as well, and correctly: measured, sccache
-      # discards an empty value exactly as it discards `30GiB`.
-      if [ "$cap" = "$_SCC_DEFAULT_BYTES" ]; then
-        # The running cap and the fallback AGREE. Stated as agreement, not causation: a
-        # server deliberately started at exactly the default is indistinguishable, and
-        # the operational fact ("this value is having no effect") is the same either way.
-        _SCC_CAP_SOURCE=invalid
-      else
-        _SCC_CAP_SOURCE=invalid-stale
-      fi
-    fi
+  # THE CAP. A number is reported ONLY when a running server was proven to answer it.
+  # `no` and `unknown` land in the SAME place, and that is the whole rule: only an
+  # affirmative yes licenses a byte count, so an absent server can never be read as a
+  # cap in force. The two are distinguished in the WHY, because the operator actions
+  # differ (start/leave alone vs investigate), not in the verdict.
+  if [ -n "$cap" ] && [ "$_SCC_ATTRIBUTED" = yes ]; then
+    _SCC_CAP_KIND=bytes; _SCC_CAP_BYTES="$cap"
   else
-    _SCC_CAP_KIND=unmeasured; _SCC_CAP_WHY="${why_cap:-no-stats}"
+    _SCC_CAP_KIND=unmeasured
+    if [ -n "$why_cap" ]; then
+      _SCC_CAP_WHY="$why_cap"
+    elif [ "$_SCC_ATTRIBUTED" = no ]; then
+      _SCC_CAP_WHY=no-running-server
+    else
+      _SCC_CAP_WHY=unattributed
+    fi
   fi
 
-  if [ -n "$used" ] && [ "$_SCC_CAP_KIND" = bytes ]; then
-    _SCC_USED_KIND=bytes; _SCC_USED_BYTES="$used"; _SCC_USED_WHY=""
-    if [ "$_SCC_CAP_BYTES" = 0 ]; then
-      # `SCCACHE_CACHE_SIZE=0G` is a legal, measured value (`0 bytes`), so the
-      # percentage is UNDEFINED rather than 0 — name it instead of dividing.
-      _SCC_USED_PCT=cap-zero
-    else
-      # NO OVERFLOW IN THE PERCENTAGE (issue #3727 roborev round 10, f3), and the coupling is worth
-      # stating: this hazard exists BECAUSE round 8 stopped rejecting large caps, so the two
-      # decisions are linked. bash arithmetic is signed 64-bit and wraps silently, so `used * 100`
-      # overflows once used exceeds ~9.2e16 — and the failure direction is the SILENT one: a wrapped
-      # negative percentage compares below 95 and SUPPRESSES the near-capacity warning. The common
-      # path keeps the exact form; only the absurd-size path divides first, where losing sub-percent
-      # precision cannot matter.
+  # THE OCCUPANCY, on its own axis: a null size leaves the cap alone and shows up here.
+  if [ -n "$used" ]; then
+    _SCC_USED_KIND=bytes; _SCC_USED_BYTES="$used"
+    if [ "$_SCC_CAP_KIND" = bytes ] && [ "$_SCC_CAP_BYTES" != 0 ]; then
+      # NO OVERFLOW IN THE PERCENTAGE, and the coupling is worth stating: `used * 100`
+      # overflows a signed 64-bit shell integer above ~92 PiB (9223372036854775807/100),
+      # so above that bound the division is done the other way round. The guard is on the
+      # MULTIPLICAND, not on a byte count someone eyeballed.
       if [ "$used" -le 92233720368547758 ]; then
         _SCC_USED_PCT="$(( used * 100 / _SCC_CAP_BYTES ))%"
       else
         _SCC_USED_PCT="$(( used / (_SCC_CAP_BYTES / 100 > 0 ? _SCC_CAP_BYTES / 100 : 1) ))%"
       fi
+    elif [ "$_SCC_CAP_KIND" = bytes ]; then
+      # A cap of 0 bytes is LEGAL and measured (`SCCACHE_CACHE_SIZE=0G`), and a
+      # percentage of it is undefined: named, never divided, and never a bare 0%.
+      _SCC_USED_PCT=cap-zero
+    else
+      _SCC_USED_PCT="pct-${_SCC_CAP_WHY:-unmeasured}"
     fi
-  elif [ -n "$used" ]; then
-    # This token reports a FILL RATIO, and a ratio needs a denominator: an
-    # unmeasured cap makes the occupancy unmeasurable, whatever the numerator.
-    _SCC_USED_KIND=unmeasured; _SCC_USED_WHY="${_SCC_CAP_WHY:-no-stats}"
   else
     _SCC_USED_KIND=unmeasured; _SCC_USED_WHY="${why_used:-no-stats}"
-  fi
-
-  # LOUD WARN to STDERR for the states an operator must ACT on, mirroring
-  # _sccache_health's idiom — and per-emit for the same reason its memo is per-emit:
-  # every call site invokes `$(accelerators_line)`, so a "once per run" flag set here
-  # would land in a subshell and be discarded. No WARN for default/inherited: those
-  # are facts to see in the block, not necessarily faults.
-  case "${_SCC_CAP_SOURCE:-}" in
-    stale)
-      echo "agent-gate: WARN: sccache-cap=stale — SCCACHE_CACHE_SIZE='${SCCACHE_CACHE_SIZE:-}' is set and accepted, but the RUNNING server enforces ${_SCC_CAP_BYTES} bytes: sccache reads the cap ONCE, at server startup, so this server predates the value. Remedy: 'sccache --stop-server' (the next compile restarts it) — NOT editing the value (#3727)" >&2 ;;
-    invalid)
-      echo "agent-gate: WARN: sccache-cap=invalid — sccache SILENTLY DISCARDS SCCACHE_CACHE_SIZE='${SCCACHE_CACHE_SIZE:-}', and the RUNNING server enforces ${_SCC_CAP_BYTES} bytes, which is exactly the fallback it would use: the value is having NO effect. The accepted form is <digits>[KkMmGgTt] with BINARY multipliers: measured, '30G' is 30 GiB while '30GiB' and '30GB' are discarded with NO diagnostic anywhere, and a bare integer means BYTES. Fix the VALUE, then 'sccache --stop-server' to apply it (#3727)" >&2 ;;
-    invalid-stale)
-      # THE DIRECTION IS COMPUTED, NOT ASSUMED (#3727 roborev round 3, f2). This used to say a
-      # restart "would LOWER the cap to sccache's default" unconditionally — false whenever the
-      # running non-default cap is BELOW the default, where a restart RAISES it. The hazard being
-      # warned about is that the restart replaces the enforced cap with the FALLBACK, and which
-      # way that moves is exactly the comparison this branch already made, so it is read from the
-      # comparison rather than guessed. (Both arms are reachable: this branch is entered only when
-      # the running cap differs from the default, in either direction.)
-      _scc_dir_word=RAISE
-      [ "$_SCC_CAP_BYTES" -gt "$_SCC_DEFAULT_BYTES" ] 2>/dev/null && _scc_dir_word=LOWER
-      echo "agent-gate: WARN: sccache-cap=invalid-stale — TWO faults at once. sccache SILENTLY DISCARDS SCCACHE_CACHE_SIZE='${SCCACHE_CACHE_SIZE:-}' (accepted form: <digits>[KkMmGgTt] binary multipliers; '30GiB'/'30GB' are discarded with no diagnostic, a bare integer means BYTES), AND the RUNNING server enforces ${_SCC_CAP_BYTES} bytes, which is neither that fallback nor anything derived from this value — so this gate cannot say where it came from. FIX THE VALUE FIRST: 'sccache --stop-server' on its own would ${_scc_dir_word} the cap to sccache's default (${_SCC_DEFAULT_BYTES} bytes), because the restart would discard the value too (#3727)" >&2 ;;
-  esac
-  if [ "$_SCC_USED_KIND" = bytes ] && [ "$_SCC_USED_PCT" != cap-zero ]; then
-    local pctnum="${_SCC_USED_PCT%\%}"
-    case "$pctnum" in
-      ''|*[!0-9]*) : ;;
-      *) if [ "$pctnum" -ge 95 ]; then
-           # REPORTS CAPACITY, NOT EVICTION (issue #3727 roborev round 4, f2). This used to say the
-           # cache "is EVICTING" — an inference, not a measurement: being near the cap does not
-           # establish that anything has been evicted, and sccache exposes no eviction counter for
-           # this token to read. (This issue's own title made the same inference; at-capacity was the
-           # observation, continuous eviction was the conclusion.) The warning is still worth having,
-           # so it states the observation and names the risk rather than asserting the mechanism.
-           #
-           # AND THE REMEDY IS SOURCE-AWARE (roborev round 7, f2). It used to say "raise
-           # SCCACHE_CACHE_SIZE" unconditionally, which CONTRADICTS the neighbouring `stale` WARN in
-           # the exact case this issue is about: env already at 50G, server still enforcing 10G. Two
-           # adjacent warnings giving opposite advice is worse than one, so the advice is derived
-           # from the SOURCE and, for a stale server, from whether the configured value is already
-           # larger than the cap in force.
-           _scc_fill_fix="Raise SCCACHE_CACHE_SIZE (<digits>[KkMmGgTt] only) and 'sccache --stop-server' to apply it"
-           case "${_SCC_CAP_SOURCE:-}" in
-             stale)
-               if [ -n "$_SCC_CFG_BYTES" ] && [ "$_SCC_CFG_BYTES" -gt "$_SCC_CAP_BYTES" ] 2>/dev/null; then
-                 _scc_fill_fix="Do NOT edit the value: SCCACHE_CACHE_SIZE already asks for ${_SCC_CFG_BYTES} bytes and only the RUNNING server is behind — 'sccache --stop-server' applies it"
-               else
-                 _scc_fill_fix="The running server does not enforce the configured value, and the configured value is not larger than the cap in force — raise SCCACHE_CACHE_SIZE first, THEN 'sccache --stop-server'"
-               fi ;;
-             invalid|invalid-stale)
-               _scc_fill_fix="FIX the value first — sccache does not accept SCCACHE_CACHE_SIZE='${SCCACHE_CACHE_SIZE:-}' (accepted form <digits>[KkMmGgTt]) — then 'sccache --stop-server'" ;;
-             unattributed)
-               _scc_fill_fix="Establish what is enforcing this cap before changing anything (this gate could not attribute it); then raise SCCACHE_CACHE_SIZE and 'sccache --stop-server'" ;;
-           esac
-           echo "agent-gate: WARN: sccache cache is ${pctnum}% of its ${_SCC_CAP_BYTES}-byte cap (${_SCC_USED_BYTES} bytes used) — AT/NEAR CAPACITY, so it is at risk of evicting objects a later gate would have hit (sccache reports no eviction counter, so this is a capacity observation and NOT an eviction measurement). ${_scc_fill_fix} (#3727)" >&2
-         fi ;;
-    esac
   fi
   return 0
 }
@@ -1562,7 +1282,7 @@ _sccache_cap_probe() {
 _sccache_cap_token() {
   case "${_SCC_CAP_KIND:-}" in
     na)    printf 'sccache-cap=na(sccache-not-in-use)' ;;
-    bytes) printf 'sccache-cap=%s(%s)' "$_SCC_CAP_BYTES" "$_SCC_CAP_SOURCE" ;;
+    bytes) printf 'sccache-cap=%s' "$_SCC_CAP_BYTES" ;;
     *)     printf 'sccache-cap=unmeasured(%s)' "${_SCC_CAP_WHY:-no-stats}" ;;
   esac
 }
@@ -1729,8 +1449,8 @@ _perf_accel_token() { local v; _perf_accel_token_into v; printf '%s' "$v"; }
 # See the ACCEL_* detection above (#1848). The sccache-health token
 # (na|ok|warn, issue #2641) surfaces sccache's own corruption counters — ERROR COUNTERS ONLY,
 # never capacity. The two #3727 tokens after it carry the capacity facts:
-# ` sccache-cap=<bytes>(pinned|default|inherited|stale|invalid|invalid-stale|unattributed)` and
-# ` sccache-used=<bytes>(<N>%)`,
+# ` sccache-cap=<bytes>` and ` sccache-used=<bytes>(<N>%)` — MEASURED bytes, with no provenance
+# classifier (lead ruling req-3727-w4: reporting stays, interpreting goes),
 # each with an explicit `unmeasured(<why>)`/`na(sccache-not-in-use)` rendering so a positive
 # reading is always an affirmative measurement. They sit BEFORE the optional Linux-only groups so
 # `perf=` remains the last token on a Linux line. On Linux
