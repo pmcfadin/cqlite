@@ -109,8 +109,11 @@ HELP_LINES = [
     "                          reported as a direction, never against the ceiling",
     "  (at least one of the two is required)",
     "",
-    "  --profile <name>     target profile for the single-stream section:",
-    "                       narrow | wide                            (default narrow)",
+    "  --profile <name>     ASSERT the recorded profile is this (narrow|wide).",
+    "                       The band comes from the MANIFEST, which records what",
+    "                       the session declared. Supplying this and disagreeing",
+    "                       REFUSES; there is deliberately no default, because a",
+    "                       verdict must not be a function of an analysis flag.",
     "  --seed <int>         bootstrap seed, recorded in the report   (default %d)" % S.DEFAULT_SEED,
     "  --resamples <int>    bootstrap resamples                      (default %d)" % S.DEFAULT_RESAMPLES,
     "  --ci-level <float>   two-sided interval level, 0 < L < 1      (default %.2f)" % S.DEFAULT_CI_LEVEL,
@@ -134,7 +137,10 @@ def parse_args(argv):
     opts = {
         "single_stream": None,
         "utilization": None,
-        "profile": "narrow",
+        # NO DEFAULT. The profile is read from the manifest; this flag is only
+        # an optional ASSERTION about it. A default here is what made the
+        # verdict a function of an analysis-time flag.
+        "profile": None,
         "seed": S.DEFAULT_SEED,
         "resamples": S.DEFAULT_RESAMPLES,
         "ci_level": S.DEFAULT_CI_LEVEL,
@@ -169,7 +175,7 @@ def parse_args(argv):
 
     if opts["single_stream"] is None and opts["utilization"] is None:
         usage_error("at least one of --single-stream or --utilization is required")
-    if opts["profile"] not in S.TARGET_BANDS:
+    if opts["profile"] is not None and opts["profile"] not in S.TARGET_BANDS:
         usage_error("--profile must be one of: %s" % ", ".join(sorted(S.TARGET_BANDS)))
     if opts["resamples"] < 100:
         usage_error("--resamples must be at least 100")
@@ -518,6 +524,14 @@ def analyze(mode, path, opts):
             "too. Label the session --control to measure other hardware"
             % (nproc, S.NARROW_PROFILE_NPROC),
         )
+    # THE BAND COMES FROM THE MANIFEST, WHICH IS THE ONLY SOURCE. `--profile`
+    # used to SELECT it at analysis time with a default of `narrow`, so the same
+    # data produced different verdicts under different flags and a wide-row
+    # session analysed with the default was scored against the narrow band. The
+    # flag is now an optional ASSERTION: it may confirm what the session
+    # declared and it may never overrule it, so a wrong `--profile` is
+    # observable rather than merely wrong.
+    resolve_profile(manifest, opts, control, mode)
     pairs, admission, session = collect_pairs_checked(
         manifest, manifest_dir, mode, declared_steps
     )
@@ -540,6 +554,51 @@ def analyze(mode, path, opts):
     stats = compute(mode, pairs, opts)
     render_common(manifest, mode, admission, session)
     return report(mode, manifest, pairs, admission, opts, stats, session)
+
+
+def resolve_profile(manifest, opts, control, mode):
+    """The target profile, from the ONE place that records it.
+
+    `--profile` used to SELECT the band at analysis time with a default of
+    `narrow`, so the same data produced different verdicts under different flags
+    and a wide-row session analysed with the default was silently scored against
+    the narrow band. It is now an optional ASSERTION: it may confirm what the
+    session declared and may never overrule it, so a wrong `--profile` is
+    OBSERVABLE rather than merely wrong.
+
+    Resolved by one function called from both the refusal path and the report,
+    so there is a single implementation even though there are two callers --
+    two resolutions of the same question is how they come to disagree.
+    """
+    recorded = manifest.get("workload", {}).get("profile")
+    asserted = opts["profile"]
+    if recorded is not None and asserted is not None and asserted != recorded:
+        raise Unmeasured(
+            "profile-assertion-mismatch",
+            "--profile %r was asserted but the session recorded %r. The manifest "
+            "is the source; this flag may confirm it and may not overrule it, "
+            "because a verdict that changes with an analysis-time flag is not a "
+            "measurement" % (asserted, recorded),
+        )
+    if recorded in S.TARGET_BANDS:
+        return recorded
+    # A CONTROL may name the band it wants scored against, since its verdict is
+    # disclaimed anyway; a MEASUREMENT may not, because that is the defect.
+    if control and asserted in S.TARGET_BANDS:
+        return asserted
+    if mode != MODE_SINGLE_STREAM:
+        # The utilization section is a DIRECTION and no band is consulted, so an
+        # undeclared profile is not an obstacle there and must not be invented.
+        return None
+    raise Unmeasured(
+        "profile-unrecorded",
+        "the manifest records workload.profile as %r, and the target band "
+        "differs by workload (~1.1-1.25x narrow, ~1.05-1.1x wide). Nothing can "
+        "derive which one a session was -- the band's own source defines them "
+        "qualitatively, with no numeric boundary -- so a session that did not "
+        "declare it cannot be scored against either. Re-run the driver with "
+        "--profile narrow|wide" % (recorded,),
+    )
 
 
 def compute(mode, pairs, opts):
@@ -817,11 +876,12 @@ def report(mode, manifest, pairs, admission, opts, stats, session):
     out("ceiling %s" % CEILING_TEXT)
 
     if mode == MODE_SINGLE_STREAM:
-        band_low, band_high = S.TARGET_BANDS[opts["profile"]]
+        profile = resolve_profile(manifest, opts, manifest.get("control"), mode)
+        band_low, band_high = S.TARGET_BANDS[profile]
         out(
             "target profile %s band [%s, %s] source "
             "docs/research/phase2-verify-row-engine.md-line-107"
-            % (opts["profile"], fmt(band_low, 2), fmt(band_high, 2))
+            % (profile, fmt(band_low, 2), fmt(band_high, 2))
         )
         out("test ci-contains-1.0 %s" % ("yes" if ratio_lo <= 1.0 <= ratio_hi else "no"))
         out(

@@ -144,6 +144,15 @@ ab-throughput.sh [options]
                             the number. It covers IGNORANCE only -- a device
                             affirmatively identified as NETWORK cannot be
                             attested away.
+  --profile <narrow|wide>   which target band this workload is measured against.
+                            REQUIRED for a measurement, and deliberately NOT
+                            defaulted: the band's own source defines narrow and
+                            wide qualitatively with no numeric boundary
+                            (docs/research/phase2-verify-row-engine.md line 107),
+                            so nothing can derive it -- and a default silently
+                            scored wide-row sessions against the narrow band.
+                            Recorded in the manifest; the analyzer reads it from
+                            there rather than from a flag of its own.
   --control <label>         mark this session a CONTROL, not a measurement; the
                             label is recorded and the analyzer refuses to let its
                             verdict be read as discharging the AC
@@ -182,6 +191,7 @@ REPLICATES=7
 WORK_DIR='/data/ab-3649'
 REPO=''
 SHAPE='full'
+PROFILE=''
 RAMP='1'
 STEP_DURATION='60s'
 PORT=0
@@ -209,7 +219,7 @@ HEAD_SERVER_EXTRA=''
 # one to miss it. `scripts`-side drift is caught by a structural case in
 # selftest-analyze.sh that requires every `shift 2` arm to appear in this list.
 VALUE_OPTS="--corpus --ticket-template --base-ref --head-ref --replicates \
---work-dir --repo --shape --ramp --step-duration --port --server-cpus \
+--work-dir --repo --shape --profile --ramp --step-duration --port --server-cpus \
 --loadgen-ref \
 --client-cpus --min-corpus-bytes --min-sstables --merge-path \
 --max-concurrent-scans --batch-size --max-batch-bytes \
@@ -231,6 +241,7 @@ while [ "$#" -gt 0 ]; do
     --work-dir)          WORK_DIR="${2:-}";         shift 2 ;;
     --repo)              REPO="${2:-}";             shift 2 ;;
     --shape)             SHAPE="${2:-}";            shift 2 ;;
+    --profile)           PROFILE="${2:-}";          shift 2 ;;
     --ramp)              RAMP="${2:-}";             shift 2 ;;
     --step-duration)     STEP_DURATION="${2:-}";    shift 2 ;;
     --port)              PORT="${2:-}";             shift 2 ;;
@@ -617,6 +628,7 @@ manifest = {
     },
     "workload": {
         "shape": env("AB_SHAPE", ""),
+        "profile": env("AB_PROFILE", None),
         "ramp": env("AB_RAMP", ""),
         "step_duration": env("AB_STEP_DURATION", ""),
         # The EFFECTIVE value, not the requested one: the warming pass runs only
@@ -701,6 +713,7 @@ export AB_DRIVER_VERSION="$DRIVER_VERSION"
 export AB_REPLICATES="$REPLICATES"
 export AB_BASE_REF="$BASE_REF" AB_HEAD_REF="$HEAD_REF"
 export AB_SHAPE="$SHAPE" AB_RAMP="$RAMP" AB_STEP_DURATION="$STEP_DURATION"
+export AB_PROFILE="$PROFILE"
 export AB_STEP_DURATION_SECONDS="$STEP_DURATION_SECONDS"
 export AB_PREWARM="$PREWARM" AB_TEMPERATURE="$TEMPERATURE"
 export AB_TICKET_TEMPLATE="$TICKET_TEMPLATE"
@@ -849,6 +862,23 @@ say "ticket frozen into the session directory as $TICKET_FROZEN sha256 $TICKET_S
 # session receiving a verdict against that band is a wrong answer wearing a
 # right-looking shape. Checking that the file is JSON never checked what was in
 # it. A CONTROL may use any shape -- its verdict is already disclaimed.
+# THE PROFILE IS DECLARED WHERE THE MEASUREMENT HAPPENS, not where it is read.
+# It used to be an ANALYSIS-time flag defaulting to `narrow`, so the same data
+# yielded different verdicts under different flags and a wide-row session
+# analysed with the default was silently scored against the narrow band. It
+# cannot be derived -- the band's source defines narrow and wide qualitatively
+# with no numeric boundary, so any threshold would be invented, and deriving it
+# from the table name is the label-not-property mistake. So it is declared once,
+# here, and REQUIRED: a default is exactly the defect.
+if [ -z "$CONTROL" ]; then
+  case "$PROFILE" in
+    narrow|wide) ;;
+    '') usage_error "--profile is REQUIRED for a measurement: the target band differs by workload (~1.1-1.25x narrow, ~1.05-1.1x wide) and nothing can derive which one this session is. There is deliberately no default -- one silently scored wide-row sessions against the narrow band" ;;
+    *)  usage_error "--profile is '$PROFILE'; it must be narrow or wide" ;;
+  esac
+elif [ -n "$PROFILE" ] && [ "$PROFILE" != narrow ] && [ "$PROFILE" != wide ]; then
+  usage_error "--profile is '$PROFILE'; it must be narrow or wide"
+fi
 if [ -z "$CONTROL" ]; then
   [ "$SHAPE" = "full" ] || usage_error \
     "--shape is '$SHAPE', but the #3649 target band is defined for --shape full over the whole ring. Run it as a control (--control <label>) if you want another shape; its verdict is then disclaimed rather than scored against the band"

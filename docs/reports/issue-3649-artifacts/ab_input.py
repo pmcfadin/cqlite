@@ -92,6 +92,11 @@ RECORD_FIELD_DISPOSITION = {
 #: constrains a step record. Same completeness case, other direction.
 WORKLOAD_DISPOSITION = {
     "shape": ("constrains", "record.shape"),
+    "profile": ("excused",
+                "the target band this session declared; it constrains no record "
+                "field because it is about the BAND the ratio is compared to, "
+                "not about the work the records describe. It is the analyzer's "
+                "single source for that band -- see resolve_profile"),
     "ramp": ("constrains", "record.target_concurrency, positionally"),
     "step_duration_seconds": ("constrains", "record.duration_s, wide band"),
     "step_duration": ("excused", "display only; the canonical value is the seconds field"),

@@ -808,6 +808,12 @@ OPTION_DISPOSITION = {
     "--min-sstables": ("resolver-input", "a documented floor; #3058's bypass depends on it"),
     "--ramp": ("resolver-input", "bounded against the admission ceiling"),
     "--control": ("resolver-input", "decides whether the floors may be lowered"),
+    "--profile": (
+        "not-server-config",
+        "which target band this workload is measured against; recorded in the "
+        "manifest and read from there by the analyzer. It configures no server "
+        "and no workload -- it names which band the RESULT is compared to",
+    ),
     "--attest-local-storage": (
         "not-server-config",
         "an operator attestation about the corpus device, recorded in the "

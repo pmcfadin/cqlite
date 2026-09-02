@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=489
+CASE_FLOOR=495
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -138,6 +138,7 @@ def main():
         "loadgen": {"commit": "2" * 40, "ref": "cfa93fe99"},
         "workload": {
             "shape": "full",
+            "profile": "narrow",
             "step_duration": "60s",
             "step_duration_seconds": 60.0,
             "ramp": ramp,
@@ -368,9 +369,51 @@ else
   ok "no ceiling-endorsing verdict token exists in the output"
 fi
 
-# The wide profile has its own band and the same rule.
-run_analyzer "$TMP/meets" --profile wide
-check_verdict "the wide profile tests the 1.05-1.10 band, not the narrow one" ABOVE-TARGET 5
+# The wide profile has its own band and the same rule -- and the band comes from
+# what the SESSION declared, so this fixture declares `wide` rather than the
+# analyzer being told to score it that way. That inversion is round 17 finding 1:
+# `--profile wide` on the analyzer used to re-score the same data against a
+# different band, which is a verdict that is a function of a flag.
+mkfixture "$TMP/wideprof" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/wideprof/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["workload"]["profile"] = "wide"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/wideprof"
+check_verdict "a session that DECLARED wide is scored against the 1.05-1.10 band" ABOVE-TARGET 5
+# The flag may CONFIRM the declaration...
+run_analyzer "$TMP/wideprof" --profile wide
+check_verdict "an assertion agreeing with the declaration is accepted" ABOVE-TARGET 5
+# ...and may never overrule it, which is the whole finding.
+run_analyzer "$TMP/wideprof" --profile narrow
+check_verdict "an assertion disagreeing with the declaration" UNMEASURED 7 single-stream
+check_cause "an analysis flag cannot re-score a session against another band" profile-assertion-mismatch
+# A session that declared nothing cannot be scored at all -- no default.
+mkfixture "$TMP/noprof" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/noprof/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+del manifest["workload"]["profile"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/noprof"
+check_verdict "a session that declared no profile" UNMEASURED 7 single-stream
+check_cause "a session that declared no profile" profile-unrecorded
+# ...and the flag cannot supply what the session did not declare, either.
+run_analyzer "$TMP/noprof" --profile narrow
+check_cause "an analysis flag cannot supply a profile the session never declared" profile-unrecorded
 
 echo
 echo "-- every input the analyzer cannot measure, cause by cause --"
@@ -1967,7 +2010,7 @@ echo "-- the driver's fail-closed guards, exercised without a rig --"
 
 # The driver refuses long before it builds anything, so its pre-flight guards are
 # testable on any box. These are the guards RUNBOOK.md's procedure depends on.
-run_driver() { # <args...>
+run_driver() { # <args...> --profile narrow
   set +e
   bash "$DRIVER" "$@" > "$TMP/out.txt" 2> "$TMP/err.txt"
   RC=$?
@@ -2049,13 +2092,15 @@ else
     bad "the scratch repository was not created, so the driver cases below are testing their environment"
   fi
 
-  run_driver --help
+  run_driver --help --profile narrow
   check_driver "the driver --help exits 3, never 0" 3
 
   # FINDING 4: a value-taking option with no value used to `shift 2` past the end
   # and exit 1 with an unanchored bash error.
   for lonely in --corpus --ticket-template --replicates --max-concurrent-scans \
                 --batch-size --step-duration --ramp --control; do
+    # NOT given --profile: this case's subject is a value-taking option with no
+    # value, and appending anything after it supplies the missing value.
     run_driver "$lonely"
     if [ "$RC" = "3" ] && anchored \
        && grep -q "^AB-3649: usage-error $lonely requires a value\$" "$TMP/err.txt"; then
@@ -2118,20 +2163,20 @@ PYINNER
     ok "--port 65535 is accepted -- the range check is inclusive at the boundary"
   fi
 
-  run_driver --no-such-flag
+  run_driver --no-such-flag --profile narrow
   check_driver "an unrecognised driver flag exits 3" 3
 
-  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 --replicates 4
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 --replicates 4 --profile narrow
   check_driver "the driver refuses fewer than 5 replicates" 3
 
-  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json"
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --profile narrow
   check_driver "the driver refuses to run without a pinned admission ceiling" 3
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --ramp 1,2,4,8
+    --max-concurrent-scans 4 --ramp 1,2,4,8 --profile narrow
   check_driver "the driver refuses a ramp that tops out above the admission pin" 3
 
-  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 --server-cpus 0,2
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 --server-cpus 0,2 --profile narrow
   check_driver "the driver refuses a server CPU set with no client CPU set" 3
 
   # The CPU-set check runs AFTER ref resolution, so this case must name refs that
@@ -2144,7 +2189,7 @@ PYINNER
   check_driver "the driver refuses overlapping server and client CPU sets" 3
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/nope.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-tpl" --repo "$SCRATCH"
+    --work-dir "$TMP/w-tpl" --repo "$SCRATCH" --profile narrow
   check_driver "an absent ticket template" 2 ticket-template-absent
 
   run_driver --corpus "$TMP/emptycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
@@ -2155,7 +2200,7 @@ PYINNER
   check_driver "a ticket naming a table that is not under the data root" 2 served-dir-absent
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-small" --repo "$SCRATCH"
+    --work-dir "$TMP/w-small" --repo "$SCRATCH" --profile narrow
   check_driver "a corpus below the stated minimum size" 2 corpus-too-small
 
   # FINDING 1: the #3058 guard must count the SERVED directory. This corpus has a
@@ -2170,7 +2215,7 @@ PYINNER
   # has a large Data.db under another table and a snapshot subtree, neither of
   # which the server would read.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-scope" --repo "$SCRATCH"
+    --work-dir "$TMP/w-scope" --repo "$SCRATCH" --profile narrow
   check_driver "a served table below the size floor, with a large unrelated table alongside" \
     2 corpus-too-small
   if grep -q 'served-dir .*ks/tbl data-db-files 2 data-db-bytes 8192' "$TMP/out.txt"; then
@@ -2206,7 +2251,7 @@ PYINNER
 
   # FINDING 5: arms served under different flags is a control by definition.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --head-server-extra '--max-batch-bytes 1'
+    --max-concurrent-scans 4 --head-server-extra '--max-batch-bytes 1' --profile narrow
   check_driver "asymmetric per-arm flags without a control label" 3
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --head-server-extra '--max-batch-bytes 1' \
@@ -2234,10 +2279,10 @@ PYINNER
 
   # P1-3: every ramp element, through the same validator the helper exposes.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --ramp 1,abc
+    --max-concurrent-scans 4 --ramp 1,abc --profile narrow
   check_driver "the driver refuses a ramp with a non-numeric element" 3
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --ramp 2
+    --max-concurrent-scans 4 --ramp 2 --profile narrow
   check_driver "the driver refuses a ramp that maps to no analyzer section" 3
 
   # FINDING 3 (round 8): a RELATIVE --work-dir. `CARGO_TARGET_DIR` is read after
@@ -2272,14 +2317,14 @@ PYINNER
     bad "the census did not detect a missing CompressionInfo.db"
   fi
   run_driver --corpus "$TMP/plaincorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --work-dir "$TMP/w-plain2" --repo "$SCRATCH"
+    --max-concurrent-scans 4 --work-dir "$TMP/w-plain2" --repo "$SCRATCH" --profile narrow
   check_driver "a measurement over an uncompressed corpus" 2 corpus-uncompressed
   # A zero-length CompressionInfo.db is ABSENT, not present: this repository
   # records that an empty one makes SELECT return 0 rows silently.
   : > "$TMP/plaincorpus/ks/tbl/nb-1-big-CompressionInfo.db"
   : > "$TMP/plaincorpus/ks/tbl/nb-2-big-CompressionInfo.db"
   run_driver --corpus "$TMP/plaincorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --work-dir "$TMP/w-plain3" --repo "$SCRATCH"
+    --max-concurrent-scans 4 --work-dir "$TMP/w-plain3" --repo "$SCRATCH" --profile narrow
   check_driver "a zero-length CompressionInfo.db, which reads as absent" 2 corpus-uncompressed
 
   # ROUND 12 FINDING 2: a ticket missing a required field used to fail after all
@@ -2303,10 +2348,10 @@ PYINNER
   # lower them -- the third route to #3058's bypass was simply passing
   # `--min-sstables 1` and serving a single-source table.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --min-sstables 1
+    --max-concurrent-scans 4 --min-sstables 1 --profile narrow
   check_driver "a measurement lowering the SSTable floor" 3
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --min-corpus-bytes 1
+    --max-concurrent-scans 4 --min-corpus-bytes 1 --profile narrow
   check_driver "a measurement lowering the corpus-size floor" 3
   if grep -q 'documented floor' "$TMP/err.txt"; then
     ok "the floors are refused by name, with the documented minimum stated"
@@ -2351,7 +2396,7 @@ PYINNER
   # floor, and symmetric extras need no control label.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --base-server-extra '--batch-size 0' \
-    --head-server-extra '--batch-size 0'
+    --head-server-extra '--batch-size 0' --profile narrow
   check_driver "symmetric per-arm extras that zero the batch size" 3
   if grep -q 'resolved --batch-size' "$TMP/err.txt"; then
     ok "the floor is enforced on the RESOLVED value, so the extras route inherits it"
@@ -2362,12 +2407,12 @@ PYINNER
   # FINDING 5: --batch-size 0 is silently clamped to one row per batch by the
   # server, so the manifest would not record the value that was used.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --batch-size 0
+    --max-concurrent-scans 4 --batch-size 0 --profile narrow
   check_driver "the driver refuses --batch-size 0" 3
 
   # FINDING 2: the shape and the ticket must match the claim the report makes.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --shape limit-k
+    --max-concurrent-scans 4 --shape limit-k --profile narrow
   check_driver "the driver refuses a non-full shape for a measurement session" 3
   printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","limit":100}\n' > "$TMP/tk-narrow.json"
   # NOT a control: the ticket check applies to measurements only, so labelling
@@ -2375,7 +2420,7 @@ PYINNER
   # the corpus floors -- and does not need to, because the ticket is validated
   # before the census runs.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/tk-narrow.json" \
-    --max-concurrent-scans 4 --work-dir "$TMP/w-narrow" --repo "$SCRATCH"
+    --max-concurrent-scans 4 --work-dir "$TMP/w-narrow" --repo "$SCRATCH" --profile narrow
   check_driver "the driver refuses a ticket carrying a LIMIT" 2 ticket-not-full-ring
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/tk-narrow.json" \
     --max-concurrent-scans 4 --work-dir "$TMP/w-narrow-ctl" --min-corpus-bytes 1 \
@@ -2390,18 +2435,18 @@ PYINNER
   # FINDING 3: a step duration flight-loadgen accepts must be accepted here too,
   # and one it rejects must fail BEFORE the builds rather than after the money.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --step-duration nope
+    --max-concurrent-scans 4 --step-duration nope --profile narrow
   check_driver "the driver refuses a step duration flight-loadgen would reject" 3
 
   # P0-3: --rows-declared reached int() unvalidated.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --rows-declared 3,999,890
+    --max-concurrent-scans 4 --rows-declared 3,999,890 --profile narrow
   check_driver "the driver refuses a --rows-declared with separators" 3
 
   # P1-6: an ordinary operator mistake must not leak an unanchored line.
   mkdir -p "$TMP/notarepo"
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --repo "$TMP/notarepo"
+    --max-concurrent-scans 4 --repo "$TMP/notarepo" --profile narrow
   check_driver "--repo pointing at a directory that is not a repository" 3
   if grep -qi 'fatal:' "$TMP/err.txt"; then
     bad "a raw git 'fatal:' line leaked past the anchor"
@@ -2409,7 +2454,7 @@ PYINNER
     ok "a non-repository --repo is reported anchored, with no raw git output"
   fi
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --repo "$TMP/no-such-dir-3649"
+    --max-concurrent-scans 4 --repo "$TMP/no-such-dir-3649" --profile narrow
   check_driver "--repo pointing at a directory that does not exist" 3
   if [ -s "$TMP/err.txt" ]; then
     ok "a missing --repo produces a diagnostic, not a silent exit 1"
@@ -2495,7 +2540,7 @@ PYINNER
   prior_before="$(cat "$TMP/w-prior/run-EARLIER-SESSION/"* | cksum)"
   prior_files="$(find "$TMP/w-prior/run-EARLIER-SESSION" -type f | sort | tr '\n' ' ')"
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
-    --max-concurrent-scans 4 --work-dir "$TMP/w-prior" --repo "$SCRATCH"
+    --max-concurrent-scans 4 --work-dir "$TMP/w-prior" --repo "$SCRATCH" --profile narrow
   check_driver "a re-used work directory whose new attempt fails pre-flight" 2 corpus-too-small
   if [ "$(cat "$TMP/w-prior/run-EARLIER-SESSION/"* | cksum)" = "$prior_before" ]; then
     ok "an earlier session's manifest, ledger AND replicate files are byte-identical after a failed attempt"
@@ -2891,6 +2936,7 @@ PYINNER
         --base-ref HEAD~1 --head-ref HEAD \
         --max-concurrent-scans 16 \
         --attest-local-storage 'selftest harness: scratch corpus on the test box, whose device model this probe does not recognise; the storage class is not the property these cases exercise' \
+        --profile narrow \
         --replicates 5 --step-duration 1s "$@" \
         > "$TMP/out.txt" 2> "$TMP/err.txt"
     RC=$?
