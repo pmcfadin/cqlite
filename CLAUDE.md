@@ -786,12 +786,13 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   cleared by raising the cap and a full, thrashing cache reads `ok`. Measured trap: `30G` is 30 GiB
   but **`30GiB` and `30GB` are SILENTLY DISCARDED** to the 10 GiB default and a bare integer means
   BYTES, with no diagnostic anywhere — `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`
-  persists the value and VERIFIES it by correlating the `/etc/environment` line, the value a fresh
-  non-login PAM session sees, that value in BYTES (asked of an ISOLATED sccache, never
-  reimplemented) and the BYTES the running server enforces (only VERIFIED is an `[ok]`).
-  **Declared residual:** a LOGIN shell can see a different value (on this fleet `/etc/profile.d`
-  runs after `pam_env` — #3727's own root cause) and that context is no longer measured, so the
-  verdict is scoped to the non-login session in its own scope note.
+  persists the value and VERIFIES it by correlating THREE measurements: the `/etc/environment`
+  line, that value in BYTES (asked of an ISOLATED sccache, never reimplemented) and the BYTES the
+  running server enforces (only VERIFIED is an `[ok]`). **It probes no session, so it establishes
+  NOTHING about what a gate's own session sees** — that claim needs a session probe and belongs to
+  **#3946**; the verdict's scope note says so in as many words. Declared residuals: a LOGIN shell
+  can see a different value (on this fleet `/etc/profile.d` runs after `pam_env` — #3727's own root
+  cause), and the binary plus the server read come from bootstrap's own PATH and routing.
 
 ## Core Commands
 

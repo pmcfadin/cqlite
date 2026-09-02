@@ -963,11 +963,12 @@ DISCARDED** to sccache's 10 GiB default, and a bare integer means BYTES — with
 anywhere. **`sccache-health` cannot answer any of this**: it is the sum of four ERROR counters with
 no capacity input, so a `warn` there can never be cleared by raising the cap and a permanently-full,
 thrashing cache reads `ok`. Persist and verify the cap with
-`bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`, which correlates the
-`/etc/environment` line, the value a fresh non-login PAM session sees, that value in bytes (its own
-isolated sccache oracle) and the bytes the running server enforces. **Declared residual:** a LOGIN
-shell can see a different value (on this fleet `/etc/profile.d` runs after `pam_env`) and that
-context is no longer measured, so the verdict is scoped to the non-login session in its own output.
+`bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`, which correlates three measurements:
+the `/etc/environment` line, that value in bytes (its own isolated sccache oracle) and the bytes the
+running server enforces. It **does not** probe a session, so it does not establish what a GATE sees
+— that is #3946's subject, and the verdict says so. **Declared residuals:** a LOGIN shell can see a
+different value (on this fleet `/etc/profile.d` runs after `pam_env`), and the server read uses
+bootstrap's own routing.
 
 ## Machine-wide concurrency cap (issue #1825)
 

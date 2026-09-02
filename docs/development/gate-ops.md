@@ -117,24 +117,29 @@ later client can change it. Measured: with a server up, `--show-stats` reports t
 * raising the value has **no effect until `sccache --stop-server`** (the next compile restarts it);
 * an env var being *visible* proves nothing about the cap in force — which is why every SUMMARY now
   carries `sccache-cap=<bytes>` read from the **running server**, and why
-  `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` correlates the `/etc/environment`
-  line, the value a fresh **non-login PAM session** sees, what sccache makes of that value in
-  **bytes** (its own isolated oracle), and the **bytes the running server enforces**, before it will
-  say `sccache-cap: VERIFIED`. `--fix-sccache-cap` never rewrites an existing value; a box
+  `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` correlates **three measurements** —
+  the `/etc/environment` line, what sccache makes of that value in **bytes** (its own isolated
+  oracle), and the **bytes the running server enforces** — before it will say
+  `sccache-cap: VERIFIED`. It does **not** establish what a GATE's own session sees: that needs a
+  session probe, which this section no longer has (#3946). `--fix-sccache-cap` never rewrites an existing value; a box
   deliberately running a different cap keeps it. Before writing, it resolves **its own** fleet
   literal through that oracle and refuses to persist anything that resolves to sccache's default —
   a shape test cannot do that job, because a 21-digit value passes every shape rule and measures as
   the default (#3727).
 
-**One measured context, and it says so (lead ruling `req-3727-w4`).** An earlier form of this
-section compared a non-login PAM session, a login shell and (briefly) the invoking shell, and
+**No session probing at all (lead ruling `req-3727-w4`).** An earlier form of this section probed
+a non-login PAM session and a login shell, compared them (and briefly the invoking shell), and
 classified their disagreements (`CONFLICTING-SOURCES`, unclassified-routing `UNMEASURED`, binary
-agreement, non-participant contexts). That comparison layer is **removed**: ten review rounds landed
-in it, and the follow-up issue carries its state-combination knowledge. **Declared residual, and it
-is #3727's own root cause:** on this fleet a LOGIN shell can see a different value from a non-login
-PAM session (`/etc/profile.d/20-agent-ami.sh` sources `~/.agent-ami/worker-env.sh` AFTER `pam_env`
-applies `/etc/environment`), and nothing now measures that context — so a `VERIFIED` is a statement
-about the non-login session that was measured, which is what the verdict's own scope note says.
+agreement, non-participant contexts). **All of it is removed** — ten review rounds landed in that
+layer — and so is `NOT-SYSTEM-WIDE`, the verdict that compared the file with a session. What
+remains needs no session: the file is read directly, the oracle is isolated, and the server answers
+sccache. **Two declared residuals, both fail-closed:** a LOGIN shell can see a different value from
+the file (`/etc/profile.d/20-agent-ami.sh` sources `~/.agent-ami/worker-env.sh` AFTER `pam_env`
+applies `/etc/environment` — #3727's own root cause, now #3946's subject), and the binary plus the
+server read come from **bootstrap's own PATH and routing**, so the server measured is the one that
+shell reaches. On a `cargo install sccache` box under `sudo bash …` there is no sccache on
+`secure_path` and the section reports UNMEASURED rather than measuring the wrong tool (measured on
+this fleet: sccache is `/usr/local/bin/sccache`, which IS on `secure_path`).
 
 A third fact, measured while building that check and worth knowing before you read any
 `--show-stats` output: **with NO server running, `--show-stats` does not start one** (nothing listens

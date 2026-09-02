@@ -4289,6 +4289,13 @@ mksccshims() {
     [ -n "$bin" ] && ln -sf "$bin" "$dir/$t" 2>/dev/null || true
   done
   [ "$mode" = no-sccache ] || mk_stub "$dir" sccache "$scc_stub_body"
+  # THE SESSION SIMULATION IS INERT SINCE lead ruling req-3727-w4, AND RETAINED DELIBERATELY. 5b2
+  # no longer opens a probe session, so the only `sudo` calls it makes are the write-privilege probe
+  # and the WRITE itself: the cap this stub injects is read by nothing, and the `val` argument every
+  # fixture passes is inert. It stays because rewriting the harness would risk a green 243-assertion
+  # suite for no behavioural change, and because the follow-up issue that rebuilds the multi-context
+  # layer needs exactly this simulation. Do not read a fixture's `val` as something under test.
+  #
   # ONE stub for both session types. It recognises `-i` (the LOGIN form section 5b2 added in round
   # 3) and, by default, answers identically for both — an agreeing box. Three env knobs, read at
   # call time so no call site has to change, drive the disagreeing cases:
@@ -4452,13 +4459,17 @@ else
   # SINCE THE RULING the note declares ONE measured session type and the login shell as a
   # DECLARED RESIDUAL rather than a compared context — and the residual is the assertion that
   # matters, because an unqualified VERIFIED would now cover a launch path nothing measured.
-  if out_has "$scc_sl_v" 'scope:.*ONE session type.*NON-LOGIN PAM session' \
-     && out_has "$scc_sl_v" 'scope:.*LOGIN shell additionally runs /etc/profile.d' \
-     && out_has "$scc_sl_v" 'scope:.*does not measure that context' \
+  # SINCE THE RULING removed the session half, the note's load-bearing statement is what VERIFIED
+  # does NOT establish: that a GATE's own session sees the value. An unqualified VERIFIED would read
+  # as exactly that, and the claim now belongs to #3946.
+  if out_has "$scc_sl_v" 'scope:.*THREE measurements' \
+     && out_has "$scc_sl_v" 'scope:.*does NOT establish what value a GATE' \
+     && out_has "$scc_sl_v" 'scope:.*#3946' \
      && out_has "$scc_sl_v" 'scope:.*SERVER at STARTUP' \
+     && out_has "$scc_sl_v" 'scope:.*THIS PROCESS' \
      && out_has "$scc_sl_v" 'scope:.*provenance is not' \
      && out_has "$scc_sl_v" 'sccache-cap=<bytes>'; then
-    ok "sccache-cap: VERIFIED prints its scope — the ONE session type measured, the login shell DECLARED as unmeasured, server-startup lifetime, unproven provenance, and the gate's own token as per-run authority"
+    ok "sccache-cap: VERIFIED prints its scope — the three measurements it correlates, the gate-session claim it explicitly does NOT make (#3946), this process own routing, server-startup lifetime, unproven provenance, and the gate own token as per-run authority"
   else
     bad "sccache-cap: the scope note is missing a statement, or still claims a context this section no longer measures"
     printf '%s\n' "$scc_sl_v" | grep 'scope:' | head -4
@@ -4493,24 +4504,30 @@ else
     printf '%s\n' "$scc_sl_nh" | head -6
   fi
 
-  # 12b-c. NOT-SYSTEM-WIDE — visible, accepted and enforced, but NOT coming from the
-  #        system-wide file, so a server started outside that source gets sccache's default.
+  # 12b-c. A VALUE THE FILE DOES NOT SET IS NOT PERSISTED — the #3727 state itself. This fixture
+  #        used to produce NOT-SYSTEM-WIDE, a verdict that compared the FILE against what a SESSION
+  #        saw; the session half is removed (lead ruling req-3727-w4), so what remains is the
+  #        affirmative measurement of the FILE: it does not set the cap, so nothing a PAM session
+  #        reads carries it, whatever this shell happens to have inherited.
   scc_shims_lit="$tmp/scc-shims-lit"; mksccshims "$scc_shims_lit" 30G
   scc_env_empty="$tmp/scc-env-empty"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$scc_env_empty"
   scc_out_nsw=$(runscc "$scc_bs" "$scc_shims_lit" "$scc_env_empty" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log")
   scc_sl_nsw=$(scc_slice "$scc_out_nsw")
-  if out_has "$scc_sl_nsw" -E '\[warn\].*sccache-cap: NOT-SYSTEM-WIDE' \
+  if out_has "$scc_sl_nsw" -E '\[warn\].*sccache-cap: FAILED' \
+     && out_has "$scc_sl_nsw" 'persisted NOWHERE' \
      && out_has "$scc_sl_nsw" -- '--fix-sccache-cap' \
-     && ! out_has "$scc_sl_nsw" -E '\[ok\].*sccache-cap'; then
-    ok "sccache-cap: a value reaching only this session is NOT-SYSTEM-WIDE, remedied by --fix-sccache-cap"
+     && ! out_has "$scc_sl_nsw" -E '\[ok\].*sccache-cap' \
+     && ! out_has "$scc_sl_nsw" 'NOT-SYSTEM-WIDE'; then
+    ok "sccache-cap: an inherited-only value is FAILED (the file persists nothing), remedied by --fix-sccache-cap"
   else
-    bad "sccache-cap: a session-only value was not reported as NOT-SYSTEM-WIDE"
+    bad "sccache-cap: an unpersisted cap was not reported as FAILED (or a removed verdict is back)"
     printf '%s\n' "$scc_sl_nsw" | head -6
   fi
 
-  # 12b-d1. FAILED needs ALL THREE contexts blind. Nothing persisted, no shim injection, and the
-  #         invoking environment scrubbed by runscc — so no launch path sees a cap and the verdict is
-  #         the affirmative FAILED rather than a disagreement.
+  # 12b-d1. FAILED IS A MEASUREMENT OF THE FILE. Nothing persisted, so the cap this fleet
+  #         provisions is in no file a PAM session reads — the affirmative FAILED, with the flag
+  #         named. (Before the ruling this case was about all three launch contexts being blind;
+  #         there are no launch contexts here now, which is why the wording changed with it.)
   scc_shims_none="$tmp/scc-shims-none"; mksccshims "$scc_shims_none" -
   scc_out_f=$(runscc "$scc_bs" "$scc_shims_none" "$scc_env_empty" SCC_STUB_MAX=32212254720 \
     SCC_STUB_LOG="$scc_log")
@@ -4518,7 +4535,7 @@ else
   if out_has "$scc_sl_f" -E '\[warn\].*sccache-cap: FAILED' \
      && ! out_has "$scc_sl_f" -E '\[ok\].*sccache-cap' \
      && out_has "$scc_sl_f" -- '--fix-sccache-cap'; then
-    ok "sccache-cap: with every launch context blind the verdict is FAILED, and the remedy names the flag"
+    ok "sccache-cap: with nothing persisted the verdict is FAILED, and the remedy names the flag"
   else
     bad "sccache-cap: an unpinned box with no disagreement did not report FAILED"
     printf '%s\n' "$scc_sl_f" | head -6
@@ -4539,9 +4556,9 @@ else
   if ! out_has "$scc_sl_inh" -E '\[ok\].*sccache-cap' \
      && out_has "$scc_sl_inh" -E '\[warn\].*sccache-cap: FAILED' \
      && ! out_has "$scc_sl_inh" 'CONFLICTING-SOURCES'; then
-    ok "sccache-cap: an INHERITED-but-not-persisted value neither certifies nor conflicts — the two blind sessions decide, and the verdict is FAILED"
+    ok "sccache-cap: an INHERITED-but-not-persisted value certifies nothing — the FILE decides, and the verdict is FAILED"
   else
-    bad "sccache-cap: an inherited value was accepted as evidence, or was compared as a launch context of its own"
+    bad "sccache-cap: an inherited value was accepted as evidence of a persisted cap"
     printf '%s\n' "$scc_sl_inh" | head -6
   fi
 
@@ -4555,7 +4572,7 @@ else
     scc_out_amb=$(runscc "$scc_bs" "$scc_shims_amb" "$scc_env_amb" SCCACHE_CACHE_SIZE="$scc_amb" SCC_STUB_MAX=10737418240 SCC_STUB_LOG="$scc_log")
     scc_sl_amb=$(scc_slice "$scc_out_amb")
     if out_has "$scc_sl_amb" -E '\[warn\].*sccache-cap: UNMEASURED' \
-       && out_has "$scc_sl_amb" "sccache's OWN default cap" \
+       && out_has "$scc_sl_amb" "sccache's OWN default" \
        && out_has "$scc_sl_amb" '<digits>\[KkMmGgTt\]' \
        && ! out_has "$scc_sl_amb" -E '\[ok\].*sccache-cap'; then
       ok "sccache-cap: '$scc_amb' resolving to sccache's own default is UNMEASURED with the ambiguity + grammar named"
@@ -4624,109 +4641,6 @@ else
   else
     bad "sccache-cap: a client-side echo with no server running was not refused"
     printf '%s\n' "$scc_sl_ns" | head -6
-  fi
-
-  # 12b-f1b. THE AMBIENT PRECONDITION MAY ONLY ANSWER FOR THE CONTEXT IT IS (roborev job 399, f1).
-  #          Under the documented `sudo bash <this script>` the ambient PATH is sudo's secure_path,
-  #          which omits ~/.cargo/bin — where section 2's own `cargo install sccache` puts the
-  #          binary — so the precondition above reported "no sccache on this box" for an installed
-  #          tool and --fix-sccache-cap repaired nothing. It is now gated on being the account a
-  #          gate runs as: a numeric NON-ZERO EUID.
-  #
-  #          THE BEHAVIOURAL HALF IS 12b-f ABOVE (this suite runs as an ordinary user, EUID != 0, so
-  #          it takes the answering branch and must still refuse without asking for privilege).
-  #          THE ROOT HALF IS NOT EXERCISABLE HERE, AND IS LABELLED AS SUCH RATHER THAN DRESSED UP:
-  #          `$EUID` is bash's own readonly and this suite is not root, so no fixture can make that
-  #          branch execute — a `sudo`/`unshare` fixture would test a different box and a SKIP here
-  #          is policed by case 13. So it is asserted STRUCTURALLY over the SHIPPED source: the
-  #          absence verdict must be EUID-gated, and the bypass must exist and say why the ambient
-  #          PATH is not authoritative. Structural, not behavioural — it proves the gate is written,
-  #          never that it fires.
-  # $BOOTSTRAP, never $PIN_BS: PIN_BS is this suite's GUARD WRAPPER (it takes the script as its
-  # first argument), so reading it yielded an EMPTY slice and the assertion failed for a reason
-  # that had nothing to do with the property — measured, first run.
-  scc_pre_src=$(sed -n '/^scc_pre_euid=/,/^fi$/p' "$BOOTSTRAP")
-  if out_has "$scc_pre_src" -E '^scc_pre_euid="\$\{EUID-\}"$' \
-     && out_has "$scc_pre_src" -E "^case \"\\\$scc_pre_euid\" in ''\|\*\[!0-9\]\*\)" \
-     && out_has "$scc_pre_src" -E '^  if \[ -n "\$scc_pre_euid" \] && \[ "\$scc_pre_euid" != 0 \]; then$' \
-     && out_has "$scc_pre_src" 'no cap to verify' \
-     && out_has "$scc_pre_src" 'secure_path' \
-     && out_has "$scc_pre_src" 'decided by the SESSION contexts'; then
-    ok "sccache-cap: the ambient-absence verdict is gated on a numeric non-zero EUID, and root bypasses it to the session contexts (structural: this suite cannot be root)"
-  else
-    bad "sccache-cap: the ambient precondition is not EUID-gated — under 'sudo bash bootstrap' a cargo-installed sccache reads as absent and --fix-sccache-cap repairs nothing"
-    printf '%s\n' "$scc_pre_src" | head -8
-  fi
-
-  # 12b-f2b. TWO PROBES MUST NOT AGREE BY SHARING OUR CONTAMINATION (roborev job 399, f2). The
-  #          scrub before each session used to NAME three variables, leaving SCCACHE_REDIS /
-  #          SCCACHE_CONF / SCCACHE_WEBDAV_* / any FUTURE SCCACHE_* in the caller's environment. If
-  #          sudoers preserves them BOTH probes inherit the same caller-specific routing, agree
-  #          because they share our contamination, and the section certifies — or STARTS — a server
-  #          no ordinary session will contact: a false VERIFIED, the exact defect 5b2 exists to
-  #          catch, in the code that reports it. Now blanket, derived from `compgen -e`, because a
-  #          future backend variable is unknowable and an enumerated list goes stale silently.
-  #
-  #          MEASURED AT THE SUDO BOUNDARY, not inferred from the verdict: the stub censuses the
-  #          SCCACHE_* it INHERITED — for MEASUREMENT calls only (a probe, a binary resolution, a
-  #          stats read, a start/stop), because those are the calls SCCACHE_* can change. The bare
-  #          `sudo … true` privilege probes and the file writes carry the caller's environment and
-  #          always will: nothing they run reads it. That scope is set BY ARGV in the stub rather
-  #          than left as an absence, and it is the same boundary 12b-f2c asserts over the source —
-  #          source-side every measurement call must carry the scrub, boundary-side no measurement
-  #          call may see caller routing. Two positive controls, because an empty census is otherwise
-  #          indistinguishable from a census that never ran — `census-ran` proves the logger fired,
-  #          and an unrelated CQLITE_SCRUB_MARKER must SURVIVE, proving the scrub is SCCACHE_*-scoped
-  #          rather than an env wipe that would make the probe answer about nothing.
-  scc_envlog="$tmp/scc-sudo-env.log"; : >"$scc_envlog"
-  scc_out_scrub=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G \
-    SCC_STUB_MAX=32212254720 SCC_SHIM_ENV_LOG="$scc_envlog" CQLITE_SCRUB_MARKER=present \
-    SCCACHE_REDIS=redis://poisoned.example/1 SCCACHE_CONF=/caller/poisoned.toml)
-  scc_sl_scrub=$(scc_slice "$scc_out_scrub")
-  if grep -q '^census-ran$' "$scc_envlog" \
-     && grep -q '^marker:present$' "$scc_envlog" \
-     && ! grep -q 'poisoned' "$scc_envlog" \
-     && out_has "$scc_sl_scrub" -E '\[ok\].*sccache-cap: VERIFIED'; then
-    ok "sccache-cap: every caller SCCACHE_* is scrubbed before each session probe (SCCACHE_REDIS/SCCACHE_CONF absent at the sudo boundary), while an unrelated variable survives — so the probes cannot agree by sharing our routing"
-  else
-    bad "sccache-cap: a caller-only SCCACHE_* reached the session probe (or the census never ran) — two probes could agree on OUR routing and certify a server no gate will use"
-    printf '  census: %s\n' "$(grep -c '^' "$scc_envlog" 2>/dev/null || echo 0) line(s)"
-    grep -n 'poisoned\|census-ran\|marker:' "$scc_envlog" | head -4
-    printf '%s\n' "$scc_sl_scrub" | head -4
-  fi
-
-  # 12b-f2c. THE SCRUB IS ASSERTED OVER EVERY SESSION CALL, DERIVED FROM THE SHIPPED SOURCE — not
-  #          over the one call site a review happened to name. 12b-f2b's census caught the first fix
-  #          being INCOMPLETE: the value probe was scrubbed while the BINARY RESOLUTION and the
-  #          shared session runner (server reads and the start — where a caller's SCCACHE_REDIS
-  #          redirects the read, not merely the report) still carried three named unsets. A curated
-  #          assertion would have passed the incomplete fix, which is the same failure one level up
-  #          from the enumerated list itself. So: join continuation lines, take every REAL
-  #          `sudo -n -u "$SCC_SELF_USER"` invocation, and require the blanket scrub on each.
-  #          ONE EXCUSAL, BY NAME AND WITH ITS REASON: the privilege probe runs `true`, so no
-  #          environment can influence it. A floor guards against a refactor greening this vacuously.
-  scc_sess_bad=""; scc_sess_n=0; scc_sess_excused=0
-  while IFS= read -r scc_sess_line; do
-    scc_sess_t=${scc_sess_line#"${scc_sess_line%%[![:space:]]*}"}
-    case "$scc_sess_t" in
-      '#'*) continue ;;
-      *'info "'*|*'warn "'*|*'info '\''*'*) continue ;;
-    esac
-    scc_sess_n=$((scc_sess_n + 1))
-    case "$scc_sess_t" in
-      *'sudo -n -u "$SCC_SELF_USER" true'*) scc_sess_excused=$((scc_sess_excused + 1)); continue ;;
-    esac
-    case "$scc_sess_t" in
-      *'SCC_ENV_SCRUB'*) ;;
-      *) scc_sess_bad="${scc_sess_bad:+$scc_sess_bad
-}  $scc_sess_t" ;;
-    esac
-  done < <(sed -e ':a' -e '/\\$/N; s/\\\n//; ta' "$BOOTSTRAP" | grep -F 'sudo -n -u "$SCC_SELF_USER"')
-  if [ "$scc_sess_n" -ge 4 ] && [ -z "$scc_sess_bad" ]; then
-    ok "sccache-cap: all $scc_sess_n session invocations carry the blanket SCCACHE_* scrub ($scc_sess_excused excused by name: the privilege probe runs 'true')"
-  else
-    bad "sccache-cap: $scc_sess_n session invocation(s) found, and one carries no blanket scrub — the caller's routing reaches a session probe, a read or a start:"
-    printf '%s\n' "${scc_sess_bad:-  (no invocation found at all — the derivation broke, which is not a pass)}"
   fi
 
   # 12b-g2. A FRESH PROVISIONED BOX: NO SERVER YET, AND THE SECTION BECOMES THE FIRST STARTER
