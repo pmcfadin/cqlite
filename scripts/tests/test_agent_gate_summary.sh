@@ -6409,7 +6409,7 @@ esac
 # STRUCTURAL: the emit boundary must admit the doctest shape via the NAMED grammar predicate,
 # not by adding `/` to the charset — a widened charset would readmit every URL path.
 fa_eb=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE")
-if printf '%s\n' "$fa_eb" | grep -q '_failassert_is_doctest_id "$fa_n"'; then
+if printf '%s\n' "$fa_eb" | grep -q '_failassert_is_doctest_id "$fa_probe"'; then
   ok "3765-doctest-boundary-grammar: the emit boundary admits the doctest shape through the named grammar predicate, so the charset still excludes / for every other shape"
 else
   bad "3765-doctest-boundary-grammar: the emit boundary does not consult _failassert_is_doctest_id — if / was added to the charset instead, every URL path is publishable again (job 63)"
@@ -6462,7 +6462,7 @@ esac
 # STRUCTURAL: the boundary must admit this shape through its OWN named grammar predicate, and
 # the delta runner must CAPTURE the verdicts (the identity has to exist before it can be named).
 fa_eb2=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE")
-if printf '%s\n' "$fa_eb2" | grep -q '_failassert_is_shelltestid "$fa_n"'; then
+if printf '%s\n' "$fa_eb2" | grep -q '_failassert_is_shelltestid "$fa_probe"'; then
   ok "3765-shelltest-boundary-grammar: the emit boundary admits the shell-test shape through its own named grammar predicate, so the charset still excludes / elsewhere"
 else
   bad "3765-shelltest-boundary-grammar: the emit boundary does not consult _failassert_is_shelltestid (job 67)"
@@ -6653,6 +6653,63 @@ if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -q '●'; then
   ok "3765-jest-no-bullet-rule: the jest bullet line is NOT a recogniser — a jest test name is free-form prose, and publishing prose is the job-70 defect"
 else
   bad "3765-jest-no-bullet-rule: a rule keys on the jest ● line, whose payload is free-form prose (job 70)"
+fi
+
+# 55zf. ROBOREV JOB 74 — pytest node ids. Two defects in the rule added the round before, and
+#       this repository has 123 `class Test` definitions and 36 parametrize decorators in its
+#       python suites, so both shapes are common rather than exotic.
+#  (a) A GREEDY `sub(/^.*::/)` cut at the LAST `::`, dropping the class scope, so
+#      `file.py::TestA::test_x` published as `file.py::test_x` — IDENTICAL to a module-level
+#      `test_x`, i.e. the WRONG identity, which is worse than a placeholder.
+printf 'FAILED tests/test_x.py::TestA::test_x\nFAILED tests/test_x.py::test_x\n' > "$fa_dir/pyc.log"
+_fa_run pyc "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pyc.log" PASS
+fa_pc=$(_fa_line fmt)
+case "$fa_pc" in
+  *"TestA::test_x"*)
+    ok "3765-pytest-class-scope: a class-scoped node id keeps its class segment, so it is distinguishable from a module-level test of the same name" ;;
+  *) bad "3765-pytest-class-scope: expected TestA::test_x, got '$fa_pc' — a greedy :: cut drops the class scope and publishes the WRONG identity (job 74)" ;;
+esac
+case "$fa_pc" in
+  *"2 RECOGNISED"*) ok "3765-pytest-class-distinct: the class-scoped and module-level tests count as TWO" ;;
+  *) bad "3765-pytest-class-distinct: expected 2 RECOGNISED, got '$fa_pc'" ;;
+esac
+#  (b) A PARAMETERISED id was REJECTED outright. The parameter VALUE is arbitrary text and can
+#      carry an authority, so it is replaced by a FIXED marker rather than sanitised — the same
+#      ruling as every other free-text field here — while dedup and the COUNT keep using the
+#      FULL node id, so two parameter cases stay two failures.
+printf 'FAILED tests/test_x.py::test_x[a]\nFAILED tests/test_x.py::test_x[b]\n' > "$fa_dir/pyp.log"
+_fa_run pyp "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pyp.log" PASS
+fa_pp=$(_fa_line fmt)
+case "$fa_pp" in
+  *"2 RECOGNISED"*"test_x[...]"*)
+    ok "3765-pytest-param: parameterised ids publish a FIXED [...] marker and still COUNT as two" ;;
+  *"not extractable"*)
+    bad "3765-pytest-param: an ordinalised parameterised pair was refused at the emit boundary ($fa_pp) — the trailing #<n> ordinal is outside every path grammar and must be stripped before matching (job 74)" ;;
+  *) bad "3765-pytest-param: expected 2 RECOGNISED with a [...] marker, got '$fa_pp'" ;;
+esac
+printf 'FAILED tests/test_x.py::test_x[https://x-access-token:SEKPARAM@h.io/p]\n' > "$fa_dir/pypu.log"
+_fa_run pypu "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pypu.log" PASS
+fa_ppu=$(_fa_line fmt)
+case "$fa_ppu" in
+  *SEKPARAM*|*"@h.io"*) bad "3765-pytest-param-no-authority: a parameter VALUE carrying an authority reached the field ('$fa_ppu')" ;;
+  *"test_x[...]"*) ok "3765-pytest-param-no-authority: a parameter value carrying an authority is replaced wholesale by the fixed marker" ;;
+  *) bad "3765-pytest-param-no-authority: expected the [...] marker, got '$fa_ppu'" ;;
+esac
+# STRUCTURAL: the ordinal must be stripped ONCE at the boundary call site, not per predicate,
+# so a fifth path grammar inherits it rather than re-discovering this defect.
+fa_ob=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE")
+if printf '%s\n' "$fa_ob" | grep -q 'fa_ord=${fa_probe##\*#}' \
+   && printf '%s\n' "$fa_ob" | grep -q '_failassert_is_doctest_id "$fa_probe"'; then
+  ok "3765-ordinal-stripped-once: the trailing ordinal is stripped once at the boundary call site and every path grammar is matched against the stripped value"
+else
+  bad "3765-ordinal-stripped-once: the ordinal is not stripped before the path grammars are consulted — an ordinalised pair renders not extractable (job 74)"
+fi
+# And the greedy-cut shape is pinned structurally, since it published a WRONG identity rather
+# than a placeholder, which no charset or shape check downstream can detect.
+if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -q 'sub(/\^\.\*::/'; then
+  ok "3765-pytest-no-greedy-cut: the pytest rule does not use a greedy ^.*:: cut, so the class scope survives"
+else
+  bad "3765-pytest-no-greedy-cut: a greedy ^.*:: cut is back — it drops the class scope and publishes the identity of a DIFFERENT test (job 74)"
 fi
 
 # CODE lines only: the digest note NAMES those binaries while explaining why it does not use
@@ -6911,7 +6968,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=568
+ASSERT_FLOOR=574
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

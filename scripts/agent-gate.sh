@@ -6925,7 +6925,11 @@ _failassert_is_pytestid() {
   [ -n "$pth" ] && [ -n "$tst" ] || return 1
   case "$pth" in *.py) ;; *) return 1 ;; esac
   case "$pth" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
-  case "$tst" in *[!A-Za-z0-9._:-]*) return 1 ;; esac
+  # The remainder is `::`-joined segments, each optionally carrying the FIXED `[...]` parameter
+  # marker (roborev job 74). Strip the literal marker, then require the rest to be identifier
+  # characters and `:` only — so `@` and `/` stay excluded and a real parameter VALUE (which
+  # the projection replaces wholesale) can never appear here.
+  case "${tst//"[...]"/}" in *[!A-Za-z0-9._:-]*) return 1 ;; esac
   return 0
 }
 _failassert_is_jestid() {
@@ -7050,6 +7054,7 @@ _failassert_record() {
   #                 family travelled on can be published even if a recogniser regressed.
   # It REFUSES rather than redacting: the value is supposed to BE an identifier, and an
   # identifier that is not one is not something to sanitise into shape.
+  local fa_probe fa_ord
   for fa_n in "${fa_names[@]}"; do
     case "$tier" in
       toolchain)
@@ -7061,8 +7066,17 @@ _failassert_record() {
       *)
         # ONE exception to the charset, and it is a GRAMMAR rather than a widening: a doctest
         # identifier carries a path, so it carries `/`. See _failassert_is_doctest_id.
-        if _failassert_is_doctest_id "$fa_n" || _failassert_is_shelltestid "$fa_n" \
-           || _failassert_is_pytestid "$fa_n" || _failassert_is_jestid "$fa_n"; then
+        # STRIP A TRAILING ORDINAL BEFORE MATCHING A GRAMMAR (roborev job 74). When two
+        # identities publish the SAME projection the layer above ordinalises them (`…#1`,
+        # `…#2`) — which is F5 working — and `#` is outside every path grammar, so an
+        # ordinalised pair of pytest/jest/doctest/shell-test identities was refused at this
+        # boundary and rendered `not extractable`. Stripped ONCE here rather than in each of
+        # the four predicates, so a fifth grammar inherits it.
+        fa_probe=$fa_n
+        fa_ord=${fa_probe##*#}
+        case "$fa_ord" in ''|*[!0-9]*) ;; *) fa_probe=${fa_probe%#*} ;; esac
+        if _failassert_is_doctest_id "$fa_probe" || _failassert_is_shelltestid "$fa_probe" \
+           || _failassert_is_pytestid "$fa_probe" || _failassert_is_jestid "$fa_probe"; then
           :
         else
           case "$fa_n" in

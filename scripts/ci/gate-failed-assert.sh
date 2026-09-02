@@ -336,9 +336,17 @@ awk -v max="$max" '
   # real failure in either published `0 RECOGNISED` (roborev job 71) — including the node-tests
   # delta log this change only just started capturing. Closed grammars, same rule as pubdoc and
   # pubsh: a path charset with no `:` beyond the `::` separator and no `@`, so no authority.
-  function pubpytest(pth, tst) {
-    if (pth ~ /^[A-Za-z0-9._\/-]+\.py$/ && tst ~ /^[A-Za-z0-9._:-]+$/) return "pytest " pth "::" tst
-    return "<no identifier in the failure text - read the component log>"
+  function pubpytest(pth, rest) {
+    if (pth !~ /^[A-Za-z0-9._\/-]+\.py$/) return "<no identifier in the failure text - read the component log>"
+    # A PARAMETERISED id carries the parameter VALUE, which is arbitrary text and can hold an
+    # authority — so the value is replaced by a FIXED marker rather than sanitised, the same
+    # ruling as every other free-text field here. Dedup and the COUNT still run on the FULL
+    # node id, so two parameter cases remain two failures (this repo has 36 parametrize
+    # decorators). roborev job 74.
+    gsub(/\[[^]]*\]/, "[...]", rest)
+    if (rest !~ /^[A-Za-z0-9._-]+(\[\.\.\.\])?(::[A-Za-z0-9._-]+(\[\.\.\.\])?)*$/)
+      return "<no identifier in the failure text - read the component log>"
+    return "pytest " pth "::" rest
   }
   function pubjest(pth) {
     if (pth ~ /^[A-Za-z0-9._\/-]+\.(test\.)?(js|mjs|cjs|ts)$/) return "jest-suite " pth
@@ -483,7 +491,11 @@ awk -v max="$max" '
   /^FAILED [^:@[:space:]]+\.py::[^[:space:]]+/ {
     s = $0; sub(/^FAILED /, "", s); sub(/[[:space:]].*$/, "", s)
     jp_p = s; sub(/::.*$/, "", jp_p)
-    jp_t = s; sub(/^.*::/, "", jp_t)
+    # substr, NOT sub(/^.*::/): that pattern is GREEDY and cut at the LAST `::`, dropping the
+    # class scope, so `file.py::TestA::test_x` published as `file.py::test_x` — identical to a
+    # module-level `test_x` and therefore the WRONG identity (roborev job 74). This repository
+    # has 123 `class Test` definitions in its python suites.
+    jp_t = substr(s, length(jp_p) + 3)
     add("assert", s, pubpytest(jp_p, jp_t), 0); next
   }
   # A7 jest: `FAIL <suite path>`. The `● <test name>` line is deliberately NOT used: a jest
