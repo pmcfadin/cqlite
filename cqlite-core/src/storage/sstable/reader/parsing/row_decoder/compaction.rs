@@ -662,7 +662,7 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                 None,
             ) {
                 Ok((_cells, _meta, _hdr, next_offset, _is_static, _complex)) => Some(next_offset),
-                Err(_) => None,
+                Err(e) => { crate::probe3782::hit("compaction:665_structure_only", &format!("{e}")); None },
             };
         }
         // Compaction mode: capture per-column complex elements and request
@@ -702,7 +702,7 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                 });
                 Some(next_offset)
             }
-            Err(_) => None,
+            Err(e) => { crate::probe3782::hit("compaction:705_full", &format!("{e}")); None },
         }
     }
 }
