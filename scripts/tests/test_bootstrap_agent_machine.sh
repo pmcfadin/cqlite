@@ -1167,15 +1167,28 @@ fi
 #      a cap regression is what it detects, not symlinks in general.
 sbAC=$(mktemp -d "$tmp/moldAC.XXXXXX"); mkdir -p "$sbAC/.cargo" "$sbAC/chain"
 printf '[net]\nretry = 23\n' >"$sbAC/chain/final.toml"
+# A PORTABLE ARITHMETIC LOOP, NOT `seq` (#3756 roborev round 11). `seq` is not in POSIX, and the
+# availability question is the SMALLER half: this suite does not run under `set -e`, so ANY failure
+# of the chain construction — a missing `seq`, an `ln` refusal, a full filesystem — left the loop
+# empty with `ac_built` still 1 and `ac_prev` still pointing at the FINAL FILE. `config.toml` was
+# then symlinked straight to it and the case PASSED having exercised a ONE-link chain, i.e. a
+# vacuous pass inside the test whose whole purpose is the 35-link one. Availability is fixed by
+# the loop; the vacuity is fixed by COUNTING what was actually built and requiring the number.
 ac_prev="$sbAC/chain/final.toml"
-ac_built=1
-for ac_i in $(seq 1 35); do
-  ln -s "$ac_prev" "$sbAC/chain/l$ac_i" || { ac_built=0; break; }
+ac_built=0
+ac_i=1
+while [ "$ac_i" -le 35 ]; do
+  ln -s "$ac_prev" "$sbAC/chain/l$ac_i" || break
   ac_prev="$sbAC/chain/l$ac_i"
+  ac_built=$((ac_built + 1))
+  ac_i=$((ac_i + 1))
 done
-# THE CHAIN MUST BE OPENABLE BY THIS KERNEL, or the case is asserting about a path nothing could
-# use and would fail for the fixture's reason rather than the code's. Probed, not assumed.
-if [ "$ac_built" = 1 ] && [ "$(cat "$ac_prev" 2>/dev/null | head -1)" = '[net]' ]; then
+# THE LENGTH IS ASSERTED, NOT INFERRED. `ac_built` now counts links that were actually created, so
+# a short chain can no longer masquerade as the long one; and the deepest link must really BE a
+# symlink. THE CHAIN MUST ALSO BE OPENABLE BY THIS KERNEL, or the case asserts about a path nothing
+# could use and fails for the fixture's reason rather than the code's. Probed, not assumed.
+if [ "$ac_built" -eq 35 ] && [ -L "$ac_prev" ] \
+   && [ "$(head -1 "$ac_prev" 2>/dev/null)" = '[net]' ]; then
   ln -s "$ac_prev" "$sbAC/.cargo/config.toml"
   PATH="$stubO:$PATH" HOME="$sbAC" CARGO_HOME="$sbAC/.cargo" \
     "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
@@ -1187,7 +1200,7 @@ if [ "$ac_built" = 1 ] && [ "$(cat "$ac_prev" 2>/dev/null | head -1)" = '[net]' 
     bad "mold/symlink: a 35-link openable chain was not written through (still-link=$([ -L "$sbAC/.cargo/config.toml" ] && echo yes || echo no) begin=$(count_begin "$sbAC/chain/final.toml") user-line=$(grep -c 'retry = 23' "$sbAC/chain/final.toml"))"
   fi
 else
-  skip "mold/symlink: 35-link chain case — this kernel or filesystem could not provide an openable 35-link chain, so the subject does not exist"
+  skip "mold/symlink: 35-link chain case — this host could not provide an OPENABLE 35-link chain (built $ac_built of 35 links; deepest-is-symlink=$([ -L "$ac_prev" ] && echo yes || echo no); readable=$([ -n "$(head -1 "$ac_prev" 2>/dev/null)" ] && echo yes || echo no)), so the subject does not exist — a shorter chain is NOT silently substituted"
 fi
 
 # --- 7. git push credentials (issue #2942) ---------------------------------
