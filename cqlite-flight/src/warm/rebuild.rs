@@ -349,10 +349,10 @@ impl WarmTableRegistry {
                 return Err(WarmError::Cancelled);
             }
             let (reader, real) = self.coalescer.open(entry.id, cancel, || {
-                // Test-only rendezvous (issue #3940): fires on the LEADER's own
-                // thread, downstream of every flight-side cancel gate above and
-                // of the coalescer's own follower poll, immediately before the
-                // Index.db open+parse. A cancel tripped here is therefore
+                // Test-only rendezvous (issue #3940): fires on the OPENING
+                // thread (whichever role reaches a real open), downstream of
+                // every flight-side cancel gate above and of the coalescer's own
+                // follower poll, immediately before the Index.db open+parse. A cancel tripped here is therefore
                 // observable ONLY by the parse's `ScanCancel` polling (fix C),
                 // which is what makes the mid-parse-cancel repro deterministic
                 // instead of sleep-calibrated. No-op in production.

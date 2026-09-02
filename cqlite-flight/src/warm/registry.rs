@@ -188,7 +188,7 @@ pub struct WarmTableRegistry {
     #[cfg(test)]
     pub(super) open_barrier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Test-only hook invoked INSIDE the coalesced real-open closure, on the
-    /// leader's own thread, immediately BEFORE `open_one_reader` runs the
+    /// OPENING thread itself, immediately BEFORE `open_one_reader` runs the
     /// Index.db open+parse — i.e. downstream of EVERY flight-side cancel gate
     /// (`rebuild`'s pre-rebuild + pre-open checks, `open_added`'s per-iteration
     /// check, and the coalescer's follower-wait poll), so a cancellation tripped
