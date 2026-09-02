@@ -376,12 +376,41 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
         *) fail "$OUT_DIR/$KEYSPACE canonicalises to $_ks_real, which is OUTSIDE $_out_real. Refusing to delete." ;;
       esac
 
-      # Nullglob so a first-ever run (no existing generation) is not a literal
-      # "$TABLE-*" pathspec.
+      # DELETE ONLY WHAT CASSANDRA ITSELF WOULD HAVE WRITTEN
+      # (roborev job 47, finding 2). `"$TABLE"-*/` is too loose for an `rm -rf`:
+      # the trailing slash makes the glob follow a SYMLINK-to-directory, and the
+      # `*` matches any suffix, so an unrelated `collection_order-scratch/` or a
+      # symlink planted beside the fixture would be destroyed. Deleting is the one
+      # irreversible thing this script does, so each candidate must earn it:
+      #   * iterate WITHOUT the trailing slash, so a symlink is seen as a symlink
+      #     rather than silently dereferenced by the glob;
+      #   * require Cassandra's exact table-directory basename, `<TABLE>-<32 hex>`;
+      #   * refuse a symlink;
+      #   * require a real directory; and
+      #   * require the canonical target to be a DIRECT CHILD of the already
+      #     validated keyspace directory, so nothing outside it can be reached.
+      # Anything not matching is LEFT ALONE and reported, never deleted.
       shopt -s nullglob
-      for _stale in "$OUT_DIR/$KEYSPACE/$TABLE"-*/; do
-        log "removing previous generation $_stale"
-        rm -rf "$_stale"
+      for _stale in "$OUT_DIR/$KEYSPACE/$TABLE"-*; do
+        _base="$(basename "$_stale")"
+        if [[ ! "$_base" =~ ^${TABLE}-[0-9a-f]{32}$ ]]; then
+          log "SKIP (not a <table>-<32-hex> generation dir, leaving alone): $_stale"
+          continue
+        fi
+        if [[ -L "$_stale" ]]; then
+          log "SKIP (symlink, refusing to delete through it): $_stale"
+          continue
+        fi
+        if [[ ! -d "$_stale" ]]; then
+          log "SKIP (not a directory): $_stale"
+          continue
+        fi
+        _stale_real="$(cd "$_stale" && pwd -P)" || fail "cannot canonicalise $_stale"
+        if [[ "$(dirname "$_stale_real")" != "$_ks_real" ]]; then
+          fail "$_stale canonicalises to $_stale_real, which is NOT a direct child of $_ks_real. Refusing to delete."
+        fi
+        log "removing previous generation $_stale_real"
+        rm -rf "$_stale_real"
       done
       shopt -u nullglob
       cp -r "$TMPDIR_EXPORT/data/$KEYSPACE/." "$OUT_DIR/$KEYSPACE/"

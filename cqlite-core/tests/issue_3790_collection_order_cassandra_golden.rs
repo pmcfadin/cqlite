@@ -824,7 +824,18 @@ struct DecodedColumn {
 /// authoritative schema, never inferred from the bytes (#28).
 fn table_schema() -> TableSchema {
     let path =
-        datasets_root::schema_path("issue-3790-comparator-ordering.cql").unwrap_or_else(|| {
+        // CHECKOUT-RELATIVE, for the same reason as `fixture_dir()` above
+        // (roborev job 47, finding 3): `datasets_root::schema_path` honours
+        // `CQLITE_SCHEMAS_ROOT`, so an out-of-tree schemas root could substitute
+        // the committed DDL this oracle is asserting about — the same shadowing
+        // class already closed for the SSTable fixture, one file over. The schema
+        // is COMMITTED SOURCE (#3148 resolves these checkout-relative and never
+        // from an env root), so nothing needs to be read from the environment.
+        Some(checkout_test_data_dir()
+            .join("schemas")
+            .join("issue-3790-comparator-ordering.cql"))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| {
             panic!(
                 "committed schema issue-3790-comparator-ordering.cql is unreadable — it \
              is checkout-relative source (#3148), so this is a resolution defect, \
