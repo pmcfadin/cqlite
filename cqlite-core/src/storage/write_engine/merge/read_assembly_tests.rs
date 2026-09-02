@@ -679,6 +679,53 @@ fn set_of_unresolved_udt_still_fails_closed() {
     );
 }
 
+/// **roborev job 60 — a composite cell path with TRAILING BYTES must fail closed.**
+///
+/// `ftk` is `map<frozen<tuple<int, text>>, bigint>`. A well-formed key for it is
+/// `i32 len=4 | int | i32 len=n | text`. Appending ONE extra byte leaves framing that
+/// does not consume the slice — and the shared decoder used to ignore the remainder,
+/// so this path decoded to the SAME logical key as the well-formed one. In a map that
+/// is a duplicate-key hazard.
+///
+/// Cassandra's `TupleType.validate` throws on trailing bytes after a composite's
+/// components, so refusing it adds no availability risk for data Cassandra would read.
+///
+/// RED BEFORE THE FIX: this returned `Ok` and the trailing byte was silently dropped.
+#[test]
+fn composite_cell_path_with_trailing_bytes_fails_closed() {
+    // int 7, then text "a", then ONE byte too many.
+    let mut path = Vec::new();
+    path.extend_from_slice(&4i32.to_be_bytes());
+    path.extend_from_slice(&7i32.to_be_bytes());
+    path.extend_from_slice(&1i32.to_be_bytes());
+    path.push(b'a');
+    let well_formed_len = path.len();
+    path.push(0xAA); // trailing garbage
+
+    let cells = vec![elem("ftk", Value::BigInt(1), path)];
+    let err = assemble_read_cells(cells, &schema(), None, registry()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("ftk") && msg.contains("trailing"),
+        "a composite cell path with trailing bytes must fail closed naming the column, \
+         got: {msg}"
+    );
+
+    // Control: the SAME path without the extra byte decodes fine, so the refusal is
+    // caused by the trailing byte and not by the fixture being malformed.
+    let mut ok_path = Vec::new();
+    ok_path.extend_from_slice(&4i32.to_be_bytes());
+    ok_path.extend_from_slice(&7i32.to_be_bytes());
+    ok_path.extend_from_slice(&1i32.to_be_bytes());
+    ok_path.push(b'a');
+    assert_eq!(ok_path.len(), well_formed_len);
+    let ok_cells = vec![elem("ftk", Value::BigInt(1), ok_path)];
+    assert!(
+        assemble_read_cells(ok_cells, &schema(), None, registry()).is_ok(),
+        "the same cell path WITHOUT the trailing byte must still decode"
+    );
+}
+
 /// **roborev job 57 — a `varint` COMPONENT of a composite must order as Cassandra does.**
 ///
 /// `compare_composite`'s scalar leaves used to delegate to `ComparatorType::compare`,
