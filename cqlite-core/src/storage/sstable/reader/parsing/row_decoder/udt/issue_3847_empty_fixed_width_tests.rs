@@ -58,9 +58,15 @@ fn column() -> crate::schema::Column {
 
 /// Every fixed-width `CqlType` the two field decoders enumerate, with its width.
 /// `Counter`, `SmallInt`, `TinyInt` and `Time` are absent DELIBERATELY: neither
-/// decoder has an arm for them (they fall to the blob default), which is a
-/// pre-existing gap this change does not widen or close — see
+/// decoder has a per-type arm for them, so a NON-EMPTY value of those types still
+/// falls to the blob default — a pre-existing gap this change does not widen or
+/// close (#3631 / PR #3820 own it), pinned by
 /// `a_fixed_width_type_with_no_arm_still_falls_to_the_blob_default`.
+///
+/// Their EMPTY case is NOT a gap any more: since roborev job 94 both decoders
+/// answer `null` for every member of `fixed_width::width_of`, arm or no arm, and
+/// `an_empty_field_of_every_fixed_width_type_is_null_in_both_decoders` asserts it
+/// set-wide. This list is about ARMS, not about the empty rule.
 fn decoder_arms() -> Vec<(CqlType, usize)> {
     vec![
         (CqlType::Int, 4),
@@ -375,5 +381,78 @@ fn a_negative_one_length_stays_an_absent_field_not_an_empty_one() {
             );
         }
         other => panic!("expected a UDT, got {other:?}"),
+    }
+}
+
+/// roborev job 94 (Medium, raised to blocker: a silent WRONG VALUE on a path this
+/// issue's own acceptance criteria name). The four types with no per-type arm —
+/// plus `Date` in the simple decoder and `TimeUuid` in the instance one — used to
+/// reach `_ => Value::Blob` and answer an EMPTY BLOB for a zero-length field, while
+/// `create_empty_value_for_type` answered `null` for the same type. Two of the five
+/// framing sites route through the router and three call a decoder directly, so the
+/// five sites disagreed for exactly these types. Both decoders now answer from
+/// `fixed_width::width_of`, so ALL of them agree.
+///
+/// Asserted for every member of the oracle's set, not just the four that were
+/// wrong: a set-wide assert cannot rot as arms are added or removed beneath it.
+#[test]
+fn an_empty_field_of_every_fixed_width_type_is_null_in_both_decoders() {
+    let parser = parser();
+    for ty in [
+        CqlType::Boolean,
+        CqlType::TinyInt,
+        CqlType::SmallInt,
+        CqlType::Int,
+        CqlType::BigInt,
+        CqlType::Counter,
+        CqlType::Float,
+        CqlType::Double,
+        CqlType::Timestamp,
+        CqlType::Date,
+        CqlType::Time,
+        CqlType::Uuid,
+        CqlType::TimeUuid,
+    ] {
+        assert_eq!(
+            V5CompressedLegacyParser::parse_simple_udt_field_value(&[], &ty)
+                .unwrap_or_else(|e| panic!("{ty:?}: empty field must decode, got {e:?}")),
+            Value::Null,
+            "{ty:?}: parse_simple_udt_field_value must answer null for a 0-length field"
+        );
+        assert_eq!(
+            parser
+                .parse_udt_field_value(&[], &ty)
+                .unwrap_or_else(|e| panic!("{ty:?}: empty field must decode, got {e:?}")),
+            Value::Null,
+            "{ty:?}: parse_udt_field_value must answer null for a 0-length field"
+        );
+        assert_eq!(
+            V5CompressedLegacyParser::create_empty_value_for_type(&ty),
+            Value::Null,
+            "{ty:?}: the router must agree with both decoders — that agreement IS the fix"
+        );
+    }
+}
+
+/// The guard must NOT swallow a variable-width or composite type: an empty `text`
+/// is the EMPTY STRING and an empty `blob` is an empty blob, neither is null, and
+/// `width_of` returning `None` for them is what keeps that true. Pinned because a
+/// guard keyed on "is this empty" alone — without the type test — would silently
+/// turn every empty `text` field into null.
+#[test]
+fn the_empty_guard_does_not_apply_to_variable_width_or_composite_types() {
+    for ty in [
+        CqlType::Text,
+        CqlType::Ascii,
+        CqlType::Blob,
+        CqlType::List(Box::new(CqlType::Int)),
+    ] {
+        let decoded = V5CompressedLegacyParser::parse_simple_udt_field_value(&[], &ty)
+            .unwrap_or_else(|e| panic!("{ty:?}: empty field must decode, got {e:?}"));
+        assert_ne!(
+            decoded,
+            Value::Null,
+            "{ty:?}: width_of must be None here, so the #3847 null guard must not fire"
+        );
     }
 }

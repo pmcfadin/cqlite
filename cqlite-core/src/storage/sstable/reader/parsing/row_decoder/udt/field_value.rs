@@ -49,6 +49,24 @@ impl V5CompressedLegacyParser {
 
     /// Parse a UDT field value based on its CqlType.
     pub(super) fn parse_udt_field_value(&self, data: &[u8], field_type: &CqlType) -> Result<Value> {
+        // #3847: a 0-length field header means "present and EMPTY", which Cassandra's
+        // READ path deserializes to null for every fixed-width scalar (oracle:
+        // docs/round-artifacts/issue-3847-cassandra-oracle.md). Answer it HERE, from
+        // the one type-keyed oracle, so this decoder agrees with the other framing
+        // sites for EVERY member of the set — including the types with no per-type arm
+        // below, which would otherwise reach `_ =>` and yield an EMPTY BLOB rather than
+        // null (roborev job 94: SmallInt, TinyInt, Time and TimeUuid). The per-type arms keep their
+        // own `FixedWidthCell::Null` branch: it is the same answer by a second path, it
+        // is what the width-classifier contract tests assert, and it must stay correct
+        // for any caller reaching an arm directly.
+        //
+        // NON-EMPTY decoding is deliberately UNTOUCHED. Those same types degrading to
+        // `Value::Blob` when non-empty is a real defect, but it is #3631's (PR #3820),
+        // not this issue's, and widening it here would change behaviour this issue's
+        // corpus census did not measure.
+        if data.is_empty() && fixed_width::width_of(field_type).is_some() {
+            return Ok(Value::Null);
+        }
         match field_type {
             CqlType::Text | CqlType::Ascii => {
                 std::str::from_utf8(data)
@@ -208,6 +226,24 @@ impl V5CompressedLegacyParser {
         data: &[u8],
         field_type: &CqlType,
     ) -> Result<Value> {
+        // #3847: a 0-length field header means "present and EMPTY", which Cassandra's
+        // READ path deserializes to null for every fixed-width scalar (oracle:
+        // docs/round-artifacts/issue-3847-cassandra-oracle.md). Answer it HERE, from
+        // the one type-keyed oracle, so this decoder agrees with the other framing
+        // sites for EVERY member of the set — including the types with no per-type arm
+        // below, which would otherwise reach `_ =>` and yield an EMPTY BLOB rather than
+        // null (roborev job 94: SmallInt, TinyInt, Time and Date). The per-type arms keep their
+        // own `FixedWidthCell::Null` branch: it is the same answer by a second path, it
+        // is what the width-classifier contract tests assert, and it must stay correct
+        // for any caller reaching an arm directly.
+        //
+        // NON-EMPTY decoding is deliberately UNTOUCHED. Those same types degrading to
+        // `Value::Blob` when non-empty is a real defect, but it is #3631's (PR #3820),
+        // not this issue's, and widening it here would change behaviour this issue's
+        // corpus census did not measure.
+        if data.is_empty() && fixed_width::width_of(field_type).is_some() {
+            return Ok(Value::Null);
+        }
         match field_type {
             CqlType::Text | CqlType::Ascii => {
                 std::str::from_utf8(data)

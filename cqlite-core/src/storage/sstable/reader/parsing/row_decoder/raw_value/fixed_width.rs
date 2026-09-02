@@ -130,3 +130,38 @@ pub(in crate::storage::sstable::reader::parsing::row_decoder) fn admissible_exac
         None
     }
 }
+
+/// Is `t` one of the twelve fixed-width scalars, and if so how wide?
+///
+/// The same set the module docs enumerate, keyed by `CqlType` instead of by the
+/// caller's literal `n`. It exists so a caller can ask "does the EMPTY-buffer rule
+/// apply to this field's declared type?" WITHOUT curating a second list of types —
+/// the list here is the oracle's, and a caller deriving from it cannot drift out of
+/// step with it (`create_empty_value_for_type` states the same set for the same
+/// reason, and both answer `Value::Null` for every member).
+///
+/// `Counter` is included: it is `bigint` on the wire, and Cassandra serves it with
+/// `LongSerializer`, whose `deserialize` is `isEmpty ? null : toLong`.
+///
+/// Deliberately NOT a general "width of any type" helper: a variable-width type
+/// (`text`, `blob`, `varint`, `decimal`, `inet`, `duration`) has no width to
+/// return, and a composite (`list`, `set`, `map`, `tuple`, `frozen`, `udt`) is not
+/// a scalar at all — both answer `None`, and a caller must treat `None` as "this
+/// rule does not apply", never as "width 0".
+pub(in crate::storage::sstable::reader::parsing::row_decoder) fn width_of(
+    t: &crate::schema::CqlType,
+) -> Option<usize> {
+    use crate::schema::CqlType;
+    match t {
+        CqlType::Boolean | CqlType::TinyInt => Some(1),
+        CqlType::SmallInt => Some(2),
+        CqlType::Int | CqlType::Float | CqlType::Date => Some(4),
+        CqlType::BigInt
+        | CqlType::Counter
+        | CqlType::Double
+        | CqlType::Timestamp
+        | CqlType::Time => Some(8),
+        CqlType::Uuid | CqlType::TimeUuid => Some(16),
+        _ => None,
+    }
+}
