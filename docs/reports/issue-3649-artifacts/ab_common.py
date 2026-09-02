@@ -14,6 +14,7 @@ The static text of every module here is asserted free of the reserved
 gate/review marker strings by `selftest-analyze.sh`.
 """
 
+import os
 import sys
 
 PREFIX = "AB-3649: "
@@ -100,3 +101,23 @@ def pair_order(replicate):
 # records show is the order the rule declares. Putting it in either one made the
 # other import it, and the two already import each other -- so the shared rule
 # belongs in the shared module rather than in whichever consumer wrote it first.
+
+
+def _canonically_within(root_real, target_real):
+    """MIRRORS `canon_target.starts_with(&canon_root)` (pathsafe.rs:117).
+
+    COMPONENT-WISE, not string-wise: Rust's `Path::starts_with` compares path
+    COMPONENTS, so `/a/bc` does NOT start with `/a/b`. A bare `str.startswith`
+    would accept it, which is a containment check that admits a sibling
+    directory whose name merely shares a prefix.
+    """
+    if target_real == root_real:
+        return True
+    return target_real.startswith(root_real.rstrip(os.sep) + os.sep)
+
+
+# LIVES HERE for the same reason pair_order does: the driver's corpus
+# enumeration and the analyzer's run-file provenance need the SAME containment
+# rule, and the two modules already import each other. A second implementation
+# of "is this path inside that one" is a second place for the component-wise
+# subtlety to be got wrong.

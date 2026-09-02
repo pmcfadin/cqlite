@@ -40,6 +40,7 @@ from ab_common import (
     err,
     out,
     pair_order,
+    _canonically_within,
 )
 from ab_input import validate_record_shape, validate_record_usable
 
@@ -1603,19 +1604,6 @@ def canonical_shape(raw):
     release builds. Canonicalising at preflight makes the two the same fact.
     """
     return SHAPE_ALIASES.get(raw.strip().lower())
-
-
-def _canonically_within(root_real, target_real):
-    """MIRRORS `canon_target.starts_with(&canon_root)` (pathsafe.rs:117).
-
-    COMPONENT-WISE, not string-wise: Rust's `Path::starts_with` compares path
-    COMPONENTS, so `/a/bc` does NOT start with `/a/b`. A bare `str.startswith`
-    would accept it, which is a containment check that admits a sibling
-    directory whose name merely shares a prefix.
-    """
-    if target_real == root_real:
-        return True
-    return target_real.startswith(root_real.rstrip(os.sep) + os.sep)
 
 
 def contained_data_files(served_dir):

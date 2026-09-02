@@ -504,7 +504,7 @@ check_cause "unpaired replicate" unpaired-replicates
 mkfixture "$TMP/short" 8 "100000:117000,100000:117000,100000:118000,100000:118000"
 run_analyzer "$TMP/short"
 check_verdict "fewer completed pairs than requested" UNMEASURED 7
-check_cause "replicate shortfall" replicate-shortfall
+check_cause "replicate shortfall" replicate-set-mismatch
 
 # 10. Too few pairs to bootstrap at all.
 mkfixture "$TMP/tiny" 2 "100000:117000,100000:118000"
@@ -3872,11 +3872,12 @@ GATING = {
     "the machine is the narrow rig": "rig-profile-mismatch",
     "the merge path was not bypassed": "merge-path-bypassed",
     "the load generator's provenance is known": "loadgen-provenance-absent",
-    "enough replicates completed": "replicate-shortfall",
+    "the pairs are EXACTLY the declared sampling plan": "replicate-set-mismatch",
     "enough pairs survived": "insufficient-pairs",
     "the server's configuration was observed": "startup-unobserved",
     "the arms ran under one admission ceiling": "admission-mismatch",
-    "the records describe this session": "record-internally-inconsistent",
+    "each record is internally consistent": "record-internally-inconsistent",
+    "the records come from THIS session's directory": "run-file-outside-session",
 }
 problems = []
 for prop, cause in sorted(GATING.items()):

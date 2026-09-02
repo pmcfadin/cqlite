@@ -41,7 +41,7 @@ import math
 import os
 import re
 
-from ab_common import Unmeasured, pair_order
+from ab_common import Unmeasured, _canonically_within, pair_order
 
 
 def DECLARED_FIRST_ARM(replicate):
@@ -755,9 +755,30 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
                 "duplicate-run",
                 "manifest.runs declares arm %s replicate %d twice" % (arm, replicate),
             )
-        path = filename
-        if not os.path.isabs(path):
-            path = os.path.join(manifest_dir, path)
+        # SESSION-LOCAL PROVENANCE, not merely "a readable file". An ABSOLUTE
+        # path or one containing `..` let a manifest source its records from
+        # ANOTHER SESSION while the analyzer went on describing them as this
+        # session's -- the containment family again, and the same ANCESTOR
+        # semantics as `pathsafe::assert_within` rather than a reimplementation.
+        if os.path.isabs(filename):
+            raise Unmeasured(
+                "run-file-outside-session",
+                "manifest.runs names %r, an ABSOLUTE path. Records are session-"
+                "local by construction: a manifest that can point anywhere can "
+                "source another session's records while this analysis describes "
+                "them as its own" % filename,
+            )
+        path = os.path.join(manifest_dir, filename)
+        if not _canonically_within(os.path.realpath(manifest_dir),
+                                   os.path.realpath(path)):
+            raise Unmeasured(
+                "run-file-outside-session",
+                "manifest.runs names %r, which resolves outside the manifest's "
+                "own directory (%s). A parent traversal or an escaping symlink "
+                "sources records from another session, and the verdict would "
+                "describe a set of runs this manifest did not produce"
+                % (filename, manifest_dir),
+            )
         expected_round = "%s-r%02d" % (arm, replicate)
         seen[key] = load_run(
             path, mode, declared_steps, expected_round, declared_duration_s,

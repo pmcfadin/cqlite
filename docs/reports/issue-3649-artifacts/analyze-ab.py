@@ -669,13 +669,30 @@ def analyze(mode, path, opts):
     pairs, admission, session = collect_pairs_checked(
         manifest, manifest_dir, mode, declared_steps
     )
-    if len(pairs) < manifest["replicates_requested"]:
+    # EXACT CONFORMANCE TO THE DECLARED SAMPLING PLAN, not a floor. A `<` test
+    # accepted EXTRA pairs and any replicate NUMBERING at all, so a manifest
+    # with duplicated-in-spirit, renumbered or out-of-range replicates entered
+    # the bootstrap -- which then resampled a set that is not the design the
+    # session declared. Same class as round 22's estimand defect: the interval
+    # is computed over something other than what the manifest describes.
+    #
+    # The enumeration called this "enough replicates completed", which is the
+    # FLOOR and not the property. That wording is why round 20 did not catch it.
+    requested = manifest["replicates_requested"]
+    observed_ids = sorted(rep for rep, _base, _head in pairs)
+    expected_ids = list(range(1, requested + 1))
+    if observed_ids != expected_ids:
+        missing = [i for i in expected_ids if i not in observed_ids]
+        extra = [i for i in observed_ids if i not in expected_ids]
         raise Unmeasured(
-            "replicate-shortfall",
-            "%d pairs against %d requested -- the driver did not complete the "
-            "requested replicate count, and a short session is not silently analysed "
-            "as if it were the requested one"
-            % (len(pairs), manifest["replicates_requested"]),
+            "replicate-set-mismatch",
+            "the session declares %d replicates, so the pairs must be exactly "
+            "%s; the manifest yields %s%s%s. A bootstrap over a different set "
+            "estimates a different design -- extra or renumbered replicates are "
+            "not a larger sample of the declared plan, they are another plan"
+            % (requested, expected_ids, observed_ids,
+               " (missing %s)" % missing if missing else "",
+               " (unexpected %s)" % extra if extra else ""),
         )
     if len(pairs) < opts["min_pairs"]:
         raise Unmeasured(
