@@ -154,7 +154,7 @@ whole_suite_checks() {
 # assertions (the two `command -v` guards and the fixture-construction asserts), so a
 # green run is 81 on any host that can run it at all; a green run BELOW this number
 # means cases were removed or the run was truncated. RAISE IT when you add cases.
-CASE_FLOOR=103
+CASE_FLOOR=104
 
 finish() {
   local rc=$?
@@ -201,8 +201,31 @@ trap 'exit 143' TERM
 # --- fixtures ---------------------------------------------------------------
 g() { local r="$1"; shift; git -C "$r" "$@"; }
 
+# THE FIXTURE CLOCK IS PINNED, AND THE SUITE'S VALIDITY RESTS ON IT — DO NOT REMOVE.
+# A commit's sha is a function of its author/committer DATES as well as its tree, so an
+# unpinned builder makes every fixture's object ids a function of THE WALL-CLOCK SECOND
+# THE FIXTURE WAS BUILT IN. Two `newrepo` calls landing either side of a second boundary
+# then produce DIFFERENT commit shas, which is a wall-clock race in a correctness test
+# (CLAUDE.md pre-roborev self-check; scripts/tests/check-no-wallclock-asserts.sh, #2642).
+#
+# It is not hypothetical and it is not cosmetic: Case 18's POSITIVE CONTROL runs a plain
+# git with `GIT_OBJECT_DIRECTORY=<clean>/.git/objects --git-dir=<mismatch>/.git` and
+# requires exit 0 — which holds ONLY while the two fixtures share object ids, because
+# otherwise <mismatch>'s refs name objects absent from <clean>'s store and fsck raises
+# ERROR_REACHABLE (exit 2). Measured with this exact recipe: same second =>
+# b1d2aeee4db43bcb41f647c78430314a2d0a5a58 twice; 1.2s later =>
+# 7efdf0e1453622b5bc6ff818e508f4857ce89455. Observed intermittently as
+# "env-plant: a plain git was not redirected by GIT_OBJECT_DIRECTORY (rc=2)" on a loaded
+# box, which would red `tooling-tests` in the gate of record for every lane, forever.
+#
+# The control was RIGHT to fail-close there; the fixture construction was what was wrong.
+# The fixed epoch is arbitrary (matching the 1700000000 used elsewhere in this file) and
+# carries an explicit `+0000` so the value does not depend on the box's TZ either.
+FIXTURE_DATE='1700000000 +0000'
+
 # newrepo <name> -> path. Two blobs, one commit. THE ONE CODE PATH every fixture is
-# built by, so a corruption case's CLEAN TWIN is identical but for the planted damage.
+# built by, so a corruption case's CLEAN TWIN is identical but for the planted damage —
+# BYTE-IDENTICAL, object ids included, which is what the pin above buys.
 newrepo() {
   local r="$T/$1"
   mkdir -p "$r"
@@ -212,7 +235,8 @@ newrepo() {
   printf 'content aaa\n' >"$r/f1"
   printf 'content bbb\n' >"$r/f2"
   g "$r" add f1 f2 >/dev/null
-  g "$r" -c user.email=t@t -c user.name=t commit -q -m c1 >/dev/null
+  GIT_AUTHOR_DATE="$FIXTURE_DATE" GIT_COMMITTER_DATE="$FIXTURE_DATE" \
+    g "$r" -c user.email=t@t -c user.name=t commit -q -m c1 >/dev/null
   printf '%s' "$r"
 }
 
@@ -861,6 +885,20 @@ fi
 # THE CONSTRUCTION IS ASSERTED FIRST, and it is what makes this case non-vacuous: a
 # PLAIN (non-isolated) git really is redirected by the variable, so a green below is
 # the isolation and not an inert variable.
+# THE PRECONDITION OF THE CONTROL BELOW, MEASURED RATHER THAN ASSUMED. The redirect can
+# only make <mismatch>'s refs resolve inside <clean>'s object store while the two
+# fixtures share object ids; if they do not, fsck raises ERROR_REACHABLE and the control
+# fails for a reason that has nothing to do with the injection. That identity is what
+# FIXTURE_DATE buys (see the builder's header) — unpinned it held only when both builds
+# happened to land in the same wall-clock second. Asserted HERE, at the one case that
+# depends on it, so removing the pin reds with the cause named instead of intermittently.
+CLEAN_HEAD=$(git -C "$R_CLEAN" rev-parse HEAD 2>/dev/null)
+MIS_HEAD=$(git -C "$R_MIS" rev-parse HEAD 2>/dev/null)
+if [ -n "$CLEAN_HEAD" ] && [ "$CLEAN_HEAD" = "$MIS_HEAD" ]; then
+  ok "env-plant: the clean and mismatch fixtures share a HEAD sha — the builder's clock is pinned, so the control below cannot turn on when the suite ran"
+else
+  bad "env-plant: clean HEAD '$CLEAN_HEAD' != mismatch HEAD '$MIS_HEAD' — the fixture clock is NOT pinned and the control below is a wall-clock race"
+fi
 plain_rc=0
 GIT_OBJECT_DIRECTORY="$R_CLEAN/.git/objects" \
   git --git-dir="$R_MIS/.git" fsck --no-progress --no-dangling >/dev/null 2>&1 || plain_rc=$?
