@@ -1366,21 +1366,34 @@ else
 fi
 assert_accelerators "sccache-used-bigused" "$scc_pbigu"
 
-# 9c-v-e. WHY THE RANGE CHECK IS LEXICAL, MEASURED RATHER THAN ASSERTED IN A COMMENT. A
-#         `[ "$v" -gt 9223372036854775807 ]` evaluates $v as a shell integer FIRST, so an
-#         out-of-range value has already wrapped by the time it is compared and the comparison
-#         answers "no, it is smaller" — the guard would license exactly the arithmetic it exists
-#         to refuse. This case measures that in THIS shell, then drives the shipped
-#         `_scc_uint_fits_i64` over the boundary, so the boundary is pinned at the helper and not
-#         only through the two summary renderings above.
-scc_naive=0
-[ "13835058055282163712" -gt 9223372036854775807 ] 2>/dev/null && scc_naive=1
-if [ "$scc_naive" -eq 0 ]; then
-  ok "sccache-pct: (mechanism) a naive numeric bound does NOT reject 13835058055282163712 in this shell — which is why the check is lexical"
+# 9c-v-e. WHY THE RANGE CHECK IS LEXICAL, MEASURED IN THIS SHELL RATHER THAN ASSERTED IN A
+#         COMMENT — and the first draft of this case got the mechanism WRONG, which is why it is
+#         measured. There are TWO arithmetic alternatives and they fail differently:
+#           * `(( v <= MAX ))` (and every `$(( ))`) WRAPS SILENTLY, so the bound ACCEPTS the very
+#             value it exists to refuse — that is the `-100%` defect;
+#           * `[ "$v" -le MAX ]` does NOT wrap: it ERRORS with rc 2 and a bash diagnostic on
+#             STDERR, so it is not an answer at all — in the natural `if [ "$v" -gt MAX ]; then
+#             refuse; fi` direction the refusal does not fire (fail-OPEN), and in the other it
+#             prints a shell error for a legitimate reading.
+#         Both are measured here, then the shipped `_scc_uint_fits_i64` is driven over the
+#         boundary, so the property is pinned at the helper and not only through the two summary
+#         renderings above.
+scc_wrap=0
+if (( 13835058055282163712 <= 9223372036854775807 )); then scc_wrap=1; fi
+if [ "$scc_wrap" -eq 1 ]; then
+  ok "sccache-pct: (mechanism) shell arithmetic WRAPS — 13835058055282163712 compares as <= 2^63-1, so an arithmetic bound would accept it"
 else
-  # Not a failure of the gate: it would mean this shell has bignum arithmetic, in which case the
-  # lexical check is merely redundant. Reported so nobody reads the ok above as always-true.
-  skipped "sccache-pct: this shell rejects 13835058055282163712 numerically (bignum arithmetic?) — the lexical rationale is unmeasurable here"
+  # Not a gate failure: it would mean this shell has bignum arithmetic, making the lexical check
+  # merely redundant. Reported so nobody reads the assert above as always-true.
+  skipped "sccache-pct: this shell does not wrap at 2^63 (bignum arithmetic?) — the wrap half of the rationale is unmeasurable here"
+fi
+scc_terr="$tmp/scc-test-builtin.err"
+[ "13835058055282163712" -le 9223372036854775807 ] 2>"$scc_terr"
+scc_trc=$?
+if [ "$scc_trc" -gt 1 ] && [ -s "$scc_terr" ]; then
+  ok "sccache-pct: (mechanism) the test builtin ERRORS (rc $scc_trc) and writes a diagnostic instead of answering — so it is not the fix either"
+else
+  skipped "sccache-pct: the test builtin answered rc $scc_trc with $( [ -s "$scc_terr" ] && echo a || echo no ) diagnostic — that half of the rationale is unmeasurable here"
 fi
 scc_fits_src=$(sed -n '/^_scc_uint_fits_i64() {/,/^}/p' "$GATE")
 if [ -z "$scc_fits_src" ]; then
@@ -1389,6 +1402,7 @@ else
   scc_fits_h="$tmp/scc-fits-harness.sh"
   { printf '%s\n' "$scc_fits_src"; echo 'if _scc_uint_fits_i64 "$1"; then echo fits; else echo over; fi'; } >"$scc_fits_h"
   scc_fits_bad=""
+  scc_fits_noise=""
   # value:expected — 2^63-1 is the largest that FITS; leading zeros are magnitude, not digits;
   # a 19-digit value differing only in the LOW half exercises the two-half comparison.
   for scc_fp in \
@@ -1399,13 +1413,24 @@ else
     '0000000000009223372036854775807:fits' '000000000000000000000:fits' \
     '00009223372036854775808:over' ':over' 'abc:over' '12x:over'; do
     scc_fv="${scc_fp%%:*}"; scc_fw="${scc_fp##*:}"
-    scc_fg=$(bash "$scc_fits_h" "$scc_fv" 2>/dev/null)
+    scc_fg=$(bash "$scc_fits_h" "$scc_fv" 2>"$tmp/scc-fits.err")
     [ "$scc_fg" = "$scc_fw" ] || scc_fits_bad="${scc_fits_bad:+$scc_fits_bad; }'$scc_fv' -> $scc_fg (want $scc_fw)"
+    # STDERR IS PART OF THE CONTRACT, and it is what distinguishes the `[ … -le … ]` form: that
+    # one returns the right answers (by ERRORING on every out-of-range value) while printing a
+    # bash diagnostic — on the gate's own stderr, for a legitimate reading. A range check that
+    # cannot be asked silently is not a range check.
+    [ -s "$tmp/scc-fits.err" ] \
+      && scc_fits_noise="${scc_fits_noise:+$scc_fits_noise; }'$scc_fv': $(head -1 "$tmp/scc-fits.err")"
   done
   if [ -z "$scc_fits_bad" ]; then
     ok "sccache-pct: the shipped range check is exact at 2^63-1, zero-stripping-correct, and refuses a non-digit — 19 pinned values"
   else
     bad "sccache-pct: the range check disagrees with the 64-bit boundary — $scc_fits_bad"
+  fi
+  if [ -z "$scc_fits_noise" ]; then
+    ok "sccache-pct: the range check answers SILENTLY for every one of those values (no shell diagnostic on the gate's stderr)"
+  else
+    bad "sccache-pct: the range check wrote a shell diagnostic — $scc_fits_noise"
   fi
 fi
 

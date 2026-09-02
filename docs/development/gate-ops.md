@@ -194,6 +194,37 @@ which cargo/toolchain a gate uses. `RUSTC_WRAPPER` carries the ABSOLUTE path whe
 what found it (a bare `sccache` is unrunnable exactly then). **Declared residual:** neither side
 honours a non-default `CARGO_HOME`; both look in `~/.cargo/bin` (#3955).
 
+**And bootstrap must agree WITH ITSELF (#3727 job 413).** Bootstrap asks the same question in two
+contexts, and until this round two of its sites answered a third way: section 2's accelerator
+report and section 5b2's precondition were plain PATH checks. On that same system-cargo +
+`~/.cargo/bin` box a NON-root run therefore **skipped cap persistence and verification entirely**,
+and a root run recorded a false `sccache MISSING` `[warn]` — which is what `--strict` reads, so
+`verify.run` failed a healthy machine. Both now call ONE resolver, `sccache_bin`, with the gate's
+two stages. **The home is the crux:** under the documented
+`sudo bash scripts/bootstrap-agent-machine.sh` bootstrap's own `$HOME` is ROOT's, so
+`$HOME/.cargo/bin` evaluated in that process is the wrong directory. The session-probed
+`scc_resolve_binary` sidesteps it by leaving `$HOME` single-quoted for the SESSION to expand; the
+in-process checks resolve the invoking account's home from the **passwd database**, keyed on a
+validated `SUDO_UID` (`getent`, then `/etc/passwd`, never an assumed `/home/<user>`), with no
+privileged call — section 2 and the precondition both run before privilege is resolved, and a
+declared test-mode run must make none. **Three outcomes, not two:** only *"both locations checked
+and neither holds one"* licenses the MISSING warning; an unidentifiable home is reported as
+UNKNOWN and never stops the section, because a refusal derived from a measurement that could not be
+taken is exactly what that section may not do. The census is a **checked claim**, not a commit
+message: `test_bootstrap_agent_machine.sh` (12c) derives every presence-decision site from the
+shipped script at run time and FAILs on one it cannot account for, and the gate suite does the same
+for `_gate_sccache_bin`.
+
+**The percentage's operands are range-checked BEFORE any arithmetic, lexically (#3727 job 413).**
+sccache reports both readings as JSON UNSIGNED integers while every `$(( ))` is signed 64-bit, so a
+cap above 2^63-1 wraps NEGATIVE on its first use: a 12 EiB cap holding 4 EiB rendered `-100%`.
+Both arithmetic alternatives are wrong, measured on bash 5.2.21 rather than reasoned about —
+`(( v <= MAX ))` **wraps silently** and so accepts the value it exists to refuse, while
+`[ "$v" -le MAX ]` **errors** (rc 2 plus a bash diagnostic on stderr) rather than answering, which
+in the natural `if [ "$v" -gt MAX ]; then refuse; fi` direction means the refusal never fires. So
+the check is lexical: digit length, then a two-half comparison of the one ambiguous length. Out of
+range renders the same `pct-inexact-overflow`; no new state, and no percentage is ever approximated.
+
 **`sccache-health` cannot answer any of this.** It is the sum of four ERROR counters with **no**
 capacity, occupancy or eviction input, so a `warn` there can never be cleared by raising the cap, and
 a permanently-full cache reports `sccache-health=ok`. Different questions, different remedies.
