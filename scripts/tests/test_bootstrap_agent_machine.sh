@@ -1003,15 +1003,19 @@ fi
 sbV=$(mktemp -d "$tmp/moldV.XXXXXX"); mkdir -p "$sbV/.cargo" "$sbV/dotfiles"
 printf '[net]\nretry = 11\n' >"$sbV/.cargo/config.toml"
 ln -s "$sbV/dotfiles/legacy-config" "$sbV/.cargo/config"
-beforeV=$(cat "$sbV/.cargo/config.toml")
+# A PRISTINE COPY plus `cmp`, never `$(cat …)` (#3756 roborev round 9). Command substitution
+# STRIPS trailing newlines, so a mutation that only adds or removes them compares EQUAL — and
+# these cases claim the file is byte-identical, which is a stronger property than substitution
+# can test. Measured: `a\n` vs `a\n\n\n` are equal under `$(cat …)` and differ under `cmp`.
+cp "$sbV/.cargo/config.toml" "$sbV/pristine-config.toml"
 outV=$(PATH="$stubO:$PATH" HOME="$sbV" CARGO_HOME="$sbV/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if [ ! -e "$sbV/dotfiles/legacy-config" ] \
-   && [ "$beforeV" = "$(cat "$sbV/.cargo/config.toml")" ] \
+   && cmp -s "$sbV/pristine-config.toml" "$sbV/.cargo/config.toml" \
    && printf '%s' "$outV" | grep -q "broken symlink and .* also exists"; then
   ok "mold/symlink: a DANGLING legacy config symlink beside a real config.toml is refused with a named warning — the legacy target is NOT materialised, so cargo's preference does not flip and the user's config.toml is left byte-identical"
 else
-  bad "mold/symlink: the shadowing case was not refused (legacy-materialised=$([ -e "$sbV/dotfiles/legacy-config" ] && echo yes || echo no) config.toml-changed=$([ "$beforeV" = "$(cat "$sbV/.cargo/config.toml")" ] && echo no || echo yes))"
+  bad "mold/symlink: the shadowing case was not refused (legacy-materialised=$([ -e "$sbV/dotfiles/legacy-config" ] && echo yes || echo no) config.toml-changed=$(cmp -s "$sbV/pristine-config.toml" "$sbV/.cargo/config.toml" && echo no || echo yes))"
   printf '%s\n' "$outV" | grep -i 'mold\|symlink' | head -5
   echo "--- config.toml ---"; cat "$sbV/.cargo/config.toml"
 fi
@@ -1047,17 +1051,17 @@ fi
 #     resolved path, so no future normalisation can move one without the other.
 sbX=$(mktemp -d "$tmp/moldX.XXXXXX"); mkdir -p "$sbX/.cargo" "$sbX/data"
 printf 'irreplaceable = "user data"\n' >"$sbX/data/regular-file"
-beforeX=$(cat "$sbX/data/regular-file")
+cp "$sbX/data/regular-file" "$sbX/pristine-regular-file"   # byte-exact baseline; see 6v on why not $(cat …)
 ln -s "$sbX/data/regular-file/" "$sbX/.cargo/config.toml"
 outX=$(PATH="$stubO:$PATH" HOME="$sbX" CARGO_HOME="$sbX/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
-if [ "$beforeX" = "$(cat "$sbX/data/regular-file")" ] \
+if cmp -s "$sbX/pristine-regular-file" "$sbX/data/regular-file" \
    && [ -L "$sbX/.cargo/config.toml" ] \
    && [ "$(count_begin "$sbX/data/regular-file")" = 0 ] \
    && printf '%s' "$outX" | grep -q "trailing '/' denotes a directory it does not name"; then
   ok "mold/symlink: a trailing-slash target naming a REGULAR FILE is refused by name — the file keeps its contents byte-for-byte and the symlink is untouched (this path used to OVERWRITE it)"
 else
-  bad "mold/symlink: the trailing-slash regular-file case lost data or was not refused (content-preserved=$([ "$beforeX" = "$(cat "$sbX/data/regular-file")" ] && echo yes || echo NO) still-link=$([ -L "$sbX/.cargo/config.toml" ] && echo yes || echo no) block-written=$(count_begin "$sbX/data/regular-file"))"
+  bad "mold/symlink: the trailing-slash regular-file case lost data or was not refused (content-preserved=$(cmp -s "$sbX/pristine-regular-file" "$sbX/data/regular-file" && echo yes || echo NO) still-link=$([ -L "$sbX/.cargo/config.toml" ] && echo yes || echo no) block-written=$(count_begin "$sbX/data/regular-file"))"
   echo "--- file now ---"; cat "$sbX/data/regular-file"; echo "----------------"
   printf '%s\n' "$outX" | grep -i 'mold\|symlink' | head -5
 fi

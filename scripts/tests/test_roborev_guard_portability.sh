@@ -382,7 +382,14 @@ add_construct '\-printf[[:space:]]' \
 # unbounded, so it also matched the BARE end-of-options delimiter — and `xargs -- rm` is
 # portable (every getopt honours `--`), so the rule red on correct code. `--[a-zA-Z]` keeps
 # `--no-run-if-empty` flagged and lets the delimiter through; both pinned by controls.
-_XARGS_OPT_RUN='([[:space:]]+-[^[:space:]|;&<>()]+)*'
+# THE RUN MUST NOT SWALLOW A BARE `--` (#3756 roborev round 9). After the end-of-options
+# delimiter the next word is the COMMAND, so `xargs -- -r` runs a command NAMED `-r` and is
+# portable — but a run that accepts any `-`-leading token consumed the `--` and then matched the
+# command as an option, i.e. the rule did NOT "stop at the command name" as claimed one comment
+# down. A run element is therefore a SHORT option (second character not `-`) or a LONG option
+# (at least one character after `--`); the bare delimiter is neither. Measured 8/8 positives,
+# 0/10 false positives including `xargs -- -r` and `xargs -0 -- -r`.
+_XARGS_OPT_RUN='([[:space:]]+(-[^-[:space:]|;&<>()][^[:space:]|;&<>()]*|--[^[:space:]|;&<>()]+))*'
 # AND THE SHORT-OPTION MATCH ENDS AT A TOKEN BOUNDARY (#3756 roborev round 5). Without one,
 # `-[a-zA-Z0-9]*r` matched the `-Ir` PREFIX of `xargs -Ireplace echo` — a portable ATTACHED
 # option argument — so the lint red on correct code. The boundary keeps `-r`, `-0r` and `-0 -r`
@@ -1203,7 +1210,8 @@ printf '%s\n' \
   '  git ls-files -z | xargs -0 -I{} -r echo {}' \
   '  printf "" | xargs --no-run-if-empty rm' \
   '  printf "" | xargs -r0 rm' \
-  '  printf "" | xargs -tr0 rm' >"$tmp/xargs-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
+  '  printf "" | xargs -tr0 rm' \
+  '  printf "" | xargs -0 --no-run-if-empty rm' >"$tmp/xargs-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
 _xargs_missed=''
 _xargs_broke=0
 while IFS= read -r _xl; do
@@ -1231,10 +1239,12 @@ printf '%s\n' \
   '  printf "" | xargs -- rm' \
   '  git ls-files -z | xargs -Ireplace echo replace' \
   '  git ls-files -z | xargs -I{} echo {}' \
-  '  printf "" | xargs -Eerror echo' >"$tmp/xargs-ok.sh"
+  '  printf "" | xargs -Eerror echo' \
+  '  printf "" | xargs -- -r' \
+  '  printf "" | xargs -0 -- -r' >"$tmp/xargs-ok.sh"
 scan_found "$RE_XARGS_R" "$tmp/xargs-ok.sh"
 case $? in
-  1) ok 'structural control: an xargs whose COMMAND carries -r (`xargs rm -rf`, `xargs -0 rm -rf`, `xargs -n1 rm -r`, `xargs -0 sh -c "grep -r …"`), the BARE end-of-options `xargs -- rm`, and ATTACHED option arguments (`-Ireplace`, `-I{}`, `-Eerror`) are NOT flagged — the option run stops at the command name, a long option must have a name, and a cluster is spelled from the ARGUMENT-FREE options only, so an argument-taking option can never carry an `r` into a match' ;;
+  1) ok 'structural control: an xargs whose COMMAND carries -r (`xargs rm -rf`, `xargs -0 rm -rf`, `xargs -n1 rm -r`, `xargs -0 sh -c "grep -r …"`), the BARE end-of-options `xargs -- rm`, a command NAMED like an option after it (`xargs -- -r`, `xargs -0 -- -r`), and ATTACHED option arguments (`-Ireplace`, `-I{}`, `-Eerror`) are NOT flagged — the option run stops at the command name, a long option must have a name, and a cluster is spelled from the ARGUMENT-FREE options only, so an argument-taking option can never carry an `r` into a match' ;;
   0) bad "structural control: the widened xargs rule flags an xargs whose COMMAND carries -r — a lint that reds on correct input is the lint agents learn to waive: $(scan_all_hits)" ;;
   *) : ;; # already counted by scan_found
 esac
