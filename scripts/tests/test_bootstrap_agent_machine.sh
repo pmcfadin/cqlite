@@ -5712,9 +5712,12 @@ fi
 # 12c-b) and no fixture can move a real account's home, so planting a marker binary there
 # would mean writing into the real /home/<account>, which no test may do.
 #
-# The stub RECORDS its own execution, so the assertion is a measured absence. It is reachable
-# ONLY from section 2: 5b2's session gets sudo's `secure_path` (no $tmp on it) and resolves
-# the real sccache, so the marker cannot be written by the sanctioned route.
+# The stub RECORDS its own execution, so the assertion is a measured absence — and section 2 is
+# the ONLY thing that could write it: this run passes `--skip-sccache-cap --skip-gate-pin`, so
+# 5b2 (the other, sanctioned, execution route) never opens a session at all. That is also what
+# keeps the blast radius of a root run of the real script to the section under test: no
+# privileged write is attempted, nothing is installed (no `--yes`), and the box's real sccache
+# server is not touched.
 scc415f_sandbox="$tmp/scc415f-home"; mkdir -p "$scc415f_sandbox/.cargo"
 scc415f_farm="$tmp/scc415f-path"; mkdir -p "$scc415f_farm"
 scc415f_mark="$tmp/scc415f-root-exec-marker"
@@ -5730,7 +5733,7 @@ if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     HOME="$scc415f_sandbox" CARGO_HOME="$scc415f_sandbox/.cargo" \
     PATH="$scc415f_farm:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 180 "$PIN_BS" "$BOOTSTRAP" \
-      --skip-smoke --skip-push-probe 2>&1)
+      --skip-smoke --skip-push-probe --skip-sccache-cap --skip-gate-pin 2>&1)
   scc415f_line=$(printf '%s\n' "$scc415f_out" | grep -F 'sccache present' | head -1)
   if [ -z "$scc415f_line" ]; then
     bad "sccache-root-exec: the root run did not report sccache present, so the execution site under test was never reached"
