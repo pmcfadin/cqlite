@@ -151,7 +151,15 @@ describe('the helper error message is not inlined by another suite (issue #3641)
         return ent.name.endsWith('.test.js') ? [full] : [];
       });
     const offenders = walk(__dirname)
-      .map((full) => path.relative(__dirname, full))
+      // Normalised to forward slashes so the allow-list keys are
+      // platform-independent (roborev job 86). path.relative() yields
+      // `sub\\file.test.js` on Windows, so a NESTED allow-list entry written
+      // `sub/file.test.js` would match on POSIX and silently miss there --
+      // turning an exemption into an offender on one platform only. Latent
+      // today (the sole key has no separator, and no CI lane runs Windows),
+      // but package.json ships x86_64-pc-windows-msvc, and the extension path
+      // is exactly what this allow-list exists to invite.
+      .map((full) => path.relative(__dirname, full).split(path.sep).join('/'))
       // Outside the allow-list the literal only ever appears as a COPY of the
       // helper's message. The reason each allowed file is allowed lives beside
       // its entry in MESSAGE_LITERAL_ALLOWED, not here.
@@ -172,6 +180,8 @@ describe('the helper error message is not inlined by another suite (issue #3641)
   // issue removed from the gate census.
   test('every allow-list entry is still necessary and still explained', () => {
     for (const [rel, reason] of MESSAGE_LITERAL_ALLOWED) {
+      // `rel` is '/'-separated by construction (see the scan above); path.join
+      // accepts that on every platform, so no denormalisation is needed here.
       const full = path.join(__dirname, rel);
       expect(fs.existsSync(full)).toBe(true);
       // If an allowed file no longer contains the literal, the entry is dead
