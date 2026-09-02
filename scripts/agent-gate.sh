@@ -19930,6 +19930,56 @@ sys.exit(0)
   case "$out" in
     *' LEFTOVER '*) _cwv="${out%% LEFTOVER *}"; _cwl="${out#* LEFTOVER }" ;;
   esac
+  # ---- A FAILED MEASUREMENT MAY ONLY KEEP OR STRENGTHEN A REFUSAL, NEVER SOFTEN ONE ----
+  #
+  # THE DEFECT THIS CLOSES (roborev job 416, the shell half). The probe can decide
+  # CANNOT-WRITE and then HANG in its own cleanup — a dead NFS mount, a stale handle.
+  # Discarding the whole payload turned that DEFINITIVE REFUSAL into a non-fatal UNMEASURED
+  # and the gate PROCEEDED on a filesystem that had just proven itself unwritable.
+  #
+  # ONE ARM, NOT ONE PER STATUS — SWEEP THE CLASS, NOT THE INSTANCE. The finding named
+  # rc=124, and the identical discard sat on EVERY other non-zero arm: after the flush, the
+  # probe still runs cleanup, and a `BaseException` escaping there (KeyboardInterrupt on a
+  # SIGINT, an interpreter-level fault) exits NON-ZERO with the verdict ALREADY IN THE
+  # CAPTURE — which the `*) classifier-failed` arm discarded exactly as the timeout arm did.
+  # A per-status fix would have left that route open, so the honouring is stated over the
+  # PROPERTY (a complete refusal is present) rather than over the STATUS.
+  #
+  # MEASURED PREMISE, because the whole thing rests on it and it is not obvious:
+  # `_component_set_bounded` captures the child stdout into a REGULAR FILE and replays it
+  # AFTER the child completes, so partial stdout SURVIVES a kill. On this host, with a child
+  # that writes+flushes a token and then hangs — timeout arm rc=124 out=16 bytes;
+  # bash-watchdog arm rc=124 out=16 bytes; and with the flush REMOVED, 0 bytes. The third
+  # reading is why the python flush is a PREREQUISITE and not a tidy-up beside it.
+  #
+  # THE ASYMMETRY IS DELIBERATE AND LOAD-BEARING: a PERMISSIVE token (`OK`) recovered the
+  # same way is STILL DISCARDED, because only `CANNOT-WRITE ` is matched here. A refusal
+  # recovered from a partial write is FAIL-CLOSED and therefore safe; an ADMISSION recovered
+  # from a process WE KILLED would be deriving a pass from an incomplete measurement, which
+  # is the one thing this whole guard exists to forbid. Do not "simplify" this into
+  # honouring whatever the capture holds.
+  #
+  # TWO STATUSES ARE DELIBERATELY EXCLUDED, each for its own reason:
+  #   `$_CS_REPLAY_RC` (198) says OUR OWN READ of the capture failed, so those bytes are
+  #     known-UNUSABLE rather than known-PARTIAL. A verdict may be recovered from a
+  #     measurement we CUT SHORT; it may not be recovered from one we could not READ.
+  #   `$_CS_UNBOUNDABLE_RC` (199) means the command was NOT RUN, so the capture is empty and
+  #     there is nothing to honour — excluded explicitly rather than left to rely on that
+  #     emptiness, which is a property of the runner and not of this call site.
+  #
+  # THE HONOURING NEEDS THE COMPLETE VERDICT PREFIX. An unrecognisable fragment
+  # (`CANNOT-WRI`) takes the ordinary failure branch, which is what "cannot tell" means; the
+  # verdict is one short `write()`, so a torn payload is not a case seen in practice.
+  #
+  # DECLARED RESIDUAL: when the cleanup was KILLED mid-unlink the probe file remains, and its
+  # name — chosen inside the child and never printed — is unknowable here, so this path
+  # declares NO leftover. It is a REFUSAL, and its remedy line already sends the operator to
+  # that directory.
+  if [ "$e" -ne 0 ] && [ "$e" -ne "$_CS_REPLAY_RC" ] && [ "$e" -ne "$_CS_UNBOUNDABLE_RC" ]; then
+    case "$_cwv" in
+      'CANNOT-WRITE '*) e=0 ;;
+    esac
+  fi
   case "$e" in
     0) ;;
     # EVERY POST-RESOLUTION FAILURE STILL CARRIES `td` (roborev job 398). These arms are all
@@ -19939,47 +19989,8 @@ sys.exit(0)
     # `_gate_disk_admission_pin_target_dir` and forfeited round 367's measured-fs-is-used-fs
     # guarantee on exactly these paths. The measurement failed; the RESOLUTION did not.
     127) printf 'UNRESOLVED\ttarget-dir-mkdir-no-classifier\t%s' "$td"; return 0 ;;
-    124|137)
-      # ---- A BOUND EXPIRING MAY ONLY KEEP OR STRENGTHEN A REFUSAL, NEVER SOFTEN ONE ----
-      #
-      # THE DEFECT THIS CLOSES (roborev job 416, the shell half). The probe can decide
-      # CANNOT-WRITE and then HANG in its own cleanup — a dead NFS mount, a stale handle.
-      # Discarding the whole payload on rc=124 turned that DEFINITIVE REFUSAL into a
-      # non-fatal UNMEASURED and the gate proceeded on a filesystem that had just proven
-      # itself unwritable. So a refusal already present in the capture is HONOURED: control
-      # falls through to the grammar parse below, exactly as on rc=0.
-      #
-      # MEASURED PREMISE, because the whole arm rests on it and it is not obvious:
-      # `_component_set_bounded` captures the child stdout into a REGULAR FILE and replays it
-      # AFTER the child completes, so partial stdout SURVIVES a kill. On this host, with a
-      # child that writes+flushes a token and then hangs — timeout arm rc=124 out=16 bytes;
-      # bash-watchdog arm rc=124 out=16 bytes; and with the flush REMOVED, 0 bytes. The third
-      # reading is why the python flush is a PREREQUISITE and not a tidy-up.
-      #
-      # THE ASYMMETRY IS DELIBERATE AND LOAD-BEARING: a PERMISSIVE token (`OK`) recovered the
-      # same way is STILL DISCARDED to UNMEASURED by falling into the `*)` arm. A refusal
-      # recovered from a partial write is FAIL-CLOSED and therefore safe; an ADMISSION
-      # recovered from a process WE KILLED would be deriving a pass from an incomplete
-      # measurement, which is the one thing this whole guard exists to forbid. Do not
-      # "simplify" this into honouring whatever the capture holds.
-      #
-      # THE HONOURING NEEDS THE COMPLETE VERDICT PREFIX. An unrecognisable fragment
-      # (`CANNOT-WRI`) takes the discard branch, which is what "cannot tell" means; the
-      # verdict is one short `write()` so a torn payload is not a case seen in practice.
-      #
-      # DECLARED RESIDUAL: when the cleanup was KILLED mid-unlink, the probe file remains and
-      # its name — chosen inside the child and never printed — is unknowable here, so this
-      # path declares NO leftover. It is a REFUSAL, and its remedy line already sends the
-      # operator to that directory.
-      case "$_cwv" in
-        'CANNOT-WRITE '*) ;;
-        *) printf 'UNRESOLVED\ttarget-dir-mkdir-timeout\t%s' "$td"; return 0 ;;
-      esac ;;
+    124|137) printf 'UNRESOLVED\ttarget-dir-mkdir-timeout\t%s' "$td"; return 0 ;;
     "$_CS_UNBOUNDABLE_RC") printf 'UNRESOLVED\ttarget-dir-mkdir-unboundable\t%s' "$td"; return 0 ;;
-    # NOT honoured, deliberately, and the distinction from 124/137 is the point: rc 198 says
-    # OUR OWN READ of the capture failed, so the bytes in `$out` are known-unusable rather
-    # than known-partial. A verdict may be recovered from a measurement we CUT SHORT; it may
-    # not be recovered from one we could not READ.
     "$_CS_REPLAY_RC") printf 'UNRESOLVED\ttarget-dir-mkdir-output-truncated\t%s' "$td"; return 0 ;;
     *) printf 'UNRESOLVED\ttarget-dir-mkdir-classifier-failed\t%s' "$td"; return 0 ;;
   esac

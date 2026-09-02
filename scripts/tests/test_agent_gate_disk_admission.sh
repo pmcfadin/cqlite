@@ -3346,6 +3346,74 @@ else
   bad "verdict-first: the discard turned into a refusal (exit $ae2_status, markers $ae2_markers) — UNMEASURED must stay non-fatal"
 fi
 
+
+# --- (d) THE SAME DISCARD ON A NON-TIMEOUT EXIT — SWEEP THE CLASS, NOT THE INSTANCE ----
+#
+# Job 416 named rc=124, and the identical discard sat on every OTHER non-zero arm. After
+# the flush the probe still runs cleanup, and a BaseException escaping there — SIGINT
+# during the unlink, an interpreter-level fault — exits NON-ZERO with the verdict ALREADY
+# IN THE CAPTURE, which the `*) classifier-failed` arm discarded exactly as the timeout arm
+# did. A per-status fix leaves that route open, so the honouring is stated over the PROPERTY
+# (a complete refusal is present) and not over the STATUS.
+cat > "$tmp/ae-prelude-raise.py" <<'AEPX'
+import os, errno
+_c = os.close
+def bc(fd):
+    _c(fd)
+    raise OSError(errno.EIO, "simulated deferred write error at close")
+def bu(*a, **k):
+    # A BaseException, so the probe's `except Exception` cleanup guards do NOT catch it and
+    # the interpreter exits non-zero — with the verdict already flushed.
+    raise KeyboardInterrupt("simulated signal during cleanup")
+os.close = bc
+os.unlink = bu
+AEPX
+# First: confirm the condition is real — the body exits NON-ZERO, NOT 124, and the verdict
+# is nonetheless in the payload. Without this the case could pass on a timeout instead.
+da_run_probe "$tmp/ae-prelude-raise.py" "$ae_cls" "$tmp/ae-t-raise" >"$tmp/ae-raise.payload" 2>/dev/null
+ae3_rc=$?
+ae3_got=$(cat "$tmp/ae-raise.payload" 2>/dev/null)
+if [ "$ae3_rc" -ne 0 ] && [ "$ae3_rc" -ne 124 ] && [ "$ae3_rc" -ne 137 ] && [ "$ae3_got" = "CANNOT-WRITE EIO" ]; then
+  ok "verdict-first: a non-timeout failure (rc=$ae3_rc) still carries the flushed refusal — the discard class is wider than the bound"
+else
+  bad "verdict-first: the non-timeout plant gave rc=$ae3_rc payload '$ae3_got' — this case does not model the wider discard"
+fi
+# END TO END: the gate must honour it, exactly as it honours the timeout case.
+da_py_shim "$tmp/ae-bin-raise" "$tmp/ae-prelude-raise.py"
+RS_PATH_PREFIX="$tmp/ae-bin-raise"
+run_stub_gate ae-raise "$(df_script ae-raise "$HIGH")" \
+  CARGO_TARGET_DIR="$tmp/ae-e2e-raise" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/ae-raise-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+RS_PATH_PREFIX=""
+ae3_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 300; ae3_status=$WX_STATUS; ae3_markers=$WX_MARKERS
+assert_no_timeout "ae refusal recovered from a non-timeout failure"
+ae3_line=$(grep_line "$ae3_err" '^agent-gate: disk-admission: ')
+if [ "$ae3_status" -ne 0 ] && [ "$ae3_markers" -eq 0 ]; then
+  ok "verdict-first: a refusal recovered from a NON-TIMEOUT failure also REFUSES (exit $ae3_status) and no work ever began"
+else
+  bad "verdict-first: the run PROCEEDED (exit $ae3_status, markers $ae3_markers) on a non-timeout failure whose capture held a definitive refusal — the discard survives one arm over"
+fi
+case "$ae3_line" in
+  *'UNWRITABLE-FAIL-CLOSED (#3755)'*)
+    ok "verdict-first: ...under the UNWRITABLE token, not 'target-dir-mkdir-classifier-failed'" ;;
+  *'target-dir-mkdir-classifier-failed'*)
+    bad "verdict-first: the recovered CANNOT-WRITE was downgraded on the classifier-failed arm: $ae3_line" ;;
+  *) bad "verdict-first: unexpected rendering for the non-timeout recovery case: ${ae3_line:-<none>}" ;;
+esac
+# AND THE EXCLUSIONS HOLD. `$_CS_REPLAY_RC` (our own read failed => bytes known-unusable)
+# and `$_CS_UNBOUNDABLE_RC` (the command was NOT RUN => empty capture) must NOT be
+# honoured. Asserted on the SHIPPED source, because neither status is drivable from here
+# without a seam in the gate — and a seam is the thing doctrine forbids.
+ae_guard=$(sed -n '/^_gate_disk_admission_subject() {/,/^}$/p' "$GATE" \
+  | grep -c 'e" -ne "\$_CS_REPLAY_RC" \] && \[ "\$e" -ne "\$_CS_UNBOUNDABLE_RC"')
+ae_guard="${ae_guard%%$'\n'*}"; case "$ae_guard" in ''|*[!0-9]*) ae_guard=0 ;; esac
+if [ "$ae_guard" -eq 1 ]; then
+  ok "verdict-first: the honouring EXCLUDES rc 198 (unusable bytes) and rc 199 (command not run) — recovery is from a measurement CUT SHORT, never from one we could not read"
+else
+  bad "verdict-first: the honouring no longer excludes the replay/unboundable statuses — a verdict could be recovered from bytes we could not read"
+fi
+
 # ===========================================================================
 # Case AF (roborev job 416, F2): BOTH python probes run ISOLATED, so environment
 # state cannot monkeypatch the os operations the verdict is computed from.
