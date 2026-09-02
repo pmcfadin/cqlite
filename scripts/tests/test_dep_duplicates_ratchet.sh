@@ -86,7 +86,15 @@
 #                             distinct property — a corrupt COMMITTED baseline in this
 #                             checkout is a repository defect and stays a FAILURE, not a
 #                             skip — is preserved in G3 in both directions
-#   G1  gate component     -> PLANTED, in a scratch worktree with the guard substituted:
+#   G0  the planted fixture-> the fixture G1/G2 run in is a STANDALONE repo with a LOCAL
+#                             bare `origin`, its gate copy pinned to treat that bare as
+#                             canonical (#3958). G0a proves the pin took; G0b proves the
+#                             #3544 component-set pre-flight was still EXERCISED IN FULL,
+#                             only against a path remote instead of github.com. Before
+#                             this, the fixture was a SHARED-CONFIG `git worktree`, so the
+#                             7 planted runs made 14 network `git ls-remote` calls inside
+#                             the MANDATORY `tooling-tests` component
+#   G1  gate component     -> PLANTED, in that fixture with the guard substituted:
 #                             a clean measurement records PASS with the driver-named
 #                             annotation and the affirmative line echoed (G1a); an
 #                             ADVISORY-INCREASE records PASS too, naming the crates (G1b);
@@ -94,7 +102,7 @@
 #                             verdict — a verdict with no `probe … INVOKED` line (G1c) or
 #                             no `MEASURED …` line (G1d) is a NAMED SKIP, never the
 #                             self-contradictory `PASS [never reached …]` G1c used to pin
-#   G2  gate SKIP paths    -> same substitution: the component records SKIP for exit 3,
+#   G2  gate SKIP paths    -> same substitution, same fixture: the component records SKIP for exit 3,
 #                             for a zero exit with NO verdict line, and for an unexpected
 #                             rc — never PASS. This is the vacuous-pass guard, and it is
 #                             the reason the component may never fail: SKIP is the only
@@ -126,13 +134,38 @@ GATE="$REPO_ROOT/scripts/agent-gate.sh"
 
 [ -f "$GUARD" ] || { echo "FAIL - guard script not found at $GUARD"; exit 1; }
 
-TMPROOT="$(mktemp -d "${TMPDIR:-/tmp}/dep-dup-selftest.XXXXXX")"
-WORKTREES=()
+# The SHARED fixture helper the three sibling gate-copying suites already use
+# (component-set, delta, tree-integrity): it pins a gate COPY's canonical-remote literal
+# to a fixture's own local `origin`, and derives that copy's component manifest. ONE
+# implementation, never a second — the #3283 lesson (a second implementation of a rule is
+# a second place for it to drift). See its header for the full reasoning.
+#
+# `-f` as well as `-r`: `-r` is TRUE for a FIFO and `.` on one BLOCKS FOREVER, with no
+# output and no verdict (CLAUDE.md's drive-issue-state clause 12, one directory over).
+# FATAL rather than degraded: the helper is COMMITTED SOURCE, so its absence is a
+# repository defect, and a suite that silently ran on without G0/G1/G2 would be the
+# vacuous-pass shape this file exists to prevent.
+PIN_LIB="$REPO_ROOT/scripts/tests/lib/agent-gate-canonical-pin.bash"
+if [ -f "$PIN_LIB" ] && [ -r "$PIN_LIB" ]; then
+  # shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.bash
+  . "$PIN_LIB"
+else
+  echo "FAIL - shared fixture helper missing or unreadable at $PIN_LIB (committed source: a repository defect, not a host property)"
+  exit 1
+fi
+
+# VALIDATED before anything is built under it: this suite runs without `errexit` so every
+# case reports, and an unchecked `mktemp -d` would leave TMPROOT EMPTY, every derived
+# fixture path would resolve under `/`, and the EXIT trap would `rm -rf ""`.
+TMPROOT="$(mktemp -d "${TMPDIR:-/tmp}/dep-dup-selftest.XXXXXX")" || {
+  echo "FAIL - mktemp -d failed; refusing to run with an unset scratch root"; exit 1; }
+if [ -z "$TMPROOT" ] || [ ! -d "$TMPROOT" ]; then
+  echo "FAIL - mktemp -d produced no usable directory ('$TMPROOT'); refusing to run"; exit 1
+fi
+# No `git worktree` bookkeeping to undo any more (#3958): the planted fixture is a
+# STANDALONE repository under TMPROOT, so removing the scratch root is the whole cleanup —
+# and nothing in this suite mutates the real repository's worktree list.
 cleanup() {
-  local w
-  for w in ${WORKTREES[@]+"${WORKTREES[@]}"}; do
-    git -C "$REPO_ROOT" worktree remove --force "$w" >/dev/null 2>&1 || true
-  done
   rm -rf "$TMPROOT"
   return 0
 }
@@ -821,8 +854,10 @@ fi
 # door and is exactly CLAUDE.md's "a lane that reds on correct input is the lane agents
 # learn to waive".
 #
-#   G1a-G1d + G2a/G2b/G2c       PLANTED. The guard is SUBSTITUTED in a scratch worktree
-#                               (the component has no seam either), so every mapping from
+#   G1a-G1d + G2a/G2b/G2c       PLANTED. The guard is SUBSTITUTED in the standalone
+#                               fixture built below (the component has no seam either,
+#                               which is why the ARTIFACT is substituted and not a
+#                               variable), so every mapping from
 #                               guard output to SUMMARY status is pinned EXACTLY, with no
 #                               dependence on what this box's dependency graph looks like.
 #   G3                          LIVE. The real component over the real workspace. BOTH
@@ -835,9 +870,78 @@ fi
 if [ ! -f "$GATE" ]; then
   skipped "G1/G2/G3: scripts/agent-gate.sh is absent"
 else
+  # THE PLANTED FIXTURE IS A STANDALONE REPOSITORY WITH A LOCAL BARE `origin` (#3958).
+  #
+  # It used to be `git worktree add --detach`, which SHARES `.git/config` with this
+  # repository — so the fixture's `origin` WAS the real canonical remote, and each of the
+  # 7 nested `--only dep-duplicates` runs paid the #3544 component-set pre-flight against
+  # github.com, TWICE per invocation since roborev job 290. Measured with a counting PATH
+  # shim: 16 network `git ls-remote` calls for the whole suite before this change (14
+  # planted + G3's 2), 2 after — and `tooling-tests`, which runs this suite, is a
+  # MANDATORY gate component.
+  #
+  # AND THE OBVIOUS FIX IS THE TRAP: A SHARED-CONFIG WORKTREE CANNOT BE GIVEN ITS OWN
+  # `origin`. `git remote set-url origin <a local test url>` inside one rewrites THIS
+  # repository's remote — the hazard test_agent_gate_component_set.sh's line-112 comment
+  # records, measured there the hard way (it made the next gate run report an unmeasurable
+  # baseline about itself). So the fixture is built STANDALONE (`git init` + a local bare
+  # `origin`) and its OWN COPY of the gate is pinned to treat that local bare as canonical,
+  # through the shared helper — SUBSTITUTING THE ARTIFACT, never adding a seam. #3544
+  # forbids an `AGENT_GATE_SKIP_*` opt-out, and a test-only seam is one more thing a real
+  # invoker can set.
+  #
+  # THE PRE-FLIGHT IS STILL EXERCISED IN FULL on every one of the 7 runs — ref oracle,
+  # baseline fetch, manifest parse, ancestry — only against a path remote instead of the
+  # network. G0a and G0b assert exactly that, so a silently-unpinned fixture cannot pass.
   wt="$TMPROOT/wt"
-  if git -C "$REPO_ROOT" worktree add --detach "$wt" HEAD >"$TMPROOT/wt.log" 2>&1; then
-    WORKTREES+=("$wt")
+  bare="$TMPROOT/origin.git"
+  build_planted_fixture() {
+    git init -q --bare "$bare" || return 1
+    # Point the bare's HEAD at `main` BEFORE anything reads it. With `init.defaultBranch`
+    # still `master` (the git default on many boxes) the push below and the pre-flight's
+    # `refs/heads/main` read would name two different branches, and the baseline would be
+    # measured as absent — every case then reporting for a reason unrelated to what it tests.
+    git -C "$bare" symbolic-ref HEAD refs/heads/main || return 1
+    mkdir -p "$wt/scripts/ci" || return 1
+    cp "$GATE" "$wt/scripts/agent-gate.sh" || return 1
+    # A placeholder guard, so the fixture's commit carries the very path component_run
+    # overwrites for each planted case. Copying ONLY these files makes the gate's
+    # `REPO_ROOT="$PWD"` resolve inside this run's mktemp namespace.
+    printf '#!/usr/bin/env bash\nexit 3\n' >"$wt/$GUARD_REL" || return 1
+    chmod +x "$wt/$GUARD_REL" || return 1
+    # BOTH helper calls are FATAL. An unpinned copy stops at the pre-flight as
+    # `remote-not-canonical` and a manifest-less one as `manifest-missing`, so a fixture
+    # that silently lost either would make every case below pass — or fail — for a reason
+    # that has nothing to do with the component under test.
+    agent_gate_pin_canonical_remote "$wt/scripts/agent-gate.sh" "$bare" || return 1
+    agent_gate_install_components_manifest "$wt/scripts/agent-gate.sh" || return 1
+    # REFUSE an empty or missing fixture path before `cd`: `cd ""` SUCCEEDS in bash and
+    # leaves you in the CURRENT directory, which is how a failed builder turns a fixture
+    # `git` command into a mutation of the live checkout.
+    [ -n "$wt" ] && [ -d "$wt" ] || return 1
+    # The pin and the manifest go in BEFORE the commit: the pre-flight reads HEAD's
+    # COMMITTED copies (the manifest baseline, and the gate's own declaration for removal
+    # provenance), never just the working tree's.
+    ( builtin cd -- "$wt" \
+      && git init -q . \
+      && git remote add origin "$bare" \
+      && git add -A \
+      && git -c user.email=dep-dup@test -c user.name=dep-dup commit -qm 'dep-duplicates planted fixture' \
+      && git push -q origin HEAD:refs/heads/main ) || return 1
+    return 0
+  }
+  if build_planted_fixture >"$TMPROOT/fixture.log" 2>&1; then
+    # G0a — THE PIN IS VERIFIED TO HAVE TAKEN, AS A CASE (#3958 acceptance). The helper
+    # already refuses a failed rewrite, but that refusal is a builder detail; surfacing it
+    # here means a fixture whose gate copy still carries the SHIPPED canonical identity
+    # cannot pass silently. Asked through the copy's OWN report-only identity hook, so no
+    # second implementation of the normalisation lives here.
+    pin_verdict=$(bash "$wt/scripts/agent-gate.sh" --component-set-remote-identity "$bare" 2>/dev/null | sed -n 's/^IDENTITY: //p')
+    if [ "$pin_verdict" = canonical ]; then
+      ok "G0a: the fixture's OWN gate copy answers IDENTITY canonical for its LOCAL bare origin — the pin took, so the 7 planted pre-flights read a path remote and not the network (#3958)"
+    else
+      bad "G0a: the fixture copy answers IDENTITY '${pin_verdict:-<no verdict>}' for its own local origin — an unpinned fixture stops at the pre-flight as remote-not-canonical, and every G case below would then report for an unrelated reason"
+    fi
     # COMPONENT_LOG is set by the CALLER, not inside component_run: `line=$(component_run …)`
     # runs the function in a command-substitution SUBSHELL, so an assignment made in there
     # is discarded (it was, and the suite died on an unbound variable mid-run).
@@ -879,6 +983,28 @@ exit 0')
     else
       bad "G1a: the component recorded a status without echoing the guard's affirmative measurement"
     fi
+
+    # G0b — THE #3544 PRE-FLIGHT WAS EXERCISED, NOT SKIPPED (#3958 acceptance). The whole
+    # point of localising `origin` is that it changes WHERE the baseline is read from and
+    # NOTHING ELSE: an affirmative `component-set:` verdict in the planted run's own
+    # SUMMARY is the evidence that the ref oracle, the baseline read and the manifest
+    # comparison all really ran. Read from G1a's summary rather than by launching an
+    # eighth gate — the measurement already exists. `ADVISORY-*` is the correct verdict
+    # here because `--only` is lenient on component-set skew by design (#3544); a
+    # `remote-not-canonical` line is called out by name, since that is exactly what an
+    # unpinned fixture would produce and it would mean the pre-flight stopped before
+    # measuring anything.
+    cs_line=$(grep -E '^component-set:' "${COMPONENT_LOG%.log}.summary.txt" 2>/dev/null | head -1)
+    case "$cs_line" in
+      '')
+        bad "G0b: no component-set line in the planted run's SUMMARY — the #3544 pre-flight left no record, so it cannot be shown to have run at all" ;;
+      *remote-not-canonical*)
+        bad "G0b: the pre-flight rejected the fixture's origin as not canonical — the pin did not reach the running copy, so no baseline was measured: $cs_line" ;;
+      *ADVISORY-PASS*)
+        ok "G0b: the #3544 component-set pre-flight was EXERCISED IN FULL on the planted run and measured its baseline from the fixture's LOCAL origin (ADVISORY, as --only is lenient by design)" ;;
+      *)
+        bad "G0b: the pre-flight reached no affirmative verdict on the planted run, so the localised origin changed more than WHERE the baseline is read from: $cs_line" ;;
+    esac
 
     # G1b — AN INCREASE IS STILL PASS, and LOUDLY. The other half of #1700 AC2: this
     # component emits no FAIL at all, so an increase must be recorded PASS with the
@@ -989,7 +1115,7 @@ exit 55')
       *)      bad "G2c: an unexpected rc was recorded as '${line:-<no component line>}' instead of SKIP" ;;
     esac
   else
-    skipped "G1/G2: could not create a detached scratch worktree ($(tail -1 "$TMPROOT/wt.log" 2>/dev/null))"
+    bad "G0/G1/G2: could not build the standalone planted fixture ($(tail -1 "$TMPROOT/fixture.log" 2>/dev/null)) — a fixture this suite builds from committed source and a local path remote needs no network and no host capability beyond git, so a failure here is a defect and not a host property"
   fi
 
   # G3 — THE LIVE COMPONENT, AND THE SUITE'S ONE LIVE PROBE (round 4 consolidation; see
