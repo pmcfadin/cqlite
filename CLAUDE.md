@@ -2018,10 +2018,23 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `merge-base(recorded-base, certified)`, to be at or before the PR's **merge-base** (never the base
   ref's tip, #3392), or the skipped prefix to be code-free. That projection is the difference between
   a check and a false FAIL: a base recorded OFF the branch skips none of the PR's own commits, so the
-  skipped prefix is a COMMIT SET and never a path diff against the recorded base. **ANY recorded
-  round that covers suffices** — every job on the PR is examined and one unretrievable record cannot
-  end the scan (coverage wins outright; an unresolved record decides only when nothing bound, as
-  `UNMEASURED`). **AND A RANGE MATCH ALONE DOES NOT BIND** — the leg's first draft REPORTED the
+  skipped prefix is a COMMIT SET and never a path diff against the recorded base. **AMONG THE ROUNDS THAT COVER,
+  THE LATEST DECIDES, AND IT MUST ITSELF BIND (#3752, roborev job 78).** The first draft said "ANY
+  recorded round that covers suffices" and stopped the scan at the first bindable record — so an
+  earlier CLEAN round stayed sufficient even when a LATER recorded round at the same certified head
+  reported findings or failure, i.e. a **known, newer, adverse review result was ignored because an
+  older favourable one was encountered first**. Chronology comes from the record's own `started_at`,
+  never from PR-comment order (a comment can be posted out of order or edited) and never from the job
+  id (nothing guarantees ids are monotonic across agents); ordering is lexicographic, so the
+  fixed-width ISO-8601 UTC form is CHECKED and anything else is `UNMEASURED` rather than sorted
+  wrongly, as is a covering round with no readable stamp — **the order is never guessed, because
+  guessing it is what lets an older favourable round win again**. Still true, and orthogonal: every
+  job on the PR is examined and one unretrievable record cannot end the scan (an unresolved record
+  decides only when no covering round decided the question, as `UNMEASURED`). **Declared residual**:
+  an unretrievable record could in principle BE a newer adverse round, and that cannot be
+  distinguished from an early round aged out of `roborev list --limit`, so demanding retrievability
+  of every historical record would red a correct multi-round PR — what is closed is the finding's
+  subject, known newer results being ignored. **AND A RANGE MATCH ALONE DOES NOT BIND** — the leg's first draft REPORTED the
   recorded verdict and derived nothing from it, declaring that a residual, which was a false-green
   route in a merge gate: a block naming an in-progress, FAILED or findings-bearing job whose range
   happened to match bound the merge, and it is an ACCIDENT route before a hostile one (a lane

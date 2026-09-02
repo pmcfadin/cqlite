@@ -660,6 +660,11 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   local heads=()
   local unresolved=()
   local findings_unauthorized=0 verdict_unknown=0 unconcluded=0
+  # THE COVERING SET (job 78, finding F2). Parallel indexed arrays, because
+  # bash 3.2 has no associative arrays and this file must run on the macOS
+  # system bash.
+  local cov_job=() cov_start=() cov_ok=() cov_note=() cov_class=()
+  local unorderable=0
   BOUND_NOTE=""
 
   # result_permits_binding <job> — 0 when this job's RECORD says its review
@@ -731,6 +736,39 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         ;;
     esac
   }
+  # record_covering <job> — this round COVERS the certified head. Its result and
+  # its chronology are recorded; NOTHING is decided here.
+  #
+  # THIS IS THE FIX FOR roborev JOB 78, FINDING F2. The loop used to call
+  # `result_permits_binding` at each coverage site and `break` on the first
+  # success, so an earlier CLEAN round remained sufficient even when a LATER
+  # recorded round at the same head reported findings or failure: a known,
+  # newer, adverse review result was ignored because an older favourable one was
+  # encountered first. Coverage is now COLLECTED and the decision is taken once,
+  # after the scan, from the LATEST round.
+  record_covering() {
+    local j="$1" ok=0 class=ok
+    if result_permits_binding "$j"; then
+      say "job $(sane "$j") $(sane "$RESULT_NOTE")"
+      ok=1
+    else
+      say "job $(sane "$j") CANNOT bind: $(sane "$RESULT_NOTE")"
+      if [ "${RESULT_UNCONCLUDED:-0}" -eq 1 ]; then
+        class=unconcluded
+      else
+        case "$(record_verdict_class "$RH_VERDICT")" in
+          findings) class=findings ;;
+          *) class=unknown ;;
+        esac
+      fi
+    fi
+    cov_job+=("$j")
+    cov_start+=("$RH_STARTED")
+    cov_ok+=("$ok")
+    cov_note+=("$RESULT_NOTE")
+    cov_class+=("$class")
+  }
+
   for job in ${jobs[@]+"${jobs[@]}"}; do
     # NOT a command substitution. `reviewed_head_of` can refuse, and a refusal
     # inside `$( )` would exit only the SUBSHELL — the caller would read the
@@ -741,6 +779,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
     RH_ERR=""
     RH_VERDICT=""
     RH_STATUS=""
+    RH_STARTED=""
     RESULT_UNCONCLUDED=0
     if ! reviewed_head_of "$job" "$tmp"; then
       say "job $(sane "$job") $(sane "$RH_ERR")"
@@ -819,21 +858,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
 
     if [ "$reviewed" = "$certified" ]; then
       say "job $(sane "$job") reviewed head EQUALS the certified head"
-      if result_permits_binding "$job"; then
-        say "job $(sane "$job") $(sane "$RESULT_NOTE")"
-        bound=1
-        BOUND_NOTE="$RESULT_NOTE"
-        break
-      fi
-      say "job $(sane "$job") but it CANNOT bind: $(sane "$RESULT_NOTE")"
-      if [ "${RESULT_UNCONCLUDED:-0}" -eq 1 ]; then
-        unconcluded=1
-      else
-        case "$(record_verdict_class "$RH_VERDICT")" in
-          findings) findings_unauthorized=1 ;;
-          *) verdict_unknown=1 ;;
-        esac
-      fi
+      record_covering "$job"
       continue
     fi
 
@@ -843,21 +868,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         say "job $(sane "$job") is an ancestor and everything after it is prose by"
         say "job $(sane "$job") scripts/ci/classify-docs-only.sh, so no reviewable code was"
         say "job $(sane "$job") added after the review"
-        if result_permits_binding "$job"; then
-          say "job $(sane "$job") $(sane "$RESULT_NOTE")"
-          bound=1
-          BOUND_NOTE="$RESULT_NOTE"
-          break
-        fi
-        say "job $(sane "$job") but it CANNOT bind: $(sane "$RESULT_NOTE")"
-        if [ "${RESULT_UNCONCLUDED:-0}" -eq 1 ]; then
-          unconcluded=1
-        else
-          case "$(record_verdict_class "$RH_VERDICT")" in
-            findings) findings_unauthorized=1 ;;
-            *) verdict_unknown=1 ;;
-          esac
-        fi
+        record_covering "$job"
         ;;
       1)
         say "job $(sane "$job") is an ancestor, but REVIEWABLE CODE was added after it"
@@ -876,6 +887,61 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   # UNMEASURED verdict below. Under `set -u` on bash 3.2 a bare `"${heads[@]}"`
   # ABORTS on an empty array, so the leg exited with no verdict at all on
   # precisely its fail-closed path: a refusal that never printed its refusal.
+  # ---- RESOLVE THE COVERING SET: THE LATEST ROUND DECIDES (job 78, F2) ------
+  # Ordering is lexicographic, which is SOUND ONLY for the fixed-width ISO-8601
+  # UTC form (`YYYY-MM-DDTHH:MM:SSZ`) — so the form is CHECKED rather than
+  # assumed, and anything else refuses instead of sorting wrongly. A covering
+  # record with no readable stamp makes the set UNORDERABLE, which is
+  # UNMEASURED: the order is never guessed, because guessing it is what would
+  # let an older favourable round win again.
+  #
+  # DECLARED RESIDUAL: an UNRETRIEVABLE record keeps its previous treatment
+  # (REPORTED, and decisive only when nothing bound). It could in principle be a
+  # newer adverse round, and that cannot be told apart from an early round aged
+  # out of `roborev list --limit`. Demanding retrievability of every historical
+  # record would red a correct multi-round PR, so the finding's subject — KNOWN
+  # newer results being ignored — is what is closed here.
+  if [ "${#cov_job[@]}" -gt 0 ]; then
+    local n=0 best=-1 st
+    while [ "$n" -lt "${#cov_job[@]}" ]; do
+      st="${cov_start[$n]}"
+      case "$st" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) : ;;
+        *)
+          say "latest job $(sane "${cov_job[$n]}") COVERS the certified head but its record"
+          say "latest carries no usable chronology (started_at $(sane "${st:-<none>}")), so which"
+          say "latest round is the LATEST cannot be established"
+          unorderable=1
+          ;;
+      esac
+      n=$((n + 1))
+    done
+    if [ "$unorderable" -eq 0 ]; then
+      n=0
+      while [ "$n" -lt "${#cov_job[@]}" ]; do
+        if [ "$best" -lt 0 ] || [ "${cov_start[$n]}" \> "${cov_start[$best]}" ]; then
+          best="$n"
+        fi
+        n=$((n + 1))
+      done
+      say "latest of ${#cov_job[@]} covering round(s), the LATEST is job"
+      say "latest $(sane "${cov_job[$best]}") (started ${cov_start[$best]}), and that is the one"
+      say "latest that must bind — an older favourable round cannot outvote it."
+      if [ "${cov_ok[$best]}" -eq 1 ]; then
+        bound=1
+        BOUND_NOTE="${cov_note[$best]}"
+      else
+        say "latest job $(sane "${cov_job[$best]}") is the deciding round and it CANNOT bind:"
+        say "latest $(sane "${cov_note[$best]}")"
+        case "${cov_class[$best]}" in
+          unconcluded) unconcluded=1 ;;
+          findings) findings_unauthorized=1 ;;
+          *) verdict_unknown=1 ;;
+        esac
+      fi
+    fi
+  fi
+
   local head
   for head in ${heads[@]+"${heads[@]}"}; do
     print_self_check "$head" "$certified"
@@ -912,6 +978,13 @@ could not be classified, so whether reviewable code was added after the review i
   if [ "$unclassifiable_base" -eq 1 ]; then
     causes+=("a recorded round's BASE half could not be compared against this PR's merge-base, \
 so how much of the branch that round actually covered is UNKNOWN.")
+  fi
+  if [ "$unorderable" -eq 1 ]; then
+    causes+=("more than one recorded round COVERS the certified head, but at least one of \
+them carries no readable chronology, so which round is the LATEST cannot be established. The \
+latest covering round is the one that must bind — an older favourable round must not outvote a \
+newer adverse one — so an unorderable covering set is UNMEASURED rather than resolved by \
+guessing.")
   fi
   if [ "$unconcluded" -eq 1 ]; then
     causes+=("a recorded round COVERS the certified head, but its job RECORD does not \
@@ -987,6 +1060,7 @@ reviewed_head_of() {
   RH_BASE=""
   RH_VERDICT=""
   RH_STATUS=""
+  RH_STARTED=""
   RH_ERR=""
   for payload in show list; do
     case "$payload" in
@@ -1017,6 +1091,12 @@ reviewed_head_of() {
     # at the binding site, where the alternative to binding can be named.
     RH_VERDICT=$(sed -n 's/^verdict=//p' "$tmp/facts" | head -1)
     RH_STATUS=$(sed -n 's/^status=//p' "$tmp/facts" | head -1)
+    # THE F2 CHRONOLOGY KEY. `started_at` is on the JOB row for every job that
+    # has begun (measured on live records 59 and 78), which the id and the
+    # PR-comment position are not substitutes for: nothing guarantees ids are
+    # monotonic across agents, and a comment can be posted out of order or
+    # edited after the fact.
+    RH_STARTED=$(sed -n 's/^started_at=//p' "$tmp/facts" | head -1)
     case "$ref" in
       *..*) : ;;
       *)

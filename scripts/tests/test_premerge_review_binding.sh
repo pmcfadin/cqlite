@@ -1108,16 +1108,21 @@ fi
 # ==============================================================================
 # BLOCKER 2 (roborev, MED) — ONE BAD RECORD MUST NOT END THE SCAN
 # ==============================================================================
-# The leg's own contract is that ANY recorded round covering the certified head
-# suffices, because a multi-round PR legitimately leaves rounds 1..n-1 behind.
-# Short-circuiting on the FIRST unretrievable record contradicts that contract
-# and refuses a PR that DOES carry a later covering round — and a false
-# rationale in a gate artifact is what stops the next person looking.
+# A multi-round PR legitimately leaves rounds 1..n-1 behind, so short-circuiting
+# on the FIRST unretrievable record refuses a PR that DOES carry a later
+# covering round — and a false rationale in a gate artifact is what stops the
+# next person looking.
 #
 # RESOLUTION RULE, asserted here and stated beside the code: an unresolved
-# record can only change the answer while nothing has PROVED coverage. So
-# coverage wins outright, and an unresolved record is decisive only when no
-# other round bound — never permissive, never unconditionally fatal.
+# record can only change the answer while nothing has been DECIDED. So an
+# unresolved record is decisive only when no covering round decided the
+# question — never permissive, never unconditionally fatal.
+#
+# NOTE the rule about the COVERING set changed with job 78's finding F2 and is
+# no longer "any covering round suffices": among the covering rounds the LATEST
+# decides, and it must itself be bindable (see the `latest:` cases below). What
+# these cases pin is the orthogonal property — that one bad record does not END
+# the scan.
 
 # pr_payload_comments <out> <baseRefName> <comment-body>... — several recorded
 # blocks, one per top-level comment, in order.
@@ -1164,6 +1169,103 @@ if run_binding 5 "multi-round: no coverage plus an unresolved record is UNMEASUR
     *"verdict UNMEASURED"*)
       ok "multi-round: an unresolved record that could have bound is UNMEASURED, not UNBOUND" ;;
     *) bad "multi-round: expected UNMEASURED (got: $OUT)" ;;
+  esac
+fi
+
+# ==============================================================================
+# FINDING F2 (roborev job 78) — THE LATEST COVERING ROUND DECIDES
+# ==============================================================================
+# The scan used to stop at the FIRST bindable record, so an earlier CLEAN round
+# stayed sufficient even when a LATER recorded round at the same certified head
+# reported findings or failure: a known, newer, adverse review result was simply
+# ignored because an older favourable one was encountered first.
+#
+# The rule is now: among the records that COVER the certified head and whose
+# result could be READ, the LATEST decides, and that round must itself be
+# bindable. Chronology comes from the record's own `started_at`, never from
+# PR-comment order (a comment can be posted out of order or edited) and never
+# from the job id (nothing guarantees ids are monotonic across agents).
+#
+# NOT changed, and deliberately: an UNRETRIEVABLE record keeps the previous
+# round's treatment — REPORTED, and decisive only when nothing bound. The
+# finding is about KNOWN newer results being ignored; demanding retrievability
+# of every historical record would red a correct multi-round PR whose early
+# rounds have aged out of `roborev list --limit`. That residual is stated beside
+# the code.
+
+# --- earlier CLEAN + later FINDINGS, both covering: must NOT bind -------------
+pr_payload_comments "$MOCK_GH_DIR/pr.json" main "$(roborev_block 710)" "$(roborev_block 711)"
+roborev_job 710 "$B1_MB" "$B1_MB_HEAD" P done 2026-09-02T10:00:00Z
+roborev_job 711 "$B1_MB" "$B1_MB_HEAD" F done 2026-09-02T11:00:00Z
+if run_binding 4 "latest: an earlier clean round does not survive a later findings round" \
+  review-binding 1 pmcfadin/cqlite "$B1_MB_HEAD"; then
+  case "$OUT" in
+    *"verdict UNBOUND"*)
+      ok "latest: the LATEST covering round decides, not the first one encountered" ;;
+    *) bad "latest: an older clean round still bound past a newer adverse one (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *711*) ok "latest: the deciding round is NAMED, so the operator knows which one" ;;
+    *) bad "latest: the refusal did not name the deciding round (got: $OUT)" ;;
+  esac
+fi
+
+# --- CONTROL, reversed order: later CLEAN over earlier FINDINGS DOES bind -----
+# Without this the case above is satisfied by "any findings record anywhere
+# refuses", which is a different (and wrong) rule.
+pr_payload_comments "$MOCK_GH_DIR/pr.json" main "$(roborev_block 712)" "$(roborev_block 713)"
+roborev_job 712 "$B1_MB" "$B1_MB_HEAD" F done 2026-09-02T10:00:00Z
+roborev_job 713 "$B1_MB" "$B1_MB_HEAD" P done 2026-09-02T11:00:00Z
+if run_binding 0 "latest: a later CLEAN round supersedes an earlier findings round" \
+  review-binding 1 pmcfadin/cqlite "$B1_MB_HEAD"; then
+  case "$OUT" in
+    *"verdict BOUND"*)
+      ok "latest: fixing findings and re-reviewing at the same head still binds" ;;
+    *) bad "latest: a later clean round failed to supersede an earlier one (got: $OUT)" ;;
+  esac
+fi
+
+# --- comment ORDER must not decide: adverse round listed FIRST ----------------
+# Same two records as the refusal case, with the blocks in the opposite comment
+# order. If the leg were ordering by encounter it would flip; by `started_at` it
+# cannot.
+pr_payload_comments "$MOCK_GH_DIR/pr.json" main "$(roborev_block 715)" "$(roborev_block 714)"
+roborev_job 714 "$B1_MB" "$B1_MB_HEAD" P done 2026-09-02T10:00:00Z
+roborev_job 715 "$B1_MB" "$B1_MB_HEAD" F done 2026-09-02T11:00:00Z
+if run_binding 4 "latest: PR-comment order does not decide which round is latest" \
+  review-binding 1 pmcfadin/cqlite "$B1_MB_HEAD"; then
+  case "$OUT" in
+    *"verdict UNBOUND"*)
+      ok "latest: chronology comes from the record, not from comment order" ;;
+    *) bad "latest: comment order changed the verdict (got: $OUT)" ;;
+  esac
+fi
+
+# --- a covering record with NO chronology key: UNMEASURED, never a guess ------
+pr_payload_comments "$MOCK_GH_DIR/pr.json" main "$(roborev_block 716)" "$(roborev_block 717)"
+roborev_job 716 "$B1_MB" "$B1_MB_HEAD" P done 2026-09-02T10:00:00Z
+roborev_job 717 "$B1_MB" "$B1_MB_HEAD" F done -
+if run_binding 5 "latest: a covering record with no started_at is UNMEASURED" \
+  review-binding 1 pmcfadin/cqlite "$B1_MB_HEAD"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "latest: an unorderable covering set is UNMEASURED — the order is not guessed" ;;
+    *) bad "latest: expected UNMEASURED for an unorderable covering set (got: $OUT)" ;;
+  esac
+fi
+
+# --- a malformed chronology key is NOT sortable as text: UNMEASURED -----------
+# Lexicographic ordering is only sound for the fixed-width ISO-8601 UTC form, so
+# anything else must refuse rather than sort wrongly.
+pr_payload_comments "$MOCK_GH_DIR/pr.json" main "$(roborev_block 718)" "$(roborev_block 719)"
+roborev_job 718 "$B1_MB" "$B1_MB_HEAD" P done 2026-09-02T10:00:00Z
+roborev_job 719 "$B1_MB" "$B1_MB_HEAD" F done "yesterday afternoon"
+if run_binding 5 "latest: a non-ISO started_at is UNMEASURED, not sorted as text" \
+  review-binding 1 pmcfadin/cqlite "$B1_MB_HEAD"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "latest: only the fixed-width ISO-8601 UTC form is accepted as an order key" ;;
+    *) bad "latest: a malformed stamp was accepted (got: $OUT)" ;;
   esac
 fi
 
