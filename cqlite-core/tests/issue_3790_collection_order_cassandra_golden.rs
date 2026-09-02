@@ -707,3 +707,249 @@ fn negative_control_whole_tuple_path_string_order_diverges_from_cassandra() {
          the composite case proves nothing about component-wise comparison"
     );
 }
+
+// ===========================================================================
+// LEG 2 — CQLite reads the same order off the same Cassandra-written bytes.
+//
+// Read path: `SSTableReader::open` + `iterate_all_partitions_for_compaction`,
+// which surfaces each complex column's per-element cells IN ON-DISK ORDER with
+// their decoded values (`ComplexColumn::elements`) plus the collapsed
+// `Value::Set`/`Value::Map` a consumer sees. Both are public and UNGATED, so
+// this leg needs no feature flag and executes wherever the target does.
+//
+// WHAT THIS LEG IS AND IS NOT. On its own it would be weak: a path that emits
+// cells in the order it read them prints the right sequence with or without the
+// comparator fix (the fixture README says exactly this). Its value is closing
+// the loop — Cassandra bytes -> CQLite decode -> CQLite comparator -> the order
+// Cassandra wrote — and, specifically, PROVING Leg 1's transcription of the
+// sstabledump text is the same value the bytes actually carry. Leg 1 remains the
+// leg that satisfies AC3.
+// ===========================================================================
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use cqlite_core::platform::Platform;
+use cqlite_core::schema::TableSchema;
+use cqlite_core::storage::sstable::reader::compaction_row::CompactionRowData;
+use cqlite_core::storage::sstable::reader::SSTableReader;
+use cqlite_core::Config;
+
+/// The ORDERING values of one complex column as CQLite decoded them, in on-disk
+/// order, from two independent surfaces of the same read.
+struct DecodedColumn {
+    /// Per-element: the SET element, or the MAP key — the value that IS the cell
+    /// path and therefore the one Cassandra's comparator ordered by.
+    per_element: Vec<Value>,
+    /// The same ordering values taken from the collapsed `Value::Set`/`Map` the
+    /// reader hands a consumer.
+    collapsed: Vec<Value>,
+}
+
+/// `test_comparator_order.collection_order` parsed from its COMMITTED DDL —
+/// authoritative schema, never inferred from the bytes (#28).
+fn table_schema() -> TableSchema {
+    let path =
+        datasets_root::schema_path("issue-3790-comparator-ordering.cql").unwrap_or_else(|| {
+            panic!(
+                "committed schema issue-3790-comparator-ordering.cql is unreadable — it \
+             is checkout-relative source (#3148), so this is a resolution defect, \
+             never an absence"
+            )
+        });
+    let ddl = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read committed schema {path:?}: {e}"));
+    let lower = ddl.to_lowercase();
+    let needle = format!("create table if not exists {TABLE}");
+    let start = lower
+        .find(&needle)
+        .unwrap_or_else(|| panic!("CREATE TABLE {TABLE} not found in {path:?}"));
+    let rest = &ddl[start..];
+    let semi = rest
+        .find(';')
+        .unwrap_or_else(|| panic!("unterminated CREATE TABLE in {path:?}"));
+    let stmt = rest[..=semi].replacen("IF NOT EXISTS ", "", 1);
+    let (_, mut schema) = cqlite_core::schema::cql_parser::parse_create_table(&stmt)
+        .unwrap_or_else(|e| panic!("parse CREATE TABLE {TABLE}: {e:?}"));
+    schema.keyspace = KEYSPACE.to_string();
+    schema.table = TABLE.to_string();
+    schema
+}
+
+/// Decode every complex column of every partition of the real `Data.db`, keyed
+/// by `(partition key as int string, column)`.
+async fn decode_fixture() -> BTreeMap<(String, String), DecodedColumn> {
+    let data_db = fixture_dir().join("nb-1-big-Data.db");
+    assert!(
+        data_db.is_file(),
+        "the Cassandra-written {data_db:?} is committed and must_run (#3220)"
+    );
+    let config = Config::default();
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("platform init for the fixture read"),
+    );
+    let reader = SSTableReader::open(&data_db, &config, platform)
+        .await
+        .unwrap_or_else(|e| panic!("open {data_db:?}: {e}"));
+    let schema = table_schema();
+    let rows = reader
+        .iterate_all_partitions_for_compaction(Some(&schema))
+        .await
+        .unwrap_or_else(|e| panic!("iterate {data_db:?}: {e}"));
+    assert_eq!(
+        rows.len(),
+        2,
+        "the fixture holds two partitions; decoding the present fixture to a \
+         different row count is a hard failure, never a skip"
+    );
+
+    let mut out = BTreeMap::new();
+    for row in &rows {
+        let key = match row.key.0.as_ref() {
+            [a, b, c, d] => i32::from_be_bytes([*a, *b, *c, *d]).to_string(),
+            other => panic!("unexpected partition key width {}: {other:?}", other.len()),
+        };
+        let complex = match &row.row_data {
+            CompactionRowData::Live { complex, .. } => complex,
+            other => panic!("partition {key} did not decode as a live row: {other:?}"),
+        };
+        for column in complex {
+            let per_element = column
+                .elements
+                .iter()
+                .map(|e| ordering_value(&column.column, e.decoded_key.as_ref(), e.value.as_ref()))
+                .collect();
+            let collapsed = collapsed_ordering_values(&column.column, &column.collapsed_value);
+            out.insert(
+                (key.clone(), column.column.clone()),
+                DecodedColumn {
+                    per_element,
+                    collapsed,
+                },
+            );
+        }
+    }
+    out
+}
+
+/// The value a complex element is ORDERED BY: a MAP entry's decoded key, or a
+/// SET member's decoded element (a set member carries the element in the cell
+/// path and an empty cell value, which the reader surfaces as `value`).
+///
+/// Panics rather than falling back: an element with neither is a decode defect,
+/// and silently skipping it would shorten the sequence into a vacuous pass.
+fn ordering_value(column: &str, decoded_key: Option<&Value>, value: Option<&Value>) -> Value {
+    match (decoded_key, value) {
+        (Some(k), _) => k.clone(),
+        (None, Some(v)) => v.clone(),
+        (None, None) => panic!(
+            "{column}: a complex element decoded to neither a map key nor an \
+             element value"
+        ),
+    }
+}
+
+/// The same ordering values read off the collapsed whole-collection `Value`.
+fn collapsed_ordering_values(column: &str, collapsed: &Value) -> Vec<Value> {
+    match collapsed {
+        Value::Set(xs) | Value::List(xs) => xs.clone(),
+        Value::Map(kvs) => kvs.iter().map(|(k, _)| k.clone()).collect(),
+        other => panic!("{column}: collapsed to a non-collection value: {other:?}"),
+    }
+}
+
+/// One column of one partition, through the real reader.
+fn assert_decoded_column(
+    decoded: &BTreeMap<(String, String), DecodedColumn>,
+    partition: &str,
+    column: &str,
+    expected: &[Value],
+    cmp: &ComparatorType,
+) {
+    let got = decoded
+        .get(&(partition.to_string(), column.to_string()))
+        .unwrap_or_else(|| {
+            panic!(
+                "{column} is absent from decoded partition {partition} — the \
+                 fixture IS present, so a missing column is a hard failure"
+            )
+        });
+    assert!(
+        !got.per_element.is_empty(),
+        "{column}/partition {partition}: the fixture is present and decoded to \
+         ZERO elements (0-rows-when-present must never pass)"
+    );
+    assert_eq!(
+        got.per_element, expected,
+        "{column}/partition {partition}: CQLite must decode the Cassandra-written \
+         cells to the same values, in the same on-disk order, that the golden's \
+         cell paths denote"
+    );
+    assert_eq!(
+        got.collapsed, expected,
+        "{column}/partition {partition}: the collapsed collection a consumer sees \
+         must carry the same order as the per-element cells"
+    );
+    // The loop that matters: sort what CQLITE DECODED with CQLite's comparator
+    // and land back on what CASSANDRA WROTE.
+    assert_strict_order(
+        cmp,
+        &got.per_element,
+        &format!("decoded {column}/partition {partition}"),
+    );
+}
+
+/// `inet_set` / `inet_map` — the live-defect case, end to end over real bytes.
+#[tokio::test]
+async fn leg2_cqlite_decodes_the_cassandra_inet_order_from_the_real_data_db() {
+    let golden = load_golden(&fixture_dir().join(GOLDEN_FILE));
+    let decoded = decode_fixture().await;
+    let cmp = inet_comparator();
+    for column in ["inet_set", "inet_map"] {
+        for partition in ["1", "2"] {
+            let expected: Vec<Value> = golden_order(&golden, partition, column)
+                .iter()
+                .map(|p| inet_value(p))
+                .collect();
+            assert_decoded_column(&decoded, partition, column, &expected, &cmp);
+        }
+    }
+}
+
+/// `time_set` / `time_map` — the LATENT case (see the module docs): a value-order
+/// pin over Cassandra-written bytes, not a caught misordering.
+#[tokio::test]
+async fn leg2_cqlite_decodes_the_cassandra_time_order_from_the_real_data_db() {
+    let golden = load_golden(&fixture_dir().join(GOLDEN_FILE));
+    let decoded = decode_fixture().await;
+    let cmp = time_comparator();
+    for column in ["time_set", "time_map"] {
+        for partition in ["1", "2"] {
+            let expected: Vec<Value> = golden_order(&golden, partition, column)
+                .iter()
+                .map(|p| time_value(p))
+                .collect();
+            assert_decoded_column(&decoded, partition, column, &expected, &cmp);
+        }
+    }
+}
+
+/// `pair_set` — the composite case decoded from real bytes as
+/// `Frozen(Tuple([Inet, Time]))`, so the tuple comparator's scalar-leaf
+/// delegation is exercised on values CQLite parsed rather than on values this
+/// test constructed.
+#[tokio::test]
+async fn leg2_cqlite_decodes_the_cassandra_composite_order_from_the_real_data_db() {
+    let golden = load_golden(&fixture_dir().join(GOLDEN_FILE));
+    let decoded = decode_fixture().await;
+    let cmp = pair_comparator();
+    for partition in ["1", "2"] {
+        let expected: Vec<Value> = golden_order(&golden, partition, "pair_set")
+            .iter()
+            .map(|p| pair_value(p))
+            .collect();
+        assert_decoded_column(&decoded, partition, "pair_set", &expected, &cmp);
+    }
+}
