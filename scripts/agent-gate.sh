@@ -6806,9 +6806,29 @@ _status_detail_file() { printf '%s/%s.status-detail' "${LOG_DIR:-}" "$1"; }
 # LOG_DIR that cannot take it must not change what the component reports. (The token
 # itself rides `.result`, whose write failure is already handled by the missing-result
 # guard.)
+# WRITE-THEN-RENAME, and on failure leave NOTHING renderable (roborev job 108). The previous
+# form truncated the destination and wrote in place, which fails two ways:
+#   * a write that dies partway (ENOSPC, a quota boundary) leaves a PARTIAL detail, which
+#     renders as a truncated disclosure — the silent truncation this issue exists to remove;
+#   * this function is called a SECOND time on the persistence path, to REPLACE the opt-out
+#     detail with the persistence one. If that second write fails, the FIRST one survives, and
+#     the row then claims `CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced)` while the
+#     component is FAIL for a reason that has nothing to do with the ratchet. That is exactly
+#     the false attribution fixed on the C1 round, arriving through a failed write instead of
+#     a missing branch.
+# So: write a temp file, rename only on a COMPLETE write, and on any failure remove both the
+# temp and the DESTINATION. Losing the detail is a truthful absence; keeping a stale one is a
+# false statement, and this whole issue is about which of those a summary may contain.
 _record_status_detail() {
   [ -n "${LOG_DIR:-}" ] || return 0
-  printf '%s\n' "$2" 2>/dev/null >"$(_status_detail_file "$1")" || return 0
+  local _sd_f _sd_t
+  _sd_f=$(_status_detail_file "$1")
+  _sd_t="$_sd_f.partial"
+  if printf '%s\n' "$2" 2>/dev/null >"$_sd_t" && mv -f "$_sd_t" "$_sd_f" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$_sd_t" "$_sd_f" 2>/dev/null
+  return 0
 }
 
 # _status_detail <component> (#3402): read it back, reduced to ONE line with the C0 controls

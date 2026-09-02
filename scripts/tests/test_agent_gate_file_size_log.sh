@@ -753,6 +753,7 @@ case "\$d" in
     if [ -d "\$d" ]; then
       case "\${FS_SABOTAGE:-}" in
         dir)     mkdir -p "\$d/file-size.log" ;;
+        detaildir) mkdir -p "\$d/file-size.status-detail" ;;
         devfull) ln -s /dev/full "\$d/file-size.log" ;;
         sibfull) mkdir -p "\$d/file-size.log"
                  ln -s /dev/full "\$d/file-size.persistence-error.log" ;;
@@ -1020,6 +1021,47 @@ STUB
       "$sumrow11" 'LOG PERSISTENCE FAILURE, not a ratchet violation .*the ratchet was OPTED OUT OF'
 
   # -------------------------------------------------------------------------
+  # Case 14 (#3402, roborev job 108) — an UNWRITABLE sidecar must leave NOTHING renderable,
+  # never a stale or partial detail. `_record_status_detail` is called TWICE on this path:
+  # once by the opt-out branch, then again by the persistence block to REPLACE that detail.
+  # A truncate-in-place whose second write failed left the FIRST detail in the file, so the
+  # row claimed `CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced)` while the component was
+  # FAIL for a persistence reason — the C1 false attribution, arriving through a failed write.
+  #
+  # The fixture plants a DIRECTORY at the sidecar path, so every write to it fails
+  # (uid-independent, unlike a chmod, which is a no-op for root).
+  #
+  # WHAT THIS CASE DOES *NOT* PROVE, said plainly rather than left to be assumed: it does NOT
+  # discriminate the write-then-rename fix. With the sidecar wholly unwritable, the previous
+  # truncate-in-place form fails identically and also renders nothing — verified against a
+  # mutant restoring it, where this case still passes. The hazard the fix closes needs the
+  # FIRST write to SUCCEED and the SECOND to FAIL, i.e. the path must become unwritable
+  # BETWEEN two calls inside one component, which no external fixture can arrange at this
+  # granularity (the same reason #3401 declared the mid-sequence partial write unreachable).
+  # So this case pins the REACHABLE half — an unwritable sidecar renders nothing partial or
+  # stale — and the unreachable half rests on the code being obviously safer rather than on a
+  # green here. A case that cannot fail for the reason you think it can is worse than one
+  # whose scope is written down.
+  # -------------------------------------------------------------------------
+  mkrepo detailfail cqlite-core/src/big.rs 900 950 main; r14="$REPO"
+  out14="$tmp/detailfail.out"
+  run_only_file_size "$r14" "$out14" PATH="$STUBBIN:$PATH" FS_SABOTAGE=detaildir \
+      CQLITE_ALLOW_FILE_GROWTH=1
+  d14=$(logdir_of "$out14") || bad "case14: the run published no usable 'logs:' dir"
+  if [ -d "$d14/file-size.status-detail" ]; then
+    ok "case14: sabotage in place (the status-detail path is a directory, so every write fails)"
+  else
+    bad "case14: sabotage did NOT take effect at '$d14/file-size.status-detail' — the path was never exercised"
+  fi
+  sumrow14="$tmp/detailfail.sumrow"
+  fs_summary_row "$r14/.sum" "$sumrow14" ||
+    bad "case14 (#3402): the run emitted no usable file-size row — the stale-detail asserts are UNMEASURED"
+  lacks "case14 (#3402): an unwritable sidecar renders NO opt-out claim (no stale detail)" \
+      "$sumrow14" "ratchet NOT enforced"
+  lacks "case14 (#3402): and no partial fragment of it either" \
+      "$sumrow14" "CQLITE_ALLOW_FILE_GROWTH"
+
+  # -------------------------------------------------------------------------
   # Case 13 — CQLITE_ALLOW_FILE_GROWTH set to a NON-1 value (#3401 review item 3). The
   # branch distinguishing "set to something that is not 1" from "never set" was otherwise
   # unexercised, so it could regress while the suite stayed green. Saying "unset" to
@@ -1106,7 +1148,10 @@ printf 'file-size component log + opt-out marker guard (#3401/#3402): %d passed,
 # the first value written here was WRONG (109, guessed from the number of asserts typed
 # rather than counted from a run: `fs_summary_row || bad` contributes nothing unless it
 # fires).
-EXPECTED_CHECKS=113
+# 113 -> 116 on job 108 (+3 case14: an unwritable sidecar must leave nothing renderable).
+# Counted from a RUN, not from asserts typed: the `fs_summary_row || bad` guard contributes
+# nothing unless it fires, which is why the first value written here (117) was wrong twice.
+EXPECTED_CHECKS=116
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"
