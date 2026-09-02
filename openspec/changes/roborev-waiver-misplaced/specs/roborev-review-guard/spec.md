@@ -264,6 +264,29 @@ that the run FAILs.
 Each issue number returned SHALL be validated **affirmatively as digits** before it is used or emitted;
 a value that is not a number SHALL be a could-not-check cause and SHALL NOT be interpolated raw.
 
+**A CLOSING REFERENCE'S NUMBER IS SCOPED TO ITS OWN REPOSITORY, AND ONLY A SAME-REPOSITORY REFERENCE
+SHALL BE PROBED.** `gh issue view <N>` resolves a number in the **current** repository, so following a
+**cross-repository** reference would read a different issue that merely shares that number — which can
+produce a **false `MISPLACED` naming a thread that never carried a marker**, worse than reporting
+nothing, or miss the real one. The probe SHALL therefore establish which repository `gh` resolves here
+(by asking `gh`, not by deriving it) and SHALL probe a reference **only** when that reference's own
+repository, read from the relation payload, **equals** it — compared case-insensitively, because
+GitHub owner and repository names are case-insensitive and a case-sensitive compare would skip a
+same-repository reference.
+
+A cross-repository reference SHALL be an **explicit, DECLARED skip**, counted and named in the
+rendering, never a silent one. Following it by URL is deliberately **not** done: the reference derives
+from the mutable pull-request body, so honouring it would widen what this call can be pointed at on a
+path whose entire justification is that it grants nothing and only selects a thread to name; the
+incident this mechanism exists for is a same-repository coordination thread; and skipping is the
+fail-closed direction, whose worst case is a `NONE` that declares the skip.
+
+**"In another repository" and "cannot tell which repository" are different facts and SHALL NOT render
+alike.** A reference whose repository cannot be read from the payload, and a current repository that
+could not be established at all, SHALL each be a **could-not-check** cause — never a declared skip
+(which would assert something nobody established) and never a probe (which is the false-`MISPLACED`
+route).
+
 **Several linked issues** SHALL each be probed, **in the order GitHub returns them** (not a sort — any
 sort is a policy nobody asked for), **bounded** by a named constant, reporting the **first** thread
 carrying a matching marker. The bound exists because the probe is a diagnostic and must not become an
@@ -281,6 +304,26 @@ SHALL say so.
 #### Scenario: Several linked issues, the first match reported
 - **WHEN** the PR declares two linked issues and the second carries the matching marker
 - **THEN** both are probed in GitHub's order and the state is `MISPLACED` naming the second
+
+#### Scenario: A cross-repository closing reference is not probed, and the skip is declared
+- **WHEN** the only declared closing reference is `other-owner/other-repo#N`, and issue `#N` **in this repository** carries a marker that would have been accepted
+- **THEN** no thread is probed for it, `MISPLACED` is not reported, and the value declares how many cross-repository references were deliberately not probed and why
+
+#### Scenario: The same number in this repository is probed
+- **WHEN** the identical number is declared as a **same-repository** closing reference
+- **THEN** it is probed and reported `MISPLACED`, so the skip above is shown to turn on the reference's repository and not on the probe having stopped working
+
+#### Scenario: Owner and repository names are compared case-insensitively
+- **WHEN** the current repository and the reference's repository differ only in letter case
+- **THEN** they are one repository, the reference is probed, and no skip is declared
+
+#### Scenario: A reference whose repository cannot be established
+- **WHEN** a relation entry carries a usable number but no readable repository
+- **THEN** the outcome is a could-not-check naming an unestablished repository, it is not counted as a cross-repository skip, and it is not probed
+
+#### Scenario: The current repository cannot be established
+- **WHEN** the call resolving the current repository fails, or answers with something that is not an owner/name pair
+- **THEN** the outcome is a could-not-check naming that resolution, and no reference is probed
 
 #### Scenario: A non-numeric value in the relation payload
 - **WHEN** the relation payload carries a value that is not a number

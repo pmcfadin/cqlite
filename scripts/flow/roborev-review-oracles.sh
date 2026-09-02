@@ -1240,9 +1240,10 @@ ROBOREV_LINKED_ISSUE_PROBE_MAX=3
 
 roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-findings-count>]
   local kind="$1" base="$2" head="$3" job="$4" observed="${5:-}"
-  local rel_errfile rel_json rel_errtext numbers declared probed=0
+  local rel_errfile rel_json rel_errtext numbers declared probed=0 skipped_cross=0
   local issue read_ok=() unread=() comments result state scan_rc
-  local issue_errfile issue_errtext read_list unread_list bound_clause
+  local issue_errfile issue_errtext read_list unread_list bound_clause cross_clause suffix
+  local repo_nwo repo_errfile repo_errtext
   ROBOREV_PROBE_OUTCOME="could-not-check"
   # THE STRUCTURED VALUE, KEPT BESIDE THE RENDERED ONE ON PURPOSE. `_DETAIL` is prose for a human;
   # `_ISSUE` is the number as data, so a later consumer (or a test) never has to parse the number back
@@ -1261,6 +1262,54 @@ roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-fi
     ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: no temporary file could be created to capture the 'gh' diagnostic"
     return 0
   fi
+  # ===== WHICH REPOSITORY WILL `gh issue view <N>` RESOLVE AGAINST? ASK, DO NOT ASSUME (#3759 r1) =====
+  # A closing reference carries a REPOSITORY-SCOPED number, and `gh issue view "$issue"` resolves that
+  # number in the CURRENT repository. So a CROSS-REPOSITORY closing reference — which a PR body can
+  # declare, and a PR body is editable by anyone with write access — used to send the probe at a
+  # DIFFERENT issue that merely shares a number. Two bad outcomes, and the first is worse than having
+  # no probe at all: a false `MISPLACED` naming a thread that never carried a marker, which sends the
+  # operator somewhere pointless and spends the diagnostic's credibility; or the real thread missed.
+  #
+  # THE RESOLUTION IS THE SKIP, NOT A URL. The relation also carries the full identity (`repository`,
+  # `url`), so the probe COULD follow a cross-repo reference by URL. It deliberately does not:
+  #   * the reference is derived from the MUTABLE PR body, and handing an arbitrary, attacker-choosable
+  #     repository URL to `gh` widens what this call can be pointed at — on a path whose entire
+  #     justification is "it grants nothing, it only selects which thread to NAME";
+  #   * the incident this mechanism exists for is a SAME-REPOSITORY coordination thread (PR #3710 ->
+  #     issue #3544 in this repository), which is where lane/lead coordination lives; and
+  #   * skipping is the fail-closed direction — the worst case is a `NONE` that DECLARES the skip,
+  #     never a MISPLACED naming the wrong thread.
+  # SO IT IS AN EXPLICIT, DECLARED SKIP (R5), counted and named in the rendering, NEVER a silent one:
+  # a probe that omits coverage silently is indistinguishable from one that covers it.
+  #
+  # `gh repo view --json nameWithOwner` is the RIGHT oracle rather than a convenient one: it answers
+  # exactly the question asked — which repository does `gh` resolve HERE — using the same base-repo
+  # resolution `gh issue view <N>` uses. Deriving it by parsing the PR's own URL would be a second,
+  # weaker implementation of that resolution. A failure is a could-not-check: with the current
+  # repository unknown, "same repository" cannot be established AFFIRMATIVELY for any reference, and
+  # an unestablished identity must never inherit the probing branch.
+  if ! repo_errfile="$(mktemp 2>/dev/null)"; then
+    rm -f "$rel_errfile"
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: no temporary file could be created to capture the 'gh' diagnostic"
+    return 0
+  fi
+  if ! repo_nwo="$(cd "$REPO" && gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>"$repo_errfile")"; then
+    repo_errtext="$(tr -d '\r' <"$repo_errfile" | tr '\n' ' ')"
+    rm -f "$repo_errfile" "$rel_errfile"
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: 'gh repo view --json nameWithOwner' failed (${repo_errtext:-no diagnostic was produced}), so which repository a closing reference points at could not be established"
+    return 0
+  fi
+  rm -f "$repo_errfile"
+  # AFFIRMATIVE SHAPE TEST on the identity itself, for the same reason each issue number gets one: it
+  # is remote text, and it is the value every same-repository decision below is compared against.
+  case "$repo_nwo" in
+    */*) ;;
+    *)
+      rm -f "$rel_errfile"
+      ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: 'gh repo view --json nameWithOwner' did not answer with an owner/name pair, so which repository a closing reference points at could not be established"
+      return 0
+      ;;
+  esac
   # ===== THE LINKED ISSUE COMES FROM THE STRUCTURED RELATION, NEVER FROM THE PR BODY (#3626) =====
   # #3626 DELETED a PR-body link requirement, and not because Markdown is hard to parse: A PULL-REQUEST
   # BODY IS EDITABLE AT ANY TIME BY ANYONE WITH WRITE ACCESS, WITH NO PER-EDIT ATTRIBUTION, while a
@@ -1301,8 +1350,12 @@ roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-fi
   # for digits itself. Two affirmative tests rather than one because the shell is what interpolates
   # into an emitted diagnostic, and a value that reaches a renderer must have been judged by the
   # process that renders it.
-  if ! numbers="$(printf '%s' "$rel_json" | python3 -c '
-import json, sys
+  if ! numbers="$(printf '%s' "$rel_json" | PROBE_REPO_NWO="$repo_nwo" python3 -c '
+import json, os, sys
+# The current repository, as `gh` itself resolves it. Compared CASE-INSENSITIVELY because GitHub
+# owner and repository names are case-insensitive, so `PMcFadin/CQLite` and `pmcfadin/cqlite` are one
+# repository and treating them as two would produce a declared skip for a same-repository reference.
+want_repo = " ".join(os.environ.get("PROBE_REPO_NWO", "").split()).lower()
 try:
     data = json.load(sys.stdin)
 except ValueError:
@@ -1323,17 +1376,50 @@ if "closingIssuesReferences" not in data:
 refs = data["closingIssuesReferences"]
 if not isinstance(refs, list):
     sys.exit(1)
+
+def ref_repo(ref):
+    """owner/name for a reference, lowercased, or None when it cannot be established.
+
+    THREE-VALUED BY CONSTRUCTION: the caller must be able to tell "another repository" from "could
+    not tell which repository", because they are different verdicts — the first is a declared skip
+    and the second is a could-not-check. Collapsing them would put an unestablished identity on the
+    permissive side of a comparison.
+    """
+    repo = ref.get("repository")
+    if not isinstance(repo, dict):
+        return None
+    name = repo.get("name")
+    owner = repo.get("owner")
+    login = owner.get("login") if isinstance(owner, dict) else None
+    if not isinstance(name, str) or not isinstance(login, str) or not name or not login:
+        return None
+    return ("%s/%s" % (login, name)).lower()
+
+
 for ref in refs:
     n = ref.get("number") if isinstance(ref, dict) else None
     if isinstance(n, bool):
         n = None
     if isinstance(n, int):
-        sys.stdout.write("%d\n" % n)
-    elif isinstance(n, str) and n.isdigit() and n:
-        sys.stdout.write("%s\n" % n)
-    else:
+        n = "%d" % n
+    elif not (isinstance(n, str) and n and n.isdigit()):
+        n = None
+    if n is None:
         # NEVER the raw value: an unrecognised entry is reported as a KIND, not as text.
         sys.stdout.write("NON-NUMERIC\n")
+        continue
+    # ===== THE NUMBER IS ONLY USABLE IF IT NAMES *THIS* REPOSITORY (#3759 round 1, finding 1) =====
+    # A closing reference number is REPOSITORY-SCOPED and `gh issue view <N>` resolves it in the
+    # current repository, so a number from another repository would probe a DIFFERENT issue that
+    # merely shares it. Keyed on the AFFIRMATIVE match: only a reference whose repository was read
+    # and EQUALS this one yields a probeable number.
+    have_repo = ref_repo(ref)
+    if have_repo is None or not want_repo:
+        sys.stdout.write("REPO-UNVERIFIED\n")
+    elif have_repo == want_repo:
+        sys.stdout.write("%s\n" % n)
+    else:
+        sys.stdout.write("CROSS-REPO\n")
 ' 2>/dev/null)"; then
     ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: the closingIssuesReferences payload was not readable as a JSON object carrying a closingIssuesReferences LIST (it was unparseable, a non-object, missing that key, or null) — that is a broken payload, NOT an empty relation, and the two must never render alike"
     return 0
@@ -1349,7 +1435,24 @@ for ref in refs:
   # order GitHub returns is the only one attributable to something outside this code.
   for issue in $numbers; do
     [ "$probed" -lt "$ROBOREV_LINKED_ISSUE_PROBE_MAX" ] || break
+    # THE TOKEN SET IS CLOSED, AND EACH NON-NUMERIC TOKEN HAS ITS OWN DISPOSITION. `CROSS-REPO` is a
+    # DECLARED SKIP (a reference we affirmatively established points elsewhere, and deliberately do
+    # not follow — see the header above the resolver call); `REPO-UNVERIFIED` is a COULD-NOT-CHECK
+    # (we could not establish where it points, which is not the same fact and must not read alike);
+    # anything else is a malformed entry. All three consume a bound slot, because the bound is on
+    # references EXAMINED and each of these was examined. The final `*[!0-9]*` arm is the fail-closed
+    # catch: a token this code has never judged is a could-not-check, never a probeable number.
     case "$issue" in
+      CROSS-REPO)
+        probed=$(( probed + 1 ))
+        skipped_cross=$(( skipped_cross + 1 ))
+        continue
+        ;;
+      REPO-UNVERIFIED)
+        probed=$(( probed + 1 ))
+        unread+=("an entry whose repository could not be established, so whether its number names an issue in THIS repository is unknown")
+        continue
+        ;;
       ''|*[!0-9]*)
         probed=$(( probed + 1 ))
         unread+=("an entry that is not an issue number")
@@ -1433,19 +1536,34 @@ for ref in refs:
   if [ "$probed" -lt "$declared" ]; then
     bound_clause=" — $probed of $declared declared examined, probe bounded at $ROBOREV_LINKED_ISSUE_PROBE_MAX, $(( declared - probed )) never looked at"
   fi
+  # THE DECLARED CROSS-REPOSITORY SKIP IS NAMED ON EVERY RENDERING IT APPLIES TO, for the same reason
+  # the bound clause is: a skip nobody is told about is indistinguishable from coverage.
+  cross_clause=""
+  if [ "$skipped_cross" -gt 0 ]; then
+    cross_clause=" — $skipped_cross cross-repository closing reference(s) declared and deliberately NOT probed (a reference's number is scoped to ITS repository, so following one here could only name the wrong thread)"
+  fi
+  suffix="$bound_clause$cross_clause"
   # ===== A PARTIAL READ IS `could-not-check` NAMING BOTH HALVES, NEVER `checked` =====
   if [ -n "$unread_list" ]; then
     ROBOREV_PROBE_OUTCOME="could-not-check"
-    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: read with no matching marker: ${read_list:-none}; NOT read: $unread_list$bound_clause"
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: read with no matching marker: ${read_list:-none}; NOT read: $unread_list$suffix"
     return 0
   fi
-  if [ -n "$bound_clause" ]; then
-    ROBOREV_PROBE_OUTCOME="checked"
-    ROBOREV_PROBE_DETAIL="linked issues $read_list checked$bound_clause: no matching marker"
+  if [ -z "$read_list" ] && [ -z "$bound_clause" ]; then
+    # NOTHING WAS READ AND NOTHING WAS CUT OFF, so every declared reference was a declared skip. This
+    # is rendering 3's slot — no thread was checked — with the reason named, NOT a fifth outcome and
+    # NOT the bare "no linked issue is declared", which would be false: references ARE declared, they
+    # just do not point here.
+    ROBOREV_PROBE_OUTCOME="no-subject"
+    ROBOREV_PROBE_DETAIL="no linked issue IN THIS REPOSITORY is declared on this PR, so no linked-issue thread was checked$cross_clause"
     return 0
   fi
   ROBOREV_PROBE_OUTCOME="checked"
-  if [ "$declared" -eq 1 ]; then
+  if [ -n "$suffix" ]; then
+    ROBOREV_PROBE_DETAIL="linked issues ${read_list:-none} checked$suffix: no matching marker"
+    return 0
+  fi
+  if [ "${#read_ok[@]}" -eq 1 ]; then
     ROBOREV_PROBE_DETAIL="linked issue $read_list checked: no matching marker there either"
   else
     ROBOREV_PROBE_DETAIL="linked issues $read_list checked: no matching marker there either"

@@ -425,14 +425,44 @@ if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
         printf '%s\n' "$STUB_GH_LINKED_JSON"
         exit 0
       fi
+      # EVERY REFERENCE CARRIES ITS REPOSITORY, as the real payload does (#3759 round 1): a closing
+      # reference's number is scoped to ITS repository, so a double that omitted the repository
+      # would make every case exercise a code path the real payload never takes.
+      # STUB_GH_LINKED_ISSUES declares SAME-repository references (the stub's own
+      # STUB_GH_REPO_NWO); STUB_GH_LINKED_CROSS declares references in another repository, so a
+      # declared skip is expressible; STUB_GH_LINKED_NOREPO declares references whose repository
+      # object is absent, so a could-not-establish is expressible and cannot be confused with either.
       _stub_refs=""
+      _stub_owner="${STUB_GH_REPO_NWO%%/*}"
+      _stub_name="${STUB_GH_REPO_NWO#*/}"
       for _stub_n in ${STUB_GH_LINKED_ISSUES:-}; do
+        _stub_refs="${_stub_refs:+$_stub_refs,}{\"number\":$_stub_n,\"repository\":{\"name\":\"$_stub_name\",\"owner\":{\"login\":\"$_stub_owner\"}}}"
+      done
+      for _stub_n in ${STUB_GH_LINKED_CROSS:-}; do
+        _stub_refs="${_stub_refs:+$_stub_refs,}{\"number\":$_stub_n,\"repository\":{\"name\":\"other-repo\",\"owner\":{\"login\":\"other-owner\"}}}"
+      done
+      for _stub_n in ${STUB_GH_LINKED_NOREPO:-}; do
         _stub_refs="${_stub_refs:+$_stub_refs,}{\"number\":$_stub_n}"
       done
       printf '{"closingIssuesReferences":[%s]}\n' "$_stub_refs"
       exit 0
       ;;
   esac
+fi
+# ===== `repo view --json nameWithOwner`: WHICH REPOSITORY `gh issue view <N>` RESOLVES AGAINST =====
+# The probe asks `gh` rather than deriving it, so the double answers as `gh` does. Independently
+# failable (STUB_GH_REPO_RC) and independently malformable (STUB_GH_REPO_NWO without a slash),
+# because "the repository could not be established" is its own could-not-check cause.
+if [ "${1:-}" = "repo" ] && [ "${2:-}" = "view" ]; then
+  if [ "${STUB_GH_REPO_RC:-0}" -ne 0 ]; then
+    printf '%s\n' "${STUB_GH_REPO_ERR:-gh: simulated repo view failure}" >&2
+    exit "${STUB_GH_REPO_RC}"
+  fi
+  case " $* " in
+    *" --jq "*) printf '%s\n' "${STUB_GH_REPO_NWO:-}" ;;
+    *) printf '{"nameWithOwner":"%s"}\n' "${STUB_GH_REPO_NWO:-}" ;;
+  esac
+  exit 0
 fi
 if [ "${1:-}" = "issue" ] && [ "${2:-}" = "view" ]; then
   # ===== `issue view <N> --json comments`: THE PROBED THREAD (#3759) =====
@@ -1286,9 +1316,18 @@ export STUB_GH_ISSUE_ERR=''
 # _FAIL/_GARBAGE/_ERR knobs make an individual thread independently unreadable so a PARTIAL read is
 # expressible. Nothing here is a seam in the wrapper: the whole `gh` binary is a substituted artifact.
 export STUB_GH_LINKED_ISSUES=''
+export STUB_GH_LINKED_CROSS=''
+export STUB_GH_LINKED_NOREPO=''
 export STUB_GH_LINKED_JSON=''
 export STUB_GH_LINKED_RC=0
 export STUB_GH_LINKED_ERR=''
+# The current repository as `gh` resolves it. This one DEFAULTS TO A VALUE rather than to empty,
+# because it is the ordinary state of every real invocation and an empty default would make every
+# case take the could-not-establish path — the mirror of the fail-closed argument for the knobs
+# above, where the ordinary state is "no linked issue" and a permissive default would hide a gap.
+export STUB_GH_REPO_NWO='pmcfadin/cqlite'
+export STUB_GH_REPO_RC=0
+export STUB_GH_REPO_ERR=''
 export STUB_GH_ISSUE_COMMENTS=''
 export STUB_GH_ISSUE_COMMENTS_FAIL=''
 export STUB_GH_ISSUE_COMMENTS_GARBAGE=''
@@ -1321,9 +1360,14 @@ reset_stub() {
   STUB_GH_ISSUES_CLOSED=''
   STUB_GH_ISSUE_ERR=''
   STUB_GH_LINKED_ISSUES=''
+  STUB_GH_LINKED_CROSS=''
+  STUB_GH_LINKED_NOREPO=''
   STUB_GH_LINKED_JSON=''
   STUB_GH_LINKED_RC=0
   STUB_GH_LINKED_ERR=''
+  STUB_GH_REPO_NWO='pmcfadin/cqlite'
+  STUB_GH_REPO_RC=0
+  STUB_GH_REPO_ERR=''
   STUB_GH_ISSUE_COMMENTS=''
   STUB_GH_ISSUE_COMMENTS_FAIL=''
   STUB_GH_ISSUE_COMMENTS_GARBAGE=''
@@ -6209,6 +6253,128 @@ assert_verdict 'case (mp11)' FAIL 1
 assert_one_result_line 'case (mp11)'
 assert_no_marker_form 'case (mp11)'
 assert_says 'case (mp11) no probe value can introduce a second RESULT line' '^RESULT: FAIL$'
+reset_stub
+
+printf '== (mp14) #3759 r1: a CROSS-REPOSITORY closing reference is skipped, and the skip is DECLARED ==\n'
+# ROUND-1 FINDING 1. A closing reference number is scoped to ITS repository, and `gh issue view <N>`
+# resolves it in the CURRENT one — so following a cross-repo reference probes a DIFFERENT issue that
+# merely shares a number. THE FALSE `MISPLACED` IS THE DANGEROUS DIRECTION: it names a thread that
+# never carried a marker and sends the operator somewhere pointless. The fixture makes that concrete:
+# issue #3544 in THIS repository DOES carry a would-have-granted marker, and the only declared
+# reference is `other-owner/other-repo#3544`. The probe must not report MISPLACED, and must say why.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_CROSS='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp14)' FAIL 1
+assert_no_marker_form 'case (mp14)'
+assert_lacks 'case (mp14) a cross-repository reference NEVER yields a MISPLACED naming a same-number thread' \
+  '^waiver: MISPLACED'
+assert_says 'case (mp14) the skip is DECLARED, with its count and its reason' \
+  '1 cross-repository closing reference\(s\) declared and deliberately NOT probed'
+assert_says 'case (mp14) and the value does not claim that no reference is declared at all' \
+  'no linked issue IN THIS REPOSITORY is declared on this PR'
+# MEASURED, NOT ASSUMED: the same-number issue in THIS repository was never read.
+if grep -qE 'gh issue view 3544 --json comments' "$INVOKED"; then
+  bad 'case (mp14): the probe READ a same-number issue in this repository for a reference that points at another one — that is the false-MISPLACED route the skip exists to close'
+else
+  ok 'case (mp14): no same-number thread was read (checked against the stub invocation record)'
+fi
+reset_stub
+
+printf '== (mp14b) #3759 r1: the SAME reference in THIS repository IS probed (the control) ==\n'
+# THE CONTROL FOR (mp14), and it is not optional: without it, (mp14) would pass identically if the
+# probe had simply stopped working. Same number, same fixture, same marker — only the reference's
+# repository differs, and that one variable flips the outcome to MISPLACED.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp14b)' FAIL 1
+assert_says 'case (mp14b) a SAME-repository reference with the identical number IS probed and reported' \
+  '^waiver: MISPLACED \(an authorization for THIS review \(this base, head and job\) is on LINKED ISSUE #3544'
+assert_lacks 'case (mp14b) and no skip is declared for it' 'cross-repository closing reference'
+reset_stub
+
+printf '== (mp14c) #3759 r1: owner/name are matched CASE-INSENSITIVELY ==\n'
+# GitHub owner and repository names are case-insensitive, so `PMcFadin/CQLite` and `pmcfadin/cqlite`
+# are ONE repository. A case-sensitive compare would declare a skip for a same-repository reference —
+# a false negative that silently loses the very thread this mechanism exists to find.
+reset_stub
+mp_waiver_fixture
+STUB_GH_REPO_NWO='PMcFadin/CQLite'
+STUB_GH_LINKED_JSON='{"closingIssuesReferences":[{"number":3544,"repository":{"name":"cqlite","owner":{"login":"pmcfadin"}}}]}'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp14c)' FAIL 1
+assert_says 'case (mp14c) a differently-cased spelling of the same repository is the same repository' \
+  '^waiver: MISPLACED \(an authorization for THIS review'
+assert_lacks 'case (mp14c) and is not declared as a cross-repository skip' 'cross-repository closing reference'
+reset_stub
+
+printf '== (mp14d) #3759 r1: a reference whose REPOSITORY cannot be established is could-not-check ==\n'
+# "IN ANOTHER REPOSITORY" AND "CANNOT TELL WHICH REPOSITORY" ARE DIFFERENT FACTS, and only one of
+# them is an answer. A payload entry with no repository object must not be filed under the declared
+# skip — that would assert something nobody established — nor probed, which is the false-MISPLACED
+# route. It is a could-not-check, with its own cause.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_NOREPO='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp14d)' FAIL 1
+assert_no_marker_form 'case (mp14d)'
+assert_says 'case (mp14d) the cause names an unestablished repository, not a cross-repository skip' \
+  'NOT read: an entry whose repository could not be established'
+assert_lacks 'case (mp14d) it is NOT filed as a declared cross-repository skip' 'cross-repository closing reference'
+assert_lacks 'case (mp14d) and it is never probed' '^waiver: MISPLACED'
+reset_stub
+
+printf '== (mp14e) #3759 r1: an unresolvable CURRENT repository is could-not-check, not a skip ==\n'
+# With the current repository unknown, "same repository" cannot be established AFFIRMATIVELY for ANY
+# reference — so the whole probe is a could-not-check rather than a set of skips or, worse, a set of
+# probes against numbers nobody could place. Both failure shapes are covered: the call failing, and
+# the call succeeding with an answer that is not an owner/name pair.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_REPO_RC=1
+run_wrapper "$w_work"
+assert_verdict 'case (mp14e/failed)' FAIL 1
+assert_no_marker_form 'case (mp14e/failed)'
+assert_says 'case (mp14e/failed) the cause names the resolution that failed' \
+  "'gh repo view --json nameWithOwner' failed"
+reset_stub
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_REPO_NWO='not-an-owner-name-pair'
+run_wrapper "$w_work"
+assert_verdict 'case (mp14e/malformed)' FAIL 1
+assert_says 'case (mp14e/malformed) an answer that is not an owner/name pair is not an identity' \
+  'did not answer with an owner/name pair'
+assert_lacks 'case (mp14e/malformed) and nothing is probed on an unestablished identity' '^waiver: MISPLACED'
+reset_stub
+
+printf '== (mp14f) #3759 r1: a MIXED set — same-repo probed, cross-repo declared, both reported ==\n'
+# The realistic shape, and the one a per-fact case cannot reach: the same-repository thread IS read
+# and carries no marker, while a cross-repository reference is skipped. Both facts must appear in one
+# value, because a rendering that reported only the first would claim the whole declared set was
+# examined.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3626'
+STUB_GH_LINKED_CROSS='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3626\n\001pmcfadin\nnothing here\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp14f)' FAIL 1
+assert_no_marker_form 'case (mp14f)'
+assert_says 'case (mp14f) the same-repository thread is reported as checked' \
+  'linked issues #3626 checked'
+assert_says 'case (mp14f) and the cross-repository skip is declared in the SAME value' \
+  '1 cross-repository closing reference\(s\) declared and deliberately NOT probed'
 reset_stub
 
 printf '== (mp12) #3759 MUTANT: probing on EVERY state reds — the escalation is only from none ==\n'
