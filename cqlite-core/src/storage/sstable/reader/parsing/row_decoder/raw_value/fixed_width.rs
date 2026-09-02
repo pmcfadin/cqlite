@@ -34,6 +34,35 @@
 //! fixed-width value is not expressible there, for Cassandra either, so those
 //! families are out of scope rather than merely unvisited.
 //!
+//! # The five UDT framing sites, which had three different answers
+//!
+//! A UDT field's length header decides whether a field is absent (`-1`), present
+//! and empty (`0`) or present with bytes. Five sites route the `0`:
+//! `parse_udt_value` and `raw_type_value.rs`'s UDT arm through
+//! `create_empty_value_for_type`, and `parse_nested_udt_from_registry`,
+//! `parse_inline_udt_value` and `raw_type_value.rs`'s registry arm by calling a
+//! field decoder with an explicit `&[]`. Before #3847 the first two answered
+//! "empty BLOB" and the other three answered `Err`; all five now answer `null`.
+//! An `Err` there was the worse of the two, because `row_data.rs` `break`s its
+//! column loop on a failing column, so the failing column AND every later one
+//! silently became null.
+//!
+//! # DECLARED DIVERGENCE, opened by #3847 and NOT closed by it
+//!
+//! `complex_column/cell_path_key.rs`'s `cql_short_allowed_widths` is a separate
+//! WIDTH-ADMISSIBILITY table in front of this decoder, and its oracle is
+//! `validate()`: it admits `{n, 0}` for the eight permissive families but only
+//! `{n}` for `smallint`, `tinyint`, `date` and `time`. Those four now disagree
+//! with this rule, and the stricter table wins — an empty MAP KEY of those four
+//! types is refused before the decoder sees it. Left alone deliberately: #3847's
+//! subject is the value decoder, and relaxing what a map KEY may be is its own
+//! behaviour change needing its own corpus measurement. Recorded here, and
+//! pointed at from `cell_path_key_tests.rs`, rather than left to be rediscovered.
+//! (Reachability caveat, from #3612 R6-F2(a): no READ reaches an empty cell path
+//! at all — the multicell map caller filters `path_bytes.is_empty()` — so the
+//! divergence is unit-observable only, which is why it is a residual and not a
+//! defect.)
+//!
 //! # Why this rule lives under `raw_value`
 //!
 //! It is shared by `raw_value/reporting.rs` (the `parse_value_from_raw_bytes`

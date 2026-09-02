@@ -1039,15 +1039,14 @@ fn a_minus_one_component_length_is_still_a_null_field() {
 // so inet is `0/4/16`. Both directions of the asymmetry are pinned below, because
 // only the pair is evidence.
 
-/// The `N`-or-`0` family: a 0-byte key passes the WIDTH table (Cassandra's
-/// serializer accepts an empty buffer for these). It still fails to DECODE, from
-/// the decoder's own minimum-length guard — so the observable outcome is an
-/// error either way, which is exactly why encoding the `0` is a fidelity fix and
-/// not a behaviour change. Asserted on the MESSAGE, which is the only thing that
-/// distinguishes "the width table refused it" from "the decoder refused it".
+/// The `N`-or-`0` family: a 0-byte key passes the WIDTH table AND now DECODES,
+/// to `Value::Null`. EXPECTATION INVERTED BY #3847: it asserted `Err` plus "the message did not
+/// come from the width table", because the shared decoder's own `< n` guard
+/// refused every empty buffer, making the `0` here a pure fidelity fix. That
+/// decoder now admits Cassandra's `deserialize` set `{n, 0}`.
 /// UNIT-ONLY: see the REACHABILITY note above — no read reaches an empty key.
 #[test]
-fn an_empty_key_of_an_n_or_zero_type_is_not_refused_by_the_width_table() {
+fn an_empty_key_of_an_n_or_zero_type_decodes_to_null() {
     let p = parser();
     for type_str in [
         "int",
@@ -1060,15 +1059,12 @@ fn an_empty_key_of_an_n_or_zero_type_is_not_refused_by_the_width_table() {
         "counter",
         "boolean",
     ] {
-        let err = p
-            .parse_cell_path_key(&[], type_str, "k")
-            .expect_err("a 0-byte fixed-width value still cannot be decoded");
-        let msg = err.to_string();
-        assert!(
-            !msg.contains("requires exactly"),
+        assert_eq!(
+            p.parse_cell_path_key(&[], type_str, "k")
+                .unwrap_or_else(|e| panic!("{type_str}: empty is legal (#3847), got Err: {e}")),
+            Value::Null,
             "{type_str}: Cassandra's serializer ACCEPTS an empty buffer for this \
-             type, so the refusal must come from the decoder, not from the width \
-             table — got the width table's message: {msg}"
+             type and deserializes it to null"
         );
     }
 }
@@ -1078,6 +1074,10 @@ fn an_empty_key_of_an_n_or_zero_type_is_not_refused_by_the_width_table() {
 /// allowance. This is the half that makes the three-way split load-bearing rather
 /// than decorative. (`inet` is NOT one of them — see
 /// `an_empty_inet_key_decodes_at_the_function_unreachable_by_a_read`.)
+///
+/// DECLARED DIVERGENCE, opened by #3847 and NOT closed by it — this table's
+/// oracle is `validate()` and the decoder's is now `deserialize()`; stated in
+/// full, with its reason, in `raw_value/fixed_width.rs`.
 /// UNIT-ONLY: see the REACHABILITY note above — no read reaches an empty key.
 #[test]
 fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
