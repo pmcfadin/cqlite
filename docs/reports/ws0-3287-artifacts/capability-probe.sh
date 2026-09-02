@@ -410,41 +410,6 @@ echo "END-OF-RECORD: event-disposition complete" >> "$D/event-disposition.txt"
 grep -q '^END-OF-RECORD: event-disposition complete$' "$D/event-disposition.txt" 2>/dev/null \
   || note_fail "event disposition is empty or truncated (no end-of-record marker)"
 
-# ------------------------------------------- counter-semantics (AC4, #3224 5.2)
-: > "$D/counter-semantics-verification.txt"
-PLD=$(perf list --details 2>/dev/null); PLD_RC=$?
-if [ $PLD_RC -ne 0 ] || [ -z "$PLD" ]; then
-  echo "[perf list --details unavailable (rc=$PLD_RC) — semantics NOT verified]" >> "$D/counter-semantics-verification.txt"
-  note_fail "counter semantics: 'perf list --details' produced nothing (rc=$PLD_RC)"
-else
-  # The previous `[ -s ]` check was VACUOUS: a heading is written per event whether
-  # or not a definition is found. Each event is now explicitly FOUND or NOT-LISTED.
-  # offcore_requests.all_data_rd is in this list because job 405 promoted it to Gate
-  # B differential evidence, and AC4 requires the semantics of anything the gate
-  # rests on to be verified from the host's own event table (roborev job 410).
-  # Evidence whose definition is unverified is the shape #3224 section 5.2 exists to
-  # prevent.
-  for e in cycle_activity.stalls_l3_miss cycle_activity.stalls_l2_miss \
-           cycle_activity.stalls_total offcore_requests_outstanding.all_data_rd \
-           offcore_requests.all_data_rd \
-           LLC-load-misses cache-references; do
-    { echo "== $e =="
-      # From the event heading to the NEXT heading, never a fixed context window
-      # (roborev job 405). `grep -A3` truncates a wrapped description — so the
-      # encoding this file exists to record could fall outside the window while the
-      # entry still reported FOUND — and over-reads a short entry into the next
-      # event. awk delimits on the heading itself, so the record is whatever perf
-      # actually printed for that event.
-      if def=$(awk -v e="  ${e}" '''$0==e{f=1;print;next} f&&/^  [^ ]/{exit} f{print}''' <<<"$PLD") && [ -n "$def" ]; then echo "$def"; echo "[semantics: FOUND]"
-      else echo "[semantics: NOT-LISTED on this host — no definition to verify against]"; fi
-      echo; } >> "$D/counter-semantics-verification.txt"
-  done
-fi
-
-echo "END-OF-RECORD: counter-semantics complete" >> "$D/counter-semantics-verification.txt"
-grep -q '^END-OF-RECORD: counter-semantics complete$' "$D/counter-semantics-verification.txt" 2>/dev/null \
-  || note_fail "counter semantics: verification file is empty or truncated (no end-of-record marker) — AC4's semantics record was not fully written"
-
 # --------------------------------------------------------------- the differential
 if ! cc -O2 -std=c99 -pthread -o "$OUT/cache-hostile.bin" "$SRC" -lm 2>"$D/cache-hostile-build.txt"; then
   echo "VERDICT: UNMEASURED (cache-hostile.c did not build; see host/cache-hostile-build.txt)" | tee "$D/differential.txt" >&2
@@ -480,6 +445,56 @@ add_group stalls  cycle_activity.stalls_total cycle_activity.stalls_l2_miss cycl
 add_group offcore offcore_requests_outstanding.all_data_rd offcore_requests_outstanding.cycles_with_data_rd offcore_requests.all_data_rd
 add_group cache   LLC-loads LLC-load-misses cache-references cache-misses
 add_group prefetch l1d_pend_miss.pending l1d_pend_miss.fb_full
+
+# MOVED HERE, AFTER the groups exist (roborev job 412 fix, second attempt). The
+# derivation reads GROUP_RENDER, which add_group populates above — run before
+# them it silently verified only the two hard-coded continuity names, i.e. the
+# curation this fix was meant to remove. Same shape as the csv_val ordering bug
+# earlier in this branch: a derivation is only as good as its position.
+# ------------------------------------------- counter-semantics (AC4, #3224 5.2)
+# THE LIST IS DERIVED FROM THE DIFFERENTIAL, NOT CURATED (roborev job 412). It used
+# to be a hand-written set, so events promoted into a group -- and the generic ones
+# that were always there -- had their semantics verified by nothing while their
+# readings were published as evidence. Deriving it means a future group edit cannot
+# leave an event unverified silently.
+#
+# PRESENCE OF THE ENTRY is the test, NOT the presence of a `cpu/event=` line: `cycles`
+# is listed with `cpu/legacy-hardware-config=0/` instead, so keying on `cpu/event=`
+# would report a definition-bearing event as unverified. (Measured while fixing this;
+# an earlier draft of the check had exactly that bug.)
+: > "$D/counter-semantics-verification.txt"
+SEM_UNVERIFIED=""
+PLD=$(perf list --details 2>/dev/null); PLD_RC=$?
+if [ $PLD_RC -ne 0 ] || [ -z "$PLD" ]; then
+  echo "[perf list --details unavailable (rc=$PLD_RC) — semantics NOT verified]" >> "$D/counter-semantics-verification.txt"
+  note_fail "counter semantics: 'perf list --details' produced nothing (rc=$PLD_RC)"
+else
+  # every event this run actually measures in a differential group, plus the two
+  # #3224 5.2 names kept for continuity with that report
+  _semlist=$(for i in "${!GROUP_RENDER[@]}"; do for n in ${GROUP_RENDER[$i]}; do echo "${n%:u}"; done; done
+             echo cycle_activity.stalls_l3_miss; echo LLC-load-misses)
+  for e in $(printf '%s\n' $_semlist | sort -u); do
+    { echo "== $e =="
+      if def=$(awk -v e="  ${e}" '$0==e{f=1;print;next} f&&/^  [^ ]/{exit} f{print}' <<<"$PLD") && [ -n "$def" ]; then
+        echo "$def"; echo "[semantics: FOUND]"
+      else
+        echo "[semantics: NOT-LISTED on this host — no definition to verify against]"
+        # A DIFFERENTIAL event with no host definition is evidence whose encoding
+        # AC4 cannot verify. It is NOT silently published as though it were
+        # verified, and it is NOT dropped either — see the declaration emitted into
+        # differential.txt below for why neither of roborev's two suggested
+        # remedies is taken.
+        case " $(for i in "${!GROUP_RENDER[@]}"; do for n in ${GROUP_RENDER[$i]}; do printf '%s ' "${n%:u}"; done; done) " in
+          *" $e "*) SEM_UNVERIFIED="$SEM_UNVERIFIED $e" ;;
+        esac
+      fi
+      echo; } >> "$D/counter-semantics-verification.txt"
+  done
+fi
+echo "END-OF-RECORD: counter-semantics complete" >> "$D/counter-semantics-verification.txt"
+grep -q '^END-OF-RECORD: counter-semantics complete$' "$D/counter-semantics-verification.txt" 2>/dev/null \
+  || note_fail "counter semantics: verification file is empty or truncated (no end-of-record marker) — AC4's semantics record was not fully written"
+
 
 # The benchmark REPORTS the configuration it actually ran; until roborev job 318
 # nothing CHECKED it. A perf exit of 0 over a well-formed CSV says the counters
@@ -653,6 +668,23 @@ reading() { # $1 rendered-name  $2 group  -> raw per-arm counts, no verdict
   echo "  answers it no; anything else means the step must be re-run. This script"
   echo "  deliberately does not make that call (#3870)."
   echo
+  # AC4 EXPOSURE, DECLARED AT THE POINT OF USE (roborev job 412). roborev asked for
+  # fail-closed OR exclusion. Measured on this host, BOTH would be wrong: the one
+  # event with no entry in the event table is
+  # `offcore_requests_outstanding.all_data_rd`, which IS Gate B's evidence — failing
+  # closed would refuse the run that produces the finding, and excluding it would
+  # DELETE the finding this artefact exists to report. The defect roborev names is
+  # real, though: publishing it as if AC4 had been satisfied. So it is published WITH
+  # its limit stated, here and in the human report, and the reader can see exactly
+  # which readings rest on an unverified encoding.
+  if [ -n "${SEM_UNVERIFIED# }" ]; then
+    echo "-- AC4 LIMIT: differential events with NO definition in this host's event table --"
+    for e in ${SEM_UNVERIFIED}; do echo "  $e — programs and is MEASURED below, but 'perf list --details' has no entry for it here, so its encoding is UNVERIFIED (AC4's verification step cannot be satisfied for it on this host)"; done
+    echo "  Neither failed-closed nor excluded, deliberately: this set includes Gate B's own"
+    echo "  evidence, so refusing would kill the run and excluding would delete the finding."
+    echo "  Read every reading for these events as encoding-unverified."
+    echo
+  fi
   echo "-- GATE B: offcore / prefetch-stall term (the one #3287 exists for) --"
   echo "  (counts as measured; the 2 GiB arm is many times L3, so read a 0 there)"
   for n in offcore_requests_outstanding.all_data_rd:u offcore_requests_outstanding.cycles_with_data_rd:u \

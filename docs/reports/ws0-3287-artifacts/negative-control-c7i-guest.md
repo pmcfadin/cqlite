@@ -81,22 +81,22 @@ regenerated.)
 | `cycle_activity.stalls_l3_miss` | **exactly 0**, all arms, every rep | `arm-*-stalls.csv` |
 | `offcore_requests_outstanding.all_data_rd` / `.cycles_with_data_rd` | **exactly 0**, all arms | `arm-*-offcore.csv` |
 | `cache-misses`, `cache-references` | **exactly 0**, all arms | `arm-*-cache.csv` |
-| `cycle_activity.stalls_l2_miss` on the 2 GiB arm | **> 80% of all cycles** (billions; 82.3–90.0% over eight captures) | `arm-hostile-2g-stalls.csv` |
+| `cycle_activity.stalls_l2_miss` on the 2 GiB arm | **> 80% of all cycles** (billions; 82.3–90.0% over nine captures) | `arm-hostile-2g-stalls.csv` |
 | `instructions` friendly vs hostile-512m | **ratio 1.00** (0.999–1.002 across reps; 1.00003 in the committed capture) | `arm-*-control.csv` |
-| `ns_per_access` | **~5–6 ns** L2-resident vs **~165–315 ns** DRAM (range over eight captures) | `arm-*.txt` |
+| `ns_per_access` | **~5–6 ns** L2-resident vs **~165–315 ns** DRAM (range over nine captures) | `arm-*.txt` |
 | stall-counter NESTING | **holds** in every arm — but see the declared limit below | `differential.txt` |
 
 **The prediction was written before the measurement**: a 2 GiB random chase over 64 B nodes through a
 serial data dependency cannot be L3-resident and the prefetcher cannot help it, so an honest
 L3-miss-stall counter must be large. Instead, **over 80% of all cycles are stalled with an L2-miss demand
 load outstanding and exactly zero of them are attributed to an L3 miss**, on a working set 19.5× the
-L3. (The bound is stated loosely on purpose: it measured between 82.3% and 90.0% over eight captures on
+L3. (The bound is stated loosely on purpose: it measured between 82.3% and 90.0% over nine captures on
 a shared box. The exact figure moves with load; that it is most of the cycles does not, and the zero
 does not move at all.) That is not a small number; it is physically impossible.
 
 **The workload's behaviour is established by WALL CLOCK, not by the PMU, so it is not in doubt — only
 the counter is.** `ns_per_access` runs ~5–6 ns in the L2-resident arm against ~165–315 ns in the DRAM
-arms across eight captures — an access-latency spread of roughly **28× to 65×** (28.4–64.2× measured), produced purely by
+arms across nine captures — an access-latency spread of roughly **28× to 65×** (28.4–64.2× measured), produced purely by
 changing the working-set extent — while `instructions` differs by **≤0.2%** between those arms
 (0.003% in the committed capture): identical work, identical code path. An L3 hit
 is ~15–20 ns; ~200 ns is DRAM. No counter is needed to know these loads left the cache.
@@ -136,6 +136,24 @@ This is the load-bearing one for #3287's *purpose*. The issue's whole point is t
 `other execution stalls`, and an offcore term is needed to move them out. On this host that term
 cannot be measured — so the TMA split alone would mis-attribute prefetch stalls as core-bound, which
 the issue names in advance as "has not answered the question".
+
+**A LIMIT ON THIS FINDING'S OWN EVIDENCE, and it is AC4-shaped (roborev job 412).**
+`offcore_requests_outstanding.all_data_rd` — the counter this finding rests on — **has no entry in
+this host's `perf list --details` output at all**, even though `perf stat -e` accepts it and returns
+a count. So unlike Finding 1, whose encoding is verified against the host's own event table
+([`host/counter-semantics-verification.txt`](host/counter-semantics-verification.txt) shows
+`cpu/event=0xa3,cmask=6,period=1000003,umask=6/`), **this finding's counter is
+encoding-unverified here** and AC4's verification step cannot be satisfied for it. The probe now
+says so itself, in an `AC4 LIMIT` block in
+[`host/differential.txt`](host/differential.txt) listing exactly which differential events are in
+that state.
+
+That does **not** weaken the conclusion, and the reason is worth stating rather than assuming: the
+finding rests on a **zero against a predicted-large behaviour**, corroborated by the wall clock and
+by `.cycles_with_data_rd` (whose definition *is* on the host). An unverifiable encoding could
+explain a *wrong magnitude*; it cannot manufacture a hard `0` in nine consecutive captures of a
+workload measured at 167–314 ns/access. It is recorded because "the encoding was verified" is a
+claim this file makes for Finding 1 and **must not silently borrow for Finding 2**.
 
 ## Finding 3 — TMA level-2 is absent, not degraded
 
@@ -231,12 +249,12 @@ ones from a genuinely memory-clean workload. Only a differential against a predi
 
 The committed `host/` artefacts are regenerated in full whenever the probe changes, so every file
 under `host/` is reproducible by the committed script rather than by a revision of it that no longer
-exists. Over this branch's review rounds that happened **eight times** on the same box
+exists. Over this branch's review rounds that happened **nine times** on the same box
 (`host/capability-probe.txt` stamps each one, and the superseded captures are in this branch's git
-history). Eight independent reps is more than the finding needed, and the contrast they draw is the
+history). Nine independent reps is more than the finding needed, and the contrast they draw is the
 file's whole argument:
 
-| `hostile-2g` arm | across all eight captures |
+| `hostile-2g` arm | across all nine captures |
 |---|---|
 | `cycle_activity.stalls_l3_miss:u` | **0 in every one — bit-identical** |
 | `offcore_requests_outstanding.*:u` | **0 in every one — bit-identical** |
@@ -245,7 +263,7 @@ file's whole argument:
 | `cycle_activity.stalls_total:u` | 5.63e9 – 7.50e9 (varies 33%) |
 | `ns_per_access` (slowest group) | 243.0 – 314.0 ns (tracks box load) |
 
-A counter that varies with load is measuring something. A counter that returns **exactly 0** in eight
+A counter that varies with load is measuring something. A counter that returns **exactly 0** in nine
 captures of a workload doing billions of DRAM accesses — while its immediate neighbour in the same
 PMU group reads six billion and the wall clock says every access went to memory — is not.
 

@@ -6,8 +6,8 @@ SCOPE: this probe RECORDS and VALIDATES; it does not classify (#3870).
 host L3: 105 MiB (1 instance)
 cpuset:  0,8 (complete sibling group from cpu0, all members online AND in this process's Cpus_allowed_list)
 window:  control-FIFO gated to the chase; events counted :u; small groups, 100.00% enabled REQUIRED
-gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.33x (need >=10x, ideal ~100x)
-  absolute, REPORTED not asserted: 6297 instructions for 1e3 accesses
+gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.35x (need >=10x, ideal ~100x)
+  absolute, REPORTED not asserted: 6296 instructions for 1e3 accesses
   (#3224 used a tuned 1e6 ceiling; the scaling property is host-independent.)
 
 -- GATE A: TMA (raw record; #3287 AC1 turns on what tma-probe.txt shows) --
@@ -18,6 +18,12 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.33x (need >=10
   answers it no; anything else means the step must be re-run. This script
   deliberately does not make that call (#3870).
 
+-- AC4 LIMIT: differential events with NO definition in this host's event table --
+  offcore_requests_outstanding.all_data_rd — programs and is MEASURED below, but 'perf list --details' has no entry for it here, so its encoding is UNVERIFIED (AC4's verification step cannot be satisfied for it on this host)
+  Neither failed-closed nor excluded, deliberately: this set includes Gate B's own
+  evidence, so refusing would kill the run and excluding would delete the finding.
+  Read every reading for these events as encoding-unverified.
+
 -- GATE B: offcore / prefetch-stall term (the one #3287 exists for) --
   (counts as measured; the 2 GiB arm is many times L3, so read a 0 there)
   offcore_requests_outstanding.all_data_rd:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
@@ -27,13 +33,13 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.33x (need >=10
       no positive control exists here (the chase does not reliably fill the
       super-queue), so a 0 could not be told from a stuck counter. Do not
       derive anything from this line.
-  l1d_pend_miss.fb_full:u : disposition=PROGRAMS  friendly-L2resident=309798  hostile-512m=1015980  hostile-2g=128229
-  l1d_pend_miss.pending:u : disposition=PROGRAMS  friendly-L2resident=140271656  hostile-512m=9673671002  hostile-2g=5500788375
+  l1d_pend_miss.fb_full:u : disposition=PROGRAMS  friendly-L2resident=4591  hostile-512m=4185868  hostile-2g=187354
+  l1d_pend_miss.pending:u : disposition=PROGRAMS  friendly-L2resident=140155635  hostile-512m=10003389757  hostile-2g=5608975398
 
 -- GATE C: reproduce #3224's own baseline counters --
   cycle_activity.stalls_l3_miss:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
-  cycle_activity.stalls_l2_miss:u : disposition=PROGRAMS  friendly-L2resident=19252  hostile-512m=9325425854  hostile-2g=5342072011
-  cycle_activity.stalls_total:u : disposition=PROGRAMS  friendly-L2resident=281020691  hostile-512m=10634654380  hostile-2g=5894572600
+  cycle_activity.stalls_l2_miss:u : disposition=PROGRAMS  friendly-L2resident=29101  hostile-512m=9586637353  hostile-2g=5639262172
+  cycle_activity.stalls_total:u : disposition=PROGRAMS  friendly-L2resident=281474238  hostile-512m=10926715263  hostile-2g=6200688670
   LLC-loads:u : disposition=ABSENT-FROM-PMU  friendly-L2resident=(no value in this run's CSV)  hostile-512m=(no value in this run's CSV)  hostile-2g=(no value in this run's CSV)
   LLC-load-misses:u : disposition=ABSENT-FROM-PMU  friendly-L2resident=(no value in this run's CSV)  hostile-512m=(no value in this run's CSV)  hostile-2g=(no value in this run's CSV)
   cache-references:u : disposition=PROGRAMS  friendly-L2resident=0  hostile-512m=0  hostile-2g=0
@@ -45,9 +51,9 @@ gate-integrity: MEASURED-OK — instruction scaling 1e3->1e5 = 95.33x (need >=10
     This check catches a nesting VIOLATION (which would invalidate #3224's
     difference-based partition); it cannot catch a silent zero. Only the
     differential can, which is why both are reported.
-    friendly-L2resident: HOLDS (0 <= 19252 <= 281020691)
-    hostile-512m: HOLDS (0 <= 9325425854 <= 10634654380)
-    hostile-2g: HOLDS (0 <= 5342072011 <= 5894572600)
+    friendly-L2resident: HOLDS (0 <= 29101 <= 281474238)
+    hostile-512m: HOLDS (0 <= 9586637353 <= 10926715263)
+    hostile-2g: HOLDS (0 <= 5639262172 <= 6200688670)
 
 -- GATE D: topology (reported; #3224's geometry needs 6+2 complete cores EXCLUSIVELY) --
   see capability-probe.txt

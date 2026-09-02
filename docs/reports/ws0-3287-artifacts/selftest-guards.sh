@@ -347,10 +347,17 @@ else bad "Gate A dropped or mangled real metric output (rc=$rc, $(verdict "$d"))
 # the run's verdict is decided by the data-integrity guards alone. What must NOT
 # happen is the probe silently converting rc=7 into a capability answer.
 d="$TMP/c2"; mkdir -p "$d"; rc=$(SHIM_TMA=error run_probe "$d")
-if grep -q 'some unexpected diagnostic' "$d/out/host/tma-probe.txt" \
+# Asserts the POSITIVE outcome, not merely the absence of one wording (roborev job
+# 412). Checking only that stderr lacks "Gate A" would still pass a regression that
+# turned the error into UNMEASURED under different words — an absence-of-bad-signal
+# pass, which is the shape this repo's doctrine rejects. rc, verdict and a
+# diagnostic-free stderr are all required.
+if [ "$rc" = 0 ] \
+   && grep -q 'VERDICT: COMPLETE' <<<"$(verdict "$d")" \
+   && ! grep -q 'PROBE-STEP-FAILED' "$d/stderr.txt" \
+   && grep -q 'some unexpected diagnostic' "$d/out/host/tma-probe.txt" \
    && grep -q '\[rc=7\]' "$d/out/host/tma-probe.txt" \
-   && grep -q 'rc=7' <<<"$(gateline "$d" 'TopdownL2')" \
-   && ! grep -qi 'Gate A' "$d/stderr.txt"; then
+   && grep -q 'rc=7' <<<"$(gateline "$d" 'TopdownL2')"; then
   ok "Gate A operational error -> recorded with its rc, NOT converted into a capability answer (#3870)"
 else bad "Gate A did not record an unrecognised perf failure faithfully (rc=$rc)" "$d"; fi
 
@@ -436,6 +443,22 @@ if [ "$rc" = 0 ] && grep -q 'disposition=PROGRAMS' <<<"$line" \
    && grep -qE 'friendly-L2resident=[0-9]+ +hostile-512m=[0-9]+ +hostile-2g=[0-9]+' <<<"$line"; then
   ok "offcore_requests.all_data_rd is MEASURED per arm, not reported as disposition-only (job 405 promotion, job 410 coverage)"
 else bad "the promoted differential event has no per-arm reading (rc=$rc, line=$line)" "$d"; fi
+
+# --- 4d. every MEASURED event must have a semantics record ---------------------
+# roborev job 412 asked for the semantics list to cover the differential; deriving it
+# from GROUP_RENDER did that — but the first attempt sat ABOVE the add_group calls,
+# so it silently verified only two hard-coded names while the suite still reported
+# 22/22. A green suite over a derivation reading an empty array is the failure this
+# case exists for. Both sets come from the run's own output, so a future reordering
+# or group edit reds here instead of quietly shrinking the record.
+d="$TMP/c4d"; mkdir -p "$d"; rc=$(SHIM_TMA=absent run_probe "$d")
+missing=""
+for e in $(awk -F, '$1 ~ /^[0-9]+$/ {print $3}' "$d/out/host"/arm-*.csv 2>/dev/null | sed 's/:u$//' | sort -u); do
+  grep -q "^== ${e} ==$" "$d/out/host/counter-semantics-verification.txt" 2>/dev/null || missing="$missing $e"
+done
+if [ "$rc" = 0 ] && [ -z "$missing" ]; then
+  ok "every event measured in a differential arm has a counter-semantics record (list DERIVED from the groups, job 412)"
+else bad "measured events with no semantics record:$missing (rc=$rc)" "$d"; fi
 
 # --- 5b. a purge that FAILS must stop the run, not be assumed to have worked ---
 # roborev job 327 (High). `rm -f` exits 0 for an already-absent file and non-zero
@@ -588,7 +611,7 @@ echo "cases: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 # A case FLOOR, on #3544's precedent: a span-replacing edit once silently deleted
 # four cases and the suite reported failed:0 over a shrunken set. A green tally
 # over fewer cases is not a green suite.
-FLOOR=21
+FLOOR=22
 if [ $((PASS+FAIL+SKIP)) -lt $FLOOR ]; then
   echo "FAIL: only $((PASS+FAIL+SKIP)) cases were reached, floor is $FLOOR — cases were deleted, not fixed"
   exit 1
@@ -598,7 +621,7 @@ fi
 # whole-suite precondition above, their topology requirement is satisfied too, so if
 # any failed to RUN it is the suite that is wrong and not the machine. They are NOT
 # "host-independent" in general; that claim was false and is corrected (job 324).
-SHIM_FLOOR=18
+SHIM_FLOOR=19
 if [ "$PASS" -lt $SHIM_FLOOR ] && [ "$FAIL" = 0 ]; then
   echo "FAIL: only $PASS cases PASSed with 0 failures; $SHIM_FLOOR are host-independent and must always run"
   exit 1
