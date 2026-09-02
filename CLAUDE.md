@@ -464,8 +464,28 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   (`/^error/p`) made a healthy box page high, stop its supervisor and fail `--strict` bootstrap.
   The class now comes from fsck's exit **BITMASK**: bits `1 ERROR_OBJECT` / `4 ERROR_PACK` are this
   sweep's subject; `2 ERROR_REACHABLE` / `8 ERROR_REFS` / `16 ERROR_COMMIT_GRAPH` /
-  `32 ERROR_MULTI_PACK_INDEX` are **not demoted to clean** (a genuinely MISSING object reports bit
-  2) but land on their own non-passing `UNMEASURED` cause. **THE MASK DOES NOT END AT 31, AND
+  `32 ERROR_MULTI_PACK_INDEX` are **not demoted to clean** but land on their own non-passing
+  `UNMEASURED` cause — **except that `2 ERROR_REACHABLE` HAS TWO CAUSES AND ROUTING BOTH TO
+  `UNMEASURED` WAS A FALSE NEGATIVE ON REAL CORRUPTION (round 4).** That bit fires for a stale
+  reflog entry naming an object a peer's gc pruned (routine, not the subject) **and** for an
+  object genuinely ABSENT while a live ref, the index or HEAD still needs it (corruption). Both
+  reproduce, so the reproduction discriminator cannot separate them, and `UNMEASURED` is
+  deliberately non-fatal to the supervisor's loop — so workers kept running against a
+  demonstrably damaged store, reported as "not measured". They are separated by a **THIRD walk
+  with `--no-reflogs`**, which drops the reflogs from the reachability roots and keeps everything
+  else: a complaint that SURVIVES it is reachable from a live root and is **`CORRUPT`** (with a
+  remedy that says the reflog remedy does not apply); one that CLEARS is `REFLOG-SCOPED` and stays
+  `UNMEASURED` where it was. Measured on git 2.43.0 on real fixtures, both directions: a blob
+  deleted while HEAD's tree names it exits 2 with AND without reflogs; a commit deleted after
+  `reset --hard`, named only by the reflog, exits 2 with and **0** without. **This is NOT the
+  `--no-reflogs` SUPPRESSION rejected in round 1** — that proposal decided whether to REPORT and
+  was measured not to help; this decides WHICH CAUSE, on a class that has already reproduced
+  twice, and can only make the verdict stronger. Passes 1 and 2 never carry the flag, asserted
+  structurally over the shipped call sites. Where the attribution itself fails (a third walk
+  killed, unlaunchable or unclassifiable) the complaint is `UNATTRIBUTED` and non-passing, and a
+  damage bit appearing ONLY in the third walk has not reproduced across the sweep walks: neither
+  is `CORRUPT` and neither is clean. The verdict set stays **closed at three** — the split is in
+  the CAUSE text, not in a fourth token two readers and a structural assert would have to learn. **THE MASK DOES NOT END AT 31, AND
   ASSUMING IT DID DROPPED REAL DAMAGE (review round 2).** A range check over `1..31` — reasoned from
   128 being `die()` and `127 & 1` being 1 — classified **33** (`32|1`) and **36** (`32|4`) as
   unclassified and so `UNMEASURED`: a FALSE NEGATIVE on genuine object corruption, the one direction
@@ -492,7 +512,20 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   convention you are applying is the process that produced it.**  And **no non-clean walk is fatal on ONE observation**: it is re-run exactly ONCE as
   a **discriminator** — a concurrency artefact does not survive a second independent walk, real
   damage does — never a retry-until-clean loop, and a damage class seen once and not twice is
-  `UNMEASURED`, neither established damage nor a clean store. **The `CORRUPT` verdict is PERSISTED
+  `UNMEASURED`, neither established damage nor a clean store. (The reachability ATTRIBUTION walk
+  above is a third walk and a different question; `MAX_SWEEP_WALKS` in the sweep script is the
+  declared ceiling, and every caller's bound is derived from it.)
+  **AND THE TWO CHANNELS MUST AGREE BEFORE THE FATAL VERDICT IS ACTED ON (round 4).** Both
+  consumers read the exit status AND the anchored `verdict ` line, and both tested them with `||`
+  while the comment above each asserted the conjunction — the false-rationale class, and the
+  reason nobody looked. An exit 4 with no verdict line, or a stray `CORRUPT` line under any other
+  status, was therefore enough to create a **STICKY, BOX-WIDE, operator-cleared latch that halts
+  every lane on the box**. Blast radius decides the direction: a false latch stops four lanes
+  until a human notices, while one more iteration over a genuinely damaged store costs the next
+  sweep, which reproduces the damage and latches it properly. So a disagreement is routed to
+  `UNMEASURED` and **NAMED** (`INCONSISTENT sweep result`) rather than folded into the generic
+  "could not measure" line. The `UNMEASURED` tests stay disjunctive on purpose: a disjunction that
+  can only reach a NON-PASSING branch cannot manufacture a verdict. **The `CORRUPT` verdict is PERSISTED
   for the box in its OWN CREATE-ONLY FILE** (`<stamp>.CORRUPT`), because a timestamp-only stamp let
   the detecting lane stop while its three peers saw a fresh stamp, skipped their own sweep for the
   whole interval and kept spawning workers over the damaged store. **PUTTING THE VERDICT IN THE
@@ -525,17 +558,32 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   still start on a box latched moments earlier. It is bounded — that lane's next iteration reads the
   latch at the top of its sweep and stops — and the atomic guarantee needs per-store
   synchronisation shared by the sweep and the spawn decision, which is **split to its own issue**.
-  **The sweep is also NOT INTERRUPTIBLE, so its cost is bounded in WALL TIME instead:** its two
+  **The sweep is also NOT INTERRUPTIBLE, so its cost is bounded in WALL TIME instead:** its
   walks run in a CHILD process, so the supervisor cannot check the stop file between them; it checks
   it (and the wall-clock budget) immediately BEFORE the sweep, and the supervisor's per-walk bound
-  defaults to **half** the sweep script's own (300 vs 600) so two walks cost no more than one walk
-  at the script's bound. Raising a bound is a change to somebody's stop latency.
+  defaults to the sweep script's own bound **divided by `MAX_SWEEP_WALKS`** (200 vs 600/3), so every
+  walk it can pay for still costs no more than one walk at the script's bound. **THE WALK COUNT IS
+  READ FROM THE SHIPPED SCRIPT, NOT RE-TYPED IN THE TEST (round 4):** the relation was asserted with
+  a hard-coded factor 2, so ADDING the third walk would have kept it green while the supervisor's
+  real worst case rose to 900s — a relation whose own constant is restated is two magic numbers
+  wearing a relation's clothes. Raising a bound, or the walk count, is a change to somebody's stop
+  latency.
   **And the stamp's KEY is resolved by the sweep script itself (`--print-store`), never by a `git`
   call in the supervisor:** a bare `git rev-parse --git-common-dir` inherits the caller's
   environment, so an inherited `GIT_DIR`/`GIT_COMMON_DIR` keyed the stamp — and hence the latch — on
   ANOTHER repository, which is roborev job 276's "the allowlist did not reach the sites the fix
   added" at a site the same round left behind. ONE resolver, in the file that owns the `env -i`
-  allowlist, so a future caller has no un-isolated shape available to it.
+  allowlist, so a future caller has no un-isolated shape available to it. **And that key is a
+  DIGEST of the canonical path, because flattening is not INJECTIVE (round 4):** replacing `/` and
+  every unsupported character with `_` maps `/tmp/a/b/objects` and `/tmp/a_b/objects` to ONE name, so
+  two repositories on a box shared a throttle stamp *and* a CORRUPT latch — one store suppressing the
+  other's sweep, or stopping every lane with the other's damage. `<sanitised tail>.<16 hex of
+  sha256>`: the tail is READABILITY ONLY and carries no identity. Three digest tools (`sha256sum`,
+  `shasum -a 256`, `openssl dgst -sha256`) cover both platforms, the output is parsed from both ends
+  and then VALIDATED as hex, and a host with none **fails closed to the EMPTY key** — no throttle, no
+  latch, announced once naming both causes — never a silent fall back to the colliding form on
+  exactly the hosts nobody tested. `cksum` is present everywhere and deliberately unused: CRC32 is
+  not collision-resistant, and a colliding key is the defect being removed.
   because a hygiene probe could not run is a self-DoS). **That sweep is PERIODIC, NOT PER-READ, so
   the emitted clause still says `store TRUSTED, not verified (#3749)` — do not inflate it.**
   **THREE ALTERNATIVES WERE REJECTED and the reasons are recorded so they are not re-derived:**
