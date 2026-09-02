@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=560
+CASE_FLOOR=564
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -1270,6 +1270,41 @@ done
 run_util "$TMP/util-asym"
 check_verdict "arms whose surviving ladders differ" UNMEASURED 7 utilization
 check_cause "mismatched surviving ladders" ramp-steps-not-comparable
+
+# ROUND 22 FINDING 1: DIFFERENT REPLICATES SHEDDING DIFFERENT STEPS. Each pair's
+# ladders match, so the per-pair check is satisfied -- and the pairs' ladders
+# differ from EACH OTHER, so the bootstrap used to combine peaks taken over
+# different concurrency sets. An aggregate of those estimates no single
+# quantity: the interval would be a confidence interval for nothing in
+# particular, and nothing in the number says so.
+mkfixture "$TMP/util-crosspair" 6 \
+  "100000:132000,100000:134000,100000:134000,100000:136000,100000:136000,100000:138000" "$RAMP"
+# Replicates 1-3 shed the top step on BOTH arms; 4-6 keep it. Every pair is
+# internally consistent; the SET of surviving ladders across pairs is not.
+for r in 1 2 3; do
+  shed_step "$TMP/util-crosspair" base "$r" 3 7
+  shed_step "$TMP/util-crosspair" head "$r" 3 7
+done
+run_util "$TMP/util-crosspair"
+check_verdict "replicates that shed DIFFERENT steps from each other" RISES 0 utilization
+if grep -q '^AB-3649: verdict-detail utilization ESTIMAND the peak is taken over the concurrency ladder shared by EVERY replicate' "$TMP/out.txt"; then
+  ok "the shared ladder is stated as the estimand rather than left implicit"
+else
+  bad "the estimand was not stated, so two different quantities look identical"
+fi
+if grep -q '^AB-3649: verdict-detail utilization ESTIMAND at least one replicate shed a step the others kept' "$TMP/out.txt"; then
+  ok "the report says the peaks were RECOMPUTED, not merely which ladder was used"
+else
+  bad "the recomputation was not disclosed"
+fi
+# ...and when no replicate sheds, the estimand line still states the ladder but
+# must NOT claim a recomputation that did not happen.
+run_util "$TMP/util"
+if grep -q 'ESTIMAND at least one replicate shed a step' "$TMP/out.txt"; then
+  bad "an unrestricted session claimed a recomputation that did not happen"
+else
+  ok "an unrestricted session does not claim a recomputation"
+fi
 
 # Every step shed: the run measured the admission ceiling and nothing else.
 mkfixture "$TMP/util-allshed" 6 \

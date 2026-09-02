@@ -516,6 +516,22 @@ def validate_record_usable(record, path, index, expected_concurrency, declared_d
 class RunPoint(object):
     """One arm's comparable measurement for one replicate."""
 
+    def restricted_to(self, ladder):
+        """This run's peak recomputed over ONLY the given concurrency steps.
+
+        The peak is a function of which steps are in scope, so restricting the
+        ladder changes the quantity -- which is why the restriction is applied
+        uniformly to every pair and recorded in the report rather than done
+        quietly per run.
+        """
+        kept = [r for r in self.records if r["target_concurrency"] in set(ladder)]
+        if not kept:
+            return self
+        best = max(kept, key=lambda r: r["rows_per_s"])
+        return RunPoint(best["rows_per_s"], kept, best["target_concurrency"],
+                        tuple(sorted(r["target_concurrency"] for r in kept)),
+                        self.shed)
+
     def __init__(self, rate, records, peak_concurrency, ladder, shed):
         self.rate = rate
         self.records = records
@@ -898,6 +914,8 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
             ),
         )
 
+    utilization_ladder = None
+    utilization_ladder_restricted = False
     pairs = []
     for rep in base_reps:
         base, head = seen[("base", rep)], seen[("head", rep)]
@@ -910,6 +928,46 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
                 % (rep, list(base.ladder), list(head.ladder)),
             )
         pairs.append((rep, base, head))
+
+    # ONE ESTIMAND ACROSS ALL PAIRS, not merely within each one. Matching
+    # ladders per pair still allowed DIFFERENT pairs to survive different steps,
+    # so the bootstrap combined peak ratios taken over different concurrency
+    # sets -- and an aggregate of those estimates NO SINGLE QUANTITY. That is a
+    # VALIDITY defect, not a precision one: the interval would be a confidence
+    # interval for nothing in particular, and nothing in the number says so.
+    #
+    # RESOLVED BY INTERSECTION rather than refusal, and the choice is recorded
+    # because the two are DIFFERENT ESTIMANDS a reader cannot tell apart from
+    # the number. Refusing whenever replicates shed differently would red a
+    # legitimate ramp session -- shedding near the ceiling is expected, and the
+    # analyzer already excludes shed steps rather than dying on them, so a
+    # refusal here would contradict that one step up. The intersection keeps the
+    # session usable and states what it measured.
+    if mode == MODE_UTILIZATION and pairs:
+        common = set(pairs[0][1].ladder)
+        for _, base, head in pairs:
+            common &= set(base.ladder)
+        common = tuple(sorted(common))
+        if not common:
+            raise Unmeasured(
+                "ramp-no-common-ladder",
+                "no concurrency step survived admission shedding in EVERY "
+                "replicate, so there is no ladder the pairs share and no single "
+                "quantity for the aggregate to estimate. Raise "
+                "--max-concurrent-scans to at least the top of the ramp",
+            )
+        # Recorded BEFORE the restriction is applied, or the comparison is
+        # against the already-restricted ladders and can never be true.
+        restricted_any = any(
+            set(base.ladder) != set(common) or set(head.ladder) != set(common)
+            for _, base, head in pairs
+        )
+        pairs = [
+            (rep, base.restricted_to(common), head.restricted_to(common))
+            for rep, base, head in pairs
+        ]
+        utilization_ladder = list(common)
+        utilization_ladder_restricted = restricted_any
 
     # WHICH ARM RAN FIRST, per pair, and whether the counterbalancing happened.
     first_by_rep = {}
@@ -967,6 +1025,8 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
         )
 
     session = {
+        "utilization_ladder": utilization_ladder,
+        "utilization_ladder_restricted": utilization_ladder_restricted,
         "order_by_replicate": first_by_rep,
         "base_first": base_first,
         "head_first": head_first,

@@ -1198,6 +1198,25 @@ def report(mode, manifest, pairs, admission, opts, stats, session):
             "is declared, not assumed local. Confirm it by hand"
             % (mode, field(manifest, "corpus", "storage_detail"))
         )
+    # THE ESTIMAND, STATED. When replicates shed different steps the peaks are
+    # recomputed over the ladder every pair shares, which is a DIFFERENT
+    # QUANTITY from the peak over each pair's own ladder -- and nothing in the
+    # number distinguishes them. Reported beside the verdict, always when a ramp
+    # was analysed and emphatically when the restriction actually bit.
+    if mode == MODE_UTILIZATION and session.get("utilization_ladder"):
+        out(
+            "verdict-detail %s ESTIMAND the peak is taken over the concurrency "
+            "ladder shared by EVERY replicate: %s"
+            % (mode, session["utilization_ladder"])
+        )
+        if session.get("utilization_ladder_restricted"):
+            out(
+                "verdict-detail %s ESTIMAND at least one replicate shed a step "
+                "the others kept, so every peak was RECOMPUTED over that shared "
+                "ladder. Without this the aggregate would combine peaks taken "
+                "over different concurrency sets, which estimates no single "
+                "quantity" % mode
+            )
     for line in non_exhaustive_lines(mode, len(pairs)):
         out("verdict-detail %s NON-EXHAUSTIVE %s" % (mode, line))
     out("---- end section %s ----" % mode)
