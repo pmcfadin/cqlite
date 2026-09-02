@@ -4064,8 +4064,10 @@ obj_sweep_latch_verdict() {
 # ANSWER IS AN AFFIRMATIVE "no". Returns 0 (carry on) only for `absent` and `unkeyed`;
 # never returns at all for `present` or `unknown`, because finalize_exit ends the process.
 #
-# IT IS CALLED AT THE TOP OF object_store_sweep, BEFORE EVERY BRANCH, AND AGAIN BEFORE
-# EVERY RETURN THAT LEADS TO A SPAWN (#3749 review rounds 3 and 5, item 1). Round 3 found
+# IT IS CALLED AT THE TOP OF object_store_sweep, BEFORE EVERY BRANCH, AGAIN BEFORE EVERY
+# RETURN THAT LEADS TO A SPAWN, AND ONCE MORE ON THE WAY OUT OF preflight_wait — which is
+# where the HOLD LOOP could otherwise carry a lane past a peer's verdict for up to an hour
+# (#3749 review rounds 3, 5 and 13, item 1). Round 3 found
 # THREE returns that reached a spawn without re-reading the latch and fixed all three;
 # round 5 found a FOURTH — the OBJ_SWEEP_INTERVAL_HOURS=0 opt-out, which returned before
 # any latch read at all, so the documented way to disable the sweep also disabled an
@@ -4181,6 +4183,35 @@ obj_sweep_stop_if_latched() {
   finalize_exit "$stop_reason" 1
 }
 
+# obj_sweep_script_path — THE ONE PLACE THAT NAMES THE SWEEP SCRIPT. Two call sites now
+# derive this box's latch path from it (object_store_sweep's entry gate and
+# obj_sweep_stop_if_latched_now), and the latch KEY is derived FROM this path, so two
+# spellings of it would key two different latches: one lane would record a stopping
+# verdict at a name the other never reads, which is the silent-permissive direction.
+obj_sweep_script_path() {
+  printf '%s' "$REPO_ROOT/scripts/check-object-store-integrity.sh"
+}
+
+# obj_sweep_stop_if_latched_now — ASK THE LATCH QUESTION FROM SCRATCH, for a caller that
+# holds no resolved paths of its own. It resolves script -> stamp -> latch through the
+# same three functions object_store_sweep uses and hands the answer to the same gate, so
+# `unknown` still STOPS and `unkeyed` is still the one permissive answer (see
+# obj_sweep_stop_if_latched for the reasoning at each branch — this wrapper adds no
+# policy of its own, deliberately: a second opinion about what a latch state means is a
+# second place for the permissive collapse to reappear).
+#
+# IT RESOLVES FRESH RATHER THAN READING A VALUE object_store_sweep LEFT BEHIND. A global
+# would save one `--print-store` (5 ms, measured) and would be EMPTY on any future path
+# that reaches this gate without having run the sweep first — and an empty latch path
+# answers `unkeyed`, which CARRIES ON. That is a silent fail-open bought for 5 ms of a
+# supervisor iteration measured in minutes.
+obj_sweep_stop_if_latched_now() {
+  local stamp latch
+  stamp="$(obj_sweep_stamp_path "$(obj_sweep_script_path)")"
+  latch="$(obj_sweep_latch_path "$stamp")"
+  obj_sweep_stop_if_latched "$latch"
+}
+
 object_store_sweep() {
   local script stamp latch claim claim_stale wait_until rc out verdict stop_verdict
   # ---------------------------------------------------------------------------
@@ -4217,7 +4248,7 @@ object_store_sweep() {
   # announces it once and carries on, with the reasoning — and the residual it leaves — at
   # that branch.
   # ---------------------------------------------------------------------------
-  script="$REPO_ROOT/scripts/check-object-store-integrity.sh"
+  script="$(obj_sweep_script_path)"
   stamp="$(obj_sweep_stamp_path "$script")"
   latch="$(obj_sweep_latch_path "$stamp")"
   obj_sweep_stop_if_latched "$latch"
@@ -4571,11 +4602,12 @@ object_store_sweep() {
 # what stops the next person looking. So the magnitudes below are stated PER PATH and each is
 # derived from a shipped default or from a measurement, never from the word "moments".
 #
-# WHAT THE ORDERING AND THE WAIT BUY. No lane advertises "this box has been swept" before a
-# stopping finding is durable; no lane returns from object_store_sweep toward a spawn without
-# having re-read the latch; and a lane that LOSES the sweep claim now waits for the peer's
-# verdict, re-reading the latch every OBJ_SWEEP_CLAIM_POLL_SECS, instead of walking off with
-# one stale read.
+# WHAT THE ORDERING, THE WAIT AND THE PREFLIGHT GATE BUY. No lane advertises "this box has
+# been swept" before a stopping finding is durable; no lane returns from object_store_sweep
+# toward a spawn without having re-read the latch; a lane that LOSES the sweep claim waits for
+# the peer's verdict, re-reading the latch every OBJ_SWEEP_CLAIM_POLL_SECS, instead of walking
+# off with one stale read; and no lane returns from preflight_wait — however long its hold
+# loop ran — without one more fresh read (round 13).
 #
 # PATH 1 — THE CLAIM LOSER. CLOSED as a distinct window (round 12). It WAS the peer's whole
 # sweep: 13-80s measured, 600s by construction. It is now bounded by the poll granularity —
@@ -4589,14 +4621,25 @@ object_store_sweep() {
 # post-sweep reads bracket it, so a peer latching the box during this lane's own walks (up to
 # 600s) is caught by the read on the way out.
 #
-# PATH 3 — THE LAST LATCH READ TO THE WORKER SPAWN. STILL OPEN, AND IT IS THE LARGEST OF THE
-# THREE. object_store_sweep returns, and the caller then runs the preflight hold loop, which
-# does NOT re-read the latch: on a clear box the gap is milliseconds, but every hold sleeps
-# HOLD_POLL_SECS and the loop tolerates up to BUILD_HOLD_MAX of them, so at the shipped
-# defaults the gap is up to 12 x 300s = 3600s — ONE HOUR, not "moments" (the leftover-worker
-# family is bounded at LEFTOVER_HOLD_MAX x HOLD_POLL_SECS = 900s). A peer's sweep completing
-# anywhere inside that stretch is unobserved by this lane, and ONE worker then starts on a
-# box that is already latched.
+# PATH 3 — THE LAST LATCH READ TO THE WORKER SPAWN. NARROWED FROM UP TO AN HOUR TO ONE
+# PRE-SPAWN PROLOGUE (round 13), AND IT IS NOT ZERO. It USED to be the largest of the three:
+# object_store_sweep returned, the caller ran the preflight hold loop, and that loop never
+# re-read the latch — every hold sleeps HOLD_POLL_SECS and the loop tolerates up to
+# BUILD_HOLD_MAX of them, so at the shipped defaults a lane could sit for 12 x 300s = 3600s,
+# ONE HOUR (the leftover-worker family is bounded at LEFTOVER_HOLD_MAX x HOLD_POLL_SECS =
+# 900s) and then spawn onto a box a peer had latched meanwhile. preflight_wait is now a
+# WRAPPER around preflight_wait_holds that re-reads the STOP latch on EVERY return out of the
+# loop, so the hold window is closed STRUCTURALLY — as a property of the function boundary,
+# not at an enumerated set of returns (see preflight_wait for why that shape was chosen).
+#
+# WHAT REMAINS IS run_iteration'S PRE-SPAWN PROLOGUE, AND IT IS A NETWORK ROUND-TRIP, NOT
+# "MILLISECONDS". Between that read and `bash -c "$WORKER_CMD"` sit an ITER bump, an `rm -f`,
+# a `mkdir -p`, some assignments — and stamp_claim, which runs CLAIM_CMD `stamp`: a ref PUSH
+# to origin (plus a best-effort delete push on a lane transition). Measured lower bound on
+# this fleet: a bare `git ls-remote origin HEAD` is 0.26-0.28s, and a push negotiates and
+# updates a ref on top of that. The supervisor puts NO timeout on it, so the window is
+# sub-second-to-seconds in practice and UNBOUNDED in principle if the network stalls. A lane
+# with CLAIM_CMD empty pays only the local prologue, which really is milliseconds.
 #
 # THE BOUND ON THE HARM, unchanged and still true for every path. It is not silent and not
 # durable: that lane's NEXT iteration begins with object_store_sweep, whose first act is the
@@ -4604,16 +4647,14 @@ object_store_sweep() {
 # Nothing certifies a merge inside that window without a full gate, and a full gate on a
 # latched box is exactly what the next iteration refuses.
 #
-# WHY PATH 3 IS NOT CLOSED HERE. An atomic "no worker may start after any peer latches"
+# WHY THE REMAINDER IS NOT CLOSED HERE. An atomic "no worker may start after any peer latches"
 # guarantee needs per-store synchronisation shared by the sweep and the spawn decision (a
-# lock held across both, or a spawn-time re-check inside whatever holds that lock) — a
-# redesign of the boundary between this function and the spawn path, not an ordering change.
-# It is split to its own issue, and so is the cheapest partial (a latch read inside the hold
-# loop, which would cut 3600s down to one HOLD_POLL_SECS): that read belongs with the
-# redesign rather than smuggled into a fix for path 1, where it would arrive untested and
-# would tempt exactly the "narrowed, so basically closed" reading this note was rewritten to
-# remove. PATH 1 IS CLOSED; PATH 3 IS OPEN AND ITS MAGNITUDE IS ABOVE. Do not describe the
-# race as gone.
+# lock held across both, with the spawn decision taken inside it) — a redesign of the boundary
+# between this function and the spawn path, not another read. It is split to its own issue. A
+# further latch read immediately before the spawn would shrink the window again and CANNOT
+# remove it: a read and a spawn are two operations, and putting the read after stamp_claim
+# only moves the network round-trip to the other side of it. PATH 1 AND THE HOLD WINDOW ARE
+# CLOSED; THE PRE-SPAWN WINDOW IS OPEN. Do not describe the race as gone.
 
 # ---------------------------------------------------------------------------
 # Preflight: fail-closed, wait-don't-spin. Returns a hold reason on stdout, or
@@ -4665,7 +4706,7 @@ preflight_stop_or_budget() {
   return 0
 }
 
-preflight_wait() {
+preflight_wait_holds() {
   local worker_holds=0 build_holds=0
   # ASKED IMMEDIATELY BEFORE THE SWEEP (#3749 review round 3, item 3). The sweep is the
   # longest uninterruptible step in an iteration, and it used to run BEFORE the hold
@@ -4742,6 +4783,50 @@ preflight_wait() {
     log "HOLD: $reason; sleeping ${HOLD_POLL_SECS}s"
     sleep "$HOLD_POLL_SECS"
   done
+}
+
+# preflight_wait — THE HOLD LOOP, PLUS A FRESH STOP-LATCH READ ON THE WAY OUT
+# (#3749 review round 13).
+#
+# THE DEFECT. The STOP latch was read at the top of object_store_sweep and again before
+# every return out of it — and then this function's hold loop ran, which does not read the
+# latch at all. Every hold sleeps HOLD_POLL_SECS and the loop tolerates up to
+# BUILD_HOLD_MAX of them, so at the shipped defaults a lane could sit here for up to
+# 12 x 300s = ONE HOUR after its last latch read and then spawn a worker on a box a PEER
+# had latched CORRUPT (or UNSWEEPABLE) in the meantime. It was declared as a residual for
+# a round and overruled: the read below is one stat plus one `--print-store`, and it
+# reduces that window from an hour to the code between here and the spawn.
+#
+# WHY A WRAPPER AND NOT A CALL BEFORE THE `return 0`. That is the shape round 3 and round 5
+# already paid for twice in object_store_sweep: "remember the check at every early return"
+# leaves a fifth door for the next reviewer. Splitting the loop into preflight_wait_holds
+# and gating it HERE makes the property structural — every RETURN out of the inner body,
+# including ones nobody has written yet, is followed by the latch read, because the caller
+# never sees the inner function at all. Asserted structurally in test_worker_supervisor.sh
+# (`preflight-latch-gate`), which also requires preflight_wait_holds to have exactly ONE
+# call site, so the gate cannot be bypassed by calling the inner body directly.
+#
+# THE OTHER EXITS ARE NOT RETURNS, AND THEY ARE DELIBERATELY UNTOUCHED. The stop-file,
+# wall-clock-budget and leftover-hold paths end in finalize_exit, which ends the PROCESS:
+# they never reach this gate, they never spawn, and their exit codes are unchanged.
+#
+# WHAT THIS DOES NOT CLOSE. The gap is now the code between this read and the spawn —
+# microseconds, not milliseconds of policy — and closing it entirely needs per-store
+# synchronisation shared by the sweep and the spawn decision (a lock held across both), not
+# another read. Do NOT describe the race as gone.
+preflight_wait() {
+  local rc=0
+  preflight_wait_holds || rc=$?
+  # UNCONDITIONAL, on every return the inner body can make. A non-zero return is not a
+  # reason to skip it: the caller does not test this function's status, so ANY return from
+  # it continues toward a spawn.
+  #
+  # NOT INSIDE A COMMAND SUBSTITUTION, and that is load-bearing (the trap
+  # obj_sweep_claim_wait documents): the gate stops this lane by calling finalize_exit, and
+  # inside `$( )` that would end a SUBSHELL — the wait would appear to return normally and
+  # the lane would spawn on a box it had just seen condemned.
+  obj_sweep_stop_if_latched_now
+  return "$rc"
 }
 
 # ---------------------------------------------------------------------------

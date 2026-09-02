@@ -789,23 +789,33 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   neither its claim nor its lock — for the claim a delay rather than a wedge, and adding signal
   handlers changes the LOCK's lifetime too (#3683's subject).
   **WHAT IS NOT CLOSED, PER PATH AND WITH ITS REAL MAGNITUDE — because a residual whose size is
-  understated is worse than one described honestly (round 12).** The earlier version of this text
-  gave ONE figure for every path ("ONE worker can still start on a box latched **moments** earlier")
-  and it was wrong twice. **PATH 1, the claim loser: CLOSED** — it was the peer's whole sweep
-  (13-80s measured, 600s by construction), and is now bounded by one `OBJ_SWEEP_CLAIM_POLL_SECS`.
-  **PATH 2, a lane's own sweep: COVERED** by the entry read plus the post-sweep reads. **PATH 3, the
-  last latch read to the worker spawn: OPEN, AND THE LARGEST OF THE THREE.** `object_store_sweep`
-  returns and the caller then runs the preflight hold loop, which does **not** re-read the latch: on
-  a clear box the gap is milliseconds, but every hold sleeps `HOLD_POLL_SECS` and the loop tolerates
-  up to `BUILD_HOLD_MAX` of them, so at the shipped defaults the gap is up to **12 x 300s = 3600s,
-  ONE HOUR** (the leftover-worker family bounds at `LEFTOVER_HOLD_MAX` x `HOLD_POLL_SECS` = 900s) —
-  "minutes" understated it by 12x. The harm bound is unchanged: it is not silent and not durable —
-  that lane's next iteration reads the latch at the top of its sweep and stops, and nothing certifies
-  a merge in that window without a full gate, which a latched box refuses. The atomic guarantee needs per-store
-  synchronisation shared by the sweep and the spawn decision, which is **split to its own issue** —
-  and so is the cheapest partial (a latch read inside the hold loop, which would cut 3600s to one
-  `HOLD_POLL_SECS`), which belongs with that redesign rather than smuggled into the path-1 fix where
-  it would arrive untested. **Path 1 is closed; path 3 is open. Do not describe the race as gone.**
+  understated is worse than one described honestly (rounds 12 and 13), AND A RESIDUAL LEFT
+  STANDING WHEN IT COULD BE CLOSED IS THE OTHER HALF OF THAT.** **PATH 1, the claim loser: CLOSED**
+  — it was the peer's whole sweep (13-80s measured, 600s by construction), and is now bounded by one
+  `OBJ_SWEEP_CLAIM_POLL_SECS`. **PATH 2, a lane's own sweep: COVERED** by the entry read plus the
+  post-sweep reads. **PATH 3, the last latch read to the worker spawn: NARROWED FROM UP TO AN HOUR
+  TO ONE PRE-SPAWN PROLOGUE, AND IT IS NOT ZERO.** The hold loop used to run after the last latch
+  read and never re-read it, so at the shipped defaults a lane could sit for `BUILD_HOLD_MAX` x
+  `HOLD_POLL_SECS` = **12 x 300s = 3600s** (leftover-worker family: `LEFTOVER_HOLD_MAX` x
+  `HOLD_POLL_SECS` = 900s) and then spawn onto a box a peer had latched meanwhile. `preflight_wait`
+  is now a WRAPPER: the loop lives in `preflight_wait_holds` and the STOP latch is re-read on
+  **every** return out of it, so the hold window is closed STRUCTURALLY — a property of the function
+  boundary, not an enumerated set of returns (round 3 fixed three such returns, round 5 found a
+  fourth; that shape does not converge). **What remains is `run_iteration`'s pre-spawn prologue**:
+  `stamp_claim`, i.e. ONE `claim-heartbeat.sh stamp` ref push to `origin` (plus a best-effort delete
+  push on a lane transition), around an `rm`/`mkdir`/assignments. Measured lower bound on this
+  fleet: a bare `git ls-remote origin HEAD` is **0.26-0.28s**, and a push negotiates and updates a
+  ref on top of that; the supervisor puts NO timeout on it, so the window is
+  sub-second-to-seconds in practice and unbounded in principle if the network stalls — **not the
+  "milliseconds" a purely local prologue would give** (a lane with `CLAIM_CMD` empty does pay only
+  that). The harm bound is unchanged: it is not silent and not durable — that lane's next iteration
+  reads the latch at the top of its sweep and stops, and nothing certifies a merge in that window
+  without a full gate, which a latched box refuses. Closing it entirely still needs per-store
+  synchronisation shared by the sweep and the spawn decision (a lock held across both, with the
+  spawn decision inside it), which is **split to its own issue**; a further read immediately before
+  the spawn would shrink the window again and cannot remove it, because a read and a spawn are two
+  operations. **Path 1 and the hold window are closed; the pre-spawn window is open. Do not
+  describe the race as gone.**
   **The sweep is also NOT INTERRUPTIBLE, so its cost is bounded in WALL TIME instead:** its
   walks run in a CHILD process, so the supervisor cannot check the stop file between them; it checks
   it (and the wall-clock budget) immediately BEFORE the sweep, and the supervisor's per-walk bound

@@ -959,21 +959,27 @@ restored, announced. The claim is a registered resource released by the EXIT tra
 path — which ends the process — does not leave peers waiting out the bound. Not closed, and
 pre-existing: this file installs no INT/TERM handlers, so a signalled supervisor releases neither
 its claim nor its lock; for the claim that is a delay, not a wedge. **What is not closed, per path
-and with its real magnitude** — the earlier version of this text gave one figure for every path
-("one worker can still start on a box latched *moments* earlier") and it was wrong twice. **Path 1,
+and with its real magnitude** — a residual whose size is understated is worse than one described
+honestly, and a residual left standing when it could be closed is the other half of that. **Path 1,
 the claim loser: closed** — it was the peer's whole sweep (13-80s measured, 600s by construction),
 now bounded by one `OBJ_SWEEP_CLAIM_POLL_SECS`. **Path 2, a lane's own sweep: covered** by the entry
-read plus the post-sweep reads. **Path 3, the last latch read to the worker spawn: open, and the
-largest of the three** — `object_store_sweep` returns and the caller then runs the preflight hold
-loop, which does *not* re-read the latch: milliseconds on a clear box, but every hold sleeps
-`HOLD_POLL_SECS` and the loop tolerates up to `BUILD_HOLD_MAX` of them, so at the shipped defaults
-the gap is up to 12 × 300s = **3600s, one hour** (the leftover-worker family bounds at
-`LEFTOVER_HOLD_MAX` × `HOLD_POLL_SECS` = 900s), and "minutes" understated it by 12x. It is bounded
-in harm (that lane's next iteration reads the latch at the top of its sweep and stops, and nothing
-certifies a merge in that window without a full gate, which a latched box refuses), and the atomic
-guarantee needs per-store synchronisation shared by the sweep and the spawn decision, which is split
-to its own issue — as is the cheapest partial, a latch read inside the hold loop that would cut
-3600s to one `HOLD_POLL_SECS`. Path 1 is closed; path 3 is open; the race is not gone. The sweep is also **not interruptible** — its two walks
+read plus the post-sweep reads. **Path 3, the last latch read to the worker spawn: narrowed from up
+to an hour to one pre-spawn prologue, and it is not zero.** The hold loop used to run after the last
+latch read and never re-read it, so at the shipped defaults a lane could sit for `BUILD_HOLD_MAX` ×
+`HOLD_POLL_SECS` = 12 × 300s = **3600s** (leftover-worker family: `LEFTOVER_HOLD_MAX` ×
+`HOLD_POLL_SECS` = 900s) and then spawn onto a box a peer had latched meanwhile. `preflight_wait` is
+now a **wrapper**: the loop lives in `preflight_wait_holds` and the STOP latch is re-read on *every*
+return out of it, so the hold window is closed structurally — a property of the function boundary,
+not an enumerated set of returns (round 3 fixed three such returns and round 5 found a fourth; that
+shape does not converge). What remains is `run_iteration`'s pre-spawn prologue: `stamp_claim`, i.e.
+one `claim-heartbeat.sh stamp` ref push to `origin`, around an `rm`/`mkdir`/assignments — a measured
+lower bound of **0.26-0.28s** for a bare `git ls-remote origin HEAD` on this fleet, unbounded in
+principle since the supervisor puts no timeout on that push, and **not** the "milliseconds" a purely
+local prologue would give. It is bounded in harm (that lane's next iteration reads the latch at the
+top of its sweep and stops, and nothing certifies a merge in that window without a full gate, which
+a latched box refuses), and closing it entirely still needs per-store synchronisation shared by the
+sweep and the spawn decision, which is split to its own issue. Path 1 and the hold window are
+closed; the pre-spawn window is open; the race is not gone. The sweep is also **not interruptible** — its two walks
 run in a child process — so the supervisor checks the stop file and the wall-clock budget
 immediately *before* the sweep, and bounds the exposure in wall time: its per-walk default is the
 sweep script's own bound **divided by `MAX_SWEEP_WALKS`** (200 vs 600/3), so every walk it can pay

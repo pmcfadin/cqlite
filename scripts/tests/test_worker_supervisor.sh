@@ -968,6 +968,15 @@ common_env() {
   # supervisor at their own scratch tree with a stub sweep, so the branch coverage is real
   # rather than mocked away.
   export OBJ_SWEEP_INTERVAL_HOURS=0
+  # AND THE STAMP KEY IS PINNED PER CASE, for two reasons. (1) Isolation: the throttle stamp and
+  # the STOP latch are BOX-WIDE files derived from that key, and preflight_wait now re-reads the
+  # latch on its way out (round 13) — so a case inheriting an earlier case's exported stamp
+  # inherits its LATCH too, and a lane that should spawn stops on another case's planted
+  # corruption. Exports persist across cases in this one shell, so "the previous case set it" is
+  # the default, not the exception. (2) Cost: an unset key sends every latch read through the
+  # sweep script's `--print-store` (a subprocess, ~5-9 ms). The cases that are ABOUT the
+  # resolver unset it again on purpose.
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
   # roborev 1839: preflight bounds the two leftover families separately, so it reads
   # per-family probes (the old combined PROC_PROBE_CMD is gone). Default both to clear;
   # leftover-hold tests override the family they exercise.
@@ -10951,6 +10960,14 @@ test_preflight_reads_the_stop_file_before_the_object_store_sweep() {
   local d obs drv
   d="$(new_case_dir)"; obs="$d/obs.txt"; drv="$d/drv.sh"
   sv_preflight_order_driver "$drv" "$obs"
+  # PINNED PER CASE, and it is not cosmetic: preflight_wait re-reads the STOP latch on the way
+  # out (round 13), the latch path is derived from OBJ_SWEEP_STAMP, and this case supplies its
+  # environment on the command line rather than through common_env — so without a pin it
+  # inherits whatever an EARLIER case exported, and the obj-sweep cases leave a LATCHED stamp
+  # behind. The control arm then "failed" by stopping on a real latch from another case. The
+  # gate itself is deliberately left in the path: the control arm is what shows it does not
+  # stop a lane that should proceed.
+  export OBJ_SWEEP_STAMP="$d/order.stamp"
   if ! bash -n "$drv" 2>/dev/null; then
     fail "preflight-order-plant: the scratch driver does not parse — the arms below would prove nothing"
     return
@@ -10991,6 +11008,171 @@ test_preflight_reads_the_stop_file_before_the_object_store_sweep() {
 }
 
 t test_preflight_reads_the_stop_file_before_the_object_store_sweep
+
+# THE HOLD LOOP MUST NOT CARRY A LANE PAST A PEER'S STOPPING VERDICT (#3749 review round 13).
+#
+# THE DEFECT. object_store_sweep reads the STOP latch at entry and again before every return
+# that leads to a spawn — and then preflight_wait's HOLD LOOP ran, which read the latch not at
+# all. Every hold sleeps HOLD_POLL_SECS and the loop tolerates up to BUILD_HOLD_MAX of them, so
+# at the shipped defaults a lane could sit here for 12 x 300s = ONE HOUR after its last latch
+# read and then spawn a worker onto a box a PEER had latched CORRUPT in the meantime.
+#
+# THE STRUCTURAL HALF, and why it is not an enumeration. Round 3 fixed three returns that
+# reached a spawn without a latch read and round 5 found a fourth: "remember the check at every
+# return" leaves a door for the next reviewer. The loop is therefore in preflight_wait_holds and
+# the gate is in the WRAPPER, so a return added to the inner body TOMORROW is gated too — the
+# caller never sees the inner function. This case asserts exactly that shape: the gate sits
+# after the one inner call and before every return of the wrapper, the inner body has exactly
+# one call site, and the gate is not inside a command substitution (where finalize_exit would
+# end a SUBSHELL and the lane would spawn anyway — the trap obj_sweep_claim_wait documents).
+test_preflight_wait_gates_every_return_on_the_latch() {
+  local body gate call_line ret_before inner_refs n line subshell=""
+  body="$(awk '/^preflight_wait\(\) \{$/,/^\}$/' "$SUPERVISOR")"
+  gate="$(grep -n '^[[:space:]]*obj_sweep_stop_if_latched_now$' <<<"$body" | head -1 | cut -d: -f1)"
+  call_line="$(grep -n '^[[:space:]]*preflight_wait_holds ' <<<"$body" | head -1 | cut -d: -f1)"
+  # PLANT: the wrapper was really extracted and really contains both halves. A body of ""
+  # has no ungated return either, so every assert below would be vacuous without this.
+  if [[ -n "$body" && "$gate" =~ ^[0-9]+$ && "$call_line" =~ ^[0-9]+$ ]]; then
+    pass "preflight-latch-gate-plant: preflight_wait was extracted from the shipped supervisor and carries both the inner call and the latch gate"
+  else
+    fail "preflight-latch-gate-plant: body=${#body} bytes gate='$gate' inner-call='$call_line' — the asserts below would prove nothing"
+    return
+  fi
+  # (1) THE GATE IS AFTER THE INNER CALL AND BEFORE EVERY return/exit IN THE WRAPPER.
+  ret_before=""
+  n=0
+  while IFS= read -r line; do
+    n=$((n + 1))
+    [[ "$n" -lt "$gate" ]] || break
+    [[ "$line" =~ ^[[:space:]]*(return|exit)([[:space:]]|$) ]] && ret_before="${ret_before}${ret_before:+ | }line $n: $line"
+  done <<<"$body"
+  if [[ "$call_line" -lt "$gate" && -z "$ret_before" ]]; then
+    pass "preflight-latch-gate: the latch read is at wrapper line $gate, after the single preflight_wait_holds call at $call_line, and NOTHING returns before it — every return out of the hold loop, including ones not yet written, is followed by a fresh latch read [STRUCTURAL]"
+  else
+    fail "preflight-latch-gate: inner call at '$call_line', gate at '$gate', return(s) before the gate: ${ret_before:-none} — a hold can end in a spawn without asking the latch question"
+  fi
+  # (2) THE INNER BODY HAS EXACTLY ONE CALL SITE. Without this the property is bypassable by
+  #     calling preflight_wait_holds directly from main(), which is the same defect wearing a
+  #     different name.
+  inner_refs="$(grep -c '^[[:space:]]*preflight_wait_holds\b' "$SUPERVISOR" 2>/dev/null || true)"
+  [[ "$inner_refs" =~ ^[0-9]+$ ]] || inner_refs=-1
+  if [[ "$inner_refs" -eq 2 ]]; then
+    pass "preflight-latch-gate: preflight_wait_holds appears exactly twice at the start of a line (its definition and the ONE gated call) — the hold loop has no ungated caller [STRUCTURAL]"
+  else
+    fail "preflight-latch-gate(callers): $inner_refs line-initial references to preflight_wait_holds, wanted 2 (definition + one call) — a second caller would bypass the gate"
+  fi
+  # (3) AND THE GATE IS NOT INSIDE A COMMAND SUBSTITUTION anywhere in the file: it stops the
+  #     lane through finalize_exit, which inside `$( )` ends a subshell and returns.
+  subshell="$(grep -n '\$(.*obj_sweep_stop_if_latched_now' "$SUPERVISOR" 2>/dev/null || true)"
+  if [[ -z "$subshell" ]]; then
+    pass "preflight-latch-gate: no call site puts the gate in a command substitution — its finalize_exit ends the PROCESS, not a subshell [STRUCTURAL]"
+  else
+    fail "preflight-latch-gate(subshell): $subshell — finalize_exit there would end a subshell and the lane would spawn anyway"
+  fi
+}
+
+t test_preflight_wait_gates_every_return_on_the_latch
+
+# THE BEHAVIOURAL HALF: A LATCH THAT APPEARS **DURING** A HOLD (#3749 review round 13).
+#
+# The latch is created by the leftover-worker probe on its FIRST call, which the supervisor
+# reaches only after object_store_sweep has already returned — so the entry read and the
+# post-sweep reads provably could not have seen it, and the HOLD line in the journal is the
+# construction assert that the loop really ran between them.
+#
+# ARM (b) IS LOAD-BEARING, NOT DECORATION. "The lane did not spawn" is also what a broken
+# fixture produces, so the control is the SAME staging one property apart — the probe creates a
+# harmless file instead of the latch — where the lane MUST hold and then run its worker.
+test_preflight_latch_during_a_hold_stops_the_lane() {
+  local d root counter calls rc latch probe holds
+  # ---- (a) THE SUBJECT: the peer's latch lands while this lane is holding ---------------
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-hold-latch"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  latch="$OBJ_SWEEP_STAMP.STOP"
+  probe="$d/bin/probe.sh"
+  # HOLD ONCE, THEN CLEAR — so the loop returns normally and the gate on the way out is the
+  # only thing that can stop this lane. The side effect is the peer's latch, written with the
+  # supervisor's own two-line shape (epoch, verdict).
+  cat >"$probe" <<EOF
+#!/usr/bin/env bash
+n=0
+[[ -f "$d/probe.n" ]] && n=\$(cat "$d/probe.n")
+n=\$((n + 1)); printf '%s' "\$n" >"$d/probe.n"
+if [[ "\$n" -le 1 ]]; then
+  printf '1700000000\nCORRUPT\nplanted-by-peer-lane-during-hold\n' >"$latch"
+  echo 1
+else
+  echo 0
+fi
+EOF
+  chmod +x "$probe"
+  export PROC_PROBE_WORKER_CMD="bash $probe"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  if [[ ! -e "$latch" ]]; then
+    pass "preflight-hold-latch-plant: the box starts UNLATCHED, so the run below reaches the hold loop with nothing for the entry read to find"
+  else
+    fail "preflight-hold-latch-plant: a latch already exists at $latch — the arm below would prove nothing"
+    return
+  fi
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/hold.log" 2>&1
+  rc=$?
+  holds="$(grep -c 'HOLD: leftover-worker' "$d/hold.log" 2>/dev/null || true)"
+  [[ "$holds" =~ ^[0-9]+$ ]] || holds=0
+  # CONSTRUCTION FIRST, AND IT NAMES WHICH THING WENT WRONG: a hold really happened (so the
+  # latch really appeared after every pre-existing read) and the sweep really ran.
+  if [[ "$holds" -ge 1 && -s "$calls" && -e "$latch" ]]; then
+    pass "preflight-hold-latch-plant: the lane swept, then HELD $holds time(s), and the peer's latch was created during that hold — after every latch read the pre-round-13 code performed"
+  else
+    fail "preflight-hold-latch-plant: STAGING — holds=$holds swept=$([[ -s "$calls" ]] && echo yes || echo no) latch=$([[ -e "$latch" ]] && echo present || echo absent) (see $d/hold.log)"
+    return
+  fi
+  if [[ "$rc" -eq 1 && ! -f "$counter" ]] && grep -q 'object-store: CORRUPT' "$d/hold.log"; then
+    pass "preflight-hold-latch: a latch recorded by a peer DURING the hold stops the lane on the way out of preflight_wait — no worker is spawned onto a box latched while this lane was waiting"
+  else
+    fail "preflight-hold-latch: THE DEFECT — rc=$rc spawned=$([[ -f "$counter" ]] && echo yes || echo no): the lane held for $holds poll(s) with a peer's CORRUPT latch already on disk and carried straight on to its worker (see $d/hold.log)"
+  fi
+  # ---- (b) THE CONTROL, one property apart: the hold ends with NO latch ----------------
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-hold-clean"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  latch="$OBJ_SWEEP_STAMP.STOP"
+  probe="$d/bin/probe.sh"
+  cat >"$probe" <<EOF
+#!/usr/bin/env bash
+n=0
+[[ -f "$d/probe.n" ]] && n=\$(cat "$d/probe.n")
+n=\$((n + 1)); printf '%s' "\$n" >"$d/probe.n"
+if [[ "\$n" -le 1 ]]; then
+  printf 'not-a-latch\n' >"$d/harmless"
+  echo 1
+else
+  echo 0
+fi
+EOF
+  chmod +x "$probe"
+  export PROC_PROBE_WORKER_CMD="bash $probe"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/clean.log" 2>&1
+  rc=$?
+  holds="$(grep -c 'HOLD: leftover-worker' "$d/clean.log" 2>/dev/null || true)"
+  [[ "$holds" =~ ^[0-9]+$ ]] || holds=0
+  if [[ "$rc" -eq 0 && -f "$counter" && "$holds" -ge 1 && ! -e "$latch" && -f "$d/harmless" ]]; then
+    pass "preflight-hold-latch-control: the SAME hold with no latch created still spawns the worker — the arm above is the latch, not a lane that stopped holding"
+  else
+    fail "preflight-hold-latch-control: rc=$rc spawned=$([[ -f "$counter" ]] && echo yes || echo no) holds=$holds latch=$([[ -e "$latch" ]] && echo present || echo absent) (see $d/clean.log)"
+  fi
+}
+
+t test_preflight_latch_during_a_hold_stops_the_lane
 
 # AND THE EXPOSURE IS BOUNDED IN WALL TIME, because the in-flight sweep is NOT
 # interruptible (#3749 review round 3, item 3). Its walks run in a CHILD process, so no
