@@ -251,7 +251,11 @@ driver_step_env() {
     FLIGHT_ENDPOINT="$WS0_FIXTURE_ENDPOINT" BASELINE_MODE=non-baseline \
     EVENTS=cycles,instructions BIN_DIR_RECORDED=target/release PROFILE_RECORDED=off \
     "QUIESCENCE_RECORDED=NOT VERIFIED (no timeseries supplied)" \
-    "WS0_SERVER_SIBLINGS=server cpu 2 siblings 2,10" "CPU_TOPOLOGY_ROOT=$TMP/fake-topology"
+    "WS0_SERVER_SIBLINGS=server cpu 2 siblings 2,10" "CPU_TOPOLOGY_ROOT=$TMP/fake-topology" \
+    FLIGHT_SERVER_CPUS=2,10 FLIGHT_PIN_MODE=siblings FLIGHT_ALLOCATOR=system \
+    "WS0_FLIGHT_PIN_VERIFIED=flight cpu 2 siblings 2,10" \
+    "FLIGHT_ALLOCATOR_LIB_RECORDED=none (fixture)" \
+    "FLIGHT_ALLOCATOR_VERIFICATION=per rep from /proc/<pid>/maps (fixture)"
 }
 
 # WHAT EACH RECORDED FIELD MUST BE, given the controlled inputs above (#3451 post-rebase round 5,
@@ -269,6 +273,7 @@ WS0_EXPECTED_CFG=(
   "flight_endpoint=$WS0_FIXTURE_ENDPOINT" "baseline_mode=non-baseline"
   "events=cycles,instructions" "bin_dir=target/release" "profile=off"
   "quiescence=NOT VERIFIED (no timeseries supplied)"
+  "flight_server_cpus=2,10"
 )
 # ...and the PIN side: the FIELD SET is derived from the driver, the VALUES are stated here
 # (#3451 post-rebase round 6, F3).
@@ -293,6 +298,14 @@ WS0_EXPECTED_PIN=(
   "server_cpus=2,10" "client_cpus=4,12"
   "server_siblings_expanded=server cpu 2 siblings 2,10"
   "topology_root=$TMP/fake-topology"
+  # THE FLIGHT ARM (#3551). Each value is DISTINCT from every other in this table, which is what
+  # makes a swapped right-hand side in the driver detectable at all: `flight_pin_verified` and
+  # `flight_allocator_lib` are both just non-empty strings to the shipped validator, so only a
+  # comparison against the value each was GIVEN can tell them apart.
+  "flight_server_cpus=2,10" "flight_pin_mode=siblings"
+  "flight_pin_verified=flight cpu 2 siblings 2,10"
+  "flight_allocator=system" "flight_allocator_lib=none (fixture)"
+  "flight_allocator_verification=per rep from /proc/<pid>/maps (fixture)"
 )
 
 # driver_pin_fields <driver> — the record fields the CPU block sources from the ENVIRONMENT, read
@@ -1110,6 +1123,11 @@ CFG_PAIRS=(
   "reps=1" "temps=warm" "arms=bypass" "scan_passes=1"
   "server_cpus=2,10" "client_cpus=4,12" "step_duration=45s/1s"
   "flight_endpoint=$WS0_FIXTURE_ENDPOINT"
+  # ...and #3551's flight pin. EQUAL to `server_cpus`, because that is THE DRIVER'S OWN DEFAULT
+  # SHAPE (`--flight-server-cpus` defaults to `--server-cpus`) — the same rule the comment below
+  # states for events/profile/quiescence: a fixture pinning a value the driver never produces
+  # makes the round trip approve an artifact production would refuse.
+  "flight_server_cpus=2,10"
   # ...and the fields #3455 added. Each value is THE DRIVER'S OWN DEFAULT SHAPE, not merely
   # something the validator accepts — the round-8 lesson about the Flight endpoint applied here
   # before it could cost a round: a fixture pinning a value the driver never produces makes the
@@ -1675,7 +1693,9 @@ from ws0_session import session_manifest_config
 session = pathlib.Path(sys.argv[2])
 # The CPU lists AS THE MANIFEST RECORDS THEM — the session-pin step's output, not a constant.
 config = session_manifest_config(session, TEMPS_ALLOWED, ARMS_ALLOWED)
-rec = verify_pinning_record(session, config["server_cpus"], config["client_cpus"])
+rec = verify_pinning_record(
+    session, config["server_cpus"], config["client_cpus"], config["flight_server_cpus"]
+)
 missing = [f for f in PINNING_RECORD_FIELDS if not rec.get(f)]
 if missing:
     print(f"pinning record is missing required fields: {missing}", file=sys.stderr)
@@ -1773,7 +1793,9 @@ from ws0_report import ARMS_ALLOWED, TEMPS_ALLOWED
 from ws0_session import session_manifest_config
 session = pathlib.Path(sys.argv[2])
 config = session_manifest_config(session, TEMPS_ALLOWED, ARMS_ALLOWED)
-verify_pinning_record(session, config["server_cpus"], config["client_cpus"])
+verify_pinning_record(
+    session, config["server_cpus"], config["client_cpus"], config["flight_server_cpus"]
+)
 PY
 )"
   swap_status=$?

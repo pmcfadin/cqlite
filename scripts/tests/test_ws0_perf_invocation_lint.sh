@@ -101,7 +101,7 @@ ws0_hermetic_init "$TMP"
 #
 # The `perf stat -C` line the injections replace, spelled in pieces so THIS FILE
 # does not trip the driver's own grep when someone greps the tree.
-CPU_WIDE_LINE='  perf stat -x, -e "$EVENTS" -C "$SERVER_CPUS" -o "$outfile" -- "$@"'
+CPU_WIDE_LINE='  perf stat -x, -e "$EVENTS" -C "$PERF_COUNT_CPUS" -o "$outfile" -- "$@"'
 
 # driver_copy_with <replacement-line> — a temp checkout of scripts/perf with the
 # CPU-wide perf line replaced. Echoes the copy's path.
@@ -201,7 +201,7 @@ expect_selfgrep_fires "a GLOBAL OPTION between the words, perf --no-pager stat -
 # throwaway function so the driver's original `}` still balances — so the injected
 # line is genuinely OUTSIDE the wrapper, which is the property under test.
 expect_selfgrep_fires "a SECOND, CPU-wide perf invocation outside the wrapper (no deny-list could see it)" \
-  '  perf stat -x, -e "$EVENTS" -C "$SERVER_CPUS" -o "$outfile" -- "$@"
+  '  perf stat -x, -e "$EVENTS" -C "$PERF_COUNT_CPUS" -o "$outfile" -- "$@"
 }
 perf stat -x, -C 0 -o /dev/null -- true
 _ws0_injected_noop() {'
@@ -568,7 +568,7 @@ argv_probe() { # argv_probe <args…> — run the driver's perf_stat_c with a pe
   ( set -uo pipefail
     # shellcheck disable=SC1090
     source "$PERF_LINT_LIB"          # supplies $_PP_SHORT / $_PP_LONG
-    EVENTS="cycles"; SERVER_CPUS="0"
+    EVENTS="cycles"; SERVER_CPUS="0"; PERF_COUNT_CPUS="0"
     perf() { printf 'PERF-RAN: %s\n' "$*"; }
     eval "$(awk '/^perf_stat_c\(\)/,/^}/' "$DRIVER")"
     perf_stat_c /dev/null "$@" ) 2>&1

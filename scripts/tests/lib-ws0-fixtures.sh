@@ -304,6 +304,13 @@ repo_root = pathlib.Path(sys.argv[1]).resolve().parent.parent
 # the pin it just wrote, which is how the other single-value fields are exercised too.
 config = {"reps": sys.argv[4], "temps": sys.argv[5], "arms": sys.argv[6],
           "scan_passes": sys.argv[7], "server_cpus": "2,10", "client_cpus": "4,12",
+          # The FLIGHT pin (#3551), a declared manifest field the reader REFUSES to do without.
+          # EQUAL to server_cpus here, which is the default every run without
+          # --flight-server-cpus produces, and it must equal what ws0_pin_verification stamps
+          # below: that agreement is what the reporter asserts. A case whose SUBJECT is the
+          # flight pin (a manifest naming CPUs no verification ran against, or a distinct-cores
+          # session) edits one side EXPLICITLY.
+          "flight_server_cpus": "2,10",
           "step_duration": "45s/1s", "flight_endpoint": sys.argv[9],
           "events": "cycles,instructions",
           "bin_dir": "/fixture/target/release",
@@ -471,6 +478,12 @@ provenance_path(session).write_text(json.dumps(rec, indent=1) + "\n")
 # manifest (the substitution the reporter must refuse) without rebuilding the whole manifest.
 ws0_pin_verification() {
   local session="$1" server="$2" client="$3" perf_dir
+  # THE FLIGHT ARM (#3551), defaulted so every existing caller keeps stamping a healthy record.
+  # `${N-default}` and not `${N:-default}` for the reason stated at ws0_pin_session_corpus: a
+  # case that deliberately passes an EMPTY value is testing the reader's empty-field refusal, and
+  # the colon form would silently hand it the healthy default instead.
+  local flight="${4-$server}" mode="${5-siblings}" allocator="${6-system}"
+  local allocator_lib="${7-none (system malloc; fixture)}"
   # DOES NOT CREATE the session dir, and that is load-bearing rather than tidiness: an earlier
   # draft used `mkdir(parents=True)`, which brought a deliberately-NONEXISTENT `--dir` into
   # existence and turned the reporter's "not an existing directory" refusal into a
@@ -483,6 +496,7 @@ import json, pathlib, sys
 sys.path.insert(0, sys.argv[1])
 from ws0_pinning import pinning_record_path
 session, server, client = pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+flight, mode, allocator, allocator_lib = sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8]
 # The expanded form mirrors `verify_sibling_pair`s real output line, so the reporter parses the
 # same shape a driver produces rather than a fixture-only spelling.
 rec = {
@@ -496,9 +510,28 @@ rec = {
     "verified_by": "scripts/perf/lib-cpu.sh verify_sibling_pair + verify_disjoint, fail-closed,"
                    " against the real thread_siblings_list BEFORE the first rep",
     "provenance": "written BY THE DRIVER that performed the verification (synthetic fixture)",
+    # THE FLIGHT ARM (#3551). The expanded forms mirror the real echoes of
+    # `verify_sibling_pair` / `verify_distinct_cores`, so the reporter reads the same SHAPE a
+    # driver produces rather than a fixture-only spelling — the rule this file already follows
+    # for server_siblings_expanded.
+    "flight_server_cpus": flight,
+    "flight_pin_mode": mode,
+    "flight_pin_verified": (
+        f"flight server CPUs: {flight} -> verified siblings of one physical core"
+        f" ({flight.replace(chr(44), chr(32))})"
+        if mode == "siblings" else
+        f"flight server CPUs: {flight} -> verified pairwise DISTINCT physical cores"
+        f" ({flight.replace(chr(44), chr(32))}); thread_siblings_list read: "
+        + " ".join(f"cpu{c}=({c} {int(c) + 8})" for c in flight.split(chr(44)))
+    ),
+    "flight_allocator": allocator,
+    "flight_allocator_lib": allocator_lib,
+    "flight_allocator_verification":
+        "per rep, AFTER await_server_ready: /proc/<server-pid>/maps is READ (synthetic fixture"
+        " record, shaped like the one the driver writes)",
 }
 pinning_record_path(session).write_text(json.dumps(rec, indent=1) + "\n")
-' "$perf_dir" "$session" "$server" "$client"
+' "$perf_dir" "$session" "$server" "$client" "$flight" "$mode" "$allocator" "$allocator_lib"
 }
 
 # ws0_pin_boundary_observations <session-dir> <reps> <temps> <arms> — the driver's MEASUREMENT-BOUNDARY
