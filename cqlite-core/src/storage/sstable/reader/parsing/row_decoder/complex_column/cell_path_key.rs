@@ -180,12 +180,12 @@
 //! inherits the assert without being able to opt out. Composed with each
 //! fixed-width arm's own `require_fixed_width` (`data.len() < n`), the accepted
 //! set for a fixed-width element is exactly `{n}`; every other arm reports its
-//! real consumption, including `duration`'s three-VInt walk. Each class is pinned
-//! in `raw_value/issue_3811_consumption_demo_tests.rs`
+//! real consumption, including `duration`'s three-VInt walk. THREE of the four
+//! carry a pin in `raw_value/issue_3811_consumption_demo_tests.rs`
 //! (`bounded_int_over_width_is_refused`, `bounded_tuple_with_trailing_byte_is_refused`,
-//! `nested_udt_trailing_garbage_is_refused`, `bounded_list_with_trailing_byte_is_refused`),
-//! and `raw_value/nested_fixed_width_length_tests.rs` re-asserts the fixed-width
-//! half at EVERY nesting position for every fixed-width type.
+//! `nested_udt_trailing_garbage_is_refused`, `bounded_list_with_trailing_byte_is_refused`);
+//! `duration` is refused by the MECHANISM above and is pinned by NO test — measured,
+//! and stated because a claim of measurement must not cover an unmeasured case.
 //!
 //! So the consequence this section used to record is gone: as `frozen<list<int>>`
 //! cell paths, `[count=1][len=4][4B]` (12 bytes) and `[count=1][len=5][5B]` (13
