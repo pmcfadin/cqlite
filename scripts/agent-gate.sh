@@ -6587,16 +6587,33 @@ _disk_scan_subject() {
     # `-a` so a subject carrying stray binary bytes is still searched rather than reported
     # as "binary file matches" with no line number.
     #
-    # `-o` ON BOTH BRANCHES, and it is a MEMORY bound, not a formatting choice (roborev job 348).
-    # Without it each emitted match carries its WHOLE LINE, and a log line has no length limit --
-    # so a command substitution here could hold an arbitrarily large string in a diagnostic whose
-    # entire purpose is to run when the machine has run out of a resource, on the path to the
-    # terminal emit. With `-o` the captured text is the MATCHED PHRASE, i.e. a member of our own
-    # closed signature set, so the capture is bounded by construction rather than by hoping logs
-    # are tidy. It also strengthens #3312 from "no log-derived text reaches the block" to "no
-    # log-derived text is even READ IN": all this function keeps is a line NUMBER.
+    # `-o` on the FILE branch, and what it does and does NOT bound is stated rather than implied
+    # (roborev jobs 348, 353). `grep -n` alone emits the WHOLE matching line, so the typical
+    # capture was one arbitrary log line; with `-m1 -o` the typical capture is ONE ~20-byte phrase
+    # from our own closed signature set. That also strengthens #3312 from "no log-derived text
+    # reaches the block" to "no log-derived text is even READ IN" -- all this function keeps is a
+    # line NUMBER.
     #
-    # The `-m1` asymmetry below is deliberate and is explained at the branch that omits it.
+    # DECLARED RESIDUAL, because the honest bound is not the flattering one: `-m1` stops after the
+    # first matching LINE, but `-o` prints every OCCURRENCE on it, so the file-branch capture is
+    # O(length of the first matching line) either way -- ~1.25x that line in the pathological case
+    # of a single line packed with copies of a signature, against ~1.0x before `-o`. So `-o` moved
+    # the TYPICAL case from one log line to twenty bytes and left the worst case at one log line.
+    #
+    # Two ways to bound it unconditionally were considered and REFUSED ON MEASUREMENT, which is why
+    # this is declared rather than carved a fourth time:
+    #   * pipe grep into a first-record consumer -- that is EXACTLY the `printf | grep` pipeline
+    #     just deleted from the in-memory branch below, whose pipefail/SIGPIPE interaction produced
+    #     a measured wrong verdict. Re-adding it here to save a fraction of one log line trades a
+    #     real defect for a hypothetical one.
+    #   * `awk 'index($0,p){print NR; exit}'` -- one process, one short record, no pipe. Measured
+    #     and rejected: awk exits **0 on a DIRECTORY** (a two-valued collapse -- "no match" over a
+    #     subject it never read, this issue's own central defect), where grep exits 2 and this
+    #     function routes 2 to UNMEASURED; and NUL handling, which `-a` exists for, varies by awk
+    #     implementation while this script must run under BSD awk too.
+    # One log line is a quantity this gate already holds in many places, so the residual is
+    # accepted and named. The in-memory branch, whose bound was genuinely ABSENT (every occurrence
+    # in the whole payload), is fixed below instead.
     if [ "$kind" = file ]; then
       # THE FILE IS AN OPERAND, NOT A REDIRECTION (roborev job 348). With `< "$payload"`, a failed
       # OPEN is reported by BASH as status 1 -- indistinguishable from grep's "no match" -- so a
@@ -6608,18 +6625,39 @@ _disk_scan_subject() {
       # `<lineno>:` parse below is unchanged.
       hit="$(LC_ALL=C grep -n -o -a -m1 -F -e "$phrase" -- "$payload" 2>/dev/null)"; rc=$?
     else
-      # `-m1` IS DELIBERATELY ABSENT ON THIS BRANCH, and it is not a style choice. This gate
-      # runs under `set -o pipefail`, and with `-m1` grep exits as soon as it matches, so a
-      # LARGE payload leaves `printf` writing into a closed pipe: printf dies of SIGPIPE, and
-      # pipefail hands the PIPELINE printf's 141 even though grep matched. MEASURED, on a
-      # 400 KB payload whose FIRST line matches: `rc=141` with `-m1`, `rc=0` without. That
-      # turns a genuine RECOGNISED into "could not read" -- a wrong verdict, and one that only
-      # appears once the captured text is big, i.e. on a dirty tree, i.e. exactly when a
-      # capture is most likely to run out of space. Without `-m1` grep consumes all of stdin,
-      # printf always completes, and the pipeline status is grep's own. The first matching
-      # line is taken in-shell below, so the reported line number is unchanged.
-      hit="$(printf '%s\n' "$payload" | LC_ALL=C grep -n -o -a -F -e "$phrase" 2>/dev/null)"; rc=$?
-      hit="${hit%%$'\n'*}"
+      # THE IN-MEMORY BRANCH READS **GREP'S OWN** STATUS, NOT THE PIPELINE'S (roborev job 353).
+      # Two earlier spellings of this branch each failed, and both failures were MEASURED, so both
+      # are recorded -- the second one is mine.
+      #
+      #   1. `printf | grep -n -o -m1` reading the PIPELINE status: this gate runs under
+      #      `set -o pipefail`, and with `-m1` grep exits at the first match, so `printf` writes
+      #      into a closed pipe, dies of SIGPIPE, and pipefail hands the pipeline printf's 141
+      #      even though grep MATCHED. On a 400 KB payload whose first line matches: rc=141 with
+      #      `-m1`, rc=0 without. A genuine RECOGNISED became "could not read", and only once the
+      #      payload was big -- i.e. exactly when a capture is most likely to run out of space.
+      #      That is why `-m1` was dropped here, which then made the capture O(every occurrence in
+      #      the WHOLE payload).
+      #   2. Doing the search in pure bash instead, to have no pipe at all. It has no capture and
+      #      cannot SIGPIPE, and it is 1000x TOO SLOW: `case "$payload" in *"$phrase"*` backtracks
+      #      once per occurrence, so a 1.5 MB line packed with the signature took **157 SECONDS**
+      #      (against 165 ms for the same size with no match). This runs on the path to the
+      #      TERMINAL EMIT, so that is worse than the unbounded capture it removed -- and the shape
+      #      that triggers it is precisely the one a disk-exhaustion log has. Measured, then
+      #      reverted.
+      #
+      # What both attempts were really working around is that a PIPELINE status is the wrong
+      # question: printf's fate is not evidence about the scan. `PIPESTATUS[1]` is grep's OWN
+      # status, and `set +o pipefail` inside this command substitution is scoped to its subshell,
+      # so printf dying of SIGPIPE becomes irrelevant instead of being avoided. That lets `-m1`
+      # come back: grep does the matching in C (fast), stops at the first matching line (bounded),
+      # and its three-valued rc reaches the caller unaltered. The residual is then the same one the
+      # FILE branch declares above -- occurrences on a single line -- rather than the whole
+      # payload.
+      hit="$(
+        set +o pipefail
+        printf '%s\n' "$payload" | LC_ALL=C grep -n -o -m1 -a -F -e "$phrase" 2>/dev/null
+        exit "${PIPESTATUS[1]}"
+      )"; rc=$?
     fi
     if [ "$rc" -eq 0 ]; then
       DISK_SCAN_SIG="$sig"

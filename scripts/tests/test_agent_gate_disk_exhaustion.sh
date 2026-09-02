@@ -1908,6 +1908,97 @@ else
   printf 'SKIP - 24b-open-fail: this host still reads a file under a mode-000 directory (running as root), so a failed open cannot be induced. DECLARED, not silently omitted.\n'
 fi
 
+# (25) roborev job 353 -- MANY REPEATED SIGNATURES, and the in-memory branch runs NO subprocess.
+#
+# `-m1` stops after the first matching LINE but `-o` prints every OCCURRENCE on it, and the
+# in-memory branch had no `-m1` at all (to dodge a measured pipefail/SIGPIPE wrong verdict) so it
+# reported every occurrence in the WHOLE payload and accumulated all of it before taking the first
+# record. The branch now reads GREP'S OWN status via PIPESTATUS[1] under a subshell-scoped
+# `set +o pipefail`, which makes printf's SIGPIPE irrelevant instead of avoided and so lets `-m1`
+# -- and the bound -- come back. Both branches are exercised against a payload PACKED with the
+# signature, which is the shape the finding named.
+#
+# A pure-bash spelling of this branch was tried first and REVERTED ON MEASUREMENT: it has no
+# capture and cannot SIGPIPE, and `case "$payload" in *"$phrase"*` backtracks once per occurrence,
+# so this exact 1.5 MB packed shape took 157 SECONDS (against 165 ms for the same size with no
+# match) on the path to the terminal emit. Hence 25b's watchdog.
+d="$tmp/c25"; mkdir -p "$d"
+# ~40k occurrences on ONE line, plus a decoy first line so the reported number must be 2.
+_packed=$(awk 'BEGIN{ s="No space left on device "; t=s; while (length(t) < 900000) t = t t; printf "%s", t }')
+{ printf 'first line, no signature\n'; printf '%s\n' "$_packed"; } > "$d/core-tests.log"
+out=$(run_line "$d" core-tests FAIL)
+if case "$out" in "disk-exhaustion: RECOGNISED (#3800)"*) true ;; *) false ;; esac \
+   && case "$out" in *"core-tests.log:2"*) true ;; *) false ;; esac \
+   && [ "${#out}" -lt 4000 ]; then
+  ok "25a-packed-file: a log line packed with ~40k copies of a signature is RECOGNISED at line 2 and the emitted line stays small (${#out} chars) -- the many-occurrence shape does not reach the block"
+else
+  bad "25a-packed-file: expected RECOGNISED at line 2 with a small emitted line; len=${#out} got: ${out:0:300}"
+fi
+# The IN-MEMORY branch on the same shape. This is the one whose bound was genuinely absent, and it
+# is also the branch with the measured SIGPIPE history -- so the assertion is the MATCH (a wrong
+# verdict there reads as UNMEASURED) plus the line number, on a payload with a leading decoy line.
+# Under the probed watchdog (when one is available): the pure-bash spelling of this branch took
+# 157 SECONDS on this exact shape, and without a bound that regression would come back as a
+# mysteriously slow mandatory gate component rather than as a red. This is a WATCHDOG, not a
+# performance threshold -- 60 s is ~200x the measured 312 ms, so it fires only on a change of
+# algorithmic class.
+# The CHILD builds the in-memory payload from the file, so a 1.5 MB string never has to travel
+# through argv or through the script text (the first version interpolated it into the `bash -c`
+# body and produced no output at all).
+o25b=$(
+  ${DISK_TIMEOUT:+$DISK_TIMEOUT 60} bash -c '
+    . "$1"; LOG_DIR="$2"; _disk_env
+    _big="decoy first line
+$(tail -1 "$3")"
+    rc=0; _disk_scan_subject text "$_big" || rc=$?
+    printf "RC %s SIG %s LN %s\n" "$rc" "$DISK_SCAN_SIG" "$DISK_SCAN_LN"
+  ' _ "$EX" "$d" "$d/core-tests.log"
+)
+if [ "$o25b" = "RC 0 SIG no-space-left-on-device LN 2" ]; then
+  ok "25b-packed-memory: the in-memory branch matches the same packed payload and reports the right line (2) -- with -m1 restored (bounding the capture to one line) and grep's OWN status read via PIPESTATUS[1], so printf dying of SIGPIPE no longer turns a match into 'could not read'"
+else
+  bad "25b-packed-memory: expected 'RC 0 SIG no-space-left-on-device LN 2'; got: $o25b"
+fi
+# NEGATIVE CONTROL for the de-piped branch: a large payload with NO signature must read rc 1 (a
+# genuine no-match), not rc 2 -- the single glob test decides this case, and it must decide it
+# correctly rather than merely quickly.
+o25c=$(
+  . "$EX"; LOG_DIR="$d"; _disk_env
+  _clean=$(awk 'BEGIN{ t="harmless "; while (length(t) < 900000) t = t t; printf "%s", t }')
+  rc=0; _disk_scan_subject text "$_clean" || rc=$?
+  printf 'RC %s\n' "$rc"
+)
+if [ "$o25c" = "RC 1" ]; then
+  ok "25c-control: a large payload with NO signature reads rc 1 (a real no-match), so the fast no-match path is not swallowing errors or claiming matches"
+else
+  bad "25c-control: expected RC 1 for a signature-free payload; got: $o25c"
+fi
+# STRUCTURAL: the in-memory branch must read GREP'S OWN status, never the pipeline's. The pipeline
+# is deliberately present -- grep does the matching in C because the pure-bash alternative measured
+# 157 s on a packed 1.5 MB line -- so what has to be pinned is the two constructs that make the
+# pipeline safe: `PIPESTATUS[1]` and the subshell-scoped `set +o pipefail`. Reading `$?` instead
+# would restore the measured SIGPIPE wrong verdict, and no runtime case here can see that: it needs
+# a specific payload size AND `-m1`, and 25b would still report line 2.
+#
+# COMMENT LINES ARE EXCLUDED, because the first version of this assert matched its OWN explanatory
+# comment (which quotes `printf … | grep`) and reported a defect that was not there -- a structural
+# guard whose subject set includes the prose describing it.
+_mem_body=$(awk '
+  /^_disk_scan_subject\(\) \{/ { inb=1 }
+  inb && /IN-MEMORY BRANCH READS/ { ins=1 }
+  ins && /^    fi$/ { ins=0 }
+  ins && $0 !~ /^[[:space:]]*#/ { print }
+  inb && /^\}$/ { inb=0 }
+' "$GATE")
+_mem_pipestatus=$(printf '%s\n' "$_mem_body" | grep -c 'PIPESTATUS\[1\]' || true)
+_mem_nopf=$(printf '%s\n' "$_mem_body" | grep -c 'set +o pipefail' || true)
+_mem_bare=$(printf '%s\n' "$_mem_body" | grep -cE '\)"; rc=\$\?' || true)
+if [ "$_mem_pipestatus" -ge 1 ] && [ "$_mem_nopf" -ge 1 ]; then
+  ok "25d-grep-status: the in-memory branch takes grep's OWN status via PIPESTATUS[1] under a subshell-scoped 'set +o pipefail' -- so printf dying of SIGPIPE is irrelevant rather than avoided, which is what lets -m1 (and the bound) come back"
+else
+  bad "25d-grep-status: PIPESTATUS[1]=$_mem_pipestatus 'set +o pipefail'=$_mem_nopf (excluding comments) -- without both, the pipeline's status is printf's and a matched signature reads as 'could not read' on a large payload; outer rc-capture sites=$_mem_bare"
+fi
+
 # (23) roborev job 343 -- THE SCAN MUST NOT BE ABLE TO HANG THE GATE.
 #
 # The subject glob accepted any existing, readable `<component>.*.log`, and BOTH `-e` and `-r` are
@@ -2130,9 +2221,15 @@ fi
 # asserting the line number and the emitted size together. 24b pins that a failed OPEN is rc 2 and
 # not rc 1 -- it DECLARES a skip as root, so it does not raise the floor. The `timeout` probe added
 # in the same round raises nothing; it converts a would-be macOS FAILURE into a declared skip.);
+# +4 (roborev job 353: the many-occurrence shape. 25a the FILE branch on a line packed with ~40k
+# copies; 25b the same shape through the now pure-bash IN-MEMORY branch, whose bound was the one
+# genuinely absent and which also carries the measured SIGPIPE history; 25c the large no-signature
+# control, so the fast no-match path is shown to decide correctly and not merely quickly; 25d the
+# structural assert that the branch reads GREP'S OWN status via PIPESTATUS[1] under a
+# subshell-scoped 'set +o pipefail', which no runtime case here can see.);
 # +0 (roborev job 319 rounds 4-5 added 21d, whose runtime half shares 21c's DECLARED skip; its
 # STRUCTURAL half needs no host capability but is counted at 0 to keep the floor host-independent.)
-CASE_FLOOR=85
+CASE_FLOOR=89
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \
