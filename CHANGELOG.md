@@ -47,6 +47,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **All surfaces (observable): a structured value inside a frozen UDT decodes from
+  its DECLARED type instead of degrading to a blob (#3631).** A UDT field whose
+  type is a collection, tuple or nested UDT — `frozen<map<text,int>>`,
+  `frozen<list<…>>`, `frozen<set<…>>`, `frozen<tuple<…>>` — surfaced to every
+  caller as raw bytes. The decode path matched a CLOSED SET of primitive types and
+  fell back to `Value::Blob` for the rest, while the declared `CqlType` naming the
+  real type was the `match` scrutinee itself: the silent degradation #28
+  (no-heuristics) forbids.
+
+  - **Before** (`udt_hashable_shapes` row 3's `stn`, CLI `--format json`):
+    `{"label":"unhashable","m":"0x0000000100000001610000000400000001"}`
+  - **After**: `{"label":"unhashable","m":[{"key":"a","value":1}]}` — which is what
+    Cassandra's own `sstabledump` already emitted for those bytes (`"m":{"a":1}`).
+
+  Python gets `{'a': 1}` instead of a 17-byte `bytes`; `cqlite-core`'s `ToJson`
+  gets `{"'a'": 1}` (its `Map` arm `Display`-stringifies keys, unchanged here).
+
+  **Two consequences a caller may notice.** (1) A declared type CQLite has no
+  decoding rule for is now an explicit `Error::unsupported_format` NAMING the type,
+  where it used to be an opaque blob and a `tracing::debug!` no caller could see —
+  including a nested UDT whose field list is in neither the `UdtRegistry` nor the
+  inline type. (2) In the Python binding, `Udt.__hash__`'s `TypeError` is now
+  reachable from decoded data: a UDT with a decoded `dict` field is genuinely
+  unhashable, where the same UDT with a `bytes` field was not. No column in the
+  committed corpus reaches a hashing position with such a UDT inside it, so nothing
+  observable changed there — the boundary is recorded in
+  `test-data/fixtures/issue_3504/README.md`, Table 2.
+
+  Also fixed in the same class: a ZERO-LENGTH field followed Cassandra's per-type
+  empty-value rule rather than becoming an empty blob (`Value::Null` for every
+  scalar whose serializer guards `accessor.isEmpty(value) ? null : …`; only
+  text/ascii/varchar/blob keep a meaningful empty value); a `date`-typed UDT field
+  gained the `SimpleDateType` epoch offset every other decode site already applied;
+  and the type-nesting limit no longer resets at each frozen-UDT hop, so a cyclic
+  `UdtRegistry` is refused rather than recursing until the stack is exhausted.
+  Instance A of the same issue — a non-frozen `map<frozen<udt>,int>` cell-path key —
+  was fixed separately by #3612.
+
 - **Both bindings (observable): a JSON number above `i64::MAX` no longer loses
   precision, and neither binding fabricates a substitute value (#3505).** A
   `Value::Json` cell's number was classified inline in each binding as
