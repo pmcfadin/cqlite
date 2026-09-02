@@ -6212,6 +6212,72 @@ else
   bad "3765-oversize-manylines: expected rc=0 count=200, got rc=$fa_ml_rc count='${fa_ml_count:-<none>}' — the extractor is retaining whole oversized identities and dying before it can report"
 fi
 
+# 55af. BLOCKER 14 (roborev job 50): `.result` IS THE PUBLICATION, SO IT IS WRITTEN LAST OF
+#       THE THREE. record_result wrote `.result` on its FIRST line and the failed-assert
+#       sidecar 20 lines later, while the tree-integrity BOUNDARY renderer discovers
+#       components by globbing "$LOG_DIR"/*.result — from a DIFFERENT lane. So a main-lane
+#       boundary failure could observe a side lane's published verdict whose `.failassert`
+#       sidecar did not exist YET, terminate the gate, and render that FAIL row as
+#       `not recorded (no extraction ran for this FAIL line)`: an ABSENCE published as a
+#       MEASUREMENT — this issue's own core rule, broken by a race.
+#
+#       STRUCTURAL, AND LABELLED AS SUCH rather than dressed up as behavioural: the race
+#       needs two lanes interleaved inside one function, which is not controllable from a
+#       test. The behavioural half that IS available — a FAIL row rendered through the
+#       boundary path carrying the REAL failed-assert value, with the sidecar complete
+#       before `.result` — is `3765-boundary-failassert` in
+#       scripts/tests/test_agent_gate_tree_integrity.sh, which has the fixture repo.
+fa_rr_body=$(awk '/^record_result\(\) \{ #/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
+fa_rr_res=$(printf '%s\n' "$fa_rr_body" | grep -n '\.result"$' | head -1 | cut -d: -f1)
+fa_rr_fa=$(printf '%s\n' "$fa_rr_body" | grep -n '_failassert_record' | head -1 | cut -d: -f1)
+fa_rr_fm=$(printf '%s\n' "$fa_rr_body" | grep -n '_fm_note_if_no_cargo_observed' | head -1 | cut -d: -f1)
+fa_rr_si=$(printf '%s\n' "$fa_rr_body" | grep -n '_assert_summary_integrity' | head -1 | cut -d: -f1)
+fa_rr_ti=$(printf '%s\n' "$fa_rr_body" | grep -n '_assert_tree_integrity' | head -1 | cut -d: -f1)
+fa_rr_hb=$(printf '%s\n' "$fa_rr_body" | grep -n '_hb_ensure' | head -1 | cut -d: -f1)
+if [ -n "$fa_rr_res" ] && [ -n "$fa_rr_fa" ] && [ -n "$fa_rr_fm" ] && [ -n "$fa_rr_si" ] \
+   && [ -n "$fa_rr_ti" ] && [ -n "$fa_rr_hb" ]; then
+  if [ "$fa_rr_res" -gt "$fa_rr_fa" ] && [ "$fa_rr_res" -gt "$fa_rr_fm" ]; then
+    ok "3765-record-order-sidecars-first: STRUCTURAL — record_result writes .result AFTER both per-component sidecars (feature matrix, failed-assert), so a concurrent lane can never observe a published verdict whose sidecar is not written yet (blocker 14)"
+  else
+    bad "3765-record-order-sidecars-first: STRUCTURAL — record_result publishes .result (line $fa_rr_res of its body) BEFORE a sidecar write (fm $fa_rr_fm, failassert $fa_rr_fa): a boundary renderer in another lane can then render that FAIL row as 'not recorded', which is an absence reported as a measurement (blocker 14)"
+  fi
+  if [ "$fa_rr_res" -lt "$fa_rr_si" ] && [ "$fa_rr_res" -lt "$fa_rr_ti" ]; then
+    ok "3765-record-order-integrity-last: STRUCTURAL — .result is still published BEFORE the two integrity asserts, either of which may emit the terminal block and exit, so this component still appears in that block"
+  else
+    bad "3765-record-order-integrity-last: STRUCTURAL — .result is written at or after an integrity assert (summary $fa_rr_si, tree $fa_rr_ti), so a boundary-terminated run drops this component from its own table"
+  fi
+  # ONLY the property #3473 states, and no more: `_hb_ensure` precedes the SLOW work (the
+  # sidecar write, the extractor scan, the two git-touching asserts). Deliberately NOT
+  # compared against the `.result` write — that write is neither slow nor a verdict #3473
+  # cares about, and asserting an order it never claimed would red on correct code.
+  if [ "$fa_rr_hb" -lt "$fa_rr_fm" ] && [ "$fa_rr_hb" -lt "$fa_rr_fa" ] \
+     && [ "$fa_rr_hb" -lt "$fa_rr_si" ]; then
+    ok "3765-record-order-hb-first: STRUCTURAL — _hb_ensure still runs first, before any slow work; #3473's reason for that is untouched by the reorder (and it publishes no verdict, so it cannot be observed as one)"
+  else
+    bad "3765-record-order-hb-first: STRUCTURAL — _hb_ensure no longer precedes the sidecar/extractor work, so a dead beater under a healthy gate reads as STALLED (#3473)"
+  fi
+  if [ "$(printf '%s\n' "$fa_rr_body" | grep -c '\.result"$')" = 1 ]; then
+    ok "3765-record-order-one-publication: STRUCTURAL — record_result publishes .result exactly ONCE; an earlier duplicate write would restore the race while the later write looks correct"
+  else
+    bad "3765-record-order-one-publication: STRUCTURAL — record_result writes .result more than once, so the EARLIEST write is the one a concurrent reader sees (blocker 14)"
+  fi
+else
+  bad "3765-record-order-scope: could not locate record_result's statements (result=$fa_rr_res fa=$fa_rr_fa fm=$fa_rr_fm si=$fa_rr_si ti=$fa_rr_ti hb=$fa_rr_hb) — this section must red with a named cause rather than pass vacuously"
+  bad "3765-record-order-scope: (see above)"
+  bad "3765-record-order-scope: (see above)"
+  bad "3765-record-order-scope: (see above)"
+fi
+# The --lite-aggregate-selftest seed must MIRROR that order, or the fixture the behavioural
+# failed-assert cases run through models an order production no longer takes.
+fa_seed_body=$(awk '/for _pair in \$\{AGENT_GATE_TEST_LITE_RESULTS/,/^  done/' "$GATE" | grep -v '^[[:space:]]*#')
+fa_seed_fa=$(printf '%s\n' "$fa_seed_body" | grep -n '_failassert_record' | head -1 | cut -d: -f1)
+fa_seed_res=$(printf '%s\n' "$fa_seed_body" | grep -n '\.result"' | head -1 | cut -d: -f1)
+if [ -n "$fa_seed_fa" ] && [ -n "$fa_seed_res" ] && [ "$fa_seed_res" -gt "$fa_seed_fa" ]; then
+  ok "3765-record-order-selftest-mirrors: STRUCTURAL — the --lite-aggregate-selftest seed also writes the sidecar before .result, so the fixture cannot certify an ordering production does not take"
+else
+  bad "3765-record-order-selftest-mirrors: STRUCTURAL — the --lite-aggregate-selftest seed publishes .result before the sidecar (fa=${fa_seed_fa:-<none>} result=${fa_seed_res:-<none>}), which models the pre-blocker-14 order"
+fi
+
 # 55za. NO SECOND FORMATTER, INCLUDING ON THE TREE-INTEGRITY BOUNDARY BLOCK (roborev job
 #       48, blocker 9). Both component loops in _tree_boundary_meta_lines rendered their
 #       rows with a bare `printf '%-18s %s (%ss)\n'`, bypassing _fm_summary_line — so a FAIL
@@ -6296,6 +6362,15 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
+# 514 -> 519 on #3765 (roborev job 50, blocker 14): section 55af adds 5 asserts, pinning it
+# STRUCTURALLY — the ordering invariant inside record_result (.result published after both
+# sidecars, before both integrity asserts, _hb_ensure still first, exactly one publication)
+# plus the selftest seed mirroring it — because the race needs two lanes interleaved inside
+# one function, which no test can drive; the behavioural half is 3765-boundary-failassert in
+# test_agent_gate_tree_integrity.sh. Host-INDEPENDENT (bash + awk + the extractor + a source
+# scan of the gate), so the same "raise by exactly the number added" rule applies and the
+# slack stays 10.
+#
 # 492 -> 514 on #3765 (roborev job 49, blockers 11/12/13): sections 55ab/55ac/55ad add 22
 # asserts and 55y/55aa are re-pointed at the new invariants. 55ab (14) pins that EVERY tier
 # publishes an IDENTIFIER and not its payload — the two shapes the neutraliser measurably
@@ -6359,7 +6434,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=514
+ASSERT_FLOOR=519
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

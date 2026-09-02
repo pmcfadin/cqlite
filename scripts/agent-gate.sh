@@ -9688,27 +9688,50 @@ esac
 # reconstructs the summary arrays (in canonical COMPONENTS order) after the pool
 # drains. This keeps the SUMMARY block deterministic regardless of finish order.
 record_result() { # <name> <status> <seconds>
-  printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"
-  # BOTH #3473 and #3453 land at this chokepoint; the merge keeps both, and the ORDER is
-  # argued rather than arbitrary. `_hb_ensure` goes FIRST because everything below it can
-  # be slow or can fail: the sidecar note writes a file, and the two integrity asserts do
-  # git work. If the beater is dead while those run, `gate-liveness.sh` reports STALLED on
-  # a perfectly healthy gate — the exact false signal #3473 exists to remove. Publishing
-  # liveness before doing work is the whole point of putting it here.
+  # ===== THE ORDER IS AN INVARIANT: SIDECARS FIRST, `.result` NEXT, INTEGRITY LAST =====
+  #
+  # #3765 (roborev job 50, blocker 14): `.result` is the PUBLICATION of this component's
+  # verdict — every reader discovers a component by its `.result` file, including the
+  # tree-integrity BOUNDARY renderer, which globs "$LOG_DIR"/*.result from ANOTHER lane
+  # while this one is still inside record_result. So `.result` must be written only once
+  # this component's per-component SIDECARS are complete: with `.result` first, a main-lane
+  # boundary failure could observe a side lane's published verdict whose `.failassert`
+  # sidecar did not exist YET, terminate the gate, and render that row as
+  # `not recorded (no extraction ran for this FAIL line)` — an ABSENCE reported as a
+  # MEASUREMENT, which is the one thing this whole field must never do. Same shape for the
+  # feature-matrix sidecar, which would read `[invocation: UNDECLARED]`.
+  #
+  # `_hb_ensure` still goes FIRST, for its original #3473 reason, which is unchanged:
+  # everything below it can be slow or can fail (the sidecar writes a file, the extractor
+  # scans a log, the two integrity asserts do git work), and if the beater is dead while
+  # those run then `gate-liveness.sh` reports STALLED on a perfectly healthy gate — the
+  # exact false signal #3473 exists to remove. Publishing liveness before doing work is the
+  # whole point of putting it here, and it publishes no verdict, so it cannot be observed
+  # as one.
+  #
+  # The two integrity asserts stay LAST, also for their original reason: either may EMIT
+  # the terminal block and EXIT, so anything that must appear in that block has to have
+  # been written before they run. That is now the same argument as the sidecar ordering
+  # above — a check that can terminate the gate must see a COMPLETE artifact.
   #
   # #3473: re-launch the liveness beater if it died under a live gate. Cheap
   # (`kill -0`), and this is the only chokepoint every component passes through.
   _hb_ensure
-  # #3453: two whitespace fields ONLY — ~60 call sites and a 2-field `read -r _st _secs`
-  # reader, which would silently absorb a third into $_secs. The feature matrix rides a
-  # per-component SIDECAR instead. A SKIP — or a FAIL that died before its first cargo
-  # call — records that fact here, so its SUMMARY line says so rather than reading
-  # UNDECLARED.
+  # #3453: `.result` carries two whitespace fields ONLY — ~60 call sites and a 2-field
+  # `read -r _st _secs` reader, which would silently absorb a third into $_secs. The
+  # feature matrix rides a per-component SIDECAR instead. A SKIP — or a FAIL that died
+  # before its first cargo call — records that fact here, so its SUMMARY line says so
+  # rather than reading UNDECLARED.
   _fm_note_if_no_cargo_observed "$1" "$2"
   # #3765: extract the failing ASSERT identity from this component's log, at the
   # boundary where the log is complete and closed. Sidecar, never a third .result field
   # (see the two-fields-only note above). No-op unless the status is FAIL.
   _failassert_record "$1" "$2"
+  # #3453: two whitespace fields ONLY (see the note above). Written HERE — after the
+  # sidecars, before the integrity asserts — because this write is what PUBLISHES the
+  # component to every reader, including a concurrent lane's boundary renderer (#3765
+  # blocker 14).
+  printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"
   # #2874: every component records its verdict through here, so this is the natural
   # component-boundary chokepoint for the mid-run summary-integrity guard.
   _assert_summary_integrity "$1"
@@ -18403,10 +18426,13 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   # Seed per-component result files from AGENT_GATE_TEST_LITE_RESULTS="name:status ...".
   # shellcheck disable=SC2086  # intentional word-split over the space-separated pairs
   for _pair in ${AGENT_GATE_TEST_LITE_RESULTS:-}; do
-    printf '%s 0\n' "${_pair#*:}" > "$LOG_DIR/${_pair%%:*}.result"
     # The REAL extraction site record_result uses (#3765) — same function, same
     # arguments, so this hook cannot certify a code path production does not take.
+    # SIDECAR FIRST, `.result` SECOND, mirroring record_result exactly (#3765 blocker 14):
+    # `.result` is the PUBLICATION, so a fixture that published first would model an order
+    # production no longer takes.
     _failassert_record "${_pair%%:*}" "${_pair#*:}"
+    printf '%s 0\n' "${_pair#*:}" > "$LOG_DIR/${_pair%%:*}.result"
   done
   # Seed the scoped-tests entry run_scoped_tests appends (and flip OVERALL as it does).
   _scoped_st="${AGENT_GATE_TEST_LITE_SCOPED:-PASS}"
