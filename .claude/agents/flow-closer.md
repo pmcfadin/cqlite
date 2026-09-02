@@ -254,7 +254,9 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    evidence). `FINDINGS` — an `unmet`/uncovered/unjustified-`partial` requirement — blocks merge
    → route back (see step 4 escalation). **`NOT-RUN` also blocks, and it is NOT a clean review**:
    it means the stage produced nothing (sentinel-only / absent / unreadable / empty /
-   ungrammatical / never-opened / the RECORD unreadable, and the token names which). Re-spawn it
+   ungrammatical / never-opened / the RECORD unreadable / **either artifact being a SYMLINK**, and
+   the token names which — a symlinked report or record was NOT READ at all, because following the
+   link would decide this stage from a file it does not name, and the action is to remove the link). Re-spawn it
    (`open --force` re-stamps the report and KEEPS the original clock, so the elapsed time still
    reads true, and publishes the report under a FRESH NONCE — carry the path it PRINTS in the new
    NEEDS-SPAWN packet, because the previous file is no longer read and the new name cannot be

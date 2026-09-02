@@ -5366,6 +5366,177 @@ else
 fi
 
 
+# --- 32. THE *READ* PATH REFUSES A SYMLINKED ARTIFACT (round 19, Y1) ------------------------------
+# THE FINDING: round 1's F5 walk refuses a symlink where this tool WRITES, and NOTHING refused one
+# where it READS. `report_bytes` decided the verdict through `[ -f ]` plus an input redirection,
+# and BOTH dereference — so replacing this generation's report with a link to any regular file
+# holding `result: PASS` made `verdict` (and `premerge-assert.sh`'s AUTO C validation with it)
+# accept a verdict from an artifact that is not the report of record. Measured on the shipped
+# script before the fix: `RESULT: PASS`, exit 0, off a link into /tmp.
+#
+# THE SAME REASONING IS APPLIED TO EVERY ARTIFACT THE READ PATH OPENS — the REPORT and the STAGE
+# RECORD — because the record is what names WHICH generation is authoritative and carries the
+# `head-sha:` the stage was opened at, so a link there redirects the decision at its root.
+#
+# THE DANGLING CASE IS THE ONE THAT PROVES `-f` CANNOT ANSWER IT: for a dangling link `[ -f ]` is
+# FALSE, which is `no-such-file`, which is the PERMISSIVE `absent` state that the clobber guard
+# treats as "there is no recorded verdict to destroy".
+#
+# DECLARED RESIDUAL, asserted as DECLARED rather than as closed: a leaf `-L` test before the open
+# leaves a TOCTOU window bash cannot close (no `openat`, no `O_NOFOLLOW`) and that window is
+# #3929's family. What is closed COMPLETELY is the non-racing case — a link planted at any earlier
+# time and simply followed, with no check at all.
+R32="$(newrepo)"
+rs "$R32" open c --issue 1901 --agent spec-auditor
+rc_is 0 "y1: the stage opened"
+R32_REP="$(REPORT_OF "$R32" 1901 c)"
+
+# (a) POSITIVE CONTROL FIRST — an ordinary regular-file report yields its verdict, so the refusals
+#     below are not a mechanism that answers NOT-RUN for everything.
+printf 'result: PASS\n\nreviewed.\n' >"$R32_REP"
+rs "$R32" verdict c --issue 1901
+rc_is 0 "y1/control: a REGULAR-FILE report still yields its verdict (exit 0)"
+has "RESULT: PASS" "y1/control: and the token is PASS"
+
+# (b) A SYMLINK TO A REGULAR FILE RECORDING `result: PASS` — the finding's own scenario.
+R32_BAIT="$T/y1-bait-$$.md"
+printf 'result: PASS\n\nNOT the report of record.\n' >"$R32_BAIT"
+rm -f "$R32_REP"
+if ln -s "$R32_BAIT" "$R32_REP" 2>/dev/null && [ -L "$R32_REP" ]; then
+  ok "y1: PREMISE — a symlink was planted at this generation's report name"
+else
+  bad "y1: PREMISE — could not plant a symlink at the report name; the assertions below would be vacuous"
+fi
+rs "$R32" verdict c --issue 1901
+rc_is 5 "y1: a SYMLINKED report is a NON-VERDICT (exit 5)"
+has "RESULT: NOT-RUN (report is a symlink)" "y1: and it carries its OWN named cause"
+hasnt "RESULT: PASS" "y1: the bait file's PASS is NOT reported — the link was refused, not followed"
+hasnt "report unreadable" "y1: NOT reported as unreadable — the operator action is to remove the link, not a chmod"
+hasnt "report absent" "y1: and NOT as absent — the file is right there"
+rs "$R32" status c --issue 1901
+has "state=report-symlink" "y1/status: its own state word, one per operator action"
+has "STATUS-NOTE" "y1/status: with a note naming what to do"
+
+# (c) A DANGLING link. `[ -f ]` answers FALSE here, i.e. `no-such-file` -> the PERMISSIVE `absent`
+#     state, so this case is what proves the test must be `-L` and must come FIRST.
+rm -f "$R32_REP"
+if ln -s "$T/y1-does-not-exist-$$" "$R32_REP" 2>/dev/null && [ -L "$R32_REP" ] && [ ! -f "$R32_REP" ]; then
+  ok "y1: PREMISE — a DANGLING link is planted, and \`-f\` really answers false for it"
+else
+  bad "y1: PREMISE — could not plant a dangling link that \`-f\` calls absent; the next assertion is vacuous"
+fi
+rs "$R32" verdict c --issue 1901
+has "RESULT: NOT-RUN (report is a symlink)" "y1: a DANGLING link is refused as a symlink, NOT excused as 'report absent' (the permissive state)"
+
+# (d) CONTROL: remove the link, write a regular file — the stage reads clean again, so the refusal
+#     is about the link and not about this stage.
+rm -f "$R32_REP"
+printf 'result: FINDINGS\n\none blocking gap.\n' >"$R32_REP"
+rs "$R32" verdict c --issue 1901
+rc_is 4 "y1/control: with the link gone a regular-file FINDINGS report reads normally (exit 4)"
+
+# (e) THE OTHER ARTIFACT THE READ PATH OPENS: the STAGE RECORD.
+R32B="$(newrepo)"
+rs "$R32B" open c --issue 1902 --agent spec-auditor
+rc_is 0 "y1/record: the stage opened"
+printf 'result: PASS\n\nreviewed.\n' >"$(REPORT_OF "$R32B" 1902 c)"
+R32B_SFILE="$R32B/.review-stage/issue-1902/c.stage"
+R32B_FOREIGN="$T/y1-foreign-$$.stage"
+cp "$R32B_SFILE" "$R32B_FOREIGN"
+rm -f "$R32B_SFILE"
+if ln -s "$R32B_FOREIGN" "$R32B_SFILE" 2>/dev/null && [ -L "$R32B_SFILE" ]; then
+  ok "y1/record: PREMISE — the stage record is replaced by a link to a FOREIGN record naming the same generation"
+else
+  bad "y1/record: PREMISE — could not plant the link; the assertions below would be vacuous"
+fi
+rs "$R32B" verdict c --issue 1902
+rc_is 5 "y1/record: a SYMLINKED stage record is a NON-VERDICT (exit 5)"
+has "RESULT: NOT-RUN (stage record is a symlink" "y1/record: and it carries its OWN named cause"
+hasnt "RESULT: PASS" "y1/record: the report the foreign record named is NOT reported"
+hasnt "stage record unreadable" "y1/record: NOT folded onto stage-record-unreadable — the file reads perfectly, which is the hazard"
+has "report=unresolved" "y1/record: and no report path is published, because none was identified"
+rs "$R32B" status c --issue 1902
+has "state=stage-record-symlink" "y1/record/status: its own state word"
+
+# (f) AND THE WRITE COMMAND REFUSES ON IT BY NAME, rather than through the record-unreadable
+#     rationale, because the operator action differs.
+rs "$R32B" record-author-performed c --issue 1902 \
+  --reason "no independent auditor was available on this lane" \
+  --evidence "docs/round-artifacts/y1-note.md" --performed-by author
+rc_is 2 "y1/record: record-author-performed REFUSES over a symlinked record"
+has "reason=stage-record-is-a-symlink" "y1/record: with its own reason token"
+if [ "$(LC_ALL=C ls -1 "$R32B/.review-stage/issue-1902" | LC_ALL=C grep -c '\.md$' || true)" = "1" ]; then
+  ok "y1/record: and NOTHING was written — the stage directory still holds exactly one report"
+else
+  bad "y1/record: the refusal wrote a report anyway ($(LC_ALL=C ls -1 "$R32B/.review-stage/issue-1902" | LC_ALL=C tr '\n' ' '))"
+fi
+
+# (g) STRUCTURAL — THE CENSUS OF READ TARGETS. A behavioural case can only cover the readers
+#     someone thought of; the property is that EVERY function which opens a FILE through the one
+#     capture boundary carries the leaf test. Derived from the shipped script, so a THIRD reader
+#     added later joins the census instead of needing this list edited.
+# COUNTED OVER *CODE*, NEVER OVER PROSE — round 18's X1 lesson inside this round's own guard, and
+# it fired while this was being written: the comment that EXPLAINS the check quotes `[ -L "$p" ]`
+# verbatim, so a whole-body match reported `report_bytes` as carrying the test with the code hunk
+# REMOVED. A guard that a comment can satisfy measures the documentation, not the mechanism. The
+# `#3929` declaration assert below deliberately reads the COMMENTS, which is why it is separate.
+Y1_CENSUS="$(LC_ALL=C awk '
+  /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/ { fn = $1; sub(/\(\).*/, "", fn); body = ""; inf = 1; next }
+  inf && /^\}/ {
+    if (body ~ /capture_map_nul "\$/) {
+      printf "%s %s\n", fn, (body ~ /\[ -L "\$/ ? "HAS-L" : "NO-L")
+    }
+    inf = 0; next
+  }
+  inf && /^[ \t]*#/ { next }
+  inf { body = body "\n" $0 }
+' "$RS")"
+Y1_NREAD="$(printf '%s\n' "$Y1_CENSUS" | LC_ALL=C grep -c . || true)"
+Y1_NOL="$(printf '%s\n' "$Y1_CENSUS" | LC_ALL=C grep -c 'NO-L' || true)"
+if [ "${Y1_NREAD:-0}" -eq 2 ]; then
+  ok "y1/structural: the census finds EXACTLY 2 functions that open a file through the capture boundary (report_bytes, stage_record_text) — a third would show up here"
+else
+  bad "y1/structural: the census finds ${Y1_NREAD:-0} file-reading function(s), not 2 — either the extraction broke or a new reader appeared: $(printf '%s' "$Y1_CENSUS" | LC_ALL=C tr '\n' ' ')"
+fi
+if [ "${Y1_NOL:-0}" -eq 0 ]; then
+  ok "y1/structural: and 0 of them lack the leaf \`[ -L ]\` test, so no read target follows a link unchecked"
+else
+  bad "y1/structural: ${Y1_NOL:-0} file-reading function(s) lack the leaf \`[ -L ]\` test: $(printf '%s' "$Y1_CENSUS" | LC_ALL=C grep 'NO-L' | LC_ALL=C tr '\n' ' ')"
+fi
+# THE ORDER IS THE PROPERTY: a `-L` test placed after a dereferencing predicate is not a check.
+Y1_RB="$(LC_ALL=C awk '/^report_bytes\(\) \{/ { inf = 1 } inf { print } inf && /^\}/ { exit }' "$RS")"
+# THE SAME COMMENT-STRIPPED VIEW for the ORDER asserts. Read over the whole body, the first match
+# for either pattern is the COMMENT that documents it, so the comparison would order two comments.
+Y1_RB_CODE="$(printf '%s\n' "$Y1_RB" | LC_ALL=C grep -v '^[[:space:]]*#')"
+Y1_L_LN="$(printf '%s\n' "$Y1_RB_CODE" | LC_ALL=C grep -n '\[ -L "\$p" \]' | LC_ALL=C head -1 | cut -d: -f1)"
+Y1_F_LN="$(printf '%s\n' "$Y1_RB_CODE" | LC_ALL=C grep -n '\[ ! -f "\$p" \]' | LC_ALL=C head -1 | cut -d: -f1)"
+if [ -n "$Y1_L_LN" ] && [ -n "$Y1_F_LN" ] && [ "$Y1_L_LN" -lt "$Y1_F_LN" ]; then
+  ok "y1/structural: report_bytes asks \`-L\` BEFORE the dereferencing \`-f\` (lines $Y1_L_LN < $Y1_F_LN)"
+else
+  bad "y1/structural: report_bytes does not ask -L before -f (L=$Y1_L_LN f=$Y1_F_LN) — a dangling link would take the permissive absent branch"
+fi
+Y1_SRT="$(LC_ALL=C awk '/^stage_record_text\(\) \{/ { inf = 1 } inf { print } inf && /^\}/ { exit }' "$RS")"
+Y1_SRT_CODE="$(printf '%s\n' "$Y1_SRT" | LC_ALL=C grep -v '^[[:space:]]*#')"
+Y1_SL_LN="$(printf '%s\n' "$Y1_SRT_CODE" | LC_ALL=C grep -n '\[ -L "\$file" \]' | LC_ALL=C head -1 | cut -d: -f1)"
+Y1_SC_LN="$(printf '%s\n' "$Y1_SRT_CODE" | LC_ALL=C grep -n 'capture_map_nul "\$file"' | LC_ALL=C head -1 | cut -d: -f1)"
+if [ -n "$Y1_SL_LN" ] && [ -n "$Y1_SC_LN" ] && [ "$Y1_SL_LN" -lt "$Y1_SC_LN" ]; then
+  ok "y1/structural: stage_record_text asks \`-L\` BEFORE the redirection that dereferences (lines $Y1_SL_LN < $Y1_SC_LN)"
+else
+  bad "y1/structural: stage_record_text does not ask -L before its read (L=$Y1_SL_LN read=$Y1_SC_LN)"
+fi
+# AND THE RESIDUAL IS DECLARED AT BOTH SITES, not left for a reader to infer that the race is
+# closed. #3929 is the accepted boundary; a fix that silently claimed more than it delivers is the
+# false-assurance shape this whole issue is about.
+Y1_DECL=0
+case "$Y1_RB" in *'#3929'*) Y1_DECL=$((Y1_DECL + 1)) ;; esac
+case "$Y1_SRT" in *'#3929'*) Y1_DECL=$((Y1_DECL + 1)) ;; esac
+if [ "$Y1_DECL" -eq 2 ]; then
+  ok "y1/structural: BOTH read sites DECLARE the TOCTOU residual (#3929) beside the check, so the fix does not read as closing the race"
+else
+  bad "y1/structural: only $Y1_DECL of 2 read sites declare the #3929 residual — a leaf test before an open cannot close that window and must not imply it does"
+fi
+
+
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
 # which is this issue's own subject inside a test file.
@@ -5780,7 +5951,28 @@ fi
 # prose: a whole-file `grep -c` counted the idiom in the comment that RECORDS the retired capture,
 # so writing down the fix reported a second resolution site. Every one needs only bash, git and
 # coreutils; none branches on the host.
-ASSERT_FLOOR=948
+#
+# ROUND 19's Y1 MOVES IT TO 980. Section 32 adds 32: the READ path followed a symlink. Round 1's
+# F5 walk refuses one where this tool WRITES and NOTHING refused one where it READS, so replacing
+# a generation's report with a link to any regular file holding `result: PASS` made `verdict` — and
+# `premerge-assert.sh`'s AUTO C validation with it — accept a verdict from an artifact that is not
+# the report of record (measured on the shipped script: `RESULT: PASS`, exit 0, off a link into the
+# scratch dir; 15 of this section's assertions RED with the two code hunks removed, 0 after). Both
+# artifacts the read path opens are covered — the report AND the stage record, the latter because
+# it names WHICH generation is authoritative and carries the `head-sha:` the stage was opened at.
+# The DANGLING case is the one that proves `-f` cannot answer the question: for a dangling link it
+# is FALSE, i.e. `no-such-file`, i.e. the PERMISSIVE `absent` state the clobber guard reads as "no
+# recorded verdict to destroy". The structural half is a DERIVED CENSUS of read targets (every
+# function opening a file through `capture_map_nul` must carry the leaf test), so a third reader
+# added later joins the census instead of needing a curated list — and it counts over CODE, not
+# prose, which is round 18's X1 lesson INSIDE this round's own guard: the comment explaining the
+# check quotes `[ -L "$p" ]` verbatim, so a whole-body match reported the test as present with the
+# code hunk removed. The residual (a leaf `-L` before an open leaves a TOCTOU window bash cannot
+# close — #3929's family) is asserted as DECLARED at both sites rather than claimed closed. Every
+# assertion needs only bash, git, `ln -s` and coreutils; none branches on the host, and the two
+# PREMISE assertions that could fail on a filesystem without symlinks call `bad` (a red run, never
+# a displaced count).
+ASSERT_FLOOR=980
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

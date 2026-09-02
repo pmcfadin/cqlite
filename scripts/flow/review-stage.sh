@@ -100,11 +100,17 @@
 # `record-author-performed` PASSES ITS OWN snapshot in, so the bytes its write is guarded on and
 # the verdict it decides by are the same instant. This is round 9's N2 property one level down.
 #
-# `NOT-RUN` carries one of SEVEN named causes, because the operator action differs per cause
-# and one token for seven states is the collapse this issue is about:
+# `NOT-RUN` carries one of ELEVEN named causes, because the operator action differs per cause
+# and one token for eleven states is the collapse this issue is about. (This header said SEVEN
+# until round 19; the count had been understated since round 17 added `stage record changed
+# mid-read` and `stage not observed` without moving it. A count nobody re-derived is a claim about
+# code, and it decays exactly like a comment — the authority is the drift guard in
+# `scripts/tests/test_review_stage.sh` §7b, which EXTRACTS these literals from this file.)
 #   no report written          the stage is open and the report is still the sentinel
 #   report absent              the stage is open and its report file is GONE
 #   report unreadable          the report file exists and CANNOT BE READ (permission, I/O)
+#   report is a symlink        the report PATH is a symlink, so it was NOT READ: following it
+#                              would decide this stage from another artifact (round 19, Y1)
 #   report empty               the report file exists and holds nothing recordable
 #   report ungrammatical: <w>  a result line that is unrecognised, absent, or unsupported —
 #                              INCLUDING a report holding a NUL 0x00 or SOH 0x01 byte, which is not
@@ -114,6 +120,18 @@
 #   stage never opened         no stage was ever opened for this <kind>/<issue>
 #   stage record unreadable: <w>  the RECORD does not name which report is current, so no report
 #                                 was identified and nothing is claimed about one (round 5, J1)
+#   stage record is a symlink: <w>  the RECORD PATH is a symlink, so it was NOT READ (round 19, Y1)
+#   stage record changed mid-read: <w>  the record moved between the two captures of ONE
+#                                 observation, so nothing is claimed about either (round 17, W1)
+#   stage not observed         internal: a caller classified without taking an observation
+#
+# BOTH SYMLINK CAUSES CLOSE THE *READ* PATH, WHICH HAD NO CHECK AT ALL (#3751 round 19, Y1). Round
+# 1's F5 walk refuses a symlink where this tool WRITES; every reader here DEREFERENCED, so a link
+# planted at either artifact's name made `verdict` — and `premerge-assert.sh`'s AUTO C validation
+# with it — accept a verdict read out of a file that is not the artifact this stage names. The
+# declared residual is the TOCTOU window a leaf `-L` test cannot close (bash has no `openat` /
+# `O_NOFOLLOW`), which is #3929's family; what is closed COMPLETELY is the non-racing case, a link
+# planted at any earlier time and simply followed, which needs no race and no timing.
 #
 # `report unreadable` was the SIXTH, added in round 2 (B7) rather than folded into an existing
 # cause: an unreadable file is NOT empty (the operator fix is `chmod`, not the agent) and calling
@@ -386,11 +404,17 @@
 #           sentinel-only           the report is still the pre-spawn sentinel
 #           report-absent           the report file is GONE
 #           report-unreadable       it exists and cannot be READ (fix: chmod / the filesystem)
+#           report-symlink          its PATH is a symlink, so it was NOT read (fix: remove the
+#                                   link — not a chmod, not a re-spawn)
 #           report-empty            it exists and holds nothing recordable
 #           report-ungrammatical    its verdict line is absent, ambiguous or unrecognised
 #           not-run-self-reported   it RECORDS a NOT-RUN of its own, and names why
 #           stage-record-unreadable the RECORD does not name which report is current (fix: the
 #                                   record, or a fresh --force open — not the agent, not a chmod)
+#           stage-record-symlink    the RECORD's path is a symlink, so it was NOT read (fix:
+#                                   remove the link)
+#           stage-record-changed    the record moved mid-observation (fix: read it again)
+#           stage-not-observed      internal: classified with no observation at all
 #           never-opened            no stage was ever opened for this kind
 #         Two of these were added in round 4 (H4): `report unreadable` and a self-recorded cause
 #         both used to be reported as `report-ungrammatical`, i.e. a WRONG remediation signal and,
@@ -1674,6 +1698,8 @@ count_field_lines_from() {
 #                                caller's capture, which the rewrite re-terminates)
 #   1  the read FAILED         — permission, I/O, a truncated read (nothing printed)
 #   2  read, NOT REPRESENTABLE — the file holds a NUL 0x00 or SOH 0x01 byte
+#   3  NOT READ AT ALL         — the path is a SYMLINK, so reading it would decide from another
+#                                artifact (#3751 round 19, Y1)
 #
 # Callers spell the permissive set AFFIRMATIVELY as `0`, so a status added here later refuses by
 # construction rather than inheriting a `!= 1` test.
@@ -1693,6 +1719,23 @@ count_field_lines_from() {
 # because a prefix that stops early would be WRITTEN BACK as the whole record.
 stage_record_text() {
   local file="$1" text="" rrc=0
+  # A SYMLINKED RECORD IS REFUSED, NOT FOLLOWED — THE SAME REASONING AS `report_bytes`, APPLIED TO
+  # THE OTHER ARTIFACT THE READ PATH OPENS (#3751 round 19, Y1). The stage record is what names
+  # WHICH generation is authoritative and carries the `head-sha:` the stage was opened at, so a
+  # link here redirects the whole decision at its root: measured on the shipped script, a record
+  # replaced by a link to a foreign `*.stage` yielded `RESULT: PASS` at exit 0. `[ -L ]` is the
+  # direct question and is asked BEFORE the redirection below, which dereferences. Its own status,
+  # so the caller can name the cause: an existing, readable file that is not this stage's record is
+  # neither a permission problem nor an unrepresentable byte.
+  #
+  # `open` cannot reach this status — `assert_no_symlink "$sfile" stage-record` refuses first — so
+  # the reachable callers are the READ paths (`verdict`, `status`, `record-author-performed`),
+  # which is precisely the half that had no check at all.
+  #
+  # DECLARED RESIDUAL, as at `report_bytes`: a leaf `-L` before the open leaves a TOCTOU window
+  # bash cannot close, which is #3929's family. The non-racing case — a link planted earlier and
+  # simply followed — is closed completely; the residual is not.
+  if [ -L "$file" ]; then return 3; fi
   text="$( { capture_map_nul "$file" && printf 'E'; } 2>/dev/null )" || rrc=$?
   [ "$rrc" -eq 0 ] || return 1
   case "$text" in
@@ -1865,6 +1908,12 @@ cmd_open() {
         emit "$REFUSE_MARKER detail=the stage record's report-nonce must be exactly ONE line carrying an alphanumeric token; it names which report of this stage is current, so a guess could name a report an earlier agent still holds. Read the record and repair it, or remove the stage directory and open a fresh stage."
         exit 2
         ;;
+      # THE `symlink` KIND (#3751 round 19, Y1) CANNOT REACH THIS FALL-THROUGH, and the reason is
+      # a control and not a hope: `assert_no_symlink "$sfile" stage-record` above refuses a
+      # symlinked record BEFORE `observe_record` is called, with `reason=path-is-symlink`. Stated
+      # here because this arm's detail asserts the record "EXISTS and could not be READ", which
+      # would be the wrong rationale for a link — if that walk is ever moved, this arm needs an
+      # arm of its own, exactly as `record-author-performed` has one.
       *)
         emit "$REFUSE_MARKER reason=stage-record-unreadable kind=$kind issue=$issue record=$(field_value "$sfile") defect=$(field_value "$STAGE_RECORD_DEFECT")"
         emit "$REFUSE_MARKER detail=this stage's record EXISTS and could not be READ, so which report of this stage is current could not be measured and NOTHING was written. That is not the same as a record with no report-nonce (which reads as the original single report): an unmeasured record may not take the permissive reading, because it is also a record whose spawned-at cannot be read, so a forced re-open would silently restart a clock a reader is using. Fix the record's permissions, or remove the stage directory and open a fresh stage."
@@ -2179,6 +2228,31 @@ CLAUSE
 # question this tool asks of it.
 report_bytes() {
   local p="$1" body rc=0
+  # A SYMLINK IS REFUSED ON THE *READ* PATH TOO, NOT FOLLOWED (#3751 round 19, Y1).
+  #
+  # THE FINDING. Round 1's F5 walk refuses a symlink where this tool WRITES; nothing refused one
+  # where it READS. Both `[ -f ]` and the input redirection below DEREFERENCE, so a link planted
+  # at this generation's report name made `verdict` — and therefore `premerge-assert.sh`'s AUTO C
+  # validation — accept a verdict read out of ANY regular file recording `result: PASS`, i.e. from
+  # an artifact that is not the report of record. Measured on the shipped script before this hunk:
+  # `RESULT: PASS`, exit 0, off a link to a file in /tmp.
+  #
+  # `[ -L "$p" ]` IS THE DIRECT QUESTION, AND IT IS THE ONLY ONE THAT CAN BE ASKED HERE: `-f`
+  # cannot answer it, because it answers about the TARGET — for a link to a regular file it is
+  # TRUE, and for a dangling link it is FALSE, which is `no-such-file`, the PERMISSIVE `absent`
+  # state. So the test has to come FIRST, before any predicate that dereferences.
+  #
+  # ITS OWN STATE — never `unreadable`, and certainly never `absent`. The file is right there and
+  # is perfectly readable; what is wrong is that it is NOT THE ARTIFACT THIS STAGE NAMES, so the
+  # operator action is "remove the link", not a chmod and not a re-spawn (round 4's H4: one state
+  # per cause, because a wrong remediation signal is what stops the operator looking).
+  #
+  # DECLARED RESIDUAL, STATED HONESTLY: a leaf `-L` test taken BEFORE the open leaves a TOCTOU
+  # window that bash cannot close (no `openat`, no `O_NOFOLLOW`), and that window is the family
+  # tracked in #3929. What this hunk closes COMPLETELY is the far larger non-racing case — a link
+  # planted at any earlier time and simply FOLLOWED, with no check at all, which needs no race and
+  # no timing at all. The residual is not claimed closed by it.
+  if [ -L "$p" ]; then printf 'state=symlink\n'; return 0; fi
   if [ ! -f "$p" ]; then printf 'state=no-such-file\n'; return 0; fi
   # Measured BY ATTEMPTING THE READ rather than with `[ -r ]`, which answers TRUE for root and
   # cannot see an I/O error. Since round 12's R2 this is the ONLY place the report's readability is
@@ -2232,6 +2306,10 @@ report_state() {
     # ITS OWN WORD, so the write-side refusal can say WHY the report could not be read — a byte the
     # capture cannot carry, not a permission. It is NOT in the permissive set at either caller.
     'state=unrepresentable') printf 'unrepresentable\n' ;;
+    # AND ITS OWN WORD FOR A SYMLINKED REPORT (#3751 round 19, Y1) — nothing was read at all, and
+    # the reason is neither a permission nor a byte: this path names an artifact that is not the
+    # report of record. It is NOT in the permissive set at either caller.
+    'state=symlink') printf 'symlink\n' ;;
     *) printf 'unreadable\n' ;;
   esac
 }
@@ -2279,6 +2357,11 @@ classify_report() {
     # what happened, so an unforeseen kind cannot leave the operator with a bare wrong rationale.
     case "$defect_kind" in
       moved) printf 'NOT-RUN|stage record changed mid-read: %s\n' "$record_defect" ;;
+      # ITS OWN PREFIX for the same reason `moved` has one (#3751 round 19, Y1): a symlinked
+      # record was never READ, so `stage record unreadable` would name the wrong action (chmod or
+      # repair, rather than "remove the link") — and the file it points at may be perfectly
+      # readable, which is exactly the hazard.
+      symlink) printf 'NOT-RUN|stage record is a symlink: %s\n' "$record_defect" ;;
       *)     printf 'NOT-RUN|stage record unreadable: %s\n' "$record_defect" ;;
     esac
     return 0
@@ -2339,6 +2422,11 @@ classify_report() {
     # the report), not `chmod`. It keeps the ONE `report-ungrammatical` status state that every
     # variant of that cause shares, deliberately, for the same reason (round 4, H4).
     unrepresentable) printf "NOT-RUN|report ungrammatical: holds a NUL 0x00 or SOH 0x01 byte, which no text record may contain — a shell capture silently DROPS a NUL, so a reader would judge a document this file does not contain\n"; return 0 ;;
+    # ITS OWN CAUSE (#3751 round 19, Y1): nothing was read, so `report ungrammatical` would assert
+    # something about content never observed, and `report unreadable` would send the operator to a
+    # chmod. The file at this path is a SYMLINK, so following it would have decided the verdict
+    # from another artifact entirely; the action is to remove the link.
+    symlink) printf 'NOT-RUN|report is a symlink\n'; return 0 ;;
     present) ;;
     *) printf 'NOT-RUN|report unreadable\n'; return 0 ;;
   esac
@@ -2549,6 +2637,7 @@ STAGE_REPORT_OBS=""; STAGE_REPORT_STATE=""
 #
 #   unrepresentable   the record holds a byte no text record may contain
 #   unreadable        the read itself failed (permission, I/O, truncation)
+#   symlink           the record PATH is a symlink, so it was not read at all (round 19, Y1)
 #   count-unmeasured  the record was read, but the generation-naming lines could not be COUNTED
 #   nonce-ambiguous   several such lines — which artifact is authoritative is not decidable
 #   nonce-invalid     one line, but not an alphanumeric generation token
@@ -2593,6 +2682,10 @@ observe_record() {
     0) STAGE_RECORD_TEXT="$text" ;;
     2) STAGE_RECORD_DEFECT_KIND=unrepresentable
        STAGE_RECORD_DEFECT="the record holds a NUL 0x00 or SOH 0x01 byte, which no text record may contain, so it could not be read as text and which report is current was never measured (rewrite the record or open a fresh stage — NOT a chmod)" ;;
+    # ITS OWN KIND (#3751 round 19, Y1), because the operator action is "remove the link": the
+    # file resolves fine and reads fine, and that is the problem — it is not this stage's record.
+    3) STAGE_RECORD_DEFECT_KIND=symlink
+       STAGE_RECORD_DEFECT="the record PATH is a SYMLINK, so it was NOT READ and which report is current was never measured — following it would have taken this stage's generation, and its head-sha, from another artifact entirely (remove the link; NOT a chmod and NOT a rewrite)" ;;
     *) STAGE_RECORD_DEFECT_KIND=unreadable
        STAGE_RECORD_DEFECT="the record EXISTS and could not be READ, so which report is current was never measured (permission or I/O — not the same as a record with no report-nonce)" ;;
   esac
@@ -2828,10 +2921,16 @@ cmd_status() {
         "no report written") state=sentinel-only ;;
         "report absent") state=report-absent ;;
         "report unreadable") state=report-unreadable ;;
+        # ITS OWN STATE (#3751 round 19, Y1): the action is to remove the link, not a chmod and
+        # not a re-spawn. Folding it onto report-unreadable would name a permission problem for a
+        # file that reads perfectly — a false rationale, which is what stops the operator looking.
+        "report is a symlink") state=report-symlink ;;
         "report empty") state=report-empty ;;
         "report ungrammatical"*) state=report-ungrammatical ;;
         "stage never opened") state=never-opened ;;
         "stage record unreadable"*) state=stage-record-unreadable ;;
+        # AND ITS OWN STATE for the record half, same reasoning (#3751 round 19, Y1).
+        "stage record is a symlink"*) state=stage-record-symlink ;;
         # ITS OWN STATE, because the operator action is "read it again" and not "repair the record
         # or chmod it" (#3751 round 17, W1). Folding it onto stage-record-unreadable would report a
         # perfectly readable record as unreadable — a false rationale, which is what stops the next
@@ -2899,6 +2998,12 @@ cmd_status() {
     emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE the report RECORDS a NOT-RUN of its own, naming: $(field_value "$cause") — the file is grammatical and the agent said WHY, so the next action is what that cause names, not a chmod and not a re-written verdict line. ADVISORY, as always: read the verdict with: $prog verdict $KI_KIND --issue $KI_ISSUE"
   elif [ "$state" = report-unreadable ]; then
     emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE the report file EXISTS but could not be READ, so nothing is claimed about its content — the fix is a permission or an I/O one (chmod / the filesystem), NOT a re-spawn: $prog verdict $KI_KIND --issue $KI_ISSUE"
+  elif [ "$state" = report-symlink ]; then
+    # THE NEXT ACTION IS TO REMOVE THE LINK (#3751 round 19, Y1) — not a chmod, not a re-spawn, and
+    # not a re-read: the path resolves and the target may read perfectly, which is the hazard.
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE the report of record is a SYMLINK, so it was NOT READ and nothing is claimed about any verdict — reading it would have decided this stage from whatever file the link points at, which is not the report of record. Remove the link and let the agent write a regular file, or supersede the stage with a fresh generation: $prog open $KI_KIND --issue $KI_ISSUE --agent <type> --force"
+  elif [ "$state" = stage-record-symlink ]; then
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE the STAGE RECORD is a SYMLINK, so it was NOT READ ($(field_value "$STAGE_RECORD_DEFECT")) — following it would have taken this stage's current generation, and the head-sha it was opened at, from another artifact. NOTHING is claimed about any report. Remove the link, then read it again: $prog verdict $KI_KIND --issue $KI_ISSUE"
   elif [ "$state" = stage-record-unreadable ]; then
     # THE FIX IS THE RECORD, NOT THE AGENT AND NOT A chmod — a distinct next action, which is the
     # whole reason each cause gets its own state (#3751 round 4, H4).
@@ -3021,6 +3126,14 @@ cmd_record_author_performed() {
     if [ "$STAGE_RECORD_DEFECT_KIND" = moved ]; then
       emit "AUTHOR-REFUSED reason=stage-record-changed-mid-read kind=$kind issue=$issue record=$(field_value "$(stage_file "$issue" "$kind")") defect=$(field_value "$STAGE_RECORD_DEFECT")"
       emit "AUTHOR-REFUSED detail=the stage record CHANGED while this stage was being observed, so the record and the report would describe DIFFERENT generations and NOTHING was written — this recording never inspected the verdict of the generation it would have superseded. Nothing is wrong with the record: read it again and decide against what is current now ($prog verdict $kind --issue $issue). Most likely a concurrent $prog open $kind --issue $issue --agent <type> --force published a fresh generation."
+      exit 2
+    fi
+    # AND A SYMLINKED RECORD IS ITS OWN REASON TOKEN, for the same reason `moved` is (#3751 round
+    # 19, Y1): nothing is wrong with the file's permissions or its grammar — it is not this
+    # stage's record — so "repair the record" would send the operator to the wrong artifact.
+    if [ "$STAGE_RECORD_DEFECT_KIND" = symlink ]; then
+      emit "AUTHOR-REFUSED reason=stage-record-is-a-symlink kind=$kind issue=$issue record=$(field_value "$(stage_file "$issue" "$kind")") defect=$(field_value "$STAGE_RECORD_DEFECT")"
+      emit "AUTHOR-REFUSED detail=the stage record PATH is a SYMLINK, so it was NOT READ and NOTHING was written — following it would have taken this stage's current generation, and the head-sha it was opened at, from another artifact, and this recording would then have superseded a verdict it never inspected. Remove the link and read the stage again ($prog verdict $kind --issue $issue), or open a fresh stage: $prog open $kind --issue $issue --agent <type> --force"
       exit 2
     fi
     emit "AUTHOR-REFUSED reason=stage-record-unreadable kind=$kind issue=$issue record=$(field_value "$(stage_file "$issue" "$kind")") defect=$(field_value "$STAGE_RECORD_DEFECT")"

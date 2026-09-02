@@ -28,8 +28,21 @@ REVIEW-STAGE: <kind> RESULT: <token> elapsed=<secs> deadline=<secs> agent=<type>
 | `AUTHOR-PERFORMED` | a disclosed substitute with its working recorded | 6 | **only under §4** |
 
 `NOT-RUN` carries a **cause** in parentheses — `no report written`, `report absent`, `report unreadable`,
-`report empty`, `report ungrammatical: <what>`, `stage never opened` — because the operator action differs per cause and
-one token for five states is the shape this issue is about.
+`report is a symlink`, `report empty`, `report ungrammatical: <what>`, `stage never opened`,
+`stage record unreadable: <what>`, `stage record is a symlink: <what>`,
+`stage record changed mid-read: <what>`, `stage not observed` — because the operator action differs per
+cause and one token for eleven states is the shape this issue is about. The number is not maintained by
+hand: the DERIVED drift guard in `scripts/tests/test_review_stage.sh` §7b extracts these literals from
+the script and requires each to be mapped to its own `status` state.
+
+**The two symlink causes close the READ path (round 19, Y1), which is a different defect from the
+write-path walk above.** `[ -f ]` and an input redirection both DEREFERENCE, so a link planted at either
+artifact's name made `verdict` — and `premerge-assert.sh`'s AUTO C validation with it — accept a verdict
+read out of an artifact that is not the one the stage names. The leaf is tested with `[ -L ]` BEFORE any
+dereferencing predicate, because `-f` is FALSE for a dangling link and that is the permissive `absent`
+state. The TOCTOU window a leaf test cannot close is DECLARED at both sites (#3929's family), not
+claimed closed; the non-racing case — a link planted earlier and simply followed — is closed
+completely.
 
 Two rules make the grammar closed rather than prefix-tested (#3544's lesson): the token is reduced to its
 first word and matched by **string equality**, and **any unrecognised value is `NOT-RUN`**, never

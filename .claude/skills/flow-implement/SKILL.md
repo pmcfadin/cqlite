@@ -142,7 +142,9 @@ never gate stdout or review churn.
    NOT-RUN / `6` AUTHOR-PERFORMED. **`NOT-RUN` is not a clean review** — it means sentinel-only,
    absent, unreadable, empty, ungrammatical or never-opened, and the token NAMES which, because the operator
    action differs per cause — plus `stage record unreadable`, where the RECORD does not name which
-   report is current. Do NOT proceed to the PR on a `NOT-RUN` stage: re-spawn
+   report is current, and (since #3751 round 19) `report is a symlink` / `stage record is a symlink`,
+   where the artifact was NOT READ because following a link would decide the stage from a file that
+   is not the one it names. Those two say **remove the link** — not a chmod, not a re-spawn. Do NOT proceed to the PR on a `NOT-RUN` stage: re-spawn
    (`open --force` KEEPS the original clock, so the elapsed time still reads true, and publishes the
    report under a FRESH NONCE — spawn with the path it PRINTS, because the previous file is no
    longer read, so an idle agent that resumes and writes there cannot certify anything, #3751 rounds

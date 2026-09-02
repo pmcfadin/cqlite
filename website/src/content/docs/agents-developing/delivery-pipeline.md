@@ -792,12 +792,11 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   reaches a fixed-width operation, INCLUDING the clock's own `date -u +%s` reading, which nothing
   else validates. Out of bound from argv is a NAMED usage refusal that writes nothing; from the
   record it is `elapsed=unknown` / `past-deadline=unknown`, with the record's own text still
-  DISPLAYED verbatim so a hand edit stays visible in the audit trail. `NOT-RUN` always names ONE OF SEVEN causes
-  (`no report written`, `report absent`, `report unreadable`, `report empty`,
-  `report ungrammatical: <what>`, `stage never opened`, `stage record unreadable: <what>`), because the operator action differs per cause —
+  DISPLAYED verbatim so a hand edit stays visible in the audit trail. `NOT-RUN` always names ONE OF ELEVEN causes
+  (`no report written`, `report absent`, `report unreadable`, **`report is a symlink`**, `report empty`, `report ungrammatical: <what>`, `stage never opened`, `stage record unreadable: <what>`, **`stage record is a symlink: <what>`**, `stage record changed mid-read: <what>`, `stage not observed`), because the operator action differs per cause —
   `report unreadable` is its own cause rather than folded into `report empty` (whose fix is the AGENT,
   where an unreadable file's is `chmod`) or `report ungrammatical` (which would assert something about
-  content never observed). **An idle notice is strictly
+  content never observed). **AND THE *READ* PATH REFUSES A SYMLINKED ARTIFACT TOO (round 19, Y1)** — round 1's walk refuses one where this tool WRITES and NOTHING refused one where it READS, and both `[ -f ]` and an input redirection DEREFERENCE, so replacing a generation's report with a link to any regular file holding `result: PASS` made `verdict` (and `premerge-assert.sh`'s AUTO C validation with it) accept a verdict from an artifact that is not the report of record — measured: `RESULT: PASS`, exit 0. Both artifacts the read path opens now refuse a leaf symlink under their OWN cause and state, the record included because it names WHICH generation is authoritative and carries the `head-sha:`. The DANGLING case is why the test is `[ -L ]` and comes FIRST: `-f` is FALSE for a dangling link, i.e. `no-such-file`, i.e. the PERMISSIVE `absent` state the clobber guard reads as "no recorded verdict to destroy". **The residual is DECLARED, not closed**: a leaf test before an open leaves a TOCTOU window bash cannot close (no `openat`, no `O_NOFOLLOW`), which is #3929's family; what is closed COMPLETELY is the non-racing case, a link planted at any earlier time and simply followed. **An idle notice is strictly
   WEAKER than the gate's `INCOMPLETE` sentinel** — at least the sentinel names itself a non-verdict — so
   never read one as a completed review. Writes go under `.review-stage/`, whose ignore status is
   **verified with `git check-ignore`, fail-closed**, so a stage opened mid-run cannot dirty a running gate

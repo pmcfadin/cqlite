@@ -183,7 +183,7 @@ Three further declared limits of the mechanism itself:
   (fix: `chmod`) sent the operator to the agent, and a SELF-RECORDED
   `result: NOT-RUN (ran out of context)` — a perfectly grammatical report in which the agent said
   WHY — was called ungrammatical, hiding the one actionable fact. Both now have their own state
-  (`report-unreadable`, `not-run-self-reported`) and their own STATUS-NOTE; All SEVEN reachable
+  (`report-unreadable`, `not-run-self-reported`) and their own STATUS-NOTE; All SEVEN reachable-at-the-time
   causes were checked at the time, not just the reported one: the five that were already right are pinned, the
   `report ungrammatical: <what>` variants deliberately keep ONE state (same operator action), and
   the enumeration is guarded against drift by a test that DERIVES the built-in cause literals from
@@ -776,10 +776,13 @@ bash scripts/flow/review-stage.sh verdict c --issue 1234
 bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-summary> --c-verdict AUTO
 ```
 
-`NOT-RUN` always carries one of seven named causes — `no report written`, `report absent`,
-`report unreadable`, `report empty`, `report ungrammatical: <what>`, `stage never opened`,
-`stage record unreadable: <what>` — because the operator
-action differs per cause, and one token for seven states is the collapse this issue is about.
+`NOT-RUN` always carries one of eleven named causes — `no report written`, `report absent`,
+`report unreadable`, `report is a symlink`, `report empty`, `report ungrammatical: <what>`,
+`stage never opened`, `stage record unreadable: <what>`, `stage record is a symlink: <what>`,
+`stage record changed mid-read: <what>`, `stage not observed` — because the operator
+action differs per cause, and one token for eleven states is the collapse this issue is about.
+(This said *seven* until round 19; the count had been understated since round 17. The authority is
+the DERIVED drift guard in `scripts/tests/test_review_stage.sh` §7b, never a number in prose.)
 Everything is written under `.review-stage/`, whose ignore status is **verified with
 `git check-ignore`, fail-closed**, so a stage opened mid-run cannot dirty a running gate of
 record (#2926) or make `premerge-assert.sh` refuse on `dirty: yes` (#3648).
@@ -787,7 +790,48 @@ record (#2926) or make `premerge-assert.sh` refuse on `dirty: yes` (#3648).
 **And a SYMLINK at the report path, at the `.stage` path or at ANY component under `.review-stage/`
 is REFUSED, never followed (#3751 round 1)** — `check-ignore` judges a LEXICAL path while a WRITE
 follows links, so an ignored-but-symlinked report clobbered a TRACKED file and reported `OPEN-OK`
-(measured); the writes themselves go through an UNPREDICTABLE same-directory temporary file
+(measured);
+
+**THE *READ* PATH REFUSED NOTHING UNTIL ROUND 19 (Y1), AND THAT IS A DIFFERENT DEFECT FROM THE
+WRITE-PATH ONE.** Round 1's walk covers where this tool WRITES. Every reader DEREFERENCED: `[ -f ]`
+and an input redirection both follow links, so replacing a generation's report with a link to any
+regular file holding `result: PASS` made `verdict` — and `premerge-assert.sh`'s AUTO C validation
+with it — accept a verdict read out of an artifact that is **not the report of record** (measured on
+the shipped script: `RESULT: PASS`, exit 0, off a link into `/tmp`). Both artifacts the read path
+opens now test the leaf affirmatively with `[ -L ]` and refuse under their OWN cause and `state=`:
+
+| artifact | cause | `status` state | operator action |
+|---|---|---|---|
+| the report of record | `report is a symlink` | `report-symlink` | remove the link |
+| the stage record | `stage record is a symlink: <what>` | `stage-record-symlink` | remove the link |
+
+The stage record is included because it is what names WHICH generation is authoritative and carries
+the `head-sha:` the stage was opened at, so a link there redirects the decision at its root
+(measured: a record replaced by a link to a foreign `*.stage` yielded `RESULT: PASS`, exit 0).
+`record-author-performed` refuses it under its own `reason=stage-record-is-a-symlink`.
+
+**`[ -L ]` IS THE ONLY PREDICATE THAT CAN ANSWER THE QUESTION, AND IT MUST COME FIRST.** `-f`
+answers about the TARGET: TRUE for a link to a regular file, and FALSE for a **dangling** link —
+which is `no-such-file`, which is the PERMISSIVE `absent` state the clobber guard reads as "there is
+no recorded verdict to destroy". The dangling case is therefore the one that proves the ordering,
+and it is pinned.
+
+**DECLARED RESIDUAL, NOT A CLOSURE.** A leaf `-L` test taken *before* the open leaves a TOCTOU
+window bash cannot close (no `openat`, no `O_NOFOLLOW`, no `renameat2`) — the same family as the
+write-path parent-component race tracked in **#3929**, and it is declared in the source at both read
+sites. What round 19 closes **completely** is the far larger non-racing case: a link planted at any
+earlier time and simply followed, with no check at all, which needs no race and no timing. The
+residual is stated rather than implied, because a fix that reads as closing more than it delivers is
+the false-assurance shape this whole mechanism exists to remove.
+
+The structural half is a **DERIVED CENSUS of read targets**: every function that opens a file
+through the one capture boundary (`capture_map_nul`) must carry the leaf test, so a third reader
+added later joins the census instead of needing a curated list — and it counts over **CODE, not
+prose**, which is round 18's X1 lesson inside round 19's own guard: the comment explaining the check
+quotes `[ -L "$p" ]` verbatim, so a whole-body match reported the test as present with the code hunk
+removed. Read targets audited: **2** (`report_bytes`, `stage_record_text`); lacking the test before
+round 19: **2**; after: **0**.
+ the writes themselves go through an UNPREDICTABLE same-directory temporary file
 (`mktemp -u`) CREATED AND OPENED IN ONE STEP under `set -C` — i.e. `O_CREAT|O_EXCL` — then written
 through the ALREADY-OPEN DESCRIPTOR and `mv -f -T`'d into place (#3751 round 3, G3; the `-T` is
 round 7's L2), so a concurrent reader never sees a half-written `result:` line.

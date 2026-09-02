@@ -173,6 +173,28 @@ directory, and any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUI
 - **THEN** `open` (and `record-author-performed`) REFUSE naming the symlink and the component, the link
   target is left UNTOUCHED, and the ordinary non-symlinked path still succeeds (the positive control)
 
+#### Scenario: a symlinked READ target is refused, not followed
+- **WHEN** the report of record, or the stage record, is a SYMLINK at the moment a READ path
+  (`verdict`, `status`, `record-author-performed`) opens it
+- **THEN** the artifact SHALL NOT be read, and the verdict SHALL be a NON-VERDICT carrying that
+  artifact's OWN cause (`report is a symlink` / `stage record is a symlink: <what>`) and its own
+  `status` `state=` (`report-symlink` / `stage-record-symlink`) — never `unreadable` (whose action is
+  a chmod) and never `absent` (whose action is a re-spawn, and which the clobber guard treats as
+  "there is no recorded verdict to destroy")
+- **AND** the leaf SHALL be tested AFFIRMATIVELY with `[ -L <path> ]` BEFORE any dereferencing
+  predicate: `[ -f ]` answers about the TARGET, so it is TRUE for a link to a regular file and FALSE
+  for a DANGLING link, which is the permissive `absent` state
+- **AND** a DANGLING link SHALL be refused as a symlink, not excused as an absent report
+- **AND** the ordinary REGULAR-FILE report SHALL still yield its verdict (the positive control), so the
+  refusal is not a mechanism that answers NOT-RUN for everything
+- **AND** EVERY artifact a read path opens SHALL carry the test, asserted by a DERIVED census over the
+  shipped script (every function reading a file through the one capture boundary), counted over CODE
+  and not over prose, so a third reader added later joins the census rather than needing a curated list
+- **AND** the residual SHALL be DECLARED, never claimed closed: a leaf test taken before an open
+  leaves a TOCTOU window bash cannot close (no `openat`, no `O_NOFOLLOW`), which is the family tracked
+  in #3929. What this closes completely is the NON-RACING case — a link planted at any earlier time
+  and simply followed, with no check at all
+
 #### Scenario: the temporary write path cannot be pre-planted
 - **WHEN** `open` or `record-author-performed` writes a record
 - **THEN** the write goes through a same-directory temporary file whose name is UNPREDICTABLE (not
