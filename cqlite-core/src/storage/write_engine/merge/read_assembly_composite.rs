@@ -129,9 +129,7 @@ fn first_unresolved_custom(cmp: &ComparatorType) -> Option<&str> {
             }
         }
         ComparatorType::Frozen(inner) => first_unresolved_custom(inner),
-        ComparatorType::List(elem) | ComparatorType::Set(elem) => {
-            first_unresolved_custom(elem)
-        }
+        ComparatorType::List(elem) | ComparatorType::Set(elem) => first_unresolved_custom(elem),
         ComparatorType::Map(key, val) => {
             first_unresolved_custom(key).or_else(|| first_unresolved_custom(val))
         }
