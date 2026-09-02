@@ -164,10 +164,7 @@ fn a_foreign_package_structural_form_is_refused() {
 /// foreign class as living in the marshal package.
 #[test]
 fn a_marshal_package_inside_the_arguments_does_not_qualify_a_foreign_head() {
-    assert_refused_as_foreign_package(
-        &format!("com.acme.VectorType({PKG}Int32Type)"),
-        "com.acme.",
-    );
+    assert_refused_as_foreign_package(&format!("com.acme.VectorType({PKG}Int32Type)"), "com.acme.");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
