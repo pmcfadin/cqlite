@@ -386,6 +386,30 @@ else bad "6.6 control: the RECORD grammar still accepts a real full-gate PASS"; 
 if g "$RECORD_RE" "$SB"; then ok "6.7 control: the RECORD grammar still accepts a real full-gate FAIL"
 else bad "6.7 control: the RECORD grammar still accepts a real full-gate FAIL"; fi
 
+# THE PUBLISHED EXIT MAPPING, DERIVED FROM THE GATE'S SOURCE (the 17.5 / 19.3 idiom).
+# Every doc site this change touches publishes "--only exits 3" as the PRIMARY completion
+# signal, and NOTHING in the gate's own component set derives that from source — the only
+# assertion of it lives in an opt-in suite which swallows the status in an `if …; then :; fi`.
+# The claim is TRUE at HEAD, so this is not a defect; but a published exit code that nothing
+# checks can ROT SILENTLY, and a lane that then polls exit 3 waits forever on a run that has
+# already finished. That is #3750's own failure mode, one layer down from the text grammars.
+#
+# Asserted as a MAPPING, not a grep for `exit 3`: PASS->0, PARTIAL->3, everything else->1, in
+# ONE terminal `case "$OVERALL"`, and `exit 3` reachable from NO other top-level arm — because
+# what the docs promise is that 3 means "completed PARTIAL" and nothing else.
+_gate="$REPO_ROOT/scripts/agent-gate.sh"
+_map=$(sed -n '/^case "\$OVERALL" in$/,/^esac$/p' "$_gate" | tr -s '[:space:]' ' ')
+_map_n=$(grep -c '^case "\$OVERALL" in$' "$_gate")
+_other3=$(grep -cE '^[[:space:]]*(\*\)|[A-Z]+\))[[:space:]]*exit 3' "$_gate")
+if [ "$_map_n" = 1 ] \
+   && printf '%s' "$_map" | grep -qF 'PASS) exit 0 ;; PARTIAL) exit 3 ;; *) exit 1 ;;' \
+   && [ "$_other3" = 1 ]; then
+  ok "6.8 the gate's terminal exit mapping is PASS->0 / PARTIAL->3 / else->1, and 3 is PARTIAL's alone"
+else
+  bad "6.8 the gate's terminal exit mapping is PASS->0 / PARTIAL->3 / else->1, and 3 is PARTIAL's alone" \
+      "terminal-case-blocks=$_map_n exit-3-arms=$_other3 map='$(printf '%s' "$_map" | cut -c1-90)'"
+fi
+
 echo "=== section 7: COMPLETION is the shared reader's question, and it says COMPLETE on PARTIAL ==="
 # One implementation, one grammar (roborev job 172): the verdict script ASKS
 # gate-liveness.sh whether the run ended rather than re-greping the terminal set. This
@@ -1218,12 +1242,14 @@ rm -rf "$_sub"
 # the reader's token) and 17 (the anchored line shape), 78 -> 87; round 5 grew 17 by one and
 # added 18 (a PARTIAL token requires its scope line) and 19 (meta reads stop at RESULT:),
 # 87 -> 96; round 6 added 20 (escapes are refused, not normalised) and 21 (the name must be a
-# real component), 96 -> 106. Raised
+# real component), 96 -> 106; the C (spec-auditor) round added 6.8 (the gate's exit mapping,
+# derived from source) and 15.12 (no site may scope the RECORD grammar to --delta),
+# 106 -> 108. Raised
 # DELIBERATELY each time: the total is a
 # `-lt` floor, so leaving it low would let the added cases be deleted while the suite still
 # reported green — this repo's own case-floor lesson.
-SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:7 7:2 8:4 9:5 10:8 11:6 12:5 13:4 14:2 15:11 16:4 17:6 18:5 19:3 20:5 21:5"
-FLOOR=106
+SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:8 7:2 8:4 9:5 10:8 11:6 12:5 13:4 14:2 15:12 16:4 17:6 18:5 19:3 20:5 21:5"
+FLOOR=108
 for _sf in $SECTION_FLOORS; do
   _sec=${_sf%%:*}; _min=${_sf##*:}
   eval "_got=\${SEC_$_sec:-0}"

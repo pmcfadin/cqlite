@@ -435,8 +435,10 @@ grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)' "$AGENT_GAT
 bash scripts/gate-component-verdict.sh "$AGENT_GATE_SUMMARY_FILE" \
      --mode only --component tooling-tests --run-id <id>
 # 0 PASS / 1 NOT-PASS / 4 COULD-NOT-MEASURE (no verdict available, whatever the reason) / 64 USAGE.
-# It REFUSES a LITE/DELTA block and any block whose `tree-integrity:` token is not PASS, rather than
-# answering about a run the gate called non-certifying.
+# It REFUSES a LITE/DELTA block (4). A block whose `tree-integrity:` token is FAIL returns NOT-PASS (1)
+# — an AFFIRMATIVE reading, because the gate itself declared that run non-certifying and that
+# invalidates every component in the block; SKIP/PENDING/absent/unrecognised return 4, because tree
+# stability was then never measured. Either way it never answers PASS about such a run.
 #
 # NOT A COMPLETION PROBE, AND NO OPINION ABOUT LIVENESS — NEVER IN A LOOP. Establish completion with
 # one of the two probes above (or the exit status); `gate-liveness.sh` is the three-valued liveness
