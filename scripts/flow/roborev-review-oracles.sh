@@ -1302,14 +1302,18 @@ roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-fi
   rm -f "$repo_errfile"
   # AFFIRMATIVE SHAPE TEST on the identity itself, for the same reason each issue number gets one: it
   # is remote text, and it is the value every same-repository decision below is compared against.
-  case "$repo_nwo" in
-    */*) ;;
-    *)
-      rm -f "$rel_errfile"
-      ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: 'gh repo view --json nameWithOwner' did not answer with an owner/name pair, so which repository a closing reference points at could not be established"
-      return 0
-      ;;
-  esac
+  # A BARE `*/*` IS TOO LOOSE, AND ITS FAILURE MODE IS THE WORST ONE ON THIS PATH (#3759 r2, found
+  # while fixing the class): `x/`, `/x`, `a/b/c` and a whitespace- or newline-bearing answer all match
+  # it, and an identity that matches nothing then makes EVERY reference compare unequal — so the probe
+  # renders a confident "these references point at another repository" DECLARED SKIP, an answer about
+  # the pull request derived from an identity nobody established. The pattern is therefore exactly one
+  # `owner/name` pair over GitHub's own character set, so anything else takes the could-not-check
+  # branch with the rest of the class.
+  if [[ ! "$repo_nwo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+    rm -f "$rel_errfile"
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: 'gh repo view --json nameWithOwner' did not answer with a single owner/name pair, so which repository a closing reference points at could not be established"
+    return 0
+  fi
   # ===== THE LINKED ISSUE COMES FROM THE STRUCTURED RELATION, NEVER FROM THE PR BODY (#3626) =====
   # #3626 DELETED a PR-body link requirement, and not because Markdown is hard to parse: A PULL-REQUEST
   # BODY IS EDITABLE AT ANY TIME BY ANYONE WITH WRITE ACCESS, WITH NO PER-EDIT ATTRIBUTION, while a
@@ -1471,6 +1475,39 @@ for ref in refs:
       continue
     fi
     rm -f "$issue_errfile"
+    # ===== THE PAYLOAD IS VALIDATED AFFIRMATIVELY BEFORE ANY CONCLUSION IS DRAWN FROM IT (#3759 r2) =
+    # A ZERO EXIT FROM THE SCANNER IS NOT "THE THREAD WAS READ". The scanner coerces a valid-JSON but
+    # malformed payload — `{}`, `{"comments": null}`, `{"comments": {}}` — to an EMPTY comment list
+    # and exits 0, which is CORRECT for its own contract (*given these comments, is there an
+    # authorization in them?* — over no comments, the answer is no). It is this CALLER that then drew
+    # the unwarranted conclusion, rendering "checked: no matching marker" over a thread nothing was
+    # ever read from. The scanner is reused UNMODIFIED by design, so the validation belongs here.
+    #
+    # AND THIS IS THE INVARIANT, NOT THE SITE. Round 1 fixed the same collapse on the RELATION payload
+    # and left the sibling input on the same path with it. The rule for this whole probe is: EVERY
+    # INPUT IS VALIDATED AFFIRMATIVELY, AND "COULD NOT TELL" NEVER COLLAPSES ONTO AN ANSWER. The
+    # inputs are the current-repository identity, the relation payload, each reference's
+    # classification token, this comments payload, the scanner's exit status and the scanner's
+    # `state=` — all six now have an affirmative test, and a new input on this path needs one too.
+    if ! printf '%s' "$comments" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+# The object form is what `gh issue view --json comments` emits, measured; a bare top-level list is
+# refused even though the scanner would accept one, because a shape `gh` does not produce is a shape
+# nobody established, and a false could-not-check is the fail-closed direction.
+if not isinstance(data, dict):
+    sys.exit(1)
+if "comments" not in data:
+    sys.exit(1)
+if not isinstance(data["comments"], list):
+    sys.exit(1)
+' 2>/dev/null; then
+      unread+=("#$issue (its comments payload was not a JSON object carrying a comments LIST, so nothing was actually read from that thread — the scanner would have reduced it to zero comments and exited 0, which is NOT a check)")
+      continue
+    fi
     # THE SAME SCANNER, THE SAME KIND, THE SAME SCOPE, THE SAME ALLOWLIST. No new argument, no new
     # grammar, no thread parameter — see the header. The deferral additionally passes the SAME
     # observed count, so `count=` is matched identically on both threads.
@@ -1480,10 +1517,31 @@ for ref in refs:
       result="$(printf '%s' "$comments" | python3 "$WAIVER_SCAN_TOOL" "$kind" "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS" 2>/dev/null)" && scan_rc=0 || scan_rc=1
     fi
     if [ "$scan_rc" -ne 0 ]; then
-      unread+=("#$issue (its comments payload could not be parsed)")
+      # REACHED ONLY FOR A NON-ZERO EXIT THE VALIDATION ABOVE DID NOT ALREADY EXPLAIN: the payload was
+      # affirmatively a JSON object carrying a comments list, so an unparseable payload is no longer
+      # this branch's cause and the text no longer claims it is. Kept as a defensive branch — a
+      # scanner that dies for any other reason must still be a could-not-check and never a check.
+      unread+=("#$issue (the scanner exited non-zero for that thread although its payload was well-formed, so what it found there was never established)")
       continue
     fi
     state="$(printf '%s\n' "$result" | sed -n 's/^state=//p' | head -1)"
+    # ===== THE RETURNED STATE IS A CLOSED GRAMMAR, CHECKED BEFORE IT IS TRUSTED (#3759 r2) =====
+    # An EMPTY or ABSENT `state=` line, or one this code has never judged, used to count as a
+    # successfully checked thread — a verdict derived from a value nobody validated, and the same
+    # collapse as the payload above. The permissive branch is keyed on the AFFIRMATIVE membership,
+    # never on `!= granted`, which is the rule the wrapper already applies to its own verdict keys.
+    #
+    # THE UNION OF THE TWO LOOKUPS' RECOGNITION LISTS, deliberately not narrowed per kind: this is a
+    # RECOGNITION list, not a granting list, every member of it is non-granting except `granted`, and
+    # the escalation below keys on `granted` alone — so per-kind precision here would buy nothing and
+    # would add a second place for those lists to drift.
+    case "$state" in
+      granted|unauthorized|stale|malformed|none|count-mismatch|unavailable) ;;
+      *)
+        unread+=("#$issue (the scanner returned the unrecognised state '${state:-<none>}' for that thread, so what it found there was never established)")
+        continue
+        ;;
+    esac
     read_ok+=("#$issue")
     # ===== ESCALATION ONLY FROM AN ISSUE-SIDE `granted`, KEYED ON THE AFFIRMATIVE VALUE =====
     # An issue-side marker that is itself stale, malformed or unauthorized is a DIFFERENT defect that

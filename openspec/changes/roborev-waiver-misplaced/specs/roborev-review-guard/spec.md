@@ -373,6 +373,24 @@ gaps in one value — what could not be read, **and** how many declared referenc
 Reporting only the first is the same defect as rendering 4's own reason for existing: a value claiming
 more completeness than the probe achieved.
 
+**EVERY INPUT ON THE PROBE PATH SHALL BE VALIDATED AFFIRMATIVELY, AND A ZERO EXIT SHALL NOT BE READ
+AS A SUCCESSFUL READ.** This is the requirement's governing invariant, stated once rather than per
+input, because three successive reviews found the same collapse at a different input each time. The
+probe's inputs are the **current-repository identity**, the **relation payload**, each reference's
+**classification**, each thread's **comments payload**, the scanner's **exit status** and the
+scanner's returned **`state=`**; each SHALL have an affirmative test, and a new input on this path
+SHALL acquire one.
+
+Two consequences that are **not** obvious and SHALL be honoured explicitly. (1) The reused scanner
+coerces a valid-JSON but malformed payload — `{}`, `{"comments": null}`, `{"comments": {}}` — to an
+**empty comment list** and exits **0**. That is correct for the scanner's own contract and the scanner
+SHALL NOT be changed for it; the **caller** SHALL validate the payload as a JSON **object** carrying a
+`comments` **list** before drawing any conclusion, and every other shape SHALL make that thread a
+could-not-check, never a successfully read one. (2) The scanner's returned `state=` SHALL be matched
+against its **closed** recognition set before it is trusted; an **empty**, absent or never-judged state
+SHALL make that thread a could-not-check. The permissive branch SHALL be keyed on **affirmative
+membership**, never on `!= granted`.
+
 **AN UNREADABLE RELATION PAYLOAD IS NOT AN EMPTY RELATION.** Rendering 3 — *"no linked issue is
 declared on this PR"* — is an **affirmative claim about the pull request**, and it SHALL be reachable
 **only** from a payload that was affirmatively read as a JSON **object** carrying a
@@ -403,6 +421,18 @@ means before it can be printed.
 #### Scenario: An unreadable relation payload is not reported as an empty relation
 - **WHEN** the relation payload is unparseable, is not a JSON object, omits the `closingIssuesReferences` key, carries an explicit `null`, or carries a non-list value
 - **THEN** each shape takes the *could not check* rendering naming the broken payload, and none of them reports *"no linked issue is declared on this PR"*
+
+#### Scenario: A valid-JSON but malformed comments payload is not a read thread
+- **WHEN** a probed thread's comments payload parses but is not an object carrying a `comments` list — `{}`, `{"comments": null}`, `{"comments": {}}`, or a non-list value — so the scanner reduces it to zero comments and exits 0
+- **THEN** that thread takes the *could not check* rendering naming the payload, is never reported as checked, and the scanner file is unchanged
+
+#### Scenario: An unrecognised or empty scanner state is not a read thread
+- **WHEN** the scanner returns an empty `state=`, no `state=` line, or a state outside its recognition set
+- **THEN** that thread takes the *could not check* rendering naming the unrecognised state, and is never counted as successfully checked
+
+#### Scenario: The current repository identity is a single owner/name pair
+- **WHEN** the repository resolution answers with something that is not exactly one `owner/name` pair — `x/`, `/x`, `a/b/c`, or a value carrying whitespace
+- **THEN** the outcome is a could-not-check, and in particular the references are **not** reported as a cross-repository declared skip, which would be an answer about the pull request derived from an identity nobody established
 
 #### Scenario: One thread read, another unavailable
 - **WHEN** two linked issues are declared, the first is read with no match, and the second's comments cannot be retrieved

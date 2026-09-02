@@ -495,6 +495,14 @@ if [ "${1:-}" = "issue" ] && [ "${2:-}" = "view" ]; then
           exit 0
         fi
       done
+      # A VERBATIM payload for every thread, so a VALID-JSON-BUT-MALFORMED shape is expressible
+      # (#3759 round 2). `{}`, `{"comments":null}` and `{"comments":{}}` all parse, and the reused
+      # scanner reduces each to zero comments and exits 0 — which is why the CALLER has to validate
+      # the shape, and why the double has to be able to produce it.
+      if [ -n "${STUB_GH_ISSUE_COMMENTS_JSON:-}" ]; then
+        printf '%s\n' "$STUB_GH_ISSUE_COMMENTS_JSON"
+        exit 0
+      fi
       printf '%b' "${STUB_GH_ISSUE_COMMENTS:-}" | STUB_WANT_ISSUE="${3:-}" python3 -c '
 import json, os, sys
 want = os.environ.get("STUB_WANT_ISSUE", "")
@@ -1329,6 +1337,7 @@ export STUB_GH_REPO_NWO='pmcfadin/cqlite'
 export STUB_GH_REPO_RC=0
 export STUB_GH_REPO_ERR=''
 export STUB_GH_ISSUE_COMMENTS=''
+export STUB_GH_ISSUE_COMMENTS_JSON=''
 export STUB_GH_ISSUE_COMMENTS_FAIL=''
 export STUB_GH_ISSUE_COMMENTS_GARBAGE=''
 export STUB_GH_ISSUE_COMMENTS_ERR=''
@@ -1369,6 +1378,7 @@ reset_stub() {
   STUB_GH_REPO_RC=0
   STUB_GH_REPO_ERR=''
   STUB_GH_ISSUE_COMMENTS=''
+  STUB_GH_ISSUE_COMMENTS_JSON=''
   STUB_GH_ISSUE_COMMENTS_FAIL=''
   STUB_GH_ISSUE_COMMENTS_GARBAGE=''
   STUB_GH_ISSUE_COMMENTS_ERR=''
@@ -6117,7 +6127,7 @@ STUB_GH_ISSUE_COMMENTS_GARBAGE='3544'
 run_wrapper "$w_work"
 assert_verdict 'case (mp6/unparseable)' FAIL 1
 assert_says 'case (mp6/unparseable) an unparseable comments payload is its own could-not-check cause' \
-  'NOT read: #3544 \(its comments payload could not be parsed\)'
+  'NOT read: #3544 \(its comments payload was not a JSON object carrying a comments LIST'
 reset_stub
 reset_stub
 mp_waiver_fixture
@@ -6354,7 +6364,7 @@ STUB_GH_REPO_NWO='not-an-owner-name-pair'
 run_wrapper "$w_work"
 assert_verdict 'case (mp14e/malformed)' FAIL 1
 assert_says 'case (mp14e/malformed) an answer that is not an owner/name pair is not an identity' \
-  'did not answer with an owner/name pair'
+  'did not answer with a single owner/name pair'
 assert_lacks 'case (mp14e/malformed) and nothing is probed on an unestablished identity' '^waiver: MISPLACED'
 reset_stub
 
@@ -6376,6 +6386,93 @@ assert_says 'case (mp14f) the same-repository thread is reported as checked' \
 assert_says 'case (mp14f) and the cross-repository skip is declared in the SAME value' \
   '1 cross-repository closing reference\(s\) declared and deliberately NOT probed'
 reset_stub
+
+printf '== (mp15) #3759 r2: a valid-JSON but MALFORMED comments payload is could-not-check ==\n'
+# ROUND-2 BLOCKER, AND THE THIRD APPEARANCE OF ONE SHAPE. The reused scanner reduces `{}`,
+# `{"comments":null}` and `{"comments":{}}` to an EMPTY comment list and exits 0 — correct for its own
+# contract (*given these comments, is there an authorization in them?* over no comments is "no"), and
+# the scanner is reused UNMODIFIED by design. It was this CALLER that turned a zero exit into "the
+# thread was read", rendering "checked: no matching marker" over a thread nothing was read from.
+# THE FIXTURE MAKES THE FALSE CLAIM CONCRETE: a real, would-have-granted marker exists on #3544, and a
+# malformed payload must never let the probe say it looked and found nothing.
+for _mp15_shape in \
+  'empty-object:{}' \
+  'null-comments:{"comments":null}' \
+  'object-comments:{"comments":{"author":{"login":"pmcfadin"}}}' \
+  'string-comments:{"comments":"none"}' ; do
+  reset_stub
+  mp_waiver_fixture
+  STUB_GH_LINKED_ISSUES='3544'
+  STUB_GH_ISSUE_COMMENTS_JSON="${_mp15_shape#*:}"
+  run_wrapper "$w_work"
+  assert_verdict "case (mp15/${_mp15_shape%%:*})" FAIL 1
+  assert_no_marker_form "case (mp15/${_mp15_shape%%:*})"
+  assert_says "case (mp15/${_mp15_shape%%:*}) the thread is could-not-check, naming what was not a comments LIST" \
+    'NOT read: #3544 \(its comments payload was not a JSON object carrying a comments LIST'
+  assert_lacks "case (mp15/${_mp15_shape%%:*}) and the probe NEVER claims it checked that thread" \
+    'checked: no matching marker there either'
+  assert_lacks "case (mp15/${_mp15_shape%%:*}) nor does a zero exit from the scanner become a grant" \
+    '^prompt-content: WAIVED'
+  reset_stub
+done
+
+printf '== (mp15b) #3759 r2: the WELL-FORMED payload is read (the control) ==\n'
+# Without this, (mp15) would pass identically if the probe had simply stopped reading anything. Same
+# fixture, same thread, same marker — only the payload SHAPE differs, and that one variable flips the
+# outcome from could-not-check to MISPLACED.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS_JSON="{\"comments\":[{\"author\":{\"login\":\"pmcfadin\"},\"body\":\"$mp_waive_grant\"}]}"
+run_wrapper "$w_work"
+assert_verdict 'case (mp15b)' FAIL 1
+assert_says 'case (mp15b) a well-formed payload IS read and its marker IS found' \
+  '^waiver: MISPLACED \(an authorization for THIS review \(this base, head and job\) is on LINKED ISSUE #3544'
+assert_lacks 'case (mp15b) and it is not reported as unreadable' 'was not a JSON object carrying a comments LIST'
+reset_stub
+
+printf '== (mp16) #3759 r2: an UNRECOGNISED or EMPTY scanner state is could-not-check, not checked ==\n'
+# THE SECOND HALF OF THE SAME INVARIANT. The `state=` line is an INPUT to this probe like any other,
+# so it is validated against the closed recognition grammar before a conclusion is drawn from it — the
+# permissive branch keyed on AFFIRMATIVE membership, never on `!= granted`. An empty, absent or
+# never-judged state used to count as a successfully checked thread.
+#
+# THE FIXTURE SUBSTITUTES THE ARTIFACT, NOT A PATH (job 27): a scratch copy of `scripts/flow/` whose
+# scanner is replaced. There is deliberately no way to point the wrapper at another enforcer — that
+# override WAS the hole — so a case needing different scanner behaviour replaces the file, which is a
+# state a real checkout can be in. The replacement answers `none` for an EMPTY comment list (so the
+# PR-side scan still reaches the probe) and the state under test for a non-empty one.
+for _mp16_state in 'unrecognised:totally-unknown-state' 'empty:' ; do
+  reset_stub
+  _mp16_dir="$tmp/scanner-state-${_mp16_state%%:*}"
+  mkdir -p "$_mp16_dir"
+  cp "$WRAPPER_REAL" "$ORACLES_SRC" "$CHECKS_SRC" "$_mp16_dir/"
+  if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+    cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_mp16_dir/"
+  fi
+  cat >"$_mp16_dir/roborev-waiver-scan.py" <<MP16SCAN
+#!/usr/bin/env python3
+import json, os, sys
+data = json.load(sys.stdin)
+n = len(data.get("comments") or [])
+sys.stdout.write("state=%s\n" % ("none" if n == 0 else os.environ.get("MP16_STATE", "")))
+for _k in ("author", "scope", "reason", "detail", "issues", "count"):
+    sys.stdout.write("%s=\n" % _k)
+MP16SCAN
+  chmod +x "$_mp16_dir/roborev-waiver-scan.py"
+  mp_waiver_fixture
+  STUB_GH_LINKED_ISSUES='3544'
+  STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+  MP16_STATE="${_mp16_state#*:}" run_wrapper --wrapper "$_mp16_dir/roborev-review.sh" "$w_work"
+  assert_verdict "case (mp16/${_mp16_state%%:*})" FAIL 1
+  assert_no_marker_form "case (mp16/${_mp16_state%%:*})"
+  assert_says "case (mp16/${_mp16_state%%:*}) an unvalidated state does not make a thread checked" \
+    'NOT read: #3544 \(the scanner returned the unrecognised state'
+  assert_lacks "case (mp16/${_mp16_state%%:*}) and the probe never claims it checked that thread" \
+    'checked: no matching marker there either'
+  assert_lacks "case (mp16/${_mp16_state%%:*}) nor does an unrecognised state escalate" '^waiver: MISPLACED'
+  reset_stub
+done
 
 printf '== (mp12) #3759 MUTANT: probing on EVERY state reds — the escalation is only from none ==\n'
 # A CASE THAT PASSES AGAINST BOTH THE REAL CODE AND ITS NAIVE FORM MEASURES NOTHING. The naive form
