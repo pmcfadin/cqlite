@@ -125,22 +125,46 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result};
 
-/// Build the [`Error::ColumnDecode`] a row-assembly column handler propagates,
-/// and record the condition at `warn!` — so a `tracing::debug!` is no longer the
-/// only trace of it, and an operator sees the column, its type and the offset even
-/// when the caller only surfaces the top-level message.
+/// Build the [`Error::ColumnDecode`] a row-assembly column handler propagates.
 ///
 /// `column_type` comes from [`dispatch_type`] and is the type the decode was
 /// actually DRIVEN FROM — see there for why that is not always the on-disk header
 /// marshal type.
+///
+/// # Why this does NOT `warn!` (issue #3721, roborev job 82)
+///
+/// It used to, on the reasoning that a `tracing::debug!` must not be the only
+/// trace of the condition (this issue's AC6). The premise was right and the site
+/// is wrong: **a failure here is not yet known to be a failure.** This
+/// constructor cannot see its caller, and two callers legitimately retry:
+///
+/// * a BTI point read whose row body STRADDLES a chunk boundary reports
+///   `row body exhausted` — itself an `Error::ColumnDecode` — which
+///   `point_read_remember_or_bail` REMEMBERS and re-parses against a larger
+///   window, where it typically succeeds (#1572);
+/// * an index-positioned walk may fall back to the full-partition path.
+///
+/// So warning here fires on CLEAN reads, and on a large BTI table straddling is
+/// ordinary rather than exceptional. A corruption warning an operator learns to
+/// ignore is worse than no warning: it is the "a guard that reds on correct input
+/// is the guard agents learn to waive" failure, pointed at a human.
+///
+/// AC6 is satisfied WITHOUT it, and always was — by the typed, matchable
+/// `Error::ColumnDecode` this returns, which propagates to the caller and is
+/// counted once at the reader's observability boundary with its category
+/// (`data_access::sequential`, issue #1704). The ERROR is the record; the log
+/// line never was. `debug!` is retained for developers, where a provisional
+/// failure belongs.
 pub(super) fn column_decode_failure(
     column_name: &str,
     column_type: &str,
     offset: usize,
     cause: Error,
 ) -> Error {
-    tracing::warn!(
-        "V5CompressedLegacy: column '{}' ({}) at offset {} FAILED to decode: {}",
+    tracing::debug!(
+        "V5CompressedLegacy: column '{}' ({}) at offset {} failed to decode \
+         (PROVISIONAL — a chunk-straddle retry or an index fallback may still \
+         succeed; the returned Error::ColumnDecode is the record): {}",
         column_name,
         column_type,
         offset,
