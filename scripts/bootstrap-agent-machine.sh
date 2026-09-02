@@ -472,6 +472,73 @@ sccache_bin() {
   return 1
 }
 
+# ---- AND NOTHING RESOLVED FROM A USER-WRITABLE LOCATION IS EVER RUN BY ROOT ----
+# (issue #3727, roborev job 415 — HIGH, introduced by job 413's resolver above.)
+#
+# THE INVARIANT: A BINARY RESOLVED FROM A LOCATION THE INVOKING ACCOUNT CAN WRITE MUST NEVER BE
+# EXECUTED BY THIS PROCESS WHILE IT IS ROOT. The documented invocation is
+# `sudo bash scripts/bootstrap-agent-machine.sh`, so this process is root while stage 2 above
+# names <the invoking account's home>/.cargo/bin/sccache — a path that account can REPLACE.
+# Executing it here is arbitrary code execution as root. On this fleet every lane runs as the
+# same account with a writable home, so the party who can plant that file is a PEER LANE and not
+# the invoker: a NON-INVOKER route, which this repo classifies as a defect rather than an
+# out-of-model invoker capability.
+#
+# WHY REFUSING TO RUN IT BEATS TESTING ITS OWNERSHIP. "Is this file writable by anyone but root"
+# is a TOCTOU race against the exec that follows it, and answering it correctly needs the group
+# and other bits AND every parent directory. Not executing removes the class instead of testing
+# for it. And telling a stage-1 (PATH) hit from a stage-2 (home) hit is that SAME ownership
+# judgement — root's PATH is normally sudo's `secure_path`, but "normally" is not a measurement —
+# so root runs NEITHER. The only thing lost is a cosmetic `--version` line, and its absence is
+# REPORTED rather than printed as an empty `()`.
+#
+# THE OTHER ROUTE TO THE SAME INVARIANT is section 5b2's: it runs the binary INSIDE the
+# already-dropped-privilege session (`scc_session_run`, i.e. `sudo -n -u <the invoking account>`),
+# which is available there because privilege has by then been resolved and probed. That is not
+# available here: section 2 runs long before any identity or sudo probe, and a declared TEST MODE
+# run with no proven sandbox must make no privileged call at all. So here the answer is to run
+# nothing. Those are the ONLY two sanctioned execution routes in this script, and
+# test_bootstrap_agent_machine.sh's `sccache-exec` census FAILS by name on any third one.
+#
+# The euid is a POSITIONAL parameter for `sccache_bin`'s reason: `$EUID` is bash's own readonly,
+# so a suite running as an ordinary account has no other way to drive the root branch, and a
+# positional default hands a real invoker nothing (an environment override would be settable by
+# exactly the party it constrains).
+SCC_SELFRUN_WHY=""
+
+# scc_selfrun_ok <euid>: rc 0 iff running a user-resolved binary in THIS process crosses no
+# privilege boundary. rc 1 with SCC_SELFRUN_WHY naming the reason otherwise. An UNREADABLE euid
+# takes the refusing branch: "cannot tell" must never inherit the permissive answer.
+scc_selfrun_ok() {
+  local euid="$1"
+  SCC_SELFRUN_WHY=""
+  case "$euid" in
+    ''|*[!0-9]*)
+      SCC_SELFRUN_WHY="this process's \$EUID is unreadable, so whether executing it would cross a privilege boundary cannot be established"
+      return 1 ;;
+  esac
+  if [ "$euid" = 0 ]; then
+    SCC_SELFRUN_WHY="this process is ROOT (the documented invocation is 'sudo bash <this script>') and the binary was resolved from a location the invoking account can write, so executing it here would run a user-replaceable file with full privilege"
+    return 1
+  fi
+  return 0
+}
+
+# scc_selfrun <euid> <bin> [args...]: run <bin> ONLY when scc_selfrun_ok says no boundary is
+# crossed. Nothing is executed otherwise. The predicate is asked HERE as well as by the caller
+# (which needs SCC_SELFRUN_WHY for its message) deliberately: one source of truth, enforced at
+# the exec itself, so a future caller that forgets to ask still cannot make root run it.
+scc_selfrun() {
+  local euid="$1" bin="$2"
+  shift 2
+  scc_selfrun_ok "$euid" || return 1
+  if [ -z "$bin" ]; then
+    SCC_SELFRUN_WHY="no binary was resolved, so there is nothing to run"
+    return 1
+  fi
+  "$bin" "$@"
+}
+
 # ---- mold link accelerator helpers (Linux only, issue #2859) ----
 # mold is the fast Linux linker; linking is the one build cost sccache cannot
 # cache, so every --lite round and full gate re-links every test binary from
@@ -637,10 +704,22 @@ hdr "Gate accelerators (issue #1848)"
 # reported as the UNKNOWN it is, because "not installed" is a claim this run cannot make.
 scc_accel_rc=0
 sccache_bin || scc_accel_rc=$?
-if [ "$scc_accel_rc" -eq 0 ] && [ "$SCCACHE_BIN_WHERE" = PATH ]; then
-  ok "sccache present ($("$SCCACHE_BIN" --version 2>/dev/null | head -1)) — cross-worktree compile cache"
+# THE TOOL'S OWN VERSION LINE, AND ONLY WHERE RUNNING IT CROSSES NO PRIVILEGE BOUNDARY (issue
+# #3727, roborev job 415). Under the documented `sudo bash <this script>` this executes NOTHING
+# and the clause below says why — see scc_selfrun. The predicate is asked separately from the run
+# because a command substitution is a SUBSHELL, so SCC_SELFRUN_WHY set inside it would be lost.
+scc_accel_ver=""
+scc_accel_vc=""
+if [ "$scc_accel_rc" -eq 0 ] && scc_selfrun_ok "${EUID-}"; then
+  scc_accel_ver=$(scc_selfrun "${EUID-}" "$SCCACHE_BIN" --version 2>/dev/null | head -1) || true
+  scc_accel_vc=" (${scc_accel_ver:-version line unreadable})"
 elif [ "$scc_accel_rc" -eq 0 ]; then
-  ok "sccache present ($("$SCCACHE_BIN" --version 2>/dev/null | head -1)) at '$SCCACHE_BIN' — not on this process's PATH, resolved from the invoking account's ~/.cargo/bin, which is the same fallback agent-gate.sh applies before it detects sccache, so a gate WILL use it — cross-worktree compile cache"
+  scc_accel_vc=" (version NOT read — $SCC_SELFRUN_WHY)"
+fi
+if [ "$scc_accel_rc" -eq 0 ] && [ "$SCCACHE_BIN_WHERE" = PATH ]; then
+  ok "sccache present$scc_accel_vc — cross-worktree compile cache"
+elif [ "$scc_accel_rc" -eq 0 ]; then
+  ok "sccache present$scc_accel_vc at '$SCCACHE_BIN' — not on this process's PATH, resolved from the invoking account's ~/.cargo/bin, which is the same fallback agent-gate.sh applies before it detects sccache, so a gate WILL use it — cross-worktree compile cache"
 elif [ "$scc_accel_rc" -eq 2 ]; then
   # NO install line here, and deliberately: `--yes` would RUN it, and installing a tool whose
   # presence this run could not determine is a side effect taken on an unknown state.
@@ -3420,6 +3499,16 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     __dir=$(mktemp -d "${TMPDIR:-/tmp}/cqlite-sccache-probe.XXXXXX" 2>/dev/null) || {
       SCC_ORACLE_WHY="a private SCCACHE_DIR could not be created"; return 1; }
     SCC_PROBE_DIRS+=("$__dir")
+    # THE DIRECTORY IS CREATED HERE AND USED THERE. mktemp gives it to whoever this process is —
+    # root, under the documented invocation — while the probe now runs as the invoking account,
+    # which could then neither read nor write it. Handing it to that account is what keeps the
+    # oracle measurable after the privilege drop above; a chown to one's own uid is permitted, so
+    # this is a successful no-op when bootstrap is already running as that account. Not fatal on
+    # failure: an unusable probe directory surfaces as the named "produced no stats" cause below,
+    # which is a measurement of the probe, not a crash. Cleanup still runs as this process.
+    if [ -n "${SCC_SELF_USER:-}" ] && have chown; then
+      bounded 5 chown "$SCC_SELF_USER" "$__dir" >/dev/null 2>&1 || true
+    fi
     for __try in 0 1 2; do
       # A PRIVATE PORT IS REQUIRED even though nothing is started: without it the client
       # connects to the DEFAULT port, i.e. to the PRODUCTION server, and would report ITS cap
@@ -3428,12 +3517,27 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
       # retried on a different port rather than trusted.
       __port=$(( 40000 + (($$ + __try * 997) % 20000) ))
       __rc=0
+      # THROUGH THE DROPPED-PRIVILEGE SESSION, NEVER IN THIS PROCESS (issue #3727, roborev job
+      # 415 — HIGH). `$SCC_SCCACHE_BIN` is a path the INVOKING ACCOUNT can write (stage 2 of
+      # `scc_resolve_binary` names <that account's home>/.cargo/bin/sccache), and under the
+      # documented `sudo bash <this script>` this process is ROOT — so running it here was
+      # arbitrary code execution as root, plantable by a peer lane sharing that home. It is now
+      # run by the same `sudo -n -u <that account>` session the other three sccache calls in
+      # this section use, and every one of them keeps its own bound. `scc_session_run` applies
+      # SCC_ENV_SCRUB outside sudo, so the scrub is unchanged; the inner `env` sets the probe's
+      # three values INSIDE the session, where they override whatever it sees on its own.
+      #
+      # `-u SCCACHE_CACHE_SIZE` IS LOAD-BEARING IN THE DEFAULT ARM, and only became so with this
+      # change: the session is a PAM session on a box this very section may have PINNED, so it
+      # legitimately sees SCCACHE_CACHE_SIZE from /etc/environment. Left inherited, "sccache's
+      # own default" would measure the persisted value, SEEN would always equal DEFAULT, and
+      # every pinned box would report the declared ambiguity forever.
       if [ "$__have" = 1 ]; then
-        __json=$(bounded 20 env "${SCC_ENV_SCRUB[@]}" SCCACHE_DIR="$__dir" \
+        __json=$(scc_session_run 20 env SCCACHE_DIR="$__dir" \
           SCCACHE_SERVER_PORT="$__port" SCCACHE_CACHE_SIZE="$__v" \
           "$SCC_SCCACHE_BIN" --show-stats --stats-format json 2>/dev/null) || __rc=$?
       else
-        __json=$(bounded 20 env "${SCC_ENV_SCRUB[@]}" SCCACHE_DIR="$__dir" \
+        __json=$(scc_session_run 20 env -u SCCACHE_CACHE_SIZE SCCACHE_DIR="$__dir" \
           SCCACHE_SERVER_PORT="$__port" \
           "$SCC_SCCACHE_BIN" --show-stats --stats-format json 2>/dev/null) || __rc=$?
       fi
