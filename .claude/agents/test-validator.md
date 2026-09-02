@@ -76,7 +76,10 @@ snapshot (do NOT quote a fixed percentage; it drifts). For known failing tables 
 
 ## Gate awareness (issues #1821/#1855/#2084)
 
-For fast per-round verification run `scripts/agent-gate.sh --lite` (~1-5 min). Its component set is
+For fast per-round verification run `scripts/agent-gate.sh --lite`. **Its cost is a function of the diff, not a
+flat `~1-5 min` (#3764):** that figure is the warm NARROW-diff case (measured median 1.4 min), while a diff
+touching `cqlite-core/src/` measures median 20 min (up to 43 min locally; up to ~104 min under peer load is
+reported, #3764) and a cold `clippy` alone adds 16-24 min whatever the diff — see CLAUDE.md's Lite row for the full model. Its component set is
 `LITE_COMPONENTS` in `scripts/agent-gate.sh` — read it there, or run `scripts/agent-gate.sh --lite-list`,
 rather than trusting a transcribed list. Two things worth knowing: lite clippy is **per-package scoped**
 (NOT whole-workspace), and it includes **`roborev-lints`** (#2656 mechanized three recurring roborev

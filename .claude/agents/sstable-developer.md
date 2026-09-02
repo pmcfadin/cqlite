@@ -73,7 +73,12 @@ below-floor and is an EXACT allowlist, not just a floor) and `version_gate/bti.r
 ## Gate & division of labor (issue #1855)
 
 Your job as the implementer ends at **commit + push + report** with `--lite`/targeted-test evidence. Verify
-with `scripts/agent-gate.sh --lite` (~1-5 min) each fix round, iterating until it PASSes. Its component set
+with `scripts/agent-gate.sh --lite` each fix round, iterating until it PASSes. **Budget it by your diff, not
+by a flat number (#3764):** `~1-5 min` is the warm NARROW-diff case only (measured median 1.4 min); a diff
+touching `cqlite-core/src/` makes `--lite` a near-workspace run — measured median 20 min, up to 43 min
+locally, and up to ~104 min under peer load (reported, #3764) — and a cold `clippy` alone adds 16-24 min
+whatever the diff. CLAUDE.md's
+Lite row has the full cost model. Its component set
 is `LITE_COMPONENTS` in `scripts/agent-gate.sh` — read it there or run `scripts/agent-gate.sh --lite-list`
 rather than trusting a transcribed list; note lite clippy is **per-package scoped** (NOT whole-workspace)
 and lite includes **`roborev-lints`** (#2656). **NEVER invoke the full `scripts/agent-gate.sh` yourself** —
