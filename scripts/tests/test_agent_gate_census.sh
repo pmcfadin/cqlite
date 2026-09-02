@@ -64,7 +64,11 @@ for fn in _ansi_stripped_log _census_sidecar _census_kind _census_write _census_
           _census_scoped_record _python_tier_ran \
           _census_status_for _census_finalize _census_classify _census_record _census_annotate \
           _status_is_nonfailing run_delta_node_tests \
-          census_summary_line _status_is_nonfailing; do
+          census_summary_line _status_is_nonfailing \
+          _failassert_sidecar _failassert_write _failassert_neutralise _failassert_clean \
+          _failassert_tool _failassert_relpath_ok _failassert_is_doctest_id \
+          _failassert_is_shelltestid _failassert_is_pytestid _failassert_is_jestid \
+          _failassert_record; do
   src=$(sed -n "/^$fn() {/,/^}$/p" "$GATE")
   if [ -z "$src" ]; then
     echo "FAIL - could not extract $fn from $GATE — renamed or reshaped; this guard must not pass having tested nothing (#3625)" >&2

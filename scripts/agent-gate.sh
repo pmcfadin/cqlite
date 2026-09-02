@@ -6738,39 +6738,682 @@ _fm_render() {
 
 # _fm_annotate <component>: the bracketed suffix appended to a SUMMARY component line.
 # NEVER empty — that is the contract (see the header).
+#
+# #3765 HALF 2 — THE BRACKET IS LABELLED. It used to render bare:
+#     tooling-tests:  FAIL (1149s)  [test ws0-corpus-gen default-features | + …]
+# An unlabelled, test-SHAPED string on a FAIL line reads as the failing test's identity,
+# and a coordination lead acted on exactly that misreading. The label says what the
+# bracket IS — the invocation this component ran — so it can no longer be confused with
+# the `failed-assert:` field beside it. The label is applied HERE, in ONE place, over a
+# bracket-free BODY: the eight renderings below would otherwise be eight chances to
+# spell it differently, which is precisely the drift #3453 removed.
 _fm_annotate() {
+  printf '[invocation: %s]' "$(_fm_annotate_body "$1")"
+}
+
+# _fm_annotate_body <component>: the bracket's CONTENT. Never empty (see the header).
+_fm_annotate_body() {
   local class obs
   if ! class=$(_fm_component_class "$1"); then
     # Not declared anywhere: name that, distinctly from a declared-cargo component whose
     # observation is missing. The guard test makes this unreachable for COMPONENTS.
-    printf '[UNCLASSIFIED — not declared in _fm_component_class (#3453)]'
+    printf 'UNCLASSIFIED — not declared in _fm_component_class (#3453)'
     return 0
   fi
   if obs=$(_fm_render "$1") && [ -n "$obs" ]; then
     case "$class" in
-      no-cargo) printf '[%s !declared-no-cargo]' "$obs" ;;
+      no-cargo) printf '%s !declared-no-cargo' "$obs" ;;
       # An `unobservable` component may ALSO run cargo in this shell. Naming both is the
       # only truthful rendering: the observed sets are real, and they are not the whole
       # story, so the class text rides along ADDITIVELY rather than being displaced.
-      unobservable:*) printf '[%s | + %s]' "$obs" "$(_fm_unobservable_desc "${class#unobservable:}")" ;;
-      *)        printf '[%s]' "$obs" ;;
+      unobservable:*) printf '%s | + %s' "$obs" "$(_fm_unobservable_desc "${class#unobservable:}")" ;;
+      *)        printf '%s' "$obs" ;;
     esac
     return 0
   fi
   case "$class" in
-    no-cargo)       printf '[no-cargo]' ;;
-    unobservable:*) printf '[%s]' "$(_fm_unobservable_desc "${class#unobservable:}")" ;;
+    no-cargo)       printf 'no-cargo' ;;
+    unobservable:*) printf '%s' "$(_fm_unobservable_desc "${class#unobservable:}")" ;;
     # An `indirect` component with an EMPTY sidecar is a RECORDING GAP, not a licence to
     # claim its driver ran (roborev job 273, F3): every indirect component records its
     # driver's reach at execution time, and record_result's
     # _fm_note_if_no_cargo_observed names a SKIP/FAIL that never got that far. Reaching
     # here means neither happened, so the honest report is UNDECLARED — carrying the same
     # token every existing detector greps for — naming the driver whose outcome is missing.
-    indirect:*)     printf '[UNDECLARED — the outcome of driver '\''%s'\'' was never recorded (#3453)]' "${class#indirect:}" ;;
-    *)              printf '[UNDECLARED]' ;;
+    indirect:*)     printf 'UNDECLARED — the outcome of driver '\''%s'\'' was never recorded (#3453)' "${class#indirect:}" ;;
+    *)              printf 'UNDECLARED' ;;
   esac
   return 0
 }
+
+# ==== FAILED-ASSERT identity on a FAIL line (issue #3765) ====
+#
+# THE DEFECT. A failing component's line read:
+#     tooling-tests:  FAIL (1149s)  [test ws0-corpus-gen default-features | + …]
+# The bracket is the #3453 INVOCATION annotation. It was UNLABELLED and it is
+# test-SHAPED, so a reader identifies `ws0-corpus-gen` as the failing test — which is
+# wrong. The real assert (`FAIL - 1465-skip-declares: …`) lived ONLY in the component
+# log, and CLAUDE.md forbids reading gate.log while simultaneously requiring a flake
+# citation to name the ASSERT rather than the component: unsatisfiable for a FAIL. Real
+# cost: a coordination lead refused a lane's (correct) flake attribution because the
+# bracket "named a different test". Both halves are fixed here — the bracket is now
+# LABELLED `invocation:` (see _fm_annotate), and the FAIL line carries `failed-assert:`.
+#
+# THE STATES ARE FOUR, AND THEY ARE TEXTUALLY DISTINCT, because they are different
+# operator facts and a positive verdict requires an AFFIRMATIVE MEASUREMENT:
+#   `<N> RECOGNISED (<tier>): …`  an identity was extracted (count is the TRUE total;
+#                                 at most FAILASSERT_SHOW names are listed, remainder
+#                                 DECLARED as `+K more`).
+#   `0 RECOGNISED (…)`            the log WAS read and scanned and nothing matched (or
+#                                 it was empty). Never a bare `0`: the recogniser set is
+#                                 documented NON-EXHAUSTIVE, so a bare zero would read
+#                                 as a verified all-clear from an incomplete scan.
+#   `not extractable (<cause>)`   the log could not be read/normalised, or the extractor
+#                                 could not run. NEVER collapsed onto `0 RECOGNISED` —
+#                                 "nothing found" and "could not look" are the two facts
+#                                 this repo most often conflates.
+#   `not recorded (<why>)`        no extraction ran for this line at all (a synthetic
+#                                 self-test block, or a runner that appends to NAMES
+#                                 without reaching an extraction site).
+#
+# SIDECAR, NOT A THIRD RESULT FIELD. `record_result`'s `.result` file is TWO whitespace
+# fields ONLY (~60 call sites and a 2-field `read -r _st _secs` reader that would
+# silently absorb a third), so this rides a per-component sidecar exactly as the #3453
+# feature matrix does.
+#
+# EXTRACTION HAPPENS AT THE COMPONENT BOUNDARY, not at emit: the log is complete and
+# closed there, and every component passes through record_result (the pooled ones from
+# their own subshell, which cannot mutate the parent's arrays but can write a file).
+#
+# #3400 COLOUR IMMUNITY AT THE PARSE SITE. The log is normalised through the gate's own
+# `_ansi_stripped_log` — the ONE stripper — and the STRIPPED path is what the extractor
+# receives, so there is no second copy to drift. `_ansi_stripped_log` FAILs CLOSED on an
+# unreadable log and that is rendered as a NAMED `not extractable`, never as "no failures
+# found". The extractor reads by REDIRECTION, never a pipe.
+FAILASSERT_SHOW=3
+
+# Exported (`export -f`) because the cli-tests component body runs under `bash -c`
+# and must see the SAME implementation rather than a second copy of it.
+# _ansi_stripped_log <logfile> — echo a path to <logfile> with ANSI escapes removed.
+#
+# roborev round-15 finding (HIGH), and the premise checked out: `.github/workflows/gate.yml`
+# (the nightly FULL gate) sets `CARGO_TERM_COLOR: always`, as do 17 other workflows under
+# .github/workflows/ (18 in total, measured — an earlier version of this comment said 8, which was
+# never measured) and scripts/local/pre-merge.sh. Cargo then emits
+#     ESC[1mESC[92m     RunningESC[0m unittests src/lib.rs (...)
+# with the reset sequence sitting BETWEEN `Running` and the path — so every parser keyed on
+# the literal text sees nothing. MEASURED on both guards, and the two directions differ:
+#   * check_unittest_targets_ran  -> FALSE FAIL: the new lanes would red on every clean
+#     nightly run, reporting "no Running unittests line" about a perfectly healthy log.
+#   * check_no_unexpected_zero_tests -> VACUOUS PASS: a target running ZERO tests is never
+#     associated with its result, so the #2039 guard silently reports OK. That one is
+#     PRE-EXISTING and affects its OTHER CALLER on nightly CI too — which is `cli-tests`, both
+#     of whose passes call it. An earlier version of this comment also named `core-tests`;
+#     core-tests does NOT call this guard, and that claim was never measured. Filed as #3400.
+#
+# Stripping is done ONCE into a sibling file, not per line and not through a pipe. A pipe
+# would put the reading loop in a SUBSHELL and its accumulated verdict variables would be
+# discarded — which for these guards means silently passing, the exact failure they exist to
+# prevent. The ESC byte is injected via printf rather than written as `\x1b`, because BSD sed
+# does not honour `\x` escapes and macOS is a first-class gate host.
+_ansi_stripped_log() {
+  local logfile="$1" out esc
+  # FAIL CLOSED on an unreadable log (roborev round-25, Medium). Returning the original path let the
+  # caller parse a file it had just failed to read, and a guard that parses nothing reports nothing
+  # wrong. The caller's own fail-closed branch is what should decide, so tell it the truth.
+  [ -r "$logfile" ] || return 1
+  esc=$(printf '\033')
+  out="$logfile.ansi-stripped"
+  if sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" "$logfile" > "$out" 2>/dev/null; then
+    printf '%s' "$out"
+  else
+    # A FAILED normalisation is not "use the coloured original": under CARGO_TERM_COLOR the
+    # coloured original is exactly what the parsers cannot read (round 15), so silently handing it
+    # back converts a normalisation failure into a vacuous PASS. Non-zero, and the caller FAILs.
+    return 1
+  fi
+}
+
+# The recogniser set lives in ONE named place, scripts/ci/gate-failed-assert.sh, with a
+# stated rule per entry, MEASURED against the 174 real FAILed component logs retained on
+# a fleet box. Resolved from the checkout with NO env override: the party the field
+# constrains must not choose its own extractor (#3312 job 27).
+_failassert_tool() { printf '%s/scripts/ci/gate-failed-assert.sh' "$REPO_ROOT"; }
+_failassert_sidecar() { printf '%s/%s.failassert' "${LOG_DIR:-}" "$1"; }
+
+# _failassert_write <component> <value>: best-effort append-free write. A failed write
+# costs a visibly `not recorded` field, never a wrong one, and must never fail the
+# component whose failure it describes.
+_failassert_write() {
+  local f
+  f=$(_failassert_sidecar "$1") || return 0
+  printf '%s\n' "$2" > "$f" 2>/dev/null || true
+  return 0
+}
+
+# _failassert_neutralise: REMOVE THE FREE-TEXT CHANNEL. Every URL-shaped, authority-shaped,
+# query-shaped or credential-KEYED token is replaced WHOLESALE with a FIXED placeholder,
+# BEFORE any bound and BEFORE the redactor.
+#
+# WHY THIS EXISTS, AND WHY IT IS NOT A SIXTH REDACTOR (roborev job 48, blocker 7). The
+# credential-leak family in this file is now six rounds old — 227 raw URL rendered, 234
+# redacted but not flattened, 239 flattened but not redacted, 264 scp form, 282 query strings
+# verbatim, and here whole assertion/toolchain lines published through a redactor that
+# understands ONLY url userinfo and the scp form. Every previous fix IMPROVED THE SANITISER,
+# which is the "rarer delimiter" move CLAUDE.md's mechanism ruling forbids; the ruling taken on
+# 282 was STOP RENDERING THE VALUE, DO NOT SANITISE IT AGAIN, and the origin URL is no longer
+# published at all. This is the same ruling applied to the same file one field over: the field
+# no longer publishes free text that CARRIES an authority, so `npm error
+# https://host/pkg?token=SECRET` cannot reach a SUMMARY block whatever the secret looks like.
+#
+# BY SHAPE, NEVER BY CREDENTIAL-DETECTION. The replacement is decided by the shape of the whole
+# TOKEN and the whole token is replaced; nothing here tries to work out WHICH PART is the
+# secret — that is precisely the strategy that failed five times. Four rules:
+#   N1  a token containing `://`                       -> <url>
+#   N2  a token with an `@` between non-space runs     -> <authority>   (scp form, an email,
+#                                                         `user:pass@host` with no scheme)
+#   N3  a token carrying a query fragment `[?&]…=`     -> <query>
+#   N4  a CREDENTIAL-NAMED key (a NAMED, DECLARED, non-exhaustive set) followed by `:`/`=`:
+#       the VALUE is replaced with <secret>, in the same token (`token=X`) or as the next one
+#       (`Authorization: Bearer X`, where the scheme word `bearer`/`basic` passes the mark on).
+#       The KEY is kept — a reader needs to know a credential-shaped field was there.
+#
+# WHAT THIS IS NOW FOR, AFTER BLOCKER 10 (roborev round 5). This function is NO LONGER what
+# stands between an environment-controlled diagnostic and a PR comment: the `toolchain` tier —
+# the ONLY tier whose payload is environment text — stopped publishing free text ALTOGETHER
+# and publishes a closed-enum KIND LABEL instead (see the PUBLICATION POLICY header in
+# scripts/ci/gate-failed-assert.sh). This stays as DEFENCE IN DEPTH over the two RETAINED
+# tiers, `assert` and `guard`, whose payloads are REPOSITORY-AUTHORED test-assertion and
+# guard-verdict text: in-tree, reviewed, diffed by every PR, and a secret committed there is a
+# different and already-lost problem. Publishing that text IS the subject of #3765.
+# DO NOT "consistently" widen the toolchain tier back, and do not narrow assert/guard to
+# match it — the asymmetry IS the fix, and its two halves have different reasons.
+#
+# DECLARED RESIDUAL — THIS IS A REDUCTION, NEVER A GUARANTEE, and the wording matters because
+# a guarantee this code cannot deliver must not be implied. A shape/keyword rule is not a
+# secrecy oracle: it CANNOT recognise an unmarked secret. MEASURED on the rendered field, both
+# directions: `token=SEKRET` and `password: SEKRET` neutralise, while `api_key SEKRET`
+# (credential-named key, SPACE-separated, no `:`/`=`) and a bare `SEKRETPLAIN` in prose do
+# NOT. Adding `api_key`-with-space to the key set would be the seventh improvement to a
+# sanitiser in a family whose standing ruling is STOP RENDERING THE VALUE, DO NOT SANITISE IT
+# AGAIN — the list does not close, which is exactly why the toolchain CHANNEL was removed
+# instead. For the retained tiers the residual is accepted: the text is repo-authored.
+#
+# OVER-REDACTION IS THE ACCEPTED DIRECTION: an ordinary `name@example.com` in an assert message
+# renders `<authority>`, and a test whose text is `token=42` renders `token=<secret>`. Under-
+# redaction costs a live token in a PR comment; over-redaction costs one word of a diagnostic.
+#
+# WHAT MUST STILL SURVIVE, and is pinned behaviourally in scripts/tests/test_agent_gate_summary.sh:
+# the #3765 motivating instance (`1465-skip-declares: the opt-out SKIP branch does not declare
+# the leak-lane state`) and `rustfmt diff in <path>` — a path has no authority.
+#
+# LINE STRUCTURE IS PRESERVED (one output line per input line, leading/trailing whitespace
+# intact): `_failassert_clean --names` passes prefix on line 1, suffix on line 2 and one name
+# per line after that, and the prefix's TRAILING SPACE is load-bearing for the join.
+_failassert_neutralise() {
+  printf '%s' "$1" | awk '
+    BEGIN {
+      # N4 key set. A LOWERCASED copy is matched, with leading punctuation stripped, so
+      # `"token":`, `[api-key=` and `--token=` all reach the same rule. NON-EXHAUSTIVE and
+      # declared as such; a key adjacent to `:`/`=` is required, so the bare word `token` in
+      # an assert message does not neutralise the word after it.
+      KEY = "^(authorization|token|access[-_]?token|refresh[-_]?token|api[-_]?key|apikey|x-api-key|secret|password|passwd|pwd|private[-_]?token|credentials?)[^a-z0-9]*[:=]"
+      # An auth SCHEME word: it carries no secret itself, and the value is the NEXT token.
+      SCHEME = "^(bearer|basic)[^a-z0-9]*$"
+    }
+    {
+      line = $0; lead = ""; trail = ""
+      if (match(line, /^[[:space:]]+/)) { lead = substr(line, 1, RLENGTH); line = substr(line, RLENGTH + 1) }
+      if (match(line, /[[:space:]]+$/)) { trail = substr(line, RSTART); line = substr(line, 1, RSTART - 1) }
+      n = split(line, tok, /[[:space:]]+/)
+      out = ""; mark = 0
+      for (i = 1; i <= n; i++) {
+        t = tok[i]
+        low = tolower(t); sub(/^[^a-z0-9]+/, "", low)
+        if (t ~ /:\/\//)                          { t = "<url>";       mark = 0 }
+        else if (t ~ /[^[:space:]]@[^[:space:]]/) { t = "<authority>"; mark = 0 }
+        else if (t ~ /[?&][^?&=[:space:]]*=/)     { t = "<query>";     mark = 0 }
+        else if (low ~ SCHEME)                    { mark = 1 }
+        else if (low ~ KEY) {
+          if (match(t, /[:=]/) && substr(t, RSTART + 1) ~ /[A-Za-z0-9]/) {
+            t = substr(t, 1, RSTART) "<secret>"; mark = 0
+          } else mark = 1
+        }
+        else if (mark)                            { t = "<secret>";    mark = 0 }
+        out = out (i > 1 ? " " : "") t
+      }
+      print lead out trail
+    }'
+}
+
+# _failassert_clean: THE ONE EMIT BOUNDARY for this field — credentials redacted, ONE
+# line, no control characters, bounded. Component logs hold repository-controlled paths,
+# and git PERMITS a newline in one — an unsanitised value would emit a SUMMARY line with
+# no key at all. TWO FORMS:
+#     _failassert_clean --prose <text>                   a cause; no per-name bound applies
+#     _failassert_clean --names <prefix> <suffix> <name>...
+#                                                        an identity list: each name is
+#                                                        display-bounded AFTER redaction
+#                                                        and joined with `, `
+# The mode token is at argv POSITION 1 and is a LITERAL at every call site in this file —
+# never filled from external text — so a value cannot forge the mode (#3312: control and
+# data must not share a channel; here they share nothing, because position 1 is ours).
+# A missing/unrecognised token is a coding error and is reported as such, never guessed.
+#
+# REDACTION, AND WHY IT IS HERE AND NOT AT THE CALL SITES (roborev job 45, blocker 4 —
+# the SIXTH instance of the credential-leak family this file already documents at
+# _component_set_one_line: 227 raw URL, 234 redacted-not-flattened, 239 flattened-not-
+# redacted, 264 scp form, 282 query strings). The `toolchain` tier copies WHOLE LINES into
+# this field (`error: `, `npm error `, `Error: `, `bash: `), and a git/npm diagnostic
+# routinely quotes the resolved remote — on CI that is
+# `https://x-access-token:<TOKEN>@github.com/…`, which the component-set pre-flight
+# explicitly ACCEPTS as canonical. SUMMARY blocks are pasted into PR comments by this
+# repo's own workflow, so an unredacted field leaks a live token into a public comment.
+#
+# It reuses `_component_set_redact_text` — the existing conservative free-text userinfo
+# redactor (deliberately broader than git's grammar: under-redaction costs a token,
+# over-redaction costs a slightly less readable diagnostic). A SECOND redactor is
+# forbidden: this repo's rule is to neutralise at the ONE emit boundary, never per
+# interpolation site and never as a second implementation, because a divergence between
+# two copies here IS a credential leak. Every state of this field — the extracted
+# identity AND the `not extractable (…)` causes that interpolate a log path — passes
+# through this function, so there is nothing to remember at a call site.
+#
+# REDACT, DO NOT REFUSE: the value is a diagnostic the run must still report.
+#
+# ===== THE ORDER, AND IT IS THE WHOLE FIX: NORMALISE -> REDACT -> BOUND FOR DISPLAY =====
+#
+# EVERY bound this field applies runs AFTER the one redaction, and no bound anywhere runs
+# before it. That is one rule replacing three separate accidents (roborev job 46,
+# blocker 6 — the THIRD instance on this issue of ONE shape, an operation applied to a
+# value BEFORE the operation that needed the value WHOLE):
+#   F1  a 57-char display cap before the DEDUP   -> two sibling tests collapsed, count UNDERCOUNTED
+#   F5  truncation at the first `:` before the DEDUP -> 13 distinct asserts named as one tag
+#   F6  a 60-char display elision before the REDACTION -> a credential reached the SUMMARY
+#
+# MEASURED F6, end to end. The extractor used to middle-elide each name to 60 chars, so
+#     npm error 401 Unauthorized while fetching the tarball https://x-access-token:TOK@h.io/p
+# arrived here as `npm error 401 Unauthorized ...ess-token:TOK@h.io/p` — the elision had
+# DELETED the `https://`, after which NEITHER redaction rule matches (rule 1 needs
+# `scheme://…@`, rule 2 needs `@host:`) and the token reached a SUMMARY block this repo
+# tells agents to paste into PR comments. The extractor now emits the FULL normalised
+# identity and the per-NAME display bound lives HERE, after the redaction.
+#
+# COUNT CORRECTNESS AND PUBLICATION SAFETY ARE SEPARATE CONCERNS, AND THEY PULL AGAINST
+# EACH OTHER (roborev job 48 — F5 wants the FULL payload, F7 wants no free text published).
+# They are reconciled by splitting the value: the extractor DEDUPES AND COUNTS on the full
+# normalised identity, INTERNALLY, and this boundary publishes only a NEUTRALISED PROJECTION
+# of it. Neither concern is traded for the other — `count` is still computed from text no
+# bound and no placeholder has touched, and nothing carrying an authority is ever rendered.
+#
+# THE FIVE STEPS, in order, each with the reason it cannot move earlier:
+#   0. NEUTRALISE — `_failassert_neutralise`, FIRST, ahead of everything including the
+#      redactor. It removes the free-text CHANNEL (url/authority/query/credential-keyed
+#      tokens -> fixed placeholders) rather than sanitising the value a sixth time; see that
+#      function's header for the ruling this implements. It must precede every bound for the
+#      same reason step 1 must: a bound ahead of it can sever the shape it keys on.
+#   1. REDACT — defence in depth, and before any bound, so no later bound can sever a URL
+#      between the token and its `@`.
+#      It also PRECEDES THE CONTROL-CHAR STRIP: `tr '\001-\037\177' ' '` turns a control
+#      character inside userinfo into a SPACE, and both rules exclude `[:space:]` from the
+#      userinfo class — so stripping first can break a match that would otherwise have
+#      fired (`https://u:TOK<0x01>@h` -> `https://u:TOK @h`, no match, token emitted).
+#      Redacting first strictly dominates; the redactor passes control characters through
+#      untouched, so the strip still does its own job afterwards.
+#   2. DISPLAY-BOUND each NAME to 60 chars, then join with `, `. The elision is in the
+#      MIDDLE, not at the tail, and that is load-bearing: a Rust test identity is a MODULE
+#      PATH whose distinguishing token is the LAST one, and the first 57 characters of two
+#      sibling tests are routinely identical, so a tail elision printed two DIFFERENT
+#      failing tests as the same visible string — re-creating, inside the field, the very
+#      misidentification #3765 exists to remove. Head 27 + `...` + tail 30 = 60.
+#      A DISPLAY COLLISION IS STILL POSSIBLE (two identities differing only in an elided
+#      middle) and is harmless BY CONSTRUCTION: `count` is computed by the extractor from
+#      the FULL identity, so the count stays true whatever the display does. The count is
+#      the authority; a name is a pointer.
+#   3. FLATTEN — NUL drop, control chars to spaces, squeeze.
+#   4. CAP the whole field at 300 chars, LAST. This is a SEPARATE bound from the 60-char
+#      per-name one; do not collapse the two.
+# EVERY ONE OF THOSE BOUNDS — here, and the extractor's safety bound upstream — now runs
+# after a step that has already removed the credential-bearing shapes, and the extractor's
+# bound TRUNCATES NOTHING (it publishes an affirmative placeholder instead of a prefix).
+# The class is closed at every bound, not at the one that happened to leak.
+#
+# ONE REDACTOR, ONE CALL. `--names` passes the prose prefix, the prose suffix and every
+# name to the SINGLE `_component_set_redact_text` invocation, NEWLINE-separated, and the
+# per-name bound is applied to its output. The separator is a boundary the payload
+# PROVABLY cannot reach — the extractor `norm()`s every identity, mapping every control
+# character (0x0A included) to a space, and its stdout protocol is line-oriented — so
+# control and data do not share a delimiter the data can forge (#3312: anchor the control
+# tokens somewhere the payload provably cannot reach, or remove the shared channel). A
+# SECOND redactor, or a second call site, is forbidden: this repo neutralises at the ONE
+# emit boundary, because a divergence between two copies here IS a credential leak.
+_failassert_clean() {
+  local _mode="${1:-}" _prefix="" _suffix="" _payload="" _neu _red
+  [ "$#" -ge 1 ] && shift
+  case "$_mode" in
+    --prose) _payload="${1:-}" ;;
+    --names)
+      # prefix on line 1, suffix on line 2, one name per line after that. The newline is a
+      # boundary the payload PROVABLY cannot reach: the extractor norm()s every identity,
+      # mapping every control character (0x0A included) to a space, and its stdout
+      # protocol is line-oriented.
+      _prefix="${1:-}"; _suffix="${2:-}"
+      [ "$#" -ge 2 ] && shift 2
+      _payload=$(printf '%s\n' "$_prefix" "$_suffix" "$@")
+      ;;
+    *)
+      printf 'not recorded (internal: _failassert_clean called with no mode token)'
+      return 0 ;;
+  esac
+  # ===== 1. THE ONE NEUTRALISATION (#3765 / roborev job 48, blocker 7). =====
+  # The free-text CHANNEL is removed here: every URL-/authority-/query-shaped and
+  # credential-keyed token becomes a fixed placeholder, so what follows is a PROJECTION of
+  # the identity and not the identity itself. It runs FIRST — before the redactor and before
+  # every bound — because a bound that ran ahead of it could sever the very shape it keys on
+  # (that is F6, at a different bound).
+  _neu=$(_failassert_neutralise "$_payload")
+  # ===== 2. THE ONE REDACTION, kept as DEFENCE IN DEPTH. Every state of this field passes
+  # through exactly this call. It is no longer the thing standing between a token and a PR
+  # comment — step 1 is — but a second, independent rule set costs nothing here and the two
+  # fail in different directions. =====
+  _red=$(_component_set_redact_text "$_neu")
+  # ===== 3. THEN, and only then, the per-NAME display bound + the join. =====
+  if [ "$_mode" = --names ]; then
+    _red=$(printf '%s\n' "$_red" | awk -v head=27 -v tail=30 '
+      NR == 1 { pre = $0; next }
+      NR == 2 { suf = $0; next }
+      { t = $0
+        if (length(t) > head + 3 + tail)
+          t = substr(t, 1, head) "..." substr(t, length(t) - tail + 1)
+        out = out (k++ ? ", " : "") t }
+      END { printf "%s%s%s", pre, out, suf }')
+  fi
+  printf '%s' "$_red" | tr -d '\000' | tr '\001-\037\177' ' ' | tr -s ' ' | cut -c1-300
+}
+
+# _failassert_relpath_ok <path>: the boundary mirror of the extractor's relpath_ok (roborev job
+# 75). Repo-relative and normalised: no leading slash, no empty component, no `.`/`..` segment,
+# safe characters only. Without it the four path grammars admitted `/etc/shadow` and
+# `../../outside/x.sh` — an absolute or traversal-shaped runtime path in a pasted summary.
+_failassert_relpath_ok() {
+  local p="${1:-}"
+  [ -n "$p" ] || return 1
+  case "$p" in /*) return 1 ;; esac
+  case "$p" in *//*) return 1 ;; esac
+  case "/$p/" in */../*|*/./*) return 1 ;; esac
+  case "$p" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  return 0
+}
+
+# _failassert_is_doctest_id <value>: does this value match the ONE closed grammar that may
+# legitimately carry a `/` — `doctest <path> line <n> (<item>)`, as produced by the extractor
+# projection pubdoc()? (#3765, roborev job 63.)
+#
+# WHY THIS EXISTS: the emit-boundary charset below deliberately excludes `/` so no URL path can
+# be published. That exclusion made the doctest projection INERT END TO END: the extractor
+# emitted `doctest src/lib.rs line 10 (item)` and this boundary replaced the whole thing with
+# `not extractable`, so a doctest failure — a class `core-tests` actually runs, via
+# `cargo test --doc` — named nothing in the SUMMARY. The extractor-side tests could not see it
+# because they asserted the extractor, not the rendered field.
+#
+# WHY ADMITTING `/` HERE IS STILL SAFE, stated rather than assumed: this is a CLOSED grammar,
+# not a widened charset. The value must be `doctest ` + a path with NO `:` and NO `@` + ` line `
+# + digits + ` (` + an identifier + `)`. A URL cannot satisfy that shape, so the property the
+# charset exists to guarantee — no publishable authority — is preserved by the SHAPE instead of
+# by the charset. Parsed with `case` globs, not a regex: this file uses `=~` nowhere.
+_failassert_is_doctest_id() {
+  local v="${1:-}" p i n rest
+  case "$v" in doctest\ *) ;; *) return 1 ;; esac
+  rest=${v#doctest }
+  case "$rest" in *" line "*) ;; *) return 1 ;; esac
+  p=${rest%% line *}
+  rest=${rest#"$p" line }
+  # The item is OPTIONAL: rustdoc reports an unnamed example as `<path> - (line N)`, so the
+  # published form is `doctest <path> line <N>` with no trailing `(item)` (roborev job 69).
+  case "$rest" in
+    *" ("*")")
+      n=${rest%% (*}
+      i=${rest#*" ("}; i=${i%)} ;;
+    *)
+      n=$rest
+      i="" ;;
+  esac
+  [ -n "$p" ] && [ -n "$n" ] || return 1
+  if [ -n "$i" ]; then case "$i" in *[!A-Za-z0-9._:-]*) return 1 ;; esac; fi
+  _failassert_relpath_ok "$p" || return 1
+  case "$n" in *[!0-9]*) return 1 ;; esac
+  return 0
+}
+
+# _failassert_is_shelltestid <value>: the SECOND closed grammar that may carry a `/` —
+# `shell-test <repo-relative path ending .sh>`, as produced by the extractor projection pubsh()
+# (#3765, roborev job 67). Same reasoning as _failassert_is_doctest_id: the safety property is
+# carried by the SHAPE, not by the charset, so a URL cannot satisfy it. Two grammars, listed
+# explicitly at the one boundary — never a widened charset, which would readmit every URL path.
+_failassert_is_shelltestid() {
+  local v="${1:-}" p
+  case "$v" in shell-test\ *) ;; *) return 1 ;; esac
+  p=${v#shell-test }
+  [ -n "$p" ] || return 1
+  case "$p" in *.sh) ;; *) return 1 ;; esac
+  _failassert_relpath_ok "$p" || return 1
+  return 0
+}
+
+# _failassert_is_pytestid / _failassert_is_jestid <value>: the THIRD and FOURTH closed grammars
+# that may carry a `/` — `pytest <path>.py::<test>` and `jest-suite <path>` (#3765, roborev job
+# 71). Same rule as the first two: the safety property is carried by the SHAPE, so no authority
+# is publishable, and the charset stays closed for every other value.
+#
+# *** IF YOU ADD A `/`-BEARING PROJECTION TO THE EXTRACTOR, IT NEEDS A PREDICATE HERE. ***
+# That coupling has now been missed THREE times (doctest, then pytest and jest together): the
+# extractor happily produced the identity and this boundary replaced it with `not extractable`,
+# so the projection was inert end to end and its extractor-side test still passed. Every
+# `/`-bearing grammar therefore also has a RENDERED-field case in the summary self-test.
+_failassert_is_pytestid() {
+  local v="${1:-}" rest pth tst
+  case "$v" in pytest\ *) ;; *) return 1 ;; esac
+  rest=${v#pytest }
+  case "$rest" in *"::"*) ;; *) return 1 ;; esac
+  pth=${rest%%::*}
+  tst=${rest#*::}
+  [ -n "$pth" ] && [ -n "$tst" ] || return 1
+  case "$pth" in *.py) ;; *) return 1 ;; esac
+  _failassert_relpath_ok "$pth" || return 1
+  # The remainder is `::`-joined segments, each optionally carrying the FIXED `[...]` parameter
+  # marker (roborev job 74). Strip the literal marker, then require the rest to be identifier
+  # characters and `:` only — so `@` and `/` stay excluded and a real parameter VALUE (which
+  # the projection replaces wholesale) can never appear here.
+  case "${tst//"[...]"/}" in *[!A-Za-z0-9._:-]*) return 1 ;; esac
+  return 0
+}
+_failassert_is_jestid() {
+  local v="${1:-}" pth
+  case "$v" in jest-suite\ *) ;; *) return 1 ;; esac
+  pth=${v#jest-suite }
+  [ -n "$pth" ] || return 1
+  case "$pth" in *.js|*.mjs|*.cjs|*.ts) ;; *) return 1 ;; esac
+  _failassert_relpath_ok "$pth" || return 1
+  return 0
+}
+
+# _failassert_record <component> <status> [logfile]: THE extraction site. Only a FAIL has
+# a failing assert, so PASS/SKIP record nothing and render no field.
+_failassert_record() {
+  local name="$1" status="${2:-}" log="${3:-}" tool src out rc tier count shown value
+  [ "$status" = FAIL ] || return 0
+  [ -n "$log" ] || log="${LOG_DIR:-}/$name.log"
+  tool=$(_failassert_tool)
+  # NO PATH IS PUBLISHED IN A CAUSE (#3765, roborev job 69). These paths derive from the
+  # checkout location and TMPDIR, i.e. from outside this field, and _failassert_clean is
+  # explicitly NOT a secrecy oracle (it cannot recognise an unmarked secret) — so an absolute
+  # path was an unbounded, externally-influenced string flowing into an artifact this repo
+  # pastes into PR comments. The CAUSE is what a reader needs; the path told them nothing they
+  # could use, since it names a directory on another machine. The component NAME is still
+  # published, and that is a repository-defined identifier.
+  if [ ! -r "$tool" ]; then
+    _failassert_write "$name" "not extractable (the extractor script is not readable)"
+    return 0
+  fi
+  if [ ! -e "$log" ]; then
+    _failassert_write "$name" "not extractable (this component kept no log file to scan)"
+    return 0
+  fi
+  if [ ! -r "$log" ] || [ ! -f "$log" ]; then
+    _failassert_write "$name" "not extractable (the component log is not a readable file)"
+    return 0
+  fi
+  if [ ! -s "$log" ]; then
+    _failassert_write "$name" "0 RECOGNISED (component log is EMPTY - nothing to scan)"
+    return 0
+  fi
+  # #3400: normalise through the gate's ONE stripper; its non-zero is a NAMED cause.
+  if ! src=$(_ansi_stripped_log "$log" 2>/dev/null) || [ -z "$src" ] || [ ! -r "$src" ]; then
+    _failassert_write "$name" "not extractable (ANSI normalisation of the component log failed, so nothing could be parsed)"
+    return 0
+  fi
+  out=$(bash "$tool" "$src" 10 2>/dev/null); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _failassert_write "$name" "not extractable (extractor scripts/ci/gate-failed-assert.sh exited $rc)"
+    return 0
+  fi
+  # EMPTY OUTPUT IS THE ONLY LEGITIMATE NO-MATCH (#3765, roborev job 69). The extractor prints
+  # tier=/count= only for a tier it actually matched, and its count is >= 1 by construction, so
+  # its no-match response is NO OUTPUT AT ALL. Collapsing "missing fields" and "count=0" onto
+  # `0 RECOGNISED` therefore reported a PROTOCOL VIOLATION as a completed scan that found
+  # nothing — a positive verdict derived from a state that was never measured, which is the
+  # exact shape this field exists to remove. Malformed non-empty output is now refused.
+  if [ -z "$out" ]; then
+    _failassert_write "$name" "0 RECOGNISED (component log scanned; no recogniser matched - the recogniser set is NON-EXHAUSTIVE)"
+    return 0
+  fi
+  tier=$(printf '%s\n' "$out" | sed -n 's/^tier=//p' | head -1)
+  count=$(printf '%s\n' "$out" | sed -n 's/^count=//p' | head -1)
+  if [ -z "$tier" ] || [ -z "$count" ] || [ "$count" = 0 ]; then
+    _failassert_write "$name" "not extractable (the extractor produced output but no usable tier/count - a protocol violation, refused rather than reported as a completed scan)"
+    return 0
+  fi
+  # BOTH INTERPOLATED PROTOCOL FIELDS ARE VALIDATED AGAINST A CLOSED SHAPE BEFORE THEY ARE
+  # PUBLISHED, and neither is echoed back on refusal. `$tier` and `$count` are rendered
+  # VERBATIM into the field's prefix (`<count> RECOGNISED (<tier>): `), so an extractor that
+  # printed anything else would publish it. They come from an in-tree extractor resolved with
+  # no env override, so this is defence in depth — but the whole point of blocker 10 is that
+  # this field must not carry a value nobody constrained, and a source scan cannot see a
+  # RUNTIME value (CLAUDE.md: an invariant over OUTPUT needs a check on the OUTPUT PATH).
+  case "$tier" in
+    assert|guard|toolchain) ;;
+    *)
+      _failassert_write "$name" "not extractable (the extractor named a tier outside this field's closed set of three - refused rather than published)"
+      return 0 ;;
+  esac
+  case "$count" in
+    ''|*[!0-9]*)
+      _failassert_write "$name" "not extractable (the extractor's count is not a number - refused rather than published)"
+      return 0 ;;
+  esac
+  # THE NAMES ARE PASSED AS SEPARATE ARGUMENTS, not pre-joined into one string, because
+  # the per-name display bound must be applied INSIDE _failassert_clean — after the
+  # redaction — and a joined string has no name boundaries left to bound (a recognised
+  # identity may itself contain `, `). Read into an array by REDIRECTION from a process
+  # substitution, never `… | while read` (#3400: a piped loop runs in a subshell and its
+  # result is discarded).
+  local -a fa_names=()
+  local fa_n
+  while IFS= read -r fa_n; do
+    [ -n "$fa_n" ] && fa_names+=("$fa_n")
+  done < <(printf '%s\n' "$out" | sed -n 's/^name=//p' | head -n "$FAILASSERT_SHOW")
+  shown=${#fa_names[@]}
+  if [ "$shown" -eq 0 ]; then
+    # count>0 with no name is not reachable through the extractor protocol (it prints
+    # min(count,max) >= 1 names); report it affirmatively rather than rendering a field
+    # that claims a count it cannot name.
+    _failassert_write "$name" "$(_failassert_clean --prose "not extractable (extractor reported count=$count for tier $tier but named nothing)")"
+    return 0
+  fi
+  # ===== EVERY TIER PUBLISHES AN IDENTIFIER, AND THAT IS CHECKED HERE TOO (blocker 11) =====
+  # The extractor publishes a PROJECTION of each identity — a tag / test path, a guard
+  # label + verdict, or a closed-enum kind label — and copies no payload (see its
+  # PUBLICATION POLICY header). This is the SAME invariant asserted on the OUTPUT PATH,
+  # because a structural assert covers the CODE while a RUNTIME value can carry what no
+  # source scan sees (CLAUDE.md: an invariant over OUTPUT needs a check on the OUTPUT PATH).
+  #
+  # ONE loop, THREE tier shapes, and the asymmetry is only in the charset each tier can
+  # legitimately produce:
+  #   toolchain     a bare `[a-z0-9-]` label token. Deliberately NOT enum MEMBERSHIP: a
+  #                 second copy of the enum here would be a second place for it to diverge,
+  #                 and a copied log line cannot be a bare token anyway.
+  #   assert/guard  an identifier from the extractor charsets plus the `#<n>` ordinal and
+  #                 the `<…>` placeholders. Every EXCLUSION is the load-bearing part: no
+  #                 `@` (no scp-form authority), no `/` (no URL path), no `?`/`&`/`=` (no
+  #                 query string) — so none of the shapes this field's six-round credential
+  #                 family travelled on can be published even if a recogniser regressed.
+  # It REFUSES rather than redacting: the value is supposed to BE an identifier, and an
+  # identifier that is not one is not something to sanitise into shape.
+  local fa_probe fa_ord
+  for fa_n in "${fa_names[@]}"; do
+    case "$tier" in
+      toolchain)
+        case "$fa_n" in
+          -*|*-|*[!a-z0-9-]*|'')
+            _failassert_write "$name" "not extractable (a toolchain kind label failed the closed-label shape check at the emit boundary - this tier publishes labels, never log text)"
+            return 0 ;;
+        esac ;;
+      *)
+        # ONE exception to the charset, and it is a GRAMMAR rather than a widening: a doctest
+        # identifier carries a path, so it carries `/`. See _failassert_is_doctest_id.
+        # STRIP A TRAILING ORDINAL BEFORE MATCHING A GRAMMAR (roborev job 74). When two
+        # identities publish the SAME projection the layer above ordinalises them (`…#1`,
+        # `…#2`) — which is F5 working — and `#` is outside every path grammar, so an
+        # ordinalised pair of pytest/jest/doctest/shell-test identities was refused at this
+        # boundary and rendered `not extractable`. Stripped ONCE here rather than in each of
+        # the four predicates, so a fifth grammar inherits it.
+        fa_probe=$fa_n
+        fa_ord=${fa_probe##*#}
+        case "$fa_ord" in ''|*[!0-9]*) ;; *) fa_probe=${fa_probe%#*} ;; esac
+        if _failassert_is_doctest_id "$fa_probe" || _failassert_is_shelltestid "$fa_probe" \
+           || _failassert_is_pytestid "$fa_probe" || _failassert_is_jestid "$fa_probe"; then
+          :
+        else
+          case "$fa_n" in
+            ''|*[!A-Za-z0-9\ ._\(\):#\<\>-]*)
+              _failassert_write "$name" "not extractable (an identifier failed the safe-charset shape check at the emit boundary - this field publishes identifiers, never assertion payloads)"
+              return 0 ;;
+          esac
+        fi ;;
+    esac
+  done
+  value=""
+  [ "$count" -gt "$shown" ] 2>/dev/null && value=" (+$((count - shown)) more)"
+  # EVERY TIER SAYS AFFIRMATIVELY WHAT IT IS NOT PUBLISHING. #3765 requires the field to
+  # name a DEFECT IDENTITY and prescribes saying so affirmatively where none is available;
+  # withholding text SILENTLY is the shape this whole issue exists to remove, so each tier
+  # states what it published and where the rest is. Fixed literals, like the prefix beside
+  # them.
+  case "$tier" in
+    toolchain)
+      value="$value - no named assert exists; the diagnostic TEXT is not published (see the component log)" ;;
+    *)
+      value="$value - identifiers only; the assertion DETAIL is not published (see the component log)" ;;
+  esac
+  _failassert_write "$name" \
+    "$(_failassert_clean --names "$count RECOGNISED ($tier): " "$value" "${fa_names[@]}")"
+  return 0
+}
+
+# _failassert_render <component> <status>: the value the ONE renderer appends. Emitted on
+# a FAIL line ONLY — a PASS or SKIP has no failing assert, so the field has no subject
+# there and its absence on those lines is the rule, not a silence.
+_failassert_render() {
+  local f v=""
+  [ "${2:-}" = FAIL ] || return 1
+  f=$(_failassert_sidecar "$1")
+  if [ -r "$f" ]; then IFS= read -r v < "$f" || v=""; fi
+  # ONE formatter for the field text, so the four states cannot be spelled two ways.
+  [ -n "$v" ] || v="not recorded (no extraction ran for this FAIL line)"
+  printf 'failed-assert: %s' "$v"
+  return 0
+}
+# ==== END failed-assert identity (#3765) ====
 
 # _fm_summary_line <name> <status> <time>: the ONE renderer for a SUMMARY component
 # line, used by all six emit sites (full, lite, two delta sites, the aggregation
@@ -6778,11 +7421,15 @@ _fm_annotate() {
 # not. `%-18s` and the `(time)` shape are unchanged — the annotation is appended, so
 # every existing prefix/stage-line assertion still matches.
 _fm_summary_line() {
-  # #3625: the census suffix rides here, at the ONE renderer, for the same reason the
-  # feature matrix does -- no mode can then emit a component line the others do not.
-  # `%-18s` and the `(time)` shape are UNCHANGED (#3453 kept them deliberately and
-  # existing prefix/stage assertions match on them); the census is APPENDED.
-  printf '%-18s %s (%s)  %s  %s' "$1:" "$2" "$3" "$(_fm_annotate "$1")" "$(_census_annotate "$1" "$2")"
+  # #3625 (census) and #3765 (failed-assert) BOTH ride here, at the ONE renderer, for the
+  # same reason the feature matrix does: no mode can then emit a component line the others
+  # do not. `%-18s` and the `(time)` shape are UNCHANGED (#3453 kept them deliberately and
+  # existing prefix/stage assertions match on them); both suffixes are APPENDED.
+  # The failed-assert field is FAIL-only — _failassert_render returns non-zero and prints
+  # nothing for PASS/SKIP — so a non-FAIL line is byte-identical to the #3625 form.
+  local _fa
+  _fa=$(_failassert_render "$1" "$2") || _fa=""
+  printf '%-18s %s (%s)  %s  %s%s' "$1:" "$2" "$3" "$(_fm_annotate "$1")" "$(_census_annotate "$1" "$2")" "${_fa:+  $_fa}"
 }
 
 # _fm_note_if_no_cargo_observed <component> <status>: a component that ENDED without a
@@ -7967,6 +8614,20 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       echo "            $TREE_SELFTEST_FIXTURE_MARKER marker — refusing to write into a live checkout (#2926)" >&2
       exit 2
     fi
+  fi
+  # #3765 (roborev job 48, blocker 9): the boundary block's component table must be
+  # exercised with a FAIL row, because a FAIL row is the only one that carries the
+  # `failed-assert:` field. STRICTLY validated here, with the mode selector, so a typo is a
+  # named refusal rather than a silently-PASSing row.
+  case "${AGENT_GATE_TREE_SELFTEST_STATUS:-PASS}" in
+    PASS|FAIL|SKIP) : ;;
+    *)
+      echo "agent-gate: invalid AGENT_GATE_TREE_SELFTEST_STATUS='${AGENT_GATE_TREE_SELFTEST_STATUS}' (expected PASS, FAIL or SKIP) (#3765)" >&2
+      exit 2 ;;
+  esac
+  if [ -n "${AGENT_GATE_TREE_SELFTEST_LOG:-}" ] && [ ! -r "${AGENT_GATE_TREE_SELFTEST_LOG}" ]; then
+    echo "agent-gate: AGENT_GATE_TREE_SELFTEST_LOG='${AGENT_GATE_TREE_SELFTEST_LOG}' is not readable (#3765)" >&2
+    exit 2
   fi
   # shellcheck disable=SC2086  # intentional word-split over the space-separated list
   for _tsp in ${AGENT_GATE_TREE_SELFTEST_MUTATE:-}; do
@@ -10291,12 +10952,26 @@ esac
 # reconstructs the summary arrays (in canonical COMPONENTS order) after the pool
 # drains. This keeps the SUMMARY block deterministic regardless of finish order.
 record_result() { # <name> <status> <seconds>
-  # #3625: the census is taken HERE -- record_result is the one chokepoint every
-  # component's verdict passes through -- and it can CHANGE the verdict: a PASS whose
-  # measured subject count is zero is recorded as VACUOUS, a distinct non-passing token
-  # in the gate's PASS/FAIL/SKIP vocabulary, so a component that verified nothing can
-  # never report PASS (AC2). It runs BELOW _hb_ensure, which must stay first (see
-  # below), and ABOVE the .result write, whose value it decides.
+  # ===== THE ORDER IS AN INVARIANT: CENSUS, THEN SIDECARS, THEN `.result`, INTEGRITY LAST =====
+  #
+  # #3625: the census is taken HERE -- record_result is the one chokepoint every component's
+  # verdict passes through -- and it can CHANGE the verdict: a PASS whose measured subject
+  # count is zero is recorded as VACUOUS, a distinct non-passing token, so a component that
+  # verified nothing can never report PASS (AC2). It runs BELOW _hb_ensure and ABOVE the
+  # `.result` write, whose value it decides.
+  #
+  # #3765 (roborev job 50, blocker 14): `.result` is the PUBLICATION of this component's
+  # verdict — every reader discovers a component by its `.result` file, including the
+  # tree-integrity BOUNDARY renderer, which globs "$LOG_DIR"/*.result from ANOTHER lane
+  # while this one is still inside record_result. So `.result` must be written only once
+  # this component's per-component SIDECARS are complete: with `.result` first, a main-lane
+  # boundary failure could observe a side lane's published verdict whose `.failassert`
+  # sidecar did not exist YET, terminate the gate, and render that row as
+  # `not recorded (no extraction ran for this FAIL line)` — an ABSENCE reported as a
+  # MEASUREMENT, which is the one thing this whole field must never do.
+  #
+  # The two integrity asserts stay LAST: either may EMIT the terminal block and EXIT, so
+  # anything that must appear in that block has to have been written before they run.
   #
   # #3473, #3453 and #3625 all land at this chokepoint; the ORDER is argued rather than
   # arbitrary. `_hb_ensure` goes FIRST because everything below it can be slow or can
@@ -10313,23 +10988,52 @@ record_result() { # <name> <status> <seconds>
   # record_result can turn a PASS into VACUOUS (a measured-zero census) or FAIL (an
   # undeclared one), and every caller used to print its OWN unchanged local `$status`
   # afterwards — so a no-op component printed `>>> [x] PASS` to the run log while the
-  # SUMMARY reported failure. A gate log that makes an affirmatively false statement is
-  # worse than silence: it is the first thing a human reads when triaging, and it is what
-  # stops the next person looking. A GLOBAL rather than a return value because ~115 call
-  # sites already print a line of their own after this call and each is in a different
-  # function; `scripts/tests/test_agent_gate_census.sh` asserts structurally that no
-  # progress line prints a raw `$status` after record_result, so a new caller cannot
-  # reintroduce the lie. The two paths that never reach record_result (run_scoped_tests'
-  # terminal paths) reassign their own `$status` from _census_finalize and are correct
-  # without it.
+  # SUMMARY reported failure. A GLOBAL rather than a return value because ~115 call sites
+  # already print a line of their own after this call.
+  #
+  # MERGE NOTE (#3625 x #3765): main published `.result` HERE with a plain redirection. That
+  # write now happens BELOW, after the sidecars and ATOMICALLY (blockers 14 and 16), and it
+  # records `$_rr_status` — the finalized value — so the census verdict is what readers see.
   RECORDED_STATUS="$_rr_status"
-  printf '%s %s\n' "$_rr_status" "$3" > "$LOG_DIR/$1.result"
-  # #3453: two whitespace fields ONLY — ~60 call sites and a 2-field `read -r _st _secs`
-  # reader, which would silently absorb a third into $_secs. The feature matrix rides a
-  # per-component SIDECAR instead. A SKIP — or a FAIL that died before its first cargo
-  # call — records that fact here, so its SUMMARY line says so rather than reading
-  # UNDECLARED.
+  # #3453: `.result` carries two whitespace fields ONLY — ~60 call sites and a 2-field
+  # `read -r _st _secs` reader, which would silently absorb a third into $_secs. The
+  # feature matrix rides a per-component SIDECAR instead.
   _fm_note_if_no_cargo_observed "$1" "$2"
+  # #3765: extract the failing ASSERT identity from this component's log, at the
+  # boundary where the log is complete and closed. Sidecar, never a third .result field
+  # (see the two-fields-only note above). No-op unless the status is FAIL.
+  # The FINALIZED status (#3625 x #3765): _census_finalize can turn a PASS into VACUOUS or
+  # FAIL, and extraction is FAIL-only — passing the caller's original `$2` would skip the
+  # identity attempt on exactly the components the census just failed.
+  _failassert_record "$1" "$_rr_status"
+  # #3453: two whitespace fields ONLY (see the note above). Written HERE — after the
+  # sidecars, before the integrity asserts — because this write is what PUBLISHES the
+  # component to every reader, including a concurrent lane's boundary renderer (#3765
+  # blocker 14).
+  # ATOMIC, because plain `>` redirection CREATES the file before printf fills it, so a
+  # concurrent boundary renderer could discover a zero-length or partial .result and render
+  # a malformed row (#3765 blocker 16). Blocker 14 moved this write AFTER the sidecars, which
+  # narrowed that window without closing it — and the note above CLAIMS this write publishes
+  # the component, so the write has to actually be indivisible. Write to a temp in the SAME
+  # directory (so the rename cannot cross a filesystem), verify it is non-empty, then mv.
+  #
+  # There is no `set -e` here (`set -uo pipefail`), so every step is tested explicitly. On
+  # failure the verdict is still published by the old direct write and the degradation is
+  # NAMED on stderr: losing the component from the summary entirely is worse than a window
+  # that only a concurrent reader can observe, and a silent fallback would be a third
+  # instance of this issue's own "absence reported as a measurement" defect.
+  local _rr_tmp
+  _rr_tmp=$(mktemp "$LOG_DIR/.result.XXXXXX" 2>/dev/null) || _rr_tmp=""
+  if [ -n "$_rr_tmp" ] \
+     && printf '%s %s\n' "$_rr_status" "$3" > "$_rr_tmp" 2>/dev/null \
+     && [ -s "$_rr_tmp" ] \
+     && mv -f "$_rr_tmp" "$LOG_DIR/$1.result" 2>/dev/null; then
+    :
+  else
+    [ -n "$_rr_tmp" ] && rm -f "$_rr_tmp" 2>/dev/null
+    echo "agent-gate: WARNING — atomic publish of $1.result failed; fell back to a direct write (#3765 blocker 16)" >&2
+    printf '%s %s\n' "$_rr_status" "$3" > "$LOG_DIR/$1.result"
+  fi
   # #2874: every component records its verdict through here, so this is the natural
   # component-boundary chokepoint for the mid-run summary-integrity guard.
   _assert_summary_integrity "$1"
@@ -10369,6 +11073,11 @@ record_result() { # <name> <status> <seconds>
 #              "<file>|<escaped-path>". Pins the escaped-path lookup (#2926 review G2).
 # AGENT_GATE_TREE_SELFTEST_MUTATE is a space-separated list of repo-relative files to
 # append to; AGENT_GATE_TREE_SELFTEST_COMMIT=1 additionally commits (moving HEAD).
+# AGENT_GATE_TREE_SELFTEST_STATUS (PASS|FAIL|SKIP, default PASS) and
+# AGENT_GATE_TREE_SELFTEST_LOG (a component log to seed) drive the boundary block's own
+# component table with a real FAIL row (#3765) — the only row that carries a
+# `failed-assert:` field, and the row the two boundary loops used to render with a bare
+# printf that bypassed the ONE renderer. Both are validated at the mode selector.
 if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
   # #2926 review B5: the mutating modes WRITE INTO — and with …_COMMIT=1 COMMIT INTO —
   # $REPO_ROOT. Requiring only an explicit summary path did not stop that from being a
@@ -10446,7 +11155,13 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
     clean|boundary|terminal)
       [ "$AGENT_GATE_TREE_SELFTEST" = clean ] || _tree_selftest_mutate
       if [ "$AGENT_GATE_TREE_SELFTEST" != terminal ]; then
-        record_result "tree-selftest" PASS 0     # MAIN lane: may emit + exit 1
+        # #3765: the caller may supply this component's STATUS and its component LOG, so the
+        # boundary block's table can be driven with a real FAIL row (the only row that
+        # carries a failed-assert field). Both default to today's behaviour.
+        if [ -n "${AGENT_GATE_TREE_SELFTEST_LOG:-}" ]; then
+          cp "$AGENT_GATE_TREE_SELFTEST_LOG" "$LOG_DIR/tree-selftest.log" 2>/dev/null || true
+        fi
+        record_result "tree-selftest" "${AGENT_GATE_TREE_SELFTEST_STATUS:-PASS}" 0   # MAIN lane: may emit + exit 1
       fi
       _tree_finalize || true
       # The REAL production stamp (#2926 review C1) — these hooks drive the same
@@ -10627,47 +11342,10 @@ run_roborev_lints_cmd() {
 # INTEGRATION `--test` targets. A `--lib` unit-test run prints "Running unittests
 # src/lib.rs", which this deliberately does not claim to cover.
 #
-# Exported (`export -f`) because the cli-tests component body runs under `bash -c`
-# and must see the SAME implementation rather than a second copy of it.
-# _ansi_stripped_log <logfile> — echo a path to <logfile> with ANSI escapes removed.
-#
-# roborev round-15 finding (HIGH), and the premise checked out: `.github/workflows/gate.yml`
-# (the nightly FULL gate) sets `CARGO_TERM_COLOR: always`, as do 17 other workflows under
-# .github/workflows/ (18 in total, measured — an earlier version of this comment said 8, which was
-# never measured) and scripts/local/pre-merge.sh. Cargo then emits
-#     ESC[1mESC[92m     RunningESC[0m unittests src/lib.rs (...)
-# with the reset sequence sitting BETWEEN `Running` and the path — so every parser keyed on
-# the literal text sees nothing. MEASURED on both guards, and the two directions differ:
-#   * check_unittest_targets_ran  -> FALSE FAIL: the new lanes would red on every clean
-#     nightly run, reporting "no Running unittests line" about a perfectly healthy log.
-#   * check_no_unexpected_zero_tests -> VACUOUS PASS: a target running ZERO tests is never
-#     associated with its result, so the #2039 guard silently reports OK. That one is
-#     PRE-EXISTING and affects its OTHER CALLER on nightly CI too — which is `cli-tests`, both
-#     of whose passes call it. An earlier version of this comment also named `core-tests`;
-#     core-tests does NOT call this guard, and that claim was never measured. Filed as #3400.
-#
-# Stripping is done ONCE into a sibling file, not per line and not through a pipe. A pipe
-# would put the reading loop in a SUBSHELL and its accumulated verdict variables would be
-# discarded — which for these guards means silently passing, the exact failure they exist to
-# prevent. The ESC byte is injected via printf rather than written as `\x1b`, because BSD sed
-# does not honour `\x` escapes and macOS is a first-class gate host.
-_ansi_stripped_log() {
-  local logfile="$1" out esc
-  # FAIL CLOSED on an unreadable log (roborev round-25, Medium). Returning the original path let the
-  # caller parse a file it had just failed to read, and a guard that parses nothing reports nothing
-  # wrong. The caller's own fail-closed branch is what should decide, so tell it the truth.
-  [ -r "$logfile" ] || return 1
-  esc=$(printf '\033')
-  out="$logfile.ansi-stripped"
-  if sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" "$logfile" > "$out" 2>/dev/null; then
-    printf '%s' "$out"
-  else
-    # A FAILED normalisation is not "use the coloured original": under CARGO_TERM_COLOR the
-    # coloured original is exactly what the parsers cannot read (round 15), so silently handing it
-    # back converts a normalisation failure into a vacuous PASS. Non-zero, and the caller FAILs.
-    return 1
-  fi
-}
+# _ansi_stripped_log lives EARLIER in this file (just above the failed-assert helpers), so
+# that the AGENT_GATE_TREE_SELFTEST hooks — which call record_result, and therefore
+# _failassert_record, from the mode dispatch — reach a DEFINED function rather than a
+# "command not found" that renders as `not extractable` (#3765).
 
 # check_test_targets_observed <label> <logfile> <expected-id>... — every expected integration
 # target must appear as a `Running` banner in the log.
@@ -18127,6 +18805,10 @@ run_scoped_tests() {
     # returns the status unchanged; it is called anyway so the block never renders a
     # scoped-tests line with no census record at all.
     status=$(_census_finalize "$name" "$status")
+    # #3765: and the extraction record_result would have made is written explicitly here
+    # (its log IS $log). AFTER the census, using the FINALIZED status, so a census-induced
+    # FAIL also gets an identity attempt rather than being skipped as a PASS.
+    _failassert_record "$name" "$status" "$log"
     NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
     echo ">>> [$name] $status ($((end - start))s)"
     return
@@ -18389,6 +19071,8 @@ run_scoped_tests() {
   _cen_rec=$(_census_scoped_record "$name" "${#pkgs[@]}" "$python_diff" "$PYTHON_TIER_NOTE")
   status=$(_census_finalize "$name" "$status" "$_cen_rec")
   _status_is_nonfailing "$status" || OVERALL=FAIL
+  # #3765: see the no-parser exit above — explicit, and after the census for the same reason.
+  _failassert_record "$name" "$status" "$log"
   NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   echo ">>> [$name] $status ($((end - start))s)"
 }
@@ -18548,9 +19232,20 @@ run_delta_node_tests() {
   # own `Tests:` tally out of this file, so it has to survive the lane — and keeping it puts
   # node-tests' output in the `logs:` bundle beside every other component's, instead of
   # discarding the evidence right after tailing 40 lines of it.
+  #
+  # MERGE NOTE (#3625 x #3765): this SUPERSEDES #3765's private-mktemp fix for this runner.
+  # That fix existed because the log lived in a bare ${TMPDIR:-/tmp} and extraction writes a
+  # derived `<log>.ansi-stripped` SIBLING beside it, which leaked and was pre-placeable by a
+  # peer. $LOG_DIR is itself a 0700 `mktemp -d`, so the sibling is neither guessable nor
+  # creatable by anyone else and never reaches a world-writable directory — a strictly better
+  # outcome, with no tmpdir for this runner to own or remove.
   local log jest_filter=""
   log="$LOG_DIR/node-tests.log"
   [ "$whole" -eq 0 ] && jest_filter="${filters[*]}"
+  # The fail-closed `[ -z "$tmpd" ]` arm that stood here is GONE with the tmpdir it guarded
+  # (#3625 x #3765): the log lives in $LOG_DIR, which the gate creates at startup, so there is
+  # no per-runner directory whose creation could fail. Leaving the arm behind referenced an
+  # unset `$tmpd` under `set -u` and aborted the runner outright — caught by the census suite.
   if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" JEST_FILTER="$jest_filter" bash -c '
       set -uo pipefail
       cd "'"$REPO_ROOT"'/bindings/node"
@@ -18573,6 +19268,10 @@ run_delta_node_tests() {
     status=FAIL; OVERALL=FAIL
     echo "--- [node-tests] FAILED; last 40 lines of $log ---"; tail -40 "$log"; echo "--- end of node-tests output ---"
   fi
+  # #3765: extract the failing identity from the jest log. No tmpdir teardown any more —
+  # the log lives in $LOG_DIR (see the merge note above), so there is nothing to race and
+  # nothing to remove, and the `.ansi-stripped` sibling stays inside the 0700 run directory.
+  _failassert_record "node-tests" "$status" "$log"
   end=$(date +%s)
   # #3625: no _census_declare here any more (roborev job 383). The census is jest's OWN
   # `Tests:` tally, measured from the log above through the SAME indirect:jest path
@@ -18607,8 +19306,42 @@ run_delta_shell_selftests() {
   n_targets=${#tarr[@]}
   echo ">>> [shell-selftests] executing $n_targets changed scripts/tests/*.sh"
   start=$(date +%s)
-  if _run_shell_selftest_files "${tarr[@]}"; then status=PASS; else status=FAIL; OVERALL=FAIL; fi
+  # #3765 roborev job 67: CAPTURE the per-file verdicts so an identity exists to extract. The
+  # verdicts were previously written straight to stdout and nowhere else, so this component had
+  # no log and published `not extractable` while the failing script name was right there.
+  #
+  # Redirect-then-cat, NOT `| tee`: a pipeline would run _run_shell_selftest_files in a SUBSHELL
+  # and hand the `if` tee's status instead of the suite's. The stdout contract is preserved by
+  # printing the log immediately afterwards, so the `shell-selftest: <file> PASS|FAIL` lines
+  # still appear exactly where a reader expects them.
+  #
+  # A PRIVATE 0700 dir, removed WHOLESALE: _ansi_stripped_log writes a `<log>.ansi-stripped`
+  # sibling during extraction, and removing only the log would leave it behind in /tmp — the
+  # blocker-3 defect, one component over.
+  local sh_tmpd sh_log=""
+  sh_tmpd=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-shsel.XXXXXX" 2>/dev/null) || sh_tmpd=""
+  if [ -n "$sh_tmpd" ]; then
+    chmod 700 "$sh_tmpd" 2>/dev/null
+    sh_log="$sh_tmpd/verdicts.log"
+  fi
+  if [ -n "$sh_log" ]; then
+    if _run_shell_selftest_files "${tarr[@]}" > "$sh_log" 2>&1; then status=PASS; else status=FAIL; OVERALL=FAIL; fi
+    cat "$sh_log"
+  else
+    if _run_shell_selftest_files "${tarr[@]}"; then status=PASS; else status=FAIL; OVERALL=FAIL; fi
+  fi
   end=$(date +%s)
+  # #3765: extract from the captured per-file verdicts. This runner used to write them only
+  # to stdout, so the component had no log and reported `not extractable` while the failing
+  # script name was right there.
+  if [ "$status" = FAIL ]; then
+    if [ -n "$sh_log" ] && [ -s "$sh_log" ]; then
+      _failassert_record shell-selftests FAIL "$sh_log"
+    else
+      _failassert_write shell-selftests "not extractable (the per-file verdicts could not be captured to a log for this run)"
+    fi
+  fi
+  [ -n "$sh_tmpd" ] && rm -rf "$sh_tmpd"
   # #3625: same as node-tests — this lane's children write to the run log, not to a
   # per-component log, and it already holds its exact subject count.
   _cen_rec=$(_census_declare shell-selftests "$n_targets" "changed scripts/tests/*.sh executed")
@@ -19139,9 +19872,24 @@ fi
 # summary, and exits on OVERALL exactly as run_lite does — so the regression test can
 # pin "any component FAIL ⇒ RESULT: FAIL + non-zero exit" without a cargo build.
 if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
+  # #3765: optionally seed a component LOG from a caller-supplied file
+  # (AGENT_GATE_TEST_LITE_LOGS="name=/path ..."), so the failed-assert field can be
+  # driven through its REAL chain — log -> _ansi_stripped_log -> the extractor -> the
+  # sidecar -> the ONE renderer — with no cargo and no 20-minute gate. A name with NO
+  # entry here keeps an absent log, which is itself one of the states under test.
+  # shellcheck disable=SC2086  # intentional word-split over the space-separated pairs
+  for _fapair in ${AGENT_GATE_TEST_LITE_LOGS:-}; do
+    cp -R "${_fapair#*=}" "$LOG_DIR/${_fapair%%=*}.log" 2>/dev/null || true
+  done
   # Seed per-component result files from AGENT_GATE_TEST_LITE_RESULTS="name:status ...".
   # shellcheck disable=SC2086  # intentional word-split over the space-separated pairs
   for _pair in ${AGENT_GATE_TEST_LITE_RESULTS:-}; do
+    # The REAL extraction site record_result uses (#3765) — same function, same
+    # arguments, so this hook cannot certify a code path production does not take.
+    # SIDECAR FIRST, `.result` SECOND, mirroring record_result exactly (#3765 blocker 14):
+    # `.result` is the PUBLICATION, so a fixture that published first would model an order
+    # production no longer takes.
+    _failassert_record "${_pair%%:*}" "${_pair#*:}"
     printf '%s 0\n' "${_pair#*:}" > "$LOG_DIR/${_pair%%:*}.result"
   done
   # Seed the scoped-tests entry run_scoped_tests appends (and flip OVERALL as it does).

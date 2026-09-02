@@ -720,8 +720,94 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   block's `commit:`/`dirty:` are derived from that verified capture, never a fresh emit-time git
   read. No env var bypasses it; remedy is to re-run on a stable tree (don't edit a worktree while
   its gate runs).
+- **A FAIL line NAMES THE FAILING ASSERT, and the invocation bracket is LABELLED (#3765).**
+  `tooling-tests: FAIL (1149s)  [invocation: test ws0-corpus-gen default-features | + cargo not
+  observable: …]  failed-assert: 1 RECOGNISED (assert): 1465-skip-declares`. The bracket used to be
+  UNLABELLED and is test-SHAPED, so a reader identified `ws0-corpus-gen` as the failing test — it is
+  not; the real assert lived only in the component log, which doctrine forbids reading while
+  simultaneously requiring a flake citation to name the ASSERT. That was unsatisfiable, and it cost
+  a real round (a lead refused a lane's correct flake attribution because the bracket "named a
+  different test"). The field appears on **FAIL lines only** — a PASS/SKIP has no failing assert —
+  and is one of FOUR textually distinct states, never blank: `<N> RECOGNISED (<tier>): a, b, c (+K
+  more)` (the count is the TRUE total; tier ∈ assert|guard|toolchain), `0 RECOGNISED (…)` for a scan
+  that matched nothing (**never a bare `0`** — the recogniser set is documented NON-EXHAUSTIVE),
+  `not extractable (<cause>)` when the log could not be read or normalised, and `not recorded (…)`
+  when no extraction ran at all. **"Found nothing" and "could not look" are never collapsed.** The
+  recogniser set is ONE named file, `scripts/ci/gate-failed-assert.sh`, with a stated rule per entry,
+  derived by MEASUREMENT over the 174 real FAILed component logs on a fleet box (114 of the 136
+  non-empty ones recognised; the knowingly-uncovered shapes are declared in its header) and resolved
+  from the checkout with **no env override**. It parses through the gate's ONE `_ansi_stripped_log`
+  (#3400), and an unreadable log is a NAMED `not extractable`, never "no failures found".
+  **The pipeline order is NEUTRALISE -> REDACT -> BOUND FOR DISPLAY, and it is a safety property, not
+  formatting.** FOUR defects on this issue were ONE shape — an operation applied to a value before
+  the operation that needed the value WHOLE: a 57-char cap before the DEDUP (count undercounted), a
+  cut at the first `:` before the DEDUP (13 distinct asserts named as one tag), a 60-char display
+  elision before the REDACTION, which deleted a URL's `scheme://` and left `TOKEN@host/path` — a
+  shape NEITHER redaction rule matches, so a live credential reached a block this repo tells agents
+  to paste into PR comments — and the extractor's own 4096-char SAFETY truncation, the same thing at
+  a 68x bound. So the extractor emits the FULL identity and **truncates nothing**: an over-bound
+  identity is published as an affirmative placeholder naming its measured length, never as a prefix,
+  because **declaring a hazard is not removing it** and a truncation must not precede neutralisation
+  at ANY bound. **And the ONE tier whose payload is environment-controlled publishes NO free text at
+  all — it publishes a CLOSED-ENUM KIND LABEL (#3765 / roborev job 48 + round 5).** A redactor that
+  knows only URL userinfo and the scp form let a secret through in a query string, a header or prose
+  — the SIXTH round of that family in this one file — and the shape neutraliser written for it was
+  the SEVENTH: measured on the rendered field, `token=X` and `password: X` neutralised while
+  `api_key X` (credential-named key, SPACE-separated) and a bare unmarked secret did NOT. **An
+  unmarked secret is undetectable in principle, so a keyword/shape recogniser over free text NEVER
+  closes** and the ruling taken on the origin diagnostic (`STOP RENDERING THE VALUE, DO NOT SANITISE
+  IT AGAIN`) is applied literally: tier `toolchain` (rustc/cargo `error:`, `npm error`, `bash:`,
+  `Error:`, a rustfmt diff) COUNTS its matched lines and publishes only a label this repo chose —
+  `npm-error`, `rustfmt-diff` — plus the affirmative statement that no named assert exists and the
+  text was withheld; the diagnostic stays in the component log. **AND THE SAME RULE NOW RUNS OVER
+  ALL THREE TIERS, BECAUSE THE "REPOSITORY-AUTHORED TEXT IS SAFE" RATIONALE WAS MEASURABLY FALSE
+  (#3765 / roborev job 49).** An earlier round kept the payload channel for `assert`/`guard` on the
+  ground that their text is "in-tree, reviewed, diffed by every PR". It is not a CONSTANT: in
+  `scripts/tests/test_agent_gate_summary.sh` alone, **205 `bad "…"` messages INTERPOLATE RUNTIME
+  VALUES** (`bad "leaked-child: … '$caller_file' …"`), so an assert payload is a repo-authored
+  TEMPLATE carrying runtime text — and this gate interpolates ORIGIN URLS into diagnostics, which is
+  what `_component_set_safe_detail` exists for, so the neutraliser's declared residual applied there
+  too. **Publishing the payload was never what #3765 asked for either**: the issue's own sketch is
+  the TAG (`failed-assert: 1465-skip-declares (accounted 419/420, floor 410)`). So every tier
+  publishes an **IDENTIFIER** — a tag / test path (first token, cut at the first single `:`, `::`
+  kept), a guard `<label> (<VERDICT>)`, or a closed-enum kind label — each **charset-constrained and
+  bounded**, with the charset exclusions load-bearing (no `@`, `/`, `?`, `&`, `=`, whitespace or `#`,
+  i.e. exactly the shapes this field's leak family travelled on). The shape neutralisation and the
+  redactor stay behind it as defence in depth, **a REDUCTION, never a guarantee**. Even the *derived*
+  `rustfmt diff in <path>` form went: a path is environment-controlled, and one argued-safe exception
+  inside a removed channel is where the next leak lands. **Count correctness and publication safety
+  are SEPARATE concerns and neither is traded for the other**: the extractor dedupes and COUNTS on
+  the FULL identity, internally, and publishes only the PROJECTION — so `F5`'s full-payload DEDUP is
+  intact while nothing publishes a payload, a toolchain count may exceed its label count, and a
+  published identifier SHARED by two distinct identities is **ORDINALISED** (`F2#1`, `F2#2`) so two
+  distinct asserts never render as one string. **A BOUND MUST BE APPLIED BEFORE RETENTION, NOT AFTER
+  IT**: the full identity used to become an array key with its 4096 bound applied afterwards
+  (unbounded memory on a log of long minified lines), so the dedup key is bounded on the way IN —
+  legitimate only because that key is **provably never published**, which is asserted. **AND A
+  BOUNDED KEY MUST CARRY A DIGEST OF THE WHOLE IDENTITY, BECAUSE A WINDOWED KEY ALIASES** — the
+  sixth instance of that one class, created BY the memory fix: keyed on length + a 1024-char head
+  + a 1024-char tail, two distinct diagnostics of equal length differing only in the MIDDLE
+  collapsed into one and the count UNDERCOUNTED while the field advertises a distinct total. The
+  tension is bounded memory vs exact distinctness and a digest resolves both, at a strength stated
+  where a reader of the key sees it: a **pair of rolling polynomial checksums, NOT a cryptographic
+  hash** — a collision is constructible, an accidental one between two real identities is not.
+  **AND THE SIDECAR IS WRITTEN BEFORE THE `.result` THAT PUBLISHES THE COMPONENT**: `.result` is
+  what every reader — including the tree-integrity boundary renderer, globbing another lane's
+  `$LOG_DIR` — discovers a component by, so publishing it first let a concurrent boundary failure
+  render a FAIL row whose sidecar merely was not written YET as `not recorded`, i.e. an absence
+  reported as a measurement, by a race. **AND AN
+  OVER-BOUND VALUE IS COUNTED, NEVER DROPPED**: an over-long guard label used to be discarded while
+  an unconditional `next` blocked every later tier, so the field read `0 RECOGNISED` — "scanned,
+  nothing matched" — for a line a recogniser HAD matched. The invariant is checked BOTH structurally
+  (every recogniser passes a label literal, `pubid(…)` or `publabel(…)`) and on the OUTPUT PATH (a
+  name outside its tier's shape is REFUSED, not sanitised), because a source
+  scan cannot see a runtime value. **A bound must
+  never be able to change a safety verdict, and a leak check must be made on the RENDERED field —
+  never on extractor stdout, where a token cut by an elision looks absent while never having been
+  redacted.** The same "one renderer" rule covers the tree-integrity BOUNDARY block, whose two
+  component loops used a second `printf` and so carried neither the bracket nor this field.
 - **Every component line NAMES the feature matrix it ran, in ALL THREE modes (#3453).**
-  `core-tests: PASS (412s)  [test cqlite-core --features cli-helpers]` — read as
+  `core-tests: PASS (412s)  [invocation: test cqlite-core --features cli-helpers]` — read as
   `<subcommand> <scope> <features>`, one entry per distinct invocation, `xN` for repeats. A bare
   `PASS (412s)` could not distinguish a run that certified the OTLP stack from one that never
   enabled it, which is this issue's whole subject. It is **DERIVED, never curated**: `cargo` and `env` are shell FUNCTIONS in the gate, so a
@@ -740,21 +826,23 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   every bash DESCENDANT record, so `tooling-tests` (which runs nested agent-gate self-tests) would
   attribute a nested run's cargo to itself — while `_fm_observe_child`, which intercepts nothing and
   fires only where a body calls it by name, IS exported (with the gate's own `_fm_describe_cargo`,
-  so there is no second formatter to drift). It **never renders blank**: `[UNDECLARED]` (cargo
-  expected, nothing observed), `[no-cargo]`, `[via <driver>: feature set NOT observed]`,
-  `[cargo not observable: <why>]`, or a named SKIP / FAILed-before-its-first-cargo /
+  so there is no second formatter to drift). It **never renders blank** — and since #3765 EVERY
+  bracket is LABELLED `[invocation: …]`, so it can no longer be read as a failure identity:
+  `[invocation: UNDECLARED]` (cargo expected, nothing observed), `[invocation: no-cargo]`,
+  `[invocation: via <driver>: feature set NOT observed]`,
+  `[invocation: cargo not observable: <why>]`, or a named SKIP / FAILed-before-its-first-cargo /
   never-reached-its-driver state; a long list abbreviates as `33:a,b,c,+30 more`, never
   a silent truncation. **A driver we cannot see is NAMED, not guessed** — `python-bindings`,
   `node-bindings` and the `--lite` scoped-tests PYTHON TIER (whose maturin build runs in a child
   process) render `via <driver>: feature set NOT observed`, ADDITIVELY beside the rust sets a mixed
-  diff also observes (`[test cqlite-core --features cli-helpers | via maturin: feature set NOT
-  observed]`): "nobody said" and "known to be indirect, therefore unobservable" are different facts
+  diff also observes (`[invocation: test cqlite-core --features cli-helpers | via maturin: feature
+  set NOT observed]`): "nobody said" and "known to be indirect, therefore unobservable" are different facts
   and only one of them is a defect.
   **AND THE CLASS DECIDES WHAT MAY BE CLAIMED — three rules, from one family of findings (roborev
   job 273).** (1) A component whose cargo runs ONLY IN A CHILD PROCESS is **never class `cargo`**:
   the interceptors are unexported by design, so `cargo` means "observable in this shell (or
   self-recorded from a `bash -c` body)". `tooling-tests` was declared `cargo` while its only cargo
-  runs inside ~60 nested test scripts, so a PASS read `[UNDECLARED]` and a FAIL could claim it
+  runs inside ~60 nested test scripts, so a PASS read `[invocation: UNDECLARED]` and a FAIL could claim it
   "FAILed before its first cargo invocation" after a child `cargo build` really ran — hence the
   fourth class `unobservable:<why>`, which asserts NOTHING in either direction and takes no
   SKIP/FAIL note. (2) An `indirect:<driver>` component must **RECORD whether its driver was

@@ -108,7 +108,11 @@ for fn in _fm_active _fm_sidecar _fm_note _fm_indirect_desc _fm_unobservable_des
           _fm_abbrev_features \
           _fm_describe_cargo _fm_observe_cargo_argv _fm_observe_child _fm_observe_driver \
           cargo env \
-          _fm_component_class _fm_render _fm_annotate _fm_summary_line \
+          _fm_component_class _fm_render _fm_annotate _fm_annotate_body _fm_summary_line \
+          _failassert_sidecar _failassert_render _failassert_record _failassert_write \
+          _failassert_clean _failassert_neutralise _failassert_tool _failassert_relpath_ok \
+          _failassert_is_doctest_id _failassert_is_shelltestid \
+          _failassert_is_pytestid _failassert_is_jestid \
           _fm_note_if_no_cargo_observed _fm_note_driver _fm_note_maturin_rc \
           _ansi_stripped_log \
           _census_sidecar _census_kind _census_write _census_read _census_declare \
@@ -521,7 +525,7 @@ seed() { printf '%s\n' "$@" > "$AGENT_GATE_FM_DIR/$1.features"; }   # first arg 
 printf '%s\n' 'test cqlite-core --features a' 'test cqlite-core --features a' 'test cqlite-flight default-features' \
   > "$AGENT_GATE_FM_DIR/core-tests.features"
 got=$(_fm_annotate core-tests)
-if [ "$got" = '[test cqlite-core --features a x2 | test cqlite-flight default-features]' ]; then
+if [ "$got" = '[invocation: test cqlite-core --features a x2 | test cqlite-flight default-features]' ]; then
   ok "R1: identical sets collapse to 'xN' and distinct sets are BOTH named"
 else
   bad "R1: got '$got'"
@@ -535,10 +539,10 @@ case "$got" in
 esac
 
 got=$(_fm_annotate minimal-build)   # cargo class, no sidecar
-[ "$got" = '[UNDECLARED]' ] && ok "R3: a cargo component with no observation renders UNDECLARED" || bad "R3: got '$got'"
+[ "$got" = '[invocation: UNDECLARED]' ] && ok "R3: a cargo component with no observation renders UNDECLARED" || bad "R3: got '$got'"
 
 got=$(_fm_annotate file-size)       # declared no-cargo, no sidecar
-[ "$got" = '[no-cargo]' ] && ok "R4: a declared no-cargo component renders no-cargo" || bad "R4: got '$got'"
+[ "$got" = '[invocation: no-cargo]' ] && ok "R4: a declared no-cargo component renders no-cargo" || bad "R4: got '$got'"
 
 # An indirect component with NO record at all: the driver is NAMED and the state is a
 # visible recording gap. It is deliberately NOT the via-driver text (roborev job 273, F3):
@@ -552,7 +556,7 @@ esac
 # …and WITH a recorded reach it renders the via-driver text.
 AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_driver python-bindings maturin reached
 got=$(_fm_annotate python-bindings)
-[ "$got" = '[via maturin: feature set NOT observed]' ] \
+[ "$got" = '[invocation: via maturin: feature set NOT observed]' ] \
   && ok "R5b: a recorded driver reach renders 'via <driver>: feature set NOT observed'" \
   || bad "R5b: got '$got'"
 rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
@@ -577,7 +581,7 @@ esac
 # …and a declared no-cargo component is left exactly as it was.
 AGENT_GATE_FM_COMPONENT=pub-surface _fm_note_if_no_cargo_observed pub-surface SKIP
 got=$(_fm_annotate pub-surface)
-[ "$got" = '[no-cargo]' ] && ok "R8: the SKIP note does not disturb a declared no-cargo component" || bad "R8: got '$got'"
+[ "$got" = '[invocation: no-cargo]' ] && ok "R8: the SKIP note does not disturb a declared no-cargo component" || bad "R8: got '$got'"
 # A FAIL that died BEFORE its first cargo call (a fail-closed derivation, a guard script)
 # now legitimately leaves an EMPTY sidecar, because the records moved inside the child body
 # (roborev job 269, blocker 2). It must say so, not read UNDECLARED.
@@ -610,7 +614,7 @@ rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
 AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_driver python-bindings maturin reached
 AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_if_no_cargo_observed python-bindings FAIL
 got=$(_fm_annotate python-bindings)
-[ "$got" = '[via maturin: feature set NOT observed]' ] \
+[ "$got" = '[invocation: via maturin: feature set NOT observed]' ] \
   && ok "R11b: a recorded driver reach survives a terminal FAIL (a failed build IS an invocation)" \
   || bad "R11b: got '$got'"
 rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
@@ -638,7 +642,7 @@ for _rc in 0 1 2 3 4 none 7; do
   : > "$_rc_marker"
   AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_maturin_rc python-bindings "$_rc" "$_rc_marker"
   got=$(_fm_annotate python-bindings)
-  [ "$got" = '[via maturin: feature set NOT observed]' ] || rc_bad+=("marker+rc$_rc:'$got'")
+  [ "$got" = '[invocation: via maturin: feature set NOT observed]' ] || rc_bad+=("marker+rc$_rc:'$got'")
 done
 rm -f "$_rc_marker"
 # (ii) Marker mechanism ACTIVE but marker ABSENT => the negative is MEASURED, and the rc
@@ -647,7 +651,7 @@ for _rc in 0 2 3; do
   rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
   AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_maturin_rc python-bindings "$_rc" "$_rc_marker"
   got=$(_fm_annotate python-bindings)
-  [ "$got" = '[via maturin: feature set NOT observed]' ] || rc_bad+=("absent+rc$_rc:'$got'")
+  [ "$got" = '[invocation: via maturin: feature set NOT observed]' ] || rc_bad+=("absent+rc$_rc:'$got'")
 done
 # (iii) NO marker path at all => UNKNOWN, never a negative. Asserting a not-reached we did not
 #       measure is the same unfounded claim this annotation exists to prevent.
@@ -683,7 +687,7 @@ rm -f "$AGENT_GATE_FM_DIR/node-bindings.features"
 ( export -f _fm_observe_driver _fm_indirect_desc _fm_sidecar
   bash -c '_fm_observe_driver node-bindings "npm run build (napi)"' )
 got=$(_fm_annotate node-bindings)
-[ "$got" = '[via npm run build (napi): feature set NOT observed]' ] \
+[ "$got" = '[invocation: via npm run build (napi): feature set NOT observed]' ] \
   && ok "R11e: _fm_observe_driver records from a CHILD shell (the exported-recorder property node-bindings depends on)" \
   || bad "R11e: got '$got'"
 rm -f "$AGENT_GATE_FM_DIR/node-bindings.features"
@@ -726,7 +730,7 @@ if AGENT_GATE_SUMMARY_FILE="$selftest_sum" bash "$GATE" --emit-summary-selftest 
   missing=()
   while IFS= read -r line; do
     case "$line" in
-      *'[UNDECLARED]'*|*UNCLASSIFIED*) missing+=("$line") ;;
+      *'[invocation: UNDECLARED]'*|*UNCLASSIFIED*) missing+=("$line") ;;
     esac
   done < <(grep -E '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP|VACUOUS)' "$selftest_sum")
   n_annot=$(grep -cE '^(fmt|clippy|core-tests|smoke): +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\)  \[.+\]' "$selftest_sum")
@@ -828,7 +832,7 @@ else
   bad "W6: rc=$(cat "$tmp/e.rc") argv=$(grep -c '^ARG\[' "$tmp/e.out") (expected 0 / 6)"
 fi
 got=$(_fm_annotate clippy)
-[ "$got" = '[clippy cqlite-core --features a,b]' ] \
+[ "$got" = '[invocation: clippy cqlite-core --features a,b]' ] \
   && ok 'W7: an "env VAR=... cargo ..." invocation IS recorded (the run_clippy path, which an env prefix would otherwise hide)' \
   || bad "W7: got '$got'"
 unset AGENT_GATE_FM_COMPONENT
@@ -896,10 +900,14 @@ run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact] [shim-d
     bad "C-$c$tag: no '$c:' component line in the emitted block"
     return
   fi
+  # #3765: a FAIL line now carries a `failed-assert:` field AFTER the invocation
+  # bracket. Drop it before isolating the bracket, or an EXACT comparison would be
+  # comparing the annotation against annotation+field.
+  line=${line%%"  failed-assert: "*}
   ann=${line#*\[}; ann="[${ann}"
   ann=$(fm_strip_census "$ann")
   case "$ann" in
-    '[UNDECLARED]'|*UNCLASSIFIED*|'[]') bad "C-$c$tag: annotation is '$ann'"; return ;;
+    '[invocation: UNDECLARED]'|*UNCLASSIFIED*|'[]'|'[invocation: ]') bad "C-$c$tag: annotation is '$ann'"; return ;;
   esac
   local exec_side="$tmp/exec-$c$tag.features"
   describe_shim_log "$shimlog" "$exec_side"
@@ -912,7 +920,7 @@ run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact] [shim-d
   local saved="$AGENT_GATE_FM_DIR" expected
   export AGENT_GATE_FM_DIR="$tmp/execside"; mkdir -p "$AGENT_GATE_FM_DIR"
   cp "$exec_side" "$AGENT_GATE_FM_DIR/$c.features"
-  expected="[$(_fm_render "$c")]"
+  expected="[invocation: $(_fm_render "$c")]"
   export AGENT_GATE_FM_DIR="$saved"
   if [ "$mode" = EXACT ]; then
     if [ "$ann" = "$expected" ]; then
@@ -1121,7 +1129,7 @@ fm_have_meta_parser=0
 py_plan_pure='python-tier: maturin develop && pytest'
 py_plan_mixed='rust-pkg: cqlite-core
 python-tier: maturin develop && pytest'
-want_via='[via maturin: feature set NOT observed]'
+want_via='[invocation: via maturin: feature set NOT observed]'
 if [ "$fm_have_meta_parser" -eq 0 ]; then
   skipped "P1-P4: neither jq nor python3 on PATH — run_scoped_tests takes its no-parser fail-closed exit before the python tier, so these have no subject here"
 else
@@ -1129,7 +1137,7 @@ got=$(py_run "$py_plan_pure" 0)
 [ "$got" = "$want_via" ] \
   && ok "P1: a PURE-python route renders $want_via — the state is NAMED as unobservable, not left UNDECLARED" \
   || bad "P1: got '$got' want '$want_via'"
-want_mixed='[test cqlite-core --features cli-helpers | via maturin: feature set NOT observed]'
+want_mixed='[invocation: test cqlite-core --features cli-helpers | via maturin: feature set NOT observed]'
 got=$(py_run "$py_plan_mixed" 0)
 [ "$got" = "$want_mixed" ] \
   && ok "P2: a MIXED rust+python route renders BOTH — the maturin entry is ADDITIVE, it does not replace the observed rust matrix" \
@@ -1267,7 +1275,7 @@ if type -P python3 >/dev/null 2>&1; then
     *) bad "PB2: got '$got'" ;;
   esac
   got=$(pyb_run 2)
-  [ "$got" = '[via maturin: feature set NOT observed]' ] \
+  [ "$got" = '[invocation: via maturin: feature set NOT observed]' ] \
     && ok "PB3: rc 2 (maturin RAN and failed) — the invocation IS recorded; a failed build is an invocation that happened" \
     || bad "PB3: got '$got'"
 else
@@ -1333,10 +1341,11 @@ for c in "${e2_cargo[@]+"${e2_cargo[@]}"}"; do
   e2_line=$(grep -E "^$c: +(PASS|FAIL|SKIP|VACUOUS)" "$e2_sum" 2>/dev/null | head -1)
   if [ -z "$e2_line" ]; then e2_missing+=("$c"); continue; fi
   e2_ran=$((e2_ran + 1))
+  e2_line=${e2_line%%"  failed-assert: "*}   # #3765: field is not part of the annotation
   e2_ann=${e2_line#*\[}; e2_ann="[$e2_ann"
   e2_ann=$(fm_strip_census "$e2_ann")
   case "$e2_ann" in
-    *UNDECLARED*|*UNCLASSIFIED*|'[]') e2_bad+=("$c=$e2_ann") ;;
+    *UNDECLARED*|*UNCLASSIFIED*|'[]'|'[invocation: ]') e2_bad+=("$c=$e2_ann") ;;
     *'no cargo build/test invoked'*)  ;;   # a NAMED terminal state, not a gap
     *) e2_observed=$((e2_observed + 1)) ;;
   esac

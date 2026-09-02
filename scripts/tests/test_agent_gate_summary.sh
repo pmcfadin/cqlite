@@ -5135,9 +5135,9 @@ fi
 # that makes a blank annotation unrepresentable: every branch that cannot report an
 # observed matrix still prints a NAMED state.
 fm_tokens_missing=()
-grep -q "printf '\[no-cargo\]'" "$GATE" || fm_tokens_missing+=(no-cargo)
+grep -q "printf 'no-cargo'" "$GATE" || fm_tokens_missing+=(no-cargo)   # #3765: the bracket moved to the ONE label site (_fm_annotate)
 grep -q 'feature set NOT observed' "$GATE" || fm_tokens_missing+=(via-driver-not-observed)
-grep -q "printf '\[UNDECLARED\]'" "$GATE" || fm_tokens_missing+=(UNDECLARED)
+grep -q "printf 'UNDECLARED'" "$GATE" || fm_tokens_missing+=(UNDECLARED)   # #3765: ditto
 grep -q 'UNCLASSIFIED' "$GATE" || fm_tokens_missing+=(UNCLASSIFIED)
 grep -q 'component SKIPped' "$GATE" || fm_tokens_missing+=(skipped-before-cargo)
 # …and, since the eight `bash -c` bodies record at EXECUTION time (#3453 roborev job 269
@@ -5166,6 +5166,1846 @@ if [ -r "$SCRIPT_DIR/../../$fm_guard" ] && grep -q "$fm_guard" "$GATE"; then
   ok "3453-annot-e: the completeness/no-drift guard exists AND is registered in the gate (tooling-tests)"
 else
   bad "3453-annot-e: $fm_guard missing (looked under $SCRIPT_DIR/../..) or not registered in $GATE — the COMPONENTS completeness census would be silently gone"
+fi
+
+# ============================================================================
+# 55. ISSUE #3765: the FAILING ASSERT IDENTITY on a FAIL line, and the LABELLED
+#     invocation bracket.
+#
+# THE DEFECT. A failing component rendered:
+#     tooling-tests:  FAIL (1149s)  [test ws0-corpus-gen default-features | + …]
+# The bracket is the #3453 INVOCATION annotation, it was UNLABELLED, and it is
+# test-SHAPED — so a reader identifies `ws0-corpus-gen` as the failing test. It is not.
+# The real assert (`FAIL - 1465-skip-declares: …`) lived ONLY in the component log, which
+# CLAUDE.md forbids an agent to read, while the same doctrine requires a flake citation to
+# name the ASSERT rather than the component. Unsatisfiable, and it cost a real round: a
+# coordination lead refused a lane's correct flake attribution because the bracket "named
+# a different test".
+#
+# HERMETIC BY CONSTRUCTION. Every case below drives the REAL chain — component log ->
+# _ansi_stripped_log -> scripts/ci/gate-failed-assert.sh -> the sidecar -> the ONE
+# renderer — through the hidden --lite-aggregate-selftest hook, which seeds a caller
+# -supplied log with AGENT_GATE_TEST_LITE_LOGS and calls the SAME _failassert_record
+# record_result calls. No cargo, no 20-minute gate, and no re-implementation of the
+# subject in this file.
+#
+# THE FOUR STATES ARE ASSERTED AS TEXTUALLY DISTINCT, because they are different operator
+# facts: an identity, a scan that found nothing, a scan that could not happen, and no
+# scan at all. Collapsing any pair is the "positive verdict from the absence of a bad
+# signal" shape this repo keeps paying for.
+# ============================================================================
+fa_dir="$tmp/3765"; mkdir -p "$fa_dir"
+printf 'ok   - a: fine\nFAIL - 1465-skip-declares: the opt-out SKIP branch does not declare the leak-lane state\npassed: 419  failed: 1\n' > "$fa_dir/one.log"
+printf 'FAIL - alpha: x\nFAIL - beta: y\nFAIL - gamma: z\nFAIL - delta: w\nFAIL - epsilon: v\n' > "$fa_dir/many.log"
+printf 'this log says nothing a recogniser knows\njust prose\n' > "$fa_dir/quiet.log"
+: > "$fa_dir/empty.log"
+mkdir -p "$fa_dir/adirectory"
+# #3400: colour SURVIVES redirection to a file, and 18 workflows set CARGO_TERM_COLOR
+# always — so the coloured form of the SAME line must yield the SAME identity.
+printf 'FAIL - \033[1;31m3400-coloured\033[0m: a coloured marker must still be recognised\n' > "$fa_dir/coloured.log"
+# Tier precedence: a real test failure ALSO produces a cargo `error:` epilogue. The
+# assert tier must win, or every libtest failure would report cargo's summary instead.
+printf 'test tests::foo_bar ... FAILED\n\nfailures:\n    tests::foo_bar\n\nerror: test failed, to rerun pass `--lib`\n' > "$fa_dir/tiered.log"
+
+# _fa_run <label> <results> <logs> <scoped> -> emits into $fa_sum
+fa_sum=""
+_fa_run() {
+  fa_sum="$fa_dir/$1.txt"
+  AGENT_GATE_SUMMARY_FILE="$fa_sum" \
+    AGENT_GATE_TEST_LITE_RESULTS="$2" AGENT_GATE_TEST_LITE_LOGS="$3" \
+    AGENT_GATE_TEST_LITE_SCOPED="$4" \
+    bash "$GATE" --lite-aggregate-selftest >/dev/null 2>&1
+}
+# VACUOUS is part of the component-status vocabulary since #3625 (a PASS whose measured
+# subject count is zero), so a two-token matcher would silently fail to FIND a census-failed
+# row and every case reading it would compare against an empty string.
+_fa_line() { grep -E "^$1: +(PASS|FAIL|SKIP|VACUOUS)" "$fa_sum" 2>/dev/null | head -1; }
+
+# 55a. AN IDENTITY IS EXTRACTED — the #3765 subject line, verbatim from the issue.
+_fa_run identity "file-size:FAIL fmt:PASS clippy:PASS" "file-size=$fa_dir/one.log" PASS
+fa_got=$(_fa_line file-size)
+case "$fa_got" in
+  *"failed-assert: 1 RECOGNISED (assert): 1465-skip-declares"*)
+    ok "3765-identity: a FAIL line NAMES the failing assert ($fa_got)" ;;
+  *) bad "3765-identity: expected 'failed-assert: 1 RECOGNISED (assert): 1465-skip-declares', got '$fa_got'" ;;
+esac
+
+# 55b. MANY FAILURES: the COUNT is the true total and the names are capped with the
+#      remainder DECLARED — defect identity, not a full report.
+_fa_run many "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/many.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *"failed-assert: 5 RECOGNISED (assert): alpha, beta, gamma (+2 more)"*)
+    ok "3765-many: count is the TRUE total, first 3 named by TAG, remainder declared ($fa_got)" ;;
+  *) bad "3765-many: expected '5 RECOGNISED (assert): alpha, beta, gamma (+2 more)', got '$fa_got'" ;;
+esac
+
+# 55c. LOG READ, NOTHING RECOGNISED: `0 RECOGNISED`, never a bare 0, and the scan's own
+#      non-exhaustiveness DECLARED in the line.
+_fa_run quiet "clippy:FAIL file-size:PASS fmt:PASS" "clippy=$fa_dir/quiet.log" PASS
+fa_got=$(_fa_line clippy)
+case "$fa_got" in
+  *"failed-assert: 0 RECOGNISED (component log scanned; no recogniser matched"*NON-EXHAUSTIVE*)
+    ok "3765-none: a scanned-but-unmatched log reads 0 RECOGNISED and declares the scan NON-EXHAUSTIVE" ;;
+  *) bad "3765-none: expected '0 RECOGNISED (component log scanned; … NON-EXHAUSTIVE)', got '$fa_got'" ;;
+esac
+
+# 55d. AN EMPTY LOG IS ITS OWN MEASUREMENT — 20 of the 174 measured FAIL logs were
+#      zero-length, and "the log was empty" is a different operator fact from "the log
+#      had content none of which matched".
+_fa_run empty "clippy:FAIL file-size:PASS fmt:PASS" "clippy=$fa_dir/empty.log" PASS
+fa_got=$(_fa_line clippy)
+case "$fa_got" in
+  *"failed-assert: 0 RECOGNISED (component log is EMPTY"*)
+    ok "3765-empty: an empty log reads 0 RECOGNISED naming EMPTY, distinct from a no-match scan" ;;
+  *) bad "3765-empty: expected '0 RECOGNISED (component log is EMPTY …)', got '$fa_got'" ;;
+esac
+
+# 55e. THE LOG COULD NOT BE READ: `not extractable` WITH THE CAUSE NAMED, and never
+#      collapsed onto 0 RECOGNISED. A directory at the log path is a readable-but-
+#      unparseable subject, i.e. the "could not look" half of the distinction.
+_fa_run unreadable "clippy:FAIL file-size:PASS fmt:PASS" "clippy=$fa_dir/adirectory" PASS
+fa_got=$(_fa_line clippy)
+case "$fa_got" in
+  *"failed-assert: not extractable ("*"is not a readable file)"*)
+    ok "3765-unreadable: an unparseable log reads 'not extractable' with the cause NAMED" ;;
+  *) bad "3765-unreadable: expected 'not extractable (… is not a readable file)', got '$fa_got'" ;;
+esac
+case "$fa_got" in
+  *"0 RECOGNISED"*) bad "3765-unreadable-distinct: an unreadable log must NEVER report 0 RECOGNISED — that is a scan verdict from a scan that never happened" ;;
+  *) ok "3765-unreadable-distinct: 'could not look' is textually distinct from 'looked and found nothing'" ;;
+esac
+
+# 55f. NO LOG AT ALL: still affirmative, still named.
+_fa_run absent "clippy:FAIL file-size:PASS fmt:PASS" "" PASS
+fa_got=$(_fa_line clippy)
+case "$fa_got" in
+  *"failed-assert: not extractable (this component kept no log file to scan)"*)
+    ok "3765-absent: a missing component log is reported affirmatively — the CAUSE, and deliberately NOT the path (job 69)" ;;
+  *) bad "3765-absent: expected 'not extractable (this component kept no log file to scan)', got '$fa_got'" ;;
+esac
+
+# 55g. NO EXTRACTION RAN AT ALL (a synthetic line, or a runner that appends to NAMES
+#      without reaching an extraction site): the field is still present and says so.
+#      scoped-tests is exactly that shape in this hook.
+_fa_run notrecorded "file-size:PASS fmt:PASS clippy:PASS" "" FAIL
+fa_got=$(_fa_line scoped-tests)
+case "$fa_got" in
+  *"failed-assert: not recorded ("*)
+    ok "3765-notrecorded: a FAIL line with no extraction record says so, rather than omitting the field" ;;
+  *) bad "3765-notrecorded: expected 'failed-assert: not recorded (…)', got '$fa_got'" ;;
+esac
+
+# 55h. THE FIELD NEVER RENDERS BLANK. Whatever happened, a FAIL line carries a
+#      non-empty value after the label — the same contract the #3453 annotation has.
+fa_blank=()
+for fa_case in identity many quiet empty unreadable absent notrecorded; do
+  fa_sum="$fa_dir/$fa_case.txt"
+  while IFS= read -r fa_l; do
+    case "$fa_l" in
+      *"failed-assert:"*)
+        [ -n "$(printf '%s' "${fa_l##*failed-assert:}" | tr -d '[:space:]')" ] || fa_blank+=("$fa_case:$fa_l") ;;
+    esac
+  done < <(grep -E '^[a-z][a-z-]*: +FAIL' "$fa_sum" 2>/dev/null)
+done
+if [ "${#fa_blank[@]}" -eq 0 ]; then
+  ok "3765-never-blank: every FAIL line's failed-assert field carries a non-empty value"
+else
+  bad "3765-never-blank: blank field(s): ${fa_blank[*]}"
+fi
+
+# 55i. THE FIELD IS FAIL-ONLY. A PASS or SKIP has no failing assert, so the field has no
+#      subject there; its absence on those lines is the stated RULE, not a silence.
+fa_wrong=$(grep -E '^[a-z][a-z-]*: +(PASS|SKIP)' "$fa_dir/identity.txt" 2>/dev/null | grep -c 'failed-assert:')
+if [ "${fa_wrong:-1}" -eq 0 ]; then
+  ok "3765-fail-only: no PASS/SKIP line carries a failed-assert field"
+else
+  bad "3765-fail-only: $fa_wrong PASS/SKIP line(s) carry a failed-assert field"
+fi
+
+# 55j. #3400 AT THE PARSE SITE: the coloured spelling of a marker yields the SAME
+#      identity. Colour survives redirection, so this is not a tty-only concern.
+_fa_run coloured "clippy:FAIL file-size:PASS fmt:PASS" "clippy=$fa_dir/coloured.log" PASS
+fa_got=$(_fa_line clippy)
+case "$fa_got" in
+  *"failed-assert: 1 RECOGNISED (assert): 3400-coloured"*)
+    ok "3765-colour: an ANSI-coloured marker still yields the identity (#3400)" ;;
+  *) bad "3765-colour: colour defeated the recogniser — got '$fa_got'" ;;
+esac
+
+# 55k. TIER PRECEDENCE: a libtest failure also emits cargo's `error:` epilogue. The
+#      named-test tier must win, or every test failure would report cargo's summary.
+_fa_run tiered "clippy:FAIL file-size:PASS fmt:PASS" "clippy=$fa_dir/tiered.log" PASS
+fa_got=$(_fa_line clippy)
+case "$fa_got" in
+  *"failed-assert: 1 RECOGNISED (assert): tests::foo_bar"*)
+    ok "3765-tier: the named-test tier beats the toolchain tier on a log carrying both" ;;
+  *) bad "3765-tier: expected the libtest name, got '$fa_got'" ;;
+esac
+
+# 55l. HALF 2 — THE INVOCATION BRACKET IS LABELLED, on every component line of a real
+#      emitted block, so it can no longer be read as a failure identity.
+fa_lab_sum="$tmp/3765-label.txt"
+if AGENT_GATE_SUMMARY_FILE="$fa_lab_sum" bash "$GATE" --emit-summary-selftest >/dev/null 2>&1; then
+  fa_lines=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\)  \[' "$fa_lab_sum")
+  fa_labelled=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\)  \[invocation: ' "$fa_lab_sum")
+  if [ "$fa_lines" -gt 0 ] && [ "$fa_lines" -eq "$fa_labelled" ]; then
+    ok "3765-label: all $fa_lines component line(s) label the bracket 'invocation:' (it cannot be read as a failure identity)"
+  else
+    bad "3765-label: only $fa_labelled of $fa_lines component lines carry the invocation label"
+  fi
+else
+  bad "3765-label: --emit-summary-selftest exited non-zero"
+fi
+
+# 55m. ONE RENDERER. The field must be produced by the single _fm_summary_line path all
+#      six emit sites share — a second formatter is exactly the drift #3453 removed.
+fa_sl=$(awk '/^_fm_summary_line\(\)/{f=1} f{print} f&&/^\}$/{exit}' "$GATE")
+if body_mentions "$fa_sl" '_failassert_render'; then
+  ok "3765-one-renderer: _fm_summary_line (the ONE renderer) is what emits the field"
+else
+  bad "3765-one-renderer: _fm_summary_line does not call _failassert_render — a second formatter would drift"
+fi
+fa_emitters=$(grep -c "printf 'failed-assert: " "$GATE")
+if [ "$fa_emitters" -eq 1 ]; then
+  ok "3765-one-formatter: exactly one site in the gate formats the field text"
+else
+  bad "3765-one-formatter: $fa_emitters sites format 'failed-assert: ' (expected exactly 1)"
+fi
+
+# 55n. THE EXTRACTION SITE IS record_result — the chokepoint every component passes
+#      through — so a new component is covered with no gate edit.
+fa_rr=$(awk '/^record_result\(\)/{f=1} f{print} f&&/^\}$/{exit}' "$GATE")
+if body_mentions "$fa_rr" '_failassert_record'; then
+  ok "3765-record-site: record_result invokes _failassert_record (every component covered by the chokepoint)"
+else
+  bad "3765-record-site: record_result does not invoke _failassert_record"
+fi
+
+# 55o. `.result` STAYS TWO FIELDS. There is a 2-field `read -r _st _secs` reader that
+#      would silently absorb a third, so the identity MUST ride a sidecar.
+# ASSERT THE SHAPE, NOT THE VARIABLE NAMES. This used to pin the literal
+# `printf '%s %s\n' "$2" "$3"`, and the #3625 merge legitimately changed the first argument to
+# the census-FINALIZED status ($_rr_status) — so the assert failed while the property it exists
+# for was intact. A structural assert keyed on an incidental spelling reports a defect that is
+# not there, which is the same class of noise as an assert that misses one that is: every
+# `.result` write must use the TWO-field format, and no three-field variant may exist anywhere.
+fa_rr_w=$(printf '%s\n' "$fa_rr" | grep -cE "printf '%s %s\\\\n'[^>]*> \"(\\\$_rr_tmp|\\\$LOG_DIR/\\\$1\.result)\"")
+fa_rr_w3=$(printf '%s\n' "$fa_rr" | grep -cE "printf '%s %s %s")
+if [ "${fa_rr_w:-0}" -ge 1 ] && [ "${fa_rr_w3:-0}" = 0 ]; then
+  ok "3765-two-fields: record_result still writes exactly two whitespace fields to .result"
+else
+  bad "3765-two-fields: record_result's .result write changed shape — a third field would be silently absorbed by the 2-field reader"
+fi
+
+# 55p. THE RECOGNISER SET LIVES IN ONE NAMED PLACE, resolved from the checkout with NO
+#      env override (the constrained party must not choose its own extractor).
+fa_tool="$SCRIPT_DIR/../ci/gate-failed-assert.sh"
+if [ -r "$fa_tool" ] && grep -q 'scripts/ci/gate-failed-assert.sh' "$GATE"; then
+  ok "3765-tool: the recogniser set is one named file and the gate resolves it from the checkout"
+else
+  bad "3765-tool: $fa_tool missing or not referenced by $GATE"
+fi
+if grep -qE '_failassert_tool\(\).*\$\{[A-Z_]+:-' "$GATE"; then
+  bad "3765-tool-nooverride: the extractor path is env-overridable — the party the field constrains must not choose its own extractor (#3312 job 27)"
+else
+  ok "3765-tool-nooverride: the extractor path has no env override"
+fi
+
+# 55q. THE EXTRACTOR FAILS CLOSED on a subject it cannot read: exit 2, so the caller
+#      renders a NAMED 'not extractable' rather than "no failures found".
+bash "$fa_tool" "$fa_dir/definitely-not-here.log" >/dev/null 2>&1
+fa_rc=$?
+if [ "$fa_rc" -eq 2 ]; then
+  ok "3765-extractor-failclosed: the extractor exits 2 on an unreadable subject (never 0 with no output)"
+else
+  bad "3765-extractor-failclosed: expected exit 2 on a missing log, got $fa_rc"
+fi
+
+# 55r. PREFIX COLLISION: DEDUP IS ON THE FULL IDENTITY, NOT ON THE DISPLAY FORM.
+#      REGRESSION, reproduced not predicted. add() used to truncate FIRST and key its
+#      `seen[]` map on the TRUNCATED text, so two DISTINCT failing tests sharing a
+#      57-character prefix — routine for sibling Rust test paths — deduped to ONE and
+#      `count` UNDERCOUNTED (the two lines below reported `count=1`). The accounted count
+#      is half the #3765 flake signature, so a DISPLAY bound must never be able to move
+#      it. This case pins the DISPLAY half (both names visible and distinguishable); 55s
+#      below is the one that reds if the dedup is moved back before the truncation.
+printf 'test cqlite_core::storage::sstable::bti::rows::tests::verify_root_base_prefix_alpha ... FAILED\ntest cqlite_core::storage::sstable::bti::rows::tests::verify_root_base_prefix_beta ... FAILED\n' > "$fa_dir/collide.log"
+fa_col=$(bash "$fa_tool" "$fa_dir/collide.log" 10 2>/dev/null)
+fa_col_count=$(printf '%s\n' "$fa_col" | sed -n 's/^count=//p' | head -1)
+if [ "${fa_col_count:-0}" = 2 ]; then
+  ok "3765-collide-count: two identities sharing a 57-char prefix count as 2 (dedup is on the FULL identity)"
+else
+  bad "3765-collide-count: expected count=2 for two prefix-colliding identities, got count='${fa_col_count:-<none>}' — the dedup key is the TRUNCATED display form and the count UNDERCOUNTS"
+fi
+fa_col_names=$(printf '%s\n' "$fa_col" | sed -n 's/^name=//p')
+fa_col_uniq=$(printf '%s\n' "$fa_col_names" | grep -c . )
+fa_col_dist=$(printf '%s\n' "$fa_col_names" | sort -u | grep -c . )
+if [ "$fa_col_uniq" = 2 ] && [ "$fa_col_dist" = 2 ]; then
+  ok "3765-collide-names: both identities are named and the two displayed names are DISTINCT (the elision is in the MIDDLE, so the distinguishing tail survives)"
+else
+  bad "3765-collide-names: expected 2 distinct name= lines, got $fa_col_uniq line(s) / $fa_col_dist distinct — a tail elision prints two different failing tests as one string"
+fi
+# THE EXTRACTOR MUST EMIT THE IDENTITY UNTRUNCATED. This is the behavioural half of the
+# F6 order fix (roborev job 46, blocker 6): the extractor used to display-cap each name at
+# 60 chars BEFORE the gate redacted it, and an elision landing inside a `scheme://` left a
+# `<token>@host` fragment that NEITHER redaction rule matches. Both fixture identities are
+# well over 60 characters, so a name of 60 here means a display bound has moved back
+# upstream of the redaction.
+fa_col_max=$(printf '%s\n' "$fa_col_names" | awk '{ if (length($0) > m) m = length($0) } END { print m+0 }')
+if [ "${fa_col_max:-0}" -gt 60 ]; then
+  ok "3765-extractor-untruncated: the extractor emits the FULL identity ($fa_col_max chars), so the display bound cannot precede the redaction"
+else
+  bad "3765-extractor-untruncated: the longest extractor identity is ${fa_col_max:-<none>} chars — a DISPLAY bound is being applied inside the extractor, UPSTREAM of the redaction (F6)"
+fi
+# And end to end: the rendered SUMMARY field carries the TRUE count, not the deduped one.
+_fa_run collide "clippy:FAIL file-size:PASS fmt:PASS" "clippy=$fa_dir/collide.log" PASS
+fa_got=$(_fa_line clippy)
+case "$fa_got" in
+  *"failed-assert: 2 RECOGNISED (assert): "*)
+    ok "3765-collide-render: the SUMMARY field reports the TRUE count for prefix-colliding identities ($fa_got)" ;;
+  *) bad "3765-collide-render: expected 'failed-assert: 2 RECOGNISED (assert): …', got '$fa_got'" ;;
+esac
+# The per-NAME display cap is observed WHERE IT IS APPLIED — in the RENDERED field, after
+# the redaction. Observing it on extractor stdout (as this case used to) would re-pin the
+# pre-redaction truncation F6 removed. Split on `,`: these two fixture identities are Rust
+# module paths and carry none.
+# The tier's affirmative "identifiers only; the assertion DETAIL is not published" suffix
+# is PROSE this field appends after the last name, not a name — strip it before splitting,
+# or the final element carries it and the cap assertion measures the wrong string.
+fa_disp=${fa_got#*"(assert): "}
+fa_disp=${fa_disp%%" - identifiers only;"*}
+fa_col_over=$(printf '%s\n' "$fa_disp" | tr ',' '\n' | sed 's/^ *//' | awk 'length($0) > 60' | grep -c . )
+if [ "${fa_col_over:-1}" = 0 ]; then
+  ok "3765-collide-cap: the per-name display cap (60) still holds in the RENDERED field — a SEPARATE bound from the gate 300-char field cap"
+else
+  bad "3765-collide-cap: $fa_col_over rendered name(s) exceed the 60-char display cap"
+fi
+
+# 55s. THE SAME PROPERTY WHERE THE DISPLAY CANNOT DISAMBIGUATE — this is the case that
+#      actually REDS if the dedup is moved back before the truncation. 55r survives a
+#      truncate-first dedup by accident (the middle elision keeps the two tails distinct,
+#      so even the truncated keys differ), so it pins the DISPLAY property, not the dedup
+#      one. Here the two identities differ ONLY in the ELIDED MIDDLE, so their display
+#      forms are byte-identical: a dedup keyed on the display form collapses them to
+#      `count=1`, and only a dedup keyed on the FULL identity reports the true 2.
+#      A display collision is EXPECTED here and is harmless BY CONSTRUCTION — `count` is
+#      the authority and a name is a pointer — so it is ASSERTED rather than left implied.
+printf 'test cqlite_core::storage::sstable::bti::alpha_variant::tests::verify_root_base_prefix ... FAILED\ntest cqlite_core::storage::sstable::bti::beta_variant::tests::verify_root_base_prefix ... FAILED\n' > "$fa_dir/collide-mid.log"
+fa_mid=$(bash "$fa_tool" "$fa_dir/collide-mid.log" 10 2>/dev/null)
+fa_mid_count=$(printf '%s\n' "$fa_mid" | sed -n 's/^count=//p' | head -1)
+fa_mid_names=$(printf '%s\n' "$fa_mid" | sed -n 's/^name=//p')
+fa_mid_dist=$(printf '%s\n' "$fa_mid_names" | sort -u | grep -c . )
+if [ "${fa_mid_count:-0}" = 2 ]; then
+  ok "3765-collide-mid: two identities that are INDISTINGUISHABLE after display truncation still count as 2 — the dedup key is the FULL identity, not the display form"
+else
+  bad "3765-collide-mid: expected count=2, got count='${fa_mid_count:-<none>}' — the dedup runs BEFORE the truncation, so a display bound is silently changing the count"
+fi
+# The DISPLAY collision is now asserted in the RENDERED field, which is where the display
+# bound is applied (F6 moved it there, after the redaction). The extractor emits both
+# identities in FULL — so `fa_mid_dist` is legitimately 2 there — and the two rendered
+# names collapse to one visible string, harmlessly, because `count` is computed from the
+# FULL identity and stays true whatever the display does.
+_fa_run collidemid "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/collide-mid.log" PASS
+fa_got=$(_fa_line fmt)
+fa_mid_disp=${fa_got#*"(assert): "}
+fa_mid_disp=${fa_mid_disp%%" - identifiers only;"*}
+fa_mid_rdist=$(printf '%s\n' "$fa_mid_disp" | tr ',' '\n' | sed 's/^ *//' | sort -u | grep -c . )
+if [ "${fa_mid_count:-0}" = 2 ] && [ "${fa_mid_rdist:-0}" = 1 ]; then
+  ok "3765-collide-mid-display: the two rendered display forms are identical and the TRUE count (2) is reported anyway (count is the authority; a name is a pointer)"
+else
+  bad "3765-collide-mid-display: expected count=2 with 1 distinct RENDERED display form, got count='${fa_mid_count:-<none>}' / $fa_mid_rdist distinct — the fixture no longer exercises a display collision, so this case no longer pins the dedup key"
+fi
+if [ "${fa_mid_dist:-0}" = 2 ]; then
+  ok "3765-collide-mid-full: the extractor emits BOTH middle-colliding identities in full, distinct form (it applies no display bound at all)"
+else
+  bad "3765-collide-mid-full: expected 2 distinct extractor identities for the middle-colliding pair, got $fa_mid_dist — the extractor is display-bounding upstream of the redaction (F6)"
+fi
+
+# 55v. SHARED-TAG COLLAPSE: the A1 identity is the FULL payload, not the tag before the
+#      first `:`. REGRESSION, reproduced from a real in-tree producer, not predicted.
+#      `add()` was fixed to dedup on the full identity (55r/55s) — and the A1 rule then
+#      applied its OWN truncation OUTSIDE add() (`add("assert", head(s))`, head() = strip
+#      from the first `:`), so add() never saw the full payload and the defect survived
+#      one level down. scripts/tests/test_ws0_round_metadata.sh emits THIRTEEN
+#      `FAIL - F2: <different assertion>` lines, so the tag is a CATEGORY, not a name:
+#      two distinct failing asserts reported `1 RECOGNISED (assert): F2`, an UNDERCOUNT
+#      naming something that identifies neither.
+printf 'FAIL - F2: the round metadata is missing the anchor\nFAIL - F2: the round metadata names the wrong sha\n' > "$fa_dir/sametag.log"
+fa_st=$(bash "$fa_tool" "$fa_dir/sametag.log" 10 2>/dev/null)
+fa_st_count=$(printf '%s\n' "$fa_st" | sed -n 's/^count=//p' | head -1)
+if [ "${fa_st_count:-0}" = 2 ]; then
+  ok "3765-sametag-count: two asserts sharing a leading tag count as 2 (the identity is the FULL payload, not the tag)"
+else
+  bad "3765-sametag-count: expected count=2 for a same-tag pair, got count='${fa_st_count:-<none>}' — the A1 rule truncates at the first ':' BEFORE dedup, so distinct asserts collapse and the count UNDERCOUNTS"
+fi
+fa_st_names=$(printf '%s\n' "$fa_st" | sed -n 's/^name=//p')
+fa_st_n=$(printf '%s\n' "$fa_st_names" | grep -c .)
+fa_st_d=$(printf '%s\n' "$fa_st_names" | sort -u | grep -c .)
+if [ "$fa_st_n" = 2 ] && [ "$fa_st_d" = 2 ]; then
+  ok "3765-sametag-names: both same-tag identities are named and the two names are DISTINCT (a reader can tell which assert failed)"
+else
+  bad "3765-sametag-names: expected 2 distinct name= lines for the same-tag pair, got $fa_st_n line(s) / $fa_st_d distinct — the field names a tag that identifies neither failure"
+fi
+_fa_run sametag "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/sametag.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *"failed-assert: 2 RECOGNISED (assert): F2#1, F2#2"*)
+    ok "3765-sametag-render: the SUMMARY field reports the TRUE count and two DISTINGUISHABLE published names for a shared tag, publishing neither payload ($fa_got)" ;;
+  *) bad "3765-sametag-render: expected '2 RECOGNISED (assert): F2#1, F2#2', got '$fa_got' — a shared tag must be ORDINALISED (two distinct asserts rendering as one string is the misidentification #3765 exists to remove) and the DETAIL must not be published (blocker 11)" ;;
+esac
+# GROUNDING: the fixture above is a real shape, measured across the suites tooling-tests
+# executes — not a shape invented for this test. A tag shared by two or more DISTINCT
+# payloads is what makes tag-only dedup wrong.
+fa_st_ground=$(grep -hoE '(fail|bad) "[A-Za-z0-9][A-Za-z0-9_.-]*: [^"]+' "$SCRIPT_DIR"/*.sh 2>/dev/null \
+  | sed -E 's/^(fail|bad) "//' | sort -u \
+  | awk -F': ' '{c[$1]++} END{m=0; for (k in c) if (c[k] > m) m = c[k]; print m+0}')
+if [ "${fa_st_ground:-0}" -ge 2 ]; then
+  ok "3765-sametag-ground: a real in-tree suite shares one FAIL tag across $fa_st_ground distinct assertions, so tag-only dedup would collapse them"
+else
+  bad "3765-sametag-ground: could not measure a shared-tag producer under $SCRIPT_DIR (got '${fa_st_ground:-<none>}') — the fixture above is no longer grounded in a real shape"
+fi
+
+# 55w. CREDENTIAL REDACTION AT THE FIELD'S ONE EMIT BOUNDARY. REGRESSION, roborev job 45
+#      blocker 4 — the SIXTH instance of the leak family agent-gate.sh documents at
+#      _component_set_one_line (227 raw URL, 234 redacted-not-flattened, 239 flattened-
+#      not-redacted, 264 scp form, 282 query strings). The `toolchain` tier copies WHOLE
+#      LINES into this field, git/npm diagnostics quote the resolved remote, CI's remote
+#      is `https://x-access-token:<TOKEN>@github.com/…` (a form the component-set
+#      pre-flight explicitly ACCEPTS), and this repo's workflow tells agents to paste
+#      SUMMARY blocks into PR comments. Both shapes the existing redactor handles are
+#      covered: URL userinfo and the scp-like `user@host:path`.
+#      The fixtures are kept UNDER the extractor's 60-char display cap on purpose, so the
+#      case measures the REDACTION and cannot pass by accident because the truncation
+#      happened to remove the token.
+printf 'bash: https://x-access-token:SEKRETALPHA@h.io: not found\n' > "$fa_dir/cred-url.log"
+printf 'Error: fatal: SEKRETBRAVO@h.io:pmcfadin/cqlite.git denied\n' > "$fa_dir/cred-scp.log"
+_fa_run credurl "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/cred-url.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETALPHA*) bad "3765-cred-url: the URL userinfo credential is rendered VERBATIM into the SUMMARY field ('$fa_got') — SUMMARY blocks are pasted into PR comments" ;;
+  *) ok "3765-cred-url: a URL-userinfo credential in a toolchain line does NOT reach the rendered field" ;;
+esac
+# THE MARKER PROPERTY CHANGED WITH BLOCKER 10 AND IS NOW STRONGER. This fixture is a
+# `bash: ` line, i.e. TIER TOOLCHAIN, whose payload is environment text and is no longer
+# published AT ALL — so the field carries the closed-enum KIND LABEL and no placeholder,
+# because there is no rendered value left to place a placeholder in. Asserted positively
+# (the label IS there — a silently dropped field is not a fix) and negatively (no fragment
+# of the line survives, not just no token).
+case "$fa_got" in
+  *"RECOGNISED (toolchain): bash-error"*)
+    case "$fa_got" in
+      *h.io*|*"not found"*) bad "3765-cred-url-marker: a FRAGMENT of the toolchain line reached the field ('$fa_got') — the tier must publish the label ONLY" ;;
+      *) ok "3765-cred-url-marker: the toolchain tier publishes the closed-enum label 'bash-error' and NO fragment of the line" ;;
+    esac ;;
+  *) bad "3765-cred-url-marker: expected the closed-enum kind label 'bash-error', got '$fa_got' — a silently dropped field is not a neutralisation" ;;
+esac
+_fa_run credscp "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/cred-scp.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETBRAVO*) bad "3765-cred-scp: the scp-form credential is rendered VERBATIM into the SUMMARY field ('$fa_got') — this is roborev job 264's shape, one field over" ;;
+  *) ok "3765-cred-scp: an scp-form (user@host:path) credential does NOT reach the rendered field" ;;
+esac
+case "$fa_got" in
+  *"RECOGNISED (toolchain): capitalised-error"*)
+    case "$fa_got" in
+      *h.io*|*cqlite.git*|*denied*) bad "3765-cred-scp-marker: a FRAGMENT of the toolchain line reached the field ('$fa_got')" ;;
+      *) ok "3765-cred-scp-marker: the toolchain tier publishes the label 'capitalised-error' and no fragment of the line, so the scp form has no channel to travel" ;;
+    esac ;;
+  *) bad "3765-cred-scp-marker: expected the closed-enum kind label 'capitalised-error', got '$fa_got'" ;;
+esac
+# STRUCTURAL, and labelled as such: the redaction must be the EXISTING one redactor,
+# called from the ONE clean function. A second implementation is the drift this repo
+# forbids, and here a divergence between two copies IS a credential leak.
+fa_cl=$(awk '/^_failassert_clean\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
+fa_cl_n=$(printf '%s\n' "$fa_cl" | grep -c '_component_set_redact_text')
+if [ "${fa_cl_n:-0}" = 1 ]; then
+  ok "3765-cred-one-redactor: _failassert_clean routes every state of the field through EXACTLY ONE _component_set_redact_text call (no second redactor, and no second call site to drift)"
+else
+  bad "3765-cred-one-redactor: _failassert_clean makes $fa_cl_n _component_set_redact_text call(s), expected exactly 1 — the redaction is gone, re-implemented, or split into two paths that can diverge (and a divergence here IS a credential leak)"
+fi
+# The mode token is CONTROL and lives at argv position 1; every call site must pass it as
+# a LITERAL, so no value can forge a mode (#3312 — control and data must not share a
+# channel). Three of the prose call sites pass a bare PATH as their payload.
+fa_cl_calls=$(grep -oE '\$\(_failassert_clean [^ ]+' "$GATE" | grep -vE '_failassert_clean (--prose|--names)$' | grep -c .)
+if [ "${fa_cl_calls:-1}" = 0 ]; then
+  ok "3765-cred-mode-literal: every _failassert_clean call site passes the mode token as a literal (--prose/--names), so a payload cannot forge the mode"
+else
+  bad "3765-cred-mode-literal: $fa_cl_calls _failassert_clean call site(s) do not lead with a literal mode token — external text at argv position 1 shares a channel with control"
+fi
+
+# 55x. THE CREDENTIAL SPANS THE DISPLAY BOUNDARY. REGRESSION, roborev job 46 blocker 6 —
+#      and the case 55w could not see, because 55w deliberately kept its fixtures UNDER
+#      the 60-char cap and therefore certified only the SAFE SIDE of the very boundary
+#      that broke. The defect: the extractor middle-elided each name to 60 chars BEFORE
+#      the gate redacted it, so the elision could DELETE the `https://` scheme and leave
+#      `TOKEN@host/path`, which matches NEITHER rule (rule 1 needs `scheme://…@`, rule 2
+#      needs `@host:`). MEASURED on the first fixture below: the extractor emitted
+#      `npm error 401 Unauthorized ...ess-token:SEKRETCHARLIE@h.io/p` and both redaction
+#      seds left it UNCHANGED.
+#
+#      This is the THIRD instance of one shape on this issue (F1 a 57-char cap before the
+#      DEDUP, F5 truncation at the first `:` before the DEDUP, F6 a display elision before
+#      the REDACTION), so the ORDER itself is asserted structurally in 55y below — a
+#      behavioural case only covers the shapes someone already thought of.
+#
+#      METHOD WARNING, because it is easy to get wrong: the extractor does NOT redact, so
+#      a leak check must NEVER be made on extractor stdout — a long token cut by the
+#      elision looks "absent" there while never having been redacted. Every assertion
+#      below is on the RENDERED field.
+printf 'npm error 401 Unauthorized while fetching the tarball https://x-access-token:SEKRETCHARLIE@h.io/p\n' > "$fa_dir/cred-long-url.log"
+printf 'Error: fatal: SEKRETDELTA@h.io:pmcfadin/cqlite.git remote rejected the push, access denied\n' > "$fa_dir/cred-long-scp.log"
+_fa_run credlongurl "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/cred-long-url.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETCHARLIE*) bad "3765-cred-long-url: a URL credential SPANNING the 60-char display elision is rendered VERBATIM into the SUMMARY field ('$fa_got') — the display bound is running BEFORE the redaction (F6)" ;;
+  *) ok "3765-cred-long-url: a URL credential spanning the display boundary does NOT reach the rendered field" ;;
+esac
+case "$fa_got" in
+  *"RECOGNISED (toolchain): npm-error"*)
+    case "$fa_got" in
+      *tarball*|*fetching*|*h.io*) bad "3765-cred-long-url-marker: a FRAGMENT of the toolchain line reached the field ('$fa_got')" ;;
+      *) ok "3765-cred-long-url-marker: an over-long toolchain line publishes the label 'npm-error' only — the display bound has nothing to elide, so it cannot sever a shape either" ;;
+    esac ;;
+  *) bad "3765-cred-long-url-marker: expected the closed-enum kind label 'npm-error', got '$fa_got'" ;;
+esac
+_fa_run credlongscp "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/cred-long-scp.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETDELTA*) bad "3765-cred-long-scp: an scp-form credential SPANNING the display elision is rendered VERBATIM into the SUMMARY field ('$fa_got') — under the old order the head-27 window kept the token and elided its '@host:' (roborev job 264's shape, one bound over)" ;;
+  *) ok "3765-cred-long-scp: an scp-form credential spanning the display boundary does NOT reach the rendered field" ;;
+esac
+case "$fa_got" in
+  *"RECOGNISED (toolchain): capitalised-error"*)
+    case "$fa_got" in
+      *rejected*|*denied*|*h.io*) bad "3765-cred-long-scp-marker: a FRAGMENT of the toolchain line reached the field ('$fa_got')" ;;
+      *) ok "3765-cred-long-scp-marker: an over-long scp-form toolchain line publishes the label only" ;;
+    esac ;;
+  *) bad "3765-cred-long-scp-marker: expected the closed-enum kind label 'capitalised-error', got '$fa_got'" ;;
+esac
+
+# 55y. THE ORDER IS ASSERTED STRUCTURALLY: normalise -> redact -> bound for display.
+#      STRUCTURAL, and labelled as such. Three behavioural instances of one shape have now
+#      been fixed one at a time; a future edit that reintroduces a bound upstream of the
+#      redaction would pass every behavioural case whose fixture happens to sit on the
+#      safe side of it (which is exactly how 55w passed while blocker 6 was live). So:
+#      (a) the extractor carries NO display bound, only a declared SAFETY bound large
+#          enough that it cannot plausibly split a credential;
+#      (b) inside _failassert_clean the ONE redactor call precedes the per-name display
+#          bound, which precedes the 300-char field cap;
+#      (c) _failassert_record — which runs BEFORE the emit boundary — bounds nothing.
+# (a) THE BOUND SIZE IS NO LONGER THE PROPERTY — THE BOUND'S BEHAVIOUR IS (blocker 11).
+#     This used to require every extractor bound to be >= 1024, as a PROXY for "a bound
+#     cannot split a credential". That proxy stopped being the right question once the
+#     extractor began publishing charset-constrained IDENTIFIERS bounded at 256 (a tag /
+#     test path) and 70 (a guard label): a small bound is now fine, and what must hold is
+#     that NO bound retains a PREFIX. So the assert is over the CLASS directly — every
+#     `length(x) > N` bound in the extractor must resolve to an affirmative placeholder.
+fa_bnd_all=$(grep -cE 'length\([A-Za-z_]+\)[[:space:]]*>[[:space:]]*[0-9]+' "$fa_tool")
+fa_bnd_ph=$(grep -E 'length\([A-Za-z_]+\)[[:space:]]*>[[:space:]]*[0-9]+' "$fa_tool" \
+              | grep -c 'too long to publish safely')
+if [ "${fa_bnd_all:-0}" -ge 2 ] && [ "$fa_bnd_all" = "$fa_bnd_ph" ]; then
+  ok "3765-order-no-early-bound: all $fa_bnd_all length bound(s) in the extractor resolve to an affirmative 'too long to publish safely' placeholder — none retains a prefix, whatever its size"
+else
+  bad "3765-order-no-early-bound: $fa_bnd_all length bound(s) in the extractor but only $fa_bnd_ph publish a placeholder — a bound that keeps a PREFIX severs the shape every later rule keys on (blocker 8), and a bound must never be able to change a safety verdict"
+fi
+# (b) THE TWO PUBLICATION PROJECTIONS REPLACE, THEY NEVER TRIM. pubid()/publabel() are the
+#     only functions that produce a published identifier for a repository-authored tier, so
+#     a `substr(`/`cut -c` inside either would be a prefix on the publication path.
+fa_pubfns=$(awk '/function pubid\(/,/^  }/' "$fa_tool"; awk '/function publabel\(/,/^  }/' "$fa_tool")
+if printf '%s\n' "$fa_pubfns" | grep -q 'too long to publish safely' \
+   && printf '%s\n' "$fa_pubfns" | grep -q 'outside the safe charset' \
+   && ! printf '%s\n' "$fa_pubfns" | grep -qE 'substr\(|cut -c'; then
+  ok "3765-order-safety-declared: pubid()/publabel() REPLACE an out-of-charset or over-bound identifier with an affirmative placeholder and contain no substr/cut — nothing on the publication path retains a prefix"
+else
+  bad "3765-order-safety-declared: a publication projection in $fa_tool trims instead of replacing (or no longer declares its charset/bound refusals) — a truncation upstream of the neutralisation is blocker 8"
+fi
+# (c) BLOCKER 12: THE DEDUP KEY IS BOUNDED BEFORE IT IS RETAINED. The full identity used to
+#     become an associative-array key with the bound applied only afterwards, so many
+#     distinct oversized recognised lines could consume unbounded memory and kill the
+#     extractor — or the gate — before any summary was produced.
+fa_add_src=$(awk '/function add\(tier, id, pub/,/^  }/' "$fa_tool" | grep -v '^[[:space:]]*#' | grep -n .)
+fa_keyln=$(printf '%s\n' "$fa_add_src" | grep -n 'k = key(full)' | head -1 | cut -d: -f1)
+fa_seenln=$(printf '%s\n' "$fa_add_src" | grep -n 'in seen)' | head -1 | cut -d: -f1)
+if [ -n "$fa_keyln" ] && [ -n "$fa_seenln" ] && [ "$fa_keyln" -lt "$fa_seenln" ] \
+   && printf '%s\n' "$fa_add_src" | grep -q 'seen\[tier SUBSEP k\] = 1' \
+   && ! printf '%s\n' "$fa_add_src" | grep -q 'seen\[tier SUBSEP full\]'; then
+  ok "3765-order-key-bounded-first: the dedup key is BOUNDED by key() before it is retained (key at $fa_keyln, retention at $fa_seenln) — an oversized identity can no longer be held whole in an array key (blocker 12)"
+else
+  bad "3765-order-key-bounded-first: add() retains the UNBOUNDED identity as its array key (key='${fa_keyln:-<none>}' seen='${fa_seenln:-<none>}') — a log of long minified lines then consumes unbounded memory upstream of any summary (blocker 12)"
+fi
+# (d) …AND THAT BOUNDED KEY IS NEVER PUBLISHED, which is what makes retaining a window in it
+#     safe at all. The published value must derive from the `pub` PARAMETER alone.
+fa_key_pub=$(printf '%s\n' "$fa_add_src" | grep -cE 'base\[tier SUBSEP idx\] = (full|k)\b')
+if [ "${fa_key_pub:-1}" = 0 ] && printf '%s\n' "$fa_add_src" | grep -q 'base\[tier SUBSEP idx\] = pub'; then
+  ok "3765-order-key-never-published: the published value derives from the pub parameter alone — the bounded dedup key and the full identity are never named"
+else
+  bad "3765-order-key-never-published: add() publishes the identity or its dedup key ($fa_key_pub site(s)) — the window key() retains is only safe because nothing downstream can render it"
+fi
+fa_ord=$(awk '/^_failassert_clean\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#' | grep -nE '_component_set_redact_text|substr\(t, 1, head\)|cut -c1-300')
+fa_ord_red=$(printf '%s\n' "$fa_ord" | grep -n '_component_set_redact_text' | head -1 | cut -d: -f1)
+fa_ord_disp=$(printf '%s\n' "$fa_ord" | grep -n 'substr(t, 1, head)' | head -1 | cut -d: -f1)
+fa_ord_cap=$(printf '%s\n' "$fa_ord" | grep -n 'cut -c1-300' | head -1 | cut -d: -f1)
+if [ -n "$fa_ord_red" ] && [ -n "$fa_ord_disp" ] && [ -n "$fa_ord_cap" ] \
+   && [ "$fa_ord_red" -lt "$fa_ord_disp" ] && [ "$fa_ord_disp" -lt "$fa_ord_cap" ]; then
+  ok "3765-order-redact-first: inside _failassert_clean the ONE redaction precedes the per-name display bound, which precedes the 300-char field cap"
+else
+  bad "3765-order-redact-first: _failassert_clean does not order redact -> display-bound -> field-cap (redact='${fa_ord_red:-<none>}' display='${fa_ord_disp:-<none>}' cap='${fa_ord_cap:-<none>}') — a bound ahead of the redaction is F6"
+fi
+fa_rec_body=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
+fa_rec_bound=$(printf '%s\n' "$fa_rec_body" | grep -cE 'cut -c|substr\(|\$\{[A-Za-z_]+:0:[0-9]+\}')
+if [ "${fa_rec_bound:-1}" = 0 ]; then
+  ok "3765-order-record-nobound: _failassert_record bounds nothing — every bound is applied at the emit boundary, after the redaction"
+else
+  bad "3765-order-record-nobound: _failassert_record applies $fa_rec_bound length bound(s) of its own, upstream of the ONE redaction (F6)"
+fi
+
+# 55z. THE FREE-TEXT CHANNEL IS REMOVED, NOT SANITISED A SIXTH TIME (roborev job 48,
+#      blockers 7 + 8). 55w/55x certified the two shapes the REDACTOR knows (url userinfo,
+#      scp form) — which is precisely the trap: every previous round of this family
+#      improved the sanitiser and the next round found a shape it did not know. Here the
+#      cases are the shapes the redactor CANNOT see (a query string, a header) plus the
+#      bound it cannot survive (a credential straddling the extractor's SAFETY bound), and
+#      the property asserted is that NO free-text payload carrying an authority reaches the
+#      rendered field at all.
+#
+#      METHOD, restated because it is the one that keeps being got wrong: every assertion
+#      below is on the RENDERED field. The extractor does not neutralise and does not
+#      redact, so a token cut by a bound looks "absent" on its stdout while never having
+#      been neutralised — a leak check made there certifies nothing.
+printf 'npm error 401 Unauthorized while fetching h.io/pkg?token=SEKRETFOXTROT\n' > "$fa_dir/neu-query.log"
+printf "npm error request failed: Authorization: Bearer SEKRETGOLF\n" > "$fa_dir/neu-header.log"
+# A credential STRADDLING the extractor's 4096-char SAFETY bound. The `@` is placed at
+# offset 4097 EXACTLY, so a bound that keeps a PREFIX hands the emit boundary
+# `…deploy-user:SEKRETHOTEL` — no `@`, no scheme, no `?…=` — which every shape rule and
+# both redaction rules legitimately pass, after which the 60-char middle elision publishes
+# the token in its tail. That is why the bound may not truncate at all.
+#
+# ON THE `assert` TIER, DELIBERATELY (blocker 10). This fixture used to be an `npm error`
+# line, i.e. tier toolchain — which no longer publishes its payload at all, so the case
+# would have passed for a reason that has nothing to do with the bound and the safety
+# placeholder would have become untested. `assert` is the tier that still publishes its
+# identity, so it is the tier where a truncating bound could still sever a shape, and that
+# is where the property must be measured.
+awk 'BEGIN {
+  pad = sprintf("%4063s", ""); gsub(/ /, "x", pad)
+  tail = sprintf("%100s", ""); gsub(/ /, "y", tail)
+  # A LIBTEST shape since job 71: the free-form rule now routes through pubtagged(), whose
+  # grammar rejects this payload as untagged prose BEFORE any length bound can fire — which
+  # would leave the over-bound path uncovered. The libtest rule still projects through
+  # pubid(), so the bound is still under test and the safety assertion is unchanged.
+  printf "test %sdeploy-user:SEKRETHOTEL@h.io/pkg%s ... FAILED\n", pad, tail
+}' > "$fa_dir/neu-span.log"
+printf 'Diff in /repo/cqlite-core/src/storage/sstable/reader.rs at line 12:\n' > "$fa_dir/neu-path.log"
+
+_fa_run neuquery "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/neu-query.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETFOXTROT*) bad "3765-neu-query: a QUERY-STRING secret is rendered VERBATIM into the SUMMARY field ('$fa_got') — the redactor knows only url userinfo and scp form, so sanitising is not the fix; the channel must be removed" ;;
+  *) ok "3765-neu-query: a query-string secret (?token=…) does NOT reach the rendered field" ;;
+esac
+case "$fa_got" in
+  *"RECOGNISED (toolchain): npm-error"*)
+    case "$fa_got" in
+      *pkg*|*Unauthorized*) bad "3765-neu-query-marker: a FRAGMENT of the toolchain line reached the field ('$fa_got')" ;;
+      *) ok "3765-neu-query-marker: a query-bearing toolchain line publishes the label 'npm-error' only — the shape the redactor cannot see has no channel at all" ;;
+    esac ;;
+  *) bad "3765-neu-query-marker: expected the closed-enum kind label 'npm-error', got '$fa_got'" ;;
+esac
+
+_fa_run neuheader "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/neu-header.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETGOLF*) bad "3765-neu-header: a HEADER-form credential (Authorization: Bearer …) is rendered VERBATIM into the SUMMARY field ('$fa_got')" ;;
+  *) ok "3765-neu-header: a header-form credential does NOT reach the rendered field" ;;
+esac
+case "$fa_got" in
+  *"RECOGNISED (toolchain): npm-error"*)
+    case "$fa_got" in
+      *Authorization*|*Bearer*|*request*) bad "3765-neu-header-marker: a FRAGMENT of the toolchain line reached the field ('$fa_got')" ;;
+      *) ok "3765-neu-header-marker: a header-form toolchain line publishes the label 'npm-error' only (the KEY-kept form is now asserted on the RETAINED assert tier, in 55aa)" ;;
+    esac ;;
+  *) bad "3765-neu-header-marker: expected the closed-enum kind label 'npm-error', got '$fa_got'" ;;
+esac
+
+_fa_run neuspan "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/neu-span.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETHOTEL*) bad "3765-neu-span: a credential STRADDLING the extractor's safety bound is rendered into the SUMMARY field ('$fa_got') — the bound keeps a PREFIX, which severs the shape every later rule keys on (blocker 8)" ;;
+  *) ok "3765-neu-span: a credential straddling the 4096-char safety bound does NOT reach the rendered field" ;;
+esac
+case "$fa_got" in
+  *"too long to publish safely"*) ok "3765-neu-span-marker: an over-bound identity is published as an affirmative placeholder naming its measured length — a measurement, never a silence and never a prefix" ;;
+  *) bad "3765-neu-span-marker: expected 'too long to publish safely' in the field, got '$fa_got' — the bound is still retaining a prefix" ;;
+esac
+
+# THE RUSTFMT PATH IS NOT PUBLISHED EITHER (blocker 10). It used to render
+# `rustfmt diff in <path> at line <n>`, and that form was defensible on one ground — it is
+# DERIVED, not a copied line. It is dropped anyway: the path is still ENVIRONMENT-controlled
+# (rustfmt formats whatever tree it was pointed at, temp dirs included), so keeping it would
+# leave exactly one argued-safe free-text exception inside a channel that was just removed —
+# and the next leak in this six-round family would be in the exception. What survives is what
+# a reader needs: the KIND, and the true COUNT of distinct diff sites (asserted at 55aa-count).
+_fa_run neupath "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/neu-path.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *"RECOGNISED (toolchain): rustfmt-diff"*)
+    case "$fa_got" in
+      *reader.rs*|*/repo/*|*"at line"*)
+        bad "3765-neu-path-notpublished: the rustfmt PATH reached the rendered field ('$fa_got') — an environment-controlled value in a channel that is supposed to publish labels only" ;;
+      *) ok "3765-neu-path-notpublished: a rustfmt diff publishes the label 'rustfmt-diff' and NOT the path (the path is environment-controlled; the component log keeps it)" ;;
+    esac ;;
+  *) bad "3765-neu-path-notpublished: expected the closed-enum kind label 'rustfmt-diff', got '$fa_got'" ;;
+esac
+_fa_run neuprose "file-size:FAIL fmt:PASS clippy:PASS" "file-size=$fa_dir/one.log" PASS
+fa_got=$(_fa_line file-size)
+# The motivating instance must publish the TAG — the issue's own proposed sketch is
+# `failed-assert: 1465-skip-declares (accounted 419/420, floor 410)` — and must publish it
+# UNTOUCHED by any placeholder: a charset/bound placeholder standing where the tag should be
+# would make the field useless for the citation it exists to support.
+case "$fa_got" in
+  *"1 RECOGNISED (assert): 1465-skip-declares -"*)
+    case "$fa_got" in
+      *"<url>"*|*"<authority>"*|*"<query>"*|*"<secret>"*|*"<identifier"*)
+        bad "3765-neu-prose-survives: a placeholder replaced the motivating instance's tag ('$fa_got')" ;;
+      *) ok "3765-neu-prose-survives: the #3765 motivating instance publishes its TAG verbatim, matching the issue's own sketch" ;;
+    esac ;;
+  *) bad "3765-neu-prose-survives: the motivating instance does not publish '1465-skip-declares' as its identifier, got '$fa_got'" ;;
+esac
+
+# STRUCTURAL, and labelled as such: EVERY BOUND, not just the display one (blocker 8 is the
+# fourth instance of one shape, so the assert is over the class rather than the instance).
+# Inside _failassert_clean the ONE neutralisation runs first, the ONE redaction second, and
+# EVERY truncating construct — the per-name elision, the 300-char field cap, and anything a
+# later edit adds — strictly after both.
+fa_cl_code=$(awk '/^_failassert_clean\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#' | grep -n .)
+fa_neu_ln=$(printf '%s\n' "$fa_cl_code" | grep '_failassert_neutralise' | head -1 | cut -d: -f1)
+fa_red_ln=$(printf '%s\n' "$fa_cl_code" | grep '_component_set_redact_text' | head -1 | cut -d: -f1)
+fa_neu_n=$(printf '%s\n' "$fa_cl_code" | grep -c '_failassert_neutralise')
+if [ "${fa_neu_n:-0}" = 1 ] && [ -n "$fa_neu_ln" ] && [ -n "$fa_red_ln" ] && [ "$fa_neu_ln" -lt "$fa_red_ln" ]; then
+  ok "3765-neu-one-call: _failassert_clean makes EXACTLY ONE _failassert_neutralise call and it precedes the redaction (one boundary, no second implementation to diverge)"
+else
+  bad "3765-neu-one-call: expected exactly 1 _failassert_neutralise call before the redaction, got $fa_neu_n call(s) (neutralise='${fa_neu_ln:-<none>}' redact='${fa_red_ln:-<none>}')"
+fi
+fa_bound_lns=$(printf '%s\n' "$fa_cl_code" | grep -E 'cut -c|substr\(|head -c|\$\{[A-Za-z_]+:[0-9]+:[0-9]+\}' | cut -d: -f1)
+fa_bound_min=$(printf '%s\n' "$fa_bound_lns" | grep -E '^[0-9]+$' | sort -n | head -1)
+fa_bound_n=$(printf '%s\n' "$fa_bound_lns" | grep -cE '^[0-9]+$')
+if [ "${fa_bound_n:-0}" -ge 2 ] && [ -n "$fa_bound_min" ] && [ -n "$fa_neu_ln" ] && [ -n "$fa_red_ln" ] \
+   && [ "$fa_bound_min" -gt "$fa_neu_ln" ] && [ "$fa_bound_min" -gt "$fa_red_ln" ]; then
+  ok "3765-order-every-bound: all $fa_bound_n truncating construct(s) in _failassert_clean run AFTER both the neutralisation and the redaction (the EARLIEST is at code line $fa_bound_min)"
+else
+  bad "3765-order-every-bound: a bound in _failassert_clean runs before the neutralisation/redaction (earliest bound='${fa_bound_min:-<none>}' of $fa_bound_n, neutralise='${fa_neu_ln:-<none>}', redact='${fa_red_ln:-<none>}') — that is the truncate-before-neutralise class, whichever bound it is"
+fi
+# …and the SAME property for the one bound that lives upstream, in the extractor: it must
+# neither `cut` nor `substr` its way to a prefix anywhere in the emit path.
+if ! grep -qE 'cut -c|head -c' "$fa_tool"; then
+  ok "3765-order-extractor-nocut: the extractor applies no character-cut of any kind — the only bound it has is the non-truncating safety placeholder"
+else
+  bad "3765-order-extractor-nocut: the extractor character-cuts its output, upstream of the neutralisation (blocker 8's class)"
+fi
+# 55aa. THE TOOLCHAIN TIER PUBLISHES A CLOSED-ENUM LABEL AND NO FREE TEXT (blocker 10,
+#       roborev round 5). 55w/55x/55z each improved the SANITISER and each was followed by
+#       a round finding a shape it did not know — six of them in this file's family. The
+#       coordination lead then MEASURED two survivors on the RENDERED field:
+#           Error: api_key SEKRETAK3 revoked      -> published VERBATIM (space-separated key)
+#           Error: SEKRETPLAIN4 is not a valid ref-> published VERBATIM (unmarked secret)
+#       An unmarked secret is undetectable in principle, so the seventh sanitiser round was
+#       refused and the CHANNEL removed instead: tier `toolchain` publishes a kind LABEL.
+#
+#       METHOD, and both halves of it caught the lead out, so they are restated here:
+#       (a) never assert a leak check on EXTRACTOR STDOUT — the extractor neither redacts
+#           nor neutralises, so a token a bound cut looks "absent" there while never having
+#           been neutralised. Every assertion below is on the RENDERED field.
+#       (b) tiers are FIRST-MATCH-WINS, so a fixture containing any `FAIL - ` line makes the
+#           ASSERT tier win and the toolchain lines are never emitted — a leak test with a
+#           mixed fixture passes for the wrong reason. Every fixture here is TOOLCHAIN-ONLY,
+#           and SHORT, so the 60-char display bound cannot hide a token either.
+fa_tcdir="$fa_dir/tc"; mkdir -p "$fa_tcdir"
+printf 'Error: token=SEKRETEQ1 rejected\n'          > "$fa_tcdir/p1.log"
+printf 'Error: password: SEKRETPW2 invalid\n'       > "$fa_tcdir/p2.log"
+printf 'Error: api_key SEKRETAK3 revoked\n'         > "$fa_tcdir/p3.log"
+printf 'Error: SEKRETPLAIN4 is not a valid ref\n'   > "$fa_tcdir/p4.log"
+fa_probe_i=0
+for fa_probe in p1:SEKRETEQ1 p2:SEKRETPW2 p3:SEKRETAK3 p4:SEKRETPLAIN4; do
+  fa_probe_f=${fa_probe%%:*}; fa_probe_tok=${fa_probe#*:}
+  fa_probe_i=$((fa_probe_i + 1))
+  _fa_run "tc$fa_probe_f" "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_tcdir/$fa_probe_f.log" PASS
+  fa_got=$(_fa_line fmt)
+  case "$fa_got" in
+    *"$fa_probe_tok"*) bad "3765-tc-noleak-$fa_probe_f: the secret $fa_probe_tok reached the RENDERED field ('$fa_got') — a keyword/shape recogniser over environment free text does not close; the channel must stay removed" ;;
+    *) ok "3765-tc-noleak-$fa_probe_f: probe $fa_probe_i publishes no $fa_probe_tok substring (the two space-separated/unmarked forms are the ones that leaked before blocker 10)" ;;
+  esac
+  case "$fa_got" in
+    *"RECOGNISED (toolchain): capitalised-error - no named assert exists; the diagnostic TEXT is not published (see the component log)"*)
+      ok "3765-tc-affirm-$fa_probe_f: the field states the KIND, that no named assert exists, and that the text was WITHHELD BY POLICY — affirmative, never a silence" ;;
+    *) bad "3765-tc-affirm-$fa_probe_f: expected the closed-enum label plus the affirmative 'no named assert exists; the diagnostic TEXT is not published' statement, got '$fa_got'" ;;
+  esac
+done
+# THE COUNT IS STILL THE TRUE NUMBER OF DISTINCT IDENTITIES, which is the property F5 exists
+# for and the one a projection could silently have destroyed: three DISTINCT `npm error`
+# lines are three, published as ONE kind (their distinct kind set), with the remainder
+# DECLARED. Count and publication are separate concerns and neither is traded for the other.
+printf 'npm error one\nnpm error two\nnpm error three\nbash: /x/y.sh: No such file\n' > "$fa_tcdir/count.log"
+_fa_run tccount "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_tcdir/count.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *"4 RECOGNISED (toolchain): npm-error, bash-error (+2 more)"*)
+    ok "3765-tc-count: 4 distinct toolchain identities count as 4 and publish their 2 distinct KINDS with the remainder declared — the projection did not corrupt the count" ;;
+  *) bad "3765-tc-count: expected '4 RECOGNISED (toolchain): npm-error, bash-error (+2 more)', got '$fa_got' — either the count is now over kinds (F5 regressed) or a kind is published twice" ;;
+esac
+
+# THE NEUTRALISER IS RETAINED FOR THE `assert`/`guard` TIERS, AND THAT IS WHERE IT IS NOW
+# MEASURED. Their payloads are REPOSITORY-AUTHORED (a `bad "…"` message, a test path, a
+# named guard verdict): in-tree, reviewed, diffed by every PR, and publishing them IS the
+# subject of #3765. So the channel is KEPT there and the shape neutralisation stays as
+# defence in depth over it — DECLARED as a REDUCTION, never a guarantee (an unmarked secret
+# in prose is undetectable in principle; see _failassert_neutralise's header). These four
+# cases pin the four rules on the tier that still publishes, so removing the neutraliser
+# would red here rather than silently affecting only repo-authored text.
+printf 'FAIL - neu-a: cloning https://x-access-token:SEKRETINDIA@h.io/p failed\n' > "$fa_tcdir/a-url.log"
+printf 'FAIL - neu-b: SEKRETJULIET@h.io:pmcfadin/cqlite.git denied\n'             > "$fa_tcdir/a-scp.log"
+printf 'FAIL - neu-c: fetch h.io/pkg?token=SEKRETKILO failed\n'                   > "$fa_tcdir/a-qry.log"
+printf 'FAIL - neu-d: Authorization: Bearer SEKRETLIMA\n'                         > "$fa_tcdir/a-hdr.log"
+for fa_probe in a-url:SEKRETINDIA:neu-a a-scp:SEKRETJULIET:neu-b a-qry:SEKRETKILO:neu-c a-hdr:SEKRETLIMA:neu-d; do
+  fa_probe_f=${fa_probe%%:*}; fa_probe_rest=${fa_probe#*:}
+  fa_probe_tok=${fa_probe_rest%%:*}; fa_probe_tag=${fa_probe_rest#*:}
+  _fa_run "neu$fa_probe_f" "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_tcdir/$fa_probe_f.log" PASS
+  fa_got=$(_fa_line fmt)
+  case "$fa_got" in
+    *"$fa_probe_tok"*) bad "3765-neu-retained-$fa_probe_f: $fa_probe_tok reached the rendered field on the assert tier ('$fa_got')" ;;
+    *) ok "3765-neu-retained-$fa_probe_f: no $fa_probe_tok in the field — the credential sat in the DETAIL, which the assert tier no longer publishes (blocker 11), with the neutraliser behind it as defence in depth" ;;
+  esac
+  # AND THE FIELD IS NOT MERELY SILENT: it publishes the repo-authored TAG. A dropped value
+  # and a projected one are different facts, and only the second is a measurement — the
+  # detail's absence is DECLARED by the tier suffix asserted at 3765-affirm-assert below.
+  case "$fa_got" in
+    *"RECOGNISED (assert): $fa_probe_tag -"*)
+      ok "3765-neu-retained-marker-$fa_probe_f: the field publishes the tag '$fa_probe_tag' and no fragment of the credential-bearing detail" ;;
+    *) bad "3765-neu-retained-marker-$fa_probe_f: expected the tag '$fa_probe_tag' as the published identifier, got '$fa_got' — a silently emptied field is not a projection" ;;
+  esac
+done
+
+# STRUCTURAL, and labelled as such (the lead's requirement, and this class has now recurred
+# five times): a future edit must not be able to reintroduce free text into the toolchain
+# tier. A behavioural case only covers the shapes someone already thought of, so the
+# MECHANISM is asserted — every toolchain recogniser passes a LABEL LITERAL, add() publishes
+# that label instead of the identity, the identity is still the DEDUP key, and the gate
+# refuses a non-label toolchain name on the OUTPUT PATH (a source scan cannot see a runtime
+# value).
+fa_tc_sec=$(awk '/---- TIER toolchain ----/,/^  END \{/' "$fa_tool" | grep -v '^[[:space:]]*#')
+fa_tc_calls=$(printf '%s\n' "$fa_tc_sec" | grep -c 'add("toolchain"')
+fa_tc_lab=$(printf '%s\n' "$fa_tc_sec" | grep -cE 'add\("toolchain", [^,]+, "[a-z][a-z0-9-]*", 1\)')
+if [ "${fa_tc_calls:-0}" -ge 5 ] && [ "$fa_tc_calls" = "$fa_tc_lab" ]; then
+  ok "3765-toolchain-all-labelled: all $fa_tc_calls toolchain recognisers publish a closed-enum LABEL LITERAL (none copies its matched line)"
+else
+  bad "3765-toolchain-all-labelled: $fa_tc_calls toolchain add() call(s) but only $fa_tc_lab pass a label literal — an unlabelled call publishes the LOG LINE, which is the removed free-text channel (blocker 10)"
+fi
+fa_tc_bare=$(grep -cE 'add\("toolchain", [^,]*\)' "$fa_tool")
+if [ "${fa_tc_bare:-1}" = 0 ]; then
+  ok "3765-toolchain-no-bare-add: nowhere in the extractor does a toolchain add() omit its label argument"
+else
+  bad "3765-toolchain-no-bare-add: $fa_tc_bare toolchain add() call(s) pass only two arguments, so the matched LINE becomes the published value (blocker 10)"
+fi
+fa_add_body=$(awk '/function add\(tier, id, pub/,/^  }/' "$fa_tool" | grep -v '^[[:space:]]*#')
+if printf '%s\n' "$fa_add_body" | grep -q 'if (pub == "") pub = "<no published identifier'; then
+  ok "3765-toolchain-projection: add() publishes its pub argument and NEVER falls back to the identity — a recogniser that supplies nothing gets an affirmative placeholder, not the payload (blocker 11 removed the empty-means-publish-the-payload default)"
+else
+  bad "3765-toolchain-projection: add() no longer publishes the pub argument unconditionally — an empty pub that falls back to the identity re-opens the payload channel for every tier at once (blocker 11)"
+fi
+if printf '%s\n' "$fa_add_body" | grep -q 'k = key(full)' \
+   && printf '%s\n' "$fa_add_body" | grep -q '(tier SUBSEP k) in seen'; then
+  ok "3765-toolchain-count-on-identity: the DEDUP key is still derived from the FULL identity (through the bounded, never-published key()), so projecting the published value cannot change the count (F5 stays fixed)"
+else
+  bad "3765-toolchain-count-on-identity: add() no longer dedups on the full identity — the count is now over the projection, which is F5 again"
+fi
+# ===== THE ONE STRUCTURAL RULE, OVER ALL THREE TIERS (blocker 11, the lead's item 4) =====
+# The publication policy used to be an ASYMMETRY — toolchain published a label, assert and
+# guard published their payloads — and the rationale for the second half was measurably
+# FALSE: 205 `bad "…"` messages in this very file interpolate RUNTIME values, so an assert
+# payload is a repo-authored TEMPLATE carrying runtime text, not a constant. Now every tier
+# publishes a PROJECTION, so the structural rule is ONE rule and covers all three: every
+# add() call site passes an explicit third argument, and that argument is one of exactly
+# three things — a closed-enum label LITERAL, pubid(…) or publabel(…). Nothing else may
+# reach the publication path, and a new recogniser cannot join without choosing one.
+# WHOLE LINES, and `grep -o` is deliberately NOT used here: a bracket expression cannot
+# express "not a newline" portably — `[^\n]` is the class {backslash, n} under a POSIX ERE,
+# so an extraction keyed on it TRUNCATED at the first `n` and read `add("toolchain", $0, "`
+# for the `npm-error` site, which then failed this very assert (measured while writing it).
+# grep is line-oriented, so `.*` is both correct and sufficient.
+fa_addcalls=$(grep -v '^[[:space:]]*#' "$fa_tool" | grep -E 'add\("(assert|guard|toolchain)",')
+fa_add_n=$(printf '%s\n' "$fa_addcalls" | grep -c .)
+fa_add_ok=$(printf '%s\n' "$fa_addcalls" \
+  | grep -cE 'add\("(assert|guard|toolchain)", .*, (pubid\(|publabel\(|pubdoc\(|pubsh\(|pubtagged\(|pubpytest\(|pubjest\(|pubunittest\(|"[a-z][a-z0-9-]*", 1\))')
+if [ "${fa_add_n:-0}" -ge 13 ] && [ "$fa_add_n" = "$fa_add_ok" ]; then
+  ok "3765-pub-one-rule: all $fa_add_n add() call sites across ALL THREE tiers publish a closed-enum label literal, pubid(…), publabel(…), pubdoc(…), pubsh(…), pubtagged(…), pubpytest(…), pubjest(…) or pubunittest(…) — no tier copies its matched line (blocker 11)"
+else
+  bad "3765-pub-one-rule: $fa_add_n add() call site(s) but only $fa_add_ok publish through a label literal / pubid() / publabel() / pubdoc() / pubsh() / pubtagged() / pubpytest() / pubjest() / pubunittest() — a call site that passes copied line content publishes an assertion PAYLOAD, which carries interpolated runtime values (blocker 11)"
+fi
+# …and the same invariant on the OUTPUT PATH for the two repository-authored tiers, because
+# a source scan cannot see a RUNTIME value. The charset REFUSES `@`, `/`, `?`, `&` and `=`,
+# i.e. exactly the shapes this field's six-round credential family travelled on.
+fa_rec_id=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
+if printf '%s\n' "$fa_rec_id" | grep -q 'an identifier failed the safe-charset shape check' \
+   && printf '%s\n' "$fa_rec_id" | grep -q 'A-Za-z0-9'; then
+  ok "3765-pub-outputpath-guard: the emit path REFUSES an assert/guard name outside the safe identifier charset — the invariant is checked on the OUTPUT, not only in the source"
+else
+  bad "3765-pub-outputpath-guard: _failassert_record does not shape-check assert/guard names before publishing them — a runtime value can carry what no source scan sees"
+fi
+fa_rec_tc=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
+if printf '%s\n' "$fa_rec_tc" | grep -q 'a toolchain kind label failed the closed-label shape check' \
+   && printf '%s\n' "$fa_rec_tc" | grep -q '\*\[!a-z0-9-\]\*'; then
+  ok "3765-toolchain-outputpath-guard: the emit path REFUSES a toolchain name that is not a bare label token — the invariant is checked on the OUTPUT, not only in the source"
+else
+  bad "3765-toolchain-outputpath-guard: _failassert_record does not shape-check toolchain names before publishing them — a runtime value can carry what no source scan sees"
+fi
+
+# 55ab. BLOCKER 11 (roborev job 49): EVERY TIER PUBLISHES AN IDENTIFIER, NEVER ITS PAYLOAD.
+#
+#       THE RATIONALE THAT WAS REMOVED, AND WHY. Tiers `assert`/`guard` used to publish the
+#       COMPLETE payload of the matched line, justified as "repository-authored text:
+#       in-tree, reviewed, diffed by every PR". MEASURED FALSIFICATION: in THIS file alone,
+#       205 `bad "…"` messages INTERPOLATE RUNTIME VALUES —
+#           bad "leaked-child: caller-known summary file '$caller_file' was not produced"
+#       — so an assert payload is a repo-authored TEMPLATE carrying runtime text, not a
+#       constant, and this repository's own gate interpolates ORIGIN URLS into diagnostics
+#       (that is what `_component_set_safe_detail` exists for). The neutraliser's DECLARED
+#       residual — it cannot see a space-separated `api_key SECRET` or a bare unmarked token
+#       — therefore applied to the assert tier too.
+#
+#       AND PUBLISHING THE PAYLOAD WAS NEVER WHAT #3765 ASKED FOR. The issue's own sketch is
+#       the TAG: `failed-assert: 1465-skip-declares (accounted 419/420, floor 410)`. F5
+#       required full-payload DEDUP; it never required full-payload PUBLICATION, and the two
+#       are now separate — count on the identity, publish a projection of it.
+#
+#       METHOD, both halves of which have caught this issue's authors out before:
+#       (a) NEVER leak-check EXTRACTOR STDOUT — it neither redacts nor neutralises, so a
+#           token a bound cut looks "absent" there while never having been neutralised.
+#           Every assertion below is on the RENDERED field.
+#       (b) tiers are FIRST-MATCH-WINS, so every fixture here is SINGLE-TIER, and SHORT, so
+#           no bound can hide a token.
+fa_pubdir="$fa_dir/pub"; mkdir -p "$fa_pubdir"
+# The two shapes the neutraliser MEASURABLY cannot see, in the DETAIL position — which is
+# where an interpolated runtime value actually lands in a `bad "<tag>: <detail>"` template.
+printf 'FAIL - pub-a: api_key SEKRETX1 revoked\n'     > "$fa_pubdir/x1.log"
+printf 'FAIL - pub-b: SEKRETX2 is not a valid ref\n'  > "$fa_pubdir/x2.log"
+for fa_probe in x1:SEKRETX1:pub-a x2:SEKRETX2:pub-b; do
+  fa_probe_f=${fa_probe%%:*}; fa_probe_rest=${fa_probe#*:}
+  fa_probe_tok=${fa_probe_rest%%:*}; fa_probe_tag=${fa_probe_rest#*:}
+  _fa_run "pub$fa_probe_f" "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_pubdir/$fa_probe_f.log" PASS
+  fa_got=$(_fa_line fmt)
+  case "$fa_got" in
+    *"$fa_probe_tok"*) bad "3765-pub-noleak-$fa_probe_f: $fa_probe_tok reached the RENDERED field ('$fa_got') — the assert tier is publishing its payload, and a keyword/shape recogniser over interpolated text does not close (blocker 11)" ;;
+    *) ok "3765-pub-noleak-$fa_probe_f: no $fa_probe_tok substring in the field — the DETAIL is not published, so the two shapes the neutraliser cannot see have no channel on this tier either" ;;
+  esac
+  case "$fa_got" in
+    *"RECOGNISED (assert): $fa_probe_tag -"*)
+      ok "3765-pub-tag-$fa_probe_f: the field publishes the repo-authored TAG '$fa_probe_tag' — a projection, not a silently emptied field" ;;
+    *) bad "3765-pub-tag-$fa_probe_f: expected the tag '$fa_probe_tag' as the published identifier, got '$fa_got'" ;;
+  esac
+done
+# THE PROPERTY IS "THE PAYLOAD IS NOT PUBLISHED", NOT "SECRETS ARE SCRUBBED". A non-secret
+# distinguishing token must be absent too, or the case would pass for a sanitiser rather
+# than for the removed channel.
+printf 'FAIL - pub-c: DISTINCTIVEDETAILTOKEN in the message\n' > "$fa_pubdir/x3.log"
+_fa_run pubx3 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_pubdir/x3.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *DISTINCTIVEDETAILTOKEN*) bad "3765-pub-nodetail: the assertion DETAIL reached the field ('$fa_got') — the tier publishes an identifier, so ANY detail token is a channel, secret-shaped or not" ;;
+  *) ok "3765-pub-nodetail: an ordinary (non-secret) detail token is absent from the field too — the channel is removed, not sanitised" ;;
+esac
+# …AND THE WITHHOLDING IS DECLARED, as the toolchain tier already declares its own. A field
+# that quietly drops what it did not publish is the silence this whole issue exists to remove.
+case "$fa_got" in
+  *"- identifiers only; the assertion DETAIL is not published (see the component log)"*)
+    ok "3765-affirm-assert: the assert tier states AFFIRMATIVELY that it published identifiers only and where the detail is" ;;
+  *) bad "3765-affirm-assert: expected the affirmative 'identifiers only; the assertion DETAIL is not published' statement, got '$fa_got'" ;;
+esac
+# AN OUT-OF-CHARSET TAG IS REPLACED WHOLESALE, NEVER TRIMMED. The charset excludes `@` and
+# `/` precisely so an scp-form authority in the TAG position cannot be published — and the
+# refusal is affirmative, so the reader knows a tag stood there.
+# A LIBTEST shape, deliberately: since job 70 the free-form `FAIL - ` rule routes through
+# pubtagged(), whose own grammar rejects untagged prose BEFORE pubid()'s charset check can
+# fire — so an untagged fixture would exercise the no-identifier path and leave the CHARSET
+# refusal uncovered. The libtest rule still projects through pubid(), so this keeps the
+# charset path under test. Its safety assertion is unchanged and is the load-bearing half.
+printf 'test SEKRETX4@h.io/p ... FAILED\n' > "$fa_pubdir/x4.log"
+_fa_run pubx4 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_pubdir/x4.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETX4*) bad "3765-pub-charset: an scp-form authority in the TAG position reached the field ('$fa_got') — the charset is not being enforced, or is being enforced by trimming" ;;
+  *) ok "3765-pub-charset: an out-of-charset tag (an scp-form authority) publishes no fragment of itself" ;;
+esac
+case "$fa_got" in
+  *"outside the safe charset"*)
+    ok "3765-pub-charset-affirm: the refusal is an affirmative placeholder naming what happened, not a dropped name" ;;
+  *) bad "3765-pub-charset-affirm: expected an 'outside the safe charset' placeholder, got '$fa_got'" ;;
+esac
+# GUARD TIER: label + verdict, which is already STRUCTURED — the explanatory prose is not
+# published. (Its identity drops the prose too, and that is DECLARED in the extractor: two
+# lines with the same label AND verdict are one guard verdict.)
+printf 'arrow-parity-guard: FAIL — 0 tests ran under DISTINCTIVEGUARDPROSE\n' > "$fa_pubdir/g1.log"
+_fa_run pubg1 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_pubdir/g1.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *"1 RECOGNISED (guard): arrow-parity-guard (FAIL)"*)
+    ok "3765-pub-guard-label: the guard tier publishes its label and verdict ($fa_got)" ;;
+  *) bad "3765-pub-guard-label: expected '1 RECOGNISED (guard): arrow-parity-guard (FAIL)', got '$fa_got'" ;;
+esac
+case "$fa_got" in
+  *DISTINCTIVEGUARDPROSE*) bad "3765-pub-guard-noprose: the guard line's explanatory PROSE reached the field ('$fa_got')" ;;
+  *) ok "3765-pub-guard-noprose: the guard line's prose is not published — the value is the structured label + verdict" ;;
+esac
+# A4 (nextest) PUBLISHES THE TEST PATH, NOT THE PACKAGE. nextest prints `<pkg> <test>`, so a
+# naive leading-token projection would publish `cqlite-core` for every failure in the crate
+# and ordinalise them all — a pointer that points nowhere. The identity stays the whole
+# payload; the published identifier is the test.
+printf 'FAIL [   0.123s] cqlite-core storage::bti::tests::alpha\nFAIL [   0.456s] cqlite-core storage::bti::tests::beta\n' > "$fa_pubdir/nx.log"
+fa_nx=$(bash "$fa_tool" "$fa_pubdir/nx.log" 10 2>/dev/null)
+fa_nx_count=$(printf '%s\n' "$fa_nx" | sed -n 's/^count=//p' | head -1)
+fa_nx_names=$(printf '%s\n' "$fa_nx" | sed -n 's/^name=//p' | tr '\n' ' ')
+if [ "${fa_nx_count:-0}" = 2 ] && [ "$fa_nx_names" = "storage::bti::tests::alpha storage::bti::tests::beta " ]; then
+  ok "3765-pub-nextest: nextest's two failures count as 2 and publish their TEST paths, not the shared package name"
+else
+  bad "3765-pub-nextest: expected count=2 with the two test paths, got count='${fa_nx_count:-<none>}' names='$fa_nx_names' — publishing the package would ordinalise every failure in one crate"
+fi
+
+# 55ac. BLOCKER 13 (roborev job 49): AN OVER-LONG GUARD LABEL IS COUNTED, NOT SILENTLY
+#       DROPPED. The B1 rule was
+#           if (length(lbl) <= 70) add("guard", lbl " (" v ")")
+#           next
+#       so a longer label was DISCARDED and the unconditional `next` then stopped every
+#       LATER tier from seeing the line — the field reported `0 RECOGNISED`, which reads as
+#       "scanned, nothing matched", when a guard pattern HAD matched. That is this issue's
+#       own rule violated: an absence must be a MEASUREMENT, never a silence. The cutoff was
+#       undocumented too; it is now derived (the widest guard label this repo emits is
+#       `cli-tests Pass 1 (default)` at 26 chars, and the B1 shape is broad enough that a
+#       whole SENTENCE can match it) and its failure publishes a bounded placeholder.
+fa_lbl80=$(awk 'BEGIN { s = sprintf("%80s", ""); gsub(/ /, "L", s); print s }')
+printf '%s: FAIL — detail\n' "$fa_lbl80" > "$fa_pubdir/longlabel.log"
+fa_ll=$(bash "$fa_tool" "$fa_pubdir/longlabel.log" 10 2>/dev/null)
+fa_ll_count=$(printf '%s\n' "$fa_ll" | sed -n 's/^count=//p' | head -1)
+if [ "${fa_ll_count:-0}" = 1 ]; then
+  ok "3765-longlabel-counted: a guard line with an 80-char label is COUNTED (count=1), not discarded"
+else
+  bad "3765-longlabel-counted: expected count=1 for an over-long guard label, got count='${fa_ll_count:-<none>}' — the match is being silently dropped"
+fi
+_fa_run longlabel "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_pubdir/longlabel.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *"0 RECOGNISED"*) bad "3765-longlabel-not-zero: the RENDERED field reads '0 RECOGNISED' for a line a guard recogniser MATCHED ('$fa_got') — 'scanned, nothing matched' is a false statement here, and the worst kind (it is what stops the next person looking)" ;;
+  *) ok "3765-longlabel-not-zero: the field does NOT report 0 RECOGNISED for a matched-but-over-long guard label" ;;
+esac
+case "$fa_got" in
+  *"1 RECOGNISED (guard): <guard label too long to publish safely: 80 chars> (FAIL)"*)
+    ok "3765-longlabel-placeholder: the over-long label publishes a bounded placeholder naming its MEASURED length, with the verdict preserved ($fa_got)" ;;
+  *) bad "3765-longlabel-placeholder: expected the '<guard label too long to publish safely: 80 chars> (FAIL)' placeholder, got '$fa_got'" ;;
+esac
+# THE `next` INTERACTION, which is the half a count-only case cannot see: with the drop in
+# place the guard tier matched NOTHING on this fixture, so the toolchain tier below won and
+# the field named `capitalised-error` — a real identity, from a tier that is not the one that
+# matched. The TIER is therefore the assertion, not merely the non-zero count.
+printf '%s: FAIL — detail\nError: something else entirely\n' "$fa_lbl80" > "$fa_pubdir/longlabel-mixed.log"
+fa_llm_tier=$(bash "$fa_tool" "$fa_pubdir/longlabel-mixed.log" 10 2>/dev/null | sed -n 's/^tier=//p' | head -1)
+if [ "${fa_llm_tier:-}" = guard ]; then
+  ok "3765-longlabel-tier: on a log carrying BOTH an over-long guard label and a toolchain diagnostic, the GUARD tier still wins — the drop no longer hands the field to a lower tier"
+else
+  bad "3765-longlabel-tier: expected tier=guard, got tier='${fa_llm_tier:-<none>}' — the over-long label is being dropped and the unconditional 'next' hands the line to a later tier"
+fi
+
+# 55ad. BLOCKER 12 (roborev job 49): THE DEDUP KEY IS BOUNDED BEFORE IT IS RETAINED. The
+#       full identity used to become an awk associative-array key with the 4096 bound applied
+#       only AFTERWARDS, so many distinct oversized recognised lines could consume unbounded
+#       memory and kill the extractor — or the gate — before any summary was produced. A
+#       component log full of long minified lines is not exotic.
+#
+#       THE PROPERTY UNDER TEST IS THAT BOUNDING THE KEY DID NOT COST DISTINCTNESS (F1/F5):
+#       two DISTINCT oversized identities must still count as 2. The extractor keys an
+#       oversized identity on its EXACT length plus a 1024-char head AND a 1024-char tail, so
+#       the DECLARED residual is a pair agreeing on all three — not a realistic shape for a
+#       test path or an assertion message, and stated in the extractor rather than implied.
+awk 'BEGIN {
+  pad = sprintf("%6000s", ""); gsub(/ /, "z", pad)
+  printf "FAIL - big-a: %s tail-alpha\n", pad
+  printf "FAIL - big-b: %s tail-beta\n", pad
+}' > "$fa_pubdir/oversize.log"
+fa_ov=$(bash "$fa_tool" "$fa_pubdir/oversize.log" 10 2>/dev/null)
+fa_ov_count=$(printf '%s\n' "$fa_ov" | sed -n 's/^count=//p' | head -1)
+if [ "${fa_ov_count:-0}" = 2 ]; then
+  ok "3765-oversize-distinct: two DISTINCT oversized (6000-char) identities still count as 2 — bounding the dedup key before retention did not collapse them (F1/F5 intact)"
+else
+  bad "3765-oversize-distinct: expected count=2 for two distinct oversized identities, got count='${fa_ov_count:-<none>}' — the bounded key is collapsing distinct identities, which is F5 again"
+fi
+# And the tags are SHORT, so the published values are the tags: the oversize is a property of
+# the IDENTITY (the dedup key), and it must not leak into the publication decision.
+fa_ov_names=$(printf '%s\n' "$fa_ov" | sed -n 's/^name=//p' | tr '\n' ' ')
+if [ "$fa_ov_names" = "big-a big-b " ]; then
+  ok "3765-oversize-published: an oversized identity with a short TAG still publishes that tag — the key bound is internal and does not reach the published value"
+else
+  bad "3765-oversize-published: expected 'big-a big-b', got '$fa_ov_names' — the internal key bound is leaking into the publication path"
+fi
+# The behavioural half of the memory bound: many distinct long recognised lines must be
+# scanned to completion with an exact count, rather than the extractor dying before it can
+# report anything. Bounded work (200 x 4200 chars ~= 840KB) so this stays a fast case.
+awk 'BEGIN { pad = sprintf("%4200s", ""); gsub(/ /, "q", pad)
+  for (i = 1; i <= 200; i++) printf "FAIL - mem-%03d: %s%d\n", i, pad, i }' > "$fa_pubdir/manylong.log"
+fa_ml=$(bash "$fa_tool" "$fa_pubdir/manylong.log" 10 2>/dev/null); fa_ml_rc=$?
+fa_ml_count=$(printf '%s\n' "$fa_ml" | sed -n 's/^count=//p' | head -1)
+if [ "$fa_ml_rc" = 0 ] && [ "${fa_ml_count:-0}" = 200 ]; then
+  ok "3765-oversize-manylines: 200 DISTINCT oversized identities are scanned to completion and counted exactly (rc=0, count=200)"
+else
+  bad "3765-oversize-manylines: expected rc=0 count=200, got rc=$fa_ml_rc count='${fa_ml_count:-<none>}' — the extractor is retaining whole oversized identities and dying before it can report"
+fi
+
+# 55ae. BLOCKER 15 (roborev job 50): THE BOUNDED DEDUP KEY MUST NOT ALIAS. The key that
+#       55ad certifies as bounded was WINDOWED — exact length + a 1024-char head + a
+#       1024-char tail — so two DISTINCT identities of equal length agreeing on both outer
+#       windows and differing only in the MIDDLE collapsed into one: `count` UNDERCOUNTED
+#       while the field advertises a distinct total. Sixth instance of the F1/F5/F6/F8/F9
+#       dedup-key-fidelity class, and the F12 fix is what created it (bounding the key for
+#       memory reintroduced the aliasing F1 and F5 were about). The resolution of the
+#       memory-vs-distinctness tension is a DIGEST over the whole normalised identity.
+awk 'BEGIN {
+  head = sprintf("%1200s",""); gsub(/ /,"h",head)
+  tail = sprintf("%1200s",""); gsub(/ /,"t",tail)
+  mid1 = sprintf("%2000s",""); gsub(/ /,"a",mid1)
+  mid2 = sprintf("%2000s",""); gsub(/ /,"b",mid2)
+  printf "FAIL - same-tag: %s%s%s\n", head, mid1, tail
+  printf "FAIL - same-tag: %s%s%s\n", head, mid2, tail
+}' > "$fa_pubdir/midcollide.log"
+fa_md=$(bash "$fa_tool" "$fa_pubdir/midcollide.log" 10 2>/dev/null)
+fa_md_count=$(printf '%s\n' "$fa_md" | sed -n 's/^count=//p' | head -1)
+if [ "${fa_md_count:-0}" = 2 ]; then
+  ok "3765-digest-middle-distinct: two EQUAL-LENGTH oversized identities sharing their first 1024 AND last 1024 characters and differing only in the MIDDLE count as 2 — the key digests the WHOLE identity, so distinctness no longer depends on WHERE they differ"
+else
+  bad "3765-digest-middle-distinct: expected count=2 for a middle-only difference, got count='${fa_md_count:-<none>}' — the bounded key is aliasing, so the count undercounts while the field claims a distinct total (blocker 15)"
+fi
+# …and being one identity apart, they must not RENDER as one string either: the tag is
+# shared, so the published values are ORDINALISED (the F5 property, one level up).
+fa_md_names=$(printf '%s\n' "$fa_md" | sed -n 's/^name=//p' | tr '\n' ' ')
+if [ "$fa_md_names" = "same-tag#1 same-tag#2 " ]; then
+  ok "3765-digest-middle-ordinalised: the two middle-differing identities publish same-tag#1 and same-tag#2 — counted as two AND rendered as two"
+else
+  bad "3765-digest-middle-ordinalised: expected 'same-tag#1 same-tag#2', got '$fa_md_names'"
+fi
+# STRUCTURAL, and labelled as such: the digest must be over the FULL identity (a digest of a
+# window is the same defect one layer down) and must be computed IN awk (a per-line shell-out
+# to cksum/sha256sum is a process per recognised line on a log full of long lines).
+fa_dg_body=$(awk '/^  function digest\(/,/^  }/' "$fa_tool")
+if printf '%s\n' "$fa_dg_body" | grep -q 'L = length(t)' \
+   && printf '%s\n' "$fa_dg_body" | grep -q 'for (i = 1; i <= L; i++)'; then
+  ok "3765-digest-full-string: digest() iterates the WHOLE normalised identity (1..length), not a window of it"
+else
+  bad "3765-digest-full-string: digest() does not iterate 1..length(t) — a digest over a WINDOW aliases exactly like the windowed key it replaced (blocker 15)"
+fi
+if printf '%s\n' "$fa_dg_body" | grep -q 'digest(t)' \
+   || printf '%s\n' "$(awk '/^  function key\(/,/^  }/' "$fa_tool")" | grep -q 'digest(t)'; then
+  ok "3765-digest-in-key: key() carries the digest of the full identity alongside its bounded windows — bounded retention AND exact distinctness, rather than one traded for the other"
+else
+  bad "3765-digest-in-key: key() does not include a digest of the full identity, so the oversize key is windowed again (blocker 15)"
+fi
+# 55x. BLOCKER 17 — pubid() must NOT strip trailing IDENTIFIER characters. `_` and `-` are
+#      valid in a Rust test path and a bash suite tag, so stripping them published
+#      `module::test_` as `module::test` — a DIFFERENT, possibly real test. The count was
+#      always right (it is taken on the full identity); the PUBLISHED identifier is what a
+#      reader matches a flake against, which is the whole purpose of this field.
+printf 'test module::test_ ... FAILED\ntest module::test ... FAILED\n' > "$fa_dir/trailid.log"
+fa_ti=$(bash "$fa_tool" "$fa_dir/trailid.log" 10)
+fa_ti_count=$(printf '%s\n' "$fa_ti" | sed -n 's/^count=//p' | head -1)
+fa_ti_names=$(printf '%s\n' "$fa_ti" | sed -n 's/^name=//p' | sort | tr '\n' ' ')
+if [ "$fa_ti_count" = 2 ]; then
+  ok "3765-trailid-count: module::test_ and module::test are TWO distinct identities"
+else
+  bad "3765-trailid-count: expected count=2, got '${fa_ti_count:-<none>}' — a trailing identifier character is being stripped before dedup (blocker 17)"
+fi
+case "$fa_ti_names" in
+  *"module::test_"*)
+    ok "3765-trailid-published: the trailing underscore SURVIVES publication, so the two are distinguishable to a reader" ;;
+  *) bad "3765-trailid-published: expected 'module::test_' among the published identifiers, got '$fa_ti_names' — pubid() strips a valid identifier character (blocker 17)" ;;
+esac
+# STRUCTURAL, labelled as such: pin the charset that pubid() strips, so a future edit cannot
+# quietly re-add `_` or `-` to it. A behavioural case only covers the shapes someone thought of.
+fa_pub_body=$(awk '/^  function pubid\(/,/^  }/' "$fa_tool")
+if printf '%s\n' "$fa_pub_body" | grep -qE 'sub\(/\[\.:\]\+\$/' ; then
+  ok "3765-trailid-charset: pubid() strips ONLY trailing . and : — identifier characters are preserved"
+else
+  bad "3765-trailid-charset: pubid() does not strip exactly [.:]+ — if _ or - is back in that class, blocker 17 has regressed"
+fi
+
+# 55y. BLOCKER 16 — .result is the PUBLICATION signal, so the write must be INDIVISIBLE.
+#      Plain `>` redirection creates the file before printf fills it, so a concurrent
+#      boundary renderer can read a zero-length or partial result. Blocker 14 moved this
+#      write after the sidecars, which narrowed the window without closing it.
+#      STRUCTURAL: the race itself is not controllable, so assert the mechanism, and label
+#      it a structural assert rather than dressing it up as behavioural.
+fa_rr_body=$(awk '/^record_result\(\) \{/,/^\}/' "$GATE")
+if printf '%s\n' "$fa_rr_body" | grep -q 'mktemp "$LOG_DIR/.result' \
+   && printf '%s\n' "$fa_rr_body" | grep -q 'mv -f "$_rr_tmp" "$LOG_DIR/$1.result"'; then
+  ok "3765-result-atomic: .result is published by writing a temp in the SAME directory and renaming it, so no reader can observe a partial result"
+else
+  bad "3765-result-atomic: record_result does not publish .result via a same-directory temp + mv — a plain redirection creates the file before it is filled (blocker 16)"
+fi
+if printf '%s\n' "$fa_rr_body" | grep -q '\[ -s "$_rr_tmp" \]'; then
+  ok "3765-result-verified: the temp is VERIFIED non-empty before it is renamed into place"
+else
+  bad "3765-result-verified: the temp is renamed without checking it was actually written — there is no set -e here, so an unwritten temp would publish an EMPTY result (blocker 16)"
+fi
+if printf '%s\n' "$fa_rr_body" | grep -q 'WARNING — atomic publish'; then
+  ok "3765-result-degradation-named: a failed atomic publish is NAMED on stderr, not silently downgraded"
+else
+  bad "3765-result-degradation-named: a failed atomic publish falls back silently — an unannounced degradation is this issue's own defect class"
+fi
+
+# 55z. ROBOREV JOB 61 — a DOCTEST failure must be NAMED. `core-tests` runs `cargo test --doc`,
+#      and under the generic libtest rule alone tagof() reduced
+#      `test src/lib.rs - item (line 10) ... FAILED` to `src/lib.rs`, which pubid() rejected
+#      for the `/`, so the field published `<identifier outside the safe charset>` and named
+#      nothing — this field failing at its one job, for a class the gate actually runs.
+printf 'test src/lib.rs - item (line 10) ... FAILED\n' > "$fa_dir/doct.log"
+fa_dt=$(bash "$fa_tool" "$fa_dir/doct.log" 10 | sed -n 's/^name=//p' | head -1)
+case "$fa_dt" in
+  *"src/lib.rs"*|*"line 10"*)
+    ok "3765-doctest-named: a doctest failure publishes a NAMED identity ($fa_dt), not a charset placeholder" ;;
+  *) bad "3765-doctest-named: expected the path and line in the published identity, got '$fa_dt' — the doctest shape is falling through to the generic libtest rule (job 61)" ;;
+esac
+# Two doctests in ONE file at DIFFERENT lines are DIFFERENT failures: the line number has to be
+# part of the identity or they collapse — the identity-fidelity class, one shape further on.
+printf 'test src/lib.rs - a (line 10) ... FAILED\ntest src/lib.rs - b (line 42) ... FAILED\n' > "$fa_dir/doct2.log"
+fa_dt2=$(bash "$fa_tool" "$fa_dir/doct2.log" 10 | sed -n 's/^count=//p' | head -1)
+if [ "$fa_dt2" = 2 ]; then
+  ok "3765-doctest-distinct: two doctests in one file at different lines count as TWO"
+else
+  bad "3765-doctest-distinct: expected count=2, got '${fa_dt2:-<none>}' — the line number is not part of the doctest identity, so distinct doctest failures collapse"
+fi
+# NEGATIVE CONTROL, and it is the load-bearing case: the doctest rule is the ONLY place `/` is
+# published, so a URL-shaped line must not be able to satisfy that shape and smuggle an
+# authority into the field. The rule is anchored and re-validates the path against a charset
+# admitting no `:` and no `@`, so such a line must fall through to the generic rule.
+printf 'test https://x-access-token:SEKRETDOC@h.io/p - item (line 10) ... FAILED\n' > "$fa_dir/doct3.log"
+fa_dt3=$(bash "$fa_tool" "$fa_dir/doct3.log" 10 | sed -n 's/^name=//p' | head -1)
+case "$fa_dt3" in
+  *SEKRETDOC*|*"@h.io"*)
+    bad "3765-doctest-no-authority: a URL-shaped line satisfied the doctest rule and published an authority ('$fa_dt3') — admitting / for doctests must not readmit a host" ;;
+  *) ok "3765-doctest-no-authority: a URL-shaped line does NOT satisfy the doctest grammar and publishes no authority ($fa_dt3)" ;;
+esac
+# STRUCTURAL: the doctest rule must PRECEDE the generic libtest rule, or the generic rule
+# consumes the line with `next` and the specific rule never runs.
+fa_doc_at=$(grep -nF 'test [^:@]+ - .*\(line [0-9]+\) \.\.\. FAILED/ {' "$fa_tool" | head -1 | cut -d: -f1)
+fa_gen_at=$(grep -nF 'test .* \.\.\. FAILED/ {' "$fa_tool" | head -1 | cut -d: -f1)
+if [ -n "$fa_doc_at" ] && [ -n "$fa_gen_at" ] && [ "$fa_doc_at" -lt "$fa_gen_at" ]; then
+  ok "3765-doctest-rule-order: the doctest recogniser (line $fa_doc_at) precedes the generic libtest rule (line $fa_gen_at), so the generic rule cannot consume a doctest line first"
+else
+  bad "3765-doctest-rule-order: the doctest rule must precede the generic libtest rule (doctest at '${fa_doc_at:-<none>}', generic at '${fa_gen_at:-<none>}') — order decides which rule sees the line"
+fi
+
+# 55za. ROBOREV JOB 63 — the doctest identity must survive THE EMIT BOUNDARY, not just the
+#       extractor. The extractor emitted `doctest src/lib.rs line 10 (item)` and the
+#       emit-boundary charset (which excludes `/` so no URL path can be published) replaced
+#       the whole value with `not extractable` — so the doctest projection was INERT END TO
+#       END while its extractor-side cases passed.
+#
+#       THE LESSON, and it is why these cases go through _fa_run: the extractor does NOT
+#       neutralise and is NOT the publication path. A leak check or an identity check asserted
+#       on extractor stdout can pass while the RENDERED field says something else entirely.
+#       The 55z cases above assert the extractor; THESE assert what a reader actually sees.
+_fa_run docrend "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/doct.log" PASS
+fa_dr=$(_fa_line fmt)
+case "$fa_dr" in
+  *"doctest src/lib.rs line 10 (item)"*)
+    ok "3765-doctest-rendered: the doctest identity survives the emit boundary and reaches the SUMMARY field" ;;
+  *"not extractable"*)
+    bad "3765-doctest-rendered: the emit-boundary charset REJECTED the doctest identifier, so the projection is inert end to end ($fa_dr) — job 63" ;;
+  *) bad "3765-doctest-rendered: expected the doctest identity in the rendered field, got '$fa_dr'" ;;
+esac
+_fa_run docrend2 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/doct2.log" PASS
+fa_dr2=$(_fa_line fmt)
+case "$fa_dr2" in
+  *"line 10 (a)"*"line 42 (b)"*)
+    ok "3765-doctest-rendered-distinct: two doctests in one file render as TWO distinct identities" ;;
+  *) bad "3765-doctest-rendered-distinct: expected both doctest identities in the rendered field, got '$fa_dr2'" ;;
+esac
+# NEGATIVE CONTROL AT THE BOUNDARY, and it is the load-bearing case: admitting `/` for the
+# doctest GRAMMAR must not admit an AUTHORITY. Both a real URL-shaped test line and a payload
+# that FORGES the doctest wording must publish no host and no token.
+_fa_run docrend3 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/doct3.log" PASS
+fa_dr3=$(_fa_line fmt)
+case "$fa_dr3" in
+  *SEKRETDOC*|*"@h.io"*)
+    bad "3765-doctest-rendered-no-authority: a URL-shaped line published an authority through the doctest exception ('$fa_dr3')" ;;
+  *) ok "3765-doctest-rendered-no-authority: a URL-shaped line publishes no authority at the emit boundary either" ;;
+esac
+printf 'FAIL - doctest https://h@x/p line 10 (item): forged shape\n' > "$fa_dir/doctforge.log"
+_fa_run docforge "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/doctforge.log" PASS
+fa_dr4=$(_fa_line fmt)
+case "$fa_dr4" in
+  *"@x/p"*|*"https://h"*)
+    bad "3765-doctest-forged-shape: a payload that FORGES the doctest wording published an authority ('$fa_dr4') — the grammar must be matched by the RULE, not by the words in a payload" ;;
+  *) ok "3765-doctest-forged-shape: a payload merely CONTAINING the word doctest cannot smuggle an authority through the grammar exception" ;;
+esac
+# STRUCTURAL: the emit boundary must admit the doctest shape via the NAMED grammar predicate,
+# not by adding `/` to the charset — a widened charset would readmit every URL path.
+fa_eb=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE")
+if printf '%s\n' "$fa_eb" | grep -q '_failassert_is_doctest_id "$fa_probe"'; then
+  ok "3765-doctest-boundary-grammar: the emit boundary admits the doctest shape through the named grammar predicate, so the charset still excludes / for every other shape"
+else
+  bad "3765-doctest-boundary-grammar: the emit boundary does not consult _failassert_is_doctest_id — if / was added to the charset instead, every URL path is publishable again (job 63)"
+fi
+# Since job 75 the charset lives in the ONE shared normaliser, so the doctest predicate is
+# asserted to DELEGATE to it rather than to carry its own copy of the character class.
+if printf '%s\n' "$(awk '/^_failassert_is_doctest_id\(\) \{/,/^\}/' "$GATE")" | grep -q '_failassert_relpath_ok "$p"' ; then
+  ok "3765-doctest-boundary-path-charset: the doctest grammar delegates its path check to the one shared normaliser (no : , no @, no leading slash, no ..)"
+else
+  bad "3765-doctest-boundary-path-charset: the doctest grammar neither carries nor delegates a path check, so the shape check alone is carrying the safety property"
+fi
+
+# 55zb. ROBOREV JOB 67 — a delta SHELL-TEST failure must name the failing script. A5 emits
+#       `shell-selftest: scripts/tests/foo.sh FAIL`, whose identity is a repo-relative PATH,
+#       so pubid() rejected it for the `/` and published a placeholder. AND the delta runner
+#       wrote those verdicts only to stdout, so there was no log to extract from at all —
+#       two independent reasons the failing script was never named.
+#       Asserted on the RENDERED field, per the job-63 lesson.
+printf 'shell-selftest: scripts/tests/foo.sh FAIL\n' > "$fa_dir/sht.log"
+_fa_run shtrend "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/sht.log" PASS
+fa_sh=$(_fa_line fmt)
+case "$fa_sh" in
+  *"shell-test scripts/tests/foo.sh"*)
+    ok "3765-shelltest-rendered: a delta shell-test failure NAMES the failing script in the rendered field" ;;
+  *"outside the safe charset"*|*"not extractable"*)
+    bad "3765-shelltest-rendered: the shell-test path was rejected and published a placeholder ($fa_sh) — job 67" ;;
+  *) bad "3765-shelltest-rendered: expected the shell-test identity, got '$fa_sh'" ;;
+esac
+printf 'shell-selftest: scripts/tests/a.sh FAIL\nshell-selftest: scripts/tests/b.sh FAIL\n' > "$fa_dir/sht2.log"
+_fa_run shtrend2 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/sht2.log" PASS
+fa_sh2=$(_fa_line fmt)
+case "$fa_sh2" in
+  *"a.sh"*"b.sh"*) ok "3765-shelltest-distinct: two failing scripts render as TWO distinct identities" ;;
+  *) bad "3765-shelltest-distinct: expected both scripts named, got '$fa_sh2'" ;;
+esac
+# NEGATIVE CONTROLS: the second `/`-bearing grammar must not become an authority channel —
+# neither from a URL-shaped verdict line nor from a payload that FORGES the wording.
+printf 'shell-selftest: https://x-access-token:SEKRETSH@h.io/p.sh FAIL\n' > "$fa_dir/shturl.log"
+_fa_run shturl "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/shturl.log" PASS
+fa_sh3=$(_fa_line fmt)
+case "$fa_sh3" in
+  *SEKRETSH*|*"@h.io"*) bad "3765-shelltest-no-authority: a URL-shaped shell-selftest line published an authority ('$fa_sh3')" ;;
+  *) ok "3765-shelltest-no-authority: a URL-shaped shell-selftest line publishes no authority" ;;
+esac
+printf 'FAIL - shell-test https://h@x/p.sh: forged shape\n' > "$fa_dir/shtforge.log"
+_fa_run shtforge "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/shtforge.log" PASS
+fa_sh4=$(_fa_line fmt)
+case "$fa_sh4" in
+  *"@x/p.sh"*|*"https://h"*) bad "3765-shelltest-forged-shape: a payload forging the shell-test wording published an authority ('$fa_sh4')" ;;
+  *) ok "3765-shelltest-forged-shape: forging the shell-test wording in a payload cannot smuggle an authority" ;;
+esac
+# STRUCTURAL: the boundary must admit this shape through its OWN named grammar predicate, and
+# the delta runner must CAPTURE the verdicts (the identity has to exist before it can be named).
+fa_eb2=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE")
+if printf '%s\n' "$fa_eb2" | grep -q '_failassert_is_shelltestid "$fa_probe"'; then
+  ok "3765-shelltest-boundary-grammar: the emit boundary admits the shell-test shape through its own named grammar predicate, so the charset still excludes / elsewhere"
+else
+  bad "3765-shelltest-boundary-grammar: the emit boundary does not consult _failassert_is_shelltestid (job 67)"
+fi
+fa_dsh=$(awk '/^run_delta_shell_selftests\(\) \{/,/^\}/' "$GATE")
+if printf '%s\n' "$fa_dsh" | grep -q '_failassert_record shell-selftests FAIL "$sh_log"'; then
+  ok "3765-shelltest-capture: the delta runner CAPTURES its per-file verdicts and extracts from them, so an identity exists to publish"
+else
+  bad "3765-shelltest-capture: the delta runner does not pass a captured log to _failassert_record — the failing script name is on stdout and nowhere else (job 67)"
+fi
+if printf '%s\n' "$fa_dsh" | grep -q 'rm -rf "$sh_tmpd"'; then
+  ok "3765-shelltest-capture-cleanup: the capture directory is removed WHOLESALE, so the .ansi-stripped sibling cannot be left behind"
+else
+  bad "3765-shelltest-capture-cleanup: the capture dir is not rm -rf-ed — extraction writes a .ansi-stripped sibling beside the log (the blocker-3 defect, one component over)"
+fi
+if printf '%s\n' "$fa_dsh" | grep -qE '_run_shell_selftest_files "\$\{tarr\[@\]\}" > "\$sh_log"'; then
+  ok "3765-shelltest-capture-not-piped: the suite is redirected then cat, never piped — a pipeline would run it in a SUBSHELL and hand the if tee status"
+else
+  bad "3765-shelltest-capture-not-piped: the capture is not a plain redirection; a `| tee` would give the if statement tee exit status instead of the suite result"
+fi
+
+# 55zc. ROBOREV JOB 69, three findings.
+#  (a) NO CAUSE MAY PUBLISH A PATH. The `not extractable (...)` causes interpolated the
+#      extractor/log paths, which derive from the checkout location and TMPDIR — externally
+#      influenced, unbounded strings flowing into an artifact this repo pastes into PR
+#      comments, and _failassert_clean is explicitly not a secrecy oracle.
+_fa_run nopath "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/absent-SEKRETPATH/x.log" PASS
+fa_np=$(_fa_line fmt)
+case "$fa_np" in
+  *SEKRETPATH*|*/tmp/*)
+    bad "3765-cause-no-path: a not-extractable cause published a filesystem path ($fa_np) — paths are externally influenced and the cause is what a reader needs" ;;
+  *"not extractable"*)
+    ok "3765-cause-no-path: the cause names WHY without publishing any path" ;;
+  *) bad "3765-cause-no-path: expected a not-extractable cause, got '$fa_np'" ;;
+esac
+# STRUCTURAL: no cause may interpolate $log or $tool again.
+fa_causes=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#' | grep 'not extractable (')
+if ! printf '%s\n' "$fa_causes" | grep -qE '\$\{?(log|tool)\b'; then
+  ok "3765-cause-no-path-structural: no not-extractable cause interpolates the log or extractor path"
+else
+  bad "3765-cause-no-path-structural: a cause still interpolates \$log or \$tool — that is the job-69 finding reintroduced"
+fi
+#  (b) EMPTY OUTPUT IS THE ONLY LEGITIMATE NO-MATCH. The extractor prints tier=/count= only for
+#      a tier it matched and its count is >= 1 by construction, so missing fields or count=0 on
+#      NON-EMPTY output is a protocol violation, not a completed scan that found nothing.
+fa_pv=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE")
+if printf '%s\n' "$fa_pv" | grep -q 'if \[ -z "$out" \]; then' \
+   && printf '%s\n' "$fa_pv" | grep -q 'a protocol violation, refused rather than reported as a completed scan'; then
+  ok "3765-protocol-violation: empty output yields 0 RECOGNISED, while malformed NON-EMPTY output is REFUSED rather than reported as a completed scan"
+else
+  bad "3765-protocol-violation: missing tier/count or count=0 still collapses onto 0 RECOGNISED — a positive verdict from a state that was never measured (job 69)"
+fi
+#  (c) THE DOCTEST ITEM IS OPTIONAL. rustdoc reports an unnamed example as `<path> - (line N)`.
+printf 'test src/lib.rs - (line 10) ... FAILED\n' > "$fa_dir/docni.log"
+_fa_run docni "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/docni.log" PASS
+fa_ni=$(_fa_line fmt)
+case "$fa_ni" in
+  *"doctest src/lib.rs line 10"*)
+    ok "3765-doctest-no-item: an unnamed doctest example is NAMED by path and line, not reduced to a charset placeholder" ;;
+  *"outside the safe charset"*)
+    bad "3765-doctest-no-item: an unnamed doctest example still publishes a charset placeholder ($fa_ni) — job 69" ;;
+  *) bad "3765-doctest-no-item: expected a doctest identity, got '$fa_ni'" ;;
+esac
+printf 'test https://x-access-token:SEKRETD@h.io/p - (line 10) ... FAILED\n' > "$fa_dir/docniurl.log"
+_fa_run docniurl "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/docniurl.log" PASS
+fa_niu=$(_fa_line fmt)
+case "$fa_niu" in
+  *SEKRETD*|*"@h.io"*)
+    bad "3765-doctest-no-item-no-authority: relaxing the item requirement let a URL-shaped line publish an authority ('$fa_niu')" ;;
+  *) ok "3765-doctest-no-item-no-authority: the item-less doctest form still admits no authority" ;;
+esac
+
+# 55zd. ROBOREV JOB 70 — UNTAGGED PROSE MUST NOT BE PUBLISHED AS AN IDENTITY. The `FAIL - `
+#       and `FAIL: ` rules published the first whitespace-delimited word unconditionally.
+#       MEASURED against this repository: 810 of 3155 bad() messages in scripts/tests/*.sh are
+#       untagged prose, so a QUARTER of real failures published a word like `could`, `the`, or
+#       `PASS` — which on a FAILING component reads as a status. That is the misidentification
+#       this issue exists to remove, recreated by its own fix: a reader searches the tracker
+#       for `PASS` exactly as the lead searched it for `ws0-corpus-gen`.
+#       Fixtures are REAL messages taken verbatim from the repo suites, per the finding.
+printf 'FAIL - PASS 1 does NOT enumerate a glob-derived default target set\n' > "$fa_dir/untag.log"
+_fa_run untag "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/untag.log" PASS
+fa_ut=$(_fa_line fmt)
+case "$fa_ut" in
+  *"(assert): PASS"*)
+    bad "3765-untagged-not-a-word: untagged prose published the word 'PASS' as the failing assert identity ($fa_ut) — on a FAILING line that reads as a status, and is the job-70 misidentification" ;;
+  *"<no identifier in the failure text"*)
+    ok "3765-untagged-not-a-word: untagged prose is reported AFFIRMATIVELY as carrying no identifier, rather than publishing its first word" ;;
+  *) bad "3765-untagged-not-a-word: expected the no-identifier placeholder, got '$fa_ut'" ;;
+esac
+printf 'FAIL - could not locate the cli-tests dispatch block in /x/agent-gate.sh\n' > "$fa_dir/untag2.log"
+_fa_run untag2 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/untag2.log" PASS
+fa_ut2=$(_fa_line fmt)
+case "$fa_ut2" in
+  *"(assert): could"*) bad "3765-untagged-second: untagged prose published 'could' as an identity ($fa_ut2)" ;;
+  *"<no identifier in the failure text"*) ok "3765-untagged-second: a second real untagged message also reports no identifier" ;;
+  *) bad "3765-untagged-second: expected the no-identifier placeholder, got '$fa_ut2'" ;;
+esac
+# THE COUNT MUST STILL BE TRUE even when no identity can be named — naming nothing is not the
+# same as counting nothing, and conflating them would undo F1/F5.
+printf 'FAIL - the first untagged failure\nFAIL - a second untagged failure\n' > "$fa_dir/untag3.log"
+_fa_run untag3 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/untag3.log" PASS
+fa_ut3=$(_fa_line fmt)
+case "$fa_ut3" in
+  *"2 RECOGNISED"*) ok "3765-untagged-count-true: two untagged failures still COUNT as two — naming nothing is not counting nothing" ;;
+  *) bad "3765-untagged-count-true: expected '2 RECOGNISED' for two untagged failures, got '$fa_ut3'" ;;
+esac
+# THE TAGGED SHAPES MUST BE UNTOUCHED: the repository convention `<tag>: <prose>`, and a bare
+# single-token tag with no colon at all.
+_fa_run tagkept "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/one.log" PASS
+fa_tk=$(_fa_line fmt)
+case "$fa_tk" in
+  *"1465-skip-declares"*) ok "3765-tagged-kept: the repository convention <tag>: <prose> still publishes its tag (the motivating instance)" ;;
+  *) bad "3765-tagged-kept: the tagged convention regressed — got '$fa_tk'" ;;
+esac
+printf 'FAIL - 1465-skip-declares\n' > "$fa_dir/baretag.log"
+_fa_run baretag "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/baretag.log" PASS
+fa_bt=$(_fa_line fmt)
+case "$fa_bt" in
+  *"1465-skip-declares"*) ok "3765-baretag-kept: a bare single-token tag with no colon is still an identifier and is still published" ;;
+  *) bad "3765-baretag-kept: a bare tag was rejected as prose — got '$fa_bt'" ;;
+esac
+# STRUCTURAL: the two free-form rules must route through pubtagged(), not pubid(tagof(...)),
+# or the first-word projection is back.
+fa_ff=$(grep -v '^[[:space:]]*#' "$fa_tool" | grep -A2 -E '\^\[\[:space:\]\]\*FAIL - |\^FAIL: ' | grep 'add("assert"')
+if [ -n "$fa_ff" ] && ! printf '%s\n' "$fa_ff" | grep -q 'pubid(tagof('; then
+  ok "3765-freeform-grammar: the FAIL - and FAIL: rules publish through pubtagged(), so an untagged payload cannot yield a first-word identity"
+else
+  bad "3765-freeform-grammar: a free-form rule still publishes pubid(tagof(...)) — the unconditional first-word projection is back (job 70)"
+fi
+
+# 55ze. ROBOREV JOB 71, two findings.
+#  (a) THE TAG DELIMITER IS A COLON FOLLOWED BY WHITESPACE, never a bare colon. Accepting any
+#      colon re-created the job-70 defect one shape over: `https://host/path failed` truncated
+#      at the first colon and published `https`, and `module::test: detail` published `module`,
+#      severing a namespace separator.
+printf 'FAIL - https://host/path failed to clone\n' > "$fa_dir/tagurl.log"
+_fa_run tagurl "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/tagurl.log" PASS
+fa_tu=$(_fa_line fmt)
+case "$fa_tu" in
+  *"(assert): https"*) bad "3765-tag-delim-url: URL-leading prose published 'https' as the identity ($fa_tu) — a bare colon is being read as a tag delimiter (job 71)" ;;
+  *"<no identifier in the failure text"*) ok "3765-tag-delim-url: URL-leading prose is untagged and reports no identifier — a colon inside :// is not a delimiter" ;;
+  *) bad "3765-tag-delim-url: expected the no-identifier placeholder, got '$fa_tu'" ;;
+esac
+printf 'FAIL - module::test: detail here\n' > "$fa_dir/tagns.log"
+_fa_run tagns "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/tagns.log" PASS
+fa_tn=$(_fa_line fmt)
+case "$fa_tn" in
+  *"(assert): module::test"*) ok "3765-tag-delim-ns: a namespaced tag keeps its :: separator (module::test, not module)" ;;
+  *) bad "3765-tag-delim-ns: expected 'module::test', got '$fa_tn' — :: is being severed by the delimiter scan (job 71)" ;;
+esac
+#  (b) THE PROJECT RUNS JEST AND PYTEST, and neither format had a rule, so a real failure in
+#      either published `0 RECOGNISED` — including the node-tests delta log this change only
+#      just started capturing. Both are RENDERED-field cases: each publishes a PATH, and a
+#      `/`-bearing projection needs a matching emit-boundary predicate or it is inert end to
+#      end. That coupling has been missed three times, so every such grammar is pinned here.
+printf 'FAILED tests/test_cli_parity.py::test_blob_roundtrip\n' > "$fa_dir/pyt.log"
+_fa_run pyt "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pyt.log" PASS
+fa_py=$(_fa_line fmt)
+case "$fa_py" in
+  *"pytest tests/test_cli_parity.py::test_blob_roundtrip"*)
+    ok "3765-pytest-rendered: a pytest failure NAMES its file and test in the rendered field" ;;
+  *"not extractable"*)
+    bad "3765-pytest-rendered: the pytest identity was refused at the emit boundary ($fa_py) — a /-bearing projection without a boundary predicate is inert end to end" ;;
+  *) bad "3765-pytest-rendered: expected the pytest identity, got '$fa_py'" ;;
+esac
+printf 'FAIL __test__/write-readback.test.js\n' > "$fa_dir/jst.log"
+_fa_run jst "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/jst.log" PASS
+fa_js=$(_fa_line fmt)
+case "$fa_js" in
+  *"jest-suite __test__/write-readback.test.js"*)
+    ok "3765-jest-rendered: a jest suite failure NAMES its suite file in the rendered field" ;;
+  *"not extractable"*)
+    bad "3765-jest-rendered: the jest identity was refused at the emit boundary ($fa_js) — missing boundary predicate" ;;
+  *) bad "3765-jest-rendered: expected the jest identity, got '$fa_js'" ;;
+esac
+# NEGATIVE CONTROLS for the two new grammars.
+printf 'FAILED https://x-access-token:SEKJP@h.io/p.py::t\nFAIL https://x-access-token:SEKJS@h.io/p.test.js\n' > "$fa_dir/jpurl.log"
+_fa_run jpurl "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/jpurl.log" PASS
+fa_jp=$(_fa_line fmt)
+case "$fa_jp" in
+  *SEKJP*|*SEKJS*|*"@h.io"*) bad "3765-jestpytest-no-authority: a URL-shaped jest/pytest line published an authority ('$fa_jp')" ;;
+  *) ok "3765-jestpytest-no-authority: URL-shaped jest/pytest lines publish no authority" ;;
+esac
+# THE JEST `● <test name>` LINE IS DELIBERATELY NOT A RULE: a jest test name is free-form prose,
+# and publishing it is exactly the job-70 defect. Pinned so nobody "completes" the jest support.
+if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -q '●'; then
+  ok "3765-jest-no-bullet-rule: the jest bullet line is NOT a recogniser — a jest test name is free-form prose, and publishing prose is the job-70 defect"
+else
+  bad "3765-jest-no-bullet-rule: a rule keys on the jest ● line, whose payload is free-form prose (job 70)"
+fi
+
+# 55zf. ROBOREV JOB 74 — pytest node ids. Two defects in the rule added the round before, and
+#       this repository has 123 `class Test` definitions and 36 parametrize decorators in its
+#       python suites, so both shapes are common rather than exotic.
+#  (a) A GREEDY `sub(/^.*::/)` cut at the LAST `::`, dropping the class scope, so
+#      `file.py::TestA::test_x` published as `file.py::test_x` — IDENTICAL to a module-level
+#      `test_x`, i.e. the WRONG identity, which is worse than a placeholder.
+printf 'FAILED tests/test_x.py::TestA::test_x\nFAILED tests/test_x.py::test_x\n' > "$fa_dir/pyc.log"
+_fa_run pyc "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pyc.log" PASS
+fa_pc=$(_fa_line fmt)
+case "$fa_pc" in
+  *"TestA::test_x"*)
+    ok "3765-pytest-class-scope: a class-scoped node id keeps its class segment, so it is distinguishable from a module-level test of the same name" ;;
+  *) bad "3765-pytest-class-scope: expected TestA::test_x, got '$fa_pc' — a greedy :: cut drops the class scope and publishes the WRONG identity (job 74)" ;;
+esac
+case "$fa_pc" in
+  *"2 RECOGNISED"*) ok "3765-pytest-class-distinct: the class-scoped and module-level tests count as TWO" ;;
+  *) bad "3765-pytest-class-distinct: expected 2 RECOGNISED, got '$fa_pc'" ;;
+esac
+#  (b) A PARAMETERISED id was REJECTED outright. The parameter VALUE is arbitrary text and can
+#      carry an authority, so it is replaced by a FIXED marker rather than sanitised — the same
+#      ruling as every other free-text field here — while dedup and the COUNT keep using the
+#      FULL node id, so two parameter cases stay two failures.
+printf 'FAILED tests/test_x.py::test_x[a]\nFAILED tests/test_x.py::test_x[b]\n' > "$fa_dir/pyp.log"
+_fa_run pyp "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pyp.log" PASS
+fa_pp=$(_fa_line fmt)
+case "$fa_pp" in
+  *"2 RECOGNISED"*"test_x[...]"*)
+    ok "3765-pytest-param: parameterised ids publish a FIXED [...] marker and still COUNT as two" ;;
+  *"not extractable"*)
+    bad "3765-pytest-param: an ordinalised parameterised pair was refused at the emit boundary ($fa_pp) — the trailing #<n> ordinal is outside every path grammar and must be stripped before matching (job 74)" ;;
+  *) bad "3765-pytest-param: expected 2 RECOGNISED with a [...] marker, got '$fa_pp'" ;;
+esac
+printf 'FAILED tests/test_x.py::test_x[https://x-access-token:SEKPARAM@h.io/p]\n' > "$fa_dir/pypu.log"
+_fa_run pypu "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pypu.log" PASS
+fa_ppu=$(_fa_line fmt)
+case "$fa_ppu" in
+  *SEKPARAM*|*"@h.io"*) bad "3765-pytest-param-no-authority: a parameter VALUE carrying an authority reached the field ('$fa_ppu')" ;;
+  *"test_x[...]"*) ok "3765-pytest-param-no-authority: a parameter value carrying an authority is replaced wholesale by the fixed marker" ;;
+  *) bad "3765-pytest-param-no-authority: expected the [...] marker, got '$fa_ppu'" ;;
+esac
+# STRUCTURAL: the ordinal must be stripped ONCE at the boundary call site, not per predicate,
+# so a fifth path grammar inherits it rather than re-discovering this defect.
+fa_ob=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE")
+if printf '%s\n' "$fa_ob" | grep -q 'fa_ord=${fa_probe##\*#}' \
+   && printf '%s\n' "$fa_ob" | grep -q '_failassert_is_doctest_id "$fa_probe"'; then
+  ok "3765-ordinal-stripped-once: the trailing ordinal is stripped once at the boundary call site and every path grammar is matched against the stripped value"
+else
+  bad "3765-ordinal-stripped-once: the ordinal is not stripped before the path grammars are consulted — an ordinalised pair renders not extractable (job 74)"
+fi
+# And the greedy-cut shape is pinned structurally, since it published a WRONG identity rather
+# than a placeholder, which no charset or shape check downstream can detect.
+if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -q 'sub(/\^\.\*::/'; then
+  ok "3765-pytest-no-greedy-cut: the pytest rule does not use a greedy ^.*:: cut, so the class scope survives"
+else
+  bad "3765-pytest-no-greedy-cut: a greedy ^.*:: cut is back — it drops the class scope and publishes the identity of a DIFFERENT test (job 74)"
+fi
+
+# 55zg. ROBOREV JOB 75, three findings.
+#  (a) A PARAMETER VALUE MAY CONTAIN SPACES, so the pytest node id does not end at the first
+#      whitespace: `test_x[a one]` and `test_x[a two]` both truncated to `test_x[a`, which
+#      BOTH undercounted (one identity instead of two) and published a placeholder.
+printf 'FAILED tests/t.py::test_x[a one]\nFAILED tests/t.py::test_x[a two]\n' > "$fa_dir/pysp.log"
+_fa_run pysp "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pysp.log" PASS
+fa_sp=$(_fa_line fmt)
+case "$fa_sp" in
+  *"2 RECOGNISED"*"test_x[...]"*)
+    ok "3765-pytest-param-spaces: parameter values containing spaces stay TWO distinct failures and publish the fixed marker" ;;
+  *) bad "3765-pytest-param-spaces: expected 2 RECOGNISED with the [...] marker, got '$fa_sp' — the node id is being cut at the first whitespace (job 75)" ;;
+esac
+# pytest short-summary appends ` - <message>`; the node id ends there, not at a space inside [].
+printf 'FAILED tests/t.py::test_x[a one] - AssertionError: boom\n' > "$fa_dir/pymsg.log"
+_fa_run pymsg "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pymsg.log" PASS
+fa_pm=$(_fa_line fmt)
+case "$fa_pm" in
+  *AssertionError*|*boom*) bad "3765-pytest-msg-dropped: the pytest failure MESSAGE reached the field ('$fa_pm') — only the node id is an identity" ;;
+  *"test_x[...]"*) ok "3765-pytest-msg-dropped: the ` - <message>` suffix is dropped and only the node id is published" ;;
+  *) bad "3765-pytest-msg-dropped: expected the node id, got '$fa_pm'" ;;
+esac
+#  (b) UNITTEST: `FAIL: <method> (<dotted.qualname>)` is the format the delivery-telemetry
+#      component produces, and A2 correctly rejected it as untagged prose — so the field
+#      reported a recognised failure while naming no test at all.
+printf 'FAIL: test_method (module.Class.test_method)\n' > "$fa_dir/ut.log"
+_fa_run ut "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/ut.log" PASS
+fa_ut=$(_fa_line fmt)
+case "$fa_ut" in
+  *"unittest module.Class.test_method"*)
+    ok "3765-unittest-named: a unittest failure publishes its dotted qualified name" ;;
+  *"<no identifier"*)
+    bad "3765-unittest-named: a unittest failure still names no test ($fa_ut) — job 75" ;;
+  *) bad "3765-unittest-named: expected the unittest qualified name, got '$fa_ut'" ;;
+esac
+#  (c) THE PATH GRAMMARS MUST REQUIRE A NORMALISED REPO-RELATIVE PATH. They admitted a leading
+#      slash and `..`, so an absolute or traversal-shaped RUNTIME path could be published —
+#      exactly what job 69 established must not reach a pasted summary.
+printf 'test /etc/shadow - item (line 10) ... FAILED\n' > "$fa_dir/absp.log"
+_fa_run absp "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/absp.log" PASS
+fa_ap=$(_fa_line fmt)
+case "$fa_ap" in
+  *"/etc/shadow"*) bad "3765-path-absolute-refused: an ABSOLUTE path was published ('$fa_ap') — the path grammars must require a normalised repo-relative path (job 75)" ;;
+  *) ok "3765-path-absolute-refused: an absolute path does not satisfy any path grammar" ;;
+esac
+printf 'shell-selftest: ../../outside/x.sh FAIL\n' > "$fa_dir/trav.log"
+_fa_run trav "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/trav.log" PASS
+fa_tv=$(_fa_line fmt)
+case "$fa_tv" in
+  *".."*) bad "3765-path-traversal-refused: a traversal-shaped path was published ('$fa_tv')" ;;
+  *) ok "3765-path-traversal-refused: a `..` component does not satisfy any path grammar" ;;
+esac
+# STRUCTURAL: ONE shared normalisation on each side, so a fifth path grammar inherits it rather
+# than re-deriving the rule (and getting it wrong in a new place).
+if grep -q 'function relpath_ok(p)' "$fa_tool" \
+   && [ "$(grep -c 'relpath_ok(' "$fa_tool")" -ge 5 ]; then
+  ok "3765-path-one-normaliser-extractor: every extractor path projection shares one relpath_ok()"
+else
+  bad "3765-path-one-normaliser-extractor: the path projections do not share one normalisation — a fifth grammar would re-derive it"
+fi
+if grep -q '_failassert_relpath_ok()' "$GATE" \
+   && [ "$(grep -c '_failassert_relpath_ok "' "$GATE")" -ge 4 ]; then
+  ok "3765-path-one-normaliser-boundary: every boundary path predicate shares one _failassert_relpath_ok"
+else
+  bad "3765-path-one-normaliser-boundary: the boundary predicates do not share one normalisation"
+fi
+
+# 55zh. ROBOREV JOB 77, two findings.
+#  (a) A PARAMETERISED pytest id can contain ` - ` INSIDE its brackets, so the short-summary
+#      separator is the first one at BRACKET DEPTH ZERO. Cutting at the first occurrence
+#      truncated `test_x[a - one]` and `test_x[a - two]` to the same prefix: ONE identity
+#      instead of two, published as a placeholder.
+printf 'FAILED tests/t.py::test_x[a - one]\nFAILED tests/t.py::test_x[a - two]\n' > "$fa_dir/pydash.log"
+_fa_run pydash "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pydash.log" PASS
+fa_pd=$(_fa_line fmt)
+case "$fa_pd" in
+  *"2 RECOGNISED"*) ok "3765-pytest-dash-in-param: a ` - ` inside a parameter id is not the message separator — the two ids stay two failures" ;;
+  *) bad "3765-pytest-dash-in-param: expected 2 RECOGNISED, got '$fa_pd' — the separator is being found inside the brackets (job 77)" ;;
+esac
+# CONTROL: a REAL trailing message must still be dropped, so the depth-zero rule did not simply
+# stop finding the separator at all.
+_fa_run pydash2 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pymsg.log" PASS
+fa_pd2=$(_fa_line fmt)
+case "$fa_pd2" in
+  *AssertionError*|*boom*) bad "3765-pytest-dash-control: the trailing message survived ('$fa_pd2') — the depth-zero separator scan stopped finding a real separator" ;;
+  *) ok "3765-pytest-dash-control: a real ` - <message>` suffix is still dropped" ;;
+esac
+#  (b) THIS REPOSITORY CONFIGURES TWO NAMED JEST PROJECTS (bindings/node/jest.config.js), so
+#      jest 29 emits `FAIL default <path>` and `FAIL leaks <path>` — neither of which the bare
+#      `FAIL <path>` form matched, so a real jest failure was named not at all. The path is
+#      located by EXTENSION, not position, because jest also appends a ` (5.123 s)` suffix.
+printf 'FAIL default __test__/w.test.js\n' > "$fa_dir/jproj.log"
+_fa_run jproj "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/jproj.log" PASS
+fa_jp1=$(_fa_line fmt)
+case "$fa_jp1" in
+  *"jest-suite __test__/w.test.js"*) ok "3765-jest-project-name: a project-qualified jest FAIL line names its suite" ;;
+  *) bad "3765-jest-project-name: expected the jest suite identity, got '$fa_jp1' — the project display name is not accepted (job 77)" ;;
+esac
+printf 'FAIL leaks __test__/leak-paths.test.js (5.123 s)\n' > "$fa_dir/jtime.log"
+_fa_run jtime "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/jtime.log" PASS
+fa_jp2=$(_fa_line fmt)
+case "$fa_jp2" in
+  *"jest-suite __test__/leak-paths.test.js"*) ok "3765-jest-timing-suffix: a project name AND a timing suffix both present — the path is found by extension, not position" ;;
+  *) bad "3765-jest-timing-suffix: expected the jest suite identity, got '$fa_jp2'" ;;
+esac
+# The BARE form must still work — the project name is OPTIONAL, not required.
+_fa_run jplain "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/jst.log" PASS
+fa_jp3=$(_fa_line fmt)
+case "$fa_jp3" in
+  *"jest-suite __test__/write-readback.test.js"*) ok "3765-jest-bare-still-works: the unqualified `FAIL <path>` form still names its suite" ;;
+  *) bad "3765-jest-bare-still-works: the bare jest form regressed — got '$fa_jp3'" ;;
+esac
+
+# CODE lines only: the digest note NAMES those binaries while explaining why it does not use
+# them, and a scan over the comments would read that explanation as the defect.
+if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -qE '(sha256sum|md5sum|cksum|openssl dgst)'; then
+  ok "3765-digest-no-shellout: the digest is computed in awk — no per-line shell-out to a hashing binary"
+else
+  bad "3765-digest-no-shellout: the extractor shells out to a hashing binary — that is a process per recognised line on a log full of long lines"
+fi
+# NO OVERCLAIM, and the reader has to be able to see it: this is a pair of rolling
+# polynomial checksums, so the file must SAY it is not a cryptographic hash and must state
+# the residual (a collision is CONSTRUCTIBLE; an accidental one is not realistic). This
+# repository has already paid two findings for a strength a mechanism cannot deliver.
+if grep -q 'NOT A CRYPTOGRAPHIC HASH' "$fa_tool" \
+   && grep -qi 'can be CONSTRUCTED' "$fa_tool" \
+   && grep -qi 'ACCIDENTAL' "$fa_tool"; then
+  ok "3765-digest-declared-strength: the extractor states at the mechanism that the digest is NOT cryptographic, and states the residual in both directions (constructible vs accidental)"
+else
+  bad "3765-digest-declared-strength: the extractor does not declare the digest strength and its residual where a reader of key() will see it — an implied guarantee this code cannot deliver has already cost this PR two findings"
+fi
+# The memory half must not regress (that is F12): an oversize key stays two bounded windows
+# plus the length plus the digest, and NEVER the whole identity.
+fa_key_body=$(awk '/^  function key\(/,/^  }/' "$fa_tool" | grep -v '^[[:space:]]*#')
+if printf '%s\n' "$fa_key_body" | grep -q 'substr(t, 1, 1024)' \
+   && printf '%s\n' "$fa_key_body" | grep -q 'substr(t, L - 1023)' \
+   && [ "$(printf '%s\n' "$fa_key_body" | grep -c 'return t')" = 1 ]; then
+  ok "3765-digest-memory-bounded: an oversized key is still two 1024-char windows + the exact length + the digest (the only unbounded 'return t' is the <= 4096 short-circuit) — F12 intact"
+else
+  bad "3765-digest-memory-bounded: key() no longer bounds what it retains for an oversized identity — the digest must be ADDED to the bound, never replace it (F12)"
+fi
+
+# 55af. BLOCKER 14 (roborev job 50): `.result` IS THE PUBLICATION, SO IT IS WRITTEN LAST OF
+#       THE THREE. record_result wrote `.result` on its FIRST line and the failed-assert
+#       sidecar 20 lines later, while the tree-integrity BOUNDARY renderer discovers
+#       components by globbing "$LOG_DIR"/*.result — from a DIFFERENT lane. So a main-lane
+#       boundary failure could observe a side lane's published verdict whose `.failassert`
+#       sidecar did not exist YET, terminate the gate, and render that FAIL row as
+#       `not recorded (no extraction ran for this FAIL line)`: an ABSENCE published as a
+#       MEASUREMENT — this issue's own core rule, broken by a race.
+#
+#       STRUCTURAL, AND LABELLED AS SUCH rather than dressed up as behavioural: the race
+#       needs two lanes interleaved inside one function, which is not controllable from a
+#       test. The behavioural half that IS available — a FAIL row rendered through the
+#       boundary path carrying the REAL failed-assert value, with the sidecar complete
+#       before `.result` — is `3765-boundary-failassert` in
+#       scripts/tests/test_agent_gate_tree_integrity.sh, which has the fixture repo.
+fa_rr_body=$(awk '/^record_result\(\) \{ #/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
+fa_rr_res=$(printf '%s\n' "$fa_rr_body" | grep -n '\.result"$' | head -1 | cut -d: -f1)
+fa_rr_fa=$(printf '%s\n' "$fa_rr_body" | grep -n '_failassert_record' | head -1 | cut -d: -f1)
+fa_rr_fm=$(printf '%s\n' "$fa_rr_body" | grep -n '_fm_note_if_no_cargo_observed' | head -1 | cut -d: -f1)
+fa_rr_si=$(printf '%s\n' "$fa_rr_body" | grep -n '_assert_summary_integrity' | head -1 | cut -d: -f1)
+fa_rr_ti=$(printf '%s\n' "$fa_rr_body" | grep -n '_assert_tree_integrity' | head -1 | cut -d: -f1)
+fa_rr_hb=$(printf '%s\n' "$fa_rr_body" | grep -n '_hb_ensure' | head -1 | cut -d: -f1)
+if [ -n "$fa_rr_res" ] && [ -n "$fa_rr_fa" ] && [ -n "$fa_rr_fm" ] && [ -n "$fa_rr_si" ] \
+   && [ -n "$fa_rr_ti" ] && [ -n "$fa_rr_hb" ]; then
+  if [ "$fa_rr_res" -gt "$fa_rr_fa" ] && [ "$fa_rr_res" -gt "$fa_rr_fm" ]; then
+    ok "3765-record-order-sidecars-first: STRUCTURAL — record_result writes .result AFTER both per-component sidecars (feature matrix, failed-assert), so a concurrent lane can never observe a published verdict whose sidecar is not written yet (blocker 14)"
+  else
+    bad "3765-record-order-sidecars-first: STRUCTURAL — record_result publishes .result (line $fa_rr_res of its body) BEFORE a sidecar write (fm $fa_rr_fm, failassert $fa_rr_fa): a boundary renderer in another lane can then render that FAIL row as 'not recorded', which is an absence reported as a measurement (blocker 14)"
+  fi
+  if [ "$fa_rr_res" -lt "$fa_rr_si" ] && [ "$fa_rr_res" -lt "$fa_rr_ti" ]; then
+    ok "3765-record-order-integrity-last: STRUCTURAL — .result is still published BEFORE the two integrity asserts, either of which may emit the terminal block and exit, so this component still appears in that block"
+  else
+    bad "3765-record-order-integrity-last: STRUCTURAL — .result is written at or after an integrity assert (summary $fa_rr_si, tree $fa_rr_ti), so a boundary-terminated run drops this component from its own table"
+  fi
+  # ONLY the property #3473 states, and no more: `_hb_ensure` precedes the SLOW work (the
+  # sidecar write, the extractor scan, the two git-touching asserts). Deliberately NOT
+  # compared against the `.result` write — that write is neither slow nor a verdict #3473
+  # cares about, and asserting an order it never claimed would red on correct code.
+  if [ "$fa_rr_hb" -lt "$fa_rr_fm" ] && [ "$fa_rr_hb" -lt "$fa_rr_fa" ] \
+     && [ "$fa_rr_hb" -lt "$fa_rr_si" ]; then
+    ok "3765-record-order-hb-first: STRUCTURAL — _hb_ensure still runs first, before any slow work; #3473's reason for that is untouched by the reorder (and it publishes no verdict, so it cannot be observed as one)"
+  else
+    bad "3765-record-order-hb-first: STRUCTURAL — _hb_ensure no longer precedes the sidecar/extractor work, so a dead beater under a healthy gate reads as STALLED (#3473)"
+  fi
+  if [ "$(printf '%s\n' "$fa_rr_body" | grep -c '\.result"$')" = 1 ]; then
+    ok "3765-record-order-one-publication: STRUCTURAL — record_result publishes .result exactly ONCE; an earlier duplicate write would restore the race while the later write looks correct"
+  else
+    bad "3765-record-order-one-publication: STRUCTURAL — record_result writes .result more than once, so the EARLIEST write is the one a concurrent reader sees (blocker 14)"
+  fi
+else
+  bad "3765-record-order-scope: could not locate record_result's statements (result=$fa_rr_res fa=$fa_rr_fa fm=$fa_rr_fm si=$fa_rr_si ti=$fa_rr_ti hb=$fa_rr_hb) — this section must red with a named cause rather than pass vacuously"
+  bad "3765-record-order-scope: (see above)"
+  bad "3765-record-order-scope: (see above)"
+  bad "3765-record-order-scope: (see above)"
+fi
+# The --lite-aggregate-selftest seed must MIRROR that order, or the fixture the behavioural
+# failed-assert cases run through models an order production no longer takes.
+fa_seed_body=$(awk '/for _pair in \$\{AGENT_GATE_TEST_LITE_RESULTS/,/^  done/' "$GATE" | grep -v '^[[:space:]]*#')
+fa_seed_fa=$(printf '%s\n' "$fa_seed_body" | grep -n '_failassert_record' | head -1 | cut -d: -f1)
+fa_seed_res=$(printf '%s\n' "$fa_seed_body" | grep -n '\.result"' | head -1 | cut -d: -f1)
+if [ -n "$fa_seed_fa" ] && [ -n "$fa_seed_res" ] && [ "$fa_seed_res" -gt "$fa_seed_fa" ]; then
+  ok "3765-record-order-selftest-mirrors: STRUCTURAL — the --lite-aggregate-selftest seed also writes the sidecar before .result, so the fixture cannot certify an ordering production does not take"
+else
+  bad "3765-record-order-selftest-mirrors: STRUCTURAL — the --lite-aggregate-selftest seed publishes .result before the sidecar (fa=${fa_seed_fa:-<none>} result=${fa_seed_res:-<none>}), which models the pre-blocker-14 order"
+fi
+
+# 55za. NO SECOND FORMATTER, INCLUDING ON THE TREE-INTEGRITY BOUNDARY BLOCK (roborev job
+#       48, blocker 9). Both component loops in _tree_boundary_meta_lines rendered their
+#       rows with a bare `printf '%-18s %s (%ss)\n'`, bypassing _fm_summary_line — so a FAIL
+#       row published from a mid-run mutation carried NEITHER the labelled `[invocation: …]`
+#       bracket NOR this issue's `failed-assert:` field, on the ONE block a reader reaches
+#       after a mutation. `%-18s` may appear exactly once in the gate: inside the renderer.
+#       (The behavioural half — a real boundary FAIL row carrying both — is in
+#       scripts/tests/test_agent_gate_tree_integrity.sh, which has the fixture repo.)
+# COMMENT-BLIND (`^[^#]*`), for the reason the #3625 guard states about its own needle: a
+# comment QUOTING the format — the boundary loops now carry two, explaining this very defect —
+# must not be counted, or an artifact DESCRIBING the rule becomes a violation of it.
+fa_raw_rows=$(grep -cE "^[^#]*printf '%-18s" "$GATE")
+if [ "${fa_raw_rows:-0}" = 1 ]; then
+  ok "3765-boundary-one-formatter: exactly one site in the gate formats a component row (_fm_summary_line) — the tree-integrity boundary loops render through it too"
+else
+  bad "3765-boundary-one-formatter: $fa_raw_rows site(s) format a '%-18s' component row (expected exactly 1) — a second formatter renders a block without the invocation bracket and without the failed-assert field"
+fi
+
+# 55t/55u. STRUCTURAL, and labelled as such: the --delta node-tests runner must keep its jest
+#          log inside a PRIVATE mktemp -d and must delete that DIRECTORY. #3765 routed that
+#          log through _failassert_record, which strips it through _ansi_stripped_log, and the
+#          stripper writes a DERIVED `<log>.ansi-stripped` SIBLING beside it — so a bare
+#          "${TMPDIR:-/tmp}" log plus `rm -f "$log"` leaks normalised test output into a
+#          world-writable directory on every delta run that reaches the runner, and leaves a
+#          window in which a peer on the same box can pre-place that sibling as a symlink for
+#          the sed to follow. Structural because the behavioural proof needs a built node
+#          module and a jest run, which this suite deliberately does not have; the property
+#          asserted is the one a future edit would silently undo.
+# CODE lines only: the runner's own comment names the old `rm -f` idiom while explaining why
+# it was wrong, and a scan over the comments would read that explanation as the defect.
+fa_nd_body=$(awk '/^run_delta_node_tests\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
+# THE MECHANISM CHANGED AND THE PROPERTY DID NOT (#3625 merge). #3765 put this jest log in a
+# private `mktemp -d` that the runner owned and deleted; main then moved it to
+# "$LOG_DIR/node-tests.log" so the census can read jest's own tally and so the log joins the
+# `logs:` bundle. $LOG_DIR is ITSELF a 0700 `mktemp -d`, so the derived `<log>.ansi-stripped`
+# sibling is neither guessable nor creatable by a peer and never reaches a world-writable
+# directory — the same property, by a better mechanism, with no tmpdir for this runner to own.
+# So the assertion is the PROPERTY: the log must NOT be a bare file in the shared tmp.
+if printf '%s\n' "$fa_nd_body" | grep -q 'log="\$LOG_DIR/node-tests.log"' \
+   && ! printf '%s\n' "$fa_nd_body" | grep -qE 'mktemp "?\$\{TMPDIR'; then
+  ok "3765-nodedelta-privdir: run_delta_node_tests keeps its jest log in \$LOG_DIR (itself a 0700 mktemp -d), never a bare file in the shared tmp — so the derived .ansi-stripped sibling cannot leak or be pre-placed"
+else
+  bad "3765-nodedelta-privdir: run_delta_node_tests does not keep its jest log in \$LOG_DIR — a bare \${TMPDIR:-/tmp} log leaks the .ansi-stripped sibling into a world-writable directory and gives a peer a symlink window (#3765)"
+fi
+# And there must be NOTHING to clean up: a runner that deletes this log would destroy the
+# evidence the census and the logs: bundle now depend on, and re-create the ownership problem.
+if ! printf '%s\n' "$fa_nd_body" | grep -qE 'rm -(f|rf) "\$(log|tmpd)"'; then
+  ok "3765-nodedelta-cleanup: the runner deletes nothing — the log lives in the run directory, so there is no sibling to strand and no tmpdir to own"
+else
+  bad "3765-nodedelta-cleanup: the runner still deletes its log or tmpdir — under \$LOG_DIR that discards the census subject and the logs: bundle evidence (#3625 x #3765)"
 fi
 
 # TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
@@ -5211,6 +7051,73 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
+# 514 -> 526 on #3765 (roborev job 50, blockers 14/15): sections 55ae/55af add 12 asserts.
+# 55ae (7) pins blocker 15: two EQUAL-LENGTH oversized identities differing only in the
+# MIDDLE count as 2 and render as two (the behavioural half — it counted 1 before), plus
+# STRUCTURAL asserts that the digest covers the FULL identity, that key() carries it, that
+# nothing shells out per line, that the file DECLARES the digest is not cryptographic and
+# states its residual, and that the memory bound of F12 is intact. 55af (5) pins blocker 14
+# STRUCTURALLY — the ordering invariant inside record_result (.result published after both
+# sidecars, before both integrity asserts, _hb_ensure still first, exactly one publication)
+# plus the selftest seed mirroring it — because the race needs two lanes interleaved inside
+# one function, which no test can drive; the behavioural half is 3765-boundary-failassert in
+# test_agent_gate_tree_integrity.sh. Host-INDEPENDENT (bash + awk + the extractor + a source
+# scan of the gate), so the same "raise by exactly the number added" rule applies and the
+# slack stays 10.
+#
+# 492 -> 514 on #3765 (roborev job 49, blockers 11/12/13): sections 55ab/55ac/55ad add 22
+# asserts and 55y/55aa are re-pointed at the new invariants. 55ab (14) pins that EVERY tier
+# publishes an IDENTIFIER and not its payload — the two shapes the neutraliser measurably
+# cannot see (`api_key SEKRET`, a bare token) in the DETAIL position, a non-secret detail
+# token (so the case cannot pass for a sanitiser), the out-of-charset tag refusal, the
+# guard label+verdict projection, and nextest's test-path-not-package projection. 55ac (4)
+# pins blocker 13: an over-long guard label is COUNTED with a bounded placeholder, the
+# field never reads `0 RECOGNISED` for a line a recogniser matched, and the GUARD tier
+# still wins on a mixed log (the half a count-only case cannot see). 55ad (3) pins
+# blocker 12: bounding the dedup key before retention did not cost distinctness, the bound
+# does not leak into the published value, and 200 oversized identities are counted exactly.
+# Slack stays 10, for the reason the paragraph above gives.
+#
+# 470 -> 492 on #3765 (roborev round 5, blocker 10): section 55aa adds 22 asserts — 8
+# behavioural probes on TOOLCHAIN-ONLY fixtures (the lead's four measured survivors: a
+# space-separated `api_key SEKRET`, a bare unmarked secret, and the two keyed forms that
+# did neutralise), each asserting BOTH no-leak AND the affirmative label+withheld-text
+# statement; 1 that the projection did not corrupt the COUNT (4 identities, 2 kinds,
+# remainder declared); 8 that the neutraliser is RETAINED and still fires on the `assert`
+# tier, whose payload is repo-authored and is still published; and 5 STRUCTURAL ones
+# pinning the mechanism (every toolchain recogniser passes a label literal, no two-argument
+# toolchain add(), the projection is one expression, the dedup key is still the full
+# identity, and the gate refuses a non-label toolchain name on the OUTPUT path).
+# Host-INDEPENDENT for the same reason as the rest of section 55.
+# 458 -> 470 on #3765 (roborev job 48, blockers 7/8/9): section 55z adds 12 asserts — 6
+# behavioural leak cases the REDACTOR cannot see (a query string, a header form, a
+# credential straddling the extractor safety bound, each with its placeholder), 2 survivals
+# (a path, and the motivating instance), and 4 STRUCTURAL ones covering EVERY bound rather
+# than the one that leaked (one neutralisation call before the redaction; every truncating
+# construct after both; no character-cut in the extractor; exactly one component-row
+# formatter in the gate). Host-INDEPENDENT for the same reason as the rest of section 55.
+# 447 -> 458 on #3765 (roborev job 46, blocker 6): sections 55x/55y add 4 asserts for a
+# credential SPANNING the display boundary (55w certified only the safe side of it) and 4
+# STRUCTURAL asserts pinning the order normalise -> redact -> bound-for-display, plus 2
+# that pin the extractor as emitting UNTRUNCATED identities, plus 1 pinning the mode
+# token as literal-only at every call site.
+# 442 -> 447 on #3765 (roborev job 45): section 55w adds 5 asserts for the credential
+# redaction at the field's one emit boundary, host-INDEPENDENT for the same reason as the
+# rest of section 55 (bash + the --lite-aggregate-selftest hook + the extractor script),
+# so the same "raise by exactly the number added" rule applies.
+# 438 -> 442 on #3765 (roborev job 45): section 55v adds 4 asserts for the shared-tag
+# A1 collapse (the truncate-before-dedup defect surviving one level below add()), all
+# host-INDEPENDENT for the same reason as the rest of section 55, so the same "raise by
+# exactly the number added" rule applies and the ~9 margin is preserved.
+# 430 -> 436 on #3765 (fix round): sections 55r/55s add 6 asserts for the prefix-collision
+# dedup regression, host-INDEPENDENT for the same reason (bash + awk + the extractor and
+# the --lite-aggregate-selftest hook), so the same "raise by exactly the number added"
+# rule applies and the ~9 margin is preserved.
+# 410 -> 430 on #3765: section 55 adds 20 asserts, host-INDEPENDENT for the same reason
+# (bash plus --lite-aggregate-selftest/--emit-summary-selftest and the extractor script; no
+# cargo, python3, jq, network or datasets), so the same "raise by exactly the number added"
+# rule applies and the ~9 margin is preserved. #3544's lesson: a green tally over a shrunken
+# suite is a false certification, so the floor RISES with the suite rather than staying put.
 # 405 -> 410 on #3453 (Phase B): section 54 adds 5 asserts, host-INDEPENDENT for the same
 # reason (bash plus --emit-summary-selftest; no cargo/python3/jq/network/datasets), so the
 # same "raise by exactly the number added" rule applies and the ~9 margin is preserved.
@@ -5221,7 +7128,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=410
+ASSERT_FLOOR=587
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

@@ -1219,19 +1219,19 @@ tree-start: <head-sha12> dirty: yes|no digest: <digest12>
 tree-end:   <head-sha12> dirty: yes|no digest: <digest12>
 tree-integrity: PASS
 census: <A>/<N> components AFFIRMED a count; <G> DECLARED-GAP (RECOGNISED); <U> NOT-MEASURED (RECOGNISED); <Z> measured-ZERO (RECOGNISED); <X> not-applicable (component did not PASS); <Y> no-subject (PASSed; the run had nothing to measure); <D> UNDECLARED; <W> unrecognised; <V> row(s) carry a VACUOUS status. NON-EXHAUSTIVE: the gap set is CURATED, so an unaffirmed component is UNMEASURED, never verified (#3625; the remaining gaps are tracked in #3162).
-fmt:               PASS|FAIL|VACUOUS (<Ns>)  [fmt workspace features=n/a]  {no census — cargo fmt --all --check emits no per-file tally to count}
-clippy:            PASS|FAIL|VACUOUS (<Ns>)  [clippy workspace(excl 5) --all-features | clippy cqlite-core --features 33:all-compression,arrow,bench-internals,+30 more | ...]  {no census — cargo clippy emits a per-crate tally only COLD; a warm run prints Finished alone}
-core-tests:        PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-core --features cli-helpers]  {verified: <n> tests passed (across <k> result line(s))}
-format-compat:     PASS|FAIL|VACUOUS (<Ns>)  [test format-compatibility-tests default-features]  {verified: 10 tests passed (across 1 result line(s))}
-integration-tests: PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-integration-tests default-features x2]  {verified: <n> tests passed and <k> test binaries built/verified}
-write-tests:       PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-core --features write-support x3]  {verified: <n> tests passed (across <k> result line(s))}
-cli-tests:         PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-cli default-features | test cqlite-cli --features write-support]  {verified: <n> tests passed (across <k> result line(s))}
-minimal-build:     PASS|FAIL|VACUOUS (<Ns>)  [build cqlite-core --no-default-features --features all-compression | test cqlite-core --no-default-features --features all-compression]  {verified: <n> test binaries built/verified}
-all-features-check: PASS|FAIL|VACUOUS (<Ns>)  [check cqlite-core --all-features | clippy cqlite-core --all-features]  {no census — cargo check/clippy passes execute no tests; the subject is a feature set, not a count}
-pub-surface:       PASS|FAIL|VACUOUS (<Ns>)  [no-cargo]  {no census — shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)}
-python-bindings:   PASS|SKIP (<Ns>)  [via maturin: feature set NOT observed]  {verified: <n> pytest tests passed}
-tooling-tests:     FAIL (<Ns>)  [test ws0-corpus-gen default-features | + cargo not observable: cargo may run inside ~60 nested test scripts (child processes)]  {no census: component ended FAIL, so there is no PASS to affirm}
-smoke:             PASS|FAIL|VACUOUS (<Ns>)  [build cqlite-cli default-features]  {no census — smoke-test-all-tables.sh prints no machine-readable table count (#3162)}
+fmt:               PASS|FAIL|VACUOUS (<Ns>)  [invocation: fmt workspace features=n/a]  {no census — cargo fmt --all --check emits no per-file tally to count}
+clippy:            PASS|FAIL|VACUOUS (<Ns>)  [invocation: clippy workspace(excl 5) --all-features | clippy cqlite-core --features 33:all-compression,arrow,bench-internals,+30 more | ...]  {no census — cargo clippy emits a per-crate tally only COLD; a warm run prints Finished alone}
+core-tests:        PASS|FAIL|VACUOUS (<Ns>)  [invocation: test cqlite-core --features cli-helpers]  {verified: <n> tests passed (across <k> result line(s))}
+format-compat:     PASS|FAIL|VACUOUS (<Ns>)  [invocation: test format-compatibility-tests default-features]  {verified: 10 tests passed (across 1 result line(s))}
+integration-tests: PASS|FAIL|VACUOUS (<Ns>)  [invocation: test cqlite-integration-tests default-features x2]  {verified: <n> tests passed and <k> test binaries built/verified}
+write-tests:       PASS|FAIL|VACUOUS (<Ns>)  [invocation: test cqlite-core --features write-support x3]  {verified: <n> tests passed (across <k> result line(s))}
+cli-tests:         PASS|FAIL|VACUOUS (<Ns>)  [invocation: test cqlite-cli default-features | test cqlite-cli --features write-support]  {verified: <n> tests passed (across <k> result line(s))}
+minimal-build:     PASS|FAIL|VACUOUS (<Ns>)  [invocation: build cqlite-core --no-default-features --features all-compression | test cqlite-core --no-default-features --features all-compression]  {verified: <n> test binaries built/verified}
+all-features-check: PASS|FAIL|VACUOUS (<Ns>)  [invocation: check cqlite-core --all-features | clippy cqlite-core --all-features]  {no census — cargo check/clippy passes execute no tests; the subject is a feature set, not a count}
+pub-surface:       PASS|FAIL|VACUOUS (<Ns>)  [invocation: no-cargo]  {no census — shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)}
+python-bindings:   PASS|SKIP (<Ns>)  [invocation: via maturin: feature set NOT observed]  {verified: <n> pytest tests passed}
+tooling-tests:     FAIL (<Ns>)  [invocation: test ws0-corpus-gen default-features | + cargo not observable: cargo may run inside ~60 nested test scripts (child processes)]  {no census: component ended FAIL, so there is no PASS to affirm}  failed-assert: 1 RECOGNISED (assert): 1465-skip-declares
+smoke:             PASS|FAIL|VACUOUS (<Ns>)  [invocation: build cqlite-cli default-features]  {no census — smoke-test-all-tables.sh prints no machine-readable table count (#3162)}
 logs: /tmp/agent-gate.<random>
 summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PASS
@@ -1250,13 +1250,96 @@ tree-end:   <head-sha12> dirty: yes|no digest: <digest12>
 tree-integrity: PASS
 mode: PARTIAL (--only fmt,clippy) - does NOT count as the gate
 census: <A>/<N> components AFFIRMED a count; <G> DECLARED-GAP (RECOGNISED); ... (as above)
-fmt:               PASS (<Ns>)  [fmt workspace features=n/a]  {no census — cargo fmt --all --check emits no per-file tally to count}
-clippy:            PASS (<Ns>)  [clippy workspace(excl 5) --all-features | ...]  {no census — cargo clippy emits a per-crate tally only COLD; a warm run prints Finished alone}
+fmt:               PASS (<Ns>)  [invocation: fmt workspace features=n/a]  {no census — cargo fmt --all --check emits no per-file tally to count}
+clippy:            PASS (<Ns>)  [invocation: clippy workspace(excl 5) --all-features | ...]  {no census — cargo clippy emits a per-crate tally only COLD; a warm run prints Finished alone}
 logs: /tmp/agent-gate.<random>
 summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PARTIAL
 ==== END AGENT-GATE SUMMARY ====
 ```
+
+### A FAIL line NAMES the failing assert, and the bracket is LABELLED (#3765)
+
+The #3453 bracket used to render **unlabelled**, and it is test-SHAPED:
+
+```
+tooling-tests:  FAIL (1149s)  [test ws0-corpus-gen default-features | + cargo not observable: ...]
+```
+
+A reader identifies `ws0-corpus-gen` as the failing test. It is not — the real assert,
+`FAIL - 1465-skip-declares: ...`, lived only in the component log, which this doctrine
+forbids an agent to read while *also* requiring a flake citation to match the **assert**
+rather than the component. Those two rules were unsatisfiable for a failing component, and
+that cost a real round: a coordination lead refused a lane's correct flake attribution
+because the bracket "named a different test".
+
+Both halves are fixed. The bracket is labelled `[invocation: ...]` (one label site, over a
+bracket-free body — eight renderings would otherwise be eight chances to spell it
+differently), and a FAIL line carries a `failed-assert:` field:
+
+```
+tooling-tests:  FAIL (1149s)  [invocation: ...]  failed-assert: 1 RECOGNISED (assert): 1465-skip-declares
+```
+
+**FAIL lines only** — a PASS or SKIP has no failing assert, so the field has no subject
+there, and its absence on those lines is the rule rather than a silence. On a FAIL it is
+one of **four textually distinct states, never blank**:
+
+| Rendering | Meaning |
+|---|---|
+| `<N> RECOGNISED (<tier>): a, b, c (+K more)` | identities extracted; `N` is the TRUE total, names capped, remainder DECLARED. Tier is `assert` (a test case), `guard` (a named guard verdict) or `toolchain` (a compiler/npm error — no assert identity exists) |
+| `0 RECOGNISED (...)` | the log WAS read and scanned and nothing matched (or it was empty — a separate cause). **Never a bare `0`**: the recogniser set is documented NON-EXHAUSTIVE, so a bare zero would read as a verified all-clear from an incomplete scan |
+| `not extractable (<cause>)` | the log could not be read or normalised, or the extractor could not run. **Never collapsed onto `0 RECOGNISED`** — "found nothing" and "could not look" are the two facts this repo most often conflates |
+| `not recorded (<why>)` | no extraction ran for this line at all (a synthetic self-test block, or a runner that appends to NAMES without reaching an extraction site) |
+
+The recogniser set is **one named file with a stated rule per entry**,
+`scripts/ci/gate-failed-assert.sh`, **derived by measurement** over the 174 real FAILed
+component logs retained on a fleet box (114 of the 136 non-empty ones recognised; the two
+knowingly-uncovered shapes are declared in its header, not left to be rediscovered), and
+resolved from the checkout with **no env override** — the party the field constrains must
+not choose its own extractor. Extraction happens at the component boundary (`record_result`,
+the chokepoint every component passes through, so a new component is covered with no gate
+edit) and rides a **sidecar**, because `record_result`'s `.result` file is two whitespace
+fields only and a third would be silently absorbed by its 2-field reader. The log is parsed
+through the gate's ONE `_ansi_stripped_log` and read by redirection, never a pipe (#3400:
+colour survives redirection, and a piped `while read` discards its verdict in a subshell);
+an unreadable log is a NAMED `not extractable`, never "no failures found".
+
+**The published value is a NEUTRALISED PROJECTION, not the identity.** Before any bound and
+before the redactor, every URL-shaped, authority-shaped, query-shaped or credential-KEYED
+token is replaced WHOLESALE with a fixed placeholder (`<url>`, `<authority>`, `<query>`,
+`<secret>`) — by SHAPE, with no attempt to work out which part is the secret. That is the
+`STOP RENDERING THE VALUE, DO NOT SANITISE IT AGAIN` ruling this repo already took on the
+origin diagnostic, applied to the same file one field over: a redactor that knew only URL
+userinfo and the scp form let a secret through in a query string (`?token=…`), a header
+(`Authorization: Bearer …`) or prose. The redactor stays as defence in depth.
+
+**Count correctness and publication safety are separate concerns.** The extractor dedupes and
+counts on the FULL normalised identity, internally; only the projection is published. No bound
+may precede the neutralisation — the extractor's 4096-char SAFETY bound therefore **truncates
+nothing**, publishing `<identity too long to publish safely: N chars>` instead of a prefix,
+because a prefix can sever the very shape every later rule keys on. Declared residual: a secret
+in ordinary prose with no authority shape and no credential-named key still passes; over-
+redaction (an ordinary `name@example.com` renders `<authority>`) is the accepted direction.
+
+Both loops of the tree-integrity **boundary** block render through the same one renderer, so a
+FAIL row published after a mid-run mutation carries the bracket and this field too.
+
+**The pipeline order is NORMALISE → REDACT → BOUND FOR DISPLAY, and it is a safety
+property rather than formatting.** Three defects on #3765 were one shape — an operation
+applied to a value *before* the operation that needed the value whole: a 57-character cap
+ahead of the DEDUP (the count undercounted), a cut at the first `:` ahead of the DEDUP (13
+distinct asserts named as one shared tag), and a 60-character display elision ahead of the
+REDACTION. That last one deleted a URL's `scheme://` and left `TOKEN@host/path`, which
+**neither** redaction rule matches (one needs `scheme://…@`, the other needs `@host:`), so a
+live credential reached a block this repo tells agents to paste into PR comments. The
+extractor therefore emits the **full** identity, the single `_component_set_redact_text`
+call runs at the one emit boundary, and every bound (60 chars per name, 300 per field) runs
+**after** it; the extractor's one remaining bound is a **declared SAFETY bound** at 4096
+characters with its residual stated in place. Two rules fall out: a bound must never be
+able to change a safety verdict, and a leak check must be made on the **rendered field** —
+never on extractor stdout, where a long token cut by an elision looks absent while never
+having been redacted.
 
 ### Every component line STATES WHAT IT VERIFIED, and a component that verified nothing cannot PASS (#3625)
 
@@ -1332,7 +1415,7 @@ short-circuit records nothing later. A body that dies before its first cargo cal
 legitimately leaves an empty sidecar, and that state is named too.
 
 **It never renders blank.** A component with no observed invocation renders an explicit
-`[UNDECLARED]`; one that runs no cargo at all renders `[no-cargo]`; a `SKIP` that never
+`[invocation: UNDECLARED]`; one that runs no cargo at all renders `[invocation: no-cargo]`; a `SKIP` that never
 reached cargo — or a `FAIL` before its first cargo call — says exactly that (and names the
 metadata-probe exclusion, because `cargo tree`/`metadata` probes are deliberately not
 recorded and three components FAIL exactly there).
@@ -1347,16 +1430,16 @@ one family of findings (roborev job 273).**
    interceptors are unexported by design, so `cargo` means *observable in the gate's own
    shell, or self-recorded from a `bash -c` body*. `tooling-tests` was declared `cargo`
    while its only cargo runs inside ~60 nested test scripts — so a PASS read
-   `[UNDECLARED]` and, worse, a FAIL could claim it *"FAILed before its first cargo
+   `[invocation: UNDECLARED]` and, worse, a FAIL could claim it *"FAILed before its first cargo
    invocation"* after a child `cargo build` really ran. It is now the fourth class,
-   `unobservable:<why>`, rendered `[cargo not observable: <why>]`: it asserts **nothing**
+   `unobservable:<why>`, rendered `[invocation: cargo not observable: <why>]`: it asserts **nothing**
    in either direction and takes no SKIP/FAIL note, because "nothing ran" is precisely
    what that shell cannot know. An in-shell observation rides beside it additively.
 2. **An `indirect:<driver>` component RECORDS whether its driver was REACHED**, from an
    explicit signal — a build-verify rc, or a recorder call on the line immediately before
    the driver runs — **never inferred from the terminal status**. `python-bindings` can die
    in venv/pip before maturin and `node-bindings` in `npm ci` before `npm run build`, and
-   both used to report `[via maturin: …]` / `[via npm run build (napi): …]` for a cargo
+   both used to report `[invocation: via maturin: …]` / `[invocation: via npm run build (napi): …]` for a cargo
    invocation that never happened. One shared helper pair does the mapping for all of them
    (`_fm_note_driver` + `_fm_note_maturin_rc`, plus the exported child-callable
    `_fm_observe_driver`), so a fourth indirect component cannot get the direction wrong by
@@ -1373,10 +1456,10 @@ one family of findings (roborev job 273).**
 **A driver we cannot see is NAMED, not guessed** (roborev job 269, blocker 1).
 `python-bindings`, `node-bindings`, and the `--lite` `scoped-tests` **python tier** —
 whose `maturin develop` runs in a child process — render
-`[via <driver>: feature set NOT observed]` **once their driver is observed to have been
+`[invocation: via <driver>: feature set NOT observed]` **once their driver is observed to have been
 reached**, and the python tier's entry is **additive**:
 a mixed rust+python diff reads
-`[test cqlite-core --features cli-helpers | via maturin: feature set NOT observed]`,
+`[invocation: test cqlite-core --features cli-helpers | via maturin: feature set NOT observed]`,
 never one at the expense of the other. It is recorded only for the build-verify exit
 codes that mean maturin actually ran (a venv/pip failure or an absent cargo/rustc records
 that the tier never reached maturin). This is deliberately **distinct from
