@@ -412,6 +412,29 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
       #     validated keyspace directory, so nothing outside it can be reached.
       # Anything not matching is LEFT ALONE and reported, never deleted.
       shopt -s nullglob
+      # VALIDATE THE EXPORT BEFORE DESTROYING ANYTHING (roborev job 66).
+      # The deletion below is irreversible in the working tree, and it used to run
+      # BEFORE any check on what was just exported — so a missing or duplicated
+      # Data.db, or an unexpectedly COMPRESSED table, left the previously valid
+      # committed fixture destroyed and replaced by a bad one. The committed copy is
+      # recoverable with `git restore`, but a generator should not require that.
+      #
+      # These two checks need only the exported bytes, so they run here, against
+      # $TMPDIR_EXPORT. The later checks that need the final location (the JSONL
+      # golden and the value assertions) are ADDITIVE, not destructive, and stay
+      # where they are.
+      _src_ks="$TMPDIR_EXPORT/data/$KEYSPACE"
+      _src_cnt=$(find "$_src_ks" -name "*-Data.db" -not -name "._*" 2>/dev/null | wc -l | tr -d ' ')
+      if [[ "$_src_cnt" -ne 1 ]]; then
+        fail "export holds $_src_cnt *-Data.db, expected exactly 1 (one flush = one SSTable).
+  The committed fixture has NOT been touched — fix the generation and re-run."
+      fi
+      if find "$_src_ks" -name "*CompressionInfo.db" -not -name "._*" | grep -q .; then
+        fail "export contains a CompressionInfo.db; the table was written COMPRESSED.
+  The committed fixture has NOT been touched — fix the schema and re-run."
+      fi
+      log "export validated in place ($_src_cnt Data.db, uncompressed); replacing the committed generation"
+
       for _stale in "$OUT_DIR/$KEYSPACE/$TABLE"-*; do
         _base="$(basename "$_stale")"
         if [[ ! "$_base" =~ ^${TABLE}-[0-9a-f]{32}$ ]]; then
