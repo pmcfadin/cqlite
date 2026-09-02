@@ -639,6 +639,19 @@ fn float32_json_round_trips_through_f32_for_a_spread_of_values() {
         16_777_215.0,
         0.1,
         1234.5678,
+        // A true SUBNORMAL, below `MIN_POSITIVE`: the f32 shortest form (`1e-45`)
+        // and the f64 re-parse are furthest apart in exponent here, so this is the
+        // hardest case for the `f32 text -> f64 -> Number` chain.
+        f32::from_bits(1),
+        // NEGATIVE ZERO: the sign bit must survive the round trip. The assertion
+        // below compares `to_bits()`, so a `-0.0` collapsing to `+0.0` fails.
+        -0.0,
+        // The EXACT TIE (36.6015625 = 4685/128, written as a fraction because a
+        // decimal literal trips `clippy::excessive_precision`). It matters to two
+        // separate assertions now: the exact-spelling case list above pins
+        // `36.601562`, and the significant-digit bound here must still hold —
+        // Display's `36.601563` and serde_json's `36.601562` are both 8 digits.
+        4685.0 / 128.0,
     ];
     for &f in values {
         let text = json_text(&Value::Float32(f));
