@@ -3484,8 +3484,10 @@ object_store_sweep() {
   out="$(bash "$script" --repo "$REPO_ROOT" --timeout "$OBJ_SWEEP_TIMEOUT_SECS" 2>&1)" || rc=$?
   # Read the verdict from the sweep's OWN anchored control line, never from loose text:
   # its output prints repository-controlled paths verbatim, so an unanchored match could
-  # land on one. Both the line AND the exit status are required to agree for the two
-  # actionable verdicts.
+  # land on one. Both the line AND the exit status are required to AGREE for the two
+  # actionable verdicts, and since #3749 review round 4 the CORRUPT branch really does
+  # require both (it was `||`, while this comment already claimed the conjunction — the
+  # false-rationale class, and the reason a reader would not have looked).
   # `{ grep || true; }` ON EVERY PIPELINE BELOW, AND IT IS LOAD-BEARING, NOT DEFENSIVE.
   # This file runs under `set -euo pipefail`: a `grep` that matches NOTHING exits 1, and
   # with `pipefail` that status becomes the pipeline's — so an ASSIGNMENT from such a
@@ -3518,7 +3520,17 @@ object_store_sweep() {
   # string and create a file; it is now empty in that direction, because the latch — the
   # thing a peer must not throttle past — is in place before anything advertises that
   # this box has been swept.
-  if [[ "$rc" -eq 4 || "$verdict" == "CORRUPT" ]]; then
+  #
+  # AND IT TAKES *BOTH*, WHICH IS ITEM 2 OF THE SAME REVIEW. With `||`, an exit 4 with no
+  # verdict line — or a `CORRUPT` line under any other status — created a PERSISTENT,
+  # BOX-WIDE latch that stops every lane on this box and can only be cleared by hand. An
+  # unrecognised or incomplete sweep must not be able to do that: the blast radius of a
+  # false latch (four lanes halted until someone notices) is worse than one more
+  # iteration of a store whose damage, if real, the NEXT sweep reproduces and latches
+  # properly. A disagreement therefore falls through to the UNMEASURED path below, which
+  # is non-passing, journalled, and paged once — and it is named explicitly there, so the
+  # signal is not swallowed on the way past.
+  if [[ "$rc" -eq 4 && "$verdict" == "CORRUPT" ]]; then
     local findings
     # LATCH FIRST, THEN EVERYTHING ELSE. A failure to persist it is REPORTED, never
     # silent: this lane stops either way, but without the latch the peers on this box
@@ -3563,6 +3575,13 @@ object_store_sweep() {
   # expired bound on a loaded box), none of which is evidence about the store. So it is
   # journalled every time and paged ONCE per run — loud enough to fix, never a silent
   # swallow and never a latch.
+  # A DISAGREEMENT IS NAMED, NOT MERELY DEMOTED. One of the two channels said CORRUPT and
+  # the other did not, so this run neither established damage nor ruled it out — and the
+  # generic UNMEASURED line below would read as an ordinary "could not measure". Loud
+  # enough to investigate, and still not a latch (see the CORRUPT branch for why).
+  if [[ "$rc" -eq 4 || "$verdict" == "CORRUPT" ]]; then
+    log "object-store: INCONSISTENT sweep result (rc=$rc verdict='${verdict:-<none>}') — exactly ONE of the exit status and the anchored verdict line says CORRUPT. Treated as UNMEASURED and NOT latched: an incomplete or unrecognised sweep must not stop every lane on this box (#3749). If the next sweep reproduces damage it will latch it; investigate the sweep itself."
+  fi
   log "object-store: UNMEASURED (rc=$rc verdict='${verdict:-<none>}') — the shared store was NOT rehashed, so its integrity is UNKNOWN, not clean. Continuing: a hygiene probe that cannot run must not stop the fleet (#3749)."
   printf '%s\n' "$out" | { grep '^OBJECT-STORE: unmeasured-cause ' || true; } | head -4 | while IFS= read -r obj_line; do
     log "object-store: $obj_line"

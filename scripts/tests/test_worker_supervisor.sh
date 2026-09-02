@@ -9391,7 +9391,11 @@ obj_sweep_tree() {
     [[ -n "$during" ]] && printf '%s\n' "$during"
     printf 'printf "OBJECT-STORE: measured stub\\n"\n'
     printf 'printf "OBJECT-STORE: object deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\\n"\n'
-    printf 'printf "OBJECT-STORE: verdict %s\\n"\n' "$verdict"
+    # The verdict `NONE` means PRINT NO VERDICT LINE AT ALL — the state a sweep killed
+    # between its verdict print and its exit, or an older/stubbed script, leaves behind.
+    # An empty string would print `verdict ` with an empty token, which is a DIFFERENT
+    # (and unreachable) shape.
+    [[ "$verdict" == NONE ]] || printf 'printf "OBJECT-STORE: verdict %s\\n"\n' "$verdict"
     printf 'exit %s\n' "$rc"
   } >"$root/scripts/check-object-store-integrity.sh"
   chmod +x "$root/scripts/check-object-store-integrity.sh"
@@ -9579,6 +9583,70 @@ test_object_store_sweep_knobs() {
 }
 
 t test_object_store_sweep_verdicts
+
+# BOTH CHANNELS MUST AGREE BEFORE A BOX-WIDE LATCH IS CREATED (#3749 review round 4,
+# item 2). The CORRUPT branch used to be `rc == 4 || verdict == CORRUPT` while the comment
+# above it already asserted the conjunction — the false-rationale class, and the reason
+# nobody looked. The harm is not a wrong log line: the latch is STICKY, BOX-WIDE and
+# operator-cleared, so an exit 4 with no verdict line, or a stray `CORRUPT` line under any
+# other status, HALTS EVERY LANE ON THE BOX until a human notices.
+#
+# Two arms, ONE PROPERTY APART — which of the two channels says CORRUPT — plus the control
+# that the conjunction still fires when they DO agree (without it, both arms would pass
+# against a supervisor that had simply lost the ability to latch at all).
+test_object_store_sweep_requires_both_channels_to_agree() {
+  local d root counter rc calls stamp latch arm verdict code
+  for arm in "status-only:NONE:4" "line-only:CORRUPT:5"; do
+    verdict="${arm#*:}"; code="${verdict#*:}"; verdict="${verdict%%:*}"
+    d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls"
+    common_env "$d"
+    write_finalize_stub "$d/bin/worker.sh" "$counter"
+    export WORKER_CMD="$d/bin/worker.sh"
+    export MAX_ISSUES=1
+    export OBJ_SWEEP_INTERVAL_HOURS=6
+    export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+    stamp="$OBJ_SWEEP_STAMP"; latch="$stamp.CORRUPT"
+    root="$(obj_sweep_tree "$d" "$verdict" "$code" "$calls")"
+    env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/stdout.log" 2>&1
+    rc=$?
+    if [[ "$rc" -eq 0 && -f "$counter" ]] && [[ ! -e "$latch" ]] &&
+      ! grep -q '"reason":"object-store-corrupt"' "$JOURNAL_FILE"; then
+      pass "obj-sweep(disagreement/${arm%%:*}): exactly ONE channel saying CORRUPT creates NO box-wide latch and stops no lane — an unrecognised or incomplete sweep cannot halt four lanes until an operator clears a file"
+    else
+      fail "obj-sweep(disagreement/${arm%%:*}): rc=$rc latched=$([[ -e "$latch" ]] && echo yes || echo no) spawned=$([[ -f "$counter" ]] && echo yes || echo no) (see $d/stdout.log)"
+    fi
+    # AND IT IS NAMED, not silently demoted: the generic UNMEASURED line would read as an
+    # ordinary "could not measure" for a run in which one channel reported damage.
+    if grep -q 'INCONSISTENT sweep result' "$d/stdout.log" &&
+      grep -q 'object-store: UNMEASURED' "$d/stdout.log"; then
+      pass "obj-sweep(disagreement/${arm%%:*}): the disagreement is journalled by name AND as UNMEASURED — the signal is not swallowed on the way past"
+    else
+      fail "obj-sweep(disagreement/${arm%%:*}): the run does not name the inconsistency: $(grep -c 'object-store' "$d/stdout.log") object-store line(s) (see $d/stdout.log)"
+    fi
+  done
+  # THE CONTROL: the two channels AGREEING still latches and still stops. One property
+  # from each arm above.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  stamp="$OBJ_SWEEP_STAMP"; latch="$stamp.CORRUPT"
+  root="$(obj_sweep_tree "$d" CORRUPT 4 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/stdout.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 1 && ! -f "$counter" && -e "$latch" ]] &&
+    ! grep -q 'INCONSISTENT sweep result' "$d/stdout.log"; then
+    pass "obj-sweep(disagreement-control): rc=4 AND verdict CORRUPT together still latch the box and stop the lane, with no inconsistency claimed — the two arms above are the disagreement, not a lost ability to latch"
+  else
+    fail "obj-sweep(disagreement-control): rc=$rc latched=$([[ -e "$latch" ]] && echo yes || echo no) spawned=$([[ -f "$counter" ]] && echo yes || echo no) (see $d/stdout.log)"
+  fi
+}
+
+t test_object_store_sweep_requires_both_channels_to_agree
+
 t test_object_store_sweep_throttle_and_disable
 t test_object_store_sweep_knobs
 

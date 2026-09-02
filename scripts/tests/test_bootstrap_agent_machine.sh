@@ -1500,6 +1500,63 @@ else
   bad "obj: CORRUPT lacks a remedy line or the summary restatement"
 fi
 
+# 7o-e/f. THE TWO CHANNELS MUST AGREE BEFORE CORRUPT IS CLAIMED (#3749 review round 4,
+#   item 2). This reader used to accept `rc == 4 || verdict == CORRUPT` while its own
+#   comment asserted the conjunction, so an exit 4 with NO verdict line — or a stray
+#   `CORRUPT` line under any other status — produced the CORRUPT report here and, in the
+#   sibling supervisor, a persistent BOX-WIDE latch that halts every lane until an
+#   operator clears it by hand. An unrecognised or incomplete sweep must not be able to do
+#   that: a false latch is worse than one more iteration over a store whose damage, if
+#   real, the next sweep reproduces.
+#
+#   THE ARTIFACT IS SUBSTITUTED, not a variable set: the sandbox's own copy of the sweep
+#   script is replaced by a stub, because a test-only seam is one more thing a real
+#   invoker can set (CLAUDE.md #3312 corollary). Two arms, one property apart — WHICH of
+#   the two channels says CORRUPT.
+mk_sweep_stub() {
+  # mk_sweep_stub <sandbox> <verdict-or-NONE> <exit>
+  local sandbox="$1" verdict="$2" rc="$3" f="$1/scripts/check-object-store-integrity.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'for a in "$@"; do [ "$a" = --print-store ] && exit 0; done\n'
+    printf 'printf "OBJECT-STORE: measured stub\\n"\n'
+    [ "$verdict" = NONE ] || printf 'printf "OBJECT-STORE: verdict %s\\n"\n' "$verdict"
+    printf 'exit %s\n' "$rc"
+  } >"$f"
+  chmod +x "$f"
+}
+for _arm in "NONE:4:status-only" "CORRUPT:5:line-only"; do
+  # Parsed by expansion rather than `set --`: this is top-level script code, and `set --`
+  # would overwrite the suite's own positional parameters.
+  _av="${_arm%%:*}"
+  _rest="${_arm#*:}"
+  _ar="${_rest%%:*}"
+  _an="${_rest#*:}"
+  repo7oe="$tmp/repo7oe-$_an"; mk_push_repo "$repo7oe" "file://$bare7pa"
+  mk_sweep_stub "$repo7oe" "$_av" "$_ar"
+  _src=0
+  _sout=$(bash "$repo7oe/scripts/check-object-store-integrity.sh" --repo "$repo7oe" 2>&1) || _src=$?
+  _sline=no
+  printf '%s' "$_sout" | grep -q 'OBJECT-STORE: verdict ' && _sline=yes
+  _swant=yes
+  [ "$_av" = NONE ] && _swant=no
+  if [ "$_src" -eq "$_ar" ] && [ "$_sline" = "$_swant" ]; then
+    ok "obj: the inconsistency plant IS the shape described ($_an: the stub exits $_ar, verdict line present=$_sline)"
+  else
+    bad "obj: the inconsistency plant ($_an) exited $_src with verdict-line=$_sline (wanted $_ar/$_swant) — the case below would prove nothing"
+  fi
+  run_push "$repo7oe" "$bin7pa" "$gc7pa" --skip-push-probe --strict
+  if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: UNMEASURED — INCONSISTENT' &&
+    ! printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
+    ! printf '%s' "$push_out" | grep -q 'SHARED OBJECT STORE CORRUPT' &&
+    ! push_green "$push_out"; then
+    ok "obj: $_an — exactly ONE channel saying CORRUPT is reported UNMEASURED/INCONSISTENT, never the CORRUPT verdict, and never certified"
+  else
+    bad "obj: $_an — an inconsistent sweep result was not handled as UNMEASURED/INCONSISTENT (rc=$push_rc)"
+    push_plain "$push_out" | grep -F 'object-store:' | head -4
+  fi
+done
+
 # 7o-d. UNMEASURABLE: the sweep script absent from the checkout. Must be a [warn] naming
 #   what could not be measured — never an [ok], because an [ok] is what --strict reads.
 repo7od="$tmp/repo7od"; mk_push_repo "$repo7od" "file://$bare7pa"

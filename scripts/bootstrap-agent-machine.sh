@@ -3089,6 +3089,15 @@ else
   # distinguish a sweep that classified itself from a wrapper that killed it. Every match
   # below is anchored on `OBJECT-STORE: verdict `, which is the sweep's own control token
   # and a position no dynamic field of its output can reach.
+  #
+  # THE TWO ACTIONABLE VERDICTS REQUIRE THE TWO CHANNELS TO AGREE; THE NON-PASSING ONES DO
+  # NOT, AND THE ASYMMETRY IS DELIBERATE (#3749 review round 4, item 2). CORRUPT was `||`
+  # while this comment already asserted the conjunction, so an exit 4 with no verdict line
+  # — or a stray `CORRUPT` line under any other status — reported CORRUPT here and, in the
+  # sibling supervisor, created a persistent box-wide latch that halts every lane until an
+  # operator clears it by hand. A disjunction that can only reach a NON-PASSING branch
+  # cannot manufacture a verdict, so the UNMEASURED test below stays `||`: every path it
+  # does not take lands on the final `else`, which also warns.
   # `{ grep || true; }` throughout: a grep with no match exits 1 and `pipefail` is on, so
   # a bare pipeline or an assignment from such a substitution would carry a non-zero status
   # — and "no match" is reachable (a sweep killed at its bound prints no verdict line). This
@@ -3104,7 +3113,7 @@ else
     # found nothing damaged — a POINT-IN-TIME sweep, which the message says so nobody reads
     # it as a per-read guarantee.
     ok "object-store: VERIFIED ($(printf '%s\n' "$obj_out" | { grep '^OBJECT-STORE: measured ' || true; } | head -1 | sed 's/^OBJECT-STORE: measured //')) — a point-in-time full rehash, not a per-read guarantee"
-  elif [ "$obj_rc" -eq 4 ] || [ "$obj_verdict" = CORRUPT ]; then
+  elif [ "$obj_rc" -eq 4 ] && [ "$obj_verdict" = CORRUPT ]; then
     # CORRUPT FAILS LOUDLY AND NAMES THE OBJECTS. Not a hard exit: this script's contract
     # is that every section runs and the verdicts accumulate (a mid-script exit would
     # silently skip sections 5c/6 and change what a caller sees). What makes it loud is
@@ -3118,6 +3127,17 @@ else
     info "REMEDY: stop every lane on this box, then re-obtain the objects from the canonical remote"
     info "  (a fresh clone of pmcfadin/cqlite, or 'git fetch --force origin' if only fetched packs are damaged)."
     info "  A LOCAL 'git gc'/'git repack' CANNOT repair this — escalate rather than improvising (#3749)."
+  elif [ "$obj_rc" -eq 4 ] || [ "$obj_verdict" = CORRUPT ]; then
+    # EXACTLY ONE CHANNEL SAYS CORRUPT (the conjunction above has already failed), so this
+    # run neither established damage nor ruled it out. NAMED rather than folded into the
+    # generic UNMEASURED message below, which would read as an ordinary missing line — and
+    # deliberately NOT escalated to CORRUPT: see the conjunction note above for why an
+    # unrecognised or incomplete sweep must not be able to produce that verdict.
+    warn "object-store: UNMEASURED — INCONSISTENT sweep result (rc=$obj_rc verdict='${obj_verdict:-<none>}'): exactly ONE of the exit status and the anchored verdict line says CORRUPT, so damage was neither established nor ruled out"
+    printf '%s\n' "$obj_out" | { grep -E '^OBJECT-STORE: (unmeasured-cause|finding|object) ' || true; } | head -8 | while IFS= read -r obj_line; do
+      info "$obj_line"
+    done
+    info "investigate the sweep itself, then re-run by hand:  bash scripts/check-object-store-integrity.sh"
   elif [ "$obj_rc" -eq 5 ] || [ "$obj_verdict" = UNMEASURED ]; then
     # UNMEASURED IS A [warn] NAMING WHAT COULD NOT BE MEASURED — never an [ok]. The
     # sweep's own `unmeasured-cause` lines are quoted rather than re-worded: a diagnostic
