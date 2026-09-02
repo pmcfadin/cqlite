@@ -392,7 +392,9 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    (a `rust-review` verdict, say) or a truncated capture is refused as ungrammatical. It measures
    each mandatory field's VALUE too, not only that the key is there exactly once — so capture the
    line WHOLE (redirect the command; never hand-edit it), because a bare `report=` or an emptied
-   `elapsed=`/`deadline=`/`agent=` is refused by name.
+   `elapsed=`/`deadline=`/`agent=` is refused by name. A report path containing a SPACE is fine —
+   `report=` is emitted LAST and read as the remainder of the line (#3751 round 11), so a checkout
+   at `/tmp/work tree` no longer makes a correct verdict refuse.
    The third argument is **REQUIRED** (an optional one would leave the convention
    honour-system): it is the `AGENT_GATE_SUMMARY_FILE` you already hold from step 1's full
    gate. A `--lite` summary is never acceptable anywhere, and a `--delta` summary is never

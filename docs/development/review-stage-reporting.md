@@ -292,9 +292,20 @@ Three further declared limits of the mechanism itself:
   CAN PRODUCE**, which is what stops it redding on correct input: `elapsed`/`deadline` are decimal
   digits (**`0` included**, from `--deadline-secs 0`) or the literal `unknown`, and `agent`/`report`
   need only be NON-EMPTY — which admits `unknown` and `unresolved`, the honest not-measured values
-  round 6's K1 emits. A charset is deliberately NOT asserted for `agent`/`report`: awk splits fields
-  on whitespace, so a value containing a space never arrives whole at that reader, and asserting a
-  charset would be a claim about a shape it cannot see. So a sibling stage's `PASS` line (a
+  round 6's K1 emits. A charset is deliberately NOT asserted for `agent`/`report`, and **the reason
+  differs per field**. `report=` carries an absolute PATH, so a charset would be a claim about
+  anything a filesystem allows — and **it DOES arrive whole, spaces included, since round 11's Q3**:
+  it is emitted LAST and read as the REMAINDER of the line. (Read as one whitespace-delimited field
+  it TRUNCATED at the first space — a checkout at `/tmp/work tree`, and this repository tracks 40
+  space-bearing paths under `docs/` — and round 10's nonce match then REFUSED an otherwise VALID
+  verdict: a false refusal on correct input, measured on the shipped artifacts as
+  `verdict reported: /tmp/…/work` beside a `validated generation:` that was exactly the one the
+  verdict named. The remainder rule is sound ONLY because `report=` is last, so that assumption is
+  ENFORCED against the shipped emitter rather than assumed — the 11 states are derived by RUNNING
+  it and no mandatory key may follow `report=` on any line it produces.) `agent=` is written through
+  `sanitize_field`, whose character class excludes whitespace, so it cannot legitimately carry one; a
+  hand-edited record could, and that value truncates — a truncated DIAGNOSTIC, never a wrong verdict,
+  since the token is what proceeds and `=` is neutralised at the emit boundary. So a sibling stage's `PASS` line (a
   `rust-review` verdict, say) can no longer certify C; what it cannot check is the ISSUE, because the line carries no sha. The
   report path is printed on the success line so a human can see which stage answered.
 - **AUTO's ROUTING MEASURE IS ROOT-ANCHORED, AND `diff.relative=false` IS NOT WHAT DOES THAT

@@ -263,7 +263,15 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   "counted, not measured". The permitted set is DERIVED FROM WHAT THE EMITTER PRODUCES, which is what
   stops it redding on correct input: digits or `unknown` for the two clocks, non-empty for
   `agent`/`report`, so round 6's honest `unknown`/`unresolved` and a legitimate `deadline=0` all
-  still pass). "Somewhere on this line it says
+  still pass). **`report=` is read as the REMAINDER of the line, not as one whitespace-delimited
+  field (round 11, Q3)** — it carries an absolute PATH, and a path may legitimately contain
+  whitespace (a checkout at `/tmp/work tree`; this repository tracks 40 space-bearing paths under
+  `docs/`), so a field read TRUNCATED the value at the first space and the generation binding then
+  REFUSED an otherwise VALID verdict: a false refusal on correct input. That rule is sound ONLY
+  because `report=` is emitted LAST, so the assumption is **ENFORCED, not assumed** — the emitter's
+  states are derived by RUNNING it, no mandatory key may follow `report=` on any line it produces,
+  and its single emit site is pinned structurally. Generalise it: **a parser that reads a
+  PATH-valued field positionally has a whitespace bug waiting.** "Somewhere on this line it says
   `RESULT: PASS`" is not a verdict about C: measured on #3751's own branch, a sibling `code-review`
   stage's PASS line satisfied `--c-verdict`, and a truncated capture with no
   `elapsed=`/`agent=`/`report=` did too. Only

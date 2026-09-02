@@ -653,6 +653,49 @@ refuse_no_c_verdict() {
 # not fixed; a cause word cannot pose as a key because review-stage.sh neutralises
 # `=` in the cause at its emit boundary, and a planted one raises a count and is
 # refused as a duplicate — the fail-closed direction.
+#
+# `report=` IS TAKEN AS THE REMAINDER OF THE LINE, NOT AS ONE FIELD (#3751 round
+# 11, Q3). It carries an absolute PATH, and a path may legitimately contain
+# WHITESPACE — a checkout at `/tmp/work tree`; this repository itself tracks 40
+# space-bearing paths under `docs/`. Read as one whitespace-delimited field the
+# value TRUNCATED at the first space, and round 10's nonce match then REFUSED an
+# otherwise VALID verdict: a FALSE REFUSAL on correct input, which is the guard
+# agents learn to waive (measured, on the shipped artifacts in a checkout named
+# `…/work tree`: `verdict reported: /tmp/…/work` beside a `validated generation:`
+# that was exactly the one the verdict named).
+#
+# THE REMAINDER RULE IS SOUND ONLY BECAUSE `report=` IS EMITTED LAST, so that
+# assumption is ENFORCED rather than assumed: section 44l of
+# scripts/tests/test_premerge_assert.sh RUNS the shipped emitter through every
+# state it has and requires no mandatory key to follow `report=` on any line it
+# produces, and pins the single emit site's trailing field structurally. Append a
+# field after `report=` and that suite reds instead of verdicts silently
+# truncating again.
+#
+# THE CURSOR WALK IS WHAT MAKES THE OFFSET EXACT. `index()` is searched from the
+# END OF THE PREVIOUS FIELD, so a field whose text also occurs earlier on the line
+# cannot mis-locate it — a bare `index($0, "report=")` could. `fs == 0` cannot
+# occur (a field is by construction present at or after that cursor) and there is
+# DELIBERATELY NO FALLBACK to the field value: a prefix of the real path is a
+# value nobody measured, and this file's standing rule is that a positive verdict
+# requires an affirmative measurement. `rep` therefore stays EMPTY, which the
+# value validator below refuses BY NAME (`report= is EMPTY`) — the fail-closed
+# direction, and it keeps the truncating form out of the source entirely, which is
+# what the structural pin in section 44l asserts.
+#
+# TWO PROPERTIES DELIBERATELY UNCHANGED. (1) The key census still scans EVERY
+# field, including the words of a space-bearing path, so a duplicated `report=`
+# is still refused; the cost is that a path component spelled `elapsed=…` /
+# `deadline=…` / `agent=…` / `report=…` raises a count and REFUSES — fail-closed,
+# and declared rather than silently permitted. (2) NOTHING IS TRIMMED from the
+# remainder: a parser that trims is a parser that guesses, the emitter's own
+# `one_line` leaves no trailing whitespace, and a hand-edited capture that gained
+# some fails the nonce match and refuses.
+#
+# The emitter's `one_line` COLLAPSES runs of whitespace to one space, so a path
+# containing a tab or two adjacent spaces is already lossy ON THE PRODUCING SIDE.
+# That is not this reader's to repair — and it does not matter to the binding,
+# whose pattern matches the FILENAME tail. Stated so the limit is not rediscovered.
 _c_verdict_awk() {
   awk '
   BEGIN {
@@ -670,11 +713,19 @@ _c_verdict_awk() {
         rpos = 1
         if (NF >= 4) tok = $4
       }
-      for (i = 4; i <= NF; i++) {
+      cur = 1
+      for (i = 1; i <= NF; i++) {
+        off = index(substr($0, cur), $i)
+        fs = 0
+        if (off > 0) { fs = cur + off - 1; cur = fs + length($i) }
+        if (i < 4) continue
         if (substr($i, 1, 8) == "elapsed=") { ke++; if (ke == 1) ve = substr($i, 9) }
         else if (substr($i, 1, 9) == "deadline=") { kd++; if (kd == 1) vd = substr($i, 10) }
         else if (substr($i, 1, 6) == "agent=") { ka++; if (ka == 1) va = substr($i, 7) }
-        else if (substr($i, 1, 7) == "report=") { kr++; if (kr == 1) rep = substr($i, 8) }
+        else if (substr($i, 1, 7) == "report=") {
+          kr++
+          if (kr == 1 && fs > 0) rep = substr($0, fs + 7)
+        }
       }
     }
   }
@@ -827,8 +878,14 @@ C_PARSE
     # So `unknown`/`unresolved` are ACCEPTED — they are the emitter's honest "not measured" and are
     # NOT a passing verdict on their own (the token is what proceeds, and it is `NOT-RUN` in every
     # state that produces them). Only agent and report are checked for NON-EMPTINESS rather than for
-    # a charset: awk splits fields on whitespace, so a value with a space never arrives whole here,
-    # and asserting a charset would be a claim about a shape this reader cannot see.
+    # a charset, and the REASON differs per field. `report=` DOES arrive whole, spaces and all,
+    # since round 11's Q3 (it is emitted LAST and read as the remainder of the line), so a charset
+    # there would be a claim about a legitimate absolute PATH — which may contain anything a
+    # filesystem allows. `agent=` is written through `review-stage.sh`'s `sanitize_field`, whose
+    # character class excludes whitespace, so it cannot legitimately carry a space; a HAND-EDITED
+    # record could, and that value would truncate here — a truncated DIAGNOSTIC, never a wrong
+    # verdict, because the token is what proceeds and `=` is neutralised at the emit boundary so a
+    # path or cause word cannot forge a key.
     vbad=0
     set -- \
       "The $what's verdict line carries a MANDATORY FIELD WITH NO USABLE VALUE:" \

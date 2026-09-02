@@ -4229,6 +4229,272 @@ else
   bad "q1/structural: a routing pin was dropped — renames off (F4) and root-relative output are both load-bearing"
 fi
 
+# --- 44l: a `report=` value containing a SPACE must arrive WHOLE (round 11, Q3) ---
+# THE FINDING (roborev job 385, Q3). `report=` carries an absolute PATH, and a path may
+# legitimately contain whitespace — a checkout at `/tmp/work tree`, and this repository itself
+# tracks 40 space-bearing paths under `docs/`. `_c_verdict_awk` took the value as ONE
+# whitespace-delimited FIELD, so it truncated at the first space and round 10's nonce match then
+# REFUSED an otherwise VALID verdict: a false refusal on correct input, which is the guard agents
+# learn to waive. Measured on the SHIPPED artifacts before the fix, in a checkout named
+# `…/q3/work tree`, where the stage's real generation IS the one the verdict names:
+#
+#   PREMERGE: NO-C-VERDICT — REFUSING TO MERGE
+#     validated generation: c.wDYumb5BHk.md (from the report-nonce: … the head-sha binding read)
+#     verdict reported:     /tmp/…/q3/work            <-- truncated at the space
+#
+# THE FIX IS THE REMAINDER OF THE LINE, and it is sound ONLY because `report=` is emitted LAST —
+# which is pinned structurally below against the shipped emitter, so a field appended after it
+# reds this suite instead of silently truncating verdicts again.
+#
+# A FIXTURE WHOSE DIRECTORY NAME CONTAINS A SPACE, end to end on the real producer: nothing short
+# of that exercises the path this defect lives on.
+c_repo_spacey() {
+  local d="$T/c-repo q3 spacey"
+  mkdir -p "$d" || return 1
+  git init -q -b mainline "$d" >/dev/null 2>&1 || return 1
+  git -C "$d" config user.email t@t
+  git -C "$d" config user.name t
+  printf '.review-stage/\n' >"$d/.gitignore"
+  printf 'seed\n' >"$d/README.md"
+  git -C "$d" add -A >/dev/null 2>&1 || return 1
+  git -C "$d" commit -q -m seed >/dev/null 2>&1 || return 1
+  git -C "$d" update-ref refs/remotes/origin/main mainline || return 1
+  git -C "$d" checkout -q -b feature || return 1
+  mkdir -p "$d/openspec/changes/a-spacey-slug"
+  printf 'the design proposal\n' >"$d/openspec/changes/a-spacey-slug/proposal.md"
+  git -C "$d" add -A >/dev/null 2>&1 || return 1
+  git -C "$d" commit -q -m "the PR" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$d"
+}
+Q3_REPO=$(c_repo_spacey) || Q3_REPO=""
+Q3_OK=0
+if [ -n "$Q3_REPO" ] && [ -d "$Q3_REPO" ]; then
+  case "$Q3_REPO" in
+    *" "*) Q3_OK=1; ok "q3 fixture: a design-routed repository whose PATH contains a space was built" ;;
+    *) bad "q3 fixture: the fixture path carries no space, so every case below would be vacuous" ;;
+  esac
+else
+  bad "q3 fixture: could not build it — every case below would be vacuous"
+fi
+# THE PRODUCER IS THE SHIPPED ARTIFACT, and its own emitted line is asserted to CARRY the space:
+# if `review-stage.sh` flattened the path instead, this section would prove nothing about the
+# reader.
+Q3_NONCE=""
+if [ "$Q3_OK" -eq 1 ]; then
+  if (cd "$Q3_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor >/dev/null 2>&1) &&
+    printf 'result: PASS\n\n## Findings\n\nnone.\n' >"$(SR_REPORT "$Q3_REPO" 3751 c)"; then
+    ok "q3: a PASSING c stage was opened in the space-bearing checkout"
+  else
+    bad "q3: the stage could not be opened there — the cases below would be vacuous"
+    Q3_OK=0
+  fi
+fi
+if [ "$Q3_OK" -eq 1 ]; then
+  Q3_LINE=$(cd "$Q3_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" verdict c --issue 3751 2>/dev/null) || true
+  case "$Q3_LINE" in
+    *"report=$Q3_REPO/"*) ok "q3/producer: the emitted report= carries the space-bearing path verbatim" ;;
+    *) bad "q3/producer: the emitter did not put the space-bearing path on the line (got: $Q3_LINE)" ;;
+  esac
+  Q3_NONCE="$(LC_ALL=C sed -n 's/^report-nonce:[[:space:]]*//p' \
+    "$Q3_REPO/.review-stage/issue-3751/c.stage" 2>/dev/null | LC_ALL=C head -1 || true)"
+  if [ -n "$Q3_NONCE" ]; then
+    ok "q3: the validated generation's nonce was read from the record ($Q3_NONCE)"
+  else
+    bad "q3: the record's report-nonce: is unavailable, so the acceptance case proves nothing"
+  fi
+fi
+
+# (a) THE FINDING, END TO END: a CORRECT verdict in a space-bearing checkout is ACCEPTED. Before
+#     the fix this exited 2 with `verdict reported: <path truncated at the space>` beside a
+#     `validated generation:` that was exactly the one the verdict named.
+if [ "$Q3_OK" -eq 1 ] &&
+  run_in_repo "$Q3_REPO" 0 \
+    "q3/accept: a CORRECT verdict whose report path contains a SPACE is ACCEPTED" \
+    --c-verdict AUTO; then
+  case "$OUT" in
+    *"PREMERGE: C-VERDICT PASS"*"source: AUTO issue=3751"*)
+      ok "q3/accept: the verdict is PASS and names the stage it read" ;;
+    *) bad "q3/accept: must report C-VERDICT PASS from AUTO (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"DIFFERENT generation"*)
+      bad "q3/accept: a correct verdict was refused as a generation mismatch — the value truncated at the space" ;;
+    *) ok "q3/accept: no generation mismatch is reported for a verdict that names the right generation" ;;
+  esac
+  # AND THE WHOLE PATH REACHES THE OPERATOR, not a prefix: the success line's `report:` field is
+  # the only place a human sees WHICH report answered.
+  if [ -n "$Q3_NONCE" ]; then
+    case "$OUT" in
+      *"report: $Q3_REPO/.review-stage/issue-3751/c.$Q3_NONCE.md"*)
+        ok "q3/accept: the success line reports the WHOLE space-bearing path" ;;
+      *) bad "q3/accept: the success line must report the whole path (got: $OUT)" ;;
+    esac
+  fi
+fi
+
+# (b) THE CONTROL, IN THE SAME SPACE-BEARING CHECKOUT: a FOREIGN nonce is STILL REFUSED. Without
+#     it, (a) is satisfiable by a reader that stopped comparing generations at all — which is
+#     exactly the round-10 property this must not weaken. A SUBSTITUTED CALLEE (#3312's corollary
+#     for tests; there is no settable seam), because the shipped emitter cannot be made to name a
+#     generation its own record does not hold.
+Q3_STUB_DIR="$T/q3stub/flow"
+Q3_STUB_OK=0
+if [ "$Q3_OK" -eq 1 ] && [ -n "$Q3_NONCE" ] && mkdir -p "$Q3_STUB_DIR" &&
+  cp "$ASSERT" "$Q3_STUB_DIR/premerge-assert.sh" 2>/dev/null &&
+  printf '%s\n' "$NEUTRAL_ADV" >"$Q3_STUB_DIR/base-staleness.sh" 2>/dev/null; then
+  chmod +x "$Q3_STUB_DIR/base-staleness.sh" 2>/dev/null || true
+  Q3_STUB_OK=1
+  ok "q3/stub: a scratch assert plus a substitutable callee was built"
+else
+  bad "q3/stub: the scratch callee could not be built, so the control below proves nothing"
+fi
+# q3_stub <report-value> — a callee reporting PASS with exactly that `report=` field.
+q3_stub() {
+  printf '#!/usr/bin/env bash\nprintf "REVIEW-STAGE: c RESULT: PASS elapsed=1 deadline=3600 agent=spec-auditor report=%%s\\n" %s\nexit 0\n' \
+    "'$1'" >"$Q3_STUB_DIR/review-stage.sh" 2>/dev/null || return 1
+  [ -s "$Q3_STUB_DIR/review-stage.sh" ] || return 1
+  return 0
+}
+# q3_run <repo> <want> <desc> — run the scratch assert from inside <repo> under AUTO.
+q3_run() {
+  local d="$1" want="$2" desc="$3" sha f
+  sha=$(git -C "$d" rev-parse HEAD 2>/dev/null) || sha=""
+  if [ -z "$sha" ]; then bad "$desc: could not resolve the fixture HEAD"; return 1; fi
+  f="$T/gate-q3-stub.txt"
+  emit_summary_block "$FULL_S" "$FULL_E" "-" \
+    "$(printf '%.7s' "$sha")" "$(printf '%.12s' "$sha")" PASS PASS >"$f"
+  OUT=$(cd "$d" && PATH="$BIN:$PATH" MOCK_GH_OUT="$sha OPEN" MOCK_GH_FAIL=0 \
+    bash "$Q3_STUB_DIR/premerge-assert.sh" 2421 "$sha" "$f" --c-verdict AUTO 2>&1)
+  RC=$?
+  if [ "$RC" -ne "$want" ]; then
+    bad "$desc (exit $RC, wanted $want)"
+    printf '     output: %s\n' "$OUT"
+    return 1
+  fi
+  return 0
+}
+if [ "$Q3_STUB_OK" -eq 1 ]; then
+  # CONTROL FIRST, so the refusal below is attributable to the NONCE and not to the substitution:
+  # the stub naming the VALIDATED generation, with the space, still certifies.
+  if q3_stub "$Q3_REPO/.review-stage/issue-3751/c.$Q3_NONCE.md" &&
+    q3_run "$Q3_REPO" 0 "q3/stub CONTROL: a space-bearing path naming the VALIDATED generation certifies"; then
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*) ok "q3/stub CONTROL: and it reports C-VERDICT PASS" ;;
+      *) bad "q3/stub CONTROL: must report C-VERDICT PASS (got: $OUT)" ;;
+    esac
+  fi
+  # THE REFUSAL: same space-bearing directory, FOREIGN nonce.
+  if q3_stub "$Q3_REPO/.review-stage/issue-3751/c.forgedgeneration9.md" &&
+    q3_run "$Q3_REPO" 2 "q3/stub forged: a space-bearing path with a FOREIGN nonce still REFUSES"; then
+    case "$OUT" in
+      *"DIFFERENT generation"*) ok "q3/stub forged: the refusal names the generation mismatch" ;;
+      *) bad "q3/stub forged: the refusal must name the generation mismatch (got: $OUT)" ;;
+    esac
+    # ASSERTED ON THE `verdict reported:` DETAIL LINE, not anywhere in the output: the block also
+    # echoes the RAW `verdict line:`, which carries the whole path whether the READER truncated it
+    # or not — so an `$OUT`-wide match would pass in the pre-fix state too (measured: it did).
+    case "$OUT" in
+      *"verdict reported:     $Q3_REPO/.review-stage/issue-3751/c.forgedgeneration9.md"*)
+        ok "q3/stub forged: and the parsed value it names is the WHOLE path, not a prefix of it" ;;
+      *) bad "q3/stub forged: the refusal must name the whole PARSED path (got: $OUT)" ;;
+    esac
+  fi
+fi
+
+# (c) THE `--c-verdict <path>` BRANCH READS THE SAME LINE, so the grammar/value validation (round
+#     7's L3) must not refuse a space-bearing path either. That branch runs no nonce check, so
+#     this isolates `c_parse_verdict` from round 10's binding.
+if run 0 "q3/explicit: an explicit verdict whose report path contains a SPACE is ACCEPTED" \
+  2421 "$CERTIFIED" "$GOOD" --c-verdict "$(c_verdict_file q3sp \
+    "REVIEW-STAGE: c RESULT: PASS elapsed=7 deadline=1800 agent=spec-auditor report=$T/a work dir/.review-stage/issue-1/c.abc.md")"; then
+  case "$OUT" in
+    *"NO USABLE VALUE"*)
+      bad "q3/explicit: a space-bearing report path was refused as a mandatory field with no usable value" ;;
+    *) ok "q3/explicit: the value validator does not red on a space-bearing path" ;;
+  esac
+  case "$OUT" in
+    *"report: $T/a work dir/.review-stage/issue-1/c.abc.md"*)
+      ok "q3/explicit: and the success line carries the whole value" ;;
+    *) bad "q3/explicit: the success line must carry the whole value (got: $OUT)" ;;
+  esac
+fi
+# AND THE FIELD CENSUS IS UNCHANGED: a BARE `report=` is still refused, so taking the remainder
+# did not turn "empty" into "the rest of the line".
+if run 2 "q3/explicit: a BARE report= is still refused (the remainder of nothing is nothing)" \
+  2421 "$CERTIFIED" "$GOOD" --c-verdict "$(c_verdict_file q3bare \
+    "REVIEW-STAGE: c RESULT: PASS elapsed=7 deadline=1800 agent=spec-auditor report=")"; then
+  case "$OUT" in
+    *"report= is EMPTY"*) ok "q3/explicit: and it is named as EMPTY, not silently widened" ;;
+    *) bad "q3/explicit: a bare report= must be named EMPTY (got: $OUT)" ;;
+  esac
+fi
+
+# (d) STRUCTURAL — THE PARSER'S ASSUMPTION IS ENFORCED, NOT ASSUMED. Taking the remainder of the
+#     line is correct ONLY while `report=` is the LAST field the emitter can produce. The states
+#     are DERIVED by RUNNING the shipped emitter (the same `c_capture_state` section 44b(v)
+#     uses), never listed by hand, and the property asserted is that NO mandatory key follows
+#     `report=` on any line it emits — so appending a field after it reds this suite.
+Q3_STATES="pass findings sentinel report-absent report-empty report-ungrammatical
+report-unreadable self-reported record-unreadable author-performed deadline-zero"
+Q3_LAST_BAD=0
+Q3_LAST_N=0
+for Q3_ST in $Q3_STATES; do
+  Q3_F="$(c_capture_state "$Q3_ST")" || Q3_F=""
+  if [ -z "$Q3_F" ] || [ ! -s "$Q3_F" ]; then
+    bad "q3/last: could not capture a verdict line for state '$Q3_ST' — the assertion below would be vacuous"
+    Q3_LAST_BAD=1
+    continue
+  fi
+  Q3_LAST_N=$((Q3_LAST_N + 1))
+  # The TAIL after `report=`. `sed` takes the FIRST occurrence, which is the field the parser
+  # reads; a second one is a duplicate the census refuses independently.
+  Q3_TAIL="$(LC_ALL=C sed -n 's/^REVIEW-STAGE: .* report=//p' "$Q3_F" 2>/dev/null | LC_ALL=C head -1 || true)"
+  case "$Q3_TAIL" in
+    *" elapsed="* | *" deadline="* | *" agent="* | *" report="*)
+      bad "q3/last: state '$Q3_ST' emits a mandatory key AFTER report=, so the remainder rule truncates it (tail: $Q3_TAIL)"
+      Q3_LAST_BAD=1 ;;
+    *) ;;
+  esac
+done
+if [ "$Q3_LAST_N" -ge 11 ]; then
+  ok "q3/last: $Q3_LAST_N emitter states were derived and captured (>= the 11 known ones)"
+else
+  bad "q3/last: only $Q3_LAST_N emitter state(s) captured — the derivation broke and this guard is vacuous"
+fi
+if [ "$Q3_LAST_BAD" -eq 0 ]; then
+  ok "q3/last: report= is the LAST field on every verdict line the shipped emitter can produce"
+else
+  bad "q3/last: report= is not last on some emitted state — the parser's remainder rule is unsound there"
+fi
+# THE EMITTER HAS EXACTLY ONE VERDICT-LINE SITE, and `report=` is written last on it. Asserted on
+# the SOURCE as well as on the output, because the behavioural sweep above can only cover the
+# states this suite knows how to reach.
+Q3_EMIT="$(LC_ALL=C grep -h 'RESULT: \$rendered' "$NEUTRAL_DIR/review-stage.sh" 2>/dev/null || true)"
+if [ "$(printf '%s\n' "$Q3_EMIT" | LC_ALL=C grep -c 'RESULT: \$rendered' || true)" -eq 1 ]; then
+  ok "q3/last-structural: the verdict line is emitted from exactly ONE site"
+else
+  bad "q3/last-structural: the verdict line is emitted from more than one site — the remainder rule would need checking at each"
+fi
+case "$Q3_EMIT" in
+  *'report=$(field_value "${STAGE_REPORT:-unresolved}")"') 
+    ok "q3/last-structural: that site ends with report=, so nothing follows the remainder" ;;
+  *) bad "q3/last-structural: report= is no longer the LAST thing on the emitted line (got: $Q3_EMIT)" ;;
+esac
+
+# (e) STRUCTURAL — THE READER TAKES THE REMAINDER, not one field. Behavioural cases only cover the
+#     paths someone thought of; this pins the mechanism against a "simplification" back to a field.
+if LC_ALL=C grep -q 'rep = substr($0, fs + 7)' "$ASSERT"; then
+  ok "q3/reader-structural: report= is read as the REMAINDER of the line"
+else
+  bad "q3/reader-structural: report= is no longer read as the remainder — a space-bearing path truncates again"
+fi
+if [ "$(LC_ALL=C grep -c 'rep = substr($i, 8)' "$ASSERT" || true)" -eq 0 ]; then
+  ok "q3/reader-structural: no field-truncating extraction of report= survives"
+else
+  bad "q3/reader-structural: the field-truncating extraction is still present"
+fi
+
 # --- 44h: THE STRUCTURAL EMIT-BOUNDARY GUARD (round 7, L1b) -------------------
 # The mirror of test_review_stage.sh section 18, for this script. See
 # scripts/tests/lib/emit-boundary-scan.sh for why the guard exists (the boundary was bypassed at a
@@ -4452,9 +4718,31 @@ fi
 # survives, and BOTH `diff.renames=false` and `diff.relative=false` are still pinned (they are
 # different axes: `:(top)` anchors what is SELECTED, `diff.relative` only what is PRINTED). All need
 # only bash, git and coreutils, so the floor moves by the SAME 10 and the derived 6-assertion margin
-# for the ONE host-gated block is PRESERVED UNCHANGED — still deliberately not the exact 421, for
-# the reason recorded above.
-ASSERT_FLOOR=415
+# for the ONE host-gated block is PRESERVED UNCHANGED.
+#
+# ROUND 11 (Q3) ADDS 20, ALL HOST-INDEPENDENT (421 -> 441): section 44l's 20 — a `report=` value
+# containing a SPACE must arrive WHOLE. `report=` carries a PATH, `_c_verdict_awk` took it as one
+# whitespace-delimited FIELD, so it truncated at the first space and round 10's nonce match then
+# REFUSED an otherwise VALID verdict — a false refusal on correct input (measured on the SHIPPED
+# artifacts in a checkout named `…/work tree`: `verdict reported: /tmp/…/work` beside a
+# `validated generation:` that was exactly the one the verdict named). A fixture whose DIRECTORY
+# NAME contains a space, driven end to end through the real producer (whose own emitted line is
+# asserted to carry the space, or the section would prove nothing about the reader); the
+# acceptance case plus a whole-path assertion on the SUCCESS line; a substituted-callee CONTROL
+# (a space-bearing path naming the VALIDATED generation certifies) and its counterpart (a
+# space-bearing path with a FOREIGN nonce still REFUSES, asserted on the `verdict reported:`
+# DETAIL line, because the block also echoes the RAW verdict line and an `$OUT`-wide match passed
+# in the pre-fix state); the `--c-verdict <path>` branch, which reads the same line under no nonce
+# check, so round 7's L3 value validation is isolated; a BARE `report=` still refused as EMPTY, so
+# taking the remainder did not turn "empty" into "the rest of the line"; and the assumption the
+# remainder rule RESTS on made ENFORCED rather than assumed — the 11 emitter states DERIVED by
+# running the shipped `review-stage.sh` (`c_capture_state`, section 44b(v)'s helper) with a
+# committed count floor, no mandatory key permitted to follow `report=` on any line it produces,
+# the single emit site pinned structurally, and the reader pinned to the remainder form with the
+# field-truncating form required ABSENT. All need only bash, git and coreutils, so the floor moves
+# by the SAME 20 and the derived 6-assertion margin for the ONE host-gated block is PRESERVED
+# UNCHANGED — still deliberately not the exact 441, for the reason recorded above.
+ASSERT_FLOOR=435
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

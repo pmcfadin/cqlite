@@ -366,6 +366,17 @@ directory, and any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUI
   admits the honest `unknown`/`unresolved` values an unreadable stage record yields. A validator
   written from what looks reasonable would REFUSE three legitimate emitter outputs, and a guard that
   reds on correct input is the guard agents learn to waive
+- **AND** `report=` SHALL be read as the REMAINDER OF THE LINE, not as one whitespace-delimited
+  field, because it carries an absolute PATH and a path may legitimately contain WHITESPACE: read as
+  a field the value TRUNCATED at the first space and the generation binding above then REFUSED an
+  otherwise VALID verdict — a false refusal on correct input
+- **AND** that rule SHALL rest on `report=` being emitted LAST, which SHALL be ENFORCED rather than
+  assumed: the emitter's states are DERIVED by RUNNING it, no mandatory key may follow `report=` on
+  any line it can produce, and its single emit site is pinned structurally, so a field appended after
+  `report=` REDS the suite instead of silently truncating verdicts
+- **AND** a BARE `report=` SHALL still be REFUSED as EMPTY, so taking the remainder does not turn
+  "empty" into "the rest of the line"; and a space-bearing path with a FOREIGN nonce SHALL still be
+  refused (the control: the acceptance must not be reachable by ceasing to compare generations)
 
 ### Requirement: A hand-performed substitute is recorded as author-performed, never as clean
 

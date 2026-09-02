@@ -1908,7 +1908,19 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   COUNTED, so a `PASS` line ending in a BARE `report=` was ACCEPTED — "counted, not measured". The
   permitted set is DERIVED FROM WHAT THE EMITTER PRODUCES, which is what stops it redding on correct
   input: digits or `unknown` for the two clocks, non-empty for `agent`/`report`, so round 6's honest
-  `unknown`/`unresolved` and a legitimate `deadline=0` all still pass). "Somewhere on this line it says `RESULT: PASS`" is not a verdict about
+  `unknown`/`unresolved` and a legitimate `deadline=0` all still pass). **`report=` IS READ AS THE
+  REMAINDER OF THE LINE, NOT AS ONE FIELD (round 11, Q3)** — it carries an absolute PATH, and a path
+  may legitimately contain WHITESPACE (a checkout at `/tmp/work tree`; this repo tracks 40
+  space-bearing paths under `docs/`), so a field read TRUNCATED it at the first space and the
+  generation binding above then REFUSED an otherwise VALID verdict: a false refusal on correct
+  input, measured on the shipped artifacts as `verdict reported: /tmp/…/work` beside a `validated
+  generation:` that was exactly the one the verdict named. **The remainder rule is sound ONLY
+  because `report=` is emitted LAST, so that assumption is ENFORCED, not assumed**: the emitter's 11
+  states are DERIVED by RUNNING it, no mandatory key may follow `report=` on any line it produces,
+  and its single emit site is pinned structurally — append a field after `report=` and the suite reds
+  instead of verdicts silently truncating again. The generalisation: **a parser that reads a
+  PATH-valued field positionally has a whitespace bug waiting; either take the remainder and pin the
+  field's position, or do not put a path on a positional line.** "Somewhere on this line it says `RESULT: PASS`" is not a verdict about
   C: measured on #3751's own branch, a sibling `code-review` stage's PASS line satisfied
   `--c-verdict`, and a truncated capture with no `elapsed=`/`agent=`/`report=` did too. Only `PASS`
   and `AUTHOR-PERFORMED`

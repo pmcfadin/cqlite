@@ -36,6 +36,11 @@
 # ------------------------------------------------------
 #   REVIEW-STAGE: <kind> RESULT: <token> elapsed=<secs> deadline=<secs> agent=<t> report=<abs>
 #
+#   `report=` IS LAST BY CONTRACT, NOT BY HABIT (#3751 round 11, Q3): its value is a PATH that may
+#   contain a SPACE, so `premerge-assert.sh` reads it as the REMAINDER of the line. Adding a field
+#   after it would truncate every space-bearing path again; pinned by section 44l of
+#   scripts/tests/test_premerge_assert.sh against THIS emitter's own output.
+#
 #   token             meaning                                            exit
 #   PASS              a report was written recording no blocking finding   0
 #   FINDINGS          a report was written recording >=1 blocking finding  4
@@ -1842,6 +1847,14 @@ cmd_verdict() {
   # generation's nonce, and `premerge-assert.sh` requires that nonce to be the one it validated in
   # the stage record — which is what catches an ABA replacement its byte comparison cannot see.
   # `unresolved` stays the honest non-measurement, and that consumer refuses on it by name.
+  #
+  # AND IT MUST STAY LAST ON THIS LINE (#3751 round 11, Q3). A report path may legitimately contain
+  # a SPACE (a checkout at `/tmp/work tree`), so that consumer reads `report=` as the REMAINDER of
+  # the line rather than as one whitespace-delimited field — a field read truncated the value and
+  # REFUSED a correct verdict. Appending a field after `report=` would silently truncate every such
+  # path again; the property is pinned against THIS emitter by section 44l of
+  # scripts/tests/test_premerge_assert.sh (its 11 states derived by RUNNING this script), so such a
+  # change reds that suite rather than shipping.
   emit "$KI_KIND RESULT: $rendered elapsed=$STAGE_ELAPSED deadline=$(field_value "$STAGE_DEADLINE") agent=$(field_value "$STAGE_AGENT") report=$(field_value "${STAGE_REPORT:-unresolved}")"
   case "$token" in
     PASS) exit 0 ;;
