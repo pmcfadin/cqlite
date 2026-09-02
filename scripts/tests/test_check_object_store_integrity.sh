@@ -1358,41 +1358,69 @@ if [ "$trap_n" -ge 4 ] && grep -qx 'trap finish EXIT' "$TRAP_SRC" &&
 else
   bad "signal-trap-plant: extracted $trap_n trap line(s) [$(tr '\n' ';' <"$TRAP_SRC")] — the case below would prove nothing"
 fi
-# mk_trap_harness <path> <trap-file> — the real `finish`'s status rule plus <trap-file>'s
-# declarations, then a loop whose last command exits 0.
+# mk_trap_harness <path> <trap-file> <ready-file> — the real `finish`'s status rule plus
+# <trap-file>'s declarations, a READINESS STAMP, then a loop whose last command exits 0.
 mk_trap_harness() {
-  local path="$1" traps="$2"
+  local path="$1" traps="$2" ready="$3"
   {
     printf '#!/usr/bin/env bash\n'
     printf 'finish() { local rc=$?; if [ "$rc" -ne 0 ]; then exit 1; fi; exit 0; }\n'
     cat "$traps"
+    # THE SIGNAL IS ORDERED BY THIS STAMP, NEVER BY A SLEEP. A fixed delay would be a
+    # wall-clock race of exactly the class this file's fixture pin removes: on a loaded
+    # box bash can take longer than the delay to start, parse and INSTALL ITS TRAPS, and
+    # a SIGTERM arriving before them is handled by the DEFAULT disposition (exit 143).
+    # That makes the RED arm below — which requires the old form to exit 0 — fail-close
+    # for a reason that has nothing to do with the trap form under test, while the GREEN
+    # arm would still pass, for the wrong reason. The stamp is written only after every
+    # trap declaration has executed, so the kill below cannot outrun them.
+    printf 'printf r >%q\n' "$ready"
     printf 'while :; do :; done\n'
   } >"$path"
   chmod +x "$path"
 }
-# term_status <harness> -> the exit status after a SIGTERM 0.3s in.
+# term_status <harness> <ready-file> -> the exit status after a SIGTERM delivered once the
+# harness has AFFIRMATIVELY installed its traps, or `not-ready` if it never got there
+# (bounded: a wedged harness fails the run rather than hanging it).
 term_status() {
-  local h="$1" pid st=0
+  local h="$1" ready="$2" pid st=0 waited=0
+  rm -f "$ready"
   bash "$h" >/dev/null 2>&1 &
   pid=$!
-  sleep 0.3
+  while [ ! -e "$ready" ] && [ "$waited" -lt 200 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    kill -KILL "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    printf 'not-ready'
+    return
+  fi
   kill -TERM "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null || st=$?
   printf '%s' "$st"
 }
-mk_trap_harness "$T/trap-green.sh" "$TRAP_SRC"
+mk_trap_harness "$T/trap-green.sh" "$TRAP_SRC" "$T/trap-green.ready"
 printf 'trap finish EXIT\ntrap %s INT TERM HUP\n' "'finish'" >"$T/trap-red-lines.txt"
-mk_trap_harness "$T/trap-red.sh" "$T/trap-red-lines.txt"
-green_st=$(term_status "$T/trap-green.sh")
-red_st=$(term_status "$T/trap-red.sh")
-if [ "$red_st" -eq 0 ]; then
+mk_trap_harness "$T/trap-red.sh" "$T/trap-red-lines.txt" "$T/trap-red.ready"
+green_st=$(term_status "$T/trap-green.sh" "$T/trap-green.ready")
+red_st=$(term_status "$T/trap-red.sh" "$T/trap-red.ready")
+# A NON-NUMERIC STATUS IS ITS OWN REFUSAL, never fed to `[ ... -eq ]`: an unmeasured
+# harness must not be read as either verdict.
+trap_measured=yes
+case "$green_st" in '' | *[!0-9]*) trap_measured=no ;; esac
+case "$red_st" in '' | *[!0-9]*) trap_measured=no ;; esac
+if [ "$trap_measured" = no ]; then
+  bad "signal-trap-harness: a harness never reported its traps installed (green='$green_st' red='$red_st') — the two cases here would prove nothing"
+elif [ "$red_st" -eq 0 ]; then
   ok "signal-trap-control: the OLD form (a signal delegating straight to finish) really does exit 0 on SIGTERM — the harness can see the defect"
 else
   bad "signal-trap-control: the old form exited $red_st, not 0 — a green below would prove nothing"
 fi
-if [ "$green_st" -ne 0 ]; then
+if [ "$trap_measured" = yes ] && [ "$green_st" -ne 0 ]; then
   ok "signal-trap: THIS suite's own trap declarations exit NONZERO ($green_st) on SIGTERM — a signalled run can never be read as a pass with cases unrun"
-else
+elif [ "$trap_measured" = yes ]; then
   bad "signal-trap: this suite's traps exit 0 on SIGTERM — a truncated run reports green"
 fi
 
