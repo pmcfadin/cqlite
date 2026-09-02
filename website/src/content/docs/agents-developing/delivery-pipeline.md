@@ -710,7 +710,24 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   calls can both choose — measured, both printed `c.1.md` and one agent's `FINDINGS` became the
   other's `PASS`. The scan, its attempt bound and its exhaustion refusal are DELETED rather than
   locked: a lock serialises a race a nonce removes and adds its own failure modes, while subtraction
-  cannot introduce a false PASS; `reopen-count:` remains as the human-readable audit number — and it SATURATES at the ten-digit ceiling rather than restarting (#3751 round 9): `$(( prior + 1 ))` walked off round 8's bound, so the next re-open read an eleven-digit value as incomparable and restarted the count at `1` (measured: the record held `10000000000`, then `1`). Refusal was rejected as the fix — round 8's own ruling is that an unusable counter is never a reason to refuse a spawn — so it is HELD, meaning AT LEAST that many, `note`d when the hold happens, and rendered `<n>+` by ONE renderer on both `OPEN-OK` and `status` (which reports the counter as of this change).
+  cannot introduce a false PASS. **BUT GENERATED IS NOT RESERVED, AND THAT ROUND DELETED THE
+  RESERVATION ALONG WITH THE SCAN (round 12, R1).** `mktemp -u` invents a NAME and creates NOTHING,
+  so an unreserved nonce repeating a report already on disk — a HISTORICAL report of the same stage,
+  deliberately kept as the audit trail — let `open` write over that report and REPUBLISH its path
+  in the record: a recorded verdict replaced by the sentinel, and the superseded agent still holding
+  that path handed the ability to write the CURRENT one, i.e. exactly what round 5's binding exists
+  to prevent, reached with **no concurrency at all**. Deleting the scan was right; deleting the
+  reservation was not. The name is now CLAIMED — each candidate created under `set -C`
+  (`O_CREAT|O_EXCL`), a FRESH RANDOM nonce on collision, and exhausting the bounded attempts is a
+  NAMED refusal (`reason=report-nonce-not-reserved`), never a fallback to an unreserved name.
+  **That is not the scan returning, and the distinction is the whole point:** the scan SELECTED a
+  name by TESTING EXISTENCE and wrote it in a LATER step — two steps, with a window two callers
+  could both observe — while an exclusive create IS the choice, so decision and claim are one
+  operation. Everything the nonce bought survives (nothing selected by scanning, an opaque token,
+  the path from the record, the record written LAST); the reserved name is an owned resource
+  registered with the cleanup path the moment it exists and de-registered on fulfilment, so a
+  refused open leaves the tree as it found it and the cleanup can never delete the published report.
+  `reopen-count:` remains as the human-readable audit number — and it SATURATES at the ten-digit ceiling rather than restarting (#3751 round 9): `$(( prior + 1 ))` walked off round 8's bound, so the next re-open read an eleven-digit value as incomparable and restarted the count at `1` (measured: the record held `10000000000`, then `1`). Refusal was rejected as the fix — round 8's own ruling is that an unusable counter is never a reason to refuse a spawn — so it is HELD, meaning AT LEAST that many, `note`d when the hold happens, and rendered `<n>+` by ONE renderer on both `OPEN-OK` and `status` (which reports the counter as of this change).
   Superseded reports stay on disk as HISTORY — nothing reads them, and since round 6 nothing depends
   on their existence either — so **paste the path `open` PRINTS into the spawn prompt, never a
   remembered one**; it carries a nonce and cannot be reconstructed, so where none was named ask

@@ -417,7 +417,27 @@ Three further declared limits of the mechanism itself:
   a holder killed mid-open) to a tool whose subject is not taking the permissive branch when
   something cannot be measured. The scan, its attempt bound and its exhaustion refusal are
   **DELETED**: with nothing selected there is nothing to exhaust, and subtraction cannot introduce
-  a false PASS. The randomness comes from `mktemp -u`'s name substitution — the same source the
+  a false PASS. **BUT GENERATED IS NOT RESERVED, AND ROUND 6 DELETED THE RESERVATION ALONG WITH
+  THE SCAN (round 12, R1).** `mktemp -u` invents a NAME and creates NOTHING, so an unreserved nonce
+  repeating a report already on disk — a HISTORICAL report of this stage, deliberately kept as the
+  audit trail — let `open` write over that report and REPUBLISH its path in the record: a recorded
+  verdict replaced by a sentinel, and the superseded agent still holding that path handed the
+  ability to write the CURRENT one. Deleting the scan was right (it raced); deleting the
+  reservation was not. The name is now CLAIMED rather than merely invented — each candidate is
+  created under `set -C` (`O_CREAT|O_EXCL`), a collision generates a FRESH RANDOM nonce, and
+  exhausting the bounded attempts is a NAMED refusal (`reason=report-nonce-not-reserved`), never a
+  fallback to an unreserved name. **That is not the scan coming back**, and the distinction is the
+  whole point: the scan SELECTED a name by TESTING EXISTENCE and wrote it LATER (two steps, with a
+  window in between), while an `O_EXCL` create IS the choice — one operation, so there is nothing
+  to interleave in and no name is derived from a state that has since changed. Everything the
+  nonce bought survives: nothing is selected by scanning, the token stays opaque, readers take the
+  path from the record, and the record is still written LAST. The reserved name is an OWNED
+  RESOURCE and is registered with the cleanup path the moment it exists (a fix that adds a resource
+  inherits that resource's lifetime bugs), de-registered on fulfilment so the cleanup can never
+  delete the published report; an `open` that reserves and then refuses leaves the stage directory
+  as it found it. Declared limit, exactly `WRITE_TMP`'s: bash runs no EXIT trap for a signal at its
+  default disposition, so a SIGKILL or an unhandled INT/TERM/HUP leaves an empty file in a
+  gitignored directory that no record names. The randomness comes from `mktemp -u`'s name substitution — the same source the
   write path's temporary name already uses — and no cryptographic strength is needed or claimed:
   the nonce is a uniqueness token, not a secret. There is deliberately **no fallback generator**; a
   box that cannot produce one is refused by name. **`reopen-count` SATURATES at the ten-digit

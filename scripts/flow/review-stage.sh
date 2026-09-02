@@ -182,6 +182,20 @@
 # a false PASS. `reopen-count:` remains as the human-readable audit number — it answers a
 # different question (how many spawns), and the nonce only has to be UNIQUE.
 #
+# BUT GENERATED IS NOT RESERVED, AND ROUND 6 DELETED THE RESERVATION ALONG WITH THE SCAN (#3751
+# round 12, R1). `mktemp -u` invents a NAME and creates NOTHING, so an UNRESERVED nonce that
+# repeats a report already on disk — a HISTORICAL report of this stage, deliberately kept as the
+# audit trail — let this open write over that report and REPUBLISH its path in the record: a
+# recorded verdict replaced by a sentinel, and the superseded agent STILL HOLDING that path handed
+# the ability to write the CURRENT one. So the name is CLAIMED, not merely invented:
+# `reserve_report_path` creates each candidate under `set -C` (`O_CREAT|O_EXCL`) and generates a
+# FRESH random nonce on collision, under a bounded attempt count whose exhaustion is a NAMED
+# refusal (`reason=report-nonce-not-reserved`) and never a fallback to an unreserved name. THAT IS
+# NOT THE SCAN RETURNING: the scan SELECTED a name by testing existence and wrote it LATER — two
+# steps with a window — while the create IS the choice, one operation, nothing to interleave in.
+# Everything the nonce bought is intact: nothing is selected (a collision yields a fresh RANDOM
+# token, never the "next" one), the token stays opaque, and the record is still written LAST.
+#
 # THE NONCE IS THE RECORD'S TO NAME, AND IT IS AN OPAQUE TOKEN, NOT A PATH. Round 4 (H2) removed
 # the record's `report:` PATH field because a data file naming a location let a reader be
 # redirected to another file; a validated alphanumeric token cannot redirect, and the readers
@@ -843,6 +857,117 @@ new_report_nonce() {
   printf '%s\n' "$tok"
 }
 
+# RESERVE_ATTEMPTS — how many nonces one `open` may try before refusing. ONE top-level literal, so
+# the loop and the refusal that names it cannot drift apart. BOUNDED for the reason
+# `prepare_write`'s loop is bounded: an unbounded retry would spin forever on a directory that
+# cannot be written, and "cannot tell" must not become "keep trying".
+RESERVE_ATTEMPTS=8
+# THE RESERVATION IS UNDONE IF THE OPEN NEVER COMPLETES. An `open` that refuses must leave the
+# tree exactly as it found it — an empty file at a report path nothing published is indistinguishable
+# from a crashed write, which is the same reason `commit_write` removes its temporary file rather
+# than leaving it. Registered THE MOMENT the name is claimed and de-registered the moment real
+# content holds it (in `commit_write`, matched by path, so no call site has to remember), which is
+# round 9's register-before-create ordering.
+#
+# DECLARED LIMIT, and it is EXACTLY `WRITE_TMP`'s: the EXIT trap covers a normal exit and every
+# `exit 2` refusal path, and bash runs no EXIT trap for a signal left at its default disposition —
+# so a SIGKILL, and an unhandled INT/TERM/HUP, leave the reservation behind. That residual costs an
+# empty file in a gitignored directory that no stage record names, so it is stated rather than
+# closed: adding signal handlers here would change `WRITE_TMP`'s lifetime too, which is not this
+# item's subject.
+RESERVED_PATH=""
+cleanup_reserved_path() {
+  [ -z "$RESERVED_PATH" ] || rm -f "$RESERVED_PATH" 2>/dev/null || true
+}
+# The reservation's outputs. GLOBALS, not a printed value, for the `WRITE_TMP` reason stated above:
+# the path verification below refuses by EMITTING and exiting 2, and inside a command substitution
+# that exit would end only the SUBSHELL while the refusal text was captured into a variable — a
+# refusal nobody sees, and a script that carries on writing.
+REPORT_NONCE=""
+REPORT_RESERVED=""
+# reserve_report_path <issue> <kind> <dir> — CLAIM this open's report path ATOMICALLY, rather than
+# merely GENERATING a name and hoping (#3751 round 12, R1). Sets `REPORT_NONCE`/`REPORT_RESERVED`
+# and returns 0, or returns non-zero having set neither.
+#
+# THE FINDING. Round 6 replaced the SCANNED generation with a random nonce and, along with the
+# scan, deleted the existence belt. `mktemp -u` invents a NAME and creates NOTHING, so a nonce that
+# repeats a report already on disk — a HISTORICAL report of this same stage, deliberately kept as
+# the audit trail — sent this open's `mv -f -T` straight over that report and REPUBLISHED its path
+# in the stage record. Two harms in one: a recorded verdict is replaced by a sentinel, and the
+# superseded agent STILL HOLDING that path can then write the CURRENT verdict — exactly the
+# property round 5's generation binding exists to prevent, reached with no concurrency at all.
+#
+# WHY THIS IS NOT THE ROUND-6 SCAN COMING BACK. Deleting the scan was right; deleting the
+# reservation was not, and the difference is the whole point. The old loop SELECTED a name by
+# TESTING EXISTENCE (`[ -e <kind>.<gen>.md ]`) and wrote to it LATER: two steps with a window
+# between them, so two callers observing the same directory both chose the same value and neither
+# observation was still true when the write happened. Here the decision and the claim are ONE
+# operation — the create under `set -C` (`O_CREAT|O_EXCL`) IS the choice — so there is no window to
+# interleave in, and no name is ever derived from a state that has since changed. Everything round
+# 6 gained is preserved: nothing is SELECTED by scanning (a collision yields a FRESH RANDOM nonce,
+# never the "next" one, so the value is still not a function of what exists), the token stays
+# OPAQUE, readers still take the path from the stage record, the record is still written LAST as
+# the publication marker (round 4, H1), and the report is still reset to the sentinel FIRST.
+#
+# THE RESERVATION IS AN EMPTY FILE THAT NO READER CAN SEE. It is claimed here, replaced by the
+# sentinel a few lines later (`commit_write`'s `mv -f -T` renames OVER it), and the only report
+# path any reader derives comes from the stage record — which is written after both. So it is
+# unreachable BY CONSTRUCTION rather than by timing. A reservation LEAKED by a later refusal is an
+# empty file in a gitignored directory that no record names; it costs a few bytes and is left in
+# place deliberately, exactly as a superseded report is.
+#
+# NO FALLBACK TO AN UNRESERVED NAME. Running out of attempts is a NAMED refusal: an unreserved
+# name is precisely the value this removes, so "cannot claim one" must not take the permissive
+# branch. TWO DISTINCT NON-ZERO STATUSES, because the operator action differs — 1 = this box could
+# not GENERATE a token at all (no usable `mktemp`; fix the box), 2 = tokens were generated and none
+# could be CLAIMED (the directory is not writable, or — astronomically — a run of collisions).
+reserve_report_path() {
+  local issue="$1" kind="$2" dir="$3"
+  local nonce cand attempt=0 had_noclobber opened generated=0
+  REPORT_NONCE=""
+  REPORT_RESERVED=""
+  while [ "$attempt" -lt "$RESERVE_ATTEMPTS" ]; do
+    attempt=$((attempt + 1))
+    nonce="$(new_report_nonce "$dir")"
+    # THE PREDICATE IS APPLIED IN THE PARENT SHELL, never from inside the substitution (#3751
+    # round 2, B6). A token this box cannot produce is not retried into existence, but the loop
+    # still completes so the caller's cause is decided by `generated`, not by loop position.
+    nonce_is_valid "$nonce" || continue
+    generated=1
+    cand="$(report_path "$issue" "$kind" "$nonce")"
+    # THE PATH IS VERIFIED BEFORE IT IS CLAIMED, on the EXACT name about to be created — the same
+    # order (and the same reason) as `prepare_write`: `git check-ignore` answers about a path
+    # STRING, so checking the string we then create is not a time-of-check/time-of-use gap. Both
+    # asserts refuse by emitting and exiting 2, which is why this function runs in the parent
+    # shell. `mkdir -p` after the symlink walk, because a component that is a DANGLING symlink
+    # makes it fail with "File exists" — an unnamed exit 1 under `set -e` instead of a refusal.
+    assert_no_symlink "$cand" report-of-record
+    mkdir -p "$dir"
+    assert_ignored "$cand" report-of-record
+    # THE CLAIM. `set -C` makes this `O_CREAT|O_EXCL`, so an existing path is a REFUSED create and
+    # never a clobber — a historical report of this stage, a peer's live reservation, and a
+    # symlink (dangling or not) all take the retry branch instead of being written through. The
+    # caller's noclobber setting is preserved: this script does not set it, but a future caller
+    # sourcing these helpers must not have it silently cleared.
+    had_noclobber=0
+    case "$-" in *C*) had_noclobber=1 ;; esac
+    opened=0
+    set -C
+    if : >"$cand" 2>/dev/null; then opened=1; fi
+    [ "$had_noclobber" -eq 1 ] || set +C
+    if [ "$opened" -eq 1 ]; then
+      # REGISTERED BEFORE THE CALLER CAN SEE IT, so no path exists that this process created and
+      # does not own for cleanup (#3751 round 9's register-before-create rule, applied here).
+      RESERVED_PATH="$cand"
+      REPORT_NONCE="$nonce"
+      REPORT_RESERVED="$cand"
+      return 0
+    fi
+  done
+  [ "$generated" -eq 1 ] || return 1
+  return 2
+}
+
 
 # assert_ignored <path> <what> — FAIL-CLOSED gitignore verification (see the header). Asks
 # git; refuses on anything that is not an affirmative "yes, ignored". `check-ignore -q` exits
@@ -991,7 +1116,11 @@ WRITE_TMP=""
 cleanup_write_tmp() {
   [ -z "$WRITE_TMP" ] || rm -f "$WRITE_TMP" 2>/dev/null || true
 }
-trap cleanup_write_tmp EXIT
+# BOTH OWNED ARTIFACTS ARE REAPED BY THE ONE TRAP: the temporary file and, since round 12's R1,
+# the reserved report name. Two handlers behind one `trap` rather than two `trap`s, because bash
+# keeps only the LAST registration for a signal and a second `trap … EXIT` would silently replace
+# the first.
+trap 'cleanup_write_tmp; cleanup_reserved_path' EXIT
 prepare_write() {
   local dest="$1" what="$2"
   local dir base cand had_noclobber attempt=0 opened=0
@@ -1093,6 +1222,14 @@ commit_write() {
     esac
     exit 2
   fi
+  # THE RESERVATION IS FULFILLED THE MOMENT THE NAME HOLDS REAL CONTENT (#3751 round 12, R1), so
+  # it is de-registered HERE and not at the call site: a cleanup that still fired afterwards would
+  # delete the PUBLISHED report. It is done BEFORE the line below because that line is the write
+  # boundary section 11f instruments — an interruption AT the boundary is an interruption AFTER the
+  # rename, and the reservation is already fulfilled at that instant. Matched by PATH, so no caller
+  # has to remember, and a no-op for every write whose destination was never reserved (the stage
+  # record, and `record-author-performed`'s replacement of an existing report).
+  [ "$dest" != "$RESERVED_PATH" ] || RESERVED_PATH=""
   WRITE_TMP=""
 }
 
@@ -1326,33 +1463,49 @@ cmd_open() {
   # exhaust and nothing to race, and the record written LAST is the published one while the
   # loser's agent writes to a path no reader derives. Subtraction cannot introduce a false PASS.
   #
-  # THE EXISTENCE BELT IS DELETED WITH IT, and the property it was for is now structural: a
-  # record deleted by hand while its report survives no longer restarts a counter at 0, because
-  # there is no counter — a fresh open picks a value nothing on disk can predict.
+  # THE SCAN'S EXISTENCE BELT IS DELETED WITH IT, but the RESERVATION IS NOT (#3751 round 12, R1).
+  # Round 6 removed both, and the second removal was wrong: `mktemp -u` invents a name and creates
+  # nothing, so a nonce repeating a report already on disk let this open write over that report and
+  # REPUBLISH its path — handing the superseded agent that still holds it the ability to write the
+  # CURRENT verdict. `reserve_report_path` claims the name ATOMICALLY instead (one `O_EXCL` create
+  # per attempt, a FRESH random nonce on collision), which is not the scan returning: the scan
+  # chose a name in one step and wrote it in another, and this decides and claims in the same
+  # operation. The counter, the walk and its exhaustion refusal stay deleted; see that function.
   #
   # `reopen-count` REMAINS, and it is where the human-readable audit number lives. It answers a
   # DIFFERENT question from the nonce (how many times this stage was spawned, versus which report
   # is current), and it is what an operator reads beside `reopened-at:` to correlate a surviving
   # report with a re-spawn; the nonce only has to be UNIQUE.
-  nonce="$(new_report_nonce "$dir")"
-  if ! nonce_is_valid "$nonce"; then
+  #
+  # THE REPORT HALF OF THE PATH VERIFICATION happens INSIDE the reservation, on each candidate,
+  # because the name is not known until it has been claimed. Its PARENT is the SAME directory as
+  # the stage record's, created above, and it is `<repo-root>/.review-stage/issue-<N>` BY
+  # DERIVATION — so the `mkdir` in there cannot create anything outside the checkout whatever the
+  # caller passed (#3751 round 4, H3: it once could, because the caller supplied the path and the
+  # containment check came AFTER it).
+  #
+  # THE STATUS IS CAPTURED WITH `|| rrc=$?`, NEVER `if ! …; then rrc=$?`, which reads 0 — the
+  # negation has already consumed the status by then.
+  local rrc=0
+  reserve_report_path "$issue" "$kind" "$dir" || rrc=$?
+  if [ "$rrc" -ne 0 ]; then
     # NO FALLBACK, for the reason `prepare_write` has none: every predictable substitute (a pid, a
     # timestamp, a counter) is exactly the collidable value this replaces, so a box that cannot
     # generate an unpredictable token is REFUSED rather than given a weaker one it cannot see.
-    emit "$REFUSE_MARKER reason=report-nonce-not-generated kind=$kind issue=$issue value=$(field_value "${nonce:-<none>}")"
-    emit "$REFUSE_MARKER detail=an unpredictable report nonce could not be generated, so NO report path was derived and NOTHING was written. The nonce comes from mktemp -u's name substitution, so this box has no usable mktemp. There is deliberately no fallback to a predictable token (a pid, a timestamp, a counter): a token two concurrent opens could both choose is the collision this nonce exists to remove, so refusing is the fail-closed answer."
+    # TWO CAUSES, NAMED SEPARATELY, because the operator action differs: a token that could not be
+    # GENERATED means this box has no usable `mktemp`; tokens that could not be CLAIMED mean the
+    # directory cannot be written.
+    if [ "$rrc" -eq 1 ]; then
+      emit "$REFUSE_MARKER reason=report-nonce-not-generated kind=$kind issue=$issue value=$(field_value "${REPORT_NONCE:-<none>}")"
+      emit "$REFUSE_MARKER detail=an unpredictable report nonce could not be generated, so NO report path was derived and NOTHING was written. The nonce comes from mktemp -u's name substitution, so this box has no usable mktemp. There is deliberately no fallback to a predictable token (a pid, a timestamp, a counter): a token two concurrent opens could both choose is the collision this nonce exists to remove, so refusing is the fail-closed answer."
+    else
+      emit "$REFUSE_MARKER reason=report-nonce-not-reserved kind=$kind issue=$issue attempts=$RESERVE_ATTEMPTS"
+      emit "$REFUSE_MARKER detail=a report path could not be CLAIMED in $RESERVE_ATTEMPTS attempt(s), so NOTHING was written and no stage record was published. Each attempt generates a fresh nonce and creates that path O_EXCL, so a name already on disk is retried rather than written through — which is what stops this open replacing a HISTORICAL report and republishing its path to an agent that still holds it. Either this stage directory is not writable, or something is occupying the names generated. There is deliberately no fallback to an unreserved name: that is the value this reservation removes."
+    fi
     exit 2
   fi
-  rpath="$(report_path "$issue" "$kind" "$nonce")"
-
-  # THE REPORT HALF OF THE PATH VERIFICATION, on the path that was just chosen. Its PARENT is the
-  # SAME directory as the stage record's, created above, and it is
-  # `<repo-root>/.review-stage/issue-<N>` BY DERIVATION — so this `mkdir` cannot create anything
-  # outside the checkout whatever the caller passed (#3751 round 4, H3: it once could, because the
-  # caller supplied the path and the containment check came AFTER this line).
-  assert_no_symlink "$rpath" report-of-record
-  mkdir -p "$(dirname "$rpath")"
-  assert_ignored "$rpath" report-of-record
+  nonce="$REPORT_NONCE"
+  rpath="$REPORT_RESERVED"
 
   # THE WRITE ORDER IS LOAD-BEARING: THE REPORT IS RESET FIRST AND THE STAGE RECORD IS WRITTEN
   # LAST, SO THE RECORD IS THE PUBLICATION MARKER (#3751 round 4, H1).

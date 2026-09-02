@@ -3000,6 +3000,242 @@ else
   bad "reopen/structural: MAX_INT_DIGITS is not derived from MAX_INT_VALUE (grep found: $(LC_ALL=C grep -n '^MAX_INT_' "$RS" | LC_ALL=C tr '\n' ' '))"
 fi
 
+# --- 23. THE REPORT NONCE MUST BE RESERVED, NOT MERELY GENERATED (round 12, R1) ----
+# THE FINDING (roborev job 386, R1). Round 6 replaced the SCANNED generation with a random nonce
+# and, along with the scan, DELETED the existence belt. Deleting the scan was right — it raced.
+# Deleting the reservation was not: `mktemp -u` invents a NAME and creates NOTHING, so a nonce that
+# repeats a report already on disk (a historical report of the same stage) sends `open`'s
+# `mv -f -T` straight over that report and REPUBLISHES its path in the record. The sentinel
+# replaces a recorded verdict, and the superseded agent still holding that path can then write the
+# CURRENT verdict — the exact property round 5's generation binding exists to prevent, reached with
+# no concurrency at all.
+#
+# THE FIX IS AN ATOMIC CLAIM, NOT THE OLD SCAN. The old loop SELECTED a name by TESTING EXISTENCE
+# and wrote to it later: two steps with a window between them. `reserve_report_path` creates the
+# name under `set -C` (`O_CREAT|O_EXCL`), so the decision and the claim are ONE operation; a
+# collision yields a FRESH random nonce, never the "next" one, and exhausting the bounded attempts
+# is a NAMED refusal rather than a fallback to an unreserved name.
+#
+# THE COLLISION IS FORCED, NOT WAITED FOR. A real nonce repeat is astronomically unlikely, so the
+# generator is driven from a FEED FILE in a SCRATCH COPY of the shipped script — the ARTIFACT is
+# substituted, there is no settable seam in the shipped script (#3312's corollary for tests). Each
+# feed line supplies one `mktemp -u`-shaped candidate; once the feed is empty the scratch copy
+# falls back to the real generator, which is what makes the retry case observable.
+R1_D="$T/r1"; mkdir -p "$R1_D"
+R1_TAKEN=TAKENNONCE1
+# `awk -v` PERFORMS ESCAPE PROCESSING on its value (round 7's measured harness defect), so both
+# the anchor and the replacement travel through ENVIRON.
+r1_build() {
+  local dest="$1" feed="$2"
+  R1_ANCHOR='cand="$(mktemp -u "$dir/.nonce.XXXXXXXXXX"' \
+  R1_REPL='  cand="$(LC_ALL=C sed -n 1p "'"$feed"'" 2>/dev/null || true)"; if [ -n "$cand" ]; then LC_ALL=C sed -i 1d "'"$feed"'" 2>/dev/null || true; else cand="$(mktemp -u "$dir/.nonce.XXXXXXXXXX" 2>/dev/null || true)"; fi # R1_FEED_GENERATOR' \
+  LC_ALL=C awk '
+    BEGIN { a = ENVIRON["R1_ANCHOR"]; r = ENVIRON["R1_REPL"]; done = 0 }
+    index($0, a) > 0 && done == 0 { print r; done = 1; next }
+    { print }
+  ' "$RS" >"$dest" 2>/dev/null || return 1
+  [ -s "$dest" ] || return 1
+  LC_ALL=C grep -q 'R1_FEED_GENERATOR' "$dest" || return 1
+  # THE ORIGINAL GENERATOR LINE MUST BE GONE, or the feed would be ignored and every case below
+  # would pass for the wrong reason (a scratch copy identical to the shipped script).
+  LC_ALL=C grep -q 'cand="\$(mktemp -u "\$dir/\.nonce\.XXXXXXXXXX" 2>/dev/null || true)"$' "$dest" && return 1
+  bash -n "$dest" 2>/dev/null || return 1
+  return 0
+}
+# r1_feed <path> <n> — n identical TAKEN candidates, so the generator collides n times.
+r1_feed() {
+  local f="$1" n="$2" i=0
+  : >"$f"
+  while [ "$i" -lt "$n" ]; do
+    i=$((i + 1))
+    printf '/unused/.nonce.%s\n' "$R1_TAKEN" >>"$f"
+  done
+}
+
+# (a) A NONCE THAT REPEATS AN EXISTING REPORT IS REFUSED, AND THE HISTORICAL REPORT SURVIVES.
+#     The feed collides on every attempt, so the reservation can never succeed. This is the branch
+#     that must NAME its refusal rather than fall back to an unreserved name.
+R1_FEED_A="$R1_D/feed-a.txt"
+r1_feed "$R1_FEED_A" 32
+if r1_build "$R1_D/collide.sh" "$R1_FEED_A"; then
+  ok "r1/collide: the feed-driven generator landed in the scratch copy (asserted, not assumed)"
+else
+  bad "r1/collide: the feed-driven generator did NOT land — the assertions below would be vacuous"
+fi
+R1A="$(newrepo)"
+R1A_DIR="$R1A/.review-stage/issue-820"
+mkdir -p "$R1A_DIR"
+R1A_HIST="$R1A_DIR/c.$R1_TAKEN.md"
+printf 'result: FINDINGS\n\n### [BLOCKER] the historical agent found this\n' >"$R1A_HIST"
+OUT="$(cd "$R1A" && bash "$R1_D/collide.sh" open c --issue 820 --agent spec-auditor 2>&1)"; RC=$?
+rc_is 2 "r1/collide: an open whose every nonce is already taken REFUSES"
+has "reason=report-nonce-not-reserved" "r1/collide: the refusal NAMES the cause (a claim that could not be made, not a token that could not be generated)"
+hasnt "reason=report-nonce-not-generated" "r1/collide: and does not report the generator failing, which is a different operator action"
+OUT="$(cat "$R1A_HIST" 2>/dev/null || printf '<absent>\n')"; RC=0
+has "### [BLOCKER] the historical agent found this" "r1/collide: the historical report is BYTE-INTACT — nothing was written over it"
+hasnt "no report written" "r1/collide: and its recorded verdict was not replaced by a sentinel"
+if [ ! -f "$R1A_DIR/c.stage" ]; then
+  ok "r1/collide: no stage record was published, so no reader derives the historical path as current"
+else
+  bad "r1/collide: a stage record was published by a refused open (it names $(RECORD_NONCE "$R1A" 820 c))"
+fi
+
+# (b) A COLLISION RETRIES TO A FRESH NONCE. One TAKEN candidate, then the real generator — so the
+#     first attempt collides and the second succeeds. This is the branch that must NOT refuse: a
+#     guard that reds on a recoverable collision is the guard agents learn to waive.
+R1_FEED_B="$R1_D/feed-b.txt"
+r1_feed "$R1_FEED_B" 1
+if r1_build "$R1_D/retry.sh" "$R1_FEED_B"; then
+  ok "r1/retry: the feed-driven generator landed for the retry case"
+else
+  bad "r1/retry: the feed-driven generator did NOT land for the retry case"
+fi
+R1B="$(newrepo)"
+R1B_DIR="$R1B/.review-stage/issue-821"
+mkdir -p "$R1B_DIR"
+R1B_HIST="$R1B_DIR/c.$R1_TAKEN.md"
+printf 'result: FINDINGS\n\n### [BLOCKER] the historical agent found this too\n' >"$R1B_HIST"
+OUT="$(cd "$R1B" && bash "$R1_D/retry.sh" open c --issue 821 --agent spec-auditor 2>&1)"; RC=$?
+rc_is 0 "r1/retry: the open SUCCEEDS — one collision is retried, not refused"
+R1B_PRINTED="$(printed_report_path)"
+if [ -n "$R1B_PRINTED" ] && [ "$R1B_PRINTED" != "$R1B_HIST" ]; then
+  ok "r1/retry: the published report is a FRESH path, not the taken one"
+else
+  bad "r1/retry: the open republished '$R1B_PRINTED', which IS the historical report — a superseded agent holding it can write the current verdict"
+fi
+if [ "$(REPORT_OF "$R1B" 821 c)" = "$R1B_PRINTED" ]; then
+  ok "r1/retry: and the stage record names that same fresh report"
+else
+  bad "r1/retry: the record names '$(REPORT_OF "$R1B" 821 c)' but the clause printed '$R1B_PRINTED'"
+fi
+OUT="$(cat "$R1B_HIST" 2>/dev/null || printf '<absent>\n')"; RC=0
+has "### [BLOCKER] the historical agent found this too" "r1/retry: the historical report is untouched by the retry"
+hasnt "no report written" "r1/retry: and was not overwritten with a sentinel"
+
+# (c) CONTROL — THE SAME SCRATCH MACHINERY WITH AN EMPTY FEED STILL OPENS AND RE-OPENS. Without
+#     this the refusal in (a) is satisfiable by a scratch copy that is simply broken, or by a
+#     reservation that refuses every input.
+R1_FEED_C="$R1_D/feed-c.txt"
+: >"$R1_FEED_C"
+if r1_build "$R1_D/control.sh" "$R1_FEED_C"; then
+  ok "r1/CONTROL: the scratch copy built with an empty feed"
+else
+  bad "r1/CONTROL: the scratch copy did NOT build with an empty feed"
+fi
+R1C="$(newrepo)"
+OUT="$(cd "$R1C" && bash "$R1_D/control.sh" open c --issue 822 --agent spec-auditor 2>&1)"; RC=$?
+rc_is 0 "r1/CONTROL: an ordinary open still succeeds through the scratch copy"
+R1C_P1="$(printed_report_path)"
+OUT="$(cd "$R1C" && bash "$R1_D/control.sh" open c --issue 822 --agent spec-auditor --force 2>&1)"; RC=$?
+rc_is 0 "r1/CONTROL: and an ordinary --force re-open still succeeds"
+R1C_P2="$(printed_report_path)"
+if [ -n "$R1C_P1" ] && [ -n "$R1C_P2" ] && [ "$R1C_P1" != "$R1C_P2" ]; then
+  ok "r1/CONTROL: the re-open is handed a DIFFERENT path, so round 5's generation binding is intact"
+else
+  bad "r1/CONTROL: open and re-open both reported '$R1C_P1'"
+fi
+
+# (d) CONTROL — A SUPERSEDED AGENT'S HELD PATH IS STILL DEAD, through the SHIPPED script. The
+#     reservation must not have turned a fresh path back into a reused one: the whole reason
+#     `open --force` moves the path is that the previous, idle agent returns LATE and writes its
+#     old-tree verdict wherever it was told to.
+R1E="$(newrepo)"
+rs "$R1E" open c --issue 823 --agent spec-auditor
+rc_is 0 "r1/superseded: the first stage opens"
+R1E_OLD="$(printed_report_path)"
+rs "$R1E" open c --issue 823 --agent spec-auditor --force
+rc_is 0 "r1/superseded: the forced re-open succeeds"
+R1E_NEW="$(printed_report_path)"
+if [ -n "$R1E_OLD" ] && [ "$R1E_OLD" != "$R1E_NEW" ]; then
+  ok "r1/superseded: the re-open moved the report path"
+else
+  bad "r1/superseded: the re-open reported the same path '$R1E_OLD'"
+fi
+printf 'result: PASS\n\nthe superseded agent, waking up late\n' >"$R1E_OLD"
+rs "$R1E" verdict c --issue 823
+rc_is 5 "r1/superseded: the current verdict is the fresh stage's NON-VERDICT, not the late PASS"
+has "no report written" "r1/superseded: and it names the sentinel cause"
+hasnt "RESULT: PASS" "r1/superseded: the superseded agent's PASS is not reported as the current verdict"
+
+# (e) STRUCTURAL — THE CLAIM IS ATOMIC, AND IT HAPPENS BEFORE ANYTHING IS WRITTEN. A behavioural
+#     case cannot see WHICH operation made the claim, and a reservation that drifted after
+#     `prepare_write` would restore the clobber while (a) and (b) still passed.
+R1_RES_BODY="$(LC_ALL=C sed -n '/^reserve_report_path() {$/,/^}$/p' "$RS")"
+if [ -n "$R1_RES_BODY" ]; then
+  ok "r1/structural: the reservation function was located in the shipped script"
+else
+  bad "r1/structural: could not locate reserve_report_path() — the assertions below would be vacuous"
+fi
+case "$R1_RES_BODY" in
+  *'set -C'*) ok "r1/structural: the claim is made under set -C, i.e. O_CREAT|O_EXCL — one operation, so there is no window between deciding and claiming" ;;
+  *) bad "r1/structural: the reservation does not create under set -C, so the name is not claimed atomically" ;;
+esac
+case "$R1_RES_BODY" in
+  *'[ -f '* | *'[ -e '* | *'[ -L '* | *' ls '*)
+    bad "r1/structural: the reservation TESTS EXISTENCE — that is round 6's scan, which selected a name in one step and wrote it in another" ;;
+  *) ok "r1/structural: the reservation makes no existence TEST, so it is a claim and not a selection" ;;
+esac
+case "$R1_RES_BODY" in
+  *'RESERVE_ATTEMPTS'*) ok "r1/structural: the retry is BOUNDED, so an unwritable directory refuses instead of spinning" ;;
+  *) bad "r1/structural: the retry has no declared bound" ;;
+esac
+if LC_ALL=C grep -q '^RESERVE_ATTEMPTS=[0-9][0-9]*$' "$RS"; then
+  ok "r1/structural: the bound is ONE literal at the top level, so the loop and the refusal cannot name two different numbers"
+else
+  bad "r1/structural: RESERVE_ATTEMPTS is not a single top-level literal (grep: $(LC_ALL=C grep -n 'RESERVE_ATTEMPTS=' "$RS" | LC_ALL=C tr '\n' ' '))"
+fi
+R1_RESERVE_LN="$(LC_ALL=C grep -n 'reserve_report_path "\$issue" "\$kind" "\$dir"' "$RS" | LC_ALL=C head -1 | cut -d: -f1)"
+R1_PREP_LN="$(LC_ALL=C grep -n 'prepare_write "\$rpath" report-of-record' "$RS" | LC_ALL=C head -1 | cut -d: -f1)"
+if [ -n "$R1_RESERVE_LN" ] && [ -n "$R1_PREP_LN" ] && [ "$R1_RESERVE_LN" -lt "$R1_PREP_LN" ]; then
+  ok "r1/structural: the name is claimed BEFORE the report is written (lines $R1_RESERVE_LN < $R1_PREP_LN)"
+else
+  bad "r1/structural: the reservation is not ahead of the write (reserve=$R1_RESERVE_LN prepare=$R1_PREP_LN)"
+fi
+# AND THE COMMENT SAYS WHY THIS IS NOT THE ROUND-6 SCAN RETURNING. Round 6's doctrine recorded the
+# existence belt as DELETED; that claim is now false, and a reader who finds a create-if-absent
+# loop here without the distinction will read it as a regression and remove it again.
+if LC_ALL=C grep -q 'WHY THIS IS NOT THE ROUND-6 SCAN COMING BACK' "$RS"; then
+  ok "r1/structural: the source states why an atomic claim is not the deleted scan"
+else
+  bad "r1/structural: nothing in the source distinguishes this claim from round 6's deleted scan"
+fi
+# (f) THE RESERVATION IS AN OWNED RESOURCE, SO IT IS REGISTERED WITH THE CLEANUP PATH. Round 17 of
+#     #3544's review recorded the third instance of one family — a fix that adds a resource
+#     inherits that resource's lifetime bugs — so the pairing is pinned rather than trusted: the
+#     name is registered the moment it exists, de-registered the moment real content holds it, and
+#     reaped by the SAME `trap` that reaps the temporary file (two handlers behind ONE
+#     registration, because bash keeps only the last `trap … EXIT`).
+case "$R1_RES_BODY" in
+  *'RESERVED_PATH="$cand"'*) ok "r1/lifetime: the claimed name is registered for cleanup inside the reservation itself" ;;
+  *) bad "r1/lifetime: the reservation does not register the name it created, so a refused open leaks it" ;;
+esac
+if LC_ALL=C grep -q "^trap 'cleanup_write_tmp; cleanup_reserved_path' EXIT\$" "$RS"; then
+  ok "r1/lifetime: ONE trap reaps BOTH owned artifacts, so neither registration can silently replace the other"
+else
+  bad "r1/lifetime: the reservation is not reaped by the same trap as the temporary file (trap lines: $(LC_ALL=C grep -n '^trap ' "$RS" | LC_ALL=C tr '\n' ' '))"
+fi
+R1_DEREG_LN="$(LC_ALL=C grep -n '\[ "\$dest" != "\$RESERVED_PATH" \]' "$RS" | LC_ALL=C head -1 | cut -d: -f1)"
+if [ -n "$R1_DEREG_LN" ]; then
+  ok "r1/lifetime: and it is de-registered on fulfilment, in commit_write, so the cleanup cannot delete the PUBLISHED report"
+else
+  bad "r1/lifetime: nothing de-registers the reservation once the report is written — the EXIT trap would delete it"
+fi
+# BEHAVIOURAL, and it is section 11(g)'s case doing the measuring: an open that reserves and then
+# REFUSES (a repository that ignores the records by EXTENSION, so the report path is ignored and
+# the temporary file beside it is not) must leave the stage directory EMPTY. Without the cleanup
+# above that case reds with an orphaned `c.<nonce>.md`, which is why it is named here rather than
+# duplicated: an empty file at a report path nothing published is indistinguishable from a crashed
+# write, the same reason `commit_write` removes its own temporary file.
+R1F="$(newrepo '.review-stage/**/*.md
+.review-stage/**/*.stage')"
+rs "$R1F" open c --issue 824 --agent spec-auditor
+rc_is 2 "r1/lifetime: an open that reserves and then refuses is still a refusal"
+if [ -z "$(ls -A "$R1F/.review-stage/issue-824" 2>/dev/null)" ]; then
+  ok "r1/lifetime: and it leaves NO reserved name behind — the tree is as it was found"
+else
+  bad "r1/lifetime: the refused open leaked $(ls -A "$R1F/.review-stage/issue-824" 2>/dev/null)"
+fi
+
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
 # which is this issue's own subject inside a test file.
@@ -3186,7 +3422,26 @@ fi
 # incomparable counter is displayed VERBATIM and unmarked, and STRUCTURALLY that the digit width is
 # DERIVED from the ceiling value so the acceptance and saturation boundaries cannot drift apart.
 # Every assertion is unconditional.
-ASSERT_FLOOR=628
+#
+# ROUND 12's R1 MOVES IT TO 663. Section 23 adds 35: the report nonce must be RESERVED, not merely
+# GENERATED. Round 6 replaced the scanned generation with a random nonce and deleted the existence
+# belt with the scan; `mktemp -u` creates nothing, so a nonce repeating a report already on disk let
+# `open` write over that report and REPUBLISH its path, handing the superseded agent that still
+# holds it the ability to write the CURRENT verdict. The collision is FORCED, not waited for — the
+# generator is driven from a feed file in a SCRATCH COPY of the shipped script (the ARTIFACT is
+# substituted; no settable seam), so both branches are deterministic and cannot flake: every
+# attempt colliding must REFUSE BY NAME with the historical report byte-intact and no record
+# published, and ONE collision must retry to a FRESH nonce rather than red on recoverable input.
+# Plus three CONTROLS (the same scratch machinery with an empty feed still opens AND re-opens to a
+# different path; a superseded agent's held path is still dead through the SHIPPED script), six
+# STRUCTURAL pins (the claim is an `O_EXCL` create, it makes no existence TEST — which is what
+# distinguishes it from round 6's deleted scan — the retry is bounded by ONE top-level literal, the
+# claim precedes the write by line number, and the source states the distinction) and five
+# LIFETIME assertions (an owned resource inherits its owner's lifetime bugs, #3544 round 17): the
+# name is registered inside the reservation, reaped by the SAME single `trap`, de-registered on
+# fulfilment, and a reserve-then-refuse open leaves the stage directory EMPTY. Every assertion is
+# unconditional — each `if`/`case` calls exactly one of `ok`/`bad` — so the EXACT floor holds.
+ASSERT_FLOOR=663
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

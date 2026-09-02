@@ -72,7 +72,21 @@ review-stage.sh open <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--
   race the nonce removes while adding its own failure modes, and subtraction cannot introduce a false
   PASS. The nonce comes from `mktemp -u`'s name substitution (the source the write path's temporary
   name already uses) with no fallback, and no cryptographic strength is needed or claimed — it is a
-  uniqueness token, not a secret. `reopen-count:` remains as the human-readable audit number — and it SATURATES at the ten-digit ceiling rather than restarting (#3751 round 9): `$(( prior + 1 ))` walked off round 8's bound, so the next re-open read an eleven-digit value as incomparable and restarted the count at `1` (measured: the record held `10000000000`, then `1`). Refusal was rejected as the fix — round 8's own ruling is that an unusable counter is never a reason to refuse a spawn — so it is HELD, meaning AT LEAST that many, `note`d when the hold happens, and rendered `<n>+` by ONE renderer on both `OPEN-OK` and `status` (which reports the counter as of this change).
+  uniqueness token, not a secret. **Round 12 (R1) puts the RESERVATION back — and only the
+  reservation, not the scan.** Round 6 deleted both, and `mktemp -u` creates nothing, so an
+  unreserved nonce repeating a report already on disk let `open` write over that HISTORICAL report
+  and republish its path in the record — a recorded verdict replaced by a sentinel, and the
+  superseded agent still holding that path handed the ability to write the CURRENT one, which is
+  exactly what round 5's generation binding exists to prevent, reached with no concurrency at all.
+  `reserve_report_path` creates each candidate under `set -C` (`O_CREAT|O_EXCL`), generates a FRESH
+  RANDOM nonce on collision, and turns exhaustion of a bounded attempt count into a NAMED refusal
+  (`reason=report-nonce-not-reserved`) rather than a fallback to an unreserved name. The scan is NOT
+  back: it SELECTED a name by TESTING EXISTENCE and wrote it in a LATER step (two steps, with a
+  window two callers could both observe), while an exclusive create IS the choice — one operation,
+  so the decision and the claim cannot be separated. The reserved name is an owned resource,
+  registered with the cleanup path the moment it exists and de-registered on fulfilment, so a
+  refused open leaves the stage directory as it found it and the cleanup can never delete the
+  published report. `reopen-count:` remains as the human-readable audit number — and it SATURATES at the ten-digit ceiling rather than restarting (#3751 round 9): `$(( prior + 1 ))` walked off round 8's bound, so the next re-open read an eleven-digit value as incomparable and restarted the count at `1` (measured: the record held `10000000000`, then `1`). Refusal was rejected as the fix — round 8's own ruling is that an unusable counter is never a reason to refuse a spawn — so it is HELD, meaning AT LEAST that many, `note`d when the hold happens, and rendered `<n>+` by ONE renderer on both `OPEN-OK` and `status` (which reports the counter as of this change).
   Superseded reports stay on disk as history, and nothing DEPENDS on their existence, so a deleted
   stage record cannot re-issue a path an older agent holds. A `[--report <path>]` override was specified here and shipped, and it is **REMOVED in
   round 4** — a DELIBERATE NARROWING of this design surface, recorded rather than quietly dropped. It

@@ -128,6 +128,7 @@ evidence_tok|sanitize_field's output, as above
 replaced|a copy of prior_token, a closed-set token
 AUTHOR_DISCLOSURE|a script constant, the verbatim disclosure sentence
 MAX_INT_VALUE|a numeric script constant: the ten-digit ceiling this tool will compare or add
+RESERVE_ATTEMPTS|a numeric script constant: the report reservation's bounded attempt count
 1|a script-authored literal detail argument at every call site (see the scope note: positionals are not resolvable here)
 2|a script-authored literal detail argument at every call site
 EOF

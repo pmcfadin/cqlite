@@ -258,6 +258,16 @@ directory, and any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUI
 - **AND** the nonce is GENERATED, never SELECTED from what is on disk: two concurrent `open --force`
   calls SHALL be handed two DIFFERENT report paths, so a superseded agent cannot overwrite the current
   verdict, and no scan, attempt bound or exhaustion refusal exists to be raced
+- **AND** the generated name SHALL be ATOMICALLY RESERVED before anything is written to it — created
+  `O_EXCL`, so a nonce that repeats a report already on disk is RETRIED with a fresh random nonce and
+  never written through: an unreserved name let `open` overwrite a HISTORICAL report and republish its
+  path, handing the superseded agent that still holds it the ability to write the CURRENT verdict. This
+  is not the deleted scan: the scan chose a name by TESTING EXISTENCE and wrote it in a LATER step,
+  while the exclusive create IS the choice, so there is no window between deciding and claiming
+- **AND** exhausting the bounded reservation attempts SHALL be a NAMED refusal that writes nothing and
+  publishes no stage record, never a fallback to an unreserved name
+- **AND** a reservation that a later refusal leaves unused SHALL be REMOVED, so an `open` that refuses
+  leaves the stage directory as it found it
 - **AND** a run that cannot generate an unpredictable nonce is REFUSED by name, with no fallback to a
   predictable token
 - **AND** superseded reports are LEFT on disk as history — nothing reads them, and nothing DEPENDS on
