@@ -1144,31 +1144,6 @@ if [ "$FIRST_WALK_CLEAN" -eq 0 ]; then
     exit 6
   fi
 
-  # A FATAL DEATH IN EXACTLY ONE PASS: it did not reproduce, so it is neither an
-  # established un-sweepable store nor a clean one. Same rule as the one-pass damage
-  # branch below, and the same reason: one observation cannot separate a transient from a
-  # durable fact on a store eight lanes are writing.
-  if [ "$C1" = fatal ] || [ "$C2" = fatal ]; then
-    emit_findings p2 unmeasured-cause
-    unmeasured "git fsck RAN and DIED without finishing (a fatal error from git itself, or a" \
-      "signal death - not its error bitmask) in ONE of two walks and did not reproduce (pass 1" \
-      "class=$C1 rc=$RC1, pass 2 class=$C2 rc=$RC2). Nothing about the store's object" \
-      "content was established, so this is NOT clean. Re-run on an IDLE box; if it recurs" \
-      "the second walk will confirm it and this sweep will stop the box (#3749)."
-  fi
-
-  # THE FSCK NEVER RAN, IN EITHER PASS: 124..127 are the timeout and shell EXEC
-  # conventions, so no store was read. Its own cause text, because the fatal branch above
-  # would claim a walk that never started and the bitmask text below would name a class
-  # that was never established.
-  if [ "$C1" = unrunnable ] || [ "$C2" = unrunnable ]; then
-    unmeasured "the fsck could not be RUN (pass 1 class=$C1 rc=$RC1, pass 2 class=$C2" \
-      "rc=$RC2): a status of 125, 126 or 127 is the timeout/exec convention for 'the" \
-      "command was not started', not an fsck status, so nothing about this store was" \
-      "measured. Usual causes: no usable timeout binary, a git that is not executable, or" \
-      "a PATH that does not reach one. Fix the tooling on this box and re-run (#3749)."
-  fi
-
   # A DAMAGE CLASS IN EXACTLY ONE PASS: non-passing, and NOT the fatal branch. It is
   # neither established damage (it did not reproduce) nor a clean store (something
   # named an object as unhashable once).
@@ -1178,6 +1153,34 @@ if [ "$FIRST_WALK_CLEAN" -eq 0 ]; then
       "walks and did not reproduce (pass 1 class=$C1 rc=$RC1, pass 2 class=$C2 rc=$RC2)." \
       "That is neither established damage nor a clean store: re-run on an IDLE box," \
       "and if it recurs treat the store as suspect and escalate (#3749)."
+  fi
+
+  # A FATAL DEATH IN EXACTLY ONE PASS: it did not reproduce, so it is neither an
+  # established un-sweepable store nor a clean one. Same rule as the one-pass damage
+  # branch ABOVE, and the same reason: one observation cannot separate a transient from a
+  # durable fact on a store eight lanes are writing. It is TESTED AFTER that branch on
+  # purpose: when the two walks carry different classes, a DAMAGE observation is the more
+  # informative thing to name, and its text prints both classes anyway.
+  if [ "$C1" = fatal ] || [ "$C2" = fatal ]; then
+    emit_findings p2 unmeasured-cause
+    unmeasured "git fsck RAN and DIED without finishing (a fatal error from git itself, or a" \
+      "signal death - not its error bitmask) in ONE of two walks and did not reproduce (pass 1" \
+      "class=$C1 rc=$RC1, pass 2 class=$C2 rc=$RC2). Nothing about the store's object" \
+      "content was established, so this is NOT clean. Re-run on an IDLE box; if it recurs" \
+      "the second walk will confirm it and this sweep will stop the box (#3749)."
+  fi
+
+  # THE FSCK NEVER RAN, IN EITHER PASS: 125..127 are the timeout and shell EXEC
+  # conventions, so no store was read (124 is the bound firing, handled as `killed`). Its
+  # own cause text, because the fatal branch above would claim a walk that never started
+  # and the bitmask text below would name a class that was never established.
+  if [ "$C1" = unrunnable ] || [ "$C2" = unrunnable ]; then
+    emit_findings p2 unmeasured-cause
+    unmeasured "the fsck could not be RUN (pass 1 class=$C1 rc=$RC1, pass 2 class=$C2" \
+      "rc=$RC2): a status of 125, 126 or 127 is the timeout/exec convention for 'the" \
+      "command was not started', not an fsck status, so nothing about this store was" \
+      "measured. Usual causes: no usable timeout binary, a git that is not executable, or" \
+      "a PATH that does not reach one. Fix the tooling on this box and re-run (#3749)."
   fi
 
   # A STATUS THIS SCRIPT CANNOT READ AS A BITMASK, in either pass. Its own cause,
