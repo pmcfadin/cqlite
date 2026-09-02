@@ -4454,7 +4454,9 @@ else
   # matters, because an unqualified VERIFIED would now cover a launch path nothing measured.
   if out_has "$scc_sl_v" 'scope:.*ONE session type.*NON-LOGIN PAM session' \
      && out_has "$scc_sl_v" 'scope:.*LOGIN shell additionally runs /etc/profile.d' \
-     && out_has "$scc_sl_v" 'scope:.*does not measure that context' \
+     && out_has "$scc_sl_v" 'scope:.*context is NOT measured here' \
+     && out_has "$scc_sl_v" 'scope:.*NO disagreement between the two is detected' \
+     && out_has "$scc_sl_v" 'scope:.*#3946' \
      && out_has "$scc_sl_v" 'scope:.*SERVER at STARTUP' \
      && out_has "$scc_sl_v" 'scope:.*provenance is not' \
      && out_has "$scc_sl_v" 'sccache-cap=<bytes>'; then
@@ -4462,6 +4464,21 @@ else
   else
     bad "sccache-cap: the scope note is missing a statement, or still claims a context this section no longer measures"
     printf '%s\n' "$scc_sl_v" | grep 'scope:' | head -4
+  fi
+  # THE PROMISE MUST NOT COME BACK. That line used to end "...a disagreement would have been
+  # reported as CONFLICTING-SOURCES, and a difference in an SCCACHE_* name this check does not
+  # classify as routing as UNMEASURED..." — output promising a detection the ruling had just
+  # deleted. That is this PR's own subject, and WORSE than the classifier was: a reader would
+  # trust a disagreement to be caught when nothing looks for one. Asserted as an ABSENCE over the
+  # whole section slice, not just that line, and as a positive-control pair with the assertion
+  # above (the residual must be DISCLOSED and the detection must not be PROMISED).
+  if ! out_has "$scc_sl_v" 'CONFLICTING-SOURCES' \
+     && ! out_has "$scc_sl_v" 'would have been' \
+     && ! out_has "$scc_sl_v" 'classify as routing'; then
+    ok "sccache-cap: no emitted line promises a detection this section no longer performs (no CONFLICTING-SOURCES, no would-have-been, no routing classification)"
+  else
+    bad "sccache-cap: emitted text promises a REMOVED detection — the exact failure mode this PR is about"
+    printf '%s\n' "$scc_sl_v" | grep -n 'CONFLICTING-SOURCES\|would have been\|classify as routing' | head -3
   fi
 
   # 12b-b. NOT-HONOURED — the #3727 state itself: the value is persisted, visible and accepted,

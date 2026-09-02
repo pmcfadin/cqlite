@@ -90,7 +90,9 @@
 #      is therefore fixed by whichever process started it: a visible env var proves nothing
 #      once a server is already up. One greppable `sccache-cap:` line: VERIFIED /
 #      NOT-SYSTEM-WIDE / NOT-HONOURED / FAILED / UNMEASURED, and only VERIFIED is an [ok].
-#      NOT-HONOURED's remedy is `sccache --stop-server`, NOT editing the value. The value->bytes
+#      NOT-HONOURED reports BOTH byte counts and prints NO remedy: the advice layer (which server
+#      to stop, in which context, in which direction) was REMOVED by lead ruling req-3727-w4 and is
+#      the follow-up issue's subject. The value->bytes
 #      map is asked of an ISOLATED throwaway sccache server, never reimplemented here: measured,
 #      `30G` is 30 GiB but `30GiB` and `30GB` are SILENTLY DISCARDED to the 10 GiB default and a
 #      bare integer means BYTES, so a bash reimplementation is exactly where this goes wrong.
@@ -3828,7 +3830,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # scc_scope_note: what VERIFIED does NOT cover, printed with the verdict rather than buried in
   # a doc — an unqualified VERIFIED reads as "every gate on this box gets this cap".
   scc_scope_note() {
-    info "scope: measured through ONE session type — a NON-LOGIN PAM session (sudo), which is what pam_env applies $SCC_ENV_FILE to. A LOGIN shell additionally runs /etc/profile.d, and on this fleet that is where a DIFFERENT value can come from (#3727's own root cause); this section does not measure that context, so this verdict is about the non-login session it DID measure AND on every exported SCCACHE_* variable; a disagreement would have been reported as CONFLICTING-SOURCES, and a difference in an SCCACHE_* name this check does not classify as routing as UNMEASURED, instead of this verdict. Whether the service stacks a gate is actually launched from read the same sources is NOT checked here, and a process tree created WITHOUT PAM (a systemd unit, a container entrypoint) never has $SCC_ENV_FILE applied at all — measured, such a session (env -i) sees the variable UNSET"
+    info "scope: measured through ONE session type — a NON-LOGIN PAM session (sudo), which is what pam_env applies $SCC_ENV_FILE to. A LOGIN shell additionally runs /etc/profile.d, and on this fleet that is where a DIFFERENT value can come from (#3727's own root cause); that context is NOT measured here and NO disagreement between the two is detected — the mechanism that will cover it is #3946. Whether the service stacks a gate is actually launched from read the same sources is NOT checked here either, and a process tree created WITHOUT PAM (a systemd unit, a container entrypoint) never has $SCC_ENV_FILE applied at all — measured, such a session (env -i) sees the variable UNSET"
     info "scope: the cap is read by the sccache SERVER at STARTUP, so this verdict is about THIS box's CURRENT server plus FUTURE sessions. A server started later by a session that does NOT see the value will enforce sccache's default instead, and a server already running keeps its cap for its whole lifetime"
     info "scope: VERIFIED asserts that the file SETS this value, that a fresh session SEES that same value, and that the RUNNING server enforces exactly the bytes that value means — it does NOT prove the file is where the session got it. Agreement is measured; provenance is not"
     # WHICH SERVER WAS MEASURED, stated rather than assumed: every read and any start ran INSIDE
