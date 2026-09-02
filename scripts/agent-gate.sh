@@ -17573,12 +17573,24 @@ run_file_size() {
 
   # Changed, non-deleted .rs files vs base (committed + working tree). With no
   # base, fall back to changes vs HEAD (uncommitted only).
-  local files
+  # THE ENUMERATION'S EXIT STATUS IS CAPTURED, because an empty `files` is a THREE-VALUED
+  # signal read two-valued (roborev job 396). This is the named `1699-find-tristate` shape
+  # CLAUDE.md records — "`[ -z "$(find …)" ]` collapses 'the scan FAILED' onto 'no match'" —
+  # and here the collapse was worse than usual: with no `set -e`, a failed `git diff` left
+  # `files` empty, the census then emitted `NO-SUBJECT the diff changed no .rs file`, and the
+  # component PASSED while affirmatively claiming it had measured an empty diff. A failed
+  # enumeration must never borrow the empty diff's PASS-preserving silence.
+  #
+  # (The existing lint did not catch it because its subject is the literal `find`, not
+  # command substitution in general — the SHAPE is command-agnostic and the lint's subject
+  # set is one command. Widening it is #3162 follow-up work, not this change.)
+  local files files_rc=0
   if [ -n "$base" ]; then
-    files=$(git diff --name-only --diff-filter=d "$base" -- '*.rs' 2>/dev/null)
+    files=$(git diff --name-only --diff-filter=d "$base" -- '*.rs' 2>/dev/null) || files_rc=$?
   else
-    files=$(git diff --name-only --diff-filter=d HEAD -- '*.rs' 2>/dev/null)
+    files=$(git diff --name-only --diff-filter=d HEAD -- '*.rs' 2>/dev/null) || files_rc=$?
   fi
+  [ "$files_rc" -eq 0 ] || files=""
 
   local -a over=() grew=()
   local f cur lim base_n
@@ -17627,8 +17639,12 @@ run_file_size() {
   if [ -n "$base" ]; then
     _fs_emit "$log" ">>> [$name] base ref: $base (via $base_src)"
   fi
-  # #3162 (the `emitted` census). THREE STATES, KEPT DISTINCT — collapsing any two of them
+  # #3162 (the `emitted` census). FOUR STATES, KEPT DISTINCT — collapsing any two of them
   # is the "could not tell" -> permissive slide this census exists to remove:
+  #   enumeration FAILED    -> NOT-MEASURED. Checked FIRST, because it is the state that
+  #                            makes every number below meaningless: `files` is empty for
+  #                            this reason too, and reading that as an empty diff is the
+  #                            three-valued-signal collapse (job 396).
   #   nothing selected      -> NO-SUBJECT. A docs- or scripts-only diff changes no `.rs`
   #                            file; the ratchet correctly had nothing to measure, and
   #                            calling that a measured zero would read VACUOUS on the
@@ -17640,7 +17656,9 @@ run_file_size() {
   #   all counted           -> the affirmative count, derived from the `wc -l`s above.
   # Emitted through the SAME sink as everything else here (stdout AND the component log), so
   # the census can read it.
-  if [ "$n_uncounted" -gt 0 ]; then
+  if [ "$files_rc" -ne 0 ]; then
+    _fs_emit "$log" "AGENT-GATE-CENSUS: NOT-MEASURED the changed-.rs enumeration FAILED (git diff exited $files_rc), so this run does not know whether there was a subject — it is NOT an empty diff"
+  elif [ "$n_uncounted" -gt 0 ]; then
     _fs_emit "$log" "AGENT-GATE-CENSUS: NOT-MEASURED $n_uncounted of $n_selected changed .rs file(s) could not be line-counted (unreadable, or absent from the worktree), so the measured total is incomplete"
   elif [ "$n_selected" -eq 0 ]; then
     _fs_emit "$log" "AGENT-GATE-CENSUS: NO-SUBJECT the diff changed no .rs file, so the ratchet had nothing to measure"
