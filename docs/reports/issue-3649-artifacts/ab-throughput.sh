@@ -756,9 +756,15 @@ if [ -z "$CONTROL" ]; then
   python3 "$SUPPORT" validate-ticket "$TICKET_TEMPLATE" \
     || die ticket-not-full-ring "$TICKET_TEMPLATE does not describe a full-ring scan (the cause is named above)"
 else
-  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$TICKET_TEMPLATE" >/dev/null 2>&1 \
-    || die ticket-template-unparseable "$TICKET_TEMPLATE is not valid JSON"
-  say "shape $SHAPE ticket UNCHECKED -- a control may narrow the workload; the analyzer disclaims its verdict"
+  # A CONTROL MAY NARROW THE WORKLOAD; IT MAY NOT SHIP AN UNDESERIALISABLE
+  # TICKET. This branch used to check only that the file was JSON, which widened
+  # the very gap the schema check exists to close: a control that cannot be
+  # deserialised wastes exactly the same three release builds as a measurement,
+  # and on a metered box that is the whole cost. So the SCHEMA half applies to
+  # every session and only the FULL-RING half is a measurement restriction.
+  python3 "$SUPPORT" validate-ticket-schema "$TICKET_TEMPLATE" \
+    || die ticket-schema-invalid "$TICKET_TEMPLATE would not deserialise into a FlightTicket (the cause is named above)"
+  say "shape $SHAPE ticket SCHEMA-CHECKED, full-ring restrictions NOT applied -- a control may narrow the workload; the analyzer disclaims its verdict"
 fi
 
 [ -d "$CORPUS" ] || die corpus-absent "$CORPUS is not a directory"

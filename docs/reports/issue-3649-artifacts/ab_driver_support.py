@@ -50,6 +50,7 @@ USAGE = [
     "ab_driver_support.py validate-ramp <ramp>",
     "ab_driver_support.py parse-duration <value>",
     "ab_driver_support.py validate-ticket <template.json>",
+    "ab_driver_support.py validate-ticket-schema <template.json>",
     "ab_driver_support.py check-affinity <pid> <cpu-list>",
     "ab_driver_support.py validate-replicate <jsonl> <round-label> <ramp>",
     "ab_driver_support.py parse-startup <server-log> "
@@ -197,8 +198,148 @@ def _token_range_is_full_ring(ticket):
     return start == end and start is not None
 
 
-def validate_ticket(path):
-    """Refuse a ticket that is not a full-ring scan of every column."""
+I64_MIN, I64_MAX = -(2 ** 63), 2 ** 63 - 1
+U64_MAX = 2 ** 64 - 1
+# MIRRORS `PredicateOp` (cqlite-flight/src/ticket.rs:50-65). No `rename_all`, so
+# serde accepts the Rust variant names verbatim.
+PREDICATE_OPS = ("Equal", "In", "Gt", "Gte", "Lt", "Lte", "Prefix")
+
+
+def _is_int(value):
+    """JSON `true` is a Python bool, and a bool is an int -- serde is not so
+    forgiving, and neither is this."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _check_ticket_predicates(value):
+    """MIRRORS `Vec<Predicate>` (ticket.rs:70-77)."""
+    if not isinstance(value, list):
+        return "is %s, but FlightTicket declares Vec<Predicate>, which " \
+               "deserialises only from a JSON array" % type(value).__name__
+    for index, entry in enumerate(value):
+        if not isinstance(entry, dict):
+            return "entry %d is not an object" % index
+        for key in ("column", "op", "value"):
+            if key not in entry:
+                return "entry %d is missing %r (Predicate declares it with no " \
+                       "serde default)" % (index, key)
+        if not isinstance(entry["column"], str):
+            return "entry %d has a non-string column" % index
+        if entry["op"] not in PREDICATE_OPS:
+            return "entry %d has op %r, which is not one of %s" % (
+                index, entry["op"], "|".join(PREDICATE_OPS))
+    return None
+
+
+def _optional(kind, what):
+    def check(value):
+        if value is None:
+            return None
+        if kind is int:
+            if not _is_int(value):
+                return "is %r, expected %s or null" % (value, what)
+            return None
+        if not isinstance(value, kind):
+            return "is %r, expected %s or null" % (value, what)
+        return None
+    return check
+
+
+def _bounded_int(low, high, what):
+    def check(value):
+        if value is None:
+            return None
+        if not _is_int(value):
+            return "is %r, expected %s or null" % (value, what)
+        if not low <= value <= high:
+            return "is %d, outside the %s range" % (value, what)
+        return None
+    return check
+
+
+def _string_list(value):
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        return "is %r, expected an array of strings or null" % (value,)
+    return None
+
+
+# THE COMPLETE CONSUMER SCHEMA, field for field from `FlightTicket`
+# (cqlite-flight/src/ticket.rs:225-290). `required` means the field carries NO
+# `#[serde(default)]`, so deserialisation fails without it -- and that is EXACTLY
+# three fields. `version` is NOT one of them: it defaults via
+# `default_ticket_version`, and demanding it here rejected a ticket the consumer
+# accepts, which is the guard-an-operator-learns-to-waive shape on a metered rig.
+TICKET_SCHEMA = {
+    "version": (False, _bounded_int(0, 255, "u8")),
+    "keyspace": (True, lambda v: None if isinstance(v, str) else
+                 "is %r, expected a string" % (v,)),
+    "table": (True, lambda v: None if isinstance(v, str) else
+              "is %r, expected a string" % (v,)),
+    "ddl": (True, lambda v: None if isinstance(v, str) else
+            "is %r, expected a string" % (v,)),
+    "snapshot": (False, _optional(str, "a string")),
+    "token_start": (False, _bounded_int(I64_MIN, I64_MAX, "i64")),
+    "token_end": (False, _bounded_int(I64_MIN, I64_MAX, "i64")),
+    "wraparound": (False, lambda v: None if isinstance(v, bool) else
+                   "is %r, expected a boolean" % (v,)),
+    "columns": (False, _string_list),
+    "predicates": (False, _check_ticket_predicates),
+    "filter": (False, _optional(dict, "an object")),
+    "aggregation": (False, _optional(dict, "an object")),
+    "limit": (False, _bounded_int(0, U64_MAX, "u64")),
+}
+
+
+def validate_ticket_schema(path, ticket):
+    """Would `serde_json` deserialise this into a `FlightTicket`?
+
+    EIGHTH validator-versus-consumer instance, and the first wrong in BOTH
+    directions at once -- which is what happens when a validator is written from
+    a reading of the field list rather than from the deserialiser's behaviour.
+    Too strict: it demanded `version`, which has a serde default. Too loose:
+    `"predicates": {}` sailed through pre-flight and failed after all three
+    release builds, because only four fields were looked at.
+
+    Note `FlightTicket` is NOT `deny_unknown_fields`, so an unknown key is
+    IGNORED by the consumer and must be ignored here: rejecting it would refuse
+    a ticket from a newer connector that the server reads fine.
+    """
+    problems = []
+    for field, (required, check) in sorted(TICKET_SCHEMA.items()):
+        if field not in ticket:
+            if required:
+                problems.append(
+                    "required field %r is missing; FlightTicket declares it with "
+                    "no serde default, so the load generator would fail to "
+                    "deserialise this ticket after every build had completed"
+                    % field
+                )
+            continue
+        if required and ticket[field] is None:
+            problems.append("required field %r is null, and it is not an Option"
+                            % field)
+            continue
+        detail = check(ticket[field])
+        if detail:
+            problems.append("field %r %s" % (field, detail))
+    if isinstance(ticket.get("ddl"), str) and not ticket["ddl"].strip():
+        problems.append("ddl is empty; it is parsed into the TableSchema that "
+                        "drives the merge")
+    return problems
+
+
+def validate_ticket(path, full_ring=True):
+    """Refuse a ticket the consumer would reject, and -- for a measurement --
+    one that is not a full-ring scan of every column.
+
+    The two halves are SEPARATE because they answer to different authorities.
+    The schema half mirrors the deserialiser and applies to EVERY session,
+    controls included: a control that cannot be deserialised wastes exactly the
+    same three builds. The full-ring half is the #3649 target band's own
+    restriction and applies only to measurements.
+    """
     try:
         with open(path, encoding="utf-8") as handle:
             ticket = json.load(handle)
@@ -210,41 +351,14 @@ def validate_ticket(path):
         err("cause ticket-template-unparseable")
         err("cause-detail %s: top level is not an object" % path)
         return 1
-    # MIRRORS `FlightTicket` (cqlite-flight/src/ticket.rs:225-256). Exactly four
-    # fields carry no `#[serde(default)]` and are therefore REQUIRED: `version`
-    # (u8), `keyspace`, `table` and `ddl`. A ticket missing `ddl` used to pass
-    # pre-flight and the census and then fail deserialisation in the load
-    # generator -- after ALL THREE release builds. Seventh validator-versus-
-    # consumer instance, and the same rig economics every time: the check is
-    # cheap and it belongs before the expensive step.
-    required = (("version", int), ("keyspace", str), ("table", str), ("ddl", str))
-    for field, kind in required:
-        value = ticket.get(field)
-        if value is None:
-            err("cause ticket-schema-invalid")
-            err(
-                "cause-detail %s: required field %r is missing; cqlite-flight's "
-                "FlightTicket declares it with no serde default, so the load "
-                "generator would fail to deserialise this ticket after every "
-                "build had completed" % (path, field)
-            )
-            return 1
-        if isinstance(value, bool) or not isinstance(value, kind):
-            err("cause ticket-schema-invalid")
-            err(
-                "cause-detail %s: required field %r is %r, expected %s"
-                % (path, field, value, kind.__name__)
-            )
-            return 1
-    if not ticket["ddl"].strip():
+    schema_problems = validate_ticket_schema(path, ticket)
+    if schema_problems:
         err("cause ticket-schema-invalid")
-        err("cause-detail %s: ddl is empty; it is parsed into the TableSchema that "
-            "drives the merge" % path)
+        for problem in schema_problems:
+            err("cause-detail %s: %s" % (path, problem))
         return 1
-    if not 0 <= ticket["version"] <= 255:
-        err("cause ticket-schema-invalid")
-        err("cause-detail %s: version %r is not a u8" % (path, ticket["version"]))
-        return 1
+    if not full_ring:
+        return 0
 
     problems = []
     # MIRRORS `pathsafe::validate_snapshot` (cqlite-flight/src/pathsafe.rs:60-73):
@@ -1098,6 +1212,11 @@ def main(argv):
             err(line)
         return 2
     command, rest = argv[0], argv[1:]
+    if command == "validate-ticket-schema":
+        if len(rest) != 1:
+            err("usage-error validate-ticket-schema needs <template.json>")
+            return 2
+        return validate_ticket(rest[0], full_ring=False)
     if command == "probe-storage":
         if len(rest) != 1:
             err("usage-error probe-storage needs <path>")

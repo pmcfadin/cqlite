@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=375
+CASE_FLOOR=393
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -842,7 +842,12 @@ check_support "a ticket with an empty snapshot name, which the server rejects" 1
 printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","snapshot":"snap-1_a"}\n' > "$TMP/tk-snap.json"
 run_support validate-ticket "$TMP/tk-snap.json"
 check_support "a ticket with a valid snapshot name" 0
-for narrowing in '"limit":100' '"predicates":[{"c":"x"}]' '"filter":"x>1"' '"aggregation":"count"' '"columns":["a"]' '"token_start":42' '"token_end":42' '"token_start":-9223372036854775808,"token_end":9223372036854775807'; do
+# EACH NARROWING IS WELL-FORMED, so this loop tests the FULL-RING half and not
+# the schema half. Three of these used to be malformed (`"filter":"x>1"`,
+# `"aggregation":"count"`, a predicate with no `column`), which the four-field
+# validator could not see -- so they were refused for the RIGHT VERDICT with the
+# WRONG REASON, and the loop silently proved less than it claimed.
+for narrowing in '"limit":100' '"predicates":[{"column":"a","op":"Equal","value":1}]' '"filter":{"Compare":{"column":"a","op":"Gt","value":1}}' '"aggregation":{"aggregates":[]}' '"columns":["a"]' '"token_start":42' '"token_end":42' '"token_start":-9223372036854775808,"token_end":9223372036854775807'; do
   printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)",%s}\n' "$narrowing" > "$TMP/tk-bad.json"
   run_support validate-ticket "$TMP/tk-bad.json"
   if [ "$RC" = "1" ] && grep -q '^AB-3649: cause ticket-not-full-ring$' "$TMP/err.txt"; then
@@ -2234,9 +2239,14 @@ PYINNER
   printf '{"version":2,"keyspace":"ks","table":"t"}\n' > "$TMP/tk-noddl.json"
   run_support validate-ticket "$TMP/tk-noddl.json"
   check_support "a ticket with no ddl, which flight-loadgen cannot deserialise" 1 ticket-schema-invalid
+  # ROUND 13 FINDING 2, the TOO-STRICT half: `version` carries
+  # `#[serde(default = "default_ticket_version")]`, so a ticket without it
+  # deserialises fine. Demanding it red a CORRECT ticket -- the shape an operator
+  # learns to waive, and worse on a rig, where waiving means --control and a
+  # disclaimed verdict. This case asserted the wrong rule until round 13.
   printf '{"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)"}\n' > "$TMP/tk-nover.json"
   run_support validate-ticket "$TMP/tk-nover.json"
-  check_support "a ticket with no version" 1 ticket-schema-invalid
+  check_support "a ticket with no version, which serde defaults" 0
   printf '{"version":2,"keyspace":"ks","table":"t","ddl":"   "}\n' > "$TMP/tk-blankddl.json"
   run_support validate-ticket "$TMP/tk-blankddl.json"
   check_support "a ticket whose ddl is blank" 1 ticket-schema-invalid
@@ -3256,6 +3266,66 @@ if grep -q '^AB-3649: verdict-detail single-stream HOST whether the box was cont
   ok "an unmeasurable load probe is disclosed as a gap, not scored as a quiet box"
 else
   bad "an unmeasurable load probe was silently read as quiet"
+fi
+
+# ---- the ticket validator mirrors the DESERIALISER, both directions ----------
+# Eighth validator-versus-consumer instance, and the first wrong in BOTH
+# directions at once: too STRICT (it demanded `version`, which carries a serde
+# default, so it red a ticket the consumer accepts) and too LOOSE (only four
+# fields were looked at, so `"predicates": {}` passed pre-flight and failed after
+# all three release builds). Both halves are pinned, because fixing one and not
+# the other is how a validator ends up wrong in a new direction.
+ticket_case() { # <name> <json> <schema-rc> <full-ring-rc>
+  printf '%s\n' "$2" > "$TMP/tk-$1.json"
+  set +e
+  python3 "$SUPPORT" validate-ticket-schema "$TMP/tk-$1.json" >/dev/null 2>&1
+  local schema_rc=$?
+  python3 "$SUPPORT" validate-ticket "$TMP/tk-$1.json" >/dev/null 2>&1
+  local full_rc=$?
+  set -e
+  if [ "$schema_rc" = "$3" ] && [ "$full_rc" = "$4" ]; then
+    ok "ticket $1 -> schema $schema_rc, full-ring $full_rc"
+  else
+    bad "ticket $1 (schema $schema_rc want $3; full-ring $full_rc want $4)"
+  fi
+}
+
+FULL_TICKET='{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","snapshot":null,"token_start":null,"token_end":null,"wraparound":false,"columns":null,"predicates":[],"filter":null,"aggregation":null,"limit":null}'
+ticket_case complete           "$FULL_TICKET" 0 0
+# TOO STRICT, the half that reds a CORRECT ticket on the rig: `version` carries
+# `#[serde(default = "default_ticket_version")]`, so a ticket without it
+# deserialises fine and must be accepted by both halves.
+ticket_case no-version         '{"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)"}' 0 0
+# NOT deny_unknown_fields, so the consumer IGNORES an unknown key -- rejecting it
+# would refuse a ticket from a newer connector that the server reads fine.
+ticket_case unknown-field      '{"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","future_knob":7}' 0 0
+# TOO LOOSE, the half that fails AFTER all three builds.
+ticket_case predicates-object  '{"keyspace":"ks","table":"t","ddl":"d","predicates":{}}' 1 1
+ticket_case predicates-badop   '{"keyspace":"ks","table":"t","ddl":"d","predicates":[{"column":"a","op":"NOPE","value":1}]}' 1 1
+ticket_case predicates-nocol   '{"keyspace":"ks","table":"t","ddl":"d","predicates":[{"op":"Equal","value":1}]}' 1 1
+ticket_case wraparound-string  '{"keyspace":"ks","table":"t","ddl":"d","wraparound":"yes"}' 1 1
+ticket_case columns-not-strings '{"keyspace":"ks","table":"t","ddl":"d","columns":[1,2]}' 1 1
+ticket_case limit-negative     '{"keyspace":"ks","table":"t","ddl":"d","limit":-1}' 1 1
+ticket_case token-not-int      '{"keyspace":"ks","table":"t","ddl":"d","token_start":"0"}' 1 1
+ticket_case version-not-u8     '{"keyspace":"ks","table":"t","ddl":"d","version":300}' 1 1
+ticket_case ddl-missing        '{"keyspace":"ks","table":"t"}' 1 1
+ticket_case ddl-null           '{"keyspace":"ks","table":"t","ddl":null}' 1 1
+ticket_case ddl-blank          '{"keyspace":"ks","table":"t","ddl":"   "}' 1 1
+# A JSON bool is a Python int; serde is not so forgiving and neither is this.
+ticket_case version-bool       '{"keyspace":"ks","table":"t","ddl":"d","version":true}' 1 1
+# THE TWO HALVES ARE SEPARATE: a narrowed ticket DESERIALISES fine, so the schema
+# half accepts it and only the full-ring half refuses. That split is the whole
+# reason a control can be schema-checked without being forced to be a full scan.
+ticket_case narrowed-limit     '{"keyspace":"ks","table":"t","ddl":"d","limit":10}' 0 1
+ticket_case narrowed-columns   '{"keyspace":"ks","table":"t","ddl":"d","columns":["a"]}' 0 1
+
+# STRUCTURAL: the control branch must apply the SCHEMA half. It used to check
+# only that the file was JSON, so a control wasted the same three release builds
+# on a ticket the load generator could not read.
+if grep -q 'validate-ticket-schema "\$TICKET_TEMPLATE"' "$DRIVER"; then
+  ok "a control's ticket is schema-checked, not merely parsed as JSON"
+else
+  bad "the control branch does not run the ticket schema check"
 fi
 
 # THE ATTESTATION COVERS IGNORANCE, NEVER EVIDENCE. An operator may assert that
