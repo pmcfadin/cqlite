@@ -212,3 +212,87 @@ fn an_empty_duration_is_still_refused_declared_residual_of_3847() {
         "the refusal must still come from the duration VInt decode, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// roborev job 96 (Low): the FOURTH and FIFTH framing sites.
+//
+// The three tests in `udt/issue_3847_empty_fixed_width_tests.rs` drive
+// `parse_udt_value`, `parse_nested_udt_from_registry` and
+// `parse_inline_udt_value` DIRECTLY. `raw_type_value.rs` has two more
+// zero-length branches, reachable only THROUGH `parse_value_from_raw_bytes`,
+// and they use DIFFERENT routing helpers — the marshal/inline arm calls
+// `create_empty_value_for_type` while the registry arm calls
+// `parse_simple_udt_field_value(&[], …)`. Two helpers, so two ways to diverge,
+// which is exactly how rounds 1 and 2 of this review found real defects. Kept
+// end-to-end rather than helper-level on the wiring-evidence rule: green
+// helper-only unit tests are not sufficient.
+// ---------------------------------------------------------------------------
+
+/// `pair(a int, b int)` in MARSHAL form. Field names are hex: `70616972` =
+/// "pair", `61` = "a", `62` = "b". Reaches `raw_type_value.rs`'s marshal/inline
+/// UDT arm, whose zero-length branch routes through
+/// `create_empty_value_for_type`.
+const MARSHAL_PAIR: &str = "org.apache.cassandra.db.marshal.UserType(issue_3847_ks,70616972,\
+61:org.apache.cassandra.db.marshal.Int32Type,\
+62:org.apache.cassandra.db.marshal.Int32Type)";
+
+/// A parser whose registry resolves the BARE name `pair` — the route to
+/// `raw_type_value.rs`'s registry arm, whose zero-length branch calls
+/// `parse_simple_udt_field_value` with an explicit `&[]`.
+fn parser_with_pair_registry() -> V5CompressedLegacyParser {
+    let mut reg = crate::schema::UdtRegistry::new();
+    reg.register_udt(
+        crate::types::UdtTypeDef::new("issue_3847_ks".to_string(), "pair".to_string())
+            .with_field("a".to_string(), crate::schema::CqlType::Int, true)
+            .with_field("b".to_string(), crate::schema::CqlType::Int, true),
+    );
+    V5CompressedLegacyParser::new("issue_3847_ks".to_string(), "t".to_string(), 0, 0, None)
+        .with_udt_registry(reg)
+}
+
+/// `[i32 BE len][bytes]` per field: a present `a = 7`, then a zero-length `b`.
+fn pair_with_empty_second_field() -> Vec<u8> {
+    let mut data = 4i32.to_be_bytes().to_vec();
+    data.extend_from_slice(&7i32.to_be_bytes());
+    data.extend_from_slice(&0i32.to_be_bytes());
+    data
+}
+
+fn assert_pair_is_seven_then_null(value: Value, site: &str) {
+    match value {
+        Value::Udt(udt) => {
+            assert_eq!(
+                udt.fields[0].value,
+                Some(Value::Integer(7)),
+                "{site}: the present field must still decode"
+            );
+            assert_eq!(
+                udt.fields[1].value,
+                Some(Value::Null),
+                "{site}: a zero-length int field is NULL, not an empty blob and not an Err"
+            );
+        }
+        other => panic!("{site}: expected a UDT, got {other:?}"),
+    }
+}
+
+/// FOURTH site: the marshal/inline UDT arm, end to end.
+#[test]
+fn a_zero_length_field_of_a_marshal_form_udt_decodes_to_null() {
+    let value = decode(MARSHAL_PAIR, &pair_with_empty_second_field())
+        .expect("a zero-length field is legal, not corruption");
+    assert_pair_is_seven_then_null(value, "marshal-form UDT via parse_value_from_raw_bytes");
+}
+
+/// FIFTH site: the registry-resolved arm, end to end. Distinct from the fourth
+/// because it routes through a DIFFERENT helper.
+#[test]
+fn a_zero_length_field_of_a_registry_resolved_udt_decodes_to_null() {
+    let value = parser_with_pair_registry()
+        .parse_value_from_raw_bytes(&pair_with_empty_second_field(), "pair", "col", 0)
+        .expect("a zero-length field is legal, not corruption");
+    assert_pair_is_seven_then_null(
+        value,
+        "registry-resolved UDT via parse_value_from_raw_bytes",
+    );
+}
