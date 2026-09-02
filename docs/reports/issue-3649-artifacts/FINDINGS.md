@@ -543,6 +543,47 @@ That is a pass derived from the absence of a bad signal, in the one check added
 to stop exactly that, and it is why there is a fourth token: `UNRECOGNISED` is
 disclosed as *not known to be local*, distinctly from `NOT-MEASURABLE`.
 
+**THE MOST DANGEROUS SHAPE IN THIS LANE: THE COMMENT STATES THE CORRECT
+PROPERTY AND THE CHECK BESIDE IT IMPLEMENTS A WEAKER ONE.** Five instances, and
+what makes it worse than an unchecked requirement is that **a reviewer reads the
+sentence as the behaviour** — every one of the five was signed off by someone
+looking straight at it:
+
+| the prose said | the check did |
+|---|---|
+| "`nproc` is the property, and it is recorded" | measured the *process's* CPUs |
+| a docstring naming the pinned commit | nothing enforced it |
+| "the same pair reversed … would be authoritative about something it did not measure" | a **prefix** test on the head, and the base unpinned |
+| "an unreadable `/proc` is UNVERIFIABLE, never 'pinned correctly'" | `return 0` — success |
+| "a requested pin that nothing established is a claim" | read the wrong manifest block, so it could never fire |
+
+The last is mine, written *in the round about this shape*, which is the best
+evidence available that noticing the class does not immunise you against it.
+
+**The census recognises three shapes and says so, because the general question
+is undecidable.** "Does the prose match the code" cannot be decided
+mechanically, so the guard does not pretend to: it detects a never/must-not
+comment beside a bare success, an exactness claim beside a prefix test, and an
+object id named in prose that nothing in the module's code can reach — the three
+that produced the five. **A sixth instance of an unrecognised shape is invisible
+to it**, declared as its own line in the output rather than left to be assumed.
+
+Two details worth keeping. Shape C resolves **names**, not just literals, or it
+would red on correct code — the analyzer enforces the pin through an imported
+constant, so the docstring's claim is backed without the literal appearing in
+the file. And its single exemption is a **list of one, not a rule**, because
+what distinguishes that hit is semantic: the comment quotes a malformed value as
+an *example* rather than claiming enforcement, and nothing mechanical separates
+those. Recorded as the human judgement it is.
+
+**AND THE FIXTURES INSTANTIATED THE DEFECT AGAIN.** The arm cases used
+`cfa93fe98…`/`cfa93fe99…`, which passed *because* the check was a prefix test —
+so the cases meant to prove the arm gate could not have failed. Second time in
+this lane after the 512-zero-byte `CompressionInfo.db`: **a fixture that
+satisfies a weaker check than the one shipped proves nothing about the shipped
+check**, and the way to notice is to ask what the fixture would have to look
+like if the check were as strong as its description.
+
 **THE DRIVER'S REFUSALS PROTECT ONLY SESSIONS THE DRIVER CREATED.** Three
 consecutive rounds found one boundary from three angles — the ticket recorded
 but not pinned, the arms pinned in the driver and unchecked in the analyzer, the
