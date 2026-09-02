@@ -76,3 +76,27 @@ class Unmeasured(Exception):
         super().__init__(cause)
         self.cause = cause
         self.detail = detail
+
+
+def pair_order(replicate):
+    """Which arm runs FIRST in this replicate's pair.
+
+    Executable, and therefore testable, for the reason round 1 paid for: the rule
+    used to be three lines inline in the session loop, which needs a rig, so
+    nothing could run it. This is the one rule in the driver whose failure mode is
+    a CONFIDENT WRONG ANSWER rather than an error -- if base always ran first, a
+    monotonic drift within a pair would land on the head arm every time and bias
+    every ratio in one direction, and every test of the statistics would still
+    pass. A rule like that must not be the untested one.
+
+    Base first on odd replicates, head first on even ones, so over an even count
+    each ordering runs exactly half the time.
+    """
+    return ("base", "head") if replicate % 2 == 1 else ("head", "base")
+
+
+# LIVES HERE because BOTH the driver support and the analyzer's input layer need
+# it: the driver decides the order and `ab_input` validates that the order the
+# records show is the order the rule declares. Putting it in either one made the
+# other import it, and the two already import each other -- so the shared rule
+# belongs in the shared module rather than in whichever consumer wrote it first.

@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=557
+CASE_FLOOR=560
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -1791,7 +1791,45 @@ with open(path, "w", encoding="utf-8") as handle:
 PYINNER
 run_analyzer "$TMP/cb-broken"
 check_verdict "every pair run in the same within-pair order" UNMEASURED 7 single-stream
-check_cause "an uncounterbalanced session" counterbalance-broken
+# The PARITY check now fires first on this fixture, and correctly: an all-base-
+# first session violates the declared order as well as the counts.
+check_cause "an uncounterbalanced session" counterbalance-not-parity
+
+# ROUND 22 FINDING 3: A GROUPED ORDER HAS EQUAL COUNTS AND IS NOT
+# COUNTERBALANCED. base-first for the first half, head-first for the second --
+# three each, so the count test passed and the manifest went on claiming parity
+# counterbalancing. It is the worst arrangement to accept silently, because it
+# is exactly the one in which a time-varying drift correlates with arm order,
+# which is the thing counterbalancing exists to prevent.
+mkfixture "$TMP/cb-grouped" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/cb-grouped/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+for entry in manifest["runs"]:
+    first_half = entry["replicate"] <= 3
+    base_first = first_half
+    if entry["arm"] == "base":
+        entry["position_in_pair"] = 1 if base_first else 2
+    else:
+        entry["position_in_pair"] = 2 if base_first else 1
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/cb-grouped"
+check_verdict "a GROUPED order with equal first-position counts" UNMEASURED 7 single-stream
+check_cause "a grouped order that the count test accepted" counterbalance-not-parity
+# ...and the declared parity order still passes, or the above proves only that
+# something is refused.
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: cause single-stream counterbalance' "$TMP/err.txt"; then
+  bad "the declared parity order was refused"
+else
+  ok "the declared parity order (base first on odd replicates) is accepted"
+fi
 
 # Counterbalancing that is not RECORDED is counterbalancing that cannot be
 # checked -- so an absent or duplicated position is a refusal, not an assumption.

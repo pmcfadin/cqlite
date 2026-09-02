@@ -33,7 +33,14 @@ import re
 import subprocess
 import sys
 
-from ab_common import MIN_CORPUS_BYTES_FLOOR, MIN_SSTABLES_FLOOR, Unmeasured, err, out
+from ab_common import (
+    MIN_CORPUS_BYTES_FLOOR,
+    MIN_SSTABLES_FLOOR,
+    Unmeasured,
+    err,
+    out,
+    pair_order,
+)
 from ab_input import validate_record_shape, validate_record_usable
 
 NOT_OBSERVED = "NOT-OBSERVED"
@@ -1193,23 +1200,6 @@ def resolve_session(batch, maxbytes, wait, scans, min_bytes, min_sstables,
             "past the ceiling is shed (#2420)" % (steps[-1], scans)
         )
     return resolved, problems
-
-
-def pair_order(replicate):
-    """Which arm runs FIRST in this replicate's pair.
-
-    Executable, and therefore testable, for the reason round 1 paid for: the rule
-    used to be three lines inline in the session loop, which needs a rig, so
-    nothing could run it. This is the one rule in the driver whose failure mode is
-    a CONFIDENT WRONG ANSWER rather than an error -- if base always ran first, a
-    monotonic drift within a pair would land on the head arm every time and bias
-    every ratio in one direction, and every test of the statistics would still
-    pass. A rule like that must not be the untested one.
-
-    Base first on odd replicates, head first on even ones, so over an even count
-    each ordering runs exactly half the time.
-    """
-    return ("base", "head") if replicate % 2 == 1 else ("head", "base")
 
 
 def ramp_section(steps):

@@ -41,7 +41,12 @@ import math
 import os
 import re
 
-from ab_common import Unmeasured
+from ab_common import Unmeasured, pair_order
+
+
+def DECLARED_FIRST_ARM(replicate):
+    """The arm the parity rule says runs first, from the ONE rule that states it."""
+    return pair_order(replicate)[0]
 
 SCHEMA_MANIFEST = "ab-3649.manifest/v1"
 SCHEMA_STEP = "flight-loadgen.step/v1"
@@ -918,6 +923,33 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
                 % (rep, base_pos),
             )
         first_by_rep[rep] = "base" if base_pos == 1 else "head"
+    # THE DECLARED RULE, PER REPLICATE -- not the aggregate counts. Equal
+    # first-position COUNTS is a NOUN standing in for the ADJECTIVE "ordered by
+    # parity": a GROUPED order (base-first for the first half, head-first for
+    # the second) has equal counts and is exactly the arrangement that lets a
+    # time-varying drift correlate with arm order, which is the thing
+    # counterbalancing exists to prevent. So the record was making an
+    # affirmative claim about experimental design that the data did not support.
+    #
+    # `pair_order` is the ONE statement of the rule (ab_driver_support.py:1198):
+    # base first on odd replicates, head first on even. Checked against it here
+    # rather than restated, because a second statement of a rule is a second
+    # thing to drift.
+    misordered = [
+        rep for rep in base_reps
+        if first_by_rep[rep] != DECLARED_FIRST_ARM(rep)
+    ]
+    if misordered:
+        raise Unmeasured(
+            "counterbalance-not-parity",
+            "replicate(s) %s did not run the arm the parity rule declares (base "
+            "first on odd replicates, head first on even); the observed order was "
+            "%s. Equal first-position counts are not parity ordering -- a GROUPED "
+            "order has equal counts and is precisely the arrangement in which a "
+            "time-varying drift correlates with arm order. The manifest claims "
+            "parity counterbalancing, so the claim and the data must agree"
+            % (misordered, {rep: first_by_rep[rep] for rep in sorted(misordered)}),
+        )
     base_first = sum(1 for arm in first_by_rep.values() if arm == "base")
     head_first = len(first_by_rep) - base_first
     # Parity counterbalancing yields |base_first - head_first| == n mod 2, so a
