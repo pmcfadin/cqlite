@@ -74,3 +74,158 @@ async fn q4_wellformed_corpus_broad_read() {
     cqlite_core::probe3782::dump(if streaming_leg { "q4-STREAMING" } else { "q4-MATERIALIZING" });
     }
 }
+
+// ---------------------------------------------------------------------------
+// Q1/Q2: mutate ONE byte of a text CLUSTERING-key value into invalid UTF-8.
+// Fixture: test_basic.composite_key_table (nb/BIG, LZ4, clustering_key2 TEXT).
+// ---------------------------------------------------------------------------
+
+const FIX_KS: &str = "test_basic";
+const FIX_TABLE: &str = "composite_key_table";
+
+fn fixture_dir(ks: &str, table: &str) -> PathBuf {
+    let root = datasets_root().join("sstables").join(ks);
+    for e in std::fs::read_dir(&root).expect("read ks dir").flatten() {
+        let n = e.file_name().to_string_lossy().to_string();
+        if n.starts_with(&format!("{table}-")) && e.path().is_dir() {
+            return e.path();
+        }
+    }
+    panic!("fixture {ks}.{table} not found under {root:?}");
+}
+
+fn comp_file(dir: &std::path::Path, suffix: &str) -> PathBuf {
+    for e in std::fs::read_dir(dir).expect("read dir").flatten() {
+        if e.file_name().to_string_lossy().ends_with(suffix) {
+            return e.path();
+        }
+    }
+    panic!("no {suffix} in {dir:?}");
+}
+
+/// Parse CompressionInfo.db → (algorithm, chunk_length, data_length, chunk_offsets).
+fn parse_ci(p: &std::path::Path) -> (String, u32, u64, Vec<u64>) {
+    let b = std::fs::read(p).expect("read CompressionInfo.db");
+    let mut o = 0usize;
+    let nlen = u16::from_be_bytes([b[0], b[1]]) as usize;
+    o += 2;
+    let alg = String::from_utf8_lossy(&b[o..o + nlen]).to_string();
+    o += nlen;
+    let opt = u32::from_be_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as usize;
+    o += 4;
+    for _ in 0..opt {
+        let kl = u16::from_be_bytes([b[o], b[o + 1]]) as usize; o += 2 + kl;
+        let vl = u16::from_be_bytes([b[o], b[o + 1]]) as usize; o += 2 + vl;
+    }
+    let chunk_length = u32::from_be_bytes([b[o], b[o+1], b[o+2], b[o+3]]); o += 4;
+    o += 4; // max_compressed_length
+    let data_length = u64::from_be_bytes(b[o..o+8].try_into().unwrap()); o += 8;
+    let n = u32::from_be_bytes([b[o], b[o+1], b[o+2], b[o+3]]) as usize; o += 4;
+    let mut offs = Vec::with_capacity(n);
+    for i in 0..n {
+        offs.push(u64::from_be_bytes(b[o + i*8..o + i*8 + 8].try_into().unwrap()));
+    }
+    (alg, chunk_length, data_length, offs)
+}
+
+/// Copy the fixture to `dst`, flipping ONE byte of the LZ4 literal carrying
+/// `needle` (a text clustering value) to 0xFF. Returns the decompressed offset
+/// that changed. Asserts the change is length-preserving and single-byte.
+fn mutate_clustering_utf8(src: &std::path::Path, dst: &std::path::Path, needles: &[&[u8]]) -> usize {
+    std::fs::create_dir_all(dst).unwrap();
+    for e in std::fs::read_dir(src).unwrap().flatten() {
+        std::fs::copy(e.path(), dst.join(e.file_name())).unwrap();
+    }
+    let ci = comp_file(dst, "-CompressionInfo.db");
+    let (alg, _clen, _dlen, offs) = parse_ci(&ci);
+    assert!(alg.to_uppercase().contains("LZ4"), "expect LZ4, got {alg}");
+    let data_path = comp_file(dst, "-Data.db");
+    let mut data = std::fs::read(&data_path).unwrap();
+    let file_len = data.len() as u64;
+
+    for needle in needles {
+    let needle: &[u8] = needle;
+    for (i, &start) in offs.iter().enumerate() {
+        let end = offs.get(i + 1).copied().unwrap_or(file_len);
+        let comp = &data[start as usize..(end - 4) as usize];
+        let before = lz4_flex::decompress_size_prepended(comp).expect("decompress chunk");
+        let dhits: Vec<usize> = (0..before.len().saturating_sub(needle.len()))
+            .filter(|&k| &before[k..k + needle.len()] == needle).collect();
+        if dhits.len() != 1 { continue }
+        let chits: Vec<usize> = (0..comp.len().saturating_sub(needle.len()))
+            .filter(|&k| &comp[k..k + needle.len()] == needle).collect();
+        if chits.len() != 1 { continue }
+        let dpos = dhits[0];
+        let flip_at = start as usize + chits[0];
+        let orig = data[flip_at];
+        data[flip_at] = 0xFF;
+        let comp2 = &data[start as usize..(end - 4) as usize];
+        let after = lz4_flex::decompress_size_prepended(comp2).expect("re-decompress");
+        assert_eq!(before.len(), after.len(), "mutation must be length-preserving");
+        let diffs: Vec<usize> = (0..before.len()).filter(|&k| before[k] != after[k]).collect();
+        if diffs.len() != 1 || diffs[0] != dpos { data[flip_at] = orig; continue }
+        assert_eq!(after[dpos], 0xFF);
+        let crc = crc32fast::hash(comp2);
+        let crc_at = (end - 4) as usize;
+        data[crc_at..crc_at + 4].copy_from_slice(&crc.to_be_bytes());
+        std::fs::write(&data_path, &data).unwrap();
+        eprintln!("PROBE3782 mutated needle={:?} chunk {i}: file_off={flip_at} decompressed_off={dpos} (0x{:02x}->0xFF)", String::from_utf8_lossy(needle), orig);
+        return dpos;
+    }
+    }
+    panic!("no needle found as a UNIQUE verbatim LZ4 literal in any chunk");
+}
+
+async fn setup_dir(ks: &str, schema_file: &str, data_dir: PathBuf) -> Database {
+    setup(ks, schema_file, data_dir).await
+}
+
+#[tokio::test]
+async fn q1_read_path_mutated_clustering_text() {
+    let src = fixture_dir(FIX_KS, FIX_TABLE);
+    let tmp = std::env::temp_dir().join(format!("p3782-q1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let stage = tmp.join("sstables").join(FIX_KS).join(src.file_name().unwrap());
+    // control copy
+    let ctl = tmp.join("ctl").join("sstables").join(FIX_KS).join(src.file_name().unwrap());
+    std::fs::create_dir_all(&ctl).unwrap();
+    for e in std::fs::read_dir(&src).unwrap().flatten() {
+        std::fs::copy(e.path(), ctl.join(e.file_name())).unwrap();
+    }
+    let dpos = mutate_clustering_utf8(&src, &stage, &[b"necessary", b"purpose", b"artist", b"region", b"glass", b"unit", b"chair"]);
+    eprintln!("PROBE3782 Q1 mutated decompressed offset {dpos}");
+
+    // CONTROL: unmutated
+    cqlite_core::probe3782::reset();
+    let db = setup_dir(FIX_KS, "basic-types.cql", tmp.join("ctl").join("sstables")).await;
+    let ctl_rows = match db.execute(&format!("SELECT * FROM {FIX_KS}.{FIX_TABLE}")).await {
+        Ok(r) => { eprintln!("PROBE3782 Q1 CONTROL execute -> Ok rows={}", r.rows.len()); r.rows.len() }
+        Err(e) => { eprintln!("PROBE3782 Q1 CONTROL execute -> Err {e}"); 0 }
+    };
+    cqlite_core::probe3782::dump("q1-control-execute");
+
+    // MUTATED: materializing
+    cqlite_core::probe3782::reset();
+    let db2 = setup_dir(FIX_KS, "basic-types.cql", tmp.join("sstables")).await;
+    match db2.execute(&format!("SELECT * FROM {FIX_KS}.{FIX_TABLE}")).await {
+        Ok(r) => eprintln!("PROBE3782 Q1 MUTATED execute -> Ok rows={} (control={ctl_rows})", r.rows.len()),
+        Err(e) => eprintln!("PROBE3782 Q1 MUTATED execute -> Err {e}"),
+    }
+    cqlite_core::probe3782::dump("q1-mutated-execute");
+
+    // MUTATED: streaming (windowed) path
+    cqlite_core::probe3782::reset();
+    let cfg = StreamingConfig { buffer_size: 8, ..Default::default() };
+    match db2.execute_streaming(&format!("SELECT * FROM {FIX_KS}.{FIX_TABLE}"), cfg).await {
+        Ok(mut it) => {
+            let (mut ok, mut err) = (0usize, 0usize);
+            let mut first_err = String::new();
+            while let Some(item) = it.next_async().await {
+                match item { Ok(_) => ok += 1, Err(e) => { err += 1; if first_err.is_empty() { first_err = e.to_string(); } } }
+            }
+            eprintln!("PROBE3782 Q1 MUTATED streaming -> ok_rows={ok} err_items={err} first_err={first_err}");
+        }
+        Err(e) => eprintln!("PROBE3782 Q1 MUTATED streaming -> Err {e}"),
+    }
+    cqlite_core::probe3782::dump("q1-mutated-streaming");
+}
