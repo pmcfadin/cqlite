@@ -89,10 +89,21 @@ TABLE="collection_order"
 
 SCHEMA_FILE="$ROOT/schemas/issue-3790-comparator-ordering.cql"
 
-# Every INSERT pins this timestamp, which stabilises liveness_info.tstamp in the
-# committed golden. NO cell is written as an explicit CQL NULL, so there is no
-# cell tombstone carrying an unpinnable wall-clock local_delete_time — unlike
-# issue-3630's fixture, THIS golden is byte-reproducible.
+# Every INSERT pins this timestamp, which stabilises liveness_info.tstamp and
+# every complex deletion's marked_deleted in the committed golden.
+#
+# WHAT IS REPRODUCIBLE, AND WHAT IS NOT (issue #3790, roborev finding 1):
+# This golden is NOT byte-reproducible, and an earlier version of this comment
+# wrongly claimed it was. Assigning a whole NON-FROZEN collection (`inet_set =
+# {...}`) makes Cassandra emit a COLLECTION TOMBSTONE — a complex deletion — ahead
+# of the cells, and its `local_delete_time` is WALL CLOCK at generation time, not
+# derived from the pinned writetime. Every one of the five complex columns carries
+# one, so regeneration changes those fields even with T_FIXED unchanged.
+#
+# Reproducible: the pinned timestamps (liveness_info.tstamp, marked_deleted) and —
+# the only thing this fixture is an oracle for — the ORDER of the cell paths.
+# NOT reproducible: each complex deletion's `local_delete_time`. Normalise or
+# ignore that field before any byte/JSON comparison of the golden.
 T_FIXED=1000
 
 while [[ $# -gt 0 ]]; do

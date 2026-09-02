@@ -2,10 +2,14 @@
 -- INET / TIME multicell-collection ORDERING fixture (issue #3790).
 --
 -- WHY THIS EXISTS
--- `ComparatorType::compare` (cqlite-core/src/types/comparator.rs) routes
--- `Custom("inet")` and `Custom("time")` through `compare_custom`, which compares
--- `format!("{}", value)` — the FORMATTED STRING — instead of the serialized
--- bytes. Cassandra 5.0.8 constructs both `InetAddressType` and `TimeType` with
+-- HISTORICALLY (the defect this fixture was built to falsify),
+-- `ComparatorType::compare` (cqlite-core/src/types/comparator.rs) routed
+-- `Custom("inet")` and `Custom("time")` through a `compare_custom` helper that
+-- compared `format!("{}", value)` — the FORMATTED STRING — instead of the
+-- serialized bytes. That helper no longer exists: #3790 replaced it with
+-- `cqlite-core/src/types/comparator/custom.rs`, where `inet` and `time` compare
+-- by value and the formatted-string comparison survives ONLY as the residual
+-- path for an unresolved-UDT / unknown `Custom(name)`. Cassandra 5.0.8 constructs both `InetAddressType` and `TimeType` with
 -- `ComparisonType.BYTE_ORDER` (verified at the pinned tag:
 --   InetAddressType() {super(ComparisonType.BYTE_ORDER);}
 --   private TimeType() {super(ComparisonType.BYTE_ORDER);}
