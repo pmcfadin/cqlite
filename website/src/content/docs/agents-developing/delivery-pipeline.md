@@ -202,7 +202,9 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   plus `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null` and an explicit empty `--template=`. The reads
   are bounded by the runner the advisory already resolves, but **only the external commands** (git and
   `mktemp -d`) — the token names both halves,
-  `anchor-reads: bounded-<n>s+<g>s(external:git,mktemp,sh,rm;UNBOUNDED:command-v+pwd-builtins)`, and an
+  `anchor-reads: bounded-<n>s+<g>s(external:git,mktemp,sh;UNBOUNDED:command-v+pwd-builtins)`; the scratch
+  dir is deliberately **not deleted** and left for the OS to reap, because a race-free delete needs
+  `openat`/`unlinkat` and all lanes run as one user; and an
   **anchor-path operation audit** in the script header records for EVERY operation whether it is bounded
   and whether its target is validated (the `workspace-test-disposition.txt` idiom), with the two
   deliberate gaps — `command -v` PATH lookups and one `$(pwd)` diagnostic — declared;

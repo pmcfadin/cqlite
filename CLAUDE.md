@@ -1768,7 +1768,11 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null` plus an explicit empty `--template=`. The reads are
   also **bounded** by the runner this script already resolves for the advisory — but **only the EXTERNAL
   commands are** (every git call and `mktemp -d`), and the token says exactly that:
-  `anchor-reads: bounded-<n>s+<g>s(external:git,mktemp,sh,rm;UNBOUNDED:command-v+pwd-builtins)`. **The
+  `anchor-reads: bounded-<n>s+<g>s(external:git,mktemp,sh;UNBOUNDED:command-v+pwd-builtins)`. **The scratch
+  directory is deliberately NOT DELETED** — a delete through a peer-mutable pathname cannot be made
+  race-free in shell (no `openat`/`unlinkat`) and every lane here runs as the SAME USER, so after three
+  rounds of narrowing it was REMOVED: one object-less `git init` is left under TMPDIR per Case B merge and
+  the OS reaps it. **The
   token was corrected TWICE — once for overclaiming, once for UNDERclaiming**, and an
   **ANCHOR-PATH OPERATION AUDIT** in the script header now lists every operation with two facts, *is it
   bounded* and *is its target validated*, in the `workspace-test-disposition.txt` idiom (a new operation
