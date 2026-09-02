@@ -111,17 +111,43 @@
 # it `worktrees/<name>/HEAD`), its private INDEX (`missing blob <sha>`), and the HEAD of
 # a PRUNABLE worktree whose working directory has been deleted - and all three survive
 # `--no-reflogs`, so a missing object needed by one reaches the CORRUPT branch above.
-# It does NOT walk a LINKED worktree's per-worktree REFS (`refs/worktree/*`,
-# `refs/bisect/*`, `refs/rewritten/*`); those are roots only for an fsck run with THAT
-# worktree's own git dir. Measured consequence, and it is the one this control exists to
-# prevent: delete an object named only by `refs/worktree/private` in a linked worktree
-# and the sweep exits **0 VERIFIED** (the worktree's HEAD reflog echoes the id, and that
-# echo CLEARS under `--no-reflogs`, so even the attribution walk reads it as
-# reflog-scoped). The MAIN worktree's per-worktree refs live in the common dir itself and
-# ARE walked. That gap is closed by the PRIVATE-ROOT PROBE below - a separate, cheap
-# question asked before the affirmative branch - and the coverage above is PINNED by the
-# test suite rather than believed, so a future git that narrows fsck's worktree
-# enumeration reds a case instead of silently shrinking this control.
+# That coverage is PINNED by the test suite rather than believed, so a future git that
+# narrows fsck's worktree enumeration reds a case instead of silently shrinking this
+# control. It is also what makes the DECLARED GAP below narrow enough to be honest.
+#
+# THE ONE GAP, DECLARED AND NOT CLOSED (#3749 review round 8). A common-dir fsck does
+# NOT use a LINKED worktree's per-worktree REFS as reachability roots
+# (`refs/worktree/*`, `refs/bisect/*`, `refs/rewritten/*`); those are roots only for an
+# fsck run with THAT worktree's own git dir. The MAIN worktree's per-worktree refs live
+# in the common dir itself and ARE walked. Measured consequence: delete an object named
+# ONLY by `refs/worktree/private` in a linked worktree and the sweep exits 0 with the
+# affirmative verdict (the worktree's HEAD reflog echoes the id, and that echo CLEARS
+# under `--no-reflogs`, so even the attribution walk reads it as reflog-scoped). The
+# declaration is EMITTED ON EVERY RUN (see the `declared-gap` lines at the sweep below),
+# because a control that omits coverage silently is indistinguishable from one that
+# covers it.
+#
+# WHY IT IS DECLARED RATHER THAN PROBED, and the measurements that decide it. A probe
+# for it WAS built and REMOVED: in one review it produced three separate false-clean
+# routes of its own (a private root's missing CHILD is invisible to a target-presence
+# check; a per-worktree ref whose NAME also exists among the common refs is discarded by
+# a name subtraction even when it points elsewhere; and a failed `awk`/`sort`/`comm`
+# degraded to a zero-root census). CLAUDE.md's standing ruling applies - a guard with
+# known documented false-PASSes is worse than no guard, because it invites reliance it
+# cannot support - and subtraction cannot introduce a false pass, while the class has
+# ZERO INSTANCES on this fleet (measured 2026-09-02: 14 registered worktrees, all three
+# namespaces absent from every linked worktree's admin dir AND from the common dir, 0
+# mentions in `packed-refs`; re-measured independently, same answer).
+#
+# THREE MEASUREMENTS RULE OUT THE fsck-SHAPED FIXES, recorded so they are not
+# re-derived by whoever revisits this (git 2.43.0):
+#   * `git fsck <sha>...` REPLACES the default heads - a missing blob reachable from
+#     HEAD went UNDETECTED (rc 0) when an unrelated head was passed - so private roots
+#     can never simply be APPENDED to the sweep walk;
+#   * a separate explicit-head `git fsck <sha>` still scans the whole object directory,
+#     so it costs a FULL rehash - the N-fsck design the #3749 lead ruling rejected;
+#   * `git rev-list <missing-root>` dies 128 (`bad object`), so `--missing=print` cannot
+#     answer the case that actually fires - the ROOT itself being gone.
 #   2   usage error — and `--help` exits 2 as well, deliberately: exit 0 MEANS
 #                    VERIFIED here, so a run that measured nothing must never
 #                    produce it.
@@ -332,18 +358,13 @@ usage() {
     "$P" "$(sane "${0##*/}")" >&2
   printf '%s USAGE        %s [--repo <path>] --print-store\n' \
     "$P" "$(sane "${0##*/}")" >&2
-  printf '%s USAGE        %s [--repo <path>] --probe-private-roots\n' \
-    "$P" "$(sane "${0##*/}")" >&2
   printf '%s USAGE Rehashes the SHARED git object store behind <path> with git fsck\n' "$P" >&2
   printf '%s USAGE and reports whether it is intact (#3749). Read-only; mutates nothing.\n' "$P" >&2
   printf '%s USAGE --print-store resolves and prints the store this run WOULD sweep\n' "$P" >&2
   printf '%s USAGE (one `store <abs-path>` line) and exits 0 WITHOUT sweeping. It is\n' "$P" >&2
   printf '%s USAGE the ONE isolated resolver callers key a throttle/latch on, so no\n' "$P" >&2
   printf '%s USAGE caller has to run its own un-isolated git to name the store.\n' "$P" >&2
-  printf '%s USAGE --probe-private-roots asks the ONE question a common-dir fsck cannot:\n' "$P" >&2
-  printf '%s USAGE are the objects named by LINKED worktrees per-worktree refs present?\n' "$P" >&2
-  printf '%s USAGE It sweeps nothing and prints `private-root` lines plus one terminal\n' "$P" >&2
-  printf '%s USAGE `private-roots` census line. The sweep runs it as a bounded child.\n' "$P" >&2
+  printf '%s USAGE Every run DECLARES what it does not walk (`declared-gap` lines).\n' "$P" >&2
   printf '%s USAGE Exits 0 verified / 4 corrupt / 5 unmeasured / 2 usage.\n' "$P" >&2
   printf '%s USAGE A CONSUMER MUST NOT READ EXIT 5 AS CLEAN (nothing was measured).\n' "$P" >&2
   printf '%s USAGE Scope is ACCIDENTAL corruption. Deliberate peer forgery is\n' "$P" >&2
@@ -369,13 +390,6 @@ BOUND_SECS=600
 repo_set=0
 bound_set=0
 PRINT_STORE=0
-PROBE_PRIVATE_ROOTS=0
-# THE PATH THIS SCRIPT RE-INVOKES FOR THE PRIVATE-ROOT PROBE. Captured ONCE, before
-# anything can change the working directory, because `$0` is resolved against the cwd in
-# effect when bash started. Nothing here cd's on the main path (the store canonicalisation
-# cd's inside a `$( )` subshell), so this stays valid - but capturing it is cheaper than
-# depending on that staying true.
-SELF="$0"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -h | --help)
@@ -393,22 +407,7 @@ while [ "$#" -gt 0 ]; do
       # RESOLVE-AND-PRINT, NO SWEEP. See the block after the store resolution for what
       # this mode is for and why it deliberately does not require a timeout binary.
       [ "$PRINT_STORE" -eq 0 ] || { usage; exit 2; }
-      [ "$PROBE_PRIVATE_ROOTS" -eq 0 ] || { usage; exit 2; }
       PRINT_STORE=1
-      shift
-      ;;
-    --probe-private-roots)
-      # THE PER-WORKTREE PRIVATE-ROOT PROBE, AS ITS OWN CHILD MODE. It is a mode rather
-      # than an inline loop for ONE reason: the whole probe has to be BOUNDED, and a
-      # bound needs a single child process to wrap. Inlining it would mean either an
-      # UNBOUNDED sequence of git calls in a script whose header says an unboundable host
-      # does not get to run it (measured: those calls took 27.9s on this box at load 132),
-      # or a shell body passed as a string to `bash -c`, which is neither reviewable nor
-      # directly testable. As a mode the body is ordinary code, the suite can drive it
-      # head-on, and the sweep pays exactly one bounded stage for it.
-      [ "$PROBE_PRIVATE_ROOTS" -eq 0 ] || { usage; exit 2; }
-      [ "$PRINT_STORE" -eq 0 ] || { usage; exit 2; }
-      PROBE_PRIVATE_ROOTS=1
       shift
       ;;
     --timeout)
@@ -455,7 +454,7 @@ done
 TIMEOUT_BIN=""
 TIMEOUT_KILL_AFTER=0
 for _tb_name in timeout gtimeout; do
-  [ "$PRINT_STORE" -eq 0 ] && [ "$PROBE_PRIVATE_ROOTS" -eq 0 ] || break
+  [ "$PRINT_STORE" -eq 0 ] || break
   _tb_path="$(command -v "$_tb_name" 2>/dev/null || true)"
   [ -n "$_tb_path" ] || continue
   if "$_tb_path" --kill-after=1 1 true >/dev/null 2>&1; then
@@ -482,7 +481,7 @@ ENV_BIN="$(command -v env 2>/dev/null || true)"
     "fsck run under an inherited GIT_DIR/GIT_OBJECT_DIRECTORY can report about a" \
     "DIFFERENT store than the one it names. Refusing rather than measuring the wrong thing."
 
-if [ -z "$TIMEOUT_BIN" ] && [ "$PRINT_STORE" -eq 0 ] && [ "$PROBE_PRIVATE_ROOTS" -eq 0 ]; then
+if [ -z "$TIMEOUT_BIN" ] && [ "$PRINT_STORE" -eq 0 ]; then
   unmeasured "no timeout/gtimeout on PATH - refusing to run an UNBOUNDED fsck: both" \
     "callers are hang-sensitive (machine onboarding, and the supervisor's" \
     "per-iteration preflight). Install GNU coreutils and re-run."
@@ -553,197 +552,6 @@ if [ "$PRINT_STORE" -eq 1 ]; then
   exit 0
 fi
 
-# --- `--probe-private-roots`: THE ROOTS A COMMON-DIR fsck DOES NOT HAVE -------
-#
-# THE QUESTION, AND WHY IT IS A DIFFERENT ONE FROM THE SWEEP'S. The sweep REHASHES every
-# object PRESENT in the store, so object CONTENT is answered store-wide and is not a
-# per-worktree question at all. The only worktree-dependent half is PRESENCE: an object
-# that is absent cannot be rehashed, and is found only by walking from a root that needs
-# it. Measured (header above): a common-dir fsck already walks every worktree's HEAD,
-# index and reflogs, and MISSES a LINKED worktree's per-worktree refs. So this probe asks
-# exactly the missing half and nothing else.
-#
-# IT IS NOT AN fsck AND MUST NEVER BECOME ONE. Three measurements rule out the obvious
-# shapes, and they are recorded so they are not re-derived:
-#   * `git fsck <sha>...` REPLACES the default heads - a missing blob reachable from HEAD
-#     went UNDETECTED (rc 0) when an unrelated head was passed - so the private roots can
-#     never be appended to the sweep walk;
-#   * `git fsck <sha>` still scans the whole object directory, so a separate explicit-head
-#     fsck costs a FULL rehash, which is the N-fsck design the #3749 lead ruling rejected;
-#   * `git rev-list <missing-root>` dies 128 (`bad object`), so `--missing=print` cannot
-#     answer the case that actually fires - the ROOT itself being gone.
-# What it does instead is O(refs): list each linked worktree's refs, subtract the common
-# ones, and ask `cat-file --batch-check` whether the remainder's targets are in the store.
-# Measured on the live 15-worktree store: 0.02s warm.
-#
-# THE ENUMERATION IS FILESYSTEM-FIRST **BECAUSE THE GIT COMMAND IS FAIL-OPEN**, which is
-# the opposite of what one would assume. Measured: `git worktree list --porcelain`
-# SILENTLY DROPS a worktree whose admin `gitdir` file is missing - rc 0, no diagnostic,
-# the worktree simply absent - so a git-only enumeration answers "clean" about a worktree
-# it could not see. `$GIT_COMMON_DIR/worktrees/*` is not a guess about this fleet's
-# layout, it is git's OWN administrative directory, and it is a SUPERSET of what the
-# command reports. The command is still run, as a CROSS-CHECK in the other direction:
-# if it names more linked worktrees than the directory holds, something is being hidden
-# from us and that is UNREADABLE, never clean.
-#
-# WHAT IT DOES NOT ASK, STATED RATHER THAN IMPLIED: the CLOSURE of a private root. It
-# asks whether each private ref's TARGET is present, not whether every object in that
-# target's history is. An object missing DEEPER in a per-worktree ref's ancestry, and
-# named by no common ref, no worktree HEAD, no index and no reflog, is not recognised
-# here. That residual is declared rather than closed because closing it needs a graph
-# walk from roots whose ancestry is normally shared with the common refs anyway, and the
-# walk would be a second bounded stage (see MAX_SWEEP_WALKS).
-
-# _prp_observe <records-file> <census-file> - ONE observation. Writes TAB-separated
-# records, one per line:
-#     ABSENT<TAB><sha><TAB><worktree><TAB><refname>
-#     UNREADABLE<TAB><worktree><TAB><cause>
-# and `<roots> <linked-worktrees>` to the census file. Returns 0 always: every failure it
-# can name is a record, because a worktree that cannot be inspected is NOT a clean one.
-_prp_observe() {
-  local out="$1" census="$2"
-  local commonrefs="$PRP_TMPD/common.refs" pairs="$PRP_TMPD/wt.pairs"
-  local names="$PRP_TMPD/wt.names" priv="$PRP_TMPD/wt.priv" cand="$PRP_TMPD/cand"
-  local bc="$PRP_TMPD/bc" miss="$PRP_TMPD/miss"
-  local wtdir name nwt=0 nroot=0 gitwt=0
-  : >"$out"
-  : >"$cand"
-  printf '0 0\n' >"$census"
-
-  if ! git_isolated git --git-dir="$GIT_COMMON_DIR" for-each-ref --format='%(refname)' \
-    >"$commonrefs" 2>/dev/null; then
-    printf 'UNREADABLE\t(common)\tthe common ref list could not be read, so no ref can be told apart from a per-worktree one\n' >>"$out"
-    return 0
-  fi
-  LC_ALL=C sort -u "$commonrefs" -o "$commonrefs" 2>/dev/null ||
-    printf 'UNREADABLE\t(common)\tthe common ref list could not be sorted for comparison\n' >>"$out"
-
-  for wtdir in "$GIT_COMMON_DIR"/worktrees/*; do
-    [ -d "$wtdir" ] || continue
-    nwt=$((nwt + 1))
-    name="${wtdir##*/}"
-    # A CONTROL CHARACTER IN AN ADMIN NAME IS REFUSED, NOT ESCAPED. These records are
-    # line- and TAB-delimited and are INTERSECTED between the two observations, so the
-    # name is an IDENTITY here and not a display value (#3749 round 5: a value sanitised
-    # for display is not an identity). Refusing keeps every name that is compared RAW.
-    case "$name" in
-      *[[:cntrl:]]* | *"$(printf '\t')"*)
-        printf 'UNREADABLE\t%s\tthe worktree admin directory name carries a control character, so its private refs cannot be reported on one anchored line\n' \
-          "$(sane "$name")" >>"$out"
-        continue
-        ;;
-    esac
-    if [ ! -r "$wtdir" ] || [ ! -x "$wtdir" ]; then
-      printf 'UNREADABLE\t%s\tthe worktree admin directory is not readable/searchable\n' "$name" >>"$out"
-      continue
-    fi
-    if ! git_isolated git --git-dir="$wtdir" for-each-ref --format='%(refname) %(objectname)' \
-      >"$pairs" 2>/dev/null; then
-      printf 'UNREADABLE\t%s\tits ref list could not be read (git for-each-ref failed against its admin dir)\n' "$name" >>"$out"
-      continue
-    fi
-    # `%(objectname)` is the REF VALUE and reads no object; `%(objecttype)` would, and
-    # dies 128 on exactly the missing object this probe exists to find (measured).
-    awk 'NF >= 2 { print $1 }' "$pairs" 2>/dev/null | LC_ALL=C sort -u >"$names" 2>/dev/null || : >"$names"
-    LC_ALL=C comm -13 "$commonrefs" "$names" >"$priv" 2>/dev/null || : >"$priv"
-    awk -v wt="$name" 'NR == FNR { p[$0] = 1; next }
-      (NF >= 2 && ($1 in p)) { printf "%s\t%s\t%s\n", $2, wt, $1 }' \
-      "$priv" "$pairs" >>"$cand" 2>/dev/null || true
-  done
-
-  # THE CROSS-CHECK IN THE FAIL-OPEN DIRECTION (see the block comment above).
-  if gitwt=$(git_isolated git --git-dir="$GIT_COMMON_DIR" worktree list --porcelain 2>/dev/null |
-    awk '/^worktree /{n++} END{print n + 0}'); then
-    case "$gitwt" in '' | *[!0-9]*) gitwt=0 ;; esac
-    # minus the main worktree, which `worktree list` always names first.
-    [ "$gitwt" -ge 1 ] && gitwt=$((gitwt - 1))
-    if [ "$gitwt" -gt "$nwt" ]; then
-      printf 'UNREADABLE\t(common)\tgit names %s linked worktree(s) but only %s admin directory(ies) exist under the common dir - one is being hidden from this probe\n' \
-        "$gitwt" "$nwt" >>"$out"
-    fi
-  else
-    printf 'UNREADABLE\t(common)\tthe worktree list could not be read as a cross-check on the admin directories\n' >>"$out"
-  fi
-
-  nroot=$(awk 'END{print NR + 0}' "$cand" 2>/dev/null || echo 0)
-  case "$nroot" in '' | *[!0-9]*) nroot=0 ;; esac
-  printf '%s %s\n' "$nroot" "$nwt" >"$census"
-  [ "$nroot" -gt 0 ] || return 0
-
-  # ONE batch presence question for every private root. `cat-file --batch-check` prints
-  # `<sha> missing` for an object the store does not hold and exits 0 (measured).
-  if ! cut -f1 "$cand" 2>/dev/null | LC_ALL=C sort -u |
-    git_isolated git --git-dir="$GIT_COMMON_DIR" cat-file --batch-check='%(objectname) %(objecttype)' \
-      >"$bc" 2>/dev/null; then
-    printf 'UNREADABLE\t(common)\tthe presence check (git cat-file --batch-check) could not be run over %s private root(s)\n' \
-      "$nroot" >>"$out"
-    return 0
-  fi
-  awk '$2 == "missing" { print $1 }' "$bc" 2>/dev/null | LC_ALL=C sort -u >"$miss" 2>/dev/null || : >"$miss"
-  awk -F'\t' 'NR == FNR { m[$0] = 1; next }
-    ($1 in m) { printf "ABSENT\t%s\t%s\t%s\n", $1, $2, $3 }' "$miss" "$cand" >>"$out" 2>/dev/null || true
-  return 0
-}
-
-# probe_private_roots - TWO independent observations, INTERSECTED, then printed.
-#
-# THE SECOND OBSERVATION IS THE SAME DISCRIMINATOR THE SWEEP USES, FOR THE SAME REASON.
-# Up to eight peer lanes write this store: a lane running `git worktree remove`, or
-# deleting a bisect ref, between the enumeration and the presence check makes a root look
-# absent when nothing is wrong, and a worktree whose admin dir is being torn down looks
-# unreadable for a second. A transient does not survive a second independent
-# enumeration; real damage does. Both observations RE-ENUMERATE from scratch - reusing
-# the first one's root list would make the second observation answer a stale question.
-#
-# BOTH OBSERVATIONS RUN INSIDE THIS ONE CHILD PROCESS, which is what keeps the sweep's
-# worst case at MAX_SWEEP_WALKS bounded stages: two bounded children would have been a
-# fourth stage, and every caller's bound is derived from that number.
-probe_private_roots() {
-  local o1="$PRP_TMPD/o1" o2="$PRP_TMPD/o2" c1="$PRP_TMPD/c1" c2="$PRP_TMPD/c2"
-  local both="$PRP_TMPD/both" nabs=0 nunr=0 nroot=0 nwt=0 kind f1 f2 f3
-  _prp_observe "$o1" "$c1"
-  _prp_observe "$o2" "$c2"
-  LC_ALL=C sort -u "$o1" -o "$o1" 2>/dev/null || : >"$o1"
-  LC_ALL=C sort -u "$o2" -o "$o2" 2>/dev/null || : >"$o2"
-  LC_ALL=C comm -12 "$o1" "$o2" >"$both" 2>/dev/null || : >"$both"
-
-  while IFS="$(printf '\t')" read -r kind f1 f2 f3; do
-    case "$kind" in
-      ABSENT)
-        nabs=$((nabs + 1))
-        printf '%s private-root ABSENT %s %s %s\n' "$P" "$(sane "$f1")" "$(sane "$f2")" "$(sane "$f3")"
-        ;;
-      UNREADABLE)
-        nunr=$((nunr + 1))
-        printf '%s private-root UNREADABLE %s %s\n' "$P" "$(sane "$f1")" "$(sane "$f2")"
-        ;;
-    esac
-  done <"$both"
-
-  # The census reports the SECOND observation's counts: it is the one whose enumeration
-  # is current at the moment the answer is given.
-  read -r nroot nwt <"$c2" 2>/dev/null || { nroot=0; nwt=0; }
-  case "$nroot" in '' | *[!0-9]*) nroot=0 ;; esac
-  case "$nwt" in '' | *[!0-9]*) nwt=0 ;; esac
-  # THE TERMINAL CENSUS LINE IS THE COMPLETENESS MARKER, and the caller requires EXACTLY
-  # ONE of them: a probe that died halfway prints records and no census, which is
-  # UNMEASURED rather than "nothing was found" (the `.started` idiom, one function over).
-  printf '%s private-roots checked=%s worktrees=%s absent=%s unreadable=%s (two observations, intersected)\n' \
-    "$P" "$nroot" "$nwt" "$nabs" "$nunr"
-  return 0
-}
-
-if [ "$PROBE_PRIVATE_ROOTS" -eq 1 ]; then
-  if ! PRP_TMPD=$(mktemp -d "${TMPDIR:-/tmp}/object-store-private-roots.XXXXXX" 2>/dev/null) ||
-    [ -z "$PRP_TMPD" ] || [ ! -d "$PRP_TMPD" ]; then
-    unmeasured "could not create a scratch dir under $(sane "${TMPDIR:-/tmp}") for the" \
-      "private-root probe"
-  fi
-  trap 'rm -rf "$PRP_TMPD" 2>/dev/null' EXIT
-  probe_private_roots
-  exit 0
-fi
-
 # --- scratch space (outside the repository: this script writes nothing in it) --
 if ! TMPD=$(mktemp -d "${TMPDIR:-/tmp}/object-store-integrity.XXXXXX" 2>/dev/null) ||
   [ -z "$TMPD" ] || [ ! -d "$TMPD" ]; then
@@ -760,6 +568,36 @@ else
   printf '%s bound %ss (SIGTERM-only: %s does not accept --kill-after; git fsck does not trap SIGTERM)\n' \
     "$P" "$BOUND_SECS" "$(sane "$TIMEOUT_BIN")"
 fi
+
+# --- WHAT THIS SWEEP DOES NOT WALK, DECLARED ON EVERY RUN --------------------
+#
+# WHY THIS IS PRINTED AT ALL, AND WHY EVERY RUN PAYS FOR IT. A control that omits a
+# class of coverage SILENTLY is indistinguishable from one that covers it - the reason
+# this repo's narrowed gate lanes declare their narrowing at run time. The gap is real,
+# it is one namespace wide, and the reasoning that keeps it declared rather than probed
+# (including the probe that was built and removed for producing false-clean routes of
+# its own) is in the header. It is printed BEFORE the walk, not beside the affirmative
+# branch, so a CORRUPT or UNMEASURED run says it too: what was not walked does not
+# depend on what was found.
+#
+# `N RECOGNISED`, NEVER A BARE COUNT. A bare `0`/`1` in a log reads as a verified
+# all-clear from a scan documented as incomplete. This count is the number of gaps THIS
+# SCRIPT RECOGNISES, and the line says so; it is STATIC TEXT and costs no git call, so
+# it adds no wall time and no new failure mode to the sweep.
+printf '%s declared-gap 1 RECOGNISED (this list states its own non-exhaustiveness)\n' "$P"
+printf '%s declared-gap 1/1: the per-worktree ref namespaces of LINKED worktrees -\n' "$P"
+printf '%s declared-gap refs/worktree/*, refs/bisect/*, refs/rewritten/* - are NOT\n' "$P"
+printf '%s declared-gap reachability roots of a common-dir git fsck, so an object named\n' "$P"
+printf '%s declared-gap ONLY by one of them is NOT detected by this run and does NOT hold\n' "$P"
+printf '%s declared-gap back the affirmative verdict below. Measured on this fleet\n' "$P"
+printf '%s declared-gap 2026-09-02: 0 such refs across 14 registered worktrees (all three\n' "$P"
+printf '%s declared-gap namespaces absent from every linked worktree admin dir and from\n' "$P"
+printf '%s declared-gap the common dir), so the gap has zero instances here - it is\n' "$P"
+printf '%s declared-gap declared because that is a measurement, not a guarantee (#3749).\n' "$P"
+printf '%s declared-gap NOT in the gap, measured rather than assumed: every registered\n' "$P"
+printf '%s declared-gap worktree private HEAD and INDEX (prunable worktrees included) and\n' "$P"
+printf '%s declared-gap the COMMON refs ARE walked, and a missing object needed by one is\n' "$P"
+printf '%s declared-gap reported. That is what makes this gap one namespace wide.\n' "$P"
 
 # --- THE SWEEP --------------------------------------------------------------
 #
@@ -808,19 +646,15 @@ FINDING_LIST_LIMIT=40
 # raises every caller's worst-case uninterruptible block.
 #   1. the sweep;
 #   2. the reproduction discriminator, when walk 1 was not clean;
-#   3. EITHER the reachability-CAUSE discriminator (`--no-reflogs`, when walks 1 and 2
-#      both reported ERROR_REACHABLE and neither reported damage) OR the PRIVATE-ROOT
-#      PROBE - never both, and that is why adding the probe did not raise this number.
+#   3. the reachability-CAUSE discriminator (`--no-reflogs`), when walks 1 and 2 both
+#      reported ERROR_REACHABLE and neither reported damage.
 #
-# WHY STAGE 3 IS AN EITHER/OR AND NOT A SUM (#3749 review round 7). Every branch of the
-# reachability block exits (CORRUPT, or one of three UNMEASURED causes), so a run that
-# spends walk 3 TERMINATES THERE and never reaches the private-root probe; and the probe
-# sits immediately before the ONE affirmative branch, which is reachable only when pass 2
-# was clean. So the worst case is max(3 fsck walks, 2 fsck walks + 1 probe) = 3 bounded
-# stages, unchanged - no caller's bound moves. That is a PLACEMENT property, not an
-# arithmetic one, so it is asserted BEHAVIOURALLY by the suite (the 3-walk fixtures must
-# emit no `private-root` line at all); moving the probe earlier would silently widen
-# every caller's uninterruptible window.
+# NOTHING ELSE MAY BE ADDED HERE WITHOUT MOVING EVERY CALLER'S BOUND. The declared gap
+# in the header (a linked worktree's per-worktree refs) is DECLARED rather than probed,
+# and one reason among several is that a probe is a further bounded stage: a stage added
+# below the reachability block is free only while every branch of that block exits,
+# which is a PLACEMENT property nothing arithmetic can check. If a stage is ever added,
+# raise this number and re-derive the callers' bounds from it (#3749 rounds 7/8).
 MAX_SWEEP_WALKS=3
 
 # git fsck's exit BITMASK, from fsck.h and CONFIRMED against the git in use (2.43.0):
@@ -1335,101 +1169,6 @@ if [ "$FIRST_WALK_CLEAN" -eq 0 ]; then
   printf '%s note which is the signature of a concurrent writer on this shared store rather\n' "$P"
   printf '%s note than damage. The verdict below rests on the second walk, which completed.\n' "$P"
 fi
-
-# --- THE PRIVATE-ROOT GATE ON `VERIFIED` ------------------------------------
-#
-# THE LAST QUESTION BEFORE THE ONLY AFFIRMATIVE VERDICT, and it is placed here for two
-# reasons that are both load-bearing. (1) SEMANTICS: `VERIFIED` may not rest on a rehash
-# alone when a whole class of roots was not walked, so the probe gates the affirmative
-# branch rather than sitting beside it. (2) THE BOUND: every branch of the reachability
-# block above exits, so a run that spent a third fsck walk never arrives here - the worst
-# case stays at MAX_SWEEP_WALKS bounded child stages and no caller's derived bound moves
-# (see MAX_SWEEP_WALKS). Moving this call earlier would silently widen every caller's
-# uninterruptible window, which is why the suite asserts the placement behaviourally.
-#
-# IT IS RUN AS A BOUNDED CHILD OF THIS SAME SCRIPT, under the same isolation and the same
-# timeout machinery as an fsck walk: the body is a mode of this file (see
-# `--probe-private-roots`), so it is ordinary reviewable code that the suite drives
-# head-on, while the caller still pays exactly one boundable process for it.
-PRP_OUT="$TMPD/prp.out"
-prp_rc=0
-if [ ! -r "$SELF" ]; then
-  unmeasured "the private-root probe could not be run: this script's own path" \
-    "($(sane "$SELF")) is not readable, so the per-worktree roots a common-dir fsck does" \
-    "NOT walk (a linked worktree's refs/worktree, refs/bisect, refs/rewritten) were not" \
-    "checked. The rehash said nothing about them, so this run is NOT clean (#3749)."
-fi
-if [ "$TIMEOUT_KILL_AFTER" -eq 1 ]; then
-  git_isolated nice -n 19 "$TIMEOUT_BIN" --kill-after="$BOUND_KILL_GRACE" "$BOUND_SECS" \
-    bash "$SELF" --repo "$REPO" --probe-private-roots >"$PRP_OUT" 2>&1 || prp_rc=$?
-else
-  git_isolated nice -n 19 "$TIMEOUT_BIN" "$BOUND_SECS" \
-    bash "$SELF" --repo "$REPO" --probe-private-roots >"$PRP_OUT" 2>&1 || prp_rc=$?
-fi
-
-# THE TWO CHANNELS MUST AGREE BEFORE EITHER IS ACTED ON (#3749 review round 4, applied to
-# the channel this round adds): the child's EXIT STATUS and its terminal census line are
-# two independent signals, and a run is only complete when BOTH say so. Exactly one
-# census line is required - the `store-key` contract idiom - so a child that died halfway
-# through printing records is UNMEASURED and never "nothing was found".
-PRP_CENSUS=""
-prp_complete=0
-if PRP_CENSUS=$(awk '/^OBJECT-STORE: private-roots /{ line = $0; n++ }
-  END { if (n == 1) { print line; exit 0 } exit 1 }' "$PRP_OUT" 2>/dev/null); then
-  prp_complete=1
-fi
-PRP_ABSENT=$(awk '/^OBJECT-STORE: private-root ABSENT /{ n++ } END { print n + 0 }' "$PRP_OUT" 2>/dev/null)
-PRP_UNREAD=$(awk '/^OBJECT-STORE: private-root UNREADABLE /{ n++ } END { print n + 0 }' "$PRP_OUT" 2>/dev/null)
-case "$PRP_ABSENT" in '' | *[!0-9]*) PRP_ABSENT=0 ;; esac
-case "$PRP_UNREAD" in '' | *[!0-9]*) PRP_UNREAD=0 ;; esac
-
-# Its own lines are already anchored, and ONLY anchored lines are re-emitted: a child that
-# died could put an unanchored shell diagnostic on this stream, and output property (a) is
-# what every consumer and every test rests on.
-awk '/^OBJECT-STORE: private-root/ { print }' "$PRP_OUT" 2>/dev/null || true
-
-if [ "$prp_rc" -eq 124 ] || [ "$prp_rc" -eq 137 ]; then
-  unmeasured "the private-root probe exceeded its ${BOUND_SECS}s bound (rc=$prp_rc), so the" \
-    "per-worktree roots a common-dir fsck does NOT walk were not checked. The rehash" \
-    "above says nothing about them. Re-run with a larger --timeout on an idle box."
-fi
-if [ "$prp_complete" -eq 0 ] || [ "$prp_rc" -ne 0 ]; then
-  unmeasured "the private-root probe did not complete (child rc=$prp_rc," \
-    "census line $([ "$prp_complete" -eq 1 ] && printf 'present' || printf 'ABSENT')): its" \
-    "exit status and its terminal census line must AGREE before either is read, and they" \
-    "do not. The per-worktree roots a common-dir fsck does NOT walk (a linked worktree's" \
-    "refs/worktree, refs/bisect, refs/rewritten) were therefore not checked, so the rehash" \
-    "above is not a clean answer about them. Run" \
-    "'bash $(sane "${0##*/}") --probe-private-roots' by hand to see what it said (#3749)."
-fi
-if [ "$PRP_ABSENT" -gt 0 ]; then
-  printf '%s measured %s\n' "$P" "$(sane "${PRP_CENSUS#"$P "}")"
-  printf '%s verdict CORRUPT\n' "$P"
-  printf '%s verdict-detail %s object(s) named by a LINKED WORKTREE'"'"'s per-worktree ref are\n' "$P" "$PRP_ABSENT"
-  printf '%s verdict-detail NOT in this box'"'"'s SHARED store, on TWO independent enumerations.\n' "$P"
-  printf '%s verdict-detail A common-dir `git fsck` does not walk those refs (it walks every\n' "$P"
-  printf '%s verdict-detail worktree'"'"'s HEAD, index and reflogs, and the COMMON refs), so the rehash\n' "$P"
-  printf '%s verdict-detail above reported nothing about them: this is exactly the missing-object\n' "$P"
-  printf '%s verdict-detail class the reachability discriminator treats as damage, found at a root\n' "$P"
-  printf '%s verdict-detail that walk never had. Every lane on this box reads this store, so do NOT\n' "$P"
-  printf '%s verdict-detail certify anything against this checkout.\n' "$P"
-  printf '%s verdict-detail REMEDY: stop the lanes on this box and re-obtain the objects from the\n' "$P"
-  printf '%s verdict-detail canonical remote (`git fetch --force origin`, or a fresh clone of\n' "$P"
-  printf '%s verdict-detail pmcfadin/cqlite). If the ref is a leftover (`refs/bisect/*` from an\n' "$P"
-  printf '%s verdict-detail abandoned bisect, a tool'"'"'s `refs/worktree/*`) and the object only ever\n' "$P"
-  printf '%s verdict-detail existed locally, DELETE THE REF in that worktree rather than improvising\n' "$P"
-  printf '%s verdict-detail on the store - but establish which it is first (#3749).\n' "$P"
-  exit 4
-fi
-if [ "$PRP_UNREAD" -gt 0 ]; then
-  unmeasured "$PRP_UNREAD registered worktree(s) could not be INSPECTED for their" \
-    "per-worktree refs, on both observations (see the private-root lines above). A" \
-    "worktree this probe cannot read is not a clean one: a common-dir fsck does not walk" \
-    "those refs, so nothing in this run establishes whether the objects they name are" \
-    "present. Fix the named admin directory under $(sane "$GIT_COMMON_DIR")/worktrees" \
-    "(or prune the worktree with 'git worktree prune') and re-run (#3749)."
-fi
-printf '%s measured %s\n' "$P" "$(sane "${PRP_CENSUS#"$P "}")"
 
 # --- THE ONE AFFIRMATIVE BRANCH --------------------------------------------
 #

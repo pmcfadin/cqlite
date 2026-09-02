@@ -152,9 +152,13 @@ whole_suite_checks() {
 # suite could vanish — or be cut short by a signal — and still report green. Every
 # host-dependent branch in this file emits a `bad` rather than silently running fewer
 # assertions (the two `command -v` guards and the fixture-construction asserts), so a
-# green run is 81 on any host that can run it at all; a green run BELOW this number
-# means cases were removed or the run was truncated. RAISE IT when you add cases.
-CASE_FLOOR=123
+# green run hits exactly the number below on any host that can run it at all; a green run
+# BELOW it means cases were removed or the run was truncated. The count is written ONCE,
+# as the value: a second copy of it in this comment went stale for three rounds and a
+# restated constant is a magic number wearing a relation's clothes. RAISE IT when you add
+# cases; LOWER IT when you deliberately remove them, never "for safety" — a floor above
+# the real count is a permanently red suite.
+CASE_FLOOR=120
 
 finish() {
   local rc=$?
@@ -1711,164 +1715,90 @@ for WTR_MODE in head index prunable; do
   fi
 done
 
-# --- Case 31: THE ROOT A COMMON-DIR fsck DOES **NOT** WALK ------------------
-# THE REAL HOLE, and it is narrower and sharper than the review finding that led to it.
-# A LINKED worktree's per-worktree refs (`refs/worktree/*`, `refs/bisect/*`,
-# `refs/rewritten/*`) are roots only for an fsck run with THAT worktree's git dir. Delete
-# an object named only by one and a common-dir fsck exits **0**: the worktree's HEAD
-# reflog echoes the id, and that echo CLEARS under `--no-reflogs`, so even the round-4
-# attribution walk reads it as reflog-scoped. The MAIN worktree's per-worktree refs live
-# in the common dir and ARE walked, which is why this fixture uses a LINKED one.
-mk_wt_privateref_repo() {
-  # mk_wt_privateref_repo <name> <delete|keep> -> path; the victim id is published to
-  # "$T/<name>.victim" for the same subshell reason as mk_wt_root_repo above.
-  local r="$T/$1" act="$2" wt="$T/$1-wt" WTP_VICTIM=""
-  : >"$T/$1.victim"
-  mkdir -p "$r"
-  git init -q "$r" >/dev/null 2>&1
-  g "$r" config user.email t@t
-  g "$r" config user.name t
-  printf 'content aaa\n' >"$r/f1"
-  g "$r" add f1 >/dev/null
-  GIT_AUTHOR_DATE="$FIXTURE_DATE" GIT_COMMITTER_DATE="$FIXTURE_DATE" \
-    g "$r" -c user.email=t@t -c user.name=t commit -q -m c1 >/dev/null
-  g "$r" worktree add -q --detach "$wt" HEAD >/dev/null 2>&1 || { printf '%s' "$r"; return 0; }
-  printf 'private-ref-only\n' >"$wt/u"
-  g "$wt" add u >/dev/null
-  GIT_AUTHOR_DATE="$FIXTURE_DATE" GIT_COMMITTER_DATE="$FIXTURE_DATE" \
-    g "$wt" -c user.email=t@t -c user.name=t commit -q -m private-ref >/dev/null
-  WTP_VICTIM=$(g "$wt" rev-parse HEAD 2>/dev/null)
-  g "$wt" update-ref refs/worktree/private "$WTP_VICTIM" >/dev/null 2>&1
-  # Move HEAD off it, and drop the reflogs, so the per-worktree REF is the ONLY thing
-  # left naming the object — which is the whole point of the case.
-  g "$wt" checkout -q --detach HEAD~1 >/dev/null 2>&1
-  rm -f "$r/.git/worktrees/$(basename "$wt")/logs/HEAD" "$r/.git/logs/HEAD" 2>/dev/null
-  rm -rf "$r/.git/logs/refs" 2>/dev/null
-  printf '%s' "$WTP_VICTIM" >"$T/$1.victim"
-  if [ "$act" = delete ] && [ -n "$WTP_VICTIM" ]; then
-    chmod u+w "$(loose_path "$r" "$WTP_VICTIM")" 2>/dev/null
-    rm -f "$(loose_path "$r" "$WTP_VICTIM")"
-  fi
-  printf '%s' "$r"
-}
-R_WTP=$(mk_wt_privateref_repo wtpriv delete)
-WTP_DEAD=$(cat "$T/wtpriv.victim" 2>/dev/null || true)
-R_WTP_OK=$(mk_wt_privateref_repo wtpriv-ctl keep)
-WTP_ALIVE=$(cat "$T/wtpriv-ctl.victim" 2>/dev/null || true)
-WTP_RAW=$(fsck_status_mode "$R_WTP")
-WTP_RAW_NR=0
-git -C "$R_WTP" fsck --no-progress --no-dangling --no-reflogs >/dev/null 2>&1 || WTP_RAW_NR=$?
-# THE CONSTRUCTION ASSERT IS ALSO THE EVIDENCE THAT THE PROBE IS LOAD-BEARING: raw git,
-# in exactly the configuration the sweep's walks use, calls this store CLEAN. Without
-# that, a green below could not distinguish "the probe found it" from "fsck found it".
-if [ -n "$WTP_DEAD" ] && [ "$WTP_DEAD" = "$WTP_ALIVE" ] &&
-  ! git -C "$R_WTP" cat-file -e "$WTP_DEAD" 2>/dev/null &&
-  git -C "$R_WTP_OK" cat-file -e "$WTP_ALIVE" 2>/dev/null &&
-  [ "$(git --git-dir="$R_WTP/.git" rev-parse --verify -q refs/worktree/private 2>/dev/null)" != "$WTP_DEAD" ] &&
-  [ "$(git --git-dir="$R_WTP/.git/worktrees/wtpriv-wt" rev-parse --verify -q refs/worktree/private 2>/dev/null)" = "$WTP_DEAD" ] &&
-  [ "$WTP_RAW" -eq 0 ] && [ "$WTP_RAW_NR" -eq 0 ]; then
-  ok "wt-privateref-plant: $WTP_DEAD is named ONLY by the LINKED worktree's refs/worktree/private (invisible from the common dir), it is absent, the control still holds it, and a raw common-dir fsck calls this store CLEAN with and without reflogs — so anything found below is found by the probe"
-else
-  bad "wt-privateref-plant: dead='$WTP_DEAD' alive='$WTP_ALIVE' raw-fsck=$WTP_RAW/$WTP_RAW_NR — not the shape this case is about; the arms below would prove nothing"
-fi
-if run 4 "wt-privateref: CORRUPT" --repo "$R_WTP"; then
-  if [ "$(verdict_of)" = CORRUPT ] &&
-    printf '%s\n' "$OUT" | grep -q "^OBJECT-STORE: private-root ABSENT $WTP_DEAD .* refs/worktree/private$"; then
-    ok "wt-privateref: an object named only by a LINKED worktree's per-worktree ref is CORRUPT (exit 4) and the missing root is NAMED — the store a raw fsck called clean"
+# --- Case 31: THE GAP IS DECLARED, ON EVERY RUN, IN THE OUTPUT --------------
+# WHAT THIS CASE IS FOR (#3749 review round 8). A common-dir fsck does NOT use a LINKED
+# worktree's per-worktree refs (`refs/worktree/*`, `refs/bisect/*`, `refs/rewritten/*`)
+# as reachability roots, so an object named ONLY by one of them is not detected. A probe
+# for that WAS built and REMOVED: it produced three false-clean routes of its own (a
+# missing CHILD of a present root; a per-worktree ref whose NAME collides with a common
+# one; a failed `awk`/`sort`/`comm` degrading to a zero-root census), and CLAUDE.md's
+# ruling is that a guard with known false-PASSes is worse than no guard. What replaces it
+# is a DECLARATION — and a declaration nobody can see is worth nothing, so the property
+# under test is that it is EMITTED, on every verdict class, in the anchored stream.
+#
+# THIS CASE AND THE GAP ARE ONE FACT. If the gap is ever genuinely CLOSED, this case must
+# change in the SAME diff as the declaration it pins: a stale declaration claiming a hole
+# that no longer exists is as misleading as a silent hole.
+dg_lines() { printf '%s\n' "$OUT" | grep '^OBJECT-STORE: declared-gap '; }
+for DG_ARM in "clean:0:$R_CLEAN" "corrupt:4:$R_ROT" "unmeasured:5:$R_REFLOG_MISS"; do
+  DG_NAME=${DG_ARM%%:*}
+  DG_REST=${DG_ARM#*:}
+  DG_WANT=${DG_REST%%:*}
+  DG_REPO=${DG_REST#*:}
+  OUT=$(bash "$SUBJECT" --repo "$DG_REPO" 2>&1)
+  RC=$?
+  record_out "declared-gap-$DG_NAME"
+  # THE POINT OF RUNNING ALL THREE CLASSES: what a run did NOT walk does not depend on
+  # what it found, so a declaration printed only beside the affirmative verdict would be
+  # absent from exactly the logs an operator reads most carefully.
+  if [ "$RC" -eq "$DG_WANT" ] && [ -n "$(dg_lines)" ]; then
+    ok "declared-gap($DG_NAME): the run-time declaration is present on a $DG_NAME run (exit $RC, verdict $(verdict_of)) — it is not conditional on the verdict"
   else
-    bad "wt-privateref: verdict='$(verdict_of)' — wanted CORRUPT naming $WTP_DEAD: $(printf '%s\n' "$OUT" | grep 'private-root' | head -2 | tr '\n' ' ')"
+    bad "declared-gap($DG_NAME): exit $RC (wanted $DG_WANT) verdict='$(verdict_of)' declaration-lines=$(dg_lines | grep -c .) — a run that omits the declaration is indistinguishable from one that covers the gap"
   fi
-fi
-if run 0 "wt-privateref-control: VERIFIED" --repo "$R_WTP_OK"; then
-  if [ "$(verdict_of)" = VERIFIED ] &&
-    printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: measured private-roots checked=1 .* absent=0 '; then
-    ok "wt-privateref(control): the SAME fixture with the object present is VERIFIED, and the affirmative branch reports that it CHECKED the private root — so VERIFIED is an affirmative statement about it, not silence"
-  else
-    bad "wt-privateref(control): verdict='$(verdict_of)' census='$(printf '%s\n' "$OUT" | grep 'measured private-roots')' — the control must pass AND must show the root was checked"
-  fi
-fi
-
-# --- Case 32: A WORKTREE THAT CANNOT BE INSPECTED IS NOT A CLEAN ONE --------
-# The permissive direction here would be silent and total: a worktree whose refs cannot
-# be listed contributes ZERO roots, so the probe would report `absent=0` and the sweep
-# would go on to VERIFIED — the exact shape CLAUDE.md names (a multi-state signal whose
-# unmeasured state inherits the permissive branch). It is UNMEASURED instead, and the
-# worktree is NAMED.
-R_WTU=$(mk_wt_root_repo wtunread head keep)
-WTU_ADMIN="$R_WTU/.git/worktrees/wtunread-wt"
-if [ "$(id -u)" = 0 ]; then
-  skipped=1
-  ok "wt-unreadable: SKIPPED as root — permission bits are advisory for uid 0, so a chmod plant would not make the admin dir unreadable and a green would prove nothing"
-elif [ -d "$WTU_ADMIN" ] && chmod 000 "$WTU_ADMIN" 2>/dev/null &&
-  ! git --git-dir="$WTU_ADMIN" for-each-ref >/dev/null 2>&1; then
-  ok "wt-unreadable-plant: the linked worktree's admin dir really is unreadable to this process (git cannot list its refs)"
-  if run 5 "wt-unreadable: UNMEASURED" --repo "$R_WTU"; then
-    if [ "$(verdict_of)" = UNMEASURED ] &&
-      printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: private-root UNREADABLE wtunread-wt ' &&
-      ! printf '%s\n' "$OUT" | grep -q 'verdict VERIFIED'; then
-      ok "wt-unreadable: a registered worktree whose refs cannot be listed is UNMEASURED and is NAMED — never a silent zero-root contribution to VERIFIED"
-    else
-      bad "wt-unreadable: verdict='$(verdict_of)' lines='$(printf '%s\n' "$OUT" | grep 'private-root' | head -2 | tr '\n' ' ')'"
-    fi
-  fi
-  chmod 755 "$WTU_ADMIN" 2>/dev/null
-  # ONE PROPERTY BACK: with the permissions restored the same fixture is VERIFIED, so the
-  # UNMEASURED above is the unreadable admin dir and not the fixture.
-  if run 0 "wt-unreadable-control: VERIFIED" --repo "$R_WTU"; then
-    if [ "$(verdict_of)" = VERIFIED ]; then
-      ok "wt-unreadable(control): restoring ONLY the permission bits makes the same fixture VERIFIED"
-    else
-      bad "wt-unreadable(control): verdict='$(verdict_of)' after restoring permissions"
-    fi
-  fi
-else
-  bad "wt-unreadable-plant: could not make the linked worktree's admin dir unreadable ($WTU_ADMIN) — the case below would prove nothing"
-fi
-
-# --- Case 33: THE PROBE MODE'S OWN CONTRACT --------------------------------
-# The caller requires EXACTLY ONE terminal census line and reads the exit status and that
-# line as a CONJUNCTION (the round-4 two-channel rule, applied to the channel this round
-# adds). If the mode stopped printing the census, or printed two, the caller would report
-# UNMEASURED — so the contract is pinned here, where the failure is attributable.
-OUT=$(bash "$SUBJECT" --repo "$R_WTP_OK" --probe-private-roots 2>&1)
-RC=$?
-record_out "probe-mode"
-PRP_CENSUS_N=$(printf '%s\n' "$OUT" | grep -c '^OBJECT-STORE: private-roots checked=')
-if [ "$RC" -eq 0 ] && [ "$PRP_CENSUS_N" -eq 1 ] &&
-  ! printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: verdict '; then
-  ok "probe-mode: --probe-private-roots exits 0, prints exactly one terminal census line, and emits NO verdict — it is a measurement the sweep consumes, not a certification"
-else
-  bad "probe-mode: rc=$RC census-lines=$PRP_CENSUS_N verdict='$(verdict_of)' — the contract the sweep's caller-side conjunction depends on is broken"
-fi
-if bash "$SUBJECT" --repo "$R_WTP_OK" --probe-private-roots --print-store >/dev/null 2>&1; then
-  bad "probe-mode: --probe-private-roots and --print-store were accepted together — two early-exit modes in one run have no defined output"
-else
-  ok "probe-mode: --probe-private-roots and --print-store are mutually exclusive (usage error, no verdict)"
-fi
-
-# --- Case 34: THE PROBE IS THE THIRD STAGE, NEVER A FOURTH (placement) ------
-# WHY THIS IS A CORRECTNESS CASE AND NOT BOOKKEEPING. Every caller derives its own
-# uninterruptible-block bound from the sweep's declared MAX_SWEEP_WALKS, and that number
-# stayed at 3 only because the reachability-attribution path (3 fsck walks) TERMINATES
-# before the probe can run. That is a property of WHERE the call sits, so no arithmetic
-# can check it: it is measured against the fixture that actually spends three walks.
-OUT=$(bash "$SUBJECT" --repo "$R_LIVE_MISS" 2>&1)
-RC=$?
-record_out "probe-placement-3walk"
-if [ "$RC" -eq 4 ] &&
-  printf '%s\n' "$OUT" | grep -q 'pass 3: fsck --no-reflogs' &&
-  ! printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: private-root'; then
-  ok "probe-placement: the 3-fsck-walk path (reachability attribution) terminates BEFORE the private-root probe, so the worst case is still MAX_SWEEP_WALKS bounded stages and no caller's derived bound moved"
-else
-  bad "probe-placement: rc=$RC — a run that spent THREE fsck walks also ran the probe, which makes every caller's uninterruptible window one stage wider than its bound assumes: $(printf '%s\n' "$OUT" | grep -cE 'measured pass|private-root') marker(s)"
-fi
-# And the complementary half: a run that reaches the affirmative branch DID pay for it,
-# so the stage is real and the case above is not passing because the probe never runs.
+done
+# THE COUNT CARRIES `RECOGNISED`, NEVER A BARE NUMBER: a bare `1` in a log reads as a
+# complete census, and this list states its own non-exhaustiveness. Asserted in both
+# directions — the affirmative form is present, and no `declared-gap <digits>` line
+# exists without it.
 OUT=$(bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
 RC=$?
-record_out "probe-placement-clean"
-if [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: measured private-roots '; then
-  ok "probe-placement(control): a run that reaches VERIFIED DOES run the probe — the case above is a placement property, not a probe that never fires"
+record_out "declared-gap-form"
+DG_BARE=$(dg_lines | grep -E '^OBJECT-STORE: declared-gap [0-9]+$' | head -1)
+if dg_lines | grep -q '^OBJECT-STORE: declared-gap 1 RECOGNISED' && [ -z "$DG_BARE" ]; then
+  ok "declared-gap(form): the count is emitted as '1 RECOGNISED' and no bare-count line exists — the declaration cannot be read as a completed census"
 else
-  bad "probe-placement(control): rc=$RC — a VERIFIED run did not run the private-root probe at all"
+  bad "declared-gap(form): recognised-line='$(dg_lines | grep -m1 RECOGNISED)' bare='$DG_BARE'"
+fi
+# IT MUST NAME WHAT IS NOT WALKED, WHAT *IS* WALKED, AND THE MEASUREMENT WITH ITS DATE.
+# The middle one is what keeps the declaration honest: "an fsck misses some worktree
+# state" would be true and useless, and the round-7 measurement (private HEAD, INDEX and
+# prunable HEADs ARE walked — pinned by Case 30 above) is what narrows it to one
+# namespace. The date is required because "zero instances" is a measurement that expires.
+DG_MISS=""
+for DG_TOK in 'refs/worktree/\*' 'refs/bisect/\*' 'refs/rewritten/\*' 'NOT in the gap' \
+  'private HEAD and INDEX' 'prunable' '2026-09-02' '0 such refs' '#3749'; do
+  dg_lines | grep -q -- "$DG_TOK" || DG_MISS="$DG_MISS [$DG_TOK]"
+done
+if [ -z "$DG_MISS" ]; then
+  ok "declared-gap(content): the declaration names all three un-walked namespaces, the coverage that is NOT in the gap, the fleet measurement and its date, and the issue"
+else
+  bad "declared-gap(content): the declaration is missing$DG_MISS — a declaration that does not say what IS covered cannot be checked by a reader"
+fi
+# ANCHORED, AND BEFORE THE VERDICT. Property (a) of this script's output is that every
+# line carries the prefix; and the declaration is printed BEFORE the walk, so it survives
+# in a log truncated at the point a long fsck was killed.
+DG_TOTAL=$(printf '%s\n' "$OUT" | grep -c 'declared-gap')
+DG_ANCH=$(dg_lines | grep -c .)
+DG_FIRST=$(printf '%s\n' "$OUT" | grep -nE '^OBJECT-STORE: (declared-gap|verdict) ' | head -1)
+if [ "$DG_TOTAL" -eq "$DG_ANCH" ] && [ "$DG_ANCH" -gt 1 ] &&
+  printf '%s' "$DG_FIRST" | grep -q 'declared-gap'; then
+  ok "declared-gap(anchoring): all $DG_ANCH declaration lines are anchored and the declaration precedes the verdict — it survives a log truncated mid-walk"
+else
+  bad "declared-gap(anchoring): total=$DG_TOTAL anchored=$DG_ANCH first-of(declared-gap|verdict)='$DG_FIRST'"
+fi
+# AND THE REMOVAL IS COMPLETE: no vestigial mode, flag or census key anywhere in the
+# shipped script or its two consumers. A half-removed probe is the worst of both — the
+# declaration would say the gap is open while a dead code path claimed to check it.
+DG_VEST=""
+for DG_F in "$SUBJECT" "$(dirname "$SUBJECT")/../local/worker-supervisor.sh" \
+  "$(dirname "$SUBJECT")/../bootstrap-agent-machine.sh"; do
+  [ -r "$DG_F" ] || continue
+  grep -qE 'probe-private-roots|PROBE_PRIVATE_ROOTS|private-root' "$DG_F" &&
+    DG_VEST="$DG_VEST $(basename "$DG_F")"
+done
+if [ -z "$DG_VEST" ]; then
+  ok "declared-gap(no-vestige): neither the sweep nor its two consumers carry a private-root probe mode, flag or census key — the gap is declared in ONE place and claimed nowhere"
+else
+  bad "declared-gap(no-vestige): probe remnants in$DG_VEST — if the gap has been CLOSED, change this case and the declaration together; if not, the remnant is dead code claiming coverage the declaration denies"
 fi
