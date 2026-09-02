@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=517
+CASE_FLOOR=518
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -3731,6 +3731,76 @@ if grep -q '^AB-3649: verdict-detail single-stream HOST the one-minute load aver
 else
   bad "a loaded host was not disclosed"
 fi
+# ---- every verdict-gating property is enforced ANALYZER-SIDE -----------------
+# ROUND 20. Rounds 18, 19 and 20 each found ONE angle of the same boundary: the
+# driver refuses things the analyzer then trusts, so a manifest the driver did
+# not create walks past them. Patching the angle we were shown is what produced
+# three rounds of it, so this enumerates the properties that gate a verdict and
+# requires each to have an analyzer-side refusal -- the same move that stopped
+# the export class.
+#
+# THE LIST IS CURATED AND SAYS SO. There is no mechanical way to derive "the
+# set of properties a verdict depends on" from source; what IS derived is
+# whether each named property has a refusal, so the list can be wrong by
+# OMISSION but never by staleness. A property whose cause is renamed or deleted
+# reds here.
+if python3 - "$HERE" <<'PYINNER'
+import re
+import sys
+
+# THE ANALYZER'S ENFORCEMENT SURFACE IS THREE FILES, not one. `ab_input.py`
+# holds the record and reconciliation refusals, and since round 20 the ticket
+# refusal is raised through the DRIVER'S validator, which the analyzer imports
+# and calls -- so the cause literal lives in ab_driver_support.py. Scanning only
+# analyze-ab.py reported a property as unenforced that is enforced through a
+# shared function, which is the guard being right about the file and wrong about
+# the question.
+both = "".join(
+    open("%s/%s" % (sys.argv[1], name), encoding="utf-8").read()
+    for name in ("analyze-ab.py", "ab_input.py", "ab_driver_support.py")
+)
+
+# property -> the cause that refuses it analyzer-side.
+GATING = {
+    "the target band this session declared": "profile-unrecorded",
+    "an analysis flag cannot re-band a session": "profile-assertion-mismatch",
+    "the arms are the #2820 pair": "arms-not-2820",
+    "the workload is a full-ring scan": "ticket-not-full-ring",
+    "the workload was recorded at all": "ticket-unrecorded",
+    "the records' shape matches the manifest": "shape-record-mismatch",
+    "the declared shape is full": "shape-not-full",
+    "the corpus is LZ4": "corpus-compression-not-lz4",
+    "the corpus is compressed at all": "corpus-uncompressed",
+    "the corpus is on local storage": "corpus-storage-unverified",
+    "the corpus is not on network storage": "corpus-network-storage",
+    "the corpus meets the size floor": "corpus-below-floor",
+    "the machine is the narrow rig": "rig-profile-mismatch",
+    "the merge path was not bypassed": "merge-path-bypassed",
+    "the load generator's provenance is known": "loadgen-provenance-absent",
+    "enough replicates completed": "replicate-shortfall",
+    "enough pairs survived": "insufficient-pairs",
+    "the server's configuration was observed": "startup-unobserved",
+    "the arms ran under one admission ceiling": "admission-mismatch",
+    "the records describe this session": "record-internally-inconsistent",
+}
+problems = []
+for prop, cause in sorted(GATING.items()):
+    if '"%s"' % cause not in both:
+        problems.append("%r is gated by cause %r, which no longer exists "
+                        "analyzer-side" % (prop, cause))
+if len(GATING) < 20:
+    problems.append("the enumeration has shrunk to %d entries" % len(GATING))
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+sys.stdout.write("%d\n" % len(GATING))
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "every enumerated verdict-gating property has an analyzer-side refusal (20 properties)"
+else
+  bad "a verdict-gating property has no analyzer-side refusal (see above)"
+fi
+
 # ---- no AB_* export precedes its variable's final value ----------------------
 # THE CLASS, not the two instances. AB_TICKET_TEMPLATE (round 18) and AB_SHAPE
 # (round 19) were the same defect: a value exported, then transformed, with the
