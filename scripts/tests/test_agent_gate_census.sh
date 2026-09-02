@@ -1704,8 +1704,11 @@ fi
 # BOTH GUARDS REALLY PRINT IT. Structural on the shipped source, because a contract the
 # component does not honour would render NOT-MEASURED on every run and look like a gap.
 v_struct=()
-grep -q "AGENT-GATE-CENSUS: " "$REPO_ROOT/scripts/ci/check-pub-surface.sh" \
-  || v_struct+=("check-pub-surface.sh-prints-no-contract-line")
+# COMMENT-BLIND, and this file's OWN RED arm is why: with the printf deleted the guard still
+# matched, because its comment EXPLAINS the contract line — the artifact describing a rule
+# read as compliance with it (#3312's shape, same as T5). Only a non-comment line counts.
+grep -vE '^[[:space:]]*#' "$REPO_ROOT/scripts/ci/check-pub-surface.sh" | grep -q 'AGENT-GATE-CENSUS: ' \
+  || v_struct+=("check-pub-surface.sh-prints-no-contract-line-from-a-non-comment-line")
 grep -qE '^[^#]*AGENT-GATE-CENSUS: \$n_scanned changed \.rs file' "$GATE" \
   || v_struct+=("run_file_size-prints-no-contract-line")
 grep -qE '^[^#]*AGENT-GATE-CENSUS: NO-SUBJECT' "$GATE" \
