@@ -459,3 +459,144 @@ fn admissible_widths_match_the_pinned_serializers() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// KNOWN-TOLERATED GAP: a UDT FIELD is not a nesting position this module's
+// width property reaches (roborev r7 / job 71).
+// ---------------------------------------------------------------------------
+
+/// Every fixed-width type whose UDT-field decode has **NO width check today**,
+/// with the width the pinned `cassandra-5.0.8` serializer requires.
+///
+/// `parse_simple_udt_field_value` (`row_decoder/udt.rs`) enumerates arms for
+/// `Int`, `BigInt`, `Boolean`, `Float`, `Double`, `Uuid`/`TimeUuid` and
+/// `Timestamp` only; these five reach its `_ =>` **blob fallback**.
+const UNGUARDED_UDT_FIELD_TYPES: &[(&str, CqlType, usize)] = &[
+    ("tinyint", CqlType::TinyInt, 1),
+    ("smallint", CqlType::SmallInt, 2),
+    ("date", CqlType::Date, 4),
+    ("time", CqlType::Time, 8),
+    ("counter", CqlType::Counter, 8),
+];
+
+/// One inline UDT field of type `ft`, as `parse_inline_udt_value` sees it:
+/// a `[i32 BE len][bytes]` component.
+fn one_field_udt(ft: CqlType) -> Vec<(String, CqlType)> {
+    vec![("f".to_string(), ft)]
+}
+
+/// CHARACTERISATION of the gap this module's width property does NOT cover —
+/// **not desired behaviour**. A wrong-width fixed-width value in a **UDT
+/// FIELD** of one of five types is accepted silently today.
+///
+/// ## Why #3811's consumption assert cannot see it
+///
+/// `parse_simple_udt_field_value` has no arm for `TinyInt`, `SmallInt`, `Date`,
+/// `Time` or `Counter`, so each falls to `_ => Ok(Value::Blob(..))`, which
+/// consumes the **whole** bounded field slice whatever its length. The outer
+/// `parse_inline_udt_value` therefore reaches
+/// `require_fully_consumed_raw(current_offset, data.len(), ..)` with
+/// `current_offset == data.len()` and the assert PASSES. #3811's mechanism is a
+/// consumption comparison, so an arm that consumes everything is invisible to
+/// it — which is exactly why this gap survived a module header claiming the
+/// property held at "every nesting position for every fixed-width type".
+///
+/// Closing it means adding a width check to those five arms, which is a
+/// TIGHTENING that turns today-accepted bytes into errors: it needs its own
+/// Cassandra oracle and a corpus measurement, and is deliberately NOT done
+/// here. Cassandra 5.0.8 refuses all of these — `ShortSerializer`
+/// (`size != 2`), `ByteSerializer` (`size != 1`), `SimpleDateSerializer`
+/// (`size != 4`), `TimeSerializer` (`size != 8`), `CounterSerializer`
+/// (`size != 8 && !isEmpty`) — so CQLite is WIDER than Cassandra here.
+///
+/// The case fails in BOTH directions: if the five arms gain a width check (a
+/// real behaviour change that must update this test and both scoping comments
+/// in the same commit), or if control (b)/(c) stops refusing.
+#[test]
+fn wrong_width_udt_field_of_five_types_is_tolerated_today_known_gap() {
+    let p = parser();
+
+    for (name, ft, width) in UNGUARDED_UDT_FIELD_TYPES {
+        // Anti-empty-pass control: the CORRECT width decodes, and it decodes to
+        // a Blob too — the blob fallback is the ONLY behaviour this field type
+        // has, so there is no "right" decode being displaced.
+        let good = framed(&vec![0x11u8; *width]);
+        match p
+            .parse_inline_udt_value(&good, "t", &one_field_udt(ft.clone()), 0)
+            .unwrap_or_else(|e| panic!("{name}: a correct-width field must decode, got {e:?}"))
+        {
+            Value::Udt(u) => assert!(
+                matches!(u.fields[0].value, Some(Value::Blob(_))),
+                "{name}: control expects the blob fallback, got {:?}",
+                u.fields[0].value
+            ),
+            other => panic!("{name}: expected a UDT, got {other:?}"),
+        }
+
+        // (a) THE GAP: every wrong width — under, over, and ZERO — decodes,
+        // yielding a Blob of exactly those bytes. Zero is included because a
+        // `field_len == 0` component takes the same `_ =>` arm with an empty
+        // slice.
+        let mut wrong: Vec<usize> = vec![0, width + 1];
+        if *width > 1 {
+            wrong.push(width - 1);
+        }
+        for w in wrong {
+            let payload = vec![0x11u8; w];
+            let body = framed(&payload);
+            let value = p
+                .parse_inline_udt_value(&body, "t", &one_field_udt(ft.clone()), 0)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "KNOWN GAP: a {w}-byte `{name}` UDT field is accepted today \
+                         (Cassandra admits {width} only). If this now refuses, the gap \
+                         is CLOSED — update this test, this module's header and \
+                         `complex_column/cell_path_key.rs`'s AC7 note together. Got {e:?}"
+                    )
+                });
+            match value {
+                Value::Udt(u) => match &u.fields[0].value {
+                    Some(Value::Blob(bytes)) => assert_eq!(
+                        bytes.as_ref(),
+                        payload.as_slice(),
+                        "KNOWN GAP: the blob fallback returns the field bytes verbatim"
+                    ),
+                    other => panic!(
+                        "KNOWN GAP: a {w}-byte `{name}` field is a Blob today, got {other:?}"
+                    ),
+                },
+                other => panic!("{name}: expected a UDT, got {other:?}"),
+            }
+        }
+    }
+
+    // (b) LIVE CONTROL: the SAME shape with a width-CHECKED type IS refused,
+    // by `parse_simple_udt_field_value`'s own arm — a different layer from this
+    // module's two wordings, so the contrast is what makes (a) evidence rather
+    // than an assertion about a decoder that validates nothing.
+    for w in [0usize, 3, 5] {
+        let body = framed(&vec![0x11u8; w]);
+        let err = p
+            .parse_inline_udt_value(&body, "t", &one_field_udt(CqlType::Int), 0)
+            .expect_err("control: a wrong-width `int` UDT field must be refused");
+        assert!(
+            matches!(&err, Error::Corruption(msg)
+                if msg.contains(&format!("Int field requires 4 bytes, got {w}"))),
+            "control: the refusal must come from the Int arm's own width check, got {err:?}"
+        );
+    }
+
+    // (c) LIVE CONTROL: #3811's `require_fully_consumed_raw` IS wired into this
+    // very path — a TRAILING byte after a correct-width `date` field is refused.
+    // So (a) is the assert being BLIND to a full-slice blob, not the assert
+    // being absent from the UDT decoder.
+    let mut trailing = framed(&[0x11u8; 4]);
+    trailing.push(0x22);
+    let err = p
+        .parse_inline_udt_value(&trailing, "t", &one_field_udt(CqlType::Date), 0)
+        .expect_err("control: a trailing byte after the last UDT field must be refused");
+    assert!(
+        is_over_width_error(&err),
+        "control: #3811's consumption assert must be live in this path, got {err:?}"
+    );
+}
