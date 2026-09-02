@@ -50,6 +50,17 @@ DEFAULT_CI_LEVEL = 0.95
 # all -- see `interval_is_degenerate` for the arithmetic.
 DEFAULT_MIN_PAIRS = 5
 
+#: The vCPU count of the narrow rig the target band was derived on: `i4i.xlarge`,
+#: the M0 server-direct profile, "4 vCPU / 2 physical Ice Lake cores"
+#: (RUNBOOK.md line 9, sourced from
+#: website/src/content/docs/field-validation/m0-throughput.md's method note).
+#:
+#: THIS IS THE vCPU COUNT (4), NOT THE PHYSICAL CORE COUNT (2), stated because
+#: the profile names both and a later reader would otherwise be right to
+#: "correct" it. `nproc` reports vCPUs, so 4 is the number that comparison needs;
+#: the physical count is not portably measurable and is not what is asserted.
+NARROW_PROFILE_NPROC = 4
+
 
 def geometric_mean(values):
     """The natural centre for ratio data.

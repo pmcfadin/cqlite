@@ -493,6 +493,31 @@ def analyze(mode, path, opts):
             % (storage_state, manifest["corpus"].get("storage_detail",
                                                      "no detail recorded")),
         )
+    # THE NARROW PROFILE, CHECKED AS A PROPERTY RATHER THAN A LABEL. The target
+    # band is defined for the M0 rig -- 4 vCPU (RUNBOOK.md line 9) -- and a wider
+    # machine runs a different experiment: an i4i.32xlarge scored a clean band
+    # verdict on 128 vCPU before this check existed. Requiring the INSTANCE TYPE
+    # to equal "i4i.xlarge" would enforce the name AWS gives the machine, which
+    # is the label-versus-property mistake this instrument already removed for
+    # storage. `nproc` is the property, and it is recorded.
+    #
+    # NOT ATTESTABLE, for the storage rule's reason: an operator may attest to
+    # something we could not measure, never to something we did. A core count is
+    # evidence.
+    nproc = manifest["host"].get("nproc")
+    if not control and nproc != S.NARROW_PROFILE_NPROC:
+        raise Unmeasured(
+            "rig-profile-mismatch",
+            "the session ran on a host reporting %r vCPU and the target band is "
+            "defined for the %d-vCPU narrow rig (RUNBOOK.md line 9: i4i.xlarge, "
+            "the M0 profile). A wider or narrower machine is a different "
+            "experiment, not a noisier one. NOTE: `nproc` honours the current "
+            "affinity mask, but PINNING A LARGER RIG TO 4 CORES DOES NOT "
+            "SUBSTITUTE -- cache and memory-bandwidth behaviour on a 128-core box "
+            "pinned to 4 is not the M0 machine, so this refusal is correct there "
+            "too. Label the session --control to measure other hardware"
+            % (nproc, S.NARROW_PROFILE_NPROC),
+        )
     pairs, admission, session = collect_pairs_checked(
         manifest, manifest_dir, mode, declared_steps
     )
@@ -932,8 +957,11 @@ def report(mode, manifest, pairs, admission, opts, stats, session):
     # honestly REFUSE, disclosed here rather than left unstated. Refusing on a
     # host name would red a correct rig the day someone uses `i4i.2xlarge`, and a
     # guard that reds on correct input is the guard people learn to waive.
+    # WIDENED from `startswith("i4i")`, which let i4i.2xlarge and i4i.32xlarge
+    # through silently: the criteria name ONE profile, not a family. The label
+    # stays a DISCLOSURE -- the refusal above is on the measured property.
     host_type = field(manifest, "host", "instance_type")
-    if not host_type.startswith("i4i"):
+    if host_type != "i4i.xlarge":
         out(
             "verdict-detail %s HOST the acceptance criteria name the field i4i "
             "narrow rig, and this session ran on %r. That cannot be refused from "

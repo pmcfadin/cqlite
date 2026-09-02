@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=455
+CASE_FLOOR=464
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -2802,6 +2802,39 @@ STUBEOF
   printf '{"version":2,"keyspace":"ks","table":"tbl","ddl":"CREATE TABLE ks.tbl (a int PRIMARY KEY)","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' \
     > "$TMP/e2e-ticket.json"
 
+  # THE PROFILE GATE IS NOT WHAT THESE CASES TEST. Their subject is the
+  # driver->analyzer pipeline: that a real session's manifest and records are
+  # consumable end to end. The rig gate has its own dedicated fixtures across
+  # every profile, so patching nproc to the narrow value here removes a
+  # host-dependent variable rather than a check. Making these sessions CONTROLS
+  # instead would delete the measurement-path coverage they exist for -- the
+  # coverage that found the exit-127 defect -- and a conditional assertion
+  # ("verdict on a 4-core box, refusal elsewhere") would be non-deterministic,
+  # which is the thing this suite refuses to be.
+  e2e_narrow_profile() { # <work-dir>
+    # The work directory is checked FIRST because `set -o pipefail` is in force:
+    # `find` on a path that does not exist yet fails, and the failure propagates
+    # through the pipeline into the assignment, aborting the whole suite with no
+    # message. Several of these directories are created by later cases.
+    [ -d "$1" ] || return 0
+    local dir
+    dir="$(find "$1" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+    [ -n "$dir" ] || return 0
+    python3 - "$dir/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+except (OSError, ValueError):
+    raise SystemExit(0)
+manifest["host"]["nproc"] = 4
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  }
   run_e2e() { # <work-dir> <extra driver args...>
     local wd="$1"; shift
     set +e
@@ -2818,6 +2851,11 @@ STUBEOF
         > "$TMP/out.txt" 2> "$TMP/err.txt"
     RC=$?
     set -e
+    # Called HERE, for every session, rather than from a list of work
+    # directories maintained by hand -- two later sessions were analysed before
+    # the one-shot version reached them, which is the shape a hand-maintained
+    # subject set always eventually takes.
+    e2e_narrow_profile "$wd"
   }
 
   : > "$TMP/cargo-argv.log"
@@ -3252,6 +3290,94 @@ if grep -q '^AB-3649: verdict-detail single-stream HOST the one-minute load aver
 else
   bad "a loaded host was not disclosed"
 fi
+# ---- the NARROW PROFILE is a property, not a label ---------------------------
+# ROUND 15 FINDING 1. The band is defined for the M0 rig -- 4 vCPU, RUNBOOK line
+# 9 -- and `if not host_type.startswith("i4i")` let the whole FAMILY through: an
+# i4i.32xlarge scored a clean band verdict on 128 vCPU. Requiring the instance
+# type to EQUAL "i4i.xlarge" would have enforced the name AWS gives the machine,
+# which is the label-versus-property mistake already removed for storage. So the
+# refusal is on nproc and the label is a disclosure, and both are pinned here.
+profile_case() { # <name> <instance-type> <nproc> <want-verdict> <want-exit>
+  mkfixture "$TMP/prof" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  AB_TYPE="$2" AB_NPROC="$3" python3 - "$TMP/prof/manifest.json" <<'PYINNER'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["host"]["instance_type"] = os.environ["AB_TYPE"]
+manifest["host"]["nproc"] = int(os.environ["AB_NPROC"])
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/prof"
+  check_verdict "$1" "$4" "$5" single-stream
+}
+profile_case "the narrow rig itself"            i4i.xlarge    4   MEETS-TARGET 0
+# THE FINDING: a wider i4i used to score against a band derived for 4 vCPU.
+profile_case "a wider i4i (8 vCPU)"             i4i.2xlarge   8   UNMEASURED   7
+profile_case "a far wider i4i (128 vCPU)"       i4i.32xlarge  128 UNMEASURED   7
+profile_case "a narrower host (2 vCPU)"         i4i.large     2   UNMEASURED   7
+check_cause "a host that is not the narrow profile" rig-profile-mismatch
+# The refusal must name the affinity residual, because an operator who pinned a
+# big rig to 4 cores will otherwise read this as a false red.
+if grep -q 'PINNING A LARGER RIG TO 4 CORES DOES NOT SUBSTITUTE' "$TMP/err.txt"; then
+  ok "the profile refusal states that pinning does not substitute for the machine"
+else
+  bad "the profile refusal does not address the pinning case an operator will try"
+fi
+# The LABEL is still disclosed, and now for a wider i4i too -- it used to be
+# silent for the whole family.
+mkfixture "$TMP/prof-wide" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/prof-wide/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["host"]["instance_type"] = "i4i.2xlarge"
+manifest["control"] = "wider-rig-sensitivity"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/prof-wide"
+if grep -q 'HOST the acceptance criteria name the field i4i' "$TMP/out.txt"; then
+  ok "a wider i4i is disclosed by label as well as refused by property"
+else
+  bad "a wider i4i carries no label disclosure"
+fi
+# A control may measure other hardware; that is what the label is for.
+mkfixture "$TMP/prof-ctl" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/prof-ctl/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["host"]["nproc"] = 64
+manifest["control"] = "wider-rig-sensitivity"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/prof-ctl"
+if [ "$RC" = "0" ]; then
+  ok "a CONTROL may measure hardware that is not the narrow profile"
+else
+  bad "a control was refused by the profile gate (exit $RC)"
+fi
+# NOT ATTESTABLE: nproc is evidence, and the storage rule is that an attestation
+# covers ignorance only. There is no flag for this and there must not be one.
+if grep -c 'attest' analyze-ab.py >/dev/null 2>&1 && \
+   ! grep -A12 'rig-profile-mismatch' analyze-ab.py | grep -q 'attest'; then
+  ok "the profile refusal has no attestation escape -- a core count is evidence"
+else
+  bad "the profile refusal appears to be attestable"
+fi
+
 # ---- the properties the `i4i` label stood for -------------------------------
 # CHECK THE PROPERTY, NOT THE LABEL. The acceptance criteria say "field i4i rig";
 # what that stood for is a corpus on LOCAL NVMe on an UNCONTENDED box. Neither is
