@@ -11004,11 +11004,20 @@ test_object_store_unsweepable_stops_the_box_without_claiming_a_cause() {
   else
     fail "obj-sweep(unsweepable): reason=$(grep -o '"reason":"[a-z-]*"' "$JOURNAL_FILE" | tail -1) (see $d/detect.log)"
   fi
-  # NO CAUSE IS CLAIMED. The damage remedy was MEASURED for a damage class this run never
+  # NO DAMAGE IS CLAIMED. The damage remedy was MEASURED for a damage class this run never
   # established, so printing it here would be round 9's defect: the text a human gets when
   # the box has stopped must match what was measured.
+  #
+  # THE WORDING MOVED FROM "NO cause was established" TO "NO damage was established" (#3749
+  # review round 11, item 1), and the change is not cosmetic: UNSWEEPABLE now has TWO
+  # causes, and for one of them a cause IS established and named (the store's own `fsck.*`
+  # config keys). The claim that must hold for EVERY cause of this verdict — and that this
+  # reader, which knows only the token, may therefore make — is that no DAMAGE was
+  # established. The sibling case
+  # test_object_store_unsweepable_text_asserts_no_mechanism asserts the other half: that
+  # the token-derived text names no mechanism at all.
   if ! grep -qi 'refetch\|damaged shared store' "$d/detect.log" &&
-     grep -q 'NO cause was established' "$d/detect.log"; then
+     grep -q 'NO damage was established' "$d/detect.log"; then
     pass "obj-sweep(unsweepable): the stop names NO repair and says so — the store's integrity is UNKNOWN, which is not the same claim as damage"
   else
     fail "obj-sweep(unsweepable): the stop claims a cause it did not establish (see $d/detect.log)"
@@ -11252,6 +11261,191 @@ test_object_store_stamp_key_is_injective() {
 }
 
 t test_object_store_stamp_key_is_injective
+
+# A RELEASE MUST NOT DELETE A SUCCESSOR'S CLAIM (#3749 review round 11, item 2).
+#
+# THE DEFECT. `obj_sweep_claim_release` removed the claim PATH unconditionally, and a path
+# is not an identity. Round 5 gave the claim a stale-recovery route, so by the time an
+# original owner releases, the directory at that path may be a DIFFERENT lane's claim — one
+# that legitimately took over after this lane's sweep overran the recovery bound. Deleting
+# it permits a second concurrent full-store fsck, which is the herd the claim exists to
+# prevent. A second route reaches the same place: a lane on the `unavailable` path never
+# owned the claim at all (no derivable recovery bound) and still ran the release at the end
+# of its own sweep.
+#
+# ASKED OF THE SHIPPED FUNCTIONS, extracted at run time — the takeover sequence cannot be
+# staged through a whole supervisor run (it needs two lanes' claims at one path in a
+# controlled order), and a test that re-typed the release would keep passing after the real
+# one changed.
+test_object_store_sweep_claim_release_requires_ownership() {
+  local d fns claim out tok_a tok_b
+  d="$(new_case_dir)"
+  fns="$d/extracted-claim.sh"
+  sed -n '/^obj_sweep_claim_mark_owner() {/,/^}/p;/^obj_sweep_claim_owner_state() {/,/^}/p;/^obj_sweep_claim_release() {/,/^}/p;/^obj_sweep_claim_mark_started() {/,/^}/p;/^obj_sweep_claim_acquire() {/,/^}/p' \
+    "$SUPERVISOR" >"$fns"
+  # CONSTRUCTION: all five functions were extracted, and the release really does consult
+  # ownership. Without this the arms below could be measuring an empty file.
+  if grep -q '^obj_sweep_claim_release() {' "$fns" && grep -q '^obj_sweep_claim_acquire() {' "$fns" &&
+    grep -q '^obj_sweep_claim_owner_state() {' "$fns" && grep -q '^obj_sweep_claim_mark_owner() {' "$fns" &&
+    grep -q 'obj_sweep_claim_owner_state' "$(printf '%s' "$fns")"; then
+    pass "obj-sweep(claim-owner-plant): the claim functions were extracted from the shipped supervisor and the release consults an ownership state"
+  else
+    fail "obj-sweep(claim-owner-plant): the extraction from $SUPERVISOR did not yield the functions — the cases below would prove nothing"
+    return 0
+  fi
+
+  # (a) CONTROL, one property from (b): a lane releasing a claim it STILL owns removes it.
+  #     A fix that simply stopped releasing would pass (b) and fail here, which is why the
+  #     control comes first.
+  claim="$d/a.sweeping"
+  out="$(bash -c 'set -uo pipefail; log() { printf "LOG %s\n" "$1"; }; OBJ_SWEEP_CLAIM_OWNED=""; OBJ_SWEEP_CLAIM_TOKEN=""; OBJ_SWEEP_CLAIM_STATE=""; OBJ_SWEEP_TIMEOUT_SECS=200; OBJ_SWEEP_CLAIM_SLACK_SECS=60; . "$1"; obj_sweep_claim_acquire "$2" 660; printf "state=%s\n" "$OBJ_SWEEP_CLAIM_STATE"; obj_sweep_claim_release "$2"; [[ -e "$2" ]] && printf "SURVIVED\n" || printf "REMOVED\n"' _ "$fns" "$claim" 2>&1)"
+  if printf '%s' "$out" | grep -q 'state=acquired' && printf '%s' "$out" | grep -q 'REMOVED'; then
+    pass "obj-sweep(claim-release-control): a lane that still owns its claim DOES remove it on release — the next interval is contended honestly, so the ownership test has not simply disabled the release"
+  else
+    fail "obj-sweep(claim-release-control): [$(printf '%s' "$out" | tr '\n' '|')]"
+  fi
+
+  # (b) THE FINDING: takeover, then the ORIGINAL owner releases. Lane A acquires; its
+  #     `started` is rewritten to an old epoch (round 5's recovery condition — a lane
+  #     killed mid-sweep, or one whose sweep overran the bound); lane B takes it over and
+  #     writes its own token; lane A then releases. B's claim must SURVIVE.
+  #
+  #     Two PROCESSES, because the token lives in a process global: one shell could not
+  #     hold two lanes' tokens at once, and faking that would be testing the fake.
+  claim="$d/b.sweeping"
+  tok_a="$(bash -c 'set -uo pipefail; log() { :; }; OBJ_SWEEP_CLAIM_OWNED=""; OBJ_SWEEP_CLAIM_TOKEN=""; OBJ_SWEEP_CLAIM_STATE=""; OBJ_SWEEP_TIMEOUT_SECS=200; OBJ_SWEEP_CLAIM_SLACK_SECS=60; . "$1"; obj_sweep_claim_acquire "$2" 660; printf "%s" "$OBJ_SWEEP_CLAIM_TOKEN"' _ "$fns" "$claim" 2>&1)"
+  printf '%s\n' 1 >"$claim/started"
+  tok_b="$(bash -c 'set -uo pipefail; log() { :; }; OBJ_SWEEP_CLAIM_OWNED=""; OBJ_SWEEP_CLAIM_TOKEN=""; OBJ_SWEEP_CLAIM_STATE=""; OBJ_SWEEP_TIMEOUT_SECS=200; OBJ_SWEEP_CLAIM_SLACK_SECS=60; . "$1"; obj_sweep_claim_acquire "$2" 660; printf "%s:%s" "$OBJ_SWEEP_CLAIM_STATE" "$OBJ_SWEEP_CLAIM_TOKEN"' _ "$fns" "$claim" 2>&1)"
+  # CONSTRUCTION: the takeover really happened (state `taken`), and the two tokens really
+  # differ — if they collided the arm below would pass for the wrong reason.
+  if [[ "$tok_b" == taken:* && -n "$tok_a" && "${tok_b#taken:}" != "$tok_a" ]]; then
+    pass "obj-sweep(claim-takeover-plant): lane B RECOVERED lane A's stale claim (state=taken) and the two ownership tokens differ — the sequence the finding describes"
+  else
+    fail "obj-sweep(claim-takeover-plant): A='$tok_a' B='$tok_b' — no takeover, or colliding tokens; the arm below would prove nothing"
+    return 0
+  fi
+  # Lane A releases, with A's token restored into a fresh process (a release from the sweep
+  # path or from the EXIT trap — both call the same function with the same global).
+  out="$(bash -c 'set -uo pipefail; log() { printf "LOG %s\n" "$1"; }; OBJ_SWEEP_CLAIM_OWNED="$2"; OBJ_SWEEP_CLAIM_TOKEN="$3"; . "$1"; obj_sweep_claim_release "$2"; [[ -e "$2" ]] && printf "SURVIVED\n" || printf "REMOVED\n"' _ "$fns" "$claim" "$tok_a" 2>&1)"
+  if printf '%s' "$out" | grep -q 'SURVIVED'; then
+    pass "obj-sweep(claim-takeover): the SUCCESSOR's claim survives a release by the original owner — round 5's serialisation is not defeated by a lane finishing late"
+  else
+    fail "obj-sweep(claim-takeover): the original owner deleted the successor's claim: [$(printf '%s' "$out" | tr '\n' '|')]"
+  fi
+  if printf '%s' "$out" | grep -q "LOG .*NOT removing"; then
+    pass "obj-sweep(claim-takeover): and it SAYS so — a claim left in place for a reason nobody can see is indistinguishable from a release that silently failed"
+  else
+    fail "obj-sweep(claim-takeover): the refusal is silent: [$(printf '%s' "$out" | tr '\n' '|')]"
+  fi
+  # AND B's TOKEN IS STILL THE ONE IN THE FILE, so what survived is B's claim and not a
+  # husk A left behind.
+  if [[ "$({ read -r x || true; } <"$claim/owner" 2>/dev/null; printf '%s' "${x:-}")" == "${tok_b#taken:}" ]]; then
+    pass "obj-sweep(claim-takeover): the surviving claim still carries B's token — B remains the owner, so its own release will work"
+  else
+    fail "obj-sweep(claim-takeover): the surviving claim's token is not B's"
+  fi
+
+  # (c) THE `unavailable` ROUTE, one property from (b): a lane that NEVER owned the claim
+  #     (no token at all — the shape of the no-derivable-bound path) must not delete a
+  #     peer's live claim either. This is the second way the old code reached the same harm.
+  out="$(bash -c 'set -uo pipefail; log() { printf "LOG %s\n" "$1"; }; OBJ_SWEEP_CLAIM_OWNED=""; OBJ_SWEEP_CLAIM_TOKEN=""; . "$1"; obj_sweep_claim_release "$2"; [[ -e "$2" ]] && printf "SURVIVED\n" || printf "REMOVED\n"' _ "$fns" "$claim" 2>&1)"
+  if printf '%s' "$out" | grep -q 'SURVIVED'; then
+    pass "obj-sweep(claim-never-owned): a lane with NO token of its own leaves a peer's claim alone — the `unavailable` path used to delete it at the end of its own sweep"
+  else
+    fail "obj-sweep(claim-never-owned): a lane that never owned the claim deleted it: [$(printf '%s' "$out" | tr '\n' '|')]"
+  fi
+
+  # (d) AN UNREADABLE TOKEN IS NOT AN ABSENT ONE. The ownership question is four-valued and
+  #     only the affirmative answer deletes, so a claim whose token cannot be read is LEFT
+  #     for the staleness bound to recover — the fail-closed direction, since the harm of
+  #     deleting is a concurrent sweep and the harm of keeping is one skipped 6-hourly probe.
+  rm -f "$claim/owner"
+  out="$(bash -c 'set -uo pipefail; log() { printf "LOG %s\n" "$1"; }; OBJ_SWEEP_CLAIM_OWNED="$2"; OBJ_SWEEP_CLAIM_TOKEN="$3"; . "$1"; printf "state=%s\n" "$(obj_sweep_claim_owner_state "$2")"; obj_sweep_claim_release "$2"; [[ -e "$2" ]] && printf "SURVIVED\n" || printf "REMOVED\n"' _ "$fns" "$claim" "$tok_a" 2>&1)"
+  if printf '%s' "$out" | grep -q 'state=unknown' && printf '%s' "$out" | grep -q 'SURVIVED' &&
+    printf '%s' "$out" | grep -q 'LOG .*could not be read'; then
+    pass "obj-sweep(claim-unreadable): a claim whose ownership token cannot be read reads 'unknown', is NOT removed, and says why — a failed probe may not destroy a peer's claim"
+  else
+    fail "obj-sweep(claim-unreadable): [$(printf '%s' "$out" | tr '\n' '|')]"
+  fi
+
+  # (e) AND A CLAIM THAT IS SIMPLY GONE is not an anomaly: no delete, and no journal line,
+  #     because a double release (sweep path then EXIT trap) is ordinary.
+  rm -rf "$claim"
+  out="$(bash -c 'set -uo pipefail; log() { printf "LOG %s\n" "$1"; }; OBJ_SWEEP_CLAIM_OWNED="$2"; OBJ_SWEEP_CLAIM_TOKEN="$3"; . "$1"; printf "state=%s\n" "$(obj_sweep_claim_owner_state "$2")"; obj_sweep_claim_release "$2"' _ "$fns" "$claim" "$tok_a" 2>&1)"
+  if printf '%s' "$out" | grep -q 'state=gone' && ! printf '%s' "$out" | grep -q 'LOG '; then
+    pass "obj-sweep(claim-gone): an already-released claim reads 'gone' and is reported as nothing — a double release is the ordinary case (the sweep path and then the EXIT trap), not a fault to page about"
+  else
+    fail "obj-sweep(claim-gone): [$(printf '%s' "$out" | tr '\n' '|')]"
+  fi
+}
+
+t test_object_store_sweep_claim_release_requires_ownership
+
+# THE OWNER TOKEN IS WRITTEN BEFORE `started`, AND THAT ORDER IS THE PROPERTY (#3749 review
+# round 11, item 2). `started` is what makes a claim AGEABLE by a peer, so a claim a peer
+# can age must already name its owner; the reverse order leaves a window in which a peer
+# takes over a claim whose owner is unrecorded, and the original owner then reads its own
+# live claim as `unknown` forever. STRUCTURAL over the shipped acquire body, and labelled
+# as such: both writes are inside one function with nothing a fixture can interpose on, so
+# whoever looks afterwards sees both files whichever order they were written in.
+test_object_store_sweep_claim_records_its_owner_before_started() {
+  local body owner_line started_line arm
+  body="$(sed -n '/^obj_sweep_claim_acquire() {/,/^}/p' "$SUPERVISOR")"
+  if [[ -z "$body" ]]; then
+    fail "obj-sweep(claim-order): obj_sweep_claim_acquire could not be extracted from $SUPERVISOR"
+    return 0
+  fi
+  # BOTH create paths — `acquired` and the round-5 `taken` recovery — are asserted, because
+  # a recovered claim is exactly the one a late original owner is about to release.
+  for arm in acquired taken; do
+    owner_line="$(printf '%s\n' "$body" | grep -n 'obj_sweep_claim_mark_owner' | sed -n "$([[ $arm == acquired ]] && echo 1 || echo 2)p" | cut -d: -f1)"
+    started_line="$(printf '%s\n' "$body" | grep -n 'obj_sweep_claim_mark_started' | sed -n "$([[ $arm == acquired ]] && echo 1 || echo 2)p" | cut -d: -f1)"
+    if [[ -n "$owner_line" && -n "$started_line" && "$owner_line" -lt "$started_line" ]]; then
+      pass "obj-sweep(claim-order/$arm): [STRUCTURAL] the ownership token is recorded (line $owner_line) BEFORE the start time (line $started_line) — a claim a peer can age already names its owner"
+    else
+      fail "obj-sweep(claim-order/$arm): [STRUCTURAL] owner='$owner_line' started='$started_line' — a claim can become ageable before it names an owner"
+    fi
+  done
+}
+
+t test_object_store_sweep_claim_records_its_owner_before_started
+
+# THE STOPPING TEXT MAY ONLY ASSERT WHAT IS TRUE OF EVERY CAUSE OF ITS VERDICT (#3749
+# review round 11, item 1).
+#
+# UNSWEEPABLE now has TWO causes — git fsck ran and reproducibly died, and a store whose
+# own config sets `fsck.*` keys (so no walk runs at all) — while the LATCH records only the
+# TOKEN. So a consumer reading that latch cannot know which cause fired, and its text used
+# to say "git fsck RAN and reproducibly DIED", which on the second cause is a
+# confidently-wrong sentence in the one place an operator reads when the box has stopped.
+# That is this issue's own false-rationale class, in a journal line.
+test_object_store_unsweepable_text_asserts_no_mechanism() {
+  local body needle bad_tokens=""
+  # The two texts derived from the token alone: the live stop branch's `case` arm and the
+  # cached-latch reader. Both are extracted from the shipped supervisor.
+  body="$(sed -n '/stop_headline="UNSWEEPABLE/,+3p;/UNSWEEPABLE)$/,+4p' "$SUPERVISOR" | grep -E 'stop_headline=|stop_body=|notify |log ')"
+  if [[ -z "$body" ]]; then
+    fail "obj-sweep(unsweepable-text): the UNSWEEPABLE operator text could not be extracted from $SUPERVISOR"
+    return 0
+  fi
+  for needle in 'DIED' 'died' 'fatal line' "fatal:"; do
+    printf '%s\n' "$body" | grep -qF -- "$needle" && bad_tokens="$bad_tokens [$needle]"
+  done
+  if [[ -z "$bad_tokens" ]]; then
+    pass "obj-sweep(unsweepable-text): neither the live stop text nor the cached-latch text names a MECHANISM — both are derived from the verdict token, which is all either reader knows, and the sweep's own quoted lines carry the cause"
+  else
+    fail "obj-sweep(unsweepable-text): mechanism claim(s)$bad_tokens in text derived from the token alone — true for one cause of UNSWEEPABLE and false for the other"
+  fi
+  # AND IT STILL SAYS THE TWO THINGS IT MUST: this is not clean, and no damage was
+  # established. A fix that emptied the text would pass the assert above.
+  if printf '%s\n' "$body" | grep -qi 'UNKNOWN' && printf '%s\n' "$body" | grep -qi 'NO damage'; then
+    pass "obj-sweep(unsweepable-text): it still states the two facts that ARE true of every cause — the store's content is UNKNOWN, and no damage was established"
+  else
+    fail "obj-sweep(unsweepable-text): the generalised text lost the UNKNOWN or the no-damage statement: [$(printf '%s\n' "$body" | tr '\n' '|' | cut -c1-300)]"
+  fi
+}
+
+t test_object_store_unsweepable_text_asserts_no_mechanism
 
 # ---------------------------------------------------------------------------
 # Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.

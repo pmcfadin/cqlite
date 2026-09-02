@@ -3230,10 +3230,13 @@ if [ "${OBJ_STORE_CORRUPT:-0}" = 1 ]; then
   printf '  \033[31mSHARED OBJECT STORE CORRUPT.\033[0m Do NOT run a gate on this box until it is resolved (section 5d above, #3749).\n'
 fi
 # ITS OWN LINE, NOT FOLDED INTO THE ONE ABOVE (#3749 review round 10, item 1): the store
-# could not be SWEPT and NO cause was established, so claiming damage in the banner would
-# be exactly the confidently-wrong text this verdict exists to avoid.
+# could not be SWEPT and NO DAMAGE was established, so claiming damage in the banner would
+# be exactly the confidently-wrong text this verdict exists to avoid. It says "no damage"
+# rather than "no cause" because since round 11, item 1 this verdict has TWO causes and one
+# of them — the store's own `fsck.*` config — IS named; what holds for both is that nothing
+# was rehashed, so no damage was found either way.
 if [ "${OBJ_STORE_UNSWEEPABLE:-0}" = 1 ]; then
-  printf '  \033[31mSHARED OBJECT STORE COULD NOT BE SWEPT.\033[0m Its integrity is UNKNOWN and no cause was established: do NOT run a gate on this box until it is resolved (section 5d above, #3749).\n'
+  printf '  \033[31mSHARED OBJECT STORE COULD NOT BE SWEPT.\033[0m Its integrity is UNKNOWN and NO damage was established: do NOT run a gate on this box until it is resolved (section 5d above, #3749).\n'
 fi
 if [ "$WARNINGS" -eq 0 ]; then
   printf '  \033[32mAll checks green.\033[0m This machine is ready for CQLite agent work.\n'

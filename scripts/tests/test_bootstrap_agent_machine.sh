@@ -1552,6 +1552,53 @@ else
   bad "obj: UNSWEEPABLE either lacks its banner restatement or claims damage nothing established"
   push_plain "$push_out" | grep -F 'OBJECT STORE' | head -4
 fi
+# 7o-d3. THE SAME [warn] FOR THE VERDICT'S OTHER CAUSE, ON A STORE WITH NO DAMAGE AT ALL
+#   (#3749 review round 11, item 1). UNSWEEPABLE now also fires when the store's OWN
+#   configuration sets `fsck.*` keys, which can suppress or downgrade the very diagnostics
+#   the sweep reads its verdict from — so no walk is run and no affirmative verdict is
+#   obtainable. ONE PROPERTY from 7o-d2: the fixture is UNDAMAGED, and the refusal comes
+#   from the config alone.
+#
+#   WHY IT IS WORTH A CASE HERE when the branch is shared: this reader's text is derived
+#   from the TOKEN, and until this round it named the fatal mechanism ("git fsck RAN and
+#   reproducibly DIED") as though it were the only cause. A fixture that reaches the same
+#   branch by the other route is what stops that text drifting back.
+repo7od3="$tmp/repo7od3"; mk_push_repo "$repo7od3" "file://$bare7pa"
+(
+  cd "$repo7od3" || exit 1
+  printf 'bbb\n' >objf4
+  git -c user.email=t@t -c user.name=t add objf4 >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -q -m obj-policy-fixture >/dev/null 2>&1
+  git config fsck.missingEmail ignore >/dev/null 2>&1
+) || true
+od3_rc=0
+git -C "$repo7od3" fsck --no-progress --no-dangling >/dev/null 2>&1 || od3_rc=$?
+od3_key=$(git -C "$repo7od3" config --get fsck.missingEmail 2>/dev/null)
+if [ "$od3_rc" -eq 0 ] && [ "$od3_key" = ignore ]; then
+  ok "obj: the plant IS the shape described (an UNDAMAGED store — plain fsck exits 0 — whose own config sets an fsck.* key)"
+else
+  bad "obj: fsck-status=$od3_rc key='$od3_key' — not the undamaged-with-policy shape; the case below would prove nothing"
+fi
+run_push "$repo7od3" "$bin7pa" "$gc7pa" --skip-push-probe --strict
+if printf '%s' "$push_out" | grep -q '\[warn\].*object-store: UNSWEEPABLE' &&
+  printf '%s' "$push_out" | grep -q 'COULD NOT BE SWEPT' &&
+  ! push_green "$push_out" && [ "$push_rc" -ne 0 ]; then
+  ok "obj: a store whose own fsck policy could suppress the diagnostics reaches the SAME stopping verdict, withholds green and fails --strict — the verdict is about what can be measured, not about what was found"
+else
+  bad "obj: an fsck-policy refusal did not produce an UNSWEEPABLE verdict (rc=$push_rc)"
+  push_plain "$push_out" | grep -F 'object-store:' | head -4
+fi
+# AND IT STILL CLAIMS NO DAMAGE — nothing was rehashed on this path either, so the damage
+# text and its measured repairs would be as wrong here as on the fatal path.
+if ! printf '%s' "$push_out" | grep -q '\[warn\].*object-store: CORRUPT' &&
+  ! printf '%s' "$push_out" | grep -q 'SHARED OBJECT STORE CORRUPT' &&
+  printf '%s' "$push_out" | grep -qi 'no damage was established'; then
+  ok "obj: the fsck-policy refusal claims NO damage and is not folded into the CORRUPT banner"
+else
+  bad "obj: the fsck-policy refusal claims damage nothing established, or lost its no-damage statement"
+  push_plain "$push_out" | grep -F 'OBJECT STORE' | head -4
+fi
+
 # 7o-e/f. THE TWO CHANNELS MUST AGREE BEFORE CORRUPT IS CLAIMED (#3749 review round 4,
 #   item 2). This reader used to accept `rc == 4 || verdict == CORRUPT` while its own
 #   comment asserted the conjunction, so an exit 4 with NO verdict line — or a stray
