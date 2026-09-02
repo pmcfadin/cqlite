@@ -100,10 +100,11 @@
 # `record-author-performed` PASSES ITS OWN snapshot in, so the bytes its write is guarded on and
 # the verdict it decides by are the same instant. This is round 9's N2 property one level down.
 #
-# `NOT-RUN` carries one of ELEVEN named causes, because the operator action differs per cause
-# and one token for eleven states is the collapse this issue is about. (This header said SEVEN
-# until round 19; the count had been understated since round 17 added `stage record changed
-# mid-read` and `stage not observed` without moving it. A count nobody re-derived is a claim about
+# `NOT-RUN` carries one of FIFTEEN named causes, because the operator action differs per cause
+# and one token for fifteen states is the collapse this issue is about. (This header said SEVEN
+# until round 19 and ELEVEN until round 20; the count had been understated since round 17 added
+# `stage record changed mid-read` and `stage not observed` without moving it, and round 20 added
+# the four PATH-COMPONENT causes below. A count nobody re-derived is a claim about
 # code, and it decays exactly like a comment — the authority is the drift guard in
 # `scripts/tests/test_review_stage.sh` §7b, which EXTRACTS these literals from this file.)
 #   no report written          the stage is open and the report is still the sentinel
@@ -121,17 +122,40 @@
 #   stage record unreadable: <w>  the RECORD does not name which report is current, so no report
 #                                 was identified and nothing is claimed about one (round 5, J1)
 #   stage record is a symlink: <w>  the RECORD PATH is a symlink, so it was NOT READ (round 19, Y1)
+#   report path has a symlinked parent directory        a DIRECTORY above the report is a symlink,
+#                              so this stage's whole directory resolves into another tree and
+#                              nothing was read (round 20, Z1)
+#   report path has an unsearchable parent directory    a DIRECTORY above the report is not
+#                              searchable, so whether the component below it is a symlink could
+#                              NOT be determined — unverified may not read as clean (round 20, Z1)
+#   stage record path has a symlinked parent directory: <w>      the same, for the RECORD, and it
+#                              NAMES the offending component; this is the REACHABLE one of the four,
+#                              because both artifacts share `stage_dir` (round 20, Z1)
+#   stage record path has an unsearchable parent directory: <w>  likewise (round 20, Z1)
 #   stage record changed mid-read: <w>  the record moved between the two captures of ONE
 #                                 observation, so nothing is claimed about either (round 17, W1)
 #   stage not observed         internal: a caller classified without taking an observation
 #
-# BOTH SYMLINK CAUSES CLOSE THE *READ* PATH, WHICH HAD NO CHECK AT ALL (#3751 round 19, Y1). Round
+# THE SYMLINK CAUSES CLOSE THE *READ* PATH, WHICH HAD NO CHECK AT ALL (#3751 round 19, Y1). Round
 # 1's F5 walk refuses a symlink where this tool WRITES; every reader here DEREFERENCED, so a link
 # planted at either artifact's name made `verdict` — and `premerge-assert.sh`'s AUTO C validation
-# with it — accept a verdict read out of a file that is not the artifact this stage names. The
-# declared residual is the TOCTOU window a leaf `-L` test cannot close (bash has no `openat` /
-# `O_NOFOLLOW`), which is #3929's family; what is closed COMPLETELY is the non-racing case, a link
-# planted at any earlier time and simply followed, which needs no race and no timing.
+# with it — accept a verdict read out of a file that is not the artifact this stage names.
+#
+# AND ROUND 19's FIX WAS LEAF-SHAPED FOR A PATH-SHAPED PROBLEM (#3751 round 20, Z1). A symlink at
+# `.review-stage/` or at `issue-<N>/` moves this stage's WHOLE DIRECTORY into another tree, and
+# every predicate on the leaf then answers about the far end of the link — measured on the round-19
+# script, both levels: `RESULT: PASS` at exit 0 off a peer tree's clean stage, and end to end
+# `PREMERGE: OK` with `C-VERDICT PASS … source: AUTO`. So every read target now validates EVERY
+# PARENT COMPONENT below the repository root, without following links, BEFORE any predicate that
+# dereferences one (`read_path_parent_symlink`), with one cause per LEVEL.
+#
+# THE RESIDUAL, AND ITS BOUNDARY CORRECTED. What #3929 owns is the TOCTOU WINDOW between a check
+# and the open that follows it (bash has no `openat` / `O_NOFOLLOW`) — and NOTHING WIDER. Round 19
+# declared the PARENT-COMPONENT case as #3929's residual as well; that is WITHDRAWN, because a link
+# planted at any earlier moment and simply followed needs no race and no timing. The rule that
+# decides it, worth carrying elsewhere: the existence of an irreducible residual in a neighbourhood
+# is not a licence to defer the reachable cases in it — ask whether the defect needs a race; if it
+# does not, it is not that issue.
 #
 # `report unreadable` was the SIXTH, added in round 2 (B7) rather than folded into an existing
 # cause: an unreadable file is NOT empty (the operator fix is `chmod`, not the agent) and calling
@@ -413,6 +437,14 @@
 #                                   record, or a fresh --force open — not the agent, not a chmod)
 #           stage-record-symlink    the RECORD's path is a symlink, so it was NOT read (fix:
 #                                   remove the link)
+#           report-parent-symlink   a DIRECTORY above the report is a symlink (fix: remove the
+#                                   DIRECTORY link — not the report)
+#           report-parent-unverifiable  a DIRECTORY above the report is not searchable, so
+#                                   nothing about it could be VERIFIED (fix: chmod +x that
+#                                   directory)
+#           stage-record-parent-symlink       the same, for the RECORD — the reachable one of the
+#                                   four, since both artifacts share one directory
+#           stage-record-parent-unverifiable  likewise
 #           stage-record-changed    the record moved mid-observation (fix: read it again)
 #           stage-not-observed      internal: classified with no observation at all
 #           never-opened            no stage was ever opened for this kind
@@ -1693,16 +1725,114 @@ count_field_lines_from() {
   printf '%s\n' "$out"
 }
 
+# read_path_parent_symlink <path> — EVERY PARENT COMPONENT OF A PATH THIS TOOL IS ABOUT TO *READ*,
+# VALIDATED WITHOUT FOLLOWING LINKS (#3751 round 20, Z1). Prints the offending component on a
+# non-zero status and nothing at all on 0:
+#
+#   0  every parent component below the repository root is verified NOT a symlink
+#   1  a parent component IS a symlink                 (the component is printed)
+#   2  a parent component could not be VERIFIED        (the component is printed)
+#
+# THE FINDING (roborev job 411, half A). Round 19 put a `[ -L ]` test on the LEAF of each read
+# target and nothing on the components above it — a leaf-shaped fix to a path-shaped problem. A
+# symlink at `.review-stage/` or at `issue-<N>/` redirects BOTH artifacts at once, and it is
+# followed by every predicate on the leaf: measured on the shipped script, with `.review-stage/`
+# linked at a peer tree holding a clean stage, `verdict c --issue 4242` printed
+# `RESULT: PASS … report=<this lane>/.review-stage/issue-4242/c.<nonce>.md` at exit 0 — a
+# FOREIGN artifact reported under THIS lane's path, and `premerge-assert.sh --c-verdict AUTO`
+# consumes that line at the merge point. Linking `issue-<N>/` alone does the same.
+#
+# IT NEEDS NO RACE AND NO TIMING, WHICH IS WHY IT IS NOT #3929. A link planted at any earlier
+# moment is simply followed at read time. #3929's family is the window BETWEEN this walk and the
+# open below it, and nothing here claims that window is closed. Round 19 declared the parent case
+# as #3929's residual; that declaration was too broad and is WITHDRAWN. The rule that decides it:
+# the existence of an irreducible residual in a neighbourhood is not a licence to defer the
+# reachable cases in it — ask whether the defect needs a race; if it does not, it is not that issue.
+#
+# WHY THIS IS A SECOND WALK AND NOT `assert_no_symlink` (which is the write path's, and stays
+# exactly as it is). That function REFUSES BY `exit`ing, and every caller here runs inside a
+# COMMAND SUBSTITUTION, where an `exit` ends only the SUBSHELL and the script carries on with a
+# captured refusal nobody sees — round 2's B6, measured in this very file. A read path needs a
+# PREDICATE. The two are deliberately separate and CANNOT drift on the property that matters:
+# `scripts/tests/test_review_stage.sh` §34 asserts both carry the same NOGLOB split idiom and the
+# same `[ -L ]` component test, and the write-path function is byte-pinned besides.
+#
+# THE LEAF IS NOT THIS FUNCTION'S SUBJECT: each reader keeps its OWN leaf test with its OWN cause,
+# because "this path is a link" and "a directory above this path is a link" are different operator
+# actions at different levels, and round 4's H4 rule is one state per action.
+#
+# A NON-DIRECTORY COMPONENT IS DELIBERATELY NOT AN OUTCOME HERE. For a WRITE it is fatal (nothing
+# can be created under it); for a READ it means there is verifiably no stage at this path at all,
+# which is exactly what `stage never opened` says — a MEASURED absence, not a cannot-tell, so it
+# takes no refusal of its own.
+#
+# "CANNOT TELL" IS STATUS 2 AND IS NEVER FOLDED ONTO 0. If a parent exists but is not searchable,
+# `-L`/`-e` on the child answer FALSE for a component that may well be a symlink — a two-valued
+# predicate collapsing the unknown onto the permissive answer. Permissive here is worse than
+# usual: with the components unverified, `[ ! -f ]` on the leaf also answers false, which is the
+# `absent` state that `record-author-performed`'s clobber guard reads as "no recorded verdict to
+# destroy".
+read_path_parent_symlink() {
+  local path="$1" dir root rel comp cur parent oldifs
+  # THE PARENT DIRECTORY, LEXICALLY. Every path this tool reads is built by `stage_dir` /
+  # `stage_file` / `report_path` from (repo root, issue, kind, nonce) and is absolute with no
+  # trailing slash and no `//`, so stripping the last component is exact — and `${path%/*}` is a
+  # string operation, so it resolves nothing and follows nothing.
+  dir="${path%/*}"
+  root="$(repo_root)"
+  # ONLY COMPONENTS BELOW THE ROOT ARE THIS TOOL'S SUBJECT, the same boundary `assert_no_symlink`
+  # draws. A `dir` equal to the root has no parent components below it, and `"$root"/*` correctly
+  # answers no for that case as well as for any path outside the repository.
+  case "$dir" in
+    "$root"/*) rel="${dir#"$root"/}" ;;
+    *) return 0 ;;
+  esac
+  cur="$root"
+  parent="$root"
+  oldifs="$IFS"
+  # NOGLOB while splitting: `set -- $rel` is an UNQUOTED expansion, so a component containing a
+  # glob character would be pathname-expanded and the walk would inspect other files entirely.
+  set -f
+  IFS='/'
+  # shellcheck disable=SC2086
+  set -- $rel
+  IFS="$oldifs"
+  set +f
+  for comp in "$@"; do
+    [ -n "$comp" ] || continue
+    if [ -e "$parent" ] && [ ! -x "$parent" ]; then
+      printf '%s' "$parent"
+      return 2
+    fi
+    parent="$cur"
+    cur="$cur/$comp"
+    # THE NON-RACING CASE, CLOSED HERE COMPLETELY: a link planted at any earlier moment and simply
+    # followed. What remains is the WINDOW between this walk and the open that follows it, and that
+    # window — nothing wider — is #3929's family. Round 19 declared the whole PARENT case as
+    # #3929's residual; that is WITHDRAWN, because this needs no race at all.
+    if [ -L "$cur" ]; then
+      printf '%s' "$cur"
+      return 1
+    fi
+  done
+  return 0
+}
+
 # stage_record_text <file> — THE STAGE RECORD'S OWN BYTES, for a rewrite that must PRESERVE every
-# field this version does not know about (#3751 round 15, U1). THREE statuses, the same closed set
-# and the same reasons as `count_field_lines` above:
+# field this version does not know about (#3751 round 15, U1). A CLOSED status set, the same
+# reasons as `count_field_lines` above:
 #
 #   0  read, faithful          — the text is printed (with trailing newlines stripped by the
 #                                caller's capture, which the rewrite re-terminates)
 #   1  the read FAILED         — permission, I/O, a truncated read (nothing printed)
 #   2  read, NOT REPRESENTABLE — the file holds a NUL 0x00 or SOH 0x01 byte
-#   3  NOT READ AT ALL         — the path is a SYMLINK, so reading it would decide from another
-#                                artifact (#3751 round 19, Y1)
+#   3  NOT READ AT ALL         — the path's LEAF is a SYMLINK, so reading it would decide from
+#                                another artifact (#3751 round 19, Y1)
+#   4  NOT READ AT ALL         — a PARENT COMPONENT is a SYMLINK, so the whole stage directory is
+#                                another lane's (#3751 round 20, Z1); the component is printed
+#   5  NOT READ AT ALL         — a PARENT COMPONENT could not be VERIFIED (its own parent is not
+#                                searchable), so whether it is a link is UNKNOWN and unknown may
+#                                not take the permissive branch; the component is printed
 #
 # Callers spell the permissive set AFFIRMATIVELY as `0`, so a status added here later refuses by
 # construction rather than inheriting a `!= 1` test.
@@ -1721,7 +1851,20 @@ count_field_lines_from() {
 # whose last byte happens to BE an `E` — and here a TRUNCATED read is the worst case of all,
 # because a prefix that stops early would be WRITTEN BACK as the whole record.
 stage_record_text() {
-  local file="$1" text="" rrc=0
+  local file="$1" text="" rrc=0 pcomp="" prc=0
+  # EVERY PARENT COMPONENT IS VALIDATED FIRST, BEFORE ANY PREDICATE THAT DEREFERENCES ONE (#3751
+  # round 20, Z1). The leaf test below is necessary and was NOT sufficient: a symlink at
+  # `.review-stage/` or `issue-<N>/` moves this stage's WHOLE DIRECTORY somewhere else, and every
+  # test on the leaf then answers about the file at the far end of it. Two statuses, because
+  # "a directory above this record is a link" (remove the link) and "whether it is a link cannot
+  # be determined" (make the directory searchable) are different operator actions. `|| prc=$?`,
+  # never `if ! …; then prc=$?`, which reads 0.
+  pcomp="$(read_path_parent_symlink "$file")" || prc=$?
+  case "$prc" in
+    0) ;;
+    1) printf '%s' "$pcomp"; return 4 ;;
+    *) printf '%s' "$pcomp"; return 5 ;;
+  esac
   # A SYMLINKED RECORD IS REFUSED, NOT FOLLOWED — THE SAME REASONING AS `report_bytes`, APPLIED TO
   # THE OTHER ARTIFACT THE READ PATH OPENS (#3751 round 19, Y1). The stage record is what names
   # WHICH generation is authoritative and carries the `head-sha:` the stage was opened at, so a
@@ -1735,9 +1878,10 @@ stage_record_text() {
   # the reachable callers are the READ paths (`verdict`, `status`, `record-author-performed`),
   # which is precisely the half that had no check at all.
   #
-  # DECLARED RESIDUAL, as at `report_bytes`: a leaf `-L` before the open leaves a TOCTOU window
-  # bash cannot close, which is #3929's family. The non-racing case — a link planted earlier and
-  # simply followed — is closed completely; the residual is not.
+  # DECLARED RESIDUAL, as at `report_bytes`, AND ITS BOUNDARY CORRECTED (#3751 round 20, Z1): what
+  # #3929 owns is the WINDOW between these checks and the read below them — a TOCTOU bash cannot
+  # close (no `openat`, no `O_NOFOLLOW`). It does NOT own the PARENT-COMPONENT case, which round 19
+  # declared as its residual: that needs no race at all and is closed above.
   if [ -L "$file" ]; then return 3; fi
   text="$( { capture_map_nul "$file" && printf 'E'; } 2>/dev/null )" || rrc=$?
   [ "$rrc" -eq 0 ] || return 1
@@ -1911,12 +2055,14 @@ cmd_open() {
         emit "$REFUSE_MARKER detail=the stage record's report-nonce must be exactly ONE line carrying an alphanumeric token; it names which report of this stage is current, so a guess could name a report an earlier agent still holds. Read the record and repair it, or remove the stage directory and open a fresh stage."
         exit 2
         ;;
-      # THE `symlink` KIND (#3751 round 19, Y1) CANNOT REACH THIS FALL-THROUGH, and the reason is
-      # a control and not a hope: `assert_no_symlink "$sfile" stage-record` above refuses a
-      # symlinked record BEFORE `observe_record` is called, with `reason=path-is-symlink`. Stated
-      # here because this arm's detail asserts the record "EXISTS and could not be READ", which
-      # would be the wrong rationale for a link — if that walk is ever moved, this arm needs an
-      # arm of its own, exactly as `record-author-performed` has one.
+      # THE THREE PATH KINDS — `symlink` (#3751 round 19, Y1), `parent-symlink` and
+      # `parent-unverifiable` (round 20, Z1) — CANNOT REACH THIS FALL-THROUGH, and the reason is a
+      # control and not a hope: `assert_no_symlink "$sfile" stage-record` above walks EVERY
+      # component of this path and refuses BEFORE `observe_record` is called, with
+      # `reason=path-is-symlink` for either symlink level and `reason=path-unverifiable` for the
+      # unsearchable one. Stated here because this arm's detail asserts the record "EXISTS and
+      # could not be READ", which would be the wrong rationale for all three — if that walk is ever
+      # moved, this arm needs arms of its own, exactly as `record-author-performed` has them.
       *)
         emit "$REFUSE_MARKER reason=stage-record-unreadable kind=$kind issue=$issue record=$(field_value "$sfile") defect=$(field_value "$STAGE_RECORD_DEFECT")"
         emit "$REFUSE_MARKER detail=this stage's record EXISTS and could not be READ, so which report of this stage is current could not be measured and NOTHING was written. That is not the same as a record with no report-nonce (which reads as the original single report): an unmeasured record may not take the permissive reading, because it is also a record whose spawned-at cannot be read, so a forced re-open would silently restart a clock a reader is using. Fix the record's permissions, or remove the stage directory and open a fresh stage."
@@ -2230,7 +2376,27 @@ CLAUSE
 # newlines is invisible to the equality guard below; such a report is the same document for every
 # question this tool asks of it.
 report_bytes() {
-  local p="$1" body rc=0
+  local p="$1" body rc=0 pcomp="" prc=0
+  # EVERY PARENT COMPONENT FIRST, BEFORE ANY PREDICATE THAT DEREFERENCES ONE (#3751 round 20, Z1).
+  # Round 19's leaf test is necessary and was NOT sufficient: a symlink at `.review-stage/` or at
+  # `issue-<N>/` moves this stage's whole directory, so `-f` and the redirection below both answer
+  # about a file in another tree. Measured on the shipped script: `RESULT: PASS`, exit 0, off a
+  # peer lane's clean stage reached through a linked `.review-stage/`.
+  #
+  # THESE TWO STATES ARE UNREACHABLE ON EVERY DECISION PATH TODAY, AND THAT IS NOT WHY THEY ARE
+  # HERE. The report and the stage record live in the SAME directory (`stage_dir`), so they have
+  # the IDENTICAL parent components, and `observe_record` reads the record first — its refusal,
+  # which NAMES the offending component, is therefore always reached first. These arms exist so
+  # that a reader added later, with parents of its own, cannot inherit a permissive branch: the
+  # same reason `report_state`'s `*` arm is fail-closed. The component is deliberately NOT carried
+  # through this grammar (which would need a two-line observation shape for a path nobody reaches);
+  # the record-side refusal is where an operator reads it.
+  pcomp="$(read_path_parent_symlink "$p")" || prc=$?
+  case "$prc" in
+    0) ;;
+    1) printf 'state=parent-symlink\n'; return 0 ;;
+    *) printf 'state=parent-unverifiable\n'; return 0 ;;
+  esac
   # A SYMLINK IS REFUSED ON THE *READ* PATH TOO, NOT FOLLOWED (#3751 round 19, Y1).
   #
   # THE FINDING. Round 1's F5 walk refuses a symlink where this tool WRITES; nothing refused one
@@ -2250,11 +2416,12 @@ report_bytes() {
   # operator action is "remove the link", not a chmod and not a re-spawn (round 4's H4: one state
   # per cause, because a wrong remediation signal is what stops the operator looking).
   #
-  # DECLARED RESIDUAL, STATED HONESTLY: a leaf `-L` test taken BEFORE the open leaves a TOCTOU
-  # window that bash cannot close (no `openat`, no `O_NOFOLLOW`), and that window is the family
-  # tracked in #3929. What this hunk closes COMPLETELY is the far larger non-racing case — a link
-  # planted at any earlier time and simply FOLLOWED, with no check at all, which needs no race and
-  # no timing at all. The residual is not claimed closed by it.
+  # DECLARED RESIDUAL, STATED HONESTLY, AND ITS BOUNDARY CORRECTED (#3751 round 20, Z1): a test
+  # taken BEFORE the open leaves a TOCTOU window bash cannot close (no `openat`, no `O_NOFOLLOW`),
+  # and THAT WINDOW — nothing wider — is the family tracked in #3929. Round 19 also declared the
+  # PARENT-COMPONENT case as #3929's; that was too broad and is WITHDRAWN, because a link planted
+  # at any earlier time and simply followed needs no race at all. Both non-racing cases (leaf here,
+  # parents above) are closed COMPLETELY; the window is not claimed closed by either.
   if [ -L "$p" ]; then printf 'state=symlink\n'; return 0; fi
   if [ ! -f "$p" ]; then printf 'state=no-such-file\n'; return 0; fi
   # Measured BY ATTEMPTING THE READ rather than with `[ -r ]`, which answers TRUE for root and
@@ -2313,6 +2480,12 @@ report_state() {
     # the reason is neither a permission nor a byte: this path names an artifact that is not the
     # report of record. It is NOT in the permissive set at either caller.
     'state=symlink') printf 'symlink\n' ;;
+    # AND ONE WORD PER LEVEL (#3751 round 20, Z1). A link ABOVE the report is a different operator
+    # action from a link AT it (remove a directory link, not a file link) and from an unsearchable
+    # parent (chmod the directory), so they are three words and not one. Neither is in the
+    # permissive set at either caller.
+    'state=parent-symlink') printf 'parent-symlink\n' ;;
+    'state=parent-unverifiable') printf 'parent-unverifiable\n' ;;
     *) printf 'unreadable\n' ;;
   esac
 }
@@ -2365,6 +2538,14 @@ classify_report() {
       # repair, rather than "remove the link") — and the file it points at may be perfectly
       # readable, which is exactly the hazard.
       symlink) printf 'NOT-RUN|stage record is a symlink: %s\n' "$record_defect" ;;
+      # AND ONE PREFIX PER LEVEL (#3751 round 20, Z1). "The record is a link" and "a DIRECTORY
+      # above the record is a link" are different operator actions at different levels, and the
+      # second one means this stage's whole directory belongs to another tree — so folding them
+      # would send an operator to remove a file that is not the problem. The unverifiable case is
+      # third for the same reason: nothing here says it IS a link, only that it could not be told,
+      # and the action is to make the directory searchable.
+      parent-symlink) printf 'NOT-RUN|stage record path has a symlinked parent directory: %s\n' "$record_defect" ;;
+      parent-unverifiable) printf 'NOT-RUN|stage record path has an unsearchable parent directory: %s\n' "$record_defect" ;;
       *)     printf 'NOT-RUN|stage record unreadable: %s\n' "$record_defect" ;;
     esac
     return 0
@@ -2430,6 +2611,14 @@ classify_report() {
     # chmod. The file at this path is a SYMLINK, so following it would have decided the verdict
     # from another artifact entirely; the action is to remove the link.
     symlink) printf 'NOT-RUN|report is a symlink\n'; return 0 ;;
+    # AND ONE CAUSE PER LEVEL (#3751 round 20, Z1), because the operator has to know WHICH level is
+    # wrong: a link at the report is one file to remove, a link at `.review-stage/` or `issue-<N>/`
+    # moves the whole stage directory, and an unsearchable parent is a chmod on a DIRECTORY. Both
+    # are unreachable on every decision path today (the record shares these components and is read
+    # first, and its refusal NAMES the component) — enumerated so a reader added later cannot
+    # inherit a permissive branch.
+    parent-symlink) printf 'NOT-RUN|report path has a symlinked parent directory\n'; return 0 ;;
+    parent-unverifiable) printf 'NOT-RUN|report path has an unsearchable parent directory\n'; return 0 ;;
     present) ;;
     *) printf 'NOT-RUN|report unreadable\n'; return 0 ;;
   esac
@@ -2689,6 +2878,17 @@ observe_record() {
     # file resolves fine and reads fine, and that is the problem — it is not this stage's record.
     3) STAGE_RECORD_DEFECT_KIND=symlink
        STAGE_RECORD_DEFECT="the record PATH is a SYMLINK, so it was NOT READ and which report is current was never measured — following it would have taken this stage's generation, and its head-sha, from another artifact entirely (remove the link; NOT a chmod and NOT a rewrite)" ;;
+    # ONE KIND PER LEVEL (#3751 round 20, Z1), and this is the level round 19 missed: the
+    # COMPONENT is named, because "a directory above this record is a link" is only actionable if
+    # the operator is told WHICH one — `.review-stage/` and `issue-<N>/` are different mistakes,
+    # and the whole stage directory (record AND every report in it) is the other tree's.
+    4) STAGE_RECORD_DEFECT_KIND=parent-symlink
+       STAGE_RECORD_DEFECT="the path component $(field_value "$text") is a SYMLINK, so this stage's WHOLE DIRECTORY — the record and every report in it — resolves into another tree and NOTHING here was read; which report is current was never measured (remove the link; NOT a chmod and NOT a rewrite)" ;;
+    # AND "COULD NOT TELL" IS ITS OWN KIND, never folded onto either the symlink one (which would
+    # assert a link nothing observed) or `unreadable` (which would name a permission on the FILE
+    # when the problem is a DIRECTORY above it).
+    5) STAGE_RECORD_DEFECT_KIND=parent-unverifiable
+       STAGE_RECORD_DEFECT="the path component $(field_value "$text") is not SEARCHABLE, so whether the component below it is a SYMLINK could not be determined and nothing was read — an unverified path may not take the permissive reading, because with the components unmeasured the leaf tests answer 'absent', which is the state a clobber guard reads as 'no recorded verdict to destroy' (make that directory searchable: chmod +x)" ;;
     *) STAGE_RECORD_DEFECT_KIND=unreadable
        STAGE_RECORD_DEFECT="the record EXISTS and could not be READ, so which report is current was never measured (permission or I/O — not the same as a record with no report-nonce)" ;;
   esac
@@ -2934,6 +3134,14 @@ cmd_status() {
         "stage record unreadable"*) state=stage-record-unreadable ;;
         # AND ITS OWN STATE for the record half, same reasoning (#3751 round 19, Y1).
         "stage record is a symlink"*) state=stage-record-symlink ;;
+        # ONE STATE PER LEVEL (#3751 round 20, Z1) — see the causes at `classify_report`. The
+        # ORDER matters here and nowhere else in this map: these two literals both begin
+        # `stage record path has a`, so each arm carries its full distinguishing prefix rather
+        # than relying on a shorter one matching first.
+        "stage record path has a symlinked parent directory"*) state=stage-record-parent-symlink ;;
+        "stage record path has an unsearchable parent directory"*) state=stage-record-parent-unverifiable ;;
+        "report path has a symlinked parent directory") state=report-parent-symlink ;;
+        "report path has an unsearchable parent directory") state=report-parent-unverifiable ;;
         # ITS OWN STATE, because the operator action is "read it again" and not "repair the record
         # or chmod it" (#3751 round 17, W1). Folding it onto stage-record-unreadable would report a
         # perfectly readable record as unreadable — a false rationale, which is what stops the next
@@ -3007,6 +3215,13 @@ cmd_status() {
     emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE the report of record is a SYMLINK, so it was NOT READ and nothing is claimed about any verdict — reading it would have decided this stage from whatever file the link points at, which is not the report of record. Remove the link and let the agent write a regular file, or supersede the stage with a fresh generation: $prog open $KI_KIND --issue $KI_ISSUE --agent <type> --force"
   elif [ "$state" = stage-record-symlink ]; then
     emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE the STAGE RECORD is a SYMLINK, so it was NOT READ ($(field_value "$STAGE_RECORD_DEFECT")) — following it would have taken this stage's current generation, and the head-sha it was opened at, from another artifact. NOTHING is claimed about any report. Remove the link, then read it again: $prog verdict $KI_KIND --issue $KI_ISSUE"
+  elif [ "$state" = stage-record-parent-symlink ] || [ "$state" = report-parent-symlink ]; then
+    # THE NEXT ACTION IS AT A DIFFERENT LEVEL (#3751 round 20, Z1): a DIRECTORY link, not a file
+    # link, so `remove the report` would send the operator to the wrong artifact — and the stage
+    # directory they would look in is not the one this tool read.
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE a PATH COMPONENT above this stage's artifacts is a SYMLINK ($(field_value "${STAGE_RECORD_DEFECT:-see the cause on the STATUS line}")), so NOTHING was read and nothing is claimed about any record or any report — reading through it would have decided this lane's merge from ANOTHER tree's stage. Remove the DIRECTORY link (not the report), then read it again: $prog verdict $KI_KIND --issue $KI_ISSUE"
+  elif [ "$state" = stage-record-parent-unverifiable ] || [ "$state" = report-parent-unverifiable ]; then
+    emit "STATUS-NOTE kind=$KI_KIND issue=$KI_ISSUE a PATH COMPONENT above this stage's artifacts is not SEARCHABLE ($(field_value "${STAGE_RECORD_DEFECT:-see the cause on the STATUS line}")), so whether the component below it is a SYMLINK could NOT be determined and nothing was read. This is not a claim that anything is wrong with the record or the report: it is a claim that neither could be verified, and unverified may not read as clean. Make that directory searchable (chmod +x), then read it again: $prog verdict $KI_KIND --issue $KI_ISSUE"
   elif [ "$state" = stage-record-unreadable ]; then
     # THE FIX IS THE RECORD, NOT THE AGENT AND NOT A chmod — a distinct next action, which is the
     # whole reason each cause gets its own state (#3751 round 4, H4).
@@ -3137,6 +3352,21 @@ cmd_record_author_performed() {
     if [ "$STAGE_RECORD_DEFECT_KIND" = symlink ]; then
       emit "AUTHOR-REFUSED reason=stage-record-is-a-symlink kind=$kind issue=$issue record=$(field_value "$(stage_file "$issue" "$kind")") defect=$(field_value "$STAGE_RECORD_DEFECT")"
       emit "AUTHOR-REFUSED detail=the stage record PATH is a SYMLINK, so it was NOT READ and NOTHING was written — following it would have taken this stage's current generation, and the head-sha it was opened at, from another artifact, and this recording would then have superseded a verdict it never inspected. Remove the link and read the stage again ($prog verdict $kind --issue $issue), or open a fresh stage: $prog open $kind --issue $issue --agent <type> --force"
+      exit 2
+    fi
+    # AND A SYMLINKED (OR UNVERIFIABLE) PATH COMPONENT IS ITS OWN REASON TOKEN, one per LEVEL
+    # (#3751 round 20, Z1). Round 19 gave the record's own leaf a token and left the directories
+    # above it on the `unreadable` fall-through, whose detail says the record "does not name which
+    # report is current" — true, and the wrong action: the record this tool would have read is not
+    # this lane's at all, and repairing the file the operator finds there repairs another tree's.
+    if [ "$STAGE_RECORD_DEFECT_KIND" = parent-symlink ]; then
+      emit "AUTHOR-REFUSED reason=stage-record-parent-is-a-symlink kind=$kind issue=$issue record=$(field_value "$(stage_file "$issue" "$kind")") defect=$(field_value "$STAGE_RECORD_DEFECT")"
+      emit "AUTHOR-REFUSED detail=a PATH COMPONENT above this stage is a SYMLINK, so this stage's whole directory resolves into another tree, NOTHING was read and NOTHING was written — a recording made here would have superseded a verdict belonging to another lane, and its trace would have named a generation that is not this stage's. Remove the DIRECTORY link (not the report), then read the stage again: $prog verdict $kind --issue $issue"
+      exit 2
+    fi
+    if [ "$STAGE_RECORD_DEFECT_KIND" = parent-unverifiable ]; then
+      emit "AUTHOR-REFUSED reason=stage-record-parent-unverifiable kind=$kind issue=$issue record=$(field_value "$(stage_file "$issue" "$kind")") defect=$(field_value "$STAGE_RECORD_DEFECT")"
+      emit "AUTHOR-REFUSED detail=a PATH COMPONENT above this stage is not SEARCHABLE, so whether the component below it is a SYMLINK could NOT be determined; NOTHING was read and NOTHING was written. Unverified is not clean: with the components unmeasured the leaf tests answer absent, which is the state this guard reads as no recorded verdict to destroy. Make that directory searchable (chmod +x), then read the stage again: $prog verdict $kind --issue $issue"
       exit 2
     fi
     emit "AUTHOR-REFUSED reason=stage-record-unreadable kind=$kind issue=$issue record=$(field_value "$(stage_file "$issue" "$kind")") defect=$(field_value "$STAGE_RECORD_DEFECT")"

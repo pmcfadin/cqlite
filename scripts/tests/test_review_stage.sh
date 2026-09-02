@@ -5703,6 +5703,220 @@ else
 fi
 
 
+# --- 34. THE READ PATH VALIDATES EVERY PATH *COMPONENT*, NOT JUST THE LEAF (round 20, Z1) ---------
+# THE FINDING (roborev job 411, half A): round 19 put a `[ -L ]` test on the LEAF of each read
+# target and NOTHING on the components above it — a leaf-shaped fix to a path-shaped problem. A
+# symlink at `.review-stage/` or at `issue-<N>/` moves this stage's WHOLE DIRECTORY into another
+# tree, and every predicate on the leaf then answers about the file at the far end of it.
+#
+# MEASURED ON THE PRE-FIX SCRIPT, both levels, both a false certification:
+#   `.review-stage/` -> a peer tree's stage:  RESULT: PASS, exit 0, report= under THIS lane's path
+#   `issue-<N>/`     -> a peer tree's stage:  RESULT: PASS, exit 0, likewise
+# `premerge-assert.sh --c-verdict AUTO` consumes exactly that line at the merge point, which is
+# case (e) below.
+#
+# IT IS NOT #3929, AND ROUND 19's DECLARATION THAT IT WAS IS WITHDRAWN. #3929 owns the WINDOW
+# between a check and the open that follows it — a TOCTOU bash cannot close. A link planted at any
+# earlier moment and simply followed needs NO race and NO timing, so it is a reachable defect and
+# not a residual. The rule: the existence of an irreducible residual in a neighbourhood is not a
+# licence to defer the reachable cases in it.
+#
+# THE PARENTS ARE SHARED BY BOTH ARTIFACTS, WHICH IS A MEASURED FACT AND NOT AN ASSUMPTION: the
+# report is `<stage_dir>/<kind>.<nonce>.md` and the record is `<stage_dir>/<kind>.stage`, so their
+# parent components are IDENTICAL and one planted link redirects both. There is therefore no
+# constructible "report-only parent" cell — asserted below rather than left implicit — and the
+# reachable refusal is the record's, which is why the record's is the one that NAMES the component.
+R34="$(newrepo)"
+rs "$R34" open c --issue 1904 --agent spec-auditor
+rc_is 0 "z1: the lane's own stage opened (the control this section is measured against)"
+R34_REP="$(REPORT_OF "$R34" 1904 c)"
+printf 'result: FINDINGS\n\none blocking gap.\n' >"$R34_REP"
+rs "$R34" verdict c --issue 1904
+rc_is 4 "z1/control: the lane's own regular-path stage reads its verdict normally (exit 4)"
+
+# A FOREIGN tree holding a CLEAN stage for the SAME issue number — the bait. Built with the tool,
+# so it is a genuine stage record and a genuine nonce-named report: the case must not turn on a
+# hand-made artifact the reader would reject for another reason.
+R34F="$(newrepo)"
+rs "$R34F" open c --issue 1905 --agent spec-auditor
+rc_is 0 "z1: PREMISE — the FOREIGN tree's stage opened"
+printf 'result: PASS\n\nanother lane review.\n' >"$(REPORT_OF "$R34F" 1905 c)"
+rs "$R34F" verdict c --issue 1905
+has "RESULT: PASS" "z1: PREMISE — and the foreign stage really does record PASS, so the bait is live"
+
+# (a) PARENT, LIVE — `.review-stage/` itself is a link to the foreign tree's stage root.
+R34A="$(newrepo)"
+if ln -s "$R34F/.review-stage" "$R34A/.review-stage" 2>/dev/null && [ -L "$R34A/.review-stage" ]; then
+  ok "z1/parent-live: PREMISE — .review-stage/ is a symlink at the foreign tree's stage root"
+else
+  bad "z1/parent-live: PREMISE — could not plant the link; the assertions below would be vacuous"
+fi
+rs "$R34A" verdict c --issue 1905
+rc_is 5 "z1/parent-live: a symlinked .review-stage/ is a NON-VERDICT (exit 5)"
+hasnt "RESULT: PASS" "z1/parent-live: the foreign tree's PASS is NOT reported — this is the false certification the finding names"
+has "RESULT: NOT-RUN (stage record path has a symlinked parent directory" "z1/parent-live: and the cause names the LEVEL, distinct from the leaf case"
+hasnt "stage record is a symlink" "z1/parent-live: NOT the leaf cause — 'remove the report' would send the operator to the wrong artifact"
+hasnt "stage record unreadable" "z1/parent-live: NOT the unreadable cause — the file reads perfectly, which is the hazard"
+has ".review-stage is a SYMLINK" "z1/parent-live: and it NAMES the offending component, so the operator knows which level is wrong"
+has "report=unresolved" "z1/parent-live: no report path is published, because none was identified"
+rs "$R34A" status c --issue 1905
+has "state=stage-record-parent-symlink" "z1/parent-live/status: its own state word, one per operator action"
+has "Remove the DIRECTORY link (not the report)" "z1/parent-live/status: with a note naming the DIRECTORY-level action"
+rs "$R34A" record-author-performed c --issue 1905 \
+  --reason "no independent auditor was available on this lane" \
+  --evidence "docs/round-artifacts/z1-note.md" --performed-by author
+rc_is 2 "z1/parent-live: record-author-performed REFUSES over a symlinked parent"
+has "reason=stage-record-parent-is-a-symlink" "z1/parent-live: with its own reason token, not the record-unreadable one"
+if [ "$(LC_ALL=C ls -1 "$R34F/.review-stage/issue-1905" | LC_ALL=C grep -c '\.md$' || true)" = "1" ]; then
+  ok "z1/parent-live: and NOTHING was written into the foreign tree through the link"
+else
+  bad "z1/parent-live: the refusal wrote into the FOREIGN tree ($(LC_ALL=C ls -1 "$R34F/.review-stage/issue-1905" | LC_ALL=C tr '\n' ' '))"
+fi
+
+# (b) PARENT, LIVE, one level down — `issue-<N>/` is the link. A different component, so a fix
+#     that hard-coded `.review-stage` would pass (a) and fail here.
+R34B="$(newrepo)"
+mkdir -p "$R34B/.review-stage"
+if ln -s "$R34F/.review-stage/issue-1905" "$R34B/.review-stage/issue-1905" 2>/dev/null && [ -L "$R34B/.review-stage/issue-1905" ]; then
+  ok "z1/parent-live-2: PREMISE — issue-1905/ is a symlink at the foreign tree's stage directory"
+else
+  bad "z1/parent-live-2: PREMISE — could not plant the link; the assertions below would be vacuous"
+fi
+rs "$R34B" verdict c --issue 1905
+rc_is 5 "z1/parent-live-2: a symlinked issue-<N>/ is a NON-VERDICT too (exit 5)"
+hasnt "RESULT: PASS" "z1/parent-live-2: and the foreign PASS is not reported at this level either"
+has "issue-1905 is a SYMLINK" "z1/parent-live-2: the refusal names THIS component, so the two levels are distinguishable"
+
+# (c) THE SHARED-PARENT FACT, MEASURED. Both artifacts are built from `stage_dir`, so a
+#     "report-only parent" cell cannot be constructed — the record's refusal always fires first.
+#     Asserted rather than asserted-in-prose, because the report-side arms exist only for a reader
+#     added later and a reader could otherwise conclude they are dead by accident.
+R34E_SD="$(LC_ALL=C awk '/^stage_file\(\)/ { print }' "$RS")"
+R34E_RP="$(LC_ALL=C awk '/^report_path\(\) \{/ { inf = 1 } inf { print } inf && /^\}/ { exit }' "$RS")"
+case "$R34E_SD" in
+  *'stage_dir "$1"'*) R34E_A=1 ;;
+  *) R34E_A=0 ;;
+esac
+case "$R34E_RP" in
+  *'stage_dir "$issue"'*) R34E_B=1 ;;
+  *) R34E_B=0 ;;
+esac
+if [ "$R34E_A" -eq 1 ] && [ "$R34E_B" -eq 1 ]; then
+  ok "z1/shared-parents: BOTH read targets are built from stage_dir, so their parent components are identical and one link redirects both — which is why the record's refusal is the reachable one and the one that names the component"
+else
+  bad "z1/shared-parents: the two read targets no longer share stage_dir (stage_file=$R34E_A report_path=$R34E_B) — the report-side parent arms may now be REACHABLE, and this section must then assert them behaviourally rather than structurally"
+fi
+
+# (d) STRUCTURAL — THE CENSUS, EXTENDED FROM THE LEAF TO THE WHOLE PATH, WITH A POSITIVE CONTROL.
+# Round 19's census asked whether each read target carries the LEAF test. That is exactly the
+# question whose "yes" answer hid this finding, so it now asks BOTH: the leaf test AND the parent
+# walk. DERIVED from the shipped script (a third reader added later joins it) and COUNTED OVER
+# CODE, NEVER OVER PROSE — round 18's X1 lesson, which fired inside round 19's own guard when the
+# comment explaining `[ -L "$p" ]` satisfied a whole-body match with the code hunk removed.
+#
+# AND IT HAS A POSITIVE CONTROL, because a census that reports CLEAN is evidence only if it can be
+# shown to red: the control SUBSTITUTES THE ARTIFACT (a scratch copy of the script with the walk
+# CALLS deleted, leaf tests intact) and requires the census to name the functions. A guard built to
+# close one blind spot shipping with its own is a shape this repository has recorded.
+z1_census() {
+  # <script> -> one `<fn> <LEAF|no-LEAF> <WALK|no-WALK>` line per function that opens a file
+  # through the one capture boundary.
+  LC_ALL=C awk '
+    /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/ { fn = $1; sub(/\(\).*/, "", fn); body = ""; inf = 1; next }
+    inf && /^\}/ {
+      if (body ~ /capture_map_nul "\$/) {
+        printf "%s %s %s\n", fn,
+          (body ~ /\[ -L "\$/ ? "LEAF" : "no-LEAF"),
+          (body ~ /read_path_parent_symlink "\$/ ? "WALK" : "no-WALK")
+      }
+      inf = 0; next
+    }
+    inf && /^[ \t]*#/ { next }
+    inf { body = body "\n" $0 }
+  ' "$1"
+}
+Z1_CENSUS="$(z1_census "$RS")"
+Z1_N="$(printf '%s\n' "$Z1_CENSUS" | LC_ALL=C grep -c . || true)"
+Z1_GAPS="$(printf '%s\n' "$Z1_CENSUS" | LC_ALL=C grep -e 'no-LEAF' -e 'no-WALK' || true)"
+if [ "${Z1_N:-0}" -eq 2 ]; then
+  ok "z1/structural: the census finds EXACTLY 2 functions that open a file through the capture boundary (report_bytes, stage_record_text) — a third would show up here"
+else
+  bad "z1/structural: the census finds ${Z1_N:-0} file-reading function(s), not 2: $(printf '%s' "$Z1_CENSUS" | LC_ALL=C tr '\n' ' ')"
+fi
+if [ -z "$Z1_GAPS" ]; then
+  ok "z1/structural: and BOTH carry the leaf \`[ -L ]\` test AND the parent-component walk, so no read target follows an unchecked component at any level"
+else
+  bad "z1/structural: read target(s) missing a check: $(printf '%s' "$Z1_GAPS" | LC_ALL=C tr '\n' ' ')"
+fi
+# THE ORDER IS THE PROPERTY, at the new level too: a walk placed after a dereferencing predicate
+# is not a check. Both readers are asserted over a COMMENT-STRIPPED view, for the same reason
+# round 19's order asserts are.
+Z1_ORDER_BAD=""
+for Z1_FN in report_bytes stage_record_text; do
+  Z1_BODY="$(LC_ALL=C awk -v f="$Z1_FN" '$0 ~ "^"f"\\(\\) \\{" { inf = 1 } inf { print } inf && /^\}/ { exit }' "$RS" \
+    | LC_ALL=C grep -v '^[[:space:]]*#')"
+  Z1_W="$(printf '%s\n' "$Z1_BODY" | LC_ALL=C grep -n 'read_path_parent_symlink "\$' | LC_ALL=C head -1 | cut -d: -f1)"
+  Z1_L="$(printf '%s\n' "$Z1_BODY" | LC_ALL=C grep -n '\[ -L "\$' | LC_ALL=C head -1 | cut -d: -f1)"
+  if [ -n "$Z1_W" ] && [ -n "$Z1_L" ] && [ "$Z1_W" -lt "$Z1_L" ]; then
+    : # the walk precedes the leaf test, which itself precedes every dereferencing predicate
+  else
+    Z1_ORDER_BAD="$Z1_ORDER_BAD $Z1_FN(walk=$Z1_W leaf=$Z1_L)"
+  fi
+done
+if [ -z "$Z1_ORDER_BAD" ]; then
+  ok "z1/structural: in BOTH readers the parent walk comes BEFORE the leaf test, which comes before every dereferencing predicate"
+else
+  bad "z1/structural: the walk does not precede the leaf test in:$Z1_ORDER_BAD — a component test taken after a dereference is not a check"
+fi
+# THE POSITIVE CONTROL. The walk CALLS are deleted from a scratch copy; the leaf tests stay. The
+# census must red AND must NAME both functions — a bare red is not evidence, since a broken
+# extraction produces one too (which is what the `no-WALK` word is checked for).
+Z1_FAKE="$T/z1-leaf-only-review-stage.sh"
+LC_ALL=C sed -e '/read_path_parent_symlink "\$/d' "$RS" >"$Z1_FAKE"
+if LC_ALL=C grep -q 'read_path_parent_symlink "\$' "$Z1_FAKE"; then
+  bad "z1/positive-control: the scratch copy still calls the walk — the control would be vacuous"
+else
+  ok "z1/positive-control: PREMISE — a scratch copy with the walk CALLS deleted and the leaf tests intact"
+fi
+Z1_FAKE_CENSUS="$(z1_census "$Z1_FAKE")"
+Z1_FAKE_GAPS="$(printf '%s\n' "$Z1_FAKE_CENSUS" | LC_ALL=C grep -c 'no-WALK' || true)"
+if [ "${Z1_FAKE_GAPS:-0}" -eq 2 ]; then
+  ok "z1/positive-control: the census REDS on the leaf-only copy and names BOTH read targets as no-WALK — so a clean report over the shipped script is evidence"
+else
+  bad "z1/positive-control: the census reported ${Z1_FAKE_GAPS:-0} of 2 read targets as no-WALK on a copy with NO walk at all — it cannot detect the defect it exists for: $(printf '%s' "$Z1_FAKE_CENSUS" | LC_ALL=C tr '\n' ' ')"
+fi
+# AND THE TWO WALKS CANNOT DRIFT ON THE PROPERTY THAT MATTERS. The write path keeps
+# `assert_no_symlink` (which refuses by `exit`ing, unusable from the command substitutions the read
+# path runs inside — round 2's B6) and the read path has its own PREDICATE. They are two
+# implementations of one walk, so the shared shape is pinned: the NOGLOB split and the `[ -L ]`
+# component test. Not a claim that they are identical — they answer for different purposes.
+Z1_ANS="$(LC_ALL=C awk '/^assert_no_symlink\(\) \{/ { inf = 1 } inf { print } inf && /^\}/ { exit }' "$RS")"
+Z1_RPS="$(LC_ALL=C awk '/^read_path_parent_symlink\(\) \{/ { inf = 1 } inf { print } inf && /^\}/ { exit }' "$RS")"
+Z1_SHAPE=0
+for Z1_BODY in "$Z1_ANS" "$Z1_RPS"; do
+  case "$Z1_BODY" in *'set -f'*) ;; *) continue ;; esac
+  case "$Z1_BODY" in *"IFS='/'"*) ;; *) continue ;; esac
+  case "$Z1_BODY" in *'set -- $rel'*) ;; *) continue ;; esac
+  case "$Z1_BODY" in *'[ -L "$cur" ]'*) ;; *) continue ;; esac
+  Z1_SHAPE=$((Z1_SHAPE + 1))
+done
+if [ "$Z1_SHAPE" -eq 2 ]; then
+  ok "z1/structural: the write-path walk and the read-path walk carry the SAME NOGLOB split idiom and the SAME \`[ -L \"\$cur\" ]\` component test, so they cannot drift on the property both exist for"
+else
+  bad "z1/structural: only $Z1_SHAPE of 2 component walks carry the shared NOGLOB-split + [ -L \"\$cur\" ] shape"
+fi
+# AND THE CORRECTED RESIDUAL BOUNDARY IS DECLARED AT BOTH SITES: #3929 owns the WINDOW between a
+# check and the open, and round 19's wider claim (that the PARENT case was #3929's) is withdrawn in
+# the source rather than only in a report nobody reads.
+Z1_DECL=0
+case "$Z1_RPS" in *'#3929'*) Z1_DECL=$((Z1_DECL + 1)) ;; esac
+case "$Z1_RPS" in *'WITHDRAWN'*) Z1_DECL=$((Z1_DECL + 1)) ;; esac
+if [ "$Z1_DECL" -eq 2 ]; then
+  ok "z1/structural: the read-path walk DECLARES what #3929 still owns (the window) and WITHDRAWS round 19's wider claim, so neither over-claims nor defers a reachable case"
+else
+  bad "z1/structural: the read-path walk declares $Z1_DECL of 2 (the #3929 window boundary, the withdrawal of round 19's wider claim)"
+fi
+
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
 # which is this issue's own subject inside a test file.
@@ -6153,7 +6367,26 @@ fi
 # arm quoted in prose is not a `case` arm — plus the FOUR sibling token/state decisions this
 # finding's audit covered, so a regression at any of them reds here instead of needing to be
 # re-audited. Every assertion needs only bash, git and coreutils; none branches on the host.
-ASSERT_FLOOR=1012
+#
+# ROUND 20's Z1 (HALF A) MOVES IT TO 1045. Section 34 adds 33: round 19 put a `[ -L ]` test on the
+# LEAF of each read target and NOTHING on the components above it — a leaf-shaped fix to a
+# path-shaped problem. A symlink at `.review-stage/` or at `issue-<N>/` moves this stage's WHOLE
+# DIRECTORY into another tree and every leaf predicate then answers about the far end of it:
+# measured on the pre-fix script, both levels reported `RESULT: PASS` at exit 0 off a peer tree's
+# clean stage, under THIS lane's report path (13 of this section's assertions RED with the walk
+# CALLS deleted, 0 after). It is NOT #3929 and round 19's declaration that it was is WITHDRAWN in
+# the source: #3929 owns the WINDOW between a check and its open, while a link planted earlier and
+# simply followed needs no race at all. Both levels are asserted behaviourally (`.review-stage/`
+# and `issue-<N>/`, each naming ITS OWN component), the verdict/status/record-author-performed
+# surfaces each get their own cause and reason token, and the SHARED-PARENT fact — both artifacts
+# are built from `stage_dir`, so no "report-only parent" cell is constructible — is asserted
+# structurally rather than left in prose. The census is EXTENDED from the leaf to the whole path
+# and carries a POSITIVE CONTROL that substitutes the artifact (a scratch copy with the walk calls
+# deleted, leaf tests intact) and requires it to name BOTH read targets, because a census that
+# reports CLEAN is evidence only if it can be shown to red. Every assertion needs only bash, git,
+# `ln -s` and coreutils; the premise assertions call `bad`, i.e. a RED run and never a displaced
+# count.
+ASSERT_FLOOR=1045
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

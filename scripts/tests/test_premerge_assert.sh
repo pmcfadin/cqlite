@@ -5358,6 +5358,110 @@ else
   bad "x1/structural: the byte-faithful expansion is absent, so the enforcer's location can still be mislocated"
 fi
 
+# --- 44t: A FOREIGN VERDICT REACHED THROUGH A SYMLINKED PATH COMPONENT (round 20, Z1) ---
+# THE HARM, AT THE MERGE POINT. `--c-verdict AUTO` locates this worktree's C stage by globbing
+# `<root>/.review-stage/issue-*/c.stage` and then reads its verdict with `review-stage.sh verdict`.
+# Round 19 gave that reader a `[ -L ]` test on the LEAF of each artifact and NOTHING on the
+# components above it, so a symlink at `.review-stage/` (or at `issue-<N>/`) supplied this lane
+# with ANOTHER TREE's stage — record, nonce and clean report together — and every leaf test
+# answered about the far end of the link. The glob traverses it, the head-sha binding is satisfied
+# by a peer standing at the same commit, and `PREMERGE: OK` follows.
+#
+# IT NEEDS NO RACE. The link is planted at any earlier moment and simply followed; the TOCTOU
+# window between a check and its open is #3929's and is not this.
+#
+# THIS CASE IS WHY THE FIX BELONGS IN `review-stage.sh` AND NOT HERE: premerge-assert consumes the
+# verdict LINE, so the protection is INHERITED — but "should be inherited" is a prediction, and the
+# whole point of this issue is that a prediction is not a measurement. Asserted end to end.
+Z1_LANE=$(c_repo z1lane design) || Z1_LANE=""
+Z1_PEER=$(c_repo z1peer design) || Z1_PEER=""
+Z1_LANE_SHA=""
+if [ -n "$Z1_LANE" ] && [ -n "$Z1_PEER" ]; then
+  Z1_LANE_SHA=$(git -C "$Z1_LANE" rev-parse HEAD 2>/dev/null) || Z1_LANE_SHA=""
+fi
+# A FIXTURE THAT COULD NOT BE BUILT IS A RED, NOT SILENCE: without this the whole section would
+# emit ZERO assertions and the suite would report `failed: 0` over a block that never ran — this
+# suite's own case-floor subject, one section down.
+if [ -z "$Z1_LANE_SHA" ]; then
+  bad "z1/premerge fixture: could not build the two synthetic repositories — the whole section would be vacuous"
+fi
+if [ -n "$Z1_LANE_SHA" ]; then
+  # THE PEER'S STAGE IS A REAL ONE, built with the shipped tool: a hand-made record would be
+  # refused for a reason that is not this case's, and the case would pass vacuously.
+  if (cd "$Z1_PEER" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
+      --agent spec-auditor >/dev/null 2>&1) &&
+    printf 'result: PASS\n\n## Findings\n\nanother lane audit.\n' \
+      >"$(SR_REPORT "$Z1_PEER" 3751 c)"; then
+    ok "z1/premerge fixture: the PEER tree holds a real, PASSING c stage"
+  else
+    bad "z1/premerge fixture: could not build the peer stage — the case would be vacuous"
+    Z1_LANE_SHA=""
+  fi
+fi
+Z1_PEER_REC="$Z1_PEER/.review-stage/issue-3751/c.stage"
+if [ -n "$Z1_LANE_SHA" ]; then
+  # THE PEER'S RECORD IS RE-STAMPED TO THE LANE'S CERTIFIED SHA, so the head-sha binding (44f) is
+  # SATISFIED and cannot be what refuses. Without this the case would go green pre-fix and prove
+  # nothing about the read path — it is the shape of a real peer lane standing at the same commit,
+  # which on this fleet is the ordinary case (every lane is a worktree of one repository).
+  if LC_ALL=C awk -v s="$Z1_LANE_SHA" '/^head-sha: /{print "head-sha: " s; next}{print}' \
+      "$Z1_PEER_REC" >"$Z1_PEER_REC.new" 2>/dev/null &&
+    mv -f "$Z1_PEER_REC.new" "$Z1_PEER_REC" &&
+    LC_ALL=C grep -q "^head-sha: $Z1_LANE_SHA\$" "$Z1_PEER_REC"; then
+    ok "z1/premerge fixture: the peer record now names the LANE's certified sha, so the stage binding cannot be what refuses"
+  else
+    bad "z1/premerge fixture: could not re-stamp the peer record — the refusal below could not be attributed to the read path"
+    Z1_LANE_SHA=""
+  fi
+fi
+if [ -n "$Z1_LANE_SHA" ]; then
+  # THE POSITIVE CONTROL FIRST: the peer's stage, read IN THE PEER'S OWN TREE, certifies. So the
+  # refusal below is about the LINK and not about this artifact, this sha or this fixture.
+  if run_in_repo "$Z1_PEER" 0 \
+    "z1/premerge control: in its OWN tree the peer's stage certifies (so the bait is live)" \
+    --c-verdict AUTO; then
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*) ok "z1/premerge control: reported C-VERDICT PASS" ;;
+      *) bad "z1/premerge control: must report C-VERDICT PASS (got: $OUT)" ;;
+    esac
+  fi
+  # NOW THE DEFECT: the LANE never opened a stage, and a link at `.review-stage/` supplies the
+  # peer's. This is the realistic shape — nothing to overwrite, nothing to notice.
+  if ln -s "$Z1_PEER/.review-stage" "$Z1_LANE/.review-stage" 2>/dev/null \
+     && [ -L "$Z1_LANE/.review-stage" ]; then
+    ok "z1/premerge: PREMISE — the lane's .review-stage/ is a symlink at the peer tree's stage root"
+  else
+    bad "z1/premerge: PREMISE — could not plant the link; the assertions below would be vacuous"
+    Z1_LANE_SHA=""
+  fi
+fi
+if [ -n "$Z1_LANE_SHA" ]; then
+  if run_in_repo "$Z1_LANE" 2 \
+    "z1/premerge: a FOREIGN PASS reached through a symlinked PATH COMPONENT is REFUSED at the merge point" \
+    --c-verdict AUTO; then
+    case "$OUT" in
+      *"PREMERGE: NO-C-VERDICT"*) ok "z1/premerge: refused under the NO-C-VERDICT verdict" ;;
+      *) bad "z1/premerge: must refuse with NO-C-VERDICT (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*)
+        bad "z1/premerge: a FOREIGN tree's PASS certified this lane's merge — the Z1 defect is live at the merge point" ;;
+      *) ok "z1/premerge: no PASS token is emitted for a verdict read through a symlinked component" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: OK"*) bad "z1/premerge: the merge was cleared over a foreign verdict" ;;
+      *) ok "z1/premerge: and PREMERGE: OK is never reached" ;;
+    esac
+    # THE INHERITED CAUSE IS THE ONE THIS SCRIPT PRINTS, so an operator reads the LEVEL from the
+    # merge-point output and does not have to re-run the stage tool to find out which link is wrong.
+    case "$OUT" in
+      *"stage record path has a symlinked parent directory"*)
+        ok "z1/premerge: and review-stage.sh's own cause is carried through, naming the LEVEL (a parent component, not the leaf)" ;;
+      *) bad "z1/premerge: the refusal does not carry the component-level cause (got: $OUT)" ;;
+    esac
+  fi
+fi
+
 # --- 44h: THE STRUCTURAL EMIT-BOUNDARY GUARD (round 7, L1b) -------------------
 # The mirror of test_review_stage.sh section 18, for this script. See
 # scripts/tests/lib/emit-boundary-scan.sh for why the guard exists (the boundary was bypassed at a
@@ -5948,7 +6052,22 @@ fi
 # SIGPIPE, and under `pipefail` the pipeline status is 141 — so a pin over a >64KiB body failed
 # exactly when its needle was PRESENT. They read a FILE now (#3400's "by redirection, never a
 # pipe", one shell feature over). Every one needs only bash, git and coreutils.
-ASSERT_FLOOR=531
+#
+# ROUND 20's Z1 (HALF A) ADDS 8, ALL HOST-INDEPENDENT (537 -> 545; floor 531 -> 539, the documented
+# 6-assertion host-gated margin PRESERVED UNCHANGED): section 44t — a FOREIGN verdict reached
+# through a symlinked PATH COMPONENT. `--c-verdict AUTO` globs `<root>/.review-stage/issue-*/c.stage`
+# and reads the verdict with `review-stage.sh verdict`; round 19 gave that reader a leaf `[ -L ]`
+# test and nothing above it, so a link at `.review-stage/` supplied this lane with a PEER TREE's
+# stage — record, nonce and clean report together. Measured on the pre-fix reader with everything
+# else intact: `PREMERGE: OK` plus `PREMERGE: C-VERDICT PASS … source: AUTO issue=3751`, i.e. another
+# lane's audit clearing this merge. The peer record is RE-STAMPED to the lane's certified sha on
+# purpose, so the head-sha binding (44f) cannot be what refuses and the refusal is attributable to
+# the read path; the POSITIVE CONTROL reads the same stage in the peer's OWN tree and still
+# certifies. The case exists because the fix lives in `review-stage.sh` and the inheritance was a
+# PREDICTION — this issue is about the difference between a prediction and a measurement. Every
+# added assertion needs only bash, git, coreutils and `ln -s`, and a fixture that cannot be built
+# calls `bad`, so a displaced count can never be a silent green.
+ASSERT_FLOOR=539
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"
