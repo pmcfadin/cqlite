@@ -4300,6 +4300,7 @@ mksccshims() {
   # option parsing at the first assignment and takes `-i` as the COMMAND (rc 127) — a failure that
   # reads as an unmeasurable login session rather than as a broken stub.
   local scc_pre='[ -n "${SCC_SHIM_SUDO_LOG:-}" ] && echo "sudo $*" >> "$SCC_SHIM_SUDO_LOG"
+[ -n "${SCC_SHIM_ENV_LOG:-}" ] && case "$*" in *cqlite-scc-probe*|*"command -v sccache"*|*--show-stats*|*--start-server*|*--stop-server*) { echo "census-ran" >> "$SCC_SHIM_ENV_LOG"; for scc_en in $(compgen -e 2>/dev/null || true); do case "$scc_en" in SCCACHE_*) echo "scc:$scc_en=${!scc_en}" >> "$SCC_SHIM_ENV_LOG" ;; esac; done; echo "marker:${CQLITE_SCRUB_MARKER-<unset>}" >> "$SCC_SHIM_ENV_LOG"; } ;; esac
 scc_login=0
 while [ "${1:-}" = "-n" ]; do shift; done
 if [ "${1:-}" = "-u" ]; then shift 2; fi
@@ -4634,7 +4635,10 @@ else
   #          absence verdict must be EUID-gated, and the bypass must exist and say why the ambient
   #          PATH is not authoritative. Structural, not behavioural — it proves the gate is written,
   #          never that it fires.
-  scc_pre_src=$(sed -n '/^scc_pre_euid=/,/^fi$/p' "$PIN_BS")
+  # $BOOTSTRAP, never $PIN_BS: PIN_BS is this suite's GUARD WRAPPER (it takes the script as its
+  # first argument), so reading it yielded an EMPTY slice and the assertion failed for a reason
+  # that had nothing to do with the property — measured, first run.
+  scc_pre_src=$(sed -n '/^scc_pre_euid=/,/^fi$/p' "$BOOTSTRAP")
   if out_has "$scc_pre_src" -E '^scc_pre_euid="\$\{EUID-\}"$' \
      && out_has "$scc_pre_src" -E "^case \"\\\$scc_pre_euid\" in ''\|\*\[!0-9\]\*\)" \
      && out_has "$scc_pre_src" -E '^  if \[ -n "\$scc_pre_euid" \] && \[ "\$scc_pre_euid" != 0 \]; then$' \
@@ -4666,6 +4670,77 @@ else
   else
     bad "sccache-cap: a binary disagreement was resolved by picking one, or not reported"
     printf '%s\n' "$scc_sl_bin" | head -6
+  fi
+
+  # 12b-f2b. TWO PROBES MUST NOT AGREE BY SHARING OUR CONTAMINATION (roborev job 399, f2). The
+  #          scrub before each session used to NAME three variables, leaving SCCACHE_REDIS /
+  #          SCCACHE_CONF / SCCACHE_WEBDAV_* / any FUTURE SCCACHE_* in the caller's environment. If
+  #          sudoers preserves them BOTH probes inherit the same caller-specific routing, agree
+  #          because they share our contamination, and the section certifies — or STARTS — a server
+  #          no ordinary session will contact: a false VERIFIED, the exact defect 5b2 exists to
+  #          catch, in the code that reports it. Now blanket, derived from `compgen -e`, because a
+  #          future backend variable is unknowable and an enumerated list goes stale silently.
+  #
+  #          MEASURED AT THE SUDO BOUNDARY, not inferred from the verdict: the stub censuses the
+  #          SCCACHE_* it INHERITED — for MEASUREMENT calls only (a probe, a binary resolution, a
+  #          stats read, a start/stop), because those are the calls SCCACHE_* can change. The bare
+  #          `sudo … true` privilege probes and the file writes carry the caller's environment and
+  #          always will: nothing they run reads it. That scope is set BY ARGV in the stub rather
+  #          than left as an absence, and it is the same boundary 12b-f2c asserts over the source —
+  #          source-side every measurement call must carry the scrub, boundary-side no measurement
+  #          call may see caller routing. Two positive controls, because an empty census is otherwise
+  #          indistinguishable from a census that never ran — `census-ran` proves the logger fired,
+  #          and an unrelated CQLITE_SCRUB_MARKER must SURVIVE, proving the scrub is SCCACHE_*-scoped
+  #          rather than an env wipe that would make the probe answer about nothing.
+  scc_envlog="$tmp/scc-sudo-env.log"; : >"$scc_envlog"
+  scc_out_scrub=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G \
+    SCC_STUB_MAX=32212254720 SCC_SHIM_ENV_LOG="$scc_envlog" CQLITE_SCRUB_MARKER=present \
+    SCCACHE_REDIS=redis://poisoned.example/1 SCCACHE_CONF=/caller/poisoned.toml)
+  scc_sl_scrub=$(scc_slice "$scc_out_scrub")
+  if grep -q '^census-ran$' "$scc_envlog" \
+     && grep -q '^marker:present$' "$scc_envlog" \
+     && ! grep -q 'poisoned' "$scc_envlog" \
+     && out_has "$scc_sl_scrub" -E '\[ok\].*sccache-cap: VERIFIED'; then
+    ok "sccache-cap: every caller SCCACHE_* is scrubbed before each session probe (SCCACHE_REDIS/SCCACHE_CONF absent at the sudo boundary), while an unrelated variable survives — so the probes cannot agree by sharing our routing"
+  else
+    bad "sccache-cap: a caller-only SCCACHE_* reached the session probe (or the census never ran) — two probes could agree on OUR routing and certify a server no gate will use"
+    printf '  census: %s\n' "$(grep -c '^' "$scc_envlog" 2>/dev/null || echo 0) line(s)"
+    grep -n 'poisoned\|census-ran\|marker:' "$scc_envlog" | head -4
+    printf '%s\n' "$scc_sl_scrub" | head -4
+  fi
+
+  # 12b-f2c. THE SCRUB IS ASSERTED OVER EVERY SESSION CALL, DERIVED FROM THE SHIPPED SOURCE — not
+  #          over the one call site a review happened to name. 12b-f2b's census caught the first fix
+  #          being INCOMPLETE: the value probe was scrubbed while the BINARY RESOLUTION and the
+  #          shared session runner (server reads and the start — where a caller's SCCACHE_REDIS
+  #          redirects the read, not merely the report) still carried three named unsets. A curated
+  #          assertion would have passed the incomplete fix, which is the same failure one level up
+  #          from the enumerated list itself. So: join continuation lines, take every REAL
+  #          `sudo -n -u "$SCC_SELF_USER"` invocation, and require the blanket scrub on each.
+  #          ONE EXCUSAL, BY NAME AND WITH ITS REASON: the privilege probe runs `true`, so no
+  #          environment can influence it. A floor guards against a refactor greening this vacuously.
+  scc_sess_bad=""; scc_sess_n=0; scc_sess_excused=0
+  while IFS= read -r scc_sess_line; do
+    scc_sess_t=${scc_sess_line#"${scc_sess_line%%[![:space:]]*}"}
+    case "$scc_sess_t" in
+      '#'*) continue ;;
+      *'info "'*|*'warn "'*|*'info '\''*'*) continue ;;
+    esac
+    scc_sess_n=$((scc_sess_n + 1))
+    case "$scc_sess_t" in
+      *'sudo -n -u "$SCC_SELF_USER" true'*) scc_sess_excused=$((scc_sess_excused + 1)); continue ;;
+    esac
+    case "$scc_sess_t" in
+      *'SCC_ENV_SCRUB'*) ;;
+      *) scc_sess_bad="${scc_sess_bad:+$scc_sess_bad
+}  $scc_sess_t" ;;
+    esac
+  done < <(sed -e ':a' -e '/\\$/N; s/\\\n//; ta' "$BOOTSTRAP" | grep -F 'sudo -n -u "$SCC_SELF_USER"')
+  if [ "$scc_sess_n" -ge 4 ] && [ -z "$scc_sess_bad" ]; then
+    ok "sccache-cap: all $scc_sess_n session invocations carry the blanket SCCACHE_* scrub ($scc_sess_excused excused by name: the privilege probe runs 'true')"
+  else
+    bad "sccache-cap: $scc_sess_n session invocation(s) found, and one carries no blanket scrub — the caller's routing reaches a session probe, a read or a start:"
+    printf '%s\n' "${scc_sess_bad:-  (no invocation found at all — the derivation broke, which is not a pass)}"
   fi
 
   # 12b-f3. A CONTEXT WITH NO SCCACHE IS A NON-PARTICIPANT, NOT A VETO (issue #3727 roborev round 7,

@@ -3411,9 +3411,9 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
       # The SESSIONS could not be ASKED at all — distinct from a session that answered "none".
       __asked=0
     else
-      __nl=$(bounded 20 env -u BASH_ENV -u ENV sudo -n -u "$SCC_SELF_USER" \
+      __nl=$(bounded 20 env "${SCC_ENV_SCRUB[@]}" sudo -n -u "$SCC_SELF_USER" \
         bash -c 'command -v sccache 2>/dev/null || true' 2>/dev/null || true)
-      __lo=$(bounded 20 env -u BASH_ENV -u ENV sudo -n -u "$SCC_SELF_USER" -i \
+      __lo=$(bounded 20 env "${SCC_ENV_SCRUB[@]}" sudo -n -u "$SCC_SELF_USER" -i \
         bash -c 'command -v sccache 2>/dev/null || true' 2>/dev/null || true)
       # Anchored on the LAST non-empty line: a LOGIN shell's stdout can carry the profile's own
       # noise ahead of the answer, and taking the first line would report a motd as a binary path.
@@ -3461,7 +3461,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # login shell), which is what a gate launched from such a session gets.
   scc_session_run() {
     local __b="$1"; shift
-    bounded "$__b" env -u BASH_ENV -u ENV -u SCCACHE_DIR -u SCCACHE_SERVER_PORT \
+    bounded "$__b" env "${SCC_ENV_SCRUB[@]}" \
       sudo -n -u "$SCC_SELF_USER" "$@"
   }
   # scc_running_cap: the cap the RUNNING server is enforcing, in bytes — read INSIDE the measured
@@ -3968,7 +3968,10 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     warn "sccache-cap: UNMEASURED ('id -un' reported no identity, so there is no user to open a probe session as — cap visibility is UNKNOWN, not ok)"
   elif [ "$SCC_PRIV_STATE" = no-sudo-binary ]; then
     warn "sccache-cap: UNMEASURED (no 'sudo' on this box, so no fresh PAM session can be created — cap visibility is UNKNOWN, not ok)"
-    info "check by hand:  env -u SCCACHE_CACHE_SIZE -u BASH_ENV -u ENV sudo -u \"\$(id -un)\" bash -c 'printf \"[%s]\\n\" \"\${SCCACHE_CACHE_SIZE-UNSET}\"'"
+    # The hint mirrors what the probe DOES, and the probe scrubs every exported SCCACHE_* (not the
+    # three named here), so the parenthetical is load-bearing: reproduced with a narrower scrub, an
+    # operator can be shown a value their own shell contributed — the defect this section reports.
+    info "check by hand:  env -u SCCACHE_CACHE_SIZE -u BASH_ENV -u ENV sudo -u \"\$(id -un)\" bash -c 'printf \"[%s]\\n\" \"\${SCCACHE_CACHE_SIZE-UNSET}\"'   (unset any OTHER SCCACHE_* you have exported too — this section scrubs ALL of them, because a caller-only routing variable makes both sessions agree with the CALLER)"
   elif [ "$SCC_PRIV_STATE" = sudo-runas-denied ]; then
     warn "sccache-cap: UNMEASURED (sudo will not open a session as '$SCC_SELF_USER' without a password, so no probe session could be created — cap visibility is UNKNOWN, not ok)"
     info "this needs only a session as YOURSELF, not root — authenticate once and re-run:  sudo -v && bash scripts/bootstrap-agent-machine.sh"
@@ -4010,8 +4013,19 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
       # then ran LOCALLY, so both "sessions" reported bootstrap's OWN environment, agreed with the
       # invoker by construction, and the section reported FAILED about a box that was pinned. That is
       # this issue's own defect (certify the wrong context) introduced by a comment.
+      # THE SCRUB IS BLANKET, NOT A LIST (roborev job 399, f2). It used to name three variables,
+      # which left SCCACHE_REDIS / SCCACHE_CONF / SCCACHE_WEBDAV_* / SCCACHE_GHA_* / any FUTURE
+      # SCCACHE_* in the caller's environment. If sudoers `env_keep`s them, BOTH probes inherit the
+      # SAME caller-specific routing, AGREE BECAUSE THEY SHARE OUR CONTAMINATION, and the section
+      # certifies — or starts — a server no ordinary session will ever contact: a false VERIFIED,
+      # which is the exact defect this section exists to catch, in the code that reports it.
+      # SCC_ENV_SCRUB is the array the isolated oracle already uses (BASH_ENV/ENV plus every
+      # exported SCCACHE_*, derived at run time from `compgen -e`), and a derived set is right here
+      # for the reason its own comment gives: a future backend variable is unknowable, so an
+      # enumerated list goes stale SILENTLY. `env` applies every -u before it execs sudo, so what
+      # the target session reports is what PAM and its profile put there.
       __out=$(bounded "$SCC_PROBE_BOUND" \
-        env -u SCCACHE_CACHE_SIZE -u SCCACHE_DIR -u SCCACHE_SERVER_PORT -u BASH_ENV -u ENV \
+        env "${SCC_ENV_SCRUB[@]}" \
         sudo -n -u "$SCC_SELF_USER" ${__login[@]+"${__login[@]}"} \
         bash -c 'printf "cqlite-scc-probe-set=%s\ncqlite-scc-probe=%s\ncqlite-scc-routing-set=%s%s\ncqlite-scc-dir=%s\ncqlite-scc-port=%s\n" "${SCCACHE_CACHE_SIZE+1}" "${SCCACHE_CACHE_SIZE-}" "${SCCACHE_DIR+d}" "${SCCACHE_SERVER_PORT+p}" "${SCCACHE_DIR-}" "${SCCACHE_SERVER_PORT-}"; for n in $(compgen -e 2>/dev/null || true); do case "$n" in SCCACHE_*) printf "cqlite-scc-env=%s=%q\n" "$n" "${!n}" ;; esac; done | LC_ALL=C sort' 2>/dev/null) || __rc=$?
       scc_ps_rc=$__rc
