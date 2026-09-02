@@ -6564,7 +6564,7 @@ _fm_summary_line() {
   # feature matrix does -- no mode can then emit a component line the others do not.
   # `%-18s` and the `(time)` shape are UNCHANGED (#3453 kept them deliberately and
   # existing prefix/stage assertions match on them); the census is APPENDED.
-  printf '%-18s %s (%s)  %s  %s' "$1:" "$2" "$3" "$(_fm_annotate "$1")" "$(_census_annotate "$1")"
+  printf '%-18s %s (%s)  %s  %s' "$1:" "$2" "$3" "$(_fm_annotate "$1")" "$(_census_annotate "$1" "$2")"
 }
 
 # _fm_note_if_no_cargo_observed <component> <status>: a component that ENDED without a
@@ -7187,45 +7187,98 @@ _census_measure_kind() {
   _census_write "$comp" "$line"; printf '%s' "$line"
 }
 
+# _census_classify <component> <status> <recorded-line> <may-measure:0|1>
+#   -> the truthful census state for (component, status), or the token `MEASURE <kind>`
+#      meaning "answering this requires reading the component's log", which only the
+#      measuring path is allowed to do.
+#
+# THE ONE CLASSIFIER FOR BOTH PATHS (roborev job 379). `_census_measure` (verdict time) and
+# `_census_record` (render time) answer the SAME question — what is the truthful state for
+# this (component, status)? — and for five rounds they answered it DIFFERENTLY, because
+# they were two implementations of it. The batch-2 LOW fix ("a component that did not PASS
+# has no PASS to affirm, and that is true whatever its kind") landed in the measurer and
+# could not land in the fallback, because the fallback WAS NOT GIVEN THE STATUS: it
+# dispatched on kind alone and so reported `GAP` for a gap-declared component that CRASHED
+# before record_result. That is the same structural root as job 371 one function over —
+# *a function required to reason about status that is not handed the status* — and it is
+# why this is a convergence rather than a sixth label patch.
+#
+# THE ASYMMETRY THAT SURVIVES, and it is the only one: the measurer may read the component
+# log and write a sidecar; the renderer runs in the PARENT after the component's lane is
+# gone and must do neither. So the classifier returns `MEASURE <kind>` for the one cell
+# where the answer genuinely needs the log — PASS x a log-measured kind — and the two
+# callers differ ONLY there. `scripts/tests/test_agent_gate_census.sh` case S drives both
+# paths over the same (status x kind) matrix and requires identical output everywhere the
+# classifier does not say MEASURE, because a second implementation's agreement is only
+# knowable by testing it.
+#
+# ORDER IS THE FIX, and it is the same order in both paths now:
+#   (1) the DECLARATION — an undeclared name is a fact about the TABLE, fatal at any status;
+#   (2) the STATUS — a component that did not PASS has no PASS to affirm, whatever its kind;
+#   (3) only then the KIND.
+_census_classify() {
+  local comp="$1" st="$2" rec="$3" may="$4" kind
+  if ! kind=$(_census_kind "$comp"); then
+    printf "UNDECLARED no census kind is declared for '%s' in _census_kind (#3625)" "$comp"
+    return 0
+  fi
+  # VACUOUS IS NOT "DID NOT PASS" — it is the census's OWN VERDICT, and treating it as an
+  # ordinary non-PASS was a regression this section's own convergence guard caught before it
+  # shipped: the row read `{no census: component ended VACUOUS}` instead of
+  # `{verified NOTHING: …}`, i.e. the state that CAUSED the status was discarded from the
+  # line that exists to explain it. The record IS the explanation, so it is returned; with
+  # no record we cannot explain the status and say so, rather than inventing a reason.
+  # No `MEASURE` here on either path: at verdict time the status handed in is the RAW one
+  # (record_result passes the pre-census value), so VACUOUS reaches only the renderer, and
+  # letting the two paths answer this cell differently is exactly what job 379 removed.
+  if [ "$st" = VACUOUS ]; then
+    if [ -n "$rec" ]; then printf '%s' "$rec"; return 0; fi
+    printf 'NOT-MEASURED the component is VACUOUS but no census record survives to say what it measured'
+    return 0
+  fi
+  if [ "$st" != PASS ]; then
+    printf 'NOT-APPLICABLE component ended %s, so there is no PASS to affirm' "$st"
+    return 0
+  fi
+  case "$kind" in
+    gap:*)
+      printf 'GAP %s' "${kind#gap:}"
+      return 0 ;;
+    self:*|runtime:*)
+      # These components record their OWN census before their verdict is finalized, so the
+      # sidecar IS the answer on both paths. Reaching here with none is a RECORDING GAP,
+      # named as such — never a licence to claim a count.
+      if [ -n "$rec" ]; then printf '%s' "$rec"; return 0; fi
+      case "$kind" in
+        self:*) printf "NOT-MEASURED '%s' records its own subject count and recorded none (unit: %s)" "$comp" "${kind#self:}" ;;
+        *)      printf "NOT-MEASURED '%s' chooses its census at run time and recorded none" "$comp" ;;
+      esac
+      return 0 ;;
+  esac
+  # A log-measured kind on a PASS: THE one cell the two paths may answer differently.
+  if [ "$may" = 1 ]; then
+    printf 'MEASURE %s' "$kind"
+    return 0
+  fi
+  if [ -n "$rec" ]; then printf '%s' "$rec"; return 0; fi
+  printf 'NOT-MEASURED no census record was written for this component'
+}
+
 # _census_measure <component> <status>: resolve the DECLARED kind and take the census,
 # RETURNING the record line on stdout (the caller needs the value even if the sidecar
 # write fails) as well as writing it to the sidecar for the parent's renderer.
 _census_measure() {
-  local comp="$1" st="$2" kind line
-  # The DECLARATION is resolved first, and its absence is fatal REGARDLESS OF STATUS: an
-  # undeclared name is a fact about the table, not about this run, and letting a SKIP hide
-  # it would put the completeness guarantee at the mercy of which components happened to
-  # run.
-  if ! kind=$(_census_kind "$comp"); then
-    line="UNDECLARED no census kind is declared for '$comp' in _census_kind (#3625)"
-    _census_write "$comp" "$line"; printf '%s' "$line"; return 0
-  fi
-  # STATUS SECOND, and ABOVE the kind dispatch (#3625 census audit, LOW 1). A component
-  # that did not PASS has no PASS to affirm, and that is true whatever its kind. This check
-  # used to sit BELOW the gap:/self: early returns, so a FAILing `fmt` rendered its gap
-  # reason and was counted under DECLARED-GAP rather than not-applicable. No verdict
-  # changed — but the aggregate line miscounted, and a miscounted census line is exactly
-  # what stops the next person looking.
-  if [ "$st" != PASS ]; then
-    line="NOT-APPLICABLE component ended $st, so there is no PASS to affirm"
-    _census_write "$comp" "$line"; printf '%s' "$line"; return 0
-  fi
-  case "$kind" in
-    gap:*)
-      line="GAP ${kind#gap:}"
-      _census_write "$comp" "$line"; printf '%s' "$line"; return 0 ;;
-    self:*|runtime:*)
-      # The component records its own census (a count, via _census_declare; or a whole
-      # record, via _census_scoped_record). Reaching here with nothing recorded is a
-      # RECORDING GAP, named as such — never a licence to claim a count.
-      if line=$(_census_read "$comp"); then printf '%s' "$line"; return 0; fi
-      case "$kind" in
-        self:*) line="NOT-MEASURED '$comp' records its own subject count and recorded none (unit: ${kind#self:})" ;;
-        *)      line="NOT-MEASURED '$comp' chooses its census at run time and recorded none" ;;
-      esac
-      _census_write "$comp" "$line"; printf '%s' "$line"; return 0 ;;
+  local comp="$1" st="$2" rec line
+  # The classification is DELEGATED (roborev job 379) so this path and the render-time
+  # fallback cannot drift: the declaration/status/kind order, and every state text, live in
+  # _census_classify. What is local to THIS path is the permission to read the component
+  # log and the duty to persist the answer.
+  rec=$(_census_read "$comp") || rec=""
+  line=$(_census_classify "$comp" "$st" "$rec" 1)
+  case "$line" in
+    MEASURE\ *) _census_measure_kind "$comp" "${line#MEASURE }"; return 0 ;;
   esac
-  _census_measure_kind "$comp" "$kind"
+  _census_write "$comp" "$line"; printf '%s' "$line"
 }
 
 
@@ -7313,28 +7366,30 @@ _census_finalize() {
   _census_status_for "$2" "$line"
 }
 
-# _census_record <component>: the EFFECTIVE census line at render time -- the sidecar
-# when one exists, else derived from the declaration so a component that never reached
-# a measurer still renders a truthful state rather than a blank.
+# _census_record <component> <status>: the EFFECTIVE census line at render time -- the
+# sidecar when one exists, else derived so a component that never reached a measurer still
+# renders a truthful state rather than a blank.
+#
+# IT TAKES THE STATUS NOW (roborev job 379), and that is the whole fix. Without it this
+# function could not express the rule its sibling had already been given — "a component
+# that did not PASS has no PASS to affirm, whatever its kind" — so a gap-declared component
+# that CRASHED before record_result rendered its GAP reason and was counted as
+# DECLARED-GAP. Same structural root as job 371 one function over: a function required to
+# reason about status, not handed the status. Both paths now answer through
+# _census_classify; this one may NOT measure (it runs in the parent, after the component's
+# lane is gone), which is the single declared asymmetry between them.
 _census_record() {
-  local line kind
-  if line=$(_census_read "$1"); then printf '%s' "$line"; return 0; fi
-  if kind=$(_census_kind "$1"); then
-    case "$kind" in
-      gap:*) printf 'GAP %s' "${kind#gap:}" ;;
-      *)     printf 'NOT-MEASURED no census record was written for this component' ;;
-    esac
-    return 0
-  fi
-  printf "UNDECLARED no census kind is declared for '%s' in _census_kind (#3625)" "$1"
+  local rec
+  rec=$(_census_read "$1") || rec=""
+  _census_classify "$1" "${2:-}" "$rec" 0
 }
 
-# _census_annotate <component>: the `{...}` suffix appended to a SUMMARY component
+# _census_annotate <component> <status>: the `{...}` suffix appended to a SUMMARY component
 # line. NEVER EMPTY -- that is the contract, for the same reason _fm_annotate has it: a
 # blank annotation is the vacuous shape this issue exists to remove.
-_census_annotate() {
+_census_annotate() { # <component> <status>
   local line state rest
-  line=$(_census_record "$1")
+  line=$(_census_record "$1" "${2:-}")
   state=${line%% *}
   rest=${line#* }
   [ "$rest" = "$line" ] && rest="(no detail recorded)"
@@ -7398,7 +7453,7 @@ census_summary_line() { # <name> <status> [<name> <status>]...
     n=$((n + 1))
     # STATUS-DERIVED, never inferred from the census state.
     [ "$st" = VACUOUS ] && vac=$((vac + 1))
-    state=$(_census_record "$c")
+    state=$(_census_record "$c" "$st")
     state=${state%% *}
     case "$state" in
       COUNT)          aff=$((aff + 1)) ;;

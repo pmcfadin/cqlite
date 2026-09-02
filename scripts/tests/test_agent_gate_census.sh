@@ -62,7 +62,7 @@ for fn in _ansi_stripped_log _census_sidecar _census_kind _census_write _census_
           _census_declare _census_libtest_tally _census_compile_tally \
           _census_driver_tally _census_measure_kind _census_measure \
           _census_scoped_record _python_tier_ran \
-          _census_status_for _census_finalize _census_record _census_annotate \
+          _census_status_for _census_finalize _census_classify _census_record _census_annotate \
           census_summary_line _status_is_nonfailing; do
   src=$(sed -n "/^$fn() {/,/^}$/p" "$GATE")
   if [ -z "$src" ]; then
@@ -172,26 +172,30 @@ fi
 LOG_DIR="$tmp/emptylogs"; mkdir -p "$LOG_DIR"
 blank=()
 notbrace=()
+# EVERY STATUS, not just PASS (#3625/job 379): the annotation is a function of (component,
+# status) now, so a status whose arm forgot to render would be invisible to a PASS-only loop.
 for c in ${comps_arr[@]+"${comps_arr[@]}"} $dyn_names a-component-that-does-not-exist; do
-  a=$(_census_annotate "$c")
-  [ -n "$a" ] || blank+=("$c")
-  case "$a" in '{'*'}') ;; *) notbrace+=("$c=$a") ;; esac
+  for b_st in PASS FAIL SKIP VACUOUS; do
+    a=$(_census_annotate "$c" "$b_st")
+    [ -n "$a" ] || blank+=("$c/$b_st")
+    case "$a" in '{'*'}') ;; *) notbrace+=("$c/$b_st=$a") ;; esac
+  done
 done
 if [ "${#blank[@]}" -eq 0 ] && [ "${#notbrace[@]}" -eq 0 ]; then
-  ok "B1: no name renders a BLANK or malformed census annotation (including an undeclared one)"
+  ok "B1: no (name x status) pair renders a BLANK or malformed census annotation — every component at PASS/FAIL/SKIP/VACUOUS, an undeclared name included"
 else
   bad "B1: blank: ${blank[*]:-(none)}; malformed: ${notbrace[*]:-(none)}"
 fi
-case "$(_census_annotate a-component-that-does-not-exist)" in
+case "$(_census_annotate a-component-that-does-not-exist PASS)" in
   *'UNDECLARED'*'a-component-that-does-not-exist'*)
     ok "B2: an undeclared component's annotation NAMES the component, rather than reading as an ordinary gap" ;;
-  *) bad "B2: got '$(_census_annotate a-component-that-does-not-exist)'" ;;
+  *) bad "B2: got '$(_census_annotate a-component-that-does-not-exist PASS)'" ;;
 esac
 # A declared gap must PRINT its reason on every run — a gap nobody sees is a silence.
-case "$(_census_annotate fmt)" in
+case "$(_census_annotate fmt PASS)" in
   *'no census'*'fmt --all --check'*)
     ok "B3: a DECLARED GAP renders its reason, so the reduction in coverage is visible in the block" ;;
-  *) bad "B3: the fmt gap does not print its declared reason: $(_census_annotate fmt)" ;;
+  *) bad "B3: the fmt gap does not print its declared reason: $(_census_annotate fmt PASS)" ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -653,11 +657,15 @@ fi
 # (G) THE AGGREGATE `census:` LINE, and the VACUOUS token reaching a MODE'S aggregation.
 # ---------------------------------------------------------------------------
 LOG_DIR="$tmp/agglogs"; mkdir -p "$LOG_DIR"
-_census_write alpha 'COUNT 9 tests passed'
-_census_write beta  'ZERO tests'
+# REAL declared components (#3625/job 379): the classifier resolves the DECLARATION before
+# anything else, so a made-up name is correctly UNDECLARED and can no longer stand in for a
+# component that has a census. tombstones-scan = a count; feature-iso-parquet = a measured
+# zero (hence the VACUOUS status); fmt = a declared gap; format-compat = no record at all.
+_census_write tombstones-scan     'COUNT 9 tests passed'
+_census_write feature-iso-parquet 'ZERO test binaries'
 # name/STATUS pairs since #3625/job 371 — see section (Q) for why every status-naming
 # qualifier has to come from the status rather than from the census state.
-agg=$(census_summary_line alpha PASS beta VACUOUS fmt PASS format-compat PASS)
+agg=$(census_summary_line tombstones-scan PASS feature-iso-parquet VACUOUS fmt PASS format-compat PASS)
 case "$agg" in
   'census: 1/4 components AFFIRMED a count; 1 DECLARED-GAP (RECOGNISED); 1 NOT-MEASURED (RECOGNISED); 1 measured-ZERO (RECOGNISED);'*'1 row(s) carry a VACUOUS status.'*'NON-EXHAUSTIVE'*)
     ok "G1: the aggregate line counts each class separately, reports every non-affirmed class as 'N RECOGNISED', and reports the VACUOUS count from the STATUS beside the measured-ZERO state" ;;
@@ -1182,24 +1190,34 @@ fi
 LOG_DIR="$tmp/sweeplogs"; mkdir -p "$LOG_DIR"
 q_bad=()
 q_n=0
-# <status>|<census record>|<expected aggregate field the row must land in>
+# <component>|<status>|<sidecar record, or '-' for none>|<expected aggregate field>
+#
+# THE SUBJECT IS CHOSEN PER CELL (#3625/job 379): the classifier resolves the DECLARATION and
+# the STATUS before it looks at the sidecar, so a cell must use a component whose KIND makes
+# its state REACHABLE — one made-up subject with a planted record no longer stands in for
+# every kind, and pretending otherwise would test a state machine that does not exist.
 for spec in \
-  'PASS|COUNT 12 tests passed|AFFIRMED' \
-  'PASS|GAP nothing derivable here|DECLARED-GAP' \
-  'PASS|NOT-MEASURED could not read the log|NOT-MEASURED' \
-  'PASS|NOT-APPLICABLE the diff routed to no rust package and no python tier|no-subject' \
-  'VACUOUS|ZERO tests|measured-ZERO' \
-  'FAIL|NOT-APPLICABLE component ended FAIL, so there is no PASS to affirm|not-applicable' \
-  'SKIP|NOT-APPLICABLE component ended SKIP, so there is no PASS to affirm|not-applicable' \
-  'FAIL|UNDECLARED no census kind is declared|UNDECLARED' \
-  'SKIP|UNDECLARED no census kind is declared|UNDECLARED' \
-  'FAIL|WHATEVER an unplanned token|unrecognised' \
-  'VACUOUS|NOT-MEASURED no census record was written|NOT-MEASURED' \
+  'tombstones-scan|PASS|COUNT 12 tests passed|AFFIRMED' \
+  'fmt|PASS|-|DECLARED-GAP' \
+  'tombstones-scan|PASS|-|NOT-MEASURED' \
+  'scoped-tests|PASS|NOT-APPLICABLE the diff routed to no rust package and no python tier|no-subject' \
+  'feature-iso-parquet|VACUOUS|ZERO test binaries|measured-ZERO' \
+  'tombstones-scan|VACUOUS|-|NOT-MEASURED' \
+  'fmt|FAIL|-|not-applicable' \
+  'fmt|SKIP|-|not-applicable' \
+  'tombstones-scan|FAIL|COUNT 12 tests passed|not-applicable' \
+  'a-brand-new-component|FAIL|-|UNDECLARED' \
+  'a-brand-new-component|SKIP|-|UNDECLARED' \
+  'a-brand-new-component|PASS|-|UNDECLARED' \
+  'tombstones-scan|PASS|WHATEVER an unplanned token|unrecognised' \
   ; do
   q_n=$((q_n + 1))
-  q_st=${spec%%|*}; q_rest=${spec#*|}; q_rec=${q_rest%|*}; q_want=${q_rest##*|}
-  _census_write sweep-subject "$q_rec"
-  q_line=$(census_summary_line sweep-subject "$q_st")
+  q_comp=${spec%%|*}; q_rest=${spec#*|}
+  q_st=${q_rest%%|*}; q_rest=${q_rest#*|}
+  q_rec=${q_rest%|*}; q_want=${q_rest##*|}
+  rm -f "$(_census_sidecar "$q_comp")"
+  [ "$q_rec" = '-' ] || _census_write "$q_comp" "$q_rec"
+  q_line=$(census_summary_line "$q_comp" "$q_st")
   # The expected bucket must hold exactly 1, and the OTHER status-derived buckets must
   # hold 0 — a label that fires for two different pairs is the defect, not the count.
   case "$q_want" in
@@ -1213,22 +1231,22 @@ for spec in \
     unrecognised)   q_got=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) unrecognised;.*/\1/p') ;;
     *)              q_got="(no extractor for $q_want)" ;;
   esac
-  [ "$q_got" = 1 ] || q_bad+=("[$q_st / ${q_rec%% *}] expected 1 in '$q_want', got '$q_got'")
+  [ "$q_got" = 1 ] || q_bad+=("[$q_comp $q_st / ${q_rec%% *}] expected 1 in '$q_want', got '$q_got'")
   # THE STATUS-DERIVED FIGURES must track the STATUS, never the state.
   q_vac=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) row(s) carry a VACUOUS status.*/\1/p')
   if [ "$q_st" = VACUOUS ]; then
-    [ "$q_vac" = 1 ] || q_bad+=("[$q_st / ${q_rec%% *}] a VACUOUS row was counted as '$q_vac' VACUOUS")
+    [ "$q_vac" = 1 ] || q_bad+=("[$q_comp $q_st / ${q_rec%% *}] a VACUOUS row was counted as '$q_vac' VACUOUS")
   else
-    [ "$q_vac" = 0 ] || q_bad+=("[$q_st / ${q_rec%% *}] a non-VACUOUS row was counted as '$q_vac' VACUOUS")
+    [ "$q_vac" = 0 ] || q_bad+=("[$q_comp $q_st / ${q_rec%% *}] a non-VACUOUS row was counted as '$q_vac' VACUOUS")
   fi
   # …and no rendered word may assert the WRONG status. The two directions that bit:
   q_np=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) not-applicable (component did not PASS).*/\1/p')
   q_ns=$(printf '%s' "$q_line" | sed -n 's/.*; \([0-9]*\) no-subject (PASSed.*/\1/p')
   if [ "$q_st" = PASS ] && [ "$q_np" != 0 ]; then
-    q_bad+=("[$q_st / ${q_rec%% *}] a PASSing row was counted as 'did not PASS'")
+    q_bad+=("[$q_comp $q_st / ${q_rec%% *}] a PASSing row was counted as 'did not PASS'")
   fi
   if [ "$q_st" != PASS ] && [ "$q_ns" != 0 ]; then
-    q_bad+=("[$q_st / ${q_rec%% *}] a non-PASSing row was counted as 'PASSed'")
+    q_bad+=("[$q_comp $q_st / ${q_rec%% *}] a non-PASSing row was counted as 'PASSed'")
   fi
   # EVERY ROW LANDS IN EXACTLY ONE STATE BUCKET: the seven must sum to N, or a row is
   # being double-counted or silently dropped. Each field is extracted on its OWN — a single
@@ -1256,9 +1274,9 @@ for spec in \
   _qf 'UNDECLARED'     's/.*; \([0-9][0-9]*\) UNDECLARED;.*/\1/p'
   _qf 'unrecognised'   's/.*; \([0-9][0-9]*\) unrecognised;.*/\1/p'
   if [ -n "$q_missing" ]; then
-    q_bad+=("[$q_st / ${q_rec%% *}] these aggregate fields could not be read, so the bucket sum measured nothing:$q_missing")
+    q_bad+=("[$q_comp $q_st / ${q_rec%% *}] these aggregate fields could not be read, so the bucket sum measured nothing:$q_missing")
   elif [ "$q_tot" != 1 ]; then
-    q_bad+=("[$q_st / ${q_rec%% *}] the state buckets sum to $q_tot, not 1 — a row is double-counted or dropped")
+    q_bad+=("[$q_comp $q_st / ${q_rec%% *}] the state buckets sum to $q_tot, not 1 — a row is double-counted or dropped")
   fi
   # THE PER-ROW SUFFIX MUST NOT ASSERT A STATUS THE ROW DOES NOT HAVE. A bare scan for
   # status WORDS is the wrong instrument and was tried: `{no census: component ended FAIL,
@@ -1266,17 +1284,17 @@ for spec in \
   # correct prose is the guard agents learn to waive. What IS checkable is the one place
   # the suffix makes a status CLAIM — `component ended <X>` — which must name the row's own
   # status, because it is derived from it.
-  q_ann=$(_census_annotate sweep-subject)
+  q_ann=$(_census_annotate "$q_comp" "$q_st")
   case "$q_ann" in
     *'component ended '*)
       q_claim=$(printf '%s' "$q_ann" | sed -n 's/.*component ended \([A-Z][A-Z-]*\).*/\1/p')
-      [ "$q_claim" = "$q_st" ] || q_bad+=("[$q_st / ${q_rec%% *}] the row suffix CLAIMS 'component ended $q_claim' on a $q_st row") ;;
+      [ "$q_claim" = "$q_st" ] || q_bad+=("[$q_comp $q_st / ${q_rec%% *}] the row suffix CLAIMS 'component ended $q_claim' on a $q_st row") ;;
   esac
 done
-if [ "$q_n" -ne 11 ]; then
-  bad "Q1: only $q_n of the 11 (status x census-state) pairs were exercised — the sweep table is not iterating, so a green here would certify nothing"
+if [ "$q_n" -ne 13 ]; then
+  bad "Q1: only $q_n of the 13 (component x status x census-state) cells were exercised — the sweep table is not iterating, so a green here would certify nothing"
 elif [ "${#q_bad[@]}" -eq 0 ]; then
-  ok "Q1 (the sweep): all $q_n (status x census-state) pairs land in exactly ONE state bucket, the buckets sum to N, every status-naming qualifier tracks the OBSERVED status, and no per-row suffix names a foreign status"
+  ok "Q1 (the sweep): all $q_n (component x status x census-state) cells — including the NO-SIDECAR fallback for a gap:, a log-measured and an undeclared kind (#3625/job 379) — land in exactly ONE state bucket, the buckets sum to N, every status-naming qualifier tracks the OBSERVED status, and no per-row suffix names a foreign status"
 else
   bad "Q1: ${q_bad[*]}"
 fi
@@ -1376,6 +1394,112 @@ if [ "${#r_missing[@]}" -eq 0 ]; then
 else
   bad "R3: still blind to VACUOUS rows: ${r_missing[*]}"
 fi
+# ---------------------------------------------------------------------------
+# (S) THE TWO PATHS CONVERGE, AND THEIR AGREEMENT IS TESTED — roborev job 379.
+#
+# THE DEFECT: `_census_measure` (verdict time) and `_census_record` (render time) answer the
+# SAME question — the truthful census state for (component, status) — and answered it
+# DIFFERENTLY for five rounds, because they were two implementations of it. The batch-2 LOW
+# fix ("a component that did not PASS has no PASS to affirm, whatever its kind") landed in
+# the measurer and COULD NOT land in the fallback, because the fallback was not given the
+# status: it dispatched on kind alone, so a gap-declared component that CRASHED before
+# record_result rendered its GAP reason and was counted as DECLARED-GAP.
+#
+# Same structural root as job 371 one function over — *a function required to reason about
+# status that is not handed the status* — which is why the fix is a CONVERGENCE (both paths
+# now call `_census_classify`) rather than a sixth label patch.
+#
+# THE ONE SURVIVING ASYMMETRY, declared rather than assumed: the measurer may read the
+# component log and write a sidecar; the renderer runs in the PARENT after the component's
+# lane is gone and must do neither. So the classifier returns `MEASURE <kind>` for the ONE
+# cell that genuinely needs the log — PASS x a log-measured kind — and the paths may differ
+# only there. Everything else must be byte-identical, and this section drives BOTH over the
+# same matrix to prove it, because a second implementation's agreement is only knowable by
+# testing it.
+# ---------------------------------------------------------------------------
+LOG_DIR="$tmp/converge"; mkdir -p "$LOG_DIR"
+s_bad=()
+s_cells=0
+s_measure_cells=0
+# One representative component per declared kind, DERIVED so a new kind cannot skip the
+# matrix: every kind _census_kind can return must have a subject here.
+s_subjects='fmt:gap tombstones-scan:libtest feature-iso-parquet:compile integration-tests:both python-bindings:indirect node-tests:self scoped-tests:runtime a-brand-new-component:undeclared'
+for s_pair in $s_subjects; do
+  s_comp=${s_pair%%:*}; s_kindname=${s_pair##*:}
+  for s_st in PASS FAIL SKIP VACUOUS; do
+    for s_side in absent present; do
+      s_cells=$((s_cells + 1))
+      rm -f "$(_census_sidecar "$s_comp")"
+      [ "$s_side" = present ] && _census_write "$s_comp" "COUNT 7 tests passed (a pre-existing sidecar)"
+      # The RENDER path (may not measure) and the CLASSIFIER the measure path uses, over the
+      # identical inputs. Comparing the classifier rather than _census_measure itself keeps
+      # the measure path's log read — which the renderer structurally cannot do — out of the
+      # comparison, which is exactly the declared asymmetry.
+      s_rec=$(_census_read "$s_comp") || s_rec=""
+      s_measure=$(_census_classify "$s_comp" "$s_st" "$s_rec" 1)
+      s_render=$(_census_record "$s_comp" "$s_st")
+      case "$s_measure" in
+        MEASURE\ *)
+          s_measure_cells=$((s_measure_cells + 1))
+          # The ONLY cell allowed to differ, and it must be the DECLARED one.
+          if [ "$s_st" != PASS ]; then
+            s_bad+=("[$s_comp/$s_kindname $s_st $s_side] the measure path wants the LOG on a non-PASS row — the status check is not above the kind dispatch")
+          fi
+          case "$s_kindname" in
+            libtest|compile|both|indirect) ;;
+            *) s_bad+=("[$s_comp/$s_kindname $s_st $s_side] a NON-log-measured kind asked to read the log") ;;
+          esac ;;
+        *)
+          [ "$s_measure" = "$s_render" ] \
+            || s_bad+=("[$s_comp/$s_kindname $s_st $s_side] DIVERGENCE — measure='$s_measure' render='$s_render'") ;;
+      esac
+    done
+  done
+done
+rm -f "$(_census_sidecar fmt)" "$(_census_sidecar tombstones-scan)" "$(_census_sidecar python-bindings)"
+if [ "$s_cells" -ne 64 ]; then
+  bad "S1: only $s_cells of the 64 (kind x status x sidecar) cells were exercised — the matrix is not iterating, so a green here would certify nothing"
+elif [ "${#s_bad[@]}" -eq 0 ]; then
+  ok "S1 (job 379, the convergence): across all $s_cells (kind x status x sidecar) cells the verdict-time and render-time paths produce IDENTICAL state, except the $s_measure_cells cells that are the declared asymmetry (PASS x a log-measured kind, where only the measurer may read the log)"
+else
+  bad "S1: ${s_bad[*]}"
+fi
+# THE CITED CELL, asserted by name on both paths — a gap-declared component that CRASHED
+# before record_result, so there is no sidecar and the status is a synthetic FAIL.
+rm -f "$(_census_sidecar fmt)"
+s_crash=$(_census_record fmt FAIL)
+case "$s_crash" in
+  'NOT-APPLICABLE component ended FAIL'*)
+    ok "S2 (the cited finding): a gap-declared component that crashed before record_result renders NOT-APPLICABLE, not its GAP reason — the aggregate no longer counts a crashed component as DECLARED-GAP" ;;
+  *) bad "S2: got '$s_crash'" ;;
+esac
+case "$(census_summary_line fmt FAIL)" in
+  *'0 DECLARED-GAP (RECOGNISED)'*'1 not-applicable (component did not PASS)'*)
+    ok "S2b: …and the aggregate counts it under not-applicable, with DECLARED-GAP at zero" ;;
+  *) bad "S2b: got '$(census_summary_line fmt FAIL)'" ;;
+esac
+case "$(_census_record fmt PASS)" in
+  'GAP cargo fmt'*) ok "S3 (control): the same component on a PASS still renders its declared GAP — S2 is the status check, not the gap arm being lost" ;;
+  *) bad "S3: got '$(_census_record fmt PASS)'" ;;
+esac
+# STRUCTURAL: neither path may regrow its own copy of the classification. A second
+# implementation is what these five rounds have been paying for.
+s_struct=()
+grep -q '_census_classify ' <<<"$(sed -n '/^_census_measure() {/,/^}$/p' "$GATE")" \
+  || s_struct+=("_census_measure-does-not-delegate-to-_census_classify")
+grep -q '_census_classify ' <<<"$(sed -n '/^_census_record() {/,/^}$/p' "$GATE")" \
+  || s_struct+=("_census_record-does-not-delegate-to-_census_classify")
+# …and the renderer must never be handed permission to measure.
+grep -q '_census_classify "$1" "${2:-}" "$rec" 0' <<<"$(sed -n '/^_census_record() {/,/^}$/p' "$GATE")" \
+  || s_struct+=("_census_record-does-not-pass-may-measure=0")
+# The status has to REACH both: the ONE renderer must forward it to the annotation.
+grep -q '_census_annotate "$1" "$2"' <<<"$(sed -n '/^_fm_summary_line() {/,/^}$/p' "$GATE")" \
+  || s_struct+=("_fm_summary_line-does-not-forward-the-status-to-the-census-annotation")
+if [ "${#s_struct[@]}" -eq 0 ]; then
+  ok "S4: both paths delegate to the ONE classifier, the renderer is denied permission to measure, and the status reaches the per-row annotation"
+else
+  bad "S4: ${s_struct[*]}"
+fi
 echo
 echo "component census guard: $PASS passed, $FAIL failed"
 # A COUNT FLOOR beside the abort trap (the idiom of test_agent_gate_summary.sh and
@@ -1383,7 +1507,7 @@ echo "component census guard: $PASS passed, $FAIL failed"
 # extraction that broke, a subshell dying quietly — shrinks the subject set WITHOUT
 # aborting, and "failed: 0" over a shrunken set is the vacuous pass this whole file is
 # about. Set just below the full-host figure so it reds on a structural loss.
-CENSUS_CASE_FLOOR=75
+CENSUS_CASE_FLOOR=84
 CENSUS_REACHED_END=1
 if [ $((PASS + FAIL)) -lt "$CENSUS_CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): sections are being skipped or dying silently, and a "0 failed" over a shrunken subject set certifies nothing.\n' \
