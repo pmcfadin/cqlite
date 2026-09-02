@@ -78,9 +78,8 @@ use canonical_jsonl::{load_golden_document, CanonicalValue};
 
 /// `CQLITE_REQUIRE_FIXTURES=1` turns a fixture absence into a hard failure.
 ///
-/// The `feature-iso-delta-scan` lane (issue #3725) exports it on the FULL gate and now
-/// REFUSES to run strict while any of its derived targets ignores it, because a target
-/// that skip-passes with its corpus absent can merge-gate as "passed" having compared
+/// The `feature-iso-delta-scan` lane (issue #3725) exports it on the FULL gate, because a
+/// target that skip-passes with its corpus absent can merge-gate as "passed" having compared
 /// nothing. Mirrors `issue_1007_complex_type_parity`'s helper of the same name.
 fn require_fixtures_strict() -> bool {
     std::env::var("CQLITE_REQUIRE_FIXTURES")

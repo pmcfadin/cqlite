@@ -711,8 +711,10 @@ async fn try_collect_delta_records(
 /// absent this target reported `14 passed` in 0.00s having compared NOTHING, and once
 /// #3725 gave it a merge-gating executor that vacuous run would have gated a merge. It is
 /// the same defect #3725 closed for `issue_1007_complex_type_parity` one target over, and
-/// the gate now REFUSES to run this lane strict while any of its targets ignores the flag
-/// (`feature-iso-delta-scan`'s fixture-blind FAIL), so this is not optional decoration.
+/// the lane exports the strict flag on the full gate, so honouring it here is what makes a
+/// corpus-absent run FAIL by name instead of passing. Note the lane does NOT verify per
+/// target that the flag is honoured — that scan was DESCOPED by lead ruling on #3725 and
+/// #3789 owns its replacement — so this is load-bearing, not optional decoration.
 fn require_fixtures_strict() -> bool {
     std::env::var("CQLITE_REQUIRE_FIXTURES")
         .map(|v| v == "1")

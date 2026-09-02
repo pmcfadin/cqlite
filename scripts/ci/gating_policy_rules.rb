@@ -457,7 +457,13 @@ module GatingRegistry
       name = File.basename(file)
       parsed = begin
         load_yaml(file)
-      rescue Psych::SyntaxError => e
+      # `Psych::Exception`, NOT just `Psych::SyntaxError` (roborev round 10). `YAML.load_file`
+      # with `aliases: true` can raise OTHER loader errors — `Psych::BadAlias` for an
+      # undefined alias is the concrete one — and those escaped this rescue, so a workflow
+      # with a dangling `*anchor` produced an uncaught ruby backtrace instead of the NAMED
+      # parse refusal this block exists to give. Same shape as the round-6 fix one exception
+      # class over: the rescue was narrower than the set of things the call can throw.
+      rescue Psych::Exception => e
         errors << "#{workflows_dir}/#{name}: could not be parsed as YAML, so whether it carries a " \
                   "`pull_request` trigger CANNOT be determined; an unreadable workflow is NOT treated " \
                   "as non-PR-triggered (YAML parse failed: #{e.message.lines.first&.strip})"
