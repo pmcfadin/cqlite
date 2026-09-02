@@ -432,9 +432,10 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   host-independent injected case carries the property everywhere.
   **THE SCOPE IS "COULD A VERDICT ALREADY BE RECORDED", NOT "IS TERMINAL" AND NOT "CARRIES A
   TABLE" — AND THE EXCLUSIONS ARE DECLARED AT THE SITE.** Of the script's 25
-  `emit_summary`/`_emit_terminal_summary` call sites, **10** append the line: the **7** that
-  render a component table, plus the **3 FULL-gate PRE-FLIGHT blocks** (#2078 fixtures, #3148
-  schemas ×2). **Those three were exempt on the ground that "no component has run", and that
+  `emit_summary`/`_emit_terminal_summary` call sites, **11** append the line: the **7** that
+  render a component table, plus the **4 PRE-FLIGHT blocks reachable AFTER `run_file_size`**
+  (#2078 fixtures, #3148 schemas ×2, and the `--only` zero-Data.db block — reachable via e.g.
+  `--only file-size,core-tests`). **Those three were exempt on the ground that "no component has run", and that
   was FALSE (job 358): `run_file_size` executes BEFORE both preflights** — deliberately, since
   it needs no dataset and those guards exit when the corpus is absent — so a `file-size` that
   died of ENOSPC was named by neither the block's contents nor any attribution. **This issue's
@@ -454,9 +455,14 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `--delta` usage ERRORs, the two `--delta` refused-**before-execution** blocks) are emitted
   before any component *can* have recorded a verdict, so they have **nothing to attribute** —
   the line could only render a misleading `0 RECOGNISED … (0/0 PASS)` — and each already names
-  its own cause with its own marker. **Read the pattern across jobs 299 → 301 → 304 → 358: four
-  times an exemption or a subject set was justified by a claim about WHAT COULD HAVE RUN, and
-  four times that claim was wrong. Verify the ordering in the source; do not reason about it.** Each carries a `# disk-exhaustion-exempt: <reason>` and
+  its own cause with its own marker. **Read the pattern across jobs 299 → 301 → 304 → 358 → 370: five
+  times an exemption or a subject set was justified by a claim about WHAT COULD HAVE RUN, and five
+  times that claim was wrong. Verify the ordering in the source; do not reason about it.** And job
+  370 adds the second half of that lesson: **fixing the INSTANCES a finding names leaves the CLASS
+  open** — three sites were corrected, the fourth kept the identical false comment and surfaced one
+  round later. A per-site comment cannot guard this, because the comment is the thing that is
+  wrong; the guard has to **derive the class** (an emit site reachable after `run_file_size` must
+  be marked, computed from the call graph), which is what would have caught all four at once. Each carries a `# disk-exhaustion-exempt: <reason>` and
   `scripts/tests/test_agent_gate_disk_exhaustion.sh` censuses **every** site as
   MARKED/EXEMPT/GAP, so a new emit site with neither REDS that suite. The claim read "every
   terminal block" until job 299, and the then-structural test **could not see** that it was

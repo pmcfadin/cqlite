@@ -1947,6 +1947,105 @@ else
   printf 'SKIP - 24b-open-fail: this host still reads a file under a mode-000 directory (running as root), so a failed open cannot be induced. DECLARED, not silently omitted.\n'
 fi
 
+# (27) roborev job 370 -- ENUMERATE THE CLASS, DO NOT FIX THE INSTANCES.
+#
+# Job 358 found that three pre-flight blocks claimed "no component has run" when `run_file_size`
+# precedes them. Three sites were fixed; a FOURTH -- the `--only` zero-Data.db block, reachable via
+# e.g. `--only file-size,core-tests` -- kept the same false exemption and was found a round later.
+# Per-site comments cannot prevent that, because the comment is exactly what is wrong. So the class
+# is DERIVED: an emit site that can be reached after `run_file_size` MUST be marked, and an
+# exemption there is a FAIL no matter how it is worded.
+#
+# Reachability is computed one level deep, which is enough for this script's shape: a site is
+# post-component if it is a TOP-LEVEL line after the `run_file_size` call, or if it lives in a
+# function that is CALLED from such a line. That is an under-approximation (a deeper call chain
+# would be missed), so it is DECLARED as such -- it enumerates a superset of the four known sites
+# and cannot silently shrink to nothing, which the floor below checks.
+_pc_prog="$tmp/postcomp.awk"
+cat > "$_pc_prog" <<'POSTCOMP_AWK'
+{ line[NR] = $0 }
+END {
+  # 1. the top-level run_file_size call
+  for (i = 1; i <= NR; i++) if (line[i] ~ /^run_file_size$/) { fs = i; break }
+  if (!fs) { print "ERROR no-top-level-run_file_size"; exit }
+  # 2. functions called from a top-level line AFTER it (bare call, no leading whitespace, and the
+  #    indented one-per-line calls inside the top-level `if` blocks that follow)
+  for (i = fs + 1; i <= NR; i++) {
+    if (line[i] ~ /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/) { infn = 1 }
+    if (infn && line[i] ~ /^\}/) { infn = 0; continue }
+    if (infn) continue
+    if (line[i] ~ /^[ \t]*#/) continue
+    if (match(line[i], /^[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*$/)) {
+      nm = line[i]; gsub(/^[ \t]+|[ \t]+$/, "", nm); called[nm] = 1
+    }
+    toplevel_after[i] = 1
+  }
+  # 3. every emit site, classified
+  for (i = 1; i <= NR; i++) {
+    l = line[i]
+    if (l ~ /^[ \t]*#/) continue
+    if (l ~ /^(emit_summary|_emit_terminal_summary)\(\)/) continue
+    if (l !~ /(^|[^_a-zA-Z])(emit_summary|_emit_terminal_summary)[ \t]/) continue
+    # which function is this site in?
+    owner = ""
+    for (k = i; k > 0; k--) {
+      if (line[k] ~ /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/) { owner = line[k]; sub(/\(\).*/, "", owner); break }
+      if (line[k] ~ /^\}/) break
+    }
+    post = 0
+    if (owner == "" && toplevel_after[i]) post = 1
+    if (owner != "" && called[owner]) post = 1
+    if (!post) continue
+    # marked? (directly, via an array append, or via a helper that appends)
+    args = l; j = i
+    while (args ~ /\\[ \t]*$/) { j++; args = args "\n" line[j] }
+    marked = (args ~ /_disk_exhaustion_line/) ? 1 : 0
+    if (!marked && args ~ /DISK_PREFLIGHT_META/) marked = 1
+    # The backward window is BOUNDED and stops at anything that means "a different block": a
+    # previous emit site, or a function/brace boundary. An unbounded (or merely long) window let a
+    # NEIGHBOURING site's helper call credit a site that had none, which is how the control below
+    # first failed to discriminate.
+    if (!marked) for (k = i - 1; k > 0 && k > i - 15; k--) {
+      if (line[k] ~ /(^|[^_a-zA-Z])(emit_summary|_emit_terminal_summary)[ \t]/) break
+      if (line[k] ~ /^\}/ || line[k] ~ /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/) break
+      if (line[k] ~ /^[ \t]*#/) continue
+      if (line[k] ~ /_disk_preflight_meta/ || line[k] ~ /_disk_exhaustion_line/) { marked = 1; break }
+    }
+    printf "%s\t%d\t%s\n", (marked ? "POST-MARKED" : "POST-EXEMPT"), i, (owner == "" ? "<top-level>" : owner)
+  }
+}
+POSTCOMP_AWK
+_pc_out=$(awk -f "$_pc_prog" "$GATE")
+_pc_total=$(printf '%s\n' "$_pc_out" | grep -c '^POST-' || true)
+_pc_bad=$(printf '%s\n' "$_pc_out" | grep -c '^POST-EXEMPT' || true)
+if case "$_pc_out" in *ERROR*) true ;; *) false ;; esac; then
+  bad "27-postcomponent: the derivation could not find the top-level run_file_size call, so this class check is vacuous: $_pc_out"
+elif [ "$_pc_total" -ge 4 ] && [ "$_pc_bad" = 0 ]; then
+  ok "27-postcomponent: all $_pc_total emit sites reachable AFTER run_file_size append the attribution -- the CLASS is derived from the call graph, so a fifth such block cannot ship with an 'emitted before the component loop' comment the way the --only block did"
+else
+  bad "27-postcomponent: $_pc_bad of $_pc_total post-component emit site(s) are still exempt (a floor of 4 is expected; a smaller total means the derivation went blind):
+$_pc_out"
+fi
+# POSITIVE CONTROL: strip the marking from one post-component site and require the class check to
+# see it. Without this, a derivation that classified nothing as post-component would read clean.
+# The mutation removes BOTH the array expansion -- what actually places the line in the emitted
+# block -- and the helper call, at EVERY site. Stripping one site was not enough to discriminate:
+# with the expansion gone the site still looked marked by the neighbouring call inside the backward
+# window, which is what prompted bounding that window above.
+_pc_ctl="$tmp/postcomp-ctl.sh"
+awk '
+  /DISK_PREFLIGHT_META\[@\]/ { next }
+  /^[ \t]*_disk_preflight_meta$/ { next }
+  { print }
+' "$GATE" > "$_pc_ctl"
+_pc_ctl_out=$(awk -f "$_pc_prog" "$_pc_ctl")
+if [ "$(printf '%s\n' "$_pc_ctl_out" | grep -c '^POST-EXEMPT')" -ge 1 ]; then
+  ok "27-control: removing the attribution from EVERY post-component pre-flight site makes the class check report them, so the clean reading above is a measurement rather than an empty classification"
+else
+  bad "27-control: the class check did not notice a stripped post-component site -- it is blind:
+$_pc_ctl_out"
+fi
+
 # (26) roborev job 358 -- THE PRE-FLIGHT BLOCKS ARE EMITTED **AFTER** A COMPONENT HAS RUN.
 #
 # Their exemptions read "no component has run, so there is nothing to attribute". That was FALSE:
@@ -1972,10 +2071,10 @@ fi
 # cannot drift from the classifier the rest of case 14 uses.
 _pf_exempt=$(disk_census | awk -F'\t' '$1 == "EXEMPT" && $3 ~ /emit_summary FAIL/ { n++ } END { print n+0 }')
 _pf_marked=$(disk_census | grep -c '^MARKED-VIA-HELPER-_disk_preflight_meta' || true)
-if [ "$_pf_marked" = 3 ]; then
-  ok "26a-preflight-marked: all 3 FULL-gate pre-flight FAIL blocks append the attribution through the shared _disk_preflight_meta helper (census-derived), so an ENOSPC that killed file-size before the corpus guard is named instead of hidden behind missing-fixtures:"
+if [ "$_pf_marked" = 4 ]; then
+  ok "26a-preflight-marked: all 4 post-run_file_size pre-flight FAIL blocks append the attribution through the shared _disk_preflight_meta helper (census-derived), so an ENOSPC that killed file-size before the corpus guard is named instead of hidden behind missing-fixtures:"
 else
-  bad "26a-preflight-marked: $_pf_marked of 3 pre-flight blocks append the attribution (still-exempt emit_summary FAIL sites: $_pf_exempt)"
+  bad "26a-preflight-marked: $_pf_marked of 4 pre-flight blocks append the attribution (still-exempt emit_summary FAIL sites: $_pf_exempt)"
 fi
 
 # (26b) RUNTIME: a recorded FAILing verdict whose log carries the signature is attributed, and an
@@ -2353,10 +2452,14 @@ fi
 # false. 26a asserts the ORDERING from source -- the fourth time in this issue that an exemption
 # rested on a wrong claim about what could already have run -- and that all 3 sites are census-
 # derived MARKED; 26b drives the attribution over a recorded verdict and pins that an EMPTY
-# recorded set still yields no line.);
+# recorded set still yields no line.); +2 (roborev job 370: the FOURTH post-run_file_size site --
+# the `--only` zero-Data.db block, reachable via `--only file-size,core-tests` -- kept the same
+# false exemption after three INSTANCES were fixed. Case 27 derives the CLASS from the call graph
+# (top-level lines after the run_file_size call, plus functions called from them) and FAILs on any
+# exempt member, with a control that strips one marking and requires the check to see it.);
 # +0 (roborev job 319 rounds 4-5 added 21d, whose runtime half shares 21c's DECLARED skip; its
 # STRUCTURAL half needs no host capability but is counted at 0 to keep the floor host-independent.)
-CASE_FLOOR=92
+CASE_FLOOR=94
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \

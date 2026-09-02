@@ -6127,8 +6127,10 @@ EXPLICIT_SUMMARY_FILE=0
 #
 # THE SCOPE IS "COULD A VERDICT ALREADY BE RECORDED", NOT "IS TERMINAL" AND NOT "CARRIES A
 # TABLE" (#3800, roborev jobs 299 and 358). Of the script's 25
-# `emit_summary`/`_emit_terminal_summary` call sites, 10 append this line: the 7 that render a
-# component table, plus the 3 FULL-gate PRE-FLIGHT blocks (#2078 fixtures, #3148 schemas x2).
+# `emit_summary`/`_emit_terminal_summary` call sites, 11 append this line: the 7 that render a
+# component table, plus the 4 PRE-FLIGHT blocks reachable AFTER `run_file_size` (#2078 fixtures,
+# #3148 schemas x2, and the `--only` zero-Data.db block -- reachable via e.g.
+# `--only file-size,core-tests`).
 # Those three were exempt on the stated ground that "no component has run" -- and that was
 # FALSE: `run_file_size` executes BEFORE both preflights, deliberately, since it needs no
 # dataset and those guards exit when the corpus is absent. So a `file-size` that died of ENOSPC
@@ -6138,11 +6140,11 @@ EXPLICIT_SUMMARY_FILE=0
 # the old rationale that survives, since an empty subject set could render only a vacuous
 # `0 RECOGNISED ... (0/0 PASS)`.
 #
-# The remaining 15 -- the #3544 component-set FAIL, the two summary-integrity FAILs, the shared
+# The remaining 14 -- the #3544 component-set FAIL, the two summary-integrity FAILs, the shared
 # forwarder, the five self-test hooks, the four --delta usage ERRORs, the two --delta
 # refused-BEFORE-EXECUTION blocks -- are emitted before ANY component can have recorded a
 # verdict (or, for the integrity FAILs, carry no table and name a concurrent peer as their
-# cause). Each of those 15 therefore carries a `# disk-exhaustion-exempt: <reason>` comment, and
+# cause). Each of those 14 therefore carries a `# disk-exhaustion-exempt: <reason>` comment, and
 # `scripts/tests/test_agent_gate_disk_exhaustion.sh` censuses EVERY emit site as
 # MARKED / EXEMPT / GAP -- a new emit site with neither REDS that suite. An earlier wording of
 # this contract claimed "every terminal block", which was false and which the then-structural
@@ -19260,11 +19262,18 @@ if selected_needs_datasets; then
     # stale PASS survives; this makes the early exit explicit for a caller reading
     # the recovery path.
     _tree_meta_array   # #2926
-    # disk-exhaustion-exempt: --only dataset pre-flight FAIL (zero Data.db). Emitted BEFORE the component loop -- no component log exists, and preflight: already names the cause
+    # #3800 (roborev job 370): the FOURTH post-`run_file_size` block, and the one the previous round
+    # missed by fixing three INSTANCES instead of sweeping the CLASS. `--only file-size,core-tests`
+    # runs file-size, records its verdict, and can then reach this block -- so the exemption's "no
+    # component log exists" was false here for exactly the same reason it was false at the fixtures
+    # and schemas blocks. The census now DERIVES this class (see case 27) rather than trusting the
+    # comment, which is what would have caught all four at once.
+    _disk_preflight_meta
     emit_summary FAIL \
       "preflight: FAIL (no Data.db files under $CQLITE_DATASETS_ROOT/sstables)" \
       "$(_component_set_meta)" \
       "${TREE_META_LINES[@]}" \
+      "${DISK_PREFLIGHT_META[@]+"${DISK_PREFLIGHT_META[@]}"}" \
       "hint: bash test-data/scripts/fetch-datasets.sh"
     exit 1
   fi
