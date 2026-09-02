@@ -428,7 +428,7 @@ fi
 refuse_no_gate() {
   printf '========================================================\n' >&2
   printf 'PREMERGE: NO-GATE-OF-RECORD — REFUSING TO MERGE\n' >&2
-  printf '  summary file: %s\n' "$summary_file" >&2
+  printf '  summary file: %s\n' "$(c_safe_display "$summary_file")" >&2
   [ -n "$delta_file" ] && printf '  delta summary file: %s\n' "$delta_file" >&2
   printf '  certified sha: %s\n' "$certified" >&2
   while [ "$#" -gt 0 ]; do

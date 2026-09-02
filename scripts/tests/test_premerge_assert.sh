@@ -3419,6 +3419,58 @@ if [ -n "$DIFF_OK" ]; then
   done
 fi
 
+# --- 44h: THE STRUCTURAL EMIT-BOUNDARY GUARD (round 7, L1b) -------------------
+# The mirror of test_review_stage.sh section 18, for this script. See
+# scripts/tests/lib/emit-boundary-scan.sh for why the guard exists (the boundary was bypassed at a
+# NEW site in three consecutive rounds, so the answer is a mechanism rather than a fourth patch) and
+# for the scope it DECLARES on every run. The positive control is the requirement, not the clean
+# run: a scanner that flagged nothing would exit 0 exactly as this one does.
+EBS="$SCRIPT_DIR/lib/emit-boundary-scan.sh"
+if [ ! -f "$EBS" ]; then
+  bad "emit-guard: $EBS is missing — the structural guard did not run (1/6)"
+  bad "emit-guard: the same absence (2/6)"
+  bad "emit-guard: the same absence (3/6)"
+  bad "emit-guard: the same absence (4/6)"
+  bad "emit-guard: the same absence (5/6)"
+  bad "emit-guard: the same absence (6/6)"
+else
+  EBS_OUT="$(bash "$EBS" "$ASSERT" 2>&1)"; EBS_RC=$?
+  if [ "$EBS_RC" -eq 0 ]; then
+    ok "emit-guard: the SHIPPED premerge-assert.sh is CLEAN — every value on an emitted line is routed or allowlisted"
+  else
+    bad "emit-guard: the shipped premerge-assert.sh has an emit-boundary BYPASS: $EBS_OUT"
+  fi
+  case "$EBS_OUT" in
+    *"NOT COVERED"*) ok "emit-guard: the scan DECLARES what it does not cover, on every run" ;;
+    *) bad "emit-guard: the scan did not declare its scope (got: $EBS_OUT)" ;;
+  esac
+  case "$EBS_OUT" in
+    *"in-scope emit site(s)"*) ok "emit-guard: and it reports HOW MANY sites it examined — a count, not an adjective" ;;
+    *) bad "emit-guard: the scan did not report its subject count (got: $EBS_OUT)" ;;
+  esac
+  EBS_D="$T/ebs"; mkdir -p "$EBS_D"
+  # The plant goes on the `PREMERGE: OK` line — the emitted line this whole check is about.
+  # SINGLE-QUOTED sed, so `$PLANTED_BYPASS_VALUE` is LITERAL text in the planted line rather than
+  # being expanded by this suite's own shell; the address uses `.` for the quote character.
+  LC_ALL=C sed -e '/^printf .PREMERGE: OK /s/$/ "$PLANTED_BYPASS_VALUE"/' \
+    "$ASSERT" >"$EBS_D/premerge-assert.sh" 2>/dev/null || true
+  if [ -f "$EBS_D/premerge-assert.sh" ] && LC_ALL=C grep -q 'PLANTED_BYPASS_VALUE' "$EBS_D/premerge-assert.sh"; then
+    ok "emit-guard/control: the plant landed in the scratch copy (asserted, not assumed)"
+  else
+    bad "emit-guard/control: the plant did NOT land, so the control below proves nothing"
+  fi
+  EBS_POUT="$(bash "$EBS" "$EBS_D/premerge-assert.sh" 2>&1)"; EBS_PRC=$?
+  if [ "$EBS_PRC" -ne 0 ]; then
+    ok "emit-guard/control: the guard REDS on a planted bypass"
+  else
+    bad "emit-guard/control: the guard reported CLEAN on a planted bypass — it proves nothing (got: $EBS_POUT)"
+  fi
+  case "$EBS_POUT" in
+    *PLANTED_BYPASS_VALUE*) ok "emit-guard/control: and it NAMES the offending value, so the red is attributable" ;;
+    *) bad "emit-guard/control: the guard red without naming the planted value (got: $EBS_POUT)" ;;
+  esac
+fi
+
 # --- case floor (#3544) ------------------------------------------------------
 # A span-replacing edit once silently deleted FOUR cases from a suite in this repo
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a

@@ -2253,6 +2253,69 @@ printf 'result: PASS\n' >"$(printed_report_path)" 2>/dev/null || true
 rs "$R17B" verdict c --issue 981
 has "deadline=1234 agent=spec-auditor" "boundary/record CONTROL: an ordinary record's values pass through the boundary UNCHANGED"
 
+# --- 18. THE STRUCTURAL EMIT-BOUNDARY GUARD (round 7, L1b) ----------------------
+# WHY A GUARD AND NOT A FOURTH PATCH. The boundary was bypassed at a NEW site in three consecutive
+# review rounds (round 2's S1, round 5's J3, round 7's L1). Every fix was correct and the class kept
+# regenerating, which is this repository's standing signal to mechanize rather than to carve the same
+# place again — and CLAUDE.md's rule is explicit: neutralise at ONE boundary, NEVER per interpolation
+# site, "because a per-site escape is a list to keep complete".
+#
+# THE GUARD IS `scripts/tests/lib/emit-boundary-scan.sh`, and it DECLARES ITS OWN SCOPE on every run.
+# Both suites exercise it, each for its own script, and each with a POSITIVE CONTROL — a bare
+# `exit 0` from a scanner proves nothing, because a scanner that flagged nothing would emit exactly
+# the same status.
+EBS="$SCRIPT_DIR/lib/emit-boundary-scan.sh"
+if [ ! -f "$EBS" ]; then
+  bad "emit-guard: $EBS is missing — the structural guard did not run (1/6)"
+  bad "emit-guard: the same absence (2/6)"
+  bad "emit-guard: the same absence (3/6)"
+  bad "emit-guard: the same absence (4/6)"
+  bad "emit-guard: the same absence (5/6)"
+  bad "emit-guard: the same absence (6/6)"
+else
+  EBS_OUT="$(bash "$EBS" "$RS" 2>&1)"; EBS_RC=$?
+  if [ "$EBS_RC" -eq 0 ]; then
+    ok "emit-guard: the SHIPPED review-stage.sh is CLEAN — every value on an emitted line is routed or allowlisted"
+  else
+    bad "emit-guard: the shipped review-stage.sh has an emit-boundary BYPASS: $EBS_OUT"
+  fi
+  # THE SCOPE MUST BE DECLARED IN THE OUTPUT, not only in a comment: a guard whose coverage is
+  # invisible is one a reader over-reads.
+  case "$EBS_OUT" in
+    *"NOT COVERED"*) ok "emit-guard: the scan DECLARES what it does not cover, on every run" ;;
+    *) bad "emit-guard: the scan did not declare its scope (got: $EBS_OUT)" ;;
+  esac
+  case "$EBS_OUT" in
+    *"in-scope emit site(s)"*) ok "emit-guard: and it reports HOW MANY sites it examined — a count, not an adjective" ;;
+    *) bad "emit-guard: the scan did not report its subject count (got: $EBS_OUT)" ;;
+  esac
+  # (a) THE POSITIVE CONTROL. A bypassing emit is planted in a THROWAWAY COPY — the artifact is
+  #     substituted, never a settable seam in the shipped script (#3312's corollary for tests) — and
+  #     the guard must red AND NAME the planted symbol. A bare non-zero exit is not evidence: an
+  #     unrelated breakage produces an identical status.
+  EBS_D="$T/ebs"; mkdir -p "$EBS_D"
+  cp "$RS" "$EBS_D/review-stage.sh" 2>/dev/null || true
+  # A name no allowlist entry mentions, planted on a REAL emit line so the plant is in scope.
+  LC_ALL=C sed -e 's|^  emit "RECORD-OK kind=|  emit "RECORD-OK smuggled=$PLANTED_BYPASS_VALUE kind=|' \
+    "$EBS_D/review-stage.sh" >"$EBS_D/planted.sh" 2>/dev/null || true
+  if [ -f "$EBS_D/planted.sh" ] && LC_ALL=C grep -q 'PLANTED_BYPASS_VALUE' "$EBS_D/planted.sh"; then
+    ok "emit-guard/control: the plant landed in the scratch copy (asserted, not assumed — a plant that missed would make the control vacuous)"
+  else
+    bad "emit-guard/control: the plant did NOT land, so the control below proves nothing"
+  fi
+  mv "$EBS_D/planted.sh" "$EBS_D/review-stage.sh" 2>/dev/null || true
+  EBS_POUT="$(bash "$EBS" "$EBS_D/review-stage.sh" 2>&1)"; EBS_PRC=$?
+  if [ "$EBS_PRC" -ne 0 ]; then
+    ok "emit-guard/control: the guard REDS on a planted bypass"
+  else
+    bad "emit-guard/control: the guard reported CLEAN on a planted bypass — it proves nothing (got: $EBS_POUT)"
+  fi
+  case "$EBS_POUT" in
+    *PLANTED_BYPASS_VALUE*) ok "emit-guard/control: and it NAMES the offending value, so the red is attributable" ;;
+    *) bad "emit-guard/control: the guard red without naming the planted value (got: $EBS_POUT)" ;;
+  esac
+fi
+
 # --- case floor ---------------------------------------------------------------
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
