@@ -543,6 +543,56 @@ That is a pass derived from the absence of a bad signal, in the one check added
 to stop exactly that, and it is why there is a fourth token: `UNRECOGNISED` is
 disclosed as *not known to be local*, distinctly from `NOT-MEASURABLE`.
 
+**A VERDICT MUST NOT BE A FUNCTION OF AN ANALYSIS-TIME FLAG.** `--profile`
+selected the target band when the report was *written*, defaulting to `narrow`,
+so the same data produced different verdicts under different flags and a
+wide-row session analysed with the default was silently scored against a band
+derived for narrow rows. This is the label-versus-property family's last
+instance and the one that was hardest to see: `nproc` binds the MACHINE,
+`rig-profile-mismatch` binds the MACHINE, and **nothing bound the WORKLOAD the
+ratio is actually about**.
+
+**It cannot be derived, and that was checked rather than assumed.** The band's
+own source — `docs/research/phase2-verify-row-engine.md` line 107 — says
+"~1.1–1.25× narrow single-stream, ~1.05–1.1× wide" and defines narrow and wide
+**nowhere**. There is no published bytes-per-row or row-count boundary. So
+deriving from the data would need a threshold nobody has authority for — *a
+fabricated constant is worse than a flag, because it looks like a measurement* —
+and deriving from the table name is the label mistake again. The declaration is
+irreducibly human.
+
+**What was wrong was WHEN, and HOW MANY TIMES.** It is declared once, at
+measurement time: the driver *requires* `--profile` with **no default** (a
+default is precisely the defect; the precedent is `--max-concurrent-scans`,
+required here for the same reason), records it in the manifest, and the analyzer
+reads it from there. `--profile` at the analyzer demotes from **selector** to
+optional **assertion** — it may confirm the declaration, may never overrule it,
+and cannot supply one a session never made. A wrong `--profile` is therefore
+*observable* rather than silently effective. One resolver serves both the
+refusal path and the report, because two resolutions of one question is how they
+come to disagree.
+
+**VALIDATE-THEN-REREAD IS A TOCTOU ON THE MEASUREMENT INPUT.** The ticket
+template was validated once, before the builds, and then re-read from its
+original **mutable** path for every prewarm and every measured run — so an edit
+mid-session makes the arms execute different filters, projections or token
+ranges while every record still reports shape `full`. An invalid band verdict
+that looks clean. The driver already applied the opposite principle everywhere
+else (per-session immutable directories, one `flight-loadgen` built from
+`--loadgen-ref`); this was the hole in it. The copy is taken **first** and the
+**copy** is validated — copying after validation leaves the same window, one
+step narrower.
+
+**And the first three cases I wrote for that freeze all passed under a plant
+that defeated it.** They asserted the *artifact*: a frozen copy exists, it does
+not follow an edit to the original, it matches its recorded digest. All three
+remain true when every run reads the original instead, because the copy is still
+made. Even the source grep passed — the plant redirected the *variable*, not the
+literal the grep looked for. The property was never "a frozen copy exists", it
+was **"every run READ the frozen copy"**, and only the invocation can answer
+that: the load-generator shim now records every `--ticket-template` it is handed
+and the case requires each to be inside a session directory.
+
 **THE REQUIREMENT WAS THE ALGORITHM AND THE CHECK TESTED EXISTENCE — with the
 requirement written in the comment directly above it.** Round 12 enforced *"a
 non-empty `CompressionInfo.db` exists"* under a comment reading *"the field is

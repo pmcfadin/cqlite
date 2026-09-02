@@ -351,6 +351,7 @@ bash ab-throughput.sh \
   --work-dir /data/ab-3649/control-null \
   --ramp 1 --replicates 5 --step-duration 60s \
   --max-concurrent-scans 16 --batch-size 8192 \
+  --profile narrow \
   --server-cpus 0,2 --client-cpus 1,3
 python3 analyze-ab.py --single-stream /data/ab-3649/control-null/run-<session-id>/manifest.json \
   | tee control-null.txt
@@ -383,6 +384,7 @@ bash ab-throughput.sh \
   --work-dir /data/ab-3649/control-sens \
   --ramp 1 --replicates 5 --step-duration 60s \
   --max-concurrent-scans 16 --batch-size 8192 \
+  --profile narrow \
   --server-cpus 0,2 --client-cpus 1,3
 python3 analyze-ab.py --single-stream /data/ab-3649/control-sens/run-<session-id>/manifest.json \
   | tee control-sensitivity.txt
@@ -411,6 +413,7 @@ bash ab-throughput.sh \
   --work-dir /data/ab-3649/measure-single \
   --ramp 1 --replicates 8 --step-duration 60s \
   --max-concurrent-scans 16 --batch-size 8192 \
+  --profile narrow \
   --server-cpus 0,2 --client-cpus 1,3 \
   --rows-declared <the corpus row count you recorded> \
   | tee measure-single-driver.txt
@@ -426,6 +429,7 @@ bash ab-throughput.sh \
   --work-dir /data/ab-3649/measure-util \
   --ramp 1,2,4,8 --replicates 8 --step-duration 60s \
   --max-concurrent-scans 16 --batch-size 8192 \
+  --profile narrow \
   --server-cpus 0,2 --client-cpus 1,3 \
   --rows-declared <the corpus row count you recorded> \
   | tee measure-util-driver.txt
@@ -633,7 +637,6 @@ One invocation, both manifests, two clearly separated sections:
 python3 analyze-ab.py \
   --single-stream /data/ab-3649/measure-single/run-<session-id>/manifest.json \
   --utilization   /data/ab-3649/measure-util/run-<session-id>/manifest.json \
-  --profile narrow \
   | tee analysis.txt
 echo "exit=$?"
 ```
@@ -715,10 +718,32 @@ With both sections present the process exit is the **larger** of the two, so the
 least affirmative outcome governs. One unusable session never suppresses the
 other — each section is analysed independently.
 
+The **control** invocations above also pass `--profile narrow`. A control is not
+required to — its verdict is disclaimed either way — but declaring it means the
+control's own analysis needs no flag, and a control whose manifest declares
+nothing would be refused `profile-unrecorded` on the single-stream section. It
+is one word, and it keeps the control procedure runnable as written.
+
+**The band is chosen by the SESSION, not by the analysis.** `ab-throughput.sh`
+requires `--profile narrow|wide` for every measurement and records it in the
+manifest; `analyze-ab.py` reads it from there. There is deliberately **no
+default** on either side, because a default silently scored wide-row sessions
+against the narrow band. Nothing can derive the profile — the band's own source
+(`docs/research/phase2-verify-row-engine.md` line 107) defines narrow and wide
+qualitatively, with no numeric boundary — so it is one human declaration made
+where the measurement happens.
+
+`analyze-ab.py --profile <name>` still exists, as an **assertion**: it may
+confirm what the session declared and can never overrule it (`--profile narrow`
+against a session that declared `wide` REFUSES with
+`profile-assertion-mismatch`), and it cannot supply a profile a session never
+declared. So a wrong `--profile` is *observable* rather than silently changing
+the verdict.
+
 **Also run the wide profile** if your corpus has a wide-row table, as a separate
-invocation with its own corpus — `--profile wide` tests the 1.05–1.10 band on the
-single-stream section. Do not run `--profile wide` over a narrow corpus and
-present it as the wide result.
+session with its own corpus and `--profile wide` **on the driver**. Do not run a
+narrow corpus and present it as the wide result — the instrument records what
+you declared and cannot check that the declaration matches the rows.
 
 ---
 
