@@ -259,6 +259,10 @@ pub(super) fn unparseable_marker_in_buffered_block(
 /// [`range_marker_refused`] — the non-final path builds the same error and drops
 /// it, because there it is not yet a finding.
 ///
+/// BOTH streaming policies reach it (roborev job 78), so the message names both
+/// harms and asserts neither exclusively: a silently truncated `SELECT` on the
+/// read path, and a tombstone missing from WRITTEN output on the compaction path.
+///
 /// The distinction is taken from the driver's own `at_final_chunk` flag — the
 /// chunking state the caller already holds — and never from inspecting bytes to
 /// guess whether more data exists (issue #28).
@@ -271,8 +275,8 @@ pub(super) fn unparseable_marker_at_final_chunk(cause: Error) -> Error {
     Error::corruption(format!(
         "the scan is at its FINAL chunk, so no further data can complete this range-tombstone \
          marker: it is corrupt or truncated, not a chunk boundary. Completing the partition here \
-         would report success while dropping the tombstone — and this decode feeds WRITTEN \
-         compaction output, so the rows it shadows would be resurrected durably, on disk (issue \
-         #3721): {cause}"
+         would report SUCCESS while dropping the tombstone AND every later row of the partition — \
+         from a `SELECT` on the read path, and from WRITTEN output on the compaction path, where \
+         the rows it shadows come back durably, on disk (issue #3721): {cause}"
     ))
 }

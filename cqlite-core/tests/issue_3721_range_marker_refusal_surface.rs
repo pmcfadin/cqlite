@@ -1262,3 +1262,202 @@ mod d8_marker_body_size {
         control(Driver::Streaming).await;
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// D9 (issue #3721, roborev job 78) — the SELECT path, where the marker-PARSE
+// failure was a SILENT TRUNCATION.
+//
+// D8 above drives the two COMPACTION drivers. The `SELECT` surfaces reach the
+// SAME parser through `parse_range_tombstone_marker_full`, and their marker-PARSE
+// `Err` arms answered with the framing terminator — `break` in the two buffered
+// block loops, `MarkerOutcome::Stop` in the streaming policy — so the marker AND
+// every later row of the partition vanished from a read that returned `Ok`.
+// Nothing downstream rejected it: `block_emit`'s `partition_complete` flag gates
+// only the #3095 static-only emission.
+//
+// Three one-byte/one-truncation corruptions of the SAME marker body, over the
+// four SELECT surfaces (which is every distinct read path that decodes a marker):
+//
+// | surface | query | path | finality established by |
+// |---------|-------|------|--------------------------|
+// | D2 full scan  | `SELECT *`              | `block_emit_windowed` | the buffered block |
+// | D2 point read | `SELECT … WHERE id = 1` | `block_emit_windowed` | the buffered block |
+// | D1 metadata   | `SELECT …, WRITETIME(v)`| `block_emit`          | the buffered block |
+// | D5 streaming  | `SELECT COUNT(*)`       | `timestamp_policy`    | the driver's `at_final_chunk` |
+//
+// Each case asserts the CAUSE TEXT, not merely that an error occurred: a
+// pre-fix cascade also errors on some inputs, and an error naming the wrong
+// subject is what stops the next person looking. It also asserts WHICH finality
+// statement the surface made, so a surface silently changing paths is visible,
+// and pairs with the UNPATCHED control (both live rows) so a refusal is
+// attributable to the corruption and a fix that refused every marker fails.
+// ─────────────────────────────────────────────────────────────────────────────
+
+mod d9_select_marker_parse_failure {
+    use super::{assert_both_live_rows, run, ErrorCategory, Patch, KEYSPACE, TABLE};
+
+    /// How the surface establishes that no further bytes can arrive — the fact
+    /// the refusal is derived from, never a byte pattern (issue #28).
+    #[derive(Clone, Copy)]
+    enum Finality {
+        /// A fully materialised block: `block_emit` / `block_emit_windowed`.
+        BufferedBlock,
+        /// The sliding driver's own `at_final_chunk`: `timestamp_policy`.
+        FinalChunk,
+    }
+
+    impl Finality {
+        fn needle(self) -> &'static str {
+            match self {
+                Finality::BufferedBlock => "the whole block is already buffered",
+                Finality::FinalChunk => "the scan is at its FINAL chunk",
+            }
+        }
+    }
+
+    /// The parser's own cause for each corruption — the half of the marker body
+    /// contract it violates. Asserted so the three cases cannot pass on each
+    /// other's refusal.
+    fn expected_cause(patch: Patch) -> &'static str {
+        match patch {
+            // The declared body ends one byte early, so the bounded decode runs
+            // the LAST field of the deletion-time pair out of bytes (fix 1).
+            Patch::MarkerBodySizeTooSmall => "Failed to parse localDeletionTime in marker body",
+            // The fields end one byte before the declared extent (fix 1's
+            // exact-consumption assert).
+            Patch::MarkerBodySizeTooLarge => "declared size and field encodings disagree",
+            // The file ends inside the marker, before its body size VUInt.
+            Patch::TruncatedAtMarker => "Failed to parse marker_body_size",
+            other => panic!("{other:?} is not a marker-body corruption"),
+        }
+    }
+
+    /// One `(surface, corruption)` case: the UNPATCHED query must return both
+    /// live rows, and the patched one must FAIL naming the marker, the finality
+    /// fact and the parser's own cause.
+    async fn case(query: &str, finality: Finality, patch: Patch) {
+        let clean = run(query, Patch::None)
+            .await
+            .unwrap_or_else(|e| panic!("`{query}` must succeed over the UNPATCHED fixture: {e}"));
+        assert_both_live_rows(&clean, query);
+
+        match run(query, patch).await {
+            Ok(rows) => panic!(
+                "`{query}` returned Ok over a fixture whose first range-tombstone marker cannot \
+                 be PARSED ({patch:?}): the marker AND every later row of the partition were \
+                 silently dropped from a SUCCESSFUL read (issue #3721, roborev job 78). \
+                 Rows: {rows:#?}"
+            ),
+            Err(e) => {
+                let rendered = e.to_string();
+                for needle in [
+                    "range-tombstone marker",
+                    "could not be PARSED",
+                    finality.needle(),
+                    expected_cause(patch),
+                ] {
+                    assert!(
+                        rendered.contains(needle),
+                        "`{query}` under {patch:?} must report the marker refusal naming \
+                         `{needle}`; got: {rendered}"
+                    );
+                }
+                assert_eq!(
+                    e.category(),
+                    ErrorCategory::Data,
+                    "an unparseable on-disk marker classifies as damaged data"
+                );
+            }
+        }
+    }
+
+    /// Every SELECT surface that decodes a marker, paired with the finality fact
+    /// it establishes. Derived from the path table in the module banner above.
+    fn surfaces() -> Vec<(String, Finality)> {
+        vec![
+            (
+                format!("SELECT * FROM {KEYSPACE}.{TABLE}"),
+                Finality::BufferedBlock,
+            ),
+            (
+                format!("SELECT * FROM {KEYSPACE}.{TABLE} WHERE id = 1"),
+                Finality::BufferedBlock,
+            ),
+            (
+                format!("SELECT id, ck, v, WRITETIME(v) FROM {KEYSPACE}.{TABLE}"),
+                Finality::BufferedBlock,
+            ),
+        ]
+    }
+
+    async fn all_buffered_surfaces(patch: Patch) {
+        for (query, finality) in surfaces() {
+            case(&query, finality, patch).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn select_refuses_a_body_size_corrupted_downward() {
+        all_buffered_surfaces(Patch::MarkerBodySizeTooSmall).await;
+    }
+
+    #[tokio::test]
+    async fn select_refuses_a_body_size_corrupted_upward_within_the_buffer() {
+        all_buffered_surfaces(Patch::MarkerBodySizeTooLarge).await;
+    }
+
+    #[tokio::test]
+    async fn select_refuses_a_marker_truncated_at_its_body() {
+        all_buffered_surfaces(Patch::TruncatedAtMarker).await;
+    }
+
+    /// The STREAMING surface, separately: its refusal comes from the sliding
+    /// driver's `at_final_chunk` rather than from a buffered block, and the
+    /// aggregate cannot be compared with `assert_both_live_rows`.
+    ///
+    /// The NON-final half of that decision is deliberately NOT asserted here —
+    /// `Database::execute` owns its own chunking — and is pinned one level down
+    /// against both drivers in
+    /// `data_access::compaction_range_marker_resume_tests`, plus the
+    /// `partition_driver` framing test `marker_unparseable_non_final_chunk_needmore_no_emit`.
+    #[tokio::test]
+    async fn streaming_aggregate_refuses_every_marker_body_corruption() {
+        let query = format!("SELECT COUNT(*) FROM {KEYSPACE}.{TABLE}");
+        let clean = run(&query, Patch::None)
+            .await
+            .unwrap_or_else(|e| panic!("`{query}` must succeed over the UNPATCHED fixture: {e}"));
+        assert!(
+            format!("{clean:?}").contains(&super::LIVE_CLUSTERING.len().to_string()),
+            "the UNPATCHED streaming aggregate must count both live rows; got: {clean:#?}"
+        );
+
+        for patch in [
+            Patch::MarkerBodySizeTooSmall,
+            Patch::MarkerBodySizeTooLarge,
+            Patch::TruncatedAtMarker,
+        ] {
+            match run(&query, patch).await {
+                Ok(rows) => panic!(
+                    "`{query}` returned Ok over a fixture whose first range-tombstone marker \
+                     cannot be PARSED ({patch:?}): the partition was silently TRUNCATED and the \
+                     count reported as success (issue #3721, roborev job 78). Rows: {rows:#?}"
+                ),
+                Err(e) => {
+                    let rendered = e.to_string();
+                    for needle in [
+                        "range-tombstone marker",
+                        "could not be PARSED",
+                        Finality::FinalChunk.needle(),
+                        expected_cause(patch),
+                    ] {
+                        assert!(
+                            rendered.contains(needle),
+                            "`{query}` under {patch:?} must name `{needle}`; got: {rendered}"
+                        );
+                    }
+                    assert_eq!(e.category(), ErrorCategory::Data);
+                }
+            }
+        }
+    }
+}
