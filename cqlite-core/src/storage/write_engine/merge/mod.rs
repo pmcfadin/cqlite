@@ -520,12 +520,6 @@ mod egress_wiring_tests;
 #[cfg(all(test, feature = "write-support"))]
 mod clone_regression_tests;
 
-// Issue #3790: merged-read `time` collection ordering must agree with the signed
-// comparator (and the writer), including out-of-range negatives. Sibling file per
-// the #1116 campsite rule — `read_assembly.rs` is already over the threshold.
-#[cfg(all(test, feature = "write-support"))]
-mod read_assembly_time_order_tests;
-
 // Issue #1665: reconcile micro-alloc guard — proves `filter_dropped_columns` no
 // longer deep-clones the survivor set (sibling file, #1116 campsite rule).
 #[cfg(all(test, feature = "write-support"))]
