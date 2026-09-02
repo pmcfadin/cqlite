@@ -2343,6 +2343,19 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   ref — but it was split out rather than shipped, because the fail-open defect family (five
   instances: a failed probe read as a negative answer) clustered in that exit-0 path and it is the
   value a cron reads. Restoring it is tracked separately, carrying the family census forward.
+  **AND ON THIS FLEET IT ANSWERED ABOUT THE EMPTY SET — SUPERVISOR FLEETS ONLY, DESCOPED by owner
+  ruling 2026-09-01 on #3548 (option C; completes #3393).** The subject set is `refs/lane-claims/*`
+  (+ legacy `refs/machine-claims/*`) and its only IN-TREE CALLER that creates or refreshes them is `worker-supervisor.sh` (`stamp` is public and can be called directly), so on
+  this supervisor-less `/drive-issue` fleet it had nothing to report when measured (persisted or
+  manually `stamp`ed refs can still produce rows) — and **exit 1 still means "nothing was reported",
+  never a clean bill of health.** The populated `refs/claims/issue-<N>` and `refs/heartbeats/<machine>`
+  are deliberately NOT read (measured: a transient claiming-shell pid; single-slot-per-machine
+  masking), and AC4 survives as a counterfactual — were a later change ever to read a non-refreshing
+  carrier, a stale pid there must abstain, never yield `DEAD-*`. **Everything else — the measurement,
+  what liveness here rests on, and both board signatures (NEITHER of which is a verdict) — is stated
+  ONCE in `docs/development/fleet-runbook.md` → *Lane liveness on a supervisor-less `/drive-issue`
+  fleet*.** Seven review rounds on #3548 were propagation failures of duplicated prose, so it is not
+  restated anywhere else.
   **Not covered, by construction**: #3393 AC3's "worktree present, tmux session absent" test is
   unimplementable in committed tooling because the lane-directory layout and tmux session naming
   exist NOWHERE in this repo — a tool guessing at them would report nothing on any differently-named

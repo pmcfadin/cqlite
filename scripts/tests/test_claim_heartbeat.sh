@@ -648,7 +648,7 @@ fi
 echo "TEST 28: dead-lanes is documented in --help, and rejects a stray argument"
 # ===========================================================================
 help_out=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
-if printf '%s\n' "$help_out" | grep -q 'dead-lanes'; then
+if grep -q 'dead-lanes' <<<"$help_out"; then
   ok "dead-lanes appears in --help (an undocumented subcommand is one nobody runs)"
 else
   bad "dead-lanes must be documented in --help"
@@ -999,15 +999,20 @@ chmod +x "$gitshim/git"
 craft_old_claim "$WORK" "warnMachine" 3404 "$$" 0
 warn_out=$(cd "$WORK" && PATH="$gitshim:$PATH" HEARTBEAT_MACHINE=warnMachine \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
-if ! printf '%s\n' "$warn_out" | grep -q 'UNKNOWN-UNREADABLE' \
-  && ! printf '%s\n' "$warn_out" | grep -qE '^Warning:|^warning:'; then
+if ! grep -q 'UNKNOWN-UNREADABLE' <<<"$warn_out" \
+  && ! grep -qE '^Warning:|^warning:' <<<"$warn_out"; then
   ok "git warnings on stderr produce no bogus ref rows and no spurious UNKNOWN-UNREADABLE"
 else
   bad "stderr must not be parsed as the ref listing: out:
 $warn_out"
 fi
 # NON-VACUITY: the shim really did emit those warnings (otherwise this asserts nothing).
-if PATH="$gitshim:$PATH" git ls-remote "$ORIGIN" 'refs/machine-claims/*' 2>&1 >/dev/null | grep -q 'Permanently added'; then
+# CAPTURE-THEN-MATCH, not a pipe (#3548, the sigpipe round). This is the site that ACTUALLY emitted
+# the observed "the git shim emitted no warning" failure: `grep -q` exits at the first match, `git`
+# then takes SIGPIPE, and under this suite's `set -o pipefail` the PIPELINE status goes non-zero — so
+# a shim that DID warn was reported as silent, and TEST 40's non-vacuity control red on correct input.
+_shimwarn_out=$(PATH="$gitshim:$PATH" git ls-remote "$ORIGIN" 'refs/machine-claims/*' 2>&1 >/dev/null)
+if grep -q 'Permanently added' <<<"$_shimwarn_out"; then
   ok "NON-VACUITY: the git shim does emit stderr warnings during ls-remote"
 else
   bad "NON-VACUITY broken: the git shim emitted no warning, so TEST 40 proves nothing"
@@ -1093,13 +1098,13 @@ echo "TEST 43: the retired per-machine bound is GONE from the help, and the per-
 # the same way TEST 46 was found still enforcing "NEVER exits 0" after exit 0 came back. A guard
 # aimed at a retired contract defends the error.
 help43=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
-if ! printf '%s\n' "$help43" | grep -qi 'ONE CLAIM REF PER MACHINE'; then
+if ! grep -qi 'ONE CLAIM REF PER MACHINE' <<<"$help43"; then
   ok "the help no longer presents one-ref-per-machine as a current limitation"
 else
   bad "the retired per-machine bound is still documented as live"
 fi
-if printf '%s\n' "$help43" | grep -q 'refs/lane-claims/<machine>/<issue>' \
-  && printf '%s\n' "$help43" | grep -qi 'never stamped is invisible\|never stamped'; then
+if grep -q 'refs/lane-claims/<machine>/<issue>' <<<"$help43" \
+  && grep -qi 'never stamped is invisible\|never stamped' <<<"$help43"; then
   ok "the help states the per-lane layout AND the bound that actually remains (a lane that never stamped is invisible)"
 else
   bad "the help must state the per-lane layout and the remaining invisible-lane bound"
@@ -1212,7 +1217,7 @@ help_text=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
 emitted=$(grep -oE 'verdict="[A-Z][A-Z-]*"' "$HB" | sed -e 's/verdict="//' -e 's/"//' | sort -u)
 undocumented=""
 for v in $emitted; do
-  printf '%s\n' "$help_text" | grep -q "$v" || undocumented="$undocumented $v"
+  grep -q "$v" <<<"$help_text" || undocumented="$undocumented $v"
 done
 if [ -n "$emitted" ] && [ -z "$undocumented" ]; then
   ok "all $(printf '%s\n' "$emitted" | wc -l | tr -d ' ') verdict tokens the code emits are documented in --help"
@@ -1224,7 +1229,7 @@ fi
 zc_out=$(cd "$empty_work" && bash "$HB" dead-lanes 2>&1); zc_rc=$?
 # The phrase is matched on ONE line: the help is a comment block, so a longer phrase
 # spans a line break and would never match however correct the text is.
-if [ "$zc_rc" -eq 1 ] && printf '%s\n' "$help_text" | grep -qi 'zero'; then
+if [ "$zc_rc" -eq 1 ] && grep -qi 'zero' <<<"$help_text"; then
   ok "the help's exit-code contract matches the zero-claims behaviour it documents (both say incomplete/1)"
 else
   bad "help and behaviour disagree on zero claims: rc=$zc_rc"
@@ -1238,7 +1243,7 @@ fi
 ns_emitted=$(grep -oE "refs/(lane-claims|machine-claims|heartbeats|tmp)/" "$HB" | sed 's|/$||' | sort -u)
 ns_missing=""
 for ns in $ns_emitted; do
-  printf '%s\n' "$help_text" | grep -q "$ns" || ns_missing="$ns_missing $ns"
+  grep -q "$ns" <<<"$help_text" || ns_missing="$ns_missing $ns"
 done
 if [ -n "$ns_emitted" ] && [ -z "$ns_missing" ]; then
   ok "every ref namespace the code touches is documented in --help ($(printf '%s' "$ns_emitted" | tr '\n' ' '))"
@@ -1247,8 +1252,8 @@ else
 fi
 # The per-lane shape specifically, since that is the one that drifted: the help must show the
 # lane-id component and must mark the legacy namespace as legacy.
-if printf '%s\n' "$help_text" | grep -q 'refs/lane-claims/<machine>/<lane-id>' \
-  && printf '%s\n' "$help_text" | grep -qi 'LEGACY'; then
+if grep -q 'refs/lane-claims/<machine>/<lane-id>' <<<"$help_text" \
+  && grep -qi 'LEGACY' <<<"$help_text"; then
   ok "--help documents the per-lane ref shape and marks refs/machine-claims/* as legacy"
 else
   bad "--help must document refs/lane-claims/<machine>/<lane-id> and mark the per-machine namespace legacy"
@@ -1259,11 +1264,11 @@ fi
 # re-read by eye each round. Brittle by construction, and accepted: doctrine treats this help as the
 # authoritative contract precisely because it cannot drift from the code, which is only true if
 # something checks.
-if printf '%s\n' "$help_text" | grep -q 'stamp <lane-id>' \
-  && printf '%s\n' "$help_text" | grep -qi 'list-claims .*one line per LANE'; then
+if grep -q 'stamp <lane-id>' <<<"$help_text" \
+  && grep -qi 'list-claims .*one line per LANE' <<<"$help_text"; then
   ok "--help describes stamp as taking a <lane-id> and list-claims as one line per LANE"
 else
-  bad "--help still describes the per-lane world in per-machine terms: $(printf '%s\n' "$help_text" | grep -E 'stamp <|list-claims ' | head -3)"
+  bad "--help still describes the per-lane world in per-machine terms: $(grep -E 'stamp <|list-claims ' <<<"$help_text" | head -3)"
 fi
 # ...and no line may cite #1930's retracted "one worker per machine" as a LIVE justification. The two
 # surviving citations are both explicitly marked as retracted, so the guard requires the retraction
@@ -1308,14 +1313,14 @@ fi
 # assertion has now been pointed at three different contracts in one day — never-0, then 0-restored,
 # now never-0-for-a-different-reason — which is exactly why it exists: each time the contract moved,
 # this is what caught the documentation lagging behind the code.
-if printf '%s\n' "$help_text" | grep -qi 'never exits 0' \
-  && ! printf '%s\n' "$help_text" | grep -qi 'exit 0 = at least one LOCAL'; then
+if grep -qi 'never exits 0' <<<"$help_text" \
+  && ! grep -qi 'exit 0 = at least one LOCAL' <<<"$help_text"; then
   ok "the help documents this slice's contract: positive detection only, never exit 0"
 else
   bad "the help must match the implementation: this slice never exits 0"
 fi
 # ...and the retired per-machine limitation must not still be presented as current.
-if ! printf '%s\n' "$help_text" | grep -qi 'ONE CLAIM REF PER MACHINE'; then
+if ! grep -qi 'ONE CLAIM REF PER MACHINE' <<<"$help_text"; then
   ok "the help no longer presents one-ref-per-machine as a current limitation"
 else
   bad "the help still describes the retired per-machine layout as a live bound"
@@ -2194,8 +2199,14 @@ else
 fi
 _help67=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
 # The help must open with the script's own banner and must NOT contain a function definition.
-if printf '%s\n' "$_help67" | head -5 | grep -q 'claim-heartbeat.sh' \
-  && ! printf '%s\n' "$_help67" | grep -qE '^[a-z_][a-z0-9_]*\(\) \{'; then
+# PIPELINE-FREE (roborev job 15, finding 1 — the same SIGPIPE class, found here by this round's
+# plant runs rather than predicted). `printf | head -5 | grep -q` under this suite's `set -o
+# pipefail` reports a FALSE FAIL whenever `head`/`grep` exits before the writer finishes: measured
+# 1 spurious failure in 60 runs of this exact condition, 0 in 60 of the form below. The help
+# content was correct every time; only the pipeline status was not.
+_help67_head="$(head -5 <<<"$_help67")"
+if grep -q 'claim-heartbeat.sh' <<<"$_help67_head" \
+  && ! grep -qE '^[a-z_][a-z0-9_]*\(\) \{' <<<"$_help67"; then
   ok "--help emits the help block and leaks no function body"
 else
   bad "--help does not look like help: first lines:
@@ -3089,6 +3100,274 @@ else
   bad "TEST 81/symlink-to-regular: a symlink to a regular library was refused (rc=$HB81_RC) — that is a false refusal on a legitimate layout. Output: $HB81_OUT"
 fi
 rm -rf "$HB81"
+
+# ===========================================================================
+echo "TEST 82: --help carries the REDUCED #3548 scope contract, phrase by phrase"
+# ===========================================================================
+# The owner ruling of 2026-09-01 (option C) is a DOCUMENTATION deliverable, so it is only worth
+# something if it is still there next month. A wording pass that deletes the scope statement leaves
+# a command whose subject set is empty on this fleet and no text saying so — the exact "reads as
+# working while answering about the empty set" failure #3548 is about.
+#
+# EACH PHRASE IS MATCHED WHOLE, AND THAT IS THE FIX FOR THE FIRST DRAFT (roborev job 15, finding 2).
+# The first version grepped for tokens — `worker-supervisor.sh`, `SINGLE-SLOT PER MACHINE` — which
+# this large help text can satisfy from an UNRELATED occurrence elsewhere: the only-writer
+# RELATIONSHIP was not required (the supervisor pid section mentions the script), and either
+# namespace-specific REASON could be deleted with the case still green. So the phrases below are
+# complete, each BINDS its namespace to its reason, and the failure message NAMES the phrase that
+# went missing — a bare red would not say which guarantee was lost.
+#
+# Matched against a WHITESPACE-FLATTENED copy of the help: it is a comment block, so every phrase
+# longer than a line is wrapped, and a line-wise grep for one could never match however correct the
+# text is (that is why the older cases in this file assert single-line fragments). Brittle by
+# construction and accepted, on TEST 44's precedent: a reflow reds this case, which is a cheap
+# correction, whereas a token match cannot tell a reflow from a deletion.
+help81=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
+# here-strings, not `printf | grep` (roborev job 15, finding 1): under this suite's `set -o
+# pipefail` a `grep -q` that exits at the first match can leave the writer with SIGPIPE, so the
+# PIPELINE status goes non-zero and the assertion reads FALSE on correct input — a false FAIL.
+help81_flat=$(tr '\n' ' ' <<<"$help81" | tr -s ' ')
+require_help_phrase() {  # <the guarantee this phrase carries> <the COMPLETE phrase, matched literally>
+  if grep -Fqi -- "$2" <<<"$help81_flat"; then
+    ok "--help carries the $1 statement"
+  else
+    bad "--help is MISSING the $1 statement (#3548) — this exact phrase is gone: \"$2\""
+  fi
+}
+# THE REDUCED SCOPE CONTRACT (roborev job 59). This case pins what the owner's ruling asked the code
+# seam to say, and nothing more. It used to pin the signature statements and a dated measurement too;
+# both moved to the runbook's single canonical section, because seven review rounds on #3548 (jobs 38,
+# 40, 41, 47, 55, 58, 59) were propagation failures of the same prose duplicated across five files —
+# including twice INSIDE this one file. Phrases are matched whole against a whitespace-flattened copy
+# (a comment block wraps, so a line-wise grep for a multi-line phrase can never match).
+require_help_phrase "supervisor-fleets-only scope, with the ruling cited" \
+  'SUPERVISOR FLEETS ONLY — DESCOPED (owner ruling 2026-09-01 on #3548, option C; completes #3393)'
+require_help_phrase "only-writer relationship" \
+  'The only IN-TREE CALLER that CREATES OR REFRESHES either is `scripts/local/worker-supervisor.sh`'
+require_help_phrase "exit-1-is-not-a-clean-bill-of-health rule (#3467)" \
+  'EXIT 1 MEANS "NOTHING WAS REPORTED", NEVER a clean bill of health'
+require_help_phrase "refs/claims/issue-<N> refusal (transient claiming-shell pid)" \
+  '`refs/claims/issue-<N>` records the TRANSIENT CLAIMING SHELL'
+require_help_phrase "refs/heartbeats/<machine> refusal (single-slot per machine)" \
+  '`refs/heartbeats/<machine>` is SINGLE-SLOT PER MACHINE'
+require_help_phrase "exclusion-IS-the-abstention mechanism (what TEST 83 proves)" \
+  'Being UNENUMERATED is the abstention: neither yields a row or a verdict of any kind'
+require_help_phrase "AC4 as a COUNTERFACTUAL about a non-refreshing carrier" \
+  'WERE a later change ever to read a NON-REFRESHING carrier, a stale pid there must never yield a `DEAD-*` verdict'
+
+# ===========================================================================
+echo "TEST 83: NAMESPACE CONTAINMENT — a dead pid in refs/claims/issue-<N> yields NO verdict (#3548 AC4)"
+# ===========================================================================
+# THE PROPERTY THAT STOPS THE OBVIOUS "FIX". `refs/claims/issue-<N>` is populated on every
+# /drive-issue box and carries a pid — but it is the TRANSIENT CLAIMING SHELL's, never
+# refreshed, and MEASURED DEAD while its lane was running (pid 3775744 on #3548). Reading it
+# would make this command report DEAD-NO-PROCESS for HEALTHY lanes. `refs/heartbeats/<machine>`
+# is single-slot per machine, so it cannot carry a per-lane verdict either. Both are therefore
+# out of the subject set, and that containment is pinned BEHAVIOURALLY rather than in prose:
+# staged exactly as the real fleet has them, a later read-side change that widened the listing
+# would turn a measured false positive into a verdict and fail here. RED-VERIFIED rather than
+# reasoned: with the listing widened to `refs/*claims/*` in a scratch copy, this fixture produces
+# a row naming issue 8801, so the assertion below reds — it is not passing because the fixture is
+# undetectable.
+#
+# Its own remote, so no lane-claims ref from an earlier case can supply a subject and make the
+# assertion pass for the wrong reason (the TEST 27 fixture idiom).
+ns_origin="$T/origin-ns.git"
+ns_work="$T/work-ns"
+g init --bare -q "$ns_origin"
+g clone -q "$ns_origin" "$ns_work" 2>/dev/null
+(
+  cd "$ns_work" || exit 1
+  echo seed >seed.txt; g add seed.txt; g commit -qm seed; g push -q -u origin main
+)
+# The per-issue LOCK, in claim.sh's own shape, carrying a verified-absent pid...
+(
+  cd "$ns_work" || exit 1
+  et=$(git hash-object -t tree --stdin </dev/null)
+  now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  cs=$(GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git commit-tree "$et" -m "claim issue=8801 machine=nsBox pid=${ABSENT_PID} actor=flow ts=${now_ts}")
+  g push -q origin "${cs}:refs/claims/issue-8801"
+)
+# ...plus a machine heartbeat, the other populated namespace. A DISTINCT issue number (8803, not the
+# lock's 8801) so each staged namespace is proven absent INDEPENDENTLY — with one shared number, a row
+# from either could satisfy the other's absence check (roborev job 41, finding 2).
+(cd "$ns_work" && HEARTBEAT_MACHINE=nsBox bash "$HB" beat 8803 >/dev/null 2>&1)
+ns_out=$(cd "$ns_work" && HEARTBEAT_MACHINE=nsBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+ns_rc=$?
+# NON-VACUITY FIRST: the fixture really is present and really would be judged dead if it were
+# in the subject set. Without this, an empty or unpushed fixture passes the containment check.
+ns_lock=$(g -C "$ns_work" ls-remote origin 'refs/claims/issue-8801' | awk '{print $1}')
+ns_beat=$(g -C "$ns_work" ls-remote origin 'refs/heartbeats/nsBox' | awk '{print $1}')
+if [ -n "$ns_lock" ] && [ -n "$ns_beat" ]; then
+  ok "NON-VACUITY: both populated namespaces are staged (refs/claims/issue-8801, refs/heartbeats/nsBox issue 8803) with pid $ABSENT_PID"
+else
+  bad "NON-VACUITY broken: fixture refs missing (lock='$ns_lock' beat='$ns_beat')"
+fi
+# THE ASSERTION HAS TO COVER WHAT IT CLAIMS (roborev job 41, finding 2). It used to reject only the
+# token `DEAD-` and the number 8801, so a heartbeat-derived row such as `nsBox <no issue> …
+# UNKNOWN-NO-PID` — which carries neither — would have passed while the case claimed "no row at all".
+# Four independent conditions now: no ROW for the staged machine, NO verdict token of ANY kind, and
+# each staged namespace's OWN identifier absent. here-strings throughout (job 15, finding 1).
+ns_row=$(grep -cE '^nsBox ' <<<"$ns_out")
+ns_verdict=$(grep -coE 'DEAD-[A-Z-]+|UNKNOWN-[A-Z-]+|ALIVE' <<<"$ns_out")
+if [ "$ns_rc" -eq 1 ] \
+  && [ "$ns_row" -eq 0 ] \
+  && [ "$ns_verdict" -eq 0 ] \
+  && ! grep -q '8801' <<<"$ns_out" \
+  && ! grep -q '8803' <<<"$ns_out"; then
+  ok "neither populated namespace yields anything: 0 rows for nsBox, 0 verdict tokens of any kind, and neither 8801 (lock) nor 8803 (heartbeat) named (rc=$ns_rc)"
+else
+  bad "the populated namespaces must be OUT of the subject set — rows=$ns_row verdict-tokens=$ns_verdict rc=$ns_rc out:
+$ns_out"
+fi
+# ...and the run must say it measured NOTHING, so an operator is not left reading silence as
+# health. This is the descope's operator-facing half: on a supervisor-less fleet THIS is the
+# normal output, and it has to be self-describing.
+if grep -qi 'not the same as an idle fleet' <<<"$ns_out" \
+  && grep -qi "NOT 'no dead lanes'" <<<"$ns_out"; then
+  ok "the empty-subject-set run says nothing was measured and that this is NOT 'no dead lanes'"
+else
+  bad "an empty subject set must report that nothing was measured: out:
+$ns_out"
+fi
+# NON-VACUITY, the other direction: the SAME pid in the SAME shape, in the namespace this
+# command DOES read, is reported DEAD. So TEST 83 pins the NAMESPACE boundary, not a fixture
+# that simply fails to be detectable.
+craft_lane_claim "$ns_work" "nsBox" 8802 "$ABSENT_PID" 30
+nsd_out=$(cd "$ns_work" && HEARTBEAT_MACHINE=nsBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+nsd_rc=$?
+if [ "$nsd_rc" -eq 3 ] && grep -Eq '^nsBox +8802 .*DEAD-NO-PROCESS' <<<"$nsd_out"; then
+  ok "NON-VACUITY: the same absent pid in refs/lane-claims IS reported DEAD-NO-PROCESS (rc=3) — the boundary is the namespace"
+else
+  bad "NON-VACUITY broken: the same pid in the subject namespace must be DEAD: rc=$nsd_rc out:
+$nsd_out"
+fi
+
+# ===========================================================================
+echo "TEST 84: ONE canonical signature statement, and no site contradicts it (#3548)"
+# ===========================================================================
+# CONSOLIDATION, NOT A CLEVERER GUARD (roborev job 58). One statement about the two board signatures
+# was duplicated across five sites and produced a review finding at jobs 38, 40, 41, 47 and 55 — every
+# one a PROPAGATION failure, i.e. the duplication WAS the defect. The previous version of this case
+# pinned the same phrases in several files, which could not see drift BETWEEN two occurrences inside
+# one file (it flattened each file to a single blob), and a per-section guard would only detect what
+# should not be possible. So the statement now lives in ONE place and this case asserts exactly two
+# things — no more, and the second bullet is what it does NOT assert:
+#   * the CANONICAL location (docs/development/fleet-runbook.md, "Lane liveness on a supervisor-less
+#     /drive-issue fleet") carries the FULL content, and
+#   * NO covered site re-asserts a definite label for either signature (the plant-verified negative
+#     half: needles grepped from the files' real text, narrow, symmetric across (a)/(b)).
+#
+# POINTER INTEGRITY IS DELIBERATELY NOT GUARDED — a decision, not an oversight (jobs 59, 61). Three
+# assertions requiring each site to point here were DELETED; do not restore them. This case reads each
+# file as ONE blob, so a pointer assertion matches anywhere in the file and PASSES while the pointer is
+# broken: measured, 209 passed / 0 failed with the pointer deleted outright from CLAUDE.md and the
+# website page, satisfied by an unrelated citation. A broken pointer is a nit; a guard with known false
+# passes is worse than none (this repo has removed two for that reason). Job 61 caught this comment
+# still CLAIMING that coverage after the assertions were gone.
+#
+# DECLARED GAP, stated rather than implied: the `cmd_dead_lanes` SEAM COMMENT is NOT covered. It sits
+# below ---END-HELP--- so `--help` cannot reach it, and reading it would mean parsing the script's
+# source for a comment block. An earlier version of this comment CLAIMED seam coverage while asserting
+# nothing about it — an advertised-but-absent coverage claim is the defect this issue keeps fixing, so
+# the claim is withdrawn instead of being quietly left in place.
+#
+# Text is NORMALISED before matching — whitespace flattened (every file wraps) and markdown emphasis
+# characters removed — because the same sentence is `**bold**` in one file and plain in another.
+#
+# SECOND DECLARED GAP (roborev job 63): this case does NOT enforce the "ONE canonical statement"
+# contract it is named for. Copying the canonical text verbatim into another covered file would PASS
+# — the negative half rejects a bounded set of contradictory phrasings, not duplication — and the
+# positive half scans each whole file rather than the canonical SECTION, so it cannot see drift
+# between two occurrences inside one document. DECLARED, NOT FIXED, and deliberately: enforcing
+# uniqueness of a prose passage mechanically means extracting sections by heading and diffing
+# normalised prose, which is the unbounded-parsing shape this repo has twice removed a guard for
+# (#3229's census-exclusion, #1716's cargo cross-check) — a guard with known false PASSes invites
+# reliance it cannot support. What this case DOES prove is plant-verified in both directions: the
+# canonical statement is present in full in the canonical file, and no covered file re-asserts a
+# definite label for either signature. Read the gap as the boundary of the claim, not an oversight.
+_rb="$SCRIPT_DIR/../../docs/development/fleet-runbook.md"
+_cl="$SCRIPT_DIR/../../CLAUDE.md"
+_wb="$SCRIPT_DIR/../../website/src/content/docs/agents-developing/delivery-pipeline.md"
+# FAIL-CLOSED on an unreadable file: committed source is never legitimately absent, and a skip here
+# would silently retire the guard (this suite's `skip` is for unstageable HOST premises, not for
+# missing repository content).
+_norm() { tr '\n' ' ' | tr -s ' ' | tr -d '*_'; }
+_help83_raw=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
+help83n=$(_norm <<<"$_help83_raw")
+missing83=""
+for _f in "$_rb" "$_cl" "$_wb"; do
+  [ -r "$_f" ] || missing83="$missing83 $_f"
+done
+if [ -n "$missing83" ]; then
+  bad "TEST 84 cannot run: committed source unreadable —$missing83 (fail-closed: absence is not a pass)"
+else
+  rb83n=$(_norm <"$_rb"); cl83n=$(_norm <"$_cl"); wb83n=$(_norm <"$_wb")
+  # --- THE CANONICAL LOCATION CARRIES THE FULL STATEMENT. These are the load-bearing clauses: that
+  #     neither shape is a verdict, both signatures' own sentences, the operator rule, and the named
+  #     check that makes signature (a) actionable. Delete or reword any of them and this reds.
+  for _need in \
+    'This section is the CANONICAL statement of the two board signatures' \
+    'NEITHER signature is a verdict' \
+    'WITH NO LIVE SESSION IS NOT A VERDICT EITHER' \
+    'NO claim ref is AMBIGUOUS and is deliberately NOT classified here' \
+    'no active `drive-issue-<N>` cron' \
+    'a prompt to look, never as a verdict'; do
+    if grep -Fqi -- "$_need" <<<"$rb83n"; then
+      ok "canonical statement (fleet-runbook.md) carries: \"$_need\""
+    else
+      bad "the CANONICAL signature statement in fleet-runbook.md is MISSING (#3548): \"$_need\""
+    fi
+  done
+  # --- POINTER INTEGRITY IS DELIBERATELY NOT GUARDED (roborev job 59, finding 2). Read that as a
+  #     decision, not an oversight. Three assertions here required each pointing site to name the
+  #     canonical section, and they were DELETED: this case reads each file as ONE blob, and both
+  #     doctrine files cite the runbook and that section heading elsewhere for unrelated reasons — so
+  #     the first version PASSED (209 passed, 0 failed) with the signature pointer deleted outright
+  #     from CLAUDE.md and from the website page. Binding the needle to the pointer's own wording fixed
+  #     that instance and left the shape: a whole-file match cannot tell WHERE a phrase occurs. A
+  #     broken pointer is a nit; a guard that can pass while wrong is worse than no guard, and this
+  #     repo has removed two guards for exactly that reason. So the guarded properties are the ones
+  #     that are load-bearing AND provable: the canonical statement exists in full in ONE place, and
+  #     no covered file contradicts it.
+  # --- NO covered site re-asserts a definite label, for EITHER signature.
+    # SYMMETRIC ACROSS BOTH SIGNATURES (roborev job 55). The negative half used to forbid definite
+    # labels for (b) ONLY, so a file could satisfy every positive clause and still carry a
+    # contradictory definite label for (a) — which is exactly what happened: two runbook sites survived
+    # job 52 calling a held claim the "lane-DEATH signal" and signature (a) "the unambiguous one".
+    #
+    # THE NEEDLES ARE GREPPED, NOT INVENTED, AND DELIBERATELY NARROW. A bare 'unambiguous' would red on
+    # correct prose — the runbook and CLAUDE.md each carry two unrelated uses (a supervisor-death alarm,
+    # a should-reap grammar note) — so each needle is bound to a signature's own subject, and the
+    # definite article matters: 'is THE lane-death signal' is forbidden while the correct sentence
+    # "neither reading is A lane-DEATH verdict" must keep passing. Every needle was checked against the
+    # four files' CURRENT text before being added, so none of them reds on correct input today.
+  for _pair in "--help:$help83n" "fleet-runbook.md:$rb83n" "CLAUDE.md:$cl83n" "website delivery-pipeline.md:$wb83n"; do
+    _who="${_pair%%:*}"; _txt="${_pair#*:}"
+    _leaked=""
+    for _refuse in \
+      'is the #3436 unclaimed-work signature' \
+      'no claim ref is the dead-lane signal' \
+      'as the signature of a lost lane' \
+      'is the dead-lane signal' \
+      'is the lane-death signal' \
+      'that one is a held claim ref with no live session' \
+      'for that, look for a held claim ref' \
+      'signature (a) is the unambiguous one' \
+      'that one is not ambiguous'; do
+      grep -Fqi -- "$_refuse" <<<"$_txt" && _leaked="$_leaked | $_refuse"
+    done
+    if [ -z "$_leaked" ]; then
+      ok "$_who asserts no definite label for signature (a) or (b)"
+    else
+      bad "$_who RE-ASSERTS a definite signature label (#3548, jobs 38/40/41/47/52/55):$_leaked"
+    fi
+  done
+fi
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed, $SKIP skipped ==="
 [ "$FAIL" -eq 0 ]
