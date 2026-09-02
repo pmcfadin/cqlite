@@ -401,7 +401,14 @@ has "RESULT: PASS " "several CONTROL: the single record is read"
 #     this refusal is a repository that ignores one of the two files and not the other — which
 #     is also the real-world shape (a hand-written pattern instead of the shipped
 #     `.review-stage/` directory rule).
-R3="$(newrepo '.review-stage/**/*.stage')"
+# THE FIXTURE ALSO IGNORES THE PUBLISH LOCK (#3751 round 21, AA1). `lock_stage` holds the lock
+# path to the same ignore bar as the record — a lock file that dirties a running gate is the very
+# harm `assert_ignored` exists for — and it is checked BEFORE the report path is even derived (the
+# report's name is not known until the nonce is reserved). So an extension-style pattern must cover
+# `*.stage.lock` as well, or the LOCK's refusal fires first and this case measures the wrong half.
+# The property under test is unchanged: one of the two artifacts is ignored and the REPORT is not.
+R3="$(newrepo '.review-stage/**/*.stage
+.review-stage/**/*.stage.lock')"
 rs "$R3" open c --issue 200 --agent spec-auditor
 rc_is 2 "check-ignore: a report path git does not confirm ignored is REFUSED (exit 2)"
 has "OPEN-REFUSED reason=path-not-gitignored" "check-ignore: the refusal names the reason"
@@ -1033,16 +1040,22 @@ rc_is 0 "symlink control: a real report over an atomically-written sentinel stil
 #     is reached through the repository's OWN `.gitignore`, which is the shape that can actually
 #     occur in the field.
 R16="$(newrepo '.review-stage/**/*.md
-.review-stage/**/*.stage')"
+.review-stage/**/*.stage
+.review-stage/**/*.stage.lock')"
 rs "$R16" open c --issue 806 --agent spec-auditor
 rc_is 2 "tempfile: records ignored only by EXTENSION are REFUSED (the temp would dirty the tree)"
 has "what=report-of-record-tempfile" "tempfile: the refusal names the TEMPORARY half"
 has "TEMPORARY file the write goes through" "tempfile: the refusal explains the path the caller never named"
 has "ignore the DIRECTORY instead" "tempfile: the refusal names the remedy"
-if [ -n "$(ls -A "$R16/.review-stage/issue-806" 2>/dev/null)" ]; then
-  bad "tempfile: the refusal must not write anything in the stage directory ($(ls -A "$R16/.review-stage/issue-806" 2>/dev/null))"
+# THE PUBLISH LOCK FILE IS EXCLUDED, DELIBERATELY (#3751 round 21, AA1). It is created before any
+# artifact of the stage and is never removed: an `flock` lock lives on the OPEN FILE DESCRIPTION,
+# so a leftover file holds no lock, while DELETING it would let a peer holding the old inode and a
+# newcomer creating a fresh one lock different objects and both proceed. The property here is
+# unchanged and is about the ARTIFACTS: no report, no record, no temporary file survives a refusal.
+if [ -n "$(ls -A "$R16/.review-stage/issue-806" 2>/dev/null | LC_ALL=C grep -v '^c\.stage\.lock$' || true)" ]; then
+  bad "tempfile: the refusal must not write any stage ARTIFACT in the stage directory ($(ls -A "$R16/.review-stage/issue-806" 2>/dev/null))"
 else
-  ok "tempfile: nothing was written at the refused path"
+  ok "tempfile: no stage artifact was written at the refused path (the publish lock file is not one)"
 fi
 # And the DIRECTORY-ignored form of the same thing is ACCEPTED — the refusal above is about the
 # PATTERN, not about writing at all, and without this control the case above could pass on a
@@ -1075,7 +1088,8 @@ fi
 # window of its own: `git check-ignore` answers about a path STRING, and the string checked is
 # the string created.
 R11E="$(newrepo '.review-stage/**/*.md
-.review-stage/**/*.stage')"
+.review-stage/**/*.stage
+.review-stage/**/*.stage.lock')"
 # The extension-only-ignored REPOSITORY is used deliberately: its `-tempfile` refusal is the ONE
 # place the temporary path is NAMED in the output, so it is how a test can observe a name that
 # otherwise never leaves the process. (That refusal is round 1's declared consequence, pinned in
@@ -2186,7 +2200,7 @@ OUT="$(cd "$R16" && PATH="$K2_BIN:$PATH" bash "$RS" open c --issue 990 --agent s
 rc_is 2 "race/no-fallback: an open that cannot generate a nonce is REFUSED"
 has "reason=report-nonce-not-generated" "race/no-fallback: the refusal names the cause"
 has "no fallback to a predictable token" "race/no-fallback: and says why there is no substitute"
-if [ -z "$(ls -A "$R16/.review-stage/issue-990" 2>/dev/null | LC_ALL=C grep -v '^c\.stage$' || true)" ]; then
+if [ -z "$(ls -A "$R16/.review-stage/issue-990" 2>/dev/null | LC_ALL=C grep -vE '^c\.stage(\.lock)?$' || true)" ]; then
   ok "race/no-fallback: no report was written at any path"
 else
   bad "race/no-fallback: the refused open wrote $(ls -A "$R16/.review-stage/issue-990" 2>/dev/null)"
@@ -6085,6 +6099,289 @@ case "$Z2_FAKE_OUT" in
   *) bad "z2/positive-control: the pre-fix-order copy did not reproduce the permissive reading (got: $Z2_FAKE_OUT)" ;;
 esac
 
+# --- 36. TWO PUBLISHERS OF ONE STAGE MUST NOT INTERLEAVE (round 21, AA1) --------------------------
+# THE FINDING (roborev job 414, AA1). `record-author-performed` RE-VERIFIES the stage record and
+# then publishes its replacement with a SEPARATE `mv`. A concurrent `open --force` landing in that
+# span publishes generation **B**, after which this command overwrites B's record with **C** while
+# recording that it superseded **A**. Both consequences are this issue's CORE SUBJECT rather than
+# side effects:
+#   * the agent the peer `open` just spawned is writing into an **ORPHANED** report — no record
+#     names B, so nothing derives its path and its eventual `FINDINGS` is read by NOTHING;
+#   * the audit trail **NAMES THE WRONG PREDECESSOR**, which is a FALSIFIED record and not merely
+#     a missing one. Falsifying the trail is the worst failure this tool can have.
+#
+# WHY A LOCK HERE, WHEN THIS ISSUE REFUSED ONE TWICE, AND THE DISTINCTION IS THE WHOLE
+# JUSTIFICATION — DO NOT GENERALISE IT.
+#   * Round 6 (K2) replaced a SCANNED generation with a random nonce INSTEAD of locking, because a
+#     nonce REMOVES the race rather than serialising it. That ruling STANDS: nothing here selects a
+#     name by looking at what is on disk, and no lock is taken to make a name unique.
+#   * Round 9/15 (N1/U1) declined a lock for the LATE-REVIEWER window, because the counterparty
+#     there is A REVIEWER WRITING ITS REPORT — which takes no lock and cannot be made to. That
+#     ruling STANDS too: report writers and every READER stay lock-free.
+#   * THIS case is different in exactly one respect, and it is the respect that decides it: BOTH
+#     parties are `review-stage.sh` SUBCOMMANDS (`open --force` and `record-author-performed`), so
+#     the counterparty CAN take the lock. Mutual exclusion between our OWN publishers is available
+#     here in a way it was not in either earlier case.
+#
+# THE THREE WORRIES ROUND 6 NAMED ARE EACH ANSWERED RATHER THAN IGNORED, and they are asserted
+# below: a box without `flock` gets a NAMED REFUSAL and never a silent unlocked fallback; a "stale
+# lock file" cannot wedge anything because an `flock` lock lives on the OPEN FILE DESCRIPTION and
+# the kernel drops it when the holder dies, so the leftover file holds no lock; and a HUNG live
+# holder is bounded by `-w` and refused BY NAME.
+AA1_D="$T/aa1"; mkdir -p "$AA1_D"
+AA1_REASON='no peer agent available on this box; hand C against the spec deltas'
+AA1_EV='docs/round-artifacts/issue-3751-hand-c.md'
+
+# (a) STRUCTURAL — THE PUBLISHER CENSUS IS DERIVED FROM THE SOURCE, NEVER CURATED. Every statement
+#     that commits the STAGE RECORD is a publisher, and each must hold the per-stage lock before it.
+#     Attributed to the FUNCTION it appears in, so a publisher added later in a new subcommand
+#     cannot join the set unlocked. Comment lines are stripped first: a comment legitimately NAMES
+#     the call it documents, and a guard that reds on correct input is the guard agents learn to
+#     waive (round 17's own first-draft defect).
+AA1_CENSUS="$(LC_ALL=C awk '
+  { line = $0; sub(/^[[:space:]]*#.*$/, "", line) }
+  line ~ /^[a-zA-Z_][a-zA-Z_0-9]*\(\)[[:space:]]*\{/ { fn = line; sub(/\(\).*$/, "", fn); lockline = 0 }
+  index(line, "lock_stage ") > 0 && fn != "" && lockline == 0 { lockline = FNR }
+  index(line, "commit_write \"$sfile\" stage-record") > 0 {
+    printf "%s:%d:%d\n", fn, FNR, lockline
+  }
+' "$RS" 2>/dev/null || true)"
+AA1_PUBS="$(printf '%s\n' "$AA1_CENSUS" | LC_ALL=C grep -c . || true)"
+if [ "$AA1_PUBS" = "2" ]; then
+  ok "aa1/census: TWO statements publish the stage record, and the census DERIVED both (cmd_open, cmd_record_author_performed)"
+else
+  bad "aa1/census: $AA1_PUBS stage-record publisher(s) found, want 2 — the publisher set moved and the lock coverage below is about the wrong sites ($AA1_CENSUS)"
+fi
+AA1_UNLOCKED="$(printf '%s\n' "$AA1_CENSUS" | LC_ALL=C awk -F: 'NF == 3 && $3 == 0 { printf "%s(line %s) ", $1, $2 }' || true)"
+if [ -z "$AA1_UNLOCKED" ]; then
+  ok "aa1/census: and EVERY publisher takes the per-stage lock before it publishes (0 unlocked)"
+else
+  bad "aa1/census: publisher(s) with NO preceding lock_stage: $AA1_UNLOCKED — a publisher that does not take the lock makes the mutual exclusion vacuous for every publisher that does"
+fi
+AA1_FNS="$(printf '%s\n' "$AA1_CENSUS" | LC_ALL=C awk -F: '{ printf "%s ", $1 }' || true)"
+case "$AA1_FNS" in
+  *cmd_open*) ok "aa1/census: cmd_open is one of them (the --force counterparty this finding names)" ;;
+  *) bad "aa1/census: cmd_open is not in the publisher census ($AA1_FNS) — the counterparty cannot be excluded" ;;
+esac
+case "$AA1_FNS" in
+  *cmd_record_author_performed*) ok "aa1/census: cmd_record_author_performed is the other (the reported site)" ;;
+  *) bad "aa1/census: the reported site is not in the publisher census ($AA1_FNS)" ;;
+esac
+# ONE IMPLEMENTATION, so the two publishers cannot hold two opinions about the lock.
+if [ "$(LC_ALL=C grep -c '^lock_stage() {' "$RS" || true)" = "1" ]; then
+  ok "aa1/census: exactly ONE lock implementation — two spellings would be two locks"
+else
+  bad "aa1/census: want exactly one 'lock_stage() {' definition"
+fi
+# READERS TAKE NO LOCK, so a reader can never be BLOCKED by a publisher. Asserted structurally as
+# well as behaviourally below, because "verdict is fast today" is not the property.
+AA1_READER_LOCKS=0
+for AA1_FN in cmd_verdict cmd_status; do
+  if LC_ALL=C awk -v fn="$AA1_FN" '
+      { line = $0; sub(/^[[:space:]]*#.*$/, "", line) }
+      line ~ ("^" fn "\\(\\)[[:space:]]*\\{") { inf = 1; next }
+      inf == 1 && line ~ /^\}/ { inf = 0 }
+      inf == 1 && index(line, "lock_stage ") > 0 { found = 1 }
+      END { exit(found ? 0 : 1) }
+    ' "$RS"; then
+    AA1_READER_LOCKS=$((AA1_READER_LOCKS + 1))
+  fi
+done
+if [ "$AA1_READER_LOCKS" = "0" ]; then
+  ok "aa1/census: NEITHER reader (verdict, status) takes the lock — a publisher can never block a read"
+else
+  bad "aa1/census: $AA1_READER_LOCKS of 2 readers take the lock — a reader waiting on a publisher is a new failure mode, and the coherent observation already detects a mid-read change on its own"
+fi
+# `flock` IS REQUIRED, NOT ATTEMPTED — the `mv -T` precedent (round 7, L2). No `|| true`, no
+# unlocked fallback, and the absence is a NAMED refusal.
+if LC_ALL=C grep -qE 'flock[^|]*\|\|[[:space:]]*true' "$RS"; then
+  bad "aa1/census: the flock call is swallowed by '|| true' — an unlocked fallback is the permissive branch this whole tool refuses"
+else
+  ok "aa1/census: the flock call is never swallowed by '|| true' — a failed lock cannot become an unlocked publish"
+fi
+AA1_CAUSES=0
+for AA1_C in stage-lock-unavailable stage-lock-timeout stage-lock-failed; do
+  LC_ALL=C grep -q "reason=$AA1_C" "$RS" && AA1_CAUSES=$((AA1_CAUSES + 1))
+done
+if [ "$AA1_CAUSES" = "3" ]; then
+  ok "aa1/census: three DISTINCT named lock causes (unavailable / timeout / failed) — the operator action differs per cause"
+else
+  bad "aa1/census: only $AA1_CAUSES of 3 named lock causes present"
+fi
+
+# (b) THE INTERLEAVE, DRIVEN DETERMINISTICALLY. SIMULATED, NOT RACED: one injected line at a fixed
+#     point inside the recheck->publish span, nothing concurrent, no timing dependence. The plant
+#     runs the SHIPPED script (baked in at build time), so the peer publisher is the real one and
+#     not the copy under test.
+AA1_PEER="$AA1_D/peer-open.out"
+AA1_INJECTION='  { bash '"'$RS'"' open c --issue "$issue" --agent spec-auditor --force >'"'$AA1_PEER'"' 2>&1 || true; } # N1_LATE_REVIEWER'
+# The anchor is the LAST `commit_write "$sfile" stage-record` — the one inside
+# `record-author-performed` — so the plant lands AFTER both final re-verifications and BEFORE the
+# publication: exactly the span the finding names, and a line present in both the pre- and
+# post-fix shapes so the same case measures both.
+if n1_build_last "$AA1_D/publish-window.sh" 'commit_write "$sfile" stage-record' "$AA1_INJECTION"; then
+  ok "aa1/interleave: the peer-publisher plant landed at the LAST instant before publication (asserted, not assumed)"
+else
+  bad "aa1/interleave: the plant did NOT land, so this case proves nothing"
+fi
+R36="$(newrepo)"
+rs "$R36" open c --issue 720 --agent spec-auditor
+AA1_A="$(RECORD_NONCE "$R36" 720 c)"
+if [ -n "$AA1_A" ]; then
+  ok "aa1/interleave PREMISE: generation A was opened and the record names it ($AA1_A)"
+else
+  bad "aa1/interleave PREMISE: no generation A nonce — the case below cannot distinguish the generations"
+fi
+: >"$AA1_PEER"
+OUT="$(cd "$R36" && bash "$AA1_D/publish-window.sh" record-author-performed c --issue 720 \
+  --reason "$AA1_REASON" --evidence "$AA1_EV" --performed-by author 2>&1)"; RC=$?
+AA1_PEER_OUT="$(cat "$AA1_PEER" 2>/dev/null || printf '<absent>\n')"
+AA1_C_NONCE="$(RECORD_NONCE "$R36" 720 c)"
+AA1_DIR="$R36/.review-stage/issue-720"
+AA1_GENS="$(LC_ALL=C find "$AA1_DIR" -maxdepth 1 -name 'c.*.md' 2>/dev/null | LC_ALL=C grep -c . || true)"
+# THE PEER PUBLISHER IS EXCLUDED. Pre-fix it reported OPEN-OK and published generation B inside the
+# window; post-fix it cannot acquire the lock and is refused BY NAME.
+case "$AA1_PEER_OUT" in
+  *"reason=stage-lock-timeout"*) ok "aa1/interleave: the peer publisher is REFUSED by name (stage-lock-timeout) — it could not publish inside the window" ;;
+  *) bad "aa1/interleave: the peer publisher was NOT excluded — it must refuse by name rather than publish a generation inside the recheck->publish span (peer out: $AA1_PEER_OUT)" ;;
+esac
+case "$AA1_PEER_OUT" in
+  *"OPEN-OK"*) bad "aa1/interleave: the peer publisher reported OPEN-OK inside the window — generation B was published between the recheck and the publish" ;;
+  *) ok "aa1/interleave: and it never reports OPEN-OK for a generation published inside that span" ;;
+esac
+# NO ORPHANED GENERATION. Pre-fix the dir held THREE reports (A, the peer's B, and this call's C)
+# and NO record named B, so the agent the peer just spawned was handed a report nothing reads.
+if [ "$AA1_GENS" = "2" ]; then
+  ok "aa1/interleave: exactly TWO generations exist (A and the substitute) — no orphaned report was published"
+else
+  bad "aa1/interleave: $AA1_GENS generations on disk, want 2 — a third one is a report NO record names, and the agent holding it writes where nothing reads"
+fi
+AA1_ORPHANS=""
+for AA1_F in "$AA1_DIR"/c.*.md; do
+  [ -f "$AA1_F" ] || continue
+  AA1_N="$(basename "$AA1_F")"; AA1_N="${AA1_N#c.}"; AA1_N="${AA1_N%.md}"
+  [ "$AA1_N" = "$AA1_A" ] && continue
+  [ "$AA1_N" = "$AA1_C_NONCE" ] && continue
+  AA1_ORPHANS="$AA1_ORPHANS $AA1_N"
+done
+if [ -z "$AA1_ORPHANS" ]; then
+  ok "aa1/interleave: every report on disk is either the superseded generation or the published one — nothing was published that no record ever named"
+else
+  bad "aa1/interleave: ORPHANED generation(s):$AA1_ORPHANS — published by the peer inside the window and named by no record, so a FINDINGS written there is read by nothing"
+fi
+# AND THE TRACE NAMES THE GENERATION ACTUALLY SUPERSEDED. Pre-fix it named A while B was the
+# generation the record held at the instant of publication.
+rc_is 0 "aa1/interleave: the recording completes — the peer was excluded, so nothing changed under it"
+has "supersedes-report-nonce=$AA1_A" "aa1/interleave: the trace names generation A"
+if [ -n "$AA1_A" ] && [ "$AA1_C_NONCE" != "$AA1_A" ] && [ -z "$AA1_ORPHANS" ]; then
+  ok "aa1/interleave: and A really IS the generation superseded — no other generation was published between the recheck and the publish, so the recorded predecessor is not a falsified one"
+else
+  bad "aa1/interleave: the recorded predecessor cannot be shown to be the superseded generation (A=$AA1_A published=$AA1_C_NONCE orphans:${AA1_ORPHANS:-none})"
+fi
+
+# (c) A PUBLISHER SERIALISES BEHIND A LIVE HOLDER — it WAITS, it does not fail fast and it does not
+#     publish anyway. Driven with an EXTERNAL holder (`flock` on the same path) rather than a second
+#     copy of the script, so the case measures the lock and not a second subject.
+R36B="$(newrepo)"
+rs "$R36B" open c --issue 721 --agent spec-auditor
+rc_is 0 "aa1/serialise fixture: a stage was opened, so the lock file's directory exists"
+AA1_LOCK="$R36B/.review-stage/issue-721/c.stage.lock"
+if [ -e "$AA1_LOCK" ]; then
+  ok "aa1/serialise: the per-stage lock file lives beside the record it guards ($(basename "$AA1_LOCK"))"
+else
+  bad "aa1/serialise: no lock file was created at $AA1_LOCK"
+fi
+if (cd "$R36B" && git check-ignore -q -- "$AA1_LOCK"); then
+  ok "aa1/serialise: and git confirms it is IGNORED, so a stage opened mid-run cannot dirty a running gate (#2926/#3648)"
+else
+  bad "aa1/serialise: the lock file is NOT gitignored — it would dirty a running gate of record"
+fi
+flock -x "$AA1_LOCK" -c 'sleep 2' &
+AA1_HOLDER=$!
+sleep 0.4
+AA1_T0="$(date +%s)"
+rs "$R36B" open c --issue 721 --agent spec-auditor --force
+AA1_T1="$(date +%s)"
+wait "$AA1_HOLDER" 2>/dev/null || true
+rc_is 0 "aa1/serialise: the second publisher SUCCEEDS once the holder releases — it serialises rather than refusing"
+if [ "$((AA1_T1 - AA1_T0))" -ge 1 ]; then
+  ok "aa1/serialise: and it really WAITED for the holder ($((AA1_T1 - AA1_T0))s >= 1s), so the exclusion is not vacuous"
+else
+  bad "aa1/serialise: it did not wait at all ($((AA1_T1 - AA1_T0))s) — the lock was not taken, so the case above proves nothing"
+fi
+
+# (d) A READER IS NEVER BLOCKED BY A PUBLISHER. The coherent-observation primitive (round 17, W1)
+#     detects a mid-read change ON ITS OWN, so a reader has nothing to gain from the lock and a
+#     reader that waited on a publisher would be a NEW failure mode in a tool whose subject is
+#     reporting the truth promptly.
+R36C="$(newrepo)"
+rs "$R36C" open c --issue 722 --agent spec-auditor
+printf 'result: FINDINGS\n\n### [BLOCKER] blocking\n' >"$(REPORT_OF "$R36C" 722 c)"
+AA1_LOCK2="$R36C/.review-stage/issue-722/c.stage.lock"
+flock -x "$AA1_LOCK2" -c 'sleep 5' &
+AA1_HOLDER2=$!
+sleep 0.4
+AA1_R0="$(date +%s)"
+rs "$R36C" verdict c --issue 722
+AA1_R1="$(date +%s)"
+rc_is 4 "aa1/reader: verdict still reports the blocking FINDINGS while a publisher holds the lock"
+if [ "$((AA1_R1 - AA1_R0))" -le 2 ]; then
+  ok "aa1/reader: and it returned PROMPTLY ($((AA1_R1 - AA1_R0))s <= 2s) — the read took no lock"
+else
+  bad "aa1/reader: the read WAITED $((AA1_R1 - AA1_R0))s on a publisher's lock — readers must stay lock-free"
+fi
+AA1_S0="$(date +%s)"
+rs "$R36C" status c --issue 722
+AA1_S1="$(date +%s)"
+if [ "$((AA1_S1 - AA1_S0))" -le 2 ]; then
+  ok "aa1/reader: status is lock-free too ($((AA1_S1 - AA1_S0))s <= 2s)"
+else
+  bad "aa1/reader: status WAITED $((AA1_S1 - AA1_S0))s on a publisher's lock"
+fi
+wait "$AA1_HOLDER2" 2>/dev/null || true
+# AND THE PRIMITIVE STILL CATCHES A MID-READ CHANGE WITHOUT THE LOCK — the property that makes the
+# lock-free read SAFE rather than merely fast, and it is PINNED ALREADY: section 31's `w1/read`
+# case plants a peer `open --force` INSIDE `observe_stage`'s own pair of reads and requires
+# `verdict` to report the NON-VERDICT `stage record changed mid-read` (exit 5). It is deliberately
+# NOT repeated here: a second copy of one case is two places for it to drift, and re-asserting it
+# under this section's label would make the count move without measuring anything new. Confirmed
+# still passing on every run of this suite — if it ever stops, the readers' lock-freedom loses its
+# justification and this section's (d) is the paragraph to re-read.
+
+# (e) `flock` IS REQUIRED, MEASURED — a box without it gets a NAMED REFUSAL and never a silent
+#     unlocked publish. THE ARTIFACT IS SUBSTITUTED, never a settable seam (round 16's rule): the
+#     case builds a PATH holding every tool this script uses EXCEPT `flock`, and the CONTROL adds
+#     `flock` back to prove the PATH is otherwise complete — without that control an unrelated
+#     missing tool would produce an identical refusal and the case would prove nothing.
+AA1_BIN="$AA1_D/bin"; mkdir -p "$AA1_BIN"
+AA1_BINOK=1
+for AA1_TOOL in awk bash basename cat cut date dirname find git grep head ln mkdir mktemp mv rm sed tail tr wc; do
+  AA1_SRC="$(command -v "$AA1_TOOL" 2>/dev/null || true)"
+  if [ -n "$AA1_SRC" ]; then ln -sf "$AA1_SRC" "$AA1_BIN/$AA1_TOOL"; else AA1_BINOK=0; fi
+done
+if [ "$AA1_BINOK" = "1" ]; then
+  ok "aa1/required: a tool directory was built with every command this script uses except flock"
+else
+  bad "aa1/required: could not build the tool directory — the cases below would be vacuous"
+fi
+AA1_FLOCK="$(command -v flock 2>/dev/null || true)"
+R36E="$(newrepo)"
+# THE CONTROL FIRST: with `flock` present in that same directory the stage opens normally, so the
+# refusal below is attributable to flock's ABSENCE and to nothing else.
+ln -sf "$AA1_FLOCK" "$AA1_BIN/flock" 2>/dev/null || true
+OUT="$(cd "$R36E" && PATH="$AA1_BIN" bash "$RS" open c --issue 724 --agent spec-auditor 2>&1)"; RC=$?
+rc_is 0 "aa1/required CONTROL: with flock on that PATH the stage opens normally (the PATH is complete)"
+rm -f "$AA1_BIN/flock"
+R36F="$(newrepo)"
+OUT="$(cd "$R36F" && PATH="$AA1_BIN" bash "$RS" open c --issue 725 --agent spec-auditor 2>&1)"; RC=$?
+rc_is 2 "aa1/required: without flock the publish is REFUSED, never performed unlocked"
+has "reason=stage-lock-unavailable" "aa1/required: under its own named cause"
+if [ -f "$R36F/.review-stage/issue-725/c.stage" ]; then
+  bad "aa1/required: a stage record was PUBLISHED on a box that cannot lock — the refusal must precede every write"
+else
+  ok "aa1/required: and NOTHING was published — no stage record exists"
+fi
+
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
 # which is this issue's own subject inside a test file.
@@ -6573,7 +6870,21 @@ esac
 # requires BOTH a structural red AND a reproduced permissive READING — a source-shape match is not
 # a behaviour. That control earned its place immediately: it is what caught an off-by-one in half
 # A's own walk, whose searchability check trailed by one iteration the `-L` it is meant to guard.
-ASSERT_FLOOR=1072
+#
+# ROUND 21's AA1 MOVES IT TO 1102. Section 36 adds 30: `record-author-performed` re-verified the
+# stage record and then published its replacement with a SEPARATE `mv`, so a concurrent
+# `open --force` landing in that span published generation B, after which the recording overwrote
+# B's record with C while its trace named A — an ORPHANED report handed to a freshly spawned agent
+# plus a FALSIFIED audit trail (13 of these assertions RED on the shipped script, 0 after). The
+# fix is a per-stage `flock` held across each publisher's recheck-and-publish span, and the
+# section carries the derived PUBLISHER CENSUS (both publishers, both locked, one implementation),
+# the reader-side lock-freedom in both directions (structural and timed), the deterministic
+# simulated interleave, and the `flock`-is-REQUIRED case whose PATH substitutes the artifact and
+# whose CONTROL proves that PATH otherwise complete. THREE of its cases are TIMED and none is
+# host-conditional: the serialise case bounds its own holder (2s) and the reader cases assert an
+# UPPER bound a lock-free read cannot exceed, so a slow box FAILS them rather than displacing a
+# count — the two shapes recorded above are satisfied and the EXACT floor holds.
+ASSERT_FLOOR=1102
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

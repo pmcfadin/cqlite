@@ -1633,6 +1633,118 @@ commit_write() {
   WRITE_TMP=""
 }
 
+# STAGE_LOCK_WAIT_SECS / stage_lock_path / lock_stage — MUTUAL EXCLUSION BETWEEN THIS TOOL'S OWN
+# PUBLISHERS, AND NOTHING WIDER (#3751 round 21, AA1).
+#
+# THE DEFECT. `record-author-performed` RE-VERIFIES the stage record (the two comparisons at the
+# end of that function) and then PUBLISHES its replacement with a separate `mv`. A concurrent
+# `open --force` landing in that span publishes generation **B**, after which the recording
+# overwrites B's record with **C** while recording that it superseded **A**. Both consequences are
+# this issue's core subject and not side effects: the agent the peer `open` just spawned is writing
+# into an ORPHANED report — no record names B, so nothing derives its path and its eventual
+# `FINDINGS` is read by NOTHING — and the audit trail NAMES THE WRONG PREDECESSOR, which is a
+# FALSIFIED record rather than a missing one.
+#
+# WHY A LOCK IS RIGHT *HERE* WHEN THIS ISSUE REFUSED ONE TWICE. DO NOT GENERALISE THIS. Both
+# earlier rulings STAND, unchanged, and nothing below reopens either:
+#   * ROUND 6 (K2) replaced a SCANNED generation with a random nonce INSTEAD of locking, because a
+#     nonce REMOVES that race rather than serialising it. Still correct — nothing here selects a
+#     name by looking at what is on disk, and no lock is taken to make a name unique. See the
+#     header and `reserve_report_path`, whose rulings this does not touch.
+#   * ROUND 9/15 (N1/U1) declined a lock for the LATE-REVIEWER window, because the counterparty
+#     there is A REVIEWER WRITING ITS REPORT, which takes no lock and cannot be made to. Still
+#     correct — report writers and every READER stay lock-free.
+#   * THIS case differs in exactly one respect, and it is the respect that decides it: BOTH parties
+#     are `review-stage.sh` SUBCOMMANDS. A mutual exclusion between our OWN publishers is
+#     AVAILABLE here in a way it was not in either earlier case, because the counterparty CAN take
+#     the lock.
+#
+# THE THREE OBJECTIONS ROUND 6 RECORDED AGAINST `flock` ARE EACH ANSWERED, not ignored:
+#   * "a box without flock" — a NAMED REFUSAL (`reason=stage-lock-unavailable`) before anything is
+#     written. `flock` is REQUIRED, NOT ATTEMPTED, the same ruling `commit_write` makes about
+#     `mv -T` (round 7, L2): a silent unlocked fallback would restore the defect precisely on the
+#     hosts that cannot detect it, which is the permissive branch this whole tool refuses.
+#   * "a stale lock file" — CANNOT WEDGE ANYTHING, and this is a property of the mechanism rather
+#     than of our care: an `flock` lock lives on the OPEN FILE DESCRIPTION, so the kernel drops it
+#     when the last holder's descriptor closes, INCLUDING on SIGKILL. The leftover FILE holds no
+#     lock. That is why the lock file is deliberately never removed — deleting it would let a peer
+#     that still holds the old inode and a newcomer that creates a fresh one lock DIFFERENT objects
+#     and both proceed.
+#   * "a holder killed mid-open" — same mechanism: the lock is released, and the next publisher
+#     acquires it. What is left behind is at worst a reserved report name and a stage record naming
+#     the generation it named before, both of which are already-declared, non-destructive states.
+#
+# THE WAIT IS BOUNDED AND A TIMEOUT IS A NAMED REFUSAL. The guarded sequence is a handful of
+# fork/execs, one `git check-ignore` and one `rename(2)`, so 30 seconds is two orders of magnitude
+# of headroom; and because a dead holder releases automatically, the only way to reach the bound is
+# a LIVE publisher that is itself hung. Refusing then — with `reason=stage-lock-timeout` and the
+# remedy — is better than blocking forever, because an unbounded wait in a tool an unattended
+# closer calls is indistinguishable from a hang. There is deliberately NO env var to widen, shorten
+# or disable it: an override is settable by the party it constrains (#3312's corollary), and
+# re-running is always available, so an escape hatch could only buy an unserialised publish.
+STAGE_LOCK_WAIT_SECS=30
+# The descriptor the lock is held on is 8, spelled LITERALLY, for the same two reasons the write
+# descriptor is 9 (see `WRITE_TMP`): bash 3.2 — a declared constraint of this script — has no
+# `{fd}` auto-assignment, and `exec ${VAR}>` is not expanded in the descriptor position. It must
+# not collide with 9, which `prepare_write` holds for the write in progress.
+STAGE_LOCK_FD_PIN=8
+# stage_lock_path <issue> <kind> — DERIVED from the record's own path, so the lock and the record
+# it guards cannot name different stages, and so the lock lands inside the directory whose ignore
+# status this tool already verifies.
+stage_lock_path() { printf '%s.lock\n' "$(stage_file "$1" "$2")"; }
+# lock_stage <issue> <kind> — acquire the per-stage publish lock, or REFUSE BY NAME. Held until the
+# process exits; every caller publishes and then exits, and a refusal path exits too, so there is
+# no release to forget and no path on which the lock outlives the decision it guards.
+#
+# READERS DELIBERATELY DO NOT CALL THIS. `verdict` and `status` take no lock at all, so a publisher
+# can never BLOCK a read — a tool whose subject is reporting the truth promptly must not learn to
+# hang — and they need none: the coherent-observation primitive (`observe_stage`, round 17's W1)
+# detects a record that MOVED between the two halves of one observation and refuses
+# `stage record changed mid-read` on its own. That is the property that makes the lock-free read
+# SAFE rather than merely fast, and it is pinned behaviourally in section 31 of
+# `scripts/tests/test_review_stage.sh` (`w1/read`).
+lock_stage() {
+  local issue="$1" kind="$2" lpath frc=0 orc=0
+  lpath="$(stage_lock_path "$issue" "$kind")"
+  # THE TOOL IS REQUIRED BEFORE THE PATH IS TOUCHED, so a box that cannot lock creates nothing.
+  if ! command -v flock >/dev/null 2>&1; then
+    emit "$REFUSE_MARKER reason=stage-lock-unavailable kind=$kind issue=$issue lock=$(field_value "$lpath")"
+    emit "$REFUSE_MARKER detail=this box has no flock on PATH, so the publish could not be SERIALISED against this tool's other publisher, and NOTHING was written. Two of this tool's subcommands publish the stage record (open and record-author-performed); without mutual exclusion one can publish a fresh generation between the other's final re-verification and its own publication, which orphans the report the freshly spawned agent was handed and makes the supersedes-report-nonce trace name the WRONG predecessor. flock is REQUIRED, not attempted: there is deliberately no unlocked fallback, because that would restore the defect exactly on the hosts that cannot detect it. Install util-linux (flock), or run this on a Linux box, which the fleet is."
+    exit 2
+  fi
+  # THE SAME PATH BAR AS EVERY OTHER FILE THIS TOOL TOUCHES, and for the same reasons: a SYMLINKED
+  # lock path (at the leaf or at any directory above it) would put the lock — and the file this
+  # creates — in ANOTHER TREE, so two publishers of one stage would lock two different objects and
+  # the exclusion would be vacuous while looking present. The walk runs BEFORE the create, so the
+  # create cannot follow a link.
+  assert_no_symlink "$lpath" stage-lock
+  assert_ignored "$lpath" stage-lock \
+    "this is the per-stage PUBLISH LOCK. It is a real file in the tree, created beside the stage record, so it is held to the same bar as the record: an untracked-but-not-ignored file written mid-run dirties a running gate of record (#2926) and makes premerge-assert refuse on dirty: yes (#3648)."
+  # THE OPEN IS WRAPPED IN A BRACE GROUP so its `2>/dev/null` applies to THIS REDIRECTION ONLY. A
+  # bare `exec 8>"$lpath" 2>/dev/null` would, on success, redirect this process's stderr to
+  # /dev/null PERMANENTLY — silencing every later refusal, which is the opposite of what this file
+  # is for. The status is captured with `|| orc=$?`, never `if ! …; then orc=$?`, which reads 0.
+  { exec 8>"$lpath"; } 2>/dev/null || orc=$?
+  if [ "$orc" -ne 0 ]; then
+    emit "$REFUSE_MARKER reason=stage-lock-failed kind=$kind issue=$issue lock=$(field_value "$lpath") open-rc=$orc"
+    emit "$REFUSE_MARKER detail=the per-stage publish lock file could not be OPENED, so the publish could not be serialised and NOTHING was written. Either this stage directory is not writable, or the lock path is not a plain file. There is deliberately no unlocked fallback."
+    exit 2
+  fi
+  # `-E 3` MAKES A CONFLICT ITS OWN STATUS, so "the bound elapsed with a live holder" is not read
+  # as "flock itself failed" — the operator action differs (wait and re-run, versus fix the box).
+  flock -w "$STAGE_LOCK_WAIT_SECS" -E 3 -x "$STAGE_LOCK_FD_PIN" || frc=$?
+  if [ "$frc" -eq 3 ]; then
+    emit "$REFUSE_MARKER reason=stage-lock-timeout kind=$kind issue=$issue lock=$(field_value "$lpath") waited-secs=$STAGE_LOCK_WAIT_SECS"
+    emit "$REFUSE_MARKER detail=another publisher of THIS stage held the publish lock for the whole $STAGE_LOCK_WAIT_SECS second bound, so NOTHING was written and the stage record still names the report it named before. The lock is held only across a re-verification and one rename, so a wait this long means a live publisher of this stage is hung; a DEAD one releases automatically (an flock lock lives on the open file description and the kernel drops it on exit, SIGKILL included), so a leftover lock FILE never wedges this. Find the other $prog process for this stage, then re-run. There is deliberately no override: an unserialised publish is the defect this bound exists to refuse."
+    exit 2
+  fi
+  if [ "$frc" -ne 0 ]; then
+    emit "$REFUSE_MARKER reason=stage-lock-failed kind=$kind issue=$issue lock=$(field_value "$lpath") flock-rc=$frc"
+    emit "$REFUSE_MARKER detail=flock could not take the per-stage publish lock (and did not report a conflict), so the publish could not be serialised and NOTHING was written. That is a broken or unusable flock rather than contention. There is deliberately no unlocked fallback: a publish nobody serialised is what this lock exists to prevent."
+    exit 2
+  fi
+}
+
 # read_field_from <text> <key> — THE ONE IMPLEMENTATION of the `<key>: <value>` field grammar
 # (#3751 round 12, R2): the FIRST such line's value, flattened to one line. Empty output means
 # "absent or empty", which every caller treats as unmeasured.
@@ -2017,6 +2129,16 @@ cmd_open() {
   assert_no_symlink "$sfile" stage-record
   dir="$(dirname "$sfile")"; mkdir -p "$dir"
   assert_ignored "$sfile" stage-record
+  # THE PUBLISH LOCK IS TAKEN BEFORE THE RECORD IS OBSERVED (#3751 round 21, AA1), so this
+  # command's decision (already-open, or --force's carry-forward of the clock) and its own
+  # PUBLICATION are ONE serialised span with respect to this tool's other publisher. Taken here
+  # rather than immediately before the write for a reason: `record-author-performed` re-reads the
+  # record and refuses if it MOVED, so if this open could publish between that re-read and that
+  # command's rename, the recording would revert a generation this open had already handed to a
+  # fresh agent — and the trace would name the wrong predecessor. It is taken AFTER the path walk
+  # and the `mkdir` because the lock file lives in that directory and its own path bar has to be
+  # checked with the directory present. Readers take no lock; see `lock_stage`.
+  lock_stage "$issue" "$kind"
 
   local spawned_iso spawned_epoch reopen_count=0 prior_iso="" head_sha=""
   local nonce="" prior_nonce="" nnonce_lines=0
@@ -3700,6 +3822,22 @@ cmd_record_author_performed() {
     emit "AUTHOR-REFUSED detail=the stage record could not be rewritten to name the fresh report generation, so NOTHING was published and the record still names the report it named before. The substitute report was written at the fresh generation and is left on disk as history, exactly as a superseded report is; nothing was destroyed. Read the record and repair it, or remove the stage directory and open a fresh stage."
     exit 2
   fi
+  # THE PUBLISH LOCK, TAKEN BEFORE THE RE-VERIFICATION BELOW AND HELD THROUGH THE PUBLICATION
+  # (#3751 round 21, AA1). THE DEFECT IT CLOSES: the two re-verifications below and the
+  # `commit_write` after them were a check and a separate `mv`, so a concurrent `open --force`
+  # landing between them published generation **B** and this command then overwrote B's record with
+  # **C** while its `supersedes-report-nonce:` trace said **A**. The peer's freshly spawned agent
+  # was left writing into an ORPHANED report (no record names B, so nothing derives its path) and
+  # the audit trail was FALSIFIED — the trail this whole issue exists to create.
+  #
+  # A LOCK, NOT A THIRD RE-VERIFICATION, and that is the whole judgement: a shell has no
+  # compare-and-swap rename, so any number of re-reads leaves a span between the last one and the
+  # rename. Rounds 9 and 15 each narrowed that span and DECLARED the remainder; narrowing it again
+  # would be the fourth carve in one place. What is available here and was not available in either
+  # earlier round is that the COUNTERPARTY IS OUR OWN SUBCOMMAND, so it can be made to wait. Round
+  # 6's ruling against locking the NONCE selection is untouched, and readers stay lock-free — see
+  # `lock_stage` for both distinctions and for why `flock` is required rather than attempted.
+  lock_stage "$issue" "$kind"
   assert_ignored "$sfile" stage-record
   prepare_write "$sfile" stage-record
   printf '%s\n' "$new_rec" >&9

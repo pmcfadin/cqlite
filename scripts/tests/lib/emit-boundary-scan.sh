@@ -141,6 +141,9 @@ replaced|a copy of prior_token, a closed-set token
 AUTHOR_DISCLOSURE|a script constant, the verbatim disclosure sentence
 MAX_INT_VALUE|a numeric script constant: the ten-digit ceiling this tool will compare or add
 RESERVE_ATTEMPTS|a numeric script constant: the report reservation's bounded attempt count
+STAGE_LOCK_WAIT_SECS|a numeric script constant: the publish lock's bounded wait, in seconds
+orc|the lock file's `exec 8>` open status, an integer
+frc|flock's exit status, an integer (3 = its -E conflict code)
 1|a script-authored literal detail argument at every call site (see the scope note: positionals are not resolvable here)
 2|a script-authored literal detail argument at every call site
 EOF
