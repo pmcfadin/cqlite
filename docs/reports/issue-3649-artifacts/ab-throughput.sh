@@ -261,6 +261,10 @@ case "$REPLICATES" in ''|*[!0-9]*) usage_error "--replicates must be a positive 
 [ "$REPLICATES" -ge 5 ] || usage_error \
   "--replicates must be at least 5. At n<=3 a 10000-draw percentile bootstrap is NOT an interval: the all-minimum resample has probability 1/n^n, which at n=3 is 3.7% and exceeds the 2.5% tail, so the reported bounds are exactly (min, max) of the observed ratios and three identical pairs yield a ZERO-WIDTH interval. 7 is the recommendation -- see RUNBOOK.md step 5"
 case "$PORT" in ''|*[!0-9]*) usage_error "--port must be an integer (0 = ephemeral)" ;; esac
+# INCLUSIVE RANGE, not just digits. 99999 is an integer and is not a port, and
+# digits-only let it reach the server launch -- which is AFTER all three release
+# builds, on a metered box. A TCP port is 16 bits; 0 means ephemeral here.
+[ "$PORT" -le 65535 ] || usage_error "--port $PORT is above 65535; a TCP port is 16 bits, and this would be refused by the server after every build had completed"
 case "$MIN_CORPUS_BYTES" in ''|*[!0-9]*) usage_error "--min-corpus-bytes must be an integer" ;; esac
 case "$TEMPERATURE" in warm|cold) ;; *) usage_error "--temperature must be warm or cold" ;; esac
 case "$MIN_SSTABLES" in ''|*[!0-9]*) usage_error "--min-sstables must be an integer" ;; esac
@@ -564,6 +568,27 @@ def env(name, default=None):
     return value if value else default
 
 
+def _ticket_content():
+    """The frozen ticket, parsed, IN the manifest.
+
+    The digest proves every run read the same bytes; the CONTENT is what lets a
+    reader six months on see what was actually served without needing the
+    session directory to still exist. Both, because they answer different
+    questions and the cheap one is not the useful one.
+    """
+    path = env("AB_TICKET_TEMPLATE", "")
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        # The manifest records what it could read. A ticket that does not parse
+        # here cannot have reached this point -- validation is upstream -- so
+        # this is a truthful null rather than a silent substitution.
+        return None
+
+
 def _int_or_none(raw):
     """None only when UNSET. A configured 0 stays 0."""
     if raw is None or raw == "":
@@ -606,6 +631,9 @@ manifest = {
         "client_cpus": env("AB_CLIENT_CPUS", "none-unpinned"),
         "temperature": env("AB_TEMPERATURE", ""),
         "ticket_template": env("AB_TICKET_TEMPLATE", ""),
+        "ticket_original": env("AB_TICKET_ORIGINAL", ""),
+        "ticket_sha256": env("AB_TICKET_SHA", ""),
+        "ticket_content": _ticket_content(),
         "merge_path": env("AB_MERGE_PATH", ""),
         # `int(x) or None` turns a configured ZERO into `null`, which is how a
         # throughput-critical parameter could vanish from the record entirely.
@@ -771,7 +799,50 @@ if [ "$AB_CONTENTION" = "CONTENDED" ]; then
   warn "host contention CONTENDED -- the 1-minute load average is $AB_LOADAVG1 on $AB_NPROC cores (limit $AB_LOAD_LIMIT), so something else was using this host at session start. Co-scheduled work steals CPU from whichever arm is running and the pairing cannot cancel it. This is RECORDED and reported beside the verdict, not refused; confirm the box is yours before reporting the result"
 fi
 
+# THE SHAPE IS CANONICALISED BEFORE ANYTHING READS IT, controls included. The
+# driver used to carry the RAW string while flight-loadgen emitted the CANONICAL
+# label, so `--shape limit` produced records labelled `limit-k` that the
+# manifest reconciliation then rejected as a mismatch -- after all three release
+# builds. And an unknown shape was not caught here at all: it failed when the
+# load generator parsed it, at the same cost. Mirrors Shape::parse
+# (tools/flight-loadgen/src/shape.rs:34-55), aliases and case-insensitivity
+# included -- `FULL` is accepted there, so refusing it here would be the
+# too-strict half that reds a correct session.
+SHAPE_CANONICAL="$(python3 "$SUPPORT" canonical-shape "$SHAPE")" \
+  || usage_error "--shape '$SHAPE' is not a shape flight-loadgen accepts (the cause is named above)"
+if [ "$SHAPE_CANONICAL" != "$SHAPE" ]; then
+  say "shape '$SHAPE' canonicalised to '$SHAPE_CANONICAL' -- flight-loadgen emits the canonical label in every record, so the driver carries the same value the records will"
+fi
+SHAPE="$SHAPE_CANONICAL"
+
 [ -f "$TICKET_TEMPLATE" ] || die ticket-template-absent "$TICKET_TEMPLATE does not exist"
+# VALIDATE-THEN-REREAD IS A TOCTOU ON THE MEASUREMENT INPUT. The template was
+# checked once, before the builds, and then re-read from its ORIGINAL MUTABLE
+# PATH for every prewarm and every measured run -- so editing it mid-session
+# makes the arms execute different filters, projections, aggregations or token
+# ranges while every record still reports shape `full`: an invalid target-band
+# verdict that looks clean. This driver already applies the opposite principle
+# everywhere else (per-session immutable directories, ONE flight-loadgen built
+# from --loadgen-ref), and this was the hole in it.
+#
+# So: copy FIRST, validate the COPY, and let nothing read the original again.
+# Copying after validation would leave the same window, one step narrower.
+TICKET_FROZEN="$RUN_DIR/ticket.json"
+cp -- "$TICKET_TEMPLATE" "$TICKET_FROZEN" \
+  || die ticket-template-unreadable "$TICKET_TEMPLATE could not be copied into the session directory"
+chmod a-w "$TICKET_FROZEN" 2>/dev/null || true
+TICKET_ORIGINAL="$TICKET_TEMPLATE"
+TICKET_TEMPLATE="$TICKET_FROZEN"
+TICKET_SHA="$(python3 - "$TICKET_FROZEN" <<'PYEOF'
+import hashlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    sys.stdout.write(hashlib.sha256(handle.read()).hexdigest())
+PYEOF
+)" || die ticket-template-unreadable "the frozen ticket could not be digested"
+export AB_TICKET_ORIGINAL="$TICKET_ORIGINAL" AB_TICKET_SHA="$TICKET_SHA"
+say "ticket frozen into the session directory as $TICKET_FROZEN sha256 $TICKET_SHA -- every run reads this copy, never $TICKET_ORIGINAL"
 # THE WORKLOAD MUST MATCH THE CLAIM THE REPORT WILL MAKE ABOUT IT. The #3649
 # target band is defined for `flight-loadgen --shape full` over the whole ring
 # (the AC's first line), so a point, limit-k, filtered, projected or aggregating

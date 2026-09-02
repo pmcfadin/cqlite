@@ -48,6 +48,7 @@ USAGE = [
     "ab_driver_support.py census-served <data-dir> <ticket.json>",
     "ab_driver_support.py probe-storage <path>",
     "ab_driver_support.py probe-compression <served-dir>",
+    "ab_driver_support.py canonical-shape <shape>",
     "ab_driver_support.py parse-listening <server-log>",
     "ab_driver_support.py validate-ramp <ramp>",
     "ab_driver_support.py parse-duration <value>",
@@ -1461,6 +1462,31 @@ def parse_compression_info(path):
     return "UNRECOGNISED", name
 
 
+# MIRRORS `Shape::parse` and `Shape::label`
+# (tools/flight-loadgen/src/shape.rs:34-55). Read from the parser, not from a
+# list in a review comment: the aliases are real AND the match is on
+# `to_ascii_lowercase()`, so `FULL` is accepted there and would have been
+# refused here -- the too-strict half, which reds a correct session.
+SHAPE_ALIASES = {
+    "full": "full",
+    "limit-k": "limit-k", "limitk": "limit-k", "limit": "limit-k",
+    "point": "point", "ptr": "point",
+    "mixed": "mixed", "mix": "mixed",
+}
+
+
+def canonical_shape(raw):
+    """The record label flight-loadgen will emit for this --shape, or None.
+
+    THE VALUE THE DRIVER CARRIES MUST BE THE ONE THE RECORDS WILL CARRY. The
+    driver exported the RAW string and the load generator emitted the CANONICAL
+    label, so `--shape limit` produced records saying `limit-k` which the
+    manifest reconciliation then rejected as a shape mismatch -- after all three
+    release builds. Canonicalising at preflight makes the two the same fact.
+    """
+    return SHAPE_ALIASES.get(raw.strip().lower())
+
+
 def probe_compression(served_dir):
     """Every served SSTable's compressor, aggregated. -> (state, detail).
 
@@ -1546,6 +1572,19 @@ def main(argv):
             err("usage-error validate-ticket-schema needs <template.json>")
             return 2
         return validate_ticket(rest[0], full_ring=False)
+    if command == "canonical-shape":
+        if len(rest) != 1:
+            err("usage-error canonical-shape needs <shape>")
+            return 2
+        label = canonical_shape(rest[0])
+        if label is None:
+            err("cause shape-unknown")
+            err("cause-detail --shape %r is not a shape flight-loadgen accepts; "
+                "Shape::parse (tools/flight-loadgen/src/shape.rs:34) takes %s"
+                % (rest[0], "|".join(sorted(SHAPE_ALIASES))))
+            return 1
+        sys.stdout.write("%s\n" % label)
+        return 0
     if command == "probe-compression":
         if len(rest) != 1:
             err("usage-error probe-compression needs <served-dir>")

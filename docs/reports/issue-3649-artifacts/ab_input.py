@@ -101,7 +101,19 @@ WORKLOAD_DISPOSITION = {
     "merge_path": ("excused", "the server does not log it, so nothing can corroborate it"),
     "server_cpus": ("excused", "verified against /proc at run time, not in the record"),
     "client_cpus": ("excused", "not verified; declared in FINDINGS.md"),
-    "ticket_template": ("excused", "a path; its content is validated at pre-flight"),
+    "ticket_template": ("excused",
+                        "the path of the FROZEN per-session copy every run read; "
+                        "its content is validated at pre-flight and recorded in "
+                        "ticket_content"),
+    "ticket_original": ("excused",
+                        "the mutable path the frozen copy was taken from, kept "
+                        "for provenance only -- nothing reads it after the copy"),
+    "ticket_sha256": ("excused",
+                      "the frozen copy's digest; it proves every run read the "
+                      "same bytes, which is the property the freeze exists for"),
+    "ticket_content": ("excused",
+                       "the frozen ticket itself, so a reader can see what was "
+                       "served without the session directory still existing"),
     "max_concurrent_scans": ("excused", "corroborated from the server's startup line"),
     "batch_size": ("excused", "corroborated from the server's startup line"),
     "max_batch_bytes": ("excused", "corroborated from the server's startup line"),
