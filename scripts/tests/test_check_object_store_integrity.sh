@@ -879,3 +879,184 @@ if [ "$RC" -eq 5 ] && [ "$(verdict_of)" = UNMEASURED ] &&
 else
   bad "no-env: rc=$RC verdict='$(verdict_of)' (wanted 5/UNMEASURED)"
 fi
+
+# --- Case 21: THE BITMASK DOES NOT END AT 31 (real fixtures) ----------------
+# THE DEFECT THIS CASE EXISTS FOR (#3749 review round 2, BLOCKER 3). The first bitmask
+# classifier only bit-tested statuses in 1..31, on the reasoning that 128 is git's
+# `die()` and `127 & 1` would read as object damage. But git's own mask is wider: 2.43
+# defines 32 ERROR_MULTI_PACK_INDEX. So a store with BOTH a multi-pack-index complaint
+# and real object damage exits 33/35/36, fell outside the range, was called
+# `unclassified` and became UNMEASURED — a FALSE NEGATIVE on genuine object corruption,
+# which is the one direction this control exists to prevent.
+#
+# TWO REAL FIXTURES, ONE PROPERTY APART: both carry a truncated `multi-pack-index`; only
+# the second also carries a corrupted loose object. The exit statuses are MEASURED with
+# git before the subject runs, and the assertion is on the BITS rather than on a literal
+# number, so a git that numbers its bits differently fails the construction assert
+# (attributable) instead of silently passing the case (not).
+mk_midx_repo() {
+  local r="$T/$1"
+  mkdir -p "$r"
+  git init -q "$r" >/dev/null 2>&1
+  g "$r" config user.email t@t
+  g "$r" config user.name t
+  printf 'content aaa\n' >"$r/f1"
+  g "$r" add f1 >/dev/null
+  g "$r" -c user.email=t@t -c user.name=t commit -q -m c1 >/dev/null
+  g "$r" repack -q -ad >/dev/null 2>&1
+  g "$r" multi-pack-index write >/dev/null 2>&1
+  # A second commit AFTER the repack, so the store also holds loose objects to damage.
+  printf 'content bbb\n' >"$r/f2"
+  g "$r" add f2 >/dev/null
+  g "$r" -c user.email=t@t -c user.name=t commit -q -m c2 >/dev/null
+  # The plant: a multi-pack-index too short to parse.
+  printf 'MIDX\001' >"$r/.git/objects/pack/multi-pack-index"
+  printf '%s' "$r"
+}
+fsck_status() {
+  local rc=0
+  git -C "$1" fsck --no-progress --no-dangling >/dev/null 2>&1 || rc=$?
+  printf '%s' "$rc"
+}
+R_MIDX=$(mk_midx_repo midx)
+R_MIDX_DMG=$(mk_midx_repo midx-damaged)
+# The BLOB of the post-repack commit, named explicitly rather than "whatever `find`
+# returns first": corrupting the COMMIT object instead makes git `die()` (exit 128, a
+# NON-bitmask status), which is Case 23's subject and not this one. Measured both ways on
+# git 2.43.0 — blob 35, commit 128 — so the choice is load-bearing, not incidental.
+MIDX_BLOB=$(g "$R_MIDX_DMG" rev-parse HEAD:f2 2>/dev/null)
+MIDX_LOOSE=""
+if [ -n "$MIDX_BLOB" ]; then
+  MIDX_LOOSE=$(loose_path "$R_MIDX_DMG" "$MIDX_BLOB")
+  chmod u+w "$MIDX_LOOSE" 2>/dev/null
+  printf 'garbagegarbagegarbage' >"$MIDX_LOOSE"
+fi
+S_MIDX=$(fsck_status "$R_MIDX")
+S_MIDX_DMG=$(fsck_status "$R_MIDX_DMG")
+if [ "$((S_MIDX & 32))" -ne 0 ] && [ "$((S_MIDX & 5))" -eq 0 ] &&
+  [ "$((S_MIDX_DMG & 32))" -ne 0 ] && [ "$((S_MIDX_DMG & 1))" -ne 0 ]; then
+  ok "midx-plant: the fixtures ARE what the case claims (git 2.43 exits $S_MIDX for the midx alone = bit 32 and no damage bit, $S_MIDX_DMG with a corrupted loose object = 32 PLUS bit 1) — the status the old 1..31 range check dropped"
+else
+  bad "midx-plant: fsck exited $S_MIDX (midx only) and $S_MIDX_DMG (midx+damage) — not the 32/32|1 shapes the case is about; the cases below would prove nothing"
+fi
+if run 4 "midx+damage: CORRUPT, not UNMEASURED" --repo "$R_MIDX_DMG"; then
+  if [ "$(verdict_of)" = CORRUPT ]; then
+    ok "midx+damage: object damage ALONGSIDE a multi-pack-index complaint (exit $S_MIDX_DMG) is CORRUPT — an unrelated high bit cannot mask the damage bits"
+  else
+    bad "midx+damage: verdict='$(verdict_of)', wanted CORRUPT — real object corruption was dropped because of an unrelated bit"
+  fi
+fi
+# ONE PROPERTY APART: the same fixture WITHOUT the damaged object. Non-passing, and NOT
+# the fatal branch — so the CORRUPT above is attributable to the damage bit and not to
+# the multi-pack-index complaint the two fixtures share.
+if run 5 "midx alone: UNMEASURED, not CORRUPT" --repo "$R_MIDX"; then
+  if [ "$(verdict_of)" = UNMEASURED ] &&
+    printf '%s\n' "$OUT" | grep -q 'multi-pack-index'; then
+    ok "midx alone: a multi-pack-index complaint with NO damage bit is UNMEASURED and the cause names the class — never CORRUPT, and never clean"
+  else
+    bad "midx alone: verdict='$(verdict_of)' — wanted UNMEASURED naming the multi-pack-index class"
+  fi
+fi
+
+# --- Case 22: THE TWO STATUSES THE FINDING NAMES, EXACTLY -------------------
+# 33 (32|1) and 36 (32|4) are the statuses the review named. They are staged with the
+# shim rather than with a fixture, because a real store cannot be made to exit a chosen
+# status on demand — and 36 in particular needs pack damage that does not also set other
+# bits. Each arm is ONE PROPERTY from the reproduced-damage arm of Case 17 (rc=3): the
+# added bit 32.
+if [ -n "${REAL_GIT:-}" ]; then
+  DMG_MSG2='error: f761ec192d9f0dca3329044b96ebdb12839dbff6: object corrupt or missing: /somewhere'
+  for _bm in 33 36; do
+    SH_BM="$T/shim-bit$_bm"
+    LOG_BM="$T/shim-bit$_bm-calls.txt"
+    : >"$LOG_BM"
+    mk_fsck_shim "$SH_BM" always "$_bm" "$DMG_MSG2" "$LOG_BM"
+    bm_c=0
+    PATH="$SH_BM:$PATH" "$SH_BM/git" -C "$R_CLEAN" fsck --no-progress >/dev/null 2>&1 || bm_c=$?
+    if [ "$bm_c" -eq "$_bm" ]; then
+      ok "bitmask-plant($_bm): the shim really exits $_bm, so the case below measures the classifier and not the shim"
+    else
+      bad "bitmask-plant($_bm): the shim exited $bm_c — the case below would prove nothing"
+    fi
+    : >"$LOG_BM"
+    OUT=$(PATH="$SH_BM:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+    RC=$?
+    record_out "bitmask-$_bm"
+    if [ "$RC" -eq 4 ] && [ "$(verdict_of)" = CORRUPT ]; then
+      ok "bitmask($_bm): a damage bit travelling with ERROR_MULTI_PACK_INDEX is CORRUPT — the status the 1..31 range check turned into a false UNMEASURED"
+    else
+      bad "bitmask($_bm): rc=$RC verdict='$(verdict_of)' (wanted 4/CORRUPT)"
+    fi
+  done
+
+  # --- Case 23: AND THE NON-BITMASK PATH STILL REFUSES ---------------------
+  # The control for Case 22, and the half of the round-1 reasoning that was RIGHT: 128 is
+  # git's `die()` and 127 a missing binary, and `127 & 1` is 1. Neither may be bit-tested.
+  # ONE property from the arms above: the status, which is at or above the floor where
+  # shell and `die()` conventions live.
+  for _nb in 127 128; do
+    SH_NB="$T/shim-nonmask$_nb"
+    LOG_NB="$T/shim-nonmask$_nb-calls.txt"
+    : >"$LOG_NB"
+    mk_fsck_shim "$SH_NB" always "$_nb" "$DMG_MSG2" "$LOG_NB"
+    OUT=$(PATH="$SH_NB:$PATH" bash "$SUBJECT" --repo "$R_CLEAN" 2>&1)
+    RC=$?
+    record_out "nonmask-$_nb"
+    if [ "$RC" -eq 5 ] && [ "$(verdict_of)" = UNMEASURED ] &&
+      printf '%s\n' "$OUT" | grep -q 'cannot read as its error'; then
+      ok "non-bitmask($_nb): a status outside the mask is UNMEASURED with its OWN cause — never bit-tested into CORRUPT, and never described as a reachability problem it never reported"
+    else
+      bad "non-bitmask($_nb): rc=$RC verdict='$(verdict_of)' (wanted 5/UNMEASURED naming the unreadable status)"
+    fi
+  done
+fi
+
+# --- Case 24: `--print-store` IS THE ONE ISOLATED RESOLVER ------------------
+# WHY IT EXISTS (#3749 review round 2, BLOCKER 2). A caller that throttles or latches on
+# the shared store has to NAME it, and naming it means resolving `--git-common-dir`.
+# `scripts/local/worker-supervisor.sh` was doing that with a BARE `git`, inheriting the
+# caller's environment, while this script had just moved every one of its own git calls
+# under `env -i` + one allowlist — so an inherited `GIT_DIR` keyed the supervisor's stamp
+# on ANOTHER repository. This mode is the shared resolver that removes the second
+# implementation, so it must be isolated exactly like the sweep is.
+if run 0 "print-store: resolves and exits without sweeping" --repo "$R_CLEAN" --print-store; then
+  if [ "$(printf '%s\n' "$OUT" | grep -c '^OBJECT-STORE: store ')" -eq 1 ] &&
+    printf '%s\n' "$OUT" | grep -q "^OBJECT-STORE: store $R_CLEAN/\.git/objects$" &&
+    ! printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: verdict '; then
+    ok "print-store: prints exactly one anchored 'store' line naming the resolved store, and NO verdict — it measures nothing and must not look like it did"
+  else
+    bad "print-store: output was [$(printf '%s\n' "$OUT" | tr '\n' '|')]"
+  fi
+fi
+# THE ISOLATION, with its construction asserted first: a PLAIN git IS redirected by
+# GIT_COMMON_DIR, so a green here is the allowlist and not an inert variable. This is the
+# exact injection that mis-keyed the supervisor's stamp.
+plain_common=$(GIT_COMMON_DIR="$R_MIS/.git" git -C "$R_CLEAN" rev-parse --git-common-dir 2>/dev/null || true)
+if [ "$plain_common" = "$R_MIS/.git" ]; then
+  ok "print-store-plant: the injection IS effective against a non-isolated git (GIT_COMMON_DIR repoints rev-parse at another repository)"
+else
+  bad "print-store-plant: a plain git was not repointed by GIT_COMMON_DIR (got '$plain_common') — the case below would prove nothing"
+fi
+OUT=$(GIT_COMMON_DIR="$R_MIS/.git" bash "$SUBJECT" --repo "$R_CLEAN" --print-store 2>&1)
+RC=$?
+record_out "print-store-env"
+if [ "$RC" -eq 0 ] &&
+  printf '%s\n' "$OUT" | grep -q "^OBJECT-STORE: store $R_CLEAN/\.git/objects$"; then
+  ok "print-store: an inherited GIT_COMMON_DIR cannot make the resolver name a DIFFERENT store — a caller keying a throttle on it cannot be pointed at another repository"
+else
+  bad "print-store: rc=$RC out=[$(printf '%s\n' "$OUT" | tr '\n' '|')] — the resolver was repointed by the caller's environment"
+fi
+# A HOST WITHOUT `timeout` can still be ASKED THE QUESTION: this mode runs one rev-parse,
+# not an fsck, so refusing for want of a bound would leave a caller keying its throttle on
+# nothing exactly where the sweep is already UNMEASURED. ONE property from Case 11.
+BIN_NOTO="$T/bin-notimeout-print"
+mk_bin "$BIN_NOTO" git
+rm -f "$BIN_NOTO/timeout" "$BIN_NOTO/gtimeout"
+OUT=$(PATH="$BIN_NOTO" bash "$SUBJECT" --repo "$R_CLEAN" --print-store 2>&1)
+RC=$?
+record_out "print-store-no-timeout"
+if [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q '^OBJECT-STORE: store '; then
+  ok "print-store: a host with no timeout binary can still NAME the store (the bound is the sweep's requirement, not the resolver's)"
+else
+  bad "print-store(no-timeout): rc=$RC out=[$(printf '%s\n' "$OUT" | tr '\n' '|')]"
+fi
