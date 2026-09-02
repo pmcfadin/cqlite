@@ -841,6 +841,19 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   Generalise: **when you assert "everything goes through ONE X", key the assert on the narrowest
   thing that MAKES it an X, never on a whole literal a caller can spell differently** — and
   re-derive the emit-site set from the code rather than from a count someone wrote in a report.
+  **(3) A LABEL MAY NAME A STATUS ONLY IF IT WAS DERIVED FROM THE OBSERVED STATUS — this issue
+  produced FOUR findings of that one shape** (a progress line printing `PASS` beside a
+  `VACUOUS` SUMMARY; a FAILing `gap:` component counted as `DECLARED-GAP` rather than
+  not-applicable; `NOT-APPLICABLE` labelled `(SKIP/FAIL)` on a row that PASSes, once the
+  `runtime:` route made that pair reachable; and the `ZERO` STATE counted under a heading
+  reading `VACUOUS`, a STATUS word, which a shipping mode already contradicted by emitting
+  `fmt: VACUOUS (0s)` beside `0 VACUOUS`). The root was structural — the aggregate took
+  component NAMES and no statuses, so every status word in it *had* to be an assumption about
+  which statuses reach a given state. It takes name/STATUS pairs now, the state buckets carry
+  no status word, and the two status-derived figures are counted from the status. **Ask of
+  every label: is this word derived from the state I am rendering, or from an assumption about
+  which states get here?** And prefer *deriving* the qualifier to deleting it — `(did not
+  PASS)` carries real information when it is true.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a

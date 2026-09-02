@@ -368,3 +368,53 @@ a mid-run tree-integrity exit would drop that log's last line — is named in pl
 **Fallout worth recording:** the FM annotation guard stubs `record_result`, and an incomplete
 stub aborted the real `run_python_bindings` under `set -u`. A stub must honour the *published
 contract*, not only the part the case needs.
+
+---
+
+## roborev round 3 (job 371) — one Low, and the sweep it triggered
+
+### The cited finding
+
+The aggregate labelled every `NOT-APPLICABLE` census `(SKIP/FAIL)`, but the `runtime:` route added
+in the census-audit round legitimately emits `NOT-APPLICABLE` **while preserving `PASS`** (a
+python-only diff that routed to a tier which did not run). So the summary contradicted its own
+component row. Ordinary: a new state reaching an old label.
+
+### The sweep — because this was the fourth finding of one shape
+
+| # | where | the false claim |
+|---|---|---|
+| 1 | job 368 | the progress line printed `PASS` while the SUMMARY said `VACUOUS` |
+| 2 | census audit LOW 1 | a FAILing `gap:` component counted under `DECLARED-GAP`, not not-applicable |
+| 3 | job 371 | `NOT-APPLICABLE` labelled `(SKIP/FAIL)` on a row that PASSes |
+| 4 | **found by the sweep, not cited** | the `ZERO` STATE counted under the heading `VACUOUS`, a STATUS word |
+
+**Instance 4 is reproducible in a shipping mode**, which is why it is recorded as a real defect
+and not a theoretical one: `--lite-aggregate-selftest` with a seeded `VACUOUS` row emitted
+`fmt: VACUOUS (0s)` beside `0 VACUOUS (RECOGNISED)` — the same contradiction, on the one counter
+that names the failure this whole subsystem exists to surface.
+
+**The root was structural.** `census_summary_line` took component NAMES and no statuses, so every
+status word in it *had to be* an assumption about which statuses reach a given census state. It
+now takes **name/STATUS pairs**, and the output splits in two:
+
+- **seven STATE buckets**, one per row, summing to N, carrying **no status word** — the one that
+  did (`VACUOUS`) is now `measured-ZERO`, which is what the state actually is;
+- **two STATUS-DERIVED figures**: the `not-applicable` split (`did not PASS` vs
+  `no-subject (PASSed)`) and the count of rows whose STATUS is `VACUOUS`.
+
+An **odd argument count is a named refusal**, because a call site that forgot to zip its statuses
+would otherwise emit a line that silently omits a row.
+
+**The rule:** a label may name a STATUS only if it was DERIVED from the observed status. Ask of
+every label — *is this word derived from the state I am rendering, or from an assumption about
+which states get here?* Assumptions were all four.
+
+### A trap this repository had already documented, and I hit anyway
+
+The zip was first written `for _ci in "${!NAMES[@]+"${!NAMES[@]}"}"`. The `+` guard that works for
+an array's **values** does **not** work for its **keys**: bash reads `${!NAME[@]+…}` as INDIRECT
+expansion, errors `invalid variable name`, and **abandons the enclosing block**. Written that way,
+`--emit-summary-selftest` fell straight through into a real 37-component gate. `run_delta`'s own
+keys loop carries a comment describing exactly this, five hundred lines away. The correct idiom is
+a count check (`[ "${#arr[@]}" -gt 0 ]`), now used at all five zips and pinned by case Q5.
