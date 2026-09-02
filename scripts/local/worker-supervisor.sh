@@ -3376,21 +3376,33 @@ obj_sweep_latch_path() {
 #   present — something is at that path. `-e || -L`, because a DANGLING symlink is
 #             `-e`-false and the fail-safe reading of "something is at the latch path" is
 #             LATCHED. Same idiom, same reason, as the supervisor lock's existence test.
-#   absent  — nothing is there AND the directory that would hold it was SEARCHABLE, so this
-#             is a MEASUREMENT and not a failure to look. A directory that does not exist
-#             yields `absent` too: no file can be inside one that is not there.
+#   absent  — nothing is there AND the absence was ESTABLISHED THROUGH SEARCHABLE
+#             ANCESTORS, so it is a MEASUREMENT and not a failure to look.
 #             SEARCH (`-x`) and not READ (`-r`) is the right test, deliberately: `-e` on a
 #             named path needs only search permission on the parent, so a searchable but
 #             unlistable directory gives a TRUE answer and requiring `-r` as well would
 #             refuse a probe that was in fact valid — a false stop bought for nothing.
-#   unknown — the directory exists and this process cannot search it, so a latch may be
-#             sitting there unread. NEVER folded into `absent`.
+#   unknown — a latch may be sitting there unread, because some directory on the way to it
+#             exists and this process cannot search it. NEVER folded into `absent`.
+#
+# AND `-d` IS ITSELF A TWO-VALUED PREDICATE, WHICH IS THE SAME TRAP ONE LEVEL UP (#3749
+# review round 10, item 2). The first version answered `absent` whenever `[[ ! -d "$dir" ]]`
+# — reading "the holding directory does not exist" off a test that is ALSO false when an
+# ANCESTOR of that directory is not searchable. On a box where `/tmp/x` is mode 000 and the
+# latch would live at `/tmp/x/y/stamp.STOP`, `-d /tmp/x/y` is false, and a latch that may
+# well be sitting there was reported as an affirmative `absent` — bypassing the fail-closed
+# `unknown` state built for exactly this. So absence is established by WALKING UP to the
+# deepest ancestor this process can actually stat, and it counts only when that ancestor is
+# SEARCHABLE: with a searchable ancestor, a stat of its child gives a true answer (and so
+# does each stat below it, by induction), so a component that fails `-d` beneath one
+# genuinely is not there. With an UNSEARCHABLE one, nothing below it is observable and the
+# answer is `unknown`.
 #   unkeyed — there is no latch PATH at all, because the box-wide key could not be
 #             derived. A different statement from all three above: it is not that the file
 #             is unreadable, it is that no file was ever named. The caller decides, and
 #             says why at the branch.
 obj_sweep_latch_state() {
-  local latch="$1" dir
+  local latch="$1" dir probe parent
   [[ -n "$latch" ]] || {
     printf 'unkeyed'
     return 0
@@ -3400,9 +3412,29 @@ obj_sweep_latch_state() {
     return 0
   fi
   dir="${latch%/*}"
+  # No slash at all: the holding directory is the CWD, which is what a bare `-e` would
+  # have resolved the name against.
   [[ "$dir" == "$latch" ]] && dir="."
+  # A latch directly under the root: `${latch%/*}` strips to the empty string.
   [[ -n "$dir" ]] || dir="/"
-  if [[ ! -d "$dir" ]] || [[ -x "$dir" ]]; then
+  # Walk up to the deepest ancestor that can be STATTED. Each step strictly shortens the
+  # path or breaks, so this terminates; `.` is the implicit parent of a relative
+  # single-component path, and `/` is its own parent, which is where the walk ends.
+  probe="$dir"
+  while [[ ! -d "$probe" ]]; do
+    parent="${probe%/*}"
+    [[ -n "$parent" ]] || parent="/"
+    [[ "$parent" == "$probe" ]] && parent="."
+    [[ "$parent" != "$probe" ]] || break
+    probe="$parent"
+  done
+  # Not even the end of that walk is a statable directory: nothing was established, so the
+  # answer is `unknown` and not an absence.
+  if [[ ! -d "$probe" ]]; then
+    printf 'unknown'
+    return 0
+  fi
+  if [[ -x "$probe" ]]; then
     printf 'absent'
     return 0
   fi
