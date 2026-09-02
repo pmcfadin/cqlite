@@ -1080,6 +1080,35 @@ else
   cat "$sbY/store/cargo-config.toml"
 fi
 
+# 6z. A SPECIAL FILE IS NOT A WRITE TARGET (#3756 roborev round 7, HIGH). "not a symlink and
+#     not a directory" is not the same set as "a config file": it also admits FIFOs, sockets and
+#     device nodes — and the legacy-link selection added in round 2 is precisely what routes
+#     `~/.cargo/config -> <fifo>` into the resolver, where a privileged run would replace the
+#     special file with a regular one. A FIFO is used rather than /dev/null because the suite
+#     runs unprivileged and must be able to CREATE the subject; the code path is identical (both
+#     are `-e` and not `-f`), and the assertion is on the file's TYPE surviving.
+if command -v mkfifo >/dev/null 2>&1; then
+  sbZ=$(mktemp -d "$tmp/moldZ.XXXXXX"); mkdir -p "$sbZ/.cargo" "$sbZ/special"
+  mkfifo "$sbZ/special/pipe" 2>/dev/null && ln -s "$sbZ/special/pipe" "$sbZ/.cargo/config"
+  if [ -p "$sbZ/special/pipe" ]; then
+    outZ=$(PATH="$stubO:$PATH" HOME="$sbZ" CARGO_HOME="$sbZ/.cargo" \
+      "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+    if [ -p "$sbZ/special/pipe" ] && [ -L "$sbZ/.cargo/config" ] \
+       && printf '%s' "$outZ" | grep -q "which is not a regular file"; then
+      ok "mold/symlink: a config symlink pointing at a SPECIAL FILE (FIFO) is refused by name — the special file keeps its type and the link is untouched; only a regular file or a nonexistent path is a write target"
+    else
+      bad "mold/symlink: the special-file target was not refused (still-fifo=$([ -p "$sbZ/special/pipe" ] && echo yes || echo NO) still-link=$([ -L "$sbZ/.cargo/config" ] && echo yes || echo no))"
+      ls -l "$sbZ/special/pipe" "$sbZ/.cargo/config" 2>&1 | head -4
+      printf '%s\n' "$outZ" | grep -i 'mold\|symlink\|regular file' | head -5
+    fi
+  else
+    # A SKIP, never a silent pass: the subject could not be created, so the case has no verdict.
+    skip "mold/symlink: special-file target case — mkfifo did not produce a FIFO on this filesystem, so the subject does not exist"
+  fi
+else
+  skip "mold/symlink: special-file target case — no mkfifo on this host"
+fi
+
 # --- 7. git push credentials (issue #2942) ---------------------------------
 # `gh` auth and `git` auth are SEPARATE credential paths: an authenticated gh CLI is
 # NOT evidence that a raw `git push` can authenticate, and scripts/flow/claim.sh +

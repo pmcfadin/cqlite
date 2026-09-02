@@ -389,7 +389,19 @@ _XARGS_OPT_RUN='([[:space:]]+-[^[:space:]|;&<>()]+)*'
 # and drops the prefix match; measured, false positives 2 -> 1 with positives unchanged at 5/5.
 # The one that remains is an attached argument that itself ENDS in `r` (`-Eerror`), which needs
 # option arity to tell from a real `-r` — the same ambiguity residual 4a records.
-RE_XARGS_R='(^|[^[:alnum:]_-])xargs'"$_XARGS_OPT_RUN"'[[:space:]]+(-[a-zA-Z0-9]*r([[:space:]]|$)|--[a-zA-Z])'
+# AND `r` NEED NOT BE LAST IN THE CLUSTER (#3756 roborev round 7). `xargs -r0` is a valid GNU
+# spelling and evaded a rule anchored on a trailing `r`. The cluster is now spelled as the
+# ARGUMENT-FREE xargs short options with an `r` somewhere among them.
+#
+# THIS IS NOT THE OPTION-ARITY TABLE RESIDUAL 4a REFUSES, and the difference is which way it
+# fails. That table would have to be COMPLETE to avoid false positives; this set only has to be
+# CONSERVATIVE — every letter in it takes no argument, so a letter wrongly LEFT OUT costs a miss
+# and a letter that takes an argument simply is not here, which is why `-Ireplace` and `-Eerror`
+# cannot match however they are spelled. It errs toward misses, never toward reddening correct
+# code. Measured: 7 of 7 real spellings (including `-r0`, `-0r`, `-tr0`) FLAGGED, 0 of 8
+# attached-argument / command-carries-r / bare-`--` forms flagged.
+_XARGS_ARGFREE='[0oprtx]'
+RE_XARGS_R='(^|[^[:alnum:]_-])xargs'"$_XARGS_OPT_RUN"'[[:space:]]+(-'"$_XARGS_ARGFREE"'*r'"$_XARGS_ARGFREE"'*([[:space:]]|$)|--[a-zA-Z])'
 add_construct "$RE_XARGS_R" \
   'xargs -r (and GNU long options) are not in BSD xargs; BSD already skips an empty input line only with -0' \
   '  printf "" | xargs -0 -r rm' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
@@ -486,11 +498,12 @@ fi
 #      Telling them apart needs xargs's option-arity table, i.e. a second implementation of an
 #      option grammar — the route this file already refuses two paragraphs above, for the reason
 #      recorded there. So: KNOWN NOT COVERED, by choice, like 1-4.
-#      THE SAME AMBIGUITY, ONE SPELLING OVER: an ATTACHED option argument that itself ENDS in `r`
-#      (`xargs -Eerror echo`, where `error` is `-E`'s eof-string) is FLAGGED — a false positive
-#      that only option arity could remove. The commoner attached forms (`-Ireplace`, `-I{}`) are
-#      not flagged, because the short-option match must end at a token boundary; this residue is
-#      the tail of that fix, and its escape is the per-line marker like any other.
+#      NARROWED IN ROUND 7, and recorded because the earlier text here is no longer true: the
+#      attached-argument false positives (`-Ireplace`, `-I{}`, and `-Eerror`, which round 5 left
+#      standing because its argument ENDS in `r`) are all gone, because a cluster is now spelled
+#      from the ARGUMENT-FREE options alone and an argument-taking letter cannot appear in one.
+#      What remains uncovered is only the SEPARATED form above — `-n 1 -r`, `-I '{}' -r` — where
+#      the argument is its own token and telling it from a command still needs arity.
 #
 #   5. THE BACKSTOP DOES NOT COVER THE WHOLE SCANNED SET, AND 1-4 ARE UNCOVERED OUTSIDE IT
 #      (#3296 round-9 finding 2 — this bullet CORRECTS an earlier claim made right here, that the
@@ -1188,7 +1201,9 @@ printf '%s\n' \
   '  printf "" | xargs -r rm' \
   '  find . -print0 | xargs -0 --no-run-if-empty rm' \
   '  git ls-files -z | xargs -0 -I{} -r echo {}' \
-  '  printf "" | xargs --no-run-if-empty rm' >"$tmp/xargs-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
+  '  printf "" | xargs --no-run-if-empty rm' \
+  '  printf "" | xargs -r0 rm' \
+  '  printf "" | xargs -tr0 rm' >"$tmp/xargs-bad.sh" # portability-lint-allow: deliberate fixtures: the unportable spellings this control must DETECT
 _xargs_missed=''
 _xargs_broke=0
 while IFS= read -r _xl; do
@@ -1204,7 +1219,7 @@ done <"$tmp/xargs-bad.sh"
 if [ "$_xargs_broke" -eq 1 ]; then
   : # already counted by scan_found; a MISS/no-MISS verdict here would be unmeasured
 elif [ -z "$_xargs_missed" ]; then
-  ok 'structural control: every GNU-only xargs spelling is detected — INCLUDING the `-0 -r` and `-0r` forms PR #3708 actually shipped, which the first-token-only rule missed entirely'
+  ok 'structural control: every GNU-only xargs spelling is detected — the `-0 -r` and `-0r` forms PR #3708 actually shipped (missed entirely by the first-token-only rule) and the clusters where `r` is NOT last (`-r0`, `-tr0`)'
 else
   bad "structural control: the xargs rule MISSES:$_xargs_missed — a rule that does not detect the incident's own spelling reports coverage it does not have"
 fi
@@ -1215,10 +1230,11 @@ printf '%s\n' \
   '  git ls-files -z | xargs -0 sh -c '"'"'grep -r foo "$@"'"'"' _' \
   '  printf "" | xargs -- rm' \
   '  git ls-files -z | xargs -Ireplace echo replace' \
-  '  git ls-files -z | xargs -I{} echo {}' >"$tmp/xargs-ok.sh"
+  '  git ls-files -z | xargs -I{} echo {}' \
+  '  printf "" | xargs -Eerror echo' >"$tmp/xargs-ok.sh"
 scan_found "$RE_XARGS_R" "$tmp/xargs-ok.sh"
 case $? in
-  1) ok 'structural control: an xargs whose COMMAND carries -r (`xargs rm -rf`, `xargs -0 rm -rf`, `xargs -n1 rm -r`, `xargs -0 sh -c "grep -r …"`), the BARE end-of-options `xargs -- rm`, and an ATTACHED option argument (`-Ireplace`, `-I{}`) are NOT flagged — the option run stops at the command name, a long option must have a name, and a short option must END at a token boundary' ;;
+  1) ok 'structural control: an xargs whose COMMAND carries -r (`xargs rm -rf`, `xargs -0 rm -rf`, `xargs -n1 rm -r`, `xargs -0 sh -c "grep -r …"`), the BARE end-of-options `xargs -- rm`, and ATTACHED option arguments (`-Ireplace`, `-I{}`, `-Eerror`) are NOT flagged — the option run stops at the command name, a long option must have a name, and a cluster is spelled from the ARGUMENT-FREE options only, so an argument-taking option can never carry an `r` into a match' ;;
   0) bad "structural control: the widened xargs rule flags an xargs whose COMMAND carries -r — a lint that reds on correct input is the lint agents learn to waive: $(scan_all_hits)" ;;
   *) : ;; # already counted by scan_found
 esac

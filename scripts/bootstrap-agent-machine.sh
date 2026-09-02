@@ -425,12 +425,22 @@ mold_write_block() {
         warn "$cfg_file resolves to $_wt, whose trailing '/' denotes a directory it does not name — skipping mold linker config rather than normalising the path into a different file"
         return 0 ;;
     esac
-    _wd=''
-    if [ ! -L "$_wt" ] && [ ! -d "$_wt" ]; then
-      _wd=$(cd -P "$(dirname "$_wt")" 2>/dev/null && pwd -P) || _wd=''
+    # EACH REFUSAL SAYS ITS OWN NAME. These conditions have DIFFERENT operator remedies — fix a
+    # symlink loop, create a missing directory, point the link at a file instead of a device —
+    # so folding them into one catch-all ("could not be resolved") would send the reader to the
+    # wrong place. They were folded, and case 6z caught it: a FIFO target was correctly refused
+    # under a message about unresolvable symlinks.
+    if [ -L "$_wt" ]; then
+      warn "$cfg_file is a symlink whose target could not be resolved — it is still a symlink after $_hops hops (a loop?) — skipping mold linker config rather than replacing the symlink with a plain file"
+      return 0
     fi
+    if [ -e "$_wt" ] && [ ! -f "$_wt" ]; then
+      warn "$cfg_file resolves to $_wt, which is not a regular file (a directory, FIFO, socket or device node) — skipping mold linker config rather than replacing it"
+      return 0
+    fi
+    _wd=$(cd -P "$(dirname "$_wt")" 2>/dev/null && pwd -P) || _wd=''
     if [ -z "$_wd" ]; then
-      warn "$cfg_file is a symlink whose target could not be resolved — skipping mold linker config rather than replacing the symlink with a plain file"
+      warn "$cfg_file is a symlink whose target could not be resolved — the directory of $_wt does not exist — skipping mold linker config rather than replacing the symlink with a plain file"
       return 0
     fi
     write_target="$_wd/$(basename "$_wt")"
@@ -441,8 +451,15 @@ mold_write_block() {
     # hands `mv` that very symlink. Whatever the route, the no-clobber guarantee is about
     # `$write_target`, so it is asserted ON `$write_target` — a check on an input cannot speak
     # for an output that was computed from it.
-    if [ -L "$write_target" ] || [ -d "$write_target" ]; then
-      warn "$cfg_file resolves to $write_target, which is itself a symlink or a directory — skipping mold linker config rather than replacing it"
+    # ONLY A REGULAR FILE OR A NONEXISTENT PATH IS A WRITE TARGET (#3756 roborev round 7, HIGH).
+    # `not a symlink and not a directory` is not the same set as `a config file`: it also admits
+    # FIFOs, sockets and DEVICE NODES, and the legacy-link selection added in round 2 is exactly
+    # what routes `~/.cargo/config -> /dev/null` (or a user-owned FIFO) here — where a
+    # sufficiently privileged run would replace the special file with a regular one. Enumerating
+    # the types to REJECT is the permissive shape this repo keeps finding, so the test is
+    # affirmative: nonexistent, or `-f`. Anything else is refused by name.
+    if [ -L "$write_target" ] || { [ -e "$write_target" ] && [ ! -f "$write_target" ]; }; then
+      warn "$cfg_file resolves to $write_target, which is not a regular file (a symlink, directory, FIFO, socket or device node) — skipping mold linker config rather than replacing it"
       return 0
     fi
   fi
