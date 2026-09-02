@@ -133,9 +133,11 @@ carry).
   call, discovery reads included, runs under `env -i` + an allowlist (`PATH`, `TMPDIR`, then
   `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null`) with an explicit empty `--template=`. The reads are
   bounded by the advisory's own runner — **the EXTERNAL commands only** (git and `mktemp -d`), recorded as
-  `anchor-reads: bounded-<n>s+<g>s(external:git,mktemp;UNBOUNDED:cd/test-builtins)`, because `cd`/`pwd -P`
-  and one `[ -d … ]` probe are shell builtins a runner cannot signal and a bare `bounded-…` would
-  overclaim — and
+  `anchor-reads: bounded-<n>s+<g>s(external:git,mktemp,sh,rm;UNBOUNDED:command-v+pwd-builtins)`. An
+  **anchor-path operation audit** in the script header records, per operation, whether it is bounded and
+  whether its target is validated — added because seven findings here were those two questions asked of
+  different operations one round at a time. What remains unbounded is `command -v` and one `$(pwd)`
+  diagnostic, both builtins over local state — and
   with **no `timeout`/`gtimeout` supporting `--kill-after` the check REFUSES**, naming a one-command
   remedy. That reverses an earlier ruling ("run unbounded, declare it, never refuse"): a hang in this
   guard blocks the merge anyway, so the choice is *hang silently* vs *refuse with a cause*, and the

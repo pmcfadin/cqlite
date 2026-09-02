@@ -202,8 +202,10 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   plus `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null` and an explicit empty `--template=`. The reads
   are bounded by the runner the advisory already resolves, but **only the external commands** (git and
   `mktemp -d`) — the token names both halves,
-  `anchor-reads: bounded-<n>s+<g>s(external:git,mktemp;UNBOUNDED:cd/test-builtins)`, since `cd`/`pwd -P`
-  and an object-dir `[ -d … ]` probe are shell builtins no runner can signal;
+  `anchor-reads: bounded-<n>s+<g>s(external:git,mktemp,sh,rm;UNBOUNDED:command-v+pwd-builtins)`, and an
+  **anchor-path operation audit** in the script header records for EVERY operation whether it is bounded
+  and whether its target is validated (the `workspace-test-disposition.txt` idiom), with the two
+  deliberate gaps — `command -v` PATH lookups and one `$(pwd)` diagnostic — declared;
   **where none exists the check REFUSES** (`ANCHOR-UNVERIFIABLE` + a one-command remedy). That reverses
   the first ruling — "a hang is only a liveness failure, so run unbounded and declare it" — because **a
   hang in this guard blocks the merge anyway**: the real comparison is hang-forever-with-no-diagnosis vs
