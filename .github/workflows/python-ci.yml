@@ -6,10 +6,66 @@ on:
     - cron: '35 3 * * *'
   push:
     branches: [main]
+    # THE RULE FOR THIS LIST (issue #1455): these are the INPUTS THIS WORKFLOW
+    # READS — above all the `cross-binding-parity` job, which compares the
+    # Python binding, the NODE binding and the CLI against one canonical form.
+    # A change to ANY of them must be able to trigger this workflow. Extending
+    # the harness means extending this list in the same edit.
+    #
+    # It is enumerated in full here because the SAME omission was found FIVE
+    # times in review — `bindings/node/**` + `cqlite-cli/**`, then
+    # `cqlite-ffi-common/**`, then `test-data/schemas/**` — each time as a
+    # single missing path rather than as the class. Each entry below says which
+    # step reads it, so the next reader can check the list against the job
+    # instead of guessing.
+    #
+    # DECLARED RESIDUAL, and the count keeps rising: FIVE instances so far, the
+    # last two AFTER this list was called complete (`test-data/datasets/**`,
+    # then `rust-toolchain.toml`, the latter having been deliberately EXCLUDED
+    # on the incorrect reasoning that a literal action ref makes the pin file a
+    # non-input). This is a CURATED list and nothing mechanically checks it
+    # against what the jobs actually read. GitHub path filters cannot be derived
+    # from the steps, so completeness rests on review alone — an input added to a
+    # step but not to this list fails SILENTLY, by the job never running. Treat
+    # 'this list looks complete' as unverified.
     paths:
-      - 'bindings/python/**'
-      - 'cqlite-core/**'
+      # --- the workflow itself -------------------------------------------
       - '.github/workflows/python-ci.yml'
+      # The composite action the dataset step USES; a change to it changes how
+      # (or whether) the corpus is restored for every dataset-backed job here.
+      - '.github/actions/restore-canonical-datasets/**'
+      # --- the three surfaces under comparison ----------------------------
+      # The wheel under test, and the pytest that IS the comparator.
+      - 'bindings/python/**'
+      # The shared canonical form + fixtures + drivers (the harness itself).
+      - 'bindings/parity/**'
+      # The Node native module: one of the three legs, built by `npm run build`.
+      - 'bindings/node/**'
+      # The release CLI: the third leg, built by `cargo build -p cqlite-cli`.
+      - 'cqlite-cli/**'
+      # --- what all three legs read through ------------------------------
+      - 'cqlite-core/**'
+      # BOTH bindings depend on cqlite-ffi-common for the decimal, varint, inet
+      # and JSON-number adapters — exactly the conversions this harness
+      # compares — and it is easy to miss because neither binding's own
+      # directory mentions it.
+      - 'cqlite-ffi-common/**'
+      # --- committed test inputs -------------------------------------------
+      # Every fixture in bindings/parity/fixtures.json names a schema here, and
+      # `columns` (the authoritative type source for canonicalization) mirrors
+      # it. A schema-only change can alter a parity query's column shape, so
+      # without this path the harness runs on the OLD shape or not at all.
+      - 'test-data/schemas/**'
+      # The dataset steps EXECUTE check-dataset-manifest.sh and (via the
+      # composite action) fetch-datasets.sh; a change to either can decide
+      # whether the corpus this job compares against is complete.
+      - 'test-data/scripts/**'
+      # The GIT-TRACKED half of the corpus. The dataset step restores tracked
+      # fixture files and check-dataset-manifest.sh derives the committed table
+      # inventory from THIS subtree — so adding, removing or renaming a dataset
+      # table directory changes what the parity legs read and whether the
+      # completeness check passes at all.
+      - 'test-data/datasets/**'
       # Issue #1459: the ABI-critical dependency versions are inherited from the
       # workspace root, NOT declared in bindings/python — `napi` and `pyo3` are
       # `{ workspace = true }`. So a root manifest/lockfile bump can change the
@@ -18,13 +74,76 @@ on:
       # running them, and the floor claim's own premise changes untested.
       - 'Cargo.toml'
       - 'Cargo.lock'
+      # Issue #1990: every product-validation lane HONORS this pin — rustup
+      # applies it at each cargo invocation, and each `dtolnay/rust-toolchain@…`
+      # ref above is a hand-kept MIRROR of its `channel`. So a toolchain-only
+      # change alters what every job here builds with, and must be able to
+      # trigger them. (Whether the literal refs stay SYNCHRONIZED with this file
+      # is a separate pin-drift guard, owned by #1990, not by this list.)
+      - 'rust-toolchain.toml'
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    # THE RULE FOR THIS LIST (issue #1455): these are the INPUTS THIS WORKFLOW
+    # READS — above all the `cross-binding-parity` job, which compares the
+    # Python binding, the NODE binding and the CLI against one canonical form.
+    # A change to ANY of them must be able to trigger this workflow. Extending
+    # the harness means extending this list in the same edit.
+    #
+    # It is enumerated in full here because the SAME omission was found FIVE
+    # times in review — `bindings/node/**` + `cqlite-cli/**`, then
+    # `cqlite-ffi-common/**`, then `test-data/schemas/**` — each time as a
+    # single missing path rather than as the class. Each entry below says which
+    # step reads it, so the next reader can check the list against the job
+    # instead of guessing.
+    #
+    # DECLARED RESIDUAL, and the count keeps rising: FIVE instances so far, the
+    # last two AFTER this list was called complete (`test-data/datasets/**`,
+    # then `rust-toolchain.toml`, the latter having been deliberately EXCLUDED
+    # on the incorrect reasoning that a literal action ref makes the pin file a
+    # non-input). This is a CURATED list and nothing mechanically checks it
+    # against what the jobs actually read. GitHub path filters cannot be derived
+    # from the steps, so completeness rests on review alone — an input added to a
+    # step but not to this list fails SILENTLY, by the job never running. Treat
+    # 'this list looks complete' as unverified.
     paths:
-      - 'bindings/python/**'
-      - 'cqlite-core/**'
+      # --- the workflow itself -------------------------------------------
       - '.github/workflows/python-ci.yml'
+      # The composite action the dataset step USES; a change to it changes how
+      # (or whether) the corpus is restored for every dataset-backed job here.
+      - '.github/actions/restore-canonical-datasets/**'
+      # --- the three surfaces under comparison ----------------------------
+      # The wheel under test, and the pytest that IS the comparator.
+      - 'bindings/python/**'
+      # The shared canonical form + fixtures + drivers (the harness itself).
+      - 'bindings/parity/**'
+      # The Node native module: one of the three legs, built by `npm run build`.
+      - 'bindings/node/**'
+      # The release CLI: the third leg, built by `cargo build -p cqlite-cli`.
+      - 'cqlite-cli/**'
+      # --- what all three legs read through ------------------------------
+      - 'cqlite-core/**'
+      # BOTH bindings depend on cqlite-ffi-common for the decimal, varint, inet
+      # and JSON-number adapters — exactly the conversions this harness
+      # compares — and it is easy to miss because neither binding's own
+      # directory mentions it.
+      - 'cqlite-ffi-common/**'
+      # --- committed test inputs -------------------------------------------
+      # Every fixture in bindings/parity/fixtures.json names a schema here, and
+      # `columns` (the authoritative type source for canonicalization) mirrors
+      # it. A schema-only change can alter a parity query's column shape, so
+      # without this path the harness runs on the OLD shape or not at all.
+      - 'test-data/schemas/**'
+      # The dataset steps EXECUTE check-dataset-manifest.sh and (via the
+      # composite action) fetch-datasets.sh; a change to either can decide
+      # whether the corpus this job compares against is complete.
+      - 'test-data/scripts/**'
+      # The GIT-TRACKED half of the corpus. The dataset step restores tracked
+      # fixture files and check-dataset-manifest.sh derives the committed table
+      # inventory from THIS subtree — so adding, removing or renaming a dataset
+      # table directory changes what the parity legs read and whether the
+      # completeness check passes at all.
+      - 'test-data/datasets/**'
       # Issue #1459: the ABI-critical dependency versions are inherited from the
       # workspace root, NOT declared in bindings/python — `napi` and `pyo3` are
       # `{ workspace = true }`. So a root manifest/lockfile bump can change the
@@ -33,6 +152,13 @@ on:
       # running them, and the floor claim's own premise changes untested.
       - 'Cargo.toml'
       - 'Cargo.lock'
+      # Issue #1990: every product-validation lane HONORS this pin — rustup
+      # applies it at each cargo invocation, and each `dtolnay/rust-toolchain@…`
+      # ref above is a hand-kept MIRROR of its `channel`. So a toolchain-only
+      # change alters what every job here builds with, and must be able to
+      # trigger them. (Whether the literal refs stay SYNCHRONIZED with this file
+      # is a separate pin-drift guard, owned by #1990, not by this list.)
+      - 'rust-toolchain.toml'
   workflow_dispatch:
 
 concurrency:
@@ -530,10 +656,124 @@ jobs:
             bindings/python/.pytest_cache/
           retention-days: 7
 
+  cross-binding-parity:
+    name: Cross-binding parity (Python vs Node vs CLI)
+    # Same tier as `test`: this job builds a release wheel, a release CLI and
+    # the Node native module, so it runs where the rest of the heavy bindings
+    # tier runs (push to main, nightly schedule, workflow_dispatch, or a PR
+    # labeled ci:bindings-full) rather than on every core-touching PR.
+    if: >-
+      ${{
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'ci:bindings-full')
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Issue #1209: remove the runner's preinstalled clippy BEFORE the pinned
+      # toolchain action reconciles, or the clippy-preview install can conflict.
+      - name: Remove preinstalled clippy (avoid clippy-preview install conflict)
+        shell: bash
+        run: rustup component remove clippy 2>/dev/null || true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1  # pinned to rust-toolchain.toml (issue #1990)
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "bindings/python -> target"
+          key: cross-binding-parity-x86_64-unknown-linux-gnu
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: bindings/node/package-lock.json
+
+      - name: Build Python wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64-unknown-linux-gnu
+          # release-unwind matches the shipped profile (issue #1440), so the leg
+          # under comparison is the one users get.
+          args: --profile release-unwind --out dist
+          working-directory: bindings/python
+          manylinux: "2_28"
+
+      - name: Install wheel and test dependencies
+        shell: bash
+        run: |
+          python -m pip install 'pytest>=7.0'
+          python -m pip install bindings/python/dist/*.whl
+
+      - name: Build Node native module
+        shell: bash
+        working-directory: bindings/node
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build CLI binary (release)
+        shell: bash
+        run: cargo build --package cqlite-cli --release
+
+      # The shared composite action, not a hand-rolled curl: it also REPAIRS a
+      # partial cache, which a bare cache+tar cannot.
+      - name: Restore canonical datasets
+        uses: ./.github/actions/restore-canonical-datasets
+        with:
+          dataset-tag: ${{ env.DATASET_TAG }}
+          dataset-asset: ${{ env.DATASET_ASSET }}
+          dataset-sha256: ${{ env.DATASET_SHA256 }}
+
+      - name: Sanity check dataset
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f test-data/datasets/metadata.yml
+          bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
+
+      - name: Run 3-way cross-binding parity (issue #1455)
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          # Datasets present but a leg erroring or returning 0 rows is a FAILURE,
+          # never a skip.
+          CQLITE_REQUIRE_FIXTURES: "1"
+          # The Node leg has its OWN fail-closed switch: CQLITE_REQUIRE_FIXTURES
+          # is about the DATASET corpus, and the `test` job sets it while never
+          # provisioning Node. This job DOES build the native module, so an
+          # absent Node leg here is a broken build, not a legitimate omission.
+          CQLITE_PARITY_REQUIRE_NODE: "1"
+          RUN_SLOW_TESTS: "1"
+        shell: bash
+        run: |
+          pytest bindings/python/tests/test_cross_binding_parity.py -v --tb=short
+
+      - name: Upload canonical artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: cross-binding-parity-artifacts
+          path: bindings/parity/out/
+          retention-days: 7
+
   quality-gate:
     name: Python CI Quality Gate
     runs-on: ubuntu-latest
-    needs: [smoke, smoke-floors, build-only-wheels, test]
+    needs: [smoke, smoke-floors, build-only-wheels, test, cross-binding-parity]
     if: always()
     env:
       RUN_FULL: >-
@@ -589,6 +829,20 @@ jobs:
             exit 1
           fi
 
+      - name: Check cross-binding parity results
+        # Issue #1455: the 3-way harness (Python binding vs Node binding vs CLI)
+        # is in the SAME heavy tier as `test`, so it is legitimately `skipped` on
+        # a routine unlabeled PR and must be asserted only when it ran.
+        if: env.RUN_FULL == 'true'
+        env:
+          PARITY_RESULT: ${{ needs.cross-binding-parity.result }}
+        run: |
+          echo "Cross-binding parity results: ${PARITY_RESULT}"
+          if [ "${PARITY_RESULT}" != "success" ]; then
+            echo "::error::3-way cross-binding parity failed (Python binding vs Node binding vs CLI)"
+            exit 1
+          fi
+
       - name: Summary
         run: |
           {
@@ -598,6 +852,7 @@ jobs:
             echo "- Ordinary PRs run one Ubuntu Python 3.12 wheel build plus non-dataset smoke pytest files."
             echo "- Floor smoke covers Python 3.9 (the floor), 3.13 and 3.14 (the current top of the advertised range), reusing the abi3 wheel from the smoke job; each leg restores the canonical corpus and runs one real query, failing on a 0-row result. It is a binding MATRIX tier, so per repo policy it runs on every push to \`main\`, on the nightly schedule, and on PRs labeled \`ci:bindings-full\` — NOT on a routine unlabeled PR (issue #1459)."
             echo "- Full cross-platform wheel builds, the full dataset-backed pytest suite, slow CLI parity, and wheel artifacts run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:bindings-full\`."
+            echo "- 3-way cross-binding parity (issue #1455) runs the SAME SELECT through the Python binding, the Node binding and the CLI and requires equal canonical JSON. Same tier as the full suite. It is the ONLY lane that exercises the Node leg of that comparison — no local agent-gate component builds the Node native module or a release CLI."
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "${RUN_FULL}" = "true" ]; then

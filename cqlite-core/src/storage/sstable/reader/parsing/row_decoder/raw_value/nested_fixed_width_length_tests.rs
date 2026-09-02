@@ -35,9 +35,32 @@
 //! | `SimpleDateSerializer` | `size != 4` | 4 only |
 //! | `TimeSerializer` | `size != 8` | 8 only |
 //!
-//! See `fixed_width.rs` for the DECISION on the `… or 0` half and the
-//! reasoning behind it (AC2): this decoder refuses a zero-length fixed-width
-//! element in the bounded element/field position.
+//! ## Where the refusal comes from: #3811's consumption contract
+//!
+//! Issue #3723 was opened to add an EXACT-width guard to each fixed-width arm.
+//! Issue **#3811** landed first and made that guard unnecessary: every bounded
+//! caller reaches `parse_value_from_raw_bytes`, a thin wrapper over
+//! `raw_value::reporting`'s consumption-reporting twin plus
+//! `require_fully_consumed_raw`. Composed with each arm's own
+//! `require_fixed_width` (`data.len() < n`), the ACCEPTED SET IS EXACTLY `{n}`:
+//! `len == 0` and `len < n` are refused under-width, while `len > n` leaves
+//! `len - n` bytes unconsumed and is refused by the caller's assert. The property
+//! AC1 and AC3 assert is therefore enforced repo-wide by #3811's mechanism, and
+//! these cases pin it AT EVERY NESTING POSITION for every fixed-width type —
+//! coverage #3811's own tests (`raw_value/issue_3811_consumption_demo_tests.rs`)
+//! do not enumerate. They must fail if either half of that composition is
+//! relaxed.
+//!
+//! Both halves report `Error::Corruption`, with two distinct wordings — the
+//! under-width one from `require_fixed_width` and the over-width one from
+//! `require_fully_consumed_raw` — and [`is_width_error`] below matches either.
+//!
+//! CQLite is therefore NARROWER than Cassandra for the six `… or 0` types above,
+//! whose `validate` admits an EMPTY buffer (`Int32Serializer.java`
+//! `size(value) != 4 && !isEmpty(value)`, deserializing to Java `null`). That
+//! divergence PREDATES both issues, is deliberate, and is tracked as **#3847**;
+//! `zero_length_fixed_width_element_is_refused_at_every_nesting_position` below
+//! characterises it rather than endorsing it.
 
 use super::*;
 
@@ -139,8 +162,28 @@ fn nesting_positions(t: &str) -> Vec<NestingPosition> {
     ]
 }
 
+/// Did `err` come from one of the TWO halves of #3811's composed width rule?
+///
+/// * UNDER-width (including zero): `reporting::require_fixed_width` —
+///   `"Frozen element '<col>': need <n> byte(s) for <what>, got <len>"`.
+/// * OVER-width: `require_fully_consumed_raw` —
+///   `"Bounded value '<col>' of type '<t>' decoded only <n> of <len> byte(s)"`.
+///
+/// Matched by MESSAGE because both are `Error::Corruption`, the pre-existing
+/// class every one of this decoder's refusals uses; there is deliberately no
+/// dedicated variant (issue #3723 proposed one and it was superseded — see this
+/// module's header). The two wordings are asserted separately so a case cannot
+/// pass on the wrong half of the rule.
+fn is_under_width_error(err: &Error) -> bool {
+    matches!(err, Error::Corruption(msg) if msg.contains("byte(s) for") && msg.contains("got"))
+}
+
+fn is_over_width_error(err: &Error) -> bool {
+    matches!(err, Error::Corruption(msg) if msg.contains("decoded only"))
+}
+
 fn is_width_error(err: &Error) -> bool {
-    matches!(err, Error::FixedWidthLengthMismatch { .. })
+    is_under_width_error(err) || is_over_width_error(err)
 }
 
 /// AC1: a wrong declared length is REFUSED at every nesting position, with the
@@ -165,20 +208,28 @@ fn wrong_declared_length_is_refused_at_every_nesting_position() {
                         "{} at {}: a {}-byte element must be refused (Cassandra admits {} only)",
                         t, label, w, width
                     ));
+                // Which half refused is DERIVED from the direction, so a case
+                // cannot pass on the wrong one: too few bytes must fail the arm's
+                // own `require_fixed_width`, too many must fail the caller's
+                // consumption assert.
+                let expected_half = if w < *width { "under" } else { "over" };
                 assert!(
-                    is_width_error(&err),
-                    "{} at {} ({} bytes): expected FixedWidthLengthMismatch, got {:?}",
+                    if w < *width {
+                        is_under_width_error(&err)
+                    } else {
+                        is_over_width_error(&err)
+                    },
+                    "{} at {} ({} bytes): expected the {}-width refusal, got {:?}",
                     t,
                     label,
                     w,
+                    expected_half,
                     err
                 );
                 let msg = err.to_string();
                 assert!(
-                    msg.contains(*t)
-                        && msg.contains(&width.to_string())
-                        && msg.contains(&w.to_string()),
-                    "{} at {}: error must name the type, expected width and actual length: {}",
+                    msg.contains(&width.to_string()) && msg.contains(&w.to_string()),
+                    "{} at {}: error must name the admissible width and the actual length: {}",
                     t,
                     label,
                     msg
@@ -191,8 +242,9 @@ fn wrong_declared_length_is_refused_at_every_nesting_position() {
 /// AC2: a ZERO-length fixed-width element is refused at every nesting position.
 ///
 /// The four strict serializers (`smallint`, `tinyint`, `date`, `time`) refuse it
-/// per the pinned source. The "or 0" family is refused by DECISION — see
-/// `fixed_width.rs`.
+/// per the pinned source. The "or 0" family is refused because `require_fixed_width`
+/// is `data.len() < n` — a PRE-EXISTING divergence from Cassandra, tracked as
+/// **#3847**; this case characterises it, it does not endorse it.
 #[test]
 fn zero_length_fixed_width_element_is_refused_at_every_nesting_position() {
     let p = parser();
@@ -207,7 +259,7 @@ fn zero_length_fixed_width_element_is_refused_at_every_nesting_position() {
                 ));
             assert!(
                 is_width_error(&err),
-                "{} at {} (0 bytes): expected FixedWidthLengthMismatch, got {:?}",
+                "{} at {} (0 bytes): expected the under-width refusal, got {:?}",
                 t,
                 label,
                 err
@@ -241,8 +293,8 @@ fn colliding_frozen_list_int_cell_paths_no_longer_collapse() {
         .parse_value_from_raw_bytes(&thirteen, "frozen<list<int>>", "col", 0)
         .expect_err("a 5-byte int element is refused by Int32Serializer.validate");
     assert!(
-        is_width_error(&err),
-        "expected FixedWidthLengthMismatch, got {:?}",
+        is_over_width_error(&err),
+        "the 5-byte `int` element must be refused by the consumption assert, got {:?}",
         err
     );
 }
@@ -347,52 +399,62 @@ fn legal_short_and_absent_encodings_stay_legal() {
     );
 }
 
-/// Drift guard: the closed name set of `fixed_width_admissible_width` and the
-/// one `decode_fixed_width_raw` decodes must be the SAME set, and the widths
-/// must be the ones the pinned Cassandra serializers require.
+/// Drift guard, at the DIRECT (unnested) bounded position: for every name the
+/// fixed-width arms of `raw_value::reporting` match, the admissible length is
+/// exactly the width the pinned `cassandra-5.0.8` serializer requires — `width`
+/// decodes, `width + 1` and `width - 1` do not.
+///
+/// This is the behavioural form of what an earlier revision asserted by
+/// comparing a `fixed_width_admissible_width` TABLE against
+/// [`FIXED_WIDTH_TYPES`]. #3811 owns the widths inline in each arm, so there is
+/// no table to compare; asserting the OBSERVABLE width is strictly stronger —
+/// a table can agree with the pinned serializers while the arm it feeds does
+/// not. [`FIXED_WIDTH_TYPES`] is the closed name set those arms match, so an
+/// arm added or renamed without updating it fails the `None`-side loop below.
 #[test]
-fn admissible_width_table_matches_the_pinned_serializers() {
+fn admissible_widths_match_the_pinned_serializers() {
+    let p = parser();
     for (t, width) in FIXED_WIDTH_TYPES {
-        assert_eq!(
-            V5CompressedLegacyParser::fixed_width_admissible_width(t),
-            Some(*width),
-            "{}: width table disagrees with the pinned cassandra-5.0.8 serializer",
-            t
-        );
-        // The decode side must accept exactly that width and refuse width+1.
-        let ok = V5CompressedLegacyParser::decode_fixed_width_raw(t, &vec![0u8; *width], "col");
         assert!(
-            ok.is_ok(),
-            "{}: {} bytes must decode, got {:?}",
+            p.parse_value_from_raw_bytes(&vec![0u8; *width], t, "col", 0)
+                .is_ok(),
+            "{}: exactly {} byte(s) must decode",
             t,
-            width,
-            ok
+            width
         );
-        let bad = V5CompressedLegacyParser::decode_fixed_width_raw(t, &vec![0u8; width + 1], "col");
+        let over = p
+            .parse_value_from_raw_bytes(&vec![0u8; width + 1], t, "col", 0)
+            .expect_err(&format!("{}: {} byte(s) must be refused", t, width + 1));
         assert!(
-            matches!(bad, Err(ref e) if is_width_error(e)),
-            "{}: {} bytes must be refused, got {:?}",
+            is_over_width_error(&over),
+            "{}: {} byte(s) must fail the consumption assert, got {:?}",
             t,
             width + 1,
-            bad
+            over
         );
+        // Zero is covered by its own case above; `width - 1` only exists for the
+        // multi-byte types.
+        if *width > 1 {
+            let under = p
+                .parse_value_from_raw_bytes(&vec![0u8; width - 1], t, "col", 0)
+                .expect_err(&format!("{}: {} byte(s) must be refused", t, width - 1));
+            assert!(
+                is_under_width_error(&under),
+                "{}: {} byte(s) must fail require_fixed_width, got {:?}",
+                t,
+                width - 1,
+                under
+            );
+        }
     }
 
-    // Names that are NOT fixed-width must not be claimed by the table.
-    for t in [
-        "text",
-        "blob",
-        "varint",
-        "decimal",
-        "inet",
-        "duration",
-        "list<int>",
-        "tuple<int>",
-    ] {
-        assert_eq!(
-            V5CompressedLegacyParser::fixed_width_admissible_width(t),
-            None,
-            "{} must not be claimed as fixed-width",
+    // Names that are NOT fixed-width must accept a length no fixed-width arm
+    // would — proving they do not silently share one of the arms above.
+    for t in ["text", "blob", "varint", "inet"] {
+        assert!(
+            p.parse_value_from_raw_bytes(&vec![0x31u8; 17], t, "col", 0)
+                .is_ok(),
+            "{} must not be width-constrained",
             t
         );
     }

@@ -189,10 +189,6 @@ ffi_error_contract_table! {
     Io => { py: Io, code: "IO", category: System, recoverable: true, prefix: Some("IoError"), },
     Serialization => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
     Corruption => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
-    // (#3723) a fixed-width value whose declared on-disk length is not a width the
-    // pinned Cassandra serializer admits: corrupt DATA, so it takes the same
-    // identity as `Corruption` rather than a parse-capability code.
-    FixedWidthLengthMismatch => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
     Schema => { py: Schema, code: "SCHEMA", category: Schema, recoverable: false, prefix: Some("SchemaError"), },
     // (#1451) real PARSE: a CQL syntax failure, not the generic QUERY bucket.
     CqlParse => { py: Parse, code: "PARSE", category: Query, recoverable: false, prefix: Some("ParseError"), },
@@ -258,7 +254,6 @@ pub fn variant_of(err: &Error) -> FfiErrorVariant {
         Error::Io(_) => FfiErrorVariant::Io,
         Error::Serialization { .. } => FfiErrorVariant::Serialization,
         Error::Corruption(_) => FfiErrorVariant::Corruption,
-        Error::FixedWidthLengthMismatch { .. } => FfiErrorVariant::FixedWidthLengthMismatch,
         Error::Schema(_) => FfiErrorVariant::Schema,
         Error::CqlParse(_) => FfiErrorVariant::CqlParse,
         Error::InvalidFormat(_) => FfiErrorVariant::InvalidFormat,
@@ -319,12 +314,6 @@ impl FfiErrorVariant {
             )),
             FfiErrorVariant::Serialization => Error::serialization("sample serialization failure"),
             FfiErrorVariant::Corruption => Error::corruption("sample corruption"),
-            FfiErrorVariant::FixedWidthLengthMismatch => Error::FixedWidthLengthMismatch {
-                cql_type: "int".to_string(),
-                context: "sample column".to_string(),
-                expected: 4,
-                actual: 5,
-            },
             FfiErrorVariant::Schema => Error::schema("sample schema failure"),
             FfiErrorVariant::CqlParse => Error::cql_parse("sample CQL syntax failure"),
             FfiErrorVariant::InvalidFormat => Error::invalid_format("sample invalid format"),

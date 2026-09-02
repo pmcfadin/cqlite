@@ -94,7 +94,6 @@ fn full_ring() -> ScanTokenBound {
     ScanTokenBound {
         start_excl: i64::MIN,
         end_incl: i64::MIN,
-        wraparound: false,
     }
 }
 

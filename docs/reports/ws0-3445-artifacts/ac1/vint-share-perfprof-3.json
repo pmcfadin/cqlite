@@ -1,0 +1,118 @@
+{
+  "perf_data": "/data/ws0-3445-build/ac1-perfprof-3/perf.data",
+  "binary": "/data/ws0-3445-build/perfprof/release/ws0-3299-scan-worker",
+  "cycles_total": 87976583550,
+  "cycles_outside_binary": 37429673722,
+  "cycles_in_binary": 50546909828,
+  "pct_outside_binary": 42.54504120488775,
+  "sample_rows": {
+    "what": "perf sample rows",
+    "kept": 175950,
+    "skipped": 0,
+    "pct_skipped": 0.0,
+    "examples": []
+  },
+  "unattributable_cycles": 0,
+  "pct_unattributable": 0.0,
+  "denominator_note": "narrow_pct/wide_pct are against cycles_total (ALL DSOs incl. libc and kernel) as the issue's 'share of scan on-CPU' wording requires. *_in_binary are against cycles_in_binary, the only cycles the DWARF numerator can reach. The two are DIFFERENT quantities: never divide one by the other, and never compare a share on one basis with a share on the other.",
+  "rebase_selfcheck": {
+    "addresses_checked": 3250,
+    "mismatches": 0,
+    "mismatch_pct": 0.0,
+    "verdict": "PASS",
+    "coverage": {
+      "what": "PIE rebase self-check addresses",
+      "kept": 3250,
+      "skipped": 0,
+      "pct_skipped": 0.0,
+      "examples": []
+    }
+  },
+  "parse_accounting": [
+    {
+      "what": "nm symbol table",
+      "kept": 4543,
+      "skipped": 0,
+      "pct_skipped": 0.0,
+      "examples": []
+    },
+    {
+      "what": "objdump instruction lines",
+      "kept": 1008741,
+      "skipped": 0,
+      "pct_skipped": 0.0,
+      "examples": []
+    }
+  ],
+  "skid_band": {
+    "k=0": {
+      "narrow_cycles": 1580028440,
+      "wide_cycles": 1614529061,
+      "write_vint_cycles": 0,
+      "no_chain_cycles": 0,
+      "narrow_pct": 1.7959647627166808,
+      "wide_pct": 1.8351804489911907,
+      "write_vint_pct": 0.0,
+      "no_chain_pct_of_total": 0.0,
+      "no_chain_pct_of_in_binary": 0.0,
+      "narrow_pct_in_binary": 3.1258655482135085,
+      "wide_pct_in_binary": 3.194120207335892
+    },
+    "k=1": {
+      "narrow_cycles": 1616029088,
+      "wide_cycles": 1661029898,
+      "write_vint_cycles": 0,
+      "no_chain_cycles": 0,
+      "narrow_pct": 1.8368854788292128,
+      "wide_pct": 1.8880363739698778,
+      "write_vint_pct": 0.0,
+      "no_chain_pct_of_total": 0.0,
+      "no_chain_pct_of_in_binary": 0.0,
+      "narrow_pct_in_binary": 3.1970878012107784,
+      "wide_pct_in_binary": 3.2861156174573654
+    },
+    "k=2": {
+      "narrow_cycles": 1526027468,
+      "wide_cycles": 1588528593,
+      "write_vint_cycles": 0,
+      "no_chain_cycles": 0,
+      "narrow_pct": 1.734583688547883,
+      "wide_pct": 1.8056265984654731,
+      "write_vint_pct": 0.0,
+      "no_chain_pct_of_total": 0.0,
+      "no_chain_pct_of_in_binary": 0.0,
+      "narrow_pct_in_binary": 3.0190321687176036,
+      "wide_pct_in_binary": 3.1426819135045307
+    },
+    "k=3": {
+      "narrow_cycles": 1527027486,
+      "wide_cycles": 1588528593,
+      "write_vint_cycles": 0,
+      "no_chain_cycles": 0,
+      "narrow_pct": 1.7357203751065644,
+      "wide_pct": 1.8056265984654731,
+      "write_vint_pct": 0.0,
+      "no_chain_pct_of_total": 0.0,
+      "no_chain_pct_of_in_binary": 0.0,
+      "narrow_pct_in_binary": 3.0210105646341945,
+      "wide_pct_in_binary": 3.1426819135045307
+    }
+  },
+  "narrow_cycles": 1580028440,
+  "wide_cycles": 1614529061,
+  "write_vint_cycles": 0,
+  "no_chain_cycles": 0,
+  "narrow_pct": 1.7959647627166808,
+  "wide_pct": 1.8351804489911907,
+  "write_vint_pct": 0.0,
+  "no_chain_pct_of_total": 0.0,
+  "no_chain_pct_of_in_binary": 0.0,
+  "narrow_pct_in_binary": 3.1258655482135085,
+  "wide_pct_in_binary": 3.194120207335892,
+  "narrow_pct_min": 1.734583688547883,
+  "narrow_pct_max": 1.8368854788292128,
+  "wide_pct_min": 1.8056265984654731,
+  "wide_pct_max": 1.8880363739698778,
+  "narrow_pct_in_binary_min": 3.0190321687176036,
+  "narrow_pct_in_binary_max": 3.1970878012107784
+}

@@ -13,13 +13,6 @@ mod cell_path_key_tests;
 // UDT field loops in `udt.rs` / `raw_type_value.rs` (see that module's header for
 // why it lives here).
 mod component_len;
-// Issue #3723 (round 5): the DROPPED-path (#1741 shadow/TTL) width-validation
-// cases for both decoders below.
-#[cfg(test)]
-mod dropped_element_tests;
-// Issue #3723 (round 5): the map-key / UDT-field decoders, shared by the live
-// path and by the #1741 shadow/TTL DROPPED path. Read its header first.
-mod element_decode;
 
 /// Issue #2038 (roborev Medium finding): the shape of ONE visible collection
 /// element's expiry, as input to [`ExpiryHomogeneity::fold`].
@@ -617,34 +610,35 @@ impl V5CompressedLegacyParser {
                     row_ttl_seconds,
                     row_expires_at,
                 );
-                // For sets: the path bytes ARE the element value (cell value is always
-                // empty). Issue #3723 moved this decode into `raw_value::set_member` and
-                // closed two silent-data-loss holes there: an EMPTY path now reaches the
-                // element decoder instead of bypassing the width guard, and a fatal
-                // `FixedWidthLengthMismatch` PROPAGATES instead of dropping the member.
-                // Every other decode error still yields `Ok(None)` (member omitted).
-                //
-                // Issue #3723 (review round 3): this decode runs BEFORE the `dropped`
-                // early return below and its value is DISCARDED when the element is
-                // filtered, so a shadowed / TTL-expired member's path is width-validated
-                // exactly like a live one. #1741 filtering itself is UNCHANGED (`dropped`
-                // is computed above and acted on below as before). Why decode-and-discard
-                // rather than a cheaper width pre-check: see the "validated even when
-                // dropped" section of `raw_value::set_member`'s module header.
-                let set_member: Option<Value> = self.decode_set_member(
-                    cell.value.clone(),
-                    &cell.path_bytes,
-                    &element_type,
-                    &column.name,
-                    i as u64,
-                )?;
-
                 if dropped {
-                    // The decoded member is DISCARDED here: it was validated, not
-                    // surfaced. Nothing about the drop accounting changes.
                     shadow_filtered_element_count += 1;
                     continue;
                 }
+
+                // For sets: the path bytes ARE the element value (cell value is always empty).
+                // If cell.value is Some (unusual case where a set cell has a non-empty value),
+                // use it. Otherwise parse the path bytes as the element type.
+                let set_member: Option<Value> = if let Some(val) = cell.value.clone() {
+                    Some(val)
+                } else if !cell.path_bytes.is_empty() {
+                    // Path bytes are the set element — parse them as the element type
+                    // Issue #3811 (roborev F1): PROPAGATE. This used to map the error
+                    // to `None`, which silently DROPPED the member — so a set cell whose
+                    // path bytes carry trailing garbage produced a set with one fewer
+                    // element instead of a refusal, and two distinct serialized cells
+                    // stayed indistinguishable. That is AC4's collapse wearing a smaller
+                    // set, and it is strictly worse than the wrong value it replaced,
+                    // because a dropped member leaves no trace at all. Verified against
+                    // the 144-file corpus census: no table decodes differently.
+                    Some(self.parse_value_from_raw_bytes(
+                        &cell.path_bytes,
+                        &element_type,
+                        &column.name,
+                        0,
+                    )?)
+                } else {
+                    None
+                };
 
                 // Epic #899: surface the live set element (decoded member value)
                 // to the compaction path, keyed by its cell_path.
@@ -766,11 +760,6 @@ impl V5CompressedLegacyParser {
                         row_expires_at,
                     );
                     if dropped {
-                        // Issue #3723 (round 5): width-validate the KEY BEFORE
-                        // filtering — shadowed is no licence to skip the guard
-                        // (only a NESTED scalar's refusal escapes: site 6, #3778).
-                        // Key DISCARDED; the drop accounting is unchanged.
-                        self.validate_dropped_map_key(&cell.path_bytes, &key_type, &column.name)?;
                         shadow_filtered_element_count += 1;
                         continue;
                     }
@@ -778,18 +767,29 @@ impl V5CompressedLegacyParser {
 
                 // Decode the map key (from cell_path) up front so it can be both
                 // recorded on the per-element compaction entry and used to build
-                // the collapsed `Value::Map`. ONE decoder, shared with the
-                // DROPPED path above (issue #3723 round 5, `element_decode`).
-                let mut opaque = false;
-                let decoded_key = self.decode_map_entry_key(
-                    &cell.path_bytes,
-                    &key_type,
-                    &column.name,
-                    &mut opaque,
-                )?;
-                if opaque {
-                    opaque_key_entries += 1;
-                }
+                // the collapsed `Value::Map`.
+                let decoded_key = if !cell.path_bytes.is_empty() {
+                    tracing::debug!(
+                        "V5CompressedLegacy: Parsing map key for column '{}', key_type='{}', path_len={}",
+                        column.name,
+                        key_type,
+                        cell.path_bytes.len()
+                    );
+                    // For cell path keys, parse directly without expecting length prefixes
+                    let mut opaque = false;
+                    let decoded = self.parse_cell_path_key_reporting(
+                        &cell.path_bytes,
+                        &key_type,
+                        &column.name,
+                        &mut opaque,
+                    )?;
+                    if opaque {
+                        opaque_key_entries += 1;
+                    }
+                    Some(decoded)
+                } else {
+                    None
+                };
 
                 // Epic #899: surface the map entry to the compaction path keyed
                 // by its cell_path (the map key bytes); value is the map value
@@ -895,30 +895,31 @@ impl V5CompressedLegacyParser {
                     row_expires_at,
                 );
                 if dropped {
-                    // Issue #3723 (round 5): width-validate the DECLARED field
-                    // value BEFORE filtering (see `element_decode`'s header).
-                    // The decoded value is DISCARDED; accounting is unchanged.
-                    self.validate_dropped_udt_field(
-                        &cell.value,
-                        &field_defs,
-                        field_index,
-                        &column.name,
-                        i as u64,
-                    )?;
                     shadow_filtered_element_count += 1;
                     continue;
                 }
 
                 // Decode the field value with its DECLARED type. `cell.value` is the
                 // raw bytes wrapped as Blob (BytesType) above; an empty-value cell
-                // yields None. ONE decoder, shared with the DROPPED path above.
-                let decoded = self.decode_udt_field_value(
-                    &cell.value,
-                    &field_defs,
-                    field_index,
-                    &column.name,
-                    i as u64,
-                )?;
+                // yields None.
+                let decoded = match &cell.value {
+                    Some(Value::Blob(raw)) => {
+                        let (_name, field_type) = field_defs
+                            .get(field_index as usize)
+                            .filter(|_| field_index >= 0)
+                            .ok_or_else(|| {
+                                Error::corruption(format!(
+                                    "UDT column '{}' cell {}: field index {} out of range (0..{})",
+                                    column.name,
+                                    i,
+                                    field_index,
+                                    field_defs.len()
+                                ))
+                            })?;
+                        Some(self.parse_value_from_raw_bytes(raw, field_type, &column.name, 0)?)
+                    }
+                    other => other.clone(),
+                };
 
                 record_element(
                     &mut elements_out,

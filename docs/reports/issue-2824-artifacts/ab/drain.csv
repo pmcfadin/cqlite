@@ -1,0 +1,17 @@
+round,arm,where,drain_state
+1,baseline,pre-floor,DRAINED
+1,baseline,pre-cold,DRAINED
+1,patched,pre-floor,DRAINED
+1,patched,pre-cold,DRAINED
+2,patched,pre-floor,DRAINED
+2,patched,pre-cold,DRAINED
+2,baseline,pre-floor,DRAINED
+2,baseline,pre-cold,DRAINED
+3,baseline,pre-floor,DRAINED
+3,baseline,pre-cold,DRAINED
+3,patched,pre-floor,DRAINED
+3,patched,pre-cold,DRAINED
+4,patched,pre-floor,DRAINED
+4,patched,pre-cold,DRAINED
+4,baseline,pre-floor,DRAINED
+4,baseline,pre-cold,DRAINED

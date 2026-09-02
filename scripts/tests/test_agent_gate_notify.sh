@@ -454,10 +454,12 @@ callsite="$tmp/callsite.sh"
 awk '/^if \[ -z "\$ONLY" \] && \[ "\$LITE" -eq 0 \] && \[ "\$DELTA" -eq 0 \] && \[ "\$SELFTEST" -eq 0 \]; then/{grab=1}
      grab{print}
      grab&&/^fi$/{exit}' "$GATE" > "$callsite"
+nonfailing_src=$(sed -n '/^_status_is_nonfailing() {/,/^}$/p' "$GATE")
 if ! grep -q 'gate_push_signal "\$_push_result"' "$callsite" \
    || ! grep -q 'TREE_COMMIT_LINE' "$callsite" \
-   || ! grep -q 'SUMMARY_WRITE_FAILED' "$callsite"; then
-  bad "could not extract the push-signal CALL SITE from $GATE"
+   || ! grep -q 'SUMMARY_WRITE_FAILED' "$callsite" \
+   || [ -z "$nonfailing_src" ]; then
+  bad "could not extract the push-signal CALL SITE (or _status_is_nonfailing) from $GATE"
 else
   # drive_callsite <overall> <summary-write-failed> <commit-line> [statuses...]
   # Replaces gate_push_signal with a recorder so the assertion is about the
@@ -474,8 +476,15 @@ else
       NAMES=(); STATUSES=()
       i=0; for st in $STATUS_LIST; do NAMES+=("c$i"); STATUSES+=("$st"); i=$((i+1)); done
       gate_push_signal() { printf "%s|%s|%s|%s\n" "$1" "$2" "$3" "$4"; }
+      # #3625: the call site asks _status_is_nonfailing which components are non-passing
+      # (the CLOSED set — PASS and SKIP — rather than the single literal FAIL token), so
+      # that ONE definition must be in scope here. Sourced from the SHIPPED gate, never
+      # re-implemented: a copy of a closed set is a second place for it to drift, and an
+      # UNDEFINED function would silently make every component "non-passing" (127 is
+      # non-zero) and this case would then be asserting on a command-not-found.
+      eval "$2"
       . "$1"
-    ' _ "$callsite" 2>/dev/null
+    ' _ "$callsite" "$(sed -n '/^_status_is_nonfailing() {/,/^}$/p' "$GATE")" 2>/dev/null
   }
 
   # ---- R1 S4: the title names the identity the SUMMARY BLOCK stamped ----------

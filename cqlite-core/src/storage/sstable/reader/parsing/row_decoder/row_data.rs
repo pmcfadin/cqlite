@@ -605,13 +605,6 @@ impl V5CompressedLegacyParser {
                         }
                         offset = new_offset;
                     }
-                    // Issue #3723: a fixed-width element whose declared on-disk length
-                    // is one Cassandra REFUSES is fatal to this row — surfacing it as a
-                    // short cell list would make the refusal unobservable at the read
-                    // path (see `raw_value::fatal_decode_error` for the authority, and
-                    // for why the fatal set is exactly this one variant). EVERY other
-                    // decode error keeps the pre-#3723 tolerant partial-row `break`.
-                    Err(e) if super::raw_value::is_fatal_decode_error(&e) => return Err(e),
                     Err(e) => {
                         tracing::debug!(
                             "V5CompressedLegacy:   ✗ Complex column {} '{}' at offset {} FAILED: {}",
@@ -850,5 +843,75 @@ impl V5CompressedLegacyParser {
             is_static,
             complex_col_meta,
         ))
+    }
+
+    /// Test-only helper that parses the cell header (flags + conditional temporal
+    /// metadata) and returns the offset at which the value bytes begin.
+    ///
+    /// This mirrors the logic in `parse_cell_value_schema_order` for the conditional
+    /// sections (Steps 1-3), but stops before the value parse.  It is used by the
+    /// S1 audit verification tests (Issue #623) to confirm that:
+    ///   - USE_ROW_TIMESTAMP (0x08) causes the timestamp VInt to be ABSENT
+    ///   - USE_ROW_TTL (0x10) without IS_EXPIRING causes LDT/TTL to be ABSENT
+    ///
+    /// Returns `(flags, value_start_offset)`.
+    #[cfg(test)]
+    pub(super) fn parse_cell_header_end_offset(
+        &self,
+        data: &[u8],
+        start_offset: usize,
+    ) -> Result<(u8, usize)> {
+        const CELL_IS_DELETED: u8 = 0x01;
+        const CELL_IS_EXPIRING: u8 = 0x02;
+        const CELL_USE_ROW_TIMESTAMP: u8 = 0x08;
+        const CELL_USE_ROW_TTL: u8 = 0x10;
+
+        if start_offset >= data.len() {
+            return Err(Error::corruption(
+                "cell_header_end_offset: no flags byte".to_string(),
+            ));
+        }
+        let flags = data[start_offset];
+        let mut offset = start_offset + 1;
+
+        let is_deleted = (flags & CELL_IS_DELETED) != 0;
+        let is_expiring = (flags & CELL_IS_EXPIRING) != 0;
+        let use_row_timestamp = (flags & CELL_USE_ROW_TIMESTAMP) != 0;
+        let use_row_ttl = (flags & CELL_USE_ROW_TTL) != 0;
+
+        // Step 1: skip timestamp VInt if not using row timestamp.
+        // Skip-only: byte advancement is identical for vint/vuint, but use the
+        // UNSIGNED variant to match the writer encoding (roborev #863).
+        if !use_row_timestamp {
+            let (remaining, _ts_delta) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "cell_header_end_offset: failed to parse timestamp VInt: {:?}",
+                    e
+                ))
+            })?;
+            offset += data[offset..].len() - remaining.len();
+        }
+        // Step 2: skip LDT VUInt if not using row TTL and (deleted or expiring)
+        if !use_row_ttl && (is_deleted || is_expiring) {
+            let (remaining, _ldt_delta) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "cell_header_end_offset: failed to parse LDT VUInt: {:?}",
+                    e
+                ))
+            })?;
+            offset += data[offset..].len() - remaining.len();
+        }
+        // Step 3: skip TTL VUInt if not using row TTL and expiring
+        if !use_row_ttl && is_expiring {
+            let (remaining, _ttl_delta) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "cell_header_end_offset: failed to parse TTL VUInt: {:?}",
+                    e
+                ))
+            })?;
+            offset += data[offset..].len() - remaining.len();
+        }
+
+        Ok((flags, offset))
     }
 }

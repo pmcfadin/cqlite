@@ -444,6 +444,13 @@ impl V5CompressedLegacyParser {
                                     );
                                 }
 
+                                debug!(
+                                    "V5CompressedLegacy: Parsed {} cells from row {} (is_static={})",
+                                    cells.len(),
+                                    row_count,
+                                    is_static
+                                );
+
                                 // Issue #480 FIX: Static row handling
                                 //
                                 // Static rows are stored once per partition and contain values for
@@ -583,13 +590,6 @@ impl V5CompressedLegacyParser {
                                     partition_index, row_count + 1, offset
                                 );
                             }
-                            // Issue #3723: this is the loop the stitched SCAN path runs
-                            // (`parse_block` → `parse_block_emit` → here), so it is where
-                            // the row-level refusal has to survive or the read reports
-                            // FEWER ROWS instead of an error. One variant only — see
-                            // `raw_value::fatal_decode_error`; every other row-parse
-                            // failure keeps the tolerant `break` below.
-                            Err(e) if super::raw_value::is_fatal_decode_error(&e) => return Err(e),
                             Err(e) => {
                                 // End of valid data in partition
                                 debug!(
@@ -809,13 +809,13 @@ impl V5CompressedLegacyParser {
         };
         let (row_header, row_size) =
             self.parse_row_metadata(data, row_metadata_offset, row_flags, extended_flags)?;
-        let next_offset = (row_metadata_offset + row_header.row_size_vint_len) + row_size as usize;
-        if next_offset > data.len() {
+        let body_start = row_metadata_offset + row_header.row_size_vint_len;
+        if row_size > data.len().saturating_sub(body_start) as u64 {
             return Err(Error::corruption(
                 "prime_shadow: row framing extends past decompressed block".to_string(),
             ));
         }
-        Ok(next_offset)
+        Ok(body_start + row_size as usize)
     }
 
     /// Parse all partitions in a decompressed block, returning per-row timestamps.

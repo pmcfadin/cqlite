@@ -51,7 +51,10 @@ mod compressed_scan_window;
 mod query_rows;
 /// Sizing constants + the derived read-ahead bounds (issue #3384).
 mod query_rows_bounds;
+/// The half-open token bound and its Cassandra-derived membership rule (#3634).
+mod token_bound;
 pub use query_rows::{QueryRowBatch, QueryRowStream, QUERY_ROWS_MAX_READ_AHEAD};
+pub use token_bound::ScanTokenBound;
 
 // COMBINED-INTERACTION regression for the #2876 read-intent split x the #2877
 // coalescing window: every widened read this walk issues must land on the
@@ -73,44 +76,6 @@ pub use query_rows::{QueryRowBatch, QueryRowStream, QUERY_ROWS_MAX_READ_AHEAD};
 mod scan_plane_coalescing_tests;
 
 use compressed_scan_window::CompressedScanWindow;
-
-/// Half-open `(start_excl, end_incl]` token bound pushed into the per-SSTable walk
-/// (issue #2413 Option A). Mirrors the flight `TokenFilter` half-open semantics
-/// exactly (including the `start == end` FULL-ring convention, #2228); the flight
-/// crate constructs one of these from its `TokenFilter` and a grid test pins that
-/// the two agree, so the membership rule lives in ONE place.
-#[derive(Debug, Clone, Copy)]
-pub struct ScanTokenBound {
-    /// Exclusive lower bound.
-    pub start_excl: i64,
-    /// Inclusive upper bound.
-    pub end_incl: i64,
-    /// Ring-wraparound segment (`start > end`): keep `token > start || token <= end`.
-    pub wraparound: bool,
-}
-
-impl ScanTokenBound {
-    /// Whether `token` is inside this half-open `(start, end]` range.
-    pub fn contains(&self, token: i64) -> bool {
-        // #2228: equal endpoints denote the FULL ring, not the empty set.
-        if self.start_excl == self.end_incl {
-            return true;
-        }
-        if self.wraparound {
-            token > self.start_excl || token <= self.end_incl
-        } else {
-            token > self.start_excl && token <= self.end_incl
-        }
-    }
-
-    /// Whether every remaining (token-ascending) partition is guaranteed to be
-    /// ABOVE this range, so a forward walk can stop. Only sound for a
-    /// non-wraparound range (a wraparound range has in-range tokens at both ends
-    /// of the ring, so a forward walk cannot early-stop).
-    fn can_stop_past(&self, token: i64) -> bool {
-        !self.wraparound && self.start_excl != self.end_incl && token > self.end_incl
-    }
-}
 
 /// The token range applied to a walk whose signature does not take one.
 ///
@@ -247,10 +212,14 @@ impl SSTableReader {
         // MUST start at the index's true beginning (offset 0) so BOTH segments are
         // reachable; `ScanTokenBound::contains` (the per-entry filter below) already
         // selects exactly the two segments, and `can_stop_past` is unconditionally
-        // `false` for `wraparound` (verified: the walk never early-stops before
-        // EOF), so the pair is coherent — a full walk, filtered.
+        // `false` for a wraparound bound (verified: the walk never early-stops
+        // before EOF), so the pair is coherent — a full walk, filtered.
+        //
+        // Wrapping is DERIVED from the endpoints (#3634), so the FULL ring
+        // (`start_excl == end_incl`, #2228) takes this arm too — as it must: it
+        // admits every token, so the walk has to start at the true beginning.
         let start_position = match token_bound {
-            Some(bound) if bound.wraparound => 0,
+            Some(bound) if bound.is_wraparound() => 0,
             Some(bound) => summary.scan_start_position_for_token(bound.start_excl),
             None => 0,
         };
@@ -690,65 +659,6 @@ impl SSTableReader {
 
 #[cfg(test)]
 mod tests {
-    use super::ScanTokenBound;
-
-    #[test]
-    fn contains_non_wraparound_half_open() {
-        let b = ScanTokenBound {
-            start_excl: 10,
-            end_incl: 20,
-            wraparound: false,
-        };
-        assert!(!b.contains(10), "start is exclusive");
-        assert!(b.contains(11));
-        assert!(b.contains(20), "end is inclusive");
-        assert!(!b.contains(21));
-    }
-
-    #[test]
-    fn contains_equal_endpoints_is_full_ring() {
-        let b = ScanTokenBound {
-            start_excl: 5,
-            end_incl: 5,
-            wraparound: false,
-        };
-        for t in [i64::MIN, -1, 0, 5, 6, i64::MAX] {
-            assert!(b.contains(t), "equal endpoints cover every token (#2228)");
-        }
-    }
-
-    #[test]
-    fn contains_wraparound() {
-        let b = ScanTokenBound {
-            start_excl: 100,
-            end_incl: -100,
-            wraparound: true,
-        };
-        assert!(b.contains(101), "above start is in range");
-        assert!(b.contains(-100), "at/below end is in range");
-        assert!(!b.contains(0), "the interior gap is excluded");
-    }
-
-    #[test]
-    fn can_stop_past_only_non_wraparound_above_end() {
-        let fwd = ScanTokenBound {
-            start_excl: 10,
-            end_incl: 20,
-            wraparound: false,
-        };
-        assert!(!fwd.can_stop_past(20), "at end still in range");
-        assert!(fwd.can_stop_past(21), "past end can stop");
-        let wrap = ScanTokenBound {
-            start_excl: 100,
-            end_incl: -100,
-            wraparound: true,
-        };
-        assert!(
-            !wrap.can_stop_past(i64::MAX),
-            "a wraparound range never early-stops a forward walk"
-        );
-    }
-
     /// The gate's own tests. The end-to-end pin, over a Cassandra-written BTI
     /// generation through `stream_all_partitions_for_query`, is
     /// `tests/issue_3358_bti_query_token_bound.rs`; these cover the parts that
@@ -778,7 +688,6 @@ mod tests {
             let bound = ScanTokenBound {
                 start_excl: token - 1,
                 end_incl: token,
-                wraparound: false,
             };
             assert!(
                 !bound.contains(cassandra_murmur3_token(&outside)),
@@ -800,7 +709,6 @@ mod tests {
             let mut gate = TokenGate::new(Some(ScanTokenBound {
                 start_excl: token - 1,
                 end_incl: token,
-                wraparound: false,
             }));
             let verdicts: Vec<bool> = [&inside, &inside, &outside, &outside, &inside]
                 .into_iter()

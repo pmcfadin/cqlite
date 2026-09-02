@@ -156,8 +156,7 @@ fn query_timeout_shares_the_timeout_identity_on_both_surfaces() {
 fn row_count_is_pinned() {
     assert_eq!(
         FfiErrorVariant::ALL.len(),
-        // 39 since issue #3723 added `FixedWidthLengthMismatch`.
-        39,
+        38,
         "contract row count changed — review the new row's py_class/node_code \
          and update this pin"
     );

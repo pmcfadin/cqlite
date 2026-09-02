@@ -163,91 +163,93 @@
 //! | duration | measured from its own three-VInt framing (the decoder ignores the remainder) |
 //! | unknown type → opaque `Value::Blob` | whole slice by construction; also raises the caller-aggregated opaque-key signal (the `warn!` is the caller's — see above) |
 //!
-//! ## The residual, NARROWED BY #3723: NESTED CONSUMPTION BELOW THE FIRST LEVEL
+//! ## The residual: NESTED CONSUMPTION IS UNCHECKED AT EVERY LEVEL BELOW THE FIRST
 //!
-//! The consumption rule above applies to the OUTER value only. A nested value is
-//! bounded by its own `[i32 BE len]` prefix and the parent advances by that
-//! DECLARED length. Issue **#3723** closed the first of the four classes below —
-//! the one this module's own headline example used. The rest are OPEN, tracked as
-//! issue **#3778**, and are why this section survives.
+//! Stated broadly because an earlier revision stated it too narrowly — it named
+//! only fixed-width scalars, and roborev round 9 was right that the class is
+//! wider. The consumption rule above applies to the OUTER value only. A nested
+//! value is bounded by its own `[i32 BE len]` prefix, the parent advances by that
+//! DECLARED length, and nothing compares it with what the child actually read. So
+//! trailing bytes inside any nested value are silently ignored:
 //!
-//! * **fixed-width scalars — CLOSED by #3723 WHERE THE GUARD IS REACHED.** The
-//!   guards were `data.len() < N`, so a 5-byte `int` decoded from its first 4
-//!   bytes; they are now `!= N`, returning [`Error::FixedWidthLengthMismatch`],
-//!   which `raw_value::is_fatal_decode_error` makes FATAL for a WRONG width (a
-//!   zero length is refused but stays TOLERATED). On the MULTICELL path that
-//!   refusal escapes the tolerant `break`/`None` handlers above and reaches the
-//!   public read path — but ONLY for a NESTED scalar. A DIRECT scalar key is
-//!   refused earlier by this file's own allowed-widths table as the TOLERATED
-//!   `Error::Corruption` (census site SIX), as is a frozen column's SIMPLE-cell
-//!   `break` (site FIVE); both declared in `fatal_decode_error.rs`, open #3778.
-//! * **nested tuples and UDTs — OPEN.** The decoders iterate the DECLARED
-//!   components and stop, leaving extra components unread.
-//! * **nested collections — OPEN.** The element loop runs the DECLARED count and
-//!   stops. Elements that are themselves fixed-width are now covered by the first
-//!   bullet, so what remains is surplus not attributable to an element's declared
-//!   width — e.g. a count that under-runs the available bytes.
-//! * **`duration` — OPEN.** Reads three VInts and ignores whatever follows.
+//! * **fixed-width scalars** — `parse_value_from_raw_bytes`'s guards are
+//!   `data.len() < N`, not `!= N`, so a 5-byte `int` element decodes from its
+//!   first 4 bytes;
+//! * **nested tuples and UDTs** — the decoders iterate the DECLARED components and
+//!   stop, leaving any extra components unread;
+//! * **nested collections** — the element loop runs the DECLARED count and stops;
+//! * **`duration`** — reads three VInts and ignores whatever follows.
 //!
-//! So the consequence previously recorded here is no longer reachable BY THE ROUTE
-//! IT NAMED: as `frozen<list<int>>` cell paths, `[count=1][len=4][4B]` (12 bytes)
-//! and `[count=1][len=5][5B]` (13 bytes) no longer both decode to
-//! `Frozen(List([Integer(7)])))`. The 13-byte form is REFUSED, because its `int`
-//! element's declared length is 5 — pinned by
-//! `raw_value::nested_fixed_width_length_tests` (AC3). Two cell paths can still
-//! collapse to one logical key where the surplus sits in an OPEN class.
+//! Consequence, and it is this PR's own headline symptom one level down: for
+//! `frozen<list<int>>` the byte strings `[count=1][len=4][4B]` and
+//! `[count=1][len=5][5B]` both satisfy the OUTER rule and decode to the same
+//! `List([Integer(x)])`, so two distinct cell paths become one logical key and can
+//! collapse a Python map entry.
 //!
-//! WHY THE REST IS NOT FIXED HERE, measured rather than asserted, and unchanged by
-//! #3723: `parse_value_from_raw_bytes` has NO consumption channel at all — it
-//! returns a `Value` — so no caller could check even if it wanted to. #3723 did
-//! not add one, and that is exactly why this class could be closed without it: an
-//! exact width guard needs only the slice already given. Adding a consumption
-//! channel is a recursive signature change across that function's ~45 call sites
-//! plus 8 further decoders in the same path (`parse_raw_type_value`,
-//! `parse_udt_value`, `parse_nested_udt_from_registry`, `parse_inline_udt_value`,
-//! `parse_tuple_elements_raw`, `parse_frozen_sequence_value_raw`,
-//! `parse_frozen_map_value_raw`, `read_frozen_element`), ~100 sites in total —
-//! a shared-decoder tightening with its own oracle, i.e. its own PR.
+//! WHY IT WAS NOT FIXED HERE, measured rather than asserted: the root cause was
+//! that `parse_value_from_raw_bytes` had NO consumption channel at all — it
+//! returned a `Value` — so no caller could check even if it wanted to. That was
+//! a shared-decoder tightening with its own oracle, i.e. its own PR, and it has
+//! since LANDED as **issue #3811**: that function is now a thin wrapper over
+//! `parse_value_from_raw_bytes_reporting` plus `require_fully_consumed_raw`, so
+//! every bounded caller of the short name inherits the rule and the collapse
+//! described above no longer occurs. This module's own enforcement is retained
+//! (it also owns the fixed-width ALLOWED-width table below), and the two are to
+//! be UNIFIED — see the `#3820` note beside `require_fully_consumed_raw`.
 //!
 //! It is also deliberately NOT patched with a second framing walk here: a
 //! call-site validator that must know about every decoder is precisely the shape
-//! this module replaced. #3723's lead ruling says the same from the other side —
-//! site-by-site width guards do not converge, so no fifth guard site was added.
+//! this module replaced.
 //!
-//! For whoever takes #3778: nothing found depends on the lenient acceptance, so
-//! the tightening looks SAFE in principle — Cassandra cannot drop a UDT field
-//! (`AlterTypeStatement` at `cassandra-5.0.8` offers only `AddField`,
-//! `RenameFields`, `AlterField`), so schema evolution yields SHORT encodings,
-//! legal and already handled, never trailing ones. The blocker is scope and
-//! oracle, not risk. (The policy-layer `Option`-collapse in `timestamp_policy.rs`
-//! / `compaction.rs` is a separate concern, issue **#3782**, not a consumption bug.)
+//! Tracked as issue **#3723**. Worth recording for whoever takes it: nothing found
+//! depends on the lenient acceptance, so the tightening looks SAFE in principle —
+//! Cassandra cannot drop a UDT field (`AlterTypeStatement` at `cassandra-5.0.8`
+//! offers only `AddField`, `RenameFields`, `AlterField`), so schema evolution
+//! yields SHORT encodings, which are legal and already handled, never trailing
+//! ones. The blocker is scope and oracle, not risk.
 //!
-//! ## SYMPTOM: A PYTHON READ COULD LOSE A MAP ENTRY — fixed-width case CLOSED
+//! ## SYMPTOM: A PYTHON READ CAN SILENTLY LOSE A MAP ENTRY (issue #3612, R6-F1)
 //!
-//! Kept symptom-first after the fix, because the symptom is what a reader arrives
-//! with. If a `map<frozen<list<...>>, ...>` comes back from the Python binding
-//! with FEWER ENTRIES than `sstabledump` shows, this is the reason. Two cell paths
-//! differing only in a nested element's declared length collapse to ONE decoded
-//! key, and Python is the ONLY surface that loses an entry to that collapse — its
-//! hashable projection makes both one `dict` key, where Rust `Value::Map` (a
-//! `Vec<(Value, Value)>`), the CLI JSON writer, Arrow/parquet `MapArray` offsets
-//! and Node (a JS `Map` keyed by OBJECT IDENTITY) all keep two.
+//! Stated symptom-first and in the LOSING direction on purpose. If you arrived
+//! here because a `map<frozen<list<...>>, ...>` came back from the Python binding
+//! with FEWER ENTRIES than `sstabledump` shows, this is the reason, and #3723 is
+//! the issue. The lead ruling on it is ACCEPT-AND-DOCUMENT, so nothing below is a
+//! justification for the loss — it is the record of it.
 //!
-//! For the `frozen<list<int>>` pair above this is now REFUSED rather than
-//! collapsed, so those two keys can no longer merge. Historical record of what it
-//! cost while it existed: before #3612 the pair decoded to two DISTINCT
-//! `Value::Blob`s of 12 and 13 bytes and Python kept two entries; between #3612
-//! and #3723 it kept one. It remains reachable only through the three OPEN classes.
+//! Two cell paths that differ only in a nested element's declared length collapse
+//! to ONE decoded key. Where `origin/main` returned two distinct opaque keys and
+//! Python kept two dict entries, HEAD returns one key and **Python keeps one
+//! entry: the other is gone, with no error and no warning.**
 //!
-//! **Scope, from Cassandra rather than from judgement** — the argument #3723 acted
-//! on, retained because it still governs the OPEN classes. That 13-byte path
-//! cannot occur in a well-formed SSTable: `ListSerializer.validate` (5.0.8)
-//! validates every element with its own type's `validate` — a 5-byte `int` is
-//! rejected by `Int32Serializer` — then throws `"Unexpected extraneous bytes after
-//! list value"`. The collapse needs input Cassandra ITSELF refuses to read. `main`
-//! returned two opaque keys and #3612 one merged key; NEITHER matched Cassandra,
-//! which errors. #3723 matched it by REJECTING, not by preserving the distinctness
-//! of two corrupt encodings — the outcome #3778 should converge on too.
+//! Recorded because the earlier statement of this residual described only the
+//! collapse and not what the collapse costs, and the difference is a behaviour
+//! change this diff introduces:
+//!
+//! * At HEAD, `[count=1][len=4][4B]` (12 bytes) and `[count=1][len=5][5B]`
+//!   (13 bytes) as `frozen<list<int>>` cell paths BOTH decode to
+//!   `Frozen(List([Integer(7)])))` — equal. On `origin/main` they decoded to two
+//!   DISTINCT `Value::Blob`s of 12 and 13 bytes. (Both measured, each with a
+//!   control proving distinct payloads still compare unequal.)
+//! * Entry count per surface, for two colliding keys — Python is the ONLY one
+//!   that loses an entry:
+//!
+//!   | surface | entries | why |
+//!   |---|---|---|
+//!   | Rust `Value::Map` | 2 | a `Vec<(Value, Value)>`; no deduplication |
+//!   | CLI JSON writer | 2 | one `{key, value}` object per pair |
+//!   | Arrow / parquet | 2 | `MapArray` offsets, one slot per pair |
+//!   | Node | 2 | a JS `Map` keyed by OBJECT IDENTITY, so equal shapes stay two |
+//!   | **Python** | **1** | the hashable projection makes both one `dict` key |
+//!
+//! **Scope, from Cassandra rather than from judgement:** that 13-byte path cannot
+//! occur in a well-formed SSTable. `ListSerializer.validate` (5.0.8) validates
+//! every element with its own type's `validate` — so a 5-byte `int` element is
+//! rejected by `Int32Serializer` — and then throws
+//! `"Unexpected extraneous bytes after list value"`. So the collapse needs input
+//! Cassandra ITSELF refuses to read, on which `main` returned two opaque keys and
+//! HEAD returns one merged key; neither matches Cassandra, which errors. That is
+//! why #3723's fix is STRICT REJECTION of such a path, not preserving the
+//! distinctness of two corrupt encodings.
 //!
 //! # Presenting the key EXACTLY as the FROZEN spelling does (issue #3612, R3-F2/R7)
 //!
@@ -466,8 +468,9 @@ impl V5CompressedLegacyParser {
     /// frozen list/set/map keys and `duration`, plus a partial trailing header —
     /// because a validator at the call site has to know about every decoder, and
     /// this one knew about two. Every composite decoder ALREADY reports a consumed
-    /// offset and `parse_value_from_raw_bytes` merely DISCARDS it (`let (val, _)`),
-    /// so the correct shape is to keep that offset instead of re-deriving it.
+    /// offset, which `parse_value_from_raw_bytes` used to DISCARD (`let (val, _)`)
+    /// until #3811 gave it a reporting twin; the correct shape is to keep that
+    /// offset instead of re-deriving it.
     ///
     /// # The `None` arms are exact, not unchecked
     /// `None` is returned only where the arm's contract IS "the entire slice is the
@@ -759,11 +762,6 @@ impl V5CompressedLegacyParser {
     ///
     /// Kept as a single table so the marshal and short-form routes cannot drift
     /// into two different opinions about a family's width.
-    ///
-    /// It is NOT the reader's only width table, deliberately: for a NESTED
-    /// element/field (framed by a SIGNED `[i32 BE len]`, where null is `-1`)
-    /// `raw_value::fixed_width::fixed_width_admissible_width` admits `N` ONLY.
-    /// Read that module's header before "fixing" either to match (#3723).
     fn cql_short_allowed_widths(short: &str) -> &'static [usize] {
         match short {
             // --- `N` OR `0`: `size != N && !isEmpty` throws, so EMPTY is legal ---
