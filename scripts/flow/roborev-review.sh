@@ -433,9 +433,12 @@ load-bearing rather than a caveat. The classifier failed because it inferred del
 MODE from injectable prompt text AT DECISION TIME, to produce an AUTOMATED verdict —
 roborev's prompt embeds repository-controlled content, so that inference was spoofable
 in both directions. What is described here is a HUMAN reading a STORED record as
-evidence for a HAND-GRANTED waiver: no automated verdict is derived from it, so there
-is nothing to spoof into a PASS. Nothing in this wrapper parses the prompt for delivery
-mode, and nothing may be added that does.
+evidence for a HAND-GRANTED waiver, so the direct PARSER exploit is gone: nothing in
+this wrapper parses the prompt for delivery mode, and nothing may be added that does.
+THAT IS ALL IT BUYS. The human is IN the path, not outside it — spoofed
+repository-controlled prompt text can mislead an authorizer into issuing the marker, and
+the marker is what makes '--recheck-job' pass. That exposure is #3826's subject and is
+NOT settled here.
 
 THE WAIVER, therefore: the OWNER or the coordination LEAD may excuse an absence FAIL
 with a PR comment that carries this as a DEDICATED LINE, at column zero, all four

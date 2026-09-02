@@ -1407,8 +1407,11 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   unwritable-and-therefore-corroborating; that was false in the half that mattered). **It resurrects nothing of the deleted delivery classifier,
   and that distinction is load-bearing rather than a caveat:** the classifier read injectable prompt
   text AT DECISION TIME to produce an AUTOMATED verdict, while this is a HUMAN reading a STORED
-  record as evidence for a HAND-GRANTED waiver — there is no automated verdict to spoof. Nothing in
-  the wrapper parses the prompt for delivery mode, and nothing may be added that does.
+  record as evidence for a HAND-GRANTED waiver, so the direct PARSER exploit is gone: nothing in
+  the wrapper parses the prompt for delivery mode, and nothing may be added that does. **THAT IS
+  ALL IT BUYS** — the human is IN the path, not outside it, so spoofed repository-controlled prompt
+  text can still mislead an authorizer into issuing the marker, and the marker is what makes
+  `--recheck-job` pass. That exposure is **#3826**'s subject and is NOT settled here.
   **AND `job=` IS DAEMON-SCOPED, WHICH NOBODY HAD WRITTEN DOWN (#3654).** Each box runs its own
   roborev daemon with its own database and its own sequential ids, so **two boxes can legitimately
   present the SAME id for DIFFERENT reviews** — measured: `job=265` on two lanes 50 minutes apart,

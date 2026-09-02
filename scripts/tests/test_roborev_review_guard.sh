@@ -5977,6 +5977,24 @@ assert_says 'case (jd1) --help says NEITHER signal establishes provenance' 'NEIT
 # reintroduced "lead with it" would be policy this change deliberately does not decide.
 assert_says 'case (jd1) --help defers the evidence policy to #3826' 'TRACKED AS #3826'
 assert_lacks 'case (jd1) --help recommends no ordering between the signals' 'should LEAD with'
+# WHAT DELETING THE CLASSIFIER BOUGHT, AND WHAT IT DID NOT. The surviving claim is the PARSER one —
+# no automated verdict is derived from injectable prompt text, and nothing may be added that does —
+# and it is load-bearing: a future reader must not read the limit below as licence to resurrect the
+# classifier. The claim that was DELETED said there was "nothing to spoof into a PASS", which was
+# false and contradicted the sentence above it: the human is IN the path, so spoofed prompt text can
+# mislead an authorizer into issuing the marker that makes `--recheck-job` pass. Third overstatement
+# in this one paragraph across the issue's rounds, so it went by SUBTRACTION, not a third rewrite —
+# subtraction cannot introduce a false claim. Both halves are pinned, so neither can creep back.
+assert_says 'case (jd1) --help keeps the parser-exploit claim, which is the true one' \
+  'the direct PARSER exploit is gone'
+assert_says 'case (jd1) --help still forbids parsing the prompt for delivery mode' \
+  'parses the prompt for delivery mode, and nothing may be added that does'
+assert_says 'case (jd1) --help bounds what that buys' 'THAT IS ALL IT BUYS'
+assert_says 'case (jd1) --help puts the human IN the path' 'human is IN the path, not outside it'
+assert_says 'case (jd1) --help leaves the human-spoofing exposure to #3826' \
+  "#3826's subject and is"
+assert_lacks 'case (jd1) --help no longer claims there is nothing to spoof into a PASS' \
+  'nothing to spoof'
 reset_stub
 
 printf '== --help documents the exit codes and the live worktree probe ==\n'
