@@ -46,8 +46,15 @@
 #       emits a SECOND line carrying no prefix, breaking the anchor everything
 #       rests on.
 #   (c) The verdict appears ONLY on a `verdict ` line, carrying a token from a
-#       CLOSED set, matched token-exactly by the caller. Prose goes on
-#       `verdict-detail` lines, so the token position can never hold a word.
+#       CLOSED set. Prose goes on `verdict-detail` lines, so the token position
+#       can never hold a word. The token is for the READER: the EXIT CODE is the
+#       decision, and `premerge-assert.sh` decides on it alone. That is
+#       deliberate and is `base-staleness.sh`'s consumer rule — a consumer must
+#       treat an UNMEASURED exit as refusing, which is a property of the code,
+#       not of a word it matched. Do not couple a caller to this token: an
+#       earlier draft of this clause claimed a caller matched it token-exactly
+#       and none ever did, which is a comment inviting reliance it cannot
+#       support.
 #   (d) This file's own STATIC TEMPLATE TEXT carries none of `PASS`, `OK`,
 #       `RESULT:` — asserted structurally by
 #       scripts/tests/test_premerge_review_binding.sh.
