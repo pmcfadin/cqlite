@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=555
+CASE_FLOOR=557
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -3814,6 +3814,126 @@ then
   ok "every enumerated verdict-gating property has an analyzer-side refusal (20 properties)"
 else
   bad "a verdict-gating property has no analyzer-side refusal (see above)"
+fi
+
+# ---- the prose and the adjacent check state the SAME property ----------------
+# ROUND 21'S CENSUS, for the most dangerous class this lane has found: THE
+# COMMENT STATES THE CORRECT PROPERTY AND THE CHECK BESIDE IT IMPLEMENTS A
+# WEAKER ONE. Five instances -- the nproc comment, the analyzer's docstring
+# naming the pinned commit while nothing enforced it, the arm prefix test
+# beneath a message describing exact identity, the affinity helper returning
+# success beneath "never pinned correctly", and my own host-versus-workload
+# no-op. It is dangerous because a reviewer reads the sentence AS the behaviour,
+# which is how every one of them was signed off.
+#
+# "DOES THE PROSE MATCH THE CODE" IS UNDECIDABLE, so this does not attempt it.
+# It recognises the THREE SHAPES that produced those five instances and says so
+# in its output. A sixth instance of an UNRECOGNISED shape is invisible to it --
+# the declared gap, and the reason this is a census and not a proof.
+if python3 - "$HERE" <<'PYINNER'
+import importlib.util
+import re
+import sys
+
+sys.path.insert(0, sys.argv[1])
+MODULES = ["analyze-ab.py", "ab_driver_support.py", "ab_input.py",
+           "ab_stats.py", "ab_common.py"]
+# Built rather than written, because a literal triple quote cannot appear inside
+# the generator that produced this file -- the same class of quoting limit the
+# harness keeps meeting.
+DQ, SQ = '"' * 3, "'" * 3
+DOC_DELIMS = (DQ, SQ, "r" + DQ, "r" + SQ)
+# ONE reasoned exemption, and a LIST of one rather than a rule, because what
+# distinguishes it is SEMANTIC: that comment QUOTES a malformed manifest value
+# as an example rather than claiming the module enforces the commit. Nothing
+# mechanical separates a quoted example from a claim, so this is a human
+# judgement and is recorded as one.
+PROSE_EXAMPLE_EXEMPT = {("ab_input.py", "cfa93fe99")}
+
+
+def split_prose_and_code(text):
+    prose, code, in_doc = [], [], False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(DOC_DELIMS):
+            in_doc = not in_doc
+            prose.append(stripped)
+            continue
+        (prose if (in_doc or stripped.startswith("#")) else code).append(stripped)
+    return "\n".join(prose), "\n".join(code)
+
+
+def following(lines, index, count=8):
+    out, cursor = [], index + 1
+    while cursor < len(lines) and len(out) < count:
+        stripped = lines[cursor].strip()
+        if stripped and not stripped.startswith("#"):
+            out.append(stripped)
+        cursor += 1
+    return out
+
+
+problems, scanned = [], 0
+for name in MODULES:
+    text = open("%s/%s" % (sys.argv[1], name), encoding="utf-8").read()
+    lines = text.splitlines()
+    prose_text, code_text = split_prose_and_code(text)
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            continue
+        scanned += 1
+        # SHAPE A: "never" / "must not" beside a bare success.
+        if re.search(r"\bnever\b|\bmust not\b", stripped, re.I):
+            window = following(lines, index)
+            for position, statement in enumerate(window):
+                if re.fullmatch(r"return 0|raise SystemExit\(0\)", statement):
+                    if not any(re.match(r"err\(|raise |problems\.append", earlier)
+                               for earlier in window[:position]):
+                        problems.append(
+                            "%s:%d says never/must-not and the next statement is "
+                            "a bare success" % (name, index + 1))
+                    break
+        # SHAPE B: an exactness claim beside a PREFIX test.
+        if re.search(r"exact(ly)? equal|\bidentity\b|exact match", stripped, re.I):
+            if any(".startswith(" in statement
+                   for statement in following(lines, index)):
+                problems.append(
+                    "%s:%d claims exactness and the adjacent check is a prefix "
+                    "test" % (name, index + 1))
+
+    # SHAPE C: an object id named in prose and unreachable from the code.
+    try:
+        spec = importlib.util.spec_from_file_location(
+            name[:-3].replace("-", "_"), "%s/%s" % (sys.argv[1], name))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        reachable = " ".join(
+            value for value in vars(module).values() if isinstance(value, str))
+    except Exception:
+        reachable = ""
+    for token in sorted(set(re.findall(r"\b[0-9a-f]{7,40}\b", prose_text))):
+        if token in code_text or token in reachable:
+            continue
+        if (name, token) in PROSE_EXAMPLE_EXEMPT:
+            continue
+        problems.append("%s names %r in prose and nothing in its code can reach "
+                        "it" % (name, token))
+
+if scanned < 200:
+    problems.append("only %d comment lines were scanned; the derivation has "
+                    "broken" % scanned)
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+sys.stdout.write("%d\n" % scanned)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "no comment states a property its adjacent check implements more weakly (3 recognised shapes)"
+  ok "the prose census declares its gap: 'does the prose match the code' is undecidable, so a sixth instance of an unrecognised shape is invisible to it"
+else
+  bad "a comment states a property the adjacent check does not enforce (see above)"
 fi
 
 # ---- no AB_* export precedes its variable's final value ----------------------
