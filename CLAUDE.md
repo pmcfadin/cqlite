@@ -1337,10 +1337,15 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   to draft** (`gh pr ready --undo <pr>`), which GitHub enforces against merging, or a per-tier
   `ci:` state. **`gh pr merge --disable-auto` alone is NOT a stop** — it removes the auto-merge
   REQUEST, and a plain `gh pr merge --squash` succeeds immediately afterward (measured: #3735
-  merged three minutes after the lead disarmed it). A column-zero `HOLD:` line on the PR or on
+  merged three minutes after the lead disarmed it). A column-zero `HOLD:` **COMMENT** on the PR or on
   the issue it closes is now mechanical too, because `premerge-assert`'s `hold-check` leg reads
   it (30-minute disarm window, a named committed constant with no env override); a lead clears
-  one with a column-zero `GO:` or `RELEASE:` line. But a draft is the only stop that holds
+  one with a column-zero `GO:` or `RELEASE:` line. **A COMMENT, not the PR DESCRIPTION** — the
+  leg scans comment bodies and never the description, deliberately: a PR body is editable at any
+  time by anyone with write access **with no per-edit attribution**, so it is the weaker artifact
+  and must never be an authorization channel (#3312), whereas a comment is permanent and
+  attributable. Do not "helpfully" add body scanning; a `HOLD:` typed into the description is
+  silently unenforced, which is why this sentence names the artifact. But a draft is the only stop that holds
   without the lane's cooperation.
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies
   already-reviewed code. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single

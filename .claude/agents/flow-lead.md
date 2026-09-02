@@ -80,9 +80,11 @@ back into one.
   PR to draft (`gh pr ready --undo <pr>`) or set a per-tier `ci:` state. **`gh pr merge --disable-auto`
   alone is NOT a stop** — it removes the auto-merge REQUEST only, and a plain `gh pr merge --squash`
   succeeds immediately afterward (measured: PR #3735 merged three minutes after a lead disarmed it).
-  A column-zero `HOLD:` line on the PR or on the issue it closes is mechanical too, since
+  A column-zero `HOLD:` **COMMENT** on the PR or on the issue it closes is mechanical too, since
   `premerge-assert`'s `hold-check` leg refuses on it (and on a disarm inside 30 minutes); clear it with
-  a column-zero `GO:` or `RELEASE:` line. Only a draft holds without the lane's cooperation.
+  a column-zero `GO:` or `RELEASE:` line. It must be a **COMMENT, never the PR DESCRIPTION** — a body is
+  editable by anyone with write access with no per-edit attribution, so the leg scans comments only
+  (#3312); a `HOLD:` in the description is silently unenforced. Only a draft holds without the lane's cooperation.
 - **Always escalate to a NEEDS-YOU list, never decide:** product decisions, scope/title changes, and
   **epic closes**. (Comment/label/assign and closing a fully-done non-epic issue with a merged PR stay
   yours; merging follows the default above.)

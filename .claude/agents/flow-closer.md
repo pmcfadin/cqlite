@@ -273,8 +273,9 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    ```
    The assert now also runs the two #3752 legs before its head check —
    `PREMERGE: REVIEW-BINDING` (the recorded roborev round must cover the certified head) and
-   `PREMERGE: HOLD-CHECK` (a column-zero `HOLD:` order on the PR or the issue it closes, or a
-   lead disarm inside 30 minutes). Both fail closed, and an `UNMEASURED` leg is a REFUSAL, not
+   `PREMERGE: HOLD-CHECK` (a column-zero `HOLD:` COMMENT on the PR or the issue it closes — a
+   comment, never the PR description, which the leg does not scan — or a lead disarm inside 30
+   minutes). Both fail closed, and an `UNMEASURED` leg is a REFUSAL, not
    a clearance.
 
    **HOW A LEAD ACTUALLY STOPS A MERGE (#3752 AC7).** The sanctioned stop is **converting the

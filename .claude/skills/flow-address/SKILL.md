@@ -73,7 +73,9 @@ Resolve them in the worktree and reply per thread.
    `==== ROBOREV REVIEW SUMMARY ====` block as a top-level PR comment, because
    `premerge-assert`'s `review-binding` leg reads the job id from the PR and refuses a merge whose
    recorded review does not cover the certified head. Its `hold-check` leg refuses on a column-zero
-   `HOLD:` on the PR or the issue it closes, and on a lead disarm inside 30 minutes; a lead clears
+   `HOLD:` COMMENT on the PR or the issue it closes (a comment, never the PR description — a body is
+   editable with no per-edit attribution, so it is not an authorization channel), and on a lead
+   disarm inside 30 minutes; a lead clears
    one with a column-zero `GO:` or `RELEASE:` line.
    The third argument is REQUIRED and must always be a FULL-gate `RESULT: PASS` block; `--lite` is
    refused by name everywhere, and a `--delta` block is accepted ONLY as the optional fourth argument
