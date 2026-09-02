@@ -939,11 +939,15 @@ fn the_undecoded_golden_gap_reports_a_wrong_kind_member() {
         ask(&json!([7])),
         "a correctly-kinded decoded member against an undecoded golden IS the declared gap"
     );
-    // And a NULL member stays acceptable at any position — a null is legal in every container
-    // this lane compares, and UserType.toJSONString emits `null` for an absent field.
+    // A NULL COLLECTION ELEMENT is malformed, not excusable (roborev job 60). CQL does not
+    // permit a null inside a collection — a `set<int>` cannot hold one, and a null map value
+    // DELETES the entry rather than storing one — so it is not a decode of this type and must
+    // be REPORTED. Nulls stay legal at a tuple SLOT and a UDT FIELD, which is where the
+    // committed fixture carries them (`rank:null`, `label:null`); measured on the golden,
+    // ZERO nulls appear directly in a collection array.
     assert!(
-        ask(&json!([null])),
-        "a null member is legal and must not break the gap"
+        !ask(&json!([null])),
+        "CQL forbids a null collection element, so it is malformed output and not this gap"
     );
 }
 

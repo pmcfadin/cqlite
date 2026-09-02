@@ -287,12 +287,42 @@ pub fn golden_map_key_value(
 /// TEXT spelling, so `Boolean` legitimately canonicalizes to [`Canon::Text`] under
 /// [`Egress::Csv`] and to [`Canon::Bool`] under [`Egress::Json`].
 pub fn canon_matches_declared_kinds(canon: &Canon, ty: &CqlType, egress: Egress) -> bool {
+    // A whole CELL may legitimately be null, so the entry point allows it; the recursion
+    // then decides per POSITION.
+    kinds_match(canon, ty, egress, NullHere::Allowed)
+}
+
+/// May a NULL stand at this position? A positional fact, from CQL rather than from taste.
+///
+/// CQL does not permit a null inside a COLLECTION: a `set<int>` cannot hold one, and writing a
+/// null map value DELETES the entry rather than storing one. It does permit a null TUPLE SLOT
+/// and a null UDT FIELD — `cassandra-5.0.8 UserType.toJSONString` emits `null` for a field
+/// whose buffer is absent, which is why a dump of a frozen UDT always carries every declared
+/// field.
+///
+/// Corpus-consistent, measured on the committed golden rather than assumed: **zero** null
+/// members appear directly in a collection array, while `nested-udt-keys.cql` deliberately
+/// carries null UDT FIELDS (`rank:null`, `label:null`).
+///
+/// It matters because accepting null everywhere made the undecoded-golden gap SUPPRESS
+/// malformed collection output — a `set<int>` containing `null` is not a decode of that type,
+/// and was being excused as one (roborev job 60).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NullHere {
+    /// A cell, a tuple slot, or a UDT field.
+    Allowed,
+    /// A list/set ELEMENT, or a map KEY or VALUE.
+    Forbidden,
+}
+
+fn kinds_match(canon: &Canon, ty: &CqlType, egress: Egress, null_here: NullHere) -> bool {
     if matches!(canon, Canon::Null) {
-        return true;
+        return null_here == NullHere::Allowed;
     }
     match ty {
         CqlType::Numeric(_) => matches!(canon, Canon::Num(_)),
         CqlType::Boolean => match egress {
+            // `Canon::for_csv` renders a boolean as its TEXT spelling.
             Egress::Json => matches!(canon, Canon::Bool(_)),
             Egress::Csv => matches!(canon, Canon::Bool(_) | Canon::Text(_)),
         },
@@ -302,31 +332,31 @@ pub fn canon_matches_declared_kinds(canon: &Canon, ty: &CqlType, egress: Egress)
         CqlType::List(element) | CqlType::Set(element) => match canon {
             Canon::Seq(items) => items
                 .iter()
-                .all(|item| canon_matches_declared_kinds(item, element, egress)),
+                .all(|item| kinds_match(item, element, egress, NullHere::Forbidden)),
             _ => false,
         },
         CqlType::Tuple(items) => match canon {
-            // Arity is already enforced by `canon_container`; this only asks about kinds.
+            // Arity is already enforced by `canon_container`; this asks only about kinds.
             Canon::Seq(slots) => slots
                 .iter()
                 .zip(items.iter())
-                .all(|(slot, slot_ty)| canon_matches_declared_kinds(slot, slot_ty, egress)),
+                .all(|(slot, slot_ty)| kinds_match(slot, slot_ty, egress, NullHere::Allowed)),
             _ => false,
         },
         CqlType::Map(key_ty, value_ty) => match canon {
             Canon::Entries(entries) => entries.iter().all(|(k, v)| {
-                canon_matches_declared_kinds(k, key_ty, egress)
-                    && canon_matches_declared_kinds(v, value_ty, egress)
+                kinds_match(k, key_ty, egress, NullHere::Forbidden)
+                    && kinds_match(v, value_ty, egress, NullHere::Forbidden)
             }),
             _ => false,
         },
         CqlType::Udt(udt) => match canon {
-            // The field SET and ORDER are already enforced by `canon_udt`, so a name that is
-            // not declared cannot reach here; a missing declared type is therefore a fault
-            // rather than a tolerated shape, and answers false.
+            // The field SET and ORDER are already enforced by `canon_udt`, so an undeclared
+            // name cannot reach here; a missing declared type is a fault, not a tolerated
+            // shape, and answers false.
             Canon::Fields(fields) => fields.iter().all(|(name, value)| {
                 match udt.fields.iter().find(|(n, _)| n == name) {
-                    Some((_, field_ty)) => canon_matches_declared_kinds(value, field_ty, egress),
+                    Some((_, field_ty)) => kinds_match(value, field_ty, egress, NullHere::Allowed),
                     None => false,
                 }
             }),

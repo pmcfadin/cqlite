@@ -680,12 +680,12 @@ const CASES: &[Case] = &[
         // CLI decodes it. A value disagreement, in the direction OPPOSITE to
         // `NestedFrozenUdtRendersAsBlobHex`.
         //
-        // CLASS 2 — the golden leaves a MULTICELL map's container-typed KEY as
-        // getString's flat cell-path text while the CLI renders the key's raw bytes
-        // as a 0x blob literal. Also a value disagreement, in BOTH directions at
-        // once: neither side decodes it. It used to be a LANE limitation covering
-        // four columns; issue #3726 closed that for the three FROZEN ones, which are
-        // now compared in full.
+        // CLASS 2 — WAS its own class and is now CLASS 1, which is the point. It
+        // covered four columns as a LANE limitation (golden left a MULTICELL map's
+        // container key as getString text, CLI rendered raw bytes as `0x`, NEITHER
+        // decoded). #3726 closed three (the FROZEN maps, compared in full); #3612
+        // then taught the CLI to decode the cell path, so the egress half is gone
+        // and only the GOLDEN's non-decode remains — Class 1's divergence exactly.
         skips: &[
             Skip {
                 path: "s_tuple_udt",
