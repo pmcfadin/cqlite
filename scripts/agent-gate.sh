@@ -19558,18 +19558,57 @@ for n in ("ENOSPC", "EDQUOT", "EROFS", "EACCES", "EPERM", "ENOTDIR", "EEXIST", "
     v = getattr(errno, n, None)
     if v is not None:
         B.add(v)
-try:
-    os.makedirs(p, exist_ok=True)
-except OSError as e:
+def report(e):
     code = errno.errorcode.get(e.errno, "E%s" % (e.errno,))
     sys.stdout.write(("CANNOT-WRITE " if e.errno in B else "UNCLASSIFIED ") + code)
     sys.exit(0)
+try:
+    os.makedirs(p, exist_ok=True)
+except OSError as e:
+    report(e)
 except Exception:
     sys.stdout.write("UNCLASSIFIED unknown")
     sys.exit(0)
 if not os.path.isdir(p):
     sys.stdout.write("CANNOT-WRITE ENOTDIR")
     sys.exit(0)
+# AN EXISTING DIRECTORY IS NOT A WRITABLE ONE. makedirs(exist_ok=True) succeeds for a
+# directory that is already there without establishing that anything can be put IN it, so
+# an existing read-only target, a read-only mount or an exhausted quota reached PASS and
+# cargo then failed on its first artifact. The bar does not cover it either: a
+# quota-exhausted user on a spacious volume sees plenty of free space in df, so both
+# checks together said PASS on a target that provably cannot be written.
+#
+# TRY IT, DO NOT ASK. os.access() reports on permission BITS and establishes nothing under
+# ACLs, a read-only mount or a quota. O_EXCL with an UNPREDICTABLE name because peer lanes
+# share the filesystems on this box, and a predictable path in a shared directory is a
+# symlink-attack shape. Removed on EVERY path, and a failed removal never changes the
+# verdict: this probe answers a question, it does not own the directory.
+#
+# fsync, because block-quota and late ENOSPC surface on flush rather than on write.
+# DECLARED RESIDUAL: delayed allocation can still defer some ENOSPC past a one-byte fsync
+# — the bar reading is the other half of that answer.
+w = os.path.join(p, "." + os.urandom(12).hex() + ".agent-gate-writeprobe")
+fd = None
+try:
+    fd = os.open(w, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.write(fd, b"\0")
+    os.fsync(fd)
+except OSError as e:
+    report(e)
+except Exception:
+    sys.stdout.write("UNCLASSIFIED unknown")
+    sys.exit(0)
+finally:
+    if fd is not None:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+    try:
+        os.unlink(w)
+    except Exception:
+        pass
 sys.stdout.write("OK")
 ' "$td" 2>/dev/null); e=$?
   case "$e" in

@@ -59,6 +59,29 @@ bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # derived from a control's absence is the shape this repo's doctrine exists to forbid.
 skip() { printf 'skip - %s\n' "$1"; SKIP=$((SKIP + 1)); }
 
+# df_operands <case-label>: the OPERAND of each `df -Pk <path>` the shim received, one per
+# line, in call order. The shim answers regardless of what it is asked, so without this the
+# suite pins what was RENDERED and not what was MEASURED — and "measure the right
+# filesystem" is the property most of this issue has been about.
+df_operands() {
+  sed -n 's/^call [0-9]*: -Pk //p' "$tmp/$1.dfstate.log" 2>/dev/null
+}
+# df_operands_all <case-label> <expected>: rc 0 when at least one df call was made AND
+# every one of them received <expected>. Zero calls is a FAILURE, not a pass: a run that
+# measured nothing must never satisfy "every measurement was of the right path".
+df_operands_all() {
+  local got n=0 bad=0 o
+  got=$(df_operands "$1")
+  while IFS= read -r o; do
+    [ -n "$o" ] || continue
+    n=$((n + 1))
+    [ "$o" = "$2" ] || bad=$((bad + 1))
+  done <<EOF_OPS
+$got
+EOF_OPS
+  [ "$n" -ge 1 ] && [ "$bad" -eq 0 ]
+}
+
 # df_calls <case-label>: how many times the shim was invoked by that run. An integer
 # always, never empty — "measured once" and "measured twice" is the fact under test.
 df_calls() {
@@ -985,6 +1008,12 @@ k_case() {
       ok "target-dir/$label: resolved to $expect, and the line says HOW" ;;
     *) bad "target-dir/$label: expected 'target-dir $expect (via cargo metadata)', got: ${line:-<none>}" ;;
   esac
+  # WHAT WAS MEASURED, not merely what was rendered (roborev job 360, Low).
+  if df_operands_all "$label" "$expect"; then
+    ok "target-dir/$label: every df -Pk call was made AGAINST $expect ($(df_calls "$label") call(s))"
+  else
+    bad "target-dir/$label: a df call measured something other than $expect — operands were: $(df_operands "$label" | tr '\n' ' ')"
+  fi
   # The differential: what the pre-fix resolver would have picked on this same input.
   if [ -n "$envname" ]; then
     local was; was=$(prefix_resolver "$envname" "$expect")
@@ -1206,6 +1235,18 @@ m_case() {
     *"target-dir $td2 "*) ok "stale-mount/$label: the line names the RE-RESOLVED target dir ($td2)" ;;
     *) bad "stale-mount/$label: the line does not name the re-resolved target dir: ${line:-<none>}" ;;
   esac
+  # THE OPERANDS MUST TRACK THE RESOLUTION IN FORCE AT EACH MOMENT. When the subject moves
+  # mid-run the two df calls must be made against DIFFERENT paths; a run that measured the
+  # same filesystem twice while reporting a moved target dir is the exact confusion the
+  # rendering assertions above cannot see.
+  local o1 o2
+  o1=$(df_operands "$label" | sed -n 1p)
+  o2=$(df_operands "$label" | sed -n 2p)
+  if [ "$o1" = "$td1" ] && [ "$o2" = "$td2" ]; then
+    ok "stale-mount/$label: df call 1 measured $td1 and call 2 measured $td2 — each the resolution in force at that moment"
+  else
+    bad "stale-mount/$label: df operands were '$o1' then '$o2'; expected '$td1' then '$td2'"
+  fi
 }
 # The subject MOVED during the queue -> the mount measured for the old one is dropped.
 m_case m-moved   "$tmp/td-A" "$tmp/td-B" unknown \
@@ -1609,6 +1650,79 @@ if [ -d "$r_cold" ]; then
   ok "mkdir-subject: the accepted side effect is real and asserted — the directory now exists (cargo would create it seconds later anyway)"
 else
   bad "mkdir-subject: the target dir was reported measured but does not exist"
+fi
+
+# ===========================================================================
+# Case T: the shipped gate still PARSES, and the operand assertion above
+# DISCRIMINATES.
+#
+# (a) The admission path embeds a python program inside a single-quoted bash
+#     string, so one apostrophe in a comment terminates the quote and breaks the
+#     whole script. It happened once while writing this change.
+#
+# (b) The df shim answers whatever it is asked, so `df_operands_all` is only
+#     evidence if it can actually FAIL. Proved against a MUTANT copy of the
+#     shipped gate whose production call measures the wrong path — the same
+#     substitute-the-artifact idiom the canonical-pin helper uses, never a seam
+#     in the shipped script.
+# ===========================================================================
+if bash -n "$GATE" 2>"$tmp/t-syntax.err"; then
+  ok "gate-parses: the shipped agent-gate.sh parses (the embedded python is still quoted correctly)"
+else
+  bad "gate-parses: the shipped agent-gate.sh does NOT parse: $(head -1 "$tmp/t-syntax.err")"
+fi
+
+# THE MUTANT NEEDS A REPO, NOT JUST A FILE. `agent-gate.sh` does `cd "$(dirname "$0")/.."`
+# and takes REPO_ROOT from there, so a copy dropped in $TMPDIR resolves REPO_ROOT=/tmp,
+# `cargo metadata` fails, and the run never reaches df — which made the first version of
+# this control pass for the WRONG REASON (zero df calls rather than a wrong operand). Its
+# own zero-call assert is what caught that, which is why it is here. So the mutant lives in
+# a SYMLINK FARM of the real checkout: every top-level entry symlinked, `scripts/` rebuilt
+# with the mutated gate. Nothing is written into the worktree — a suite that runs inside
+# `tooling-tests` must never mutate the tree its own gate is certifying (#2926).
+t_root="$tmp/t-mutrepo"
+t_repo=$(cd "$SCRIPT_DIR/../.." && pwd)   # SCRIPT_DIR is scripts/tests, so the repo is TWO levels up
+mkdir -p "$t_root/scripts"
+for t_e in "$t_repo"/* "$t_repo"/.[!.]*; do
+  t_b=$(basename "$t_e"); [ "$t_b" = scripts ] && continue
+  ln -s "$t_e" "$t_root/$t_b" 2>/dev/null || true
+done
+for t_e in "$t_repo"/scripts/* "$t_repo"/scripts/.[!.]*; do
+  t_b=$(basename "$t_e"); [ "$t_b" = agent-gate.sh ] && continue
+  ln -s "$t_e" "$t_root/scripts/$t_b" 2>/dev/null || true
+done
+t_mutant="$t_root/scripts/agent-gate.sh"
+sed 's|df -Pk "$path"|df -Pk /|' "$GATE" > "$t_mutant"
+if grep -q 'df -Pk /' "$t_mutant" && ! grep -q 'df -Pk "$path"' "$t_mutant"; then
+  ok "operand-guard CONTROL: the mutant gate was built (its production df call measures the WRONG path)"
+else
+  bad "operand-guard CONTROL: the mutant substitution did not take — the discrimination proof below would be vacuous"
+fi
+t_target="$tmp/t-target"; mkdir -p "$t_target"
+t_script=$(df_script t "$HIGH")
+mkdir -p "$tmp/t.run"
+env PATH="$tmp/shim:$PATH" \
+  DF_SHIM_SCRIPT="$t_script" DF_SHIM_STATE="$tmp/t.dfstate" \
+  CARGO_TARGET_DIR="$t_target" \
+  AGENT_GATE_SUMMARY_FILE="$tmp/t.summary.txt" \
+  CQLITE_GATE_STUB_RUNDIR="$tmp/t.run" CQLITE_GATE_STUB_SLEEP=1 \
+  CQLITE_GATE_SLOTS_DIR="$tmp/t-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_POLL_SECS=0.3 \
+  bash "$t_mutant" >"$tmp/t.out" 2>"$tmp/t.err"
+if [ "$(df_calls t)" -ge 1 ]; then
+  ok "operand-guard CONTROL: the mutant DID call df ($(df_calls t) time(s)) — so a red below is a mismatch, not an absence"
+else
+  bad "operand-guard CONTROL: the mutant made no df call at all; the discrimination proof would be vacuous"
+fi
+if df_operands_all t "$t_target"; then
+  bad "operand-guard: df_operands_all PASSED a gate that measured $(df_operands t | sed -n 1p) instead of $t_target — the assertion cannot see a wrong operand and proves nothing"
+else
+  ok "operand-guard: df_operands_all REDS on a gate that measures the wrong path (observed operand: $(df_operands t | sed -n 1p))"
+fi
+# ...and it must not red on the correct one, or it would be a red that means nothing.
+if df_operands_all k-build-td "$k_bt"; then
+  ok "operand-guard: the same assertion PASSES the unmutated gate — it discriminates in both directions"
+else
+  bad "operand-guard: the assertion reds the correct gate too"
 fi
 
 printf '\n%s\n' "-----------------------------------------------"
