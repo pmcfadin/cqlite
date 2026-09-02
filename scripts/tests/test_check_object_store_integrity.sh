@@ -154,7 +154,7 @@ whole_suite_checks() {
 # assertions (the two `command -v` guards and the fixture-construction asserts), so a
 # green run is 81 on any host that can run it at all; a green run BELOW this number
 # means cases were removed or the run was truncated. RAISE IT when you add cases.
-CASE_FLOOR=94
+CASE_FLOOR=103
 
 finish() {
   local rc=$?
@@ -1124,6 +1124,17 @@ if run 0 "print-store: resolves and exits without sweeping" --repo "$R_CLEAN" --
   else
     bad "print-store: output was [$(printf '%s\n' "$OUT" | tr '\n' '|')]"
   fi
+  # AND THE KEY LINE, which is what a caller actually keys its throttle and CORRUPT latch
+  # on (#3749 review round 5, item 3). Exactly one, and of the shape the caller validates:
+  # a readable tail plus 16 hex of sha256 over the RAW path. Case 29 below is the property;
+  # this is the CONTRACT — a caller that stopped receiving it would silently lose its
+  # box-wide key.
+  if [ "$(printf '%s\n' "$OUT" | grep -c '^OBJECT-STORE: store-key ')" -eq 1 ] &&
+    printf '%s\n' "$OUT" | grep -qE '^OBJECT-STORE: store-key [A-Za-z0-9._-]{1,64}\.[0-9a-f]{16}$'; then
+    ok "print-store: prints exactly one anchored 'store-key' line of the shape the caller validates (readable tail + 16 hex digest)"
+  else
+    bad "print-store: no usable store-key line in [$(printf '%s\n' "$OUT" | tr '\n' '|')]"
+  fi
 fi
 # THE ISOLATION, with its construction asserted first: a PLAIN git IS redirected by
 # GIT_COMMON_DIR, so a green here is the allowlist and not an inert variable. This is the
@@ -1463,4 +1474,83 @@ if [ -z "$p12_bad" ]; then
   ok "no-reflogs: passes 1 and 2 — the sweep proper — carry no --no-reflogs, so the flag cannot become a suppressor of the very class it exists to attribute (structural)"
 else
   bad "no-reflogs: a SWEEP walk carries --no-reflogs: $p12_bad"
+fi
+
+# --- Case 29: THE STORE KEY IS INJECTIVE OVER THE **RAW** PATH --------------
+# THE DEFECT (#3749 review round 5, item 3). Round 4 made the caller's throttle/latch key
+# injective over the FLATTENING and then computed the digest from the value this script had
+# already passed through `sane()` — a DISPLAY encoding, and a lossy one. A store path
+# holding a REAL newline and one holding the two literal characters `\n` render to the same
+# text, so two different stores shared a throttle stamp AND a CORRUPT latch: one suppressing
+# the other's sweep for the whole interval, or one store's damage stopping every lane
+# working on the other. The identity now comes from the raw bytes, in this script, and the
+# caller receives a finished key.
+#
+# The construction assert measures the COLLISION FIRST — the two values really do render
+# identically — so a green below is injectivity and not two arbitrary distinct strings.
+KEYFN="$T/keyfn.sh"
+sed -n '/^sane() {/,/^}/p;/^store_digest() {/,/^}/p;/^store_key() {/,/^}/p' "$SUBJECT" >"$KEYFN"
+if grep -q '^store_key() {' "$KEYFN" && grep -q '^store_digest() {' "$KEYFN" &&
+  grep -q '^sane() {' "$KEYFN"; then
+  ok "store-key-plant: sane/store_digest/store_key were extracted from the shipped script at run time — the case measures the shipped derivation, not a restatement of it"
+else
+  bad "store-key-plant: the extraction from $SUBJECT did not yield the three functions — everything below would be vacuous"
+fi
+RAW_NL=$(printf '/tmp/objstore-a\nb/objects')
+RAW_LIT='/tmp/objstore-a\nb/objects'
+SANE_NL=$(bash -c '. "$1"; sane "$2"' _ "$KEYFN" "$RAW_NL" 2>/dev/null)
+SANE_LIT=$(bash -c '. "$1"; sane "$2"' _ "$KEYFN" "$RAW_LIT" 2>/dev/null)
+if [ -n "$SANE_NL" ] && [ "$SANE_NL" = "$SANE_LIT" ]; then
+  ok "store-key-plant: the two store paths RENDER identically through sane() ('$SANE_NL') — the collision this case is about is really available"
+else
+  bad "store-key-plant: the two paths render differently ('$SANE_NL' vs '$SANE_LIT') — the assert below would prove nothing"
+fi
+KEY_NL=$(bash -c '. "$1"; store_key "$2"' _ "$KEYFN" "$RAW_NL" 2>/dev/null)
+KEY_LIT=$(bash -c '. "$1"; store_key "$2"' _ "$KEYFN" "$RAW_LIT" 2>/dev/null)
+if [ -n "$KEY_NL" ] && [ -n "$KEY_LIT" ] && [ "$KEY_NL" != "$KEY_LIT" ]; then
+  ok "store-key: two stores whose paths RENDER identically get DIFFERENT keys — the identity is the raw bytes, not the display encoding"
+else
+  bad "store-key: nl='$KEY_NL' lit='$KEY_LIT' — the key is computed from the rendering, so two different stores share a throttle stamp and a CORRUPT latch"
+fi
+# ROUND 4'S PROPERTY, PRESERVED: the flattening collision is still separated.
+KEY_A=$(bash -c '. "$1"; store_key "$2"' _ "$KEYFN" '/tmp/objstore-collide/a/b/objects' 2>/dev/null)
+KEY_B=$(bash -c '. "$1"; store_key "$2"' _ "$KEYFN" '/tmp/objstore-collide/a_b/objects' 2>/dev/null)
+KEY_A2=$(bash -c '. "$1"; store_key "$2"' _ "$KEYFN" '/tmp/objstore-collide/a/b/objects' 2>/dev/null)
+if [ -n "$KEY_A" ] && [ "$KEY_A" != "$KEY_B" ] && [ "$KEY_A" = "$KEY_A2" ]; then
+  ok "store-key: two paths that FLATTEN to one name still get different keys, and the same path gets the SAME key twice (a digest, not a nonce)"
+else
+  bad "store-key: a='$KEY_A' b='$KEY_B' a2='$KEY_A2'"
+fi
+case "$KEY_A" in
+  *objects.[0-9a-f]*) ok "store-key: the key keeps a readable tail naming the store and ends in the digest, so an operator reading 'ls /tmp' can still tell which store a stamp belongs to" ;;
+  *) bad "store-key: '$KEY_A' is not operator-readable" ;;
+esac
+# END TO END, and this is the arm that pins the WIRING rather than the function: a real
+# repository under a newline-bearing path. The printed key must NOT equal the key of the
+# printed `store` line — which is exactly what it would equal if the caller (or this mode)
+# digested the rendering.
+NLDIR=$(printf '%s/nl-a\nb' "$T")
+if mkdir -p "$NLDIR" 2>/dev/null && git init -q "$NLDIR/repo" >/dev/null 2>&1; then
+  ok "store-key-plant: a repository really can be created under a newline-bearing path on this filesystem — the end-to-end arm below has a subject"
+else
+  bad "store-key-plant: could not create a repository under a newline-bearing path; the end-to-end arm below would prove nothing"
+fi
+OUT=$(bash "$SUBJECT" --repo "$NLDIR/repo" --print-store 2>&1)
+RC=$?
+record_out "print-store-newline"
+PRINTED_STORE=$(printf '%s\n' "$OUT" | sed -n 's/^OBJECT-STORE: store //p' | head -1)
+PRINTED_KEY=$(printf '%s\n' "$OUT" | sed -n 's/^OBJECT-STORE: store-key //p' | head -1)
+KEY_OF_DISPLAY=$(bash -c '. "$1"; store_key "$2"' _ "$KEYFN" "$PRINTED_STORE" 2>/dev/null)
+if [ "$RC" -eq 0 ] && [ -n "$PRINTED_KEY" ] && [ -n "$KEY_OF_DISPLAY" ] &&
+  [ "$PRINTED_KEY" != "$KEY_OF_DISPLAY" ]; then
+  ok "store-key: --print-store on a repository under a newline-bearing path prints a key that is NOT the key of its own rendered 'store' line — the digest is taken from the raw canonical path (rc=$RC)"
+else
+  bad "store-key(end-to-end): rc=$RC printed-key='$PRINTED_KEY' key-of-display='$KEY_OF_DISPLAY' store='$PRINTED_STORE' — the key is derived from the display rendering"
+fi
+# AND THE RENDERED LINE IS STILL SAFE: one line, with the newline escaped, so the anchored
+# output invariant survives a path that could otherwise inject a prefix-less line.
+if [ "$(printf '%s\n' "$OUT" | grep -c '^OBJECT-STORE: ')" = "$(printf '%s\n' "$OUT" | grep -c .)" ]; then
+  ok "store-key: every line of the newline-path run is still anchored — sane() keeps doing the job it exists for, and the key does the job sane() cannot"
+else
+  bad "store-key: an unanchored line appeared for a newline-bearing store path: [$(printf '%s\n' "$OUT" | tr '\n' '|')]"
 fi

@@ -229,6 +229,79 @@ sane() {
   printf '%s' "$out"
 }
 
+# --- THE BOX-WIDE KEY FOR THIS STORE ----------------------------------------
+#
+# WHY THE KEY IS COMPUTED HERE AND NOT BY THE CALLER (#3749 review round 5, item 3).
+# A caller that throttles or latches on the shared store needs a filesystem-safe,
+# INJECTIVE name for it. Round 4 made that name injective over the FLATTENING —
+# `<sanitised tail>.<16 hex of sha256(path)>`, because replacing `/` with `_` maps
+# `/tmp/a/b/objects` and `/tmp/a_b/objects` onto one name — and then fed the digest the
+# value THIS script had already passed through `sane()`. That is a DISPLAY encoding and
+# it is LOSSY: a path containing a real newline and one containing the two literal
+# characters `\n` render identically, so two different stores shared a throttle stamp AND
+# a CORRUPT latch — one suppressing the other's sweep, or stopping every lane on the box
+# with the other store's damage. `sane()` exists so a control character cannot break the
+# anchored output; it was never reversible and was never an identity.
+#
+# So the digest is taken from the RAW canonical path, in the one place that has it, and
+# the caller receives a finished key. There is then no lossy value left for a caller to
+# digest — the same "remove the shape, not the site" move as the isolated resolver below:
+# the non-injective form is UNAVAILABLE rather than discouraged.
+#
+# store_digest <value> -> 16 lowercase hex chars of sha256(value), or nothing (exit 1) on
+# a host with no usable digest tool. THREE TOOLS because the two platforms this file
+# supports ship different ones: `sha256sum` (GNU coreutils), `shasum -a 256` (macOS, via
+# perl), `openssl dgst -sha256` (both). `cksum` is present everywhere and is deliberately
+# NOT used: CRC32 is not collision-resistant, and a colliding key is the defect being
+# removed. The output is parsed from BOTH ENDS and then VALIDATED AS HEX — first field for
+# the coreutils/perl tools, last for openssl (`SHA2-256(stdin)= <hex>` on 3.x, `(stdin)=
+# <hex>` on 1.1.x) — so a tool whose output shape is neither FAILS CLOSED instead of
+# contributing a garbage key.
+store_digest() {
+  local v="$1" out='' hex=''
+  if command -v sha256sum >/dev/null 2>&1; then
+    out=$(printf '%s' "$v" | sha256sum 2>/dev/null || true)
+  elif command -v shasum >/dev/null 2>&1; then
+    out=$(printf '%s' "$v" | shasum -a 256 2>/dev/null || true)
+  elif command -v openssl >/dev/null 2>&1; then
+    out=$(printf '%s' "$v" | openssl dgst -sha256 2>/dev/null || true)
+  else
+    return 1
+  fi
+  for hex in "${out%% *}" "${out##* }"; do
+    case "$hex" in
+      '' | *[!0-9a-f]*) continue ;;
+    esac
+    [ "${#hex}" -ge 32 ] || continue
+    printf '%s' "${hex:0:16}"
+    return 0
+  done
+  return 1
+}
+
+# store_key <raw-store-path> -> `<sanitised tail>.<digest>`, or nothing (exit 1).
+#
+# THE TAIL IS READABILITY ONLY AND CARRIES NO IDENTITY: an operator reading `ls /tmp`
+# should be able to tell which store a stamp belongs to, while the DIGEST is what makes two
+# stores two files. It is the TAIL because the distinguishing part of these paths is the
+# end, and the length is checked explicitly because `${v: -40}` yields the EMPTY STRING —
+# not the whole value — when the value is shorter than the offset.
+store_key() {
+  local raw="$1" tail='' digest=''
+  [ -n "$raw" ] || return 1
+  tail=$(printf '%s' "$raw" | tr -c 'A-Za-z0-9._-' '_')
+  [ -n "$tail" ] || return 1
+  if [ "${#tail}" -gt 40 ]; then
+    tail="${tail:${#tail}-40}"
+  fi
+  digest=$(store_digest "$raw") || return 1
+  case "$digest" in
+    '' | *[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#digest}" -eq 16 ] || return 1
+  printf '%s.%s' "$tail" "$digest"
+}
+
 # EVERY line here is prefixed too: under property (a) the prefix is THE
 # load-bearing invariant, so an unprefixed usage line is a hole in it. `${0##*/}`
 # rather than `basename` — an external command whose stderr is not captured here
@@ -414,11 +487,22 @@ fi
 # un-isolated shape available to a future caller: it would have to write a git call of
 # its own, which is the thing review looks for.
 #
-# It prints the same anchored `store <abs>` line the sweep prints, and nothing else:
-# a consumer reads that one line and never has to parse a verdict that this mode, by
-# construction, does not produce.
+# It prints the same anchored `store <abs>` line the sweep prints, plus the box-wide
+# `store-key` a caller keys its throttle and latch on — and no verdict, which this mode by
+# construction does not produce.
+#
+# TWO LINES, AND THE SECOND ONE IS THE IDENTITY (#3749 review round 5, item 3). The `store`
+# line is passed through `sane()` for the anchored-output invariant, which makes it a
+# DISPLAY value and NOT injective: a caller that digested it keyed two different stores onto
+# one stamp and one CORRUPT latch. `store-key` is derived from the RAW path here (see
+# store_key above) so the caller never has to reconstruct an identity from a rendering. A
+# host with no digest tool prints NO key line at all — the caller then has no box-wide key,
+# which it announces and handles, rather than being handed a name two stores could share.
 if [ "$PRINT_STORE" -eq 1 ]; then
   printf '%s store %s\n' "$P" "$(sane "$OBJ_DIR")"
+  if STORE_KEY=$(store_key "$OBJ_DIR"); then
+    printf '%s store-key %s\n' "$P" "$STORE_KEY"
+  fi
   exit 0
 fi
 

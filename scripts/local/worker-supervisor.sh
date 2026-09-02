@@ -3273,41 +3273,6 @@ OBJ_SWEEP_CLAIM_STATE=""
 # a bound in its own right, which is why it is a small constant and not a measurement.
 OBJ_SWEEP_CLAIM_SLACK_SECS=60
 
-# obj_sweep_digest <value> — a COLLISION-RESISTANT, filesystem-safe fingerprint of
-# <value>, 16 lowercase hex characters, or nothing (exit 1) when this host has no usable
-# digest tool. It is what makes the stamp/latch key INJECTIVE; see obj_sweep_stamp_path.
-#
-# THREE TOOLS, BECAUSE THE TWO PLATFORMS THIS FILE SUPPORTS SHIP DIFFERENT ONES:
-# `sha256sum` (GNU coreutils, every Linux box here), `shasum -a 256` (macOS, via perl),
-# `openssl dgst -sha256` (both, and the fallback if the first two are absent). `cksum` is
-# present everywhere and is NOT used: CRC32 is not collision-resistant, and a key that
-# collides is the defect this exists to remove.
-#
-# THE OUTPUT IS PARSED FROM BOTH ENDS AND THEN VALIDATED AS HEX. The hex is the FIRST
-# field for the coreutils/perl tools (`<hex>  -`) and the LAST for openssl
-# (`SHA2-256(stdin)= <hex>` on 3.x, `(stdin)= <hex>` on 1.1.x). A tool whose output shape
-# is neither must FAIL CLOSED rather than contribute a garbage key, which is why the
-# candidate is required to match hex rather than merely to be non-empty.
-obj_sweep_digest() {
-  local v="$1" out="" hex=""
-  if command -v sha256sum >/dev/null 2>&1; then
-    out="$(printf '%s' "$v" | sha256sum 2>/dev/null || true)"
-  elif command -v shasum >/dev/null 2>&1; then
-    out="$(printf '%s' "$v" | shasum -a 256 2>/dev/null || true)"
-  elif command -v openssl >/dev/null 2>&1; then
-    out="$(printf '%s' "$v" | openssl dgst -sha256 2>/dev/null || true)"
-  else
-    return 1
-  fi
-  for hex in "${out%% *}" "${out##* }"; do
-    if [[ "$hex" =~ ^[0-9a-f]{32,}$ ]]; then
-      printf '%s' "${hex:0:16}"
-      return 0
-    fi
-  done
-  return 1
-}
-
 # obj_sweep_stamp_path <sweep-script> — the THROTTLE stamp: WHEN this box last SPENT a
 # sweep. Keyed on the SHARED OBJECT STORE, not on the lane, so four lanes of one box
 # share one cadence instead of sweeping four times.
@@ -3350,7 +3315,7 @@ obj_sweep_digest() {
 # an un-throttled sweep per iteration, which is loud and visible rather than a key two
 # stores can share.
 obj_sweep_stamp_path() {
-  local script="$1" line common key dir digest
+  local script="$1" line key dir
   if [[ -n "$OBJ_SWEEP_STAMP" ]]; then
     printf '%s' "$OBJ_SWEEP_STAMP"
     return 0
@@ -3360,38 +3325,33 @@ obj_sweep_stamp_path() {
   # file runs under `set -euo pipefail`, so a grep that matches nothing (an older or
   # stubbed sweep script that has no --print-store mode) would take the supervisor down.
   line="$(bash "$script" --repo "$REPO_ROOT" --print-store 2>/dev/null |
-    { grep '^OBJECT-STORE: store ' || true; } | head -1)"
-  common="${line#OBJECT-STORE: store }"
+    { grep '^OBJECT-STORE: store-key ' || true; } | head -1)"
+  key="${line#OBJECT-STORE: store-key }"
   # Both halves are required: an empty line yields an empty value, and a line the prefix
   # did NOT strip is not the answer to this question.
-  [[ -n "$common" && "$common" != "$line" ]] || return 0
-  # THE KEY IS A DIGEST OF THE CANONICAL PATH, NOT A FLATTENING OF IT (#3749 review round
-  # 4, item 3). Replacing `/` — and every unsupported character — with `_` is NOT
-  # INJECTIVE: `/tmp/a/b/objects` and `/tmp/a_b/objects` flatten to the same name, so two
-  # different repositories on one box shared a throttle stamp AND a CORRUPT latch. Either
-  # direction is a defect: one store suppresses the other's sweep for the whole interval,
-  # or one store's damage stops every lane working on the other. Low likelihood on this
-  # fleet (the real store is `/data/lanes/repo/.git/objects`) and cheap to remove, and the
-  # failure mode is the sticky box-wide latch again.
+  [[ -n "$key" && "$key" != "$line" ]] || return 0
+  # THE KEY IS DERIVED BY THE SWEEP SCRIPT, FROM THE RAW CANONICAL PATH — NOT HERE, AND NOT
+  # FROM THE `store` LINE (#3749 review round 5, item 3). Round 4 made this key injective
+  # over the FLATTENING (`/tmp/a/b/objects` and `/tmp/a_b/objects` collapse to one name) by
+  # digesting the path — and digested the value from the resolver's `store` line, which is
+  # passed through that script's `sane()` display encoding. That encoding is LOSSY: a path
+  # holding a real newline and one holding the literal characters `\n` print identically, so
+  # two stores shared a throttle stamp AND a CORRUPT latch. Either direction is a defect —
+  # one store suppresses the other's sweep, or one store's damage stops every lane working
+  # on the other.
   #
-  # THE SANITISED TAIL IS READABILITY ONLY AND CARRIES NO IDENTITY — an operator reading
-  # `ls /tmp` should be able to tell which store a stamp belongs to; the digest is what
-  # makes two stores two files. It is the TAIL because the distinguishing part of these
-  # paths is the end, and it is length-checked explicitly because `${v: -40}` yields the
-  # EMPTY STRING (not the whole value) when the value is shorter than the offset.
-  key="$(printf '%s' "$common" | tr -c 'A-Za-z0-9._-' '_')"
-  if [[ "${#key}" -gt 40 ]]; then
-    key="${key:${#key}-40}"
-  fi
-  # FAIL CLOSED: with no usable digest tool this returns the EMPTY path, so the caller
-  # neither reads nor writes a stamp and the sweep simply runs every iteration. Falling
-  # back to the flattened name would be the non-injective form again, silently, on exactly
-  # the hosts nobody tested.
-  digest="$(obj_sweep_digest "$common")" || return 0
-  [[ "$digest" =~ ^[0-9a-f]{16}$ ]] || return 0
+  # So the identity now arrives already computed, from the only process that has the raw
+  # bytes, and there is no lossy value left here to digest. See `store_key` in
+  # check-object-store-integrity.sh for the tail/digest split and the three digest tools.
+  #
+  # IT IS STILL VALIDATED, because it is another process's stdout and not a fact: the shape
+  # is checked rather than assumed, and anything else yields the EMPTY path — no throttle,
+  # no latch, announced once by the caller — instead of a filename built out of whatever
+  # arrived. A host with no digest tool prints no key line at all and lands here too.
+  [[ "$key" =~ ^[A-Za-z0-9._-]{1,64}\.[0-9a-f]{16}$ ]] || return 0
   dir="/tmp"
   [[ -d "$dir" && -w "$dir" ]] || dir="${TMPDIR:-/tmp}"
-  printf '%s' "${dir}/cqlite-object-store-sweep.${key}.${digest}.stamp"
+  printf '%s' "${dir}/cqlite-object-store-sweep.${key}.stamp"
 }
 
 # obj_sweep_latch_path <stamp-path> — the CORRUPT latch that belongs to that stamp.

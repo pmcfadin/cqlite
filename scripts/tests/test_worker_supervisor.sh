@@ -9389,7 +9389,14 @@ obj_sweep_tree() {
     printf 'MAX_SWEEP_WALKS=3\n'
     printf 'for a in "$@"; do\n'
     printf '  if [ "$a" = --print-store ]; then\n'
-    [[ -n "$storeline" ]] && printf '    printf "OBJECT-STORE: store %%s\\n" %s\n' "$(printf '%q' "$storeline")"
+    if [[ -n "$storeline" ]]; then
+      printf '    printf "OBJECT-STORE: store %%s\\n" %s\n' "$(printf '%q' "$storeline")"
+      # AND THE KEY, which is what the supervisor actually reads (round 5, item 3). It is
+      # the SHIPPED derivation's answer for that path, so this stub and the real resolver
+      # cannot disagree about the same store.
+      printf '    printf "OBJECT-STORE: store-key %%s\\n" %s\n' \
+        "$(printf '%q' "$(obj_sweep_store_key "$storeline")")"
+    fi
     printf '    exit 0\n'
     printf '  fi\n'
     printf 'done\n'
@@ -9432,19 +9439,42 @@ obj_sweep_calls() {
 obj_sweep_expected_stamp() {
   local d="$1" store="$2"
   mkdir -p "$d"
+  # THE STUB SWEEP SCRIPT COMPUTES THE KEY WITH THE SHIPPED `store_key`, EXTRACTED FROM
+  # check-object-store-integrity.sh AT RUN TIME (#3749 review round 5, item 3: the key is
+  # derived from the RAW path by the resolver, because the `store` line is a lossy display
+  # rendering). It is computed INSIDE the stub rather than baked in as a literal, so a
+  # caller that restricts PATH — the no-digest-tool arms below — restricts the derivation
+  # too, which is the whole point of those arms.
   {
     printf '#!/usr/bin/env bash\n'
+    sed -n '/^store_digest() {/,/^}/p;/^store_key() {/,/^}/p' \
+      "$REPO_ROOT/scripts/check-object-store-integrity.sh"
     printf 'printf "OBJECT-STORE: store %%s\\n" %s\n' "$(printf '%q' "$store")"
+    printf 'if k=$(store_key %s); then printf "OBJECT-STORE: store-key %%s\\n" "$k"; fi\n' \
+      "$(printf '%q' "$store")"
   } >"$d/sweep-stub.sh"
   {
     printf 'set -uo pipefail\n'
     printf 'OBJ_SWEEP_STAMP=""\n'
     printf 'REPO_ROOT=%s\n' "$(printf '%q' "$d")"
-    awk '/^obj_sweep_digest\(\) \{$/,/^\}$/' "$SUPERVISOR"
     awk '/^obj_sweep_stamp_path\(\) \{$/,/^\}$/' "$SUPERVISOR"
     printf 'obj_sweep_stamp_path %s\n' "$(printf '%q' "$d/sweep-stub.sh")"
   } >"$d/driver.sh"
   bash "$d/driver.sh" 2>/dev/null
+}
+
+# obj_sweep_store_key <store-path> -> the key the SHIPPED sweep script derives for it,
+# extracted at run time for the same reason as everything else in this section: a test that
+# re-typed the formula would keep passing after the real one changed.
+obj_sweep_store_key() {
+  local d
+  d="$(mktemp -d "$TMP_ROOT/storekey.XXXXXX")" || return 1
+  {
+    sed -n '/^store_digest() {/,/^}/p;/^store_key() {/,/^}/p' \
+      "$REPO_ROOT/scripts/check-object-store-integrity.sh"
+    printf 'store_key %s\n' "$(printf '%q' "$1")"
+  } >"$d/key.sh"
+  bash "$d/key.sh" 2>/dev/null
 }
 
 test_object_store_sweep_verdicts() {
@@ -10674,6 +10704,43 @@ test_object_store_stamp_key_comes_from_the_resolver() {
     pass "obj-sweep(resolver): a store the resolver cannot name does NOT throttle — both runs swept, so no unresolvable store can suppress another's sweep through a shared fallback name"
   else
     fail "obj-sweep(resolver-unresolvable): rc=$rc sweeps=$(obj_sweep_calls "$calls") (wanted 2)"
+  fi
+
+  # AND ONE PROPERTY APART AGAIN: a resolver that names the store but produces NO
+  # `store-key` line — a host with no digest tool (#3749 review round 5, item 3: the key is
+  # derived from the RAW path by the resolver, so its absence is now the resolver's answer
+  # and no longer something this file can compute for itself). The `store` line is present
+  # and MUST NOT be used as a key: it is a `sane()`-rendered display value, and keying on it
+  # is exactly the non-injective form this round removed.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-nokey"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  unset OBJ_SWEEP_STAMP
+  fake="$d/resolved-store/objects"
+  mkdir -p "$fake"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls" "" "$fake")"
+  sed -i '/OBJECT-STORE: store-key/d' "$root/scripts/check-object-store-integrity.sh"
+  # CONSTRUCTION: the stub really does still name the store and really does not name a key.
+  if bash "$root/scripts/check-object-store-integrity.sh" --print-store 2>/dev/null |
+    grep -q '^OBJECT-STORE: store ' &&
+    ! bash "$root/scripts/check-object-store-integrity.sh" --print-store 2>/dev/null |
+      grep -q '^OBJECT-STORE: store-key '; then
+    pass "obj-sweep(nokey-plant): the resolver names the store and produces NO key — the state a host with no digest tool is in"
+  else
+    fail "obj-sweep(nokey-plant): the stub is not the shape the arm below claims"
+    return
+  fi
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/nokey1.log" 2>&1
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/nokey2.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && "$(obj_sweep_calls "$calls")" -eq 2 ]] &&
+    grep -q 'no box-wide key for this store' "$d/nokey1.log"; then
+    pass "obj-sweep(nokey): a resolver that names a store but no KEY yields no throttle and no latch, announced — the display-only `store` line is never used as an identity"
+  else
+    fail "obj-sweep(nokey): rc=$rc sweeps=$(obj_sweep_calls "$calls") (wanted 2) (see $d/nokey1.log)"
   fi
 }
 
