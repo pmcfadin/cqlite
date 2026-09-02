@@ -173,24 +173,24 @@
 //! scalars (`data.len() < N`, not `!= N`), nested tuples and UDTs, nested
 //! collections, and `duration`.
 //!
-//! **All four are now REFUSED, and it is a MEASURED claim, not a reading of the
-//! diff.** Issue **#3811** gave `parse_value_from_raw_bytes` a consumption
-//! channel — it is a thin wrapper over `parse_value_from_raw_bytes_reporting`
-//! plus `require_fully_consumed_raw`, and every bounded caller of the short name
-//! inherits the assert without being able to opt out. Composed with each
-//! fixed-width arm's own `require_fixed_width` (`data.len() < n`), the accepted
-//! set for a fixed-width element is exactly `{n}`; every other arm reports its
-//! real consumption, including `duration`'s three-VInt walk. THREE of the four
-//! carry a pin in `raw_value/issue_3811_consumption_demo_tests.rs`
-//! (`bounded_int_over_width_is_refused`, `bounded_tuple_with_trailing_byte_is_refused`,
-//! `nested_udt_trailing_garbage_is_refused`, `bounded_list_with_trailing_byte_is_refused`);
-//! `duration` is refused by the MECHANISM above and is pinned by NO test — measured,
-//! and stated because a claim of measurement must not cover an unmeasured case.
+//! **All four are REFUSED ON THE BOUNDED SCALAR PATH — MEASURED, not a reading of the diff — with ONE carve-out, next.** Issue **#3811** made
+//! `parse_value_from_raw_bytes` a thin wrapper over `parse_value_from_raw_bytes_reporting` plus `require_fully_consumed_raw`, inherited by
+//! every bounded caller of the short name with no opt-out. Composed with each fixed-width arm's own `require_fixed_width` (`data.len() < n`),
+//! the accepted set is exactly `{n}`; every other arm reports real consumption, `duration`'s three-VInt walk included. THREE of the four
+//! carry a pin in `raw_value/issue_3811_consumption_demo_tests.rs` (`bounded_int_over_width_is_refused`,
+//! `bounded_tuple_with_trailing_byte_is_refused`, `nested_udt_trailing_garbage_is_refused`, `bounded_list_with_trailing_byte_is_refused`);
+//! `duration` is refused by that MECHANISM and pinned by NO test — stated because a claim of measurement must not cover an unmeasured case.
 //!
-//! So the consequence this section used to record is gone: as `frozen<list<int>>`
-//! cell paths, `[count=1][len=4][4B]` (12 bytes) and `[count=1][len=5][5B]` (13
-//! bytes) no longer both decode to `Frozen(List([Integer(7)])))` — the 13-byte
-//! form is REFUSED, its `int` element's declared length being 5.
+//! **CARVE-OUT — a UDT FIELD of `tinyint`, `smallint`, `date`, `time` or `counter` is NOT refused (roborev r7 / job 71).**
+//! `parse_simple_udt_field_value` (`row_decoder/udt.rs`) has no arm for those five, so each takes its `_ =>` blob fallback, consuming the
+//! WHOLE bounded field slice at ANY length; the enclosing UDT loop then reaches `require_fully_consumed_raw` with `consumed == len` and
+//! PASSES, so #3811's mechanism is structurally BLIND to it. MEASURED by `raw_value/nested_fixed_width_length_tests.rs`'s
+//! `wrong_width_udt_field_of_five_types_is_tolerated_today_known_gap`; closing it is a TIGHTENING needing its own oracle and a corpus
+//! measurement, out of #3723's scope.
+//!
+//! So the consequence this section used to record is gone: as `frozen<list<int>>` cell paths, `[count=1][len=4][4B]` (12 bytes) and
+//! `[count=1][len=5][5B]` (13 bytes) no longer both decode to `Frozen(List([Integer(7)])))` — the 13-byte form is REFUSED, its `int`
+//! element's declared length being 5.
 //!
 //! This module's OWN enforcement is retained (it also owns the fixed-width
 //! ALLOWED-width table below) and the two are to be UNIFIED — see the `#3820`
