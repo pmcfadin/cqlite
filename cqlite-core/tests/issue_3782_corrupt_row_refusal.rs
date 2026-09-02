@@ -295,7 +295,10 @@ async fn corpus_wide_well_formed_tables_still_decode_without_refusal() {
                 let partitions = reader.iterate_all_partitions().await.unwrap_or_else(|e| {
                     panic!("#3782 regression: well-formed {dir:?} now REFUSES the index walk: {e}")
                 });
-                if !partitions.is_empty() {
+                let entries = reader.get_all_entries().await.unwrap_or_else(|e| {
+                    panic!("#3782 regression: well-formed {dir:?} now REFUSES the block walk: {e}")
+                });
+                if !partitions.is_empty() || !entries.is_empty() {
                     with_rows += 1;
                 }
             }

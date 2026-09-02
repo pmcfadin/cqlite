@@ -268,6 +268,13 @@ impl V5CompressedLegacyParser {
                             offset,
                             e
                         );
+                        // Issue #3782: same contract as the primary block-emit site —
+                        // when the caller PROVED the buffer complete no further bytes
+                        // can complete this row, so the failure is data loss and is
+                        // reported; otherwise the tolerant break stays.
+                        if self.complete_buffer {
+                            return Err(e);
+                        }
                         break;
                     }
                 }

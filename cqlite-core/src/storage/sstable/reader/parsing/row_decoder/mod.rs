@@ -783,6 +783,19 @@ pub struct V5CompressedLegacyParser {
     /// decided uniformly regardless of which block parsed it). Only consulted when
     /// `read_shadowing` is `true`; physical consumers ignore it and stay byte-unchanged.
     now_secs: i64,
+    /// Issue #3782: the caller GUARANTEES the buffer handed to
+    /// [`Self::parse_block_emit_windowed`] is COMPLETE — the whole stitched
+    /// decompressed data section, or an index-entry slice already proven to hold a
+    /// whole partition — so no further bytes exist that could complete a row.
+    ///
+    /// The block-emit path has no `NeedMore`/refill vocabulary (unlike
+    /// `drive_partition_sliding`'s `at_final_chunk`), so tolerance there cannot be
+    /// decided from inside the parse: a caller that hands over a partial window
+    /// (a chunk-covering window whose tail cuts a following partition's row) MUST
+    /// keep the tolerant break. `false` is therefore the default and the safe
+    /// value; only a caller that can PROVE completeness sets it, and then a row
+    /// decode error is corruption/truncation — data loss — and is returned.
+    complete_buffer: bool,
 }
 
 mod block_emit;
@@ -896,6 +909,7 @@ impl V5CompressedLegacyParser {
             // Issue #1741 (F2): sample the read clock ONCE per parser (== once per
             // read/scan operation); every block/partition below reuses this value.
             now_secs: now_epoch_secs(),
+            complete_buffer: false,
         }
     }
 
@@ -904,6 +918,21 @@ impl V5CompressedLegacyParser {
     /// the default (`false`) for physical/verification/compaction/delta reads.
     pub fn with_read_shadowing(mut self, on: bool) -> Self {
         self.read_shadowing = on;
+        self
+    }
+
+    /// Issue #3782: declare that every buffer handed to
+    /// [`Self::parse_block_emit_windowed`] through this parser is COMPLETE, so a
+    /// row that fails to decode is corruption/truncation rather than a row
+    /// straddling the end of a partial window — and must be REPORTED, not
+    /// swallowed as end-of-partition.
+    ///
+    /// Only set this where completeness is a PROVEN property of the caller (the
+    /// fully stitched decompressed data section; an index-entry slice already
+    /// validated by `partition_slice_fully_consumed`). Leave the default (`false`)
+    /// anywhere the buffer is a window that may cut a row.
+    pub fn with_complete_buffer(mut self, on: bool) -> Self {
+        self.complete_buffer = on;
         self
     }
 

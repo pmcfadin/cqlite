@@ -603,6 +603,25 @@ impl V5CompressedLegacyParser {
                                         partition_index, offset, e
                                     );
                                 }
+                                // Issue #3782: when the caller PROVED the buffer is
+                                // complete (`with_complete_buffer`), no further bytes
+                                // exist that could complete this row, so the failure
+                                // is truncation or corruption — DATA LOSS — and is
+                                // reported. Swallowing it here is what made a SELECT
+                                // over a fixture with ONE corrupted clustering byte
+                                // return 23 of 100 rows, silently.
+                                //
+                                // Without that guarantee the break STAYS: this path
+                                // has no refill vocabulary, and a caller handing a
+                                // chunk-covering window can legitimately cut a row at
+                                // the tail (`big_decode_clustering_window` with no
+                                // row-body window reads past its target partition by
+                                // design). Deciding tolerance from inside the parse is
+                                // exactly what this issue removed from the sliding
+                                // driver; here the knowledge lives with the caller.
+                                if self.complete_buffer {
+                                    return Err(e);
+                                }
                                 break; // End of valid data in partition
                             }
                         }

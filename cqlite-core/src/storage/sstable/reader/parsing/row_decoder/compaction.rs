@@ -645,7 +645,7 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         resolution: &RowColumnResolution,
         pending: &mut Vec<Self::Row>,
-    ) -> Option<usize> {
+    ) -> Result<Option<usize>> {
         use crate::storage::sstable::reader::compaction_row::CompactionRow;
         // Structure-only (issue #3058): advance over the row WITHOUT allocating a
         // per-cell metadata map, a complex-element map or a `CompactionRow` — the
@@ -661,8 +661,14 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                 resolution,
                 None,
             ) {
-                Ok((_cells, _meta, _hdr, next_offset, _is_static, _complex)) => Some(next_offset),
-                Err(_) => None,
+                Ok((_cells, _meta, _hdr, next_offset, _is_static, _complex)) => {
+                    Ok(Some(next_offset))
+                }
+                // Issue #3782: preserve the decode error. The structural coverage
+                // check that drives this arm passes `at_final_chunk = false`, so the
+                // driver still answers `NeedMore` (⇒ "not fully consumed") there;
+                // the error only becomes terminal where no more bytes can arrive.
+                Err(e) => Err(e),
             };
         }
         // Compaction mode: capture per-column complex elements and request
@@ -700,9 +706,12 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
                     row_timestamp: row_ts,
                     row_data,
                 });
-                Some(next_offset)
+                Ok(Some(next_offset))
             }
-            Err(_) => None,
+            // Issue #3782: preserve the decode error. Swallowing it here is what
+            // made compaction emit MORE rows than the source while losing real
+            // partitions — a loss it would then write back to disk.
+            Err(e) => Err(e),
         }
     }
 }
