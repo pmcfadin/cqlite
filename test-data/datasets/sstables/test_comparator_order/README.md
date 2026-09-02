@@ -30,18 +30,22 @@ size **52 KB** on disk (~13.4 KB of file content).
 
 ## How a test resolves it
 
-It sits in the **checkout's committed corpus**, which is the second built-in
-candidate of the TABLE-granular resolver, so no extra candidate root is needed:
+It sits in the **checkout's committed corpus**. The #3790 tests resolve it
+**checkout-relative and deliberately do NOT use the TABLE-granular resolver**
+(roborev job 70): `sstables_root_for_table` searches `$CQLITE_DATASETS_ROOT`
+BEFORE the checkout, so an out-of-tree corpus carrying a
+`test_comparator_order/collection_order-*` would SUBSTITUTE this oracle — and a
+single external fixture is unambiguous inside its own root, so counting
+candidates there cannot detect it either. A committed oracle must not consult an
+external corpus root at all:
 
 ```rust
-#[path = "support/datasets_root.rs"] mod datasets_root;
-use datasets_root::sstables_root_for_table;
-
-let root = sstables_root_for_table("test_comparator_order", "collection_order")
-    .expect("committed fixture is must_run (#3220): fail closed, never skip");
-let data_db = root
-    .join("test_comparator_order/collection_order-3479a500a65e11f1895d413585556a46")
-    .join("nb-1-big-Data.db");
+let ks = checkout_test_data_dir()
+    .join("datasets")
+    .join("sstables")
+    .join("test_comparator_order");
+// then require EXACTLY ONE `collection_order-<32 hex>` carrying both a
+// *-Data.db and its *-Data.db.jsonl; ambiguity is a hard failure.
 ```
 
 `sstables_root_for_table` walks EVERY candidate root (the `CQLITE_DATASETS_ROOT`

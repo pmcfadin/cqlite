@@ -84,20 +84,25 @@ fn compare_inet(left: &Value, right: &Value) -> Result<Ordering> {
 /// `to_be_bytes()` is the serialized form verbatim, so THIS COMPARATOR agrees
 /// with Cassandra for all inputs.
 ///
-/// SCOPED CLAIM — the comparator, not the whole system (roborev job 45).
-/// `Value`'s own `PartialOrd` (`types.rs`, the `(Value::Time(a), Value::Time(b))`
-/// arm) compares SIGNED, and writer/memtable paths that order through it are
-/// unchanged by #3790. The two therefore agree for every value in the valid range
-/// and DISAGREE for an out-of-range negative nanos, where this comparator sorts it
-/// above non-negatives and `PartialOrd` sorts it below. Cassandra's
-/// `TimeSerializer` validates `0..=86_399_999_999_999`, so no Cassandra-written
-/// SSTable can contain such a value and no READ path can observe the divergence;
-/// it is reachable only for a negative `Value::Time` that CQLite itself
-/// constructs. Unifying the two (or rejecting out-of-range time at the write
-/// boundary) is filed as #3920 — it means changing writer-path ordering, which is
-/// outside this issue (1:1:1:1). Noted here rather than left implicit, because
-/// choosing byte-order-exactness for the negative case is precisely what makes
-/// the inconsistency worth naming.
+/// SCOPED CLAIM — this comparator, not the whole system (roborev jobs 45/70).
+/// Three other sites order `time` and TWO OF THEM ARE SIGNED: `Value::PartialOrd`
+/// (`types.rs`), and — the one that reaches disk — the whole-collection writer
+/// (`data_writer/collection_order::compare_collection_elements`, which
+/// `write_complex_set` uses and then emits cell paths in that order with no
+/// re-sort). The per-element writer (`compare_cell_paths`) is unsigned like this.
+///
+/// They agree for every value in `time`'s valid range, and DISAGREE for an
+/// out-of-range negative nanos. **A READ CAN OBSERVE THAT** — an earlier revision
+/// of this comment claimed it could not, which was wrong: Cassandra's
+/// `TimeSerializer` rejects such a value so no CASSANDRA-written SSTable holds
+/// one, but nothing in CQLite validates the range, so a CQLite-WRITTEN collection
+/// can be laid down in signed order and read back in byte order.
+///
+/// Unifying them means changing on-disk collection ordering, memtable key
+/// placement and compaction merge, which is outside this issue (1:1:1:1): filed
+/// as #3935, with the missing range validation — the fix that would make all the
+/// sites agree trivially — as #3920. Noted here rather than left implicit,
+/// because choosing byte-order-exactness is what makes the split worth naming.
 fn compare_time(left: &Value, right: &Value) -> Result<Ordering> {
     match (left, right) {
         (Value::Time(l), Value::Time(r)) => Ok(l.to_be_bytes().cmp(&r.to_be_bytes())),
