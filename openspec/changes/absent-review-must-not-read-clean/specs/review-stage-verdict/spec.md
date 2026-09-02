@@ -235,6 +235,29 @@ directory, and any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUI
   path carrying a foreign nonce
 - **AND** a verdict naming the validated generation still certifies (the positive control)
 
+#### Scenario: `report=` publishes a path that EXISTS, on a repository path containing `=`
+- **WHEN** the repository root legally contains an `=` (e.g. a checkout at `.../eq=path/lane`)
+- **THEN** the verdict line's `report=` SHALL carry the report-of-record path VERBATIM — the value
+  SHALL name a file that EXISTS, because the grammar promises the absolute report-of-record path and
+  `verdict`, unlike `open`, publishes no separate raw path line to fall back to
+- **AND** that field alone SHALL be EXEMPT from the `=`→`~` map, for exactly one reason: it is
+  emitted LAST and read as the line REMAINDER, so an `=` inside it cannot create an ambiguous field
+  and the anti-forgery justification for the map does not apply to it
+- **AND** the exemption SHALL be COUPLED to that property STRUCTURALLY — one assertion requiring the
+  field to be last AND routed through the exempt boundary — so appending a field after `report=`, or
+  routing it back through the mapping boundary, reds a suite rather than silently re-corrupting the
+  value or re-enabling forgery
+- **AND** the exemption SHALL be CONFINED to that ONE field on that ONE line: every other `report=`
+  emitter keeps the mapping boundary, because no consumer reads any of those lines as a remainder and
+  one of them emits a further field AFTER `report=`, where the exemption would be unsound
+- **AND** a `key=value` pair smuggled through a DIFFERENT field SHALL still be neutralised — the
+  remainder rule depends on it, since an unmapped value could put a REAL `report=` pair AHEAD of the
+  measured one and the reader takes the FIRST
+- **AND** control-character neutralisation SHALL be UNCHANGED in the exempt boundary: every line
+  break flattened and the whole C0 range plus DEL rendered visibly, so the exemption is the `=` map
+  ALONE
+- **AND** an `=`-free path SHALL still be published unchanged (the positive control)
+
 #### Scenario: the C verdict is re-validated INSIDE the window it certifies
 - **WHEN** the C stage is SUPERSEDED (a concurrent `review-stage.sh open --force`, or a hand edit)
   AFTER the verdict has been validated and BEFORE `premerge-assert.sh` emits its success verdict —

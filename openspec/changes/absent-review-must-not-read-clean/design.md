@@ -458,3 +458,54 @@ network round trip" to "a local git measurement plus one `review-stage.sh` read"
 because a verdict is a snapshot of a file at a time. Symmetrically, the `gh` head/state check is no longer
 the last thing before the success emit — a trade recorded at the call site, in the direction that makes
 the removed window two orders of magnitude larger than the added one.
+
+### V2 — a legal `=` in the path made `report=` publish a file that does not exist (`review-stage.sh`)
+
+`report=` went through `field_value`, whose `=`→`~` map exists so a value cannot forge a `key=value`
+pair that a field-scanning consumer reads instead of the measured one. A repository root may
+**legally** contain `=` — so on such a checkout the verdict line advertised a path that does not
+exist, while the grammar promises the absolute report-of-record path. Measured on the shipped script
+at `…/eq=path/lane`:
+
+```
+open  (raw line):  …/eq=path/.review-stage/issue-3751/c.XPRfO9NNsk.md   <- exists
+verdict report=:   …/eq~path/.review-stage/issue-3751/c.XPRfO9NNsk.md   <- does not exist
+```
+
+`open` was correctly scoped out of the finding: it prints a raw path line of its own, deliberately
+unrouted, which is the channel a caller consumes. `verdict` has no such fallback.
+
+**The exemption is coupled to the property that justifies it, not to a comment.** Since round 11 (Q3)
+`report=` is emitted LAST and read as the line REMAINDER, so there is no following field for a forged
+pair to displace and the consumer is not scanning fields there at all — the anti-forgery reason
+simply does not apply to this one field. Because the exemption *depends* on that arrangement, the two
+facts are pinned in **one** assertion (the field is last AND routed through the exempt boundary), so
+either change alone reds a suite.
+
+**Three things worth carrying beyond this issue:**
+
+- **Confinement is a design property, not bookkeeping.** Six other `report=` emitters keep
+  `field_value`. That is not caution: `report-changed-mid-write` emits `now-verdict=` *after*
+  `report=`, so the exemption would be **unsound** there — and for the rest, no consumer reads those
+  lines as a remainder, so exempting them would rest on *"no consumer exists today"*, which is a
+  permission derived from the ABSENCE of a bad signal. The structural pin is therefore one
+  definition, one call site.
+- **The control proves the confinement, not the fix.** A `report=` pair smuggled through the
+  `agent=` field must still be neutralised: unmapped, it puts a **real** `report=` pair *ahead* of
+  the measured one and the remainder reader takes the FIRST. Without that case, the headline
+  assertion is satisfiable by dropping the map from every field — which would be a strictly worse
+  script that passes a strictly weaker test.
+- **"Differs in one respect" is a claim about behaviour, so it is tested behaviourally.** The
+  differential extracts `field_value` and `remainder_value` from the shipped file and RUNS them:
+  `field_value` still maps `=`, `remainder_value` does not, and `remainder_value` still renders a C0
+  byte visibly and still flattens a newline. Reading the source would have proved only that the two
+  bodies look different.
+
+Adding the new boundary function also **RED the emit-boundary scanner** until it was declared in
+`BOUNDARIES` — the round-7 mechanism doing exactly its job, and the reason that entry carries its own
+paragraph of reasoning rather than being appended silently.
+
+**Declared residual:** on a `=`-bearing checkout the `status`, `OPEN-OK`, `already-open`,
+`AUTHOR-REFUSED`, `report-changed-mid-write` and `RECORD-OK` lines still *display* a
+`~`-substituted path. Each is a diagnostic; the two channels that promise the real path are `open`'s
+raw line and the verdict line.

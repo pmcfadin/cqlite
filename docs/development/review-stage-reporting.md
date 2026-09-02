@@ -421,7 +421,32 @@ Three further declared limits of the mechanism itself:
   `verdict reported: /tmp/…/work` beside a `validated generation:` that was exactly the one the
   verdict named. The remainder rule is sound ONLY because `report=` is last, so that assumption is
   ENFORCED against the shipped emitter rather than assumed — the 11 states are derived by RUNNING
-  it and no mandatory key may follow `report=` on any line it produces.) `agent=` is written through
+  it and no mandatory key may follow `report=` on any line it produces.) **AND BEING LAST IS WHAT
+  EARNS IT THE ONE EXEMPTION FROM THE `=`→`~` MAP (#3751 round 16, V2).** A repository root may
+  LEGALLY contain `=`, and `report=` went through the same `field_value` boundary as every other
+  field — so on such a checkout the verdict line advertised a path that **DOES NOT EXIST** while
+  this grammar promises the absolute report-of-record path (measured on the shipped script at
+  `…/eq=path/lane`: `open` printed the real `…/eq=path/…/c.<nonce>.md` on its raw line, `verdict`
+  published `…/eq~path/…`, which no `open(2)` resolves), and `verdict` — unlike `open` — offers no
+  separate raw channel to fall back to. The exemption (`remainder_value`: everything `field_value`
+  does EXCEPT the `=` map) is sound for exactly one reason, the remainder rule above — there is no
+  following field for a forged pair to displace and the consumer is not scanning fields there — so
+  the two facts are **pinned TOGETHER in one match**, since either change alone makes the other
+  wrong. It is **CONFINED** to one definition and one call site: the six other `report=` emitters
+  keep `field_value`, and that is not bookkeeping — `report-changed-mid-write` emits `now-verdict=`
+  AFTER `report=`, where the exemption would be **unsound**, and no consumer reads any of those
+  lines as a remainder, so exempting them would rest on "no consumer exists today", a permission
+  derived from the ABSENCE of a bad signal. The control that proves the confinement rather than the
+  fix: a `report=` pair smuggled through the `agent=` field must still be neutralised, because
+  unmapped it puts a REAL `report=` **ahead of** the measured one and the remainder reader takes the
+  FIRST. Control-character neutralisation is untouched (rounds 5/7/13/14) and is asserted
+  BEHAVIOURALLY against the extracted functions rather than by reading their source, because "does
+  this map `=`" is a question about what they DO — so the exemption is the `=` map ALONE.
+  **DECLARED RESIDUAL:** on a `=`-bearing checkout the `status`, `OPEN-OK`, `already-open`,
+  `AUTHOR-REFUSED`, `report-changed-mid-write` and `RECORD-OK` lines still DISPLAY a
+  `~`-substituted path. In every one of those cases it is a diagnostic; the two channels that
+  promise the real path are `open`'s raw line and the verdict line.
+- `agent=` is written through
   `sanitize_field`, whose character class excludes whitespace, so it cannot legitimately carry one; a
   hand-edited record could, and that value truncates — a truncated DIAGNOSTIC, never a wrong verdict,
   since the token is what proceeds and `=` is neutralised at the emit boundary. So a sibling stage's `PASS` line (a

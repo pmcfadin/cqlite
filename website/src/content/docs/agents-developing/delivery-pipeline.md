@@ -289,7 +289,19 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   because `report=` is emitted LAST, so the assumption is **ENFORCED, not assumed** — the emitter's
   states are derived by RUNNING it, no mandatory key may follow `report=` on any line it produces,
   and its single emit site is pinned structurally. Generalise it: **a parser that reads a
-  PATH-valued field positionally has a whitespace bug waiting.** "Somewhere on this line it says
+  PATH-valued field positionally has a whitespace bug waiting.**
+  **The `=`->`~` map has exactly ONE exemption, coupled to the property that justifies it (#3751
+  round 16).** A repository root may legally contain `=`, and `report=` went through that map — so
+  on such a checkout the verdict line advertised a path that DOES NOT EXIST while the grammar
+  promises the absolute report-of-record path (measured at `.../eq=path/lane`: `open` printed the
+  real file, `verdict` published `.../eq~path/...`), and `verdict` offers no separate raw channel.
+  The exemption is sound only because `report=` is LAST and read as the remainder, so the two facts
+  are pinned together in one match, and it is CONFINED to one definition and one call site — one of
+  the other `report=` emitters puts `now-verdict=` after it, where the exemption would be unsound.
+  The control that proves the confinement is that a `report=` pair smuggled through `agent=` is
+  still neutralised, since unmapped it lands AHEAD of the measured one and the reader takes the
+  first. Control-character neutralisation is untouched: the exemption is the `=` map alone.
+ "Somewhere on this line it says
   `RESULT: PASS`" is not a verdict about C: measured on #3751's own branch, a sibling `code-review`
   stage's PASS line satisfied `--c-verdict`, and a truncated capture with no
   `elapsed=`/`agent=`/`report=` did too. Only

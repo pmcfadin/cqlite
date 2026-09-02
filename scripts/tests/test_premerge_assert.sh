@@ -4498,10 +4498,26 @@ if [ "$(printf '%s\n' "$Q3_EMIT" | LC_ALL=C grep -c 'RESULT: \$rendered' || true
 else
   bad "q3/last-structural: the verdict line is emitted from more than one site — the remainder rule would need checking at each"
 fi
+# THE LITERAL PINS THE BOUNDARY AS WELL AS THE POSITION (#3751 round 16, V2). `report=` is the ONE
+# field EXEMPT from the '='->'~' map, through `remainder_value` — a repository root may legally
+# contain '=', and mapping it published a path that DOES NOT EXIST. That exemption is sound ONLY
+# because of the property this subsection asserts: the field is LAST and is read as the line
+# REMAINDER, so an '=' inside it cannot create an ambiguous field. So the two facts are pinned
+# TOGETHER, in one match: a change that appends a field after `report=` OR routes it back through
+# the '='-mapping boundary reds here, because either one alone makes the other wrong.
 case "$Q3_EMIT" in
-  *'report=$(field_value "${STAGE_REPORT:-unresolved}")"') 
-    ok "q3/last-structural: that site ends with report=, so nothing follows the remainder" ;;
-  *) bad "q3/last-structural: report= is no longer the LAST thing on the emitted line (got: $Q3_EMIT)" ;;
+  *'report=$(remainder_value "${STAGE_REPORT:-unresolved}")"')
+    ok "q3/last-structural: that site ends with report= through the remainder-exempt boundary, so nothing follows the remainder" ;;
+  *) bad "q3/last-structural: report= is no longer the LAST thing on the emitted line, or no longer exempt from the '=' map (got: $Q3_EMIT)" ;;
+esac
+# AND THE EXEMPTION IS NOT A BLANKET ONE: the OTHER mandatory fields on this line must still go
+# through the '='-mapping boundary, or a hand-edited record could forge a `report=` pair AHEAD of
+# the measured one and the remainder rule above would take the FORGED value (the reader takes the
+# FIRST occurrence). The behavioural counterpart is section 29(b) of test_review_stage.sh.
+case "$Q3_EMIT" in
+  *'deadline=$(field_value "$STAGE_DEADLINE") agent=$(field_value "$STAGE_AGENT")'*)
+    ok "q3/last-structural: and deadline=/agent= STILL route through the '='-mapping boundary, so neither can forge a report= pair" ;;
+  *) bad "q3/last-structural: a mandatory field ahead of report= no longer maps '=' — a record value could forge the pair the remainder rule reads (got: $Q3_EMIT)" ;;
 esac
 
 # (e) STRUCTURAL — THE READER TAKES THE REMAINDER, not one field. Behavioural cases only cover the
@@ -5609,7 +5625,18 @@ fi
 # file-wide, because the globals are initialised to "" at the top and a whole-file grep PASSES on
 # the pre-fix artifact — and the second evaluation calls the SHIPPED `c_evaluate` rather than
 # re-implementing the binding.
-ASSERT_FLOOR=513
+#
+# ROUND 16 (V2) ADDS 1 MORE, HOST-INDEPENDENT (519 -> 520; floor 513 -> 514, the documented
+# 6-assertion host-gated margin PRESERVED UNCHANGED): section 44l(d)'s existing emitter-literal pin
+# is retargeted at `remainder_value` — `report=` is the ONE field EXEMPT from the `=`->`~` map,
+# because a repository root may legally contain `=` and mapping it published a path that DOES NOT
+# EXIST — and pinned TOGETHER with the position, since the exemption is sound only while the field
+# is last and read as the remainder, so either change alone makes the other wrong. The ADDED
+# assertion is the other half of that coupling: `deadline=`/`agent=` must STILL route through the
+# `=`-mapping boundary, or a hand-edited record could forge a `report=` pair AHEAD of the measured
+# one and the remainder rule would read the FORGED value (the reader takes the FIRST occurrence).
+# Its behavioural counterpart is section 29(b) of test_review_stage.sh.
+ASSERT_FLOOR=514
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

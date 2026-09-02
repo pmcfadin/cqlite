@@ -87,7 +87,16 @@ P='EMIT-BOUNDARY-SCAN: '
 # THE BOUNDARY FUNCTIONS. One list, shared by both subjects deliberately: `one_line` and
 # `c_safe_display` render the same byte classes the same way precisely so ONE value cannot read two
 # ways depending on which script printed it (round 5, J3).
-BOUNDARIES='field_value one_line sanitize_field c_safe_display'
+# `remainder_value` IS A BOUNDARY (#3751 round 16, V2): it applies `one_line` in full — every line
+# break flattened, the whole C0 range plus DEL rendered visibly — and differs from `field_value` in
+# ONE respect, the '='->'~' map, which it omits because its single caller's field (`report=` on the
+# verdict line) is emitted LAST and read as the line REMAINDER, so an '=' inside it cannot forge a
+# `key=value` pair. This scanner's question is "was the value ROUTED", not "which reserved
+# characters did the routing neutralise" (that is the two suites' byte-census cases, and section 29
+# of test_review_stage.sh pins the one-respect difference behaviourally), so it belongs in this
+# list. A NEW boundary function must be added here or its call sites read as BYPASSES — which is
+# how this entry came to exist: adding `remainder_value` without declaring it RED this guard.
+BOUNDARIES='field_value one_line sanitize_field c_safe_display remainder_value'
 
 # COMMAND SUBSTITUTIONS THAT ARE NOT BOUNDARIES AND NEED NONE, per subject, each with its reason.
 # Separate from the variable allowlist because the two are different claims: "this NAME is not data"

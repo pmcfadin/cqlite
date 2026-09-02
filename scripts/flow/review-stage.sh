@@ -41,6 +41,11 @@
 #   after it would truncate every space-bearing path again; pinned by section 44l of
 #   scripts/tests/test_premerge_assert.sh against THIS emitter's own output.
 #
+#   AND BEING LAST IS WHAT EARNS IT THE ONE EXEMPTION FROM THE '=' MAP (#3751 round 16, V2): a
+#   repository root may LEGALLY contain '=', and mapping it published a path that DOES NOT EXIST,
+#   so this field alone goes through `remainder_value` rather than `field_value`. The two facts are
+#   pinned TOGETHER, because either one alone makes the other wrong — see `remainder_value`.
+#
 #   token             meaning                                            exit
 #   PASS              a report was written recording no blocking finding   0
 #   FINDINGS          a report was written recording >=1 blocking finding  4
@@ -621,6 +626,51 @@ one_line() {
 # never change a verdict — the same reasoning the roborev wrapper's `roborev_safe_line` states.
 field_value() {
   one_line "${1:-}" | LC_ALL=C tr '=' '~'
+}
+
+# remainder_value <text> — THE EMIT BOUNDARY FOR THE ONE FIELD THAT IS PARSED AS THE REMAINDER OF
+# ITS LINE (#3751 round 16, V2). Everything `field_value` does EXCEPT the '=' map.
+#
+# THE DEFECT IT FIXES. `report=` went through `field_value`, so a repository root containing a
+# LEGAL '=' had its report path published with that character rewritten to '~' — the verdict line
+# advertised a path THAT DOES NOT EXIST while the grammar promises the absolute report-of-record
+# path. Measured on the shipped script in a checkout named `…/eq=path/lane`: `open` printed the
+# real `…/eq=path/…/c.XPRfO9NNsk.md` on its raw line and `verdict` published
+# `…/eq~path/…/c.XPRfO9NNsk.md`, which no `open(2)` can resolve. Round 10's nonce check and every
+# consumer that OPENS that path were reading a corrupted value, and `verdict` — unlike `open`,
+# which prints a raw path line of its own — offers NO separate raw channel to fall back to.
+#
+# WHY THE EXEMPTION IS SOUND, AND IT IS THE ROUND-11 PROPERTY THAT MAKES IT SO. The '=' map exists
+# so a value cannot forge a `key=value` pair that a field-scanning consumer reads instead of the
+# measured one. Since round 11 (Q3) `report=` is emitted LAST on the verdict line and read as the
+# REMAINDER of that line, so an '=' inside it cannot create an ambiguous field — there is no
+# following field for a forged pair to displace, and the consumer is not scanning fields there
+# anyway. The anti-forgery reason simply does not apply to this one field, which is why this is an
+# exemption rather than a weakening.
+#
+# THE EXEMPTION IS COUPLED TO THAT PROPERTY STRUCTURALLY, NOT BY THIS COMMENT. `report=` being last
+# AND being read as the remainder are pinned by section 44l(d)/(e) of
+# scripts/tests/test_premerge_assert.sh (its emitter states DERIVED by running this script), and
+# section 29 of scripts/tests/test_review_stage.sh additionally pins that this function has exactly
+# ONE definition and exactly ONE call site and that it differs from `field_value` in the '=' map
+# ALONE. So appending a field after `report=` — which would silently truncate the value again and
+# re-open the forgery route — reds a suite instead of shipping.
+#
+# CONFINED TO ONE FIELD ON ONE LINE, BY CONSTRUCTION. The `status`, `OPEN-OK`, `already-open`,
+# `AUTHOR-REFUSED`, `report-changed-mid-write` and `RECORD-OK` lines keep `field_value` for their
+# own `report=`. That is deliberate: no consumer reads any of them as a line remainder, so the
+# justification above is unavailable there, and a permission derived from "no consumer exists today"
+# is a permission derived from the ABSENCE of a bad signal — the shape this repository refuses
+# everywhere else. DECLARED RESIDUAL: on a '='-bearing checkout those lines still DISPLAY a
+# '~'-substituted path. It is a diagnostic in every one of those cases; the two channels that
+# promise the real path are `open`'s raw line and this one.
+#
+# EVERYTHING ELSE IS UNCHANGED, and that is the other half of the claim: `one_line` still flattens
+# every line break and renders the whole C0 range plus DEL visibly (rounds 5/7/13/14), so this
+# trades a corrupted path for nothing. DISPLAY-ONLY, like its sibling: every decision — the token,
+# the exit code, the paths actually written — is made on the RAW value before this line is built.
+remainder_value() {
+  one_line "${1:-}"
 }
 
 # placeholder_defect <raw-value> — THE ONE JUDGEMENT, shared by every caller that has to
@@ -2445,6 +2495,15 @@ cmd_verdict() {
   # the stage record — which is what catches an ABA replacement its byte comparison cannot see.
   # `unresolved` stays the honest non-measurement, and that consumer refuses on it by name.
   #
+  # AND IT IS THE ONE FIELD EXEMPT FROM THE '=' MAP (#3751 round 16, V2) — `remainder_value`, not
+  # `field_value`. A repository root may LEGALLY contain '=', and mapping it published a path that
+  # DOES NOT EXIST while this grammar promises the absolute report-of-record path (measured: a
+  # checkout at `…/eq=path/lane` had `open` print the real file and this line advertise
+  # `…/eq~path/…`). The exemption is sound for exactly ONE reason, the round-11 property below:
+  # this field is LAST and is read as the line REMAINDER, so an '=' inside it cannot create an
+  # ambiguous field and the anti-forgery reason does not apply to it. Control characters are still
+  # neutralised in full. See `remainder_value` for the coupling and the confinement, both pinned.
+  #
   # AND IT MUST STAY LAST ON THIS LINE (#3751 round 11, Q3). A report path may legitimately contain
   # a SPACE (a checkout at `/tmp/work tree`), so that consumer reads `report=` as the REMAINDER of
   # the line rather than as one whitespace-delimited field — a field read truncated the value and
@@ -2452,7 +2511,7 @@ cmd_verdict() {
   # path again; the property is pinned against THIS emitter by section 44l of
   # scripts/tests/test_premerge_assert.sh (its 11 states derived by RUNNING this script), so such a
   # change reds that suite rather than shipping.
-  emit "$KI_KIND RESULT: $rendered elapsed=$STAGE_ELAPSED deadline=$(field_value "$STAGE_DEADLINE") agent=$(field_value "$STAGE_AGENT") report=$(field_value "${STAGE_REPORT:-unresolved}")"
+  emit "$KI_KIND RESULT: $rendered elapsed=$STAGE_ELAPSED deadline=$(field_value "$STAGE_DEADLINE") agent=$(field_value "$STAGE_AGENT") report=$(remainder_value "${STAGE_REPORT:-unresolved}")"
   case "$token" in
     PASS) exit 0 ;;
     FINDINGS) exit 4 ;;

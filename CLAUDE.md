@@ -1383,6 +1383,27 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   (there is no value for which `echo` beats `printf '%s\n'`, and an entry here could only be a claim
   that one line's data contains no backslash) and additionally requires every `printf` FORMAT to be
   a literal the script authored — the same channel one step in, through `%`.
+  **AND THE `=` MAP HAS EXACTLY ONE EXEMPTION, COUPLED TO THE PROPERTY THAT JUSTIFIES IT (#3751
+  round 16, V2).** A repository root may LEGALLY contain `=`, and `report=` went through the same
+  map — so on such a checkout the verdict line advertised a path that **DOES NOT EXIST** while the
+  grammar promises the absolute report-of-record path (measured on the shipped script at
+  `…/eq=path/lane`: `open` printed the real `…/eq=path/…/c.<nonce>.md` on its raw line while
+  `verdict` published `…/eq~path/…`, which no `open(2)` resolves) — and `verdict`, unlike `open`,
+  offers **no separate raw channel** to fall back to. The exemption (`remainder_value`, everything
+  `field_value` does except the `=` map) is sound for ONE reason and only that reason: since round
+  11 `report=` is emitted **LAST** and read as the line **REMAINDER**, so an `=` inside it cannot
+  create an ambiguous field. **So the two facts are pinned TOGETHER** — one match asserts the field
+  is last AND routed through the exempt boundary, because either change alone makes the other wrong
+  — and the exemption is **CONFINED**: exactly one definition, exactly one call site, with the six
+  other `report=` emitters keeping `field_value`. That confinement is not bookkeeping: one of them
+  (`report-changed-mid-write`) emits `now-verdict=` AFTER `report=`, where the exemption would be
+  **unsound**, and no consumer reads any of those lines as a remainder — so exempting them would
+  rest on "no consumer exists today", a permission derived from the ABSENCE of a bad signal. The
+  control that proves the confinement, not the fix: a `report=` pair smuggled through the `agent=`
+  field must still be neutralised, because unmapped it puts a REAL `report=` **ahead of** the
+  measured one and the remainder reader takes the FIRST. Control-character neutralisation is
+  untouched in the exempt boundary (rounds 5/7/13/14), asserted behaviourally rather than by
+  reading the source, so the exemption is the `=` map ALONE.
   **AND "EVERY READ GOES THROUGH THE BOUNDARY" WAS FALSE FOR TWO READERS FOR A WHOLE ROUND — SO
   THE CLASS IS NOW MECHANIZED, NOT ASSERTED (#3751 round 14).** Round 13 routed three of the five
   non-boundary read sites and left two reading files directly, and **both** were found by the next

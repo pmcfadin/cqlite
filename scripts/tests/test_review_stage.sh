@@ -4411,6 +4411,214 @@ else
     *) bad "read-guard/stale: the guard did not report a stale entry when the declared --help read was reworded (got: $RBS_SOUT)" ;;
   esac
 fi
+# --- 29. A LEGAL '=' IN THE PATH MUST NOT MAKE `report=` PUBLISH A FILE THAT DOES NOT EXIST
+#         (round 16, V2) ----------------------------------------------------------------------
+# THE FINDING (roborev job 393, V2, review-stage.sh:2455). `report=` went through `field_value`,
+# which maps the ONE reserved character of these `key=value` lines, '=', to '~' so a value cannot
+# forge a pair. A repository root may LEGALLY contain '=' — so on such a checkout the verdict line
+# advertised a path that DOES NOT EXIST, while the grammar promises the absolute report-of-record
+# path and `open` (which prints a raw path line of its own) had just created the real one. Measured
+# on the shipped script in a checkout named `…/eq=repo`:
+#
+#   open  (raw line):  …/eq=repo/.review-stage/issue-3751/c.0sqezS2DJW.md   <- exists
+#   verdict report=:   …/eq~repo/.review-stage/issue-3751/c.0sqezS2DJW.md   <- does not exist
+#
+# Round 10's nonce check and any consumer that OPENS that path are reading a corrupted value, and
+# `verdict` — unlike `open` — offers NO separate raw channel to fall back to.
+#
+# THE FIX IS AN EXEMPTION COUPLED TO THE PROPERTY THAT JUSTIFIES IT. Since round 11 (Q3) `report=`
+# is emitted LAST and read as the REMAINDER of the line, so an '=' inside it cannot create an
+# ambiguous field — the anti-forgery reason for the map does not apply to this ONE field. Control
+# characters are still neutralised (rounds 5/7/13/14). The coupling is asserted STRUCTURALLY below
+# and in section 44l(d) of the premerge suite, so appending a field after `report=` reds a suite
+# rather than silently re-corrupting the value or re-enabling forgery.
+#
+# THE EXEMPTION IS CONFINED TO ONE FIELD ON ONE LINE, and the control that matters proves the
+# confinement rather than the fix: a forged `key=value` smuggled through a DIFFERENT field is what
+# the remainder rule depends on being neutralised, since an unmapped `agent: a report=/forged`
+# would put a REAL `report=` pair AHEAD of the measured one and the remainder parse takes the first.
+V2_ROOT="$T/v2 eq=path"
+V2_REPO="$V2_ROOT/lane"
+V2_OK=0
+if mkdir -p "$V2_REPO" && git -C "$V2_REPO" init -q >/dev/null 2>&1; then
+  printf '.review-stage/\n' >"$V2_REPO/.gitignore"
+  case "$V2_REPO" in
+    *=*) V2_OK=1; ok "v2 fixture: a checkout whose PATH contains a legal '=' was built" ;;
+    *) bad "v2 fixture: the fixture path carries no '=', so every case below would be vacuous" ;;
+  esac
+else
+  bad "v2 fixture: could not build it — every case below would be vacuous"
+fi
+
+V2_RAW=""
+if [ "$V2_OK" -eq 1 ]; then
+  rs "$V2_REPO" open c --issue 3751 --agent spec-auditor
+  rc_is 0 "v2: the stage opened in the '='-bearing checkout"
+  # `open`'s RAW path line is deliberately NOT routed through the boundary, so it is the ground
+  # truth this section compares against — and it is the reason `open` was scoped OUT of the finding.
+  V2_RAW="$(printed_report_path)"
+  if [ -n "$V2_RAW" ] && printf 'result: PASS\n\n## Findings\n\nnone.\n' >"$V2_RAW" 2>/dev/null &&
+    [ -f "$V2_RAW" ]; then
+    ok "v2: open's RAW path line names a file that EXISTS (the premise: there IS a real report to publish)"
+  else
+    bad "v2: open's raw path is unusable (got: $V2_RAW) — the assertions below would be vacuous"
+    V2_OK=0
+  fi
+  case "$V2_RAW" in
+    *=*) ok "v2: and that real path CONTAINS the '=' (so the corruption below is about this fixture)" ;;
+    *) bad "v2: the real path carries no '=' — the fixture does not exercise the defect (got: $V2_RAW)" ;;
+  esac
+fi
+
+if [ "$V2_OK" -eq 1 ]; then
+  # (a) THE FINDING: the published value must BE the real path, and must NAME AN EXISTING FILE.
+  #     Both are asserted, because they are different claims: a value could be textually equal to
+  #     something and still not exist, and a value could exist and not be the report of record.
+  rs "$V2_REPO" verdict c --issue 3751
+  rc_is 0 "v2/publish: the verdict reports PASS"
+  V2_PUB="${OUT#*report=}"
+  if [ "$V2_PUB" = "$V2_RAW" ]; then
+    ok "v2/publish: the published report= is EXACTLY the path open printed"
+  else
+    bad "v2/publish: the published report= is not the real path (published: $V2_PUB / real: $V2_RAW)"
+  fi
+  if [ -f "$V2_PUB" ]; then
+    ok "v2/publish: and that published path names a file that EXISTS"
+  else
+    bad "v2/publish: the published path does NOT exist — the verdict advertises a file nobody can open ($V2_PUB)"
+  fi
+  # THE VALUE IS NOT MERELY UNMAPPED, IT IS WHOLE: the '=' survives rather than being dropped, which
+  # a scrubber that DELETED the character would also satisfy for the equality above only by accident.
+  case "$V2_PUB" in
+    *"eq=path"*) ok "v2/publish: the '=' is present in the published value, not dropped or substituted" ;;
+    *) bad "v2/publish: the '=' did not survive into the published value (got: $V2_PUB)" ;;
+  esac
+
+  # (b) THE CONFINEMENT CONTROL: a forged `report=` smuggled through ANOTHER field is still
+  #     neutralised. This is the property the remainder rule RESTS on — unmapped, the plant below
+  #     puts a REAL `report=` pair ahead of the measured one and the remainder parse takes the
+  #     FIRST. Without this case, (a) is satisfiable by dropping the map from every field.
+  V2_SF="$V2_REPO/.review-stage/issue-3751/c.stage"
+  if [ -f "$V2_SF" ] &&
+    LC_ALL=C sed -e 's|^agent:.*|agent: spec-auditor report=/forged/elsewhere.md|' \
+      "$V2_SF" >"$V2_SF.new" 2>/dev/null && mv "$V2_SF.new" "$V2_SF"; then
+    ok "v2/forge: the record's agent field was re-written to smuggle a report= pair"
+  else
+    bad "v2/forge: the plant could not be written, so the control below proves nothing"
+  fi
+  rs "$V2_REPO" verdict c --issue 3751
+  rc_is 0 "v2/forge: the verdict still reports PASS — a display boundary decides nothing"
+  # COUNTED, NOT MATCHED: the line legitimately CONTAINS `report=`, so a substring test passes on
+  # the broken script too. Exactly one pair is the property.
+  V2_N="$(printf '%s' "$OUT" | LC_ALL=C tr ' ' '\n' | LC_ALL=C grep -c '^report=' || true)"
+  if [ "$V2_N" = "1" ]; then
+    ok "v2/forge: the verdict line carries EXACTLY ONE 'report=' pair — a smuggled one cannot forge a second"
+  else
+    bad "v2/forge: the line carries $V2_N 'report=' pairs — the exemption re-enabled forgery (got: $OUT)"
+  fi
+  has "agent=spec-auditor report~/forged/elsewhere.md" \
+    "v2/forge: and the smuggled '=' is still rendered '~' in the agent field — neutralised, not dropped"
+  V2_PUB2="${OUT#*report=}"
+  if [ "$V2_PUB2" = "$V2_RAW" ]; then
+    ok "v2/forge: and the remainder still resolves to the REAL report path, not the forged one"
+  else
+    bad "v2/forge: the forged pair displaced the real path (got: $V2_PUB2)"
+  fi
+fi
+
+# (c) THE ORDINARY CHECKOUT STILL ROUND-TRIPS — a guard that reds on correct input is the guard
+#     agents learn to waive, and this is the case every other section's repository is.
+V2_PLAIN="$(newrepo)"
+if [ -n "$V2_PLAIN" ]; then
+  rs "$V2_PLAIN" open c --issue 982 --agent spec-auditor
+  rc_is 0 "v2/plain CONTROL: an ordinary stage opened"
+  V2_PRAW="$(printed_report_path)"
+  printf 'result: PASS\n' >"$V2_PRAW" 2>/dev/null || true
+  rs "$V2_PLAIN" verdict c --issue 982
+  V2_PPUB="${OUT#*report=}"
+  if [ -n "$V2_PRAW" ] && [ "$V2_PPUB" = "$V2_PRAW" ]; then
+    ok "v2/plain CONTROL: an '='-free path is published unchanged too"
+  else
+    bad "v2/plain CONTROL: an ordinary path was altered (published: $V2_PPUB / real: $V2_PRAW)"
+  fi
+else
+  bad "v2/plain CONTROL: could not build an ordinary repository"
+fi
+
+# (d) STRUCTURAL — THE EXEMPTION IS COUPLED TO ITS JUSTIFICATION AND CONFINED TO ONE SITE.
+#     Behavioural cases cover the shapes someone thought of; these pin the arrangement, which is
+#     what a later change would break silently.
+V2_SRC="$RS"
+if [ "$(LC_ALL=C grep -c 'remainder_value()' "$V2_SRC" || true)" -eq 1 ]; then
+  ok "v2/structural: there is exactly ONE remainder-exempt boundary function"
+else
+  bad "v2/structural: the remainder-exempt boundary is not defined exactly once"
+fi
+# CALLED FROM EXACTLY ONE PLACE. The exemption's justification — LAST on the line and read as the
+# REMAINDER — is a property of the VERDICT line alone; the `status`, `OPEN-OK`, `already-open`,
+# `AUTHOR-REFUSED`, `report-changed-mid-write` and `RECORD-OK` lines keep `field_value`, because no
+# consumer reads any of them as a remainder and a permission derived from "no consumer exists
+# today" is a permission derived from the absence of a bad signal.
+V2_CALLS="$(LC_ALL=C grep -c 'remainder_value "' "$V2_SRC" || true)"
+if [ "$V2_CALLS" -eq 1 ]; then
+  ok "v2/structural: and it is CALLED from exactly one site, so the exemption cannot spread unnoticed"
+else
+  bad "v2/structural: the remainder-exempt boundary has $V2_CALLS call sites — the exemption is no longer confined"
+fi
+# THE ONE CALL SITE IS THE VERDICT LINE, AND `report=` IS STILL LAST ON IT.
+V2_EMIT="$(LC_ALL=C grep -h 'RESULT: \$rendered' "$V2_SRC" 2>/dev/null || true)"
+case "$V2_EMIT" in
+  *'report=$(remainder_value "${STAGE_REPORT:-unresolved}")"')
+    ok "v2/structural: the verdict line ends with report= through the remainder-exempt boundary" ;;
+  *) bad "v2/structural: the verdict line's report= is not the last field through that boundary (got: $V2_EMIT)" ;;
+esac
+# AND THE TWO BOUNDARIES DIFFER IN EXACTLY ONE RESPECT: the '=' map. Asserted BEHAVIOURALLY against
+# the shipped functions rather than by reading their source, because "does this map '='" is a
+# question about what they DO. A control character must still be neutralised by BOTH, or the
+# exemption would have traded a corrupted path for an injectable one (rounds 5/7/13/14).
+V2_FN_OK=0
+if V2_FV="$(LC_ALL=C awk '/^one_line\(\) \{/,/^\}/' "$V2_SRC")" &&
+  V2_F2="$(LC_ALL=C awk '/^field_value\(\) \{/,/^\}/' "$V2_SRC")" &&
+  V2_F3="$(LC_ALL=C awk '/^remainder_value\(\) \{/,/^\}/' "$V2_SRC")" &&
+  [ -n "$V2_FV" ] && [ -n "$V2_F2" ] && [ -n "$V2_F3" ]; then
+  V2_FN_OK=1
+  ok "v2/structural: all three boundary functions were extracted (the differential below is not vacuous)"
+else
+  bad "v2/structural: a boundary function could not be extracted, so the differential is UNMEASURED"
+fi
+if [ "$V2_FN_OK" -eq 1 ]; then
+  V2_OUT_F="$(printf '%s\n%s\n%s\n' "$V2_FV" "$V2_F2" \
+    'field_value "a=b" ' | bash 2>/dev/null || true)"
+  V2_OUT_R="$(printf '%s\n%s\n%s\n' "$V2_FV" "$V2_F3" \
+    'remainder_value "a=b" ' | bash 2>/dev/null || true)"
+  if [ "$V2_OUT_F" = "a~b" ]; then
+    ok "v2/structural: field_value STILL maps '=' to '~' (the anti-forgery rule is untouched)"
+  else
+    bad "v2/structural: field_value no longer maps '=' (got: $V2_OUT_F)"
+  fi
+  if [ "$V2_OUT_R" = "a=b" ]; then
+    ok "v2/structural: remainder_value does NOT map '=', which is the whole exemption"
+  else
+    bad "v2/structural: remainder_value still alters '=' (got: $V2_OUT_R)"
+  fi
+  # BOTH must still neutralise a control character. An ESC is used because round 5's J3 is the
+  # finding that made the C0 range, not just the three whitespace controls, part of the contract.
+  V2_ESC_R="$(printf '%s\n%s\n%s\n' "$V2_FV" "$V2_F3" \
+    'remainder_value "$(printf "a\033[31mb")" ' | bash 2>/dev/null || true)"
+  if [ "$V2_ESC_R" = "a?[31mb" ]; then
+    ok "v2/structural: remainder_value STILL renders a C0 control byte visibly (the exemption is the '=' map ALONE)"
+  else
+    bad "v2/structural: remainder_value does not neutralise a control byte (got: $V2_ESC_R)"
+  fi
+  V2_NL_R="$(printf '%s\n%s\n%s\n' "$V2_FV" "$V2_F3" \
+    'remainder_value "$(printf "a\nb")" ' | bash 2>/dev/null || true)"
+  if [ "$V2_NL_R" = "a b" ]; then
+    ok "v2/structural: and it still flattens a NEWLINE, so one record cannot become two"
+  else
+    bad "v2/structural: remainder_value lets a newline through — a second line is a forged record (got: $V2_NL_R)"
+  fi
+fi
+
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
 # which is this issue's own subject inside a test file.
@@ -4718,7 +4926,32 @@ fi
 # declaration survives at none of the five sites that carried it. Section 9b gains the property
 # itself: the superseded generation still records the FINDINGS, prose included. Every one needs only
 # bash, git and coreutils; none branches on the host.
-ASSERT_FLOOR=833
+#
+# ROUND 16 ADDED 23 HOST-INDEPENDENT ASSERTIONS (833 -> 856), all in the new section 29, for V2 —
+# a legal `=` in the repository path made `report=` publish a path that DOES NOT EXIST. `report=`
+# went through `field_value`, whose `=`->`~` map exists so a value cannot forge a `key=value` pair;
+# a repository root may legally contain `=`, so on such a checkout the verdict line advertised
+# `…/eq~path/…/c.<nonce>.md` while `open`'s own raw line had just created `…/eq=path/…` — and
+# `verdict`, unlike `open`, offers NO separate raw channel. Measured on the shipped script. The
+# fixture is a checkout whose PATH contains `=` (asserted to contain one, or every case is
+# vacuous), the premise is `open`'s RAW path existing on disk, and the finding is asserted as TWO
+# claims — the published value IS the real path AND names a file that EXISTS — because a value can
+# be equal to something without existing and can exist without being the report of record; plus
+# that the `=` SURVIVED rather than being dropped, which a deleting scrubber would satisfy by
+# accident. The case that matters most is the CONFINEMENT control (b): a `report=` pair smuggled
+# through the `agent=` field must still be neutralised, since unmapped it puts a REAL `report=`
+# ahead of the measured one and the remainder reader takes the FIRST — so it is COUNTED (exactly
+# one pair), the `~` rendering asserted, and the remainder required to still resolve to the real
+# path. Without it, (a) is satisfiable by dropping the map from every field. An ordinary `=`-free
+# checkout is the other control. Six STRUCTURAL pins: ONE definition and ONE call site for
+# `remainder_value` (so the exemption cannot spread unnoticed — the six other `report=` emitters
+# keep `field_value`, and one of them, `report-changed-mid-write`, has `now-verdict=` AFTER
+# `report=`, where the exemption would be unsound), the verdict line ending with it, and a
+# BEHAVIOURAL differential over the extracted functions: `field_value` still maps `=`,
+# `remainder_value` does not, and `remainder_value` still renders a C0 byte visibly and still
+# flattens a newline — the exemption is the `=` map ALONE. Every one needs only bash, git and
+# coreutils; none branches on the host.
+ASSERT_FLOOR=856
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"
