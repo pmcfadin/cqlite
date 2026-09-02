@@ -223,17 +223,60 @@ awk -v max="$max" '
   # the blocker-8 rule (no truncation upstream of neutralisation) is not weakened: nothing
   # downstream can render this string.
   #
-  # DISTINCTNESS, which is F1/F5 and must not regress: an oversized identity keys on its
-  # EXACT length plus a 1024-char head AND a 1024-char tail. Two DISTINCT identities collide
-  # only if they agree on their first 1024 characters, their last 1024 characters and their
-  # total length — not a realistic case for a test path, an assertion message or a compiler
-  # diagnostic, and DECLARED here rather than left implied. Chosen over a hand-rolled digest
-  # deliberately: a digest would need a collision argument about a hash nobody here can
-  # vouch for, and this needs none.
+  # DISTINCTNESS, which is F1/F5 and must not regress. The FIRST version of this bound keyed
+  # an oversized identity on its EXACT length plus a 1024-char head AND a 1024-char tail, and
+  # declared the residual — "two identities agreeing on all three is not a realistic shape" —
+  # as if that were the end of it. IT WAS NOT, and this is the SIXTH instance of the class the
+  # table above enumerates (blocker 15): a WINDOWED key ALIASES. Two distinct diagnostics of
+  # equal length sharing both outer windows and differing only in the MIDDLE collapse into
+  # one, so `count` UNDERCOUNTS while the field it feeds advertises a distinct total. The F12
+  # fix CREATED it: bounding the key to fix memory reintroduced exactly the aliasing F1 and F5
+  # were about.
+  #
+  # THE TENSION IS BOUNDED MEMORY vs EXACT DISTINCTNESS, AND A DIGEST RESOLVES BOTH — which is
+  # what F12 should have answered. The key now carries a checksum computed over the WHOLE
+  # normalised identity, so the retained string stays bounded (~2100 characters: two 1024-char
+  # windows, the exact length and the two checksums) while distinctness no longer depends on
+  # where the two identities happen to differ.
+  #
+  # WHAT THE DIGEST IS, STATED AT ITS STRENGTH AND NOT ABOVE IT: digest() is a PAIR OF ROLLING
+  # POLYNOMIAL CHECKSUMS (Rabin-Karp shape, distinct bases and distinct prime moduli, combined
+  # state ~2^61). IT IS NOT A CRYPTOGRAPHIC HASH and awk has no primitive that would make one
+  # cheap. THE RESIDUAL, HONESTLY: a collision can be CONSTRUCTED by someone who wants one — a
+  # log line is repository- and toolchain-authored text, not an authorization, so a constructed
+  # collision buys an attacker one undercounted duplicate in a diagnostic field; an ACCIDENTAL
+  # collision between two distinct real identities requires them to agree on the length, both
+  # 1024-char windows AND both checksums, which does not happen to test paths, assertion
+  # messages or compiler diagnostics. No guarantee stronger than that is implied anywhere.
   function key(t,   L) {
     L = length(t)
     if (L <= 4096) return t
-    return "<oversize:" L ">" substr(t, 1, 1024) "<...>" substr(t, L - 1023)
+    return "<oversize:" L ":" digest(t) ">" substr(t, 1, 1024) "<...>" substr(t, L - 1023)
+  }
+  # digest() — the checksum over the COMPLETE normalised identity. In awk, so nothing shells
+  # out per line (a per-line `cksum`/`sha256sum` on a log full of long lines is a process per
+  # line). Two accumulators, different bases and different prime moduli:
+  #   h1 mod 2147483647 (2^31-1), base 131      -> max intermediate ~2.8e11
+  #   h2 mod 1000000007,          base 8191     -> max intermediate ~8.2e12
+  # both far below 2^53, so every step is EXACT in the doubles awk uses — no silent precision loss
+  # turning the digest into a coarser function than it looks.
+  #
+  # CHARACTER CODES: printable ASCII is seeded in BEGIN, and any OTHER character (a UTF-8
+  # character under a multibyte locale, a byte under LC_ALL=C) is assigned a distinct code at
+  # first sight. That keeps the map INJECTIVE without depending on the locale or on an awk
+  # `ord`, which POSIX awk does not have. The assignment order is per-run, which is fine and
+  # deliberate: this key never leaves this process (see the never-published note above), so it
+  # needs to be stable within the run, not across runs.
+  function digest(t,   L, i, c, v, h1, h2) {
+    L = length(t); h1 = 5381; h2 = 52711
+    for (i = 1; i <= L; i++) {
+      c = substr(t, i, 1)
+      if (c in ORD) v = ORD[c]
+      else { v = 1000 + ++ORDN; ORD[c] = v }
+      h1 = (h1 * 131 + v) % 2147483647
+      h2 = (h2 * 8191 + v) % 1000000007
+    }
+    return sprintf("%d.%d", h1, h2)
   }
   # tagof() — the TAG position of an identity: its first whitespace-delimited token, cut at
   # the first SINGLE `:`. A `::` is a Rust module-path separator, not a tag/detail delimiter,
@@ -317,6 +360,10 @@ awk -v max="$max" '
     base[tier SUBSEP idx] = pub
     occ[tier SUBSEP pub]++
   }
+  # ORD is seeded ONCE, for the 95 printable ASCII characters digest() sees in practice.
+  # BEGIN is the only place it can be done once per run; digest() extends it for anything
+  # else (see its note on injectivity).
+  BEGIN { for (_o = 32; _o <= 126; _o++) ORD[sprintf("%c", _o)] = _o }
   # ---- TIER assert ----
   # The IDENTITY is the WHOLE payload (F5: a tag is routinely SHARED, so tag-only dedup
   # UNDERCOUNTS). The PUBLISHED value is the tag (blocker 11: the detail carries runtime

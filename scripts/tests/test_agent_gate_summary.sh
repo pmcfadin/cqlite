@@ -6212,6 +6212,82 @@ else
   bad "3765-oversize-manylines: expected rc=0 count=200, got rc=$fa_ml_rc count='${fa_ml_count:-<none>}' — the extractor is retaining whole oversized identities and dying before it can report"
 fi
 
+# 55ae. BLOCKER 15 (roborev job 50): THE BOUNDED DEDUP KEY MUST NOT ALIAS. The key that
+#       55ad certifies as bounded was WINDOWED — exact length + a 1024-char head + a
+#       1024-char tail — so two DISTINCT identities of equal length agreeing on both outer
+#       windows and differing only in the MIDDLE collapsed into one: `count` UNDERCOUNTED
+#       while the field advertises a distinct total. Sixth instance of the F1/F5/F6/F8/F9
+#       dedup-key-fidelity class, and the F12 fix is what created it (bounding the key for
+#       memory reintroduced the aliasing F1 and F5 were about). The resolution of the
+#       memory-vs-distinctness tension is a DIGEST over the whole normalised identity.
+awk 'BEGIN {
+  head = sprintf("%1200s",""); gsub(/ /,"h",head)
+  tail = sprintf("%1200s",""); gsub(/ /,"t",tail)
+  mid1 = sprintf("%2000s",""); gsub(/ /,"a",mid1)
+  mid2 = sprintf("%2000s",""); gsub(/ /,"b",mid2)
+  printf "FAIL - same-tag: %s%s%s\n", head, mid1, tail
+  printf "FAIL - same-tag: %s%s%s\n", head, mid2, tail
+}' > "$fa_pubdir/midcollide.log"
+fa_md=$(bash "$fa_tool" "$fa_pubdir/midcollide.log" 10 2>/dev/null)
+fa_md_count=$(printf '%s\n' "$fa_md" | sed -n 's/^count=//p' | head -1)
+if [ "${fa_md_count:-0}" = 2 ]; then
+  ok "3765-digest-middle-distinct: two EQUAL-LENGTH oversized identities sharing their first 1024 AND last 1024 characters and differing only in the MIDDLE count as 2 — the key digests the WHOLE identity, so distinctness no longer depends on WHERE they differ"
+else
+  bad "3765-digest-middle-distinct: expected count=2 for a middle-only difference, got count='${fa_md_count:-<none>}' — the bounded key is aliasing, so the count undercounts while the field claims a distinct total (blocker 15)"
+fi
+# …and being one identity apart, they must not RENDER as one string either: the tag is
+# shared, so the published values are ORDINALISED (the F5 property, one level up).
+fa_md_names=$(printf '%s\n' "$fa_md" | sed -n 's/^name=//p' | tr '\n' ' ')
+if [ "$fa_md_names" = "same-tag#1 same-tag#2 " ]; then
+  ok "3765-digest-middle-ordinalised: the two middle-differing identities publish same-tag#1 and same-tag#2 — counted as two AND rendered as two"
+else
+  bad "3765-digest-middle-ordinalised: expected 'same-tag#1 same-tag#2', got '$fa_md_names'"
+fi
+# STRUCTURAL, and labelled as such: the digest must be over the FULL identity (a digest of a
+# window is the same defect one layer down) and must be computed IN awk (a per-line shell-out
+# to cksum/sha256sum is a process per recognised line on a log full of long lines).
+fa_dg_body=$(awk '/^  function digest\(/,/^  }/' "$fa_tool")
+if printf '%s\n' "$fa_dg_body" | grep -q 'L = length(t)' \
+   && printf '%s\n' "$fa_dg_body" | grep -q 'for (i = 1; i <= L; i++)'; then
+  ok "3765-digest-full-string: digest() iterates the WHOLE normalised identity (1..length), not a window of it"
+else
+  bad "3765-digest-full-string: digest() does not iterate 1..length(t) — a digest over a WINDOW aliases exactly like the windowed key it replaced (blocker 15)"
+fi
+if printf '%s\n' "$fa_dg_body" | grep -q 'digest(t)' \
+   || printf '%s\n' "$(awk '/^  function key\(/,/^  }/' "$fa_tool")" | grep -q 'digest(t)'; then
+  ok "3765-digest-in-key: key() carries the digest of the full identity alongside its bounded windows — bounded retention AND exact distinctness, rather than one traded for the other"
+else
+  bad "3765-digest-in-key: key() does not include a digest of the full identity, so the oversize key is windowed again (blocker 15)"
+fi
+# CODE lines only: the digest note NAMES those binaries while explaining why it does not use
+# them, and a scan over the comments would read that explanation as the defect.
+if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -qE '(sha256sum|md5sum|cksum|openssl dgst)'; then
+  ok "3765-digest-no-shellout: the digest is computed in awk — no per-line shell-out to a hashing binary"
+else
+  bad "3765-digest-no-shellout: the extractor shells out to a hashing binary — that is a process per recognised line on a log full of long lines"
+fi
+# NO OVERCLAIM, and the reader has to be able to see it: this is a pair of rolling
+# polynomial checksums, so the file must SAY it is not a cryptographic hash and must state
+# the residual (a collision is CONSTRUCTIBLE; an accidental one is not realistic). This
+# repository has already paid two findings for a strength a mechanism cannot deliver.
+if grep -q 'NOT A CRYPTOGRAPHIC HASH' "$fa_tool" \
+   && grep -qi 'can be CONSTRUCTED' "$fa_tool" \
+   && grep -qi 'ACCIDENTAL' "$fa_tool"; then
+  ok "3765-digest-declared-strength: the extractor states at the mechanism that the digest is NOT cryptographic, and states the residual in both directions (constructible vs accidental)"
+else
+  bad "3765-digest-declared-strength: the extractor does not declare the digest strength and its residual where a reader of key() will see it — an implied guarantee this code cannot deliver has already cost this PR two findings"
+fi
+# The memory half must not regress (that is F12): an oversize key stays two bounded windows
+# plus the length plus the digest, and NEVER the whole identity.
+fa_key_body=$(awk '/^  function key\(/,/^  }/' "$fa_tool" | grep -v '^[[:space:]]*#')
+if printf '%s\n' "$fa_key_body" | grep -q 'substr(t, 1, 1024)' \
+   && printf '%s\n' "$fa_key_body" | grep -q 'substr(t, L - 1023)' \
+   && [ "$(printf '%s\n' "$fa_key_body" | grep -c 'return t')" = 1 ]; then
+  ok "3765-digest-memory-bounded: an oversized key is still two 1024-char windows + the exact length + the digest (the only unbounded 'return t' is the <= 4096 short-circuit) — F12 intact"
+else
+  bad "3765-digest-memory-bounded: key() no longer bounds what it retains for an oversized identity — the digest must be ADDED to the bound, never replace it (F12)"
+fi
+
 # 55af. BLOCKER 14 (roborev job 50): `.result` IS THE PUBLICATION, SO IT IS WRITTEN LAST OF
 #       THE THREE. record_result wrote `.result` on its FIRST line and the failed-assert
 #       sidecar 20 lines later, while the tree-integrity BOUNDARY renderer discovers
@@ -6362,7 +6438,12 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
-# 514 -> 519 on #3765 (roborev job 50, blocker 14): section 55af adds 5 asserts, pinning it
+# 514 -> 526 on #3765 (roborev job 50, blockers 14/15): sections 55ae/55af add 12 asserts.
+# 55ae (7) pins blocker 15: two EQUAL-LENGTH oversized identities differing only in the
+# MIDDLE count as 2 and render as two (the behavioural half — it counted 1 before), plus
+# STRUCTURAL asserts that the digest covers the FULL identity, that key() carries it, that
+# nothing shells out per line, that the file DECLARES the digest is not cryptographic and
+# states its residual, and that the memory bound of F12 is intact. 55af (5) pins blocker 14
 # STRUCTURALLY — the ordering invariant inside record_result (.result published after both
 # sidecars, before both integrity asserts, _hb_ensure still first, exactly one publication)
 # plus the selftest seed mirroring it — because the race needs two lanes interleaved inside
@@ -6434,7 +6515,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=519
+ASSERT_FLOOR=526
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
