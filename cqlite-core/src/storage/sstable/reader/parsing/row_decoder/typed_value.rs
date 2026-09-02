@@ -578,20 +578,27 @@ impl V5CompressedLegacyParser {
                 if data.is_empty() && !Self::empty_is_a_value(short) {
                     return Ok((Value::Null, 0));
                 }
-                if let Some(width) = Self::fixed_scalar_width(short) {
-                    // Any length other than the exact width is refused rather than
-                    // truncated: the delegate bounds-checks with `<`, so it would read
-                    // `width` bytes out of a longer frame and drop the tail.
-                    if data.len() != width {
-                        return Err(Error::corruption(format!(
-                            "{ctx}: declared type '{short}' is {width} bytes wide (or \
-                             empty, meaning null) but the framed value is {} bytes; \
-                             accepting it would silently discard {} trailing byte(s) \
-                             (issue #3631)",
-                            data.len(),
-                            data.len().saturating_sub(width)
-                        )));
-                    }
+                // A width the declared type does not admit is refused rather than
+                // truncated: the delegate bounds-checks with `<`, so it would read the
+                // first legal width out of a longer frame and drop the tail — and for
+                // `inet`, whose width is a SET of two, it borrows the whole malformed
+                // slice and calls it an address (roborev job 68, finding 2).
+                let widths = Self::scalar_allowed_widths(short);
+                if !widths.is_empty() && !widths.contains(&data.len()) {
+                    let detail = match widths.iter().filter(|w| **w <= data.len()).max() {
+                        Some(w) => format!(
+                            "accepting it would silently discard {} trailing byte(s)",
+                            data.len() - w
+                        ),
+                        None => "it is shorter than any legal width".to_string(),
+                    };
+                    return Err(Error::corruption(format!(
+                        "{ctx}: declared type '{short}' is {} bytes wide (or empty, \
+                         meaning null) but the framed value is {} bytes; {detail} \
+                         (issue #3631)",
+                        Self::render_allowed_widths(widths),
+                        data.len(),
+                    )));
                 }
                 // The delegate is the ASSERTING short name, so on `Ok` it has ALREADY
                 // required `consumed == data.len()` (#3811). That is what makes

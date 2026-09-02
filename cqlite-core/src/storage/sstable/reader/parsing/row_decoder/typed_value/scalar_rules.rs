@@ -12,8 +12,10 @@
 use super::super::*;
 
 impl V5CompressedLegacyParser {
-    /// The EXACT serialized width of a fixed-width scalar, or `None` when the type is
-    /// variable-width (`text`, `blob`, `varint`, `decimal`, `duration`, `inet`).
+    /// The NON-EMPTY serialized widths `short` admits, or `&[]` when the type is
+    /// genuinely variable-width (`text`, `blob`, `varint`, `decimal`, `duration`).
+    /// An EMPTY buffer is governed separately by [`Self::empty_is_a_value`], so it is
+    /// deliberately absent from these lists.
     ///
     /// Authority: `cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/`, whose
     /// fixed-width `AbstractType.validate` implementations accept the exact width OR
@@ -22,15 +24,46 @@ impl V5CompressedLegacyParser {
     /// type-string decoder this module delegates to bounds-checks with `<`, so it
     /// happily reads a 4-byte int out of a 9-byte frame and drops the rest — the same
     /// silent-discard class the exhaustion assert exists to refuse, one level down.
-    pub(super) fn fixed_scalar_width(short: &str) -> Option<usize> {
-        Some(match short {
-            "boolean" | "tinyint" => 1,
-            "smallint" => 2,
-            "int" | "float" | "date" => 4,
-            "bigint" | "counter" | "double" | "time" | "timestamp" => 8,
-            "uuid" | "timeuuid" => 16,
-            _ => return None,
-        })
+    ///
+    /// # Why this is a SET and not one width (roborev job 68, finding 2)
+    /// `inet` has TWO legal widths, so as a single `Option<usize>` it read as
+    /// "variable-width" and skipped the gate entirely — and the delegated `"inet"`
+    /// arm borrows whatever slice it is handed, so a five-byte field surfaced as a
+    /// `Value::Inet` no `InetAddress` can be built from.
+    /// `serializers/InetAddressSerializer.java` `validate` RETURNS EARLY on an empty
+    /// buffer and otherwise delegates to `InetAddress.getByAddress`, throwing
+    /// *"Expected 4 or 16 byte inetaddress"*; `deserialize` is
+    /// `if (accessor.isEmpty(value)) return null` and
+    /// `InetAddressType.isEmptyValueMeaningless()` is `true`, which is exactly what
+    /// `empty_is_a_value("inet") == false` already encodes.
+    ///
+    /// That is ONE rule with one authority, and this repository already states it
+    /// once — `complex_column/cell_path_key.rs`'s `cql_short_allowed_widths` row
+    /// `"inet" => &[0, 4, 16]` (its `0` is the empty case this predicate delegates).
+    /// The two tables answer deliberately different questions — that one follows
+    /// `validate`, which refuses an empty `date`/`time`/`tinyint`/`smallint`, while
+    /// this one follows `deserialize`, which returns NULL for them — so they are not
+    /// merged here; only the widths agree, which is what finding 2 is about.
+    pub(super) fn scalar_allowed_widths(short: &str) -> &'static [usize] {
+        match short {
+            "boolean" | "tinyint" => &[1],
+            "smallint" => &[2],
+            "int" | "float" | "date" => &[4],
+            "bigint" | "counter" | "double" | "time" | "timestamp" => &[8],
+            "uuid" | "timeuuid" => &[16],
+            "inet" => &[4, 16],
+            _ => &[],
+        }
+    }
+
+    /// The width list as the refusal renders it: `"4"`, or `"4 or 16"`. Keeps the
+    /// single-width wording byte-identical to what it always was.
+    pub(super) fn render_allowed_widths(widths: &[usize]) -> String {
+        widths
+            .iter()
+            .map(|w| w.to_string())
+            .collect::<Vec<_>>()
+            .join(" or ")
     }
 
     /// Whether an EMPTY serialized value is a VALUE for `short`, rather than NULL.
