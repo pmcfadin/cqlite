@@ -396,14 +396,9 @@ const CASES: &[Case] = &[
         multicell: &[],
         skips: &[],
     },
-    // test-data/schemas/issue-3790-comparator-ordering.cql — the inet/time
-    // multicell-collection ORDERING fixture (#3790). COMPARED, not excluded: the
-    // only dump shape it carries beyond plain cells is a multicell cell tombstone
-    // (a `path` plus `deletion_info`, one per collection column, from assigning a
-    // whole non-frozen collection), and `golden_dump_shapes` states that shape is
-    // "Deliberately NOT a variant" which "cannot justify an exclusion" — it
-    // reconciles to the element being absent, which `golden_row` reconstructs.
-    // Same disposition as test_signed_coll above, the element-ORDER precedent.
+    // The inet/time multicell-collection ORDERING fixture (#3790). COMPARED, not
+    // excluded: its only non-plain shape is a multicell cell tombstone, which
+    // `golden_dump_shapes` says "cannot justify an exclusion".
     Case {
         presence: Presence::Committed,
         keyspace: "test_comparator_order",
@@ -418,27 +413,26 @@ const CASES: &[Case] = &[
             ("time_map", Multicell::Map),
             ("pair_set", Multicell::Set),
         ],
-        // Two MEASURED rendering divergences, neither of them ordering — the
-        // element ORDER is compared by position and is NOT excused by either skip,
-        // which is the property #3790 exists for and which this case does verify.
+        // Two MEASURED rendering divergences, neither of them ordering: ORDER is
+        // compared by position and is NOT excused by either skip.
         skips: &[
             Skip {
                 path: "inet_set",
                 formats: BOTH,
                 divergence: Divergence::InetIpv6RendersCompressed,
-                why: "golden spells IPv6 in Cassandra's expanded getHostAddress() form (0:0:0:0:0:0:0:1) while the egress spells the same address compressed (::1); the matcher proves both sides parse to the SAME address, so a wrong one still fails, and element ORDER is still compared",
+                why: "golden spells IPv6 expanded (getHostAddress), egress compressed; the matcher proves both parse to the SAME address, and element ORDER is still compared",
             },
             Skip {
                 path: "inet_map",
                 formats: BOTH,
                 divergence: Divergence::InetMapKeyIpv6SpellingNotPairableByThisLane,
-                why: "map key is inet, whose IPv6 values the two sides spell differently, so entries never pair and the column is NOT COMPARED AT ALL: a null, a malformed {key,value} array and a wrong entry COUNT are all UNCHECKED here. The ORDER is pinned directly against the same golden by cqlite-core/tests/issue_3790_collection_order_cassandra_golden.rs",
+                why: "inet map keys never pair across the two IPv6 spellings, so the column is NOT COMPARED AT ALL (null/malformed/wrong-COUNT unchecked); its ORDER is pinned by issue_3790_collection_order_cassandra_golden.rs",
             },
             Skip {
                 path: "pair_set",
                 formats: BOTH,
                 divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
-                why: "golden leaves the frozen tuple<inet, time> element as sstabledump's colon-joined text while the CLI decodes it to an array; only the SHAPE is checked — the element CONTENT is NOT compared",
+                why: "golden leaves the frozen tuple<inet, time> as colon-joined text while the CLI decodes it; only the SHAPE is checked",
             },
         ],
     },
