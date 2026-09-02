@@ -1,0 +1,10 @@
+2329976 madvise(0x7368ee800000, 2774760422, MADV_RANDOM) = 0
+2329980 madvise(0x736a4f9fc000, 2076672, MADV_DONTNEED) = 0
+2329979 madvise(0x736a4fbfd000, 2076672, MADV_DONTNEED) = 0
+2329980 +++ exited with 0 +++
+2329979 +++ exited with 0 +++
+2329977 madvise(0x736a4ffff000, 2076672, MADV_DONTNEED) = 0
+2329977 +++ exited with 0 +++
+2329978 madvise(0x736a4fdfe000, 2076672, MADV_DONTNEED) = 0
+2329978 +++ exited with 0 +++
+2329976 +++ exited with 0 +++

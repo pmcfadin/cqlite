@@ -207,7 +207,11 @@ hostnames:** the claim holder identity is `hostname -s`; on a fleet of cloud ima
 VMs that report the *same* short hostname, export a UNIQUE `CLAIM_MACHINE` per box (else two machines
 share one identity and each treats the other's claim as its own).
 
-Sanity check: `bash scripts/agent-gate.sh --lite` should pass in ~1–5 min, and the SUMMARY's
+Sanity check: `bash scripts/agent-gate.sh --lite` should pass in ~1–5 min **on a NARROW diff** (measured
+median 1.4 min) — that expectation holds for that case only, so **a slow `--lite` is not by itself evidence of
+a broken box (#3764)**: a diff touching `cqlite-core/src/` measures median 20 min (up to 43 min locally; ~104
+min under peer load is reported, #3764), and a cold `clippy` alone adds 16–24 min whatever the diff. CLAUDE.md's Lite row carries
+the full cost model. Whatever the diff, the SUMMARY's
 `accelerators:` line should read `sccache=on nextest=on lanes=parallel`. If anything says
 `absent`, the gate prints the one-line install fix — do it; a degraded machine is ~3× slower.
 

@@ -1,5 +1,22 @@
 use super::*;
 
+// Issue #3811: the consumption-reporting twin of `parse_value_from_raw_bytes`,
+// plus the one assert every bounded caller of the short name now inherits. Kept
+// as a CHILD of this module (rather than a sibling registered in `mod.rs`)
+// because it is an implementation detail of this one function.
+mod reporting;
+
+#[cfg(test)]
+mod issue_3811_consumption_demo_tests;
+
+// Issue #3811 / roborev round 4 (closes #3861): the two frozen-UDT consumption
+// checks in `cell_value_complex.rs` driven at their PRODUCTION call site, which
+// needs a live `SSTableReader` and therefore `write-support` (a default feature).
+// Registered here rather than in `mod.rs` because `mod.rs` is at the campsite
+// file-size ratchet ceiling; it shares this module's oracle-derived vectors.
+#[cfg(all(test, feature = "write-support"))]
+mod issue_3811_cell_site_tests;
+
 impl V5CompressedLegacyParser {
     /// Map a PRIMITIVE Cassandra marshal type (e.g.
     /// `org.apache.cassandra.db.marshal.Int32Type`) to the canonical CQL short
@@ -83,9 +100,24 @@ impl V5CompressedLegacyParser {
     /// explicit `[i32 BE len][raw bytes]` boundaries and we have extracted exactly
     /// the bytes that constitute the value. The entire `data` slice IS the value.
     ///
-    /// - Variable-width types (text, blob, varint, decimal, inet): consume the full slice
-    /// - Fixed-width types (int, bigint, uuid, etc.): read from offset 0
-    /// - Nested collections: use the bounded sub-format `[i32 BE count][i32 BE len][bytes]...`
+    /// **Issue #3811: that sentence is now ENFORCED.** This is a thin wrapper over
+    /// [`Self::parse_value_from_raw_bytes_reporting`], which threads a REAL
+    /// consumption count out of every arm; the wrapper then requires the decode to
+    /// have consumed every byte of `data`
+    /// ([`Self::require_fully_consumed_raw`]). The rule is
+    /// `cassandra-5.0.8` `TupleType.split`: a genuinely SHORT encoding leaves
+    /// `position == length` and is legal, while trailing bytes (rule 4) and a
+    /// partial 1-3 byte component-length prefix (rule 2) both leave it short and
+    /// are `MarshalException`s.
+    ///
+    /// **Inheritance mechanism (AC2).** Every existing bounded call site keeps this
+    /// name and silently GAINS the check. The reporting twin is `pub(super)` inside
+    /// `raw_value::reporting`, so it is not nameable from any other `row_decoder`
+    /// child at all — a bounded caller elsewhere cannot opt out even deliberately
+    /// without first widening that visibility, which is the reviewable act. (An
+    /// earlier revision of this paragraph described reaching for the longer name as
+    /// something a caller could just do; it could not, and saying so invited the
+    /// next author to "fix" the privacy error by creating the opt-out.)
     pub(super) fn parse_value_from_raw_bytes(
         &self,
         data: &[u8],
@@ -93,406 +125,10 @@ impl V5CompressedLegacyParser {
         column_name: &str,
         depth: usize,
     ) -> Result<Value> {
-        if depth > MAX_TYPE_NESTING_DEPTH {
-            return Err(Error::corruption(format!(
-                "Frozen element '{}': recursion depth {} exceeds maximum {}",
-                column_name, depth, MAX_TYPE_NESTING_DEPTH
-            )));
-        }
-        // Issue #1081: scalar marshal forms (e.g.
-        // `org.apache.cassandra.db.marshal.Int32Type` / `BooleanType`) reach this
-        // function for multicell-UDT field values, which resolve their field
-        // types from the authoritative on-disk `UserType(...)` marshal string.
-        // The match below only enumerates short forms plus a handful of text
-        // marshal aliases, so a bare scalar marshal type would otherwise fall
-        // through to the blob default. Normalize a primitive marshal type to its
-        // canonical CQL short form (via the existing authoritative marshal→CqlType
-        // mapping, no heuristics) and re-dispatch. Composite/UDT marshal forms
-        // (UserType/ListType/MapType/SetType/etc.) are left untouched here — they
-        // are handled by the dedicated arms below — so this only rewrites scalars.
-        if type_str.contains("org.apache.cassandra.db.marshal.") {
-            if let Some(short) = Self::primitive_marshal_to_cql_short(type_str) {
-                return self.parse_value_from_raw_bytes(data, short, column_name, depth);
-            }
-        }
-
-        // Preserve the ORIGINAL-CASE type string. Below, the `match` scrutinee is
-        // `type_str.to_lowercase()` and each `type_str if ...` arm binding SHADOWS
-        // the function parameter with the lowercased string. The collection/tuple/
-        // frozen extraction helpers slice their element/inner types out of the
-        // string they are handed, so if we passed the lowercased binding the nested
-        // element marshal type would come back lowercased (e.g. `...int32type`) and
-        // would NOT re-normalize via the CASE-SENSITIVE `primitive_marshal_to_cql_short`
-        // suffix match, wrongly falling through to blob. The marshal-form arms below
-        // therefore extract from `raw_type_str` (original case) so nested element
-        // marshal types keep their case. The CQL-short-form arms are unaffected
-        // because their inner types are already canonical lowercase.
-        let raw_type_str = type_str;
-        let normalized_type = type_str.to_lowercase();
-        match normalized_type.as_str() {
-            "text"
-            | "varchar"
-            | "ascii"
-            | "org.apache.cassandra.db.marshal.utf8type"
-            | "org.apache.cassandra.db.marshal.asciitype"
-            | "org.apache.cassandra.db.marshal.varchartype" => {
-                // Issue #1644 (K5 stage 2): validate in place, borrow if possible.
-                std::str::from_utf8(data).map_err(|e| {
-                    Error::corruption(format!(
-                        "Frozen element '{}': invalid UTF-8 in text value: {}",
-                        column_name, e
-                    ))
-                })?;
-                Ok(Value::Text(
-                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
-                ))
-            }
-            "blob" | "bytes" => Ok(Value::Blob(
-                crate::storage::sstable::reader::value_borrow::borrow_active(data),
-            )),
-            "int" => {
-                if data.len() < 4 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 4 bytes for int, got {}",
-                        column_name,
-                        data.len()
-                    )));
-                }
-                Ok(Value::Integer(i32::from_be_bytes([
-                    data[0], data[1], data[2], data[3],
-                ])))
-            }
-            "bigint" | "counter" => {
-                if data.len() < 8 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 8 bytes for bigint, got {}",
-                        column_name,
-                        data.len()
-                    )));
-                }
-                Ok(Value::BigInt(i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ])))
-            }
-            "boolean" => {
-                if data.is_empty() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 1 byte for boolean",
-                        column_name
-                    )));
-                }
-                Ok(Value::Boolean(data[0] != 0))
-            }
-            "uuid" | "timeuuid" => {
-                if data.len() < 16 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 16 bytes for UUID, got {}",
-                        column_name,
-                        data.len()
-                    )));
-                }
-                let uuid: [u8; 16] = data[..16]
-                    .try_into()
-                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
-                Ok(Value::Uuid(uuid))
-            }
-            "float" => {
-                if data.len() < 4 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 4 bytes for float, got {}",
-                        column_name,
-                        data.len()
-                    )));
-                }
-                // CQL `float` is `Value::Float32`, not the f64 `Value::Float`; the column
-                // path and both UDT field decoders already agree (roborev round 10 F1).
-                let f = f32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Float32(f))
-            }
-            "double" => {
-                if data.len() < 8 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 8 bytes for double, got {}",
-                        column_name,
-                        data.len()
-                    )));
-                }
-                Ok(Value::Float(f64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ])))
-            }
-            "smallint" | "short" => {
-                if data.len() < 2 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 2 bytes for smallint, got {}",
-                        column_name,
-                        data.len()
-                    )));
-                }
-                Ok(Value::SmallInt(i16::from_be_bytes([data[0], data[1]])))
-            }
-            "tinyint" | "byte" => {
-                if data.is_empty() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 1 byte for tinyint",
-                        column_name
-                    )));
-                }
-                Ok(Value::TinyInt(data[0] as i8))
-            }
-            "timestamp" => {
-                if data.len() < 8 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 8 bytes for timestamp, got {}",
-                        column_name,
-                        data.len()
-                    )));
-                }
-                Ok(Value::Timestamp(i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ])))
-            }
-            "date" => {
-                if data.len() < 4 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 4 bytes for date, got {}",
-                        column_name,
-                        data.len()
-                    )));
-                }
-                let stored = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                let days_since_epoch = stored.wrapping_add(i32::MIN as u32) as i32;
-                Ok(Value::Date(days_since_epoch))
-            }
-            "time" => {
-                if data.len() < 8 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 8 bytes for time, got {}",
-                        column_name,
-                        data.len()
-                    )));
-                }
-                Ok(Value::Time(i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ])))
-            }
-            "duration" => {
-                // Issue #1081: in this function the entire `data` slice IS the value
-                // (the element/cell length prefix already bounded it) — there is NO
-                // outer `[VInt len]` prefix. Decode three consecutive SIGNED VInts
-                // directly over `data`: months, days, nanos (Cassandra
-                // DurationSerializer). Contrast `parse_raw_type_value`'s duration arm,
-                // which reads an outer `[VInt len]` first because its framing differs.
-                let (remaining, months) = parse_vint(data).map_err(|e| {
-                    Error::corruption(format!(
-                        "Frozen element '{}': failed to parse duration months: {:?}",
-                        column_name, e
-                    ))
-                })?;
-                let pos = data.len() - remaining.len();
-
-                let (remaining, days) = parse_vint(&data[pos..]).map_err(|e| {
-                    Error::corruption(format!(
-                        "Frozen element '{}': failed to parse duration days: {:?}",
-                        column_name, e
-                    ))
-                })?;
-                let pos = data.len() - remaining.len();
-
-                let (_remaining, nanos) = parse_vint(&data[pos..]).map_err(|e| {
-                    Error::corruption(format!(
-                        "Frozen element '{}': failed to parse duration nanos: {:?}",
-                        column_name, e
-                    ))
-                })?;
-
-                // months/days are i32 in Cassandra's DurationType. Reject
-                // (rather than silently truncate via `as i32`) any encoded value
-                // outside the i32 range so a corrupt encoding errors instead of
-                // wrapping (issue #1632, item b).
-                let months = i32::try_from(months).map_err(|_| {
-                    Error::corruption(format!(
-                        "Frozen element '{}': duration months out of i32 range",
-                        column_name
-                    ))
-                })?;
-                let days = i32::try_from(days).map_err(|_| {
-                    Error::corruption(format!(
-                        "Frozen element '{}': duration days out of i32 range",
-                        column_name
-                    ))
-                })?;
-                Ok(Value::Duration {
-                    months,
-                    days,
-                    nanos,
-                })
-            }
-            "varint" => Ok(Value::Varint(
-                crate::storage::sstable::reader::value_borrow::borrow_active(data),
-            )),
-            "decimal" => {
-                if data.len() < 4 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': decimal too short ({} bytes)",
-                        column_name,
-                        data.len()
-                    )));
-                }
-                let scale = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                let unscaled = data[4..].to_vec();
-                Ok(Value::Decimal { scale, unscaled })
-            }
-            "inet" => Ok(Value::Inet(
-                crate::storage::sstable::reader::value_borrow::borrow_active(data),
-            )),
-            // Nested list/set/map inside a bounded element (e.g. map<text, list<int>>).
-            //
-            // Issue #1081: the guards accept BOTH the CQL short form (`list<...>`)
-            // and the authoritative Cassandra marshal form
-            // (`org.apache.cassandra.db.marshal.ListType(...)`). Multicell-UDT field
-            // values resolve their field types from the on-disk `UserType(...)`
-            // marshal string, so a collection-typed UDT field arrives here in marshal
-            // form and would otherwise fall through to the blob default. The
-            // extraction helpers (`extract_collection_element_type` / `extract_map_types`)
-            // already accept marshal forms; we extract from `raw_type_str`
-            // (original case) so the returned nested element marshal type keeps its
-            // case and re-normalizes correctly on recursion (see note above).
-            type_str
-                if type_str.starts_with("list<")
-                    || type_str.starts_with("org.apache.cassandra.db.marshal.listtype(") =>
-            {
-                let element_type = self.extract_collection_element_type(raw_type_str, "list")?;
-                let (val, _) = self.parse_frozen_list_value_raw(
-                    data,
-                    0,
-                    &element_type,
-                    column_name,
-                    depth + 1,
-                )?;
-                Ok(val)
-            }
-            type_str
-                if type_str.starts_with("set<")
-                    || type_str.starts_with("org.apache.cassandra.db.marshal.settype(") =>
-            {
-                let element_type = self.extract_collection_element_type(raw_type_str, "set")?;
-                let (val, _) = self.parse_frozen_set_value_raw(
-                    data,
-                    0,
-                    &element_type,
-                    column_name,
-                    depth + 1,
-                )?;
-                Ok(val)
-            }
-            type_str
-                if type_str.starts_with("map<")
-                    || type_str.starts_with("org.apache.cassandra.db.marshal.maptype(") =>
-            {
-                let (key_type, value_type) = self.extract_map_types(raw_type_str)?;
-                let (val, _) = self.parse_frozen_map_value_raw(
-                    data,
-                    0,
-                    &key_type,
-                    &value_type,
-                    column_name,
-                    depth + 1,
-                )?;
-                Ok(val)
-            }
-            // Nested tuple inside a frozen collection element.
-            // The caller (read_frozen_element) has already extracted the raw element bytes
-            // into `data`, so there is no outer VUInt length here — just the sequence of
-            // [i32 BE len][bytes] fields as written by serialize_value for Value::Tuple.
-            // Issue #1081: also accept the marshal form `TupleType(...)`, extracting
-            // element types from the original-case `raw_type_str`.
-            type_str
-                if type_str.starts_with("tuple<")
-                    || type_str.starts_with("org.apache.cassandra.db.marshal.tupletype(") =>
-            {
-                let element_types = self.extract_tuple_element_types(raw_type_str)?;
-                if element_types.is_empty() {
-                    return Err(Error::schema(format!(
-                        "Nested tuple element '{}': empty tuple type",
-                        column_name
-                    )));
-                }
-                let mut off = 0usize;
-                let blob_end = data.len();
-                let elements = self.parse_tuple_elements_raw(
-                    data,
-                    &mut off,
-                    blob_end,
-                    &element_types,
-                    column_name,
-                    depth + 1,
-                )?;
-                Ok(Value::Tuple(elements))
-            }
-            // Issue #1081: accept BOTH the CQL short form (`frozen<...>`) and the
-            // authoritative Cassandra marshal form
-            // (`org.apache.cassandra.db.marshal.FrozenType(...)`). Collection/UDT
-            // fields inside a multicell UDT must be frozen, and their field types
-            // resolve from the on-disk `UserType(...)` marshal string where a frozen
-            // field is spelled `FrozenType(...)` — e.g. `frozen<list<int>>` arrives
-            // as `FrozenType(ListType(Int32Type))` and `frozen<some_udt>` as
-            // `FrozenType(UserType(...))`. Without this arm those bypass the frozen
-            // handling and fall through to the blob default. `extract_frozen_inner_type`
-            // accepts both forms; we extract from `raw_type_str` (original case) so the
-            // inner marshal type keeps its case and re-routes to the marshal
-            // collection/UDT/scalar arms above on recursion.
-            type_str
-                if type_str.starts_with("frozen<")
-                    || type_str.starts_with("org.apache.cassandra.db.marshal.frozentype(") =>
-            {
-                let inner_type = self.extract_frozen_inner_type(raw_type_str)?;
-                let inner =
-                    self.parse_value_from_raw_bytes(data, &inner_type, column_name, depth + 1)?;
-                Ok(Value::Frozen(Box::new(inner)))
-            }
-            // UDT (User-Defined Type): delegate to parse_raw_type_value which has the full
-            // UDT parsing logic including field count validation and nested type resolution.
-            // The raw bytes representation is identical between the two function conventions.
-            other if Self::is_udt_type(other) => {
-                let (val, _offset) =
-                    self.parse_raw_type_value(data, 0, type_str, column_name, depth)?;
-                Ok(val)
-            }
-            other => {
-                // Check if it's a short UDT name in the registry (e.g., "address_type").
-                // This handles the case where parse_value_from_raw_bytes is called recursively
-                // from the frozen<> arm with the stripped inner type (e.g., frozen<address_type>
-                // → "address_type"). Since parse_raw_type_value already has a registry-lookup
-                // fallback that correctly handles bare UDT names, we delegate there.
-                // The byte-level encoding is identical: UDT fields use 4-byte i32 length prefixes
-                // with no overall cell-level length prefix, so parse_raw_type_value offset=0 is
-                // correct for already-extracted cell value bytes.
-                // See Issue #481 regression fix.
-                if let Some(ref registry) = self.udt_registry {
-                    if registry.get_udt_qualified(&self.keyspace, other).is_some() {
-                        tracing::debug!(
-                            "parse_value_from_raw_bytes: type '{}' for '{}' resolved as UDT via registry, delegating to parse_raw_type_value",
-                            other,
-                            column_name,
-                        );
-                        let (val, _offset) =
-                            self.parse_raw_type_value(data, 0, type_str, column_name, depth)?;
-                        return Ok(val);
-                    }
-                }
-                // Truly unknown type: fall back to blob.
-                tracing::debug!(
-                    "parse_value_from_raw_bytes: unknown type '{}' for '{}', treating as blob ({} bytes)",
-                    other,
-                    column_name,
-                    data.len()
-                );
-                Ok(Value::Blob(
-                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
-                ))
-            }
-        }
+        let (value, consumed) =
+            self.parse_value_from_raw_bytes_reporting(data, type_str, column_name, depth)?;
+        Self::require_fully_consumed_raw(consumed, data.len(), column_name, type_str)?;
+        Ok(value)
     }
 }
 

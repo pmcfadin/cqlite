@@ -462,6 +462,25 @@ dispatch/claim authority**: it only narrows the candidate set — the selection 
 flow-* skills no longer write the board-derived labels (they set board Status only; the mirror follows);
 `status:spec-review`/`status:addressing` stay transient skill-managed sub-markers the mirror does not touch.
 
+### Product first: what may sit in Ready (owner ruling 2026-09-01, #3893)
+
+The board's `Ready` column is the sole dispatch authority, so what it holds is what the fleet builds.
+On 2026-09-01 it held 9 product items against 38 delivery-tooling items, and the release lane starved
+while workers iterated on bash harnesses (22/25/32 roborev findings over 7–12 rounds on three PRs).
+The standing rule since:
+
+1. **Workers take release-milestoned product items first.** Tooling (gate, roborev, claim, bootstrap,
+   fleet, telemetry, coord) is taken only when no product item is `Ready`, or the item is blocking.
+2. **A tooling issue reaches `Ready` only if it** caused a false PASS or the merge of bad code, blocked
+   a lane for more than an hour, or recurred twice — cited in the body. Everything else is `Backlog`,
+   a one-line doctrine note, or nothing. "Well-scoped" is not sufficient.
+3. **Scripts get a two-round review cap.** Round-3 roborev findings on `scripts/**`, `.claude/**`,
+   `.github/**` or `docs/reports/*-artifacts/**` are disposed (one follow-up issue, a deferral marker
+   on the merits), never fixed — except hangs and false verdicts, which are always fixed.
+4. **Tooling is feature-complete for the release.** A tooling change needs a rule-2 justification.
+5. **In-flight tooling PRs finish on their merits**; nothing new is promoted until the product queue
+   is empty. Retro metric: product share of merged PRs, target ≥ 70 %.
+
 ## The claim protocol (no duplicate work)
 
 Before working an item, a session claims it so no two sessions — **including two sessions authenticated
