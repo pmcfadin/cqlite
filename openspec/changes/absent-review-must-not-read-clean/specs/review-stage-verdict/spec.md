@@ -252,7 +252,8 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
 ### Requirement: A hand-performed substitute is recorded as author-performed, never as clean
 
 `review-stage.sh record-author-performed` SHALL require a substantive `--reason`, a named `--evidence`
-artifact and `--performed-by author|peer`, SHALL refuse placeholder values, and SHALL cause `verdict` to
+artifact and `--performed-by author` — the ONLY accepted performer, since the reported token names
+the AUTHOR and a peer audit stated as an author's is a false verdict — SHALL refuse placeholder values, and SHALL cause `verdict` to
 report the DISTINCT token `AUTHOR-PERFORMED` — never `PASS`. The recorded disclosure SHALL carry the
 form: *"an author's hand audit is not an independent one; weight it accordingly."* It SHALL NOT
 replace a report that already RECORDS a verdict (`PASS` or `FINDINGS`) unless `--force` is passed, and
@@ -274,7 +275,7 @@ a forced replacement SHALL record the replaced token in the new report.
 
 #### Scenario: the classifier is as strong as the writer
 - **WHEN** a HAND-WRITTEN report asserts `result: AUTHOR-PERFORMED` with the disclosure but with a
-  `performed-by` outside `author|peer`, or a `reason`/`evidence` the writer would refuse as a
+  `performed-by` other than `author` (INCLUDING `peer`), or a `reason`/`evidence` the writer would refuse as a
   placeholder, too short or an unsubstituted `<…>`
 - **THEN** `verdict` reports `NOT-RUN (report ungrammatical: AUTHOR-PERFORMED …)`, naming the field and
   the defect — never `AUTHOR-PERFORMED`

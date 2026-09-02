@@ -375,6 +375,17 @@ bash scripts/flow/review-stage.sh record-author-performed c --issue 1234 \
   --performed-by author
 ```
 
+`--performed-by author` is the ONLY accepted performer. `peer` was accepted until round 6 (K3) and
+was then reported under the token `AUTHOR-PERFORMED` — so a PEER audit, the more independent of the
+two, was stated to be the diff AUTHOR's, which is a false statement in the one line a human reads.
+It is REMOVED rather than given a `PEER-PERFORMED` token of its own: a peer who CAN perform the
+audit writes the report of record and reaches a genuine `PASS`, which is the PRIMARY path, so the
+affordance bought nothing but the false verdict — and a token nobody needs is a maintenance tax at
+every site the closed grammar is enumerated (`premerge-assert.sh`, CLAUDE.md, this file, six agent
+definitions, two skills, the OpenSpec delta and both website pages). This subcommand exists for the
+case where NO independent audit can be obtained, i.e. the author's own, and removing `peer` makes
+its name true.
+
 That reports the DISTINCT token `AUTHOR-PERFORMED`, never `PASS`, and `premerge-assert.sh`
 prints it on its own `PREMERGE: C-VERDICT` line — never folded into `PREMERGE: OK` — for the same
 reason the roborev wrapper's `WAIVED` is textually distinct from `PASS`: **nobody grepping the

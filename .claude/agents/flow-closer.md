@@ -237,14 +237,15 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    it means the stage produced nothing (sentinel-only / absent / unreadable / empty /
    ungrammatical / never-opened / the RECORD unreadable, and the token names which). Re-spawn it
    (`open --force` re-stamps the report and KEEPS the original clock, so the elapsed time still
-   reads true, and ADVANCES the report GENERATION — carry the path it PRINTS in the new
-   NEEDS-SPAWN packet, because the previous generation's file is no longer read, so the idle
-   auditor that resumes and writes there certifies nothing, #3751 round 5), or use `status` to
-   report how long it has produced nothing. If no independent audit can be obtained, the SANCTIONED
+   reads true, and publishes the report under a FRESH NONCE — carry the path it PRINTS in the new
+   NEEDS-SPAWN packet, because the previous file is no longer read and the new name cannot be
+   guessed, so the idle auditor that resumes and writes there certifies nothing, #3751 rounds 5-6),
+   or use `status` to report how long it has produced nothing (its `report=` field is the authority
+   for the path when you do not have the clause). If no independent audit can be obtained, the SANCTIONED
    FALLBACK — never a hand-asserted pass — is to record the substitute WITH ITS WORKING:
    ```bash
    bash scripts/flow/review-stage.sh record-author-performed c --issue <N> \
-     --reason <why-no-independent-audit> --evidence <artifact> --performed-by author|peer
+     --reason <why-no-independent-audit> --evidence <artifact> --performed-by author
    ```
    That reports the DISTINCT token `AUTHOR-PERFORMED`, never `PASS`, and premerge-assert prints
    it on its own line — an author's hand audit is not an independent one; weight it accordingly.
@@ -354,8 +355,8 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    ARTIFACT: a `result: PASS` recorded before a further commit, an amend or a rebase persists in
    `.review-stage/` and would certify a tree nobody audited. So if the branch moves after C
    reports, re-open the stage (`review-stage.sh open c --issue <N> --agent spec-auditor --force`,
-   which RE-STAMPS `head-sha` while PRESERVING `spawned-at`, and advances the report generation so
-   the re-spawned auditor gets a fresh path) and re-run C — that is the remedy the
+   which RE-STAMPS `head-sha` while PRESERVING `spawned-at`, and publishes the report under a FRESH
+   NONCE so the re-spawned auditor gets a path the idle one does not hold) and re-run C — that is the remedy the
    refusal prints. A record with no `head-sha:`, several of them, or a value that is not a 40-hex
    sha refuses by name, never silently: an audit of an older tree may not certify a newer one,
    which is the gate-of-record rule applied to the intent audit.

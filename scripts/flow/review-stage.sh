@@ -44,7 +44,7 @@
 #   AUTHOR-PERFORMED  a disclosed substitute with its working recorded     6
 #
 # `AUTHOR-PERFORMED` is reported ONLY when the working is actually there: the required
-# disclosure verbatim, a `performed-by` of exactly `author`/`peer`, and a `reason` and an
+# disclosure verbatim, a `performed-by` of exactly `author`, and a `reason` and an
 # `evidence` that pass the SAME placeholder judgement `record-author-performed` applies
 # (`author_working_defect`, one function, called by the writer AND by this classifier). A
 # report asserting the token without usable working is `NOT-RUN (report ungrammatical: …)`,
@@ -283,7 +283,7 @@
 #   verdict <kind> --issue <N>
 #         EXACTLY ONE line of the closed grammar above. Exit 0/4/5/6.
 #   record-author-performed <kind> --issue <N> --reason <why> --evidence <artifact>
-#                           --performed-by author|peer [--force]
+#                           --performed-by author [--force]
 #         The sanctioned FALLBACK, never recorded as independent. Requires the WORKING:
 #         a substantive reason, a named evidence artifact, and who performed it.
 #         Placeholders are refused exactly as `claim.sh --reason` refuses them — by the same
@@ -505,8 +505,19 @@ reject_placeholder() {
 author_working_defect() {
   local pb="${1:-}" reason="${2:-}" evidence="${3:-}" d
   [ -n "$pb" ] || { printf 'performed-by|absent|\n'; return 0; }
+  # ONE PERFORMER, AND `peer` IS REFUSED (#3751 round 6, K3). `peer` used to be ACCEPTED here and
+  # then reported under the token `AUTHOR-PERFORMED` — so a PEER audit, the more independent of the
+  # two, was stated to be the diff AUTHOR's. A verdict that misstates WHO audited is a false
+  # statement in the one line a human reads. The answer is SUBTRACTION, not a second token: a peer
+  # who can perform the audit can write the report of record and produce a genuine `PASS`, which is
+  # the PRIMARY path — `record-author-performed` exists for the case where NO independent audit can
+  # be obtained, i.e. the author's own. So `peer` was a false affordance whose only effect was a
+  # false verdict, and removing it makes this subcommand's NAME true. A `PEER-PERFORMED` token was
+  # deliberately not added: the closed grammar is enumerated in `premerge-assert.sh`, CLAUDE.md,
+  # `docs/development/review-stage-reporting.md`, six agent definitions, two skills, the OpenSpec
+  # delta and both website pages, and a token nobody needs is a maintenance tax at all of them.
   case "$pb" in
-    author | peer) ;;
+    author) ;;
     # SANITIZED for the RETURNED token only: it is rendered into a verdict line, and the raw
     # value comes from a report written by the very agent being judged. Every DECISION above is
     # made on the raw value, so this is display-only (#3312's rule, same as the cause).
@@ -531,7 +542,7 @@ author_defect_prose() {
   tok="${d##*|}"
   case "$kind" in
     absent)        printf 'with no %s recorded\n' "$field" ;;
-    not-in-set)    printf "with performed-by '%s', which is not 'author' or 'peer'\n" "$tok" ;;
+    not-in-set)    printf "with performed-by '%s', which is not 'author' — this tool records the AUTHOR's own audit, and a peer who can audit writes the report of record instead\n" "$tok" ;;
     unsubstituted) printf 'whose %s still carries an UNSUBSTITUTED placeholder\n' "$field" ;;
     unrecordable)  printf "whose %s records as '%s' — fewer than 3 recordable characters\n" "$field" "$tok" ;;
     placeholder)   printf "whose %s is the PLACEHOLDER '%s'\n" "$field" "$tok" ;;
@@ -1709,9 +1720,9 @@ cmd_record_author_performed() {
     esac
     case "$field:$kind" in
       performed-by:absent)
-        die_usage "record-author-performed: --performed-by author|peer is required — peer-C is preferred and self-C is the sanctioned fallback, so which one happened is the whole disclosure" ;;
+        die_usage "record-author-performed: --performed-by author is required — this subcommand records the DIFF AUTHOR's own audit, and stating so explicitly is the whole disclosure" ;;
       performed-by:not-in-set)
-        die_usage "record-author-performed: --performed-by must be exactly 'author' or 'peer', got '$performed_by'" ;;
+        die_usage "record-author-performed: --performed-by must be exactly 'author', got '$performed_by' — this subcommand records the AUTHOR's own audit and reports the token AUTHOR-PERFORMED, so no other performer can be stated truthfully. A PEER who can perform the audit should write the report of record instead ($prog open <kind> --issue <N> --agent <type>), which reaches a genuine PASS" ;;
       reason:absent)
         die_usage "record-author-performed: --reason <why> is required — say why an independent audit was not available; a substitute with no stated reason is not a disclosure" ;;
       evidence:absent)
@@ -1823,6 +1834,6 @@ case "${1:-}" in
   verdict) shift; cmd_verdict "$@" ;;
   record-author-performed) shift; cmd_record_author_performed "$@" ;;
   -h | --help | help) usage ;;
-  "") die_usage "a subcommand is required: open <kind> --issue <N> --agent <type> | status <kind> --issue <N> | verdict <kind> --issue <N> | record-author-performed <kind> --issue <N> --reason <why> --evidence <artifact> --performed-by author|peer" ;;
+  "") die_usage "a subcommand is required: open <kind> --issue <N> --agent <type> | status <kind> --issue <N> | verdict <kind> --issue <N> | record-author-performed <kind> --issue <N> --reason <why> --evidence <artifact> --performed-by author" ;;
   *) die_usage "unknown subcommand '$1' (open | status | verdict | record-author-performed)" ;;
 esac

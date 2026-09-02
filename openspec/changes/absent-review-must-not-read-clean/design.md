@@ -158,7 +158,7 @@ and `lane-3544`'s reason, which is why the fallback is sanctioned at all:
 > an audit I performed and showed my working for is auditable, whereas an absent one is not
 
 So the recording **requires the working**: a substantive `--reason`, a named `--evidence` artifact, and a
-`--performed-by author|peer`. Placeholders are refused the way `claim.sh --reason` refuses them (a bare
+`--performed-by author`, the ONLY accepted performer — `peer` was REMOVED in round 6 (K3): it was accepted and then reported under the token `AUTHOR-PERFORMED`, so a PEER audit was stated to be the diff AUTHOR's, and a peer who CAN audit writes the report of record instead, reaching a genuine `PASS`. Placeholders are refused the way `claim.sh --reason` refuses them (a bare
 `why`/`todo`/`tbd`, an unsubstituted `<…>`) — a template pasted unfilled is not a disclosure. The token
 is `AUTHOR-PERFORMED`, textually distinct from `PASS`, for the reason `WAIVED` is distinct in the roborev
 wrapper: nobody grepping the passing token may read a substitute as the real thing.

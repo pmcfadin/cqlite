@@ -686,7 +686,17 @@ hand_ap "$AP_R" nobody 'no peer agent available; hand C against the spec deltas'
 rs "$R7" verdict c --issue 500
 rc_is 5 "hand-written AP: an out-of-set performed-by is refused by the CLASSIFIER too"
 has "performed-by" "hand-written AP: the refusal names performed-by"
-has "not 'author' or 'peer'" "hand-written AP: the refusal names the closed performer set"
+has "not 'author'" "hand-written AP: the refusal names the closed performer set"
+# AND `peer` IS OUT OF THAT SET SINCE ROUND 6 (K3). It was ACCEPTED and then reported under the
+# token `AUTHOR-PERFORMED`, i.e. a PEER audit — the more independent of the two — was stated to be
+# the diff AUTHOR's. A verdict that misstates WHO audited is a false statement in the one line a
+# human reads, and the affordance bought nothing: a peer who can perform the audit can write the
+# report of record and produce a genuine `PASS`. So the token set is not widened; `peer` is gone.
+hand_ap "$AP_R" peer 'a peer on this box audited the spec deltas by hand' 'docs/x.md'
+rs "$R7" verdict c --issue 500
+rc_is 5 "hand-written AP: performed-by: peer is refused by the CLASSIFIER too — never reported as an AUTHOR audit"
+hasnt "RESULT: AUTHOR-PERFORMED" "hand-written AP: a peer-performed report does NOT reach the merge-proceeding token"
+has "not 'author'" "hand-written AP: and the refusal names the one-value performer set"
 
 hand_ap "$AP_R" author 'x' 'docs/x.md'
 rs "$R7" verdict c --issue 500
@@ -725,14 +735,29 @@ has "--evidence <artifact> is required" "author-refusals: names the missing evid
 
 rs "$R8" record-author-performed c --issue 600 --reason "$GOOD_REASON" --evidence "$GOOD_EV"
 rc_is 64 "author-refusals: a MISSING --performed-by is a usage error"
-has "--performed-by author|peer is required" "author-refusals: names the missing performer"
+has "--performed-by author is required" "author-refusals: names the missing performer"
 
 rs "$R8" record-author-performed c --issue 600 --reason "$GOOD_REASON" --evidence "$GOOD_EV" --performed-by nobody
 rc_is 64 "author-refusals: an out-of-set --performed-by is a usage error"
-has "must be exactly 'author' or 'peer'" "author-refusals: names the closed performer set"
+has "must be exactly 'author'" "author-refusals: names the closed performer set"
 
+# `peer` IS REFUSED BY NAME (round 6, K3), not merely absent from a list. It used to be ACCEPTED
+# and then reported under the token `AUTHOR-PERFORMED`, so a peer audit was stated to be the diff
+# AUTHOR's — a false statement in the one line a human reads. The token set is deliberately NOT
+# widened with a `PEER-PERFORMED`: the grammar is enumerated in `premerge-assert.sh`, CLAUDE.md,
+# `docs/development/review-stage-reporting.md`, six agent definitions, two skills, the OpenSpec
+# delta and both website pages, and a token nobody needs is a maintenance tax at every one of
+# them. `record-author-performed` exists for the case where NO independent audit can be obtained;
+# a peer who CAN audit writes the report of record and produces a genuine `PASS`.
 rs "$R8" record-author-performed c --issue 600 --reason "$GOOD_REASON" --evidence "$GOOD_EV" --performed-by peer
-rc_is 0 "author-refusals: --performed-by peer is accepted (peer-C is the PREFERRED form)"
+rc_is 64 "author-refusals: --performed-by peer is REFUSED — this tool records an AUTHOR audit and nothing else"
+has "must be exactly 'author'" "author-refusals: the refusal names the one-value set"
+has "report of record" "author-refusals: and points at the PRIMARY path, which is what a peer should use"
+if [ -f "$(REPORT_OF "$R8" 600 c)" ] && LC_ALL=C grep -q '^result: NOT-RUN' "$(REPORT_OF "$R8" 600 c)" 2>/dev/null; then
+  ok "author-refusals: the refused peer recording wrote NOTHING — the report is still the sentinel"
+else
+  bad "author-refusals: the refused peer recording changed the report ($(LC_ALL=C grep -m1 '^result:' "$(REPORT_OF "$R8" 600 c)" 2>/dev/null))"
+fi
 
 for ph in why todo tbd TODO n/a placeholder; do
   rs "$R8" record-author-performed c --issue 600 --reason "$ph" --evidence "$GOOD_EV" --performed-by author
@@ -2263,7 +2288,13 @@ rc_is 0 "race/no-fallback CONTROL: with a working mktemp the same open succeeds"
 # section 16's extra requirements (git commits, `cp -a`, a PATH-shadowed `mktemp`) are the SUBJECT
 # of asserted preconditions rather than preconditions for running — so the EXACT floor still holds
 # by the two shapes recorded above.
-ASSERT_FLOOR=465
+# ROUND 6's THIRD ITEM (K3) MOVES IT TO 471, IN BOTH DIRECTIONS. `--performed-by peer` was ACCEPTED
+# and then reported under the token `AUTHOR-PERFORMED`, so a PEER audit was stated to be the diff
+# AUTHOR's. `peer` is REMOVED rather than given a token of its own, so the ONE case that asserted it
+# was accepted (2 assertions) is REPLACED by the case that it is refused by name and writes nothing
+# (4), and the classifier gains the matching hand-written case (3): 465 -> 471, with the two prose
+# assertions that quoted the two-value set corrected in place. Every assertion is unconditional.
+ASSERT_FLOOR=471
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

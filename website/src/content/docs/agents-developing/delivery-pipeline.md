@@ -671,7 +671,8 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   created. A concurrent reader still never sees a half-written `result:` line.
   `verdict` establishes that a VERDICT WAS RECORDED, never that a review was PERFORMED — a report whose
   only content is `result: PASS` reads as PASS. Where no independent audit can be obtained, the sanctioned
-  fallback is `record-author-performed --reason <why> --evidence <artifact> --performed-by author|peer`,
+  fallback is `record-author-performed --reason <why> --evidence <artifact> --performed-by author`
+  (the ONLY performer this tool accepts — `peer` was REMOVED in round 6 (K3): it was accepted and then reported under the token `AUTHOR-PERFORMED`, so a PEER audit was stated to be the diff AUTHOR's, and a peer who CAN audit writes the report of record instead, reaching a genuine `PASS`),
   which REQUIRES the working (placeholders refused as `claim.sh` refuses them) and reports the DISTINCT
   token `AUTHOR-PERFORMED`, never `PASS` — *an author's hand audit is not an independent one; weight it
   accordingly*, and it is sanctioned at all because *an audit whose working is shown is auditable, whereas
