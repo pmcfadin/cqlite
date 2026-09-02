@@ -193,6 +193,32 @@ bar v0.2.0
 EOF
 }
 tree_grew() { tree_baseline; printf 'foo v3.0.0\n└── w v9.9.9\n'; }
+# P22's version-field writers (roborev round 9). The POSITIVE one carries every shape
+# cargo was MEASURED to print plus the legal-but-absent-here prerelease form, and its
+# census is 4 instances / 2 crates so it matches baseline_matching exactly.
+tree_ver_ok() {
+  cat <<'EOF'
+foo v1.0.0+wasi-snapshot-preview1
+└── x v0.1.0
+
+foo v2.0.0-rc.1
+└── y v0.2.0
+
+bar v0.1.0+spec-1.0.0 (*)
+bar v0.2.0-alpha.1.2
+EOF
+}
+tree_ver_truncated() { printf 'foo v1\n'; }
+tree_ver_garbage()   { printf 'foo v1garbage\n'; }
+tree_ver_twopart()   { printf 'foo v1.2\n'; }
+tree_ver_trailing()  { printf 'foo v1.2.3.4\n'; }
+# THE CASE THAT DEMONSTRATES THE FINDING'S ACTUAL HARM. The four single-record writers
+# above are ALSO caught by the downstream implausible-census check ('foo' appears once),
+# so on their own they pin the CAUSE NAME and not the false verdict. This one is a real
+# DUPLICATE group — two instances of one crate — so implausible-census passes and, before
+# the fix, both garbage records were COUNTED and compared, publishing a verdict from a
+# document the parser never recognised.
+tree_ver_garbage_dup() { printf 'foo v1garbage\n└── x v0.1.0\nfoo v2garbage\n└── y v0.2.0\n'; }
 tree_new_crate() { tree_baseline; printf '\nbaz v1.0.0\nbaz v2.0.0\n'; }
 tree_smaller() { printf 'foo v1.0.0\n└── x v0.1.0\n\nfoo v2.0.0\n'; }
 # MIXED-DIRECTION fixtures: one metric grows while the other shrinks, which is the state
@@ -710,6 +736,38 @@ if [ "$p21b_calls" = 1 ]; then
 else
   bad "P21c: cargo was invoked $p21b_calls time(s) — a second, unlocked/online attempt is exactly the silent permissive fallback that may not exist: argv log was '$(tr '\n' '|' < "$d/cargo-argv.txt" 2>/dev/null)'"
 fi
+
+# --- P22: THE VERSION FIELD IS VALIDATED WHOLE ---------------------------
+# roborev round 9, Medium. `v[0-9]*` required a `v` and ONE digit and let the trailing `*`
+# swallow the rest, so a TRUNCATED or GARBAGE version satisfied the closed grammar and the
+# record was COUNTED — a verdict derived from a document the parser does not recognise.
+# PINNED IN BOTH DIRECTIONS deliberately: a tightening that also refuses cargo's real
+# output is not a fix, and the positive case is what would catch that.
+d=$(new_tree p22a); plant_cargo "$d" 0 tree_ver_ok; run_guard "$d"
+assert_case "P22a: every version shape cargo was MEASURED to print — bare, +build with dots and hyphens, and legal prerelease — is COUNTED, not refused" \
+  0 'MEASURED 4 duplicate instance(s) / 2 duplicated crate(s)' 'verdict NO-INCREASE'
+p22_reject() { # <label> <writer> <offending field>
+  local d2
+  d2=$(new_tree "p22-$RANDOM$RANDOM"); plant_cargo "$d2" 0 "$2"; run_guard "$d2"
+  assert_case "P22 ($1): refused as malformed-record, naming the field — never counted" \
+    3 'SKIP-UNMEASURABLE cause=malformed-record' "second field '$3' is not a complete"
+  case "$OUT" in
+    *'verdict '*) bad "P22 ($1): a refused document must yield NO verdict" ;;
+    *)            ok "P22 ($1): no verdict is printed from a document the parser refused" ;;
+  esac
+}
+p22_reject "truncated to one component" tree_ver_truncated 'v1'
+p22_reject "a garbage suffix after the first digit" tree_ver_garbage 'v1garbage'
+p22_reject "two components only" tree_ver_twopart 'v1.2'
+p22_reject "a fourth numeric component" tree_ver_trailing 'v1.2.3.4'
+# NON-VACUITY of the four above, and the finding's real exploit path in one case.
+d=$(new_tree p22f); plant_cargo "$d" 0 tree_ver_garbage_dup; run_guard "$d"
+assert_case "P22f: a garbage version on a REAL duplicate group (which implausible-census cannot catch) is refused — this is the false verdict the finding names" \
+  3 'SKIP-UNMEASURABLE cause=malformed-record' "second field 'v1garbage' is not a complete"
+case "$OUT" in
+  *'verdict '*) bad "P22f: THE FINDING, REPRODUCED — a verdict was published from two unrecognised records that the census check cannot see" ;;
+  *)            ok "P22f: no verdict is published from an unrecognised duplicate group" ;;
+esac
 
 # --- P12: --regenerate round trip ----------------------------------------
 d=$(new_tree p12 none); plant_cargo "$d" 0 tree_grew
@@ -1258,7 +1316,7 @@ echo "dep-duplicates ratchet self-test: $PASS passed, $FAIL failed"
 # ROUND 8 ADDS THREE AND MOVES THE FLOOR BY THREE: the P11 leading-zero shapes are
 # planted (shim cargo + plant_timeout), so they are host-independent BY CONSTRUCTION and
 # a deletion of them must red. 46 + 3 = 49.
-CASE_FLOOR=49
+CASE_FLOOR=60
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): cases are being skipped or dying silently.\n' \
     "$((PASS + FAIL))" "$CASE_FLOOR" >&2

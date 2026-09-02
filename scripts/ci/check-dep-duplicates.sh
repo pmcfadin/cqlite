@@ -478,11 +478,26 @@ while IFS= read -r line || [ -n "$line" ]; do
     *[!A-Za-z0-9_-]*) unmeasurable malformed-record \
       "$PROBE_DESC printed a column-zero line whose first field '$nm' is not a crate name: '$line'" ;;
   esac
-  case "$ver" in
-    v[0-9]*) ;;
-    *) unmeasurable malformed-record \
-      "$PROBE_DESC printed a column-zero line whose second field '$ver' is not a v<version>: '$line'" ;;
-  esac
+  # THE WHOLE FIELD, not just its first character (roborev round 9, Medium). `v[0-9]*`
+  # required only a `v` and ONE digit and let the trailing `*` swallow anything after it,
+  # so a TRUNCATED `foo v1` or a garbage `foo v1garbage` satisfied it and was COUNTED —
+  # a verdict derived from a document this parser does not actually recognise, which is
+  # the one thing the closed grammar exists to prevent. `ver` is never used as a value
+  # (the census keys on the crate NAME); validating it is purely how we recognise a line
+  # as a cargo duplicate-group head, so it must match cargo's OWN output shape exactly.
+  #
+  # DERIVED FROM MEASURED OUTPUT, not assumed: `cargo tree -d --workspace --target all`
+  # on this workspace prints 114 heads — 110 bare `vN.N.N`, plus `v0.11.1+wasi-snapshot-
+  # preview1` and `v1.0.0+spec-1.0.0` style BUILD METADATA (dots AND hyphens inside it).
+  # Cargo prints a resolved semver, always three numeric components. PRERELEASE (`-rc.1`)
+  # appears nowhere in this corpus but is legal semver that cargo can print, so it is
+  # ACCEPTED rather than refused — a guard that reds on correct input is the guard agents
+  # learn to waive. Leading zeros in the numeric parts are likewise not refused: they are
+  # not what this check is for, and cargo could only print what a manifest resolved to.
+  if [[ ! $ver =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+    unmeasurable malformed-record \
+      "$PROBE_DESC printed a column-zero line whose second field '$ver' is not a complete v<major>.<minor>.<patch>[-prerelease][+build]: '$line'"
+  fi
   now_instances=$((now_instances + 1))
   census_get "$NOW_CENSUS" "$nm" >/dev/null || now_names="$now_names $nm"
   census_bump "$NOW_CENSUS" "$nm"
