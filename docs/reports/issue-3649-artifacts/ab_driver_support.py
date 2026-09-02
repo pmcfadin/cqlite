@@ -47,6 +47,7 @@ USAGE = [
     "<min-bytes> <min-sstables> <ramp> <control> <base-extra> <head-extra>",
     "ab_driver_support.py census-served <data-dir> <ticket.json>",
     "ab_driver_support.py probe-storage <path>",
+    "ab_driver_support.py probe-compression <served-dir>",
     "ab_driver_support.py parse-listening <server-log>",
     "ab_driver_support.py validate-ramp <ramp>",
     "ab_driver_support.py parse-duration <value>",
@@ -1354,6 +1355,141 @@ def probe_storage(path):
     return classify_storage_model(model), base, (model or "the device model is empty")
 
 
+# MIRRORS the `CompressionInfo.db` header as the definitive guide records it
+# (docs/sstables-definitive-guide/chapters/appendix-g-compression-chunk-formats.md
+# lines 34-70), whose authority is `CompressionMetadata.java` at cassandra-5.0.8
+# (`open()` 76-112, `writeHeader()` 375-398). Read from the guide and the pinned
+# source, NEVER from CQLite's own reader: a CQLite file:line is evidence of what
+# CQLite does, never of what is correct.
+#
+#   [algorithm: writeUTF -- 2-byte BE length + UTF-8 bytes]
+#   [option count: u32 BE][key,value writeUTF pairs...]
+#   [chunk length: u32 BE][max compressed length: u32 BE]
+#   [data length: u64 BE][chunk count: u32 BE][chunk offsets: u64 BE * count]
+#
+# The field ORDER is the parse; there is no padding after the name.
+COMPRESSOR_NAMES = {
+    "LZ4Compressor": "LZ4",
+    "SnappyCompressor": "SNAPPY",
+    "DeflateCompressor": "DEFLATE",
+    "ZstdCompressor": "ZSTD",
+    "NoopCompressor": "NOOP",
+}
+#: The field is LZ4 (docs/research/throughput-program-2026-07.md line 21), so the
+#: target band is defined for LZ4 decode work and nothing else.
+REQUIRED_COMPRESSOR = "LZ4"
+
+
+def parse_compression_info(path):
+    """-> (state, detail). FOUR-valued, and only the first is acceptable.
+
+      LZ4            the header parses and names LZ4Compressor
+      OTHER          it parses and names a compressor we KNOW is not LZ4
+      UNRECOGNISED   it parses and names something we do not know
+      UNPARSEABLE    it does not parse, or the header is not self-consistent
+
+    OTHER and UNRECOGNISED are deliberately distinct even though both refuse. A
+    known non-LZ4 name means the corpus was generated with the wrong compressor
+    -- the operator regenerates it. An unknown name means a newer Cassandra or a
+    file that is well-formed but foreign, and the honest report is the name
+    itself. UNPARSEABLE is a third operator action again: the file is damaged.
+    Collapsing them would hand one remedy to three different problems.
+    """
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        return "UNPARSEABLE", "unreadable: %s" % (exc.strerror or exc)
+    if len(raw) < 26:
+        return "UNPARSEABLE", "%d bytes, shorter than the smallest legal header" % len(raw)
+
+    def be(offset, width):
+        return int.from_bytes(raw[offset:offset + width], "big")
+
+    name_len = be(0, 2)
+    if name_len == 0 or 2 + name_len > len(raw):
+        return "UNPARSEABLE", "the algorithm-name length (%d) does not fit the file" % name_len
+    try:
+        name = raw[2:2 + name_len].decode("utf-8")
+    except UnicodeDecodeError:
+        return "UNPARSEABLE", "the algorithm name is not valid UTF-8"
+    # A class simple name. Anything else means we are not reading a header.
+    if not re.fullmatch(r"[A-Za-z0-9_$.]{1,255}", name):
+        return "UNPARSEABLE", "the algorithm name %r is not a class name" % name
+
+    cursor = 2 + name_len
+    if cursor + 4 > len(raw):
+        return "UNPARSEABLE", "truncated before the option count"
+    option_count = be(cursor, 4)
+    cursor += 4
+    if option_count > 1000:
+        return "UNPARSEABLE", "an option count of %d is not plausible" % option_count
+    for _ in range(option_count * 2):  # each option is a key AND a value
+        if cursor + 2 > len(raw):
+            return "UNPARSEABLE", "truncated inside the compression options"
+        item_len = be(cursor, 2)
+        cursor += 2 + item_len
+        if cursor > len(raw):
+            return "UNPARSEABLE", "an option string runs past the end of the file"
+    if cursor + 20 > len(raw):
+        return "UNPARSEABLE", "truncated before the chunk header"
+    chunk_length = be(cursor, 4)
+    max_compressed = be(cursor + 4, 4)
+    data_length = be(cursor + 8, 8)
+    chunk_count = be(cursor + 16, 4)
+    cursor += 20
+    # SELF-CONSISTENCY, which is what separates "parsed" from "happens to have
+    # readable bytes at the front". Zero max-compressed-length is corrupt per the
+    # guide's own guard; a chunk map that does not fit is not a chunk map.
+    if chunk_length == 0:
+        return "UNPARSEABLE", "chunk_length is zero"
+    if max_compressed == 0:
+        return "UNPARSEABLE", "max_compressed_length is zero, which the format calls corrupt"
+    if chunk_count == 0:
+        return "UNPARSEABLE", "chunk_count is zero"
+    if cursor + 8 * chunk_count > len(raw):
+        return "UNPARSEABLE", (
+            "the chunk map needs %d bytes and the file has %d left"
+            % (8 * chunk_count, len(raw) - cursor))
+
+    known = COMPRESSOR_NAMES.get(name)
+    if known == REQUIRED_COMPRESSOR:
+        return "LZ4", "%s chunk_length=%d data_length=%d chunks=%d" % (
+            name, chunk_length, data_length, chunk_count)
+    if known is not None:
+        return "OTHER", known
+    return "UNRECOGNISED", name
+
+
+def probe_compression(served_dir):
+    """Every served SSTable's compressor, aggregated. -> (state, detail).
+
+    Checked per FILE, not per directory: one Snappy table beside four LZ4 ones
+    still means the measured decode work is not what the band was derived for,
+    and an aggregate that reported only the majority would hide it.
+    """
+    try:
+        entries = sorted(os.listdir(served_dir))
+    except OSError as exc:
+        return "UNPARSEABLE", "%s: %s" % (served_dir, exc.strerror or exc)
+    data_files = [e for e in entries if e.endswith("-Data.db")]
+    if not data_files:
+        return "NO-SSTABLES", "no *-Data.db under %s" % served_dir
+    worst = None
+    for data_file in data_files:
+        stem = data_file[: -len("Data.db")]
+        info = os.path.join(served_dir, stem + "CompressionInfo.db")
+        if not os.path.exists(info) or os.path.getsize(info) == 0:
+            return "MISSING", "%s has no usable CompressionInfo.db" % data_file
+        state, detail = parse_compression_info(info)
+        if state != "LZ4":
+            # First offender wins: the remedy is per-file and naming one file the
+            # operator can look at beats a summary of how many were wrong.
+            return state, "%s: %s" % (stem + "CompressionInfo.db", detail)
+        worst = detail
+    return "LZ4", "%d served SSTable(s), all LZ4Compressor" % len(data_files)
+
+
 def classify_storage_model(model):
     """Sort a device model string into the four storage verdicts.
 
@@ -1410,6 +1546,13 @@ def main(argv):
             err("usage-error validate-ticket-schema needs <template.json>")
             return 2
         return validate_ticket(rest[0], full_ring=False)
+    if command == "probe-compression":
+        if len(rest) != 1:
+            err("usage-error probe-compression needs <served-dir>")
+            return 2
+        state, detail = probe_compression(rest[0])
+        sys.stdout.write("%s %s\n" % (state, detail))
+        return 0
     if command == "probe-storage":
         if len(rest) != 1:
             err("usage-error probe-storage needs <path>")

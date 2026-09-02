@@ -258,6 +258,16 @@ def render_common(manifest, mode, admission, session):
     # about the table under measurement.
     out("corpus served-dir %s" % field(manifest, "corpus", "served_dir"))
     out("corpus compressed %s" % field(manifest, "corpus", "compressed"))
+    # THE NUMBER CARRIES WHAT IT WAS MEASURED ON. An LZ4-derived band and the
+    # algorithm actually decoded are the same fact stated twice, and a report
+    # that omits the second invites the comparison it cannot support.
+    out(
+        "corpus compression %s (%s)"
+        % (
+            field(manifest, "corpus", "compression"),
+            field(manifest, "corpus", "compression_detail"),
+        )
+    )
     # THE PROPERTIES THE `i4i` LABEL STOOD FOR, reported as themselves. A rig
     # class is not reliably derivable from a hostname, but the two things the
     # class was chosen FOR are measurable, and each is reported separately: a
@@ -414,6 +424,22 @@ def analyze(mode, path, opts):
     # the denominator and inflates the ratio. Re-checked rather than trusted for
     # the usual reason: a manifest is data, and this analyzer does not get to
     # assume which driver produced it.
+    # THE ALGORITHM, RE-CHECKED. `compressed: true` says metadata exists; the
+    # requirement is that it is LZ4, because the band was derived against LZ4
+    # decode work. A manifest silent about the algorithm refuses rather than
+    # inheriting the permissive branch -- "did not ask" and "asked and it was
+    # LZ4" are different facts, the sentinel rule this lane keeps re-learning.
+    if not control and manifest["corpus"].get("compression") != "LZ4":
+        raise Unmeasured(
+            "corpus-compression-not-lz4",
+            "the manifest records the served corpus compression as %r (%s). The "
+            "field is LZ4 and the target band was derived against LZ4 decode "
+            "work, so a ratio measured against different -- or unverified -- "
+            "decompression is not comparable to it. Label the session --control "
+            "if that is what you meant to measure"
+            % (manifest["corpus"].get("compression", "NOT-RECORDED"),
+               manifest["corpus"].get("compression_detail", "no detail recorded")),
+        )
     if not control and manifest["corpus"].get("compressed") is not True:
         raise Unmeasured(
             "corpus-uncompressed",

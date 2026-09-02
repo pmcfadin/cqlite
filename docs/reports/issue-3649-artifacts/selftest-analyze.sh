@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=438
+CASE_FLOOR=455
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -158,6 +158,8 @@ def main():
             "min_bytes_required": 268435456,
             "min_sstables_required": 2,
             "compressed": True,
+            "compression": "LZ4",
+            "compression_detail": "3 served SSTable(s), all LZ4Compressor",
             "storage": "LOCAL",
             "storage_detail": "nvme0n1 Amazon EC2 NVMe Instance Storage",
             "rows_declared": 3999890,
@@ -181,6 +183,30 @@ main()
 PYEOF
 
 mkfixture() { python3 "$TMP/mkfixture.py" "$@"; }
+
+# A CompressionInfo.db header, written from the definitive guide's layout
+# (appendix-g-compression-chunk-formats.md 34-70; authority
+# CompressionMetadata.java at cassandra-5.0.8). Used both to make the e2e corpus
+# honest and to drive the parser through every state.
+mkcompressioninfo() { # <path> <compressor-name> [chunk-length] [max-compressed] [chunk-count]
+  python3 - "$1" "$2" "${3:-16384}" "${4:-2147483647}" "${5:-3}" <<'PYINNER'
+import sys
+
+path, name, chunk_length, max_compressed, chunk_count = sys.argv[1:6]
+chunk_length, max_compressed = int(chunk_length), int(max_compressed)
+chunk_count = int(chunk_count)
+encoded = name.encode("utf-8")
+blob = len(encoded).to_bytes(2, "big") + encoded
+blob += (0).to_bytes(4, "big")                      # option count
+blob += chunk_length.to_bytes(4, "big")
+blob += max_compressed.to_bytes(4, "big")
+blob += (150000000).to_bytes(8, "big")              # data length, uncompressed
+blob += chunk_count.to_bytes(4, "big")
+blob += b"".join((i * 4096).to_bytes(8, "big") for i in range(chunk_count))
+with open(path, "wb") as handle:
+    handle.write(blob)
+PYINNER
+}
 
 RC=0
 run_analyzer() { # <dir> [extra args...]   -- the single-stream section
@@ -1973,8 +1999,8 @@ else
   mkdir -p "$TMP/tinycorpus/ks/tbl"
   head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-1-big-Data.db"
   head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-2-big-Data.db"
-  head -c 512 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-1-big-CompressionInfo.db"
-  head -c 512 /dev/zero > "$TMP/tinycorpus/ks/tbl/nb-2-big-CompressionInfo.db"
+  mkcompressioninfo "$TMP/tinycorpus/ks/tbl/nb-1-big-CompressionInfo.db" LZ4Compressor
+  mkcompressioninfo "$TMP/tinycorpus/ks/tbl/nb-2-big-CompressionInfo.db" LZ4Compressor
   # Unrelated tables and a snapshot subtree that the census must NOT count: this
   # is finding 1's shape, and without them the served-scope guard is untested.
   mkdir -p "$TMP/tinycorpus/other/bigtable" "$TMP/tinycorpus/ks/tbl/snapshots/s1"
@@ -1983,7 +2009,7 @@ else
   head -c 4096 /dev/zero > "$TMP/tinycorpus/ks/tbl/snapshots/s1/nb-8-big-Data.db"
   mkdir -p "$TMP/onesstcorpus/ks/tbl"
   head -c 4096 /dev/zero > "$TMP/onesstcorpus/ks/tbl/nb-1-big-Data.db"
-  head -c 512 /dev/zero > "$TMP/onesstcorpus/ks/tbl/nb-1-big-CompressionInfo.db"
+  mkcompressioninfo "$TMP/onesstcorpus/ks/tbl/nb-1-big-CompressionInfo.db" LZ4Compressor
   # ...and the one-source corpus gets a SECOND file elsewhere, so the #3058 guard
   # can only pass by counting the wrong directory.
   mkdir -p "$TMP/onesstcorpus/ks/decoy"
@@ -2140,7 +2166,7 @@ PYINNER
   # so a symlinked decoy must satisfy neither floor.
   mkdir -p "$TMP/symcorpus/ks/tbl" "$TMP/symcorpus/elsewhere"
   head -c 4096 /dev/zero > "$TMP/symcorpus/ks/tbl/nb-1-big-Data.db"
-  head -c 512 /dev/zero > "$TMP/symcorpus/ks/tbl/nb-1-big-CompressionInfo.db"
+  mkcompressioninfo "$TMP/symcorpus/ks/tbl/nb-1-big-CompressionInfo.db" LZ4Compressor
   head -c 400000 /dev/zero > "$TMP/symcorpus/elsewhere/real-Data.db"
   ln -sf "$TMP/symcorpus/elsewhere/real-Data.db" "$TMP/symcorpus/ks/tbl/nb-2-big-Data.db"
   run_driver --corpus "$TMP/symcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
@@ -2223,8 +2249,8 @@ PYINNER
     --max-concurrent-scans 4 --work-dir "$TMP/w-plain" --min-corpus-bytes 1 \
     --min-sstables 1 --control selftest --repo "$SCRATCH"
   # A control MAY measure an uncompressed corpus; only a measurement may not.
-  if grep -q 'corpus compression UNCOMPRESSED' "$TMP/out.txt"; then
-    ok "an uncompressed corpus is detected and named"
+  if grep -q 'corpus compression MISSING' "$TMP/out.txt"; then
+    ok "a corpus with no usable CompressionInfo.db is detected and named MISSING"
   else
     bad "the census did not detect a missing CompressionInfo.db"
   fi
@@ -2764,10 +2790,15 @@ STUBEOF
   mkdir -p "$TMP/e2e-corpus/ks/tbl"
   truncate -s 150000000 "$TMP/e2e-corpus/ks/tbl/nb-1-big-Data.db"
   truncate -s 150000000 "$TMP/e2e-corpus/ks/tbl/nb-2-big-Data.db"
-  # The compressed-corpus requirement is now ENFORCED, so a served SSTable
-  # without a usable CompressionInfo.db is refused for a measurement.
-  head -c 512 /dev/zero > "$TMP/e2e-corpus/ks/tbl/nb-1-big-CompressionInfo.db"
-  head -c 512 /dev/zero > "$TMP/e2e-corpus/ks/tbl/nb-2-big-CompressionInfo.db"
+  # REAL LZ4 HEADERS, not 512 zero bytes. Those zeros satisfied round 12's
+  # "a non-empty CompressionInfo.db exists" check while being a corrupt file --
+  # this fixture WAS the defect round 15 finding 2 reports, sitting inside the
+  # test suite for it. The bytes are written from the layout in the definitive
+  # guide (appendix-g-compression-chunk-formats.md 34-70, authority
+  # CompressionMetadata.java at cassandra-5.0.8), so the fixture is a document
+  # the parser has to actually read.
+  mkcompressioninfo "$TMP/e2e-corpus/ks/tbl/nb-1-big-CompressionInfo.db" LZ4Compressor
+  mkcompressioninfo "$TMP/e2e-corpus/ks/tbl/nb-2-big-CompressionInfo.db" LZ4Compressor
   printf '{"version":2,"keyspace":"ks","table":"tbl","ddl":"CREATE TABLE ks.tbl (a int PRIMARY KEY)","limit":null,"predicates":[],"filter":null,"aggregation":null,"columns":null,"token_start":null,"token_end":null,"wraparound":false}\n' \
     > "$TMP/e2e-ticket.json"
 
@@ -3325,6 +3356,103 @@ if grep -q '^AB-3649: verdict-detail single-stream HOST whether the box was cont
   ok "an unmeasurable load probe is disclosed as a gap, not scored as a quiet box"
 else
   bad "an unmeasurable load probe was silently read as quiet"
+fi
+
+# ---- the compression REQUIREMENT is the algorithm, not the metadata's existence
+# ROUND 15 FINDING 2. Round 12 enforced "a non-empty CompressionInfo.db exists"
+# while the comment beside the check said "the field is LZ4" -- so Snappy,
+# Deflate, Zstd, NOOP and any corrupt-but-non-empty file passed as the required
+# corpus. Enforcing EXISTENCE where the requirement is IDENTITY. FOUR-valued,
+# because the three refusals are three different operator actions: regenerate
+# with the right compressor / this is a compressor we do not know / this file is
+# damaged. Collapsing them hands one remedy to three problems.
+compression_case() { # <name> <compressor> <want-state> [chunk-length] [max-compressed] [chunk-count]
+  mkcompressioninfo "$TMP/ci-probe.db" "$2" "${4:-16384}" "${5:-2147483647}" "${6:-3}"
+  local got
+  got="$(python3 - "$HERE" "$TMP/ci-probe.db" <<'PYINNER'
+import sys
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+print(S.parse_compression_info(sys.argv[2])[0])
+PYINNER
+)"
+  if [ "$got" = "$3" ]; then
+    ok "compression $1 -> $got"
+  else
+    bad "compression $1 parsed as $got, expected $3"
+  fi
+}
+compression_case lz4          LZ4Compressor     LZ4
+compression_case snappy       SnappyCompressor  OTHER
+compression_case deflate      DeflateCompressor OTHER
+compression_case zstd         ZstdCompressor    OTHER
+# NOOP is the one that matters most: it is metadata for NO compression at all,
+# so it satisfied "compressed: true" while removing every byte of decode work.
+compression_case noop         NoopCompressor    OTHER
+# Parses cleanly, names something we do not know -- NOT the same fact as a
+# damaged file, and reported as itself so the operator sees the name.
+compression_case future       FutureCompressor  UNRECOGNISED
+# Self-consistency, which is what separates "parsed" from "has readable bytes".
+compression_case zero-chunklen LZ4Compressor    UNPARSEABLE 0
+compression_case zero-maxcomp  LZ4Compressor    UNPARSEABLE 16384 0
+compression_case zero-chunks   LZ4Compressor    UNPARSEABLE 16384 2147483647 0
+
+# THE FIXTURE THAT WAS THE DEFECT: 512 zero bytes passed round 12's non-empty
+# check and lived in this suite's own e2e corpus.
+head -c 512 /dev/zero > "$TMP/ci-zeros.db"
+if python3 - "$HERE" "$TMP/ci-zeros.db" <<'PYINNER' | grep -q '^UNPARSEABLE'
+import sys
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+print(S.parse_compression_info(sys.argv[2])[0])
+PYINNER
+then
+  ok "a non-empty file of zero bytes is UNPARSEABLE, not 'compressed'"
+else
+  bad "512 zero bytes was accepted as a compression header"
+fi
+# Truncation anywhere in the header is a refusal, not a partial read.
+mkcompressioninfo "$TMP/ci-full.db" LZ4Compressor
+for cut in 4 12 20 30; do
+  head -c "$cut" "$TMP/ci-full.db" > "$TMP/ci-cut.db"
+  if python3 - "$HERE" "$TMP/ci-cut.db" <<'PYINNER' | grep -q '^UNPARSEABLE'
+import sys
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+print(S.parse_compression_info(sys.argv[2])[0])
+PYINNER
+  then
+    ok "a header truncated to $cut bytes is UNPARSEABLE"
+  else
+    bad "a header truncated to $cut bytes was accepted"
+  fi
+done
+
+# THE AGGREGATE: checked per FILE, so one wrong table among right ones refuses.
+rm -rf "$TMP/mixedcorpus" && mkdir -p "$TMP/mixedcorpus"
+for n in 1 2 3; do
+  truncate -s 1000 "$TMP/mixedcorpus/nb-$n-big-Data.db"
+  mkcompressioninfo "$TMP/mixedcorpus/nb-$n-big-CompressionInfo.db" LZ4Compressor
+done
+AGG="$(python3 "$SUPPORT" probe-compression "$TMP/mixedcorpus")"
+if [ "${AGG%% *}" = "LZ4" ]; then
+  ok "a corpus whose every served SSTable is LZ4 aggregates to LZ4"
+else
+  bad "an all-LZ4 corpus aggregated to ${AGG%% *}"
+fi
+mkcompressioninfo "$TMP/mixedcorpus/nb-2-big-CompressionInfo.db" SnappyCompressor
+AGG="$(python3 "$SUPPORT" probe-compression "$TMP/mixedcorpus")"
+if [ "${AGG%% *}" = "OTHER" ] && printf '%s' "$AGG" | grep -q 'nb-2-big-CompressionInfo.db'; then
+  ok "one non-LZ4 table among LZ4 ones refuses, naming the file"
+else
+  bad "a mixed-compressor corpus did not refuse naming the offending file ($AGG)"
+fi
+rm -f "$TMP/mixedcorpus/nb-2-big-CompressionInfo.db"
+AGG="$(python3 "$SUPPORT" probe-compression "$TMP/mixedcorpus")"
+if [ "${AGG%% *}" = "MISSING" ]; then
+  ok "a served SSTable with no CompressionInfo.db aggregates to MISSING"
+else
+  bad "a missing CompressionInfo.db aggregated to ${AGG%% *}"
 fi
 
 # ---- ONE validator for one record schema -------------------------------------

@@ -245,6 +245,8 @@ def load_manifest(path, mode):
     # is CLOSED for the same reason: `!= "NETWORK"` would accept a typo.
     for holder, key, allowed in (
         ("corpus", "storage", ("LOCAL", "NETWORK", "UNRECOGNISED", "NOT-MEASURABLE")),
+        ("corpus", "compression",
+         ("LZ4", "OTHER", "UNRECOGNISED", "UNPARSEABLE", "MISSING", "NO-SSTABLES")),
         ("host", "contention", ("QUIET", "CONTENDED", "NOT-MEASURABLE")),
     ):
         value = _require(manifest[holder], key, str, "manifest.%s" % holder)

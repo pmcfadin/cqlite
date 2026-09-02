@@ -638,6 +638,8 @@ manifest = {
         "path": env("AB_CORPUS", ""),
         "served_dir": env("AB_SERVED_DIR", ""),
         "compressed": env("AB_CORPUS_COMPRESSED", "") == "compressed",
+        "compression": env("AB_COMPRESSION_STATE", "NOT-RECORDED"),
+        "compression_detail": env("AB_COMPRESSION_DETAIL", "NOT-RECORDED"),
         "storage": env("AB_STORAGE", "NOT-RECORDED"),
         "storage_attestation": env("AB_STORAGE_ATTESTATION", "") or None,
         "storage_detail": env("AB_STORAGE_DETAIL", "NOT-RECORDED"),
@@ -817,10 +819,35 @@ export AB_CORPUS_COMPRESSED="$CORPUS_COMPRESSED"
 export AB_SERVED_DIR="$SERVED_DIR"
 export AB_CORPUS_FILES="$CORPUS_FILES" AB_CORPUS_BYTES="$CORPUS_BYTES"
 say "corpus path $CORPUS served-dir $SERVED_DIR data-db-files $CORPUS_FILES data-db-bytes $CORPUS_BYTES"
-say "corpus compression $CORPUS_COMPRESSED -- every served SSTable must have a usable CompressionInfo.db; the field is LZ4 and an UNCOMPRESSED corpus biases the ratio TOWARD the target"
-if [ "$CORPUS_COMPRESSED" != "compressed" ] && [ -z "$CONTROL" ]; then
-  die corpus-uncompressed \
-    "the served directory $SERVED_DIR holds SSTables with no usable CompressionInfo.db. The field is LZ4 (throughput-program-2026-07.md line 21) and removing LZ4 decode removes real CPU from the denominator, so an uncompressed corpus inflates the measured ratio -- the failure is in the direction that looks like success. Run it as a --control if you mean to measure an uncompressed corpus"
+# THE REQUIREMENT IS THE ALGORITHM, NOT THE EXISTENCE OF METADATA. Round 12
+# enforced "a non-empty CompressionInfo.db exists" while the comment beside it
+# said "the field is LZ4" -- so Snappy, Deflate, Zstd or NOOP metadata, and any
+# corrupt-but-non-empty file, passed as the required corpus. Scoring different
+# decompression work against an LZ4-derived band is a wrong number, and it is
+# the same requirement-versus-check gap one level deeper: we enforced EXISTENCE
+# where the requirement was IDENTITY.
+COMPRESSION_RAW="$(python3 "$SUPPORT" probe-compression "$SERVED_DIR" 2>/dev/null || echo 'UNPARSEABLE the probe failed')"
+COMPRESSION_STATE="${COMPRESSION_RAW%% *}"
+COMPRESSION_DETAIL="${COMPRESSION_RAW#* }"
+export AB_COMPRESSION_STATE="$COMPRESSION_STATE" AB_COMPRESSION_DETAIL="$COMPRESSION_DETAIL"
+say "corpus compression $COMPRESSION_STATE ($COMPRESSION_DETAIL) -- the field is LZ4 (throughput-program-2026-07.md line 21), so the target band is defined for LZ4 decode work and nothing else"
+if [ "$COMPRESSION_STATE" != "LZ4" ] && [ -z "$CONTROL" ]; then
+  case "$COMPRESSION_STATE" in
+    MISSING)
+      die corpus-uncompressed \
+        "the served directory $SERVED_DIR holds SSTables with no usable CompressionInfo.db ($COMPRESSION_DETAIL). Removing LZ4 decode removes real CPU from the denominator, so an uncompressed corpus inflates the measured ratio -- the failure is in the direction that looks like success. Run it as a --control if you mean to measure an uncompressed corpus" ;;
+    OTHER)
+      die corpus-wrong-compressor \
+        "the served corpus is compressed with $COMPRESSION_DETAIL, not LZ4. The target band was derived against LZ4 decode work, so a ratio measured against different decompression is not comparable to it -- regenerate the corpus with LZ4Compressor, or run it as a --control" ;;
+    UNRECOGNISED)
+      die corpus-unknown-compressor \
+        "the served corpus names a compressor this probe does not know ($COMPRESSION_DETAIL). The header parses, so the file is not damaged -- but an unknown compressor is not evidence of LZ4, and the band is LZ4's. Run it as a --control if you mean to measure it" ;;
+    NO-SSTABLES)
+      die corpus-empty "the served directory $SERVED_DIR holds no *-Data.db files" ;;
+    *)
+      die corpus-compression-unparseable \
+        "a served CompressionInfo.db does not parse as a compression header ($COMPRESSION_DETAIL). A non-empty file is not a valid one, and this corpus cannot be described -- so it cannot be measured" ;;
+  esac
 fi
 # THE OTHER HALF OF WHAT `i4i` STOOD FOR: LOCAL NVMe, NOT NETWORK STORAGE. This
 # is what disqualified this lane's own host -- `lsblk` reports *Amazon Elastic
