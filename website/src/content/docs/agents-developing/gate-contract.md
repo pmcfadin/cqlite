@@ -671,13 +671,14 @@ peer wanting a false `PASS` can simply edit `scripts/agent-gate.sh`, which is ch
 pack data; no check inside a process defends against the party that controls the process.
 *Accidental* corruption **is** in model, and its control is a periodic full-rehash sweep:
 `scripts/check-object-store-integrity.sh` runs a full `git fsck` (never `--connectivity-only`, which
-does not rehash content) over the shared store and emits an anchored three-valued
-`VERIFIED`/`CORRUPT`/`UNMEASURED` verdict — exit 0/4/5, and **a consumer must not read `UNMEASURED`
-as clean**. It runs at machine onboarding (`bootstrap-agent-machine.sh` section 5d, where
+does not rehash content) over the shared store and emits an anchored four-valued
+`VERIFIED`/`CORRUPT`/`UNSWEEPABLE`/`UNMEASURED` verdict — exit 0/4/6/5, and **a consumer must not
+read `UNMEASURED` as clean**. It runs at machine onboarding (`bootstrap-agent-machine.sh` section 5d, where
 `VERIFIED` is the only `[ok]`, so an unmeasured host cannot pass `--strict`) and on the worker
 supervisor's throttled per-iteration cadence (default every 6h). There, `CORRUPT` **stops the
 supervisor loudly** instead of holding — corruption is non-self-clearing, so a hold-and-repoll loop
-would spin to the wall-clock budget taking no useful action — while `UNMEASURED` is journalled and
+would spin to the wall-clock budget taking no useful action — and so does `UNSWEEPABLE` (below),
+while `UNMEASURED` is journalled and
 paged once and deliberately does **not** stop the loop, because refusing to run any worker over a
 hygiene probe that could not run is a self-DoS. **That sweep is periodic, not per-read, which is why
 the emitted clause still says `TRUSTED, not verified`.**
@@ -754,6 +755,27 @@ above 124 (timeout/shell conventions, `die()` and signal deaths above them) is r
 outright, and a status carrying a bit outside the supported mask is unclassified rather than folded
 into a class whose remedy would be wrong — which is how it degrades safely as git adds bits.
 
+**And that range has two halves, which sharing one verdict made a false negative on real
+commit-object corruption.** Measured on git 2.43.0: overwrite the loose object a live ref points *at*
+with unparseable bytes and fsck prints `fatal: loose object <sha> … is corrupt` and exits **128**,
+while the same damage to a *blob* — or a valid object stored under the commit's name — exits 3
+(`2|1`) and is caught. So the exact damage this control exists for lands outside the mask, where
+`unclassified` ⇒ `UNMEASURED` ⇒ the supervisor writes a fresh throttle stamp and keeps spawning
+workers. `124..127` is the timeout/exec convention — the fsck **never ran**, a fact about the box's
+tooling, and it stays permissive; `128`+ is git's own `die()` or a signal death — it **ran and did
+not finish**, and reproduced on *both* walks it is the stopping verdict `UNSWEEPABLE` (exit 6). The
+boundary is argued from the exec chain rather than assumed: `env`/`nice`/`timeout` each report their
+own failures inside `125..127`, so a status at or above 128 is the innermost command having actually
+started, which together with the launch marker below makes "fsck ran and died" an *affirmative*
+observation. **`UNSWEEPABLE` claims no cause and prints no repair** — the alternative was to read the
+`fatal:` text for a damage signature, i.e. the text-shape classifier again, narrower, with every
+wording nobody enumerated falling back to the same permissive state. It tells the operator to run the
+walk by hand and act on what the `fatal:` line names (that line is kept in the findings **for display
+only**; it reaches no branch), and it makes a completed sweep the condition for resuming. The
+verdict set is closed at **four**, and the closure is over *dispositions*, not over a count: a token
+is what every consumer keys its behaviour on, so a state that stops the box cannot be expressed as
+another verdict's cause text, while two causes that both continue (the reflog split above) must be.
+
 **And a status is only a bitmask if the command that produced it actually ran.** fsck's status space
 is shared with the shell's, so the classifier had a precondition it never checked: the two capture
 redirections are part of the fsck command, and a failure to open the scratch output file (a full or
@@ -781,7 +803,11 @@ reproduces it and latches it properly. A disagreement is therefore routed to `UN
 (`INCONSISTENT sweep result`), never folded into the generic "could not measure" line; the
 `UNMEASURED` tests stay disjunctive on purpose, because a disjunction that can only reach a
 non-passing branch cannot manufacture a verdict. The `CORRUPT` verdict is **persisted for the box in its own create-only
-file** (`<stamp>.CORRUPT`), because a timestamp-only stamp let the detecting lane stop while its
+file** (`<stamp>.STOP`, which records *which* stopping verdict it is, read affirmatively — it was
+`.CORRUPT` until a second stopping verdict existed, and a file whose *name* asserts damage is a
+confidently-wrong claim on disk for a verdict that establishes no cause; an unrecognised second line
+is a cause-free stop and is never defaulted to the damage text), because a timestamp-only stamp let
+the detecting lane stop while its
 peers skipped their own sweep for the interval and kept spawning workers over the damaged store.
 Putting the verdict *in* that stamp was the first fix and was itself a defect: stamp writes are
 unsynchronised overwrites, so a lane whose sweep started before the detection could finish after it
@@ -828,7 +854,7 @@ latch first, stamp second, and one `obj_sweep_stop_if_latched` helper before the
 **And ordering was not enough: the stamp is written only if the latch is CONFIRMED present, else it
 is forced stale (round 9, item 1).** "Latch first, stamp second" left the stamp unconditional, so on
 the one branch where the latch could not be *persisted* — a writable stamp inside a directory that is
-not writable, so creating `<stamp>.CORRUPT` fails while rewriting `<stamp>` succeeds — the detecting
+not writable, so creating `<stamp>.STOP` fails while rewriting `<stamp>` succeeds — the detecting
 lane stopped (correct) and still advertised a freshly swept box (not correct): its peers read the
 fresh stamp, skipped their own sweep for the whole interval, and kept working against a store already
 confirmed damaged. The stamp write is now gated on `obj_sweep_latch_present`, the afterwards-existence
@@ -864,6 +890,10 @@ structurally. The post-sweep reads stay: a peer can latch the box while this lan
 path that previously paid none. The latch question is also **four-valued**, because `[[ -e ]]` is
 false both for an absent latch and for one the process cannot look at: `unknown` STOPS under its own
 reason (`object-store-latch-unreadable`, never as `CORRUPT` — nothing observed damage), and
+`absent` requires the absence to be **established through searchable ancestors** — `-d` on the
+holding directory is itself two-valued (false both for a directory that does not exist and for one
+whose *ancestor* cannot be searched), so the probe walks up to the deepest ancestor it can stat and
+counts the absence only when that one is searchable, and
 `unkeyed` is the one permissive answer, announced once, because no key means no latch was ever named
 and stopping would make a missing sweep script halt every lane for want of a hygiene probe.
 

@@ -452,10 +452,11 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   defends against the party that controls the process. **ACCIDENTAL corruption IS in model**, and
   its control is a periodic full-rehash sweep: `scripts/check-object-store-integrity.sh` (full
   `git fsck`, never `--connectivity-only`, which does not rehash content), emitting an anchored
-  three-valued `VERIFIED`/`CORRUPT`/`UNMEASURED` verdict — run at machine onboarding
+  four-valued `VERIFIED`/`CORRUPT`/`UNSWEEPABLE`/`UNMEASURED` verdict — run at machine onboarding
   (`bootstrap-agent-machine.sh` section 5d, where VERIFIED is the ONLY `[ok]`) and on the
   worker supervisor's throttled per-iteration cadence (default 6h; `CORRUPT` **stops that
-  supervisor loudly** rather than holding, because corruption is non-self-clearing, while
+  supervisor loudly** rather than holding, because corruption is non-self-clearing, and so does
+  `UNSWEEPABLE` (round 10, below), while
   `UNMEASURED` is reported and deliberately does NOT stop the loop — refusing to run any worker
   **THE FATAL VERDICT IS AFFIRMATIVE, AND IT HAD TO BE MADE SO (#3749 review).** A `git fsck` over
   a store up to eight peer lanes are concurrently writing prints `error:` lines on a **healthy**
@@ -484,8 +485,12 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   structurally over the shipped call sites. Where the attribution itself fails (a third walk
   killed, unlaunchable or unclassifiable) the complaint is `UNATTRIBUTED` and non-passing, and a
   damage bit appearing ONLY in the third walk has not reproduced across the sweep walks: neither
-  is `CORRUPT` and neither is clean. The verdict set stays **closed at three** — the split is in
-  the CAUSE text, not in a fourth token two readers and a structural assert would have to learn.
+  is `CORRUPT` and neither is clean. That split stays in the CAUSE text rather than in a new token,
+  because both its outcomes CONTINUE the loop. **The rule generalises to DISPOSITION, not to a
+  count, and round 10 is where that mattered:** `UNSWEEPABLE` STOPS the box, and a token is what
+  every consumer keys its disposition on, so a state whose disposition differs from all existing
+  ones CANNOT be expressed as cause text — the verdict set is closed at **four**, and a fifth needs
+  a fifth disposition, not a fifth cause.
   **AND "THE ROOTS THE WALK HAS" WAS ITSELF AN UNCHECKED ASSUMPTION, WRONG IN BOTH DIRECTIONS
   (review round 7).** A review finding held that `--git-dir=<common>` discards linked worktrees'
   private administrative context, so a missing object needed only by a lane's private HEAD or index
@@ -537,7 +542,26 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   bits are tested INDEPENDENTLY, and FIRST**, before any completeness check on the rest of the
   status, and an unrelated bit can therefore never MASK damage — it only travels with it. Only a
   status at or above **124** (the timeout/shell conventions, and `die()`/signal deaths above them) is
-  refused bit-testing outright, and a status carrying a bit OUTSIDE the supported mask is
+  refused bit-testing outright — **and that range HAS TWO HALVES, WHICH SHARING ONE VERDICT MADE A
+  FALSE NEGATIVE ON REAL COMMIT-OBJECT CORRUPTION (round 10).** Measured on git 2.43.0: overwrite
+  the loose object a live ref points AT with unparseable bytes and fsck prints `fatal: loose object
+  <sha> … is corrupt` and exits **128**, while the same damage to a BLOB — or a VALID object stored
+  under the commit's name — exits 3 (`2|1`) and is caught. So the exact damage this control exists
+  for has a shape landing OUTSIDE the mask, where `unclassified` ⇒ `UNMEASURED` ⇒ the supervisor
+  writes a fresh throttle stamp and keeps spawning workers. **`124..127` is the timeout/exec
+  convention — the fsck NEVER RAN**, which is a fact about this box's tooling and stays permissive
+  (`unrunnable`); **`128`+ is git's own `die()` or a signal death — it RAN and did not finish**
+  (`fatal`), and reproduced on BOTH walks it is the STOPPING verdict `UNSWEEPABLE` (exit 6). The
+  boundary is argued from the exec chain, not assumed: `env`/`nice`/`timeout` each report their own
+  failures inside `125..127`, so a status at or above 128 is the innermost command having actually
+  started, which together with the `.started` marker below makes "fsck ran and died" an
+  AFFIRMATIVE observation rather than an absence. **`UNSWEEPABLE` CLAIMS NO CAUSE AND PRINTS NO
+  REPAIR** — the alternative was to read the `fatal:` text for a damage signature, i.e. round 1's
+  classifier again, narrower, and with every wording nobody enumerated falling back to the SAME
+  permissive state, so it would close only the cases somebody thought of. It tells the operator to
+  run the walk by hand and act on what the `fatal:` line names (that line is now kept in the
+  findings **for DISPLAY only** — it reaches no branch), and it makes a completed sweep the
+  condition for resuming. A status carrying a bit OUTSIDE the supported mask is
   `unclassified` rather than folded into a class whose remedy would be wrong. That is what makes it
   **degrade safely** as git adds bits: a new bit alongside damage is still damage, a new bit alone is
   non-passing, and widening `FSCK_KNOWN_MASK` is then a wording change rather than a correctness fix. **AND A STATUS IS ONLY A BITMASK IF THE COMMAND THAT PRODUCED IT ACTUALLY RAN
@@ -569,7 +593,12 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `UNMEASURED` and **NAMED** (`INCONSISTENT sweep result`) rather than folded into the generic
   "could not measure" line. The `UNMEASURED` tests stay disjunctive on purpose: a disjunction that
   can only reach a NON-PASSING branch cannot manufacture a verdict. **The `CORRUPT` verdict is PERSISTED
-  for the box in its OWN CREATE-ONLY FILE** (`<stamp>.CORRUPT`), because a timestamp-only stamp let
+  for the box in its OWN CREATE-ONLY FILE** (`<stamp>.STOP`, which RECORDS WHICH stopping verdict it
+  is, read affirmatively — round 10 renamed it from `.CORRUPT`, because a file whose NAME asserts
+  damage is a confidently-wrong claim on disk for a verdict that establishes no cause, and every
+  message naming that path would have sent an operator to the re-clone remedy; an unrecognised
+  second line is a cause-free stop and is never defaulted to the damage text), because a
+  timestamp-only stamp let
   the detecting lane stop while its three peers saw a fresh stamp, skipped their own sweep for the
   whole interval and kept spawning workers over the damaged store. **PUTTING THE VERDICT IN THE
   THROTTLE STAMP WAS THE FIRST FIX FOR THAT AND WAS ITSELF A DEFECT (round 2):** stamp writes are
@@ -599,7 +628,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   **AND ORDERING WAS NOT ENOUGH: THE STAMP IS WRITTEN ONLY IF THE LATCH IS CONFIRMED PRESENT,
   ELSE IT IS FORCED STALE (round 9, item 1).** "Latch first, stamp second" left the stamp
   UNCONDITIONAL, so on the one branch where the latch could not be PERSISTED — a writable stamp
-  inside a directory that is not writable, so creating `<stamp>.CORRUPT` fails while rewriting
+  inside a directory that is not writable, so creating `<stamp>.STOP` fails while rewriting
   `<stamp>` succeeds — the detecting lane stopped (correct) and still advertised a freshly swept box
   (not correct): its peers read the fresh stamp, skipped their own sweep for the whole interval, and
   kept working against a store already confirmed damaged. Round 1's harm, surviving in the one branch
@@ -647,7 +676,14 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   **AND THE LATCH QUESTION IS FOUR-VALUED, BECAUSE A FILE PREDICATE IS NOT.** `[[ -e "$latch" ]]`
   is false both for an absent latch and for one the process cannot look at — CLAUDE.md's standing
   two-valued-predicate rule, landing on the single file whose job is to stop the box. `present` and
-  `absent` (an affirmative measurement: the directory was searchable, or does not exist) join
+  `absent` (an affirmative measurement: the absence was ESTABLISHED THROUGH SEARCHABLE ANCESTORS —
+  **`-d` on the holding directory is ITSELF two-valued and reading it as absence was the same trap
+  one level up (round 10, item 2): it is false both for a directory that does not exist and for one
+  whose ANCESTOR cannot be searched, so a latch under an inaccessible ancestor answered `absent`,
+  the permissive value, bypassing the fail-closed state built for exactly it.** The probe now walks
+  up to the deepest ancestor it can stat and counts the absence only if THAT one is searchable,
+  which is what makes it a measurement: with a searchable ancestor every stat below it gives a true
+  answer, by induction) join
   **`unknown`**, which STOPS under its own reason `object-store-latch-unreadable` — never as
   CORRUPT, since nothing observed damage and that remedy would send an operator to re-clone a
   healthy store — and **`unkeyed`**, the one permissive answer, announced once: no key means no
