@@ -458,7 +458,18 @@ refuse_tool_failure() {
 # claim — "the repository is the CURRENT WORKING DIRECTORY's, with no env
 # override" — true, where before a caller's `GIT_DIR` silently won.
 #
-# THE READS ARE ALSO BOUNDED (roborev job 358, Medium). They read the SHARED
+# WHAT IS BOUNDED, AND WHAT IS NOT (roborev job 358, NARROWED by job 382). The
+# EXTERNAL commands are bounded: every git call and `mktemp -d`, through the one
+# `_anchor_bounded` runner. NOT BOUNDED, and the evidence line SAYS so rather than
+# implying otherwise: `_anchor_canon` (`cd` + `pwd -P`) and the `[ -d … ]` probe on
+# the lane object directory are SHELL BUILTINS — there is no process for a runner
+# to signal — so on a stalled mount they can still hang this guard before any git
+# read happens. Inventing a way to bound a builtin is explicitly NOT the fix; the
+# claim is narrowed to what is true instead. One unbounded builtin stat was also
+# DELETED rather than bounded (the scratch `.git` check — see its own note below),
+# because removing code beats bounding it.
+#
+# THE BOUNDED READS (job 358, Medium). They read the SHARED
 # object store, so a malformed loose object (a FIFO) or a stalled filesystem read
 # would hang the merge guard forever instead of producing the documented
 # `ANCHOR-UNVERIFIABLE`. In model on both halves: a peer lane can plant into that
@@ -605,7 +616,16 @@ _anchor_resolve_bound() {
   local anchor="$1" head="$2" name
   if name=$(resolve_advisory_timeout) && ANCHOR_BOUND_RUNNER=$(command -v "$name" 2>/dev/null) &&
      [ -n "$ANCHOR_BOUND_RUNNER" ]; then
-    ANCHOR_READS="bounded-${ADVISORY_TIMEOUT_SECS}s+${ADVISORY_KILL_GRACE}s"
+    # THE TOKEN NAMES EXACTLY WHAT IS BOUNDED (roborev job 382). It used to read a
+    # bare `bounded-<n>s+<g>s`, which claimed more than is true: `_anchor_canon`
+    # (`cd` + `pwd -P`) and the `[ -d "$lane_objects" ]` probe are SHELL BUILTINS,
+    # so there is no process to bound and a stalled mount can still hang them. A
+    # guard that says "bounded" while a filesystem probe can hang is the overclaim
+    # shape this issue has spent every round removing, and the standing rule is
+    # that a check claiming nothing false beats one claiming a closure it does not
+    # deliver. So the token says: the EXTERNAL commands are bounded, the builtin
+    # filesystem probes are not.
+    ANCHOR_READS="bounded-${ADVISORY_TIMEOUT_SECS}s+${ADVISORY_KILL_GRACE}s(external:git,mktemp;UNBOUNDED:cd/test-builtins)"
     return 0
   fi
   ANCHOR_BOUND_RUNNER=""
@@ -626,14 +646,25 @@ _anchor_resolve_bound() {
 # location-specific variables by exporting them in a subshell (see _anchor_git).
 # A timeout is reported through the exit code (124 from timeout(1), or 137 when
 # the SIGKILL escalation was needed) and every caller maps those to UNVERIFIABLE.
-_anchor_run() {
+# _anchor_bounded <external-cmd> <args...> — the ONE bounded-external runner
+# (roborev job 382). Extracted from `_anchor_run` rather than duplicated, so
+# `mktemp` and git share one bound and one env allowlist. Only EXTERNAL commands
+# can go through it; a shell builtin has no process to bound, which is why the
+# claim is narrowed rather than extended (see the header).
+_anchor_bounded() {
   if [ -n "$ANCHOR_BOUND_RUNNER" ]; then
     env -i "${ANCHOR_GIT_ENV[@]}" "$ANCHOR_BOUND_RUNNER" \
-      --kill-after="$ADVISORY_KILL_GRACE" "$ADVISORY_TIMEOUT_SECS" \
-      git "${ANCHOR_GIT_OPTS[@]}" "$@"
+      --kill-after="$ADVISORY_KILL_GRACE" "$ADVISORY_TIMEOUT_SECS" "$@"
   else
-    env -i "${ANCHOR_GIT_ENV[@]}" git "${ANCHOR_GIT_OPTS[@]}" "$@"
+    env -i "${ANCHOR_GIT_ENV[@]}" "$@"
   fi
+}
+
+# MULTI-LINE ON PURPOSE: the structural census in the test suite detects function
+# boundaries by a line that is exactly `}`, and a one-line definition left its
+# scan running into the NEXT function (job 382 — it flagged a comment there).
+_anchor_run() {
+  _anchor_bounded git "${ANCHOR_GIT_OPTS[@]}" "$@"
 }
 
 # _anchor_refuse_timeout <anchor> <head> <what> — THE ONE timeout refusal, shared
@@ -763,8 +794,14 @@ _anchor_build_scratch() {
       ANCHOR_SCRATCH_ERR="the scratch root $tmp_canon resolves INSIDE the repository (work tree $repo_canon / git dir $common_canon); NOTHING was created"
       return 1 ;;
   esac
-  if ! ANCHOR_SCRATCH=$(mktemp -d "$tmp_canon/premerge-anchor.XXXXXX" 2>/dev/null) ||
-     [ -z "$ANCHOR_SCRATCH" ] || [ ! -d "$ANCHOR_SCRATCH" ]; then
+  # BOUNDED (job 382): `mktemp` is an EXTERNAL command touching the filesystem, so
+  # a stalled TMPDIR mount would hang the guard before any git read.
+  rc=0
+  ANCHOR_SCRATCH=$(_anchor_bounded mktemp -d "$tmp_canon/premerge-anchor.XXXXXX" 2>/dev/null) || rc=$?
+  if _anchor_timed_out "$rc"; then
+    _anchor_refuse_timeout "$anchor" "$head" "creating the scratch directory (mktemp -d)"
+  fi
+  if [ "$rc" -ne 0 ] || [ -z "$ANCHOR_SCRATCH" ] || [ ! -d "$ANCHOR_SCRATCH" ]; then
     ANCHOR_SCRATCH=""
     ANCHOR_SCRATCH_ERR="could not create a scratch directory under $tmp_canon"
     return 1
@@ -825,7 +862,16 @@ _anchor_build_scratch() {
   if _anchor_timed_out "$rc"; then
     _anchor_refuse_timeout "$anchor" "$head" "initialising the isolated scratch repository (git init)"
   fi
-  if [ "$rc" -ne 0 ] || [ ! -d "$ANCHOR_SCRATCH_REPO/.git" ]; then
+  # THE `[ -d "$ANCHOR_SCRATCH_REPO/.git" ]` CHECK IS DELETED (job 382), not
+  # bounded: it was an UNBOUNDED builtin stat, and it was redundant for
+  # CORRECTNESS — a `git init` that exits 0 without creating a repository would
+  # make every bounded read below fail, so the check still refuses. Removing code
+  # beats bounding it.
+  #   THE TRADE, stated: in that (essentially impossible) case the refusal would
+  #   name "the ANCHOR commit is not present in this repository" rather than a
+  #   broken scratch — a less accurate cause for a state that requires a broken
+  #   git. An unbounded stat on a stalled mount is a real hang; that is not.
+  if [ "$rc" -ne 0 ]; then
     ANCHOR_SCRATCH_ERR="could not initialise an isolated scratch repository at $ANCHOR_SCRATCH_REPO"
     return 1
   fi

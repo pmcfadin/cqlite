@@ -84,8 +84,15 @@ fi
 # invites reliance it cannot support.
 #
 # WHAT REPLACES IT NEEDS NO ADJUDICATION AT ALL. Every process this suite spawns
-# carries `$T/` in its argv — the shim paths and the sentinel sleep alike — and
-# `$T` is a per-run `mktemp -d`, so ANYTHING wearing it IS OURS. That makes the
+# wears ONE OF TWO run-unique argv shapes, and BOTH are needed — matching only the
+# first was a matcher bug (roborev job 382), not a return of the deleted class:
+#   (a) `$T/…`         the shim paths (the KILL shim blocked on its FIFO wears this)
+#   (b) `$TOSENTINEL`  the TERM shim `exec`s into `sleep <duration>`, which REPLACES
+#                      its argv and ERASES the shim path — so shape (a) misses
+#                      precisely the process the sweep exists to catch, and a
+#                      centuries-long sleep survives.
+# `$T` is a per-run `mktemp -d` and `$TOSENTINEL` is derived from this run's pid, so
+# ANYTHING wearing either IS OURS. That makes the
 # kill safe by CONSTRUCTION (job 279's argv validation, with a needle no peer can
 # produce) instead of by interpreting an exit status. Nothing here decides
 # anything, so nothing here can fail open: if `ps` cannot run, the sweep kills
@@ -98,27 +105,47 @@ fi
 # ORDER IS LOAD-BEARING: the sweep runs BEFORE `rm -rf "$T"`. A shim can be
 # blocked on a FIFO inside $T, and removing the FIFO does NOT unblock a reader
 # already waiting on it.
+# DECLARED EMPTY HERE, ~2000 lines before it is derived, because the traps below
+# read it AT FIRE TIME: under `set -u` a signal arriving before the derivation
+# would error inside the handler. Empty simply means the sentinel arm of the sweep
+# has nothing to match yet — the `$T/` arm still works.
+TOSENTINEL=""
+
 suite_cleanup() {
   to_sweep_run_processes
   rm -f "$T/ps-census.txt" 2>/dev/null
   rm -rf "$T"
 }
 
-# to_sweep_run_processes — kill every process whose argv names THIS RUN's scratch
-# dir. Best-effort by design: no status is inspected and no verdict is produced.
-# `wait` follows, for whatever was a direct child (it is a no-op for the rest).
+# to_sweep_run_processes — kill every process whose argv wears one of THIS RUN's
+# two unique shapes (see the block above). Best-effort by design: no status is
+# inspected and no verdict is produced. `wait` follows, for whatever was a direct
+# child (a harmless no-op for the rest).
+#
+# THE SNAPSHOT LIVES INSIDE `$T`, not in shared TMPDIR (roborev job 382). A
+# predictable name under a world-writable directory, truncated by shell
+# redirection, lets a stale or peer-created SYMLINK redirect the write. `$T` is
+# already run-unique and already created — it exists before these traps are
+# installed — so it costs nothing.
 to_sweep_run_processes() {
-  local snap p a
-  snap="${TMPDIR:-/tmp}/premerge-sweep.$$"
+  local snap p a hit
+  snap="$T/ps-sweep.txt"
   ps -eo pid=,args= >"$snap" 2>/dev/null || { rm -f "$snap"; return 0; }
   while read -r p a; do
     case "$p" in ''|*[!0-9]*) continue ;; esac
-    case "$a" in
-      *"$T/"*)
-        kill -KILL "$p" 2>/dev/null || true
-        wait "$p" 2>/dev/null || true
-        ;;
-    esac
+    # Two needles, tested separately rather than as one `case` alternative: an
+    # EMPTY `$TOSENTINEL` (before it is derived, see above) would otherwise be a
+    # pattern matching an empty argv, and "match nothing" must be explicit rather
+    # than an accident of what `ps` happens to print.
+    hit=0
+    case "$a" in *"$T/"*) hit=1 ;; esac
+    if [ "$hit" -eq 0 ] && [ -n "$TOSENTINEL" ] && [ "$a" = "$TOSENTINEL" ]; then
+      hit=1
+    fi
+    if [ "$hit" -eq 1 ]; then
+      kill -KILL "$p" 2>/dev/null || true
+      wait "$p" 2>/dev/null || true
+    fi
   done <"$snap"
   rm -f "$snap"
   return 0
@@ -1164,6 +1191,21 @@ if run_anc 0 "anchored delta pair (full PASS at X + delta at Y) -> exit 0" \
       ok "delta pair: the evidence line AFFIRMS the reads were bounded" ;;
     *) bad "delta pair: expected an affirmative bounded anchor-reads: token (got: $OUT)" ;;
   esac
+  # THE TOKEN MUST NOT CLAIM MORE THAN IS BOUNDED (job 382). `_anchor_canon`
+  # (`cd`+`pwd -P`) and the object-dir `[ -d … ]` probe are SHELL BUILTINS with no
+  # process to bound, so a bare `bounded-<n>s+<g>s` overclaimed. The token now
+  # names both halves, and this arm pins BOTH — a reworded token that quietly
+  # dropped the unbounded half would restore the overclaim.
+  case "$OUT" in
+    *"anchor-reads: bounded-"*"external:git,mktemp"*)
+      ok "delta pair: the token names WHAT is bounded (the external commands)" ;;
+    *) bad "delta pair: the anchor-reads token must name the bounded externals (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"UNBOUNDED:cd/test-builtins"*)
+      ok "delta pair: the token also names what is NOT bounded — no overclaim" ;;
+    *) bad "delta pair: the anchor-reads token must declare the UNBOUNDED builtin probes (got: $OUT)" ;;
+  esac
   case "$OUT" in
     *"summary: $RGOODDELTA"*) ok "delta pair: the DELTA-RECERT line names the delta summary file" ;;
     *) bad "delta pair: DELTA-RECERT must name the delta summary file (got: $OUT)" ;;
@@ -2128,9 +2170,14 @@ fi
 # ...and that every git invocation in the check consumes that array rather than
 # calling `git` bare. Counted, not eyeballed: this is the invariant that job 276
 # says has to reach the sites a later change adds.
+# Scans `_anchor_bounded` TOO (job 382): it is now where the raw command actually
+# executes, so a git call added there would bypass the options array. COMMENTS are
+# skipped — the first version matched the phrase "not inside a git work tree" in a
+# comment and reported a bypass that did not exist.
 anchor_bare=$(awk '
-  /^_anchor_(run|git)\(\) \{/ { inf = 1 }
+  /^_anchor_(run|git|bounded)\(\) \{/ { inf = 1 }
   inf && /^\}/ { inf = 0 }
+  inf && /^[[:space:]]*#/ { next }
   inf && /(^|[^_[:alnum:]])git / && !/ANCHOR_GIT_OPTS/ { c++ }
   END { print c + 0 }
 ' "$ASSERT")
