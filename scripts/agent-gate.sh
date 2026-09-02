@@ -2109,12 +2109,24 @@ apply_fixture_preflight() {
       echo "agent-gate: remedy: bash test-data/scripts/fetch-datasets.sh  (or point CQLITE_DATASETS_ROOT at a checkout that has it)" >&2
       echo "agent-gate: intentional opt-out (SKIP, stamped in the SUMMARY): AGENT_GATE_ALLOW_MISSING_FIXTURES=1" >&2
       _tree_meta_array   # #2926: every emitted block carries the tree provenance
-      # disk-exhaustion-exempt: pre-flight FAIL emitted BEFORE the component loop -- no component has run, so there is no component log to scan and the line could only render a misleading "0 RECOGNISED ... (0/0 PASS)"; the cause is already named by missing-fixtures: in this same block
+      # #3800 (roborev job 358): this block is emitted AFTER `run_file_size`, so a verdict may
+      # already be recorded and the old "no component has run" exemption was false. The
+      # attribution is appended when there IS something to attribute, and omitted when there is
+      # not -- an empty subject set could only render a vacuous "0 RECOGNISED ... (0/0 PASS)",
+      # which is what the exemption was right about and the only part of it that survives.
+      _dx_pairs="$(_disk_recorded_pairs)"; _dx_meta=()
+      # A `case` on the SUBJECT SET, never an `if`/`&&` around the CALL: the attribution must
+      # never sit inside a conditional whose value could influence a verdict, and
+      # `test_agent_gate_disk_exhaustion.sh`'s 15-attribution guard enforces that syntactically.
+      case "$_dx_pairs" in
+        ?*) _dx_meta+=("$(_disk_exhaustion_line $_dx_pairs)") ;;
+      esac
       emit_summary FAIL \
         "preflight: FAIL (canonical corpus $CANONICAL_FIXTURE_KEYSPACE absent under $CQLITE_DATASETS_ROOT/sstables — only committed byte-parity refs present)" \
         "missing-fixtures: FAIL-CLOSED (#2078) — dataset-dependent components would SKIP; overall verdict FAIL" \
         "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
+        "${_dx_meta[@]+"${_dx_meta[@]}"}" \
         "hint: bash test-data/scripts/fetch-datasets.sh  (opt-out: AGENT_GATE_ALLOW_MISSING_FIXTURES=1 restores SKIP + stamps this block)"
       exit 1 ;;
   esac
@@ -2543,12 +2555,19 @@ apply_schemas_preflight() {
       return 1
     fi
     _tree_meta_array   # #2926
-    # disk-exhaustion-exempt: pre-flight FAIL on a REJECTED relative CQLITE_SCHEMAS_ROOT, emitted BEFORE the component loop -- no component log exists to attribute, and the missing-schemas: marker in this same block already names the cause
+    # #3800 (roborev job 358): emitted AFTER run_file_size -- see the fixtures site for why the
+    # "no component has run" exemption was false. Appended only when a verdict exists.
+    _dx_pairs="$(_disk_recorded_pairs)"; _dx_meta=()
+    # `case` on the subject set, not `if`/`&&` around the call -- see the fixtures site.
+    case "$_dx_pairs" in
+      ?*) _dx_meta+=("$(_disk_exhaustion_line $_dx_pairs)") ;;
+    esac
     emit_summary FAIL \
       "preflight: FAIL ($reject)" \
       "$marker" \
       "$(_component_set_meta)" \
       "${TREE_META_LINES[@]}" \
+      "${_dx_meta[@]+"${_dx_meta[@]}"}" \
       "hint: export a clean ABSOLUTE CQLITE_SCHEMAS_ROOT, or unset it to use $root"
     exit 1
   fi
@@ -2572,12 +2591,21 @@ apply_schemas_preflight() {
         return 1
       fi
       _tree_meta_array   # #2926: every emitted block carries the tree provenance
-      # disk-exhaustion-exempt: pre-flight FAIL on unreadable committed test-data/schemas/*.cql, emitted BEFORE the component loop -- no component log exists to attribute, and missing-schemas: already names the cause
+      # #3800 (roborev job 358): emitted AFTER run_file_size -- see the fixtures site for why the
+      # "no component has run" exemption was false. Appended only when a verdict exists.
+      _dx_pairs="$(_disk_recorded_pairs)"; _dx_meta=()
+      # A `case` on the SUBJECT SET, never an `if`/`&&` around the CALL: the attribution must
+      # never sit inside a conditional whose value could influence a verdict, and
+      # `test_agent_gate_disk_exhaustion.sh`'s 15-attribution guard enforces that syntactically.
+      case "$_dx_pairs" in
+        ?*) _dx_meta+=("$(_disk_exhaustion_line $_dx_pairs)") ;;
+      esac
       emit_summary FAIL \
         "preflight: FAIL (committed CQL schema fixtures unreadable under $root — missing: $missing)" \
         "missing-schemas: FAIL-CLOSED (#3148) — dataset-backed components would panic on an absent .cql; overall verdict FAIL" \
         "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
+        "${_dx_meta[@]+"${_dx_meta[@]}"}" \
         "hint: expected $root/${missing%% *} — unset CQLITE_SCHEMAS_ROOT, or: git -C $REPO_ROOT restore --source=HEAD -- test-data/schemas"
       exit 1 ;;
   esac
@@ -6107,17 +6135,24 @@ EXPLICIT_SUMMARY_FILE=0
 # TABLE, on the `missing-fixtures: FAIL-CLOSED (#2078)` / `missing-schemas: FAIL-CLOSED (#3148)`
 # precedent: a distinct, textually-separable marker key carrying a CLOSED value set.
 #
-# THE SCOPE IS "CARRIES A COMPONENT TABLE", NOT "IS TERMINAL" (#3800, roborev job 299). The
-# script has 25 `emit_summary`/`_emit_terminal_summary` call sites; 7 carry a component table
-# and all 7 append this line. The other 18 -- the three pre-flight FAIL-CLOSED blocks, the
-# #3544 component-set FAIL, the two summary-integrity FAILs, the shared forwarder, the five
-# self-test hooks, the four --delta usage ERRORs, the two --delta refused-BEFORE-EXECUTION
-# blocks and the --only no-Data.db pre-flight -- are emitted where NO component has run (or,
-# for the two integrity FAILs, where the block carries no component table and its cause is a
-# concurrent peer). They have nothing to attribute: the line could only render a misleading
-# `0 RECOGNISED ... (0/0 PASS)`, and each block already names its own cause with its own
-# dedicated marker, so adding it there would be noise that dilutes this marker's meaning. Each
-# of those 18 therefore carries a `# disk-exhaustion-exempt: <reason>` comment naming why, and
+# THE SCOPE IS "COULD A VERDICT ALREADY BE RECORDED", NOT "IS TERMINAL" AND NOT "CARRIES A
+# TABLE" (#3800, roborev jobs 299 and 358). Of the script's 25
+# `emit_summary`/`_emit_terminal_summary` call sites, 10 append this line: the 7 that render a
+# component table, plus the 3 FULL-gate PRE-FLIGHT blocks (#2078 fixtures, #3148 schemas x2).
+# Those three were exempt on the stated ground that "no component has run" -- and that was
+# FALSE: `run_file_size` executes BEFORE both preflights, deliberately, since it needs no
+# dataset and those guards exit when the corpus is absent. So a `file-size` that died of ENOSPC
+# was named by neither the block nor any attribution, which is this issue's opening defect
+# inside an exemption written for this issue. They now attribute over whatever
+# `_disk_recorded_pairs` has, and omit the line only when that set is EMPTY -- the one part of
+# the old rationale that survives, since an empty subject set could render only a vacuous
+# `0 RECOGNISED ... (0/0 PASS)`.
+#
+# The remaining 15 -- the #3544 component-set FAIL, the two summary-integrity FAILs, the shared
+# forwarder, the five self-test hooks, the four --delta usage ERRORs, the two --delta
+# refused-BEFORE-EXECUTION blocks -- are emitted before ANY component can have recorded a
+# verdict (or, for the integrity FAILs, carry no table and name a concurrent peer as their
+# cause). Each of those 15 therefore carries a `# disk-exhaustion-exempt: <reason>` comment, and
 # `scripts/tests/test_agent_gate_disk_exhaustion.sh` censuses EVERY emit site as
 # MARKED / EXEMPT / GAP -- a new emit site with neither REDS that suite. An earlier wording of
 # this contract claimed "every terminal block", which was false and which the then-structural
@@ -6668,6 +6703,27 @@ _disk_scan_subject() {
     fi
   done
   return 1
+}
+
+# _disk_recorded_pairs: the `<name> <status>` pairs for every verdict recorded SO FAR, in canonical
+# COMPONENTS order. It exists for the FULL-gate PRE-FLIGHT blocks, whose exemptions used to claim
+# "no component has run" (roborev job 358). That claim was FALSE: `run_file_size` executes BEFORE
+# `apply_fixture_preflight` and `apply_schemas_preflight` -- deliberately, since it needs no dataset
+# and those guards exit when the corpus is missing -- so by the time either emits its FAIL block,
+# file-size has recorded a verdict, and a `file-size` that died of ENOSPC was reported by neither
+# the block's component list nor any attribution. That is this issue's opening defect inside the
+# exemption written for this issue.
+#
+# It reads through the ONE aggregation wrapper, and disposes with `|| true` because these blocks
+# are ALREADY FAIL and a renderer must not own a verdict.
+_disk_recorded_pairs() {
+  local c rf
+  for c in "${COMPONENTS[@]+"${COMPONENTS[@]}"}"; do
+    rf="${LOG_DIR:-}/$c.result"
+    [ -f "$rf" ] || continue
+    _disk_verdict_read_aggregate "$c" "$rf" || true
+    printf '%s %s\n' "$c" "$DISK_VERDICT_ST"
+  done
 }
 
 _disk_exhaustion_line() {

@@ -284,9 +284,11 @@ worktree; additionally prune stale worktrees' `target/` dirs and size the shared
 bare `minimal-build: FAIL (611s)` beside 36/37 PASS and `tree-integrity: PASS` — and since
 doctrine retains ONLY the SUMMARY and forbids reading `gate.log`, the reader debugged a
 minimal-features build that was never broken. Every SUMMARY block **that carries a component
-table** — 7 of the script's 25 emit sites — now carries a `disk-exhaustion:` line naming a
+table**, plus the three FULL-gate pre-flight blocks — 10 of the script's 25 emit sites — now carries a `disk-exhaustion:` line naming a
 recognised signature, the component and the log line, plus a start→emit free-space delta; see
-the gate section of `CLAUDE.md` for its closed value set. The other 18, emitted before any
+the gate section of `CLAUDE.md` for its closed value set. (The pre-flight blocks were exempt
+until #3800/job 358, on the stated ground that no component had run — false, because
+`run_file_size` executes before them, so a file-size that died of ENOSPC was named nowhere.) The other 15, emitted before any
 component runs (the pre-flight FAIL-CLOSED blocks, the `--delta` usage errors and
 refused-before-execution blocks, the self-test hooks), are **declared exempt at the site** and
 already name their own cause. It is an **attribution, never a verdict**: it never changes

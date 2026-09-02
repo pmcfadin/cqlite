@@ -430,15 +430,24 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   the in-memory subjects collapses the same run to `0 RECOGNISED … (3/3 PASS)`, which *is* the
   false reading. `/dev/full` is Linux-only, so that case **declares its skip** and a
   host-independent injected case carries the property everywhere.
-  **THE SCOPE IS "CARRIES A COMPONENT TABLE", NOT "IS TERMINAL", AND THE 18 EXCLUSIONS ARE
-  DECLARED AT THE SITE.** Of the script's 25 `emit_summary`/`_emit_terminal_summary` call
-  sites, 7 carry a table and all 7 append the line; the other 18 (the three pre-flight
-  FAIL-CLOSED blocks, the `component-set` FAIL, the two summary-integrity FAILs, the shared
-  forwarder, the five self-test hooks, the four `--delta` usage ERRORs, the two `--delta`
-  refused-**before-execution** blocks, the `--only` no-Data.db pre-flight) are emitted where no
-  component has run, so they have **nothing to attribute** — the line could only render a
-  misleading `0 RECOGNISED … (0/0 PASS)` — and each already names its own cause with its own
-  marker. Each carries a `# disk-exhaustion-exempt: <reason>` and
+  **THE SCOPE IS "COULD A VERDICT ALREADY BE RECORDED", NOT "IS TERMINAL" AND NOT "CARRIES A
+  TABLE" — AND THE EXCLUSIONS ARE DECLARED AT THE SITE.** Of the script's 25
+  `emit_summary`/`_emit_terminal_summary` call sites, **10** append the line: the **7** that
+  render a component table, plus the **3 FULL-gate PRE-FLIGHT blocks** (#2078 fixtures, #3148
+  schemas ×2). **Those three were exempt on the ground that "no component has run", and that
+  was FALSE (job 358): `run_file_size` executes BEFORE both preflights** — deliberately, since
+  it needs no dataset and those guards exit when the corpus is absent — so a `file-size` that
+  died of ENOSPC was named by neither the block's contents nor any attribution. **This issue's
+  opening defect, inside an exemption written for this issue.** They now attribute over the
+  verdicts recorded so far and omit the line only when that set is **empty**, which is the one
+  part of the old rationale that survives. The remaining **15** (the `component-set` FAIL, the
+  two summary-integrity FAILs, the shared forwarder, the five self-test hooks, the four
+  `--delta` usage ERRORs, the two `--delta` refused-**before-execution** blocks) are emitted
+  before any component *can* have recorded a verdict, so they have **nothing to attribute** —
+  the line could only render a misleading `0 RECOGNISED … (0/0 PASS)` — and each already names
+  its own cause with its own marker. **Read the pattern across jobs 299 → 301 → 304 → 358: four
+  times an exemption or a subject set was justified by a claim about WHAT COULD HAVE RUN, and
+  four times that claim was wrong. Verify the ordering in the source; do not reason about it.** Each carries a `# disk-exhaustion-exempt: <reason>` and
   `scripts/tests/test_agent_gate_disk_exhaustion.sh` censuses **every** site as
   MARKED/EXEMPT/GAP, so a new emit site with neither REDS that suite. The claim read "every
   terminal block" until job 299, and the then-structural test **could not see** that it was

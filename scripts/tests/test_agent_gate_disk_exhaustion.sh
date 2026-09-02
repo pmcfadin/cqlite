@@ -97,7 +97,7 @@ EXTRACT_OK=1
   for fn in _disk_safe _disk_abbrev _disk_df_probe _disk_gib _disk_free_leg \
             _disk_free_field _disk_scan_field _disk_note_capture_failure \
             _disk_note_unread_verdict _disk_secs_is_int _disk_verdict_read \
-            _disk_verdict_read_aggregate \
+            _disk_verdict_read_aggregate _disk_recorded_pairs \
             _disk_scan_subject _disk_exhaustion_line \
             _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file _tree_hex_id_ok \
             _tree_digest_ok _tree_manifest_ok _tree_mtime _tree_identity \
@@ -110,7 +110,7 @@ EXTRACT_OK=1
 for want in DISK_EXHAUSTION_SIGNATURES DISK_MEM_SUBJECTS DISK_UNREAD_VERDICTS _disk_safe _disk_abbrev \
             _disk_df_probe _disk_gib _disk_free_leg _disk_free_field _disk_scan_field \
             _disk_note_capture_failure _disk_note_unread_verdict _disk_secs_is_int \
-            _disk_verdict_read _disk_verdict_read_aggregate \
+            _disk_verdict_read _disk_verdict_read_aggregate _disk_recorded_pairs \
             record_result _disk_scan_subject _disk_exhaustion_line \
             _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file _tree_hex_id_ok \
             _tree_digest_ok _tree_manifest_ok _tree_mtime _tree_identity \
@@ -643,16 +643,30 @@ END {
     while (args ~ /\\[ \t]*$/) { j++; args = args "\n" line[j] }
     verdict = "GAP"
     if (args ~ /_disk_exhaustion_line/) verdict = "MARKED-DIRECT"
-    else if (match(args, /\$\{[A-Za-z_]+\[@\]\}/)) {
-      nm = substr(args, RSTART + 2, RLENGTH - 6)
-      for (k = i; k > 0; k--) {
-        if (line[k] ~ ("(declare -a |local -a )?" nm "=\\(")) break
-        if (k < i && line[k] ~ /^[A-Za-z_][A-Za-z0-9_]*\(\) \{|^\}/) break
-        if (line[k] !~ /^[ \t]*#/ && line[k] ~ ("" nm "\\+=\\(\"\\$\\(_disk_exhaustion_line")) { verdict = "MARKED-VIA-" nm; break }
-        if (match(line[k], /< <\(([A-Za-z_][A-Za-z0-9_]*)\)/)) {
-          fn = substr(line[k], RSTART + 4, RLENGTH - 5)
-          if (_marking_fn(fn)) { verdict = "MARKED-VIA-RENDERER-" fn; break }
+    else {
+      # EVERY array named in the args is examined, not just the first one, and BOTH spellings are
+      # recognised. Two defects were here:
+      #   * the derivation took the FIRST `${NAME[@]}` in the args and walked upward for THAT
+      #     name only. A site that expands several arrays -- e.g. `${TREE_META_LINES[@]}` before
+      #     the one carrying the attribution -- censused as a GAP while appending the line.
+      #   * it matched only the plain `${arr[@]}`, while agent-gate.sh MANDATES the
+      #     `"${arr[@]+"${arr[@]}"}"` idiom wherever an array may be empty (a plain `${arr[@]}` of
+      #     an empty array is "unbound" under `set -u` on bash 3.2).
+      # The name runs from `${` to the `[`, which is identical for both spellings.
+      rest = args
+      while (match(rest, /\$\{[A-Za-z_]+\[@\]/)) {
+        nm = substr(rest, RSTART + 2, RLENGTH - 5)
+        rest = substr(rest, RSTART + RLENGTH)
+        for (k = i; k > 0; k--) {
+          if (line[k] ~ ("(declare -a |local -a )?" nm "=\\(")) break
+          if (k < i && line[k] ~ /^[A-Za-z_][A-Za-z0-9_]*\(\) \{|^\}/) break
+          if (line[k] !~ /^[ \t]*#/ && line[k] ~ ("" nm "\\+=\\(\"\\$\\(_disk_exhaustion_line")) { verdict = "MARKED-VIA-" nm; break }
+          if (match(line[k], /< <\(([A-Za-z_][A-Za-z0-9_]*)\)/)) {
+            fn = substr(line[k], RSTART + 4, RLENGTH - 5)
+            if (_marking_fn(fn)) { verdict = "MARKED-VIA-RENDERER-" fn; break }
+          }
         }
+        if (verdict != "GAP") break
       }
     }
     if (verdict == "GAP") {
@@ -1908,6 +1922,61 @@ else
   printf 'SKIP - 24b-open-fail: this host still reads a file under a mode-000 directory (running as root), so a failed open cannot be induced. DECLARED, not silently omitted.\n'
 fi
 
+# (26) roborev job 358 -- THE PRE-FLIGHT BLOCKS ARE EMITTED **AFTER** A COMPONENT HAS RUN.
+#
+# Their exemptions read "no component has run, so there is nothing to attribute". That was FALSE:
+# `run_file_size` executes BEFORE `apply_fixture_preflight` and `apply_schemas_preflight`
+# (deliberately -- it needs no dataset, and those guards exit when the corpus is absent), so a
+# file-size that died of ENOSPC was named by neither the block's contents nor any attribution: this
+# issue's opening defect, inside an exemption written for this issue.
+#
+# (26a) ORDERING, ASSERTED FROM THE SOURCE rather than reasoned about -- which is the actual lesson,
+# since this is the FOURTH time in this issue that an exemption or a subject set rested on a wrong
+# claim about what could already have run. If someone reorders these calls the reasoning changes and
+# this case must be re-decided, so it reds rather than silently passing.
+_ord_fs=$(awk '/^run_file_size$/ { print NR; exit }' "$GATE")
+_ord_fx=$(awk '/^[[:space:]]+apply_fixture_preflight$/ { print NR; exit }' "$GATE")
+_ord_sc=$(awk '/^[[:space:]]+apply_schemas_preflight$/ { print NR; exit }' "$GATE")
+if [ -n "$_ord_fs" ] && [ -n "$_ord_fx" ] && [ -n "$_ord_sc" ] \
+   && [ "$_ord_fs" -lt "$_ord_fx" ] && [ "$_ord_fs" -lt "$_ord_sc" ]; then
+  ok "26a-ordering: run_file_size (line $_ord_fs) really does execute BEFORE apply_fixture_preflight ($_ord_fx) and apply_schemas_preflight ($_ord_sc) -- so those blocks CAN carry a recorded verdict, which is why they attribute instead of claiming nothing has run"
+else
+  bad "26a-ordering: could not establish the ordering from source (file-size=${_ord_fs:-<none>} fixtures=${_ord_fx:-<none>} schemas=${_ord_sc:-<none>}) -- if the calls were reordered the pre-flight attribution reasoning must be re-decided, not silently kept"
+fi
+# ...and the three pre-flight sites must be MARKED, not exempt. Derived from the census output so it
+# cannot drift from the classifier the rest of case 14 uses.
+_pf_exempt=$(disk_census | awk -F'\t' '$1 == "EXEMPT" && $3 ~ /emit_summary FAIL/ { n++ } END { print n+0 }')
+_pf_marked=$(disk_census | grep -c '^MARKED-VIA-_dx_meta' || true)
+if [ "$_pf_marked" = 3 ]; then
+  ok "26a-preflight-marked: all 3 FULL-gate pre-flight FAIL blocks append the attribution via _dx_meta (census-derived), so an ENOSPC that killed file-size before the corpus guard is named instead of hidden behind missing-fixtures:"
+else
+  bad "26a-preflight-marked: $_pf_marked of 3 pre-flight blocks append the attribution (still-exempt emit_summary FAIL sites: $_pf_exempt)"
+fi
+
+# (26b) RUNTIME: a recorded FAILing verdict whose log carries the signature is attributed, and an
+# EMPTY recorded set yields NO line at all -- the one part of the old exemption that survives, since
+# a vacuous "0 RECOGNISED ... (0/0 PASS)" would be worse than silence.
+d="$tmp/c26b"; mkdir -p "$d"
+o26b=$(
+  . "$EX"; LOG_DIR="$d"; _disk_env
+  COMPONENTS=(file-size fmt clippy)
+  printf 'FAIL 3\n' > "$d/file-size.result"
+  echo 'error: No space left on device' > "$d/file-size.log"
+  printf 'PAIRS [%s]\n' "$(_disk_recorded_pairs | tr '\n' ' ')"
+  printf 'LINE %s\n' "$(_disk_exhaustion_line $(_disk_recorded_pairs))"
+  rm -f "$d/file-size.result"
+  printf 'EMPTY [%s]\n' "$(_disk_recorded_pairs)"
+)
+l26b=$(printf '%s\n' "$o26b" | sed -n 's/^LINE //p')
+if case "$o26b" in *"PAIRS [file-size FAIL ]"*) true ;; *) false ;; esac \
+   && case "$l26b" in "disk-exhaustion: RECOGNISED (#3800)"*"component 'file-size'"*"file-size.log:1"*) true ;; *) false ;; esac \
+   && case "$o26b" in *"EMPTY []"*) true ;; *) false ;; esac; then
+  ok "26b-preflight-runtime: a file-size verdict recorded before the corpus guard is RECOGNISED and named with its log line, and an empty recorded set produces NO pairs (so the site appends no line and cannot render a vacuous 0/0)"
+else
+  bad "26b-preflight-runtime: the pre-flight attribution path is wrong:
+$o26b"
+fi
+
 # (25) roborev job 353 -- MANY REPEATED SIGNATURES, and the in-memory branch runs NO subprocess.
 #
 # `-m1` stops after the first matching LINE but `-o` prints every OCCURRENCE on it, and the
@@ -2226,10 +2295,15 @@ fi
 # genuinely absent and which also carries the measured SIGPIPE history; 25c the large no-signature
 # control, so the fast no-match path is shown to decide correctly and not merely quickly; 25d the
 # structural assert that the branch reads GREP'S OWN status via PIPESTATUS[1] under a
-# subshell-scoped 'set +o pipefail', which no runtime case here can see.);
+# subshell-scoped 'set +o pipefail', which no runtime case here can see.); +3 (roborev job 358: the
+# pre-flight blocks are emitted AFTER run_file_size, so their "no component has run" exemption was
+# false. 26a asserts the ORDERING from source -- the fourth time in this issue that an exemption
+# rested on a wrong claim about what could already have run -- and that all 3 sites are census-
+# derived MARKED; 26b drives the attribution over a recorded verdict and pins that an EMPTY
+# recorded set still yields no line.);
 # +0 (roborev job 319 rounds 4-5 added 21d, whose runtime half shares 21c's DECLARED skip; its
 # STRUCTURAL half needs no host capability but is counted at 0 to keep the floor host-independent.)
-CASE_FLOOR=89
+CASE_FLOOR=92
 printf '\n%s\n' "----------------------------------------"
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case-floor: %d cases ran but this suite declares a floor of %d -- cases were REMOVED or are dying silently.\n' \
