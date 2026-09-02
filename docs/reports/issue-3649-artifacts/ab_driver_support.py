@@ -231,6 +231,115 @@ def _check_ticket_predicates(value):
     return None
 
 
+# MIRRORS `AggFunc` (ticket.rs:162-178) and the `#[serde(tag = "type")]`
+# variants of `PredicateExpr` (ticket.rs:107-147). Internally tagged, so the JSON
+# is `{"type": "And", "exprs": [...]}`; no field in any variant carries a serde
+# default, so every one listed here is REQUIRED.
+AGG_FUNCS = ("Count", "Sum", "SumDouble", "Min", "Max")
+PREDICATE_EXPR_VARIANTS = {
+    "And": (("exprs", "exprs"),),
+    "Or": (("exprs", "exprs"),),
+    "Not": (("expr", "expr"),),
+    "Compare": (("column", "str"), ("op", "op"), ("value", "any")),
+    "In": (("column", "str"), ("values", "list")),
+    "IsNull": (("column", "str"),),
+}
+# A bound, so a deeply nested tree is a NAMED refusal rather than a
+# RecursionError -- an unanchored traceback is the failure mode this harness
+# exists to not have. Far above anything a connector emits.
+_MAX_PREDICATE_DEPTH = 64
+
+
+def _check_predicate_expr(value, depth=0, where="filter"):
+    """MIRRORS `PredicateExpr`, recursively. Returns a problem string or None.
+
+    Round 13 fixed `predicates: {}` and stopped; `filter: {}` is the same defect
+    one field over, and was still checked only for being an object -- so it
+    passed pre-flight and failed deserialisation after all builds. The fix that
+    does not generalise to its siblings is half a fix.
+    """
+    if depth > _MAX_PREDICATE_DEPTH:
+        return "%s nests deeper than %d levels" % (where, _MAX_PREDICATE_DEPTH)
+    if not isinstance(value, dict):
+        return "%s is %s, but PredicateExpr deserialises only from an object" % (
+            where, type(value).__name__)
+    tag = value.get("type")
+    if tag is None:
+        return ("%s has no \"type\" tag; PredicateExpr is "
+                "#[serde(tag = \"type\")], so the tag is required" % where)
+    if tag not in PREDICATE_EXPR_VARIANTS:
+        return "%s has type %r, which is not one of %s" % (
+            where, tag, "|".join(sorted(PREDICATE_EXPR_VARIANTS)))
+    for field, kind in PREDICATE_EXPR_VARIANTS[tag]:
+        if field not in value:
+            return "%s (%s) is missing %r, which carries no serde default" % (
+                where, tag, field)
+        inner = value[field]
+        if kind == "str" and not isinstance(inner, str):
+            return "%s (%s) has a non-string %s" % (where, tag, field)
+        if kind == "list" and not isinstance(inner, list):
+            return "%s (%s) has a non-array %s" % (where, tag, field)
+        if kind == "op" and inner not in PREDICATE_OPS:
+            # Compare's doc says "never In", but that is a SEMANTIC note, not a
+            # deserialisation rule -- serde accepts any PredicateOp here, so
+            # refusing `In` would be the too-strict half all over again.
+            return "%s (%s) has op %r, which is not one of %s" % (
+                where, tag, inner, "|".join(PREDICATE_OPS))
+        if kind == "expr":
+            problem = _check_predicate_expr(inner, depth + 1, "%s.%s" % (where, field))
+            if problem:
+                return problem
+        if kind == "exprs":
+            if not isinstance(inner, list):
+                return "%s (%s) has a non-array exprs" % (where, tag)
+            for index, child in enumerate(inner):
+                problem = _check_predicate_expr(
+                    child, depth + 1, "%s.exprs[%d]" % (where, index))
+                if problem:
+                    return problem
+    return None
+
+
+def _check_aggregation(value):
+    """MIRRORS `Aggregation` / `AggregateSpec` / `AggFunc` (ticket.rs:189-217)."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return "is %s, but Aggregation deserialises only from an object" % (
+            type(value).__name__,)
+    if "aggregates" not in value:
+        return "is missing 'aggregates', which carries no serde default"
+    if not isinstance(value["aggregates"], list):
+        return "has a non-array 'aggregates'"
+    group_by = value.get("group_by", [])
+    if not isinstance(group_by, list) or not all(
+            isinstance(g, str) for g in group_by):
+        return "has a 'group_by' that is not an array of strings"
+    for index, spec in enumerate(value["aggregates"]):
+        if not isinstance(spec, dict):
+            return "aggregates[%d] is not an object" % index
+        for field in ("func", "output"):
+            if field not in spec:
+                return "aggregates[%d] is missing %r, which carries no serde " \
+                       "default" % (index, field)
+        if spec["func"] not in AGG_FUNCS:
+            return "aggregates[%d] has func %r, which is not one of %s" % (
+                index, spec["func"], "|".join(AGG_FUNCS))
+        if not isinstance(spec["output"], str):
+            return "aggregates[%d] has a non-string 'output'" % index
+        column = spec.get("column")
+        if column is not None and not isinstance(column, str):
+            return "aggregates[%d] has a 'column' that is neither a string nor " \
+                   "null" % index
+    return None
+
+
+def _predicate_expr_or_null(value):
+    if value is None:
+        return None
+    return _check_predicate_expr(value)
+
+
 def _optional(kind, what):
     def check(value):
         if value is None:
@@ -286,8 +395,8 @@ TICKET_SCHEMA = {
                    "is %r, expected a boolean" % (v,)),
     "columns": (False, _string_list),
     "predicates": (False, _check_ticket_predicates),
-    "filter": (False, _optional(dict, "an object")),
-    "aggregation": (False, _optional(dict, "an object")),
+    "filter": (False, _predicate_expr_or_null),
+    "aggregation": (False, _check_aggregation),
     "limit": (False, _bounded_int(0, U64_MAX, "u64")),
 }
 

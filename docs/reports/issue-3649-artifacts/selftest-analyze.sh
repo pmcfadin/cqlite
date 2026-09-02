@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=409
+CASE_FLOOR=424
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -843,11 +843,16 @@ printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int
 run_support validate-ticket "$TMP/tk-snap.json"
 check_support "a ticket with a valid snapshot name" 0
 # EACH NARROWING IS WELL-FORMED, so this loop tests the FULL-RING half and not
-# the schema half. Three of these used to be malformed (`"filter":"x>1"`,
+# the schema half. The `filter` entry was written in round 13 as
+# `{"Compare": {...}}` -- serde's EXTERNALLY tagged spelling -- from a guess at
+# the representation rather than a reading of it; `PredicateExpr` is
+# `#[serde(tag = "type")]`, so the real shape is `{"type": "Compare", ...}`.
+# Round 14's recursive mirror caught that fixture, which is the same lesson as
+# the finding it was added for: read the deserialiser, do not infer it. Three of these used to be malformed (`"filter":"x>1"`,
 # `"aggregation":"count"`, a predicate with no `column`), which the four-field
 # validator could not see -- so they were refused for the RIGHT VERDICT with the
 # WRONG REASON, and the loop silently proved less than it claimed.
-for narrowing in '"limit":100' '"predicates":[{"column":"a","op":"Equal","value":1}]' '"filter":{"Compare":{"column":"a","op":"Gt","value":1}}' '"aggregation":{"aggregates":[]}' '"columns":["a"]' '"token_start":42' '"token_end":42' '"token_start":-9223372036854775808,"token_end":9223372036854775807'; do
+for narrowing in '"limit":100' '"predicates":[{"column":"a","op":"Equal","value":1}]' '"filter":{"type":"Compare","column":"a","op":"Gt","value":1}' '"aggregation":{"aggregates":[]}' '"columns":["a"]' '"token_start":42' '"token_end":42' '"token_start":-9223372036854775808,"token_end":9223372036854775807'; do
   printf '{"version":2,"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)",%s}\n' "$narrowing" > "$TMP/tk-bad.json"
   run_support validate-ticket "$TMP/tk-bad.json"
   if [ "$RC" = "1" ] && grep -q '^AB-3649: cause ticket-not-full-ring$' "$TMP/err.txt"; then
@@ -3402,6 +3407,56 @@ ticket_case version-bool       '{"keyspace":"ks","table":"t","ddl":"d","version"
 # reason a control can be schema-checked without being forced to be a full scan.
 ticket_case narrowed-limit     '{"version":2,"keyspace":"ks","table":"t","ddl":"d","limit":10}' 0 1
 ticket_case narrowed-columns   '{"version":2,"keyspace":"ks","table":"t","ddl":"d","columns":["a"]}' 0 1
+
+# ROUND 14 FINDING 2: `filter` and `aggregation` were checked for being OBJECTS,
+# not for matching PredicateExpr/Aggregation -- so `filter: {}` passed pre-flight
+# and failed deserialisation after every build. That is round 13's `predicates:
+# {}` one field over: THE FIX THAT DOES NOT GENERALISE TO ITS SIBLINGS IS HALF A
+# FIX, which is why the whole tagged grammar is mirrored here and not just the
+# two shapes that were reported.
+GOOD_CMP='{"type":"Compare","column":"a","op":"Gt","value":1}'
+ticket_case filter-empty        '{"version":2,"keyspace":"ks","table":"t","ddl":"d","filter":{}}' 1 1
+ticket_case filter-untagged     '{"version":2,"keyspace":"ks","table":"t","ddl":"d","filter":{"column":"a"}}' 1 1
+ticket_case filter-badtag       '{"version":2,"keyspace":"ks","table":"t","ddl":"d","filter":{"type":"Xor","exprs":[]}}' 1 1
+ticket_case filter-cmp-noop     '{"version":2,"keyspace":"ks","table":"t","ddl":"d","filter":{"type":"Compare","column":"a","value":1}}' 1 1
+ticket_case filter-cmp-badop    '{"version":2,"keyspace":"ks","table":"t","ddl":"d","filter":{"type":"Compare","column":"a","op":"Approx","value":1}}' 1 1
+ticket_case filter-isnull-nocol '{"version":2,"keyspace":"ks","table":"t","ddl":"d","filter":{"type":"IsNull"}}' 1 1
+ticket_case filter-in-notlist   '{"version":2,"keyspace":"ks","table":"t","ddl":"d","filter":{"type":"In","column":"a","values":3}}' 1 1
+# RECURSION: a malformed leaf buried inside a well-formed tree must be found.
+# Checking only the root is the same "stopped at the first layer" mistake.
+ticket_case filter-nested-bad   "{\"version\":2,\"keyspace\":\"ks\",\"table\":\"t\",\"ddl\":\"d\",\"filter\":{\"type\":\"And\",\"exprs\":[$GOOD_CMP,{\"type\":\"Not\",\"expr\":{\"type\":\"Compare\",\"column\":\"a\",\"op\":\"NOPE\",\"value\":1}}]}}" 1 1
+ticket_case filter-nested-good  "{\"version\":2,\"keyspace\":\"ks\",\"table\":\"t\",\"ddl\":\"d\",\"filter\":{\"type\":\"And\",\"exprs\":[$GOOD_CMP,{\"type\":\"Not\",\"expr\":$GOOD_CMP}]}}" 0 1
+ticket_case agg-empty           '{"version":2,"keyspace":"ks","table":"t","ddl":"d","aggregation":{}}' 1 1
+ticket_case agg-badfunc         '{"version":2,"keyspace":"ks","table":"t","ddl":"d","aggregation":{"aggregates":[{"func":"Median","output":"m"}]}}' 1 1
+ticket_case agg-nooutput        '{"version":2,"keyspace":"ks","table":"t","ddl":"d","aggregation":{"aggregates":[{"func":"Count"}]}}' 1 1
+ticket_case agg-groupby-nonstr  '{"version":2,"keyspace":"ks","table":"t","ddl":"d","aggregation":{"group_by":[1],"aggregates":[{"func":"Count","output":"c"}]}}' 1 1
+# count(*) is `column: null`, and group_by carries a serde default -- both are
+# VALID, so the schema half accepts them and only the full-ring half refuses.
+ticket_case agg-countstar       '{"version":2,"keyspace":"ks","table":"t","ddl":"d","aggregation":{"aggregates":[{"func":"Count","column":null,"output":"c"}]}}' 0 1
+
+# A tree deeper than the bound is a NAMED refusal, never a RecursionError: an
+# unanchored traceback is the failure mode this harness exists not to have.
+python3 - "$TMP/tk-deep.json" <<'PYINNER'
+import json
+import sys
+
+node = {"type": "Compare", "column": "a", "op": "Gt", "value": 1}
+for _ in range(200):
+    node = {"type": "Not", "expr": node}
+ticket = {"version": 2, "keyspace": "ks", "table": "t", "ddl": "d", "filter": node}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(ticket, handle)
+PYINNER
+set +e
+python3 "$SUPPORT" validate-ticket-schema "$TMP/tk-deep.json" >"$TMP/deep-out.txt" 2>"$TMP/deep-err.txt"
+DEEP_RC=$?
+set -e
+if [ "$DEEP_RC" = "1" ] && grep -q '^AB-3649: cause ticket-schema-invalid$' "$TMP/deep-err.txt" \
+   && ! grep -q 'Traceback' "$TMP/deep-err.txt"; then
+  ok "a predicate tree past the depth bound is a named refusal, not a RecursionError"
+else
+  bad "a deeply nested predicate tree did not produce an anchored refusal (exit $DEEP_RC)"
+fi
 
 # STRUCTURAL: the control branch must apply the SCHEMA half. It used to check
 # only that the file was JSON, so a control wasted the same three release builds
