@@ -82,7 +82,13 @@ pub const BIG_COMPOSITE: FixtureSpec = FixtureSpec {
 /// (`0x0017` = 23 = `len("charlie-extended-bucket")`) because the same text also
 /// appears INSIDE every `payload` value of that partition, and a `payload`
 /// mutation is NOT a decode error on this reader (measured: the row still
-/// decodes, carrying the invalid byte). Pinning the prefix pins the CLUSTERING
+/// decodes, carrying the invalid byte).
+///
+/// That non-refusal is the `row_data.rs` per-column break-swallow family —
+/// tracked as **#3778**, the nested-consumption half split out of #3723 — and it
+/// is NOT what #3782 changed: a REGULAR-column value whose decode fails is
+/// dropped from the row rather than refused, so a `payload` mutation could never
+/// evidence this issue's property. Pinning the length prefix pins the CLUSTERING
 /// field, whose decode does validate — the same corruption class the BIG lane
 /// uses.
 pub const BTI_MULTICLUSTERING: FixtureSpec = FixtureSpec {

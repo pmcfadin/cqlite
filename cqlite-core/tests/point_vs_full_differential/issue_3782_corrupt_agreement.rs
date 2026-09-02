@@ -37,6 +37,17 @@
 //! Assertion 2 is written so it stays TRUE after that follow-up (a refusing arm
 //! simply never enters the `Ok` branch), so this case does not pin the gap.
 //!
+//! **Carry-forward for #3922, and the reason this case cannot be its oracle:**
+//! the point arm here runs under `if let Ok(r) = point.execute(...)` and asserts
+//! only NON-FABRICATION, so it will never assert point/full AGREEMENT — not
+//! today, and not after #3922 lands. A point arm that starts REFUSING simply
+//! skips the `Ok` branch and this case stays green either way, which is exactly
+//! what makes it safe to commit now and useless as a completion signal. So
+//! **#3922 must add the positive `point == full` assertion itself** (or convert
+//! this `if let Ok` into a required-refusal match); if it does not, #3782's AC4
+//! — the two read paths agreeing on the corrupt fixture — stays untested
+//! forever behind a green suite.
+//!
 //! # DECLARED GAP 2 of 2 — the partition-HEADER arm still resyncs (#3928)
 //!
 //! #3782 fixes the ROW arm: on a proven-complete buffer a row that fails to

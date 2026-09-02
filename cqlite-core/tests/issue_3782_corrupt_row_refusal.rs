@@ -174,6 +174,162 @@ async fn read_path_refuses_a_corrupt_row_instead_of_truncating() {
     );
 }
 
+/// Capture WARN-and-above tracing output into a shared buffer, so a test can
+/// assert what a code path did NOT log.
+#[derive(Clone, Default)]
+struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("log sink mutex")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+    type Writer = LogSink;
+    fn make_writer(&'a self) -> LogSink {
+        self.clone()
+    }
+}
+impl LogSink {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("log sink mutex").clone()).to_string()
+    }
+}
+
+/// The #2302 index-random-read detour WARN, verbatim from
+/// `partition_lookup.rs`'s `iterate_all_partitions_cancellable`.
+const INDEX_DETOUR_WARN: &str = "falling back to a full sequential scan";
+
+/// AC2 on the **index-random-read** path — the route the issue is TITLED for,
+/// and the one route no other case in this file reaches.
+///
+/// `read_path_refuses_a_corrupt_row_instead_of_truncating` above goes through
+/// `Database::execute` → `scan_inner` → `sequential_scan` → the STITCHED
+/// `parse_block`; the compaction cases go through the `*_for_compaction`
+/// surfaces. Neither reaches `SSTableReader::iterate_all_partitions` →
+/// `iterate_all_partitions_via_full_index` (`full_index_scan.rs`), which has no
+/// in-crate caller outside `data_access`/`partition_lookup` — so before this
+/// case the issue's headline route had no committed coverage at all.
+///
+/// # What this pins, and what it CANNOT pin (measured, 2026-09-02)
+///
+/// It pins the refusal: `iterate_all_partitions` on the corrupt fixture answers
+/// `Err(Error::Corruption)` and never an `Ok` with a short partition set
+/// (pre-fix on this fixture: `Ok`, 23 of 100).
+///
+/// It does NOT pin `full_index_scan.rs`'s `BufferExtent::Complete` parse, and
+/// the reason is a property of the route rather than of this test: the
+/// per-entry coverage oracle `partition_slice_fully_consumed` runs FIRST and
+/// already answers `false` for the corrupt partition (its structure-only drive
+/// stops at the undecodable clustering value, so `consumed < raw.len()`), so the
+/// walk returns `Ok(None)` BEFORE reaching the parse below it. Measured: with
+/// that parse reverted to `BufferExtent::Window`, this case still passes — the
+/// corrupt partition never reaches it. No corrupt fixture available here can
+/// reach it either, since any decode error that would fire there also stops the
+/// structure-only drive one step earlier.
+///
+/// # DECLARED GAP — the refusal arrives via the #2302 Signal-B detour
+///
+/// AC2's second half ("no WARN-and-fall-back-to-sequential-scan detour") is
+/// therefore NOT satisfied on this route, and it is not an oversight in the
+/// #3782 fix: the `Ok(None)` above is issue #2302's **Signal B**, whose
+/// exhaustive exit table (`full_index_scan.rs` module doc, roborev jobs
+/// 1609/1610) DESIGNATES "a corrupt/truncated partition body" as an
+/// `incomplete Ok(None)` that the caller reports LOUDLY and then re-walks
+/// sequentially. What #3782 changed is the destination: that sequential re-walk
+/// now REFUSES instead of returning 23 rows.
+///
+/// So the composed behaviour measured here is WARN → full sequential re-scan →
+/// `Err`. The WARN's PRESENCE is asserted rather than left unstated, because a
+/// gap this file does not name is a gap the next reader cannot find: making the
+/// error surface directly means changing #2302's documented Signal-B routing
+/// (the materialising arm's `Ok(None)`, versus the streaming sibling's
+/// `Err::corruption` at `full_index_stream.rs:356`), which is a routing decision
+/// for #2302's owner and not a test-only change. When that lands, THIS
+/// ASSERTION MUST FLIP to `!contains` and this comment must go with it.
+///
+/// The capture is a THREAD-LOCAL dispatcher (`set_default`), never a global one:
+/// the sibling corpus case in this target calls `iterate_all_partitions` over
+/// the whole corpus on other threads, and a global sink would mix its WARNs in.
+#[tokio::test]
+async fn index_random_read_path_refuses_a_corrupt_row_carrying_the_decode_errors_kind() {
+    let staged = fixture::stage_control_and_mutated(&fixture_dir(&BIG_COMPOSITE), "indexwalk");
+
+    // Route precondition, as an ON-DISK fact: a BIG SSTable carrying an
+    // `Index.db` and NO `Partitions.db` is what routes `iterate_all_partitions`
+    // into `iterate_all_partitions_via_full_index` rather than straight to the
+    // sequential fallback.
+    let components: Vec<String> = std::fs::read_dir(&staged.mutated_dir)
+        .expect("read staged fixture dir")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        components.iter().any(|c| c.ends_with("-Index.db")),
+        "the index-random-read route needs an Index.db; staged components: {components:?}"
+    );
+    assert!(
+        !components.iter().any(|c| c.ends_with("-Partitions.db")),
+        "this case pins the BIG index-random-read route; a Partitions.db would route it \
+         through BTI instead: {components:?}"
+    );
+
+    let control = open_reader(&staged.control_dir).await;
+    assert!(
+        control.has_partition_index(),
+        "the control reader must have loaded a random-access partition index, or this case \
+         never reaches the index-random-read path at all"
+    );
+    let control_partitions = control
+        .iterate_all_partitions()
+        .await
+        .expect("the pristine fixture must walk the index-random-read path cleanly");
+    assert!(
+        !control_partitions.is_empty(),
+        "0-rows-when-present: the control index walk must yield partitions"
+    );
+
+    let sink = LogSink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .finish();
+    let got = {
+        let _dispatch = tracing::subscriber::set_default(subscriber);
+        let mutated = open_reader(&staged.mutated_dir).await;
+        mutated.iterate_all_partitions().await
+    };
+
+    match got {
+        Err(e) => assert_corruption_kind(&e, "iterate_all_partitions (index-random-read)"),
+        Ok(rows) => panic!(
+            "the index-random-read walk must REFUSE a corrupt row: got Ok with {} of {} \
+             partitions (before #3782 this was Ok/23)",
+            rows.len(),
+            control_partitions.len()
+        ),
+    }
+
+    // The DECLARED GAP above, asserted so it cannot be silently lost. This also
+    // proves the capture is non-vacuous: the substring is the #2302 WARN this
+    // very route emits, so a sink that saw nothing would red here.
+    let logs = sink.text();
+    assert!(
+        logs.contains(INDEX_DETOUR_WARN),
+        "declared gap (#2302 Signal B): today the index-random-read refusal arrives AFTER the \
+         documented WARN + sequential re-walk, so that WARN must be observable here. If it is \
+         gone, the routing changed — flip this assertion to `!contains` and update the case \
+         doc, which is AC2's second half. Captured WARN output was:\n{logs}"
+    );
+}
+
 /// AC6/AC8 — BOTH compaction surfaces refuse. Compaction is the surface that
 /// would WRITE the loss back to disk, and before the fix it reported MORE rows
 /// than the control while losing two real partitions and fabricating three.
@@ -202,6 +358,13 @@ async fn compaction_refuses_a_corrupt_row_and_never_loses_or_fabricates_partitio
     // surfaces still agree row-for-row on it — asserted as MULTISET equality of
     // the emitted keys, not as a row COUNT. A count can be equal while one key
     // is dropped and another duplicated, which is the very trade #3782 measured.
+    //
+    // Scope, stated because it is easy to overclaim: this (and the sibling
+    // `stitched_verifier_scans_*` case) compares KEY MULTISETS, never BYTES. It
+    // cannot evidence "well-formed compaction OUTPUT is byte-identical" — the
+    // oracle for that claim is the gate's own `compaction-byte-parity`
+    // component, which diffs CQLite-written compaction output against Apache
+    // Cassandra's. Cite that component, not this case, for byte identity.
     let cancel = cqlite_core::storage::scan_cancel::ScanCancel::new();
     let mut streamed_keys: Vec<Vec<u8>> = Vec::new();
     control_reader
@@ -376,10 +539,14 @@ fn data_files_for_table(keyspace: &str, table: &str) -> Vec<PathBuf> {
 ///
 /// The fix must not convert a single legitimate MID-STREAM toleration into a
 /// refusal. Across the whole discovered corpus every well-formed table must
-/// still decode without error on the two surfaces the driver feeds — the
-/// buffered compaction walk and the index/partition walk — and must still yield
-/// rows. On the measured corpus the tolerant path fires 614 times here; any of
-/// them turning into an `Err` reds this test.
+/// still decode without error on the two surfaces this case actually calls —
+/// `iterate_all_partitions` (the index/partition walk) and `get_all_entries`
+/// (the block walk) — and must still yield rows. Neither is a `*_for_compaction`
+/// entry point: the compaction surfaces are covered on the corrupt fixture by
+/// `compaction_refuses_a_corrupt_row_and_never_loses_or_fabricates_partitions`
+/// above, and on well-formed input by the gate's own `compaction-byte-parity`
+/// component. On the measured corpus the tolerant path fires 614 times here; any
+/// of them turning into an `Err` reds this test.
 ///
 /// Row-count EQUALITY with the pre-change behaviour is covered by the corpus
 /// parity suites the gate already runs (the sstabledump JSONL goldens and the
