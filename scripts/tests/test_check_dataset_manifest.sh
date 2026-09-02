@@ -2422,7 +2422,21 @@ else
   nbgate_src_sha=$(git -C "$nbgate_repo" rev-parse --verify HEAD 2>/dev/null || true)
   if [ -z "$nbgate_src_sha" ]; then
     bad "cases 97-102: could not resolve HEAD of '$nbgate_repo' to a sha, so the scratch clone cannot be checked out at a known commit"
-  elif ! git clone --local --shared --no-checkout --quiet "$nbgate_repo" "$nbgate_wt" >"$WORK/nb-gate-tree.log" 2>&1; then
+  # SHALLOW SOURCES (roborev job 109). git's handling of `--local` against a shallow source is
+  # VERSION-DEPENDENT: 2.43.0 WARNS ("source repository is shallow, ignoring --local") and
+  # succeeds -- measured, with the whole sequence below completing and scripts/ present, so the
+  # finding's claim that fixture construction FAILS does NOT reproduce here. Older git rejected
+  # outright. Rather than depend on which behaviour the host has, ask and pick: a shallow source
+  # gets the local TRANSPORT (`--no-local`), which is still file-based and touches NO network, so
+  # job 100's hermeticity property is unaffected either way. Three-valued on purpose -- an
+  # UNKNOWN shallowness answer takes the conservative branch, because paying for a slower local
+  # transport is not a correctness cost while guessing "not shallow" would be.
+  elif nbgate_shallow=$(git -C "$nbgate_repo" rev-parse --is-shallow-repository 2>/dev/null || echo unknown); \
+       [ "$nbgate_shallow" != false ] \
+       && ! git clone --no-local --no-checkout --quiet "$nbgate_repo" "$nbgate_wt" >"$WORK/nb-gate-tree.log" 2>&1; then
+    bad "cases 97-102: could not clone the scratch tree through the local transport from a shallow-or-unknown source (is-shallow-repository='$nbgate_shallow'): $(tail -1 "$WORK/nb-gate-tree.log" 2>/dev/null)"
+  elif [ "$nbgate_shallow" = false ] \
+       && ! git clone --local --shared --no-checkout --quiet "$nbgate_repo" "$nbgate_wt" >"$WORK/nb-gate-tree.log" 2>&1; then
     bad "cases 97-102: could not clone a scratch tree for the exit-code mapping cases: $(tail -1 "$WORK/nb-gate-tree.log" 2>/dev/null)"
   elif ! git -C "$nbgate_wt" checkout --detach --quiet "$nbgate_src_sha" >>"$WORK/nb-gate-tree.log" 2>&1; then
     bad "cases 97-102: cloned the scratch tree but could not check out source HEAD $nbgate_src_sha in it: $(tail -1 "$WORK/nb-gate-tree.log" 2>/dev/null)"
