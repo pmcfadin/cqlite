@@ -113,7 +113,7 @@ for fn in _fm_active _fm_sidecar _fm_note _fm_indirect_desc _fm_unobservable_des
           _ansi_stripped_log \
           _census_sidecar _census_kind _census_write _census_read _census_declare \
           _census_libtest_tally _census_compile_tally _census_driver_tally \
-          _census_measure_kind _census_measure _census_status_for _census_finalize \
+          _census_classify _census_measure_kind _census_measure _census_status_for _census_finalize \
           _census_record _census_annotate _census_scoped_record _python_tier_ran \
           _status_is_nonfailing \
           run_scoped_tests run_python_bindings; do
