@@ -9414,6 +9414,33 @@ obj_sweep_calls() {
   printf '%s' "$n"
 }
 
+# obj_sweep_expected_stamp <scratch-dir> <store-path> -> the stamp path THE SHIPPED
+# SUPERVISOR derives for that store.
+#
+# THE DERIVATION IS EXTRACTED FROM THE SHIPPED FILE AT RUN TIME, never restated: a test
+# that re-typed the key formula would keep passing after the real one changed (and, worse,
+# would fail attributing the difference to whatever the case is really about — which is
+# exactly what happened when round 4 replaced the flattened key with a digest). The two
+# functions are lifted verbatim into a driver, with a stub sweep script for the
+# `--print-store` resolution they ask for.
+obj_sweep_expected_stamp() {
+  local d="$1" store="$2"
+  mkdir -p "$d"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'printf "OBJECT-STORE: store %%s\\n" %s\n' "$(printf '%q' "$store")"
+  } >"$d/sweep-stub.sh"
+  {
+    printf 'set -uo pipefail\n'
+    printf 'OBJ_SWEEP_STAMP=""\n'
+    printf 'REPO_ROOT=%s\n' "$(printf '%q' "$d")"
+    awk '/^obj_sweep_digest\(\) \{$/,/^\}$/' "$SUPERVISOR"
+    awk '/^obj_sweep_stamp_path\(\) \{$/,/^\}$/' "$SUPERVISOR"
+    printf 'obj_sweep_stamp_path %s\n' "$(printf '%q' "$d/sweep-stub.sh")"
+  } >"$d/driver.sh"
+  bash "$d/driver.sh" 2>/dev/null
+}
+
 test_object_store_sweep_verdicts() {
   local d root counter rc calls
   # (a) VERIFIED: the sweep runs, is journalled, and the iteration proceeds normally.
@@ -10125,10 +10152,12 @@ test_object_store_stamp_key_comes_from_the_resolver() {
   # The stamp names both files (`<stamp>` and `<stamp>.CORRUPT`), derived exactly as
   # obj_sweep_stamp_path derives them, so the assertions below name a path rather than
   # globbing a shared /tmp that peer lanes are also writing.
-  key_fake="$(printf '%s' "${fake//\//_}" | tr -c 'A-Za-z0-9._-' '_')"
-  key_other="$(printf '%s' "${other//\//_}" | tr -c 'A-Za-z0-9._-' '_')"
-  stamp_fake="/tmp/cqlite-object-store-sweep.${key_fake}.stamp"
-  stamp_other="/tmp/cqlite-object-store-sweep.${key_other}.stamp"
+  # DERIVED BY CALLING THE SHIPPED FUNCTIONS, never restated here. This case used to
+  # re-type the flattening (`${x//\//_} | tr -c ...`), so when round 4 replaced the key
+  # with a digest the expectation and the implementation were two different formulas and
+  # the case failed for a reason that had nothing to do with the resolver.
+  stamp_fake="$(obj_sweep_expected_stamp "$d/expect-fake" "$fake")"
+  stamp_other="$(obj_sweep_expected_stamp "$d/expect-other" "$other")"
   rm -f "$stamp_fake" "$stamp_other"
   # CONSTRUCTION: a BARE git in this environment really does answer with the INJECTED
   # directory, so a green below is the resolver and not an inert variable. This is the
@@ -10173,6 +10202,86 @@ test_object_store_stamp_key_comes_from_the_resolver() {
 }
 
 t test_object_store_stamp_key_comes_from_the_resolver
+
+# THE KEY MUST BE INJECTIVE, AND FLATTENING IS NOT (#3749 review round 4, item 3).
+# Replacing `/` and every unsupported character with `_` maps `/tmp/a/b/objects` and
+# `/tmp/a_b/objects` to the SAME name, so two different repositories on one box shared a
+# throttle stamp and a CORRUPT latch: one store could suppress the other's sweep for the
+# whole interval, or stop every lane on the box with the other store's damage. The key is
+# now a sha256 digest of the canonical path, with a sanitised tail kept for readability.
+test_object_store_stamp_key_is_injective() {
+  local d a b flat_a flat_b sa sb sa2 root_a root_b calls_a calls_b rc bin_ok bin_no with without
+  d="$(new_case_dir)"
+  a="/tmp/objstore-collide/a/b/objects"
+  b="/tmp/objstore-collide/a_b/objects"
+  # CONSTRUCTION: the two paths really do FLATTEN to one name, so the case has a subject.
+  # Without this the assertion below would pass for any two distinct paths.
+  flat_a="$(printf '%s' "${a//\//_}" | tr -c 'A-Za-z0-9._-' '_')"
+  flat_b="$(printf '%s' "${b//\//_}" | tr -c 'A-Za-z0-9._-' '_')"
+  if [[ "$flat_a" == "$flat_b" ]]; then
+    pass "obj-sweep(injective-plant): the two store paths collide under the OLD flattening ('$flat_a') — the collision the case is about is really available"
+  else
+    fail "obj-sweep(injective-plant): '$flat_a' != '$flat_b' — the paths do not collide; the assertions below would prove nothing"
+    return
+  fi
+  sa="$(obj_sweep_expected_stamp "$d/key-a" "$a")"
+  sb="$(obj_sweep_expected_stamp "$d/key-b" "$b")"
+  sa2="$(obj_sweep_expected_stamp "$d/key-a2" "$a")"
+  if [[ -n "$sa" && -n "$sb" && "$sa" != "$sb" ]]; then
+    pass "obj-sweep(injective): two stores that flatten to ONE name get DIFFERENT keys — neither can suppress the other's sweep or latch it corrupt"
+  else
+    fail "obj-sweep(injective): a='$sa' b='$sb' — the key is not injective"
+  fi
+  if [[ -n "$sa2" && "$sa2" == "$sa" ]]; then
+    pass "obj-sweep(injective): the same store yields the SAME key on a second call — it is a digest, not a nonce (a nonce would defeat the throttle AND the latch entirely)"
+  else
+    fail "obj-sweep(injective): the key is not stable ('$sa' then '$sa2')"
+  fi
+  if [[ "$sa" == *objects* && "$sa" == *cqlite-object-store-sweep* && "$sa" == *.stamp ]]; then
+    pass "obj-sweep(injective): the key keeps a readable tail and the shared prefix/suffix, so an operator reading /tmp can still tell which store a stamp belongs to"
+  else
+    fail "obj-sweep(injective): the key is not operator-readable: '$sa'"
+  fi
+
+  # FAIL CLOSED WITH NO DIGEST TOOL: the empty path (no throttle, no latch), never a
+  # silent fall back to the non-injective form on exactly the hosts nobody tested. ONE
+  # PROPERTY between the two arms — whether sha256sum is on PATH — and the CONTROL comes
+  # first, so an empty answer cannot be attributed to the hermetic PATH itself.
+  bin_ok="$d/bin-with-digest"
+  bin_no="$d/bin-without-digest"
+  mkdir -p "$bin_ok" "$bin_no"
+  # `mkdir` is in the list because the DERIVATION HELPER needs it to build its own
+  # driver — the first version omitted it, the control arm produced no key, and the
+  # missing-digest arm would have passed for the wrong reason. That is what a control arm
+  # is for.
+  for tool in bash grep head tr awk mkdir cat sed; do
+    ln -sf "$(command -v "$tool")" "$bin_ok/$tool" 2>/dev/null
+    ln -sf "$(command -v "$tool")" "$bin_no/$tool" 2>/dev/null
+  done
+  ln -sf "$(command -v sha256sum || command -v shasum)" "$bin_ok/" 2>/dev/null
+  if [[ -x "$bin_ok/sha256sum" || -x "$bin_ok/shasum" ]] &&
+    [[ ! -e "$bin_no/sha256sum" && ! -e "$bin_no/shasum" && ! -e "$bin_no/openssl" ]] &&
+    [[ -x "$bin_no/tr" && -x "$bin_no/grep" && -x "$bin_no/mkdir" ]]; then
+    pass "obj-sweep(no-digest-plant): the two hermetic PATHs differ in ONE property — a sha256 tool — and both carry the tr/grep/head the derivation itself needs"
+  else
+    fail "obj-sweep(no-digest-plant): the hermetic PATHs are not the shape the case claims; the arms below would prove nothing"
+    return
+  fi
+  with="$(PATH="$bin_ok" obj_sweep_expected_stamp "$d/key-with" "$a")"
+  without="$(PATH="$bin_no" obj_sweep_expected_stamp "$d/key-without" "$a")"
+  if [[ -n "$with" ]]; then
+    pass "obj-sweep(no-digest-control): with a digest tool on the hermetic PATH the derivation still answers ('$with')"
+  else
+    fail "obj-sweep(no-digest-control): the control produced no key — the arm below cannot be attributed to the missing digest tool"
+  fi
+  if [[ -z "$without" ]]; then
+    pass "obj-sweep(no-digest): a host with NO sha256 tool yields the EMPTY key — the caller then neither throttles nor latches, instead of silently sharing a name between two stores"
+  else
+    fail "obj-sweep(no-digest): a host with no digest tool still produced a key ('$without') — the non-injective fallback is back"
+  fi
+}
+
+t test_object_store_stamp_key_is_injective
 
 # ---------------------------------------------------------------------------
 # Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.
