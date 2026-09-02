@@ -41,8 +41,20 @@ pass-through. `PASS-BUT-UNMEASURED` must not satisfy a `PASS*` test.
 review-stage.sh open <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--force]
 ```
 
-- The path is `<repo-root>/.review-stage/issue-<N>/<kind>.md` inside the worktree, **DERIVED and not
-  overridable**. A `[--report <path>]` override was specified here and shipped, and it is **REMOVED in
+- The path is `<repo-root>/.review-stage/issue-<N>/<kind>[.<generation>].md` inside the worktree,
+  **DERIVED, not overridable, and GENERATION-BOUND**. The generation is round 5's (J1) answer to a
+  defect in this section as it was first built: `--force` reset the report and re-stamped `head-sha:`
+  AT THE SAME PATH, so the previous, idle agent could wake up afterwards and write its old-tree
+  verdict into that path, where it was paired with the new `head-sha:` — a commit nobody audited
+  passing `premerge-assert.sh`. Since this whole mechanism exists BECAUSE delegated agents return
+  late, that is the expected behaviour of the population it serves. So each open records a
+  `report-generation:` (generation 0 keeps the bare `<kind>.md` name, both for the documents that
+  quote it and for records written before the field existed; each re-open advances) and the readers
+  derive the path from THAT NUMBER — never from a path in a data file, which is the channel round 4
+  removed. A resumed agent therefore holds a stale path and is STRUCTURALLY unable to write into the
+  current report; a check could not deliver that, because the harm is a write. Old generations'
+  reports stay on disk as history, and `open` advances past any generation whose report still
+  exists, so a deleted stage record cannot re-issue a path an older agent holds. A `[--report <path>]` override was specified here and shipped, and it is **REMOVED in
   round 4** — a DELIBERATE NARROWING of this design surface, recorded rather than quietly dropped. It
   was mandated by no requirement and used by NOTHING (measured by grep: no agent definition, no skill,
   no script, no call site — only this usage line and the test suite), and it was the caller-controlled

@@ -160,18 +160,22 @@ Three further declared limits of the mechanism itself:
   exists to detect). Judging whether the working is
   real is a human's job — and for the author-performed substitute, requiring the working to be
   recorded is the whole point.
-- **`status`'s `state=` is one value PER CAUSE (round 4, H4).** The six-cause contract exists
+- **`status`'s `state=` is one value PER CAUSE (round 4, H4).** The per-cause contract exists
   because the operator action differs per cause, and the status mapper was throwing two of them
   away: every unenumerated cause fell through to `report-ungrammatical`, so `report unreadable`
   (fix: `chmod`) sent the operator to the agent, and a SELF-RECORDED
   `result: NOT-RUN (ran out of context)` — a perfectly grammatical report in which the agent said
   WHY — was called ungrammatical, hiding the one actionable fact. Both now have their own state
-  (`report-unreadable`, `not-run-self-reported`) and their own STATUS-NOTE. All SEVEN reachable
-  causes were checked, not just the reported one: the five that were already right are pinned, the
+  (`report-unreadable`, `not-run-self-reported`) and their own STATUS-NOTE; All SEVEN reachable
+  causes were checked at the time, not just the reported one: the five that were already right are pinned, the
   `report ungrammatical: <what>` variants deliberately keep ONE state (same operator action), and
   the enumeration is guarded against drift by a test that DERIVES the built-in cause literals from
   the script and requires each to be mapped — a new cause added to the classifier and not to the
-  mapper reds the suite rather than being mislabelled.
+  mapper reds the suite rather than being mislabelled. **That guard then paid out in round 5**: J1's
+  new `stage record unreadable` cause was picked up by the derivation, so it arrived with its own
+  `stage-record-unreadable` state and STATUS-NOTE (next action: the RECORD, or a fresh `--force`
+  open — neither a chmod nor a re-spawn) instead of being mislabelled as self-reported. Eight
+  reachable causes now.
 - **The deadline is advisory and changes nothing.** A late report is still a report; a stage
   silent inside its deadline is still `NOT-RUN`. Letting a clock decide would add a clock to a
   question already answerable from content, and would fail a slow-but-real review.
@@ -200,9 +204,33 @@ Three further declared limits of the mechanism itself:
   gate INVALIDATES it) applied to the intent audit, and an audit of an older tree may not
   certify a newer one. The remedy every one of those refusals prints is the same: re-open the
   stage with `--force` at this commit and re-run C.
+- **The report path is GENERATION-BOUND, so a resumed agent cannot write into the current report
+  (round 5, J1).** `open --force` reset the report to the sentinel and re-stamped `head-sha:` **at
+  the same path**, so the PREVIOUS, idle agent could wake up after the reset and write its OLD-TREE
+  verdict there — where it was paired with the NEWLY stamped `head-sha:`, and a commit nobody
+  audited passed `premerge-assert.sh`. This mechanism exists BECAUSE delegated agents go idle and
+  return late, so that is the expected behaviour of the population it serves, not an exotic race.
+  Every open now records a `report-generation:` and the path INCLUDES it — `<kind>.md` at
+  generation 0, `<kind>.<N>.md` for each re-open — so the resumed agent holds a STALE PATH and is
+  STRUCTURALLY unable to write into the current report. A check could not deliver this: the harm is
+  a WRITE, and a check placed after it could only report it. Four properties worth keeping in mind.
+  (1) The generation is a **NUMBER in the record, never a path** — the reader derives the path from
+  it with the same function `open` used, so there is ONE source of truth for which report counts,
+  and round 4's removal of the `report:` path field (a data file that could redirect a reader) is
+  not undone. (2) It is written in the SAME atomic record as `head-sha:`, so the tree audited and
+  the artifact auditing it are published together or not at all — an interrupted `--force` leaves
+  the ENTIRE previous stage in place, which is coherent and refuses at the merge point on the sha.
+  (3) An ABSENT field is generation 0, which is an affirmative reading of a record written before
+  the field existed (that version wrote exactly one report, at `<kind>.md`), while SEVERAL lines or
+  a non-numeric value is a `stage record unreadable` NON-VERDICT that derives no path at all —
+  falling back to generation 0 is exactly how a stale generation-0 `PASS` would be read as current.
+  (4) Old generations' reports are LEFT ON DISK as history: nothing reads them, they are what an
+  operator opens to see what the previous agent concluded, and `open` uses their EXISTENCE to avoid
+  handing a new agent a path an old one still holds (so deleting one by hand re-opens that hole).
+  The operational consequence for a lane: **paste the path `open` PRINTS, never a remembered one.**
 - **The report path is DERIVED, and `--report` is GONE (round 4, H2/H3).** It is always
-  `<repo-root>/.review-stage/issue-<N>/<kind>.md`, computed the same way by `open` and by every
-  reader — so nothing a caller passes, and nothing written in a data file, can redirect a reader to
+  `<repo-root>/.review-stage/issue-<N>/<kind>[.<generation>].md`, computed the same way by `open`
+  and by every reader — so nothing a caller passes, and nothing written in a data file, can redirect a reader to
   another file. The override is REMOVED rather than hardened, which is a **deliberate narrowing of
   the approved design surface**: it was mandated by no spec requirement and used by NOTHING
   (measured by grep — no agent definition, no skill, no script, no call site), and it was the
@@ -273,9 +301,10 @@ bash scripts/flow/review-stage.sh verdict c --issue 1234
 bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-summary> --c-verdict AUTO
 ```
 
-`NOT-RUN` always carries one of six named causes — `no report written`, `report absent`,
-`report unreadable`, `report empty`, `report ungrammatical: <what>`, `stage never opened` — because the operator
-action differs per cause, and one token for five states is the collapse this issue is about.
+`NOT-RUN` always carries one of seven named causes — `no report written`, `report absent`,
+`report unreadable`, `report empty`, `report ungrammatical: <what>`, `stage never opened`,
+`stage record unreadable: <what>` — because the operator
+action differs per cause, and one token for seven states is the collapse this issue is about.
 Everything is written under `.review-stage/`, whose ignore status is **verified with
 `git check-ignore`, fail-closed**, so a stage opened mid-run cannot dirty a running gate of
 record (#2926) or make `premerge-assert.sh` refuse on `dirty: yes` (#3648).

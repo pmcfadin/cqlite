@@ -35,6 +35,11 @@ report?" but "what does the report say?".
 - If your caller named NO path, write one anyway — `.review-stage/issue-<N>/<kind>.md` inside
   the worktree — and name it in your reply. Do not silently skip the artifact because nobody
   asked for it.
+- **Write to the path your caller NAMED, never a remembered or guessed one (#3751 round 5).** A
+  report path carries the stage's GENERATION: a stage that was re-opened reads
+  `<kind>.<generation>.md` and never the earlier `<kind>.md`, so a report written where you were
+  told to write it LAST time lands in a file nothing consults — which reads exactly like no
+  report at all. If you were re-spawned, use the path in the clause you were re-spawned with.
 
 > **You are also a CONSUMER of this contract.** Before spawning (or requesting the spawn of)
 > any review stage you `open` it, and after the stage you read its `verdict` — see the review-stage
@@ -227,9 +232,12 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    evidence). `FINDINGS` — an `unmet`/uncovered/unjustified-`partial` requirement — blocks merge
    → route back (see step 4 escalation). **`NOT-RUN` also blocks, and it is NOT a clean review**:
    it means the stage produced nothing (sentinel-only / absent / unreadable / empty /
-   ungrammatical / never-opened, and the token names which). Re-spawn it (`open --force` re-stamps the report and
-   KEEPS the original clock, so the elapsed time still reads true), or use `status` to report how
-   long it has produced nothing. If no independent audit can be obtained, the SANCTIONED
+   ungrammatical / never-opened / the RECORD unreadable, and the token names which). Re-spawn it
+   (`open --force` re-stamps the report and KEEPS the original clock, so the elapsed time still
+   reads true, and ADVANCES the report GENERATION — carry the path it PRINTS in the new
+   NEEDS-SPAWN packet, because the previous generation's file is no longer read, so the idle
+   auditor that resumes and writes there certifies nothing, #3751 round 5), or use `status` to
+   report how long it has produced nothing. If no independent audit can be obtained, the SANCTIONED
    FALLBACK — never a hand-asserted pass — is to record the substitute WITH ITS WORKING:
    ```bash
    bash scripts/flow/review-stage.sh record-author-performed c --issue <N> \
@@ -343,7 +351,8 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    ARTIFACT: a `result: PASS` recorded before a further commit, an amend or a rebase persists in
    `.review-stage/` and would certify a tree nobody audited. So if the branch moves after C
    reports, re-open the stage (`review-stage.sh open c --issue <N> --agent spec-auditor --force`,
-   which RE-STAMPS `head-sha` while PRESERVING `spawned-at`) and re-run C — that is the remedy the
+   which RE-STAMPS `head-sha` while PRESERVING `spawned-at`, and advances the report generation so
+   the re-spawned auditor gets a fresh path) and re-run C — that is the remedy the
    refusal prints. A record with no `head-sha:`, several of them, or a value that is not a 40-hex
    sha refuses by name, never silently: an audit of an older tree may not certify a newer one,
    which is the gate-of-record rule applied to the intent audit.

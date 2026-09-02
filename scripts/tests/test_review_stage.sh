@@ -113,6 +113,17 @@ rc_is() {
 WRITE_FD_PIN=9
 
 REPORT_OF() { printf '%s/.review-stage/issue-%s/%s.md\n' "$1" "$2" "$3"; }
+# REPORT_GEN_OF <repo> <issue> <kind> <generation> — the same path, GENERATION-BOUND (round 5,
+# J1). Generation 0 keeps the bare `<kind>.md` name (so `REPORT_OF` above is generation 0 and every
+# quoted document example stays true); generation N>0 is `<kind>.<N>.md`.
+REPORT_GEN_OF() {
+  if [ "$4" = 0 ]; then printf '%s/.review-stage/issue-%s/%s.md\n' "$1" "$2" "$3"
+  else printf '%s/.review-stage/issue-%s/%s.%s.md\n' "$1" "$2" "$3" "$4"; fi
+}
+# The path `open` PRINTS on its own line — the one a caller pastes into a spawn prompt. Read from
+# the output rather than reconstructed, because "the clause hands the fresh agent the right file"
+# is one of the properties under test.
+printed_report_path() { printf '%s\n' "$OUT" | LC_ALL=C sed -n 's|^\(/.*\.md\)$|\1|p' | LC_ALL=C head -1; }
 
 # --- 1. AC1: a stage that produced nothing is NOT-RUN, non-zero -----------------
 # THE CASE THE ISSUE EXISTS FOR. Open a stage, spawn nothing, write nothing.
@@ -1317,10 +1328,21 @@ else
   bad "marker-order: could not create a distinct commit B (A=$SHA_A B=$SHA_B)"
 fi
 SF_B="$R11F/.review-stage/issue-901/c.stage"
-RP_B="$(REPORT_OF "$R11F" 901 c)"
+# THE PROBE WATCHES THE GENERATION THE RE-OPEN PUBLISHES (round 5, J1). The re-opened stage's
+# report is generation 1 (`c.1.md`), not the generation-0 file the previous agent holds — so the
+# on-disk pair a reader would act on is (this record's head-sha, generation 1's verdict). Reading
+# generation 0 here would measure a file nothing consults and report the H1 property as broken on
+# a script that has it.
+RP_B="$(REPORT_GEN_OF "$R11F" 901 c 1)"
+RP_B_OLD="$(REPORT_OF "$R11F" 901 c)"
 LOG_B="$T/probe-b.log"
 rsp "$R11F" "$LOG_B" "$SF_B" "$RP_B" 0 open c --issue 901 --agent spec-auditor --force
 rc_is 0 "marker-order: the forced re-open succeeds"
+if [ -f "$RP_B" ]; then
+  ok "marker-order: the re-open published generation 1's report, so the probe measured the file a reader consults"
+else
+  bad "marker-order: generation 1's report ($RP_B) does not exist — the assertions below would measure the wrong file"
+fi
 FORBIDDEN="$(LC_ALL=C grep -c "record-head=$SHA_B report-token=PASS" "$LOG_B" 2>/dev/null || true)"
 if [ "$FORBIDDEN" = "0" ]; then
   ok "marker-order: at NO write boundary is the NEW head-sha paired with the OLD PASS report (the H1 defect)"
@@ -1329,13 +1351,24 @@ else
 fi
 PB1="$(nth_probe "$LOG_B" 1)"
 case "$PB1" in
-  *"report-token=NOT-RUN"*) ok "marker-order: the report is reset to the sentinel at the FIRST boundary" ;;
+  *"report-token=NOT-RUN"*) ok "marker-order: the new generation's report is the SENTINEL at the FIRST boundary" ;;
   *) bad "marker-order: the report was not yet the sentinel at the first boundary (got: $PB1)" ;;
 esac
 case "$PB1" in
-  *"record-head=$SHA_A"*) ok "marker-order: the record still names the OLD commit while the report is being reset" ;;
-  *) bad "marker-order: the record was already re-stamped before the report was reset (got: $PB1)" ;;
+  *"record-head=$SHA_A"*) ok "marker-order: the record still names the OLD commit while the new report is being published" ;;
+  *) bad "marker-order: the record was already re-stamped before the report was published (got: $PB1)" ;;
 esac
+# AND THE PREVIOUS GENERATION'S PASS IS STILL ON DISK, UNREAD (round 5, J1). H1 used to CLOBBER it
+# with the sentinel, which was the only thing keeping the stale verdict out of the reader's way;
+# now the reader simply does not look there. Both properties are asserted, because the ORDER still
+# has to hold for the generation the re-open publishes.
+if LC_ALL=C grep -q '^result: PASS$' "$RP_B_OLD" 2>/dev/null; then
+  ok "marker-order: the previous generation's PASS survives as history"
+else
+  bad "marker-order: the previous generation's report was clobbered instead of superseded"
+fi
+rs "$R11F" verdict c --issue 901
+rc_is 5 "marker-order: and the re-opened stage reads its OWN generation, so the stale PASS is not a verdict"
 
 # (c) THE INTERRUPTED STATE, PERMANENTLY: the same forced re-open, killed at the first write.
 #     Whatever is on disk afterwards must NOT read as a verdict for the new tree. This is the
@@ -1350,8 +1383,9 @@ git -C "$R11F" -c user.email=t@example.invalid -c user.name=t commit -q -m C >/d
 SHA_C="$(git -C "$R11F" rev-parse HEAD 2>/dev/null || true)"
 SF_C="$R11F/.review-stage/issue-902/c.stage"
 RP_C="$(REPORT_OF "$R11F" 902 c)"
+RP_C_NEW="$(REPORT_GEN_OF "$R11F" 902 c 1)"
 LOG_C="$T/probe-c.log"
-rsp "$R11F" "$LOG_C" "$SF_C" "$RP_C" 1 open c --issue 902 --agent spec-auditor --force
+rsp "$R11F" "$LOG_C" "$SF_C" "$RP_C_NEW" 1 open c --issue 902 --agent spec-auditor --force
 rc_is 90 "marker-order: the simulated kill fired at the first write"
 NPC="$(LC_ALL=C grep -c . "$LOG_C" 2>/dev/null || true)"
 if [ "$NPC" = "1" ]; then
@@ -1359,29 +1393,49 @@ if [ "$NPC" = "1" ]; then
 else
   bad "marker-order: $NPC write(s) completed before the kill, expected 1"
 fi
-SENT="$(LC_ALL=C grep -c '^result: NOT-RUN' "$RP_C" 2>/dev/null || true)"
+SENT="$(LC_ALL=C grep -c '^result: NOT-RUN' "$RP_C_NEW" 2>/dev/null || true)"
 if [ "$SENT" = "1" ]; then
-  ok "marker-order: the interrupted state leaves the SENTINEL on disk, not the stale PASS"
+  ok "marker-order: the interrupted state leaves the new generation's SENTINEL on disk"
 else
-  bad "marker-order: the report on disk is not the sentinel after the kill ($(LC_ALL=C grep -m1 '^result:' "$RP_C" 2>/dev/null))"
+  bad "marker-order: the new generation's report is not the sentinel after the kill ($(LC_ALL=C grep -m1 '^result:' "$RP_C_NEW" 2>/dev/null))"
 fi
+# WHAT THE INTERRUPTED STATE IS, AND WHY IT IS STILL THE FAIL-CLOSED ONE (round 5, J1 changes the
+# OBSERVABLE here, not the property). The RECORD is the publication marker and it was not written,
+# so the stage is EXACTLY what it was before the re-open: generation 0, opened at B, recording the
+# audit that was really made at B. That pair is TRUTHFUL — and it is now published ATOMICALLY,
+# because `head-sha:` and `report-generation:` are two fields of ONE record write, so no partial
+# state can pair a new commit with an older generation's verdict at all. Before generations, the
+# same interruption left the ONE report clobbered to the sentinel; that was fail-closed too, but it
+# DESTROYED the audit it had, and the H1 pairing was kept out only by the write order.
 DISKHEAD="$(LC_ALL=C sed -n 's/^head-sha:[[:space:]]*//p' "$SF_C" 2>/dev/null | LC_ALL=C head -1 || true)"
 if [ "$DISKHEAD" = "$SHA_B" ]; then
   ok "marker-order: the record still names the commit the audit was actually made at, so the merge point refuses on the sha too"
 else
   bad "marker-order: the record's head-sha is '$DISKHEAD', expected the pre-kill '$SHA_B'"
 fi
+DISKGEN="$(LC_ALL=C sed -n 's/^report-generation:[[:space:]]*//p' "$SF_C" 2>/dev/null | LC_ALL=C head -1 || true)"
+if [ "$DISKGEN" = "0" ]; then
+  ok "marker-order: and it still names the generation that head-sha was stamped WITH — the pair is atomic, so it cannot be split by an interruption"
+else
+  bad "marker-order: the record's report-generation is '$DISKGEN', expected the pre-kill '0'"
+fi
 rs "$R11F" verdict c --issue 902
-rc_is 5 "marker-order: the interrupted stage reads NOT-RUN — the partial state fails CLOSED"
-hasnt "RESULT: PASS" "marker-order: no PASS survives the interrupted re-open"
-has "no report written" "marker-order: and the cause names the sentinel, so the operator knows to re-spawn"
+rc_is 0 "marker-order: the interrupted re-open published NOTHING, so the stage is still the previous generation"
+has "report=$RP_C" "marker-order: the verdict is read from the generation the RECORD names, not the half-published one"
+hasnt "report=$RP_C_NEW" "marker-order: the unpublished generation's sentinel is not read"
 
 # (d) POSITIVE CONTROL: the UNINTERRUPTED forced re-open leaves a USABLE stage — otherwise (c)
 #     could pass on a script that broke --force altogether, and a guard that reds on correct
 #     input is the guard agents learn to waive.
 rs "$R11F" open c --issue 902 --agent spec-auditor --force
 rc_is 0 "marker-order CONTROL: a complete forced re-open succeeds"
-printf 'result: PASS\n\nre-audited at C.\n' >"$RP_C"
+RP_C_LIVE="$(printed_report_path)"
+if [ -n "$RP_C_LIVE" ] && [ "$RP_C_LIVE" != "$RP_C" ]; then
+  ok "marker-order CONTROL: the completed re-open published a NEW generation and printed its path"
+else
+  bad "marker-order CONTROL: the re-open printed '$RP_C_LIVE', which is not a fresh generation"
+fi
+printf 'result: PASS\n\nre-audited at C.\n' >"$RP_C_LIVE"
 rs "$R11F" verdict c --issue 902
 rc_is 0 "marker-order CONTROL: the re-opened stage can record a PASS again"
 DISKHEAD2="$(LC_ALL=C sed -n 's/^head-sha:[[:space:]]*//p' "$SF_C" 2>/dev/null | LC_ALL=C head -1 || true)"
@@ -1549,6 +1603,202 @@ done
 rs "$R13" open c --issue "$(printf '907\n908')" --agent spec-auditor
 rc_is 64 "derived/issue: an issue carrying a NEWLINE is refused"
 
+# --- 14. THE REPORT PATH IS GENERATION-BOUND (round 5, J1) ------------------------
+# THE FINDING. `open --force` reset the report to the sentinel and re-stamped `head-sha:`, but
+# the report PATH was unchanged — so the PREVIOUS, idle agent could wake up afterwards and write
+# its OLD-TREE verdict into that same path, where it was now paired with the NEWLY stamped
+# `head-sha:`. A commit nobody audited then passed `premerge-assert.sh`. This is not an exotic
+# race: #3751 exists BECAUSE delegated agents go idle and return late, so "the late agent wakes
+# up and writes" is the expected behaviour of the population this mechanism serves.
+#
+# THE FIX IS STRUCTURAL, NOT A CHECK. Every open records a `report-generation:` in the stage
+# record and the report path INCLUDES it, so a resumed old agent holds a STALE PATH and cannot
+# write into the current generation's report at all. A check could only notice the write
+# afterwards, and the harm is the write.
+#
+# TWO SHAPES, ONE DERIVATION, and the reason the first open keeps the bare name: generation 0 is
+# `<kind>.md` and generation N>0 is `<kind>.<N>.md`. They cannot collide because `<kind>` may not
+# contain a dot (round 4's narrowing) and a generation is digits only. Keeping generation 0's
+# name bare is what makes every quoted `.review-stage/issue-<N>/<kind>.md` example in the agent
+# definitions, the skills, CLAUDE.md and both website pages still TRUE for a first open, and what
+# keeps a record written before this field existed readable instead of reported as
+# `report absent` — a guard that reds on correct input is the guard agents learn to waive.
+
+R14="$(newrepo)"
+printf 'seed\n' >"$R14/seed.txt"
+git -C "$R14" add seed.txt >/dev/null 2>&1
+git -C "$R14" -c user.email=t@example.invalid -c user.name=t commit -q -m A >/dev/null 2>&1
+G_A="$(git -C "$R14" rev-parse HEAD 2>/dev/null || true)"
+if [ -n "$G_A" ]; then
+  ok "generation: the scratch repo has a resolvable HEAD (the head-sha half is measurable)"
+else
+  bad "generation: could not commit in the scratch repo — the assertions below would be vacuous"
+fi
+
+# (a) THE FIRST OPEN KEEPS THE BARE NAME, and the printed path is the OPEN-OK line's path. Pinned
+#     so a change to the compatibility rule has to be deliberate: several committed documents
+#     quote this exact shape.
+rs "$R14" open c --issue 950 --agent spec-auditor
+rc_is 0 "generation: the first open succeeds"
+G_P0="$(printed_report_path)"
+if [ "$G_P0" = "$(REPORT_GEN_OF "$R14" 950 c 0)" ]; then
+  ok "generation: generation 0's report keeps the bare <kind>.md name (every quoted doc example stays true)"
+else
+  bad "generation: the first open printed '$G_P0', expected $(REPORT_GEN_OF "$R14" 950 c 0)"
+fi
+has "report=$G_P0" "generation: the OPEN-OK line's report= field is the SAME path the clause prints"
+has "report-generation=0" "generation: the OPEN-OK line names the generation"
+if LC_ALL=C grep -q '^report-generation: 0$' "$R14/.review-stage/issue-950/c.stage" 2>/dev/null; then
+  ok "generation: the stage record records the generation, so a reader has ONE source of truth for which report counts"
+else
+  bad "generation: the stage record does not record report-generation: 0 (record: $(cat "$R14/.review-stage/issue-950/c.stage" 2>/dev/null))"
+fi
+
+# (b) THE J1 SCENARIO, END TO END. The stage records a PASS at A; a further commit lands; the
+#     stage is re-opened with --force; and THEN the previous agent wakes up and writes its
+#     old-tree PASS into the path it was originally given.
+printf 'result: PASS\n\naudited at A.\n' >"$G_P0"
+rs "$R14" verdict c --issue 950
+rc_is 0 "generation: the first-generation audit is readable while it is current"
+printf 'more\n' >>"$R14/seed.txt"
+git -C "$R14" add seed.txt >/dev/null 2>&1
+git -C "$R14" -c user.email=t@example.invalid -c user.name=t commit -q -m B >/dev/null 2>&1
+G_B="$(git -C "$R14" rev-parse HEAD 2>/dev/null || true)"
+if [ -n "$G_B" ] && [ "$G_B" != "$G_A" ]; then
+  ok "generation: a distinct commit B exists"
+else
+  bad "generation: could not create a distinct commit B (A=$G_A B=$G_B)"
+fi
+rs "$R14" open c --issue 950 --agent spec-auditor --force
+rc_is 0 "generation: the forced re-open succeeds"
+G_P1="$(printed_report_path)"
+if [ "$G_P1" != "$G_P0" ]; then
+  ok "generation: the re-opened stage's report path DIFFERS from the one the idle agent holds"
+else
+  bad "generation: --force reused the report path ($G_P1) — the resumed agent can still write into the current report"
+fi
+if [ "$G_P1" = "$(REPORT_GEN_OF "$R14" 950 c 1)" ]; then
+  ok "generation: and it is generation 1's path"
+else
+  bad "generation: the forced re-open printed '$G_P1', expected $(REPORT_GEN_OF "$R14" 950 c 1)"
+fi
+has "report-generation=1" "generation: the OPEN-OK line names the new generation"
+# THE OLD AGENT WAKES UP AND WRITES. This is the whole finding.
+printf 'result: PASS\n\naudited at A, reported late.\n' >"$G_P0"
+rs "$R14" verdict c --issue 950
+rc_is 5 "generation: a resumed agent's write into its OLD path is NOT a verdict for the new tree"
+has "NOT-RUN (no report written)" "generation: the current generation reads as the sentinel it is"
+hasnt "RESULT: PASS" "generation: no PASS is reported for a tree nobody audited"
+has "report=$G_P1" "generation: and the emitted report= names the CURRENT generation"
+# NOTHING IS DELETED. Old generations stay on disk as history; the property is that nothing
+# READS them, not that they are removed — an audit trail is the point of this whole issue.
+if LC_ALL=C grep -q '^result: PASS$' "$G_P0" 2>/dev/null; then
+  ok "generation: the previous generation's report is left INTACT on disk as history"
+else
+  bad "generation: the previous generation's report was destroyed — the audit trail is the point of this issue"
+fi
+# AND THE RECORD PAIRS THE NEW GENERATION WITH THE NEW COMMIT, in ONE atomic write.
+if LC_ALL=C grep -q "^head-sha: $G_B\$" "$R14/.review-stage/issue-950/c.stage" 2>/dev/null; then
+  ok "generation: the record re-stamped head-sha to B beside the new generation (one atomic pair)"
+else
+  bad "generation: the record does not name B (record: $(cat "$R14/.review-stage/issue-950/c.stage" 2>/dev/null))"
+fi
+
+# (c) POSITIVE CONTROL: the RE-SPAWNED agent, writing into the path the clause printed, reaches a
+#     PASS. Without this the section would pass on a script that had simply broken --force, and a
+#     guard that reds on correct input is the guard agents learn to waive.
+printf 'result: PASS\n\nre-audited at B.\n' >"$G_P1"
+rs "$R14" verdict c --issue 950
+rc_is 0 "generation CONTROL: the fresh agent's report at the printed path IS the verdict"
+has "report=$G_P1" "generation CONTROL: read from the current generation's path"
+
+# (d) MONOTONIC ACROSS A SECOND RE-OPEN, and generation 1's report is left alone too.
+rs "$R14" open c --issue 950 --agent spec-auditor --force
+rc_is 0 "generation: a second forced re-open succeeds"
+G_P2="$(printed_report_path)"
+if [ "$G_P2" = "$(REPORT_GEN_OF "$R14" 950 c 2)" ]; then
+  ok "generation: the generation ADVANCES (2), so no two opens of one stage ever share a path"
+else
+  bad "generation: the second re-open printed '$G_P2', expected $(REPORT_GEN_OF "$R14" 950 c 2)"
+fi
+if LC_ALL=C grep -q '^result: PASS$' "$G_P1" 2>/dev/null; then
+  ok "generation: generation 1's report is history too, not clobbered"
+else
+  bad "generation: generation 1's report was destroyed by the next re-open"
+fi
+rs "$R14" verdict c --issue 950
+rc_is 5 "generation: and the new generation starts as a non-verdict, whatever the older ones say"
+
+# (e) THE ADVANCE BELT: a monotonic counter read from the record cannot help when the RECORD is
+#     gone and the REPORT is not — the count would restart at 0 and hand a new agent the path an
+#     old one still holds. So the generation also ADVANCES PAST any generation whose report file
+#     already exists.
+rs "$R14" open c --issue 951 --agent spec-auditor
+rc_is 0 "generation/belt: a stage opens at generation 0"
+G_B0="$(printed_report_path)"
+printf 'result: PASS\n\naudited by the agent that is still running.\n' >"$G_B0"
+rm -f "$R14/.review-stage/issue-951/c.stage"
+rs "$R14" open c --issue 951 --agent spec-auditor
+rc_is 0 "generation/belt: with the record gone, a fresh open succeeds"
+G_B1="$(printed_report_path)"
+if [ "$G_B1" != "$G_B0" ]; then
+  ok "generation/belt: it ADVANCES past the surviving report rather than reusing its path"
+else
+  bad "generation/belt: the fresh open reused $G_B0, which an earlier agent still holds"
+fi
+if LC_ALL=C grep -q '^result: PASS$' "$G_B0" 2>/dev/null; then
+  ok "generation/belt: and the surviving report is untouched"
+else
+  bad "generation/belt: the surviving report was clobbered"
+fi
+rs "$R14" verdict c --issue 951
+rc_is 5 "generation/belt: the re-opened stage reads its OWN generation, not the survivor's PASS"
+
+# (f) A RECORD WHOSE GENERATION CANNOT BE READ NAMES ITS OWN CAUSE AND FABRICATES NO PATH. The
+#     field decides WHICH ARTIFACT COUNTS, so "cannot tell" may not take the permissive branch by
+#     falling back to generation 0 — that is how a stale generation-0 PASS would be read as the
+#     current verdict.
+rs "$R14" open c --issue 952 --agent spec-auditor
+G_SF="$R14/.review-stage/issue-952/c.stage"
+printf 'result: PASS\n\nstale, from generation 0.\n' >"$(REPORT_GEN_OF "$R14" 952 c 0)"
+LC_ALL=C sed -e 's|^report-generation: .*|report-generation: nope|' "$G_SF" >"$G_SF.new" && mv "$G_SF.new" "$G_SF"
+rs "$R14" verdict c --issue 952
+rc_is 5 "generation/defect: an unreadable report-generation is a NON-VERDICT"
+has "stage record unreadable" "generation/defect: and it names the STAGE RECORD, not the report (a different operator action)"
+hasnt "RESULT: PASS" "generation/defect: the generation-0 report is NOT read as the current verdict"
+has "report=unresolved" "generation/defect: no path is fabricated on the line that is otherwise the authority"
+rs "$R14" status c --issue 952
+has "state=stage-record-unreadable" "generation/defect: status gives it its own state, per the one-state-per-cause rule"
+rs "$R14" record-author-performed c --issue 952 \
+  --reason 'no peer auditor was available on this box' --evidence docs/development/review-stage-reporting.md --performed-by author
+rc_is 2 "generation/defect: record-author-performed REFUSES rather than write to a guessed path"
+# NAMED, so this case cannot pass on the NEIGHBOURING refusal: a generation-0 report holding a
+# recorded PASS would refuse as `verdict-already-recorded` whether or not the record is readable.
+has "AUTHOR-REFUSED reason=stage-record-unreadable" "generation/defect: naming the record defect, not the neighbouring already-recorded refusal"
+
+# (g) SEVERAL generation lines is AMBIGUOUS, refused by the COUNT and not resolved by order —
+#     the same rule the `result:` reader follows, for the same reason.
+rs "$R14" open c --issue 953 --agent spec-auditor
+G_SF2="$R14/.review-stage/issue-953/c.stage"
+printf 'result: PASS\n\nstale, from generation 0.\n' >"$(REPORT_GEN_OF "$R14" 953 c 0)"
+printf 'report-generation: 7\n' >>"$G_SF2"
+rs "$R14" verdict c --issue 953
+rc_is 5 "generation/defect: TWO report-generation lines is a NON-VERDICT"
+has "stage record unreadable" "generation/defect: named as a record defect"
+hasnt "RESULT: PASS" "generation/defect: and the first line does not win"
+
+# (h) A RECORD WRITTEN BEFORE THE FIELD EXISTED still reads its report. Every prior version wrote
+#     exactly ONE report, at `<kind>.md`, so ABSENT is an affirmative measurement of that shape —
+#     not a "cannot tell". Reading generation 0 there is the TRUE answer, and reporting
+#     `report absent` instead would red on correct input.
+rs "$R14" open c --issue 954 --agent spec-auditor
+G_SF3="$R14/.review-stage/issue-954/c.stage"
+printf 'result: PASS\n\naudited by the previous version of this tool.\n' >"$(REPORT_GEN_OF "$R14" 954 c 0)"
+LC_ALL=C grep -v '^report-generation:' "$G_SF3" >"$G_SF3.new" && mv "$G_SF3.new" "$G_SF3"
+rs "$R14" verdict c --issue 954
+rc_is 0 "generation/legacy: a record with no report-generation reads generation 0's report"
+has "report=$(REPORT_GEN_OF "$R14" 954 c 0)" "generation/legacy: and names the bare path that version wrote"
+
 # --- case floor ---------------------------------------------------------------
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
@@ -1614,7 +1864,21 @@ rc_is 64 "derived/issue: an issue carrying a NEWLINE is refused"
 # and takes the FIRST shape the two rules above allow: the mode-000 unreadable case emits the SAME
 # NUMBER of assertions whether or not this user can read a mode-000 file (root can), so the count
 # does not move.
-ASSERT_FLOOR=372
+#
+# ROUND 5 (J1) MOVES IT TO 419, IN BOTH DIRECTIONS AGAIN. Section 14 adds 40 assertions (the
+# report path is GENERATION-BOUND: the first open's bare name, the J1 scenario end to end, the
+# re-spawn positive control, monotonicity, the existence belt, the two record-defect shapes, and
+# the legacy-record control), and section 11f gains 7 (the previous generation's report survives as
+# history and is not read; the interrupted re-open leaves the record's head-sha AND generation
+# paired; the completed re-open prints a fresh generation) — 372 -> 419. Section 11f's own count
+# rose rather than fell: nothing was deleted, three assertions were RE-EXPRESSED against the
+# generation the re-open publishes (the probe now watches that file, because reading the previous
+# generation would measure a file no reader consults) and one changed its expected outcome, which
+# is recorded in place with the reasoning. Every added assertion is UNCONDITIONAL — section 14's
+# extra requirements (git commits in the scratch repo) are the SUBJECT of an asserted precondition
+# rather than a precondition for running, exactly as 11f's are — so the EXACT floor still holds by
+# the two shapes recorded above.
+ASSERT_FLOOR=419
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

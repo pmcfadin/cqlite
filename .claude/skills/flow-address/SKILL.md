@@ -76,7 +76,8 @@ Resolve them in the worktree and reply per thread.
    worktree of ONE shared `.git` and a peer lane's certified commit resolves from any lane
    (#3616's class — resolvability is not provenance). If addressing comments changed the SPEC deltas, C has to be re-run — re-open the
    stage (`review-stage.sh open c --issue <N> --agent spec-auditor --force`, which KEEPS the
-   original clock) and read its `verdict` again.
+   original clock and ADVANCES the report generation — spawn the auditor with the path that command
+   PRINTS, since the previous generation's report is no longer read) and read its `verdict` again.
    The third argument is REQUIRED and must always be a FULL-gate `RESULT: PASS` block; `--lite` is
    refused by name everywhere, and a `--delta` block is accepted ONLY as the optional fourth argument
    (where the script checks that its `delta-anchor:` names the third argument's block and that its own

@@ -613,23 +613,37 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   inside a fenced block, a glob-ish value), asserting they agree per row AND that both reach the
   EXPECTED disposition — agreement alone is satisfiable by both being wrong in the same way.
   `status` reports
-  elapsed/deadline and is **advisory, never a verdict input**. `NOT-RUN` always names ONE OF SIX causes
+  elapsed/deadline and is **advisory, never a verdict input**. `NOT-RUN` always names ONE OF SEVEN causes
   (`no report written`, `report absent`, `report unreadable`, `report empty`,
-  `report ungrammatical: <what>`, `stage never opened`), because the operator action differs per cause —
+  `report ungrammatical: <what>`, `stage never opened`, `stage record unreadable: <what>`), because the operator action differs per cause —
   `report unreadable` is its own cause rather than folded into `report empty` (whose fix is the AGENT,
   where an unreadable file's is `chmod`) or `report ungrammatical` (which would assert something about
   content never observed). **An idle notice is strictly
   WEAKER than the gate's `INCOMPLETE` sentinel** — at least the sentinel names itself a non-verdict — so
   never read one as a completed review. Writes go under `.review-stage/`, whose ignore status is
   **verified with `git check-ignore`, fail-closed**, so a stage opened mid-run cannot dirty a running gate
-  (#2926) or make `premerge-assert.sh` refuse on `dirty: yes` (#3648). **The report path is DERIVED** —
-  `<repo-root>/.review-stage/issue-<N>/<kind>.md`, computed identically by the writer and by every
+  (#2926) or make `premerge-assert.sh` refuse on `dirty: yes` (#3648). **The report path is DERIVED and GENERATION-BOUND** —
+  `<repo-root>/.review-stage/issue-<N>/<kind>.md` at generation 0 and `<kind>.<N>.md` after each
+  `--force` re-open, computed identically by the writer and by every
   reader, with **no `--report` override** (removed in round 4, a deliberate narrowing: the flag was
   mandated by no requirement, used by nothing, and was the caller-controlled component behind a
   finding cluster across four rounds — written raw into the LINE-oriented stage record, a legal
   newline-bearing filename split and the reader took the PREFIX, which could select a different
   pre-existing report recording `PASS`; and the parent directory was created BEFORE containment was
-  verified, so a refused outside-the-repository path still created directories outside the checkout). **And a SYMLINK at the report
+  verified, so a refused outside-the-repository path still created directories outside the checkout).
+  **The GENERATION exists because `--force` used to reset the report AT THE SAME PATH (#3751 round 5,
+  J1)**: the PREVIOUS, idle agent could wake up after the reset and write its OLD-TREE verdict into
+  that path, where it was paired with the newly stamped `head-sha:`, so a commit nobody audited
+  passed `premerge-assert.sh` — the expected behaviour of a population of agents that return late,
+  not an exotic race. A resumed agent now holds a STALE PATH and is STRUCTURALLY unable to write
+  into the current report, which a check could not deliver because the harm is a write. The stage
+  record names the generation as a **NUMBER, never a path** (round 4 removed the `report:` path
+  field precisely so no data file can redirect a reader), written in the SAME atomic record as
+  `head-sha:`; an absent field is generation 0, which is what every earlier version wrote, and
+  several or a non-numeric value is a `stage record unreadable` NON-VERDICT rather than a fallback
+  to generation 0. Old generations' reports stay on disk as HISTORY — nothing reads them, and `open`
+  uses their existence to avoid handing a new agent a path an old one still holds — so **paste the
+  path `open` PRINTS into the spawn prompt, never a remembered one**. **And a SYMLINK at the report
   path, at the `.stage` path or at ANY component under `.review-stage/` is REFUSED, never followed
   (#3751 round 1)** — `check-ignore` judges a LEXICAL path while a WRITE follows links, so an
   ignored-but-symlinked report clobbered a TRACKED file and reported `OPEN-OK` (measured); the

@@ -14,9 +14,9 @@ non-verdict sentinel recording `spawned-at`, `agent`, `issue`, and a `deadline`.
 
 #### Scenario: the report path is derived, never caller-supplied
 - **WHEN** any subcommand resolves the report of record for `<kind>`/`<issue>`
-- **THEN** the path is `<repo-root>/.review-stage/issue-<N>/<kind>.md`, computed identically by the
-  writer and by EVERY reader, with NO override flag — so no caller-controlled component enters a path
-  this tool builds, reads or writes
+- **THEN** the path is `<repo-root>/.review-stage/issue-<N>/<kind>[.<generation>].md`, computed
+  identically by the writer and by EVERY reader, with NO override flag — so no caller-controlled
+  component enters a path this tool builds, reads or writes
 - **AND** `<kind>` (`[A-Za-z0-9][A-Za-z0-9_-]*`) and `<issue>` (decimal digits only) are the WHOLE
   path-input surface and are refused by name at ONE boundary — no `/`, no `.`, no leading dash, no
   CR/LF
@@ -75,6 +75,9 @@ ORDER is not a rule in either direction.
 - **THEN** the `NOT-RUN` token carries a parenthesised cause distinguishing that state from the others
 - **AND** an UNREADABLE report is its own cause, not `report empty`: the operator fix is `chmod`, not
   the agent, and calling it ungrammatical would assert something about content never observed
+- **AND** a STAGE RECORD that does not name which report is current is its own cause too
+  (`stage record unreadable: <what>`) — no report was identified, so neither `report absent` nor
+  `report ungrammatical` may be claimed about one, and the operator action is the record itself
 
 #### Scenario: an unrecognised token is not passed through
 - **WHEN** a report records a result token outside the closed set
@@ -93,7 +96,8 @@ nothing was produced. The deadline SHALL NOT change the verdict.
 #### Scenario: each status state names its own cause
 - **WHEN** `status` reports a stage whose report is unreadable, or whose report RECORDS a `NOT-RUN`
   of its own with a stated cause
-- **THEN** `state=` names THAT cause (`report-unreadable`, `not-run-self-reported`) and never
+- **THEN** `state=` names THAT cause (`report-unreadable`, `not-run-self-reported`, and
+  `stage-record-unreadable` for a record that does not name its current report) and never
   `report-ungrammatical` — the operator action differs per cause (`chmod` / act on what the agent
   said / re-write the verdict line), and a wrong remediation signal is worse than a vague one, since
   it is what stops the operator looking
@@ -177,6 +181,28 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
 - **AND** re-opening the stage with `--force` at the certified commit and re-running C certifies it (the
   positive control: a guard with no way past it is the guard agents learn to waive)
 
+#### Scenario: a re-opened stage's report path cannot be written by the agent it replaced
+- **WHEN** `open --force` re-opens a stage
+- **THEN** the stage record's `report-generation:` ADVANCES and the report path INCLUDES it
+  (`<kind>.md` at generation 0, `<kind>.<N>.md` thereafter), so the previous, idle agent holds a STALE
+  PATH and is STRUCTURALLY unable to write into the current report — a resumed agent's late write into
+  the path it was originally given used to be paired with the newly stamped `head-sha:`, certifying a
+  commit nobody audited
+- **AND** the path `open` PRINTS (and the paste-ready clause it emits) is that new generation's path,
+  so a re-spawned agent is handed the file that counts
+- **AND** the generation is recorded as a NUMBER, never a path, and every reader derives the path from
+  the record with the same function the writer used — one source of truth for which report counts, and
+  no data file that can redirect a reader
+- **AND** a record with NO `report-generation:` reads as generation 0 — an affirmative reading of a
+  record written before the field existed, which wrote exactly one report at `<kind>.md`, so a correct
+  older record is not reported as `report absent`
+- **AND** SEVERAL `report-generation:` lines, or a non-numeric value, is a `stage record unreadable`
+  NON-VERDICT that derives NO path at all and fabricates none in its emitted line: falling back to
+  generation 0 is how a stale generation-0 `PASS` would be read as the current verdict
+- **AND** older generations' reports are LEFT on disk as history — nothing reads them, and `open`
+  advances past a generation whose report file still exists, so a deleted stage record cannot hand a
+  new agent the path an older agent still holds
+
 #### Scenario: an interrupted open cannot publish a stale verdict
 - **WHEN** `open` (or `open --force`) writes its two files and is interrupted between them — by a failed
   write, or by the process being killed
@@ -186,6 +212,10 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
 - **AND** the previous report's verdict is NEVER paired with the newly-recorded `head-sha:` — writing the
   record first made a `result: PASS` from an audit of an OLDER tree satisfy both of the merge point's
   bindings at once, and a check could only have REPORTED that pairing, because the harm is a WRITE
+- **AND** since the record carries the report GENERATION beside `head-sha:` in ONE atomic write, an
+  interrupted re-open leaves the ENTIRE previous stage in place — the older generation's verdict beside
+  the commit it was really audited at, which is coherent and still refuses at the merge point on the sha
+  — instead of destroying the audit it had
 - **AND** an uninterrupted `--force` re-open still yields a usable stage that can record a fresh verdict
   (the positive control)
 

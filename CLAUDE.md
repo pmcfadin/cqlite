@@ -1135,8 +1135,9 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   inside a fenced block, a glob-ish value) and asserts they agree per row AND reach the expected
   disposition, because agreement on a wrong answer is not correctness and a second
   implementation's correctness is only knowable by testing it against the first; `status` reports elapsed/deadline and is **advisory, never a
-  verdict input**. `NOT-RUN` always names ONE OF SIX causes (`no report written`, `report absent`,
-  `report unreadable`, `report empty`, `report ungrammatical: <what>`, `stage never opened`) because
+  verdict input**. `NOT-RUN` always names ONE OF SEVEN causes (`no report written`, `report absent`,
+  `report unreadable`, `report empty`, `report ungrammatical: <what>`, `stage never opened`,
+  `stage record unreadable: <what>`) because
   the operator action differs per cause — `report unreadable` was added in round 2 rather than folded
   into `report empty` (whose fix is the AGENT, where an unreadable file's is `chmod`) or into
   `report ungrammatical` (which would assert something about content never observed: a false
@@ -1147,9 +1148,25 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `sstable-developer`, which had queued work it never did, are in it beside the four reviewers).
   Writes go under `.review-stage/`, whose ignore status is **verified with `git check-ignore`,
   fail-closed**, so a stage opened mid-run cannot dirty a running gate (#2926) or make
-  `premerge-assert.sh` refuse on `dirty: yes` (#3648). **The report path is DERIVED —
-  `<repo-root>/.review-stage/issue-<N>/<kind>.md`, computed the same way by the writer and by every
-  reader, with NO `--report` override (removed in round 4).** That flag was mandated by no
+  `premerge-assert.sh` refuse on `dirty: yes` (#3648). **The report path is DERIVED and GENERATION-BOUND —
+  `<repo-root>/.review-stage/issue-<N>/<kind>.md` at generation 0 and `<kind>.<N>.md` after each
+  `--force` re-open, computed the same way by the writer and by every
+  reader, with NO `--report` override (removed in round 4).** The generation exists because
+  `--force` used to reset the report AT THE SAME PATH (#3751 round 5, J1): the PREVIOUS, idle agent
+  could wake up after the reset and write its OLD-TREE verdict into that path, where it was paired
+  with the newly stamped `head-sha:`, and **a commit nobody audited passed `premerge-assert.sh`** —
+  which is the expected behaviour of this population, not an exotic race, since this whole mechanism
+  exists because delegated agents return late. A resumed agent now holds a STALE PATH and is
+  STRUCTURALLY unable to write into the current report; a check could not deliver that, because the
+  harm is a write. The stage record names the generation as a **NUMBER, never a path** (round 4
+  removed the `report:` path field precisely so no data file can redirect a reader), in the SAME
+  atomic write as `head-sha:`, so the tree audited and the artifact auditing it are published
+  together or not at all; an absent field is generation 0 (what every earlier version wrote — an
+  affirmative reading, not a permissive default), and several or a non-numeric value is a
+  `stage record unreadable` NON-VERDICT that derives no path at all rather than falling back to
+  generation 0. Old generations' reports stay on disk as HISTORY: nothing reads them, and `open`
+  uses their existence to avoid handing a new agent a path an old one still holds. **So paste the
+  path `open` PRINTS into the spawn prompt — never a remembered one.** That flag was mandated by no
   requirement and used by nothing, and it was the caller-controlled component behind a finding
   cluster across four rounds: written RAW into the LINE-oriented stage record, a legal
   newline-bearing filename SPLIT and the reader took the PREFIX — which could select a DIFFERENT

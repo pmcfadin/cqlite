@@ -225,6 +225,17 @@
 #       one. Every one of those refusals prints the same remedy — re-open the stage
 #       at this commit with `--force` (which RE-STAMPS `head-sha`, deliberately
 #       unlike `spawned-at`) and re-run C.
+#   WHICH REPORT the record names is NOT this script's question (#3751 round 5, J1).
+#   The record also carries a `report-generation:`, and the report path INCLUDES it
+#   (`<kind>.md` at generation 0, `<kind>.<N>.md` after a re-open) so that a
+#   PREVIOUS, idle agent resuming after a `--force` holds a stale path and cannot
+#   write into the current report at all. This script never derives that path: it
+#   runs `review-stage.sh verdict`, which resolves the generation from the same
+#   record with the same function `open` wrote it with. A record whose
+#   `report-generation:` cannot be read therefore arrives here as a NON-PASSING
+#   TOKEN (`NOT-RUN (stage record unreadable: …)`), which the closed grammar below
+#   refuses like any other — no fallback, and no second opinion about which file
+#   holds the verdict.
 #
 # USAGE
 #   scripts/flow/premerge-assert.sh <pr-number> <certified-sha> \
@@ -286,7 +297,10 @@ usage() {
   printf '                              must be BOUND to the certified sha twice: this\n' >&2
   printf '                              worktree HEAD, and the stage record head-sha: it\n' >&2
   printf '                              was opened at. A stale, missing or unparsable\n' >&2
-  printf '                              head-sha REFUSES — re-open with --force, re-run C.\n' >&2
+  printf '                              head-sha REFUSES — re-open with --force, re-run C\n' >&2
+  printf '                              WRITING INTO THE PATH THAT open PRINTS: a --force\n' >&2
+  printf '                              re-open advances the report GENERATION, so the\n' >&2
+  printf '                              previous generation file is no longer read (#3751).\n' >&2
   printf '         --c-verdict <path>   a file holding a captured verdict line, i.e.\n' >&2
   printf '                              scripts/flow/review-stage.sh verdict c --issue <N> > <path>\n' >&2
 }
@@ -469,7 +483,7 @@ C_ROUTING=""        # REQUIRED | NOT-APPLICABLE | UNMEASURED
 C_ROUTING_DETAIL=""
 # ONE remedy sentence for every stage-binding refusal (#3751 round 3, G1): each of those
 # refusals has the SAME next action, and six copies of it is six places for it to drift.
-C_REOPEN_REMEDY="Remedy: re-open the stage at THIS commit and re-run C — review-stage.sh open <kind> --issue <N> --agent spec-auditor --force (--force RE-STAMPS head-sha, deliberately unlike spawned-at) — then read it with: review-stage.sh verdict <kind> --issue <N>"
+C_REOPEN_REMEDY="Remedy: re-open the stage at THIS commit and re-run C — review-stage.sh open <kind> --issue <N> --agent spec-auditor --force (--force RE-STAMPS head-sha, deliberately unlike spawned-at, and ADVANCES the report generation: spawn the auditor with the path that command PRINTS, because the previous generation's file is no longer read) — then read it with: review-stage.sh verdict <kind> --issue <N>"
 
 refuse_no_c_verdict() {
   printf '========================================================\n' >&2
@@ -617,7 +631,8 @@ C_PARSE
     refuse_no_c_verdict \
       "The $what holds NO verdict line (no line begins 'REVIEW-STAGE: ' at column zero)." \
       "A captured verdict is produced by:  review-stage.sh verdict $C_STAGE_KIND --issue <N> > <path>" \
-      "The stage's REPORT file (.review-stage/issue-<N>/$C_STAGE_KIND.md) is NOT that line:" \
+      "The stage's REPORT file (.review-stage/issue-<N>/$C_STAGE_KIND.md, or" \
+      "$C_STAGE_KIND.<generation>.md once the stage has been re-opened) is NOT that line:" \
       "the report is the agent's prose, the verdict line is the closed-grammar reading of it."
   fi
   if [ "$CV_N" -gt 1 ]; then
@@ -1111,9 +1126,9 @@ c_evaluate() {
     NOT-RUN)
       refuse_no_c_verdict \
         "The $C_STAGE_KIND stage reports NOT-RUN — no verdict was ever recorded." \
-        "NOT-RUN covers six distinct states (sentinel-only, report absent, report unreadable," \
-        "report empty, report ungrammatical, stage never opened) and the verdict line above NAMES which," \
-        "because the operator action differs per cause."
+        "NOT-RUN covers seven distinct states (sentinel-only, report absent, report unreadable," \
+        "report empty, report ungrammatical, stage never opened, stage record unreadable) and the" \
+        "verdict line above NAMES which, because the operator action differs per cause."
       ;;
     '')
       refuse_no_c_verdict \

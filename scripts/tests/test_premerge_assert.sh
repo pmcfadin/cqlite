@@ -3024,10 +3024,21 @@ if [ -n "$STALE_B" ]; then
   # AND THE REMEDY IS RE-OPENING THE STAGE: --force re-stamps head-sha (deliberately unlike
   # spawned-at), so a re-opened, re-audited stage certifies B. Without this the refusal above
   # would be a dead end, and a guard with no way past it is the guard agents learn to waive.
-  if (cd "$STALE_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
-    --agent spec-auditor --force >/dev/null 2>&1) &&
-    printf 'result: PASS\n\n## Findings\n\nre-audited at B.\n' \
-      >"$STALE_REPO/.review-stage/issue-3751/c.md"; then
+  # THE RE-AUDIT GOES INTO THE PATH THE RE-OPEN PRINTS, NOT THE OLD ONE (#3751 round 5, J1). A
+  # forced re-open publishes a NEW report GENERATION, so `.review-stage/issue-3751/c.md` is the
+  # file the PREVIOUS agent holds and nothing reads it any more. Taking the path from the tool's
+  # own printed line is also the property under test one level up: the clause a lane pastes into
+  # the re-spawn prompt has to name the file that counts.
+  STALE_REOPEN_OUT="$(cd "$STALE_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor --force 2>/dev/null || true)"
+  STALE_RP="$(printf '%s\n' "$STALE_REOPEN_OUT" | LC_ALL=C sed -n 's|^\(/.*\.md\)$|\1|p' | LC_ALL=C head -1)"
+  if [ -n "$STALE_RP" ] && [ "$STALE_RP" != "$STALE_REPO/.review-stage/issue-3751/c.md" ]; then
+    ok "stale remedy: the re-open printed a NEW generation's report path (a resumed agent's old path cannot certify)"
+  else
+    bad "stale remedy: the re-open printed '$STALE_RP', which is not a fresh generation path"
+  fi
+  if [ -n "$STALE_RP" ] &&
+    printf 'result: PASS\n\n## Findings\n\nre-audited at B.\n' >"$STALE_RP"; then
     if LC_ALL=C grep -q "^head-sha: $STALE_B\$" "$STALE_RECORD" 2>/dev/null; then
       ok "stale remedy: --force RE-STAMPS head-sha to the current commit (B)"
     else
@@ -3126,6 +3137,30 @@ if [ -n "$SHAPE_REPO" ]; then
       *"PREMERGE: C-VERDICT PASS"*)
         bad "record-shape/unparsable: an unreadable binding certified the merge" ;;
       *) ok "record-shape/unparsable: no PASS token is emitted for an unreadable binding" ;;
+    esac
+  fi
+  # (d) AN UNREADABLE `report-generation:` — the field that names WHICH REPORT this stage's
+  #     verdict lives in (#3751 round 5, J1). The AUTO path does not read the report itself; it
+  #     asks `review-stage.sh verdict`, which refuses to derive a path it cannot compute. So the
+  #     refusal arrives as a NON-PASSING TOKEN rather than as a stage-binding failure — asserted
+  #     here because this is the seam between the two scripts, and a fallback to generation 0
+  #     would have let the generation-0 report certify a stage that has moved on.
+  if sr_plant "$SHAPE_REPO" '{ sub(/^report-generation:.*/, "report-generation: nope"); print }' &&
+    run_in_repo "$SHAPE_REPO" 2 \
+      "record-shape: an unreadable report-generation REFUSES (the report cannot be located)" \
+      --c-verdict AUTO; then
+    case "$OUT" in
+      *"stage record unreadable"*) ok "record-shape/generation: the refusal names the STAGE RECORD as the unreadable half" ;;
+      *) bad "record-shape/generation: the refusal must name the record defect (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*)
+        bad "record-shape/generation: a stage whose report could not be located certified the merge" ;;
+      *) ok "record-shape/generation: no PASS token is emitted when the report cannot be located" ;;
+    esac
+    case "$OUT" in
+      *"review-stage.sh open c --issue"*) ok "record-shape/generation: and the refusal names a concrete remedy" ;;
+      *) bad "record-shape/generation: the refusal must name a remedy (got: $OUT)" ;;
     esac
   fi
 fi
@@ -3307,7 +3342,16 @@ fi
 # the SAME 34 and the derived 6-assertion margin for the ONE host-gated block (Case 41's
 # TERM-ignoring escalation, which needs a real `timeout`/`gtimeout` supporting `--kill-after`) is
 # PRESERVED UNCHANGED. It is still deliberately NOT the exact 307, for that reason.
-ASSERT_FLOOR=301
+#
+# ROUND 5 (J1) ADDS 4, ALSO HOST-INDEPENDENT (307 -> 311): section 44f's stale-remedy case gains
+# one assertion (a forced re-open publishes a NEW report GENERATION and PRINTS its path, so the
+# re-audit is written where a reader looks — the old path is the one the resumed agent holds), and
+# a fourth unparsable-record shape is added (an unreadable `report-generation:`, which arrives
+# here as a non-passing TOKEN because the seam between the two scripts is
+# `review-stage.sh verdict`, plus its remedy assertion). Both need only git and bash, so the floor
+# moves by the SAME 4 and the derived 6-assertion margin for the ONE host-gated block is PRESERVED
+# UNCHANGED — still deliberately not the exact 311, for the reason recorded above.
+ASSERT_FLOOR=305
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

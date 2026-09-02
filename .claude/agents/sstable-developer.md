@@ -35,6 +35,11 @@ report?" but "what does the report say?".
 - If your caller named NO path, write one anyway — `.review-stage/issue-<N>/<kind>.md` inside
   the worktree — and name it in your reply. Do not silently skip the artifact because nobody
   asked for it.
+- **Write to the path your caller NAMED, never a remembered or guessed one (#3751 round 5).** A
+  report path carries the stage's GENERATION: a stage that was re-opened reads
+  `<kind>.<generation>.md` and never the earlier `<kind>.md`, so a report written where you were
+  told to write it LAST time lands in a file nothing consults — which reads exactly like no
+  report at all. If you were re-spawned, use the path in the clause you were re-spawned with.
 
 > **Your report of record is a PROGRESS record, not a review verdict.** Use `result: PASS` when
 > the assigned unit of work is complete and committed, `result: FINDINGS` when you are handing a
