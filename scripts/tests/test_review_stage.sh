@@ -4029,6 +4029,218 @@ for T2_FN in die_usage note emit; do
     *) bad "t2/structural: $T2_FN does not print through a literal printf (got: $T2_DEF)" ;;
   esac
 done
+
+# --- 28. A FAITHFUL READER IS NOT A FAITHFUL ANSWER (round 14, T1) ------------------
+# ROUND 13's S2 GAVE THIS SCRIPT ONE FAITHFUL-READ BOUNDARY AND LEFT ONE PATH BYPASSING IT — the
+# THIRD round in a row with that shape (round 7's emit sites, round 13's record reads, this).
+# `count_field_lines` still read the stage record with `grep -c` on the FILE, and `grep` is a
+# perfectly faithful reader; it is the ANSWER that is not. A record whose key is spelt
+# `report-<NUL>nonce: CURRENTX1` holds NO `report-nonce:` line, so the count was a TRUTHFUL `0` —
+# and `0` is precisely the value that means "a pre-nonce record, whose single report is the LEGACY
+# bare `<kind>.md`". Measured on the shipped script, with a stale legacy report still on disk:
+#
+#   $ od -c c.stage | grep -A1 report      ->  r e p o r t - \0 n o n c e :   C U R R E N T X 1
+#   $ grep -c '^report-nonce:' c.stage     ->  0   (rc 1 — the record really is not there)
+#   $ review-stage.sh verdict c --issue 900
+#     REVIEW-STAGE: c RESULT: PASS … report=…/.review-stage/issue-900/c.md     rc=0
+#
+# The current report (`c.CURRENTX1.md`) held the SENTINEL. The `PASS` came from a STALE `c.md` an
+# earlier version would have written — which is round 4's H2 defect (a data file redirecting a
+# reader) reached through yet another door, and it is exactly what the nonce exists to prevent.
+# So the byte never has to defeat the COUNTER to defeat the READER: it only has to make the current
+# record unparseable while a stale artifact is still on disk. `0` is not a safe reading of a
+# document we could not read as text.
+#
+# THE STATUS IS THREE-VALUED NOW (0 faithful / 1 read failed / 2 unrepresentable) and both callers
+# spell the permissive set AFFIRMATIVELY as `0`, so a status added later refuses by construction.
+# Status 2 gets its OWN refusal because the operator action differs — rewrite the record or re-open
+# the stage, never a chmod — and a refusal saying "permission or I/O" about a file whose permissions
+# are fine is a false rationale, which round 2's B7 records as worse than none.
+T1R="$(newrepo)" || bad "t1: could not create the fixture repo"
+T1D="$T1R/.review-stage/issue-900"
+mkdir -p "$T1D"
+# THE STALE LEGACY ARTIFACT: what a pre-nonce version of this tool wrote, still on disk, recording a
+# PASS. It is READ but never WRITTEN by this version, which is what makes the `0` branch dangerous.
+printf '# stale legacy report\nresult: PASS\n\nan old agent audited an OLD tree\n' >"$T1D/c.md"
+# THE CURRENT RECORD, whose `report-nonce:` KEY carries the byte.
+printf 'kind: c\nissue: 900\nagent: spec-auditor\nspawned-at: 2026-09-01T00:00:00Z\nspawned-epoch: 1756684800\ndeadline-secs: 3600\nreopen-count: 0\nreport-\000nonce: CURRENTX1\nhead-sha: unresolved\n' >"$T1D/c.stage"
+# THE CURRENT REPORT, holding the sentinel — i.e. the agent produced NOTHING.
+printf '# review stage: c\nresult: NOT-RUN (no report written)\n' >"$T1D/c.CURRENTX1.md"
+# PREMISE, MEASURED ON THE FILES — three of them, because a case built on a broken fixture proves
+# nothing: the record really lacks a column-zero `report-nonce:` line (so a faithful reader's `0` is
+# CORRECT and the defect is in what `0` MEANS), it really holds the byte, and the stale artifact
+# really records the merge-proceeding verdict.
+if LC_ALL=C grep -q '^report-nonce:' "$T1D/c.stage" 2>/dev/null; then
+  bad "t1 PREMISE: the record DOES carry a column-zero report-nonce: line, so the case below is not about the byte"
+else
+  ok "t1 PREMISE: the record holds NO column-zero 'report-nonce:' line (MEASURED with grep on the FILE) — a faithful reader legitimately counts ZERO"
+fi
+if LC_ALL=C tr -d '\000' <"$T1D/c.stage" 2>/dev/null | LC_ALL=C cmp -s - "$T1D/c.stage"; then
+  bad "t1 PREMISE: the record holds NO NUL byte, so this host did not build the fixture and the case proves nothing"
+else
+  ok "t1 PREMISE: the record really holds a NUL byte (MEASURED by deleting it and comparing)"
+fi
+if LC_ALL=C grep -q '^result: PASS$' "$T1D/c.md" 2>/dev/null; then
+  ok "t1 PREMISE: the STALE legacy report really records the merge-proceeding 'result: PASS' — the bait is real"
+else
+  bad "t1 PREMISE: the stale legacy report does not record a PASS, so nothing dangerous was on offer"
+fi
+rs "$T1R" verdict c --issue 900
+rc_is 5 "t1: a record holding the byte is a NON-VERDICT (exit 5), not the stale legacy report's PASS"
+hasnt "RESULT: PASS" "t1: the merge-proceeding token is NOT reported for a record that could not be read as text"
+has "stage record unreadable" "t1: and the cause is the stage-RECORD one, so the operator is not sent to look at a report"
+has "NUL 0x00 or SOH 0x01" "t1: the cause NAMES the byte, so an operator knows what is wrong with their file"
+has "NOT a chmod" "t1: and it names the NEXT ACTION, which differs from a permission failure's"
+has "report=unresolved" "t1: no report path is published at all — neither the stale legacy one nor a fabricated current one"
+hasnt "c.md " "t1: the stale legacy path is never even named"
+# `status` reports the same fact on its own surface, with the derived state.
+rs "$T1R" status c --issue 900
+rc_is 0 "t1/status: status is advisory (exit 0)"
+has "state=stage-record-unreadable" "t1/status: the derived state names the record, not the report"
+has "NUL 0x00 or SOH 0x01" "t1/status: and the STATUS-NOTE carries the byte in its detail"
+# THE WRITE SIDE REFUSES UNDER ITS OWN NAME, distinct from the read-failed refusal: `open --force`
+# over such a record would have to copy `spawned-at`/`reopen-count` out of a document it cannot read.
+rs "$T1R" open c --issue 900 --agent spec-auditor --force
+rc_is 2 "t1/open: a forced re-open over a record holding the byte is REFUSED (exit 2)"
+has "reason=stage-record-unrepresentable" "t1/open: refused under its OWN reason token, distinctly from stage-record-unreadable — the operator action differs"
+has "do not chmod it" "t1/open: and the refusal says so explicitly, because a permission diagnosis would be a false rationale"
+hasnt "OPEN-OK" "t1/open: nothing was written"
+if LC_ALL=C grep -q '^result: PASS$' "$T1D/c.md" 2>/dev/null; then
+  ok "t1/open: the stale artifact is INTACT — a refusal destroys nothing"
+else
+  bad "t1/open: the refused re-open modified the stale report"
+fi
+# CONTROL: the SAME record WITHOUT the byte reads the CURRENT report, not the legacy one. Without
+# this the case above could pass on a script that refused every record.
+printf 'kind: c\nissue: 900\nagent: spec-auditor\nspawned-at: 2026-09-01T00:00:00Z\nspawned-epoch: 1756684800\ndeadline-secs: 3600\nreopen-count: 0\nreport-nonce: CURRENTX1\nhead-sha: unresolved\n' >"$T1D/c.stage"
+rs "$T1R" verdict c --issue 900
+rc_is 5 "t1 CONTROL: the same record with the byte REMOVED still reads its CURRENT report (the sentinel, exit 5)"
+has "no report written" "t1 CONTROL: and reports the sentinel's own cause, so the guard does not red on correct input"
+has "c.CURRENTX1.md" "t1 CONTROL: naming the CURRENT report, never the stale legacy one"
+# CONTROL 2: a LEGITIMATE pre-nonce record — no `report-nonce:` line at all — must still read the
+# legacy bare name. That branch is the one the byte impersonated, and a guard that broke it would
+# red on correct input.
+printf 'kind: c\nissue: 900\nagent: spec-auditor\nspawned-at: 2026-09-01T00:00:00Z\nspawned-epoch: 1756684800\ndeadline-secs: 3600\nreopen-count: 0\nhead-sha: unresolved\n' >"$T1D/c.stage"
+rs "$T1R" verdict c --issue 900
+rc_is 0 "t1 CONTROL: a genuine PRE-NONCE record (no such field at all) still reads the LEGACY report — the branch the byte impersonated is intact"
+has "RESULT: PASS" "t1 CONTROL: reporting that legacy report's real verdict"
+
+# (b) STRUCTURAL: the read is routed, and the permissive set is affirmative at BOTH callers.
+if LC_ALL=C grep -q 'capture_map_nul "\$file" && printf' "$RS"; then
+  ok "t1/structural: count_field_lines reads through capture_map_nul, with the two-signal completeness assertion"
+else
+  bad "t1/structural: count_field_lines does not read through the capture boundary"
+fi
+if [ "$(LC_ALL=C grep -c 'grep -c -i "\^\[\[:space:\]\]\*\${key}:" "\$file"' "$RS" || true)" -eq 0 ]; then
+  ok "t1/structural: no reader greps the record FILE directly any more"
+else
+  bad "t1/structural: a direct grep of the record file remains, and a faithful reader is not a faithful answer"
+fi
+if LC_ALL=C grep -q '\*"\$CAPTURE_NUL_BYTE"\*) return 2' "$RS"; then
+  ok "t1/structural: an unrepresentable record is its OWN status (2), not folded into the read-failed 1"
+else
+  bad "t1/structural: the unrepresentable case has no distinct status, so its refusal must borrow another cause's rationale"
+fi
+if [ "$(LC_ALL=C grep -c 'nnonce_lines="\$(count_field_lines "\$sfile" report-nonce)" || cfl_rc=\$?' "$RS" || true)" -eq 1 ]; then
+  ok "t1/structural: the open caller captures the STATUS (|| cfl_rc=\$?), never 'if ! …' which reads 0"
+else
+  bad "t1/structural: the open caller does not capture count_field_lines' status the fail-closed way"
+fi
+if [ "$(LC_ALL=C grep -c 'nnonce="\$(count_field_lines "\$sfile" report-nonce)" || cfl_rc=\$?' "$RS" || true)" -eq 1 ]; then
+  ok "t1/structural: and so does the load_stage caller, from the same idiom"
+else
+  bad "t1/structural: the load_stage caller does not capture count_field_lines' status the fail-closed way"
+fi
+if [ "$(LC_ALL=C grep -c 'if ! nnonce' "$RS" || true)" -eq 0 ]; then
+  ok "t1/structural: no caller branches on a bare 'if ! …' any more, which could only see zero-vs-nonzero"
+else
+  bad "t1/structural: a caller still branches on 'if ! …', so it cannot tell status 2 from status 1"
+fi
+
+# (c) THE STRUCTURAL READ-BOUNDARY GUARD (round 14, T1). Round 13's asserts check that the mapping
+#     appears exactly ONCE — a property of the BOUNDARY, not of its CALLERS — which is why neither
+#     round-14 site was visible to them. `read-boundary-scan.sh` is the caller-side mirror of
+#     section 18's emit-boundary scanner. Its positive control is the requirement, and not a
+#     formality: written without an assignment-prefix stripper the scanner reported CLEAN on the
+#     pre-fix script AND on a planted `cat "$file"`, because every text call here is spelled
+#     `LC_ALL=C grep …` and the text before the command word therefore ends in `C`.
+RBS="$SCRIPT_DIR/lib/read-boundary-scan.sh"
+if [ ! -f "$RBS" ]; then
+  # NINE, matching the nine assertions the else-branch emits, so the EXACT floor holds either way.
+  bad "read-guard: $RBS is missing — the structural guard did not run (1/9)"
+  bad "read-guard: the same absence (2/9)"
+  bad "read-guard: the same absence (3/9)"
+  bad "read-guard: the same absence (4/9)"
+  bad "read-guard: the same absence (5/9)"
+  bad "read-guard: the same absence (6/9)"
+  bad "read-guard: the same absence (7/9)"
+  bad "read-guard: the same absence (8/9)"
+  bad "read-guard: the same absence (9/9)"
+else
+  RBS_OUT="$(bash "$RBS" "$RS" 2>&1)"; RBS_RC=$?
+  if [ "$RBS_RC" -eq 0 ]; then
+    ok "read-guard: the SHIPPED review-stage.sh is CLEAN — every read of file content is routed or declared with its reason"
+  else
+    bad "read-guard: the shipped review-stage.sh has a read-boundary BYPASS: $RBS_OUT"
+  fi
+  case "$RBS_OUT" in
+    *"NOT COVERED"*) ok "read-guard: the scan DECLARES what it does not cover, on every run" ;;
+    *) bad "read-guard: the scan did not declare its scope (got: $RBS_OUT)" ;;
+  esac
+  case "$RBS_OUT" in
+    *"recogniser hit(s)"*) ok "read-guard: and it reports its COUNTS — hits, declared reads and boundary calls, not an adjective" ;;
+    *) bad "read-guard: the scan did not report its subject counts (got: $RBS_OUT)" ;;
+  esac
+  # CONTROL (a): THE EXACT PRE-FIX SHAPE, planted in a throwaway copy — a `grep -c` of the record
+  #              file inside a `$( … )` behind an `LC_ALL=C` assignment prefix. All three of those
+  #              details were what made the real defect invisible to the first draft of the guard.
+  RBS_D="$T/rbs-grep"; mkdir -p "$RBS_D"
+  LC_ALL=C sed -e '/^count_field_lines() {/a\  PLANTED_OUT="$(LC_ALL=C grep -c -i "^x:" "$PLANTED_RECORD_READ")"' \
+    "$RS" >"$RBS_D/review-stage.sh" 2>/dev/null || true
+  RBS_LINE="$(LC_ALL=C grep -n 'PLANTED_RECORD_READ' "$RBS_D/review-stage.sh" 2>/dev/null | LC_ALL=C head -1 || true)"
+  if [ -n "$RBS_LINE" ]; then
+    ok "read-guard/control: the pre-fix-shaped plant landed in the scratch copy (asserted, not assumed)"
+  else
+    bad "read-guard/control: the plant did NOT land, so the control below proves nothing"
+  fi
+  # AND IT MUST REALLY BE BEHIND AN ASSIGNMENT PREFIX INSIDE A SUBSTITUTION, or this control is a
+  # weaker case than the defect it stands for. Measured from the planted text itself.
+  case "${RBS_LINE#*:}" in
+    *'$(LC_ALL=C grep'*) ok "read-guard/control: the planted read sits inside a \$( … ) behind an LC_ALL=C prefix — the exact shape that defeated the first draft of this guard" ;;
+    *) bad "read-guard/control: the planted read is not in the pre-fix shape, so it tests a weaker case (line: $RBS_LINE)" ;;
+  esac
+  RBS_POUT="$(bash "$RBS" "$RBS_D/review-stage.sh" 2>&1)"; RBS_PRC=$?
+  if [ "$RBS_PRC" -ne 0 ]; then
+    ok "read-guard/control: the guard REDS on the planted raw read"
+  else
+    bad "read-guard/control: the guard reported CLEAN on the planted raw read — it proves nothing (got: $RBS_POUT)"
+  fi
+  case "$RBS_POUT" in
+    *'the reading command `grep` starts a pipeline'*) ok "read-guard/control: and it NAMES the command and the recogniser that fired, so the red is attributable" ;;
+    *) bad "read-guard/control: the guard red without naming the reading command (got: $RBS_POUT)" ;;
+  esac
+  # CONTROL (b): A DIFFERENT READING COMMAND, to prove the recogniser is a LIST and not one pattern.
+  RBS_C="$T/rbs-cat"; mkdir -p "$RBS_C"
+  LC_ALL=C sed -e '/^count_field_lines() {/a\  PLANTED_OUT="$(LC_ALL=C cat "$PLANTED_CAT_READ")"' \
+    "$RS" >"$RBS_C/review-stage.sh" 2>/dev/null || true
+  RBS_COUT="$(bash "$RBS" "$RBS_C/review-stage.sh" 2>&1)"; RBS_CRC=$?
+  if [ "$RBS_CRC" -ne 0 ] && [ "${RBS_COUT#*"\`cat\` starts a pipeline"}" != "$RBS_COUT" ]; then
+    ok "read-guard/control: a planted 'cat' read reds too and is named — the reader set is a declared LIST, not one command"
+  else
+    bad "read-guard/control: a planted 'cat' read was not caught or not named (rc=$RBS_CRC; got: $RBS_COUT)"
+  fi
+  # CONTROL (c): A STALE ALLOWLIST ENTRY is its own failure. An entry matching nothing excuses
+  #              nothing — and it is the signal that the read it described has CHANGED, which is why
+  #              entries are matched on SOURCE TEXT and never by line number.
+  RBS_S="$T/rbs-stale"; mkdir -p "$RBS_S"
+  LC_ALL=C sed -e "s|sed -n '2,/\^# ---END-HELP---\$/p' \"\\\$0\"|sed -n '3,/^# ---END-HELP---\$/p' \"\\\$0\"|" \
+    "$RS" >"$RBS_S/review-stage.sh" 2>/dev/null || true
+  RBS_SOUT="$(bash "$RBS" "$RBS_S/review-stage.sh" 2>&1)"
+  case "$RBS_SOUT" in
+    *"STALE allowlist entry"*) ok "read-guard/stale: an allowlist entry whose source text has CHANGED is reported STALE by name, not silently kept as a standing excusal" ;;
+    *) bad "read-guard/stale: the guard did not report a stale entry when the declared --help read was reworded (got: $RBS_SOUT)" ;;
+  esac
+fi
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
 # which is this issue's own subject inside a test file.
@@ -4298,7 +4510,31 @@ done
 # `emit-boundary-scan.sh` (which now refuses `echo` outright and requires every `printf` FORMAT to
 # be a script-authored literal) with a COMPOUND positive control and a data-derived-format control,
 # and three source pins as a belt.
-ASSERT_FLOOR=775
+#
+# ROUND 14's T1 MOVES IT TO 813. Section 28 adds 38: a FAITHFUL READER IS NOT A FAITHFUL ANSWER.
+# Round 13's S2 gave this script one faithful-read boundary and left `count_field_lines` reading the
+# stage record with `grep -c` on the FILE — and `grep` is faithful; the ANSWER is not. A record whose
+# key is spelt `report-<NUL>nonce:` holds NO `report-nonce:` line, so the count was a TRUTHFUL `0`,
+# which is exactly the value meaning "a pre-nonce record whose single report is the LEGACY bare
+# name" — so a stale `c.md` recording `result: PASS` was reported as this stage's verdict at exit 0
+# while the CURRENT report held the sentinel (measured; 19 failures with the hunk reverted, 0 after).
+# THREE PREMISE assertions measure the fixture on the FILES (the record really lacks the line, really
+# holds the byte, and the stale bait really records a PASS), ten cover the verdict/status surfaces and
+# the byte being NAMED with its own next action, five the WRITE side refusing under its own reason
+# token `stage-record-unrepresentable` with the artifact intact, five CONTROLS keep both legitimate
+# neighbours working (the same record without the byte reads its CURRENT report; a genuine pre-nonce
+# record still reads the LEGACY one — the branch the byte impersonated), six STRUCTURAL pins (the read
+# is routed with the two-signal completeness assertion, no direct grep of the record file remains, the
+# unrepresentable case is its OWN status 2, and BOTH callers capture the status with `|| cfl_rc=$?`
+# rather than an `if ! …` that can only see zero-vs-nonzero), and nine over the new caller-side guard
+# `scripts/tests/lib/read-boundary-scan.sh` — round 13's asserts check the mapping appears exactly
+# ONCE, a property of the BOUNDARY and not of its CALLERS, which is why neither round-14 site was
+# visible to them. Its controls plant the EXACT pre-fix shape (a `grep -c` inside a `$( … )` behind an
+# `LC_ALL=C` prefix, asserted to really be that shape), a DIFFERENT reading command, and a REWORDED
+# declared read, requiring the guard to red AND to name the command / the STALE entry. That is not a
+# formality: written without an assignment-prefix stripper the scanner reported CLEAN on the real
+# defect and on a planted `cat "$file"`, because every text call here is spelled `LC_ALL=C grep …`.
+ASSERT_FLOOR=813
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

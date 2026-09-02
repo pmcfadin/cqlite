@@ -827,7 +827,34 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   sharing the channel rather than escape harder**, and it is pinned structurally: the emit-boundary
   scanner refuses `echo` outright **with no allowlist** and additionally requires every `printf`
   FORMAT to be script-authored, over EVERY logical line rather than only the emit sites, with its own
-  declared scope, its own NOT-COVERED set and its own vacuity guard. **The classifier enforces that working too,
+  declared scope, its own NOT-COVERED set and its own vacuity guard.
+  **AND "EVERY READ GOES THROUGH THE BOUNDARY" WAS FALSE FOR TWO READERS FOR A WHOLE ROUND, SO THE
+  CLASS IS NOW MECHANIZED RATHER THAN ASSERTED (#3751 round 14).** Round 13 routed three of the five
+  non-boundary read sites and left two reading files directly; both were found by the next review
+  round. (1) `count_field_lines` read the stage record with `grep -c` on the FILE — **a faithful
+  reader is not a faithful ANSWER**: a record whose key is spelt `report-<NUL>nonce:` holds **no**
+  `report-nonce:` line, so the count was a *truthful* `0`, and `0` is exactly the value meaning "a
+  pre-nonce record whose single report is the LEGACY bare `<kind>.md`" — so a stale legacy `c.md`
+  recording `result: PASS` was reported as the stage's verdict at exit 0 while the CURRENT report
+  held the sentinel. The byte never has to defeat the COUNTER to defeat the READER; it only has to
+  make the current record unparseable while a stale artifact is still on disk. (2) `_gate_awk` read
+  the GATE-OF-RECORD summary raw, so `RESULT: PA<NUL>SS` reached the merge gate as `PASS`. Both are
+  routed, and `count_field_lines` is now three-valued (read faithfully / read failed / not
+  representable) with the permissive set spelled AFFIRMATIVELY as `0` at both callers and its own
+  refusal token for the third state, because the operator action differs (rewrite the record, never a
+  chmod). **Three consecutive rounds have found the same shape — a boundary exists and one path
+  bypasses it** (round 7's emit sites, round 13's record reads, round 14's remaining two) — and the
+  reason round 13's asserts missed both generalises: **they check that the mapping appears exactly
+  ONCE, which is a property of the BOUNDARY and not of its CALLERS.**
+  `scripts/tests/lib/read-boundary-scan.sh` asks the caller-side question instead, with two
+  recognisers (an input redirection from a value; a reading command at the START of a pipeline with a
+  `$`-bearing operand), deliberately WITHOUT reducing command substitutions because both defects
+  lived inside a `$( … )`, an allowlist whose entries are claims carrying reasons and whose STALE
+  entries are their own FAIL, and a printed NOT-COVERED set. **Its own first draft reported CLEAN on
+  the very defect it exists for** — every text call in these scripts is spelled `LC_ALL=C grep …`, so
+  the text before the command word ends in `C` and matched no spelling of "pipeline start" — caught
+  by the positive control, which is why the controls plant the EXACT shape and a clean run proves
+  nothing. **The classifier enforces that working too,
   by calling the SAME function the writer does (#3751 round 1).** `verdict` reads HAND-WRITTEN reports by design, and it used to accept any
   NON-EMPTY `performed-by`/`reason`/`evidence` — so `performed-by: nobody`, `reason: x`, `evidence: tbd`
   reached the token that PROCEEDS at the merge point while the writer would have refused all three. A

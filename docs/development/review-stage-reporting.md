@@ -250,6 +250,46 @@ Three further declared limits of the mechanism itself:
   print by another tool (an awk `print`, a `tee`), an `echo` inside a heredoc or a single-quoted
   awk/sed body (noise, not blindness — neither subject has one), whether a literal format's
   conversions are CORRECT, and any script other than these two.
+- **AND THE *READ* BOUNDARY NEEDED THE SAME TREATMENT, BECAUSE "every read goes through it" WAS
+  FALSE FOR TWO READERS (round 14, T1).** Round 13 introduced `capture_map_nul` /
+  `c_capture_map_nul` and routed three of the five non-boundary read sites; the two it left were
+  both found by the next review round. (1) `count_field_lines` read the stage record with `grep -c`
+  on the FILE — and **`grep` is a faithful reader; the ANSWER is not.** A record whose key is spelt
+  `report-<NUL>nonce: CURRENTX1` holds **no** `report-nonce:` line, so the count was a *truthful*
+  `0`, which is exactly the value meaning "a pre-nonce record whose single report is the LEGACY bare
+  `<kind>.md`". Measured on the shipped script: a stale legacy `c.md` recording `result: PASS`
+  reported `RESULT: PASS` at exit 0 while the CURRENT report held the sentinel — round 4's H2 defect
+  (a data file redirecting a reader) through yet another door, and precisely what the nonce exists
+  to prevent. **The byte never has to defeat the counter to defeat the reader: it only has to make
+  the current record unparseable while a stale artifact is still on disk, because `0` is not a safe
+  reading of a document we could not read as text.** (2) `_gate_awk` read the gate-of-record summary
+  raw, so `RESULT: PA<NUL>SS` reached the merge gate as `PASS`. `count_field_lines` is now
+  **three-valued** — read faithfully (`0`) / read failed (`1`) / not representable (`2`) — with the
+  permissive set spelled AFFIRMATIVELY as `0` at both callers, so a status added later refuses by
+  construction; status 2 carries its own refusal token `stage-record-unrepresentable`, because the
+  operator action differs (rewrite the record or re-open the stage, never a chmod) and a permission
+  diagnosis about a file whose permissions are fine is round 2's B7 false rationale.
+  **THREE consecutive rounds have now found "a boundary exists and one path bypasses it"** — round
+  7's emit sites, round 13's record reads, round 14's remaining two — so the completeness is
+  asserted structurally by `scripts/tests/lib/read-boundary-scan.sh` and not by a sentence in a
+  header. **The reason round 13's asserts could not see either site generalises: they check the
+  mapping appears exactly ONCE, which is a property of the BOUNDARY and not of its CALLERS.** The
+  new scanner asks the caller-side question with two recognisers — an input redirection from a
+  value, and a reading command at the START of a pipeline with a `$`-bearing operand and no
+  redirection (pipeline position is the discriminator that keeps `printf … | tr …` out of scope) —
+  and it deliberately does **not** reduce command substitutions, because both defects lived inside
+  a `$( … )`. An unrouted read must be NAMED in the scanner with its reason, and a **stale** entry,
+  one that matches nothing, is its own FAIL: it excuses nothing, and it is the signal that the read
+  it described has changed. Two entries exist today: each script's own mapping body, and
+  `review-stage.sh`'s `--help` renderer reading its own source. Not covered, declared on every run:
+  whether the mapping is CORRECT (this is a routing check), a reader reached by a construct outside
+  the printed closed list, shell text versus an embedded awk/sed program, a `$`-bearing word that is
+  a PATTERN rather than a file operand, and — the important one — WHICH files are untrusted, since a
+  guard deciding that from a variable's NAME would be guessing. **Its own first draft reported CLEAN
+  on the very defect it exists for**: every text call in these scripts is spelled `LC_ALL=C grep …`,
+  so the text before the command word ends in `C` and matched no spelling of "pipeline start" —
+  caught by the positive control, which is why the controls plant the EXACT shape (an assignment
+  prefix, inside a substitution, asserted to really be that shape) rather than a convenient one.
 - **AND THAT GUARD SHIPPED WITH ITS OWN BLIND SPOT, WHICH IS THE CLASS IT EXISTS FOR (round 9,
   N3).** Its scope was anchored `^[[:space:]]*(printf|echo)[[:space:]]` — the START of a line — so
   every COMPOUND statement was invisible to it, and it reported both scripts CLEAN with **three real

@@ -122,6 +122,20 @@
 # the valid `STALEPASS1` and redirected the reader to a STALE report's `PASS`. A capture that
 # normalises its input cannot be the thing that validates it.
 #
+# THAT SENTENCE WAS FALSE FOR ONE READER FOR A WHOLE ROUND, AND IS NOW MECHANIZED (#3751 round 14,
+# T1). Round 13 routed `read_field` and `report_bytes` and left `count_field_lines` reading the
+# stage record with `grep -c` on the FILE, so the header claimed a completeness the code did not
+# have — the exact "claim broader than the mechanism" defect round 5's J3 records, one boundary
+# over. `grep` is a FAITHFUL reader; the ANSWER is not: a record spelt `report-<NUL>nonce:` holds no
+# `report-nonce:` line, so the count was a truthful `0` — the value that means "a pre-nonce record
+# whose single report is the LEGACY bare name" — and a stale `c.md` recording `result: PASS` was
+# reported as this stage's verdict while the CURRENT report held the sentinel. THREE rounds in a row
+# have now found "a boundary exists and one path bypasses it" (round 7's emit sites, round 13's
+# record reads, this), so the completeness is asserted STRUCTURALLY by
+# `scripts/tests/lib/read-boundary-scan.sh` rather than by this sentence: round 13's own asserts
+# could not see the site, because they check that the mapping appears exactly ONCE, which is a
+# property of the BOUNDARY and not of its CALLERS.
+#
 # TWO FILES, AND WHY (the never-opened / report-absent distinction needs them)
 # ---------------------------------------------------------------------------
 #   <dir>/<kind>.<nonce>.md  the REPORT OF RECORD: what the agent writes, what `verdict` reads.
@@ -1394,8 +1408,33 @@ read_field() {
 }
 
 # count_field_lines <file> <key> — HOW MANY TIMES <key> APPEARS, AS AN AFFIRMATIVE MEASUREMENT.
-# Prints the count and returns 0 ONLY when the file was actually READ; returns 1, printing
-# nothing, when the read FAILED. Every caller must branch on that status.
+# Prints the count and returns 0 ONLY when the file was READ FAITHFULLY. THREE statuses, because
+# there are three facts and only one of them is permissive:
+#
+#   0  read, faithful, counted            — the count is printed; the caller may act on it
+#   1  the read FAILED                    — permission, I/O, a truncated read (nothing printed)
+#   2  read, but NOT REPRESENTABLE        — the file holds a NUL 0x00 or SOH 0x01 byte
+#
+# Every caller branches on that status with the PERMISSIVE set spelled AFFIRMATIVELY (`0` alone),
+# so a status added here later refuses at every call site by construction rather than inheriting
+# a `!= 1` test.
+#
+# IT READS THROUGH THE ONE CAPTURE BOUNDARY, AND THAT WAS THE THIRD TIME A BOUNDARY WAS INTRODUCED
+# WITH ONE PATH LEFT BYPASSING IT (#3751 round 14, T1; round 7's emit sites and round 13's record
+# reads are the first two). Round 13 routed `read_field` and `report_bytes` through
+# `capture_map_nul` and left THIS reader reading the file directly with `grep`. `grep` is a FAITHFUL
+# reader — it is the answer that is not: a record whose bytes are `report-<NUL>nonce: CURRENTX1`
+# holds no `report-nonce:` line at all, so the count was a truthful `0`, which is exactly the value
+# that means "a pre-nonce record, whose single report is the LEGACY bare `<kind>.md`". Measured on
+# the shipped script: a stale legacy `c.md` recording `result: PASS` beside a current
+# `c.CURRENTX1.md` holding the sentinel reported `RESULT: PASS` at exit 0, from the stale file.
+# So the byte does not have to defeat the counter to defeat the reader — it only has to make the
+# CURRENT record unparseable while a stale artifact is still on disk, and `0` is not a safe
+# reading of a document we could not read as text.
+#
+# Its own STATUS rather than a folded-in `1`, for round 2's B7 reason: the operator action differs
+# (rewrite the record or re-open the stage, never a chmod), and a refusal saying "permission or
+# I/O" about a file whose permissions are fine is a FALSE RATIONALE, which is worse than none.
 #
 # THE `|| true` THAT USED TO BE HERE WAS THE DEFECT (#3751 round 6, K1). `grep` separates the two
 # facts this reader depends on with its EXIT STATUS: 1 means "the file was READ and holds no such
@@ -1414,12 +1453,41 @@ read_field() {
 # The count itself is required to be numeric as well: a count we cannot read is not a count, and
 # `""` would otherwise arrive at an arithmetic `[` test as a syntax error rather than a refusal.
 count_field_lines() {
-  local file="$1" key="$2" out="" rc=0
-  out="$(LC_ALL=C grep -c -i "^[[:space:]]*${key}:" "$file" 2>/dev/null)" || rc=$?
-  case "$rc" in
+  local file="$1" key="$2" text="" out="" rrc=0 grc=0
+  # ONE READ, THROUGH THE ONE MAPPING, WITH THE COMPLETE READ ASSERTED BY *TWO* SIGNALS — the same
+  # pair, for the same reasons, as `report_bytes`: the sentinel `E` survives a refactor that folds
+  # this assignment into its `local` declaration (where the STATUS would silently become `local`'s),
+  # and the STATUS catches what the sentinel cannot, a read that fails after delivering a prefix
+  # whose last byte happens to BE an `E`. A TRUNCATED read matters here as much as a failed one: a
+  # prefix that stops before the `report-nonce:` line counts `0` and takes the LEGACY reading.
+  # `|| rrc=$?`, never `if ! …; then rrc=$?`, which reads 0.
+  text="$( { capture_map_nul "$file" && printf 'E'; } 2>/dev/null )" || rrc=$?
+  [ "$rrc" -eq 0 ] || return 1
+  case "$text" in
+    *E) ;;
+    *) return 1 ;;
+  esac
+  text="${text%E}"
+  # A byte the capture cannot carry is its OWN status, so the caller can name it (see the header).
+  case "$text" in
+    *"$CAPTURE_NUL_BYTE"*) return 2 ;;
+  esac
+  # COUNTED OVER THE SNAPSHOT, BY A HERE-STRING RATHER THAN A PIPE. `grep -m1`'s SIGPIPE hazard
+  # (recorded at `read_field_from`) does not apply to `-c`, but a here-string keeps the two readers
+  # of this grammar in the same shape — and it also TERMINATES the final line, so a record whose
+  # last line has no newline is counted exactly as reading the file directly counted it.
+  #
+  # `grep`'s remaining statuses still separate two facts: 1 is "read, no such line" (it prints
+  # `0`), >= 2 is a failure of grep itself, which measures nothing. The `|| true` that used to
+  # swallow this was round 6's K1 defect — it made an unreadable record indistinguishable from a
+  # record with no field, so the record took the LEGACY reading and reported an OLD report's `PASS`.
+  out="$(LC_ALL=C grep -c -i "^[[:space:]]*${key}:" <<<"$text" 2>/dev/null)" || grc=$?
+  case "$grc" in
     0 | 1) ;;
     *) return 1 ;;
   esac
+  # The count itself is required to be numeric: a count we cannot read is not a count, and `""`
+  # would otherwise arrive at an arithmetic `[` test as a syntax error rather than a refusal.
   case "$out" in
     "" | *[!0-9]* ) return 1 ;;
   esac
@@ -1522,11 +1590,27 @@ cmd_open() {
     # THE READ IS VERIFIED AFFIRMATIVELY (#3751 round 6, K1). `count_field_lines` returns non-zero
     # when the record could not be READ at all, which is a different fact from "read fine, no such
     # field" — the second is the legacy shape, the first measures nothing.
-    if ! nnonce_lines="$(count_field_lines "$sfile" report-nonce)"; then
-      emit "$REFUSE_MARKER reason=stage-record-unreadable kind=$kind issue=$issue record=$(field_value "$sfile")"
-      emit "$REFUSE_MARKER detail=this stage's record EXISTS and could not be READ, so which report of this stage is current could not be measured and NOTHING was written. That is not the same as a record with no report-nonce (which reads as the original single report): an unmeasured record may not take the permissive reading, because it is also a record whose spawned-at cannot be read, so a forced re-open would silently restart a clock a reader is using. Fix the record's permissions, or remove the stage directory and open a fresh stage."
-      exit 2
-    fi
+    #
+    # AND THE PERMISSIVE SET IS SPELLED AFFIRMATIVELY (#3751 round 14, T1): only status `0` — read
+    # FAITHFULLY — may proceed. Status 2, a record holding a byte the capture cannot carry, gets its
+    # OWN refusal because the operator action differs (rewrite the record or re-open the stage, never
+    # a chmod), and the `*)` arm takes the fail-closed word so a status added to that helper later
+    # cannot inherit a permissive branch here.
+    local cfl_rc=0
+    nnonce_lines="$(count_field_lines "$sfile" report-nonce)" || cfl_rc=$?
+    case "$cfl_rc" in
+      0) ;;
+      2)
+        emit "$REFUSE_MARKER reason=stage-record-unrepresentable kind=$kind issue=$issue record=$(field_value "$sfile")"
+        emit "$REFUSE_MARKER detail=this stage's record holds a NUL 0x00 or SOH 0x01 byte, which no text record may contain, so it could not be read as one and NOTHING was written. A shell capture silently DROPS a NUL, so a reader would judge lines this file does not hold — a record whose key is spelt report-<NUL>nonce holds NO report-nonce line, which counts as ZERO and is exactly the value that means a pre-nonce record whose single report is the LEGACY bare name. That is how a STALE report's PASS gets reported as this stage's verdict. Rewrite the record as text, or remove the stage directory and open a fresh stage. This is NOT a permission problem: do not chmod it."
+        exit 2
+        ;;
+      *)
+        emit "$REFUSE_MARKER reason=stage-record-unreadable kind=$kind issue=$issue record=$(field_value "$sfile")"
+        emit "$REFUSE_MARKER detail=this stage's record EXISTS and could not be READ, so which report of this stage is current could not be measured and NOTHING was written. That is not the same as a record with no report-nonce (which reads as the original single report): an unmeasured record may not take the permissive reading, because it is also a record whose spawned-at cannot be read, so a forced re-open would silently restart a clock a reader is using. Fix the record's permissions, or remove the stage directory and open a fresh stage."
+        exit 2
+        ;;
+    esac
     prior_nonce=""
     if [ "$nnonce_lines" -eq 1 ]; then
       prior_nonce="$(read_field "$sfile" report-nonce)"
@@ -2155,13 +2239,24 @@ load_stage() {
     return 0
   fi
   STAGE_OPEN=1
-  local nnonce nval
+  local nnonce nval cfl_rc=0
   # THE READ IS VERIFIED AFFIRMATIVELY, AND A FAILED READ IS ITS OWN DEFECT (#3751 round 6, K1).
   # `count_field_lines` returns non-zero only when the record could not be READ; "read fine, no
   # such field" prints 0 and returns 0. The two were collapsed by a `|| true`, so an unreadable
   # record fell through to the LEGACY reading and an OLD report's `PASS` was reported as the
   # current verdict. The legacy reading below is reserved for a record that WAS read.
-  if ! nnonce="$(count_field_lines "$sfile" report-nonce)"; then
+  #
+  # THE PERMISSIVE SET IS `0` AND NOTHING ELSE (#3751 round 14, T1). Status 2 — the record holds a
+  # byte the capture cannot carry — is its own defect with its own next action; every other non-zero
+  # status takes the read-failed branch, so a status added to that helper later cannot arrive here
+  # as "read fine, no such field". THAT is the branch this issue turns on: a record spelt
+  # `report-<NUL>nonce:` holds no `report-nonce:` line, so a faithful `grep` counted a truthful ZERO
+  # — which means "a pre-nonce record whose single report is the LEGACY bare name" — and a stale
+  # legacy `c.md` recording `result: PASS` was then reported as this stage's verdict.
+  nnonce="$(count_field_lines "$sfile" report-nonce)" || cfl_rc=$?
+  if [ "$cfl_rc" -eq 2 ]; then
+    STAGE_RECORD_DEFECT="the record holds a NUL 0x00 or SOH 0x01 byte, which no text record may contain, so it could not be read as text and which report is current was never measured (rewrite the record or open a fresh stage — NOT a chmod)"
+  elif [ "$cfl_rc" -ne 0 ]; then
     STAGE_RECORD_DEFECT="the record EXISTS and could not be READ, so which report is current was never measured (permission or I/O — not the same as a record with no report-nonce)"
   elif [ "$nnonce" -gt 1 ]; then
     STAGE_RECORD_DEFECT="report-nonce appears $nnonce times (AMBIGUOUS — several records is refused, never resolved by order)"

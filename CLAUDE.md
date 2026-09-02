@@ -1358,6 +1358,35 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   (there is no value for which `echo` beats `printf '%s\n'`, and an entry here could only be a claim
   that one line's data contains no backslash) and additionally requires every `printf` FORMAT to be
   a literal the script authored — the same channel one step in, through `%`.
+  **AND "EVERY READ GOES THROUGH THE BOUNDARY" WAS FALSE FOR TWO READERS FOR A WHOLE ROUND — SO
+  THE CLASS IS NOW MECHANIZED, NOT ASSERTED (#3751 round 14).** Round 13 routed three of the five
+  non-boundary read sites and left two reading files directly, and **both** were found by the next
+  review round. (1) `count_field_lines` read the stage record with `grep -c` on the FILE. **`grep`
+  is a faithful reader; the ANSWER is not** — a record whose key is spelt `report-<NUL>nonce:` holds
+  **no** `report-nonce:` line, so the count was a *truthful* `0`, and `0` is exactly the value that
+  means "a pre-nonce record whose single report is the LEGACY bare `<kind>.md`". Measured: a stale
+  legacy `c.md` recording `result: PASS` was reported as the stage's verdict at exit 0 while the
+  CURRENT report held the sentinel. **The byte never has to defeat the counter to defeat the reader
+  — it only has to make the current record unparseable while a stale artifact is still on disk.**
+  (2) `_gate_awk` read the GATE-OF-RECORD summary raw, so `RESULT: PA<NUL>SS` became `PASS` at the
+  merge gate. Both are routed; `count_field_lines` is now **three-valued** (read faithfully / read
+  failed / not representable) with the permissive set spelled affirmatively as `0` at both callers,
+  and the unrepresentable case carries its OWN refusal because the operator action differs (rewrite
+  the record, never a chmod). **THREE CONSECUTIVE ROUNDS FOUND THE SAME SHAPE — a boundary exists
+  and one path bypasses it** (round 7's emit sites, round 13's record reads, round 14's remaining
+  two) — which is the standing signal to mechanize. Round 13's own structural asserts could not see
+  either site, and the reason generalises: **they check that the mapping appears exactly ONCE, which
+  is a property of the BOUNDARY and not of its CALLERS.** So
+  `scripts/tests/lib/read-boundary-scan.sh` asks the caller-side question — no statement may read
+  file content except through the mapping, unless NAMED IN THE SCANNER WITH ITS REASON (a stale
+  entry, one matching nothing, is its own FAIL) — with two recognisers, an input redirection from a
+  value and a reading command at the START of a pipeline with a `$`-bearing operand, and it does
+  **not** reduce command substitutions, because both defects lived inside a `$( … )`. **Its own
+  first draft reported CLEAN on the very defect it exists for**, because every text call in these
+  scripts is spelled `LC_ALL=C grep …` so the text before the command word ends in `C` and no
+  spelling of "pipeline start" matched — caught by the positive control, which is why a control that
+  plants the EXACT shape (assignment prefix, inside a substitution) is the requirement and a clean
+  run is not.
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies
   already-reviewed code. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
   call site AND no new surface). When in doubt, review.

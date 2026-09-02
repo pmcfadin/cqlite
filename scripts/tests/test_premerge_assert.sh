@@ -4756,6 +4756,140 @@ else
   esac
 fi
 
+# --- 44o: THE GATE-OF-RECORD READ MUST GO THROUGH THE CAPTURE BOUNDARY (round 14, T1) ---
+# THE THIRD SITE OF ROUND 13's DEFECT, in the OTHER half of this same script (roborev job 388, T1
+# names the sibling site in `review-stage.sh`; this one the audit found while sweeping the class).
+# Section 44m routed `c_parse_verdict`'s file read and `c_record_bytes` through `c_capture_map_nul`
+# and left `_gate_awk` — the parser of the GATE OF RECORD, the artifact #3465 exists to require —
+# reading its file RAW with `awk … <"$1"`. Measured on the shipped script:
+#
+#   $ printf '…\nRESULT: PA\0SS\n…' > g.txt
+#   $ _gate_awk g.txt full | od -c              ->  v _ r e s u l t = P A \0 S S
+#   $ out=$(_gate_awk g.txt full); …            ->  v_result=PASS
+#
+# gawk passes the NUL through the field and the CAPTURE in `gate_parse_file` removes it, so this
+# script read `PASS` from a summary that does not contain it. Same shape, same round-13 lesson: a
+# capture that normalises its input cannot be the thing that validates it.
+#
+# THE MAPPING IS APPLIED AT THE READ, in `gate_parse_file`, because the parser is a pure stdin
+# filter and that caller is the one place a FILE is opened; `_gate_awk` lost its file operand with
+# the redirection, since a parameter nothing reads is a parameter a later caller passes wrongly.
+GATE_NUL="$T/full-pass-nul-result.txt"
+LC_ALL=C sed -e 's/^RESULT: PASS$/RESULT: PA\x00SS/' "$GOOD" >"$GATE_NUL" 2>/dev/null ||
+  cp "$GOOD" "$GATE_NUL"
+# THE PREMISE IS MEASURED ON THE FILE — twice, because both halves matter: the fixture must NOT
+# carry the literal certifying token, and it must really carry the byte. A refusal from a fixture
+# that is merely malformed some other way would prove nothing.
+if LC_ALL=C grep -q '^RESULT: PASS$' "$GATE_NUL" 2>/dev/null; then
+  bad "t1/pm PREMISE: the fixture still carries a literal column-zero 'RESULT: PASS', so the case below proves nothing"
+else
+  ok "t1/pm PREMISE: the fixture carries NO literal column-zero 'RESULT: PASS' (MEASURED with grep on the FILE)"
+fi
+if LC_ALL=C tr -d '\000' <"$GATE_NUL" 2>/dev/null | LC_ALL=C cmp -s - "$GATE_NUL"; then
+  bad "t1/pm PREMISE: the fixture holds NO NUL byte — this host's sed did not plant it, so the case below is not about the byte"
+else
+  ok "t1/pm PREMISE: the fixture really holds a NUL byte (MEASURED by deleting it and comparing)"
+fi
+refused "t1/pm: a NUL-bearing gate-of-record RESULT is REFUSED, not read as the PASS the capture manufactured" \
+  "$GATE_NUL"
+# CONTROL: the SAME summary without the byte still certifies, so the refusal is about the byte and
+# not about the fixture being unparsable for some other reason.
+if run 0 "t1/pm CONTROL: the same summary without the NUL still certifies (exit 0)" \
+  2421 "$CERTIFIED" "$GOOD" --c-verdict "$C_PASS_FILE"; then
+  case "$OUT" in
+    *"PREMERGE: OK"*) ok "t1/pm CONTROL: and reports PREMERGE: OK, so the guard does not red on correct input" ;;
+    *) bad "t1/pm CONTROL: the clean summary did not report PREMERGE: OK (got: $OUT)" ;;
+  esac
+fi
+# STRUCTURAL: the read is routed, and the parser can no longer be handed a file at all.
+if LC_ALL=C grep -q 'c_capture_map_nul "$1" | _gate_awk' "$ASSERT"; then
+  ok "t1/pm/structural: the gate-summary FILE read goes through the mapping before awk sees it"
+else
+  bad "t1/pm/structural: the gate summary is still fed to awk raw, so a NUL in a field survives to a capture that removes it"
+fi
+if [ "$(LC_ALL=C grep -c "' <\"\\\$1\"" "$ASSERT" || true)" -eq 0 ]; then
+  ok "t1/pm/structural: no awk program takes its input by redirection from a value any more"
+else
+  bad "t1/pm/structural: $(LC_ALL=C grep -c "' <\"\\\$1\"" "$ASSERT" || true) awk program(s) still read a value-named file directly"
+fi
+if LC_ALL=C grep -q 'awk -v WANT="\$1"' "$ASSERT"; then
+  ok "t1/pm/structural: _gate_awk takes WANT as its ONLY argument — a file operand nothing reads is one a later caller passes wrongly"
+else
+  bad "t1/pm/structural: _gate_awk still declares a second parameter, so a caller can pass it a file that is never read"
+fi
+
+# --- 44p: THE STRUCTURAL READ-BOUNDARY GUARD (round 14, T1) -------------------
+# THREE CONSECUTIVE ROUNDS HAVE FOUND "a boundary exists and one path bypasses it" — round 7's emit
+# sites, round 13's record reads, and round 14's two remaining file reads — which is this
+# repository's standing signal to mechanize rather than carve the same place a fourth time. Round
+# 13's own structural asserts could NOT see either site: they check that the mapping appears exactly
+# ONCE, which is a property of the boundary and not of its CALLERS.
+#
+# `scripts/tests/lib/read-boundary-scan.sh` is the caller-side guard, the mirror of section 44h's
+# emit-boundary scanner. The POSITIVE CONTROL is the requirement, not the clean run — and here it is
+# more than a formality: written without an assignment-prefix stripper the scanner reported CLEAN on
+# the very defect it exists for, because every text call in these scripts is spelled
+# `LC_ALL=C grep …` and the text before the command word therefore ends in `C`.
+RBS="$SCRIPT_DIR/lib/read-boundary-scan.sh"
+if [ ! -f "$RBS" ]; then
+  # SEVEN, matching the seven assertions the else-branch emits, so the case floor is unaffected by
+  # which branch runs.
+  bad "read-guard: $RBS is missing — the structural guard did not run (1/7)"
+  bad "read-guard: the same absence (2/7)"
+  bad "read-guard: the same absence (3/7)"
+  bad "read-guard: the same absence (4/7)"
+  bad "read-guard: the same absence (5/7)"
+  bad "read-guard: the same absence (6/7)"
+  bad "read-guard: the same absence (7/7)"
+else
+  RBS_OUT="$(bash "$RBS" "$ASSERT" 2>&1)"; RBS_RC=$?
+  if [ "$RBS_RC" -eq 0 ]; then
+    ok "read-guard: the SHIPPED premerge-assert.sh is CLEAN — every read of file content is routed or declared"
+  else
+    bad "read-guard: the shipped premerge-assert.sh has a read-boundary BYPASS: $RBS_OUT"
+  fi
+  case "$RBS_OUT" in
+    *"NOT COVERED"*) ok "read-guard: the scan DECLARES what it does not cover, on every run" ;;
+    *) bad "read-guard: the scan did not declare its scope (got: $RBS_OUT)" ;;
+  esac
+  case "$RBS_OUT" in
+    *"recogniser hit(s)"*) ok "read-guard: and it reports HOW MANY statements it examined — a count, not an adjective" ;;
+    *) bad "read-guard: the scan did not report its subject count (got: $RBS_OUT)" ;;
+  esac
+  # THE POSITIVE CONTROL: the round-13 shape, an awk program fed the file by REDIRECTION, planted in
+  # a THROWAWAY COPY (the artifact is substituted, never a settable seam — #3312's corollary).
+  RBS_D="$T/rbs"; mkdir -p "$RBS_D"
+  LC_ALL=C sed -e "/awk -v WANT=/s|.*|  awk -v WANT=\"\$1\" '{ print }' <\"\$PLANTED_RAW_READ\"|" \
+    "$ASSERT" >"$RBS_D/premerge-assert.sh" 2>/dev/null || true
+  if LC_ALL=C grep -q 'PLANTED_RAW_READ' "$RBS_D/premerge-assert.sh" 2>/dev/null; then
+    ok "read-guard/control: the raw-read plant landed in the scratch copy (asserted, not assumed)"
+  else
+    bad "read-guard/control: the raw-read plant did NOT land, so the control below proves nothing"
+  fi
+  RBS_POUT="$(bash "$RBS" "$RBS_D/premerge-assert.sh" 2>&1)"; RBS_PRC=$?
+  if [ "$RBS_PRC" -ne 0 ]; then
+    ok "read-guard/control: the guard REDS on a planted raw read"
+  else
+    bash "$RBS" "$RBS_D/premerge-assert.sh" >/dev/null 2>&1
+    bad "read-guard/control: the guard reported CLEAN on a planted raw read — it proves nothing (got: $RBS_POUT)"
+  fi
+  case "$RBS_POUT" in
+    *"input REDIRECTION reads a file named by a value"*) ok "read-guard/control: and it NAMES the recogniser that fired, so the red is attributable" ;;
+    *) bad "read-guard/control: the guard red without naming the redirection recogniser (got: $RBS_POUT)" ;;
+  esac
+  # AND A STALE ALLOWLIST ENTRY IS ITS OWN FAILURE. An entry that matches nothing excuses nothing —
+  # and it is the signal that the read it described has CHANGED, which is the whole reason entries
+  # are matched on source text rather than by line number.
+  RBS_S="$T/rbs-stale"; mkdir -p "$RBS_S"
+  LC_ALL=C sed -e '/awk -v WANT=/s|.*|  awk -v WANT="$1" -v UNUSED=1 '"'"'|' \
+    "$ASSERT" >"$RBS_S/premerge-assert.sh" 2>/dev/null || true
+  RBS_SOUT="$(bash "$RBS" "$RBS_S/premerge-assert.sh" 2>&1)"
+  case "$RBS_SOUT" in
+    *"STALE allowlist entry"*) ok "read-guard/stale: an allowlist entry whose source text has CHANGED is reported STALE by name, not silently kept" ;;
+    *) bad "read-guard/stale: the guard did not report a stale allowlist entry when the declared read was reworded (got: $RBS_SOUT)" ;;
+  esac
+fi
+
 # --- case floor (#3544) ------------------------------------------------------
 # A span-replacing edit once silently deleted FOUR cases from a suite in this repo
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a
@@ -4932,7 +5066,25 @@ fi
 # data-derived-`printf`-FORMAT plant, each required to red AND to name what failed. The fallback arm
 # is ten bads to match. All need only bash and coreutils, so the floor moves by the SAME 10 and the
 # derived 6-assertion margin for the ONE host-gated block is PRESERVED UNCHANGED.
-ASSERT_FLOOR=453
+#
+# ROUND 14's T1 ADDS 14 MORE, ALL HOST-INDEPENDENT (453 -> 467): section 44o's 7 — the GATE-OF-RECORD
+# read must go through the capture boundary. Section 44m routed the c-verdict read and the stage
+# record and left `_gate_awk` reading its summary RAW, so gawk passed a NUL through `v_result` and
+# the capture in `gate_parse_file` removed it: `RESULT: PA<NUL>SS` read as `PASS` at the merge gate.
+# Two PREMISE assertions measure the fixture ON THE FILE (no literal `RESULT: PASS`, and the byte
+# really planted), the refusal, a CONTROL that the same summary without the byte still certifies, and
+# three structural pins (the read is piped through the mapping; no awk program takes a value-named
+# file by redirection; `_gate_awk` has no file parameter left). Plus section 44p's 7 — the STRUCTURAL
+# read-boundary guard `scripts/tests/lib/read-boundary-scan.sh`, the caller-side mirror of 44h:
+# round 13's asserts check the mapping appears exactly ONCE, which is a property of the boundary and
+# not of its callers, so neither round-14 site was visible to them. Its positive controls plant a
+# raw redirection read and a REWORDED declared read, requiring the guard to red AND to name the
+# recogniser / the STALE allowlist entry — and that control is not a formality: written without an
+# assignment-prefix stripper the scanner reported CLEAN on the very defect it exists for, because
+# every text call in these scripts is spelled `LC_ALL=C grep …`. The fallback arm is seven bads to
+# match. All need only bash and coreutils, so the floor moves by the SAME 14 and the derived
+# 6-assertion margin for the ONE host-gated block is PRESERVED UNCHANGED.
+ASSERT_FLOOR=467
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

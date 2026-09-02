@@ -355,6 +355,32 @@ directory, and any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUI
   separately from the value check's, SHALL FAIL rather than report clean when it finds no subject at
   all, and SHALL be exercised by positive controls that plant a COMPOUND `echo` and a data-derived
   format and require it to red AND to name what failed
+- **AND** the same completeness SHALL hold for the *READ* boundary, and SHALL be asserted
+  STRUCTURALLY rather than claimed in a comment: no statement in either script may read FILE CONTENT
+  except through that script's faithful-read mapping, unless the statement is NAMED in a committed
+  scanner WITH ITS REASON — a claim in one place a reviewer already reads, whose STALE entries (an
+  entry matching nothing) are their own FAILURE, since such an entry excuses nothing and is the
+  signal that the read it described has CHANGED
+- **AND** that scanner SHALL recognise BOTH ways a shell reads a file (an input redirection from a
+  value, and a reading command at the START of a pipeline with a `$`-bearing operand and no
+  redirection), SHALL NOT reduce command substitutions — every measured instance of this defect lived
+  inside a `$( … )` — SHALL declare its own NOT-COVERED set on every run, and SHALL be exercised by a
+  positive control planting the EXACT shape of a measured instance rather than a convenient one,
+  because a scanner written without an assignment-prefix stripper reported CLEAN on the defect it
+  exists for
+- **AND** the reader of a stage record's report-nonce COUNT SHALL be THREE-valued — read faithfully /
+  read FAILED / not REPRESENTABLE — with the permissive set spelled AFFIRMATIVELY as the faithful
+  status alone at every caller, so a status added later refuses by construction: a record whose key
+  is spelt `report-<NUL>nonce:` holds NO such line, so a faithful reader counts a TRUTHFUL ZERO,
+  which is exactly the value that selects the LEGACY bare report name — and a stale legacy report
+  recording `result: PASS` was reported as that stage's verdict while its CURRENT report held the
+  sentinel
+- **AND** the not-representable state SHALL carry its OWN refusal naming the byte and the next action
+  (rewrite the record or open a fresh stage, never a chmod), never a permission-or-I/O rationale about
+  a file whose permissions are fine
+- **AND** a GENUINE pre-nonce record — one with no such field at all — SHALL still read the legacy
+  bare report, because that is the branch the byte impersonated and a guard that broke it would red on
+  correct input
 
 #### Scenario: an audit counter at its ceiling does not restart
 - **WHEN** the stage record's re-open counter is at the widest value this tool can compare and the

@@ -206,6 +206,17 @@
 # `PREMERGE: OK` at exit 0. A capture that normalises its input cannot be the thing
 # that validates it.
 #
+# THAT SENTENCE WAS FALSE FOR ONE READER FOR A WHOLE ROUND (#3751 round 14, T1).
+# Round 13 routed the `--c-verdict` read and `c_record_bytes` and left `_gate_awk`
+# — the parser of the GATE OF RECORD, the artifact #3465 exists to require —
+# reading its file RAW. Measured: `RESULT: PA<NUL>SS` yielded `v_result=PA<NUL>SS`
+# from awk and the capture in `gate_parse_file` removed the byte, so this script
+# read `PASS` from a summary that does not contain it. THREE rounds in a row have
+# now found "a boundary exists and one path bypasses it", so the completeness is
+# asserted STRUCTURALLY by `scripts/tests/lib/read-boundary-scan.sh` rather than
+# by this sentence — round 13's own asserts check the mapping appears exactly ONCE,
+# which is a property of the BOUNDARY and not of its CALLERS.
+#
 # AND EVERY LINE IS PRINTED WITH `printf` OF A LITERAL FORMAT — NEVER `echo`
 # (#3751 round 14, T2). `c_safe_display` neutralises the VALUE; the printing
 # COMMAND must not re-interpret what it just neutralised. Under the bash option
@@ -1911,8 +1922,30 @@ assert_readable_summary() {
   fi
 }
 
-# Parse the summary by REDIRECTION, never a pipe (#3400: a piped `while read`
-# runs in a subshell and its verdict is discarded). One awk pass:
+# THROUGH THE ONE CAPTURE BOUNDARY (#3751 round 14, T1). Round 13 (S2) routed
+# `c_parse_verdict`'s file read and `c_record_bytes` through `c_capture_map_nul`
+# and left THIS reader — the GATE-OF-RECORD summary parser, the other half of the
+# merge gate — reading the file RAW. Measured on the shipped script: a summary
+# holding `RESULT: PA<NUL>SS` yielded `v_result=PA<NUL>SS` from awk (gawk passes a
+# NUL through a field) and the capture of awk's OUTPUT in `gate_parse_file` then
+# REMOVED it, so this script read `PASS`. Same defect, third site — a boundary
+# introduced with one path left bypassing it, which is round 7 and round 13 over
+# again. The `#3400` REDIRECTION rule this comment used to open with is about a
+# piped `while read` losing its verdict in a subshell; `pipefail` is set, so an
+# unreadable file still fails this pipeline and reaches `refuse_tool_failure`
+# exactly as the redirection did.
+#
+# THE BYTE IS NOT NAMED BY ITS OWN STATE HERE, DELIBERATELY, AND THAT IS WEAKER
+# THAN `c_record_bytes` — declared rather than implied. Every field this parser
+# publishes is matched AFFIRMATIVELY downstream (block markers by whole-line
+# equality, `RESULT:`/`tree-integrity:`/`dirty:` against closed sets, `commit:`/
+# `tree-start:` as hex against the certified sha), so a mapped SOH makes each of
+# them refuse, and the refusal RENDERS the value through `c_safe_display`, which
+# shows SOH as a visible `?` — the operator sees `PA?SS`. A dedicated state would
+# buy a better sentence, not a different verdict, and this parser feeds two files
+# through one path.
+#
+# One awk pass:
 #   * strips ANSI escapes and a trailing CR before matching anything (belt — see
 #     the header: the summary file's own block lines are not coloured)
 #   * counts blocks by WHOLE-LINE-EXACT marker equality, never substring. That
@@ -1928,9 +1961,11 @@ assert_readable_summary() {
 #     (the headers are distinct by construction: scripts/agent-gate.sh)
 #   * emits key=value lines with per-key occurrence COUNTS, so a duplicated key
 #     inside one block is refusable rather than silently last-wins
-# WANT selects which family is "the block": full (default) or delta.
+# WANT selects which family is "the block": full (default) or delta. It is now
+# the ONLY argument — the file operand went with the redirection, and a parameter
+# nothing reads is a parameter a later caller passes wrongly.
 _gate_awk() {
-  awk -v WANT="$2" '
+  awk -v WANT="$1" '
   BEGIN {
     FULL_S  = "==== AGENT-GATE SUMMARY ===="
     FULL_E  = "==== END AGENT-GATE SUMMARY ===="
@@ -2015,7 +2050,7 @@ _gate_awk() {
     print "v_mode=" v_mode
     print "v_anchor=" v_anchor
   }
-' <"$1"
+'
 }
 
 # gate_parse_file <file> <want> <what> — run the parse and publish its fields as
@@ -2024,7 +2059,10 @@ _gate_awk() {
 # unparseable/absent count is refused, never treated as "no problem found".
 gate_parse_file() {
   local gp_out gp_k gp_v
-  gp_out=$(_gate_awk "$1" "$2") || refuse_tool_failure awk "$3"
+  # THROUGH THE ONE CAPTURE BOUNDARY (#3751 round 14, T1) — see `_gate_awk`. The
+  # mapping is applied HERE, at the read, rather than inside the parser, because
+  # the parser is a pure stdin filter and this is the one place a FILE is opened.
+  gp_out=$(c_capture_map_nul "$1" | _gate_awk "$2") || refuse_tool_failure awk "$3"
   GP_blocks=""; GP_full=""; GP_lite=""; GP_delta=""; GP_unterminated=""
   GP_n_mode=""; GP_n_result=""; GP_n_ti=""; GP_n_commit=""; GP_n_ts=""
   GP_n_anchor=""; GP_n_nested=""; GP_anchor_unresolved=""; GP_n_dirty=""; GP_n_tsdirty=""

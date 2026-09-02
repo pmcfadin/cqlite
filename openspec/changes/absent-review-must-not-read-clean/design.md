@@ -298,6 +298,19 @@ primitive question has one answer everywhere — that refuses `echo` with no all
 every `printf` FORMAT to be script-authored. Its scope, its NOT-COVERED set and its own vacuity
 guard are declared separately from the value check's.
 
+**And the READ boundary needed the same mechanism, for the same reason (round 14, T1).** Round 13
+introduced the faithful-read boundary and routed three of five non-boundary read sites; both
+remaining ones were found the next round — `count_field_lines` reading the stage record with
+`grep -c` on the FILE (a *faithful* reader whose truthful `0` means "pre-nonce record, LEGACY bare
+report", so a stale `c.md` recording `result: PASS` was reported as the verdict at exit 0) and
+`_gate_awk` reading the gate-of-record summary raw. Round 13's asserts could not see either, because
+they check the mapping appears exactly ONCE — a property of the BOUNDARY, not of its CALLERS.
+`scripts/tests/lib/read-boundary-scan.sh` asks the caller-side question, with an allowlist whose
+entries are CLAIMS carrying reasons and whose STALE entries are their own failure; its own first
+draft reported CLEAN on the defect it exists for (every text call here is `LC_ALL=C grep …`, so the
+text before the command word ends in `C`), caught by the positive control — which is why the
+controls plant the exact shape rather than a convenient one.
+
 ## §5 — the agent side, and the limit of what it buys
 
 Every agent whose completion is a pipeline gate gains a report-of-record clause in its definition, and

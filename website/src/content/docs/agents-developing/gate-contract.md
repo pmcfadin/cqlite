@@ -150,7 +150,15 @@ carry).
   must not re-interpret it — every line is `printf` of a literal format, never `echo`, whose argument
   is a FORMAT under the inherited-environment option `xpg_echo` (a `\n` splits a line, `\033` injects
   terminal control, `\c` truncates, octal `\075` manufactures a real `=`). This script uses no `echo`
-  today — measured — and the scanner keeps it that way. Details:
+  today — measured — and the scanner keeps it that way. **And the GATE-OF-RECORD read was the third
+  site of the same NUL defect (#3751 round 14)**: round 13 routed the `--c-verdict` read and the stage
+  record and left `_gate_awk` — the parser of the artifact #3465 exists to require — reading its file
+  RAW, so `RESULT: PA<NUL>SS` yielded `v_result=PA<NUL>SS` from awk and the capture in
+  `gate_parse_file` removed the byte, and this script read `PASS` from a summary that does not contain
+  it. Routed now, and the caller-side completeness is asserted by
+  `scripts/tests/lib/read-boundary-scan.sh` rather than by a sentence in a header — round 13's own
+  asserts check the mapping appears exactly ONCE, which is a property of the boundary and not of its
+  callers. Details:
   [delivery pipeline](/cqlite/agents-developing/delivery-pipeline/).
   **What a `PREMERGE: OK` does NOT prove (#3650), printed on the success path as `PREMERGE: SCOPE`.**
   It proves the diff is unchanged since certification and that a full gate PASSed on THAT EXACT TREE.

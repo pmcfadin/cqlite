@@ -385,6 +385,15 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    publishes a fresh nonce) and re-run C. And **spawn the auditor with the path `open` PRINTS**, not
    a path remembered from an earlier open — a verdict read from a superseded generation is exactly
    what this refuses.
+   **ONE REMEDY EXCEPTION (#3751 round 14): `--force` DOES NOT RECOVER a record that holds a NUL
+   0x00 or SOH 0x01 byte.** Such a record is not text, so `open --force` refuses it by name
+   (`reason=stage-record-unrepresentable`) rather than copying `spawned-at`/`reopen-count` out of a
+   document it cannot read, and `verdict` reports `NOT-RUN (stage record unreadable: … holds a NUL
+   0x00 or SOH 0x01 byte …)`. **It is NOT a permission problem — do not chmod it.** Remove the
+   stage directory and `open` a fresh stage. (The reason this matters: a record whose key is spelt
+   `report-<NUL>nonce:` holds no `report-nonce:` line at all, and "no nonce" is the LEGACY reading
+   that selects the bare `c.md` — so before this refusal existed a stale legacy report's `PASS`
+   was reported as the current verdict.)
    Pass an explicit
    `--c-verdict <path>` (a captured `review-stage.sh verdict … > <path>` line) only where AUTO
    cannot locate the stage — and capture the **`c`** stage's own line: the assert validates the
