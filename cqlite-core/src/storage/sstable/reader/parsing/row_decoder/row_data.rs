@@ -450,6 +450,26 @@ impl V5CompressedLegacyParser {
                 ));
             }
 
+            // Issue #3721 (roborev job 75): hand the decoders THIS ROW's bytes, not the
+            // whole parse unit. `row_bound_check` below still reconciles the returned
+            // offset, but it can only judge a value ALREADY decoded — so a `row_size`
+            // corrupted downward let a decoder parse, and ALLOCATE from, later rows'
+            // bytes (up to the collection/value limits) before the result was thrown
+            // away. Bounding the input means those bytes are not reachable in the first
+            // place, and the reconciliation stays as defence in depth.
+            //
+            // `min` rather than a refusal: `after_row_offset` beyond the buffer is
+            // AMBIGUOUS — corruption when buffered, a chunk boundary mid-row when
+            // streaming — and only the caller holds the chunking state needed to tell
+            // them apart (the same reasoning as the marker path's `Err` arm, and
+            // issue #28: nothing here inspects bytes to guess which it is). Clamping
+            // preserves today's behaviour exactly in that case: the bound becomes
+            // `data.len()`, and whichever of the guards above and below applies still
+            // fires. Slicing unclamped would PANIC, since this path — unlike the pure
+            // tombstone branch — never validated `after_row_offset` against `data.len()`.
+            let row_data_bound = after_row_offset.min(data.len());
+            let row_bytes = &data[..row_data_bound];
+
             // Issue #221: Branch based on column type - complex columns need special parsing
             // Issue #693: simple columns return 4-tuple including cell timestamp / expiration;
             //             complex columns return 2-tuple and inherit the row-level timestamp.
@@ -467,7 +487,7 @@ impl V5CompressedLegacyParser {
                     let row_ts = row_header.timestamp.unwrap_or(0);
                     let mut element_buf = Vec::new();
                     self.parse_complex_column_inner(
-                        data,
+                        row_bytes,
                         offset,
                         column,
                         complex_type,
@@ -526,7 +546,7 @@ impl V5CompressedLegacyParser {
                         row_ttl_seconds: row_header.ttl,
                     });
                     self.parse_complex_column(
-                        data,
+                        row_bytes,
                         offset,
                         column,
                         complex_type,
@@ -656,7 +676,7 @@ impl V5CompressedLegacyParser {
                 // `column_decode_error`, "The cell-flags byte: NOT a terminator"
                 // (authority, and the rejected mask-to-`0x1F` alternative).
                 match self.parse_cell_value_schema_order(
-                    data,
+                    row_bytes,
                     offset,
                     column,
                     header_type,

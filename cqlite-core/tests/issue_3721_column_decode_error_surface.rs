@@ -1008,7 +1008,7 @@ fn assert_row_body_exhausted(err: &Error, column: &str, at: usize, on_disk_colum
 /// the partition from a SUCCESSFUL query, the same shape as the column-level swallow
 /// this file's other cases pin.
 #[tokio::test]
-async fn a_truncation_whose_resync_walk_reads_payload_as_a_marker_fails_the_select() {
+async fn a_truncation_whose_resync_walk_cannot_frame_a_marker_fails_the_select() {
     let err = select_all_truncated(
         COMPLEX_KEYSPACE,
         RESYNC_MARKER_TABLE,
@@ -1019,33 +1019,51 @@ async fn a_truncation_whose_resync_walk_reads_payload_as_a_marker_fails_the_sele
     )
     .await
     .expect_err(
-        "a framed range-tombstone marker the read-side shadow FSM cannot represent is \
-         damaged data and must FAIL the read — pre-#3721 this `break`ed and reported a \
-         SUCCESSFUL query, dropping the marker and every later row of the partition",
+        "a truncation whose resync walk lands on bytes it cannot frame as a well-formed \
+         unfiltered is damaged data and must FAIL the read — pre-#3721 this `break`ed and \
+         reported a SUCCESSFUL query, dropping every later row of the partition",
     );
-    // The refusal must say WHAT it measured: that the marker was framed (so a resume
-    // point exists and this is not the end of the partition body), where the body
-    // continues, and the shadow FSM's own cause. A bare "corrupt SSTable" would leave
-    // an operator no better off than the `tracing::debug!` this replaces.
+    // WHICH LAYER REFUSES CHANGED, AND THE SUBJECT CHANGED WITH IT (roborev job 75).
+    //
+    // This case used to reach the shadow FSM: the marker parser returned `Ok` for these
+    // bytes because it OVERWROTE its cursor with the declared `body_end` after decoding
+    // the deletion times from beyond it, so a body-inconsistent frame still produced a
+    // marker, which the FSM then refused for its bound kind. That `Ok` was the High
+    // finding of job 75 — on the compaction path it wrote a tombstone whose timestamps
+    // were read from the NEXT unfiltered. The parser now requires the body to be
+    // consumed EXACTLY, so these bytes are refused AS an ill-framed marker, the walk
+    // falls through to the row path, and the row's own declared extent refuses them.
+    //
+    // The PROPERTY under test is unchanged and is what this asserts: the read FAILS
+    // rather than returning `Ok` with rows silently dropped. What is no longer asserted
+    // here is the marker refusal's WORDING — that is not a coverage loss, because
+    // `issue_3721_range_marker_refusal_surface.rs` asserts the identical needle set
+    // ("range-tombstone marker" / "could not be represented faithfully" / "partition
+    // body continues at offset" / "bound kind") across FOUR public surfaces (full scan,
+    // point read, cell-metadata scan, streaming) against a marker that IS well framed,
+    // which is the honest fixture for that diagnostic. Asserting it from a truncation
+    // that no longer frames one would be pinning a message to the wrong input.
     let rendered = err.to_string();
+    assert_eq!(err.category(), ErrorCategory::Data);
+    assert!(!err.is_recoverable());
+    // The refusal must still SAY WHAT IT MEASURED — the row extent it could not
+    // satisfy and the column left outstanding — not a bare "corrupt SSTable", which
+    // would leave an operator no better off than the `tracing::debug!` this replaces.
     for needle in [
-        "range-tombstone marker",
-        "could not be represented faithfully",
-        "partition body continues at offset",
-        "bound kind",
+        "row body exhausted",
+        "still declared PRESENT",
+        "truncated or corrupt row body",
     ] {
         assert!(
             rendered.contains(needle),
-            "the marker refusal must name `{needle}`; got: {rendered}"
+            "the refusal must name `{needle}`; got: {rendered}"
         );
     }
-    assert_eq!(err.category(), ErrorCategory::Data);
-    assert!(!err.is_recoverable());
-    // NOT the column-level variant: this is a marker, and conflating the two is what
-    // the dedicated `Error::ColumnDecode` variant exists to prevent.
+    // And it must be the dedicated, MATCHABLE per-column variant, so the row and
+    // partition loops cannot fold it back into "end of partition" (#3721).
     assert!(
-        !matches!(err, Error::ColumnDecode { .. }),
-        "a marker refusal must not be reported as a per-COLUMN decode failure; got: {err:?}"
+        matches!(err, Error::ColumnDecode { .. }),
+        "a per-column decode failure must be reported as `Error::ColumnDecode`; got: {err:?}"
     );
 }
 

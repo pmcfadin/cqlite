@@ -293,6 +293,21 @@ fn assert_column_decode_at(err: &Error, column: &str, at: usize, needles: &[&str
 /// Pre-fix this returned `Ok` with all 600 rows and `ck=1`'s `body` carrying 16 bytes
 /// of the following row's framing appended to its text — a wrong answer that no
 /// consumer can tell from a right one.
+///
+/// WHICH LAYER REFUSES CHANGED, AND THIS TEST FOLLOWED IT (#3721, roborev job 75).
+/// The decoders are now handed `&data[..after_row_offset]` — THIS ROW's bytes — rather
+/// than the whole parse unit, so a cell reaching past its row is refused by the length
+/// check AT the row boundary and can no longer read or ALLOCATE from later rows at all.
+/// `row_bound_check`'s "PAST the end of its own row body" is therefore no longer what
+/// fires here; it is retained as a BACKSTOP for the case bounding cannot reach — a
+/// decoder that over-ADVANCES its returned offset without needing bytes past the row —
+/// and its message is asserted below to be ABSENT, so a future change that silently
+/// re-widens the decoder's input reds this test instead of quietly passing it.
+///
+/// The assertion is the ARITHMETIC, not the offsets: the cell must ask for exactly
+/// `SKEW` more bytes than the row has left. That is what makes the visible bound
+/// provably the ROW's extent — the whole parse unit is 195_018 bytes and would have
+/// satisfied this read, which is precisely the pre-fix wrong answer.
 #[tokio::test]
 async fn a_cell_reaching_past_its_row_fails_the_select_instead_of_returning_the_next_rows_bytes() {
     let err = select_bodies(&[(
@@ -306,18 +321,54 @@ async fn a_cell_reaching_past_its_row_fails_the_select_instead_of_returning_the_
          row's data, so the value it produced is not this row's — the read must fail, not \
          return it",
     );
-    assert_column_decode_at(
-        &err,
-        "body",
-        BODY_CELL_START,
-        &[
-            // The condition, the boundary it crossed, and the offset it returned.
-            "PAST the end of its own row body",
-            &format!("{ROW_BODY_END}"),
-            &format!("{}", ROW_BODY_END + SKEW as usize),
-            "next row or partition",
-        ],
+    let Error::ColumnDecode {
+        column: named,
+        offset,
+        source,
+        ..
+    } = &err
+    else {
+        panic!("expected Error::ColumnDecode for column 'body', got: {err:?}");
+    };
+    assert_eq!(named, "body", "the error must NAME the column");
+    assert_eq!(
+        *offset, BODY_CELL_START,
+        "the failure must be reported at the byte the refused decode was measured from"
     );
+    let cause = source.to_string();
+    // `Cell '<col>': need <need> bytes for <type>, only <available> available`
+    let nums: Vec<usize> = cause
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.parse().unwrap_or_default())
+        .collect();
+    assert!(
+        cause.contains("need") && cause.contains("available") && nums.len() >= 2,
+        "the cause must report the shortfall it MEASURED (need N .. only M available), \
+         otherwise this is some other failure aborting the same read; got: {cause}"
+    );
+    let (need, available) = (nums[0], nums[1]);
+    assert_eq!(
+        need - available,
+        SKEW as usize,
+        "the cell must come up short by exactly the {SKEW} bytes it was skewed by, \
+         measured against THIS ROW's remaining extent — need={need} available={available} \
+         in: {cause}"
+    );
+    assert!(
+        available < FULL_LEN,
+        "the bound the decoder saw must be the ROW's, not the parse unit's ({FULL_LEN} \
+         bytes, which would have satisfied this read — the pre-fix wrong answer); got \
+         available={available}"
+    );
+    assert!(
+        !cause.contains("PAST the end of its own row body"),
+        "bounding the decoder's input must make the over-read UNREACHABLE, not merely \
+         detected after the fact — if the backstop fired, the decoder was handed bytes \
+         beyond this row again; got: {cause}"
+    );
+    assert_eq!(err.category(), ErrorCategory::Data);
+    assert!(!err.is_recoverable());
 }
 
 /// UNDER-consumption. The converse: the cell stopped SHORT, leaving bytes inside the
