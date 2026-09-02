@@ -529,7 +529,7 @@ expect "9.4 a line for a component the --only scope EXCLUDES is a contradiction,
 S9N="$TMP/no-mode-line.txt"
 mk_summary "$S9N" run-1 PARTIAL "$(comp_line tooling-tests PASS 1112s)"
 expect "9.5 a PARTIAL token with NO mode: line is a shape no emitter produces => refuse" \
-  COULD-NOT-MEASURE 4 "mode-scope" -- "$S9N" --mode only --component tooling-tests --run-id run-1
+  COULD-NOT-MEASURE 4 "mode-scope-missing" -- "$S9N" --mode only --component tooling-tests --run-id run-1
 
 echo "=== section 10: the INTEGRITY lines invalidate every component in the block (B3) ==="
 # A mutated-mid-run run stamps `tree-integrity: FAIL (tree-mutated-midrun; …)` and a FAIL
@@ -1029,8 +1029,8 @@ echo "=== section 17: the component-line shape is anchored over BOTH real emitte
 # two real shapes; 17.3 is the regression guard for that trap, so do not "tidy" it away.
 SG1="$TMP/shape-garbage.txt"
 mk_only_summary "$SG1" run-1 PARTIAL tooling-tests "tooling-tests:     PASS (1112s) arbitrary text"
-expect "17.1 trailing garbage after a single space is NOT a component verdict" \
-  NOT-PASS 1 "absent" -- "$SG1" --mode only --component tooling-tests --run-id run-1
+expect "17.1 trailing garbage after a single space is MALFORMED, not absent" \
+  COULD-NOT-MEASURE 4 "component-line-malformed" -- "$SG1" --mode only --component tooling-tests --run-id run-1
 SG2="$TMP/shape-annotated.txt"
 mk_only_summary "$SG2" run-1 PARTIAL tooling-tests "$(comp_line tooling-tests PASS 1112s '[unobservable:nested]')"
 expect "17.2 control: the ANNOTATED shape (_fm_summary_line) is accepted" \
@@ -1066,15 +1066,15 @@ expect "17.3 the REAL boundary block (unannotated shape + integrity FAIL) is rej
   NOT-PASS 1 "tree-integrity" -- "$SG3" --mode only --component tooling-tests --run-id run-1
 SG4="$TMP/shape-nosecs.txt"
 mk_only_summary "$SG4" run-1 PARTIAL tooling-tests "$(printf '%-18s %s (%ss)' 'tooling-tests:' PASS '')"
-expect "17.4 an empty duration field is not a component line (a truncated .result)" \
-  NOT-PASS 1 "absent" -- "$SG4" --mode only --component tooling-tests --run-id run-1
+expect "17.4 an empty duration field is MALFORMED, not absent (a truncated .result)" \
+  COULD-NOT-MEASURE 4 "component-line-malformed" -- "$SG4" --mode only --component tooling-tests --run-id run-1
 
 # THE TIGHTENING (F3). An integrity-PASS block carrying the UNANNOTATED shape is a combination
 # NO emitter produces, so it is not certifying evidence and must not read as a component verdict.
 SG5="$TMP/shape-unannotated-integrity-pass.txt"
 mk_only_summary "$SG5" run-1 PARTIAL tooling-tests "$(printf '%-18s %s (%ss)' 'tooling-tests:' PASS 1112)"
-expect "17.6 the UNANNOTATED shape in an integrity-PASS block is not a component verdict (no emitter makes that pair)" \
-  NOT-PASS 1 "absent" -- "$SG5" --mode only --component tooling-tests --run-id run-1
+expect "17.6 the UNANNOTATED shape in an integrity-PASS block is MALFORMED, not absent (no emitter makes that pair)" \
+  COULD-NOT-MEASURE 4 "component-line-malformed" -- "$SG5" --mode only --component tooling-tests --run-id run-1
 
 # DERIVED, like the delta token set: there are exactly TWO distinct component-line printf
 # formats in the shipped gate. A THIRD emitter appearing must RED here rather than silently
@@ -1101,7 +1101,7 @@ echo "=== section 18: a PARTIAL token REQUIRES its --only scope line (F4) ==="
 SM1="$TMP/partial-no-mode.txt"
 mk_summary "$SM1" run-1 PARTIAL "$(comp_line tooling-tests PASS 1112s)"
 expect "18.1 a PARTIAL token with NO scope line => refuse (that pair is unemittable)" \
-  COULD-NOT-MEASURE 4 "mode-scope" -- "$SM1" --mode only --component tooling-tests --run-id run-1
+  COULD-NOT-MEASURE 4 "mode-scope-missing" -- "$SM1" --mode only --component tooling-tests --run-id run-1
 
 SM2="$TMP/partial-two-modes.txt"
 { echo "==== AGENT-GATE SUMMARY ===="
@@ -1114,7 +1114,7 @@ SM2="$TMP/partial-two-modes.txt"
   echo "==== END AGENT-GATE SUMMARY ===="
 } > "$SM2"
 expect "18.2 TWO scope lines is ambiguous, never resolved in favour of PASS" \
-  COULD-NOT-MEASURE 4 "mode-scope" -- "$SM2" --mode only --component tooling-tests --run-id run-1
+  COULD-NOT-MEASURE 4 "mode-scope-ambiguous" -- "$SM2" --mode only --component tooling-tests --run-id run-1
 
 # CONTROL: the ordinary PARTIAL summary — one scope line, component a member — still passes,
 # or the requirement has become refuse-everything and 18.1/18.2 prove nothing.
@@ -1140,7 +1140,7 @@ SM4="$TMP/partial-empty-scope.txt"
   echo "==== END AGENT-GATE SUMMARY ===="
 } > "$SM4"
 expect "18.5 an EMPTY --only scope is malformed, not a licence to skip membership" \
-  COULD-NOT-MEASURE 4 "mode-scope" -- "$SM4" --mode only --component tooling-tests --run-id run-1
+  COULD-NOT-MEASURE 4 "mode-scope-ungrammatical" -- "$SM4" --mode only --component tooling-tests --run-id run-1
 
 echo "=== section 19: component reads stop at RESULT:, not at the closer (F5) ==="
 # A RESIDUAL OF B1'S OWN FIX, and the same class as it: B1 bounded reads to the BLOCK, and the
@@ -1390,7 +1390,7 @@ expect "22.4 a LONE malformed tree-integrity line is named malformed, not report
   echo "==== END AGENT-GATE SUMMARY ===="
 } > "$TMP/mal-mode.txt"
 expect "22.5 a malformed --only scope line is named malformed, not treated as no scope at all" \
-  COULD-NOT-MEASURE 4 "malformed" -- "$TMP/mal-mode.txt" --mode only --component tooling-tests --run-id run-1
+  COULD-NOT-MEASURE 4 "mode-scope-ungrammatical" -- "$TMP/mal-mode.txt" --mode only --component tooling-tests --run-id run-1
 
 # CONTROL: a clean block still PASSes, or every case above is satisfied by a
 # refuse-everything reader and proves nothing.
@@ -1461,12 +1461,13 @@ fi
 # derived from source) and 15.12 (no site may scope the RECORD grammar to --delta),
 # 106 -> 108; #3951 grew section 10 by eight (an uncertain tree-integrity must not mask a
 # certain summary-integrity FAIL, plus four controls for the mappings that must NOT move),
-# 108 -> 116. Raised
+# 108 -> 116; job 401 added section 22 (the reserved-line recognizer class: malformed is its
+# own refusal, never absent), 116 -> 125. Raised
 # DELIBERATELY each time: the total is a
 # `-lt` floor, so leaving it low would let the added cases be deleted while the suite still
 # reported green — this repo's own case-floor lesson.
-SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:8 7:2 8:4 9:5 10:16 11:6 12:5 13:4 14:2 15:12 16:4 17:6 18:5 19:3 20:5 21:5"
-FLOOR=116
+SECTION_FLOORS="1:4 2:5 3:3 4:5 5:7 6:8 7:2 8:4 9:5 10:16 11:6 12:5 13:4 14:2 15:12 16:4 17:6 18:5 19:3 20:5 21:5 22:9"
+FLOOR=125
 for _sf in $SECTION_FLOORS; do
   _sec=${_sf%%:*}; _min=${_sf##*:}
   eval "_got=\${SEC_$_sec:-0}"

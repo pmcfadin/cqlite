@@ -300,6 +300,46 @@ _count_re() {
   printf '%s' "${n:-0}"
   return 0
 }
+# _RESERVED_LINES — EVERY reserved `name:` line this reader consults, enumerated in ONE place
+# so a future one cannot join without going through the two-step below:
+#
+#     summary-integrity   tree-integrity   mode   RESULT   <the component row>
+#
+# `run-id:` is deliberately NOT here: this script never reads it — gate-liveness.sh owns that
+# binding (#2874) — and the two block MARKERS are not `name:` lines, so they keep their own
+# exact anchored regex, where a malformed marker already refuses.
+#
+# THE TWO-STEP, AND WHY STEP 1 EXISTS AT ALL. Every recognizer in this file used to COUNT its
+# line with the FULL accepted grammar, so a line that was PRESENT BUT MALFORMED matched
+# nothing and the block read as if the line were not there — and ABSENT is the permissive
+# branch. Measured, three times over, as literal false PASSes: `summary-integrity:FAIL`
+# (no space) was invisible; a valid `tree-integrity: PASS` beside a malformed
+# `tree-integrity:FAIL` counted as one; a valid component row beside a malformed
+# same-component row counted as one. So:
+#
+#   STEP 1  count by BARE PREFIX `^<name>:`, making NO assumption about what follows;
+#   STEP 2  validate that single line against the exact accepted grammar, and treat
+#           MALFORMED as its OWN named refusal — never as absence.
+#
+# This is the affirmative-measurement rule applied to the RECOGNIZER rather than to the
+# verdict: key the permissive branch on the AFFIRMATIVE value, never on `!= <bad>`. The class
+# had appeared FIVE times here, once introduced by the round that was fixing it, which is why
+# the sweep is uniform rather than per-instance.
+
+# _count_prefix <name> <file> — STEP 1. Same tri-state contract as _count_re: echoes the
+# count, returns 2 on a FAILED grep, because a failed measurement is never an absence either.
+_count_prefix() { _count_re "^$1:" "$2"; }
+
+# _reserved_token <name> <file> — STEP 2. Echoes the line's token, or returns 1 when the line
+# is MALFORMED (present by prefix, but not `<name>:<whitespace><token>`). Every caller turns
+# that non-zero into its own named refusal.
+_reserved_token() {
+  local v
+  v=$(_key_token "$1" "$2") || return 1
+  [ -n "$v" ] || return 1
+  printf '%s' "$v"
+}
+
 # _key_token <key> <file> — the FIRST whitespace-delimited token after `<key>: `, which is
 # how premerge-assert.sh compares these same lines. Token-exact by construction, so a
 # trailing detail (`PASS (lockfile-settled: …)`) does not change the verdict and a longer
@@ -343,8 +383,20 @@ _key_token() {
 # The mktemp failure goes through the NORMAL verdict path like every other cause, so it
 # lands on stdout with the `summary:` line: a caller parsing verdicts must not have to read
 # a second stream for one branch.
-SNAPDIR=$(mktemp -d "${TMPDIR:-/tmp}/gate-component-verdict.XXXXXX") \
-  || cnm "snapshot-unavailable; a scratch directory for the one-read snapshot could not be created under ${TMPDIR:-/tmp}"
+# `mktemp`'s OWN stderr is CAPTURED, not inherited, so the one branch that cannot route
+# through the sanitizer can no longer emit an unprefixed line ahead of the anchored response.
+# Its text is reported THROUGH the sanitized path rather than discarded — the diagnostic is
+# the useful part of this failure, and the invariant is that every line carries the anchor,
+# not that nothing is said. Same family as the round-6 `--help` finding.
+#
+# CAPTURED INTO A VARIABLE, NOT A FILE, and that is the whole trick: the first attempt wrote
+# the stderr to a sibling under `$TMPDIR` — the very directory that is missing in the failure
+# this handles — so the redirect itself failed and bash emitted the exact unanchored line the
+# change was removing. `2>&1` inside the substitution needs no directory to exist. On success
+# mktemp prints only the path, so the variable IS the path.
+_mkout=$(mktemp -d "${TMPDIR:-/tmp}/gate-component-verdict.XXXXXX" 2>&1) \
+  || cnm "snapshot-unavailable; a scratch directory for the one-read snapshot could not be created under ${TMPDIR:-/tmp}${_mkout:+ — mktemp: $_mkout}"
+SNAPDIR="$_mkout"
 trap 'rm -rf "$SNAPDIR"' EXIT
 SNAP="$SNAPDIR/summary"
 BLOCK="$SNAPDIR/block"
@@ -507,10 +559,16 @@ esac
 #
 # Neither ordering can produce a false PASS — every branch involved is a refusal — so what
 # this buys is the PRECISION of the refusal, and a header that agrees with its code.
-_n_si=$(_count_re '^summary-integrity:[[:space:]]' "$BODY") \
+_n_si=$(_count_prefix summary-integrity "$BODY") \
   || cnm "summary-integrity-unmeasurable; the scan for the summary-integrity line failed"
-_si=""
-[ "$_n_si" -eq 1 ] && _si=$(_key_token summary-integrity "$BODY")
+# STEP 2 is deferred to the verdict sites below, NOT taken here, so the ORDER of the verdicts
+# is unchanged and `tree-integrity: FAIL` keeps its own already-certain cause (#3951).
+# `_si_malformed=1` records "present by prefix, ungrammatical" as a THIRD state, distinct from
+# both a readable token and absence.
+_si=""; _si_malformed=0
+if [ "$_n_si" -eq 1 ]; then
+  _si=$(_reserved_token summary-integrity "$BODY") || { _si=""; _si_malformed=1; }
+fi
 
 # _si_preempt <what-was-unmeasured>: promote an UNCERTAIN tree refusal to the certain
 # summary-integrity one, and ONLY on an unambiguous FAIL. A duplicated or unrecognised
@@ -521,7 +579,7 @@ _si_preempt() {
   notpass "summary-integrity FAIL — a mid-run summary clobber was detected (#2874), so the block is non-certifying and NO component verdict in it can be read as a pass. Reported IN PREFERENCE to the tree-integrity reading, which was itself UNMEASURED here ($1): an affirmatively established failure outranks a cannot-tell (#3951)"
 }
 
-_n_ti=$(_count_re '^tree-integrity:[[:space:]]' "$BODY") \
+_n_ti=$(_count_prefix tree-integrity "$BODY") \
   || cnm "tree-integrity-unmeasurable; the scan for the tree-integrity line failed"
 if [ "$_n_ti" -eq 0 ]; then
   _si_preempt "the block carries no tree-integrity line"
@@ -531,7 +589,12 @@ if [ "$_n_ti" -gt 1 ]; then
   _si_preempt "the block carries $_n_ti tree-integrity lines"
   cnm "tree-integrity-ambiguous; the block carries $_n_ti tree-integrity lines, and ambiguity is never resolved in favour of PASS"
 fi
-_ti=$(_key_token tree-integrity "$BODY")
+_ti=$(_reserved_token tree-integrity "$BODY") || {
+  # PRESENT BY PREFIX, UNGRAMMATICAL. Its own refusal, and NOT the `absent` one: those are
+  # different facts and only one of them is actionable.
+  _si_preempt "the tree-integrity line is present but ungrammatical"
+  cnm "tree-integrity-malformed; the block carries a tree-integrity line that is not '<key>: <token>', so its verdict cannot be read — reported as MALFORMED rather than absent, because a line the gate could not have emitted is not the same fact as no line at all"
+}
 case "$_ti" in
   PASS) ;;
   FAIL)
@@ -547,6 +610,12 @@ esac
 # own verdict, read from the values measured above (#3951: measured once, acted on twice).
 if [ "$_n_si" -gt 1 ]; then
   cnm "summary-integrity-ambiguous; the block carries $_n_si summary-integrity lines"
+fi
+if [ "$_si_malformed" -eq 1 ]; then
+  # STEP 2's refusal, and NOT the "unrecognised token" one below: a line that is present by
+  # prefix but ungrammatical was the measured false PASS (`summary-integrity:FAIL`, no space,
+  # read as if the line were absent), so it is named for what it is.
+  cnm "summary-integrity-malformed; the block carries a summary-integrity line that is not '<key>: <token>', so the clobber declaration cannot be read — reported as MALFORMED rather than absent, because the gate emits this line ONLY on detection and its presence is never benign (#2874)"
 fi
 if [ "$_n_si" -eq 1 ]; then
   # agent-gate.sh emits this line ONLY on detection, and only ever with a FAIL token — so
@@ -623,12 +692,12 @@ esac
 # annotation content and the tail must stay permissive after the two spaces. What the
 # anchoring closes is the SINGLE-space tail, which no emitter can produce.
 _COMP_LINE_RE="^${COMP_RE}: +[A-Za-z][A-Za-z-]* \([0-9]+s\)  .+$"
-COMP_LINES=$(grep -E "$_COMP_LINE_RE" "$BODY"); _grc=$?
-if [ "$_grc" -ge 2 ]; then
-  cnm "component-scan-failed; the scan for this component's line failed (rc=$_grc), and a failed measurement is never reported as an absence"
-fi
-COMP_N=0
-[ -n "$COMP_LINES" ] && COMP_N=$(printf '%s\n' "$COMP_LINES" | grep -c '^')
+# STEP 1 — COUNT BY BARE PREFIX. Counting with the full row grammar was the third measured
+# false PASS: one valid `PASS` row plus a same-component row in a malformed or unannotated
+# shape left the count at 1, so an artifact that could not have been coherently emitted
+# answered PASS.
+COMP_N=$(_count_prefix "$COMP_RE" "$BODY") \
+  || cnm "component-scan-failed; the scan for this component's line failed, and a failed measurement is never reported as an absence"
 
 # A `PARTIAL` RUN TOKEN **REQUIRES** ITS `--only` SCOPE LINE (F4), and then the component
 # must be in it.
@@ -654,21 +723,28 @@ COMP_N=0
 # correct `--only fmt,clippy`. Membership uses the gate's OWN predicate — comma to space,
 # then a whole-word match (agent-gate.sh's `grep -qw "$name" <<<"${ONLY//,/ }"`) — so the two
 # agree by construction and any looseness can only widen membership.
-_n_mode=$(_count_re '^mode: PARTIAL \(--only ' "$BODY") \
+# STEP 1 counts `^mode:` by BARE PREFIX. Safe because the gate emits exactly ONE lowercase
+# `mode:` line and only for `--only` (its uppercase `MODE:` lite/delta line is a different
+# key, and those blocks are refused by the opener check above anyway), so a legitimate
+# full-marker block carries no other `mode:` line for this to trip over.
+_n_mode=$(_count_prefix mode "$BODY") \
   || cnm "mode-scope-unmeasurable; the scan for the block's --only scope failed"
 if [ "$_n_mode" -gt 1 ]; then
-  cnm "mode-scope-ambiguous; the block states $_n_mode --only scopes, and ambiguity is never resolved in favour of PASS"
+  cnm "mode-scope-ambiguous; the block carries $_n_mode mode: lines, and ambiguity is never resolved in favour of PASS"
+fi
+# STEP 2: the one line must match the scope grammar exactly. A malformed one is its OWN
+# refusal — reading it as "no scope line at all" would silently skip the membership test.
+if [ "$_n_mode" -eq 1 ] && ! grep -qE '^mode: PARTIAL \(--only [^)]' "$BODY"; then
+  cnm "mode-scope-ungrammatical; the block carries a mode: line that is not 'mode: PARTIAL (--only <non-empty list>)' — which covers both a mis-spelled line and an EMPTY scope, neither of which the gate can emit — so the run's scope cannot be read. Reported as its own kind rather than as no scope at all, which would silently skip the membership test"
 fi
 if [ "$RUN_TOKEN" = PARTIAL ] && [ "$_n_mode" -ne 1 ]; then
   cnm "mode-scope-missing; the run token is PARTIAL, which the gate emits ONLY from its --only demotion, and that demotion appends the 'mode: PARTIAL (--only …)' line in the same block — so a PARTIAL token with $_n_mode scope lines is a shape no emitter produces"
 fi
 if [ "$_n_mode" -eq 1 ]; then
+  # Non-empty by construction: STEP 2 above refused an empty scope, so the separate
+  # empty-scope check that used to sit here is gone. Two branches emitting one kind is what
+  # let a control pass for the wrong reason.
   _scope=$(sed -n 's/^mode: PARTIAL (--only \([^)]*\)).*/\1/p' "$BODY" | head -1)
-  # An EMPTY scope is not a scope: the gate's `--only` argument cannot be empty, so this is
-  # a malformed line and never a licence to skip the membership test.
-  if [ -z "${_scope// /}" ]; then
-    cnm "mode-scope-malformed; the block's --only scope is empty, which the gate cannot emit"
-  fi
   # `-F`: the name is DATA here, not a pattern. Every other site interpolates the
   # `.`-escaped COMP_RE; a raw `$COMPONENT` as a BRE would make `a.b` match `axb`.
   if [ "$COMP_N" -ge 1 ] && ! grep -Fqw -- "$COMPONENT" <<<"${_scope//,/ }"; then
@@ -677,18 +753,27 @@ if [ "$_n_mode" -eq 1 ]; then
 fi
 
 if [ "$COMP_N" -gt 1 ]; then
-  cnm "ambiguous-component-line; the block carries $COMP_N lines for this component, so which one is the verdict cannot be established; run-result=$RUN_TOKEN"
+  cnm "ambiguous-component-line; the block carries $COMP_N lines whose prefix is this component, so which one is the verdict cannot be established — counted by BARE PREFIX on purpose, so a malformed sibling row cannot hide behind a valid one; run-result=$RUN_TOKEN"
 fi
 
 if [ "$COMP_N" -eq 0 ]; then
   # AFFIRMATIVELY ABSENT from a block we have established is complete, valid and
   # single-extent: the component was not selected, or it crashed before recording. Either
   # way the check did not pass, and this must never soften to "probably fine".
-  _hint=""
-  if grep -qE "^${COMP_RE}: " "$BODY"; then
-    _hint=" (a non-component line with that prefix exists — a META line carries no (Ns) duration field and is not a verdict)"
-  fi
-  notpass "component-absent; the run completed and its block does not name this component as a component${_hint}; run-result=$RUN_TOKEN"
+  # Genuinely absent rather than merely ungrammatical, because STEP 1 counted the BARE
+  # PREFIX. The old "a non-component line with that prefix exists" hint is GONE because it is
+  # now unreachable: any such line lands on the malformed refusal below instead.
+  notpass "component-absent; the run completed and its block carries no line at all whose prefix is this component; run-result=$RUN_TOKEN"
+fi
+
+# STEP 2 — validate the ONE row against the exact emitted grammar. Malformed is its own
+# refusal, never "absent": the block DOES name this component, in a shape no emitter produces.
+COMP_LINES=$(grep -E "$_COMP_LINE_RE" "$BODY"); _grc=$?
+if [ "$_grc" -ge 2 ]; then
+  cnm "component-scan-failed; validating this component's row failed (rc=$_grc), and a failed measurement is never reported as an absence"
+fi
+if [ -z "$COMP_LINES" ]; then
+  cnm "component-line-malformed; the block carries a line whose prefix is this component, but it is not a component row in the emitter's own shape ('<name>: <STATUS> (<N>s)  <annotation>'), so no verdict can be read from it — reported as MALFORMED rather than absent; run-result=$RUN_TOKEN"
 fi
 
 COMP_STATUS=$(printf '%s' "$COMP_LINES" | sed -E "s/^${COMP_RE}: +([A-Za-z][A-Za-z-]*) \([0-9]+s\).*/\1/")
