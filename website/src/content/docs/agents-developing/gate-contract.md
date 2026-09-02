@@ -1166,18 +1166,18 @@ ci-pins: DATASET_TAG: <tag>  DATASET_ASSET: <asset>  DATASET_SHA256: <sha>
 tree-start: <head-sha12> dirty: yes|no digest: <digest12>
 tree-end:   <head-sha12> dirty: yes|no digest: <digest12>
 tree-integrity: PASS
-fmt:               PASS|FAIL (<Ns>)  [fmt workspace default-features]
-clippy:            PASS|FAIL (<Ns>)  [clippy workspace(excl 5) --all-features | clippy cqlite-core --features 33:all-compression,arrow,bench-internals,+30 more | ...]
-core-tests:        PASS|FAIL (<Ns>)  [test cqlite-core --features cli-helpers]
-integration-tests: PASS|FAIL (<Ns>)  [test cqlite-integration-tests default-features x2]
-write-tests:       PASS|FAIL (<Ns>)  [test cqlite-core --features write-support x3]
-cli-tests:         PASS|FAIL (<Ns>)  [test cqlite-cli default-features | test cqlite-cli --features write-support]
-minimal-build:     PASS|FAIL (<Ns>)  [build cqlite-core --no-default-features --features all-compression | test cqlite-core --no-default-features --features all-compression]
-all-features-check: PASS|FAIL (<Ns>)  [check cqlite-core --all-features | clippy cqlite-core --all-features]
-pub-surface:       PASS|FAIL (<Ns>)  [no-cargo]
-python-bindings:   PASS|SKIP (<Ns>)  [via maturin: feature set NOT observed]
-tooling-tests:     PASS|FAIL (<Ns>)  [cargo not observable: cargo may run inside ~60 nested test scripts (child processes)]
-smoke:             PASS|FAIL (<Ns>)  [build cqlite-cli default-features]
+fmt:               PASS|FAIL (<Ns>)  [invocation: fmt workspace default-features]
+clippy:            PASS|FAIL (<Ns>)  [invocation: clippy workspace(excl 5) --all-features | clippy cqlite-core --features 33:all-compression,arrow,bench-internals,+30 more | ...]
+core-tests:        PASS|FAIL (<Ns>)  [invocation: test cqlite-core --features cli-helpers]
+integration-tests: PASS|FAIL (<Ns>)  [invocation: test cqlite-integration-tests default-features x2]
+write-tests:       PASS|FAIL (<Ns>)  [invocation: test cqlite-core --features write-support x3]
+cli-tests:         PASS|FAIL (<Ns>)  [invocation: test cqlite-cli default-features | test cqlite-cli --features write-support]
+minimal-build:     PASS|FAIL (<Ns>)  [invocation: build cqlite-core --no-default-features --features all-compression | test cqlite-core --no-default-features --features all-compression]
+all-features-check: PASS|FAIL (<Ns>)  [invocation: check cqlite-core --all-features | clippy cqlite-core --all-features]
+pub-surface:       PASS|FAIL (<Ns>)  [invocation: no-cargo]
+python-bindings:   PASS|SKIP (<Ns>)  [invocation: via maturin: feature set NOT observed]
+tooling-tests:     FAIL      (<Ns>)  [invocation: cargo not observable: cargo may run inside ~60 nested test scripts (child processes)]  failed-assert: 1 RECOGNISED (assert): 1465-skip-declares
+smoke:             PASS|FAIL (<Ns>)  [invocation: build cqlite-cli default-features]
 logs: /tmp/agent-gate.<random>
 summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PASS
@@ -1202,6 +1202,53 @@ summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PARTIAL
 ==== END AGENT-GATE SUMMARY ====
 ```
+
+### A FAIL line NAMES the failing assert, and the bracket is LABELLED (#3765)
+
+The #3453 bracket used to render **unlabelled**, and it is test-SHAPED:
+
+```
+tooling-tests:  FAIL (1149s)  [test ws0-corpus-gen default-features | + cargo not observable: ...]
+```
+
+A reader identifies `ws0-corpus-gen` as the failing test. It is not — the real assert,
+`FAIL - 1465-skip-declares: ...`, lived only in the component log, which this doctrine
+forbids an agent to read while *also* requiring a flake citation to match the **assert**
+rather than the component. Those two rules were unsatisfiable for a failing component, and
+that cost a real round: a coordination lead refused a lane's correct flake attribution
+because the bracket "named a different test".
+
+Both halves are fixed. The bracket is labelled `[invocation: ...]` (one label site, over a
+bracket-free body — eight renderings would otherwise be eight chances to spell it
+differently), and a FAIL line carries a `failed-assert:` field:
+
+```
+tooling-tests:  FAIL (1149s)  [invocation: ...]  failed-assert: 1 RECOGNISED (assert): 1465-skip-declares
+```
+
+**FAIL lines only** — a PASS or SKIP has no failing assert, so the field has no subject
+there, and its absence on those lines is the rule rather than a silence. On a FAIL it is
+one of **four textually distinct states, never blank**:
+
+| Rendering | Meaning |
+|---|---|
+| `<N> RECOGNISED (<tier>): a, b, c (+K more)` | identities extracted; `N` is the TRUE total, names capped, remainder DECLARED. Tier is `assert` (a test case), `guard` (a named guard verdict) or `toolchain` (a compiler/npm error — no assert identity exists) |
+| `0 RECOGNISED (...)` | the log WAS read and scanned and nothing matched (or it was empty — a separate cause). **Never a bare `0`**: the recogniser set is documented NON-EXHAUSTIVE, so a bare zero would read as a verified all-clear from an incomplete scan |
+| `not extractable (<cause>)` | the log could not be read or normalised, or the extractor could not run. **Never collapsed onto `0 RECOGNISED`** — "found nothing" and "could not look" are the two facts this repo most often conflates |
+| `not recorded (<why>)` | no extraction ran for this line at all (a synthetic self-test block, or a runner that appends to NAMES without reaching an extraction site) |
+
+The recogniser set is **one named file with a stated rule per entry**,
+`scripts/ci/gate-failed-assert.sh`, **derived by measurement** over the 174 real FAILed
+component logs retained on a fleet box (114 of the 136 non-empty ones recognised; the two
+knowingly-uncovered shapes are declared in its header, not left to be rediscovered), and
+resolved from the checkout with **no env override** — the party the field constrains must
+not choose its own extractor. Extraction happens at the component boundary (`record_result`,
+the chokepoint every component passes through, so a new component is covered with no gate
+edit) and rides a **sidecar**, because `record_result`'s `.result` file is two whitespace
+fields only and a third would be silently absorbed by its 2-field reader. The log is parsed
+through the gate's ONE `_ansi_stripped_log` and read by redirection, never a pipe (#3400:
+colour survives redirection, and a piped `while read` discards its verdict in a subshell);
+an unreadable log is a NAMED `not extractable`, never "no failures found".
 
 ### Every component line NAMES the feature matrix it ran (#3453)
 
@@ -1244,7 +1291,7 @@ short-circuit records nothing later. A body that dies before its first cargo cal
 legitimately leaves an empty sidecar, and that state is named too.
 
 **It never renders blank.** A component with no observed invocation renders an explicit
-`[UNDECLARED]`; one that runs no cargo at all renders `[no-cargo]`; a `SKIP` that never
+`[invocation: UNDECLARED]`; one that runs no cargo at all renders `[invocation: no-cargo]`; a `SKIP` that never
 reached cargo — or a `FAIL` before its first cargo call — says exactly that (and names the
 metadata-probe exclusion, because `cargo tree`/`metadata` probes are deliberately not
 recorded and three components FAIL exactly there).
