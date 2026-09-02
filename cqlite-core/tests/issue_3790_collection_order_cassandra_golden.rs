@@ -70,6 +70,16 @@
 //! that catches the live defect. Any reading of this file as demonstrating a
 //! caught `time` misordering is wrong.
 //!
+//! # RED-verified (measured, not asserted)
+//!
+//! With the `inet`/`time` arms of `types::comparator::custom::compare` removed —
+//! i.e. both types back on the formatted-string fallback that was the #3790
+//! defect — **7 of these 11 cases FAIL**: every `inet` case and every composite
+//! case, in BOTH legs, plus the formatted-string negative control. The four that
+//! still pass are exactly the `time` ones and the whole-tuple-path control,
+//! which is the LATENT-`time` scope above measured rather than merely claimed. A
+//! green ordering test that has never been shown to red proves nothing.
+//!
 //! # Gate
 //!
 //! **Deliberately UNGATED at file level.** A crate-level `#![cfg(feature = ...)]`
@@ -204,12 +214,21 @@ fn fixture_dir() -> PathBuf {
 // Golden JSONL -> per-(partition, column) cell-path sequence IN FILE ORDER.
 // ===========================================================================
 
+/// One partition of the golden: `(column, Some(cell path))` per cell, in file
+/// order. `None` is the path-less complex-column deletion shell Cassandra writes
+/// ahead of a whole-collection assignment.
+type GoldenCells = Vec<(String, Option<String>)>;
+
+/// Every partition of the golden: `(partition key as rendered by sstabledump,
+/// cells)`.
+type Golden = Vec<(String, GoldenCells)>;
+
 /// Every partition of the golden, as `(partition key string, cells)` where a
 /// cell is `(column, Option<path>)`. The path-less cell is the complex-column
 /// deletion shell Cassandra writes ahead of a whole-collection assignment; it is
 /// skipped by [`golden_order`] rather than dropped here, so a golden that lost
 /// its cells entirely still shows up as an empty sequence and fails loudly.
-fn load_golden(path: &std::path::Path) -> Vec<(String, Vec<(String, Option<String>)>)> {
+fn load_golden(path: &std::path::Path) -> Golden {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
         panic!("golden {path:?} is committed alongside the fixture and must read: {e}")
     });
@@ -254,11 +273,7 @@ fn load_golden(path: &std::path::Path) -> Vec<(String, Vec<(String, Option<Strin
 
 /// The cell paths of one column of one partition, in FILE ORDER — i.e. the order
 /// Cassandra's comparator put them in.
-fn golden_order(
-    golden: &[(String, Vec<(String, Option<String>)>)],
-    partition: &str,
-    column: &str,
-) -> Vec<String> {
+fn golden_order(golden: &Golden, partition: &str, column: &str) -> Vec<String> {
     let (_, cells) = golden
         .iter()
         .find(|(k, _)| k == partition)
@@ -459,7 +474,7 @@ fn assert_strict_order(cmp: &ComparatorType, values: &[Value], what: &str) {
 /// One column of one partition: cross-check the golden's file order against the
 /// README oracle, then require the comparator to reproduce it.
 fn assert_column(
-    golden: &[(String, Vec<(String, Option<String>)>)],
+    golden: &Golden,
     partition: &str,
     column: &str,
     oracle: &[&str],
