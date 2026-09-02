@@ -1966,6 +1966,176 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   deletes the ref (refuses under an open PR without `--force`). Maintain the liveness heartbeat
   (`scripts/flow/claim-heartbeat.sh beat <N>`, refreshed at claim + every stage transition);
   `flow-board` reaps deterministically (age > 4h AND no open PR) (#2089).
+  **The per-lane STATE MARKER is ownership-stamped too, and its session axis is deliberately NOT
+  fail-closed (#3822).** `/drive-issue`'s durable `.drive-issue-state.md` used to be prose with no
+  writer, no reader and no ownership stamp, so a session rehydrating in a shared or REUSED worktree
+  adopted a peer's plan wholesale. It is now written and read ONLY through
+  `scripts/flow/drive-issue-state.sh` (`write` / `verify` / `adopt --reason <why>` / `show`;
+  `--help` is the contract), which stamps issue, machine, worktree, session, the SESSION's pid + its
+  start window, and actor into a **bounded prologue** — an exact first-line sentinel, `key: value`
+  lines at column zero, an exact end sentinel — so identity is never grepped out of the free-form
+  body (#3312: remove the shared channel; a body line reproducing a sentinel at column zero is
+  REFUSED at write time, and a duplicate sentinel is its own read-time refusal). **The axis split is
+  the load-bearing decision and the thing a future agent will otherwise undo:** `issue`, `machine`
+  and `worktree` are FAIL-CLOSED and each refusal NAMES ITS AXIS, because they are stable across a
+  legitimate resume and distinct across lanes. `session` is RECORDED but not fail-closed, because
+  the marker's *intended consumer* is the Delta 3 cron re-invoke — a NEW `CLAUDE_CODE_SESSION_ID` in
+  the SAME lane on the SAME issue — so verifying it literally would red EVERY correct resume, and a
+  guard that reds on correct input is the guard agents learn to waive. A session difference alone is
+  resolved by the LIVENESS of the recorded writer, three-valued on `dead-lanes`' precedent: provably
+  GONE ⇒ `ADOPTABLE` and `verify` STILL exits non-zero (adoption is an explicit `adopt` gesture that
+  records the prior session, never an implicit inheritance); provably ALIVE ⇒ `LIVE-PEER`, which
+  **`adopt` also refuses** (an adopt that ignores liveness is a mute button for the whole guard);
+  UNMEASURABLE ⇒ `LIVENESS-UNKNOWN`, refused — a positive verdict requires an affirmative
+  measurement. **The pid recorded is the SESSION's (`CLAUDE_PID`), and there is deliberately NO `$$`
+  fallback**: `$$` is the transient bash that exits immediately, so recording it would make a LIVE
+  peer read as DEAD seconds later — the exact false-permissive this closes. PID reuse is defeated by
+  requiring the live pid's start window to still intersect the recorded one, measured by the
+  three-valued primitives now SHARED with `claim-heartbeat.sh` in
+  `scripts/flow/lib/process-liveness.sh` (one definition, sourced by both: a second implementation
+  of those review rounds is a second place to lose them). `machine` is the same notion `claim.sh`
+  records — same env var, same default, same sanitizer — and the agreement is pinned BEHAVIOURALLY
+  by `scripts/tests/test_drive_issue_state.sh`, which extracts claim.sh's own definition and
+  compares, rather than by care. **`write` MUST succeed over an UNSTAMPED marker, and that is a
+  correctness requirement rather than a convenience**: every lane holds an unstamped marker on
+  rollout BY DEFINITION, so refusing it made the whole marker path a dead letter fleet-wide while
+  the refusal text named the very command that refused — the #3312-job-24 shape, where a
+  break-glass ships that no sequence of actions can reach. An unstamped marker asserts NO
+  ownership, so refusing protects no identifiable party; its body is DISCARDED (never carried
+  forward) and the discard is ANNOUNCED. A MALFORMED/DUPLICATE-SENTINEL marker gets no such
+  exception — it CLAIMS an identity that merely cannot be READ, which may be a live peer's — so a
+  human moves it aside and the lane then takes the ABSENT path. **Generalised, and pinned by a
+  DERIVED test case rather than per-verdict prose: no refusal text may name a subcommand of the
+  script that returns the SAME refusal in that state** — including a two-step remedy, because the
+  readers of these texts run printed commands literally. Naming no mechanical remedy is fine
+  (`FOREIGN-*` say "escalate"); naming one that refuses is the defect, and that case caught two
+  further instances in the same round it was written.
+  **Three later corrections, one shape: a guarantee that stops short of what a consumer
+  actually reads.** (1) A fatal start-up failure printed an ANCHORED line and no
+  `verdict <TOKEN>`, so every caller the doctrine tells to `case` on the token fell through
+  every arm — the prefix is contract (a), the token is contract (c), and **(a) does not imply
+  (c)**; every exit now carries a token. (2) The anchor covers the EXTERNAL commands too: a
+  native `mktemp:`/`mv:` line has no prefix at all, so each call site either CAPTURES that text
+  into the anchored message or suppresses it, and a cleanup command carries `|| true` because a
+  failing command in a bash EXIT trap under `set -e` aborts the trap **and replaces the exit
+  status** (measured: a broken `rm` turned a legitimate `WRITTEN`(0) into an unexplained
+  non-zero). Same sweep, worse defect: a failing `date` committed a stamp with an EMPTY
+  required field — `set -e` cannot catch it, since the writer is called as `if ! write_marker`,
+  which suppresses `set -e` for its whole subtree — so the assembled bytes are now checked for
+  FIELD COMPLETENESS, not just sentinels, or the lane bricks itself. (3) The ADOPTION
+  PROVENANCE (`prior-session`, `prior-session-pid`, `prior-ts`, `adopt-reason`) is DURABLE
+  STATE: an ordinary `write` preserves it exactly as it preserves stage/request-id/pr/branch,
+  because a mandatory, validated `--reason` that the next stage update erases is no audit
+  record — and carrying a field forward requires READING it, so all four are parsed under the
+  same duplicate-key refusal as the identity keys. (4) And the marker CLASSIFIER read `grep`
+  two-valued: an unperformable scan counted as ZERO sentinels, so a DISPLACED stamp classified
+  as `legacy` and `write`'s migration path — the ONE branch licensed to discard a marker —
+  overwrote what may be a LIVE PEER's state. Every sentinel/field scan here is now three-valued
+  and an unmeasurable classification is its own `ERROR` class every caller refuses on, which is
+  CLAUDE.md's standing rule (a positive verdict requires an AFFIRMATIVE MEASUREMENT; never
+  derive a pass from the ABSENCE of a bad signal) applied where its permissive branch DELETES
+  DATA. (5) Correction (1) reached ONE exit path, and the SIGNAL traps and USAGE errors still
+  exited with no token — the fix not reaching every site of its own class — so contract (c) is
+  now enforced by a FLAG rather than by reviewing each `exit`: `verdict()` records that it
+  fired, an EXIT-trap backstop emits `ERROR` for any path that would leave with none, `USAGE`
+  joins the closed set, and the signal handlers pick their one token from an explicit
+  COMMIT_PHASE (`ERROR` before the atomic rename, the run's own success token after it,
+  DEFERRED across it). That phase is only OBSERVABLE because the rename moved OUT of a `$( )`:
+  measured on bash 5.2, a trapped signal arriving while the shell waits for a COMMAND
+  SUBSTITUTION inside a FUNCTION is DISCARDED — the trap never runs — while the same signal
+  during a plain command is delivered normally. (6) Same shape once more, at the SHELL's own
+  diagnostics: correction (2) captured 21 EXTERNAL commands' stderr and left `shift`'s, which
+  bash prints UNPREFIXED under `shift_verbose`/POSIX mode — both reachable from the inherited
+  `BASHOPTS`, so by a caller and not only by the invoker. Every `shift` now validates `$#`
+  FIRST. **The transferable rule from (4)-(6): when a round's fix names a site, sweep the
+  CLASS and add coverage driven by a TABLE, or the next round finds the same defect one exit
+  path over** — which is what happened here three times running. That table immediately paid
+  out on a site none of the three findings named: a FAILED REDIRECTION is a native diagnostic
+  too, and bash applies redirections LEFT TO RIGHT, so `: >>"$lock" 2>/dev/null` printed its own
+  unprefixed `Permission denied` before stderr was diverted — the suppressor must come FIRST.
+  (7) The marker BODY is copied BY BYTE OFFSET, never by a line-oriented tool: `awk '{print}'`
+  ALWAYS terminates the record it prints, so a body whose last line had no newline GAINED one on
+  every carry-forward write (measured 19 → 20 bytes) under a header promising byte-for-byte
+  preservation — and the case meant to catch that extracted through awk TOO, so **a verification
+  sharing the defect's blind spot is not a verification**; the test helper now reads a `grep -b`
+  byte offset and copies with `tail -c`, a different mechanism from the script's, with the
+  retired helper kept as the positive control. `$( )` capture is the same class (it strips
+  trailing newlines), which is why body bytes are streamed to a redirected stdout and never
+  captured into a variable. (8) Contract (c)'s own enforcer had a window inside it: `verdict()`
+  committed the "already emitted" flag BEFORE printing the line, so a signal landing between the
+  two made the handler AND the EXIT backstop both stay silent and the run exited with NO token —
+  over a possibly-committed write. **A flag that says a side effect HAPPENED must be set AFTER
+  the side effect, and the gap made unobservable**: the emission is now a signal-deferred
+  critical section (print, then commit, then deliver anything that arrived), there is exactly ONE
+  site that prints a verdict line and ONE that sets the flag, and the race is pinned by a
+  structural order assert plus a signal PLANTED at the window in a scratch copy — with the
+  pre-fix ordering kept as the positive control, because a race cannot be pinned by a timed test.
+  (9) **An identity is recorded and compared LOSSLESSLY or the run REFUSES, naming its axis** —
+  the third instance of H1's family (unmeasurable axis committed as a placeholder; then the
+  worktree axis; now a MEASURABLE identity committed LOSSILY). The shared `sanitize_field`
+  maps space to `-`, collapses runs and TRUNCATES at 120, so `CLAIM_MACHINE='build box'`
+  recorded `build-box` and a genuinely different `build-box` verified as OWNED — and two names
+  sharing a 120-char prefix were one owner. Enforced at the USE SITE by requiring
+  `sanitize_field(v) == v` (one comparison covering charset AND length, needing no second copy
+  of the sanitizer's rules), never in the sanitizer, which stays pinned against claim.sh's own
+  definition — that agreement case now compares the two EXTRACTED functions over a TABLE, since
+  a lossy value no longer reaches a marker to be read back out of. It covers `machine` and
+  `session` (an EQUAL session id is OWNED outright, so a lossy one aliases two sessions);
+  `worktree` was already verbatim; `actor`, the durable fields and the `prior-*` provenance are
+  DECLARED lossy and deliberately not refused, because nothing COMPARES them so a collision
+  cannot grant ownership. Same round, two more: a supplied body is **READ, never stat-gated** —
+  an `[ -s ]` before the copy let a source deleted or truncated in between commit an EMPTY body
+  under `WRITTEN`, so the caller's file is snapshotted ONCE and every later step reads those
+  bytes (a check before the act can only describe a file that no longer has to be the one acted
+  on); and an **unrecognised prologue key is PRESERVED**, because accepting it "for forward
+  compatibility" while the rewrite path dropped it made an OLDER script silently DELETE a field
+  a NEWER one introduced — preserve beats refuse, which would brick every touched lane on a
+  fleet mid-rollout.
+  (10) **An `-e` existence probe is not an existence probe: it FOLLOWS the link, so a DANGLING
+  symlink at the marker path classified `absent` — the ONE class licensed to replace a file — and
+  `write` silently destroyed a link someone placed.** Existence is now `-e` **or** `-L`, the `-L`
+  test runs BEFORE `-f` (which also follows), and EVERY symlink, dangling or not, takes the
+  existing `not-regular` refusal; the class was swept to the script-owned lock sidecar, where
+  `: >>"$lock"` would have created a file OUTSIDE the lane. **And an axis guard must run before
+  anything that DERIVES A PATH OR TAKES A LOCK**: `adopt` locked first, so an unmeasurable
+  worktree yielded a generic "not writable" instead of the published `axis=worktree` refusal —
+  the same input answered differently by subcommand. Both were UNTESTED because the axis matrix
+  named `write verify show` by hand, so it is now DERIVED from the dispatch table and a
+  subcommand with no declared arguments REDS rather than joining uncovered.
+  (11) **A `-L`-only refusal is a type rule with one row: the class is EVERY non-regular type,
+  and the FIFO is the one that HANGS.** Clause (10) taught the lock sidecar to refuse a symlink
+  and left FIFO, socket, device and directory accepted — the third consecutive round whose fix
+  reached one member of its own class. `: >>"$lock"` on a **FIFO BLOCKS INDEFINITELY** waiting
+  for a reader (measured: `timeout 10` ⇒ rc 124, **no verdict line at all**), which is the worst
+  available breach of contract (c) — not a wrong verdict but NO verdict, forever, in a lane
+  nobody is watching; a device would serialize NOTHING while appearing to succeed. So the rule
+  is stated over the TYPE — only `absent` or `regular` may be opened, everything else including
+  a type the probe cannot NAME is one refusal reporting what the entry actually is — and the
+  symlink check is FOLDED IN rather than kept beside it, because two checks are two messages to
+  keep true. The same sweep covers `--body-file`, where `-r` is TRUE for a FIFO and the `cat`
+  then blocks (and `/dev/zero` streams without end into the snapshot: a filled disk, not a
+  hang), but there the question is what the path **RESOLVES to**, since a symlink to a real
+  notes file is the caller's own ordinary artifact — **the same probe answering two different
+  questions would be a defect either way.** The probes are pure `test` builtins: they STAT and
+  never OPEN, so probing cannot itself block. Where a probe CANNOT close the gap it is replaced
+  rather than added to: the `mv`-diagnostic file was a redirection into the derived name
+  `$tmp.err`, and a stat before a redirect only describes a file that no longer has to be the
+  one opened — so it is now `mktemp`, which creates with `O_EXCL` and therefore cannot open a
+  pre-planted entry of any type. **And a test whose subject is a HANG must be BOUNDED and must
+  assert rc != 124 explicitly**: unbounded, a regression does not fail the suite, it hangs it,
+  and the thing that notices is the gate's stall watchdog minutes later.
+  (12) **EXTRACTING A SHARED LIBRARY MOVES A `source` INTO A SCRIPT THAT NEVER HAD ONE, AND
+  THE GUARD WRITTEN FOR IT WAS WEAKER THAN THE ONE THIS SAME CHANGE HAD ALREADY WRITTEN NEXT
+  DOOR.** Pulling the liveness predicates out of `claim-heartbeat.sh` into
+  `lib/process-liveness.sh` gave that script its first `.` — a NEW open, hence a new exposure —
+  and it was guarded `-r` only, while `drive-issue-state.sh`'s guard on the SAME library
+  already required `-f` as well. A FIFO there passed `-r` and the `.` BLOCKED FOREVER
+  (measured: `timeout 10` ⇒ rc 124, **no output at all**), in the script the fleet reaper runs
+  unattended. So: **an extraction's DEDUPLICATION is not complete until the GUARDS around the
+  new dependency are deduplicated too** — the second call site is where the review rounds get
+  lost, exactly as the predicates themselves would have been. `-f` is the whole class in one
+  predicate (false for FIFO, socket, device and directory alike) and FOLLOWS a symlink on
+  purpose, since a symlinked checkout is a legitimate layout.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT
