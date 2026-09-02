@@ -3373,6 +3373,28 @@ obj_sweep_set_latch() {
   obj_sweep_latch_present "$latch"
 }
 
+# obj_sweep_stop_if_latched <latch-path> — ASK THE LATCH QUESTION AND STOP IF THE ANSWER
+# IS YES. Returns 0 (carry on) when the box is not latched; never returns at all when it
+# is, because finalize_exit ends the process.
+#
+# WHY IT IS A FUNCTION CALLED FROM SEVERAL PLACES RATHER THAN ONE CHECK AT THE TOP
+# (#3749 review round 3, item 1a). The question has to be asked again IMMEDIATELY BEFORE
+# every path that lets this lane go on to spawn a worker, because a PEER can latch the
+# box at any moment — including while this lane's own sweep is in flight, which is up to
+# two fsck walks. A lane that swept CLEAN while a peer was recording CORRUPT would
+# otherwise return 0 from a sweep whose answer is already known to be superseded.
+obj_sweep_stop_if_latched() {
+  local latch="$1" latch_ts
+  obj_sweep_latch_present "$latch" || return 0
+  latch_ts="$(head -1 "$latch" 2>/dev/null || true)"
+  [[ "$latch_ts" =~ ^[0-9]+$ ]] || latch_ts="<unrecorded>"
+  notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT (latched)" \
+    "a sweep on this box recorded CORRUPT for the shared git object store every lane here reads. Stopping without re-sweeping. Repair the store, then remove $latch."
+  log "object-store: CORRUPT (cached at $latch_ts by a sweep on this box) — stopping; no worker may certify against a damaged shared store (#3749)."
+  log "object-store: REMEDY — stop every lane on this box and re-obtain the objects from the canonical remote; a local 'git gc'/'git repack' CANNOT repair it. THEN CLEAR THE LATCH: rm -f $latch"
+  finalize_exit "object-store-corrupt" 1
+}
+
 object_store_sweep() {
   local script stamp latch latch_ts now last rc out verdict stamp_ts
   if [[ "$OBJ_SWEEP_INTERVAL_HOURS" -le 0 ]]; then
@@ -3432,17 +3454,13 @@ object_store_sweep() {
   # age-based expiry would resume workers over a still-damaged store; the operator who
   # repairs the store removes the file, and the remedy line below NAMES the path and the
   # command, because a latch nobody can clear bricks the box after the repair.
-  if obj_sweep_latch_present "$latch"; then
-    latch_ts="$(head -1 "$latch" 2>/dev/null || true)"
-    [[ "$latch_ts" =~ ^[0-9]+$ ]] || latch_ts="<unrecorded>"
-    notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT (latched)" \
-      "a sweep on this box recorded CORRUPT for the shared git object store every lane here reads. Stopping without re-sweeping. Repair the store, then remove $latch."
-    log "object-store: CORRUPT (cached at $latch_ts by a sweep on this box) — stopping; no worker may certify against a damaged shared store (#3749)."
-    log "object-store: REMEDY — stop every lane on this box and re-obtain the objects from the canonical remote; a local 'git gc'/'git repack' CANNOT repair it. THEN CLEAR THE LATCH: rm -f $latch"
-    finalize_exit "object-store-corrupt" 1
-  fi
+  obj_sweep_stop_if_latched "$latch"
 
   if [[ -n "$stamp" ]] && [[ $((now - last)) -lt $((OBJ_SWEEP_INTERVAL_HOURS * 3600)) ]]; then
+    # RE-ASKED ON THE THROTTLED PATH TOO. Cheap (one stat), and it keeps ONE rule —
+    # "no return that leads to a spawn without a fresh latch read" — instead of a set of
+    # paths someone has to remember to audit individually.
+    obj_sweep_stop_if_latched "$latch"
     return 0
   fi
   rc=0
@@ -3472,33 +3490,53 @@ object_store_sweep() {
   verdict="${verdict#OBJECT-STORE: verdict }"
   verdict="${verdict%% *}"
 
-  # THE STAMP IS WRITTEN FOR EVERY OUTCOME. It bounds how often this box SPENDS the sweep
-  # — a box that cannot measure (no timeout binary, say) must not re-attempt it every
-  # iteration — and it says nothing about what was found. What a peer lane must not
-  # throttle past is recorded separately, and monotonically, by the latch below.
-  obj_sweep_write_stamp "$stamp"
-
-  if [[ "$rc" -eq 0 && "$verdict" == "VERIFIED" ]]; then
-    log "object-store: VERIFIED — $(printf '%s\n' "$out" | { grep '^OBJECT-STORE: measured ' || true; } | head -1)"
-    return 0
-  fi
+  # THE CORRUPT BRANCH IS TESTED FIRST, AND IT CREATES THE LATCH BEFORE THE THROTTLE
+  # STAMP IS WRITTEN (#3749 review round 3, item 1a).
+  #
+  # THE ORDERING DEFECT THIS FIXES. The stamp used to be written for every outcome
+  # BEFORE this branch ran, so between that write and the latch create there was a
+  # window in which a peer lane saw a FRESH, non-corrupt throttle stamp, skipped its own
+  # sweep for the whole interval, and went on spawning workers over a store this lane
+  # had already found damaged. The window was as long as it took to build the `findings`
+  # string and create a file; it is now empty in that direction, because the latch — the
+  # thing a peer must not throttle past — is in place before anything advertises that
+  # this box has been swept.
   if [[ "$rc" -eq 4 || "$verdict" == "CORRUPT" ]]; then
     local findings
-    findings="$(printf '%s\n' "$out" | { grep -E '^OBJECT-STORE: (finding|object) ' || true; } | head -6 | tr '\n' ';' | cut -c1-600)"
-    # LATCH FIRST, THEN STOP. A failure to persist it is REPORTED, never silent: this
-    # lane stops either way, but without the latch the peers on this box will re-run
-    # their own sweep and rediscover the damage rather than inheriting the verdict, and
-    # an operator reading only this journal would otherwise never learn that.
+    # LATCH FIRST, THEN EVERYTHING ELSE. A failure to persist it is REPORTED, never
+    # silent: this lane stops either way, but without the latch the peers on this box
+    # will re-run their own sweep and rediscover the damage rather than inheriting the
+    # verdict, and an operator reading only this journal would otherwise never learn that.
     if [[ -z "$latch" ]]; then
       log "object-store: the CORRUPT verdict could NOT be latched — this box's shared store could not be resolved, so there is no box-wide file to record it in. Peer lanes will re-sweep and rediscover it (#3749)."
     elif ! obj_sweep_set_latch "$latch"; then
       log "object-store: the CORRUPT verdict could NOT be latched at $latch (unwritable?) — peer lanes will re-sweep and rediscover it rather than inheriting this verdict (#3749)."
     fi
+    # ONLY NOW the throttle stamp: it says "this box paid for a sweep", and a peer
+    # reading it will also read the latch that is already there.
+    obj_sweep_write_stamp "$stamp"
+    findings="$(printf '%s\n' "$out" | { grep -E '^OBJECT-STORE: (finding|object) ' || true; } | head -6 | tr '\n' ';' | cut -c1-600)"
     notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT" \
       "git fsck reports damaged objects in this box's shared git object store — every lane here reads it, so NO gate verdict on this box can be trusted. Stopping. ${findings:-<no findings captured>}"
     log "object-store: CORRUPT — stopping loudly; no worker may certify against a damaged shared store (#3749). ${findings:-<no findings captured>}"
     log "object-store: REMEDY — stop every lane on this box and re-obtain the objects from the canonical remote; a local 'git gc'/'git repack' CANNOT repair it.${latch:+ THEN CLEAR THE LATCH: rm -f $latch}"
     finalize_exit "object-store-corrupt" 1
+  fi
+
+  # THE STAMP IS WRITTEN FOR EVERY OUTCOME. It bounds how often this box SPENDS the
+  # sweep — a box that cannot measure (no timeout binary, say) must not re-attempt it
+  # every iteration — and it says nothing about what was found. What a peer lane must
+  # not throttle past is recorded separately, and monotonically, by the latch above.
+  obj_sweep_write_stamp "$stamp"
+
+  if [[ "$rc" -eq 0 && "$verdict" == "VERIFIED" ]]; then
+    log "object-store: VERIFIED — $(printf '%s\n' "$out" | { grep '^OBJECT-STORE: measured ' || true; } | head -1)"
+    # RE-ASKED AFTER THE SWEEP, BEFORE RETURNING TO THE SPAWN PATH. This lane's own walk
+    # said VERIFIED, but it took up to two fsck bounds to say it, and a PEER may have
+    # latched the box in the meantime. The peer's finding is about the same store and is
+    # strictly newer than this measurement, so it wins.
+    obj_sweep_stop_if_latched "$latch"
+    return 0
   fi
   # UNMEASURED (or no recognised verdict at all): REPORTED, and DELIBERATELY PERMISSIVE.
   # THE WHY, IN CODE (CLAUDE.md #3229). An UNMEASURED sweep is not clean — nothing here
@@ -3517,8 +3555,41 @@ object_store_sweep() {
       "the shared git object store could not be rehashed on this box (rc=$rc) — integrity is UNKNOWN, not clean. The loop continues; fix the cause so the sweep can run."
     OBJ_SWEEP_UNMEASURED_NOTIFIED=1
   fi
+  # Same re-check on the permissive path: UNMEASURED lets this lane carry on, so it is a
+  # return that leads to a spawn and it gets a fresh latch read like every other one.
+  obj_sweep_stop_if_latched "$latch"
   return 0
 }
+
+# THE RESIDUAL WINDOW, STATED PRECISELY BECAUSE IT IS NOT CLOSED (#3749 review round 3,
+# item 1b — DELIBERATELY DEFERRED to its own issue, not papered over).
+#
+# WHAT THE ORDERING ABOVE BUYS: no lane advertises "this box has been swept" before the
+# CORRUPT finding is durable, and no lane returns from this function toward a spawn
+# without having re-read the latch. That strictly shrinks the window; it does not remove
+# it.
+#
+# WHAT REMAINS RACY. The latch read and the worker spawn are two separate operations
+# with no synchronisation between them, so a peer can create the latch in the gap
+# between this lane's last `obj_sweep_stop_if_latched` and the moment its worker
+# actually starts — and that gap is not small: after this function returns, the caller
+# still runs the whole preflight hold loop (load, leftover processes, disk), which can
+# poll for minutes. A peer's sweep completing anywhere inside that stretch is
+# unobserved by this lane.
+#
+# THE WORST OUTCOME, NAMED: ONE worker is spawned on a box that was latched corrupt
+# moments earlier. It is not silent and it is not durable — that lane's NEXT iteration
+# begins with `object_store_sweep`, whose first act is the latch read at the top, so it
+# stops there and its own worker exits at the end of its current issue. Nothing certifies
+# a merge in that window without a full gate, and a full gate on a latched box is exactly
+# what the next iteration refuses.
+#
+# WHY IT IS NOT CLOSED HERE. An atomic "no worker may start after any peer latches"
+# guarantee needs per-store synchronisation shared by the sweep and the spawn decision
+# (a lock held across both, or a spawn-time re-check inside whatever holds that lock) —
+# a redesign of the boundary between this function and the spawn path, not an ordering
+# change. It is split to its own issue. Do NOT describe the race as closed: it is
+# narrowed, and the residual above is what a reader is entitled to know.
 
 # ---------------------------------------------------------------------------
 # Preflight: fail-closed, wait-don't-spin. Returns a hold reason on stdout, or
