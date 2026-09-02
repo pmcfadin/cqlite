@@ -1052,16 +1052,22 @@ lc_whats=(
   'a live peel inside a COMMAND SUBSTITUTION on a local declaration (the round-3 High)'
   'an UNDECLARED read SMUGGLED IN FRONT of an allowed live call (roborev 347 item 2)'
 )
+# PORTABILITY (roborev job 366): a newline in a sed REPLACEMENT is written as a backslash
+# followed by a LITERAL newline, which POSIX mandates for splitting a line. A GNU-style `\n`
+# escape here emits a literal `n` under BSD/macOS sed, which silently MALFORMS the plant --
+# the mutation then fails its `_tooks` assertion and reds this suite on a correct tree.
 lc_progs=(
   's|^\(  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet \)HEAD$|\1HEAD~1|'
   's|^\(  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet \)HEAD$|\1"$_cs_planted_rev"|'
-  's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _cs_live_git --no-replace-objects -C "$REPO_ROOT" \\\n    rev-parse --verify --quiet "HEAD^{commit}"|'
+  's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _cs_live_git --no-replace-objects -C "$REPO_ROOT" \\\
+    rev-parse --verify --quiet "HEAD^{commit}"|'
   's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git --git-dir="$REPO_ROOT/.git" rev-parse --verify --quiet "HEAD^{commit}"|'
   's|-C "\$_CS_READ_DIR" rev-parse --verify --quiet "\${head_unpeeled}|-C "$_CS_READ_DIR" -C "$REPO_ROOT" rev-parse --verify --quiet "${head_unpeeled}|'
   's|-C "\$_CS_READ_DIR" merge-base --is-ancestor|-C "$_CS_READ_DIR" --git-dir="$REPO_ROOT/.git" merge-base --is-ancestor|'
   's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _cs_live_git_quiet --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}"|'
   's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  $CS_PLANTED_GIT_BIN --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}"|'
-  's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  local _cs_planted_sha=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}")\n\&|'
+  's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  local _cs_planted_sha=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}")\
+\&|'
   's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _cs_planted_undeclared_read; _cs_live_git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet HEAD|'
 )
 lc_tooks=(
@@ -1316,13 +1322,19 @@ rd_whats=(
   'the refusal reverted to a DENY-LIST of bad states instead of an affirmative test'
   'the refusal moved back DOWN to the peel, behind four object reads (the job-347 regression)'
 )
+# PORTABILITY (roborev job 366): a newline in a sed REPLACEMENT is written as a backslash
+# followed by a LITERAL newline, which POSIX mandates for splitting a line. A GNU-style `\n`
+# escape here emits a literal `n` under BSD/macOS sed, which silently MALFORMS the plant --
+# the mutation then fails its `_tooks` assertion and reds this suite on a correct tree.
 rd_progs=(
   's|^  _CS_READ_DIR="\$_CS_READ_DIR_UNSET"; _CS_READ_ENV=(); _CS_HEAD_SHA=""$|  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=(); _CS_HEAD_SHA=""|'
   's|^  _CS_READ_DIR="\$_CS_READ_DIR_UNSET"; _CS_READ_ENV=(); _CS_HEAD_SHA=""$|  _CS_READ_DIR=""; _CS_READ_ENV=(); _CS_HEAD_SHA=""|'
-  's|^  _CS_READ_DIR="\$csdir/repo"$|  : "$(git --no-replace-objects -C "$_CS_READ_DIR" cat-file -e planted-by-the-selftest 2>/dev/null)"\n  _CS_READ_DIR="$csdir/repo"|'
+  's|^  _CS_READ_DIR="\$csdir/repo"$|  : "$(git --no-replace-objects -C "$_CS_READ_DIR" cat-file -e planted-by-the-selftest 2>/dev/null)"\
+  _CS_READ_DIR="$csdir/repo"|'
   '/_cs_read_dir_isolated_or_refuse "/d'
   's|if \[ -n "\$_CS_SCRATCH_DIR" \] && \[ "\$_CS_READ_DIR" = "\$_CS_SCRATCH_DIR/repo" \]; then|if [ "$_CS_READ_DIR" != "$REPO_ROOT" ]; then|'
-  '/_cs_read_dir_isolated_or_refuse "/d; s|^\(    \)_CS_HEAD_SHA=\$(_component_set_bounded|\1if _cs_read_dir_isolated_or_refuse "peel HEAD"; then return 0; fi\n\1_CS_HEAD_SHA=$(_component_set_bounded|'
+  '/_cs_read_dir_isolated_or_refuse "/d; s|^\(    \)_CS_HEAD_SHA=\$(_component_set_bounded|\1if _cs_read_dir_isolated_or_refuse "peel HEAD"; then return 0; fi\
+\1_CS_HEAD_SHA=$(_component_set_bounded|'
 )
 rd_tooks=(
   '^  _CS_READ_DIR="\$REPO_ROOT"; _CS_READ_ENV'
