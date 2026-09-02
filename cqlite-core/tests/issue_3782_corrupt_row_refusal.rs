@@ -16,6 +16,11 @@
 //! | `iterate_all_partitions_for_compaction`  | 100     | `Ok`, **102** rows — 2 partition keys LOST, 3 FABRICATED |
 //! | `stream_all_partitions_for_compaction`   | 100     | `Ok`, 102 rows |
 //!
+//! Those four numbers were measured on the BIG fixture with the byte flipped at
+//! the mutation site this harness still pins (`flip_offset_in_needle: 0`), so
+//! they stay reproducible; the BTI row of the story is the separate case below,
+//! measured at 120 of 468.
+//!
 //! The compaction number is the dangerous one: the row COUNT goes UP while real
 //! data is lost, so no count-based check can see it, and compaction would write
 //! that loss back to disk permanently.

@@ -49,6 +49,15 @@ pub struct FixtureSpec {
     pub table: &'static str,
     pub schema_file: &'static str,
     pub needles: &'static [&'static [u8]],
+    /// Which byte OF THE NEEDLE to flip. Stated per fixture rather than derived,
+    /// because the two fixtures need different answers and a rule that produced
+    /// both would be cleverness in a place that has to stay obvious: BIG's
+    /// needles are bare values, so byte 0 is inside the value (and is the site
+    /// the pre-fix numbers in `issue_3782_corrupt_row_refusal.rs` were measured
+    /// at, so it is pinned); the BTI needle carries a 2-byte length prefix, so
+    /// byte 0 would corrupt the LENGTH — a different corruption class, framing
+    /// rather than value — and the last byte is used instead.
+    pub flip_offset_in_needle: usize,
 }
 
 /// `test_basic.composite_key_table` — Cassandra 5.0 `nb`/BIG, LZ4,
@@ -58,6 +67,7 @@ pub const BIG_COMPOSITE: FixtureSpec = FixtureSpec {
     table: FIX_TABLE,
     schema_file: SCHEMA_FILE,
     needles: NEEDLES,
+    flip_offset_in_needle: 0,
 };
 
 /// `test_da.multiclustering_table` — Cassandra 5.0 `da`/BTI, LZ4,
@@ -80,6 +90,8 @@ pub const BTI_MULTICLUSTERING: FixtureSpec = FixtureSpec {
     table: "multiclustering_table",
     schema_file: "multiclustering-table-bti.cql",
     needles: &[b"\x00\x17charlie-extended-bucket"],
+    // Last byte: inside the VALUE, past the 2-byte length prefix.
+    flip_offset_in_needle: b"\x00\x17charlie-extended-bucket".len() - 1,
 };
 
 /// A staged control/mutated pair. Each `*_root` is an ingestion data root — the
@@ -202,7 +214,7 @@ fn mutate_text_literal(dir: &Path, spec: &FixtureSpec) -> (usize, usize) {
         // CompressionInfo.db), so the reported offset is the position within
         // the whole stitched data section.
         let chunk_base = i * chunk_length;
-        for flip_at in candidate_literal_sites(&data[lo..hi], spec.needles) {
+        for flip_at in candidate_literal_sites(&data[lo..hi], spec) {
             let abs = lo + flip_at;
             let orig = data[abs];
             if !orig.is_ascii_graphic() {
@@ -240,18 +252,24 @@ fn mutate_text_literal(dir: &Path, spec: &FixtureSpec) -> (usize, usize) {
 }
 
 /// Compressed-chunk byte positions worth flipping: for each needle that occurs
-/// EXACTLY ONCE in the compressed chunk (hence verbatim in a literal), the last
-/// byte of its VALUE. Needles may carry a length prefix to pin a field, so the
-/// last byte is used rather than the first — it is inside the value for both
-/// spellings.
-fn candidate_literal_sites(comp: &[u8], needles: &[&[u8]]) -> impl Iterator<Item = usize> {
+/// EXACTLY ONCE in the compressed chunk (hence verbatim in a literal), the byte
+/// at the spec's [`FixtureSpec::flip_offset_in_needle`].
+fn candidate_literal_sites(comp: &[u8], spec: &FixtureSpec) -> impl Iterator<Item = usize> {
     let mut sites: Vec<usize> = Vec::new();
-    for needle in needles {
+    for needle in spec.needles {
+        assert!(
+            spec.flip_offset_in_needle < needle.len(),
+            "{}.{}: flip offset {} is outside its {}-byte needle",
+            spec.keyspace,
+            spec.table,
+            spec.flip_offset_in_needle,
+            needle.len()
+        );
         let hits: Vec<usize> = (0..comp.len().saturating_sub(needle.len()))
             .filter(|&k| &comp[k..k + needle.len()] == *needle)
             .collect();
         if let [k] = hits.as_slice() {
-            sites.push(k + needle.len() - 1);
+            sites.push(k + spec.flip_offset_in_needle);
         }
     }
     sites.into_iter()
