@@ -6880,9 +6880,33 @@ _census_kind() {
     # this table exists to close. It is a HOOK: it exercises the tree-integrity guard and
     # verifies nothing about the codebase, so there is no subject to count.
     tree-selftest)   printf 'gap:the #2926 tree-integrity self-test hook exercises the guard and has no codebase subject to count' ;;
-    # The DYNAMIC --delta entries. Both delete their log before returning and both
-    # already hold an exact, affirmative subject count, so they record it themselves.
-    node-tests)      printf 'self:changed jest test file(s)' ;;
+    # ---- The DYNAMIC --delta entries, and the two of them are NOT the same case.
+    #
+    # node-tests: jest's OWN `Tests:` tally, through the SAME indirect:jest path
+    # node-bindings uses (roborev job 383). It was `self:` counting `n_targets` — THE NUMBER
+    # OF CHANGED FILES I SELECTED — which is this issue's own thesis violated inside its fix:
+    # "a duration is a proxy for work; a count is the work", and a count of INPUTS is just a
+    # better proxy. It was wrong in BOTH directions at once: an all-skipped run of many files
+    # censused as many and verified nothing (jest exits 0 when every selected test is
+    # skipped), while a changed HELPER runs the WHOLE suite and censused as one "file". The
+    # first half of the old `self:` rationale — "it deletes its log, so no log-reading
+    # measurer could census it" — was an implementation choice, not a constraint: the lane
+    # now writes to $LOG_DIR like every other component and the log is kept.
+    node-tests)      printf 'indirect:jest' ;;
+    # shell-selftests: the subject genuinely IS the script, and this is the RULING, recorded
+    # here so it is not re-asked (roborev job 383). Two facts decide it, and the first is the
+    # one that distinguishes this lane from node-tests:
+    #   (1) SELECTED == EXECUTED. `_run_shell_selftest_files` invokes every file it is handed,
+    #       unconditionally — there is no skip layer, so the count is of executions, not of
+    #       selections. jest's is a count of selections, which is exactly why jest needed its
+    #       own tally instead.
+    #   (2) There is NO uniform per-script assertion tally to prefer. These are arbitrary
+    #       shell guards whose terminal lines differ (`passed=N failed=M`, `N passed, M
+    #       failed`, `ok - …`); deriving one number across them would be the curation this
+    #       census refuses, and it is the same reason `tooling-tests` is a declared gap.
+    # DECLARED RESIDUAL: a script that runs and asserts nothing is invisible to this count —
+    # the census records a COUNT, not a TRUTH (the #1716/#3522 precedent), and each script's
+    # own case floor is what covers that.
     shell-selftests) printf 'self:changed scripts/tests/*.sh executed' ;;
     # ---- DECLARED GAPS (#3625 phase 1). Each prints its reason on every run.
     fmt)            printf 'gap:cargo fmt --all --check emits no per-file tally to count' ;;
@@ -18240,8 +18264,12 @@ run_delta_node_tests() {
   n_targets=$(printf '%s\n' "$targets" | awk 'NF' | wc -l | tr -d ' ')
   echo ">>> [node-tests] jest on $n_targets changed bindings/node/__test__ file(s) (already-built module; no cargo build)"
   start=$(date +%s)
+  # $LOG_DIR, not a mktemp this function deletes (roborev job 383): the census reads jest's
+  # own `Tests:` tally out of this file, so it has to survive the lane — and keeping it puts
+  # node-tests' output in the `logs:` bundle beside every other component's, instead of
+  # discarding the evidence right after tailing 40 lines of it.
   local log jest_filter=""
-  log=$(mktemp "${TMPDIR:-/tmp}/agent-gate-nodedelta.XXXXXX")
+  log="$LOG_DIR/node-tests.log"
   [ "$whole" -eq 0 ] && jest_filter="${filters[*]}"
   if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" JEST_FILTER="$jest_filter" bash -c '
       set -uo pipefail
@@ -18263,14 +18291,16 @@ run_delta_node_tests() {
     status=PASS
   else
     status=FAIL; OVERALL=FAIL
-    echo "--- [node-tests] FAILED; last 40 lines ---"; tail -40 "$log"; echo "--- end of node-tests output ---"
+    echo "--- [node-tests] FAILED; last 40 lines of $log ---"; tail -40 "$log"; echo "--- end of node-tests output ---"
   fi
-  rm -f "$log"
   end=$(date +%s)
-  # #3625: this lane DELETES its log, so no log-reading measurer could ever census it —
-  # but it already holds an exact affirmative subject count, so it records its own
-  # (census kind `self:` in _census_kind).
-  _census_declare node-tests "$n_targets" "changed jest test file(s)"
+  # #3625: no _census_declare here any more (roborev job 383). The census is jest's OWN
+  # `Tests:` tally, measured from the log above through the SAME indirect:jest path
+  # node-bindings uses — so a run in which every selected test was SKIPPED measures ZERO and
+  # becomes VACUOUS, where counting the changed files would have reported a confident
+  # `COUNT n` for a suite that verified nothing. `n_targets` remains the DELTA_EXECUTORS
+  # figure, which is a statement about what was dispatched and is correct as one.
+  #
   # …and COUPLE it (#3625 census audit BLOCKER 2). This used to push the RAW status, so a
   # ZERO census rendered `{verified NOTHING: …}` beside a PASS, was counted as VACUOUS on
   # the aggregate line, and the run stayed GREEN. Unreachable today only because this lane

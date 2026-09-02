@@ -63,6 +63,7 @@ for fn in _ansi_stripped_log _census_sidecar _census_kind _census_write _census_
           _census_driver_tally _census_measure_kind _census_measure \
           _census_scoped_record _python_tier_ran \
           _census_status_for _census_finalize _census_classify _census_record _census_annotate \
+          _status_is_nonfailing run_delta_node_tests \
           census_summary_line _status_is_nonfailing; do
   src=$(sed -n "/^$fn() {/,/^}$/p" "$GATE")
   if [ -z "$src" ]; then
@@ -370,25 +371,25 @@ case "$got" in
   *) bad "D11: got '$got'" ;;
 esac
 # A `self:` component that recorded nothing is a RECORDING GAP, named — never a count.
-got=$(_census_measure node-tests PASS)
+got=$(_census_measure shell-selftests PASS)
 case "$got" in
-  'NOT-MEASURED'*"'node-tests' records its own subject count and recorded none"*) ok "D12: a self: component with no record is NOT-MEASURED naming itself, not a licence to claim a count" ;;
+  'NOT-MEASURED'*"'shell-selftests' records its own subject count and recorded none"*) ok "D12: a self: component with no record is NOT-MEASURED naming itself, not a licence to claim a count" ;;
   *) bad "D12: got '$got'" ;;
 esac
-_census_declare node-tests 4 'changed jest test file(s)'
-got=$(_census_measure node-tests PASS)
+_census_declare shell-selftests 4 'changed scripts/tests/*.sh executed'
+got=$(_census_measure shell-selftests PASS)
 case "$got" in
-  'COUNT 4 changed jest test file(s)') ok "D13: _census_declare records a self: component's own affirmative count" ;;
+  'COUNT 4 changed scripts/tests/*.sh executed') ok "D13: _census_declare records a self: component's own affirmative count" ;;
   *) bad "D13: got '$got'" ;;
 esac
-_census_declare node-tests 0 'changed jest test file(s)'
-got=$(_census_measure node-tests PASS)
+_census_declare shell-selftests 0 'changed scripts/tests/*.sh executed'
+got=$(_census_measure shell-selftests PASS)
 case "$got" in
-  'ZERO changed jest test file(s)') ok "D14: _census_declare records a self-reported 0 as ZERO — an affirmative measurement of nothing is still nothing" ;;
+  'ZERO changed scripts/tests/*.sh executed') ok "D14: _census_declare records a self-reported 0 as ZERO — an affirmative measurement of nothing is still nothing" ;;
   *) bad "D14: got '$got'" ;;
 esac
-_census_declare node-tests "not-a-number" 'changed jest test file(s)'
-got=$(_census_measure node-tests PASS)
+_census_declare shell-selftests "not-a-number" 'changed scripts/tests/*.sh executed'
+got=$(_census_measure shell-selftests PASS)
 case "$got" in
   'NOT-MEASURED the component offered a non-numeric subject count') ok "D15: a non-numeric self-reported count is NOT-MEASURED, never coerced to 0 (which would be a fabricated vacuity) and never to a pass" ;;
   *) bad "D15: got '$got'" ;;
@@ -919,15 +920,15 @@ fi
 # BEHAVIOURAL: the composition the wiring performs. A ZERO census must turn a PASS into
 # VACUOUS and a VACUOUS must be a failing status — asserted on the REAL functions.
 LOG_DIR="$tmp/selflogs"; mkdir -p "$LOG_DIR"
-_census_declare node-tests 0 'changed jest test file(s)'
-zst=$(_census_finalize node-tests PASS)
+_census_declare shell-selftests 0 'changed scripts/tests/*.sh executed'
+zst=$(_census_finalize shell-selftests PASS)
 if [ "$zst" = VACUOUS ] && ! _status_is_nonfailing "$zst"; then
   ok "L2: a self: lane's ZERO census turns its PASS into VACUOUS, and VACUOUS is a FAILING status — so the flip the wiring performs really fails the run"
 else
   bad "L2: a ZERO self: census yielded '$zst' (want VACUOUS, and it must be failing)"
 fi
-_census_declare node-tests 4 'changed jest test file(s)'
-nst=$(_census_finalize node-tests PASS)
+_census_declare shell-selftests 4 'changed scripts/tests/*.sh executed'
+nst=$(_census_finalize shell-selftests PASS)
 if [ "$nst" = PASS ]; then
   ok "L3 (control): a self: lane with a real count keeps its PASS — L2 is the ZERO, not the coupling reddening everything"
 else
@@ -1431,7 +1432,7 @@ s_cells=0
 s_measure_cells=0
 # One representative component per declared kind, DERIVED so a new kind cannot skip the
 # matrix: every kind _census_kind can return must have a subject here.
-s_subjects='fmt:gap tombstones-scan:libtest feature-iso-parquet:compile integration-tests:both python-bindings:indirect node-tests:self scoped-tests:runtime a-brand-new-component:undeclared'
+s_subjects='fmt:gap tombstones-scan:libtest feature-iso-parquet:compile integration-tests:both python-bindings:indirect shell-selftests:self scoped-tests:runtime a-brand-new-component:undeclared'
 for s_pair in $s_subjects; do
   s_comp=${s_pair%%:*}; s_kindname=${s_pair##*:}
   for s_st in PASS FAIL SKIP VACUOUS; do
@@ -1508,6 +1509,157 @@ if [ "${#s_struct[@]}" -eq 0 ]; then
 else
   bad "S4: ${s_struct[*]}"
 fi
+# ---------------------------------------------------------------------------
+# (T) node-tests CENSUSES THE WORK, NOT THE INPUTS — roborev job 383.
+#
+# THE DEFECT, and it is this issue's own thesis violated inside its fix. #3625 says "a
+# duration is a PROXY for work; a COUNT is the work" — and `node-tests` was censusing
+# `n_targets`, THE NUMBER OF CHANGED FILES THE LANE SELECTED, which is simply a better
+# proxy. It was wrong in BOTH directions at once:
+#   * jest EXITS 0 when every selected test is skipped, so an all-skipped run of many files
+#     reported a confident `COUNT n` and kept its PASS — the vacuous run this whole
+#     subsystem exists to catch, waved through by the detector;
+#   * a changed HELPER (a non-`*.test.js` file) runs the WHOLE suite and was censused as
+#     ONE "jest test file".
+#
+# THE FIX REUSES THE EXISTING TALLY rather than adding a second parser: the lane is now
+# `indirect:jest`, the same path `node-bindings` takes, so there is ONE implementation of
+# "what did jest report" — the rounds before this one were all about two implementations of
+# one question drifting. The old `self:` rationale ("it deletes its log, so no log-reading
+# measurer could census it") was an IMPLEMENTATION CHOICE, not a constraint; the lane writes
+# to $LOG_DIR now and keeps the log.
+#
+# DRIVEN THROUGH THE REAL FUNCTION. `_delta_node_targets` is stubbed (it is the diff
+# classifier, not the subject) and `node` is a PATH shim emitting a chosen jest summary —
+# which is what makes the two arms differ in exactly ONE property, the tally jest reports.
+# Everything else runs: the real filter derivation, the real `bash -c` body, the real
+# `_census_finalize`, the real `_status_is_nonfailing` OVERALL flip.
+# ---------------------------------------------------------------------------
+t_root="$tmp/nodedelta"; mkdir -p "$t_root/bindings/node/scripts"
+: > "$t_root/bindings/node/scripts/generate-loader.mjs"
+t_shimdir="$tmp/nodeshim"; mkdir -p "$t_shimdir"
+cat > "$t_shimdir/node" <<'NODESHIM'
+#!/usr/bin/env bash
+# Stands in for BOTH `node scripts/generate-loader.mjs` (silent, rc 0) and
+# `node --expose-gc ./node_modules/jest/bin/jest.js …`, which prints the summary the case
+# chose. jest exits 0 for an all-skipped run, so this shim does too — that is the property
+# under test, not an accident of the double.
+case "$*" in
+  *generate-loader*) exit 0 ;;
+esac
+printf '%s\n' "${CQLITE_TEST_JEST_SUMMARY:?}"
+exit 0
+NODESHIM
+chmod +x "$t_shimdir/node"
+
+# t_delta_node <jest-summary> ; echoes "<pushed-status>|<OVERALL>|<census state>"
+t_delta_node() {
+  (
+    _delta_node_targets() { printf '%s\n' 'bindings/node/__test__/a.test.js'; printf '%s\n' 'bindings/node/__test__/b.test.js'; }
+    REPO_ROOT="$t_root"
+    LOG_DIR="$tmp/nodedelta-logs"; mkdir -p "$LOG_DIR"
+    rm -f "$LOG_DIR/node-tests.log" "$LOG_DIR/node-tests.census"
+    CQLITE_DATASETS_ROOT=""
+    DELTA_EXECUTORS=""
+    OVERALL=PASS
+    NAMES=(); STATUSES=(); TIMES=()
+    CQLITE_TEST_JEST_SUMMARY="$1"
+    export CQLITE_TEST_JEST_SUMMARY
+    PATH="$t_shimdir:$PATH"
+    run_delta_node_tests 'bindings/node/__test__/a.test.js' >/dev/null 2>&1
+    printf '%s|%s|%s' "${STATUSES[0]:-(none)}" "$OVERALL" "$(_census_record node-tests "${STATUSES[0]:-}")"
+  )
+}
+t_skipped=$(t_delta_node 'Test Suites: 2 skipped, 2 total
+Tests:       12 skipped, 12 total')
+case "$t_skipped" in
+  'VACUOUS|FAIL|ZERO jest tests'*)
+    ok "T1 (job 383): an ALL-SKIPPED delta node run — which jest exits 0 for — measures ZERO, is pushed as VACUOUS and FAILs the run. Censusing the 2 changed files it selected would have reported 'COUNT 2' and kept the PASS" ;;
+  *) bad "T1: got '$t_skipped' (want VACUOUS|FAIL|ZERO …)" ;;
+esac
+t_real=$(t_delta_node 'Test Suites: 2 passed, 2 total
+Tests:       1 skipped, 41 passed, 42 total')
+case "$t_real" in
+  'PASS|PASS|COUNT 41 jest tests passed')
+    ok "T2 (positive control): the SAME lane, differing in ONE property — the tally jest reports — measures 41 tests passed and keeps its PASS. T1 is the census, not the harness" ;;
+  *) bad "T2: got '$t_real' (want PASS|PASS|COUNT 41 jest tests passed)" ;;
+esac
+# THE SECOND DIRECTION of the same defect: a changed HELPER runs the WHOLE suite. The census
+# must report what jest ran, not the one file that triggered it.
+t_helper=$(
+  (
+    _delta_node_targets() { printf '%s\n' 'bindings/node/__test__/setup.js'; }
+    REPO_ROOT="$t_root"
+    LOG_DIR="$tmp/nodedelta-logs2"; mkdir -p "$LOG_DIR"
+    CQLITE_DATASETS_ROOT=""; DELTA_EXECUTORS=""; OVERALL=PASS
+    NAMES=(); STATUSES=(); TIMES=()
+    CQLITE_TEST_JEST_SUMMARY='Tests:       0 skipped, 137 passed, 137 total'
+    export CQLITE_TEST_JEST_SUMMARY
+    PATH="$t_shimdir:$PATH"
+    run_delta_node_tests 'bindings/node/__test__/setup.js' >/dev/null 2>&1
+    printf '%s' "$(_census_record node-tests "${STATUSES[0]:-}")"
+  )
+)
+case "$t_helper" in
+  'COUNT 137 jest tests passed')
+    ok "T3: ONE changed helper runs the WHOLE suite, and the census says 137 tests — not the '1 jest test file' the input count would have claimed. The proxy was wrong in both directions; the tally is wrong in neither" ;;
+  *) bad "T3: got '$t_helper' (want COUNT 137 jest tests passed)" ;;
+esac
+# The declaration must be the SHARED jest path, not a second parser.
+t_kind=$(_census_kind node-tests) || t_kind='(undeclared)'
+if [ "$t_kind" = 'indirect:jest' ] && [ "$(_census_kind node-bindings)" = 'indirect:jest' ]; then
+  ok "T4: node-tests and node-bindings both declare indirect:jest — ONE implementation of 'what did jest report', which is what the previous rounds were spent on"
+else
+  bad "T4: node-tests is '$t_kind' and node-bindings is '$(_census_kind node-bindings)' — the two jest lanes do not share a tally"
+fi
+# …and the lane must KEEP its log, or the measurer has nothing to read.
+t_body=$(sed -n '/^run_delta_node_tests() {/,/^}$/p' "$GATE")
+t_bad=()
+grep -q 'log="$LOG_DIR/node-tests.log"' <<<"$t_body" || t_bad+=("does-not-log-into-LOG_DIR")
+grep -qE '^[[:space:]]*rm -f "\$log"' <<<"$t_body" && t_bad+=("still-deletes-its-log-before-the-census-can-read-it")
+# COMMENT-BLIND: the body now carries a comment EXPLAINING why the declare is gone, and a
+# bare substring test would read that explanation as the thing it forbids — the artifact
+# describing the rule becoming a violation of it (#3312's shape, and the same reason this
+# repo's other structural scans strip comments first).
+grep -vE '^[[:space:]]*#' <<<"$t_body" | grep -q '_census_declare' \
+  && t_bad+=("still-declares-an-input-count-instead-of-measuring-the-work")
+if [ "${#t_bad[@]}" -eq 0 ]; then
+  ok "T5: the lane writes its jest output to \$LOG_DIR and keeps it, and no longer self-declares an input count"
+else
+  bad "T5: ${t_bad[*]}"
+fi
+
+# ---------------------------------------------------------------------------
+# (U) THE shell-selftests RULING — stated, not assumed (roborev job 383).
+#
+# The other `self:` lane counts SCRIPTS EXECUTED, and the question "is that the same defect"
+# deserves an answer that lives somewhere, not a seventh reviewer asking it. The position,
+# and the two facts it rests on:
+#   (1) SELECTED == EXECUTED. `_run_shell_selftest_files` invokes every file it is handed,
+#       unconditionally — no skip layer, no filter. That is the fact that distinguishes it
+#       from node-tests, whose count was of SELECTIONS while jest decided separately how many
+#       to run.
+#   (2) There is no uniform per-script assertion tally to prefer instead; deriving one across
+#       heterogeneous shell guards would be the curation this census refuses.
+# So the subject is genuinely the script. DECLARED RESIDUAL, recorded rather than hidden: a
+# script that runs and asserts nothing is invisible to this count — the census records a
+# COUNT, not a TRUTH.
+# ---------------------------------------------------------------------------
+u_runner=$(sed -n '/^_run_shell_selftest_files() {/,/^}$/p' "$GATE")
+if [ -z "$u_runner" ]; then
+  bad "U1: _run_shell_selftest_files not found — the ruling's first premise cannot be checked"
+elif grep -qE '^[[:space:]]*(if )?bash "\$REPO_ROOT/\$f"' <<<"$u_runner" \
+     && ! grep -qiE 'skip|filter|continue[[:space:]]*$' <<<"$(grep -v '\[ -n "\$f" \]' <<<"$u_runner")"; then
+  ok "U1 (the ruling's premise, MEASURED not assumed): _run_shell_selftest_files invokes every file it is handed with no skip or filter layer — so for this lane selected == executed, which is exactly what was NOT true of node-tests"
+else
+  bad "U1: _run_shell_selftest_files has grown a skip/filter path — selected != executed, so 'scripts executed' is now an input count and this lane needs node-tests' treatment"
+fi
+u_decl=$(sed -n '/^_census_kind() {/,/^}$/p' "$GATE")
+if grep -q 'SELECTED == EXECUTED' <<<"$u_decl" && grep -q 'DECLARED RESIDUAL' <<<"$u_decl"; then
+  ok "U2: the ruling — why this lane's subject IS the script, and what it does not cover — is recorded AT THE DECLARATION, where the next reader of _census_kind will find it"
+else
+  bad "U2: the shell-selftests ruling is not recorded at _census_kind, so the question has no answer in the code"
+fi
 echo
 echo "component census guard: $PASS passed, $FAIL failed"
 # A COUNT FLOOR beside the abort trap (the idiom of test_agent_gate_summary.sh and
@@ -1515,7 +1667,7 @@ echo "component census guard: $PASS passed, $FAIL failed"
 # extraction that broke, a subshell dying quietly — shrinks the subject set WITHOUT
 # aborting, and "failed: 0" over a shrunken set is the vacuous pass this whole file is
 # about. Set just below the full-host figure so it reds on a structural loss.
-CENSUS_CASE_FLOOR=84
+CENSUS_CASE_FLOOR=90
 CENSUS_REACHED_END=1
 if [ $((PASS + FAIL)) -lt "$CENSUS_CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): sections are being skipped or dying silently, and a "0 failed" over a shrunken subject set certifies nothing.\n' \
