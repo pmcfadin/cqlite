@@ -160,14 +160,14 @@ because the failure it demonstrates is the one this document is about.
 | `both` | 1 | integration-tests |
 | `runtime:<why>` | 1 | scoped-tests — no statically correct kind; it records what the diff ROUTED to |
 | `indirect:<driver>` | 3 | python-bindings (pytest), node-bindings (jest), node-tests (jest) |
-| `emitted` | 2 | file-size, pub-surface — the guard prints `AGENT-GATE-CENSUS: <n> <unit>` and the census reads it |
 | `self:<unit>` | 1 | shell-selftests — selected == executed, and no per-script tally exists to prefer |
-| `gap:<reason>` | 12 | fmt, clippy, all-features-check, oom-audit, parity-report, operator-metrics-doc, smoke, roborev-lints, binding-unwind-profile, delivery-telemetry, tooling-tests, tree-selftest |
+| `gap:<reason>` | 14 | fmt, clippy, all-features-check, oom-audit, parity-report, operator-metrics-doc, smoke, roborev-lints, binding-unwind-profile, delivery-telemetry, tooling-tests, tree-selftest |
 
 > **These counts are DERIVED, and the derivation is the authority, not this table**: case A2
 > of `scripts/tests/test_agent_gate_census.sh` prints them from the shipped `_census_kind` on
 > every run, and the line above was copied from its output —
-> `libtest=18 compile=3 both=1 self=1 indirect=3 runtime=1 emitted=2 gap=12`. A number written
+> `libtest=18 compile=3 both=1 self=1 indirect=3 runtime=1 gap=14` (the `emitted` lanes were
+> REVERTED — see the final section). A number written
 > in prose decays exactly like a stale comment.
 
 Every `libtest`/`compile`/`both` declaration was verified AT ITS CALL SITE to write its
@@ -176,7 +176,7 @@ cargo output into `$LOG_DIR/<name>.log` — directly, via `run_component`'s redi
 `record_result`. A mis-declaration is the one failure mode this subsystem must not have: it
 would make a legitimately green component measure `ZERO` and read `VACUOUS`.
 
-The 12 gaps are a real, declared reduction in coverage. They print their reason on every
+The 14 gaps are a real, declared reduction in coverage. They print their reason on every
 run and are counted separately on the aggregate `census:` line as `N DECLARED-GAP
 (RECOGNISED)`; none of them is one of the components the issue's two-run table names.
 
@@ -817,3 +817,62 @@ Every command substitution in the `emitted`-lane code, and how its failure is ha
 **No fourth instance found.** The one adjacent item is already declared residual 18 (a run whose
 base ref is unavailable degrades to advisory while the census still counts the files it measured
 — the count stays true, it just does not distinguish ratcheted from advisory).
+
+---
+
+## REVERTED: the `emitted` lanes (`file-size`, `pub-surface`) — back to declared gaps
+
+### The paragraph for #3162
+
+> **`emitted` cannot be shipped for `file-size` until the ratchet's failure semantics are
+> decided.** Two lanes were added as a post-audit scope addition — `file-size` and
+> `pub-surface`, chosen because each already walks a subject set and knows its count — and they
+> produced **four consecutive Medium review findings**, all one family, *an unmeasured input
+> taking the permissive branch*:
+> 1. the count was derived from `[ -f "$path" ]`, i.e. from **existence, not measurement**, so an
+>    unreadable selected file was reported as measured (job 389);
+> 2. `git diff`'s **exit status was discarded**, so a failed enumeration was indistinguishable
+>    from an empty diff and censused as `NO-SUBJECT` (job 396) — the named `1699-find-tristate`
+>    shape, which the existing lint missed because **its subject is the literal `find` while the
+>    shape is command-agnostic**;
+> 3. the `NOT-MEASURED` states from (1) and (2) preserve `PASS`, so the ratchet can pass having
+>    examined none or part of its subject (job 397);
+> 4. and the `NO-SUBJECT` form itself exists only because the first draft would have reddened
+>    **every docs- or scripts-only `--lite` round** — `file-size`'s subject is the *changed* `.rs`
+>    files, and most diffs change none.
+>
+> Finding 3's proper remedy is to **FAIL `file-size` when a selected `.rs` file cannot be read**.
+> That changes the RATCHET's failure semantics for every diff — the ratchet has *always* silently
+> skipped such a file — and carries its own risk of reddening correct input (a file deleted in the
+> diff, a symlink, a transient lock). It is a real decision, it needs its own measurement, and it
+> is not the census's to make. **Sequence the ratchet decision first; `emitted` for this lane is
+> downstream of it.** `pub-surface` is cleaner (its guard already refuses a crate root with no
+> unconditional declarations, so its zero is real vacuity) and could be done alone — but it was
+> only ever worth ~1 of 400 observed `PASS (0s)` rows, so on its own it does not pay for a round.
+>
+> Also worth carrying: **adding a line to a guard's stdout is a change to an INTERFACE.** Doing
+> `emitted` broke two consumers that nobody thought of as parsers — `test_pub_surface_guard.sh`'s
+> unanchored extraction (which failed a gate of record) and `test_agent_gate_file_size_log.sh`'s
+> pinned emit count. Nothing mechanically warns that a guard's output has consumers.
+
+### The boundary of the revert
+
+**Removed:** `check-pub-surface.sh`'s contract line; `file-size`'s census emits and their
+`files_rc`/`n_selected`/`n_scanned`/`n_uncounted` plumbing (`run_file_size` is now **byte-identical
+to its pre-`emitted` shape**, verified by diff); the `emitted` kind, `_census_emitted_tally`, the
+`NO-SUBJECT` contract form; and their guard cases (census section V, file-size case14/case15).
+The machinery went with the lanes because **with nothing declaring `emitted` it would be a guard
+with an empty subject set, which greens vacuously** — the shape this change exists to remove.
+
+**Checked, not assumed — one part STAYS:** the `NOT-APPLICABLE` state and the aggregate's
+`no-subject (PASSed; …)` bucket are reached by the surviving `runtime:` path —
+`_census_scoped_record` writes them when a diff routes only to a python tier that did not run.
+Q1's `PASS × NOT-APPLICABLE → no-subject` cell uses `scoped-tests` and still exercises it.
+
+**Kept:** every gap reason pointing at the OPEN #3162; the design-doc count corrections;
+`test_pub_surface_guard.sh`'s anchored extractions, the decoy case and its non-vacuity control
+(correct whether or not a census line exists — its decoy is now synthetic, which is the right
+shape: the property is about *any* second line carrying the keyword); the enumeration-derived emit
+count in `test_agent_gate_file_size_log.sh` case8, **re-derived from the code** (3 on a clean tree:
+thresholds, base ref, no-changed-files) rather than reverted to the old constant; and the entire
+core census mechanism, untouched.
