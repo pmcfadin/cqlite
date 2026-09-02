@@ -1331,8 +1331,8 @@ open_pr_state() {
 # gone. See the header for what "owning process" means and what this does NOT cover.
 #
 # SUPERVISOR FLEETS ONLY — DESCOPED (#3548, owner ruling 2026-09-01; completes #3393). The
-# subject set below is `refs/lane-claims/*` + the legacy `refs/machine-claims/*`, written by
-# `worker-supervisor.sh` alone; returning 1 means "NOTHING WAS REPORTED", never a clean bill of
+# subject set below is `refs/lane-claims/*` + the legacy `refs/machine-claims/*` (who writes
+# them, and who does not, is stated once in the header's SCOPE section); returning 1 means "NOTHING WAS REPORTED", never a clean bill of
 # health (#3467). The populated `refs/claims/issue-<N>` and `refs/heartbeats/<machine>` are NOT
 # read here — do not point this at them; the measured reasons and AC4's counterfactual are in
 # the header's SCOPE section.
