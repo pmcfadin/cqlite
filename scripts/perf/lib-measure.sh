@@ -49,7 +49,10 @@
 # `$SCAN_PASSES`, `$STEP_DURATION`, `$COLD_STEP_DURATION`, `$SERVER_PID`, and since #3551
 # `$FLIGHT_SERVER_CPUS`, `$FLIGHT_ALLOCATOR`, `$FLIGHT_ALLOCATOR_LIB` and
 # `$FLIGHT_ALLOCATOR_LIB_BASENAME` — and call `perf_stat_c`, `drop_caches_if_cold`,
-# `stop_server`, `require_port_free` and `await_server_ready`.
+# `stop_server`, `require_port_free`, `await_server_ready` and (since #3551)
+# `verify_flight_allocator_mapping`, which lives in `scripts/perf/lib-flight-arm.sh` with the
+# rest of the flight-arm difference rather than here: this file owns HOW a rep is executed, that
+# one owns WHAT differs between the arms and whether it was verified.
 #
 # They also WRITE two driver globals, which is why both are listed rather than left implicit:
 # `$SERVER_PID` (as they always have) and, since #3551, `$PERF_COUNT_CPUS` — the CPU-WIDE
@@ -83,121 +86,6 @@
 # file whatever the caller did, so the library locates its own sibling and the coupling list above
 # stays true.
 WS0_MEASURE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# ---------------------------------------------------------------------------
-# Arm C's evidence — WHICH ALLOCATOR IS THE SERVER PROCESS ACTUALLY RUNNING?
-# ---------------------------------------------------------------------------
-# verify_flight_allocator_mapping <maps-path> <mode> <lib-basename> <tag>
-#
-# Echoes the affirmative evidence and returns 0; prints a refusal on stderr and returns 1.
-#
-# # WHY THIS EXISTS AT ALL, which is the whole of arm C
-#
-# `LD_PRELOAD` FAILS OPEN. glibc prints
-#
-#     ERROR: ld.so: object '<path>' from LD_PRELOAD cannot be preloaded ...: ignored.
-#
-# on stderr and **CONTINUES WITH SYSTEM MALLOC**, exit code 0, server healthy, every row served.
-# So without reading the running process, `--flight-allocator jemalloc` would produce a rep that
-# is a BYTE-IDENTICAL DUPLICATE of the system arm under a label saying otherwise — the
-# instrument-reports-success-without-having-measured shape this rig's integrity contract is built
-# around (#3272), and the worst available version of it, because the two arms would agree and the
-# agreement would read as a result.
-#
-# # BOTH DIRECTIONS ARE ASSERTED, and the negative is not the weaker half
-#
-# On the `system` arm a jemalloc mapping is a REFUSAL, not a curiosity: an operator with
-# `LD_PRELOAD` exported in their shell would have the CONTROL arm running the very allocator
-# under test, which does not add noise — it INVERTS the comparison. The launch empties
-# `LD_PRELOAD` for that reason, and this is what establishes that the emptying worked.
-#
-# # THE READ IS THREE-VALUED, and "could not measure" is a REFUSAL
-#
-# An absent maps file (the process already exited), an unreadable one, and an EMPTY one are each
-# COULD-NOT-MEASURE — never "no jemalloc mapping is present", which is what a two-valued
-# `grep -q` would have made of them. A live process always has a non-empty `maps`, so an empty
-# read is a failed measurement and not evidence of anything. That distinction is the difference
-# between this check and a check that passes whenever it cannot look.
-#
-# Every read is a bash builtin over the file's own bytes — no `grep`, no pipeline — because this
-# runs under the driver's `set -o pipefail`, where a `grep | head` on a match closes the pipe and
-# reports FAILURE on the SUCCESS case (the trap #3248 already hit in this rig, at `nm | grep -q`).
-#
-# HERMETIC BY CONSTRUCTION: the maps PATH is a parameter, so
-# `scripts/tests/test_ws0_flight_arm_guards.sh` drives every branch — including the absent-mapping
-# branch this check exists for — against synthetic maps files, with no server, no root and no
-# `/proc` of its own.
-verify_flight_allocator_mapping() {
-  local maps="$1" mode="$2" needle="$3" tag="$4"
-  local line="" first_match="" saw_jemalloc=0 n=0
-  # THE THREE-VALUED READ. `-L` before `-e`, because `-e` FOLLOWS a symlink and would report a
-  # dangling one as plain absence — a different cause with a different remedy.
-  if [[ -L "$maps" && ! -e "$maps" ]] || [[ ! -e "$maps" ]]; then
-    echo "FATAL: $maps does not exist, so which allocator the Flight server of $tag is running" >&2
-    echo "       COULD NOT BE MEASURED. The usual cause is that the process exited between" >&2
-    echo "       readiness and this read — see ${OUT_DIR:-<results-dir>}/$tag.server.log." >&2
-    echo "       This is a refusal and never a pass: 'the mapping is absent' and 'the mapping" >&2
-    echo "       could not be looked for' are different facts, and only the first one could ever" >&2
-    echo "       support a verdict (#3551)." >&2
-    return 1
-  fi
-  while IFS= read -r line; do
-    n=$((n + 1))
-    if [[ -n "$needle" && -z "$first_match" && "$line" == *"$needle"* ]]; then first_match="$line"; fi
-    if [[ "$line" == *jemalloc* ]]; then saw_jemalloc=1; fi
-  done < "$maps"
-  if ((n == 0)); then
-    echo "FATAL: $maps was readable but EMPTY, so which allocator the Flight server of $tag is" >&2
-    echo "       running COULD NOT BE MEASURED. A live process always publishes its mappings," >&2
-    echo "       so an empty read is a failed measurement rather than evidence that no jemalloc" >&2
-    echo "       mapping is present — the permissive reading of an unmeasurable state is the" >&2
-    echo "       vacuous pass this rig refuses (#3551)." >&2
-    return 1
-  fi
-  case "$mode" in
-    jemalloc)
-      if [[ -z "$needle" ]]; then
-        echo "FATAL: --flight-allocator jemalloc but no library basename was passed to the" >&2
-        echo "       mapping check for $tag, so there is nothing to look for. The driver" >&2
-        echo "       resolves the library before the first rep; this is an internal" >&2
-        echo "       inconsistency and it stops the run rather than asserting nothing (#3551)." >&2
-        return 1
-      fi
-      if [[ -n "$first_match" ]]; then
-        echo "jemalloc VERIFIED for $tag: $needle is mapped in the server process ($n mappings read from $maps) | $first_match"
-        return 0
-      fi
-      echo "FATAL: --flight-allocator jemalloc, but NO mapping of '$needle' is present in the" >&2
-      echo "       Flight server process of $tag ($n mappings read from $maps)." >&2
-      echo "       LD_PRELOAD FAILS OPEN: glibc prints \"object ... cannot be preloaded ...:" >&2
-      echo "       ignored\" and CONTINUES with system malloc, exit 0, server healthy. So this" >&2
-      echo "       rep would have been a byte-identical duplicate of the system arm under a" >&2
-      echo "       label saying otherwise, which is worse than no rep (#3551)." >&2
-      echo "       Check ${OUT_DIR:-<results-dir>}/$tag.server.log for that ld.so line, and that the library" >&2
-      echo "       matches the binary's architecture." >&2
-      return 1 ;;
-    system)
-      if ((saw_jemalloc == 1)); then
-        echo "FATAL: --flight-allocator system, but the Flight server process of $tag HAS a" >&2
-        echo "       jemalloc mapping ($n mappings read from $maps)." >&2
-        echo "       The most likely cause is an LD_PRELOAD exported in the invoking" >&2
-        echo "       environment (the launch empties it, so also suspect /etc/ld.so.preload or" >&2
-        echo "       a jemalloc linked into the binary itself)." >&2
-        echo "       This is refused rather than noted because the CONTROL arm running the" >&2
-        echo "       allocator under test does not add noise — it INVERTS the comparison the" >&2
-        echo "       whole session exists to make (#3551)." >&2
-        return 1
-      fi
-      echo "system VERIFIED for $tag: no jemalloc mapping in the server process ($n mappings read from $maps)"
-      return 0 ;;
-    *)
-      echo "FATAL: the allocator mapping check for $tag was passed the unknown mode '$mode'." >&2
-      echo "       The driver's argument loop refuses every value but system|jemalloc, so this" >&2
-      echo "       is an internal inconsistency. It refuses rather than picking a direction to" >&2
-      echo "       assert (#3551)." >&2
-      return 1 ;;
-  esac
-}
 
 # ---------------------------------------------------------------------------
 # Arm A — the bare scan

@@ -42,6 +42,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DRIVER="$REPO_ROOT/scripts/perf/ws0-baseline.sh"
 CPU_LIB="$REPO_ROOT/scripts/perf/lib-cpu.sh"
 MEASURE_LIB="$REPO_ROOT/scripts/perf/lib-measure.sh"
+# The flight arm's own library (#3551): the three-valued jemalloc probe, the pin-mode dispatch
+# and the /proc/<pid>/maps check. Split out of the driver under the campsite rule.
+FLIGHT_LIB="$REPO_ROOT/scripts/perf/lib-flight-arm.sh"
 REPORT="$REPO_ROOT/scripts/perf/ws0_report.py"
 
 fails=0
@@ -51,7 +54,7 @@ checks=0
 pass() { checks=$((checks + 1)); echo "ok   - $1"; }
 fail() { checks=$((checks + 1)); echo "FAIL - $1"; fails=$((fails + 1)); }
 
-for f in "$DRIVER" "$CPU_LIB" "$MEASURE_LIB" "$REPORT"; do
+for f in "$DRIVER" "$CPU_LIB" "$MEASURE_LIB" "$FLIGHT_LIB" "$REPORT"; do
   [ -f "$f" ] || { echo "FAIL - missing $f"; exit 1; }
 done
 # python3 is a HARD REQUIREMENT of this rig (`ws0-baseline.sh` refuses to run without it), so its
@@ -347,13 +350,22 @@ if [ "$rc" -eq 0 ]; then
 else
   fail "verify_disjoint must accept a disjoint pair (rc=$rc, out: $out)"
 fi
-if grep -qF 'verify_disjoint "$FLIGHT_SERVER_CPUS" "$CLIENT_CPUS"' "$DRIVER" \
-   && grep -qF 'verify_cpus_online "$FLIGHT_SERVER_CPUS" "flight server"' "$DRIVER" \
-   && grep -qF 'verify_distinct_cores "$FLIGHT_SERVER_CPUS" "flight server"' "$DRIVER" \
-   && grep -qF 'verify_sibling_pair "$FLIGHT_SERVER_CPUS" "flight server"' "$DRIVER"; then
-  pass "wiring (STRUCTURAL): the driver puts the FLIGHT list through the online check, BOTH pin-mode assertions and the disjointness check"
+if grep -qF 'verify_disjoint "$FLIGHT_SERVER_CPUS" "$CLIENT_CPUS"' "$FLIGHT_LIB" \
+   && grep -qF 'verify_cpus_online "$FLIGHT_SERVER_CPUS" "flight server"' "$FLIGHT_LIB" \
+   && grep -qF 'verify_distinct_cores "$FLIGHT_SERVER_CPUS" "flight server"' "$FLIGHT_LIB" \
+   && grep -qF 'verify_sibling_pair "$FLIGHT_SERVER_CPUS" "flight server"' "$FLIGHT_LIB"; then
+  pass "wiring (STRUCTURAL): the FLIGHT list goes through the online check, BOTH pin-mode assertions and the disjointness check"
 else
-  fail "wiring: the driver must verify the flight list four ways (see the calls after verify_disjoint of the server set)"
+  fail "wiring: the flight list must be verified four ways in lib-flight-arm.sh"
+fi
+# ...and the DRIVER must CALL it, at the point in the sequence where it belongs. The library
+# holds the checks; only the driver can place them after the server pin and before any
+# measurement, and a library nobody calls verifies nothing.
+if grep -qF 'verify_flight_arm_pin || exit 2' "$DRIVER" \
+   && grep -qF 'record_flight_allocator_facts || exit 2' "$DRIVER"; then
+  pass "wiring (STRUCTURAL): the driver CALLS both flight-arm entry points and exits 2 on either refusal (a library nobody calls verifies nothing)"
+else
+  fail "wiring: the driver must call verify_flight_arm_pin and record_flight_allocator_facts, fail-closed"
 fi
 # ...and the BARE SCAN must stay on `$SERVER_CPUS`, which is the entire drift-control argument:
 # if the scan followed the flight pin there would be no pin-identical leg left to compare against.
@@ -390,7 +402,7 @@ fi
 maps_call() {
   ( set -uo pipefail
     # shellcheck disable=SC1090
-    source "$MEASURE_LIB"
+    source "$FLIGHT_LIB"
     verify_flight_allocator_mapping "$@" ) 2>&1
 }
 MAPS_WITH="$TMP/maps-with-jemalloc"
@@ -671,13 +683,13 @@ else
   fail "results.json must carry the flight-arm facts"
 fi
 # ...and THE DRIVER'S OWN recorded contract DECLARES ITS LIMIT (structural, against the driver
-# source, because only the driver writes this string): the per-rep statuses are written where the
+# source, because only the rig writes this string): the per-rep statuses are written where the
 # observation is made and NOTHING AT REPORT TIME requires them to be present. A record that
 # claimed report-time completeness it does not have would be the claim-nothing-backs shape.
-if grep -qF "DECLARED LIMIT: the driver ABORTS on a failure, and nothing at REPORT time requires those per-rep files to exist" "$DRIVER"; then
+if grep -qF "DECLARED LIMIT: the driver ABORTS on a failure, and nothing at REPORT time requires those per-rep files to exist" "$FLIGHT_LIB"; then
   pass "the driver's recorded allocator contract DECLARES its own limit (no report-time completeness check for the per-rep statuses) rather than implying coverage it lacks"
 else
-  fail "the driver's allocator verification string must declare its report-time limit"
+  fail "the recorded allocator verification string must declare its report-time limit"
 fi
 
 # ==========================================================================

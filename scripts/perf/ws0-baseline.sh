@@ -71,7 +71,7 @@
 # did (#3249): an earlier draft of THIS paragraph asserted a count already false when written. Run
 # `wc -l`, the only statement of this file's size that cannot be stale.
 #
-# Ten libraries, each owning ONE question about whether a measurement means what it says:
+# Eleven libraries, each owning ONE question about whether a measurement means what it says:
 #
 #     lib-cpu.sh             are the pinned CPUs one physical core?
 #     lib-host-state.sh      is the host's state put back?
@@ -83,6 +83,8 @@
 #     lib-binaries.sh        WHICH PROGRAMS are measured, and are they this revision's?
 #     lib-inputs.sh          WHICH SCHEMA are the bytes read with, and WHICH REQUEST is asked?
 #     lib-corpus-boundary.sh are the bytes still the PINNED bytes, MID-RUN?
+#     lib-flight-arm.sh      the two arms no longer run the same way — what differs, and was
+#                            the difference VERIFIED rather than requested? (#3551)
 #
 # What remains here is deliberately the part that must stay legible in ONE file: the ORDER of
 # operations, which is itself a correctness property (arguments before creation, verification
@@ -117,6 +119,10 @@ source "$HERE/lib-binaries.sh"
 source "$HERE/lib-inputs.sh"
 # shellcheck source=scripts/perf/lib-corpus-boundary.sh
 source "$HERE/lib-corpus-boundary.sh"
+# AFTER lib-cpu.sh, which its verification calls (#3551): the sourcing order is the dependency
+# order.
+# shellcheck source=scripts/perf/lib-flight-arm.sh
+source "$HERE/lib-flight-arm.sh"
 # LAST, because the sourcing order is the DEPENDENCY order: the measurement legs call
 # `stop_server`/`require_port_free`/`await_server_ready` from lib-server.sh above, plus this
 # driver's own `perf_stat_c` and `drop_caches_if_cold` (both defined below — a function body is
@@ -157,14 +163,9 @@ FLIGHT_ALLOCATOR="system"
 # fall-through to the system allocator: a run labelled `jemalloc` that measured system malloc is
 # the instrument-reports-success-without-measuring shape this rig exists to refuse.
 FLIGHT_ALLOCATOR_LIB=""
-# The paths probed when `--jemalloc-lib` is not given. Multi-arch Debian/Ubuntu first (this box),
-# then the two common non-multi-arch layouts. Probed THREE-VALUED (present / verified-absent /
-# could-not-measure) — see resolve_flight_allocator_lib.
-FLIGHT_ALLOCATOR_LIB_CANDIDATES="/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
-/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
-/usr/lib64/libjemalloc.so.2
-/usr/lib/libjemalloc.so.2
-/usr/local/lib/libjemalloc.so.2"
+# The candidate PATHS live beside the three-valued probe that consumes them, in
+# `scripts/perf/lib-flight-arm.sh`: the list and the probe are one decision (what counts as
+# "this host has no jemalloc"), and splitting them would put half of it two files away.
 REPS=3
 TEMPS="warm cold"
 ARMS="bypass"
@@ -744,93 +745,14 @@ if [[ -z "$FLIGHT_SERVER_CPUS" ]]; then
   FLIGHT_SERVER_CPUS="$SERVER_CPUS"
 fi
 
-# --- WHAT STATE IS ONE PATH IN? THREE-VALUED, because two-valued always guesses (#3551) -----
-# `present` / `absent` / a NAMED unusable state. A plain `[ -f ]` collapses "this host has no
-# libjemalloc" onto "this host has one I cannot read", and those have different remedies —
-# install it vs fix its permissions — while the permissive reading of either is a run labelled
-# `jemalloc` that measured system malloc. `-L` is tested FIRST because `-e`/`-f` FOLLOW the link,
-# so a DANGLING symlink would otherwise read as `absent`, i.e. as a host with no jemalloc when
-# what it has is a broken install.
-flight_lib_state() {
-  local path="$1"
-  if [[ -L "$path" && ! -e "$path" ]]; then echo "dangling-symlink"; return 1; fi
-  if [[ ! -e "$path" ]]; then echo "absent"; return 1; fi
-  if [[ ! -f "$path" ]]; then echo "not-a-regular-file"; return 1; fi
-  if [[ ! -r "$path" ]]; then echo "unreadable"; return 1; fi
-  echo "present"
-}
-
-# --- RESOLVE THE PRELOADED LIBRARY ONCE, BEFORE ANY MEASUREMENT (#3551) ---------------------
-# Echoes the resolved absolute path; refuses (rc 1, diagnostic on stderr) otherwise. Called
-# ABOVE the argument boundary because it reads nothing but file metadata and because "refusing a
-# value after acting on it is not refusing it" — the same rule --bin-dir and --profile-out follow
-# a few lines up. An unusable candidate is a REFUSAL naming it, never a skip to the next one: a
-# silently skipped unreadable library is how a host with jemalloc installed reports that it has
-# none.
-resolve_flight_allocator_lib() {
-  local cand state
-  if [[ -n "$FLIGHT_ALLOCATOR_LIB" ]]; then
-    state="$(flight_lib_state "$FLIGHT_ALLOCATOR_LIB")" || {
-      echo "FATAL: --jemalloc-lib '$FLIGHT_ALLOCATOR_LIB' is $state, not a readable regular file." >&2
-      echo "       --flight-allocator jemalloc preloads exactly this path into the Flight" >&2
-      echo "       server, so an unusable one has no reachable success: glibc would print" >&2
-      echo "       'object ... cannot be preloaded ... ignored' and CONTINUE with system" >&2
-      echo "       malloc, and the rep would be arm B wearing arm C's label. Refused here," >&2
-      echo "       before any build, cache drop or measurement." >&2
-      echo "       Install it and drop the flag:  sudo apt-get install -y libjemalloc2" >&2
-      return 1
-    }
-    printf '%s\n' "$FLIGHT_ALLOCATOR_LIB"
-    return 0
-  fi
-  while IFS= read -r cand; do
-    [[ -n "$cand" ]] || continue
-    state="$(flight_lib_state "$cand")" && { printf '%s\n' "$cand"; return 0; }
-    if [[ "$state" != "absent" ]]; then
-      echo "FATAL: the candidate jemalloc library '$cand' is $state." >&2
-      echo "       That is a COULD-NOT-MEASURE state, not an absence, so it is refused rather" >&2
-      echo "       than skipped: skipping it would report 'jemalloc is not installed' about a" >&2
-      echo "       host that has it, and the remedy for the two is different (#3551)." >&2
-      echo "       Fix that path, or name a usable one with --jemalloc-lib PATH." >&2
-      return 1
-    fi
-  done <<<"$FLIGHT_ALLOCATOR_LIB_CANDIDATES"
-  echo "FATAL: --flight-allocator jemalloc was requested and no jemalloc library was found." >&2
-  echo "       Probed (each verified ABSENT, not merely unmatched):" >&2
-  while IFS= read -r cand; do
-    [[ -n "$cand" ]] || continue
-    echo "         $cand" >&2
-  done <<<"$FLIGHT_ALLOCATOR_LIB_CANDIDATES"
-  echo "       Remedy:  sudo apt-get install -y libjemalloc2" >&2
-  echo "       (or name the path with --jemalloc-lib PATH). This is a REFUSAL and never a" >&2
-  echo "       fall-through to --flight-allocator system: an arm C that quietly measured" >&2
-  echo "       system malloc would be a byte-identical duplicate of arm B under a label that" >&2
-  echo "       says otherwise (#3551)." >&2
-  return 1
-}
-
-# WHAT IS RECORDED for the allocator, resolved here so the manifest, the pin record and the
-# per-rep verification all read ONE value. `none (...)` is a positive statement rather than an
-# empty field: "no library" and "nobody wrote the field down" must not look the same.
-if [[ "$FLIGHT_ALLOCATOR" == "jemalloc" ]]; then
-  FLIGHT_ALLOCATOR_LIB="$(resolve_flight_allocator_lib)" || exit 2
-  FLIGHT_ALLOCATOR_LIB_RECORDED="$FLIGHT_ALLOCATOR_LIB"
-  FLIGHT_ALLOCATOR_LIB_BASENAME="${FLIGHT_ALLOCATOR_LIB##*/}"
-  # WHAT IS ASSERTED PER REP, recorded verbatim into the pin record so the report's allocator
-  # line cites a mechanism rather than a label. It also states its OWN LIMIT, in the record, for
-  # the reason `provenance` does: the per-rep files are written where the observation is made and
-  # NOTHING AT REPORT TIME requires them to be present.
-  FLIGHT_ALLOCATOR_VERIFICATION="per rep, AFTER await_server_ready: /proc/<server-pid>/maps is READ and must carry a mapping whose path contains '$FLIGHT_ALLOCATOR_LIB_BASENAME'; an absent mapping is FATAL for that rep, and an unreadable/empty maps file is FATAL as COULD-NOT-MEASURE (never read as verified). Necessary because glibc prints 'object ... cannot be preloaded ... ignored' and CONTINUES with system malloc, which would make this arm a byte-identical duplicate of the system arm under a label saying otherwise. Each rep's outcome is written to <tag>.allocator.status by scripts/perf/lib-measure.sh verify_flight_allocator_mapping. DECLARED LIMIT: the driver ABORTS on a failure, and nothing at REPORT time requires those per-rep files to exist — that completeness check is the boundary-observation shape (#3272 round 22) and is NOT implemented for the allocator (#3551)."
-else
-  FLIGHT_ALLOCATOR_LIB=""
-  FLIGHT_ALLOCATOR_LIB_RECORDED="none (system malloc; any inherited LD_PRELOAD is EMPTIED for the server launch, and the absence of a jemalloc mapping is asserted per rep)"
-  FLIGHT_ALLOCATOR_LIB_BASENAME=""
-  # THE NEGATIVE IS ASSERTED TOO. A control arm silently running jemalloc — an operator with
-  # `LD_PRELOAD` exported in their shell — would INVERT the comparison, so it is refused rather
-  # than assumed: the launch EMPTIES `LD_PRELOAD` and the absence of a jemalloc mapping is then
-  # OBSERVED. Same declared limit as the jemalloc branch.
-  FLIGHT_ALLOCATOR_VERIFICATION="per rep, AFTER await_server_ready: /proc/<server-pid>/maps is READ and must carry NO jemalloc mapping; one present is FATAL, and an unreadable/empty maps file is FATAL as COULD-NOT-MEASURE (never read as verified). LD_PRELOAD is EMPTIED for the server launch rather than trusted to be unset, because a control arm quietly running jemalloc inverts the whole result. Each rep's outcome is written to <tag>.allocator.status by scripts/perf/lib-measure.sh verify_flight_allocator_mapping. DECLARED LIMIT: the driver ABORTS on a failure, and nothing at REPORT time requires those per-rep files to exist — that completeness check is the boundary-observation shape (#3272 round 22) and is NOT implemented for the allocator (#3551)."
-fi
+# --- THE FLIGHT ARM'S ALLOCATOR, RESOLVED BEFORE ANY MEASUREMENT (#3551) -------------------
+# `scripts/perf/lib-flight-arm.sh` owns the three-valued library probe (present /
+# verified-absent / a NAMED could-not-measure state, each a refusal) and the four values the
+# manifest, the pin record and the per-rep check all read. Called HERE, above the argument
+# boundary, because it reads nothing but file metadata and because "refusing a value after
+# acting on it is not refusing it" — the rule `--bin-dir` and `--profile-out` follow a few lines
+# up. Exit 2, like every other argument refusal.
+record_flight_allocator_facts || exit 2
 
 if [[ "$VALIDATE_ONLY" == "1" ]]; then
   # `baseline-mode` is in the stamp so the hermetic self-tests can observe WHICH claim the run
@@ -877,39 +799,14 @@ verify_cpus_online "$CLIENT_CPUS" "client" || exit 2
 verify_disjoint "$SERVER_CPUS" "$CLIENT_CPUS"
 
 # --- THE FLIGHT ARM'S PIN, VERIFIED WITH THE SAME RIGOUR AS THE SERVER'S (#3551) -----------
-# Three checks, all BEFORE the first rep and all fail-closed, in the order whose diagnostic is
-# most specific:
-#
-#   1. every CPU EXISTS and is ONLINE. `sched_setaffinity` ANDs the requested mask with
-#      `cpu_online_mask`, so an offline member is silently dropped and the manifest then records
-#      CPUs that never ran an instruction (#3272 round 21, one flag over).
-#   2. the requested PIN MODE holds, read from the real `thread_siblings_list`. Two modes, two
-#      affirmative assertions — never a relaxation. The `*` arm is an internal fail-closed guard:
-#      the argument loop already refused every other value, and a mode reaching here unhandled
-#      must stop the run rather than inherit either assertion.
-#   3. DISJOINT from the client set, for the reason the server set is: a client sharing a
-#      physical core with the server puts the client's own cost inside the counted window.
-#
-# `verify_cpus_online`'s stdout is DISCARDED here and its refusal is what this call is for: its
-# success line ends "only the SERVER set must be one physical core", which is a true statement
-# about `--server-cpus` and a misleading one printed under a flight label. The substance of the
-# flight verification is the pin-mode echo below, which is captured and RECORDED.
-verify_cpus_online "$FLIGHT_SERVER_CPUS" "flight server" >/dev/null || exit 2
-echo "flight server CPUs: $FLIGHT_SERVER_CPUS -> verified present and ONLINE"
-case "$FLIGHT_PIN_MODE" in
-  siblings)
-    WS0_FLIGHT_PIN_VERIFIED="$(verify_sibling_pair "$FLIGHT_SERVER_CPUS" "flight server")" || exit 2 ;;
-  distinct-cores)
-    WS0_FLIGHT_PIN_VERIFIED="$(verify_distinct_cores "$FLIGHT_SERVER_CPUS" "flight server")" || exit 2 ;;
-  *)
-    echo "FATAL: --flight-pin-mode '$FLIGHT_PIN_MODE' reached the topology stage unhandled." >&2
-    echo "       The argument loop refuses every value but siblings|distinct-cores, so this is" >&2
-    echo "       an internal inconsistency. It stops the run rather than defaulting to either" >&2
-    echo "       assertion: which property was VERIFIED is what the report claims (#3551)." >&2
-    exit 2 ;;
-esac
-echo "$WS0_FLIGHT_PIN_VERIFIED"
-verify_disjoint "$FLIGHT_SERVER_CPUS" "$CLIENT_CPUS"
+# Three checks, all fail-closed and all BEFORE the first rep: every CPU present and ONLINE, the
+# requested PIN MODE (two affirmative assertions, never a relaxation), and disjointness from the
+# client set. `scripts/perf/lib-flight-arm.sh` carries the argument for each; the CALL is here so
+# the ORDER stays visible in one file — after the server set is verified, before anything is
+# measured. It captures the sysfs echo into `$WS0_FLIGHT_PIN_VERIFIED`, which the pin record
+# below carries, so the report's claim rests on an observation.
+verify_flight_arm_pin || exit 2
+
 
 # --- THE COUNTING DOMAIN FOLLOWS THE ARM (#3551) -------------------------------------------
 # `perf_stat_c`/`perf_record_c` count CPU-WIDE over `$PERF_COUNT_CPUS`, and the two arms no

@@ -20,7 +20,8 @@ scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096
 | `lib-args.sh` | numeric + duration validation: positive, bounded to the reporter's cap, decimal |
 | `ws0_report.py` | aggregation → `results.json` + a human summary |
 | `ws0_validate.py` | the fail-closed layer: what the reporter is ALLOWED to aggregate |
-| `lib-measure.sh` | one rep of each arm — and, since #3551, WHICH ALLOCATOR the measured server is really running |
+| `lib-measure.sh` | how ONE rep of each arm is executed, prewarmed and counted |
+| `lib-flight-arm.sh` | the two arms no longer run the same way — WHAT differs (pin, allocator) and was it VERIFIED (#3551) |
 
 Full method, the traps, the recorded pinning and the residual caveats:
 **`docs/reports/ws0-3096-artifacts/measurement-method.md`** — read it before
