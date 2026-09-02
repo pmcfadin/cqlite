@@ -1158,6 +1158,38 @@ else
   printf '%s\n' "$outAB" | grep -i 'mold\|regular file' | head -5
 fi
 
+# 6ac. A LONG-BUT-OPENABLE SYMLINK CHAIN RESOLVES (#3756 roborev round 10). The hop cap exists
+#      to bound a LOOP, not to be stricter than the `readlink -f` it replaced — and at 32 it was.
+#      Measured on Linux: the kernel resolves a 39-link chain and ELOOPs at 41 (MAXSYMLINKS=40)
+#      while `readlink -f` walks 60+, so a 35-link config chain was openable by cargo, resolvable
+#      by the old code, and refused by the new one. 35 is chosen deliberately: it is ABOVE the old
+#      cap of 32 and BELOW the kernel limit, so this case fails on a cap of 32 and passes on 64 —
+#      a cap regression is what it detects, not symlinks in general.
+sbAC=$(mktemp -d "$tmp/moldAC.XXXXXX"); mkdir -p "$sbAC/.cargo" "$sbAC/chain"
+printf '[net]\nretry = 23\n' >"$sbAC/chain/final.toml"
+ac_prev="$sbAC/chain/final.toml"
+ac_built=1
+for ac_i in $(seq 1 35); do
+  ln -s "$ac_prev" "$sbAC/chain/l$ac_i" || { ac_built=0; break; }
+  ac_prev="$sbAC/chain/l$ac_i"
+done
+# THE CHAIN MUST BE OPENABLE BY THIS KERNEL, or the case is asserting about a path nothing could
+# use and would fail for the fixture's reason rather than the code's. Probed, not assumed.
+if [ "$ac_built" = 1 ] && [ "$(cat "$ac_prev" 2>/dev/null | head -1)" = '[net]' ]; then
+  ln -s "$ac_prev" "$sbAC/.cargo/config.toml"
+  PATH="$stubO:$PATH" HOME="$sbAC" CARGO_HOME="$sbAC/.cargo" \
+    "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+  if [ -L "$sbAC/.cargo/config.toml" ] \
+     && [ "$(count_begin "$sbAC/chain/final.toml")" = 1 ] \
+     && grep -qx 'retry = 23' "$sbAC/chain/final.toml"; then
+    ok "mold/symlink: a 35-link chain — longer than the old 32-hop cap, shorter than the kernel's limit — is resolved and written THROUGH to its final target; the cap bounds a loop without being stricter than the readlink -f it replaced" # portability-lint-allow: the replaced construct NAMED in a diagnostic string, not an invocation
+  else
+    bad "mold/symlink: a 35-link openable chain was not written through (still-link=$([ -L "$sbAC/.cargo/config.toml" ] && echo yes || echo no) begin=$(count_begin "$sbAC/chain/final.toml") user-line=$(grep -c 'retry = 23' "$sbAC/chain/final.toml"))"
+  fi
+else
+  skip "mold/symlink: 35-link chain case — this kernel or filesystem could not provide an openable 35-link chain, so the subject does not exist"
+fi
+
 # --- 7. git push credentials (issue #2942) ---------------------------------
 # `gh` auth and `git` auth are SEPARATE credential paths: an authenticated gh CLI is
 # NOT evidence that a raw `git push` can authenticate, and scripts/flow/claim.sh +

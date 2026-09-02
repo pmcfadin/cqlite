@@ -388,8 +388,18 @@ mold_write_block() {
     # Chase the chain with bare `readlink` (POSIX, both flavours) instead, bounded so a
     # symlink loop cannot spin, then canonicalise the final DIRECTORY with `cd`+`pwd -P`
     # (this repo's canonicalisation idiom, and what makes the result absolute).
+    # THE HOP CAP IS ABOVE EVERY PLATFORM'S KERNEL LIMIT, so it bounds a LOOP without ever
+    # being the thing that refuses a chain the OS would happily open (#3756 roborev round 10).
+    # At 32 it was STRICTER than the `readlink -f` it replaced, in a measurable window. Measured
+    # on Linux here: the kernel resolves a 39-link chain and ELOOPs at 41 (MAXSYMLINKS=40), while
+    # `readlink -f` walks 60+ in userspace — so a 33-to-40-link config chain was openable by
+    # cargo, resolvable by the old code, and refused by this one. (BSD/macOS documents
+    # MAXSYMLINKS=32, which is why the window is Linux-only; not measured here, and it does not
+    # matter, because 64 is above both.) Above the kernel limit the chain cannot be opened by
+    # anything, so refusing it costs nothing; a genuine loop still terminates in 64 iterations
+    # and is refused by name below.
     local _wt="$cfg_file" _lt _wd _hops=0
-    while [ -L "$_wt" ] && [ "$_hops" -lt 32 ]; do
+    while [ -L "$_wt" ] && [ "$_hops" -lt 64 ]; do
       _lt=$(readlink "$_wt" 2>/dev/null) || break
       [ -n "$_lt" ] || break
       case "$_lt" in
@@ -431,7 +441,7 @@ mold_write_block() {
     # wrong place. They were folded, and case 6z caught it: a FIFO target was correctly refused
     # under a message about unresolvable symlinks.
     if [ -L "$_wt" ]; then
-      warn "$cfg_file is a symlink whose target could not be resolved — it is still a symlink after $_hops hops (a loop?) — skipping mold linker config rather than replacing the symlink with a plain file"
+      warn "$cfg_file is a symlink whose target could not be resolved — it is still a symlink after $_hops hops, which is past every platform's kernel symlink limit, so nothing could open it either (a loop?) — skipping mold linker config rather than replacing the symlink with a plain file"
       return 0
     fi
     if [ -e "$_wt" ] && [ ! -f "$_wt" ]; then
