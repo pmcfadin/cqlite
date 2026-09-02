@@ -647,15 +647,29 @@ manifest = {
         "ticket_sha256": env("AB_TICKET_SHA", ""),
         "ticket_content": _ticket_content(),
         "merge_path": env("AB_MERGE_PATH", ""),
-        # `int(x) or None` turns a configured ZERO into `null`, which is how a
-        # throughput-critical parameter could vanish from the record entirely.
-        # An unset option is "server-default"; a configured one is recorded
-        # exactly, zero included.
+        # THE SERVER OPTIONS ARE NOT RECORDED HERE, DELIBERATELY. They used to
+        # be, read from the GLOBAL options -- so identical per-arm extras
+        # (`--base-server-extra '--batch-size 1'` plus the matching head option)
+        # ran both servers at 1 while this block said 8192. The resolved
+        # per-arm values already live in `expected_server_config`, which is what
+        # the launcher built the argv from and what the startup read-back is
+        # compared against, so these fields were a SECOND COPY of facts that
+        # already had a home -- and a second copy is a thing that can drift
+        # again once synced.
+        #
+        # A GLOBAL FIELD ALSO HAS A QUESTION IT CANNOT ANSWER: what to record
+        # when the arms legitimately differ, which under a sensitivity control
+        # they do BY DESIGN. Per-arm values belong per-arm, and no global claim
+        # is the honest amount of claim.
+        #
+        # `max_concurrent_scans` STAYS, and the distinction is not cosmetic:
+        # OVERRIDABLE is exactly the three options above
+        # (ab_driver_support.py:858), so the admission ceiling CANNOT differ
+        # between arms -- there is no route by which this global could disagree
+        # with what either server was launched with. A field that cannot drift
+        # is not a second source. Deleting it too would have been a blanket
+        # applied where a distinction was available.
         "max_concurrent_scans": _int_or_none(env("AB_MAX_CONCURRENT_SCANS")),
-        "batch_size": _int_or_none(env("AB_BATCH_SIZE")),
-        "max_batch_bytes": env("AB_MAX_BATCH_BYTES") or "server-default",
-        "admission_wait_timeout_ms": env("AB_ADMISSION_WAIT_TIMEOUT_MS")
-        or "server-default",
         "step_duration_seconds": float(env("AB_STEP_DURATION_SECONDS", "0")),
     },
     "control": env("AB_CONTROL") or None,
@@ -854,6 +868,13 @@ with open(sys.argv[1], "rb") as handle:
     sys.stdout.write(hashlib.sha256(handle.read()).hexdigest())
 PYEOF
 )" || die ticket-template-unreadable "the frozen ticket could not be digested"
+# RE-EXPORTED, because the manifest's variable is exported at line 719 -- BEFORE
+# the freeze -- and would otherwise still name the mutable original. Round 17
+# pinned the EXECUTION and left the RECORD, so a mid-session edit produced a
+# manifest documenting a ticket nobody ran: worse than the original defect,
+# which at least had the honesty of being consistently wrong. One variable now
+# means the executed path, and the original survives only under its own name.
+export AB_TICKET_TEMPLATE="$TICKET_FROZEN"
 export AB_TICKET_ORIGINAL="$TICKET_ORIGINAL" AB_TICKET_SHA="$TICKET_SHA"
 say "ticket frozen into the session directory as $TICKET_FROZEN sha256 $TICKET_SHA -- every run reads this copy, never $TICKET_ORIGINAL"
 # THE WORKLOAD MUST MATCH THE CLAIM THE REPORT WILL MAKE ABOUT IT. The #3649

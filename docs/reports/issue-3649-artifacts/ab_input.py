@@ -119,10 +119,16 @@ WORKLOAD_DISPOSITION = {
     "ticket_content": ("excused",
                        "the frozen ticket itself, so a reader can see what was "
                        "served without the session directory still existing"),
-    "max_concurrent_scans": ("excused", "corroborated from the server's startup line"),
-    "batch_size": ("excused", "corroborated from the server's startup line"),
-    "max_batch_bytes": ("excused", "corroborated from the server's startup line"),
-    "admission_wait_timeout_ms": ("excused", "corroborated from the server's startup line"),
+    # The three PER-ARM OVERRIDABLE server options are GONE from the workload
+    # block: they were populated from the GLOBAL options and so could disagree
+    # with what the servers were launched with. They live per-arm in
+    # `expected_server_config`, which the launcher built the argv from.
+    # `max_concurrent_scans` stays because it is NOT overridable
+    # (ab_driver_support.py:858) and therefore cannot drift.
+    "max_concurrent_scans": ("excused",
+                             "not per-arm overridable, so the global IS the "
+                             "resolved value; corroborated from the server's "
+                             "startup line"),
 }
 
 MODE_SINGLE_STREAM = "single-stream"

@@ -674,19 +674,17 @@ def census_served(data_dir, ticket_path):
     # satisfying both floors -- the round-4 fix closed the recursive-scan route
     # and this one stayed open. A Cassandra snapshot is a HARD link, which
     # canonicalises inside the directory and is therefore still counted.
+    # THE SAME ENUMERATION THE PROBE USES. Two components deciding separately
+    # which files the server serves is how their views come apart -- which is
+    # exactly what happened: this one applied containment and probe_compression
+    # did not.
+    data_files, enum_error = contained_data_files(served)
+    if enum_error is not None:
+        err("cause served-dir-absent")
+        err("cause-detail %s" % enum_error)
+        return 1
     try:
-        served_real = os.path.realpath(served)
-        for name in os.listdir(served):
-            if not name.endswith("-Data.db"):
-                continue
-            path = os.path.join(served, name)
-            if not os.path.isfile(path):
-                continue
-            real = os.path.realpath(path)
-            if os.path.dirname(real) != served_real:
-                # Excluded exactly as the server excludes it, and counted by
-                # neither floor.
-                continue
+        for real in data_files:
             total += os.path.getsize(real)
             count += 1
             # THE COMPRESSED-CORPUS REQUIREMENT, ASKED RATHER THAN ASSUMED.
@@ -1493,6 +1491,43 @@ def canonical_shape(raw):
     return SHAPE_ALIASES.get(raw.strip().lower())
 
 
+def contained_data_files(served_dir):
+    """The `*-Data.db` the SERVER will read, and no others. -> (paths, error).
+
+    ONE ENUMERATION, because two components holding different views of which
+    files are served is how a validator comes to red a corpus the server would
+    happily serve. `census_served` applied the containment rule and
+    `probe_compression` re-listed the directory without it, so an escaping
+    symlink the server EXCLUDES could fail a valid LZ4 corpus as MISSING or as
+    the wrong compressor -- a false refusal, which is the fail-closed direction
+    and still the guard an operator learns to work around.
+
+    MIRRORS `DirSource::data_paths` (cqlite-flight/src/producer.rs:215-235, via
+    `pathsafe::assert_within`): a flat listing of the resolved directory,
+    excluding any entry whose CANONICAL target escapes it. A Cassandra snapshot
+    is a HARD link, which canonicalises inside the directory and is kept.
+    Returns the CANONICAL paths, since that is what the server reads.
+    """
+    try:
+        served_real = os.path.realpath(served_dir)
+        names = sorted(os.listdir(served_dir))
+    except OSError as exc:
+        return None, "%s: %s" % (served_dir, exc.strerror or exc)
+    kept = []
+    for name in names:
+        if not name.endswith("-Data.db"):
+            continue
+        path = os.path.join(served_dir, name)
+        if not os.path.isfile(path):
+            continue
+        real = os.path.realpath(path)
+        if os.path.dirname(real) != served_real:
+            # Excluded exactly as the server excludes it.
+            continue
+        kept.append(real)
+    return kept, None
+
+
 def probe_compression(served_dir):
     """Every served SSTable's compressor, aggregated. -> (state, detail).
 
@@ -1500,24 +1535,24 @@ def probe_compression(served_dir):
     still means the measured decode work is not what the band was derived for,
     and an aggregate that reported only the majority would hide it.
     """
-    try:
-        entries = sorted(os.listdir(served_dir))
-    except OSError as exc:
-        return "UNPARSEABLE", "%s: %s" % (served_dir, exc.strerror or exc)
-    data_files = [e for e in entries if e.endswith("-Data.db")]
+    data_files, error = contained_data_files(served_dir)
+    if error is not None:
+        return "UNPARSEABLE", error
     if not data_files:
         return "NO-SSTABLES", "no *-Data.db under %s" % served_dir
     worst = None
-    for data_file in data_files:
-        stem = data_file[: -len("Data.db")]
-        info = os.path.join(served_dir, stem + "CompressionInfo.db")
+    for real in data_files:
+        data_file = os.path.basename(real)
+        stem = real[: -len("Data.db")]
+        info = stem + "CompressionInfo.db"
         if not os.path.exists(info) or os.path.getsize(info) == 0:
             return "MISSING", "%s has no usable CompressionInfo.db" % data_file
         state, detail = parse_compression_info(info)
         if state != "LZ4":
             # First offender wins: the remedy is per-file and naming one file the
             # operator can look at beats a summary of how many were wrong.
-            return state, "%s: %s" % (stem + "CompressionInfo.db", detail)
+            return state, "%s: %s" % (
+                os.path.basename(stem) + "CompressionInfo.db", detail)
         worst = detail
     return "LZ4", "%d served SSTable(s), all LZ4Compressor" % len(data_files)
 

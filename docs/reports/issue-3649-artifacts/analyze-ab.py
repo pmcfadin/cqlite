@@ -311,13 +311,25 @@ def render_common(manifest, mode, admission, session):
             field(manifest, "workload", "prewarm"),
         )
     )
-    out(
-        "server batch-size %s max-batch-bytes %s step-duration-seconds %s"
-        % (
-            field(manifest, "workload", "batch_size"),
-            field(manifest, "workload", "max_batch_bytes"),
-            field(manifest, "workload", "step_duration_seconds"),
+    # PER ARM, from the resolved configuration the servers were launched with.
+    # This used to read `workload.batch_size`, which was populated from the
+    # GLOBAL option and therefore said 8192 while both servers ran at 1 under
+    # matching per-arm extras. There is no global field to read now, which is
+    # the point: a single line cannot describe two arms that may differ.
+    for _arm in ("base", "head"):
+        _cfg = manifest.get("expected_server_config", {}).get(_arm, {})
+        out(
+            "server %s batch-size %s max-batch-bytes %s wait-timeout-ms %s"
+            % (
+                _arm,
+                _cfg.get("batch_size_observed", "NOT-RECORDED"),
+                _cfg.get("max_batch_bytes_observed", "NOT-RECORDED"),
+                _cfg.get("wait_timeout_ms_observed", "NOT-RECORDED"),
+            )
         )
+    out(
+        "server step-duration-seconds %s"
+        % field(manifest, "workload", "step_duration_seconds")
     )
     out(
         "admission max-concurrent-scans requested %s observed %s corroboration %s "
@@ -328,7 +340,9 @@ def render_common(manifest, mode, admission, session):
             admission.state,
             admission.observed,
             admission.total,
-            field(manifest, "workload", "admission_wait_timeout_ms"),
+            # The wait timeout IS per-arm overridable, so it is reported on
+            # the per-arm lines above and not claimed globally here.
+            "see per-arm lines",
         )
     )
     out(

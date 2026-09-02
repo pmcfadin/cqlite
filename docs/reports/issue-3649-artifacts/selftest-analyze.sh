@@ -147,10 +147,13 @@ def main():
             "client_cpus": "1,3",
             "temperature": "warm",
             "merge_path": "merge",
+            # Only the NON-overridable one is here. The three per-arm
+            # overridable options left `workload` in round 18: populated from
+            # the GLOBAL options, they could disagree with what the servers were
+            # launched with, and they already live per-arm in
+            # `expected_server_config`. A fixture carrying fields the driver no
+            # longer emits describes a manifest shape that does not exist.
             "max_concurrent_scans": 16,
-            "batch_size": 8192,
-            "max_batch_bytes": "server-default",
-            "admission_wait_timeout_ms": "server-default",
         },
         "corpus": {
             "path": "/data/ab-3649/corpus/sstables",
