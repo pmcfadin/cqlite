@@ -3839,7 +3839,8 @@ fi
 # whether each named property has a refusal, so the list can be wrong by
 # OMISSION but never by staleness. A property whose cause is renamed or deleted
 # reds here.
-if python3 - "$HERE" <<'PYINNER'
+set +e
+GATING_OUT="$(python3 - "$HERE" <<'PYINNER'
 import re
 import sys
 
@@ -3886,13 +3887,69 @@ for prop, cause in sorted(GATING.items()):
                         "analyzer-side" % (prop, cause))
 if len(GATING) < 20:
     problems.append("the enumeration has shrunk to %d entries" % len(GATING))
+
+# THE OMISSION DIRECTION, WHICH ROUND 20 DECLARED AND DID NOT CLOSE. That census
+# checked only that each ENUMERATED cause still exists; nothing checked that
+# every refusal is enumerated, so four rounds of new causes accumulated
+# unlisted and the census went on reporting "20 properties" while the analyzer
+# raised many more. A declared gap that nobody measures is a gap that grows.
+#
+# CLASSIFIED BY SET, NOT BY PROSE, and that is deliberate. The two weak
+# predicates round 23 found were weak because they were SENTENCES, and adding
+# forty more sentences would add forty more chances to state a property more
+# weakly than the check enforces -- the census inheriting the class it exists to
+# close. Membership of a set carries no claim about WHAT the cause enforces,
+# only that somebody decided which kind of refusal it is.
+INPUT_INTEGRITY = {
+    # The manifest or its records cannot be READ at all. These gate nothing
+    # about the measurement; they are the difference between having input and
+    # not having it.
+    "manifest-unreadable", "manifest-not-json", "manifest-schema",
+    "manifest-field", "run-file-unreadable", "run-file-empty",
+    "run-file-not-jsonl", "run-record-count", "run-record-schema",
+    "run-record-field", "ticket-template-unparseable", "internal-error",
+}
+VERDICT_GATING_EXTRA = {
+    # Verdict-gating, and deliberately NOT given prose statements above: the
+    # statements are what went weak, so these are listed as members only.
+    "ticket-digest-mismatch", "ticket-identifier-invalid", "ticket-schema-invalid",
+    "affinity-unverified", "counterbalance-broken", "counterbalance-not-parity",
+    "position-not-recorded", "duplicate-run", "unpaired-replicates",
+    "round-label-mismatch", "ramp-order-mismatch", "ramp-steps-not-comparable",
+    "ramp-no-common-ladder", "ramp-fully-shed", "step-duration-mismatch",
+    "server-config-mismatch", "server-config-unexpected", "admission-provenance",
+    "run-errors", "run-shed", "run-degenerate", "run-non-finite",
+    "loadgen-provenance-mismatch", "ratio-non-finite", "ci-non-finite",
+    "bootstrap-degenerate", "mode-manifest-mismatch", "shape-record-mismatch",
+}
+# DRIVER-side causes are deliberately absent: this census is about the
+# ANALYZER's enforcement surface, and `die corpus-empty` in the driver is not a
+# refusal the analyzer can make. Including them made the staleness half red,
+# which is the half working -- it caught the over-inclusion immediately.
+classified = set(GATING.values()) | INPUT_INTEGRITY | VERDICT_GATING_EXTRA
+raised = set(re.findall(r'raise Unmeasured\(\s*"([a-z-]+)"', both))
+raised |= set(re.findall(r'return "([a-z-]+)", \[', both))
+unclassified = sorted(raised - classified)
+if unclassified:
+    problems.append(
+        "%d refusal cause(s) are raised and classified NEITHER as verdict-gating "
+        "NOR as input-integrity: %s. Every refusal must be one or the other, or "
+        "the enumeration silently stops describing the analyzer"
+        % (len(unclassified), unclassified))
+stale = sorted(c for c in (INPUT_INTEGRITY | VERDICT_GATING_EXTRA)
+               if '"%s"' % c not in both)
+if stale:
+    problems.append("%d classified cause(s) no longer exist: %s" % (len(stale), stale))
 for problem in problems:
     sys.stderr.write("AB-3649: %s\n" % problem)
 sys.stdout.write("%d\n" % len(GATING))
 raise SystemExit(1 if problems else 0)
 PYINNER
-then
-  ok "every enumerated verdict-gating property has an analyzer-side refusal (20 properties)"
+)"
+set -e
+GATING_COUNT="$GATING_OUT"
+if [ -n "$GATING_OUT" ]; then
+  ok "every enumerated verdict-gating property has an analyzer-side refusal, and every refusal is classified ($GATING_COUNT with property statements, plus the rest by set)"
 else
   bad "a verdict-gating property has no analyzer-side refusal (see above)"
 fi
