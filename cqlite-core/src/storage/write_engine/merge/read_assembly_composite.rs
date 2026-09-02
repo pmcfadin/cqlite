@@ -89,6 +89,7 @@ pub(super) fn decode_composite(
     bytes: &[u8],
     cmp: &ComparatorType,
 ) -> Result<Value> {
+    reject_trailing_bytes(column, kind, bytes, cmp)?;
     if let Some(name) = first_unresolved_custom(cmp) {
         return Err(Error::unsupported_format(format!(
             "column '{column}': {kind} type '{name}' did not resolve to a structure \
@@ -98,6 +99,88 @@ pub(super) fn decode_composite(
         )));
     }
     parse_value_with_comparator(bytes, cmp)
+}
+
+/// Refuse a composite cell path whose framing does not consume the WHOLE slice.
+///
+/// **Why this is required here and not inside the shared decoder (roborev job 60).**
+/// `parse_value_with_comparator`'s tuple/UDT helpers stop once every DECLARED field
+/// is read and ignore whatever follows, because their other callers hand them element
+/// bytes already bounded by an outer length prefix — trailing bytes cannot occur
+/// there. **A cell path has no such outer bound: the whole slice IS the key.** So two
+/// DISTINCT cell paths that share a prefix decoded to the SAME logical map key / set
+/// element, which in a map is a duplicate-key hazard and in a set collapses two
+/// members into one.
+///
+/// The rule is the one `cell_path_key.rs` already states for the single-generation
+/// reader, and it is applied here verbatim so the two arms agree: **`Err` only where
+/// Cassandra's own `validate`/`split` throws** — and `TupleType.validate` at the
+/// pinned `cassandra-5.0.8` tag throws on trailing bytes after a composite's
+/// components. Such input is corrupt on Cassandra's own terms, so refusing it adds no
+/// availability risk for data Cassandra itself would have read.
+///
+/// Only the TOP-LEVEL framing is walked, which is where the unbounded slice is; a
+/// nested value is bounded by its own `i32` length prefix. Field bytes are never
+/// inspected — the walk is over the framing alone (no-heuristics, #28) — and a length
+/// that would run past the end is itself a refusal rather than a panic, since this
+/// slice is attacker-controlled SSTable content.
+fn reject_trailing_bytes(
+    column: &str,
+    kind: &str,
+    bytes: &[u8],
+    cmp: &ComparatorType,
+) -> Result<()> {
+    let arity = match unwrap_frozen_comparator(cmp) {
+        ComparatorType::Tuple(fields) => fields.len(),
+        ComparatorType::Udt {
+            field_comparators, ..
+        } => field_comparators.len(),
+        // Only tuple/UDT framing is fixed-arity and therefore checkable this way.
+        // A frozen collection carries its own leading count, and a scalar leaf is
+        // width-validated by its own decoder.
+        _ => return Ok(()),
+    };
+
+    let mut off = 0usize;
+    for _ in 0..arity {
+        // A composite with FEWER encoded components than declared is legal —
+        // Cassandra's `compareCustom` treats an omitted suffix as all-null — so
+        // running out of input here is not an error, only a stop.
+        if off == bytes.len() {
+            return Ok(());
+        }
+        let Some(len_bytes) = bytes.get(off..off + 4) else {
+            return Err(trailing_error(column, kind, bytes.len(), off));
+        };
+        off += 4;
+        let raw = i32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
+        if raw < 0 {
+            // Negative length == a null component; it consumes no value bytes.
+            continue;
+        }
+        let Some(next) = off.checked_add(raw as usize) else {
+            return Err(trailing_error(column, kind, bytes.len(), off));
+        };
+        if next > bytes.len() {
+            return Err(trailing_error(column, kind, bytes.len(), off));
+        }
+        off = next;
+    }
+
+    if off != bytes.len() {
+        return Err(trailing_error(column, kind, bytes.len(), off));
+    }
+    Ok(())
+}
+
+fn trailing_error(column: &str, kind: &str, total: usize, consumed: usize) -> Error {
+    Error::corruption(format!(
+        "column '{column}': {kind} cell path is {total} bytes but its declared \
+         composite framing consumes {consumed} — trailing or truncated bytes after the \
+         components. Cassandra's TupleType.validate throws on this, so the key is \
+         corrupt on its own terms; decoding it from a prefix would let two distinct \
+         cell paths collapse to one logical key (issues #28/#2339)"
+    ))
 }
 
 /// The name of the first `Custom` comparator node ANYWHERE in `cmp`'s tree that
