@@ -979,7 +979,13 @@ else
       local s="${COMPONENT_LOG%.log}.summary.txt"
       ( cd "$wt" && AGENT_GATE_SUMMARY_FILE="$s" AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
           bash "$wt/scripts/agent-gate.sh" --only dep-duplicates ) >"$COMPONENT_LOG" 2>&1
-      grep -E '^dep-duplicates: +(PASS|FAIL|SKIP)' "$s" 2>/dev/null | head -1
+      # VACUOUS is a component status too (#3625), so the alternation must name it: a
+      # pattern that omits it returns EMPTY on exactly the row reporting that the
+      # component verified nothing, and every caller below would then misreport that as
+      # "no component line — the component did not run". Returning the row instead lets
+      # each caller's own arm red on it, which is what #1700 AC2 requires (VACUOUS is a
+      # failing status, and this component may reach no failing status at all).
+      grep -E '^dep-duplicates: +(PASS|FAIL|SKIP|VACUOUS)' "$s" 2>/dev/null | head -1
     }
 
     # G1a — THE CLEAN MEASUREMENT, planted. This is where the deterministic PASS

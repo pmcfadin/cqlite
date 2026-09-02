@@ -16340,7 +16340,7 @@ run_dep_duplicates() {
     echo ">>> [$name] SKIP (cause=guard-absent: $guard is not in this checkout, so nothing was measured)"
     _fm_note_driver "$name" "$drv" not-reached "the guard script is absent from this checkout"
     record_result "$name" "$status" 0
-    echo ">>> [$name] $status (0s)"
+    echo ">>> [$name] $RECORDED_STATUS (0s)"
     return 0
   fi
   echo ">>> [$name] bash $guard"
@@ -16445,7 +16445,7 @@ run_dep_duplicates() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
@@ -17983,7 +17983,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
