@@ -1,81 +1,6 @@
 use super::*;
 
 impl V5CompressedLegacyParser {
-    /// Read i32 BE element/entry count from a frozen collection blob.
-    ///
-    /// `bound` is the exclusive upper byte index for the collection data (either
-    /// `data.len()` for raw variants or `blob_end` for cell-level variants).
-    fn read_frozen_count(
-        data: &[u8],
-        offset: &mut usize,
-        bound: usize,
-        collection_kind: &str,
-        column_name: &str,
-    ) -> Result<usize> {
-        if *offset + 4 > bound {
-            return Err(Error::corruption(format!(
-                "Frozen {} '{}': not enough bytes for element count",
-                collection_kind, column_name
-            )));
-        }
-        let count = i32::from_be_bytes([
-            data[*offset],
-            data[*offset + 1],
-            data[*offset + 2],
-            data[*offset + 3],
-        ]);
-        *offset += 4;
-
-        if count < 0 {
-            return Err(Error::corruption(format!(
-                "Frozen {} '{}': negative element count {}",
-                collection_kind, column_name, count
-            )));
-        }
-        let count = count as usize;
-        if count > MAX_FROZEN_COLLECTION_SIZE as usize {
-            return Err(Error::corruption(format!(
-                "Frozen {} '{}': element count {} exceeds maximum {}",
-                collection_kind, column_name, count, MAX_FROZEN_COLLECTION_SIZE
-            )));
-        }
-        Ok(count)
-    }
-
-    /// Read the frozen collection preamble: VUInt blob_len + i32 BE element count.
-    ///
-    /// Returns `(count, blob_end)` with `offset` advanced past the preamble.
-    fn read_frozen_preamble(
-        data: &[u8],
-        offset: &mut usize,
-        collection_kind: &str,
-        column_name: &str,
-    ) -> Result<(usize, usize)> {
-        let (remaining, blob_len) = parse_vuint(&data[*offset..]).map_err(|e| {
-            Error::corruption(format!(
-                "Frozen {} '{}': failed to parse blob length: {:?}",
-                collection_kind, column_name, e
-            ))
-        })?;
-        let blob_len = blob_len as usize;
-        let bytes_consumed = data[*offset..].len() - remaining.len();
-        *offset += bytes_consumed;
-
-        if *offset + blob_len > data.len() {
-            return Err(Error::corruption(format!(
-                "Frozen {} '{}': blob_len {} exceeds available data {}",
-                collection_kind,
-                column_name,
-                blob_len,
-                data.len() - *offset
-            )));
-        }
-
-        let blob_end = *offset + blob_len;
-        let count = Self::read_frozen_count(data, offset, blob_end, collection_kind, column_name)?;
-        Ok((count, blob_end))
-    }
-
     /// Read a single length-prefixed element from a frozen collection blob.
     ///
     /// `blob_end` is the exclusive upper byte index bounding the collection.
@@ -155,15 +80,11 @@ impl V5CompressedLegacyParser {
             let desc = format!("{} '{}' element {}", kind, column.name, i);
             let value =
                 self.read_frozen_element(data, &mut offset, blob_end, element_type, &desc, 0)?;
-            tracing::debug!(
-                "V5CompressedLegacy: Frozen {} element {}: {:?}",
-                kind,
-                i,
-                value
-            );
+            tracing::debug!("V5CompressedLegacy: Frozen {kind} element {i}: {value:?}");
             elements.push(value);
         }
 
+        Self::require_frozen_extent(offset, blob_end, kind, &column.name)?; // #3811 (F)
         if as_set {
             Ok((Value::Set(elements), blob_end))
         } else {
@@ -178,7 +99,6 @@ impl V5CompressedLegacyParser {
         offset: usize,
         element_type: &str,
         column: &crate::schema::Column,
-        _reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         self.parse_frozen_sequence_value(data, offset, element_type, column, false)
     }
@@ -193,7 +113,6 @@ impl V5CompressedLegacyParser {
         offset: usize,
         element_type: &str,
         column: &crate::schema::Column,
-        _reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         self.parse_frozen_sequence_value(data, offset, element_type, column, true)
     }
@@ -209,7 +128,6 @@ impl V5CompressedLegacyParser {
         key_type: &str,
         value_type: &str,
         column: &crate::schema::Column,
-        _reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         let (count, blob_end) = Self::read_frozen_preamble(data, &mut offset, "map", &column.name)?;
 
@@ -231,15 +149,11 @@ impl V5CompressedLegacyParser {
             let val_value =
                 self.read_frozen_element(data, &mut offset, blob_end, value_type, &val_desc, 0)?;
 
-            tracing::debug!(
-                "V5CompressedLegacy: Frozen map entry {}: {:?} -> {:?}",
-                i,
-                key_value,
-                val_value
-            );
+            tracing::debug!("Frozen map entry {i}: {key_value:?} -> {val_value:?}");
             entries.push((key_value, val_value));
         }
 
+        Self::require_frozen_extent(offset, blob_end, "map", &column.name)?; // #3811 (F)
         Ok((Value::Map(entries), blob_end))
     }
 
@@ -456,7 +370,6 @@ impl V5CompressedLegacyParser {
         offset: &mut usize,
         type_str: &str,
         column: &crate::schema::Column,
-        _reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<Value> {
         // Extract element types from schema (schema-aware, no heuristics)
         let element_types = self.extract_tuple_element_types(type_str)?;
@@ -499,8 +412,10 @@ impl V5CompressedLegacyParser {
         let elements =
             self.parse_tuple_elements_raw(data, offset, blob_end, &element_types, &column.name, 0)?;
 
-        // Advance offset to end of blob regardless of how many elements were consumed
-        // (protects against trailing bytes / schema drift).
+        // #3811 (F): the removed comment claimed advancing to blob_end "protects
+        // against trailing bytes"; it made them unobservable. Refuse, THEN advance
+        // — the caller needs the STREAM position here, not the consumed count.
+        Self::require_frozen_extent(*offset, blob_end, "tuple", &column.name)?;
         *offset = blob_end;
 
         Ok(Value::Tuple(elements))

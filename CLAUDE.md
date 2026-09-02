@@ -92,7 +92,7 @@ ad-hoc cargo runs never count. `scripts/agent-gate.sh --list` shows the componen
 | Mode | Command | Use |
 |------|---------|-----|
 | **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests **at the TARGET granularity each component names, NEVER whole packages** (#3522: `cli-tests` runs 35 of 45 `--test` targets and passes no `--lib`/`--bins`, so `cqlite-cli`'s 255 lib/bin unit tests execute nowhere; `integration-tests` COMPILES `cqlite-integration-tests` (`--no-run`) then runs 6 named targets, leaving its lib's 206 tests and 13 bins unexecuted — per-member record: `scripts/tests/workspace-test-disposition.txt`), `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), the **binding lanes** (#3522: `binding-rust-tests` EXECUTES `cqlite-ffi-common` (ALL targets) and `cqlite-node` (`--lib`), whose Rust tests previously ran NOWHERE, and never SKIPs — it needs nothing beyond cargo; `node-bindings` runs the WHOLE jest suite, not 1 of 27 files), `all-features-check` (#3453: `cargo check` + `cargo clippy -D warnings`, both at `-p cqlite-core --all-features --all-targets` — the ONLY component that enables the OTLP stack; never SKIPs), smoke. Emits `AGENT-GATE SUMMARY`. |
-| **Lite** (#1821, ~1–5 min) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + scoped clippy + blast-radius tests (touched package `--lib` + diff's new `--test` targets, mapped from `git diff origin/main...HEAD`; defaults to `cqlite-core --lib` when no rust package is in the diff). Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
+| **Lite** (#1821 — cost is a FUNCTION of the diff; see the measured bands) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + clippy + roborev-lints + blast-radius tests. **Two cost drivers, and only ONE of them scales with your diff.** (1) **`clippy` is NOT diff-scoped** — `--lite` dispatches the IDENTICAL `run_clippy` the full gate does (`run_component clippy run_clippy`, `scripts/agent-gate.sh:17233` vs `:18220`), i.e. the #1844 **per-package scoped-workspace** matrix at `:9357`, and `run_clippy` never reads the diff. (The whole-workspace `--all-features --all-targets` form is the `CQLITE_CLIPPY_FULL=1` path only — do not read the scoped matrix as that one.) So every `--lite` pays clippy IN FULL whatever the diff: measured over 188 completed lite runs it is a no-op warm, 2–7 min part-warm, and **16–24 min cold**. (2) **`scoped-tests` is diff-scoped, and has a fan-out leg the old wording omitted entirely**: it RUNS the touched package's `--lib` + the diff's new `--test` targets (owners by longest-prefix path match over `cargo metadata`, from `merge-base(HEAD, <base>)...HEAD` where `<base>` is the FIRST of `origin/main` → `main` → `origin/master` → `master` that resolves (`:16870`), **plus `git diff HEAD` — the uncommitted diff over TRACKED files only, untracked excluded**; defaults to `cqlite-core --lib` when no rust package is in the diff) — **and when a changed path is under `cqlite-core/src/` it ALSO runs `cargo test -p <pkg> --all-targets --no-run` for every workspace member that DIRECTLY DECLARES a dependency on `cqlite-core` (the `--no-deps` metadata edge) and owns a `--test` target (#2658: COMPILE-CHECKED, never run).** That leg — NOT "touched packages", which consult no dependency edge at all — is why a core-src diff annotates 9–11 package sets, and its `--all-targets` is what balloons `target/debug/deps` (+18 GB in a single round — reported by another lane in #3763/#3764, not measured here). **Measured bands** (completed runs, one fleet box): a **narrow, WARM-clippy** diff is **median 1.4 min** (n=43) — so the `~1–5 min` this row used to claim is that case exactly, a FLOOR and not a range. **The bands are marginal over DIFFERENT subsets and do not compose**: a 1.4 min run is by construction one that paid no cold clippy, so you cannot add the cold-clippy band to it — read each as what its own population measured. A **`cqlite-core/src/`** diff is **median 20 min, range 3.8–43 min** (n=20), and lane-3612 **reports** (not measured here) **up to ~104 min under peer load** in #3764. `cqlite-core/tests/**` does NOT trigger the fan-out; `cqlite-core/src/**` does. **`--lite` is EXEMPT from the #1825 gate-slot cap** (as are `--delta`/`--only`) — it runs outside slot arbitration entirely, so on a shared box its build competes with a peer's gate of record for disk and CPU with nothing arbitrating it. **There is NO admission check for `--lite` today and #3763 owns that gap** — do not read this row as instructing you to apply one. Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
 | **Delta** (#1892) | `scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certify a post-full-PASS polish round whose diff is ONLY executable tests/docs (rust test code, python/node binding tests against an already-built module, `scripts/tests/*.sh`, `*.md`; #2081). FAILs CLOSED on anything else (src, scripts, workflows, `Cargo.*`, config, test-data, unbuilt node module) — never builds, never passes vacuously. Emits a DISTINCT `AGENT-GATE DELTA SUMMARY` naming the anchor + a `delta-executors:` line; record BOTH it AND the anchor's full SUMMARY in the PR. NOT the gate of record. |
 
 **Compiling a feature is not covering it (#1699).** The scoped clippy matrix enables ~30 cqlite-core features
@@ -162,6 +162,35 @@ SUMMARY line. `scripts/tests/test_agent_gate_binding_rust_lanes.sh` does the sam
 lanes, and adds the case the failing-assertion plants cannot reach: one that cfg's a unit suite OUT, so it
 compiles, runs **zero** tests and exits 0 — the only plant that exercises the non-zero-count half of
 `check_unittest_targets_ran`.
+
+**AND THE SAME QUESTION APPLIES TO A LINT'S SUBJECT SET, WHICH IS WHERE IT WAS HARDEST TO SEE
+(#3756).** A gate component's subject set is a package or a target; a LINT's is a LIST OF FILES,
+and an enumerated list that honestly declares its own non-exhaustiveness is **honest without
+being coverage**. Measured: `scripts/tests/test_roborev_guard_portability.sh` has carried the
+rule *"`xargs -r` (and GNU long options) are not in BSD xargs"* verbatim since #3296, and
+`xargs -0 -r` still shipped in `scripts/tests/test_bootstrap_agent_machine.sh`'s tree-identity
+digest — the worst available place, since a silent BSD failure inside an INTEGRITY digest made
+an edited untracked file report `STABLE` — because neither that lint nor its sibling
+`test_agent_gate_tree_portability.sh` named either bootstrap file (**0 references in either**).
+A human reviewer caught it; the lint that already knew the rule never looked. **A FULL
+DERIVATION WAS MEASURED AND REJECTED, NOT ASSUMED AWAY**: sweeping all 167 tracked
+`scripts/**/*.sh` reds 10 of 15 rules across ~40 sites — mostly OTHER portability lints' own
+rule TABLES and deliberate GNU-first/BSD-fallback pairs — a cross-cutting cleanup with its own
+review surface that would red `roborev-lints` in every lane's `--lite`. So the set stays
+ENUMERATED and **DECLARES ITSELF AT RUN TIME**, the same move `flight-tests` makes: every
+scanned path is printed beside an affirmatively MEASURED `unscanned: N of M tracked
+scripts/**/*.sh` line, which reads `NOT MEASURED` — never a number — when the census cannot be
+taken, because a number in a scope declaration reads as authority. Two rules fall out.
+**MEMBERSHIP IS NOT DETECTION**: adding a file to the list proves it reaches `grep`, not that
+the incident's own construct would be caught in it, so each newly-scanned file carries a control
+that PLANTS the construct into a throwaway copy and requires the scan to **NAME** the planted
+line — in a 3000-line file a bare red is produced identically by an unrelated rule. And
+**WIDENING A LINT FINDS THINGS, WHICH IS THE POINT AND ALSO THE COST**: the two bootstrap files
+yielded a real macOS defect (`readlink -f` behind a `|| echo` fallback that made a symlinked
+cargo config get REPLACED by a plain file) and one rule FALSE POSITIVE — `timeout[[:space:]]+[0-9]`
+matched the `2` of `command -v timeout 2>/dev/null`, i.e. the rule red on **the very guard its own
+message recommends**, at three real call sites. Fix the rule, never the caller, and pin both
+directions: a false-positive fix that also loses the true positive is not a fix.
 
 **A CI exemption that defers to a local gate component is only as true as that component's SCOPE
 (#3493).** `.github/ci-gating-tiers.yml` excuses a workflow from `required` by naming the local
@@ -849,6 +878,129 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   must not be clobbered), so re-running it is a **silent no-op**: fix the VALUE in
   `/etc/environment` by hand. Bootstrap says the same thing at the same fork, as
   `gate-pin: NOT-HONOURED`.
+- **Every component line states WHAT IT VERIFIED, not just how long it took — and a component
+  that verified NOTHING cannot report PASS (#3625).** `PASS (0s)` was indistinguishable, in a
+  pasted block, from a component that did nothing. A duration is a PROXY for work; a COUNT is
+  the work. So `_fm_summary_line` now appends a census suffix — `{verified: 3562 tests passed}`,
+  `{verified: 2 test binaries built/verified}`, `{no census — <declared reason>}`,
+  `{census NOT-MEASURED: <reason>}` — plus ONE aggregate `census:` line per block. **The
+  measured oracle behind it, and the answer to the issue's two-run comparison: cargo caches
+  COMPILATION, never test EXECUTION** — a WARM `cargo test` re-prints `test result: ok. N
+  passed` and a WARM `cargo test --no-run` still prints one `Executable ` line per binary — so
+  those `0s` lanes DID re-verify their subjects and the count was in the log all along; nothing
+  put it in the SUMMARY. A `libtest`/`compile`/`both` lane whose measured subject count is ZERO
+  is recorded as **`VACUOUS`**, a fourth component-status token beside PASS/FAIL/SKIP, and it
+  fails the run. **That required making every aggregation AFFIRMATIVE**: `[ "$st" = FAIL ] &&
+  OVERALL=FAIL` failed only the ONE named bad token, so every other value — an unrecognised
+  token, an empty result file, VACUOUS itself — took the permissive branch; `_status_is_nonfailing`
+  is now a closed set (PASS, SKIP) and everything else fails. Two states are DECLARED and
+  deliberately NON-FATAL, because a lane that reds on correct input is the lane agents learn to
+  waive: `NOT-MEASURED` (an unreadable log, a failed ANSI strip, an unrecognised driver report)
+  and `gap:<reason>` (14 components today — fmt, clippy, all-features-check, the shell/python
+  guards, smoke, tooling-tests — each PRINTING its reason every run). Neither is ever read as
+  verified: the aggregate line counts them separately and always as `N RECOGNISED`, never a bare
+  `N`, and it DECLARES its own non-exhaustiveness, because the gap set is curated. One asymmetry
+  worth knowing: for a cargo lane the subject markers are cargo's OWN guaranteed output, so their
+  absence really does mean nothing ran — but for `indirect:<driver>` (python-bindings/pytest,
+  node-bindings/jest) an ABSENT tally is `NOT-MEASURED`, since a third-party report format is not
+  ours and its absence is a measurement failure, not proof of vacuity. **#3400 HAS A SECOND
+  DIMENSION, AND QUIET IS IT**: that rule is about a cargo-output parse keyed on a
+  PRESENTATION property, and an anchor can be perfectly colour-immune while still depending
+  on another one. `CARGO_TERM_QUIET=true` in the environment, or `[term] quiet = true` in any
+  `.cargo/config.toml`, suppresses EVERY cargo status line — measured: a
+  `cargo test --lib --no-run` under quiet emits a COMPLETELY EMPTY log — while leaving
+  libtest's `running N tests`/`test result:` untouched. Neither is visible at the call site,
+  so a box carrying either would have made `feature-iso-parquet` and `minimal-build` measure
+  a *zero* `Executable` count and read VACUOUS on every gate, fleet-wide, on correct input.
+  The fix is THREE-VALUED, not an env override (#3400 records that moving correctness into a
+  setting far from the parse is the worse coupling): the tally reports
+  `<Executable lines> <cargo status lines>`, and a log with **no cargo status output at all**
+  is `NOT-MEASURED (suppressed)` while only a log that demonstrably carries status output
+  *and* zero `Executable` lines is a real `ZERO`. Generalise: **"the marker is absent" and
+  "the marker could not have been printed" are different facts, and a fatal state may only
+  be derived from the first.** Declaration site:
+  `_census_kind` (a CLOSED set; an undeclared component is a named FAIL, so a new component
+  cannot join with a blank census) — **and that guarantee is only as strong as WHERE the
+  state is judged**: the verdict coupling used to return every non-`PASS` status untouched,
+  so `UNDECLARED` was not fatal when the component SKIPped, i.e. the completeness rule failed
+  exactly on a NEW component that SKIPs on the box where it is first run. The census RECORD
+  is now judged before the run's status (an unsound record is a fact about the TABLE, not
+  about this run), and only then does the status decide. **BUT A STATIC DECLARATION IS NOT
+  ALWAYS POSSIBLE, AND
+  ASSUMING IT WAS COST A HIGH**: `scoped-tests` was declared `both`, and a diff confined to
+  `bindings/python/**` dispatches NO cargo at all (`classify_scoped_plan` diverts `cqlite-py`
+  and the `cqlite-core` fallback is deliberately guarded on `python_diff -eq 0`), so its log
+  holds only maturin + pytest output and the lane measured ZERO — reddening a CORRECT `--lite`
+  fix round and a CORRECT `--delta`, a certifying mode. A lane whose SUBJECT DEPENDS ON WHAT
+  THE RUN ROUTED TO gets the `runtime:<why>` kind and writes its own record from the same
+  routing variables the dispatch was made from; "no executable subject was dispatched" is an
+  affirmative `NOT-APPLICABLE`, never `VACUOUS`. **The general rule: before declaring a lane's
+  subject, ask whether the lane always HAS that subject — a kind that is right for the common
+  route and wrong for a rarer one is a guard that reds on correct input.** **Its domain is WIDER than `COMPONENTS`, and getting that
+  wrong was measured, not theorised**: a name reaches a component line from `COMPONENTS`, from a
+  `NAMES+=("<literal>")` append in the `run_delta_*` helpers, AND from a `record_result
+  "<literal>"` call — the #2926 `tree-selftest` hook is the third kind, and enumerating only the
+  first two rendered its row `FAIL` in a real self-test block. Guard: `scripts/tests/test_agent_gate_census.sh`
+  (`tooling-tests`), which plants a no-op in a real component under `--only`, requires the block
+  to NAME it, and carries a positive control on the same lane differing in ONE property.
+  **ADDING A STATUS TOKEN INVALIDATES EVERY HARD-CODED STATUS-SET LITERAL, including the ones in
+  the test suites**: three `(PASS|FAIL|SKIP)` alternations survived `VACUOUS`'s arrival, and the
+  failure direction is the nasty one — such a pattern stops SEEING exactly the rows that report a
+  component verified nothing (one of them then REDDENED A CORRECT boundary block, because a
+  sibling count did see them). `test_agent_gate_census.sh` case R1 is the standing sweep; its
+  needle is deliberately SPLIT so the guard cannot match its own source, and case R2 proves it
+  discriminates the bare three from the roborev block's longer verdict vocabulary, which
+  legitimately begins with the same tokens.
+  **Two lessons from its review worth carrying elsewhere. (1) A "present-and-zero" tally has more
+  than one spelling, and keying on the GOOD word misses all the others**: the pytest reader matched
+  `N passed`, so every terminal summary reporting zero passed WITHOUT that word — `61 skipped in
+  1.20s`, `1 xfailed in …`, `2 deselected in …`, `3 errors in …` — fell into the ABSENT branch,
+  which is `NOT-MEASURED` and therefore PRESERVES `PASS`. A suite whose every test was skipped is
+  the vacuous pass this mechanism exists to catch, so RECOGNISE THE SUMMARY LINE FIRST (an outcome
+  pair from the driver's own closed vocabulary **plus** a duration tail) and read the count off it
+  second. **(2) A near-miss in a FORMAT STRING can hide an entire emit path from a uniformity
+  guard**: #3453's B1 grepped for the literal `printf '%-18s %s (%s)'` while the tree-integrity
+  BOUNDARY printer spelled its format `(%ss)` — one character — so a whole mode rendered component
+  rows with neither annotation and the guard reported zero bypasses. The needle is now the `%-18s`
+  NAME FIELD (comment-blind), whose only legitimate occurrence is the renderer's own definition.
+  Generalise: **when you assert "everything goes through ONE X", key the assert on the narrowest
+  thing that MAKES it an X, never on a whole literal a caller can spell differently** — and
+  re-derive the emit-site set from the code rather than from a count someone wrote in a report.
+  **(3) A LABEL MAY NAME A STATUS ONLY IF IT WAS DERIVED FROM THE OBSERVED STATUS — this issue
+  produced FOUR findings of that one shape** (a progress line printing `PASS` beside a
+  `VACUOUS` SUMMARY; a FAILing `gap:` component counted as `DECLARED-GAP` rather than
+  not-applicable; `NOT-APPLICABLE` labelled `(SKIP/FAIL)` on a row that PASSes, once the
+  `runtime:` route made that pair reachable; and the `ZERO` STATE counted under a heading
+  reading `VACUOUS`, a STATUS word, which a shipping mode already contradicted by emitting
+  `fmt: VACUOUS (0s)` beside `0 VACUOUS`). The root was structural — the aggregate took
+  component NAMES and no statuses, so every status word in it *had* to be an assumption about
+  which statuses reach a given state. It takes name/STATUS pairs now, the state buckets carry
+  no status word, and the two status-derived figures are counted from the status. **Ask of
+  every label: is this word derived from the state I am rendering, or from an assumption about
+  which states get here?** And prefer *deriving* the qualifier to deleting it — `(did not
+  PASS)` carries real information when it is true. **(4) THE SAME ROOT APPEARED A THIRD TIME, IN
+  THE RENDER-TIME FALLBACK, AND THE ANSWER WAS CONVERGENCE RATHER THAN A SIXTH PATCH.**
+  `_census_measure` (verdict time) and `_census_record` (render time) answer the same question —
+  what is the truthful census state for (component, status)? — and answered it differently for
+  five rounds, because the fallback *took no status* and dispatched on kind alone: a gap-declared
+  component that CRASHED before `record_result` rendered its GAP reason. Both now delegate to one
+  `_census_classify`, with exactly one declared asymmetry (only the measurer may read the
+  component log), and `test_agent_gate_census.sh` case S1 drives BOTH over the same 64-cell
+  (kind × status × sidecar) matrix requiring identical output wherever the log is not needed —
+  because **a second implementation's agreement is only knowable by testing it**. Generalised:
+  when two functions answer one question, converging them and pinning the agreement ends the
+  class; patching the sixth label does not. **(5) AND A COUNT OF INPUTS IS STILL A PROXY** — the
+  delta `node-tests` lane censused *the number of changed files it selected*, which is this
+  doctrine's own premise ("a duration is a proxy for work; a count IS the work") violated inside
+  its implementation, and wrong in BOTH directions at once: jest EXITS 0 when every selected test
+  is skipped, so an all-skipped run reported a confident count and kept its PASS, while a changed
+  HELPER runs the WHOLE suite and was censused as one file. The subject must be what the DRIVER
+  reports it did, so that lane is `indirect:jest` like `node-bindings` — one tally, not two. **The
+  sibling question is answered AT THE DECLARATION rather than left for the next reviewer**:
+  `shell-selftests` keeps "scripts executed" because `_run_shell_selftest_files` invokes every file
+  unconditionally (selected == executed, which is exactly what was NOT true of jest) and because no
+  uniform per-script assertion tally exists to prefer; its residual — a script that runs and
+  asserts nothing — is declared there too.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a
@@ -1904,6 +2056,13 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   target) → re-review` (#2087). **Nits** never trigger
   a re-verify round: batch all of a PR's nits into ONE linked follow-up issue at merge time. When in
   doubt, blocker. Every pre-roborev self-check class below is BLOCKER by definition.
+  **Scripts get a capped loop (#3893):** roborev on `scripts/**`, `.claude/**`, `.github/**` and
+  measurement-harness code (`docs/reports/*-artifacts/**`) is capped at **TWO rounds**; round-3 findings
+  are DISPOSED — one linked follow-up issue per PR, `roborev-defer` marker on the merits — not fixed,
+  UNLESS a finding is a **hang** or a **false verdict** (those two classes are exempt from every
+  convergence rule). Bash has no compiler, so each fix round seeds the next; measured 22/25/32 findings
+  over 7–12 rounds on three harness PRs in one day, most in the prior round's own fix. Tests and the full
+  gate still apply; only the review loop is capped.
   **A DEFERRED finding still has to get PAST roborev, and since #3626 that is mechanical rather than a
   matter of lead memory**: roborev re-reports a deferred finding on every later round, so batching nits
   into a follow-up issue does not by itself make `findings:` read `NONE`. The lead records the deferral
@@ -1974,6 +2133,19 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   (`Backlog/Ready/In Progress/In Review/Done`); exactly one `P0`–`P3` per issue. New issues auto-land
   at `Backlog`. Empty Ready column = no work ready → STOP. Board unreachable (auth/scope) → STOP and
   fix auth; never label-dispatch.
+- **PRODUCT FIRST — the dispatch queue is for the release, not the tooling (owner ruling 2026-09-01,
+  #3893).** Measured that night: Ready held 9 product items vs 38 delivery-tooling items; 13 of the day's
+  new issues were tooling; three bash-harness PRs ran 22/25/32 roborev findings, most in the previous
+  round's fix. Tooling had reached Ready with equal standing and starved the release lane. Rules:
+  **(1)** a worker pulling from Ready takes a **release-milestoned** item (currently `0.17`) whenever one
+  is Ready; delivery-tooling (gate, roborev, claim, bootstrap, fleet, telemetry, coord) is taken only when
+  no product item is Ready or the tooling item is BLOCKING under (2). **(2)** A tooling issue reaches
+  Ready ONLY if it (a) caused a **false PASS** or the merge of bad code, (b) **blocked a lane > 1 h**, or
+  (c) **recurred twice** — cite which in the issue body. Everything else lands `Backlog` (or is a one-line
+  doctrine note, or nothing). "Well-scoped" is no longer sufficient; the lead enforces this at triage
+  and does not promote tooling on scope alone. **(3)** Tooling is **feature-complete for the release**: a
+  tooling change needs a (2)-justification. **(4)** Finish in-flight tooling PRs on their merits; do not
+  feed the pipeline. **(5)** Retro metric: product share of merged PRs, target ≥ 70 % (≈ 45 % when ruled).
 - **How to READ the board — always `--query`, never an unfiltered page (#3055)**: the fresh board read
   the claim protocol requires is a **server-side filtered** `item-list`. This board is 900+ items, and
   an UNFILTERED `gh project item-list` **silently truncates** at the page limit — it returns a partial
@@ -2034,6 +2206,176 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   deletes the ref (refuses under an open PR without `--force`). Maintain the liveness heartbeat
   (`scripts/flow/claim-heartbeat.sh beat <N>`, refreshed at claim + every stage transition);
   `flow-board` reaps deterministically (age > 4h AND no open PR) (#2089).
+  **The per-lane STATE MARKER is ownership-stamped too, and its session axis is deliberately NOT
+  fail-closed (#3822).** `/drive-issue`'s durable `.drive-issue-state.md` used to be prose with no
+  writer, no reader and no ownership stamp, so a session rehydrating in a shared or REUSED worktree
+  adopted a peer's plan wholesale. It is now written and read ONLY through
+  `scripts/flow/drive-issue-state.sh` (`write` / `verify` / `adopt --reason <why>` / `show`;
+  `--help` is the contract), which stamps issue, machine, worktree, session, the SESSION's pid + its
+  start window, and actor into a **bounded prologue** — an exact first-line sentinel, `key: value`
+  lines at column zero, an exact end sentinel — so identity is never grepped out of the free-form
+  body (#3312: remove the shared channel; a body line reproducing a sentinel at column zero is
+  REFUSED at write time, and a duplicate sentinel is its own read-time refusal). **The axis split is
+  the load-bearing decision and the thing a future agent will otherwise undo:** `issue`, `machine`
+  and `worktree` are FAIL-CLOSED and each refusal NAMES ITS AXIS, because they are stable across a
+  legitimate resume and distinct across lanes. `session` is RECORDED but not fail-closed, because
+  the marker's *intended consumer* is the Delta 3 cron re-invoke — a NEW `CLAUDE_CODE_SESSION_ID` in
+  the SAME lane on the SAME issue — so verifying it literally would red EVERY correct resume, and a
+  guard that reds on correct input is the guard agents learn to waive. A session difference alone is
+  resolved by the LIVENESS of the recorded writer, three-valued on `dead-lanes`' precedent: provably
+  GONE ⇒ `ADOPTABLE` and `verify` STILL exits non-zero (adoption is an explicit `adopt` gesture that
+  records the prior session, never an implicit inheritance); provably ALIVE ⇒ `LIVE-PEER`, which
+  **`adopt` also refuses** (an adopt that ignores liveness is a mute button for the whole guard);
+  UNMEASURABLE ⇒ `LIVENESS-UNKNOWN`, refused — a positive verdict requires an affirmative
+  measurement. **The pid recorded is the SESSION's (`CLAUDE_PID`), and there is deliberately NO `$$`
+  fallback**: `$$` is the transient bash that exits immediately, so recording it would make a LIVE
+  peer read as DEAD seconds later — the exact false-permissive this closes. PID reuse is defeated by
+  requiring the live pid's start window to still intersect the recorded one, measured by the
+  three-valued primitives now SHARED with `claim-heartbeat.sh` in
+  `scripts/flow/lib/process-liveness.sh` (one definition, sourced by both: a second implementation
+  of those review rounds is a second place to lose them). `machine` is the same notion `claim.sh`
+  records — same env var, same default, same sanitizer — and the agreement is pinned BEHAVIOURALLY
+  by `scripts/tests/test_drive_issue_state.sh`, which extracts claim.sh's own definition and
+  compares, rather than by care. **`write` MUST succeed over an UNSTAMPED marker, and that is a
+  correctness requirement rather than a convenience**: every lane holds an unstamped marker on
+  rollout BY DEFINITION, so refusing it made the whole marker path a dead letter fleet-wide while
+  the refusal text named the very command that refused — the #3312-job-24 shape, where a
+  break-glass ships that no sequence of actions can reach. An unstamped marker asserts NO
+  ownership, so refusing protects no identifiable party; its body is DISCARDED (never carried
+  forward) and the discard is ANNOUNCED. A MALFORMED/DUPLICATE-SENTINEL marker gets no such
+  exception — it CLAIMS an identity that merely cannot be READ, which may be a live peer's — so a
+  human moves it aside and the lane then takes the ABSENT path. **Generalised, and pinned by a
+  DERIVED test case rather than per-verdict prose: no refusal text may name a subcommand of the
+  script that returns the SAME refusal in that state** — including a two-step remedy, because the
+  readers of these texts run printed commands literally. Naming no mechanical remedy is fine
+  (`FOREIGN-*` say "escalate"); naming one that refuses is the defect, and that case caught two
+  further instances in the same round it was written.
+  **Three later corrections, one shape: a guarantee that stops short of what a consumer
+  actually reads.** (1) A fatal start-up failure printed an ANCHORED line and no
+  `verdict <TOKEN>`, so every caller the doctrine tells to `case` on the token fell through
+  every arm — the prefix is contract (a), the token is contract (c), and **(a) does not imply
+  (c)**; every exit now carries a token. (2) The anchor covers the EXTERNAL commands too: a
+  native `mktemp:`/`mv:` line has no prefix at all, so each call site either CAPTURES that text
+  into the anchored message or suppresses it, and a cleanup command carries `|| true` because a
+  failing command in a bash EXIT trap under `set -e` aborts the trap **and replaces the exit
+  status** (measured: a broken `rm` turned a legitimate `WRITTEN`(0) into an unexplained
+  non-zero). Same sweep, worse defect: a failing `date` committed a stamp with an EMPTY
+  required field — `set -e` cannot catch it, since the writer is called as `if ! write_marker`,
+  which suppresses `set -e` for its whole subtree — so the assembled bytes are now checked for
+  FIELD COMPLETENESS, not just sentinels, or the lane bricks itself. (3) The ADOPTION
+  PROVENANCE (`prior-session`, `prior-session-pid`, `prior-ts`, `adopt-reason`) is DURABLE
+  STATE: an ordinary `write` preserves it exactly as it preserves stage/request-id/pr/branch,
+  because a mandatory, validated `--reason` that the next stage update erases is no audit
+  record — and carrying a field forward requires READING it, so all four are parsed under the
+  same duplicate-key refusal as the identity keys. (4) And the marker CLASSIFIER read `grep`
+  two-valued: an unperformable scan counted as ZERO sentinels, so a DISPLACED stamp classified
+  as `legacy` and `write`'s migration path — the ONE branch licensed to discard a marker —
+  overwrote what may be a LIVE PEER's state. Every sentinel/field scan here is now three-valued
+  and an unmeasurable classification is its own `ERROR` class every caller refuses on, which is
+  CLAUDE.md's standing rule (a positive verdict requires an AFFIRMATIVE MEASUREMENT; never
+  derive a pass from the ABSENCE of a bad signal) applied where its permissive branch DELETES
+  DATA. (5) Correction (1) reached ONE exit path, and the SIGNAL traps and USAGE errors still
+  exited with no token — the fix not reaching every site of its own class — so contract (c) is
+  now enforced by a FLAG rather than by reviewing each `exit`: `verdict()` records that it
+  fired, an EXIT-trap backstop emits `ERROR` for any path that would leave with none, `USAGE`
+  joins the closed set, and the signal handlers pick their one token from an explicit
+  COMMIT_PHASE (`ERROR` before the atomic rename, the run's own success token after it,
+  DEFERRED across it). That phase is only OBSERVABLE because the rename moved OUT of a `$( )`:
+  measured on bash 5.2, a trapped signal arriving while the shell waits for a COMMAND
+  SUBSTITUTION inside a FUNCTION is DISCARDED — the trap never runs — while the same signal
+  during a plain command is delivered normally. (6) Same shape once more, at the SHELL's own
+  diagnostics: correction (2) captured 21 EXTERNAL commands' stderr and left `shift`'s, which
+  bash prints UNPREFIXED under `shift_verbose`/POSIX mode — both reachable from the inherited
+  `BASHOPTS`, so by a caller and not only by the invoker. Every `shift` now validates `$#`
+  FIRST. **The transferable rule from (4)-(6): when a round's fix names a site, sweep the
+  CLASS and add coverage driven by a TABLE, or the next round finds the same defect one exit
+  path over** — which is what happened here three times running. That table immediately paid
+  out on a site none of the three findings named: a FAILED REDIRECTION is a native diagnostic
+  too, and bash applies redirections LEFT TO RIGHT, so `: >>"$lock" 2>/dev/null` printed its own
+  unprefixed `Permission denied` before stderr was diverted — the suppressor must come FIRST.
+  (7) The marker BODY is copied BY BYTE OFFSET, never by a line-oriented tool: `awk '{print}'`
+  ALWAYS terminates the record it prints, so a body whose last line had no newline GAINED one on
+  every carry-forward write (measured 19 → 20 bytes) under a header promising byte-for-byte
+  preservation — and the case meant to catch that extracted through awk TOO, so **a verification
+  sharing the defect's blind spot is not a verification**; the test helper now reads a `grep -b`
+  byte offset and copies with `tail -c`, a different mechanism from the script's, with the
+  retired helper kept as the positive control. `$( )` capture is the same class (it strips
+  trailing newlines), which is why body bytes are streamed to a redirected stdout and never
+  captured into a variable. (8) Contract (c)'s own enforcer had a window inside it: `verdict()`
+  committed the "already emitted" flag BEFORE printing the line, so a signal landing between the
+  two made the handler AND the EXIT backstop both stay silent and the run exited with NO token —
+  over a possibly-committed write. **A flag that says a side effect HAPPENED must be set AFTER
+  the side effect, and the gap made unobservable**: the emission is now a signal-deferred
+  critical section (print, then commit, then deliver anything that arrived), there is exactly ONE
+  site that prints a verdict line and ONE that sets the flag, and the race is pinned by a
+  structural order assert plus a signal PLANTED at the window in a scratch copy — with the
+  pre-fix ordering kept as the positive control, because a race cannot be pinned by a timed test.
+  (9) **An identity is recorded and compared LOSSLESSLY or the run REFUSES, naming its axis** —
+  the third instance of H1's family (unmeasurable axis committed as a placeholder; then the
+  worktree axis; now a MEASURABLE identity committed LOSSILY). The shared `sanitize_field`
+  maps space to `-`, collapses runs and TRUNCATES at 120, so `CLAIM_MACHINE='build box'`
+  recorded `build-box` and a genuinely different `build-box` verified as OWNED — and two names
+  sharing a 120-char prefix were one owner. Enforced at the USE SITE by requiring
+  `sanitize_field(v) == v` (one comparison covering charset AND length, needing no second copy
+  of the sanitizer's rules), never in the sanitizer, which stays pinned against claim.sh's own
+  definition — that agreement case now compares the two EXTRACTED functions over a TABLE, since
+  a lossy value no longer reaches a marker to be read back out of. It covers `machine` and
+  `session` (an EQUAL session id is OWNED outright, so a lossy one aliases two sessions);
+  `worktree` was already verbatim; `actor`, the durable fields and the `prior-*` provenance are
+  DECLARED lossy and deliberately not refused, because nothing COMPARES them so a collision
+  cannot grant ownership. Same round, two more: a supplied body is **READ, never stat-gated** —
+  an `[ -s ]` before the copy let a source deleted or truncated in between commit an EMPTY body
+  under `WRITTEN`, so the caller's file is snapshotted ONCE and every later step reads those
+  bytes (a check before the act can only describe a file that no longer has to be the one acted
+  on); and an **unrecognised prologue key is PRESERVED**, because accepting it "for forward
+  compatibility" while the rewrite path dropped it made an OLDER script silently DELETE a field
+  a NEWER one introduced — preserve beats refuse, which would brick every touched lane on a
+  fleet mid-rollout.
+  (10) **An `-e` existence probe is not an existence probe: it FOLLOWS the link, so a DANGLING
+  symlink at the marker path classified `absent` — the ONE class licensed to replace a file — and
+  `write` silently destroyed a link someone placed.** Existence is now `-e` **or** `-L`, the `-L`
+  test runs BEFORE `-f` (which also follows), and EVERY symlink, dangling or not, takes the
+  existing `not-regular` refusal; the class was swept to the script-owned lock sidecar, where
+  `: >>"$lock"` would have created a file OUTSIDE the lane. **And an axis guard must run before
+  anything that DERIVES A PATH OR TAKES A LOCK**: `adopt` locked first, so an unmeasurable
+  worktree yielded a generic "not writable" instead of the published `axis=worktree` refusal —
+  the same input answered differently by subcommand. Both were UNTESTED because the axis matrix
+  named `write verify show` by hand, so it is now DERIVED from the dispatch table and a
+  subcommand with no declared arguments REDS rather than joining uncovered.
+  (11) **A `-L`-only refusal is a type rule with one row: the class is EVERY non-regular type,
+  and the FIFO is the one that HANGS.** Clause (10) taught the lock sidecar to refuse a symlink
+  and left FIFO, socket, device and directory accepted — the third consecutive round whose fix
+  reached one member of its own class. `: >>"$lock"` on a **FIFO BLOCKS INDEFINITELY** waiting
+  for a reader (measured: `timeout 10` ⇒ rc 124, **no verdict line at all**), which is the worst
+  available breach of contract (c) — not a wrong verdict but NO verdict, forever, in a lane
+  nobody is watching; a device would serialize NOTHING while appearing to succeed. So the rule
+  is stated over the TYPE — only `absent` or `regular` may be opened, everything else including
+  a type the probe cannot NAME is one refusal reporting what the entry actually is — and the
+  symlink check is FOLDED IN rather than kept beside it, because two checks are two messages to
+  keep true. The same sweep covers `--body-file`, where `-r` is TRUE for a FIFO and the `cat`
+  then blocks (and `/dev/zero` streams without end into the snapshot: a filled disk, not a
+  hang), but there the question is what the path **RESOLVES to**, since a symlink to a real
+  notes file is the caller's own ordinary artifact — **the same probe answering two different
+  questions would be a defect either way.** The probes are pure `test` builtins: they STAT and
+  never OPEN, so probing cannot itself block. Where a probe CANNOT close the gap it is replaced
+  rather than added to: the `mv`-diagnostic file was a redirection into the derived name
+  `$tmp.err`, and a stat before a redirect only describes a file that no longer has to be the
+  one opened — so it is now `mktemp`, which creates with `O_EXCL` and therefore cannot open a
+  pre-planted entry of any type. **And a test whose subject is a HANG must be BOUNDED and must
+  assert rc != 124 explicitly**: unbounded, a regression does not fail the suite, it hangs it,
+  and the thing that notices is the gate's stall watchdog minutes later.
+  (12) **EXTRACTING A SHARED LIBRARY MOVES A `source` INTO A SCRIPT THAT NEVER HAD ONE, AND
+  THE GUARD WRITTEN FOR IT WAS WEAKER THAN THE ONE THIS SAME CHANGE HAD ALREADY WRITTEN NEXT
+  DOOR.** Pulling the liveness predicates out of `claim-heartbeat.sh` into
+  `lib/process-liveness.sh` gave that script its first `.` — a NEW open, hence a new exposure —
+  and it was guarded `-r` only, while `drive-issue-state.sh`'s guard on the SAME library
+  already required `-f` as well. A FIFO there passed `-r` and the `.` BLOCKED FOREVER
+  (measured: `timeout 10` ⇒ rc 124, **no output at all**), in the script the fleet reaper runs
+  unattended. So: **an extraction's DEDUPLICATION is not complete until the GUARDS around the
+  new dependency are deduplicated too** — the second call site is where the review rounds get
+  lost, exactly as the predicates themselves would have been. `-f` is the whole class in one
+  predicate (false for FIFO, socket, device and directory alike) and FOLLOWS a symlink on
+  purpose, since a symlinked checkout is a legitimate layout.
   **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
   are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT
@@ -2089,6 +2431,19 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   ref — but it was split out rather than shipped, because the fail-open defect family (five
   instances: a failed probe read as a negative answer) clustered in that exit-0 path and it is the
   value a cron reads. Restoring it is tracked separately, carrying the family census forward.
+  **AND ON THIS FLEET IT ANSWERED ABOUT THE EMPTY SET — SUPERVISOR FLEETS ONLY, DESCOPED by owner
+  ruling 2026-09-01 on #3548 (option C; completes #3393).** The subject set is `refs/lane-claims/*`
+  (+ legacy `refs/machine-claims/*`) and its only IN-TREE CALLER that creates or refreshes them is `worker-supervisor.sh` (`stamp` is public and can be called directly), so on
+  this supervisor-less `/drive-issue` fleet it had nothing to report when measured (persisted or
+  manually `stamp`ed refs can still produce rows) — and **exit 1 still means "nothing was reported",
+  never a clean bill of health.** The populated `refs/claims/issue-<N>` and `refs/heartbeats/<machine>`
+  are deliberately NOT read (measured: a transient claiming-shell pid; single-slot-per-machine
+  masking), and AC4 survives as a counterfactual — were a later change ever to read a non-refreshing
+  carrier, a stale pid there must abstain, never yield `DEAD-*`. **Everything else — the measurement,
+  what liveness here rests on, and both board signatures (NEITHER of which is a verdict) — is stated
+  ONCE in `docs/development/fleet-runbook.md` → *Lane liveness on a supervisor-less `/drive-issue`
+  fleet*.** Seven review rounds on #3548 were propagation failures of duplicated prose, so it is not
+  restated anywhere else.
   **Not covered, by construction**: #3393 AC3's "worktree present, tmux session absent" test is
   unimplementable in committed tooling because the lane-directory layout and tmux session naming
   exist NOWHERE in this repo — a tool guessing at them would report nothing on any differently-named

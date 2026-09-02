@@ -12,6 +12,10 @@
 // (-1 = null via `parse_vint`); their COUNT reads therefore use the signed
 // helper to stay self-consistent.
 use super::super::vint::{parse_vint, parse_vint_length, parse_vint_length_signed};
+// #3848: `take_vint_length` is the SINGLE place a signed VInt length is
+// narrowed — it rejects a negative length AND one wider than `usize` on a
+// 32-bit target, where `take(len as usize)` would silently truncate instead.
+use super::super::vint_narrow::take_vint_length;
 use super::udt::parse_cql_value_for_type_with_registry;
 use super::{
     create_empty_value_for_cql_type, parse_cql_value, parse_cql_value_raw,
@@ -68,13 +72,8 @@ pub fn parse_list(input: &[u8]) -> IResult<&[u8], Value> {
 
         let element = if element_length == -1 {
             Value::Null // Null element
-        } else if element_length < 0 {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                remaining,
-                nom::error::ErrorKind::Verify,
-            )));
         } else {
-            let (new_remaining, element_data) = take(element_length as usize)(remaining)?;
+            let (new_remaining, element_data) = take_vint_length(element_length)(remaining)?;
             remaining = new_remaining;
 
             // Handle nested collections correctly
@@ -155,13 +154,8 @@ pub fn parse_map(input: &[u8]) -> IResult<&[u8], Value> {
 
         let key = if key_length == -1 {
             Value::Null // Null key (unusual but possible)
-        } else if key_length < 0 {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                remaining,
-                nom::error::ErrorKind::Verify,
-            )));
         } else {
-            let (new_remaining, key_data) = take(key_length as usize)(remaining)?;
+            let (new_remaining, key_data) = take_vint_length(key_length)(remaining)?;
             remaining = new_remaining;
             parse_cql_value_raw(key_data, key_type)?.1
         };
@@ -172,13 +166,8 @@ pub fn parse_map(input: &[u8]) -> IResult<&[u8], Value> {
 
         let value = if value_length == -1 {
             Value::Null // Null value
-        } else if value_length < 0 {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                remaining,
-                nom::error::ErrorKind::Verify,
-            )));
         } else {
-            let (new_remaining, value_data) = take(value_length as usize)(remaining)?;
+            let (new_remaining, value_data) = take_vint_length(value_length)(remaining)?;
             remaining = new_remaining;
             parse_cql_value_raw(value_data, value_type)?.1
         };
@@ -542,13 +531,8 @@ pub fn parse_list_with_schema<'a>(
 
         let element = if element_length == -1 {
             Value::Null
-        } else if element_length < 0 {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                remaining,
-                nom::error::ErrorKind::Verify,
-            )));
         } else {
-            let (new_remaining, element_data) = take(element_length as usize)(remaining)?;
+            let (new_remaining, element_data) = take_vint_length(element_length)(remaining)?;
             remaining = new_remaining;
 
             // Parse using schema-driven decoding (no heuristics)
@@ -608,13 +592,8 @@ pub fn parse_map_with_schema<'a>(
 
         let key = if key_length == -1 {
             Value::Null
-        } else if key_length < 0 {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                remaining,
-                nom::error::ErrorKind::Verify,
-            )));
         } else {
-            let (new_remaining, key_data) = take(key_length as usize)(remaining)?;
+            let (new_remaining, key_data) = take_vint_length(key_length)(remaining)?;
             remaining = new_remaining;
 
             let (key_remaining, key_value) = parse_cql_value_with_schema(key_data, key_schema)?;
@@ -634,13 +613,8 @@ pub fn parse_map_with_schema<'a>(
 
         let value = if value_length == -1 {
             Value::Null
-        } else if value_length < 0 {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                remaining,
-                nom::error::ErrorKind::Verify,
-            )));
         } else {
-            let (new_remaining, value_data) = take(value_length as usize)(remaining)?;
+            let (new_remaining, value_data) = take_vint_length(value_length)(remaining)?;
             remaining = new_remaining;
 
             let (value_remaining, value_value) =

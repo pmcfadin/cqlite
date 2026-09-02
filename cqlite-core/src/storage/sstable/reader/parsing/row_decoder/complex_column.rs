@@ -622,23 +622,20 @@ impl V5CompressedLegacyParser {
                     Some(val)
                 } else if !cell.path_bytes.is_empty() {
                     // Path bytes are the set element — parse them as the element type
-                    match self.parse_value_from_raw_bytes(
+                    // Issue #3811 (roborev F1): PROPAGATE. This used to map the error
+                    // to `None`, which silently DROPPED the member — so a set cell whose
+                    // path bytes carry trailing garbage produced a set with one fewer
+                    // element instead of a refusal, and two distinct serialized cells
+                    // stayed indistinguishable. That is AC4's collapse wearing a smaller
+                    // set, and it is strictly worse than the wrong value it replaced,
+                    // because a dropped member leaves no trace at all. Verified against
+                    // the 144-file corpus census: no table decodes differently.
+                    Some(self.parse_value_from_raw_bytes(
                         &cell.path_bytes,
                         &element_type,
                         &column.name,
                         0,
-                    ) {
-                        Ok(val) => Some(val),
-                        Err(e) => {
-                            tracing::debug!(
-                                "V5CompressedLegacy: set element {} parse failed (type={}): {}",
-                                i,
-                                element_type,
-                                e
-                            );
-                            None
-                        }
-                    }
+                    )?)
                 } else {
                     None
                 };

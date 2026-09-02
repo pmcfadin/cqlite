@@ -5084,20 +5084,44 @@ fi
 # network, no datasets), so none of these five can become a declared tooling skip.
 fm_sum="$tmp/3453-annot-summary.txt"
 if AGENT_GATE_SUMMARY_FILE="$fm_sum" bash "$GATE" --emit-summary-selftest >/dev/null 2>&1; then
-  fm_lines=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\)' "$fm_sum")
-  fm_annot=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\) +\[.+\]$' "$fm_sum")
+  # VACUOUS joins PASS/FAIL/SKIP in the component-status vocabulary (#3625): a PASS whose
+  # measured subject count is zero is recorded under its own token, so a shape recogniser
+  # that omits it would stop SEEING the very lines that state a component verified nothing.
+  fm_lines=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\)' "$fm_sum")
+  # The line's tail is now `[<feature matrix>]  {<census>}` — BOTH are part of the block
+  # contract, and the `$` anchor requires the census to be LAST, so neither can be dropped
+  # without this failing (#3453 + #3625).
+  fm_annot=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\) +\[.+\]  \{.+\}$' "$fm_sum")
   if [ "$fm_lines" -gt 0 ] && [ "$fm_annot" = "$fm_lines" ]; then
-    ok "3453-annot-a: all $fm_lines component line(s) carry a bracketed feature matrix"
+    ok "3453-annot-a: all $fm_lines component line(s) carry a bracketed feature matrix AND a census suffix"
   else
-    bad "3453-annot-a: only $fm_annot of $fm_lines component lines carry a feature matrix"
-    grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP)' "$fm_sum" || true
+    bad "3453-annot-a: only $fm_annot of $fm_lines component lines carry a feature matrix + census suffix"
+    grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS)' "$fm_sum" || true
   fi
-  if grep -qE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP).*\[(UNDECLARED|UNCLASSIFIED)' "$fm_sum"; then
+  # #3625: the aggregate census line. It must be present, must declare its own
+  # NON-EXHAUSTIVENESS, and must report every non-affirmed class as `N RECOGNISED` rather
+  # than a bare N — a bare zero in a gate log reads as a verified all-clear.
+  fm_census=$(grep -E '^census: ' "$fm_sum" | head -1)
+  # The line carries STATE buckets (which name no status) and STATUS-DERIVED figures. The
+  # `VACUOUS (RECOGNISED)` heading this used to require is GONE on purpose (#3625, roborev
+  # job 371 + sweep): it was a STATUS word counted from the ZERO STATE, and a shipping mode
+  # already emitted a `VACUOUS` row beside `0 VACUOUS`. The state bucket is now
+  # `measured-ZERO` and the status figure is counted from the observed status.
+  case "$fm_census" in
+    *'AFFIRMED a count'*'DECLARED-GAP (RECOGNISED)'*'NOT-MEASURED (RECOGNISED)'*'measured-ZERO (RECOGNISED)'*'not-applicable (component did not PASS)'*'no-subject (PASSed'*'carry a VACUOUS status'*'NON-EXHAUSTIVE'*)
+      ok "3625-census-block: the block carries ONE aggregate census line whose status-naming qualifiers are DERIVED (not-applicable/did-not-PASS vs no-subject/PASSed, and a VACUOUS count from the status), declaring its own non-exhaustiveness" ;;
+    '') bad "3625-census-block: no 'census:' aggregate line in the emitted block" ;;
+    *)  bad "3625-census-block: the census line does not carry the required RECOGNISED / status-derived / NON-EXHAUSTIVE wording: $fm_census" ;;
+  esac
+  # VACUOUS included (#3625): omitting it made this screen BLIND to exactly the rows that
+  # report a component verified nothing — the ones most worth checking for a broken
+  # annotation.
+  if grep -qE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS).*\[(UNDECLARED|UNCLASSIFIED)' "$fm_sum"; then
     bad "3453-annot-b: a component line reads UNDECLARED/UNCLASSIFIED in the reference block"
   else
     ok "3453-annot-b: no component line reads UNDECLARED/UNCLASSIFIED in the reference block"
   fi
-  if grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP)' "$fm_sum" | grep -q 'RESULT:'; then
+  if grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS)' "$fm_sum" | grep -q 'RESULT:'; then
     bad "3453-annot-c: an annotation embeds the RESULT: token — it would break the #2908 poll predicate"
   else
     ok "3453-annot-c: no annotation embeds the RESULT: token (the one-RESULT invariant is safe)"
@@ -5192,7 +5216,10 @@ _fa_run() {
     AGENT_GATE_TEST_LITE_SCOPED="$4" \
     bash "$GATE" --lite-aggregate-selftest >/dev/null 2>&1
 }
-_fa_line() { grep -E "^$1: +(PASS|FAIL|SKIP)" "$fa_sum" 2>/dev/null | head -1; }
+# VACUOUS is part of the component-status vocabulary since #3625 (a PASS whose measured
+# subject count is zero), so a two-token matcher would silently fail to FIND a census-failed
+# row and every case reading it would compare against an empty string.
+_fa_line() { grep -E "^$1: +(PASS|FAIL|SKIP|VACUOUS)" "$fa_sum" 2>/dev/null | head -1; }
 
 # 55a. AN IDENTITY IS EXTRACTED — the #3765 subject line, verbatim from the issue.
 _fa_run identity "file-size:FAIL fmt:PASS clippy:PASS" "file-size=$fa_dir/one.log" PASS
@@ -5320,8 +5347,8 @@ esac
 #      emitted block, so it can no longer be read as a failure identity.
 fa_lab_sum="$tmp/3765-label.txt"
 if AGENT_GATE_SUMMARY_FILE="$fa_lab_sum" bash "$GATE" --emit-summary-selftest >/dev/null 2>&1; then
-  fa_lines=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\)  \[' "$fa_lab_sum")
-  fa_labelled=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\)  \[invocation: ' "$fa_lab_sum")
+  fa_lines=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\)  \[' "$fa_lab_sum")
+  fa_labelled=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\)  \[invocation: ' "$fa_lab_sum")
   if [ "$fa_lines" -gt 0 ] && [ "$fa_lines" -eq "$fa_labelled" ]; then
     ok "3765-label: all $fa_lines component line(s) label the bracket 'invocation:' (it cannot be read as a failure identity)"
   else
@@ -5357,7 +5384,15 @@ fi
 
 # 55o. `.result` STAYS TWO FIELDS. There is a 2-field `read -r _st _secs` reader that
 #      would silently absorb a third, so the identity MUST ride a sidecar.
-if printf '%s\n' "$fa_rr" | grep -q "printf '%s %s\\\\n' \"\$2\" \"\$3\" > \"\$LOG_DIR/\$1.result\""; then
+# ASSERT THE SHAPE, NOT THE VARIABLE NAMES. This used to pin the literal
+# `printf '%s %s\n' "$2" "$3"`, and the #3625 merge legitimately changed the first argument to
+# the census-FINALIZED status ($_rr_status) — so the assert failed while the property it exists
+# for was intact. A structural assert keyed on an incidental spelling reports a defect that is
+# not there, which is the same class of noise as an assert that misses one that is: every
+# `.result` write must use the TWO-field format, and no three-field variant may exist anywhere.
+fa_rr_w=$(printf '%s\n' "$fa_rr" | grep -cE "printf '%s %s\\\\n'[^>]*> \"(\\\$_rr_tmp|\\\$LOG_DIR/\\\$1\.result)\"")
+fa_rr_w3=$(printf '%s\n' "$fa_rr" | grep -cE "printf '%s %s %s")
+if [ "${fa_rr_w:-0}" -ge 1 ] && [ "${fa_rr_w3:-0}" = 0 ]; then
   ok "3765-two-fields: record_result still writes exactly two whitespace fields to .result"
 else
   bad "3765-two-fields: record_result's .result write changed shape — a third field would be silently absorbed by the 2-field reader"
@@ -6883,7 +6918,10 @@ fi
 #       after a mutation. `%-18s` may appear exactly once in the gate: inside the renderer.
 #       (The behavioural half — a real boundary FAIL row carrying both — is in
 #       scripts/tests/test_agent_gate_tree_integrity.sh, which has the fixture repo.)
-fa_raw_rows=$(grep -c "printf '%-18s" "$GATE")
+# COMMENT-BLIND (`^[^#]*`), for the reason the #3625 guard states about its own needle: a
+# comment QUOTING the format — the boundary loops now carry two, explaining this very defect —
+# must not be counted, or an artifact DESCRIBING the rule becomes a violation of it.
+fa_raw_rows=$(grep -cE "^[^#]*printf '%-18s" "$GATE")
 if [ "${fa_raw_rows:-0}" = 1 ]; then
   ok "3765-boundary-one-formatter: exactly one site in the gate formats a component row (_fm_summary_line) — the tree-integrity boundary loops render through it too"
 else
@@ -6903,17 +6941,25 @@ fi
 # CODE lines only: the runner's own comment names the old `rm -f` idiom while explaining why
 # it was wrong, and a scan over the comments would read that explanation as the defect.
 fa_nd_body=$(awk '/^run_delta_node_tests\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
-if printf '%s\n' "$fa_nd_body" | grep -q 'mktemp -d "\${TMPDIR:-/tmp}/agent-gate-nodedelta' \
-   && ! printf '%s\n' "$fa_nd_body" | grep -qE '=\$\(mktemp "\$\{TMPDIR'; then
-  ok "3765-nodedelta-privdir: run_delta_node_tests creates its jest log inside a private mktemp -d, not as a bare file in the shared tmp"
+# THE MECHANISM CHANGED AND THE PROPERTY DID NOT (#3625 merge). #3765 put this jest log in a
+# private `mktemp -d` that the runner owned and deleted; main then moved it to
+# "$LOG_DIR/node-tests.log" so the census can read jest's own tally and so the log joins the
+# `logs:` bundle. $LOG_DIR is ITSELF a 0700 `mktemp -d`, so the derived `<log>.ansi-stripped`
+# sibling is neither guessable nor creatable by a peer and never reaches a world-writable
+# directory — the same property, by a better mechanism, with no tmpdir for this runner to own.
+# So the assertion is the PROPERTY: the log must NOT be a bare file in the shared tmp.
+if printf '%s\n' "$fa_nd_body" | grep -q 'log="\$LOG_DIR/node-tests.log"' \
+   && ! printf '%s\n' "$fa_nd_body" | grep -qE 'mktemp "?\$\{TMPDIR'; then
+  ok "3765-nodedelta-privdir: run_delta_node_tests keeps its jest log in \$LOG_DIR (itself a 0700 mktemp -d), never a bare file in the shared tmp — so the derived .ansi-stripped sibling cannot leak or be pre-placed"
 else
-  bad "3765-nodedelta-privdir: run_delta_node_tests creates its jest log with a bare mktemp in \${TMPDIR:-/tmp} — _ansi_stripped_log writes a <log>.ansi-stripped sibling there that nothing removes (#3765)"
+  bad "3765-nodedelta-privdir: run_delta_node_tests does not keep its jest log in \$LOG_DIR — a bare \${TMPDIR:-/tmp} log leaks the .ansi-stripped sibling into a world-writable directory and gives a peer a symlink window (#3765)"
 fi
-if printf '%s\n' "$fa_nd_body" | grep -q 'rm -rf "\$tmpd"' \
-   && ! printf '%s\n' "$fa_nd_body" | grep -q 'rm -f "\$log"'; then
-  ok "3765-nodedelta-cleanup: run_delta_node_tests removes the DIRECTORY, which is what also removes the .ansi-stripped sibling"
+# And there must be NOTHING to clean up: a runner that deletes this log would destroy the
+# evidence the census and the logs: bundle now depend on, and re-create the ownership problem.
+if ! printf '%s\n' "$fa_nd_body" | grep -qE 'rm -(f|rf) "\$(log|tmpd)"'; then
+  ok "3765-nodedelta-cleanup: the runner deletes nothing — the log lives in the run directory, so there is no sibling to strand and no tmpdir to own"
 else
-  bad "3765-nodedelta-cleanup: run_delta_node_tests removes only the log file — the derived .ansi-stripped sibling survives every run (#3765)"
+  bad "3765-nodedelta-cleanup: the runner still deletes its log or tmpdir — under \$LOG_DIR that discards the census subject and the logs: bundle evidence (#3625 x #3765)"
 fi
 
 # TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
