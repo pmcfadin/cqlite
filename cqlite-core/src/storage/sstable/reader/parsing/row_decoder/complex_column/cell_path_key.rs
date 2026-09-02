@@ -59,23 +59,15 @@
 //!      a grep of its `if`s.
 //!
 //!    #3612 encoded the `0` allowances as a FIDELITY fix with no behaviour change,
-//!    because the caller then decoded only a NON-EMPTY `path_bytes`. It recorded
-//!    why anyway: "correct only because the caller filters" is a coupling one file
-//!    away from being silently broken.
+//!    because the caller then decoded only a NON-EMPTY `path_bytes` — while warning
+//!    that "correct only because the caller filters" was one file from breaking.
 //!
-//!    **That day came: the `0` rows are now load-bearing (issue #3747).** The
-//!    filter was the defect #3612 described — a LEGAL empty `text`/`blob` key
-//!    (`{'': 1}` is valid CQL; `CollectionSerializer` rejects only a NULL -1 key)
-//!    was not left undecoded but DROPPED from the reconstructed `Value::Map`,
-//!    because `if let Some(key_value) = decoded_key` never fired. #3612 filed it as
-//!    #3747 rather than change a filter governing every complex column.
-//!
-//!    #3747 REMOVED that guard, so the caller decodes EVERY cell path, this table
-//!    decides an empty key's fate, and the empty-key tests are reached by a real
-//!    read (their UNIT-ONLY labels are gone). One consequence: for the `N`-or-`0`
-//!    families this table ADMITS empty but the downstream decoder still refuses it,
-//!    so those keys error — a two-layer inconsistency #3747 pinned and filed as
-//!    **#3805**, not one the guard removal introduced.
+//!    **#3747 removed that filter, so these `0` rows are now load-bearing.** The
+//!    filter WAS the defect #3612 described: a legal empty `text`/`blob` key was
+//!    DROPPED from the `Value::Map`. The caller now decodes every cell path, so this
+//!    table decides an empty key's fate and the empty-key tests are reached by a real
+//!    read (UNIT-ONLY labels gone). Where it ADMITS `0` but no `Value` can carry it,
+//!    the decode below preserves the entry OPAQUELY; a typed one is **#3805**'s.
 //!
 //! # When this site may return `Err` — and why the line is drawn at Cassandra
 //!
@@ -399,7 +391,16 @@ impl V5CompressedLegacyParser {
         // ONE decode, which also REPORTS what it consumed (see
         // `decode_reporting_consumption`).
         let (decoded, consumed) =
-            self.decode_reporting_consumption(data, type_str, column_name, 0)?;
+            match self.decode_reporting_consumption(data, type_str, column_name, 0) {
+                Ok(v) => v,
+                // #3747: the table ADMITTED this empty buffer but no `Value` carries an
+                // empty fixed-width scalar — same OPAQUE policy as below. Typed: #3805.
+                Err(_) if data.is_empty() && allowed.contains(&0) => {
+                    *opaque_out = true;
+                    return Ok(Value::blob(Vec::new()));
+                }
+                Err(e) => return Err(e),
+            };
         // A PEELED VIEW FOR THE CHECKS ONLY — the value itself is returned exactly
         // as the shared decoder produced it (see the return, and the module header's
         // parity section). A `frozen<absent_udt>` key can come back as

@@ -133,37 +133,20 @@ fn empty_key_decodes_for_the_families_that_admit_it() {
     }
 }
 
-/// The `empty is NOT REPRESENTABLE` direction — and the assertion that matters is
-/// the BLAST RADIUS, not the error.
+/// CASSANDRA-VALID BUT UNTYPED — the entry SURVIVES, opaquely. This is the case
+/// roborev pushed on across four rounds and was right about every time.
 ///
-/// roborev job 73 caught what an earlier revision of this fix got wrong. For the
-/// families whose empty representation the downstream decoder does not support,
-/// that revision let the decode error PROPAGATE. That is strictly worse than the
-/// bug #3747 fixes, because row assembly has exactly one `Err` handler and it
-/// `break`s the column loop — so the map column **and every later on-disk column**
-/// vanish from the row, silently (`row_data.rs`; `cell_path_key.rs`'s own module
-/// doc records this, reproduced there with a real `SELECT`).
-///
-/// I had described that to the lead as "pre-fix silently dropped, post-fix errors
-/// visibly". That was wrong in both halves: it is silent either way, and the
-/// post-fix loss was LARGER. So the fix now keeps the PRE-fix behaviour for exactly
-/// these cases — the one entry is dropped — and the two-layer inconsistency behind
-/// it stays #3805's to settle.
-///
-/// What this pins, therefore, is that an unrepresentable empty key costs ONE ENTRY
-/// and not the column: the call must return `Ok`, and the map must simply be short.
+/// Cassandra's `size != N && !isEmpty` shape makes an EMPTY buffer legal for the
+/// `N`-or-`0` families, and #3612's width table encodes that. CQLite has no `Value`
+/// that carries an empty fixed-width scalar — but it already has a POLICY for a key
+/// it cannot model: surface the bytes opaquely and raise `opaque_out`, never drop
+/// and never `Err`. Two earlier revisions of this fix got that wrong: one let the
+/// error propagate (which `break`s row assembly and takes the column plus every
+/// later one), the other dropped the entry (the very data loss #3747 exists to
+/// stop). Applying the existing opaque policy is what resolves both.
 #[test]
-fn an_unrepresentable_empty_key_drops_one_entry_and_never_truncates_the_row() {
-    // Both layers are represented: `tinyint`/`smallint`/`date`/`time` are refused by
-    // #3612's width table (strict `!= N`), while `int`/`float`/`bigint`/`double`/
-    // `timestamp`/`uuid`/`boolean` pass that table and are refused downstream. After
-    // this fix the CALLER cannot tell them apart, which is the point — neither may
-    // take the row down.
+fn a_cassandra_valid_but_untyped_empty_key_survives_as_an_opaque_blob() {
     for ty in [
-        "tinyint",
-        "smallint",
-        "date",
-        "time",
         "int",
         "float",
         "bigint",
@@ -172,13 +155,35 @@ fn an_unrepresentable_empty_key_drops_one_entry_and_never_truncates_the_row() {
         "uuid",
         "timeuuid",
         "boolean",
-        "decimal",
     ] {
         let map_type = format!("map<{ty},int>");
         let decoded = decode(&map_type, b"", &7i32.to_be_bytes()).unwrap_or_else(|e| {
+            panic!("Cassandra admits an empty {ty}; the entry must survive, not error: {e}")
+        });
+        assert_eq!(
+            decoded,
+            Value::Map(vec![(Value::blob(Vec::new()), Value::Integer(7))]),
+            "the empty {ty} key must be PRESERVED opaquely, not dropped and not typed"
+        );
+    }
+}
+
+/// CASSANDRA-INVALID — dropped, and the assertion that matters is the BLAST RADIUS.
+///
+/// `tinyint`/`smallint`/`date`/`time` are spelled with a strict `!= N` check and
+/// `decimal` needs >= 4 bytes, so an empty buffer is TRUNCATED data, not an empty
+/// value. Those are refused by the width table itself. They must still not take the
+/// row down: row assembly has one `Err` handler and it `break`s the column loop, so
+/// a propagated error costs the map column AND EVERY LATER COLUMN, silently. So the
+/// call returns `Ok` and the map is simply short by one.
+#[test]
+fn a_cassandra_invalid_empty_key_drops_one_entry_and_never_truncates_the_row() {
+    for ty in ["tinyint", "smallint", "date", "time", "decimal"] {
+        let map_type = format!("map<{ty},int>");
+        let decoded = decode(&map_type, b"", &7i32.to_be_bytes()).unwrap_or_else(|e| {
             panic!(
-                "an unrepresentable empty {ty} key must NOT propagate — row assembly \
-                 would `break` and take the column plus every later one with it; got {e}"
+                "an empty {ty} key is truncated data, but propagating would `break` row \
+                 assembly and lose the column plus every later one; got {e}"
             )
         });
         assert_eq!(
