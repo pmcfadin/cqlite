@@ -5538,6 +5538,221 @@ if [ "$scc413c_ok" -eq 1 ]; then
   fi
 fi
 
+# --- 12c-d. THE EXECUTION CENSUS: A USER-RESOLVED BINARY IS NEVER RUN BY ROOT ------------
+# (issue #3727, roborev job 415 — HIGH, and it was introduced BY job 413's resolver.) The
+# resolver above answers with <the invoking account's home>/.cargo/bin/sccache, and the
+# documented invocation is `sudo bash <bootstrap>` — so every in-process execution of that
+# answer was root running a file the invoking account can REPLACE. On this fleet every lane
+# runs as one account with a writable home, so the planter is a PEER LANE: a non-invoker
+# route, hence a defect and not an out-of-model invoker capability.
+#
+# 12c-a's census answers "which sites DECIDE presence". This one answers the other half,
+# "which sites EXECUTE the answer", and it exists for 12c-a's reason: the finding named two
+# lines, there were FOUR, and a hand-verified site list is exactly what job 413 leaked
+# through. So the subject set is DERIVED from the shipped script at run time, and any
+# execution outside the two sanctioned routes FAILS BY NAME.
+#
+# THE TWO ROUTES, both already in the script before this fix: `scc_session_run` (section
+# 5b2's `sudo -n -u <the invoking account>` session — privilege already dropped) and
+# `scc_selfrun` (section 2's, which runs the binary ONLY when this process is not root,
+# because section 2 precedes every identity/sudo probe and may make no privileged call).
+#
+# LOGICAL LINES, NOT PHYSICAL ONES. Two of the four sites carry the binary on a `\`
+# CONTINUATION of the line that names the wrapper, so a physical-line scan would report the
+# wrapper missing on a correct site (a red on correct input is the check agents learn to
+# waive) — and, worse, would call a NEW continuation-line exec compliant if its opener
+# happened to mention a wrapper. Continuations are joined first, and the FIRST physical line
+# number is kept so a failure names something greppable.
+#
+# DECLARED NON-EXHAUSTIVE, in this file rather than left to be rediscovered: this recognises
+# the resolver's own variables spelled `"$SCCACHE_BIN"` / `"$SCC_SCCACHE_BIN"` in command
+# position. An exec through a COPY (`b=$SCCACHE_BIN; "$b" --version`) is not recognised, and
+# no textual scan of bash can be. That is why `scc_selfrun` enforces the predicate ITSELF at
+# the exec rather than trusting its callers: the census catches the shape, the function
+# catches the case the census cannot see.
+scc415_logical=$(awk '
+  { if (acc == "") start = NR
+    acc = acc $0
+    if (sub(/\\[[:space:]]*$/, "", acc)) next
+    print start ":" acc; acc = "" }
+  END { if (acc != "") print start ":" acc }' "$BOOTSTRAP")
+if [ -z "$scc415_logical" ]; then
+  bad "sccache-exec: the shipped script could not be read as logical lines — the census below would be vacuous"
+else
+  # Comment lines are dropped AFTER the join (the rationale above quotes the idioms it
+  # replaced, and the shipped script's own comments quote the exec forms they explain).
+  scc415_cands=$(printf '%s\n' "$scc415_logical" \
+    | grep -vE '^[0-9]+:[[:space:]]*#' \
+    | grep -E '"\$(SCC_)?SCCACHE_BIN"[[:space:]]+[^]|)&;]' || true)
+  scc415_n=$(printf '%s' "$scc415_cands" | grep -c '^' 2>/dev/null || true)
+  [ -n "$scc415_cands" ] || scc415_n=0
+  # A FLOOR, because a count is what goes silently to zero: rename the variable, or wrap the
+  # exec in a helper the regex no longer sees, and an EMPTY subject set would report a clean
+  # census having examined nothing. Four sites existed when this was written (one selfrun,
+  # two in the isolated oracle, two in the running-cap read, one in the server start = 6
+  # logical lines); the floor is deliberately below that so ordinary refactoring does not red
+  # it, and above zero so an emptied scan cannot pass.
+  if [ "$scc415_n" -ge 5 ]; then
+    ok "sccache-exec: the census has a subject — $scc415_n execution sites of the resolved binary found in the shipped script"
+  else
+    bad "sccache-exec: only $scc415_n execution sites found (floor 5) — the scan has gone blind, so every assert below would be vacuous"
+    printf '%s\n' "$scc415_cands"
+  fi
+  scc415_bad=""
+  while IFS= read -r scc415_line; do
+    [ -n "$scc415_line" ] || continue
+    case "$scc415_line" in
+      *scc_session_run*|*scc_selfrun*) continue ;;
+    esac
+    scc415_bad="${scc415_bad}${scc415_line}"$'\n'
+  done <<EOF
+$scc415_cands
+EOF
+  if [ -z "$scc415_bad" ]; then
+    ok "sccache-exec: EVERY execution of the resolved sccache goes through the dropped-privilege session or the not-root-only runner — root runs a user-replaceable binary nowhere"
+  else
+    bad "sccache-exec: an execution of the resolved sccache outside both sanctioned routes — under 'sudo bash <bootstrap>' this is root executing a file the invoking account can replace (job 415):"
+    printf '%s' "$scc415_bad"
+  fi
+  # BOTH ROUTES MUST BE PRESENT. Without this, deleting `scc_selfrun` and inlining a bare
+  # exec would be caught, but deleting section 2's exec ENTIRELY and leaving the census to
+  # pass on the five session sites would look identical to a fix.
+  if printf '%s\n' "$scc415_cands" | grep -q 'scc_selfrun' \
+     && printf '%s\n' "$scc415_cands" | grep -q 'scc_session_run'; then
+    ok "sccache-exec: both sanctioned routes are in use (section 2's not-root-only runner and 5b2's privilege-dropped session)"
+  else
+    bad "sccache-exec: one of the two sanctioned execution routes has no site at all — the census may be passing over a shrunken subject"
+    printf '%s\n' "$scc415_cands"
+  fi
+fi
+
+# --- 12c-e. THE RUNNER'S OWN BEHAVIOUR, DRIVEN AT EUID 0 --------------------------------
+# The census above is structural; this is the behaviour, and it is what the finding asks for
+# by name ("add coverage for the root invocation path"). `$EUID` is bash's own readonly and
+# this suite runs as an ordinary account, so the euid is a POSITIONAL parameter of
+# `scc_selfrun`/`scc_selfrun_ok` for the reason `sccache_bin`'s is — no environment seam,
+# which would be settable by exactly the party it constrains.
+#
+# The subject is EXTRACTED FROM THE SHIPPED SCRIPT, and the stub it is pointed at RECORDS its
+# own execution, so "root did not run it" is a measured absence of a marker rather than an
+# inference from an exit code. BOTH DIRECTIONS: a runner that refuses unconditionally would
+# satisfy the refusal case while breaking every non-root box.
+scc415_ok_fn=$(sed -n '/^scc_selfrun_ok() {/,/^}/p' "$BOOTSTRAP")
+scc415_run_fn=$(sed -n '/^scc_selfrun() {/,/^}/p' "$BOOTSTRAP")
+if [ -z "$scc415_ok_fn" ] || [ -z "$scc415_run_fn" ]; then
+  bad "sccache-selfrun: could not extract scc_selfrun_ok/scc_selfrun from the shipped script — the cases below would be vacuous"
+else
+  ok "sccache-selfrun: extracted scc_selfrun_ok + scc_selfrun from the shipped script"
+  scc415_h="$tmp/scc415-selfrun.sh"
+  {
+    echo 'set -uo pipefail'
+    echo 'SCC_SELFRUN_WHY=""'
+    printf '%s\n' "$scc415_ok_fn"
+    printf '%s\n' "$scc415_run_fn"
+    cat <<'HEOF'
+r=0
+out=$(scc_selfrun "$1" "$2" --version 2>/dev/null) || r=$?
+printf 'rc=%s|out=%s|why=%s\n' "$r" "$out" "${SCC_SELFRUN_WHY:-}"
+HEOF
+  } >"$scc415_h"
+  scc415_mark="$tmp/scc415-exec-marker"
+  scc415_stub="$tmp/scc415-stub-sccache"
+  { echo '#!/usr/bin/env bash'
+    echo 'printf ran >> "$SCC415_MARK"'
+    echo 'echo "sccache 9.9.9 (test stub)"'
+  } >"$scc415_stub"
+  chmod +x "$scc415_stub"
+  scc415_selfrun() { rm -f "$scc415_mark"; SCC415_MARK="$scc415_mark" bash "$scc415_h" "$1" "$scc415_stub"; }
+
+  # NON-ROOT: it MUST run, or every box that is not root silently loses the version line.
+  scc415_r=$(scc415_selfrun 1000)
+  if [ -e "$scc415_mark" ] && case "$scc415_r" in rc=0*'sccache 9.9.9'*) true ;; *) false ;; esac; then
+    ok "sccache-selfrun: a NON-root process runs the binary and gets its version (no boundary is crossed — that account resolved its own home)"
+  else
+    bad "sccache-selfrun: the non-root path did not execute the binary: $scc415_r (marker $([ -e "$scc415_mark" ] && echo present || echo absent))"
+  fi
+
+  # ROOT: it must NOT run, and the reason must name the privilege — this is the finding.
+  scc415_r=$(scc415_selfrun 0)
+  if [ ! -e "$scc415_mark" ] && case "$scc415_r" in rc=1*ROOT*) true ;; *) false ;; esac; then
+    ok "sccache-selfrun: at EUID 0 the binary is NOT EXECUTED (marker never written) and the refusal names the privilege — job 415's root-execution route is closed"
+  else
+    bad "sccache-selfrun: EUID 0 executed the user-resolved binary, or refused without naming why: $scc415_r (marker $([ -e "$scc415_mark" ] && echo PRESENT || echo absent))"
+  fi
+
+  # AN UNREADABLE EUID TAKES THE REFUSING BRANCH: "cannot tell" must never inherit the
+  # permissive answer (this file's standing rule about two-valued predicates).
+  scc415_r=$(scc415_selfrun '')
+  if [ ! -e "$scc415_mark" ] && case "$scc415_r" in rc=1*EUID*) true ;; *) false ;; esac; then
+    ok "sccache-selfrun: an unreadable \$EUID refuses and names it — an unmeasured privilege state is not a licence to exec"
+  else
+    bad "sccache-selfrun: an unreadable EUID did not refuse: $scc415_r (marker $([ -e "$scc415_mark" ] && echo PRESENT || echo absent))"
+  fi
+  rm -f "$scc415_mark"
+
+  # AND THE PREDICATE IS ENFORCED AT THE EXEC, NOT ONLY BY THE CALLER. Structural, because
+  # the behavioural cases above pass just as well if the guard lives in section 2's caller —
+  # and then the next caller added inherits nothing. Both facts, from the shipped text.
+  if printf '%s\n' "$scc415_run_fn" | grep -q 'scc_selfrun_ok "\$euid" || return 1'; then
+    ok "sccache-selfrun: the runner asks the predicate ITSELF before exec'ing, so a future caller that forgets cannot make root run it"
+  else
+    bad "sccache-selfrun: the exec is no longer guarded inside the runner — the invariant would rest on every caller remembering"
+  fi
+fi
+
+# --- 12c-f. A REAL ROOT PROCESS, AND A BINARY IT MUST NOT RUN ---------------------------
+# 12c-e drives the decision; this drives a REAL root invocation of the shipped script, which
+# is the context the finding is about, and it is stageable here for case 11ak's reason: this
+# box has passwordless sudo. Skipped with a named cause where it does not (policed by case 13).
+#
+# THE SUBJECT IS A DIRECTORY THIS ACCOUNT CAN WRITE, ON THE ROOT PROCESS'S PATH — which is a
+# faithful instance of the invariant, not a weaker one: "resolved from a location the invoking
+# account can write" is the property, and $tmp is such a location. Stage 2's ~/.cargo/bin
+# cannot be used here because that path comes from the PASSWD DATABASE (deliberately — see
+# 12c-b) and no fixture can move a real account's home, so planting a marker binary there
+# would mean writing into the real /home/<account>, which no test may do.
+#
+# The stub RECORDS its own execution, so the assertion is a measured absence. It is reachable
+# ONLY from section 2: 5b2's session gets sudo's `secure_path` (no $tmp on it) and resolves
+# the real sccache, so the marker cannot be written by the sanctioned route.
+scc415f_sandbox="$tmp/scc415f-home"; mkdir -p "$scc415f_sandbox/.cargo"
+scc415f_farm="$tmp/scc415f-path"; mkdir -p "$scc415f_farm"
+scc415f_mark="$tmp/scc415f-root-exec-marker"
+{ echo '#!/usr/bin/env bash'
+  echo 'printf ran >> "$SCC415_MARK"'
+  echo 'echo "sccache 9.9.9 (root-exec canary)"'
+} >"$scc415f_farm/sccache"
+chmod +x "$scc415f_farm/sccache"
+rm -f "$scc415f_mark"
+if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+  scc415f_out=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" \
+    CQLITE_BOOTSTRAP_TEST_MODE=1 SCC415_MARK="$scc415f_mark" \
+    HOME="$scc415f_sandbox" CARGO_HOME="$scc415f_sandbox/.cargo" \
+    PATH="$scc415f_farm:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 180 "$PIN_BS" "$BOOTSTRAP" \
+      --skip-smoke --skip-push-probe 2>&1)
+  scc415f_line=$(printf '%s\n' "$scc415f_out" | grep -F 'sccache present' | head -1)
+  if [ -z "$scc415f_line" ]; then
+    bad "sccache-root-exec: the root run did not report sccache present, so the execution site under test was never reached"
+    printf '%s\n' "$scc415f_out" | grep -i sccache | head -5
+  elif [ ! -e "$scc415f_mark" ] \
+       && printf '%s\n' "$scc415f_line" | grep -q 'version NOT read' \
+       && printf '%s\n' "$scc415f_line" | grep -q 'ROOT' \
+       && ! printf '%s\n' "$scc415f_line" | grep -q '9\.9\.9'; then
+    ok "sccache-root-exec: a REAL root run resolves an sccache this account can replace and NEVER EXECUTES IT (canary marker never written), reporting the version as unread and saying why"
+  else
+    bad "sccache-root-exec: a real root run executed a user-writable binary, or claimed a version it must not have read (job 415):"
+    printf '%s\n' "$scc415f_line" | head -2
+    [ -e "$scc415f_mark" ] && echo "  CANARY EXECUTED: $(cat "$scc415f_mark" 2>/dev/null)"
+  fi
+  # Root-owned leftovers cannot be removed by this suite's own user-run cleanup trap — the
+  # same leak shape 11ak records, one directory over.
+  sudo -n rm -f "$scc415f_mark" 2>/dev/null || true
+  sudo -n rm -rf "$scc415f_sandbox" 2>/dev/null || true
+else
+  skip "sccache-root-exec (no passwordless sudo here to stage a real root invocation of bootstrap)"
+fi
+
 # --- 13. NO SKIP MAY BE ANNOUNCED THROUGH ok() (issue #3414 roborev round 2) ----------
 # The finding was one `ok "SKIP ..."` — an announcement that incremented PASS and left the
 # skip count at 0, i.e. a skip reported as a pass, sitting inside the accounting added the
