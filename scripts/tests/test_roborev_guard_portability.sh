@@ -1188,13 +1188,30 @@ case "$_scope_line" in
     fi ;;
 esac
 # (iii) the untakeable census renders as NOT MEASURED, never as a number.
+# THE "NOT A REPO" CONTROL MUST REALLY NOT BE IN A REPO (#3756 roborev round 12). A bare
+# subdirectory of $tmp is not enough: git DISCOVERS the enclosing repository by walking upward, so
+# on a host whose TMPDIR sits inside the checkout the census would succeed and return a NUMBER —
+# a spurious FAIL on a correct tree, which is the shape this whole file exists to keep out.
+# GIT_CEILING_DIRECTORIES stops the upward walk at $tmp, and a nonexistent GIT_DIR removes the
+# other way in; both are set, because a control that depends on where TMPDIR happens to live is
+# not a control.
+#
+# MEASURED, and the real defect was subtler than "it would return a number": `git ls-files`
+# pathspecs are CWD-RELATIVE, so from a subdirectory of the checkout `scripts/*.sh` matches
+# NOTHING and the command SUCCEEDS with empty output — 0 files, exit 0. The control therefore
+# still rendered NOT MEASURED and still PASSED, but through the "census returned nothing" branch
+# instead of the "census could not be taken" branch it claims to exercise: the right verdict for
+# the wrong reason, which is indistinguishable from coverage until the day it is not. So the cause
+# is now asserted too, not just the verdict.
 mkdir -p "$tmp/not-a-repo"
-_scope_nm=$(_scope_unscanned_line "$tmp/not-a-repo")
+_scope_nm=$(GIT_CEILING_DIRECTORIES="$tmp" GIT_DIR="$tmp/no-such-git-dir" \
+  _scope_unscanned_line "$tmp/not-a-repo")
 case "$_scope_nm" in
   *'NOT MEASURED'*)
     case "$_scope_nm" in
       *' of '*' tracked '*) bad "scope control: an untakeable census printed NOT MEASURED but ALSO a count ($_scope_nm) — the number is what a reader quotes" ;;
-      *) ok 'scope control: a census that CANNOT be taken renders NOT MEASURED and emits no number — an unmeasurable scope is never dressed as a measured one' ;;
+      *'could not be taken'*) ok 'scope control: a census that CANNOT be taken renders NOT MEASURED, emits no number, AND names the command failure as its cause — so the control exercises the unrunnable-census branch rather than passing through the empty-result branch for the wrong reason' ;;
+      *) bad "scope control: NOT MEASURED was rendered, but NOT for the reason this control exercises — it reports '$_scope_nm' rather than an unrunnable census, i.e. the right verdict from the wrong branch" ;;
     esac ;;
   *) bad "scope control: a census taken outside any repository still produced a numeric scope line ($_scope_nm) — that is a fabricated measurement" ;;
 esac

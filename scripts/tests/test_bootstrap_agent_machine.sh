@@ -984,7 +984,12 @@ ln -s "$sbU/.cargo/actual.toml" "$sbU/.cargo/second"
 ln -s "$sbU/.cargo/second/" "$sbU/.cargo/config.toml"
 outU=$(PATH="$stubO:$PATH" HOME="$sbU" CARGO_HOME="$sbU/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
-if [ -L "$sbU/.cargo/second" ] && [ "$(count_begin "$sbU/.cargo/actual.toml")" = 0 ] \
+# EVERY protected link is asserted PRESENT and UNCHANGED — `-L` plus its exact `readlink` value
+# (#3756 roborev round 12). These cases claim "the links are untouched"; testing only one of them,
+# and only for existence, would pass if the other were deleted or REPOINTED. Assert the claim made.
+if [ -L "$sbU/.cargo/second" ] && [ "$(readlink "$sbU/.cargo/second")" = "$sbU/.cargo/actual.toml" ] \
+   && [ -L "$sbU/.cargo/config.toml" ] && [ "$(readlink "$sbU/.cargo/config.toml")" = "$sbU/.cargo/second/" ] \
+   && [ "$(count_begin "$sbU/.cargo/actual.toml")" = 0 ] \
    && printf '%s' "$outU" | grep -qE "could not be resolved|which is itself a symlink or a directory|trailing '/' denotes a directory it does not name"; then
   ok "mold/symlink: a trailing-slash target naming a SECOND symlink is refused — the intermediate guards can be bypassed by normalisation, so the no-clobber test is re-run on the write target itself"
 else
@@ -1011,6 +1016,7 @@ cp "$sbV/.cargo/config.toml" "$sbV/pristine-config.toml"
 outV=$(PATH="$stubO:$PATH" HOME="$sbV" CARGO_HOME="$sbV/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if [ ! -e "$sbV/dotfiles/legacy-config" ] \
+   && [ -L "$sbV/.cargo/config" ] && [ "$(readlink "$sbV/.cargo/config")" = "$sbV/dotfiles/legacy-config" ] \
    && cmp -s "$sbV/pristine-config.toml" "$sbV/.cargo/config.toml" \
    && printf '%s' "$outV" | grep -q "broken symlink and .* also exists"; then
   ok "mold/symlink: a DANGLING legacy config symlink beside a real config.toml is refused with a named warning — the legacy target is NOT materialised, so cargo's preference does not flip and the user's config.toml is left byte-identical"
@@ -1031,6 +1037,8 @@ ln -s "$sbW/dotfiles/modern-config" "$sbW/.cargo/config.toml"
 outW=$(PATH="$stubO:$PATH" HOME="$sbW" CARGO_HOME="$sbW/.cargo" \
   "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if [ ! -e "$sbW/dotfiles/legacy-config" ] && [ ! -e "$sbW/dotfiles/modern-config" ] \
+   && [ -L "$sbW/.cargo/config" ] && [ "$(readlink "$sbW/.cargo/config")" = "$sbW/dotfiles/legacy-config" ] \
+   && [ -L "$sbW/.cargo/config.toml" ] && [ "$(readlink "$sbW/.cargo/config.toml")" = "$sbW/dotfiles/modern-config" ] \
    && printf '%s' "$outW" | grep -q "broken symlink and .* also exists"; then
   ok "mold/symlink: a dangling legacy config symlink beside a DANGLING config.toml symlink is refused too — neither target is materialised, so the run does not pick a winner between two broken declarations"
 else
@@ -3065,64 +3073,77 @@ MUT
 # under test, and losing it is better than a case that cannot run. Same `${var:+…}` idiom the
 # gate-pin cases already use for their own bound.
 NOTIFY_TIMEOUT_BIN=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
-[ -n "$NOTIFY_TIMEOUT_BIN" ] \
-  || echo "note: no timeout(1)/gtimeout on this host — the notify-capability cases run UNBOUNDED"
 runnotifyroot() { # runnotifyroot <dir> [env assignments...]
   local dir="$1"; shift
   env PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" "$@" \
-    ${NOTIFY_TIMEOUT_BIN:+"$NOTIFY_TIMEOUT_BIN" -s KILL 300} \
+    "$NOTIFY_TIMEOUT_BIN" -s KILL 300 \
     "$PIN_BS" "$dir/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1
 }
 
-# (b) POSITIVE twin: a healthy wrapper must be reported VERIFIED.
-goodroot="$tmp/notify-good"
-if mknotifyroot "$goodroot" good; then
-  good_out=$(runnotifyroot "$goodroot" CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t')
-  if printf '%s' "$good_out" | grep -q 'notify capability verified' \
-     && ! printf '%s' "$good_out" | grep -q 'notify self-test FAILED'; then
-    ok "notify capability: a HEALTHY wrapper is reported verified"
+# THESE CASES REQUIRE A BOUNDED RUNNER, AND SKIP LOUDLY WITHOUT ONE (#3756 roborev round 12).
+# An earlier revision degraded to an UNBOUNDED run when neither `timeout` nor `gtimeout` existed
+# (stock macOS), reasoning that the bound is a runaway guard rather than the property under test.
+# That trade is wrong HERE: this file runs in the gate's MANDATORY `tooling-tests` component, so a
+# hang regression in the code under test would wedge the component — and the whole gate — with no
+# verdict, for as long as the box stays up. A verdict-less stall is strictly worse than a declared
+# coverage loss, and the skip is COUNTED and printed in the tally, so the reduction is visible
+# rather than silent. Every Linux lane and every CI runner has timeout(1), so this fires only where
+# the alternative was the wedge.
+if [ -n "$NOTIFY_TIMEOUT_BIN" ]; then
+  # (b) POSITIVE twin: a healthy wrapper must be reported VERIFIED.
+  goodroot="$tmp/notify-good"
+  if mknotifyroot "$goodroot" good; then
+    good_out=$(runnotifyroot "$goodroot" CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t')
+    if printf '%s' "$good_out" | grep -q 'notify capability verified' \
+       && ! printf '%s' "$good_out" | grep -q 'notify self-test FAILED'; then
+      ok "notify capability: a HEALTHY wrapper is reported verified"
+    else
+      bad "notify capability: healthy wrapper was not reported verified"
+      printf '%s\n' "$good_out" | grep -i 'notify' | head -4
+    fi
   else
-    bad "notify capability: healthy wrapper was not reported verified"
-    printf '%s\n' "$good_out" | grep -i 'notify' | head -4
+    bad "notify capability: could not stage the healthy wrapper tree"
   fi
-else
-  bad "notify capability: could not stage the healthy wrapper tree"
-fi
 
-# (a) NEGATIVE: a genuinely broken wrapper must be reported FAILED, and must NOT be
-#     reported verified. This is the assertion the auditor's mutation defeats.
-badroot="$tmp/notify-broken"
-if mknotifyroot "$badroot" broken; then
-  bad_out=$(runnotifyroot "$badroot" CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t')
-  if printf '%s' "$bad_out" | grep -q 'notify self-test FAILED' \
-     && ! printf '%s' "$bad_out" | grep -q 'notify capability verified'; then
-    ok "notify capability: a BROKEN wrapper is reported FAILED and never verified"
+  # (a) NEGATIVE: a genuinely broken wrapper must be reported FAILED, and must NOT be
+  #     reported verified. This is the assertion the auditor's mutation defeats.
+  badroot="$tmp/notify-broken"
+  if mknotifyroot "$badroot" broken; then
+    bad_out=$(runnotifyroot "$badroot" CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t')
+    if printf '%s' "$bad_out" | grep -q 'notify self-test FAILED' \
+       && ! printf '%s' "$bad_out" | grep -q 'notify capability verified'; then
+      ok "notify capability: a BROKEN wrapper is reported FAILED and never verified"
+    else
+      bad "notify capability: broken wrapper was not surfaced (probe verdict ignored?)"
+      printf '%s\n' "$bad_out" | grep -i 'notify' | head -4
+    fi
   else
-    bad "notify capability: broken wrapper was not surfaced (probe verdict ignored?)"
-    printf '%s\n' "$bad_out" | grep -i 'notify' | head -4
+    bad "notify capability: could not stage the broken wrapper tree (mutation did not apply)"
   fi
-else
-  bad "notify capability: could not stage the broken wrapper tree (mutation did not apply)"
-fi
 
-# (c) NO TARGET: never exercised on a fleet box, because the ambient
-#     CODEX_NOTIFY_WEBHOOK always takes the other branch. Assert the warning, the
-#     EXACT export text a reader is told to add, and rc 0 (bootstrap is advisory).
-if mknotifyroot "$tmp/notify-notarget" good; then
-  notarget_out=$(runnotifyroot "$tmp/notify-notarget" \
-    CODEX_NOTIFY_WEBHOOK= CQLITE_NOTIFY_WEBHOOK= CODEX_NOTIFY_NTFY_TOPIC= CQLITE_NOTIFY_TOPIC=)
-  notarget_rc=$?
-  if [ "$notarget_rc" -eq 0 ] \
-     && printf '%s' "$notarget_out" | grep -q 'no notify target configured' \
-     && printf '%s' "$notarget_out" | grep -q 'CODEX_NOTIFY_WEBHOOK=https://ntfy.sh/<your-topic>' \
-     && printf '%s' "$notarget_out" | grep -q 'silent no-ops on this machine'; then
-    ok "notify no-target: warns, prints the exact export line, and still exits 0"
+  # (c) NO TARGET: never exercised on a fleet box, because the ambient
+  #     CODEX_NOTIFY_WEBHOOK always takes the other branch. Assert the warning, the
+  #     EXACT export text a reader is told to add, and rc 0 (bootstrap is advisory).
+  if mknotifyroot "$tmp/notify-notarget" good; then
+    notarget_out=$(runnotifyroot "$tmp/notify-notarget" \
+      CODEX_NOTIFY_WEBHOOK= CQLITE_NOTIFY_WEBHOOK= CODEX_NOTIFY_NTFY_TOPIC= CQLITE_NOTIFY_TOPIC=)
+    notarget_rc=$?
+    if [ "$notarget_rc" -eq 0 ] \
+       && printf '%s' "$notarget_out" | grep -q 'no notify target configured' \
+       && printf '%s' "$notarget_out" | grep -q 'CODEX_NOTIFY_WEBHOOK=https://ntfy.sh/<your-topic>' \
+       && printf '%s' "$notarget_out" | grep -q 'silent no-ops on this machine'; then
+      ok "notify no-target: warns, prints the exact export line, and still exits 0"
+    else
+      bad "notify no-target case (rc=$notarget_rc)"
+      printf '%s\n' "$notarget_out" | grep -i 'notify' | head -4
+    fi
   else
-    bad "notify no-target case (rc=$notarget_rc)"
-    printf '%s\n' "$notarget_out" | grep -i 'notify' | head -4
+    bad "notify no-target: could not stage the tree"
   fi
 else
-  bad "notify no-target: could not stage the tree"
+  skip "notify capability: the HEALTHY-wrapper case — no timeout(1)/gtimeout on this host, so bootstrap cannot be run under a deadline and an unbounded run could wedge the mandatory tooling-tests component"
+  skip "notify capability: the BROKEN-wrapper case — same reason (no bounded runner available)"
+  skip "notify no-target: the no-target case — same reason (no bounded runner available)"
 fi
 
 # --- 11. Single-gate pin: the VERDICT is a session PROBE, not a file read (#3414) ---
