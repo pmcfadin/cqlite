@@ -109,7 +109,7 @@ use cqlite_core::types::Value;
 
 #[path = "support/datasets_root.rs"]
 mod datasets_root;
-use datasets_root::{describe_search, sstables_root_for_table};
+use datasets_root::fixture_roots::checkout_test_data_dir;
 
 const KEYSPACE: &str = "test_comparator_order";
 const TABLE: &str = "collection_order";
@@ -183,14 +183,27 @@ const ORACLE_PAIR_ROW2: &[&str] = &[
 // ===========================================================================
 
 fn fixture_dir() -> PathBuf {
-    let root = sstables_root_for_table(KEYSPACE, TABLE).unwrap_or_else(|| {
-        panic!(
-            "{KEYSPACE}.{TABLE} is COMMITTED to git and must resolve in every \
-             checkout, unconditionally (#3220) — {}",
-            describe_search(KEYSPACE, TABLE)
-        )
-    });
-    let ks = root.join(KEYSPACE);
+    // RESOLVED FROM THE CHECKOUT ONLY — the shadowing channel is REMOVED, not
+    // detected (roborev job 43, finding 1).
+    //
+    // This deliberately does NOT use `sstables_root_for_table`. That resolver
+    // searches `$CQLITE_DATASETS_ROOT` BEFORE the checkout, so an out-of-tree
+    // corpus carrying `test_comparator_order/collection_order-*` would win — and
+    // an earlier version of this function only counted candidates WITHIN the
+    // root the resolver had already chosen, which cannot see that substitution at
+    // all: a SINGLE external fixture is unambiguous inside its own root and
+    // silently replaces the oracle. Counting was the wrong shape; the fix is to
+    // remove the choice.
+    //
+    // This fixture is COMMITTED SOURCE, not fetched corpus, so its location is
+    // knowable without consulting the environment: `checkout_test_data_dir()` is
+    // anchored on the workspace root via `CARGO_MANIFEST_DIR`. Same reasoning as
+    // the committed CQL schemas (#3148), which are resolved checkout-relative and
+    // never derived from `CQLITE_DATASETS_ROOT`.
+    let ks = checkout_test_data_dir()
+        .join("datasets")
+        .join("sstables")
+        .join(KEYSPACE);
 
     // AMBIGUITY IS A HARD FAILURE, NOT A CHOICE (roborev job 42, findings 1+3).
     //
@@ -227,11 +240,8 @@ fn fixture_dir() -> PathBuf {
         .filter(|p| {
             let has = |suffix: &str| {
                 std::fs::read_dir(p).is_ok_and(|rd| {
-                    rd.flatten().any(|e| {
-                        e.file_name()
-                            .to_str()
-                            .is_some_and(|n| n.ends_with(suffix))
-                    })
+                    rd.flatten()
+                        .any(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(suffix)))
                 })
             };
             has("-Data.db") && has("-Data.db.jsonl")
@@ -244,14 +254,16 @@ fn fixture_dir() -> PathBuf {
         0 => panic!(
             "no {TABLE}-<uuid> directory under {ks:?} carries BOTH a *-Data.db and its \
              *-Data.db.jsonl golden. {KEYSPACE}.{TABLE} is COMMITTED to git and must \
-             resolve in every checkout, unconditionally (#3220: must_run) — {}",
-            describe_search(KEYSPACE, TABLE)
+             resolve in every checkout, unconditionally (#3220: must_run). This path is \
+             checkout-relative by design and is NOT affected by CQLITE_DATASETS_ROOT."
         ),
         n => panic!(
             "AMBIGUOUS fixture: {n} {TABLE}-<uuid> directories under {ks:?} each carry a \
              *-Data.db + golden, so which one this test asserts against would depend on \
              filesystem order. Leave exactly ONE generation committed (a regeneration must \
              stage the previous directory's DELETION, not just add the new files). \
+             (Shadowing by an external corpus is impossible here — this path is \
+             checkout-relative — so two candidates means two COMMITTED generations.) \
              Candidates: {candidates:?}"
         ),
     }

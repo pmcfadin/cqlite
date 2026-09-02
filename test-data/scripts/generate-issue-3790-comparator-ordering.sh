@@ -355,6 +355,27 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
       # removal to the `<TABLE>-<uuid>/` generations so keyspace-level
       # documentation survives regeneration.
       mkdir -p "$OUT_DIR/$KEYSPACE"
+
+      # REFUSE A SYMLINKED KEYSPACE PATH BEFORE DELETING ANYTHING
+      # (roborev job 43, finding 2). Only OUT_DIR is canonicalised above; the
+      # table-scoped `rm -rf` loop below would FOLLOW a symlinked
+      # "$OUT_DIR/$KEYSPACE" and delete `collection_order-*` directories OUTSIDE
+      # the validated output root. Fail closed rather than canonicalise-and-hope:
+      # a symlink here is never legitimate for a committed fixture path.
+      if [[ -L "$OUT_DIR/$KEYSPACE" ]]; then
+        fail "$OUT_DIR/$KEYSPACE is a SYMLINK. Refusing to delete generations through it (a
+      symlinked keyspace path would let this script remove directories outside the
+      validated output root). Replace it with a real directory and re-run."
+      fi
+      # Belt: even for a real directory, confirm it is still beneath OUT_DIR after
+      # canonicalisation before any removal.
+      _ks_real="$(cd "$OUT_DIR/$KEYSPACE" && pwd -P)" || fail "cannot canonicalise $OUT_DIR/$KEYSPACE"
+      _out_real="$(cd "$OUT_DIR" && pwd -P)" || fail "cannot canonicalise $OUT_DIR"
+      case "$_ks_real/" in
+        "$_out_real"/*) : ;;
+        *) fail "$OUT_DIR/$KEYSPACE canonicalises to $_ks_real, which is OUTSIDE $_out_real. Refusing to delete." ;;
+      esac
+
       # Nullglob so a first-ever run (no existing generation) is not a literal
       # "$TABLE-*" pathspec.
       shopt -s nullglob
