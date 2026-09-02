@@ -538,11 +538,16 @@ const CASES: &[Case] = &[
         skips: &[],
     },
     // ---------------------------------------------------------------------
-    // FETCHED-corpus tier (test-data/schemas/cql-type-parity.cql). These four
-    // tables carry the null/empty/absent properties NO committed fixture has —
-    // verified by scanning every committed golden: none of them has a row that
-    // omits a regular cell, so without this tier "an absent cell renders as
-    // null" and "a cell tombstone renders as null" would be unasserted.
+    // FETCHED-corpus tier. Each of these tables carries a property NO committed
+    // fixture has, so the tier exists to cover what the committed set cannot.
+    //
+    // The `test_types` tables (test-data/schemas/cql-type-parity.cql) carry the
+    // null/empty/absent properties — verified by scanning every committed golden:
+    // none of them has a row that omits a regular cell, so without this tier "an
+    // absent cell renders as null" and "a cell tombstone renders as null" would be
+    // unasserted. `test_timeseries.sensor_data` carries the only `FLOAT` this lane
+    // can reach (see its own note below). Stated as a tier rather than as a count,
+    // which drifts (roborev job 308).
     // ---------------------------------------------------------------------
 
     // Row 1 omits `reg` (never written), row 2 carries a CELL TOMBSTONE for it,
@@ -626,6 +631,59 @@ const CASES: &[Case] = &[
                 why: "empty multicell map renders as {} where Cassandra reads null",
             },
         ],
+    },
+    // test-data/schemas/time-series.cql — the ONLY `FLOAT` column this lane can
+    // reach (issue #3777). NO committed `*-Data.db` fixture declares a `float`
+    // anywhere: measured across every committed schema, so before this case the
+    // lane compared no f32 at all and could not see the JSON writer widening an
+    // f32 to f64 before serializing — `1.6699999570846558` where sstabledump (and
+    // Cassandra `FloatSerializer` -> `Float.toString`) spells `1.67`. That
+    // divergence lived in a README note instead of a test for exactly that reason.
+    //
+    // `temperature`/`humidity` are FLOAT and carry the full 7-9 significant digits
+    // an f32 holds (`92.88221`, `-16.172066`, `1.5052613`), so a widened spelling
+    // cannot pass as a rounding coincidence; `pressure DOUBLE` sits beside them, so
+    // the f64 path is compared in the same rows. Ten live partitions, no tombstone,
+    // no TTL, no static column — the golden reader accepts it whole.
+    Case {
+        presence: Presence::Corpus,
+        keyspace: "test_timeseries",
+        table: "sensor_data",
+        schema: "time-series",
+        pk: &["sensor_id"],
+        ck: &["timestamp"],
+        multicell: &[],
+        // MEASURED DIVERGENCE, and a CSV-ONLY one: exactly ONE of this table's 1000
+        // `temperature` cells (`sensor_id=bc9e0632-1319-472a-a38e-ff5b54cf7ef8`) is
+        // an f32 whose shortest decimal is an EXACT TIE — 36.6015625, where
+        // `36.601562` and `36.601563` are equidistant and both round-trip. The
+        // golden carries `36.601562` (`Float.toString` breaks a tie to an EVEN last
+        // digit); the CSV and table writers render through
+        // `ValueFormatter::format_float32`, i.e. Rust's `f32` `Display`, which
+        // rounds away from zero and emits `36.601563`. Same f32, different spelling
+        // — the gap REQUIRES identical f32 bits, so a genuine value error here is an
+        // ordinary diff.
+        //
+        // The JSON lane is NOT excluded and compares this cell: #3777 made the JSON
+        // writer format the f32 as an f32 (through serde_json's own Ryū-family
+        // formatter, which breaks ties to even), so it agrees with the oracle. The
+        // shared CSV/table formatter in cqlite-core is the remaining half and is its
+        // own change; when it is fixed this gap goes stale and FAILS this lane,
+        // which is what removes it.
+        //
+        // The cost is ONE CELL, measured from the census lines rather than assumed:
+        // the CSV lane compares 15999 cells against the JSON lane's 16000, because a
+        // gap suppresses only the node where its declared divergence is OBSERVED —
+        // the other 999 `temperature` cells agree and are compared normally, as are
+        // `humidity` (also FLOAT) and `pressure` (DOUBLE) in both lanes.
+        skips: &[Skip {
+            path: "temperature",
+            formats: &[Egress::Csv],
+            divergence: Divergence::Float32TieBreakSpellingDiffersFromJava,
+            why: "an exact-tie f32 (36.6015625) is spelled 36.601563 by the shared \
+                  CSV/table formatter where Float.toString spells the tie-to-even \
+                  36.601562 — the SAME f32, only the tie-break digit differs",
+        }],
     },
     // test-data/schemas/nested-udt-keys.cql — (id int PRIMARY KEY) plus ten
     // columns nesting the `key_part` UDT inside tuples, sets, lists and maps,

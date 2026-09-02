@@ -94,13 +94,36 @@ impl Serialize for RowObj<'_> {
 /// `JsonValue`. So the conversion is done here, locally, with no new dependency
 /// and no feature flag whose absence would silently change release output.
 ///
-/// Rust's `f32` `Display` emits the shortest round-tripping decimal for the f32
-/// (at most 9 significant digits, never in exponent form). Re-parsing that text
-/// as `f64` is lossless — f64 recovers any decimal of up to 15 significant
-/// digits, so the nearest f64 to that text is the only f64 whose own shortest
-/// form is that same text — and the `Number` therefore serializes the f32
-/// spelling. Verified over a spread of values by
+/// # How the shortest f32 form is obtained, and why not `f32::to_string`
+///
+/// Via serde_json's OWN f32 serializer (`serde_json::to_string(&f32)`, which is the
+/// only path in the crate that formats an f32 as an f32), then re-parsed as `f64`
+/// for the `Number`. Rust's `Display` was tried first and is WRONG against the
+/// oracle on an exact tie: for `36.6015625f32` (exactly representable, and a real
+/// `test_timeseries.sensor_data` `temperature`) four 8-digit decimals round-trip
+/// and two are equidistant, so the tie-break decides. Measured —
+///
+/// ```text
+/// f32 36.6015625:  Display -> 36.601563     serde_json -> 36.601562
+/// sstabledump golden (Cassandra Float.toString): 36.601562
+/// ```
+///
+/// — serde_json rounds the tie to an EVEN last digit, which is what `Float.toString`
+/// specifies and what the committed dump carries, while `Display` rounds away from
+/// zero. This is the same "Rust float formatting is not Java's" family as
+/// `total_cmp` vs `Float.compare` (CLAUDE.md self-check list), and the AD2 lane's
+/// `test_timeseries.sensor_data` case is what caught it.
+///
+/// Re-parsing that text as `f64` is lossless: the text carries at most 9
+/// significant digits, f64 recovers any decimal of up to 15, so the nearest f64 to
+/// it is the only f64 whose own shortest form is that same text. Verified over a
+/// spread of values by
 /// `json_tests.rs::float32_json_round_trips_through_f32_for_a_spread_of_values`.
+///
+/// The cost is one short `String` per `float` cell — the same order as this
+/// writer's blob, timestamp and decimal arms, all of which render through a
+/// `String` already — in exchange for not adding a formatting dependency and not
+/// depending on a cargo feature whose absence would silently change release output.
 fn float32_to_json(f: f32) -> JsonValue {
     // Non-finite floats stay JSON `null`: JSON has no literal for NaN or
     // +/-Infinity. That is a DECLARED divergence (CLAUDE.md `bindings/parity`
@@ -110,7 +133,13 @@ fn float32_to_json(f: f32) -> JsonValue {
     if !f.is_finite() {
         return JsonValue::Null;
     }
-    let shortest = f.to_string();
+    // serde_json's f32 serializer, NOT `f32::to_string` — see the tie-break
+    // measurement above. `serialize_f32` cannot fail for a finite f32 (it writes
+    // into a `Vec<u8>`), but the error is mapped rather than unwrapped: no
+    // `unwrap()`/`expect()` in this crate.
+    let Ok(shortest) = serde_json::to_string(&f) else {
+        return JsonValue::Null;
+    };
     match shortest.parse::<f64>() {
         Ok(widened) => serde_json::Number::from_f64(widened)
             .map(JsonValue::Number)

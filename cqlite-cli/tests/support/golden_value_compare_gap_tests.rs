@@ -670,3 +670,69 @@ fn the_undecoded_golden_gap_requires_the_cli_array_spelling() {
         );
     }
 }
+
+/// The `temperature` gap declares an exact-TIE `float` spelled with the
+/// away-from-zero digit where `Float.toString` breaks the tie to EVEN — the SAME
+/// f32, only the tie-break digit differing. So it may suppress nothing else: a
+/// DIFFERENT f32 at that position is a value error, which is what this lane exists
+/// to catch, and it is reported as an ordinary diff.
+///
+/// CSV-scoped by declaration and by the divergence itself: the JSON egress renders
+/// the oracle's spelling (issue #3777), so a JSON-lane match would excuse a real
+/// regression there.
+#[test]
+fn the_float_tie_break_gap_does_not_cover_a_different_f32() {
+    let schema = schema_of(
+        "CREATE TABLE t (id int PRIMARY KEY, temperature float);",
+        "t",
+    );
+    let gap = [(
+        "temperature",
+        Divergence::Float32TieBreakSpellingDiffersFromJava,
+    )];
+    // The real divergent cell: f32 36.6015625, whose two equidistant 8-digit
+    // spellings both round-trip.
+    let golden = vec![row(&[("id", json!(1)), ("temperature", json!(36.601562))])];
+
+    // DECLARED: the away-from-zero spelling of the same f32, as a CSV field.
+    let declared = vec![row(&[
+        ("id", json!(1)),
+        ("temperature", json!("36.601563")),
+    ])];
+    let report = compare_rows(&golden, &declared, &schema, &["id"], &[], &gap, Egress::Csv);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert!(report.stale_skips.is_empty(), "{:?}", report.stale_skips);
+
+    // UNDECLARED: a DIFFERENT f32 (one ulp away, and a wholly wrong value), a
+    // non-numeric spelling, and a null. None of these is a tie-break spelling.
+    for wrong in [
+        json!("36.60156"),
+        json!("36.605"),
+        json!("not-a-number"),
+        json!(null),
+    ] {
+        let cli = vec![row(&[("id", json!(1)), ("temperature", wrong.clone())])];
+        let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &gap, Egress::Csv);
+        assert_eq!(
+            report.diffs.len(),
+            1,
+            "a different f32 must still be compared under the tie-break gap ({wrong}): {:?}",
+            report.diffs
+        );
+    }
+
+    // FORMAT SCOPE: the same pair in the JSON lane is NOT this gap — the JSON
+    // egress spells the oracle's tie-to-even form since #3777, so a JSON mismatch
+    // here is a regression and must be reported.
+    let json_cli = vec![row(&[("id", json!(1)), ("temperature", json!(36.601563))])];
+    let report = compare_rows(
+        &golden,
+        &json_cli,
+        &schema,
+        &["id"],
+        &[],
+        &gap,
+        Egress::Json,
+    );
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+}

@@ -200,6 +200,40 @@ pub enum Divergence {
     /// canonicalization — tracked as the container-key comparison follow-up. When it
     /// lands, `compare_map` no longer refuses, these skips suppress nothing, and
     /// `Report::stale_skips` FAILS the lane until they are removed.
+    /// A `float` whose shortest decimal has an EXACT TIE is spelled with the
+    /// away-from-zero digit by the CSV/table egress where the oracle rounds the tie
+    /// to an EVEN last digit. The two spellings denote the SAME f32.
+    ///
+    /// ORACLE: Cassandra `FloatSerializer` renders a `float` through
+    /// `Float.toString`, whose contract is "the shortest decimal that round-trips,
+    /// and if two are equally close, the one whose least significant digit is
+    /// even". The committed corpus has exactly one such cell —
+    /// `test_timeseries.sensor_data`'s `temperature` for
+    /// `sensor_id=bc9e0632-1319-472a-a38e-ff5b54cf7ef8` — whose f32 is exactly
+    /// 36.6015625, where four 8-digit decimals round-trip and `36.601562` /
+    /// `36.601563` are equidistant. The golden carries `36.601562`.
+    ///
+    /// EGRESS SHAPE: a decimal rendering of the SAME f32 — both sides parse to
+    /// identical f32 bits — spelled differently. That equality is the whole
+    /// content of the gap: nothing is lost, only the tie-break digit differs,
+    /// because `cqlite_core::util::value_fmt::ValueFormatter::format_float32` renders
+    /// through Rust's `f32` `Display`, which rounds a tie away from zero. This is the
+    /// same "Rust float formatting is not Java's" family as `total_cmp` vs
+    /// `Float.compare` (CLAUDE.md self-check list).
+    ///
+    /// CSV-SCOPED, and the scope is load-bearing: the JSON egress renders the
+    /// oracle's spelling since issue #3777 (it formats the f32 as an f32 through
+    /// serde_json's own Ryū-family formatter, which breaks ties to even), so
+    /// declaring this for JSON too would drop a column from the format that is
+    /// right. The shared CSV/table formatter is the remaining half and is tracked
+    /// separately — when it is fixed this gap goes stale and FAILS the lane, which
+    /// is what removes it.
+    ///
+    /// NOT COVERED: a DIFFERENT f32 (the two sides must parse to identical bits, so
+    /// every genuine value error is an ordinary diff), a non-finite token (that is
+    /// [`Divergence::NonFiniteFloatRendersAsJsonNull`]'s subject), a `double`, any
+    /// non-numeric spelling, and the JSON lane.
+    Float32TieBreakSpellingDiffersFromJava,
     ContainerMapKeyNotPairableByThisLane,
 }
 
@@ -232,6 +266,12 @@ impl Divergence {
                  UNDECODED as a flat scalar (raw bytes as hex for a collection, \
                  colon-joined text for a tuple) while the egress decodes it into a \
                  structure"
+            }
+            Divergence::Float32TieBreakSpellingDiffersFromJava => {
+                "the golden spells a `float` whose shortest decimal is an exact TIE with \
+                 an EVEN last digit (Float.toString's rule) while the CSV egress spells \
+                 the SAME f32 with the away-from-zero digit — both parse to identical \
+                 f32 bits, so nothing but the tie-break digit differs"
             }
             Divergence::ContainerMapKeyNotPairableByThisLane => {
                 "the declared map KEY type is a container, which this lane has no rule \
@@ -342,6 +382,18 @@ impl Divergence {
                 // here is NOT this gap and is reported as an ordinary diff.
                 matches!(cli, Value::Array(_))
             }
+            Divergence::Float32TieBreakSpellingDiffersFromJava => {
+                // CSV lane, DDL-declared `float` (never `double`: the tie-break the
+                // shared formatter gets wrong is `Float.toString`'s, and a `double`
+                // cell diverging is a different, unmeasured claim), and the two
+                // spellings must denote the SAME f32. Depth and kinding are not
+                // read: a `float` is a scalar, and the equality below is stated
+                // over the two RENDERINGS rather than over a canonical form.
+                let _ = (depth, kinding);
+                egress == Egress::Csv
+                    && matches!(ty, CqlType::Numeric(name) if name == "float")
+                    && same_f32_spelled_differently(golden, cli)
+            }
             Divergence::ContainerMapKeyNotPairableByThisLane => {
                 // DDL ONLY. No value is read — deliberately, and this is the whole
                 // resolution of jobs 302/305/306: any shape assertion here invites
@@ -353,6 +405,31 @@ impl Divergence {
             }
         }
     }
+}
+
+/// Do these two renderings spell the SAME f32 with DIFFERENT text?
+///
+/// The golden side is a JSON number and the CSV side is the field's text, so each
+/// is reduced to its decimal rendering and both are parsed as `f32`. Equal bits is
+/// what makes the divergence a spelling one: a different f32 — any genuine value
+/// error — is not this gap. Non-finite is refused outright (identical spellings, a
+/// `NaN` that never equals itself, and a different variant's subject).
+fn same_f32_spelled_differently(golden: &Value, cli: &Value) -> bool {
+    let text = |v: &Value| match v {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    };
+    let (Some(g_text), Some(c_text)) = (text(golden), text(cli)) else {
+        return false;
+    };
+    if g_text == c_text {
+        return false;
+    }
+    let (Ok(g), Ok(c)) = (g_text.parse::<f32>(), c_text.parse::<f32>()) else {
+        return false;
+    };
+    g.is_finite() && c.is_finite() && g.to_bits() == c.to_bits()
 }
 
 /// CQL's blob literal: `0x` and an EVEN number of hex digits (a byte string), and
