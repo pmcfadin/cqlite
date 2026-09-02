@@ -859,6 +859,11 @@ mod regression_1641_boundary_peek_tests;
 #[cfg(test)]
 mod regression_1795_overflow_tests;
 
+// Issue #3848: the frozen collection preamble's VUInt blob length is capped and
+// bounds-checked without an overflowing add (returns `Err`, never panics).
+#[cfg(test)]
+mod regression_3848_frozen_preamble_overflow_tests;
+
 // Issue #2807: the DECODE surface for keyspace-qualified UDT type names — the
 // registry-backed fallback must split `ks.udt` before the bare-keyed lookup, or
 // the value silently degrades to `Blob`.

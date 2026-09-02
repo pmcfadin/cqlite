@@ -45,7 +45,7 @@ impl V5CompressedLegacyParser {
     /// Read the frozen collection preamble: VUInt blob_len + i32 BE element count.
     ///
     /// Returns `(count, blob_end)` with `offset` advanced past the preamble.
-    fn read_frozen_preamble(
+    pub(super) fn read_frozen_preamble(
         data: &[u8],
         offset: &mut usize,
         collection_kind: &str,
