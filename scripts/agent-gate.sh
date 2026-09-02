@@ -19243,6 +19243,12 @@ _DA_MOUNT_FOR_TARGET=""
 # AFTER a successful write is NOT a writability answer and never refuses; it is DECLARED in
 # the emitted line so a leftover cannot be absorbed into the certification baseline unseen.
 _DA_LEFTOVER=""
+# ACCUMULATED ACROSS EVALUATIONS, newline-separated (roborev job 398). A full gate probes
+# TWICE, and `_DA_LEFTOVER` is reset per measurement, so when both unlinks failed only the
+# POST-SLOT artifact was ever declared and the launch one was absorbed silently — the exact
+# outcome the declaration exists to prevent. Deduplicated, because the two evaluations can
+# legitimately resolve the same directory and a repeated path is noise, not a second stray.
+_DA_LEFTOVER_ALL=""
 # Per-measurement outputs of _gate_disk_admission_measure.
 _DA_STATE=""
 _DA_VALUE=""
@@ -19659,8 +19665,10 @@ sys.stdout.write(p)
 
 # _gate_disk_admission_subject: prints
 #     OK<TAB><probe-path><TAB><target-dir><TAB><leftover-or-empty>
-#     UNWRITABLE<TAB><errno-name><TAB><target-dir>
-#     UNRESOLVED<TAB><why>
+#     UNWRITABLE<TAB><errno-name><TAB><target-dir><TAB><leftover-or-empty>
+#     UNRESOLVED<TAB><why><TAB><target-dir-or-empty>
+# `target-dir` is present on EVERY post-resolution response, empty only when cargo itself
+# never answered (job 398).
 #
 # EVERY FACT TRAVELS OUT THROUGH THE PRINTED PROTOCOL, never through a global. This
 # function is reached via `$(_gate_disk_admission_probe)`, a COMMAND SUBSTITUTION, so a
@@ -19675,11 +19683,12 @@ sys.stdout.write(p)
 # (bounded `mkdir -p`) rather than approximated by an ancestor. See the body: that removed
 # a two-valued predicate that could admit on the wrong filesystem.
 _gate_disk_admission_subject() {
-  local r td e out
+  local r td e out _cwl
   r=$(_gate_resolve_target_dir)
   case "$r" in
     'OK '*) td="${r#OK }" ;;
-    *) printf 'UNRESOLVED\t%s' "${r#UNRESOLVED }"; return 0 ;;
+    # PRE-resolution: cargo never told us a directory, so the empty field is the truth.
+    *) printf 'UNRESOLVED\t%s\t' "${r#UNRESOLVED }"; return 0 ;;
   esac
   # THE ANCESTOR WALK IS GONE — REMOVED, NOT HARDENED (roborev job 351).
   #
@@ -19753,13 +19762,42 @@ p = sys.argv[1]
 # probe could print OK after a write that never landed -- a false admission.
 #
 # The errno is reported for the operator; it no longer decides anything.
-def fail(e):
+def fail(e, w):
+    # CLEAN UP, THEN REFUSE -- AND THE CLEANUP MAY NEVER SOFTEN THE VERDICT (roborev job 398).
+    #
+    # THE DEFECT. This exited immediately, so a failure of write/fsync/close AFTER the probe
+    # file was created left that file behind and never mentioned it. The verdict was right
+    # and the refusal littered -- and a disk-admission guard must not add to the exhaustion
+    # it measures, least of all on the path where an inode is least affordable.
+    #
+    # THE ORDERING IS THE WHOLE POINT: the verdict is decided from the ORIGINAL error, before
+    # any cleanup runs, and cleanup can only ever APPEND a declaration. There is no branch by
+    # which a close() or unlink() problem turns CANNOT-WRITE into anything else.
     code = "unknown"
     if isinstance(e, OSError) and e.errno is not None:
         code = errno.errorcode.get(e.errno, "E%s" % (e.errno,))
-    sys.stdout.write("CANNOT-WRITE " + code)
+    # ONLY A FILE THAT WAS ACTUALLY CREATED CAN BE A STRAY. `w` is the intended PATH; it is
+    # set before os.open, so when open() ITSELF fails nothing exists there and the unlink
+    # legitimately fails with ENOENT. Keying the declaration on `w` therefore named an
+    # artifact that never existed -- a false statement in a certification artifact, the same
+    # class as the target-dir one this round also fixes, and a defect introduced by the first
+    # draft of this very cleanup. Keyed on `created` instead: set only after os.open returns.
+    stray = ""
+    if created:
+        try:
+            os.unlink(w)
+        except Exception:
+            stray = w
+    if stray:
+        # Symmetrical with the success path OK-LEFTOVER: same fact, same shape, reported on
+        # the refusal path too so a refusal cannot litter silently.
+        sys.stdout.write("CANNOT-WRITE-LEFTOVER " + code + " " + stray)
+    else:
+        sys.stdout.write("CANNOT-WRITE " + code)
     sys.exit(0)
 w = ""
+fd = None
+created = False
 try:
     os.makedirs(p, exist_ok=True)
     if not os.path.isdir(p):
@@ -19767,12 +19805,33 @@ try:
         sys.exit(0)
     w = os.path.join(p, "." + os.urandom(12).hex() + ".agent-gate-writeprobe")
     fd = os.open(w, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    created = True
     os.write(fd, b"\0")
     os.fsync(fd)
     os.close(fd)
+    fd = None
 except OSError as e:
-    fail(e)
+    # close() is attempted here and NOT inside fail(), because a descriptor left open would
+    # keep the inode alive and make the unlink pointless on some filesystems. Its own failure
+    # is swallowed deliberately: the verdict is already decided, and the fd is released by
+    # process exit a few lines later regardless.
+    if fd is not None:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+    fail(e, w)
 except Exception:
+    if fd is not None:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+    if created:
+        try:
+            os.unlink(w)
+        except Exception:
+            pass
     sys.stdout.write("UNCLASSIFIED unknown")
     sys.exit(0)
 # THE ONE DELIBERATE EXCEPTION, AND IT IS OUTSIDE THE BOUNDARY ON PURPOSE.
@@ -19797,11 +19856,17 @@ else:
 ' "$td" 2>/dev/null); e=$?
   case "$e" in
     0) ;;
-    127) printf 'UNRESOLVED\ttarget-dir-mkdir-no-classifier'; return 0 ;;
-    124|137) printf 'UNRESOLVED\ttarget-dir-mkdir-timeout'; return 0 ;;
-    "$_CS_UNBOUNDABLE_RC") printf 'UNRESOLVED\ttarget-dir-mkdir-unboundable'; return 0 ;;
-    "$_CS_REPLAY_RC") printf 'UNRESOLVED\ttarget-dir-mkdir-output-truncated'; return 0 ;;
-    *) printf 'UNRESOLVED\ttarget-dir-mkdir-classifier-failed'; return 0 ;;
+    # EVERY POST-RESOLUTION FAILURE STILL CARRIES `td` (roborev job 398). These arms are all
+    # reached AFTER cargo has told us the target directory, so dropping it made the block say
+    # `target-dir UNRESOLVED` about a directory that WAS resolved — a false statement in a
+    # certification artifact — and left `_DA_TARGET_DIR` empty, which silently skipped
+    # `_gate_disk_admission_pin_target_dir` and forfeited round 367's measured-fs-is-used-fs
+    # guarantee on exactly these paths. The measurement failed; the RESOLUTION did not.
+    127) printf 'UNRESOLVED\ttarget-dir-mkdir-no-classifier\t%s' "$td"; return 0 ;;
+    124|137) printf 'UNRESOLVED\ttarget-dir-mkdir-timeout\t%s' "$td"; return 0 ;;
+    "$_CS_UNBOUNDABLE_RC") printf 'UNRESOLVED\ttarget-dir-mkdir-unboundable\t%s' "$td"; return 0 ;;
+    "$_CS_REPLAY_RC") printf 'UNRESOLVED\ttarget-dir-mkdir-output-truncated\t%s' "$td"; return 0 ;;
+    *) printf 'UNRESOLVED\ttarget-dir-mkdir-classifier-failed\t%s' "$td"; return 0 ;;
   esac
   case "$out" in
     OK) printf 'OK\t%s\t%s\t' "$td" "$td"; return 0 ;;
@@ -19809,9 +19874,14 @@ else:
     # -- that is the only question here -- so this is NOT a refusal; the artifact is carried
     # out as the fourth field and DECLARED in the emitted line (job 395).
     'OK-LEFTOVER '*) printf 'OK\t%s\t%s\t%s' "$td" "$td" "${out#OK-LEFTOVER }"; return 0 ;;
-    'CANNOT-WRITE '*) printf 'UNWRITABLE\t%s\t%s' "${out#CANNOT-WRITE }" "$td"; return 0 ;;
-    'UNCLASSIFIED '*) printf 'UNRESOLVED\ttarget-dir-uncreatable-%s' "${out#UNCLASSIFIED }"; return 0 ;;
-    *) printf 'UNRESOLVED\ttarget-dir-mkdir-unrecognised'; return 0 ;;
+    'CANNOT-WRITE '*) printf 'UNWRITABLE\t%s\t%s\t' "${out#CANNOT-WRITE }" "$td"; return 0 ;;
+    # A refusal that could not clean up after itself (job 398): the verdict is unchanged and
+    # the stray rides out in the leftover field, symmetrically with OK-LEFTOVER.
+    'CANNOT-WRITE-LEFTOVER '*)
+      _cwl="${out#CANNOT-WRITE-LEFTOVER }"
+      printf 'UNWRITABLE\t%s\t%s\t%s' "${_cwl%% *}" "$td" "${_cwl#* }"; return 0 ;;
+    'UNCLASSIFIED '*) printf 'UNRESOLVED\ttarget-dir-uncreatable-%s\t%s' "${out#UNCLASSIFIED }" "$td"; return 0 ;;
+    *) printf 'UNRESOLVED\ttarget-dir-mkdir-unrecognised\t%s' "$td"; return 0 ;;
   esac
 }
 
@@ -19900,7 +19970,7 @@ _gate_disk_admission_parse() {
 _gate_disk_admission_probe() {
   local path out rc parsed avail mount availbody subj
   subj=$(_gate_disk_admission_subject)
-  local td="" leftover=""
+  local td="" leftover="" _uw_why=""
   case "$subj" in
     OK$'\t'*)
       subj="${subj#OK$'\t'}"
@@ -19910,9 +19980,14 @@ _gate_disk_admission_probe() {
       # An AFFIRMATIVE measurement that the build cannot write here. It is passed through
       # as its own kind rather than folded into UNMEASURED, which is what let it proceed.
       subj="${subj#UNWRITABLE$'\t'}"
-      printf 'UNWRITABLE\t%s\t%s\t' "${subj%%$'\t'*}" "${subj#*$'\t'}"; return 0 ;;
+      _uw_why="${subj%%$'\t'*}"; subj="${subj#*$'\t'}"
+      printf 'UNWRITABLE\t%s\t%s\t%s' "$_uw_why" "${subj%%$'\t'*}" "${subj#*$'\t'}"; return 0 ;;
     UNRESOLVED$'\t'*)
-      printf 'UNMEASURED\t%s\t\t' "${subj#UNRESOLVED$'\t'}"; return 0 ;;
+      subj="${subj#UNRESOLVED$'\t'}"
+      # `td` survives the conversion (job 398): a failed MEASUREMENT does not unresolve a
+      # directory cargo already named, and carrying it is what keeps the block truthful and
+      # the target-dir pin reachable on this path.
+      printf 'UNMEASURED\t%s\t%s\t' "${subj%%$'\t'*}" "${subj#*$'\t'}"; return 0 ;;
     *) printf 'UNMEASURED\ttarget-dir-resolver-unrecognised\t\t'; return 0 ;;
   esac
   # BOUNDED (roborev job 349): a stalled NFS/FUSE mount hangs `df` forever, and this runs
@@ -20040,11 +20115,29 @@ _gate_disk_admission_measure() {
       _DA_STATE=UNMEASURED; _DA_WHY=probe-unrecognised
       _DA_MOUNT=""; _DA_MOUNT_FOR_TARGET="" ;;
   esac
+  # job 398: every evaluation contributes its stray, so a two-probe run declares BOTH.
+  _gate_disk_admission_record_leftover
   return 0
 }
 
 # _gate_disk_admission_render_state: the per-moment rendering shared by both moments,
 # so the two can never drift into two spellings of one fact.
+# _gate_disk_admission_record_leftover: fold this measurement's stray (if any) into the
+# run-wide accumulator, once. Called from the measurement, so BOTH evaluations contribute.
+_gate_disk_admission_record_leftover() {
+  [ -n "${_DA_LEFTOVER:-}" ] || return 0
+  case "$_DA_LEFTOVER_ALL" in
+    *"$_DA_LEFTOVER"*) return 0 ;;   # already recorded (same dir on both evaluations)
+  esac
+  if [ -n "$_DA_LEFTOVER_ALL" ]; then
+    _DA_LEFTOVER_ALL="$_DA_LEFTOVER_ALL
+$_DA_LEFTOVER"
+  else
+    _DA_LEFTOVER_ALL="$_DA_LEFTOVER"
+  fi
+  return 0
+}
+
 _gate_disk_admission_render_state() {
   case "$_DA_STATE" in
     OK)    printf '%s' "$_DA_VALUE" ;;
@@ -20071,7 +20164,12 @@ _gate_disk_admission_line() {
   # DECLARED, never a verdict (job 395): the write probe proved the filesystem writable and
   # then could not clean up after itself. Naming the exact path is what keeps a stray
   # artifact from being absorbed into the certification baseline unnoticed.
-  [ -n "${_DA_LEFTOVER:-}" ] && DISK_ADMISSION_LINE="$DISK_ADMISSION_LINE; write-probe artifact LEFT BEHIND (unlink failed after a successful write; writability is unaffected): $_DA_LEFTOVER"
+  if [ -n "${_DA_LEFTOVER_ALL:-}" ]; then
+    local _lo_n _lo_list
+    _lo_n=$(printf '%s\n' "$_DA_LEFTOVER_ALL" | grep -c '[^[:space:]]')
+    _lo_list=$(printf '%s' "$_DA_LEFTOVER_ALL" | tr '\n' '|' | sed 's/|/ | /g')
+    DISK_ADMISSION_LINE="$DISK_ADMISSION_LINE; write-probe artifacts LEFT BEHIND ($_lo_n; unlink failed after the write, so writability is unaffected): $_lo_list"
+  fi
   # ---- THE SUBJECT SET IS NON-EXHAUSTIVE, AND SAYS SO ON EVERY RENDERING (#3886) ----
   #
   # This probe measures ONE filesystem: the build-output directory cargo resolved. The

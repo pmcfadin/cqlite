@@ -2521,8 +2521,21 @@ aa_got2=$(PYTHONPATH="$tmp/aa-pre2" python3 "$aa_cls" "$tmp/aa-target2" 2>/dev/n
 case "$aa_got2" in
   'CANNOT-WRITE ESTALE')
     ok "errno-source: a forced ESTALE from the OPEN half is binding too (both halves of the probe, not just creation)" ;;
+  'CANNOT-WRITE-LEFTOVER ESTALE'*)
+    bad "errno-source: a stray was DECLARED although open() failed, so no file was ever created — a false statement about an artifact that does not exist: $aa_got2" ;;
   *) bad "errno-source: the open/write half gave '$aa_got2', expected CANNOT-WRITE ESTALE" ;;
 esac
+# AND THE ARTIFACT CENSUS BACKS IT: the directory must be empty, so the payload above is not
+# merely worded right but TRUE. This assertion is here because the first draft of job 398's
+# cleanup keyed the declaration on the intended PATH rather than on whether the file was
+# CREATED, and claimed a stray that never existed.
+aa_files=$(ls -A "$tmp/aa-target2" 2>/dev/null | grep -c 'agent-gate-writeprobe' || true)
+aa_files="${aa_files%%$'\n'*}"; case "$aa_files" in ''|*[!0-9]*) aa_files=0 ;; esac
+if [ "$aa_files" -eq 0 ]; then
+  ok "errno-source: and the directory really is empty — a payload claiming no stray is TRUE, not just well-worded"
+else
+  bad "errno-source: $aa_files artifact(s) actually present although the payload claimed none"
+fi
 # NOT AN OVER-CORRECTION: a writable directory must still come back OK.
 aa_ok=$(python3 "$aa_cls" "$tmp/aa-good" 2>/dev/null)
 if [ "$aa_ok" = OK ] && [ -d "$tmp/aa-good" ]; then
@@ -2648,12 +2661,40 @@ if [ "$ac_boundaries" -eq 1 ]; then
 else
   bad "one-boundary: found $ac_boundaries 'except OSError' clauses — the probe has been re-carved into per-call handling"
 fi
-ac_branches=$(grep -cE '^\s*(try:|except|finally:)' "$ac_cls" 2>/dev/null); ac_branches="${ac_branches%%$'\n'*}"
-case "$ac_branches" in ''|*[!0-9]*) ac_branches=99 ;; esac
-if [ "$ac_branches" -le 6 ]; then
-  ok "one-boundary: $ac_branches error branches (was 11 before the consolidation — fewer, not more)"
+# A RAW BRANCH COUNT STOPPED MEASURING THE INVARIANT (job 398). Job 395 asserted `<= 6`
+# branches as a proxy for "consolidated, not carved". Job 398 then had to add CLEANUP
+# branches — a refusal must unlink before it exits — and the count rose to 13 while the
+# property was untouched. A proxy that reds on a correct change is the guard agents learn to
+# waive, so the invariant is now encoded directly: EXACTLY ONE handler decides fatality, and
+# EVERY other handler is a SWALLOWING cleanup handler whose body is `pass`.
+# ENCODE THE PROPERTY, NOT A PROXY FOR IT — AND NOT BY PARSING INDENTATION EITHER. The
+# first attempt at this assert counted "handlers whose next statement is not `pass`", which
+# read a COMMENT as a statement and counted a handler that RECORDS A DECLARATION (`stray =
+# w`) as one that DECIDES A VERDICT. Two different things. What the consolidation actually
+# guarantees is: ONE handler decides fatality, ONE reports an internal fault, and the set of
+# things this program can SAY is closed. All three are countable without knowing Python.
+ad_count() { grep -cF "$1" "$ac_cls" 2>/dev/null | head -1; }
+ac_failcalls=$(grep -cE '^ +fail\(e, w\)$' "$ac_cls" 2>/dev/null); ac_failcalls="${ac_failcalls%%$'\n'*}"
+case "$ac_failcalls" in ''|*[!0-9]*) ac_failcalls=0 ;; esac
+if [ "$ac_failcalls" -eq 1 ]; then
+  ok "one-boundary: exactly ONE call site reaches the fatality decision (fail() is invoked from the single OSError boundary and nowhere else)"
 else
-  bad "one-boundary: $ac_branches error branches; the consolidation should have REDUCED them"
+  bad "one-boundary: $ac_failcalls call sites invoke fail() — fatality is being decided in more than one place again"
+fi
+ac_unclass=$(ad_count 'sys.stdout.write("UNCLASSIFIED'); case "$ac_unclass" in ''|*[!0-9]*) ac_unclass=0 ;; esac
+if [ "$ac_unclass" -eq 1 ]; then
+  ok "one-boundary: exactly ONE internal-fault arm (the non-OSError case), so a cleanup problem can never report as one"
+else
+  bad "one-boundary: $ac_unclass UNCLASSIFIED emissions, expected 1"
+fi
+# The CLOSED SET of things the probe can say. Six, named, so a seventh cannot appear
+# unannounced and no cleanup handler can start emitting a verdict of its own.
+ac_says=$(grep -cE 'sys\.stdout\.write\(' "$ac_cls" 2>/dev/null); ac_says="${ac_says%%$'\n'*}"
+case "$ac_says" in ''|*[!0-9]*) ac_says=0 ;; esac
+if [ "$ac_says" -eq 6 ]; then
+  ok "one-boundary: the probe emits a CLOSED SET of 6 payloads (CANNOT-WRITE, CANNOT-WRITE-LEFTOVER, ENOTDIR, UNCLASSIFIED, OK-LEFTOVER, OK)"
+else
+  bad "one-boundary: $ac_says emission sites, expected 6 — the payload set changed and the shell parser may not know about it"
 fi
 
 # (a) A FORCED close() FAILURE IS BINDING, with the pre-fix behaviour shown emitting OK.
@@ -2737,17 +2778,208 @@ else
   bad "one-boundary: a leftover artifact refused the run (exit $ac_status, markers $ac_markers)"
 fi
 case "$ac_line" in
-  *'write-probe artifact LEFT BEHIND'*"$tmp/ac-e2e-target/."*)
-    ok "one-boundary: the emitted line DECLARES the leftover and names its exact path" ;;
-  *'write-probe artifact LEFT BEHIND'*)
-    bad "one-boundary: the leftover is declared but its path is not named: $ac_line" ;;
+  *'write-probe artifacts LEFT BEHIND ('*"$tmp/ac-e2e-target/."*)
+    ok "one-boundary: the emitted line DECLARES the leftovers and names their exact paths" ;;
+  *'write-probe artifacts LEFT BEHIND'*)
+    bad "one-boundary: the leftovers are declared but no path is named: $ac_line" ;;
   *) bad "one-boundary: the leftover was not declared in the line: ${ac_line:-<none>}" ;;
 esac
 # ...and a clean run must NOT carry that declaration, or it would be noise rather than a signal.
-if grep -q 'write-probe artifact LEFT BEHIND' "$n_pass_err" 2>/dev/null; then
+if grep -q 'write-probe artifacts LEFT BEHIND' "$n_pass_err" 2>/dev/null; then
   bad "one-boundary: a CLEAN run also declares a leftover — the declaration is noise, not a signal"
 else
   ok "one-boundary: a clean run carries no leftover declaration (it fires only when there is one)"
+fi
+
+# ===========================================================================
+# Case AD (roborev job 398): three fixes in the emit path.
+#   1  a refusal cleans up before exiting, and never lets cleanup soften the verdict
+#   2  `td` survives every POST-resolution failure, so the block stops saying
+#      UNRESOLVED about a resolved directory and the target-dir pin stays reachable
+#   3  leftovers ACCUMULATE across both evaluations, so a two-probe run declares BOTH
+# ===========================================================================
+ad_cls="$tmp/ad-classifier.py"
+sed -n '/^import errno, os, sys$/,/^    sys.stdout.write("OK")$/p' "$GATE" > "$ad_cls"
+if python3 -c "compile(open('$ad_cls').read(),'c','exec')" 2>/dev/null; then
+  ok "emit-path: extracted the SHIPPED classifier and it compiles"
+else
+  bad "emit-path: the extracted classifier does not compile — every case below would test nothing"
+fi
+
+# --- 1  A REFUSAL MUST NOT LITTER, AND MUST STILL REFUSE ---------------------------
+mkdir -p "$tmp/ad-close"
+cat > "$tmp/ad-close/sitecustomize.py" <<'ADSC'
+import os, errno
+_real = os.close
+def boom(fd):
+    _real(fd)
+    raise OSError(errno.EIO, "simulated deferred write error at close")
+os.close = boom
+ADSC
+ad_t1="$tmp/ad-t1"
+ad_v1=$(PYTHONPATH="$tmp/ad-close" python3 "$ad_cls" "$ad_t1" 2>/dev/null)
+ad_stray1=$(ls -A "$ad_t1" 2>/dev/null | grep -c 'agent-gate-writeprobe' || true)
+ad_stray1="${ad_stray1%%$'\n'*}"; case "$ad_stray1" in ''|*[!0-9]*) ad_stray1=0 ;; esac
+if [ "$ad_v1" = "CANNOT-WRITE EIO" ]; then
+  ok "refusal-cleanup: the VERDICT is preserved on a post-create failure (CANNOT-WRITE EIO)"
+else
+  bad "refusal-cleanup: the verdict changed to '$ad_v1' — cleanup must never soften a refusal"
+fi
+if [ "$ad_stray1" -eq 0 ]; then
+  ok "refusal-cleanup: the probe file is REMOVED before the refusal exits (0 strays left)"
+else
+  bad "refusal-cleanup: the refusal left $ad_stray1 artifact(s) behind — a disk guard adding to the exhaustion it measures"
+fi
+# THE POSITIVE CONTROL: the PRE-FIX shape, reproduced verbatim — exit straight from the
+# error handler with no cleanup — on the SAME forced failure. It must LITTER.
+ad_t1p="$tmp/ad-t1-prefix"
+PYTHONPATH="$tmp/ad-close" python3 - "$ad_t1p" >/dev/null 2>&1 <<'ADPRE'
+import errno, os, sys
+p = sys.argv[1]
+def fail(e):
+    sys.stdout.write("CANNOT-WRITE")
+    sys.exit(0)
+os.makedirs(p, exist_ok=True)
+w = os.path.join(p, "." + os.urandom(12).hex() + ".agent-gate-writeprobe")
+try:
+    fd = os.open(w, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.write(fd, b"\0")
+    os.fsync(fd)
+    os.close(fd)
+except OSError as e:
+    fail(e)
+ADPRE
+ad_strayp=$(ls -A "$ad_t1p" 2>/dev/null | grep -c 'agent-gate-writeprobe' || true)
+ad_strayp="${ad_strayp%%$'\n'*}"; case "$ad_strayp" in ''|*[!0-9]*) ad_strayp=0 ;; esac
+if [ "$ad_strayp" -ge 1 ]; then
+  ok "refusal-cleanup CONTROL: the PRE-FIX shape left $ad_strayp artifact(s) on the same failure — the defect was reachable"
+else
+  bad "refusal-cleanup CONTROL: the pre-fix shape littered nothing; this case does not demonstrate the defect"
+fi
+# ...and when cleanup ITSELF fails, the verdict is still the refusal, with the stray named.
+mkdir -p "$tmp/ad-both"
+cat > "$tmp/ad-both/sitecustomize.py" <<'ADSB'
+import os, errno
+_real = os.close
+def bc(fd):
+    _real(fd)
+    raise OSError(errno.EIO, "simulated")
+def bu(*a, **k):
+    raise OSError(errno.EPERM, "simulated")
+os.close = bc
+os.unlink = bu
+ADSB
+ad_v2=$(PYTHONPATH="$tmp/ad-both" python3 "$ad_cls" "$tmp/ad-t2" 2>/dev/null)
+case "$ad_v2" in
+  'CANNOT-WRITE-LEFTOVER EIO '*'.agent-gate-writeprobe')
+    ok "refusal-cleanup: cleanup failing too keeps the REFUSAL and names the stray (symmetrical with OK-LEFTOVER)" ;;
+  'OK'*) bad "refusal-cleanup: a cleanup problem SOFTENED the refusal to '$ad_v2' — the exact route this must not open" ;;
+  *) bad "refusal-cleanup: unexpected payload '$ad_v2'" ;;
+esac
+
+# --- 2  `td` SURVIVES A POST-RESOLUTION FAILURE, AND THE PIN STAYS REACHABLE --------
+ad_x() { sed -n "/^$1() {/,/^}$/p" "$GATE"; }
+# CONTROL: an EMPTY target dir renders the false statement, which is what the dropped field
+# produced. Driven through the SHIPPED line renderer.
+ad_pre_line=$(
+  _DA_EVALUATIONS=1; _DA_LAUNCH_RENDER="x"; _DA_POST_RENDER="y"; _DA_BAR=40; _DA_BAR_SRC=default
+  _DA_MOUNT="/m"; _DA_TARGET_DIR=""; _DA_TARGET_NOTE=""; _DA_LEFTOVER_ALL=""; DISK_ADMISSION_LINE=""
+  eval "$(ad_x _gate_disk_admission_line)"
+  _gate_disk_admission_line "UNMEASURED (target-dir-mkdir-timeout)" "d" >/dev/null 2>&1
+  printf '%s' "$DISK_ADMISSION_LINE"
+)
+case "$ad_pre_line" in
+  *'target-dir UNRESOLVED'*)
+    ok "td-survives CONTROL: an EMPTY target dir renders 'target-dir UNRESOLVED' — the false statement the dropped field produced" ;;
+  *) bad "td-survives CONTROL: an empty target dir did not render UNRESOLVED; the differential below proves less than it claims" ;;
+esac
+# SHIPPED, end to end: a post-resolution measurement failure (the mkdir classifier bound
+# fires) must still name the RESOLVED directory. Driven with a python3 shim that hangs only
+# on the 3-argv classifier call, so the cargo resolution itself still succeeds.
+mkdir -p "$tmp/ad-hangpy"
+_AD_REAL_PY=$(command -v python3 2>/dev/null || printf '/nonexistent/python3')
+cat > "$tmp/ad-hangpy/python3" <<ADPH
+#!/usr/bin/env bash
+if [ "\$#" -eq 3 ] && [ "\$1" = -c ]; then sleep 120; fi
+exec "$_AD_REAL_PY" "\$@"
+ADPH
+chmod +x "$tmp/ad-hangpy/python3"
+ad_tgt="$tmp/ad-resolved-target"
+RS_PATH_PREFIX="$tmp/ad-hangpy"
+run_stub_gate ad "$(df_script ad "$HIGH")" \
+  CARGO_TARGET_DIR="$ad_tgt" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/ad-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+RS_PATH_PREFIX=""
+ad_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 300; ad_status=$WX_STATUS; ad_markers=$WX_MARKERS
+assert_no_timeout "ad post-resolution failure"
+ad_line=$(grep_line "$ad_err" '^agent-gate: disk-admission: ')
+case "$ad_line" in
+  *'UNMEASURED (target-dir-mkdir-timeout)'*"target-dir $ad_tgt "*)
+    ok "td-survives: a post-resolution measurement failure still names the RESOLVED directory" ;;
+  *'target-dir UNRESOLVED'*)
+    bad "td-survives: the block says UNRESOLVED about a directory cargo DID resolve: $ad_line" ;;
+  *) bad "td-survives: unexpected rendering: ${ad_line:-<none>}" ;;
+esac
+if [ "$ad_status" -eq 0 ] && [ "$ad_markers" -ge 1 ]; then
+  ok "td-survives: the run still proceeds as declared UNMEASURED (the fix is reporting + pinning, not a new refusal)"
+else
+  bad "td-survives: the run was refused (exit $ad_status) — a measurement failure must stay non-fatal"
+fi
+# THE PIN. Round 367's guarantee is forfeited when _DA_TARGET_DIR is empty, because the
+# pinner skips. Asserted against the REAL disposer + pinner, with an UNMEASURED state.
+ad_pin=$(
+  set -uo pipefail
+  _DA_TARGET_DIR="/resolved/dir"; _DA_STATE=UNMEASURED; _DA_WHY=target-dir-mkdir-timeout
+  CARGO_TARGET_DIR="SENTINEL"; DISK_ADMISSION_LINE=""
+  _gate_disk_admission_line() { DISK_ADMISSION_LINE="line"; }
+  _gate_disk_admission_refuse() { printf 'REFUSED'; exit 0; }
+  eval "$(ad_x _gate_disk_admission_pin_target_dir)"
+  eval "$(ad_x _gate_disk_admission_dispose)"
+  _gate_disk_admission_dispose "n" "d" >/dev/null 2>&1
+  printf '%s' "$CARGO_TARGET_DIR"
+)
+if [ "$ad_pin" = /resolved/dir ]; then
+  ok "td-survives: an UNMEASURED result with a RESOLVED dir still PINS CARGO_TARGET_DIR (measured-fs-is-used-fs holds on this path)"
+else
+  bad "td-survives: the pin was skipped on an UNMEASURED result (CARGO_TARGET_DIR='$ad_pin')"
+fi
+
+# --- 3  LEFTOVERS ACCUMULATE ACROSS BOTH EVALUATIONS -------------------------------
+mkdir -p "$tmp/ad-unlink"
+cat > "$tmp/ad-unlink/sitecustomize.py" <<'ADSU'
+import os, errno
+def boom(*a, **k):
+    raise OSError(errno.EPERM, "simulated immutable directory")
+os.unlink = boom
+ADSU
+run_stub_gate ad-two "$(df_script ad-two "$HIGH")" \
+  PYTHONPATH="$tmp/ad-unlink" CARGO_TARGET_DIR="$tmp/ad-two-target" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/ad-two-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+ad2_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 180; ad2_status=$WX_STATUS
+assert_no_timeout "ad-two accumulation"
+ad2_line=$(grep_line "$ad2_err" '^agent-gate: disk-admission: ')
+# The run probes TWICE, so both artifacts must be declared and the count must say 2.
+case "$ad2_line" in
+  *'evaluated 2x'*'write-probe artifacts LEFT BEHIND (2;'*)
+    ok "leftover-accumulates: a two-evaluation run declares BOTH artifacts and counts them" ;;
+  *'write-probe artifacts LEFT BEHIND (1;'*)
+    bad "leftover-accumulates: only ONE artifact declared on a two-probe run — the launch stray was absorbed silently: $ad2_line" ;;
+  *) bad "leftover-accumulates: unexpected rendering: ${ad2_line:-<none>}" ;;
+esac
+# Both paths must actually appear, not just a count.
+ad2_paths=$(printf '%s' "$ad2_line" | grep -o "$tmp/ad-two-target/\.[0-9a-f]*\.agent-gate-writeprobe" | sort -u | grep -c . || true)
+ad2_paths="${ad2_paths%%$'\n'*}"; case "$ad2_paths" in ''|*[!0-9]*) ad2_paths=0 ;; esac
+if [ "$ad2_paths" -eq 2 ]; then
+  ok "leftover-accumulates: TWO DISTINCT paths are named (each probe makes its own random name)"
+else
+  bad "leftover-accumulates: $ad2_paths distinct path(s) named, expected 2"
+fi
+if [ "$ad2_status" -eq 0 ]; then
+  ok "leftover-accumulates: still non-fatal — a declaration, not a verdict"
+else
+  bad "leftover-accumulates: leftovers refused the run (exit $ad2_status)"
 fi
 
 printf '\n%s\n' "-----------------------------------------------"
