@@ -707,7 +707,31 @@ the verdict stronger. Passes 1 and 2 never carry the flag (asserted structurally
 call sites), an attribution walk that is killed, unlaunchable or unclassifiable leaves the complaint
 `UNATTRIBUTED` and non-passing, and a damage bit appearing only in the third walk has not reproduced
 across the sweep walks. The verdict set stays closed at three: the split is in the *cause* text, not
-in a fourth token two readers and a structural assert would have to learn. **The mask does not end at
+in a fourth token two readers and a structural assert would have to learn. **And "the roots the walk
+has" was itself an unchecked assumption, wrong in both directions.** A review finding held that
+`--git-dir=<common>` discards linked worktrees' private administrative context, so a missing object
+needed only by a lane's private HEAD or index would be overlooked. Measured on git 2.43.0, that is
+**false**: a common-dir fsck *does* walk every registered worktree's private `HEAD`, its private
+index, and the HEAD of a *prunable* worktree — all three surviving `--no-reflogs`, hence already
+`CORRUPT`. What it does *not* walk is a **linked** worktree's per-worktree refs (`refs/worktree/*`,
+`refs/bisect/*`, `refs/rewritten/*`; the main worktree's live in the common dir and are walked):
+delete an object named only by one and the sweep exits **0 VERIFIED**, because the HEAD reflog echoes
+the id and that echo clears under `--no-reflogs`. Both halves are now measured rather than believed —
+the covered roots are pinned by fixtures, and the gap is closed by a **private-root probe**: not an
+fsck (`git fsck <sha>` *replaces* the default heads, an explicit-head fsck still costs a full rehash,
+and `rev-list <missing-root>` dies 128) but an O(refs) question — list each linked worktree's refs,
+subtract the common ones, ask `cat-file --batch-check` whether the remainder's targets are present
+(0.22 s against the live 15-worktree store). Its enumeration is **filesystem-first because the git
+command is fail-open**: `git worktree list --porcelain` silently drops a worktree whose admin
+`gitdir` file is missing, so `$GIT_COMMON_DIR/worktrees/*` — git's own administrative directory, not
+a guess about lane layout — is the subject set, with the command kept as a cross-check in the
+direction it can fail. A worktree that cannot be inspected is *not* a clean one (a named
+`UNREADABLE` record, never a silent zero-root contribution to `VERIFIED`). And it widens no caller's
+window, **by placement rather than arithmetic**: one bounded child stage immediately before the
+single affirmative branch, and every branch of the reachability block exits, so a run that spent a
+third fsck walk never reaches it — asserted behaviourally against the fixture that really spends
+three walks. Declared residual: it asks whether each private ref's *target* is present, not whether
+its whole closure is. **The mask does not end at
 31, and assuming it did dropped real damage.** A range check over `1..31` — reasoned from 128 being
 `die()` and `127 & 1` being 1 — classified 33 (`32|1`) and 36 (`32|4`) as unclassified and therefore
 `UNMEASURED`, a false negative on genuine object corruption. Measured on git 2.43.0: a truncated

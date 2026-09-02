@@ -485,7 +485,43 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   killed, unlaunchable or unclassifiable) the complaint is `UNATTRIBUTED` and non-passing, and a
   damage bit appearing ONLY in the third walk has not reproduced across the sweep walks: neither
   is `CORRUPT` and neither is clean. The verdict set stays **closed at three** — the split is in
-  the CAUSE text, not in a fourth token two readers and a structural assert would have to learn. **THE MASK DOES NOT END AT 31, AND
+  the CAUSE text, not in a fourth token two readers and a structural assert would have to learn.
+  **AND "THE ROOTS THE WALK HAS" WAS ITSELF AN UNCHECKED ASSUMPTION, WRONG IN BOTH DIRECTIONS
+  (review round 7).** A review finding held that `--git-dir=<common>` discards linked worktrees'
+  private administrative context, so a missing object needed only by a lane's private HEAD or index
+  would be overlooked — *"the normal state of eight lanes"*. **Measured on git 2.43.0, that is
+  FALSE**: a common-dir fsck DOES walk every registered worktree's private `HEAD` (it names it
+  `worktrees/<name>/HEAD`), its private INDEX, and the HEAD of a **prunable** worktree whose
+  directory has been deleted — all three surviving `--no-reflogs`, hence already `CORRUPT`. What it
+  does NOT walk is a LINKED worktree's **per-worktree refs** (`refs/worktree/*`, `refs/bisect/*`,
+  `refs/rewritten/*`; the MAIN worktree's live in the common dir and ARE walked). Delete an object
+  named only by one and the sweep exits **0 VERIFIED** — the HEAD reflog echoes the id and that echo
+  CLEARS under `--no-reflogs`, so the attribution walk calls real damage reflog-scoped. So the
+  finding's premise was wrong and there was a hole one namespace over; **both halves are now
+  measured rather than believed** — the covered roots are PINNED by fixtures (a future git that
+  narrows fsck's enumeration reds a case) and the gap is closed by a **private-root probe**. Three
+  measurements shaped it and are recorded so they are not re-derived: `git fsck <sha>` **REPLACES**
+  the default heads (a missing blob reachable from HEAD went undetected), so private roots can never
+  be appended to the sweep walk; an explicit-head fsck still scans the whole object directory, so it
+  costs a FULL rehash; and `rev-list <missing-root>` dies 128, so `--missing=print` cannot answer the
+  case that fires. The probe is therefore O(refs), not an fsck: list each linked worktree's refs,
+  subtract the common ones, ask `cat-file --batch-check` whether the remainder's targets are present
+  (measured **0.22 s** against the live 15-worktree store; the whole sweep 12.8–15.8 s, unchanged
+  within noise). **Its enumeration is FILESYSTEM-FIRST because the git command is FAIL-OPEN** —
+  `git worktree list --porcelain` SILENTLY DROPS a worktree whose admin `gitdir` file is missing (rc
+  0, no diagnostic), so `$GIT_COMMON_DIR/worktrees/*`, which is git's own administrative directory
+  and not a guess about lane layout, is the subject set and the command is kept only as a
+  cross-check in the direction it can fail (it names MORE than the directory holds ⇒ `UNMEASURED`).
+  A worktree that cannot be inspected is **not a clean one**: it contributes a named `UNREADABLE`
+  record, never a silent zero-root contribution to `VERIFIED`. **And it costs no caller a wider
+  window, by PLACEMENT rather than by arithmetic**: it runs as ONE bounded child stage immediately
+  before the single affirmative branch, and every branch of the reachability block above EXITS, so a
+  run that spent a third fsck walk never reaches it — worst case stays `MAX_SWEEP_WALKS` stages and
+  no derived bound (the supervisor's per-walk default, the claim's recovery bound, bootstrap's outer
+  belt) moves. That is a property of WHERE the call sits, so it is asserted BEHAVIOURALLY against the
+  fixture that really spends three walks. **Declared residual: the probe asks whether each private
+  ref's TARGET is present, not whether its whole CLOSURE is** — an object missing deeper in a
+  per-worktree ref's ancestry and named by nothing else is not recognised. **THE MASK DOES NOT END AT 31, AND
   ASSUMING IT DID DROPPED REAL DAMAGE (review round 2).** A range check over `1..31` — reasoned from
   128 being `die()` and `127 & 1` being 1 — classified **33** (`32|1`) and **36** (`32|4`) as
   unclassified and so `UNMEASURED`: a FALSE NEGATIVE on genuine object corruption, the one direction
