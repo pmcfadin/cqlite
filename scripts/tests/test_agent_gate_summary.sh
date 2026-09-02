@@ -5451,6 +5451,32 @@ else
   bad "3765-collide-mid-display: expected 1 distinct display form for a middle-colliding pair, got $fa_mid_dist — the fixture no longer exercises a display collision, so this case no longer pins the dedup key"
 fi
 
+# 55t/55u. STRUCTURAL, and labelled as such: the --delta node-tests runner must keep its jest
+#          log inside a PRIVATE mktemp -d and must delete that DIRECTORY. #3765 routed that
+#          log through _failassert_record, which strips it through _ansi_stripped_log, and the
+#          stripper writes a DERIVED `<log>.ansi-stripped` SIBLING beside it — so a bare
+#          "${TMPDIR:-/tmp}" log plus `rm -f "$log"` leaks normalised test output into a
+#          world-writable directory on every delta run that reaches the runner, and leaves a
+#          window in which a peer on the same box can pre-place that sibling as a symlink for
+#          the sed to follow. Structural because the behavioural proof needs a built node
+#          module and a jest run, which this suite deliberately does not have; the property
+#          asserted is the one a future edit would silently undo.
+# CODE lines only: the runner's own comment names the old `rm -f` idiom while explaining why
+# it was wrong, and a scan over the comments would read that explanation as the defect.
+fa_nd_body=$(awk '/^run_delta_node_tests\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
+if printf '%s\n' "$fa_nd_body" | grep -q 'mktemp -d "\${TMPDIR:-/tmp}/agent-gate-nodedelta' \
+   && ! printf '%s\n' "$fa_nd_body" | grep -qE '=\$\(mktemp "\$\{TMPDIR'; then
+  ok "3765-nodedelta-privdir: run_delta_node_tests creates its jest log inside a private mktemp -d, not as a bare file in the shared tmp"
+else
+  bad "3765-nodedelta-privdir: run_delta_node_tests creates its jest log with a bare mktemp in \${TMPDIR:-/tmp} — _ansi_stripped_log writes a <log>.ansi-stripped sibling there that nothing removes (#3765)"
+fi
+if printf '%s\n' "$fa_nd_body" | grep -q 'rm -rf "\$tmpd"' \
+   && ! printf '%s\n' "$fa_nd_body" | grep -q 'rm -f "\$log"'; then
+  ok "3765-nodedelta-cleanup: run_delta_node_tests removes the DIRECTORY, which is what also removes the .ansi-stripped sibling"
+else
+  bad "3765-nodedelta-cleanup: run_delta_node_tests removes only the log file — the derived .ansi-stripped sibling survives every run (#3765)"
+fi
+
 # TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
 # coordination lead authorised, taken on the evidence below).
 #
@@ -5513,7 +5539,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=436
+ASSERT_FLOOR=438
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

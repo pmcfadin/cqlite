@@ -17468,10 +17468,28 @@ run_delta_node_tests() {
   n_targets=$(printf '%s\n' "$targets" | awk 'NF' | wc -l | tr -d ' ')
   echo ">>> [node-tests] jest on $n_targets changed bindings/node/__test__ file(s) (already-built module; no cargo build)"
   start=$(date +%s)
-  local log jest_filter=""
-  log=$(mktemp "${TMPDIR:-/tmp}/agent-gate-nodedelta.XXXXXX")
+  local log tmpd jest_filter=""
+  # A PRIVATE 0700 dir, not a bare mktemp file in the shared tmp (#3765). The
+  # _failassert_record call below routes this log through _ansi_stripped_log, which writes a
+  # DERIVED `<log>.ansi-stripped` SIBLING beside it. A bare ${TMPDIR:-/tmp} log therefore
+  # (a) leaks that sibling into a world-writable directory on EVERY delta run that reaches this
+  # runner - `rm -f "$log"` never saw it - and (b) gives a peer on the same box a window between
+  # the log appearing and the strip in which to pre-place the sibling as a SYMLINK for the sed to
+  # follow. Inside a 0700 mktemp -d the sibling is neither guessable nor creatable by anyone
+  # else, and removing the DIRECTORY removes the sibling with it. Same reasoning the
+  # arrow-parity-guard and cli-tests callers already apply to their logs.
+  #
+  # FAIL-CLOSED when mktemp -d fails: a fallback to a bare file would reinstate exactly the
+  # hazard above, and there is no set -e here to stop the runner for us. The verdict is still
+  # appended below, so the delta summary NAMES node-tests rather than silently dropping it.
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-nodedelta.XXXXXX") || tmpd=""
+  [ -n "$tmpd" ] && chmod 700 "$tmpd" 2>/dev/null
+  log="$tmpd/jest.log"
   [ "$whole" -eq 0 ] && jest_filter="${filters[*]}"
-  if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" JEST_FILTER="$jest_filter" bash -c '
+  if [ -z "$tmpd" ]; then
+    echo "node-tests: FAIL-CLOSED - could not create a private temp dir for the jest log (#3765)" >&2
+    status=FAIL; OVERALL=FAIL
+  elif CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" JEST_FILTER="$jest_filter" bash -c '
       set -uo pipefail
       cd "'"$REPO_ROOT"'/bindings/node"
       # Regenerate the JS loader from the ALREADY-BUILT .node (no cargo build).
@@ -17493,10 +17511,14 @@ run_delta_node_tests() {
     status=FAIL; OVERALL=FAIL
     echo "--- [node-tests] FAILED; last 40 lines ---"; tail -40 "$log"; echo "--- end of node-tests output ---"
   fi
-  # #3765: extract BEFORE the log is deleted — this runner appends to NAMES directly and
-  # its log is a private mktemp, not $LOG_DIR/<name>.log, so the path is passed in.
-  _failassert_record "node-tests" "$status" "$log"
-  rm -f "$log"
+  if [ -n "$tmpd" ]; then
+    # #3765: extract BEFORE the log is destroyed - this runner appends to NAMES directly and
+    # its log lives in a private mktemp dir, not $LOG_DIR/<name>.log, so the path is passed in.
+    _failassert_record "node-tests" "$status" "$log"
+    # rm -rf the DIRECTORY, never just the log: that is what also removes the
+    # `.ansi-stripped` sibling the line above just caused to be written.
+    rm -rf "$tmpd"
+  fi
   end=$(date +%s)
   NAMES+=("node-tests"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   DELTA_EXECUTORS="${DELTA_EXECUTORS:+$DELTA_EXECUTORS }node-tests($n_targets)"
