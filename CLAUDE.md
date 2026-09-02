@@ -750,7 +750,19 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   distinct asserts never render as one string. **A BOUND MUST BE APPLIED BEFORE RETENTION, NOT AFTER
   IT**: the full identity used to become an array key with its 4096 bound applied afterwards
   (unbounded memory on a log of long minified lines), so the dedup key is bounded on the way IN —
-  legitimate only because that key is **provably never published**, which is asserted. **AND AN
+  legitimate only because that key is **provably never published**, which is asserted. **AND A
+  BOUNDED KEY MUST CARRY A DIGEST OF THE WHOLE IDENTITY, BECAUSE A WINDOWED KEY ALIASES** — the
+  sixth instance of that one class, created BY the memory fix: keyed on length + a 1024-char head
+  + a 1024-char tail, two distinct diagnostics of equal length differing only in the MIDDLE
+  collapsed into one and the count UNDERCOUNTED while the field advertises a distinct total. The
+  tension is bounded memory vs exact distinctness and a digest resolves both, at a strength stated
+  where a reader of the key sees it: a **pair of rolling polynomial checksums, NOT a cryptographic
+  hash** — a collision is constructible, an accidental one between two real identities is not.
+  **AND THE SIDECAR IS WRITTEN BEFORE THE `.result` THAT PUBLISHES THE COMPONENT**: `.result` is
+  what every reader — including the tree-integrity boundary renderer, globbing another lane's
+  `$LOG_DIR` — discovers a component by, so publishing it first let a concurrent boundary failure
+  render a FAIL row whose sidecar merely was not written YET as `not recorded`, i.e. an absence
+  reported as a measurement, by a race. **AND AN
   OVER-BOUND VALUE IS COUNTED, NEVER DROPPED**: an over-long guard label used to be discarded while
   an unconditional `next` blocked every later tier, so the field read `0 RECOGNISED` — "scanned,
   nothing matched" — for a line a recogniser HAD matched. The invariant is checked BOTH structurally
