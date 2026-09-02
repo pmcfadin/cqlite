@@ -63,6 +63,12 @@ use super::super::*;
 #[path = "regression_3631_marshal_field_types_tests.rs"]
 mod regression_3631_marshal_field_types_tests;
 
+// Issue #3631 / roborev job 76: the PACKAGE half of a marshal name's identity — a
+// third-party class sharing a native simple name must be refused, not decoded.
+#[cfg(test)]
+#[path = "regression_3631_marshal_package_rule_tests.rs"]
+mod regression_3631_marshal_package_rule_tests;
+
 impl V5CompressedLegacyParser {
     /// Parse a UDT type string to extract the UDT definition.
     /// Cassandra encodes UDTs as:

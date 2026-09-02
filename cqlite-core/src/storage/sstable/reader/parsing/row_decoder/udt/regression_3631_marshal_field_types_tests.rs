@@ -210,13 +210,29 @@ fn reversedtype_marshal_udt_field_takes_its_base_types_layout() {
 }
 
 /// A third-party marshal class is NOT a native type and NOT a UDT name — exact
-/// simple-name matching keeps it out of `blob`, which a `ends_with("BytesType")`
+/// simple-name matching keeps it out of `blob`, which an `ends_with("BytesType")`
 /// suffix match would have handed it.
+///
+/// Since roborev job 76 it is REFUSED rather than carried as `CqlType::Custom`:
+/// the type-string parser is the only place that still knows a dotted name here is
+/// a JAVA CLASS, so it is where the package rule can be applied without guessing
+/// (downstream, a `Custom` payload cannot be told from a keyspace-qualified UDT
+/// name). The package rule's own cases live in
+/// `regression_3631_marshal_package_rule_tests.rs`.
 #[test]
 fn a_third_party_marshal_class_is_not_silently_a_blob() {
-    assert_eq!(
-        field_type_of("com.acme.MyBytesType"),
-        CqlType::Custom("com.acme.MyBytesType".to_string()),
+    let err = V5CompressedLegacyParser::parse_udt_type_definition(&marshal_udt_with_field(
+        "com.acme.MyBytesType",
+    ))
+    .expect_err("a foreign marshal package must be refused, never decoded as blob");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("com.acme.MyBytesType") && msg.contains("com.acme."),
+        "the refusal must name the type and the package it was rejected on: {msg}"
+    );
+    assert!(
+        !msg.contains("nested user-defined type"),
+        "not a UDT: {msg}"
     );
 }
 
