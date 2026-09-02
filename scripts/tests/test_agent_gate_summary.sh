@@ -5755,7 +5755,11 @@ printf "npm error request failed: Authorization: Bearer SEKRETGOLF\n" > "$fa_dir
 awk 'BEGIN {
   pad = sprintf("%4063s", ""); gsub(/ /, "x", pad)
   tail = sprintf("%100s", ""); gsub(/ /, "y", tail)
-  printf "FAIL - %sdeploy-user:SEKRETHOTEL@h.io/pkg%s\n", pad, tail
+  # A LIBTEST shape since job 71: the free-form rule now routes through pubtagged(), whose
+  # grammar rejects this payload as untagged prose BEFORE any length bound can fire — which
+  # would leave the over-bound path uncovered. The libtest rule still projects through
+  # pubid(), so the bound is still under test and the safety assertion is unchanged.
+  printf "test %sdeploy-user:SEKRETHOTEL@h.io/pkg%s ... FAILED\n", pad, tail
 }' > "$fa_dir/neu-span.log"
 printf 'Diff in /repo/cqlite-core/src/storage/sstable/reader.rs at line 12:\n' > "$fa_dir/neu-path.log"
 
@@ -5996,11 +6000,11 @@ fi
 fa_addcalls=$(grep -v '^[[:space:]]*#' "$fa_tool" | grep -E 'add\("(assert|guard|toolchain)",')
 fa_add_n=$(printf '%s\n' "$fa_addcalls" | grep -c .)
 fa_add_ok=$(printf '%s\n' "$fa_addcalls" \
-  | grep -cE 'add\("(assert|guard|toolchain)", .*, (pubid\(|publabel\(|pubdoc\(|pubsh\(|pubtagged\(|"[a-z][a-z0-9-]*", 1\))')
+  | grep -cE 'add\("(assert|guard|toolchain)", .*, (pubid\(|publabel\(|pubdoc\(|pubsh\(|pubtagged\(|pubpytest\(|pubjest\(|"[a-z][a-z0-9-]*", 1\))')
 if [ "${fa_add_n:-0}" -ge 13 ] && [ "$fa_add_n" = "$fa_add_ok" ]; then
-  ok "3765-pub-one-rule: all $fa_add_n add() call sites across ALL THREE tiers publish a closed-enum label literal, pubid(…), publabel(…), pubdoc(…), pubsh(…) or pubtagged(…) — no tier copies its matched line (blocker 11)"
+  ok "3765-pub-one-rule: all $fa_add_n add() call sites across ALL THREE tiers publish a closed-enum label literal, pubid(…), publabel(…), pubdoc(…), pubsh(…), pubtagged(…), pubpytest(…) or pubjest(…) — no tier copies its matched line (blocker 11)"
 else
-  bad "3765-pub-one-rule: $fa_add_n add() call site(s) but only $fa_add_ok publish through a label literal / pubid() / publabel() / pubdoc() / pubsh() / pubtagged() — a call site that passes copied line content publishes an assertion PAYLOAD, which carries interpolated runtime values (blocker 11)"
+  bad "3765-pub-one-rule: $fa_add_n add() call site(s) but only $fa_add_ok publish through a label literal / pubid() / publabel() / pubdoc() / pubsh() / pubtagged() / pubpytest() / pubjest() — a call site that passes copied line content publishes an assertion PAYLOAD, which carries interpolated runtime values (blocker 11)"
 fi
 # …and the same invariant on the OUTPUT PATH for the two repository-authored tiers, because
 # a source scan cannot see a RUNTIME value. The charset REFUSES `@`, `/`, `?`, `&` and `=`,
@@ -6590,6 +6594,67 @@ else
   bad "3765-freeform-grammar: a free-form rule still publishes pubid(tagof(...)) — the unconditional first-word projection is back (job 70)"
 fi
 
+# 55ze. ROBOREV JOB 71, two findings.
+#  (a) THE TAG DELIMITER IS A COLON FOLLOWED BY WHITESPACE, never a bare colon. Accepting any
+#      colon re-created the job-70 defect one shape over: `https://host/path failed` truncated
+#      at the first colon and published `https`, and `module::test: detail` published `module`,
+#      severing a namespace separator.
+printf 'FAIL - https://host/path failed to clone\n' > "$fa_dir/tagurl.log"
+_fa_run tagurl "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/tagurl.log" PASS
+fa_tu=$(_fa_line fmt)
+case "$fa_tu" in
+  *"(assert): https"*) bad "3765-tag-delim-url: URL-leading prose published 'https' as the identity ($fa_tu) — a bare colon is being read as a tag delimiter (job 71)" ;;
+  *"<no identifier in the failure text"*) ok "3765-tag-delim-url: URL-leading prose is untagged and reports no identifier — a colon inside :// is not a delimiter" ;;
+  *) bad "3765-tag-delim-url: expected the no-identifier placeholder, got '$fa_tu'" ;;
+esac
+printf 'FAIL - module::test: detail here\n' > "$fa_dir/tagns.log"
+_fa_run tagns "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/tagns.log" PASS
+fa_tn=$(_fa_line fmt)
+case "$fa_tn" in
+  *"(assert): module::test"*) ok "3765-tag-delim-ns: a namespaced tag keeps its :: separator (module::test, not module)" ;;
+  *) bad "3765-tag-delim-ns: expected 'module::test', got '$fa_tn' — :: is being severed by the delimiter scan (job 71)" ;;
+esac
+#  (b) THE PROJECT RUNS JEST AND PYTEST, and neither format had a rule, so a real failure in
+#      either published `0 RECOGNISED` — including the node-tests delta log this change only
+#      just started capturing. Both are RENDERED-field cases: each publishes a PATH, and a
+#      `/`-bearing projection needs a matching emit-boundary predicate or it is inert end to
+#      end. That coupling has been missed three times, so every such grammar is pinned here.
+printf 'FAILED tests/test_cli_parity.py::test_blob_roundtrip\n' > "$fa_dir/pyt.log"
+_fa_run pyt "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/pyt.log" PASS
+fa_py=$(_fa_line fmt)
+case "$fa_py" in
+  *"pytest tests/test_cli_parity.py::test_blob_roundtrip"*)
+    ok "3765-pytest-rendered: a pytest failure NAMES its file and test in the rendered field" ;;
+  *"not extractable"*)
+    bad "3765-pytest-rendered: the pytest identity was refused at the emit boundary ($fa_py) — a /-bearing projection without a boundary predicate is inert end to end" ;;
+  *) bad "3765-pytest-rendered: expected the pytest identity, got '$fa_py'" ;;
+esac
+printf 'FAIL __test__/write-readback.test.js\n' > "$fa_dir/jst.log"
+_fa_run jst "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/jst.log" PASS
+fa_js=$(_fa_line fmt)
+case "$fa_js" in
+  *"jest-suite __test__/write-readback.test.js"*)
+    ok "3765-jest-rendered: a jest suite failure NAMES its suite file in the rendered field" ;;
+  *"not extractable"*)
+    bad "3765-jest-rendered: the jest identity was refused at the emit boundary ($fa_js) — missing boundary predicate" ;;
+  *) bad "3765-jest-rendered: expected the jest identity, got '$fa_js'" ;;
+esac
+# NEGATIVE CONTROLS for the two new grammars.
+printf 'FAILED https://x-access-token:SEKJP@h.io/p.py::t\nFAIL https://x-access-token:SEKJS@h.io/p.test.js\n' > "$fa_dir/jpurl.log"
+_fa_run jpurl "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/jpurl.log" PASS
+fa_jp=$(_fa_line fmt)
+case "$fa_jp" in
+  *SEKJP*|*SEKJS*|*"@h.io"*) bad "3765-jestpytest-no-authority: a URL-shaped jest/pytest line published an authority ('$fa_jp')" ;;
+  *) ok "3765-jestpytest-no-authority: URL-shaped jest/pytest lines publish no authority" ;;
+esac
+# THE JEST `● <test name>` LINE IS DELIBERATELY NOT A RULE: a jest test name is free-form prose,
+# and publishing it is exactly the job-70 defect. Pinned so nobody "completes" the jest support.
+if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -q '●'; then
+  ok "3765-jest-no-bullet-rule: the jest bullet line is NOT a recogniser — a jest test name is free-form prose, and publishing prose is the job-70 defect"
+else
+  bad "3765-jest-no-bullet-rule: a rule keys on the jest ● line, whose payload is free-form prose (job 70)"
+fi
+
 # CODE lines only: the digest note NAMES those binaries while explaining why it does not use
 # them, and a scan over the comments would read that explanation as the defect.
 if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -qE '(sha256sum|md5sum|cksum|openssl dgst)'; then
@@ -6846,7 +6911,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=562
+ASSERT_FLOOR=568
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

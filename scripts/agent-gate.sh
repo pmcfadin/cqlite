@@ -6905,6 +6905,39 @@ _failassert_is_shelltestid() {
   return 0
 }
 
+# _failassert_is_pytestid / _failassert_is_jestid <value>: the THIRD and FOURTH closed grammars
+# that may carry a `/` — `pytest <path>.py::<test>` and `jest-suite <path>` (#3765, roborev job
+# 71). Same rule as the first two: the safety property is carried by the SHAPE, so no authority
+# is publishable, and the charset stays closed for every other value.
+#
+# *** IF YOU ADD A `/`-BEARING PROJECTION TO THE EXTRACTOR, IT NEEDS A PREDICATE HERE. ***
+# That coupling has now been missed THREE times (doctest, then pytest and jest together): the
+# extractor happily produced the identity and this boundary replaced it with `not extractable`,
+# so the projection was inert end to end and its extractor-side test still passed. Every
+# `/`-bearing grammar therefore also has a RENDERED-field case in the summary self-test.
+_failassert_is_pytestid() {
+  local v="${1:-}" rest pth tst
+  case "$v" in pytest\ *) ;; *) return 1 ;; esac
+  rest=${v#pytest }
+  case "$rest" in *"::"*) ;; *) return 1 ;; esac
+  pth=${rest%%::*}
+  tst=${rest#*::}
+  [ -n "$pth" ] && [ -n "$tst" ] || return 1
+  case "$pth" in *.py) ;; *) return 1 ;; esac
+  case "$pth" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  case "$tst" in *[!A-Za-z0-9._:-]*) return 1 ;; esac
+  return 0
+}
+_failassert_is_jestid() {
+  local v="${1:-}" pth
+  case "$v" in jest-suite\ *) ;; *) return 1 ;; esac
+  pth=${v#jest-suite }
+  [ -n "$pth" ] || return 1
+  case "$pth" in *.js|*.mjs|*.cjs|*.ts) ;; *) return 1 ;; esac
+  case "$pth" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  return 0
+}
+
 # _failassert_record <component> <status> [logfile]: THE extraction site. Only a FAIL has
 # a failing assert, so PASS/SKIP record nothing and render no field.
 _failassert_record() {
@@ -7028,7 +7061,8 @@ _failassert_record() {
       *)
         # ONE exception to the charset, and it is a GRAMMAR rather than a widening: a doctest
         # identifier carries a path, so it carries `/`. See _failassert_is_doctest_id.
-        if _failassert_is_doctest_id "$fa_n" || _failassert_is_shelltestid "$fa_n"; then
+        if _failassert_is_doctest_id "$fa_n" || _failassert_is_shelltestid "$fa_n" \
+           || _failassert_is_pytestid "$fa_n" || _failassert_is_jestid "$fa_n"; then
           :
         else
           case "$fa_n" in

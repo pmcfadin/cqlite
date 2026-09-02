@@ -332,12 +332,32 @@ awk -v max="$max" '
   # Anything else is UNTAGGED PROSE and gets an AFFIRMATIVE placeholder. Naming nothing is
   # strictly better than naming a word that is not an identity: the count is still true, and
   # the reader is told to read the log rather than sent to search for `the`.
+  # pubpytest() / pubjest() — the project runs both suites, and neither format had a rule, so a
+  # real failure in either published `0 RECOGNISED` (roborev job 71) — including the node-tests
+  # delta log this change only just started capturing. Closed grammars, same rule as pubdoc and
+  # pubsh: a path charset with no `:` beyond the `::` separator and no `@`, so no authority.
+  function pubpytest(pth, tst) {
+    if (pth ~ /^[A-Za-z0-9._\/-]+\.py$/ && tst ~ /^[A-Za-z0-9._:-]+$/) return "pytest " pth "::" tst
+    return "<no identifier in the failure text - read the component log>"
+  }
+  function pubjest(pth) {
+    if (pth ~ /^[A-Za-z0-9._\/-]+\.(test\.)?(js|mjs|cjs|ts)$/) return "jest-suite " pth
+    return "<no identifier in the failure text - read the component log>"
+  }
   function pubtagged(t,   head) {
-    if (t ~ /^[A-Za-z0-9._:\/-]+:/) {
-      head = t; sub(/:.*$/, "", head)
-      if (head != "") return pubid(head)
-    }
-    if (t ~ /^[A-Za-z0-9._:\/-]+$/) return pubid(t)
+    # THE DELIMITER IS A COLON FOLLOWED BY WHITESPACE, or a colon at end of string — never a
+    # BARE colon (roborev job 71). Accepting any colon re-created the job-70 defect one shape
+    # over: `https://host/path failed` matched, truncated at the first colon and published
+    # `https`; and `module::test: detail` published `module`, severing a namespace separator.
+    # A colon inside `://` or `::` is NOT a tag delimiter, and requiring the following
+    # whitespace is what distinguishes them without enumerating URL schemes.
+    if (match(t, /:[[:space:]]/)) head = substr(t, 1, RSTART - 1)
+    else if (t ~ /:$/)            head = substr(t, 1, length(t) - 1)
+    else if (t ~ /^[A-Za-z0-9._:-]+$/) return pubid(t)
+    else return "<no identifier in the failure text - read the component log>"
+    # `::` PRESERVED, single colons and `/` REFUSED: a tag is dotted/dashed segments optionally
+    # joined by `::`, which admits a Rust path and rejects an authority.
+    if (head ~ /^[A-Za-z0-9._-]+(::[A-Za-z0-9._-]+)*$/) return pubid(head)
     return "<no identifier in the failure text - read the component log>"
   }
   function pubsh(t) {
@@ -458,6 +478,19 @@ awk -v max="$max" '
   /^[[:space:]]*FAIL \[/ {
     s = $0; sub(/^[[:space:]]*FAIL \[[^]]*\][[:space:]]*/, "", s)
     add("assert", s, pubid(tagof(lasttok(norm(s)))), 0); next
+  }
+  # A6 pytest: `FAILED <path>.py::<test>`. AFTER A1/A2 so `FAIL - `/`FAIL: ` still win.
+  /^FAILED [^:@[:space:]]+\.py::[^[:space:]]+/ {
+    s = $0; sub(/^FAILED /, "", s); sub(/[[:space:]].*$/, "", s)
+    jp_p = s; sub(/::.*$/, "", jp_p)
+    jp_t = s; sub(/^.*::/, "", jp_t)
+    add("assert", s, pubpytest(jp_p, jp_t), 0); next
+  }
+  # A7 jest: `FAIL <suite path>`. The `● <test name>` line is deliberately NOT used: a jest
+  # test name is free-form prose, and publishing it is exactly the job-70 defect.
+  /^FAIL [^:@[:space:]]+\.(test\.)?(js|mjs|cjs|ts)([[:space:]]|$)/ {
+    s = $0; sub(/^FAIL /, "", s); sub(/[[:space:]].*$/, "", s)
+    add("assert", s, pubjest(s), 0); next
   }
   /^shell-selftest: .* FAIL$/ {
     s = $0; sub(/^shell-selftest: /, "", s); sub(/ FAIL$/, "", s)
