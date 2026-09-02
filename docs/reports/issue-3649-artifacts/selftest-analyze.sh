@@ -3295,29 +3295,31 @@ ticket_case complete           "$FULL_TICKET" 0 0
 # TOO STRICT, the half that reds a CORRECT ticket on the rig: `version` carries
 # `#[serde(default = "default_ticket_version")]`, so a ticket without it
 # deserialises fine and must be accepted by both halves.
+# `version` is deliberately ABSENT here and PRESENT in every malformed case
+# above, so each case isolates the field it names.
 ticket_case no-version         '{"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)"}' 0 0
 # NOT deny_unknown_fields, so the consumer IGNORES an unknown key -- rejecting it
 # would refuse a ticket from a newer connector that the server reads fine.
 ticket_case unknown-field      '{"keyspace":"ks","table":"t","ddl":"CREATE TABLE ks.t (a int PRIMARY KEY)","future_knob":7}' 0 0
 # TOO LOOSE, the half that fails AFTER all three builds.
-ticket_case predicates-object  '{"keyspace":"ks","table":"t","ddl":"d","predicates":{}}' 1 1
-ticket_case predicates-badop   '{"keyspace":"ks","table":"t","ddl":"d","predicates":[{"column":"a","op":"NOPE","value":1}]}' 1 1
-ticket_case predicates-nocol   '{"keyspace":"ks","table":"t","ddl":"d","predicates":[{"op":"Equal","value":1}]}' 1 1
-ticket_case wraparound-string  '{"keyspace":"ks","table":"t","ddl":"d","wraparound":"yes"}' 1 1
-ticket_case columns-not-strings '{"keyspace":"ks","table":"t","ddl":"d","columns":[1,2]}' 1 1
-ticket_case limit-negative     '{"keyspace":"ks","table":"t","ddl":"d","limit":-1}' 1 1
-ticket_case token-not-int      '{"keyspace":"ks","table":"t","ddl":"d","token_start":"0"}' 1 1
+ticket_case predicates-object  '{"version":2,"keyspace":"ks","table":"t","ddl":"d","predicates":{}}' 1 1
+ticket_case predicates-badop   '{"version":2,"keyspace":"ks","table":"t","ddl":"d","predicates":[{"column":"a","op":"NOPE","value":1}]}' 1 1
+ticket_case predicates-nocol   '{"version":2,"keyspace":"ks","table":"t","ddl":"d","predicates":[{"op":"Equal","value":1}]}' 1 1
+ticket_case wraparound-string  '{"version":2,"keyspace":"ks","table":"t","ddl":"d","wraparound":"yes"}' 1 1
+ticket_case columns-not-strings '{"version":2,"keyspace":"ks","table":"t","ddl":"d","columns":[1,2]}' 1 1
+ticket_case limit-negative     '{"version":2,"keyspace":"ks","table":"t","ddl":"d","limit":-1}' 1 1
+ticket_case token-not-int      '{"version":2,"keyspace":"ks","table":"t","ddl":"d","token_start":"0"}' 1 1
 ticket_case version-not-u8     '{"keyspace":"ks","table":"t","ddl":"d","version":300}' 1 1
-ticket_case ddl-missing        '{"keyspace":"ks","table":"t"}' 1 1
-ticket_case ddl-null           '{"keyspace":"ks","table":"t","ddl":null}' 1 1
-ticket_case ddl-blank          '{"keyspace":"ks","table":"t","ddl":"   "}' 1 1
+ticket_case ddl-missing        '{"version":2,"keyspace":"ks","table":"t"}' 1 1
+ticket_case ddl-null           '{"version":2,"keyspace":"ks","table":"t","ddl":null}' 1 1
+ticket_case ddl-blank          '{"version":2,"keyspace":"ks","table":"t","ddl":"   "}' 1 1
 # A JSON bool is a Python int; serde is not so forgiving and neither is this.
 ticket_case version-bool       '{"keyspace":"ks","table":"t","ddl":"d","version":true}' 1 1
 # THE TWO HALVES ARE SEPARATE: a narrowed ticket DESERIALISES fine, so the schema
 # half accepts it and only the full-ring half refuses. That split is the whole
 # reason a control can be schema-checked without being forced to be a full scan.
-ticket_case narrowed-limit     '{"keyspace":"ks","table":"t","ddl":"d","limit":10}' 0 1
-ticket_case narrowed-columns   '{"keyspace":"ks","table":"t","ddl":"d","columns":["a"]}' 0 1
+ticket_case narrowed-limit     '{"version":2,"keyspace":"ks","table":"t","ddl":"d","limit":10}' 0 1
+ticket_case narrowed-columns   '{"version":2,"keyspace":"ks","table":"t","ddl":"d","columns":["a"]}' 0 1
 
 # STRUCTURAL: the control branch must apply the SCHEMA half. It used to check
 # only that the file was JSON, so a control wasted the same three release builds
