@@ -4321,16 +4321,26 @@ if [ "$scc_login" = 1 ]; then
   # contexts would run different sccache installs.
   [ -n "${SCC_SHIM_LOGIN_BIN:-}" ] && scc_extra+=("PATH=$SCC_SHIM_LOGIN_BIN:$PATH")
 elif [ -n "${SCC_SHIM_NONLOGIN_NOBIN:-}" ]; then
-  # The NON-LOGIN context resolves NO sccache: the `cargo install` shape, where the binary sits in
-  # the user Cargo bin directory and sudo replaces PATH with secure_path. An ABSOLUTE path still
-  # executes, which is why the server reads keep working — only `command -v` comes back empty.
+  # The NON-LOGIN context resolves NO sccache ON ITS OWN PATH: the `cargo install` shape, where the
+  # binary sits in the user Cargo bin directory and sudo replaces PATH with secure_path. An ABSOLUTE
+  # path still executes, which is why the server reads keep working — only `command -v` comes back
+  # empty.
+  #
+  # THE VARIABLE'"'"'S VALUE *IS* THAT PATH, and it must carry a `bash` (roborev job 407 f1, Part B).
+  # This arm was unreachable — nothing in the tree set the variable — and it pinned a literal
+  # `PATH=/nonexistent`, which does not model what it claims: GNU env resolves the COMMAND against
+  # the PATH it has just set, so `env PATH=/nonexistent bash -c ...` dies rc 127 with `bash` itself
+  # unfindable. That is "the session could not run", not "the session ran and found no sccache", and
+  # it makes the ~/.cargo/bin RETRY stage unobservable too — both stages come back empty for the same
+  # harness reason. So a case passes a real directory holding bash and the coreutils but NO sccache,
+  # and the two stages then differ on exactly one property: whether ~/.cargo/bin holds one.
   #
   # SCOPED TO THE RESOLUTION PROBE ONLY. Applying it to every non-login sudo call also broke
   # `sudo -n -u <self> true` (the PRIVILEGE probe), which then reported sudo-runas-denied and made
   # the case fail for a reason that had nothing to do with the binary — a harness artifact wearing
   # the verdict it was meant to test.
   case "$*" in
-    *"command -v sccache"*) scc_extra+=("PATH=/nonexistent") ;;
+    *"command -v sccache"*) scc_extra+=("PATH=$SCC_SHIM_NONLOGIN_NOBIN") ;;
   esac
 fi'
   if [ "${val#file:}" != "$val" ]; then
@@ -4595,7 +4605,7 @@ else
   #        PROPERTY the fix added — via the `sudo` shim's argv log, that NO sudo call happened at
   #        all. The old phrase was an implementation detail of which arm fired; the property is the
   #        contract. (The binary arm is still reachable and still covered: sccache present but no
-  #        session able to resolve it — 12b-f2/12b-f3.)
+  #        session able to resolve it on its own PATH — 12b-f3/12b-f4 below.)
   scc_shims_nb="$tmp/scc-shims-nb"; mksccshims "$scc_shims_nb" 30G no-sccache
   scc_sudolog_nb="$tmp/scc-sudo-nb.log"; : >"$scc_sudolog_nb"
   scc_out_nb=$(runscc "$scc_bs" "$scc_shims_nb" "$scc_env_v" SCCACHE_CACHE_SIZE=30G \
@@ -4744,6 +4754,82 @@ else
   else
     bad "sccache-cap: $scc_sess_n session invocation(s) found, and one carries no blanket scrub — the caller's routing reaches a session probe, a read or a start:"
     printf '%s\n' "${scc_sess_bad:-  (no invocation found at all — the derivation broke, which is not a pass)}"
+  fi
+
+  # 12b-f3 / 12b-f4. THE ~/.cargo/bin RESOLUTION RETRY (roborev job 407, f1) — AND THE FIXTURE THAT
+  #          DRIVES IT. `sudo -n -u <user> bash -c` is non-login and non-interactive, so its PATH is
+  #          sudo's `secure_path` (measured on this fleet:
+  #          /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin), which omits the
+  #          ~/.cargo/bin that this script's own documented `cargo install sccache` writes to — while
+  #          agent-gate.sh prepends exactly that directory before it detects sccache. One stage of
+  #          resolution therefore reports ABSENT a binary gates are successfully USING, which refuses
+  #          persistence and reds the strict verify.run.
+  #
+  #          THE ARM WAS PRESENT AND UNREACHABLE. `SCC_SHIM_NONLOGIN_NOBIN` existed in the `sudo`
+  #          stub and NOTHING in the tree set it, so the no-binary shape had no behavioural coverage
+  #          at all. These two cases set it, and they differ in exactly ONE property — whether
+  #          ~/.cargo/bin holds an sccache — so the pair is a RED/GREEN control rather than two
+  #          assertions that could both pass against a section that always refuses.
+  #
+  #          A PER-CASE HOME, not a mutation of the shared one: runscc pins HOME and `env` lets a
+  #          later assignment win, so each case gets its own home directory and the pair is
+  #          order-independent (a shared home would make 12b-f4's refusal depend on 12b-f3 having
+  #          cleaned up after itself).
+  # The no-sccache PATH the non-login context gets: bash and the coreutils, deliberately NO sccache.
+  scc_nobin_path="$tmp/scc-nobin-path"; mk_hermetic_bin "$scc_nobin_path"; rm -f "$scc_nobin_path/sccache"
+  if [ -x "$scc_nobin_path/bash" ] && [ ! -e "$scc_nobin_path/sccache" ]; then
+    ok "sccache-cap: the no-sccache session PATH fixture carries a bash and no sccache (the pair's own precondition)"
+  else
+    bad "sccache-cap: the no-sccache session PATH fixture is unusable — 12b-f3/12b-f4 would test nothing"
+  fi
+
+  # 12b-f3. THE RETRY ANSWERS, AND THE EMITTED LINE SAYS SO. Nothing on the session's own PATH, an
+  #         sccache under ~/.cargo/bin: the run must resolve THAT absolute path, reach a verdict with
+  #         it, and the provenance clause must NOT claim the session named it on its own PATH.
+  scc_home_cargo="$tmp/scc-home-cargobin"
+  mkdir -p "$scc_home_cargo/.cargo/bin"
+  mk_stub "$scc_home_cargo/.cargo/bin" sccache "$scc_stub_body"
+  scc_out_cb=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G \
+    SCC_STUB_MAX=32212254720 HOME="$scc_home_cargo" \
+    SCC_SHIM_NONLOGIN_NOBIN="$scc_nobin_path")
+  scc_sl_cb=$(scc_slice "$scc_out_cb")
+  if out_has "$scc_sl_cb" -F "sccache binary: '$scc_home_cargo/.cargo/bin/sccache'" \
+     && out_has "$scc_sl_cb" 'only after ~/.cargo/bin was prepended to its PATH' \
+     && ! out_has "$scc_sl_cb" "named by the probed session on its own PATH" \
+     && ! out_has "$scc_sl_cb" -E '\[warn\].*sccache-cap: UNMEASURED'; then
+    ok "sccache-cap: a cargo-installed sccache absent from the session's own PATH is still resolved from ~/.cargo/bin, and the emitted line names the RETRY as the stage that answered"
+  else
+    bad "sccache-cap: the ~/.cargo/bin retry did not resolve the binary, or the line still claims the session named it on its own PATH"
+    printf '%s\n' "$scc_sl_cb" | grep -E 'sccache binary|sccache-cap:' | head -4
+  fi
+  # AND THE SCOPE NOTE CARRIES THE SAME PROVENANCE, because it is the second place the claim is
+  # made and the two must not disagree about which stage answered.
+  if out_has "$scc_sl_cb" -F "scope: every sccache call here used '$scc_home_cargo/.cargo/bin/sccache'" \
+     && ! out_has "$scc_sl_cb" 'the binary the probed session itself named'; then
+    ok "sccache-cap: the scope note names the retried binary with the same provenance clause, never the old unqualified 'the probed session itself named'"
+  else
+    bad "sccache-cap: the scope note disagrees with the resolution line about which binary or which stage"
+    printf '%s\n' "$scc_sl_cb" | grep -F 'scope: every sccache call' | head -2
+  fi
+
+  # 12b-f4. NEITHER STAGE ANSWERS -> REFUSAL THAT NAMES BOTH. The same fixture with NO ~/.cargo/bin:
+  #         an operator must not be told merely "absent" when two different resolutions were tried,
+  #         or they cannot tell "install it" from "it is installed somewhere neither stage looks".
+  scc_home_nocargo="$tmp/scc-home-nocargobin"
+  mkdir -p "$scc_home_nocargo"
+  rm -rf "$scc_home_nocargo/.cargo"
+  scc_out_nc=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G \
+    SCC_STUB_MAX=32212254720 HOME="$scc_home_nocargo" \
+    SCC_SHIM_NONLOGIN_NOBIN="$scc_nobin_path")
+  scc_sl_nc=$(scc_slice "$scc_out_nc")
+  if out_has "$scc_sl_nc" 'sccache binary: the probed session named none on its own PATH, and a retry with ~/.cargo/bin prepended named none either' \
+     && out_has "$scc_sl_nc" -E '\[warn\].*sccache-cap: UNMEASURED' \
+     && out_has "$scc_sl_nc" "resolved no 'sccache' on its own PATH, and none under ~/.cargo/bin either" \
+     && ! out_has "$scc_sl_nc" -E '\[ok\].*sccache-cap'; then
+    ok "sccache-cap: with neither the session's own PATH nor ~/.cargo/bin naming an sccache, the refusal NAMES both stages and stays UNMEASURED, never an [ok]"
+  else
+    bad "sccache-cap: the two-stage refusal does not name both stages, or it certified something"
+    printf '%s\n' "$scc_sl_nc" | grep -E 'sccache binary|sccache-cap:' | head -4
   fi
 
   # 12b-g2. A FRESH PROVISIONED BOX: NO SERVER YET, AND THE SECTION BECOMES THE FIRST STARTER

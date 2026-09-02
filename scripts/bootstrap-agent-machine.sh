@@ -3235,7 +3235,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     eval "$__out="
     SCC_ORACLE_WHY=""
     if [ -z "$SCC_SCCACHE_BIN" ]; then
-      SCC_ORACLE_WHY="the probed session named no sccache on its own PATH, so the value->bytes map cannot be asked of the tool gates actually run"
+      SCC_ORACLE_WHY="the probed session named no sccache on its own PATH, nor did a retry with ~/.cargo/bin prepended, so the value->bytes map cannot be asked of the tool gates actually run"
       return 1
     fi
     if [ -z "$TIMEOUT_BIN" ]; then
@@ -3386,12 +3386,24 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # Round 3's reason survives: what is passed to a session is an ABSOLUTE PATH, so nothing depends
   # on `secure_path` at use time; it is just the path that session itself named.
   SCC_SCCACHE_BIN=""
-  # scc_resolve_binary: ask the probed session which sccache it would run. One extra bounded sudo
-  # call, deliberately taken BEFORE the persist decision, because the literal oracle that AUTHORIZES
+  # SCC_BIN_PROVENANCE: WHICH of the two resolution stages below named the binary, as ONE FACTUAL
+  # CLAUSE for the operator-facing lines. It is deliberately NOT a verdict state, a classifier or a
+  # grammar (lead ruling req-3727-w4 removed all three from this section): it exists because the
+  # emitted line asserts a provenance, and asserting "named by the probed session on its own PATH"
+  # when the ~/.cargo/bin retry is what answered would be a false sentence in an operator-facing
+  # line — the defect class this section has been bleeding findings on.
+  SCC_BIN_PROVENANCE=""
+  # scc_resolve_binary: ask the probed session which sccache it would run. Two bounded sudo calls at
+  # most, deliberately taken BEFORE the persist decision, because the literal oracle that AUTHORIZES
   # the write must not run on a binary the session does not have.
+  #
+  # TWO STAGES, BECAUSE ONE STAGE CANNOT SEE THE DOCUMENTED INSTALL (roborev job 407, f1). Stage 1
+  # asks the session with the PATH it really gets; stage 2 retries the SAME call with ~/.cargo/bin
+  # prepended. Neither stage is a guess about the box: both are measurements, and the one that
+  # answered is named in the emitted line.
   scc_resolve_binary() {
     local __nl=""
-    SCC_SCCACHE_BIN=""
+    SCC_SCCACHE_BIN=""; SCC_BIN_PROVENANCE=""
     if [ -z "$SCC_SELF_USER" ] || [ -z "$TIMEOUT_BIN" ] || ! have sudo; then
       return 1
     fi
@@ -3400,8 +3412,30 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     # Anchored on the LAST non-empty line: a session's stdout can carry noise ahead of the answer,
     # and taking the first line would report a motd as a binary path.
     __nl=$(printf '%s\n' "$__nl" | grep -v '^[[:space:]]*$' | tail -1)
+    if [ -n "$__nl" ]; then
+      SCC_SCCACHE_BIN="$__nl"
+      SCC_BIN_PROVENANCE="named by the probed session on its own PATH"
+      return 0
+    fi
+    # STAGE 2 — THE ~/.cargo/bin RETRY. `sudo -n -u <user> bash -c` is NON-LOGIN and
+    # NON-INTERACTIVE, so its PATH is sudo's `secure_path` — measured on this fleet as
+    # /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin — which omits the
+    # ~/.cargo/bin that this script's own documented `cargo install sccache` writes to. agent-gate.sh
+    # prepends exactly that directory before it detects sccache, so stage 1 alone can report ABSENT a
+    # binary gates are successfully USING, and that absence then refuses persistence and reds the
+    # strict verify.run. Same user, same 20s bound, same blanket SCCACHE_* scrub as stage 1 — an
+    # unbounded or unscrubbed retry would be a worse defect than the one it fixes.
+    #
+    # `$HOME` is left SINGLE-QUOTED for the SESSION to expand, so it is that session's own home and
+    # not bootstrap's, which under the documented `sudo bash <this script>` is root's. Round 3's
+    # reason still holds either way: what is passed on to a session later is the ABSOLUTE path this
+    # call printed, so nothing depends on `secure_path` at use time.
+    __nl=$(bounded 20 env "${SCC_ENV_SCRUB[@]}" sudo -n -u "$SCC_SELF_USER" \
+      bash -c 'PATH="$HOME/.cargo/bin:$PATH"; command -v sccache 2>/dev/null || true' 2>/dev/null || true)
+    __nl=$(printf '%s\n' "$__nl" | grep -v '^[[:space:]]*$' | tail -1)
     [ -n "$__nl" ] || return 1
     SCC_SCCACHE_BIN="$__nl"
+    SCC_BIN_PROVENANCE="named by the probed session only after ~/.cargo/bin was prepended to its PATH — nothing answered on the PATH that session gets on its own, which is the documented 'cargo install sccache' layout and the same fallback agent-gate.sh applies before it detects sccache"
     return 0
   }
   # The ROUTING variables are scrubbed alongside BASH_ENV/ENV: an SCCACHE_DIR or
@@ -3438,7 +3472,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   scc_running_cap() {
     SCC_RUN_CAP=""; SCC_RUN_WHY=""; SCC_RUN_STATE=unreadable
     if [ -z "$SCC_SCCACHE_BIN" ]; then
-      SCC_RUN_WHY="the probed session named no sccache on its own PATH, so no running server can be read with the binary gates use"
+      SCC_RUN_WHY="the probed session named no sccache on its own PATH, nor did a retry with ~/.cargo/bin prepended, so no running server can be read with the binary gates use"
       return 1
     fi
     if [ -z "$TIMEOUT_BIN" ]; then
@@ -3529,7 +3563,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   scc_start_server_for() {
     local v="$1" rc=0
     if [ -z "$SCC_SCCACHE_BIN" ]; then
-      SCC_START_WHY="the probed session named no sccache on its own PATH"
+      SCC_START_WHY="the probed session named no sccache on its own PATH, nor did a retry with ~/.cargo/bin prepended"
       return 1
     fi
     if [ -z "$TIMEOUT_BIN" ]; then
@@ -3659,9 +3693,9 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # measurements.
   scc_resolve_binary || true
   if [ -n "$SCC_SCCACHE_BIN" ]; then
-    info "sccache binary: '$SCC_SCCACHE_BIN' (named by the probed session itself, so it is the one a gate launched that way would run)"
+    info "sccache binary: '$SCC_SCCACHE_BIN' ($SCC_BIN_PROVENANCE, so it is the one a gate launched that way would run)"
   else
-    info "sccache binary: the probed session named none, so nothing will be persisted or certified from a binary this run cannot identify"
+    info "sccache binary: the probed session named none on its own PATH, and a retry with ~/.cargo/bin prepended named none either, so nothing will be persisted or certified from a binary this run cannot identify"
   fi
 
   # ---- (3) persistence: append-if-absent / create-if-absent, NEVER a rewrite ----
@@ -3844,7 +3878,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     if [ "${SCC_SERVER_STARTED:-0}" = 1 ]; then
       info "scope: there was NO server when this run began, so the cap is in force from now on because THIS RUN started it. Anything that stops the server later and does not see the value (a session created before the /etc/environment line existed) will start one at sccache's own default again"
     fi
-    info "scope: every sccache call here used '$SCC_SCCACHE_BIN', the binary the probed session itself named — so it is the one a gate launched that way would run"
+    info "scope: every sccache call here used '$SCC_SCCACHE_BIN', $SCC_BIN_PROVENANCE — so it is the one a gate launched that way would run"
     [ -n "$SCC_PROBE_SUBJECT_NOTE" ] && info "subject: $SCC_PROBE_SUBJECT_NOTE"
   }
   # scc_fix_hint <what-the-flag-would-do>: the ONE place that prints the repair line, because
@@ -3982,7 +4016,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     elif [ "$scc_probe_ok" != 1 ]; then
       warn "sccache-cap: UNMEASURED (the non-login probe session produced no cqlite-scc-probe-set= line, rc=$scc_probe_rc — cap visibility is UNKNOWN, not ok)"
     elif [ -z "$SCC_SCCACHE_BIN" ]; then
-      warn "sccache-cap: UNMEASURED (the probed session resolved no 'sccache' on its own PATH, so neither the value->bytes oracle nor the running server can be read — cap enforcement is UNKNOWN, not ok)"
+      warn "sccache-cap: UNMEASURED (the probed session resolved no 'sccache' on its own PATH, and none under ~/.cargo/bin either, so neither the value->bytes oracle nor the running server can be read — cap enforcement is UNKNOWN, not ok)"
     elif [ -n "$scc_probe_set" ]; then
       # VISIBLE — which is only the FIRST of three facts. EFFECT is asked before ATTRIBUTION,
       # the same order 5b uses: a value with no effect makes the question of where it came from
