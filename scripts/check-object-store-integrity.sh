@@ -445,6 +445,16 @@ fi
 # operators learn to waive. WORST-CASE WALL TIME IS 2x THE BOUND, because a
 # non-clean first pass is re-run once (see the discriminator below); only the rare
 # non-clean path pays it.
+#
+# A CALLER MAY WANT A TIGHTER BOUND THAN THIS DEFAULT, AND ONE DOES. This bound is a
+# property of the WALK; how long a caller may block is a property of the CALLER.
+# scripts/local/worker-supervisor.sh passes 300 rather than accepting 600, because the
+# sweep runs inside a child process and nothing in that supervisor can read its stop
+# file between the two walks - so its worst case of two walks is deliberately capped at
+# one walk's worth of this default (#3749 review round 3). Machine onboarding
+# (bootstrap-agent-machine.sh) keeps 600: nobody is waiting on a stop file there. If you
+# change this number, the supervisor's own default is asserted to stay at most half of
+# it, so that relation reds rather than drifting silently.
 FINDING_LIST_LIMIT=40
 
 # git fsck's exit BITMASK, from fsck.h and CONFIRMED against the git in use (2.43.0):

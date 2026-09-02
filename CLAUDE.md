@@ -477,7 +477,19 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   refused bit-testing outright, and a status carrying a bit OUTSIDE the supported mask is
   `unclassified` rather than folded into a class whose remedy would be wrong. That is what makes it
   **degrade safely** as git adds bits: a new bit alongside damage is still damage, a new bit alone is
-  non-passing, and widening `FSCK_KNOWN_MASK` is then a wording change rather than a correctness fix. And **no non-clean walk is fatal on ONE observation**: it is re-run exactly ONCE as
+  non-passing, and widening `FSCK_KNOWN_MASK` is then a wording change rather than a correctness fix. **AND A STATUS IS ONLY A BITMASK IF THE COMMAND THAT PRODUCED IT ACTUALLY RAN
+  (round 3).** The status space fsck uses is SHARED with the shell's, so the classifier had a
+  precondition it never checked: the two capture redirections are part of the fsck command, and a
+  failure to open the scratch output file (a full or reaped `TMPDIR`) means bash execs nothing and
+  exits **1** — `ERROR_OBJECT`. Both passes then fail identically, both "reproduce", and the sweep
+  emitted **`CORRUPT` about a store it never opened** — the same false-CORRUPT harm as the `/^error/p`
+  classifier above, arriving through the shell instead of through a concurrent writer. It CANNOT be
+  inferred from the status, which is the whole point; the evidence is **affirmative** — a marker
+  written INSIDE the redirected group as its first statement (a redirection failure on a compound
+  command means the body does not execute at all), plus both capture files existing afterwards — and
+  its absence is a `launchfail` class routed to `UNMEASURED` and **never bit-tested**. The
+  generalisation: **before reading a status as a structured value, establish that the process whose
+  convention you are applying is the process that produced it.**  And **no non-clean walk is fatal on ONE observation**: it is re-run exactly ONCE as
   a **discriminator** — a concurrency artefact does not survive a second independent walk, real
   damage does — never a retry-until-clean loop, and a damage class seen once and not twice is
   `UNMEASURED`, neither established damage nor a clean store. **The `CORRUPT` verdict is PERSISTED
@@ -498,6 +510,26 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   its own could-not-acquire path that must then not silently skip the latch. The latch does not
   expire (corruption is non-self-clearing) and is cleared by hand with the `rm -f <latch>` that every
   message naming it prints; a create that could not happen is REPORTED, never read as a latched box.
+  **THE LATCH IS CREATED BEFORE THE THROTTLE STAMP, AND RE-READ BEFORE EVERY RETURN THAT LEADS TO A
+  SPAWN — AND THE REMAINING RACE IS DECLARED, NOT CLOSED (round 3).** Two ordering defects, neither
+  needing a lock. The stamp used to be written for EVERY outcome BEFORE the CORRUPT branch ran, so
+  between those two writes a peer read a fresh non-corrupt stamp and throttled past a corruption
+  about to be recorded — round 1's own harm, one instruction earlier. And a lane whose OWN sweep
+  said `VERIFIED` returned toward a spawn without re-reading the latch, so a peer latching the box
+  DURING that lane's two fsck walks was simply not seen. So: latch first, stamp second, and one
+  `obj_sweep_stop_if_latched` helper called before the throttled, `VERIFIED` and `UNMEASURED`
+  returns alike — one rule ("no such return without a fresh latch read") instead of a set of paths
+  someone must remember to audit. **What is NOT closed, stated because a narrowed race described as
+  closed is worse than one described honestly:** the latch read and the worker spawn are still
+  unsynchronised, and the preflight hold loop can poll for minutes between them, so ONE worker can
+  still start on a box latched moments earlier. It is bounded — that lane's next iteration reads the
+  latch at the top of its sweep and stops — and the atomic guarantee needs per-store
+  synchronisation shared by the sweep and the spawn decision, which is **split to its own issue**.
+  **The sweep is also NOT INTERRUPTIBLE, so its cost is bounded in WALL TIME instead:** its two
+  walks run in a CHILD process, so the supervisor cannot check the stop file between them; it checks
+  it (and the wall-clock budget) immediately BEFORE the sweep, and the supervisor's per-walk bound
+  defaults to **half** the sweep script's own (300 vs 600) so two walks cost no more than one walk
+  at the script's bound. Raising a bound is a change to somebody's stop latency.
   **And the stamp's KEY is resolved by the sweep script itself (`--print-store`), never by a `git`
   call in the supervisor:** a bare `git rev-parse --git-common-dir` inherits the caller's
   environment, so an inherited `GIT_DIR`/`GIT_COMMON_DIR` keyed the stamp — and hence the latch — on

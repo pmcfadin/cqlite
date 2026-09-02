@@ -699,6 +699,19 @@ above 124 (timeout/shell conventions, `die()` and signal deaths above them) is r
 outright, and a status carrying a bit outside the supported mask is unclassified rather than folded
 into a class whose remedy would be wrong — which is how it degrades safely as git adds bits.
 
+**And a status is only a bitmask if the command that produced it actually ran.** fsck's status space
+is shared with the shell's, so the classifier had a precondition it never checked: the two capture
+redirections are part of the fsck command, and a failure to open the scratch output file (a full or
+reaped `TMPDIR`) means bash execs nothing and exits **1** — `ERROR_OBJECT`. Both passes then fail
+identically, both "reproduce", and the sweep emitted `CORRUPT` **about a store it never opened** —
+the same false-`CORRUPT` harm as the text-shape classifier, arriving through the shell instead of
+through a concurrent writer. It cannot be inferred from the status, which is the point; the evidence
+is **affirmative** — a marker written inside the redirected group as its first statement (a
+redirection failure on a compound command means the body does not execute at all) plus both capture
+files existing afterwards — and its absence is a `launchfail` class routed to `UNMEASURED`, never
+bit-tested. Generalise it: **before reading a status as a structured value, establish that the
+process whose convention you are applying is the process that produced it.**
+
 And no non-clean walk is fatal on one observation: it is re-run **once** as a discriminator — a
 concurrency artefact does not survive a second independent walk, damage does — never a
 retry-until-clean loop. The `CORRUPT` verdict is **persisted for the box in its own create-only
@@ -718,6 +731,24 @@ is reported, never read as a latched box. The stamp's **key** is resolved by the
 (`--print-store`), never by a `git` call in the supervisor — a bare `git rev-parse
 --git-common-dir` inherits the caller's environment, so an inherited `GIT_DIR` keyed the stamp on
 another repository.
+
+**The latch is created before the throttle stamp, re-read before every return that leads to a spawn,
+and the remaining race is declared rather than closed.** The stamp used to be written for every
+outcome *before* the `CORRUPT` branch ran, so between those two writes a peer read a fresh
+non-corrupt stamp and throttled past a corruption about to be recorded; and a lane whose own sweep
+said `VERIFIED` returned toward a spawn without re-reading the latch, so a peer latching the box
+*during* that lane's two fsck walks was never seen. Both are ordering fixes, neither needs a lock:
+latch first, stamp second, and one `obj_sweep_stop_if_latched` helper before the throttled,
+`VERIFIED` and `UNMEASURED` returns alike — one rule instead of a set of paths to audit. **What is
+not closed:** the latch read and the worker spawn are still unsynchronised, and the preflight hold
+loop can poll for minutes between them, so one worker can still start on a box latched moments
+earlier. It is bounded (that lane's next iteration reads the latch at the top of its sweep and
+stops) and the atomic guarantee needs per-store synchronisation shared by the sweep and the spawn
+decision, which is split to its own issue. The sweep is also **not interruptible** — its two walks
+run in a child process — so the supervisor checks the stop file and the wall-clock budget
+immediately *before* the sweep, and bounds the exposure in wall time: its per-walk default is
+**half** the sweep script's own (300 vs 600), so two walks cost no more than one walk at the
+script's bound. Raising a bound is a change to somebody's stop latency.
 
 Three alternatives were **rejected** by the same ruling, recorded so they are not re-derived:
 per-lane full clones (a permanent multi-GB tax for an out-of-model threat); per-read rehashing (the
