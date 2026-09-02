@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=568
+CASE_FLOOR=576
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -4236,6 +4236,122 @@ if [ "$RC" = 1 ] && grep -q '^AB-3649: cause affinity-unverifiable$' "$TMP/err.t
 else
   bad "an unparsable requested CPU list returned $RC"
 fi
+
+# ---- records are SESSION-LOCAL, and the pairs are the DECLARED PLAN ----------
+# ROUND 23. Both properties were encoded in the round-20 enumeration as weaker
+# cousins -- "enough replicates completed" is a FLOOR, and "the records describe
+# this session" was conflating internal consistency with provenance -- which is
+# why that census did not prevent them.
+runfile_case() { # <name> <python-mutation> <want-cause>
+  mkfixture "$TMP/rf" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/rf" <<PYINNER
+import json
+import os
+
+run_dir = "$TMP/rf"
+path = os.path.join(run_dir, "manifest.json")
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+runs = manifest["runs"]
+$2
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/rf"
+  check_cause "$1" "$3"
+}
+# An ABSOLUTE path: the manifest can name any file on the box.
+runfile_case "a run file named by absolute path" \
+  'runs[0]["file"] = os.path.join(run_dir, runs[0]["file"])' run-file-outside-session
+# PARENT TRAVERSAL: syntactically relative, resolves outside.
+# A traversal that returns INSIDE is not an escape and must not be refused --
+# `../<this-dir>/<file>` resolves to the same file. The escape is one that
+# LEAVES, so the traversal case points at the parent itself.
+runfile_case "a run file reached by parent traversal" \
+  'import shutil
+shutil.copy(os.path.join(run_dir, runs[0]["file"]),
+            os.path.join(os.path.dirname(run_dir), runs[0]["file"]))
+runs[0]["file"] = os.path.join("..", runs[0]["file"])' \
+  run-file-outside-session
+# AN ESCAPING SYMLINK: relative, no `..`, and still another directory's records.
+mkfixture "$TMP/rf-sym" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+mkdir -p "$TMP/rf-elsewhere"
+python3 - "$TMP/rf-sym" "$TMP/rf-elsewhere" <<'PYINNER'
+import json
+import os
+import shutil
+import sys
+
+run_dir, elsewhere = sys.argv[1], sys.argv[2]
+path = os.path.join(run_dir, "manifest.json")
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+victim = manifest["runs"][0]["file"]
+shutil.move(os.path.join(run_dir, victim), os.path.join(elsewhere, victim))
+os.symlink(os.path.join(elsewhere, victim), os.path.join(run_dir, victim))
+PYINNER
+run_analyzer "$TMP/rf-sym"
+check_cause "a run file that is a symlink out of the session" run-file-outside-session
+# ...and an ordinary relative name still works, or the above proves only that
+# something is refused.
+run_analyzer "$TMP/meets"
+if grep -q '^AB-3649: cause single-stream run-file-outside-session$' "$TMP/err.txt"; then
+  bad "an ordinary session-local run file was refused"
+else
+  ok "an ordinary relative run file inside the session directory is accepted"
+fi
+
+# THE DECLARED PLAN, not a floor. Extra and renumbered replicates entered the
+# bootstrap, which then resampled a set that is not the design the manifest
+# describes.
+replicate_set_case() { # <name> <python-mutation>
+  mkfixture "$TMP/rs" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+  python3 - "$TMP/rs/manifest.json" <<PYINNER
+import json
+import os
+
+path = "$TMP/rs/manifest.json"
+run_dir = os.path.dirname(path)
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+runs = manifest["runs"]
+
+
+def renumber(old_rep, new_rep):
+    """Renumber a replicate CONSISTENTLY -- manifest entry, file name and the
+    round label inside the records. Renumbering only the manifest is refused
+    earlier by the round-label reconciliation, so the case would never reach
+    the replicate-set check it exists for."""
+    for entry in runs:
+        if entry["replicate"] != old_rep:
+            continue
+        arm = entry["arm"]
+        old_name, new_name = entry["file"], "%s-r%02d.jsonl" % (arm, new_rep)
+        old_tag, new_tag = "%s-r%02d" % (arm, old_rep), "%s-r%02d" % (arm, new_rep)
+        body = open(os.path.join(run_dir, old_name), encoding="utf-8").read()
+        with open(os.path.join(run_dir, new_name), "w", encoding="utf-8") as handle:
+            handle.write(body.replace(old_tag, new_tag))
+        entry["replicate"], entry["file"] = new_rep, new_name
+
+
+$2
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+  run_analyzer "$TMP/rs"
+  check_cause "$1" replicate-set-mismatch
+}
+# EXTRA pairs: more data than declared is a different design, not a bigger one.
+replicate_set_case "more pairs than the manifest declares" \
+  'manifest["replicates_requested"] = 5'
+# NONCONTIGUOUS ids: 1,2,3,4,5,9 is not the plan 1..6.
+replicate_set_case "noncontiguous replicate ids" \
+  'renumber(6, 9)'
+# ZERO and NEGATIVE ids are outside any declared plan.
+replicate_set_case "a zero replicate id" \
+  'renumber(1, 0)'
+replicate_set_case "a replicate id outside the declared range" \
+  'renumber(1, 99)'
 
 # ---- the analyzer enforces the arms and the ticket ---------------------------
 # ROUND 20 findings 1 and 2. The driver refused both and the analyzer trusted

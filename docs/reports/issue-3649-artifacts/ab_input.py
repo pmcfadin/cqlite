@@ -997,6 +997,37 @@ def collect_pairs(manifest, manifest_dir, mode, declared_steps):
         utilization_ladder = list(common)
         utilization_ladder_restricted = restricted_any
 
+    # THE SET BEFORE ITS ORDERING. Whether these pairs ARE the declared plan is
+    # prior to whether they ran in the declared order: a renumbered replicate
+    # otherwise reds as a parity violation, which tells the operator the wrong
+    # thing about the wrong problem. Moved here from the analyzer for that
+    # reason -- it was correct there and it fired second.
+    #
+    # EXACT CONFORMANCE, not a floor. A `<` test accepted EXTRA pairs and any
+    # numbering at all, so a manifest with renumbered or out-of-range
+    # replicates entered the bootstrap, which then resampled a set that is not
+    # the declared design. The round-20 enumeration called this "enough
+    # replicates completed" -- the floor, not the property, which is why that
+    # census did not prevent it.
+    requested = manifest.get("replicates_requested")
+    if isinstance(requested, int):
+        observed_ids = sorted(base_reps)
+        expected_ids = list(range(1, requested + 1))
+        if observed_ids != expected_ids:
+            missing = [i for i in expected_ids if i not in observed_ids]
+            extra = [i for i in observed_ids if i not in expected_ids]
+            raise Unmeasured(
+                "replicate-set-mismatch",
+                "the session declares %d replicates, so the pairs must be "
+                "exactly %s; the manifest yields %s%s%s. A bootstrap over a "
+                "different set estimates a different design -- extra or "
+                "renumbered replicates are not a larger sample of the declared "
+                "plan, they are another plan"
+                % (requested, expected_ids, observed_ids,
+                   " (missing %s)" % missing if missing else "",
+                   " (unexpected %s)" % extra if extra else ""),
+            )
+
     # WHICH ARM RAN FIRST, per pair, and whether the counterbalancing happened.
     first_by_rep = {}
     for rep in base_reps:
