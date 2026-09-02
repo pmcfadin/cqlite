@@ -1,5 +1,9 @@
 use super::*;
 
+// Issue #3811: the inline-field UDT decoder, split out under the campsite rule
+// and carrying the consumption contract census finding C left open.
+mod inline;
+
 impl V5CompressedLegacyParser {
     /// Issue #1080: is this on-disk SerializationHeader marshal type a TOP-LEVEL
     /// frozen (or bare) UDT — `FrozenType(UserType(...))` or `UserType(...)` — that
@@ -77,7 +81,9 @@ impl V5CompressedLegacyParser {
         }
 
         let udt_data = &data[offset..offset + blob_len];
-        let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
+        let (udt_value, n) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
+        // #3811 (finding C): `parse_udt_value` REPORTS; this caller used to drop it.
+        Self::require_fully_consumed_raw(n, udt_data.len(), &column.name, "frozen UDT")?;
         offset += blob_len;
 
         Ok((udt_value, offset))
@@ -657,7 +663,10 @@ impl V5CompressedLegacyParser {
                     default: None,
                     is_static: false,
                 };
-                let (value, _) = self.parse_udt_value(data, 0, &nested_def, &dummy_column)?;
+                let (value, n) = self.parse_udt_value(data, 0, &nested_def, &dummy_column)?;
+                // #3811 (finding C): the 4th discarding bounded caller of the pair
+                // roborev named; `data` here is one exactly-bounded UDT field.
+                Self::require_fully_consumed_raw(n, data.len(), &nested_def.name, "nested UDT")?;
                 Ok(value)
             }
             _ => {
@@ -1073,116 +1082,15 @@ impl V5CompressedLegacyParser {
             });
         }
 
+        // Issue #3811 (census finding C): `data` IS the whole nested UDT value —
+        // every caller slices it with `checked_component_len` — so the field loop
+        // must have reached its end. Trailing bytes and a partial component-length
+        // header both leave `current_offset` short; TupleType.split rule 1 (a
+        // genuinely short encoding) leaves it EQUAL and stays accepted.
+        Self::require_fully_consumed_raw(current_offset, data.len(), &udt_def.name, "nested UDT")?;
         Ok(Value::Udt(Box::new(UdtValue {
             type_name: udt_def.name.clone(),
             keyspace: udt_def.keyspace.clone(),
-            fields,
-        })))
-    }
-
-    /// Parse a UDT using inline field definitions from CqlType::Udt
-    /// Used when we have inline type info but no registry entry (Issue #239)
-    ///
-    /// This handles the case where a UDT contains a nested UDT field, and the
-    /// nested UDT's field definitions are available inline in the CqlType structure
-    /// (parsed from the Statistics.db type string) rather than from the UdtRegistry.
-    pub(super) fn parse_inline_udt_value(
-        &self,
-        data: &[u8],
-        type_name: &str,
-        inline_fields: &[(String, CqlType)],
-        depth: usize,
-    ) -> Result<Value> {
-        if depth > MAX_TYPE_NESTING_DEPTH {
-            return Err(Error::corruption(format!(
-                "UDT nesting depth {} exceeds maximum {}",
-                depth, MAX_TYPE_NESTING_DEPTH
-            )));
-        }
-
-        let mut current_offset = 0;
-        let mut fields = Vec::with_capacity(inline_fields.len());
-
-        for (field_name, field_type) in inline_fields {
-            // Check bounds for field length (4 bytes BE i32)
-            if current_offset + 4 > data.len() {
-                // Trailing fields are implicit null
-                while fields.len() < inline_fields.len() {
-                    let remaining_field = &inline_fields[fields.len()];
-                    fields.push(UdtField {
-                        name: remaining_field.0.clone(),
-                        value: None,
-                    });
-                }
-                break;
-            }
-
-            // Read field length (4 bytes big-endian i32)
-            let field_len = i32::from_be_bytes([
-                data[current_offset],
-                data[current_offset + 1],
-                data[current_offset + 2],
-                data[current_offset + 3],
-            ]);
-            current_offset += 4;
-
-            let field_value = if field_len == -1 {
-                // Null field
-                None
-            } else if field_len == 0 {
-                // Empty value
-                let value = Self::parse_simple_udt_field_value(&[], field_type)?;
-                Some(value)
-            } else {
-                let field_len =
-                    Self::checked_component_len(field_len, field_name, current_offset, data.len())?;
-
-                let field_data = &data[current_offset..current_offset + field_len];
-                current_offset += field_len;
-
-                // Handle nested UDTs using inline field definitions (Issue #239)
-                let value = match field_type {
-                    CqlType::Udt(nested_name, nested_fields) if !nested_fields.is_empty() => {
-                        // Recursively parse nested UDT using its inline fields
-                        self.parse_inline_udt_value(
-                            field_data,
-                            nested_name,
-                            nested_fields,
-                            depth + 1,
-                        )?
-                    }
-                    CqlType::Frozen(inner) => match inner.as_ref() {
-                        CqlType::Udt(nested_name, nested_fields) if !nested_fields.is_empty() => {
-                            // Frozen nested UDT - unwrap and parse
-                            let inner_value = self.parse_inline_udt_value(
-                                field_data,
-                                nested_name,
-                                nested_fields,
-                                depth + 1,
-                            )?;
-                            Value::Frozen(Box::new(inner_value))
-                        }
-                        _ => {
-                            // Other frozen types - parse as simple value
-                            let inner_value =
-                                Self::parse_simple_udt_field_value(field_data, inner)?;
-                            Value::Frozen(Box::new(inner_value))
-                        }
-                    },
-                    _ => Self::parse_simple_udt_field_value(field_data, field_type)?,
-                };
-                Some(value)
-            };
-
-            fields.push(UdtField {
-                name: field_name.clone(),
-                value: field_value,
-            });
-        }
-
-        Ok(Value::Udt(Box::new(UdtValue {
-            type_name: type_name.to_string(),
-            keyspace: self.keyspace.clone(),
             fields,
         })))
     }

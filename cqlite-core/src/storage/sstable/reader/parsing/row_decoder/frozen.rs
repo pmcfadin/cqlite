@@ -80,15 +80,11 @@ impl V5CompressedLegacyParser {
             let desc = format!("{} '{}' element {}", kind, column.name, i);
             let value =
                 self.read_frozen_element(data, &mut offset, blob_end, element_type, &desc, 0)?;
-            tracing::debug!(
-                "V5CompressedLegacy: Frozen {} element {}: {:?}",
-                kind,
-                i,
-                value
-            );
+            tracing::debug!("V5CompressedLegacy: Frozen {kind} element {i}: {value:?}");
             elements.push(value);
         }
 
+        Self::require_frozen_extent(offset, blob_end, kind, &column.name)?; // #3811 (F)
         if as_set {
             Ok((Value::Set(elements), blob_end))
         } else {
@@ -103,7 +99,6 @@ impl V5CompressedLegacyParser {
         offset: usize,
         element_type: &str,
         column: &crate::schema::Column,
-        _reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         self.parse_frozen_sequence_value(data, offset, element_type, column, false)
     }
@@ -118,7 +113,6 @@ impl V5CompressedLegacyParser {
         offset: usize,
         element_type: &str,
         column: &crate::schema::Column,
-        _reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         self.parse_frozen_sequence_value(data, offset, element_type, column, true)
     }
@@ -134,7 +128,6 @@ impl V5CompressedLegacyParser {
         key_type: &str,
         value_type: &str,
         column: &crate::schema::Column,
-        _reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         let (count, blob_end) = Self::read_frozen_preamble(data, &mut offset, "map", &column.name)?;
 
@@ -156,15 +149,11 @@ impl V5CompressedLegacyParser {
             let val_value =
                 self.read_frozen_element(data, &mut offset, blob_end, value_type, &val_desc, 0)?;
 
-            tracing::debug!(
-                "V5CompressedLegacy: Frozen map entry {}: {:?} -> {:?}",
-                i,
-                key_value,
-                val_value
-            );
+            tracing::debug!("Frozen map entry {i}: {key_value:?} -> {val_value:?}");
             entries.push((key_value, val_value));
         }
 
+        Self::require_frozen_extent(offset, blob_end, "map", &column.name)?; // #3811 (F)
         Ok((Value::Map(entries), blob_end))
     }
 
@@ -381,7 +370,6 @@ impl V5CompressedLegacyParser {
         offset: &mut usize,
         type_str: &str,
         column: &crate::schema::Column,
-        _reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<Value> {
         // Extract element types from schema (schema-aware, no heuristics)
         let element_types = self.extract_tuple_element_types(type_str)?;
@@ -424,8 +412,10 @@ impl V5CompressedLegacyParser {
         let elements =
             self.parse_tuple_elements_raw(data, offset, blob_end, &element_types, &column.name, 0)?;
 
-        // Advance offset to end of blob regardless of how many elements were consumed
-        // (protects against trailing bytes / schema drift).
+        // #3811 (F): the removed comment claimed advancing to blob_end "protects
+        // against trailing bytes"; it made them unobservable. Refuse, THEN advance
+        // — the caller needs the STREAM position here, not the consumed count.
+        Self::require_frozen_extent(*offset, blob_end, "tuple", &column.name)?;
         *offset = blob_end;
 
         Ok(Value::Tuple(elements))
