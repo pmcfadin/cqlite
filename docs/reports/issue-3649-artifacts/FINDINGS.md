@@ -543,6 +543,27 @@ That is a pass derived from the absence of a bad signal, in the one check added
 to stop exactly that, and it is why there is a fourth token: `UNRECOGNISED` is
 disclosed as *not known to be local*, distinctly from `NOT-MEASURABLE`.
 
+**A PLANT THAT SILENTLY FAILS TO APPLY IS INDISTINGUISHABLE FROM A FIX THAT
+WORKS.** Twice in one round I concluded a guard had no coverage because a plant
+produced no red — and both times the plant had never applied: `str.replace` with
+a needle whose indentation was wrong changes nothing and reports nothing. The
+run was green because the code was unmodified, which looks exactly like the run
+being green because the code is correct.
+
+The fix is the one already applied to every patch script in this lane and never
+to the plants: **assert the mutation landed.** `assert old in s` before
+replacing. Planting is the verification method this lane relies on most, and it
+was the one step performing no verification of itself — the shape it exists to
+find, one level up.
+
+**AND THE FALSE CONCLUSION IS THE WORSE HALF.** On the strength of a plant that
+did nothing, I recorded that the driver's digest checks were uncovered and wrote
+a structural guard for them. The guard is worth having and it does fire — but the
+finding that motivated it was an artifact of my own tooling, and had I not
+re-planted with an assertion it would have entered the record as a real coverage
+gap. *A measurement that cannot fail is not evidence, and a plant that cannot
+apply is a measurement that cannot fail.*
+
 **THE MOST DANGEROUS SHAPE IN THIS LANE: THE COMMENT STATES THE CORRECT
 PROPERTY AND THE CHECK BESIDE IT IMPLEMENTS A WEAKER ONE.** Five instances, and
 what makes it worse than an unchecked requirement is that **a reviewer reads the
