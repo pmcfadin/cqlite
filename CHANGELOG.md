@@ -101,6 +101,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`EmptyType`, `VectorType(...)`, a foreign class) is refused BY NAME instead of
   being reported as a user-defined type with a missing field list.
 
+  **And the marshal class's PACKAGE is part of its identity.** Matching the simple
+  name exactly still ignored the package, so a third-party `com.acme.Int32Type` was
+  decoded as CQL `int` — an unknown class's bytes read as if the class were known,
+  the same no-heuristics defect one level up. `TypeParser.getAbstractType` at the
+  pinned tag resolves a name as `compareWith.contains(".") ? compareWith :
+  "org.apache.cassandra.db.marshal." + compareWith`, so a marshal name has exactly
+  two legal spellings — bare, or fully qualified under
+  `org.apache.cassandra.db.marshal` — and both continue to decode identically.
+  Anything else, INCLUDING a structural form (`com.acme.TupleType(...)`) and a
+  package that merely resembles the marshal one (`…db.marshalX.`,
+  `notorg.apache.cassandra.db.marshal.`, `my.org.apache.cassandra.db.marshal.`), is
+  now an `Error::unsupported_format` naming the package it was rejected on. The same
+  rule closed a package-SUFFIX hole in the `UserType(` marker locator, where a
+  substring search accepted `my.org.apache.cassandra.db.marshal.UserType(...)` as
+  Cassandra's.
+
   **A malformed `inet` is refused.** An `inet` value is 4 bytes (IPv4) or 16 (IPv6),
   or empty meaning null (`InetAddressSerializer`); any other width was accepted and
   handed back as a `Value::Inet` no address can be built from. It is now
