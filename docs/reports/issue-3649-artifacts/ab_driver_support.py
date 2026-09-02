@@ -612,6 +612,36 @@ def resolve_served_dir(data_dir, keyspace, table, snapshot):
     return table_dir
 
 
+def served_dir_escapes(data_dir, served):
+    """Would `DirSource::resolve` REFUSE this directory? -> a reason, or None.
+
+    MIRRORS the `assert_within(field, data_dir, &dir)` at producer.rs:176, which
+    the resolution mirror omitted entirely. That omission is a FALSE ACCEPT and
+    therefore worse than the false refusal beside it: a directory symlink whose
+    canonical target escapes `--data-dir` passed pre-flight, and the server then
+    refuses the ticket with UnsafePath -- after all three release builds.
+
+    `assert_within` walks UP from the target to the deepest ancestor that can be
+    canonicalised, so a not-yet-existing directory is judged by where it WOULD
+    live. Mirrored here: `os.path.realpath` resolves what exists and leaves the
+    rest lexically, which is the same answer for the cases that matter, and the
+    non-existent case is caught separately as served-dir-absent.
+    """
+    try:
+        root_real = os.path.realpath(data_dir)
+    except OSError as exc:
+        return "--data-dir %s is not accessible: %s" % (data_dir, exc.strerror or exc)
+    if not os.path.isdir(root_real):
+        return "--data-dir %s is not a directory" % data_dir
+    target_real = os.path.realpath(served)
+    if not _canonically_within(root_real, target_real):
+        return ("the ticket resolves to %s, which canonicalises to %s -- OUTSIDE "
+                "--data-dir %s (%s). cqlite-flight refuses this with UnsafePath "
+                "(producer.rs:176), so the session would die at the first request"
+                % (served, target_real, data_dir, root_real))
+    return None
+
+
 def census_served(data_dir, ticket_path):
     """Census the ONE directory the ticket will actually be served from.
 
@@ -656,6 +686,11 @@ def census_served(data_dir, ticket_path):
         return 1
 
     served = resolve_served_dir(data_dir, keyspace, table, snapshot or None)
+    escape = served_dir_escapes(data_dir, served)
+    if escape is not None:
+        err("cause served-dir-escapes")
+        err("cause-detail %s" % escape)
+        return 1
     if not os.path.isdir(served):
         err("cause served-dir-absent")
         err(
@@ -685,7 +720,7 @@ def census_served(data_dir, ticket_path):
         err("cause-detail %s" % enum_error)
         return 1
     try:
-        for real in data_files:
+        for path, real in data_files:
             total += os.path.getsize(real)
             count += 1
             # THE COMPRESSED-CORPUS REQUIREMENT, ASKED RATHER THAN ASSUMED.
@@ -698,7 +733,8 @@ def census_served(data_dir, ticket_path):
             # hardest kind to notice. A zero-length CompressionInfo.db counts as
             # absent: this repository records that an empty one makes SELECT
             # return 0 rows silently.
-            info = real[: -len("-Data.db")] + "-CompressionInfo.db"
+            # Beside the ENUMERATED entry, as the server would look for it.
+            info = path[: -len("-Data.db")] + "-CompressionInfo.db"
             if not os.path.isfile(info) or os.path.getsize(info) == 0:
                 uncompressed.append(os.path.basename(real))
     except OSError as exc:
@@ -1492,6 +1528,19 @@ def canonical_shape(raw):
     return SHAPE_ALIASES.get(raw.strip().lower())
 
 
+def _canonically_within(root_real, target_real):
+    """MIRRORS `canon_target.starts_with(&canon_root)` (pathsafe.rs:117).
+
+    COMPONENT-WISE, not string-wise: Rust's `Path::starts_with` compares path
+    COMPONENTS, so `/a/bc` does NOT start with `/a/b`. A bare `str.startswith`
+    would accept it, which is a containment check that admits a sibling
+    directory whose name merely shares a prefix.
+    """
+    if target_real == root_real:
+        return True
+    return target_real.startswith(root_real.rstrip(os.sep) + os.sep)
+
+
 def contained_data_files(served_dir):
     """The `*-Data.db` the SERVER will read, and no others. -> (paths, error).
 
@@ -1522,10 +1571,20 @@ def contained_data_files(served_dir):
         if not os.path.isfile(path):
             continue
         real = os.path.realpath(path)
-        if os.path.dirname(real) != served_real:
+        # ANCESTOR containment, mirroring `assert_within("sstable", &self.dir, p)`
+        # (producer.rs:228). The previous form required the canonical target's
+        # IMMEDIATE PARENT to equal the served directory, which is STRICTER than
+        # the server: a symlink resolving to `<served>/sub/x-Data.db` is served
+        # and was being omitted from the size and compression checks.
+        if not _canonically_within(served_real, real):
             # Excluded exactly as the server excludes it.
             continue
-        kept.append(real)
+        # THE ENUMERATED PATH IS RETAINED, not just the canonical one. The
+        # server opens `p` -- the entry as enumerated -- so a symlinked
+        # `x-Data.db` has its companion components beside the SYMLINK, not
+        # beside the target. Deriving `-CompressionInfo.db` from the canonical
+        # path looked for it in the wrong directory.
+        kept.append((path, real))
     return kept, None
 
 
@@ -1542,9 +1601,10 @@ def probe_compression(served_dir):
     if not data_files:
         return "NO-SSTABLES", "no *-Data.db under %s" % served_dir
     worst = None
-    for real in data_files:
-        data_file = os.path.basename(real)
-        stem = real[: -len("Data.db")]
+    for path, real in data_files:
+        data_file = os.path.basename(path)
+        # Beside the ENUMERATED entry, which is what the server opens.
+        stem = path[: -len("Data.db")]
         info = stem + "CompressionInfo.db"
         if not os.path.exists(info) or os.path.getsize(info) == 0:
             return "MISSING", "%s has no usable CompressionInfo.db" % data_file
