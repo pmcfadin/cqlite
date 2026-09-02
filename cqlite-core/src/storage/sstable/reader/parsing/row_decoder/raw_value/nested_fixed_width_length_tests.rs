@@ -630,3 +630,40 @@ fn wrong_width_udt_field_of_five_types_is_tolerated_today_known_gap() {
         "control: #3811's consumption assert must be live in this path, got {err:?}"
     );
 }
+
+/// roborev r8 (job 80), Low: the AC7 text claimed all four nested-consumption
+/// classes were MEASURED while `duration` was pinned by no test, so a
+/// regression admitting trailing bytes after the three VInts would have gone
+/// undetected. The review offered two remedies — narrow the claim, or add the
+/// pin. This is the pin, because it makes the claim TRUE rather than smaller.
+///
+/// `duration` is fixed-FORM rather than fixed-WIDTH: its extent is whatever its
+/// three VInts occupy, so no `require_fixed_width` arm can express it. The
+/// refusal therefore comes from #3811's consumption assert alone
+/// (`raw_value/reporting.rs:67`), which is exactly why the pin matters — this is
+/// the one class where the composed rule reduces to a single check.
+///
+/// The exact form is the CONTROL: without it, a refusal of the trailing-byte
+/// form would prove only that the decoder rejects something.
+#[test]
+fn bounded_duration_with_trailing_bytes_is_refused() {
+    let p = parser();
+
+    // Three zigzag VInts, each zero: months=0, days=0, nanos=0.
+    let exact: [u8; 3] = [0x00, 0x00, 0x00];
+
+    // CONTROL / NON-DISCRIMINATING: the exact form decodes.
+    p.parse_value_from_raw_bytes(&exact, "duration", "col", 0)
+        .unwrap_or_else(|e| panic!("the exact 3-VInt duration must decode, got {e:?}"));
+
+    // DISCRIMINATING: one trailing byte leaves the assert short.
+    let mut trailing = exact.to_vec();
+    trailing.push(0xAA);
+    let err = p
+        .parse_value_from_raw_bytes(&trailing, "duration", "col", 0)
+        .expect_err("a duration carrying a trailing byte must be refused");
+    assert!(
+        is_over_width_error(&err),
+        "expected #3811's short-consumption refusal, got {err:?}"
+    );
+}

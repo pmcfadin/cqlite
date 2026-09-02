@@ -176,10 +176,10 @@
 //! **All four are REFUSED ON THE BOUNDED SCALAR PATH — MEASURED, not a reading of the diff — with ONE carve-out, next.** Issue **#3811** made
 //! `parse_value_from_raw_bytes` a thin wrapper over `parse_value_from_raw_bytes_reporting` plus `require_fully_consumed_raw`, inherited by
 //! every bounded caller of the short name with no opt-out. Composed with each fixed-width arm's own `require_fixed_width` (`data.len() < n`),
-//! the accepted set is exactly `{n}`; every other arm reports real consumption, `duration`'s three-VInt walk included. THREE of the four
-//! carry a pin in `raw_value/issue_3811_consumption_demo_tests.rs` (`bounded_int_over_width_is_refused`,
-//! `bounded_tuple_with_trailing_byte_is_refused`, `nested_udt_trailing_garbage_is_refused`, `bounded_list_with_trailing_byte_is_refused`);
-//! `duration` is refused by that MECHANISM and pinned by NO test — stated because a claim of measurement must not cover an unmeasured case.
+//! the accepted set is exactly `{n}`; every other arm reports real consumption, `duration`'s three-VInt walk included. ALL FOUR now
+//! carry a pin: three in `raw_value/issue_3811_consumption_demo_tests.rs` (`bounded_int_over_width_is_refused`,
+//! `bounded_tuple_with_trailing_byte_is_refused`, `nested_udt_trailing_garbage_is_refused`, `bounded_list_with_trailing_byte_is_refused`),
+//! and `duration` — fixed-FORM, so no `require_fixed_width` arm can express it — in `bounded_duration_with_trailing_bytes_is_refused` (r8).
 //!
 //! **CARVE-OUT — a UDT FIELD of `tinyint`, `smallint`, `date`, `time` or `counter` is NOT refused (roborev r7 / job 71).**
 //! `parse_simple_udt_field_value` (`row_decoder/udt.rs`) has no arm for those five, so each takes its `_ =>` blob fallback, consuming the
