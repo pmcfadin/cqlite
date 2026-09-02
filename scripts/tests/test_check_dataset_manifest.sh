@@ -2515,7 +2515,7 @@ JESTSTUB
       STUB_MANIFEST_RC="$rc" \
       STUB_NPM_INVOCATIONS="$WORK/nbgate-$tag.npm-argv" \
       AGENT_GATE_SUMMARY_FILE="$WORK/nbgate-$tag.summary" \
-      "${optenv[@]}" \
+      ${optenv[@]+"${optenv[@]}"} \
       bash "$nbgate_wt/scripts/agent-gate.sh" --only node-bindings >"$out" 2>&1
     printf '%s' "$out"
   }
