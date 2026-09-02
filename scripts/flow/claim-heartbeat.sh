@@ -243,7 +243,9 @@
 #   watchdog's clothes. So this implements the same detection keyed on a signal
 #   the repository DOES own: the supervisor-authored claim ref and the pid it
 #   records (#2655). The remaining half — teaching the fleet a committed lane/
-#   session convention — needs an owner decision and is left to #3393.
+#   session convention — was left to #3393 and has since been DECIDED, not
+#   deferred: the owner DESCOPED it on 2026-09-01 (see the scope note directly
+#   below). Do not read this paragraph as an open question; it is settled.
 #
 # SCOPE OF `dead-lanes`: SUPERVISOR FLEETS ONLY — DESCOPED (owner ruling 2026-09-01 on
 # #3548, option C; completes #3393)
