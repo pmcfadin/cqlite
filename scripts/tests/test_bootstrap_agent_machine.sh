@@ -4299,7 +4299,8 @@ mksccshims() {
   # Leaving `-i` unhandled would make the stub run `env VAR=x -i bash …`, where GNU env stops
   # option parsing at the first assignment and takes `-i` as the COMMAND (rc 127) — a failure that
   # reads as an unmeasurable login session rather than as a broken stub.
-  local scc_pre='scc_login=0
+  local scc_pre='[ -n "${SCC_SHIM_SUDO_LOG:-}" ] && echo "sudo $*" >> "$SCC_SHIM_SUDO_LOG"
+scc_login=0
 while [ "${1:-}" = "-n" ]; do shift; done
 if [ "${1:-}" = "-u" ]; then shift 2; fi
 if [ "${1:-}" = "-i" ]; then scc_login=1; shift; fi
@@ -4547,19 +4548,50 @@ else
     fi
   done
 
-  # 12b-f. NO ORACLE, NO VERDICT. With no sccache on PATH the value->bytes map cannot be asked
-  #        of the tool that owns it, so the answer is UNMEASURED — never an [ok], and never a
-  #        bash reimplementation of the grammar.
+  # 12b-f. NO ORACLE, NO VERDICT — AND NOT ONE PRIVILEGED CALL. With no sccache on PATH the
+  #        value->bytes map cannot be asked of the tool that owns it, so the answer is UNMEASURED,
+  #        never an [ok] and never a bash reimplementation of the grammar.
+  #
+  #        THE EXPECTED TEXT FOLLOWS THE PRECONDITION, NOT THE BINARY ARM (issue #3727, after the
+  #        root-request blocker). This case used to expect 'no launch context resolved an sccache at
+  #        all' — the BINARY-resolution arm's wording — because that was the first thing to notice
+  #        the absence. The section now notices it as a SECTION-LEVEL PRECONDITION, before privilege
+  #        is resolved, which is the whole point of that fix: a run that could never certify anything
+  #        must not ask for root. So the case asserts the new wording and, more importantly, the
+  #        PROPERTY the fix added — via the `sudo` shim's argv log, that NO sudo call happened at
+  #        all. The old phrase was an implementation detail of which arm fired; the property is the
+  #        contract. (The binary arm is still reachable and still covered: sccache present but no
+  #        session able to resolve it — 12b-f2/12b-f3.)
   scc_shims_nb="$tmp/scc-shims-nb"; mksccshims "$scc_shims_nb" 30G no-sccache
-  scc_out_nb=$(runscc "$scc_bs" "$scc_shims_nb" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720)
+  scc_sudolog_nb="$tmp/scc-sudo-nb.log"; : >"$scc_sudolog_nb"
+  scc_out_nb=$(runscc "$scc_bs" "$scc_shims_nb" "$scc_env_v" SCCACHE_CACHE_SIZE=30G \
+    SCC_STUB_MAX=32212254720 SCC_SHIM_SUDO_LOG="$scc_sudolog_nb")
   scc_sl_nb=$(scc_slice "$scc_out_nb")
   if out_has "$scc_sl_nb" -E '\[warn\].*sccache-cap: UNMEASURED' \
-     && out_has "$scc_sl_nb" 'no launch context resolved an sccache at all' \
+     && out_has "$scc_sl_nb" "no 'sccache' on this box's PATH" \
      && ! out_has "$scc_sl_nb" -E '\[ok\].*sccache-cap'; then
-    ok "sccache-cap: no sccache on PATH -> UNMEASURED naming the missing oracle, never an [ok]"
+    ok "sccache-cap: no sccache on PATH -> UNMEASURED naming the missing tool, never an [ok]"
   else
     bad "sccache-cap: an absent oracle did not produce UNMEASURED"
     printf '%s\n' "$scc_sl_nb" | head -6
+  fi
+  # THE BLOCKER'S OWN PROPERTY, pinned in the suite that owns this section rather than only in the
+  # perf suite that caught it: with nothing to measure, 5b2 must make no privileged call.
+  #
+  # SCOPED TO 5b2'S ATTRIBUTABLE CALLS, AND THAT LIMIT IS THE POINT. Section 5b legitimately probes
+  # sudo in this sandbox (the staged tree here HAS agent-gate.sh, unlike the perf suite's minimal
+  # one), so a whole-run "no sudo at all" assert reds on correct input — measured: 3 calls, all 5b's.
+  # Two of 5b2's five former calls (`sudo -n -u <user> true` and `sudo -n true`) are TEXTUALLY
+  # IDENTICAL to 5b's and cannot be attributed from argv, so this asserts the three that CAN be:
+  # the two per-context binary resolutions (`command -v sccache`) and the session probe
+  # (`cqlite-scc-probe`). If the precondition regresses, those reappear. The whole-run property —
+  # no privileged call by ANY section — is the perf suite's, which is where it was caught.
+  scc_nb_attrib=$(grep -cE 'cqlite-scc-probe|command -v sccache' "$scc_sudolog_nb" 2>/dev/null)
+  if [ "${scc_nb_attrib:-0}" = 0 ]; then
+    ok "sccache-cap: with no sccache present, NONE of 5b2's attributable privileged calls happen (no binary resolution, no session probe) — it stops before resolving privilege"
+  else
+    bad "sccache-cap: a run that could not certify anything still made ${scc_nb_attrib} 5b2-attributable sudo call(s)"
+    grep -E 'cqlite-scc-probe|command -v sccache' "$scc_sudolog_nb" | head -3
   fi
 
   # 12b-g. NO RUNNING SERVER -> UNMEASURED, not a comparison of the value with itself. MEASURED:
