@@ -3070,6 +3070,32 @@ if [ "$SCC_SECTION_OK" = 1 ] && [ "$PLATFORM" != linux ]; then
   info "sccache-cap: no PAM-read system-wide env file on this $PLATFORM host, so bootstrap does not MANAGE the cap here — it still MEASURES the running server's enforced cap below"
 fi
 
+# NO SCCACHE ON THIS BOX ⇒ NOTHING TO CAP, AND NOTHING PRIVILEGED TO DO (issue #3727, found by
+# scripts/tests/test_perf_capability_bootstrap.sh — a suite that tests this file and was NOT in the
+# diff, so ten roborev rounds could not see it). This section's every measurement is ultimately a
+# question about sccache: the value->bytes oracle, the running server, the agreed binary. Without
+# the tool there is no question to answer, so the section reports that and stops BEFORE resolving
+# privilege — which is what removes the sudo calls it would otherwise make.
+#
+# WHY THAT ORDER IS THE FIX AND NOT A WORKAROUND. Bootstrap's perf guards assert that a declared
+# TEST MODE run with no proven sandbox makes NO privileged call at all, recorded by a `sudo` shim on
+# a hermetic PATH — and that PATH has no sccache. On `main` the assertion held because the only
+# sudo-using section (5b) is itself disabled there by a missing `agent-gate.sh`; 5b2 has no such
+# dependency and probed anyway, so a run that could never certify anything still asked for root.
+# Establishing the precondition first is what this section already does for `timeout` and `sudo`;
+# sccache was the one prerequisite checked only downstream.
+#
+# DELIBERATELY THE AMBIENT PATH, and that is NOT round 6's mistake: it decides only whether this box
+# has sccache AT ALL — a cheap precondition — and never which binary is authoritative, which is
+# still asked of each session context. A box whose invoking shell lacks sccache while a session has
+# one now reports UNMEASURED instead of certifying; that is the fail-closed direction and it is
+# declared below.
+if [ "$SCC_SECTION_OK" = 1 ] && ! have sccache; then
+  warn "sccache-cap: UNMEASURED (no 'sccache' on this box's PATH, so there is no cap to verify and nothing to persist for: the value->bytes oracle, the running server and the agreed binary are all questions about a tool that is not installed)"
+  info "install sccache first (section 2 above prints the command); this section makes no privileged call at all when the tool is absent"
+  SCC_SECTION_OK=0
+fi
+
 # `$EUID` — bash's own readonly — NEVER a PATH-resolved `id`, and a nonnumeric value is
 # UNKNOWN (treated as privileged, so an unreadable identity fails closed). Same reasoning as
 # 5b at the corresponding line; resolved again here because this section must not depend on 5b
