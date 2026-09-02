@@ -937,16 +937,38 @@ fi
 # must update the pin, and the both-directions leg turns a forgotten update into a loud finding
 # rather than a silent hole. That is the same cost the live-call pin has always carried.
 #
-# WHAT IT DOES NOT CLAIM. It does not understand bash, and it cannot see a live read that names
-# the repository some OTHER way: a path copied into a variable outside this region, a `cd` plus a
-# bare `git` with no `$REPO_ROOT` token, or a `GIT_DIR=` built from an expression that does not
-# spell `$REPO_ROOT`. Those are real residuals, not covered here, and the runtime
-# `_cs_read_dir_isolated_or_refuse` refusal plus the `/dev/null/` sentinel are what bound them.
+# WHAT IT DOES CLAIM, AND WHAT IT DOES NOT. COVERED: a line naming the live repository by DIRECT
+# expansion, in EITHER spelling — `$REPO_ROOT` or `${REPO_ROOT}`. That pair is closed by bash's
+# grammar (see the partition note below), so a direct-expansion read cannot escape the pins by
+# re-spelling itself.
+#
+# NOT COVERED, and these are genuinely open-ended: a live read that names the repository some
+# OTHER way — a path copied into another variable outside this region, an INDIRECT expansion
+# (`${!ref}`), a `cd` plus a bare `git` with no repo-root token, or a `GIT_DIR=` built from an
+# expression that never spells the name at all. Those are real residuals, not covered here, and
+# the runtime `_cs_read_dir_isolated_or_refuse` refusal plus the `/dev/null/` sentinel are what
+# bound them. This paragraph previously excused only "an expression that does not spell
+# `$REPO_ROOT`", which read as covering the braced form while the code did not — a false
+# rationale in a guard is worse than none, because it is what stops the next reader looking.
 #
 # THE PARTITION IS A SUBSTRING TEST, so the two pins never disagree about a line: a line
 # mentioning `_cs_live_git` is judged by the live-call pin (that is what makes a SECOND wrapper
 # such as `_cs_live_git_quiet` a finding rather than an unpinned stranger); every other
-# `$REPO_ROOT` line is judged by the second pin.
+# repo-root line is judged by the second pin.
+#
+# AND THE PARTITION MATCHES BOTH DIRECT EXPANSIONS, `$REPO_ROOT` AND `${REPO_ROOT}` (roborev job
+# 376). The COMPARISON escaped the tokeniser's disease; the SELECTION step had not. Matching only
+# the unbraced spelling meant `git -C "${REPO_ROOT}" cat-file -e "HEAD^{commit}"` contained
+# neither `_cs_live_git` nor the literal `$REPO_ROOT`, fell through BOTH arms, was never compared
+# against either pin, and so reintroduced a live-repository object read — and its promisor
+# lazy-fetch route — with the suite green. One character's distance, reachable by an ordinary
+# refactor rather than by construction, which is what made it a defect and not a residual.
+#
+# THIS IS A CLOSED SET, AND THAT IS WHY IT IS NOT THE TOKENISER COMING BACK. Bash has exactly TWO
+# direct expansions of a name — `$NAME` and `${NAME}` — so this enumeration is closed by the
+# LANGUAGE GRAMMAR, not by our imagination about what an author might write. That is the precise
+# difference from the deleted recogniser, which had to enumerate an open-ended space of ways a
+# line could REACH the live repository. Indirect naming stays a declared residual below.
 #
 # Both blocks are QUOTED HEREDOCS, so `"`, `$`, `\` and `'` inside the pinned lines need no
 # escaping and cannot drift from the gate's own text through a quoting mistake.
@@ -994,9 +1016,9 @@ cs_pinned_line_findings() {
         continue ;;
     esac
     case "$raw" in
-      *'$REPO_ROOT'*)
+      *'$REPO_ROOT'*|*'${REPO_ROOT}'*)
         grep -Fxq -- "$raw" <<<"$CS_PINNED_REPO_ROOT_LINES" \
-          || printf 'FINDING[repo-root]: %s: this line names the LIVE repository ($REPO_ROOT) and is NOT one of the %s PINNED lines (whole-line equality; the line is not read, only compared): %s\n' "$num" "$cs_pin_rr_n" "$raw" ;;
+          || printf 'FINDING[repo-root]: %s: this line names the LIVE repository ($REPO_ROOT or ${REPO_ROOT}) and is NOT one of the %s PINNED lines (whole-line equality; the line is not read, only compared): %s\n' "$num" "$cs_pin_rr_n" "$raw" ;;
     esac
   done < <(cs_region_code "$g")
   while IFS= read -r pin; do
@@ -1039,7 +1061,7 @@ fi
 # TEXT, which the finding prints verbatim — so a route is proved reported without the guard
 # pretending to have understood it.
 lc_dir="$tmp/3757-live-call-controls"; mkdir -p "$lc_dir"
-lc_ids=(a b c d e f g h i j)
+lc_ids=(a b c d e f g h i j k)
 lc_whats=(
   'a dereferencing rev that contains no ^{ (HEAD~1)'
   'the rev held in a VARIABLE, so no rev token appears on the call line'
@@ -1051,6 +1073,7 @@ lc_whats=(
   'a live call whose command word is a VARIABLE, not the literal git'
   'a live peel inside a COMMAND SUBSTITUTION on a local declaration (the round-3 High)'
   'an UNDECLARED read SMUGGLED IN FRONT of an allowed live call (roborev 347 item 2)'
+  'a live read naming the repo through the BRACED expansion ${REPO_ROOT} (roborev job 376)'
 )
 # PORTABILITY (roborev job 366): a newline in a sed REPLACEMENT is written as a backslash
 # followed by a LITERAL newline, which POSIX mandates for splitting a line. A GNU-style `\n`
@@ -1069,6 +1092,7 @@ lc_progs=(
   's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  local _cs_planted_sha=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}")\
 \&|'
   's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _cs_planted_undeclared_read; _cs_live_git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet HEAD|'
+  's|^  _cs_live_git --no-replace-objects -C "\$REPO_ROOT" rev-parse --verify --quiet HEAD$|  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "${REPO_ROOT}" cat-file -e "HEAD^{commit}"|'
 )
 lc_tooks=(
   'rev-parse --verify --quiet HEAD~1$'
@@ -1081,6 +1105,7 @@ lc_tooks=(
   '\$CS_PLANTED_GIT_BIN --no-replace-objects'
   'local _cs_planted_sha=\$(env'
   '_cs_planted_undeclared_read; _cs_live_git'
+  'git -C "\${REPO_ROOT}" cat-file'
 )
 lc_needles=(
   'HEAD~1'
@@ -1093,6 +1118,7 @@ lc_needles=(
   '$CS_PLANTED_GIT_BIN'
   '_cs_planted_sha'
   '_cs_planted_undeclared_read'
+  '-C "${REPO_ROOT}" cat-file'
 )
 for lc_i in "${!lc_ids[@]}"; do
   lc_id="${lc_ids[$lc_i]}"
