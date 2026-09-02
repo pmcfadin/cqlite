@@ -327,11 +327,12 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    other, or any ordering between them. **It resurrects nothing of the deleted delivery classifier, and that distinction is
    load-bearing rather than a caveat:** the classifier read injectable prompt text *at decision time* to
    produce an **automated verdict**, while this is a **human** reading a **stored record** as evidence for a
-   **hand-granted** waiver, so the direct **parser** exploit is gone: nothing in the wrapper parses the
-   prompt for delivery mode, and nothing may be added that does. **That is all it buys** — the human is
-   *in* the path, not outside it, so spoofed repository-controlled prompt text can still mislead an
-   authorizer into issuing the marker, and the marker is what makes `--recheck-job` pass. That exposure is
-   [#3826](https://github.com/pmcfadin/cqlite/issues/3826)'s subject and is not settled here.
+   **hand-granted** waiver — there is no automated verdict to spoof. Nothing in the wrapper parses the
+   prompt for delivery mode, and nothing may be added that does. **That closes the PARSER path and not
+   the HUMAN one, and keeping the two separate is what makes this true:** the human is *in* the path, so
+   spoofed repository-controlled prompt text can still mislead an authorizer into posting the marker, and
+   the marker is what makes `--recheck-job` pass. That exposure is real, is
+   [#3826](https://github.com/pmcfadin/cqlite/issues/3826)'s subject, and is **not** settled here.
 
    **And `job=` is daemon-scoped, which nobody had written down (#3654).** Each fleet box runs its own
    roborev daemon with its own database and its own sequential ids, so **two boxes can legitimately present
