@@ -47,6 +47,12 @@
 
 use super::super::*;
 
+// Issue #3631 / roborev job 68 finding 1: the marshal-form UDT field types that
+// used to be routed to `Custom` (and thence, wrongly, to the nested-UDT decoder).
+#[cfg(test)]
+#[path = "regression_3631_marshal_field_types_tests.rs"]
+mod regression_3631_marshal_field_types_tests;
+
 impl V5CompressedLegacyParser {
     /// Parse a UDT type string to extract the UDT definition.
     /// Cassandra encodes UDTs as:
