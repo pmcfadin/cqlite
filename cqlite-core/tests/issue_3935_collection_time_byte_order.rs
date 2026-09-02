@@ -84,12 +84,23 @@
 //!
 //! # RED-verified (measured, not asserted)
 //!
-//! With the `time` arm reverted to `x.cmp(y)`, `whole_collection_set_matches_byte_order`
-//! and `whole_collection_map_matches_byte_order` FAIL (the negative nanos lands
-//! FIRST instead of LAST) and so does `both_write_paths_agree_on_element_order`;
-//! the per-element cases keep passing, which is the pre-existing divergence this
-//! issue is about. A green ordering test that has never been shown to red proves
-//! nothing.
+//! With the `time` arm reverted to `x.cmp(y)` and the rest of this file
+//! unchanged, MEASURED in this lane: **3 of 5 FAIL, 2 pass.**
+//!
+//! * FAIL — `whole_collection_set_matches_byte_order`,
+//!   `whole_collection_map_matches_byte_order` (the negative nanos lands FIRST
+//!   instead of LAST) and `both_write_paths_agree_on_element_order`.
+//! * PASS — `per_element_path_matches_byte_order`, because that path never
+//!   consulted `compare_collection_elements`; its passing under BOTH
+//!   implementations IS the pre-existing divergence this issue is about, and it
+//!   is what makes the agreement case above non-vacuous.
+//! * PASS — `in_range_only_collection_order_is_unmoved`, by construction: it is
+//!   the COMPATIBILITY pin, and a compatibility pin that reddened under the old
+//!   comparator would be asserting the opposite of its own claim.
+//!
+//! A green ordering test that has never been shown to red proves nothing; so
+//! does a test whose every case reds, which would mean it cannot tell the
+//! unchanged half of the behaviour from the changed half.
 //!
 //! # Gate
 //!
