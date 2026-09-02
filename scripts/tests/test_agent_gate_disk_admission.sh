@@ -1097,12 +1097,16 @@ else
 fi
 case "$j_path" in
   post-probe-*)
-    # The probe ran before this preflight, so the block must carry a REAL verdict.
+    # The probe ran before this preflight, so the block must carry a REAL verdict — which
+    # need NOT be PASS. Pinning PASS specifically made this red whenever the admission probe
+    # itself was legitimately UNMEASURED (a transient cargo failure is enough), i.e. a false
+    # red from a condition unrelated to the property under test. The property is that the
+    # verdict EXISTS and names both evaluations; NOT EVALUATED is the only failure.
     case "$j_line" in
-      *'disk-admission: PASS'*'evaluated 2x'*)
-        ok "J: a POST-probe early terminal carries the real verdict, both evaluations named" ;;
       *'NOT EVALUATED'*)
         bad "J: a POST-probe early terminal claims NOT EVALUATED — the verdict existed and was dropped: $j_line" ;;
+      *'disk-admission: '*'evaluated 2x'*)
+        ok "J: a POST-probe early terminal carries a real verdict, both evaluations named" ;;
       *) bad "J: unexpected rendering on a post-probe early terminal: ${j_line:-<none>}" ;;
     esac ;;
   pre-probe-*)
@@ -1138,13 +1142,34 @@ esac
 # the gate resolves what CARGO resolves — instead of an assumption about the box. The
 # CASE-CHOSEN expectations (k-cargo-td / k-build-td / k-config-td) are unaffected and are
 # where a wrong answer is still caught.
+# AN UNANSWERABLE ORACLE IS A SKIP, NOT A FAIL — AND NEVER A GUESS (the round-19 flake).
+#
+# THE DEFECT, identified by exact reproduction rather than by hypothesis. This was ONE
+# unbounded, unretried external call at suite start whose failure was a `bad`, so a BRIEF
+# transient — a concurrent `git checkout`/rebase rewriting Cargo.toml and Cargo.lock is the
+# observed trigger — reddened the suite on a condition with nothing to do with the code
+# under test. Signature: `passed: 236  failed: 1  skipped: 1`, reproduced BYTE-IDENTICALLY
+# by failing exactly this call (suite-level calls are the metadata invocations WITHOUT
+# `--locked`; the gate always passes it, so that is the discriminator).
+#
+# THE FIX IS NOT A RETRY, which would only pick an arbitrary count and mask the same thing.
+# It is that cargo not answering is an UNMEASURABLE PRECONDITION, not evidence of a defect:
+# the honest verdict is a named `skip -`, the same disposition as quota and Case Y.
+#
+# AND IT REMOVES A GUESS THAT WAS ALREADY WRONG IN PRINCIPLE: the old fallback asserted
+# k-default against `$REPO/target`, which is only cargo's answer when NO configuration says
+# otherwise — and an ancestor `.cargo/config.toml` is exactly the source this suite cannot
+# isolate (job 389). So on the boxes where the fallback mattered it could be false, and the
+# case would have red for the wrong reason.
+K_HAVE_DEFAULT=1
 K_PREFIX_DEFAULT=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
   | python3 -c 'import json,sys;sys.stdout.write(json.load(sys.stdin)["target_directory"])' 2>/dev/null)
 if [ -n "$K_PREFIX_DEFAULT" ]; then
   ok "target-dir: derived the unconfigured expectation from cargo itself ($K_PREFIX_DEFAULT)"
 else
-  bad "target-dir: could not ask cargo for the unconfigured target dir — the k-default case would assert an assumption"
-  K_PREFIX_DEFAULT=$(cd "$SCRIPT_DIR/../.." && pwd)/target
+  K_HAVE_DEFAULT=0
+  K_PREFIX_DEFAULT=""
+  skip "target-dir: cargo could not answer for the unconfigured target dir, so the k-default expectation is UNMEASURABLE here — the cases that need it are skipped by name below, and nothing is asserted against a guess"
 fi
 
 # prefix_resolver <env-name> <env-value>: the PRE-FIX subject resolution, reproduced
@@ -1179,8 +1204,10 @@ k_case() {
   else
     bad "target-dir/$label: a df call measured something other than $expect — operands were: $(df_operands "$label" | tr '\n' ' ')"
   fi
-  # The differential: what the pre-fix resolver would have picked on this same input.
-  if [ -n "$envname" ]; then
+  # The differential: what the pre-fix resolver would have picked on this same input. It is
+  # stated only when the derivation succeeded, since the pre-fix resolver's answer for the
+  # non-env mechanisms IS that value.
+  if [ -n "$envname" ] && [ "$K_HAVE_DEFAULT" -eq 1 ]; then
     local was; was=$(prefix_resolver "$envname" "$expect")
     if [ "$was" = "$expect" ]; then
       ok "target-dir/$label CONTROL: the pre-fix resolver also picked $expect (this case is not a differential — it guards against over-correction)"
@@ -1196,7 +1223,11 @@ k_ch="$tmp/k-cargo-home"; mkdir -p "$k_ch"
 k_cfg="$tmp/k-target-cfg"
 printf '[build]\ntarget-dir = "%s"\n' "$k_cfg" > "$k_ch/config.toml"
 
-k_case k-default   "$K_PREFIX_DEFAULT" ""                     CQLITE_GATE_POLL_SECS=0.3
+if [ "$K_HAVE_DEFAULT" -eq 1 ]; then
+  k_case k-default   "$K_PREFIX_DEFAULT" ""                     CQLITE_GATE_POLL_SECS=0.3
+else
+  skip "target-dir/k-default: skipped — the unconfigured expectation could not be derived (see above)"
+fi
 k_case k-cargo-td  "$k_ct"  CARGO_TARGET_DIR       CARGO_TARGET_DIR="$k_ct"
 k_case k-build-td  "$k_bt"  CARGO_BUILD_TARGET_DIR CARGO_BUILD_TARGET_DIR="$k_bt"
 k_case k-config-td "$k_cfg" CARGO_HOME             CARGO_HOME="$k_ch"
@@ -1252,11 +1283,17 @@ case "$k_nc_line" in
     bad "target-dir/k-nocargo: a resolution failure is reported as a DF failure — wrong operator action: $k_nc_line" ;;
   *) bad "target-dir/k-nocargo: expected a target-dir UNMEASURED cause, got: ${k_nc_line:-<none>}" ;;
 esac
+# GUARDED: with an empty K_PREFIX_DEFAULT the pattern below would match ANY line, turning a
+# negative assertion into an unconditional failure.
+if [ "$K_HAVE_DEFAULT" -eq 0 ]; then
+  skip "target-dir/k-nocargo: no-fallback check skipped — it compares against the underivable unconfigured target dir"
+else
 case "$k_nc_line" in
   *"target-dir $K_PREFIX_DEFAULT"*)
     bad "target-dir/k-nocargo: fell back to \$REPO_ROOT/target — the defect is reinstated in exactly the configurations that trigger it" ;;
   *) ok "target-dir/k-nocargo: NO fallback to \$REPO_ROOT/target on a resolution failure" ;;
 esac
+fi
 if [ "$k_nc_status" -eq 0 ] && [ "$k_nc_markers" -ge 1 ]; then
   ok "target-dir/k-nocargo: a resolution failure is NON-FATAL (declared, not un-runnable)"
 else
@@ -2060,10 +2097,15 @@ v_user_target="$tmp/v-user-level-target"
 printf '[build]\ntarget-dir = "%s"\n' "$v_user_target" > "$v_home/.cargo/config.toml"
 v_prefix=$(env -u CARGO_HOME HOME="$v_home" cargo metadata --no-deps --format-version 1 2>/dev/null \
   | python3 -c 'import json,sys;sys.stdout.write(json.load(sys.stdin)["target_directory"])' 2>/dev/null)
+# SAME CLASS AS THE k-default DERIVATION: this is a single unretried cargo call, so a
+# transient makes it EMPTY. An empty answer means the control could not be MEASURED, which
+# is a skip; only a NON-EMPTY answer that is the WRONG path is a real failure of the fixture.
 if [ "$v_prefix" = "$v_user_target" ]; then
   ok "env-isolation[\$HOME] CONTROL: with CARGO_HOME UNSET, cargo reads \$HOME/.cargo and resolves $v_user_target — the pre-fix hazard, reproduced"
+elif [ -z "$v_prefix" ]; then
+  skip "env-isolation[\$HOME] CONTROL: cargo did not answer, so the pre-fix hazard could not be reproduced here — the shipped assertion below is reported but is not a differential"
 else
-  bad "env-isolation[\$HOME] CONTROL: the pre-fix environment resolved '${v_prefix:-<none>}', not the planted $v_user_target — this fixture does not reach the defect, so the assertion below proves nothing"
+  bad "env-isolation[\$HOME] CONTROL: the pre-fix environment resolved '$v_prefix', not the planted $v_user_target — this fixture does not reach the defect, so the assertion below proves nothing"
 fi
 # The shipped suite: the same poisoned HOME, but CARGO_HOME isolated. k-default must still
 # agree with cargo's unconfigured answer.
@@ -2074,6 +2116,9 @@ v_home_err=$RS_ERR
 watch_until_exit "$RS_PID" "$RS_RUNDIR" 120
 assert_no_timeout "v-home"
 v_home_line=$(grep_line "$v_home_err" '^agent-gate: disk-admission: ')
+if [ "$K_HAVE_DEFAULT" -eq 0 ]; then
+  skip "env-isolation[\$HOME]: skipped — it compares against the underivable unconfigured target dir"
+else
 case "$v_home_line" in
   *"target-dir $K_PREFIX_DEFAULT "*)
     ok "env-isolation[\$HOME]: a user-level build.target-dir does NOT move the measurement — the isolated CARGO_HOME holds" ;;
@@ -2085,6 +2130,7 @@ if df_operands_all v-home "$K_PREFIX_DEFAULT"; then
   ok "env-isolation[\$HOME]: and every df call measured that same directory"
 else
   bad "env-isolation[\$HOME]: df measured '$(df_operands v-home | sed -n 1p)'"
+fi
 fi
 
 # (b3) THE POISON CASES MUST NOT DAMAGE THE ISOLATION THEY TEST AGAINST. Found the hard
