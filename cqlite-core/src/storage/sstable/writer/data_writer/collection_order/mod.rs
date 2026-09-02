@@ -250,6 +250,154 @@ mod tests {
         assert!(matches!(v[3], Value::Float(f) if f.is_nan()));
     }
 
+    /// `time` (TimeType) — issue #3935: a NEGATIVE nanos sorts ABOVE every
+    /// non-negative one, the exact INVERSION of the signed order this arm used
+    /// to have.
+    ///
+    /// Expectation derived from the pinned source, never from CQLite's own
+    /// behaviour (#3041): `db/marshal/TimeType.java:48`
+    /// `private TimeType() {super(ComparisonType.BYTE_ORDER);}`, and
+    /// `ComparisonType.BYTE_ORDER` is `ByteBufferUtil.compareUnsigned` over the
+    /// serialized 8-byte big-endian nanos. `-1i64` serializes to
+    /// `FF FF FF FF FF FF FF FF`, whose leading byte `0xFF` is unsigned-GREATER
+    /// than the `0x00` leading byte of every value in `0..=86_399_999_999_999`
+    /// (max `0x00 00 4E 94 91 4E FF FF`).
+    #[test]
+    fn time_negative_nanos_sorts_above_every_non_negative() {
+        // Sanity on the serialized forms the rule is stated over, so the
+        // assertion below is anchored on bytes and not on a remembered claim.
+        assert_eq!((-1_i64).to_be_bytes(), [0xFF; 8]);
+        assert_eq!(0_i64.to_be_bytes()[0], 0x00);
+        assert_eq!(86_399_999_999_999_i64.to_be_bytes()[0], 0x00);
+
+        let mut v = vec![
+            Value::Time(86_399_999_999_999),
+            Value::Time(-1),
+            Value::Time(0),
+            Value::Time(i64::MIN),
+        ];
+        v.sort_by(compare_collection_elements);
+        assert_eq!(
+            v,
+            vec![
+                // 0x00.. and 0x00.. — the in-range values, ascending.
+                Value::Time(0),
+                Value::Time(86_399_999_999_999),
+                // 0x80.. — i64::MIN, the SMALLEST signed value, sorts here.
+                Value::Time(i64::MIN),
+                // 0xFF.. — the LARGEST unsigned leading byte sorts last.
+                Value::Time(-1),
+            ],
+            "TimeType is ComparisonType.BYTE_ORDER: negatives sort above every \
+             non-negative, and i64::MIN (0x80..) below -1 (0xFF..)"
+        );
+
+        // NEGATIVE CONTROL — the OLD signed implementation produces a DIFFERENT
+        // sequence, so the assertion above provably has teeth rather than being
+        // satisfiable by any total order.
+        let mut signed = vec![
+            Value::Time(86_399_999_999_999),
+            Value::Time(-1),
+            Value::Time(0),
+            Value::Time(i64::MIN),
+        ];
+        signed.sort_by(|a, b| match (a, b) {
+            (Value::Time(x), Value::Time(y)) => x.cmp(y),
+            _ => Ordering::Equal,
+        });
+        assert_ne!(
+            signed, v,
+            "signed i64::cmp must NOT reproduce the BYTE_ORDER sequence, else \
+             this case cannot distinguish the two implementations"
+        );
+    }
+
+    /// `timestamp` (TimestampType) stays SIGNED — the regression pin for the
+    /// half of the removed "TimestampType/TimeType extend/share LongType"
+    /// comment that WAS right.
+    ///
+    /// Pinned authority: `db/marshal/TimestampType.java:56`
+    /// `private TimestampType() {super(ComparisonType.CUSTOM);}` with
+    /// `compareCustom` (`:69-71`) delegating verbatim to
+    /// `LongType.compareLongs`, which compares the SIGNED first byte (Java
+    /// `getByte` is signed) and then the unsigned tail. So a pre-epoch negative
+    /// millis sorts BELOW every non-negative one — the opposite of `time`.
+    #[test]
+    fn timestamp_keeps_signed_order() {
+        let mut v = vec![
+            Value::Timestamp(1),
+            Value::Timestamp(-1),
+            Value::Timestamp(0),
+            Value::Timestamp(i64::MIN),
+        ];
+        v.sort_by(compare_collection_elements);
+        assert_eq!(
+            v,
+            vec![
+                Value::Timestamp(i64::MIN),
+                Value::Timestamp(-1),
+                Value::Timestamp(0),
+                Value::Timestamp(1),
+            ],
+            "TimestampType is CUSTOM -> LongType.compareLongs (SIGNED); #3935 \
+             changed `time` only and must not have moved `timestamp`"
+        );
+
+        // The two temporal types must now DISAGREE on the same nanos/millis
+        // sequence — that disagreement IS the corrected rule.
+        assert_eq!(
+            compare_collection_elements(&Value::Timestamp(-1), &Value::Timestamp(0)),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_collection_elements(&Value::Time(-1), &Value::Time(0)),
+            Ordering::Greater
+        );
+    }
+
+    /// COMPATIBILITY PIN (#3935): for every `time` in Cassandra's valid range
+    /// `0..=86_399_999_999_999` the order is UNCHANGED by this fix, so no
+    /// in-range on-disk collection ordering moved.
+    ///
+    /// Why it holds: every such value has a `0x00` sign byte, so unsigned byte
+    /// order, unsigned numeric order and SIGNED numeric order all coincide over
+    /// the range. Asserted rather than asserted-about: the case compares the new
+    /// BYTE_ORDER comparator against a signed `i64::cmp` reference over the
+    /// range's boundaries and interior, and requires them EQUAL on every pair.
+    #[test]
+    fn in_range_time_order_is_unchanged() {
+        const MAX_VALID_NANOS: i64 = 86_399_999_999_999; // DAYS.toNanos(1) - 1
+        let in_range = [
+            0,
+            1,
+            9_000_000_000,
+            10_000_000_000,
+            43_200_000_000_000,
+            MAX_VALID_NANOS,
+        ];
+        for &x in &in_range {
+            assert_eq!(
+                x.to_be_bytes()[0],
+                0x00,
+                "{x} must have a 0x00 sign byte for the coincidence argument to hold"
+            );
+            for &y in &in_range {
+                assert_eq!(
+                    compare_collection_elements(&Value::Time(x), &Value::Time(y)),
+                    x.cmp(&y),
+                    "in-range time pair ({x}, {y}) must order identically under \
+                     BYTE_ORDER and the pre-#3935 signed order"
+                );
+            }
+        }
+
+        // And the whole sorted sequence is the numeric one.
+        let mut v: Vec<Value> = in_range.iter().rev().map(|&n| Value::Time(n)).collect();
+        v.sort_by(compare_collection_elements);
+        let expected: Vec<Value> = in_range.iter().map(|&n| Value::Time(n)).collect();
+        assert_eq!(v, expected);
+    }
+
     /// Unsigned-lexicographic types (text/blob/boolean) keep serialized-byte
     /// order — raw byte comparison is the correct Cassandra comparator there.
     #[test]
