@@ -19677,7 +19677,13 @@ _gate_disk_admission_parse() {
       # pushes it further right.
       if (cap < 5) { print "AMBIG capacity-field-too-early"; exit }
       avail = $(cap - 1)
-      if (avail !~ /^[0-9]+$/) { print "AMBIG available-not-numeric"; exit }
+      # SIGNED (roborev job 373). df legitimately reports a NEGATIVE Available on an
+      # overcommitted filesystem or one dipping into its reserved blocks. Rejecting it as
+      # unparsable produced a non-fatal UNMEASURED and let the build proceed in the most
+      # severe low-space condition there is — a false admission at the worst possible
+      # moment. It needs no new comparison logic: the bar is non-negative by construction
+      # (the low side clamps to 0), so any negative reading compares BELOW it.
+      if (avail !~ /^-?[0-9]+$/) { print "AMBIG available-not-numeric"; exit }
       m = ""
       for (i = cap + 1; i <= NF; i++) m = (m == "" ? $i : m " " $i)
       printf "OK\t%s\t%s\n", avail, m
@@ -19715,7 +19721,7 @@ _gate_disk_admission_parse() {
 # df cannot leak `command not found` onto the gate's own stderr, where
 # test_agent_gate_summary.sh's minimal-PATH case reads any such line as a defect.
 _gate_disk_admission_probe() {
-  local path out rc parsed avail mount subj
+  local path out rc parsed avail mount availbody subj
   subj=$(_gate_disk_admission_subject)
   local td=""
   case "$subj" in
@@ -19755,8 +19761,12 @@ _gate_disk_admission_probe() {
   parsed="${parsed#OK$'\t'}"
   avail="${parsed%%$'\t'*}"
   mount="${parsed#*$'\t'}"
-  # Belt on the anchor's own numeric assert: the caller compares this as an integer.
-  case "$avail" in
+  # Belt on the anchor's own numeric assert: the caller compares this as a number. SIGNED,
+  # for the reason stated in the awk above — a negative Available is a real reading of a
+  # filesystem in its worst state, not a parse failure.
+  local availbody="$avail"
+  case "$availbody" in -*) availbody="${availbody#-}" ;; esac
+  case "$availbody" in
     ''|*[!0-9]*) printf 'UNMEASURED\tdf-unparsable\t%s' "$td"; return 0 ;;
   esac
   # The mount point is rendered VERBATIM into a `key: value` SUMMARY line, and a mount

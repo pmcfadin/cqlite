@@ -95,9 +95,54 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 0
 fi
 
-# The bar's source token is decided from whether CQLITE_GATE_MIN_FREE_GB is SET, so a
-# value inherited from the caller's environment would change what several cases observe.
-unset CQLITE_GATE_MIN_FREE_GB
+# ---------------------------------------------------------------------------
+# ENVIRONMENT ISOLATION (roborev job 373, High) — THE ONE NAMED LIST.
+#
+# THE DEFECT. This suite runs inside `tooling-tests`, i.e. as a CHILD of a gate — and since
+# the #3755 pin that parent EXPORTS `CARGO_TARGET_DIR`. It is highest-precedence, so it
+# silently overrode exactly the mechanisms the resolution cases exist to exercise: six cases
+# failed, INCLUDING the operand-guard control, which reddened a CORRECT gate. Measured:
+#   standalone                                   -> 165 passed, 0 failed
+#   CARGO_TARGET_DIR=<repo>/target <same suite>  ->  59 passed, 6 FAILED
+# Standalone-green is not `tooling-tests`-green. That is the general shape: a suite whose
+# verdict depends on how it was launched is not a suite, and this one could only be trusted
+# when launched by hand.
+#
+# WHAT IS CLEARED, and why each is here — a case's MEANING depends on it:
+#   CARGO_TARGET_DIR / CARGO_BUILD_TARGET_DIR / CARGO_HOME
+#       the three inputs to cargo's target-dir precedence; cases K/K-low/M/U are ABOUT that
+#       precedence, so an inherited one decides the answer before the case does
+#   CQLITE_GATE_MIN_FREE_GB
+#       the bar's source token is decided from whether it is SET
+#   CQLITE_GATE_DISABLE_CAP
+#       an inherited 1 turns every queue case into a no-cap case with no other symptom
+#   AGENT_GATE_ALLOW_MISSING_FIXTURES
+#       flips WHICH early terminal Case J reaches
+#   AGENT_GATE_SUMMARY_FILE
+#       every case pins its own; scrubbed so a missed one cannot clobber a caller's file
+#
+# WHAT IS DELIBERATELY *NOT* CLEARED, stated so the omission is a decision and not a gap:
+#   AGENT_GATE_PARENT_RUN_ID   under `tooling-tests` these child gates ARE nested, and #2874
+#                              wants them to say so; clearing it would make a child claim to
+#                              be a top-level gate, which is a lie in the artifact
+#   AGENT_GATE_FM_DIR          the feature-matrix sidecar dir; no assertion here depends on
+#                              it, and it is the parent's business
+#   RUSTFLAGS / RUSTC_WRAPPER / CARGO_INCREMENTAL / CARGO_BUILD_JOBS
+#                              build-time only; nothing here builds, and `cargo metadata`
+#                              resolution does not read them
+#   PATH                       the shims deliberately PREPEND to the caller's
+# Derived from the gate's own `export` sweep, not guessed: those four plus PATH and
+# CQLITE_DATASETS_ROOT (which every case that cares passes explicitly) are everything
+# agent-gate.sh exports.
+DA_ISOLATE=(CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_HOME
+            CQLITE_GATE_MIN_FREE_GB CQLITE_GATE_DISABLE_CAP
+            AGENT_GATE_ALLOW_MISSING_FIXTURES AGENT_GATE_SUMMARY_FILE)
+# In-process, so the suite's OWN cargo calls (the Case U no-op demonstration) are clean too.
+unset "${DA_ISOLATE[@]}"
+# ...and for every child, so a future edit that re-exports one cannot reach a case. Placed
+# BEFORE a case's own assignments, which `env` therefore still wins.
+DA_ENV_U=()
+for _da_v in "${DA_ISOLATE[@]}"; do DA_ENV_U+=(-u "$_da_v"); done
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/gate-disk-adm.XXXXXX")
 cleanup() { kill $(jobs -p) 2>/dev/null; rm -rf "$tmp"; }
@@ -204,7 +249,7 @@ run_stub_gate() {
   # PATH= comes last, so a caller-supplied one is silently overridden — which is exactly
   # how the k-nocargo case first ran against the REAL cargo and reported a resolution it
   # was written to prove impossible.
-  env "$@" \
+  env "${DA_ENV_U[@]}" "$@" \
     PATH="${RS_PATH_PREFIX:+$RS_PATH_PREFIX:}$tmp/shim:$PATH" \
     DF_SHIM_SCRIPT="$script" \
     DF_SHIM_STATE="$tmp/$case_name.dfstate" \
@@ -238,6 +283,12 @@ run_stub_gate() {
 # group most likely to inherit it is a PEER LANE'S GATE. And no `wait` is issued after
 # the kill: a process wedged in uninterruptible sleep would make even that call
 # unbounded, so the reap is a bounded poll and a survivor is left to the EXIT trap.
+# DEADLINES ARE GENEROUS ON PURPOSE (120s for a child that normally exits in ~2s). They
+# bound a HANG; they are not a performance assertion, and nothing here asserts a duration.
+# Six cases still carried a 30s deadline from before the probe grew a `cargo metadata` call
+# and a writability probe, and one of them (`e-above`) TIMED OUT on a loaded box while the
+# same case passed in the next run — a flake in a suite that runs inside `tooling-tests`,
+# where a co-scheduled gate is the normal condition rather than the exception.
 WX_STATUS=0
 WX_MARKERS=0
 WX_TIMEDOUT=0
@@ -411,7 +462,7 @@ fi
 follow_script=$(df_script a-follow "$HIGH")
 run_stub_gate a-follow "$follow_script" \
   CQLITE_GATE_SLOTS_DIR="$a_slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
-watch_until_exit "$RS_PID" "$RS_RUNDIR" 30; f_status=$WX_STATUS; f_markers=$WX_MARKERS
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; f_status=$WX_STATUS; f_markers=$WX_MARKERS
 assert_no_timeout "AC2 follow-up run"
 if [ "$f_status" -eq 0 ] && [ "$f_markers" -ge 1 ]; then
   ok "AC2: the released slot is immediately usable by a follow-up run"
@@ -462,7 +513,7 @@ c_script=$(df_script c "$LOW" "$HIGH")
 run_stub_gate c "$c_script" \
   CQLITE_GATE_SLOTS_DIR="$tmp/c-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
 c_err=$RS_ERR
-watch_until_exit "$RS_PID" "$RS_RUNDIR" 30; c_status=$WX_STATUS; c_markers=$WX_MARKERS
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; c_status=$WX_STATUS; c_markers=$WX_MARKERS
 assert_no_timeout "launch-advisory case"
 if [ "$c_status" -eq 0 ] && [ "$c_markers" -ge 1 ]; then
   ok "LAUNCH ADVISORY: below-at-launch/above-at-grant PROCEEDS (exit 0)"
@@ -485,7 +536,7 @@ run_unmeasured_case() {
   run_stub_gate "$label" "$s" \
     CQLITE_GATE_SLOTS_DIR="$tmp/$label-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
   local err=$RS_ERR st mk line
-  watch_until_exit "$RS_PID" "$RS_RUNDIR" 30; st=$WX_STATUS; mk=$WX_MARKERS
+  watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; st=$WX_STATUS; mk=$WX_MARKERS
   assert_no_timeout "$label"
   if [ "$st" -eq 0 ] && [ "$mk" -ge 1 ]; then
     ok "UNMEASURED($why): non-fatal — the run proceeded and began work"
@@ -510,7 +561,7 @@ d_script=$(df_script d-absent NOTFOUND)
 run_stub_gate d-absent "$d_script" \
   CQLITE_GATE_SLOTS_DIR="$tmp/d-absent-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
 d_err=$RS_ERR
-watch_until_exit "$RS_PID" "$RS_RUNDIR" 30; d_status=$WX_STATUS; d_markers=$WX_MARKERS
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; d_status=$WX_STATUS; d_markers=$WX_MARKERS
 assert_no_timeout "df-absent case"
 d_line=$(grep_line "$d_err" '^agent-gate: disk-admission: ')
 if [ "$d_status" -eq 0 ] && [ "$d_markers" -ge 1 ]; then
@@ -540,7 +591,7 @@ bar_case() {
     CQLITE_GATE_SLOTS_DIR="$tmp/$label-slots" CQLITE_GATE_MAX_CONCURRENCY=1 \
     CQLITE_GATE_STUB_SLEEP=1 "$@"
   local err=$RS_ERR st mk line
-  watch_until_exit "$RS_PID" "$RS_RUNDIR" 30; st=$WX_STATUS; mk=$WX_MARKERS
+  watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; st=$WX_STATUS; mk=$WX_MARKERS
   assert_no_timeout "$label"
   line=$(grep_line "$err" '^agent-gate: disk-admission: ')
   case "$line" in
@@ -562,7 +613,7 @@ run_stub_gate e-above "$e_script" \
   CQLITE_GATE_SLOTS_DIR="$tmp/e-above-slots" CQLITE_GATE_MAX_CONCURRENCY=1 \
   CQLITE_GATE_STUB_SLEEP=2 CQLITE_GATE_MIN_FREE_GB=500
 e_sum=$RS_SUMMARY
-watch_until_exit "$RS_PID" "$RS_RUNDIR" 30; e_status=$WX_STATUS; e_markers=$WX_MARKERS
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; e_status=$WX_STATUS; e_markers=$WX_MARKERS
 assert_no_timeout "pinned-bar refusal"
 if [ "$e_status" -ne 0 ] && [ "$e_markers" -eq 0 ]; then
   ok "bar-source: a PINNED bar above the reading refuses and never begins work"
@@ -582,7 +633,7 @@ fi
 # ===========================================================================
 f_state="$tmp/f.dfstate"
 f_script=$(df_script f "$HIGH")
-env PATH="$tmp/shim:$PATH" DF_SHIM_SCRIPT="$f_script" DF_SHIM_STATE="$f_state" \
+env "${DA_ENV_U[@]}" PATH="$tmp/shim:$PATH" DF_SHIM_SCRIPT="$f_script" DF_SHIM_STATE="$f_state" \
   AGENT_GATE_SUMMARY_FILE="$tmp/f.summary.txt" \
   CQLITE_GATE_STUB_RUNDIR="$tmp/f.run" CQLITE_GATE_STUB_SLEEP=1 \
   CQLITE_GATE_SLOTS_DIR="$tmp/f-slots" CQLITE_GATE_MAX_CONCURRENCY=1 \
@@ -938,7 +989,7 @@ fi
 j_root="$tmp/j-empty-datasets"; mkdir -p "$j_root/sstables"
 j_script=$(df_script j "$HIGH" "$HIGH")
 j_sum="$tmp/j.summary.txt"; j_err="$tmp/j.err"
-env PATH="$tmp/shim:$PATH" \
+env "${DA_ENV_U[@]}" PATH="$tmp/shim:$PATH" \
   DF_SHIM_SCRIPT="$j_script" DF_SHIM_STATE="$tmp/j.dfstate" \
   AGENT_GATE_SUMMARY_FILE="$j_sum" \
   CQLITE_DATASETS_ROOT="$j_root" \
@@ -1475,7 +1526,7 @@ q_only=0
 q_worst=""
 for q_c in $q_free; do
   q_rec="$tmp/q-only.$q_c.record"; : > "$q_rec"
-  env PATH="$tmp/q-cargoshim:$PATH" CARGO_RECORD="$q_rec" \
+  env "${DA_ENV_U[@]}" PATH="$tmp/q-cargoshim:$PATH" CARGO_RECORD="$q_rec" \
     AGENT_GATE_SUMMARY_FILE="$tmp/q-only.$q_c.summary.txt" \
     CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-/nonexistent}" \
     bash "$GATE" --only "$q_c" >"$tmp/q-only.$q_c.out" 2>"$tmp/q-only.$q_c.err"
@@ -1494,7 +1545,7 @@ q_rec="$tmp/q-only.file-size.record"
 q_rec2="$tmp/q-full.record"; : > "$q_rec2"
 q_full_script=$(df_script q-full "$HIGH")
 mkdir -p "$tmp/q-full.run"
-env PATH="$tmp/q-cargoshim:$tmp/shim:$PATH" CARGO_RECORD="$q_rec2" \
+env "${DA_ENV_U[@]}" PATH="$tmp/q-cargoshim:$tmp/shim:$PATH" CARGO_RECORD="$q_rec2" \
   DF_SHIM_SCRIPT="$q_full_script" DF_SHIM_STATE="$tmp/q-full.dfstate" \
   AGENT_GATE_SUMMARY_FILE="$tmp/q-full.summary.txt" \
   CQLITE_GATE_STUB_RUNDIR="$tmp/q-full.run" CQLITE_GATE_STUB_SLEEP=1 \
@@ -1726,7 +1777,7 @@ fi
 t_target="$tmp/t-target"; mkdir -p "$t_target"
 t_script=$(df_script t "$HIGH")
 mkdir -p "$tmp/t.run"
-env PATH="$tmp/shim:$PATH" \
+env "${DA_ENV_U[@]}" PATH="$tmp/shim:$PATH" \
   DF_SHIM_SCRIPT="$t_script" DF_SHIM_STATE="$tmp/t.dfstate" \
   CARGO_TARGET_DIR="$t_target" \
   AGENT_GATE_SUMMARY_FILE="$tmp/t.summary.txt" \
@@ -1840,6 +1891,129 @@ if df_operands_all u "$u_inherited"; then
   ok "pin/nested: and every df call was made against that same inherited directory"
 else
   bad "pin/nested: df measured '$(df_operands u | sed -n 1p)', not the inherited $u_inherited"
+fi
+
+# ===========================================================================
+# Case V (roborev job 373, High): the suite is verified in the environment
+# `tooling-tests` GIVES it, not only the one a human launches it in.
+#
+# A suite that can only be trusted when launched by hand is not trustworthy in
+# the component that runs it. So the hostile environment is part of this suite's
+# own coverage: an inherited variable must red HERE, not in someone's gate of
+# record.
+# ===========================================================================
+# (a) STRUCTURAL: every gate invocation in this file must go through the isolation list.
+#     A behavioural case only covers the variables someone already thought of; this covers
+#     an invocation someone adds later.
+v_unisolated=$(awk '
+  /bash "\$GATE"|bash "\$t_mutant"/ {
+    blk = $0
+    for (j = NR - 1; j >= 1 && lines[j] ~ /\\$/; j--) blk = lines[j] "\n" blk
+    if (blk !~ /DA_ENV_U/) { print NR; n++ }
+  }
+  { lines[NR] = $0 }
+' "$0" | tr '\n' ' ')
+if [ -z "$(printf '%s' "$v_unisolated" | tr -d '[:space:]')" ]; then
+  ok "env-isolation: every gate invocation in this file routes through the DA_ISOLATE list"
+else
+  bad "env-isolation: UNISOLATED gate invocation(s) at line(s): $v_unisolated — an inherited variable would reach that case"
+fi
+
+# (b) BEHAVIOURAL: poison the SUITE's own environment exactly as a parent gate does, then
+#     run a resolution case and require it to measure ITS OWN target dir. This is the
+#     reproduction that found the defect, turned into coverage.
+v_poison_target="$tmp/v-poison"; mkdir -p "$v_poison_target"
+v_case_target="$tmp/v-case"; mkdir -p "$v_case_target"
+v_poison_home="$tmp/v-poison-home"; mkdir -p "$v_poison_home"
+printf '[build]\ntarget-dir = "%s"\n' "$v_poison_target" > "$v_poison_home/config.toml"
+v_run() {
+  local label="$1"; shift
+  local sc; sc=$(df_script "$label" "$HIGH")
+  run_stub_gate "$label" "$sc" \
+    CARGO_TARGET_DIR="$v_case_target" \
+    CQLITE_GATE_SLOTS_DIR="$tmp/$label-slots" CQLITE_GATE_MAX_CONCURRENCY=1 \
+    CQLITE_GATE_STUB_SLEEP=1
+  watch_until_exit "$RS_PID" "$RS_RUNDIR" 120
+  assert_no_timeout "$label"
+  grep_line "$RS_ERR" '^agent-gate: disk-admission: '
+}
+for v_var in CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_HOME; do
+  case "$v_var" in
+    CARGO_HOME) export CARGO_HOME="$v_poison_home" ;;
+    *) export "$v_var=$v_poison_target" ;;
+  esac
+  v_line=$(v_run "v-${v_var}")
+  unset "$v_var"
+  case "$v_line" in
+    *"target-dir $v_case_target "*)
+      ok "env-isolation[$v_var]: an inherited $v_var does NOT decide what the case measures" ;;
+    *"target-dir $v_poison_target "*)
+      bad "env-isolation[$v_var]: the INHERITED value won — the case measured $v_poison_target, not its own $v_case_target" ;;
+    *) bad "env-isolation[$v_var]: unexpected rendering: ${v_line:-<none>}" ;;
+  esac
+  if df_operands_all "v-${v_var}" "$v_case_target"; then
+    ok "env-isolation[$v_var]: and every df call measured the case's own directory"
+  else
+    bad "env-isolation[$v_var]: df measured '$(df_operands "v-${v_var}" | sed -n 1p)'"
+  fi
+done
+
+# (c) THE OPERAND GUARD MUST DISCRIMINATE IN BOTH DIRECTIONS *UNDER A PIN*. Reddening a
+#     CORRECT gate is as broken as greening a wrong one, and that is precisely how this
+#     defect surfaced. Re-checked here with the poison in place.
+export CARGO_TARGET_DIR="$v_poison_target"
+v_ok_line=$(v_run v-guard-correct)
+unset CARGO_TARGET_DIR
+if df_operands_all v-guard-correct "$v_case_target"; then
+  ok "env-isolation: df_operands_all GREENS the correct gate even with a pin exported"
+else
+  bad "env-isolation: df_operands_all REDS a correct gate under an exported pin — the control misfires"
+fi
+if df_operands_all t "$t_target"; then
+  bad "env-isolation: df_operands_all still greens the MUTANT — it discriminates in neither direction"
+else
+  ok "env-isolation: ...and still REDS the mutant — both directions, under a pinned environment"
+fi
+
+# ===========================================================================
+# Case W (roborev job 373, Medium): a NEGATIVE Available is the worst reading
+# there is, not an unparsable one.
+#
+# df legitimately reports a negative Available on an overcommitted filesystem or
+# one dipping into reserved blocks. Classifying it unparsable produced a
+# non-fatal UNMEASURED and let the build proceed in the most severe low-space
+# condition that exists — a false admission at the worst possible moment.
+# ===========================================================================
+W_NEG=-1048576   # -1 GiB
+# THE POSITIVE CONTROL: the PRE-FIX validators, reproduced verbatim, on the same value.
+if printf '%s' "$W_NEG" | grep -qE '^[0-9]+$'; then
+  bad "negative-avail CONTROL: the pre-fix unsigned pattern ACCEPTED $W_NEG; this case does not demonstrate the defect"
+else
+  ok "negative-avail CONTROL: the PRE-FIX unsigned pattern REJECTED $W_NEG — it became UNMEASURED, i.e. non-fatal, i.e. admitted"
+fi
+w_script=$(df_script w "$W_NEG")
+run_stub_gate w "$w_script" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/w-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=2
+w_err=$RS_ERR; w_sum=$RS_SUMMARY
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; w_status=$WX_STATUS; w_markers=$WX_MARKERS
+assert_no_timeout "w negative available"
+w_line=$(grep_line "$w_err" '^agent-gate: disk-admission: ')
+if [ "$w_status" -ne 0 ] && [ "$w_markers" -eq 0 ]; then
+  ok "negative-avail: a negative Available REFUSES and never begins work — a binding refusal, not a parse"
+else
+  bad "negative-avail: the run PROCEEDED on a negative Available (exit $w_status, markers $w_markers)"
+fi
+case "$w_line" in
+  *'FAIL-CLOSED (#3755)'*'-1.0GiB(BELOW BAR)'*)
+    ok "negative-avail: read as a MEASUREMENT below the bar, and rendered as the negative it is" ;;
+  *'UNMEASURED (df-unparsable)'*)
+    bad "negative-avail: still classified unparsable — the worst reading there is, treated as no reading: $w_line" ;;
+  *) bad "negative-avail: unexpected rendering: ${w_line:-<none>}" ;;
+esac
+if grep -qx 'RESULT: FAIL' "$w_sum" 2>/dev/null; then
+  ok "negative-avail: RESULT: FAIL in the emitted block"
+else
+  bad "negative-avail: no exact 'RESULT: FAIL' line"
 fi
 
 printf '\n%s\n' "-----------------------------------------------"
