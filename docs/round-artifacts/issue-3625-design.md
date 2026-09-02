@@ -876,3 +876,65 @@ shape: the property is about *any* second line carrying the keyword); the enumer
 count in `test_agent_gate_file_size_log.sh` case8, **re-derived from the code** (3 on a clean tree:
 thresholds, base ref, no-changed-files) rather than reverted to the old constant; and the entire
 core census mechanism, untouched.
+
+---
+
+## roborev round 12 (job 400) — a best-effort write was driving a verdict
+
+### The finding, and why it is an INHERITED assumption rather than an oversight
+
+`_census_write` is deliberately non-fatal, inherited from `_fm_note`, whose comment argues it
+correctly: *"a failed append must never fail the component whose matrix it describes — the
+consequence of a lost append is a visibly incomplete annotation, never a wrong one."*
+
+**That reasoning was true for the feature matrix and is false for the census.** A lost annotation
+is cosmetic; a lost census record is not, because the census now drives a **verdict**. The
+`self:`/`runtime:` producers computed a record, **threw the value away**, and finalized by
+re-reading the sidecar — so a failed write turned a computed `ZERO` into `NOT-MEASURED`, and
+`NOT-MEASURED` preserves `PASS`. A filesystem hiccup bought a false green in a merge gate.
+
+It is CLAUDE.md's recorded shape one directory over: *a fail-closed argument for a
+`${VAR:-default}` is only valid for the consumers that existed when it was written* — a new
+consumer for which the permissive direction is unsafe inverts the original argument **silently**.
+The sentence is now at the fix site, so the next reader of "best-effort" knows the verdict path no
+longer relies on it.
+
+### The fix
+
+`_census_declare` and `_census_scoped_record` **return** the record they computed;
+`_census_measure`/`_census_finalize` take it as an optional third argument and use it instead of
+re-reading. The sidecar remains for RENDERING only on those paths.
+
+**The sibling paths were confirmed, not assumed:** the log-measured kinds never had the problem —
+`_census_measure_kind` prints the value it computed, so `record_result` already finalizes from the
+value even when the write fails.
+
+### The guard
+
+Section W makes the write fail **the way a real one would** — the sidecar path is occupied by a
+directory, so the `printf >` redirect cannot create it — rather than stubbing `_census_write`,
+which would test a double instead of the shipped helper. W0 proves the sabotage bites; W1 the
+producer returns its record; W2 a computed `ZERO` still becomes `VACUOUS`; **W2 RED** runs the
+pre-fix call shape over the same lost write and gets `PASS`, which is the false green verbatim;
+W3 a real `COUNT` still passes through the same failed-write path; W4 the same for the `runtime:`
+producer; W5 structural.
+
+### The case-floor question, answered by measurement
+
+`CENSUS_CASE_FLOOR` was **88 while the suite reported 110**. The honest answer is that it was NOT
+environment variance: the value was set by subtracting when the `emitted` section was removed —
+exactly the move that hides a future shrink.
+
+Measured: the suite has **no `skip` path, no `command -v` guard, and no corpus/node/cargo
+dependency**, so the count is **environment-invariant**. Confirmed empirically by the P2 RED arm
+above: with python3 unavailable the count stayed at 117 (116 + 1 failure), it did not drop.
+
+Raised to **110** against a measured 117, with the reasoning recorded at the constant. The 7-case
+margin covers a lean host I have **not** measured (bash 3.2 on macOS, which this repo supports),
+and is labelled as that rather than as a known drop.
+
+**Found while measuring:** P2 was the suite's only external-tool dependency and it was the vacuous
+shape this very file polices — with python3 absent the derivation printed nothing, `$p_raw` was
+empty, and P2 reported *"no progress line prints the pre-census status"* **having examined
+nothing**. A case floor could never have caught it, because the case count does not change. It now
+fails closed on the derivation's exit status.
