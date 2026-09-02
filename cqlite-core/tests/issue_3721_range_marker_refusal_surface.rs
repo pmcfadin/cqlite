@@ -1367,6 +1367,7 @@ mod d9_select_marker_parse_failure {
                     ErrorCategory::Data,
                     "an unparseable on-disk marker classifies as damaged data"
                 );
+                assert_no_compaction_label(&rendered, query);
             }
         }
     }
@@ -1456,8 +1457,22 @@ mod d9_select_marker_parse_failure {
                         );
                     }
                     assert_eq!(e.category(), ErrorCategory::Data);
+                    assert_no_compaction_label(&rendered, &query);
                 }
             }
         }
+    }
+
+    /// `parse_range_tombstone_marker_with_ldt`'s diagnostics used to be suffixed
+    /// `(compaction)`, from when it had one caller; the READ path reaches it now,
+    /// so a `SELECT` was telling an operator to debug the wrong subsystem (issue
+    /// #3721, roborev job 78). The parser cannot see which caller it has, so the
+    /// property is pinned HERE, at the public surface, on every SELECT surface.
+    fn assert_no_compaction_label(rendered: &str, query: &str) {
+        assert!(
+            !rendered.contains("(compaction)"),
+            "`{query}` is a SELECT: its refusal must not attribute itself to \
+             compaction; got: {rendered}"
+        );
     }
 }

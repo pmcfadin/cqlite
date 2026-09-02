@@ -1165,4 +1165,3 @@ async fn the_complex_subject_still_reads_cleanly_without_its_checksum_components
     .expect("the untruncated scratch copy must read cleanly");
     assert_eq!(rows, 1, "present fixture must return its row");
 }
-

@@ -878,7 +878,7 @@ impl V5CompressedLegacyParser {
 
         let schema = schema.ok_or_else(|| {
             Error::schema(format!(
-                "V5CompressedLegacy (compaction) format requires schema for {}.{}",
+                "V5CompressedLegacy format requires schema for {}.{}",
                 self.keyspace, self.table_name
             ))
         })?;
@@ -937,7 +937,7 @@ impl V5CompressedLegacyParser {
 
         if skipped_partitions > 0 {
             tracing::warn!(
-                "V5CompressedLegacy (compaction): skipped {} malformed partitions",
+                "V5CompressedLegacy: skipped {} malformed partitions",
                 skipped_partitions
             );
         }
@@ -992,7 +992,7 @@ impl V5CompressedLegacyParser {
 
         let schema = schema.ok_or_else(|| {
             Error::schema(format!(
-                "V5CompressedLegacy (compaction) format requires schema for {}.{}",
+                "V5CompressedLegacy format requires schema for {}.{}",
                 self.keyspace, self.table_name
             ))
         })?;
