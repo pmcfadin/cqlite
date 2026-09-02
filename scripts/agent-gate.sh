@@ -7226,14 +7226,29 @@ _census_measure_kind() {
       # The two subjects are probed INDEPENDENTLY: libtest output survives quiet, cargo
       # status output does not, so a quiet box must not turn a lane's measurable half into
       # a claim about its unmeasurable one.
+      #
+      # THE LIBTEST HALF IS DESCRIBED FROM `seen`, NOT FROM `total` (roborev job 402). A
+      # PRESENT tally reporting 0 passed also has `total == 0`, so wording keyed on `total`
+      # said "no libtest tally" when a tally was present and said zero — a false statement
+      # in a gate log, which is this change's own subject. The tally has returned BOTH
+      # numbers since job 389 exactly so the two can be told apart; this branch was the one
+      # that never consumed the second value. (The `libtest` arm above already keys on
+      # `seen`; only `both` was short.) No verdict moves — `total` still decides the state,
+      # `seen` only decides how it is EXPLAINED.
+      local _lt_desc
+      if [ "$seen" -eq 0 ]; then
+        _lt_desc="no libtest tally"
+      else
+        _lt_desc="$seen libtest result line(s), all reporting 0 passed"
+      fi
       if [ "$cargo_status" -eq 0 ]; then
         if [ "$total" -eq 0 ]; then
-          line="NOT-MEASURED no libtest tally in $comp.log, and $quiet_note"
+          line="NOT-MEASURED $comp.log has $_lt_desc, and $quiet_note"
         else
           line="COUNT $total tests passed (test binaries NOT MEASURED: $quiet_note)"
         fi
       elif [ "$total" -eq 0 ] && [ "$bins" -eq 0 ]; then
-        line="ZERO tests and test binaries — $comp.log carries cargo status output but neither a libtest tally nor an 'Executable' line"
+        line="ZERO tests and test binaries — $comp.log carries cargo status output but no 'Executable' line, and $_lt_desc"
       else
         line="COUNT $total tests passed and $bins test binaries built/verified"
       fi ;;

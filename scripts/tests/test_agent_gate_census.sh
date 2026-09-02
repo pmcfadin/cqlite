@@ -1062,7 +1062,7 @@ esac
 : > "$LOG_DIR/integration-tests.log"
 got=$(_census_measure integration-tests PASS); st=$(_census_status_for PASS "$got")
 case "$got|$st" in
-  'NOT-MEASURED no libtest tally'*'SUPPRESSED'*'|PASS')
+  'NOT-MEASURED'*'no libtest tally'*'SUPPRESSED'*'|PASS')
     ok "N6: a 'both' lane with NEITHER subject readable under quiet is NOT-MEASURED, not ZERO — under quiet an empty log is exactly what a healthy --no-run-only route produces" ;;
   *) bad "N6: got '$got' / '$st'" ;;
 esac
@@ -1762,6 +1762,81 @@ if [ "${#w_struct[@]}" -eq 0 ]; then
 else
   bad "W5: ${w_struct[*]}"
 fi
+# ---------------------------------------------------------------------------
+# (X) THE RECORD-CONSTRUCTION TEXTS — the r4 sweep's scope, widened (roborev job 402).
+#
+# Round 4 swept "every label and counter on the aggregate `census:` line and in
+# `_fm_annotate`'s census suffix" and I recorded the family as CLOSED. It was not: the texts
+# that BUILD the record — inside `_census_measure_kind`, `_census_classify` and the
+# `self:`/`runtime:` recorders — feed the record, which feeds the annotation, so they were in
+# the family's blast radius and outside the sweep's stated scope. Job 402 is the fifth
+# instance and it lives there: the `both` arm keyed its "no libtest tally" wording on
+# `total == 0`, which is ALSO true of a tally that is PRESENT and reports zero.
+#
+# THIS IS CLAIM-VS-OBSERVATION, NOT A WORD SCAN. Each row supplies a log whose contents are
+# known, then asserts the text CONTAINS what those contents justify and does NOT contain the
+# specific claim they falsify. A blanket scan for words was tried in r4 and removed — the
+# text `{no census: component ended FAIL, so there is no PASS to affirm}` legitimately
+# contains "PASS" — and a guard that reds on correct prose is the guard agents learn to
+# waive. The forbidden string here is derived from the fixture, one per row.
+# ---------------------------------------------------------------------------
+LOG_DIR="$tmp/recordtext"; mkdir -p "$LOG_DIR"
+x_bad=()
+x_n=0
+x_LOUD='    Finished `test` profile in 0.01s\n'
+x_ZEROTALLY='\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored\n'
+x_REALTALLY='\nrunning 5 tests\n\ntest result: ok. 5 passed; 0 failed; 0 ignored\n'
+x_EXEC='  Executable unittests src/lib.rs (target/debug/deps/x-1)\n'
+# <component>|<kind>|<log body>|<must contain>|<must NOT contain, or '-'>
+x_rows='
+integration-tests|both|'"$x_ZEROTALLY"'|libtest result line(s), all reporting 0 passed|no libtest tally
+integration-tests|both||no libtest tally|libtest result line(s), all reporting 0 passed
+integration-tests|both|'"$x_LOUD$x_ZEROTALLY"'|libtest result line(s), all reporting 0 passed|no libtest tally
+integration-tests|both|'"$x_LOUD"'|no libtest tally|reporting 0 passed
+integration-tests|both|'"$x_LOUD$x_REALTALLY$x_EXEC"'|COUNT 5 tests passed and 1 test binaries|NOT MEASURED
+tombstones-scan|libtest|'"$x_ZEROTALLY"'|every one of them reporting 0 passed|carries no libtest or nextest result line
+tombstones-scan|libtest||carries no libtest or nextest result line|reporting 0 passed
+feature-iso-parquet|compile||SUPPRESSED|nothing was built or verified fresh
+feature-iso-parquet|compile|'"$x_LOUD"'|carries cargo status output but no '"'"'Executable'"'"' line|SUPPRESSED
+python-bindings|indirect:pytest|61 skipped in 1.20s\n|reports none|no pytest tally found
+python-bindings|indirect:pytest|maturin noise only\n|no pytest tally found|reports none
+'
+old_ifs=$IFS
+while IFS='|' read -r x_comp x_kind x_body x_want x_forbid; do
+  [ -n "$x_comp" ] || continue
+  x_n=$((x_n + 1))
+  rm -f "$(_census_sidecar "$x_comp")"
+  printf '%b' "$x_body" > "$LOG_DIR/$x_comp.log"
+  x_got=$(_census_measure_kind "$x_comp" "$x_kind")
+  case "$x_got" in
+    *"$x_want"*) ;;
+    *) x_bad+=("[$x_comp/$x_kind] missing '$x_want' in: $x_got") ;;
+  esac
+  if [ "$x_forbid" != '-' ]; then
+    case "$x_got" in
+      *"$x_forbid"*) x_bad+=("[$x_comp/$x_kind] FALSE CLAIM '$x_forbid' — the log does not justify it: $x_got") ;;
+    esac
+  fi
+done <<X_EOF
+$x_rows
+X_EOF
+IFS=$old_ifs
+if [ "$x_n" -ne 11 ]; then
+  bad "X1: only $x_n of the 11 record-construction cells were exercised — the table is not iterating, so a green here would certify nothing"
+elif [ "${#x_bad[@]}" -eq 0 ]; then
+  ok "X1 (job 402 + the widened r4 sweep): all $x_n record-construction texts say only what their log justifies — in particular a PRESENT tally reporting zero is never described as an ABSENT tally, in either the libtest or the both arm, quiet or loud"
+else
+  bad "X1: ${x_bad[*]}"
+fi
+# The specific regression, called out by name so a failure points at job 402 directly.
+rm -f "$(_census_sidecar integration-tests)"
+printf '%b' "$x_ZEROTALLY" > "$LOG_DIR/integration-tests.log"
+x_j402=$(_census_measure_kind integration-tests both)
+case "$x_j402" in
+  *'no libtest tally'*) bad "X2 (job 402): the both arm still reports 'no libtest tally' for a log whose tally is PRESENT and reports 0 passed: $x_j402" ;;
+  *'1 libtest result line(s), all reporting 0 passed'*) ok "X2 (job 402): the both arm describes a present-but-zero tally from \$seen, not from \$total — the information was already in hand since job 389 and this branch was the one not consuming it" ;;
+  *) bad "X2: got '$x_j402'" ;;
+esac
 echo
 echo "component census guard: $PASS passed, $FAIL failed"
 # A COUNT FLOOR beside the abort trap (the idiom of test_agent_gate_summary.sh and
@@ -1780,7 +1855,7 @@ echo "component census guard: $PASS passed, $FAIL failed"
 # future shrink, and the honest answer to the question is that it gave away headroom for no
 # reason. Raised to sit just under the measured count; the 7-case margin covers a lean host
 # I have NOT measured (bash 3.2 on macOS, which this repo supports), not a known drop.
-CENSUS_CASE_FLOOR=110
+CENSUS_CASE_FLOOR=112
 CENSUS_REACHED_END=1
 if [ $((PASS + FAIL)) -lt "$CENSUS_CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): sections are being skipped or dying silently, and a "0 failed" over a shrunken subject set certifies nothing.\n' \
