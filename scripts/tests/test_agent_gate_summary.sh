@@ -5547,8 +5547,8 @@ case "$fa_got" in
   *) ok "3765-cred-url: a URL-userinfo credential in a toolchain line does NOT reach the rendered field" ;;
 esac
 case "$fa_got" in
-  *"<redacted>@h.io"*) ok "3765-cred-url-marker: the redaction MARKER is present, so the field reports the diagnostic rather than refusing it" ;;
-  *) bad "3765-cred-url-marker: expected '<redacted>@h.io' in the field, got '$fa_got' — a silently dropped value is not a redaction" ;;
+  *"<url>"*) ok "3765-cred-url-marker: the NEUTRALISATION placeholder is present, so the field reports that a url stood there rather than dropping the line" ;;
+  *) bad "3765-cred-url-marker: expected '<url>' in the field, got '$fa_got' — a silently dropped value is not a neutralisation" ;;
 esac
 _fa_run credscp "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/cred-scp.log" PASS
 fa_got=$(_fa_line fmt)
@@ -5557,8 +5557,8 @@ case "$fa_got" in
   *) ok "3765-cred-scp: an scp-form (user@host:path) credential does NOT reach the rendered field" ;;
 esac
 case "$fa_got" in
-  *"<redacted>@h.io:"*) ok "3765-cred-scp-marker: the scp-form redaction MARKER is present, so the diagnostic is still reported" ;;
-  *) bad "3765-cred-scp-marker: expected '<redacted>@h.io:' in the field, got '$fa_got'" ;;
+  *"<authority>"*) ok "3765-cred-scp-marker: the authority placeholder is present, so the diagnostic is still reported" ;;
+  *) bad "3765-cred-scp-marker: expected '<authority>' in the field, got '$fa_got'" ;;
 esac
 # STRUCTURAL, and labelled as such: the redaction must be the EXISTING one redactor,
 # called from the ONE clean function. A second implementation is the drift this repo
@@ -5608,8 +5608,8 @@ case "$fa_got" in
   *) ok "3765-cred-long-url: a URL credential spanning the display boundary does NOT reach the rendered field" ;;
 esac
 case "$fa_got" in
-  *"<redacted>@h.io"*) ok "3765-cred-long-url-marker: the redaction MARKER survives the display bound, so the field still reports the diagnostic" ;;
-  *) bad "3765-cred-long-url-marker: expected '<redacted>@h.io' in the field, got '$fa_got' — a silently dropped value is not a redaction" ;;
+  *"<url>"*) ok "3765-cred-long-url-marker: the placeholder survives the display bound, so the field still reports the diagnostic" ;;
+  *) bad "3765-cred-long-url-marker: expected '<url>' in the field, got '$fa_got' — a silently dropped value is not a neutralisation" ;;
 esac
 _fa_run credlongscp "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/cred-long-scp.log" PASS
 fa_got=$(_fa_line fmt)
@@ -5618,8 +5618,8 @@ case "$fa_got" in
   *) ok "3765-cred-long-scp: an scp-form credential spanning the display boundary does NOT reach the rendered field" ;;
 esac
 case "$fa_got" in
-  *"<redacted>@h."*) ok "3765-cred-long-scp-marker: the scp-form redaction MARKER survives the display bound" ;;
-  *) bad "3765-cred-long-scp-marker: expected '<redacted>@h.' in the field, got '$fa_got'" ;;
+  *"<authority>"*) ok "3765-cred-long-scp-marker: the authority placeholder survives the display bound" ;;
+  *) bad "3765-cred-long-scp-marker: expected '<authority>' in the field, got '$fa_got'" ;;
 esac
 
 # 55y. THE ORDER IS ASSERTED STRUCTURALLY: normalise -> redact -> bound for display.
@@ -5684,6 +5684,8 @@ fi
 #      below is on the RENDERED field. The extractor does not neutralise and does not
 #      redact, so a token cut by a bound looks "absent" on its stdout while never having
 #      been neutralised — a leak check made there certifies nothing.
+printf 'npm error 401 Unauthorized while fetching h.io/pkg?token=SEKRETFOXTROT\n' > "$fa_dir/neu-query.log"
+printf "npm error request failed: Authorization: Bearer SEKRETGOLF\n" > "$fa_dir/neu-header.log"
 # A credential STRADDLING the extractor's 4096-char SAFETY bound. The `@` is placed at
 # offset 4097 EXACTLY, so a bound that keeps a PREFIX hands the emit boundary
 # `…deploy-user:SEKRETHOTEL` — no `@`, no scheme, no `?…=` — which every shape rule and
@@ -5694,6 +5696,29 @@ awk 'BEGIN {
   tail = sprintf("%100s", ""); gsub(/ /, "y", tail)
   printf "npm error %sdeploy-user:SEKRETHOTEL@h.io/pkg%s\n", pad, tail
 }' > "$fa_dir/neu-span.log"
+printf 'Diff in /repo/cqlite-core/src/storage/sstable/reader.rs at line 12:\n' > "$fa_dir/neu-path.log"
+
+_fa_run neuquery "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/neu-query.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETFOXTROT*) bad "3765-neu-query: a QUERY-STRING secret is rendered VERBATIM into the SUMMARY field ('$fa_got') — the redactor knows only url userinfo and scp form, so sanitising is not the fix; the channel must be removed" ;;
+  *) ok "3765-neu-query: a query-string secret (?token=…) does NOT reach the rendered field" ;;
+esac
+case "$fa_got" in
+  *"<query>"*) ok "3765-neu-query-marker: the query placeholder is present, so the field still reports that a query-bearing token stood there" ;;
+  *) bad "3765-neu-query-marker: expected '<query>' in the field, got '$fa_got' — a silently dropped value is not a neutralisation" ;;
+esac
+
+_fa_run neuheader "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/neu-header.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETGOLF*) bad "3765-neu-header: a HEADER-form credential (Authorization: Bearer …) is rendered VERBATIM into the SUMMARY field ('$fa_got')" ;;
+  *) ok "3765-neu-header: a header-form credential does NOT reach the rendered field" ;;
+esac
+case "$fa_got" in
+  *"Authorization: Bearer <secret>"*) ok "3765-neu-header-marker: the KEY and the scheme word are kept and only the VALUE is neutralised, so the diagnostic still says what kind of field it was" ;;
+  *) bad "3765-neu-header-marker: expected 'Authorization: Bearer <secret>' in the field, got '$fa_got'" ;;
+esac
 
 _fa_run neuspan "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/neu-span.log" PASS
 fa_got=$(_fa_line fmt)
@@ -5706,6 +5731,60 @@ case "$fa_got" in
   *) bad "3765-neu-span-marker: expected 'too long to publish safely' in the field, got '$fa_got' — the bound is still retaining a prefix" ;;
 esac
 
+# THE NEUTRALISATION MUST NOT EAT THE SUBJECT. Two survivals, both from the issue itself:
+# a rustfmt diff names a PATH (no authority), and the #3765 motivating instance is ordinary
+# prose. A rule that blanked either would make the field useless, which is the failure mode
+# opposite to the leak and just as fatal to this issue's purpose.
+_fa_run neupath "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/neu-path.log" PASS
+fa_got=$(_fa_line fmt)
+# The 60-char per-name DISPLAY elision still applies (it is a separate, pre-existing bound,
+# and it runs AFTER all of this) — so the property asserted is that the neutralisation
+# CHANGED NOTHING: the head and the distinguishing tail are the path's own, and no
+# placeholder appears.
+case "$fa_got" in
+  *"rustfmt diff in /repo/cqlit"*"sstable/reader.rs at line 12"*)
+    case "$fa_got" in
+      *"<url>"*|*"<authority>"*|*"<query>"*|*"<secret>"*)
+        bad "3765-neu-path-survives: a placeholder replaced part of an ordinary path ('$fa_got') — the neutralisation is eating paths" ;;
+      *) ok "3765-neu-path-survives: 'rustfmt diff in <path>' survives the neutralisation untouched (a path carries no authority)" ;;
+    esac ;;
+  *) bad "3765-neu-path-survives: expected the rustfmt path identity (head + tail) intact, got '$fa_got'" ;;
+esac
+_fa_run neuprose "file-size:FAIL fmt:PASS clippy:PASS" "file-size=$fa_dir/one.log" PASS
+fa_got=$(_fa_line file-size)
+case "$fa_got" in
+  *"1465-skip-declares: the opt"*"declare the leak-lane state"*)
+    case "$fa_got" in
+      *"<url>"*|*"<authority>"*|*"<query>"*|*"<secret>"*)
+        bad "3765-neu-prose-survives: a placeholder replaced part of the motivating instance ('$fa_got')" ;;
+      *) ok "3765-neu-prose-survives: the #3765 motivating instance still renders IDENTIFIABLY (tag AND distinguishing tail) through the neutralisation" ;;
+    esac ;;
+  *) bad "3765-neu-prose-survives: the motivating instance no longer renders identifiably, got '$fa_got'" ;;
+esac
+
+# STRUCTURAL, and labelled as such: EVERY BOUND, not just the display one (blocker 8 is the
+# fourth instance of one shape, so the assert is over the class rather than the instance).
+# Inside _failassert_clean the ONE neutralisation runs first, the ONE redaction second, and
+# EVERY truncating construct — the per-name elision, the 300-char field cap, and anything a
+# later edit adds — strictly after both.
+fa_cl_code=$(awk '/^_failassert_clean\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#' | grep -n .)
+fa_neu_ln=$(printf '%s\n' "$fa_cl_code" | grep '_failassert_neutralise' | head -1 | cut -d: -f1)
+fa_red_ln=$(printf '%s\n' "$fa_cl_code" | grep '_component_set_redact_text' | head -1 | cut -d: -f1)
+fa_neu_n=$(printf '%s\n' "$fa_cl_code" | grep -c '_failassert_neutralise')
+if [ "${fa_neu_n:-0}" = 1 ] && [ -n "$fa_neu_ln" ] && [ -n "$fa_red_ln" ] && [ "$fa_neu_ln" -lt "$fa_red_ln" ]; then
+  ok "3765-neu-one-call: _failassert_clean makes EXACTLY ONE _failassert_neutralise call and it precedes the redaction (one boundary, no second implementation to diverge)"
+else
+  bad "3765-neu-one-call: expected exactly 1 _failassert_neutralise call before the redaction, got $fa_neu_n call(s) (neutralise='${fa_neu_ln:-<none>}' redact='${fa_red_ln:-<none>}')"
+fi
+fa_bound_lns=$(printf '%s\n' "$fa_cl_code" | grep -E 'cut -c|substr\(|head -c|\$\{[A-Za-z_]+:[0-9]+:[0-9]+\}' | cut -d: -f1)
+fa_bound_min=$(printf '%s\n' "$fa_bound_lns" | grep -E '^[0-9]+$' | sort -n | head -1)
+fa_bound_n=$(printf '%s\n' "$fa_bound_lns" | grep -cE '^[0-9]+$')
+if [ "${fa_bound_n:-0}" -ge 2 ] && [ -n "$fa_bound_min" ] && [ -n "$fa_neu_ln" ] && [ -n "$fa_red_ln" ] \
+   && [ "$fa_bound_min" -gt "$fa_neu_ln" ] && [ "$fa_bound_min" -gt "$fa_red_ln" ]; then
+  ok "3765-order-every-bound: all $fa_bound_n truncating construct(s) in _failassert_clean run AFTER both the neutralisation and the redaction (the EARLIEST is at code line $fa_bound_min)"
+else
+  bad "3765-order-every-bound: a bound in _failassert_clean runs before the neutralisation/redaction (earliest bound='${fa_bound_min:-<none>}' of $fa_bound_n, neutralise='${fa_neu_ln:-<none>}', redact='${fa_red_ln:-<none>}') — that is the truncate-before-neutralise class, whichever bound it is"
+fi
 # …and the SAME property for the one bound that lives upstream, in the extractor: it must
 # neither `cut` nor `substr` its way to a prefix anywhere in the emit path.
 if ! grep -qE 'cut -c|head -c' "$fa_tool"; then
@@ -5797,14 +5876,13 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
-# 459 -> 462 on #3765 (roborev job 48, blocker 8): section 55z adds 3 asserts for the
-# credential STRADDLING the extractor's safety bound (the bound now publishes a placeholder
-# instead of a prefix) plus the structural "no character-cut anywhere in the extractor".
-# Host-INDEPENDENT for the same reason as the rest of section 55.
-# 458 -> 459 on #3765 (roborev job 48, blocker 9): section 55za adds 1 structural assert —
-# `%-18s` may be formatted in exactly ONE place, so the tree-integrity boundary block's rows
-# cannot be rendered by a second formatter that omits the invocation bracket and this
-# issue's failed-assert field. Host-INDEPENDENT (a grep over the gate script).
+# 458 -> 470 on #3765 (roborev job 48, blockers 7/8/9): section 55z adds 12 asserts — 6
+# behavioural leak cases the REDACTOR cannot see (a query string, a header form, a
+# credential straddling the extractor safety bound, each with its placeholder), 2 survivals
+# (a path, and the motivating instance), and 4 STRUCTURAL ones covering EVERY bound rather
+# than the one that leaked (one neutralisation call before the redaction; every truncating
+# construct after both; no character-cut in the extractor; exactly one component-row
+# formatter in the gate). Host-INDEPENDENT for the same reason as the rest of section 55.
 # 447 -> 458 on #3765 (roborev job 46, blocker 6): sections 55x/55y add 4 asserts for a
 # credential SPANNING the display boundary (55w certified only the safe side of it) and 4
 # STRUCTURAL asserts pinning the order normalise -> redact -> bound-for-display, plus 2
@@ -5837,7 +5915,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=462
+ASSERT_FLOOR=470
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

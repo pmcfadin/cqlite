@@ -6610,6 +6610,86 @@ _failassert_write() {
   return 0
 }
 
+# _failassert_neutralise: REMOVE THE FREE-TEXT CHANNEL. Every URL-shaped, authority-shaped,
+# query-shaped or credential-KEYED token is replaced WHOLESALE with a FIXED placeholder,
+# BEFORE any bound and BEFORE the redactor.
+#
+# WHY THIS EXISTS, AND WHY IT IS NOT A SIXTH REDACTOR (roborev job 48, blocker 7). The
+# credential-leak family in this file is now six rounds old — 227 raw URL rendered, 234
+# redacted but not flattened, 239 flattened but not redacted, 264 scp form, 282 query strings
+# verbatim, and here whole assertion/toolchain lines published through a redactor that
+# understands ONLY url userinfo and the scp form. Every previous fix IMPROVED THE SANITISER,
+# which is the "rarer delimiter" move CLAUDE.md's mechanism ruling forbids; the ruling taken on
+# 282 was STOP RENDERING THE VALUE, DO NOT SANITISE IT AGAIN, and the origin URL is no longer
+# published at all. This is the same ruling applied to the same file one field over: the field
+# no longer publishes free text that CARRIES an authority, so `npm error
+# https://host/pkg?token=SECRET` cannot reach a SUMMARY block whatever the secret looks like.
+#
+# BY SHAPE, NEVER BY CREDENTIAL-DETECTION. The replacement is decided by the shape of the whole
+# TOKEN and the whole token is replaced; nothing here tries to work out WHICH PART is the
+# secret — that is precisely the strategy that failed five times. Four rules:
+#   N1  a token containing `://`                       -> <url>
+#   N2  a token with an `@` between non-space runs     -> <authority>   (scp form, an email,
+#                                                         `user:pass@host` with no scheme)
+#   N3  a token carrying a query fragment `[?&]…=`     -> <query>
+#   N4  a CREDENTIAL-NAMED key (a NAMED, DECLARED, non-exhaustive set) followed by `:`/`=`:
+#       the VALUE is replaced with <secret>, in the same token (`token=X`) or as the next one
+#       (`Authorization: Bearer X`, where the scheme word `bearer`/`basic` passes the mark on).
+#       The KEY is kept — a reader needs to know a credential-shaped field was there.
+#
+# DECLARED RESIDUAL, because a shape rule cannot be a secrecy oracle: a secret in ORDINARY
+# PROSE, with no authority shape and no credential-named key (`npm error the passphrase was
+# hunter2`), still passes. That is deliberate — the alternative is publishing nothing, and the
+# whole subject of #3765 is that a FAIL line must NAME its failing assert. What is closed is
+# the shape that carries credentials in the measured corpus.
+#
+# OVER-REDACTION IS THE ACCEPTED DIRECTION: an ordinary `name@example.com` in an assert message
+# renders `<authority>`, and a test whose text is `token=42` renders `token=<secret>`. Under-
+# redaction costs a live token in a PR comment; over-redaction costs one word of a diagnostic.
+#
+# WHAT MUST STILL SURVIVE, and is pinned behaviourally in scripts/tests/test_agent_gate_summary.sh:
+# the #3765 motivating instance (`1465-skip-declares: the opt-out SKIP branch does not declare
+# the leak-lane state`) and `rustfmt diff in <path>` — a path has no authority.
+#
+# LINE STRUCTURE IS PRESERVED (one output line per input line, leading/trailing whitespace
+# intact): `_failassert_clean --names` passes prefix on line 1, suffix on line 2 and one name
+# per line after that, and the prefix's TRAILING SPACE is load-bearing for the join.
+_failassert_neutralise() {
+  printf '%s' "$1" | awk '
+    BEGIN {
+      # N4 key set. A LOWERCASED copy is matched, with leading punctuation stripped, so
+      # `"token":`, `[api-key=` and `--token=` all reach the same rule. NON-EXHAUSTIVE and
+      # declared as such; a key adjacent to `:`/`=` is required, so the bare word `token` in
+      # an assert message does not neutralise the word after it.
+      KEY = "^(authorization|token|access[-_]?token|refresh[-_]?token|api[-_]?key|apikey|x-api-key|secret|password|passwd|pwd|private[-_]?token|credentials?)[^a-z0-9]*[:=]"
+      # An auth SCHEME word: it carries no secret itself, and the value is the NEXT token.
+      SCHEME = "^(bearer|basic)[^a-z0-9]*$"
+    }
+    {
+      line = $0; lead = ""; trail = ""
+      if (match(line, /^[[:space:]]+/)) { lead = substr(line, 1, RLENGTH); line = substr(line, RLENGTH + 1) }
+      if (match(line, /[[:space:]]+$/)) { trail = substr(line, RSTART); line = substr(line, 1, RSTART - 1) }
+      n = split(line, tok, /[[:space:]]+/)
+      out = ""; mark = 0
+      for (i = 1; i <= n; i++) {
+        t = tok[i]
+        low = tolower(t); sub(/^[^a-z0-9]+/, "", low)
+        if (t ~ /:\/\//)                          { t = "<url>";       mark = 0 }
+        else if (t ~ /[^[:space:]]@[^[:space:]]/) { t = "<authority>"; mark = 0 }
+        else if (t ~ /[?&][^?&=[:space:]]*=/)     { t = "<query>";     mark = 0 }
+        else if (low ~ SCHEME)                    { mark = 1 }
+        else if (low ~ KEY) {
+          if (match(t, /[:=]/) && substr(t, RSTART + 1) ~ /[A-Za-z0-9]/) {
+            t = substr(t, 1, RSTART) "<secret>"; mark = 0
+          } else mark = 1
+        }
+        else if (mark)                            { t = "<secret>";    mark = 0 }
+        out = out (i > 1 ? " " : "") t
+      }
+      print lead out trail
+    }'
+}
+
 # _failassert_clean: THE ONE EMIT BOUNDARY for this field — credentials redacted, ONE
 # line, no control characters, bounded. Component logs hold repository-controlled paths,
 # and git PERMITS a newline in one — an unsanitised value would emit a SUMMARY line with
@@ -6663,8 +6743,21 @@ _failassert_write() {
 # tells agents to paste into PR comments. The extractor now emits the FULL normalised
 # identity and the per-NAME display bound lives HERE, after the redaction.
 #
-# THE FOUR STEPS, in order, each with the reason it cannot move earlier:
-#   1. REDACT — first, so no later bound can sever a URL between the token and its `@`.
+# COUNT CORRECTNESS AND PUBLICATION SAFETY ARE SEPARATE CONCERNS, AND THEY PULL AGAINST
+# EACH OTHER (roborev job 48 — F5 wants the FULL payload, F7 wants no free text published).
+# They are reconciled by splitting the value: the extractor DEDUPES AND COUNTS on the full
+# normalised identity, INTERNALLY, and this boundary publishes only a NEUTRALISED PROJECTION
+# of it. Neither concern is traded for the other — `count` is still computed from text no
+# bound and no placeholder has touched, and nothing carrying an authority is ever rendered.
+#
+# THE FIVE STEPS, in order, each with the reason it cannot move earlier:
+#   0. NEUTRALISE — `_failassert_neutralise`, FIRST, ahead of everything including the
+#      redactor. It removes the free-text CHANNEL (url/authority/query/credential-keyed
+#      tokens -> fixed placeholders) rather than sanitising the value a sixth time; see that
+#      function's header for the ruling this implements. It must precede every bound for the
+#      same reason step 1 must: a bound ahead of it can sever the shape it keys on.
+#   1. REDACT — defence in depth, and before any bound, so no later bound can sever a URL
+#      between the token and its `@`.
 #      It also PRECEDES THE CONTROL-CHAR STRIP: `tr '\001-\037\177' ' '` turns a control
 #      character inside userinfo into a SPACE, and both rules exclude `[:space:]` from the
 #      userinfo class — so stripping first can break a match that would otherwise have
@@ -6684,6 +6777,10 @@ _failassert_write() {
 #   3. FLATTEN — NUL drop, control chars to spaces, squeeze.
 #   4. CAP the whole field at 300 chars, LAST. This is a SEPARATE bound from the 60-char
 #      per-name one; do not collapse the two.
+# EVERY ONE OF THOSE BOUNDS — here, and the extractor's safety bound upstream — now runs
+# after a step that has already removed the credential-bearing shapes, and the extractor's
+# bound TRUNCATES NOTHING (it publishes an affirmative placeholder instead of a prefix).
+# The class is closed at every bound, not at the one that happened to leak.
 #
 # ONE REDACTOR, ONE CALL. `--names` passes the prose prefix, the prose suffix and every
 # name to the SINGLE `_component_set_redact_text` invocation, NEWLINE-separated, and the
@@ -6695,7 +6792,7 @@ _failassert_write() {
 # SECOND redactor, or a second call site, is forbidden: this repo neutralises at the ONE
 # emit boundary, because a divergence between two copies here IS a credential leak.
 _failassert_clean() {
-  local _mode="${1:-}" _prefix="" _suffix="" _payload="" _red
+  local _mode="${1:-}" _prefix="" _suffix="" _payload="" _neu _red
   [ "$#" -ge 1 ] && shift
   case "$_mode" in
     --prose) _payload="${1:-}" ;;
@@ -6712,9 +6809,19 @@ _failassert_clean() {
       printf 'not recorded (internal: _failassert_clean called with no mode token)'
       return 0 ;;
   esac
-  # ===== THE ONE REDACTION. Every state of this field passes through exactly this call. =====
-  _red=$(_component_set_redact_text "$_payload")
-  # THEN, and only then, the per-NAME display bound + the join.
+  # ===== 1. THE ONE NEUTRALISATION (#3765 / roborev job 48, blocker 7). =====
+  # The free-text CHANNEL is removed here: every URL-/authority-/query-shaped and
+  # credential-keyed token becomes a fixed placeholder, so what follows is a PROJECTION of
+  # the identity and not the identity itself. It runs FIRST — before the redactor and before
+  # every bound — because a bound that ran ahead of it could sever the very shape it keys on
+  # (that is F6, at a different bound).
+  _neu=$(_failassert_neutralise "$_payload")
+  # ===== 2. THE ONE REDACTION, kept as DEFENCE IN DEPTH. Every state of this field passes
+  # through exactly this call. It is no longer the thing standing between a token and a PR
+  # comment — step 1 is — but a second, independent rule set costs nothing here and the two
+  # fail in different directions. =====
+  _red=$(_component_set_redact_text "$_neu")
+  # ===== 3. THEN, and only then, the per-NAME display bound + the join. =====
   if [ "$_mode" = --names ]; then
     _red=$(printf '%s\n' "$_red" | awk -v head=27 -v tail=30 '
       NR == 1 { pre = $0; next }
