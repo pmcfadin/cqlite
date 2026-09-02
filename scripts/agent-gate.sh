@@ -6850,6 +6850,39 @@ _failassert_clean() {
   printf '%s' "$_red" | tr -d '\000' | tr '\001-\037\177' ' ' | tr -s ' ' | cut -c1-300
 }
 
+# _failassert_is_doctest_id <value>: does this value match the ONE closed grammar that may
+# legitimately carry a `/` — `doctest <path> line <n> (<item>)`, as produced by the extractor
+# projection pubdoc()? (#3765, roborev job 63.)
+#
+# WHY THIS EXISTS: the emit-boundary charset below deliberately excludes `/` so no URL path can
+# be published. That exclusion made the doctest projection INERT END TO END: the extractor
+# emitted `doctest src/lib.rs line 10 (item)` and this boundary replaced the whole thing with
+# `not extractable`, so a doctest failure — a class `core-tests` actually runs, via
+# `cargo test --doc` — named nothing in the SUMMARY. The extractor-side tests could not see it
+# because they asserted the extractor, not the rendered field.
+#
+# WHY ADMITTING `/` HERE IS STILL SAFE, stated rather than assumed: this is a CLOSED grammar,
+# not a widened charset. The value must be `doctest ` + a path with NO `:` and NO `@` + ` line `
+# + digits + ` (` + an identifier + `)`. A URL cannot satisfy that shape, so the property the
+# charset exists to guarantee — no publishable authority — is preserved by the SHAPE instead of
+# by the charset. Parsed with `case` globs, not a regex: this file uses `=~` nowhere.
+_failassert_is_doctest_id() {
+  local v="${1:-}" p i n rest
+  case "$v" in doctest\ *) ;; *) return 1 ;; esac
+  rest=${v#doctest }
+  case "$rest" in *" line "*) ;; *) return 1 ;; esac
+  p=${rest%% line *}
+  rest=${rest#"$p" line }
+  case "$rest" in *" ("*")") ;; *) return 1 ;; esac
+  n=${rest%% (*}
+  i=${rest#*" ("}; i=${i%)}
+  [ -n "$p" ] && [ -n "$n" ] && [ -n "$i" ] || return 1
+  case "$p" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  case "$n" in *[!0-9]*) return 1 ;; esac
+  case "$i" in *[!A-Za-z0-9._:-]*) return 1 ;; esac
+  return 0
+}
+
 # _failassert_record <component> <status> [logfile]: THE extraction site. Only a FAIL has
 # a failing assert, so PASS/SKIP record nothing and render no field.
 _failassert_record() {
@@ -6954,11 +6987,17 @@ _failassert_record() {
             return 0 ;;
         esac ;;
       *)
-        case "$fa_n" in
-          ''|*[!A-Za-z0-9\ ._\(\):#\<\>-]*)
-            _failassert_write "$name" "not extractable (an identifier failed the safe-charset shape check at the emit boundary - this field publishes identifiers, never assertion payloads)"
-            return 0 ;;
-        esac ;;
+        # ONE exception to the charset, and it is a GRAMMAR rather than a widening: a doctest
+        # identifier carries a path, so it carries `/`. See _failassert_is_doctest_id.
+        if _failassert_is_doctest_id "$fa_n"; then
+          :
+        else
+          case "$fa_n" in
+            ''|*[!A-Za-z0-9\ ._\(\):#\<\>-]*)
+              _failassert_write "$name" "not extractable (an identifier failed the safe-charset shape check at the emit boundary - this field publishes identifiers, never assertion payloads)"
+              return 0 ;;
+          esac
+        fi ;;
     esac
   done
   value=""

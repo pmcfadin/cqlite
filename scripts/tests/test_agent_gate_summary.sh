@@ -6353,6 +6353,64 @@ else
   bad "3765-doctest-rule-order: the doctest rule must precede the generic libtest rule (doctest at '${fa_doc_at:-<none>}', generic at '${fa_gen_at:-<none>}') — order decides which rule sees the line"
 fi
 
+# 55za. ROBOREV JOB 63 — the doctest identity must survive THE EMIT BOUNDARY, not just the
+#       extractor. The extractor emitted `doctest src/lib.rs line 10 (item)` and the
+#       emit-boundary charset (which excludes `/` so no URL path can be published) replaced
+#       the whole value with `not extractable` — so the doctest projection was INERT END TO
+#       END while its extractor-side cases passed.
+#
+#       THE LESSON, and it is why these cases go through _fa_run: the extractor does NOT
+#       neutralise and is NOT the publication path. A leak check or an identity check asserted
+#       on extractor stdout can pass while the RENDERED field says something else entirely.
+#       The 55z cases above assert the extractor; THESE assert what a reader actually sees.
+_fa_run docrend "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/doct.log" PASS
+fa_dr=$(_fa_line fmt)
+case "$fa_dr" in
+  *"doctest src/lib.rs line 10 (item)"*)
+    ok "3765-doctest-rendered: the doctest identity survives the emit boundary and reaches the SUMMARY field" ;;
+  *"not extractable"*)
+    bad "3765-doctest-rendered: the emit-boundary charset REJECTED the doctest identifier, so the projection is inert end to end ($fa_dr) — job 63" ;;
+  *) bad "3765-doctest-rendered: expected the doctest identity in the rendered field, got '$fa_dr'" ;;
+esac
+_fa_run docrend2 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/doct2.log" PASS
+fa_dr2=$(_fa_line fmt)
+case "$fa_dr2" in
+  *"line 10 (a)"*"line 42 (b)"*)
+    ok "3765-doctest-rendered-distinct: two doctests in one file render as TWO distinct identities" ;;
+  *) bad "3765-doctest-rendered-distinct: expected both doctest identities in the rendered field, got '$fa_dr2'" ;;
+esac
+# NEGATIVE CONTROL AT THE BOUNDARY, and it is the load-bearing case: admitting `/` for the
+# doctest GRAMMAR must not admit an AUTHORITY. Both a real URL-shaped test line and a payload
+# that FORGES the doctest wording must publish no host and no token.
+_fa_run docrend3 "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/doct3.log" PASS
+fa_dr3=$(_fa_line fmt)
+case "$fa_dr3" in
+  *SEKRETDOC*|*"@h.io"*)
+    bad "3765-doctest-rendered-no-authority: a URL-shaped line published an authority through the doctest exception ('$fa_dr3')" ;;
+  *) ok "3765-doctest-rendered-no-authority: a URL-shaped line publishes no authority at the emit boundary either" ;;
+esac
+printf 'FAIL - doctest https://h@x/p line 10 (item): forged shape\n' > "$fa_dir/doctforge.log"
+_fa_run docforge "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/doctforge.log" PASS
+fa_dr4=$(_fa_line fmt)
+case "$fa_dr4" in
+  *"@x/p"*|*"https://h"*)
+    bad "3765-doctest-forged-shape: a payload that FORGES the doctest wording published an authority ('$fa_dr4') — the grammar must be matched by the RULE, not by the words in a payload" ;;
+  *) ok "3765-doctest-forged-shape: a payload merely CONTAINING the word doctest cannot smuggle an authority through the grammar exception" ;;
+esac
+# STRUCTURAL: the emit boundary must admit the doctest shape via the NAMED grammar predicate,
+# not by adding `/` to the charset — a widened charset would readmit every URL path.
+fa_eb=$(awk '/^_failassert_record\(\) \{/,/^\}/' "$GATE")
+if printf '%s\n' "$fa_eb" | grep -q '_failassert_is_doctest_id "$fa_n"'; then
+  ok "3765-doctest-boundary-grammar: the emit boundary admits the doctest shape through the named grammar predicate, so the charset still excludes / for every other shape"
+else
+  bad "3765-doctest-boundary-grammar: the emit boundary does not consult _failassert_is_doctest_id — if / was added to the charset instead, every URL path is publishable again (job 63)"
+fi
+if printf '%s\n' "$(awk '/^_failassert_is_doctest_id\(\) \{/,/^\}/' "$GATE")" | grep -q 'A-Za-z0-9._/-' ; then
+  ok "3765-doctest-boundary-path-charset: the grammar re-validates the path against a charset admitting no : and no @"
+else
+  bad "3765-doctest-boundary-path-charset: the doctest grammar does not re-validate its path charset, so the shape check alone is carrying the safety property"
+fi
+
 # CODE lines only: the digest note NAMES those binaries while explaining why it does not use
 # them, and a scan over the comments would read that explanation as the defect.
 if ! grep -v '^[[:space:]]*#' "$fa_tool" | grep -qE '(sha256sum|md5sum|cksum|openssl dgst)'; then
@@ -6609,7 +6667,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=537
+ASSERT_FLOOR=543
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
