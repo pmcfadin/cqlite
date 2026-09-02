@@ -126,6 +126,139 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
+# HOW A HOSTILE PYTHON IS PLANTED (roborev job 416, F2) — AND WHY IT CHANGED.
+#
+# The shipped probes run `python3 -I -S`, so `PYTHONPATH=<dir>` + `sitecustomize.py`
+# — the technique cases AA/AC/AD used — reaches NOTHING. That is the POINT of the
+# isolation fix, not an obstacle to testing it: this suite WAS the proof that the
+# probes were exploitable.
+#
+# The replacement CONSTRUCTS the hostile interpreter itself: the prelude is prepended
+# to the SHIPPED body IN SOURCE and both are handed to the real interpreter under the
+# SHIPPED flags. Two properties the old technique did not have:
+#   * the plants now exercise the body under the argv the GATE actually uses, instead
+#     of under a non-isolated one that no longer models it;
+#   * the shipped argv is left free to be isolated, so Case AF can assert that
+#     isolation AS A DIFFERENTIAL rather than as an absence.
+# The absolute interpreter path is captured HERE, before any shim can be prepended to
+# PATH — a `command -v python3` from inside a shim finds the shim.
+# ---------------------------------------------------------------------------
+DA_REAL_PY=$(command -v python3 2>/dev/null || printf '/nonexistent/python3')
+# ---------------------------------------------------------------------------
+# da_farm <dest-root>: build a SYMLINK FARM of the real checkout at <dest-root>, with an
+# empty `scripts/` ready for a substituted `agent-gate.sh`.
+#
+# WHY A FARM AND NOT A LONE COPY. `agent-gate.sh` does `cd "$(dirname "$0")/.."` and takes
+# REPO_ROOT from there, so a copy dropped in $TMPDIR resolves REPO_ROOT=/tmp: `cargo
+# metadata` fails, `scripts/lib/gate_slot_daemon.py` is missing so the cap never engages,
+# and the run never reaches df — a mutant that CANNOT exhibit the behaviour it is the
+# control for, i.e. a control that passes for the wrong reason. Measured, twice: case T hit
+# it first (zero df calls), and Case AF hit it again (`target-dir-lockfile-stale-or-
+# metadata-failed` + `slot daemon missing`).
+#
+# ONE definition, because two hand-rolled copies of this is two places for it to go subtly
+# wrong — and the omission that broke each attempt was a different entry each time.
+# Nothing is written into the worktree: a suite that runs inside `tooling-tests` must never
+# mutate the tree its own gate is certifying (#2926).
+# ---------------------------------------------------------------------------
+DA_REPO=$(cd "$SCRIPT_DIR/../.." && pwd)
+da_farm() {
+  local dest="$1" e b
+  mkdir -p "$dest/scripts"
+  for e in "$DA_REPO"/* "$DA_REPO"/.[!.]*; do
+    [ -e "$e" ] || continue
+    b=$(basename "$e"); [ "$b" = scripts ] && continue
+    ln -s "$e" "$dest/$b" 2>/dev/null || true
+  done
+  for e in "$DA_REPO"/scripts/* "$DA_REPO"/scripts/.[!.]*; do
+    [ -e "$e" ] || continue
+    b=$(basename "$e"); [ "$b" = agent-gate.sh ] && continue
+    ln -s "$e" "$dest/scripts/$b" 2>/dev/null || true
+  done
+  return 0
+}
+# da_run_probe <prelude-or-empty> <body-file> <target>: run the shipped probe body under
+# the shipped isolation flags, with a hostile prelude prepended. Prints the payload.
+da_run_probe() {
+  local pre="$1" body="$2" tgt="$3"
+  if [ -n "$pre" ]; then
+    "$DA_REAL_PY" -I -S -c "$(cat "$pre")
+$(cat "$body")" "$tgt" 2>/dev/null
+  else
+    "$DA_REAL_PY" -I -S -c "$(cat "$body")" "$tgt" 2>/dev/null
+  fi
+}
+# ---------------------------------------------------------------------------
+# da_py_shim <dir> <prelude-file>: install a PATH `python3` that runs the gate's
+# WRITE PROBE under a hostile prelude and passes every other python3 call through.
+#
+# WHY NOT `PYTHONPATH` + `sitecustomize.py`, which cases AA/AC/AD used: the shipped
+# probes now run `python3 -I -S`, so that technique reaches nothing — and that is the
+# POINT of the isolation fix, not an obstacle to testing it. This replacement
+# CONSTRUCTS the hostile interpreter itself, so the full ability to force any errno is
+# retained while the shipped argv stays free to be isolated (which Case AF then
+# asserts as a differential). Strictly better coverage, not a workaround.
+#
+# The probe is recognised by its own artifact marker, NEVER by an argument count: the
+# shipped argv gained two flags this round, and a count-keyed shim goes silently inert
+# — reporting a green that measured nothing.
+# ---------------------------------------------------------------------------
+da_py_shim() {
+  local dir="$1" prelude="$2"
+  mkdir -p "$dir"
+  cat > "$dir/python3" <<SHIM
+#!/usr/bin/env bash
+REAL='$DA_REAL_PY'
+PRELUDE='$prelude'
+orig=("\$@")
+body=""; seen=0
+declare -a rest=()
+while [ "\$#" -gt 0 ]; do
+  if [ "\$1" = -c ]; then
+    shift; body="\${1-}"; shift; rest=("\$@"); seen=1; break
+  fi
+  shift
+done
+if [ "\$seen" -eq 1 ]; then
+  case "\$body" in
+    *agent-gate-writeprobe*)
+      exec "\$REAL" -I -S -c "\$(cat "\$PRELUDE")
+\$body" \${rest[@]+"\${rest[@]}"} ;;
+  esac
+fi
+exec "\$REAL" \${orig[@]+"\${orig[@]}"}
+SHIM
+  chmod +x "$dir/python3"
+}
+
+# da_py_hang_shim <dir>: install a PATH `python3` that HANGS on the write probe and
+# delegates everything else, so a real bound fires on exactly the call under test.
+#
+# ONE definition replacing two hand-rolled copies, each of which keyed on
+# `[ $# -eq 3 ] && [ $1 = -c ]`. The shipped argv gained two isolation flags this round, so
+# that predicate stopped matching ANYTHING: both shims would have gone SILENTLY INERT and
+# their cases would have reported greens while the gate ran its probe normally. Keyed on the
+# payload marker instead, which cannot go inert that way.
+da_py_hang_shim() {
+  local dir="$1"
+  mkdir -p "$dir"
+  cat > "$dir/python3" <<HANGSHIM
+#!/usr/bin/env bash
+orig=("\$@")
+body=""
+while [ "\$#" -gt 0 ]; do
+  if [ "\$1" = -c ]; then shift; body="\${1-}"; break; fi
+  shift
+done
+case "\$body" in
+  *agent-gate-writeprobe*) sleep 120 ;;
+esac
+exec "$DA_REAL_PY" \${orig[@]+"\${orig[@]}"}
+HANGSHIM
+  chmod +x "$dir/python3"
+}
+
+# ---------------------------------------------------------------------------
 # ENVIRONMENT ISOLATION (roborev job 373, High) — THE ONE NAMED LIST.
 #
 # THE DEFECT. This suite runs inside `tooling-tests`, i.e. as a CHILD of a gate — and since
@@ -314,6 +447,13 @@ marker_count() {
 # run_stub_gate <case> <df-script> [env assignments...] -> backgrounds a stub gate.
 # Sets, for the caller: RS_PID, RS_RUNDIR, RS_SUMMARY, RS_ERR.
 RS_PATH_PREFIX=""
+# RS_GATE names the script under test. It defaults to the SHIPPED gate and is overridden
+# ONLY by Case AF, which needs a scratch copy with the isolation flags stripped as its
+# positive control: a "verdict unchanged" assertion is indistinguishable from a test that
+# never reached the code unless the SAME plant is shown to flip a build that lacks the fix.
+# A dedicated variable, for the reason RS_PATH_PREFIX is one — `env` applies assignments
+# left to right and this function's own come last.
+RS_GATE=""
 run_stub_gate() {
   local case_name="$1" script="$2"; shift 2
   RS_RUNDIR="$tmp/$case_name.run"; mkdir -p "$RS_RUNDIR"
@@ -331,7 +471,7 @@ run_stub_gate() {
     AGENT_GATE_SUMMARY_FILE="$RS_SUMMARY" \
     CQLITE_GATE_STUB_RUNDIR="$RS_RUNDIR" \
     CQLITE_GATE_POLL_SECS=0.3 \
-    bash "$GATE" >"$tmp/$case_name.out" 2>"$RS_ERR" &
+    bash "${RS_GATE:-$GATE}" >"$tmp/$case_name.out" 2>"$RS_ERR" &
   RS_PID=$!
 }
 
@@ -1799,16 +1939,9 @@ fi
 
 # ---- THE OTHER HALF OF THE SPLIT: a failure that establishes NOTHING stays non-fatal.
 # Driven by a REAL bound firing, not a simulated status: a python3 shim that hangs ONLY on
-# the mkdir classifier (3 argv: -c, script, path) and delegates the metadata parse (2 argv),
+# the WRITE PROBE (recognised by its own payload marker) and delegates the metadata parse,
 # so the resolution still succeeds and the hang lands exactly on the call under test.
-mkdir -p "$tmp/r-hangpy"
-_R_REAL_PY=$(command -v python3 2>/dev/null || printf '/nonexistent/python3')
-cat > "$tmp/r-hangpy/python3" <<RPY
-#!/usr/bin/env bash
-if [ "\$#" -eq 3 ] && [ "\$1" = -c ]; then sleep 120; fi
-exec "$_R_REAL_PY" "\$@"
-RPY
-chmod +x "$tmp/r-hangpy/python3"
+da_py_hang_shim "$tmp/r-hangpy"
 r_unm_script=$(df_script r-unm "$HIGH")
 RS_PATH_PREFIX="$tmp/r-hangpy"
 run_stub_gate r-unm "$r_unm_script" \
@@ -1883,16 +2016,7 @@ fi
 # with the mutated gate. Nothing is written into the worktree — a suite that runs inside
 # `tooling-tests` must never mutate the tree its own gate is certifying (#2926).
 t_root="$tmp/t-mutrepo"
-t_repo=$(cd "$SCRIPT_DIR/../.." && pwd)   # SCRIPT_DIR is scripts/tests, so the repo is TWO levels up
-mkdir -p "$t_root/scripts"
-for t_e in "$t_repo"/* "$t_repo"/.[!.]*; do
-  t_b=$(basename "$t_e"); [ "$t_b" = scripts ] && continue
-  ln -s "$t_e" "$t_root/$t_b" 2>/dev/null || true
-done
-for t_e in "$t_repo"/scripts/* "$t_repo"/scripts/.[!.]*; do
-  t_b=$(basename "$t_e"); [ "$t_b" = agent-gate.sh ] && continue
-  ln -s "$t_e" "$t_root/scripts/$t_b" 2>/dev/null || true
-done
+da_farm "$t_root"
 t_mutant="$t_root/scripts/agent-gate.sh"
 sed 's|df -Pk "$path"|df -Pk /|' "$GATE" > "$t_mutant"
 if grep -q 'df -Pk /' "$t_mutant" && ! grep -q 'df -Pk "$path"' "$t_mutant"; then
@@ -2522,14 +2646,15 @@ if [ -s "$aa_cls" ] && grep -q 'CANNOT-WRITE' "$aa_cls"; then
 else
   bad "errno-source: could not extract the classifier — this case would test nothing"
 fi
-mkdir -p "$tmp/aa-pre"
-cat > "$tmp/aa-pre/sitecustomize.py" <<'AASC'
+# PLANTED VIA THE ISOLATED ARGV, not PYTHONPATH (roborev job 416): the shipped probe now
+# runs `python3 -I -S`, so a sitecustomize reaches nothing — see the da_run_probe header.
+cat > "$tmp/aa-prelude.py" <<'AASC'
 import os, errno
 def boom(*a, **k):
     raise OSError(errno.EIO, "simulated I/O error")
 os.makedirs = boom
 AASC
-aa_got=$(PYTHONPATH="$tmp/aa-pre" python3 "$aa_cls" "$tmp/aa-target" 2>/dev/null)
+aa_got=$(da_run_probe "$tmp/aa-prelude.py" "$aa_cls" "$tmp/aa-target")
 # THE POSITIVE CONTROL: the PRE-FIX allowlist, reproduced verbatim, on the SAME errno. It
 # must classify EIO as UNCLASSIFIED — i.e. non-fatal — or this case is not a differential.
 aa_pre=$(python3 - <<'AAPRE' 2>/dev/null
@@ -2555,15 +2680,14 @@ case "$aa_got" in
   *) bad "errno-source: unexpected classification '$aa_got'" ;;
 esac
 # And the same for a forced failure of the OPEN/WRITE half, not just the creation.
-mkdir -p "$tmp/aa-pre2"
-cat > "$tmp/aa-pre2/sitecustomize.py" <<'AASC2'
+cat > "$tmp/aa-prelude2.py" <<'AASC2'
 import os, errno
 _real = os.open
 def boom(*a, **k):
     raise OSError(errno.ESTALE, "simulated stale handle")
 os.open = boom
 AASC2
-aa_got2=$(PYTHONPATH="$tmp/aa-pre2" python3 "$aa_cls" "$tmp/aa-target2" 2>/dev/null)
+aa_got2=$(da_run_probe "$tmp/aa-prelude2.py" "$aa_cls" "$tmp/aa-target2")
 case "$aa_got2" in
   'CANNOT-WRITE ESTALE')
     ok "errno-source: a forced ESTALE from the OPEN half is binding too (both halves of the probe, not just creation)" ;;
@@ -2583,7 +2707,7 @@ else
   bad "errno-source: $aa_files artifact(s) actually present although the payload claimed none"
 fi
 # NOT AN OVER-CORRECTION: a writable directory must still come back OK.
-aa_ok=$(python3 "$aa_cls" "$tmp/aa-good" 2>/dev/null)
+aa_ok=$(da_run_probe "" "$aa_cls" "$tmp/aa-good")
 if [ "$aa_ok" = OK ] && [ -d "$tmp/aa-good" ]; then
   ok "errno-source: a writable target still classifies OK (the rule did not become 'always refuse')"
 else
@@ -2763,8 +2887,7 @@ else
 fi
 
 # (a) A FORCED close() FAILURE IS BINDING, with the pre-fix behaviour shown emitting OK.
-mkdir -p "$tmp/ac-close"
-cat > "$tmp/ac-close/sitecustomize.py" <<'ACSC'
+cat > "$tmp/ac-prelude-close.py" <<'ACSC'
 import os, errno
 _real = os.close
 def boom(fd):
@@ -2772,11 +2895,11 @@ def boom(fd):
     raise OSError(errno.EIO, "simulated deferred write error at close")
 os.close = boom
 ACSC
-ac_got=$(PYTHONPATH="$tmp/ac-close" python3 "$ac_cls" "$tmp/ac-target" 2>/dev/null)
+ac_got=$(da_run_probe "$tmp/ac-prelude-close.py" "$ac_cls" "$tmp/ac-target")
 # THE POSITIVE CONTROL: the PRE-FIX shape, reproduced verbatim — close() inside a `finally`
 # with its error swallowed — on the SAME forced failure. It must print OK, which is the
 # false admission.
-ac_pre=$(PYTHONPATH="$tmp/ac-close" python3 - "$tmp/ac-pre-target" <<'ACPRE' 2>/dev/null
+cat > "$tmp/ac-prefix-body.py" <<'ACPRE'
 import os, sys
 p = sys.argv[1]
 os.makedirs(p, exist_ok=True)
@@ -2796,7 +2919,7 @@ finally:
     except Exception: pass
 sys.stdout.write("OK")
 ACPRE
-)
+ac_pre=$(da_run_probe "$tmp/ac-prelude-close.py" "$tmp/ac-prefix-body.py" "$tmp/ac-pre-target")
 if [ "$ac_pre" = OK ]; then
   ok "one-boundary CONTROL: the PRE-FIX shape prints OK on a forced close() failure — a write that never landed, admitted"
 else
@@ -2812,14 +2935,13 @@ esac
 # (b) A FORCED unlink() FAILURE STILL ADMITS, AND NAMES THE ARTIFACT. Deliberate: everything
 #     before it succeeded, so the filesystem IS writable, which is the only question the
 #     probe answers. Refusing would red correct input; the leftover is DECLARED instead.
-mkdir -p "$tmp/ac-unlink"
-cat > "$tmp/ac-unlink/sitecustomize.py" <<'ACSU'
+cat > "$tmp/ac-prelude-unlink.py" <<'ACSU'
 import os, errno
 def boom(*a, **k):
     raise OSError(errno.EPERM, "simulated immutable directory")
 os.unlink = boom
 ACSU
-ac_ul=$(PYTHONPATH="$tmp/ac-unlink" python3 "$ac_cls" "$tmp/ac-ul-target" 2>/dev/null)
+ac_ul=$(da_run_probe "$tmp/ac-prelude-unlink.py" "$ac_cls" "$tmp/ac-ul-target")
 case "$ac_ul" in
   'OK LEFTOVER '*'.agent-gate-writeprobe')
     ok "one-boundary: a failed unlink AFTER a successful write still answers OK and reports the artifact path" ;;
@@ -2830,9 +2952,14 @@ esac
 # END TO END: the run admits and the emitted line NAMES the leftover, so it cannot be
 # absorbed into the certification baseline unseen.
 ac_script=$(df_script ac "$HIGH")
+da_py_shim "$tmp/ac-bin" "$tmp/ac-prelude-unlink.py"
+RS_PATH_PREFIX="$tmp/ac-bin"
 run_stub_gate ac "$ac_script" \
-  PYTHONPATH="$tmp/ac-unlink" CARGO_TARGET_DIR="$tmp/ac-e2e-target" \
+  CARGO_TARGET_DIR="$tmp/ac-e2e-target" \
   CQLITE_GATE_SLOTS_DIR="$tmp/ac-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+# RESET IMMEDIATELY. A leaked prefix silently applies this plant to every LATER case, which
+# is the same "silently active / silently inert" failure the argv-count shims had.
+RS_PATH_PREFIX=""
 ac_err=$RS_ERR
 watch_until_exit "$RS_PID" "$RS_RUNDIR" 180; ac_status=$WX_STATUS; ac_markers=$WX_MARKERS
 assert_no_timeout "ac unlink end-to-end"
@@ -2872,8 +2999,7 @@ else
 fi
 
 # --- 1  A REFUSAL MUST NOT LITTER, AND MUST STILL REFUSE ---------------------------
-mkdir -p "$tmp/ad-close"
-cat > "$tmp/ad-close/sitecustomize.py" <<'ADSC'
+cat > "$tmp/ad-prelude-close.py" <<'ADSC'
 import os, errno
 _real = os.close
 def boom(fd):
@@ -2882,7 +3008,7 @@ def boom(fd):
 os.close = boom
 ADSC
 ad_t1="$tmp/ad-t1"
-ad_v1=$(PYTHONPATH="$tmp/ad-close" python3 "$ad_cls" "$ad_t1" 2>/dev/null)
+ad_v1=$(da_run_probe "$tmp/ad-prelude-close.py" "$ad_cls" "$ad_t1")
 ad_stray1=$(ls -A "$ad_t1" 2>/dev/null | grep -c 'agent-gate-writeprobe' || true)
 ad_stray1="${ad_stray1%%$'\n'*}"; case "$ad_stray1" in ''|*[!0-9]*) ad_stray1=0 ;; esac
 if [ "$ad_v1" = "CANNOT-WRITE EIO" ]; then
@@ -2898,7 +3024,7 @@ fi
 # THE POSITIVE CONTROL: the PRE-FIX shape, reproduced verbatim — exit straight from the
 # error handler with no cleanup — on the SAME forced failure. It must LITTER.
 ad_t1p="$tmp/ad-t1-prefix"
-PYTHONPATH="$tmp/ad-close" python3 - "$ad_t1p" >/dev/null 2>&1 <<'ADPRE'
+cat > "$tmp/ad-prefix-body.py" <<'ADPRE'
 import errno, os, sys
 p = sys.argv[1]
 def fail(e):
@@ -2914,6 +3040,7 @@ try:
 except OSError as e:
     fail(e)
 ADPRE
+da_run_probe "$tmp/ad-prelude-close.py" "$tmp/ad-prefix-body.py" "$ad_t1p" >/dev/null 2>&1
 ad_strayp=$(ls -A "$ad_t1p" 2>/dev/null | grep -c 'agent-gate-writeprobe' || true)
 ad_strayp="${ad_strayp%%$'\n'*}"; case "$ad_strayp" in ''|*[!0-9]*) ad_strayp=0 ;; esac
 if [ "$ad_strayp" -ge 1 ]; then
@@ -2922,8 +3049,7 @@ else
   bad "refusal-cleanup CONTROL: the pre-fix shape littered nothing; this case does not demonstrate the defect"
 fi
 # ...and when cleanup ITSELF fails, the verdict is still the refusal, with the stray named.
-mkdir -p "$tmp/ad-both"
-cat > "$tmp/ad-both/sitecustomize.py" <<'ADSB'
+cat > "$tmp/ad-prelude-both.py" <<'ADSB'
 import os, errno
 _real = os.close
 def bc(fd):
@@ -2934,7 +3060,7 @@ def bu(*a, **k):
 os.close = bc
 os.unlink = bu
 ADSB
-ad_v2=$(PYTHONPATH="$tmp/ad-both" python3 "$ad_cls" "$tmp/ad-t2" 2>/dev/null)
+ad_v2=$(da_run_probe "$tmp/ad-prelude-both.py" "$ad_cls" "$tmp/ad-t2")
 case "$ad_v2" in
   'CANNOT-WRITE EIO LEFTOVER '*'.agent-gate-writeprobe')
     ok "refusal-cleanup: cleanup failing too keeps the REFUSAL and names the stray, as a SUFFIX to a complete verdict (symmetrical with OK LEFTOVER)" ;;
@@ -2961,14 +3087,7 @@ esac
 # SHIPPED, end to end: a post-resolution measurement failure (the mkdir classifier bound
 # fires) must still name the RESOLVED directory. Driven with a python3 shim that hangs only
 # on the 3-argv classifier call, so the cargo resolution itself still succeeds.
-mkdir -p "$tmp/ad-hangpy"
-_AD_REAL_PY=$(command -v python3 2>/dev/null || printf '/nonexistent/python3')
-cat > "$tmp/ad-hangpy/python3" <<ADPH
-#!/usr/bin/env bash
-if [ "\$#" -eq 3 ] && [ "\$1" = -c ]; then sleep 120; fi
-exec "$_AD_REAL_PY" "\$@"
-ADPH
-chmod +x "$tmp/ad-hangpy/python3"
+da_py_hang_shim "$tmp/ad-hangpy"
 ad_tgt="$tmp/ad-resolved-target"
 RS_PATH_PREFIX="$tmp/ad-hangpy"
 run_stub_gate ad "$(df_script ad "$HIGH")" \
@@ -3011,16 +3130,18 @@ else
 fi
 
 # --- 3  LEFTOVERS ACCUMULATE ACROSS BOTH EVALUATIONS -------------------------------
-mkdir -p "$tmp/ad-unlink"
-cat > "$tmp/ad-unlink/sitecustomize.py" <<'ADSU'
+cat > "$tmp/ad-prelude-unlink.py" <<'ADSU'
 import os, errno
 def boom(*a, **k):
     raise OSError(errno.EPERM, "simulated immutable directory")
 os.unlink = boom
 ADSU
+da_py_shim "$tmp/ad-two-bin" "$tmp/ad-prelude-unlink.py"
+RS_PATH_PREFIX="$tmp/ad-two-bin"
 run_stub_gate ad-two "$(df_script ad-two "$HIGH")" \
-  PYTHONPATH="$tmp/ad-unlink" CARGO_TARGET_DIR="$tmp/ad-two-target" \
+  CARGO_TARGET_DIR="$tmp/ad-two-target" \
   CQLITE_GATE_SLOTS_DIR="$tmp/ad-two-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+RS_PATH_PREFIX=""
 ad2_err=$RS_ERR
 watch_until_exit "$RS_PID" "$RS_RUNDIR" 180; ad2_status=$WX_STATUS
 assert_no_timeout "ad-two accumulation"
@@ -3079,49 +3200,6 @@ fi
 # beside it: without the explicit flush there is nothing to honour.
 # ===========================================================================
 
-# ---------------------------------------------------------------------------
-# da_py_shim <dir> <prelude-file>: install a PATH `python3` that runs the gate's
-# WRITE PROBE under a hostile prelude and passes every other python3 call through.
-#
-# WHY NOT `PYTHONPATH` + `sitecustomize.py`, which cases AA/AC/AD used: the shipped
-# probes now run `python3 -I -S`, so that technique reaches nothing — and that is the
-# POINT of the isolation fix, not an obstacle to testing it. This replacement
-# CONSTRUCTS the hostile interpreter itself, so the full ability to force any errno is
-# retained while the shipped argv stays free to be isolated (which Case AF then
-# asserts as a differential). Strictly better coverage, not a workaround.
-#
-# The probe is recognised by its own artifact marker, NEVER by an argument count: the
-# shipped argv gained two flags this round, and a count-keyed shim goes silently inert
-# — reporting a green that measured nothing.
-# ---------------------------------------------------------------------------
-DA_REAL_PY=$(command -v python3 2>/dev/null || printf '/nonexistent/python3')
-da_py_shim() {
-  local dir="$1" prelude="$2"
-  mkdir -p "$dir"
-  cat > "$dir/python3" <<SHIM
-#!/usr/bin/env bash
-REAL='$DA_REAL_PY'
-PRELUDE='$prelude'
-orig=("\$@")
-body=""; seen=0
-declare -a rest=()
-while [ "\$#" -gt 0 ]; do
-  if [ "\$1" = -c ]; then
-    shift; body="\${1-}"; shift; rest=("\$@"); seen=1; break
-  fi
-  shift
-done
-if [ "\$seen" -eq 1 ]; then
-  case "\$body" in
-    *agent-gate-writeprobe*)
-      exec "\$REAL" -I -S -c "\$(cat "\$PRELUDE")
-\$body" \${rest[@]+"\${rest[@]}"} ;;
-  esac
-fi
-exec "\$REAL" \${orig[@]+"\${orig[@]}"}
-SHIM
-  chmod +x "$dir/python3"
-}
 
 # The shipped write-probe body, extracted between its two anchors.
 ae_cls="$tmp/ae-classifier.py"
@@ -3155,6 +3233,17 @@ AEPO
 
 # (a) HALF ONE, DIRECTLY: with the cleanup hung, does the DEFINITIVE VERDICT reach the
 #     caller at all? Run under a real external bound, exactly as the gate does.
+# A HOST WITHOUT `timeout` CANNOT RUN THIS PAIR, AND THAT IS REPORTED, NEVER PASSED. The
+# subject is what survives a KILL, so the case needs a real external bound; a green derived
+# from a control that could not run is the shape this file's own `skip()` exists to forbid.
+# (The end-to-end halves (b) and (c) below need no such tool — they use the gate's own
+# bounded runner, which has a pure-bash arm.)
+DA_HAVE_TIMEOUT=0
+command -v timeout >/dev/null 2>&1 && DA_HAVE_TIMEOUT=1
+if [ "$DA_HAVE_TIMEOUT" -eq 0 ]; then
+  skip "verdict-first: no timeout(1) on this host — the flushed-vs-unflushed differential and its pre-fix control cannot be driven"
+  ae_rc=0; ae_got="SKIPPED"; ae_prerc=0; ae_pre="SKIPPED"
+else
 # Run DIRECTLY, capturing into a file rather than through `$( )`: a substitution runs in
 # a SUBSHELL, so an rc recorded into a variable there is discarded — the same trap this
 # file records for `watch_until_exit`, and it cost a round here too.
@@ -3202,6 +3291,7 @@ if [ -z "$ae_pre" ] && { [ "$ae_prerc" -eq 124 ] || [ "$ae_prerc" -eq 137 ]; }; 
   ok "verdict-first CONTROL: the PRE-FIX ordering yields rc=$ae_prerc and an EMPTY payload on the same hang — the defect was reachable"
 else
   bad "verdict-first CONTROL: the pre-fix ordering gave rc=$ae_prerc payload '$ae_pre'; this case does not demonstrate the defect"
+fi
 fi
 
 # (b) HALF TWO, END TO END: the recovered refusal is HONOURED. A REAL gate run whose
@@ -3254,6 +3344,171 @@ if [ "$ae2_status" -eq 0 ] && [ "$ae2_markers" -ge 1 ]; then
   ok "verdict-first: ...and UNMEASURED stays NON-FATAL, so the discard does not red a run whose filesystem was never shown to be bad"
 else
   bad "verdict-first: the discard turned into a refusal (exit $ae2_status, markers $ae2_markers) — UNMEASURED must stay non-fatal"
+fi
+
+# ===========================================================================
+# Case AF (roborev job 416, F2): BOTH python probes run ISOLATED, so environment
+# state cannot monkeypatch the os operations the verdict is computed from.
+#
+# THE DEFECT. Neither probe passed any isolation flag, so both inherited PYTHONPATH
+# and auto-loaded `sitecustomize`. THIS SUITE WAS THE PROOF OF EXPLOITABILITY — it is
+# exactly how cases AA/AC/AD planted their EIO/ESTALE/close failures. IN MODEL because
+# PYTHONPATH can be set SYSTEM-WIDE in `/etc/environment`, which the fleet bootstrap
+# writes, so the setter need not be the invoker: a non-invoker route is a defect
+# (CLAUDE.md's triage rule), not an invoker-class hazard to be recorded and left.
+#
+# WHICH FLAG BUYS WHICH PROPERTY — MEASURED on this host (python 3.12.3), because
+# NEITHER ALONE IS SUFFICIENT and a comment asserting that without measuring it is a
+# guess:
+#
+#   `-S`  stops `site` running, which is what imports `sitecustomize`. With `-I` ALONE,
+#         `site` still runs and the SYSTEM site dirs stay on sys.path (measured:
+#         `site imported: True`, with /usr/local/lib/python3.12/dist-packages and
+#         /usr/lib/python3/dist-packages present), so a `sitecustomize.py` dropped into
+#         a system dir still executes and can patch `os` outright.
+#   `-I`  drops PYTHONPATH (via the `-E` it implies) and the user site dir (via `-s`).
+#         With `-S` ALONE, PYTHONPATH IS STILL ON sys.path (measured: True), so a
+#         planted `json.py` SHADOWS the stdlib — measured end to end, the metadata parse
+#         returned an attacker-supplied `target_directory`. (`os` is a FROZEN module in
+#         3.12 and cannot be shadowed that way; `json`, which the first probe imports,
+#         is ordinary python and can.)
+#
+# The two flags close two different routes and the PAIR is the fix. Both bodies need
+# only stdlib (os, errno, sys, json), verified importable under `-I -S`.
+# ===========================================================================
+
+# ---- (a) STRUCTURAL: every python3 this path dispatches is isolated ---------------
+# Counted from the SHIPPED source, so a THIRD probe added later without the flags is
+# caught by the census rather than by someone noticing.
+af_py_calls=$(grep -cE '_component_set_bounded "\$_GATE_[A-Z_]+_BOUND_SECS" python3 ' "$GATE" 2>/dev/null)
+af_py_calls="${af_py_calls%%$'\n'*}"; case "$af_py_calls" in ''|*[!0-9]*) af_py_calls=0 ;; esac
+af_py_iso=$(grep -cE '_component_set_bounded "\$_GATE_[A-Z_]+_BOUND_SECS" python3 -I -S -c ' "$GATE" 2>/dev/null)
+af_py_iso="${af_py_iso%%$'\n'*}"; case "$af_py_iso" in ''|*[!0-9]*) af_py_iso=0 ;; esac
+if [ "$af_py_calls" -eq 2 ]; then
+  ok "isolation: the disk-admission path dispatches exactly 2 bounded python3 probes (the metadata parse and the write probe)"
+else
+  bad "isolation: found $af_py_calls bounded python3 probes, expected 2 — one may have arrived unisolated, or this census no longer sees them"
+fi
+if [ "$af_py_iso" -gt 0 ] && [ "$af_py_iso" -eq "$af_py_calls" ]; then
+  ok "isolation: ALL $af_py_iso of them run 'python3 -I -S' (each flag closes a different route; see the header)"
+else
+  bad "isolation: only $af_py_iso of $af_py_calls bounded python3 probes are isolated — an inherited PYTHONPATH or a sitecustomize can monkeypatch the os operations the verdict is computed from"
+fi
+
+# ---- THE POSITIVE CONTROL VEHICLE ------------------------------------------------
+# Without it the behavioural assertions below mean NOTHING: a bare "the verdict is
+# unchanged" is indistinguishable from a test that never reached the code. So the SAME
+# plant is applied to a SCRATCH COPY of the gate with the isolation flags STRIPPED, and
+# that copy MUST FLIP.
+# A SYMLINK FARM (see da_farm for why a lone copy of the script cannot serve as a
+# control here), substituting ONLY the stripped `agent-gate.sh` — so the scratch gate
+# differs from the shipped one in EXACTLY the property under test.
+af_repo="$tmp/af-unisolated-repo"
+af_stripped="$af_repo/scripts/agent-gate.sh"
+da_farm "$af_repo"
+sed 's/python3 -I -S -c /python3 -c /g' "$GATE" > "$af_stripped"
+af_strip_n=$(grep -cE 'python3 -I -S -c ' "$af_stripped" 2>/dev/null)
+af_strip_n="${af_strip_n%%$'\n'*}"; case "$af_strip_n" in ''|*[!0-9]*) af_strip_n=0 ;; esac
+if [ -s "$af_stripped" ] && [ "$af_strip_n" -eq 0 ] && bash -n "$af_stripped" 2>/dev/null \
+   && [ -f "$af_repo/scripts/lib/gate_slot_daemon.py" ] && [ -e "$af_repo/Cargo.lock" ]; then
+  ok "isolation CONTROL: built a scratch REPO whose gate has the isolation flags stripped (0 flagged sites left), with a live slot daemon and workspace"
+else
+  bad "isolation CONTROL: could not build the unisolated scratch repo ($af_strip_n flagged sites left) — the differentials below would prove nothing"
+fi
+
+# ---- (b) THE WRITE PROBE: a plant that WOULD refuse the run ----------------------
+mkdir -p "$tmp/af-plant-write"
+cat > "$tmp/af-plant-write/sitecustomize.py" <<'AFPW'
+import os, errno
+def boom(*a, **k):
+    raise OSError(errno.EIO, "planted: the write probe cannot create the target dir")
+os.makedirs = boom
+AFPW
+# CONTROL FIRST — the unisolated copy must HONOUR the plant and refuse.
+RS_GATE="$af_stripped"
+run_stub_gate af-w-ctl "$(df_script af-w-ctl "$HIGH")" \
+  PYTHONPATH="$tmp/af-plant-write" CARGO_TARGET_DIR="$tmp/af-w-ctl-target" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/af-w-ctl-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+RS_GATE=""
+af_wc_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 300; af_wc_status=$WX_STATUS; af_wc_markers=$WX_MARKERS
+assert_no_timeout "af write-probe control (unisolated)"
+af_wc_line=$(grep_line "$af_wc_err" '^agent-gate: disk-admission: ')
+case "$af_wc_line" in
+  *'UNWRITABLE-FAIL-CLOSED (#3755)'*)
+    ok "isolation CONTROL: the UNISOLATED gate HONOURS a planted sitecustomize and refuses (exit $af_wc_status) — the plant really does flip the verdict" ;;
+  *) bad "isolation CONTROL: the unisolated gate did not flip on the plant (exit $af_wc_status): ${af_wc_line:-<none>} — the shipped-gate assertion below proves nothing" ;;
+esac
+
+# THE SHIPPED GATE, SAME PLANT, MUST BE UNAFFECTED.
+run_stub_gate af-w "$(df_script af-w "$HIGH")" \
+  PYTHONPATH="$tmp/af-plant-write" CARGO_TARGET_DIR="$tmp/af-w-target" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/af-w-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+af_w_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 300; af_w_status=$WX_STATUS; af_w_markers=$WX_MARKERS
+assert_no_timeout "af write-probe (shipped)"
+af_w_line=$(grep_line "$af_w_err" '^agent-gate: disk-admission: ')
+case "$af_w_line" in
+  *'disk-admission: PASS'*)
+    ok "isolation: the SHIPPED gate IGNORES the same plant and admits normally — the write probe is isolated" ;;
+  *) bad "isolation: the shipped gate was steered by an inherited PYTHONPATH (exit $af_w_status): ${af_w_line:-<none>}" ;;
+esac
+if [ "$af_w_status" -eq 0 ] && [ "$af_w_markers" -ge 1 ]; then
+  ok "isolation: ...and it reached its work phase, so the plant changed nothing at all"
+else
+  bad "isolation: the shipped gate did not complete under the plant (exit $af_w_status, markers $af_w_markers)"
+fi
+
+# ---- (c) THE METADATA PROBE: a plant that WOULD redirect the measured filesystem --
+# This is the route `-S` alone does NOT close, so it is asserted separately rather than
+# assumed to follow from (b): a hostile `json.py` on PYTHONPATH shadows the stdlib and
+# hands the gate an attacker-chosen `target_directory` — which the gate then MEASURES,
+# PINS as CARGO_TARGET_DIR, and builds into.
+mkdir -p "$tmp/af-plant-json"
+af_fake_td="$tmp/af-planted-target-dir"
+cat > "$tmp/af-plant-json/json.py" <<AFPJ
+def load(f):
+    return {"target_directory": "$af_fake_td"}
+def loads(s):
+    return {"target_directory": "$af_fake_td"}
+AFPJ
+# CONTROL FIRST — the unisolated copy must MEASURE THE PLANTED DIRECTORY.
+RS_GATE="$af_stripped"
+run_stub_gate af-j-ctl "$(df_script af-j-ctl "$HIGH")" \
+  PYTHONPATH="$tmp/af-plant-json" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/af-j-ctl-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+RS_GATE=""
+af_jc_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 300; af_jc_status=$WX_STATUS
+assert_no_timeout "af metadata-probe control (unisolated)"
+af_jc_line=$(grep_line "$af_jc_err" '^agent-gate: disk-admission: ')
+case "$af_jc_line" in
+  *"target-dir $af_fake_td "*)
+    ok "isolation CONTROL: the UNISOLATED gate measured the PLANTED target dir — a shadowed stdlib json really does redirect the subject filesystem" ;;
+  *) bad "isolation CONTROL: the unisolated gate was not redirected by the shadowed json: ${af_jc_line:-<none>} — the shipped assertion below proves nothing" ;;
+esac
+
+# THE SHIPPED GATE, SAME PLANT, MUST RESOLVE THE REAL DIRECTORY.
+run_stub_gate af-j "$(df_script af-j "$HIGH")" \
+  PYTHONPATH="$tmp/af-plant-json" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/af-j-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+af_j_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 300; af_j_status=$WX_STATUS; af_j_markers=$WX_MARKERS
+assert_no_timeout "af metadata-probe (shipped)"
+af_j_line=$(grep_line "$af_j_err" '^agent-gate: disk-admission: ')
+case "$af_j_line" in
+  *"target-dir $af_fake_td "*)
+    bad "isolation: the SHIPPED gate measured the PLANTED target dir — the metadata probe is steered by an inherited PYTHONPATH: $af_j_line" ;;
+  *'target-dir UNRESOLVED'*)
+    bad "isolation: the shipped gate could not resolve a target dir at all under the plant — the fix must not break the probe: $af_j_line" ;;
+  *'target-dir /'*)
+    ok "isolation: the SHIPPED gate ignores the shadowed stdlib json and resolves the REAL target dir — the metadata probe is isolated too" ;;
+  *) bad "isolation: unexpected rendering from the shipped metadata probe: ${af_j_line:-<none>}" ;;
+esac
+if [ "$af_j_status" -eq 0 ] && [ "$af_j_markers" -ge 1 ]; then
+  ok "isolation: ...and that run completed normally, so isolating the metadata probe costs a correct run nothing"
+else
+  bad "isolation: the shipped gate did not complete with the json plant present (exit $af_j_status, markers $af_j_markers)"
 fi
 
 printf '\n%s\n' "-----------------------------------------------"

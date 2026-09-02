@@ -19640,7 +19640,33 @@ _gate_resolve_target_dir() {
   # Parsed as JSON, never with a regex: a path may contain any byte and cargo escapes it.
   # Bounded for the same reason the probe is. A newline in the value is REFUSED rather
   # than rendered, because it would split the one-fact-per-line SUMMARY contract.
-  path=$(_component_set_bounded "$_GATE_TARGET_DIR_BOUND_SECS" python3 -c '
+  # `-I -S`: BOTH FLAGS, AND NEITHER ALONE IS SUFFICIENT (roborev job 416).
+  #
+  # THE DEFECT. This probe inherited PYTHONPATH and auto-loaded `sitecustomize`, so
+  # environment state could monkeypatch what it computes. IN MODEL, and this is why it is a
+  # defect rather than an invoker-class hazard: PYTHONPATH can be set SYSTEM-WIDE in
+  # `/etc/environment`, which the fleet bootstrap writes — so the setter need not be the
+  # invoker, and a non-invoker route is a defect. The consequence here is the worst
+  # available: a shadowed stdlib `json` hands this call an ATTACKER-CHOSEN
+  # `target_directory`, which the gate then MEASURES and PINS as CARGO_TARGET_DIR, so the
+  # admission and the build both move to a filesystem nobody chose. MEASURED end to end
+  # against a planted `json.py`: the block reported `PASS` naming the planted directory.
+  #
+  # WHICH FLAG BUYS WHICH PROPERTY, measured on python 3.12.3:
+  #   `-S` stops `site` running, which is what imports `sitecustomize`. With `-I` ALONE
+  #        `site` still runs and the SYSTEM site dirs stay on sys.path (measured: `site
+  #        imported: True`, /usr/local/lib/python3.12/dist-packages and
+  #        /usr/lib/python3/dist-packages present), so a `sitecustomize.py` in a system dir
+  #        still executes.
+  #   `-I` drops PYTHONPATH (via the `-E` it implies) and the user site dir (via `-s`). With
+  #        `-S` ALONE, PYTHONPATH IS STILL ON sys.path (measured: True), so a planted
+  #        `json.py` shadows the stdlib — which is exactly this call site.
+  # `os` happens to be a FROZEN module in 3.12 and is not shadowable that way, but `json` is
+  # ordinary python and `sitecustomize` can patch anything; the pair closes both routes.
+  #
+  # Costs a correct run nothing: this body needs only `json` and `sys`, verified importable
+  # under `-I -S`.
+  path=$(_component_set_bounded "$_GATE_TARGET_DIR_BOUND_SECS" python3 -I -S -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -19745,7 +19771,15 @@ _gate_disk_admission_subject() {
   # parsing `mkdir`'s message would be a locale-dependent string oracle. python3 is already
   # required on this path (it parses the cargo metadata payload), so this adds no
   # dependency; its absence is rc 127 and lands in the honest "cannot tell" branch.
-  out=$(_component_set_bounded "$_GATE_DF_BOUND_SECS" python3 -c '
+  # `-I -S` FOR THE SAME REASON AS THE METADATA PROBE ABOVE, where the two flags are argued
+  # in full (roborev job 416). Here the exposure was the sharper of the two: this body IS the
+  # write measurement, so a `sitecustomize` patching `os.makedirs`/`os.open`/`os.close`
+  # dictates the verdict outright. THIS REPOSITORY OWN TEST SUITE WAS THE PROOF OF
+  # EXPLOITABILITY — that is how it plants EIO/ESTALE/close failures — and it now plants them
+  # by constructing the hostile interpreter itself instead, which is strictly better coverage:
+  # it proves the SHIPPED argv is isolated while keeping the ability to force any errno.
+  # Needs only `errno`, `os` and `sys`, verified importable under `-I -S`.
+  out=$(_component_set_bounded "$_GATE_DF_BOUND_SECS" python3 -I -S -c '
 import errno, os, sys
 p = sys.argv[1]
 # ONE ERROR BOUNDARY AROUND THE WHOLE PROBE (roborev job 395). This is the THIRD round in
