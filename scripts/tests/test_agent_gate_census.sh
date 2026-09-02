@@ -1699,11 +1699,30 @@ v_probe file-size   'AGENT-GATE-CENSUS: NO-SUBJECT the diff changed no .rs file,
 v_probe pub-surface 'AGENT-GATE-CENSUS: 14 unconditional crate-root pub mod declaration(s) verified against their module prologues\n' 'COUNT 14 unconditional crate-root pub mod' PASS
 v_probe pub-surface 'AGENT-GATE-CENSUS: 0 unconditional crate-root pub mod declaration(s) verified against their module prologues\n' 'ZERO unconditional crate-root pub mod' VACUOUS
 v_probe pub-surface 'the guard printed prose but no contract line\n' 'NOT-MEASURED pub-surface printed no' PASS
+# THE THIRD CONTRACT FORM (roborev job 389): "there WAS a subject and it could not be read".
+# It must NOT borrow NO-SUBJECT's affirmative silence — that is the same "could not tell" ->
+# permissive collapse this census exists to remove — and it must not read as verified either.
+v_probe file-size   'AGENT-GATE-CENSUS: NOT-MEASURED 1 of 2 changed .rs file(s) could not be line-counted (unreadable, or absent from the worktree), so the measured total is incomplete\n' 'NOT-MEASURED 1 of 2 changed .rs file(s)' PASS
 if [ "${#v_bad[@]}" -eq 0 ]; then
-  ok "V1: the emitted kind reads a guard's own AGENT-GATE-CENSUS line — a count affirms, a PRESENT zero is VACUOUS, an absent line is NOT-MEASURED, and NO-SUBJECT preserves PASS (which is what stops file-size reddening every docs-only diff)"
+  ok "V1: the emitted kind reads a guard's own AGENT-GATE-CENSUS line across all FOUR states — a count affirms, a PRESENT zero is VACUOUS, an absent line is NOT-MEASURED, NO-SUBJECT preserves PASS (what stops file-size reddening every docs-only diff), and an explicit NOT-MEASURED stays distinct from NO-SUBJECT (job 389)"
 else
   bad "V1: ${v_bad[*]}"
 fi
+# NO-SUBJECT and NOT-MEASURED must render DIFFERENTLY. Both preserve PASS, so a collapse
+# between them would be invisible to a status-only assert — and the whole point is that a
+# reader can tell "nothing to measure" from "something I could not measure".
+rm -f "$(_census_sidecar file-size)"
+printf 'AGENT-GATE-CENSUS: NO-SUBJECT the diff changed no .rs file, so the ratchet had nothing to measure\n' > "$LOG_DIR/file-size.log"
+v_ns=$(_census_measure file-size PASS)
+rm -f "$(_census_sidecar file-size)"
+printf 'AGENT-GATE-CENSUS: NOT-MEASURED 1 of 2 changed .rs file(s) could not be line-counted\n' > "$LOG_DIR/file-size.log"
+v_nm=$(_census_measure file-size PASS)
+if [ "${v_ns%% *}" = NOT-APPLICABLE ] && [ "${v_nm%% *}" = NOT-MEASURED ] && [ "$v_ns" != "$v_nm" ]; then
+  ok "V1b: the two PASS-preserving states render DISTINCTLY — NO-SUBJECT as NOT-APPLICABLE ('nothing to measure') and an unreadable subject as NOT-MEASURED ('something I could not measure'); a status-only assert could not tell them apart"
+else
+  bad "V1b: NO-SUBJECT gave '$v_ns' and NOT-MEASURED gave '$v_nm' — the two states are not distinguishable"
+fi
+
 # BOTH GUARDS REALLY PRINT IT. Structural on the shipped source, because a contract the
 # component does not honour would render NOT-MEASURED on every run and look like a gap.
 v_struct=()
@@ -1717,8 +1736,16 @@ grep -qE '^[^#]*AGENT-GATE-CENSUS: \$n_scanned changed \.rs file' "$GATE" \
 grep -qE '^[^#]*AGENT-GATE-CENSUS: NO-SUBJECT' "$GATE" \
   || v_struct+=("run_file_size-has-no-NO-SUBJECT-arm")
 # …and the count must come from the files MEASURED, not from a re-derivation here.
-grep -q 'n_scanned=$((n_scanned + 1))' <<<"$(sed -n '/^run_file_size() {/,/^}$/p' "$GATE")" \
-  || v_struct+=("file-size-count-not-derived-from-the-scanned-set")
+v_fs=$(sed -n '/^run_file_size() {/,/^}$/p' "$GATE" | grep -vE '^[[:space:]]*#')
+grep -q 'n_scanned=$((n_scanned + 1))' <<<"$v_fs" \
+  || v_struct+=("file-size-count-not-incremented-anywhere")
+# …and it must be incremented ONLY after a validated measurement, never beside an existence
+# test (roborev job 389: `[ -f ]` answers "does this path exist", the census claims "I counted
+# this file"). A `-f` test on the same line as the increment is that defect returning.
+grep -E 'n_scanned=\$\(\(n_scanned \+ 1\)\)' <<<"$v_fs" | grep -q '\-f ' \
+  && v_struct+=("file-size-count-incremented-beside-an-existence-predicate")
+grep -q 'n_uncounted=$((n_uncounted + 1))' <<<"$v_fs" \
+  || v_struct+=("file-size-does-not-count-selected-but-uncountable-files")
 if [ "${#v_struct[@]}" -eq 0 ]; then
   ok "V2: both shipped guards print the contract line, and file-size's count is derived from the file set it walked (with a NO-SUBJECT arm for the empty one)"
 else
@@ -1745,7 +1772,7 @@ echo "component census guard: $PASS passed, $FAIL failed"
 # extraction that broke, a subshell dying quietly — shrinks the subject set WITHOUT
 # aborting, and "failed: 0" over a shrunken set is the vacuous pass this whole file is
 # about. Set just below the full-host figure so it reds on a structural loss.
-CENSUS_CASE_FLOOR=93
+CENSUS_CASE_FLOOR=95
 CENSUS_REACHED_END=1
 if [ $((PASS + FAIL)) -lt "$CENSUS_CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): sections are being skipped or dying silently, and a "0 failed" over a shrunken subject set certifies nothing.\n' \
