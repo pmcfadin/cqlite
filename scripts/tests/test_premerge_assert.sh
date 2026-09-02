@@ -1197,12 +1197,12 @@ if run_anc 0 "anchored delta pair (full PASS at X + delta at Y) -> exit 0" \
   # names both halves, and this arm pins BOTH — a reworded token that quietly
   # dropped the unbounded half would restore the overclaim.
   case "$OUT" in
-    *"anchor-reads: bounded-"*"external:git,mktemp"*)
+    *"anchor-reads: bounded-"*"external:git,mktemp,sh,rm"*)
       ok "delta pair: the token names WHAT is bounded (the external commands)" ;;
     *) bad "delta pair: the anchor-reads token must name the bounded externals (got: $OUT)" ;;
   esac
   case "$OUT" in
-    *"UNBOUNDED:cd/test-builtins"*)
+    *"UNBOUNDED:command-v+pwd-builtins"*)
       ok "delta pair: the token also names what is NOT bounded — no overclaim" ;;
     *) bad "delta pair: the anchor-reads token must declare the UNBOUNDED builtin probes (got: $OUT)" ;;
   esac

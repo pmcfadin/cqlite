@@ -542,6 +542,88 @@ refuse_anchor_unverifiable() {
   exit 3
 }
 
+# ===========================================================================
+# ANCHOR-PATH OPERATION AUDIT (roborev job 384) — A DECLARED ARTIFACT
+# ===========================================================================
+# WHY THIS EXISTS. Seven shipped-script findings on #3653 — graft, environment,
+# commit-graph, no-runner, discovery status, filesystem probes, and cleanup twice
+# — were all the SAME TWO QUESTIONS asked of a different operation: IS IT BOUNDED,
+# and IS ITS TARGET VALIDATED. Letting a reviewer enumerate those one per round
+# does not converge. So every operation in the anchor path is listed here with
+# both answers, and an operation that is deliberately unbounded or unvalidated
+# SAYS SO WITH ITS REASON.
+#
+# THIS IS A MAINTENANCE OBLIGATION, in the idiom of
+# scripts/tests/workspace-test-disposition.txt: a NEW operation added to this path
+# must join the table, and an omission is then visible in review rather than
+# discovered by a reviewer round. The table records COMPLETENESS AND LABELLING,
+# not truth — nothing mechanically enforces it, exactly as #1716 ruled for the
+# tools/ disposition list.
+#
+# LEGEND  bound:  RUNNER = through _anchor_bounded (timeout + --kill-after)
+#                 SELF   = bounded by its own construction
+#                 NONE   = unbounded, with the reason stated
+#         target: what the operation's inputs/targets are checked against
+#
+# ---------------------------------------------------------------------------
+# OPERATION                                    | BOUND   | TARGET / INPUT VALIDATION
+# ---------------------------------------------------------------------------
+# resolve_advisory_timeout: command -v          | NONE    | closed hard-coded candidate
+#   (PATH lookup for timeout/gtimeout)          |  (a)    | set {timeout,gtimeout}
+# resolve_advisory_timeout: <cand> --kill-after | SELF    | capability PROBED, not assumed;
+#   =1 1 true  (the capability probe)           | (1s)    | a rejecting cand is discarded
+# command -v git                                | NONE    | n/a (presence only); absence is
+#                                               |  (a)    | its own UNVERIFIABLE refusal
+# rev-parse --git-dir       (work-tree probe)   | RUNNER  | cwd's repo, no env override;
+#                                               |         | rc three-valued, 124/137 routed
+# rev-parse --show-toplevel                     | RUNNER  | rc inspected; empty => refuse
+# rev-parse --git-common-dir                    | RUNNER  | rc inspected; empty => refuse
+# rev-parse --git-path objects                  | RUNNER  | rc inspected; non-empty, made
+#                                               |         | absolute, canonicalised
+# rev-parse --is-shallow-repository              | RUNNER  | must equal the literal `false`;
+#                                               |         | anything else => UNVERIFIABLE
+# _anchor_canon  (sh -c 'cd -- "$1" && pwd -P') | RUNNER  | empty input refused; empty output
+#   x4: toplevel, common-dir, TMPDIR, created   |         | treated as could-not-measure
+# TMPDIR read                                    | n/a     | canonicalised, then proven
+#                                               |         | OUTSIDE work tree AND git dir
+# mktemp -d <tmp_canon>/premerge-anchor.XXXXXX   | RUNNER  | result: non-empty, canonical,
+#                                               |         | outside repo, DIRECT child of
+#                                               |         | tmp_canon, prefix-matched
+# git init -q --template=  (scratch repo)       | RUNNER  | target is the validated scratch
+#                                               |         | path; empty template forced
+# cat-file -e <anchor>^{commit}   (in scratch)  | RUNNER  | input is a validated 40-hex sha
+# cat-file -e <certified>^{commit} (in scratch) | RUNNER  | input is a validated 40-hex sha
+# merge-base --is-ancestor <a> <b> (in scratch) | RUNNER  | validated 40-hex shas; rc
+#                                               |         | three-valued (0/1/>=2)
+# rm -rf <scratch>          (_anchor_cleanup)   | RUNNER  | REVALIDATED at delete time:
+#                                               |         | canonical, not `/`, DIRECT child
+#                                               |         | of the persisted root, prefix
+#                                               |         | matched; else LEFT IN PLACE
+# $(pwd) in the no-work-tree diagnostic          | NONE    | n/a (diagnostic text only)
+#                                               |  (b)    |
+# trap install (EXIT/INT/TERM/HUP)               | n/a     | registered BEFORE any resource
+#                                               |         | exists; handlers re-raise
+# env -i + allowlist (wraps every git call)      | n/a     | ADMIT list is hard-coded, not
+#                                               |         | env-derived; neutralisers last
+# GIT_ALTERNATE_OBJECT_DIRECTORIES value         | n/a     | non-empty checked; C-quoted
+# ---------------------------------------------------------------------------
+#
+# THE TWO DECLARED GAPS, both `NONE`, both shell builtins over LOCAL state:
+#  (a) `command -v` stats PATH directories. Unboundable (a builtin), and no user
+#      or repository data reaches it — PATH comes from the invoking environment.
+#      A stalled directory ON PATH would hang it. Accepted, not fixed.
+#  (b) `$(pwd)` in one refusal message reads the shell's own cwd. Same class, and
+#      it only runs on a path that is already refusing.
+# Neither is reachable from the SHARED object store or from TMPDIR, which are the
+# surfaces the bounds exist for. The `anchor-reads:` token names both.
+#
+# WHAT THE AUDIT CHANGED, so the table is not read as a description of what was
+# already there: `_anchor_canon` became RUNNER-bounded (it was the FIRST filesystem
+# touch in the path and was unbounded); the two `[ -d … ]` builtin stats were
+# DELETED as redundant with it rather than bounded; `rm -rf` became RUNNER-bounded
+# and target-revalidated; and the `anchor-reads:` token was corrected twice — once
+# for overclaiming, once for UNDERclaiming after these fixes.
+
 # --- THE ISOLATED HOP'S ENVIRONMENT (roborev job 358) -----------------------
 # See the header for the two measured routes and the ADMIT/CLEAR line. Built
 # once, used by every git call below — lane discovery included.
@@ -616,16 +698,17 @@ _anchor_resolve_bound() {
   local anchor="$1" head="$2" name
   if name=$(resolve_advisory_timeout) && ANCHOR_BOUND_RUNNER=$(command -v "$name" 2>/dev/null) &&
      [ -n "$ANCHOR_BOUND_RUNNER" ]; then
-    # THE TOKEN NAMES EXACTLY WHAT IS BOUNDED (roborev job 382). It used to read a
-    # bare `bounded-<n>s+<g>s`, which claimed more than is true: `_anchor_canon`
-    # (`cd` + `pwd -P`) and the `[ -d "$lane_objects" ]` probe are SHELL BUILTINS,
-    # so there is no process to bound and a stalled mount can still hang them. A
-    # guard that says "bounded" while a filesystem probe can hang is the overclaim
-    # shape this issue has spent every round removing, and the standing rule is
-    # that a check claiming nothing false beats one claiming a closure it does not
-    # deliver. So the token says: the EXTERNAL commands are bounded, the builtin
-    # filesystem probes are not.
-    ANCHOR_READS="bounded-${ADVISORY_TIMEOUT_SECS}s+${ADVISORY_KILL_GRACE}s(external:git,mktemp;UNBOUNDED:cd/test-builtins)"
+    # THE TOKEN NAMES EXACTLY WHAT IS BOUNDED (job 382), AND IT WAS CORRECTED AGAIN
+    # BY THE job-384 AUDIT — in the UNDERSTATING direction this time, which is the
+    # same defect wearing modest clothes. It first read a bare `bounded-<n>s+<g>s`
+    # (an overclaim: builtin filesystem probes could hang). The audit then made
+    # those probes bounded — canonicalisation via `sh -c 'cd … && pwd -P'`, and the
+    # two `[ -d … ]` stats deleted as redundant with it — so the previous token's
+    # `UNBOUNDED:cd/test-builtins` had become FALSE in the other direction.
+    # What remains genuinely unbounded is named instead: `command -v` PATH lookups
+    # and the single `$(pwd)` in the no-work-tree diagnostic, both shell builtins
+    # over local state. Full per-operation record: the AUDIT TABLE in the header.
+    ANCHOR_READS="bounded-${ADVISORY_TIMEOUT_SECS}s+${ADVISORY_KILL_GRACE}s(external:git,mktemp,sh,rm;UNBOUNDED:command-v+pwd-builtins)"
     return 0
   fi
   ANCHOR_BOUND_RUNNER=""
@@ -714,10 +797,56 @@ _anchor_lane() { _anchor_run "$@"; }
 # still dies of the signal it was sent. This script installs no other traps (it
 # had none before this change), so there is no caller disposition to save.
 ANCHOR_SCRATCH=""
+# PERSISTED FOR CLEANUP (roborev job 384): the canonical scratch ROOT the create
+# was validated against, and the basename prefix `mktemp` was given. Cleanup
+# revalidates against BOTH immediately before the recursive delete — see
+# `_anchor_cleanup`. Empty until the create validates, so an early signal cannot
+# make cleanup delete anything.
+ANCHOR_SCRATCH_ROOT=""
+ANCHOR_SCRATCH_PREFIX="premerge-anchor."
+
+# _anchor_cleanup — remove the scratch dir. BOUNDED, and its TARGET REVALIDATED
+# immediately before the delete (roborev job 384; both findings were here).
+#
+#  1. BOUNDED. `rm -rf` on a stalled scratch filesystem would hang a SUCCESSFUL
+#     check, a timeout refusal, AND a signal handler — defeating the bounded-exit
+#     behaviour the rest of this path was built for. It runs through the resolved
+#     runner when there is one. When there is not, it runs unbounded: cleanup is
+#     the LAST thing this script does, so an unbounded delete there cannot delay a
+#     verdict that has not been emitted yet, and Case B refuses long before this
+#     point without a runner anyway.
+#  2. TARGET REVALIDATED. It used to delete whatever path `mktemp` emitted,
+#     without confirming that path is still an expected direct child of the
+#     canonical root — so a path-replacement race, or a faulty shim, redirects a
+#     RECURSIVE DELETE somewhere else. This is the one operation in this file that
+#     can damage something outside its own scratch, so it gets the care regardless
+#     of severity: the value must be canonically a DIRECT child of the persisted
+#     root AND carry the expected basename prefix, checked HERE and not merely at
+#     create time. A check at create time answers about the path as it was then.
+#
+# Anything that fails revalidation is LEFT IN PLACE and reported to stderr rather
+# than deleted: a scratch dir the OS will reap is a far smaller problem than an
+# `rm -rf` aimed at an unverified path.
 _anchor_cleanup() {
-  [ -n "$ANCHOR_SCRATCH" ] || return 0
-  rm -rf "$ANCHOR_SCRATCH" 2>/dev/null || true
+  local target="$ANCHOR_SCRATCH" root="$ANCHOR_SCRATCH_ROOT" canon base
   ANCHOR_SCRATCH=""
+  [ -n "$target" ] || return 0
+  if [ -z "$root" ]; then
+    printf 'PREMERGE: NOTE scratch dir %s left in place: no validated scratch root recorded\n' \
+      "$target" >&2
+    return 0
+  fi
+  canon=$(_anchor_canon "$target")
+  base="${canon##*/}"
+  if [ -z "$canon" ] || [ "$canon" = "/" ] ||
+     [ "$canon" != "$root/$base" ] ||
+     [ "$base" = "${base#"$ANCHOR_SCRATCH_PREFIX"}" ]; then
+    printf 'PREMERGE: NOTE scratch dir %s left in place: it is no longer a %s* direct child of %s\n' \
+      "$target" "$ANCHOR_SCRATCH_PREFIX" "$root" >&2
+    return 0
+  fi
+  _anchor_bounded rm -rf "$canon" >/dev/null 2>&1 || true
+  return 0
 }
 trap '_anchor_cleanup' EXIT
 trap '_anchor_cleanup; trap - INT;  kill -INT  $$' INT
@@ -738,9 +867,19 @@ trap '_anchor_cleanup; trap - HUP;  kill -HUP  $$' HUP
 # FALSE PASS, not merely a wrong remedy. The timeout propagation above closes the
 # timeout route; this line closes the ordinary-git-failure route, which no status
 # check can, because there the value really is empty.
+# BOUNDED SINCE THE job-384 AUDIT, and it is the operation that most needed it:
+# canonicalising `TMPDIR` is the FIRST filesystem touch in this path, before any
+# git call, so a stalled mount there hung the guard with nothing to stop it. `cd`
+# and `pwd` are builtins with no process to bound — but `sh -c 'cd … && pwd -P'`
+# is an EXTERNAL command, so it goes through the existing runner. Verified to
+# agree with the builtin form, symlinked input included.
+#
+# A timeout, a missing/unreadable path and an absent `sh` all yield EMPTY, which
+# every caller already treats as "could not measure" and refuses on. That is the
+# fail-closed direction, and it is why this does not need its own timeout arm.
 _anchor_canon() {
   [ -n "$1" ] || return 0
-  (cd "$1" 2>/dev/null && pwd -P) || true
+  _anchor_bounded sh -c 'cd -- "$1" && pwd -P' sh "$1" 2>/dev/null || true
 }
 
 # _anchor_build_scratch — on success sets ANCHOR_SCRATCH (the mktemp dir),
@@ -753,6 +892,7 @@ ANCHOR_SCRATCH_ERR=""
 _anchor_build_scratch() {
   local anchor="$1" head="$2"
   local lane_objects repo_canon common_canon tmp_req tmp_canon created_canon alt_q
+  local created_base
   local rc toplevel commondir
 
   # THE SCRATCH MUST BE PROVABLY OUTSIDE THE REPOSITORY, and "the repository" is
@@ -801,7 +941,10 @@ _anchor_build_scratch() {
   if _anchor_timed_out "$rc"; then
     _anchor_refuse_timeout "$anchor" "$head" "creating the scratch directory (mktemp -d)"
   fi
-  if [ "$rc" -ne 0 ] || [ -z "$ANCHOR_SCRATCH" ] || [ ! -d "$ANCHOR_SCRATCH" ]; then
+  # No `[ -d … ]` stat here: `_anchor_canon` below is BOUNDED and returns empty
+  # unless the path is a directory this process can `cd` into, which is a strictly
+  # stronger check than an unbounded builtin stat (job-384 audit).
+  if [ "$rc" -ne 0 ] || [ -z "$ANCHOR_SCRATCH" ]; then
     ANCHOR_SCRATCH=""
     ANCHOR_SCRATCH_ERR="could not create a scratch directory under $tmp_canon"
     return 1
@@ -816,6 +959,20 @@ _anchor_build_scratch() {
       ANCHOR_SCRATCH_ERR="the CREATED scratch directory $created_canon resolves INSIDE the repository — the root resolved into the checkout between the pre-check and the create"
       return 1 ;;
   esac
+  # THE CREATED PATH MUST BE AN EXPECTED DIRECT CHILD OF THE ROOT IT WAS VALIDATED
+  # AGAINST (job 384). `mktemp` was given `$tmp_canon/premerge-anchor.XXXXXX`, so
+  # anything else means the value did not come from that template — and cleanup
+  # would later aim a recursive delete at it.
+  created_base="${created_canon##*/}"
+  if [ "$created_canon" != "$tmp_canon/$created_base" ] ||
+     [ "$created_base" = "${created_base#"$ANCHOR_SCRATCH_PREFIX"}" ]; then
+    ANCHOR_SCRATCH_ERR="the created scratch directory $created_canon is not a ${ANCHOR_SCRATCH_PREFIX}* DIRECT child of $tmp_canon, so it did not come from the mktemp template this run asked for"
+    return 1
+  fi
+  # Recorded only now, i.e. only for a path that passed every check above. Cleanup
+  # revalidates against it rather than trusting this moment.
+  ANCHOR_SCRATCH="$created_canon"
+  ANCHOR_SCRATCH_ROOT="$tmp_canon"
 
   # THE LANE'S OBJECT DIRECTORY, resolved rather than assumed — and this is the
   # ONE read that still happens in the live repository, mirroring the reference
@@ -843,8 +1000,11 @@ _anchor_build_scratch() {
     /*) : ;;
     *)  lane_objects="$repo_canon/$lane_objects" ;;
   esac
-  if [ ! -d "$lane_objects" ]; then
-    ANCHOR_SCRATCH_ERR="this repository's object directory ($lane_objects) is not a directory"
+  # BOUNDED, and it keeps its own diagnostic (job 374's lesson: a broken object
+  # directory must not borrow the absent-object remedy). The unbounded builtin
+  # stat this replaces was the last first-touch filesystem probe in the path.
+  if [ -z "$(_anchor_canon "$lane_objects")" ]; then
+    ANCHOR_SCRATCH_ERR="this repository's object directory ($lane_objects) is not a readable directory"
     return 1
   fi
 
