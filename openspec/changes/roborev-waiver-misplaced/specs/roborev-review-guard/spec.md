@@ -323,6 +323,16 @@ A **mixed outcome** — one thread read, another unavailable — SHALL take rend
 halves; it SHALL NOT take rendering 1. *A partial scan reported as a complete one is worse than an
 admitted failure, because it is the version nobody re-checks.*
 
+**AN UNREADABLE RELATION PAYLOAD IS NOT AN EMPTY RELATION.** Rendering 3 — *"no linked issue is
+declared on this PR"* — is an **affirmative claim about the pull request**, and it SHALL be reachable
+**only** from a payload that was affirmatively read as a JSON **object** carrying a
+`closingIssuesReferences` **list**. An unparseable payload, a non-object top level, a **missing**
+`closingIssuesReferences` key, an explicit `null`, and a non-list value SHALL each take rendering 4.
+`gh pr view --json closingIssuesReferences` always returns the key it was asked for, so its absence is
+a broken payload; coercing any of these to zero declared references would derive an ANSWER from
+something nobody could read, which is the permissive-branch-inherits-the-unknown-state shape this
+whole mechanism is written against.
+
 The existing `NONE` teaching text — that the marker must be the **sole nonblank content** of a
 **top-level** comment — SHALL be **retained**; the declaration is additional, not a replacement. An
 unrecognised rendering SHALL NOT exist: the set is closed, and a new outcome requires deciding what it
@@ -339,6 +349,10 @@ means before it can be printed.
 #### Scenario: The probe could not be performed
 - **WHEN** no marker is on the PR and the linked-issue comment read fails (no `gh`, an API error, or an unparseable payload)
 - **THEN** the state is `NONE`, its value names the *could not check* rendering with the cause, the run still FAILs on the underlying key, and the probe failure itself neither fails nor rescues anything
+
+#### Scenario: An unreadable relation payload is not reported as an empty relation
+- **WHEN** the relation payload is unparseable, is not a JSON object, omits the `closingIssuesReferences` key, carries an explicit `null`, or carries a non-list value
+- **THEN** each shape takes the *could not check* rendering naming the broken payload, and none of them reports *"no linked issue is declared on this PR"*
 
 #### Scenario: One thread read, another unavailable
 - **WHEN** two linked issues are declared, the first is read with no match, and the second's comments cannot be retrieved

@@ -1307,9 +1307,20 @@ try:
     data = json.load(sys.stdin)
 except ValueError:
     sys.exit(1)
-refs = data.get("closingIssuesReferences") if isinstance(data, dict) else None
-if refs is None:
-    refs = []
+# ===== THE SHAPE IS TESTED AFFIRMATIVELY; NOTHING UNREADABLE BECOMES AN ANSWER (#3759 round 1) =====
+# This used to read `data.get(...) if isinstance(data, dict) else None` and then coerce a `None` to
+# `[]`, so FOUR different unreadable payloads — a non-object top level, a MISSING
+# `closingIssuesReferences` key, an explicit `null`, and a non-list value — all arrived at the
+# shell as ZERO declared references and rendered "no linked issue is declared on this PR". That is
+# an ANSWER derived from a payload that could not be read: the permissive-branch-inherits-the-
+# unknown-state shape this whole file is written against. `gh pr view --json closingIssuesReferences`
+# ALWAYS returns the key it was asked for, so its absence is a broken payload and never an empty
+# relation. Each of these is now a NON-ZERO exit, which the caller renders as could-not-check.
+if not isinstance(data, dict):
+    sys.exit(1)
+if "closingIssuesReferences" not in data:
+    sys.exit(1)
+refs = data["closingIssuesReferences"]
 if not isinstance(refs, list):
     sys.exit(1)
 for ref in refs:
@@ -1324,7 +1335,7 @@ for ref in refs:
         # NEVER the raw value: an unrecognised entry is reported as a KIND, not as text.
         sys.stdout.write("NON-NUMERIC\n")
 ' 2>/dev/null)"; then
-    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: the closingIssuesReferences payload could not be parsed"
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: the closingIssuesReferences payload was not readable as a JSON object carrying a closingIssuesReferences LIST (it was unparseable, a non-object, missing that key, or null) — that is a broken payload, NOT an empty relation, and the two must never render alike"
     return 0
   fi
   declared=0

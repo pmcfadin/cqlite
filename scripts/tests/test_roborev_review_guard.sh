@@ -6084,14 +6084,30 @@ assert_says 'case (mp6/non-numeric) a non-numeric relation entry is a could-not-
   'NOT read: an entry that is not an issue number'
 assert_lacks 'case (mp6/non-numeric) and the raw value is NEVER interpolated' 'not-a-number'
 reset_stub
-reset_stub
-mp_waiver_fixture
-STUB_GH_LINKED_JSON='this is not json'
-run_wrapper "$w_work"
-assert_verdict 'case (mp6/unparseable-relation)' FAIL 1
-assert_says 'case (mp6/unparseable-relation) an unparseable relation payload names itself' \
-  'the closingIssuesReferences payload could not be parsed'
-reset_stub
+# ===== FOUR UNREADABLE PAYLOAD SHAPES, EACH A COULD-NOT-CHECK AND NEVER "NONE DECLARED" =====
+# (#3759 round 1, finding 2.) The coercion these replace turned an unparseable payload, a non-object
+# top level, a MISSING key and an explicit `null` all into ZERO declared references, which rendered
+# as the affirmative "no linked issue is declared on this PR" — an ANSWER derived from a payload
+# nobody could read. Asserted PER SHAPE: one standing for the family is exactly how three of these
+# stayed invisible behind the fourth.
+for _mp6_shape in \
+  'unparseable:this is not json' \
+  'non-object:[1, 2, 3]' \
+  'missing-key:{"someOtherField":[]}' \
+  'explicit-null:{"closingIssuesReferences":null}' \
+  'non-list:{"closingIssuesReferences":{"number":3544}}' ; do
+  reset_stub
+  mp_waiver_fixture
+  STUB_GH_LINKED_JSON="${_mp6_shape#*:}"
+  run_wrapper "$w_work"
+  assert_verdict "case (mp6/relation-shape/${_mp6_shape%%:*})" FAIL 1
+  assert_no_marker_form "case (mp6/relation-shape/${_mp6_shape%%:*})"
+  assert_says "case (mp6/relation-shape/${_mp6_shape%%:*}) is a could-not-check naming the broken payload" \
+    'the closingIssuesReferences payload was not readable as a JSON object carrying a closingIssuesReferences LIST'
+  assert_lacks "case (mp6/relation-shape/${_mp6_shape%%:*}) and NEVER claims that no linked issue is declared" \
+    'no linked issue is declared on this PR'
+  reset_stub
+done
 
 printf '== (mp7) #3759: a PARTIAL read is could-not-check naming BOTH halves, never checked ==\n'
 # A PARTIAL SCAN REPORTED AS A COMPLETE ONE IS WORSE THAN AN ADMITTED FAILURE, because it is the
