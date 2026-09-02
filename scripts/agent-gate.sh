@@ -1246,18 +1246,87 @@ accelerators_line() {
 #                         core-tests long pole.
 # A caller who exports CARGO_BUILD_JOBS is respected verbatim (never overridden).
 
-# _gate_max_concurrency: resolve N from the #1825 default formula + the
-# CQLITE_GATE_MAX_CONCURRENCY override. Defined early (issue #2640) because the
-# core-budget derivation below needs it before any cargo runs; the #1825 cap's
-# acquire_gate_slot consumes the SAME function further down (single source).
-_gate_max_concurrency() {
+# _gate_resolve_max_concurrency: resolve N — and WHERE N CAME FROM — ONCE, into
+# GATE_MAX_CONCURRENCY + GATE_MAX_CONCURRENCY_SOURCE. Resolved early (issue #2640)
+# because the core-budget derivation below needs it before any cargo runs; the
+# #1825 cap's acquire_gate_slot and the SUMMARY's cpu-budget line both READ THESE
+# GLOBALS through _gate_max_concurrency, so the value the slot semaphore enforces
+# and the value the pasted SUMMARY reports are STRUCTURALLY the same value — a
+# second, independently-recomputing resolver could disagree with the first.
+#
+# THE SOURCE TOKEN IS THE POINT (issue #3414). `max-concurrency=3` alone does not
+# say whether this box was PINNED at 3 or merely DEFAULTED there because nothing
+# set the variable, and those are different operational facts: the fleet ran for
+# months with the pin present in ~/.bashrc but invisible to every non-interactive
+# shell (Ubuntu's stock .bashrc returns early when not interactive), so every gate
+# silently resolved N from the formula, admitted co-tenants, and no artifact said
+# so. Four states, because two more fall straight out of the resolver:
+#   pinned  — the env var is set to a valid integer >= 1 and is used verbatim
+#   default — the env var is UNSET, so N is the #1825 formula max(2,(ncpu-2)/4)
+#   invalid — the env var is set to a value that cannot be used as a cap: EMPTY,
+#             non-numeric, or a digit string too large to represent (19+ digits,
+#             roborev job 332). It is SILENTLY discarded for the formula (a mis-set
+#             tmux/systemd/CI var reads exactly like a healthy defaulted box unless
+#             we say so)
+#   clamped — the env var is set to a valid integer < 1 (e.g. 0) and is silently
+#             raised to 1
+# `${VAR+set}` — NOT `${VAR:-}` — is what separates unset from set-but-empty:
+# the `:-` form collapses them onto one answer, which is precisely how an empty
+# value would have gone on reading as `default`.
+_gate_resolve_max_concurrency() {
   local dflt=$(( ( _ncpu - 2 ) / 4 ))
   [ "$dflt" -lt 2 ] && dflt=2
-  local v="${CQLITE_GATE_MAX_CONCURRENCY:-$dflt}"
-  case "$v" in *[!0-9]*|'') v=$dflt ;; esac
-  [ "$v" -lt 1 ] && v=1
-  printf '%s' "$v"
+  local v src sig
+  if [ -z "${CQLITE_GATE_MAX_CONCURRENCY+set}" ]; then
+    v=$dflt; src=default
+  else
+    v="${CQLITE_GATE_MAX_CONCURRENCY}"
+    case "$v" in
+      ''|*[!0-9]*) v=$dflt; src=invalid ;;
+      # BASE-10 EXPLICITLY (roborev job 331, Medium). The case above admits any digit-only
+      # string, so `08` reached the arithmetic below — where bash reads a leading zero as
+      # OCTAL and `08`/`09` are not valid octal. Measured before the fix:
+      #   CQLITE_GATE_MAX_CONCURRENCY=08 -> "line 1301: 08: value too great for base"
+      # i.e. the gate ERRORED OUT rather than resolving a cap, which is worse than either
+      # mis-classifying it or refusing it. `10#` forces base 10, and `v` is normalised so
+      # every downstream consumer (cores-per-gate, build-jobs, test-threads) gets a clean
+      # decimal — the SUMMARY then reports the value actually honoured, e.g. `8(pinned)`.
+      *)           # AN UPPER BOUND CHECKED BY DIGIT COUNT, BEFORE ANY ARITHMETIC (roborev
+                   # job 332). `10#$v` on a digit string bash cannot represent WRAPS
+                   # SILENTLY, and the wrap was reported as a pin. Measured before the fix:
+                   #   ...=99999999999999999999 -> max-concurrency=7766279631452241919(pinned)
+                   #   ...=9223372036854775808  -> max-concurrency=1(clamped)
+                   # The first is the damaging one: the SUMMARY AFFIRMS a pin at a value
+                   # nobody set, which inverts the one property this token exists to carry.
+                   # The second mislabels an unusable value as a deliberate 0.
+                   #
+                   # The bound is a DIGIT COUNT, not a comparison against INT64_MAX, because
+                   # it must be decided WITHOUT the arithmetic that is the defect: any
+                   # <=18-digit decimal is < 9.22e18 and always fits, so 19+ digits is
+                   # refused. That refuses a handful of representable 19-digit values too —
+                   # deliberately, since a 19-digit slot cap is a mis-set variable by any
+                   # measure, and `invalid` (silently discarded, use the formula) is the
+                   # correct answer for one. A lexical compare against INT64_MAX would be
+                   # exact but locale-dependent on digit collation; a length test is not.
+                   sig="$v"
+                   while [ "${#sig}" -gt 1 ] && [ "${sig#0}" != "$sig" ]; do sig="${sig#0}"; done
+                   if [ "${#sig}" -gt 18 ]; then
+                     v=$dflt; src=invalid
+                   else
+                     v=$(( 10#$sig ))
+                     if [ "$v" -lt 1 ]; then v=1; src=clamped; else src=pinned; fi
+                   fi ;;
+    esac
+  fi
+  GATE_MAX_CONCURRENCY="$v"
+  GATE_MAX_CONCURRENCY_SOURCE="$src"
 }
+_gate_resolve_max_concurrency
+
+# _gate_max_concurrency: the SINGLE accessor for the resolved N. Kept as a function
+# so every existing call site (acquire_gate_slot, the core budget, the cpu-budget
+# line) keeps reading one resolution rather than recomputing its own.
+_gate_max_concurrency() { printf '%s' "$GATE_MAX_CONCURRENCY"; }
 
 # _gate_cores_per_gate: the fair-share core count for THIS gate = max(1, ncpu/N).
 _gate_cores_per_gate() {
@@ -1283,8 +1352,14 @@ fi
 # cpu_budget_line: machine-checkable one-liner stamped into every SUMMARY block,
 # so per-gate CPU throttling (or its absence) is visible in the pasted block, not
 # just scrollback (#2640). Names the wrapper (nice/taskpolicy/none), the resolved
-# machine-wide concurrency N, the derived per-gate cores, and the build-jobs +
-# test-threads the gate actually used.
+# machine-wide concurrency N **and where N came from** (#3414), the derived
+# per-gate cores, and the build-jobs + test-threads the gate actually used.
+#
+# max-concurrency carries its source in parentheses — the same idiom as
+# build-jobs=N(derived|caller) beside it — so a pasted SUMMARY distinguishes a box
+# that was PINNED at N from one that merely DEFAULTED there (and from one whose pin
+# is invalid or was clamped). It is deliberately here and NOT on `accelerators:`:
+# the cap already lives on this line, and two spellings of one fact is drift.
 #
 # The `cpu-budget:` line is a space-delimited `key=value`-per-token line, so the
 # wrapper field MUST be a SINGLE token: AGENT_GATE_WRAPPER holds the full command
@@ -1292,12 +1367,14 @@ fi
 # otherwise inject stray `-c`/`utility`/`-n`/`10` tokens between wrapper= and the
 # next key and break any positional/space-splitting parser. Emit only the tool
 # name (first word) here; the full command stays in AGENT_GATE_WRAPPER for the
-# re-exec (issue #2640).
+# re-exec (issue #2640). The same rule binds every field added later: the #3414
+# source token is `max-concurrency=1(pinned)` with NO space inside the parens, for
+# exactly the reason the wrapper field is truncated.
 cpu_budget_line() {
   local _wrapper_tok="${AGENT_GATE_WRAPPER:-none}"
   _wrapper_tok="${_wrapper_tok%% *}"   # first word only: "taskpolicy -c utility" -> "taskpolicy"
-  printf 'cpu-budget: wrapper=%s ncpu=%s max-concurrency=%s cores-per-gate=%s build-jobs=%s(%s) test-threads=%s' \
-    "$_wrapper_tok" "$_ncpu" "$(_gate_max_concurrency)" \
+  printf 'cpu-budget: wrapper=%s ncpu=%s max-concurrency=%s(%s) cores-per-gate=%s build-jobs=%s(%s) test-threads=%s' \
+    "$_wrapper_tok" "$_ncpu" "$GATE_MAX_CONCURRENCY" "$GATE_MAX_CONCURRENCY_SOURCE" \
     "$GATE_CORES_PER_GATE" "${CARGO_BUILD_JOBS:-unset}" "${CARGO_BUILD_JOBS_SOURCE:-unknown}" \
     "$GATE_TEST_THREADS"
 }
@@ -1811,11 +1888,54 @@ _fixture_status() {
 # #3522 widened node-bindings from one jest file to the WHOLE suite via `npm test`,
 # and #1465 had wired its exception-path/abandoned-iterator LEAK BUDGETS in as a
 # SECOND jest invocation (`npm run test:leaks`). Composed naively that runs the leak
-# budgets TWICE per component. MEASURED with `./node_modules/.bin/jest --listTests`
-# under the two-project jest config #1465 introduced: the all-projects list is 28
-# files with NO duplicates and it INCLUDES leak-paths.test.js, so #3522's whole-suite
-# run already executes the leak budgets exactly once. The second invocation was pure
-# duplication.
+# budgets TWICE per component. Under the two-project jest config #1465 introduced a
+# bare `npm test` runs BOTH projects, and the `testPathIgnorePatterns` entry in the
+# `default` project hands leak-paths.test.js to the `leaks` project ALONE -- so exactly
+# one project matches it, #3522's whole-suite run already executes the leak budgets
+# exactly once, and the second invocation was pure duplication.
+#
+# THAT "EXACTLY ONCE" IS GROUNDED IN THE CONFIG PLUS TWO RUN-TIME CHECKS, AND
+# DELIBERATELY NOT IN `--listTests` (#3772). An earlier draft of this very comment
+# cited the `--listTests` set as the evidence -- while the paragraph below it explains
+# that `--listTests` DEDUPLICATES and therefore cannot see a double execution at all.
+# The evidence is: the project exclusion above (config), `check_jest_suites_ran`'s
+# suite-TOTAL comparison, and the JSON affirmation's refusal on two suites at the leak
+# path (both run time). Naming the wrong oracle is the exact defect this issue is
+# about, so it is worth saying twice: reason about execution multiplicity from the
+# RUN, never from the listing.
+#
+# NO FILE COUNT IS QUOTED HERE, DELIBERATELY (issue #3772). This argument used to rest
+# on a one-off measurement -- a hard-coded file count, asserted as "no duplicates" -- and
+# the suite then grew past it while the sentence stood still. A stale number inside the
+# rationale for a composition decision is the failure mode CLAUDE.md names: a false
+# statement in a gate log (or in the comment a reader checks it against) is worse than
+# none, because it is what stops the next person looking. Writing today's count here
+# instead would only restart the same clock, so no number appears -- not the old one,
+# not the current one, and not as an illustration inside this explanation.
+#
+# The number was never load-bearing, because both halves of the claim are DERIVED and
+# ENFORCED on every run -- which is what makes deleting it safe rather than a loss:
+#   * the COUNT is reconciled in run_node_bindings from two INDEPENDENT oracles (a
+#     recursive find over __test__/ vs `jest --listTests`) and PRINTED as
+#     `suite set RECONCILED: N *.test.js file(s)`;
+#   * DOUBLE EXECUTION is caught by check_jest_suites_ran's `s_total -eq expected`:
+#     `expected` is the DEDUPLICATED inventory, so a file BOTH projects match makes
+#     jest report one suite MORE than the inventory holds, and FAILs;
+#   * leak-paths.test.js being executed EXACTLY ONCE is enforced by the affirmation
+#     below, which refuses outright on `suites.length !== 1` at that path.
+#
+# AND THE DELETED SENTENCE NAMED THE WRONG ORACLE, which is the better reason to
+# delete it than the stale count (measured on jest 29.7.0, #3772 -- two projects whose
+# testMatch both select one file):
+#     jest --listTests  ->  __test__/probe.test.js          (ONE line)
+#     jest             ->  Test Suites: 2 passed, 2 total   (executed TWICE)
+# `--listTests` DEDUPLICATES across projects, so it can never report the duplicate it
+# was cited as having ruled out; and the `sort -u` normalisation in run_node_bindings'
+# reconciliation would erase one anyway. Verified against this package too: deleting
+# the `testPathIgnorePatterns` entry that hands the leak file to the `leaks` project
+# leaves `--listTests` unchanged. So "no duplicates, measured via --listTests" was
+# unfalsifiable by its own stated method -- the run's suite TOTAL is the only oracle
+# that sees it. A number nobody re-measures is the smaller half of that defect.
 #
 # So there is ONE executor -- #3522's `npm test` -- and #1465 keeps the thing that
 # made its lane merge-gating rather than decorative: the NAMED-BUDGET AFFIRMATION,
@@ -1856,10 +1976,13 @@ abandoned streaming iterators stay under the leak budget"
 _NODE_LEAK_BUDGET_TITLE_SUFFIX="stay under the leak budget"
 
 # The SUITE the budget tests must live in. Load-bearing since the recomposition
-# (#1465 round 10, roborev R2): the affirmation now reads the WHOLE-SUITE report (28
-# suites), so a title namespace that was private to one file became shared. Without
-# this scope a same-titled `passed` test in ANY other suite would satisfy the
-# affirmation for a leak test that was skipped or failed.
+# (#1465 round 10, roborev R2): the affirmation now reads the WHOLE-SUITE report (every
+# suite, not just this one), so a title namespace that was private to one file became
+# shared. Without this scope a same-titled `passed` test in ANY other suite would
+# satisfy the affirmation for a leak test that was skipped or failed. (The suite count
+# is deliberately not quoted -- see the composition header above, issue #3772: what
+# makes the scope necessary is that the report covers OTHER suites at all, not how
+# many.)
 #
 # REPO-RELATIVE and matched with a LEADING SLASH (round 11, T1): a bare
 # `__test__/leak-paths.test.js` tail was satisfied by a file of that name in ANOTHER
@@ -1883,9 +2006,10 @@ _node_leak_lane_note() { # <RUN|SKIP-OPTOUT|NO-NODE|NOT-REACHED|ENTERED-FAILED|
                          # `AGENT_GATE_ALLOW_MISSING_FIXTURES=1 && !
                          # _node_bindings_corpus_present` branch governs, ALONE. It is
                          # strictly earlier (before `npm ci`) and strictly coarser (it
-                         # skips all 28 suites), so a second, lane-level dataset gate
-                         # could only ever be unreachable code that looks like a
-                         # control. #1465's own `_node_leak_lane_status` predicate was
+                         # skips the WHOLE suite, not just this lane -- #3772: no
+                         # count quoted, the coarseness is what matters), so a
+                         # second, lane-level dataset gate could only ever be
+                         # unreachable code that looks like a control. #1465's own `_node_leak_lane_status` predicate was
                          # therefore DELETED, not kept as a decoration; what remains is
                          # this note, which that branch writes as SKIP-OPTOUT so the
                          # SUMMARY still declares the leak budgets did not run.
@@ -1956,8 +2080,8 @@ _node_leak_lane_affirm() { # <note-file> <json-file>
           process.exit(1);
         }
         // SUITE-SCOPED (roborev R2): only assertions from the leak suite count. The
-        // report covers all 28 suites, so an unscoped title match would let another
-        // suite satisfy this check.
+        // report covers the WHOLE suite, so an unscoped title match would let another
+        // suite satisfy this check. (No file count quoted -- #3772.)
         const anchored = `/${suiteFile}`;
         const suites = (report.testResults || []).filter((s) =>
           typeof s.name === "string" && s.name.endsWith(anchored)
@@ -2603,16 +2727,26 @@ apply_schemas_preflight() {
 #                                        DEFAULT object format, which is why a sha256 baseline
 #                                        advertisement is refused at the ref oracle rather than
 #                                        failing here as a mystery transfer error (job 309).
-#     git rev-parse --verify --quiet <rev>
+#     git rev-parse --verify --quiet <rev>^{commit}
 #                                        resolves a sha to a COMMIT in the isolated repository —
-#                                        the transfer assert and HEAD's own sha. Commits are
-#                                        never filtered out of a clone.
+#                                        the transfer assert, and the PEEL of HEAD's own sha
+#                                        (#3757: the LIVE side resolves the ref and does not peel
+#                                        it, so the only object read is here). Commits are never
+#                                        filtered out of a clone.
 #     git merge-base --is-ancestor       walks commit parents only.
 #     git rev-parse --is-shallow-repository / --git-path shallow / --git-path objects
 #                                        repository STATE reads (is the history truncated? where
 #                                        is the object store, so it can be offered to the
 #                                        isolated repo as an ALTERNATE?); no object access, no
 #                                        remote contact.
+#     git rev-parse --verify --quiet HEAD
+#                                        HEAD resolved to a sha, UNPEELED (#3757). A REF read, not
+#                                        an OBJECT read: measured in a promisor clone whose HEAD
+#                                        object was absent, this form invoked the remote helper
+#                                        ZERO times while the peeled `HEAD^{commit}` form it
+#                                        replaced invoked it TWICE (a lazy fetch under the LIVE
+#                                        repository's own config). The peel and the "is it a
+#                                        commit" validation happen in the isolated repository.
 #
 #   LOCAL UTILITIES (no network, no spawn, bounded work). THE AUTHORITATIVE SET IS
 #     `declared_externals` in scripts/tests/test_agent_gate_component_set.sh, which is checked
@@ -2668,27 +2802,68 @@ apply_schemas_preflight() {
 #     redefined.
 #
 # The rule that generalises all five: THIS PRE-FLIGHT ONLY EVER RESOLVES A URL INSIDE THE
-# ISOLATED SCRATCH REPOSITORY, AND ONLY EVER READS OBJECTS BY SHA IN THE LIVE ONE. A change that
-# breaks either half re-opens this list and belongs in review, not in a follow-up.
+# ISOLATED SCRATCH REPOSITORY, AND SINCE #3757 IT READS NO OBJECT IN THE LIVE ONE AT ALL — the
+# live repository is asked only for REFS, CONFIG and repository STATE, and every object read runs
+# BY SHA in the isolated repository with the lane's store attached as an ALTERNATE. The previous
+# wording — "only ever READS OBJECTS BY SHA in the live one" — is what licensed the peel #3757
+# removed: a sha-addressed read is still an OBJECT read, and in a promisor clone a missing object
+# is answered from the NETWORK under the live repository's own config, which is the one thing this
+# enumeration exists to forbid. A change that breaks either half re-opens this list and belongs in
+# review, not in a follow-up.
 
 # Probe state, set by _component_set_probe and read by the pure verdict/line helpers.
 # Globals rather than a parsed multi-line stdout: the probe does real I/O (fetch, git
 # show, a baseline `--list`), and routing its result through `$( )` would add a
 # newline-stripping value path for no benefit (the #3148 lesson, one guard over).
 _CS_KIND=""        # ok | no-tool | no-git | no-remote | unboundable | fetch-failed | baseline-*
-                   # | manifest-* | head-set-unmeasured
+                   # | manifest-* | head-set-unmeasured | repo-read-blocked
+                   # | read-dir-unisolated
 _CS_SHA="-"        # the origin/main sha40 the comparison actually used
 _CS_MISSING=""     # baseline components ABSENT from this tree's set (space separated)
 _CS_EXTRA=""       # branch-only components (NOT skew; recorded for audit only)
 _CS_UNCOMMITTED="" # of _CS_MISSING, those still PRESENT in the gate script AT HEAD, i.e.
                    # removed by an UNCOMMITTED working-tree edit (#3544 / job 215)
-_CS_READ_DIR=""    # THE REPOSITORY EVERY BASELINE/HEAD OBJECT READ RUNS IN (#3544 / job 268).
-                   # The isolated scratch when one exists, else this checkout.
+# THE "NOT ESTABLISHED YET" VALUE FOR `_CS_READ_DIR`, AND IT IS A NON-TRAVERSABLE PATH ON PURPOSE
+# (#3757). The obvious sentinels are both UNSAFE, measured rather than assumed (git 2.43.0, in a
+# real worktree):
+#   git -C ""            rev-parse --git-dir  -> rc 0, prints the LIVE worktree's git dir
+#   git -C ""            cat-file -e HEAD^{commit} -> rc 0  (a LIVE OBJECT READ)
+#   git -C <nonexistent> rev-parse --git-dir  -> rc 128, "cannot change to '…': No such file"
+# IT IS UNDER `/dev/null/` AND NOT A MERELY-ABSENT PATH (roborev job 372). An absent path is
+# absent only until someone creates it: `/nonexistent/` is not reserved, so root could make the
+# sentinel RESOLVE and a consumer reached before the scratch exists would then read a real
+# repository instead of failing. `/dev/null` is a CHARACTER DEVICE, so every path under it is
+# ENOTDIR for everyone including root — `mkdir /dev/null` itself fails "Not a directory" — which
+# makes the objection unexpressible rather than merely unlikely. Measured, same worktree:
+#   git -C /dev/null/<x> rev-parse --git-dir           -> rc 128, "cannot change to '…': Not a directory"
+#   git -C /dev/null/<x> cat-file -e HEAD^{commit}     -> rc 128, same
+#   git -C /dev/null/<x> merge-base --is-ancestor …    -> rc 128, same
+# NOTE this is defence in depth, NOT the control: the control is the AFFIRMATIVE test in
+# `_cs_read_dir_isolated_or_refuse`, which permits ONLY `$_CS_SCRATCH_DIR/repo`, so any other
+# value — resolvable or not — is already refused.
+# `-C ""` leaves the working directory UNCHANGED, so an EMPTY value silently MEANS this checkout —
+# the exact read the region's execution-route enumeration forbids — while a non-existent path
+# makes any consumer reached before the scratch exists fail CLOSED without touching the live
+# repository. The named refusal below still exists and is what a reader sees at the peel; this
+# value is what bounds every OTHER consumer, including the ones whose bodies are defined earlier
+# in this file than the assignment (lexical position is not execution order for a function body,
+# so no source scan can decide that ordering — the sentinel makes it moot).
+_CS_READ_DIR_UNSET='/dev/null/agent-gate-component-set-read-dir-not-established'
+_CS_READ_DIR="$_CS_READ_DIR_UNSET"
+                   # THE REPOSITORY EVERY BASELINE/HEAD OBJECT READ RUNS IN (#3544 / job 268).
+                   # ALWAYS the isolated scratch — "else this checkout" was written here while
+                   # the pre-flight still read objects live, and since #3757 it reads NONE
+                   # there, so that clause licensed exactly what the enumeration above forbids.
+                   # Set to `$_CS_READ_DIR_UNSET` at every probe entry (see above) and to the
+                   # scratch once it exists; a consumer must REFUSE any other value rather than
+                   # pass it to git — see `_cs_read_dir_isolated_or_refuse` (#3757).
 _CS_READ_ENV=()    # env fragment for those reads: `GIT_ALTERNATE_OBJECT_DIRECTORIES=<lane
                    # objects>` when reading in the scratch (HEAD's objects live in the lane),
                    # else EMPTY
-_CS_HEAD_SHA=""    # HEAD resolved to a sha IN THIS CHECKOUT, so the scratch can be asked about
-                   # it: `HEAD` inside the scratch would mean the SCRATCH's own unborn HEAD
+_CS_HEAD_SHA=""    # HEAD as a COMMIT sha, so the scratch can be asked about it: `HEAD` inside the
+                   # scratch would mean the SCRATCH's own unborn HEAD. The REF is resolved in this
+                   # checkout (unpeeled) and PEELED in the scratch (#3757) — peeling reads an
+                   # object, and in the live repository that read can lazily fetch
 _CS_SCRATCH_DIR="" # the isolated scratch repo the baseline fetch ran in (#3544 / job 242)
 _CS_BASE_OBJ=""    # HOW the baseline COMMIT was obtained: reused (already in this repository)
                    # | fetched (the isolated hop + verified transfer) — job 258
@@ -4412,11 +4587,58 @@ _cs_live_refuse() {
   return 1
 }
 
+# _cs_read_dir_isolated_or_refuse <what>: assert that `$_CS_READ_DIR` names the ISOLATED scratch
+# before its value is handed to git, and set a NAMED refusal if it does not. Returns 0 when it SET
+# a refusal (the caller must return), 1 otherwise — the same contract as `_cs_live_refuse`, so the
+# two read alike at a call site.
+#
+# WHY A REFUSAL AND NOT AN ASSERTION-BY-COMMENT (#3757): a wrong value here silently redirects an
+# OBJECT read into the live repository, which is the one thing the execution-route enumeration at
+# the head of this region forbids.
+#
+# AND WHY IT IS AFFIRMATIVE, NOT A LIST OF BAD STATES (roborev job 339, item 5). The first version
+# enumerated three: empty (because `git -C ""` leaves the working directory unchanged, so it MEANS
+# this checkout), the UNSET sentinel, and `$REPO_ROOT`. That was sound for the three assignment
+# sites that exist and NOTHING PINNED THE NUMBER OF SITES, so a future fourth
+# `_CS_READ_DIR=<some live-ish path>` would pass the `*)` arm silently — the permissive-default
+# shape this pre-flight keeps ruling against. The question is now asked the other way round: the
+# value must BE the scratch this run created. `_CS_SCRATCH_DIR` is set from `$csdir` at the top of
+# the scratch block, before `_CS_READ_DIR="$csdir/repo"` in the same function, so the two are
+# derived from one value and comparing them cannot go stale; a probe that never got that far
+# leaves them unequal and is refused. The three named states survive only as DIAGNOSTIC TEXT, so
+# an operator still reads a cause rather than a bare mismatch.
+_cs_read_dir_isolated_or_refuse() {
+  local why
+  if [ -n "$_CS_SCRATCH_DIR" ] && [ "$_CS_READ_DIR" = "$_CS_SCRATCH_DIR/repo" ]; then
+    return 1
+  fi
+  case "$_CS_READ_DIR" in
+    "")                        why="EMPTY, and git reads \`-C \"\"\` as 'leave the working directory unchanged' — i.e. the LIVE checkout" ;;
+    "$_CS_READ_DIR_UNSET")     why="still the 'not established' sentinel ($_CS_READ_DIR), so the isolated scratch was never created" ;;
+    "$REPO_ROOT")              why="the LIVE checkout ($_CS_READ_DIR)" ;;
+    *)                         why="'$_CS_READ_DIR', which is not the scratch this run created (\$_CS_SCRATCH_DIR is ${_CS_SCRATCH_DIR:-EMPTY})" ;;
+  esac
+  _CS_KIND=read-dir-unisolated
+  _CS_DETAIL="refusing to $1: the isolated read repository was never established (\$_CS_READ_DIR is $why), and an object read in the live repository can be answered from the NETWORK by a promisor remote under that repository's own config. This is a code-path defect in the pre-flight, not a state of your checkout: the scratch assignment was skipped or removed"
+  return 0
+}
+
 _component_set_probe_inner() {
   # `_CS_READ_ENV` now carries ONLY what is specific to a read location (the alternate). The
   # neutralisers — `GIT_NO_LAZY_FETCH`, `GIT_NO_REPLACE_OBJECTS`, the config suppressors — live in
   # the ONE allowlist (`_CS_GIT_ENV`) that every git call in this pre-flight now runs under.
-  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=(); _CS_HEAD_SHA=""
+  # `_CS_READ_DIR` STARTS AT THE UNSET SENTINEL, NOT AT `$REPO_ROOT` (#3757). The old initialiser
+  # made THE LIVE CHECKOUT the value every consumer would see if the scratch assignment were ever
+  # skipped, so "this pre-flight reads no object in the live repository" held only because every
+  # earlier failure `return 0`s before that assignment — an ORDERING property nothing checked.
+  # Job 314 rejected the same reasoning in this same function ("relying on 'the parent happens to
+  # go first'... is made explicit instead"). There is no reachable route to it today; this is
+  # HARDENING, and it is made real by three things rather than by tracing: the sentinel (a
+  # non-existent path, so an unguarded consumer fails CLOSED instead of reading live — see its
+  # measurement above), the named runtime refusal at the peel
+  # (`_cs_read_dir_isolated_or_refuse`), and a structural assert over this function's own body in
+  # scripts/tests/test_agent_gate_component_set.sh (`3757-read-dir-shape`).
+  _CS_READ_DIR="$_CS_READ_DIR_UNSET"; _CS_READ_ENV=(); _CS_HEAD_SHA=""
   _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""; _CS_UNCOMMITTED=""
   _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
   _CS_HEAD_SET=""; _CS_HEAD_ERR=""; _CS_BASE_SRC=""; _CS_HEAD_SRC=""; _CS_BASE_OBJ=""
@@ -4822,6 +5044,26 @@ _component_set_probe_inner() {
   _cs_alt_q="${lane_objects//\\/\\\\}"; _cs_alt_q="${_cs_alt_q//\"/\\\"}"
   _CS_READ_DIR="$csdir/repo"
   _CS_READ_ENV=("GIT_ALTERNATE_OBJECT_DIRECTORIES=\"$_cs_alt_q\"")
+  # THE ISOLATION ASSERTION LIVES HERE, WHERE IT DOMINATES EVERY CONSUMER (roborev job 347). It
+  # used to sit immediately before the HEAD peel, and that was the repo's own standing error: a
+  # check placed AFTER the harmful effect can only REPORT it, never PREVENT it — the same family as
+  # job 264's transfer hop (where the sha assert sat downstream of the fetch it was meant to
+  # validate) and job 290's certification window. FOUR object reads run BEFORE the peel — the fast
+  # path's `cat-file -e` and `rev-list`, and the manifest `ls-tree`/`show` at the baseline rev — so
+  # an unisolated value performed prohibited LIVE reads and only then got reported.
+  #
+  # ONE PLACEMENT, NOT N SCATTERED ASSERTS, and this is the one line where that is expressible:
+  # `_CS_READ_DIR` is assigned in exactly three places (the global initialiser, the probe's own
+  # reset, and this line), nothing reassigns it afterwards, and every consumer — in this function
+  # and in the two helpers it calls — runs after this point. So a single assert here is a
+  # DOMINATOR: there is no path from an unisolated value to a git call.
+  #
+  # NOT MERELY A RESTATEMENT OF THE LINE ABOVE IT. What it catches is the assignment itself being
+  # wrong rather than absent: `$csdir` empty (the value would be the plausible-looking `/repo`),
+  # a future edit pointing it at the live checkout, or a stale `_CS_SCRATCH_DIR` from an earlier
+  # probe in the same process. The `-n "$_CS_SCRATCH_DIR"` half is what makes the empty-`csdir`
+  # case a refusal instead of an accidental match.
+  if _cs_read_dir_isolated_or_refuse "read objects for the component-set comparison"; then return 0; fi
 
   # ---- DO WE ALREADY HOLD THAT COMMIT? -----------------------------------------------------
   # If this repository already has the object, there is NOTHING to fetch: a git object is
@@ -5069,15 +5311,100 @@ _component_set_probe_inner() {
   # is BOUNDED, because the objects it reads come from the shared store.
   # HEAD IS RESOLVED TO A SHA IN THIS CHECKOUT FIRST, because the ancestry walk now runs in
   # `$_CS_READ_DIR` — and inside the isolated scratch the ref `HEAD` would mean the SCRATCH's own
-  # (unborn) HEAD, silently answering a different question. Commit objects are never omitted by any
-  # partial-clone filter, so resolving it is genuinely local; an unresolvable HEAD (unborn, or a
+  # (unborn) HEAD, silently answering a different question. An unresolvable HEAD (unborn, or a
   # broken detached HEAD) is INDETERMINATE below, exactly as an unanswerable probe was before.
   # BOUNDED, not annotated local-only (job 312): same config read, same FIFO exposure; and the
   # `|| true` would have turned a kill into an empty sha, taking the rc=128 branch below with a
   # cause that names HEAD rather than the blocked read.
-  _cs_live_git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}"
-  if _cs_live_refuse "HEAD's commit sha"; then return 0; fi
-  _CS_HEAD_SHA="$_CS_LIVE_OUT"
+  #
+  # THE LIVE CALL RESOLVES THE REF AND DOES NOT PEEL IT (#3757). It used to ask for
+  # `HEAD^{commit}`, and a PEEL is an OBJECT READ in the LIVE repository: in a promisor clone a
+  # missing object is answered by a LAZY FETCH under that repository's OWN local config, where a
+  # `url.*.insteadOf` rewrite invokes a remote HELPER — the route jobs 268/299 removed from every
+  # other read in this pre-flight. The comment this replaces argued the read was "genuinely local"
+  # because no partial-clone filter omits COMMITS; that is true and it answers the wrong question,
+  # because the hazard is what happens when the object is absent for any OTHER reason (a pruned or
+  # corrupted store, a hand-written ref, a peer lane's edit to the SHARED `.git`).
+  # `GIT_NO_LAZY_FETCH=1` is carried in `_CS_GIT_ENV` as a BELT (git >= 2.36, silently absent on an
+  # older supported host), which is exactly why it cannot BE the control.
+  #
+  # MEASURED, with a discriminating control, rather than reasoned from the docs. Promisor clones of
+  # a local bare origin (`--filter=blob:none` AND `--filter=tree:0`, `uploadpack.allowfilter=true`),
+  # HEAD pointed at a commit present on the remote and ABSENT locally (absence confirmed with
+  # `GIT_NO_LAZY_FETCH=1 cat-file -e`), the promisor URL replaced by an `ext::` recorder script that
+  # logs every invocation; git 2.43.0, both filters behaving identically:
+  #
+  #   rev-parse --verify --quiet HEAD              rc=0    4ms   helper invocations: 0  (sha printed)
+  #   rev-parse --verify --quiet 'HEAD^{commit}'   rc=1   10ms   helper invocations: 2  (LAZY FETCH)
+  #   cat-file -t <that sha>                       rc=128        helper invocations: 1  (LAZY FETCH)
+  #
+  # A second measurement separates the OBJECT READ from the network, in a plain repository with a
+  # FIFO planted at HEAD's LOOSE object path (this pre-flight's own FIFO idiom):
+  #
+  #   rev-parse --verify --quiet HEAD              rc=0    3ms   (sha printed)
+  #   rev-parse --verify --quiet 'HEAD^{commit}'   BLOCKED       (bound fired at 3s)
+  #
+  # So the unpeeled form resolves the REF without reading the OBJECT it names, and that is what
+  # makes the peel movable. The peel — and the "is it a COMMIT" validation — happen below, in the
+  # ISOLATED scratch, which configures no promisor and reaches HEAD's objects only through an
+  # alternate: pure object storage, no config, nothing for a helper to be invoked from.
+  #
+  # THE ARGUMENT MUST STAY A BARE REF NAME, and this is the contract a future caller inherits: the
+  # measurement above says a REF resolution reads no object, and it says nothing about a rev
+  # EXPRESSION. `HEAD^{commit}`, `HEAD~1`, `<tag>^{}` and a tag name all DEREFERENCE — i.e. read
+  # objects — so any of them here re-opens the lazy-fetch route this replaced, whatever the
+  # `--verify --quiet` spelling suggests. A caller needing a peeled or walked rev must ask the
+  # SCRATCH, exactly as the block below does. `scripts/tests/test_agent_gate_component_set.sh::
+  # 3757-live-call-allowlist` fails the suite if any live call grows a peel operator (or any other
+  # undeclared argument shape).
+  _cs_live_git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet HEAD
+  if _cs_live_refuse "HEAD's sha (the ref only, unpeeled)"; then return 0; fi
+  local head_unpeeled="$_CS_LIVE_OUT" peel_rc=0
+  if [ -n "$head_unpeeled" ]; then
+    # THE READ REPOSITORY IS ASSERTED, NOT ASSUMED (#3757) — and the assertion is UPSTREAM, at the
+    # scratch assignment, not here (roborev job 347). A check at this consumer could only report a
+    # prohibited read that the four earlier consumers had already performed. See the assertion at
+    # the `_CS_READ_DIR="$csdir/repo"` assignment for why one placement there dominates all of
+    # them; there is deliberately no second check at this site, because two checks on one property
+    # is the drift this region keeps removing.
+    # PEEL + COMMIT-VALIDATE IN THE ISOLATED SCRATCH, and BOUNDED there for the reason job 315
+    # recorded for the ancestry walk: this reads a commit object out of the LANE's SHARED object
+    # store through the alternate, and a LOOSE object is read as a stream, so a FIFO planted at an
+    # object path by a PEER LANE hangs it. 124/137/`$_CS_UNBOUNDABLE_RC` therefore take the SAME
+    # `repo-read-blocked` / UNBOUNDED refusals as every other read here — a missing capability must
+    # never inherit the permissive branch.
+    #
+    # The capture triple is already memoized IN THE PARENT by the earlier DIRECT `_cs_live_git`
+    # calls (the git-directory read at the top of this function), so this command substitution
+    # cannot leave capture files behind with nobody holding their paths — the leak
+    # `_cs_live_git`'s header records, and the same reasoning the slow path's `cssha=$( … )` relies on.
+    _CS_HEAD_SHA=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" rev-parse --verify --quiet "${head_unpeeled}^{commit}" 2>/dev/null); peel_rc=$?
+    if [ "$peel_rc" -eq 124 ] || [ "$peel_rc" -eq 137 ] || [ "$peel_rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+      _CS_KIND=repo-read-blocked
+      if [ "$peel_rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+        # `repo-read-blocked`, NOT `unboundable`, AND THE PRECEDENT IS THE ADJACENT ANCESTRY WALK
+        # (roborev job 325, nit 4). Every `_cs_live_git` call maps this same condition to
+        # `unboundable`, and that kind's own comment argues against "a second spelling... two
+        # names for one fact" — so the choice is stated rather than left to be inferred. Two
+        # reasons for following the walk instead of the wrapper: this is a read of the LANE's
+        # SHARED OBJECT STORE (the walk's subject), not of the live repository's config (the
+        # wrapper's), so an operator reading the detail is being sent to `find <objdir> -type p`
+        # and not to `git config --get-all include.path`; and the walk 15 lines below already
+        # spells an unboundable object read this way, so matching the wrapper here would put TWO
+        # spellings on the SAME condition inside one block. No verdict changes either way —
+        # both kinds are non-`ok`, hence UNMEASURED.
+        _CS_DETAIL="peeling HEAD ($head_unpeeled) to a commit could not be BOUNDED on this host (no timeout, no gtimeout, no sleep for the bash watchdog, or no capture file) — refusing to run an UNBOUNDED read of the lane's object store, which could hang the gate outright; a missing capability must not inherit the permissive branch"
+      else
+        _CS_DETAIL="peeling HEAD ($head_unpeeled) to a commit EXCEEDED its ${_CS_BOUND_HINT}s bound reading that object from this lane's SHARED object store — the read never returned. A LOOSE object there is read as a stream, so a FIFO planted at an object path hangs it, and on this fleet that store is shared by every lane on the box. Inspect it by resolving the object directory with \`git rev-parse --git-path objects\` and searching that directory for FIFOs with \`find <objdir> -type p\`"
+      fi
+      return 0
+    fi
+    # A PEEL THAT FAILED IS INDETERMINATE, NEVER A FALSE `BEHIND` — the rc=128 semantics below are
+    # unchanged. HEAD names no commit this run can READ: an unborn or broken HEAD, a ref naming a
+    # non-commit, or an object genuinely absent from the lane's store. Deliberately NOT fetched: a
+    # missing HEAD object is a broken checkout, not a reason for a pre-flight whose whole premise is
+    # that it reaches no network to reach one.
+  fi
   if [ -z "$_CS_HEAD_SHA" ]; then
     rc=128
   else
@@ -9761,9 +10088,10 @@ export -f check_unittest_targets_ran
 #
 # The jest ANALOGUE of check_unittest_targets_ran (issue #3522). A green `npm test` exit
 # is not evidence that anything ran: a suite whose every TEST is `test.skip`ped is
-# reported as a PASSED suite, so `Test Suites: 27 passed, 27 total` is reachable over
-# zero real assertions — the vacuous green this whole issue exists to remove, arriving
-# through the widened lane's own plumbing. (Jest's suite-level `skipped` count is a
+# reported as a PASSED suite, so a `Test Suites: N passed, N total` line covering EVERY
+# suite is reachable over zero real assertions — the vacuous green this whole issue
+# exists to remove, arriving through the widened lane's own plumbing. (The illustration
+# named a literal count until #3772; it was stale, and an EXAMPLE does not need one.) (Jest's suite-level `skipped` count is a
 # DIFFERENT and weaker signal: it catches a whole FILE being skipped, not a file whose
 # every test was. That is why the two are separate directions below rather than one.)
 #
@@ -10538,6 +10866,20 @@ EOF
 # full suite adds ~15–35s on top of it — 504 passing tests across 27/27 suites, green
 # on two consecutive runs. That is not a cost worth 26 suites of blindness.
 #
+# THE COUNTS IN THE TWO PARAGRAPHS ABOVE ARE DATED MEASUREMENTS AND ARE KEPT ON PURPOSE
+# (issue #3772, which removed the stale ones elsewhere in this file). The line #3772
+# draws, so that a later reader does not "finish the job" by deleting these too:
+#   * a claim about WHAT IS TRUE NOW ("the list is N files", "they agree at N today")
+#     decays the moment a test file is added, so it is never written down -- every such
+#     claim in this component is DERIVED at run time instead;
+#   * a claim about WHAT WAS MEASURED THEN, attributed to the change that measured it
+#     (#1255 narrowed to 1 of 27; #3522 measured 504 passing tests across 27/27 and
+#     ~15-35s), is a dated record of a past state. It stays true however the suite
+#     grows, exactly like the measurement in a commit message, and deleting it would
+#     destroy the evidence for a decision rather than refresh it.
+# If you are unsure which kind you are writing: if adding one test file would make the
+# sentence false, it is the first kind -- derive it or drop it.
+#
 # THE CORPUS HALF IS NOW HONOURED, NOT AVOIDED — AND THE REASON IS NOT THE ONE THIS
 # COMMENT FIRST GAVE (roborev/rust-reviewer round 1, B4). 14 of the suite's files gate on
 # dataset availability, so node-bindings IS now in DATASET_COMPONENTS (it was NOT before,
@@ -10711,9 +11053,22 @@ run_node_bindings() {
   census+=("  AFFIRMED BY NAME (#1465): the 2 exception-path/abandoned-iterator LEAK BUDGET tests")
   census+=("       inside leak-paths.test.js, checked from this run's own jest --json report. The")
   census+=("       suite guards judge the file set and per-suite work; only this one knows WHICH")
-  census+=("       tests must have passed. ONE executor: the npm test above (measured — the")
-  census+=("       all-projects jest --listTests is 28 files with no duplicates and includes the")
-  census+=("       leak file), so npm run test:leaks is a human/debug entry point, not a lane.")
+  census+=("       tests must have passed. ONE executor: the npm test above (a bare npm test runs")
+  census+=("       both jest projects, and the config hands the leak file to exactly one of")
+  census+=("       them), so npm run test:leaks is a human/debug entry point, not a lane. What")
+  census+=("       THIS RUN establishes, rather than asserts: the reconciled file count, printed")
+  census+=("       below as \"suite set RECONCILED: N\"; and that the leak file executed EXACTLY")
+  census+=("       ONCE — zero or twice would fail check_jest_suites_ran (jest reported total vs")
+  census+=("       the DEDUPLICATED disk inventory) and the affirmation itself (suites.length")
+  census+=("       !== 1 at the leak path). No guard reads a jest PROJECT identity; that both")
+  census+=("       projects ran follows from the config plus the COMPLETE per-suite results —")
+  census+=("       the leak file evidences the leaks project, and the OTHER reconciled suites")
+  census+=("       evidence the default one. Neither half evidences the other. This line used")
+  census+=("       to carry a hard-coded")
+  census+=("       file count asserted as duplicate-free; it had gone stale as the suite grew,")
+  census+=("       and its cited oracle could not see a duplicate anyway (jest --listTests")
+  census+=("       DEDUPES across projects — measured, #3772). No count is printed here now, in")
+  census+=("       either direction: a fresh one would only restart the same decay.")
   census+=("       Budgets run STRICT here: CQLITE_LEAK_BUDGET_RELAX is UNSET for every node")
   census+=("       invocation of this component (#1465 V1), so no inherited value — including a")
   census+=("       CI runner env — can double a ceiling in the gate of record.")
@@ -10739,9 +11094,11 @@ run_node_bindings() {
   # WHY TWO, AND WHY ONE WAS NOT ENOUGH (roborev round 3, D1). `jest --listTests` is the
   # right oracle for the ACTUAL set — it applies this package's `testMatch`
   # (`**/__test__/**/*.test.js`, RECURSIVE) and jest's ignore patterns, which a
-  # `find -maxdepth 1` cannot reproduce (it agrees at 27 today and would silently
-  # UNDERCOUNT the day a subdirectory appears, false-redding healthy code). That argument
-  # stands and is why the find below is RECURSIVE and is NOT used to select what runs.
+  # `find -maxdepth 1` cannot reproduce: it agrees with jest's list for as long as
+  # __test__/ stays flat, and would silently UNDERCOUNT the day a subdirectory appears,
+  # false-redding healthy code. That argument stands and is why the find below is
+  # RECURSIVE and is NOT used to select what runs. (No count stated -- #3772: a
+  # "they agree at N today" is a claim about TODAY, and this one had gone stale.)
   #
   # But using it as the EXPECTED count too made the guard SELF-REFERENTIAL: the expectation
   # and the run both flow from jest's configuration, so a `testMatch` narrowing or an added
@@ -11090,8 +11447,9 @@ run_node_bindings() {
       cd "'"$REPO_ROOT"'/bindings/node"
       npm test -- --json --outputFile="$CQLITE_JEST_JSON"' >>"$log" 2>&1; then
     # A green `npm test` is NOT sufficient: jest reports a suite whose every describe
-    # was skipped as PASSED, so the exit code alone cannot distinguish 27 suites of
-    # assertions from 27 suites of nothing.
+    # was skipped as PASSED, so the exit code alone cannot distinguish a full suite of
+    # assertions from the same number of suites containing nothing. (The argument never
+    # needed a count and no longer states one -- #3772.)
     # BOTH halves are required and neither implies the other (roborev round 5, F1):
     # check_jest_suites_ran judges the FILE SET and the aggregate counts;
     # check_jest_per_suite_passed judges whether EACH reconciled suite did any work. A suite
@@ -11921,6 +12279,14 @@ run_compaction_byte_parity() {
 # falls back to the in-repo committed fixture when CQLITE_DATASETS_ROOT names a corpus
 # that lacks it. Under the previous keyspace-granular resolution the case skipped.
 #
+# Fourth invocation — scripts/tests/test_issue_3358_failclosed.sh (#3731/#3220 AC3), the
+# same positive control for the OTHER committed-fixture BTI lane,
+# issue_3358_bti_query_token_bound. Its #3220 hardening recorded the RED verification as
+# measurements in a PR comment, which proves a guard fired once and regression-protects
+# nothing: a run with the fixture PRESENT is identical whether or not `fixture()` still
+# fails closed. roborev job 252 raised exactly that. Runs HERE for the same reason as the
+# third invocation — it drives a test binary this component's feature set has built.
+#
 # Third invocation — scripts/tests/test_point_vs_full_failclosed.sh (#3220 AC2), the
 # POSITIVE CONTROL for everything above: a green lane proves nothing unless the same
 # lane FAILs on a fixture that is absent from every candidate root AND on one that is
@@ -11950,7 +12316,16 @@ run_bti_multiclustering() {
   # word as the command.
   local -a ds_env=()
   [ -n "${CQLITE_DATASETS_ROOT:-}" ] && ds_env=(CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT")
+  # DECLARES WHAT IT RUNS, because the SUMMARY annotation structurally cannot. That line
+  # is derived from cargo argv observed in THIS shell, and the interceptors are unexported
+  # by design, so the 6 cargo invocations inside the two fail-closed sub-scripts are
+  # invisible to it: the annotation reads `x2` while this component drives 8. Not drift —
+  # `x2` truthfully names what the renderer saw — but a reader pasting the SUMMARY would
+  # not know either harness ran. The narrowing is therefore declared HERE, in the emitted
+  # log, on the same principle as flight-tests printing what it does not execute.
   echo ">>> [$name] compound-clustering BTI trie shape + SELECT + point-vs-full lanes, fail-closed (#3032/#3220)"
+  echo ">>> [$name] + 2 fail-closed positive controls, 6 further cargo runs NOT named by the SUMMARY annotation:"
+  echo ">>> [$name]     test_point_vs_full_failclosed.sh (#3220 AC2), test_issue_3358_failclosed.sh (#3731 AC3)"
   if env CQLITE_REQUIRE_FIXTURES=1 "${ds_env[@]}" \
       cargo test -p cqlite-core --features "state_machine cli-helpers" \
         --test issue_3032_multiclustering_rows_trie_shape \
@@ -11958,7 +12333,8 @@ run_bti_multiclustering() {
     && env -u CQLITE_REQUIRE_FIXTURES "${ds_env[@]}" \
       cargo test -p cqlite-core --features "state_machine cli-helpers" \
         --test point_vs_full_differential >>"$log" 2>&1 \
-    && bash "$REPO_ROOT/scripts/tests/test_point_vs_full_failclosed.sh" >>"$log" 2>&1; then
+    && bash "$REPO_ROOT/scripts/tests/test_point_vs_full_failclosed.sh" >>"$log" 2>&1 \
+    && bash "$REPO_ROOT/scripts/tests/test_issue_3358_failclosed.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -14802,6 +15178,23 @@ run_tooling_tests() {
     return 0
   fi
 
+  # #3689: the one-shot smoke harness must run its WHOLE suite through a failing
+  # test. It used to abort on the first failure (a bare `set -e` inside run_test
+  # clobbering main()'s `set +e`), so a stale CSV golden hid an identical
+  # staleness in select_simple_table.golden. Hermetic: stub CLI, no cargo, no
+  # dataset corpus, no network. Carries its own positive control.
+  echo ">>> [$name] bash scripts/tests/test_ci_one_shot_smoke_no_abort.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ci_one_shot_smoke_no_abort.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ci-one-shot-smoke no-abort guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   echo ">>> [$name] bash scripts/tests/test_check_dockerfile_rust_pin.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_check_dockerfile_rust_pin.sh" >>"$log" 2>&1; then
     status=FAIL
@@ -16364,7 +16757,7 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
@@ -16375,6 +16768,7 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_perf_capability_bootstrap.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_claim_lock.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_claim_heartbeat.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_drive_issue_state.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/flow/tests/claim-resume.test.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_premerge_assert.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_base_staleness.sh" >>"$log" 2>&1 &&

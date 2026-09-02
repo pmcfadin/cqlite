@@ -56,6 +56,12 @@ pub enum FilterError {
 pub struct TokenFilter {
     start: i64,
     end: i64,
+    /// Ring wrapping, DERIVED from `start`/`end` at construction the way
+    /// `Range.isWrapAround` derives it (`start >= end`) — never taken from the
+    /// ticket's wire flag (issue #3634). Kept as a field rather than recomputed
+    /// per call because `contains`/`overlaps` are per-row and per-SSTable hot
+    /// paths; it is private, and `ScanSpec::from_ticket` is the only constructor
+    /// outside this crate's tests, so it cannot drift from the endpoints.
     wraparound: bool,
 }
 
@@ -71,11 +77,14 @@ impl TokenFilter {
     /// half-open `(start, end]` membership EXACTLY (including the `start == end`
     /// FULL-ring convention, #2228); `token_filter_lowering_agrees_with_core` pins
     /// that agreement so the two never diverge.
+    ///
+    /// The core bound DERIVES its wrapping from the endpoints the way
+    /// `Range.isWrapAround` does, so this filter's own `wraparound` flag is not
+    /// carried across (issue #3634); the grid test covers both spellings.
     pub fn to_scan_bound(self) -> cqlite_core::storage::sstable::reader::ScanTokenBound {
         cqlite_core::storage::sstable::reader::ScanTokenBound {
             start_excl: self.start,
             end_incl: self.end,
-            wraparound: self.wraparound,
         }
     }
 
@@ -256,11 +265,32 @@ impl ScanSpec {
     pub fn from_ticket(ticket: &FlightTicket, schema: &TableSchema) -> Result<Self, FilterError> {
         let token = match (ticket.token_start, ticket.token_end) {
             (None, None) => None,
-            (start, end) => Some(TokenFilter {
-                start: start.unwrap_or(i64::MIN),
-                end: end.unwrap_or(i64::MAX),
-                wraparound: ticket.wraparound,
-            }),
+            (start, end) => {
+                let start = start.unwrap_or(i64::MIN);
+                let end = end.unwrap_or(i64::MAX);
+                Some(TokenFilter {
+                    start,
+                    end,
+                    // DERIVED from the endpoints, never copied from the ticket
+                    // (issue #3634). `ticket.wraparound` is a `#[serde(default)]`
+                    // WIRE field that `validate()` does not check against
+                    // `token_start`/`token_end`, so a client can present a flag
+                    // that disagrees with its own bounds — a state Cassandra
+                    // cannot express, since `Range.isWrapAround(left, right)` IS
+                    // `left.compareTo(right) >= 0`.
+                    //
+                    // Deriving here is what keeps this filter consistent with the
+                    // core bound it lowers to: `to_scan_bound` derives the same
+                    // way, while `contains` and `overlaps` read this field, and
+                    // `contains` alone gates FOUR serving paths (producer_stream,
+                    // producer_point, producer_drive, statics) that take no
+                    // pushdown. Copying an inconsistent flag here therefore made
+                    // those paths answer differently from the pushdown for the
+                    // SAME ticket — path-dependent rows, which is worse than
+                    // either answer alone.
+                    wraparound: start >= end,
+                })
+            }
         };
 
         // Preserve v1 validation: a flat `IN` predicate must carry a JSON array

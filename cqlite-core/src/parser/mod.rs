@@ -131,10 +131,14 @@ pub mod types;
 #[cfg(test)]
 pub mod udt_tests;
 pub mod vint;
+// #3848: truncation-free narrowing of a VInt/VUInt length for the `nom`
+// parsers (`take(len as usize)` silently accepts a truncated length on a 32-bit
+// target). Its own module because `vint.rs` is over the size threshold.
 #[cfg(test)]
 mod vint_j4_tests;
 #[cfg(test)]
 mod vint_length_corpus_audit_tests;
+pub mod vint_narrow;
 
 // Re-export binary format parser
 pub use binary::{CQLiteParseError, ParseResult, SSTableParser};

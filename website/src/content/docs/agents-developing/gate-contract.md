@@ -87,7 +87,12 @@ carry).
   convention: the third argument is REQUIRED, and the script refuses the merge unless that file holds
   one full `==== AGENT-GATE SUMMARY ====` block with `RESULT: PASS`, `tree-integrity: PASS`, no
   `nested-under:` line (#2874: a nested sub-gate runs at the SAME tree, so the sha binding provably
-  cannot see it) and `commit:`/`tree-start:` covering the certified sha. A `--lite` summary is refused
+  cannot see it), `dirty: no` (#3648) and `commit:`/`tree-start:` covering the certified sha. The
+  `dirty:` requirement is the third property the sha binding cannot see: a `dirty: yes` run certified
+  the sha PLUS uncommitted TRACKED edits (the gate's capture is `--exclude-standard`, so never a
+  gitignored log) and stamps the very same `commit:`/`tree-start:` it would have stamped clean. It is
+  matched AFFIRMATIVELY — an absent, empty or unrecognised value REFUSES rather than being read as
+  clean — and there is deliberately no env opt-out, because a dirty tree is always re-gateable. A `--lite` summary is refused
   by name anywhere, and a `--delta` summary as the THIRD argument (their headers are distinct by
   construction) — which is exactly the PR #3408 escape: 22 lite PASSes and no full gate.
   **The OPTIONAL fourth argument is how a `--delta` re-cert certifies a merge.** #1892 *mandates*
@@ -95,7 +100,9 @@ carry).
   `X`, and mandates the PR record BOTH blocks — so a 3-arg-only guard red on correct, mandated input.
   In that shape the third argument is the ANCHOR's full PASS (its sha need not be the certified sha)
   and the fourth is one `==== AGENT-GATE DELTA SUMMARY ====` block carrying `MODE: delta` (asserted
-  affirmatively, the inverse of the full block's belt), `RESULT: PASS`, `tree-integrity: PASS`, a
+  affirmatively, the inverse of the full block's belt), `RESULT: PASS`, `tree-integrity: PASS`,
+  `dirty: no` (#3648 — required of the anchor block too, since a dirty anchor hangs the whole chain
+  off a tree nobody can reconstruct), a
   `delta-anchor:` naming exactly that anchor — an `(UNRESOLVED)` anchor refuses — and its own
   `commit:`/`tree-start:` at the certified sha. The chain is closed end to end; a delta block ALONE
   is still the #3408 escape and still refused.
@@ -754,13 +761,58 @@ Exit codes: `0` = PASS, `1` = FAIL/REFUSED (`--delta`), `2` = usage/anchor error
 
 ## Tiered gate: `--lite` iterate, full gate once (issue #1821)
 
-The gate is tiered. `scripts/agent-gate.sh --lite` runs only the fast subset
-(file-size + fmt + scoped workspace clippy + blast-radius-scoped tests, ~1–5 min).
-It is the **fast iteration loop, NOT the gate of record** — it emits a DISTINCT
-`==== AGENT-GATE LITE SUMMARY ====` block (`MODE: lite`) that must **never** be
-pasted as the full SUMMARY. Iterate on `--lite` every fix round; run the FULL
-`scripts/agent-gate.sh` **exactly once** before merge. `--lite` never replaces the
-full gate.
+The gate is tiered. `scripts/agent-gate.sh --lite` runs only the reduced component
+set (`LITE_COMPONENTS`: file-size + fmt + scoped workspace clippy + `roborev-lints`
++ blast-radius-scoped tests). It is the **fast iteration loop, NOT the gate of
+record** — it emits a DISTINCT `==== AGENT-GATE LITE SUMMARY ====` block
+(`MODE: lite`) that must **never** be pasted as the full SUMMARY. Iterate on
+`--lite` every fix round; run the FULL `scripts/agent-gate.sh` **exactly once**
+before merge. `--lite` never replaces the full gate.
+
+**`--lite` is NOT a flat `~1–5 min` budget — its cost is a FUNCTION of the diff
+(issue #3764).** There are **two cost drivers, and only ONE of them scales with
+your diff.**
+
+1. **`clippy` is NOT diff-scoped.** `--lite` dispatches the IDENTICAL `run_clippy`
+   the full gate does — `run_component clippy run_clippy` at
+   `scripts/agent-gate.sh:17233` and `:18220` respectively — i.e. the issue #1844
+   **per-package scoped workspace** matrix at `:9357`, and `run_clippy` never reads
+   the diff. (The whole-workspace `--all-features --all-targets` pass is the
+   `CQLITE_CLIPPY_FULL=1` path only; do not read the scoped matrix as that one.) So
+   **every** `--lite` pays clippy IN FULL whatever the diff: measured over 188
+   completed lite runs it is a no-op warm, 2–7 min part-warm, and **16–24 min
+   cold**.
+2. **`scoped-tests` is diff-scoped, and it has a fan-out leg.** It RUNS the touched
+   package's `--lib` plus the diff's new `--test` targets (owners by longest-prefix
+   path match over `cargo metadata`, from `merge-base(HEAD, <base>)...HEAD` — where
+   `<base>` is the FIRST of `origin/main` → `main` → `origin/master` → `master` that
+   resolves (`:16870`) — **plus `git diff HEAD`, i.e. the uncommitted diff over
+   TRACKED files only, untracked excluded**; defaults to `cqlite-core --lib` when
+   no rust package is in the diff) — **and when a changed path is under
+   `cqlite-core/src/` it ALSO runs `cargo test -p <pkg> --all-targets --no-run` for
+   every workspace member that DIRECTLY DECLARES a dependency on `cqlite-core`
+   (the `--no-deps` metadata edge) and owns a `--test` target (issue #2658:
+   COMPILE-CHECKED, never run).** That leg — not "touched packages",
+   which consult no dependency edge at all — is why a core-src diff annotates 9–11
+   package sets, and its `--all-targets` is what balloons `target/debug/deps`
+   (**+18 GB in a single round** — reported by another lane in issues #3763/#3764,
+   not measured here).
+   **`cqlite-core/tests/**` does NOT trigger the fan-out; `cqlite-core/src/**`
+   does.**
+
+**Measured bands** (completed runs, one fleet box): a **narrow, WARM-clippy** diff
+is **median 1.4 min** (n=43) — so the `~1–5 min` this page used to claim is that case
+exactly, a **FLOOR and not a range**; a **`cqlite-core/src/`** diff is **median 20
+min, range 3.8–43 min** (n=20). **The two bands are marginal over DIFFERENT subsets
+and do not compose** — a 1.4 min run is by construction one that paid no cold clippy,
+so the cold-clippy band is not additive on top of it. Beyond those, lane-3612
+**reports** (not measured here) **up to ~104 min under peer load** in issue #3764.
+
+**And `--lite` is EXEMPT from the issue #1825 gate-slot cap** (as are `--delta` and
+`--only`) — it runs outside slot arbitration entirely, so on a shared box its build
+competes with a peer's gate of record for disk and CPU with nothing arbitrating it.
+**There is NO admission check for `--lite` today, and issue #3763 owns that gap** —
+read this as a budgeting fact, not as an instruction to apply one yourself.
 
 **Division of labor (issues #1855, #2084).** In the worker → subagent model, an
 implementer subagent (`sstable-developer`) edits, commits, pushes, and verifies
@@ -892,7 +944,11 @@ On **Linux** the line additionally carries a `mold=` token and a `perf=` token
 
 ```
 accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=ok
+cpu-budget: wrapper=nice ncpu=16 max-concurrency=1(pinned) cores-per-gate=16 build-jobs=16(derived) test-threads=16
 ```
+
+(The `cpu-budget:` line is a sibling of `accelerators:` and carries the resolved
+slot cap **and where it came from** — see the concurrency-cap section below.)
 
 - **`sccache`** — cross-worktree compile cache (~25.6% faster fresh builds).
 - **`nextest`** — parallel `core-tests` (the gate's long pole).
@@ -947,6 +1003,23 @@ caller blocks cleanly rather than spin-failing.
 - **N** defaults to `max(2, floor((ncpu-2)/4))` — a conservative fraction of cores
   that still lets a couple of gates run on a small box. Override with
   `CQLITE_GATE_MAX_CONCURRENCY`.
+- **Every SUMMARY says where N came from (issue #3414).** The `cpu-budget:` line
+  stamps `max-concurrency=N(pinned|default|invalid|clamped)`, the same idiom as
+  `build-jobs=N(derived|caller)` beside it: `pinned` = the env var held a valid
+  integer ≥ 1 and was used verbatim, `default` = it was unset so N is the formula
+  above, `invalid` = it was empty or non-numeric and was silently discarded for the
+  formula, `clamped` = it was a valid integer < 1 and was silently raised to 1.
+  `3` and `3 because nothing set it` are different operational facts — read
+  `N(default)` on a fleet box as *the pin is not provisioned*.
+
+  **The remedy DIFFERS BY TOKEN, and getting that wrong sends you in a circle.** A
+  `default` box has no pin line at all, so
+  `bash scripts/bootstrap-agent-machine.sh --fix-gate-pin` (or `--yes`) persists one.
+  An `invalid` or `clamped` box ALREADY HAS the line, holding a bad value — and
+  bootstrap deliberately never rewrites an existing value, because a box running >1
+  gate on purpose must not be clobbered — so re-running it there is a **silent
+  no-op**. Fix the VALUE by hand in `/etc/environment`. Bootstrap says the same thing
+  at the same fork, as `gate-pin: NOT-HONOURED`.
 - **SIGKILL-safe stale-slot reaping:** each slot is an `fcntl.flock` held by a
   small background daemon (`scripts/lib/gate_slot_daemon.py`) that the gate starts
   and monitors. Because the daemon opens the lock fd *after* it is forked, the

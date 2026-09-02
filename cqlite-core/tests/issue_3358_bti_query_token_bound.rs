@@ -1,8 +1,9 @@
 //! Issue #3358: `stream_all_partitions_for_query` must narrow to its
 //! `token_bound` on a BTI (`da`) reader, as it already does on an `nb` one.
 //!
-//! `ScanTokenBound::contains` is called in one place, the Summary-guided walk in
-//! `summary_scan/mod.rs`, and `stream_all_partitions_for_query` gates that walk on
+//! When #3358 was filed, `ScanTokenBound::contains` had ONE caller, the Summary-guided
+//! walk in `summary_scan/mod.rs`; the fix this file pins added a second,
+//! `TokenGate::admits`. `stream_all_partitions_for_query` gates that walk on
 //! `self.index_reader.is_some() && self.bti_partitions_db.is_none() &&
 //! summary_usable`. Every BTI generation has a `Partitions.db`, so the second term
 //! is false for every `da` reader on every call: the "full-ring fallback" below the
@@ -35,9 +36,32 @@
 //! "the whole ring" and "the range" would be the same answer and the test could
 //! not discriminate.
 //!
-//! Requires the gitignored `Data.db` binaries; SKIPs (never passes with zero rows)
-//! when absent. `CQLITE_DATASETS_ROOT` is honored first, else the in-repo
-//! `test-data/datasets` corpus is used.
+//! This fixture is COMMITTED SOURCE, not part of the gitignored fetched corpus:
+//! `git ls-files` lists its `da-1-bti-*` components and `git check-ignore` does not
+//! match them, so it is present in every complete checkout and appears in a fresh
+//! `git worktree add` without any fetch. Absence therefore means a BROKEN CHECKOUT,
+//! never an expected condition — so every case here is `must_run` and fails CLOSED
+//! (issue #3220). It deliberately does NOT skip: this file is the only end-to-end
+//! pin of #3358, a silent-wrong-data defect, and a skip would leave a green suite
+//! that certified nothing. The reachable way to lose the file is real and already
+//! documented — #3310 added reporting for git-tracked fixtures a SIGKILLed fetch
+//! left deleted — which is exactly the case a skip would swallow.
+//!
+//! Fixture roots resolve through the SHARED `support/datasets_root.rs` resolver, not a
+//! private copy: `CQLITE_DATASETS_ROOT` is honored first, then the in-repo
+//! `test-data/datasets` corpus, and EVERY candidate is probed for this TABLE's own
+//! `da-1-bti-Data.db` rather than committing to a root by keyspace (issue #3220),
+//! because neither root is a superset — the root `fetch-datasets.sh` prints does not
+//! carry this fixture and the checkout does.
+//!
+//! Using the shared module rather than re-deriving the rule is what makes the
+//! fail-closed guard OBSERVABLE (#3220 AC3). The checkout candidate is built from
+//! `CARGO_MANIFEST_DIR`, a COMPILE-TIME constant, so with a private resolver the only
+//! way to stage "the committed fixture is unreadable" is deleting a git-tracked file
+//! from the working tree — which also trips the gate's mid-run `tree-integrity` check
+//! (#2926). The shared module's `CQLITE_TEST_CHECKOUT_SSTABLES_ROOT` seam substitutes
+//! the checkout candidate instead, and can only ever REMOVE fixtures from view, so a
+//! stray value makes this lane FAIL, never pass vacuously.
 
 #![cfg(feature = "state_machine")]
 
@@ -53,29 +77,48 @@ use cqlite_core::storage::sstable::reader::{SSTableReader, ScanTokenBound};
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use cqlite_core::Config;
 
+// The #3220 fixture-root rule lives HERE, once, and is regression-tested on synthetic
+// roots by `issue_3220_datasets_root_resolution.rs`. A private re-derivation in this
+// file would be the very shape #3220 exists to remove, and would carry no test seam.
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
+
 const KEYSPACE: &str = "test_da";
 const TABLE: &str = "wide_multiclustering_small";
 const SSTABLE_PREFIX: &str = "da-1-bti";
 
-/// Repo root = the parent of this crate's manifest dir (`<repo>/cqlite-core`).
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("cqlite-core has a parent repo dir")
-        .to_path_buf()
+/// Single-quote a path for safe pasting into a shell.
+///
+/// Checkout paths on this fleet contain no spaces today, but a remedy is copied by
+/// hand into a terminal, so a path holding a space or a shell metacharacter would
+/// silently run a different command. Single quotes disable all expansion; an embedded
+/// single quote is closed, escaped and reopened, the standard POSIX form.
+fn shell_quote(p: &Path) -> String {
+    format!("'{}'", p.display().to_string().replace('\'', "'\\''"))
 }
 
-/// The `<table>-<cfid>` generation dir, requiring a real `Data.db` so a JSONL-only
-/// checkout SKIPs rather than passing with zero rows.
+/// The `<table>-<cfid>` generation dir holding this fixture's `da-1-bti` generation.
+///
+/// Candidate roots come from [`datasets_root::sstables_root_candidates`] — the shared,
+/// deduplicated, workspace-anchored list, including the override seam the RED
+/// verification uses — and each is probed with THIS generation's own `Data.db`. The
+/// first root that actually holds it wins: resolution is by EVIDENCE, never by a fixed
+/// env-first/checkout-first preference, because neither root is a superset (#3104).
+///
+/// The probe is `{SSTABLE_PREFIX}-Data.db` rather than the shared
+/// [`datasets_root::table_has_data`]'s any-`*-Data.db` test, matching the oracle's
+/// `sstables_root_for_case` precedent for a format-specific fixture. The stricter
+/// predicate matters in the safe direction: a root carrying some OTHER generation of
+/// this table would satisfy `table_has_data`, win the selection, and then hard-FAIL
+/// this `must_run` lane on a checkout that does hold the `da` copy — a guard that reds
+/// on correct input is the guard agents learn to waive.
+///
+/// `None` means no candidate held it, which [`fixture`] turns into a hard failure —
+/// this fixture is committed source.
 fn fixture_dir() -> Option<PathBuf> {
-    let roots = std::env::var("CQLITE_DATASETS_ROOT")
-        .ok()
-        .map(PathBuf::from)
-        .into_iter()
-        .chain(std::iter::once(repo_root().join("test-data/datasets")));
-    for root in roots {
-        let keyspace_dir = root.join("sstables").join(KEYSPACE);
-        let Ok(entries) = std::fs::read_dir(&keyspace_dir) else {
+    let data_db = format!("{SSTABLE_PREFIX}-Data.db");
+    for root in datasets_root::sstables_root_candidates() {
+        let Ok(entries) = std::fs::read_dir(root.join(KEYSPACE)) else {
             continue;
         };
         let mut candidates: Vec<PathBuf> = entries
@@ -88,10 +131,7 @@ fn fixture_dir() -> Option<PathBuf> {
             })
             .collect();
         candidates.sort();
-        if let Some(dir) = candidates
-            .into_iter()
-            .find(|p| p.join(format!("{SSTABLE_PREFIX}-Data.db")).is_file())
-        {
+        if let Some(dir) = candidates.into_iter().find(|p| p.join(&data_db).is_file()) {
             return Some(dir);
         }
     }
@@ -204,9 +244,116 @@ struct Fixture {
 
 /// The fixture's partitions in ring order, with the golden's row count each.
 ///
-/// Returns `None` when the `Data.db` binaries are absent, which is the SKIP.
-fn fixture() -> Option<Fixture> {
-    let dir = fixture_dir()?;
+/// PANICS when the fixture is absent — it is committed source, so absence is a broken
+/// checkout and #3220 requires `must_run`, fail-closed unconditionally. There is no
+/// opt-out env var and none may be added: committed source in a checkout is never
+/// legitimately absent, so an escape hatch could only buy a vacuous green.
+fn fixture() -> Fixture {
+    let dir = fixture_dir().unwrap_or_else(|| {
+        // DELIBERATELY NOT a synthesized `git restore` command. Five review rounds
+        // produced five different defects in one hand-built remedy string — an
+        // unsubstituted `<cfid>`, shell-redirection from the `<`, crate-relative paths
+        // that resolve to nothing when run from `cqlite-core/`, a glob that would
+        // restore the WHOLE fixture directory and silently discard a reader's unrelated
+        // uncommitted changes, and a repo-root anchor that still fails when pasted
+        // outside the checkout. The variant list was not closing.
+        //
+        // `fetch-datasets.sh --verify-only` already emits a precise, safe restore
+        // command for exactly this case (#3310: it names git-tracked fixtures a
+        // SIGKILLed fetch deleted). Pointing at the tested emitter is strictly better
+        // than reproducing it here badly, so this message names ONE command and lets
+        // that tool produce the restore line. Do not "helpfully" add one back.
+        //
+        // BOTH values in the emitted command are ABSOLUTE, and both are load-bearing.
+        //
+        // The probe is scoped to the root it is given. On a fleet box
+        // CQLITE_DATASETS_ROOT points at a machine-local corpus OUTSIDE any git work
+        // tree, where it correctly reports `NO SUBJECT` and exits 0 — measured: it finds
+        // none of the 10 deleted files. So the caller's value must not be inherited.
+        //
+        // Unsetting it is NOT enough, which cost a review round: the script then falls
+        // back to a CWD-RELATIVE `test-data/datasets`, and `cargo test -p cqlite-core`
+        // is routinely run from `cqlite-core/`, where that names nothing and the command
+        // silently reports no missing fixtures. Measured from that directory: the
+        // unset form found none of the 10; this form finds all 10.
+        //
+        // Passing the absolute checkout corpus makes the command independent of both the
+        // caller's environment and the caller's directory. A remedy that is correct only
+        // from the repository root is a remedy that gets pasted from somewhere else and
+        // quietly reads as an all-clear — the exact silent-pass this test exists to stop.
+        let root = datasets_root::repo_root();
+        let verify_cmd = shell_quote(&root.join("test-data/scripts/fetch-datasets.sh"));
+        let verify_root = shell_quote(&root.join("test-data/datasets"));
+        // NOT `describe_search`: it reports "no *-Data.db for <keyspace>.<table>", a
+        // BROADER absence than this lookup measured. The probe is generation-specific
+        // on purpose (see `fixture_dir`), so in the very case that predicate exists
+        // for — a root holding some OTHER generation of this table — that wording
+        // would be false. And NOT `describe_roots` either: its text advertises a bare
+        // `fetch-datasets.sh`, the destructive invocation the rest of this message
+        // spends six lines warning against. So the root list is taken from the
+        // resolver and the sentence is composed here, naming what was actually
+        // required. Taking the list from the resolver is what stops the message naming
+        // a candidate set the lookup above did not use.
+        let roots = datasets_root::sstables_root_candidates()
+            .iter()
+            .map(|r| r.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Named because a stray value hard-FAILs a CORRECT checkout: the seam removes
+        // the checkout candidate, which is the safe direction but an opaque one to
+        // debug if the reader does not know the var exists.
+        let seam = datasets_root::CHECKOUT_SSTABLES_ROOT_OVERRIDE_ENV;
+        let seam_note = match std::env::var_os(seam) {
+            Some(v) if !v.is_empty() => format!(
+                "NOTE: the test-harness seam {seam} is SET to '{}', which REPLACED the \
+                 checkout candidate root. If you did not mean to set it, unset it and \
+                 re-run — that alone may resolve this.\n\n",
+                v.to_string_lossy()
+            ),
+            _ => String::new(),
+        };
+        panic!(
+            "{KEYSPACE}.{TABLE}: no directory `{TABLE}-*` holding \
+             `{SSTABLE_PREFIX}-Data.db` under any candidate sstables root [{roots}]. \
+             The probe is GENERATION-specific, so a root carrying a different \
+             generation of this table does not satisfy it.\n\
+             \n\
+             {seam_note}\
+             This fixture is COMMITTED SOURCE (git-tracked, not gitignored), so this \
+             is a broken checkout rather than a missing optional corpus, and it fails \
+             closed rather than skipping: this file is the only end-to-end pin of \
+             #3358 and a skip would leave a green suite that certified nothing \
+             (issue #3220).\n\
+             \n\
+             Remedy: a SIGKILLed `fetch-datasets.sh` can delete tracked files \
+             (#3310). Run:\n\
+             \n\
+             \x20   CQLITE_DATASETS_ROOT={verify_root} bash {verify_cmd} --verify-only\n\
+             \n\
+             It writes to STDERR, so keep `2>&1` if you pipe it. Read the FIRST line \
+             and branch on it — the two outcomes are different conditions with \
+             different answers:\n\
+             \n\
+             (1) `ERROR: TRACKED FIXTURES MISSING … (issue #3310)` — this is your case. \
+             That block names every tracked fixture that is absent and then prints an \
+             exact `git -C <repo> restore` command covering ONLY those paths (a second \
+             one with `--staged --worktree` if any deletion was staged). Run it \
+             verbatim. The probe reports only: it creates, deletes and restores \
+             nothing. This is why this message does not construct a restore command \
+             itself — five earlier attempts to hand-build one produced five different \
+             defects, and the tool's version is scoped and tested.\n\
+             \n\
+             (2) `Tracked-fixture probe (#3310): OK` — every tracked fixture is \
+             present, so the fault is NOT a deleted fixture and this test's own \
+             resolution is what to look at next. ONLY in this case are the `ERROR:` \
+             lines that follow unrelated noise: they report that the corpus is not a \
+             complete FETCHED corpus, which a checkout is never meant to be, and the \
+             command exits 1 with 7 such lines even though nothing is missing. Do NOT \
+             run the remedy they propose there — clearing `.dataset-pin` and re-running \
+             the fetch takes its destructive path (`rm -rf` on the dataset root), which \
+             against a checkout root DELETES the committed fixtures."
+        )
+    });
     let golden = golden_rows_by_pk(&dir);
     let mut by_token: Vec<(i32, i64, usize)> = golden
         .iter()
@@ -214,11 +361,11 @@ fn fixture() -> Option<Fixture> {
         .collect();
     by_token.sort_by_key(|(_, token, _)| *token);
     let ring: Vec<(i32, usize)> = by_token.iter().map(|(pk, _, rows)| (*pk, *rows)).collect();
-    Some(Fixture {
+    Fixture {
         data_db: dir.join(format!("{SSTABLE_PREFIX}-Data.db")),
         ring,
         golden,
-    })
+    }
 }
 
 fn token_of(pk: i32) -> i64 {
@@ -229,13 +376,9 @@ fn token_of(pk: i32) -> i64 {
 /// narrowed answer below is a narrowing rather than a failure to read.
 #[test]
 fn unbounded_scan_matches_the_golden() {
-    let Some(Fixture {
+    let Fixture {
         data_db, golden, ..
-    }) = fixture()
-    else {
-        eprintln!("SKIP: {KEYSPACE}.{TABLE} Data.db is absent (gitignored corpus)");
-        return;
-    };
+    } = fixture();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let reader = rt.block_on(open_reader(&data_db));
     let got = rt.block_on(emitted_rows_by_pk(&reader, None));
@@ -254,10 +397,7 @@ fn unbounded_scan_matches_the_golden() {
 /// table.
 #[test]
 fn non_wraparound_range_emits_only_its_segment() {
-    let Some(Fixture { data_db, ring, .. }) = fixture() else {
-        eprintln!("SKIP: {KEYSPACE}.{TABLE} Data.db is absent (gitignored corpus)");
-        return;
-    };
+    let Fixture { data_db, ring, .. } = fixture();
     // A mid-ring segment: every partition above the lowest and below the highest.
     // The two it excludes are what makes the case discriminating.
     let last = ring.len() - 1;
@@ -279,7 +419,6 @@ fn non_wraparound_range_emits_only_its_segment() {
     let bound = ScanTokenBound {
         start_excl,
         end_incl,
-        wraparound: false,
     };
     let got = rt.block_on(emitted_rows_by_pk(&reader, Some(bound)));
 
@@ -302,10 +441,7 @@ fn non_wraparound_range_emits_only_its_segment() {
 /// that the fix takes no early exit it is not entitled to.
 #[test]
 fn wraparound_range_emits_both_segments_and_nothing_between() {
-    let Some(Fixture { data_db, ring, .. }) = fixture() else {
-        eprintln!("SKIP: {KEYSPACE}.{TABLE} Data.db is absent (gitignored corpus)");
-        return;
-    };
+    let Fixture { data_db, ring, .. } = fixture();
     // `(highest-but-one, MAX] ∪ [MIN, lowest]`: the highest partition and the
     // lowest one, with everything between them excluded.
     let last = ring.len() - 1;
@@ -327,7 +463,6 @@ fn wraparound_range_emits_both_segments_and_nothing_between() {
     let bound = ScanTokenBound {
         start_excl,
         end_incl,
-        wraparound: true,
     };
     let got = rt.block_on(emitted_rows_by_pk(&reader, Some(bound)));
 

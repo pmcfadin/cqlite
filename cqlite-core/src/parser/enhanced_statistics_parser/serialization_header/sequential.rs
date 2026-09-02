@@ -307,7 +307,6 @@ pub(super) fn parse_serialization_header_sequential(
 
     // Step 2: Parse clustering key count and types
     let (input, clustering_count) = parse_vuint(input)?;
-    let clustering_count = clustering_count as usize;
 
     if clustering_count > 100 {
         tracing::debug!(
@@ -319,6 +318,10 @@ pub(super) fn parse_serialization_header_sequential(
             nom::error::ErrorKind::Verify,
         )));
     }
+
+    // #3848: narrow only AFTER the bound above, which compares the RAW `u64`.
+    // Casting first let `(1 << 32) + n` pass the bound as `n` on a 32-bit target.
+    let clustering_count = clustering_count as usize;
 
     tracing::debug!(
         "Sequential parser: clustering key count: {}",
@@ -359,7 +362,6 @@ pub(super) fn parse_serialization_header_sequential(
 
     // Step 3: Parse static columns
     let (input, static_count) = parse_vuint(input)?;
-    let static_count = static_count as usize;
 
     if static_count > 200 {
         tracing::debug!(
@@ -371,6 +373,10 @@ pub(super) fn parse_serialization_header_sequential(
             nom::error::ErrorKind::Verify,
         )));
     }
+
+    // #3848: narrow only AFTER the bound above, which compares the RAW `u64`.
+    // Casting first let `(1 << 32) + n` pass the bound as `n` on a 32-bit target.
+    let static_count = static_count as usize;
 
     tracing::debug!("Sequential parser: static column count: {}", static_count);
 
@@ -442,7 +448,6 @@ pub(super) fn parse_serialization_header_sequential(
 
     // Step 4: Parse regular columns
     let (input, regular_count) = parse_vuint(input)?;
-    let regular_count = regular_count as usize;
 
     if regular_count > 500 {
         tracing::debug!(
@@ -454,6 +459,10 @@ pub(super) fn parse_serialization_header_sequential(
             nom::error::ErrorKind::Verify,
         )));
     }
+
+    // #3848: narrow only AFTER the bound above, which compares the RAW `u64`.
+    // Casting first let `(1 << 32) + n` pass the bound as `n` on a 32-bit target.
+    let regular_count = regular_count as usize;
 
     tracing::debug!("Sequential parser: regular column count: {}", regular_count);
 

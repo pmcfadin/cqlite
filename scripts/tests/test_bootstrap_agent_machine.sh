@@ -15,8 +15,278 @@ BOOTSTRAP="$SCRIPT_DIR/../bootstrap-agent-machine.sh"
 
 PASS=0
 FAIL=0
-ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
-bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+SKIPS=0
+# Every case name that actually REPORTED. Case 15 reads this rather than re-deriving what
+# "should" have run: the question is whether a case executed, and the only evidence of that
+# is that it announced a verdict.
+PIN_RAN_CASES=""
+ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); PIN_RAN_CASES="$PIN_RAN_CASES
+$1"; }
+bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); PIN_RAN_CASES="$PIN_RAN_CASES
+$1"; }
+# SKIPS ARE NEITHER PASS NOR FAIL, so they must be COUNTED and REPORTED (issue #3414
+# review B1). Three end-to-end cases silently became skips when section 5b started adding
+# one warning to every sandbox, and the suite still said FAIL=0 — including the case whose
+# own comment records that its absence "let a defect through with 102 tests green". A
+# total that cannot distinguish "ran and passed" from "did not run" is the proxy-for-a-fact
+# shape this issue exists to remove, so the tail now prints SKIP= alongside PASS/FAIL.
+# Deliberately NOT a failure in itself: some skips here are honest reports about the HOST
+# (no timeout that accepts --kill-after), and a suite that reds on correct input is one
+# agents learn to waive. The DRIFT that silently disables cases is caught at its root
+# instead, by the base_warns assertion in block 7p.
+skip() { printf 'skip - %s\n' "$1"; SKIPS=$((SKIPS + 1)); }
+
+# --- THIS SUITE IS NOT RUNNABLE AS ROOT, AND SAYS SO UP FRONT (#3414 roborev round 7) --
+# OUR OWN REGRESSION, and the second time these three cases have been silently disabled.
+# Round 5 made the test seam refuse under EUID 0 (finding S, a real privilege-escalation
+# hole). But the refusal is a [warn], and it fires for EVERY sandboxed invocation, so under
+# root `base_warns` becomes 2, the baseline assertion below fails, and the three green-path
+# cases print `skip` — the exact three that round 2's finding was about. We unskipped them,
+# then re-skipped them four rounds later by fixing something else.
+#
+# Refused UP FRONT rather than per-case: the alternative is threading privilege-dropping
+# through test setup, which is how the seam came to need a root guard in the first place. A
+# suite that declares "not runnable as root" is honest and cheap; one that runs 190 cases
+# of which an unpredictable subset are silently meaningless is neither.
+#
+# COUNTED, never an `ok` — round 2's finding, and this file now has a hygiene case that
+# forbids announcing a skip through ok() anyway.
+#
+# AND IT IS THE FIRST THING THAT RUNS, BEFORE `mktemp -d` AND BEFORE ANY CASE (#3414
+# roborev round 8, lead caution). The manual check that this suite declines under root is
+# itself run with `sudo`, so anything executing above the decline would run AS ROOT — and
+# a single line up there that resolves CARGO_HOME from /etc/environment, or writes outside
+# its own tmpdir, would make the check for a safety property the thing that violates it.
+# That is not hypothetical: it is what happened 40 minutes earlier with the cargo config.
+# Even the tmpdir matters — created as root it is litter the invoking user cannot remove.
+# So the decline precedes everything, and the only host contact above it is now none.
+#
+# AND IT ASKS BASH, NOT `id` (#3414 roborev round 9). The production guard was moved to the
+# readonly $EUID because `id` can be missing, shadowed or malformed; this decline is a
+# SAFETY gate, so the same argument applies with more force — an `id` that fails here does
+# not merely misreport, it lets the suite continue AS ROOT past the one check whose purpose
+# is to stop exactly that. $EUID is set by the shell itself, needs no PATH lookup and no
+# fork, and cannot be shadowed. A missing or non-numeric value FAILS CLOSED: unable to tell
+# is not permission to proceed.
+pin_suite_euid="${EUID-}"
+case "$pin_suite_euid" in
+  ''|*[!0-9]*)
+    printf 'bad  - THE ENTIRE SUITE: cannot determine the effective UID (EUID=%s). Refusing to run: this suite must not execute as root, and a shell that cannot answer that question cannot be trusted to have declined.\n' "${pin_suite_euid:-<unset>}"
+    echo
+    echo "PASS=$PASS FAIL=$((FAIL + 1)) SKIP=$SKIPS"
+    echo "DECLINED: EUID is unavailable, so root could not be ruled out. Run under bash." >&2
+    exit 1 ;;
+esac
+if [ "$pin_suite_euid" = 0 ]; then
+  skip "THE ENTIRE SUITE: it drives bootstrap through a test seam that is REFUSED under root (#3414 finding S), so every sandboxed invocation gains a warning and the green-path assertions cannot run. Re-run as an unprivileged user."
+  echo
+  echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIPS"
+  # NONZERO, and this is the THIRD LEVEL at which this same shape has been caught (#3414
+  # roborev round 8). Round 2 found a CASE counted as a pass; round 4 found `ok "SKIP …"`;
+  # round 7's fix for those turned it into a SUITE-level version — the gate checks only
+  # exit status, so `exit 0` here reported `tooling-tests` green having executed nothing at
+  # all, including every regression this branch added. A declined suite is not a passing
+  # suite. The gate runs as an unprivileged user, so the normal path never reaches this and
+  # the cost is zero; running it as root becomes a loud failure instead of a silent green.
+  echo "DECLINED: this suite executed NOTHING and is exiting NONZERO so no caller can read it as a pass." >&2
+  exit 1
+fi
+
+# The sandbox and the shared-state guard are created BEFORE the first case, because the
+# guard wraps every bootstrap invocation and case 2 (`--help`) is one of them. Creating it
+# later left that invocation calling an undefined "$PIN_BS" — coverage that reads as
+# complete while one call site silently is not, which is the shape this guard exists for.
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-test.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+
+# Baseline for the hermeticity assertion at the end of the suite. Captured as
+# mode+mtime+content so a rewrite is caught even if it happens to restore the bytes.
+# Named only for the diagnostic below; never stat'd or hashed. The GNU-only `stat -c` /
+# `md5sum` snapshot that used to live here is gone with the shared-state observation it
+# served (#3414 roborev round 11) — those probes yield empty fields on macOS, where this
+# suite runs as part of a MANDATORY gate component.
+PIN_SHARED_CARGO=/usr/local/cargo/config.toml
+
+# --- ATTRIBUTABLE, NOT MERELY DETECTED (#3414 roborev round 10) ------------------------
+# The tripwire used to snapshot the shared file around the WHOLE suite, so ANY concurrent
+# writer — a peer lane's bootstrap, an administrator, or a human at a prompt — made it FAIL
+# claiming this suite mutated the file. That is not hypothetical: the lead ran bootstrap by
+# hand mid-session and moved that file's mode and mtime; had the suite been running, its
+# tripwire would have blamed itself for someone else's shell.
+#
+# NOT weakened to a notice — a guard that cannot red cannot catch the reintroduced reach it
+# exists for. Made ATTRIBUTABLE instead: every bootstrap invocation this suite makes goes
+# through the guard below, which snapshots immediately either side of THAT invocation. A
+# change observed across a known invocation is attributable to it; a change observed across
+# 188 cases and several minutes is not.
+#
+# A SCRIPT, not a shell function, because several call sites run under `timeout`, which
+# execs a binary and cannot invoke a function. Violations are appended to a FILE rather
+# than a variable for the same reason plus one more: several invocations run inside `$( )`,
+# and a variable assigned in a subshell is discarded — the exact defect round 6 found one
+# directory over. A file survives both.
+export PIN_SHARED_VIOLATIONS="$tmp/shared-state-violations.log"
+: >"$PIN_SHARED_VIOLATIONS"
+PIN_BS="$tmp/pin-bs-guard"
+cat >"$PIN_BS" <<'PINBS'
+#!/usr/bin/env bash
+# pin-bs-guard <bootstrap-path> [args...] — run one bootstrap invocation with its
+# HOST-REACHING INPUTS asserted, and record a violation if they are not sandboxed.
+# stdout/stderr and the exit status pass through untouched: callers capture output and
+# assert on rc.
+#
+# ASSERTS THE INPUTS, DOES NOT OBSERVE THE OUTPUT (#3414 roborev round 11). The previous
+# form snapshotted the SHARED /usr/local/cargo/config.toml either side of each invocation.
+# That was already attributable in the common case — a change outside every invocation
+# window was reported as another writer's, not ours — but it had two defects it could not
+# shed: an external write landing INSIDE one of our windows was still recorded as ours (a
+# narrower race is a smaller race, not attribution), and `stat -c`/`md5sum` are GNU-only,
+# so on macOS both probes yield empty fields, the mutation self-test cannot detect its own
+# deliberate write, and a MANDATORY gate component fails on that platform.
+#
+# The property we actually need is "no invocation can reach the shared path". Bootstrap
+# resolves its cargo config as `${CARGO_HOME:-$HOME/.cargo}/config.toml`, so if BOTH
+# CARGO_HOME and HOME point inside the suite sandbox, that path is unreachable BY
+# CONSTRUCTION — no window, no race, no platform-specific probe, and nothing another
+# writer on the box can affect. So assert the inputs.
+#
+# HONEST RESIDUAL, stated because input-assertion does not cover it: a future bootstrap
+# edit that writes an ABSOLUTE path while ignoring CARGO_HOME/HOME would not be caught
+# here. That is a different defect (a hardcoded destination rather than an unsandboxed
+# caller), and claiming this guard covers it would be the false-assurance shape this whole
+# branch is about. #3673 is where a destination-side guard belongs.
+# FAIL CLOSED ON AN UNUSABLE SANDBOX ROOT, FIRST. Without this the patterns below read
+# `"$PIN_SANDBOX_ROOT"/*`, which with an empty root degenerates to `/*` and matches EVERY
+# absolute path — so the guard would silently permit everything it exists to catch. That is
+# the permissive-branch-on-an-unmeasured-input shape, inside the guard written to catch that
+# shape (#3414, lead self-review). An unusable root is a violation in its own right, never a
+# pass: unable to tell is not permission.
+_v=""
+case "${PIN_SANDBOX_ROOT-}" in
+  '') _v="PIN_SANDBOX_ROOT is unset, so the sandbox test would match every absolute path — refusing to certify this invocation" ;;
+  /*) ;;
+  *) _v="PIN_SANDBOX_ROOT='$PIN_SANDBOX_ROOT' is not an absolute path, so the sandbox test is meaningless" ;;
+esac
+[ -n "$_v" ] || case "${CARGO_HOME-}" in
+  '') _v="CARGO_HOME is unset, so bootstrap would resolve \${HOME}/.cargo — on this fleet HOME-derived or /etc/environment-derived paths reach the SHARED root-owned config" ;;
+  "$PIN_SANDBOX_ROOT"/*) ;;
+  *) _v="CARGO_HOME='$CARGO_HOME' is outside the suite sandbox ($PIN_SANDBOX_ROOT)" ;;
+esac
+if [ -z "$_v" ]; then
+  case "${HOME-}" in
+    '') _v="HOME is unset" ;;
+    "$PIN_SANDBOX_ROOT"/*) ;;
+    *) _v="HOME='$HOME' is outside the suite sandbox ($PIN_SANDBOX_ROOT)" ;;
+  esac
+fi
+if [ -n "$_v" ]; then
+  printf 'invocation: %s\n  unsandboxed input: %s\n' "$*" "$_v" >>"$PIN_SHARED_VIOLATIONS"
+  # AND REFUSE TO RUN (roborev job 321, Medium). Recording a violation and then executing
+  # anyway lets the damage land BEFORE the suite reports it — and the damage is not
+  # hypothetical: an unsandboxed run on this box left /usr/local/cargo/config.toml root-owned
+  # 0600 and broke cargo for every other lane, three times (#3673). A guard that observes but
+  # does not stop is a log, not a guard. The violation is still recorded, so case 14 reports
+  # it exactly as before; what changes is that bootstrap never runs.
+  printf 'FATAL: refusing to run bootstrap with unsandboxed input: %s\n' "$_v" >&2
+  # IF THIS FIRES ON A SUDO INVOCATION, THE CAUSE IS ALMOST CERTAINLY env_reset, NOT A REAL
+  # UNSANDBOXED INPUT. sudo repopulates the environment from /etc/environment, so
+  # PIN_SANDBOX_ROOT and PIN_SHARED_VIOLATIONS — both exported by the suite — do NOT survive
+  # the boundary, and the guard then fail-closes on an unusable sandbox root while the actual
+  # HOME/CARGO_HOME it was handed are perfectly sandboxed. Every `sudo -n env` call site
+  # therefore re-passes BOTH vars explicitly. Measured when this refusal was added: 6 root
+  # cases broke at once, and the same env_reset drop had ALSO been silently discarding every
+  # violation record from a sudo invocation (`>>""`), so that half of the guard had never
+  # worked across the boundary at all.
+  exit 97
+fi
+bash "$@"
+exit $?
+PINBS
+chmod +x "$PIN_BS"
+PIN_SANDBOX_ROOT="$tmp"
+export PIN_SANDBOX_ROOT
+
+# `--help` gets a sandbox like every other invocation. It exits before any section and so
+# cannot write — but the guard asserts INPUTS, and excusing an invocation because we
+# reasoned it is harmless is how a guard's coverage erodes into a claim. No exemptions.
+mkdir -p "$tmp/help-home/.cargo"
+
+# --- TREE IDENTITY, STAMPED AT BOTH ENDS (#3414, shared-worktree incident) -------------
+# This suite is run by more than one actor against ONE shared worktree, and a run that
+# spans an edit CANNOT BE ATTRIBUTED — its failures may belong to the tree it started on,
+# the tree it ended on, or neither. That is not hypothetical twice over: a run died with a
+# parse error at a line nobody had touched (bash was still reading the file as it changed),
+# and separately a `FAIL=1` followed by four clean runs was read as an intermittent case
+# when it was actually one measurement across a moving tree.
+#
+# Neither was visible in the log. The mtime forensics that found them are not something the
+# next reader will think to do, so the run now SAYS what tree it ran on, at both ends, in
+# the same shape agent-gate.sh uses (tree-start / tree-end / tree-integrity). A moving tree
+# then shows up as itself instead of as a flaky case.
+#
+# Portable and non-fatal: `git` may be absent or this may not be a checkout, in which case
+# the stamp says UNKNOWN rather than pretending. It never fails the suite on its own —
+# the point is that the log can be read, not that the tree must be still.
+# A COUNT IS NOT A DIGEST (#3414 final roborev, finding CC). The first version recorded
+# HEAD plus the NUMBER of dirty paths — unchanged by editing an already-dirty file, and
+# unchanged by swapping one dirty path for another. So it would have reported STABLE across
+# exactly the shared-worktree edit it was built to expose, and BOTH incidents that motivated
+# it began with a file that was ALREADY modified: the instrument was blind to its own
+# founding case.
+#
+# The stamp now carries a digest of the actual content — porcelain status plus the
+# working-tree AND index diffs. `git hash-object` rather than `md5sum`/`shasum`: git is
+# already a hard requirement two lines up, while `md5sum` is GNU-only, and this suite has
+# already shipped one GNU-only probe that broke off Linux. A digest that cannot be computed
+# prints UNKNOWN, never an empty string — two empty digests compare EQUAL, which is the
+# false-STABLE all over again.
+pin_tree_id() {
+  local head dig
+  if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    head=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || printf 'UNKNOWN')
+    # UNTRACKED CONTENTS ARE HASHED TOO (#3414 roborev round 14, finding EE). `git status
+    # --porcelain` NAMES an untracked file; `git diff` omits its CONTENT — so editing an
+    # already-untracked file left the digest unchanged and reported STABLE. The lead
+    # preferred narrowing the claim to tracked files; I covered them instead, because the
+    # hole is closable in one line and a narrower claim would still have missed a real
+    # shared-worktree edit. IGNORED paths stay excluded on purpose (`--exclude-standard`):
+    # this lane's own scratch — the verdict file, the follow-up list — changes constantly
+    # and hashing it would make every run report MOVED, which is the alarm nobody reads.
+    # ...AND THE ENUMERATION IS ROOTED AT THE WORKTREE TOP, NOT AT $SCRIPT_DIR (roborev
+    # job 332). `git ls-files` defaults to the CURRENT DIRECTORY, so `-C "$SCRIPT_DIR"`
+    # hashed untracked contents only under `scripts/tests` — an untracked file anywhere
+    # else could change content and still digest STABLE. That is the SAME silent-omission
+    # class as the `xargs -r` defect above, one axis over: portability there, SCOPE here,
+    # and in both the digest still LOOKS like it covered them. `status --porcelain` is
+    # repo-wide already, so the NAME of such a file was never the gap — only its CONTENT.
+    # Measured cost on this lane: 0 untracked non-ignored files, 0.017s.
+    local top
+    top=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null) || top="$SCRIPT_DIR"
+    [ -n "$top" ] || top="$SCRIPT_DIR"
+    dig=$( { git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null
+             git -C "$SCRIPT_DIR" diff 2>/dev/null
+             git -C "$SCRIPT_DIR" diff --cached 2>/dev/null
+             # PORTABLE NUL loop, not `xargs -0 -r` (#3414 final roborev). `-r`
+             # (--no-run-if-empty) is GNU-only and BSD/macOS xargs REJECTS it, so on a
+             # supported macOS host the whole untracked-contents branch failed silently
+             # and edits to already-untracked files were reported STABLE. A silent
+             # omission inside an integrity digest is the worst possible failure mode:
+             # the digest still LOOKS like it covered them.
+             while IFS= read -r -d "" _u; do
+               git -C "$top" hash-object -- "$_u" 2>/dev/null
+             done < <(git -C "$top" ls-files --others --exclude-standard -z 2>/dev/null)
+           } | git hash-object --stdin 2>/dev/null )
+    case "$dig" in
+      ?*) dig=$(printf '%s' "$dig" | cut -c1-12) ;;
+      *)  dig=UNKNOWN ;;
+    esac
+    printf '%s worktree=%s' "$head" "$dig"
+  else
+    printf 'UNKNOWN worktree=UNKNOWN'
+  fi
+}
+PIN_TREE_START=$(pin_tree_id)
+printf 'tree-start: %s  (worktree digest covers tracked diffs + untracked contents; ignored paths excluded)\n' "$PIN_TREE_START"
 
 # --- 1. syntax check (bash -n) ---
 if bash -n "$BOOTSTRAP" 2>/dev/null; then
@@ -26,7 +296,7 @@ else
 fi
 
 # --- 2. --help exits 0 and prints usage ---
-help_out=$(bash "$BOOTSTRAP" --help 2>&1); help_rc=$?
+help_out=$(env HOME="$tmp/help-home" CARGO_HOME="$tmp/help-home/.cargo" "$PIN_BS" "$BOOTSTRAP" --help 2>&1); help_rc=$?
 if [ "$help_rc" -eq 0 ] && printf '%s' "$help_out" | grep -q "bootstrap"; then
   ok "--help exits 0 and prints usage"
 else
@@ -36,8 +306,6 @@ fi
 # --- 3. Pure-check run must NOT install. Shadow brew/cargo/roborev with a tripwire
 #        on PATH so ANY install attempt is recorded, then assert nothing ran an
 #        install subcommand. ---
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-test.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
 tripwire="$tmp/tripwire.log"
 : >"$tripwire"
 
@@ -55,6 +323,46 @@ tripwire="$tmp/tripwire.log"
 export GIT_CONFIG_GLOBAL="$tmp/global-gitconfig"
 export GIT_CONFIG_NOSYSTEM=1
 : >"$GIT_CONFIG_GLOBAL"
+
+# --- /etc/environment isolation for the single-gate pin (issue #3414) -------
+# Section 5b persists CQLITE_GATE_MAX_CONCURRENCY into /etc/environment under --yes,
+# and several cases below run bootstrap with --yes. Without this the suite's verdict
+# would depend on the host's real system env file — and, on a root-run box, would
+# MUTATE it. The section's test seam redirects the write into this sandbox and, under
+# the required CQLITE_BOOTSTRAP_TEST_MODE marker, makes that write UNPRIVILEGED, so no
+# case here can reach a privileged write at all. Exported ONCE, like GIT_CONFIG_GLOBAL
+# above, so a case added later inherits the isolation without remembering to opt in;
+# the pin cases below override the FILE per case and leave the marker alone.
+export CQLITE_BOOTSTRAP_TEST_MODE=1
+export CQLITE_BOOTSTRAP_ENV_FILE="$tmp/etc-environment"
+: >"$CQLITE_BOOTSTRAP_ENV_FILE"
+
+
+# --- CARGO_HOME isolation: THIS SUITE WAS BREAKING cargo FOR THE WHOLE BOX ---------
+# The mold section writes `${CARGO_HOME:-$HOME/.cargo}/config.toml`, and on this fleet
+# /etc/environment sets CARGO_HOME=/usr/local/cargo — root-owned and SHARED BY EVERY
+# USER. So every bootstrap invocation here rewrote the machine-wide cargo config, and a
+# peer lane took three spurious red clusters from `could not load Cargo configuration ...
+# Permission denied` while it sat root-owned mode 600.
+#
+# TWO HALVES OF THE CAUSE, both worth recording. The hazard is OLD — that section has
+# always written $CARGO_HOME — but this suite makes **37 bootstrap invocations**, so what
+# was "occasionally, when someone runs the suite" became constant. We did not introduce
+# the bug; we crossed a threshold on someone else's latent one, and a tooling test that
+# mutates shared host state is a fleet-wide false-red generator whatever it asserts —
+# including inside a gate of record, where it voids a 20-minute certification and invites
+# misattribution to the diff under test.
+#
+# Sandboxed rather than restored-afterwards: a restore leaves a window in which peers red,
+# does not survive a killed run, and still clobbers whatever the real file legitimately
+# holds. The sibling suite test_perf_capability_bootstrap.sh already pairs
+# CARGO_HOME with its sandbox HOME per invocation; this is the same fact from a second
+# channel, so a case added later that sets HOME and forgets CARGO_HOME is still contained.
+# NOTE the export does NOT cover `sudo` invocations — sudoers' env_reset drops it — so
+# those must pass CARGO_HOME explicitly on the command line; see the root cases in block 11.
+export CARGO_HOME="$tmp/cargo-home"
+mkdir -p "$CARGO_HOME"
+
 
 # --- REAL-ORIGIN isolation for the push probe (issue #3369) ----------------
 # Section 3b now MEASURES push capability by actually pushing a throwaway
@@ -105,7 +413,7 @@ host_home="$tmp/host-home"; mkdir -p "$host_home/.cargo"
 
 # Run with the shims FIRST on PATH, default mode (no --yes), skipping the smoke.
 run_out=$(PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1); run_rc=$?
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1); run_rc=$?
 
 if [ "$run_rc" -eq 0 ]; then
   ok "default (no --yes) run exits 0"
@@ -136,7 +444,7 @@ done
 # Reset the tripwire so the no-install assertion below reflects ONLY this run.
 : >"$tripwire"
 guard_out=$(PATH="$tmp:/usr/bin:/bin" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$guard_out" | grep -Eq "install sccache:|sccache MISSING"; then
   ok "missing accelerator prints install guidance (does not auto-install)"
 else
@@ -156,11 +464,29 @@ fi
 mk_stub() {
   # mk_stub <dir> <name> <body>
   local dir="$1" name="$2" body="$3"
+  # REMOVE FIRST — never write THROUGH the path. mk_hermetic_bin populates these same dirs
+  # with SYMLINKS to the real tools, and `cat >` FOLLOWS a symlink, so stubbing a name that
+  # is ALSO hermetically linked has two failure modes and neither is visible: where the link
+  # target is not writable (a root-owned /usr/bin tool, and the suite runs unprivileged) the
+  # redirect fails, no stub is installed, and every case relying on it passes VACUOUSLY
+  # against the REAL tool; where the target IS writable it TRUNCATES THE REAL BINARY.
+  # Measured when this bit: `chmod` is the one name in both sets, the stub never installed,
+  # and case 11bc read the real chmod's success as its own.
+  rm -f "$dir/$name"
   cat >"$dir/$name" <<EOF
 #!/usr/bin/env bash
 $body
 EOF
   chmod +x "$dir/$name"
+  # AND FAIL LOUDLY. A harness that cannot install a stub does not produce a failing case,
+  # it produces a PASSING one that tested nothing — the exact shape this suite exists to
+  # refuse, so it aborts rather than reporting a verdict it did not earn.
+  if [ -L "$dir/$name" ] || [ ! -f "$dir/$name" ] || [ ! -x "$dir/$name" ]; then
+    printf 'FATAL: mk_stub could not install a real stub at %s/%s (symlink=%s file=%s exec=%s) — refusing to run cases that would pass vacuously against the real tool\n' \
+      "$dir" "$name" "$([ -L "$dir/$name" ] && echo yes || echo no)" \
+      "$([ -f "$dir/$name" ] && echo yes || echo no)" "$([ -x "$dir/$name" ] && echo yes || echo no)" >&2
+    exit 1
+  fi
 }
 # count_begin <file>: number of managed-block BEGIN markers. grep -c already prints
 # a count (0 on no match) AND exits 1 — a `|| echo 0` would DOUBLE-print "0\n0", so
@@ -207,7 +533,7 @@ mk_hermetic_bin() {
   local dir="$1" t p
   mkdir -p "$dir"
   for t in bash dirname mktemp grep cp cat sed awk mkdir rm ln mv touch chmod \
-           head tail tr sort cut wc stat env git find xargs basename date sleep expr \
+           head tail tr sort cut wc stat env git find xargs basename date sleep expr flock \
            timeout gtimeout; do   # BOTH: stock macOS has only gtimeout (GNU coreutils)
     p=$(type -P "$t" 2>/dev/null) || continue
     [ -n "$p" ] && ln -sf "$p" "$dir/$t" 2>/dev/null || true
@@ -224,7 +550,7 @@ stub_net "$stubA"
 mk_stub "$stubA" mold '[ "$1" = --version ] && echo "mold 2.4.0"; exit 0'
 mk_stub "$stubA" cc 'exit 0'
 outA=$(PATH="$stubA:$PATH" HOME="$sbA" CARGO_HOME="$sbA/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 cfgA="$sbA/.cargo/config.toml"
 if printf '%s' "$outA" | grep -q "Link accelerator: mold"; then
   ok "mold: Linux run emits the mold section"
@@ -252,7 +578,7 @@ fi
 #     identical to the first run.
 firstA=$(cat "$cfgA")
 PATH="$stubA:$PATH" HOME="$sbA" CARGO_HOME="$sbA/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 secondA=$(cat "$cfgA")
 if [ "$(count_begin "$cfgA")" = 1 ] && [ "$firstA" = "$secondA" ]; then
   ok "mold: re-run idempotent (exactly one block, file byte-identical)"
@@ -265,7 +591,7 @@ sbC=$(mktemp -d "$tmp/moldC.XXXXXX"); mkdir -p "$sbC/.cargo"
 cfgC="$sbC/.cargo/config.toml"
 printf '[build]\njobs = 7\n\n[net]\nretry = 9\n' >"$cfgC"
 PATH="$stubA:$PATH" HOME="$sbC" CARGO_HOME="$sbC/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if grep -qx 'jobs = 7' "$cfgC" && grep -qx 'retry = 9' "$cfgC" \
    && grep -qx '\[build\]' "$cfgC" && grep -qx '\[net\]' "$cfgC" \
    && grep -q '^# BEGIN cqlite-mold' "$cfgC"; then
@@ -277,7 +603,7 @@ fi
 # Idempotent even with user content present.
 firstC=$(cat "$cfgC")
 PATH="$stubA:$PATH" HOME="$sbC" CARGO_HOME="$sbC/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if [ "$firstC" = "$(cat "$cfgC")" ] && [ "$(count_begin "$cfgC")" = 1 ]; then
   ok "mold: re-run with user content stays byte-identical (one block)"
 else
@@ -292,7 +618,7 @@ mk_stub "$stubD" mold 'exit 0'
 mk_stub "$stubD" cc 'exit 1'
 mk_stub "$stubD" clang 'exit 1'
 outD=$(PATH="$stubD:$PATH" HOME="$sbD" CARGO_HOME="$sbD/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outD" | grep -q "link probe FAILED" \
    && [ ! -f "$sbD/.cargo/config.toml" ]; then
   ok "mold: failed link probe warns and writes no linker config"
@@ -309,7 +635,7 @@ mk_stub "$stubE" mold 'exit 0'
 mk_stub "$stubE" cc 'exit 1'
 mk_stub "$stubE" clang 'exit 0'
 PATH="$stubE:$PATH" HOME="$sbE" CARGO_HOME="$sbE/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 cfgE="$sbE/.cargo/config.toml"
 if [ -f "$cfgE" ] && [ "$(grep -c '^linker = "clang"' "$cfgE")" = 2 ]; then
   ok "mold: clang-only probe writes linker = \"clang\" for both triples"
@@ -325,7 +651,7 @@ stub_net "$stubF"
 mk_stub "$stubF" mold '[ "$1" = --version ] && echo "mold 2.4.0"; exit 0'
 mk_stub "$stubF" cc 'exit 0'
 outF=$(PATH="$stubF:$PATH" HOME="$sbF" CARGO_HOME="$sbF/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if ! printf '%s' "$outF" | grep -q "Link accelerator: mold" \
    && [ ! -f "$sbF/.cargo/config.toml" ]; then
   ok "mold: Darwin performs no mold detection/config (no-op)"
@@ -342,7 +668,7 @@ mk_hermetic_bin "$stubG"
 tripG="$stubG/tripwire.log"; : >"$tripG"
 mk_stub "$stubG" apt-get "echo \"apt-get \$*\" >>\"$tripG\"; exit 0"
 outG=$(PATH="$stubG" HOME="$sbG" CARGO_HOME="$sbG/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outG" | grep -q "mold MISSING" \
    && printf '%s' "$outG" | grep -q "install mold:.*apt-get install -y mold" \
    && [ ! -s "$tripG" ] \
@@ -358,7 +684,7 @@ fi
 sbH=$(mktemp -d "$tmp/moldH.XXXXXX"); stubH="$tmp/stubH"
 mk_hermetic_bin "$stubH"
 outH=$(PATH="$stubH" HOME="$sbH" CARGO_HOME="$sbH/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outH" | grep -q "no supported package manager" \
    && [ ! -f "$sbH/.cargo/config.toml" ]; then
   ok "mold: missing + no package manager warns and writes no config"
@@ -373,7 +699,7 @@ fi
 sbJ=$(mktemp -d "$tmp/moldJ.XXXXXX"); mkdir -p "$sbJ/.cargo"
 printf '[net]\nretry = 4\n' >"$sbJ/.cargo/config"
 PATH="$stubA:$PATH" HOME="$sbJ" CARGO_HOME="$sbJ/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if grep -q '^# BEGIN cqlite-mold' "$sbJ/.cargo/config" \
    && grep -qx 'retry = 4' "$sbJ/.cargo/config" \
    && [ ! -f "$sbJ/.cargo/config.toml" ]; then
@@ -392,7 +718,7 @@ cfgK="$sbK/.cargo/config.toml"
 printf '[target.x86_64-unknown-linux-gnu]\nrustflags = ["-C", "target-cpu=native"]\n' >"$cfgK"
 beforeK=$(cat "$cfgK")
 outK=$(PATH="$stubA:$PATH" HOME="$sbK" CARGO_HOME="$sbK/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outK" | grep -q "existing \[target" \
    && [ "$beforeK" = "$(cat "$cfgK")" ] \
    && ! grep -q '^# BEGIN cqlite-mold' "$cfgK"; then
@@ -409,7 +735,7 @@ printf '[net]\nretry = 1\n' >"$sbL/.cargo/config"
 printf '[net]\nretry = 2\n' >"$sbL/.cargo/config.toml"
 tomlL_before=$(cat "$sbL/.cargo/config.toml")
 PATH="$stubA:$PATH" HOME="$sbL" CARGO_HOME="$sbL/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if grep -q '^# BEGIN cqlite-mold' "$sbL/.cargo/config" \
    && ! grep -q '^# BEGIN cqlite-mold' "$sbL/.cargo/config.toml" \
    && [ "$tomlL_before" = "$(cat "$sbL/.cargo/config.toml")" ]; then
@@ -426,7 +752,7 @@ cfgM="$sbM/.cargo/config.toml"
 printf '[build]\nrustflags = ["-C", "target-cpu=native"]\n' >"$cfgM"
 beforeM=$(cat "$cfgM")
 outM=$(PATH="$stubA:$PATH" HOME="$sbM" CARGO_HOME="$sbM/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outM" | grep -q "existing \[build\] rustflags" \
    && [ "$beforeM" = "$(cat "$cfgM")" ] \
    && ! grep -q '^# BEGIN cqlite-mold' "$cfgM"; then
@@ -451,7 +777,7 @@ mk_stub "$stubN" sudo 'exec "$@"'   # passthrough so `sudo apt-get …` runs the
 apt_body='installed=0; for a in "$@"; do [ "$a" = mold ] && installed=1; done; if [ "$installed" = 1 ]; then printf "#!/usr/bin/env bash\n[ \"\$1\" = --version ] && echo \"mold 2.4.0\"\nexit 0\n" > "'"$stubN/mold"'"; chmod +x "'"$stubN/mold"'"; fi; exit 0'
 mk_stub "$stubN" apt-get "$apt_body"
 PATH="$stubN" HOME="$sbN" CARGO_HOME="$sbN/.cargo" \
-  bash "$nrepo/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke >/dev/null 2>&1
+  "$PIN_BS" "$nrepo/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke >/dev/null 2>&1
 if grep -q '^# BEGIN cqlite-mold' "$sbN/.cargo/config.toml" 2>/dev/null; then
   ok "mold: --yes installs mold then wires the managed block in the same run"
 else
@@ -470,7 +796,7 @@ printf '[registries.example]\nindex = "sparse+https://example.invalid/"\n' >"$re
 repo_before=$(cat "$repo_cfg")
 sbI=$(mktemp -d "$tmp/moldI.XXXXXX"); mkdir -p "$sbI/.cargo"
 PATH="$stubA:$PATH" HOME="$sbI" CARGO_HOME="$sbI/.cargo" \
-  bash "$fakerepo/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1
+  "$PIN_BS" "$fakerepo/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1
 if [ "$repo_before" = "$(cat "$repo_cfg")" ] \
    && grep -q '^# BEGIN cqlite-mold' "$sbI/.cargo/config.toml"; then
   ok "mold: repo-committed .cargo/config.toml untouched; block written to per-machine CARGO_HOME"
@@ -520,7 +846,7 @@ mk_hermetic_bin "$stub7a"
 repo7a="$tmp/repo7a"; mk_fake_repo "$repo7a" "https://github.com/pmcfadin/cqlite.git"
 gc7a="$sb7a/gitconfig"   # deliberately absent
 out7a=$(PATH="$stub7a" HOME="$sb7a" CARGO_HOME="$sb7a/.cargo" GIT_CONFIG_GLOBAL="$gc7a" \
-  GH_TOKEN="" GITHUB_TOKEN="" bash "$repo7a/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  GH_TOKEN="" GITHUB_TOKEN="" "$PIN_BS" "$repo7a/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if printf '%s' "$out7a" | grep -q "git push credentials"; then
   ok "cred: bootstrap emits the git-credential section"
 else
@@ -557,7 +883,7 @@ exit 0"   # setup-git succeeds but wires nothing; `auth token` answers as real g
 repo7b="$tmp/repo7b"; mk_fake_repo "$repo7b" "https://github.com/pmcfadin/cqlite.git"
 gc7b="$sb7b/gitconfig"
 out7b=$(PATH="$stub7b" HOME="$sb7b" CARGO_HOME="$sb7b/.cargo" GIT_CONFIG_GLOBAL="$gc7b" \
-  GH_TOKEN="$FAKE_TOKEN" bash "$repo7b/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
+  GH_TOKEN="$FAKE_TOKEN" "$PIN_BS" "$repo7b/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
 if grep -q "auth setup-git" "$gh7b_log"; then
   ok "cred: --yes prefers 'gh auth setup-git' first"
 else
@@ -606,7 +932,7 @@ exit 0'
 repo7c="$tmp/repo7c"; mk_fake_repo "$repo7c" "https://github.com/pmcfadin/cqlite.git"
 gc7c="$sb7c/gitconfig"
 out7c=$(PATH="$stub7c" HOME="$sb7c" CARGO_HOME="$sb7c/.cargo" GIT_CONFIG_GLOBAL="$gc7c" \
-  GH_TOKEN="$FAKE_TOKEN" bash "$repo7c/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
+  GH_TOKEN="$FAKE_TOKEN" "$PIN_BS" "$repo7c/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
 if [ -f "$gc7c" ] && grep -q 'gh-stub' "$gc7c" && ! grep -q 'x-access-token' "$gc7c" \
    && printf '%s' "$out7c" | grep -q "gh auth setup-git"; then
   ok "cred: a working 'gh auth setup-git' is preferred; no \$GH_TOKEN fallback added"
@@ -622,7 +948,7 @@ mk_hermetic_bin "$stub7d"
 repo7d="$tmp/repo7d"; mk_fake_repo "$repo7d" "git@github.com:pmcfadin/cqlite.git"
 gc7d="$sb7d/gitconfig"
 out7d=$(PATH="$stub7d" HOME="$sb7d" CARGO_HOME="$sb7d/.cargo" GIT_CONFIG_GLOBAL="$gc7d" \
-  GH_TOKEN="$FAKE_TOKEN" bash "$repo7d/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
+  GH_TOKEN="$FAKE_TOKEN" "$PIN_BS" "$repo7d/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
 if printf '%s' "$out7d" | grep -qi "SSH" \
    && ! { [ -f "$gc7d" ] && grep -q 'x-access-token' "$gc7d"; }; then
   ok "cred: SSH origin reported as its own credential path; no helper written"
@@ -665,7 +991,7 @@ if ! grep -q 'x-access-token' "$gc7g" 2>/dev/null; then
   bad "cred: 7g precondition FAILED — no helper installed, the warn below would be vacuous"
 fi
 out7g=$(PATH="$stub7g" HOME="$sb7g" CARGO_HOME="$sb7g/.cargo" GIT_CONFIG_GLOBAL="$gc7g" \
-  GH_TOKEN="" GITHUB_TOKEN="" bash "$repo7g/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  GH_TOKEN="" GITHUB_TOKEN="" "$PIN_BS" "$repo7g/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if printf '%s' "$out7g" | grep -q "\[warn\].*git push has NO credentials" \
    && ! printf '%s' "$out7g" | grep -Eq '\[ok\].*git push credentials resolve'; then
   ok "cred: helper present but GH_TOKEN unset -> WARN (a declining helper is not a credential)"
@@ -695,7 +1021,7 @@ else
   bad "cred: (precondition) expected git to accept an empty password line"
 fi
 out7ge=$(PATH="$stub7ge" HOME="$sb7ge" CARGO_HOME="$sb7ge/.cargo" GIT_CONFIG_GLOBAL="$gc7ge" \
-  GH_TOKEN="" GITHUB_TOKEN="" bash "$repo7ge/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  GH_TOKEN="" GITHUB_TOKEN="" "$PIN_BS" "$repo7ge/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if printf '%s' "$out7ge" | grep -q "\[warn\].*git push has NO credentials" \
    && ! printf '%s' "$out7ge" | grep -Eq '\[ok\].*git push credentials resolve'; then
   ok "cred: a helper answering with an EMPTY password is not accepted as a credential"
@@ -762,7 +1088,7 @@ if [ -n "$TIMEOUT_BIN_TEST" ]; then
   git config --file "$gc7h" --add 'credential.https://github.com.helper' '!f(){ sleep 120; };f'
   rc7h=0
   "$TIMEOUT_BIN_TEST" 60 env PATH="$stub7h" HOME="$sb7h" CARGO_HOME="$sb7h/.cargo" GIT_CONFIG_GLOBAL="$gc7h" \
-    GH_TOKEN="" bash "$repo7h/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1 || rc7h=$?
+    GH_TOKEN="" "$PIN_BS" "$repo7h/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1 || rc7h=$?
   if [ "$rc7h" -ne 124 ]; then
     ok "cred: a hanging credential helper is bounded — bootstrap still completes (rc=$rc7h)"
   else
@@ -782,14 +1108,14 @@ if [ -n "$TIMEOUT_BIN_TEST" ]; then
   rc7hm=0
   "$TIMEOUT_BIN_TEST" 60 env PATH="$stub7hm" HOME="$sb7hm" CARGO_HOME="$sb7hm/.cargo" \
     GIT_CONFIG_GLOBAL="$gc7hm" GH_TOKEN="" \
-    bash "$repo7hm/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1 || rc7hm=$?
+    "$PIN_BS" "$repo7hm/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1 || rc7hm=$?
   if [ "$rc7hm" -ne 124 ]; then
     ok "cred: the hang bound also applies on a gtimeout-only (macOS-shaped) host (rc=$rc7hm)"
   else
     bad "cred: bootstrap HUNG on a gtimeout-only host — the bound is inert on macOS"
   fi
 else
-  echo "skip - cred: hanging-helper guard needs timeout/gtimeout (neither on this host)"
+  skip "cred: hanging-helper guard needs timeout/gtimeout (neither on this host)"
 fi
 
 # 7e. Re-running --yes must not STACK a second copy of the helper. Bootstrap is
@@ -803,10 +1129,10 @@ repo7e="$tmp/repo7e"; mk_fake_repo "$repo7e" "https://github.com/pmcfadin/cqlite
 gc7e="$sb7e/gitconfig"
 for _ in 1 2; do
   PATH="$stub7e" HOME="$sb7e" CARGO_HOME="$sb7e/.cargo" GIT_CONFIG_GLOBAL="$gc7e" \
-    GH_TOKEN="$FAKE_TOKEN" bash "$repo7e/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke >/dev/null 2>&1
+    GH_TOKEN="$FAKE_TOKEN" "$PIN_BS" "$repo7e/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke >/dev/null 2>&1
 done
 out7e=$(PATH="$stub7e" HOME="$sb7e" CARGO_HOME="$sb7e/.cargo" GIT_CONFIG_GLOBAL="$gc7e" \
-  GH_TOKEN="$FAKE_TOKEN" bash "$repo7e/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
+  GH_TOKEN="$FAKE_TOKEN" "$PIN_BS" "$repo7e/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
 helper_count=$(grep -c 'x-access-token' "$gc7e" 2>/dev/null); helper_count="${helper_count:-0}"
 if [ "$helper_count" = 1 ]; then
   ok "cred: repeated --yes runs keep exactly one credential helper (idempotent)"
@@ -833,7 +1159,7 @@ repo7i="$tmp/repo7i"; mk_fake_repo "$repo7i" "https://github.com/pmcfadin/cqlite
 git -C "$repo7i" config --local --add 'credential.https://github.com.helper' \
   '!f(){ test "$1" = get || exit 0; echo username=x; echo password=local-only-secret; };f'
 out7i=$(PATH="$stub7i" HOME="$sb7i" CARGO_HOME="$sb7i/.cargo" GIT_CONFIG_GLOBAL="$sb7i/gitconfig" \
-  GH_TOKEN="" bash "$repo7i/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  GH_TOKEN="" "$PIN_BS" "$repo7i/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if printf '%s' "$out7i" | grep -q 'REPO-LOCAL scope only'; then
   ok "cred: repo-local-scope note fires for a HOST-SCOPED local helper"
 else
@@ -870,6 +1196,25 @@ mk_push_repo() {
   mkdir -p "$dir/scripts/lib" "$dir/test-data/datasets/sstables/ks/tbl" "$dir/.home/.cargo"
   cp "$SCRIPT_DIR/../lib/gate-notify.sh" "$dir/scripts/lib/gate-notify.sh"
   cp "$SCRIPT_DIR/../perf-capability.sh" "$dir/scripts/perf-capability.sh"
+  # agent-gate.sh is staged for SECTION 5b, not for the push probe (issue #3414 review B1).
+  # 5b's verdict asks the gate what it will do with the probed value, so a sandbox without
+  # it yields `gate-pin: UNMEASURED` — one extra [warn] in EVERY case built on this helper,
+  # which pushed base_warns from 1 to 2 and silently turned three end-to-end assertions
+  # below (the absolute-green, AC1+AC3 exit-0, and one-warning cases) into `skip`s. Skips
+  # are neither pass nor fail, so the suite stayed at FAIL=0 while the case whose own
+  # comment records that its absence "let a defect through with 102 tests green" stopped
+  # running. Staging it here plus the pinned `sudo` shim in mk_push_bin makes 5b contribute
+  # ZERO warnings deterministically — on a pinned host and an unpinned one alike.
+  cp "$SCRIPT_DIR/../agent-gate.sh" "$dir/scripts/agent-gate.sh"
+  # A PER-SANDBOX system env file carrying the pin, pointed at by run_push. Section 5b's
+  # VERIFIED now requires BOTH the file line and a session that sees it (roborev round 2),
+  # so without this the sandboxes would take the new NOT-SYSTEM-WIDE branch, base_warns
+  # would go back to 2, and the three end-to-end cases would silently skip again — the
+  # round-4 defect returning through the round-5 fix. Per-sandbox rather than the
+  # suite-wide seam ALSO removes an order-dependence that was already latent: the shared
+  # file is appended to by whichever earlier `--yes` case runs first, so what these cases
+  # measured depended on suite ordering.
+  printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$dir/etc-environment"
   : >"$dir/test-data/datasets/sstables/ks/tbl/nb-1-big-Data.db"
 }
 
@@ -927,11 +1272,36 @@ EOF
 mk_push_bin() {
   local dir="$1" setup="${2:-:}"
   mkdir -p "$dir"
-  mk_stub "$dir" uname 'echo Darwin'
+  # LINUX, plus a perf stub — changed by finding DD (#3414 round 14). This sandbox reported
+  # Darwin purely to skip the Linux-only perf section. But DD made a non-Linux host
+  # permanently NON-PASSING (with no system-wide file there is nothing to correlate a
+  # session value against), so Darwin now costs a gate-pin warn instead: `base_warns` went
+  # 1 -> 2 and the three green-path cases silently skipped for the FOURTH time. Measured
+  # both ways before choosing — Darwin: gate-pin warns; Linux: gate-pin passes and only the
+  # perf section warns. So the sandbox becomes Linux and the one section that made Darwin
+  # attractive is satisfied directly. It also makes the green-path cases MORE meaningful:
+  # "this box certifies green" is now a Linux-only claim, so they must model a Linux box.
+  mk_stub "$dir" uname 'echo Linux'
+  # perf stat is invoked with CSV output, so the stub emits `<count>,,cycles` on stderr as
+  # the real one does — a human-formatted row parses as no-cycles-row (verified against the
+  # shipped awk rather than guessed).
+  mk_stub "$dir" perf 'case "$*" in *stat*) echo "1234567,,cycles" >&2 ;; esac
+exit 0'
   mk_stub "$dir" sccache 'exit 0'
   mk_stub "$dir" cargo-nextest 'exit 0'
   mk_stub "$dir" cargo 'exit 0'
   mk_stub "$dir" roborev 'exit 0'
+  # A `sudo` that stands in for a PAM session on a PINNED box (issue #3414 review B1).
+  # Without it these sandboxes fall through to the REAL sudo and the REAL /etc/environment,
+  # so section 5b's verdict — and therefore the warning count every case here measures —
+  # would depend on whether the HOST running the suite happens to be pinned. That is the
+  # host-dependence this file removes everywhere else (GIT_CONFIG_GLOBAL, the board env,
+  # the datasets stub); 5b is simply the newest place it could leak in. Section 3b never
+  # invokes sudo and the perf section is skipped here (`uname` reports Darwin), so this
+  # shim's only subject is 5b.
+  mk_stub "$dir" sudo 'while [ "${1:-}" = "-n" ]; do shift; done
+if [ "${1:-}" = "-u" ]; then shift 2; fi
+exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   mk_push_gh "$dir" "$setup"
 }
 
@@ -946,10 +1316,11 @@ run_push() {
   local repo="$1" bin="$2" gc="$3"; shift 3
   push_rc=0
   push_out=$(PATH="$bin:$PATH" HOME="$repo/.home" CARGO_HOME="$repo/.home/.cargo" \
+    CQLITE_BOOTSTRAP_ENV_FILE="$repo/etc-environment" \
     GIT_CONFIG_GLOBAL="$gc" GIT_CONFIG_NOSYSTEM=1 CLAIM_MACHINE=push-probe-test \
     CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
     CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
-    bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke "$@" 2>&1) || push_rc=$?
+    "$PIN_BS" "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke "$@" 2>&1) || push_rc=$?
 }
 # ANSI colour is stripped with a printf-built ESC, not a `\x1b` escape: BSD sed (the
 # fleet's macOS hosts) does not understand \x1b and would silently match nothing.
@@ -1000,6 +1371,20 @@ fi
 # Absolute-green assertions need the sandbox to be otherwise-warning-free. MEASURE that
 # (baseline = exactly the one OPT-OUT warning) instead of assuming it: an exotic host
 # that warns for its own reasons must not produce a mystery red here.
+# THE BASELINE ITSELF IS AN ASSERTION (issue #3414 review B1). The three cases below are
+# guarded on `base_warns -eq 1` and print a `skip` otherwise — which is correct as a safety
+# net but SILENT as a signal: when section 5b began emitting an extra warning in every
+# sandbox, base_warns went 1 -> 2, all three stopped running, and the suite still reported
+# FAIL=0. Asserting the baseline catches that drift at its cause instead of letting it
+# disable assertions one by one. If this reds, a section has started warning in the clean
+# sandbox; find it before touching the cases below.
+if [ "$base_warns" -eq 1 ]; then
+  ok "push: the clean sandbox costs exactly ONE warning (the opt-out) — the exit-0/green cases below can run"
+else
+  bad "push: sandbox baseline drifted to $base_warns warnings — the three end-to-end cases below will SKIP, not fail"
+  push_plain "$out7pd" | grep -E '^[[:space:]]+\[warn\] ' | head -4
+fi
+
 if [ "$base_warns" -eq 1 ]; then
   if push_green "$out7pa" && [ "$rc7pa" -eq 0 ]; then
     ok "push: VERIFIED yields 'All checks green.' and --strict exits 0 (zero warnings)"
@@ -1008,7 +1393,7 @@ if [ "$base_warns" -eq 1 ]; then
     push_verdict "$out7pa"
   fi
 else
-  echo "skip - push: absolute-green assertions need an otherwise-clean sandbox (baseline=$base_warns warnings)"
+  skip "push: absolute-green assertions need an otherwise-clean sandbox (baseline=$base_warns warnings)"
   printf '%s' "$out7pd" | grep -F '[warn]' | sed 's/\x1b\[[0-9;]*m//g' | head -5
 fi
 
@@ -1208,7 +1593,7 @@ if [ "$base_warns" -eq 1 ]; then
     push_plain "$out7pj" | grep -E '\[warn\]' | head -5
   fi
 else
-  echo "skip - push: AC1+AC3 exit-0 assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
+  skip "push: AC1+AC3 exit-0 assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
 fi
 
 # 7p-k. AN UNSUCCESSFUL CLEANUP DELETE (#3369 blocker 2). `cmd_smoke` used to emit SMOKE-OK — text and
@@ -1340,7 +1725,7 @@ if [ -n "$TIMEOUT_KILL_TEST" ]; then
     CARGO_HOME="$repo7pm/.home/.cargo" GIT_CONFIG_GLOBAL="$gc7pm" GIT_CONFIG_NOSYSTEM=1 \
     CLAIM_MACHINE=push-probe-test CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
     CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
-    bash "$repo7pm/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1) || hang_rc=$?
+    "$PIN_BS" "$repo7pm/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1) || hang_rc=$?
   hang_elapsed=$(( $(date +%s) - hang_start ))
   # rc 124 OR 137 both mean the OUTER ceiling fired (137 = the watchdog had to SIGKILL
   # bootstrap itself), i.e. the inner bound failed to bound. Either is a failure here.
@@ -1355,7 +1740,7 @@ else
   # Deliberately SKIP rather than run unbounded: this fixture ignores SIGTERM, so without
   # a hard-kill-capable watchdog the case could hang the gate forever. A skip that says
   # so is honest; a case that can hang is not.
-  echo "skip - push: bound-escalation guard needs a timeout/gtimeout accepting --kill-after (its fixture ignores SIGTERM)"
+  skip "push: bound-escalation guard needs a timeout/gtimeout accepting --kill-after (its fixture ignores SIGTERM)"
 fi
 
 # 7p-n. SSH REMOTES GET SSH ADVICE (#3369 review). `gh auth setup-git` configures an
@@ -1464,7 +1849,7 @@ if [ -n "$TIMEOUT_BIN_TEST" ]; then
     push_plain "$out7po" | grep -E 'git-push|kill-after' | head -4
   fi
 else
-  echo "skip - push: --kill-after fallback case needs a real timeout/gtimeout to delegate to"
+  skip "push: --kill-after fallback case needs a real timeout/gtimeout to delegate to"
 fi
 
 # 7p-p. A REMOTE WITH SEVERAL PUSH URLs (#3369 review). `git push <remote>` writes to
@@ -1651,7 +2036,7 @@ if [ "$base_warns" -eq 1 ]; then
     push_plain "$out7pr" | grep -E '^[[:space:]]+\[warn\] ' | head -4
   fi
 else
-  echo "skip - push: one-warning assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
+  skip "push: one-warning assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
 fi
 
 # (ii) POSITIVE CONTROL: the SAME sandbox and the SAME fallback path, the ONLY change being
@@ -1720,14 +2105,14 @@ if [ "$divergence" -eq 0 ] && [ "$green_runs" -ge 1 ] && [ "$nongreen_runs" -ge 
 elif [ "$divergence" -ne 0 ]; then
   bad "push: --strict and the 'All checks green.' string DIVERGED (see the divergence lines above)"
 else
-  echo "skip - push: divergence check needs both directions (green=$green_runs nongreen=$nongreen_runs on this host)"
+  skip "push: divergence check needs both directions (green=$green_runs nongreen=$nongreen_runs on this host)"
 fi
 
 # 7p-h. FLAG HYGIENE. --skip-push-probe and --skip-smoke are different subjects (the
 #   git push probe vs the gate fmt run) and the name similarity is a live hazard, so
 #   both must be documented and each must skip only its own thing. 7p-a ran with
 #   --skip-smoke ALONE and still probed; 7p-d ran with BOTH and skipped only the probe.
-push_help=$(bash "$BOOTSTRAP" --help 2>&1)
+push_help=$(env HOME="$tmp/help-home" CARGO_HOME="$tmp/help-home/.cargo" "$PIN_BS" "$BOOTSTRAP" --help 2>&1)
 if printf '%s' "$push_help" | grep -q -- '--skip-push-probe' \
    && printf '%s' "$push_help" | grep -q -- '--skip-smoke' \
    && printf '%s' "$push_help" | grep -q -- '--fix-credentials' \
@@ -1843,7 +2228,7 @@ run_board_case() {
   repo="$tmp/repo-board-$name"; mk_fake_repo "$repo" "https://github.com/pmcfadin/cqlite.git"
   BOARD_OUT=$(PATH="$stub" HOME="$sb" CARGO_HOME="$sb/.cargo" GIT_CONFIG_GLOBAL="$sb/gitconfig" \
     CQLITE_PROJECT_ACCOUNT=tester CQLITE_PROJECT_NUMBER=1 \
-    GH_TOKEN="" bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+    GH_TOKEN="" "$PIN_BS" "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 }
 
 # run_board_auth_case <name> <auth-status-body> [env...] -> BOARD_OUT/BOARD_LOG
@@ -1874,7 +2259,7 @@ EOF
   # override would silently do nothing and the case would assert against the default.
   BOARD_OUT=$(PATH="$stub" HOME="$sb" CARGO_HOME="$sb/.cargo" GIT_CONFIG_GLOBAL="$sb/gitconfig" \
     CQLITE_PROJECT_NUMBER=1 \
-    GH_TOKEN="" env "$@" bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+    GH_TOKEN="" env "$@" "$PIN_BS" "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 }
 
 # 8a. THE false-OK case: `project` scope present, `read:org` missing, `gh project`
@@ -2056,7 +2441,7 @@ log8i="$tmp/gh8i.log"; : >"$log8i"; state8i="$tmp/gh8i.state"
 mk_switch_gh "$stub8i" "$log8i" "$state8i" other-emu pmcfadin   # EMU active at start
 repo8i="$tmp/repo8i"; mk_fake_repo "$repo8i" "https://github.com/pmcfadin/cqlite.git"
 out8i=$(PATH="$stub8i" HOME="$sb8i" CARGO_HOME="$sb8i/.cargo" GIT_CONFIG_GLOBAL="$sb8i/gitconfig" \
-  CQLITE_PROJECT_NUMBER=1 GH_TOKEN="" bash "$repo8i/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  CQLITE_PROJECT_NUMBER=1 GH_TOKEN="" "$PIN_BS" "$repo8i/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if grep -q -- 'auth switch --user pmcfadin' "$log8i"; then
   ok "board: switches to CQLITE_PROJECT_ACCOUNT before probing (mirrors flow-board)"
 else
@@ -2083,7 +2468,7 @@ log8j="$tmp/gh8j.log"; : >"$log8j"; state8j="$tmp/gh8j.state"
 mk_switch_gh "$stub8j" "$log8j" "$state8j" other-emu pmcfadin
 repo8j="$tmp/repo8j"; mk_fake_repo "$repo8j" "https://github.com/pmcfadin/cqlite.git"
 out8j=$(PATH="$stub8j" HOME="$sb8j" CARGO_HOME="$sb8j/.cargo" GIT_CONFIG_GLOBAL="$sb8j/gitconfig" \
-  CQLITE_PROJECT_NUMBER=1 GH_TOKEN="$FAKE_TOKEN" bash "$repo8j/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  CQLITE_PROJECT_NUMBER=1 GH_TOKEN="$FAKE_TOKEN" "$PIN_BS" "$repo8j/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if ! grep -q -- 'auth switch' "$log8j" && [ "$(cat "$state8j")" = other-emu ]; then
   ok "board: an env token suppresses the switch entirely (no pointless host mutation)"
 else
@@ -2120,7 +2505,7 @@ EOF
 chmod +x "$stub8k/gh"
 repo8k="$tmp/repo8k"; mk_fake_repo "$repo8k" "https://github.com/pmcfadin/cqlite.git"
 out8k=$(PATH="$stub8k" HOME="$sb8k" CARGO_HOME="$sb8k/.cargo" GIT_CONFIG_GLOBAL="$sb8k/gitconfig" \
-  CQLITE_PROJECT_ACCOUNT=tester GH_TOKEN="" bash "$repo8k/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  CQLITE_PROJECT_ACCOUNT=tester GH_TOKEN="" "$PIN_BS" "$repo8k/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if printf '%s' "$out8k" | grep -Eq '\[ok\].*board #.*reachable'; then
   bad "board: unexported CQLITE_PROJECT_NUMBER still produced a green 'reachable' verdict"
 elif printf '%s' "$out8k" | grep -q 'CQLITE_PROJECT_NUMBER is NOT exported'; then
@@ -2137,7 +2522,7 @@ if [ -n "$jqp" ]; then
     printf '%s\n' "$out8k" | grep -i "PROJECT_NUMBER"
   fi
 else
-  echo "skip - board: title discovery needs jq (absent on this host)"
+  skip "board: title discovery needs jq (absent on this host)"
 fi
 
 # 8k-ii: not discoverable -> point at setup-project-board.sh, still no green.
@@ -2215,7 +2600,7 @@ fi
 # reported value must name the HOST only.
 redact_out=$(PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
   CODEX_NOTIFY_WEBHOOK='https://alice:s3cr3t-token@ntfy.example.com/private-topic' \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$redact_out" | grep -q 'notify target configured' \
    && ! printf '%s' "$redact_out" | grep -qE 's3cr3t-token|alice:'; then
   ok "notify: URL userinfo is redacted from the reported target"
@@ -2266,7 +2651,7 @@ MUT
 runnotifyroot() { # runnotifyroot <dir> [env assignments...]
   local dir="$1"; shift
   env PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" "$@" \
-    timeout -s KILL 300 bash "$dir/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1
+    timeout -s KILL 300 "$PIN_BS" "$dir/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1
 }
 
 # (b) POSITIVE twin: a healthy wrapper must be reported VERIFIED.
@@ -2320,6 +2705,1605 @@ else
   bad "notify no-target: could not stage the tree"
 fi
 
+# --- 11. Single-gate pin: the VERDICT is a session PROBE, not a file read (#3414) ---
+# The defect this closes, in the section's own words: it reported `ok` from a GREP of
+# the shell profile it had just written, or from the value it had INHERITED from its
+# own caller. Both were true on every fleet box at once while NO gate could see the
+# pin — Ubuntu's stock ~/.bashrc returns early for non-interactive shells — so every
+# gate resolved the #1825 cap from the default formula and admitted co-tenants.
+#
+# These cases assert the VERDICT, in the shape case 10 above established: a NEGATIVE
+# that the old code would have passed, its POSITIVE twin, and the degraded states that
+# must warn rather than pass. The probe's fresh PAM session is stood in for by a `sudo`
+# PATH shim, so nothing here needs sudo, root, or the host's real /etc/environment.
+
+# mkpinshims <dir> <persisted-value|-> : a hermetic PATH whose `sudo` stands in for a
+# fresh, profile-free session. `-` = a box where NOTHING is persisted system-wide, so
+# the session starts from exactly the environment it was handed and injects nothing —
+# which is what makes it able to catch a bootstrap that forgot to scrub its own
+# inherited value. A value = a box where the pin IS persisted: the session injects it,
+# as pam_env would from /etc/environment.
+mkpinshims() {
+  local dir="$1" val="$2" t bin
+  mk_hermetic_bin "$dir"
+  # mk_hermetic_bin links the coreutils the mold/cred cases need; the pin section also
+  # needs `id` (to name the probe's runas user), `tee` (the append) and `true` (the
+  # `sudo -n true` availability probe — the shim EXECs it, and on a hermetic PATH a
+  # missing /usr/bin/true makes that probe look like a sudo that needs a password).
+  for t in id tee true; do
+    bin=$(type -P "$t" 2>/dev/null) || continue
+    [ -n "$bin" ] && ln -sf "$bin" "$dir/$t" 2>/dev/null || true
+  done
+  if [ "${val#file:}" != "$val" ]; then
+    # PAM STAND-IN: read the env file AT SESSION CREATION, exactly as pam_env does, so a
+    # write performed earlier in the same bootstrap run is visible to this probe. Presence
+    # of the line and its VALUE are separated (grep vs sed) so a present-but-empty line
+    # injects an empty value rather than being treated as absent — the distinction the
+    # gate's (invalid) classification turns on.
+    mk_stub "$dir" sudo "while [ \"\${1:-}\" = \"-n\" ]; do shift; done
+if [ \"\${1:-}\" = \"-u\" ]; then shift 2; fi
+pam_file='${val#file:}'
+if [ -f \"\$pam_file\" ] && grep -Eq '^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=' \"\$pam_file\"; then
+  pam_val=\$(sed -n 's/^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=//p' \"\$pam_file\" | head -1)
+  exec env CQLITE_GATE_MAX_CONCURRENCY=\"\$pam_val\" \"\$@\"
+fi
+exec \"\$@\""
+  elif [ "$val" = "-" ]; then
+    mk_stub "$dir" sudo 'while [ "${1:-}" = "-n" ]; do shift; done
+if [ "${1:-}" = "-u" ]; then shift 2; fi
+exec "$@"'
+  else
+    mk_stub "$dir" sudo "while [ \"\${1:-}\" = \"-n\" ]; do shift; done
+if [ \"\${1:-}\" = \"-u\" ]; then shift 2; fi
+exec env CQLITE_GATE_MAX_CONCURRENCY=$val \"\$@\""
+  fi
+}
+
+# runpin <root-dir> <shim-dir> <env-file> [NAME=VALUE...] [--flag...] — one bootstrap
+# run. NAME=VALUE arguments become environment; anything starting with `-` becomes a
+# bootstrap flag. HOME is per-call so a case can control what the shell profile says.
+#
+# CQLITE_GATE_MAX_CONCURRENCY IS SCRUBBED FROM EVERY CALL, and a case that wants it set
+# passes it explicitly: this suite runs on fleet boxes that export the pin, so an
+# inherited value would otherwise decide 11b's verdict instead of the case's own input.
+# `env` applies its `-u` options before the NAME=VALUE assignments, so passing it still
+# works.
+runpin() {
+  local root="$1" shims="$2" envfile="$3"; shift 3
+  local -a pin_env=() pin_flags=()
+  local a
+  for a in "$@"; do
+    case "$a" in
+      -*) pin_flags+=("$a") ;;
+      *) pin_env+=("$a") ;;
+    esac
+  done
+  env -u CQLITE_GATE_MAX_CONCURRENCY \
+    PATH="$shims" CARGO_HOME="$tmp/pin-cargo" \
+    CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envfile" \
+    ${pin_env[@]+"${pin_env[@]}"} \
+    "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$root/scripts/bootstrap-agent-machine.sh" \
+      --skip-smoke ${pin_flags[@]+"${pin_flags[@]}"} 2>&1
+}
+
+pinroot="$tmp/pin-root"
+# THE SEAM IS REFUSED UNDER ROOT BY DESIGN (#3414 roborev round 5, HIGH), so this entire
+# block is unexercisable as root. Reported as ONE counted `skip` rather than an `ok`:
+# announcing a skip through ok() was round 2's finding, and reintroducing it inside the
+# block that fixed it would be galling. The capability loss is accepted, not worked around.
+if [ "$(id -u)" = 0 ]; then
+  skip "gate-pin: the ENTIRE block (the test seam is refused under root, so section 5b cannot be driven here)"
+elif ! mknotifyroot "$pinroot" good; then
+  bad "gate-pin: could not stage the bootstrap tree"
+elif ! cp "$SCRIPT_DIR/../agent-gate.sh" "$pinroot/scripts/agent-gate.sh"; then
+  # The verdict asks the GATE what it will do with the probed value (rather than
+  # re-deriving the gate's rules inside bootstrap), so the throwaway tree needs a real
+  # agent-gate.sh. A tree WITHOUT one is its own case — 11m below.
+  bad "gate-pin: could not stage agent-gate.sh into the bootstrap tree"
+else
+  mkdir -p "$tmp/pin-cargo"
+  pin_home_plain="$tmp/pin-home-plain"; mkdir -p "$pin_home_plain/.cargo"
+
+  # 11a. THE CASE. Nothing is persisted, but bootstrap's OWN environment carries the
+  #      value — which is the normal state of a re-run on a fleet box. An unscrubbed
+  #      probe returns the inherited value and reports the box healthy, i.e. it
+  #      certifies exactly the failure this section exists to catch. Must be FAILED.
+  shims_none="$tmp/pin-shims-none"; mkpinshims "$shims_none" -
+  envf_a="$tmp/pin-env-a"; : >"$envf_a"
+  out_a=$(runpin "$pinroot" "$shims_none" "$envf_a" HOME="$pin_home_plain" \
+    CQLITE_GATE_MAX_CONCURRENCY=7)
+  if printf '%s' "$out_a" | grep -q 'gate-pin: FAILED' \
+     && ! printf '%s' "$out_a" | grep -q 'gate-pin: VERIFIED'; then
+    ok "gate-pin: an INHERITED-but-not-persisted value is FAILED, never VERIFIED (the scrub is honoured)"
+  else
+    bad "gate-pin: an inherited value was accepted as evidence the box is pinned"
+    printf '%s\n' "$out_a" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11b. POSITIVE twin: the pin IS visible to a fresh session (and this run's own
+  #      environment does NOT carry it), so VERIFIED must be reachable. Without this,
+  #      11a would also pass against a section that can only ever say FAILED.
+  shims_one="$tmp/pin-shims-one"; mkpinshims "$shims_one" 1
+  envf_b="$tmp/pin-env-b"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_b"
+  out_b=$(runpin "$pinroot" "$shims_one" "$envf_b" HOME="$pin_home_plain")
+  if printf '%s' "$out_b" | grep -q 'gate-pin: VERIFIED' \
+     && ! printf '%s' "$out_b" | grep -q 'gate-pin: FAILED'; then
+    ok "gate-pin: a pin a fresh profile-free session CAN see is reported VERIFIED"
+  else
+    bad "gate-pin: a genuinely visible pin was not reported VERIFIED"
+    printf '%s\n' "$out_b" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11c. NO SUDO BINARY: no session can be created, so nothing was measured. It must
+  #      warn — an unmeasured capability may never inherit the permissive branch.
+  shims_nosudo="$tmp/pin-shims-nosudo"; mkpinshims "$shims_nosudo" -; rm -f "$shims_nosudo/sudo"
+  envf_c="$tmp/pin-env-c"; : >"$envf_c"
+  out_c=$(runpin "$pinroot" "$shims_nosudo" "$envf_c" HOME="$pin_home_plain" \
+    CQLITE_GATE_MAX_CONCURRENCY=7)
+  if printf '%s' "$out_c" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+     && printf '%s' "$out_c" | grep -q "no 'sudo' on this box" \
+     && ! printf '%s' "$out_c" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: no sudo binary => UNMEASURED as a [warn], never an [ok]"
+  else
+    bad "gate-pin: a box with no sudo did not report UNMEASURED-as-a-warn"
+    printf '%s\n' "$out_c" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11d. SUDO NEEDS A PASSWORD: `sudo -n` never prompts, so the probe cannot run.
+  #      Same posture, different cause text — a remedy that names the wrong cause
+  #      costs the operator a cycle before they learn it does not apply.
+  shims_pw="$tmp/pin-shims-pw"; mkpinshims "$shims_pw" -; mk_stub "$shims_pw" sudo 'exit 1'
+  envf_d="$tmp/pin-env-d"; : >"$envf_d"
+  out_d=$(runpin "$pinroot" "$shims_pw" "$envf_d" HOME="$pin_home_plain" \
+    CQLITE_GATE_MAX_CONCURRENCY=7)
+  if printf '%s' "$out_d" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+     && printf '%s' "$out_d" | grep -q 'will not open a session as' \
+     && ! printf '%s' "$out_d" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: a sudo that cannot open a self-session => UNMEASURED as a [warn], with its own cause"
+  else
+    bad "gate-pin: a password-requiring sudo did not report UNMEASURED-as-a-warn"
+    printf '%s\n' "$out_d" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11e. --yes PERSISTS into the system env file, and does so IDEMPOTENTLY. Two runs
+  #      must leave exactly one CQLITE_GATE_MAX_CONCURRENCY line: /etc/environment is
+  #      a hot, hand-edited file and a bootstrap that appends on every re-run would
+  #      grow it without bound.
+  envf_e="$tmp/pin-env-e"; : >"$envf_e"
+  runpin "$pinroot" "$shims_none" "$envf_e" HOME="$pin_home_plain" --yes >/dev/null 2>&1
+  runpin "$pinroot" "$shims_none" "$envf_e" HOME="$pin_home_plain" --yes >/dev/null 2>&1
+  pin_e_n=$(grep -c '^CQLITE_GATE_MAX_CONCURRENCY=1$' "$envf_e" 2>/dev/null || true)
+  if [ "${pin_e_n:-0}" = 1 ]; then
+    ok "gate-pin: --yes persists the pin into the system env file, idempotently across re-runs"
+  else
+    bad "gate-pin: expected exactly one persisted pin line, got ${pin_e_n:-0}"
+    cat "$envf_e"
+  fi
+
+  # 11f. AN EXISTING VALUE IS NEVER REWRITTEN. A box deliberately running >1
+  #      concurrent gate overrides the pin, and clobbering that back to 1 on the next
+  #      bootstrap would be a silent regression of a deliberate operator decision.
+  #      The run must also SAY it left the value alone: asserting only that the file is
+  #      unchanged is satisfied by a bootstrap that never writes at all, so the case
+  #      would pass against the very code this replaces.
+  envf_f="$tmp/pin-env-f"; printf 'CQLITE_GATE_MAX_CONCURRENCY=4\n' >"$envf_f"
+  out_f=$(runpin "$pinroot" "$shims_none" "$envf_f" HOME="$pin_home_plain" --yes)
+  if [ "$(cat "$envf_f")" = "CQLITE_GATE_MAX_CONCURRENCY=4" ] \
+     && printf '%s' "$out_f" | grep -q 'already carries a CQLITE_GATE_MAX_CONCURRENCY line — left EXACTLY as it is'; then
+    ok "gate-pin: an existing CQLITE_GATE_MAX_CONCURRENCY value is left EXACTLY as it is, and the run says so"
+  else
+    bad "gate-pin: --yes rewrote a deliberate override (or never looked at the file)"
+    cat "$envf_f"
+    printf '%s\n' "$out_f" | grep -i 'gate-pin\|already carries' | head -2
+  fi
+
+  # 11g. A file whose last byte is not a newline must not have the pin welded onto its
+  #      final line — pam_env would read the join as one malformed entry, i.e. the
+  #      write would silently un-persist whatever was already there.
+  envf_g="$tmp/pin-env-g"; printf 'FOO=bar' >"$envf_g"
+  runpin "$pinroot" "$shims_none" "$envf_g" HOME="$pin_home_plain" --yes >/dev/null 2>&1
+  if grep -q '^FOO=bar$' "$envf_g" && grep -q '^CQLITE_GATE_MAX_CONCURRENCY=1$' "$envf_g"; then
+    ok "gate-pin: appending to a file with no trailing newline keeps both lines intact"
+  else
+    bad "gate-pin: the append welded onto the previous line"
+    cat -A "$envf_g" | head -3
+  fi
+
+  # 11h. PRESENCE IN A PROFILE CAN NO LONGER REPORT SUCCESS. The profile carries the
+  #      export AND this run inherits the value — the exact pair of proxies the old
+  #      code passed on — while nothing is persisted where a session reads it.
+  pin_home_prof="$tmp/pin-home-prof"; mkdir -p "$pin_home_prof/.cargo"
+  printf 'export CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$pin_home_prof/.bashrc"
+  envf_h="$tmp/pin-env-h"; : >"$envf_h"
+  out_h=$(runpin "$pinroot" "$shims_none" "$envf_h" HOME="$pin_home_prof" \
+    SHELL=/bin/bash CQLITE_GATE_MAX_CONCURRENCY=7)
+  if printf '%s' "$out_h" | grep -q 'gate-pin: FAILED' \
+     && ! printf '%s' "$out_h" | grep -qE '\[ok\].*(gate-pin|CQLITE_GATE_MAX_CONCURRENCY)'; then
+    ok "gate-pin: a profile that carries the export produces NO success verdict"
+  else
+    bad "gate-pin: a profile grep (or the inherited value) still bought a success verdict"
+    printf '%s\n' "$out_h" | grep -iE 'gate-pin|CQLITE_GATE_MAX_CONCURRENCY' | head -4
+  fi
+
+  # 11i. STRUCTURAL, because the behavioural cases above can only cover the branches
+  #      someone thought of: section 5b must contain EXACTLY ONE `ok` call, and it
+  #      must be the probe's VERIFIED verdict. Any future `ok` added for a file write,
+  #      a profile grep or an inherited value reds this immediately.
+  pin_section=$(awk '/^# ---- 5b\./,/^# ---- 5c\./' "$BOOTSTRAP")
+  # TWO success verdicts now, and both are ENUMERATED rather than merely counted: the
+  # probe's VERIFIED, and the non-Linux NOT-APPLICABLE (an explicit inapplicability, which
+  # must be an [ok] so a correctly-configured Mac is not permanently non-passing). Naming
+  # them is what keeps this a real guard — a bare count of 2 would let a third `ok` in as
+  # soon as someone removed one of these.
+  pin_ok_total=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "' || true)
+  pin_ok_named=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "gate-pin: VERIFIED [(]' || true)
+  # ONE success verdict again (#3414 round 14): the non-Linux `ok` was deleted, because on a
+  # platform with no system-wide file to correlate against no verdict that reports a state
+  # is available. A second `ok` reappearing here means someone re-added an exemption.
+  if [ -n "$pin_section" ] && [ "${pin_ok_total:-0}" = 1 ] && [ "${pin_ok_named:-0}" = 1 ]; then
+    ok "gate-pin: section 5b's ONLY success verdict is VERIFIED (no platform exemption)"
+  else
+    bad "gate-pin: section 5b has ${pin_ok_total:-0} ok() call(s), ${pin_ok_named:-0} of them a named verdict"
+  fi
+
+  # 11j. The OPT-OUT is loud and NON-PASSING: a switch that returned `ok` would be a
+  #      way to buy a vacuous green, which is the failure mode this section removes.
+  envf_j="$tmp/pin-env-j"; : >"$envf_j"
+  out_j=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
+    CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_j" \
+    "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      --skip-smoke --skip-gate-pin 2>&1)
+  if printf '%s' "$out_j" | grep -qE '\[warn\].*gate-pin: OPT-OUT' \
+     && ! printf '%s' "$out_j" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: --skip-gate-pin is a [warn] OPT-OUT that can never buy a green"
+  else
+    bad "gate-pin: the opt-out did not report as a non-passing OPT-OUT"
+    printf '%s\n' "$out_j" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11l. VISIBLE IS NOT HONOURED. A value the gate DISCARDS (non-numeric/empty) or
+  #      silently CLAMPS (<1) is a pin in name only: bootstrap would be certifying a cap
+  #      the gate does not apply, while the gate's own summary says (invalid)/(clamped)
+  #      for the same box. That is this issue's shape one level further out, so it gets
+  #      its own non-passing verdict — never VERIFIED, and never the bare FAILED, whose
+  #      remedy ("persist the pin") is wrong for a pin that is already there.
+  for pin_case in "abc:DISCARDS" "0:silently raises it to 1"; do
+    pin_val=${pin_case%%:*}; pin_expect=${pin_case#*:}
+    shims_nh="$tmp/pin-shims-nh-$pin_val"; mkpinshims "$shims_nh" "$pin_val"
+    envf_nh="$tmp/pin-env-nh-$pin_val"; printf 'CQLITE_GATE_MAX_CONCURRENCY=%s\n' "$pin_val" >"$envf_nh"
+    out_nh=$(runpin "$pinroot" "$shims_nh" "$envf_nh" HOME="$pin_home_plain")
+    if printf '%s' "$out_nh" | grep -q 'gate-pin: NOT-HONOURED' \
+       && printf '%s' "$out_nh" | grep -q "$pin_expect" \
+       && ! printf '%s' "$out_nh" | grep -qE '\[ok\].*gate-pin'; then
+      ok "gate-pin: a visible '$pin_val' the gate does not honour is NOT-HONOURED, never VERIFIED"
+    else
+      bad "gate-pin: a visible-but-not-honoured '$pin_val' was not surfaced"
+      printf '%s\n' "$out_nh" | grep -i 'gate-pin' | head -3
+    fi
+  done
+
+  # 11m. A value >= 1 is VERIFIED whatever the number: a box deliberately running >1
+  #      concurrent gate is legitimate and bootstrap correctly never rewrites it, so the
+  #      verdict is "visible AND honoured", not "equal to 1". Without this, 11l would
+  #      also pass against a section that only ever accepts the literal 1.
+  shims_four="$tmp/pin-shims-four"; mkpinshims "$shims_four" 4
+  envf_m="$tmp/pin-env-m"; printf 'CQLITE_GATE_MAX_CONCURRENCY=4\n' >"$envf_m"
+  out_m=$(runpin "$pinroot" "$shims_four" "$envf_m" HOME="$pin_home_plain")
+  if printf '%s' "$out_m" | grep -q 'gate-pin: VERIFIED' \
+     && printf '%s' "$out_m" | grep -q 'max-concurrency=4(pinned)'; then
+    ok "gate-pin: a deliberate override >1 is VERIFIED and reported as the cap the gate will apply"
+  else
+    bad "gate-pin: a legitimate >1 override was not VERIFIED"
+    printf '%s\n' "$out_m" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11n. THE HONOURING ORACLE IS NOT OPTIONAL. With no agent-gate.sh to consult, the
+  #      second half of the question is unanswered — that must be UNMEASURED, never an
+  #      assumed pass. (A positive verdict requires an affirmative measurement.)
+  nogate="$tmp/pin-root-nogate"
+  if mknotifyroot "$nogate" good; then
+    envf_n="$tmp/pin-env-n"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_n"
+    out_n=$(runpin "$nogate" "$shims_one" "$envf_n" HOME="$pin_home_plain")
+    if printf '%s' "$out_n" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+       && printf '%s' "$out_n" | grep -q 'could not be consulted to confirm' \
+       && ! printf '%s' "$out_n" | grep -qE '\[ok\].*gate-pin'; then
+      ok "gate-pin: a visible pin whose honouring could NOT be checked is UNMEASURED, not VERIFIED"
+    else
+      bad "gate-pin: an unconsultable gate still produced a verdict about honouring"
+      printf '%s\n' "$out_n" | grep -i 'gate-pin' | head -3
+    fi
+  else
+    bad "gate-pin: could not stage the gate-less bootstrap tree"
+  fi
+
+  # 11o. THE PAM CASE. The pin IS in the file and a fresh session still does not see it.
+  #      That is not a missing pin, and `--yes` cannot fix it — it finds the line already
+  #      present and changes nothing, so an operator handed the persist remedy loops.
+  #      The two boxes that reach FAILED must be told apart.
+  envf_o="$tmp/pin-env-o"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_o"
+  out_o=$(runpin "$pinroot" "$shims_none" "$envf_o" HOME="$pin_home_plain")
+  if printf '%s' "$out_o" | grep -q 'gate-pin: FAILED' \
+     && printf '%s' "$out_o" | grep -q 'this is a PAM condition, NOT a missing pin' \
+     && printf '%s' "$out_o" | grep -q 'pam_env' \
+     && ! printf '%s' "$out_o" | grep -q 'fix:  bash scripts/bootstrap-agent-machine.sh --yes'; then
+    ok "gate-pin: a present-but-invisible pin is diagnosed as a PAM condition, not handed the persist remedy"
+  else
+    bad "gate-pin: the two FAILED boxes were not told apart"
+    printf '%s\n' "$out_o" | grep -i 'gate-pin\|pam_env\|fix:' | head -4
+  fi
+
+  # 11p. ...and the ABSENT-file box is not handed a remedy naming a file it does not
+  #      have. A remedy that cannot work on the box it is printed for costs a cycle
+  #      before the operator learns that.
+  #
+  #      THIS CASE USED TO ASSERT THE WRONG HALF (roborev job 332). It ran on the
+  #      suite's own LINUX host with the env file merely MISSING, and required the
+  #      message "has nowhere to persist it" — which is a MAC's message. On Linux the
+  #      missing file is CREATED by --fix-gate-pin, so the case was PINNING A FALSE
+  #      DIAGNOSTIC in place: it simulated a Mac by removing a file, and "the file is
+  #      absent" is not "this platform has no such file". Split in two, one per state,
+  #      because a single case cannot distinguish them by construction.
+  #
+  #      11p covers the LINUX absent file: creatable, so the remedy must NAME the flag
+  #      that creates it and must NOT claim there is nowhere to persist it.
+  envf_p="$tmp/pin-env-p-missing"; rm -f "$envf_p"
+  out_p=$(runpin "$pinroot" "$shims_none" "$envf_p" HOME="$pin_home_plain")
+  if printf '%s' "$out_p" | grep -q 'gate-pin: FAILED' \
+     && [[ $out_p == *'--fix-gate-pin'* ]] \
+     && [[ $out_p != *'has nowhere to persist it'* ]]; then
+    ok "gate-pin: a LINUX box with no env file is pointed at --fix-gate-pin, which creates it — not told there is nowhere to persist"
+  else
+    bad "gate-pin: the absent-env-file Linux box got the unmanaged-platform remedy (job 332)"
+    printf '%s\n' "$out_p" | grep -i 'gate-pin\|nowhere\|fix:' | head -4
+  fi
+
+  # 11p2. ...and the UNMANAGED-PLATFORM box keeps the original ruling: no remedy naming a
+  #      file the platform does not have. Same missing file as 11p; the ONLY difference is
+  #      `uname`, which is what makes this the state 11p is not. Without this half the fix
+  #      above could have deleted the Mac message entirely and still passed.
+  shims_mac_p="$tmp/pin-shims-mac-p"; mkpinshims "$shims_mac_p" -
+  mk_stub "$shims_mac_p" uname 'echo Darwin'
+  envf_p2="$tmp/pin-env-p2-missing"; rm -f "$envf_p2"
+  out_p2=$(runpin "$pinroot" "$shims_mac_p" "$envf_p2" HOME="$pin_home_plain")
+  if [[ $out_p2 != *'--fix-gate-pin   (this'* ]] \
+     && [[ $out_p2 != *'fix:  bash scripts/bootstrap-agent-machine.sh --yes'* ]] \
+     && ! printf '%s' "$out_p2" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: an unmanaged-platform box with no env file is never pointed at a file its platform does not read"
+  else
+    bad "gate-pin: the unmanaged-platform box was handed a create-the-file remedy"
+    printf '%s\n' "$out_p2" | grep -i 'gate-pin\|nowhere\|fix:' | head -4
+  fi
+
+  # 11q. PERSIST-THEN-PROBE WITHIN ONE RUN — the property `verify.run` depends on.
+  #      `--fix-gate-pin` writes the env file and the probe then opens a NEW session, which
+  #      reads that file at session creation, so a box that starts unpinned must come out
+  #      of the SAME invocation VERIFIED — no --yes, no re-login, no second run. If this
+  #      does not hold, putting the flag in .agent-ami/profile.yaml's verify.run buys
+  #      nothing. The `sudo` shim here stands in for pam_env by reading the file, so the
+  #      case exercises the ORDERING rather than a canned answer.
+  envf_q="$tmp/pin-env-q"; : >"$envf_q"
+  shims_pam_q="$tmp/pin-shims-pam-q"; mkpinshims "$shims_pam_q" "file:$envf_q"
+  out_q=$(runpin "$pinroot" "$shims_pam_q" "$envf_q" HOME="$pin_home_plain" --fix-gate-pin)
+  if printf '%s' "$out_q" | grep -q 'gate-pin: VERIFIED' \
+     && grep -q '^CQLITE_GATE_MAX_CONCURRENCY=1$' "$envf_q"; then
+    ok "gate-pin: --fix-gate-pin persists AND the same run's probe then sees it (no --yes, no re-login)"
+  else
+    bad "gate-pin: persist-then-probe did not close within one run"
+    printf '%s\n' "$out_q" | grep -i 'gate-pin' | head -3
+    cat "$envf_q"
+  fi
+
+  # 11q4. AN OVERSIZED VALUE IS NOT "NON-NUMERIC", AND MUST NOT BE TOLD IT IS (roborev job
+  #      333, Low). This branch widened `invalid` to include a digit string too large to
+  #      represent, and the diagnosis still read "it is empty or non-numeric" while the
+  #      remedy said "use a positive integer" — advice `99999999999999999999` HAS ALREADY
+  #      TAKEN. A remedy the operator already complies with is worse than none: they find
+  #      nothing wrong and re-run into the same verdict. Both halves are asserted, because
+  #      naming the cause while leaving the remedy unqualified fixes only the visible half.
+  envf_q4="$tmp/pin-env-q4"; printf 'CQLITE_GATE_MAX_CONCURRENCY=99999999999999999999\n' >"$envf_q4"
+  shims_pam_q4="$tmp/pin-shims-pam-q4"; mkpinshims "$shims_pam_q4" "file:$envf_q4"
+  out_q4=$(runpin "$pinroot" "$shims_pam_q4" "$envf_q4" HOME="$pin_home_plain")
+  if printf '%s' "$out_q4" | grep -q 'gate-pin: NOT-HONOURED' \
+     && [[ $out_q4 == *'too large to use as a slot cap'* ]] \
+     && [[ $out_q4 != *'it is not a plain decimal integer'* ]] \
+     && [[ $out_q4 == *'at most 18 digits'* ]]; then
+    ok "gate-pin: an oversized pin is diagnosed BY SIZE and its remedy states the 18-digit bound (not 'use a positive integer')"
+  else
+    bad "gate-pin: an oversized pin was diagnosed as non-numeric or given advice it already satisfies (job 333)"
+    printf '%s\n' "$out_q4" | grep -i 'gate-pin\|fix the VALUE' | head -4
+  fi
+
+  # 11q2. A VALID LEADING-ZERO PIN MUST REACH VERIFIED (roborev job 333, Medium). The gate
+  #      NORMALISES `08` -> `8(pinned)`; bootstrap compared that normalised N against the RAW
+  #      session value, so `8` != `08` demoted a CORRECTLY PERSISTED pin to UNMEASURED and
+  #      `--strict` red on a properly pinned box. Introduced by this branch's own octal fix:
+  #      normalisation was added to the gate and this comparison was not told about it.
+  #
+  #      THIS CASE IS ALSO THE ANTI-DRIFT MECHANISM for the canonicaliser bootstrap now
+  #      mirrors from the gate. `$pinroot` carries the REAL agent-gate.sh (copied above), so
+  #      if the gate's normalisation rule ever changes, this reds rather than the two rules
+  #      silently diverging. That is why it is worth a case and not a comment.
+  envf_q2="$tmp/pin-env-q2"; printf 'CQLITE_GATE_MAX_CONCURRENCY=08\n' >"$envf_q2"
+  shims_pam_q2="$tmp/pin-shims-pam-q2"; mkpinshims "$shims_pam_q2" "file:$envf_q2"
+  out_q2=$(runpin "$pinroot" "$shims_pam_q2" "$envf_q2" HOME="$pin_home_plain")
+  if printf '%s' "$out_q2" | grep -q 'gate-pin: VERIFIED' \
+     && ! printf '%s' "$out_q2" | grep -q 'gate-pin: UNMEASURED'; then
+    ok "gate-pin: a valid leading-zero pin (08) reaches VERIFIED — the gate's normalisation is not read as oracle drift"
+  else
+    bad "gate-pin: a correctly persisted 08 was not VERIFIED (job 333 — raw-vs-normalised compare)"
+    printf '%s\n' "$out_q2" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11q3. ...and the drift check it must NOT break: the whole point of comparing against our
+  #      input is to catch an oracle answering about a DIFFERENT value. Canonicalising both
+  #      sides preserves that, and this asserts it — otherwise 11q2 could have been "fixed"
+  #      by deleting the comparison, which would pass 11q2 and silently remove a guard.
+  #      `08` and `9` are both valid and both pinned, so only the COMPARISON distinguishes
+  #      them: the session-visible value is 08 while a BASH_ENV-style pollution makes the
+  #      oracle answer 9, and that must NOT read VERIFIED.
+  envf_q3="$tmp/pin-env-q3"; printf 'CQLITE_GATE_MAX_CONCURRENCY=08\n' >"$envf_q3"
+  shims_pam_q3="$tmp/pin-shims-pam-q3"; mkpinshims "$shims_pam_q3" "file:$envf_q3"
+  # a gate whose cpu-budget line always answers 9(pinned), whatever it was handed
+  cat > "$shims_pam_q3/../pin-fake-gate.sh" <<'FAKEGATE'
+#!/usr/bin/env bash
+echo "cpu-budget: wrapper=none ncpu=16 max-concurrency=9(pinned) cores-per-gate=1 build-jobs=1(derived) test-threads=1"
+FAKEGATE
+  chmod +x "$shims_pam_q3/../pin-fake-gate.sh" 2>/dev/null
+  pinroot_q3="$tmp/pin-root-q3"; mkdir -p "$pinroot_q3/scripts"
+  cp "$pinroot/scripts/bootstrap-agent-machine.sh" "$pinroot_q3/scripts/" 2>/dev/null
+  cp "$shims_pam_q3/../pin-fake-gate.sh" "$pinroot_q3/scripts/agent-gate.sh" 2>/dev/null
+  out_q3=$(runpin "$pinroot_q3" "$shims_pam_q3" "$envf_q3" HOME="$pin_home_plain")
+  if ! printf '%s' "$out_q3" | grep -q 'gate-pin: VERIFIED'; then
+    ok "gate-pin: an oracle answering about a DIFFERENT value is still refused — canonicalising did not delete the drift check"
+  else
+    bad "gate-pin: the drift check was lost — a gate answering 9(pinned) for a session showing 08 read VERIFIED"
+    printf '%s\n' "$out_q3" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11r. The NEGATIVE twin of 11q, so it cannot pass for the wrong reason: with the SAME
+  #      pam-stand-in shim and no repair flag, an unpinned box must still come out FAILED.
+  #      Without this, 11q would also pass against a shim that injects unconditionally.
+  envf_r="$tmp/pin-env-r"; : >"$envf_r"
+  shims_pam_r="$tmp/pin-shims-pam-r"; mkpinshims "$shims_pam_r" "file:$envf_r"
+  out_r=$(runpin "$pinroot" "$shims_pam_r" "$envf_r" HOME="$pin_home_plain")
+  if printf '%s' "$out_r" | grep -q 'gate-pin: FAILED' \
+     && ! printf '%s' "$out_r" | grep -qE '\[ok\].*gate-pin' \
+     && [ ! -s "$envf_r" ]; then
+    ok "gate-pin: without a repair flag the same unpinned box stays FAILED and nothing is written"
+  else
+    bad "gate-pin: the no-flag twin did not stay FAILED (or wrote without being asked)"
+    printf '%s\n' "$out_r" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11s. --fix-gate-pin must stay NON-PASSING on a box it cannot certify. An onboarding
+  #      instance without passwordless sudo has to red loudly — that is the whole point of
+  #      putting the flag behind --strict in verify.run, and `--strict` keys off exactly
+  #      this: a [warn] rather than an [ok].
+  #
+  #      It deliberately does NOT also assert "wrote nothing". Under the test seam the
+  #      write is forced UNPRIVILEGED (that is what makes "no env var can steer a
+  #      PRIVILEGED write" true), so a broken `sudo` cannot stop the sandbox write and the
+  #      file-emptiness half would be asserting a property of the seam, not of the code.
+  #      The refuse-to-persist path is covered behaviourally by 11s2 below instead.
+  envf_s="$tmp/pin-env-s"; : >"$envf_s"
+  out_s=$(runpin "$pinroot" "$shims_pw" "$envf_s" HOME="$pin_home_plain" --fix-gate-pin)
+  if ! printf '%s' "$out_s" | grep -qE '\[ok\].*gate-pin' \
+     && printf '%s' "$out_s" | grep -qE '\[warn\].*gate-pin:'; then
+    ok "gate-pin: --fix-gate-pin on a box it cannot certify stays non-passing (so --strict exits 1)"
+  else
+    bad "gate-pin: --fix-gate-pin reported ok on a box without passwordless sudo"
+    printf '%s\n' "$out_s" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11s2. ...and a genuine COULD-NOT-PERSIST condition refuses the write, says why, and
+  #      still does not pass. An unreadable env file is the one such condition reachable
+  #      through the seam: bootstrap will not append blind, because it cannot tell whether
+  #      a line is already there and a blind append could duplicate or contradict it.
+  #      Root can read a 0000 file, so the case would assert nothing as root — skipped
+  #      rather than silently inverted.
+  if [ "$(id -u)" = 0 ]; then
+    # Through `skip`, NOT `ok` (#3414 roborev round 2): an `ok` here increments PASS and
+    # leaves SKIP unchanged — a skip counted as a pass, sitting inside the very accounting
+    # added to expose that.
+    skip "gate-pin unreadable-env-file case (running as root: 0000 is still readable)"
+  else
+    envf_s2="$tmp/pin-env-s2"; printf 'FOO=bar\n' >"$envf_s2"; chmod 0000 "$envf_s2"
+    # shims_none (a session that injects nothing) is the right stand-in here: the append
+    # was refused, so the box IS unpinned and the probe must say so. Using a shim bound to
+    # some OTHER case's file would report that file's pin and green this case for a reason
+    # that has nothing to do with it.
+    out_s2=$(runpin "$pinroot" "$shims_none" "$envf_s2" HOME="$pin_home_plain" --fix-gate-pin)
+    chmod 0644 "$envf_s2"
+    if printf '%s' "$out_s2" | grep -q 'cannot read' \
+       && printf '%s' "$out_s2" | grep -q 'gate-pin: FAILED' \
+       && ! printf '%s' "$out_s2" | grep -qE '\[ok\].*gate-pin' \
+       && [ "$(cat "$envf_s2")" = "FOO=bar" ]; then
+      ok "gate-pin: an unreadable env file refuses the append, says why, and does not pass"
+    else
+      bad "gate-pin: an unreadable env file was appended to blind (or still passed)"
+      printf '%s\n' "$out_s2" | grep -i 'gate-pin\|cannot read' | head -3
+      cat "$envf_s2"
+    fi
+  fi
+
+  # 11t. Contradictory intents do not resolve silently: an explicit --skip-gate-pin beside
+  #      --fix-gate-pin is a usage error, and flag ORDER must not change that.
+  #      The MESSAGE is asserted too, not just the exit code: an unrecognised flag also
+  #      exits 2, so a bare rc check would pass against a build that never learned
+  #      --fix-gate-pin at all — a vacuous green in the exact place this case exists.
+  for pin_order in "--skip-gate-pin --fix-gate-pin" "--fix-gate-pin --skip-gate-pin"; do
+    # shellcheck disable=SC2086
+    pin_t_out=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
+      CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$tmp/pin-env-t" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+        --skip-smoke $pin_order 2>&1)
+    pin_t_rc=$?
+    if [ "$pin_t_rc" -eq 2 ] && printf '%s' "$pin_t_out" | grep -q 'contradictory'; then
+      ok "gate-pin: '$pin_order' is a usage error naming the contradiction, whatever the order"
+    else
+      bad "gate-pin: '$pin_order' did not exit 2 naming the contradiction (rc=$pin_t_rc)"
+      printf '%s\n' "$pin_t_out" | head -2
+    fi
+  done
+
+  # 11u. ...but the weaker ENV opt-out yields to an explicit --fix-gate-pin, so a harness
+  #      that exports CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 cannot neuter a caller's repair.
+  envf_u="$tmp/pin-env-u"; : >"$envf_u"
+  shims_pam_u="$tmp/pin-shims-pam-u"; mkpinshims "$shims_pam_u" "file:$envf_u"
+  out_u=$(runpin "$pinroot" "$shims_pam_u" "$envf_u" HOME="$pin_home_plain" \
+    CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 --fix-gate-pin)
+  if printf '%s' "$out_u" | grep -q 'gate-pin: VERIFIED' \
+     && ! printf '%s' "$out_u" | grep -q 'gate-pin: OPT-OUT'; then
+    ok "gate-pin: an explicit --fix-gate-pin overrides the weaker env opt-out"
+  else
+    bad "gate-pin: the env opt-out neutered an explicit --fix-gate-pin"
+    printf '%s\n' "$out_u" | grep -i 'gate-pin' | head -3
+  fi
+
+
+  # 11w. BASH_ENV MUST NOT BE ABLE TO FORGE A PIN (issue #3414 roborev, Medium).
+  #      A NON-INTERACTIVE bash sources $BASH_ENV before running its command. On a box
+  #      whose sudoers lacks `Defaults env_reset` an inherited BASH_ENV survives into the
+  #      probe, and that file can `export CQLITE_GATE_MAX_CONCURRENCY` — so scrubbing the
+  #      variable while leaving the mechanism that re-injects it is not a scrub, and the
+  #      run reports VERIFIED with nothing persisted anywhere. The `-` shim models exactly
+  #      that box: it strips sudo's flags and execs, passing the environment straight
+  #      through, which is what a missing env_reset does.
+  pin_bashenv="$tmp/pin-bashenv.sh"
+  printf 'export CQLITE_GATE_MAX_CONCURRENCY=9\n' >"$pin_bashenv"
+  envf_w="$tmp/pin-env-w"; : >"$envf_w"
+  out_w=$(runpin "$pinroot" "$shims_none" "$envf_w" HOME="$pin_home_plain" \
+    BASH_ENV="$pin_bashenv")
+  if printf '%s' "$out_w" | grep -q 'gate-pin: FAILED' \
+     && ! printf '%s' "$out_w" | grep -qE '\[ok\].*gate-pin' \
+     && ! printf '%s' "$out_w" | grep -q 'CQLITE_GATE_MAX_CONCURRENCY=9'; then
+    ok "gate-pin: a BASH_ENV file exporting the pin cannot forge VERIFIED (BASH_ENV is scrubbed)"
+  else
+    bad "gate-pin: BASH_ENV injected a pin the box does not have"
+    printf '%s\n' "$out_w" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11x. ...and its POSITIVE twin, so 11w cannot pass against a probe that is simply
+  #      broken: the same shim and the same BASH_ENV file, but with the pin genuinely
+  #      persisted, must still reach VERIFIED. Without this, deleting the probe entirely
+  #      would green 11w.
+  envf_x="$tmp/pin-env-x"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_x"
+  shims_pam_x="$tmp/pin-shims-pam-x"; mkpinshims "$shims_pam_x" "file:$envf_x"
+  out_x=$(runpin "$pinroot" "$shims_pam_x" "$envf_x" HOME="$pin_home_plain" \
+    BASH_ENV="$pin_bashenv")
+  if printf '%s' "$out_x" | grep -q 'gate-pin: VERIFIED' \
+     && printf '%s' "$out_x" | grep -q 'max-concurrency=1(pinned)'; then
+    ok "gate-pin: scrubbing BASH_ENV does not break a genuinely pinned box"
+  else
+    bad "gate-pin: the BASH_ENV scrub broke the positive path"
+    printf '%s\n' "$out_x" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11y. VERIFIED STATES ITS OWN SCOPE (issue #3414 review B2). The probe measures a
+  #      PAM-created sudo session; a gate launched from a systemd unit or a container
+  #      entrypoint has no PAM in its ancestry and never has /etc/environment applied, so
+  #      an unqualified VERIFIED reads as a guarantee the probe cannot give. The verdict
+  #      must therefore carry the limit AND name the gate's own cpu-budget token as the
+  #      authoritative per-run confirmation — and must not re-assert the attribution it
+  #      cannot establish ("came from the system env file").
+  # Scoped to the ATTRIBUTION half; the scope-note WORDING is 11z4's subject, so the two
+  # cases do not both red on one rewording. What must never come back is the claim the
+  # probe cannot establish — that the value "came from the system env file" — since
+  # ~/.pam_environment or a sudoers env_file satisfies the observation identically. (What
+  # licenses the system-wide claim now is the FILE correlation, not the probe.)
+  if ! printf '%s' "$out_x" | grep -q 'came from the system env file' \
+     && printf '%s' "$out_x" | grep -q 'max-concurrency=N(pinned)'; then
+    ok "gate-pin: VERIFIED does not re-assert the unestablishable attribution, and names cpu-budget as authoritative"
+  else
+    bad "gate-pin: VERIFIED claims an attribution the probe cannot make (or dropped the cpu-budget pointer)"
+    printf '%s\n' "$out_x" | grep -iA 2 'gate-pin: VERIFIED' | head -4
+  fi
+
+  # 11z. VERIFIED REQUIRES BOTH HALVES (issue #3414 roborev round 2). A session that sees
+  #      the value while the system-wide file does NOT carry the line means the value is
+  #      arriving from something sudo- or user-specific (a sudoers env_file,
+  #      ~/.pam_environment) — real for the session bootstrap opened, absent for every
+  #      gate launched outside it. Scoping the TEXT was not enough: the verdict was still
+  #      an `ok`, so zero warnings still bought "All checks green." and verify.run still
+  #      passed on such a box.
+  envf_z="$tmp/pin-env-z"; : >"$envf_z"          # file has NO pin line ...
+  out_z=$(runpin "$pinroot" "$shims_one" "$envf_z" HOME="$pin_home_plain")   # ... session DOES see one
+  if printf '%s' "$out_z" | grep -q 'gate-pin: NOT-SYSTEM-WIDE' \
+     && ! printf '%s' "$out_z" | grep -qE '\[ok\].*gate-pin' \
+     && printf '%s' "$out_z" | grep -q 'sudo- or user-specific source'; then
+    ok "gate-pin: a session-visible value with NO line in the system env file is NOT-SYSTEM-WIDE, never VERIFIED"
+  else
+    bad "gate-pin: a sudo-only value was certified as a system-wide pin"
+    printf '%s\n' "$out_z" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11z2. ...and the file half alone is not enough either, which is the ORIGINAL #3414
+  #      defect: the line is in the file but no session sees it. Asserting both directions
+  #      is what makes "neither half suffices" a tested property rather than a comment.
+  #      (11b/11q already cover the both-halves-present positive.)
+  envf_z2="$tmp/pin-env-z2"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_z2"
+  out_z2=$(runpin "$pinroot" "$shims_none" "$envf_z2" HOME="$pin_home_plain")
+  if printf '%s' "$out_z2" | grep -q 'gate-pin: FAILED' \
+     && ! printf '%s' "$out_z2" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: the file half ALONE is not VERIFIED either (the original #3414 defect)"
+  else
+    bad "gate-pin: a file line with no session visibility was treated as a pin"
+    printf '%s\n' "$out_z2" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11z3. An UNREADABLE system env file cannot be correlated, so the run has only half the
+  #      evidence the verdict requires — UNMEASURED, never VERIFIED. Root can read a 0000
+  #      file, so the case would assert nothing there.
+  if [ "$(id -u)" = 0 ]; then
+    skip "gate-pin uncorrelatable-file case (running as root: 0000 is still readable)"
+  else
+    envf_z3="$tmp/pin-env-z3"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_z3"; chmod 0000 "$envf_z3"
+    out_z3=$(runpin "$pinroot" "$shims_one" "$envf_z3" HOME="$pin_home_plain")
+    chmod 0644 "$envf_z3"
+    if printf '%s' "$out_z3" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+       && printf '%s' "$out_z3" | grep -q 'could not be READ' \
+       && ! printf '%s' "$out_z3" | grep -qE '\[ok\].*gate-pin'; then
+      ok "gate-pin: an unreadable system env file cannot be correlated => UNMEASURED, not VERIFIED"
+    else
+      bad "gate-pin: an uncorrelatable file still produced a verdict about system-wide scope"
+      printf '%s\n' "$out_z3" | grep -i 'gate-pin' | head -3
+    fi
+  fi
+
+  # 11z4. The scope note must now claim the CORRELATED scope — every PAM stack, not just
+  #      the sudo session the probe opened — while still naming the residual it cannot
+  #      cover. A note that under-claims after the correlation is as wrong as one that
+  #      over-claimed before it.
+  # The claim STRENGTHENED with the weaken-only PAM check (roborev round 5): the note used
+  # to assert that pam_env reads the file in every stack; it now says those stacks were
+  # CHECKED. Asserting the checked wording is the point — the earlier phrasing was a
+  # statement about PAM in general, this one is a statement about THIS box.
+  # The PAM weaken-signal was DELETED (#3414 round 7 ruling), so the note no longer claims
+  # the service stacks were checked — it now states that they are NOT checked here. That
+  # is the whole point of the deletion: the note must not assert a scope nothing measured.
+  # AND IT MUST DISCLOSE THE TEMPORAL HALF (#3728). pam_env reads the file at SESSION
+  # CREATION, so a VERIFIED verdict is about FUTURE sessions: this shell and everything
+  # already descended from it — including workers a launcher started earlier — do not have
+  # the pin until their sessions are recreated. That was disclosed in the PR body and in
+  # #3728 and NOWHERE IN THE EMITTED LINE, which is the only place an operator reads. A
+  # caveat that lives where only a caveat-hunter looks is not a disclosure; asserted here
+  # so a later edit cannot drop it silently.
+  if printf '%s' "$out_x" | grep -q 'is NOT checked here' \
+     && printf '%s' "$out_x" | grep -q 'created WITHOUT PAM' \
+     && printf '%s' "$out_x" | grep -q 'SESSION CREATION' \
+     && printf '%s' "$out_x" | grep -q 'already descended from it' \
+     && printf '%s' "$out_x" | grep -q 'max-concurrency=N(pinned)'; then
+    ok "gate-pin: the scope note states what it did NOT check, that the verdict covers FUTURE sessions only, and names the gate's token as authority"
+  else
+    bad "gate-pin: the scope note does not match the correlated verdict"
+    printf '%s\n' "$out_x" | grep -iA 3 'gate-pin: VERIFIED' | head -4
+  fi
+
+  # 11z5. THE NEGATIVE ROW IS INDEPENDENT OF FILE STATE (issue #3414, lead ruling). The
+  #      verdict is a conjunction of two measurements, not a file-state precedence: when
+  #      the session does NOT see the value, that is an affirmative measurement and the
+  #      verdict is FAILED whatever the file says — present, absent, or unreadable. The
+  #      rule is that an unmeasurable half may weaken a POSITIVE claim but may never
+  #      soften a NEGATIVE one, so an unreadable file must not downgrade a real FAILED to
+  #      UNMEASURED. Asserted across all three file states in one loop, because the
+  #      individual cases (11w absent, 11z2 present, 11s2 unreadable) each check one row
+  #      and none of them states the INVARIANT that binds the three.
+  for pin_row in absent present mismatched unreadable; do
+    envf_r5="$tmp/pin-env-r5-$pin_row"
+    case "$pin_row" in
+      absent)     : >"$envf_r5" ;;
+      present)    printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_r5" ;;
+      # `mismatched` joined the loop with the value check (roborev round 3): the new
+      # comparison must not become a way for file state to soften a negative either.
+      mismatched) printf 'CQLITE_GATE_MAX_CONCURRENCY=abc\n' >"$envf_r5" ;;
+      unreadable) printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_r5"; chmod 0000 "$envf_r5" ;;
+    esac
+    if [ "$pin_row" = unreadable ] && [ "$(id -u)" = 0 ]; then
+      skip "gate-pin negative-row invariant, unreadable file (running as root: 0000 is still readable)"
+      continue
+    fi
+    out_r5=$(runpin "$pinroot" "$shims_none" "$envf_r5" HOME="$pin_home_plain")
+    chmod 0644 "$envf_r5" 2>/dev/null || true
+    if printf '%s' "$out_r5" | grep -q 'gate-pin: FAILED' \
+       && ! printf '%s' "$out_r5" | grep -qE 'gate-pin: (UNMEASURED|NOT-SYSTEM-WIDE|VERIFIED)'; then
+      ok "gate-pin: session-cannot-see-it => FAILED with the env file $pin_row (file state cannot soften a negative)"
+    else
+      bad "gate-pin: file state '$pin_row' changed a NEGATIVE probe's verdict"
+      printf '%s\n' "$out_r5" | grep -i 'gate-pin' | head -2
+    fi
+  done
+
+  # 11aa. THE FILE'S VALUE MUST EQUAL THE SESSION'S, not merely exist (issue #3414 roborev
+  #      round 3 — the FOURTH instance of this issue's own defect in this lane, and it was
+  #      inside the correlation added to fix the third). File says `abc`, a sudo- or
+  #      user-specific source supplies `1`: both halves of "line present AND session sees
+  #      it" hold, so the old check said VERIFIED — while every ordinary PAM session gets
+  #      `abc`, which the gate discards for its default formula and stamps N(invalid).
+  envf_aa="$tmp/pin-env-aa"; printf 'CQLITE_GATE_MAX_CONCURRENCY=abc\n' >"$envf_aa"
+  out_aa=$(runpin "$pinroot" "$shims_one" "$envf_aa" HOME="$pin_home_plain")   # session sees 1
+  if printf '%s' "$out_aa" | grep -q 'gate-pin: NOT-SYSTEM-WIDE' \
+     && ! printf '%s' "$out_aa" | grep -qE '\[ok\].*gate-pin' \
+     && printf '%s' "$out_aa" | grep -q "OVERRIDING the system-wide file"; then
+    ok "gate-pin: a file value the session does NOT match is not VERIFIED (presence is not the predicate)"
+  else
+    bad "gate-pin: a file/session VALUE mismatch was certified"
+    printf '%s\n' "$out_aa" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11ab. ...and the equality is a STRING comparison, deliberately not a numeric one. The
+  #      gate's own resolver discards `1 ` (trailing space matches *[!0-9]*), so treating
+  #      it as equal to `1` here would make bootstrap certify a value the gate rejects —
+  #      a second classifier disagreeing with the one that decides, which is the thing
+  #      pin_gate_source_for exists to avoid.
+  envf_ab="$tmp/pin-env-ab"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1 \n' >"$envf_ab"
+  out_ab=$(runpin "$pinroot" "$shims_one" "$envf_ab" HOME="$pin_home_plain")
+  if ! printf '%s' "$out_ab" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: '1 ' in the file is not equal to '1' in the session (string equality, as the gate resolves it)"
+  else
+    bad "gate-pin: a value the gate would DISCARD was normalised into a match"
+    printf '%s\n' "$out_ab" | grep -i 'gate-pin' | head -2
+  fi
+
+  # 11ac. A NON-LINUX HOST IS ASKED A NARROWER QUESTION, NOT EXEMPTED FROM IT (#3414 final
+  #      roborev, finding BB). The earlier contract emitted `ok "NOT-APPLICABLE"` on every
+  #      non-Linux host unconditionally, so `--strict` CERTIFIED AN UNPINNED MAC:
+  #      inapplicability of the PERSISTENCE STEP stood in for absence of the REQUIREMENT —
+  #      this issue's own defect wearing a platform label, in code a full gate had passed.
+  #
+  #      BOTH DIRECTIONS are asserted, and the second is the one that matters, because it
+  #      is the case the old code got wrong: a non-Linux host that sees an honoured pin
+  #      earns the scoped `ok`; one that sees nothing must be NON-PASSING.
+  shims_mac="$tmp/pin-shims-mac"; mkpinshims "$shims_mac" 1
+  mk_stub "$shims_mac" uname 'echo Darwin'
+  envf_ac="$tmp/pin-env-ac"; : >"$envf_ac"
+  out_ac=$(runpin "$pinroot" "$shims_mac" "$envf_ac" HOME="$pin_home_plain")
+  if printf '%s' "$out_ac" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+     && printf '%s' "$out_ac" | grep -q 'no PAM-read system-wide file to compare it against' \
+     && ! printf '%s' "$out_ac" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: a non-Linux host with a session-visible pin is UNMEASURED, never certified"
+  else
+    bad "gate-pin: a non-Linux host was given a verdict its platform cannot support"
+    printf '%s\n' "$out_ac" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11ac2. THE CASE THE OLD CONTRACT GOT WRONG: a non-Linux host whose fresh session sees
+  #      NOTHING must be NON-PASSING. Under the previous code this host got an unconditional
+  #      `ok`, so `--strict` exited 0 and certified a machine on which no gate is pinned.
+  shims_mac_none="$tmp/pin-shims-mac-none"; mkpinshims "$shims_mac_none" -
+  mk_stub "$shims_mac_none" uname 'echo Darwin'
+  envf_ac2="$tmp/pin-env-ac2"; : >"$envf_ac2"
+  out_ac2=$(runpin "$pinroot" "$shims_mac_none" "$envf_ac2" HOME="$pin_home_plain")
+  if ! printf '%s' "$out_ac2" | grep -qE '\[ok\].*gate-pin' \
+     && printf '%s' "$out_ac2" | grep -qE '\[warn\].*gate-pin'; then
+    ok "gate-pin: an UNPINNED non-Linux host is also NON-PASSING — no platform exemption certifies it"
+  else
+    bad "gate-pin: an unpinned non-Linux host was certified (the finding-BB defect)"
+    printf '%s\n' "$out_ac2" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11ad. ...and the scoping is on PLATFORM, not on "the file is missing". A LINUX box
+  #      with no /etc/environment is a genuine anomaly and must stay non-passing; folding
+  #      it into 11ac's branch would trade a false red for a false green. Same input as
+  #      11ac (no env file) with the only difference being the platform.
+  envf_ad="$tmp/pin-env-ad-missing"; rm -f "$envf_ad"
+  out_ad=$(runpin "$pinroot" "$shims_one" "$envf_ad" HOME="$pin_home_plain")
+  if ! printf '%s' "$out_ad" | grep -qE '\[ok\].*gate-pin' \
+     && ! printf '%s' "$out_ad" | grep -qE 'NOT-APPLICABLE|VERIFIED-NO-SYSTEM-FILE'; then
+    ok "gate-pin: a LINUX box with no system env file stays non-passing (scoped by platform, not by file absence)"
+  else
+    bad "gate-pin: a Linux anomaly was excused as a platform inapplicability"
+    printf '%s\n' "$out_ad" | grep -i 'gate-pin' | head -2
+  fi
+
+  # 11ae. A QUOTED-BUT-CORRECT FILE MUST STILL VERIFY (issue #3414, lead correction).
+  #      pam_env strips surrounding quotes, and quoting IS the convention in this file —
+  #      /etc/environment on this fleet opens with PATH="/usr/local/sbin:...". Comparing
+  #      the RAW string would make `CQLITE_GATE_MAX_CONCURRENCY="1"` parse as `"1"` while
+  #      the session reports `1`, and a properly pinned box would get a non-passing
+  #      verdict: red on correct input, produced by the fix for a false green. Both quote
+  #      kinds, because pam was MEASURED to treat them alike rather than assumed to.
+  for pin_q in '"1"' "'1'" '"1' '1'; do
+    envf_ae="$tmp/pin-env-ae"; printf 'CQLITE_GATE_MAX_CONCURRENCY=%s\n' "$pin_q" >"$envf_ae"
+    out_ae=$(runpin "$pinroot" "$shims_one" "$envf_ae" HOME="$pin_home_plain")
+    if printf '%s' "$out_ae" | grep -qE '\[ok\].*gate-pin: VERIFIED'; then
+      ok "gate-pin: a file value written as $pin_q still VERIFIES (pam_env's quoting is read, not reinterpreted)"
+    else
+      bad "gate-pin: a correctly-pinned box written as $pin_q was reported non-passing"
+      printf '%s\n' "$out_ae" | grep -i 'gate-pin' | head -2
+    fi
+  done
+
+  # 11af. ...and de-quoting must not become normalisation. The INTERIOR is untouched, so a
+  #      quoted `" 1 "` still mismatches a session reporting `1` — the gate discards ` 1 `
+  #      (it matches *[!0-9]*), so calling them equal here would certify a value the gate
+  #      rejects. This is the line between reading the file's format and reinterpreting
+  #      its content, and it is the half a future "just trim it" refactor would erase.
+  envf_af="$tmp/pin-env-af"; printf 'CQLITE_GATE_MAX_CONCURRENCY=" 1 "\n' >"$envf_af"
+  out_af=$(runpin "$pinroot" "$shims_one" "$envf_af" HOME="$pin_home_plain")
+  if ! printf '%s' "$out_af" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: de-quoting leaves the interior alone — a quoted ' 1 ' still mismatches '1'"
+  else
+    bad "gate-pin: de-quoting slid into normalisation and certified a value the gate discards"
+    printf '%s\n' "$out_af" | grep -i 'gate-pin' | head -2
+  fi
+
+  # 11ag. THE GATE ORACLE MUST NOT BE POLLUTABLE EITHER (issue #3414 roborev round 4).
+  #      The oracle launches its own fresh non-interactive bash to ask the gate what it
+  #      honours, and a non-interactive bash SOURCES $BASH_ENV — so the hole closed for
+  #      the probe in round 2 was still open one call site over. Persisted value `abc`,
+  #      a valid `1` injected through BASH_ENV: the oracle answers `1(pinned)` about a
+  #      value it never saw, and the run certifies a box whose gates will stamp
+  #      N(invalid). Two independent defences now: the scrub, and the requirement that
+  #      the oracle's resolved N equal the value actually probed.
+  pin_bashenv_v="$tmp/pin-bashenv-valid.sh"
+  printf 'export CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$pin_bashenv_v"
+  envf_ag="$tmp/pin-env-ag"; printf 'CQLITE_GATE_MAX_CONCURRENCY=abc\n' >"$envf_ag"
+  shims_ag="$tmp/pin-shims-ag"; mkpinshims "$shims_ag" abc     # session genuinely sees abc
+  out_ag=$(runpin "$pinroot" "$shims_ag" "$envf_ag" HOME="$pin_home_plain" \
+    BASH_ENV="$pin_bashenv_v")
+  if ! printf '%s' "$out_ag" | grep -qE '\[ok\].*gate-pin' \
+     && printf '%s' "$out_ag" | grep -q 'gate-pin: NOT-HONOURED'; then
+    ok "gate-pin: a BASH_ENV-injected valid value cannot make the ORACLE certify an invalid pin"
+  else
+    bad "gate-pin: the gate oracle was polluted into certifying a value it never saw"
+    printf '%s\n' "$out_ag" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11ah. ...and the SOURCE TOKEN ALONE is not the check: the oracle's resolved N must be
+  #      the value we handed it. A `(pinned)` suffix says only that *something* was a
+  #      valid pin. Asserted structurally as well as behaviourally, because a future edit
+  #      could drop the N comparison while every behavioural case above still passes —
+  #      the scrub alone would cover them.
+  #
+  #      THE NEEDLE MOVED WITH THE COMPARISON (roborev job 333). It used to be the literal
+  #      `pin_gate_n" != "$pin_probe_seen`, which the canonical-decimal fix replaced — the
+  #      comparison is still there and still compares the resolved N against the probed
+  #      value, now with both sides normalised so the gate's own `08`->`8` does not read as
+  #      drift. This guard CORRECTLY RED when the expression changed, which is what a
+  #      structural guard is for; it is updated rather than deleted, and it still fails if
+  #      the comparison is removed altogether. A structural needle is a claim about source
+  #      text and decays exactly like a comment: when you change the expression, come here.
+  if grep -Fq '[ "$(pin_canon_decimal "$pin_gate_n")" != "$(pin_canon_decimal "$pin_probe_seen")" ]' "$BOOTSTRAP" \
+     && grep -q 'bounded 30 env -u BASH_ENV -u ENV' "$BOOTSTRAP"; then
+    ok "gate-pin: the oracle is scrubbed AND its resolved N is compared, not just its source token"
+  else
+    bad "gate-pin: the oracle check lost its scrub or its resolved-value comparison"
+  fi
+
+  # 11ai. THE PROFILE APPEND MUST NOT MANUFACTURE A DIVERGENCE (issue #3414 roborev
+  #      round 4). On a box deliberately pinned to 4, appending a hardcoded `export …=1`
+  #      to the shell profile gives interactive shells 1 while every non-interactive one
+  #      gets 4 — this issue's own subject, created by the tool that exists to remove it.
+  #      It is SKIPPED rather than value-derived because PAM already delivers the
+  #      system-wide value to interactive login shells, so the append could only override
+  #      it, and a derived value would go stale on the next edit of the env file.
+  pin_home_ai="$tmp/pin-home-ai"; mkdir -p "$pin_home_ai/.cargo"; : >"$pin_home_ai/.bashrc"
+  envf_ai="$tmp/pin-env-ai"; printf 'CQLITE_GATE_MAX_CONCURRENCY=4\n' >"$envf_ai"
+  shims_ai="$tmp/pin-shims-ai"; mkpinshims "$shims_ai" 4
+  out_ai=$(runpin "$pinroot" "$shims_ai" "$envf_ai" HOME="$pin_home_ai" SHELL=/bin/bash --yes)
+  if ! grep -q 'CQLITE_GATE_MAX_CONCURRENCY' "$pin_home_ai/.bashrc" \
+     && printf '%s' "$out_ai" | grep -q 'not touching' \
+     && printf '%s' "$out_ai" | grep -qE '\[ok\].*gate-pin: VERIFIED'; then
+    ok "gate-pin: --yes on a box pinned to 4 leaves the profile alone (no manufactured 1-vs-4 divergence)"
+  else
+    bad "gate-pin: the profile append manufactured a divergence with the system-wide value"
+    printf '%s\n' "$out_ai" | grep -i 'gate-pin\|profile\|not touching' | head -3
+    cat "$pin_home_ai/.bashrc"
+  fi
+
+  # 11aj. ...but where NO system-wide value can be established the append still happens,
+  #      so 11ai cannot pass against a build that simply stopped writing profiles.
+  #
+  #      THE STATE HAS TO BE AN UNWRITABLE ENV FILE, NOT A MISSING ONE — and this case's
+  #      premise was invalidated by THIS BRANCH. A missing file used to qualify, because
+  #      bootstrap refused to create one, so PAM delivered nothing and the profile was the
+  #      only lever left. `--fix-gate-pin`/`--yes` now CREATE it, so on a missing file
+  #      bootstrap establishes the system-wide value and then CORRECTLY skips the profile
+  #      (that skip is 11ai's whole point). Measured: the run emits `CREATED <file>
+  #      carrying CQLITE_GATE_MAX_CONCURRENCY=1` and then `not touching <profile>`.
+  #      A file that EXISTS but cannot be written is still genuinely unestablishable —
+  #      `the append to <file> FAILED — the pin was NOT persisted` — so the profile is
+  #      once again the only lever, and the case tests what it claims to.
+  #
+  #      (A box that merely STARTS empty is not this case either — `--yes` persists into
+  #      it and the append is correctly skipped for the same reason. I discovered that by
+  #      writing this case the obvious way first and watching it fail.)
+  pin_home_aj="$tmp/pin-home-aj"; mkdir -p "$pin_home_aj/.cargo"; : >"$pin_home_aj/.bashrc"
+  envf_aj="$tmp/pin-env-aj-ro"; printf '# no pin here\n' >"$envf_aj"; chmod 0444 "$envf_aj"
+  out_aj=$(runpin "$pinroot" "$shims_none" "$envf_aj" HOME="$pin_home_aj" SHELL=/bin/bash --yes)
+  chmod 0644 "$envf_aj" 2>/dev/null || true
+  if grep -q '^export CQLITE_GATE_MAX_CONCURRENCY=1' "$pin_home_aj/.bashrc"; then
+    ok "gate-pin: on a box where no system-wide value CAN be established the profile append still happens"
+  else
+    bad "gate-pin: the profile append stopped happening even with no system-wide value (11ai would pass vacuously)"
+    # DUMP THE SCRIPT OUTPUT, not just the profile: this case previously printed only
+    # `.bashrc`, so when the premise above went stale the failure could not show WHY the
+    # append was skipped, and it was misdiagnosed as a flake in unrelated code. A failure
+    # diagnostic must carry the evidence its own assertion turns on (#3758 nit 7).
+    cat "$pin_home_aj/.bashrc"
+    printf '%s\n' "$out_aj" | grep -iE 'CREATED|not touching|NOT persisted|gate-pin:' | head -8
+    echo "  env-file: mode=$(stat -c %a "$envf_aj" 2>/dev/null) content=[$(cat "$envf_aj" 2>/dev/null | tr '\n' '|')]"
+  fi
+
+  # 11ak. THE SEAM MUST NOT STEER A ROOT-PRIVILEGED WRITE (issue #3414 roborev round 5,
+  #      HIGH — the SIXTH instance of this issue's defect, and it was inside the safety
+  #      guard). The old invariant tested `${#PIN_ROOT[@]} -gt 0`, i.e. "are we going
+  #      through sudo" — a proxy for EFFECTIVE PRIVILEGE. Under EUID 0 the array is empty
+  #      and `tee -a` is privileged anyway, so an env var could aim a root write at any
+  #      absolute path. Asserted at the level the guard now uses: a real root invocation
+  #      with the seam set must REFUSE, not write.
+  # A sandbox for the ROOT invocations below. It must be cleaned with sudo, because root
+  # writing here leaves root-owned files that the suite's own `rm -rf "$tmp"` trap (running
+  # as the invoking user) cannot remove — a leak of the same shape as the one being fixed,
+  # one directory over.
+  pin_root_sandbox="$tmp/pin-root-sandbox"; mkdir -p "$pin_root_sandbox/.cargo"
+  pin_seam_probe="$tmp/pin-seam-root-target"; rm -f "$pin_seam_probe"
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    out_ak=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$pin_seam_probe" \
+      HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+        --skip-smoke --skip-push-probe --yes 2>&1)
+    if printf '%s' "$out_ak" | grep -q 'gate-pin: SKIPPED' \
+       && printf '%s' "$out_ak" | grep -q 'PRIVILEGED write' \
+       && [ ! -e "$pin_seam_probe" ]; then
+      ok "gate-pin: a ROOT run with the seam set refuses and writes nothing to the env-chosen path"
+    else
+      bad "gate-pin: the seam was honoured under root (a privileged write could be steered)"
+      printf '%s\n' "$out_ak" | grep -i 'gate-pin' | head -2
+      ls -l "$pin_seam_probe" 2>/dev/null
+    fi
+    sudo -n rm -f "$pin_seam_probe" 2>/dev/null || true
+    sudo -n rm -rf "$pin_root_sandbox" 2>/dev/null || true; mkdir -p "$pin_root_sandbox/.cargo"
+  else
+    skip "gate-pin root-seam refusal (no passwordless sudo here to stage a real root invocation)"
+  fi
+
+  # 11al. ...and the guard keys on EFFECTIVE PRIVILEGE, not on the sudo-prefix array.
+  #      Structural, because the behavioural case above needs root to run at all and a
+  #      future edit could revert the predicate while every unprivileged case still passes.
+  if grep -q 'PIN_EUID" = 0 \] || \[ -z "\$PIN_EUID" \] || \[ "\${#PIN_ROOT\[@\]}" -gt 0' "$BOOTSTRAP"; then
+    ok "gate-pin: the privileged-write invariant tests EUID, not merely the presence of a sudo prefix"
+  else
+    bad "gate-pin: the privileged-write invariant is back to keying on PIN_ROOT alone"
+  fi
+
+  # 11am. THE PROBE SUBJECT IS THE ACCOUNT THAT WILL RUN GATES (roborev round 5). Under
+  #      `sudo bash bootstrap`, `id -un` is root — the wrong subject, since a per-user
+  #      ~/.pam_environment on the agent account diverges from root's session. An
+  #      invoker sudo names but that does not resolve is UNMEASURED, never a silent fall
+  #      back to answering about root.
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    out_am=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" SUDO_USER=cqlite-no-such-account-3414 \
+      HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+        --skip-smoke --skip-push-probe 2>&1)
+    if printf '%s' "$out_am" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+       && printf '%s' "$out_am" | grep -qE 'does not resolve to an account|INCONSISTENT sudo metadata' \
+       && ! printf '%s' "$out_am" | grep -qE '\[ok\].*gate-pin'; then
+      ok "gate-pin: an unresolvable sudo invoker is UNMEASURED, never answered about root instead"
+    else
+      bad "gate-pin: an unresolvable invoker fell back to probing the wrong user"
+      printf '%s\n' "$out_am" | grep -i 'gate-pin' | head -2
+    fi
+    out_an=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" SUDO_USER="$(id -un)" \
+      HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+        --skip-smoke --skip-push-probe 2>&1)
+    if printf '%s' "$out_an" | grep -q "the account that invoked sudo"; then
+      ok "gate-pin: a resolvable sudo invoker becomes the probe subject, and the run says so"
+    else
+      bad "gate-pin: the sudo invoker was not adopted as the probe subject"
+      printf '%s\n' "$out_an" | grep -i 'gate-pin\|subject' | head -2
+    fi
+  else
+    skip "gate-pin sudo-invocation-mode cases (no passwordless sudo here)"
+  fi
+
+  # 11at. THE PRIVILEGE DECISION MUST NOT GO THROUGH A PATH-RESOLVED BINARY (issue #3414
+  #      roborev round 8, HIGH). It used to call `id -u`, so a shadowed or merely MALFORMED
+  #      `id` — a busybox variant, a broken PATH — made a ROOT invocation look
+  #      unprivileged, and the seam then steered a root `tee -a` at an arbitrary absolute
+  #      path: the round-5 High reopened through a different door. Bash's readonly $EUID
+  #      cannot be shadowed and costs no fork.
+  #
+  #      Driven as a REAL root invocation with a lying `id` first on PATH, because that is
+  #      the only way to distinguish "we read $EUID" from "we read a binary that agreed".
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    pin_liar="$tmp/pin-liar-bin"; mkdir -p "$pin_liar"
+    printf '#!/usr/bin/env bash\necho 1000\n' >"$pin_liar/id"; chmod +x "$pin_liar/id"
+    pin_liar_target="$tmp/pin-liar-target"; rm -f "$pin_liar_target"
+    out_at=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" PATH="$pin_liar:$PATH" \
+      CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$pin_liar_target" \
+      HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+        --skip-smoke --skip-push-probe --yes 2>&1)
+    if printf '%s' "$out_at" | grep -q 'gate-pin: SKIPPED' && [ ! -e "$pin_liar_target" ]; then
+      ok "gate-pin: a lying 'id' on PATH cannot make a ROOT run look unprivileged (the decision reads \$EUID)"
+    else
+      bad "gate-pin: a shadowed 'id' defeated the root guard — the seam steered a privileged write"
+      printf '%s\n' "$out_at" | grep -i 'gate-pin' | head -2
+      ls -l "$pin_liar_target" 2>/dev/null
+    fi
+    sudo -n rm -f "$pin_liar_target" 2>/dev/null || true
+
+    # 11au. SUDO_USER MUST AGREE WITH SUDO_UID (roborev round 8). Trusting the NAME alone
+    #      accepts stale metadata — `SUDO_UID=1000 SUDO_USER=root` would probe root and
+    #      could report VERIFIED while the agent account differs, which is the
+    #      wrong-subject defect the retarget exists to fix, wearing the retarget's clothes.
+    out_au=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" SUDO_UID=1000 SUDO_USER=root \
+      HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+        --skip-smoke --skip-push-probe 2>&1)
+    if printf '%s' "$out_au" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+       && printf '%s' "$out_au" | grep -q 'INCONSISTENT sudo metadata' \
+       && ! printf '%s' "$out_au" | grep -qE '\[ok\].*gate-pin'; then
+      ok "gate-pin: SUDO_USER disagreeing with SUDO_UID is UNMEASURED, not a probe of the wrong account"
+    else
+      bad "gate-pin: inconsistent sudo metadata was trusted"
+      printf '%s\n' "$out_au" | grep -i 'gate-pin' | head -2
+    fi
+
+    # 11av. ...and root invoking sudo (SUDO_UID=0) tells us nothing about a gate's account.
+    out_av=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" SUDO_UID=0 SUDO_USER=root \
+      HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
+      "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
+        --skip-smoke --skip-push-probe 2>&1)
+    if printf '%s' "$out_av" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+       && printf '%s' "$out_av" | grep -q 'sudo was invoked BY root'; then
+      ok "gate-pin: SUDO_UID=0 is UNMEASURED — root invoking sudo says nothing about a gate's account"
+    else
+      bad "gate-pin: SUDO_UID=0 was treated as a usable probe subject"
+      printf '%s\n' "$out_av" | grep -i 'gate-pin' | head -2
+    fi
+    sudo -n rm -rf "$pin_root_sandbox" 2>/dev/null || true; mkdir -p "$pin_root_sandbox/.cargo"
+  else
+    skip "gate-pin privilege-source and sudo-metadata cases (no passwordless sudo here)"
+  fi
+
+  # 11aw. UNREADABLE IS NOT ABSENT for the profile append (roborev round 8). The Q fix
+  #      keyed on a value having been FOUND, so an unreadable or unparseable env file fell
+  #      through to appending the hardcoded `=1` — and if that file already pins 4, we
+  #      silently create the divergence Q existed to prevent. An unmeasurable state must
+  #      not inherit the permissive branch.
+  if [ "$(id -u)" = 0 ]; then
+    skip "gate-pin unreadable-file profile-append case (running as root: 0000 is still readable)"
+  else
+    pin_home_aw="$tmp/pin-home-aw"; mkdir -p "$pin_home_aw/.cargo"; : >"$pin_home_aw/.bashrc"
+    envf_aw="$tmp/pin-env-aw"; printf 'CQLITE_GATE_MAX_CONCURRENCY=4\n' >"$envf_aw"; chmod 0000 "$envf_aw"
+    out_aw=$(runpin "$pinroot" "$shims_none" "$envf_aw" HOME="$pin_home_aw" SHELL=/bin/bash --yes)
+    chmod 0644 "$envf_aw"
+    if ! grep -q 'CQLITE_GATE_MAX_CONCURRENCY' "$pin_home_aw/.bashrc" \
+       && printf '%s' "$out_aw" | grep -q 'could not determine what'; then
+      ok "gate-pin: an UNREADABLE env file does not get the hardcoded profile export (unreadable is not absent)"
+    else
+      bad "gate-pin: an unreadable env file fell through to the append, recreating the divergence Q removed"
+      printf '%s\n' "$out_aw" | grep -i 'not touching\|could not determine' | head -2
+      cat "$pin_home_aw/.bashrc"
+    fi
+  fi
+
+  # 11ax. NO TIMEOUT UTILITY => NO PROBE RUNS AT ALL (issue #3414 roborev round 10).
+  #      `bounded` degrades to running the command DIRECTLY when neither timeout nor
+  #      gtimeout exists, and both sudo probes used to execute ABOVE the no-timeout guard —
+  #      so a stalled sudo/PAM/NSS lookup hung bootstrap indefinitely while the code
+  #      CLAIMED it refuses unbounded session probing. Asserting the verdict alone would
+  #      not have caught it: the verdict was already correct, and only the ORDER was wrong.
+  #      So this counts sudo invocations with a recording shim — the fact that distinguishes
+  #      "refused" from "ran it anyway and then said it refused".
+  pin_nt="$tmp/pin-no-timeout"; mkdir -p "$pin_nt"
+  for pin_t in bash env grep sed awk head tail tr cut wc stat mktemp dirname basename cat \
+               cp mv rm mkdir chmod ln find date id uname nproc tee sort xargs expr sleep; do
+    pin_tp=$(type -P "$pin_t" 2>/dev/null) || continue
+    [ -n "$pin_tp" ] && ln -sf "$pin_tp" "$pin_nt/$pin_t" 2>/dev/null || true
+  done
+  pin_nt_trip="$tmp/pin-no-timeout-sudo.log"; : >"$pin_nt_trip"
+  mk_stub "$pin_nt" sudo "echo \"sudo \$*\" >>\"$pin_nt_trip\"; exit 0"
+  envf_ax="$tmp/pin-env-ax"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_ax"
+  # NOT through runpin: that wraps the invocation in `timeout`, which this case has
+  # deliberately removed from PATH, so bootstrap would never launch and the assertion would
+  # fail for the harness's reason rather than the code's. The outer timeout is invoked by
+  # ABSOLUTE path so the bound on the test itself survives while bootstrap's OWN PATH still
+  # has none — which is the condition under test.
+  pin_ax_timeout=$(command -v timeout 2>/dev/null || true)
+  out_ax=$(env PATH="$pin_nt" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo"     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_ax"     ${pin_ax_timeout:+"$pin_ax_timeout" -s KILL 120}     "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke --skip-push-probe 2>&1)
+  if printf '%s' "$out_ax" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+     && printf '%s' "$out_ax" | grep -q 'NOTHING was probed' \
+     && [ ! -s "$pin_nt_trip" ]; then
+    ok "gate-pin: with no timeout utility the section refuses AND invokes sudo zero times"
+  else
+    bad "gate-pin: a probe ran unbounded (or the refusal was not reported): $(wc -l <"$pin_nt_trip") sudo call(s)"
+    printf '%s\n' "$out_ax" | grep -i 'gate-pin' | head -2
+    cat "$pin_nt_trip"
+  fi
+
+  # 11ay. A BOX THAT PERMITS THE SELF-SESSION BUT NOT UNRESTRICTED ROOT MUST STILL BE
+  #      MEASURED (roborev round 10). Probe capability was gated on `sudo -n true`
+  #      succeeding as ROOT, but that asks "may I run ANYTHING as root" while the probe
+  #      needs only "may I open a session as MYSELF". A narrowly-scoped sudoers rule — or a
+  #      box already correctly pinned — was reported sudo-needs-password and failed
+  #      --strict on a legitimately configured machine.
+  pin_ab="$tmp/pin-shims-selfonly"; mkpinshims "$pin_ab" 1
+  mk_stub "$pin_ab" sudo 'args="$*"
+case "$args" in
+  "-n true")  exit 1 ;;                 # root execution DENIED
+esac
+while [ "${1:-}" = "-n" ]; do shift; done
+if [ "${1:-}" = "-u" ]; then shift 2; fi
+exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
+  envf_ay="$tmp/pin-env-ay"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_ay"
+  out_ay=$(runpin "$pinroot" "$pin_ab" "$envf_ay" HOME="$pin_home_plain")
+  if printf '%s' "$out_ay" | grep -qE '\[ok\].*gate-pin: VERIFIED' \
+     && ! printf '%s' "$out_ay" | grep -q 'needs a password'; then
+    ok "gate-pin: root execution denied but the self-session permitted still MEASURES (no false red)"
+  else
+    bad "gate-pin: a box permitting the self-session was failed for lacking unrestricted root"
+    printf '%s\n' "$out_ay" | grep -i 'gate-pin' | head -2
+  fi
+
+  # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
+  #      marker, or relative, it SKIPS the section rather than silently persisting to
+  #      the real /etc/environment (the #3249 lesson — a seam that degrades to the
+  #      production path certifies the production path by accident).
+  # 11ba. A MISSING env file is CREATED under authorisation, and NOT created without it
+  #      (#3414 final roborev). Before this, --fix-gate-pin declined to create the file, so a
+  #      MINIMAL Linux install — where /etc/environment does not ship — could never be
+  #      repaired and failed --strict onboarding forever: a repair flag that cannot repair the
+  #      one case it exists for. BOTH directions are asserted because a repair that fires
+  #      unasked is as wrong as one that never fires, and the create path was previously
+  #      verified BY HAND only, which is the gap this case closes.
+  envf_ba="$tmp/pin-env-ba"; rm -f "$envf_ba"
+  out_ba=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
+    CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_ba" \
+    "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke --fix-gate-pin 2>&1)
+  ba_created=0; [ -s "$envf_ba" ] && grep -q '^CQLITE_GATE_MAX_CONCURRENCY=1$' "$envf_ba" && ba_created=1
+  envf_bb="$tmp/pin-env-bb"; rm -f "$envf_bb"
+  out_bb=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
+    CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_bb" \
+    "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  if [ "$ba_created" = 1 ] \
+     && printf '%s' "$out_ba" | grep -q 'CREATED' \
+     && [ ! -e "$envf_bb" ] \
+     && printf '%s' "$out_bb" | grep -q 'will be CREATED'; then
+    ok "gate-pin: a MISSING env file is created under --fix-gate-pin (with the pin in it), and is NOT created without authorisation — which SAYS it would be"
+  else
+    bad "gate-pin: the create path is wrong (created=$ba_created, unauthorised-file-exists=$([ -e "$envf_bb" ] && echo yes || echo no))"
+    printf '%s\n' "$out_ba" | grep -iE 'CREATED|gate-pin' | head -2
+    printf '%s\n' "$out_bb" | grep -iE 'CREATED|gate-pin' | head -2
+  fi
+
+  # 11bc. THE CREATE IS TWO STEPS, AND ITS FAILURE MUST NOT LEAVE A POPULATED FILE
+  #      (roborev job 311, Low). Content-then-mode: a `tee` that succeeded followed by a
+  #      mode that could not be established took the failure branch, reported "the pin was
+  #      NOT persisted", and left the pin line on disk. The NEXT run then reads a present
+  #      CQLITE_GATE_MAX_CONCURRENCY line, treats the pin as persisted, and never repairs
+  #      the mode — one run's reported failure becoming the next run's silent success at a
+  #      permission nothing chose.
+  #
+  #      RE-ANCHORED AGAIN (roborev job 329): the post-`ln` read-back-and-rollback this case
+  #      used to drive HAS BEEN DELETED, because removing the destination by pathname was a
+  #      destructive race (`ln` proves the inode is ours at LINK time, not at REMOVE time). The
+  #      mode is now established and verified on the TEMP *before* linking, so the observable
+  #      changed: on a mode failure the destination is NEVER CREATED rather than created-then-
+  #      removed. The assertion is the same shape — destination absent + failure reported — for
+  #      a materially better reason.
+  #
+  #      DRIVEN THROUGH ITS ORACLE, and the reason is the third instance of premise-staleness
+  #      in this block. The first version stubbed `chmod` to fail and forced `umask 077` so
+  #      `tee` created 0600. The job-314 fix then made the create atomic — one privileged
+  #      `bash -c` with `umask 022` and `set -C` — which establishes 0644 AT CREATION, so a
+  #      failing chmod can no longer produce a wrong mode and that route to the state is
+  #      closed. The rollback branch is still LIVE in production (a default ACL or an odd
+  #      filesystem can yield a mode the readback rejects), so it is exercised by making the
+  #      readback itself report a non-0644 mode. Stubbing `stat` is only possible because
+  #      mk_stub now removes the hermetic symlink first — before that, this stub would have
+  #      silently not installed and the case would have passed against the real `stat`.
+  shims_badstat="$tmp/pin-shims-badstat"; mkpinshims "$shims_badstat" 1
+  mk_stub "$shims_badstat" stat 'echo 600'
+  envf_bc="$tmp/pin-env-bc"; rm -f "$envf_bc"
+  out_bc=$(runpin "$pinroot" "$shims_badstat" "$envf_bc" HOME="$pin_home_plain" --fix-gate-pin)
+  if [ ! -e "$envf_bc" ] \
+     && printf '%s' "$out_bc" | grep -q 'the pin was NOT persisted' \
+     && printf '%s' "$out_bc" | grep -q 'never created'; then
+    ok "gate-pin: a create whose mode cannot be established on the STAGED file never links it, so the destination is untouched (nothing to roll back, hence no rollback race)"
+  else
+    bad "gate-pin: the failed create left a residue, or did not report rolling it back"
+    printf '%s\n' "$out_bc" | grep -iE 'gate-pin|CREATED|REMOVED|persisted' | head -4
+    echo "  file-exists=$([ -e "$envf_bc" ] && echo yes || echo no) content=[$(cat "$envf_bc" 2>/dev/null | tr '\n' '|')]"
+  fi
+
+  # 11bi. A PRE-LINK FAILURE MUST NOT TOUCH THE DESTINATION (roborev job 328, Medium — a
+  #      DESTRUCTIVE defect I introduced with the temp+`ln` rewrite). Exit 5 means the STAGING
+  #      write failed, so `ln` never ran and the destination was NEVER ours. The branch used to
+  #      `rm -f "$PIN_ENV_FILE"` unconditionally, so a provisioner that created
+  #      /etc/environment during our write had ITS file deleted by our "cleanup" — defeating
+  #      the exact no-clobber guarantee the rewrite exists for.
+  #
+  #      DRIVEN BY A READ-ONLY DIRECTORY, which is the one schedulable way to reach exit 5 from
+  #      the CLI: the destination is absent (so the create branch IS entered) and the temp
+  #      write then fails with EACCES.
+  #
+  #      WHAT THIS CASE CANNOT DO, stated rather than implied: it cannot schedule the RACE
+  #      itself. Entering the create branch requires the destination to be absent, and a peer
+  #      creating it mid-write is not something a test can time. So this asserts the reachable
+  #      half — the failure is reported and NOTHING is written or removed at the destination —
+  #      and the unreachable half rests on the code carrying no destination-`rm` on that path
+  #      at all, which is a structural property of a branch that now has none.
+  pin_ro_dir="$tmp/pin-ro-dir"; rm -rf "$pin_ro_dir"; mkdir -p "$pin_ro_dir"
+  envf_bi="$pin_ro_dir/env"; rm -f "$envf_bi"
+  chmod 0555 "$pin_ro_dir"
+  out_bi=$(runpin "$pinroot" "$shims_one" "$envf_bi" HOME="$pin_home_plain" --fix-gate-pin)
+  chmod 0755 "$pin_ro_dir" 2>/dev/null || true
+  if printf '%s' "$out_bi" | grep -q 'the pin was NOT persisted' \
+     && printf '%s' "$out_bi" | grep -q 'before .* was linked' \
+     && [ ! -e "$envf_bi" ]; then
+    ok "gate-pin: a staging-write failure reports itself and writes NOTHING at the destination (no destructive cleanup of a path that was never ours)"
+  else
+    bad "gate-pin: the pre-link failure path did not report cleanly, or touched the destination"
+    printf '%s\n' "$out_bi" | grep -iE 'gate-pin|staging|persisted|CREATED' | head -4
+    echo "  dest exists=$([ -e "$envf_bi" ] && echo yes || echo no)"
+  fi
+
+  # 11bh. AN INVARIANT GUARD, EXPLICITLY *NOT* A DISCRIMINATOR FOR THE LOCK. Two concurrent
+  #      runs must leave exactly ONE CQLITE_GATE_MAX_CONCURRENCY line, because pam_env
+  #      resolves duplicates by taking the last.
+  #
+  #      MEASURED, and stated because the first version of this comment claimed the opposite:
+  #      this case passes against the pre-lock bootstrap TOO (RED run: PASS=199 FAIL=0, with
+  #      the sanity checks confirming 11bh present and `pin_append_env_file` absent). Two
+  #      runs started together do enough work before their append that one finishes before
+  #      the other reads, so the unlocked implementation serialises by luck and the duplicate
+  #      state never materialises. The case therefore pins the INVARIANT — useful against a
+  #      future change that reintroduces duplicates in a way that does race — and evidences
+  #      NOTHING about job 316's lock.
+  #
+  #      That makes THREE consecutive failed attempts to discriminate a concurrency fix in
+  #      this script (11bg's umask, this case's duplicate count, and the O_EXCL race itself).
+  #      The generalisation is worth more than the cases: a fix that narrows a WINDOW is not
+  #      observable from a harness that cannot schedule the window, and a test that passes
+  #      either way is indistinguishable from coverage until you run it against the defect.
+  #      Both concurrency fixes are DECLARED UNCOVERED — see the note at 11bg.
+  envf_bh="$tmp/pin-env-bh"; : >"$envf_bh"
+  runpin "$pinroot" "$shims_one" "$envf_bh" HOME="$tmp/pin-home-bh1" --fix-gate-pin >/dev/null 2>&1 &
+  pin_bh1=$!
+  runpin "$pinroot" "$shims_one" "$envf_bh" HOME="$tmp/pin-home-bh2" --fix-gate-pin >/dev/null 2>&1 &
+  pin_bh2=$!
+  wait "$pin_bh1" 2>/dev/null; wait "$pin_bh2" 2>/dev/null
+  bh_lines=$(grep -cE '^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=' "$envf_bh" 2>/dev/null)
+  if [ "$bh_lines" = 1 ]; then
+    ok "gate-pin: two concurrent runs leave exactly ONE CQLITE_GATE_MAX_CONCURRENCY line (invariant guard; passes with and without the lock)"
+  else
+    bad "gate-pin: concurrent runs left $bh_lines CQLITE_GATE_MAX_CONCURRENCY lines (pam_env would take the last)"
+    cat "$envf_bh"
+  fi
+
+  # 11bg WAS HERE AND WAS DELETED, because it passed against the defect it was written for
+  #      — the vacuous-case class this block keeps finding, produced this time by me.
+  #      It asserted that a create under `umask 077` still comes out 0644, intending to pin
+  #      the job-314 fix's "mode established AT CREATION" half. RED-verified against the
+  #      pre-fix bootstrap: PASS=199 FAIL=0 — it did not discriminate. The old code was
+  #      `tee` (0600 under that umask) followed by a real `chmod 0644` that SUCCEEDS, so both
+  #      implementations end at 0644. The difference exists only in the window BETWEEN the
+  #      two steps, which is exactly as unobservable from the CLI as the O_EXCL race.
+  #
+  #      Both halves of that fix are therefore DECLARED UNCOVERED rather than faked: an
+  #      implementation-neutral test would have to inject a file between the caller's
+  #      `[ ! -e ]` test and the write, and the two implementations share NO step there — so
+  #      any test that could fire would be pinning the implementation, not the property. The
+  #      remaining option is a source grep for `set -C`, which is nit 5's antipattern
+  #      (#3758). The reachable halves ARE covered: 11ba (create happens / does not without
+  #      authorisation) and 11bc (rollback when the mode cannot be confirmed).
+
+  # 11bd. A REMEDY MUST BE CHOSEN BY THE FACT THAT DISCRIMINATES IT (roborev job 311, Low).
+  #      The verdict `case` dispatches on the GATE's classification of what the SESSION saw,
+  #      which says nothing about WHERE that value came from. So a box whose system file is
+  #      CORRECT (`=1`) but whose session is overridden by a per-user `abc` reached the
+  #      not-honoured branch and was told to "fix the VALUE in <file>" — a file that is
+  #      already right. The operator finds nothing wrong and re-runs into the same verdict.
+  #      This is #3414's own subject one level down: a remedy keyed on a verdict rather than
+  #      on the fact that decides between two remedies.
+  envf_bd="$tmp/pin-env-bd"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_bd"
+  shims_bd="$tmp/pin-shims-bd"; mkpinshims "$shims_bd" abc
+  out_bd=$(runpin "$pinroot" "$shims_bd" "$envf_bd" HOME="$pin_home_plain")
+  if printf '%s' "$out_bd" | grep -q 'gate-pin: NOT-HONOURED' \
+     && printf '%s' "$out_bd" | grep -q 'is OVERRIDING it' \
+     && ! printf '%s' "$out_bd" | grep -q 'fix the VALUE (not the presence)'; then
+    ok "gate-pin: a bad SESSION value over a CORRECT system file is diagnosed as an override, not as a bad file"
+  else
+    bad "gate-pin: the override case was handed the edit-the-system-file remedy"
+    printf '%s\n' "$out_bd" | grep -iE 'gate-pin:|OVERRIDING|fix the VALUE' | head -4
+  fi
+
+  # 11be. THE NEGATIVE TWIN, so 11bd cannot pass by suppressing the remedy outright: where
+  #      the system file REALLY holds the bad value, "edit the VALUE in that file" is the
+  #      correct advice and must survive.
+  envf_be="$tmp/pin-env-be"; printf 'CQLITE_GATE_MAX_CONCURRENCY=abc\n' >"$envf_be"
+  out_be=$(runpin "$pinroot" "$shims_bd" "$envf_be" HOME="$pin_home_plain")
+  if printf '%s' "$out_be" | grep -q 'gate-pin: NOT-HONOURED' \
+     && printf '%s' "$out_be" | grep -q 'fix the VALUE (not the presence)' \
+     && ! printf '%s' "$out_be" | grep -q 'is OVERRIDING it'; then
+    ok "gate-pin: where the system file really holds the bad value, the edit-the-file remedy survives"
+  else
+    bad "gate-pin: the genuine bad-file case lost its remedy to the override branch"
+    printf '%s\n' "$out_be" | grep -iE 'gate-pin:|OVERRIDING|fix the VALUE' | head -4
+  fi
+
+  # 11bf. VERIFIED DISCLOSES WHAT IT MEASURED (roborev job 311, Medium). Matching values do
+  #      not prove the session got the value FROM the system file: a box that also sets it
+  #      from a sudoers env_file or ~/.pam_environment to the same value would read VERIFIED
+  #      with an /etc/environment no PAM stack loads. That cannot be settled without either
+  #      inspecting PAM config (deleted in round 7 — config inspection standing in for
+  #      runtime behaviour) or perturbing a live system file, so the CLAIM is scoped in the
+  #      output instead of being overstated. Asserted because an unstated limit is
+  #      indistinguishable from one nobody noticed.
+  envf_bf="$tmp/pin-env-bf"; : >"$envf_bf"
+  shims_bf="$tmp/pin-shims-bf"; mkpinshims "$shims_bf" "file:$envf_bf"
+  out_bf=$(runpin "$pinroot" "$shims_bf" "$envf_bf" HOME="$pin_home_plain" --fix-gate-pin)
+  if printf '%s' "$out_bf" | grep -q 'gate-pin: VERIFIED' \
+     && printf '%s' "$out_bf" | grep -q 'Agreement is measured; provenance is not'; then
+    ok "gate-pin: VERIFIED states that it measured agreement and NOT provenance (the alternate-source residual is disclosed with the verdict)"
+  else
+    bad "gate-pin: VERIFIED did not disclose the agreement-vs-provenance limit"
+    printf '%s\n' "$out_bf" | grep -iE 'VERIFIED|provenance|scope:' | head -4
+  fi
+
+  envf_k="$tmp/pin-env-k"; : >"$envf_k"
+  # `-u CQLITE_BOOTSTRAP_TEST_MODE` is the point of this half: the marker is exported
+  # suite-wide for host safety, and the case is about a seam set WITHOUT it.
+  out_k=$(env -u CQLITE_BOOTSTRAP_TEST_MODE \
+    PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
+    CQLITE_BOOTSTRAP_ENV_FILE="$envf_k" \
+    "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  out_k2=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
+    CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="relative/env" \
+    "${TIMEOUT_BIN_TEST:-timeout}" -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  if printf '%s' "$out_k" | grep -q 'gate-pin: SKIPPED' \
+     && printf '%s' "$out_k2" | grep -q 'gate-pin: SKIPPED' \
+     && ! printf '%s' "$out_k" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: the test seam is fail-closed (no marker / relative path => SKIPPED, no fallback)"
+  else
+    bad "gate-pin: the test seam was honoured without its marker, or accepted a relative path"
+    printf '%s\n' "$out_k" | grep -i 'gate-pin' | head -2
+    printf '%s\n' "$out_k2" | grep -i 'gate-pin' | head -2
+  fi
+fi
+
+# 11v. THE COUPLING THAT MOTIVATES THE FLAG. --fix-gate-pin exists because a launched box's
+#      ONLY bootstrap invocation is .agent-ami/profile.yaml's verify.run. If that command
+#      string ever loses the flag, every new instance silently arrives unpinned again and
+#      nothing else in this suite would notice — the flag would still work perfectly and be
+#      called by nobody.
+pin_profile="$SCRIPT_DIR/../../.agent-ami/profile.yaml"
+if [ ! -r "$pin_profile" ]; then
+  bad "gate-pin: .agent-ami/profile.yaml is not readable — cannot check verify.run carries --fix-gate-pin"
+elif grep -E '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$pin_profile" | grep -q -- '--fix-gate-pin'; then
+  ok "gate-pin: .agent-ami/profile.yaml's verify.run persists the pin on a launched box (--fix-gate-pin)"
+else
+  bad "gate-pin: verify.run no longer passes --fix-gate-pin — launched boxes will arrive UNPINNED"
+  grep -nE '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$pin_profile" | head -2
+fi
+
+# --- 13. NO SKIP MAY BE ANNOUNCED THROUGH ok() (issue #3414 roborev round 2) ----------
+# The finding was one `ok "SKIP ..."` — an announcement that incremented PASS and left the
+# skip count at 0, i.e. a skip reported as a pass, sitting inside the accounting added the
+# round before to expose exactly that. The sweep found a second instance in a sibling
+# suite. "If one existed, more may" is the durable half of that finding, so it is a check
+# rather than a one-time grep: this scans EVERY suite, so a new one cannot join the habit.
+#
+# The pattern separates an ANNOUNCEMENT from an ASSERTION ABOUT skips: `ok "SKIP …"` and
+# `ok "skip …"` are announcements, while `ok "skip-routing: …"` / `ok "skip-worktree: …"`
+# are real passing assertions whose subject happens to be skipping. Matching the former
+# and sparing the latter is why this keys on the delimiter after the word, not the word.
+# Also asserted host-independently: the root-only case that motivated it never executes on
+# an unprivileged host, so a behavioural test could not have covered it here at all.
+# COMMENT LINES ARE EXCLUDED, and that is not incidental: the paragraph above QUOTES the
+# offending form to explain it, so without this filter the check reds on its own
+# documentation — the artifact describing a rule becoming a violation of it. Filter on the
+# first non-space character of the matched line, after grep's `file:line:` prefix.
+pin_skip_offenders=$(grep -rnE '(^|[^_[:alnum:]])ok "(SKIP|skip)([[:space:]"]|$)' \
+  "$SCRIPT_DIR" 2>/dev/null | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' | head -5)
+if [ -z "$pin_skip_offenders" ]; then
+  ok "suite hygiene: no test announces a SKIP through ok() (a skip must never increment PASS)"
+else
+  bad "suite hygiene: a SKIP is announced through ok(), so it counts as a PASS and not as a skip:"
+  printf '%s\n' "$pin_skip_offenders"
+fi
+
+# --- 13b. THE TRIPWIRE MUST BE ABLE TO FIRE (#3414 roborev round 10) -------------------
+# Case 14 asserts the guard found nothing. That is a claim about the WORLD, and on its own
+# it is satisfied equally by a guard that works and by a guard that is blind — exactly the
+# absence-of-a-bad-signal shape this issue keeps returning to. Nothing in this suite
+# legitimately touches the shared file, so the guard's ability to DETECT is otherwise never
+# exercised: a plant that neutered it left the suite green.
+#
+# So the guard is self-tested by PLANTING THE DEFECT IT EXISTS FOR — an invocation whose
+# CARGO_HOME is not sandboxed — into a throwaway violations log. Both directions, because
+# a guard that fires unconditionally is as useless as one that never fires.
+pin_guard_log="$tmp/guard-selftest-violations.log"; : >"$pin_guard_log"
+PIN_SHARED_VIOLATIONS="$pin_guard_log" HOME="$tmp/sb-selftest" \
+  env -u CARGO_HOME "$PIN_BS" -c 'true' >/dev/null 2>&1
+pin_guard_out="$tmp/guard-selftest-outside.log"; : >"$pin_guard_out"
+PIN_SHARED_VIOLATIONS="$pin_guard_out" HOME="$tmp/sb-selftest" CARGO_HOME=/usr/local/cargo \
+  "$PIN_BS" -c 'true' >/dev/null 2>&1
+pin_guard_clean="$tmp/guard-selftest-clean.log"; : >"$pin_guard_clean"
+PIN_SHARED_VIOLATIONS="$pin_guard_clean" HOME="$tmp/sb-selftest" CARGO_HOME="$tmp/sb-selftest/.cargo" \
+  "$PIN_BS" -c 'true' >/dev/null 2>&1
+# ...and the guard's OWN unmeasured-input case: with PIN_SANDBOX_ROOT unset the sandbox
+# patterns would degenerate to `/*` and match every absolute path, so a guard that did not
+# fail closed here would silently permit everything it exists to catch. Planted with an
+# otherwise-PERFECTLY-SANDBOXED pair, so the only thing under test is the missing root.
+pin_guard_noroot="$tmp/guard-selftest-noroot.log"; : >"$pin_guard_noroot"
+PIN_SHARED_VIOLATIONS="$pin_guard_noroot" HOME="$tmp/sb-selftest" CARGO_HOME="$tmp/sb-selftest/.cargo" \
+  env -u PIN_SANDBOX_ROOT "$PIN_BS" -c 'true' >/dev/null 2>&1
+if [ -s "$pin_guard_log" ] && [ -s "$pin_guard_out" ] && [ -s "$pin_guard_noroot" ] && [ ! -s "$pin_guard_clean" ]; then
+  ok "host hygiene: the guard FIRES on an unset CARGO_HOME, on one outside the sandbox, and on an unusable PIN_SANDBOX_ROOT; and stays quiet on a sandboxed pair"
+else
+  bad "host hygiene: the input guard cannot fire (or fires unconditionally) — case 14 would be vacuous"
+  printf '  unset: %s bytes; outside: %s bytes; no-root: %s bytes; sandboxed: %s bytes\n' \
+    "$(wc -c <"$pin_guard_log")" "$(wc -c <"$pin_guard_out")" "$(wc -c <"$pin_guard_noroot")" "$(wc -c <"$pin_guard_clean")"
+fi
+
+# --- 14. THIS SUITE MUST NOT TOUCH SHARED HOST STATE -----------------------------------
+# Asserted affirmatively rather than by inspection, because the reach is easy to
+# reintroduce (a new case that sets HOME and forgets CARGO_HOME, or a `sudo` invocation
+# where the exported value is dropped by env_reset) and the cost lands on OTHER lanes as
+# unexplained red gates, which is the worst possible place for it to surface.
+# ATTRIBUTED BY CONSTRUCTION, not inferred and not observed: the guard asserts each
+# invocation's CARGO_HOME and HOME are inside the sandbox, which makes the shared path
+# unreachable for bootstrap's `${CARGO_HOME:-$HOME/.cargo}` resolution. No external writer
+# can affect this verdict, and it needs no GNU-only probe, so it holds on macOS too.
+if [ ! -s "$PIN_SHARED_VIOLATIONS" ]; then
+  ok "host hygiene: every bootstrap invocation in this suite ran with sandboxed CARGO_HOME and HOME, so the shared cargo config was unreachable"
+else
+  bad "host hygiene: a bootstrap invocation in THIS suite ran with an UNSANDBOXED CARGO_HOME or HOME, so it could reach the shared $PIN_SHARED_CARGO — that breaks cargo for every other user on the box"
+  cat "$PIN_SHARED_VIOLATIONS"
+fi
+
+# --- 14b. GUARD COVERAGE AS A COUNT, NOT A CLAIM (#3414 roborev round 11) --------------
+# Case 14 says no invocation escaped the sandbox. That is only as strong as the number of
+# invocations actually routed THROUGH the guard: an unwrapped one is invisible to it, so a
+# guard covering 49 of 50 sites reports exactly the same green as one covering 50. "Routed
+# the direct calls through the wrapper" is a sentence that was true the day it was written
+# and unverifiable afterwards; a count is checkable on every run.
+#
+# Measured from this file's own source: every line that launches bootstrap must do so via
+# "$PIN_BS". Excluded, and each for a stated reason rather than by convenience — `bash -n`
+# is a syntax check that never executes the script, and a match inside single quotes is a
+# grep PATTERN in an assertion about bootstrap's OUTPUT, not an invocation.
+pin_cov_total=0; pin_cov_wrapped=0; pin_cov_missing=""
+while IFS= read -r pin_cov_line; do
+  case "$pin_cov_line" in
+    *"bash -n "*) continue ;;
+    *"'"*"bootstrap-agent-machine.sh"*"'"*) continue ;;
+  esac
+  pin_cov_total=$((pin_cov_total + 1))
+  case "$pin_cov_line" in
+    *'"$PIN_BS"'*) pin_cov_wrapped=$((pin_cov_wrapped + 1)) ;;
+    *) pin_cov_missing="${pin_cov_missing:+$pin_cov_missing
+}  ${pin_cov_line#"${pin_cov_line%%[![:space:]]*}"}" ;;
+  esac
+done <<EOF
+$(grep -nE '(^|[^-a-zA-Z0-9_])bash [^|;]*bootstrap-agent-machine\.sh|"\$PIN_BS" "\$(BOOTSTRAP|[A-Za-z_][A-Za-z0-9_]*)' "$0" || true)
+EOF
+if [ "$pin_cov_total" -gt 0 ] && [ -z "$pin_cov_missing" ]; then
+  ok "host hygiene: guard coverage is $pin_cov_wrapped/$pin_cov_total bootstrap invocations — none unwrapped"
+else
+  bad "host hygiene: guard coverage is $pin_cov_wrapped/$pin_cov_total — an unwrapped invocation is INVISIBLE to case 14, which would still report green:"
+  printf '%s\n' "$pin_cov_missing"
+fi
+
+# --- 15. THE THREE GREEN-PATH CASES MUST HAVE RUN, BY NAME (#3414 roborev round 7) -----
+# They have now been silently disabled TWICE by unrelated changes — once when section 5b
+# started warning in every sandbox (round 4), once when the seam began refusing under root
+# (round 7). Both times the suite reported FAIL=0 and both times the skip count was the
+# only trace. The baseline assertion at :1102 catches the CAUSE, and case 13 catches skips
+# announced as passes; this catches the EFFECT directly, keyed on the case names, because
+# the two prior recurrences arrived through different causes and a third will too.
+pin_mustrun_missing=""
+for pin_mustrun in \
+  "push: VERIFIED yields 'All checks green.' and --strict exits 0 (zero warnings)" \
+  "push: AC1+AC3 end to end" \
+  "push: the refusal is exactly ONE warning and names the host"; do
+  printf '%s\n' "$PIN_RAN_CASES" | grep -qF -- "$pin_mustrun" \
+    || pin_mustrun_missing="${pin_mustrun_missing:+$pin_mustrun_missing; }$pin_mustrun"
+done
+if [ -z "$pin_mustrun_missing" ]; then
+  ok "suite: the three green-path cases RAN (not skipped by a warning-count drift)"
+else
+  bad "suite: green-path case(s) did not run — silently disabled again: $pin_mustrun_missing"
+fi
+
+# --- 16. A WHOLESALE DECLINE MUST NOT EXIT 0 (#3414 roborev round 8) -------------------
+# Third instance of one shape (case-level pass, `ok "SKIP"`, then suite-level), so it is a
+# check rather than a fixed comment. STRUCTURAL, and the limit is stated rather than
+# implied: a behavioural test would mean re-running this suite as root FROM INSIDE ITSELF,
+# which is recursive and minutes long, so what is asserted here is that every wholesale
+# `skip`-then-exit path exits nonzero. The behavioural half is a one-off manual check under
+# `sudo`, recorded in the lane verdict file — a structural grep must not be read as a
+# behavioural guarantee.
+pin_decline_bad=$(awk '
+  /^  skip "THE ENTIRE SUITE/ { seen = NR }
+  seen && NR > seen && NR <= seen + 8 && /^  exit 0$/ { print NR }
+' "$0")
+if [ -z "$pin_decline_bad" ] && grep -qE '^  exit 1$' "$0"; then
+  ok "suite hygiene: the wholesale-decline path exits NONZERO (a declined suite is not a passing suite)"
+else
+  bad "suite hygiene: a wholesale decline exits 0 — the gate reads only exit status, so it would certify a suite that ran nothing"
+fi
+
+# THE DIGEST SEES UNTRACKED CONTENT ANYWHERE IN THE WORKTREE, NOT JUST UNDER scripts/tests
+# (roborev job 332). `git ls-files` defaults to the CURRENT DIRECTORY, so the enumeration
+# used to be confined to $SCRIPT_DIR and an untracked file elsewhere could change content
+# while the digest reported STABLE — the same silent-omission class as the `xargs -r`
+# defect, one axis over.
+#
+# THE CASE HAS TO CREATE ITS OWN SUBJECT: this lane has ZERO untracked non-ignored files
+# (measured), so on this tree the fixed and unfixed forms are INDISTINGUISHABLE and a case
+# that merely called pin_tree_id twice would pass either way. It therefore plants a file at
+# the WORKTREE TOP (outside $SCRIPT_DIR, which is the whole point), mutates it, and removes
+# it — then asserts the digest RETURNED to its original value, which is what proves the
+# case cannot destabilise the run's own start/end comparison below. If the case dies before
+# cleanup the leftover file flips tree-integrity to MOVED, i.e. it fails LOUDLY rather than
+# quietly poisoning the verdict.
+# THE PROBE NAME MUST NOT BE GITIGNORED, AND THE FIRST ONE WAS. `.gitignore:79` carries
+# `*.tmp`, so a `…-$$.tmp` probe was excluded by `--exclude-standard` — the case would have
+# taken the `skip` branch on EVERY run, silently, which is a vacuous case wearing a skip's
+# clothes. Caught by the guard below rather than by the suite passing, which is the only
+# reason it is not still there. `.txt` is not matched by any rule in this repository; the
+# guard stays, because a future .gitignore rule could make it so.
+pin_dig_top="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)"
+pin_dig_probe="$pin_dig_top/pin-digest-probe-$$.txt"
+if [ -n "$pin_dig_top" ] && [ -d "$pin_dig_top" ] && ! git check-ignore -q "$pin_dig_probe" 2>/dev/null; then
+  pin_dig_before=$(pin_tree_id)
+  printf 'a\n' > "$pin_dig_probe" 2>/dev/null
+  pin_dig_added=$(pin_tree_id)
+  printf 'b\n' > "$pin_dig_probe" 2>/dev/null
+  pin_dig_edited=$(pin_tree_id)
+  rm -f "$pin_dig_probe"
+  pin_dig_after=$(pin_tree_id)
+  if [ "$pin_dig_added" != "$pin_dig_before" ] \
+     && [ "$pin_dig_edited" != "$pin_dig_added" ] \
+     && [ "$pin_dig_after" = "$pin_dig_before" ]; then
+    ok "suite hygiene: the tree digest sees a CONTENT change to an untracked file outside scripts/tests (and the probe restored the tree)"
+  else
+    bad "suite hygiene: an untracked file outside scripts/tests changed content and the digest did not move (job 332)"
+    printf '  before=%s added=%s edited=%s after=%s\n' \
+      "$pin_dig_before" "$pin_dig_added" "$pin_dig_edited" "$pin_dig_after"
+  fi
+else
+  skip "suite hygiene: cannot plant a NON-IGNORED untracked probe at the worktree top (digest scope unverified — an ignored probe would make this case vacuous)"
+fi
+
+PIN_TREE_END=$(pin_tree_id)
+printf 'tree-end:   %s\n' "$PIN_TREE_END"
+if [ "$PIN_TREE_START" = "$PIN_TREE_END" ]; then
+  printf 'tree-integrity: STABLE\n'
+else
+  # Reported, not failed: the run may still be entirely valid. What it must not do is look
+  # like a clean measurement of one tree when it spanned two.
+  printf 'tree-integrity: MOVED (%s -> %s) — this run spanned an edit; do not attribute its verdicts to either tree without re-running on a still one\n' \
+    "$PIN_TREE_START" "$PIN_TREE_END"
+fi
+
 echo
-echo "PASS=$PASS FAIL=$FAIL"
+echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIPS"
 [ "$FAIL" -eq 0 ]

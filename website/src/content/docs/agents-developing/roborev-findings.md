@@ -334,6 +334,67 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    legitimate but can never be pasted as evidence of a *fresh* review. Demonstrated end to end: absence
    FAIL → waiver naming that base/head/job → recheck ⇒ `WAIVED` + `RESULT: PASS`, with zero reviewer
    invocations; and a recheck of a *different* job stays `STALE`.
+   **REQUEST A WAIVER ONLY WHEN THE HEAD IS FINAL — pushed, conflict-free, post-gate, and reviewed AT
+   THAT SHA (issue #3460).** The binding above is `base` AND `head` AND `job`, each compared for **exact
+   equality** and each against a **different** value:
+
+   - `head` against the run's own `HEAD_SHA` (`git rev-parse HEAD`, assigned **once** before mode
+     dispatch — no path derives head from the job record, `--recheck-job` included);
+   - `base` against `RANGE_BASE_SHA`, which is the **merge-base and *not* the base ref's tip** (#3392) —
+     copy it from the block's `assert-base:` line, **never** from `base:`;
+   - `job` against this run's job id.
+
+   So **any commit landing after the request makes the grant unapplicable** — the run reports
+   `waiver: STALE` and the FAIL stands. The order is therefore:
+
+   1. **push** every local commit;
+   2. **rebase or resolve** until the PR is no longer `CONFLICTING`;
+   3. **gate of record**;
+   4. a **roborev confirmation pass on that final sha**;
+   5. *then* request the waiver, naming **that** round's `base`/`head`/`job`.
+
+   **`--recheck-job` is not an escape.** #3392 stabilised the *base* comparison against a moving `main`,
+   and nothing can make a *head* binding survive a genuine content change — that is what the binding is
+   for.
+
+   **The confirmation pass is the step that gets skipped, and skipping it has its own failure shape.**
+   #3367 found its gated sha had never been reviewed at all: round 25 reviewed `6f5fc2b7c` and two
+   commits landed after it; #2605 hit the same shape. The final sha needs its **own** review round, and
+   *that* round's job id is the one the waiver must name.
+
+   **The trap catches a lane doing the careful thing, which is why it is written down rather than left
+   to judgement.** The absence diagnostic prints `base … head … job …`, and those values are *correct at
+   the moment it prints them*. **The failing block itself says nothing about a push invalidating them** —
+   only `--help` does ("a push, a different base or a re-run each need a fresh one"), which is not where
+   a lane reading a FAIL is looking. So copying the verified triple straight into a request is
+   simultaneously the obvious action and the wrong one whenever anything is still going to move the
+   head. Measured cost: **three independent lanes on one day** (2026-08-28) — #1705/PR #3382 (grant
+   received, then a conflict with just-merged #1701 had to be resolved), #1699/PR #3403 (the triple was
+   exact and the PR was `CONFLICTING` at the same moment), #3248/PR #3455 (fixes committed but unpushed,
+   **and** `CONFLICTING`) — each spending an authorization on code that would not merge, and asking the
+   authorizer to judge a review that no longer described the diff.
+
+   **Do not loosen the binding to make this easier.** All three instances are the binding *working*, and
+   a waiver riding to a later review is the hole #3312 exists to close.
+
+   **Two of the four conditions are mechanized and two are not — know which.**
+
+   | condition | mechanized? | what enforces it |
+   |---|---|---|
+   | pushed | **yes** | `push-assert` fails the round *before any review is enqueued* — `FAIL (unpushed commits)` when the remote branch exists and local is ahead, `FAIL (branch absent on remote <remote>)` when it was never pushed |
+   | reviewed at that sha | **yes** | `sha-assert` fails when the record's range head ≠ local `HEAD`; the head binding catches it again at waiver time |
+   | conflict-free | **no** | `mergeable` / `CONFLICTING` appears **nowhere** in the wrapper, the waiver scanner or `premerge-assert.sh` |
+   | post-gate | **no** | nothing correlates the reviewed sha with a gate of record |
+
+   So a pushed, reviewed, still-`CONFLICTING` head passes every check and yields a triple that dies on
+   the rebase. Mechanizing those two, and splitting the staleness **verdict token** (`STALE` for all
+   three causes today, though its *detail* already names the diverged field and both values) into
+   `head moved` / `base moved` / `job mismatch`, is **issue #3827** — whose demonstration is *circular
+   rather than impossible*: every sanctioned invocation is the branch's own
+   `scripts/flow/roborev-review.sh`, so the round that reviews a wrapper change runs the **changed**
+   wrapper (the property #3544 records for `agent-gate.sh` — not the read-from-root self-certification
+   bar of #3229).
+
    **The marker is decided by ONE anchored pattern, and the reason is trimmed BEFORE it is judged**, so
    field order and value boundaries are enforced and `reason=TODO ` / whitespace-only reasons are refused
    like their untrimmed forms — per-field extraction had enforced neither.

@@ -9,7 +9,11 @@ Validation is `scripts/agent-gate.sh`, run in the tiered loop:
 `AGENT_GATE_SUMMARY_FILE=<path> bash scripts/agent-gate.sh [--lite] > gate.log 2>&1 < /dev/null`, then
 read only the summary file — never `gate.log`.
 
-- **Iterate:** `--lite` on every fix round (~1-5 min). Its components are exactly
+- **Iterate:** `--lite` on every fix round. **Budget by the diff, not a flat `~1-5 min` (#3764):** that is the
+  warm NARROW-diff case (median 1.4 min); a `cqlite-core/src/` diff measures median 20 min (up to 43 min
+  locally; up to ~104 min under peer load is reported, #3764), and a cold `clippy` alone adds 16-24 min
+  whatever the diff. CLAUDE.md's
+  Lite row carries the full cost model. Its components are exactly
   `file-size fmt clippy roborev-lints scoped-tests` (the `scripts/agent-gate.sh` `LITE_COMPONENTS` array),
   where lite clippy is **per-package scoped** (#1844), not whole-workspace, and `scoped-tests` is
   blast-radius (touched package `--lib` + the diff's new `--test` targets). It emits a distinct

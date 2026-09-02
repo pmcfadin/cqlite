@@ -576,7 +576,6 @@ async fn narrow_token_range_does_not_mature_the_ramp() {
     let bound = ScanTokenBound {
         start_excl,
         end_incl,
-        wraparound: false,
     };
     SSTableReader::reset_decompress_calls();
     SSTableReader::reset_scan_window_counters();
@@ -763,7 +762,6 @@ async fn wraparound_compressed_scan_reads_both_disjoint_segments() {
     let bound = ScanTokenBound {
         start_excl,
         end_incl,
-        wraparound: true,
     };
     SSTableReader::reset_decompress_calls();
     SSTableReader::reset_scan_window_counters();

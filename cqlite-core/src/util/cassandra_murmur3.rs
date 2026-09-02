@@ -141,11 +141,38 @@ pub fn cassandra_murmur3_x64_128(data: &[u8]) -> (i64, i64) {
     (h1 as i64, h2 as i64)
 }
 
+/// The minimum token of Cassandra's Murmur3 ring — `Murmur3Partitioner.MINIMUM`.
+///
+/// `git show cassandra-5.0.8:src/java/org/apache/cassandra/dht/Murmur3Partitioner.java`
+/// field `MINIMUM`: `public static final LongToken MINIMUM = new LongToken(Long.MIN_VALUE);`
+///
+/// It is the token of the **empty** partition key and of nothing else: the javadoc on
+/// `getToken` states that "all generated token are strictly bigger than
+/// MINIMUM ... we don't want MINIMUM to correspond to any key because the range
+/// (MINIMUM, X] doesn't include MINIMUM but we use such range to select all data whose
+/// token is smaller than X", and `normalize(long)` enforces that by remapping
+/// a hashed `Long.MIN_VALUE` to `Long.MAX_VALUE`.
+///
+/// Named rather than spelled `i64::MIN` at each site so the ring minimum is greppable:
+/// this is the single authoritative definition shared by the streaming k-way merge, the
+/// `WHERE pk IN (...)` fan-out and the scan fallbacks (see [`cmp_partition_keys_by_token`]).
+pub const CASSANDRA_MINIMUM_TOKEN: i64 = i64::MIN;
+
 /// Compute a Murmur3 partition token matching Cassandra's Murmur3Partitioner.
 ///
 /// Takes h1 from the 128-bit hash and applies `normalize`:
 /// maps `i64::MIN` to `i64::MAX` (Cassandra excludes the minimum token value).
+///
+/// An **empty** key short-circuits to [`CASSANDRA_MINIMUM_TOKEN`] without hashing,
+/// exactly as Cassandra does (`Murmur3Partitioner.getToken(ByteBuffer, long[])`,
+/// cassandra-5.0.8: `if (key.remaining() == 0) return MINIMUM;`).
+/// The hash of the empty input is `h1 == 0` and `normalize(0) == 0`, so without
+/// this branch an empty key would be placed on the ring at token 0 (issue #3633).
 pub fn cassandra_murmur3_token(data: &[u8]) -> i64 {
+    // `key.remaining() == 0` in Cassandra's terms.
+    if data.is_empty() {
+        return CASSANDRA_MINIMUM_TOKEN;
+    }
     let (h1, _) = cassandra_murmur3_x64_128(data);
     cassandra_murmur3_normalize_token(h1)
 }
@@ -156,8 +183,18 @@ pub fn cassandra_murmur3_token(data: &[u8]) -> i64 {
 ///
 /// Exposed so a caller that already holds `(h1, h2)` from a single
 /// [`cassandra_murmur3_x64_128`] pass can derive the token without re-hashing
-/// the key (issue #1681). `cassandra_murmur3_token(data)` is exactly
-/// `cassandra_murmur3_normalize_token(cassandra_murmur3_x64_128(data).0)`.
+/// the key (issue #1681).
+///
+/// **This is NOT the whole token function.** For a NON-EMPTY key,
+/// `cassandra_murmur3_token(data)` equals
+/// `cassandra_murmur3_normalize_token(cassandra_murmur3_x64_128(data).0)`. For an
+/// EMPTY key it does NOT: the token is [`CASSANDRA_MINIMUM_TOKEN`], because
+/// `Murmur3Partitioner.getToken(ByteBuffer, long[])` short-circuits a zero-length
+/// key to `MINIMUM` before consulting the hash, while `normalize(0) == 0`
+/// (issue #3633). A caller taking this single-pass route MUST carry its own
+/// `is_empty()` guard: reading this equivalence as unconditional is exactly how
+/// the BTI partitions writer came to place an empty key at token 0 while the
+/// reader probed at `i64::MIN`.
 pub fn cassandra_murmur3_normalize_token(h1: i64) -> i64 {
     normalize(h1)
 }
@@ -526,6 +563,15 @@ mod tests {
     }
 
     /// Verify the raw hash function returns (h1, h2) — not swapped
+    ///
+    /// NOTE (issue #3633): `h1 == 0` for `b""` is the CORRECT raw murmur3_x64_128
+    /// value at seed 0 and must stay asserted as-is. It does NOT contradict
+    /// `cassandra_murmur3_token(b"") == CASSANDRA_MINIMUM_TOKEN`: Cassandra's
+    /// `Murmur3Partitioner.getToken(ByteBuffer, long[])` (cassandra-5.0.8, lines
+    /// returns `MINIMUM` for a zero-length key BEFORE consulting the hash,
+    /// so the raw hash and the token legitimately differ at empty input. Do not
+    /// "reconcile" the two — changing this assertion would break the port of
+    /// `MurmurHash.hash3_x64_128`.
     #[test]
     fn test_hash_returns_h1_h2_order() {
         // For the empty input with seed 0, both h1 and h2 should be 0
@@ -589,6 +635,63 @@ mod tests {
                 "bc first byte mismatch for UUID {:02X}*16",
                 c.uuid_byte
             );
+        }
+    }
+
+    /// An EMPTY partition key hashes to the ring MINIMUM, not to `normalize(h1)`.
+    ///
+    /// Oracle (pinned Cassandra 5.0.8, the only format authority here):
+    /// `git show cassandra-5.0.8:src/java/org/apache/cassandra/dht/Murmur3Partitioner.java`
+    /// - field `MINIMUM`: `public static final LongToken MINIMUM = new LongToken(Long.MIN_VALUE);`
+    /// - `private LongToken getToken(ByteBuffer key, long[] hash)` is
+    ///   `{ if (key.remaining() == 0) return MINIMUM; return new LongToken(normalize(hash[0])); }`
+    ///
+    /// So Cassandra returns `Long.MIN_VALUE` for a zero-length key, short-circuiting
+    /// the hash entirely. The raw hash of `b""` at seed 0 is `h1 == 0` and
+    /// `normalize(0) == 0`, so without the guard CQLite would answer `0` — a token
+    /// that belongs to some other key's slot on the ring.
+    #[test]
+    fn empty_partition_key_token_is_cassandra_minimum() {
+        assert_eq!(
+            cassandra_murmur3_token(b""),
+            CASSANDRA_MINIMUM_TOKEN,
+            "empty key must map to Murmur3Partitioner.MINIMUM"
+        );
+        assert_eq!(CASSANDRA_MINIMUM_TOKEN, i64::MIN);
+        // The guard is on the key length, not on the hash value: the raw hash of the
+        // empty input is still 0 (see `test_hash_returns_h1_h2_order`).
+        assert_eq!(cassandra_murmur3_x64_128(b"").0, 0);
+        assert_eq!(cassandra_murmur3_normalize_token(0), 0);
+    }
+
+    /// The empty-key guard must not perturb any NON-empty key (hot-path regression
+    /// pin). Every expected value here is an already-pinned vector from the test
+    /// vectors above, all of which derive from Cassandra's `Murmur3Partitioner`.
+    #[test]
+    fn non_empty_key_tokens_unchanged_by_empty_key_guard() {
+        let vectors: &[(&[u8], i64)] = &[
+            (b"a", -8839064797231613815),
+            (b"hello", -3758069500696749310),
+            (&[0x00], 5048724184180415669),
+            (&[0x80], -5284281814142962636),
+            (&[0xFF], -4442228696663692417),
+            (&[0, 0, 0, 0, 0, 0, 0, 0], 2945182322382062539),
+            (
+                &[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                9204767954415360687u64 as i64,
+            ),
+            (&[0x11; 16], 4360155383588533346),
+        ];
+        for (key, expected) in vectors {
+            assert_eq!(
+                cassandra_murmur3_token(key),
+                *expected,
+                "token changed for non-empty key {key:02X?}"
+            );
+            // A non-empty key never lands on MINIMUM: `normalize` maps `i64::MIN`
+            // to `i64::MAX` precisely so the ring minimum stays unreachable
+            // (Murmur3Partitioner.normalize(long), cassandra-5.0.8).
+            assert_ne!(cassandra_murmur3_token(key), CASSANDRA_MINIMUM_TOKEN);
         }
     }
 }
