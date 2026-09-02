@@ -6919,10 +6919,16 @@ _census_kind() {
     python-bindings) printf 'indirect:pytest' ;;
     node-bindings)   printf 'indirect:jest' ;;
     all-features-check) printf 'gap:cargo check/clippy passes execute no tests; the subject is a feature set, not a count' ;;
-    oom-audit|parity-report|operator-metrics-doc) printf 'gap:xtask/report driver prints no machine-readable subject count (#3625 phase 2)' ;;
-    smoke)          printf 'gap:smoke-test-all-tables.sh prints no machine-readable table count (#3625 phase 2)' ;;
+    # THE RESIDUAL POINTER NAMES AN OPEN ISSUE (#3162), NOT THE CLOSED ONE IT WAS BORN IN.
+    # These strings print on component rows of EVERY full gate, so a stale pointer sends the
+    # one operator who follows it to a dead ticket — and the residual then belongs to nobody.
+    # #3625 was closed NOT_PLANNED and absorbed into the OPEN umbrella #3162; the remaining
+    # `emitted` lanes are tracked there. A gap that prints its reason every run is only
+    # honest while the reason is actionable.
+    oom-audit|parity-report|operator-metrics-doc) printf 'gap:xtask/report driver prints no machine-readable subject count (#3162)' ;;
+    smoke)          printf 'gap:smoke-test-all-tables.sh prints no machine-readable table count (#3162)' ;;
     file-size|roborev-lints|pub-surface|binding-unwind-profile|delivery-telemetry|tooling-tests)
-                    printf 'gap:shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3625 phase 2)' ;;
+                    printf 'gap:shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)' ;;
     *) return 1 ;;
   esac
   return 0
