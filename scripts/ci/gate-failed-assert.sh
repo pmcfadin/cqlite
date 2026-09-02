@@ -306,7 +306,14 @@ awk -v max="$max" '
   # for both; anything longer is not an identifier. The gate then MIDDLE-elides to 60 for
   # display, after the redaction, which is safe on a charset that cannot hold an authority.
   function pubid(t) {
-    sub(/[._:-]+$/, "", t)                   # trailing separators are punctuation, not identity
+    # ONLY `.` and `:` are stripped. `_` and `-` are VALID IDENTIFIER CHARACTERS, and
+    # stripping them made `module::test_` publish as `module::test` — a DIFFERENT, possibly
+    # real test — so a reader matching a flake against the field could match the wrong one
+    # (#3765 blocker 17). That is the identity-fidelity class this issue keeps producing: a
+    # normalisation that makes two distinct identities indistinguishable. The COUNT was never
+    # wrong (it is computed on the full identity), but the PUBLISHED identifier is what a
+    # reader matches on, which is the whole purpose of this field.
+    sub(/[.:]+$/, "", t)                     # sentence/delimiter punctuation only, never identity chars
     if (t == "") return "<no identifier in the matched line>"
     if (t ~ /[^A-Za-z0-9._:-]/) return "<identifier outside the safe charset>"
     if (length(t) > 256) return "<identifier too long to publish safely: " length(t) " chars>"
