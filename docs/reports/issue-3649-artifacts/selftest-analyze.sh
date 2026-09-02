@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=393
+CASE_FLOOR=397
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -2387,6 +2387,37 @@ PYINNER
   else
     bad "a lock-refused session created a session directory before checking the lock"
   fi
+  # ...AND IT MUST NOT RELEASE THE LOCK IT FAILED TO TAKE. The trap is armed
+  # BEFORE acquisition, so `cleanup` runs on this path too; keying its rmdir on
+  # the directory merely existing would delete the PEER'S lock, turning a leak
+  # into a silent mutual-exclusion failure -- strictly worse than the leak being
+  # fixed. This is the case that stops the obvious fix.
+  if [ -d "$TMP/w-locked/.session-lock" ]; then
+    ok "a lock-refused session leaves the holder's lock alone"
+  else
+    bad "a lock-refused session DELETED the lock another session holds"
+  fi
+  rmdir "$TMP/w-locked/.session-lock"
+
+  # THE LEAK ITSELF: a session that fails AFTER taking the lock must release it,
+  # or the work directory is permanently unusable. `--corpus` naming nothing is a
+  # refusal that happens well after acquisition.
+  run_driver --corpus "$TMP/no-such-corpus-dir" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-leak" --min-corpus-bytes 1 --control selftest --min-sstables 1 \
+    --repo "$SCRATCH"
+  check_driver "a session failing after it took the lock" 2 corpus-absent
+  if [ -d "$TMP/w-leak/.session-lock" ]; then
+    bad "a session that failed after acquiring the lock LEAKED it, blocking every later session"
+  else
+    ok "a session that fails after acquiring the lock releases it"
+  fi
+  # ...and the proof that the release is real: the next session gets past the
+  # lock rather than being refused work-dir-busy. A stat on a directory is not
+  # the property an operator cares about; being able to run again is.
+  run_driver --corpus "$TMP/no-such-corpus-dir" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-leak" --min-corpus-bytes 1 --control selftest --min-sstables 1 \
+    --repo "$SCRATCH"
+  check_driver "a session reusing a work directory whose predecessor failed" 2 corpus-absent
 
   # P1-7: a worktree at the right commit but carrying uncommitted edits builds
   # code the manifest does not describe.
