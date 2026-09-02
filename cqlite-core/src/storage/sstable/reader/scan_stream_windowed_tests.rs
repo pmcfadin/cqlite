@@ -854,7 +854,7 @@ mod fixture_drain {
             ),
         };
         assert!(
-            matches!(err, Error::Corruption { .. }),
+            matches!(err, Error::Corruption(_)),
             "the refusal must carry the decode error's own kind, got: {err}"
         );
 

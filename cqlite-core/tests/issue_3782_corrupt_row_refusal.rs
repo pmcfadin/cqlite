@@ -474,3 +474,36 @@ fn assert_corruption_kind(e: &cqlite_core::Error, surface: &str) {
          (Error::Corruption), not a re-wrapped generic; got {e:?}"
     );
 }
+
+/// Roborev job 52 (finding 2) — the extent parameter must be NAMEABLE from
+/// OUTSIDE the crate.
+///
+/// `V5CompressedLegacyParser` is public API by a two-hop `doc(hidden)`
+/// re-export (`parsing/mod.rs` → `reader/mod.rs` → `lib.rs`'s `pub mod
+/// storage`), and #3782 made four of its `pub fn`s take a `BufferExtent`. While
+/// that enum was `pub(crate)` those methods were UNCALLABLE from outside — an
+/// out-of-crate caller could not write the argument — and `private_interfaces`
+/// did not fire, so nothing but this test observes the break.
+///
+/// This file IS out-of-crate (an integration test), so the `use` below is the
+/// assertion: it fails to COMPILE if the type stops travelling the parser's own
+/// public path, or if a variant is renamed or made non-exhaustive-constructible.
+#[test]
+fn the_block_emit_extent_is_nameable_beside_its_parser_from_outside_the_crate() {
+    use cqlite_core::storage::sstable::reader::{BufferExtent, V5CompressedLegacyParser};
+
+    // The parser item itself, on the public path.
+    let _parser_ctor = V5CompressedLegacyParser::new;
+    // Both variants, constructed by an out-of-crate caller.
+    let complete = BufferExtent::Complete;
+    let window = BufferExtent::Window;
+    assert_ne!(
+        complete, window,
+        "the two extents must stay distinguishable: Complete REFUSES a decode \
+         error at the buffer end (data loss), Window tolerates it (a row \
+         straddling into the next chunk)"
+    );
+    // `Copy`, so passing it to a parse call never moves the caller's value.
+    let copied = complete;
+    assert_eq!(copied, BufferExtent::Complete);
+}

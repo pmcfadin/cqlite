@@ -20,12 +20,34 @@
 //! unrepresentable: a new call site cannot compile without answering the
 //! question, and the answer sits beside the buffer it describes rather than
 //! several builder calls away.
-/// Deliberately `pub(crate)`: every caller is in-crate, and the flag this
-/// replaced was `pub` on a type re-exported (`doc(hidden)`) for integration
-/// tests, so an out-of-crate caller could have declared a chunk-covering window
-/// complete and turned legitimate straddling rows into hard errors.
+/// # Contract — the caller MUST state which of these its buffer is
+///
+/// This type is `pub` because it is a REQUIRED parameter of public methods on
+/// [`V5CompressedLegacyParser`](super::V5CompressedLegacyParser) (re-exported
+/// `doc(hidden)` for integration tests, issue #166): a public method taking an
+/// unnameable type cannot be called at all, so the type is re-exported beside
+/// the parser (`storage::sstable::reader::BufferExtent`).
+///
+/// Choosing the WRONG variant is a correctness bug in both directions, and
+/// neither direction is safe to guess for the caller:
+///
+/// * [`BufferExtent::Complete`] on a buffer that is really a WINDOW turns every
+///   legitimate straddling row — a row whose bytes continue in the next chunk —
+///   into a hard error. The point readers use the tolerant break as their
+///   straddle protocol, so this direction is a false refusal on healthy data.
+/// * [`BufferExtent::Window`] on a buffer that is really COMPLETE silently
+///   drops the remainder of the extent on any decode error: DATA LOSS, reported
+///   as `Ok`. That is the defect issue #3782 removed.
+///
+/// Hence there is deliberately **no** defaulted setter and **no** wrapper that
+/// picks a variant: the previous `with_complete_buffer(bool)` builder flag
+/// defaulted to the data-losing answer, and a new parse site inherited it
+/// silently. A two-variant enum that must be written at the call site keeps the
+/// answer beside the buffer it describes. Do NOT reintroduce a default — the
+/// earlier "narrow the public surface" review nit was about the defaulted
+/// boolean setter, not about this self-documenting required parameter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BufferExtent {
+pub enum BufferExtent {
     /// The buffer holds EVERY byte of the extent being decoded — the whole
     /// stitched data section, a partition slice already proven fully consumed,
     /// or a standalone buffer with no continuation. No further bytes can arrive
@@ -43,6 +65,10 @@ pub(crate) enum BufferExtent {
 impl BufferExtent {
     /// `true` only for [`BufferExtent::Complete`] — the affirmative value, so a
     /// permissive branch is never keyed on "not the bad one".
+    ///
+    /// Stays `pub(crate)`: the enum has to be NAMEABLE from outside (it is a
+    /// public parameter), but out-of-crate callers construct variants rather
+    /// than inspect them, so the predicate is not widened with the type.
     pub(crate) fn is_complete(self) -> bool {
         matches!(self, BufferExtent::Complete)
     }

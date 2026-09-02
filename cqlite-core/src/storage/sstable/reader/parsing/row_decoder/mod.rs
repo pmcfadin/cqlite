@@ -789,7 +789,12 @@ mod block_emit;
 mod block_emit_windowed;
 // Issue #3782: the explicit buffer-extent contract the block-emit parses take.
 mod buffer_extent;
-pub(crate) use buffer_extent::BufferExtent;
+// `pub` (not `pub(crate)`): `BufferExtent` is a REQUIRED parameter of the
+// parser's public block-emit methods, so it must be re-exportable on the same
+// public path as the parser itself — a public method taking an unnameable type
+// is uncallable from outside the crate. `row_decoder` is `pub(crate)`, so this
+// only makes the item re-exportable, never directly reachable.
+pub use buffer_extent::BufferExtent;
 mod cell_kind;
 mod cell_value;
 // campsite split of `cell_value` (issue #1795): scalar arms + complex ladder.

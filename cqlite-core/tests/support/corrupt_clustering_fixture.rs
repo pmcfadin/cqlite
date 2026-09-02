@@ -203,6 +203,10 @@ fn mutate_text_literal(dir: &Path, spec: &FixtureSpec) -> (usize, usize) {
     let mut data = std::fs::read(&data_path).expect("read Data.db");
     let file_len = data.len() as u64;
 
+    // Per-needle occurrence tally across EVERY chunk, so an unfound needle is
+    // distinguishable from a found-but-unflippable one (roborev job 52).
+    let mut needle_hits = vec![0usize; spec.needles.len()];
+
     for (i, &start) in offs.iter().enumerate() {
         let end = offs.get(i + 1).copied().unwrap_or(file_len);
         let (lo, hi) = (start as usize, (end - 4) as usize);
@@ -214,7 +218,7 @@ fn mutate_text_literal(dir: &Path, spec: &FixtureSpec) -> (usize, usize) {
         // CompressionInfo.db), so the reported offset is the position within
         // the whole stitched data section.
         let chunk_base = i * chunk_length;
-        for flip_at in candidate_literal_sites(&data[lo..hi], spec) {
+        for flip_at in candidate_literal_sites(&data[lo..hi], spec, &mut needle_hits) {
             let abs = lo + flip_at;
             let orig = data[abs];
             if !orig.is_ascii_graphic() {
@@ -245,18 +249,68 @@ fn mutate_text_literal(dir: &Path, spec: &FixtureSpec) -> (usize, usize) {
             return (chunk_base + diffs[0], diffs.len());
         }
     }
+    // A needle that occurs NOWHERE is a broken fixture/spec, not an
+    // unflippable candidate — name it, so the scaffolding cannot weaken a case
+    // by silently finding nothing to mutate.
+    let missing: Vec<String> = spec
+        .needles
+        .iter()
+        .zip(needle_hits.iter())
+        .filter(|(_, &hits)| hits == 0)
+        .map(|(needle, _)| format!("{:?}", String::from_utf8_lossy(needle)))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{}.{}: needle(s) {} occur in NO compressed chunk — the fixture bytes or \
+         the needle spelling changed, so there was never a site to flip \
+         (per-needle hits across {} chunk(s): {:?})",
+        spec.keyspace,
+        spec.table,
+        missing.join(", "),
+        offs.len(),
+        needle_hits
+    );
     panic!(
-        "no needle of {}.{} is carried verbatim as a flippable LZ4 literal",
-        spec.keyspace, spec.table
+        "no needle of {}.{} is carried verbatim as a flippable LZ4 literal \
+         (per-needle hits across {} chunk(s): {:?}; every occurrence was either \
+         non-unique in its chunk, non-graphic, or not a clean replicated flip)",
+        spec.keyspace,
+        spec.table,
+        offs.len(),
+        needle_hits
     );
 }
 
 /// Compressed-chunk byte positions worth flipping: for each needle that occurs
 /// EXACTLY ONCE in the compressed chunk (hence verbatim in a literal), the byte
 /// at the spec's [`FixtureSpec::flip_offset_in_needle`].
-fn candidate_literal_sites(comp: &[u8], spec: &FixtureSpec) -> impl Iterator<Item = usize> {
+///
+/// `hits_per_needle[j]` is INCREMENTED by the number of occurrences of
+/// `spec.needles[j]` in `comp`, so the caller can tell "no candidate was
+/// flippable" from "the needle occurs NOWHERE" — the latter means the fixture or
+/// the needle spelling changed, and it must fail loudly rather than skip
+/// quietly (roborev job 52).
+///
+/// The scan bound is INCLUSIVE of the last valid start index
+/// (`comp.len() - needle.len()`): an exclusive bound silently missed a needle
+/// ending exactly at the end of the chunk, which reads as a false
+/// "needle not found".
+fn candidate_literal_sites(
+    comp: &[u8],
+    spec: &FixtureSpec,
+    hits_per_needle: &mut [usize],
+) -> impl Iterator<Item = usize> {
+    assert_eq!(
+        hits_per_needle.len(),
+        spec.needles.len(),
+        "{}.{}: hit counter has {} slots for {} needles",
+        spec.keyspace,
+        spec.table,
+        hits_per_needle.len(),
+        spec.needles.len()
+    );
     let mut sites: Vec<usize> = Vec::new();
-    for needle in spec.needles {
+    for (j, needle) in spec.needles.iter().enumerate() {
         assert!(
             spec.flip_offset_in_needle < needle.len(),
             "{}.{}: flip offset {} is outside its {}-byte needle",
@@ -265,9 +319,15 @@ fn candidate_literal_sites(comp: &[u8], spec: &FixtureSpec) -> impl Iterator<Ite
             spec.flip_offset_in_needle,
             needle.len()
         );
-        let hits: Vec<usize> = (0..comp.len().saturating_sub(needle.len()))
+        // A needle longer than the chunk cannot occur in it at all; the
+        // inclusive bound below would underflow, so answer it directly.
+        if needle.len() > comp.len() {
+            continue;
+        }
+        let hits: Vec<usize> = (0..=comp.len() - needle.len())
             .filter(|&k| &comp[k..k + needle.len()] == *needle)
             .collect();
+        hits_per_needle[j] += hits.len();
         if let [k] = hits.as_slice() {
             sites.push(k + spec.flip_offset_in_needle);
         }
