@@ -1248,7 +1248,7 @@ if not isinstance(data[field], list):
     ROBOREV_JSONF_CAUSE=""
     return 0
   fi
-  ROBOREV_JSONF_CAUSE="the payload was not a JSON object carrying a $2 LIST (it was unparseable, a non-object, missing that key, or null)"
+  ROBOREV_JSONF_CAUSE="the payload was not a JSON object carrying a $2 LIST (it was empty, unparseable, a non-object, missing that key, or null)"
   return 0
 }
 
@@ -1266,6 +1266,27 @@ if not isinstance(data[field], list):
 # that is not an object carrying a comments list; a `state=` outside the closed set) — fix or report
 # the payload. Neither is ever permissive, and a two-valued return would re-import the collapse this
 # whole restructure exists to remove.
+#
+# ===== WHAT `ok` ESTABLISHES, AND WHAT IT DELIBERATELY DOES NOT (#3759 round 4) =====
+# IT ESTABLISHES: the payload is a top-level JSON OBJECT; the field it needs is a LIST; the scanner
+# exited zero; and the returned `state=` is in the closed recognition set. IT DOES NOT DISTINGUISH A
+# MALFORMED ELEMENT INSIDE AN OTHERWISE WELL-FORMED LIST — a comment entry that is not an object, or
+# whose `body` is not a string, is SKIPPED by the scanner, so a list of such entries reads here as a
+# thread with no authorization in it.
+#
+# THAT IS A DECLARED LIMIT, NOT AN OVERSIGHT, AND IT IS DELIBERATELY NOT CLOSED HERE. The scanner is
+# reused UNMODIFIED by design and its element-skipping is CORRECT for its own contract. A caller that
+# re-validated every element and its field types would be re-implementing the scanner parse — a SECOND
+# implementation of the marker path, which is the hazard this design rejected at the outset and which
+# this repository rules on repeatedly: a second implementation is correct only insofar as it is
+# differentially tested against the first, never by care. Closing it would trade a bounded, stated
+# limitation for an unbounded one.
+#
+# SO IT IS STATED WHERE IT IS RELIED ON: the probe repeats this boundary in the rendering of every
+# thread it reports as READ, because an affirmative declared limit beats a silent one — that is the
+# same rule the probe follows for its bound and its cross-repository skips. The harm ceiling is a
+# diagnostic that is one step less precise than it sounds; it is NEVER a wrongly granted
+# authorization, because nothing here can grant.
 #
 # A ZERO EXIT FROM THE SCANNER IS NOT A SUCCESSFUL READ. The scanner reduces `{}`,
 # `{"comments": null}` and `{"comments": {}}` to an EMPTY comment list and exits 0 — CORRECT for its
@@ -1376,7 +1397,7 @@ roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-fi
   local kind="$1" base="$2" head="$3" job="$4" observed="${5:-}"
   local rel_errfile rel_json rel_errtext numbers declared probed=0 skipped_cross=0
   local issue read_ok=() unread=() comments state
-  local issue_errfile issue_errtext read_list unread_list bound_clause cross_clause suffix
+  local issue_errfile issue_errtext read_list unread_list bound_clause cross_clause suffix read_limit
   local repo_nwo repo_errfile repo_errtext
   ROBOREV_PROBE_OUTCOME="could-not-check"
   # THE STRUCTURED VALUE, KEPT BESIDE THE RENDERED ONE ON PURPOSE. `_DETAIL` is prose for a human;
@@ -1500,7 +1521,14 @@ import json, os, re, sys
 # ONE grammar for a GitHub owner or repository name, received from the shell so that the current
 # repository and every reference are held to the SAME constraint. Two parallel validators of one
 # grammar drift, and a drift here yields a CONFIDENT declared skip from an unvalidated identity.
-NAME_RE = re.compile("^" + os.environ.get("PROBE_NAME_RE", "(?!)") + "$")
+# ANCHORED WITH fullmatch, NOT WITH a trailing dollar (#3759 round 4). In Python that anchor matches
+# BEFORE a final newline, so a name ending in a newline satisfied it — and the newline then survived
+# into the joined identity, which compares unequal to everything, so a SAME-repository reference was
+# reported as a confident CROSS-REPO declared skip instead of REPO-UNVERIFIED. fullmatch has no such
+# exception. The shell copy of this check is unaffected: the bash =~ operator anchors at end of
+# string, and command substitution strips trailing newlines before it ever runs.
+# NO APOSTROPHES IN THIS BLOCK: it lives inside a single-quoted shell string, so one would end it.
+NAME_RE = re.compile(os.environ.get("PROBE_NAME_RE", "(?!)"))
 want_repo = " ".join(os.environ.get("PROBE_REPO_NWO", "").split()).lower()
 # The shape was judged by `roborev_json_list_field` before this ran, so this leg PARSES and never
 # DECIDES. A parse failure here would mean the payload changed between the two reads, which cannot
@@ -1534,7 +1562,7 @@ def ref_repo(ref):
     # produced a joined identity that compares unequal to everything, and an identity that matches
     # nothing renders as a CONFIDENT cross-repository DECLARED SKIP. An identity that fails this is
     # REPO-UNVERIFIED — "cannot tell which repository" — and never CROSS-REPO.
-    if not NAME_RE.match(name) or not NAME_RE.match(login):
+    if not NAME_RE.fullmatch(name) or not NAME_RE.fullmatch(login):
         return None
     return ("%s/%s" % (login, name)).lower()
 
@@ -1684,11 +1712,22 @@ for ref in refs:
   if [ "$skipped_cross" -gt 0 ]; then
     cross_clause=" — $skipped_cross cross-repository closing reference(s) declared and deliberately NOT probed (a reference's number is scoped to ITS repository, so following one here could only name the wrong thread)"
   fi
+  # THE DECLARED LIMIT OF A "READ" THREAD, carried by every rendering that claims one (#3759 round 4).
+  # A thread counts as read when its payload was a comments LIST the scanner accepted; a malformed
+  # ENTRY inside an otherwise well-formed list is skipped by the scanner and is NOT distinguished
+  # here. Declared rather than closed: closing it would mean re-implementing the scanner parse in the
+  # caller, which is the second-implementation hazard the whole design rejects. Not appended to the
+  # MISPLACED rendering, where a marker WAS found and the limit cannot affect the claim, nor to the
+  # no-subject rendering, which claims no read at all.
+  read_limit=""
+  if [ -n "$read_list" ]; then
+    read_limit=" (NON-EXHAUSTIVE: a thread counts as read when its payload was a comments LIST the scanner accepted; a malformed ENTRY inside an otherwise well-formed list is skipped by the scanner and is not distinguished here)"
+  fi
   suffix="$bound_clause$cross_clause"
   # ===== A PARTIAL READ IS `could-not-check` NAMING BOTH HALVES, NEVER `checked` =====
   if [ -n "$unread_list" ]; then
     ROBOREV_PROBE_OUTCOME="could-not-check"
-    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: read with no matching marker: ${read_list:-none}; NOT read: $unread_list$suffix"
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: read with no matching marker: ${read_list:-none}; NOT read: $unread_list$suffix$read_limit"
     return 0
   fi
   if [ -z "$read_list" ] && [ -z "$bound_clause" ]; then
@@ -1702,13 +1741,13 @@ for ref in refs:
   fi
   ROBOREV_PROBE_OUTCOME="checked"
   if [ -n "$suffix" ]; then
-    ROBOREV_PROBE_DETAIL="linked issues ${read_list:-none} checked$suffix: no matching marker"
+    ROBOREV_PROBE_DETAIL="linked issues ${read_list:-none} checked$suffix: no matching marker$read_limit"
     return 0
   fi
   if [ "${#read_ok[@]}" -eq 1 ]; then
-    ROBOREV_PROBE_DETAIL="linked issue $read_list checked: no matching marker there either"
+    ROBOREV_PROBE_DETAIL="linked issue $read_list checked: no matching marker there either$read_limit"
   else
-    ROBOREV_PROBE_DETAIL="linked issues $read_list checked: no matching marker there either"
+    ROBOREV_PROBE_DETAIL="linked issues $read_list checked: no matching marker there either$read_limit"
   fi
   return 0
 }
@@ -1794,7 +1833,14 @@ roborev_absence_waiver_lookup() {
     ROBOREV_WAIVER_DETAIL="'gh pr view --json comments' failed (no PR for this branch, no auth, or an API error), so no waiver could be read"
     return 0
   fi
-  [ -n "$json" ] || return 0
+  # ===== AN EMPTY PAYLOAD IS AN UNREADABLE PAYLOAD, NOT AN ABSENT AUTHORIZATION (#3759 round 4) =====
+  # There used to be a `[ -n "$json" ] || return 0` here, which BYPASSED the validated read on the one
+  # input shape most likely to arrive from a healthy-looking `gh`: exit 0 with nothing on stdout. The
+  # early return left the state at its `none` default, so the block reported "there is no
+  # authorization" over comments NOBODY READ — the same false claim as every other unvalidated payload,
+  # on the GRANTING path, and (like the missing shape check this helper replaced) it predates the
+  # misplacement probe. Empty output now falls into `roborev_json_list_field` with every other shape
+  # and comes back `unavailable`, which is the value that says the oracle could not be consulted.
   # ===== THE ONE VALIDATED READ (#3759 round 3) =====
   # The scanner owns the WHOLE authorization decision — shape, scope, reason and authorization — so
   # this shell never associates an author with a body. Its output is `key=value` lines with
@@ -2073,7 +2119,14 @@ roborev_findings_deferral_lookup() {
     ROBOREV_DEFERRAL_DETAIL="'gh pr view --json comments' failed (no PR for this branch, no auth, or an API error), so no deferral could be read"
     return 0
   fi
-  [ -n "$json" ] || return 0
+  # ===== AN EMPTY PAYLOAD IS AN UNREADABLE PAYLOAD, NOT AN ABSENT AUTHORIZATION (#3759 round 4) =====
+  # There used to be a `[ -n "$json" ] || return 0` here, which BYPASSED the validated read on the one
+  # input shape most likely to arrive from a healthy-looking `gh`: exit 0 with nothing on stdout. The
+  # early return left the state at its `none` default, so the block reported "there is no
+  # authorization" over comments NOBODY READ — the same false claim as every other unvalidated payload,
+  # on the GRANTING path, and (like the missing shape check this helper replaced) it predates the
+  # misplacement probe. Empty output now falls into `roborev_json_list_field` with every other shape
+  # and comes back `unavailable`, which is the value that says the oracle could not be consulted.
   # THE ONE VALIDATED READ (#3759 round 3) — see the waiver's copy of this comment for what routing it
   # through the helper repairs on the GRANTING path, which is a pre-existing defect and not the
   # probe's. A malformed payload is `unavailable`, and the probe therefore never runs over it.

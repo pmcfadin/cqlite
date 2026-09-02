@@ -562,6 +562,12 @@ json.dump({"comments": records.get(want, [])}, sys.stdout)
   printf 'GraphQL: Could not resolve to an issue or pull request with the number of %s. (repository.issue)\n' "${3:-}" >&2
   exit 1
 fi
+# EXIT 0 WITH NOTHING ON STDOUT — its own knob, because it cannot be spelled with any other (#3759
+# round 4). It is a plausible real-world `gh` result and it is the shape that used to BYPASS the
+# validated read entirely, so it has to be expressible or the case measures nothing.
+if [ -n "${STUB_GH_PR_EMPTY_STDOUT:-}" ]; then
+  exit 0
+fi
 if [ -n "${STUB_GH_COMMENTS_JSON:-}" ]; then
   printf '%s\n' "$STUB_GH_COMMENTS_JSON"
   exit 0
@@ -1310,6 +1316,7 @@ export STUB_RECORD_OUTPUT_FIELD=''
 export STUB_GH_COMMENTS=''
 export STUB_GH_COMMENTS_JSON=''
 export STUB_GH_COMMENTS_FILE=''
+export STUB_GH_PR_EMPTY_STDOUT=''
 export STUB_GH_RC=0
 # #3626: the FINDINGS-DEFERRAL knobs. STUB_GH_ISSUES is the set of issue numbers that EXIST, so
 # retrievability is a fixture decision and not a stub default; STUB_GH_ISSUE_ERR fixtures a
@@ -1364,6 +1371,7 @@ reset_stub() {
   STUB_GH_COMMENTS=''
   STUB_GH_COMMENTS_JSON=''
   STUB_GH_COMMENTS_FILE=''
+  STUB_GH_PR_EMPTY_STDOUT=''
   STUB_GH_RC=0
   STUB_GH_ISSUES=''
   STUB_GH_ISSUES_CLOSED=''
@@ -6023,7 +6031,7 @@ for _mp3 in \
   assert_verdict "case (mp3/$_mp3_kind)" FAIL 1
   assert_no_marker_form "case (mp3/$_mp3_kind)"
   assert_says "case (mp3/$_mp3_kind) the state stays NONE with the probe's checked declaration" \
-    '^waiver: NONE \(no waiver comment for this review:.*; linked issue #3544 checked: no matching marker there either\)$'
+    '^waiver: NONE \(no waiver comment for this review:.*; linked issue #3544 checked: no matching marker there either \(NON-EXHAUSTIVE: a thread counts as read when its payload was a comments LIST the scanner accepted; a malformed ENTRY inside an otherwise well-formed list is skipped by the scanner and is not distinguished here\)\)$'
   assert_lacks "case (mp3/$_mp3_kind) MISPLACED is not reported for a marker that would not have been accepted" \
     '^waiver: MISPLACED'
   assert_lacks "case (mp3/$_mp3_kind) and nothing is waived" '^prompt-content: WAIVED'
@@ -6475,6 +6483,106 @@ MP16SCAN
   assert_lacks "case (mp16/${_mp16_state%%:*}) nor does an unrecognised state escalate" '^waiver: MISPLACED'
   reset_stub
 done
+
+printf '== (mp17) #3759 r4: `gh` exiting 0 with EMPTY output is UNAVAILABLE, never NONE ==\n'
+# ROUND-4 FINDING 1, SECOND HALF, AND IT IS ON THE GRANTING PATH. Both PR-side callers had an
+# `[ -n "$json" ] || return 0` that BYPASSED the validated read on the one input shape a healthy-
+# looking `gh` most plausibly produces: exit 0, nothing on stdout. The early return left the state at
+# its `none` default, so the block asserted "there is no authorization" over comments NOBODY READ.
+# Like the missing shape check before it, this predates the misplacement probe.
+# THE FIXTURE MAKES THE FALSE CLAIM CONCRETE: a would-have-granted marker exists on the linked issue,
+# so a `none` here would additionally have run the probe and reported MISPLACED off an unread PR.
+reset_stub
+mp_waiver_fixture
+STUB_GH_PR_EMPTY_STDOUT=1
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp17)' FAIL 1
+assert_no_marker_form 'case (mp17)'
+assert_says 'case (mp17) an empty payload is the state that says the oracle could not be consulted' \
+  '^waiver: UNAVAILABLE \(the payload was not a JSON object carrying a comments LIST \(it was empty'
+assert_lacks 'case (mp17) it NEVER asserts that no authorization exists over comments nobody read' '^waiver: NONE'
+assert_lacks 'case (mp17) and nothing is waived' '^prompt-content: WAIVED'
+# AND THE PROBE IS NOT RUN AT ALL: it runs only from `none`, so an unreadable PR payload can no longer
+# produce a MISPLACED derived from a pull request that was never read.
+assert_lacks 'case (mp17) an unread PR payload can never yield a MISPLACED' '^waiver: MISPLACED'
+if grep -qF 'closingIssuesReferences' "$INVOKED"; then
+  bad 'case (mp17): the probe RAN over a PR payload that was never read'
+else
+  ok 'case (mp17): no probe was performed (checked against the stub invocation record)'
+fi
+reset_stub
+
+printf '== (mp17b) #3759 r4: the same on the DEFERRAL side ==\n'
+# The deferral carried the identical bypass, and a residual corrected in one of two places reads as
+# correct in the other.
+reset_stub
+df_grant_fixture
+STUB_GH_PR_EMPTY_STDOUT=1
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (mp17b)' FAIL 1
+assert_no_marker_form 'case (mp17b)'
+assert_says 'case (mp17b) an empty payload is UNAVAILABLE on the deferral side too' \
+  '^deferral: UNAVAILABLE \(the payload was not a JSON object carrying a comments LIST \(it was empty'
+assert_lacks 'case (mp17b) never NONE' '^deferral: NONE'
+assert_says 'case (mp17b) and the findings stand exactly as measured' '^findings: PRESENT \(2\)$'
+reset_stub
+
+printf '== (mp18) #3759 r4: a NEWLINE-BEARING identity is REPO-UNVERIFIED, not CROSS-REPO ==\n'
+# ROUND-4 FINDING 2. A trailing-dollar anchor in Python matches BEFORE a final newline, so a login or
+# repository name ending in a newline VALIDATED — and the newline then survived into the joined
+# identity, which compares unequal to everything. A SAME-repository reference therefore came out as a
+# CONFIDENT cross-repository DECLARED SKIP: the exact false confidence the identity validation exists
+# to remove, produced by the validation itself. `fullmatch` has no such exception.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_JSON='{"closingIssuesReferences":[{"number":3544,"repository":{"name":"cqlite\n","owner":{"login":"pmcfadin"}}}]}'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\n$mp_waive_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (mp18)' FAIL 1
+assert_no_marker_form 'case (mp18)'
+assert_says 'case (mp18) an identity that fails the grammar is a could-not-check' \
+  'NOT read: an entry whose repository could not be established'
+assert_lacks 'case (mp18) and is NEVER a confident cross-repository declared skip' \
+  'cross-repository closing reference'
+assert_lacks 'case (mp18) nor is it probed' '^waiver: MISPLACED'
+reset_stub
+
+printf '== (mp19) #3759 r4: a READ thread DECLARES what "read" does not establish ==\n'
+# R5 APPLIED TO THIS FEATURE'S OWN LIMIT. The validated read establishes the CONTAINER (a top-level
+# object whose field is a list), the exit status and the closed-grammar state — it does NOT
+# distinguish a malformed ELEMENT inside an otherwise well-formed list, because the scanner skips such
+# an entry and the scanner is reused UNMODIFIED by design. Re-validating each element in the caller
+# would be a SECOND implementation of the marker path, whose correctness is knowable only by
+# differential testing against the first. So the limit is DECLARED rather than closed — and it is
+# declared IN THE RENDERING, where the claim is made, not only in a comment nobody opens.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544'
+STUB_GH_ISSUE_COMMENTS_JSON='{"comments":[{"author":"not-an-object"},{"body":42},"a bare string"]}'
+run_wrapper "$w_work"
+assert_verdict 'case (mp19)' FAIL 1
+assert_no_marker_form 'case (mp19)'
+# The container IS well-formed, so the thread genuinely counts as read — and the value says exactly
+# what that does and does not mean rather than implying an element-level check nobody performed.
+assert_says 'case (mp19) the thread is reported as read' 'linked issue #3544 checked: no matching marker there either'
+assert_says 'case (mp19) and the rendering declares its own non-exhaustiveness' \
+  'NON-EXHAUSTIVE: a thread counts as read when its payload was a comments LIST the scanner accepted'
+assert_says 'case (mp19) naming precisely what is not distinguished' \
+  'a malformed ENTRY inside an otherwise well-formed list is skipped by the scanner and is not distinguished here'
+reset_stub
+
+printf '== (mp19b) #3759 r4: the declared limit is absent where no read is claimed ==\n'
+# A limit printed where nothing was read would be noise, and worse, would imply a read. The no-subject
+# rendering claims no read at all, so it carries no such clause.
+reset_stub
+mp_waiver_fixture
+run_wrapper "$w_work"
+assert_says 'case (mp19b) no linked issue means no read is claimed' \
+  'no linked issue is declared on this PR, so no linked-issue thread was checked'
+assert_lacks 'case (mp19b) so the read limit is not declared here' 'NON-EXHAUSTIVE: a thread counts as read'
+reset_stub
 
 printf '== (mp12) #3759 MUTANT: probing on EVERY state reds — the escalation is only from none ==\n'
 # A CASE THAT PASSES AGAINST BOTH THE REAL CODE AND ITS NAIVE FORM MEASURES NOTHING. The naive form

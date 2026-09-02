@@ -330,6 +330,10 @@ SHALL say so.
 - **WHEN** a reference's repository object carries an owner login or a name that does not satisfy the shared owner/name grammar
 - **THEN** the reference is could-not-check, not a declared cross-repository skip, and the grammar it was judged against is the same one, defined once, that the current-repository identity is judged against
 
+#### Scenario: A newline-bearing identity fails the grammar
+- **WHEN** a reference's repository name or owner login ends with a newline
+- **THEN** it fails the shared grammar and is could-not-check — never a cross-repository declared skip, which is what an anchor admitting a trailing newline produced, since the surviving newline made a same-repository reference compare unequal to everything
+
 #### Scenario: A reference whose repository cannot be established
 - **WHEN** a relation entry carries a usable number but no readable repository
 - **THEN** the outcome is a could-not-check naming an unestablished repository, it is not counted as a cross-repository skip, and it is not probed
@@ -404,9 +408,29 @@ No caller on this path SHALL read a payload, invoke the scanner, or extract the 
 other way, and a **structural** test SHALL assert that — because what four rounds of site fixes failed
 to achieve is making the **next** input structurally unable to join the unvalidated set.
 
+**AND WHAT THE VALIDATED READ ESTABLISHES SHALL BE STATED WITH ITS LIMIT, NOT IMPLIED.** An `ok`
+establishes the **container** — a top-level object whose named field is a list — the **exit status**,
+and the **closed-grammar state**. It does **NOT** distinguish a malformed **element** inside an
+otherwise well-formed list: a comment entry that is not an object, or whose `body` is not a string, is
+**skipped by the scanner**, so a list of such entries reads as a thread carrying no authorization.
+
+**That limit SHALL be DECLARED and SHALL NOT be closed here.** The scanner is reused **unmodified** by
+design and its element-skipping is correct for its own contract; a caller that re-validated every
+element and its field types would be **re-implementing the scanner parse** — a second implementation
+of the marker path, whose correctness is knowable only by differential testing against the first, and
+the precise hazard this design rejected at the outset. Closing it would trade a bounded, stated
+limitation for an unbounded one. The limit SHALL therefore be stated **in the rendering of every
+thread reported as read**, not only in a comment: an affirmative declared limit beats a silent one,
+which is this requirement's whole point. It SHALL NOT be attached to a rendering that claims no read.
+The harm ceiling is a diagnostic one step less precise than it sounds; it can never be a wrongly
+granted authorization, because nothing on this path can grant.
+
 **THE TWO GRANTING LOOKUPS SHALL USE THE SAME READ.** This is not confined to the probe: the
 pull-request payload that decides an **authorization** SHALL be validated by the same helper. A
-malformed pull-request payload SHALL make the lookup state **`unavailable`** — the value that says the
+**An EMPTY payload — `gh` exiting zero with nothing on standard output — is an unreadable payload and
+SHALL take the same path as every other**: no caller SHALL short-circuit on it, because that reports
+"there is no authorization" over comments nobody read. A
+malformed or empty pull-request payload SHALL make the lookup state **`unavailable`** — the value that says the
 oracle could not be consulted — and, because the probe runs only from `none`, SHALL therefore not be
 probed at all. *(Recorded honestly: the missing validation on that granting read predates this change
 — on `main` a malformed payload already yields `none` rather than `unavailable`. This change did not
@@ -457,6 +481,18 @@ means before it can be printed.
 #### Scenario: Every read on the path goes through the one validated helper
 - **WHEN** `scripts/tests/test_roborev_review_guard.sh` runs
 - **THEN** it asserts structurally that every scanner invocation and every `state=` extraction lies inside the validated-read helper, that every payload-shape predicate lies inside the one shape validator, that both granting lookups and the probe route through them, and it fails if any call site reads a payload or the scanner directly
+
+#### Scenario: A read thread declares what "read" does not establish
+- **WHEN** a probed thread's payload is a well-formed comments **list** whose **elements** are malformed — not objects, or with non-string bodies — so the scanner skips them and reports no authorization
+- **THEN** the thread is reported as read, and the value declares its own non-exhaustiveness: that a thread counts as read when its payload was a comments list the scanner accepted, and that a malformed entry inside an otherwise well-formed list is skipped by the scanner and is not distinguished here
+
+#### Scenario: The declared limit is absent where no read is claimed
+- **WHEN** a rendering claims no thread was read at all
+- **THEN** it carries no read limit, so the declaration cannot itself imply a read
+
+#### Scenario: An empty payload from a successful gh is unavailable, not none
+- **WHEN** `gh` exits zero with nothing on standard output, for either kind
+- **THEN** the lookup state is `unavailable` naming the empty payload, never `none`, and no linked-issue probe is performed
 
 #### Scenario: A malformed pull-request payload does not grant and is not probed
 - **WHEN** the pull-request comments payload parses but is not an object carrying a `comments` list
