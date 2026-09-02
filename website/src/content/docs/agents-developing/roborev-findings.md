@@ -366,6 +366,14 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    `mergeable: MERGEABLE` on a marker-bearing merge commit). Run on both `job=265` lanes it gave the right
    answer for a reason that did not hold.
 
+   **What the `git_ref` check settles is scoped to one daemon; the rest is not claimed.** It settles
+   that the id names the review you think it does *on this daemon*. It does **not** settle the cross-box
+   case: two daemons can hold the same id for the **same `git_ref` range**, so a waiver authorized
+   against machine A's review can be accepted by `--recheck-job` against machine B's different review of
+   that range — and **no local lookup can detect it**, because `roborev list` only ever sees the local
+   daemon while the marker travels through GitHub. Same-range cross-daemon collisions therefore remain
+   **unprotected**: declared here, not closed here.
+
    **Whether the block should name the issuing daemon — and the cross-box question that comes with it,
    since the marker travels through GitHub while `--recheck-job` reads the *local* daemon — is tracked as
    [#3825](https://github.com/pmcfadin/cqlite/issues/3825), together with the marker-grammar question it

@@ -5935,6 +5935,22 @@ assert_lacks 'case (jd1) --help no longer claims the list filters by the shell b
 assert_says 'case (jd1) --help refuses the row-count probe as a collision check' \
   'A LOCAL ROW COUNT IS NOT EVIDENCE OF UNIQUENESS'
 assert_says 'case (jd1) --help says why the probe cannot work' 'only ever sees the LOCAL daemon'
+# AND THE PROCEDURE MUST DECLARE ITS OWN LIMIT. Checking `job` plus `git_ref` settles that the id
+# names the review you think it does ON THIS DAEMON — it does NOT bind a waiver to one BOX: two
+# daemons can hold the same id for the SAME range, so an authorization for machine A's review is
+# accepted by `--recheck-job` against machine B's different review, undetectably from here. This
+# declaration was DELETED once, together with the (#3825) key it had been written beside, and the
+# residual was re-reported in one round — presenting the git_ref check as settling the question
+# with no statement of its limit IS the defect. It needs no key to be true, so it is pinned here.
+assert_says 'case (jd1) --help declares what the git_ref check does NOT claim' \
+  'WHAT THE git_ref CHECK SETTLES, AND WHAT IS NOT CLAIMED'
+assert_says 'case (jd1) --help scopes what it settles to one daemon' \
+  'names the review you think it does ON THIS DAEMON'
+assert_says 'case (jd1) --help says two daemons can share an id for the same range' \
+  'the SAME id for the SAME git_ref range'
+assert_says 'case (jd1) --help says no local lookup can detect it' 'no local lookup can detect it'
+assert_says 'case (jd1) --help declares the residual not closed here, and names #3825' \
+  'NOT CLAIMED and NOT closed here: closing it is #3825'
 # THE PRESCRIBED LOOKUP MUST REACH AN OLDER RECORD. `roborev list` returns a BOUNDED WINDOW —
 # `--limit` defaults to 50 (measured: `roborev list --help`, v0.61.2) — so a limitless documented
 # command answers NOTHING for a job outside it, an absence indistinguishable from "no such job",

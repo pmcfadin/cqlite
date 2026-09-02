@@ -528,6 +528,16 @@ to separate, the same class as reading the gate's 'RESULT: INCOMPLETE' launch se
 a verdict, or locating a gate run directory with 'ls -t'. Run on both of the 'job=265'
 lanes, it gave the right answer for a reason that did not hold. Use git_ref.
 
+WHAT THE git_ref CHECK SETTLES, AND WHAT IS NOT CLAIMED (#3654). It settles that the id
+names the review you think it does ON THIS DAEMON. It does NOT settle the cross-box
+question: two daemons can hold the SAME id for the SAME git_ref range, so a waiver
+authorized against machine A's review can be accepted by '--recheck-job' against machine
+B's DIFFERENT review of that range — and no local lookup can detect it, because
+'roborev list' only ever sees the LOCAL daemon. The marker travels through GITHUB while
+'--recheck-job' reads the local daemon, so nothing here binds an authorization to one
+BOX. That residual is NOT CLAIMED and NOT closed here: closing it is #3825, which carries
+the 'job-machine:' key and the marker-grammar question that comes with it.
+
 THREE THINGS STOP THE DOCUMENTATION BECOMING THE CREDENTIAL. (1) The marker must BE the
 line: an indented, '>'-quoted, bulleted or mid-sentence copy does not match, so pasting
 a block or quoting an example grants nothing. (2) A placeholder reason is refused — an

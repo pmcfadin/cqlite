@@ -1441,9 +1441,15 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   output is IDENTICAL under the two states it claims to separate (the `RESULT: INCOMPLETE` launch
   sentinel read as a verdict; a gate run dir found by `ls -t`; `mergeable: MERGEABLE` on a
   marker-bearing merge commit) — and it gave both lanes the right answer for a reason that did not
-  hold. Use `git_ref`. **Whether the block should NAME the issuing daemon — and the cross-box
-  question that comes with it, since the marker travels through GITHUB while `--recheck-job` reads
-  the LOCAL daemon — is tracked as #3825, together with the marker-grammar question it raises.**
+  hold. Use `git_ref`. **AND WHAT THE `git_ref` CHECK SETTLES IS SCOPED TO ONE DAEMON — the rest is
+  NOT CLAIMED.** It settles that the id names the review you think it does *on this daemon*. It does
+  NOT settle the cross-box case: two daemons can hold the same id for the SAME `git_ref` range, so a
+  waiver authorized against machine A's review can be accepted by `--recheck-job` against machine B's
+  DIFFERENT review of that range, and **no local lookup can detect it** — `roborev list` only ever
+  sees the local daemon, while the marker travels through GITHUB. So same-range cross-daemon
+  collisions remain UNPROTECTED; that is declared, not closed. **Whether the block should NAME the
+  issuing daemon — and the cross-box question that comes with it — is tracked as #3825, together with
+  the marker-grammar question it raises.**
   **THE ABSENCE WAIVER — the break-glass, its four constraints, and why the documentation is not the
   credential (#3312 job 23).** The **OWNER or the coordination LEAD** may excuse an absence FAIL with a
   **dedicated, column-zero line** of a PR comment:
