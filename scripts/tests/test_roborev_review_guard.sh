@@ -6136,8 +6136,8 @@ STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\nnothing\n\002#3626\n\001pmcfadi
 run_wrapper "$w_work"
 assert_verdict 'case (mp8)' FAIL 1
 assert_no_marker_form 'case (mp8)'
-assert_says 'case (mp8) the rendering declares declared / probed / bound' \
-  'linked issues #3544,#3626,#3312 checked — 3 of 4 declared, probe bounded at 3: no matching marker'
+assert_says 'case (mp8) the rendering declares declared / probed / bound / remainder' \
+  'linked issues #3544,#3626,#3312 checked — 3 of 4 declared examined, probe bounded at 3, 1 never looked at: no matching marker'
 assert_lacks 'case (mp8) the unprobed remainder is not silently claimed as checked' \
   'checked: no matching marker there either'
 if grep -qE 'gh issue view 3710 --json comments' "$INVOKED"; then
@@ -6145,6 +6145,27 @@ if grep -qE 'gh issue view 3710 --json comments' "$INVOKED"; then
 else
   ok 'case (mp8): the bound was honoured (the fourth declared thread was not read)'
 fi
+reset_stub
+
+printf '== (mp8b) #3759: UNREADABLE inside the bound AND over-bound — BOTH gaps are declared ==\n'
+# (#3759 round 1, finding 3.) The case neither (mp7) nor (mp8) reaches: a read FAILS inside the
+# bounded prefix while declared references remain unexamined. The could-not-check rendering used to
+# return without ever saying that part of the declared set was never looked at, so a diagnostic that
+# had examined 3 of 5 and failed on one of them read exactly like one that had examined everything.
+reset_stub
+mp_waiver_fixture
+STUB_GH_LINKED_ISSUES='3544 3626 3312 3710 3572'
+STUB_GH_ISSUE_COMMENTS="\002#3544\n\001pmcfadin\nnothing\n\002#3312\n\001pmcfadin\nnothing\n"
+STUB_GH_ISSUE_COMMENTS_FAIL='3626'
+run_wrapper "$w_work"
+assert_verdict 'case (mp8b)' FAIL 1
+assert_no_marker_form 'case (mp8b)'
+assert_says 'case (mp8b) the unreadable half is named' \
+  'the linked-issue thread could NOT be checked: read with no matching marker: #3544,#3312; NOT read: #3626 \('
+assert_says 'case (mp8b) AND the unexamined remainder is named in the SAME rendering' \
+  '3 of 5 declared examined, probe bounded at 3, 2 never looked at'
+assert_lacks 'case (mp8b) a could-not-check with an unexamined remainder never reads as checked' \
+  'checked: no matching marker there either'
 reset_stub
 
 printf '== (mp9) #3759: several linked issues, the FIRST MATCH is reported, in GitHub order ==\n'

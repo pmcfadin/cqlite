@@ -314,14 +314,21 @@ coverage silently is indistinguishable from one that covers it* — the reason t
 
 1. **checked** — *"linked issue #N checked: no matching marker there either"*. Emitted **only when
    every probed thread was read successfully**.
-2. **partially checked** — *"linked issues #A,#B checked — N of M declared, probe bounded at N: no
-   matching marker"*. The unprobed remainder is named, never implied.
+2. **partially checked** — *"linked issues #A,#B checked — N of M declared examined, probe bounded at
+   N, R never looked at"*. The unprobed remainder is named, never implied.
 3. **no subject** — *"no linked issue is declared on this PR, so no linked-issue thread was checked"*.
 4. **could not check** — *"the linked-issue thread could NOT be checked: `<cause>`"*, naming the cause.
 
 A **mixed outcome** — one thread read, another unavailable — SHALL take rendering 4 and name **both**
 halves; it SHALL NOT take rendering 1. *A partial scan reported as a complete one is worse than an
 admitted failure, because it is the version nobody re-checks.*
+
+**THE UNEXAMINED REMAINDER SHALL BE NAMED WHEREVER IT EXISTS, NOT ONLY ON RENDERING 1's SIBLING.**
+The bound clause SHALL be appended to **whichever** rendering fires, including rendering 4. A read
+that fails inside the bounded prefix while declared references remain unexamined SHALL report **both**
+gaps in one value — what could not be read, **and** how many declared references were never looked at.
+Reporting only the first is the same defect as rendering 4's own reason for existing: a value claiming
+more completeness than the probe achieved.
 
 **AN UNREADABLE RELATION PAYLOAD IS NOT AN EMPTY RELATION.** Rendering 3 — *"no linked issue is
 declared on this PR"* — is an **affirmative claim about the pull request**, and it SHALL be reachable
@@ -357,6 +364,10 @@ means before it can be printed.
 #### Scenario: One thread read, another unavailable
 - **WHEN** two linked issues are declared, the first is read with no match, and the second's comments cannot be retrieved
 - **THEN** the value takes the *could not check* rendering naming both what was read and what was not, and never the *checked* rendering
+
+#### Scenario: A thread is unreadable inside the bound while declared references remain unexamined
+- **WHEN** the declared set exceeds the bound and one thread inside the probed prefix cannot be read
+- **THEN** the *could not check* rendering names **both** the unreadable thread and how many declared references were never examined, in one value
 
 #### Scenario: More linked issues than the bound
 - **WHEN** the declared linked-issue set exceeds the probe bound and no match is found in the probed prefix

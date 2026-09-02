@@ -1242,7 +1242,7 @@ roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-fi
   local kind="$1" base="$2" head="$3" job="$4" observed="${5:-}"
   local rel_errfile rel_json rel_errtext numbers declared probed=0
   local issue read_ok=() unread=() comments result state scan_rc
-  local issue_errfile issue_errtext read_list unread_list
+  local issue_errfile issue_errtext read_list unread_list bound_clause
   ROBOREV_PROBE_OUTCOME="could-not-check"
   # THE STRUCTURED VALUE, KEPT BESIDE THE RENDERED ONE ON PURPOSE. `_DETAIL` is prose for a human;
   # `_ISSUE` is the number as data, so a later consumer (or a test) never has to parse the number back
@@ -1420,18 +1420,28 @@ for ref in refs:
   for issue in ${read_ok[@]+"${read_ok[@]}"}; do read_list="${read_list:+$read_list,}$issue"; done
   unread_list=""
   for issue in ${unread[@]+"${unread[@]}"}; do unread_list="${unread_list:+$unread_list; }$issue"; done
+  # ===== THE BOUND CLAUSE IS COMPUTED ONCE AND APPENDED TO WHICHEVER RENDERING FIRES =====
+  # (#3759 round 1, finding 3.) The remainder used to be named on the `checked` rendering ALONE, so a
+  # read that FAILED inside the bounded prefix returned through the could-not-check branch and the
+  # diagnostic never said that part of the declared set had also never been looked at. That is the
+  # same family as finding 2 one step along: a rendering claiming more completeness than the probe
+  # achieved. THE UNPROBED REMAINDER IS NAMED WHEREVER IT EXISTS, never implied — the same reason the
+  # gate prints `0 RECOGNISED` rather than a bare `0`, and the reason a partial read may not take the
+  # `checked` rendering. `probed` counts references EXAMINED (a read attempt, a declared skip or a
+  # malformed entry all consume one), so `declared - probed` is exactly what the bound cut off.
+  bound_clause=""
+  if [ "$probed" -lt "$declared" ]; then
+    bound_clause=" — $probed of $declared declared examined, probe bounded at $ROBOREV_LINKED_ISSUE_PROBE_MAX, $(( declared - probed )) never looked at"
+  fi
   # ===== A PARTIAL READ IS `could-not-check` NAMING BOTH HALVES, NEVER `checked` =====
   if [ -n "$unread_list" ]; then
     ROBOREV_PROBE_OUTCOME="could-not-check"
-    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: read with no matching marker: ${read_list:-none}; NOT read: $unread_list"
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: read with no matching marker: ${read_list:-none}; NOT read: $unread_list$bound_clause"
     return 0
   fi
-  if [ "$probed" -lt "$declared" ]; then
-    # THE UNPROBED REMAINDER IS NAMED, NEVER IMPLIED — the same reason the gate prints
-    # `0 RECOGNISED` rather than a bare `0`. A lane that omits coverage silently is
-    # indistinguishable from one that covers it.
+  if [ -n "$bound_clause" ]; then
     ROBOREV_PROBE_OUTCOME="checked"
-    ROBOREV_PROBE_DETAIL="linked issues $read_list checked — $probed of $declared declared, probe bounded at $ROBOREV_LINKED_ISSUE_PROBE_MAX: no matching marker"
+    ROBOREV_PROBE_DETAIL="linked issues $read_list checked$bound_clause: no matching marker"
     return 0
   fi
   ROBOREV_PROBE_OUTCOME="checked"
