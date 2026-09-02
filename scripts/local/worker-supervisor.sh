@@ -206,14 +206,24 @@ UNVERIFIED_MAX="${UNVERIFIED_MAX:-2}"
 #   a store known to be damaged.
 # OBJ_SWEEP_TIMEOUT_SECS — passed through as the sweep's own `--timeout`, and it is the
 #   bound on EACH of the sweep's walks (a non-clean first walk is re-run once as a
-#   discriminator), so the worst-case wall time is twice it. 600s is ~7.5x the observed
-#   cold worst case above; the bound exists to stop a HANG, not to police duration, and a
-#   bound that expires on a healthy-but-busy box yields UNMEASURED noise nobody acts on.
+#   discriminator), so the worst-case wall time is TWICE it. The bound exists to stop a
+#   HANG, not to police duration, and a bound that expires on a healthy-but-busy box
+#   yields UNMEASURED noise nobody acts on.
+#   THE SUPERVISOR'S DEFAULT IS HALF THE SWEEP SCRIPT'S OWN (300 vs 600), AND THAT IS
+#   THIS CALLER'S LATENCY BUDGET RATHER THAN A DIFFERENT VIEW OF THE STORE (#3749 review
+#   round 3, item 3). The sweep runs inside a CHILD process, so nothing here can check
+#   the stop file or the wall-clock budget BETWEEN its two walks; the only lever this
+#   caller has is how long those two walks can take. At 300 the worst case is 600s — one
+#   walk at the script's own bound — instead of the 1200s that raising the per-walk bound
+#   to 600 in round 2 silently bought. 300s is still ~3.75x the observed COLD worst case
+#   (47-80s on this fleet's 366M store) and ~12x the warm one, so it costs no realistic
+#   sweep its verdict. The other caller, scripts/bootstrap-agent-machine.sh, keeps 600:
+#   machine onboarding is a one-shot step where nobody is waiting on a stop file.
 #   STRICTLY POSITIVE: the sweep rejects 0 as a usage error, which would turn the probe
 #   into a permanent UNMEASURED — a silently self-disabling bound, the shape
 #   validate_numeric_knobs exists for.
 OBJ_SWEEP_INTERVAL_HOURS="${OBJ_SWEEP_INTERVAL_HOURS:-6}"
-OBJ_SWEEP_TIMEOUT_SECS="${OBJ_SWEEP_TIMEOUT_SECS:-600}"
+OBJ_SWEEP_TIMEOUT_SECS="${OBJ_SWEEP_TIMEOUT_SECS:-300}"
 # Empty => derived per SHARED STORE in obj_sweep_stamp_path (below), so lanes sharing one
 # object store share one throttle. It also names the CORRUPT latch (`<stamp>.CORRUPT`),
 # so pinning it relocates both files together.
@@ -3632,16 +3642,43 @@ LAST_HOLD_REASON=""
 # leftover families are bounded SEPARATELY (roborev 1839): a non-self-clearing worker
 # orphan trips the TIGHT LEFTOVER_HOLD_MAX; a self-clearing build/gate process is
 # allowed the LOOSE BUILD_HOLD_MAX so a legitimate concurrent full gate is waited out.
+# preflight_stop_or_budget — the TWO clean-exit conditions, in one place so they can be
+# asked wherever this file is about to commit to something long and uninterruptible.
+# Never returns when either fires (finalize_exit ends the process).
+preflight_stop_or_budget() {
+  [[ -f "$STOP_FILE" ]] && finalize_exit "stop-file" 0
+  [[ $(($(date +%s) - START_TS)) -ge "$MAX_HOURS_SECS" ]] && finalize_exit "budget-wallclock" 0
+  return 0
+}
+
 preflight_wait() {
   local worker_holds=0 build_holds=0
+  # ASKED IMMEDIATELY BEFORE THE SWEEP (#3749 review round 3, item 3). The sweep is the
+  # longest uninterruptible step in an iteration, and it used to run BEFORE the hold
+  # loop's stop-file and wall-clock checks — so a stop requested just after the outer
+  # loop's own check was ignored for the whole sweep. An operator who touches the stop
+  # file is entitled to have it read before this process spends minutes on hygiene.
+  preflight_stop_or_budget
   # The throttled shared-object-store sweep (#3749) runs ONCE per iteration, HERE, before
   # the hold loop: it is per-iteration box hygiene, not a hold reason, and it must not be
   # re-run on every hold repoll. `CORRUPT` never returns — it stops the loop loudly from
   # inside (see object_store_sweep).
+  #
+  # THE IN-FLIGHT SWEEP IS STILL NOT INTERRUPTIBLE, AND THAT IS A DELIBERATE LIMIT, NOT
+  # AN OVERSIGHT. The sweep's two fsck walks happen inside a CHILD PROCESS
+  # (`bash scripts/check-object-store-integrity.sh`), so "check the stop file between the
+  # passes" is not something this function can do: there is no point between them that
+  # executes here. Making it interruptible means running the child in its own process
+  # group, polling, and signalling that group — a bounded-runner redesign whose own
+  # lifetime and process-ownership hazards this repo has already paid for once
+  # (CLAUDE.md: never signal a process group you no longer own), for a stop-latency win.
+  # So the exposure is BOUNDED IN WALL TIME INSTEAD: see OBJ_SWEEP_TIMEOUT_SECS, whose
+  # supervisor default is half the sweep script's own, precisely so that TWO walks here
+  # cost no more than ONE walk at the script's bound. The stop file is re-read the moment
+  # the sweep returns (the loop's first statement, below).
   object_store_sweep
   while true; do
-    [[ -f "$STOP_FILE" ]] && finalize_exit "stop-file" 0
-    [[ $(($(date +%s) - START_TS)) -ge "$MAX_HOURS_SECS" ]] && finalize_exit "budget-wallclock" 0
+    preflight_stop_or_budget
     local reason
     reason="$(preflight_reason)"
     if [[ -z "$reason" ]]; then

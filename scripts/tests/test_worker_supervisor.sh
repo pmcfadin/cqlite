@@ -9842,6 +9842,113 @@ test_object_store_corrupt_leaves_both_the_latch_and_the_stamp() {
 
 t test_object_store_corrupt_leaves_both_the_latch_and_the_stamp
 
+# THE STOP FILE AND THE WALL-CLOCK BUDGET ARE READ BEFORE THE SWEEP, NOT AFTER IT
+# (#3749 review round 3, item 3).
+#
+# THE DEFECT. `preflight_wait` ran `object_store_sweep` BEFORE the hold loop, whose first
+# statement is the stop-file and budget check — so a stop requested after the outer
+# loop's own check (during `credit_merged_pending_prs`' gh calls, or the claim
+# migration's bounded retry burst, both of which sit between them) was ignored for the
+# whole sweep. Round 2 raised the per-walk bound to 600s and the sweep takes two walks on
+# the non-clean path, so that ignore-window had just grown to ~20 minutes.
+#
+# DRIVEN THROUGH THE SHIPPED FUNCTION, SOURCED (the sv_scratch_head idiom): the ordering
+# inside `preflight_wait` is the whole subject, and a full supervisor run cannot stage it
+# — the outer loop checks the stop file first, so a stop file present at startup never
+# reaches this function at all. Sourcing means the function under test is the shipped
+# one, and the stubs below only OBSERVE.
+sv_preflight_order_driver() {
+  local out="$1" obs="$2"
+  {
+    sv_scratch_head
+    printf 'OBS=%s\n' "$(printf '%q' "$obs")"
+    printf ': >"$OBS"\n'
+    # The supervisor assigns START_TS unconditionally at source time, so the budget arm
+    # has to move it AFTERWARDS; an env value alone is silently overwritten (which is how
+    # that arm first passed the sweep it was meant to skip).
+    printf 'START_TS="${DRV_START_TS:-$START_TS}"\n'
+    # Defined AFTER the source, so they replace the shipped definitions. Each records and
+    # nothing else; finalize_exit ends the driver as the real one ends the process.
+    printf 'object_store_sweep() { printf "sweep\\n" >>"$OBS"; return 0; }\n'
+    printf 'finalize_exit() { printf "finalize:%%s:%%s\\n" "$1" "$2" >>"$OBS"; exit 0; }\n'
+    printf 'preflight_reason() { printf "preflight-probe\\n" >>"$OBS"; printf ""; }\n'
+    printf 'preflight_wait\n'
+    printf 'printf "returned\\n" >>"$OBS"\n'
+  } >"$out"
+}
+test_preflight_reads_the_stop_file_before_the_object_store_sweep() {
+  local d obs drv
+  d="$(new_case_dir)"; obs="$d/obs.txt"; drv="$d/drv.sh"
+  sv_preflight_order_driver "$drv" "$obs"
+  if ! bash -n "$drv" 2>/dev/null; then
+    fail "preflight-order-plant: the scratch driver does not parse — the arms below would prove nothing"
+    return
+  fi
+  # (a) CONTROL FIRST, so a green in (b) cannot come from a driver that never reaches the
+  #     sweep at all: no stop file, budget not exhausted => the sweep runs and the function
+  #     returns normally.
+  # MAX_HOURS_SECS is DERIVED inside main(), which a sourced driver never runs, so it is
+  # supplied explicitly here rather than left empty (an empty value compares as 0 and
+  # would fire the budget in every arm — which is how the control arm first failed).
+  env STOP_FILE="$d/absent-stop" START_TS="$(date +%s)" MAX_HOURS_SECS=99999 \
+    bash "$drv" >"$d/ctl.log" 2>&1
+  if grep -qx 'sweep' "$obs" && grep -qx 'returned' "$obs" && ! grep -q '^finalize:' "$obs"; then
+    pass "preflight-order-control: with no stop file the sweep RUNS and preflight_wait returns — the arms below are not passing because the driver never gets there"
+  else
+    fail "preflight-order-control: obs=[$(tr '\n' ';' <"$obs")] (see $d/ctl.log)"
+  fi
+  # (b) THE SUBJECT: a stop file present when preflight_wait is entered. The loop must
+  #     exit `stop-file` and the sweep must NOT have run.
+  : >"$d/stop"
+  env STOP_FILE="$d/stop" START_TS="$(date +%s)" MAX_HOURS_SECS=99999 \
+    bash "$drv" >"$d/stop.log" 2>&1
+  if grep -qx 'finalize:stop-file:0' "$obs" && ! grep -qx 'sweep' "$obs"; then
+    pass "preflight-order: a stop file present on entry exits the loop BEFORE the object-store sweep — an operator's stop is not held for up to two fsck bounds"
+  else
+    fail "preflight-order(stop): obs=[$(tr '\n' ';' <"$obs")] — the sweep ran (or the stop was not read) ahead of the stop file (see $d/stop.log)"
+  fi
+  # (c) THE SAME FOR THE WALL-CLOCK BUDGET, one property apart from (b): no stop file,
+  #     an exhausted budget. Both conditions are checked at the same point, and asserting
+  #     only one would let the other regress.
+  env STOP_FILE="$d/absent-stop" DRV_START_TS=0 MAX_HOURS_SECS=1 \
+    bash "$drv" >"$d/budget.log" 2>&1
+  if grep -qx 'finalize:budget-wallclock:0' "$obs" && ! grep -qx 'sweep' "$obs"; then
+    pass "preflight-order: an exhausted wall-clock budget also exits BEFORE the sweep — the run does not spend minutes of hygiene past its own deadline"
+  else
+    fail "preflight-order(budget): obs=[$(tr '\n' ';' <"$obs")] (see $d/budget.log)"
+  fi
+}
+
+t test_preflight_reads_the_stop_file_before_the_object_store_sweep
+
+# AND THE EXPOSURE IS BOUNDED IN WALL TIME, because the in-flight sweep is NOT
+# interruptible (#3749 review round 3, item 3). Its two walks run in a CHILD process, so
+# no check between them can execute here; the only lever this caller has is how long the
+# two of them may take. The supervisor's default per-walk bound is therefore HALF the
+# sweep script's own, so 2 walks here cost no more than 1 walk at the script's bound.
+# Asserted as a RELATION between the two defaults, read from both shipped files, rather
+# than as two magic numbers that could drift apart silently.
+test_supervisor_sweep_bound_is_half_the_sweep_scripts_own() {
+  local sup_default script_default sweep_sh
+  sweep_sh="$REPO_ROOT/scripts/check-object-store-integrity.sh"
+  sup_default="$(sed -n 's/^OBJ_SWEEP_TIMEOUT_SECS="\${OBJ_SWEEP_TIMEOUT_SECS:-\([0-9]*\)}"$/\1/p' "$SUPERVISOR" | head -1)"
+  script_default="$(sed -n 's/^BOUND_SECS=\([0-9]*\)$/\1/p' "$sweep_sh" | head -1)"
+  if [[ "$sup_default" =~ ^[0-9]+$ ]] && [[ "$script_default" =~ ^[0-9]+$ ]] &&
+    [[ "$sup_default" -gt 0 ]] && [[ "$script_default" -gt 0 ]]; then
+    pass "sweep-bound-plant: both defaults were read from the shipped files (supervisor $sup_default, sweep script $script_default)"
+  else
+    fail "sweep-bound-plant: supervisor='$sup_default' script='$script_default' — one of the declarations moved; the assert below would be vacuous"
+    return
+  fi
+  if [[ $((sup_default * 2)) -le "$script_default" ]]; then
+    pass "sweep-bound: the supervisor's per-walk bound ($sup_default s) is at most HALF the sweep script's own ($script_default s), so its worst case of TWO walks costs no more than ONE walk at the script's bound — the uninterruptible window did not double when the script's bound was raised"
+  else
+    fail "sweep-bound: 2 x $sup_default > $script_default — the supervisor can block uninterruptibly for longer than one of the sweep script's own bounds"
+  fi
+}
+
+t test_supervisor_sweep_bound_is_half_the_sweep_scripts_own
+
 # THE CREATE-ONLY PRIMITIVE ITSELF (#3749 review round 2, BLOCKER 1).
 #
 # The case above proves the harm is prevented on the path the supervisor takes. This one
