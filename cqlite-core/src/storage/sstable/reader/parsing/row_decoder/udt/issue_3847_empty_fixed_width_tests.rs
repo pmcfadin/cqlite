@@ -456,3 +456,68 @@ fn the_empty_guard_does_not_apply_to_variable_width_or_composite_types() {
         );
     }
 }
+
+/// roborev job 95. `varchar` is a CQL ALIAS for `text`, and the router
+/// (`create_empty_value_for_type`) lists all three while both field decoders listed
+/// only two — so a zero-length `varchar` field answered `''` through the router and
+/// an EMPTY BLOB through either decoder. This branch WIDENED that gap by adding
+/// `Varchar` to the router alone, so it is this PR's to close, not a pre-existing
+/// residual.
+///
+/// Asserts the three aliases give the SAME answer at BOTH decoders AND the router,
+/// empty and non-empty, because "they are one type" is the actual invariant — a
+/// test naming only the empty case would let the non-empty halves drift apart again.
+#[test]
+fn the_three_text_aliases_agree_at_every_site_empty_and_non_empty() {
+    let parser = parser();
+    for ty in [CqlType::Text, CqlType::Ascii, CqlType::Varchar] {
+        assert_eq!(
+            V5CompressedLegacyParser::create_empty_value_for_type(&ty),
+            Value::text(String::new()),
+            "{ty:?}: the router must answer the EMPTY STRING, never null and never a blob"
+        );
+        for (site, decoded) in [
+            (
+                "parse_simple_udt_field_value",
+                V5CompressedLegacyParser::parse_simple_udt_field_value(&[], &ty)
+                    .unwrap_or_else(|e| panic!("{ty:?}: empty must decode, got {e:?}")),
+            ),
+            (
+                "parse_udt_field_value",
+                parser
+                    .parse_udt_field_value(&[], &ty)
+                    .unwrap_or_else(|e| panic!("{ty:?}: empty must decode, got {e:?}")),
+            ),
+        ] {
+            assert_eq!(
+                decoded,
+                Value::text(String::new()),
+                "{site} must answer '' for a 0-length {ty:?} field, matching the router"
+            );
+        }
+
+        // Non-empty: all three decode as TEXT, not blob. This is the half that makes
+        // `varchar` an alias rather than a special case, and it is what the omitted
+        // arm was really costing.
+        let bytes = b"hi";
+        for (site, decoded) in [
+            (
+                "parse_simple_udt_field_value",
+                V5CompressedLegacyParser::parse_simple_udt_field_value(bytes, &ty)
+                    .unwrap_or_else(|e| panic!("{ty:?}: non-empty must decode, got {e:?}")),
+            ),
+            (
+                "parse_udt_field_value",
+                parser
+                    .parse_udt_field_value(bytes, &ty)
+                    .unwrap_or_else(|e| panic!("{ty:?}: non-empty must decode, got {e:?}")),
+            ),
+        ] {
+            assert_eq!(
+                decoded,
+                Value::text("hi"),
+                "{site}: a non-empty {ty:?} field must decode as Text(\"hi\")"
+            );
+        }
+    }
+}

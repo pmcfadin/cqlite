@@ -68,7 +68,16 @@ impl V5CompressedLegacyParser {
             return Ok(Value::Null);
         }
         match field_type {
-            CqlType::Text | CqlType::Ascii => {
+            // `varchar` IS `text` in CQL — an alias, not a distinct type — and this
+            // repository already treats the three as one everywhere else
+            // (`schema/parser.rs:149` routes all three to `parse_text`,
+            // `query/result.rs:775`, `cql_to_mutation/codec.rs:98`). It was omitted HERE
+            // while `create_empty_value_for_type` lists it, so a zero-length `varchar`
+            // field answered `''` through the router and an EMPTY BLOB through either
+            // decoder — the same five-sites disagreement as roborev job 94, one type over,
+            // and one this branch WIDENED by adding `Varchar` to the router alone
+            // (roborev job 95).
+            CqlType::Text | CqlType::Ascii | CqlType::Varchar => {
                 std::str::from_utf8(data)
                     .map_err(|e| Error::corruption(format!("Invalid UTF-8 in UDT field: {}", e)))?;
                 Ok(Value::Text(
@@ -245,7 +254,16 @@ impl V5CompressedLegacyParser {
             return Ok(Value::Null);
         }
         match field_type {
-            CqlType::Text | CqlType::Ascii => {
+            // `varchar` IS `text` in CQL — an alias, not a distinct type — and this
+            // repository already treats the three as one everywhere else
+            // (`schema/parser.rs:149` routes all three to `parse_text`,
+            // `query/result.rs:775`, `cql_to_mutation/codec.rs:98`). It was omitted HERE
+            // while `create_empty_value_for_type` lists it, so a zero-length `varchar`
+            // field answered `''` through the router and an EMPTY BLOB through either
+            // decoder — the same five-sites disagreement as roborev job 94, one type over,
+            // and one this branch WIDENED by adding `Varchar` to the router alone
+            // (roborev job 95).
+            CqlType::Text | CqlType::Ascii | CqlType::Varchar => {
                 std::str::from_utf8(data)
                     .map_err(|e| Error::corruption(format!("Invalid UTF-8 in UDT field: {}", e)))?;
                 Ok(Value::Text(
