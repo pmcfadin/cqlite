@@ -245,7 +245,8 @@ MEASURED_RE='^pub-surface: [0-9]+ crate-root declarations scanned in cqlite-core
 # ([0-9]+) unconditional.*/\1/'` over the WHOLE output — the SUBSTITUTE form, which passes
 # every NON-matching line through UNCHANGED. The guard's output is multi-line, so the moment
 # `check-pub-surface.sh` gained a second line carrying the word `unconditional` (#3162's
-# `AGENT-GATE-CENSUS:` contract line, which has no `of which`), the result became a
+# `AGENT-GATE-CENSUS:` contract line, which had no `of which` — since reverted, but the
+# anchoring stands on its own and the guard's output will gain lines again), the result became a
 # TWO-LINE string beginning `AGENT-GATE-CENSUS: 14 unconditional …`; `$((base_open + 1))`
 # then read `AGENT` as a variable name and `set -u` made it fatal:
 #     test_pub_surface_guard.sh: line 403: AGENT: unbound variable
@@ -311,9 +312,13 @@ base_read_probe="$(ps_measured_field 'baseline prologues-read count' "$TMPROOT/g
 #     next colliding word reinstates the bug — but that the extraction READS ONLY THE
 #     GUARD'S OWN MEASUREMENT LINE.
 #
-#     The decoys below are the real shapes: the `AGENT-GATE-CENSUS:` contract line that
-#     actually broke this suite, plus one that also carries `module-file prologues read`,
-#     so BOTH extractions are exercised. The RED half is inline and explicit — the OLD
+#     The first decoy is the line that HISTORICALLY broke this suite — #3162's
+#     `AGENT-GATE-CENSUS:` contract line, since reverted, so it is now synthetic. That is
+#     the right shape for this case and not a weakening: the property is about ANY second
+#     line carrying the keyword, and pinning it to a line that still exists would make the
+#     case lapse the moment that line changed again. The second decoy carries
+#     `module-file prologues read` so BOTH extractions are exercised. The RED half is
+#     inline and explicit — the OLD
 #     substitute form is run over the same input and required to produce something OTHER
 #     than the integer — because a green here would otherwise prove nothing about whether
 #     the anchoring is what is doing the work.

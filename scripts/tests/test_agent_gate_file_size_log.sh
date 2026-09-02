@@ -522,20 +522,19 @@ STUB
       bad "case8: /dev/full did not behave as required (truncate-ok + append-rejected) — the case proves nothing"
     fi
     assert_verdict "case8: rejected appends make the component FAIL" "$d8" FAIL
-    # 4 emitted lines on a clean tree, and the ENUMERATION is the point — this stays a
+    # 3 emitted lines on a clean tree, and the ENUMERATION is the point — this stays a
     # derived expectation, never a magic constant:
     #   1. thresholds
     #   2. base ref
-    #   3. AGENT-GATE-CENSUS (the #3162 `emitted` contract line; on a clean tree it is the
-    #      NO-SUBJECT form, because the diff changed no .rs file)
-    #   4. "no changed .rs files over threshold"
-    # It was 3 before the census line was added, and this case correctly caught the change:
+    #   3. "no changed .rs files over threshold"
+    # It went 3 -> 4 while #3162's `emitted` census added a contract line here, and back to 3
+    # when that was reverted; BOTH moves were caught by this case, which is the property:
     # the EXACT count is the oracle — a fabricated or hardcoded flag cannot produce it, and
     # the `[ -s ]` check cannot produce a count at all. Adding or removing an _fs_emit call
     # in run_file_size MUST move this number, and the enumeration above says which line is
     # which so the next person can tell a real regression from an intended emit.
     has "case8: the cause names the EXACT number of rejected writes (the counter, not the -s check)" \
-        "$out8" "4 write(s) to it were rejected"
+        "$out8" "3 write(s) to it were rejected"
     assert_log_present "case8: the persistence diagnostic sibling is written here too" "$sib8"
     has "case8: the sibling carries the rejected-write cause" \
         "$sib8" "write(s) to it were rejected"
@@ -708,151 +707,6 @@ fi
 
 
 # ---------------------------------------------------------------------------
-# case14 (#3162, roborev job 389): THE CENSUS COUNT COMES FROM THE MEASUREMENT, NOT FROM A
-# PREDICATE ABOUT THE PATH.
-#
-# `n_scanned` was derived by re-asking `[ -f "$path" ]` in a second pass. `[ -f ]` answers
-# "does this path exist right now"; the census claims "I counted this file's lines". A file
-# that is SELECTED but unreadable satisfied the predicate and was reported as MEASURED — the
-# count asserting verification that did not happen, which is the one thing a census must
-# never do. It is now incremented only after a `wc -l` that produced a validated number.
-#
-# THREE STATES, AND THE COLLAPSE THAT MUST NOT HAPPEN: nothing selected is NO-SUBJECT and
-# preserves PASS; *some* selected of which *none* could be counted is NOT-MEASURED. Letting
-# the second borrow the first's affirmative silence is the same "could not tell" -> permissive
-# slide, one lane over — so it is asserted explicitly, not left implied by the happy path.
-# ---------------------------------------------------------------------------
-c14_pre=0
-if [ "$(id -u)" -ne 0 ]; then
-  c14_probe="$tmp/c13-probe"
-  if printf 'x\n' >"$c14_probe" 2>/dev/null && chmod 000 "$c14_probe" 2>/dev/null \
-     && ! ( wc -l <"$c14_probe" ) >/dev/null 2>&1; then
-    c14_pre=1
-  fi
-  chmod 600 "$c14_probe" 2>/dev/null || true
-fi
-if [ "$c14_pre" -ne 1 ]; then
-  # ONE skip PER SKIPPED ASSERT, the case8 precedent — the suite's census is exact.
-  skip "case14: cannot make a file unreadable on this host (root, or a permissive FS) — positive control not run"
-  skip "case14: cannot make a file unreadable on this host — uncountable-file census not asserted"
-  skip "case14: cannot make a file unreadable on this host — NO-SUBJECT collapse not asserted"
-  skip "case14: cannot make a file unreadable on this host — uncounted/selected counts not asserted"
-else
-  # POSITIVE CONTROL FIRST, and it differs from the plant in ONE property: whether the
-  # selected file can be read. Without it a FAIL below could be the fixture, not the census.
-  mkrepo censusread14 cqlite-core/src/big.rs 900 950 main; r14a="$REPO"
-  out14a="$tmp/censusread14.out"
-  run_only_file_size "$r14a" "$out14a"
-  if grep -Fq 'AGENT-GATE-CENSUS: 1 changed .rs file(s) measured against the thresholds' "$out14a"; then
-    ok "case14: control — a READABLE changed .rs file censuses as 1 measured"
-  else
-    bad "case14: control — expected the COUNT form for a readable changed file; got: $(grep -F 'AGENT-GATE-CENSUS:' "$out14a" | head -1)"
-  fi
-
-  mkrepo censusunread14 cqlite-core/src/big.rs 900 950 main; r14b="$REPO"
-  out14b="$tmp/censusunread14.out"
-  chmod 000 "$r14b/cqlite-core/src/big.rs" 2>/dev/null || true
-  run_only_file_size "$r14b" "$out14b"
-  c14_line=$(grep -F 'AGENT-GATE-CENSUS:' "$out14b" | head -1)
-  chmod 600 "$r14b/cqlite-core/src/big.rs" 2>/dev/null || true
-  case "$c14_line" in
-    *'AGENT-GATE-CENSUS: NOT-MEASURED'*'could not be line-counted'*)
-      ok "case14: a SELECTED but unreadable .rs file censuses as NOT-MEASURED, never as measured" ;;
-    *) bad "case14: expected the NOT-MEASURED form for an unreadable selected file; got: ${c14_line:-<no contract line>}" ;;
-  esac
-  # THE COLLAPSE, asserted explicitly: this is NOT the empty-subject state.
-  case "$c14_line" in
-    *NO-SUBJECT*) bad "case14: an unreadable selected file rendered as NO-SUBJECT — 'there was nothing to measure' and 'there was something I could not measure' have collapsed" ;;
-    *) ok "case14: it does NOT render as NO-SUBJECT — the empty-subject state keeps its own meaning" ;;
-  esac
-  # …and the numbers are the real ones, so the line cannot be a fixed string.
-  case "$c14_line" in
-    *'1 of 1 changed .rs file(s)'*)
-      ok "case14: the cause names the EXACT uncounted/selected counts (1 of 1), so the count is derived and not a canned message" ;;
-    *) bad "case14: expected '1 of 1 changed .rs file(s)' in the cause; got: ${c14_line:-<no contract line>}" ;;
-  esac
-fi
-
-# ---------------------------------------------------------------------------
-# case15 (#3162, roborev job 396): A FAILED ENUMERATION IS NOT AN EMPTY DIFF.
-#
-# `files=$(git diff --name-only …)` discarded its exit status. With no `set -e`, a failed
-# enumeration left `files` empty — indistinguishable from "no .rs changed" — so the census
-# emitted `NO-SUBJECT the diff changed no .rs file` and the component PASSED while
-# affirmatively claiming it had measured an empty diff. That is the named
-# `1699-find-tristate` shape: a THREE-valued signal read two-valued, with the unmeasured
-# state taking the permissive branch.
-#
-# The stub fails ONLY `git diff --name-only --diff-filter=d`, which is uniquely this
-# component's enumeration — every other git call the gate makes (tree identity, base-ref
-# resolution, the component-set pre-flight) is delegated to the real binary, so a red here
-# cannot come from a differently-broken fixture.
-# ---------------------------------------------------------------------------
-REAL_GIT=$(command -v git 2>/dev/null)
-if [ -z "$REAL_GIT" ]; then
-  bad "case15: no git on PATH — but this suite's fixtures need git, so this is a broken host, not a skip"
-  bad "case15: enumeration-failure census not asserted (no git)"
-  bad "case15: NO-SUBJECT collapse not asserted (no git)"
-  bad "case15: control not asserted (no git)"
-else
-  cat >"$STUBBIN/git" <<STUB
-#!/usr/bin/env bash
-# Delegate everything to the real git EXCEPT run_file_size's own enumeration, which fails
-# with a chosen rc when FS_GIT_DIFF_FAIL is set.
-if [ -n "\${FS_GIT_DIFF_FAIL:-}" ]; then
-  _saw_diff=0; _saw_name_only=0; _saw_filter=0
-  for _a in "\$@"; do
-    case "\$_a" in
-      diff)              _saw_diff=1 ;;
-      --name-only)       _saw_name_only=1 ;;
-      --diff-filter=d)   _saw_filter=1 ;;
-    esac
-  done
-  if [ "\$_saw_diff" -eq 1 ] && [ "\$_saw_name_only" -eq 1 ] && [ "\$_saw_filter" -eq 1 ]; then
-    echo "stub: enumeration deliberately failed" >&2
-    exit "\$FS_GIT_DIFF_FAIL"
-  fi
-fi
-exec "$REAL_GIT" "\$@"
-STUB
-  chmod +x "$STUBBIN/git"
-
-  # POSITIVE CONTROL FIRST — the same fixture and the same stub on PATH, differing in ONE
-  # property: whether the enumeration is made to fail. Without it, a red below could be the
-  # stub breaking git in general rather than the rc being honoured.
-  mkrepo gitokfs cqlite-core/src/big.rs 900 950 main; r15a="$REPO"
-  out15a="$tmp/gitokfs.out"
-  run_only_file_size "$r15a" "$out15a" PATH="$STUBBIN:$PATH"
-  if grep -Fq 'AGENT-GATE-CENSUS: 1 changed .rs file(s) measured against the thresholds' "$out15a"; then
-    ok "case15: control — with the stub on PATH but NOT sabotaging, the enumeration succeeds and censuses 1 measured file"
-  else
-    bad "case15: control — the stub broke git in general; got: $(grep -F 'AGENT-GATE-CENSUS:' "$out15a" | head -1)"
-  fi
-
-  mkrepo gitfailfs cqlite-core/src/big.rs 900 950 main; r15b="$REPO"
-  out15b="$tmp/gitfailfs.out"
-  run_only_file_size "$r15b" "$out15b" PATH="$STUBBIN:$PATH" FS_GIT_DIFF_FAIL=7
-  c15_line=$(grep -F 'AGENT-GATE-CENSUS:' "$out15b" | head -1)
-  case "$c15_line" in
-    *'AGENT-GATE-CENSUS: NOT-MEASURED the changed-.rs enumeration FAILED'*)
-      ok "case15: a FAILED enumeration censuses as NOT-MEASURED, not as a measured empty diff" ;;
-    *) bad "case15: expected the NOT-MEASURED form for a failed enumeration; got: ${c15_line:-<no contract line>}" ;;
-  esac
-  # THE COLLAPSE, asserted explicitly — this is the whole finding.
-  case "$c15_line" in
-    *NO-SUBJECT*) bad "case15: a FAILED enumeration rendered as NO-SUBJECT — 'the scan failed' has collapsed onto 'no match', which is the 1699-find-tristate shape" ;;
-    *) ok "case15: it does NOT render as NO-SUBJECT — a failed scan cannot borrow the empty diff's affirmative silence" ;;
-  esac
-  # …and it names the ACTUAL rc, so the line cannot be a canned string.
-  case "$c15_line" in
-    *'git diff exited 7'*)
-      ok "case15: the cause names the REAL exit status (7), so the state is derived from the rc and not from a fixed message" ;;
-    *) bad "case15: expected 'git diff exited 7' in the cause; got: ${c15_line:-<no contract line>}" ;;
-  esac
-  rm -f "$STUBBIN/git"
-fi
-
-# ---------------------------------------------------------------------------
 printf '\n%s\n' "----------------------------------------"
 printf 'file-size component log guard (#3401): %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 # Census, not a floor (#3401 review N4/N2): every assertion reports exactly one of
@@ -862,7 +716,7 @@ printf 'file-size component log guard (#3401): %d passed, %d failed, %d skipped\
 # precondition failure (an unusable repo, a missing mktemp) short-circuits its case's
 # remaining asserts and lands here too, so the message names both causes rather than
 # misattributing one as the other.
-EXPECTED_CHECKS=83
+EXPECTED_CHECKS=75
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"

@@ -6837,9 +6837,6 @@ _census_sidecar() { printf '%s/%s.census' "${LOG_DIR:-}" "$1"; }
 #                  its verdict is finalized. `scoped-tests` is the case: a python-only
 #                  diff dispatches no cargo at all, so a static `both` measured ZERO and
 #                  reddened a CORRECT --lite/--delta (#3625 census audit BLOCKER 1).
-#   emitted        the component's own guard prints `AGENT-GATE-CENSUS: <n> <unit>` (or
-#                  `AGENT-GATE-CENSUS: NO-SUBJECT <why>`) and the census reads it — for
-#                  guards that already walk their subject set and know the number.
 #   indirect:<drv> the subject count comes from a DRIVER's own report in the component
 #                  log (pytest's `N passed`, jest's `Tests: … N passed`). ONE RULE
 #                  DIFFERS HERE and it is deliberate: an ABSENT tally is NOT-MEASURED,
@@ -6930,19 +6927,13 @@ _census_kind() {
     # honest while the reason is actionable.
     oom-audit|parity-report|operator-metrics-doc) printf 'gap:xtask/report driver prints no machine-readable subject count (#3162)' ;;
     smoke)          printf 'gap:smoke-test-all-tables.sh prints no machine-readable table count (#3162)' ;;
-    # ---- emitted: the guard ALREADY walks its subject set and knows the number, so it
-    # prints the contract line and the census reads it. Only the two cheapest instances are
-    # shipped; the remaining six guards stay declared gaps under #3162, deliberately (each
-    # would need its own count derived, and a fabricated number is worse than an honest gap).
-    #   file-size    — the changed `.rs` files it measured against the thresholds. It emits
-    #                  NO-SUBJECT when the diff changed none, which is CORRECT and common
-    #                  (any docs- or scripts-only change) and must not read as vacuity.
-    #   pub-surface  — the unconditional crate-root `pub mod` declarations it verified. Zero
-    #                  is not a legitimate outcome there: the guard already REFUSES on a
-    #                  crate root with no unconditional declarations, so ZERO -> VACUOUS is
-    #                  the right coupling and cannot fire on correct input.
-    file-size|pub-surface) printf 'emitted' ;;
-    roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests)
+    # file-size and pub-surface WERE briefly `emitted` (a count read from a contract line
+    # the guard printed). REVERTED to declared gaps: that addition produced four Medium
+    # review findings in a row, and the last one's proper remedy — FAILing file-size when a
+    # selected `.rs` file cannot be read — changes the RATCHET's failure semantics for every
+    # diff, which is its own decision with its own risk of reddening correct input. Doing
+    # `emitted` properly requires settling that first. Tracked in #3162.
+    file-size|pub-surface|roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests)
                     printf 'gap:shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)' ;;
     *) return 1 ;;
   esac
@@ -7070,47 +7061,6 @@ _census_compile_tally() {
   ' < "$1"
 }
 
-# _census_emitted_tally <stripped-log> -> "COUNT <n> <unit>" | "ZERO <unit>" | "NO-SUBJECT <why>" | "NONE"
-#
-# THE `emitted` CONTRACT: a component's own guard prints ONE line
-#   AGENT-GATE-CENSUS: <n> <unit>            -- n subjects verified
-#   AGENT-GATE-CENSUS: NO-SUBJECT <why>      -- this run legitimately had nothing to verify
-#   AGENT-GATE-CENSUS: NOT-MEASURED <why>    -- there WAS a subject and it could not be read
-# and the census reads it. Used where the component ALREADY walks its subject set and knows
-# the number, so the count is derived from the work rather than re-derived here.
-#
-# THE `NO-SUBJECT` FORM IS NOT DECORATION, it is what keeps this kind off correct input.
-# `file-size` measures the CHANGED `.rs` files, and a docs- or scripts-only diff legitimately
-# changes none — the commonest shape on this branch. Without a way to say "the subject set was
-# empty and that is correct", an honest zero would become `ZERO` -> `VACUOUS` and red every
-# such run. A component that has nothing to measure has not failed to measure it.
-#
-# LAST match wins (a guard that reprints its line is scored on the final one), and the line is
-# read from the ANSI-normalised copy like every other parser even though it is OUR text and
-# carries no escapes — the #3400 rule is that the property is LOCAL to the parse, not inherited
-# from who happens to print it.
-_census_emitted_tally() {
-  awk '
-    /^[[:space:]]*AGENT-GATE-CENSUS:[[:space:]]/ {
-      sub(/^[[:space:]]*AGENT-GATE-CENSUS:[[:space:]]+/, "")
-      payload = $0; seen = 1
-    }
-    END {
-      if (seen != 1) { print "NONE"; exit }
-      if (payload ~ /^NO-SUBJECT[[:space:]]/) { print payload; exit }
-      # DISTINCT from NO-SUBJECT on purpose: "there was nothing to measure" and "there was
-      # something and I could not measure it" are different facts, and only the first may
-      # render as an affirmative non-finding (job 389).
-      if (payload ~ /^NOT-MEASURED[[:space:]]/) { print payload; exit }
-      n = payload; sub(/[[:space:]].*$/, "", n)
-      if (n !~ /^[0-9]+$/) { print "NONE"; exit }
-      unit = payload; sub(/^[0-9]+[[:space:]]+/, "", unit)
-      if (unit == "") { print "NONE"; exit }
-      if (n + 0 == 0) { printf "ZERO %s\n", unit } else { printf "COUNT %s %s\n", n, unit }
-    }
-  ' < "$1"
-}
-
 # _census_driver_tally <driver> <stripped-log> -> "COUNT <n>" | "ZERO" | "NONE"
 #
 # The driver's OWN summary, read from the component log. Both drivers write theirs at the
@@ -7197,18 +7147,6 @@ _census_measure_kind() {
     _census_write "$comp" "$line"; printf '%s' "$line"; return 0
   fi
   case "$kind" in
-    emitted)
-      local et
-      et=$(_census_emitted_tally "$src" 2>/dev/null) || et=""
-      rm -f "$src" 2>/dev/null || true
-      case "$et" in
-        COUNT\ *)      line="$et" ;;
-        ZERO\ *)       line="$et — the component's own AGENT-GATE-CENSUS line reports none" ;;
-        NO-SUBJECT\ *)   line="NOT-APPLICABLE ${et#NO-SUBJECT }" ;;
-        NOT-MEASURED\ *) line="$et" ;;
-        *)             line="NOT-MEASURED $comp printed no 'AGENT-GATE-CENSUS: <n> <unit>' contract line, so its own count could not be read" ;;
-      esac
-      _census_write "$comp" "$line"; printf '%s' "$line"; return 0 ;;
     indirect:*)
       local drv="${kind#indirect:}" dt
       dt=$(_census_driver_tally "$drv" "$src" 2>/dev/null) || dt=""
@@ -17573,53 +17511,18 @@ run_file_size() {
 
   # Changed, non-deleted .rs files vs base (committed + working tree). With no
   # base, fall back to changes vs HEAD (uncommitted only).
-  # THE ENUMERATION'S EXIT STATUS IS CAPTURED, because an empty `files` is a THREE-VALUED
-  # signal read two-valued (roborev job 396). This is the named `1699-find-tristate` shape
-  # CLAUDE.md records — "`[ -z "$(find …)" ]` collapses 'the scan FAILED' onto 'no match'" —
-  # and here the collapse was worse than usual: with no `set -e`, a failed `git diff` left
-  # `files` empty, the census then emitted `NO-SUBJECT the diff changed no .rs file`, and the
-  # component PASSED while affirmatively claiming it had measured an empty diff. A failed
-  # enumeration must never borrow the empty diff's PASS-preserving silence.
-  #
-  # (The existing lint did not catch it because its subject is the literal `find`, not
-  # command substitution in general — the SHAPE is command-agnostic and the lint's subject
-  # set is one command. Widening it is #3162 follow-up work, not this change.)
-  local files files_rc=0
+  local files
   if [ -n "$base" ]; then
-    files=$(git diff --name-only --diff-filter=d "$base" -- '*.rs' 2>/dev/null) || files_rc=$?
+    files=$(git diff --name-only --diff-filter=d "$base" -- '*.rs' 2>/dev/null)
   else
-    files=$(git diff --name-only --diff-filter=d HEAD -- '*.rs' 2>/dev/null) || files_rc=$?
+    files=$(git diff --name-only --diff-filter=d HEAD -- '*.rs' 2>/dev/null)
   fi
-  [ "$files_rc" -eq 0 ] || files=""
 
   local -a over=() grew=()
   local f cur lim base_n
-  # #3162 (roborev job 389): the census count is derived from the MEASUREMENT ITSELF, here,
-  # and never from a second pass asking `[ -f ]` about each path. Those are different facts:
-  # `[ -f ]` answers "does this path exist right now", while the census claims "I counted
-  # this file's lines". A file that is selected but unreadable — or that disappears between
-  # the two passes, or whose `wc` fails — satisfied the predicate and was reported as
-  # MEASURED. A count that includes files nobody counted is a duration with extra steps,
-  # which is the one thing this whole census must not be.
-  #   n_selected  every non-empty path the diff selected  (the denominator)
-  #   n_scanned   incremented ONLY after a `wc -l` that produced a validated number
-  #   n_uncounted selected, and could not be line-counted at all
-  local n_selected=0 n_scanned=0 n_uncounted=0
   while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    n_selected=$((n_selected + 1))
-    # NOT `[ -f ] || continue`: an unreadable-or-absent selected file must be COUNTED as
-    # uncounted, not silently dropped from both the numerator and the denominator.
-    cur=""
-    [ -f "$f" ] && cur=$(wc -l <"$f" 2>/dev/null | tr -d ' ')
-    case "$cur" in
-      ''|*[!0-9]*)
-        # The ratchet already skipped such a file before this change (the arithmetic
-        # comparison below simply failed on an empty value); what is new is that the
-        # census now KNOWS, and refuses to claim it as measured.
-        n_uncounted=$((n_uncounted + 1)); continue ;;
-    esac
-    n_scanned=$((n_scanned + 1))
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    cur=$(wc -l <"$f" | tr -d ' ')
     case "$f" in
       *_test.rs|*_tests.rs|*/tests/*|tests/*|*/benches/*) lim=$TEST_LIMIT ;;
       *) lim=$SRC_LIMIT ;;
@@ -17638,32 +17541,6 @@ run_file_size() {
   _fs_emit "$log" ">>> [$name] thresholds: src=$SRC_LIMIT test=$TEST_LIMIT (total lines, inline tests included)"
   if [ -n "$base" ]; then
     _fs_emit "$log" ">>> [$name] base ref: $base (via $base_src)"
-  fi
-  # #3162 (the `emitted` census). FOUR STATES, KEPT DISTINCT — collapsing any two of them
-  # is the "could not tell" -> permissive slide this census exists to remove:
-  #   enumeration FAILED    -> NOT-MEASURED. Checked FIRST, because it is the state that
-  #                            makes every number below meaningless: `files` is empty for
-  #                            this reason too, and reading that as an empty diff is the
-  #                            three-valued-signal collapse (job 396).
-  #   nothing selected      -> NO-SUBJECT. A docs- or scripts-only diff changes no `.rs`
-  #                            file; the ratchet correctly had nothing to measure, and
-  #                            calling that a measured zero would read VACUOUS on the
-  #                            commonest diff shape there is.
-  #   something uncountable -> NOT-MEASURED, naming how many. The ratchet HAD a subject and
-  #                            could not read it, which is neither "measured" nor "no
-  #                            subject". It must not borrow NO-SUBJECT's PASS-preserving
-  #                            silence (roborev job 389).
-  #   all counted           -> the affirmative count, derived from the `wc -l`s above.
-  # Emitted through the SAME sink as everything else here (stdout AND the component log), so
-  # the census can read it.
-  if [ "$files_rc" -ne 0 ]; then
-    _fs_emit "$log" "AGENT-GATE-CENSUS: NOT-MEASURED the changed-.rs enumeration FAILED (git diff exited $files_rc), so this run does not know whether there was a subject — it is NOT an empty diff"
-  elif [ "$n_uncounted" -gt 0 ]; then
-    _fs_emit "$log" "AGENT-GATE-CENSUS: NOT-MEASURED $n_uncounted of $n_selected changed .rs file(s) could not be line-counted (unreadable, or absent from the worktree), so the measured total is incomplete"
-  elif [ "$n_selected" -eq 0 ]; then
-    _fs_emit "$log" "AGENT-GATE-CENSUS: NO-SUBJECT the diff changed no .rs file, so the ratchet had nothing to measure"
-  else
-    _fs_emit "$log" "AGENT-GATE-CENSUS: $n_scanned changed .rs file(s) measured against the thresholds"
   fi
   if [ "${#over[@]}" -eq 0 ]; then
     _fs_emit "$log" ">>> [$name] no changed .rs files over threshold"
