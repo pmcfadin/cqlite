@@ -5495,6 +5495,50 @@ else
   bad "3765-sametag-ground: could not measure a shared-tag producer under $SCRIPT_DIR (got '${fa_st_ground:-<none>}') — the fixture above is no longer grounded in a real shape"
 fi
 
+# 55w. CREDENTIAL REDACTION AT THE FIELD'S ONE EMIT BOUNDARY. REGRESSION, roborev job 45
+#      blocker 4 — the SIXTH instance of the leak family agent-gate.sh documents at
+#      _component_set_one_line (227 raw URL, 234 redacted-not-flattened, 239 flattened-
+#      not-redacted, 264 scp form, 282 query strings). The `toolchain` tier copies WHOLE
+#      LINES into this field, git/npm diagnostics quote the resolved remote, CI's remote
+#      is `https://x-access-token:<TOKEN>@github.com/…` (a form the component-set
+#      pre-flight explicitly ACCEPTS), and this repo's workflow tells agents to paste
+#      SUMMARY blocks into PR comments. Both shapes the existing redactor handles are
+#      covered: URL userinfo and the scp-like `user@host:path`.
+#      The fixtures are kept UNDER the extractor's 60-char display cap on purpose, so the
+#      case measures the REDACTION and cannot pass by accident because the truncation
+#      happened to remove the token.
+printf 'bash: https://x-access-token:SEKRETALPHA@h.io: not found\n' > "$fa_dir/cred-url.log"
+printf 'Error: fatal: SEKRETBRAVO@h.io:pmcfadin/cqlite.git denied\n' > "$fa_dir/cred-scp.log"
+_fa_run credurl "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/cred-url.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETALPHA*) bad "3765-cred-url: the URL userinfo credential is rendered VERBATIM into the SUMMARY field ('$fa_got') — SUMMARY blocks are pasted into PR comments" ;;
+  *) ok "3765-cred-url: a URL-userinfo credential in a toolchain line does NOT reach the rendered field" ;;
+esac
+case "$fa_got" in
+  *"<redacted>@h.io"*) ok "3765-cred-url-marker: the redaction MARKER is present, so the field reports the diagnostic rather than refusing it" ;;
+  *) bad "3765-cred-url-marker: expected '<redacted>@h.io' in the field, got '$fa_got' — a silently dropped value is not a redaction" ;;
+esac
+_fa_run credscp "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_dir/cred-scp.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *SEKRETBRAVO*) bad "3765-cred-scp: the scp-form credential is rendered VERBATIM into the SUMMARY field ('$fa_got') — this is roborev job 264's shape, one field over" ;;
+  *) ok "3765-cred-scp: an scp-form (user@host:path) credential does NOT reach the rendered field" ;;
+esac
+case "$fa_got" in
+  *"<redacted>@h.io:"*) ok "3765-cred-scp-marker: the scp-form redaction MARKER is present, so the diagnostic is still reported" ;;
+  *) bad "3765-cred-scp-marker: expected '<redacted>@h.io:' in the field, got '$fa_got'" ;;
+esac
+# STRUCTURAL, and labelled as such: the redaction must be the EXISTING one redactor,
+# called from the ONE clean function. A second implementation is the drift this repo
+# forbids, and here a divergence between two copies IS a credential leak.
+fa_cl=$(awk '/^_failassert_clean\(\) \{/,/^\}/' "$GATE" | grep -v '^[[:space:]]*#')
+if printf '%s\n' "$fa_cl" | grep -q '_component_set_redact_text'; then
+  ok "3765-cred-one-redactor: _failassert_clean routes the value through the EXISTING _component_set_redact_text (no second redactor)"
+else
+  bad "3765-cred-one-redactor: _failassert_clean does not call _component_set_redact_text — either the redaction is gone or it has been re-implemented"
+fi
+
 # 55t/55u. STRUCTURAL, and labelled as such: the --delta node-tests runner must keep its jest
 #          log inside a PRIVATE mktemp -d and must delete that DIRECTORY. #3765 routed that
 #          log through _failassert_record, which strips it through _ansi_stripped_log, and the
@@ -5564,6 +5608,10 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
+# 442 -> 447 on #3765 (roborev job 45): section 55w adds 5 asserts for the credential
+# redaction at the field's one emit boundary, host-INDEPENDENT for the same reason as the
+# rest of section 55 (bash + the --lite-aggregate-selftest hook + the extractor script),
+# so the same "raise by exactly the number added" rule applies.
 # 438 -> 442 on #3765 (roborev job 45): section 55v adds 4 asserts for the shared-tag
 # A1 collapse (the truncate-before-dedup defect surviving one level below add()), all
 # host-INDEPENDENT for the same reason as the rest of section 55, so the same "raise by
@@ -5587,7 +5635,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=442
+ASSERT_FLOOR=447
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

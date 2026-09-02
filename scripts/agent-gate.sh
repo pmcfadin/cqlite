@@ -6568,11 +6568,53 @@ _failassert_write() {
   return 0
 }
 
-# _failassert_clean <text>: ONE line, no control characters, bounded. Component logs hold
-# repository-controlled paths, and git PERMITS a newline in one — an unsanitised value
-# would emit a SUMMARY line with no key at all.
+# _failassert_clean <text>: THE ONE EMIT BOUNDARY for this field — credentials redacted,
+# ONE line, no control characters, bounded. Component logs hold repository-controlled
+# paths, and git PERMITS a newline in one — an unsanitised value would emit a SUMMARY line
+# with no key at all.
+#
+# REDACTION, AND WHY IT IS HERE AND NOT AT THE CALL SITES (roborev job 45, blocker 4 —
+# the SIXTH instance of the credential-leak family this file already documents at
+# _component_set_one_line: 227 raw URL, 234 redacted-not-flattened, 239 flattened-not-
+# redacted, 264 scp form, 282 query strings). The `toolchain` tier copies WHOLE LINES into
+# this field (`error: `, `npm error `, `Error: `, `bash: `), and a git/npm diagnostic
+# routinely quotes the resolved remote — on CI that is
+# `https://x-access-token:<TOKEN>@github.com/…`, which the component-set pre-flight
+# explicitly ACCEPTS as canonical. SUMMARY blocks are pasted into PR comments by this
+# repo's own workflow, so an unredacted field leaks a live token into a public comment.
+#
+# It reuses `_component_set_redact_text` — the existing conservative free-text userinfo
+# redactor (deliberately broader than git's grammar: under-redaction costs a token,
+# over-redaction costs a slightly less readable diagnostic). A SECOND redactor is
+# forbidden: this repo's rule is to neutralise at the ONE emit boundary, never per
+# interpolation site and never as a second implementation, because a divergence between
+# two copies here IS a credential leak. Every state of this field — the extracted
+# identity AND the `not extractable (…)` causes that interpolate a log path — passes
+# through this function, so there is nothing to remember at a call site.
+#
+# REDACT, DO NOT REFUSE: the value is a diagnostic the run must still report.
+#
+# ORDER IS LOAD-BEARING, and it is redact -> control-strip -> squeeze -> cap:
+#   * the CAP MUST BE LAST. `cut -c1-300` applied first can sever a URL between the token
+#     and its `@`, and BOTH redaction rules key on that `@` — so a length bound would
+#     silently defeat the redaction. A bound must never be able to change a safety verdict
+#     (the same reasoning that put the display cap after the dedup in the extractor).
+#   * REDACTION PRECEDES THE CONTROL-CHAR STRIP. `tr '\001-\037\177' ' '` turns a control
+#     character inside userinfo into a SPACE, and both rules exclude `[:space:]` from the
+#     userinfo class — so stripping first can break a match that would otherwise have
+#     fired (`https://u:TOK<0x01>@h` -> `https://u:TOK @h`, no match, token emitted).
+#     Redacting first strictly dominates; the redactor passes control characters through
+#     untouched, so the strip still does its own job afterwards.
+#
+# DECLARED RESIDUAL: the extractor display-caps each NAME at 60 chars with a middle
+# elision BEFORE this function sees it, so an elision landing inside a `scheme://` can in
+# principle leave a `<token>@host` fragment that neither rule matches (rule 1 needs the
+# scheme, rule 2 needs a `:` after the host). Narrow, but not zero. Closing it needs the
+# redaction to run before the extractor's truncation, which cannot be done without a
+# second implementation of the rules inside awk — so it is DECLARED here rather than
+# silently accepted.
 _failassert_clean() {
-  printf '%s' "$1" | tr -d '\000' | tr '\001-\037\177' ' ' | tr -s ' ' | cut -c1-300
+  printf '%s' "$(_component_set_redact_text "$1")" | tr -d '\000' | tr '\001-\037\177' ' ' | tr -s ' ' | cut -c1-300
 }
 
 # _failassert_record <component> <status> [logfile]: THE extraction site. Only a FAIL has
