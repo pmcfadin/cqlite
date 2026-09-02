@@ -1785,6 +1785,134 @@ else
   ok "shallow: SKIPPED (differential fixture unbuildable — arm UNEXERCISED, declared not silent)"
 fi
 
+# --- 44(e2): AN INCOMPLETE OBJECT STORE WITHOUT A SHALLOW MARKER (job 412) ----
+#
+# THE VERDICT DEFECT this arm exists for: `--is-shallow-repository = false` says
+# there is no shallow MARKER, not that the history is COMPLETE. A missing
+# intermediate COMMIT object in a non-shallow repository produces the same rc 1
+# from the ancestry walk — and the script used to call that NOT-ANCESTOR at
+# exit 2, i.e. "your chain is wrong", when the truth was "this box could not
+# measure it". A false DEFINITIVE verdict, which is the bad direction.
+#
+# THE DIFFERENTIAL IS THE PROOF, exactly as for the shallow arm: the same pair
+# must be BOUND in the INTACT copy and UNVERIFIABLE once one intermediate commit
+# object is removed. Without the intact half, the refusal could be anything.
+BR_SRC="$T/broken-src"
+BR_INTACT="$T/broken-intact"
+broken_shape=0
+BR_A=""; BR_C=""; BR_MID=""
+mkdir -p "$BR_SRC"
+if git init -q -b main "$BR_SRC" >/dev/null 2>&1; then
+  git -C "$BR_SRC" config user.email t@t
+  git -C "$BR_SRC" config user.name t
+  _br_ok=1
+  for _i in 0 1 2 3 4 5; do
+    printf 'c%s\n' "$_i" >"$BR_SRC/f$_i"
+    git -C "$BR_SRC" add -- "f$_i" >/dev/null 2>&1 &&
+      git -C "$BR_SRC" commit -q -m "c$_i" >/dev/null 2>&1 || _br_ok=0
+  done
+  if [ "$_br_ok" -eq 1 ]; then
+    BR_A=$(git -C "$BR_SRC" rev-parse main~5 2>/dev/null) || BR_A=""
+    BR_C=$(git -C "$BR_SRC" rev-parse main 2>/dev/null) || BR_C=""
+    BR_MID=$(git -C "$BR_SRC" rev-parse main~2 2>/dev/null) || BR_MID=""
+  fi
+fi
+# The INTACT copy is the differential's other half; the SOURCE is the one broken.
+if [ -n "$BR_A" ] && [ -n "$BR_C" ] && [ -n "$BR_MID" ] &&
+   cp -a "$BR_SRC" "$BR_INTACT" 2>/dev/null; then
+  # Objects are loose here (no repack was run), so removing the intermediate
+  # COMMIT object is a single unlink. Trees and blobs are untouched: the point is
+  # that the COMMIT graph — what `--is-ancestor` traverses — is broken.
+  _br_obj="$BR_SRC/.git/objects/$(printf '%s' "$BR_MID" | cut -c1-2)/$(printf '%s' "$BR_MID" | cut -c3-)"
+  if [ -f "$_br_obj" ] && rm -f "$_br_obj"; then
+    # FIXTURE SELF-CONSISTENCY, four conditions. The third is the whole subject
+    # (no shallow marker) and the fourth is what makes the case ambiguous.
+    if [ "$(git -C "$BR_SRC" rev-parse --is-shallow-repository 2>/dev/null)" = false ] &&
+       ! git -C "$BR_SRC" cat-file -e "$BR_MID^{commit}" >/dev/null 2>&1 &&
+       git -C "$BR_SRC" cat-file -e "$BR_A^{commit}" >/dev/null 2>&1 &&
+       git -C "$BR_SRC" cat-file -e "$BR_C^{commit}" >/dev/null 2>&1; then
+      broken_shape=1
+    fi
+  fi
+fi
+if [ "$broken_shape" -eq 1 ]; then
+  ok "incomplete-store fixture: NO shallow marker, both endpoints present, an INTERMEDIATE commit removed"
+  # THE GIT-LEVEL DIFFERENTIAL: intact -> rc 0, broken -> rc 1 with no shallow
+  # marker. That second line is the exact input that produced the false verdict.
+  if git -C "$BR_INTACT" merge-base --is-ancestor "$BR_A" "$BR_C" >/dev/null 2>&1; then
+    ok "incomplete-store differential (git): the INTACT copy reports the pair as an ancestor (rc 0)"
+  else
+    bad "incomplete-store differential (git): the pair is not an ancestor even intact — the fixture cannot exercise the case"
+    broken_shape=0
+  fi
+  if git -C "$BR_SRC" merge-base --is-ancestor "$BR_A" "$BR_C" >/dev/null 2>&1; then
+    bad "incomplete-store differential (git): the BROKEN copy still reports an ancestor — rc 1 is not being produced, so the arm proves nothing"
+    broken_shape=0
+  else
+    ok "incomplete-store differential (git): the BROKEN copy returns rc 1 with NO shallow marker — the false-verdict input"
+  fi
+fi
+if [ "$broken_shape" -eq 1 ]; then
+  BRFULL="$T/broken-full.txt"
+  BRDELTA="$T/broken-delta.txt"
+  full_summary "$BRFULL" "$(printf '%.7s' "$BR_A")" "$(printf '%.12s' "$BR_A")" PASS PASS
+  delta_summary "$BRDELTA" "$BR_A" "$(printf '%.7s' "$BR_C")" "$(printf '%.12s' "$BR_C")" \
+    PASS PASS "MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION — anchor $BR_A)"
+  # GUARD LEVEL, half 1 — the INTACT copy must BIND, or half 2 proves nothing.
+  OUT=$(cd "$BR_INTACT" && PATH="$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$BR_C OPEN" \
+    bash "$NEUTRAL_ASSERT" 2421 "$BR_C" "$BRFULL" "$BRDELTA" 2>&1)
+  RC=$?
+  if [ "$RC" -eq 0 ] && [ "${OUT#*anchor-ancestry: BOUND}" != "$OUT" ]; then
+    ok "incomplete-store differential (guard): the INTACT copy BINDS the pair (exit 0, anchor-ancestry: BOUND)"
+  else
+    bad "incomplete-store differential (guard): the intact copy did not BIND (exit $RC) — the broken half proves nothing (got: $OUT)"
+  fi
+  # GUARD LEVEL, half 2 — the BROKEN copy must be UNVERIFIABLE, never exit 2.
+  OUT=$(cd "$BR_SRC" && PATH="$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$BR_C OPEN" \
+    bash "$NEUTRAL_ASSERT" 2421 "$BR_C" "$BRFULL" "$BRDELTA" 2>&1)
+  RC=$?
+  if [ "$RC" -eq 2 ]; then
+    bad "incomplete-store (guard): a VALID anchor was refused at exit 2 as NOT-ANCESTOR — the false definitive verdict this arm exists to prevent (got: $OUT)"
+  elif [ "$RC" -ne 3 ]; then
+    bad "incomplete-store (guard): expected exit 3 (got $RC: $OUT)"
+  else
+    ok "incomplete-store (guard): an incomplete store is exit 3, NEVER the exit-2 NOT-ANCESTOR verdict"
+    case "$OUT" in
+      *"PREMERGE: ANCHOR-UNVERIFIABLE"*)
+        ok "incomplete-store (guard): carries the ANCHOR-UNVERIFIABLE marker" ;;
+      *) bad "incomplete-store (guard): expected the ANCHOR-UNVERIFIABLE marker (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"reachable history is INCOMPLETE"*)
+        ok "incomplete-store (guard): the cause names the incomplete history" ;;
+      *) bad "incomplete-store (guard): the cause must name the incomplete history (got: $OUT)" ;;
+    esac
+    # THE THREE REASONS rc 1 IS NOT A VERDICT MUST BE DISTINGUISHABLE. This one is
+    # neither the shallow cause nor a timeout, and it must not read as either.
+    case "$OUT" in
+      *"NOT PROVEN COMPLETE"*)
+        bad "incomplete-store (guard): reported as the SHALLOW cause — the operator would run git fetch --unshallow on a repo with no shallow marker (got: $OUT)" ;;
+      *) ok "incomplete-store (guard): NOT reported as the shallow cause" ;;
+    esac
+    case "$OUT" in
+      *"timed out after"*)
+        bad "incomplete-store (guard): reported as a TIMEOUT (got: $OUT)" ;;
+      *) ok "incomplete-store (guard): NOT reported as a timeout" ;;
+    esac
+    case "$OUT" in
+      *"git fsck"*)
+        ok "incomplete-store (guard): the cause carries its own remedy (git fsck / git fetch)" ;;
+      *) bad "incomplete-store (guard): the cause must carry a repair remedy (got: $OUT)" ;;
+    esac
+  fi
+else
+  printf 'ARM NOT TAKEN: incomplete object store (job 412) — this host could not build the fixture: a\n'
+  printf 'ARM NOT TAKEN: 6-commit history with an INTERMEDIATE loose commit object removed, no shallow\n'
+  printf 'ARM NOT TAKEN: marker, both endpoints intact, plus an untouched copy for the differential.\n'
+  printf 'ARM NOT TAKEN: Without it the connectivity branch of assert_anchor_on_history is UNEXERCISED.\n'
+  ok "incomplete-store: SKIPPED (differential fixture unbuildable — arm UNEXERCISED, declared not silent)"
+fi
+
 # --- 44(f): A GRAFT MUST NOT BE ABLE TO MANUFACTURE `BOUND` (roborev job 355) -
 #
 # `$GIT_DIR/info/grafts` rewrites parentage and **survives

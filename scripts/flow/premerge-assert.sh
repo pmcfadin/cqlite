@@ -597,7 +597,15 @@ refuse_anchor_unverifiable() {
 # rev-parse --git-path objects                  | RUNNER  | rc inspected; non-empty, made
 #                                               |         | absolute, canonicalised
 # rev-parse --is-shallow-repository              | RUNNER  | must equal the literal `false`;
-#                                               |         | anything else => UNVERIFIABLE
+#                                               |         | anything else => UNVERIFIABLE.
+#                                               |         | `false` means NO SHALLOW MARKER,
+#                                               |         | NOT a complete history (job 412):
+#                                               |         | it no longer establishes
+#                                               |         | completeness on its own.
+# rev-list --quiet <certified>  (in scratch)     | RUNNER  | the CONNECTIVITY check that does
+#   ONLY on the rc-1 path; 0ms on success        |         | establish it: rc != 0 => the
+#                                               |         | history is INCOMPLETE =>
+#                                               |         | UNVERIFIABLE, never exit 2
 # _anchor_canon  (sh -c 'cd -- "$1" && pwd -P') | RUNNER  | empty input refused; rc now
 #   x5: toplevel, common-dir, TMPDIR, created,  |         | INSPECTED three-valued (job 395):
 #       object-dir                              |         | 124/137 -> TIMEOUT cause, rc 1 ->
@@ -673,7 +681,16 @@ refuse_anchor_unverifiable() {
 # and target-revalidated; and the `anchor-reads:` token was corrected twice — once
 # for overclaiming, once for UNDERclaiming after these fixes.
 #
-# AND WHAT THE LATEST ROUND CHANGED (job 395): `_anchor_canon` stopped
+# AND WHAT THE LATEST ROUND CHANGED (job 412), and it is the only VERDICT defect
+# found since round 12 rather than a diagnostic one: `--is-shallow-repository =
+# false` was treated as establishing a complete history, and it does not — it says
+# there is no shallow MARKER. A missing intermediate commit object in a non-shallow
+# repository yields the same rc 1 from the ancestry walk, so a VALID anchor was
+# refused at EXIT 2 as NOT-ANCESTOR ("your chain is wrong") when the truth was
+# "this box could not measure it". A connectivity walk (`rev-list --quiet
+# <certified>`, in the scratch, bounded, on the rc-1 path ONLY) now establishes
+# completeness before rc 1 is treated as a verdict, with its own textually
+# distinct cause and remedy. The shallowness rows `_anchor_canon` stopped
 # suppressing its exit status with `|| true`, so all FIVE canonicalisations now
 # distinguish a TIMEOUT (124/137, stalled filesystem) from an unresolvable path
 # (rc 1) instead of collapsing both onto "empty output". Its table row narrows
@@ -1368,6 +1385,63 @@ assert_anchor_on_history() {
       "that is not the literal 'false' — 'true', empty, or a git too old to answer" \
       "— is UNMEASURED, and an unmeasured ancestry is never read as a pass." \
       "REMEDY: git fetch --unshallow (or fetch the missing history), then re-run."
+  fi
+
+  # SHALLOWNESS IS NOT THE ONLY REASON rc 1 CAN BE NON-DEFINITIVE (roborev job
+  # 412). `--is-shallow-repository = false` says there is no SHALLOW MARKER; it
+  # does NOT say the certified commit's reachable history is COMPLETE. If an
+  # intermediate commit object is missing or corrupt in a non-shallow repository,
+  # `merge-base --is-ancestor` returns the same rc 1 — and this script then
+  # reported a VALID anchor as NOT-ANCESTOR at exit 2, telling the operator their
+  # chain is wrong when the truth is that this box could not measure it.
+  #
+  # THAT IS A FALSE DEFINITIVE VERDICT, which is why it outranks every diagnostic
+  # fix since round 12: the whole point of the exit-2/exit-3 split is that they are
+  # DIFFERENT OPERATOR ACTIONS. It is the "rc 1 is three-valued" lesson (#3544)
+  # caught one axis short — we had encoded shallowness as the only cause.
+  #
+  # MEASURED, on a non-shallow repo with one intermediate commit object removed:
+  #   merge-base --is-ancestor <a> <c>  -> rc 1     (the false NOT-ANCESTOR)
+  #   rev-list --quiet <c>              -> rc 128   (the connectivity signal)
+  #   rev-parse --is-shallow-repository -> false    (no marker; useless here)
+  #
+  # SO CONNECTIVITY IS VERIFIED BEFORE rc 1 IS TREATED AS A VERDICT. The walk is
+  # over COMMITS only, which is exactly what `--is-ancestor` traverses — trees and
+  # blobs cannot change an ancestry answer, so `--objects` would buy nothing and
+  # cost a great deal. It runs in the SCRATCH through the same `_anchor_git`
+  # wrapper, so it inherits the bound, the `env -i` allowlist and ANCHOR_GIT_OPTS
+  # (job 276: the option must reach every site) and adds NO resource and NO
+  # lifetime.
+  #
+  # COST, MEASURED RATHER THAN ESTIMATED (2539 commits, this repo, in the real
+  # scratch-over-alternate posture): 57-61ms, against 4ms for the ancestry walk
+  # itself. AND IT IS ZERO ON THE SUCCESS PATH — this branch is only reached when
+  # the walk already answered "no", so a correct Case B merge (anchor IS an
+  # ancestor, rc 0) returns above without walking anything. The cost is paid only
+  # on a refusal, where a slow correct answer beats a fast wrong one.
+  rc=0
+  _anchor_git rev-list --quiet "$head" >/dev/null 2>&1 || rc=$?
+  if _anchor_timed_out "$rc"; then
+    _anchor_refuse_timeout "$anchor" "$head" "the connectivity walk (rev-list over the certified sha's history)" \
+      "the SHARED object store, read through the scratch alternate"
+  fi
+  if [ "$rc" -ne 0 ]; then
+    # TEXTUALLY DISTINCT from the shallow cause and from the timeout cause: there
+    # are now THREE reasons rc 1 is not a verdict, and an operator must be able to
+    # tell which one fired.
+    refuse_anchor_unverifiable "$anchor" "$head" \
+      "the certified sha's reachable history is INCOMPLETE in this object store (rev-list exited $rc)" \
+      "There is no shallow marker on this repository, so the shallowness probe" \
+      "above answered 'false' — but that only means no marker, NOT that the history" \
+      "is complete. A missing or corrupt intermediate COMMIT object produces the" \
+      "same rc 1 from the ancestry walk, and treating it as a verdict would report" \
+      "a VALID anchor as 'not on this history' (exit 2) when the truth is that this" \
+      "box could not measure it." \
+      "REMEDY: repair the object store — 'git fsck' names the missing objects, and" \
+      "'git fetch' the branches that carry them — then re-run this assert. Do NOT" \
+      "re-run the gate: the chain may well be correct." \
+      "This is NOT the shallow cause (that names a shallow/unproven repository) and" \
+      "NOT a timeout (that names the operation that hung)."
   fi
 
   refuse_no_gate \
