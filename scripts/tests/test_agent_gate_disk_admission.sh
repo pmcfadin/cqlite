@@ -2221,6 +2221,89 @@ case "$X_LINE" in
   *) bad "bar-precision: 0.1 was not accepted as pinned: ${X_LINE:-<none>}" ;;
 esac
 
+# ===========================================================================
+# Case Y (roborev job 390, Medium): admission never mutates a TRACKED file, so
+# the gate cannot absorb its own write into the certification baseline.
+#
+# `cargo metadata` without `--locked` is PERMITTED to create or update
+# `Cargo.lock`, and this probe runs BEFORE `_tree_recapture_after_slot` — so such
+# a write would land before the certification window is captured and be ABSORBED
+# rather than caught. `tree-integrity` makes a mid-run mutation fatal; one before
+# the recapture is invisible to it.
+#
+# THE REACHABILITY CONTROL COULD NOT BE PRODUCED ON THIS TOOLCHAIN, and that is
+# reported rather than simulated (the same disposition as quota in Case W). See
+# the skip below for the four measurements.
+# ===========================================================================
+y_repo=$(cd "$SCRIPT_DIR/../.." && pwd)
+
+# (a) STRUCTURAL, and on this toolchain it is the assertion that CARRIES the guarantee:
+#     since the behavioural control cannot discriminate here, a source assert is the only
+#     thing that reds if someone drops `--locked`.
+if grep -q 'cargo metadata --no-deps --locked --format-version 1' "$GATE"; then
+  ok "lockfile: the shipped metadata probe passes --locked, so it may not write Cargo.lock"
+else
+  bad "lockfile: the metadata probe does NOT pass --locked — it may create or update Cargo.lock before the certification window opens"
+fi
+# The cause must be its own string: four operator situations (df / target-dir / bar /
+# lockfile), four strings.
+if grep -q 'target-dir-lockfile-stale-or-metadata-failed' "$GATE"; then
+  ok "lockfile: a --locked refusal has its OWN cause naming the lockfile, distinct from the df, bar and other target-dir causes"
+else
+  bad "lockfile: no distinct cause naming the lockfile — a stale lockfile would report as a generic probe failure"
+fi
+
+# (b) BEHAVIOURAL: the digest of Cargo.lock, and the whole tracked-file census, across a
+#     REAL admission run. Asserted from the artifacts themselves, never from the absence of
+#     a complaint.
+y_lock_before=$(sha256sum "$y_repo/Cargo.lock" 2>/dev/null | cut -d' ' -f1)
+y_status_before=$(cd "$y_repo" && git status --porcelain 2>/dev/null | sha256sum | cut -d' ' -f1)
+y_script=$(df_script y "$HIGH")
+run_stub_gate y "$y_script" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/y-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+y_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; y_status=$WX_STATUS
+assert_no_timeout "y lockfile immutability"
+y_lock_after=$(sha256sum "$y_repo/Cargo.lock" 2>/dev/null | cut -d' ' -f1)
+y_status_after=$(cd "$y_repo" && git status --porcelain 2>/dev/null | sha256sum | cut -d' ' -f1)
+# The run must have actually reached the probe, or "nothing changed" proves nothing.
+if [ "$(df_calls y)" -ge 1 ]; then
+  ok "lockfile CONTROL: the run reached the admission probe ($(df_calls y) df call(s)) — so an unchanged lockfile means something"
+else
+  bad "lockfile CONTROL: the run never reached the probe; the immutability assertions below would be vacuous"
+fi
+if [ -n "$y_lock_before" ] && [ "$y_lock_before" = "$y_lock_after" ]; then
+  ok "lockfile: Cargo.lock's DIGEST is unchanged across a full admission run"
+elif [ -z "$y_lock_before" ]; then
+  bad "lockfile: could not digest $y_repo/Cargo.lock — the assertion could not be made"
+else
+  bad "lockfile: Cargo.lock CHANGED across admission — the gate mutated a tracked file before its own certification window opened"
+fi
+if [ "$y_status_before" = "$y_status_after" ]; then
+  ok "lockfile: the whole tracked-file census is unchanged across admission (broader than Cargo.lock, which is the property that matters)"
+else
+  bad "lockfile: admission changed the tracked-file census — some tracked path was written before the certification window opened"
+fi
+
+# (c) THE REACHABILITY CONTROL, reported as unavailable rather than faked. Measured four
+#     ways on the pinned toolchain, each with the lockfile ABSENT (the most favourable
+#     condition for a write): with and without `--offline`, network available and not.
+#     Every one left Cargo.lock absent at rc 0 — `--no-deps` does not write it. So the
+#     pre-fix invocation cannot be shown mutating anything HERE, and `--locked` is
+#     converting an incidental, undocumented property into an explicit one rather than
+#     fixing an observed write.
+y_farm="$tmp/y-farm"; mkdir -p "$y_farm"
+for y_e in "$y_repo"/* "$y_repo"/.[!.]*; do
+  y_b=$(basename "$y_e"); [ "$y_b" = Cargo.lock ] && continue
+  ln -s "$y_e" "$y_farm/$y_b" 2>/dev/null || true
+done
+( cd "$y_farm" && timeout 300 cargo metadata --no-deps --offline --format-version 1 >/dev/null 2>&1 )
+if [ -f "$y_farm/Cargo.lock" ]; then
+  ok "lockfile CONTROL: the PRE-FIX invocation CREATED Cargo.lock from absent — the defect is reachable and the assertions above are a differential"
+else
+  skip "lockfile CONTROL: the pre-fix invocation did NOT write Cargo.lock even with the file ABSENT — reachability is not demonstrable on this cargo, so (a) is what carries the guarantee"
+fi
+
 printf '\n%s\n' "-----------------------------------------------"
 printf 'passed: %d  failed: %d  skipped: %d\n' "$PASS" "$FAIL" "$SKIP"
 [ "$FAIL" -eq 0 ] || exit 1

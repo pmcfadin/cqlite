@@ -19425,6 +19425,27 @@ _gate_disk_admission_clears_bar() {
 #     tr, cut          pure string filters over a variable, in the stderr WARN only
 #
 # A new command on this path belongs in one of those two lists, with its reason.
+#
+# ---- SECOND AXIS: WHAT EACH ONE MAY *WRITE* (roborev job 390) ----------------------
+#
+# A different question from bounding, and it needs its own enumeration for the same reason
+# the first one did: this family has regenerated three times by closing one axis at a time.
+# The rule: NOTHING on this path may write inside the REPOSITORY, because the probe runs
+# BEFORE `_tree_recapture_after_slot` and a write landing there is absorbed into the
+# certification baseline instead of being caught by `tree-integrity`.
+#
+#   cargo metadata   READ-ONLY, and now EXPLICITLY so: `--locked` forbids it creating or
+#                    updating `Cargo.lock`, the one tracked file it could otherwise touch.
+#   python3 (parse)  reads `$md` from stdin; writes nothing.
+#   python3 (mkdir)  WRITES, deliberately and declared: it creates the resolved TARGET DIR
+#                    and one `O_EXCL` probe file inside it, removed in a `finally`. Both
+#                    live under the target dir, which is a BUILD OUTPUT directory and is
+#                    gitignored — never a tracked path. Argued in full at that function.
+#   df -Pk           read-only by construction.
+#   $md              written under `$LOG_DIR`, this run's own scratch, never the worktree.
+#   capture triple   written under `$LOG_DIR` for the same reason (job 349).
+#
+# A new command belongs in this list too, with what it writes and where.
 _GATE_DF_BOUND_SECS=15
 
 # ---- CAPTURE OWNERSHIP FOR THE BOUNDED CALLS (roborev job 349, Low) -------------------
@@ -19479,8 +19500,25 @@ _DA_TARGET_NOTE=""
 _gate_resolve_target_dir() {
   local md rc path
   md="$LOG_DIR/disk-admission-cargo-metadata.json"
+  # `--locked` (roborev job 390). WITHOUT it, `cargo metadata` is PERMITTED to create or
+  # update `Cargo.lock` — a TRACKED file — and this probe runs BEFORE
+  # `_tree_recapture_after_slot`, so such a write would land before the certification window
+  # is captured and be ABSORBED into the baseline rather than caught. `tree-integrity` makes
+  # a mid-run mutation fatal; a mutation before the recapture is invisible to it, which is a
+  # false-certification route. Note the asymmetry that makes it worse than the tolerated
+  # case: when the FIRST CARGO COMPONENT re-resolves a stale lockfile, that is a mutation
+  # INSIDE the window and surfaces as tree-integrity's named `lockfile-settled` class; a
+  # write from here surfaces as nothing at all.
+  #
+  # MEASURED, and the measurement is the reason this comment is long: on the pinned
+  # toolchain the mutation is NOT REACHABLE — `--no-deps` does not write the lockfile even
+  # when it is MISSING, with or without `--offline`, network available or not (four
+  # measurements, all "Cargo.lock absent", rc 0). So `--locked` is not fixing an observed
+  # write; it converts a property we were relying on INCIDENTALLY — an undocumented
+  # `--no-deps` implementation detail that a future cargo may change — into an EXPLICIT one,
+  # at zero measured cost (the normal case exits 0 with it).
   _component_set_bounded "$_GATE_TARGET_DIR_BOUND_SECS" \
-    cargo metadata --no-deps --format-version 1 >"$md" 2>/dev/null
+    cargo metadata --no-deps --locked --format-version 1 >"$md" 2>/dev/null
   rc=$?
   case "$rc" in
     0) ;;
@@ -19488,7 +19526,22 @@ _gate_resolve_target_dir() {
     124|137) printf 'UNRESOLVED target-dir-probe-timeout'; return 0 ;;
     "$_CS_UNBOUNDABLE_RC") printf 'UNRESOLVED target-dir-probe-unboundable'; return 0 ;;
     "$_CS_REPLAY_RC") printf 'UNRESOLVED target-dir-output-truncated'; return 0 ;;
-    *) printf 'UNRESOLVED target-dir-probe-failed'; return 0 ;;
+    *)
+      # THE `--locked` ARM, and it is DELIBERATELY the honest name rather than a confident
+      # one. With `--locked` the dominant cause of a non-zero exit is a stale or missing
+      # lockfile, so the cause NAMES it — a fourth operator situation with a fourth string,
+      # distinct from every df cause, every bar cause and the other target-dir causes. It
+      # does not claim certainty, because confirming it would mean parsing cargo's message,
+      # and that is a locale-dependent string oracle (the same reason the mkdir classifier
+      # reports `errno.errorcode` instead of reading `mkdir`'s output).
+      #
+      # WHICH EPISTEMIC STATE: UNMEASURED, and the choice is deliberate. A lockfile cargo
+      # will not accept establishes NOTHING about whether the build can write to the target
+      # filesystem — unlike an ENOSPC from the writability probe, which does. So it is the
+      # "cannot tell" branch, DECLARED in the block by its own cause rather than silent.
+      # Remedy for an operator who sees it: `cargo generate-lockfile`, or rebase onto a main
+      # whose lockfile matches the manifests.
+      printf 'UNRESOLVED target-dir-lockfile-stale-or-metadata-failed'; return 0 ;;
   esac
   # Parsed as JSON, never with a regex: a path may contain any byte and cargo escapes it.
   # Bounded for the same reason the probe is. A newline in the value is REFUSED rather
