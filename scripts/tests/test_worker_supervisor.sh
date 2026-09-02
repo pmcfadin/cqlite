@@ -10340,7 +10340,15 @@ test_object_store_sweep_claim_loser_waits_for_the_peer_verdict() {
       touch "$d/go"
       fixture_wait "$lane_a" >/dev/null 2>&1 || true
       fixture_wait "$lane_b" >/dev/null 2>&1 || true
-      fail "obj-sweep(loser-wait-parked/$arm): waiting=$(grep -c 'WAITING for the peer lane' "$d/b.log" 2>/dev/null || true) latch=$([[ -e "$OBJ_SWEEP_STAMP.STOP" ]] && echo present || echo absent) spawned=$([[ -f "$counter2" ]] && echo yes || echo no) after $waited polls (see $d/b.log)"
+      # NAME WHICH OF THE TWO THINGS WENT WRONG, because they are different findings and a
+      # single message for both is what makes a RED arm unattributable: a loser that never
+      # parked AND ALREADY RAN ITS WORKER is the round-12 defect itself, observed, while
+      # anything else here is a staging failure and proves nothing either way.
+      if [[ -f "$counter2" ]]; then
+        fail "obj-sweep(loser-wait-parked/$arm): THE DEFECT — the claim loser never waited (waiting=$(grep -c 'WAITING for the peer lane' "$d/b.log" 2>/dev/null || true)) and has ALREADY SPAWNED its worker while the peer's sweep was in flight (latch=$([[ -e "$OBJ_SWEEP_STAMP.STOP" ]] && echo present || echo absent) after $waited polls) — see $d/b.log"
+      else
+        fail "obj-sweep(loser-wait-parked/$arm): STAGING — waiting=$(grep -c 'WAITING for the peer lane' "$d/b.log" 2>/dev/null || true) latch=$([[ -e "$OBJ_SWEEP_STAMP.STOP" ]] && echo present || echo absent) spawned=no after $waited polls; the arm below could not be staged (see $d/b.log)"
+      fi
       continue
     fi
     # RELEASE LANE A: its sweep now prints its verdict and lane A acts on it.

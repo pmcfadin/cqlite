@@ -3947,10 +3947,16 @@ obj_sweep_claim_wait() {
   elapsed=$(( $(date +%s) - started_at ))
   case "$OBJ_SWEEP_CLAIM_WAIT_STATE" in
     completed)
-      log "object-store sweep: the peer lane holding $claim FINISHED its sweep after ${elapsed}s of waiting and advertised it in the throttle stamp; this box is not latched (#3749)."
+      # WHAT THIS MAY CLAIM IS BOUNDED BY WHEN IT LOOKED. The pass that observed the fresh
+      # stamp read the latch first and found none, so what is true is that NO STOPPING
+      # VERDICT HAD BEEN RECORDED AS OF THAT READ — not that the box "is not latched" now,
+      # which is a claim about the present that a peer can falsify between this printf and
+      # the next statement. The caller re-reads the latch before it returns toward a spawn;
+      # this line is a journal entry, not a licence.
+      log "object-store sweep: the peer lane holding $claim FINISHED its sweep after ${elapsed}s of waiting and advertised it in the throttle stamp; no stopping verdict had been recorded for this box as of the read that observed it (#3749)."
       ;;
     vacated)
-      log "object-store sweep: the peer lane holding $claim GAVE THE CLAIM UP after ${elapsed}s without advertising a sweep — it was killed mid-sweep, or it stopped on a verdict it could not latch and forced the throttle stamp stale so every lane re-sweeps. This box is not latched; this lane will contend for the claim again (#3749)."
+      log "object-store sweep: the peer lane holding $claim GAVE THE CLAIM UP after ${elapsed}s without advertising a sweep — it was killed mid-sweep, or it stopped on a verdict it could not latch and forced the throttle stamp stale so every lane re-sweeps. No stopping verdict had been recorded for this box as of the read that observed it; this lane will contend for the claim again (#3749)."
       ;;
     expired)
       log "object-store sweep: the peer lane holding $claim has neither finished nor given it up in ${elapsed}s, and that claim is now older than the derived ${stale}s recovery bound, so the sweep it represents cannot still be running. This lane will RECOVER the claim and measure the store itself rather than carry on unmeasured (#3749)."
