@@ -124,6 +124,20 @@ D="$OUT/host"
 # named, fatal refusal. (This is the same rule the rest of the script follows — a
 # positive verdict requires an affirmative measurement, never the absence of an
 # error.)
+# ENUMERABILITY IS CHECKED FIRST, because both the removal and the survivor check
+# depend on it (roborev job 410). Glob expansion and `ls` both need the directory
+# READABLE: if $D is writable and searchable but not readable, neither can list its
+# contents, the globs stay literal, `ls` finds nothing, and the survivor check
+# concludes "no survivors" — a false clean over stale numbers from another host,
+# which is precisely what this purge exists to prevent. "Cannot tell" must not take
+# the permissive branch, so it is a named refusal instead.
+if [ ! -r "$D" ] || [ ! -x "$D" ]; then
+  echo "PROBE-STEP-FAILED: $D is not both readable and searchable, so the stale-measurement purge" >&2
+  echo "  can neither enumerate nor VERIFY itself (globs and ls both need readdir). Refusing to start:" >&2
+  echo "  a previous run's or another host's numbers could survive unseen." >&2
+  echo "VERDICT: UNMEASURED (output directory not enumerable; no capability claim may rest on this run)" > "$D/differential.txt" 2>/dev/null
+  exit 1
+fi
 rm -f "$D"/arm-*.csv "$D"/arm-*.txt "$D"/gate-probe-*.csv "$D"/gate-probe-*.txt \
       "$D"/differential.txt "$D"/tma-probe.txt "$D"/event-disposition.txt \
       "$D"/counter-semantics-verification.txt "$D"/capability-probe.txt \
@@ -405,8 +419,14 @@ if [ $PLD_RC -ne 0 ] || [ -z "$PLD" ]; then
 else
   # The previous `[ -s ]` check was VACUOUS: a heading is written per event whether
   # or not a definition is found. Each event is now explicitly FOUND or NOT-LISTED.
+  # offcore_requests.all_data_rd is in this list because job 405 promoted it to Gate
+  # B differential evidence, and AC4 requires the semantics of anything the gate
+  # rests on to be verified from the host's own event table (roborev job 410).
+  # Evidence whose definition is unverified is the shape #3224 section 5.2 exists to
+  # prevent.
   for e in cycle_activity.stalls_l3_miss cycle_activity.stalls_l2_miss \
            cycle_activity.stalls_total offcore_requests_outstanding.all_data_rd \
+           offcore_requests.all_data_rd \
            LLC-load-misses cache-references; do
     { echo "== $e =="
       # From the event heading to the NEXT heading, never a fixed context window

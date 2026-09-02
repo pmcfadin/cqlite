@@ -21,6 +21,9 @@
 == offcore_requests_outstanding.all_data_rd ==
 [semantics: NOT-LISTED on this host — no definition to verify against]
 
+== offcore_requests.all_data_rd ==
+[semantics: NOT-LISTED on this host — no definition to verify against]
+
 == LLC-load-misses ==
 [semantics: NOT-LISTED on this host — no definition to verify against]
 

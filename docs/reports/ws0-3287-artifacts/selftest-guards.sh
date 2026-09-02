@@ -122,7 +122,7 @@ if [ "$IS_MEASURE" = 0 ]; then
     exit 0
   fi
   case "$BARE" in
-    LLC-loads|LLC-load-misses|offcore_requests.all_data_rd|offcore_requests_buffer.sq_full|topdown.slots|slots|topdown-*|cycle_activity.stalls_mem_any)
+    LLC-loads|LLC-load-misses|offcore_requests_buffer.sq_full|topdown.slots|slots|topdown-*|cycle_activity.stalls_mem_any)
       echo "event syntax error: Bad event name" >&2; exit 1 ;;
   esac
   [ -n "${OF:-}" ] && printf '1234,,%s,1000000,100.00,,\n' "$name" > "$OF"
@@ -161,6 +161,12 @@ for e in "${evs[@]}"; do
     cycle_activity.stalls_l2_miss:u) if [ "$work" = 0 ]; then v=$((accesses*15)); else v=100; fi ;;
     cycle_activity.stalls_l3_miss:u) if [ -n "${SHIM_NEST_VIOLATE:-}" ]; then v=999999999999; else v=0; fi ;;
     offcore_requests_outstanding*)   v=0 ;;
+    # MOVES with the working set (roborev job 410): job 405 put this event into the
+    # offcore differential group, and the shim previously reported it absent, so no
+    # case exercised the measurement path that promotion created. A stuck-at-0 shim
+    # value would not have exercised it either — the point of the differential is
+    # that a usable counter RISES.
+    offcore_requests.all_data_rd:u) if [ "$work" = 0 ]; then v=$((accesses*9)); else v=40; fi ;;
     cache-misses:u|cache-references:u) v=0 ;;
     l1d_pend_miss.pending:u) if [ "$work" = 0 ]; then v=$((accesses*12)); else v=50; fi ;;
     l1d_pend_miss.fb_full:u) if [ "$work" = 0 ]; then v=$((accesses*3)); else v=10; fi ;;
@@ -417,6 +423,19 @@ rc=$(SHIM_TMA=absent run_probe "$d")
 if ! grep -rq '999999999\|888888888' "$d/out/host/"*.csv 2>/dev/null; then
   ok "stale arm CSVs purged before this run reports (job 312 f2: another host's numbers under COMPLETE)"
 else bad "stale CSVs from a previous run survived into this run's verdict" "$d"; fi
+
+# --- 4c. the event promoted into the differential must be MEASURED, not just probed
+# roborev job 410. Job 405 moved offcore_requests.all_data_rd out of "disposition
+# only" and into the offcore group — the whole point being that a silent zero becomes
+# detectable. Nothing exercised that: the shim reported the event absent, so the
+# measurement path it had just been given was dead in every test. Now the shim
+# provides it and this case requires the report to carry a per-arm reading.
+d="$TMP/c4c"; mkdir -p "$d"; rc=$(SHIM_TMA=absent run_probe "$d")
+line=$(gateline "$d" 'offcore_requests\.all_data_rd:u')
+if [ "$rc" = 0 ] && grep -q 'disposition=PROGRAMS' <<<"$line" \
+   && grep -qE 'friendly-L2resident=[0-9]+ +hostile-512m=[0-9]+ +hostile-2g=[0-9]+' <<<"$line"; then
+  ok "offcore_requests.all_data_rd is MEASURED per arm, not reported as disposition-only (job 405 promotion, job 410 coverage)"
+else bad "the promoted differential event has no per-arm reading (rc=$rc, line=$line)" "$d"; fi
 
 # --- 5b. a purge that FAILS must stop the run, not be assumed to have worked ---
 # roborev job 327 (High). `rm -f` exits 0 for an already-absent file and non-zero
