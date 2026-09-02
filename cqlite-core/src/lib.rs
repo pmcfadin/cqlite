@@ -17,7 +17,6 @@ pub mod error;
 // FFI error contract moved to `cqlite_ffi_common::error_contract` (#1452; no re-export, see CHANGELOG).
 pub(crate) mod float_cmp;
 pub mod parser;
-pub mod probe3782; // TEMPORARY #3782 instrumentation — REVERT
 pub mod types;
 pub mod util;
 pub mod version_hints;

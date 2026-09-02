@@ -235,7 +235,7 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                 }
                 Some(next_offset)
             }
-            Err(e) => { crate::probe3782::hit("timestamp_policy:238", &format!("{e}")); None },
+            Err(_) => None,
         }
     }
 

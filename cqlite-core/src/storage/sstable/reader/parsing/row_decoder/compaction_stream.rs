@@ -285,7 +285,6 @@ impl V5CompressedLegacyParser {
                 Ok(PartitionStreamStep::Consumed(next_offset))
             }
             None => {
-                crate::probe3782::hit("compaction_stream:287_none_arm", if at_final_chunk { "at_final_chunk=true" } else { "at_final_chunk=false" });
                 // A row failed to parse. Mid-stream that may be a row straddling the
                 // chunk boundary, so request more bytes unless this is the final
                 // chunk (where it is end-of-partition).
