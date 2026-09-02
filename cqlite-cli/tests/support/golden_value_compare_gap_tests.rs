@@ -899,40 +899,51 @@ fn an_unpairable_key_alone_is_suppressed_and_the_values_agree() {
     assert!(report.stale_skips.is_empty(), "{:?}", report.stale_skips);
 }
 
-/// THE KNOWN HOLE, PINNED EXECUTABLY: a member of the right SHAPE but the wrong KIND is
-/// still suppressed (roborev job 34, issue #3726).
+/// A member of the right SHAPE but the WRONG KIND is REPORTED, not suppressed (roborev job
+/// 38, issue #3726).
 ///
-/// The matcher canonicalizes the egress side under the declared type, which rejects a wrong
-/// ARITY or an undeclared UDT field. It does NOT reject a wrong scalar KIND, because
-/// `canon_typed` deliberately accepts a string where an `int` is declared — it canonicalizes
-/// both sides and lets the COMPARISON report the inequality. At this position there is no
-/// other side: the golden is undecoded, which is the gap's whole premise.
-///
-/// So this asserts the CURRENT, WRONG-ISH behaviour on purpose. It is a hole marker, not an
-/// endorsement: closing it needs a strict type validator, which is its own design (#3500's
-/// abandoned ladder is exactly "a second opinion about what a well-formed value is"). When
-/// someone builds it, THIS TEST REDS and they delete it — which is the point of writing the
-/// residual as a test rather than as a paragraph nobody re-reads.
+/// This test replaces a HOLE MARKER. Until the leaf-kind check landed, the matcher read
+/// `canon_typed(...).is_ok()` as "the egress produced a well-formed value of this type" — and
+/// the canonicalizer accepts a string where an `int` is declared ON PURPOSE, so
+/// `"not-an-int"` inside a declared `set<int>` was suppressed. The previous version of this
+/// test asserted that hole deliberately, with a message saying a red meant a validator had
+/// landed and the test should be deleted. It red. This is the deletion, and it is the argument
+/// for writing residuals as tests rather than as prose: the paragraph would still be sitting
+/// there claiming a limitation that no longer exists.
 #[test]
-fn the_undecoded_golden_gap_suppresses_a_wrong_kind_member() {
+fn the_undecoded_golden_gap_reports_a_wrong_kind_member() {
     let gap = Divergence::NestedFrozenValueLeftUndecodedByGolden;
     let inner = CqlType::Set(Box::new(CqlType::Numeric("int".into())));
     let golden_hex = json!("000000020000001100000005616c706861");
-    let matched = gap.matched(
-        &golden_hex,
-        &json!(["not-an-int"]),
-        Position {
-            ty: &inner,
-            egress: Egress::Json,
-            depth: Depth::TopLevel,
-            kinding: Kinding::Natural,
-            map_key_spelling: MapKeySpelling::ToJsonString,
-        },
-    );
+    let ask = |cli: &Value| {
+        gap.matched(
+            &golden_hex,
+            cli,
+            Position {
+                ty: &inner,
+                egress: Egress::Json,
+                depth: Depth::TopLevel,
+                kinding: Kinding::Natural,
+                map_key_spelling: MapKeySpelling::ToJsonString,
+            },
+        )
+    };
     assert!(
-        matched,
-        "KNOWN HOLE: a wrong-KIND member is still suppressed. If this now fails, a strict \
-         validator has landed — delete this test and update the residual note on the variant."
+        !ask(&json!(["not-an-int"])),
+        "a member whose KIND is not the declared one is not a decode of this type, so it is \
+         NOT this gap and must be reported"
+    );
+    // The control: the same shape with a correctly-kinded member IS the gap. Without it this
+    // case could pass because the matcher had stopped matching anything at all.
+    assert!(
+        ask(&json!([7])),
+        "a correctly-kinded decoded member against an undecoded golden IS the declared gap"
+    );
+    // And a NULL member stays acceptable at any position — a null is legal in every container
+    // this lane compares, and UserType.toJSONString emits `null` for an absent field.
+    assert!(
+        ask(&json!([null])),
+        "a null member is legal and must not break the gap"
     );
 }
 

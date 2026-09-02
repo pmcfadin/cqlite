@@ -264,6 +264,77 @@ pub fn golden_map_key_value(
     Ok(parsed)
 }
 
+/// Does this canonical value's SHAPE AND SCALAR KINDS match what the DDL declares?
+///
+/// Exists because `canon_typed(...).is_ok()` is not a validity test (roborev job 38). The
+/// canonicalizer accepts a string where an `int` is declared ON PURPOSE — it canonicalizes
+/// both sides and lets the COMPARISON report the inequality — so a gap that reads its `Ok`
+/// as "the egress produced a well-formed value of this type" suppresses `"not-an-int"`
+/// inside a declared `set<int>`.
+///
+/// NOT a second opinion about the type system, which is the shape #3500 abandoned. It reads
+/// `canon_typed`'s OWN OUTPUT back against the declared type: the canonicalizer already
+/// decided what each leaf became, and this only asks whether that variant is the one the DDL
+/// implies. No parsing, no spelling rules, no arity logic — arity and field sets are already
+/// enforced inside `canon_container`, so this adds exactly the leaf-kind question and nothing
+/// else.
+///
+/// `Canon::Null` is accepted at EVERY position: a null member is legal in every container
+/// this lane compares, and `cassandra-5.0.8 UserType.toJSONString` emits `null` for a field
+/// whose buffer is absent.
+///
+/// Egress-aware, because the projection differs: `Canon::for_csv` renders a boolean as its
+/// TEXT spelling, so `Boolean` legitimately canonicalizes to [`Canon::Text`] under
+/// [`Egress::Csv`] and to [`Canon::Bool`] under [`Egress::Json`].
+pub fn canon_matches_declared_kinds(canon: &Canon, ty: &CqlType, egress: Egress) -> bool {
+    if matches!(canon, Canon::Null) {
+        return true;
+    }
+    match ty {
+        CqlType::Numeric(_) => matches!(canon, Canon::Num(_)),
+        CqlType::Boolean => match egress {
+            Egress::Json => matches!(canon, Canon::Bool(_)),
+            Egress::Csv => matches!(canon, Canon::Bool(_) | Canon::Text(_)),
+        },
+        CqlType::Text(_) | CqlType::Blob | CqlType::Timestamp | CqlType::Opaque(_) => {
+            matches!(canon, Canon::Text(_))
+        }
+        CqlType::List(element) | CqlType::Set(element) => match canon {
+            Canon::Seq(items) => items
+                .iter()
+                .all(|item| canon_matches_declared_kinds(item, element, egress)),
+            _ => false,
+        },
+        CqlType::Tuple(items) => match canon {
+            // Arity is already enforced by `canon_container`; this only asks about kinds.
+            Canon::Seq(slots) => slots
+                .iter()
+                .zip(items.iter())
+                .all(|(slot, slot_ty)| canon_matches_declared_kinds(slot, slot_ty, egress)),
+            _ => false,
+        },
+        CqlType::Map(key_ty, value_ty) => match canon {
+            Canon::Entries(entries) => entries.iter().all(|(k, v)| {
+                canon_matches_declared_kinds(k, key_ty, egress)
+                    && canon_matches_declared_kinds(v, value_ty, egress)
+            }),
+            _ => false,
+        },
+        CqlType::Udt(udt) => match canon {
+            // The field SET and ORDER are already enforced by `canon_udt`, so a name that is
+            // not declared cannot reach here; a missing declared type is therefore a fault
+            // rather than a tolerated shape, and answers false.
+            Canon::Fields(fields) => fields.iter().all(|(name, value)| {
+                match udt.fields.iter().find(|(n, _)| n == name) {
+                    Some((_, field_ty)) => canon_matches_declared_kinds(value, field_ty, egress),
+                    None => false,
+                }
+            }),
+            _ => false,
+        },
+    }
+}
+
 /// Canonicalize a CONTAINER value under its declared type — the recursive arms of
 /// [`super::canon_typed`], which dispatches here for every container type and keeps
 /// the scalar arms itself.

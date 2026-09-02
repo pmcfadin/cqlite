@@ -420,26 +420,33 @@ impl Divergence {
                 // so this reimplements none of it. A CLI value that does not canonicalize
                 // is not a decode of this type at all, and is reported.
                 //
-                // DECLARED RESIDUAL — SCALAR KINDS ARE NOT CHECKED HERE, and the reason is
-                // that `canon_typed` deliberately does not check them (roborev job 34).
-                // The canonicalizer ACCEPTS a string where the DDL declares an `int`,
-                // ON PURPOSE: it canonicalizes both sides and lets the COMPARISON report
-                // the inequality, which is how a wrong-kind egress is normally caught. At
-                // this position there is no other side to compare against — the golden is
-                // undecoded, which is the whole premise of the gap — so nothing catches
-                // it and a tuple slot holding `"3"` where `int` is declared IS suppressed.
-                // `gaps::the_undecoded_golden_gap_suppresses_a_wrong_KIND_member` pins that
-                // hole EXECUTABLY rather than in prose, so closing it reds a test instead
-                // of requiring someone to re-read this paragraph.
+                // AND THE LEAF KINDS ARE CHECKED TOO (roborev job 38). `canon_typed(...).is_ok()`
+                // alone is NOT a validity test: the canonicalizer accepts a string where the DDL
+                // declares an `int` ON PURPOSE — it canonicalizes both sides and lets the
+                // COMPARISON report the inequality, which is how a wrong-kind egress is normally
+                // caught. At THIS position there is no other side (the golden is undecoded,
+                // which is the gap's premise), so reading `Ok` as "well-formed" suppressed
+                // `"not-an-int"` inside a declared `set<int>`.
                 //
-                // Not closed here because closing it means a STRICT type validator — a
-                // second opinion about what a well-formed value of a declared type is —
-                // and that is the shape #3500 abandoned, needing its own design rather
-                // than a clause bolted onto a gap matcher. Proposed as a follow-up.
+                // `container::canon_matches_declared_kinds` closes it by reading `canon_typed`'s
+                // OWN OUTPUT back against the declared type — the canonicalizer already decided
+                // what each leaf became, and this only asks whether that variant is the one the
+                // DDL implies. It is therefore NOT the strict validator #3500 abandoned: no
+                // parsing, no spelling rules, and no arity or field-set logic, all of which
+                // `canon_container` already enforces.
+                //
+                // This replaced a declared residual that was pinned as a test asserting the hole
+                // on purpose. Closing it RED that test, which is what a residual written as a
+                // test buys over one written as a paragraph.
                 if !matches!(cli, Value::Array(_)) {
                     return false;
                 }
-                super::canon_typed(cli, egress, ty, depth, Kinding::Natural, Side::Cli).is_ok()
+                match super::canon_typed(cli, egress, ty, depth, Kinding::Natural, Side::Cli) {
+                    Ok(canon) => {
+                        super::super::container::canon_matches_declared_kinds(&canon, ty, egress)
+                    }
+                    Err(_) => false,
+                }
             }
             Divergence::MulticellMapKeyUndecodedByGoldenRendersAsBlobHex => {
                 // ASKED AT THE KEY NODE, NOT AT THE COLUMN (roborev job 28).
