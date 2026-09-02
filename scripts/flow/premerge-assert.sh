@@ -997,23 +997,35 @@ c_record_bytes() {
   printf 'state=present\n%s' "${body%E}"
 }
 
-# _c_stage_head_awk — read a STAGE RECORD on stdin, print `key=value` lines.
+# _c_stage_record_awk — read a STAGE RECORD on stdin, print `key=value` lines.
 #
-# COLUMN-ZERO ANCHORED (`/^head-sha:[ \t]/`) and every anchored line COUNTED, for the same
-# reasons `_c_verdict_awk` above is: a first-wins read of several candidates is the rule this
-# file refuses everywhere else, and an indented copy is DATA. ANSI/CR stripped as belt (#3400).
-# `NF == 2` is required AFFIRMATIVELY: the documented field is exactly `head-sha: <40-hex>`,
-# so an empty value or trailing junk is UNPARSABLE and must not be reduced to its first word —
-# a record that cannot state which tree it audited certifies nothing.
-_c_stage_head_awk() {
+# COLUMN-ZERO ANCHORED (`/^head-sha:[ \t]/`, `/^report-nonce:[ \t]/`) and every anchored line
+# COUNTED, for the same reasons `_c_verdict_awk` above is: a first-wins read of several candidates
+# is the rule this file refuses everywhere else, and an indented copy is DATA. ANSI/CR stripped as
+# belt (#3400). `NF == 2` is required AFFIRMATIVELY of BOTH fields: the documented shapes are
+# exactly `head-sha: <40-hex>` and `report-nonce: <token>`, so an empty value or trailing junk is
+# UNPARSABLE and must not be reduced to its first word — a record that cannot state which tree it
+# audited, or which report of it is current, certifies nothing.
+#
+# IT READS TWO FIELDS IN ONE PASS BECAUSE THEY ARE ASKED OF ONE OBSERVATION (#3751 round 10, P2).
+# The head-sha binds the audit to the TREE (round 3, G1); the report-nonce names the GENERATION of
+# the stage whose report the accepted verdict came from (round 6, K2). Both questions are asked of
+# the single capture in `C_STAGE_RECORD`, so a second pass over a re-read file cannot make them
+# two different facts. It was named `_c_stage_head_awk` while it read one field; the name moved
+# with the content, because a comment that lies is worse than none.
+_c_stage_record_awk() {
   awk '
-  BEGIN { n = 0; v = "" }
+  BEGIN { n = 0; v = ""; nn = 0; nv = "" }
   { gsub(/\033\[[0-9;]*[a-zA-Z]/, ""); sub(/\r$/, "") }
   /^head-sha:[ \t]/ {
     n++
     if (n == 1 && NF == 2) v = $2
   }
-  END { print "n=" n; print "value=" v }
+  /^report-nonce:[ \t]/ {
+    nn++
+    if (nn == 1 && NF == 2) nv = $2
+  }
+  END { print "n=" n; print "value=" v; print "nn=" nn; print "nonce=" nv }
 '
 }
 
@@ -1043,8 +1055,15 @@ C_STAGE_HEAD=""
 # `c_assert_stage_record_unchanged`. Empty means the binding never ran, which that function
 # refuses rather than reading as "unchanged".
 C_STAGE_RECORD=""
+# THE GENERATION THE BINDING WAS VALIDATED ON (#3751 round 10, P2). `report-nonce:` names WHICH
+# report of this stage is current, and it is read from the SAME capture as `head-sha:`. The COUNT
+# is published beside the value because 0 (a legacy pre-nonce record), 1 and several are three
+# DIFFERENT states and only one of them can be bound — see
+# `c_assert_verdict_from_validated_generation`, which is where they are judged.
+C_STAGE_NONCE=""
+C_STAGE_NONCE_N=""
 c_assert_stage_binds_certified() {
-  local issue="$1" sfile out k v n="" value=""
+  local issue="$1" sfile out k v n="" value="" nn="" nonce=""
   sfile="$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.stage"
   if [ ! -f "$sfile" ]; then
     refuse_no_c_verdict \
@@ -1073,16 +1092,26 @@ c_assert_stage_binds_certified() {
       ;;
   esac
   # `printf '%s\n'` guarantees awk a terminated final line, whatever the file ended with.
-  out=$(printf '%s\n' "${C_STAGE_RECORD#*$'\n'}" | _c_stage_head_awk) ||
-    refuse_tool_failure awk "the C stage record's head-sha"
+  out=$(printf '%s\n' "${C_STAGE_RECORD#*$'\n'}" | _c_stage_record_awk) ||
+    refuse_tool_failure awk "the C stage record's head-sha and report-nonce"
   while IFS='=' read -r k v; do
     case "$k" in
       n)     n="$v" ;;
       value) value="$v" ;;
+      nn)    nn="$v" ;;
+      nonce) nonce="$v" ;;
     esac
   done <<C_STAGE_HEAD_PARSE
 $out
 C_STAGE_HEAD_PARSE
+  # PUBLISHED FROM THIS ONE PARSE, AND DELIBERATELY NOT JUDGED HERE (#3751 round 10, P2). The
+  # generation is only ever compared against a value `review-stage.sh verdict` reports back, which
+  # does not exist yet — and pre-empting that comparison with a refusal HERE would relabel the
+  # seam section 44f(d) pins: an unusable `report-nonce:` is diagnosed by `review-stage.sh` itself
+  # as `NOT-RUN (stage record unreadable: …)`, which names the field to repair, and this script
+  # replacing that with a binding failure would be a worse diagnostic for the same refusal.
+  C_STAGE_NONCE_N="$nn"
+  C_STAGE_NONCE="$nonce"
   case "$n" in
     ''|*[!0-9]*)
       refuse_no_c_verdict \
@@ -1196,6 +1225,144 @@ c_assert_stage_record_unchanged() {
       "mid-check. Re-run this assert once the stage is quiescent." \
       "$C_REOPEN_REMEDY"
   fi
+}
+
+# c_assert_verdict_from_validated_generation <issue> — THE ACCEPTED VERDICT MUST DEMONSTRABLY COME
+# FROM THE GENERATION THIS SCRIPT VALIDATED (#3751 round 10, P2).
+#
+# THE DEFECT. Round 9's N2 captures the stage record ONCE, validates `head-sha` from that capture,
+# lets `review-stage.sh verdict` re-read the record to pick which report is current, and then
+# re-compares the record's bytes. **An ABA REPLACEMENT DEFEATS THE BYTE COMPARISON**: the record
+# can go from the validated generation A to a foreign generation B while `verdict` reads B, and
+# back to A before the comparison runs. Both observations are then byte-identical and the check
+# passes — while the ACCEPTED verdict came from B, which may be stale, may be another lane's, and
+# may be bound to a different commit. Equality of two observations is not identity of the thing
+# observed at a third instant; that is what "one observation" could not buy on its own.
+#
+# THE FIX BINDS THE VERDICT ITSELF, USING A VALUE THE VERDICT ALREADY REPORTS OUTWARD. Since round
+# 6 (K2) the report path INCLUDES the generation's nonce (`<kind>.<nonce>.md`), and `verdict`
+# publishes that path as its mandatory `report=` field. So the returned `report=` is required to
+# name the nonce carried by THE CAPTURE the binding was validated on. ABA cannot satisfy that: a
+# verdict read from B returns B's nonce, whatever the record says afterwards. "The record looks
+# unchanged" becomes "the verdict I am accepting came from the generation I validated".
+#
+# NOTHING IS PASSED INTO review-stage.sh, AND THAT IS DELIBERATE — DO NOT "SIMPLIFY" IT INTO AN
+# ARGUMENT. Round 4 (H2) DELETED `--report` so that no caller and no data file can name which file
+# holds a verdict, and round 9 (N2) refused the same shortcut for this reason: an inbound path or
+# nonce argument would rebuild that control channel from the other end. This reads a value OUT of
+# the verdict line, which creates no such channel — the callee still decides which report is
+# current, and this only checks that its answer is about the generation that was validated.
+#
+# THE COMPARISON IS AGAINST THE SAME SINGLE CAPTURE `head-sha` WAS PARSED FROM (`C_STAGE_NONCE`,
+# published by `c_assert_stage_binds_certified`), never a fresh read: a re-read expectation would
+# be a second fact, which is the defect one level down and exactly what round 9 removed.
+#
+# THE BYTE COMPARISON IS KEPT AS DEFENCE IN DEPTH, not replaced. It catches changes this cannot
+# see — a `spawned-at`, `agent` or `deadline-secs` edit under the SAME nonce, and the record
+# vanishing — and this catches the one it cannot. Neither contains the other.
+#
+# IT GATES ACCEPTANCE, WHICH IS THE ONLY THING THAT CAN CERTIFY. The caller invokes it for the two
+# tokens the closed grammar lets proceed. Every other token already REFUSES, and where the token
+# is non-accepting `review-stage.sh`'s OWN cause is the more precise operator action: an unusable
+# `report-nonce:` arrives as `NOT-RUN (stage record unreadable: …)`, which names the field to
+# repair, and section 44f(d) pins that seam on purpose. This is not a permissive branch — the
+# tokens it does not gate do not proceed.
+#
+# EVERY STATE IT CANNOT BIND REFUSES, AND SAYS WHICH STATE IT WAS. A pass requires an affirmative
+# match; there is no state in which an unbindable generation is read as bound.
+c_assert_verdict_from_validated_generation() {
+  local issue="$1" sfile
+  sfile="$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.stage"
+  if [ -z "$C_STAGE_RECORD" ]; then
+    # FAIL CLOSED: no captured observation means the binding assert did not run, so there is no
+    # validated generation to bind to. Never read as bound.
+    refuse_tool_failure \
+      "c_assert_verdict_from_validated_generation (no captured stage-record observation)" \
+      "the C stage verdict"
+  fi
+  case "$C_STAGE_NONCE_N" in
+    ''|*[!0-9]*)
+      # The parse produced no usable count. A non-measurement is never read as a pass.
+      refuse_tool_failure \
+        "c_assert_verdict_from_validated_generation (no usable count of report-nonce: lines)" \
+        "the C stage verdict"
+      ;;
+  esac
+  if [ "$C_STAGE_NONCE_N" -eq 0 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage record carries NO 'report-nonce:' field, so it does not say" \
+      "which report of this stage is current — and the verdict just read therefore cannot be" \
+      "bound to the generation whose head-sha was validated:" \
+      "  record: $sfile" \
+      "This is the shape a record written before that field existed has (the LEGACY bare" \
+      "<kind>.md report). review-stage.sh still READS that shape, deliberately, so an old stage" \
+      "reports rather than crashes — but a generation that cannot be named cannot be bound, and" \
+      "an unbindable audit may not certify a merge. Re-open the stage: --force publishes the" \
+      "report under a FRESH NONCE." \
+      "$C_REOPEN_REMEDY"
+  fi
+  if [ "$C_STAGE_NONCE_N" -gt 1 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage record carries $C_STAGE_NONCE_N 'report-nonce:' fields —" \
+      "AMBIGUOUS, refusing rather than picking one." \
+      "  record: $sfile" \
+      "Two answers to 'which report of this stage is current' is not a generation, and a" \
+      "first-wins read is the rule this file refuses everywhere else." \
+      "$C_REOPEN_REMEDY"
+  fi
+  # ALPHANUMERIC AND NON-EMPTY, ASSERTED AFFIRMATIVELY. This reader is deliberately at least as
+  # strict as review-stage.sh's own `nonce_is_valid`, so a format drift REFUSES rather than
+  # passing — the same relationship this file's head-sha reader has to that writer. Its LENGTH
+  # BOUNDS are deliberately NOT re-implemented here: they belong to review-stage.sh, and a second
+  # copy of a bound is a second place for it to drift. What is required here is that the token
+  # names exactly one generation.
+  case "$C_STAGE_NONCE" in
+    "" | *[!A-Za-z0-9]*)
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' stage record's report-nonce is '$C_STAGE_NONCE', which is not an" \
+        "alphanumeric token, so the generation the verdict came from cannot be identified." \
+        "  record: $sfile" \
+        "$C_REOPEN_REMEDY"
+      ;;
+  esac
+  # review-stage.sh's OWN honest non-measurement (round 6's K1 states): it could not derive a
+  # report path at all, so its `report=` names no generation. A non-measurement is never a pass,
+  # and it is named as ITS OWN state rather than folded into the mismatch below, because the
+  # operator action differs — repair the record, not "a peer replaced your stage".
+  if [ "$C_TOKEN_REPORT" = unresolved ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' stage verdict reports report=unresolved — review-stage.sh could not" \
+      "derive WHICH report of this stage is current, so the verdict cannot be bound to the" \
+      "generation whose head-sha was validated." \
+      "  record: $sfile" \
+      "The verdict line above names the record defect it observed; repair that field." \
+      "$C_REOPEN_REMEDY"
+  fi
+  # THE AFFIRMATIVE MATCH. review-stage.sh's `report_path` prints `<dir>/<kind>.<nonce>.md`, so
+  # this requires the RETURNED path to end in the validated generation's own name. The pattern's
+  # payload is QUOTED (hence literal) and only the directory half is a glob: this script does not
+  # reconstruct the path — that would be H2's deleted channel written from this side — it checks
+  # that the callee's answer is about the generation that was validated.
+  case "$C_TOKEN_REPORT" in
+    */"$C_STAGE_KIND.$C_STAGE_NONCE.md") ;;
+    *)
+      refuse_no_c_verdict \
+        "The '$C_STAGE_KIND' verdict just accepted names a report that does NOT belong to the" \
+        "generation of the stage this script validated:" \
+        "  validated generation: $C_STAGE_KIND.$C_STAGE_NONCE.md (from the report-nonce: of the record the head-sha binding read)" \
+        "  verdict reported:     $C_TOKEN_REPORT" \
+        "  record: $sfile" \
+        "So the verdict came from a DIFFERENT generation of this stage — possibly a stale one," \
+        "possibly another lane's, possibly one bound to a different commit — under a binding that" \
+        "was checked on the validated one. The byte re-comparison cannot see this on its own: a" \
+        "record replaced and put BACK (A to B to A) leaves two identical observations while the" \
+        "verdict in between was read from B. Equality of two observations is not identity of the" \
+        "thing observed at a third instant." \
+        "The ordinary cause is a concurrent 'review-stage.sh open --force' (or a hand edit)" \
+        "landing while this assert runs. Re-run it once the stage is quiescent." \
+        "$C_REOPEN_REMEDY"
+      ;;
+  esac
 }
 
 # c_auto_locate_issue — find THE open C stage in this worktree, by its stage
@@ -1335,6 +1502,19 @@ c_evaluate() {
     # was bound to the certified tree rather than merely found in this directory.
     C_SOURCE="AUTO issue=$issue stage=$C_STAGE_KIND stage-head=${C_STAGE_HEAD:0:12} (routing $C_ROUTING)"
     c_parse_verdict text "$out" "C stage verdict for issue $issue"
+    # AND THE VERDICT IS BOUND TO THE GENERATION THAT WAS VALIDATED (#3751 round 10, P2). The
+    # byte re-comparison above is defeated by an ABA replacement — A to B and back to A leaves two
+    # identical observations while `verdict` read B — so the returned `report=` field must name
+    # the nonce carried by the capture the head-sha binding was validated on. Read OUT of the
+    # verdict line, never passed IN (H2's deleted `--report` channel; see the function).
+    #
+    # RUN FOR THE TOKENS THAT WOULD PROCEED, because acceptance is the only thing that can
+    # certify: every other token already refuses, and for those `review-stage.sh`'s own cause is
+    # the more precise operator action (section 44f(d)'s seam). It is placed BEFORE the closed
+    # grammar below, so no unbound generation ever reaches an accepting arm.
+    case "$C_TOKEN" in
+      PASS | AUTHOR-PERFORMED) c_assert_verdict_from_validated_generation "$issue" ;;
+    esac
   fi
 
   # THE CLOSED GRAMMAR, MATCHED BY STRING EQUALITY ON THE FIRST WORD (#3544). awk

@@ -3741,11 +3741,325 @@ fi
 # AND THE VALIDATED OBSERVATION IS THE ONE THE head-sha WAS TAKEN FROM — one read of the file,
 # every question asked of that value. A second `<"$sfile"` read for the head-sha would make the
 # comparison below compare something the binding never saw.
-if [ "$(LC_ALL=C grep -c '_c_stage_head_awk <"\$sfile"' "$ASSERT" || true)" -eq 0 ] &&
+# NAME-AGNOSTIC ON PURPOSE (#3751 round 10). It used to name `_c_stage_head_awk` literally, so
+# RENAMING that function — which round 10 did, when it grew a second field — would have made this
+# guard match nothing and pass VACUOUSLY. The pattern is the SHAPE (`<parser> <"$sfile"`), which a
+# rename cannot escape.
+if [ "$(LC_ALL=C grep -cE '_awk[[:space:]]*<[[:space:]]*"\$sfile"' "$ASSERT" || true)" -eq 0 ] &&
   LC_ALL=C grep -q 'C_STAGE_RECORD=' "$ASSERT"; then
   ok "n2/structural: head-sha is parsed from the CAPTURED observation, not from a second read of the file"
 else
   bad "n2/structural: the head-sha is still parsed by re-reading the record, so the captured observation is a different fact"
+fi
+
+# --- 44j: an ABA replacement must not defeat the byte comparison (round 10, P2) ---
+# THE FINDING (roborev job 384, P2, premerge-assert.sh:1320). Round 9's N2 captures the stage
+# record ONCE, validates `head-sha` from that capture, lets `review-stage.sh verdict` re-read the
+# record to pick which report is current, and then re-compares the record's BYTES. An ABA
+# replacement defeats that comparison: the record goes from the validated generation A to a
+# foreign generation B while `verdict` reads B, and back to A before the comparison. Both
+# observations are byte-identical, the check passes, and the ACCEPTED verdict came from B —
+# possibly stale, possibly another lane's, possibly bound to a different commit. Equality of two
+# observations is not identity of the thing observed at a third instant.
+#
+# THE INTERLEAVE IS SIMULATED, NOT RACED. Two lines are injected into a SCRATCH COPY of the
+# assert — one immediately BEFORE it invokes `review-stage.sh verdict`, one immediately AFTER —
+# so the A->B->A sequence is deterministic, cannot flake, and makes no claim about timing. The
+# ARTIFACT is substituted (#3312's corollary for tests); there is no settable seam. Section 44i's
+# single-injection builder cannot express this case: the restore has to land after the callee ran.
+P2_DIR="$T/p2/flow"
+mkdir -p "$P2_DIR"
+p2_ok=1
+cp "$ASSERT" "$P2_DIR/premerge-assert.sh" 2>/dev/null || p2_ok=0
+cp "$SCRIPT_DIR/../flow/review-stage.sh" "$P2_DIR/review-stage.sh" 2>/dev/null || p2_ok=0
+printf '%s\n' "$NEUTRAL_ADV" >"$P2_DIR/base-staleness.sh" 2>/dev/null || p2_ok=0
+chmod +x "$P2_DIR/base-staleness.sh" 2>/dev/null || true
+# Every injected line travels through ENVIRON, never `awk -v`, which performs ESCAPE PROCESSING
+# on its value (round 7 measured a `\n` in an injected line becoming a real newline).
+P2_ANCHOR='out=$(bash "$rs" verdict "$C_STAGE_KIND" --issue "$issue"'
+P2_SD='"$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND'
+# p2_build <dest> <pre> <post> — the same anchor as 44i, but a line on EACH side of it.
+p2_build() {
+  local dest="$1" pre="$2" post="$3"
+  [ "$p2_ok" -eq 1 ] || return 1
+  P2_A="$P2_ANCHOR" P2_PRE="$pre" P2_POST="$post" LC_ALL=C awk '
+    BEGIN { a = ENVIRON["P2_A"]; pre = ENVIRON["P2_PRE"]; post = ENVIRON["P2_POST"]; done = 0 }
+    index($0, a) > 0 && done == 0 { print pre; print $0; print post; done = 1; next }
+    { print }
+  ' "$P2_DIR/premerge-assert.sh" >"$dest" 2>/dev/null || return 1
+  [ -s "$dest" ] || return 1
+  LC_ALL=C grep -q 'P2_ABA_PRE' "$dest" || return 1
+  LC_ALL=C grep -q 'P2_ABA_POST' "$dest" || return 1
+  return 0
+}
+# p2_run <script> <repo> <want> <desc> — `run_in_repo` against a named scratch assert.
+p2_run() {
+  local script="$1" d="$2" want="$3" desc="$4" sha f
+  sha=$(git -C "$d" rev-parse HEAD 2>/dev/null) || sha=""
+  if [ -z "$sha" ]; then bad "$desc: could not resolve the fixture HEAD"; return 1; fi
+  f="$d/../gate-p2-$(basename "$script").txt"
+  emit_summary_block "$FULL_S" "$FULL_E" "-" \
+    "$(printf '%.7s' "$sha")" "$(printf '%.12s' "$sha")" PASS PASS >"$f"
+  OUT=$(cd "$d" && PATH="$BIN:$PATH" MOCK_GH_OUT="$sha OPEN" MOCK_GH_FAIL=0 \
+    bash "$script" 2421 "$sha" "$f" --c-verdict AUTO 2>&1)
+  RC=$?
+  if [ "$RC" -ne "$want" ]; then
+    bad "$desc (exit $RC, wanted $want)"
+    printf '     output: %s\n' "$OUT"
+    return 1
+  fi
+  return 0
+}
+# p2_restore — back to "opened at HEAD, current report records PASS", asserted per case. A case
+# that leaves the DECOY installed makes the next one refuse at the head-sha BINDING and never
+# reach the read it is about — the cross-case leakage round 3 recorded in `sr_plant`.
+p2_restore() {
+  (cd "$P2_REPO" && bash "$P2_DIR/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor --force >/dev/null 2>&1) || return 1
+  printf 'result: PASS\n\n## Findings\n\nnone.\n' >"$(SR_REPORT "$P2_REPO" 3751 c)" || return 1
+  rm -f "$P2_REPO/.review-stage/issue-3751/c.md" 2>/dev/null || true
+  return 0
+}
+P2_REPO=$(c_repo p2 design) || P2_REPO=""
+P2_REC="$P2_REPO/.review-stage/issue-3751/c.stage"
+P2_DECOY="$P2_REPO/.review-stage/issue-3751/c.decoy"
+P2_ZERO=0000000000000000000000000000000000000000
+if [ -n "$P2_REPO" ] && [ "$p2_ok" -eq 1 ] && p2_restore; then
+  ok "p2 fixture: a PASSING c stage was opened at the fixture head"
+else
+  bad "p2 fixture: could not open the stage — every case below would be vacuous"
+  P2_REPO=""
+fi
+if [ -n "$P2_REPO" ]; then
+  # THE DECOY IS A SECOND GENERATION: its own nonce, its own PASSING report, and a head-sha that
+  # is NOT the certified commit. It is what an `open --force` (or a hand edit) leaves behind, and
+  # it is the bait the second read follows.
+  LC_ALL=C sed -e "s|^head-sha:.*|head-sha: $P2_ZERO|" \
+    -e 's|^report-nonce:.*|report-nonce: decoygenerationB|' \
+    "$P2_REC" >"$P2_DECOY" 2>/dev/null || true
+  printf 'result: PASS\n\n## Findings\n\nan audit of a DIFFERENT tree.\n' \
+    >"$P2_REPO/.review-stage/issue-3751/c.decoygenerationB.md" 2>/dev/null || true
+  if LC_ALL=C grep -q "^head-sha: $P2_ZERO\$" "$P2_DECOY" 2>/dev/null &&
+    LC_ALL=C grep -q '^report-nonce: decoygenerationB$' "$P2_DECOY" 2>/dev/null &&
+    LC_ALL=C grep -q '^result: PASS$' "$P2_REPO/.review-stage/issue-3751/c.decoygenerationB.md" 2>/dev/null; then
+    ok "p2 fixture: the decoy generation is VALID BAIT (its own nonce, its own PASSING report, a head-sha that is not the certified commit)"
+  else
+    bad "p2 fixture: the decoy generation is not valid bait, so the cases below prove nothing"
+  fi
+
+  # (a) THE DEFECT: A -> B -> A. The record is replaced for exactly the span in which
+  #     `review-stage.sh verdict` reads it, and restored before the byte comparison.
+  if p2_restore; then
+    ok "p2/aba: the stage was restored to opened-at-HEAD before the case (no leakage from a sibling)"
+  else
+    bad "p2/aba: the stage could not be restored, so this case starts from an unknown state"
+  fi
+  if p2_build "$P2_DIR/aba.sh" \
+    "    cp $P2_SD.stage\" $P2_SD.genA\" 2>/dev/null && cp $P2_SD.decoy\" $P2_SD.stage\" 2>/dev/null || true   # P2_ABA_PRE" \
+    "    cp $P2_SD.genA\" $P2_SD.stage\" 2>/dev/null || true   # P2_ABA_POST"; then
+    ok "p2/aba: both halves of the A->B->A plant landed in the scratch assert (asserted, not assumed)"
+  else
+    bad "p2/aba: the plant did NOT land, so this case proves nothing"
+  fi
+  if p2_run "$P2_DIR/aba.sh" "$P2_REPO" 2 \
+    "p2/aba: a verdict read from a generation swapped in and BACK OUT must NOT certify"; then
+    case "$OUT" in
+      *"PREMERGE: NO-C-VERDICT"*) ok "p2/aba: refused under the NO-C-VERDICT verdict" ;;
+      *) bad "p2/aba: must refuse with NO-C-VERDICT (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"DIFFERENT generation"*) ok "p2/aba: the refusal names the GENERATION mismatch" ;;
+      *) bad "p2/aba: the refusal must name the generation mismatch (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *decoygenerationB*) ok "p2/aba: and it names the generation the verdict actually came from" ;;
+      *) bad "p2/aba: the refusal must name the foreign generation (got: $OUT)" ;;
+    esac
+    # THE DISCRIMINATION THAT MAKES THIS CASE ITS OWN: the byte comparison MUST have passed. If
+    # the refusal said the record CHANGED, this would be section 44i's case again and the ABA
+    # premise would be untested.
+    case "$OUT" in
+      *CHANGED*) bad "p2/aba: the byte comparison fired, so the A->B->A restore did not happen and this case is 44i's (got: $OUT)" ;;
+      *) ok "p2/aba: the byte comparison did NOT fire — the two observations were identical, which is the finding" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*)
+        bad "p2/aba: a verdict from an unvalidated generation certified the merge — the P2 defect is live" ;;
+      *) ok "p2/aba: no PASS token is emitted for a verdict read from an unvalidated generation" ;;
+    esac
+  fi
+
+  # (b) CONTROL — THE SAME TWO-POINT MACHINERY WITH NO-OP INJECTIONS STILL CERTIFIES. Without it
+  #     the refusal above is satisfiable by a scratch copy that is simply broken, or by a check
+  #     that refuses every AUTO run.
+  if p2_restore; then
+    ok "p2/CONTROL: the stage was restored before the control"
+  else
+    bad "p2/CONTROL: the stage could not be restored"
+  fi
+  if p2_build "$P2_DIR/noop.sh" '    : P2_ABA_PRE no-op' '    : P2_ABA_POST no-op'; then
+    ok "p2/CONTROL: both no-op plants landed at the same anchor"
+  else
+    bad "p2/CONTROL: the no-op plants did NOT land"
+  fi
+  if p2_run "$P2_DIR/noop.sh" "$P2_REPO" 0 \
+    "p2/CONTROL: an UNDISTURBED generation still certifies (the refusal comes from the interleave)"; then
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*) ok "p2/CONTROL: and it still reports C-VERDICT PASS" ;;
+      *) bad "p2/CONTROL: must report C-VERDICT PASS (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"DIFFERENT generation"*) bad "p2/CONTROL: it claimed a generation mismatch that did not happen (got: $OUT)" ;;
+      *) ok "p2/CONTROL: and claims no generation mismatch that did not happen" ;;
+    esac
+  fi
+
+  # (c) THE LEGACY PRE-NONCE RECORD — a state that cannot be bound, and it PASSED. Strip
+  #     `report-nonce:` and provide the bare `<kind>.md` report review-stage.sh still READS: the
+  #     token is a genuine PASS, the head-sha binding holds, the bytes never change, and nothing
+  #     names which generation answered. An unbindable audit must refuse, naming the state.
+  if p2_restore &&
+    printf 'result: PASS\n\n## Findings\n\nthe LEGACY bare report.\n' \
+      >"$P2_REPO/.review-stage/issue-3751/c.md" &&
+    LC_ALL=C awk '!/^report-nonce:/ { print }' "$P2_REC" >"$P2_REC.new" &&
+    mv -f "$P2_REC.new" "$P2_REC" &&
+    ! LC_ALL=C grep -q '^report-nonce:' "$P2_REC" &&
+    LC_ALL=C grep -q '^head-sha: ' "$P2_REC"; then
+    ok "p2/legacy: the fixture is a record with NO report-nonce and a PASSING bare report (head-sha intact)"
+    if p2_run "$P2_DIR/noop.sh" "$P2_REPO" 2 \
+      "p2/legacy: a PASS whose generation the record does not name must NOT certify"; then
+      case "$OUT" in
+        *"report-nonce"*) ok "p2/legacy: the refusal names the field that is missing" ;;
+        *) bad "p2/legacy: the refusal must name report-nonce (got: $OUT)" ;;
+      esac
+      case "$OUT" in
+        *"--force"*) ok "p2/legacy: and it names the remedy (re-open, which publishes a fresh nonce)" ;;
+        *) bad "p2/legacy: the refusal must name the remedy (got: $OUT)" ;;
+      esac
+      case "$OUT" in
+        *"PREMERGE: C-VERDICT PASS"*)
+          bad "p2/legacy: an unnameable generation certified the merge" ;;
+        *) ok "p2/legacy: no PASS token is emitted for a generation the record does not name" ;;
+      esac
+    fi
+  else
+    bad "p2/legacy: the fixture could not be built, so the case proves nothing"
+  fi
+
+  # (d) A DRIFTED OR FOREIGN CALLEE — the affirmative match tested WITHOUT the injection
+  #     machinery. `review-stage.sh` is substituted by a STUB emitting one grammatical verdict
+  #     line, so the `report=` value is chosen directly. This is what makes the check's own
+  #     property visible: it is a comparison against the VALIDATED nonce, not a coupling to
+  #     whatever the shipped callee happens to print. The `report=unresolved` arm is reachable
+  #     ONLY this way — the shipped emitter forces NOT-RUN whenever it cannot derive a path —
+  #     so without a substituted callee that arm would be untested code.
+  P2_STUB_DIR="$T/p2/stub"
+  mkdir -p "$P2_STUB_DIR"
+  p2_stub_ok=1
+  cp "$ASSERT" "$P2_STUB_DIR/premerge-assert.sh" 2>/dev/null || p2_stub_ok=0
+  printf '%s\n' "$NEUTRAL_ADV" >"$P2_STUB_DIR/base-staleness.sh" 2>/dev/null || p2_stub_ok=0
+  chmod +x "$P2_STUB_DIR/base-staleness.sh" 2>/dev/null || true
+  # p2_stub <report-value> — a callee that reports PASS with exactly that `report=` field.
+  p2_stub() {
+    printf '#!/usr/bin/env bash\nprintf "REVIEW-STAGE: c RESULT: PASS elapsed=1 deadline=3600 agent=spec-auditor report=%%s\\n" %s\nexit 0\n' \
+      "'$1'" >"$P2_STUB_DIR/review-stage.sh" 2>/dev/null || return 1
+    [ -s "$P2_STUB_DIR/review-stage.sh" ] || return 1
+    return 0
+  }
+  if p2_restore; then
+    ok "p2/stub: the stage was restored before the substituted-callee cases"
+  else
+    bad "p2/stub: the stage could not be restored"
+  fi
+  P2_NONCE="$(LC_ALL=C sed -n 's/^report-nonce:[[:space:]]*//p' "$P2_REC" 2>/dev/null | LC_ALL=C head -1 || true)"
+  if [ "$p2_stub_ok" -eq 1 ] && [ -n "$P2_NONCE" ]; then
+    ok "p2/stub: the validated generation's nonce was read from the record ($P2_NONCE)"
+  else
+    bad "p2/stub: the scratch callee or the record's nonce is unavailable, so the cases below prove nothing"
+    p2_stub_ok=0
+  fi
+  if [ "$p2_stub_ok" -eq 1 ]; then
+    # (d1) CONTROL FIRST: the stub naming the VALIDATED generation still certifies. Without it
+    #      the two refusals below are satisfiable by a check that refuses every stubbed callee.
+    if p2_stub "$P2_REPO/.review-stage/issue-3751/c.$P2_NONCE.md" &&
+      p2_run "$P2_STUB_DIR/premerge-assert.sh" "$P2_REPO" 0 \
+        "p2/stub CONTROL: a callee naming the VALIDATED generation certifies"; then
+      case "$OUT" in
+        *"PREMERGE: C-VERDICT PASS"*) ok "p2/stub CONTROL: and it reports C-VERDICT PASS" ;;
+        *) bad "p2/stub CONTROL: must report C-VERDICT PASS (got: $OUT)" ;;
+      esac
+    fi
+    # (d2) A WELL-FORMED PATH WITH A FOREIGN NONCE — the match is on the GENERATION, not on the
+    #      path being shaped like a report.
+    if p2_stub "$P2_REPO/.review-stage/issue-3751/c.forgedgeneration9.md" &&
+      p2_run "$P2_STUB_DIR/premerge-assert.sh" "$P2_REPO" 2 \
+        "p2/stub forged: a well-formed report path with a FOREIGN nonce refuses"; then
+      case "$OUT" in
+        *"DIFFERENT generation"*) ok "p2/stub forged: the refusal names the generation mismatch" ;;
+        *) bad "p2/stub forged: the refusal must name the generation mismatch (got: $OUT)" ;;
+      esac
+      case "$OUT" in
+        *forgedgeneration9*) ok "p2/stub forged: and quotes the value it was given" ;;
+        *) bad "p2/stub forged: the refusal must quote the reported path (got: $OUT)" ;;
+      esac
+    fi
+    # (d3) `report=unresolved` BESIDE AN ACCEPTING TOKEN — review-stage.sh's honest
+    #      non-measurement. It is its OWN named state, not folded into the mismatch, because the
+    #      operator action differs (repair the record, not "a peer replaced your stage").
+    if p2_stub unresolved &&
+      p2_run "$P2_STUB_DIR/premerge-assert.sh" "$P2_REPO" 2 \
+        "p2/stub unresolved: report=unresolved beside a PASS token refuses"; then
+      case "$OUT" in
+        *"report=unresolved"*) ok "p2/stub unresolved: the refusal names the non-measurement as its own state" ;;
+        *) bad "p2/stub unresolved: the refusal must name report=unresolved (got: $OUT)" ;;
+      esac
+      case "$OUT" in
+        *"PREMERGE: C-VERDICT PASS"*)
+          bad "p2/stub unresolved: a verdict naming no generation certified the merge" ;;
+        *) ok "p2/stub unresolved: no PASS token is emitted where no generation was named" ;;
+      esac
+    fi
+  fi
+fi
+# (e) STRUCTURAL — WHERE THE BINDING SITS, WHAT IT READS, AND WHAT IT DOES NOT PASS.
+P2_VERDICT_LN="$(LC_ALL=C grep -n 'out=\$(bash "\$rs" verdict' "$ASSERT" | LC_ALL=C head -1 | cut -d: -f1)"
+P2_BIND_LN="$(LC_ALL=C grep -n 'c_assert_verdict_from_validated_generation "\$issue"' "$ASSERT" | LC_ALL=C head -1 | cut -d: -f1)"
+P2_ACCEPT_LN="$(LC_ALL=C grep -n '^  case "\$C_TOKEN" in' "$ASSERT" | LC_ALL=C head -1 | cut -d: -f1)"
+if [ -n "$P2_VERDICT_LN" ] && [ -n "$P2_BIND_LN" ] && [ -n "$P2_ACCEPT_LN" ] &&
+  [ "$P2_BIND_LN" -gt "$P2_VERDICT_LN" ] && [ "$P2_BIND_LN" -lt "$P2_ACCEPT_LN" ]; then
+  ok "p2/structural: the generation binding sits between the verdict read and the closed-grammar acceptance (lines $P2_VERDICT_LN < $P2_BIND_LN < $P2_ACCEPT_LN)"
+else
+  bad "p2/structural: the generation binding is NOT between the verdict read and the acceptance (verdict=$P2_VERDICT_LN bind=$P2_BIND_LN accept=$P2_ACCEPT_LN)"
+fi
+# THE EXPECTED NONCE COMES FROM THE ONE CAPTURE, AND `report-nonce:` IS PARSED IN EXACTLY ONE
+# PLACE. A second reader of that field would be a second fact, which is the defect one level down.
+# The pattern matches the awk RULE (a `/^report-nonce:` at the start of a line, comments excluded
+# — a `#` line cannot match), so a second PARSER of the field reds this and a second mention of it
+# in prose does not.
+if [ "$(LC_ALL=C grep -cE '^[[:space:]]*/\^report-nonce:' "$ASSERT" || true)" -eq 1 ] &&
+  LC_ALL=C grep -q 'C_STAGE_NONCE="\$nonce"' "$ASSERT"; then
+  ok "p2/structural: report-nonce: is anchored and parsed in exactly ONE place, and published from that parse"
+else
+  bad "p2/structural: report-nonce: is read in more than one place, or is not published from the capture's parse"
+fi
+# NOTHING IS PASSED INTO review-stage.sh. Round 4 (H2) deleted `--report` so that no caller can
+# name which file holds a verdict; this fix reads a value OUT of the verdict line, and an inbound
+# path or nonce argument would rebuild that channel from the other end. Asserted on the ARGV.
+P2_INVOKE="$(LC_ALL=C grep -h 'bash "\$rs" verdict' "$ASSERT" | LC_ALL=C head -1)"
+if [ -n "$P2_INVOKE" ] &&
+  [ "$P2_INVOKE" = '    out=$(bash "$rs" verdict "$C_STAGE_KIND" --issue "$issue" 2>/dev/null) || rc=$?' ]; then
+  ok "p2/structural: the callee is invoked with kind and issue ONLY — no report path, no nonce, no third channel"
+else
+  bad "p2/structural: the verdict invocation is not the pinned argv (got: $P2_INVOKE)"
+fi
+# AND THE BYTE COMPARISON IS KEPT AS DEFENCE IN DEPTH, not replaced by the nonce match: it catches
+# what the nonce cannot (a spawned-at/agent/deadline edit under the SAME nonce, and the record
+# vanishing), and the nonce catches what it cannot. Neither contains the other.
+if LC_ALL=C grep -q 'c_assert_stage_record_unchanged "\$issue"' "$ASSERT" &&
+  [ "$(LC_ALL=C grep -c 'c_assert_stage_record_unchanged()' "$ASSERT" || true)" -eq 1 ]; then
+  ok "p2/structural: round 9's byte re-comparison is still called (defence in depth, not superseded)"
+else
+  bad "p2/structural: the byte re-comparison was removed or is no longer called"
 fi
 
 # --- 44h: THE STRUCTURAL EMIT-BOUNDARY GUARD (round 7, L1b) -------------------
@@ -3934,7 +4248,30 @@ fi
 # the OLD scanner reds on this same plant for an UNRELATED reason and never names it), and asserts
 # the planted statement does not begin its line. The fallback arm is ten bads to match. So the
 # floor moves by the SAME 4 and the derived 6-assertion margin is PRESERVED UNCHANGED.
-ASSERT_FLOOR=377
+#
+# ROUND 10 (P2) ADDS 28, ALL HOST-INDEPENDENT (383 -> 411): section 44j's 28 — an ABA replacement
+# must not defeat round 9's byte comparison. A record swapped to a foreign generation for exactly
+# the span in which `review-stage.sh verdict` reads it, and swapped BACK before the comparison,
+# leaves two byte-identical observations while the ACCEPTED verdict came from the foreign one
+# (measured: `C-VERDICT PASS … stage-head=<validated>` beside `report: …/c.decoygenerationB.md`,
+# with NO record-changed refusal, because the bytes genuinely matched). The interleave is SIMULATED
+# by TWO lines injected either side of the verdict invocation in a scratch copy of the assert
+# (44i's single-injection builder cannot express it: the restore has to land after the callee ran):
+# the A->B->A case with its four content assertions — including the DISCRIMINATION that the byte
+# comparison must NOT have fired, without which this is 44i's case again — a valid-BAIT assertion,
+# per-case RESTOREs, a two-point NO-OP CONTROL that still certifies, the LEGACY pre-nonce record
+# (a genuine PASS from a bare `<kind>.md` report whose generation nothing names), three cases
+# against a SUBSTITUTED callee (a control naming the validated generation, a well-formed path with
+# a foreign nonce, and `report=unresolved` beside an accepting token — the last reachable ONLY this
+# way, since the shipped emitter forces NOT-RUN whenever it cannot derive a path), and four
+# STRUCTURAL pins (the binding sits between the verdict read and the closed-grammar acceptance;
+# `report-nonce:` is parsed in exactly ONE place and published from the capture's parse; the callee
+# is invoked with kind and issue ONLY, so H2's deleted `--report` channel is not rebuilt from the
+# other end; and round 9's byte comparison is still called, as defence in depth rather than
+# superseded). All need only bash, git and coreutils, so the floor moves by the SAME 28 and the
+# derived 6-assertion margin for the ONE host-gated block is PRESERVED UNCHANGED — still
+# deliberately not the exact 411, for the reason recorded above.
+ASSERT_FLOOR=405
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"
