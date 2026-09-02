@@ -42,7 +42,9 @@ report?" but "what does the report say?".
   kind and the issue: a stage that was re-opened reads only the report its record names, and a
   report written where you were told to write it LAST time lands in a file nothing consults —
   which reads exactly like no report at all. If you were re-spawned, use the path in the clause
-  you were re-spawned with.
+  you were re-spawned with. **Since round 10 that is enforced at the merge point, not merely
+  wasted effort**: `premerge-assert.sh` requires the verdict it accepts to name the generation it
+  validated, so a verdict read from a superseded generation REFUSES the merge outright.
 
 > **You are also a CONSUMER of this contract.** Before spawning (or requesting the spawn of)
 > any review stage you `open` it, and after the stage you read its `verdict` — see the review-stage
@@ -370,6 +372,16 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    byte-identical — so a `--force` re-open landing mid-check REFUSES naming the change, because a
    verdict from a generation nothing validated may not certify. Nothing is lost: re-run the assert
    once the stage is quiescent.
+   **AND THE VERDICT ITSELF MUST NAME THAT GENERATION (#3751 round 10).** Byte equality is not
+   identity: a record swapped to another generation for exactly the span in which `verdict` reads
+   it, and swapped BACK, leaves two identical observations while the accepted verdict came from the
+   other generation. So the verdict's `report=` field — which carries the generation's nonce
+   (`c.<nonce>.md`) — must name the `report-nonce:` of the record the binding was validated on. Two
+   consequences for you. A **LEGACY stage record with no `report-nonce:`** cannot be bound and
+   REFUSES even when its bare `c.md` report records a genuine `PASS`: re-open the stage (`--force`
+   publishes a fresh nonce) and re-run C. And **spawn the auditor with the path `open` PRINTS**, not
+   a path remembered from an earlier open — a verdict read from a superseded generation is exactly
+   what this refuses.
    Pass an explicit
    `--c-verdict <path>` (a captured `review-stage.sh verdict … > <path>` line) only where AUTO
    cannot locate the stage — and capture the **`c`** stage's own line: the assert validates the

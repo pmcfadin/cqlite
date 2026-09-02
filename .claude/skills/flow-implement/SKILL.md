@@ -147,7 +147,9 @@ never gate stdout or review churn.
    report under a FRESH NONCE — spawn with the path it PRINTS, because the previous file is no
    longer read, so an idle agent that resumes and writes there cannot certify anything, #3751 rounds
    5-6; the nonce is GENERATED rather than chosen by scanning, so two concurrent `--force` calls
-   cannot be handed one path), or read `status` for how long it has produced nothing — its `report=`
+   cannot be handed one path; and since round 10 the merge point REFUSES a verdict that names any
+   OTHER generation, so writing to a stale path now blocks the merge rather than merely wasting the
+   round), or read `status` for how long it has produced nothing — its `report=`
    field is also the authority when you need the path and do not have the clause. **Never infer a clean review from an idle
    notice** — that is the exact false certification #3751 exists to prevent.
    `review-stage.sh` writes only under `.review-stage/`, which is gitignored and verified so

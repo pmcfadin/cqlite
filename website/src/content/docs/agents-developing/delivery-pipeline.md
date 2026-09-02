@@ -233,7 +233,19 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   capture must still be byte-identical before the token is parsed. **A handoff was the wrong fix**:
   resolving the report in `premerge-assert.sh` and passing it to `verdict` would rebuild from the
   other end the control channel round 4 (H2) deleted with `--report` — nothing outside
-  `review-stage.sh` may name which file holds a verdict. Third binding: the
+  `review-stage.sh` may name which file holds a verdict. **AND BYTE EQUALITY IS NOT IDENTITY — AN
+  ABA REPLACEMENT DEFEATS THAT COMPARISON (#3751 round 10, P2)**: the record can go from the
+  validated generation A to a foreign generation B while `verdict` reads B, and BACK to A before
+  the comparison, leaving two byte-identical observations while the ACCEPTED verdict came from B.
+  So the verdict is bound to the GENERATION itself, using a value it already reports OUTWARD — its
+  mandatory `report=` field carries that generation's nonce (`<kind>.<nonce>.md`), which must equal
+  the `report-nonce:` of the SAME capture `head-sha` was parsed from; a verdict read from B returns
+  B's nonce, so ABA cannot satisfy it. Reading a value OUT of the verdict line rebuilds no control
+  channel (nothing is passed IN), the byte comparison is KEPT as defence in depth (it catches an
+  edit under the same nonce, and a vanished record), and every unbindable state REFUSES BY NAME: a
+  legacy record with no `report-nonce:`, several of them, an unusable token, a `report=unresolved`,
+  a foreign nonce. It gates the two tokens the closed grammar lets PROCEED, because acceptance is
+  the only thing that can certify. Third binding: the
   verdict line is validated against its WHOLE documented grammar — `REVIEW-STAGE: <kind> RESULT:
   <token> elapsed=<n> deadline=<n> agent=<t> report=<abs>` — with the **stage KIND compared by
   STRING EQUALITY**, each mandatory key required EXACTLY ONCE, **and each one's VALUE measured**

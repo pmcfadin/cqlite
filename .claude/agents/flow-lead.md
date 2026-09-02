@@ -57,7 +57,9 @@ back into one.
   FULL gate's own summary file, so a merge with NO gate of record is mechanically refused (#3465),
   and `--c-verdict` is REQUIRED with no default (omitting it is exit 3), so a merge with NO recorded
   C intent audit is refused too where C is required — routing MEASURED from the certified tree, never
-  taken from the caller (#3751) — re-reads for
+  taken from the caller (#3751), and the verdict it accepts must NAME the generation of the stage
+  record it validated, so a stage re-opened mid-check (or a legacy record with no `report-nonce:`)
+  refuses rather than certifying an audit nothing bound (#3751 round 10) — re-reads for
   a fresh `HOLD:` order, then **arms `gh pr merge --auto --squash
   --delete-branch`** and `flow-finalize`s. GitHub owns the CI-green wait — the `required` check
   (#2433, enforced for admins too via `enforce_admins`) lands the PR the instant it passes; **never

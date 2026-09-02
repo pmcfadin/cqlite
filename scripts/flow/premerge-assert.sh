@@ -238,6 +238,26 @@
 #       is deliberately NOT the fix: round 4 (H2) deleted `--report` so that nothing
 #       outside `review-stage.sh` can name which file holds a verdict, and a path
 #       argument would rebuild that channel from the other end.
+#   (d) THE GENERATION (#3751 round 10, P2). (c) is defeated by an ABA REPLACEMENT:
+#       the record can go from the validated generation A to a foreign generation B
+#       while `verdict` reads B, and BACK to A before the byte comparison — two
+#       identical observations, comparison passes, accepted verdict came from B.
+#       Equality of two observations is not identity of the thing observed at a third
+#       instant. So the verdict is bound to the generation ITSELF, using a value it
+#       already reports OUTWARD: since round 6 (K2) the report path carries the
+#       generation's nonce (`<kind>.<nonce>.md`) and `verdict` publishes it as its
+#       mandatory `report=` field, so that field must name the nonce carried by the
+#       capture (b) was validated on — read from the SAME capture, never a fresh
+#       read. ABA cannot satisfy it: a verdict read from B returns B's nonce. Still
+#       nothing is passed INTO `review-stage.sh` — reading a value OUT of the verdict
+#       line rebuilds no control channel — and (c) is KEPT as defence in depth: it
+#       catches an edit under the SAME nonce and a vanished record, which (d) cannot,
+#       and (d) catches what it cannot. Every state that cannot be bound REFUSES and
+#       NAMES itself (a legacy record with no `report-nonce:`, several of them, an
+#       unusable token, a `report=unresolved`, a foreign nonce). It gates the two
+#       tokens the closed grammar lets PROCEED, because acceptance is the only thing
+#       that can certify — every other token already refuses, and there
+#       `review-stage.sh`'s own cause is the more precise operator action.
 #   WHICH REPORT the record names is NOT this script's question (#3751 round 5 J1,
 #   round 6 K2). The record also carries a `report-nonce:`, and the report path
 #   INCLUDES it (`<kind>.<nonce>.md`; a bare `<kind>.md` only for a record written
@@ -250,7 +270,10 @@
 #   `report-nonce:` cannot be read therefore arrives here as a NON-PASSING
 #   TOKEN (`NOT-RUN (stage record unreadable: …)`), which the closed grammar below
 #   refuses like any other — no fallback, and no second opinion about which file
-#   holds the verdict.
+#   holds the verdict. It does, since round 10, CHECK the ANSWER — binding (d)
+#   requires the returned `report=` to name the validated generation's nonce — which
+#   is a different act from deriving the path or naming one inward: the callee still
+#   decides which report is current.
 #
 # USAGE
 #   scripts/flow/premerge-assert.sh <pr-number> <certified-sha> \
@@ -319,6 +342,12 @@ usage() {
   printf '                              The record is read ONCE and must still be\n' >&2
   printf '                              byte-identical when the verdict comes back: a\n' >&2
   printf '                              generation swapped in mid-check REFUSES (#3751).\n' >&2
+  printf '                              AND the verdict itself must NAME that generation:\n' >&2
+  printf '                              its report= field must carry the record report-nonce:\n' >&2
+  printf '                              that was validated, so a record swapped in and BACK\n' >&2
+  printf '                              OUT (byte-identical, verdict read from the other\n' >&2
+  printf '                              generation) REFUSES too. A legacy record with no\n' >&2
+  printf '                              report-nonce: cannot be bound and REFUSES (#3751).\n' >&2
   printf '         --c-verdict <path>   a file holding a captured verdict line, i.e.\n' >&2
   printf '                              scripts/flow/review-stage.sh verdict c --issue <N> > <path>\n' >&2
   printf '                              Capture it WHOLE: the stage KIND, every mandatory key\n' >&2
@@ -1270,6 +1299,14 @@ c_assert_stage_record_unchanged() {
 #
 # EVERY STATE IT CANNOT BIND REFUSES, AND SAYS WHICH STATE IT WAS. A pass requires an affirmative
 # match; there is no state in which an unbindable generation is read as bound.
+#
+# AUTO-ONLY BY CONSTRUCTION, not by omission. The `--c-verdict <path>` branch reads a verdict from a
+# file the CALLER supplied and locates no stage at all (it reports `routing: NOT-CONSULTED`), so
+# there is no captured record and no validated generation for a returned nonce to be compared
+# against. That branch's own bar is the WHOLE-GRAMMAR validation in `c_parse_verdict` — kind by
+# string equality, every mandatory key exactly once, every value measured — which is what it has
+# instead. Adding a generation binding there would mean deriving the expected nonce from a stage
+# this invocation never bound, i.e. asserting a relationship between two unrelated facts.
 c_assert_verdict_from_validated_generation() {
   local issue="$1" sfile
   sfile="$(c_stage_root)/.review-stage/issue-$issue/$C_STAGE_KIND.stage"

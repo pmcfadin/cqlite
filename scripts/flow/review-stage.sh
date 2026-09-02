@@ -203,6 +203,15 @@
 # nothing DEPENDS on their existence either — the nonce is generated, not chosen from what is
 # absent — so deleting one by hand costs the audit trail and nothing else.
 #
+# AND THE `report=` FIELD OF THE VERDICT LINE IS NOW LOAD-BEARING FOR A CONSUMER (#3751 round 10,
+# P2). `premerge-assert.sh` binds the verdict it accepts to the GENERATION it validated by
+# requiring that field to end in the `report-nonce:` it read from the stage record: an ABA
+# replacement of the record — swapped to another generation for the span in which this script
+# reads it, and swapped back — leaves that consumer's byte comparison satisfied, and the returned
+# nonce is what exposes it. So `report=` is not merely a diagnostic for a human: DO NOT drop it,
+# abbreviate it, or stop deriving it from the nonce. Nothing is passed INWARD to make this work
+# (round 4's H2 `--report` stays deleted); the consumer reads the value OUT of this line.
+#
 # AND BOTH PATHS ARE DERIVED — THERE IS NO `--report` (#3751 round 4, H2/H3)
 # ------------------------------------------------------------------------
 # The report of record is ALWAYS `<repo-root>/.review-stage/issue-<N>/<kind>.md`, computed the
@@ -1829,6 +1838,10 @@ cmd_verdict() {
   # routed and does not need to be: it is `unknown` or the result of integer arithmetic here,
   # never text read from the record. The rule is the one round 2's S1 states — ONE boundary for
   # EVERY data value on these lines, because the alternative is a per-site list to keep complete.
+  # `report=` IS A CONSUMER'S BINDING, NOT ONLY A DIAGNOSTIC (#3751 round 10, P2). It carries the
+  # generation's nonce, and `premerge-assert.sh` requires that nonce to be the one it validated in
+  # the stage record — which is what catches an ABA replacement its byte comparison cannot see.
+  # `unresolved` stays the honest non-measurement, and that consumer refuses on it by name.
   emit "$KI_KIND RESULT: $rendered elapsed=$STAGE_ELAPSED deadline=$(field_value "$STAGE_DEADLINE") agent=$(field_value "$STAGE_AGENT") report=$(field_value "${STAGE_REPORT:-unresolved}")"
   case "$token" in
     PASS) exit 0 ;;

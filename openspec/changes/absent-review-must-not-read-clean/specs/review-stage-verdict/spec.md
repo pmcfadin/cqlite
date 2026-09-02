@@ -184,6 +184,25 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
   never from a second read of the file
 - **AND** an undisturbed record still certifies (the positive control)
 
+#### Scenario: the accepted verdict NAMES the generation the binding was validated on
+- **WHEN** the stage record is replaced with a foreign generation for exactly the span in which the
+  verdict is read, and replaced BACK before the byte comparison (an A-B-A interleave, so the two
+  observations are byte-IDENTICAL and that comparison cannot see it)
+- **THEN** `premerge-assert.sh` REFUSES, naming that the verdict came from a DIFFERENT GENERATION of
+  the stage — the `report=` field of the accepted verdict SHALL carry the `report-nonce:` of the SAME
+  captured observation the `head-sha:` was parsed from, because equality of two observations is not
+  identity of the thing observed at a third instant
+- **AND** that expected nonce SHALL be derived from that one capture, never from a fresh read
+- **AND** NOTHING SHALL be passed INTO `review-stage.sh` to achieve it: the value is read OUT of the
+  verdict line, so the control channel removed with `--report` is not rebuilt from the other end
+- **AND** the byte comparison SHALL be RETAINED as defence in depth — it catches an edit under the
+  SAME nonce, and a vanished record, which the generation match cannot
+- **AND** every state that cannot be bound SHALL REFUSE, naming which state it was: a record with no
+  `report-nonce:` (the legacy bare `<kind>.md` report), several `report-nonce:` fields, a value that
+  is not an alphanumeric token, a verdict reporting `report=unresolved`, and a well-formed report
+  path carrying a foreign nonce
+- **AND** a verdict naming the validated generation still certifies (the positive control)
+
 #### Scenario: a stage record is bound to the commit it was opened at
 - **WHEN** `open` creates or `--force` re-stamps a stage record
 - **THEN** the record carries a `head-sha:` field holding the commit `HEAD` resolved to at that moment

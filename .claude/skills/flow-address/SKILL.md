@@ -74,7 +74,10 @@ Resolve them in the worktree and reply per thread.
    REFUSED. Run it IN the lane you certified: `AUTO` requires this worktree's `HEAD` to EQUAL
    `<certified-sha>` before it trusts a locally-located stage, because every lane here is a
    worktree of ONE shared `.git` and a peer lane's certified commit resolves from any lane
-   (#3616's class — resolvability is not provenance). If addressing comments changed the SPEC deltas, C has to be re-run — re-open the
+   (#3616's class — resolvability is not provenance). And do NOT re-open the stage while the assert
+   runs: it binds the verdict to ONE observation of the stage record AND requires the verdict's own
+   `report=` to name that generation's nonce (#3751 rounds 9-10), so a `--force` landing mid-check
+   REFUSES — re-run the assert once the stage is quiescent. If addressing comments changed the SPEC deltas, C has to be re-run — re-open the
    stage (`review-stage.sh open c --issue <N> --agent spec-auditor --force`, which KEEPS the
    original clock and publishes the report under a FRESH NONCE — spawn the auditor with the path
    that command PRINTS, since the previous report is no longer read and the new name cannot be

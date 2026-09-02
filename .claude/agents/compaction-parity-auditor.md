@@ -42,7 +42,9 @@ report?" but "what does the report say?".
   kind and the issue: a stage that was re-opened reads only the report its record names, and a
   report written where you were told to write it LAST time lands in a file nothing consults —
   which reads exactly like no report at all. If you were re-spawned, use the path in the clause
-  you were re-spawned with.
+  you were re-spawned with. **Since round 10 that is enforced at the merge point, not merely
+  wasted effort**: `premerge-assert.sh` requires the verdict it accepts to name the generation it
+  validated, so a verdict read from a superseded generation REFUSES the merge outright.
 
 # Compaction Parity Auditor
 

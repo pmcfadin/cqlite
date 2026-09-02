@@ -1828,6 +1828,21 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   byte-identical before the token is parsed. A HANDOFF is deliberately not the fix — resolving the
   report here and passing it to `verdict` would rebuild the control channel round 4 deleted with
   `--report`, since nothing outside `review-stage.sh` may name which file holds a verdict.
+  **AND BYTE EQUALITY IS NOT IDENTITY — AN ABA REPLACEMENT DEFEATS THAT COMPARISON (#3751 round
+  10).** The record can go from the validated generation A to a foreign generation B while
+  `verdict` reads B, and BACK to A before the comparison: two identical observations, the check
+  passes, and the accepted verdict came from B. Equality of two observations is not identity of
+  the thing observed at a third instant. So the verdict is bound to the GENERATION itself, using a
+  value it already reports OUTWARD — its mandatory `report=` field carries that generation's nonce
+  (`<kind>.<nonce>.md`), which must equal the `report-nonce:` of the SAME capture `head-sha` was
+  parsed from. ABA cannot satisfy it: a verdict read from B returns B's nonce. Reading a value OUT
+  of the verdict line rebuilds no control channel — nothing is passed IN, `--report` stays deleted
+  — and the byte comparison is KEPT as defence in depth, since it catches what the nonce cannot (an
+  edit under the SAME nonce, a vanished record) and vice versa. Every state that cannot be bound
+  REFUSES BY NAME: a legacy record with no `report-nonce:`, several of them, an unusable token, a
+  `report=unresolved`, a foreign nonce. It gates the two tokens the closed grammar lets PROCEED,
+  because acceptance is the only thing that can certify — for every other token
+  `review-stage.sh`'s own cause is the more precise operator action.
   Before arming `gh pr merge --auto` the closer runs the scripted pre-merge assert
   `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>] --c-verdict <path|AUTO>`
   (#2456/#3465/#3751) — refusing to merge unless the PR head still equals the certified SHA **AND** a

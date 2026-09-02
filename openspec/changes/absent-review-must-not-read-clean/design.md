@@ -134,6 +134,21 @@ review-stage.sh open <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--
   second read, and requires it to be byte-identical before the token is parsed. A HANDOFF (resolving
   the report and passing it to `verdict`) is deliberately not the fix: it would rebuild from the other
   end the control channel round 4 (H2) deleted with `--report`.
+- **And byte equality is not IDENTITY: an ABA replacement defeats that comparison** (#3751 round 10,
+  P2). The record can go from the validated generation A to a foreign generation B while `verdict`
+  reads B, and BACK to A before the comparison — two byte-identical observations, the comparison
+  passes, and the ACCEPTED verdict came from B. Equality of two observations is not identity of the
+  thing observed at a third instant. So the verdict is bound to the GENERATION itself, using a value
+  it already reports OUTWARD: its mandatory `report=` field carries that generation's nonce
+  (`<kind>.<nonce>.md`), which must equal the `report-nonce:` of the SAME capture `head-sha` was
+  parsed from — ABA cannot satisfy that, because a verdict read from B returns B's nonce. Reading a
+  value OUT of the verdict line rebuilds no control channel (nothing is passed IN, so H2's deleted
+  `--report` is not recreated from the other end), and the byte comparison is KEPT as defence in
+  depth: it catches an edit under the SAME nonce and a vanished record, which the nonce match
+  cannot, and the nonce match catches what it cannot. Every state that cannot be bound REFUSES BY
+  NAME (a legacy record with no `report-nonce:`, several of them, an unusable token, a
+  `report=unresolved`, a foreign nonce), and it gates the two tokens the closed grammar lets
+  PROCEED, because acceptance is the only thing that can certify.
 - Prints, on stdout, the absolute path **and the exact clause to paste into the spawn prompt**, so the
   contract reaches the agent verbatim rather than being paraphrased per lane.
 

@@ -331,7 +331,27 @@ Three further declared limits of the mechanism itself:
   control channel round 4 (H2) deleted with `--report` — nothing outside `review-stage.sh` may name
   which file holds a verdict. What the comparison does NOT claim: the REPORT can still change after
   `verdict` classified it. A verdict is a snapshot of a file at a time; this is about the record's
-  GENERATION.
+  GENERATION. (d) **AND BYTE EQUALITY IS NOT
+  IDENTITY — AN ABA REPLACEMENT DEFEATS (c) (#3751 round 10, P2).** The record can go from the
+  validated generation A to a foreign generation B while `verdict` reads B, and BACK to A before
+  the comparison: two byte-identical observations, (c) passes, and the ACCEPTED verdict came from
+  B. Equality of two observations is not identity of the thing observed at a third instant — that
+  is what "one observation" could not buy on its own. So the verdict is bound to the GENERATION
+  itself, using a value it already reports OUTWARD: its mandatory `report=` field carries that
+  generation's nonce (`<kind>.<nonce>.md`, below), and that nonce must equal the `report-nonce:`
+  of the SAME capture `head-sha` was parsed from. ABA cannot satisfy it — a verdict read from B
+  returns B's nonce. Reading a value OUT of the verdict line rebuilds NO control channel (nothing
+  is passed IN; H2's `--report` stays deleted), and (c) is KEPT as defence in depth rather than
+  replaced: it catches an edit under the SAME nonce and a vanished record, which (d) cannot, and
+  (d) catches what it cannot — neither contains the other. Every state that cannot be bound
+  REFUSES BY NAME (a legacy record with no `report-nonce:`, several of them, an unusable token, a
+  `report=unresolved`, a foreign nonce), and it gates the two tokens the closed grammar lets
+  PROCEED, because acceptance is the only thing that can certify — for every other token
+  `review-stage.sh`'s own cause is the more precise operator action. Measured RED: an A→B→A
+  interleave produced `C-VERDICT PASS … stage-head=<validated>` beside
+  `report: …/c.decoygenerationB.md` with NO record-changed refusal, because the bytes genuinely
+  matched; and a legacy record with no `report-nonce:` certified a PASS from a bare `<kind>.md`
+  report whose generation nothing named.
 - **The report path is NONCE-BOUND, so a resumed agent cannot write into the current report
   (round 5 J1, round 6 K2).** `open --force` reset the report to the sentinel and re-stamped
   `head-sha:` **at the same path**, so the PREVIOUS, idle agent could wake up after the reset and
