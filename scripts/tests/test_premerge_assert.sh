@@ -75,72 +75,55 @@ if ! T=$(mktemp -d "${TMPDIR:-/tmp}/premerge-assert-test.XXXXXX" 2>/dev/null) ||
   printf 'FAIL - every path in this suite would resolve under / instead.\n' >&2
   exit 1
 fi
-# CLEANUP IS A FUNCTION SO IT CAN GROW, AND IT IS REGISTERED BEFORE ANY RESOURCE
-# EXISTS (CLAUDE.md job 282). The decoy of case 44(l) is a TERM-IGNORING process
-# blocked on a FIFO: if its recognition fails, or the suite is interrupted, it
-# would otherwise sit blocked forever. The trap reads DECOY_CLEANUP_PID at FIRE
-# time, so installing the handler here — before the decoy exists — is exactly the
-# ordering job 282 asks for. Signals get handlers too, because bash runs no EXIT
-# trap for a signal left at its default disposition; each re-raises so the process
-# still dies of what it was sent.
+# CLEANUP IS UNCONDITIONAL, RUN-SCOPED, AND MAKES NO VERDICT (roborev job 381,
+# firing the stop line). The leak ADJUDICATION that used to live here — deciding
+# LEAK vs RECYCLED vs GONE vs ZOMBIE vs UNMEASURABLE from a two-valued `ps` probe
+# — is DELETED. Six findings in that apparatus, three of them the same fail-open
+# read after three correct fixes, and the standing ruling applies: a guard with a
+# persistent documented false-PASS record is worse than no guard, because it
+# invites reliance it cannot support.
 #
-# ORDER IS LOAD-BEARING: the decoy is reaped BEFORE `rm -rf "$T"`, because it
-# blocks on a FIFO inside $T and removing the FIFO does NOT unblock an open() that
-# is already waiting.
-DECOY_CLEANUP_PID=""
-DECOY_CLEANUP_NEEDLE=""
+# WHAT REPLACES IT NEEDS NO ADJUDICATION AT ALL. Every process this suite spawns
+# carries `$T/` in its argv — the shim paths and the sentinel sleep alike — and
+# `$T` is a per-run `mktemp -d`, so ANYTHING wearing it IS OURS. That makes the
+# kill safe by CONSTRUCTION (job 279's argv validation, with a needle no peer can
+# produce) instead of by interpreting an exit status. Nothing here decides
+# anything, so nothing here can fail open: if `ps` cannot run, the sweep kills
+# nothing and no assertion depends on it.
+#
+# Registered BEFORE any resource exists (CLAUDE.md job 282), signals included,
+# because bash runs no EXIT trap for a signal at its default disposition; each
+# re-raises so the process still dies of what it was sent.
+#
+# ORDER IS LOAD-BEARING: the sweep runs BEFORE `rm -rf "$T"`. A shim can be
+# blocked on a FIFO inside $T, and removing the FIFO does NOT unblock a reader
+# already waiting on it.
 suite_cleanup() {
-  to_kill_decoy
+  to_sweep_run_processes
+  rm -f "$T/ps-census.txt" 2>/dev/null
   rm -rf "$T"
 }
-# to_kill_decoy — kill the registered decoy, VALIDATING ITS ARGV FIRST so a pid
-# that has been recycled into something else is never signalled (job 279:
-# ownership ends at reap, not at exit; on this fleet the inheritor of a released
-# pid is most likely a peer lane's gate). Safe to call any number of times.
-#
-# THREE THINGS THE FIRST VERSION GOT WRONG (roborev job 378):
-#
-#  1. IT CLEARED THE REGISTRATION EVEN WHEN THE PROBE COULD NOT ANSWER. `args=$(ps
-#     …) || args=""` collapses "ps FAILED" onto "the process is GONE", and the
-#     unconditional clear then DISCARDED the registration — so a failed probe
-#     silently leaked the process. That is the fail-open shape this repo names
-#     explicitly: a probe that could not answer taking the permissive branch. And
-#     it is not niche — a failing `ps` is exactly when the registration matters
-#     most. MEASURED, which is what makes the split expressible: `ps -p <gone>`
-#     exits 1 with no output (an AFFIRMATIVE "not found"), while a broken `ps`
-#     exits >= 2. So rc >= 2 KEEPS the registration for a later call; only an
-#     affirmative determination may clear it.
-#  2. IT KILLED WITHOUT REAPING. The decoy is a DIRECT CHILD, so an unreaped
-#     SIGKILL leaves a zombie holding the pid. `wait` follows the kill, and the
-#     clear follows the wait — in that order.
-#  3. It relied on `rm -rf "$T"` as a backstop, which cannot work: REMOVING THE
-#     FIFO DOES NOT UNBLOCK A READER ALREADY BLOCKED ON IT. That is why the reap
-#     runs BEFORE the directory removal in `suite_cleanup`, not after.
-#
-# An EMPTY needle is also a "cannot validate" state: it neither signals nor
-# clears, because `*""*` matches anything and would authorise a blind kill.
-to_kill_decoy() {
-  local pid="$DECOY_CLEANUP_PID" args rc=0
-  [ -n "$pid" ] || return 0
-  args=$(ps -p "$pid" -o args= 2>/dev/null) || rc=$?
-  if [ "$rc" -ge 2 ]; then
-    return 0                      # the probe FAILED: keep the registration
-  fi
-  if [ -z "$args" ]; then
-    DECOY_CLEANUP_PID=""          # affirmatively gone (ps ran, found nothing)
-    return 0
-  fi
-  [ -n "$DECOY_CLEANUP_NEEDLE" ] || return 0   # cannot validate: never blind-kill
-  case "$args" in
-    *"$DECOY_CLEANUP_NEEDLE"*)
-      kill -KILL "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null || true          # reap: it is a direct child
-      DECOY_CLEANUP_PID=""
-      ;;
-    *) : ;;                       # RECYCLED: never signalled, never cleared
-  esac
+
+# to_sweep_run_processes — kill every process whose argv names THIS RUN's scratch
+# dir. Best-effort by design: no status is inspected and no verdict is produced.
+# `wait` follows, for whatever was a direct child (it is a no-op for the rest).
+to_sweep_run_processes() {
+  local snap p a
+  snap="${TMPDIR:-/tmp}/premerge-sweep.$$"
+  ps -eo pid=,args= >"$snap" 2>/dev/null || { rm -f "$snap"; return 0; }
+  while read -r p a; do
+    case "$p" in ''|*[!0-9]*) continue ;; esac
+    case "$a" in
+      *"$T/"*)
+        kill -KILL "$p" 2>/dev/null || true
+        wait "$p" 2>/dev/null || true
+        ;;
+    esac
+  done <"$snap"
+  rm -f "$snap"
   return 0
 }
+
 trap 'suite_cleanup' EXIT
 trap 'suite_cleanup; trap - INT;  kill -INT  $$' INT
 trap 'suite_cleanup; trap - TERM; kill -TERM $$' TERM
@@ -2219,8 +2202,8 @@ fi
 # no other process on the box can produce — never a `pkill -f` pattern.
 TOFLOW="$T/flow-timeout"
 # THE SENTINEL MUST BE UNIQUE PER RUN, AND A FIXED STRING WAS A REAL BLOCKER.
-# It used to be a FIXED `sleep <constant>` argv, while `to_leaks` and the cleanup
-# census the WHOLE BOX (`ps -eo …`). Measured, both directions: a suite run
+# It used to be a FIXED `sleep <constant>` argv, while the leak census and the
+# cleanup scanned the WHOLE BOX (`ps -eo …`). Measured, both directions: a suite run
 # CONCURRENTLY with another run of itself reported `293 passed, 1 FAILED —
 # 1 stray process(es) matching the sentinel survived`, and the same suite run
 # alone immediately after reported `294 passed, 0 failed` with no strays on the
@@ -2295,134 +2278,12 @@ else
   ok "hung-read: SKIPPED (no bounding runner / fixture unbuildable — arms UNEXERCISED, declared not silent)"
 fi
 
-# to_leaks — count processes whose FULL argv is exactly the sentinel. An exact
-# whole-line match, never a `pkill -f` pattern: on this fleet a pattern-based
-# kill has already taken out a peer lane's gate.
-#
-# THIS CENSUS IS NOT SUFFICIENT ON ITS OWN, and believing it was is roborev job
-# 367: only the TERM shim ever WEARS that argv (it `exec`s into the sentinel
-# sleep). The KILL shim stays a BASH process blocked on the FIFO — measured argv
-# `bash <shimdir>/git merge-base --is-ancestor <sha> <sha>` — so a surviving
-# KILL-path process passed this assertion untouched. The assertion was vacuous
-# for precisely the arm that needs it, the one where the runner had to escalate.
-# A vacuous assertion is worse than a missing one, because it invites reliance it
-# cannot support. It is KEPT as a cheap second signal (it also catches a stray
-# sentinel from an earlier run) and is no longer the primary check.
-# THREE-VALUED SINCE roborev job 380, and it had TWO fail-open routes at once:
-#   * `ps` ran INSIDE A PIPELINE, so its exit status was DISCARDED entirely — the
-#     pipeline's status is grep's. A failing `ps` produced EMPTY input, grep
-#     counted 0, and the caller read "no leaks".
-#   * `grep -c` prints `0` AND EXITS 1 on no-match, so its status cannot be used
-#     naively either (that trap already cost this file one round).
-# So `ps` writes to a FILE, its status is inspected, and only then is the count
-# taken. Prints a NUMBER, or the literal `UNMEASURABLE` — never a silent 0. The
-# caller must FAIL on UNMEASURABLE: this suite tests a guard that is fail-closed
-# on an unmeasurable state, so its own checks being permissive there would be
-# incoherent.
-to_leaks() {
-  local psout n rc=0 grc=0
-  psout="$T/ps-census.txt"
-  ps -eo args= >"$psout" 2>/dev/null || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    rm -f "$psout"
-    printf 'UNMEASURABLE\n'
-    return 0
-  fi
-  n=$(grep -c -x -F "$TOSENTINEL" "$psout" 2>/dev/null)
-  grc=$?
-  rm -f "$psout"
-  # grep -c: 0 = matches, 1 = none (still prints a count), >=2 = ERROR.
-  if [ "$grc" -ge 2 ]; then
-    printf 'UNMEASURABLE\n'
-    return 0
-  fi
-  case "$n" in
-    ''|*[!0-9]*) printf 'UNMEASURABLE\n'; return 0 ;;
-  esac
-  printf '%s\n' "$n"
-}
-
-# to_check_pid <label> <pidfile> <expected-argv-needle> — the PRIMARY leak check
-# (job 367). The shim records its OWN pid before it blocks; `exec` PRESERVES the
-# pid, so this covers the TERM arm as well as the KILL arm, uniformly.
-#
-# THREE-VALUED, and the middle value is the whole point of doing this carefully:
-#   gone                      -> no leak.
-#   present AND argv MATCHES  -> a real leak. Reported, then killed.
-#   present AND argv does NOT -> INDETERMINATE. The pid was RELEASED and RECYCLED
-#                                into another process, and on this fleet the most
-#                                likely inheritor is A PEER LANE'S GATE (this repo
-#                                has that incident). So the argv is validated
-#                                BEFORE any signal, and a mismatch is REPORTED and
-#                                NEVER SIGNALLED — job 279's "ownership ends at
-#                                REAP, not at exit".
-# A `<defunct>` entry is its own, fourth outcome: a zombie holds a pid but runs no
-# code and is reaped by init, so it is not a leak — named explicitly rather than
-# folded into either branch.
-# to_pid_verdict <pidfile> <needle> — the DECIDING half, split out so it can be
-# SELF-TESTED (see 44(l)): it prints exactly one verdict token and KILLS NOTHING.
-# A check whose only caller reports "no leak" cannot demonstrate that it would
-# ever say otherwise, which is the defect this whole round is about.
-#   NO-SUBJECT | BAD-PID | UNMEASURABLE | GONE | ZOMBIE | LEAK | RECYCLED
-#
-# `UNMEASURABLE` was added on roborev job 380: `args=$(ps …) || args=""` collapsed
-# a FAILED probe onto an EMPTY one, so a `ps` that could not run was reported as
-# `GONE` — a surviving timeout child read as successfully reaped while the suite
-# passed. Same measured split as `to_kill_decoy` uses: `ps -p <gone>` exits 1 with
-# no output (an affirmative "not found"), a broken `ps` exits >= 2.
-to_pid_verdict() {
-  local pidfile="$1" needle="$2" pid args rc=0
-  if [ ! -f "$pidfile" ]; then printf 'NO-SUBJECT\n'; return 0; fi
-  pid=$(cat "$pidfile" 2>/dev/null)
-  case "$pid" in
-    ''|*[!0-9]*) printf 'BAD-PID\n'; return 0 ;;
-  esac
-  args=$(ps -p "$pid" -o args= 2>/dev/null) || rc=$?
-  if [ "$rc" -ge 2 ]; then printf 'UNMEASURABLE\n'; return 0; fi
-  if [ -z "$args" ]; then printf 'GONE\n'; return 0; fi
-  case "$args" in
-    *"<defunct>"*) printf 'ZOMBIE\n' ;;
-    *"$needle"*)   printf 'LEAK\n' ;;
-    *)             printf 'RECYCLED\n' ;;
-  esac
-  return 0
-}
-
-# to_check_pid <label> <pidfile> <expected-argv-needle> — the REPORTING half.
-to_check_pid() {
-  local label="$1" pidfile="$2" needle="$3" pid verdict args
-  verdict=$(to_pid_verdict "$pidfile" "$needle")
-  pid=$(cat "$pidfile" 2>/dev/null || true)
-  case "$verdict" in
-    NO-SUBJECT)
-      bad "hung-read ($label): the shim never recorded a pid — it did not run, so this arm proves nothing"
-      return 1 ;;
-    BAD-PID)
-      bad "hung-read ($label): the shim recorded a non-numeric pid ('$pid') — the leak check cannot be made"
-      return 1 ;;
-    UNMEASURABLE)
-      # NOT read as "no leak": the probe could not answer, so whether the runner
-      # reaped its child is UNKNOWN, and an unknown is never a pass (job 380).
-      bad "hung-read ($label): the process probe FAILED (ps unusable), so whether pid $pid survived the bound is UNKNOWN — never read as reaped"
-      return 1 ;;
-  esac
-  ok "hung-read ($label): the shim recorded its own pid ($pid) — the leak check has a SUBJECT"
-  case "$verdict" in
-    GONE)
-      ok "hung-read ($label): the shim process is GONE — nothing leaked past the bound" ;;
-    ZOMBIE)
-      ok "hung-read ($label): the shim pid is a ZOMBIE (runs no code, reaped by init) — not a leak" ;;
-    LEAK)
-      args=$(ps -p "$pid" -o args= 2>/dev/null || true)
-      bad "hung-read ($label): the shim process $pid SURVIVED the bound (argv: $args) — the runner did not reap its child (job 279)"
-      # Signalled ONLY because the argv was VALIDATED to be OUR shim.
-      kill -KILL "$pid" 2>/dev/null ;;
-    RECYCLED)
-      args=$(ps -p "$pid" -o args= 2>/dev/null || true)
-      bad "hung-read ($label): pid $pid is alive but its argv does NOT match this shim (argv: $args) — the pid was RECYCLED, so whether the shim leaked is INDETERMINATE. NOT signalled: on this fleet the inheritor of a released pid is most likely a peer lane's gate." ;;
-  esac
-  return 0
-}
+# THE LEAK ADJUDICATION USED TO LIVE HERE (`to_leaks`, `to_pid_verdict`,
+# `to_check_pid`) AND IS DELETED — see the cleanup block at the top of this file
+# for why. What the arms below still assert is the SHIPPED behaviour rounds 4 and
+# 7 asked for: exit 3, the ANCHOR-UNVERIFIABLE marker, and a TIMEOUT cause
+# distinct from every other cause, each with a runner-exit control. What they no
+# longer assert is WHO leaked and WHY.
 
 # to_run_arm <label> <shim-dir> <expected-runner-rc>
 #
@@ -2481,30 +2342,9 @@ to_run_arm() {
       *) ok "hung-read ($label): a timeout borrows NO other cause's remedy (not work-tree, TMPDIR, absent-object, shallow or NOT-ANCESTOR)" ;;
     esac
   fi
-  # PRIMARY: the shim's OWN recorded pid (job 367). Works for BOTH arms, because
-  # the KILL shim never wears the sentinel argv.
-  to_check_pid "$label" "$pidfile" "$shimdir/git"
-  # SECONDARY: the sentinel census, kept as a cheap cross-check. It can only see
-  # the TERM arm's `exec`ed sleep — see the note on to_leaks.
-  leaks=$(to_leaks)
-  if [ "$leaks" = UNMEASURABLE ]; then
-    bad "hung-read ($label): the sentinel census could not be taken (ps unusable) — that is UNKNOWN, not 'no strays' (job 380)"
-  elif [ "$leaks" = 0 ]; then
-    ok "hung-read ($label): the sentinel census also finds no stray sleep (secondary check)"
-  else
-    bad "hung-read ($label): $leaks stray process(es) matching the sentinel survived — the runner did not reap its child (job 279)"
-    # Clean up ONLY pids whose full argv EQUALS the sentinel. WHAT MAKES THIS
-    # SAFE IS THAT THE SENTINEL IS UNIQUE TO THIS RUN (derived from `$T`), NOT
-    # that the match is exact. The previous comment claimed exactness was the
-    # safety property — "an exact whole-argv match cannot be a peer lane's gate"
-    # — which is true and buys nothing: with a shared constant the match is
-    # exactly a PEER LANE'S COPY OF THIS SUITE, and this loop SIGKILLed it. Do
-    # not weaken the derivation back to a constant; the reasoning error is easy
-    # to reproduce, which is why it is written down here.
-    ps -eo pid=,args= 2>/dev/null | while read -r _p _a; do
-      [ "$_a" = "$TOSENTINEL" ] && kill -KILL "$_p" 2>/dev/null
-    done
-  fi
+  # NO LEAK ASSERTION HERE ANY MORE (job 381). Reaping is covered by the
+  # unconditional run-scoped sweep at suite exit, which makes no claim about it.
+  # DECLARED, not buried: see the DECLARED LOSS notice printed below this arm.
 }
 
 if [ "$to_shape" -eq 1 ]; then
@@ -2648,216 +2488,23 @@ FAILSHIM
   fi
 fi
 
-# --- 44(l): THE LEAK CHECK MUST BE ABLE TO SAY "LEAK" (roborev job 367) ------
+# --- 44(l) REMOVED: the leak self-test and its decoy (roborev job 381) -------
 #
-# Round 4's leak assertion searched for the sentinel sleep argv. Only
-# the TERM shim ever wears it (it `exec`s into that sleep); the KILL shim stays a
-# BASH process blocked on the FIFO — measured argv
-# `bash <shimdir>/git merge-base --is-ancestor <sha> <sha>` — so a surviving
-# KILL-path process passed the assertion untouched. The check was VACUOUS for the
-# one arm that needs it, the arm where the runner had to escalate.
+# This case existed to prove the leak adjudication could say LEAK. The
+# adjudication is gone, so the proof has nothing to prove — and the decoy was the
+# only fixture in this suite that deliberately spawned a live process in order to
+# INSPECT it, which is where every process-lifetime defect in this apparatus
+# originated (an orphaning child, an unregistered pid, a kill without a reap).
 #
-# A vacuous assertion is worse than a missing one: it invites reliance it cannot
-# support. So the deciding half is now `to_pid_verdict`, and THIS case proves it
-# has discriminating power — the same standard the mutation arm at 44(c) is held
-# to. Three properties, over a DECOY that is deliberately alive:
-#   1. a live process whose argv MATCHES -> LEAK        (the assert can fire)
-#   2. a live process whose argv does NOT -> RECYCLED, and it is NOT SIGNALLED
-#      (job 279: ownership ends at reap, and a released pid on this fleet is most
-#      likely inherited by a peer lane's gate)
-#   3. a dead pid -> GONE                               (no false alarm)
-# The decoy's argv is built to CONTAIN a shim-like path, so property 1 exercises
-# the same needle shape the real arms use.
-DECOY_DIR="$T/leak-decoy"
-DECOY_PID="$T/leak-decoy.pid"
-DECOY_FIFO="$T/leak-decoy.fifo"
-decoy_shape=0
-# THE DECOY IS AN ORDINARY PROCESS ON PURPOSE — NO `trap '' TERM` (roborev job
-# 378). It used to ignore TERM, which was shaping carried over from the KILL-path
-# shim, where ignoring TERM IS the point. Here it bought NOTHING and cost the
-# entire cleanup problem: an unkillable-by-TERM child needs careful management,
-# and four findings in this scaffolding came from managing it.
-#   VERIFIED rather than assumed, because it is the premise of the change:
-#   `to_pid_verdict` contains ZERO `kill` — it only inspects `ps` — so none of the
-#   verdicts this arm tests (LEAK / RECYCLED / GONE / NO-SUBJECT / BAD-PID) needs
-#   the decoy to survive a signal. Nothing in this suite sends the decoy TERM
-#   either; the only TERM senders target `$$`. And on a Ctrl-C the decoy now dies
-#   with the foreground group by itself, which is strictly better.
-# So the hazardous PROPERTY is removed at its source rather than managed: a plain
-# direct child is removable with `kill` + `wait`, which reaps reliably.
-#
-# THE DECOY MUST NOT SPAWN A CHILD, and getting that wrong ONCE is why this
-# comment exists. The first version ran a bare `sleep`, so the decoy was TWO
-# processes: the bash wrapper (which carries the argv the needle matches, and is
-# the pid recorded) and its sleep CHILD. SIGKILLing the wrapper ORPHANED the
-# child, and five runs of this suite left five stray sleeps on the box —
-# precisely the "a test that leaks processes is its own hazard" failure this arm
-# exists to guard against, introduced BY the guard. So the decoy blocks the same
-# way the KILL shim does: opening a writer-less FIFO, which needs no child, so
-# one SIGKILL removes the whole thing. The arm asserts its own cleanup below.
-rm -f "$DECOY_FIFO"
-if mkdir -p "$DECOY_DIR" 2>/dev/null && mkfifo "$DECOY_FIFO" 2>/dev/null; then
-  cat >"$DECOY_DIR/git" <<DECOY
-#!/usr/bin/env bash
-read -r _ < "$DECOY_FIFO"
-DECOY
-  chmod +x "$DECOY_DIR/git"
-  bash "$DECOY_DIR/git" merge-base --is-ancestor deadbeef deadbeef >/dev/null 2>&1 &
-  decoy_pid=$!
-  # REGISTERED IMMEDIATELY, on the line after the spawn (job 282). Everything
-  # below this point — a failed recognition, a `bad`, an interrupt, a normal exit
-  # — is covered by the trap installed at the top of this file.
-  DECOY_CLEANUP_PID="$decoy_pid"
-  DECOY_CLEANUP_NEEDLE="$DECOY_DIR/git"
-  printf '%s\n' "$decoy_pid" >"$DECOY_PID"
-  # Give it a moment to appear in the process table, then CONFIRM it is really
-  # alive with the expected argv — a decoy that died makes every property below
-  # vacuous, which is the exact failure this case exists to remove.
-  sleep 1
-  if [ -n "$(ps -p "$decoy_pid" -o args= 2>/dev/null | grep -F "$DECOY_DIR/git")" ]; then
-    decoy_shape=1
-  fi
-  # THE NO-CHILD PROPERTY, ASSERTED WHILE THE DECOY IS ALIVE — this is the check
-  # that would have caught round 7's orphaning decoy, and it can only be made
-  # here, because after the parent dies its children are reparented and the link
-  # is gone. A decoy with a child means SIGKILLing the recorded pid ORPHANS that
-  # child, which is the "a leak guard that leaks" hazard.
-  if [ "$decoy_shape" -eq 1 ]; then
-    decoy_kids=$(ps -eo ppid= 2>/dev/null | awk -v p="$decoy_pid" '$1 == p { n++ } END { print n + 0 }')
-    if [ "$decoy_kids" = 0 ]; then
-      ok "leak self-test fixture: the decoy has NO child process, so killing it cannot orphan anything"
-    else
-      bad "leak self-test fixture: the decoy has $decoy_kids child process(es) — killing the recorded pid would ORPHAN them (this is the round-7 defect)"
-    fi
-  fi
-fi
-if [ "$decoy_shape" -ne 1 ]; then
-  # REAP BEFORE DECLARING THE SKIP: recognition may have failed with the decoy
-  # STILL ALIVE and blocked on its FIFO. Reporting a skip while leaving it running
-  # is the leak this arm exists to guard against (roborev job 370, finding 2). The
-  # exit trap would also get it, but a skip should not depend on that.
-  to_kill_decoy
-  printf 'ARM NOT TAKEN: leak-check self-test (job 367) — a live decoy process carrying a shim-like argv\n'
-  printf 'ARM NOT TAKEN: could not be started on this host, so the leak checks discriminating power is\n'
-  printf 'ARM NOT TAKEN: UNPROVEN on this run. Any partially-started decoy has been reaped.\n'
-  ok "leak self-test: SKIPPED (decoy unavailable — arm UNEXERCISED, declared not silent)"
-else
-  ok "leak self-test fixture: a live decoy carrying a shim-like argv really exists"
-  # (1) it can say LEAK.
-  v=$(to_pid_verdict "$DECOY_PID" "$DECOY_DIR/git")
-  if [ "$v" = LEAK ]; then
-    ok "leak self-test: a live process with a MATCHING argv is reported as LEAK — the assert can fire"
-  else
-    bad "leak self-test: a live matching process was reported '$v', not LEAK — the leak assertion is vacuous (job 367)"
-  fi
-  # (2) a NON-matching argv is RECYCLED, and the decoy must SURVIVE the check,
-  # because a mismatched pid must never be signalled.
-  v=$(to_pid_verdict "$DECOY_PID" "$T/no-such-shim-dir/git")
-  if [ "$v" = RECYCLED ]; then
-    ok "leak self-test: a live process with a NON-matching argv is reported RECYCLED, not LEAK"
-  else
-    bad "leak self-test: a non-matching argv was reported '$v', not RECYCLED — the argv is not being validated before cleanup"
-  fi
-  if [ -n "$(ps -p "$decoy_pid" -o args= 2>/dev/null)" ]; then
-    ok "leak self-test: the RECYCLED verdict did NOT signal the process (job 279)"
-  else
-    bad "leak self-test: the decoy was killed on a NON-matching argv — a recycled pid must never be signalled (job 279)"
-  fi
-  # (3) a dead pid is GONE, not a false alarm. Killed by pid AFTER validating the
-  # argv is our own decoy — the same discipline the real check follows.
-  # ONE implementation of the validated kill+reap: the arm calls the same helper
-  # the traps do, rather than duplicating it. A second copy is a second place for
-  # the ordering (kill -> wait -> clear) to be wrong.
-  to_kill_decoy
-  if [ -z "$DECOY_CLEANUP_PID" ]; then
-    ok "leak self-test: the validated kill+reap cleared the registration (job 282's second half)"
-  else
-    bad "leak self-test: the registration survived the kill — either the probe could not answer or the argv did not match, and the decoy may still be running"
-  fi
-  sleep 1
-  v=$(to_pid_verdict "$DECOY_PID" "$DECOY_DIR/git")
-  if [ "$v" = GONE ]; then
-    ok "leak self-test: once the decoy is killed the verdict is GONE — no false alarm, and it was REAPED"
-  elif [ "$v" = ZOMBIE ]; then
-    # NOT LOAD-BEARING ON THIS BASH, and said so rather than left to look pinned.
-    # MEASURED: deleting the `wait` from to_kill_decoy leaves this suite at 318/0,
-    # because bash reaps a background child asynchronously and the pid is gone from
-    # `ps` without an explicit wait. So the `wait` is defence in depth — correct,
-    # documented, and required by shells that do not auto-reap — while this arm can
-    # only catch a zombie that some other shell or a future refactor produces. A
-    # fixture that could provoke one would have to suppress bash's own SIGCHLD
-    # bookkeeping, which is not controllable from a script.
-    bad "leak self-test: the decoy is a ZOMBIE — it was killed without being reaped (job 378); it is a direct child, so \`wait\` must follow the kill"
-  else
-    bad "leak self-test: a dead decoy was reported '$v' — the check would red on a clean run"
-  fi
-  # THE FAIL-CLOSED PROBE PROPERTY, which is job 378's core finding: when `ps`
-  # CANNOT ANSWER the registration must be KEPT, never discarded. Exercised with a
-  # `ps` that exits 2 shadowed onto PATH for exactly this call — the shipped
-  # helper is unchanged, only what it can see is.
-  FAILPS="$T/bin-failing-ps"
-  mkdir -p "$FAILPS"
-  printf '#!/bin/sh\nexit 2\n' >"$FAILPS/ps"
-  chmod +x "$FAILPS/ps"
-  DECOY_CLEANUP_PID=424242
-  DECOY_CLEANUP_NEEDLE="$DECOY_DIR/git"
-  _kd_path="$PATH"
-  PATH="$FAILPS:$PATH"
-  to_kill_decoy
-  PATH="$_kd_path"
-  if [ "$DECOY_CLEANUP_PID" = 424242 ]; then
-    ok "leak self-test: a FAILED ps probe KEEPS the registration — a probe that cannot answer never takes the permissive branch (job 378)"
-  else
-    bad "leak self-test: a failed ps probe DISCARDED the registration — the process would leak silently, which is the fail-open shape this repo forbids"
-  fi
-  # ...and the affirmative counterpart: a working `ps` that finds nothing DOES
-  # clear it, or the registration would pile up forever.
-  DECOY_CLEANUP_PID=424242
-  to_kill_decoy
-  if [ -z "$DECOY_CLEANUP_PID" ]; then
-    ok "leak self-test: an AFFIRMATIVE 'not found' clears the registration (rc 1 with no output)"
-  else
-    bad "leak self-test: an affirmatively-gone pid left the registration set — it would never be released"
-  fi
-  DECOY_CLEANUP_NEEDLE=""
-  # THE SAME FAIL-CLOSED PROPERTY FOR THE TWO *LEAK CHECKS* (job 380). The arm
-  # above covers `to_kill_decoy`; these cover the PRIMARY verdict and the
-  # SECONDARY census, which had the same permissive-on-unmeasurable read. Reuses
-  # the `$FAILPS` shim built above — no new machinery.
-  _kd_path="$PATH"
-  PATH="$FAILPS:$PATH"
-  v=$(to_pid_verdict "$DECOY_PID" "$DECOY_DIR/git")
-  n=$(to_leaks)
-  PATH="$_kd_path"
-  if [ "$v" = UNMEASURABLE ]; then
-    ok "leak self-test: a FAILED ps probe makes to_pid_verdict UNMEASURABLE, never GONE (job 380)"
-  else
-    bad "leak self-test: to_pid_verdict reported '$v' with an unusable ps — a surviving process would read as successfully reaped"
-  fi
-  if [ "$n" = UNMEASURABLE ]; then
-    ok "leak self-test: a FAILED ps makes the census UNMEASURABLE, never a silent 0 (job 380)"
-  else
-    bad "leak self-test: to_leaks reported '$n' with an unusable ps — a stray would read as absent"
-  fi
-  # (the no-child property is asserted at the fixture, while the decoy is still
-  # alive — see `decoy_kids` above. A post-hoc census for a `sleep` argv, which
-  # is what stood here, became VACUOUS the moment the decoy stopped spawning one:
-  # nothing could ever wear that argv again, so the assertion could not fail.
-  # That is the same "worse than missing" class this whole round is about, one
-  # arm over.)
-  # And the absent/garbage subjects, so a silent NO-SUBJECT can never read as clean.
-  if [ "$(to_pid_verdict "$T/no-such-pidfile" "$DECOY_DIR/git")" = NO-SUBJECT ]; then
-    ok "leak self-test: a MISSING pidfile is NO-SUBJECT (the arm proves nothing), never 'no leak'"
-  else
-    bad "leak self-test: a missing pidfile must be NO-SUBJECT"
-  fi
-  printf 'x\n' >"$T/leak-decoy-garbage.pid"
-  if [ "$(to_pid_verdict "$T/leak-decoy-garbage.pid" "$DECOY_DIR/git")" = BAD-PID ]; then
-    ok "leak self-test: a non-numeric pidfile is BAD-PID, never 'no leak'"
-  else
-    bad "leak self-test: a non-numeric pidfile must be BAD-PID"
-  fi
-fi
+# DECLARED LOSS, printed at run time rather than left in a commit message: the
+# shipped runner's reap-its-own-child property (job 279) is now asserted by
+# NOTHING in this suite. The hung-read arms still prove the bound FIRES (exit 3,
+# the ANCHOR-UNVERIFIABLE marker, a distinct TIMEOUT cause, and a runner-exit
+# control per arm); they no longer prove the runner left no process behind.
+printf 'DECLARED LOSS: leak reaping is NO LONGER ASSERTED by this suite (job 381). The hung-read\n'
+printf 'DECLARED LOSS: arms prove the bound fires and names its own cause; they do NOT prove the\n'
+printf 'DECLARED LOSS: bounded runner reaped its child. Strays are swept unconditionally at suite\n'
+printf 'DECLARED LOSS: exit by argv (run-scoped, no verdict), which is HYGIENE, not a check.\n'
 
 # --- 44(m): THE SENTINEL IS UNIQUE PER RUN (cross-lane blocker) --------------
 #
