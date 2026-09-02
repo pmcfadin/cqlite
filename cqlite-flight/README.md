@@ -81,6 +81,24 @@ This is the wire contract with non-Rust clients; see `src/ticket.rs`.
 `Prefix`. Predicate operands are typed by the column's CQL type. Token-range
 filtering uses the token stored on each partition key — no Murmur3 computation.
 
+### A request must have at least one OUTPUT column (issue #3742)
+
+A ticket whose output column set is empty is refused up front with
+`InvalidArgument`, before any Arrow schema message is produced — never with a
+mid-stream failure and never with a zero-field schema. Refused shapes:
+
+| Ticket | Why |
+|--------|-----|
+| `"columns": []` | an explicitly empty projection selects nothing |
+| `"columns": ["nope"]` | no projected name exists in the table schema (the error NAMES them) |
+| `"aggregation": {"group_by": [], "aggregates": []}` | output columns are `group_by` + `aggregates` |
+
+The rule is **zero total output columns**, not "no aggregates":
+`{"group_by": ["c"], "aggregates": []}` — what Trino emits for
+`SELECT DISTINCT c` — has one output column and is served, as is a projection
+that names an unknown column alongside a real one (it resolves to the real
+one). Omit `columns` (or send `null`) to select every column.
+
 ## Running
 
 ```bash
