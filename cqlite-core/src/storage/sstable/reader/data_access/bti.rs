@@ -214,6 +214,11 @@ impl SSTableReader {
             .bti_decompress_and_parse_target_all(
                 offset as usize,
                 decode_end_bound,
+                // Issue #3890: the UN-narrowed successor offset. `decode_end_bound`
+                // above may have been tightened to a clustering slice's row-index
+                // block extent INSIDE the partition, which is the right bound for
+                // the DECOMPRESSION and the wrong one for the PARSE.
+                end_bound,
                 row_body_window,
                 &key,
                 table_id,

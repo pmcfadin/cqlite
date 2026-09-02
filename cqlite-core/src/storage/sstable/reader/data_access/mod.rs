@@ -20,6 +20,11 @@ mod bti;
 // BTI point-read path split out of `bti.rs` (issue #1599 / G3, campsite #1116):
 // `bti_point_lookup` + the chunk-targeted single-partition decode machinery.
 mod bti_point;
+// Issue #3890: bounding a single-partition seek's PARSE input to the target
+// partition's authoritative byte extent (split out of `bti_point.rs`, campsite
+// #1116). Seek-only, so `not(tombstones)` like the rest of that path.
+#[cfg(not(feature = "tombstones"))]
+mod bti_partition_extent;
 // BIG ("nb") promoted-index forward seek + reverse iterator (Issue #1184). The
 // seek/reverse paths exist only on the default build, so the whole module is
 // `not(tombstones)` gated.
