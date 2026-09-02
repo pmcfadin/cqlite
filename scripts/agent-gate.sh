@@ -1634,6 +1634,10 @@ PYTHON_LITE_TIER_CMD="$PYTHON_LITE_MATURIN_CMD && $PYTHON_LITE_PYTEST_CMD"
 # run_scoped_tests; rendered by run_lite as a `python-tier:` line. Empty (no line)
 # when the diff has no python-binding change.
 PYTHON_TIER_NOTE=""
+# #3625 (roborev job 368, low): the FINALIZED component status, published by record_result
+# for the caller's progress line. Initialised here so `set -u` is satisfied on any path
+# that reads it, and so it can never carry a value in from the environment.
+RECORDED_STATUS=""
 
 # Read changed repo-relative paths on stdin; emit the deduped set of owning Cargo
 # workspace packages (one per line) — the union of path-owners + changed
@@ -1829,6 +1833,20 @@ delta_classify_stdin() {
 # through as RESULT: FAIL). Pure: reads the allowed set on stdin, no cargo/git/side
 # effects — exposed via the hidden --delta-python-gap hook so scripts/tests can assert
 # the SAME decision run_delta consumes (single-source; drift is impossible).
+# _python_tier_ran <PYTHON_TIER_NOTE>: did the --lite/--delta python tier actually EXECUTE?
+# The gate's own convention, in ONE place because two readers now depend on it
+# (_delta_python_tier_gap's refusal, and _census_scoped_record's choice of census kind — a
+# second spelling of this discrimination would be a second thing to drift): the tier writes
+# `python-tier: PASS`/`FAIL` when it RAN and `python-tier: SKIPPED (...)` when it did not,
+# and an EMPTY note means it was never in scope. Affirmative — only the two ran-states
+# return 0, so an unrecognised or absent note is "did not run", never the permissive answer.
+_python_tier_ran() {
+  case "${1:-}" in
+    "python-tier: PASS"*|"python-tier: FAIL"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _delta_python_tier_gap() {
   local note="${1:-}" line py_tests=0
   while IFS= read -r line; do
@@ -1837,9 +1855,7 @@ _delta_python_tier_gap() {
     esac
   done
   [ "$py_tests" -eq 1 ] || return 1
-  case "$note" in
-    "python-tier: PASS"*|"python-tier: FAIL"*) return 1 ;;
-  esac
+  _python_tier_ran "$note" && return 1
   return 0
 }
 
@@ -6639,6 +6655,21 @@ _fm_component_class() {
     # python test.
     file-size|roborev-lints|pub-surface|binding-unwind-profile|delivery-telemetry)
       printf 'no-cargo' ;;
+    # tree-selftest: the #2926 hidden hook, which reaches a SUMMARY row via
+    # `record_result "tree-selftest" PASS 0` and NOT via COMPONENTS or a `NAMES+=` append —
+    # so it was undeclared here and rendered [UNCLASSIFIED] once #3625 routed the boundary
+    # block through this renderer (roborev job 401).
+    #
+    # `no-cargo` AND NOT `unobservable:<why>`, and the distinction is the one this table
+    # already draws elsewhere. `unobservable` is for a component that shells out to children
+    # this shell cannot see — tooling-tests' ~60 nested scripts, shell-selftests' arbitrary
+    # guards — where "no cargo ran" is a claim nobody can support. This hook is the opposite:
+    # a FIXED, fully readable code path in this very script (`_tree_selftest_mutate`,
+    # `_tree_finalize`, `_tree_commit_meta`, `_emit_terminal_summary`), file and git work
+    # only, invoking no child script at all. Verified: zero non-comment `cargo` in the hook's
+    # whole block. So the affirmative claim is available and `unobservable` would UNDER-claim
+    # — asserting nothing where the code can be read end to end.
+    tree-selftest) printf 'no-cargo' ;;
     # indirect: the extension is built by a driver that invokes cargo internally, so no
     # cargo argv passes through this shell. Naming the DRIVER is structural (it is the
     # command the component runs); the feature set is NOT claimed.
@@ -6747,7 +6778,11 @@ _fm_annotate() {
 # not. `%-18s` and the `(time)` shape are unchanged — the annotation is appended, so
 # every existing prefix/stage-line assertion still matches.
 _fm_summary_line() {
-  printf '%-18s %s (%s)  %s' "$1:" "$2" "$3" "$(_fm_annotate "$1")"
+  # #3625: the census suffix rides here, at the ONE renderer, for the same reason the
+  # feature matrix does -- no mode can then emit a component line the others do not.
+  # `%-18s` and the `(time)` shape are UNCHANGED (#3453 kept them deliberately and
+  # existing prefix/stage assertions match on them); the census is APPENDED.
+  printf '%-18s %s (%s)  %s  %s' "$1:" "$2" "$3" "$(_fm_annotate "$1")" "$(_census_annotate "$1" "$2")"
 }
 
 # _fm_note_if_no_cargo_observed <component> <status>: a component that ENDED without a
@@ -6938,6 +6973,824 @@ _fm_observe_child() {
   return 0
 }
 # ==== END feature-matrix annotation (#3453) ====
+
+# ==== BEGIN component census (#3625) ====
+#
+# WHY THIS EXISTS. A component line reading `PASS (0s)` is indistinguishable, in the
+# SUMMARY block a closer pastes, from a component that did nothing. A DURATION is a
+# PROXY for work; a COUNT is the work. #3384 gave flight-tests a run-time census for
+# exactly this reason; this is the same treatment for every other component, DERIVED
+# FROM THE RUN'S OWN OUTPUT at run time and never curated.
+#
+# THE MEASURED ORACLE — cargo's own behaviour, taken 2026-09-01 on a throwaway crate,
+# cold then warm. This is what the issue's two-run comparison actually shows:
+#
+#   cargo test           WARM it still prints `Running ...`, `running N tests` and
+#                        `test result: ok. N passed`. Cargo caches COMPILATION, never
+#                        test EXECUTION. So the `0s` lanes in the issue's table
+#                        (tombstones-scan, arrow-parity-guard, format-compat,
+#                        integration-tests, query-semantics-oracle -- every one of them
+#                        a `cargo test` RUN lane) DID re-verify their subjects on the
+#                        second run; the duration collapsed because the BUILD was
+#                        cached. The count was in the component log all along. Nothing
+#                        put it in the SUMMARY, which is the whole defect.
+#   cargo test --no-run  WARM it genuinely runs nothing -- but it still emits one
+#                        `Executable ...` status line per test binary. Its honest
+#                        affirmative subject is therefore BINARIES, not tests, which is
+#                        why feature-iso-parquet's documented `PASS (0s)` is legitimate
+#                        and still had nothing to say for itself.
+#
+# THE STATES, AND ONLY ONE OF THEM AFFIRMS ANYTHING:
+#
+#   COUNT <payload>        affirmative measurement            -> `{verified: ...}`
+#   ZERO <payload>         MEASURED, and the subject count is zero. FATAL: the
+#                          component's PASS becomes VACUOUS (AC2).
+#   NOT-MEASURED <reason>  the census could not be taken (unreadable log, failed ANSI
+#                          strip, a `self:` component that recorded nothing). DECLARED
+#                          and deliberately NON-FATAL: a lane that reds on correct
+#                          input is the lane agents learn to waive, and a transient
+#                          log-read failure on an otherwise green gate is correct
+#                          input. It is NEVER rendered as verified and never satisfies
+#                          AC1.
+#   GAP <reason>           DECLARED: no census is derivable for this component yet. The
+#                          reason PRINTS on every run, so the reduction in coverage is
+#                          visible rather than inferred from a silence.
+#   NOT-APPLICABLE <why>   the component did not PASS, so there is no PASS to affirm.
+#   UNDECLARED <why>       fail-closed: a component reached the census with no declared
+#                          kind. Its status becomes FAIL, so a new component cannot join
+#                          the gate with a blank census the way one could before #3453
+#                          closed the same hole for the feature matrix.
+#
+# A POSITIVE VERDICT REQUIRES AN AFFIRMATIVE MEASUREMENT. `NOT-MEASURED` and `GAP` are
+# never read as verified: they are counted SEPARATELY on the aggregate `census:` line,
+# always as `N RECOGNISED` and never as a bare `N`, because the gap set is CURATED and
+# that line must not read as a verified all-clear.
+#
+# THIS RECORDS A COUNT, NOT A TRUTH -- the `workspace-test-disposition` precedent
+# (#1716/#3522). A component can declare `libtest` and count a suite that asserts
+# nothing; that is not this guard's subject and it does not pretend otherwise.
+
+# _census_sidecar <component>: the per-component census record, written by the
+# component's own lane (which may be a backgrounded subshell that cannot mutate the
+# parent's arrays -- the same constraint that put `.result` beside it) and read by the
+# parent at emit time.
+_census_sidecar() { printf '%s/%s.census' "${LOG_DIR:-}" "$1"; }
+
+# _census_kind <component>: THE DECLARATION SITE. A CLOSED set; an undeclared name is a
+# fail-closed refusal (return 1), never a guess.
+#
+#   libtest        the affirmative subject is EXECUTED TESTS. Sums libtest's own
+#                  `test result: ok. N passed` tallies plus cargo-nextest's
+#                  `N tests run:` summary (core-tests' nextest branch prints the
+#                  latter for the unit suite and the former for its --doc pass).
+#   compile        a `--no-run` lane runs no test, so its subject is the test BINARIES
+#                  cargo built or verified fresh -- one `Executable ` status line each.
+#   both           a lane with a `--no-run` pass AND a run pass. Vacuous only when BOTH
+#                  subjects measure zero.
+#   self:<unit>    the component knows its own count and records it directly with
+#                  _census_declare, because its output never reaches a $LOG_DIR log
+#                  this measurer could read.
+#   runtime:<why>  the component has NO statically correct kind — its subject depends on
+#                  what the run routed to — so it writes its OWN complete record before
+#                  its verdict is finalized. `scoped-tests` is the case: a python-only
+#                  diff dispatches no cargo at all, so a static `both` measured ZERO and
+#                  reddened a CORRECT --lite/--delta (#3625 census audit BLOCKER 1).
+#   indirect:<drv> the subject count comes from a DRIVER's own report in the component
+#                  log (pytest's `N passed`, jest's `Tests: … N passed`). ONE RULE
+#                  DIFFERS HERE and it is deliberate: an ABSENT tally is NOT-MEASURED,
+#                  not ZERO. For a cargo lane the subject markers are cargo's OWN
+#                  guaranteed output, so their absence really does mean nothing ran; a
+#                  third-party driver's report format is not ours, so its absence is a
+#                  measurement failure and reading it as proof of vacuity would red a
+#                  healthy lane on a pytest/jest output change. A tally that is PRESENT
+#                  and says zero is still ZERO.
+#   gap:<reason>   no census is derivable yet. The reason is PRINTED, every run.
+#
+# EVERY `libtest`/`compile`/`both` DECLARATION BELOW WAS VERIFIED AT ITS CALL SITE to
+# write its cargo output into $LOG_DIR/<name>.log -- directly, via run_component's
+# redirect, or (binding-rust-tests) via an unconditional `cat` of its per-package logs
+# into $log before record_result. A mis-declaration here would make a legitimately
+# green component measure ZERO and read VACUOUS, which is the one failure mode this
+# subsystem must not have.
+_census_kind() {
+  case "$1" in
+    core-tests|tombstones-scan|scan-offload-guard|work-counters-guard) printf 'libtest' ;;
+    byte-budget-guard|arrow-parity-guard|memory-budget|format-compat)  printf 'libtest' ;;
+    write-tests|cli-tests|compaction-byte-parity|bti-multiclustering)  printf 'libtest' ;;
+    query-semantics-oracle|flight-query-semantics-oracle|flight-tests) printf 'libtest' ;;
+    legacy-heuristics|binding-rust-tests|kit-dashboard-drift)          printf 'libtest' ;;
+    feature-iso-parquet|feature-iso-delta-scan|minimal-build)          printf 'compile' ;;
+    # integration-tests: `cargo test --package X --no-run` then a named-target run pass.
+    integration-tests)                                                 printf 'both' ;;
+    # scoped-tests has NO statically correct kind, and declaring one was a HIGH defect
+    # (#3625 census audit BLOCKER 1). Its subject depends on what the diff ROUTED to: a
+    # diff confined to bindings/python/** dispatches NO cargo at all (classify_scoped_plan
+    # diverts cqlite-py, sets the python-tier flag, and the cqlite-core fallback is
+    # deliberately guarded on `python_diff -eq 0`), so its log holds only maturin + pytest
+    # output — no `test result:`, no `N tests run:`, no `Executable`. Declared `both`, that
+    # measured ZERO and made a CORRECT --lite fix round, and a CORRECT --delta (a
+    # CERTIFYING mode), report VACUOUS. So the lane chooses its census at run time from
+    # what it actually dispatched; see _census_scoped_record.
+    scoped-tests) printf 'runtime:the subject depends on what the diff ROUTED to (cargo, the python tier, or neither)' ;;
+    # tree-selftest: the #2926 hidden self-test hook records a verdict under this name
+    # (`record_result "tree-selftest" PASS 0`), so it reaches a SUMMARY component line and
+    # must be declared — a name that can be printed and cannot be classified is the hole
+    # this table exists to close. It is a HOOK: it exercises the tree-integrity guard and
+    # verifies nothing about the codebase, so there is no subject to count.
+    tree-selftest)   printf 'gap:the #2926 tree-integrity self-test hook exercises the guard and has no codebase subject to count' ;;
+    # ---- The DYNAMIC --delta entries, and the two of them are NOT the same case.
+    #
+    # node-tests: jest's OWN `Tests:` tally, through the SAME indirect:jest path
+    # node-bindings uses (roborev job 383). It was `self:` counting `n_targets` — THE NUMBER
+    # OF CHANGED FILES I SELECTED — which is this issue's own thesis violated inside its fix:
+    # "a duration is a proxy for work; a count is the work", and a count of INPUTS is just a
+    # better proxy. It was wrong in BOTH directions at once: an all-skipped run of many files
+    # censused as many and verified nothing (jest exits 0 when every selected test is
+    # skipped), while a changed HELPER runs the WHOLE suite and censused as one "file". The
+    # first half of the old `self:` rationale — "it deletes its log, so no log-reading
+    # measurer could census it" — was an implementation choice, not a constraint: the lane
+    # now writes to $LOG_DIR like every other component and the log is kept.
+    node-tests)      printf 'indirect:jest' ;;
+    # shell-selftests: the subject genuinely IS the script, and this is the RULING, recorded
+    # here so it is not re-asked (roborev job 383). Two facts decide it, and the first is the
+    # one that distinguishes this lane from node-tests:
+    #   (1) SELECTED == EXECUTED. `_run_shell_selftest_files` invokes every file it is handed,
+    #       unconditionally — there is no skip layer, so the count is of executions, not of
+    #       selections. jest's is a count of selections, which is exactly why jest needed its
+    #       own tally instead.
+    #   (2) There is NO uniform per-script assertion tally to prefer. These are arbitrary
+    #       shell guards whose terminal lines differ (`passed=N failed=M`, `N passed, M
+    #       failed`, `ok - …`); deriving one number across them would be the curation this
+    #       census refuses, and it is the same reason `tooling-tests` is a declared gap.
+    # DECLARED RESIDUAL: a script that runs and asserts nothing is invisible to this count —
+    # the census records a COUNT, not a TRUTH (the #1716/#3522 precedent), and each script's
+    # own case floor is what covers that.
+    shell-selftests) printf 'self:changed scripts/tests/*.sh executed' ;;
+    # ---- DECLARED GAPS (#3625 phase 1). Each prints its reason on every run.
+    fmt)            printf 'gap:cargo fmt --all --check emits no per-file tally to count' ;;
+    clippy)         printf 'gap:cargo clippy emits a per-crate tally only COLD; a warm run prints Finished alone' ;;
+    # ---- indirect: cargo runs under a driver this shell cannot observe, but the DRIVER
+    # reports its own tally into the component log, and that tally is the affirmative
+    # subject. #3625's issue text names python-bindings as the CONTRAST that already
+    # answered the question ("576 passed, 61 skipped, 1 xfailed in BOTH runs"); this
+    # lifts that count out of the log and into the block.
+    python-bindings) printf 'indirect:pytest' ;;
+    node-bindings)   printf 'indirect:jest' ;;
+    all-features-check) printf 'gap:cargo check/clippy passes execute no tests; the subject is a feature set, not a count' ;;
+    # THE RESIDUAL POINTER NAMES AN OPEN ISSUE (#3162), NOT THE CLOSED ONE IT WAS BORN IN.
+    # These strings print on component rows of EVERY full gate, so a stale pointer sends the
+    # one operator who follows it to a dead ticket — and the residual then belongs to nobody.
+    # #3625 was closed NOT_PLANNED and absorbed into the OPEN umbrella #3162; the remaining
+    # `emitted` lanes are tracked there. A gap that prints its reason every run is only
+    # honest while the reason is actionable.
+    oom-audit|parity-report|operator-metrics-doc) printf 'gap:xtask/report driver prints no machine-readable subject count (#3162)' ;;
+    smoke)          printf 'gap:smoke-test-all-tables.sh prints no machine-readable table count (#3162)' ;;
+    # file-size and pub-surface WERE briefly `emitted` (a count read from a contract line
+    # the guard printed). REVERTED to declared gaps: that addition produced four Medium
+    # review findings in a row, and the last one's proper remedy — FAILing file-size when a
+    # selected `.rs` file cannot be read — changes the RATCHET's failure semantics for every
+    # diff, which is its own decision with its own risk of reddening correct input. Doing
+    # `emitted` properly requires settling that first. Tracked in #3162.
+    file-size|pub-surface|roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests)
+                    printf 'gap:shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)' ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+# _census_write <component> <line>: best-effort append-free write of the record. A
+# failed write must never fail the component whose work it describes -- the caller
+# already holds the value it computed, and the consequence of a lost write is a
+# visibly UNRECORDED census, never a wrong one.
+_census_write() {
+  local f
+  f=$(_census_sidecar "$1") || return 0
+  [ -n "${LOG_DIR:-}" ] || return 0
+  printf '%s\n' "$2" > "$f" 2>/dev/null || true
+  return 0
+}
+
+# _census_read <component>: the recorded line, or return 1 when there is none.
+_census_read() {
+  local f line
+  [ -n "${LOG_DIR:-}" ] || return 1
+  f=$(_census_sidecar "$1") || return 1
+  [ -r "$f" ] || return 1
+  IFS= read -r line < "$f" || return 1
+  [ -n "$line" ] || return 1
+  printf '%s' "$line"
+}
+
+# _census_declare <component> <n> <unit>: the entry point for a `self:` component,
+# which knows its own subject count. `0` is recorded as ZERO, not as a COUNT of zero --
+# an affirmative measurement of nothing is still nothing.
+_census_declare() {
+  local n line
+  case "$2" in ''|*[!0-9]*) n="" ;; *) n="$2" ;; esac
+  if [ -z "$n" ]; then
+    line="NOT-MEASURED the component offered a non-numeric subject count"
+  elif [ "$n" -eq 0 ]; then
+    line="ZERO $3"
+  else
+    line="COUNT $n $3"
+  fi
+  # RETURNED, not merely written (roborev job 400). The caller must finalize from THIS
+  # VALUE; see the note on _census_measure's third parameter for why re-reading the
+  # sidecar is unsafe now that the census drives a verdict.
+  _census_write "$1" "$line"
+  printf '%s' "$line"
+}
+
+# ---------------------------------------------------------------------------
+# THE PARSERS. #3400 governs both: route through _ansi_stripped_log (the caller does
+# that once, below) and read by REDIRECTION, never a pipe -- a piped `while read` runs
+# in a subshell whose accumulated verdict dies with it, which for a counter means a
+# silent zero.
+#
+# WHAT IS AND IS NOT COLOURED, and why each anchor is where it is:
+#   * `test result:` and `running N tests` are LIBTEST's own text. Cargo does not pass
+#     --color through to the harness, so they carry no escapes -- but that is a
+#     property of cargo's plumbing, not of this code, which is exactly the coupling
+#     that left the cli-tests zero-tests guard inert for months. Normalised anyway.
+#   * `Executable ` is a CARGO STATUS WORD and IS coloured, with the reset landing
+#     BETWEEN the word and the payload (`Executable<ESC>[0m unittests src/lib.rs`). So
+#     the anchor is the STATUS WORD ALONE ($1 == "Executable"), never `<status> <payload>`.
+#   * cargo-nextest's `Summary` is likewise a coloured status word, so the nextest
+#     anchor is its PAYLOAD (`N tests run:`), which carries no escapes at all.
+# ---------------------------------------------------------------------------
+
+# _census_libtest_tally <stripped-log> -> "<sum-of-passed> <result-lines-seen>"
+_census_libtest_tally() {
+  awk '
+    {
+      if (match($0, /test result: (ok|FAILED)\. [0-9]+ passed/)) {
+        seg = substr($0, RSTART, RLENGTH)
+        sub(/^test result: (ok|FAILED)\. /, "", seg)
+        sub(/ passed$/, "", seg)
+        total += seg + 0; seen += 1
+      } else if (match($0, /[0-9]+ tests run:/)) {
+        # nextest reports `N tests run: X passed, Y failed`, where N = X + Y — so N is
+        # tests RUN, not tests PASSED, and summing it under a `COUNT %d tests passed`
+        # label was a FALSE LABEL (#3625 census audit, LOW 2). Only reachable on a PASS
+        # today, where the two are equal, which is exactly why it would have decayed
+        # unnoticed. Read X off the same line; a summary with no `passed` field
+        # contributes 0 rather than its run count.
+        if (match($0, /[0-9]+ passed/)) {
+          seg = substr($0, RSTART, RLENGTH)
+          sub(/ passed$/, "", seg)
+          total += seg + 0
+        }
+        seen += 1
+      }
+    }
+    END { printf "%d %d\n", total + 0, seen + 0 }
+  ' < "$1"
+}
+
+# _census_compile_tally <stripped-log> -> "<Executable lines> <cargo status lines>"
+#
+# TWO FIELDS, BECAUSE "no Executable line" HAS TWO CAUSES AND ONLY ONE OF THEM IS A ZERO
+# (roborev job 368, blocker 1). This is #3400 GENERALIZED: that rule is about a cargo-output
+# parse keyed on a PRESENTATION property, colour was one instance, and QUIET is another.
+# `Executable` is suppressed not only by a `-q` on the command line (#3625 census audit
+# LOW 3) but by `CARGO_TERM_QUIET=true` in the ENVIRONMENT and by `[term] quiet = true` in
+# any `.cargo/config.toml` — neither of which is visible at the call site, so a box carrying
+# either would have made `feature-iso-parquet` and `minimal-build` measure ZERO and read
+# VACUOUS on every gate, on correct input.
+#
+# MEASURED (2026-09-01, throwaway crate, both mechanisms):
+#   * quiet suppresses EVERY cargo status line — `Compiling`, `Finished`, `Running`,
+#     `Executable`. A `cargo test --lib --no-run` under quiet produces a COMPLETELY EMPTY
+#     log. That is what makes the presence probe possible and reliable: there is no partial
+#     state to misread.
+#   * libtest's `running N tests` / `test result:` are UNAFFECTED by either mechanism, so
+#     the `libtest` kind needs no equivalent probe. (That asymmetry is also why a `-q` lane
+#     is safe declared `libtest` and can never be `compile`/`both`; `kit-dashboard-drift` is
+#     the only `-q` lane today and is correctly `libtest`.)
+#
+# So the second field counts cargo STATUS lines of any kind. `Finished` is its load-bearing
+# member — every successful cargo invocation prints one unless quiet is in force — and the
+# rest are carried so a run that dies mid-compile still probes as "status output present".
+# Both anchors are the STATUS WORD ALONE (`$1` after the strip), never `<status> <payload>`,
+# for the #3400 reason. Erring NARROW is deliberate: an unrecognised status word makes the
+# probe say "suppressed", which routes to the NON-FATAL NOT-MEASURED, while erring wide
+# would route a suppressed log to the FATAL ZERO.
+_census_compile_tally() {
+  awk '
+    $1 == "Executable" { n += 1 }
+    $1 == "Compiling" || $1 == "Checking" || $1 == "Finished" || $1 == "Fresh" ||
+    $1 == "Building"  || $1 == "Running"  || $1 == "Executable" { st += 1 }
+    END { printf "%d %d\n", n + 0, st + 0 }
+  ' < "$1"
+}
+
+# _census_driver_tally <driver> <stripped-log> -> "COUNT <n>" | "ZERO" | "NONE"
+#
+# The driver's OWN summary, read from the component log. Both drivers write theirs at the
+# END of the run, so the LAST match wins — a jest `--json` run prints its human reporter
+# summary to stderr as well, and a re-run inside one component would otherwise be scored
+# on its first attempt.
+#
+#   pytest  RECOGNISE THE SUMMARY LINE, THEN READ THE PASSED COUNT OFF IT — never the
+#           other way round. Keying on `N passed` alone (the first version, roborev job
+#           360 finding 1) missed every pytest terminal summary that reports ZERO passed
+#           in a spelling that omits the word: `61 skipped in 1.20s`, `1 xfailed in
+#           0.10s`, `2 deselected in 0.02s`, `3 errors in 0.40s`. Those are PRESENT
+#           tallies saying zero passed — a suite whose every test was skipped is exactly
+#           the vacuous pass this whole subsystem exists to catch — and they fell into
+#           the ABSENT branch, i.e. NOT-MEASURED, which preserves PASS.
+#
+#           A line is a pytest terminal summary iff it carries BOTH a `<N> <outcome>`
+#           pair from pytest's OWN closed outcome vocabulary AND a ` in <duration>s`
+#           tail; `no tests ran` is recognised separately because it carries no count.
+#           Requiring BOTH is what keeps the recogniser off cargo's `Finished ...
+#           target(s) in 41.05s` (a duration with no outcome pair). libtest's
+#           `test result: ok. 5 passed; ... finished in 0.00s` DOES satisfy both, so it
+#           is excluded BY NAME: it is a different harness's tally and counting it here
+#           would attribute rust tests to pytest.
+#   jest    prints `Tests:       1 skipped, 122 passed, 123 total`. A `Tests:` line with
+#           no `N passed` — the all-skipped shape jest reports as a PASSED suite
+#           (CLAUDE.md, #3522 roborev F1) — is a present-and-zero tally, so the jest arm
+#           already had finding 1's property; a case now pins it rather than leaving it
+#           true by accident.
+#
+# Both take the LAST recognised summary (a component that invoked its driver twice is
+# scored on the run that finished), neither is coloured in a way that matters (both are
+# the driver's own text, and the caller normalises anyway), and both read by REDIRECTION,
+# never a pipe.
+_census_driver_tally() {
+  case "$1" in
+    pytest)
+      awk '
+        /^[[:space:]]*test result:/ { next }
+        {
+          if ($0 ~ /no tests ran/) {
+            seen = 1; n = 0
+          } else if ($0 ~ /[0-9]+ (passed|failed|error|errors|skipped|xfailed|xpassed|deselected)/ \
+                     && $0 ~ / in [0-9]+(\.[0-9]+)?s/) {
+            seen = 1
+            if (match($0, /[0-9]+ passed/)) {
+              seg = substr($0, RSTART, RLENGTH); sub(/ passed$/, "", seg); n = seg + 0
+            } else {
+              n = 0
+            }
+          }
+        }
+        END { if (seen != 1) { print "NONE" } else if (n == 0) { print "ZERO" } else { printf "COUNT %d\n", n } }
+      ' < "$2" ;;
+    jest)
+      awk '
+        /^Tests:/ { seen = 1; if (match($0, /[0-9]+ passed/)) { seg = substr($0, RSTART, RLENGTH); sub(/ passed$/, "", seg); n = seg + 0 } else { n = 0 } }
+        END { if (seen != 1) { print "NONE" } else if (n == 0) { print "ZERO" } else { printf "COUNT %d\n", n } }
+      ' < "$2" ;;
+    *) printf 'NONE\n' ;;
+  esac
+}
+
+# _census_measure_kind <component> <concrete-kind> — the MEASURING CORE: take the census
+# of <component>'s log AS the named kind, write it to the sidecar and print it. Split out
+# of _census_measure (#3625, census audit BLOCKER 1) because `scoped-tests` has to choose
+# its kind AT RUN TIME from what the diff routed to, and a second copy of the measuring
+# logic would be a second place for it to drift. <concrete-kind> is one of the measurable
+# kinds only — libtest / compile / both / indirect:<driver> — never a declaration form.
+_census_measure_kind() {
+  local comp="$1" kind="$2" line log src tally total seen bins ctally cargo_status=0
+  # THE ONE SPELLING of "cargo printed nothing we could count, and that is not a zero".
+  local quiet_note="cargo status output is SUPPRESSED in this log (CARGO_TERM_QUIET, a [term] quiet=true in some .cargo/config.toml, or a -q on the invocation), so no 'Executable' line could exist — this is NOT a measured zero. Remedy: unset the quiet setting on this box" 
+  log="${LOG_DIR:-}/$comp.log"
+  src=$(_ansi_stripped_log "$log" 2>/dev/null) || src=""
+  if [ -z "$src" ] || [ ! -r "$src" ]; then
+    # #3400: a failed strip is NEVER a fallback to the coloured original — that turns a
+    # normalisation failure into a wrong count. NOT-MEASURED, and it never reads verified.
+    # This is also where DISK PRESSURE lands: the strip writes a full COPY of the log, so
+    # an ENOSPC inside $LOG_DIR costs a NOT-MEASURED rather than a wrong number. Declared
+    # rather than defended against, because the alternative — parsing the coloured original
+    # — is the defect this routing exists to prevent.
+    line="NOT-MEASURED could not read or ANSI-normalise $comp.log, so nothing was counted"
+    _census_write "$comp" "$line"; printf '%s' "$line"; return 0
+  fi
+  case "$kind" in
+    indirect:*)
+      local drv="${kind#indirect:}" dt
+      dt=$(_census_driver_tally "$drv" "$src" 2>/dev/null) || dt=""
+      rm -f "$src" 2>/dev/null || true
+      case "$dt" in
+        COUNT\ *) line="COUNT ${dt#COUNT } $drv tests passed" ;;
+        ZERO)     line="ZERO $drv tests — the $drv tally in $comp.log reports none" ;;
+        # ABSENT tally: NOT-MEASURED, never ZERO. See the class note on _census_kind.
+        *)        line="NOT-MEASURED no $drv tally found in $comp.log (the driver's report format is not ours, so an absent tally is unmeasured, not proof that nothing ran)" ;;
+      esac
+      _census_write "$comp" "$line"; printf '%s' "$line"; return 0 ;;
+  esac
+  total=0; seen=0; bins=0
+  case "$kind" in
+    libtest|both)
+      tally=$(_census_libtest_tally "$src" 2>/dev/null) || tally=""
+      if [ -z "$tally" ]; then
+        rm -f "$src" 2>/dev/null || true
+        line="NOT-MEASURED the libtest/nextest tally over $comp.log could not be computed"
+        _census_write "$comp" "$line"; printf '%s' "$line"; return 0
+      fi
+      total=${tally%% *}; seen=${tally##* } ;;
+  esac
+  case "$kind" in
+    compile|both)
+      ctally=$(_census_compile_tally "$src" 2>/dev/null) || ctally=""
+      if [ -z "$ctally" ]; then
+        rm -f "$src" 2>/dev/null || true
+        line="NOT-MEASURED the cargo Executable tally over $comp.log could not be computed"
+        _census_write "$comp" "$line"; printf '%s' "$line"; return 0
+      fi
+      bins=${ctally%% *}; cargo_status=${ctally##* } ;;
+  esac
+  # The derived `<log>.ansi-stripped` sibling is a full COPY of the component log, and
+  # core-tests' runs to tens of MB — retained, it would silently double the size of the
+  # `logs:` bundle every gate keeps. Removed as soon as both tallies are taken; a failed
+  # removal is not the census's business.
+  rm -f "$src" 2>/dev/null || true
+  case "$kind" in
+    libtest)
+      if [ "$seen" -eq 0 ]; then
+        line="ZERO tests — $comp.log carries no libtest or nextest result line, so no test binary reported a tally"
+      elif [ "$total" -eq 0 ]; then
+        line="ZERO tests — $seen result line(s), every one of them reporting 0 passed"
+      else
+        line="COUNT $total tests passed (across $seen result line(s))"
+      fi ;;
+    compile)
+      if [ "$cargo_status" -eq 0 ]; then
+        line="NOT-MEASURED $quiet_note"
+      elif [ "$bins" -eq 0 ]; then
+        line="ZERO test binaries — $comp.log carries cargo status output but no 'Executable' line, so nothing was built or verified fresh"
+      else
+        line="COUNT $bins test binaries built/verified"
+      fi ;;
+    both)
+      # The two subjects are probed INDEPENDENTLY: libtest output survives quiet, cargo
+      # status output does not, so a quiet box must not turn a lane's measurable half into
+      # a claim about its unmeasurable one.
+      #
+      # THE LIBTEST HALF IS DESCRIBED FROM `seen`, NOT FROM `total` (roborev job 402). A
+      # PRESENT tally reporting 0 passed also has `total == 0`, so wording keyed on `total`
+      # said "no libtest tally" when a tally was present and said zero — a false statement
+      # in a gate log, which is this change's own subject. The tally has returned BOTH
+      # numbers since job 389 exactly so the two can be told apart; this branch was the one
+      # that never consumed the second value. (The `libtest` arm above already keys on
+      # `seen`; only `both` was short.) No verdict moves — `total` still decides the state,
+      # `seen` only decides how it is EXPLAINED.
+      local _lt_desc
+      if [ "$seen" -eq 0 ]; then
+        _lt_desc="no libtest tally"
+      else
+        _lt_desc="$seen libtest result line(s), all reporting 0 passed"
+      fi
+      if [ "$cargo_status" -eq 0 ]; then
+        if [ "$total" -eq 0 ]; then
+          line="NOT-MEASURED $comp.log has $_lt_desc, and $quiet_note"
+        else
+          line="COUNT $total tests passed (test binaries NOT MEASURED: $quiet_note)"
+        fi
+      elif [ "$total" -eq 0 ] && [ "$bins" -eq 0 ]; then
+        line="ZERO tests and test binaries — $comp.log carries cargo status output but no 'Executable' line, and $_lt_desc"
+      else
+        line="COUNT $total tests passed and $bins test binaries built/verified"
+      fi ;;
+    *)
+      line="NOT-MEASURED census kind '$kind' has no measurer" ;;
+  esac
+  _census_write "$comp" "$line"; printf '%s' "$line"
+}
+
+# _census_classify <component> <status> <recorded-line> <may-measure:0|1>
+#   -> the truthful census state for (component, status), or the token `MEASURE <kind>`
+#      meaning "answering this requires reading the component's log", which only the
+#      measuring path is allowed to do.
+#
+# THE ONE CLASSIFIER FOR BOTH PATHS (roborev job 379). `_census_measure` (verdict time) and
+# `_census_record` (render time) answer the SAME question — what is the truthful state for
+# this (component, status)? — and for five rounds they answered it DIFFERENTLY, because
+# they were two implementations of it. The batch-2 LOW fix ("a component that did not PASS
+# has no PASS to affirm, and that is true whatever its kind") landed in the measurer and
+# could not land in the fallback, because the fallback WAS NOT GIVEN THE STATUS: it
+# dispatched on kind alone and so reported `GAP` for a gap-declared component that CRASHED
+# before record_result. That is the same structural root as job 371 one function over —
+# *a function required to reason about status that is not handed the status* — and it is
+# why this is a convergence rather than a sixth label patch.
+#
+# THE ASYMMETRY THAT SURVIVES, and it is the only one: the measurer may read the component
+# log and write a sidecar; the renderer runs in the PARENT after the component's lane is
+# gone and must do neither. So the classifier returns `MEASURE <kind>` for the one cell
+# where the answer genuinely needs the log — PASS x a log-measured kind — and the two
+# callers differ ONLY there. `scripts/tests/test_agent_gate_census.sh` case S drives both
+# paths over the same (status x kind) matrix and requires identical output everywhere the
+# classifier does not say MEASURE, because a second implementation's agreement is only
+# knowable by testing it.
+#
+# ORDER IS THE FIX, and it is the same order in both paths now:
+#   (1) the DECLARATION — an undeclared name is a fact about the TABLE, fatal at any status;
+#   (2) the STATUS — a component that did not PASS has no PASS to affirm, whatever its kind;
+#   (3) only then the KIND.
+_census_classify() {
+  local comp="$1" st="$2" rec="$3" may="$4" kind
+  if ! kind=$(_census_kind "$comp"); then
+    printf "UNDECLARED no census kind is declared for '%s' in _census_kind (#3625)" "$comp"
+    return 0
+  fi
+  # VACUOUS IS NOT "DID NOT PASS" — it is the census's OWN VERDICT, and treating it as an
+  # ordinary non-PASS was a regression this section's own convergence guard caught before it
+  # shipped: the row read `{no census: component ended VACUOUS}` instead of
+  # `{verified NOTHING: …}`, i.e. the state that CAUSED the status was discarded from the
+  # line that exists to explain it. The record IS the explanation, so it is returned; with
+  # no record we cannot explain the status and say so, rather than inventing a reason.
+  # No `MEASURE` here on either path: at verdict time the status handed in is the RAW one
+  # (record_result passes the pre-census value), so VACUOUS reaches only the renderer, and
+  # letting the two paths answer this cell differently is exactly what job 379 removed.
+  if [ "$st" = VACUOUS ]; then
+    if [ -n "$rec" ]; then printf '%s' "$rec"; return 0; fi
+    printf 'NOT-MEASURED the component is VACUOUS but no census record survives to say what it measured'
+    return 0
+  fi
+  if [ "$st" != PASS ]; then
+    printf 'NOT-APPLICABLE component ended %s, so there is no PASS to affirm' "$st"
+    return 0
+  fi
+  case "$kind" in
+    gap:*)
+      printf 'GAP %s' "${kind#gap:}"
+      return 0 ;;
+    self:*|runtime:*)
+      # These components record their OWN census before their verdict is finalized, so the
+      # sidecar IS the answer on both paths. Reaching here with none is a RECORDING GAP,
+      # named as such — never a licence to claim a count.
+      if [ -n "$rec" ]; then printf '%s' "$rec"; return 0; fi
+      case "$kind" in
+        self:*) printf "NOT-MEASURED '%s' records its own subject count and recorded none (unit: %s)" "$comp" "${kind#self:}" ;;
+        *)      printf "NOT-MEASURED '%s' chooses its census at run time and recorded none" "$comp" ;;
+      esac
+      return 0 ;;
+  esac
+  # A log-measured kind on a PASS: THE one cell the two paths may answer differently.
+  if [ "$may" = 1 ]; then
+    printf 'MEASURE %s' "$kind"
+    return 0
+  fi
+  if [ -n "$rec" ]; then printf '%s' "$rec"; return 0; fi
+  printf 'NOT-MEASURED no census record was written for this component'
+}
+
+# _census_measure <component> <status>: resolve the DECLARED kind and take the census,
+# RETURNING the record line on stdout (the caller needs the value even if the sidecar
+# write fails) as well as writing it to the sidecar for the parent's renderer.
+_census_measure() { # <component> <status> [<already-computed-record>]
+  local comp="$1" st="$2" rec line
+  # THE THIRD PARAMETER EXISTS BECAUSE THE SIDECAR IS BEST-EFFORT AND THE CENSUS NOW DRIVES A
+  # VERDICT (roborev job 400). `_census_write` is deliberately non-fatal, inherited from
+  # `_fm_note`, whose comment argues it correctly: "a failed append must never fail the
+  # component whose matrix it describes — the consequence of a lost append is a visibly
+  # incomplete annotation, never a wrong one." THAT REASONING WAS TRUE FOR THE FEATURE
+  # MATRIX AND IS FALSE HERE: a lost annotation is cosmetic, but a lost CENSUS record turned
+  # a computed ZERO into NOT-MEASURED on the re-read, and NOT-MEASURED preserves PASS — so a
+  # filesystem hiccup bought a false green in a merge gate. It is CLAUDE.md's recorded shape
+  # one directory over: a fail-closed argument holds only for the consumers that existed when
+  # it was written, and a new consumer for which the permissive direction is unsafe inverts
+  # it SILENTLY.
+  #
+  # So the `self:`/`runtime:` producers RETURN what they computed and their callers pass it
+  # here; the sidecar is for RENDERING ONLY on those paths. (The log-measured kinds never had
+  # the problem: `_census_measure_kind` prints the value it computed, so its caller already
+  # finalizes from the value even when the write fails.)
+  if [ "$#" -ge 3 ]; then
+    rec="$3"
+  else
+    rec=$(_census_read "$comp") || rec=""
+  fi
+  # The classification is DELEGATED (roborev job 379) so this path and the render-time
+  # fallback cannot drift: the declaration/status/kind order, and every state text, live in
+  # _census_classify. What is local to THIS path is the permission to read the component
+  # log and the duty to persist the answer.
+  line=$(_census_classify "$comp" "$st" "$rec" 1)
+  case "$line" in
+    MEASURE\ *) _census_measure_kind "$comp" "${line#MEASURE }"; return 0 ;;
+  esac
+  _census_write "$comp" "$line"; printf '%s' "$line"
+}
+
+
+# _census_scoped_record <component> <n-rust-packages> <python-diff> <PYTHON_TIER_NOTE>
+# — the run-time census choice for the `runtime:` lane (#3625 census audit BLOCKER 1).
+#
+# THE SUBJECT IS WHATEVER THE DIFF ROUTED TO, and this function is the only place that
+# knows. It is called from run_scoped_tests with the SAME variables the dispatch was made
+# from (`pkgs[]`, `python_diff`, `PYTHON_TIER_NOTE`), so the census describes what
+# EXECUTED and not what the lane might have executed — the #3453 execution-vs-intent rule.
+#
+# THREE ROUTES, THREE CENSUSES:
+#   rust packages dispatched  -> measure `both`, exactly as before. (`--no-run` is a
+#       legitimate outcome here: a test-only crate with no changed --test target is
+#       compile-checked, so binaries alone affirm the lane.) A python tier running
+#       ALONGSIDE cargo is not folded in: its own verdict already has a dedicated
+#       `python-tier:` line in the block, and the cargo subject is the one this lane's
+#       name is about.
+#   python tier ONLY, and it RAN -> the subject is the pytest tally sitting in this same
+#       log, measured through the SAME `indirect:pytest` path python-bindings uses (so it
+#       inherits the corrected present-and-zero rule: an all-skipped suite is ZERO, hence
+#       VACUOUS, while an ABSENT tally is NOT-MEASURED).
+#   nothing executable dispatched -> an affirmative NOT-APPLICABLE record NAMING that. Not
+#       a silent PASS, and deliberately NOT `VACUOUS`: the lane did not fail to verify its
+#       subject, it HAD no executable subject, and reddening a correct `--lite` round is
+#       the failure this whole fix exists to remove.
+# RETURNS the record it computed, for the reason on _census_measure's third parameter
+# (roborev job 400): the caller finalizes from this VALUE, never from a re-read of the
+# best-effort sidecar.
+_census_scoped_record() {
+  local comp="$1" npkgs="$2" pydiff="$3" note="${4:-}" line
+  if [ "${npkgs:-0}" -gt 0 ]; then
+    _census_measure_kind "$comp" both
+    return 0
+  fi
+  if [ "${pydiff:-0}" -eq 1 ]; then
+    if _python_tier_ran "$note"; then
+      _census_measure_kind "$comp" indirect:pytest
+    else
+      line="NOT-APPLICABLE the diff routed ONLY to the python tier and the tier did not run (${note:-python-tier: not run}), so this lane had no executable subject"
+      _census_write "$comp" "$line"; printf '%s' "$line"
+    fi
+    return 0
+  fi
+  line="NOT-APPLICABLE the diff routed to no rust package and no python tier, so this lane had no executable subject"
+  _census_write "$comp" "$line"; printf '%s' "$line"
+}
+
+# _census_status_for <status> <census-line>: the AC2 coupling. AFFIRMATIVE by
+# construction -- a PASS survives only on a state that is explicitly non-fatal;
+# anything unrecognised is FAIL, never the permissive branch.
+#
+# THE CENSUS STATE IS JUDGED BEFORE THE STATUS, AND THAT ORDER IS THE FIX FOR A REAL HOLE
+# (roborev job 368, blocker 2). This used to return every non-PASS status untouched, so
+# `UNDECLARED` — the fail-closed state that is supposed to make "a new component cannot
+# join the gate with a blank census" true — was NOT fatal when the component SKIPped. That
+# is the completeness guarantee failing exactly where it is least likely to be noticed: a
+# NEW component that SKIPs on the box where it is first run. Ask the standing question of
+# this key — what fails the run if THIS key alone goes bad? — and the answer had been
+# "nothing, on a SKIP".
+#
+# So there are two independent judgements, in this order:
+#   (1) is the RECORD itself sound? `UNDECLARED` and any unrecognised/empty state are
+#       facts about the TABLE and about our own machinery, not about this run's outcome, so
+#       they are FATAL at ANY status.
+#   (2) only then does the run's own status decide, with ZERO promoting a PASS to VACUOUS.
+_census_status_for() {
+  local st="$1" state
+  state=${2%% *}
+  case "$state" in
+    # (1) An unsound record fails the run whatever the component did.
+    UNDECLARED) printf 'FAIL'; return 0 ;;
+    COUNT|ZERO|GAP|NOT-MEASURED|NOT-APPLICABLE) ;;
+    *)          printf 'FAIL'; return 0 ;;
+  esac
+  # (2) A non-PASS component keeps its own status: there is no PASS to promote or demote.
+  [ "$st" = PASS ] || { printf '%s' "$st"; return 0; }
+  case "$state" in
+    ZERO) printf 'VACUOUS' ;;
+    *)    printf 'PASS' ;;
+  esac
+}
+
+# _census_finalize <component> <status>: measure, then print the possibly-adjusted
+# status. THE ONE call every verdict path makes -- record_result for the 37 components,
+# and run_scoped_tests, which appends to NAMES directly and never reaches record_result.
+_census_finalize() { # <component> <status> [<already-computed-record>]
+  local line
+  if [ "$#" -ge 3 ]; then
+    line=$(_census_measure "$1" "$2" "$3")
+  else
+    line=$(_census_measure "$1" "$2")
+  fi
+  _census_status_for "$2" "$line"
+}
+
+# _census_record <component> <status>: the EFFECTIVE census line at render time -- the
+# sidecar when one exists, else derived so a component that never reached a measurer still
+# renders a truthful state rather than a blank.
+#
+# IT TAKES THE STATUS NOW (roborev job 379), and that is the whole fix. Without it this
+# function could not express the rule its sibling had already been given — "a component
+# that did not PASS has no PASS to affirm, whatever its kind" — so a gap-declared component
+# that CRASHED before record_result rendered its GAP reason and was counted as
+# DECLARED-GAP. Same structural root as job 371 one function over: a function required to
+# reason about status, not handed the status. Both paths now answer through
+# _census_classify; this one may NOT measure (it runs in the parent, after the component's
+# lane is gone), which is the single declared asymmetry between them.
+_census_record() {
+  local rec
+  rec=$(_census_read "$1") || rec=""
+  _census_classify "$1" "${2:-}" "$rec" 0
+}
+
+# _census_annotate <component> <status>: the `{...}` suffix appended to a SUMMARY component
+# line. NEVER EMPTY -- that is the contract, for the same reason _fm_annotate has it: a
+# blank annotation is the vacuous shape this issue exists to remove.
+_census_annotate() { # <component> <status>
+  local line state rest
+  line=$(_census_record "$1" "${2:-}")
+  state=${line%% *}
+  rest=${line#* }
+  [ "$rest" = "$line" ] && rest="(no detail recorded)"
+  case "$state" in
+    COUNT)          printf '{verified: %s}' "$rest" ;;
+    ZERO)           printf '{verified NOTHING: %s}' "$rest" ;;
+    NOT-MEASURED)   printf '{census NOT-MEASURED: %s}' "$rest" ;;
+    GAP)            printf '{no census — %s}' "$rest" ;;
+    NOT-APPLICABLE) printf '{no census: %s}' "$rest" ;;
+    UNDECLARED)     printf '{census UNDECLARED: %s}' "$rest" ;;
+    *)              printf '{census UNREADABLE: unrecognised record %s}' "$line" ;;
+  esac
+}
+
+# census_summary_line <name> <status> [<name> <status>]... : the ONE aggregate line, built
+# from the same NAMES/STATUSES the component rows are built from.
+#
+# IT TAKES THE STATUS, AND THAT IS THE POINT (roborev job 371, plus the uncited sibling the
+# sweep for it found). This used to take names alone, so every qualifier that names a STATUS
+# had to be an ASSUMPTION about which statuses reach a given census STATE — and this issue
+# has now produced FOUR findings of exactly that shape:
+#   1. the progress line printed PASS while the SUMMARY said VACUOUS (job 368);
+#   2. a FAILing gap: component counted under DECLARED-GAP instead of not-applicable
+#      (census audit LOW 1);
+#   3. NOT-APPLICABLE labelled `(SKIP/FAIL)` on a row that PASSes — the `runtime:` route
+#      legitimately emits PASS + NOT-APPLICABLE, a pair that did not exist when the label
+#      was written (job 371, the cited finding);
+#   4. the ZERO state counted under the heading `VACUOUS` — a STATUS word derived from a
+#      STATE. Not cited, found by sweeping the family, and REPRODUCED in a shipping mode:
+#      `--lite-aggregate-selftest` with a seeded VACUOUS row emits
+#      `fmt: VACUOUS (0s)` beside `0 VACUOUS (RECOGNISED)`. Same contradiction, on the one
+#      counter that names the failure this whole subsystem exists to surface.
+#
+# THE RULE THE FAMILY LEAVES BEHIND: a label may name a STATUS only if it was DERIVED from
+# the observed status. Ask of every word here — is this derived from the state I am
+# rendering, or from an assumption about which states get here? Assumptions were all four.
+#
+# So the counters split in two, and the split is visible in the output:
+#   * SEVEN STATE buckets, one per row, summing to N. They carry no status word — the one
+#     that used to (`VACUOUS`) is now `measured-ZERO`, which is what the state actually is.
+#   * TWO STATUS-DERIVED figures: the `not-applicable` split (did-not-PASS vs PASSed) and
+#     the count of rows whose STATUS is VACUOUS, which no longer has to be inferred from
+#     `measured-ZERO` and would differ from it the moment anything else produced a VACUOUS
+#     row (as the selftest already does).
+#
+# Every non-affirmed class prints as `N RECOGNISED` — never a bare N — and the line DECLARES
+# ITS OWN NON-EXHAUSTIVENESS, because the gap set is curated: a component that affirms
+# nothing is UNMEASURED, which is not the same statement as verified.
+#
+# AN ODD ARGUMENT COUNT IS A NAMED REFUSAL, not a silent drop: it can only be OUR bug (a
+# call site that forgot to zip its status array), and a census line that quietly omits a
+# row is the reporting defect this function exists to remove.
+census_summary_line() { # <name> <status> [<name> <status>]...
+  local c st state n=0 aff=0 gapn=0 nm=0 zero=0 na_np=0 na_pass=0 und=0 unk=0 vac=0
+  if [ $(( $# % 2 )) -ne 0 ]; then
+    printf 'census: MALFORMED — census_summary_line received an ODD argument count (%d); it takes <name> <status> PAIRS, so a call site is not zipping its status array and this block would silently omit a row (#3625).' "$#"
+    return 0
+  fi
+  while [ "$#" -gt 0 ]; do
+    c="$1"; st="$2"; shift 2
+    n=$((n + 1))
+    # STATUS-DERIVED, never inferred from the census state.
+    [ "$st" = VACUOUS ] && vac=$((vac + 1))
+    state=$(_census_record "$c" "$st")
+    state=${state%% *}
+    case "$state" in
+      COUNT)          aff=$((aff + 1)) ;;
+      GAP)            gapn=$((gapn + 1)) ;;
+      NOT-MEASURED)   nm=$((nm + 1)) ;;
+      ZERO)           zero=$((zero + 1)) ;;
+      # The ONLY state reachable from BOTH a passing and a non-passing row, so the
+      # qualifier has to come from the row: `_census_measure` writes it for every non-PASS
+      # component, and `_census_scoped_record` writes it on a PASS when the diff routed to
+      # nothing executable.
+      NOT-APPLICABLE) if [ "$st" = PASS ]; then na_pass=$((na_pass + 1)); else na_np=$((na_np + 1)); fi ;;
+      UNDECLARED)     und=$((und + 1)) ;;
+      *)              unk=$((unk + 1)) ;;
+    esac
+  done
+  printf 'census: %d/%d components AFFIRMED a count; %d DECLARED-GAP (RECOGNISED); %d NOT-MEASURED (RECOGNISED); %d measured-ZERO (RECOGNISED); %d not-applicable (component did not PASS); %d no-subject (PASSed; the run had nothing to measure); %d UNDECLARED; %d unrecognised; %d row(s) carry a VACUOUS status. NON-EXHAUSTIVE: the gap set is CURATED, so an unaffirmed component is UNMEASURED, never verified (#3625; the remaining gaps are tracked in #3162).' \
+    "$aff" "$n" "$gapn" "$nm" "$zero" "$na_np" "$na_pass" "$und" "$unk" "$vac"
+}
+
+# _status_is_nonfailing <status>: THE CLOSED SET of component statuses that do not fail
+# the run. AFFIRMATIVE by construction (#3625). Every aggregation used to ask
+# `[ "$st" = FAIL ]`, i.e. only the ONE named bad token failed and EVERY other value --
+# an unrecognised token, a truncated result file, the empty string -- took the
+# PERMISSIVE branch. That is the exact shape CLAUDE.md forbids ("key a permissive
+# branch on the AFFIRMATIVE value, never on != <bad>"), and it is what a new
+# non-passing token like VACUOUS would otherwise have walked straight through.
+_status_is_nonfailing() {
+  case "$1" in
+    PASS|SKIP) return 0 ;;
+    *)         return 1 ;;
+  esac
+}
+# ==== END component census (#3625) ====
+
 # The per-run sidecar directory. Both variables are set UNCONDITIONALLY here — no
 # `${…:-…}`, no env indirection — because the annotation is the block's evidence about
 # what was certified, and the party the evidence constrains must not be able to choose
@@ -8876,7 +9729,7 @@ _tree_mode_components() {
 }
 
 _tree_boundary_meta_lines() {
-  local _c _s _rf _st _secs _done=0 _sel=0 _seen=" "
+  local _c _s _rf _st _secs _done=0 _sel=0 _seen=" " _cen_names="" _rows=""
   _tree_commit_meta_render
   printf '%s\n' "$TREE_COMMIT_LINE"
   if [ -n "${DATA_COUNT:-}" ]; then
@@ -8915,12 +9768,24 @@ _tree_boundary_meta_lines() {
   # names it — that is the same "the set is hand-maintained" failure mode as J2 itself, one
   # step out. LOG_DIR is this run's own mktemp directory, so the sweep can only see verdicts
   # record_result wrote, and the glob is deterministically ordered.
+  #
+  # ROUTED THROUGH `_fm_summary_line`, THE ONE RENDERER (#3625, roborev job 360 finding 2).
+  # These two loops used to `printf '%-18s %s (%ss)'` directly, so a run that STOPPED at a
+  # boundary emitted a table with NEITHER the #3453 feature matrix NOR the #3625 census
+  # suffix — the one mode that rendered a block the others do not, which is precisely the
+  # property both designs rest on. #3453's own uniformity guard could not see it: its needle
+  # is the literal `printf '%-18s %s (%s)'` and this site spelled the format `(%ss)`, so a
+  # near-miss in a format string was enough to hide a whole emit path. The rows are buffered
+  # rather than printed inline because the aggregate `census:` line goes ABOVE the table (as
+  # it does in every other block) and its subject set is only known once both loops are done.
   for _c in $(_tree_mode_components); do
     _rf="$LOG_DIR/$_c.result"
     [ -f "$_rf" ] || continue
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
-    printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
+    _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
+"
+    _cen_names="$_cen_names $_c $_st"
     _seen="$_seen $_c "
     _done=$(( _done + 1 ))
   done
@@ -8930,9 +9795,19 @@ _tree_boundary_meta_lines() {
     case "$_seen" in *" $_c "*) continue ;; esac
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
-    printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
+    _rows="$_rows$(_fm_summary_line "$_c" "$_st" "${_secs}s")
+"
+    _cen_names="$_cen_names $_c $_st"
     _done=$(( _done + 1 ))
   done
+  # The aggregate census line, over exactly the components this truncated table names.
+  # Emitted even when the table is EMPTY (a boundary hit before the first component
+  # recorded anything): `census: 0/0 components AFFIRMED a count …` is a true statement
+  # about a run that got nowhere, and omitting the line would make a stopped block
+  # indistinguishable from one produced before this contract existed.
+  # shellcheck disable=SC2086  # intentional word-split over the name/STATUS pairs
+  printf '%s\n' "$(census_summary_line $_cen_names)"
+  [ -n "$_rows" ] && printf '%s' "$_rows"
   # Selected-count via the bash-3.2 empty-array-safe idiom used throughout this script
   # (a bare "${ARR[@]}" on an empty array aborts under `set -u` on bash < 4.4).
   for _s in ${SELECTED_MAIN[@]+"${SELECTED_MAIN[@]}"} ${SELECTED_SIDE[@]+"${SELECTED_SIDE[@]}"}; do
@@ -9263,6 +10138,23 @@ if [ "$SELFTEST" -eq 1 ]; then
   AGENT_GATE_FM_COMPONENT=clippy     _fm_observe_cargo_argv clippy --workspace --all-targets --all-features --exclude cqlite-core
   AGENT_GATE_FM_COMPONENT=core-tests _fm_observe_cargo_argv test --package cqlite-core --features cli-helpers
   AGENT_GATE_FM_COMPONENT=smoke      _fm_observe_cargo_argv build --package cqlite-cli --bin cqlite
+  # #3625 (roborev job 371): the aggregate is built from name/STATUS pairs — a qualifier
+  # that names a status must be derived from the observed one, never assumed from the
+  # census state. Zipped explicitly (bash 3.2 has no namerefs) and with NO separator
+  # character between the two fields, per #3312: remove the shared channel rather than
+  # pick a delimiter a value might one day contain.
+  # GUARD THE KEYS EXPANSION WITH A COUNT CHECK, never the `+` idiom. The
+  # `"${arr[@]+"${arr[@]}"}"` form that works for VALUES does NOT work for the KEYS form:
+  # bash reads `${!NAMES[@]+...}` as INDIRECT expansion and errors "invalid variable name"
+  # on the array's string contents, ABANDONING the enclosing block before its exit. Already
+  # documented at run_delta's own keys loop, and reproduced here anyway: written with the `+`
+  # form, --emit-summary-selftest fell straight through into a REAL 37-component gate.
+  # `${#arr[@]}` is set -u-safe even when empty.
+  _cen_args=()
+  if [ "${#NAMES[@]}" -gt 0 ]; then
+    for _ci in "${!NAMES[@]}"; do _cen_args+=("${NAMES[$_ci]}" "${STATUSES[$_ci]}"); done
+  fi
+  meta+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for i in "${!NAMES[@]}"; do
     meta+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
@@ -9399,17 +10291,39 @@ esac
 # reconstructs the summary arrays (in canonical COMPONENTS order) after the pool
 # drains. This keeps the SUMMARY block deterministic regardless of finish order.
 record_result() { # <name> <status> <seconds>
-  printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"
-  # BOTH #3473 and #3453 land at this chokepoint; the merge keeps both, and the ORDER is
-  # argued rather than arbitrary. `_hb_ensure` goes FIRST because everything below it can
-  # be slow or can fail: the sidecar note writes a file, and the two integrity asserts do
-  # git work. If the beater is dead while those run, `gate-liveness.sh` reports STALLED on
-  # a perfectly healthy gate — the exact false signal #3473 exists to remove. Publishing
-  # liveness before doing work is the whole point of putting it here.
+  # #3625: the census is taken HERE -- record_result is the one chokepoint every
+  # component's verdict passes through -- and it can CHANGE the verdict: a PASS whose
+  # measured subject count is zero is recorded as VACUOUS, a distinct non-passing token
+  # in the gate's PASS/FAIL/SKIP vocabulary, so a component that verified nothing can
+  # never report PASS (AC2). It runs BELOW _hb_ensure, which must stay first (see
+  # below), and ABOVE the .result write, whose value it decides.
   #
-  # #3473: re-launch the liveness beater if it died under a live gate. Cheap
-  # (`kill -0`), and this is the only chokepoint every component passes through.
+  # #3473, #3453 and #3625 all land at this chokepoint; the ORDER is argued rather than
+  # arbitrary. `_hb_ensure` goes FIRST because everything below it can be slow or can
+  # fail: the census reads (and ANSI-normalises) a component log that may be large, the
+  # sidecar note writes a file, and the two integrity asserts do git work. If the beater
+  # is dead while those run, `gate-liveness.sh` reports STALLED on a perfectly healthy
+  # gate — the exact false signal #3473 exists to remove. Publishing liveness before
+  # doing work is the whole point of putting it here. The census then goes ABOVE the
+  # `.result` write because it DECIDES the value that write records.
+  local _rr_status
   _hb_ensure
+  _rr_status=$(_census_finalize "$1" "$2")
+  # THE FINALIZED STATUS, PUBLISHED FOR THE CALLER'S PROGRESS LINE (roborev job 368, low).
+  # record_result can turn a PASS into VACUOUS (a measured-zero census) or FAIL (an
+  # undeclared one), and every caller used to print its OWN unchanged local `$status`
+  # afterwards — so a no-op component printed `>>> [x] PASS` to the run log while the
+  # SUMMARY reported failure. A gate log that makes an affirmatively false statement is
+  # worse than silence: it is the first thing a human reads when triaging, and it is what
+  # stops the next person looking. A GLOBAL rather than a return value because ~115 call
+  # sites already print a line of their own after this call and each is in a different
+  # function; `scripts/tests/test_agent_gate_census.sh` asserts structurally that no
+  # progress line prints a raw `$status` after record_result, so a new caller cannot
+  # reintroduce the lie. The two paths that never reach record_result (run_scoped_tests'
+  # terminal paths) reassign their own `$status` from _census_finalize and are correct
+  # without it.
+  RECORDED_STATUS="$_rr_status"
+  printf '%s %s\n' "$_rr_status" "$3" > "$LOG_DIR/$1.result"
   # #3453: two whitespace fields ONLY — ~60 call sites and a 2-field `read -r _st _secs`
   # reader, which would silently absorb a third into $_secs. The feature matrix rides a
   # per-component SIDECAR instead. A SKIP — or a FAIL that died before its first cargo
@@ -10733,7 +11647,7 @@ run_component() { # run_component <name> <cmd...>
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # python-bindings: build the extension with maturin and run pytest. Unlike the
@@ -10810,7 +11724,7 @@ run_python_bindings() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # _node_bindings_corpus_present: does CQLITE_DATASETS_ROOT hold a corpus the node jest
@@ -11171,7 +12085,7 @@ run_node_bindings() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   if [ ! -r "$list_file" ]; then
@@ -11183,7 +12097,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   # ORACLE A — jest's own list, normalised. Both sides are reduced to their path RELATIVE
@@ -11215,7 +12129,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -11236,7 +12150,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   # `-print0` and a NUL-vs-line count assert: a filename containing a newline would be
@@ -11256,7 +12170,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   _nb_nuls=$(find -H "$_nb_test_dir" -type d -name node_modules -prune -o -type f -name '*.test.js' -print0 2>/dev/null | tr -dc '\0' | wc -c | tr -d ' ')
@@ -11274,7 +12188,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -11292,7 +12206,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   if [ -n "$only_disk" ] || [ -n "$only_jest" ]; then
@@ -11319,7 +12233,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -11340,7 +12254,7 @@ run_node_bindings() {
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   echo ">>> [$name] suite set RECONCILED: $suite_n *.test.js file(s) — two INDEPENDENT oracles agree (recursive find over __test__/ vs ./node_modules/.bin/jest --listTests); neither alone could detect a config exclusion (#3522 D1)"
@@ -11395,7 +12309,7 @@ run_node_bindings() {
     _node_leak_lane_note SKIP-OPTOUT > "$(_node_leak_lane_note_file)"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   if [ "$_dm_rc" -ne 0 ]; then
@@ -11417,7 +12331,7 @@ run_node_bindings() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   echo ">>> [$name] corpus complete: check-dataset-manifest.sh verified every expected table under $CQLITE_DATASETS_ROOT/sstables (#3493)"
@@ -11485,7 +12399,7 @@ run_node_bindings() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # Partition a package's DERIVED integration targets into the ones cargo can actually
@@ -11788,7 +12702,7 @@ EOF
     cat "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -11976,7 +12890,7 @@ EOF
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # delivery-telemetry: run the delivery-pipeline telemetry tool's unit test
@@ -12026,7 +12940,7 @@ run_delivery_telemetry() {
     echo "     failed derivation, never a pass over nothing)"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   status=PASS
@@ -12105,7 +13019,7 @@ run_delivery_telemetry() {
   done
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # oom-audit: the STREAM_RETURNS_VEC static AST audit (issue #2012) run in
@@ -12162,7 +13076,7 @@ run_oom_audit() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # compaction-byte-parity: the PR-VISIBLE proxy for the nightly-only Java
@@ -12240,7 +13154,7 @@ run_compaction_byte_parity() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # bti-multiclustering: the compound-clustering BTI (`da`) lane (issue #3032, extended
@@ -12344,7 +13258,7 @@ run_bti_multiclustering() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # query-semantics-oracle: the QUERY-SEMANTICS parity lane (issue #1742), DISTINCT
@@ -12392,7 +13306,7 @@ run_query_semantics_oracle() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # flight-query-semantics-oracle: the QUERY-SEMANTICS parity lane routed through the
@@ -12457,7 +13371,7 @@ run_flight_query_semantics_oracle() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # _resolved_package_features <package> [cargo-feature-flag…]: print " a b c " — the
@@ -12809,7 +13723,7 @@ run_flight_tests() {
       } | tee "$log"
       end=$(date +%s)
       record_result "$name" "$status" "$((end - start))"
-      echo ">>> [$name] $status ($((end - start))s)"
+      echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
       return 0
     fi
     echo ">>> [$name] fixture preflight: test_timeseries/sensor_data + Statistics.db present"
@@ -12833,7 +13747,7 @@ run_flight_tests() {
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -12856,7 +13770,7 @@ run_flight_tests() {
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -12891,7 +13805,7 @@ run_flight_tests() {
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -12929,7 +13843,7 @@ run_flight_tests() {
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   while IFS=$'\t' read -r gname grel ggate; do
@@ -13026,7 +13940,7 @@ EOF
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # legacy-heuristics: BUILD cqlite-core at `default + legacy-heuristics` AND EXECUTE
@@ -13826,7 +14740,7 @@ run_legacy_heuristics() {
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   # HOISTED ABOVE THE TARGET LOOP (roborev round-36). It used to be resolved here, ~200 lines
@@ -13845,7 +14759,7 @@ run_legacy_heuristics() {
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
   local _mt_name _mt_src _mt_how _mt_rel _mt_rf _mt_dir _mt_hit _mt_cf _obs_id _mt_cnt _mt_rc _pol_rc
@@ -13900,7 +14814,7 @@ run_legacy_heuristics() {
         } | tee "$log"
         end=$(date +%s)
         record_result "$name" "$status" "$((end - start))"
-        echo ">>> [$name] $status ($((end - start))s)"
+        echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
         return 0
       fi
       if [ -s "$_mt_fatal" ]; then
@@ -13914,7 +14828,7 @@ run_legacy_heuristics() {
         } | tee "$log"
         end=$(date +%s)
         record_result "$name" "$status" "$((end - start))"
-        echo ">>> [$name] $status ($((end - start))s)"
+        echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
         return 0
       fi
       # BUFFERED, not emitted here (roborev job 97, Medium + Low). Two reasons, and both were
@@ -13960,7 +14874,7 @@ run_legacy_heuristics() {
             echo "        zero-tests guard, so an empty run would pass."
           } | tee -a "$log"
           end=$(date +%s); record_result "$name" "$status" "$((end - start))"
-          echo ">>> [$name] $status ($((end - start))s)"; return 0
+          echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"; return 0
         fi
         if [ "${_mt_cnt:-0}" -gt 0 ]; then _mt_hit=1; break; fi
       done <<EOF
@@ -14097,7 +15011,7 @@ EOF
         } | tee "$log"
         end=$(date +%s)
         record_result "$name" "$status" "$((end - start))"
-        echo ">>> [$name] $status ($((end - start))s)"
+        echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
         return 0
       fi
     fi
@@ -14149,7 +15063,7 @@ EOF
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -14233,7 +15147,7 @@ EOF
       echo "        clean zero gap. A census that could not be taken is never reported as empty."
     } | tee -a "$log"
     end=$(date +%s); record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"; return 0
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"; return 0
   fi
   while IFS= read -r _libsrc; do
     [ -n "$_libsrc" ] || continue
@@ -14262,7 +15176,7 @@ EOF
       } | tee "$log"
       end=$(date +%s)
       record_result "$name" "$status" "$((end - start))"
-      echo ">>> [$name] $status ($((end - start))s)"
+      echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
       return 0
     fi
     # A census that CANNOT be taken is never reported as empty (the lane's standing rule):
@@ -14276,7 +15190,7 @@ EOF
       } | tee "$log"
       end=$(date +%s)
       record_result "$name" "$status" "$((end - start))"
-      echo ">>> [$name] $status ($((end - start))s)"
+      echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
       return 0
     fi
     while IFS=$'\t' read -r _k _ln _ms; do
@@ -14405,7 +15319,7 @@ EOF
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -14444,7 +15358,7 @@ EOF
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # run_feature_iso <feature>: ONE isolation lane, parameterized by the feature under
@@ -14706,7 +15620,7 @@ run_all_features_check() {
     echo "--- end of $name output ---"
   fi
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # parity-report: verify the committed derived parity report is not stale vs its
@@ -14764,7 +15678,7 @@ run_parity_report() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # operator-metrics-doc: verify the committed operator-facing Flight metrics
@@ -14821,7 +15735,7 @@ run_operator_metrics_doc() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # kit-dashboard-drift: verify the kit Grafana dashboard
@@ -14879,7 +15793,7 @@ run_kit_dashboard_drift() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # pub-surface: the CRATE-ROOT DECLARATION-CONSISTENCY guard for cqlite-core (issue
@@ -15018,7 +15932,7 @@ run_pub_surface() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
@@ -15139,7 +16053,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15155,7 +16069,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15174,7 +16088,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15191,7 +16105,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15203,7 +16117,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15223,7 +16137,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15245,7 +16159,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15266,7 +16180,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15287,7 +16201,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15306,7 +16220,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15324,7 +16238,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15349,7 +16263,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15374,7 +16288,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15397,7 +16311,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15434,7 +16348,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15488,7 +16402,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15513,7 +16427,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15529,7 +16443,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15555,7 +16469,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15581,7 +16495,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15611,7 +16525,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15635,7 +16549,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15686,7 +16600,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15724,7 +16638,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15790,7 +16704,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15802,7 +16716,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15814,7 +16728,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15861,7 +16775,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15893,7 +16807,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15924,7 +16838,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15954,7 +16868,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -15984,7 +16898,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16018,7 +16932,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16079,7 +16993,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16114,7 +17028,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16138,7 +17052,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16177,7 +17091,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16197,7 +17111,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16211,7 +17125,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16228,7 +17142,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16243,7 +17157,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16260,7 +17174,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16276,7 +17190,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16292,7 +17206,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16314,7 +17228,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16331,7 +17245,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16347,7 +17261,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16366,7 +17280,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16384,7 +17298,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16405,7 +17319,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16423,7 +17337,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16441,7 +17355,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16458,7 +17372,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16486,7 +17400,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16500,7 +17414,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16517,7 +17431,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16535,7 +17449,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16552,7 +17466,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16569,7 +17483,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16586,7 +17500,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16610,7 +17524,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16633,7 +17547,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16653,7 +17567,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16675,7 +17589,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16696,7 +17610,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16723,7 +17637,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16747,7 +17661,7 @@ run_tooling_tests() {
     echo "--- end of $name output ---"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
     return 0
   fi
 
@@ -16757,7 +17671,7 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/tests/test_drive_issue_state.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_base_staleness.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh; bash scripts/tests/test_agent_gate_census.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
@@ -16775,7 +17689,8 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_board_label_mirror.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_worker_supervisor.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_failure_mode.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_cargo_output_parsers.sh" >>"$log" 2>&1; then
+     bash "$REPO_ROOT/scripts/tests/test_cargo_output_parsers.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_agent_gate_census.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -16785,7 +17700,7 @@ run_tooling_tests() {
   fi
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # file-size: the campsite-rule ratchet (epic #1116 / #1135). Two parts:
@@ -17101,9 +18016,19 @@ run_file_size() {
   # check becomes implementable, and THIS REJECTION IS VOID: re-examine the finding on its
   # merits rather than citing this comment, which would then be arguing for a constraint
   # that no longer exists.
-  printf '%s\n' ">>> [$name] $status ($((end - start))s)" 2>/dev/null >>"$log"
+  # ORDER CHANGED BY #3625 (roborev job 368, low), and it does NOT touch the rejection
+  # above. Both sinks now print the FINALIZED status, so `record_result` has to run first.
+  # Re-checking that comment's own falsification test: (a) this line's content is still the
+  # component verdict, and (b) it still depends on the persistence decision computed above —
+  # neither condition is broken, so the rejection stands as written. What the move costs is
+  # bounded and worth naming: if a mid-run tree-integrity detection makes record_result emit
+  # and exit, this component log loses its terminal verdict LINE. That is strictly better
+  # than the alternative, which was printing a verdict the census may have just changed —
+  # the SUMMARY carries the real one either way, and a log that states a FALSE verdict is
+  # what stops the next person looking.
   record_result "$name" "$status" "$((end - start))"
-  printf '%s\n' ">>> [$name] $status ($((end - start))s)"
+  printf '%s\n' ">>> [$name] $RECORDED_STATUS ($((end - start))s)" 2>/dev/null >>"$log"
+  printf '%s\n' ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
 }
 
 # scoped-tests (issue #1821, --lite only): the blast-radius-scoped test component.
@@ -17133,7 +18058,7 @@ run_file_size() {
 # rust-only diffs are unaffected; a mixed diff runs BOTH the rust-scoped targets
 # AND the python tier. See PYTHON_LITE_TIER_CMD / classify_scoped_plan above.
 run_scoped_tests() {
-  local name=scoped-tests
+  local name=scoped-tests _cen_rec
   # #3453: attribute this lane's cargo invocations to `scoped-tests` (the name it appends
   # to NAMES), NOT to whichever component ran before it. run_lite calls this AFTER
   # run_component roborev-lints, so without this the blast-radius cargo runs would have
@@ -17197,6 +18122,11 @@ run_scoped_tests() {
     # exit — taken before any cargo runs — rendered `[UNDECLARED]` ("nobody said") instead
     # of the fact we know exactly. Both of this function's terminal paths now note it.
     _fm_note_if_no_cargo_observed "$name" "$status"
+    # #3625: run_scoped_tests never reaches record_result, so the census is taken here
+    # too. This path is already FAIL, so _census_finalize records NOT-APPLICABLE and
+    # returns the status unchanged; it is called anyway so the block never renders a
+    # scoped-tests line with no census record at all.
+    status=$(_census_finalize "$name" "$status")
     NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
     echo ">>> [$name] $status ($((end - start))s)"
     return
@@ -17448,6 +18378,17 @@ run_scoped_tests() {
   # #3453 (F4): the SECOND terminal path of this function — see the note at the no-parser
   # exit. record_result is never called here either, so the note is written explicitly.
   _fm_note_if_no_cargo_observed "$name" "$status"
+  # #3625: the SECOND terminal path, same reason. A scoped run whose measured subject
+  # count is zero becomes VACUOUS, and — because this function owns its own OVERALL
+  # bookkeeping rather than going through the aggregation that reads .result files —
+  # the run must be failed HERE.
+  #
+  # The RECORD comes first, from the same routing variables the dispatch was made from
+  # (#3625 census audit BLOCKER 1): this lane's census kind is `runtime:`, so nothing else
+  # can know whether its subject was cargo, the python tier, or nothing at all.
+  _cen_rec=$(_census_scoped_record "$name" "${#pkgs[@]}" "$python_diff" "$PYTHON_TIER_NOTE")
+  status=$(_census_finalize "$name" "$status" "$_cen_rec")
+  _status_is_nonfailing "$status" || OVERALL=FAIL
   NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   echo ">>> [$name] $status ($((end - start))s)"
 }
@@ -17481,7 +18422,7 @@ aggregate_lite_components() {
     read -r st secs < "$rf" || true
     [ -n "$st" ] || { st=FAIL; secs=0; }
     LN+=("$c"); LS+=("$st"); LT+=("${secs}s")
-    [ "$st" = FAIL ] && OVERALL=FAIL
+    _status_is_nonfailing "$st" || OVERALL=FAIL   # #3625: affirmative closed set
   done
   # Preserve the scoped-tests (+ any python/node) entries run_scoped_tests appended to
   # NAMES; run_scoped_tests already set OVERALL=FAIL itself on a test failure.
@@ -17545,7 +18486,25 @@ run_lite() {
   SUMMARY_META+=("$(cpu_budget_line)")
   _tree_meta_array   # #2926
   SUMMARY_META+=("${TREE_META_LINES[@]}")
-  local i
+  local i _ci
+  local -a _cen_args=()
+  # #3625 (roborev job 371): the aggregate is built from name/STATUS pairs — a qualifier
+  # that names a status must be derived from the observed one, never assumed from the
+  # census state. Zipped explicitly (bash 3.2 has no namerefs) and with NO separator
+  # character between the two fields, per #3312: remove the shared channel rather than
+  # pick a delimiter a value might one day contain.
+  # GUARD THE KEYS EXPANSION WITH A COUNT CHECK, never the `+` idiom. The
+  # `"${arr[@]+"${arr[@]}"}"` form that works for VALUES does NOT work for the KEYS form:
+  # bash reads `${!NAMES[@]+...}` as INDIRECT expansion and errors "invalid variable name"
+  # on the array's string contents, ABANDONING the enclosing block before its exit. Already
+  # documented at run_delta's own keys loop, and reproduced here anyway: written with the `+`
+  # form, --emit-summary-selftest fell straight through into a REAL 37-component gate.
+  # `${#arr[@]}` is set -u-safe even when empty.
+  _cen_args=()
+  if [ "${#NAMES[@]}" -gt 0 ]; then
+    for _ci in "${!NAMES[@]}"; do _cen_args+=("${NAMES[$_ci]}" "${STATUSES[$_ci]}"); done
+  fi
+  SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
@@ -17585,8 +18544,12 @@ run_delta_node_tests() {
   n_targets=$(printf '%s\n' "$targets" | awk 'NF' | wc -l | tr -d ' ')
   echo ">>> [node-tests] jest on $n_targets changed bindings/node/__test__ file(s) (already-built module; no cargo build)"
   start=$(date +%s)
+  # $LOG_DIR, not a mktemp this function deletes (roborev job 383): the census reads jest's
+  # own `Tests:` tally out of this file, so it has to survive the lane — and keeping it puts
+  # node-tests' output in the `logs:` bundle beside every other component's, instead of
+  # discarding the evidence right after tailing 40 lines of it.
   local log jest_filter=""
-  log=$(mktemp "${TMPDIR:-/tmp}/agent-gate-nodedelta.XXXXXX")
+  log="$LOG_DIR/node-tests.log"
   [ "$whole" -eq 0 ] && jest_filter="${filters[*]}"
   if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" JEST_FILTER="$jest_filter" bash -c '
       set -uo pipefail
@@ -17608,10 +18571,25 @@ run_delta_node_tests() {
     status=PASS
   else
     status=FAIL; OVERALL=FAIL
-    echo "--- [node-tests] FAILED; last 40 lines ---"; tail -40 "$log"; echo "--- end of node-tests output ---"
+    echo "--- [node-tests] FAILED; last 40 lines of $log ---"; tail -40 "$log"; echo "--- end of node-tests output ---"
   fi
-  rm -f "$log"
   end=$(date +%s)
+  # #3625: no _census_declare here any more (roborev job 383). The census is jest's OWN
+  # `Tests:` tally, measured from the log above through the SAME indirect:jest path
+  # node-bindings uses — so a run in which every selected test was SKIPPED measures ZERO and
+  # becomes VACUOUS, where counting the changed files would have reported a confident
+  # `COUNT n` for a suite that verified nothing. `n_targets` remains the DELTA_EXECUTORS
+  # figure, which is a statement about what was dispatched and is correct as one.
+  #
+  # …and COUPLE it (#3625 census audit BLOCKER 2). This used to push the RAW status, so a
+  # ZERO census rendered `{verified NOTHING: …}` beside a PASS, was counted as VACUOUS on
+  # the aggregate line, and the run stayed GREEN. Unreachable today only because this lane
+  # early-returns on an empty target set — i.e. the coupling was absent and something
+  # unrelated was holding the line, which is the decay shape CLAUDE.md names ("ask of every
+  # key what fails the run if THIS key alone goes bad"). This function owns its own OVERALL
+  # bookkeeping, so the flip happens here.
+  status=$(_census_finalize node-tests "$status")
+  _status_is_nonfailing "$status" || OVERALL=FAIL
   NAMES+=("node-tests"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   DELTA_EXECUTORS="${DELTA_EXECUTORS:+$DELTA_EXECUTORS }node-tests($n_targets)"
   echo ">>> [node-tests] $status ($((end - start))s)"
@@ -17621,7 +18599,7 @@ run_delta_node_tests() {
 # scripts/tests/*.sh self-test scripts verbatim. No-op when none changed. Appends a
 # shell-selftests verdict to NAMES; a failing script sets OVERALL=FAIL.
 run_delta_shell_selftests() {
-  local allowed="$1" targets f start end status n_targets
+  local allowed="$1" targets f start end status n_targets _cen_rec
   targets=$(printf '%s\n' "$allowed" | _delta_shell_targets)
   [ -n "$(printf '%s' "$targets" | awk 'NF')" ] || return 0
   local -a tarr=()
@@ -17631,6 +18609,13 @@ run_delta_shell_selftests() {
   start=$(date +%s)
   if _run_shell_selftest_files "${tarr[@]}"; then status=PASS; else status=FAIL; OVERALL=FAIL; fi
   end=$(date +%s)
+  # #3625: same as node-tests — this lane's children write to the run log, not to a
+  # per-component log, and it already holds its exact subject count.
+  _cen_rec=$(_census_declare shell-selftests "$n_targets" "changed scripts/tests/*.sh executed")
+  # …and COUPLE it, for the reason spelled out on node-tests above (#3625 census audit
+  # BLOCKER 2).
+  status=$(_census_finalize shell-selftests "$status" "$_cen_rec")
+  _status_is_nonfailing "$status" || OVERALL=FAIL
   NAMES+=("shell-selftests"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   DELTA_EXECUTORS="${DELTA_EXECUTORS:+$DELTA_EXECUTORS }shell-selftests($n_targets)"
   echo ">>> [shell-selftests] $status ($((end - start))s)"
@@ -17865,7 +18850,8 @@ run_delta() {
   # file-size FAIL fails the delta and shows in the block), then append the
   # scoped-tests entry run_scoped_tests already pushed onto NAMES.
   local -a DN=() DS=() DT=()
-  local c rf st secs
+  local -a _cen_args=()
+  local c rf st secs _ci
   for c in file-size fmt; do
     rf="$LOG_DIR/$c.result"
     if [ -f "$rf" ]; then
@@ -17873,7 +18859,7 @@ run_delta() {
       read -r st secs < "$rf" || true
       [ -n "$st" ] || { st=FAIL; secs=0; }
       DN+=("$c"); DS+=("$st"); DT+=("${secs}s")
-      [ "$st" = FAIL ] && OVERALL=FAIL
+      _status_is_nonfailing "$st" || OVERALL=FAIL   # #3625: affirmative closed set
     else
       DN+=("$c"); DS+=(FAIL); DT+=("0s"); OVERALL=FAIL
     fi
@@ -17917,6 +18903,23 @@ run_delta() {
     _tree_meta_array
     SUMMARY_META+=("${TREE_META_LINES[@]}")
     SUMMARY_META+=("${file_meta[@]}")
+  # #3625 (roborev job 371): the aggregate is built from name/STATUS pairs — a qualifier
+  # that names a status must be derived from the observed one, never assumed from the
+  # census state. Zipped explicitly (bash 3.2 has no namerefs) and with NO separator
+  # character between the two fields, per #3312: remove the shared channel rather than
+  # pick a delimiter a value might one day contain.
+    # GUARD THE KEYS EXPANSION WITH A COUNT CHECK, never the `+` idiom. The
+    # `"${arr[@]+"${arr[@]}"}"` form that works for VALUES does NOT work for the KEYS form:
+    # bash reads `${!NAMES[@]+...}` as INDIRECT expansion and errors "invalid variable name"
+    # on the array's string contents, ABANDONING the enclosing block before its exit. Already
+    # documented at run_delta's own keys loop, and reproduced here anyway: written with the `+`
+    # form, --emit-summary-selftest fell straight through into a REAL 37-component gate.
+    # `${#arr[@]}` is set -u-safe even when empty.
+    _cen_args=()
+    if [ "${#DN[@]}" -gt 0 ]; then
+      for _ci in "${!DN[@]}"; do _cen_args+=("${DN[$_ci]}" "${DS[$_ci]}"); done
+    fi
+    SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
     for i in "${!DN[@]}"; do
       SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
     done
@@ -17954,6 +18957,23 @@ run_delta() {
   _tree_meta_array   # #2926
   SUMMARY_META+=("${TREE_META_LINES[@]}")
   SUMMARY_META+=("${file_meta[@]}")
+  # #3625 (roborev job 371): the aggregate is built from name/STATUS pairs — a qualifier
+  # that names a status must be derived from the observed one, never assumed from the
+  # census state. Zipped explicitly (bash 3.2 has no namerefs) and with NO separator
+  # character between the two fields, per #3312: remove the shared channel rather than
+  # pick a delimiter a value might one day contain.
+  # GUARD THE KEYS EXPANSION WITH A COUNT CHECK, never the `+` idiom. The
+  # `"${arr[@]+"${arr[@]}"}"` form that works for VALUES does NOT work for the KEYS form:
+  # bash reads `${!NAMES[@]+...}` as INDIRECT expansion and errors "invalid variable name"
+  # on the array's string contents, ABANDONING the enclosing block before its exit. Already
+  # documented at run_delta's own keys loop, and reproduced here anyway: written with the `+`
+  # form, --emit-summary-selftest fell straight through into a REAL 37-component gate.
+  # `${#arr[@]}` is set -u-safe even when empty.
+  _cen_args=()
+  if [ "${#DN[@]}" -gt 0 ]; then
+    for _ci in "${!DN[@]}"; do _cen_args+=("${DN[$_ci]}" "${DS[$_ci]}"); done
+  fi
+  SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for i in "${!DN[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
   done
@@ -18127,7 +19147,7 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   # Seed the scoped-tests entry run_scoped_tests appends (and flip OVERALL as it does).
   _scoped_st="${AGENT_GATE_TEST_LITE_SCOPED:-PASS}"
   NAMES+=("scoped-tests"); STATUSES+=("$_scoped_st"); TIMES+=("0s")
-  [ "$_scoped_st" = FAIL ] && OVERALL=FAIL
+  _status_is_nonfailing "$_scoped_st" || OVERALL=FAIL   # #3625: affirmative closed set
   aggregate_lite_components
   declare -a SUMMARY_META=()
   SUMMARY_META+=("commit: selftest branch: selftest dirty: no")
@@ -18136,6 +19156,23 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   SUMMARY_META+=("$(cpu_budget_line)")
   # #2926: synthetic tree identity (no git state needed for the aggregation self-test).
   SUMMARY_META+=("$TREE_START_LINE" "$TREE_END_LINE" "$TREE_INTEGRITY_LINE")
+  # #3625 (roborev job 371): the aggregate is built from name/STATUS pairs — a qualifier
+  # that names a status must be derived from the observed one, never assumed from the
+  # census state. Zipped explicitly (bash 3.2 has no namerefs) and with NO separator
+  # character between the two fields, per #3312: remove the shared channel rather than
+  # pick a delimiter a value might one day contain.
+  # GUARD THE KEYS EXPANSION WITH A COUNT CHECK, never the `+` idiom. The
+  # `"${arr[@]+"${arr[@]}"}"` form that works for VALUES does NOT work for the KEYS form:
+  # bash reads `${!NAMES[@]+...}` as INDIRECT expansion and errors "invalid variable name"
+  # on the array's string contents, ABANDONING the enclosing block before its exit. Already
+  # documented at run_delta's own keys loop, and reproduced here anyway: written with the `+`
+  # form, --emit-summary-selftest fell straight through into a REAL 37-component gate.
+  # `${#arr[@]}` is set -u-safe even when empty.
+  _cen_args=()
+  if [ "${#NAMES[@]}" -gt 0 ]; then
+    for _ci in "${!NAMES[@]}"; do _cen_args+=("${NAMES[$_ci]}" "${STATUSES[$_ci]}"); done
+  fi
+  SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
   for _i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(_fm_summary_line "${NAMES[$_i]}" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
   done
@@ -19002,7 +20039,9 @@ for _c in "${COMPONENTS[@]}"; do
   _st=""; _secs=""
   read -r _st _secs < "$_rf" || true
   NAMES+=("$_c"); STATUSES+=("$_st"); TIMES+=("${_secs}s")
-  [ "$_st" = FAIL ] && OVERALL=FAIL
+  # #3625: AFFIRMATIVE, not `!= FAIL`. Only PASS and SKIP are non-failing; VACUOUS, an
+  # unrecognised token and an empty/truncated result file all fail the run.
+  _status_is_nonfailing "$_st" || OVERALL=FAIL
 done
 
 # #2926: the TERMINAL tree capture — the authoritative check, taken AFTER the last
@@ -19047,6 +20086,23 @@ if [ -n "$ONLY" ]; then
   SUMMARY_META+=("mode: PARTIAL (--only $ONLY) - does NOT count as the gate")
   [ "$OVERALL" = "PASS" ] && OVERALL=PARTIAL
 fi
+# #3625 (roborev job 371): the aggregate is built from name/STATUS pairs — a qualifier
+# that names a status must be derived from the observed one, never assumed from the
+# census state. Zipped explicitly (bash 3.2 has no namerefs) and with NO separator
+# character between the two fields, per #3312: remove the shared channel rather than
+# pick a delimiter a value might one day contain.
+# GUARD THE KEYS EXPANSION WITH A COUNT CHECK, never the `+` idiom. The
+# `"${arr[@]+"${arr[@]}"}"` form that works for VALUES does NOT work for the KEYS form:
+# bash reads `${!NAMES[@]+...}` as INDIRECT expansion and errors "invalid variable name"
+# on the array's string contents, ABANDONING the enclosing block before its exit. Already
+# documented at run_delta's own keys loop, and reproduced here anyway: written with the `+`
+# form, --emit-summary-selftest fell straight through into a REAL 37-component gate.
+# `${#arr[@]}` is set -u-safe even when empty.
+_cen_args=()
+if [ "${#NAMES[@]}" -gt 0 ]; then
+  for _ci in "${!NAMES[@]}"; do _cen_args+=("${NAMES[$_ci]}" "${STATUSES[$_ci]}"); done
+fi
+SUMMARY_META+=("$(census_summary_line ${_cen_args[@]+"${_cen_args[@]}"})")
 for i in "${!NAMES[@]}"; do
   SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
 done
@@ -19070,7 +20126,8 @@ if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ "$DELTA" -eq 0 ] && [ "$SELFTEST" -e
   [ "$SUMMARY_WRITE_FAILED" -ne 0 ] && _push_result=FAIL
   _push_fails=""
   for i in "${!NAMES[@]}"; do
-    [ "${STATUSES[$i]}" = FAIL ] && _push_fails="${_push_fails:+$_push_fails,}${NAMES[$i]}"
+    # #3625: name every NON-PASSING component, not only the one literal FAIL token.
+    _status_is_nonfailing "${STATUSES[$i]}" || _push_fails="${_push_fails:+$_push_fails,}${NAMES[$i]}"
   done
   # #2926 review C1: the signal names the SAME verified identity the block stamped, not a
   # fresh emit-time read (advisory notification, but it must not disagree with the block).
