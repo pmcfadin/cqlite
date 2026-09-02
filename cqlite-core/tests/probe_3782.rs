@@ -9,7 +9,12 @@
 //! provably a single decompressed byte (asserted), and invisible to integrity
 //! checks. No CQLite-written bytes are involved (#3042).
 //!
-//! Measured on `main` @ 1023095ee (2026-09-02), `CQLITE_DATASETS_ROOT=/data/datasets`:
+//! Measured on `main` @ 1023095ee (2026-09-02), `CQLITE_DATASETS_ROOT=/data/datasets`,
+//! i.e. BEFORE the #3782 fix. The committed regression lane that pins the fixed
+//! behaviour is `issue_3782_corrupt_row_refusal.rs`; both stage the fixture through
+//! the SAME harness (`support/corrupt_clustering_fixture.rs`) so they can never
+//! measure different mutations. This file stays `#[ignore]`d: it REPORTS numbers,
+//! it asserts almost nothing, and re-running it is how the table above is refreshed.
 //!
 //! | surface                                       | control | mutated | note |
 //! |-----------------------------------------------|---------|---------|------|
@@ -36,12 +41,10 @@ use cqlite_core::query::result::StreamingConfig;
 use cqlite_core::storage::sstable::SSTableReader;
 use cqlite_core::Database;
 
-const FIX_KS: &str = "test_basic";
-const FIX_TABLE: &str = "composite_key_table";
-const SCHEMA_FILE: &str = "basic-types.cql";
-/// Clustering-key values known to be unique in this fixture; the first one that
-/// also appears exactly once as a verbatim LZ4 literal is the mutation target.
-const NEEDLES: &[&[u8]] = &[b"necessary", b"purpose", b"artist", b"region", b"glass"];
+#[path = "support/corrupt_clustering_fixture.rs"]
+mod fixture;
+
+use fixture::{comp_file, FIX_KS, FIX_TABLE, SCHEMA_FILE};
 
 /// Collect WARN/ERROR tracing output into a shared buffer.
 #[derive(Clone, Default)]
@@ -74,7 +77,7 @@ fn datasets_root() -> PathBuf {
 fn schemas_dir() -> PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .unwrap()
+        .expect("workspace root")
         .join("test-data")
         .join("schemas")
 }
@@ -91,104 +94,6 @@ fn fixture_dir() -> PathBuf {
         }
     }
     panic!("fixture {FIX_KS}.{FIX_TABLE} not found under {root:?}");
-}
-
-fn comp_file(dir: &std::path::Path, suffix: &str) -> PathBuf {
-    for e in std::fs::read_dir(dir).expect("read dir").flatten() {
-        if e.file_name().to_string_lossy().ends_with(suffix) {
-            return e.path();
-        }
-    }
-    panic!("no {suffix} in {dir:?}");
-}
-
-/// `CompressionInfo.db` → (algorithm, chunk_offsets). Parsed independently of
-/// the code under test so the layout is an on-disk fact, not a derived one.
-fn parse_ci(p: &std::path::Path) -> (String, Vec<u64>) {
-    let b = std::fs::read(p).expect("read CompressionInfo.db");
-    let nlen = u16::from_be_bytes([b[0], b[1]]) as usize;
-    let mut o = 2usize;
-    let alg = String::from_utf8_lossy(&b[o..o + nlen]).to_string();
-    o += nlen;
-    let opt = u32::from_be_bytes(b[o..o + 4].try_into().unwrap()) as usize;
-    o += 4;
-    for _ in 0..opt {
-        let kl = u16::from_be_bytes(b[o..o + 2].try_into().unwrap()) as usize;
-        o += 2 + kl;
-        let vl = u16::from_be_bytes(b[o..o + 2].try_into().unwrap()) as usize;
-        o += 2 + vl;
-    }
-    o += 4 + 4 + 8; // chunk_length, max_compressed_length, data_length
-    let n = u32::from_be_bytes(b[o..o + 4].try_into().unwrap()) as usize;
-    o += 4;
-    let offs = (0..n)
-        .map(|i| u64::from_be_bytes(b[o + i * 8..o + i * 8 + 8].try_into().unwrap()))
-        .collect();
-    (alg, offs)
-}
-
-/// Copy the fixture to `dst`, flipping ONE byte of the LZ4 literal carrying one
-/// of `NEEDLES` to `0xFF`, and fixing the chunk CRC32. Returns the changed
-/// DECOMPRESSED offset. Asserts length-preservation and single-byte change.
-fn mutate_clustering_utf8(src: &std::path::Path, dst: &std::path::Path) -> usize {
-    std::fs::create_dir_all(dst).unwrap();
-    for e in std::fs::read_dir(src).unwrap().flatten() {
-        std::fs::copy(e.path(), dst.join(e.file_name())).unwrap();
-    }
-    let (alg, offs) = parse_ci(&comp_file(dst, "-CompressionInfo.db"));
-    assert!(
-        alg.to_uppercase().contains("LZ4"),
-        "expected LZ4, got {alg}"
-    );
-    let data_path = comp_file(dst, "-Data.db");
-    let mut data = std::fs::read(&data_path).unwrap();
-    let file_len = data.len() as u64;
-
-    for needle in NEEDLES {
-        for (i, &start) in offs.iter().enumerate() {
-            let end = offs.get(i + 1).copied().unwrap_or(file_len);
-            let (lo, hi) = (start as usize, (end - 4) as usize);
-            let before =
-                lz4_flex::decompress_size_prepended(&data[lo..hi]).expect("decompress chunk");
-            let dhits: Vec<usize> = (0..before.len().saturating_sub(needle.len()))
-                .filter(|&k| &before[k..k + needle.len()] == *needle)
-                .collect();
-            let chits: Vec<usize> = (0..(hi - lo).saturating_sub(needle.len()))
-                .filter(|&k| &data[lo + k..lo + k + needle.len()] == *needle)
-                .collect();
-            if dhits.len() != 1 || chits.len() != 1 {
-                continue;
-            }
-            let (dpos, flip_at) = (dhits[0], lo + chits[0]);
-            let orig = data[flip_at];
-            data[flip_at] = 0xFF;
-            let after =
-                lz4_flex::decompress_size_prepended(&data[lo..hi]).expect("re-decompress chunk");
-            assert_eq!(
-                before.len(),
-                after.len(),
-                "mutation must be length-preserving"
-            );
-            let diffs: Vec<usize> = (0..before.len())
-                .filter(|&k| before[k] != after[k])
-                .collect();
-            if diffs.as_slice() != [dpos] {
-                data[flip_at] = orig; // not a clean single-byte change; try the next needle
-                continue;
-            }
-            assert_eq!(after[dpos], 0xFF);
-            let crc = crc32fast::hash(&data[lo..hi]).to_be_bytes();
-            data[hi..hi + 4].copy_from_slice(&crc);
-            std::fs::write(&data_path, &data).unwrap();
-            eprintln!(
-                "PROBE3782 mutated {:?} in chunk {i}: file_off={flip_at} decompressed_off={dpos} \
-                 (0x{orig:02x} -> 0xFF), chunk CRC32 recomputed",
-                String::from_utf8_lossy(needle)
-            );
-            return dpos;
-        }
-    }
-    panic!("no needle occurs exactly once as a verbatim LZ4 literal in any chunk");
 }
 
 fn table_schema() -> cqlite_core::schema::TableSchema {
@@ -216,21 +121,17 @@ async fn open_db(data_dir: PathBuf) -> Database {
     .database
 }
 
-/// Stage a pristine copy (`ctl`) and a single-byte-mutated copy (`mut`) of the
-/// fixture under a unique temp root, each in `<root>/<leg>/sstables/<ks>/<dir>`.
+/// Stage a pristine copy and a single-byte-mutated copy of the fixture, via the
+/// shared harness the committed regression lane uses
+/// (`support/corrupt_clustering_fixture.rs`), so probe and regression can never
+/// measure different mutations. Returns the two TABLE directories.
 fn stage() -> (PathBuf, PathBuf) {
-    let src = fixture_dir();
-    let name = src.file_name().unwrap().to_owned();
-    let root = std::env::temp_dir().join(format!("probe3782-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    let ctl = root.join("ctl").join("sstables").join(FIX_KS).join(&name);
-    std::fs::create_dir_all(&ctl).unwrap();
-    for e in std::fs::read_dir(&src).unwrap().flatten() {
-        std::fs::copy(e.path(), ctl.join(e.file_name())).unwrap();
-    }
-    let mutated = root.join("mut").join("sstables").join(FIX_KS).join(&name);
-    mutate_clustering_utf8(&src, &mutated);
-    (ctl, mutated)
+    let staged = fixture::stage_control_and_mutated(&fixture_dir(), "probe");
+    eprintln!(
+        "PROBE3782 mutated decompressed_off={} (chunk CRC32 recomputed)",
+        staged.mutated_offset
+    );
+    (staged.control_dir, staged.mutated_dir)
 }
 
 /// Q1 — the READ path. Control vs mutated row counts through the public
