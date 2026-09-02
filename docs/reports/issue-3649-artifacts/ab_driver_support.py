@@ -1558,6 +1558,32 @@ def probe_compression(served_dir):
     return "LZ4", "%d served SSTable(s), all LZ4Compressor" % len(data_files)
 
 
+def _parse_cpu_range_list(raw):
+    """`0-15` / `0` / `0-3,8-11` -> a count; anything else -> None.
+
+    Split out so the grammar can be exercised against inputs no single box
+    produces: this machine reports one shape, and a parser tested only against
+    the shape in front of it is tested against one case.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    total = 0
+    for part in raw.split(","):
+        part = part.strip()
+        if re.fullmatch(r"[0-9]+", part):
+            total += 1
+            continue
+        span = re.fullmatch(r"([0-9]+)-([0-9]+)", part)
+        if not span:
+            return None
+        low, high = int(span.group(1)), int(span.group(2))
+        if high < low:
+            return None
+        total += high - low + 1
+    return total or None
+
+
 def hardware_cpu_count():
     """The MACHINE's online CPU count, independent of any affinity mask.
 
@@ -1583,23 +1609,9 @@ def hardware_cpu_count():
             raw = handle.read().strip()
     except OSError as exc:
         return None, "%s: %s" % (path, exc.strerror or exc)
-    if not raw:
-        return None, "%s is empty" % path
-    total = 0
-    for part in raw.split(","):
-        part = part.strip()
-        if re.fullmatch(r"[0-9]+", part):
-            total += 1
-            continue
-        span = re.fullmatch(r"([0-9]+)-([0-9]+)", part)
-        if not span:
-            return None, "%s holds %r, which is not a CPU range list" % (path, raw)
-        low, high = int(span.group(1)), int(span.group(2))
-        if high < low:
-            return None, "%s holds a descending range %r" % (path, part)
-        total += high - low + 1
-    if total < 1:
-        return None, "%s describes no online CPUs" % path
+    total = _parse_cpu_range_list(raw)
+    if total is None:
+        return None, "%s holds %r, which is not a CPU range list" % (path, raw)
     return total, raw
 
 

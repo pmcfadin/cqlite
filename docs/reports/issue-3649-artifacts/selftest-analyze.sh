@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=502
+CASE_FLOOR=511
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -2178,6 +2178,51 @@ PYINNER
     ok "--port 65535 is accepted -- the range check is inclusive at the boundary"
   fi
 
+  # ROUND 19 FINDING B: an unlabelled measurement must be the #2820 comparison.
+  # The scratch repo satisfies the pin for real (a tag named cfa93fe99), so
+  # these exercise the actual resolution path.
+  #
+  # A MEASUREMENT CANNOT LOWER THE FLOORS -- that is control-only -- so these
+  # need a corpus that genuinely meets them. Sparse, so 300 MB costs no blocks.
+  mkdir -p "$TMP/armcorpus/ks/tbl"
+  truncate -s 150000000 "$TMP/armcorpus/ks/tbl/nb-1-big-Data.db"
+  truncate -s 150000000 "$TMP/armcorpus/ks/tbl/nb-2-big-Data.db"
+  mkcompressioninfo "$TMP/armcorpus/ks/tbl/nb-1-big-CompressionInfo.db" LZ4Compressor
+  mkcompressioninfo "$TMP/armcorpus/ks/tbl/nb-2-big-CompressionInfo.db" LZ4Compressor
+  run_driver --corpus "$TMP/armcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-arms" --repo "$SCRATCH" \
+    --profile narrow --base-ref HEAD --head-ref HEAD~1
+  check_driver "arms in the WRONG ORDER, which would invert the ratio" 2 arm-refs-not-2820
+  # The refusal must say it will not reorder, because an operator's next thought
+  # is "then swap them for me".
+  if grep -q 'The arms are NOT reordered for you' "$TMP/err.txt"; then
+    ok "the refusal says the arms are not reordered, and why a silent swap is worse"
+  else
+    bad "the arm refusal does not address the reorder an operator would expect"
+  fi
+  # A CONTROL may compare anything: that is what the label is for.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-arms-ctl" --min-corpus-bytes 1 --min-sstables 1 --repo "$SCRATCH" \
+    --control other-commits --base-ref HEAD --head-ref HEAD~1
+  if grep -q '^AB-3649: cause arm-refs-not-2820$' "$TMP/err.txt"; then
+    bad "a control was refused for comparing other commits"
+  else
+    ok "a CONTROL may compare commits other than the #2820 pair"
+  fi
+  # A repository without the pin cannot confirm what it is measuring. The refs
+  # are given EXPLICITLY and resolvably here: with the defaults, `cfa93fe99^`
+  # fails to resolve first and the session dies arm-ref-unresolvable, which is
+  # correct but is a different cause. This case exists for the one where the
+  # arms resolve fine and the PIN is what is missing.
+  NOPIN="$TMP/nopinrepo"
+  mkdir -p "$NOPIN"
+  ( cd "$NOPIN" && git init -q . && git config user.email t@e && git config user.name t \
+    && printf 'a\n' > f && git add f && git commit -qm one && printf 'b\n' > f && git commit -qam two ) >/dev/null 2>&1
+  run_driver --corpus "$TMP/armcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-nopin" --repo "$NOPIN" --profile narrow \
+    --base-ref HEAD~1 --head-ref HEAD
+  check_driver "a repository that does not contain the #2820 commit" 2 arm-pin-unresolvable
+
   run_driver --no-such-flag --profile narrow
   check_driver "an unrecognised driver flag exits 3" 3
 
@@ -2998,6 +3043,64 @@ PYINNER
   else
     bad "a session missing --profile reached cargo: $(head -1 "$TMP/cargo-argv.log")"
   fi
+  # ROUND 19 FINDING C, THROUGH THE WHOLE DRIVER. AB_SHAPE was exported before
+  # canonicalisation and never updated, so an accepted alias put the CANONICAL
+  # label in the JSONL and the RAW one in the manifest -- and the analyzer then
+  # rejected a valid COMPLETED session with shape-record-mismatch. This runs a
+  # session with an alias and requires it to complete AND to reconcile; only the
+  # end-to-end path can show that, because the mismatch is between two artifacts
+  # that only a real session produces.
+  run_e2e "$TMP/e2e-alias" --ramp 1 --no-prewarm --control alias-spelling --shape limit
+  if [ "$RC" = "0" ]; then
+    ok "a session using the alias 'limit' completes"
+  else
+    bad "an aliased --shape aborted the session (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '\n' ' ')"
+  fi
+  ALIAS_DIR="$(find "$TMP/e2e-alias" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | head -1)"
+  if [ -n "$ALIAS_DIR" ] && [ -f "$ALIAS_DIR/manifest.json" ]; then
+    if python3 - "$ALIAS_DIR" <<'PYINNER'
+import glob
+import json
+import os
+import sys
+
+run_dir = sys.argv[1]
+manifest = json.load(open(os.path.join(run_dir, "manifest.json"), encoding="utf-8"))
+problems = []
+if manifest["workload"]["shape"] != "limit-k":
+    problems.append("the manifest records shape %r, not the canonical 'limit-k'"
+                    % manifest["workload"]["shape"])
+if manifest["workload"].get("shape_requested") != "limit":
+    problems.append("the manifest lost the requested spelling: %r"
+                    % manifest["workload"].get("shape_requested"))
+# The records carry the canonical label, so manifest and records must agree --
+# which is the reconciliation that used to reject the session.
+# The REPLICATE files only. `runs.jsonl` is the session ledger and carries a
+# different schema with no `shape`, so globbing all JSONL made this case report
+# a mismatch that was its own imprecision rather than the driver's.
+for path in sorted(glob.glob(os.path.join(run_dir, "*-r*.jsonl"))):
+    for line in open(path, encoding="utf-8"):
+        if not line.strip():
+            continue
+        shape = json.loads(line).get("shape")
+        if shape != manifest["workload"]["shape"]:
+            problems.append("%s records shape %r while the manifest says %r"
+                            % (os.path.basename(path), shape,
+                               manifest["workload"]["shape"]))
+            break
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+    then
+      ok "an aliased shape reconciles: canonical in both the manifest and the records, requested spelling kept"
+    else
+      bad "an aliased shape does not reconcile (see above)"
+    fi
+  else
+    bad "the aliased-shape session produced no manifest"
+  fi
+
   : > "$TMP/cargo-argv.log"
   # ROUND 15 FINDING 3, THROUGH THE WHOLE DRIVER. Round 14 canonicalised resolved
   # integers, and one comparison kept reading the raw option string -- so
@@ -3594,6 +3697,54 @@ if grep -q '^AB-3649: verdict-detail single-stream HOST the one-minute load aver
 else
   bad "a loaded host was not disclosed"
 fi
+# ---- the machine's CPUs, not the process's ----------------------------------
+# ROUND 19 FINDING A. `nproc` reports CPUs available to the PROCESS: on this box
+# `nproc` is 16 and `taskset -c 0-3 nproc` is 4, while the sysfs online set is
+# `0-15` under both. So a large rig pinned to four CPUs passed a guard whose own
+# text forbids exactly that. The probe is exercised UNDER A MASK, because that
+# is the condition the defect needed and an unmasked run cannot distinguish the
+# two sources at all.
+HW_PLAIN="$(python3 "$SUPPORT" hardware-cpus | cut -d' ' -f1)"
+if command -v taskset >/dev/null 2>&1; then
+  HW_MASKED="$(taskset -c 0 python3 "$SUPPORT" hardware-cpus | cut -d' ' -f1)"
+  NPROC_MASKED="$(taskset -c 0 nproc)"
+  if [ "$HW_MASKED" = "$HW_PLAIN" ]; then
+    ok "the hardware CPU count is unchanged under an affinity mask ($HW_PLAIN)"
+  else
+    bad "the hardware count changed under a mask: $HW_PLAIN -> $HW_MASKED"
+  fi
+  if [ "$NPROC_MASKED" != "$HW_PLAIN" ]; then
+    ok "nproc DOES change under the same mask ($NPROC_MASKED), so the two sources are distinguishable here"
+  else
+    bad "nproc did not change under a one-CPU mask, so this box cannot demonstrate the defect"
+  fi
+else
+  bad "taskset is unavailable, so the affinity-independence of the hardware probe was NOT demonstrated"
+fi
+# The range grammar, since the sysfs value is a list and not a number.
+if python3 - "$HERE" <<'PYINNER'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+
+cases = {"0-15": 16, "0": 1, "0-3,8-11": 8, "0,2,4": 3, "": None,
+         "3-1": None, "banana": None}
+problems = []
+for raw, want in cases.items():
+    got = S._parse_cpu_range_list(raw) if hasattr(S, "_parse_cpu_range_list") else None
+    if got != want:
+        problems.append("%r -> %r, expected %r" % (raw, got, want))
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "the sysfs CPU range grammar counts lists, ranges and refuses garbage"
+else
+  bad "the sysfs CPU range grammar is wrong (see above)"
+fi
+
 # ---- the NARROW PROFILE is a property, not a label ---------------------------
 # ROUND 15 FINDING 1. The band is defined for the M0 rig -- 4 vCPU, RUNBOOK line
 # 9 -- and `if not host_type.startswith("i4i")` let the whole FAMILY through: an
