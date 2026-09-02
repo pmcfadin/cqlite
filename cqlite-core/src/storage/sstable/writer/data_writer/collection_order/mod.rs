@@ -170,16 +170,16 @@ pub(crate) fn compare_collection_elements(a: &Value, b: &Value) -> Ordering {
         //     An earlier revision of this audit claimed Cassandra makes duration
         //     NON-comparable; that was FALSE. The CONCLUSION survives for a
         //     different and better reason: CQL FORBIDS `duration` as a set element
-        //     or a map key outright — `cql3/CQL3Type.java:830-838` throws
-        //     "Durations are not allowed inside sets" and "Durations are not
-        //     allowed as map keys" — so a `Value::Duration` cannot legitimately
+        //     or a map key outright — `cql3/CQL3Type.java:830-831` throws
+        //     "Durations are not allowed inside sets" and `:837-838` "Durations
+        //     are not allowed as map keys" — so a `Value::Duration` cannot legitimately
         //     reach this comparator at all. The fallback keeps the sort
         //     total/panic-free if one somehow does.
         //   * `counter` (CounterColumnType): `ComparisonType.NOT_COMPARABLE`
         //     (`db/marshal/CounterColumnType.java:38`) — THIS is the type
         //     Cassandra makes non-comparable, and it is also forbidden inside a
-        //     collection (`cql3/CQL3Type.java:827` "Counters are not allowed
-        //     inside collections", `:836` for map keys). So a `Value::Counter`
+        //     collection (`cql3/CQL3Type.java:827-828` "Counters are not allowed
+        //     inside collections", `:835-836` for map keys). So a `Value::Counter`
         //     cannot legitimately be a set element or map key either. The
         //     `Value::Counter` arm ABOVE compares signed rather than falling
         //     through; it exists solely to keep the sort TOTAL for a value shape
@@ -251,8 +251,11 @@ mod tests {
     }
 
     /// `time` (TimeType) — issue #3935: a NEGATIVE nanos sorts ABOVE every
-    /// non-negative one, the exact INVERSION of the signed order this arm used
-    /// to have.
+    /// non-negative one, INVERTING where the negatives sit relative to the
+    /// signed order this arm used to have. (Not a reversal of the whole
+    /// sequence: within each sign class the relative order is unchanged, which
+    /// is why the expectation below is spelled out element by element rather
+    /// than described as "reversed".)
     ///
     /// Expectation derived from the pinned source, never from CQLite's own
     /// behaviour (#3041): `db/marshal/TimeType.java:48`
@@ -398,8 +401,12 @@ mod tests {
         assert_eq!(v, expected);
     }
 
-    /// Unsigned-lexicographic types (text/blob/boolean) keep serialized-byte
-    /// order — raw byte comparison is the correct Cassandra comparator there.
+    /// Unsigned-lexicographic types (text/blob) keep serialized-byte order —
+    /// raw byte comparison is the correct Cassandra comparator there. (`boolean`
+    /// was listed here too and is NOT one: `BooleanType` is CUSTOM — see the
+    /// declared residual in the fallback audit above. It agrees with byte order
+    /// for every canonically-serialized value, which is why it was mistaken for
+    /// BYTE_ORDER.)
     #[test]
     fn text_keeps_byte_order() {
         let mut v = vec![
