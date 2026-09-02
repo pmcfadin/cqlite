@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=498
+CASE_FLOOR=500
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -3058,6 +3058,69 @@ PYINNER
     else
       bad "the manifest does not carry the ticket content"
     fi
+    # ROUND 18 FINDING 1 -- THE OTHER HALF OF THE PROPERTY. Round 17 asserted
+    # that every run READ the frozen copy and said nothing about what the
+    # manifest RECORDS, and the manifest recorded the mutable original. Both
+    # halves are needed: an instrument that runs the right ticket and documents
+    # a different one is not self-describing.
+    if python3 - "$E2E_TICKET_DIR" <<'PYINNER'
+import json
+import os
+import sys
+
+run_dir = sys.argv[1]
+manifest = json.load(open(os.path.join(run_dir, "manifest.json"), encoding="utf-8"))
+workload = manifest["workload"]
+recorded = workload.get("ticket_template", "")
+problems = []
+if os.path.realpath(recorded) != os.path.realpath(os.path.join(run_dir, "ticket.json")):
+    problems.append("workload.ticket_template is %r, not the frozen copy" % recorded)
+original = workload.get("ticket_original", "")
+if not original or os.path.realpath(original) == os.path.realpath(recorded):
+    problems.append("ticket_original is absent or equal to the frozen path, so "
+                    "provenance is lost")
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+    then
+      ok "the manifest records the FROZEN ticket path, with the original kept only as provenance"
+    else
+      bad "the manifest does not record the frozen ticket (see above)"
+    fi
+    # INTERNAL CONSISTENCY ONLY, and labelled as such because it CANNOT catch
+    # finding (1) on its own: at session time the original and the frozen copy
+    # hold identical bytes, so a manifest that read the wrong one records the
+    # same content. The PATH assertion above is what catches the defect. What
+    # this adds is that the three ticket fields describe ONE document -- a
+    # manifest whose path, content and digest disagreed would be self-refuting,
+    # and nothing else checks that.
+    if python3 - "$E2E_TICKET_DIR" <<'PYINNER'
+import hashlib
+import json
+import os
+import sys
+
+run_dir = sys.argv[1]
+manifest = json.load(open(os.path.join(run_dir, "manifest.json"), encoding="utf-8"))
+content = manifest["workload"].get("ticket_content")
+frozen = json.load(open(os.path.join(run_dir, "ticket.json"), encoding="utf-8"))
+if content != frozen:
+    sys.stderr.write("AB-3649: the manifest's ticket_content is not the frozen "
+                     "ticket: %r vs %r\n" % (content, frozen))
+    raise SystemExit(1)
+digest = hashlib.sha256(
+    open(os.path.join(run_dir, "ticket.json"), "rb").read()).hexdigest()
+if manifest["workload"].get("ticket_sha256") != digest:
+    sys.stderr.write("AB-3649: the recorded digest does not match the frozen file\n")
+    raise SystemExit(1)
+PYINNER
+    then
+      ok "the manifest's ticket path, content and digest describe one document"
+    else
+      bad "the manifest's ticket fields describe different documents (see above)"
+    fi
+
     # THE BEHAVIOUR, not the artifact: every load-generator invocation must have
     # been handed a path inside a session run directory. A source grep for the
     # original's literal name passed under a plant that redirected the VARIABLE,
