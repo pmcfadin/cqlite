@@ -861,27 +861,34 @@ async fn the_reported_type_names_the_complex_columns_declared_key_type() {
 /// partitions out of the middle of the real row's cell values (measured: phantom
 /// headers at 19, 58, 85). The `row body exhausted` this case asserted came from the
 /// LAST of those phantoms. Byte `0x4f` of that same row is the `z` of the text value
-/// `"zero"` — `0x7a`, which has `IS_MARKER` (`0x02`) set — and byte `0x50` is its
-/// `e`, `0x65` = 101, read as the bound kind. So the resync walk reaches an
-/// unrepresentable range-tombstone marker at offset 79 BEFORE any phantom row can
-/// run out of bytes, and the marker-level propagation added for the same issue fires
-/// first.
+/// `"zero"` — `0x7a`, which has `IS_MARKER` (`0x02`) set — so the resync walk reaches
+/// a range-tombstone MARKER at offset 79 before any phantom row can run out of
+/// bytes, and the marker layer answers first.
 ///
-/// The bogus bound kind is therefore NOT a second, removable defect: it is the
-/// truncation's own artifact at a fixed offset inside the fixture's real payload.
-/// MEASURED exhaustively over every `keep` in `20..=145`:
+/// That marker is therefore NOT a second, removable defect: it is the truncation's
+/// own artifact at a fixed offset inside the fixture's real payload. RE-MEASURED
+/// exhaustively over every `keep` in `20..=145` after the read path stopped
+/// converting a marker PARSE failure into a partition terminator (roborev job 78):
 ///
 /// ```text
-///  20..= 86  Ok(0 rows)   the separate row-framing swallow this file's header
-///                         already records as out of scope
-///  87..=143  Err          range-tombstone marker refusal at offset 79
-/// 144..=145  Ok(1 row)    the untruncated fixture reads cleanly
+///  20..= 79  Ok(0 rows)              the separate row-framing swallow this file's
+///                                    header already records as out of scope
+///  80..=143  Err marker-unparseable  the marker at offset 79 cannot be PARSED
+/// 144..=145  Ok(1 row)               the untruncated fixture reads cleanly
 /// ```
 ///
+/// Both boundaries and the CLASS moved with that fix, which is why the table is
+/// dated: the refusal used to come from the shadow FSM rejecting the bound kind
+/// (`0x65` = 101, the `e` of `"zero"`) over `87..=143`, and now comes from the
+/// marker's own body not parsing over `80..=143` — 7 more keeps, and one layer
+/// earlier. `144..=145` is the load-bearing row: the UNTRUNCATED fixture still
+/// reads cleanly, so nothing here refuses a correct read.
+///
 /// There is no `keep` that isolates the column-level condition, so per the split
-/// this case now pins the MARKER-level refusal on the same bytes, and the
-/// column-level `row body exhausted` pin is the COMPLEX case below — whose fixture
-/// is measured marker-clean at every `keep` in `20..=109`.
+/// this case pins the MARKER-level refusal on these bytes, and the column-level
+/// `row body exhausted` pin is the COMPLEX case below — whose fixture is
+/// marker-clean at every `keep` in `20..=109`, RE-MEASURED under the same fix
+/// (`20..=78` `Ok(0)`, `79..=107` the row-level refusal, `108..=109` `Ok(1)`).
 const RESYNC_MARKER_TABLE: &str = "frozen_int_collections";
 const RESYNC_MARKER_DIR: &str = "frozen_int_collections-c9820c30748d11f1a94ae34493d77740";
 /// The fixture's untruncated size, asserted so a corpus change cannot silently move
@@ -998,17 +1005,19 @@ fn assert_row_body_exhausted(err: &Error, column: &str, at: usize, on_disk_colum
 /// A truncation whose RESYNC walk reads real payload as a range-tombstone marker
 /// must FAIL the read, not truncate the partition (issue #3721, marker level).
 ///
-/// Named for what it pins. See [`RESYNC_MARKER_TABLE`] for the measurement showing
-/// this fixture can no longer reach the column-level condition, and why the bogus
-/// bound kind is the truncation's own artifact rather than a second defect that
-/// could be removed from the fixture.
+/// Named for what it pins, which has now moved TWICE — see the comment in the body
+/// for both moves. [`RESYNC_MARKER_TABLE`] carries the exhaustive `keep`
+/// measurement showing this fixture can no longer reach the column-level condition,
+/// and why the unframeable marker is the truncation's own artifact rather than a
+/// second defect that could be removed from the fixture.
 ///
-/// Pre-#3721 the marker handlers answered an unrepresentable bound kind with a bare
-/// `break`, so this read returned `Ok` — dropping the marker and every later row of
-/// the partition from a SUCCESSFUL query, the same shape as the column-level swallow
-/// this file's other cases pin.
+/// Pre-#3721 EVERY marker-`Err` arm on the read path answered with the framing
+/// terminator — a bare `break` in the two buffered block loops, `MarkerOutcome::Stop`
+/// in the streaming policy — so this read returned `Ok`, dropping the marker and
+/// every later row of the partition from a SUCCESSFUL query: the same shape as the
+/// column-level swallow this file's other cases pin, one structural level up.
 #[tokio::test]
-async fn a_truncation_whose_resync_walk_cannot_frame_a_marker_fails_the_select() {
+async fn a_truncation_whose_resync_walk_lands_on_an_unframeable_marker_fails_the_select() {
     let err = select_all_truncated(
         COMPLEX_KEYSPACE,
         RESYNC_MARKER_TABLE,
@@ -1046,24 +1055,58 @@ async fn a_truncation_whose_resync_walk_cannot_frame_a_marker_fails_the_select()
     let rendered = err.to_string();
     assert_eq!(err.category(), ErrorCategory::Data);
     assert!(!err.is_recoverable());
-    // The refusal must still SAY WHAT IT MEASURED — the row extent it could not
-    // satisfy and the column left outstanding — not a bare "corrupt SSTable", which
-    // would leave an operator no better off than the `tracing::debug!` this replaces.
+    // SECOND MOVE OF THIS CASE'S REFUSAL LAYER — recorded because the migration is the
+    // informative part, and because a name or a needle left behind by it would describe
+    // the wrong subject.
+    //
+    // Move 1: the marker parser once returned `Ok` for a body-inconsistent frame (it
+    // overwrote its cursor with the declared `body_end`), so this reached the shadow FSM
+    // and was refused for its bound kind. Requiring the body to be consumed EXACTLY made
+    // these bytes an ill-framed MARKER, and the walk then fell through to the row path,
+    // which refused on the row's own extent — so this asserted `row body exhausted`.
+    //
+    // Move 2 (this one): the READ path no longer converts a marker PARSE failure into a
+    // partition terminator. `MarkerOutcome::Stop` is GONE, so the refusal is raised at
+    // the layer that actually measured it — the marker — instead of surfacing as a
+    // downstream row error about a row that does not exist. That is strictly more
+    // truthful, and it is why the needles below are the marker's and not the row's.
+    //
+    // What is asserted is the CHAIN, because each link is a separate claim an operator
+    // depends on: the finality fact (no refill can help), the marker-layer condition,
+    // and the parser's OWN cause surviving to the surface rather than being discarded
+    // and re-synthesised.
     for needle in [
-        "row body exhausted",
-        "still declared PRESENT",
-        "truncated or corrupt row body",
+        // Finality: this is corruption, not a window boundary — the distinction the
+        // driver alone can make, since only it holds the chunking state.
+        "no further data can complete this range-tombstone marker",
+        "not a chunk boundary",
+        // The harm this refusal exists to prevent, named in the message itself.
+        "would report SUCCESS while dropping the tombstone",
+        // The marker-layer condition, and why there is no resume point.
+        "range-tombstone marker at offset",
+        "could not be PARSED, so no resume point exists",
+        // The parser's own cause, preserved through both wrappers.
+        "prev_size in marker body",
     ] {
         assert!(
             rendered.contains(needle),
             "the refusal must name `{needle}`; got: {rendered}"
         );
     }
-    // And it must be the dedicated, MATCHABLE per-column variant, so the row and
-    // partition loops cannot fold it back into "end of partition" (#3721).
+    // A marker refusal is NOT the per-column variant: conflating the two is exactly what
+    // the dedicated `Error::ColumnDecode` variant exists to prevent, and this case now
+    // never reaches a column.
     assert!(
-        matches!(err, Error::ColumnDecode { .. }),
-        "a per-column decode failure must be reported as `Error::ColumnDecode`; got: {err:?}"
+        !matches!(err, Error::ColumnDecode { .. }),
+        "a marker refusal must not be reported as a per-COLUMN decode failure; got: {err:?}"
+    );
+    // The parser is shared by the read and compaction paths, so its diagnostics may name
+    // NEITHER. This is a SELECT; a message ending "(compaction)" would send an operator
+    // to the wrong subsystem. Pinned here, at the public surface, because the parser
+    // cannot see which caller it has and so cannot assert this about itself.
+    assert!(
+        !rendered.contains("(compaction)"),
+        "a SELECT's refusal must not attribute itself to compaction; got: {rendered}"
     );
 }
 
@@ -1122,3 +1165,4 @@ async fn the_complex_subject_still_reads_cleanly_without_its_checksum_components
     .expect("the untruncated scratch copy must read cleanly");
     assert_eq!(rows, 1, "present fixture must return its row");
 }
+

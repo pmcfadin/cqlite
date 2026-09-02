@@ -1105,6 +1105,18 @@ impl V5CompressedLegacyParser {
     ///
     /// Returns `(bound_values, bound_kind, (mfda_primary, ldt_primary),
     /// Option<(mfda_secondary, ldt_secondary)>, next_offset)`.
+    ///
+    /// # Its diagnostics name no caller, deliberately (issue #3721)
+    ///
+    /// Every `Error` below used to end `(compaction)`, from when this parser had ONE
+    /// caller. It no longer does: [`Self::parse_range_tombstone_marker_full`] delegates
+    /// here, so the READ path reaches it too, and a `SELECT` was reporting a failure
+    /// "(compaction)" — telling an operator to debug the wrong subsystem, which is what
+    /// stops the next person looking. A parser cannot know its caller, so do NOT
+    /// re-add the suffix and do NOT thread one in as a parameter: the enclosing
+    /// `range_marker_error::range_marker_unparseable` /
+    /// `unparseable_marker_at_final_chunk` wrappers already name the surface and the
+    /// partition, so a caller label here can only ever restate or contradict them.
     #[allow(clippy::type_complexity)]
     pub(super) fn parse_range_tombstone_marker_with_ldt(
         &self,
@@ -1116,7 +1128,7 @@ impl V5CompressedLegacyParser {
 
         if pos >= data.len() {
             return Err(Error::corruption(
-                "V5CompressedLegacy: Unexpected end at range tombstone marker (compaction)",
+                "V5CompressedLegacy: Unexpected end at range tombstone marker",
             ));
         }
 
@@ -1126,7 +1138,7 @@ impl V5CompressedLegacyParser {
         if (marker_flags & ROW_HAS_EXTENDED_FLAGS) != 0 {
             if pos >= data.len() {
                 return Err(Error::corruption(
-                    "V5CompressedLegacy: Unexpected end reading marker extended flags (compaction)",
+                    "V5CompressedLegacy: Unexpected end reading marker extended flags",
                 ));
             }
             pos += 1;
@@ -1135,7 +1147,7 @@ impl V5CompressedLegacyParser {
         // Bound kind byte.
         if pos >= data.len() {
             return Err(Error::corruption(
-                "V5CompressedLegacy: Unexpected end reading range tombstone bound kind (compaction)",
+                "V5CompressedLegacy: Unexpected end reading range tombstone bound kind",
             ));
         }
         let bound_kind = data[pos];
@@ -1144,7 +1156,7 @@ impl V5CompressedLegacyParser {
         // Cluster count (u16 big-endian).
         if pos + 2 > data.len() {
             return Err(Error::corruption(
-                "V5CompressedLegacy: Unexpected end reading range tombstone cluster count (compaction)",
+                "V5CompressedLegacy: Unexpected end reading range tombstone cluster count",
             ));
         }
         let cluster_count = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
@@ -1164,7 +1176,7 @@ impl V5CompressedLegacyParser {
         // marker_body_size VUInt — size of (prev_size VUInt + deletion_time(s)).
         let (remaining, marker_body_size) = parse_vuint(&data[pos..]).map_err(|e| {
             Error::corruption(format!(
-                "V5CompressedLegacy: Failed to parse marker_body_size (compaction) at offset {}: {:?}",
+                "V5CompressedLegacy: Failed to parse marker_body_size at offset {}: {:?}",
                 pos, e
             ))
         })?;
@@ -1173,8 +1185,10 @@ impl V5CompressedLegacyParser {
         let body_len = vuint_length_within(marker_body_size, data.len().saturating_sub(pos))
             .ok_or_else(|| {
                 Error::corruption(format!(
-                    "V5CompressedLegacy: marker_body_size={} at pos={} exceeds data length {} (compaction)",
-                    marker_body_size, pos, data.len()
+                    "V5CompressedLegacy: marker_body_size={} at pos={} exceeds data length {}",
+                    marker_body_size,
+                    pos,
+                    data.len()
                 ))
             })?;
         let body_end = pos + body_len;
@@ -1208,7 +1222,7 @@ impl V5CompressedLegacyParser {
         // Both are now named, and neither can reach `Ok`.
         let body = data.get(..body_end).ok_or_else(|| {
             Error::corruption(format!(
-                "V5CompressedLegacy: marker body end {} exceeds data length {} (compaction)",
+                "V5CompressedLegacy: marker body end {} exceeds data length {}",
                 body_end,
                 data.len()
             ))
@@ -1217,7 +1231,7 @@ impl V5CompressedLegacyParser {
         // prev_unfiltered_size VUInt — skip.
         let (remaining2, _prev_size) = parse_vuint(&body[pos..]).map_err(|e| {
             Error::corruption(format!(
-                "V5CompressedLegacy: Failed to parse prev_size in marker body (compaction) at {}: {:?}",
+                "V5CompressedLegacy: Failed to parse prev_size in marker body at {}: {:?}",
                 pos, e
             ))
         })?;
@@ -1234,7 +1248,7 @@ impl V5CompressedLegacyParser {
             return Err(Error::corruption(format!(
                 "V5CompressedLegacy: marker body declared {} bytes ending at offset {} but \
                  decoding consumed to {} (bound_kind={}) — declared size and field \
-                 encodings disagree (compaction)",
+                 encodings disagree",
                 body_len, body_end, pos, bound_kind
             )));
         }
