@@ -153,10 +153,17 @@ if [[ "$DRY_RUN" -eq 0 ]] && $ENGINE inspect "$CONTAINER_NAME" >/dev/null 2>&1; 
   $ENGINE rm -f $CONTAINER_NAME"
 fi
 
+# CLEAN UP BY OWNED ID, NEVER BY NAME (roborev job 51, finding 2).
+# This trap is installed BEFORE the container exists, so cleaning up by NAME races
+# a concurrent invocation: both can pass the `inspect` check above while the name is
+# absent, one wins `run --name`, and the LOSER's failed run fires this trap and
+# deletes the WINNER's container. Only ever remove a container this process
+# successfully started, identified by the id `run -d` returned.
+OWNED_CID=""
 cleanup() {
-  if [[ "$DRY_RUN" -eq 0 ]]; then
-    log "Cleaning up container..."
-    $ENGINE rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  if [[ "$DRY_RUN" -eq 0 && -n "$OWNED_CID" ]]; then
+    log "Cleaning up container $OWNED_CID..."
+    $ENGINE rm -f "$OWNED_CID" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -317,12 +324,23 @@ log "Starting $KEYSPACE generation (issue #3790)"
 log "Output directory: $OUT_DIR"
 
 log "Starting $CASSANDRA_IMAGE container ($CONTAINER_NAME)..."
-run $ENGINE run -d \
-  --name "$CONTAINER_NAME" \
-  -e MAX_HEAP_SIZE=1G \
-  -e HEAP_NEWSIZE=256m \
-  -e CASSANDRA_CLUSTER_NAME=cqlite-issue3790 \
-  "$CASSANDRA_IMAGE"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "[dry-run] $ENGINE run -d --name $CONTAINER_NAME ... $CASSANDRA_IMAGE"
+else
+  # Capture the id so `cleanup` removes only OUR container (see the trap above).
+  # A failure here leaves OWNED_CID empty, so the trap is a no-op and a concurrent
+  # run's container is left alone.
+  OWNED_CID="$($ENGINE run -d \
+    --name "$CONTAINER_NAME" \
+    -e MAX_HEAP_SIZE=1G \
+    -e HEAP_NEWSIZE=256m \
+    -e CASSANDRA_CLUSTER_NAME=cqlite-issue3790 \
+    "$CASSANDRA_IMAGE")" \
+    || fail "Failed to start $CASSANDRA_IMAGE as '$CONTAINER_NAME'. If a concurrent
+  run of this script owns that name, wait for it to finish rather than removing it."
+  [[ -n "$OWNED_CID" ]] || fail "container started but no id was returned by $ENGINE"
+  log "Started container id $OWNED_CID"
+fi
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
   wait_cassandra
