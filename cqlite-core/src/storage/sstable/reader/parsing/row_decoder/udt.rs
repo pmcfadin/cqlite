@@ -83,7 +83,7 @@ impl V5CompressedLegacyParser {
         let udt_data = &data[offset..offset + blob_len];
         let (udt_value, n) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
         // #3811 (finding C): `parse_udt_value` REPORTS; this caller used to drop it.
-        Self::require_fully_consumed_raw(n, udt_data.len(), &column.name, "frozen UDT")?;
+        Self::require_fully_consumed(n, udt_data.len(), &column.name, "frozen UDT")?;
         offset += blob_len;
 
         Ok((udt_value, offset))
@@ -666,7 +666,7 @@ impl V5CompressedLegacyParser {
                 let (value, n) = self.parse_udt_value(data, 0, &nested_def, &dummy_column)?;
                 // #3811 (finding C): the 4th discarding bounded caller of the pair
                 // roborev named; `data` here is one exactly-bounded UDT field.
-                Self::require_fully_consumed_raw(n, data.len(), &nested_def.name, "nested UDT")?;
+                Self::require_fully_consumed(n, data.len(), &nested_def.name, "nested UDT")?;
                 Ok(value)
             }
             _ => {
@@ -1087,7 +1087,7 @@ impl V5CompressedLegacyParser {
         // must have reached its end. Trailing bytes and a partial component-length
         // header both leave `current_offset` short; TupleType.split rule 1 (a
         // genuinely short encoding) leaves it EQUAL and stays accepted.
-        Self::require_fully_consumed_raw(current_offset, data.len(), &udt_def.name, "nested UDT")?;
+        Self::require_fully_consumed(current_offset, data.len(), &udt_def.name, "nested UDT")?;
         Ok(Value::Udt(Box::new(UdtValue {
             type_name: udt_def.name.clone(),
             keyspace: udt_def.keyspace.clone(),

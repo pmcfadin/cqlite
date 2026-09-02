@@ -133,7 +133,7 @@ impl V5CompressedLegacyParser {
         // Issue #3811 (census finding C): `data` IS the whole UDT value, so the
         // field loop must have reached its end. See the module header for why this
         // is here and not at the 14 call sites, and for why rule 1 still passes.
-        Self::require_fully_consumed_raw(current_offset, data.len(), type_name, "inline UDT")?;
+        Self::require_fully_consumed(current_offset, data.len(), type_name, "inline UDT")?;
         Ok(Value::Udt(Box::new(UdtValue {
             type_name: type_name.to_string(),
             keyspace: self.keyspace.clone(),

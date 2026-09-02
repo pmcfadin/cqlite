@@ -125,7 +125,7 @@ impl V5CompressedLegacyParser {
                 // #3811 (finding C): `parse_udt_value` REPORTS; this caller dropped it,
                 // so a frozen UDT blob with trailing bytes or a partial trailing field
                 // header was accepted where the collection and tuple paths refuse.
-                Self::require_fully_consumed_raw(n, udt_data.len(), &column.name, "frozen UDT")?;
+                Self::require_fully_consumed(n, udt_data.len(), &column.name, "frozen UDT")?;
                 off += blob_len;
 
                 (udt_value, off)
@@ -177,7 +177,7 @@ impl V5CompressedLegacyParser {
                 // #3811 (finding C): `parse_udt_value` REPORTS; this caller dropped it,
                 // so a frozen UDT blob with trailing bytes or a partial trailing field
                 // header was accepted where the collection and tuple paths refuse.
-                Self::require_fully_consumed_raw(n, udt_data.len(), &column.name, "frozen UDT")?;
+                Self::require_fully_consumed(n, udt_data.len(), &column.name, "frozen UDT")?;
                 off += blob_len;
 
                 (udt_value, off)
