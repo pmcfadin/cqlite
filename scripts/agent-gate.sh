@@ -716,7 +716,7 @@
 #                      fail here as noise, not leakage. No opt-out.
 #                      Also runs scripts/tests/test_features_load_bearing_guard.sh
 #                      (#1698), the non-vacuity proof for the
-#                      features-load-bearing component: 57 cases over throwaway
+#                      features-load-bearing component: 58 cases over throwaway
 #                      fixture workspaces, each criterion pinned by a green/red
 #                      differential pair, every negative case requiring the
 #                      diagnostic to NAME the planted feature, and an EXACT case
@@ -15045,7 +15045,7 @@ run_features_load_bearing() {
 # is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
 # red. Hermetic: no network (path remote), no cargo, no #1825 slot.
 # Also runs scripts/tests/test_features_load_bearing_guard.sh (#1698), the non-vacuity
-# proof for the features-load-bearing component: 57 cases over throwaway fixture
+# proof for the features-load-bearing component: 58 cases over throwaway fixture
 # workspaces, each criterion of the predicate pinned by a green/red differential pair,
 # every negative case required to NAME the planted feature, and an EXACT case count (a
 # floor below the real count lets one case be deleted silently — #3544's lesson applied
@@ -16551,7 +16551,11 @@ run_tooling_tests() {
   # a key is package-local. Job 93 closes the last ownership hole: a `.rs` file that NO
   # TARGET covers credits EVERY workspace member, not just its containing members — a
   # shared module outside every member directory had no container and so was credited to
-  # nobody. Still no `#[path]`/`include!` resolution, by design. Every fixture is a LOCAL path workspace with no registry dependency and every
+  # nobody. Still no `#[path]`/`include!` resolution, by design. Job 110 closes the adjacent
+  # silent skip: a symlinked directory resolving OUTSIDE the repository, inside a target's
+  # source tree, is now a NAMED REFUSAL rather than skipped (it could hold a
+  # `#[path]`-included gate) — scoped to target source trees so it cannot red on
+  # `node_modules`, and measured to fire on ZERO of this checkout's 33 symlinks. Every fixture is a LOCAL path workspace with no registry dependency and every
   # in-place edit goes through python3 helpers rather than `sed -i`, so the suite runs
   # offline (verified under CARGO_NET_OFFLINE=1) and portably — this component is mandatory
   # and must depend on neither a network nor a GNU userland.

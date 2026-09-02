@@ -1139,6 +1139,19 @@ def owners_of(path):
 # only reference site lived there was reported DEAD — a false FAIL, and a direct
 # contradiction of this guard's own fail-closed promise that "an unmeasured feature set is
 # never an empty one". An unmeasurable directory must NEVER become an empty one.
+def _within_target_tree(path):
+    """Is this path inside a directory that some workspace target's sources live in?
+
+    The scoping predicate for the out-of-repo symlink refusal: it answers "would this scan
+    have traversed it as SOURCE?", using the same target-derived trees ownership uses, so
+    the refusal cannot fire on a path the guard never cared about.
+    """
+    for tree_dir, _name in tree_owners:
+        if path == tree_dir or path.startswith(tree_dir + os.sep):
+            return True
+    return False
+
+
 def _walk_error(err):
     fail("could not traverse %s while collecting feature reference sites (%s). An "
          "unreadable directory is NOT an empty one: a reference site could be in there, "
@@ -1146,13 +1159,27 @@ def _walk_error(err):
          "permissions, or remove the directory." % (getattr(err, "filename", "?"), err))
 
 
-# SYMLINKED DIRECTORIES ARE THE SAME CLASS, and were the one sibling this sweep found:
+# SYMLINKED DIRECTORIES ARE THE SAME CLASS, and were the one sibling that sweep found:
 # `os.walk` does not descend into them by default, so a member whose source directory is a
 # symlink would have been silently skipped (this checkout has one such directory today,
-# `.claude/skills/rust-skills`). Links are now followed, BOUNDED two ways: a realpath
-# visited-set makes a cycle impossible, and a link resolving OUTSIDE the repository root is
-# not followed because ownership is decided by realpath containment — nothing out there can
-# be a member's source, so descending could only cost time.
+# `.claude/skills/rust-skills`, resolving inside the repo). Links are FOLLOWED, bounded by a
+# realpath visited-set that makes a cycle impossible.
+#
+# A LINK RESOLVING OUTSIDE THE REPOSITORY IS A NAMED REFUSAL, NOT A SILENT SKIP (roborev
+# job 110). It used to be skipped, on the reasoning that "ownership is decided by realpath
+# containment, so nothing out there can be a member's source" — which is FALSE: `#[path]`
+# and `include!` compile modules from anywhere, so a feature referenced only out there was
+# reported DEAD, contradicting the no-false-fail contract. Following such a link is not the
+# fix either: that means walking arbitrary out-of-repo paths inside a mandatory gate
+# component, unbounded and a hazard of its own. So the scan REFUSES, naming the path.
+#
+# THE REFUSAL IS SCOPED TO WHAT THE SCAN WOULD ACTUALLY HAVE TRAVERSED: the link must lie
+# within some target's SOURCE TREE. A guard that reds on `node_modules` is the guard
+# everyone waives, so an out-of-repo link outside every target tree is skipped exactly as
+# before — the scan never cared about it. Measured on this checkout: 33 symlinks, 32 of
+# them files under `bindings/node/node_modules` (never in `dirnames`, and pruned by name
+# anyway) and one directory (`.claude/skills/rust-skills`) resolving INSIDE the repo, so
+# the refusal fires on ZERO cases here and cannot red a gate on current content.
 scanned_files = 0
 visited_dirs = {os.path.realpath(REPO_ROOT)}
 for dirpath, dirnames, filenames in os.walk(REPO_ROOT, onerror=_walk_error, followlinks=True):
@@ -1165,6 +1192,12 @@ for dirpath, dirnames, filenames in os.walk(REPO_ROOT, onerror=_walk_error, foll
         if real_d in visited_dirs:
             continue
         if os.path.islink(full_d) and not (real_d == REPO_ROOT or real_d.startswith(REPO_ROOT + os.sep)):
+            if _within_target_tree(full_d):
+                fail("the symlinked directory %s resolves OUTSIDE this repository, to %s, and it lies inside a workspace target's source tree — so a feature referenced only in there would be INVISIBLE to this scan and reported dead. Following the link is not an option in a mandatory gate component (it would walk arbitrary out-of-repo paths), and skipping it silently is what this refusal replaces, so NO verdict is available. Remedy: replace the link with a real directory inside the repository, move the shared module in-tree, or point the link inside the repository." % (
+                    os.path.relpath(full_d, REPO_ROOT), real_d))
+            # Outside every target source tree: the scan never looked in there, so there is
+            # nothing to be wrong about (`node_modules`, editor/agent tooling links). Skipped
+            # exactly as before — see the note above on scoping.
             continue
         visited_dirs.add(real_d)
         keep.append(d)

@@ -211,6 +211,12 @@
 #                Pins the MODEL, not a verdict flip — a verdict-flipping fixture is not
 #                constructible, because activating a dependency is itself an effect.
 #
+#  54.  RED+GREEN — an OUT-OF-REPO symlinked directory inside a target's SOURCE TREE is a
+#                NAMED refusal (it could hold a `#[path]`-included gate this scan cannot
+#                follow), while the same link OUTSIDE every target tree does not refuse.
+#                The control is the point: a guard that reds on `node_modules` is the
+#                guard everyone waives.
+#
 #   CASE NUMBERS ARE STABLE IDENTIFIERS, NOT POSITIONS — deleted cases leave gaps (the
 #   convention scripts/tests/test_pub_surface_guard.sh already uses). The suite asserts
 #   the exact NUMBER OF CASES RUN at the end, which is what catches a silent deletion.
@@ -1512,13 +1518,51 @@ expect_green "$D" "case 53"
 assert_contract_declares "a .rs file that NO TARGET COVERS credits EVERY workspace member" "case 53"
 ok "SOUNDNESS: a shared module OUTSIDE every member directory (#[path] from the workspace root) credits its feature — no module resolution needed"
 
+# --- 54. RED + control: an OUT-OF-REPO symlinked source dir is a NAMED refusal
+# `#[path]` and `include!` compile modules from anywhere, so a symlinked directory
+# resolving outside the repository can hold a real gate — and this scan cannot follow it
+# (walking arbitrary out-of-repo paths inside a mandatory gate component is unbounded and a
+# hazard of its own). Skipping it silently reported such a feature DEAD, contradicting the
+# no-false-fail contract, so the scan REFUSES and names the path (roborev job 110).
+#
+# BOTH HALVES ARE ASSERTED, and the second is the one that matters: the refusal is scoped
+# to a link inside a TARGET'S SOURCE TREE. An out-of-repo link outside every target tree —
+# `node_modules`, editor/agent tooling — must NOT refuse, because the scan never looked in
+# there. A guard that reds on `node_modules` is the guard everyone waives.
+OUTSIDE="$TMPROOT/outside-repo-source"
+mkdir -p "$OUTSIDE"
+cat >"$OUTSIDE/gated.rs" <<'EOF'
+#[cfg(feature = "offsitefeat")]
+pub fn only_out_of_repo() {}
+EOF
+
+D="$(fixture out-of-repo-symlink)"
+append_after_line "$D/a/Cargo.toml" 'tfeat = []' 'offsitefeat = []'
+ln -s "$OUTSIDE" "$D/a/src/external"
+[ -L "$D/a/src/external" ] || fail_case "case 54: the symlink was not created"
+run_guard "$D" && { cat "$TMPROOT/out.txt"; fail_case "case 54: an out-of-repo symlinked directory inside a target's source tree was SILENTLY SKIPPED — a feature referenced only there would read dead"; }
+grep -q 'resolves OUTSIDE this repository' "$TMPROOT/out.txt" \
+  || { cat "$TMPROOT/out.txt"; fail_case "case 54: the guard failed but did not NAME the refusal reason — a bare non-zero exit is not evidence"; }
+grep -qF -- "a/src/external" "$TMPROOT/out.txt" \
+  || { cat "$TMPROOT/out.txt"; fail_case "case 54: the diagnostic does not name the offending path"; }
+grep -q 'declared feature(s) are DEAD' "$TMPROOT/out.txt" \
+  && { cat "$TMPROOT/out.txt"; fail_case "case 54: the guard reported features DEAD over a tree it could not fully read — a refusal was required"; }
+
+# THE SCOPING CONTROL: same out-of-repo link, but OUTSIDE every target source tree.
+D="$(fixture out-of-repo-symlink-unscanned)"
+mkdir -p "$D/vendor_js"
+ln -s "$OUTSIDE" "$D/vendor_js/node_modules_like"
+[ -L "$D/vendor_js/node_modules_like" ] || fail_case "case 54: the control symlink was not created"
+expect_green "$D" "case 54 (control)"
+ok "an OUT-OF-REPO symlinked directory inside a target's source tree is a NAMED refusal; the same link outside every target tree does not refuse (the node_modules scoping)"
+
 # --- CASE COUNT: EXACT, not a floor ------------------------------------------
 # #3544's lesson is this suite's own subject: a span-replacing edit once deleted four
 # cases from a suite and it reported "failed: 0" over the shrunken remainder. A FLOOR
 # below the real count tolerates exactly that — one case can be deleted and the guard
 # still greens (roborev job 50, finding 5) — so the count is pinned EXACTLY. Adding a
 # case means changing this number in the same diff, deliberately.
-CASE_COUNT_EXPECTED=57
+CASE_COUNT_EXPECTED=58
 [ "$CASES" -eq "$CASE_COUNT_EXPECTED" ] \
   || fail_case "CASE COUNT: $CASES cases ran, expected EXACTLY $CASE_COUNT_EXPECTED. Cases were deleted, skipped or added without updating this assertion; a green tally over a changed suite certifies nothing."
 
