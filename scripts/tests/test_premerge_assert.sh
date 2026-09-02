@@ -2354,12 +2354,23 @@ to_check_pid() {
 # path it actually took — and "we tested the escalation" would be a claim nothing
 # established. So each shim is first run UNDER THE RUNNER DIRECTLY and its exit
 # code asserted: 124 for the TERM shim, 137 for the TERM-ignoring one.
+# Params 5 and 6 were added for roborev job 374: the same arms must be able to
+# hang a DISCOVERY call, whose expected CAUSE differs from the ancestry walk's.
+# Parameterising the proven runner is deliberate reuse — a second construction is
+# where every defect in this scaffolding has come from.
+#   $5 want_cause   the timeout cause substring this arm must see
+#                   (default: the ancestry walk's)
+#   $6 control_args the argv the CONTROL invokes, which must be the one the shim
+#                   triggers on (default: the ancestry walk's)
 to_run_arm() {
   local label="$1" shimdir="$2" want_rc="$3" pidfile="$4"
+  local want_cause="${5:-the ancestry walk timed out after}"
+  local control_args="${6:-merge-base --is-ancestor $R_CERT $R_CERT}"
   local out rc leaks crc=0
   rm -f "$pidfile"
+  # shellcheck disable=SC2086  # intentional word-split of the control argv list
   PATH="$shimdir:$PATH" "$REAL_TO" --kill-after=1 2 \
-    git merge-base --is-ancestor "$R_CERT" "$R_CERT" >/dev/null 2>&1 || crc=$?
+    git $control_args >/dev/null 2>&1 || crc=$?
   if [ "$crc" = "$want_rc" ]; then
     ok "hung-read ($label): CONTROL — the shim really produces runner exit $want_rc"
   else
@@ -2369,25 +2380,28 @@ to_run_arm() {
     bash "$TOFLOW/premerge-assert.sh" 2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA" 2>&1)
   rc=$?
   if [ "$rc" -ne 3 ]; then
-    bad "hung-read ($label): a hung ancestry read must be exit 3 (got $rc: $out)"
+    bad "hung-read ($label): a hung bounded call must be exit 3 (got $rc: $out)"
   else
-    ok "hung-read ($label): a hung ancestry read is exit 3, not a hang and not a pass"
+    ok "hung-read ($label): a hung bounded call is exit 3, not a hang and not a pass"
     case "$out" in
       *"PREMERGE: ANCHOR-UNVERIFIABLE"*)
         ok "hung-read ($label): carries the ANCHOR-UNVERIFIABLE marker" ;;
       *) bad "hung-read ($label): expected the ANCHOR-UNVERIFIABLE marker (got: $out)" ;;
     esac
     case "$out" in
-      *"the ancestry walk timed out after"*)
-        ok "hung-read ($label): the cause names the TIMEOUT, distinctly from the other UNVERIFIABLE causes" ;;
-      *) bad "hung-read ($label): the cause must name the timeout (got: $out)" ;;
+      *"$want_cause"*)
+        ok "hung-read ($label): the cause names the TIMEOUT of the call that hung, distinctly from the other UNVERIFIABLE causes" ;;
+      *) bad "hung-read ($label): the cause must name '$want_cause' (got: $out)" ;;
     esac
-    # Distinctness in both directions: it must not be reported as an absent
-    # object, a shallow history, or a NOT-ANCESTOR verdict.
+    # Distinctness in both directions: a timeout must never BORROW another
+    # cause's remedy — that is job 374's whole subject. The forbidden set covers
+    # every non-timeout UNVERIFIABLE cause this script can print.
     case "$out" in
-      *"is not present in this repository"* | *"NOT PROVEN COMPLETE"* | *"is NOT on the certified sha's history"*)
-        bad "hung-read ($label): a timeout was misreported as another cause (got: $out)" ;;
-      *) ok "hung-read ($label): a timeout is NOT misreported as an absent object, a shallow history or NOT-ANCESTOR" ;;
+      *"is not present in this repository"* | *"NOT PROVEN COMPLETE"* \
+        | *"is NOT on the certified sha's history"* | *"not inside a git work tree"* \
+        | *"could not be resolved"* | *"scratch root"* | *"could not initialise"*)
+        bad "hung-read ($label): a timeout was misreported as another cause — the operator would get the WRONG remedy (got: $out)" ;;
+      *) ok "hung-read ($label): a timeout borrows NO other cause's remedy (not work-tree, TMPDIR, absent-object, shallow or NOT-ANCESTOR)" ;;
     esac
   fi
   # PRIMARY: the shim's OWN recorded pid (job 367). Works for BOTH arms, because
@@ -2472,6 +2486,85 @@ KILLSHIM
       printf 'ARM NOT TAKEN: TERM-ignoring block with no child process cannot be constructed. The exit-137\n'
       printf 'ARM NOT TAKEN: escalation is UNEXERCISED (the TERM/124 arm above still ran).\n'
       ok "hung-read (KILL path): SKIPPED (mkfifo unavailable — arm UNEXERCISED, declared not silent)"
+    fi
+
+    # ARM 3 — A HUNG *DISCOVERY* CALL (roborev job 374). Several bounded calls
+    # used to discard their status via `|| true` / an empty-value fallback /
+    # `if !`, so a timeout during repository discovery was reported as "not
+    # inside a git work tree" or an unusable TMPDIR — sending the operator to
+    # check their cwd when the real answer is a stalled filesystem. The arms
+    # above only ever hung `merge-base`, so nothing caught it.
+    #
+    # SAME TEMPLATE AS ARM 1, different trigger argv: `--show-toplevel`, which
+    # `_anchor_build_scratch` calls. `--git-dir` runs BEFORE it and passes
+    # through to the real binary, so the fixture proves the status is propagated
+    # from a call that is not the walk.
+    DSH="$T/bin-git-hang-discovery"
+    mkdir -p "$DSH"
+    DPID="$T/hang-discovery.pid"
+    cat >"$DSH/git" <<DISCSHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "--show-toplevel" ]; then
+    printf '%s\n' "\$\$" >"$DPID"
+    exec $TOSENTINEL
+  fi
+done
+exec "$REALGIT" "\$@"
+DISCSHIM
+    chmod +x "$DSH/git"
+    to_run_arm "DISCOVERY path / exit 124" "$DSH" 124 "$DPID" \
+      "the work-tree root probe (rev-parse --show-toplevel) timed out after" \
+      "rev-parse --show-toplevel"
+
+    # ARM 4 — A DISCOVERY CALL THAT *FAILS* (not hangs). Found while RED-verifying
+    # arm 3, and it is the more serious half: `cd ""` SUCCEEDS in bash and leaves
+    # the shell where it is, so `(cd "$x" && pwd -P)` with an EMPTY $x printed the
+    # CURRENT DIRECTORY. A discovery call that failed therefore yielded cwd, every
+    # `[ -z … ]` guard was unreachable, and the check ran on a plausible-looking
+    # wrong value — arm 3's RED control exited 0 with `PREMERGE: OK`, a FALSE PASS.
+    # Status propagation cannot close this route, because here the value really IS
+    # empty; only refusing an empty argument can.
+    #
+    # No timeout involved, so this runs the NEUTRAL assert (real bound, real
+    # constants) rather than the shortened scratch copy.
+    FSH="$T/bin-git-fail-discovery"
+    mkdir -p "$FSH"
+    cat >"$FSH/git" <<FAILSHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "--show-toplevel" ]; then exit 1; fi
+done
+exec "$REALGIT" "\$@"
+FAILSHIM
+    chmod +x "$FSH/git"
+    # NON-VACUITY: the shim must really make that one call fail while others work.
+    if PATH="$FSH:$PATH" git rev-parse --show-toplevel >/dev/null 2>&1; then
+      bad "discovery-fail fixture: the shim did not make rev-parse --show-toplevel fail"
+    elif ! PATH="$FSH:$PATH" git rev-parse --git-dir >/dev/null 2>&1; then
+      bad "discovery-fail fixture: the shim broke OTHER git calls too — the arm would not reach the code under test"
+    else
+      ok "discovery-fail fixture: --show-toplevel fails while other git calls pass through"
+      OUT=$(cd "$ANC_REPO" && PATH="$FSH:$BIN:$PATH" MOCK_GH_FAIL=0 MOCK_GH_OUT="$R_CERT OPEN" \
+        bash "$NEUTRAL_ASSERT" 2421 "$R_CERT" "$RANCFULL" "$RGOODDELTA" 2>&1)
+      RC=$?
+      if [ "$RC" -eq 0 ]; then
+        bad "discovery-fail: a FAILED work-tree-root probe produced PREMERGE: OK — an empty canonicalisation is being read as the current directory (got: $OUT)"
+      elif [ "$RC" -ne 3 ]; then
+        bad "discovery-fail: expected exit 3 (got $RC: $OUT)"
+      else
+        ok "discovery-fail: a FAILED discovery probe refuses at exit 3, never a false PREMERGE: OK"
+        case "$OUT" in
+          *"could not be resolved"*)
+            ok "discovery-fail: the refusal names the unresolvable root — the guard is REACHABLE at last" ;;
+          *) bad "discovery-fail: expected the unresolvable-root cause (got: $OUT)" ;;
+        esac
+        case "$OUT" in
+          *"timed out after"*)
+            bad "discovery-fail: a plain failure must NOT be reported as a timeout (got: $OUT)" ;;
+          *) ok "discovery-fail: a plain failure is not misreported as a timeout" ;;
+        esac
+      fi
     fi
   fi
 fi

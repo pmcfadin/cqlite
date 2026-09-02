@@ -636,6 +636,26 @@ _anchor_run() {
   fi
 }
 
+# _anchor_refuse_timeout <anchor> <head> <what> — THE ONE timeout refusal, shared
+# by EVERY bounded call (roborev job 374). It exists so a new call site cannot
+# invent a different wording, and so a timeout can never borrow another cause's
+# REMEDY: the whole reason this script splits exit 2 from exit 3 is to hand the
+# operator the right action, and "not inside a git work tree" sends someone to
+# check their cwd when the real answer is a stalled filesystem. A misleading
+# diagnostic is worse than a vague one.
+_anchor_refuse_timeout() {
+  refuse_anchor_unverifiable "$1" "$2" \
+    "$3 timed out after ${ADVISORY_TIMEOUT_SECS}s (+${ADVISORY_KILL_GRACE}s kill grace)" \
+    "The call did not return. These reads touch the SHARED object store and the" \
+    "repository metadata beside it, where a malformed loose object (a FIFO) or a" \
+    "stalled mount stops them; a hang here would leave the merge guard with no" \
+    "verdict at all, which the bound converts into this one." \
+    "This is NOT a statement about your cwd, your TMPDIR or your object paths —" \
+    "those causes have their own wording, and a timeout no longer borrows them." \
+    "REMEDY: check the object store under this repository's objects directory and" \
+    "the mount it lives on, then re-run this assert."
+}
+
 # _anchor_timed_out <rc> — TRUE when the runner terminated the call rather than
 # git answering. Only meaningful when a runner is in use; with none, no exit code
 # means "timed out" and the test is simply never true.
@@ -676,7 +696,21 @@ trap '_anchor_cleanup; trap - HUP;  kill -HUP  $$' HUP
 # _anchor_canon <dir> — canonicalize with `cd`+`pwd -P`, EMPTY on failure. The
 # convention scripts/flow/base-staleness.sh uses (no `realpath` dependency), and
 # every caller treats empty as "could not measure", never as "outside".
-_anchor_canon() { (cd "$1" 2>/dev/null && pwd -P) || true; }
+#
+# AN EMPTY ARGUMENT IS REFUSED EXPLICITLY, AND WITHOUT THAT LINE EVERY
+# "could not be resolved" BRANCH WAS UNREACHABLE (found while RED-verifying job
+# 374). Measured: **`cd ""` SUCCEEDS in bash and leaves the shell where it is**,
+# so `(cd "" && pwd -P)` prints the CURRENT DIRECTORY. A discovery call that
+# failed or timed out therefore yielded cwd instead of an empty string, the
+# `[ -z … ]` guards never fired, and the check proceeded on a plausible-looking
+# wrong value — the RED control for job 374 exited 0 with `PREMERGE: OK`, i.e. a
+# FALSE PASS, not merely a wrong remedy. The timeout propagation above closes the
+# timeout route; this line closes the ordinary-git-failure route, which no status
+# check can, because there the value really is empty.
+_anchor_canon() {
+  [ -n "$1" ] || return 0
+  (cd "$1" 2>/dev/null && pwd -P) || true
+}
 
 # _anchor_build_scratch — on success sets ANCHOR_SCRATCH (the mktemp dir),
 # ANCHOR_SCRATCH_REPO (the git dir to run in) and ANCHOR_ALT (the value for
@@ -686,7 +720,9 @@ ANCHOR_SCRATCH_REPO=""
 ANCHOR_ALT=""
 ANCHOR_SCRATCH_ERR=""
 _anchor_build_scratch() {
+  local anchor="$1" head="$2"
   local lane_objects repo_canon common_canon tmp_req tmp_canon created_canon alt_q
+  local rc toplevel commondir
 
   # THE SCRATCH MUST BE PROVABLY OUTSIDE THE REPOSITORY, and "the repository" is
   # BOTH roots: the work tree AND the git COMMON dir (these are worktrees of one
@@ -695,8 +731,23 @@ _anchor_build_scratch() {
   # pre-check answers about the path as it resolved a moment ago, so what was
   # ACTUALLY CREATED is re-validated, because a symlink swapped in between lands
   # the real directory somewhere else.
-  repo_canon=$(_anchor_canon "$(_anchor_lane rev-parse --show-toplevel 2>/dev/null || true)")
-  common_canon=$(_anchor_canon "$(_anchor_lane rev-parse --git-common-dir 2>/dev/null || true)")
+  # SPLIT so the status is visible: the old form nested the git call inside two
+  # command substitutions with a `|| true`, which discarded a timeout entirely and
+  # reported it as an unresolvable work-tree root (job 374).
+  rc=0
+  toplevel=$(_anchor_lane rev-parse --show-toplevel 2>/dev/null) || rc=$?
+  if _anchor_timed_out "$rc"; then
+    _anchor_refuse_timeout "$anchor" "$head" "the work-tree root probe (rev-parse --show-toplevel)"
+  fi
+  rc=0
+  commondir=$(_anchor_lane rev-parse --git-common-dir 2>/dev/null) || rc=$?
+  if _anchor_timed_out "$rc"; then
+    _anchor_refuse_timeout "$anchor" "$head" "the git common-directory probe (rev-parse --git-common-dir)"
+  fi
+  # A non-timeout failure, or an empty answer, keeps its ORIGINAL cause below:
+  # those are real states (an unusable repository) with their own remedy.
+  repo_canon=$(_anchor_canon "$toplevel")
+  common_canon=$(_anchor_canon "$commondir")
   if [ -z "$repo_canon" ] || [ -z "$common_canon" ]; then
     ANCHOR_SCRATCH_ERR="the work-tree root and/or git common directory could not be resolved, so a scratch location cannot be proven outside them"
     return 1
@@ -737,7 +788,12 @@ _anchor_build_scratch() {
   # (measured here: `--git-path objects` = /…/repo/.git/objects while
   # `--git-dir` = /…/repo/.git/worktrees/<lane>). It reads no object and reaches
   # no network; a graft cannot redirect a path.
-  lane_objects=$(_anchor_lane rev-parse --git-path objects 2>/dev/null) || lane_objects=""
+  rc=0
+  lane_objects=$(_anchor_lane rev-parse --git-path objects 2>/dev/null) || rc=$?
+  if _anchor_timed_out "$rc"; then
+    _anchor_refuse_timeout "$anchor" "$head" "the object-directory probe (rev-parse --git-path objects)"
+  fi
+  [ "$rc" -eq 0 ] || lane_objects=""
   # MADE ABSOLUTE: `--git-path` answers RELATIVE TO THE WORK-TREE ROOT for a
   # plain clone (`.git/objects`) and absolute only for a worktree. A relative
   # value would be resolved against the SCRATCH, a different directory, and the
@@ -764,8 +820,12 @@ _anchor_build_scratch() {
   # refuses, removing both lets the attack land at exit 0 (see the header). Kept
   # as defence in depth, and because the flag additionally beats a config-FILE
   # `init.templateDir` that no environment can clear.
-  if ! _anchor_run init -q --template= "$ANCHOR_SCRATCH_REPO" >/dev/null 2>&1 ||
-     [ ! -d "$ANCHOR_SCRATCH_REPO/.git" ]; then
+  rc=0
+  _anchor_run init -q --template= "$ANCHOR_SCRATCH_REPO" >/dev/null 2>&1 || rc=$?
+  if _anchor_timed_out "$rc"; then
+    _anchor_refuse_timeout "$anchor" "$head" "initialising the isolated scratch repository (git init)"
+  fi
+  if [ "$rc" -ne 0 ] || [ ! -d "$ANCHOR_SCRATCH_REPO/.git" ]; then
     ANCHOR_SCRATCH_ERR="could not initialise an isolated scratch repository at $ANCHOR_SCRATCH_REPO"
     return 1
   fi
@@ -822,7 +882,16 @@ assert_anchor_on_history() {
   # Resolve the bound BEFORE the first read, so no read is ever unbounded by
   # accident rather than by the measured absence of a runner.
   _anchor_resolve_bound "$anchor" "$head"
-  if ! _anchor_lane rev-parse --git-dir >/dev/null 2>&1; then
+  # STATUS IS INSPECTED, NOT DISCARDED (job 374). An `if !` collapses "timed out"
+  # onto "not a work tree", which is the two-valued-predicate-over-a-multi-state-
+  # signal shape — except here the permissive branch is not the danger, a WRONG
+  # REMEDY is.
+  rc=0
+  _anchor_lane rev-parse --git-dir >/dev/null 2>&1 || rc=$?
+  if _anchor_timed_out "$rc"; then
+    _anchor_refuse_timeout "$anchor" "$head" "the git work-tree probe (rev-parse --git-dir)"
+  fi
+  if [ "$rc" -ne 0 ]; then
     refuse_anchor_unverifiable "$anchor" "$head" \
       "the current directory is not inside a git work tree (cwd: $(pwd))" \
       "REMEDY: run this assert from the ISSUE'S WORKTREE. The repository whose" \
@@ -832,7 +901,7 @@ assert_anchor_on_history() {
   # THE ISOLATED REPOSITORY IS BUILT BEFORE ANY OBJECT IS READ, and a failure to
   # build it is UNVERIFIABLE — never a fall-back to the live repository, which is
   # the whole hole job 355 closes.
-  if ! _anchor_build_scratch; then
+  if ! _anchor_build_scratch "$anchor" "$head"; then
     refuse_anchor_unverifiable "$anchor" "$head" \
       "the isolated scratch repository could not be built: $ANCHOR_SCRATCH_ERR" \
       "The ancestry walk deliberately does NOT run in this checkout: a graft in" \
@@ -863,14 +932,7 @@ assert_anchor_on_history() {
   rc=0
   _anchor_git cat-file -e "$anchor^{commit}" >/dev/null 2>&1 || rc=$?
   if _anchor_timed_out "$rc"; then
-    refuse_anchor_unverifiable "$anchor" "$head" \
-      "reading the ANCHOR object timed out after ${ADVISORY_TIMEOUT_SECS}s (+${ADVISORY_KILL_GRACE}s kill grace)" \
-      "The object store did not answer. A malformed loose object (a FIFO) or a" \
-      "stalled filesystem will do this, and both are reachable here: the store is" \
-      "SHARED between lanes and a stalled mount is an accident, not an attack." \
-      "A hang would give NO verdict at all, so the bound turns it into this one." \
-      "REMEDY: check the object store under this repository's objects directory" \
-      "and the mount it lives on, then re-run this assert."
+    _anchor_refuse_timeout "$anchor" "$head" "reading the ANCHOR object"
   fi
   if [ "$rc" -ne 0 ]; then
     refuse_anchor_unverifiable "$anchor" "$head" \
@@ -883,11 +945,7 @@ assert_anchor_on_history() {
   rc=0
   _anchor_git cat-file -e "$head^{commit}" >/dev/null 2>&1 || rc=$?
   if _anchor_timed_out "$rc"; then
-    refuse_anchor_unverifiable "$anchor" "$head" \
-      "reading the CERTIFIED object timed out after ${ADVISORY_TIMEOUT_SECS}s (+${ADVISORY_KILL_GRACE}s kill grace)" \
-      "See the ANCHOR timeout cause above: a shared object store that does not" \
-      "answer is UNMEASURED, never a pass." \
-      "REMEDY: check the object store and its mount, then re-run this assert."
+    _anchor_refuse_timeout "$anchor" "$head" "reading the CERTIFIED object"
   fi
   if [ "$rc" -ne 0 ]; then
     refuse_anchor_unverifiable "$anchor" "$head" \
@@ -904,12 +962,7 @@ assert_anchor_on_history() {
     return 0
   fi
   if _anchor_timed_out "$rc"; then
-    refuse_anchor_unverifiable "$anchor" "$head" \
-      "the ancestry walk timed out after ${ADVISORY_TIMEOUT_SECS}s (+${ADVISORY_KILL_GRACE}s kill grace)" \
-      "merge-base did not finish. The walk reads the SHARED object store, where a" \
-      "malformed object or a stalled mount stops it; a hang here would leave the" \
-      "merge guard with no verdict at all, which the bound converts into this one." \
-      "REMEDY: check the object store and its mount, then re-run this assert."
+    _anchor_refuse_timeout "$anchor" "$head" "the ancestry walk"
   fi
   if [ "$rc" -ne 1 ]; then
     refuse_anchor_unverifiable "$anchor" "$head" \
@@ -932,7 +985,17 @@ assert_anchor_on_history() {
   # unconditionally and turn this guard into a vacuous pass — the exact shape
   # this whole check exists to refuse. It is a STATE probe, not an object read,
   # so the graft route job 355 closed does not apply to it.
-  shallow=$(_anchor_lane rev-parse --is-shallow-repository 2>/dev/null) || shallow=""
+  rc=0
+  shallow=$(_anchor_lane rev-parse --is-shallow-repository 2>/dev/null) || rc=$?
+  if _anchor_timed_out "$rc"; then
+    # Without this a timeout HERE would be reported as "this repository is not
+    # proven complete", i.e. it would borrow the shallow cause's remedy
+    # (`git fetch --unshallow`) for a stalled mount (job 374).
+    _anchor_refuse_timeout "$anchor" "$head" "the shallowness probe (rev-parse --is-shallow-repository)"
+  fi
+  # A non-timeout failure (an old git that does not know the option) legitimately
+  # keeps the "not proven complete" cause below — that IS the unmeasured state.
+  [ "$rc" -eq 0 ] || shallow=""
   if [ "$shallow" != false ]; then
     refuse_anchor_unverifiable "$anchor" "$head" \
       "--is-ancestor said 'no', but this repository is NOT PROVEN COMPLETE (git rev-parse --is-shallow-repository = '$shallow')" \
