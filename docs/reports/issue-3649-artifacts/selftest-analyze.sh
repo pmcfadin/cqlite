@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=464
+CASE_FLOOR=465
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -3371,11 +3371,94 @@ else
 fi
 # NOT ATTESTABLE: nproc is evidence, and the storage rule is that an attestation
 # covers ignorance only. There is no flag for this and there must not be one.
-if grep -c 'attest' analyze-ab.py >/dev/null 2>&1 && \
-   ! grep -A12 'rig-profile-mismatch' analyze-ab.py | grep -q 'attest'; then
+#
+# FOUR-VALUED, because the first version was two-valued and both of its failure
+# modes landed in one `else`. It read `analyze-ab.py` as a BARE RELATIVE PATH,
+# so invoked from the repository root -- which is how this suite is normally
+# run -- grep exited 2 and the case reported "the profile refusal appears to be
+# attestable": a claim about the code's behaviour derived from never having read
+# the code. A missing file is a HARNESS fault; a vacuous positive control is a
+# third state again (if `attest` has vanished from the file entirely, the
+# proximity test is true for the boring reason); only the last is a code fault.
+set +e
+python3 - "$HERE" 2> "$TMP/attest-err.txt" <<'PYINNER'
+import re
+import sys
+
+path = "%s/analyze-ab.py" % sys.argv[1]
+try:
+    source = open(path, encoding="utf-8").read()
+except OSError as exc:
+    sys.stderr.write("HARNESS could not read %s: %s\n" % (path, exc.strerror or exc))
+    raise SystemExit(2)
+# POSITIVE CONTROL: the concept must appear in this file at all, or "no
+# attestation near the profile refusal" is true for the boring reason.
+if "attest" not in source:
+    sys.stderr.write("CONTROL the word 'attest' no longer appears in "
+                     "analyze-ab.py at all, so the proximity test proves "
+                     "nothing -- the concept was renamed or removed\n")
+    raise SystemExit(3)
+# Located STRUCTURALLY rather than by a line count: a `-A12` window silently
+# changes meaning every time the message is reworded.
+block = re.search(r'raise Unmeasured\(\s*"rig-profile-mismatch".*?\n        \)',
+                  source, re.S)
+if block is None:
+    sys.stderr.write("HARNESS the rig-profile-mismatch refusal could not be "
+                     "located; the derivation has broken\n")
+    raise SystemExit(2)
+body = block.group(0).lower().replace("not attestable", "")
+if "attest" in body:
+    sys.stderr.write("VIOLATION the profile refusal mentions an attestation; a "
+                     "core count is evidence, and evidence is not attestable\n")
+    raise SystemExit(1)
+PYINNER
+ATTEST_RC=$?
+set -e
+if [ "$ATTEST_RC" = 0 ]; then
   ok "the profile refusal has no attestation escape -- a core count is evidence"
 else
-  bad "the profile refusal appears to be attestable"
+  case "$ATTEST_RC" in
+    2) bad "HARNESS FAULT in the attestation case, not a code fault: $(head -1 "$TMP/attest-err.txt")" ;;
+    3) bad "the attestation case's positive control failed, so it proves nothing: $(head -1 "$TMP/attest-err.txt")" ;;
+    *) bad "the profile refusal is attestable: $(head -1 "$TMP/attest-err.txt")" ;;
+  esac
+fi
+
+# THE CLASS, not the instance: a case that reads an artifact by a BARE RELATIVE
+# PATH tests the property AND the caller's working directory, and then reports
+# the environment failure as a property failure. This suite is run from the repo
+# root, from its own directory, and from an out-of-tree copy; only one of those
+# worked. The filenames are assembled from parts so this guard cannot match its
+# own source.
+if python3 - "$HERE/selftest-analyze.sh" <<'PYINNER'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+# Assembled from parts so this guard cannot match its own source line.
+names = ["analyze" + "-ab.py", "ab_" + "driver_support.py", "ab_" + "input.py",
+         "ab_" + "stats.py", "ab_" + "common.py", "ab-" + "throughput.sh"]
+readers = r"(?:grep|cat|head|tail|sed|awk|wc|bash|python3|sh)"
+problems = []
+for number, line in enumerate(source.splitlines(), start=1):
+    if line.lstrip().startswith("#"):
+        continue
+    for name in names:
+        # A BARE occurrence is one not reached through a path variable, an
+        # absolute path, or a quoted format string.
+        for match in re.finditer(r"(?<![/\w$'\"])" + re.escape(name), line):
+            before = line[: match.start()]
+            if re.search(readers + r"[^|;&]*$", before):
+                problems.append("line %d reads %s by a bare relative path"
+                                % (number, name))
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "no case reads an artifact by a bare relative path, so none depends on the caller's CWD"
+else
+  bad "a case reads an artifact by a bare relative path (see above)"
 fi
 
 # ---- the properties the `i4i` label stood for -------------------------------
