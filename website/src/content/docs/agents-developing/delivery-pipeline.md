@@ -266,6 +266,25 @@ dispatch/claim authority**: it only narrows the candidate set — the selection 
 flow-* skills no longer write the board-derived labels (they set board Status only; the mirror follows);
 `status:spec-review`/`status:addressing` stay transient skill-managed sub-markers the mirror does not touch.
 
+### Product first: what may sit in Ready (owner ruling 2026-09-01, #3893)
+
+The board's `Ready` column is the sole dispatch authority, so what it holds is what the fleet builds.
+On 2026-09-01 it held 9 product items against 38 delivery-tooling items, and the release lane starved
+while workers iterated on bash harnesses (22/25/32 roborev findings over 7–12 rounds on three PRs).
+The standing rule since:
+
+1. **Workers take release-milestoned product items first.** Tooling (gate, roborev, claim, bootstrap,
+   fleet, telemetry, coord) is taken only when no product item is `Ready`, or the item is blocking.
+2. **A tooling issue reaches `Ready` only if it** caused a false PASS or the merge of bad code, blocked
+   a lane for more than an hour, or recurred twice — cited in the body. Everything else is `Backlog`,
+   a one-line doctrine note, or nothing. "Well-scoped" is not sufficient.
+3. **Scripts get a two-round review cap.** Round-3 roborev findings on `scripts/**`, `.claude/**`,
+   `.github/**` or `docs/reports/*-artifacts/**` are disposed (one follow-up issue, a deferral marker
+   on the merits), never fixed — except hangs and false verdicts, which are always fixed.
+4. **Tooling is feature-complete for the release.** A tooling change needs a rule-2 justification.
+5. **In-flight tooling PRs finish on their merits**; nothing new is promoted until the product queue
+   is empty. Retro metric: product share of merged PRs, target ≥ 70 %.
+
 ## The claim protocol (no duplicate work)
 
 Before working an item, a session claims it so no two sessions — **including two sessions authenticated
@@ -449,6 +468,22 @@ because the fail-open defect family clustered in that exit-0 path, and being wro
 It claims nothing about lanes that never stamped (a lane run with `CLAIM_CMD=""` is invisible) and
 nothing about other machines — a PID is only checkable where it runs, so **run it ON the suspect
 box**.
+
+**AND ON A SUPERVISOR-LESS FLEET IT ANSWERED ABOUT THE EMPTY SET — supervisor fleets only, DESCOPED
+by owner ruling 2026-09-01 on #3548 (option C; completes #3393).** The subject set is
+`refs/lane-claims/*` plus the legacy `refs/machine-claims/*`, and the only in-tree CALLER that creates
+or refreshes either is `worker-supervisor.sh` (`stamp` is a public subcommand and can be invoked directly). This fleet runs `/drive-issue` lanes, so when #3548 was measured the command
+had no subject and exited 1 — persisted or manually `stamp`ed refs can still produce rows, and either
+way **1 means "nothing was reported", never a clean bill of health.** The two *populated* namespaces
+are deliberately not read, both refusals measured: `refs/claims/issue-<N>` records the transient
+claiming shell's pid (dead while its lane runs), and `refs/heartbeats/<machine>` is single-slot per
+machine. **AC4** survives as a counterfactual: were a later change ever to read a non-refreshing
+carrier, a stale pid there must abstain rather than yield `DEAD-*`.
+
+**Everything else is stated once, not here.** What lane liveness on this fleet actually rests on, and
+both board signatures — neither of which is a verdict — live in
+`docs/development/fleet-runbook.md` → *Lane liveness on a supervisor-less `/drive-issue` fleet*. Seven
+review rounds on #3548 were propagation failures of duplicated prose, so nothing restates it.
 
 A suspected dead lane still has a diagnostic **order, and it matters** — full procedure in
 `docs/development/fleet-runbook.md`. The one line worth memorising: when a box accepts TCP but sends no SSH

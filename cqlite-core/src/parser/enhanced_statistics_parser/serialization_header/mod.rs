@@ -422,10 +422,10 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                         break;
                     }
                 };
-                let type_len = type_len_u64 as usize;
+                let type_len = type_len_u64 as usize; // #3848: raw `u64` bounded on the `if` below
                 pos = input.len() - type_remaining.len();
 
-                if type_len == 0 || type_len > 5000 || pos + type_len > input.len() {
+                if type_len_u64 == 0 || type_len_u64 > 5000 || pos + type_len > input.len() {
                     tracing::debug!(
                         "Column {} ('{}') parsing failed at offset {}: type_len sanity check failed (type_len={}, pos={}, buffer_len={})",
                         col_idx,

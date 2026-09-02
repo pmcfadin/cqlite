@@ -380,7 +380,13 @@ fi
 r_tbl=$(mkrepo table-repo)
 sum="$tmp/table-boundary.txt"; out="$tmp/table-boundary.out"
 run_selftest "$r_tbl" boundary "$sum" "$out" AGENT_GATE_TREE_SELFTEST_MUTATE=README.md
-n_rows=$(grep -cE '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP) \([0-9]+s\)' "$sum" 2>/dev/null | tr -d ' ')
+# VACUOUS joins PASS/FAIL/SKIP in the component-status vocabulary (#3625). A hard-coded
+# three-token alternation is now WRONG wherever it appears: it stops SEEING the very rows
+# that state a component verified nothing.
+# Here the consequence was a guard that REDS ON CORRECT INPUT: a legitimate VACUOUS boundary
+# row was not counted in n_rows, while the annotation count below (added with the census) did
+# count it, so the two disagreed and the consistency assert failed on a healthy block.
+n_rows=$(grep -cE '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\)' "$sum" 2>/dev/null | tr -d ' ')
 n_done=$(sed -n 's/^components-completed: \([0-9]*\) .*/\1/p' "$sum" | head -1)
 if grep -qE '^tree-selftest: +PASS \([0-9]+s\)' "$sum"; then
   ok "J2: a recorded verdict whose component no static set names still appears in the table (tree-selftest row present)"
@@ -392,6 +398,26 @@ if [ -n "$n_done" ] && [ "$n_done" = "$n_rows" ]; then
   ok "J2: components-completed ($n_done) equals the number of rows the block printed — no undercount"
 else
   bad "J2: components-completed is '$n_done' but the block printed $n_rows row(s)"
+fi
+# #3625 (roborev job 360 finding 2): the boundary block is a MODE, and every mode's
+# component rows must carry the SAME two annotations — the #3453 feature matrix and the
+# #3625 census — because the whole safety argument of both is "one renderer, so no mode can
+# render a block the others do not". This path used to `printf` its rows directly, so a run
+# that STOPPED at a boundary emitted a table with neither, and the aggregate `census:` line
+# was absent as well. Asserted BEHAVIOURALLY here, on the block a real boundary run emitted,
+# because the structural half (in scripts/tests/test_agent_gate_census.sh) cannot see
+# whether the call site is reached.
+n_annot=$(grep -cE '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\) +\[.+\]  \{.+\}$' "$sum" 2>/dev/null | tr -d ' ')
+if [ "$n_rows" -gt 0 ] && [ "$n_annot" = "$n_rows" ]; then
+  ok "J2/#3625: all $n_rows boundary row(s) carry BOTH the feature matrix and the census suffix — the truncated table is the same dialect as a completed one"
+else
+  bad "J2/#3625: only $n_annot of $n_rows boundary row(s) are fully annotated — this mode renders a block the others do not"
+  grep -E '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP|VACUOUS) \(' "$sum" 2>/dev/null | head -5
+fi
+if grep -qE '^census: [0-9]+/[0-9]+ components AFFIRMED a count;.*NON-EXHAUSTIVE' "$sum" 2>/dev/null; then
+  ok "J2/#3625: the boundary block carries the aggregate census: line, so a stopped run states what it verified rather than only how far it got"
+else
+  bad "J2/#3625: the boundary block has no aggregate census: line"
 fi
 # The mutant: neutralise the sweep's not-yet-printed test so it skips everything.
 mut="$tmp/gate-mutant-sweep.sh"
