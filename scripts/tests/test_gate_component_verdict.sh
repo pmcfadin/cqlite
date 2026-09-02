@@ -492,13 +492,17 @@ mk_only_summary "$S9X" run-1 PARTIAL fmt \
 expect "9.4 a line for a component the --only scope EXCLUDES is a contradiction, not a pass" \
   COULD-NOT-MEASURE 4 "scope" -- "$S9X" --mode only --component tooling-tests --run-id run-1
 
-# TRAP 2: the tree-integrity BOUNDARY emit writes NO `mode:` line at all, so requiring one
-# unconditionally REDS a legitimate --only block. A full-marker block with no `mode:` line
-# must still be answerable.
+# TRAP 2, AND ITS JUSTIFICATION IS NOW VOID — see section 18. The rule used to be "an absent
+# `mode:` line is not required, because the tree-integrity BOUNDARY emit writes none".
+# MEASURED: that boundary emit's run token is FAIL, never PARTIAL, and its block always carries
+# `tree-integrity: FAIL`, which the B3 precondition rejects upstream. So a PARTIAL token with no
+# `mode:` line is a shape NO emitter produces, and accepting it was dead permissiveness. The
+# trap-2 property SURVIVES, narrowed to what is real: a FAIL-token block with no `mode:` line is
+# still answerable (18.4).
 S9N="$TMP/no-mode-line.txt"
 mk_summary "$S9N" run-1 PARTIAL "$(comp_line tooling-tests PASS 1112s)"
-expect "9.5 control: a full-marker block with NO mode: line is still answerable (trap 2)" \
-  PASS 0 "tooling-tests" -- "$S9N" --mode only --component tooling-tests --run-id run-1
+expect "9.5 a PARTIAL token with NO mode: line is a shape no emitter produces => refuse" \
+  COULD-NOT-MEASURE 4 "mode-scope" -- "$S9N" --mode only --component tooling-tests --run-id run-1
 
 echo "=== section 10: the INTEGRITY lines invalidate every component in the block (B3) ==="
 # A mutated-mid-run run stamps `tree-integrity: FAIL (tree-mutated-midrun; …)` and a FAIL
@@ -871,16 +875,46 @@ SG2="$TMP/shape-annotated.txt"
 mk_only_summary "$SG2" run-1 PARTIAL tooling-tests "$(comp_line tooling-tests PASS 1112s '[unobservable:nested]')"
 expect "17.2 control: the ANNOTATED shape (_fm_summary_line) is accepted" \
   PASS 0 "tooling-tests" -- "$SG2" --mode only --component tooling-tests --run-id run-1
-# THE REGRESSION GUARD. Byte-for-byte what `_tree_boundary_meta_lines` emits — reproduced
-# with its own printf, not described, so a fixture cannot drift from the emitter.
-SG3="$TMP/shape-unannotated.txt"
-mk_only_summary "$SG3" run-1 PARTIAL tooling-tests "$(printf '%-18s %s (%ss)' 'tooling-tests:' PASS 1112)"
-expect "17.3 the UNANNOTATED boundary shape (_tree_boundary_meta_lines) is accepted" \
-  PASS 0 "tooling-tests" -- "$SG3" --mode only --component tooling-tests --run-id run-1
+# THE UNANNOTATED SHAPE, PINNED WHERE IT IS ACTUALLY REACHABLE — the correction to round 4.
+# That round accepted the unannotated shape, citing a REAL `tooling-tests:     FAIL (512s)`
+# line as proof that requiring the annotation would red correct input. The line is real; the
+# reasoning skipped the ORDER OF THE CHECKS. MEASURED from source, all four legs:
+# `_tree_boundary_meta_lines` has exactly ONE caller (agent-gate.sh:8734, inside
+# `_tree_boundary_fail`); that caller requires TREE_GUARDED=1, so no SKIP path coexists; it
+# calls `_tree_detection_mark` immediately before, whose BOTH arms route to
+# `_tree_fail_closed`, which sets `tree-integrity: FAIL`; and `_emit_terminal_summary` names
+# none of `_tree_finalize`/`_tree_meta_array`/`TREE_INTEGRITY_LINE`, so nothing resets it to
+# PASS in between. Empirically confirmed on this lane's own real boundary block. So the
+# unannotated shape occurs ONLY in `tree-integrity: FAIL` blocks, which the B3 precondition
+# rejects BEFORE the component read — accepting it was dead permissiveness.
+#
+# This fixture is that real block's shape, so the case pins the REACHABLE behaviour.
+SG3="$TMP/shape-boundary-real.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "commit: bc4e347 branch: issue-3750 dirty: no (VERIFIED START — the tree MUTATED mid-run)"
+  echo "tree-start: bc4e3471e478 dirty: no digest: dccb793eceab"
+  echo "tree-end: 94e041b61dc2 dirty: no digest: 22f4e590dd43 (POST-MUTATION observation)"
+  echo "tree-integrity: FAIL (tree-mutated-midrun; head bc4e3471e478->94e041b61dc2; detected-after-component: tooling-tests)"
+  printf '%-18s %s (%ss)\n' 'tooling-tests:' FAIL 512
+  echo "components-completed: 1 of 1 selected (run STOPPED at the tree-integrity boundary — the rest never ran)"
+  echo "detected-after-component: tooling-tests"
+  echo "RESULT: FAIL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$SG3"
+expect "17.3 the REAL boundary block (unannotated shape + integrity FAIL) is rejected on INTEGRITY" \
+  NOT-PASS 1 "tree-integrity" -- "$SG3" --mode only --component tooling-tests --run-id run-1
 SG4="$TMP/shape-nosecs.txt"
 mk_only_summary "$SG4" run-1 PARTIAL tooling-tests "$(printf '%-18s %s (%ss)' 'tooling-tests:' PASS '')"
 expect "17.4 an empty duration field is not a component line (a truncated .result)" \
   NOT-PASS 1 "absent" -- "$SG4" --mode only --component tooling-tests --run-id run-1
+
+# THE TIGHTENING (F3). An integrity-PASS block carrying the UNANNOTATED shape is a combination
+# NO emitter produces, so it is not certifying evidence and must not read as a component verdict.
+SG5="$TMP/shape-unannotated-integrity-pass.txt"
+mk_only_summary "$SG5" run-1 PARTIAL tooling-tests "$(printf '%-18s %s (%ss)' 'tooling-tests:' PASS 1112)"
+expect "17.6 the UNANNOTATED shape in an integrity-PASS block is not a component verdict (no emitter makes that pair)" \
+  NOT-PASS 1 "absent" -- "$SG5" --mode only --component tooling-tests --run-id run-1
 
 # DERIVED, like the delta token set: there are exactly TWO distinct component-line printf
 # formats in the shipped gate. A THIRD emitter appearing must RED here rather than silently
@@ -891,6 +925,103 @@ if [ "$_emitters" = 2 ]; then
 else
   bad "17.5 the shipped gate still has exactly TWO component-line emitters (the alternation covers both)" \
       "found $_emitters distinct printf formats — the alternation may no longer cover them all"
+fi
+
+echo "=== section 18: a PARTIAL token REQUIRES its --only scope line (F4) ==="
+# SAME ROOT CAUSE AS F3: the skip-when-absent branch was justified by boundary blocks lacking
+# a `mode:` line, and the B3 integrity precondition (round 3) made that case unreachable at
+# the point of use, so the permissiveness went dead and nobody re-derived it.
+#
+# MEASURED from source: `OVERALL=PARTIAL` has EXACTLY ONE site (agent-gate.sh:18791), and the
+# `mode: PARTIAL (--only …)` line is appended TWO LINES ABOVE IT INSIDE THE SAME
+# `if [ -n "$ONLY" ]` block — so a PARTIAL token and its scope line are inseparable by
+# construction. No other emitter publishes a PARTIAL token (no `emit_summary PARTIAL`, no
+# `_tree_result PARTIAL`). The only component-line-bearing blocks without a `mode:` line are
+# the boundary FAIL blocks, whose token is FAIL and which the integrity gate rejects anyway.
+SM1="$TMP/partial-no-mode.txt"
+mk_summary "$SM1" run-1 PARTIAL "$(comp_line tooling-tests PASS 1112s)"
+expect "18.1 a PARTIAL token with NO scope line => refuse (that pair is unemittable)" \
+  COULD-NOT-MEASURE 4 "mode-scope" -- "$SM1" --mode only --component tooling-tests --run-id run-1
+
+SM2="$TMP/partial-two-modes.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "tree-integrity: PASS"
+  echo "mode: PARTIAL (--only tooling-tests) - does NOT count as the gate"
+  echo "mode: PARTIAL (--only fmt) - does NOT count as the gate"
+  comp_line tooling-tests PASS 1112s
+  echo "RESULT: PARTIAL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$SM2"
+expect "18.2 TWO scope lines is ambiguous, never resolved in favour of PASS" \
+  COULD-NOT-MEASURE 4 "mode-scope" -- "$SM2" --mode only --component tooling-tests --run-id run-1
+
+# CONTROL: the ordinary PARTIAL summary — one scope line, component a member — still passes,
+# or the requirement has become refuse-everything and 18.1/18.2 prove nothing.
+expect "18.3 control: the ORDINARY PARTIAL shape (one scope line, member) still reaches a verdict" \
+  PASS 0 "tooling-tests" -- "$S8c" --mode only --component tooling-tests --run-id run-1
+
+# CONTROL: TRAP 2 SURVIVES, NARROWED TO WHAT IS REAL. A FAIL-token block with no scope line is
+# still answerable — the scope line is required only where the token says the run was scoped.
+SM3="$TMP/fail-no-mode.txt"
+mk_summary "$SM3" run-1 "FAIL (1 component)" "$(comp_line fmt FAIL 3s)" "$(comp_line tooling-tests PASS 1112s)"
+expect "18.4 control: a FAIL-token block with NO scope line is still answerable (trap 2, narrowed)" \
+  PASS 0 "tooling-tests" -- "$SM3" --mode only --component tooling-tests --run-id run-1
+
+# An EMPTY scope is not a scope: `--only` cannot be empty (its arg is `${2:?…}`), so this is a
+# malformed line and never a licence to skip the membership test.
+SM4="$TMP/partial-empty-scope.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "tree-integrity: PASS"
+  echo "mode: PARTIAL (--only ) - does NOT count as the gate"
+  comp_line tooling-tests PASS 1112s
+  echo "RESULT: PARTIAL"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$SM4"
+expect "18.5 an EMPTY --only scope is malformed, not a licence to skip membership" \
+  COULD-NOT-MEASURE 4 "mode-scope" -- "$SM4" --mode only --component tooling-tests --run-id run-1
+
+echo "=== section 19: component reads stop at RESULT:, not at the closer (F5) ==="
+# A RESIDUAL OF B1'S OWN FIX, and the same class as it: B1 bounded reads to the BLOCK, and the
+# block still has a TAIL. Every emitter writes `RESULT:` immediately before the closing marker,
+# so a stale or injected component line sitting between them is inside the block and after the
+# verdict — and was being accepted as this run's component verdict.
+SR1="$TMP/after-result.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: run-1"
+  echo "tree-integrity: PASS"
+  echo "mode: PARTIAL (--only tooling-tests) - does NOT count as the gate"
+  echo "RESULT: PARTIAL"
+  comp_line tooling-tests PASS 1112s
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$SR1"
+expect "19.1 a component line BETWEEN RESULT: and the closer is not this run's verdict" \
+  NOT-PASS 1 "absent" -- "$SR1" --mode only --component tooling-tests --run-id run-1
+
+# CONTROL: the same line BEFORE RESULT: is accepted, or 19.1 passes because the reader stopped
+# finding component lines at all.
+expect "19.2 control: the same line BEFORE RESULT: still reads PASS" \
+  PASS 0 "tooling-tests" -- "$S8c" --mode only --component tooling-tests --run-id run-1
+
+# DERIVED, so the premise cannot rot: EVERY `RESULT:` write in the shipped gate must be
+# IMMEDIATELY followed by the end marker. If a future emitter ever writes a line between them,
+# this reds — instead of the truncation above silently dropping legitimate content.
+_res_lines=$(grep -n 'echo "RESULT: ' "$REPO_ROOT/scripts/agent-gate.sh" | cut -d: -f1)
+_bad_order=0; _res_n=0
+for _n in $_res_lines; do
+  _res_n=$(( _res_n + 1 ))
+  _next=$(sed -n "$(( _n + 1 ))p" "$REPO_ROOT/scripts/agent-gate.sh" | sed 's/^[[:space:]]*//')
+  case "$_next" in
+    'echo "$SUMMARY_END_MARKER"'|'echo "$SUMMARY_END_MARKER" '*) ;;
+    *) _bad_order=$(( _bad_order + 1 )) ;;
+  esac
+done
+if [ "$_res_n" -gt 0 ] && [ "$_bad_order" -eq 0 ]; then
+  ok "19.3 every RESULT: write in the shipped gate ($_res_n) is immediately followed by the end marker"
+else
+  bad "19.3 every RESULT: write in the shipped gate is immediately followed by the end marker" \
+      "found $_res_n RESULT: writes, $_bad_order of them followed by something else"
 fi
 
 # ---------------------------------------------------------------------------
