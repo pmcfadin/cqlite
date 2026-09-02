@@ -150,7 +150,9 @@
 #                      closes parity.test.js's `test.skip` placeholder, the one
 #                      corpus-conditional path that WOULD pass silently. It is NOT
 #                      protection against `describe.skip`: no *.test.js uses it (the
-#                      repo's Node convention is skipIfNoDatasets(), which THROWS).
+#                      repo's Node convention is assertDatasetsAvailable(), which
+#                      THROWS — #3641 renamed it from skipIfNoDatasets(), a skip-named
+#                      function that never skipped).
 #                      --only/--lite stay lenient and the #2078 opt-out is honoured,
 #                      with the mode PRINTED. check_jest_suites_ran is
 #                      the affirmative guard: the reported suite total must equal the
@@ -11797,11 +11799,18 @@ EOF
 # THE CORPUS HALF IS NOW HONOURED, NOT AVOIDED — AND THE REASON IS NOT THE ONE THIS
 # COMMENT FIRST GAVE (roborev/rust-reviewer round 1, B4). 14 of the suite's files gate on
 # dataset availability, so node-bindings IS now in DATASET_COMPONENTS (it was NOT before,
-# and that comment was correct then and would be a stale rationale now).
+# and that comment was correct then and would be a stale rationale now). Since #3641 the
+# 14 is checkable rather than remembered: `grep -l 'assertDatasetsAvailable('
+# __test__/*.test.js` lists exactly those plus helpers.test.js, the helper's own test.
+# The OPERAND is kept contiguous on one line deliberately (roborev job 71): split as
+# `__test__/` + `*.test.js` it is two operands, and it does not fail loudly -- measured,
+# it silently lists 2 files and exits 0, so a reader would under-count the gated suites.
+# Before #3641 it was 11 callers of `skipIfNoDatasets()` PLUS 3 files carrying a verbatim
+# COPY of its body, so the number in this comment and any grep for it disagreed by three.
 #
 # The FULL gate additionally exports CQLITE_REQUIRE_FIXTURES=1. What that buys, MEASURED:
 #   * ONE clean, named setup failure (setup.js's `No SSTable fixtures found: …` throw)
-#     instead of 14 separate `beforeAll` THROWS from `skipIfNoDatasets()`; and
+#     instead of 14 separate `beforeAll` THROWS from `assertDatasetsAvailable()`; and
 #   * it closes `parity.test.js:70`'s `test.skip` placeholder — the ONE
 #     corpus-conditional path in the whole suite that would otherwise pass SILENTLY.
 #
@@ -11809,7 +11818,7 @@ EOF
 # claim was false in three ways. There is no `describe.skip` anywhere in
 # `bindings/node/__test__/*.test.js` — the only occurrence of that string is inside a
 # COMMENT in dataset-guard.test.js. The repo's Node convention is the OPPOSITE of
-# skipping: `helpers.js`'s `skipIfNoDatasets()` THROWS, and `result.test.js` says so
+# skipping: `helpers.js`'s `assertDatasetsAvailable()` THROWS, and `result.test.js` says so
 # outright ("per the repo's Node test convention it THROWS (never skips) … so a
 # misconfigured CI run fails loudly rather than passing silently"). The earlier text also
 # said "7 suites"; the measured number is 14.
@@ -11866,7 +11875,7 @@ run_node_bindings() {
   # FAIL where it used to PASS: the old scope was `write-readback-content` alone, which
   # self-generates its SSTables. `env -u`'ing the strict variables (correct for B2, and kept)
   # does NOT help here, because the suites do not gate on them — `helpers.js`'s
-  # `skipIfNoDatasets()` throws on `!global.DATASETS_AVAILABLE` and never consults
+  # `assertDatasetsAvailable()` throws on `!global.DATASETS_AVAILABLE` and never consults
   # `REQUIRE_FIXTURES` at all. So 14 suites throw whenever the corpus is absent, opt-out or
   # not.
   #
@@ -11887,7 +11896,7 @@ run_node_bindings() {
     status=SKIP
     echo ">>> [$name] SKIP (AGENT_GATE_ALLOW_MISSING_FIXTURES=1 and no usable corpus at CQLITE_DATASETS_ROOT='${CQLITE_DATASETS_ROOT:-<unset>}')"
     echo ">>> [$name]   NOT VALIDATED by this run: the 14 dataset-gated jest suites. helpers.js's"
-    echo ">>> [$name]   skipIfNoDatasets() THROWS on an absent corpus and never consults the strict-mode"
+    echo ">>> [$name]   assertDatasetsAvailable() THROWS on an absent corpus and never consults strict-mode"
     echo ">>> [$name]   env vars, so they cannot be run leniently — the honest options are SKIP or FAIL,"
     echo ">>> [$name]   and FAIL would make the documented #2078 opt-out ineffective (roborev C2)."
     echo ">>> [$name]   The corpus-free half (incl. the #1231 write-readback content proof) is ALSO"

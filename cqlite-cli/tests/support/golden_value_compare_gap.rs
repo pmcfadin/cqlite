@@ -201,6 +201,63 @@ pub enum Divergence {
     /// lands, `compare_map` no longer refuses, these skips suppress nothing, and
     /// `Report::stale_skips` FAILS the lane until they are removed.
     ContainerMapKeyNotPairableByThisLane,
+    /// AN IPv6 `inet` IS SPELLED IN CASSANDRA'S EXPANDED FORM IN THE GOLDEN AND IN
+    /// RFC 5952 COMPRESSED FORM BY THE EGRESS — the SAME address, two spellings.
+    ///
+    /// sstabledump renders `inet` through `InetAddressType`, whose `toString` is
+    /// `InetAddress.getHostAddress()`, and that never elides a zero run: a golden
+    /// carries `0:0:0:0:0:0:0:1` and `2001:db8:0:0:0:0:0:1`. The CLI egress renders
+    /// the compressed form (`::1`, `2001:db8::1`). IPv4 is unaffected — both sides
+    /// spell it as a dotted quad, so a v4 mismatch is a real defect.
+    ///
+    /// **THE MATCHER PROVES THE TWO ARE THE SAME ADDRESS RATHER THAN TRUSTING THE
+    /// SHAPE.** Both sides are parsed as [`std::net::IpAddr`] and the gap applies
+    /// only when they compare EQUAL, are both v6, and their TEXT actually differs.
+    /// So a wrong address, a null, a non-address string and a mixed v4/v6 pair are
+    /// all still failures — unlike a shape-only rule this cannot hide a value
+    /// defect. It also cannot excuse an ORDER difference: elements are compared by
+    /// position, so a reordered collection still fails even when every element is
+    /// individually excused here. That distinction is the point for issue #3790,
+    /// whose subject is ordering.
+    ///
+    /// DECLARED RESIDUAL: the exact TEXT is not compared at this position, so a
+    /// later change to the egress's IPv6 spelling would not be caught here. The
+    /// egress divergence is itself a real difference from Cassandra's rendering and
+    /// is filed separately; when it is resolved this skip goes stale and
+    /// `SkipPaths::stale` FAILS the lane until it is removed.
+    InetIpv6RendersCompressed,
+    /// THIS LANE CANNOT PAIR THE ENTRIES OF A MAP KEYED BY `inet`, so the whole
+    /// column is skipped. **A LANE LIMITATION, NOT A VALUE DISAGREEMENT, AND IT
+    /// DELIBERATELY OVER-SKIPS** — the same shape, and the same resolution, as
+    /// [`Divergence::ContainerMapKeyNotPairableByThisLane`].
+    ///
+    /// Map entries are paired and reported by their key's canonical form. For an
+    /// IPv6 `inet` key the two sides spell the SAME address differently — the
+    /// golden in Cassandra's expanded `getHostAddress()` form, the egress in RFC
+    /// 5952 compressed form — so the keys never pair and the mismatch surfaces as a
+    /// key-POSITION difference, which is a different class from the value
+    /// divergence [`Divergence::InetIpv6RendersCompressed`] declares. That gap
+    /// therefore cannot reach this position, and a
+    /// [`SkipPaths`] entry is PATH-SCOPED TO A COLUMN, so it cannot express
+    /// "compare everything about this map EXCEPT the key spelling".
+    ///
+    /// **DDL-ONLY, and it over-skips two ways, stated rather than discovered.** It
+    /// reads no values, so it also suppresses a null, a malformed `{key,value}`
+    /// array and a wrong entry COUNT in the column. And it is keyed on the DECLARED
+    /// key type, so it applies even to an inet-keyed map whose keys are all IPv4
+    /// and would have compared exactly. Over-skipping is honest and visible in the
+    /// artifact; a claim that misdescribes its own subject is not.
+    ///
+    /// The ORDER this column exists to pin (issue #3790) is NOT lost — it is
+    /// asserted directly against the same golden by
+    /// `cqlite-core/tests/issue_3790_collection_order_cassandra_golden.rs`, which
+    /// compares the cell-path sequence rather than the egress text. What this skip
+    /// costs is the CLI egress's rendering of that column, not the ordering.
+    ///
+    /// The real fix is for the egress and Cassandra to agree on IPv6 spelling, or
+    /// for key pairing to compare addresses rather than text; either retires this
+    /// skip and [`SkipPaths::stale`] FAILS the lane until it is removed.
+    InetMapKeyIpv6SpellingNotPairableByThisLane,
 }
 
 impl Divergence {
@@ -232,6 +289,16 @@ impl Divergence {
                  UNDECODED as a flat scalar (raw bytes as hex for a collection, \
                  colon-joined text for a tuple) while the egress decodes it into a \
                  structure"
+            }
+            Divergence::InetIpv6RendersCompressed => {
+                "the golden spells an IPv6 inet in Cassandra's expanded \
+                 getHostAddress() form while the egress spells the SAME address in \
+                 RFC 5952 compressed form (verified equal as parsed addresses)"
+            }
+            Divergence::InetMapKeyIpv6SpellingNotPairableByThisLane => {
+                "the declared map key type is `inet`, whose IPv6 values the golden \
+                 and the egress spell differently, so this lane cannot pair the \
+                 entries and the whole column is skipped"
             }
             Divergence::ContainerMapKeyNotPairableByThisLane => {
                 "the declared map KEY type is a container, which this lane has no rule \
@@ -341,6 +408,30 @@ impl Divergence {
                 // `{key,value}` objects), so an object, a scalar, a null or a number
                 // here is NOT this gap and is reported as an ordinary diff.
                 matches!(cli, Value::Array(_))
+            }
+            Divergence::InetIpv6RendersCompressed => {
+                // Same address, different spelling — PROVEN, not assumed.
+                if !matches!(ty, CqlType::Opaque(name) if name == "inet") {
+                    return false;
+                }
+                let (Value::String(g), Value::String(c)) = (golden, cli) else {
+                    return false;
+                };
+                match (g.parse::<std::net::IpAddr>(), c.parse::<std::net::IpAddr>()) {
+                    // Both v6, equal as addresses, and genuinely spelled
+                    // differently. A v4 pair, an unequal pair, or an unparsable
+                    // side is NOT this gap.
+                    (Ok(ga), Ok(ca)) => ga == ca && ga.is_ipv6() && g != c,
+                    _ => false,
+                }
+            }
+            Divergence::InetMapKeyIpv6SpellingNotPairableByThisLane => {
+                // DDL ONLY, exactly like the container-key case below: reading
+                // values here would invite the same unbounded sequence of shape
+                // assertions. The over-skip is the accepted, documented cost.
+                let _ = (golden, cli, egress, depth, kinding);
+                matches!(ty, CqlType::Map(key_ty, _)
+                    if matches!(&**key_ty, CqlType::Opaque(n) if n == "inet"))
             }
             Divergence::ContainerMapKeyNotPairableByThisLane => {
                 // DDL ONLY. No value is read — deliberately, and this is the whole

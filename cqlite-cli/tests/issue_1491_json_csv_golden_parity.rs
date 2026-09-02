@@ -396,6 +396,55 @@ const CASES: &[Case] = &[
         multicell: &[],
         skips: &[],
     },
+    // The inet/time multicell-collection ORDERING fixture (#3790). COMPARED, not
+    // excluded: its only non-plain shape is a multicell cell tombstone, which
+    // `golden_dump_shapes` says "cannot justify an exclusion".
+    Case {
+        presence: Presence::Committed,
+        keyspace: "test_comparator_order",
+        table: "collection_order",
+        schema: "issue-3790-comparator-ordering",
+        pk: &["id"],
+        ck: &[],
+        multicell: &[
+            ("inet_set", Multicell::Set),
+            ("inet_map", Multicell::Map),
+            ("time_set", Multicell::Set),
+            ("time_map", Multicell::Map),
+            ("pair_set", Multicell::Set),
+        ],
+        // Two MEASURED rendering divergences, neither of them ordering. What each
+        // skip costs for ORDER differs, and saying "order is still compared" of
+        // both would be false (roborev job 69):
+        //   * inet_set: the matcher proves the two sides are the SAME address, so a
+        //     reordered set fails — element [0] would pair ::1 against 9.0.0.1.
+        //   * pair_set: NestedFrozenValueLeftUndecodedByGolden compares no content,
+        //     so THIS LANE would not notice the tuples being reordered with the
+        //     count preserved. That order is pinned instead by
+        //     cqlite-core/tests/issue_3790_collection_order_cassandra_golden.rs,
+        //     which asserts pair_set's cell-path sequence (inet-major, time-minor,
+        //     both partitions) directly against the same golden.
+        skips: &[
+            Skip {
+                path: "inet_set",
+                formats: BOTH,
+                divergence: Divergence::InetIpv6RendersCompressed,
+                why: "golden spells IPv6 expanded (getHostAddress), egress compressed; the matcher proves both parse to the SAME address, and element ORDER is still compared",
+            },
+            Skip {
+                path: "inet_map",
+                formats: BOTH,
+                divergence: Divergence::InetMapKeyIpv6SpellingNotPairableByThisLane,
+                why: "inet map keys never pair across the two IPv6 spellings, so the column is NOT COMPARED AT ALL (null/malformed/wrong-COUNT unchecked); its ORDER is pinned by issue_3790_collection_order_cassandra_golden.rs",
+            },
+            Skip {
+                path: "pair_set",
+                formats: BOTH,
+                divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
+                why: "golden leaves the frozen tuple<inet, time> as colon-joined text while the CLI decodes it; only the SHAPE is checked — so a REORDERING of the tuples is NOT detected here either, and pair_set's order is pinned by issue_3790_collection_order_cassandra_golden.rs instead",
+            },
+        ],
+    },
     Case {
         presence: Presence::Committed,
         keyspace: "test_signed_coll",

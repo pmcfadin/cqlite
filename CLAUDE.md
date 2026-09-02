@@ -129,7 +129,14 @@ named setup failure instead of 14 separate `beforeAll` throws and closes `parity
 placeholder — the one corpus-conditional path in that suite that would pass silently. (An earlier draft
 of this paragraph said those suites `describe.skip`; **measured, none does** — the repo's Node
 convention THROWS. A false rationale in a gate log is worse than none, because it is what stops the
-next person looking.) The durable question is the same one shape up: for each workspace member, **which component
+next person looking.) **The throwing helper was NAMED `skipIfNoDatasets()` until #3641** — a
+skip-named function that could not skip, believed by design work until someone measured it (an empty
+root gives `prepared.test.js` 16 FAILED of 16, not 16 skipped). It is now
+`assertDatasetsAvailable()`, the three suites that had copied its body verbatim call it, and its
+contract — throws on an absent corpus, in BOTH strict-mode directions, never skips — is asserted in
+`bindings/node/__test__/helpers.test.js` rather than only described in a doc comment. **A name is a
+claim about behaviour, and this repo's gate design consumed that claim**; the doc comment that said
+otherwise sat two lines above the throw and did not travel to a single one of the 14 call sites. The durable question is the same one shape up: for each workspace member, **which component
 EXECUTES it** — recorded, member by member, in `scripts/tests/workspace-test-disposition.txt`
 (`EXECUTED`/`PARTIAL`/`NOT-EXECUTED`, a closed label set enforced under `tooling-tests`), so a new
 crate cannot join the unexecuted set unannounced. Each record also carries a CLASS — `silent` (no
@@ -1887,6 +1894,98 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   EXIST and the merged tree is covered — directly, or by an anchored delta re-cert on top of it. A
   block carrying `nested-under:` (#2874) is refused outright: a nested sub-gate runs at the SAME tree,
   so the sha binding provably cannot see it.
+  **AND IN CASE B THE ANCHOR MUST BE ON THE CERTIFIED SHA'S HISTORY (#3653).** Everything above proves
+  the two blocks AGREE about a sha, never that the sha is on THIS PR — Case B's anchor identity rested
+  entirely on the delta run's SELF-DECLARED `delta-anchor:` line, so any full-gate PASS plus a delta
+  naming it satisfied the chain: the #3616 cross-lane class surviving in the one path Case A's sha
+  binding does not cover. (The accident route was narrowed by `agent-gate.sh --delta`'s own
+  fail-closed diff classification, i.e. **by another script** — a real constraint stated nowhere the
+  guard is read.) So `git merge-base --is-ancestor <anchor> <certified>`, **three-valued** because
+  `--is-ancestor`'s rc 1 is itself three-valued (#3544 — in a SHALLOW clone it also means "the
+  connecting history is absent", so rc 1 is a verdict only in a repository proven complete):
+  **BOUND** (rc 0) proceeds and is RECORDED as `anchor-ancestry: BOUND` on the `PREMERGE: DELTA-RECERT`
+  line, because a silent pass is indistinguishable from a check that never ran; **NOT-ANCESTOR**
+  (rc 1, both objects present, `--is-shallow-repository` = `false`) is exit 2 naming both shas;
+  everything UNMEASURABLE — no git, not a work tree, either object absent, shallow or shallowness
+  unknown, `--is-ancestor` exiting ≥ 2 — is exit 3 under its own `PREMERGE: ANCHOR-UNVERIFIABLE`
+  marker, each cause carrying its own remedy, because an unmeasurable result is UNKNOWN and "fix the
+  box" is a different operator action from "your chain is wrong". **The walk does NOT run in the lane**
+  (roborev job 355): `$GIT_DIR/info/grafts` rewrites parentage and SURVIVES `--no-replace-objects` (the
+  job-285 measurement above, re-measured for this check: `no` → `YES` → `YES`), so a graft alone turns a
+  FOREIGN anchor into `BOUND` — and grafts live in the COMMON git dir that every lane on this fleet
+  shares, making the planter a PEER LANE as well as an accident. The ruling there was to MOVE the walk,
+  and it is applied here: the object reads and `merge-base` run in a throwaway `git init` scratch whose
+  only view of the lane is `GIT_ALTERNATE_OBJECT_DIRECTORIES` — pure object storage, no config, hence no
+  grafts, no replace refs, no promisor; a failure to build it is UNVERIFIABLE, **never** a fall-back to
+  the live repository. Two reads stay in the lane on purpose: resolving its object directory
+  (`rev-parse --git-path objects`, no object read, no network) and `--is-shallow-repository`, because a
+  fresh scratch is NEVER shallow and probing it there would answer `false` unconditionally, making the
+  shallow guard a vacuous pass. **A SCRATCH'S ENVIRONMENT IS LOAD-BEARING IN A WAY A LANE READ'S IS NOT**
+  (roborev job 358): the old rationale — "these reads are addressed BY A SHA, so no environment can bend
+  them" — is right about a read in the lane and WRONG here, because an environment variable does not bend
+  the OBJECT, it bends WHICH REPOSITORY ANSWERS. Measured on git 2.43.0: `GIT_DIR` **overrides `-C`**, and
+  both `git init --template=<dir>` and `GIT_TEMPLATE_DIR` seed a planted `info/grafts` INTO the new
+  scratch. So every git call — the lane DISCOVERY reads included (job 276: the allowlist has to reach the
+  sites a later change adds) — runs under `env -i` + an allowlist ADMITting only `PATH` and `TMPDIR`
+  (tighter than the pre-flight's: no network here, so no `HOME`, no `SSH_*`, no proxy), with
+  `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null` plus an explicit empty `--template=`. The reads are
+  also **bounded** by the runner this script already resolves for the advisory — but **only the EXTERNAL
+  commands are** (every git call and `mktemp -d`), and the token says exactly that:
+  `anchor-reads: bounded-<n>s+<g>s(external:git,mktemp,sh;UNBOUNDED:command-v+pwd-builtins)`. **The scratch
+  directory is deliberately NOT DELETED** — a delete through a peer-mutable pathname cannot be made
+  race-free in shell (no `openat`/`unlinkat`) and every lane here runs as the SAME USER, so after three
+  rounds of narrowing it was REMOVED: one object-less `git init` is left under TMPDIR per Case B merge and
+  the OS reaps it. **The
+  token was corrected TWICE — once for overclaiming, once for UNDERclaiming**, and an
+  **ANCHOR-PATH OPERATION AUDIT** in the script header now lists every operation with two facts, *is it
+  bounded* and *is its target validated*, in the `workspace-test-disposition.txt` idiom (a new operation
+  must join the table; it records completeness and labelling, not truth). That audit exists because seven
+  shipped-script findings on #3653 were the same two questions asked of different operations, one per
+  review round. It made canonicalisation runner-bounded (`sh -c 'cd … && pwd -P'` is external, so no
+  builtin-bounding was invented), DELETED both `[ -d … ]` builtin stats as redundant with it, and bounded
+  + target-revalidated the scratch `rm -rf`. What is left unbounded is `command -v` PATH lookups and one
+  `$(pwd)` diagnostic — builtins over local state, unreachable from the shared object store or TMPDIR. And **where no `timeout`/`gtimeout`
+  supporting `--kill-after` exists the check REFUSES** (`ANCHOR-UNVERIFIABLE`, naming a one-command
+  remedy). **That REVERSES the first ruling here, which said run unbounded and declare it, on the ground
+  that a hang is a LIVENESS failure yielding no verdict rather than a false pass.** What that missed: **a
+  hang in this guard BLOCKS THE MERGE ANYWAY**, so the real comparison is never merge-vs-refuse but
+  *hang forever with no diagnosis* vs *refuse now with a named cause and remedy* — same outcome for the
+  merge, and the refusal strictly dominates. "It cannot produce a false pass" was true and IRRELEVANT,
+  because the alternative was never a pass. Hand-rolling a portable bounded runner is ruled OUT: that is
+  new process-lifetime code, the family that produced three defects in this issue's own test scaffolding,
+  and a fourth inside a merge guard costs more than one named install command.
+  **THE COMMIT-GRAPH IS TRUSTED METADATA, SO IT IS DISABLED — AND THE MEASUREMENT IS NOT THE ONE THE
+  FINDING PREDICTED** (roborev job 361). `objects/info/commit-graph` reaches the scratch through the
+  alternate, is NOT content-addressed, and git trusts its parent edges. Measured on git 2.43.0 against a
+  graph whose CDAT parent slot was patched and whose checksum recomputed: `rev-list --parents` reports the
+  FORGED parent and `-c core.commitGraph=false` the real one (so the graph IS consulted and IS trusted) —
+  but `merge-base --is-ancestor`, the call this guard makes, answered `no` **both** ways, so the exploit
+  against THIS call did not reproduce. The flag ships as defence in depth (one git version or one refactor
+  from mattering) and the test says so, pinning it STRUCTURALLY where no behavioural arm can. Measured and
+  deliberately NOT disabled: `core.multiPackIndex` (with the pack `.idx` removed the object was
+  unreadable, so no evidence it supplies lookups or edges) and reachability bitmaps (`GIT_TRACE2_PERF=1`
+  showed ZERO bitmap mentions during the call) — widening past a measurement is guessing.
+  **AND AT THAT POINT THE BOUNDARY IS DECLARED RATHER THAN ENUMERATED AGAIN.** Three review rounds found
+  three routes into one mechanism (graft → environment/template → commit-graph), which is #3544 job 264's
+  *"one axis closed, space declared done"* shape, and #3746 / job 311 already ruled on the unclosable
+  version: DECLARE it in the emitted line and hand the subject to the issue that owns it. So every Case B
+  success line ends with one constant — `ancestry over this box's SHARED object store: objects+metadata
+  and SCRATCH namespace: objects, metadata and scratch TRUSTED, not verified (#3746) — closes
+  accident/drift, NOT a same-UID peer` — folded into the ONE renderer, never per-arm. **THAT IS THE
+  TERMINUS OF THIS HARDENING LINE (job 390).** Every lane on this fleet runs as the same user, so a peer
+  can write the shared object store AND our scratch — it can drop `.git/info/grafts` into the scratch
+  between `git init` and the walk, reproducing the graft attack inside the thing built to prevent it — and
+  no mode or ownership can admit this process while excluding a peer. So the CLAIM is narrowed rather than
+  the hole patched, and the hazard is assigned to **#3746**, which already owns "lanes share an object
+  store". **A later same-UID-peer instance is that declared boundary, not a new defect** — which is what
+  #3653 asked for, since its own text says the hostile route is largely closed elsewhere and the defect was
+  the constraint not being stated where the guard is read. What the binding proves:
+  ancestry over the objects and commit metadata this box's shared store presents, isolated (each with a
+  positive control) from grafts, replace refs, an inherited `GIT_DIR`, an ambient template, and the
+  commit-graph. What it does not: that the anchor is on the PR **as GitHub sees it**, and anything against
+  a peer that can WRITE that shared store. A fifth route in this family is a residual under that
+  declaration, not a false claim — a check that claims nothing false is worth more than one claiming a
+  closure it does not deliver.
   **What a `PREMERGE: OK` does NOT prove (#3650) — it says so itself, on a `PREMERGE: SCOPE` line.**
   It proves the diff is unchanged since certification and that a full gate PASSed on **that exact
   tree**. It does NOT prove the change was certified against the `main` it will join: a squash-merge
