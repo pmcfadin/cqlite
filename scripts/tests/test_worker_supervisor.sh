@@ -9912,6 +9912,218 @@ test_object_store_latch_is_written_before_the_throttle_stamp() {
 
 t test_object_store_latch_is_written_before_the_throttle_stamp
 
+# THE ENTRY LATCH READ — THE STRUCTURAL INVARIANT, NOT THE FOUR KNOWN SITES (#3749 review
+# round 5, item 1).
+#
+# THE DEFECT, AND WHY THIS CASE IS SHAPED THE WAY IT IS. Round 3 found "a return path that
+# reaches a spawn without re-reading the CORRUPT latch" at THREE sites and fixed all three
+# with a shared helper; round 5 found a FOURTH — the OBJ_SWEEP_INTERVAL_HOURS=0 opt-out,
+# which returned before any latch read, so the documented way to disable the sweep also
+# disabled an already-recorded verdict. A case that enumerated the four sites would leave a
+# fifth for the next reviewer, so this one asserts the PROPERTY THAT MAKES A FIFTH
+# UNEXPRESSIBLE: the latch read is at the TOP of object_store_sweep, and the lines before it
+# are declarations and assignments ONLY — no `if`, no `return`, nothing that can leave the
+# function. Since the FIRST control-flow line in the body comes after the gate call, EVERY
+# `return` in it does too, including ones nobody has written yet.
+#
+# LABELLED [STRUCTURAL] IN THE MESSAGE, because that is what it is: a claim about the
+# shipped source, not a measurement of a run. The behavioural half — the four return paths,
+# each with a control — is the case that follows.
+test_object_store_sweep_reads_the_latch_at_entry() {
+  local body gate_line first_cf line i n bad prologue_bad=""
+  body="$(awk '/^object_store_sweep\(\) \{$/,/^\}$/' "$SUPERVISOR")"
+  gate_line="$(grep -n '^[[:space:]]*obj_sweep_stop_if_latched ' <<<"$body" | head -1 | cut -d: -f1)"
+  # PLANT ASSERT: the body was really extracted, it really contains a gate call, and it
+  # really contains the branches this invariant is about — otherwise the comparison below
+  # would be vacuous (a body of "" has no control flow either).
+  if [[ -n "$body" && "$gate_line" =~ ^[0-9]+$ ]] &&
+    grep -q 'OBJ_SWEEP_INTERVAL_HOURS" -le 0' <<<"$body" &&
+    grep -q '! -r "\$script"' <<<"$body"; then
+    pass "obj-sweep(entry-latch-plant): object_store_sweep was extracted from the shipped supervisor and carries both early-return branches plus a latch gate"
+  else
+    fail "obj-sweep(entry-latch-plant): body=${#body} bytes gate_line='$gate_line' — the asserts below would be vacuous"
+    return
+  fi
+  # (1) THE FIRST CONTROL-FLOW LINE COMES AFTER THE GATE. `#`-comment lines cannot match:
+  # every pattern here is anchored on a keyword at the start of the line.
+  first_cf="$(grep -nE '^[[:space:]]*(if|while|until|for|case|return|exit|\[\[|\{)([[:space:]]|\()' <<<"$body" | head -1 | cut -d: -f1)"
+  if [[ "$first_cf" =~ ^[0-9]+$ && "$gate_line" -lt "$first_cf" ]]; then
+    pass "obj-sweep(entry-latch-read): the latch gate is at body line $gate_line and the FIRST control-flow line is $first_cf — every return in object_store_sweep, including ones not yet written, is preceded by a latch read [STRUCTURAL]"
+  else
+    fail "obj-sweep(entry-latch-read): gate at '$gate_line', first control flow at '$first_cf' — a branch can leave this function without asking the latch question"
+  fi
+  # (2) AND THE PROLOGUE IS DECLARATIONS AND ASSIGNMENTS ONLY. (1) is keyword-anchored, so
+  # it cannot see `some_helper || return 0` or a bare call that exits; this half requires
+  # every line before the gate to be a comment, a blank, a `local`, or a plain assignment.
+  n=0
+  while IFS= read -r line; do
+    n=$((n + 1))
+    [[ "$n" -lt "$gate_line" ]] || break
+    [[ "$n" -eq 1 ]] && continue
+    if [[ "$line" =~ ^[[:space:]]*# ]] ||
+      [[ -z "${line//[[:space:]]/}" ]] ||
+      [[ "$line" =~ ^[[:space:]]*local[[:space:]] ]] ||
+      [[ "$line" =~ ^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=[^\;\&\|]*$ ]]; then
+      continue
+    fi
+    prologue_bad="${prologue_bad}${prologue_bad:+ | }${line}"
+  done <<<"$body"
+  if [[ -z "$prologue_bad" ]]; then
+    pass "obj-sweep(entry-latch-prologue): every line before the latch gate is a comment, a declaration or a plain assignment — nothing before it can branch, call out or return [STRUCTURAL]"
+  else
+    fail "obj-sweep(entry-latch-prologue): executable non-assignment line(s) before the latch gate: $prologue_bad"
+  fi
+}
+
+t test_object_store_sweep_reads_the_latch_at_entry
+
+# THE BEHAVIOURAL HALF: THE TWO RETURN PATHS THAT USED TO PRECEDE ANY LATCH READ (#3749
+# review round 5, item 1). Each arm has a CONTROL one property apart, because "the lane
+# stopped" is also what a broken fixture produces.
+test_object_store_sweep_latch_beats_the_opt_out() {
+  local d root counter calls rc latch
+  # (a) THE FINDING ITSELF: OBJ_SWEEP_INTERVAL_HOURS=0 — the documented opt-out — on a box
+  #     whose latch is already set. The lane must STOP, must NOT sweep (the opt-out still
+  #     opts out of spending fsck walks), and must not spawn.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-optout"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=0
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  latch="$OBJ_SWEEP_STAMP.CORRUPT"
+  printf '%s\nCORRUPT\n' "$(date +%s)" >"$latch"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/optout.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 1 && ! -f "$counter" && ! -s "$calls" ]] &&
+    grep -q 'object-store: CORRUPT (cached' "$d/optout.log" &&
+    grep -q '"reason":"object-store-corrupt"' "$JOURNAL_FILE"; then
+    pass "obj-sweep(opt-out-latched): with the sweep DISABLED, an existing CORRUPT latch still stops the lane — a latch is a fact about the store, not a schedule"
+  else
+    fail "obj-sweep(opt-out-latched): rc=$rc spawned=$([[ -f "$counter" ]] && echo yes || echo no) swept=$([[ -s "$calls" ]] && echo yes || echo no) (see $d/optout.log)"
+  fi
+  # (b) CONTROL, one property apart: the same disabled sweep with NO latch. The worker must
+  #     run and the sweep must still not be spent — so (a) is the latch, not the opt-out
+  #     having been broken into a stop.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-optout-control"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=0
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/optout-control.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && -f "$counter" && ! -s "$calls" ]] &&
+    grep -q 'object-store sweep DISABLED' "$d/optout-control.log"; then
+    pass "obj-sweep(opt-out-control): the SAME disabled sweep with no latch still announces DISABLED, still spends no walk, and the worker runs"
+  else
+    fail "obj-sweep(opt-out-control): rc=$rc spawned=$([[ -f "$counter" ]] && echo yes || echo no) swept=$([[ -s "$calls" ]] && echo yes || echo no) (see $d/optout-control.log)"
+  fi
+  # (c) THE OTHER PRE-GATE RETURN: the sweep script is ABSENT from this checkout (an older
+  #     branch, a partial tree). With the key pinned the latch is still NAMEABLE, so it is
+  #     still read — the lane stops instead of running because a hygiene probe is missing.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-unavail"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  latch="$OBJ_SWEEP_STAMP.CORRUPT"
+  printf '%s\nCORRUPT\n' "$(date +%s)" >"$latch"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  rm -f "$root/scripts/check-object-store-integrity.sh"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/unavail.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 1 && ! -f "$counter" ]] &&
+    grep -q 'object-store: CORRUPT (cached' "$d/unavail.log"; then
+    pass "obj-sweep(unavailable-latched): with the sweep script absent but the key pinned, the latch is still read and still stops the lane"
+  else
+    fail "obj-sweep(unavailable-latched): rc=$rc spawned=$([[ -f "$counter" ]] && echo yes || echo no) (see $d/unavail.log)"
+  fi
+  # (d) CONTROL for (c): same absent script, no latch. The lane must announce UNAVAILABLE
+  #     and RUN — refusing to work because a hygiene probe is missing is the self-DoS the
+  #     code rules out at that branch, and this arm is what keeps (c) from having quietly
+  #     become one.
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-unavail-control"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  export OBJ_SWEEP_STAMP="$d/sweep.stamp"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  rm -f "$root/scripts/check-object-store-integrity.sh"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/unavail-control.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && -f "$counter" ]] &&
+    grep -q 'object-store sweep UNAVAILABLE' "$d/unavail-control.log"; then
+    pass "obj-sweep(unavailable-control): the same absent sweep script with NO latch announces UNAVAILABLE and the worker runs — the stop above is the latch, not the missing probe"
+  else
+    fail "obj-sweep(unavailable-control): rc=$rc spawned=$([[ -f "$counter" ]] && echo yes || echo no) (see $d/unavail-control.log)"
+  fi
+}
+
+t test_object_store_sweep_latch_beats_the_opt_out
+
+# AN UNREADABLE LATCH IS NOT AN ABSENT ONE (#3749 review round 5, item 1's second half).
+#
+# `[[ -e "$latch" ]]` is FALSE both for a latch that is not there and for one this process
+# cannot look at — the two-valued file predicate CLAUDE.md warns about, on the single file
+# whose job is to stop the box. The supervisor answers the latch question in four values,
+# and `unknown` must STOP, under its OWN reason: nothing observed damage, so calling it
+# CORRUPT would send an operator to re-clone a healthy store.
+test_object_store_latch_unreadable_is_not_absent() {
+  local d root counter calls rc dir
+  d="$(new_case_dir)"; counter="$d/counter"; calls="$d/calls-unreadable"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export OBJ_SWEEP_INTERVAL_HOURS=6
+  dir="$d/latchdir"
+  mkdir -p "$dir"
+  export OBJ_SWEEP_STAMP="$dir/sweep.stamp"
+  root="$(obj_sweep_tree "$d" VERIFIED 0 "$calls")"
+  # CONTROL FIRST, so the stop below is attributable to the permissions and not to the
+  # subdirectory: a searchable directory with no latch in it runs the sweep and the worker.
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/readable.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && -f "$counter" && -s "$calls" ]]; then
+    pass "obj-sweep(latch-unreadable-control): a SEARCHABLE latch directory with no latch in it is an affirmative 'absent' — the sweep runs and so does the worker"
+  else
+    fail "obj-sweep(latch-unreadable-control): rc=$rc spawned=$([[ -f "$counter" ]] && echo yes || echo no) swept=$([[ -s "$calls" ]] && echo yes || echo no) (see $d/readable.log)"
+  fi
+  chmod 000 "$dir" 2>/dev/null || true
+  # CONSTRUCTION ASSERT: as root the permission bits are advisory, so the plant does not
+  # plant. Skipped explicitly rather than passing against a directory this process can
+  # still read.
+  if [[ -x "$dir" || -r "$dir" ]]; then
+    chmod 755 "$dir" 2>/dev/null || true
+    skip "obj-sweep(latch-unreadable): this process can still search a 000 directory (root?) — the unknown-latch state cannot be planted here"
+    return
+  fi
+  rm -f "$counter"
+  : >"$calls"
+  env LANE_ID=objsweep-test bash "$root/scripts/local/worker-supervisor.sh" >"$d/unreadable.log" 2>&1
+  rc=$?
+  chmod 755 "$dir" 2>/dev/null || true
+  if [[ "$rc" -eq 1 && ! -f "$counter" ]] &&
+    grep -q 'could NOT be read' "$d/unreadable.log" &&
+    grep -q '"reason":"object-store-latch-unreadable"' "$JOURNAL_FILE" &&
+    ! grep -q '"reason":"object-store-corrupt"' "$JOURNAL_FILE"; then
+    pass "obj-sweep(latch-unreadable): a latch this process cannot look at STOPS the lane under its own reason — UNKNOWN is not 'absent', and it is not reported as a corruption finding either"
+  else
+    fail "obj-sweep(latch-unreadable): rc=$rc spawned=$([[ -f "$counter" ]] && echo yes || echo no) reason=$(grep -o '"reason":"[a-z-]*"' "$JOURNAL_FILE" | tail -1) (see $d/unreadable.log)"
+  fi
+}
+
+t test_object_store_latch_unreadable_is_not_absent
+
 # AND THE BEHAVIOURAL HALF THE ORDERING SERVES: on the CORRUPT path BOTH files exist
 # when the lane stops, so the state a peer inherits is complete rather than half-written.
 test_object_store_corrupt_leaves_both_the_latch_and_the_stamp() {
@@ -10065,15 +10277,20 @@ test_object_store_set_latch_is_create_only() {
   local d fns rc out latch
   d="$(new_case_dir)"
   fns="$d/extracted.sh"
-  sed -n '/^obj_sweep_latch_present() {/,/^}/p;/^obj_sweep_set_latch() {/,/^}/p' \
+  # THREE functions, because the create's verdict is the file's EXISTENCE asked afterwards
+  # and that question is now answered in four values (round 5, item 1):
+  # obj_sweep_latch_present delegates to obj_sweep_latch_state, so extracting only the
+  # first two yields a `command not found` — a real failure, but one whose cause is the
+  # extraction rather than the subject.
+  sed -n '/^obj_sweep_latch_state() {/,/^}/p;/^obj_sweep_latch_present() {/,/^}/p;/^obj_sweep_set_latch() {/,/^}/p' \
     "$SUPERVISOR" >"$fns"
-  # CONSTRUCTION: the extraction really got both functions, and the create-only mechanism
-  # really is in the extracted text. Without this the cases below could be measuring an
-  # empty file (every one of which would `command not found` and be reported as a failure,
-  # but with a cause nobody could attribute).
+  # CONSTRUCTION: the extraction really got all three functions, and the create-only
+  # mechanism really is in the extracted text. Without this the cases below could be
+  # measuring an empty file (every one of which would `command not found` and be reported
+  # as a failure, but with a cause nobody could attribute).
   if grep -q '^obj_sweep_set_latch() {' "$fns" && grep -q '^obj_sweep_latch_present() {' "$fns" &&
-     grep -q 'set -C' "$fns"; then
-    pass "obj-sweep(set-latch-plant): both functions were extracted from the shipped supervisor, noclobber included"
+     grep -q '^obj_sweep_latch_state() {' "$fns" && grep -q 'set -C' "$fns"; then
+    pass "obj-sweep(set-latch-plant): all three latch functions were extracted from the shipped supervisor, noclobber included"
   else
     fail "obj-sweep(set-latch-plant): the extraction from $SUPERVISOR did not yield the functions — the cases below would prove nothing"
     return 0

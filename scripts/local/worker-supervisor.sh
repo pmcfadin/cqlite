@@ -3379,15 +3379,54 @@ obj_sweep_latch_path() {
   printf '%s.CORRUPT' "$stamp"
 }
 
-# obj_sweep_latch_present <latch-path> — is the latch in place?
+# obj_sweep_latch_state <latch-path> — the latch question, answered in FOUR values on
+# stdout: `present`, `absent`, `unknown` or `unkeyed`.
 #
-# `-e || -L` rather than a bare `-e`: a DANGLING symlink at that name is `-e`-false, and
-# the fail-safe reading of "something is at the latch path" is that the box is latched.
-# Same idiom, same reason, as the supervisor lock's existence test above.
+# WHY IT IS NOT A FILE PREDICATE (CLAUDE.md's standing rule, #3749 review round 5 item 1).
+# Every `test`/`[` file predicate is TWO-valued, so it has to collapse "cannot tell" onto
+# one of its two answers — and it always picks the permissive one. `[[ -e "$latch" ]]` is
+# FALSE both for a latch that is genuinely absent and for a latch this process cannot look
+# at, and reading the second as the first is a fail-open on the one file whose entire job
+# is to stop this box.
+#
+#   present — something is at that path. `-e || -L`, because a DANGLING symlink is
+#             `-e`-false and the fail-safe reading of "something is at the latch path" is
+#             LATCHED. Same idiom, same reason, as the supervisor lock's existence test.
+#   absent  — nothing is there AND the directory that would hold it was searchable and
+#             readable, so this is a MEASUREMENT and not a failure to look. A directory
+#             that does not exist yields `absent` too: no file can be inside it.
+#   unknown — the directory exists and this process cannot search or read it, so a latch
+#             may be sitting there unread. NEVER folded into `absent`.
+#   unkeyed — there is no latch PATH at all, because the box-wide key could not be
+#             derived. A different statement from all three above: it is not that the file
+#             is unreadable, it is that no file was ever named. The caller decides, and
+#             says why at the branch.
+obj_sweep_latch_state() {
+  local latch="$1" dir
+  [[ -n "$latch" ]] || {
+    printf 'unkeyed'
+    return 0
+  }
+  if [[ -e "$latch" || -L "$latch" ]]; then
+    printf 'present'
+    return 0
+  fi
+  dir="${latch%/*}"
+  [[ "$dir" == "$latch" ]] && dir="."
+  [[ -n "$dir" ]] || dir="/"
+  if [[ ! -d "$dir" ]] || { [[ -x "$dir" ]] && [[ -r "$dir" ]]; }; then
+    printf 'absent'
+    return 0
+  fi
+  printf 'unknown'
+}
+
+# obj_sweep_latch_present <latch-path> — is the latch in place? The affirmative half of
+# obj_sweep_latch_state, kept as its own name because obj_sweep_set_latch asks exactly
+# this question (did the file end up there?) and nothing else.
 obj_sweep_latch_present() {
   local latch="$1"
-  [[ -n "$latch" ]] || return 1
-  [[ -e "$latch" || -L "$latch" ]]
+  [[ "$(obj_sweep_latch_state "$latch")" == present ]]
 }
 
 # obj_sweep_write_stamp <path> — record WHEN this box last swept. One line, the epoch.
@@ -3447,19 +3486,64 @@ obj_sweep_set_latch() {
   obj_sweep_latch_present "$latch"
 }
 
-# obj_sweep_stop_if_latched <latch-path> — ASK THE LATCH QUESTION AND STOP IF THE ANSWER
-# IS YES. Returns 0 (carry on) when the box is not latched; never returns at all when it
-# is, because finalize_exit ends the process.
+# obj_sweep_stop_if_latched <latch-path> — ASK THE LATCH QUESTION AND STOP UNLESS THE
+# ANSWER IS AN AFFIRMATIVE "no". Returns 0 (carry on) only for `absent` and `unkeyed`;
+# never returns at all for `present` or `unknown`, because finalize_exit ends the process.
 #
-# WHY IT IS A FUNCTION CALLED FROM SEVERAL PLACES RATHER THAN ONE CHECK AT THE TOP
-# (#3749 review round 3, item 1a). The question has to be asked again IMMEDIATELY BEFORE
-# every path that lets this lane go on to spawn a worker, because a PEER can latch the
-# box at any moment — including while this lane's own sweep is in flight, which is up to
-# MAX_SWEEP_WALKS fsck walks. A lane that swept CLEAN while a peer was recording CORRUPT would
-# otherwise return 0 from a sweep whose answer is already known to be superseded.
+# IT IS CALLED AT THE TOP OF object_store_sweep, BEFORE EVERY BRANCH, AND AGAIN BEFORE
+# EVERY RETURN THAT LEADS TO A SPAWN (#3749 review rounds 3 and 5, item 1). Round 3 found
+# THREE returns that reached a spawn without re-reading the latch and fixed all three;
+# round 5 found a FOURTH — the OBJ_SWEEP_INTERVAL_HOURS=0 opt-out, which returned before
+# any latch read at all, so the documented way to disable the sweep also disabled an
+# already-recorded CORRUPT verdict. That is ONE defect arriving through a new door each
+# round, because the shape required every early return to independently remember the
+# check. So the ENTRY read is hoisted above every branch in object_store_sweep: the
+# invariant is now "this function cannot be ENTERED without a latch read", which holds for
+# branches nobody has written yet, and the post-sweep reads stay because a PEER can latch
+# the box WHILE this lane sweeps (up to MAX_SWEEP_WALKS fsck walks).
+#
+# `unknown` STOPS, AND HERE IS THE REASONING AT THE BRANCH. It means the directory holding
+# the latch exists and this process cannot search it, so a CORRUPT verdict may be sitting
+# there unread. The two directions are not symmetric: a false stop is ONE lane exiting with
+# a named, actionable reason an operator fixes in seconds, while a false carry-on is
+# workers certifying merges against a store already known to be damaged. It is also not a
+# plausible self-DoS — that directory is the same box-wide `/tmp` this supervisor puts its
+# own flock in, so a box on which it is unsearchable cannot get this far anyway. It is
+# reported as its OWN reason (`object-store-latch-unreadable`), never as CORRUPT: nothing
+# here observed damage, and claiming it would send an operator to re-clone a healthy store.
+#
+# `unkeyed` CARRIES ON, AND THAT IS THE ONE PERMISSIVE ANSWER (CLAUDE.md #3229: where a
+# signal genuinely SHOULD be permissive, record the why at the branch). No key means no
+# latch was ever NAMED — and the writer derives the name through the same resolver, so on
+# the two box-wide causes (the store cannot be resolved; this host has no digest tool) no
+# lane here could have recorded one either. It is announced once and it costs this lane its
+# throttle, so it re-measures the store itself every iteration and would rediscover damage
+# rather than inherit it. What it does NOT cover is a TRANSIENT resolver failure in THIS
+# lane while a peer keyed and latched successfully: that lane misses the peer's verdict for
+# one iteration. Stopping instead would make a missing or older `check-object-store-
+# integrity.sh` — an ordinary state on any branch cut before #3749 merged — halt every lane
+# on the box for want of a hygiene probe, which is the self-DoS CLAUDE.md rules out.
 obj_sweep_stop_if_latched() {
-  local latch="$1" latch_ts
-  obj_sweep_latch_present "$latch" || return 0
+  local latch="$1" latch_ts state
+  state="$(obj_sweep_latch_state "$latch")"
+  case "$state" in
+    absent)
+      return 0
+      ;;
+    unkeyed)
+      if [[ "$OBJ_SWEEP_NOSTAMP_NOTIFIED" -eq 0 ]]; then
+        log "object-store sweep: no box-wide key for this store — the shared store could not be resolved, or this host has no sha256 digest tool. There is no throttle and NO LATCH: a CORRUPT verdict recorded by a peer cannot be read here, and one found here cannot be recorded for peers. The sweep runs every iteration instead (#3749)."
+        OBJ_SWEEP_NOSTAMP_NOTIFIED=1
+      fi
+      return 0
+      ;;
+    unknown)
+      notify "high" "worker-supervisor: object-store CORRUPT latch UNREADABLE" \
+        "the directory holding this box's CORRUPT latch ($latch) exists and cannot be searched, so a recorded CORRUPT verdict may be sitting there unread. Stopping this lane rather than spawning a worker on an unknown store. This is NOT a corruption finding."
+      log "object-store: the CORRUPT latch state could NOT be read at $latch (its directory exists and is not searchable) — stopping. UNKNOWN is not clean: a peer's verdict may be unread. This is NOT a corruption finding; fix the directory's permissions (#3749)."
+      finalize_exit "object-store-latch-unreadable" 1
+      ;;
+  esac
   latch_ts="$(head -1 "$latch" 2>/dev/null || true)"
   [[ "$latch_ts" =~ ^[0-9]+$ ]] || latch_ts="<unrecorded>"
   notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT (latched)" \
@@ -3471,17 +3555,58 @@ obj_sweep_stop_if_latched() {
 
 object_store_sweep() {
   local script stamp latch latch_ts now last rc out verdict stamp_ts
+  # ---------------------------------------------------------------------------
+  # THE ENTRY LATCH READ. IT IS ABOVE EVERY BRANCH IN THIS FUNCTION, AND THE LINES
+  # BEFORE IT ARE ASSIGNMENTS ONLY — NO `if`, NO `return`, NOTHING THAT CAN LEAVE
+  # (#3749 review round 5, item 1).
+  #
+  # THE HISTORY IS THE POINT. Round 3 found "a return path that reaches a spawn without
+  # re-reading the latch" at THREE sites and fixed all three; round 5 found a FOURTH, the
+  # OBJ_SWEEP_INTERVAL_HOURS=0 opt-out, which returned before any latch read — so the
+  # documented way to switch the sweep OFF also switched off an already-recorded CORRUPT
+  # verdict, contradicting "a latch ignores the interval". Patching the fourth site would
+  # have left a fifth for the next reviewer, because the design required EVERY early
+  # return to independently remember the check. The read is therefore hoisted here, ONCE,
+  # at entry: "this function cannot be entered without a latch read" is a property of the
+  # function rather than of a set of sites, and it holds for branches nobody has written
+  # yet. Asserted STRUCTURALLY (test_worker_supervisor.sh, obj-sweep(entry-latch-read)):
+  # the first control-flow line in this body must come AFTER this call, so a future early
+  # return cannot be placed above it without reddening that case.
+  #
+  # THE POST-SWEEP READS STAY. They answer a DIFFERENT question — a peer can latch the box
+  # WHILE this lane sweeps, which is up to MAX_SWEEP_WALKS fsck walks — so the entry read
+  # does not subsume them (round 3, and its RED arm is still in the suite).
+  #
+  # THE COST IS ONE `--print-store` RESOLUTION PER ITERATION, MEASURED AT 5 ms on this
+  # fleet's store (10 runs, 2026-09-02; round 2 measured 7 ms for the same call). The
+  # opt-out path did not pay it before and now does. A supervisor iteration is minutes, so
+  # this is not a trade worth making conditional: a cache would be one more piece of
+  # process-scoped state on a question ("is this box latched?") whose whole value is that
+  # it is asked FRESH.
+  #
+  # THE LATCH PATH CANNOT ALWAYS BE DERIVED, and that is a NAMED state rather than an
+  # absent latch: obj_sweep_latch_state answers `unkeyed`, and obj_sweep_stop_if_latched
+  # announces it once and carries on, with the reasoning — and the residual it leaves — at
+  # that branch.
+  # ---------------------------------------------------------------------------
+  script="$REPO_ROOT/scripts/check-object-store-integrity.sh"
+  stamp="$(obj_sweep_stamp_path "$script")"
+  latch="$(obj_sweep_latch_path "$stamp")"
+  obj_sweep_stop_if_latched "$latch"
   if [[ "$OBJ_SWEEP_INTERVAL_HOURS" -le 0 ]]; then
     # ANNOUNCED, never silent (the CLAIM_CMD-disabled precedent in main()): a hygiene
     # probe that is off must be visible in the journal rather than inferred from missing
     # lines.
+    #
+    # AND IT IS REACHED ONLY AFTER THE ENTRY LATCH READ ABOVE. Disabling the sweep means
+    # "do not spend fsck walks on this box", never "ignore a verdict a sweep already
+    # recorded": the latch is a fact about the store, not a schedule.
     if [[ "$OBJ_SWEEP_ANNOUNCED" -eq 0 ]]; then
-      log "object-store sweep DISABLED (OBJ_SWEEP_INTERVAL_HOURS=0) — this box's SHARED git object store is NOT being rehashed this run (#3749)"
+      log "object-store sweep DISABLED (OBJ_SWEEP_INTERVAL_HOURS=0) — this box's SHARED git object store is NOT being rehashed this run; an existing CORRUPT latch is still honoured (#3749)"
       OBJ_SWEEP_ANNOUNCED=1
     fi
     return 0
   fi
-  script="$REPO_ROOT/scripts/check-object-store-integrity.sh"
   if [[ ! -r "$script" ]]; then
     # PERMISSIVE, AND HERE IS THE REASON, IN CODE (CLAUDE.md #3229: where a signal
     # genuinely SHOULD be permissive, record the why at the branch). The sweep is absent
@@ -3494,17 +3619,9 @@ object_store_sweep() {
     fi
     return 0
   fi
-  stamp="$(obj_sweep_stamp_path "$script")"
-  latch="$(obj_sweep_latch_path "$stamp")"
-  # NO KEY MEANS NO THROTTLE AND NO LATCH, AND THAT IS ANNOUNCED RATHER THAN INFERRED.
-  # Two causes, both named: the sweep script could not resolve the shared store, or this
-  # host has no usable digest tool (see obj_sweep_digest — the key must be injective, so
-  # there is deliberately no fallback to a name two stores could share). Once per run: it
-  # is a property of the box, not of the iteration.
-  if [[ -z "$stamp" && "$OBJ_SWEEP_NOSTAMP_NOTIFIED" -eq 0 ]]; then
-    log "object-store sweep: no box-wide key for this store — the shared store could not be resolved, or this host has no sha256 digest tool. The sweep will run EVERY iteration and a CORRUPT verdict cannot be latched for peer lanes (#3749)."
-    OBJ_SWEEP_NOSTAMP_NOTIFIED=1
-  fi
+  # THE STAMP AND LATCH WERE RESOLVED AT ENTRY, ABOVE, and the "no box-wide key" state is
+  # announced there by obj_sweep_stop_if_latched's `unkeyed` branch — the one place that
+  # can say it, because it is the branch that could not ask the latch question.
   now="$(date +%s)"
   last=0
   if [[ -n "$stamp" && -r "$stamp" ]]; then
@@ -3519,9 +3636,10 @@ object_store_sweep() {
   # since round 2, is not even in this file.
   [[ "$last" -gt "$now" ]] && last=0
 
-  # A LATCHED BOX STOPS THIS LANE WITHOUT RE-SWEEPING, AND IT IGNORES THE INTERVAL.
+  # A LATCHED BOX STOPS THIS LANE WITHOUT RE-SWEEPING, AND IT IGNORES THE INTERVAL —
+  # WHICH IS WHY THE READ THAT ENFORCES IT IS AT THE TOP OF THIS FUNCTION AND NOT HERE.
   #
-  # THE DEFECT THIS EXISTS FOR (#3749 review, BLOCKER A). The throttle is keyed on the
+  # THE DEFECT IT EXISTS FOR (#3749 review, BLOCKER A). The throttle is keyed on the
   # SHARED store and lives in a box-wide directory, so it is genuinely box-wide. When it
   # recorded only a timestamp, the lane that DETECTED corruption stopped — and its three
   # peers then saw a FRESH stamp, skipped their own sweep for the whole interval, and kept
@@ -3530,17 +3648,20 @@ object_store_sweep() {
   #
   # THE LATCH IS A DIFFERENT FILE FROM THE STAMP, ON PURPOSE (round 2, BLOCKER 1): see
   # obj_sweep_set_latch for why a verdict field in the mutable stamp is not monotonic
-  # under concurrency and why a lock was rejected. Here the consequence is simply that
-  # this test is an EXISTENCE test, which no concurrent writer can undo.
+  # under concurrency and why a lock was rejected. The consequence here is simply that the
+  # test is an EXISTENCE test, which no concurrent writer can undo.
   #
   # IT DOES NOT EXPIRE, and it is CLEARED BY HAND. Corruption is non-self-clearing, so an
   # age-based expiry would resume workers over a still-damaged store; the operator who
-  # repairs the store removes the file, and the remedy line below NAMES the path and the
-  # command, because a latch nobody can clear bricks the box after the repair.
-  obj_sweep_stop_if_latched "$latch"
-
+  # repairs the store removes the file, and every message that names the latch names that
+  # exact command, because a latch nobody can clear bricks the box after the repair.
+  #
+  # There is deliberately NO second read between the entry read and the throttle branch
+  # below: nothing between them can change the latch except a peer, in the microseconds it
+  # takes to stat one file, and the reads that DO cover a real window (this lane's own
+  # multi-walk sweep) are the ones after it.
   if [[ -n "$stamp" ]] && [[ $((now - last)) -lt $((OBJ_SWEEP_INTERVAL_HOURS * 3600)) ]]; then
-    # RE-ASKED ON THE THROTTLED PATH TOO. Cheap (one stat), and it keeps ONE rule —
+    # RE-ASKED ON THE THROTTLED PATH. Cheap (one stat), and it keeps ONE rule —
     # "no return that leads to a spawn without a fresh latch read" — instead of a set of
     # paths someone has to remember to audit individually.
     obj_sweep_stop_if_latched "$latch"
