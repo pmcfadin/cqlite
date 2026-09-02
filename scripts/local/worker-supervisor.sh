@@ -3376,11 +3376,15 @@ obj_sweep_latch_path() {
 #   present — something is at that path. `-e || -L`, because a DANGLING symlink is
 #             `-e`-false and the fail-safe reading of "something is at the latch path" is
 #             LATCHED. Same idiom, same reason, as the supervisor lock's existence test.
-#   absent  — nothing is there AND the directory that would hold it was searchable and
-#             readable, so this is a MEASUREMENT and not a failure to look. A directory
-#             that does not exist yields `absent` too: no file can be inside it.
-#   unknown — the directory exists and this process cannot search or read it, so a latch
-#             may be sitting there unread. NEVER folded into `absent`.
+#   absent  — nothing is there AND the directory that would hold it was SEARCHABLE, so this
+#             is a MEASUREMENT and not a failure to look. A directory that does not exist
+#             yields `absent` too: no file can be inside one that is not there.
+#             SEARCH (`-x`) and not READ (`-r`) is the right test, deliberately: `-e` on a
+#             named path needs only search permission on the parent, so a searchable but
+#             unlistable directory gives a TRUE answer and requiring `-r` as well would
+#             refuse a probe that was in fact valid — a false stop bought for nothing.
+#   unknown — the directory exists and this process cannot search it, so a latch may be
+#             sitting there unread. NEVER folded into `absent`.
 #   unkeyed — there is no latch PATH at all, because the box-wide key could not be
 #             derived. A different statement from all three above: it is not that the file
 #             is unreadable, it is that no file was ever named. The caller decides, and
@@ -3398,7 +3402,7 @@ obj_sweep_latch_state() {
   dir="${latch%/*}"
   [[ "$dir" == "$latch" ]] && dir="."
   [[ -n "$dir" ]] || dir="/"
-  if [[ ! -d "$dir" ]] || { [[ -x "$dir" ]] && [[ -r "$dir" ]]; }; then
+  if [[ ! -d "$dir" ]] || [[ -x "$dir" ]]; then
     printf 'absent'
     return 0
   fi

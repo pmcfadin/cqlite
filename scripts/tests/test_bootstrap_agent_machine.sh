@@ -1803,7 +1803,17 @@ if push_plain "$out7pk" | grep -q "git ls-remote .* refs/claims/smoke-"; then
   ok "push: the quoted verdict reaches the operator with the ls-remote check for the possibly-stranded ref"
 else
   bad "push: cleanup-unverified verdict lost its stray-ref guidance in transit"
-  push_plain "$out7pk" | grep -E 'CLAIM:|git-push' | head -3
+  # THE DIAGNOSTIC CARRIES THE rc AND A COUNT, NOT JUST THE FIRST THREE MATCHES (#3749
+  # review round 4). This pair has failed twice on this branch and the captured evidence
+  # could not tell the candidate causes apart: a different reason code, a probe KILLED at
+  # its 60s bound under load (which prints the UNMEASURED verdict and no CLAIM line at
+  # all), or a sandbox missing claim.sh. All three look the same when only the first three
+  # matching lines are shown — one observed log printed a single line and left it
+  # ambiguous whether a CLAIM verdict was quoted at ALL, which is precisely the fact that
+  # separates them. So: the probe's exit status, how many CLAIM lines reached the output,
+  # and then the lines.
+  printf '  rc=%s claim-lines=%s\n' "$rc7pk" "$(push_plain "$out7pk" | grep -cE 'CLAIM: ' || true)"
+  push_plain "$out7pk" | grep -E 'CLAIM: |git-push:' | head -6 | sed 's/^/    /'
 fi
 # NO CAUSE MAY BE ATTRIBUTED (#3369 review). One nonzero exit cannot tell a deletion
 # policy from a network drop from a post-readback auth failure, so neither claim.sh nor
