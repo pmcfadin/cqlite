@@ -1155,7 +1155,14 @@ The gate emits a block between `==== AGENT-GATE SUMMARY ====` markers. The last
 line is always `RESULT: PASS` or `RESULT: FAIL`. Paste this block verbatim in your
 PR report — prose summaries are not accepted.
 
-**Format (exact, as emitted by `scripts/agent-gate.sh`):**
+**Format (as emitted by `scripts/agent-gate.sh`; ABRIDGED — 13 of the 37 component rows are
+shown, and the meta lines a run also emits are `component-set:`, `accelerators:` and
+`cpu-budget:`):**
+
+This block previously called itself *exact* and was not — it showed a subset of rows and had
+drifted behind the emitted format. "Exact" is a claim this page cannot keep true across every
+component addition, so it now says what it is. Every field name, and the whole `NON-EXHAUSTIVE`
+clause, are verbatim from a real run; only counts and shas are placeholders, as elsewhere here.
 
 ```
 ==== AGENT-GATE SUMMARY ====
@@ -1166,18 +1173,20 @@ ci-pins: DATASET_TAG: <tag>  DATASET_ASSET: <asset>  DATASET_SHA256: <sha>
 tree-start: <head-sha12> dirty: yes|no digest: <digest12>
 tree-end:   <head-sha12> dirty: yes|no digest: <digest12>
 tree-integrity: PASS
-fmt:               PASS|FAIL (<Ns>)  [fmt workspace default-features]
-clippy:            PASS|FAIL (<Ns>)  [clippy workspace(excl 5) --all-features | clippy cqlite-core --features 33:all-compression,arrow,bench-internals,+30 more | ...]
-core-tests:        PASS|FAIL (<Ns>)  [test cqlite-core --features cli-helpers]
-integration-tests: PASS|FAIL (<Ns>)  [test cqlite-integration-tests default-features x2]
-write-tests:       PASS|FAIL (<Ns>)  [test cqlite-core --features write-support x3]
-cli-tests:         PASS|FAIL (<Ns>)  [test cqlite-cli default-features | test cqlite-cli --features write-support]
-minimal-build:     PASS|FAIL (<Ns>)  [build cqlite-core --no-default-features --features all-compression | test cqlite-core --no-default-features --features all-compression]
-all-features-check: PASS|FAIL (<Ns>)  [check cqlite-core --all-features | clippy cqlite-core --all-features]
-pub-surface:       PASS|FAIL (<Ns>)  [no-cargo]
-python-bindings:   PASS|SKIP (<Ns>)  [via maturin: feature set NOT observed]
-tooling-tests:     PASS|FAIL (<Ns>)  [cargo not observable: cargo may run inside ~60 nested test scripts (child processes)]
-smoke:             PASS|FAIL (<Ns>)  [build cqlite-cli default-features]
+census: <A>/<N> components AFFIRMED a count; <G> DECLARED-GAP (RECOGNISED); <U> NOT-MEASURED (RECOGNISED); <Z> measured-ZERO (RECOGNISED); <X> not-applicable (component did not PASS); <Y> no-subject (PASSed; the run had nothing to measure); <D> UNDECLARED; <W> unrecognised; <V> row(s) carry a VACUOUS status. NON-EXHAUSTIVE: the gap set is CURATED, so an unaffirmed component is UNMEASURED, never verified (#3625; the remaining gaps are tracked in #3162).
+fmt:               PASS|FAIL|VACUOUS (<Ns>)  [fmt workspace features=n/a]  {no census — cargo fmt --all --check emits no per-file tally to count}
+clippy:            PASS|FAIL|VACUOUS (<Ns>)  [clippy workspace(excl 5) --all-features | clippy cqlite-core --features 33:all-compression,arrow,bench-internals,+30 more | ...]  {no census — cargo clippy emits a per-crate tally only COLD; a warm run prints Finished alone}
+core-tests:        PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-core --features cli-helpers]  {verified: <n> tests passed (across <k> result line(s))}
+format-compat:     PASS|FAIL|VACUOUS (<Ns>)  [test format-compatibility-tests default-features]  {verified: 10 tests passed (across 1 result line(s))}
+integration-tests: PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-integration-tests default-features x2]  {verified: <n> tests passed and <k> test binaries built/verified}
+write-tests:       PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-core --features write-support x3]  {verified: <n> tests passed (across <k> result line(s))}
+cli-tests:         PASS|FAIL|VACUOUS (<Ns>)  [test cqlite-cli default-features | test cqlite-cli --features write-support]  {verified: <n> tests passed (across <k> result line(s))}
+minimal-build:     PASS|FAIL|VACUOUS (<Ns>)  [build cqlite-core --no-default-features --features all-compression | test cqlite-core --no-default-features --features all-compression]  {verified: <n> test binaries built/verified}
+all-features-check: PASS|FAIL|VACUOUS (<Ns>)  [check cqlite-core --all-features | clippy cqlite-core --all-features]  {no census — cargo check/clippy passes execute no tests; the subject is a feature set, not a count}
+pub-surface:       PASS|FAIL|VACUOUS (<Ns>)  [no-cargo]  {no census — shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)}
+python-bindings:   PASS|SKIP (<Ns>)  [via maturin: feature set NOT observed]  {verified: <n> pytest tests passed}
+tooling-tests:     FAIL (<Ns>)  [test ws0-corpus-gen default-features | + cargo not observable: cargo may run inside ~60 nested test scripts (child processes)]  {no census: component ended FAIL, so there is no PASS to affirm}
+smoke:             PASS|FAIL|VACUOUS (<Ns>)  [build cqlite-cli default-features]  {no census — smoke-test-all-tables.sh prints no machine-readable table count (#3162)}
 logs: /tmp/agent-gate.<random>
 summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PASS
@@ -1195,13 +1204,47 @@ tree-start: <head-sha12> dirty: yes|no digest: <digest12>
 tree-end:   <head-sha12> dirty: yes|no digest: <digest12>
 tree-integrity: PASS
 mode: PARTIAL (--only fmt,clippy) - does NOT count as the gate
-fmt:               PASS (<Ns>)  [fmt workspace default-features]
-clippy:            PASS (<Ns>)  [clippy workspace(excl 5) --all-features | ...]
+census: <A>/<N> components AFFIRMED a count; <G> DECLARED-GAP (RECOGNISED); ... (as above)
+fmt:               PASS (<Ns>)  [fmt workspace features=n/a]  {no census — cargo fmt --all --check emits no per-file tally to count}
+clippy:            PASS (<Ns>)  [clippy workspace(excl 5) --all-features | ...]  {no census — cargo clippy emits a per-crate tally only COLD; a warm run prints Finished alone}
 logs: /tmp/agent-gate.<random>
 summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PARTIAL
 ==== END AGENT-GATE SUMMARY ====
 ```
+
+### Every component line STATES WHAT IT VERIFIED, and a component that verified nothing cannot PASS (#3625)
+
+`PASS (0s)` is indistinguishable, in a pasted block, from a component that did nothing. A
+duration is a PROXY for work; a COUNT is the work. So every component line carries a census
+suffix after its feature matrix, and the block carries one aggregate `census:` line.
+
+The suffix renderings a reader will actually see:
+
+| suffix | meaning |
+|---|---|
+| `{verified: 3562 tests passed (across 41 result line(s))}` | an affirmative count — the component's real subject |
+| `{verified: 2 test binaries built/verified}` | a `--no-run` lane, whose honest subject is binaries, not tests |
+| `{no census — <reason>}` | a DECLARED GAP: no count is derivable for this component yet, and the reason prints every run |
+| `{no census: component ended FAIL, so there is no PASS to affirm}` | the component did not pass, so there is no PASS to census |
+| `{census NOT-MEASURED: <reason>}` | the census could not be taken (an unreadable log, a suppressed cargo status). **Never read as verified**, and deliberately non-fatal |
+| `{verified NOTHING: <reason>}` | the subject count was MEASURED and is zero — see `VACUOUS` below |
+
+**`VACUOUS` is a fourth component status beside `PASS`/`FAIL`/`SKIP`.** A component whose PASS
+carries a measured-zero census is recorded as `VACUOUS`, and **it fails the run** — `RESULT` is
+still only `PASS`/`FAIL`/`PARTIAL`, because the aggregation treats `PASS` and `SKIP` as the only
+non-failing component statuses and everything else, `VACUOUS` included, as a failure.
+
+Two conventions in the aggregate line are load-bearing and are not tidied away: every
+non-affirmed class prints as `N RECOGNISED` — never a bare `N` — and the line **declares its own
+non-exhaustiveness**, because the gap set is curated. A component that affirms nothing is
+UNMEASURED, which is not the same statement as verified.
+
+**Why cargo's warm `0s` rows are legitimate, and how to tell:** cargo caches COMPILATION, never
+test EXECUTION. A warm `cargo test` re-prints `test result: ok. N passed`, and a warm
+`cargo test --no-run` still prints one `Executable ` line per binary. So a `0s` row whose suffix
+carries a count really did re-verify its subject; the duration collapsed because the build was
+cached. That is the distinction the census exists to make visible.
 
 ### Every component line NAMES the feature matrix it ran (#3453)
 
