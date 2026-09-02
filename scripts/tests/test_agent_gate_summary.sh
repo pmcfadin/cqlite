@@ -1107,6 +1107,45 @@ elif grep -q 'PATH="\$HOME/.cargo/bin:\$PATH"; command -v sccache' "$scc_boot" \
 else
   bad "accel-sccache-agree: bootstrap and the gate no longer name the same fallback directory — one side moved, and the #3727 job-411 divergence returns"
 fi
+# THE THIRD SITE (#3727 job 413). Bootstrap answers this question in TWO contexts — a probed
+# SESSION (`scc_resolve_binary`, above) and its OWN process (`sccache_bin`, which section 2's
+# accelerator report and section 5b2's precondition both call). All three must name ~/.cargo/bin;
+# the in-process one resolves the INVOKING account's home from the passwd database rather than
+# from `$HOME`, because under `sudo bash bootstrap` that variable is root's. Its behaviour is
+# pinned in test_bootstrap_agent_machine.sh (12c); what no single-suite case can catch is one
+# side moving the directory, which is what this asserts.
+if [ ! -r "$scc_boot" ]; then
+  : # already reported above
+elif grep -q 'SCCACHE_FALLBACK_DIR="\$home/.cargo/bin"' "$scc_boot" \
+     && grep -q 'SCCACHE_FALLBACK_DIR="\$HOME/.cargo/bin"' "$scc_boot"; then
+  ok "accel-sccache-agree: bootstrap's IN-PROCESS resolver names the same ~/.cargo/bin, from the passwd home and from \$HOME"
+else
+  bad "accel-sccache-agree: bootstrap's in-process sccache_bin no longer names ~/.cargo/bin — the three sites have drifted apart"
+fi
+# AND THE GATE'S OWN CENSUS IS CLOSED: every line in agent-gate.sh that decides sccache presence
+# must be INSIDE `_gate_sccache_bin`. Counting today's sites proves nothing about tomorrow's, so
+# this is derived at run time and names any line it cannot account for. Comments are excluded
+# (the rationale quotes the idioms) and so are the three `__bin=$(_gate_sccache_bin)` callers,
+# which ASK the resolver rather than deciding.
+scc_gate_fn=$(sed -n '/^_gate_sccache_bin() {/,/^}/p' "$GATE")
+if [ -z "$scc_gate_fn" ]; then
+  bad "accel-sccache-census: could not extract _gate_sccache_bin from the shipped gate — the census would be vacuous"
+else
+  scc_gate_extra=""
+  while IFS= read -r scc_gline; do
+    [ -n "$scc_gline" ] || continue
+    case "$scc_gate_fn" in *"$scc_gline"*) continue ;; esac
+    scc_gate_extra="${scc_gate_extra:+$scc_gate_extra; }$scc_gline"
+  done <<EOF
+$(grep -vE '^[[:space:]]*#' "$GATE" \
+   | grep -E 'command -v sccache|type -P sccache|which sccache|-x "[^"]*sccache"|-f "[^"]*sccache"')
+EOF
+  if [ -z "$scc_gate_extra" ]; then
+    ok "accel-sccache-census: EVERY sccache presence decision in the gate is inside _gate_sccache_bin — no second answer about one box"
+  else
+    bad "accel-sccache-census: an sccache presence decision outside _gate_sccache_bin —$scc_gate_extra"
+  fi
+fi
 
 # 9c. sccache cache-health token (issue #2641). The accelerators line carries a
 #     trailing `sccache-health=na|ok|warn` token driven by sccache's OWN error
@@ -1283,6 +1322,92 @@ else
   ok "sccache-used: no approximated numeric percentage where exactness is unreachable"
 fi
 assert_accelerators "sccache-used-inexact" "$scc_pinx"
+
+# 9c-v-d. THE OPERANDS THEMSELVES CAN BE OUT OF RANGE, AND SIGNED ARITHMETIC ON ONE IS THE
+#         DEFECT (#3727 job 413, f2). The previous round bounded the intermediate PRODUCTS and
+#         left the INPUTS unchecked. sccache reports both readings as JSON UNSIGNED integers
+#         while every `$(( ))` here is signed 64-bit, so a cap above 2^63-1 wraps NEGATIVE on
+#         its FIRST use: the finding's own example — a 12 EiB cap holding 4 EiB — rendered
+#         `-100%`, a NUMBER, in a token whose whole premise is measured bytes honestly reported.
+scc_pneg="$tmp/scc-used-12eib.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_pneg" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=13835058055282163712 \
+  AGENT_GATE_TEST_SCCACHE_USED_BYTES=4611686018427387904 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_pneg" sccache-used '4611686018427387904(pct-inexact-overflow)'; then
+  ok "sccache-used: the finding's 12 EiB cap with 4 EiB used is NAMED pct-inexact-overflow (measured bytes kept, no percentage guessed)"
+else
+  bad "sccache-used: expected 4611686018427387904(pct-inexact-overflow) at a cap above 2^63-1"
+  grep '^accelerators:' "$scc_pneg" 2>/dev/null || cat "$scc_pneg"
+fi
+# The SPECIFIC wrong rendering, asserted against by name: a negative percentage is not merely
+# inexact, it is outside the token's grammar, and `-100%` is what this input used to produce.
+if grep -qE '^accelerators:.*sccache-used=[0-9]+\(-[0-9]+%\)' "$scc_pneg"; then
+  bad "sccache-used: rendered a NEGATIVE percentage — the wrapped signed arithmetic is back"
+  grep '^accelerators:' "$scc_pneg"
+else
+  ok "sccache-used: no negative percentage is rendered for an out-of-range cap"
+fi
+assert_accelerators "sccache-used-12eib" "$scc_pneg"
+# And the OTHER operand: an out-of-range USED with an ordinary cap. Both sides are checked, so
+# neither can reach the arithmetic.
+scc_pbigu="$tmp/scc-used-bigused.txt"
+AGENT_GATE_SUMMARY_FILE="$scc_pbigu" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  AGENT_GATE_TEST_SCCACHE_MAX_BYTES=10737418240 \
+  AGENT_GATE_TEST_SCCACHE_USED_BYTES=18446744073709551615 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if accel_token_is "$scc_pbigu" sccache-used '18446744073709551615(pct-inexact-overflow)'; then
+  ok "sccache-used: an out-of-range USED reading with an in-range cap is named too (both operands are checked)"
+else
+  bad "sccache-used: an out-of-range used reading was not named"
+  grep '^accelerators:' "$scc_pbigu" 2>/dev/null || cat "$scc_pbigu"
+fi
+assert_accelerators "sccache-used-bigused" "$scc_pbigu"
+
+# 9c-v-e. WHY THE RANGE CHECK IS LEXICAL, MEASURED RATHER THAN ASSERTED IN A COMMENT. A
+#         `[ "$v" -gt 9223372036854775807 ]` evaluates $v as a shell integer FIRST, so an
+#         out-of-range value has already wrapped by the time it is compared and the comparison
+#         answers "no, it is smaller" — the guard would license exactly the arithmetic it exists
+#         to refuse. This case measures that in THIS shell, then drives the shipped
+#         `_scc_uint_fits_i64` over the boundary, so the boundary is pinned at the helper and not
+#         only through the two summary renderings above.
+scc_naive=0
+[ "13835058055282163712" -gt 9223372036854775807 ] 2>/dev/null && scc_naive=1
+if [ "$scc_naive" -eq 0 ]; then
+  ok "sccache-pct: (mechanism) a naive numeric bound does NOT reject 13835058055282163712 in this shell — which is why the check is lexical"
+else
+  # Not a failure of the gate: it would mean this shell has bignum arithmetic, in which case the
+  # lexical check is merely redundant. Reported so nobody reads the ok above as always-true.
+  skipped "sccache-pct: this shell rejects 13835058055282163712 numerically (bignum arithmetic?) — the lexical rationale is unmeasurable here"
+fi
+scc_fits_src=$(sed -n '/^_scc_uint_fits_i64() {/,/^}/p' "$GATE")
+if [ -z "$scc_fits_src" ]; then
+  bad "sccache-pct: could not extract _scc_uint_fits_i64 from the shipped gate — the boundary asserts below would be vacuous"
+else
+  scc_fits_h="$tmp/scc-fits-harness.sh"
+  { printf '%s\n' "$scc_fits_src"; echo 'if _scc_uint_fits_i64 "$1"; then echo fits; else echo over; fi'; } >"$scc_fits_h"
+  scc_fits_bad=""
+  # value:expected — 2^63-1 is the largest that FITS; leading zeros are magnitude, not digits;
+  # a 19-digit value differing only in the LOW half exercises the two-half comparison.
+  for scc_fp in \
+    '0:fits' '1:fits' '10737418240:fits' '999999999999999999:fits' \
+    '1000000000000000000:fits' '9223372036854775806:fits' '9223372036854775807:fits' \
+    '9223372036854775808:over' '9223372036999999999:over' '9223372037000000000:over' \
+    '13835058055282163712:over' '18446744073709551615:over' '99999999999999999999:over' \
+    '0000000000009223372036854775807:fits' '000000000000000000000:fits' \
+    '00009223372036854775808:over' ':over' 'abc:over' '12x:over'; do
+    scc_fv="${scc_fp%%:*}"; scc_fw="${scc_fp##*:}"
+    scc_fg=$(bash "$scc_fits_h" "$scc_fv" 2>/dev/null)
+    [ "$scc_fg" = "$scc_fw" ] || scc_fits_bad="${scc_fits_bad:+$scc_fits_bad; }'$scc_fv' -> $scc_fg (want $scc_fw)"
+  done
+  if [ -z "$scc_fits_bad" ]; then
+    ok "sccache-pct: the shipped range check is exact at 2^63-1, zero-stripping-correct, and refuses a non-digit — 19 pinned values"
+  else
+    bad "sccache-pct: the range check disagrees with the 64-bit boundary — $scc_fits_bad"
+  fi
+fi
 
 # 9c-vi. THE UNMEASURABLE STATE HAS ITS OWN TOKEN, and `0` is not an all-clear. A cap that could
 #        not be read must never render blank, never render 0, and never be mistaken for a measured

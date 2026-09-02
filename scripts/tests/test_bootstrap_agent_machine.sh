@@ -4611,10 +4611,17 @@ else
   scc_out_nb=$(runscc "$scc_bs" "$scc_shims_nb" "$scc_env_v" SCCACHE_CACHE_SIZE=30G \
     SCC_STUB_MAX=32212254720 SCC_SHIM_SUDO_LOG="$scc_sudolog_nb")
   scc_sl_nb=$(scc_slice "$scc_out_nb")
+  #        AND THE ABSENCE NOW NAMES BOTH LOCATIONS (roborev job 413, f1). A PATH-only
+  #        precondition skipped this whole section on the STANDARD layout — a system cargo with
+  #        the documented `cargo install sccache` in the invoking account's ~/.cargo/bin — so the
+  #        check is the shared two-stage `sccache_bin`, and an absence may only be claimed once
+  #        BOTH locations have been checked. The expected text asserts that both were: a message
+  #        naming only the PATH would be the pre-fix behaviour.
   if out_has "$scc_sl_nb" -E '\[warn\].*sccache-cap: UNMEASURED' \
-     && out_has "$scc_sl_nb" "no 'sccache' on this box's PATH" \
+     && out_has "$scc_sl_nb" "no 'sccache' for the account gates run as" \
+     && out_has "$scc_sl_nb" -F -- "nor at '$tmp/scc-home/.cargo/bin/sccache'" \
      && ! out_has "$scc_sl_nb" -E '\[ok\].*sccache-cap'; then
-    ok "sccache-cap: no sccache on PATH -> UNMEASURED naming the missing tool, never an [ok]"
+    ok "sccache-cap: no sccache in EITHER location -> UNMEASURED naming both, never an [ok]"
   else
     bad "sccache-cap: an absent oracle did not produce UNMEASURED"
     printf '%s\n' "$scc_sl_nb" | head -6
@@ -4672,17 +4679,40 @@ else
   # $BOOTSTRAP, never $PIN_BS: PIN_BS is this suite's GUARD WRAPPER (it takes the script as its
   # first argument), so reading it yielded an EMPTY slice and the assertion failed for a reason
   # that had nothing to do with the property — measured, first run.
+  #
+  #          AND THE PRECONDITION MUST ASK THE SHARED TWO-STAGE RESOLVER (roborev job 413, f1).
+  #          `have sccache` alone answered for the ambient PATH only, so the non-root branch
+  #          STOPPED THE WHOLE SECTION on the standard layout (system cargo + `cargo install
+  #          sccache` in the invoking account's ~/.cargo/bin) — the gate accelerates such a box
+  #          and this section neither persisted nor verified its cap. Three properties, all
+  #          readable from the shipped source: the check is `sccache_bin` and NOT a second
+  #          `have sccache`; the ABSENCE branch requires rc 1 (both locations checked) as well as
+  #          a numeric non-zero EUID; and rc 2 — stage 2 unidentifiable — does NOT stop the
+  #          section, because a refusal derived from a measurement that could not be taken is
+  #          exactly what this section may not do. The slice ends at the first column-0 `fi`, and
+  #          bootstrap keeps only one in this block for that reason; an EMPTY or truncated slice
+  #          is reported rather than passed over.
   scc_pre_src=$(sed -n '/^scc_pre_euid=/,/^fi$/p' "$BOOTSTRAP")
-  if out_has "$scc_pre_src" -E '^scc_pre_euid="\$\{EUID-\}"$' \
+  scc_pre_lines=$(printf '%s\n' "$scc_pre_src" | grep -c . || true)
+  # CODE ONLY for the negative assert: the paragraph in bootstrap QUOTES `have sccache` to say
+  # why it is gone, so without this filter the check reds on its own rationale — the same trap
+  # case 13 records for its own pattern.
+  scc_pre_code=$(printf '%s\n' "$scc_pre_src" | grep -v '^[[:space:]]*#' || true)
+  if [ "${scc_pre_lines:-0}" -lt 12 ]; then
+    bad "sccache-cap: the precondition slice is $scc_pre_lines lines — the sed range broke (a nested column-0 'fi'?), so the asserts below would pass or fail for the wrong reason"
+  elif out_has "$scc_pre_src" -E '^scc_pre_euid="\$\{EUID-\}"$' \
      && out_has "$scc_pre_src" -E "^case \"\\\$scc_pre_euid\" in ''\|\*\[!0-9\]\*\)" \
-     && out_has "$scc_pre_src" -E '^  if \[ -n "\$scc_pre_euid" \] && \[ "\$scc_pre_euid" != 0 \]; then$' \
+     && out_has "$scc_pre_src" -F -- 'sccache_bin || scc_pre_rc=$?' \
+     && ! out_has "$scc_pre_code" -E 'have sccache' \
+     && out_has "$scc_pre_src" -E '^  if \[ "\$scc_pre_rc" -eq 1 \] && \[ -n "\$scc_pre_euid" \] && \[ "\$scc_pre_euid" != 0 \]; then$' \
      && out_has "$scc_pre_src" 'no cap to verify' \
      && out_has "$scc_pre_src" 'secure_path' \
+     && out_has "$scc_pre_src" 'ABSENCE is NOT established' \
      && out_has "$scc_pre_src" 'decided by the SESSION contexts'; then
-    ok "sccache-cap: the ambient-absence verdict is gated on a numeric non-zero EUID, and root bypasses it to the session contexts (structural: this suite cannot be root)"
+    ok "sccache-cap: the precondition asks the shared two-stage resolver, and only rc 1 + a numeric non-zero EUID is an absence (root and an unidentifiable fallback both defer to the session contexts) — structural: this suite cannot be root"
   else
-    bad "sccache-cap: the ambient precondition is not EUID-gated — under 'sudo bash bootstrap' a cargo-installed sccache reads as absent and --fix-sccache-cap repairs nothing"
-    printf '%s\n' "$scc_pre_src" | head -8
+    bad "sccache-cap: the ambient precondition is not two-stage + EUID-gated — under 'sudo bash bootstrap' (or on a system-cargo box) a cargo-installed sccache reads as absent and --fix-sccache-cap repairs nothing"
+    printf '%s\n' "$scc_pre_src" | head -12
   fi
 
   # 12b-f2b. TWO PROBES MUST NOT AGREE BY SHARING OUR CONTAMINATION (roborev job 399, f2). The
@@ -5221,6 +5251,291 @@ if [ -r "$scc_profile" ] \
 else
   bad "sccache-cap: verify.run no longer passes --fix-sccache-cap — launched boxes will arrive UNCAPPED"
   grep -nE '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$scc_profile" | head -2
+fi
+
+# --- 12c. ONE ANSWER TO "WHICH sccache" PER CONTEXT (issue #3727, roborev job 413) ------
+# Job 411 found agent-gate.sh disagreeing with THIS script about one box: a system cargo plus
+# the documented `cargo install sccache` (which lands in ~/.cargo/bin) was resolved by
+# bootstrap's session probe and invisible to the gate. Job 413 is the same defect INSIDE this
+# script — two PATH-only checks left over, and they are the two that decide whether anything
+# happens at all: section 2's accelerator report (whose false `sccache MISSING` is a [warn],
+# so `--strict` FAILED a healthy machine) and section 5b2's precondition (which SKIPPED cap
+# persistence and verification entirely). Both now call the shared `sccache_bin`.
+#
+# Three parts, in order of what they can prove: the CENSUS (no fourth site exists), the
+# RESOLVER's own behaviour including the root branch this suite cannot reach end to end, and
+# an END-TO-END `--strict` run on the exact divergent layout.
+
+# 12c-a. THE CENSUS, DERIVED AT RUN TIME AND CLOSED. Counting today's sites proves nothing
+#        about tomorrow's, so every line in the shipped script matching a presence-decision
+#        idiom must be one of the forms below, and an unrecognised one is a FAIL that NAMES it.
+#        This is what makes "the census is closed" a checked claim rather than a commit message.
+scc413_fn=$(sed -n '/^sccache_bin() {/,/^}/p' "$BOOTSTRAP")
+scc413_ic=$(sed -n '/^invoker_cargo_bin() {/,/^}/p' "$BOOTSTRAP")
+if [ -z "$scc413_fn" ] || [ -z "$scc413_ic" ]; then
+  bad "sccache-census: could not extract sccache_bin/invoker_cargo_bin from the shipped script — every assert below would be vacuous"
+else
+  ok "sccache-census: extracted sccache_bin + invoker_cargo_bin from the shipped script"
+  # The two STAGES live in that one function, and stage 2 tests -f BEFORE -x: `[ -x <dir> ]` is
+  # TRUE for a directory, so a directory named `sccache` would otherwise resolve as a binary.
+  if out_has "$scc413_fn" -F -- 'if have sccache; then' \
+     && out_has "$scc413_fn" -F -- '[ -f "$SCCACHE_FALLBACK_DIR/sccache" ] && [ -x "$SCCACHE_FALLBACK_DIR/sccache" ]'; then
+    ok "sccache-census: both stages (ambient PATH, then the invoking account's ~/.cargo/bin with -f before -x) live in the ONE resolver"
+  else
+    bad "sccache-census: sccache_bin no longer carries both stages in that form"
+    printf '%s\n' "$scc413_fn" | head -20
+  fi
+  # THE CLOSED SET. A matching line is legitimate only if it is (1) inside the resolver, (2) a
+  # single-quoted `bash -c` SESSION probe (scc_resolve_binary's two stages, which must expand
+  # $HOME in the session and so cannot be the in-process check), or (3) an EMIT — an
+  # `ok`/`warn`/`info` line, which is operator-facing text and decides nothing. Comments are
+  # excluded because the rationale QUOTES the idioms it replaced. Class (3) is a real exemption
+  # and not a loophole: MEASURED, it is what one `warn` about a literal sccache would discard and
+  # one `info` naming a by-hand check trip over, both prose containing the words "which sccache"
+  # and "command -v sccache". A decision cannot hide there — an emit's value is reported, never
+  # branched on — and the alternative (a command-position regex) would need its own grammar.
+  scc413_unexplained=""
+  while IFS= read -r scc413_line; do
+    [ -n "$scc413_line" ] || continue
+    # Leading whitespace stripped before the emit test: a `case` glob cannot express "any
+    # amount of indentation THEN this word" (`[[:space:]]*` is one class plus anything, and a
+    # bare `*` would match any prefix at all, exempting real code).
+    scc413_bare="${scc413_line#"${scc413_line%%[![:space:]]*}"}"
+    case "$scc413_line" in
+      *'bash -c '*) continue ;;                      # a probed SESSION, the other context
+    esac
+    case "$scc413_bare" in
+      'ok "'*|'warn "'*|'info "'*) continue ;;       # an EMIT: operator-facing text
+    esac
+    case "$scc413_fn" in *"$scc413_line"*) continue ;; esac
+    scc413_unexplained="${scc413_unexplained}${scc413_line}"$'\n'
+  done <<EOF
+$(grep -vE '^[[:space:]]*#' "$BOOTSTRAP" \
+   | grep -nE 'have sccache|command -v sccache|type -P sccache|which sccache|-x "[^"]*sccache"|-f "[^"]*sccache"' \
+   | sed 's/^[0-9]*://')
+EOF
+  if [ -z "$scc413_unexplained" ]; then
+    ok "sccache-census: EVERY presence-decision site in bootstrap is the shared resolver, a session probe, or advice text — no fourth site"
+  else
+    bad "sccache-census: a presence-decision site outside the shared resolver — the job-411/413 divergence class, reintroduced"
+    printf '%s' "$scc413_unexplained"
+  fi
+fi
+
+# 12c-b. THE RESOLVER'S BEHAVIOUR, INCLUDING THE ROOT BRANCH THIS SUITE CANNOT BE.
+#        `$EUID` is bash's own readonly and this suite runs as an ordinary account, so no
+#        fixture can make bootstrap's own process be root — a `sudo`/`unshare` fixture would
+#        measure a different box, and a SKIP is policed by case 13. So the euid is a POSITIONAL
+#        parameter of both functions (no env seam: an override is settable by the party it
+#        constrains) and these cases drive it directly, extracted from the SHIPPED script.
+#        DECLARED LIMIT: this covers every line that DIFFERS under root — the identity and home
+#        resolution — while the emit decision it feeds is shared with the non-root path, which
+#        12c-c exercises end to end. What is NOT covered here is a real root process.
+scc413_h="$tmp/scc413-harness.sh"
+{
+  echo 'set -uo pipefail'
+  # Harness setup, NOT the subject: `have` and `bounded` are taken from the shipped script too,
+  # so the extraction cannot pass against a different `have`.
+  sed -n '/^have() /p' "$BOOTSTRAP"
+  sed -n '/^bounded() {/,/^}/p' "$BOOTSTRAP"
+  echo 'TIMEOUT_BIN=$(command -v timeout || true); TIMEOUT_KILL_AFTER=1; BOUNDED_KILL_GRACE=5'
+  printf '%s\n' "$scc413_ic"
+  printf '%s\n' "$scc413_fn"
+  cat <<'HEOF'
+r=0
+if [ "${1:-bin}" = home ]; then
+  shift; invoker_cargo_bin "$@" || r=$?
+  printf 'rc=%s|dir=%s|why=%s\n' "$r" "${SCCACHE_FALLBACK_DIR:-}" "${SCCACHE_FALLBACK_WHY:-}"
+else
+  shift; sccache_bin "$@" || r=$?
+  printf 'rc=%s|bin=%s|where=%s|dir=%s|why=%s\n' "$r" "${SCCACHE_BIN:-}" "${SCCACHE_BIN_WHERE:-}" "${SCCACHE_FALLBACK_DIR:-}" "${SCCACHE_FALLBACK_WHY:-}"
+fi
+HEOF
+} >"$scc413_h"
+# A PATH with the coreutils the resolver uses and NO sccache, plus a HOME holding one.
+scc413_farm="$tmp/scc413-farm"; mk_hermetic_bin "$scc413_farm"
+for scc413_t in id getent; do
+  scc413_p=$(type -P "$scc413_t" 2>/dev/null) || continue
+  [ -n "$scc413_p" ] && ln -sf "$scc413_p" "$scc413_farm/$scc413_t" 2>/dev/null || true
+done
+scc413_home="$tmp/scc413-home"; mkdir -p "$scc413_home/.cargo/bin"
+mk_stub "$scc413_home/.cargo/bin" sccache 'exit 0'
+scc413_nohome="$tmp/scc413-empty-home"; mkdir -p "$scc413_nohome"
+scc413_dirhome="$tmp/scc413-dir-home"; mkdir -p "$scc413_dirhome/.cargo/bin/sccache"
+scc413_nxhome="$tmp/scc413-nx-home"; mkdir -p "$scc413_nxhome/.cargo/bin"
+: >"$scc413_nxhome/.cargo/bin/sccache"     # present but NOT executable
+scc413_run() { env -i PATH="$scc413_farm" HOME="$1" bash "$scc413_h" "${@:2}"; }
+# The CONSTRUCTION first: with no sccache on that PATH, stage 1 must not answer, or every case
+# below would pass through the wrong stage.
+if [ -n "$(env -i PATH="$scc413_farm" bash -c 'command -v sccache 2>/dev/null || true')" ]; then
+  bad "sccache-resolver: the fixture PATH resolves an sccache — stage 1 would answer and the ~/.cargo/bin stage would never run"
+else
+  ok "sccache-resolver: fixture constructed — no sccache on the fixture PATH, so stage 2 is what answers"
+  scc413_r=$(scc413_run "$scc413_home" bin 1000)
+  case "$scc413_r" in
+    "rc=0|bin=$scc413_home/.cargo/bin/sccache|where=$scc413_home/.cargo/bin|"*)
+      ok "sccache-resolver: a non-root run resolves the ABSOLUTE ~/.cargo/bin path (the only runnable form in that layout)" ;;
+    *) bad "sccache-resolver: stage 2 did not resolve the cargo-bin binary: $scc413_r" ;;
+  esac
+  scc413_r=$(scc413_run "$scc413_nohome" bin 1000)
+  case "$scc413_r" in
+    rc=1*) ok "sccache-resolver: BOTH locations checked and empty is rc 1 — the only outcome that licenses an absence claim" ;;
+    *) bad "sccache-resolver: an absence was not reported as rc 1: $scc413_r" ;;
+  esac
+  scc413_r=$(scc413_run "$scc413_dirhome" bin 1000)
+  case "$scc413_r" in
+    rc=1*) ok "sccache-resolver: a DIRECTORY named sccache is not a binary (-f before -x)" ;;
+    *) bad "sccache-resolver: a directory named sccache resolved as a binary: $scc413_r" ;;
+  esac
+  scc413_r=$(scc413_run "$scc413_nxhome" bin 1000)
+  case "$scc413_r" in
+    rc=1*) ok "sccache-resolver: a non-executable file at that path is not a binary" ;;
+    *) bad "sccache-resolver: a non-executable sccache resolved: $scc413_r" ;;
+  esac
+  # THE ROOT CRUX: bootstrap's own $HOME is ROOT's under `sudo bash <this script>`, so the home
+  # must come from the PASSWD DATABASE keyed on a validated SUDO_UID. HOME is pointed at a
+  # directory that DOES hold an sccache, so a resolver reading $HOME would answer with it — the
+  # assert is that it does NOT, and names the invoking account's home instead.
+  scc413_uid=$(id -u); scc413_user=$(id -un)
+  scc413_pwhome=$(getent passwd "$scc413_uid" 2>/dev/null | awk -F: '{print $6}')
+  if [ -z "$scc413_pwhome" ]; then
+    bad "sccache-resolver: getent could not name this account's home, so the root-branch cases cannot assert anything"
+  else
+    scc413_r=$(env -i PATH="$scc413_farm" HOME="$scc413_home" \
+      SUDO_UID="$scc413_uid" SUDO_USER="$scc413_user" bash "$scc413_h" home 0)
+    case "$scc413_r" in
+      "rc=0|dir=$scc413_pwhome/.cargo/bin|"*)
+        ok "sccache-resolver: under root the fallback is the INVOKING account's passwd home ($scc413_pwhome), NOT this process's \$HOME" ;;
+      *) bad "sccache-resolver: the root branch did not resolve the invoking account's passwd home (want $scc413_pwhome/.cargo/bin): $scc413_r" ;;
+    esac
+    # And the three facts that make it UNRESOLVABLE are rc 1 from invoker_cargo_bin, which
+    # sccache_bin turns into rc 2 — "stage 2 could not be identified", NEVER an absence. This is
+    # the half that fixes --strict: no MISSING warning may be emitted from an unmeasured state.
+    scc413_r=$(env -i PATH="$scc413_farm" HOME="$scc413_home" bash "$scc413_h" bin 0)
+    case "$scc413_r" in
+      rc=2*SUDO_UID*) ok "sccache-resolver: root with no usable SUDO_UID is rc 2 naming it — unmeasured, not absent" ;;
+      *) bad "sccache-resolver: root without SUDO_UID did not report rc 2 + a reason: $scc413_r" ;;
+    esac
+    scc413_r=$(env -i PATH="$scc413_farm" HOME="$scc413_home" SUDO_UID=0 SUDO_USER=root \
+      bash "$scc413_h" bin 0)
+    case "$scc413_r" in
+      rc=2*"invoked BY root"*) ok "sccache-resolver: SUDO_UID=0 (sudo invoked by root) is rc 2, not an absence" ;;
+      *) bad "sccache-resolver: SUDO_UID=0 did not report rc 2 + a reason: $scc413_r" ;;
+    esac
+    scc413_r=$(env -i PATH="$scc413_farm" HOME="$scc413_home" SUDO_UID="$scc413_uid" \
+      SUDO_USER=root bash "$scc413_h" bin 0)
+    case "$scc413_r" in
+      rc=2*INCONSISTENT*) ok "sccache-resolver: a SUDO_USER that disagrees with SUDO_UID is rc 2 (ambiguous whose home), not an absence" ;;
+      *) bad "sccache-resolver: inconsistent sudo metadata did not report rc 2: $scc413_r" ;;
+    esac
+    scc413_r=$(env -i PATH="$scc413_farm" HOME="$scc413_home" bash "$scc413_h" bin '')
+    case "$scc413_r" in
+      rc=2*EUID*) ok "sccache-resolver: an unreadable \$EUID is rc 2 naming it — the account gates run as is unknown, so nothing is claimed" ;;
+      *) bad "sccache-resolver: an unreadable EUID did not report rc 2: $scc413_r" ;;
+    esac
+  fi
+fi
+
+# 12c-c. THE END-TO-END STRICT-MODE CASE, ON THE EXACT DIVERGENT LAYOUT (the finding's own
+#        consequence). Built on the 7p green-path sandbox — the one fixture in this suite that
+#        reaches ZERO warnings, `All checks green.` and `--strict` exit 0 — with ONE property
+#        changed: the sccache stub moves off PATH into the invoking account's ~/.cargo/bin,
+#        which is where `cargo install sccache` puts it. Before this fix that box lost section
+#        2 to a false `sccache MISSING` [warn] (so --strict failed) AND section 5b2 to a
+#        precondition skip (so the cap was neither persisted nor verified).
+#
+#        THE PATH IS THE HOST'S MINUS EXACTLY ONE ENTRY. A hermetic farm would change many
+#        variables at once and a fixed `/usr/bin:/bin` would depend on where THIS host installed
+#        sccache; linking every executable on the host PATH except `sccache` changes the one
+#        property under test and nothing else.
+scc413c_farm="$tmp/scc413c-nosccache-path"; mkdir -p "$scc413c_farm"
+IFS=: read -r -a scc413c_parts <<<"$PATH"
+for scc413c_d in ${scc413c_parts[@]+"${scc413c_parts[@]}"}; do
+  [ -n "$scc413c_d" ] && [ -d "$scc413c_d" ] || continue
+  for scc413c_f in "$scc413c_d"/*; do
+    [ -x "$scc413c_f" ] && [ ! -d "$scc413c_f" ] || continue
+    scc413c_n=${scc413c_f##*/}
+    [ "$scc413c_n" = sccache ] && continue
+    [ -e "$scc413c_farm/$scc413c_n" ] && continue
+    ln -s "$scc413c_f" "$scc413c_farm/$scc413c_n" 2>/dev/null || true
+  done
+done
+scc413c_bare="$tmp/scc413c-bare.git"; mk_push_bare "$scc413c_bare"
+scc413c_repo="$tmp/scc413c-repo"; mk_push_repo "$scc413c_repo" "file://$scc413c_bare"
+scc413c_bin="$tmp/scc413c-bin"; mk_push_bin "$scc413c_bin"
+scc413c_gc="$tmp/scc413c-gc"; : >"$scc413c_gc"
+rm -f "$scc413c_bin/sccache"                      # OFF the PATH…
+mkdir -p "$scc413c_repo/.home/.cargo/bin"         # …and into the account's cargo bin
+mk_stub "$scc413c_repo/.home/.cargo/bin" sccache "$scc_stub_body"
+scc413c_scc="$scc413c_repo/.home/.cargo/bin/sccache"
+# CONSTRUCTION, asserted: cargo must be resolvable (the SYSTEM-cargo half of the divergence)
+# and sccache must NOT be, or stage 1 answers and this case tests nothing.
+scc413c_ok=1
+if [ -n "$(env -i PATH="$scc413c_bin:$scc413c_farm" bash -c 'command -v sccache 2>/dev/null || true')" ]; then
+  bad "sccache-strict-e2e: the fixture PATH still resolves an sccache — the layout under test was not constructed"
+  scc413c_ok=0
+fi
+if [ -z "$(env -i PATH="$scc413c_bin:$scc413c_farm" bash -c 'command -v cargo 2>/dev/null || true')" ]; then
+  bad "sccache-strict-e2e: the fixture PATH has no cargo, so the SYSTEM-CARGO half of the divergence is absent"
+  scc413c_ok=0
+fi
+if [ "$scc413c_ok" -eq 1 ]; then
+  ok "sccache-strict-e2e: fixture constructed — cargo ON PATH, sccache ONLY under the account's ~/.cargo/bin"
+  # run_push builds PATH as "$bin:$PATH", so the caller's PATH is the farm for the duration of
+  # the run and restored immediately after (this suite's own tools come back with it).
+  scc413c_savepath="$PATH"
+  PATH="$scc413c_farm"
+  run_push "$scc413c_repo" "$scc413c_bin" "$scc413c_gc" --strict
+  PATH="$scc413c_savepath"
+  scc413c_out="$push_out"; scc413c_rc="$push_rc"; scc413c_warns=$(push_warns "$scc413c_out")
+  scc413c_plain=$(push_plain "$scc413c_out")
+  if [ "$scc413c_rc" -eq 0 ] && [ "$scc413c_warns" -eq 0 ] && push_green "$scc413c_out"; then
+    ok "sccache-strict-e2e: a box whose sccache is ONLY in ~/.cargo/bin passes --strict with ZERO warnings (the false 'sccache MISSING' that failed a healthy machine is gone)"
+  else
+    bad "sccache-strict-e2e: --strict did not go green (rc=$scc413c_rc warns=$scc413c_warns) on a box the gate accelerates"
+    printf '%s\n' "$scc413c_plain" | grep -E '^[[:space:]]+\[warn\] ' | head -5
+  fi
+  if out_has "$scc413c_out" -F -- "sccache present" && out_has "$scc413c_out" -F -- "at '$scc413c_scc'"; then
+    ok "sccache-strict-e2e: section 2 reports it PRESENT and names the absolute path a gate will run"
+  else
+    bad "sccache-strict-e2e: section 2 did not report the ~/.cargo/bin sccache as present"
+    printf '%s\n' "$scc413c_plain" | grep -i sccache | head -5
+  fi
+  if ! out_has "$scc413c_out" -F -- 'sccache MISSING'; then
+    ok "sccache-strict-e2e: no 'sccache MISSING' warning for an sccache that IS installed"
+  else
+    bad "sccache-strict-e2e: the false MISSING warning is back — that is the --strict failure in the finding"
+  fi
+  # AND SECTION 5b2 MUST HAVE RUN, not been skipped by its precondition: it reaches VERIFIED,
+  # which is only reachable if the section resolved a binary, read the running server and
+  # correlated the env file. `UNMEASURED (no 'sccache'` is the precondition-skip signature.
+  if out_has "$scc413c_out" -E '\[ok\].*sccache-cap: VERIFIED'; then
+    ok "sccache-strict-e2e: section 5b2 ran and CERTIFIED the cap — persistence/verification is no longer skipped on this layout"
+  else
+    bad "sccache-strict-e2e: section 5b2 did not reach VERIFIED — the precondition skip (or a session that could not resolve the binary) is back"
+    printf '%s\n' "$scc413c_plain" | grep -i 'sccache-cap' | head -5
+  fi
+  if ! out_has "$scc413c_out" -F -- "no 'sccache' for the account gates run as"; then
+    ok "sccache-strict-e2e: 5b2's absence verdict was NOT emitted for a box that has one"
+  else
+    bad "sccache-strict-e2e: 5b2 declared sccache absent on a box where it is installed under ~/.cargo/bin"
+  fi
+  # THE NEGATIVE CONTROL, one property back: remove that binary and the SAME sandbox must fail
+  # --strict with the MISSING warning and the precondition skip. Without it the case above could
+  # be passing because nothing in it is sensitive to sccache at all.
+  rm -f "$scc413c_scc"
+  scc413c_savepath="$PATH"
+  PATH="$scc413c_farm"
+  run_push "$scc413c_repo" "$scc413c_bin" "$scc413c_gc" --strict
+  PATH="$scc413c_savepath"
+  scc413c_nout="$push_out"; scc413c_nrc="$push_rc"
+  if [ "$scc413c_nrc" -ne 0 ] && out_has "$scc413c_nout" -F -- 'sccache MISSING' \
+     && out_has "$scc413c_nout" -F -- "no 'sccache' for the account gates run as"; then
+    ok "sccache-strict-e2e: with the SAME sandbox and the binary removed, --strict FAILS with the MISSING warning and 5b2's absence verdict (so the green above is sccache-sensitive)"
+  else
+    bad "sccache-strict-e2e: the negative control did not fail (rc=$scc413c_nrc) — the positive case may be green for an unrelated reason"
+    push_plain "$scc413c_nout" | grep -i sccache | head -5
+  fi
 fi
 
 # --- 13. NO SKIP MAY BE ANNOUNCED THROUGH ok() (issue #3414 roborev round 2) ----------

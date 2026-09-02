@@ -447,10 +447,15 @@ invoker_cargo_bin() {
   return 1
 }
 
-# sccache_bin: THREE outcomes, and a caller may claim an ABSENCE only on rc 1.
+# sccache_bin [<euid>]: THREE outcomes, and a caller may claim an ABSENCE only on rc 1.
 #   rc 0 — SCCACHE_BIN is what to run, SCCACHE_BIN_WHERE says which stage answered.
 #   rc 1 — BOTH locations were checked and neither holds an sccache.
 #   rc 2 — stage 1 found none and stage 2 could not be identified (SCCACHE_FALLBACK_WHY).
+#
+# <euid> defaults to bash's own `$EUID` and NO caller passes it: it is a positional parameter
+# for the reason `invoker_cargo_bin`'s is — a readonly `$EUID` cannot be set, so it is the only
+# way a suite running as an ordinary account can drive the ROOT branch of this resolver at all,
+# and a positional default hands a real invoker nothing (unlike an environment override).
 sccache_bin() {
   SCCACHE_BIN=""; SCCACHE_BIN_WHERE=""
   if have sccache; then
@@ -458,7 +463,7 @@ sccache_bin() {
     SCCACHE_BIN_WHERE=PATH
     return 0
   fi
-  invoker_cargo_bin "${EUID-}" || return 2
+  invoker_cargo_bin "${1-${EUID-}}" || return 2
   if [ -f "$SCCACHE_FALLBACK_DIR/sccache" ] && [ -x "$SCCACHE_FALLBACK_DIR/sccache" ]; then
     SCCACHE_BIN="$SCCACHE_FALLBACK_DIR/sccache"
     SCCACHE_BIN_WHERE="$SCCACHE_FALLBACK_DIR"
@@ -3267,9 +3272,11 @@ case "$scc_pre_euid" in ''|*[!0-9]*) scc_pre_euid="" ;; esac
 # `cargo install sccache` under the invoking account's ~/.cargo/bin: a box the gate happily
 # accelerates, reported here as having no sccache at all.
 scc_pre_rc=0
-if [ "$SCC_SECTION_OK" = 1 ]; then
-  sccache_bin || scc_pre_rc=$?
-fi
+# ONE column-0 `fi` in this block, deliberately: the structural guard in
+# test_bootstrap_agent_machine.sh (12b-f1b) slices this precondition with a `sed` range that
+# ENDS at the first one, so a nested column-0 `fi` would truncate the slice and the guard
+# would assert over half the code.
+[ "$SCC_SECTION_OK" = 1 ] && { sccache_bin || scc_pre_rc=$?; }
 if [ "$SCC_SECTION_OK" = 1 ] && [ "$scc_pre_rc" -ne 0 ]; then
   if [ "$scc_pre_rc" -eq 1 ] && [ -n "$scc_pre_euid" ] && [ "$scc_pre_euid" != 0 ]; then
     warn "sccache-cap: UNMEASURED (no 'sccache' for the account gates run as — neither on this process's PATH nor at '$SCCACHE_FALLBACK_DIR/sccache' — so there is no cap to verify and nothing to persist for: the value->bytes oracle, the running server and the agreed binary are all questions about a tool that is not installed)"
