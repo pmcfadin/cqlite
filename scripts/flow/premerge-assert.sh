@@ -177,15 +177,31 @@
 #           hold commits never pushed, and no `gh` call here reads the PR's commit
 #           list. The `commit:`/`tree-start:` binding plus the head compare are
 #           what tie the chain to the sha GitHub will merge.
-#       (b) anything against a PEER THAT CAN WRITE THE SHARED OBJECT STORE. Git
-#           does not rehash a packed object against the id it was asked for, and
-#           not every file in that store is content-addressed. So the ancestry
-#           verdict is derived from a store that is TRUSTED, NOT VERIFIED — which
-#           the evidence line SAYS, on every run, naming #3746. That hazard is
-#           strictly bigger than this guard: #3746's own note is that its subject
-#           may be the infrastructure decision that lanes share an object store
-#           at all. A FIFTH route in this family is therefore a residual under
-#           (b), not a defect in this check and not a false claim here.
+#       (b) ANYTHING AGAINST A HOSTILE SAME-UID PEER. This is the TERMINUS of
+#           #3653's hardening line, and it is one fact with many faces. Git does
+#           not rehash a packed object against the id it was asked for and not
+#           every file in the shared store is content-addressed; AND the SCRATCH
+#           is peer-writable too, so a peer can drop `.git/info/grafts` into it,
+#           or replace the `repo` pathname, between `git init` and the walk —
+#           reproducing the round-1 graft attack inside the thing built to prevent
+#           it. Both halves have the SAME cause: every lane on this fleet runs as
+#           the SAME USER, so no mode or ownership can admit this process and
+#           exclude a peer, and the only alternative is a helper binary, which is
+#           not this issue.
+#
+#           SO WHAT THIS GUARD CLAIMS, EXACTLY: bounded, environment-isolated, and
+#           immune to grafts, replace refs, ambient templates and a trusted
+#           commit-graph AGAINST ACCIDENT AND DRIFT — a stray graft in the lane
+#           repo, a leftover `GIT_DIR`, an inherited template, a stale
+#           commit-graph. It is explicitly NOT a boundary against a hostile
+#           same-UID peer. The evidence line says so on every run, naming #3746,
+#           which already owns "lanes share an object store".
+#
+#           A LATER SAME-UID-PEER INSTANCE IS NOT A NEW DEFECT. It is this
+#           declared boundary, and it belongs to #3746. That is also what #3653
+#           asked for: the issue text says the hostile route is largely closed
+#           elsewhere and that the DEFECT WAS THE CONSTRAINT NOT BEING STATED
+#           WHERE THE GUARD IS READ. Stating it is the fix.
 #
 # USAGE
 #   scripts/flow/premerge-assert.sh <pr-number> <certified-sha> \
@@ -603,7 +619,16 @@ refuse_anchor_unverifiable() {
 # $(pwd) in the no-work-tree diagnostic          | NONE    | n/a (diagnostic text only)
 #                                               |  (b)    |
 # trap install (EXIT/INT/TERM/HUP)               | n/a     | registered BEFORE any resource
-#                                               |         | exists; handlers re-raise
+#                                               |         | exists; handlers re-raise. They
+#                                               |         | REPORT the retained scratch and
+#                                               |         | delete nothing. (This row was
+#                                               |         | FALSE between jobs 388 and 390:
+#                                               |         | the traps had been removed as
+#                                               |         | collateral while the table still
+#                                               |         | claimed them. Reconciled.)
+# the scratch directory itself, between      | n/a     | *** NOT ISOLATED FROM A SAME-UID
+#   `git init` and the walk                     |         | PEER (e) ***. Peer-writable; see
+#                                               |         | the terminus statement.
 # env -i + allowlist (wraps every git call)      | n/a     | ADMIT list is hard-coded, not
 #                                               |         | env-derived; neutralisers last
 # GIT_ALTERNATE_OBJECT_DIRECTORIES value         | n/a     | non-empty checked; C-quoted
@@ -617,6 +642,17 @@ refuse_anchor_unverifiable() {
 #      it only runs on a path that is already refusing.
 # Neither is reachable from the SHARED object store or from TMPDIR, which are the
 # surfaces the bounds exist for. The `anchor-reads:` token names both.
+#
+# AND THE BOUNDARY THIS WHOLE GUARD STOPS AT:
+#  (e) THE SCRATCH NAMESPACE IS TRUSTED, NOT VERIFIED — exactly as the shared
+#      object store is, for the same reason and with the same owner (#3746). A
+#      same-UID peer can drop `.git/info/grafts` into OUR scratch, or replace the
+#      `repo` pathname, between `git init` and the walk — reproducing round 1's
+#      graft attack INSIDE the thing built to prevent it. There is no permission
+#      boundary available: every lane on this fleet runs as the SAME USER, so
+#      neither mode nor ownership can admit us and exclude a peer, and the only
+#      alternative is a helper binary, which is not this issue. So the CLAIM is
+#      narrowed instead of the hole patched.
 #
 # AND ONE DECLARED NON-OPERATION:
 #  (c) THE SCRATCH DIRECTORY IS NOT DELETED. A delete through a peer-mutable
@@ -718,10 +754,14 @@ ANCHOR_BOUND_RUNNER=""
 ANCHOR_READS="UNRECORDED"
 
 # THE DECLARED BOUNDARY, in ONE constant consumed by the ONE renderer (job 361,
+# WIDENED at job 390 to name the SCRATCH NAMESPACE as well — see the terminus
+# statement in the header. The two halves have the same cause and the same owner:
+# every lane runs as the same user, so a peer can write both the shared object
+# store and our scratch.
 # following #3746 / job 311's mechanics). It is a CONSTANT and not a computed
 # value on purpose: there is no measurement this script can take that would make
 # it false, so a variable would only invite a future arm to omit it.
-ANCHOR_PROVENANCE="ancestry over this box's SHARED object store: objects+metadata TRUSTED, not verified (#3746)"
+ANCHOR_PROVENANCE="ancestry over this box's SHARED object store and SCRATCH namespace: objects, metadata and scratch TRUSTED, not verified (#3746) — closes accident/drift, NOT a same-UID peer"
 # _anchor_resolve_bound <anchor> <certified> — REFUSES when there is no supported
 # runner (see the reversal in the header). The two shas are taken only so the
 # refusal can name them, exactly like every other UNVERIFIABLE cause.
@@ -818,16 +858,9 @@ _anchor_timed_out() {
 _anchor_lane() { _anchor_run "$@"; }
 
 # --- THE ISOLATED SCRATCH REPOSITORY (roborev job 355) ----------------------
-# CLEANUP IS REGISTERED BEFORE THE RESOURCE EXISTS. CLAUDE.md's recurring lesson
-# in this family (roborev job 282) is exactly that ordering, plus: a fix that
-# ADDS a resource inherits that resource's lifetime bugs. So the variable is
+# REGISTRATION PRECEDES THE RESOURCE (CLAUDE.md job 282): the variable is
 # declared and the traps installed HERE, above any `mktemp`, and the handler is
-# empty-safe (`rm -rf ""` would delete nothing but is still a bug worth not
-# writing). Signals get handlers because bash runs NO EXIT trap for a signal left
-# at its default disposition; each re-raises after cleaning up, so the process
-# still dies of the signal it was sent. This script installs no other traps (it
-# had none before this change), so there is no caller disposition to save.
-ANCHOR_SCRATCH=""
+# empty-safe. Nothing here deletes — see below — so the handler only ever REPORTS.
 # THE SCRATCH IS DELIBERATELY NOT DELETED (roborev job 388). Three consecutive
 # rounds narrowed this one recursive delete — bounded it, validated its target,
 # then closed a symlink TOCTOU — and each fix could only SHRINK the check-to-use
@@ -857,6 +890,23 @@ ANCHOR_SCRATCH=""
 # device+inode identity probe — whose own measured limits (ext4 REUSES a
 # just-freed inode, so a same-path recreate was invisible; and no portable `stat`
 # format exists) were the clearest sign this was being narrowed, not solved.
+ANCHOR_SCRATCH=""
+
+# _anchor_cleanup — REPORTS the retained scratch path. It deletes nothing (see
+# above); its whole job is to make sure an operator learns where the directory
+# went, on EVERY post-creation exit path.
+#
+# THE TRAPS WERE DOCUMENTED IN THE AUDIT TABLE AND DID NOT EXIST (roborev job 390,
+# finding 3). They were removed as collateral by a span-replacing edit when the
+# delete came out, leaving ONE call on the success path — so every refusal, and
+# every signal, retained a scratch directory with NONE of the promised notice
+# while the table still claimed the traps were installed. A false claim in a
+# declared artifact is worse than a missing one, which is this issue in one line.
+#
+# Restored NON-DELETING: registered before any resource exists (job 282), signals
+# included because bash runs no EXIT trap for a signal at its default disposition,
+# each re-raising so the process still dies of what it was sent. There is nothing
+# to race here — reporting a path cannot delete anything.
 _anchor_cleanup() {
   [ -n "$ANCHOR_SCRATCH" ] || return 0
   printf 'PREMERGE: NOTE scratch dir left in place (NOT deleted): %s\n' "$ANCHOR_SCRATCH" >&2
@@ -867,6 +917,10 @@ _anchor_cleanup() {
   ANCHOR_SCRATCH=""
   return 0
 }
+trap '_anchor_cleanup' EXIT
+trap '_anchor_cleanup; trap - INT;  kill -INT  $$' INT
+trap '_anchor_cleanup; trap - TERM; kill -TERM $$' TERM
+trap '_anchor_cleanup; trap - HUP;  kill -HUP  $$' HUP
 
 # _anchor_canon <dir> — canonicalize with `cd`+`pwd -P`, EMPTY on failure. The
 # convention scripts/flow/base-staleness.sh uses (no `realpath` dependency), and

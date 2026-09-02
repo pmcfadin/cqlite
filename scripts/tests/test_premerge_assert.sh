@@ -98,6 +98,20 @@ fi
 # pin at 44(m) — but NOTHING MAY KILL BASED ON IT.
 TOSENTINEL=""
 
+# THE SUITE'S OWN `rm -rf "$T"` HAS THE SAME RACE, AND IS DELIBERATELY KEPT
+# (roborev job 390, finding 2 — DECLARED AND ACCEPTED, not removed). A same-UID
+# peer can swap `$T` between the mktemp and this delete, exactly as it could for
+# the shipped scratch. Four reasons this is not the same decision:
+#   1. cleaning one's own `mktemp` root is universal test practice;
+#   2. the same-UID fleet means NO boundary exists for a test suite either, so
+#      removal would not buy isolation — it would only move the garbage;
+#   3. the consequence is bounded: a test scratch, not a merge verdict. The
+#      shipped delete could damage a concurrent lane while certifying a merge;
+#   4. never cleaning ACCUMULATES every run, which R68 measured as a real cost
+#      (240 stray directories) — and this delete is what contains those, since
+#      TMPDIR points here.
+# Consistency with the production path would be cargo-culting that rule past the
+# reason for it.
 suite_cleanup() {
   rm -rf "$T"
 }
@@ -2168,6 +2182,21 @@ if run_anc 0 "Case B success declares the ancestry provenance boundary" \
     *"SHARED object store"*)
       ok "boundary: the declaration names WHAT is trusted (this box's shared object store)" ;;
     *) bad "boundary: the declaration must name the shared object store (got: $OUT)" ;;
+  esac
+  # WIDENED AT job 390: the SCRATCH namespace is trusted for the SAME reason — a
+  # same-UID peer can write into it between `git init` and the walk, reproducing
+  # round 1's graft attack inside the thing built to prevent it. There is no
+  # permission boundary on a one-user fleet, so the claim is narrowed rather than
+  # the hole patched, and this arm stops the scratch half being quietly dropped.
+  case "$OUT" in
+    *"SCRATCH namespace"*)
+      ok "boundary: the declaration ALSO names the scratch namespace (job 390)" ;;
+    *) bad "boundary: the declaration must name the SCRATCH namespace too (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"NOT a same-UID peer"*)
+      ok "boundary: the declaration states what it does NOT close (a same-UID peer)" ;;
+    *) bad "boundary: the declaration must say it does not close a same-UID peer (got: $OUT)" ;;
   esac
   # It must not have displaced the tokens a reader greps for.
   case "$OUT" in
