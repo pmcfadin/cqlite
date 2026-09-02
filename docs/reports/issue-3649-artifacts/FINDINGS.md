@@ -543,6 +543,54 @@ That is a pass derived from the absence of a bad signal, in the one check added
 to stop exactly that, and it is why there is a fourth token: `UNRECOGNISED` is
 disclosed as *not known to be local*, distinctly from `NOT-MEASURABLE`.
 
+**THE REQUIREMENT WAS THE ALGORITHM AND THE CHECK TESTED EXISTENCE — with the
+requirement written in the comment directly above it.** Round 12 enforced *"a
+non-empty `CompressionInfo.db` exists"* under a comment reading *"the field is
+LZ4"*, so Snappy, Deflate, Zstd, **`NoopCompressor`** and any corrupt-but-
+non-empty file passed as the required corpus. `NoopCompressor` is the sharpest:
+it is metadata for *no compression at all*, so it satisfied `compressed: true`
+while removing every byte of decode work — **the flattering direction again**,
+which is why it survived three rounds of review. A ratio measured against
+different decompression is not comparable to an LZ4-derived band.
+
+The parser is written from the definitive guide's layout
+(`appendix-g-compression-chunk-formats.md` 34–70, whose authority is
+`CompressionMetadata.java` at `cassandra-5.0.8`) and **never from CQLite's own
+reader** — a CQLite `file:line` is evidence of what CQLite does, never of what
+is correct. It is **four-valued, and the fourth state earned itself**: `LZ4` /
+`OTHER` (a compressor we know is not LZ4) / `UNRECOGNISED` (parses, names
+something we do not know) / `UNPARSEABLE`. Three refusals, three different
+operator actions — regenerate with the right compressor, look at this name, this
+file is damaged — and collapsing them hands one remedy to three problems.
+*An unknown compressor and a corrupt file are different things, and only the
+first is safely describable in the manifest*: recording a name we read is a
+fact, recording anything from bytes we could not parse would be inventing one.
+
+**And this suite's own fixtures were the defect, in five places.** The e2e corpus
+and four driver corpora used **512 zero bytes** as `CompressionInfo.db` — which
+satisfied the existence check while being a corrupt file. The test suite
+contained a working example of the bug it existed to catch. They are real LZ4
+headers now, generated from the guide's layout, so they are documents the parser
+has to read.
+
+**THE NARROW RIG IS A PROPERTY, AND `i4i.xlarge` IS WHAT AWS CALLS IT.** The
+band is defined for the M0 profile — 4 vCPU (§RUNBOOK line 9) — and
+`startswith("i4i")` let the whole *family* through: an `i4i.32xlarge` scored a
+clean band verdict on **128 vCPU**. The tempting fix, requiring the instance type
+to equal `i4i.xlarge`, enforces the *name*; it is the label-versus-property
+mistake this instrument had already removed for storage, reappearing one field
+over. So the refusal is on `nproc` and the label is a disclosure — two properties,
+each checked where it is measurable, with `c7i.4xlarge` still refused by the
+*storage* check because 4 vCPU on network storage fails for a different reason
+and should say so.
+
+**Declared residual, in the refusal text itself:** `nproc` honours the affinity
+mask, so pinning a 128-core box to 4 cores still reports the host count and is
+refused. That is **correct for the band** — cache and memory-bandwidth behaviour
+on a pinned large machine is not the M0 machine — but it will read as a false red
+to someone who believes they configured the narrow profile, so the refusal says
+so rather than leaving them to guess.
+
 **CLEANUP REGISTRATION PRECEDES RESOURCE CREATION — the fourth instance in this
 repository and the first in this file.** The session lock was acquired ~80 lines
 before the trap that frees it, so any failure in between left `.session-lock`
