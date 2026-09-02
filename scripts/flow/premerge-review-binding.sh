@@ -368,7 +368,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   local job bound=0 unclassifiable=0 unclassifiable_base=0 reviewed
   local heads=()
   local unresolved=()
-  for job in "${jobs[@]}"; do
+  for job in ${jobs[@]+"${jobs[@]}"}; do
     # NOT a command substitution. `reviewed_head_of` can refuse, and a refusal
     # inside `$( )` would exit only the SUBSHELL — the caller would read the
     # diagnostic as a sha and carry on. That is the fail-OPEN shape this whole
@@ -477,8 +477,14 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
     esac
   done
 
+  # GUARDED EXPANSION, and this is the site the portability finding names
+  # (roborev job 59, finding 4). `heads` is EMPTY exactly when every recorded
+  # job record was unretrievable — the run that MUST still reach the documented
+  # UNMEASURED verdict below. Under `set -u` on bash 3.2 a bare `"${heads[@]}"`
+  # ABORTS on an empty array, so the leg exited with no verdict at all on
+  # precisely its fail-closed path: a refusal that never printed its refusal.
   local head
-  for head in "${heads[@]}"; do
+  for head in ${heads[@]+"${heads[@]}"}; do
     print_self_check "$head" "$certified"
   done
   if [ "$bound" -eq 1 ]; then
@@ -505,7 +511,7 @@ so how much of the branch that round actually covered is UNKNOWN.")
   if [ "${#causes[@]}" -gt 0 ]; then
     causes+=("That is a measurement failure, not an absence of coverage, and the two need \
 different actions — so it is reported as its own verdict rather than folded into one.")
-    unmeasured "${causes[@]}"
+    unmeasured ${causes[@]+"${causes[@]}"}
   fi
   say "unbound none of the recorded roborev rounds covers the certified head."
   verdict UNBOUND

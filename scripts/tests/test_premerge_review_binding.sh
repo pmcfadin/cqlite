@@ -1285,6 +1285,45 @@ if run_hold 0 "scanner: a NULL body is a comment with no text, and still clears"
   esac
 fi
 
+# ==============================================================================
+# FINDING 4 (roborev job 59) — BASH 3.2 PORTABILITY
+# ==============================================================================
+# `mapfile`/`readarray` is bash 4+ and this repo states bash 3.2 support (stock
+# macOS ships 3.2.57), so the enrolled suite silently degraded to "unmeasurable"
+# on a SUPPORTED host. And `"${arr[@]}"` on an EMPTY array ABORTS under `set -u`
+# on 3.2 — at the one site (`heads`) that is empty exactly when every job record
+# was unretrievable, i.e. the leg exited with NO VERDICT on its fail-closed path.
+#
+# STRUCTURAL, because the defect is invisible on this host: bash 5 runs both
+# spellings happily, so no behavioural case on this box can distinguish them.
+for _f in "$REPO_ROOT/tests/lib/tristate-file-probe.bash" \
+  "$REPO_ROOT/flow/premerge-review-binding.sh"; do
+  assert_src_absent \
+    "portability: ${_f##*/} uses no bash-4-only mapfile/readarray builtin" \
+    "portability: ${_f##*/} still calls mapfile/readarray, which is absent on bash 3.2" \
+    "$_f" '^[[:space:]]*(mapfile|readarray)[[:space:]]' code
+  assert_src_absent \
+    "portability: ${_f##*/} has no unguarded \"\${arr[@]}\" expansion" \
+    "portability: ${_f##*/} expands an array unguarded, which aborts under set -u on bash 3.2" \
+    "$_f" 'for [A-Za-z_]+ in "\$\{[A-Za-z_]+\[@\]\}"' code
+done
+unset _f
+
+# BEHAVIOURAL: the consequence the finding names — with EVERY recorded job
+# unretrievable, `heads` is empty and the documented UNMEASURED verdict must
+# still be emitted rather than the shell aborting mid-unwind.
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 901)$(roborev_block 902)"
+rm -f "$MOCK_ROBOREV_DIR/job-901.json" "$MOCK_ROBOREV_DIR/job-902.json" \
+  "$MOCK_ROBOREV_DIR/list.json"
+if run_binding 5 "portability: EVERY job record unretrievable still REACHES a verdict" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "portability: the all-unretrievable run prints its UNMEASURED refusal (empty heads[])" ;;
+    *) bad "portability: expected the UNMEASURED verdict on an empty heads[] (got: $OUT)" ;;
+  esac
+fi
+
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.

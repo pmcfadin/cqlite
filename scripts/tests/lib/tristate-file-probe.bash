@@ -33,7 +33,8 @@
 # SIGPIPE, the PIPELINE reports 141, and the `if` takes the no-match branch. A
 # CORRECT file intermittently reds, and a merge-gate test that reds on correct
 # input is the guard agents learn to waive. These helpers read the subject with
-# `mapfile` and match with bash's own `=~`/`==`, so there is no pipe, no
+# a plain `read` loop (bash 3.2 safe) and match with bash's own `=~`/`==`,
+# so there is no pipe, no
 # early-exiting consumer and no exit status to lose.
 #
 # The probes are PURE (0/1/2 or a count on stdout); the `assert_*` wrappers call
@@ -72,7 +73,24 @@ probe_read() {
     PROBE_WHY="the file is not readable"
     return 2
   fi
-  mapfile -t PROBE_LINES <"$1" || {
+  # PORTABLE, NOT `mapfile` (roborev job 59, finding 4). `mapfile`/`readarray`
+  # is bash 4+, and this repo states bash 3.2 compatibility (stock macOS ships
+  # 3.2.57). Under 3.2 the builtin is simply absent, so every probe in this
+  # library returned 2 and every structural assert built on it reported "could
+  # not be measured" — a whole suite degrading to unmeasurable on a SUPPORTED
+  # host. The read loop below is byte-equivalent for our subjects and needs no
+  # builtin: `read` returns non-zero on a final line with no trailing newline,
+  # which is why the last partial line is appended explicitly rather than
+  # dropped.
+  # `_line` is INITIALISED, not merely declared: this library is sourced into
+  # suites running under `set -u`, where the `[ -n "$_line" ]` guard below would
+  # abort on an unset variable the first time `read` fails.
+  local _line=""
+  PROBE_LINES=()
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    PROBE_LINES+=("$_line")
+    _line=""
+  done <"$1" || {
     PROBE_WHY="the file could not be read in full"
     PROBE_LINES=()
     return 2
@@ -97,7 +115,7 @@ _probe_skip() {
 probe_file_match() {
   local f=$1 re=$2 mode=${3:-all} line
   probe_read "$f" || return 2
-  for line in "${PROBE_LINES[@]}"; do
+  for line in ${PROBE_LINES[@]+"${PROBE_LINES[@]}"}; do
     _probe_skip "$line" "$mode" && continue
     [[ $line =~ $re ]] && return 0
   done
@@ -108,7 +126,7 @@ probe_file_match() {
 probe_file_fixed() {
   local f=$1 needle=$2 mode=${3:-all} line
   probe_read "$f" || return 2
-  for line in "${PROBE_LINES[@]}"; do
+  for line in ${PROBE_LINES[@]+"${PROBE_LINES[@]}"}; do
     _probe_skip "$line" "$mode" && continue
     [[ $line == *"$needle"* ]] && return 0
   done
@@ -123,7 +141,7 @@ probe_file_fixed() {
 probe_count() {
   local f=$1 kind=$2 needle=${3:-} line n=0
   probe_read "$f" || return 2
-  for line in "${PROBE_LINES[@]}"; do
+  for line in ${PROBE_LINES[@]+"${PROBE_LINES[@]}"}; do
     case "$kind" in
       line-exact) [ "$line" = "$needle" ] && n=$((n + 1)) ;;
       contains) [[ $line == *"$needle"* ]] && n=$((n + 1)) ;;
@@ -215,7 +233,7 @@ probe_write_code_lines() {
     PROBE_WHY="the destination $2 could not be created"
     return 2
   }
-  for line in "${PROBE_LINES[@]}"; do
+  for line in ${PROBE_LINES[@]+"${PROBE_LINES[@]}"}; do
     _probe_skip "$line" code && continue
     printf '%s\n' "$line" >>"$2" || {
       PROBE_WHY="writing $2 failed part-way"
