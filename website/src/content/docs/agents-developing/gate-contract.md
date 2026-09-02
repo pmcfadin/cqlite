@@ -767,7 +767,8 @@ not finish**, and reproduced on *both* walks it is the stopping verdict `UNSWEEP
 boundary is argued from the exec chain rather than assumed: `env`/`nice`/`timeout` each report their
 own failures inside `125..127`, so a status at or above 128 is the innermost command having actually
 started, which together with the launch marker below makes "fsck ran and died" an *affirmative*
-observation. **`UNSWEEPABLE` claims no cause and prints no repair** — the alternative was to read the
+observation. **On that cause `UNSWEEPABLE` claims no cause and prints no repair** (scoped to the
+*fatal* cause: the verdict gained a second one, below, which does name its cause) — the alternative was to read the
 `fatal:` text for a damage signature, i.e. the text-shape classifier again, narrower, with every
 wording nobody enumerated falling back to the same permissive state. It tells the operator to run the
 walk by hand and act on what the `fatal:` line names (that line is kept in the findings **for display
@@ -775,6 +776,30 @@ only**; it reaches no branch), and it makes a completed sweep the condition for 
 verdict set is closed at **four**, and the closure is over *dispositions*, not over a count: a token
 is what every consumer keys its behaviour on, so a state that stops the box cannot be expressed as
 another verdict's cause text, while two causes that both continue (the reflog split above) must be.
+
+**`UNSWEEPABLE` has a second cause: the store's own `fsck.*` config, which the environment allowlist
+cannot reach.** `env -i` plus the allowlist closes git's *environment* config sources; a **local
+config is a file in the repository, not an environment variable**, and `git fsck` is configurable.
+Measured on git 2.43.0 against a real fixture (a commit object with no author email — an
+ERROR-severity message, exit bit 1, the sweep's own damage class): plain fsck exits **1**, while both
+`fsck.<msg-id>=ignore` and a `fsck.skipList` naming that object exit **0** — so the sweep reported
+`VERIFIED` **about a damaged store**, the exact false affirmative this control exists to prevent. It
+is in model because the file is the *shared* `.git/config` a peer lane, or an accident, writes. It is
+**refused, not overridden**: `fsck.<msg-id>` is an open-ended key space (one key per message id, new
+ids with new git versions), so a `-c` per key is a list that is wrong the moment git adds a message,
+and a partial override is the "one axis closed, space declared done" shape this issue has hit five
+times. So any `fsck.*` key in the configuration the walk would read means **no walk at all** and
+`UNSWEEPABLE`, naming the keys and the `config --list --show-origin --name-only` that lists them, and
+claiming **no damage** — nothing was rehashed. It *stops* rather than reporting, because the policy is
+a persistent property of the repository and because an `fsck.<msg-id>` naming an id this git does not
+know **already** stops the box through the fatal cause, so the permissive reading would stop a box
+whose config merely breaks fsck while letting one that suppresses real damage carry on. "Could not
+**ask**" stays permissive and is its own state: a failed probe, or an rc-0 answer listing no key at
+all (an *unread* policy, not an empty one — every repository's config declares
+`core.repositoryformatversion`), is `UNMEASURED` with its own cause and no walk, so `VERIFIED` is
+reachable only from a policy that was read and found empty. And both consumers' text is now derived
+from the **token** alone — the latch records only the verdict, so a reader naming the fatal mechanism
+was affirmatively false on the other cause.
 
 **And a status is only a bitmask if the command that produced it actually ran.** fsck's status space
 is shared with the shell's, so the classifier had a precondition it never checked: the two capture

@@ -491,6 +491,41 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   every consumer keys its disposition on, so a state whose disposition differs from all existing
   ones CANNOT be expressed as cause text — the verdict set is closed at **four**, and a fifth needs
   a fifth disposition, not a fifth cause.
+  **`UNSWEEPABLE` HAS A SECOND CAUSE, AND IT IS THE ONE THE ENVIRONMENT ALLOWLIST CANNOT REACH
+  (round 11).** `env -i` + the allowlist closes git's *environment* config sources; it cannot close
+  the store's OWN config, because **a local config is a FILE in the repository, not an environment
+  variable** — the same distinction this file already records for the transport hop. And `git fsck`
+  is CONFIGURABLE: measured on git 2.43.0 against a real fixture (a commit object with no author
+  email — an ERROR-severity message, exit bit 1, the sweep's own damage class), plain fsck exits
+  **1** while both `fsck.<msg-id>=ignore` and a `fsck.skipList` naming that object exit **0**, so
+  the sweep reported **`VERIFIED` about a damaged store** — the exact false affirmative this whole
+  control exists to prevent, and it is IN MODEL because the file is the SHARED
+  `/data/lanes/repo/.git/config` a peer lane (or an accident — one `skipList` added to work around
+  one known-bad object) writes. It is **REFUSED, not overridden**: `fsck.<msg-id>` is an
+  OPEN-ENDED key space (one key per message id, new ids with new git versions), so a `-c` per key is
+  a list that is wrong the moment git adds a message and a partial override is the "one axis closed,
+  space declared done" shape this issue has hit five times — the same ruling as the protocol
+  allowlist (*"a protocol allowlist is not expressible either … So there is no import at all"*).
+  So: **any `fsck.*` key in the configuration the walk would read ⇒ no walk at all ⇒ `UNSWEEPABLE`**,
+  naming the keys and the `config --list --show-origin --name-only` that lists them, claiming **NO
+  damage** (nothing was rehashed). It **STOPS** rather than reporting, on the round-10 disposition
+  argument plus one that decides it: an `fsck.<msg-id>` for an id THIS git does not know **already**
+  stops the box (exit 128 twice, the fatal cause), so the permissive reading would stop a box whose
+  config merely BREAKS fsck while letting one that SUPPRESSES REAL DAMAGE carry on. Zero such keys
+  exist on this fleet's shared store (measured 2026-09-02), the remedy is local and repairs nothing,
+  and detection would otherwise be OFF on that box forever. **"Could not ASK" stays permissive and
+  is its own state**: a failed probe — or an rc-0 answer listing NO key at all, which is an UNREAD
+  policy and not an empty one, since every repository's config declares
+  `core.repositoryformatversion` — is `UNMEASURED` with its own cause and no walk, so `VERIFIED` is
+  reachable only from a policy that was READ and found empty. **And the CONSUMERS' text is now
+  derived from the TOKEN alone**: the latch records only the verdict, so a reader that named the
+  fatal mechanism was affirmatively false on the other cause — they say the store's content is
+  UNKNOWN and NO DAMAGE was established, and quote the sweep's own `verdict-detail` lines for the
+  cause. Two rejected shapes, recorded: sweeping through a scratch repository with a clean config
+  (it loses round 7's measured worktree roots and would have to reconstruct git's administrative
+  layout — a second implementation of it, with its own false-clean routes), and walking anyway while
+  downgrading only the affirmative verdict (it keeps a `VERIFIED` path alive under a policy nobody
+  read).
   **AND "THE ROOTS THE WALK HAS" WAS ITSELF AN UNCHECKED ASSUMPTION, WRONG IN BOTH DIRECTIONS
   (review round 7).** A review finding held that `--git-dir=<common>` discards linked worktrees'
   private administrative context, so a missing object needed only by a lane's private HEAD or index
@@ -555,8 +590,9 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   boundary is argued from the exec chain, not assumed: `env`/`nice`/`timeout` each report their own
   failures inside `125..127`, so a status at or above 128 is the innermost command having actually
   started, which together with the `.started` marker below makes "fsck ran and died" an
-  AFFIRMATIVE observation rather than an absence. **`UNSWEEPABLE` CLAIMS NO CAUSE AND PRINTS NO
-  REPAIR** — the alternative was to read the `fatal:` text for a damage signature, i.e. round 1's
+  AFFIRMATIVE observation rather than an absence. **ON THAT CAUSE `UNSWEEPABLE` CLAIMS NO CAUSE AND
+  PRINTS NO REPAIR** — scoped to the FATAL cause since round 11 gave the verdict a second one, below,
+  which does name its cause — the alternative was to read the `fatal:` text for a damage signature, i.e. round 1's
   classifier again, narrower, and with every wording nobody enumerated falling back to the SAME
   permissive state, so it would close only the cases somebody thought of. It tells the operator to
   run the walk by hand and act on what the `fatal:` line names (that line is now kept in the
@@ -716,7 +752,21 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   unrecoverable claim is worse than the herd it prevents. The claim is a **REGISTERED** resource
   (`OBJ_SWEEP_CLAIM_OWNED`, read by the EXIT trap installed before any sweep can run), so the
   CORRUPT path — which ends the process — does not leave its peers waiting out the bound; CLAUDE.md's
-  roborev-job-282 ruling, applied to a resource this fix ADDED. Still not closed, and it is the
+  roborev-job-282 ruling, applied to a resource this fix ADDED.
+  **AND A CLAIM IS RELEASED ONLY WHILE IT IS STILL OURS — A PATH IS NOT AN IDENTITY (round 11).**
+  The release `rm -rf`'d the claim path unconditionally, so a lane whose sweep overran the recovery
+  bound deleted the claim of the SUCCESSOR that had legitimately taken over — permitting the second
+  concurrent full-store fsck the claim exists to prevent — and a lane on the `unavailable` path,
+  which never owned the claim at all, did the same at the end of its own sweep. The claim now carries
+  an ownership TOKEN written **before** its `started` file (so a claim a peer can AGE already names
+  its owner), and only an AFFIRMATIVE token match deletes: the question is four-valued
+  (`ours`/`other`/`gone`/`unknown`) and the three non-affirmative answers all LEAVE the directory,
+  because deleting costs a concurrent sweep while keeping costs one skipped 6-hourly probe that the
+  staleness bound recovers. **It is NOT atomic and does not claim to be**: the read and the `rm` are
+  two operations, so a takeover landing between them is still deleted — a microsecond window against
+  the previous "always". A rename-then-verify was rejected (it moves a successor's claim aside before
+  it can be checked, and restoring it is not atomic either, since `mv` onto an existing directory
+  moves INTO it). Still not closed, and it is the
   pre-existing half: this file installs no INT/TERM handlers, so a SIGNALLED supervisor releases
   neither its claim nor its lock — for the claim a delay rather than a wedge, and adding signal
   handlers changes the LOCK's lifetime too (#3683's subject).
