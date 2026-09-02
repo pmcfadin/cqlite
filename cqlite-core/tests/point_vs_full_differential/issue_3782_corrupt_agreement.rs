@@ -81,12 +81,15 @@ async fn open_db(root: &Path, schema: &Path, mode: ReadPathMode) -> cqlite_core:
     .database
 }
 
-/// The committed fixture directory, resolved per TABLE (#3220).
+/// The fixture directory, resolved per TABLE across every candidate root
+/// (#3220) — this BIG subject is a FETCHED fixture (its checkout directory holds
+/// sidecars only), so a checkout-first or env-first preference is wrong for one
+/// root or the other (#3104); evidence decides.
 fn fixture_dir() -> std::path::PathBuf {
     let root = match datasets_root::sstables_root_for_table(fixture::FIX_KS, fixture::FIX_TABLE) {
         Some(r) => r,
         None => panic!(
-            "committed fixture {}.{} not found; {}",
+            "fixture {}.{} not found; {}",
             fixture::FIX_KS,
             fixture::FIX_TABLE,
             datasets_root::describe_search(fixture::FIX_KS, fixture::FIX_TABLE)

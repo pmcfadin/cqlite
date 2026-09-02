@@ -61,14 +61,17 @@ mod fixture;
 
 use fixture::{comp_file, FixtureSpec, BIG_COMPOSITE, BTI_MULTICLUSTERING, FIX_KS, FIX_TABLE};
 
-/// The corrupted fixture's directory, resolved per TABLE (#3220) so a root that
-/// holds the keyspace but not this table cannot silently win the selection.
+/// The fixture's directory, resolved per TABLE (#3220) so a root that holds the
+/// keyspace but not this table cannot silently win the selection. The two specs
+/// live in DIFFERENT roots on a fleet box — the BTI one is git-committed in the
+/// checkout, the BIG one is fetched-corpus-only — so evidence, never a
+/// preference order, decides (#3104).
 fn fixture_dir(spec: &FixtureSpec) -> PathBuf {
     let (ks, table) = (spec.keyspace, spec.table);
     let root = match datasets_root::sstables_root_for_table(ks, table) {
         Some(r) => r,
         None => panic!(
-            "committed fixture {ks}.{table} not found; {}",
+            "fixture {ks}.{table} not found; {}",
             datasets_root::describe_search(ks, table)
         ),
     };
@@ -252,6 +255,104 @@ async fn compaction_refuses_a_corrupt_row_and_never_loses_or_fabricates_partitio
     );
 }
 
+/// Table identity: `(keyspace, table)` with the generation/uuid directory suffix
+/// dropped, so the same table reachable from two candidate roots is ONE subject.
+type TableId = (String, String);
+
+/// Committed/required corpus subjects that MUST be scanned by the corpus case
+/// below — fail-closed unconditionally, never a skip (#3220).
+///
+/// `test_da.multiclustering_table` is a git-COMMITTED `da`/BTI fixture
+/// (`git ls-files` carries its `-Data.db`) and lives in the checkout corpus
+/// ONLY: a fleet `CQLITE_DATASETS_ROOT` does not hold it. `test_basic
+/// .composite_key_table` is the BIG subject of every other case in this file and
+/// is the mirror image — a FETCHED fixture whose checkout directory holds
+/// sidecars only. So neither candidate root is a superset of the other and any
+/// fixed root preference misses one of the two (#3104), which is exactly why the
+/// scan below takes their UNION and resolves each table by EVIDENCE.
+///
+/// Both are unconditional here even though only the first is committed: the AC2/
+/// AC6/AC8 cases in this same target already hard-panic in `fixture_dir` when the
+/// BIG fixture is absent, so this target cannot pass without it either way — a
+/// conditional floor here could only hide a corpus that shrank, never enable a
+/// configuration that legitimately lacks the fixture.
+const MUST_RUN: &[(&str, &str)] = &[
+    ("test_da", "multiclustering_table"),
+    ("test_basic", "composite_key_table"),
+];
+
+/// Every `(keyspace, table)` identity that carries a real `*-Data.db` under ANY
+/// candidate root — the UNION, deduplicated by identity.
+///
+/// Enumerating the union (rather than committing to the first root that yields
+/// anything) is the #3220 rule: a `break` on the first non-empty root is a
+/// PREFERENCE ORDERING, and measured on this box it binds to the fetched corpus
+/// and never sees the three checkout-only tables at all, the BTI subject among
+/// them.
+fn corpus_table_identities() -> BTreeSet<TableId> {
+    let mut ids: BTreeSet<TableId> = BTreeSet::new();
+    for root in datasets_root::sstables_root_candidates() {
+        let Ok(keyspaces) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for ks in keyspaces.flatten() {
+            if !ks.path().is_dir() {
+                continue;
+            }
+            let keyspace = ks.file_name().to_string_lossy().to_string();
+            let Ok(tables) = std::fs::read_dir(ks.path()) else {
+                continue;
+            };
+            for table in tables.flatten() {
+                if !table.path().is_dir() {
+                    continue;
+                }
+                let dir_name = table.file_name().to_string_lossy().to_string();
+                // `<table>-<generation uuid>`; a CQL table name cannot contain
+                // `-`, so the last separator is the generation boundary.
+                let Some((name, _generation)) = dir_name.rsplit_once('-') else {
+                    continue;
+                };
+                // Presence is judged by an actual `*-Data.db` (the repo commits
+                // JSONL sidecars for fixtures whose binaries are gitignored).
+                if datasets_root::table_has_data(&root, &keyspace, name) {
+                    ids.insert((keyspace.clone(), name.to_string()));
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// Every `*-Data.db` of `<keyspace>.<table>` under the root that EVIDENCE picks
+/// for that table (`sstables_root_for_table`, the sanctioned per-table resolver),
+/// across all of that table's generation directories.
+fn data_files_for_table(keyspace: &str, table: &str) -> Vec<PathBuf> {
+    let Some(root) = datasets_root::sstables_root_for_table(keyspace, table) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = Vec::new();
+    let prefix = format!("{table}-");
+    if let Ok(entries) = std::fs::read_dir(root.join(keyspace)) {
+        for e in entries.flatten() {
+            let dir = e.path();
+            if !dir.is_dir() || !e.file_name().to_string_lossy().starts_with(&prefix) {
+                continue;
+            }
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for f in rd.flatten() {
+                    let p = f.path();
+                    if p.to_string_lossy().ends_with("-Data.db") {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// AC3 — the NEGATIVE CONTROL, and the highest-value test in this change.
 ///
 /// The fix must not convert a single legitimate MID-STREAM toleration into a
@@ -265,66 +366,63 @@ async fn compaction_refuses_a_corrupt_row_and_never_loses_or_fabricates_partitio
 /// parity suites the gate already runs (the sstabledump JSONL goldens and the
 /// query-semantics oracle); what this lane adds is the property those cannot
 /// express — that no well-formed table started REFUSING.
+///
+/// The subject set is the UNION of every candidate root, deduplicated by table
+/// identity, with each table's bytes read from the root that actually carries
+/// them (#3220/#3104) — and the committed subjects in [`MUST_RUN`] are asserted
+/// PER CASE, so this cannot pass by omission the way a suite-wide floor can.
 #[tokio::test]
 async fn corpus_wide_well_formed_tables_still_decode_without_refusal() {
     let config = cqlite_core::Config::default();
     let platform = Arc::new(Platform::new(&config).await.expect("platform"));
-    let mut scanned = 0usize;
+    let mut scanned_tables: BTreeSet<TableId> = BTreeSet::new();
+    let mut scanned_sstables = 0usize;
     let mut with_rows = 0usize;
 
-    for root in datasets_root::sstables_root_candidates() {
-        let Ok(keyspaces) = std::fs::read_dir(&root) else {
-            continue;
-        };
-        for ks in keyspaces.flatten() {
-            if !ks.path().is_dir() {
-                continue;
-            }
-            let Ok(tables) = std::fs::read_dir(ks.path()) else {
+    for (keyspace, table) in corpus_table_identities() {
+        for data in data_files_for_table(&keyspace, &table) {
+            let Ok(reader) = SSTableReader::open(&data, &config, platform.clone()).await else {
+                // Unopenable (an out-of-scope format, a sidecar-only fixture):
+                // not a subject of this lane. A MUST_RUN table that never opens
+                // is caught by the per-case assertion below.
                 continue;
             };
-            for table in tables.flatten() {
-                let dir = table.path();
-                if !dir.is_dir() {
-                    continue;
-                }
-                let Some(data) = std::fs::read_dir(&dir).ok().and_then(|rd| {
-                    rd.flatten()
-                        .map(|e| e.path())
-                        .find(|p| p.to_string_lossy().ends_with("-Data.db"))
-                }) else {
-                    continue;
-                };
-                let Ok(reader) = SSTableReader::open(&data, &config, platform.clone()).await else {
-                    // Unopenable (an out-of-scope format, a sidecar-only fixture):
-                    // not a subject of this lane.
-                    continue;
-                };
-                scanned += 1;
-                let partitions = reader.iterate_all_partitions().await.unwrap_or_else(|e| {
-                    panic!("#3782 regression: well-formed {dir:?} now REFUSES the index walk: {e}")
-                });
-                let entries = reader.get_all_entries().await.unwrap_or_else(|e| {
-                    panic!("#3782 regression: well-formed {dir:?} now REFUSES the block walk: {e}")
-                });
-                if !partitions.is_empty() || !entries.is_empty() {
-                    with_rows += 1;
-                }
+            scanned_sstables += 1;
+            scanned_tables.insert((keyspace.clone(), table.clone()));
+            let partitions = reader.iterate_all_partitions().await.unwrap_or_else(|e| {
+                panic!("#3782 regression: well-formed {data:?} now REFUSES the index walk: {e}")
+            });
+            let entries = reader.get_all_entries().await.unwrap_or_else(|e| {
+                panic!("#3782 regression: well-formed {data:?} now REFUSES the block walk: {e}")
+            });
+            if !partitions.is_empty() || !entries.is_empty() {
+                with_rows += 1;
             }
-        }
-        if scanned > 0 {
-            break;
         }
     }
 
+    // Per-CASE, fail-closed, unconditional: a committed fixture is source, so
+    // "not found" is a hard failure and never a skip (#3220).
+    for (keyspace, table) in MUST_RUN {
+        assert!(
+            scanned_tables.contains(&((*keyspace).to_string(), (*table).to_string())),
+            "must_run corpus subject {keyspace}.{table} was never scanned; {}",
+            datasets_root::describe_search(keyspace, table)
+        );
+    }
+
     assert!(
-        scanned >= 20,
-        "case floor: expected a real corpus, scanned only {scanned} tables ({})",
+        scanned_tables.len() >= 20,
+        "case floor: expected a real corpus, scanned only {} tables ({} SSTables) ({})",
+        scanned_tables.len(),
+        scanned_sstables,
         datasets_root::describe_roots()
     );
     assert!(
         with_rows > 0,
-        "0-rows-when-present: {scanned} tables scanned and none yielded a partition"
+        "0-rows-when-present: {} tables / {scanned_sstables} SSTables scanned and none yielded a \
+         partition",
+        scanned_tables.len()
     );
 }
 

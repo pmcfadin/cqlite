@@ -41,6 +41,8 @@ use cqlite_core::query::result::StreamingConfig;
 use cqlite_core::storage::sstable::SSTableReader;
 use cqlite_core::Database;
 
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
 #[path = "support/corrupt_clustering_fixture.rs"]
 mod fixture;
 
@@ -70,21 +72,23 @@ impl LogSink {
     }
 }
 
-fn datasets_root() -> PathBuf {
-    PathBuf::from(std::env::var("CQLITE_DATASETS_ROOT").expect("CQLITE_DATASETS_ROOT"))
+fn schema_file() -> PathBuf {
+    datasets_root::schema_path(SCHEMA_FILE).expect("committed CQL schema (#3148)")
 }
 
-fn schemas_dir() -> PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace root")
-        .join("test-data")
-        .join("schemas")
-}
-
+/// The fixture directory, resolved per TABLE across every candidate root
+/// (#3220) — a single env-derived root is a preference ordering, and neither
+/// candidate root is a superset of the other (#3104).
 fn fixture_dir() -> PathBuf {
-    let root = datasets_root().join("sstables").join(FIX_KS);
-    for e in std::fs::read_dir(&root)
+    let root = match datasets_root::sstables_root_for_table(FIX_KS, FIX_TABLE) {
+        Some(r) => r,
+        None => panic!(
+            "fixture {FIX_KS}.{FIX_TABLE} not found; {}",
+            datasets_root::describe_search(FIX_KS, FIX_TABLE)
+        ),
+    };
+    let ks_dir = root.join(FIX_KS);
+    for e in std::fs::read_dir(&ks_dir)
         .expect("read keyspace dir")
         .flatten()
     {
@@ -93,11 +97,11 @@ fn fixture_dir() -> PathBuf {
             return e.path();
         }
     }
-    panic!("fixture {FIX_KS}.{FIX_TABLE} not found under {root:?}");
+    panic!("fixture {FIX_KS}.{FIX_TABLE} not found under {ks_dir:?}");
 }
 
 fn table_schema() -> cqlite_core::schema::TableSchema {
-    let cql = std::fs::read_to_string(schemas_dir().join(SCHEMA_FILE)).unwrap();
+    let cql = std::fs::read_to_string(schema_file()).unwrap();
     let start = cql
         .find(&format!("CREATE TABLE IF NOT EXISTS {FIX_TABLE}"))
         .expect("CREATE TABLE statement");
@@ -110,7 +114,7 @@ fn table_schema() -> cqlite_core::schema::TableSchema {
 
 async fn open_db(data_dir: PathBuf) -> Database {
     ingest(IngestionConfig {
-        schema_paths: vec![schemas_dir().join(SCHEMA_FILE)],
+        schema_paths: vec![schema_file()],
         data_dir,
         version_hint: None,
         core_config: cqlite_core::Config::default(),
