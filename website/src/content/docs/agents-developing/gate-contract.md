@@ -1306,16 +1306,16 @@ one family of findings (roborev job 273).**
    interceptors are unexported by design, so `cargo` means *observable in the gate's own
    shell, or self-recorded from a `bash -c` body*. `tooling-tests` was declared `cargo`
    while its only cargo runs inside ~60 nested test scripts — so a PASS read
-   `[UNDECLARED]` and, worse, a FAIL could claim it *"FAILed before its first cargo
+   `[invocation: UNDECLARED]` and, worse, a FAIL could claim it *"FAILed before its first cargo
    invocation"* after a child `cargo build` really ran. It is now the fourth class,
-   `unobservable:<why>`, rendered `[cargo not observable: <why>]`: it asserts **nothing**
+   `unobservable:<why>`, rendered `[invocation: cargo not observable: <why>]`: it asserts **nothing**
    in either direction and takes no SKIP/FAIL note, because "nothing ran" is precisely
    what that shell cannot know. An in-shell observation rides beside it additively.
 2. **An `indirect:<driver>` component RECORDS whether its driver was REACHED**, from an
    explicit signal — a build-verify rc, or a recorder call on the line immediately before
    the driver runs — **never inferred from the terminal status**. `python-bindings` can die
    in venv/pip before maturin and `node-bindings` in `npm ci` before `npm run build`, and
-   both used to report `[via maturin: …]` / `[via npm run build (napi): …]` for a cargo
+   both used to report `[invocation: via maturin: …]` / `[invocation: via npm run build (napi): …]` for a cargo
    invocation that never happened. One shared helper pair does the mapping for all of them
    (`_fm_note_driver` + `_fm_note_maturin_rc`, plus the exported child-callable
    `_fm_observe_driver`), so a fourth indirect component cannot get the direction wrong by
@@ -1332,10 +1332,10 @@ one family of findings (roborev job 273).**
 **A driver we cannot see is NAMED, not guessed** (roborev job 269, blocker 1).
 `python-bindings`, `node-bindings`, and the `--lite` `scoped-tests` **python tier** —
 whose `maturin develop` runs in a child process — render
-`[via <driver>: feature set NOT observed]` **once their driver is observed to have been
+`[invocation: via <driver>: feature set NOT observed]` **once their driver is observed to have been
 reached**, and the python tier's entry is **additive**:
 a mixed rust+python diff reads
-`[test cqlite-core --features cli-helpers | via maturin: feature set NOT observed]`,
+`[invocation: test cqlite-core --features cli-helpers | via maturin: feature set NOT observed]`,
 never one at the expense of the other. It is recorded only for the build-verify exit
 codes that mean maturin actually ran (a venv/pip failure or an absent cargo/rustc records
 that the tier never reached maturin). This is deliberately **distinct from

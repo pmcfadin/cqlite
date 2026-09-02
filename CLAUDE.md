@@ -725,21 +725,23 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   every bash DESCENDANT record, so `tooling-tests` (which runs nested agent-gate self-tests) would
   attribute a nested run's cargo to itself — while `_fm_observe_child`, which intercepts nothing and
   fires only where a body calls it by name, IS exported (with the gate's own `_fm_describe_cargo`,
-  so there is no second formatter to drift). It **never renders blank**: `[UNDECLARED]` (cargo
-  expected, nothing observed), `[no-cargo]`, `[via <driver>: feature set NOT observed]`,
-  `[cargo not observable: <why>]`, or a named SKIP / FAILed-before-its-first-cargo /
+  so there is no second formatter to drift). It **never renders blank** — and since #3765 EVERY
+  bracket is LABELLED `[invocation: …]`, so it can no longer be read as a failure identity:
+  `[invocation: UNDECLARED]` (cargo expected, nothing observed), `[invocation: no-cargo]`,
+  `[invocation: via <driver>: feature set NOT observed]`,
+  `[invocation: cargo not observable: <why>]`, or a named SKIP / FAILed-before-its-first-cargo /
   never-reached-its-driver state; a long list abbreviates as `33:a,b,c,+30 more`, never
   a silent truncation. **A driver we cannot see is NAMED, not guessed** — `python-bindings`,
   `node-bindings` and the `--lite` scoped-tests PYTHON TIER (whose maturin build runs in a child
   process) render `via <driver>: feature set NOT observed`, ADDITIVELY beside the rust sets a mixed
-  diff also observes (`[test cqlite-core --features cli-helpers | via maturin: feature set NOT
-  observed]`): "nobody said" and "known to be indirect, therefore unobservable" are different facts
+  diff also observes (`[invocation: test cqlite-core --features cli-helpers | via maturin: feature
+  set NOT observed]`): "nobody said" and "known to be indirect, therefore unobservable" are different facts
   and only one of them is a defect.
   **AND THE CLASS DECIDES WHAT MAY BE CLAIMED — three rules, from one family of findings (roborev
   job 273).** (1) A component whose cargo runs ONLY IN A CHILD PROCESS is **never class `cargo`**:
   the interceptors are unexported by design, so `cargo` means "observable in this shell (or
   self-recorded from a `bash -c` body)". `tooling-tests` was declared `cargo` while its only cargo
-  runs inside ~60 nested test scripts, so a PASS read `[UNDECLARED]` and a FAIL could claim it
+  runs inside ~60 nested test scripts, so a PASS read `[invocation: UNDECLARED]` and a FAIL could claim it
   "FAILed before its first cargo invocation" after a child `cargo build` really ran — hence the
   fourth class `unobservable:<why>`, which asserts NOTHING in either direction and takes no
   SKIP/FAIL note. (2) An `indirect:<driver>` component must **RECORD whether its driver was
