@@ -355,7 +355,7 @@ impl V5CompressedLegacyParser {
         pos += body_size_vint_len;
 
         // Skip marker_body_size bytes (prev_size + deletion time(s))
-        let body_end = pos + marker_body_size as usize;
+        let body_end = pos.saturating_add(marker_body_size as usize);
         if body_end > data.len() {
             return Err(Error::corruption(format!(
                 "V5CompressedLegacy: marker_body_size={} at pos={} exceeds data length {}",
@@ -1169,7 +1169,7 @@ impl V5CompressedLegacyParser {
         })?;
         pos += data[pos..].len() - remaining.len();
 
-        let body_end = pos + marker_body_size as usize;
+        let body_end = pos.saturating_add(marker_body_size as usize);
         if body_end > data.len() {
             return Err(Error::corruption(format!(
                 "V5CompressedLegacy: marker_body_size={} at pos={} exceeds data length {} (compaction)",
@@ -1386,7 +1386,7 @@ impl V5CompressedLegacyParser {
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 let len_offset = offset + bytes_consumed;
 
-                if len_offset + len as usize > data.len() {
+                if len as usize > data.len().saturating_sub(len_offset) {
                     return Err(Error::corruption(format!(
                         "V5CompressedLegacy: Clustering '{}': need {} bytes for text, only {} available",
                         col.name,
@@ -1483,7 +1483,7 @@ impl V5CompressedLegacyParser {
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 let len_offset = offset + bytes_consumed;
 
-                if len_offset + len as usize > data.len() {
+                if len as usize > data.len().saturating_sub(len_offset) {
                     return Err(Error::corruption(format!(
                         "V5CompressedLegacy: Clustering '{}': need {} bytes, only {} available",
                         col.name,

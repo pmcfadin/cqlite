@@ -45,7 +45,7 @@ impl V5CompressedLegacyParser {
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + text_len > data.len() {
+                if text_len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
                         "Frozen element '{}': need {} bytes for text, only {} available",
                         column_name,
@@ -107,7 +107,7 @@ impl V5CompressedLegacyParser {
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + text_len > data.len() {
+                if text_len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
                         "Frozen element '{}': need {} bytes for text, only {} available",
                         column_name,
@@ -329,7 +329,7 @@ impl V5CompressedLegacyParser {
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + duration_len > data.len() {
+                if duration_len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
                         "Frozen element '{}': need {} bytes for duration, only {} available",
                         column_name,
@@ -439,7 +439,7 @@ impl V5CompressedLegacyParser {
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + blob_len > data.len() {
+                if blob_len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
                         "Frozen element '{}': need {} bytes for blob, only {} available",
                         column_name,
@@ -495,7 +495,7 @@ impl V5CompressedLegacyParser {
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + varint_len > data.len() {
+                if varint_len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
                         "Frozen element '{}': need {} bytes for varint, only {} available",
                         column_name,
@@ -523,7 +523,7 @@ impl V5CompressedLegacyParser {
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + total_len > data.len() {
+                if total_len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
                         "Frozen element '{}': need {} bytes for decimal, only {} available",
                         column_name,
@@ -1104,7 +1104,7 @@ impl V5CompressedLegacyParser {
                         let bytes_consumed = data[offset..].len() - remaining.len();
                         offset += bytes_consumed;
 
-                        if offset + blob_len > data.len() {
+                        if blob_len > data.len().saturating_sub(offset) {
                             return Err(Error::corruption(format!(
                                 "Frozen element '{}': need {} bytes for unknown type, only {} available",
                                 column_name,
@@ -1138,7 +1138,7 @@ impl V5CompressedLegacyParser {
                     let bytes_consumed = data[offset..].len() - remaining.len();
                     offset += bytes_consumed;
 
-                    if offset + blob_len > data.len() {
+                    if blob_len > data.len().saturating_sub(offset) {
                         return Err(Error::corruption(format!(
                             "Frozen element '{}': need {} bytes for unknown type, only {} available",
                             column_name,
