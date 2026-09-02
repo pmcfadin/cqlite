@@ -35,11 +35,11 @@
 //! on the DECLARED schema type only (no guessing).
 //!
 //! Two decodable scalars — `inet` (`InetAddressType`) and `time` (`TimeType`) —
-//! route through the comparator's `compare_custom`, which orders by the FORMATTED
-//! string and can diverge from Cassandra's raw-byte order; their serialized
-//! `cell_path` form IS unsigned-byte-comparable, so they are ordered by raw
-//! `cell_path` bytes instead ([`comparator_orders_by_raw_cell_path_bytes`],
-//! roborev 1631/1632).
+//! have serialized `cell_path` forms that ARE unsigned-byte-comparable, so they
+//! are ordered by raw `cell_path` bytes rather than decoded and routed through
+//! the scalar comparator ([`comparator_orders_by_raw_cell_path_bytes`], roborev
+//! 1631/1632). The scalar comparator used to order them by FORMATTED string;
+//! since #3790 it agrees, so raw-byte order stays equivalent and cheaper.
 //!
 //! Tombstone handling follows Cassandra SELECT semantics (issue #1742: SELECT
 //! output is the read-path authority), NOT the single-generation reader's
@@ -330,8 +330,8 @@ fn cell_path_bytes(cell: &CellData) -> &[u8] {
 /// `cmp` is always a scalar. Two scalar shapes:
 ///   * A `inet`/`time` comparator ([`comparator_orders_by_raw_cell_path_bytes`])
 ///     orders by raw `cell_path` byte comparison — its serialized form's unsigned
-///     byte order IS its Cassandra order, and routing it through the scalar
-///     `compare_custom` would mis-order it (roborev 1631/1632).
+///     byte order IS its Cassandra order (roborev 1631/1632; the scalar comparator
+///     mis-ordered these by formatted string until #3790).
 ///   * Any other scalar decodes each `cell_path` to a `Value` and orders by the
 ///     type comparator (e.g. signed-int order != raw byte order), surfacing any
 ///     genuine decode error (wrong-width scalar) rather than masking it.
@@ -394,22 +394,22 @@ fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
 }
 
 /// True when the element/key type's Cassandra ordering IS unsigned raw-byte
-/// comparison of the `cell_path`, so decoding to a `Value` and routing through
-/// the scalar type comparator would MIS-order it.
+/// comparison of the `cell_path`, so the raw bytes can be compared directly with
+/// no decode round-trip.
 ///
-/// Every other scalar [`ComparatorType`] in this sort path has a proper
-/// [`ComparatorType::compare`] arm; the ONLY declared scalar types that fall
-/// through to `compare_custom` (which orders by the FORMATTED string, diverging
-/// from a single-generation `SELECT`) are the two decodable `Custom` names —
-/// `inet` and `time`. Both have a canonical serialized form whose UNSIGNED byte
-/// order equals their Cassandra order, and the element/key `cell_path` IS that
-/// serialized form, so ordering by raw `cell_path` bytes matches Cassandra
-/// exactly and closes the whole `compare_custom` class here (roborev 1631/1632):
-///   * `inet` (`InetAddressType`): raw address bytes, e.g. `9.0.0.1` = `[9,0,0,1]`
-///     precedes `10.0.0.1` = `[10,0,0,1]` (formatted-string order is the reverse).
-///   * `time` (`TimeType`): 8-byte big-endian nanoseconds-of-day, always
-///     non-negative, so byte order == numeric order (formatted `HH:MM:...` string
-///     order misorders, e.g. any value whose text form sorts against its magnitude).
+/// The two decodable `Custom` names — `inet` and `time` — are the ONLY declared
+/// scalar types in this sort path without a dedicated [`ComparatorType`] arm.
+/// Both have a canonical serialized form whose UNSIGNED byte order equals their
+/// Cassandra order, and the element/key `cell_path` IS that serialized form, so
+/// ordering by raw `cell_path` bytes matches Cassandra exactly and needs no
+/// decode round-trip (roborev 1631/1632). Until #3790 the scalar `Custom` arm
+/// ordered both by FORMATTED string; correct either way here, but only `inet`
+/// actually diverged (roborev job 67):
+///   * `inet` (`InetAddressType`): raw address bytes — `9.0.0.1` = `[9,0,0,1]`
+///     precedes `10.0.0.1`, the REVERSE of string order: a real misordering.
+///   * `time` (`TimeType`): big-endian nanos-of-day, always non-negative, so byte
+///     order == numeric; and `fmt_time` zero-pads, so over the VALID range string
+///     order EQUALS it — the old comparator was already right (no counterexample).
 ///
 /// Branches on the DECLARED type only (no-heuristics, issue #28); recurses through
 /// `Frozen` defensively though neither inet nor time is ever frozen here.
@@ -526,8 +526,8 @@ mod tests {
                 col("fset", "set<frozen<addr_type>>"),
                 col("ftk", "map<frozen<tuple<int, text>>, bigint>"),
                 // inet/time element ordering (roborev 1631/1632): InetAddressType /
-                // TimeType order by raw serialized bytes, NOT the formatted-string
-                // order the scalar `compare_custom` would use.
+                // TimeType order by raw serialized bytes, which the scalar comparator
+                // contradicted with a formatted-string order until #3790.
                 col("iset", "set<inet>"),
                 col("tset", "set<time>"),
             ],
@@ -660,14 +660,14 @@ mod tests {
     fn set_of_time_orders_by_raw_bytes_not_formatted_string() {
         // set<time>: cell_path is the 8-byte big-endian nanoseconds-of-day; Cassandra's
         // TimeType orders by that raw long (non-negative → byte order == numeric order).
-        // The scalar Custom("time") comparator instead falls to compare_custom's
+        // Until #3790 the scalar Custom("time") comparator instead used a
         // FORMATTED-string order ("TIME(HH:MM:SS.nnn)"), which — because the hours
         // field is only zero-padded to two digits — diverges from numeric order once
         // the hours magnitude changes digit-width. 10h vs 100h: the string
         // "TIME(100:..." sorts BEFORE "TIME(10:..." ('0' < ':'), the REVERSE of numeric
         // order, so a multi-SSTable set would mis-order pre-fix. (Valid times-of-day
         // happen to coincide under the current Display; ordering by the raw cell_path
-        // bytes is the robust, parity-correct rule and closes the compare_custom class,
+        // bytes is the robust, parity-correct rule and closes that class here,
         // roborev 1632.) Arrive out of order to prove the sort runs.
         let t_small = 36_000_000_000_000i64; // 10h in ns
         let t_big = 360_000_000_000_000i64; // 100h in ns

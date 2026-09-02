@@ -231,6 +231,22 @@ mach2 = "0.4"
 name = "issue_1495_arrow_accessor_parity"
 required-features = ["arrow"]
 
+# Issue #3790 merged-read `time` collection-ordering guard. It calls
+# `storage::write_engine::merge::assemble_read_cells`, and the whole
+# `storage::write_engine` module is gated on `write-support`, so an
+# auto-discovered target would fail to COMPILE under `--no-default-features`
+# (the gate's `minimal-build`) — `cannot find write_engine in storage`.
+#
+# `required-features` rather than a crate-level `#![cfg]`: `write-support` is a
+# DEFAULT feature, so this keeps the target running in `core-tests` (the gate of
+# record) while excluding it only where the module genuinely does not exist. A
+# `#![cfg(feature = ...)]` on a NON-default feature is what puts a target in a
+# lane that executes nowhere (#3522) — that trap is the reason this test is not
+# gated in its source.
+[[test]]
+name = "issue_3790_merged_read_time_order"
+required-features = ["write-support"]
+
 # Full-Index.db partition-enumeration regression (issue #2302). It is
 # `#![cfg(all(feature = "work-counters", feature = "write-support"))]` — the
 # `read_work_counters` probe gauge AND the `SSTableWriter`/mutation write API — so
