@@ -691,7 +691,8 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   worktree is safe to write mid-gate precisely BECAUSE it is ignored; an untracked-and-visible one
   is `tree-mutated-midrun` and voids the run — which is how #3414 lost 40 minutes to an unlisted
   `.gate-of-record-sha.txt`. `.gitignore` reserves an un-anchored `.lane-*` namespace so the next
-  scratch name is covered by construction; **never put source under a `.lane-*` path** (that
+  scratch name is covered by construction; **never put source under a `.lane-*` path** — enforced by
+  a tracked-file census in the guard, not just stated (that
   reservation is why the whole `.lane-<name>/` subtree is swallowed with no `!.lane-*/` negation,
   unlike the job-209 `.agent-gate-*` entries). Verify with `git check-ignore -v <path>` BEFORE
   writing anything into a worktree while a gate runs. Guard:

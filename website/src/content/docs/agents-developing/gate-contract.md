@@ -1413,7 +1413,8 @@ Contract:
   used to be ignored by ENUMERATION, so the next unlisted name reproduced the defect —
   #3414 created `.gate-of-record-sha.txt` mid-gate and lost 40 minutes. `.gitignore` now
   reserves an un-anchored `.lane-*` namespace, so a new scratch name is covered by
-  construction; **source may never live under a `.lane-*` path**, which is what makes
+  construction; **source may never live under a `.lane-*` path** — enforced by a tracked-file
+  census in the guard below, not merely stated — which is what makes
   swallowing a `.lane-<name>/` subtree whole safe (hence no `!.lane-*/` negation, unlike
   the job-209 `.agent-gate-*` entries). Before writing ANY file into a worktree while a
   gate runs: `git check-ignore -v <path>`. Pinned by

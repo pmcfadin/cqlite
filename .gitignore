@@ -371,7 +371,9 @@ trino-connector/docker/field-repro-artifacts/
 # exactly what is wanted. Re-including it would surface its contents as untracked,
 # stamping `dirty: yes` / `tree-mutated-midrun` — reproducing this issue's own defect
 # through the negation meant to prevent a different one. The reserved namespace (no
-# source under it, EVER) is what makes the subtree swallow safe. Both behaviours are
+# source under it, EVER) is what makes the subtree swallow safe, and that reservation
+# is MECHANICALLY ENFORCED, not merely asserted here: the guard censuses the index and
+# fails closed if any TRACKED file lives under a `.lane-*` path. Both behaviours are
 # pinned together by scripts/tests/test_lane_scratch_ignored.sh (tooling-tests), so
 # a blanket-negation edit here reds.
 #
