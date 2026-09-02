@@ -73,7 +73,8 @@
 #   5   UNMEASURED — the answer was not obtained: no git, no resolvable object
 #                    store, no usable timeout binary, the bound expired, an fsck
 #                    failure this script cannot classify, a damage class that did
-#                    NOT reproduce, or reachability/ref complaints that did.
+#                    NOT reproduce, or reachability/ref/commit-graph/multi-pack-index
+#                    complaints that did.
 #
 # REACHABILITY IS ITS OWN NON-PASSING STATE, NEITHER CLEAN NOR CORRUPT. fsck's exit
 # bit 2 (ERROR_REACHABLE) fires for a stale reflog entry on a store peer lanes are
@@ -216,8 +217,14 @@ usage() {
   printf '%s USAGE - the call is wrong (this is NOT a measurement verdict)\n' "$P" >&2
   printf '%s USAGE usage: %s [--repo <path>] [--timeout <secs>]\n' \
     "$P" "$(sane "${0##*/}")" >&2
+  printf '%s USAGE        %s [--repo <path>] --print-store\n' \
+    "$P" "$(sane "${0##*/}")" >&2
   printf '%s USAGE Rehashes the SHARED git object store behind <path> with git fsck\n' "$P" >&2
   printf '%s USAGE and reports whether it is intact (#3749). Read-only; mutates nothing.\n' "$P" >&2
+  printf '%s USAGE --print-store resolves and prints the store this run WOULD sweep\n' "$P" >&2
+  printf '%s USAGE (one `store <abs-path>` line) and exits 0 WITHOUT sweeping. It is\n' "$P" >&2
+  printf '%s USAGE the ONE isolated resolver callers key a throttle/latch on, so no\n' "$P" >&2
+  printf '%s USAGE caller has to run its own un-isolated git to name the store.\n' "$P" >&2
   printf '%s USAGE Exits 0 verified / 4 corrupt / 5 unmeasured / 2 usage.\n' "$P" >&2
   printf '%s USAGE A CONSUMER MUST NOT READ EXIT 5 AS CLEAN (nothing was measured).\n' "$P" >&2
   printf '%s USAGE Scope is ACCIDENTAL corruption. Deliberate peer forgery is\n' "$P" >&2
@@ -242,6 +249,7 @@ REPO="."
 BOUND_SECS=600
 repo_set=0
 bound_set=0
+PRINT_STORE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -h | --help)
@@ -254,6 +262,13 @@ while [ "$#" -gt 0 ]; do
       REPO="$2"
       repo_set=1
       shift 2
+      ;;
+    --print-store)
+      # RESOLVE-AND-PRINT, NO SWEEP. See the block after the store resolution for what
+      # this mode is for and why it deliberately does not require a timeout binary.
+      [ "$PRINT_STORE" -eq 0 ] || { usage; exit 2; }
+      PRINT_STORE=1
+      shift
       ;;
     --timeout)
       [ "$#" -ge 2 ] || { usage; exit 2; }
@@ -290,9 +305,16 @@ done
 # every bounded call fail. SIGTERM-only is ACCEPTED here — unlike a credential
 # helper, `git fsck` does not trap or ignore SIGTERM — and the degradation is
 # NAMED in the output rather than left silent.
+#
+# `--print-store` DOES NOT NEED ONE, and is exempted rather than being made to fail for
+# a reason that has nothing to do with the question it asks: it runs one `rev-parse`,
+# not an fsck, so "this host cannot bound a long walk" says nothing about whether the
+# store can be NAMED. Making it depend on `timeout` would leave a caller keying a
+# throttle on nothing on exactly the hosts where the sweep is already UNMEASURED.
 TIMEOUT_BIN=""
 TIMEOUT_KILL_AFTER=0
 for _tb_name in timeout gtimeout; do
+  [ "$PRINT_STORE" -eq 0 ] || break
   _tb_path="$(command -v "$_tb_name" 2>/dev/null || true)"
   [ -n "$_tb_path" ] || continue
   if "$_tb_path" --kill-after=1 1 true >/dev/null 2>&1; then
@@ -319,7 +341,7 @@ ENV_BIN="$(command -v env 2>/dev/null || true)"
     "fsck run under an inherited GIT_DIR/GIT_OBJECT_DIRECTORY can report about a" \
     "DIFFERENT store than the one it names. Refusing rather than measuring the wrong thing."
 
-if [ -z "$TIMEOUT_BIN" ]; then
+if [ -z "$TIMEOUT_BIN" ] && [ "$PRINT_STORE" -eq 0 ]; then
   unmeasured "no timeout/gtimeout on PATH - refusing to run an UNBOUNDED fsck: both" \
     "callers are hang-sensitive (machine onboarding, and the supervisor's" \
     "per-iteration preflight). Install GNU coreutils and re-run."
@@ -351,6 +373,32 @@ OBJ_DIR="$GIT_COMMON_DIR/objects"
 if [ ! -d "$OBJ_DIR" ] || [ ! -r "$OBJ_DIR" ]; then
   unmeasured "the object store $(sane "$OBJ_DIR") is absent or unreadable, so there is" \
     "nothing this run can rehash"
+fi
+
+# --- `--print-store`: the ONE isolated resolver, shared with the callers ------
+#
+# WHY THIS MODE EXISTS (#3749 review round 2, BLOCKER 2). A caller that throttles or
+# latches on the shared store has to NAME it, and naming it means resolving
+# `--git-common-dir` — a git call. `scripts/local/worker-supervisor.sh` was doing that
+# with a BARE `git`, inheriting the caller's environment, while this script had just
+# moved every one of its own git calls under `env -i` + one allowlist. An inherited
+# `GIT_DIR`/`GIT_COMMON_DIR` therefore keyed the supervisor's stamp on ANOTHER
+# repository, so the real store's sweep was throttled away or its verdict recorded under
+# the wrong key: the closed hole re-opened at a site the same round left behind.
+#
+# The remedy CLAUDE.md records for this family (roborev job 276) is one allowlist
+# reaching every site, not a second copy of it. A second copy in the supervisor would be
+# a second place for the list to drift, so instead the resolution has exactly ONE
+# implementation — the one above, isolated — and callers ASK for it. There is then no
+# un-isolated shape available to a future caller: it would have to write a git call of
+# its own, which is the thing review looks for.
+#
+# It prints the same anchored `store <abs>` line the sweep prints, and nothing else:
+# a consumer reads that one line and never has to parse a verdict that this mode, by
+# construction, does not produce.
+if [ "$PRINT_STORE" -eq 1 ]; then
+  printf '%s store %s\n' "$P" "$(sane "$OBJ_DIR")"
+  exit 0
 fi
 
 # --- scratch space (outside the repository: this script writes nothing in it) --
@@ -399,6 +447,18 @@ fi
 # non-clean path pays it.
 FINDING_LIST_LIMIT=40
 
+# git fsck's exit BITMASK, from fsck.h and CONFIRMED against the git in use (2.43.0):
+#   1 ERROR_OBJECT   2 ERROR_REACHABLE   4 ERROR_PACK
+#   8 ERROR_REFS    16 ERROR_COMMIT_GRAPH  32 ERROR_MULTI_PACK_INDEX
+# FSCK_DAMAGE_MASK is this script's subject: object content and pack integrity.
+# FSCK_KNOWN_MASK is every bit it can NAME; a status carrying anything else is
+# unclassified rather than guessed at (see the ordering note above fsck_pass).
+# FSCK_NONMASK_FLOOR is where shell/timeout/die() statuses live and bit-testing stops
+# being meaningful: 124-127 are the timeout and exec conventions, 128+N is a signal.
+FSCK_DAMAGE_MASK=5
+FSCK_KNOWN_MASK=63
+FSCK_NONMASK_FLOOR=124
+
 # fsck_pass <tag> - ONE bounded fsck over the shared store. Sets WALK_RC,
 # WALK_ELAPSED, WALK_CLASS, WALK_NFIND and writes $TMPD/<tag>.findings (the
 # recognised diagnostic lines, verbatim) and $TMPD/<tag>.ids (the 40-hex tokens in
@@ -417,14 +477,34 @@ FINDING_LIST_LIMIT=40
 # `CORRUPT` that pages high, stops the supervisor and fails `--strict` bootstrap.
 #
 # Only bits 1 and 4 are the subject of this script (an object that failed to
-# rehash, a damaged pack). Bits 2/8/16 are NOT demoted to clean - a genuinely
-# missing object also reports ERROR_REACHABLE, so treating reachability as clean
-# would convert a real corruption symptom into a pass - they land in their own
-# NON-PASSING state (UNMEASURED, with a cause that names the class).
+# rehash, a damaged pack). The OTHER known bits are NOT demoted to clean - a
+# genuinely missing object also reports ERROR_REACHABLE, so treating reachability
+# as clean would convert a real corruption symptom into a pass - they land in their
+# own NON-PASSING state (UNMEASURED, with a cause that names the class).
 #
-# A status OUTSIDE 1..31 is not a bitmask at all (128 is git's `die()`, 127 is a
-# missing binary), so it is `unclassified`, never bit-tested: `127 & 1` is 1 and
-# would read as object damage.
+# THE MASK DOES NOT END AT 31, AND ASSUMING IT DID DROPPED REAL DAMAGE (#3749 review
+# round 2, BLOCKER 3). git 2.43 also defines 32 ERROR_MULTI_PACK_INDEX, so the
+# supported mask is 63. The previous version classified only statuses in 1..31 and
+# called everything else `unclassified`, which meant 33 (32|1: a multi-pack-index
+# complaint PLUS object damage) and 36 (32|4) became UNMEASURED - a FALSE NEGATIVE on
+# genuine object corruption, the one direction this whole control exists to prevent.
+# MEASURED on git 2.43.0 rather than reasoned from the header: a repo with a truncated
+# `multi-pack-index` exits 32, and the same repo with one loose object overwritten
+# exits 35 (32|2|1).
+#
+# THE THREE RULES BELOW, IN THIS ORDER, AND THE ORDER IS THE POINT:
+#   1. A status at or above 124 IS NOT A BITMASK. 124/125/126/127 are the
+#      timeout/shell conventions (this fsck runs under `timeout`), 128+N is git's
+#      `die()` and signal deaths. Testing bits in that range is how `127 & 1` reads as
+#      object damage. `unclassified`, never bit-tested.
+#   2. THE DAMAGE BITS ARE TESTED INDEPENDENTLY, before any completeness check on the
+#      rest of the status. An unrelated bit - one git added after this was written -
+#      can then never MASK object or pack damage; it only travels with it.
+#   3. Only then, a status carrying a bit OUTSIDE the supported mask is
+#      `unclassified`. That is the safe degradation: a bit this script has never heard
+#      of means something it cannot name, so it goes to a NON-PASSING state rather
+#      than being folded into the class whose remedy would be wrong. Adding a bit to
+#      FSCK_KNOWN_MASK is then a wording change, not a correctness fix.
 fsck_pass() {
   local tag="$1" rc=0 t0 t1 el
   local out="$TMPD/$tag.out" err="$TMPD/$tag.err" all="$TMPD/$tag.all"
@@ -486,14 +566,14 @@ fsck_pass() {
     WALK_CLASS=clean
   elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
     WALK_CLASS=killed
-  elif [ "$rc" -ge 1 ] && [ "$rc" -le 31 ]; then
-    if [ $((rc & 5)) -ne 0 ]; then
-      WALK_CLASS=damage
-    else
-      WALK_CLASS=reachability
-    fi
-  else
+  elif [ "$rc" -ge "$FSCK_NONMASK_FLOOR" ]; then
     WALK_CLASS=unclassified
+  elif [ $((rc & FSCK_DAMAGE_MASK)) -ne 0 ]; then
+    WALK_CLASS=damage
+  elif [ $((rc & ~FSCK_KNOWN_MASK)) -ne 0 ]; then
+    WALK_CLASS=unclassified
+  else
+    WALK_CLASS=nondamage
   fi
 }
 
@@ -612,20 +692,35 @@ if [ "$FIRST_WALK_CLEAN" -eq 0 ]; then
       "and if it recurs treat the store as suspect and escalate (#3749)."
   fi
 
-  # BOTH PASSES NON-CLEAN, NEITHER OBJECT/PACK DAMAGE: reachability, refs or
-  # commit-graph complaints that survived a second walk. Its OWN non-passing state
-  # with its OWN cause text - never the fatal branch (this is not the class this
-  # script exists for) and never VERIFIED (a genuinely MISSING object reports
-  # exactly this, so reading it as clean would hide real damage). No `object` lines:
-  # the 40-hex tokens in a reflog diagnostic name INTACT objects.
+  # A STATUS THIS SCRIPT CANNOT READ AS A BITMASK, in either pass. Its own cause,
+  # because the nondamage text below would name a class that was never established:
+  # a `die()` or an exec failure says nothing about reachability, and describing it as
+  # a reflog problem would send the operator to the wrong remedy.
+  if [ "$C1" = unclassified ] || [ "$C2" = unclassified ]; then
+    emit_findings p2 unmeasured-cause
+    unmeasured "git fsck exited with a status this script cannot read as its error" \
+      "bitmask (pass 1 class=$C1 rc=$RC1, pass 2 class=$C2 rc=$RC2). The bits it" \
+      "supports are 1|2|4|8|16|32; a status carrying anything else is a die(), an" \
+      "exec failure, or a git newer than this classifier. Nothing about the store's" \
+      "object content was established, so this is NOT clean. Run the fsck by hand to" \
+      "see what it said."
+  fi
+
+  # BOTH PASSES NON-CLEAN, NEITHER OBJECT/PACK DAMAGE: reachability, refs,
+  # commit-graph or multi-pack-index complaints that survived a second walk. Its OWN
+  # non-passing state with its OWN cause text - never the fatal branch (this is not
+  # the class this script exists for) and never VERIFIED (a genuinely MISSING object
+  # reports exactly this, so reading it as clean would hide real damage). No `object`
+  # lines: the 40-hex tokens in a reflog diagnostic name INTACT objects.
   if [ "$C2" != clean ]; then
     emit_findings p2 unmeasured-cause
-    unmeasured "git fsck reported reachability/ref/commit-graph problems on BOTH walks" \
+    unmeasured "git fsck reported reachability/ref/commit-graph/multi-pack-index problems on BOTH walks" \
       "(pass 1 class=$C1 rc=$RC1, pass 2 class=$C2 rc=$RC2) and NO object or pack" \
       "damage. This script's subject is object content, and that question is therefore" \
       "not answered: a missing object reports the same class. Inspect the diagnostics" \
       "above; a stale reflog clears with 'git reflog expire --expire-unreachable=now" \
-      "--all', a genuinely absent object does not."
+      "--all', a stale multi-pack-index with 'git multi-pack-index write', and a" \
+      "genuinely absent object with neither."
   fi
 
   # PASS 2 CLEAN, and pass 1 carried no damage class: the first observation did not

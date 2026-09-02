@@ -215,7 +215,8 @@ UNVERIFIED_MAX="${UNVERIFIED_MAX:-2}"
 OBJ_SWEEP_INTERVAL_HOURS="${OBJ_SWEEP_INTERVAL_HOURS:-6}"
 OBJ_SWEEP_TIMEOUT_SECS="${OBJ_SWEEP_TIMEOUT_SECS:-600}"
 # Empty => derived per SHARED STORE in obj_sweep_stamp_path (below), so lanes sharing one
-# object store share one throttle AND one cached verdict.
+# object store share one throttle. It also names the CORRUPT latch (`<stamp>.CORRUPT`),
+# so pinning it relocates both files together.
 OBJ_SWEEP_STAMP="${OBJ_SWEEP_STAMP:-}"
 # issue #2670 (roborev 1813): before escalating a non-merged PR state to a
 # mismatch, re-read gh a few times to absorb read-after-merge lag. Env-tunable so
@@ -3230,36 +3231,61 @@ acquire_lock() {
 OBJ_SWEEP_ANNOUNCED=0
 OBJ_SWEEP_UNMEASURED_NOTIFIED=0
 
-# obj_sweep_stamp_path — the THROTTLE-AND-CACHED-VERDICT stamp. Keyed on the SHARED
-# OBJECT STORE, not on the lane, so four lanes of one box share one cadence instead of
-# sweeping four times — and, since #3749's review, so a CORRUPT verdict found by one lane
-# is seen by its peers instead of being throttled away.
+# obj_sweep_stamp_path <sweep-script> — the THROTTLE stamp: WHEN this box last SPENT a
+# sweep. Keyed on the SHARED OBJECT STORE, not on the lane, so four lanes of one box
+# share one cadence instead of sweeping four times.
 #
-# THE DIRECTORY IS DERIVED, NOT TAKEN FROM THE CALLER. Both facts this file records —
-# "this box swept recently" and "this box's shared store is damaged" — are BOX-wide facts
-# about a store every lane reads, so a per-lane `TMPDIR` would silently make them
-# per-lane: peers would keep their own cadence and, worse, never see a peer's CORRUPT.
-# `/tmp` when it is a writable directory, `${TMPDIR:-/tmp}` only as a fallback for a host
-# without one. OBJ_SWEEP_STAMP still overrides both (the self-suite pins it per case).
+# IT HOLDS A TIMESTAMP AND NOTHING ELSE, AND THAT IS THE DESIGN, NOT AN OMISSION (#3749
+# review round 2, BLOCKER 1). The CORRUPT verdict lives in a SEPARATE, CREATE-ONLY file
+# — see obj_sweep_set_latch below for the reasoning. A timestamp is a cell it is
+# HARMLESS to move backwards: the worst a losing writer can do is buy the box one extra
+# sweep. A VERDICT is not, which is why it is not kept here.
+#
+# THE STORE IS RESOLVED BY THE SWEEP SCRIPT ITSELF (`--print-store`), NOT BY A `git`
+# CALL IN THIS FILE, AND THAT IS THE REVIEW'S OTHER CORRECTION (BLOCKER 2). This
+# function used to run a BARE `git -C "$REPO_ROOT" rev-parse --git-common-dir`,
+# inheriting the caller's environment, while the sweep it keys runs EVERY git call under
+# `env -i` + one allowlist. An inherited GIT_DIR/GIT_COMMON_DIR therefore selected
+# ANOTHER repository's stamp — so the real store's sweep is throttled away, or its
+# verdict recorded under the wrong key. That is the same defect class the sweep had just
+# closed, at a site the same round left behind, which is CLAUDE.md's roborev-job-276
+# ruling verbatim ("the migrated object reads ran under a bare `env` … the round-13 hole
+# re-opened at the NEW sites, not a new route"), and its remedy is the same: ONE
+# resolver, in the file that owns the allowlist. A future git call cannot be added
+# un-isolated HERE because there is no git call here at all — the un-isolated shape is
+# unavailable rather than discouraged.
+#
+# THE DIRECTORY IS DERIVED, NOT TAKEN FROM THE CALLER. Both facts this pair of files
+# records — "this box swept recently" and "this box's shared store is damaged" — are
+# BOX-wide facts about a store every lane reads, so a per-lane `TMPDIR` would silently
+# make them per-lane: peers would keep their own cadence and, worse, never see a peer's
+# CORRUPT. `/tmp` when it is a writable directory, `${TMPDIR:-/tmp}` only as a fallback
+# for a host without one. OBJ_SWEEP_STAMP still overrides both (the self-suite pins it
+# per case), and the latch follows it, so a pinned stamp relocates BOTH files together.
 #
 # AN UNRESOLVABLE STORE DOES NOT THROTTLE AT ALL — it prints the empty string, and the
 # caller then neither reads nor writes a stamp. The old fallback collapsed every
 # unresolvable store on a box onto ONE name, so two different checkouts shared a 6-hour
 # throttle and one suppressed the other's sweep: a MISSED sweep, not an extra one. Not
-# throttling costs nothing here, because the sweep resolves the same `--git-common-dir`
-# itself and fails FAST (a sub-second UNMEASURED) in exactly the states where this
-# resolution failed.
+# throttling costs nothing here, because the sweep resolves the same store itself and
+# fails FAST (a sub-second UNMEASURED) in exactly the states where this resolution
+# failed.
 obj_sweep_stamp_path() {
-  local common key dir
+  local script="$1" line common key dir
   if [[ -n "$OBJ_SWEEP_STAMP" ]]; then
     printf '%s' "$OBJ_SWEEP_STAMP"
     return 0
   fi
-  common="$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)" || common=""
-  if [[ -n "$common" ]]; then
-    common="$(cd "$REPO_ROOT" 2>/dev/null && cd "$common" 2>/dev/null && pwd -P)" || common=""
-  fi
-  [[ -n "$common" ]] || return 0
+  [[ -n "$script" && -r "$script" ]] || return 0
+  # `{ grep || true; }` for the reason spelled out in object_store_sweep below: this
+  # file runs under `set -euo pipefail`, so a grep that matches nothing (an older or
+  # stubbed sweep script that has no --print-store mode) would take the supervisor down.
+  line="$(bash "$script" --repo "$REPO_ROOT" --print-store 2>/dev/null |
+    { grep '^OBJECT-STORE: store ' || true; } | head -1)"
+  common="${line#OBJECT-STORE: store }"
+  # Both halves are required: an empty line yields an empty value, and a line the prefix
+  # did NOT strip is not the answer to this question.
+  [[ -n "$common" && "$common" != "$line" ]] || return 0
   key="$common"
   # Flatten to one path component; keep only characters that cannot surprise a shell or
   # a filesystem.
@@ -3270,23 +3296,85 @@ obj_sweep_stamp_path() {
   printf '%s' "${dir}/cqlite-object-store-sweep.${key}.stamp"
 }
 
-# obj_sweep_write_stamp <path> <verdict> — record WHEN this box last swept and WHAT it
-# found, as two lines: the epoch, then the verdict token.
+# obj_sweep_latch_path <stamp-path> — the CORRUPT latch that belongs to that stamp.
+# Derived from the stamp so the two always live in the same box-wide directory and a
+# pinned OBJ_SWEEP_STAMP relocates both.
+obj_sweep_latch_path() {
+  local stamp="$1"
+  [[ -n "$stamp" ]] || return 0
+  printf '%s.CORRUPT' "$stamp"
+}
+
+# obj_sweep_latch_present <latch-path> — is the latch in place?
+#
+# `-e || -L` rather than a bare `-e`: a DANGLING symlink at that name is `-e`-false, and
+# the fail-safe reading of "something is at the latch path" is that the box is latched.
+# Same idiom, same reason, as the supervisor lock's existence test above.
+obj_sweep_latch_present() {
+  local latch="$1"
+  [[ -n "$latch" ]] || return 1
+  [[ -e "$latch" || -L "$latch" ]]
+}
+
+# obj_sweep_write_stamp <path> — record WHEN this box last swept. One line, the epoch.
 #
 # `2>/dev/null` PRECEDES the output redirection deliberately: bash applies redirections
 # LEFT TO RIGHT, so with the old order a failed `>"$stamp"` printed bash's own
 # UNANCHORED error before the suppression took effect, in addition to the intended log
 # line.
 obj_sweep_write_stamp() {
-  local path="$1" verdict="$2"
+  local path="$1"
   [[ -n "$path" ]] || return 0
-  printf '%s\n%s\n' "$(date +%s)" "$verdict" 2>/dev/null >"$path" ||
+  printf '%s\n' "$(date +%s)" 2>/dev/null >"$path" ||
     log "object-store sweep: could not write the throttle stamp $path — the sweep will re-run next iteration"
   return 0
 }
 
+# obj_sweep_set_latch <latch-path> — record MONOTONICALLY that this box's shared object
+# store has been found damaged. Exits 0 when the latch is in place AFTERWARDS (whether
+# this call created it or found a peer's), 1 when it could not be persisted at all.
+#
+# WHY A SEPARATE CREATE-ONLY FILE AND NOT A VERDICT FIELD IN THE STAMP — THE DESIGN CALL
+# (#3749 review round 2, BLOCKER 1). Round 1 put the verdict IN the throttle stamp, and
+# the stamp is a mutable shared cell that every lane rewrites at the END of its own
+# sweep. Stamp writes are unsynchronised, so a peer whose sweep STARTED before this lane
+# detected corruption can finish AFTER it and overwrite `CORRUPT` with `VERIFIED` or
+# `UNMEASURED`; the other lanes then throttle on that fresh non-corrupt stamp and keep
+# working against a store already known to be damaged. That is round 1's own harm coming
+# back through a different door, and it is the SECOND consecutive review finding in this
+# one shared cell.
+#
+# A LOCK WAS THE OTHER OPTION AND WAS REJECTED. It makes the read-modify-write atomic,
+# but the value stays a mutable cell any writer can move BACKWARDS, so "CORRUPT is
+# sticky" would rest on every present and future writer remembering to honour it — plus
+# a lock has its own could-not-acquire path, which must then not silently skip the
+# latch. CLAUDE.md's standing ruling for this family is to REMOVE THE SHARED MUTABLE
+# CHANNEL rather than to serialise access to it, so the latch is its own file and its
+# only state transition is ABSENT -> PRESENT:
+#
+#   * `set -C` (noclobber) makes `>` FAIL on an existing path instead of truncating it,
+#     and create with O_EXCL on a missing one. The kernel arbitrates; a losing writer
+#     cannot overwrite the winner, and there is no read-modify-write to serialise.
+#   * It is set in a SUBSHELL so the option cannot leak into the rest of this script.
+#   * NOTHING HERE EVER REMOVES IT. Corruption is non-self-clearing, so it does not
+#     expire either; the operator who repairs the store removes the file, and every
+#     message that mentions the latch names that exact command.
+#
+# THE VERDICT IS THE FILE'S EXISTENCE, ASKED AFTERWARDS — never this call's own exit
+# status, which cannot tell "a peer got there first" (fine, the box is latched) from
+# "the directory is unwritable" (not fine, and the caller must say so out loud).
+obj_sweep_set_latch() {
+  local latch="$1"
+  [[ -n "$latch" ]] || return 1
+  (
+    set -C
+    printf '%s\nCORRUPT\n' "$(date +%s)" >"$latch"
+  ) 2>/dev/null || true
+  obj_sweep_latch_present "$latch"
+}
+
 object_store_sweep() {
-  local script stamp now last rc out verdict cached stamp_ts stamp_verdict
+  local script stamp latch latch_ts now last rc out verdict stamp_ts
   if [[ "$OBJ_SWEEP_INTERVAL_HOURS" -le 0 ]]; then
     # ANNOUNCED, never silent (the CLAIM_CMD-disabled precedent in main()): a hygiene
     # probe that is off must be visible in the journal rather than inferred from missing
@@ -3310,47 +3398,47 @@ object_store_sweep() {
     fi
     return 0
   fi
-  stamp="$(obj_sweep_stamp_path)"
+  stamp="$(obj_sweep_stamp_path "$script")"
+  latch="$(obj_sweep_latch_path "$stamp")"
   now="$(date +%s)"
   last=0
-  cached=""
   if [[ -n "$stamp" && -r "$stamp" ]]; then
     stamp_ts=""
-    stamp_verdict=""
-    { read -r stamp_ts || true; read -r stamp_verdict || true; } <"$stamp" 2>/dev/null || true
+    { read -r stamp_ts || true; } <"$stamp" 2>/dev/null || true
     last="$stamp_ts"
-    cached="$stamp_verdict"
   fi
   [[ "$last" =~ ^[0-9]+$ ]] || last=0
   # A stamp in the FUTURE (clock skew, a hand-edited file, a restored snapshot) must not
-  # park the sweep forever: treat it as never-swept. It does NOT clear a recorded CORRUPT,
-  # which is a fact about the store rather than about when it was last measured.
+  # park the sweep forever: treat it as never-swept. It does NOT clear the CORRUPT latch,
+  # which is a fact about the store rather than about when it was last measured — and,
+  # since round 2, is not even in this file.
   [[ "$last" -gt "$now" ]] && last=0
-  # Only the exact token is honoured; anything else is treated as no cached verdict.
-  [[ "$cached" == "CORRUPT" ]] || cached=""
 
-  # A CACHED `CORRUPT` STOPS THIS LANE WITHOUT RE-SWEEPING, AND IT IGNORES THE INTERVAL.
+  # A LATCHED BOX STOPS THIS LANE WITHOUT RE-SWEEPING, AND IT IGNORES THE INTERVAL.
   #
-  # THE DEFECT THIS EXISTS FOR (#3749 review, BLOCKER A). The stamp is keyed on the
+  # THE DEFECT THIS EXISTS FOR (#3749 review, BLOCKER A). The throttle is keyed on the
   # SHARED store and lives in a box-wide directory, so it is genuinely box-wide. When it
   # recorded only a timestamp, the lane that DETECTED corruption stopped — and its three
   # peers then saw a FRESH stamp, skipped their own sweep for the whole interval, and kept
   # spawning workers against a store known to be damaged. That is the exact harm this
   # feature exists to prevent, delivered by the throttle.
   #
-  # Persisting the VERDICT is the stronger fix of the two available: "don't stamp on
-  # CORRUPT" would merely make each peer re-run a 20-80s fsck to rediscover the same
-  # thing, and would leave a window between the write and the peer's next iteration.
+  # THE LATCH IS A DIFFERENT FILE FROM THE STAMP, ON PURPOSE (round 2, BLOCKER 1): see
+  # obj_sweep_set_latch for why a verdict field in the mutable stamp is not monotonic
+  # under concurrency and why a lock was rejected. Here the consequence is simply that
+  # this test is an EXISTENCE test, which no concurrent writer can undo.
   #
   # IT DOES NOT EXPIRE, and it is CLEARED BY HAND. Corruption is non-self-clearing, so an
   # age-based expiry would resume workers over a still-damaged store; the operator who
   # repairs the store removes the file, and the remedy line below NAMES the path and the
   # command, because a latch nobody can clear bricks the box after the repair.
-  if [[ -n "$cached" ]]; then
-    notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT (cached)" \
-      "a sweep on this box recorded CORRUPT for the shared git object store every lane here reads. Stopping without re-sweeping. Repair the store, then remove $stamp."
-    log "object-store: CORRUPT (cached at $last by a sweep on this box) — stopping; no worker may certify against a damaged shared store (#3749)."
-    log "object-store: REMEDY — stop every lane on this box and re-obtain the objects from the canonical remote; a local 'git gc'/'git repack' CANNOT repair it. THEN CLEAR THE LATCH: rm -f $stamp"
+  if obj_sweep_latch_present "$latch"; then
+    latch_ts="$(head -1 "$latch" 2>/dev/null || true)"
+    [[ "$latch_ts" =~ ^[0-9]+$ ]] || latch_ts="<unrecorded>"
+    notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT (latched)" \
+      "a sweep on this box recorded CORRUPT for the shared git object store every lane here reads. Stopping without re-sweeping. Repair the store, then remove $latch."
+    log "object-store: CORRUPT (cached at $latch_ts by a sweep on this box) — stopping; no worker may certify against a damaged shared store (#3749)."
+    log "object-store: REMEDY — stop every lane on this box and re-obtain the objects from the canonical remote; a local 'git gc'/'git repack' CANNOT repair it. THEN CLEAR THE LATCH: rm -f $latch"
     finalize_exit "object-store-corrupt" 1
   fi
 
@@ -3384,20 +3472,11 @@ object_store_sweep() {
   verdict="${verdict#OBJECT-STORE: verdict }"
   verdict="${verdict%% *}"
 
-  # THE STAMP IS WRITTEN FOR EVERY OUTCOME, AND IT CARRIES THE VERDICT. The throttle
-  # bounds how often this box SPENDS the sweep (a box that cannot measure — no timeout
-  # binary, say — must not re-attempt it every iteration), and the recorded verdict is
-  # what stops a peer lane throttling past a CORRUPT this lane just found. Only the exact
-  # token is recorded; anything unrecognised is recorded as UNMEASURED, which grants no
-  # authority to anyone.
-  if [[ "$rc" -eq 0 && "$verdict" == "VERIFIED" ]]; then
-    stamp_verdict=VERIFIED
-  elif [[ "$rc" -eq 4 || "$verdict" == "CORRUPT" ]]; then
-    stamp_verdict=CORRUPT
-  else
-    stamp_verdict=UNMEASURED
-  fi
-  obj_sweep_write_stamp "$stamp" "$stamp_verdict"
+  # THE STAMP IS WRITTEN FOR EVERY OUTCOME. It bounds how often this box SPENDS the sweep
+  # — a box that cannot measure (no timeout binary, say) must not re-attempt it every
+  # iteration — and it says nothing about what was found. What a peer lane must not
+  # throttle past is recorded separately, and monotonically, by the latch below.
+  obj_sweep_write_stamp "$stamp"
 
   if [[ "$rc" -eq 0 && "$verdict" == "VERIFIED" ]]; then
     log "object-store: VERIFIED — $(printf '%s\n' "$out" | { grep '^OBJECT-STORE: measured ' || true; } | head -1)"
@@ -3406,10 +3485,19 @@ object_store_sweep() {
   if [[ "$rc" -eq 4 || "$verdict" == "CORRUPT" ]]; then
     local findings
     findings="$(printf '%s\n' "$out" | { grep -E '^OBJECT-STORE: (finding|object) ' || true; } | head -6 | tr '\n' ';' | cut -c1-600)"
+    # LATCH FIRST, THEN STOP. A failure to persist it is REPORTED, never silent: this
+    # lane stops either way, but without the latch the peers on this box will re-run
+    # their own sweep and rediscover the damage rather than inheriting the verdict, and
+    # an operator reading only this journal would otherwise never learn that.
+    if [[ -z "$latch" ]]; then
+      log "object-store: the CORRUPT verdict could NOT be latched — this box's shared store could not be resolved, so there is no box-wide file to record it in. Peer lanes will re-sweep and rediscover it (#3749)."
+    elif ! obj_sweep_set_latch "$latch"; then
+      log "object-store: the CORRUPT verdict could NOT be latched at $latch (unwritable?) — peer lanes will re-sweep and rediscover it rather than inheriting this verdict (#3749)."
+    fi
     notify "high" "worker-supervisor: SHARED OBJECT STORE CORRUPT" \
       "git fsck reports damaged objects in this box's shared git object store — every lane here reads it, so NO gate verdict on this box can be trusted. Stopping. ${findings:-<no findings captured>}"
     log "object-store: CORRUPT — stopping loudly; no worker may certify against a damaged shared store (#3749). ${findings:-<no findings captured>}"
-    log "object-store: REMEDY — stop every lane on this box and re-obtain the objects from the canonical remote; a local 'git gc'/'git repack' CANNOT repair it.${stamp:+ THEN CLEAR THE LATCH: rm -f $stamp}"
+    log "object-store: REMEDY — stop every lane on this box and re-obtain the objects from the canonical remote; a local 'git gc'/'git repack' CANNOT repair it.${latch:+ THEN CLEAR THE LATCH: rm -f $latch}"
     finalize_exit "object-store-corrupt" 1
   fi
   # UNMEASURED (or no recognised verdict at all): REPORTED, and DELIBERATELY PERMISSIVE.
