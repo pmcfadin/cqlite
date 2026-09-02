@@ -19230,6 +19230,11 @@ _DA_EVALUATIONS=0
 # there — so a refusal can never claim a slot was released when none was ever held.
 _DA_MOMENT=""
 _DA_SLOT_NOTE=""
+# Set by the disposer immediately before a refusal so the two binding causes render their
+# OWN verdict token, lead sentence and remedy. Defaulted at the use site, never assumed.
+_DA_REFUSE_VERDICT=""
+_DA_REFUSE_LEAD=""
+_DA_REFUSE_REMEDY=""
 # The resolved target dir the CURRENTLY retained _DA_MOUNT was measured against. The
 # pairing is explicit so a later measurement can PROVE the retained mount still describes
 # the same subject rather than assume it (roborev job 345).
@@ -19359,7 +19364,7 @@ _gate_disk_admission_clears_bar() {
 #   FILESYSTEM-TOUCHING — every one BOUNDED via `_component_set_bounded`:
 #     cargo metadata   the target-dir resolution        (_GATE_TARGET_DIR_BOUND_SECS)
 #     python3 -c       reads the metadata payload       (_GATE_TARGET_DIR_BOUND_SECS)
-#     mkdir -p         creating the resolved target dir (_GATE_DF_BOUND_SECS)
+#     python3 -c       creating + errno-classifying the target dir (_GATE_DF_BOUND_SECS)
 #     df -Pk           the free-space reading           (_GATE_DF_BOUND_SECS)
 #
 #   NO FILESYSTEM ACCESS — deliberately NOT bounded, and each stated so the next reader
@@ -19477,7 +19482,7 @@ sys.stdout.write(p)
 # (bounded `mkdir -p`) rather than approximated by an ancestor. See the body: that removed
 # a two-valued predicate that could admit on the wrong filesystem.
 _gate_disk_admission_subject() {
-  local r td e
+  local r td e out
   r=$(_gate_resolve_target_dir)
   case "$r" in
     'OK '*) td="${r#OK }" ;;
@@ -19510,12 +19515,76 @@ _gate_disk_admission_subject() {
   # creates exactly this directory seconds later on every path that does not refuse
   # (measured: `cargo metadata` does NOT create it, so this is the first creation) — so the
   # gate does nothing here the build was not about to do anyway.
-  _component_set_bounded "$_GATE_DF_BOUND_SECS" mkdir -p "$td"; e=$?
+  # THE FAILURE OF `mkdir -p` IS CLASSIFIED FROM THE ACTUAL ERRNO (roborev job 357).
+  #
+  # THE DEFECT IT FIXES, and it was in the central disposition rule rather than in the
+  # periphery: a failed creation was classified UNMEASURED, which is non-fatal and
+  # PROCEEDS. So on ENOSPC or inode exhaustion — THE EXACT CONDITION THIS WHOLE CHANGE
+  # EXISTS TO CATCH — admission was BYPASSED, and a permission or non-directory failure
+  # walked into a build already known to be impossible. That is the permissive-branch-on-
+  # unknown shape in the one place it costs everything, and it inverts the meaning of its
+  # own input: an ENOSPC from `mkdir` is not an ABSENCE of information, it is an
+  # AFFIRMATIVE MEASUREMENT that the build cannot write.
+  #
+  # So the two epistemic states are separated, and they are genuinely different:
+  #
+  #   ESTABLISHES THE BUILD CANNOT WRITE  -> BINDING REFUSAL, disposed exactly like a
+  #     below-bar reading (slot released, named outcome, RESULT: FAIL) but under its OWN
+  #     verdict token: "the floor was crossed" and "the directory cannot be created" are
+  #     different operator situations with different remedies.
+  #   ESTABLISHES NOTHING (the bound fired, no bounding mechanism, an error we cannot
+  #     classify) -> non-fatal UNMEASURED. There the honest answer really is "cannot tell",
+  #     and REFUSING on an unclassified error would red correct runs — a guard that reds on
+  #     correct input is the guard agents learn to waive.
+  #
+  # CLASSIFIED FROM THE ERRNO, NOT FROM A BARE NON-ZERO EXIT, which would collapse the two
+  # groups back together and reinstate the finding. python3 performs the creation and
+  # reports `errno.errorcode`, so the classification is NUMERIC and locale-independent —
+  # parsing `mkdir`'s message would be a locale-dependent string oracle. python3 is already
+  # required on this path (it parses the cargo metadata payload), so this adds no
+  # dependency; its absence is rc 127 and lands in the honest "cannot tell" branch.
+  out=$(_component_set_bounded "$_GATE_DF_BOUND_SECS" python3 -c '
+import errno, os, sys
+p = sys.argv[1]
+# Each name is here because it ESTABLISHES the build cannot write to this path:
+#   ENOSPC/EDQUOT  the filesystem or quota is full   (this issue is about exactly this)
+#   EROFS          read-only mount
+#   EACCES/EPERM   we are not permitted to create it
+#   ENOTDIR        a path component is not a directory
+#   EEXIST         with exist_ok=True this can only mean "exists and is NOT a directory"
+#   ELOOP/ENAMETOOLONG  the path itself is unusable, not merely absent
+B = set()
+for n in ("ENOSPC", "EDQUOT", "EROFS", "EACCES", "EPERM", "ENOTDIR", "EEXIST", "ELOOP", "ENAMETOOLONG"):
+    v = getattr(errno, n, None)
+    if v is not None:
+        B.add(v)
+try:
+    os.makedirs(p, exist_ok=True)
+except OSError as e:
+    code = errno.errorcode.get(e.errno, "E%s" % (e.errno,))
+    sys.stdout.write(("CANNOT-WRITE " if e.errno in B else "UNCLASSIFIED ") + code)
+    sys.exit(0)
+except Exception:
+    sys.stdout.write("UNCLASSIFIED unknown")
+    sys.exit(0)
+if not os.path.isdir(p):
+    sys.stdout.write("CANNOT-WRITE ENOTDIR")
+    sys.exit(0)
+sys.stdout.write("OK")
+' "$td" 2>/dev/null); e=$?
   case "$e" in
-    0) printf 'OK\t%s\t%s' "$td" "$td"; return 0 ;;
+    0) ;;
+    127) printf 'UNRESOLVED\ttarget-dir-mkdir-no-classifier'; return 0 ;;
     124|137) printf 'UNRESOLVED\ttarget-dir-mkdir-timeout'; return 0 ;;
     "$_CS_UNBOUNDABLE_RC") printf 'UNRESOLVED\ttarget-dir-mkdir-unboundable'; return 0 ;;
-    *) printf 'UNRESOLVED\ttarget-dir-uncreatable'; return 0 ;;
+    "$_CS_REPLAY_RC") printf 'UNRESOLVED\ttarget-dir-mkdir-output-truncated'; return 0 ;;
+    *) printf 'UNRESOLVED\ttarget-dir-mkdir-classifier-failed'; return 0 ;;
+  esac
+  case "$out" in
+    OK) printf 'OK\t%s\t%s' "$td" "$td"; return 0 ;;
+    'CANNOT-WRITE '*) printf 'UNWRITABLE\t%s\t%s' "${out#CANNOT-WRITE }" "$td"; return 0 ;;
+    'UNCLASSIFIED '*) printf 'UNRESOLVED\ttarget-dir-uncreatable-%s' "${out#UNCLASSIFIED }"; return 0 ;;
+    *) printf 'UNRESOLVED\ttarget-dir-mkdir-unrecognised'; return 0 ;;
   esac
 }
 
@@ -19565,6 +19634,7 @@ _gate_disk_admission_parse() {
 # _gate_disk_admission_probe: the THREE-VALUED reading of the subject filesystem.
 # Prints exactly one of
 #     MEASURED<TAB><available-kib><TAB><target-dir><TAB><mount-point>
+#     UNWRITABLE<TAB><errno-name><TAB><target-dir>   (an affirmative "cannot write")
 #     UNMEASURED<TAB><why><TAB><target-dir-or-empty>
 # and returns 0 either way — the CALLER disposes, because the two moments dispose of
 # the same reading differently. TAB-delimited because BOTH the target dir and the mount
@@ -19600,6 +19670,11 @@ _gate_disk_admission_probe() {
       subj="${subj#OK$'\t'}"
       path="${subj%%$'\t'*}"
       td="${subj#*$'\t'}" ;;
+    UNWRITABLE$'\t'*)
+      # An AFFIRMATIVE measurement that the build cannot write here. It is passed through
+      # as its own kind rather than folded into UNMEASURED, which is what let it proceed.
+      subj="${subj#UNWRITABLE$'\t'}"
+      printf 'UNWRITABLE\t%s\t%s' "${subj%%$'\t'*}" "${subj#*$'\t'}"; return 0 ;;
     UNRESOLVED$'\t'*)
       printf 'UNMEASURED\t%s\t' "${subj#UNRESOLVED$'\t'}"; return 0 ;;
     *) printf 'UNMEASURED\ttarget-dir-resolver-unrecognised\t'; return 0 ;;
@@ -19645,7 +19720,7 @@ _gate_disk_admission_probe() {
 _gate_gib_render() { awk -v k="$1" 'BEGIN { printf "%.1fGiB", k/1048576 }' 2>/dev/null; }
 
 # _gate_disk_admission_measure: ONE evaluation of the ONE predicate. Sets _DA_STATE
-# (OK | BELOW | UNMEASURED), _DA_VALUE (rendered GiB), _DA_MOUNT, _DA_WHY. Both
+# (OK | BELOW | UNWRITABLE | UNMEASURED), _DA_VALUE (rendered GiB), _DA_MOUNT, _DA_WHY. Both
 # moments call THIS — that identity is the whole of AC1.
 _gate_disk_admission_measure() {
   local probe crc
@@ -19694,6 +19769,15 @@ _gate_disk_admission_measure() {
         *) _DA_STATE=UNMEASURED; _DA_WHY=comparison-unavailable ;;
       esac
       ;;
+    UNWRITABLE$'\t'*)
+      probe="${probe#UNWRITABLE$'\t'}"
+      _DA_STATE=UNWRITABLE
+      _DA_WHY="${probe%%$'\t'*}"
+      _DA_TARGET_DIR="${probe#*$'\t'}"
+      [ -n "$_DA_TARGET_DIR" ] && _DA_TARGET_NOTE="via cargo metadata"
+      # No filesystem was read, so any retained mount describes something else.
+      _DA_MOUNT=""; _DA_MOUNT_FOR_TARGET=""
+      ;;
     UNMEASURED$'\t'*)
       probe="${probe#UNMEASURED$'\t'}"
       _DA_STATE=UNMEASURED
@@ -19719,6 +19803,7 @@ _gate_disk_admission_render_state() {
   case "$_DA_STATE" in
     OK)    printf '%s' "$_DA_VALUE" ;;
     BELOW) printf '%s(BELOW BAR)' "$_DA_VALUE" ;;
+    UNWRITABLE) printf 'UNWRITABLE(%s)' "${_DA_WHY:-unknown}" ;;
     *)     printf 'UNMEASURED(%s)' "${_DA_WHY:-unknown}" ;;
   esac
 }
@@ -19798,6 +19883,9 @@ _gate_disk_admission_launch() {
     invalid|clamped|out-of-range)
       echo "agent-gate: WARN: CQLITE_GATE_MIN_FREE_GB='$(printf '%s' "${CQLITE_GATE_MIN_FREE_GB:-}" | tr -d '\000-\037\177' | cut -c1-60)' was NOT used AS SET ($_DA_BAR_SRC); the bar in effect is ${_DA_BAR}GiB (accepted range 0..${_GATE_MAX_FREE_GB} GiB) (#3755)" >&2 ;;
   esac
+  if [ "$_DA_STATE" = UNWRITABLE ]; then
+    echo "agent-gate: WARN: the build output directory ${_DA_TARGET_DIR:-<unresolved>} cannot be created at LAUNCH (${_DA_WHY:-unknown}) — ADVISORY *only if a slot grant follows* (a queued peer may free space or inodes); the binding check is re-taken at slot grant (#3755)" >&2
+  fi
   if [ "$_DA_STATE" = BELOW ]; then
     echo "agent-gate: WARN: only $_DA_VALUE free on ${_DA_MOUNT:-the target filesystem} at LAUNCH, below the ${_DA_BAR}GiB bar — ADVISORY *only if a slot grant follows* (a queued peer may free space); if the cap does not engage, THIS reading is the binding one (#3755)" >&2
   fi
@@ -19813,7 +19901,19 @@ _gate_disk_admission_launch() {
 _gate_disk_admission_dispose() {
   _DA_SLOT_NOTE="$1"
   case "$_DA_STATE" in
-    BELOW) _gate_disk_admission_refuse ;;   # exits 1 — never returns
+    BELOW)
+      _DA_REFUSE_VERDICT="FAIL-CLOSED (#3755)"
+      _DA_REFUSE_LEAD="only $_DA_VALUE free on ${_DA_MOUNT:-the target filesystem} ${_DA_MOMENT%% (*}, below the ${_DA_BAR}GiB bar (${_DA_BAR_SRC})"
+      _DA_REFUSE_REMEDY="free space on ${_DA_MOUNT:-the target filesystem} (cargo clean / prune stale /tmp/agent-gate.* run dirs), then re-run"
+      _gate_disk_admission_refuse ;;        # exits 1 — never returns
+    UNWRITABLE)
+      # A DISTINCT verdict token: "the floor was crossed" and "the build output directory
+      # cannot be created" are different operator situations with different remedies, and a
+      # reader must not have to infer which one happened.
+      _DA_REFUSE_VERDICT="UNWRITABLE-FAIL-CLOSED (#3755)"
+      _DA_REFUSE_LEAD="the build output directory ${_DA_TARGET_DIR:-<unresolved>} CANNOT BE CREATED (${_DA_WHY:-unknown}) ${_DA_MOMENT%% (*}"
+      _DA_REFUSE_REMEDY="make ${_DA_TARGET_DIR:-the target directory} creatable — free space or inodes, fix the permissions, or correct a target dir whose parent is not a directory — then re-run"
+      _gate_disk_admission_refuse ;;        # exits 1 — never returns
     OK)    _gate_disk_admission_line PASS "$2" ;;
     *)     _gate_disk_admission_line "UNMEASURED (${_DA_WHY:-unknown})" "the bar was NOT APPLIED; the run proceeds UNADMITTED (#3755)" ;;
   esac
@@ -19861,10 +19961,10 @@ _gate_disk_admission_refuse() {
   # is idempotent (it clears GATE_SLOT_DAEMON_PID) and a no-op when no slot was ever
   # acquired, so calling it unconditionally here is safe at all three moments.
   _gate_release_slot
-  _gate_disk_admission_line "FAIL-CLOSED (#3755)" "$_DA_SLOT_NOTE"
-  echo "agent-gate: FAIL: only $_DA_VALUE free on ${_DA_MOUNT:-the target filesystem} ${_DA_MOMENT%% (*}, below the ${_DA_BAR}GiB bar (${_DA_BAR_SRC}) — refusing to start a build that would abort into the floor (#3755)" >&2
+  _gate_disk_admission_line "${_DA_REFUSE_VERDICT:-FAIL-CLOSED (#3755)}" "$_DA_SLOT_NOTE"
+  echo "agent-gate: FAIL: ${_DA_REFUSE_LEAD:-the admission check refused} — refusing to start a build that cannot finish (#3755)" >&2
   echo "agent-gate: $_DA_SLOT_NOTE." >&2
-  echo "agent-gate: remedy: free space on ${_DA_MOUNT:-the target filesystem} (cargo clean / prune stale /tmp/agent-gate.* run dirs), then re-run." >&2
+  echo "agent-gate: remedy: ${_DA_REFUSE_REMEDY:-free space on the target filesystem, then re-run}." >&2
   echo "agent-gate: $DISK_ADMISSION_LINE" >&2
   # A complete, well-formed terminal block — the refusal must not be information-poorer
   # than any other FAIL. _tree_commit_meta runs BEFORE _tree_meta_array so the `commit:`
@@ -20881,6 +20981,25 @@ _gate_side_target_base_init() {
   return 0
 }
 
+# _gate_side_lane_needs_cargo <component...>: rc 0 when at least one of them is
+# Cargo-backed, i.e. when a resolved target dir is actually going to be used.
+#
+# DERIVED from `_fm_component_class` rather than from a list kept here, so this cannot
+# drift from the classification the rest of the gate reasons with. `no-cargo` is the ONLY
+# class that skips: `indirect:<driver>` really does run cargo (through maturin/napi) and
+# needs the dir, and `unobservable:*` is by definition a class we cannot rule cargo out
+# for. An unreadable class defaults to needing it — resolving when we did not have to costs
+# one bounded probe, while NOT resolving when we had to would send a side build to the
+# wrong directory, so the conservative branch is the one that resolves.
+_gate_side_lane_needs_cargo() {
+  local c cls
+  for c in "$@"; do
+    cls=$(_fm_component_class "$c" 2>/dev/null) || cls=cargo
+    [ "$cls" = no-cargo ] || return 0
+  done
+  return 1
+}
+
 run_side_component() {
   # Reads the value resolved in the main shell. The `:-` is a guard for a dispatch path
   # that never called the init, not a second resolution: resolving HERE would be inside the
@@ -20935,7 +21054,17 @@ launch_components() {
   # exactly once, in the MAIN shell, before any lane starts — which is what keeps it out of
   # the backgrounded SIDE sub-pool, where a cache write would land in a subshell and
   # concurrent resolutions would race on the bounded runner's shared capture files.
-  if [ "${#side_lane[@]}" -gt 0 ]; then
+  #
+  # GATED ON THE CLASS, NOT ON LANE MEMBERSHIP (roborev job 357). The first cut gated on
+  # `side_lane` being non-empty, which fixed the INSTANCE the review named (`--only
+  # file-size`, a MAIN-lane run) and left the CLASS open: `delivery-telemetry` and
+  # `binding-unwind-profile` are SIDE components that are explicitly Cargo-free, so
+  # `--only delivery-telemetry` still ran `cargo metadata` with the same delay and lockfile
+  # exposure. A finding names an instance; the defect is a class, and the question to ask is
+  # what ENUMERATES the class. Here it already exists: `_fm_component_class`, the same
+  # classification the #3453 feature-matrix annotation is derived from — so a future
+  # Cargo-free side component is covered with no edit here.
+  if [ "${#side_lane[@]}" -gt 0 ] && _gate_side_lane_needs_cargo ${side_lane[@]+"${side_lane[@]}"}; then
     _gate_side_target_base_init
   fi
 

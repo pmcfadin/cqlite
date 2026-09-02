@@ -1375,13 +1375,53 @@ q_meta_calls() {
   printf '%s' "$n"
 }
 
-# (a) THE SUBJECT: a main-only --only run.
-q_rec="$tmp/q-only.record"; : > "$q_rec"
-env PATH="$tmp/q-cargoshim:$PATH" CARGO_RECORD="$q_rec" \
-  AGENT_GATE_SUMMARY_FILE="$tmp/q-only.summary.txt" \
-  CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-/nonexistent}" \
-  bash "$GATE" --only file-size >"$tmp/q-only.out" 2>"$tmp/q-only.err"
-q_only=$(q_meta_calls "$q_rec")
+# THE SUBJECT SET IS DERIVED, NOT LISTED (roborev job 357). Round 8 fixed the INSTANCE the
+# review named — `--only file-size`, a MAIN-lane component — and left the CLASS open: the
+# SIDE lane also holds explicitly Cargo-free components, and `--only delivery-telemetry`
+# still ran cargo metadata. A finding names an instance; the defect is a class, so the set
+# is computed from the gate's OWN classification (_component_lane + _fm_component_class,
+# extracted from the shipped file) and a future Cargo-free component joins with no edit here.
+q_extract() { sed -n "/^$1() {/,/^}$/p" "$GATE"; }
+q_derive_free() {
+  (
+    eval "$(q_extract _component_lane)"
+    eval "$(q_extract _fm_component_class)"
+    local c
+    for c in $(sed -n 's/^COMPONENTS=(\(.*\))$/\1/p' "$GATE"); do
+      case "$(_fm_component_class "$c" 2>/dev/null)" in
+        no-cargo) printf '%s\n' "$c" ;;
+      esac
+    done
+  )
+}
+q_free=$(q_derive_free)
+q_free_n=$(printf '%s\n' "$q_free" | grep -c '[^[:space:]]' || true)
+q_free_n="${q_free_n%%$'\n'*}"; case "$q_free_n" in ''|*[!0-9]*) q_free_n=0 ;; esac
+# A derivation that yields nothing would make every assertion below vacuous.
+if [ "$q_free_n" -ge 3 ]; then
+  ok "only-cargo-free: derived $q_free_n Cargo-free component(s) from the gate's own classification"
+else
+  bad "only-cargo-free: the derivation yielded $q_free_n component(s) — too few to be the real set; every assertion below would be vacuous"
+fi
+
+# (a) THE SUBJECTS: one --only run per Cargo-free component, MAIN lane and SIDE lane alike.
+q_only=0
+q_worst=""
+for q_c in $q_free; do
+  q_rec="$tmp/q-only.$q_c.record"; : > "$q_rec"
+  env PATH="$tmp/q-cargoshim:$PATH" CARGO_RECORD="$q_rec" \
+    AGENT_GATE_SUMMARY_FILE="$tmp/q-only.$q_c.summary.txt" \
+    CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-/nonexistent}" \
+    bash "$GATE" --only "$q_c" >"$tmp/q-only.$q_c.out" 2>"$tmp/q-only.$q_c.err"
+  q_n=$(q_meta_calls "$q_rec")
+  if [ "$q_n" -eq 0 ]; then
+    ok "only-cargo-free[$q_c]: 0 'cargo metadata' calls — its Cargo-free contract holds"
+  else
+    bad "only-cargo-free[$q_c]: invoked cargo metadata $q_n time(s) — a documented Cargo-free path runs Cargo"
+    q_only=$((q_only + q_n)); q_worst="$q_c"
+  fi
+done
+q_rec="$tmp/q-only.file-size.record"
 # (b) THE DISCRIMINATION CONTROL, run FIRST in spirit and asserted here: the SAME shim on a
 #     full gate MUST record metadata calls. Without it, "0" proves only that the shim is
 #     inert — the failure mode four earlier controls on this branch actually had.
@@ -1401,9 +1441,9 @@ else
   bad "only-cargo-free CONTROL: the shim recorded NO metadata call even on a full gate — it is inert and the subject assertion below proves nothing"
 fi
 if [ "$q_only" -eq 0 ]; then
-  ok "only-cargo-free: '--only file-size' invoked cargo metadata 0 times (its cargo-free contract holds)"
+  ok "only-cargo-free: the WHOLE derived class is Cargo-metadata-free, not just the one instance a review named"
 else
-  bad "only-cargo-free: '--only file-size' invoked cargo metadata $q_only time(s) — a documented cargo-free path runs cargo"
+  bad "only-cargo-free: $q_only metadata call(s) across the class (worst: $q_worst)"
 fi
 # The claim is precisely about `cargo metadata`. The gate's accelerator detection runs
 # `cargo nextest --version` at startup on EVERY invocation, which is pre-existing and not
@@ -1449,25 +1489,103 @@ fi
 r_script=$(df_script r "$HIGH")
 run_stub_gate r "$r_script" \
   CARGO_TARGET_DIR="$r_target" \
-  CQLITE_GATE_SLOTS_DIR="$tmp/r-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
-r_err=$RS_ERR
+  CQLITE_GATE_SLOTS_DIR="$tmp/r-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=2
+r_err=$RS_ERR; r_sum=$RS_SUMMARY
 watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; r_status=$WX_STATUS; r_markers=$WX_MARKERS
 assert_no_timeout "r uncreatable target dir"
 r_line=$(grep_line "$r_err" '^agent-gate: disk-admission: ')
-case "$r_line" in
-  *'UNMEASURED (target-dir-uncreatable)'*)
-    ok "mkdir-subject: an uncreatable target dir is UNMEASURED with its own cause, not a reading of some ancestor" ;;
-  *) bad "mkdir-subject: expected UNMEASURED (target-dir-uncreatable), got: ${r_line:-<none>}" ;;
-esac
-if [ "$(df_calls r)" -eq 0 ]; then
-  ok "mkdir-subject: df was NEVER called — no filesystem other than the subject was measured"
+# ---- roborev job 357, Medium: a failure that ESTABLISHES the build cannot write is a
+# BINDING REFUSAL, not a non-fatal UNMEASURED. Classifying it "could not tell" bypassed
+# admission on exactly the condition this change exists to catch.
+if [ "$r_status" -ne 0 ] && [ "$r_markers" -eq 0 ]; then
+  ok "cannot-write: an uncreatable target dir REFUSES and never begins work (exit $r_status)"
 else
-  bad "mkdir-subject: df ran $(df_calls r) time(s) — some other filesystem was measured, which is the false admission"
+  bad "cannot-write: the run PROCEEDED into a build already known to be impossible (exit $r_status, markers $r_markers)"
 fi
-if [ "$r_status" -eq 0 ] && [ "$r_markers" -ge 1 ]; then
-  ok "mkdir-subject: the refusal to measure is DECLARED and non-fatal"
+case "$r_line" in
+  *'UNWRITABLE-FAIL-CLOSED (#3755)'*'UNWRITABLE(ENOTDIR)'*)
+    ok "cannot-write: reported under its OWN verdict token, naming the errno that established it" ;;
+  *'UNMEASURED'*)
+    bad "cannot-write: still classified UNMEASURED — an affirmative 'cannot write' read as 'cannot tell': $r_line" ;;
+  *) bad "cannot-write: unexpected rendering: ${r_line:-<none>}" ;;
+esac
+if grep -qx 'RESULT: FAIL' "$r_sum" 2>/dev/null; then
+  ok "cannot-write: RESULT: FAIL (the pollable terminal token, as for a below-bar refusal)"
 else
-  bad "mkdir-subject: an unmeasurable subject refused the run (exit $r_status)"
+  bad "cannot-write: no exact 'RESULT: FAIL' line in the refusal SUMMARY"
+fi
+# The two binding causes must be TEXTUALLY distinct — different operator situations,
+# different remedies — so a below-bar refusal must NOT carry the unwritable token.
+if grep -q '^disk-admission: FAIL-CLOSED (#3755)' "$a_subj_sum" 2>/dev/null \
+   && ! grep -q '^disk-admission: UNWRITABLE-FAIL-CLOSED' "$a_subj_sum" 2>/dev/null; then
+  ok "cannot-write: the below-bar refusal keeps its own distinct token (the two are not merged)"
+else
+  bad "cannot-write: the below-bar and unwritable refusals are not textually distinct"
+fi
+if [ "$(df_calls r)" -eq 0 ]; then
+  ok "cannot-write: df was NEVER called — no filesystem other than the subject was measured"
+else
+  bad "cannot-write: df ran $(df_calls r) time(s) — some other filesystem was measured"
+fi
+# A REAL EACCES subject, in addition to the ENOTDIR one above, because the finding named
+# permission failures explicitly. Skipped rather than faked when running as root, where
+# chmod cannot deny us.
+if [ "$(id -u)" -eq 0 ]; then
+  skip "cannot-write[EACCES]: running as root — chmod cannot produce a real permission denial here"
+else
+  r_locked="$tmp/r-locked"; mkdir -p "$r_locked"; chmod 500 "$r_locked"
+  r_perm_script=$(df_script r-perm "$HIGH")
+  run_stub_gate r-perm "$r_perm_script" \
+    CARGO_TARGET_DIR="$r_locked/target" \
+    CQLITE_GATE_SLOTS_DIR="$tmp/r-perm-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=2
+  r_perm_err=$RS_ERR
+  watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; r_perm_status=$WX_STATUS; r_perm_markers=$WX_MARKERS
+  assert_no_timeout "r-perm"
+  chmod 700 "$r_locked"
+  r_perm_line=$(grep_line "$r_perm_err" '^agent-gate: disk-admission: ')
+  case "$r_perm_line" in
+    *'UNWRITABLE-FAIL-CLOSED (#3755)'*'UNWRITABLE(EACCES)'*)
+      if [ "$r_perm_status" -ne 0 ] && [ "$r_perm_markers" -eq 0 ]; then
+        ok "cannot-write[EACCES]: a REAL permission denial refuses and never begins work"
+      else
+        bad "cannot-write[EACCES]: named the errno but did not refuse (exit $r_perm_status)"
+      fi ;;
+    *) bad "cannot-write[EACCES]: expected an UNWRITABLE(EACCES) refusal, got: ${r_perm_line:-<none>}" ;;
+  esac
+fi
+
+# ---- THE OTHER HALF OF THE SPLIT: a failure that establishes NOTHING stays non-fatal.
+# Driven by a REAL bound firing, not a simulated status: a python3 shim that hangs ONLY on
+# the mkdir classifier (3 argv: -c, script, path) and delegates the metadata parse (2 argv),
+# so the resolution still succeeds and the hang lands exactly on the call under test.
+mkdir -p "$tmp/r-hangpy"
+_R_REAL_PY=$(command -v python3 2>/dev/null || printf '/nonexistent/python3')
+cat > "$tmp/r-hangpy/python3" <<RPY
+#!/usr/bin/env bash
+if [ "\$#" -eq 3 ] && [ "\$1" = -c ]; then sleep 120; fi
+exec "$_R_REAL_PY" "\$@"
+RPY
+chmod +x "$tmp/r-hangpy/python3"
+r_unm_script=$(df_script r-unm "$HIGH")
+RS_PATH_PREFIX="$tmp/r-hangpy"
+run_stub_gate r-unm "$r_unm_script" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/r-unm-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+RS_PATH_PREFIX=""
+r_unm_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 300; r_unm_status=$WX_STATUS; r_unm_markers=$WX_MARKERS
+assert_no_timeout "r-unm bounded classifier"
+r_unm_line=$(grep_line "$r_unm_err" '^agent-gate: disk-admission: ')
+case "$r_unm_line" in
+  *'UNMEASURED (target-dir-mkdir-timeout)'*)
+    ok "cannot-tell: the bound firing stays UNMEASURED with its own cause — it establishes nothing" ;;
+  *'UNWRITABLE'*)
+    bad "cannot-tell: a bound timeout was read as an affirmative 'cannot write' — that would red correct runs: $r_unm_line" ;;
+  *) bad "cannot-tell: expected UNMEASURED (target-dir-mkdir-timeout), got: ${r_unm_line:-<none>}" ;;
+esac
+if [ "$r_unm_status" -eq 0 ] && [ "$r_unm_markers" -ge 1 ]; then
+  ok "cannot-tell: 'could not tell' is NON-FATAL — the run proceeded, declared"
+else
+  bad "cannot-tell: an unclassifiable failure refused the run (exit $r_unm_status)"
 fi
 
 # THE OTHER HALF: a target dir that simply does not exist yet — the cold-lane case the
