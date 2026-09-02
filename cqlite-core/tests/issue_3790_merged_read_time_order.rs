@@ -28,6 +28,29 @@
 //! evidence has to be the RULE plus what our own writer does. This test encodes that
 //! conclusion so it cannot be re-litigated by whichever review lands next.
 //!
+//! ## WHAT THIS DOES NOT EXERCISE — declared, not implied (roborev job 54)
+//!
+//! It calls `assemble_read_cells` on hand-built `CellData`, so it pins the
+//! **merged-read assembly** order and **NOTHING ABOUT THE WRITER**. An earlier
+//! revision named these cases `..._matching_the_writer`, which was an overclaim
+//! twice over: the writer is never invoked here, and "the writer" is ambiguous
+//! because CQLite has TWO collection write paths that DISAGREE for a negative
+//! `time`:
+//!
+//! * per-element (`data_writer/complex.rs`, via `compare_cell_paths`) — unsigned
+//!   raw cell-path bytes, which matches Cassandra and matches this test;
+//! * whole-collection (`data_writer/complex.rs`, `write_complex_set` via
+//!   `collection_order::compare_collection_elements`) — **signed** for
+//!   `Value::Time`, and it emits cell paths in that order with no re-sort.
+//!
+//! So the whole-collection writer currently disagrees with Cassandra, with the
+//! per-element writer, and with this test, for out-of-range negatives. That is a
+//! pre-existing write-path parity defect, out of scope for a comparator fix
+//! (on-disk byte ordering is compaction-parity territory) and filed as **#3935**.
+//! An end-to-end write→read regression belongs there, where the rule is decided;
+//! adding one here would pin one of two conflicting writer behaviours as correct
+//! before that decision is made.
+//!
 //! ## What this catches, MEASURED — and what it does not
 //!
 //! Both halves of the reverted mistake were re-applied to check, rather than assumed:
@@ -108,7 +131,7 @@ fn column_of(row: &[(std::sync::Arc<str>, Value)], name: &str) -> Value {
 /// bit makes the leading byte `0xFF` and the order is UNSIGNED. Signed order would put
 /// it first — that is the reverted mistake this pins.
 #[test]
-fn negative_time_set_element_sorts_by_unsigned_bytes_matching_the_writer() {
+fn negative_time_set_element_sorts_by_unsigned_serialized_bytes() {
     let cells = vec![
         time_elem("tset", 0, Value::Time(0)),
         time_elem("tset", -1, Value::Time(-1)),
@@ -130,14 +153,16 @@ fn negative_time_set_element_sorts_by_unsigned_bytes_matching_the_writer() {
         got,
         vec![0, 86_399_999_999_999, -2, -1],
         "set<time> must order by UNSIGNED serialized bytes (negatives LAST, 0xFF \
-         leading), matching Cassandra's TimeType BYTE_ORDER and the on-disk writer. \
-         Signed order would be [-2, -1, 0, max] — the reverted #3790 mistake."
+         leading), matching Cassandra's TimeType BYTE_ORDER and the PER-ELEMENT \
+         write path. Signed order would be [-2, -1, 0, max] — the reverted #3790 \
+         mistake. NOTE the whole-collection writer is signed today (#3935); this \
+         asserts the read side, not that writer."
     );
 }
 
 /// Same property for a `map<time, text>` key, the other ordering position.
 #[test]
-fn negative_time_map_key_sorts_by_unsigned_bytes_matching_the_writer() {
+fn negative_time_map_key_sorts_by_unsigned_serialized_bytes() {
     let cells = vec![
         time_elem("tmap", 10, Value::text("ten".to_string())),
         time_elem("tmap", -5, Value::text("neg".to_string())),
