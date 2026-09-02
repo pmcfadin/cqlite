@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=564
+CASE_FLOOR=567
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -40,6 +40,7 @@ expect() { # <description> <condition-already-evaluated:0|1>
 # Fixture generator: a manifest plus one single-record JSONL per (arm, replicate)
 # ---------------------------------------------------------------------------
 cat > "$TMP/mkfixture.py" <<'PYEOF'
+import hashlib
 import json
 import os
 import sys
@@ -198,6 +199,12 @@ def main():
         },
         "runs": runs,
     }
+    # The canonical digest is COMPUTED from the fixture's own ticket, not
+    # written as a constant: a hardcoded digest would drift the moment the
+    # fixture ticket changed, and the case would then be testing the constant.
+    manifest["workload"]["ticket_canonical_sha256"] = hashlib.sha256(
+        json.dumps(manifest["workload"]["ticket_content"], sort_keys=True,
+                   separators=(",", ":")).encode("utf-8")).hexdigest()
     with open(os.path.join(outdir, "manifest.json"), "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=1, sort_keys=True)
         handle.write("\n")
@@ -4225,6 +4232,13 @@ with open(path, encoding="utf-8") as handle:
     manifest = json.load(handle)
 ticket = manifest["workload"]["ticket_content"]
 $2
+# The digest is RECOMPUTED, because these cases exercise the FULL-RING refusal
+# and a stale digest would make every one of them test the digest check
+# instead. The non-recomputing case is separate and deliberate, below.
+import hashlib
+manifest["workload"]["ticket_canonical_sha256"] = hashlib.sha256(
+    json.dumps(ticket, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(manifest, handle, indent=1, sort_keys=True)
 PYINNER
@@ -4244,6 +4258,43 @@ ticket_manifest_case "a recorded ticket narrowing the token range" 'ticket["toke
 check_cause "a recorded ticket narrowing the token range" ticket-not-full-ring
 ticket_manifest_case "a manifest recording NO ticket"          'manifest["workload"]["ticket_content"] = None' UNMEASURED 7
 check_cause "a manifest recording no ticket at all" ticket-unrecorded
+
+# ROUND 22 FINDING 2, THE ANALYZER HALF: content edited WITHOUT updating the
+# digest. This is the case the recomputation above deliberately avoids, and it
+# is what makes the two halves unforgeable alone -- editing the workload now
+# requires editing the digest too, and the digest is reproducible from the
+# content, so the two cannot be made to agree on a lie.
+mkfixture "$TMP/tkdigest" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/tkdigest/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+# A narrowed ticket, with the digest left describing the honest one.
+manifest["workload"]["ticket_content"]["limit"] = 10
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/tkdigest"
+check_verdict "a ticket edited without updating its digest" UNMEASURED 7 single-stream
+check_cause "content and digest that disagree" ticket-digest-mismatch
+# ...and the digest edited without the content is caught by the same check.
+mkfixture "$TMP/tkdigest2" 6 "100000:116000,100000:117000,100000:118000,100000:119000,100000:120000,100000:117500"
+python3 - "$TMP/tkdigest2/manifest.json" <<'PYINNER'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["workload"]["ticket_canonical_sha256"] = "0" * 64
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=1, sort_keys=True)
+PYINNER
+run_analyzer "$TMP/tkdigest2"
+check_cause "a digest edited without the content" ticket-digest-mismatch
 
 # ---- the machine's CPUs, not the process's ----------------------------------
 # ROUND 19 FINDING A. `nproc` reports CPUs available to the PROCESS: on this box

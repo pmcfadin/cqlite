@@ -62,6 +62,8 @@ quality; it is a token and nothing more. A consumer must treat 7 / UNMEASURED as
 no result, never as a permissive default.
 """
 
+import hashlib
+import json
 import os
 import sys
 
@@ -638,6 +640,26 @@ def analyze(mode, path, opts):
                 "be checked to be the full-ring scan the target band is defined "
                 "for. A session that does not say what it served cannot be "
                 "scored against a band that describes one",
+            )
+        # THE RECORDED CONTENT MUST MATCH THE RECORDED DIGEST. The driver's
+        # raw-byte digest cannot be recomputed from a manifest, so it records a
+        # CANONICAL one over the parsed ticket -- which this recomputes. A
+        # manifest whose content was edited without updating the digest is then
+        # self-contradicting rather than merely unverified, and neither half can
+        # be forged alone.
+        recorded_digest = manifest.get("workload", {}).get(
+            "ticket_canonical_sha256")
+        canonical = json.dumps(
+            recorded_ticket, sort_keys=True, separators=(",", ":"))
+        actual_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        if recorded_digest != actual_digest:
+            raise Unmeasured(
+                "ticket-digest-mismatch",
+                "the manifest's recorded ticket hashes to %s and it records %r. "
+                "The content and the digest disagree, so one of them was edited "
+                "after the session -- and the workload this verdict describes is "
+                "not the one the session declared"
+                % (actual_digest, recorded_digest),
             )
         cause, problems = ticket_problems(
             recorded_ticket, "the manifest's recorded ticket", full_ring=True)

@@ -127,6 +127,13 @@ WORKLOAD_DISPOSITION = {
     "ticket_original": ("excused",
                         "the mutable path the frozen copy was taken from, kept "
                         "for provenance only -- nothing reads it after the copy"),
+    "ticket_canonical_sha256": ("excused",
+                                "a digest over the CANONICAL serialisation of "
+                                "the ticket, so the analyzer can recompute it "
+                                "from ticket_content alone -- the raw-byte "
+                                "digest cannot be reproduced from a manifest, "
+                                "and a content edited without its digest is then "
+                                "self-contradicting rather than unverified"),
     "ticket_sha256": ("excused",
                       "the frozen copy's digest; it proves every run read the "
                       "same bytes, which is the property the freeze exists for"),

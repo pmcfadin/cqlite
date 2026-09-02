@@ -656,6 +656,7 @@ manifest = {
         "ticket_template": env("AB_TICKET_TEMPLATE", ""),
         "ticket_original": env("AB_TICKET_ORIGINAL", ""),
         "ticket_sha256": env("AB_TICKET_SHA", ""),
+        "ticket_canonical_sha256": env("AB_TICKET_CANON_SHA", ""),
         "ticket_content": _ticket_content(),
         "merge_path": env("AB_MERGE_PATH", ""),
         # THE SERVER OPTIONS ARE NOT RECORDED HERE, DELIBERATELY. They used to
@@ -911,6 +912,12 @@ export AB_SHAPE="$SHAPE"
 TICKET_FROZEN="$RUN_DIR/ticket.json"
 cp -- "$TICKET_TEMPLATE" "$TICKET_FROZEN" \
   || die ticket-template-unreadable "$TICKET_TEMPLATE could not be copied into the session directory"
+# A READ-ONLY BIT IS NOT IMMUTABILITY. `chmod a-w` is a PERMISSION; the file
+# can still be replaced through the writable parent directory, and the mode says
+# nothing about the CONTENTS. This is the presence-versus-property shape applied
+# to the one input the whole measurement rests on -- a noun ("read-only")
+# standing in for the adjective ("unchanged") -- and it is the third round on
+# this freeze. The bit stays as a speed bump; the DIGEST is the check.
 chmod a-w "$TICKET_FROZEN" 2>/dev/null || true
 TICKET_ORIGINAL="$TICKET_TEMPLATE"
 TICKET_TEMPLATE="$TICKET_FROZEN"
@@ -936,6 +943,23 @@ PYEOF
 # is exported above, at the assignment; only the digest can be exported here,
 # because only here does it exist.
 export AB_TICKET_SHA="$TICKET_SHA"
+# TWO DIGESTS, because they answer different questions. The raw-byte one above
+# is what the driver re-checks around every invocation. This one is over a
+# CANONICAL serialisation of the parsed ticket, so the ANALYZER can recompute it
+# from `ticket_content` alone -- a manifest whose content was edited without
+# updating the digest is then self-contradicting rather than merely unverified.
+TICKET_CANON_SHA="$(python3 - "$TICKET_FROZEN" <<'PYEOF'
+import hashlib
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+sys.stdout.write(hashlib.sha256(canonical.encode("utf-8")).hexdigest())
+PYEOF
+)" || die ticket-template-unreadable "the frozen ticket could not be canonically digested"
+export AB_TICKET_CANON_SHA="$TICKET_CANON_SHA"
 say "ticket frozen into the session directory as $TICKET_FROZEN sha256 $TICKET_SHA -- every run reads this copy, never $TICKET_ORIGINAL"
 # THE WORKLOAD MUST MATCH THE CLAIM THE REPORT WILL MAKE ABOUT IT. The #3649
 # target band is defined for `flight-loadgen --shape full` over the whole ring
@@ -1458,12 +1482,37 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   local -a client_prefix=()
   [ -n "$CLIENT_CPUS" ] && client_prefix+=(taskset -c "$CLIENT_CPUS")
 
+  # THE FROZEN TICKET IS RE-VERIFIED AROUND EVERY INVOCATION, BEFORE AND AFTER.
+  # Hashing once and setting a read-only bit is not immutability: the file can
+  # be replaced through the writable parent directory, and nothing compared
+  # contents again. BEFORE catches a swap between runs; AFTER catches a swap
+  # DURING one, which is the case a before-only check cannot see and the one
+  # where the records already exist to be believed.
+  verify_frozen_ticket() { # <when>
+    local now
+    now="$(python3 - "$TICKET_TEMPLATE" <<'PYEOF'
+import hashlib
+import sys
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        sys.stdout.write(hashlib.sha256(handle.read()).hexdigest())
+except OSError:
+    sys.stdout.write("UNREADABLE")
+PYEOF
+)"
+    [ "$now" = "$TICKET_SHA" ] || die ticket-mutated \
+      "$tag: the frozen ticket $TICKET_TEMPLATE hashes to $now $1, but the session recorded $TICKET_SHA. The measurement input changed mid-session, so the arms did not all serve the same workload and the records cannot be compared"
+  }
+
   if [ "$PREWARM" -eq 1 ] && [ "$TEMPERATURE" = "warm" ]; then
+    verify_frozen_ticket "before the warming pass"
     "${client_prefix[@]}" "$LOADGEN_BIN" --endpoint "$endpoint" \
       --ticket-template "$TICKET_TEMPLATE" --shape "$SHAPE" --ramp "$RAMP" \
       --step-duration "$STEP_DURATION" --round "$tag-prewarm" --out /dev/null \
       > "$LOG_DIR/$tag.prewarm.log" 2>&1 \
       || die prewarm-failed "the $tag warming pass failed; see $LOG_DIR/$tag.prewarm.log"
+    verify_frozen_ticket "after the warming pass"
   fi
 
   local cpu0 cpu1 hz
@@ -1471,11 +1520,13 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   # has a null path for server_cpu_seconds and a silent zero would defeat it.
   cpu0="$(awk '{print $14+$15}' "/proc/$srv/stat" 2>/dev/null || true)"
   local rc=0
+  verify_frozen_ticket "before the measured run"
   "${client_prefix[@]}" "$LOADGEN_BIN" --endpoint "$endpoint" \
     --ticket-template "$TICKET_TEMPLATE" --shape "$SHAPE" --ramp "$RAMP" \
     --step-duration "$STEP_DURATION" --round "$tag" --out "$jsonl" \
     > "$LOG_DIR/$tag.loadgen.log" 2>&1 || rc=$?
   cpu1="$(awk '{print $14+$15}' "/proc/$srv/stat" 2>/dev/null || true)"
+  verify_frozen_ticket "after the measured run"
   hz="$(getconf CLK_TCK)"
 
   reap_server
