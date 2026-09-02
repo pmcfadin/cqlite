@@ -839,6 +839,26 @@ refuse_no_c_verdict() {
 # is made of that. A CSI deletion removes bytes from the MIDDLE and JOINS two runs the
 # file keeps apart. The trailing CR therefore stays tolerated (the full ruling, with its
 # three corroborating reasons, is at the check in `c_parse_verdict`).
+#
+# THE RULE IS THEREFORE STATED, ONCE, AS *WHICH READS MAY NORMALISE*: a read may
+# normalise TO LOCATE a line and may NEVER normalise TO SUPPLY A VALUE. Round 15
+# implemented the second half with a JOIN test — every field of the deleted reading had
+# to survive as a whole field of a CSI-as-SEPARATOR reading — and that MISSED A CSI THAT
+# BRACKETS A FIELD, because a bracketed field is still a whole field of the separating
+# reading (#3751 round 21, AA2). Measured on the shipped parser: `RESULT: <CSI>PASS<CSI>`
+# normalised to `PASS`, the escape counter stayed ZERO, and a line whose RAW token is not
+# `PASS` — one this artifact's declared producer CANNOT EMIT — reached `PREMERGE: OK`.
+# Every one of the EIGHT fields of the verdict line, and the stage record's `head-sha:`,
+# had the same hole; the class is *compared the NORMALISED form*, not one token.
+#
+# SO THE MEASUREMENT IS AN IDENTITY AND NOT A WIDER JOIN TEST: the parsed reading must be
+# BYTE-IDENTICAL to the line the file holds, minus the one trailing CR. Either the line is
+# refused, or every field IS the raw field — so the closed grammar is applied to bytes
+# nobody transformed, for all fields at once instead of being re-argued per field. It also
+# closes a shape NO join test could reach: an ESC forming no CSI at all (a bare `\033`,
+# `\033(B`) is deleted by NEITHER reading, so the two readings agreed and the join test
+# passed while the token still carried an escape. `_gate_awk` KEEPS the value-only join
+# form on purpose — see the reasoning at `esc_joined`.
 _c_verdict_awk() {
   awk '
   BEGIN {
@@ -847,32 +867,32 @@ _c_verdict_awk() {
     ve = ""; vd = ""; va = ""
     n_esc = 0
   }
-  # TWO READINGS OF THE LINE, ONE PER JOB (#3751 round 15, U2). `loc` is the line with each
-  # CSI DELETED — the reading everything below parses, and the reading that makes a coloured
-  # capture locatable at all (#3400). `val` is the same line with each CSI replaced by a
-  # SINGLE SPACE, and it is used for ONE question: did a deletion JOIN two runs the file
-  # keeps apart? A CSI that BRACKETS a token leaves that token a whole field of `val`; a CSI
-  # INSIDE a token splits it, so the token `loc` shows appears in `val` NOWHERE. That is the
-  # separate-versus-join rule as a measurement rather than a guess.
+  # TWO READINGS OF THE LINE, ONE PER JOB (#3751 round 15, U2; the second reading REPLACED in
+  # round 21, AA2). `loc` is the line with each CSI DELETED — the reading everything below
+  # parses, and the reading that makes a coloured capture LOCATABLE at all (#3400). The second
+  # reading answers only: DID THE STRIP CHANGE THIS LINE? Round 15 asked that as a JOIN test
+  # (each field of `loc` must survive as a whole field of a CSI-as-SEPARATOR reading), which a
+  # CSI BRACKETING a field satisfies — so `RESULT: <CSI>PASS<CSI>` normalised to `PASS` with
+  # the flag at ZERO and certified a merge. It is now an IDENTITY against the raw line minus
+  # the one trailing CR, so a bracketed field, an interior splice and a bare non-CSI ESC are
+  # all the same answer.
   #
-  # STRICT HERE — EVERY field of the anchored line must survive as a field of `val` — because
-  # a `--c-verdict` artifact has exactly ONE producer, `review-stage.sh verdict > <path>`,
-  # which emits no colour at all (every value goes through `one_line`, which deletes the whole
-  # C0 range). The legitimate coloured capture of #3400 is about the GATE SUMMARY, whose reader
-  # therefore takes the looser value-only form; see `_gate_awk`.
+  # STRICT HERE — the parsed line must BE the line on disk — because a `--c-verdict` artifact
+  # has exactly ONE producer, `review-stage.sh verdict > <path>`, which emits no colour at all
+  # (every value goes through `one_line`, which maps the whole C0 range to a space or to `?`).
+  # The legitimate coloured capture of #3400 is about the GATE SUMMARY, whose reader therefore
+  # keeps the looser value-only join form; see `_gate_awk`.
   {
     raw = $0
     loc = raw; gsub(/\033\[[0-9;]*[a-zA-Z]/, "", loc); sub(/\r$/, "", loc)
-    val = raw; gsub(/\033\[[0-9;]*[a-zA-Z]/, " ", val); sub(/\r$/, "", val)
-    lesc = 0
-    if (loc != val) {
-      _nl = split(loc, _LF); _nv = split(val, _VF)
-      for (_i = 1; _i <= _nl; _i++) {
-        _f = 0
-        for (_j = 1; _j <= _nv; _j++) if (_VF[_j] == _LF[_i]) { _f = 1; break }
-        if (_f == 0) { lesc = 1; break }
-      }
-    }
+    # THE MEASUREMENT IS AN IDENTITY, NOT A FIELD-MEMBERSHIP TEST (#3751 round 21, AA2). `rawcr` is
+    # the line AS THE FILE HOLDS IT, minus the ONE trailing CR that is separator whitespace by
+    # ruling (see `c_parse_verdict`). If the parsed reading differs from THAT by a single byte, the
+    # strip CHANGED the line, so every field below would be a value the strip SUPPLIED — refused.
+    # Either this line is refused, or `$0` is byte-identical to the bytes on disk and each
+    # mandatory field is compared RAW, by string equality, with nothing normalised out of it.
+    rawcr = raw; sub(/\r$/, "", rawcr)
+    lesc = (loc != rawcr) ? 1 : 0
     $0 = loc
   }
   /^REVIEW-STAGE: / {
@@ -986,11 +1006,19 @@ C_PARSE
   fi
   C_TOKEN_LINE="$CV_LINE"
 
-  # THE VERDICT LINE MUST BE WHAT THE FILE HOLDS (#3751 round 15, U2). The strip above
-  # located this line; it may not have SUPPLIED it. Asked BEFORE the grammar checks
-  # below, because every one of them reads a field the normalisation produced — a
-  # refusal placed after them would name the wrong defect (or, for
-  # `PA<ESC>[31mSS`, name nothing at all and certify).
+  # THE VERDICT LINE MUST BE WHAT THE FILE HOLDS (#3751 round 15, U2; measured as an
+  # IDENTITY since round 21, AA2). The strip above located this line; it may not have
+  # SUPPLIED it. Asked BEFORE the grammar checks below, because every one of them reads
+  # a field the normalisation produced — a refusal placed after them would name the wrong
+  # defect (or, for `PA<ESC>[31mSS`, name nothing at all and certify).
+  #
+  # WHAT PASSING THIS CHECK NOW GUARANTEES, and it is what the grammar below rests on:
+  # `$0` is BYTE-IDENTICAL to the line on disk minus one trailing CR, so every token the
+  # grammar compares — the stage kind, `RESULT:`, the verdict token, the four mandatory
+  # values — is the RAW value and the comparison is a string equality against bytes
+  # nobody transformed. Round 15 asked a weaker question (does each field survive as a
+  # field of a CSI-as-SEPARATOR reading?) which a CSI BRACKETING a field satisfies, so
+  # `RESULT: <CSI>PASS<CSI>` reached `PREMERGE: OK` with this flag at ZERO.
   #
   # THE PERMISSIVE VALUE IS THE AFFIRMATIVE `0`, so an unparseable or absent flag
   # refuses rather than reading as "no escape found": a positive verdict requires an
@@ -1003,8 +1031,10 @@ C_PARSE
       refuse_no_c_verdict \
         "The $what's verdict line contains an ANSI ESCAPE SEQUENCE (0x1b), so its raw bytes are not" \
         "the verdict they were read as: stripping the escape would MANUFACTURE a token the file does" \
-        "not contain — a value spelt PA<ESC>[31mSS normalises to PASS, and a transform that" \
-        "normalises its input cannot be the thing that validates it." \
+        "not contain — a value spelt PA<ESC>[31mSS normalises to PASS, and one spelt <ESC>[32mPASS<ESC>[0m" \
+        "normalises to PASS while BRACKETING it, and a transform that normalises its input cannot be" \
+        "the thing that validates it. Every mandatory field of this line is compared RAW; a CSI" \
+        "anywhere on it means no field can be." \
         "review-stage.sh emits every value through one_line, which deletes the whole C0 range, so an" \
         "escape here did not come from the emitter. Re-capture the verdict from the tool, not from a" \
         "coloured terminal log:  review-stage.sh verdict $C_STAGE_KIND --issue <N> > <path>"
@@ -1423,9 +1453,12 @@ c_record_bytes() {
 # is the rule this file refuses everywhere else, and an indented copy is DATA. ANSI/CR stripped to
 # LOCATE the line (#3400), never to SUPPLY its value (#3751 round 15, U2 — see `_c_verdict_awk`
 # for the rule and for why a trailing CR is separator whitespace while a CSI deletion is
-# manufacture): an ESC anywhere on either anchored line is published as `esc=1` and REFUSED by
-# name, because `head-sha: <ESC>[32m<40-hex>` would otherwise normalise into a clean sha and bind
-# a stage to a tree the record does not name. `NF == 2` is required AFFIRMATIVELY of BOTH fields: the documented shapes are
+# manufacture): a CSI ANYWHERE on either anchored line is published as `esc=1` and REFUSED by
+# name, because `head-sha: <ESC>[32m<40-hex><ESC>[0m` would otherwise normalise into a clean sha
+# and bind a stage to a tree the record does not name. THAT CLAIM WAS FALSE UNTIL ROUND 21's AA2
+# and is now true: the round-15 JOIN test passed a CSI that BRACKETED the value, so a bracketed
+# splice reached `PREMERGE: OK` on a record whose raw bytes carry no such sha. The measurement is
+# an IDENTITY against the raw line, so both anchored lines are covered by the one per-line flag. `NF == 2` is required AFFIRMATIVELY of BOTH fields: the documented shapes are
 # exactly `head-sha: <40-hex>` and `report-nonce: <token>`, so an empty value or trailing junk is
 # UNPARSABLE and must not be reduced to its first word — a record that cannot state which tree it
 # audited, or which report of it is current, certifies nothing.
@@ -1439,24 +1472,23 @@ c_record_bytes() {
 _c_stage_record_awk() {
   awk '
   BEGIN { n = 0; v = ""; nn = 0; nv = ""; esc = 0 }
-  # THE SAME TWO READINGS AND THE SAME STRICT RULE as `_c_verdict_awk` (#3751 round 15, U2),
-  # for the same reason: this record has ONE producer, `review-stage.sh`, which writes it with
-  # printf through a sanitizer that deletes the whole C0 range, so no colouring of it is
-  # legitimate. `head-sha: <ESC>[32m<40-hex>` would otherwise normalise into a clean sha and
-  # BIND this stage to a tree the record does not name.
+  # THE SAME TWO READINGS AND THE SAME STRICT RULE as `_c_verdict_awk` (#3751 round 15, U2;
+  # identity measurement since round 21, AA2), for the same reason: this record has ONE
+  # producer, `review-stage.sh`, which writes it with printf through a sanitizer that maps the
+  # whole C0 range to a space or to `?`, so no colouring of it is legitimate. `head-sha:
+  # <ESC>[32m<40-hex><ESC>[0m` would otherwise normalise into a clean sha and BIND this stage to
+  # a tree the record does not name — and under the round-15 join test it DID.
   {
     raw = $0
     loc = raw; gsub(/\033\[[0-9;]*[a-zA-Z]/, "", loc); sub(/\r$/, "", loc)
-    val = raw; gsub(/\033\[[0-9;]*[a-zA-Z]/, " ", val); sub(/\r$/, "", val)
-    lesc = 0
-    if (loc != val) {
-      _nl = split(loc, _LF); _nv = split(val, _VF)
-      for (_i = 1; _i <= _nl; _i++) {
-        _f = 0
-        for (_j = 1; _j <= _nv; _j++) if (_VF[_j] == _LF[_i]) { _f = 1; break }
-        if (_f == 0) { lesc = 1; break }
-      }
-    }
+    # THE MEASUREMENT IS AN IDENTITY, NOT A FIELD-MEMBERSHIP TEST (#3751 round 21, AA2). `rawcr` is
+    # the line AS THE FILE HOLDS IT, minus the ONE trailing CR that is separator whitespace by
+    # ruling (see `c_parse_verdict`). If the parsed reading differs from THAT by a single byte, the
+    # strip CHANGED the line, so every field below would be a value the strip SUPPLIED — refused.
+    # Either this line is refused, or `$0` is byte-identical to the bytes on disk and each
+    # mandatory field is compared RAW, by string equality, with nothing normalised out of it.
+    rawcr = raw; sub(/\r$/, "", rawcr)
+    lesc = (loc != rawcr) ? 1 : 0
     $0 = loc
   }
   /^head-sha:[ \t]/ {

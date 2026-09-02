@@ -4782,10 +4782,26 @@ if [ "$U2_DEL" = "3" ]; then
 else
   bad "u2/structural: $U2_DEL deleting CSI strips, want 3 (one per awk reader) — a reader lost or gained one"
 fi
-if [ "$U2_SEP" = "3" ]; then
-  ok "u2/structural: and all THREE keep a SEPARATING reading (for the join test): $U2_SEP"
+# RETARGETED IN ROUND 21 (AA2): the SEPARATING reading now lives in `_gate_awk` ALONE. The two
+# readers of review-stage.sh's own artifacts no longer ask the join question at all — a CSI that
+# BRACKETS a field satisfies it, which is exactly how `RESULT: <CSI>PASS<CSI>` certified a merge —
+# and ask an IDENTITY against the raw line instead (pinned in section 44u, which asserts the
+# replacement rather than its absence). `_gate_awk` KEEPS the join form because a coloured GATE
+# SUMMARY is documented-legitimate input (#3400) and real colouring brackets the KEY as readily as
+# the value, so the strict form would red on correct input; case (c) above is that control.
+if [ "$U2_SEP" = "1" ]; then
+  ok "u2/structural: the SEPARATING reading survives in exactly ONE reader — _gate_awk, the one for which #3400 makes colour legitimate: $U2_SEP"
 else
-  bad "u2/structural: $U2_SEP separating CSI substitutions, want 3 — a reader validates values the deletion invented"
+  bad "u2/structural: $U2_SEP separating CSI substitutions, want 1 (_gate_awk only) — either the gate reader lost its value-only test, or a strict reader is back to the join test a bracketing CSI satisfies"
+fi
+if LC_ALL=C awk '
+    /^_gate_awk\(\)/ { inf = 1 }
+    inf == 1 && index($0, "gsub(/\\033\\[[0-9;]*[a-zA-Z]/, \" \", lval)") > 0 { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$ASSERT"; then
+  ok "u2/structural: and that ONE separating reading is inside _gate_awk (named, not merely counted)"
+else
+  bad "u2/structural: the surviving separating reading is NOT in _gate_awk — the count above would then be satisfied by the wrong reader"
 fi
 if [ "$(LC_ALL=C grep -c 'gsub(/\\033\\\[\[0-9;\]\*\[a-zA-Z\]/, "")' "$ASSERT" || true)" = "0" ]; then
   ok "u2/structural: no reader strips in place with a bare two-argument gsub, which would leave no raw line to compare against"
@@ -5462,6 +5478,264 @@ if [ -n "$Z1_LANE_SHA" ]; then
   fi
 fi
 
+# --- 44u: A MANDATORY FIELD IS COMPARED RAW, NEVER NORMALISED (round 21, AA2) ---
+# THE FINDING (roborev job 414, AA2). Round 15's U2 established the rule — *a strip may LOCATE a
+# line, it may never SUPPLY a value* — and implemented it with a JOIN test: each field of the
+# CSI-DELETED reading had to survive as a whole field of the CSI-as-SEPARATOR reading. That catches
+# a CSI *inside* a field and MISSES a CSI that BRACKETS one, because a bracketed field is still a
+# whole field of the separating reading. So `RESULT: <CSI>PASS<CSI>` normalised to `PASS`, the
+# escape counter stayed ZERO, and a line the declared producer CANNOT EMIT — whose RAW token is not
+# `PASS` — certified a merge. U2's own comment named the gap and read it as acceptable ("a CSI that
+# BRACKETS a token leaves that token a whole field"); it is not, because the STRICT readers' whole
+# justification is that their artifacts have ONE producer which emits no control byte at all.
+#
+# THE FIX IS NOT A WIDER JOIN TEST BUT A DIFFERENT QUESTION. `_c_verdict_awk` and
+# `_c_stage_record_awk` now require the parsed reading to be BYTE-IDENTICAL to the line the file
+# holds, minus the ONE trailing CR. Either the line is refused, or every field below IS the raw
+# field — so `PASS` and `AUTHOR-PERFORMED` are compared by string equality against bytes nobody
+# transformed, and the property holds for EVERY field at once rather than being re-argued per
+# field. It also closes a shape no join test could reach: an ESC that forms no CSI at all (a bare
+# `\033`, or `\033(B`) is deleted by neither reading, so the join test saw identical readings and
+# passed while the token carried an escape.
+#
+# WHICH READS MAY NORMALISE AND WHICH MAY NOT — the rule, stated where the class lives:
+#   * TO LOCATE: yes, always. The strip is why a coloured capture is FOUND at all (#3400 — colour
+#     survives redirection to a file), and being found is what lets the refusal NAME what is wrong
+#     instead of reporting "no verdict line" for a document that has one. Case (b) shape 1 below
+#     colours the ANCHOR itself and requires exactly that: located, then refused by name.
+#   * TO SUPPLY A VALUE: never, in the two readers of `review-stage.sh`'s own artifacts. Their
+#     producer routes every value through `one_line`, which maps the whole C0 range to a space or
+#     to `?`, so no control byte on those lines is ever legitimate.
+#   * `_gate_awk` KEEPS the value-only (join) form and is deliberately NOT strictened: a coloured
+#     GATE SUMMARY is documented-legitimate input and real colouring brackets the KEY as readily as
+#     the value, so the strict form would red on correct input. Case (d) pins the confinement.
+AA2_ESC=$(printf '\033')
+AA2_D="$T/aa2"; mkdir -p "$AA2_D"
+# aa2_wrap <field-index> <dest> — the canonical PASS verdict line with ONE field BRACKETED by a
+# CSI pair. Planted through ENVIRON rather than `awk -v`, which performs escape processing on its
+# value (round 7's measured harness defect).
+aa2_wrap() {
+  AA2_N="$2" AA2_E="$AA2_ESC" LC_ALL=C awk '
+    BEGIN { e = ENVIRON["AA2_E"]; n = ENVIRON["AA2_N"] + 0 }
+    { for (i = 1; i <= NF; i++) if (i == n) $i = e "[32m" $i e "[0m"; print }
+  ' "$C_PASS_FILE" >"$1" 2>/dev/null
+}
+
+# (a) THE REPORTED SITE — the VERDICT TOKEN, bracketed. Pre-fix this reached PREMERGE: OK.
+AA2_TOK="$AA2_D/token-bracketed.txt"
+aa2_wrap "$AA2_TOK" 4
+if LC_ALL=C grep -q 'RESULT: PASS' "$AA2_TOK" 2>/dev/null; then
+  bad "aa2/token PREMISE: the fixture DOES carry the literal 'RESULT: PASS', so the case below proves nothing"
+else
+  ok "aa2/token PREMISE: the fixture's RAW token is NOT 'PASS' (MEASURED with grep on the FILE) — only the normalised reading says so"
+fi
+if LC_ALL=C grep -q "$AA2_ESC" "$AA2_TOK" 2>/dev/null; then
+  ok "aa2/token PREMISE: and the escape really is a BRACKETING pair, which the round-15 join test passes"
+else
+  bad "aa2/token PREMISE: no escape was planted — the case is vacuous"
+fi
+c_refused "aa2/token: a BRACKETED verdict token is REFUSED, not read as the PASS the strip produced" \
+  "$AA2_TOK" "ANSI ESCAPE"
+if run 2 "aa2/token: (re-run to inspect the diagnostic)" 2421 "$CERTIFIED" "$GOOD" --c-verdict "$AA2_TOK"; then
+  case "$OUT" in
+    *"PREMERGE: OK"*) bad "aa2/token: PREMERGE: OK was reached over a token the file does not contain" ;;
+    *) ok "aa2/token: and PREMERGE: OK is never reached" ;;
+  esac
+  case "$OUT" in
+    *"RESULT: ?[32mPASS?[0m"*) ok "aa2/token: the diagnostic prints the RAW line, so it does not assert a clean PASS beside a refusal about an escape" ;;
+    *) bad "aa2/token: the diagnostic does not show the raw bracketed token (got: $OUT)" ;;
+  esac
+fi
+
+# (b) THE WHOLE CLASS, SWEPT FIELD BY FIELD. The class is "compared the NORMALISED form", not this
+#     one token, so EVERY field of the verdict line is asserted the same way — the anchor, the
+#     stage kind, the RESULT: key, the token, and the four mandatory key=value fields. Every one of
+#     the eight passed the round-15 join test when bracketed; every one must refuse now. Field 1 is
+#     the ANCHOR and is the case that pins the LOCATE tolerance: it must be FOUND (so the refusal
+#     names the escape) and never reported as "holds NO verdict line".
+AA2_NAMES="anchor:REVIEW-STAGE: kind:c key:RESULT: token:PASS elapsed:elapsed= deadline:deadline= agent:agent= report:report="
+AA2_I=0
+for AA2_ENTRY in $AA2_NAMES; do
+  AA2_I=$((AA2_I + 1))
+  AA2_NAME="${AA2_ENTRY%%:*}"
+  AA2_F="$AA2_D/field-$AA2_I.txt"
+  aa2_wrap "$AA2_F" "$AA2_I"
+  if LC_ALL=C grep -q "$AA2_ESC" "$AA2_F" 2>/dev/null; then
+    c_refused "aa2/field: a BRACKETED $AA2_NAME field (field $AA2_I) is REFUSED — the value compared must be the RAW one" \
+      "$AA2_F" "ANSI ESCAPE"
+  else
+    bad "aa2/field: could not bracket field $AA2_I ($AA2_NAME), so that field of the class is unmeasured"
+  fi
+done
+if [ "$AA2_I" = "8" ]; then
+  ok "aa2/field: EIGHT fields of the verdict line were re-audited, one fixture each (a shrunken list would leave a field of the class unswept)"
+else
+  bad "aa2/field: only $AA2_I fields swept, want 8"
+fi
+# AND THE ANCHOR CASE'S OWN PROPERTY: located, then refused BY NAME. A refusal saying the file
+# holds no verdict line would be the #3400 diagnostic loss the strip exists to avoid.
+if run 2 "aa2/locate: (inspecting the bracketed-anchor diagnostic)" 2421 "$CERTIFIED" "$GOOD" \
+  --c-verdict "$AA2_D/field-1.txt"; then
+  case "$OUT" in
+    *"holds NO verdict line"*) bad "aa2/locate: a coloured ANCHOR made the line UNFINDABLE — the strip must still LOCATE it (got: $OUT)" ;;
+    *) ok "aa2/locate: a coloured ANCHOR still LOCATES the line (never 'holds NO verdict line') — the strip keeps its locating job" ;;
+  esac
+fi
+
+# (c) THE SIBLING STRICT READER — the STAGE RECORD. Same producer, same rule, and the same
+#     bracketing gap: `head-sha: <CSI><40-hex><CSI>` normalised into a clean sha and BOUND the
+#     stage to a tree whose record does not name it in raw bytes, which is exactly what round 3's
+#     G1 exists to prevent. Found by sweeping the class rather than by a second report.
+AA2_REPO=$(c_repo aa2rec design) || AA2_REPO=""
+if [ -n "$AA2_REPO" ]; then
+  if (cd "$AA2_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor >/dev/null 2>&1) &&
+    printf 'result: PASS\n\n## Findings\n\nnone.\n' >"$(SR_REPORT "$AA2_REPO" 3751 c)"; then
+    ok "aa2/record fixture: a PASSING c stage was opened"
+  else
+    bad "aa2/record fixture: could not open the stage — the cases would be vacuous"
+    AA2_REPO=""
+  fi
+fi
+if [ -n "$AA2_REPO" ]; then
+  AA2_REC="$AA2_REPO/.review-stage/issue-3751/c.stage"
+  cp "$AA2_REC" "$AA2_REC.pristine" 2>/dev/null || true
+  if run_in_repo "$AA2_REPO" 0 "aa2/record CONTROL: the intact record certifies under AUTO" \
+    --c-verdict AUTO; then
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*) ok "aa2/record CONTROL: reaching C-VERDICT PASS, so each splice below is the only difference" ;;
+      *) bad "aa2/record CONTROL: expected C-VERDICT PASS (got: $OUT)" ;;
+    esac
+  fi
+  # BOTH ANCHORED KEYS, AND THE ASYMMETRY IN THEIR *PRE-FIX* BEHAVIOUR IS WORTH RECORDING because
+  # it says which case actually discriminates. `head-sha:` is read only by THIS script, so
+  # pre-fix a bracketed splice normalised into a clean sha, satisfied round 3's G1 binding and
+  # reached `PREMERGE: OK` on a record whose raw bytes carry no such sha — measured. A bracketed
+  # `report-nonce:` ALSO got past this reader pre-fix, but was then caught one layer LATER by
+  # `review-stage.sh`'s own nonce-shape reader (an alphanumeric token of 6-64 characters, which
+  # `<ESC>[32m…<ESC>[0m` is not), so it refused under THAT cause — defence in depth paying out in
+  # the direction nobody plans for, and NOT a reason to leave this reader permissive. Post-fix both
+  # keys refuse HERE, naming the escape, because this script reads the record BEFORE it reads the
+  # verdict and both anchored lines set the SAME per-line flag.
+  for AA2_KEY in head-sha report-nonce; do
+    if AA2_E="$AA2_ESC" AA2_K="$AA2_KEY" LC_ALL=C awk '
+        BEGIN { e = ENVIRON["AA2_E"]; k = ENVIRON["AA2_K"] ":" }
+        $1 == k { printf "%s %s[32m%s%s[0m\n", $1, e, $2, e; next }
+        { print }
+      ' "$AA2_REC.pristine" >"$AA2_REC.new" 2>/dev/null && mv -f "$AA2_REC.new" "$AA2_REC"; then
+      ok "aa2/record: a BRACKETING escape was planted around the whole $AA2_KEY value"
+    else
+      bad "aa2/record: could not plant the $AA2_KEY splice — the case below is vacuous"
+    fi
+    if run_in_repo "$AA2_REPO" 2 \
+      "aa2/record: a BRACKETED $AA2_KEY REFUSES — a normalised value may not bind or locate a generation" \
+      --c-verdict AUTO; then
+      case "$OUT" in
+        *"ANSI ESCAPE"*) ok "aa2/record: and the refusal NAMES the escape ($AA2_KEY)" ;;
+        *) bad "aa2/record: the refusal must name the escape for $AA2_KEY (got: $OUT)" ;;
+      esac
+      case "$OUT" in
+        *"PREMERGE: OK"*) bad "aa2/record: PREMERGE: OK was reached over a $AA2_KEY the record does not hold in raw bytes" ;;
+        *) ok "aa2/record: and PREMERGE: OK is never reached for $AA2_KEY" ;;
+      esac
+    fi
+    cp "$AA2_REC.pristine" "$AA2_REC" 2>/dev/null || true
+  done
+fi
+
+# (d) THE CONTROLS — a guard that reds on correct input is the guard agents learn to waive, and the
+#     strictening must be CONFINED to the two readers whose producer emits no colour.
+if run 0 "aa2 CONTROL: a genuinely clean verdict still certifies (exit 0)" \
+  2421 "$CERTIFIED" "$GOOD" --c-verdict "$C_PASS_FILE"; then
+  case "$OUT" in
+    *"PREMERGE: OK"*) ok "aa2 CONTROL: reporting PREMERGE: OK — no escape anywhere, so nothing is refused" ;;
+    *) bad "aa2 CONTROL: the clean verdict did not certify (got: $OUT)" ;;
+  esac
+fi
+# A TRAILING CR IS STILL TOLERATED — separate versus join, the ruling at `c_parse_verdict`. This is
+# the one transform that remains, and it is why the measurement subtracts a single trailing CR from
+# the raw line before comparing rather than demanding raw equality outright.
+AA2_CR="$AA2_D/trailing-cr.txt"
+LC_ALL=C awk '{ printf "%s\r\n", $0 }' "$C_PASS_FILE" >"$AA2_CR" 2>/dev/null
+if LC_ALL=C grep -q "$(printf '\r')" "$AA2_CR" 2>/dev/null; then
+  ok "aa2 CONTROL: the CRLF fixture really does carry a trailing CR"
+else
+  bad "aa2 CONTROL: no CR in the fixture — the tolerance case is vacuous"
+fi
+if run 0 "aa2 CONTROL: a CRLF-transported verdict still certifies — a trailing CR SEPARATES, it cannot JOIN" \
+  2421 "$CERTIFIED" "$GOOD" --c-verdict "$AA2_CR"; then
+  case "$OUT" in
+    *"PREMERGE: OK"*) ok "aa2 CONTROL: reporting PREMERGE: OK, so the raw comparison did not turn the CR ruling into a refusal" ;;
+    *) bad "aa2 CONTROL: the CRLF verdict was refused — that is a unilateral change to one of two readers of one shape (44g) (got: $OUT)" ;;
+  esac
+fi
+# THE CONFINEMENT: a #3400-style coloured GATE SUMMARY — colour BRACKETING the key and the value,
+# which is what a colouring tool actually emits — must still parse and still certify. Section 44q's
+# `u2/gate CONTROL` asserts this for round 15's form; it is re-asserted HERE because THIS round
+# strictens the two sibling readers, and the property under test is that the strictening did not
+# leak into `_gate_awk`. Without it, a copy of the raw comparison pasted into that reader would red
+# only two thousand lines away.
+AA2_GC="$AA2_D/gate-bracketed.txt"
+LC_ALL=C sed \
+  -e "s/RESULT: PASS/${AA2_ESC}[32mRESULT${AA2_ESC}[0m: ${AA2_ESC}[1;32mPASS${AA2_ESC}[0m/" \
+  -e "s/tree-integrity: PASS/tree-integrity: ${AA2_ESC}[32mPASS${AA2_ESC}[0m/" \
+  "$GOOD" >"$AA2_GC"
+if LC_ALL=C grep -q "$AA2_ESC" "$AA2_GC" 2>/dev/null; then
+  ok "aa2/confine: the bracketed-colour GATE SUMMARY fixture really does carry ANSI escapes"
+else
+  bad "aa2/confine: the fixture carries no escapes — the confinement control is vacuous"
+fi
+if run 0 "aa2/confine: a coloured GATE SUMMARY still certifies (exit 0) — the strictening is confined to the two review-stage.sh readers" \
+  2421 "$CERTIFIED" "$AA2_GC" --c-verdict "$C_PASS_FILE"; then
+  case "$OUT" in
+    *"PREMERGE: OK"*) ok "aa2/confine: and reports PREMERGE: OK — _gate_awk keeps the value-only form #3400 makes legitimate" ;;
+    *) bad "aa2/confine: the coloured gate summary stopped certifying (got: $OUT)" ;;
+  esac
+fi
+
+# (e) STRUCTURAL — THE TWO STRICT READERS ASK THE RAW QUESTION, AND `_gate_awk` DOES NOT.
+#     Round 15's own structural pins are RETARGETED in section 44q (the separating reading is now
+#     ONE, in `_gate_awk`, not three); these assert the replacement rather than its absence.
+AA2_RAWCMP=$(LC_ALL=C grep -cF 'rawcr = raw; sub(/\r$/, "", rawcr)' "$ASSERT" || true)
+if [ "$AA2_RAWCMP" = "2" ]; then
+  ok "aa2/structural: BOTH strict readers derive the raw line minus one trailing CR: $AA2_RAWCMP"
+else
+  bad "aa2/structural: $AA2_RAWCMP strict readers derive the CR-stripped raw line, want 2 (c-verdict and stage-record)"
+fi
+AA2_RAWEQ=$(LC_ALL=C grep -cF 'lesc = (loc != rawcr)' "$ASSERT" || true)
+if [ "$AA2_RAWEQ" = "2" ]; then
+  ok "aa2/structural: and BOTH decide the escape flag by that IDENTITY, not by field membership: $AA2_RAWEQ"
+else
+  bad "aa2/structural: $AA2_RAWEQ identity comparisons, want 2 — a reader that lost it is back to validating a value the strip supplied"
+fi
+if [ "$(LC_ALL=C grep -cF '_VF[_j] == _LF[_i]' "$ASSERT" || true)" = "0" ]; then
+  ok "aa2/structural: the field-membership JOIN loop is GONE from the strict readers — a bracketed field can no longer satisfy it"
+else
+  bad "aa2/structural: a field-membership join loop survives in a strict reader, so a bracketed field still passes"
+fi
+if LC_ALL=C awk '
+    /^_gate_awk\(\)/ { inf = 1 }
+    inf == 1 && index($0, "function esc_joined(") > 0 { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$ASSERT"; then
+  ok "aa2/structural: _gate_awk KEEPS its value-only esc_joined test — the looser form #3400 requires is still there"
+else
+  bad "aa2/structural: _gate_awk lost its value-only escape test, so a coloured gate summary either reds or goes unchecked"
+fi
+# THE DECISION IS STILL TAKEN BEFORE THE GRAMMAR IT PROTECTS — asserted in 44q for the c-verdict
+# reader. Here: the RAW reading must be derived BEFORE `$0` is replaced by the normalised one, or
+# the comparison would be between a value and itself.
+if LC_ALL=C awk '
+    index($0, "rawcr = raw; sub(") > 0 { r++; seen_r = 1 }
+    index($0, "lesc = (loc != rawcr)") > 0 { if (seen_r == 0) bad = 1; seen_e = 1; e++ }
+    index($0, "$0 = loc") > 0 { if (seen_e == 1) { good++; seen_r = 0; seen_e = 0 } }
+    END { exit((bad == 0 && good == 2 && r == 2 && e == 2) ? 0 : 1) }
+  ' "$ASSERT"; then
+  ok "aa2/structural: in both readers the raw line is derived, then compared, and only then is \$0 replaced by the normalised reading"
+else
+  bad "aa2/structural: the raw comparison is not ordered before the normalised reading is installed"
+fi
+
 # --- 44h: THE STRUCTURAL EMIT-BOUNDARY GUARD (round 7, L1b) -------------------
 # The mirror of test_review_stage.sh section 18, for this script. See
 # scripts/tests/lib/emit-boundary-scan.sh for why the guard exists (the boundary was bypassed at a
@@ -6067,7 +6341,25 @@ fi
 # PREDICTION — this issue is about the difference between a prediction and a measurement. Every
 # added assertion needs only bash, git, coreutils and `ln -s`, and a fixture that cannot be built
 # calls `bad`, so a displaced count can never be a silent green.
-ASSERT_FLOOR=539
+#
+# ROUND 21's AA2 ADDS 34, ALL HOST-INDEPENDENT (545 -> 579; floor 539 -> 573, the documented
+# 6-assertion host-gated margin PRESERVED UNCHANGED — the margin exists for Case 41's
+# host-branching bound cases and nothing here branches on the host): section 44u — a mandatory
+# field is compared RAW, never normalised. Round 15's U2 measured the strip with a JOIN test that
+# a CSI BRACKETING a field satisfies, so `RESULT: <CSI>PASS<CSI>` normalised to `PASS` with the
+# escape counter at ZERO and reached `PREMERGE: OK`; the same hole existed in ALL EIGHT fields of
+# the verdict line and in the stage record's `head-sha:`, where a bracketed splice bound a stage
+# to a tree whose record carries no such sha in raw bytes. 17 of these assertions RED on the
+# shipped script, 0 after. The section sweeps the class field by field (8 fixtures, one per
+# field), covers the sibling stage-record reader for both anchored keys, and carries four
+# CONTROLS: a clean verdict still certifies, a CRLF-transported one still certifies (the
+# separate-versus-join ruling is untouched), and a #3400-style coloured GATE SUMMARY still
+# certifies — the last one pinning that the strictening is CONFINED to the two readers whose
+# producer emits no colour. Two of round 15's structural pins are RETARGETED in place, in section
+# 44q, with the replacement stated beside them. Every added assertion needs only bash, git and
+# coreutils, and a fixture that cannot be built calls `bad`, so a displaced count can never be a
+# silent green.
+ASSERT_FLOOR=573
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"
