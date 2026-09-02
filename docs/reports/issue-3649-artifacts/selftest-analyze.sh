@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=511
+CASE_FLOOR=512
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -3697,6 +3697,59 @@ if grep -q '^AB-3649: verdict-detail single-stream HOST the one-minute load aver
 else
   bad "a loaded host was not disclosed"
 fi
+# ---- no AB_* export precedes its variable's final value ----------------------
+# THE CLASS, not the two instances. AB_TICKET_TEMPLATE (round 18) and AB_SHAPE
+# (round 19) were the same defect: a value exported, then transformed, with the
+# manifest keeping the pre-transform value -- and `die` writes a manifest, so
+# the stale window is reachable. Finding an instance and not sweeping for the
+# class is what let the second one sit in the same file, introduced by the same
+# round. This derives every `export AB_X="$VAR"` from the driver and requires
+# VAR to have no later assignment.
+if python3 - "$DRIVER" <<'PYINNER'
+import re
+import sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+# A RULE, NOT A LIST. Some exports capture the PRE-transform value ON PURPOSE:
+# AB_TICKET_ORIGINAL holds the path before the freeze, AB_SHAPE_REQUESTED the
+# spelling before canonicalisation. Both are the "record both facts" pattern
+# this instrument uses everywhere, and both would be flagged by a naive
+# position check. Rather than list them -- a list grows and stops being read --
+# the SUFFIX declares the intent: a name ending _ORIGINAL or _REQUESTED says
+# "this deliberately holds the value from before the transform", so the later
+# reassignment is the point and not the defect. A new pre-transform capture
+# inherits the exemption by being named honestly; anything else is flagged.
+EXEMPT_SUFFIXES = ("_ORIGINAL", "_REQUESTED")
+problems = []
+seen = 0
+for number, line in enumerate(lines, start=1):
+    if line.lstrip().startswith("#") or "export " not in line:
+        continue
+    for match in re.finditer(r'\b(AB_[A-Z0-9_]+)="\$([A-Za-z_][A-Za-z0-9_]*)"', line):
+        name, var = match.group(1), match.group(2)
+        seen += 1
+        if name.endswith(EXEMPT_SUFFIXES):
+            continue
+        later = [j for j, l in enumerate(lines, start=1)
+                 if j > number and re.match(r'\s*%s=' % re.escape(var), l)
+                 and not l.lstrip().startswith("#")]
+        if later:
+            problems.append("%s is exported at line %d from %s, which is "
+                            "reassigned at %s -- the manifest would record the "
+                            "pre-transform value" % (name, number, var, later))
+if seen < 20:
+    problems.append("only %d AB_* exports were derived; the derivation has broken"
+                    % seen)
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+then
+  ok "no AB_* export names a variable that is reassigned after it"
+else
+  bad "an AB_* export precedes its variable's final value (see above)"
+fi
+
 # ---- the machine's CPUs, not the process's ----------------------------------
 # ROUND 19 FINDING A. `nproc` reports CPUs available to the PROCESS: on this box
 # `nproc` is 16 and `taskset -c 0-3 nproc` is 4, while the sysfs online set is
