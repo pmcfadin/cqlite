@@ -941,7 +941,7 @@ fi
 # the repository some OTHER way: a path copied into a variable outside this region, a `cd` plus a
 # bare `git` with no `$REPO_ROOT` token, or a `GIT_DIR=` built from an expression that does not
 # spell `$REPO_ROOT`. Those are real residuals, not covered here, and the runtime
-# `_cs_read_dir_isolated_or_refuse` refusal plus the `/nonexistent/` sentinel are what bound them.
+# `_cs_read_dir_isolated_or_refuse` refusal plus the `/dev/null/` sentinel are what bound them.
 #
 # THE PARTITION IS A SUBSTRING TEST, so the two pins never disagree about a line: a line
 # mentioning `_cs_live_git` is judged by the live-call pin (that is what makes a SECOND wrapper
@@ -1212,9 +1212,15 @@ cs_read_dir_findings() {
   # even though the pattern was found, and `if ! …` then fires on a correct tree. Measured here on
   # the first run: this exact predicate reported the sentinel "not declared" while a standalone
   # `grep -c` on the same input answered 1.
-  sentinel_decl=$(cs_region_code "$g" | grep "^[0-9][0-9]*:_CS_READ_DIR_UNSET='/nonexistent/" || true)
+  # PINNED TO `/dev/null/` SPECIFICALLY, not to "some absent path" (roborev job 372). A merely
+  # absent path is absent only until someone creates it, and `/nonexistent/` is not reserved;
+  # `/dev/null` is a character device, so every path under it is ENOTDIR for everyone including
+  # root and cannot be made to resolve. This pin is deliberately a SINGLE accepted spelling
+  # rather than an alternation over "absent-looking" prefixes: an alternation would re-admit the
+  # createable form it exists to exclude.
+  sentinel_decl=$(cs_region_code "$g" | grep "^[0-9][0-9]*:_CS_READ_DIR_UNSET='/dev/null/" || true)
   if [ -z "$sentinel_decl" ]; then
-    printf 'FINDING: the UNSET sentinel is not declared as a literal /nonexistent/... path — a sentinel git can resolve is a live read waiting to happen\n'
+    printf 'FINDING: the UNSET sentinel is not declared as a literal /dev/null/... path — a sentinel that any user (or root) can create is a live read waiting to happen\n'
   fi
   assign=$(cs_region_code "$g" | grep -F '_CS_READ_DIR="$csdir/repo"' | head -1)
   if [ -z "$assign" ]; then
@@ -1303,7 +1309,7 @@ cs_read_dir_findings() {
 }
 rd_findings=$(cs_read_dir_findings "$GATE")
 if [ -z "$rd_findings" ]; then
-  ok "3757-read-dir-shape: the read repository is a NON-EXISTENT-path sentinel until the scratch exists (so an unguarded consumer fails closed, not live), no consumer in the probe body precedes the scratch assignment, and the peel refuses an unisolated value before calling git"
+  ok "3757-read-dir-shape: the read repository is a NON-TRAVERSABLE `/dev/null/` sentinel until the scratch exists (so an unguarded consumer fails closed, not live), no consumer in the probe body precedes the scratch assignment, and the peel refuses an unisolated value before calling git"
 else
   bad "3757-read-dir-shape: the read-repository invariants are not met:"
   printf '%s\n' "$rd_findings"

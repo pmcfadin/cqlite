@@ -2776,12 +2776,24 @@ _CS_MISSING=""     # baseline components ABSENT from this tree's set (space sepa
 _CS_EXTRA=""       # branch-only components (NOT skew; recorded for audit only)
 _CS_UNCOMMITTED="" # of _CS_MISSING, those still PRESENT in the gate script AT HEAD, i.e.
                    # removed by an UNCOMMITTED working-tree edit (#3544 / job 215)
-# THE "NOT ESTABLISHED YET" VALUE FOR `_CS_READ_DIR`, AND IT IS A NON-EXISTENT PATH ON PURPOSE
+# THE "NOT ESTABLISHED YET" VALUE FOR `_CS_READ_DIR`, AND IT IS A NON-TRAVERSABLE PATH ON PURPOSE
 # (#3757). The obvious sentinels are both UNSAFE, measured rather than assumed (git 2.43.0, in a
 # real worktree):
 #   git -C ""            rev-parse --git-dir  -> rc 0, prints the LIVE worktree's git dir
 #   git -C ""            cat-file -e HEAD^{commit} -> rc 0  (a LIVE OBJECT READ)
 #   git -C <nonexistent> rev-parse --git-dir  -> rc 128, "cannot change to '…': No such file"
+# IT IS UNDER `/dev/null/` AND NOT A MERELY-ABSENT PATH (roborev job 372). An absent path is
+# absent only until someone creates it: `/nonexistent/` is not reserved, so root could make the
+# sentinel RESOLVE and a consumer reached before the scratch exists would then read a real
+# repository instead of failing. `/dev/null` is a CHARACTER DEVICE, so every path under it is
+# ENOTDIR for everyone including root — `mkdir /dev/null` itself fails "Not a directory" — which
+# makes the objection unexpressible rather than merely unlikely. Measured, same worktree:
+#   git -C /dev/null/<x> rev-parse --git-dir           -> rc 128, "cannot change to '…': Not a directory"
+#   git -C /dev/null/<x> cat-file -e HEAD^{commit}     -> rc 128, same
+#   git -C /dev/null/<x> merge-base --is-ancestor …    -> rc 128, same
+# NOTE this is defence in depth, NOT the control: the control is the AFFIRMATIVE test in
+# `_cs_read_dir_isolated_or_refuse`, which permits ONLY `$_CS_SCRATCH_DIR/repo`, so any other
+# value — resolvable or not — is already refused.
 # `-C ""` leaves the working directory UNCHANGED, so an EMPTY value silently MEANS this checkout —
 # the exact read the region's execution-route enumeration forbids — while a non-existent path
 # makes any consumer reached before the scratch exists fail CLOSED without touching the live
@@ -2789,7 +2801,7 @@ _CS_UNCOMMITTED="" # of _CS_MISSING, those still PRESENT in the gate script AT H
 # value is what bounds every OTHER consumer, including the ones whose bodies are defined earlier
 # in this file than the assignment (lexical position is not execution order for a function body,
 # so no source scan can decide that ordering — the sentinel makes it moot).
-_CS_READ_DIR_UNSET='/nonexistent/agent-gate-component-set-read-dir-not-established'
+_CS_READ_DIR_UNSET='/dev/null/agent-gate-component-set-read-dir-not-established'
 _CS_READ_DIR="$_CS_READ_DIR_UNSET"
                    # THE REPOSITORY EVERY BASELINE/HEAD OBJECT READ RUNS IN (#3544 / job 268).
                    # ALWAYS the isolated scratch — "else this checkout" was written here while
