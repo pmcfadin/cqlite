@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=435
+CASE_FLOOR=436
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -3530,6 +3530,93 @@ ticket_case version-bool       '{"keyspace":"ks","table":"t","ddl":"d","version"
 # reason a control can be schema-checked without being forced to be a full scan.
 ticket_case narrowed-limit     '{"version":2,"keyspace":"ks","table":"t","ddl":"d","limit":10}' 0 1
 ticket_case narrowed-columns   '{"version":2,"keyspace":"ks","table":"t","ddl":"d","columns":["a"]}' 0 1
+
+# THE COMPLETENESS OF `TICKET_SCHEMA`, DERIVED FROM `ticket.rs` ITSELF.
+# A curated field list is the shape this lane keeps closing: `filter` and
+# `aggregation` were unvalidated because nobody looked at them, exactly as
+# `predicates` had been one round earlier. Listing the fields more carefully
+# does not end that -- CHECKING THE LIST AGAINST THE STRUCT does. So the subject
+# set comes from the deserialiser, the same standard as OPTION_DISPOSITION
+# deriving its options from the driver's own dispatch.
+#
+# THREE-VALUED on purpose. `cqlite-flight/src/ticket.rs` absent AND no
+# `cqlite-flight` directory anywhere above means these artifacts were copied out
+# of the repository, which is a supported way to run this suite -- declared, not
+# silently passed. A `cqlite-flight` directory that exists WITHOUT that file
+# means the struct moved, which is a FAIL: that is the case a skip would hide.
+set +e
+python3 - "$HERE" > "$TMP/schema-completeness.txt" 2> "$TMP/schema-completeness-err.txt" <<'PYINNER'
+import os
+import re
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import ab_driver_support as S
+
+here = os.path.abspath(sys.argv[1])
+ticket_rs = None
+saw_crate = False
+probe = here
+while True:
+    candidate = os.path.join(probe, "cqlite-flight", "src", "ticket.rs")
+    if os.path.isdir(os.path.join(probe, "cqlite-flight")):
+        saw_crate = True
+    if os.path.isfile(candidate):
+        ticket_rs = candidate
+        break
+    parent = os.path.dirname(probe)
+    if parent == probe:
+        break
+    probe = parent
+
+if ticket_rs is None:
+    if saw_crate:
+        sys.stderr.write("AB-3649: a cqlite-flight directory exists but "
+                         "src/ticket.rs is not in it -- the struct moved, and "
+                         "TICKET_SCHEMA can no longer be checked against it\n")
+        raise SystemExit(1)
+    sys.stdout.write("DECLARED-NOT-MEASURABLE these artifacts are outside the "
+                     "repository, so TICKET_SCHEMA cannot be checked against "
+                     "ticket.rs from here\n")
+    raise SystemExit(0)
+
+source = open(ticket_rs, encoding="utf-8").read()
+block = re.search(r"^pub struct FlightTicket \{\n(.*?)^\}$", source, re.S | re.M)
+if not block:
+    sys.stderr.write("AB-3649: the FlightTicket struct could not be located in "
+                     "%s; the derivation has broken, which is a FAIL rather "
+                     "than an empty subject set\n" % ticket_rs)
+    raise SystemExit(1)
+declared = set(re.findall(r"^\s{4}pub ([a-z_][a-z0-9_]*):", block.group(1), re.M))
+if len(declared) < 8:
+    sys.stderr.write("AB-3649: only %d fields were derived from FlightTicket; "
+                     "the parse has broken\n" % len(declared))
+    raise SystemExit(1)
+
+problems = []
+for field in sorted(declared - set(S.TICKET_SCHEMA)):
+    problems.append("FlightTicket declares %r and TICKET_SCHEMA does not "
+                    "validate it -- an unvalidated field is one that fails "
+                    "after every build" % field)
+for field in sorted(set(S.TICKET_SCHEMA) - declared):
+    problems.append("TICKET_SCHEMA validates %r, which FlightTicket no longer "
+                    "declares" % field)
+for problem in problems:
+    sys.stderr.write("AB-3649: %s\n" % problem)
+raise SystemExit(1 if problems else 0)
+PYINNER
+SCHEMA_RC=$?
+set -e
+if [ "$SCHEMA_RC" != 0 ]; then
+  bad "TICKET_SCHEMA and FlightTicket disagree about the field set: $(head -2 "$TMP/schema-completeness-err.txt" | tr '\n' ' ')"
+elif grep -q '^DECLARED-NOT-MEASURABLE' "$TMP/schema-completeness.txt"; then
+  # NOT a pass. Saying "covers exactly the fields" here would be a claim the run
+  # did not earn -- the same false-affirmation shape the rest of this suite
+  # exists to refuse. It is reported as the declared gap it is.
+  ok "TICKET_SCHEMA completeness DECLARED-NOT-MEASURABLE (running outside the repository, so ticket.rs is unreachable)"
+else
+  ok "TICKET_SCHEMA covers exactly the fields FlightTicket declares, derived from ticket.rs"
+fi
 
 # ROUND 14 FINDING 2: `filter` and `aggregation` were checked for being OBJECTS,
 # not for matching PredicateExpr/Aggregation -- so `filter: {}` passed pre-flight

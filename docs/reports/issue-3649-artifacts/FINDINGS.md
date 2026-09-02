@@ -553,6 +553,19 @@ box. The comment directly beneath the acquisition asserted the very ordering the
 code violated — **a comment is not a check**, which is this lane's own recurring
 finding pointed at itself.
 
+**The sweep the family warranted, with verdicts rather than a fix count.** Four
+documented instances each fixed at a single site is the strongest available
+evidence that single-site fixes do not work on this family, so every resource
+the driver creates was checked for the same ordering:
+
+| resource | verdict |
+|---|---|
+| session lock | **was defective** — acquired ~80 lines before the trap; fixed |
+| server process | sound — the trap is armed long before launch, and the identity is captured on the statement after `&`; the residual window leaks an unreaped child rather than signalling a stranger, which is the safe direction |
+| build worktrees | **deliberately persistent**, not an ordering defect — they are reused across sessions to avoid rebuilds, disclosed at session end with the exact `git worktree remove` command, and every early-failure `die` names the path |
+| manifest `.tmp` | sound by construction — the atomic write's residue lands inside the session's own directory, so it cannot affect another session |
+| run/log directories | the session's output, deliberately kept |
+
 **The obvious fix is wrong, and it has its own case.** With the trap armed
 first, `cleanup` also runs on the path where acquisition *failed because a peer
 holds the directory* — so keying the removal on the directory existing would
@@ -903,6 +916,25 @@ now the whole tagged grammar (`PredicateExpr` is `#[serde(tag = "type")]` with
 six variants, validated recursively so a malformed leaf inside a well-formed
 tree is caught; `Aggregation`/`AggregateSpec`/`AggFunc` likewise), depth-bounded
 so a deep tree is a named refusal rather than a `RecursionError`.
+
+**AND THE FIX THAT ENDS THE CLASS IS THE ONE THAT CHECKS ITS OWN COMPLETENESS.**
+Validating `filter` and `aggregation` would have been the third careful reading
+of the same struct, and a fourth field would go unvalidated the same way — so
+`TICKET_SCHEMA`'s field set is now **derived from `ticket.rs` at test time** and
+asserted **bidirectionally**: a field `FlightTicket` declares and the schema
+does not validate is a FAIL, and so is a schema entry the struct no longer
+declares. Same standard as `OPTION_DISPOSITION` deriving its options from the
+driver's own dispatch — *the list may be curated; the completeness must be
+checked against the real thing.*
+
+That check is **three-valued**, because these artifacts are also run copied out
+of the repository: no `cqlite-flight` directory anywhere above means `ticket.rs`
+is genuinely unreachable and the case reports `DECLARED-NOT-MEASURABLE` rather
+than claiming a coverage it did not measure — while a `cqlite-flight` directory
+that exists *without* that file means the struct MOVED, which is a FAIL. A
+two-valued version would have hidden exactly the second case. (The first draft
+of the wrapper printed the success line on the unmeasurable path — a pass the
+run had not earned, caught before commit.)
 
 It also caught a fixture *this lane wrote one round earlier*: the "well-formed"
 filter narrowing was `{"Compare": {…}}`, serde's **externally** tagged spelling,
