@@ -200,7 +200,10 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   `info/grafts` into the new repository. So every git call, the lane discovery reads included, runs under
   `env -i` + an allowlist admitting only `PATH` and `TMPDIR` (no network here, so no `HOME`/`SSH_*`/proxy)
   plus `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null` and an explicit empty `--template=`. The reads
-  are bounded by the runner the advisory already resolves, recorded as `anchor-reads: bounded-<n>s+<g>s`;
+  are bounded by the runner the advisory already resolves, but **only the external commands** (git and
+  `mktemp -d`) — the token names both halves,
+  `anchor-reads: bounded-<n>s+<g>s(external:git,mktemp;UNBOUNDED:cd/test-builtins)`, since `cd`/`pwd -P`
+  and an object-dir `[ -d … ]` probe are shell builtins no runner can signal;
   **where none exists the check REFUSES** (`ANCHOR-UNVERIFIABLE` + a one-command remedy). That reverses
   the first ruling — "a hang is only a liveness failure, so run unbounded and declare it" — because **a
   hang in this guard blocks the merge anyway**: the real comparison is hang-forever-with-no-diagnosis vs

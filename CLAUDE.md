@@ -1766,8 +1766,14 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   sites a later change adds) — runs under `env -i` + an allowlist ADMITting only `PATH` and `TMPDIR`
   (tighter than the pre-flight's: no network here, so no `HOME`, no `SSH_*`, no proxy), with
   `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null` plus an explicit empty `--template=`. The reads are
-  also **bounded** by the runner this script already resolves for the advisory, with
-  `anchor-reads: bounded-<n>s+<g>s` as the affirmative record — and **where no `timeout`/`gtimeout`
+  also **bounded** by the runner this script already resolves for the advisory — but **only the EXTERNAL
+  commands are** (every git call and `mktemp -d`), and the token says exactly that:
+  `anchor-reads: bounded-<n>s+<g>s(external:git,mktemp;UNBOUNDED:cd/test-builtins)`. `cd`/`pwd -P` and the
+  object-dir `[ -d … ]` probe are SHELL BUILTINS with no process for a runner to signal, so on a stalled
+  mount they can still hang the guard; inventing a way to bound a builtin is explicitly not the fix, and
+  one such probe was DELETED rather than bounded (redundant: a bounded `git init` failure refuses anyway).
+  A bare `bounded-…` claimed more than is true, which is the overclaim shape this issue exists to remove —
+  a check claiming nothing false beats one claiming a closure it does not deliver. And **where no `timeout`/`gtimeout`
   supporting `--kill-after` exists the check REFUSES** (`ANCHOR-UNVERIFIABLE`, naming a one-command
   remedy). **That REVERSES the first ruling here, which said run unbounded and declare it, on the ground
   that a hang is a LIVENESS failure yielding no verdict rather than a false pass.** What that missed: **a

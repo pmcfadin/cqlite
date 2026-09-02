@@ -132,7 +132,10 @@ carry).
   `GIT_TEMPLATE_DIR`/`--template=` seed a planted `info/grafts` into the new repository — so every git
   call, discovery reads included, runs under `env -i` + an allowlist (`PATH`, `TMPDIR`, then
   `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null`) with an explicit empty `--template=`. The reads are
-  bounded by the advisory's own runner, recorded affirmatively as `anchor-reads: bounded-<n>s+<g>s` — and
+  bounded by the advisory's own runner — **the EXTERNAL commands only** (git and `mktemp -d`), recorded as
+  `anchor-reads: bounded-<n>s+<g>s(external:git,mktemp;UNBOUNDED:cd/test-builtins)`, because `cd`/`pwd -P`
+  and one `[ -d … ]` probe are shell builtins a runner cannot signal and a bare `bounded-…` would
+  overclaim — and
   with **no `timeout`/`gtimeout` supporting `--kill-after` the check REFUSES**, naming a one-command
   remedy. That reverses an earlier ruling ("run unbounded, declare it, never refuse"): a hang in this
   guard blocks the merge anyway, so the choice is *hang silently* vs *refuse with a cause*, and the
