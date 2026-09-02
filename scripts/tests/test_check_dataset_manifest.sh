@@ -2412,10 +2412,24 @@ else
   # (measured) and `--no-hardlinks` would copy the whole object store. Measured at 0.6s, i.e.
   # the same cost as the `worktree add` it replaces, and it leaves nothing registered in the
   # real repo for cleanup to unregister.
-  if git clone --local --shared --quiet "$nbgate_repo" "$nbgate_wt" >"$WORK/nb-gate-tree.log" 2>&1; then
-    nbgate_ok=1
-  else
+  # --no-checkout + an EXPLICIT sha, because a plain clone checks out the source's default
+  # BRANCH -- and a source on a DETACHED HEAD that no local branch points at then clones
+  # SUCCESSFULLY with an empty working tree, so the `cp` below would land in a directory with
+  # no scripts/ and every case would fail on fixture construction rather than on its subject
+  # (roborev job 102). The `worktree add --detach` this replaced handled that state; the clone
+  # has to be told. Lanes DO run detached -- this suite's own throwaway fixtures use
+  # `git worktree add --detach` -- so the state is reachable, not theoretical.
+  nbgate_src_sha=$(git -C "$nbgate_repo" rev-parse --verify HEAD 2>/dev/null || true)
+  if [ -z "$nbgate_src_sha" ]; then
+    bad "cases 97-102: could not resolve HEAD of '$nbgate_repo' to a sha, so the scratch clone cannot be checked out at a known commit"
+  elif ! git clone --local --shared --no-checkout --quiet "$nbgate_repo" "$nbgate_wt" >"$WORK/nb-gate-tree.log" 2>&1; then
     bad "cases 97-102: could not clone a scratch tree for the exit-code mapping cases: $(tail -1 "$WORK/nb-gate-tree.log" 2>/dev/null)"
+  elif ! git -C "$nbgate_wt" checkout --detach --quiet "$nbgate_src_sha" >>"$WORK/nb-gate-tree.log" 2>&1; then
+    bad "cases 97-102: cloned the scratch tree but could not check out source HEAD $nbgate_src_sha in it: $(tail -1 "$WORK/nb-gate-tree.log" 2>/dev/null)"
+  elif [ ! -d "$nbgate_wt/scripts" ]; then
+    bad "cases 97-102: the scratch clone has no scripts/ directory after checkout of $nbgate_src_sha -- fixture construction is broken, not the subject under test"
+  else
+    nbgate_ok=1
   fi
 fi
 
@@ -2562,9 +2576,13 @@ JESTSTUB
     sumtoks=$(sed -n 's/^node-bindings:[[:space:]]*\([A-Za-z-]*\).*/\1/p' "$sum" 2>/dev/null)
     NBG_SUM_TOKS=$(printf '%s\n' "$sumtoks" | grep -E '.' | tr '\n' ' ')
     NBG_SUM_N=$(printf '%s\n' "$sumtoks" | grep -cE '.')
-    NBG_LIVE=0; NBG_TEST=0
+    NBG_LIVE=0; NBG_TEST=0; NBG_BUILD=0; NBG_TYPECHECK=0
     grep -qE '^(ci|install)( |$)' "$argv" 2>/dev/null && NBG_LIVE=1
     grep -qE '^test( |$)' "$argv" 2>/dev/null && NBG_TEST=1
+    # ANCHORED, so `run build:debug` / `run typecheck:watch` cannot satisfy the claim that
+    # `npm run build` / `npm run typecheck` themselves ran (roborev job 102).
+    grep -qE '^run build( |$)' "$argv" 2>/dev/null && NBG_BUILD=1
+    grep -qE '^run typecheck( |$)' "$argv" 2>/dev/null && NBG_TYPECHECK=1
     return 0
   }
   # _nbgate_assert <tag> <allowed verdicts, space-separated> <expect npm test: yes|no>
@@ -2590,6 +2608,19 @@ JESTSTUB
       esac
     done
     [ "$NBG_LIVE" = 1 ] || why="$why; no 'npm ci'/'npm install' in the argv log, so the invocation marker is not PROVEN LIVE in this run and an absent 'test' line would prove nothing"
+    # EVERY nested run below reaches the manifest check, and the component invokes
+    # `npm run build` then `npm run typecheck` BEFORE it. So both are required in all four
+    # cases -- unconditionally, not per-contract (roborev job 102).
+    #
+    # WHY THIS IS NOT REDUNDANT WITH THE STRUCTURAL PIN, which is the whole point: case 93
+    # pins that the `npm run typecheck` LINE EXISTS in run_node_bindings. It cannot pin that
+    # the line RUNS. A control-flow change that returns, branches or short-circuits past it
+    # while LEAVING THE LINE PRESENT satisfies case 93 and every verdict assertion here --
+    # and silently re-falsifies the .github/ci-gating-tiers.yml sentence that names this
+    # component as the merge-gating half of the node-ci exemption. That is #3493's own defect
+    # class, and it is what this issue exists to close.
+    [ "$NBG_BUILD" = 1 ] || why="$why; 'npm run build' was NOT invoked, so the native module this component's claims rest on was never built in this run"
+    [ "$NBG_TYPECHECK" = 1 ] || why="$why; 'npm run typecheck' was NOT invoked — the ci-gating-tiers.yml exemption names THIS component as running it, so a run that reaches the manifest check without it makes that registry sentence FALSE (the structural pin proves the line exists, never that it executes)"
     if [ "$wanttest" = yes ]; then
       [ "$NBG_TEST" = 1 ] || why="$why; 'npm test' was NOT invoked, so the suite never ran"
     else
