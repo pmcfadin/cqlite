@@ -105,6 +105,29 @@ DEFER_MARKER = re.compile(
 )
 DEFER_STEM = "roborev-defer: findings"
 
+# ===== A THIRD KIND, FOR THE MERGE GATE, THAT JUDGES AUTHORIZATION AND NOT THE COUNT =====
+# `premerge-review-binding.sh` (#3752) must decide whether a job whose RECORD verdict is `F` was
+# nonetheless authorized to be deferred, before it may bind that job's range to the merge. It reads
+# the SAME marker, in the same channel, under all the same rules — column-zero, sole nonblank
+# content, top-level comments only, structured author association, hard-coded allowlist, placeholder
+# refusal, scope bound to base AND head AND job.
+#
+# WHAT IT DELIBERATELY DOES NOT JUDGE, AND WHY THIS IS A SEPARATE KIND RATHER THAN A FLAG ON THE
+# EXISTING ONE: the `count=` equality. That half is matched against the findings count OBSERVED BY
+# THE REVIEW, and the merge gate never ran the review — the job record carries a verdict LETTER and
+# no count at all. There is therefore no measured count for the merge gate to compare against, and
+# the two dishonest ways to manufacture one are both refused here: passing a fabricated count would
+# make an affirmative check pass on an unmeasured value (the exact shape #3586 forbids), and parsing
+# the count out of the marker so it can be compared with itself would be a tautology dressed as a
+# check. Enforcing it at REVIEW time is what the wrapper does and where the measurement exists.
+#
+# So the state is `granted-authorization`, TEXTUALLY DISTINCT from the wrapper's `granted`, and the
+# consumer prints it as its own token. Nobody grepping for a full deferral grant can match this, and
+# the merge gate DECLARES in its own output that the count half was enforced upstream and is not
+# re-verified here. One parser, one marker grammar, one new disposition — never a second
+# implementation of a channel rule, because a divergence there is an authorization bypass.
+AUTHZ_KIND = "findings-deferral-authorization"
+
 # ===== NO EMITTED DIAGNOSTIC CARRIES ANY PART OF THE MARKER FORM (#3312 job 23, layer 3) =====
 # The MALFORMED detail used to quote the whole required form, and that detail is interpolated into the
 # summary block's `waiver:`/`deferral:` key — so a block naming a live base/head/job printed a
@@ -125,6 +148,7 @@ MALFORMED_FORM_DETAIL = (
 EMIT_KEYS = {
     WAIVE_KIND: ("state", "author", "scope", "reason", "detail"),
     DEFER_KIND: ("state", "author", "scope", "reason", "detail", "issues", "count"),
+    AUTHZ_KIND: ("state", "author", "scope", "reason", "detail", "issues", "count"),
 }
 # ===== AN AUTHORIZATION MUST BE THE SOLE NONBLANK CONTENT OF ITS COMMENT (#3312 job 29) =====
 # THE FIFTH VARIATION OF ONE DEFECT, and the reason this rule replaces a parser rather than extending it.
@@ -448,6 +472,14 @@ def judge_defer_line(line, author, base, head, job, allowlist, observed_count):
     # on a count mismatch instead of passing silently, and ANY new finding at the same head raises the
     # observed count and therefore fails. That is how "the UNDEFERRED set" is computed without a
     # per-finding identity that does not exist.
+    if observed_count is None:
+        # THE AUTHORIZATION-ONLY KIND (AUTHZ_KIND). The count half is SKIPPED, not defaulted and not
+        # compared with itself — see the AUTHZ_KIND comment for why the merge gate has no measured
+        # count. Everything else above and below still applies, and the grant token differs.
+        if author not in allowlist:
+            return "unauthorized", dict(
+                fields, detail=unauthorized_detail(author, allowlist, "deferral"))
+        return "granted-authorization", fields
     if m_count != observed_count:
         return "count-mismatch", dict(fields, detail=(
             "the marker authorizes %s finding(s) but this job reports %s — the counts must match "
@@ -470,7 +502,10 @@ def scan(kind, comments, base, head, job, allowlist, observed_count):
     """The LAST GRANTED marker wins; otherwise the FIRST refusal is reported."""
     granted = None
     first_refusal = None
+    # The AUTHORIZATION kind reads the SAME stem as the deferral: it is the same marker, judged on
+    # a subset of its fields.
     stem = WAIVE_STEM if kind == WAIVE_KIND else DEFER_STEM
+    grant_state = "granted-authorization" if kind == AUTHZ_KIND else "granted"
     for comment in comments:
         if not isinstance(comment, dict):
             continue
@@ -495,12 +530,12 @@ def scan(kind, comments, base, head, job, allowlist, observed_count):
         else:
             state, fields = judge_defer_line(
                 line, author, base, head, job, allowlist, observed_count)
-        if state == "granted":
+        if state == grant_state:
             granted = fields
         elif first_refusal is None:
             first_refusal = (state, fields)
     if granted is not None:
-        return dict(granted, state="granted")
+        return dict(granted, state=grant_state)
     if first_refusal is not None:
         state, fields = first_refusal
         return dict(fields, state=state)
@@ -508,7 +543,7 @@ def scan(kind, comments, base, head, job, allowlist, observed_count):
 
 
 def main(argv):
-    kinds = (WAIVE_KIND, DEFER_KIND)
+    kinds = (WAIVE_KIND, DEFER_KIND, AUTHZ_KIND)
     if len(argv) < 6 or argv[1] not in kinds:
         sys.stderr.write(
             "usage: roborev-waiver-scan.py <%s> <base-sha> <head-sha> <job-id> <allowlist> "
@@ -522,7 +557,19 @@ def main(argv):
     # and a default would let that happen SILENTLY, which is the shape a positive verdict must never
     # rest on. The waiver has no count to bind, so accepting one there would invite the two kinds'
     # arguments to be confused.
-    if kind == DEFER_KIND:
+    if kind == AUTHZ_KIND:
+        # NO COUNT ARGUMENT, and passing one is a usage error rather than being ignored: this kind
+        # exists BECAUSE the caller has no measured count, so accepting one would invite a
+        # fabricated value into the one place this kind is defined not to look at. `None` — not the
+        # empty string — is what tells `judge_defer_line` to skip the count half, so an accidental
+        # `""` can never be read as "skip".
+        if len(argv) != 6:
+            sys.stderr.write(
+                "usage: roborev-waiver-scan.py findings-deferral-authorization <base> <head> "
+                "<job> <allowlist>\n")
+            return 2
+        observed_count = None
+    elif kind == DEFER_KIND:
         if len(argv) != 7:
             sys.stderr.write(
                 "usage: roborev-waiver-scan.py findings-deferral <base> <head> <job> <allowlist> "

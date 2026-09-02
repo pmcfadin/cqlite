@@ -78,11 +78,22 @@
 # ---------------------------------------------------------------------------
 # WHAT THIS LEG DOES **NOT** DO — declared, not implied
 # ---------------------------------------------------------------------------
-#   1. It does NOT enforce that the recorded roborev block's own terminal
-#      verdict is affirmative. That value is REPORTED on a `recorded-verdict`
-#      line and nothing is derived from it: an intermediate round legitimately
-#      records findings, so a hard check there would red correct input. #3752
-#      declares this a residual, out of its own scope.
+#   1. It does NOT derive anything from the recorded BLOCK's terminal verdict.
+#      That value is still REPORTED on a `recorded-verdict` line and nothing is
+#      derived from it, because the block is attacker- and accident-controlled
+#      text. WHAT IS ENFORCED, since roborev job 59 finding 1, is the JOB
+#      RECORD's own structured verdict: a job binds only when its record says
+#      `clean`, or says `findings` AND an allowlisted human authorized deferring
+#      them for that exact base/head/job. An unreadable record verdict never
+#      binds. The earlier version of this leg treated a `git_ref` match ALONE as
+#      sufficient and declared the verdict a residual — a false-green route in a
+#      merge gate, since a block naming a FAILED or in-progress job whose range
+#      matched bound the merge.
+#      STILL NOT RE-VERIFIED HERE, and declared rather than implied: the
+#      deferral marker's `count=` half, which is matched against the findings
+#      count OBSERVED BY THE REVIEW. This leg never ran the review and the
+#      record carries no count, so there is nothing here to compare against;
+#      that half is enforced at review time, by the wrapper.
 #   2. It does NOT model roborev's exclusion set, and it does not re-derive the
 #      wrapper's own asserts. It answers ONE question: is the commit a recorded
 #      review actually covered an ancestor of the tree about to merge, with no
@@ -111,6 +122,14 @@ OWN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCAN_TOOL="$OWN_DIR/premerge-pr-scan.py"
 FACTS_TOOL="$OWN_DIR/roborev-job-facts.py"
 CLASSIFY_TOOL="$OWN_DIR/../ci/classify-docs-only.sh"
+# The deferral-AUTHORIZATION enforcer and the allowlist it applies. Same rule as
+# above: resolved from this script's own directory, no env override, no
+# `${...:-...}` fallback. The allowlist is read from the ONE committed
+# definition the wrapper uses (`roborev-review-oracles.sh`) rather than restated
+# here — two spellings of "who may authorize" is two places for it to drift, and
+# a drift there is an authorization bypass.
+WAIVER_SCAN_TOOL="$OWN_DIR/roborev-waiver-scan.py"
+ORACLES_FILE="$OWN_DIR/roborev-review-oracles.sh"
 
 P=''
 
@@ -228,6 +247,103 @@ classify_paths() {
 }
 
 # ---------------------------------------------------------------------------
+# WHO MAY AUTHORIZE A DEFERRAL — read as DATA from the ONE committed definition
+# ---------------------------------------------------------------------------
+# The allowlist has exactly one home, `roborev-review-oracles.sh`, and it is
+# read here as TEXT and never EXECUTED — the same idiom the agent gate uses for
+# its `COMPONENTS` baseline, and for the same reason: sourcing a 1600-line file
+# to obtain one string imports every function it defines, and executing a file
+# to learn a value is a control channel where a data read will do.
+#
+# It REFUSES LOUDLY on any shape it does not recognise. A parser that guesses
+# here would guess about who may authorize a merge, so an unrecognised
+# declaration is a named refusal and never an empty allowlist — an empty
+# allowlist would silently make every deferral `unauthorized`, which reads as a
+# correct refusal while actually meaning the check never ran.
+waiver_authors() {
+  local line value
+  [ -f "$ORACLES_FILE" ] || return 1
+  # Column-zero anchored, exactly one line, the committed form.
+  line=$(sed -n 's/^ROBOREV_WAIVER_AUTHORS="\([^"]*\)"$/\1/p' "$ORACLES_FILE") || return 1
+  # EXACTLY ONE declaration must have matched. Command substitution strips
+  # TRAILING newlines, so a single match carries none and two matches carry one
+  # between them — an embedded newline therefore means the file holds more than
+  # one declaration, and concatenating them would invent an allowlist neither
+  # line states.
+  #
+  # THE PATTERN USES BASH ANSI-C QUOTING, NOT A COMMAND SUBSTITUTION. Written as
+  # a substitution around printf, the newline being searched for is stripped by
+  # the substitution itself, collapsing the pattern to an empty string that
+  # matches EVERY value. That made this function return 1 unconditionally and
+  # the authorized-deferral path UNREACHABLE — fail-closed, but a guard that
+  # reds on correct input is the guard agents learn to waive, and it surfaced
+  # only because a behavioural case demanded the grant.
+  case "$line" in
+    *$'\n'*) return 1 ;;
+  esac
+  value="$line"
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+# record_verdict_class <letter> — the record verdict, THREE-VALUED.
+#
+# `clean` and `findings` are the two AFFIRMATIVE measurements roborev records
+# (`roborev show --json` synthesises the letter from `reviews.verdict_bool`: `P`
+# clean, `F` findings). EVERYTHING ELSE — absent, empty, or a letter this code
+# has never judged — is `unknown`, and `unknown` NEVER binds. A positive verdict
+# requires a positive measurement; inferring `clean` from "no findings signal"
+# is deriving a pass from the absence of a bad signal.
+record_verdict_class() {
+  case "$1" in
+    P | p) printf 'clean' ;;
+    F | f) printf 'findings' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# deferral_authorized <job> <base> <head> <tmp> — 0 when an allowlisted human
+# authorized deferring THIS job's findings, with DEFERRAL_AUTHOR set.
+#
+# WHY THIS PATH EXISTS AT ALL: roborev RE-REPORTS a lead-deferred finding on
+# every later round, so a job record's verdict stays `F` forever once findings
+# were found and deferred (#3626). Requiring `clean` with no deferral route
+# would make such a merge UNOBTAINABLE — the defect #3626 exists to record, and
+# a rule that punishes the correct behaviour will not survive contact.
+#
+# THE AUTHORIZATION IS RE-VERIFIED HERE, NOT READ OFF THE PR BLOCK. The block is
+# the untrusted artifact this whole finding is about; deciding from its
+# `findings: DEFERRED` text would be circular. So the SAME scanner the wrapper
+# uses is called, on the SAME marker, under all the same channel rules.
+#
+# WHAT IS NOT RE-VERIFIED, DECLARED RATHER THAN IMPLIED: the `count=` half. It
+# is matched against the findings count OBSERVED BY THE REVIEW, and this leg
+# never ran the review — the job record carries a verdict LETTER and no count.
+# So the scanner is called in its `findings-deferral-authorization` mode, which
+# judges marker form, sole-content, top-level placement, structured authorship,
+# the allowlist and the base/head/job scope, and returns the DISTINCT state
+# `granted-authorization`. Fabricating a count to satisfy the check would be an
+# affirmative assert over an unmeasured value; comparing the marker's count with
+# itself would be a tautology. The count is enforced at REVIEW time, where the
+# measurement exists.
+DEFERRAL_AUTHOR=""
+deferral_authorized() {
+  local job="$1" base="$2" head="$3" tmp="$4" allow result state
+  DEFERRAL_AUTHOR=""
+  [ -f "$WAIVER_SCAN_TOOL" ] || return 1
+  allow=$(waiver_authors) || return 1
+  [ -n "$allow" ] || return 1
+  result=$(python3 "$WAIVER_SCAN_TOOL" findings-deferral-authorization \
+    "$base" "$head" "$job" "$allow" <"$tmp/pr.json" 2>/dev/null) || return 1
+  state=$(printf '%s\n' "$result" | sed -n 's/^state=//p' | head -1)
+  # KEYED ON THE AFFIRMATIVE VALUE, never on `!= <bad>`: a state this code has
+  # never judged is not a grant.
+  [ "$state" = "granted-authorization" ] || return 1
+  DEFERRAL_AUTHOR=$(printf '%s\n' "$result" | sed -n 's/^author=//p' | head -1)
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # review-binding
 # ---------------------------------------------------------------------------
 cmd_review_binding() {
@@ -321,8 +437,17 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   while IFS= read -r line; do
     case "$line" in
       recorded-verdict=*)
-        say "recorded-verdict $(sane "${line#recorded-verdict=}") — reported ONLY. Nothing is"
-        say "recorded-verdict derived from it here (#3752 declared residual)."
+        # REPORTED ONLY, and this is now a DELIBERATE non-use rather than a
+        # residual: the authoritative signal is the JOB RECORD's structured
+        # verdict, read in `reviewed_head_of` and judged at the binding site.
+        # This line is the BLOCK's self-report — untrusted text — and is kept
+        # visible so a mismatch between what a PR claims and what roborev
+        # recorded is legible to a human. The two are textually distinct
+        # (`recorded-verdict` here, `record verdict` at the binding site) so a
+        # pasted log can never be read as the other.
+        say "recorded-verdict $(sane "${line#recorded-verdict=}") — the BLOCK's own claim,"
+        say "recorded-verdict reported for the reader ONLY. The binding decision below uses"
+        say "recorded-verdict the JOB RECORD's structured verdict, never this."
         ;;
     esac
   done <<<"$scan_out"
@@ -368,6 +493,51 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   local job bound=0 unclassifiable=0 unclassifiable_base=0 reviewed
   local heads=()
   local unresolved=()
+  local findings_unauthorized=0 verdict_unknown=0
+  BOUND_NOTE=""
+
+  # result_permits_binding <job> — 0 when this job's RECORD says its review
+  # concluded in a state a merge may rest on. Sets RESULT_NOTE for the log.
+  #
+  # THIS IS THE FIX FOR roborev JOB 59, FINDING 1, and the thing it replaces was
+  # a DECLARED RESIDUAL — "the recorded block's terminal verdict is REPORTED and
+  # nothing is derived from it". That residual was a false-green route in a merge
+  # gate: a `git_ref` match ALONE yielded BOUND, so a block naming an
+  # in-progress, FAILED or findings-bearing job whose range happened to match
+  # the certified head bound the merge. It is an ACCIDENT route before it is a
+  # hostile one — THIS PR'''s own body recorded a job at `RESULT: FAIL`, and a
+  # lane pasting its first (failing) round would have certified itself.
+  #
+  # The verdict is read from the JOB RECORD, never from the PR block: the block
+  # is attacker- and accident-controlled text, the record is roborev'''s own
+  # structured field. That is #3564'''s rule one directory over — `NONE` is
+  # reachable only from the structured verdict letter, never reconstructed from
+  # prose.
+  result_permits_binding() {
+    local j="$1" class
+    RESULT_NOTE=""
+    class=$(record_verdict_class "$RH_VERDICT")
+    case "$class" in
+      clean)
+        RESULT_NOTE="record verdict is affirmatively CLEAN"
+        return 0
+        ;;
+      findings)
+        if deferral_authorized "$j" "$RH_BASE" "$RH_HEAD" "$tmp"; then
+          # A DISTINCT TOKEN, deliberately: nobody grepping this log for a
+          # clean bind can match a deferred one.
+          RESULT_NOTE="record verdict is FINDINGS, deferral AUTHORIZED by @$(sane "$DEFERRAL_AUTHOR")"
+          return 0
+        fi
+        RESULT_NOTE="record verdict is FINDINGS and no authorized deferral covers this job"
+        return 1
+        ;;
+      *)
+        RESULT_NOTE="record verdict could not be established (status $(sane "${RH_STATUS:-<none>}"))"
+        return 1
+        ;;
+    esac
+  }
   for job in ${jobs[@]+"${jobs[@]}"}; do
     # NOT a command substitution. `reviewed_head_of` can refuse, and a refusal
     # inside `$( )` would exit only the SUBSHELL — the caller would read the
@@ -376,6 +546,8 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
     RH_HEAD=""
     RH_BASE=""
     RH_ERR=""
+    RH_VERDICT=""
+    RH_STATUS=""
     if ! reviewed_head_of "$job" "$tmp"; then
       say "job $(sane "$job") $(sane "$RH_ERR")"
       unresolved+=("$RH_ERR")
@@ -453,8 +625,18 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
 
     if [ "$reviewed" = "$certified" ]; then
       say "job $(sane "$job") reviewed head EQUALS the certified head"
-      bound=1
-      break
+      if result_permits_binding "$job"; then
+        say "job $(sane "$job") $(sane "$RESULT_NOTE")"
+        bound=1
+        BOUND_NOTE="$RESULT_NOTE"
+        break
+      fi
+      say "job $(sane "$job") but it CANNOT bind: $(sane "$RESULT_NOTE")"
+      case "$(record_verdict_class "$RH_VERDICT")" in
+        findings) findings_unauthorized=1 ;;
+        *) verdict_unknown=1 ;;
+      esac
+      continue
     fi
 
     classify_paths "$reviewed" "$certified"
@@ -463,8 +645,17 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         say "job $(sane "$job") is an ancestor and everything after it is prose by"
         say "job $(sane "$job") scripts/ci/classify-docs-only.sh, so no reviewable code was"
         say "job $(sane "$job") added after the review"
-        bound=1
-        break
+        if result_permits_binding "$job"; then
+          say "job $(sane "$job") $(sane "$RESULT_NOTE")"
+          bound=1
+          BOUND_NOTE="$RESULT_NOTE"
+          break
+        fi
+        say "job $(sane "$job") but it CANNOT bind: $(sane "$RESULT_NOTE")"
+        case "$(record_verdict_class "$RH_VERDICT")" in
+          findings) findings_unauthorized=1 ;;
+          *) verdict_unknown=1 ;;
+        esac
         ;;
       1)
         say "job $(sane "$job") is an ancestor, but REVIEWABLE CODE was added after it"
@@ -489,7 +680,18 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   done
   if [ "$bound" -eq 1 ]; then
     verdict BOUND
-    detail "a recorded roborev round covers the certified head's reviewable content."
+    detail "a recorded roborev round covers the certified head's reviewable content, and that"
+    detail "round's RECORD says its review concluded in a bindable state: $BOUND_NOTE."
+    case "$BOUND_NOTE" in
+      *AUTHORIZED*)
+        detail "THAT BIND RESTS ON AN AUTHORIZED DEFERRAL, not on a clean review. The"
+        detail "authorization was re-verified here from the PR's top-level comments (marker"
+        detail "form, sole content, column-zero, structured authorship, hard-coded allowlist,"
+        detail "base/head/job scope). The marker's count= half is NOT re-verified here and is"
+        detail "not claimed to be: it is matched against the findings count OBSERVED BY THE"
+        detail "REVIEW, which this leg never ran, and it is enforced at review time."
+        ;;
+    esac
     exit 0
   fi
 
@@ -504,6 +706,12 @@ could not be classified, so whether reviewable code was added after the review i
     causes+=("a recorded round's BASE half could not be compared against this PR's merge-base, \
 so how much of the branch that round actually covered is UNKNOWN.")
   fi
+  if [ "$verdict_unknown" -eq 1 ]; then
+    causes+=("a recorded round COVERS the certified head, but its job RECORD carries no \
+verdict this code can read, so whether that review concluded at all is UNKNOWN. A range match \
+alone is not a review: the record must AFFIRMATIVELY say the review finished. Re-run the \
+sanctioned wrapper and post the block it prints.")
+  fi
   local why
   for why in ${unresolved[@]+"${unresolved[@]}"}; do
     causes+=("$why")
@@ -512,6 +720,25 @@ so how much of the branch that round actually covered is UNKNOWN.")
     causes+=("That is a measurement failure, not an absence of coverage, and the two need \
 different actions — so it is reported as its own verdict rather than folded into one.")
     unmeasured ${causes[@]+"${causes[@]}"}
+  fi
+  # A FINDINGS RECORD WITH NO AUTHORIZED DEFERRAL IS A *MEASURED* REFUSAL, SO IT
+  # IS UNBOUND AND NOT UNMEASURED. The distinction is the one this file keeps
+  # everywhere else: `unmeasured` means the oracle could not be consulted, and
+  # here it WAS — roborev'''s record affirmatively says the review found findings
+  # and no allowlisted human authorized deferring them. Folding a definite
+  # refusal into UNMEASURED would misdescribe it to the operator, whose action
+  # is completely different (triage the findings, or get a deferral authorized —
+  # not "fix the box and re-run").
+  if [ "$findings_unauthorized" -eq 1 ]; then
+    say "unbound a recorded round COVERS the certified head, but its record verdict is"
+    say "unbound FINDINGS and no authorized deferral covers it."
+    verdict UNBOUND
+    detail "REMEDY: either resolve the findings and run a fresh round at this head, or — if the"
+    detail "lead has ruled them deferrable — have an authorized human post the findings-deferral"
+    detail "marker for THIS base/head/job as the sole content of a top-level PR comment, then"
+    detail "re-decide the round with the wrapper's --recheck-job <id>. The marker form is in"
+    detail "\`bash scripts/flow/roborev-review.sh --help\`; it is deliberately not printed here."
+    exit 4
   fi
   say "unbound none of the recorded roborev rounds covers the certified head."
   verdict UNBOUND
@@ -544,6 +771,8 @@ reviewed_head_of() {
   local job="$1" tmp="$2" payload json ref head base
   RH_HEAD=""
   RH_BASE=""
+  RH_VERDICT=""
+  RH_STATUS=""
   RH_ERR=""
   for payload in show list; do
     case "$payload" in
@@ -568,6 +797,12 @@ reviewed_head_of() {
       >/dev/null 2>&1 <<<"$json" || continue
     ref=$(sed -n 's/^git_ref=//p' "$tmp/facts" | head -1 | tr 'A-F' 'a-f')
     [ -n "$ref" ] || continue
+    # THE RECORD'S OWN STRUCTURED RESULT, from the same parse (roborev job 59,
+    # finding 1). `verdict` and `status` are already STRING_FACTS of the shared
+    # facts tool, so this needs no second parser. They are read here and JUDGED
+    # at the binding site, where the alternative to binding can be named.
+    RH_VERDICT=$(sed -n 's/^verdict=//p' "$tmp/facts" | head -1)
+    RH_STATUS=$(sed -n 's/^status=//p' "$tmp/facts" | head -1)
     case "$ref" in
       *..*) : ;;
       *)

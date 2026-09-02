@@ -69,7 +69,16 @@ done
 FLOW="$T/scripts/flow"
 CI="$T/scripts/ci"
 mkdir -p "$FLOW" "$CI"
+# roborev-waiver-scan.py and roborev-review-oracles.sh joined this list with
+# roborev job 59 finding 1: the leg re-verifies a findings DEFERRAL through the
+# same scanner the wrapper uses, and reads the author allowlist from the one
+# committed definition — both resolved from its OWN directory with no override,
+# so scratch must lay them out identically or the deferral path cannot run at
+# all. An ABSENT enforcer makes `deferral_authorized` refuse, which looks
+# exactly like "no authorization was posted", so omitting them here would have
+# made the authorized-deferral case pass for the wrong reason.
 for f in premerge-review-binding.sh premerge-pr-scan.py roborev-job-facts.py \
+  roborev-waiver-scan.py roborev-review-oracles.sh \
   premerge-assert.sh base-staleness.sh; do
   cp "$REPO_ROOT/flow/$f" "$FLOW/$f" || {
     printf 'FAIL - could not copy scripts/flow/%s into scratch.\n' "$f" >&2
@@ -134,17 +143,46 @@ chmod +x "$BIN/roborev"
 # --- fixture builders ---------------------------------------------------------
 # roborev_job <id> <base40> <head40> -- a `roborev show` payload of the REAL
 # shape: the job row NESTED under a "job" key (measured, issue #2964).
+# The 4th argument is the RECORD's structured verdict letter, `P` clean / `F`
+# findings, as `roborev show --json` synthesises it from `reviews.verdict_bool`.
+# It DEFAULTS to `P` because that is the shape of a real clean record, and since
+# roborev job 59 finding 1 the binding decision READS it: a record with no
+# readable verdict no longer binds, so a fixture omitting it would be asserting
+# the unknown-verdict path by accident. Pass `-` for a record carrying NO
+# verdict field at all.
 roborev_job() {
   mkdir -p "$MOCK_ROBOREV_DIR"
-  python3 - "$MOCK_ROBOREV_DIR/job-$1.json" "$1" "$2" "$3" <<'PY'
+  python3 - "$MOCK_ROBOREV_DIR/job-$1.json" "$1" "$2" "$3" "${4:-P}" <<'PY'
 import json, sys
-out, job, base, head = sys.argv[1:5]
-json.dump({"id": int(job), "job_id": int(job), "agent": "codex",
-           "job": {"id": int(job), "git_ref": "%s..%s" % (base, head),
-                   "status": "done", "model": "gpt-5.6-sol",
-                   "token_usage": json.dumps({"input_tokens": 400000,
-                                              "cached_input_tokens": 320000,
-                                              "total_output_tokens": 5000})}},
+out, job, base, head, verdict = sys.argv[1:6]
+row = {"id": int(job), "git_ref": "%s..%s" % (base, head),
+       "status": "done", "model": "gpt-5.6-sol",
+       "token_usage": json.dumps({"input_tokens": 400000,
+                                  "cached_input_tokens": 320000,
+                                  "total_output_tokens": 5000})}
+if verdict != "-":
+    row["verdict"] = verdict
+json.dump({"id": int(job), "job_id": int(job), "agent": "codex", "job": row},
+          open(out, "w"))
+PY
+}
+
+# defer_marker <issues> <count> <base> <head> <job> <reason> — the authorization
+# marker, which grants only as the SOLE nonblank content of a top-level comment.
+defer_marker() {
+  printf 'roborev-defer: findings issues=%s count=%s base=%s head=%s job=%s reason=%s' \
+    "$1" "$2" "$3" "$4" "$5" "$6"
+}
+
+# pr_payload_with_comment <out> <baseRefName> <body> <author> <comment-body>
+pr_payload_with_comment() {
+  python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import json, sys
+out, base, body, author, comment = sys.argv[1:6]
+json.dump({"baseRefName": base, "body": body,
+           "comments": [{"author": {"login": author}, "body": comment,
+                         "createdAt": "2026-09-02T00:00:00Z",
+                         "updatedAt": "2026-09-02T00:00:00Z"}]},
           open(out, "w"))
 PY
 }
@@ -1286,6 +1324,128 @@ if run_hold 0 "scanner: a NULL body is a comment with no text, and still clears"
 fi
 
 # ==============================================================================
+# FINDING 1 (roborev job 59) — A RANGE MATCH ALONE MUST NOT BIND
+# ==============================================================================
+# The leg used to treat a matching `git_ref` as sufficient, with the recorded
+# verdict REPORTED and nothing derived from it (a "declared residual"). So a
+# block naming an in-progress, FAILED or findings-bearing job whose range
+# matched the certified head BOUND the merge. That is an ACCIDENT route before a
+# hostile one: this PR's own body records a job at a FAIL verdict, so a lane
+# pasting its first failing round would have certified itself.
+#
+# The verdict now read is the JOB RECORD's structured letter, never the block's.
+
+# --- verdict FINDINGS, no deferral: a MEASURED refusal, so UNBOUND ------------
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 610)"
+roborev_job 610 "$(cd "$WORK" && git rev-parse main)" "$HEAD_AFTER" F
+if run_binding 4 "result: a FINDINGS record covering the head does NOT bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNBOUND"*)
+      ok "result: findings-with-no-deferral is UNBOUND — a measured refusal, not UNMEASURED" ;;
+    *) bad "result: expected UNBOUND for a findings record (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"no authorized deferral"*)
+      ok "result: the refusal NAMES the missing authorization, so the remedy is legible" ;;
+    *) bad "result: the findings refusal did not name the deferral route (got: $OUT)" ;;
+  esac
+fi
+
+# --- verdict ABSENT: never binds, and it is UNMEASURED (nothing was read) -----
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 611)"
+roborev_job 611 "$(cd "$WORK" && git rev-parse main)" "$HEAD_AFTER" -
+if run_binding 5 "result: a record with NO verdict field does NOT bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "result: an unreadable record verdict is UNMEASURED — a range match is not a review" ;;
+    *) bad "result: expected UNMEASURED for a verdict-less record (got: $OUT)" ;;
+  esac
+fi
+
+# --- verdict FINDINGS + AUTHORIZED deferral: binds, under a DISTINCT token ----
+# The marker must name THIS job's base and head, be the SOLE content of a
+# top-level comment, and come from the hard-coded allowlist.
+MB_MAIN=$(cd "$WORK" && git rev-parse main)
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 612)" pmcfadin \
+  "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 612 'both filed and lead-deferred')"
+roborev_job 612 "$MB_MAIN" "$HEAD_AFTER" F
+if run_binding 0 "result: FINDINGS + an authorized deferral DOES bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict BOUND"*)
+      ok "result: an authorized deferral binds, so #3626's unobtainable-merge trap is not reintroduced" ;;
+    *) bad "result: expected BOUND with an authorized deferral (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"deferral AUTHORIZED by @pmcfadin"*)
+      ok "result: the deferred bind is reported under its OWN token, naming the authorizer" ;;
+    *) bad "result: a deferred bind did not name its authorization (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"count= half is NOT re-verified here"*)
+      ok "result: the block DECLARES the count half is not re-verified, rather than implying it" ;;
+    *) bad "result: the deferred bind did not declare its unverified half (got: $OUT)" ;;
+  esac
+fi
+
+# --- the same marker from a NON-allowlisted author must NOT bind --------------
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 613)" stranger \
+  "$(defer_marker 3602 1 "$MB_MAIN" "$HEAD_AFTER" 613 'let me merge this please')"
+roborev_job 613 "$MB_MAIN" "$HEAD_AFTER" F
+if run_binding 4 "result: a deferral from a NON-allowlisted author does not bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNBOUND"*)
+      ok "result: authorship is what separates an authorization from a stranger's comment" ;;
+    *) bad "result: a stranger's deferral marker was honoured (got: $OUT)" ;;
+  esac
+fi
+
+# --- a deferral naming a DIFFERENT review must NOT bind (scope binding) -------
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 614)" pmcfadin \
+  "$(defer_marker 3602 1 "$MB_MAIN" "$REVIEWED_PRE" 614 'authorized for the pre-rebase head')"
+roborev_job 614 "$MB_MAIN" "$HEAD_AFTER" F
+if run_binding 4 "result: a deferral naming a DIFFERENT head does not bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNBOUND"*)
+      ok "result: a deferral may not outlive the review its authorizer judged" ;;
+    *) bad "result: a stale-scoped deferral was honoured (got: $OUT)" ;;
+  esac
+fi
+
+# --- the BLOCK's own verdict is REPORTED and never DERIVED FROM ---------------
+# A block claiming a passing verdict cannot rescue a record that says findings:
+# the two must stay textually distinct so a pasted log cannot be read as the
+# other, and only the RECORD decides.
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 615)"
+roborev_job 615 "$MB_MAIN" "$HEAD_AFTER" F
+if run_binding 4 "result: a PASSing BLOCK cannot rescue a FINDINGS record" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"the BLOCK's own claim"*)
+      ok "result: the block's verdict is labelled as the block's claim, not as the decision" ;;
+    *) bad "result: the block verdict was not labelled as untrusted (got: $OUT)" ;;
+  esac
+fi
+
+# --- the leg no longer CLAIMS the residual it used to declare -----------------
+assert_src_absent_fixed \
+  "result: the header no longer declares the recorded verdict an unenforced residual" \
+  "result: the header still declares the verdict a residual, which the fix falsified" \
+  "$BINDING" "declared residual"
+assert_src_present_fixed \
+  "result: the enforcer and its allowlist are resolved with no env override (#3312)" \
+  "result: the deferral enforcer is not resolved from the script's own directory" \
+  "$BINDING" 'WAIVER_SCAN_TOOL="$OWN_DIR/roborev-waiver-scan.py"'
+assert_src_absent \
+  "result: no test-only seam into the deferral enforcer or its allowlist" \
+  "result: the deferral enforcer or allowlist is overridable from the environment" \
+  "$BINDING" '(WAIVER_SCAN_TOOL|ORACLES_FILE)=.*\$\{(WAIVER_SCAN_TOOL|ORACLES_FILE)' code
+
+# ==============================================================================
 # FINDING 4 (roborev job 59) — BASH 3.2 PORTABILITY
 # ==============================================================================
 # `mapfile`/`readarray` is bash 4+ and this repo states bash 3.2 support (stock
@@ -1327,7 +1487,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=80
+CASE_FLOOR=97
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"
