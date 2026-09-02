@@ -427,6 +427,37 @@ Three further declared limits of the mechanism itself:
   since the token is what proceeds and `=` is neutralised at the emit boundary. So a sibling stage's `PASS` line (a
   `rust-review` verdict, say) can no longer certify C; what it cannot check is the ISSUE, because the line carries no sha. The
   report path is printed on the success line so a human can see which stage answered.
+- **THE C VERDICT IS RE-VALIDATED INSIDE THE WINDOW IT CERTIFIES (#3751 round 16, V1).** The check
+  ran ONCE, near the top of `premerge-assert.sh`'s merge-point checks — and the base-staleness
+  advisory (bounded at 65s) and the `gh pr view` round trip then ran with NOTHING re-checking it, so
+  a concurrent `review-stage.sh open --force` superseded the validated PASS with a fresh `NOT-RUN`
+  generation and the script still certified. Measured on the shipped artifact with the supersede
+  planted immediately after the single evaluation: `PREMERGE: OK b5f49d60aae4…` at exit 0, while
+  `review-stage.sh verdict` read from the same worktree an instant later reported the FRESH
+  generation. **The remedy was not invented for this**: the identical shape had already been ruled
+  on for the gate's own component-set pre-flight (roborev job 290) — *a check must be INSIDE the
+  window it certifies, not before it and not after the harm* — and its remedy was to **REPEAT the
+  check inside the window while KEEPING the earlier one**, the early call being what stops an
+  uncertifiable run paying for the expensive work at all. Three properties carry beyond this issue.
+  **The repeat RESETS its inputs**: rounds 9 and 10 both fail closed on an empty capture, so
+  resetting is what forces the single observation and the generation binding to be taken *afresh* —
+  a re-validation that left the first capture in place would compare the record against an
+  observation taken BEFORE the window, a different property that reads as satisfied while the second
+  evaluation measured nothing of its own. **A repeat is not a comparison, and only the comparison
+  catches the interesting case**: a supersede to a DIFFERENT generation that ITSELF PASSES at the
+  same head returns an accepting token from an audit this run never validated, so running the check
+  twice certifies it while comparing the two answers refuses it — which is why the pinning test's
+  discriminating case is that one and not the headline `NOT-RUN` one. **And a refusal's own prose may
+  not reproduce the success marker**: this fix's first draft explained itself with the words *"runs
+  immediately before `PREMERGE: OK`"*, so a reader — or a grep — saw the certification token inside a
+  refusal, which is #3312's rule (a diagnostic must not print the marker it describes) one directory
+  over, and it was caught only because the test asserts that NO such line is emitted at all rather
+  than merely checking the exit code. **Residual, DECLARED: two checks cannot both be last.** The C
+  window narrows from "the advisory plus a network round trip" to "a local git measurement plus one
+  `review-stage.sh` read"; it is not CLOSED, because a verdict is a snapshot of a file at a time.
+  Symmetrically the `gh` head/state check is no longer the last thing before the success emit — a
+  trade recorded at the call site, in the direction that makes the removed window two orders of
+  magnitude larger than the added one.
 - **AUTO's ROUTING MEASURE IS ROOT-ANCHORED, AND `diff.relative=false` IS NOT WHAT DOES THAT
   (#3751 round 11, Q1).** The measure is `git diff <merge-base(origin/main, certified)>
   <certified> -- ':(top)openspec/changes/'`. A BARE pathspec is interpreted relative to the

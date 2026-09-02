@@ -235,6 +235,36 @@ directory, and any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUI
   path carrying a foreign nonce
 - **AND** a verdict naming the validated generation still certifies (the positive control)
 
+#### Scenario: the C verdict is re-validated INSIDE the window it certifies
+- **WHEN** the C stage is SUPERSEDED (a concurrent `review-stage.sh open --force`, or a hand edit)
+  AFTER the verdict has been validated and BEFORE `premerge-assert.sh` emits its success verdict —
+  the interval that holds the base-staleness advisory (bounded at 65s) and the `gh pr view` round
+  trip
+- **THEN** `premerge-assert.sh` REFUSES, naming what changed between the two evaluations — a check
+  placed outside the window it certifies can only REPORT the harm, never prevent it (the ruling
+  this repository already applied to the gate's own component-set pre-flight, roborev job 290)
+- **AND** the whole evaluation SHALL be REPEATED immediately before the success emit, AFTER
+  everything that can consume time and BEFORE any output a reader could take as certification
+- **AND** the EARLY evaluation SHALL be RETAINED — it is what stops a run with no C verdict at all
+  from paying for the advisory and a network round trip before being told so, which is the same
+  remedy job 290 applied
+- **AND** the repeat SHALL RESET the captured observation, so the single-observation discipline and
+  the generation binding are taken AFRESH on this window's own capture rather than inherited from
+  one taken before the window
+- **AND** a supersede to a DIFFERENT generation that ITSELF PASSES at the same head SHALL REFUSE
+  too — the comparison, not merely the repeat, is what sees that the audit which answered is not
+  the audit that was validated
+- **AND** a disagreement SHALL NAME THE FIELD that moved, and SHALL NEVER be resolved as a second
+  opinion or last-one-wins
+- **AND** no output a reader takes as certification SHALL be emitted on a refusing run — including
+  inside the refusal's own prose, which may not reproduce the success marker
+- **AND** an UNDISTURBED run still certifies (the positive control — a guard that reds on correct
+  input is the guard agents learn to waive)
+- **AND** the residual SHALL be DECLARED rather than implied: two checks cannot both be last, so
+  the C window is NARROWED (to a local git measurement plus one `review-stage.sh` read) and not
+  closed, and the `gh` head/state check is correspondingly no longer the last thing before the
+  success emit
+
 #### Scenario: a stage record is bound to the commit it was opened at
 - **WHEN** `open` creates or `--force` re-stamps a stage record
 - **THEN** the record carries a `head-sha:` field holding the commit `HEAD` resolved to at that moment

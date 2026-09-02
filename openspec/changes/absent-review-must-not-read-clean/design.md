@@ -419,3 +419,42 @@ reason. Two consequences for this design, both deliberate:
   replaced, and its exit-3-on-omission does not depend on being the only required flag.
 - **One re-certification visit for in-flight lanes**, which is a landing-order decision for the lead, not
   a design constraint discharged here.
+
+## §9 — round 16: two windows, one lesson each
+
+### V1 — a check outside the window it certifies (`premerge-assert.sh`)
+
+`c_evaluate` ran once, near the top of the merge-point checks. Between it and `PREMERGE: OK` sat the
+base-staleness advisory (bounded at 65s) and the `gh pr view` round trip — so a concurrent
+`review-stage.sh open --force` superseded the validated PASS and the script still certified. Measured on
+the shipped artifact with the supersede planted immediately after the single evaluation:
+`PREMERGE: OK b5f49d60aae4…` at exit 0, while `review-stage.sh verdict` read from the same worktree an
+instant later reported the FRESH generation.
+
+**The remedy was not invented here.** This repository had already ruled on exactly this shape, on the
+gate's own component-set pre-flight (roborev job 290): *a check must be INSIDE the window it certifies —
+not before it, not after the harm* — and the remedy applied there was to **REPEAT the check inside the
+window while KEEPING the earlier one**, because the early call is what stops an uncertifiable run doing
+the expensive work at all. That arrangement is followed verbatim rather than replaced by one late check.
+
+Three properties are worth carrying beyond this issue:
+
+- **The repeat RESETS its inputs.** Rounds 9 and 10 both fail closed on an empty capture, so resetting is
+  what forces the single observation and the generation binding to be taken *afresh*. A re-validation that
+  left the first capture in place would compare the record against an observation taken before the window
+  — a different property, which reads as satisfied while the second evaluation measured nothing of its own.
+- **A repeat is not a comparison, and only the comparison catches the interesting case.** A supersede to a
+  DIFFERENT generation that itself PASSES at the same head returns an accepting token from an audit this
+  run never validated. Running the check twice certifies it; comparing the two answers refuses it. The
+  test that pins this is the section's discriminating case, not its headline one.
+- **A refusal's own prose may not reproduce the success marker.** This fix's first draft explained itself
+  with the words *"runs immediately before `PREMERGE: OK`"*, so a reader — or a grep — saw the
+  certification token inside a refusal. That is #3312's rule (a diagnostic must not print the marker it
+  describes) one directory over, and it was caught only because the test asserts that NO such line is
+  emitted at all rather than merely checking the exit code.
+
+**Residual, declared:** two checks cannot both be last. The C window narrows from "the advisory plus a
+network round trip" to "a local git measurement plus one `review-stage.sh` read"; it is not closed,
+because a verdict is a snapshot of a file at a time. Symmetrically, the `gh` head/state check is no longer
+the last thing before the success emit — a trade recorded at the call site, in the direction that makes
+the removed window two orders of magnitude larger than the added one.

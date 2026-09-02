@@ -45,6 +45,13 @@ report?" but "what does the report say?".
   you were re-spawned with. **Since round 10 that is enforced at the merge point, not merely
   wasted effort**: `premerge-assert.sh` requires the verdict it accepts to name the generation it
   validated, so a verdict read from a superseded generation REFUSES the merge outright.
+  **And since round 16 it is re-checked immediately before the merge is armed (#3751 V1):** the
+  whole C evaluation runs TWICE — once early and offline, once after the advisory and the `gh`
+  call — so a stage superseded WHILE you are arming the merge REFUSES, naming what changed. The
+  practical consequence for you: **do not `open --force` a stage while `premerge-assert.sh` is
+  running**, and if it refuses with a `phase: revalidation` line, the stage moved under you — read
+  the verdict again and re-run the assert once the stage is quiescent, rather than re-running it
+  hoping for a different answer.
 
 > **You are also a CONSUMER of this contract.** Before spawning (or requesting the spawn of)
 > any review stage you `open` it, and after the stage you read its `verdict` — see the review-stage

@@ -188,6 +188,24 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   archive-only finalize PR read design-routed and REFUSE for want of a C verdict: a false refusal on
   correct, doctrine-mandated input. A path that is ONLY deleted also contributes nothing to audit,
   since there is no spec delta at the certified tree for C to anchor to; every ADDED or MODIFIED
+  **AND THE WHOLE C CHECK RUNS TWICE, BECAUSE A CHECK MUST BE INSIDE THE WINDOW IT CERTIFIES (#3751
+  round 16).** It was validated ONCE near the top, and then the base-staleness advisory (bounded at
+  65s) and the `gh pr view` round trip ran with NOTHING re-checking it — so a concurrent
+  `review-stage.sh open --force` superseded the validated PASS and the script still certified
+  (measured on the shipped artifact: `PREMERGE: OK b5f49d60aae4...` at exit 0, while
+  `review-stage.sh verdict` read an instant later reported the FRESH generation). The remedy is
+  roborev job 290's, verbatim — the ruling that governs the gate's own component-set pre-flight:
+  **REPEAT the check inside the window and KEEP the earlier one**, the early call being what stops
+  an uncertifiable run paying for the advisory and the network call at all. The repeat **RESETS**
+  its captured observation, so the single-observation and generation bindings are taken AFRESH; a
+  disagreement **REFUSES naming the field that moved**, never last-one-wins. **A repeat is not a
+  comparison, and only the comparison catches the interesting case**: a supersede to a DIFFERENT
+  generation that itself PASSES at the same head returns an accepting token from an audit this run
+  never validated. **And a refusal's own prose may not reproduce the success marker** — the first
+  draft said *"runs immediately before the OK line"*, spelled with the literal token, so a grep saw
+  certification inside a refusal (#3312's rule, one directory over). **Residual, DECLARED: two
+  checks cannot both be last** — the C window narrows to a local measurement and is NOT closed, and
+  the `gh` head/state check is no longer the last thing before the success emit.
   path under a live change still routes to C. A plain LISTING of
   `openspec/changes/` cannot answer it — measured 2026-09-01, `origin/main` carries `archive` plus two
   sibling lanes' in-flight change directories, so every branch would read design-routed and the

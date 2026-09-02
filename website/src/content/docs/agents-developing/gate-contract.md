@@ -139,7 +139,25 @@ carry).
   IDENTITY (#3751 round 10)** — an ABA replacement (A to a foreign generation B while `verdict`
   reads B, then back to A) leaves two identical observations — so the accepted verdict must also
   NAME the validated generation: its `report=` field carries the report nonce, which must equal the
-  `report-nonce:` of that same capture. **And the CAPTURE must not MANUFACTURE the token it validates
+  `report-nonce:` of that same capture.
+  **And the whole C check runs TWICE, because a check must be INSIDE the window it certifies
+  (#3751 round 16)** — the ruling this repository already applied to the gate's own component-set
+  pre-flight (roborev job 290). It ran ONCE, and then the base-staleness advisory (bounded at 65s)
+  and the `gh pr view` round trip ran with nothing re-checking it, so a concurrent
+  `review-stage.sh open --force` superseded the validated PASS and the script still certified
+  (measured on the shipped artifact: exit 0 with the success line printed, while
+  `review-stage.sh verdict` read an instant later reported the FRESH generation). Job 290's remedy
+  is followed verbatim: REPEAT the evaluation inside the window and KEEP the earlier one, the early
+  call being what stops an uncertifiable run paying for the advisory and the network round trip at
+  all. The repeat RESETS its captured observation, so rounds 9 and 10's bindings are taken AFRESH
+  rather than inherited from before the window, and a disagreement REFUSES naming the field that
+  moved — never a second opinion, never last-one-wins. A repeat alone would not be enough: a
+  supersede to a DIFFERENT generation that ITSELF PASSES at the same head returns an accepting
+  token from an audit this run never validated, and only the COMPARISON sees it. Residual,
+  declared: two checks cannot both be last, so the C window is NARROWED (to a local git
+  measurement plus one `review-stage.sh` read) and not closed, and the `gh` head/state check is
+  correspondingly no longer the last thing before the success emit.
+  **And the CAPTURE must not MANUFACTURE the token it validates
   (#3751 round 13)** — a command substitution SILENTLY DISCARDS NUL bytes, and gawk passes a NUL
   through a field, so a `--c-verdict` file whose token was `PA<NUL>SS` (a token the closed set must
   refuse, since the match is string equality) arrived as `PASS` and this script reported

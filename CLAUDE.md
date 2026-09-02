@@ -2069,6 +2069,28 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   root-relative (which the `archive/` prefix test and the slug extraction depend on). The
   generalisation: **a pinned config option is a claim about ONE axis, and "cwd cannot change this
   answer" needs the axis your call actually uses** — `base-staleness.sh`'s identical pin IS the
+  **AND THE WHOLE C CHECK RUNS TWICE, BECAUSE A CHECK MUST BE INSIDE THE WINDOW IT CERTIFIES
+  (#3751 round 16).** It was validated ONCE near the top, and then the base-staleness advisory
+  (bounded at 65s) and the `gh pr view` round trip ran with NOTHING re-checking it — so a
+  concurrent `review-stage.sh open --force` superseded the validated PASS and the script still
+  certified (measured on the shipped artifact, supersede planted immediately after the single
+  evaluation: `PREMERGE: OK b5f49d60aae4…` at exit 0, while `review-stage.sh verdict` read an
+  instant later reported the FRESH generation). **The remedy is roborev job 290's, verbatim** — the
+  same ruling that governs the gate's own component-set pre-flight: **REPEAT the check inside the
+  window and KEEP the earlier one**, the early call being what stops an uncertifiable run paying
+  for the advisory and the network call at all. The repeat **RESETS** its captured observation, so
+  the single-observation and generation bindings are taken AFRESH rather than inherited from before
+  the window; a disagreement **REFUSES naming the field that moved**, never a second opinion and
+  never last-one-wins. **A repeat is not a comparison, and only the comparison catches the
+  interesting case**: a supersede to a DIFFERENT generation that itself PASSES at the same head
+  returns an accepting token from an audit this run never validated, which running the check twice
+  would certify. **And a refusal's own prose may not reproduce the success marker** — this fix's
+  first draft said *"runs immediately before `PREMERGE: OK`"*, so a grep saw certification inside a
+  refusal (#3312's rule that a diagnostic must not print the marker it describes), caught only
+  because the test asserts NO such line is emitted at all rather than checking the exit code.
+  **Residual, DECLARED: two checks cannot both be last** — the C window narrows to a local git
+  measurement plus one `review-stage.sh` read and is NOT closed, and the `gh` head/state check is
+  correspondingly no longer the last thing before the success emit.
   whole cwd story there only because that scan passes NO pathspec at all. **Any failure to measure — no git,
   no `origin/main`, the certified commit absent from this checkout — is `UNMEASURED` and is TREATED
   AS REQUIRED**: never derive a pass from the absence of a bad signal. There is deliberately NO

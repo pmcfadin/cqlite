@@ -4813,6 +4813,247 @@ else
   bad "u2/structural: nothing in the source states why an escape is refused while a trailing CR is not"
 fi
 
+# --- 44r: THE C VERDICT MUST BE RE-VALIDATED INSIDE THE WINDOW IT CERTIFIES (round 16, V1) ---
+# THE FINDING (roborev job 393, V1, premerge-assert.sh:2717). `c_evaluate` ran ONCE, and then the
+# base-staleness advisory (bounded at ADVISORY_TIMEOUT_SECS + ADVISORY_KILL_GRACE = 65s) and the
+# `gh pr view` network call happened, and NOTHING re-validated C before `PREMERGE: OK` was emitted.
+# A concurrent `review-stage.sh open --force` landing in that window supersedes the validated PASS
+# with a fresh NOT-RUN generation, and the script still printed `PREMERGE: OK` on the strength of
+# the stale PASS.
+#
+# THIS REPOSITORY ALREADY HAD THE RULING (CLAUDE.md, roborev job 290, on the gate's own
+# component-set pre-flight): a check must be INSIDE the window it certifies — not before it, not
+# after the harm — and the remedy applied there was to REPEAT the check inside the window while
+# KEEPING the earlier one, because the early call is what stops an uncertifiable run from doing the
+# expensive work at all. Both halves are asserted below: the repeat, and the retention.
+#
+# THE INTERLEAVE IS SIMULATED, NOT RACED. One line is injected into a SCRATCH COPY of the assert
+# immediately after its FIRST `c_evaluate`, so the supersede is deterministic, cannot flake, and
+# makes no claim about timing. The ARTIFACT is substituted (#3312's corollary for tests); there is
+# no settable seam. Section 44j's two-point builder cannot express this case — the plant has to
+# land between the two EVALUATIONS, not either side of one callee invocation.
+V1_DIR="$T/v1/flow"
+mkdir -p "$V1_DIR"
+v1_ok=1
+cp "$ASSERT" "$V1_DIR/premerge-assert.sh" 2>/dev/null || v1_ok=0
+cp "$SCRIPT_DIR/../flow/review-stage.sh" "$V1_DIR/review-stage.sh" 2>/dev/null || v1_ok=0
+printf '%s\n' "$NEUTRAL_ADV" >"$V1_DIR/base-staleness.sh" 2>/dev/null || v1_ok=0
+chmod +x "$V1_DIR/base-staleness.sh" 2>/dev/null || true
+V1_REPO=$(c_repo v1 design) || V1_REPO=""
+# v1_restore — back to "opened at HEAD, current report records PASS", re-asserted per case: a case
+# that leaves a superseded generation installed makes the next one refuse for the PREVIOUS case's
+# reason, which is the cross-case leakage section 44j records.
+v1_restore() {
+  [ -n "$V1_REPO" ] || return 1
+  (cd "$V1_REPO" && bash "$V1_DIR/review-stage.sh" open c --issue 3751 \
+    --agent spec-auditor --force >/dev/null 2>&1) || return 1
+  printf 'result: PASS\n\n## Findings\n\nnone.\n' >"$(SR_REPORT "$V1_REPO" 3751 c)" || return 1
+  return 0
+}
+if [ -n "$V1_REPO" ] && [ "$v1_ok" -eq 1 ] && v1_restore; then
+  ok "v1 fixture: a design-routed repository with a PASSING c stage opened at its head was built"
+else
+  bad "v1 fixture: could not build it — every case below would be vacuous"
+  V1_REPO=""
+fi
+# Every injected line travels through ENVIRON, never `awk -v`, which performs ESCAPE PROCESSING on
+# its value (round 7 measured a `\n` in an injected line becoming a real newline).
+# v1_build <dest> <line> — copy the scratch assert with <line> inserted immediately AFTER its
+# first bare `c_evaluate` call, i.e. inside the window the finding is about.
+v1_build() {
+  local dest="$1" post="$2"
+  [ "$v1_ok" -eq 1 ] || return 1
+  V1_POST="$post" LC_ALL=C awk '
+    BEGIN { post = ENVIRON["V1_POST"]; done = 0 }
+    $0 == "c_evaluate" && done == 0 { print $0; print post; done = 1; next }
+    { print }
+  ' "$V1_DIR/premerge-assert.sh" >"$dest" 2>/dev/null || return 1
+  [ -s "$dest" ] || return 1
+  LC_ALL=C grep -q 'V1_SUPERSEDE' "$dest" || return 1
+  return 0
+}
+# v1_run <script> <repo> <want> <desc> — `run_in_repo` against a named scratch assert.
+v1_run() {
+  local script="$1" d="$2" want="$3" desc="$4" sha f
+  sha=$(git -C "$d" rev-parse HEAD 2>/dev/null) || sha=""
+  if [ -z "$sha" ]; then bad "$desc: could not resolve the fixture HEAD"; return 1; fi
+  f="$T/gate-v1-$(basename "$script").txt"
+  emit_summary_block "$FULL_S" "$FULL_E" "-" \
+    "$(printf '%.7s' "$sha")" "$(printf '%.12s' "$sha")" PASS PASS >"$f"
+  OUT=$(cd "$d" && PATH="$BIN:$PATH" MOCK_GH_OUT="$sha OPEN" MOCK_GH_FAIL=0 \
+    bash "$script" 2421 "$sha" "$f" --c-verdict AUTO 2>&1)
+  RC=$?
+  if [ "$RC" -ne "$want" ]; then
+    bad "$desc (exit $RC, wanted $want)"
+    printf '     output: %s\n' "$OUT"
+    return 1
+  fi
+  return 0
+}
+V1_RS="$V1_DIR/review-stage.sh"
+# THE SUPERSEDE, in the two shapes a real one takes. `open --force` re-stamps `head-sha` to THIS
+# worktree's HEAD — which in the fixture IS the certified sha — so neither plant is caught by the
+# head binding: what changes is the GENERATION, which is the property under test.
+V1_SUP_NOTRUN="    bash \"$V1_RS\" open c --issue 3751 --agent spec-auditor --force >/dev/null 2>&1 || true   # V1_SUPERSEDE"
+V1_SUP_PASS="    V1P=\$(bash \"$V1_RS\" open c --issue 3751 --agent spec-auditor --force 2>/dev/null | LC_ALL=C sed -n 2p) && printf 'result: PASS\\n' >\"\$V1P\" || true   # V1_SUPERSEDE"
+
+if [ -n "$V1_REPO" ]; then
+  # (a) THE CONTROL, FIRST AND UNDISTURBED: no plant at all, so the scratch copy must still reach
+  #     `PREMERGE: OK`. A guard that reds on correct input is the guard agents learn to waive, and
+  #     without this case the refusals below are satisfiable by a re-check that refuses always.
+  if v1_restore; then
+    ok "v1/control: the stage was restored to opened-at-HEAD with a PASSING report"
+  else
+    bad "v1/control: the stage could not be restored, so this case starts from an unknown state"
+  fi
+  if v1_run "$V1_DIR/premerge-assert.sh" "$V1_REPO" 0 \
+    "v1/control: an UNDISTURBED run still certifies (the re-check must not red on correct input)"; then
+    case "$OUT" in
+      *"PREMERGE: OK"*) ok "v1/control: and it emits PREMERGE: OK" ;;
+      *) bad "v1/control: must emit PREMERGE: OK (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: C-VERDICT PASS"*) ok "v1/control: and it reports C-VERDICT PASS" ;;
+      *) bad "v1/control: must report C-VERDICT PASS (got: $OUT)" ;;
+    esac
+  fi
+
+  # (b) THE FINDING: the validated PASS is SUPERSEDED by a fresh NOT-RUN generation inside the
+  #     window. Before the fix this exited 0 and printed `PREMERGE: OK` on the strength of a
+  #     verdict that no longer existed.
+  if v1_restore; then
+    ok "v1/notrun: the stage was restored before the case (no leakage from the control)"
+  else
+    bad "v1/notrun: the stage could not be restored, so this case starts from an unknown state"
+  fi
+  if v1_build "$V1_DIR/sup-notrun.sh" "$V1_SUP_NOTRUN"; then
+    ok "v1/notrun: the supersede plant landed in the scratch assert (asserted, not assumed)"
+  else
+    bad "v1/notrun: the plant did NOT land, so this case proves nothing"
+  fi
+  if v1_run "$V1_DIR/sup-notrun.sh" "$V1_REPO" 2 \
+    "v1/notrun: a PASS SUPERSEDED by a fresh NOT-RUN generation mid-window must NOT certify"; then
+    case "$OUT" in
+      *"PREMERGE: NO-C-VERDICT"*) ok "v1/notrun: refused under the NO-C-VERDICT verdict" ;;
+      *) bad "v1/notrun: must refuse with NO-C-VERDICT (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"revalidation"*) ok "v1/notrun: and the refusal names the RE-VALIDATION as the window it was raised in" ;;
+      *) bad "v1/notrun: the refusal must name the re-validation window (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *NOT-RUN*) ok "v1/notrun: and it names the state the stage is now in" ;;
+      *) bad "v1/notrun: the refusal must name the NOT-RUN state (got: $OUT)" ;;
+    esac
+    # THE CERTIFICATION MUST NEVER HAVE BEEN PRINTED. Exit 2 with an `OK` line already on stdout
+    # would be a merge armed by a reader that stopped at the first line.
+    case "$OUT" in
+      *"PREMERGE: OK"*) bad "v1/notrun: PREMERGE: OK was emitted on a refusing run — a reader takes that as certification" ;;
+      *) ok "v1/notrun: and no PREMERGE: OK line was emitted at all" ;;
+    esac
+  fi
+
+  # (c) THE DISCRIMINATION THAT MAKES THIS SECTION MORE THAN "RUN IT TWICE": the supersede installs
+  #     a generation that ITSELF PASSES, at the same head. A second evaluation alone therefore
+  #     returns PASS and would certify; only a COMPARISON against the first observation sees that
+  #     the audit that answered is not the audit that was validated.
+  if v1_restore; then
+    ok "v1/freshpass: the stage was restored before the case (no leakage from (b))"
+  else
+    bad "v1/freshpass: the stage could not be restored, so this case starts from an unknown state"
+  fi
+  if v1_build "$V1_DIR/sup-pass.sh" "$V1_SUP_PASS"; then
+    ok "v1/freshpass: the fresh-PASS supersede plant landed in the scratch assert"
+  else
+    bad "v1/freshpass: the plant did NOT land, so this case proves nothing"
+  fi
+  if v1_run "$V1_DIR/sup-pass.sh" "$V1_REPO" 2 \
+    "v1/freshpass: a DIFFERENT generation that also PASSES must NOT certify either"; then
+    case "$OUT" in
+      *"PREMERGE: NO-C-VERDICT"*) ok "v1/freshpass: refused under the NO-C-VERDICT verdict" ;;
+      *) bad "v1/freshpass: must refuse with NO-C-VERDICT (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"CHANGED between"*) ok "v1/freshpass: the refusal says the audit CHANGED between the two evaluations" ;;
+      *) bad "v1/freshpass: the refusal must say the audit changed between the evaluations (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *report-nonce*) ok "v1/freshpass: and it NAMES the field that changed (the generation), not merely that something did" ;;
+      *) bad "v1/freshpass: the refusal must name the changed field (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: OK"*) bad "v1/freshpass: PREMERGE: OK was emitted on a refusing run" ;;
+      *) ok "v1/freshpass: and no PREMERGE: OK line was emitted" ;;
+    esac
+  fi
+  v1_restore || true
+fi
+
+# (d) STRUCTURAL — THE REPEAT EXISTS, THE EARLY CALL IS KEPT, AND THE ORDER IS THE ONE THE RULING
+#     REQUIRES. Behavioural cases only cover the interleaves someone thought of; these pin the
+#     arrangement, which is the thing job 290's ruling is actually about.
+if LC_ALL=C grep -q '^c_revalidate$' "$ASSERT"; then
+  ok "v1/structural: the C verdict is re-validated by a second, explicit call"
+else
+  bad "v1/structural: no re-validation call survives — the C verdict is validated outside the window it certifies"
+fi
+if [ "$(LC_ALL=C grep -c '^c_evaluate$' "$ASSERT" || true)" -eq 1 ]; then
+  ok "v1/structural: the EARLY evaluation is RETAINED (it fails fast before the advisory and the network call)"
+else
+  bad "v1/structural: the early c_evaluate call is not present exactly once — job 290's remedy keeps it"
+fi
+V1_LN_FIRST="$(LC_ALL=C grep -n '^c_evaluate$' "$ASSERT" | LC_ALL=C head -1 | LC_ALL=C cut -d: -f1)"
+V1_LN_GH="$(LC_ALL=C grep -n 'gh pr view "\$pr"' "$ASSERT" | LC_ALL=C head -1 | LC_ALL=C cut -d: -f1)"
+V1_LN_REVAL="$(LC_ALL=C grep -n '^c_revalidate$' "$ASSERT" | LC_ALL=C head -1 | LC_ALL=C cut -d: -f1)"
+V1_LN_OK="$(LC_ALL=C grep -n "^printf 'PREMERGE: OK" "$ASSERT" | LC_ALL=C head -1 | LC_ALL=C cut -d: -f1)"
+if [ -n "$V1_LN_FIRST" ] && [ -n "$V1_LN_GH" ] && [ -n "$V1_LN_REVAL" ] && [ -n "$V1_LN_OK" ]; then
+  ok "v1/structural: all four ordering anchors were located (the assertion below is not vacuous)"
+  if [ "$V1_LN_FIRST" -lt "$V1_LN_GH" ] && [ "$V1_LN_GH" -lt "$V1_LN_REVAL" ] &&
+    [ "$V1_LN_REVAL" -lt "$V1_LN_OK" ]; then
+    ok "v1/structural: the re-validation sits AFTER the gh call and BEFORE any line a reader takes as certification"
+  else
+    bad "v1/structural: the order is wrong (early=$V1_LN_FIRST gh=$V1_LN_GH reval=$V1_LN_REVAL ok=$V1_LN_OK)"
+  fi
+else
+  bad "v1/structural: an ordering anchor could not be located (early=$V1_LN_FIRST gh=$V1_LN_GH reval=$V1_LN_REVAL ok=$V1_LN_OK)"
+  bad "v1/structural: so the ordering property is UNMEASURED, which is never read as satisfied"
+fi
+# THE SECOND EVALUATION MUST MEASURE, NOT INHERIT. Round 9's byte comparison and round 10's nonce
+# match both fail CLOSED on an empty capture, so a re-validation that left the FIRST observation in
+# place would compare the record against a capture taken before the window — a different property,
+# and one that reads as satisfied while the second evaluation never captured anything.
+V1_FNBODY="$(LC_ALL=C awk '
+  $0 == "c_revalidate() {" { inf = 1 }
+  inf { print }
+  inf && $0 == "}" { exit }
+' "$ASSERT" 2>/dev/null || true)"
+if [ -n "$V1_FNBODY" ]; then
+  ok "v1/structural: the re-validation function body was extracted (the assertion below is not vacuous)"
+else
+  bad "v1/structural: the re-validation function body could not be extracted, so the reset is UNMEASURED"
+fi
+# ASSERTED INSIDE THE FUNCTION, not file-wide: the C_* globals are initialised to "" at the top of
+# the script, so a whole-file grep for the reset PASSES on the pre-fix artifact — measured, it did,
+# while no re-validation existed at all. A structural assert satisfiable by the code it is meant to
+# require is not an assert.
+V1_RESET=0
+for V1_G in C_TOKEN C_TOKEN_REPORT C_STAGE_HEAD C_STAGE_RECORD C_STAGE_NONCE C_STAGE_NONCE_N; do
+  case "$V1_FNBODY" in
+    *"$V1_G="'""'*) V1_RESET=$((V1_RESET + 1)) ;;
+  esac
+done
+if [ "$V1_RESET" -eq 6 ]; then
+  ok "v1/structural: all 6 captured-observation fields are RESET inside the re-validation, so it measures afresh"
+else
+  bad "v1/structural: only $V1_RESET of 6 captured-observation fields are reset inside the re-validation — it inherits the first observation"
+fi
+# AND THE SECOND EVALUATION IS THE SHIPPED ONE, not a re-implementation of the binding: a shortcut
+# past `c_evaluate` would be a second copy of round 3/9/10's asserts and a second place to drift.
+case "$V1_FNBODY" in
+  *"  c_evaluate"*) ok "v1/structural: the re-validation runs the SAME evaluation, not a second implementation of the binding" ;;
+  *) bad "v1/structural: the re-validation does not call c_evaluate — the binding is implemented twice" ;;
+esac
+
 # --- 44h: THE STRUCTURAL EMIT-BOUNDARY GUARD (round 7, L1b) -------------------
 # The mirror of test_review_stage.sh section 18, for this script. See
 # scripts/tests/lib/emit-boundary-scan.sh for why the guard exists (the boundary was bypassed at a
@@ -5344,7 +5585,31 @@ fi
 # shape ACTUALLY disagreed there — `classify_report` reported `unrecognised result token
 # 'PA?[31mSS'` while `_c_verdict_awk` published `PASS` — so reaching TOKEN-REJECTED at both is
 # a consolidation, and the table's floor moves 8 -> 9 with it).
-ASSERT_FLOOR=490
+#
+# ROUND 16 (V1) ADDS 23, ALL HOST-INDEPENDENT (496 -> 519; floor 490 -> 513, the documented
+# 6-assertion host-gated margin PRESERVED UNCHANGED — every added case needs only bash, git,
+# coreutils and awk): section 44r's 23 — the C verdict must be re-validated INSIDE the window it
+# certifies. `c_evaluate` ran ONCE and was then followed by the base-staleness advisory (bounded at
+# 65s) and the `gh pr view` round trip with NOTHING re-checking C before `PREMERGE: OK`, so a
+# concurrent `review-stage.sh open --force` superseded the validated PASS and the script still
+# certified (measured on the shipped artifact with the supersede planted immediately after the
+# single evaluation: `PREMERGE: OK b5f49d60aae4…` at exit 0). The interleave is SIMULATED by ONE
+# line injected after the first evaluation in a scratch copy of the assert. An UNDISTURBED CONTROL
+# first (a guard that reds on correct input is the guard agents learn to waive), then the
+# supersede-to-NOT-RUN case, then the case that makes this a COMPARISON rather than a repeat — a
+# supersede to a DIFFERENT generation that itself PASSES at the same head, which a second
+# evaluation alone would certify — each with per-case RESTOREs, plant-landed assertions, and the
+# requirement that NO `PREMERGE: OK` line is emitted at all on a refusing run (which caught this
+# fix's own first draft: the refusal PROSE carried the literal success marker, so a reader grepping
+# for it saw certification in a refusal — #3312's rule that a diagnostic may not print the token it
+# describes, one directory over). Plus seven STRUCTURAL pins: the re-validation call EXISTS, the
+# EARLY call is RETAINED exactly once (job 290's remedy keeps it), the four-anchor ORDER is derived
+# by line number (early < gh < re-validation < the success emit) with its own not-vacuous
+# assertion, the captured observation is RESET inside the FUNCTION BODY — extracted, not
+# file-wide, because the globals are initialised to "" at the top and a whole-file grep PASSES on
+# the pre-fix artifact — and the second evaluation calls the SHIPPED `c_evaluate` rather than
+# re-implementing the binding.
+ASSERT_FLOOR=513
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

@@ -298,6 +298,29 @@
 #       tokens the closed grammar lets PROCEED, because acceptance is the only thing
 #       that can certify — every other token already refuses, and there
 #       `review-stage.sh`'s own cause is the more precise operator action.
+#   (e) THE WINDOW (#3751 round 16, V1). (a)-(d) all ran ONCE, near the top of the
+#       merge-point checks — and the base-staleness advisory (bounded at 65s) and the
+#       `gh pr view` round trip then ran with NOTHING re-checking C, so a concurrent
+#       `review-stage.sh open --force` superseded the validated PASS and the script
+#       still emitted its success verdict on the strength of it (measured: `PREMERGE:
+#       OK b5f49d60aae4…` at exit 0 with the supersede planted immediately after the
+#       single evaluation). This repository's own ruling covers it — a check must be
+#       INSIDE the window it certifies, not before it and not after the harm (roborev
+#       job 290, on the gate's component-set pre-flight) — and its remedy is followed
+#       verbatim: the whole evaluation is REPEATED immediately before the success
+#       emit, after everything that can consume time, while the EARLY one is KEPT
+#       because it is what stops an uncertifiable run paying for the advisory and the
+#       network call at all. The repeat RESETS the captured observation, so it takes
+#       (c)'s single observation and (d)'s generation binding AFRESH rather than
+#       inheriting a capture from before the window. A disagreement is a REFUSAL
+#       NAMING WHICH FIELD MOVED — never a second opinion, never last-one-wins — and
+#       that comparison is load-bearing rather than decorative: a supersede to a
+#       DIFFERENT generation that itself PASSES at the same head yields an accepting
+#       token from an audit this run never validated, which a bare repeat would
+#       certify. RESIDUAL, DECLARED: two checks cannot both be last, so the C window
+#       is NARROWED (to a local git measurement plus one `review-stage.sh` read) and
+#       not closed, and the `gh` head check is correspondingly no longer the last
+#       thing before the success emit.
 #   WHICH REPORT the record names is NOT this script's question (#3751 round 5 J1,
 #   round 6 K2). The record also carries a `report-nonce:`, and the report path
 #   INCLUDES it (`<kind>.<nonce>.md`; a bare `<kind>.md` only for a record written
@@ -390,6 +413,12 @@ usage() {
   printf '                              report-nonce: cannot be bound and REFUSES (#3751).\n' >&2
   printf '                              The routing measure is ROOT-ANCHORED, so it does\n' >&2
   printf '                              not depend on your working directory (#3751).\n' >&2
+  printf '                              The WHOLE C check runs TWICE: once here, offline, so\n' >&2
+  printf '                              "you have no C verdict" needs no network; and again\n' >&2
+  printf '                              immediately before the success verdict, so the check\n' >&2
+  printf '                              sits INSIDE the window it certifies. A stage\n' >&2
+  printf '                              SUPERSEDED in between — even by a generation that\n' >&2
+  printf '                              itself PASSES — REFUSES, naming what changed (#3751).\n' >&2
   printf '         --c-verdict <path>   a file holding a captured verdict line, i.e.\n' >&2
   printf '                              scripts/flow/review-stage.sh verdict c --issue <N> > <path>\n' >&2
   printf '                              Capture it WHOLE: the stage KIND, every mandatory key\n' >&2
@@ -609,6 +638,12 @@ C_TOKEN_REPORT=""   # the `report=` field, so a human can see WHICH stage answer
 C_SOURCE=""         # how the verdict was obtained
 C_ROUTING=""        # REQUIRED | NOT-APPLICABLE | UNMEASURED
 C_ROUTING_DETAIL=""
+# WHICH OF THE TWO C EVALUATIONS IS RUNNING (#3751 round 16, V1). Empty during the EARLY one and
+# `revalidation` during the one that runs immediately before the success emit, so every refusal the
+# second raises SAYS SO — otherwise a `NOT-RUN` refusal raised after a PASS was already validated
+# reads as "there was never a verdict", which is affirmatively false about the run and hides the
+# fact that the stage MOVED while the merge was being armed.
+C_PHASE=""
 # ONE remedy sentence for every stage-binding refusal (#3751 round 3, G1): each of those
 # refusals has the SAME next action, and six copies of it is six places for it to drift.
 C_REOPEN_REMEDY="Remedy: re-open the stage at THIS commit and re-run C — review-stage.sh open <kind> --issue <N> --agent spec-auditor --force (--force RE-STAMPS head-sha, deliberately unlike spawned-at, and publishes the report under a FRESH NONCE: spawn the auditor with the path that command PRINTS, because the previous file is no longer read) — then read it with: review-stage.sh verdict <kind> --issue <N>"
@@ -647,6 +682,19 @@ refuse_no_c_verdict() {
   printf '  --c-verdict: %s\n' "$(c_safe_display "$c_verdict")" >&2
   printf '  routing: %s%s\n' "$C_ROUTING" \
     "${C_ROUTING_DETAIL:+ ($(c_safe_display "$C_ROUTING_DETAIL"))}" >&2
+  # WHICH WINDOW (#3751 round 16, V1). The C verdict is evaluated TWICE — once early, offline, so
+  # an uncertifiable run never pays for the advisory or the network call, and once immediately
+  # before `PREMERGE: OK` so the check sits INSIDE the window it certifies (roborev job 290). A
+  # refusal from the second one means the stage CHANGED after it was validated, which is a
+  # different operator fact from "there was never a verdict" — so it is named rather than left to
+  # be inferred from the wording. Routed like every other value on this channel, though `C_PHASE`
+  # is a script constant: ONE rule for EVERY value is what stops the next added field forgetting.
+  if [ -n "$C_PHASE" ]; then
+    printf '  phase: %s — this refusal comes from the SECOND evaluation of the audit, the one\n' \
+      "$(c_safe_display "$C_PHASE")" >&2
+    printf '         that runs immediately before this script emits its success verdict. The\n' >&2
+    printf '         FIRST one had already succeeded, so the stage moved between the two.\n' >&2
+  fi
   [ -z "$C_TOKEN" ] || printf '  verdict token: %s\n' "$(c_safe_display "$C_TOKEN")" >&2
   [ -z "$C_TOKEN_LINE" ] || printf '  verdict line: %s\n' "$(c_safe_display "$C_TOKEN_LINE")" >&2
   # EVERY DETAIL LINE TOO, not only the two fields above: several callers INTERPOLATE a value they
@@ -1939,6 +1987,125 @@ c_evaluate() {
   esac
 }
 
+# c_revalidate — THE C VERDICT IS RE-VALIDATED INSIDE THE WINDOW IT CERTIFIES (#3751 round 16, V1).
+#
+# THE DEFECT. `c_evaluate` ran ONCE, near the top of the merge-point checks — and then the
+# base-staleness advisory (bounded at ADVISORY_TIMEOUT_SECS + ADVISORY_KILL_GRACE = 65s) and the
+# `gh pr view` network call happened, and NOTHING re-validated C before `PREMERGE: OK` was emitted.
+# A concurrent `review-stage.sh open --force` landing in that interval supersedes the validated
+# PASS with a fresh NOT-RUN generation, and the script still printed OK on the strength of the
+# stale PASS. Measured on the shipped artifact with the supersede planted immediately after the
+# single evaluation: `PREMERGE: OK b5f49d60aae4…` at exit 0, while `review-stage.sh verdict` read
+# from the same worktree an instant later reported the FRESH generation.
+#
+# THE PRECEDENT IS THIS REPOSITORY'S OWN (CLAUDE.md, roborev job 290, on the gate's component-set
+# pre-flight): a check must be INSIDE the window it certifies — not before it, not after the harm —
+# and the remedy applied there was to REPEAT the check inside the window while KEEPING the earlier
+# one. That arrangement is followed here rather than replaced by one late check: the EARLY call is
+# what stops an uncertifiable run paying for the advisory and the network round trip at all, and
+# "you have no C verdict" must stay reportable offline.
+#
+# IT RE-EVALUATES ON THE SAME SINGLE-OBSERVATION DISCIPLINE, NOT ON A CHEAPER PROXY. The captured
+# observation is RESET first, so the second evaluation CAPTURES the stage record once itself,
+# parses its `head-sha` and `report-nonce` from THAT capture (round 9's N2) and binds the returned
+# verdict to that generation (round 10's P2). Leaving the first capture in place would compare the
+# record against an observation taken BEFORE the window — a different property, which reads as
+# satisfied while the second evaluation measured nothing of its own.
+#
+# A DISAGREEMENT IS A REFUSAL NAMING WHAT CHANGED, never a second opinion and never last-one-wins.
+# Two outcomes are possible and both are covered. The second evaluation can REFUSE on its own terms
+# — the stage is now NOT-RUN, its head-sha no longer binds, its generation is unnameable — and
+# those refusals carry `C_PHASE`, so the block says which of the two windows raised it. Or it can
+# SUCCEED with a DIFFERENT answer, which only a comparison can see: a peer's `open --force`
+# followed by a fresh PASS at the same head yields an ACCEPTING token from an audit that is not the
+# audit this run validated, so running the check twice without comparing would certify it. That
+# case is why this is a comparison and not merely a repeat.
+#
+# WHAT IT DOES NOT CLAIM, stated because the residual is real: TWO CHECKS CANNOT BOTH BE LAST. This
+# narrows the C window from "the advisory plus a network round trip" to "the re-validation itself"
+# — a local git measurement plus one `review-stage.sh` read — and it cannot close it, because a
+# verdict is a snapshot of a file at a time (round 9's own statement about the report). The `gh`
+# head/state check is correspondingly no longer the last thing before OK; that trade is measured
+# and recorded at this function's call site, which is where the ordering decision lives.
+#
+# NOTHING IS PASSED INTO THE SECOND EVALUATION AND NOTHING IS INHERITED BY IT — do not "optimize"
+# it into a cheap re-read of one field. Round 4 (H2) deleted `--report` so no caller can name which
+# file holds a verdict, and a re-validation that took a shortcut past `c_evaluate` would be a
+# SECOND implementation of the whole binding, i.e. a second place for it to drift from the first.
+C_RV_DIFFS=()
+C_RV_N=0
+# c_rv_note <field> <before> <after> — record a disagreement, or nothing. The COUNT is a separate
+# scalar so `${#C_RV_DIFFS[@]}` is never evaluated on an empty array (bash 3.2 under `set -u`).
+c_rv_note() {
+  local name="$1" before="$2" after="$3"
+  if [ "$before" = "$after" ]; then
+    return 0
+  fi
+  C_RV_DIFFS[$C_RV_N]="  $name: was '$before' — is now '$after'"
+  C_RV_N=$((C_RV_N + 1))
+}
+# c_rv_note_flat <text> — a disagreement whose VALUES are not worth rendering (see the record-bytes
+# comparison below).
+c_rv_note_flat() {
+  C_RV_DIFFS[$C_RV_N]="  $1"
+  C_RV_N=$((C_RV_N + 1))
+}
+c_revalidate() {
+  local p_token="$C_TOKEN" p_report="$C_TOKEN_REPORT" p_source="$C_SOURCE"
+  local p_routing="$C_ROUTING" p_detail="$C_ROUTING_DETAIL"
+  local p_head="$C_STAGE_HEAD" p_nonce="$C_STAGE_NONCE" p_record="$C_STAGE_RECORD"
+  C_RV_DIFFS=()
+  C_RV_N=0
+  C_PHASE=revalidation
+  # RESET, so the second evaluation MEASURES rather than inheriting the first's capture. Both
+  # round 9's byte comparison and round 10's nonce match FAIL CLOSED on an empty capture, so this
+  # cannot silently skip them: it forces them to be taken again, on this window's own observation.
+  C_TOKEN=""
+  C_TOKEN_LINE=""
+  C_TOKEN_REPORT=""
+  C_SOURCE=""
+  C_ROUTING=""
+  C_ROUTING_DETAIL=""
+  C_STAGE_HEAD=""
+  C_STAGE_RECORD=""
+  C_STAGE_NONCE=""
+  C_STAGE_NONCE_N=""
+  c_evaluate
+  # COMPARED FIELD BY FIELD, so a refusal NAMES what moved rather than asserting that something
+  # did. `C_TOKEN_LINE` is deliberately NOT compared: it carries `elapsed=`, which legitimately
+  # advances between two reads of ONE stage, and a guard that reds on correct input is the guard
+  # agents learn to waive.
+  c_rv_note 'verdict token' "$p_token" "$C_TOKEN"
+  c_rv_note 'routing' "$p_routing" "$C_ROUTING"
+  c_rv_note 'routing detail' "$p_detail" "$C_ROUTING_DETAIL"
+  c_rv_note 'stage record head-sha' "$p_head" "$C_STAGE_HEAD"
+  c_rv_note 'stage record report-nonce' "$p_nonce" "$C_STAGE_NONCE"
+  c_rv_note 'report (WHICH report answered)' "$p_report" "$C_TOKEN_REPORT"
+  c_rv_note 'source (the provenance the success line prints)' "$p_source" "$C_SOURCE"
+  # THE RECORD'S BYTES, reported as a FACT and not as a value: the whole file on a refusal line
+  # would bury the named fields above, and the two load-bearing fields inside it are compared by
+  # name already. Kept as defence in depth for the same reason round 9 keeps its own comparison —
+  # it catches an edit to `spawned-at`, `agent` or `deadline-secs` under an UNCHANGED nonce, which
+  # none of the named comparisons can see.
+  if [ "$p_record" != "$C_STAGE_RECORD" ]; then
+    c_rv_note_flat "stage record bytes: CHANGED (a field other than the two named above was edited, or the record was replaced)"
+  fi
+  if [ "$C_RV_N" -gt 0 ]; then
+    refuse_no_c_verdict \
+      "The '$C_STAGE_KIND' intent audit CHANGED between the two evaluations of it:" \
+      "${C_RV_DIFFS[@]}" \
+      "The audit was validated, and THEN the base-staleness advisory (up to 65s) and the gh call" \
+      "ran; this is the RE-VALIDATION that runs immediately before the success verdict. A check" \
+      "outside the window it certifies can only REPORT the harm (roborev job 290), so both" \
+      "evaluations" \
+      "must agree: nothing is accepted from the first alone, and a later answer NEVER overrides" \
+      "an earlier one — that would be last-one-wins on a merge gate." \
+      "The ordinary cause is a concurrent 'review-stage.sh open --force' (or a hand edit) landing" \
+      "mid-check. Re-run this assert once the stage is quiescent." \
+      "$C_REOPEN_REMEDY"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # THE BASE-STALENESS ADVISORY (#3650 slice 1) — INFORMATION, NEVER A VERDICT
 # ---------------------------------------------------------------------------
@@ -2714,6 +2881,14 @@ assert_clean_tree "full-gate block" "$full_tsdirty" full "$full_ntsdirty" tree-s
 # verdict" must be reportable without a network round trip. It runs AFTER the
 # gate-of-record half so that a run with no gate at all is still reported as the
 # more fundamental failure first.
+#
+# THIS IS THE FIRST OF TWO EVALUATIONS, AND IT STAYS (#3751 round 16, V1). It is
+# NOT the one that certifies — `c_revalidate` below is, because a check must be
+# inside the window it certifies (roborev job 290) — but it is KEPT, exactly as
+# job 290's own remedy kept the gate's pre-slot component-set pre-flight: it is
+# what stops a run with no C verdict at all from paying for the 65s advisory and
+# a network round trip before being told so. Deleting it would make the common
+# failure the slowest one to report.
 c_evaluate
 
 # ---------------------------------------------------------------------------
@@ -2726,7 +2901,18 @@ c_evaluate
 # a sha that is no longer the PR head, which is precisely the stale-head merge
 # #2456 exists to refuse. The fix is ordering, not a re-check: the advisory is
 # MEASURED here and PRINTED later in its original position, so the gh head/state
-# check remains the LAST thing that happens before OK.
+# check stays as late as it can.
+#
+# IT IS NO LONGER THE LAST THING BEFORE OK, AND THAT TRADE IS DELIBERATE (#3751
+# round 16, V1). The C re-validation now runs after it, because the C verdict was
+# the check sitting OUTSIDE the window it certifies — validated, then 65s of
+# advisory plus a network call, then OK. Two checks cannot both be last, so the
+# question is which residual window is smaller: `c_revalidate` is a LOCAL git
+# measurement plus one `review-stage.sh` read, where the window it removes was the
+# bounded-at-65s advisory plus an unbounded-latency `gh` call. The head-check
+# window therefore widens by a local, sub-second, non-blocking amount and the C
+# window shrinks by two orders of magnitude — net strictly better, and neither
+# window is claimed closed.
 #
 # Capturing changes no output: every line of the report is written to stdout by
 # `print_base_staleness_advisory`, and printing it at the original call site keeps
@@ -2788,6 +2974,12 @@ if [ "$actual" != "$certified" ]; then
   printf '========================================================\n' >&2
   exit 2
 fi
+
+# THE C VERDICT IS RE-VALIDATED HERE, INSIDE THE WINDOW IT CERTIFIES (#3751 round 16, V1).
+# LAST, deliberately: after everything that can consume time (the advisory measurement above, the
+# `gh pr view` round trip) and BEFORE the first byte a reader can take as certification. See
+# `c_revalidate` for the defect, the job-290 precedent it follows, and the residual it declares.
+c_revalidate
 
 printf 'PREMERGE: OK %s\n' "$certified"
 # Scope clause (#3650) — printed on EVERY success so `GATE-OF-RECORD` can never be
