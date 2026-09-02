@@ -219,6 +219,21 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
 - **AND** an uninterrupted `--force` re-open still yields a usable stage that can record a fresh verdict
   (the positive control)
 
+#### Scenario: a report-supplied value cannot carry control characters into an emitted line
+- **WHEN** a report-supplied value — a self-recorded `NOT-RUN` cause, an unrecognised token, or the
+  `report=` field of a captured verdict line — reaches an emitted line of `review-stage.sh` or a
+  diagnostic of `premerge-assert.sh`
+- **THEN** it is flattened at that ONE emit boundary so that no line break and NO non-printable
+  control character survives — the whole C0 range and DEL, not only `\n`/`\r`/`\t` — with the
+  line-breaking whitespace rendered as a space and every other such byte as a VISIBLE placeholder
+- **AND** ordinary punctuation and non-ASCII prose pass through READABLE, because a boundary that
+  mangles legitimate text is one people route around
+- **AND** the boundary is DISPLAY-ONLY: every decision (the token, the exit code, the paths written,
+  the stage-kind comparison) is made on the RAW value before any line is built, so it cannot change
+  a verdict
+- **AND** a comment or claim about that boundary states exactly what it neutralises: asserting more
+  than the mechanism delivers is itself a defect, because it is what stops the next reader checking
+
 #### Scenario: a sibling stage's PASS cannot certify C
 - **WHEN** the verdict line names a stage kind other than `c`, or omits any of
   `elapsed=`/`deadline=`/`agent=`/`report=`, or carries one of them twice

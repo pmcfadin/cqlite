@@ -176,6 +176,20 @@ Three further declared limits of the mechanism itself:
   `stage-record-unreadable` state and STATUS-NOTE (next action: the RECORD, or a fresh `--force`
   open — neither a chmod nor a re-spawn) instead of being mislabelled as self-reported. Eight
   reachable causes now.
+- **A report-supplied value is neutralised at ONE emit boundary, and the boundary now delivers what
+  it claimed (round 5, J3).** The cause, the quoted token and the `report=` field are all DATA on a
+  line whose other fields a consumer scans, so `review-stage.sh` maps them through `one_line` /
+  `field_value` and `premerge-assert.sh` through `c_safe_display`. `one_line` mapped only
+  `\n`/`\r`/`\t` while its comment asserted that "no control character can break the one-line
+  contract", so ESC, BEL, backspace, VT, FF and DEL passed into `verdict`'s line and into the merge
+  point's diagnostics — a report could emit terminal escape sequences. The claim being broader than
+  the mechanism is the defect, independently of what a sequence can do. Now the whole C0 range plus
+  DEL is neutralised: the line-breaking whitespace becomes a space, every other such byte becomes a
+  VISIBLE `?` (escaped rather than dropped, so a reader can see that something unprintable was
+  there), and ordinary punctuation and non-ASCII prose pass through byte-for-byte — pinned by a
+  control case, since a boundary that mangles legitimate text is one people route around. Both
+  boundaries are DISPLAY-ONLY: every decision is made on the RAW value first, so neither can change
+  a verdict.
 - **The deadline is advisory and changes nothing.** A late report is still a report; a stage
   silent inside its deadline is still `NOT-RUN`. Letting a clock decide would add a clock to a
   question already answerable from content, and would fail a slow-but-real review.

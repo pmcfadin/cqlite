@@ -334,15 +334,53 @@ sanitize_field() {
   printf '%s\n' "$s"
 }
 
-# one_line <text> — flatten to a single line for a diagnostic that is INTERPOLATED into an
-# emitted line. Unlike sanitize_field this preserves spaces and punctuation (a cause is
-# prose a human reads), and only guarantees the one property the grammar needs: no control
-# character can break the one-line contract. Reserved characters of the emitted grammar
-# ('(' / ')') are not stripped — the cause is already inside parentheses and a reader takes
-# the LAST ')' — but a newline would produce a second line, which is the property that
-# matters.
+# one_line <text> — flatten to a single line of PRINTABLE text for a diagnostic that is
+# INTERPOLATED into an emitted line. Unlike `sanitize_field` it preserves spaces, punctuation and
+# non-ASCII (a cause is prose a human reads); what it guarantees is exactly two properties:
+#
+#   1. NO LINE BREAK survives — the emitted grammar is one line per record, and a second line
+#      would be read as a second (forged) record;
+#   2. NO NON-PRINTABLE CONTROL CHARACTER survives — the whole C0 range and DEL, not just the
+#      three whitespace ones.
+#
+# (2) IS ROUND 5's J3, AND THE COMMENT IS THE DEFECT IT FIXES. This function used to map only
+# `\n`/`\r`/`\t` (plus deleting NUL) while its comment asserted that "no control character can
+# break the one-line contract" — so ESC, BEL, backspace, VT, FF and DEL passed through into
+# `verdict`'s line and into `premerge-assert.sh`'s diagnostics, where a report-supplied `NOT-RUN`
+# cause could emit terminal escape sequences (clear the screen, reposition the cursor, retitle the
+# window, or overwrite the verdict token that was just printed with backspaces). The CLAIM being
+# broader than the MECHANISM is itself the defect, independently of what an escape sequence can do:
+# a comment that promises more than the code delivers is what stops the next person checking.
+#
+# THREE CLASSES, SPELLED OUT because the mapping is not uniform: the five whitespace controls
+# (`\n` `\r` `\t` `\v` `\f`) become a SPACE and runs are squeezed, since that is what they were
+# for; EVERY OTHER C0 byte plus DEL becomes a VISIBLE `?`; NUL is deleted (bash cannot hold one in
+# a variable, so it can only arrive from a file read, and there is nothing to render).
+#
+# ESCAPED VISIBLY (each such byte becomes `?`), NOT DELETED, and the reason is the same audit-trail one
+# this issue is built on: a diagnostic that silently drops bytes reads as if the agent wrote
+# something it did not, while a run of `?` says "there was something unprintable here". The
+# surrounding prose is untouched, so the readable part of the cause is still readable.
+#
+# DISPLAY-ONLY, which is the whole safety argument (see `field_value` below): every decision — the
+# token, the exit code, the paths written — is made on the RAW value before any line is built, so
+# this can never turn a non-verdict into a verdict.
+#
+# Reserved characters of the emitted grammar ('(' / ')') are deliberately NOT stripped — the cause
+# is already inside parentheses and a reader takes the LAST ')'.
+#
+# `LC_ALL=C` on every stage is load-bearing: BSD/macOS `tr` aborts with "Illegal byte sequence" on
+# non-ASCII input under a UTF-8 locale, and a cause carrying an em dash is a likely input here;
+# under `set -euo pipefail` that would kill the script inside a command substitution and print no
+# verdict line at all. Byte-oriented also means a UTF-8 sequence (continuation bytes 0x80-0xBF)
+# passes through untouched rather than being mangled — asserted by a control case, because a guard
+# that mangles legitimate text is a guard people route around.
 one_line() {
-  printf '%s' "${1:-}" | LC_ALL=C tr -d '\000' | LC_ALL=C tr '\n\r\t' '   ' | LC_ALL=C sed -e 's/  */ /g' -e 's/^ //' -e 's/ $//'
+  printf '%s' "${1:-}" |
+    LC_ALL=C tr -d '\000' |
+    LC_ALL=C tr '\n\r\t\013\014' '     ' |
+    LC_ALL=C tr '\001-\010\016-\037\177' '?' |
+    LC_ALL=C sed -e 's/  */ /g' -e 's/^ //' -e 's/ $//'
 }
 
 # field_value <text> — THE ONE EMIT BOUNDARY for a DATA value interpolated into one of this

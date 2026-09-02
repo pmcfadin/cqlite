@@ -485,17 +485,48 @@ C_ROUTING_DETAIL=""
 # refusals has the SAME next action, and six copies of it is six places for it to drift.
 C_REOPEN_REMEDY="Remedy: re-open the stage at THIS commit and re-run C — review-stage.sh open <kind> --issue <N> --agent spec-auditor --force (--force RE-STAMPS head-sha, deliberately unlike spawned-at, and ADVANCES the report generation: spawn the auditor with the path that command PRINTS, because the previous generation's file is no longer read) — then read it with: review-stage.sh verdict <kind> --issue <N>"
 
+# c_safe_display <text> — THE ONE EMIT BOUNDARY for text this script did not produce (#3751 round
+# 5, J3). The stage verdict line, its token, its `report=` field and its stage KIND all come from a
+# file a DELEGATED AGENT wrote, so they are DATA — and they used to reach stderr and stdout
+# verbatim. `_c_verdict_awk` strips ANSI CSI sequences as parse hygiene (#3400), which is neither
+# complete (a bare ESC, BEL, backspace, VT/FF, DEL or an OSC `ESC ] … BEL` sequence survives it)
+# nor a display guarantee. So every value those two printers render goes through here.
+#
+# Same three classes as `review-stage.sh`'s `one_line`, and the same rendering PER BYTE, so one
+# value cannot read two ways depending on which script printed it: the whitespace controls become a
+# SPACE (this printer puts ONE argument per line, so a smuggled newline would forge a line of the
+# refusal block), every other C0 byte plus DEL becomes a VISIBLE `?`, and NUL is dropped. It does
+# NOT squeeze runs of spaces, which `one_line` does: the detail lines of this block are ALIGNED
+# with leading and internal spaces, and collapsing them would mangle correct output to normalise
+# text nobody reads as a record. The property required here is one line per argument, not a
+# canonical spacing.
+#
+# DISPLAY-ONLY, and that is the whole safety argument: every decision — the token comparison, the
+# stage-kind equality, the field census, the exit code — is made EARLIER, on the RAW value, so this
+# cannot turn a refusal into a pass. `LC_ALL=C` keeps `tr` byte-oriented, so a UTF-8 sequence
+# passes through readable instead of aborting a BSD `tr` mid-pipeline.
+c_safe_display() {
+  printf '%s' "${1:-}" |
+    LC_ALL=C tr -d '\000' |
+    LC_ALL=C tr '\n\r\t\013\014' '     ' |
+    LC_ALL=C tr '\001-\010\016-\037\177' '?'
+}
+
 refuse_no_c_verdict() {
   printf '========================================================\n' >&2
   printf 'PREMERGE: NO-C-VERDICT — REFUSING TO MERGE\n' >&2
   printf '  stage: %s (the C intent audit)\n' "$C_STAGE_KIND" >&2
-  printf '  --c-verdict: %s\n' "$c_verdict" >&2
+  printf '  --c-verdict: %s\n' "$(c_safe_display "$c_verdict")" >&2
   printf '  routing: %s%s\n' "$C_ROUTING" \
-    "${C_ROUTING_DETAIL:+ ($C_ROUTING_DETAIL)}" >&2
-  [ -z "$C_TOKEN" ] || printf '  verdict token: %s\n' "$C_TOKEN" >&2
-  [ -z "$C_TOKEN_LINE" ] || printf '  verdict line: %s\n' "$C_TOKEN_LINE" >&2
+    "${C_ROUTING_DETAIL:+ ($(c_safe_display "$C_ROUTING_DETAIL"))}" >&2
+  [ -z "$C_TOKEN" ] || printf '  verdict token: %s\n' "$(c_safe_display "$C_TOKEN")" >&2
+  [ -z "$C_TOKEN_LINE" ] || printf '  verdict line: %s\n' "$(c_safe_display "$C_TOKEN_LINE")" >&2
+  # EVERY DETAIL LINE TOO, not only the two fields above: several callers INTERPOLATE a value they
+  # read from the verdict stream into their prose (the stage KIND, the value that could not be
+  # parsed), and neutralising the fields while leaving the prose raw is the per-site escaping this
+  # boundary exists to replace — a list to keep complete is a list that goes stale.
   while [ "$#" -gt 0 ]; do
-    printf '  %s\n' "$1" >&2
+    printf '  %s\n' "$(c_safe_display "$1")" >&2
     shift
   done
   printf '  An ABSENT review is not a clean one (#3751). Every measured instance so\n' >&2
@@ -1930,9 +1961,14 @@ fi
 # textually distinct from `PASS` for the same reason the roborev wrapper's
 # `WAIVED` is: nobody grepping the passing token may read a substitute as the real
 # thing.
+# THE SAME EMIT BOUNDARY ON THE SUCCESS PATH (#3751 round 5, J3). `C_TOKEN` and `C_TOKEN_REPORT`
+# are read from a file a delegated agent wrote, and a PASSING run's line is the one that gets
+# pasted into a PR comment — so it is neutralised exactly as the refusal's is. The token has
+# already been compared by string equality against the closed set at this point, so this is
+# display-only and cannot change the verdict.
 printf 'PREMERGE: C-VERDICT %s stage: %s source: %s%s\n' \
-  "$C_TOKEN" "$C_STAGE_KIND" "$C_SOURCE" \
-  "${C_TOKEN_REPORT:+ report: $C_TOKEN_REPORT}"
+  "$(c_safe_display "$C_TOKEN")" "$C_STAGE_KIND" "$C_SOURCE" \
+  "${C_TOKEN_REPORT:+ report: $(c_safe_display "$C_TOKEN_REPORT")}"
 if [ "$C_TOKEN" = AUTHOR-PERFORMED ]; then
   printf 'PREMERGE: C-VERDICT-NOTE the intent audit was performed by the diff'"'"'s AUTHOR, not\n'
   printf 'PREMERGE: C-VERDICT-NOTE independently: an author'"'"'s hand audit is not an independent\n'

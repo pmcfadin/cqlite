@@ -1171,6 +1171,55 @@ rs "$R11C" record-author-performed t2 --issue 810 \
 rc_is 0 "emit-boundary: record-author-performed accepts the stage"
 hasnt "elapsed=999" "emit-boundary: the RECORD-OK line does not carry the reason's injected pair either"
 
+# AND EVERY NON-PRINTABLE CONTROL CHARACTER, NOT JUST THE THREE WHITESPACE ONES (round 5, J3).
+# `one_line` mapped `\n`/`\r`/`\t` and deleted NUL, while its comment asserted that "no control
+# character can break the one-line contract" — so ESC, BEL, backspace, VT, FF and DEL passed
+# through into the verdict line and into `premerge-assert.sh`'s diagnostics, where a
+# report-supplied cause could emit terminal escape sequences. The CLAIM being broader than the
+# MECHANISM is the defect, independently of what a sequence can do.
+#
+# ASSERTED AS A BYTE CENSUS OVER THE WHOLE OUTPUT, not as "does it contain ESC": a case that
+# checked one byte would pass on a fix that handled that byte alone, which is how the original
+# gap survived (`\t` was handled and `\v` was not).
+CTRL_CAUSE="$(printf 'ran out \033[2Jof \007context \010here \177and \013more')"
+printf 'result: NOT-RUN (%s)\n\nsee above.\n' "$CTRL_CAUSE" >"$(REPORT_OF "$R11C" 810 t2)"
+rs "$R11C" verdict t2 --issue 810
+rc_is 5 "emit-boundary/controls: a control-bearing cause is still reported (not refused)"
+CTRL_LEFT="$(printf '%s' "$OUT" | LC_ALL=C tr -dc '\001-\010\013\014\016-\037\177' | LC_ALL=C wc -c | LC_ALL=C tr -d ' ')"
+if [ "$CTRL_LEFT" = "0" ]; then
+  ok "emit-boundary/controls: NO C0 or DEL byte survives into the verdict line (ESC, BEL, backspace, VT and DEL all planted)"
+else
+  bad "emit-boundary/controls: $CTRL_LEFT control byte(s) survived into the verdict line (out: $(printf '%s' "$OUT" | LC_ALL=C tr -d '\001-\010\013\014\016-\037\177'))"
+fi
+N_LINES="$(printf '%s\n' "$OUT" | LC_ALL=C grep -c . || true)"
+if [ "$N_LINES" = "1" ]; then
+  ok "emit-boundary/controls: and the verdict is still EXACTLY ONE line"
+else
+  bad "emit-boundary/controls: the verdict became $N_LINES lines"
+fi
+has "ran out" "emit-boundary/controls: the readable prose either side of a control byte is PRESERVED"
+has "and" "emit-boundary/controls: including the text after the DEL byte, so the cause is not truncated at the first control"
+rs "$R11C" status t2 --issue 810
+STATUS_CTRL="$(printf '%s' "$OUT" | LC_ALL=C tr -dc '\001-\010\013\014\016-\037\177' | LC_ALL=C wc -c | LC_ALL=C tr -d ' ')"
+if [ "$STATUS_CTRL" = "0" ]; then
+  ok "emit-boundary/controls: the STATUS-NOTE that passes the agent's own cause through is neutralised too"
+else
+  bad "emit-boundary/controls: $STATUS_CTRL control byte(s) reached the STATUS output"
+fi
+
+# CONTROL: ORDINARY PUNCTUATION AND NON-ASCII PROSE PASS THROUGH READABLE. Without this, a fix
+# that dropped everything outside [A-Za-z0-9 ] would satisfy every assertion above — and a guard
+# that mangles legitimate text is a guard people route around. The em dash also pins the
+# `LC_ALL=C` requirement: a locale-sensitive `tr` aborts on it (BSD: "Illegal byte sequence"),
+# which under `set -euo pipefail` would print no verdict line at all.
+printf 'result: NOT-RUN (ran out of context %s 100%% of the "budget", (see notes) [ref: #3751])\n' \
+  "$(printf '\342\200\224')" >"$(REPORT_OF "$R11C" 810 t2)"
+rs "$R11C" verdict t2 --issue 810
+rc_is 5 "emit-boundary/controls CONTROL: an ordinary prose cause is reported"
+has "$(printf '\342\200\224')" "emit-boundary/controls CONTROL: a non-ASCII em dash survives byte-for-byte"
+has '100% of the "budget"' "emit-boundary/controls CONTROL: punctuation and quotes survive verbatim"
+has '[ref: #3751]' "emit-boundary/controls CONTROL: brackets and a colon survive verbatim"
+
 # --- 11b. AN UNREADABLE REPORT IS ITS OWN CAUSE, NOT "report empty" (round 2, B7) ---------
 # The cause list's entire justification is that THE OPERATOR ACTION DIFFERS PER CAUSE: "the file
 # is empty" sends the operator to the agent, "I cannot read the file" sends them to `chmod`. An
@@ -1878,7 +1927,15 @@ has "report=$(REPORT_GEN_OF "$R14" 954 c 0)" "generation/legacy: and names the b
 # extra requirements (git commits in the scratch repo) are the SUBJECT of an asserted precondition
 # rather than a precondition for running, exactly as 11f's are — so the EXACT floor still holds by
 # the two shapes recorded above.
-ASSERT_FLOOR=419
+#
+# ROUND 5's SECOND ITEM (J3) ADDS 10 (419 -> 429): section 11c gains the control-character census
+# over the verdict line and the STATUS-NOTE (ESC, BEL, backspace, VT and DEL all planted, asserted
+# as a BYTE COUNT over the whole output rather than as "does it contain ESC" — a one-byte check
+# would pass on a one-byte fix, which is how the original gap survived) plus the CONTROL that
+# ordinary punctuation and a non-ASCII em dash still pass through readable. Both are
+# host-independent: they need only bash, git and `tr`, and `tr` is a subject of the assertions
+# rather than a precondition for running them.
+ASSERT_FLOOR=429
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

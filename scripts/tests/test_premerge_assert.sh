@@ -2384,6 +2384,56 @@ if run 0 "verdict PASS from an explicit path -> the merge assert PROCEEDS" \
   esac
 fi
 
+# --- 44b(iii): THE EMIT BOUNDARY — a verdict this script did not produce cannot
+#               carry control characters into its output (round 5, J3) ---------
+# The verdict line, its token and its `report=` field come from a file a DELEGATED AGENT wrote, and
+# they are printed verbatim into the refusal block and (on the success path) into a line that gets
+# pasted into a PR comment. `_c_verdict_awk` strips ANSI CSI sequences as PARSE hygiene (#3400),
+# which is neither complete — a bare ESC, BEL, backspace, VT/FF, DEL or an OSC `ESC ] … BEL`
+# sequence survives it — nor a display guarantee. Asserted as a BYTE CENSUS over the whole output,
+# for the same reason as in test_review_stage.sh: a case that checked one byte would pass on a fix
+# that handled that byte alone.
+CV_CTRL_CAUSE="$(printf 'NOT-RUN (ran out \033[2Jof \007context \010here \177and \013more)')"
+if run 2 "controls: a control-bearing verdict cause still REFUSES" \
+  2421 "$CERTIFIED" "$GOOD" --c-verdict "$(c_verdict_file ctrl "$(cv_line "$CV_CTRL_CAUSE")")"; then
+  CV_LEFT="$(printf '%s' "$OUT" | LC_ALL=C tr -dc '\001-\010\013\014\016-\037\177' | LC_ALL=C wc -c | LC_ALL=C tr -d ' ')"
+  if [ "$CV_LEFT" = "0" ]; then
+    ok "controls: NO C0 or DEL byte reaches the refusal block (ESC, BEL, backspace, VT and DEL all planted)"
+  else
+    bad "controls: $CV_LEFT control byte(s) reached the refusal block"
+  fi
+  # BOTH ENDS of the planted cause, so a fix that TRUNCATED at the first control byte fails here.
+  # Note the tail reads `and  more`: the VT became a space and this boundary deliberately does NOT
+  # squeeze runs (the refusal block's own detail lines are aligned with leading spaces), so the
+  # assertion matches the two words separately rather than pinning a space count.
+  case "$OUT" in
+    *"ran out"*) ok "controls: the readable prose BEFORE the first control byte is preserved" ;;
+    *) bad "controls: the cause was dropped rather than neutralised (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"more)"*) ok "controls: and the prose AFTER the last control byte too — not truncated at the first one" ;;
+    *) bad "controls: the cause was truncated at a control byte (got: $OUT)" ;;
+  esac
+fi
+# THE SUCCESS PATH TOO: a PASS line is the one that gets pasted into a PR comment, and its
+# `report=` field is equally agent-written. Neutralised there as well, and the token has already
+# been compared by string equality by then, so this is display-only.
+if run 0 "controls CONTROL: a PASS whose report= carries a control byte still PROCEEDS" \
+  2421 "$CERTIFIED" "$GOOD" --c-verdict "$(c_verdict_file ctrlpass \
+    "$(printf 'REVIEW-STAGE: c RESULT: PASS elapsed=7 deadline=1800 agent=spec-auditor report=%s/plan\007ted.md' "$T")")"; then
+  CV_LEFT2="$(printf '%s' "$OUT" | LC_ALL=C tr -dc '\001-\010\013\014\016-\037\177' | LC_ALL=C wc -c | LC_ALL=C tr -d ' ')"
+  if [ "$CV_LEFT2" = "0" ]; then
+    ok "controls: no control byte reaches the PREMERGE: C-VERDICT success line either"
+  else
+    bad "controls: $CV_LEFT2 control byte(s) reached the success line"
+  fi
+  case "$OUT" in
+    *"PREMERGE: C-VERDICT PASS stage: c source: file"*)
+      ok "controls CONTROL: the neutralisation did not change the verdict — a display boundary decides nothing" ;;
+    *) bad "controls CONTROL: the PASS must still be reported (got: $OUT)" ;;
+  esac
+fi
+
 # --- 44b(ii): the FULL grammar is validated, kind included (F2) --------------
 # A parser that accepted any column-zero `REVIEW-STAGE: ` line containing
 # `RESULT: PASS` would let a SIBLING stage certify C: this very branch's diff
@@ -3351,7 +3401,13 @@ fi
 # `review-stage.sh verdict`, plus its remedy assertion). Both need only git and bash, so the floor
 # moves by the SAME 4 and the derived 6-assertion margin for the ONE host-gated block is PRESERVED
 # UNCHANGED — still deliberately not the exact 311, for the reason recorded above.
-ASSERT_FLOOR=305
+#
+# ROUND 5's SECOND ITEM (J3) ADDS 5 MORE, ALSO HOST-INDEPENDENT (311 -> 316): section 44b(iii)'s
+# control-character census over the refusal block AND over the PASS success line, with the
+# prose-preserved assertions either side of a planted control byte and the CONTROL that the
+# neutralisation did not change the verdict. So the floor moves by the SAME 5 and the derived
+# 6-assertion margin is PRESERVED UNCHANGED.
+ASSERT_FLOOR=310
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"
