@@ -19248,6 +19248,37 @@ _DA_WHY=""
 # _gate_is_nonneg_decimal <s>: true for an unsigned integer or decimal (`40`, `0.5`,
 # `.5`, `40.`). Written with `case` globs, not `[[ =~ ]]`: this script carries no
 # other `=~` and supports the bash 3.2 floor.
+# The most fractional digits a bar may carry, and WHY THIS NUMBER (roborev job 389).
+#
+# THE DEFECT. The grammar accepted arbitrarily precise decimals while the comparison runs in
+# IEEE-754 doubles, so `40.0000000000000000001` converts to exactly 40 and a filesystem with
+# EXACTLY 40 GiB free PASSED a floor set strictly above 40. Measured: that bar times 2^20 is
+# exactly 41943040, and a reading of 41943040 KiB compares `>=` and is ADMITTED. Same
+# direction as the round-5 `%d` saturation — a false admission in a guard.
+#
+# WHY REFUSING EXCESS PRECISION RATHER THAN ROUNDING UP: the loss happens in the TEXT->double
+# conversion, before any arithmetic this code performs, so no amount of conservative rounding
+# afterwards can recover it. Refusing fails closed; rounding would not.
+#
+# WHY 3 AND NOT "EXACTLY REPRESENTABLE": requiring exact representability would refuse `0.1`,
+# a perfectly reasonable floor, i.e. it would red correct input. 3 digits is 0.001 GiB ~= 1
+# MiB, finer than any plausible floor, and it makes the comparison SAFE BY MEASUREMENT: with
+# at most 3 decimals the true product is a multiple of 2^20/1000 = 131072/125, so when it is
+# not an integer its distance from one is a multiple of 1/125 = 8e-3 KiB, while the double
+# error over the whole accepted range is at most ~1.1e-16 * 1.1e12 = 1.2e-4 KiB — 65x smaller.
+# So a rounding error can never carry the product across an integer KiB boundary, which is
+# the only way the comparison against an integer reading could flip.
+_GATE_MAX_BAR_DECIMALS=3
+
+# _gate_bar_decimals <v>: how many digits follow the decimal point (0 when there is none).
+_gate_bar_decimals() {
+  local frac
+  case "$1" in
+    *.*) frac="${1#*.}"; printf '%s' "${#frac}" ;;
+    *)   printf '0' ;;
+  esac
+}
+
 _gate_is_nonneg_decimal() {
   case "$1" in
     ''|.) return 1 ;;
@@ -19278,6 +19309,11 @@ _gate_min_free_gb() {
     printf '%s invalid' "$_GATE_MIN_FREE_GB_DEFAULT"; return 0
   fi
   [ "$neg" -eq 1 ] && { printf '0 clamped'; return 0; }
+  # Precision BEFORE range: an over-precise value cannot be compared correctly at all, so
+  # there is nothing for a range check to be right about.
+  if [ "$(_gate_bar_decimals "$body")" -gt "$_GATE_MAX_BAR_DECIMALS" ]; then
+    printf '%.24s too-precise' "$v"; return 0
+  fi
   # THREE-VALUED, like every other probe here: over the maximum / within it / could not
   # be compared. The third case keeps the operator's pin rather than inventing a verdict
   # — the measurement below then reports `comparison-unavailable`, which is the truth.
@@ -19941,17 +19977,28 @@ _gate_disk_admission_launch() {
   #
   # Its own verdict token, distinct from a below-bar refusal AND from an unwritable one:
   # three different operator actions (free space / fix the directory / fix the variable).
-  if [ "$_DA_BAR_SRC" = out-of-range ]; then
-    _DA_EVALUATIONS=0
-    _DA_LAUNCH_RENDER='NOT MEASURED (the bar was refused before any measurement)'
-    _DA_POST_RENDER='NOT MEASURED (the bar was refused before any measurement)'
-    _DA_MOMENT="at LAUNCH (before any measurement: the BAR itself is unusable)"
-    _DA_SLOT_NOTE="no slot was ever requested; NOTHING was built"
-    _DA_REFUSE_VERDICT="BAR-UNREPRESENTABLE-FAIL-CLOSED (#3755)"
-    _DA_REFUSE_LEAD="CQLITE_GATE_MIN_FREE_GB=${_DA_BAR} exceeds the largest representable bar (${_GATE_MAX_FREE_GB}GiB), so the requested floor cannot be applied"
-    _DA_REFUSE_REMEDY="set CQLITE_GATE_MIN_FREE_GB to a value in 0..${_GATE_MAX_FREE_GB} GiB (it is a FLOOR in GiB, not a byte count), then re-run"
-    _gate_disk_admission_refuse            # exits 1 — never returns
-  fi
+  # TWO UNUSABLE-BAR CAUSES, TWO TOKENS. Out of range and over-precise are different
+  # operator mistakes with different remedies ("that number is too big" vs "that number has
+  # more digits than a floor can carry"), so they are never merged — the same rule the three
+  # measurement refusals follow.
+  case "$_DA_BAR_SRC" in
+    out-of-range|too-precise)
+      _DA_EVALUATIONS=0
+      _DA_LAUNCH_RENDER='NOT MEASURED (the bar was refused before any measurement)'
+      _DA_POST_RENDER='NOT MEASURED (the bar was refused before any measurement)'
+      _DA_MOMENT="at LAUNCH (before any measurement: the BAR itself is unusable)"
+      _DA_SLOT_NOTE="no slot was ever requested; NOTHING was built"
+      if [ "$_DA_BAR_SRC" = out-of-range ]; then
+        _DA_REFUSE_VERDICT="BAR-UNREPRESENTABLE-FAIL-CLOSED (#3755)"
+        _DA_REFUSE_LEAD="CQLITE_GATE_MIN_FREE_GB=${_DA_BAR} exceeds the largest representable bar (${_GATE_MAX_FREE_GB}GiB), so the requested floor cannot be applied"
+        _DA_REFUSE_REMEDY="set CQLITE_GATE_MIN_FREE_GB to a value in 0..${_GATE_MAX_FREE_GB} GiB (it is a FLOOR in GiB, not a byte count), then re-run"
+      else
+        _DA_REFUSE_VERDICT="BAR-TOO-PRECISE-FAIL-CLOSED (#3755)"
+        _DA_REFUSE_LEAD="CQLITE_GATE_MIN_FREE_GB=${_DA_BAR} carries more than ${_GATE_MAX_BAR_DECIMALS} decimal places, which the comparison cannot represent exactly — a rounded floor would ADMIT a filesystem the requested one refuses"
+        _DA_REFUSE_REMEDY="set CQLITE_GATE_MIN_FREE_GB with at most ${_GATE_MAX_BAR_DECIMALS} decimal places (0.001 GiB is ~1 MiB, finer than any real floor), then re-run"
+      fi
+      _gate_disk_admission_refuse ;;       # exits 1 — never returns
+  esac
   _gate_disk_admission_measure
   _DA_EVALUATIONS=1
   _DA_LAUNCH_RENDER=$(_gate_disk_admission_render_state)
@@ -20102,7 +20149,7 @@ _gate_disk_admission_refuse() {
   _da_meta+=("$(accelerators_line)")
   _da_meta+=("$(cpu_budget_line)")
   _da_meta+=("${TREE_META_LINES[@]}")
-  _da_meta+=("hint: bar override CQLITE_GATE_MIN_FREE_GB=<gib> (source token in the line above says whether the value in effect was default|pinned|invalid|clamped; out-of-range REFUSES rather than substituting a bar)")
+  _da_meta+=("hint: bar override CQLITE_GATE_MIN_FREE_GB=<gib> (source token in the line above says whether the value in effect was default|pinned|invalid|clamped; out-of-range and too-precise REFUSE rather than substituting a bar)")
   # Routed through the shared no-clobber terminal contract (#2874), not a bare
   # emit_summary: a refusal is a TERMINAL block and must obey the same live-peer rules
   # as every other one.

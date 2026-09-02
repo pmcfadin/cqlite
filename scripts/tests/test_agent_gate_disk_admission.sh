@@ -108,10 +108,40 @@ fi
 # verdict depends on how it was launched is not a suite, and this one could only be trusted
 # when launched by hand.
 #
+# A DENY-LIST WAS THE WRONG SHAPE, AND CLOSING ONE AXIS AT A TIME PROVED IT (job 389).
+# This suite's isolation has now been incomplete in THREE different directions — the
+# variable list, the inherited pin, and `$HOME`. `unset CARGO_HOME` does NOT isolate cargo
+# configuration: cargo then reads `$HOME/.cargo/config.toml`, so a caller with a legitimate
+# user-level `build.target-dir` made the k-default case resolve elsewhere and this
+# GATE-WIRED suite failed as a function of whose box it ran on. Measured, both directions,
+# on one planted user-level config:
+#   unset CARGO_HOME   -> target_directory = <planted>/user-level     (the defect)
+#   CARGO_HOME=<empty> -> target_directory = <repo>/target            (the fix)
+#
+# EVERYTHING CARGO READS FOR `build.target-dir`, enumerated so the next reader does not have
+# to rediscover it one axis at a time:
+#   1. env `CARGO_TARGET_DIR`               highest precedence          -> CLEARED below
+#   2. env `CARGO_BUILD_TARGET_DIR`         the `[build]` env spelling  -> CLEARED below
+#   3. `$CARGO_HOME/config.toml`            CARGO_HOME defaults to `$HOME/.cargo`, which is
+#                                           why UNSETTING it isolates nothing -> SET below
+#                                           to a fresh EMPTY dir, which cargo reads and
+#                                           finds nothing in (no `$HOME` fallback happens
+#                                           when CARGO_HOME is set)
+#   4. `.cargo/config.toml` in the cwd and EVERY ANCESTOR — NOT isolable without moving the
+#                                           cwd, which the gate requires to be the repo. So
+#                                           k-default does not HARD-CODE `<repo>/target`; it
+#                                           asks cargo, under this same environment, what it
+#                                           would resolve unaided. An ancestor config then
+#                                           moves BOTH the expectation and the gate, and the
+#                                           case still asserts the property that matters:
+#                                           the gate resolves what CARGO resolves.
+# The positive construction is the durable form; the cleared list below is the part of it
+# that has to be expressed as absence.
+#
 # WHAT IS CLEARED, and why each is here — a case's MEANING depends on it:
-#   CARGO_TARGET_DIR / CARGO_BUILD_TARGET_DIR / CARGO_HOME
-#       the three inputs to cargo's target-dir precedence; cases K/K-low/M/U are ABOUT that
-#       precedence, so an inherited one decides the answer before the case does
+#   CARGO_TARGET_DIR / CARGO_BUILD_TARGET_DIR
+#       two of the three inputs to cargo's target-dir precedence; cases K/K-low/M/U are
+#       ABOUT that precedence, so an inherited one decides the answer before the case does
 #   CQLITE_GATE_MIN_FREE_GB
 #       the bar's source token is decided from whether it is SET
 #   CQLITE_GATE_DISABLE_CAP
@@ -127,6 +157,11 @@ fi
 #                              be a top-level gate, which is a lie in the artifact
 #   AGENT_GATE_FM_DIR          the feature-matrix sidecar dir; no assertion here depends on
 #                              it, and it is the parent's business
+#   CARGO_HOME                 deliberately NOT in the cleared list: it is SET (see above),
+#                              and `env -u`-ing it would drop the isolation for every child
+#                              that does not set its own, sending cargo back to
+#                              `$HOME/.cargo`. A case that needs its own still wins, because
+#                              its assignment comes after these flags.
 #   RUSTFLAGS / RUSTC_WRAPPER / CARGO_INCREMENTAL / CARGO_BUILD_JOBS
 #                              build-time only; nothing here builds, and `cargo metadata`
 #                              resolution does not read them
@@ -134,7 +169,7 @@ fi
 # Derived from the gate's own `export` sweep, not guessed: those four plus PATH and
 # CQLITE_DATASETS_ROOT (which every case that cares passes explicitly) are everything
 # agent-gate.sh exports.
-DA_ISOLATE=(CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_HOME
+DA_ISOLATE=(CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR
             CQLITE_GATE_MIN_FREE_GB CQLITE_GATE_DISABLE_CAP
             AGENT_GATE_ALLOW_MISSING_FIXTURES AGENT_GATE_SUMMARY_FILE)
 # In-process, so the suite's OWN cargo calls (the Case U no-op demonstration) are clean too.
@@ -147,6 +182,16 @@ for _da_v in "${DA_ISOLATE[@]}"; do DA_ENV_U+=(-u "$_da_v"); done
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/gate-disk-adm.XXXXXX")
 cleanup() { kill $(jobs -p) 2>/dev/null; rm -rf "$tmp"; }
 trap cleanup EXIT
+
+# THE POSITIVELY-CONSTRUCTED HALF of the isolation (job 389): a fresh EMPTY cargo home,
+# exported so every child inherits it. Cargo reads `$CARGO_HOME/config.toml`, finds nothing,
+# and does NOT fall back to `$HOME/.cargo` — which is exactly what `unset CARGO_HOME` failed
+# to achieve. Verified not to break the probe: `cargo metadata --no-deps` resolves normally
+# under an empty CARGO_HOME (the lockfile is already present, so no registry is consulted),
+# and `cargo nextest` still resolves through PATH rather than `$CARGO_HOME/bin`.
+DA_CARGO_HOME="$tmp/isolated-cargo-home"
+mkdir -p "$DA_CARGO_HOME"
+export CARGO_HOME="$DA_CARGO_HOME"
 
 # ---------------------------------------------------------------------------
 # The PATH-shim `df`. Each invocation consumes the NEXT line of $DF_SHIM_SCRIPT
@@ -1056,7 +1101,21 @@ esac
 # Every below case carries the PRE-FIX resolver evaluated on the SAME input, so the
 # defect is shown to have been reachable rather than merely fixed.
 # ===========================================================================
-K_PREFIX_DEFAULT=$(cd "$SCRIPT_DIR/../.." && pwd)/target
+# ASKED, NOT HARD-CODED (job 389). This was `<repo>/target`, which is only cargo's answer
+# when no configuration says otherwise — and an ANCESTOR `.cargo/config.toml` is the one
+# config source this suite cannot isolate. Deriving it from cargo under the SAME isolated
+# environment the cases run in makes k-default assert the property that actually matters —
+# the gate resolves what CARGO resolves — instead of an assumption about the box. The
+# CASE-CHOSEN expectations (k-cargo-td / k-build-td / k-config-td) are unaffected and are
+# where a wrong answer is still caught.
+K_PREFIX_DEFAULT=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
+  | python3 -c 'import json,sys;sys.stdout.write(json.load(sys.stdin)["target_directory"])' 2>/dev/null)
+if [ -n "$K_PREFIX_DEFAULT" ]; then
+  ok "target-dir: derived the unconfigured expectation from cargo itself ($K_PREFIX_DEFAULT)"
+else
+  bad "target-dir: could not ask cargo for the unconfigured target dir — the k-default case would assert an assumption"
+  K_PREFIX_DEFAULT=$(cd "$SCRIPT_DIR/../.." && pwd)/target
+fi
 
 # prefix_resolver <env-name> <env-value>: the PRE-FIX subject resolution, reproduced
 # exactly — `${CARGO_TARGET_DIR:-$REPO_ROOT/target}` — under the given single override.
@@ -1937,11 +1996,14 @@ v_run() {
   assert_no_timeout "$label"
   grep_line "$RS_ERR" '^agent-gate: disk-admission: '
 }
-for v_var in CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_HOME; do
-  case "$v_var" in
-    CARGO_HOME) export CARGO_HOME="$v_poison_home" ;;
-    *) export "$v_var=$v_poison_target" ;;
-  esac
+# ONLY THE VARIABLES THAT ARE *CLEARED* BELONG IN THIS LOOP. CARGO_HOME is no longer one
+# of them — it is SET (the positive construction), so poisoning it here would prove nothing
+# about the clearing, and worse, this case USED to pass for the wrong reason: `v_run` passes
+# an explicit CARGO_TARGET_DIR, which is highest precedence and beats any CARGO_HOME config,
+# so the assertion held without the isolation doing anything. The CARGO_HOME/$HOME axis is
+# covered honestly by (b2) above, which sets no CARGO_TARGET_DIR at all.
+for v_var in CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR; do
+  export "$v_var=$v_poison_target"
   v_line=$(v_run "v-${v_var}")
   unset "$v_var"
   case "$v_line" in
@@ -1957,6 +2019,55 @@ for v_var in CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_HOME; do
     bad "env-isolation[$v_var]: df measured '$(df_operands "v-${v_var}" | sed -n 1p)'"
   fi
 done
+
+# (b2) THE $HOME AXIS (job 389). `unset CARGO_HOME` sends cargo to `$HOME/.cargo/config.toml`,
+#      so a caller with a user-level `build.target-dir` made this GATE-WIRED suite fail as a
+#      function of whose box it ran on. Both directions are measured on ONE planted config:
+#      the pre-fix environment must resolve the planted dir (proving the hazard is real and
+#      this fixture reaches it), and the shipped isolated CARGO_HOME must not.
+v_home="$tmp/v-fake-home"; mkdir -p "$v_home/.cargo"
+v_user_target="$tmp/v-user-level-target"
+printf '[build]\ntarget-dir = "%s"\n' "$v_user_target" > "$v_home/.cargo/config.toml"
+v_prefix=$(env -u CARGO_HOME HOME="$v_home" cargo metadata --no-deps --format-version 1 2>/dev/null \
+  | python3 -c 'import json,sys;sys.stdout.write(json.load(sys.stdin)["target_directory"])' 2>/dev/null)
+if [ "$v_prefix" = "$v_user_target" ]; then
+  ok "env-isolation[\$HOME] CONTROL: with CARGO_HOME UNSET, cargo reads \$HOME/.cargo and resolves $v_user_target — the pre-fix hazard, reproduced"
+else
+  bad "env-isolation[\$HOME] CONTROL: the pre-fix environment resolved '${v_prefix:-<none>}', not the planted $v_user_target — this fixture does not reach the defect, so the assertion below proves nothing"
+fi
+# The shipped suite: the same poisoned HOME, but CARGO_HOME isolated. k-default must still
+# agree with cargo's unconfigured answer.
+v_hg_script=$(df_script v-home "$HIGH")
+HOME="$v_home" run_stub_gate v-home "$v_hg_script" \
+  CQLITE_GATE_SLOTS_DIR="$tmp/v-home-slots" CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_STUB_SLEEP=1
+v_home_err=$RS_ERR
+watch_until_exit "$RS_PID" "$RS_RUNDIR" 120
+assert_no_timeout "v-home"
+v_home_line=$(grep_line "$v_home_err" '^agent-gate: disk-admission: ')
+case "$v_home_line" in
+  *"target-dir $K_PREFIX_DEFAULT "*)
+    ok "env-isolation[\$HOME]: a user-level build.target-dir does NOT move the measurement — the isolated CARGO_HOME holds" ;;
+  *"target-dir $v_user_target "*)
+    bad "env-isolation[\$HOME]: the user-level config WON — this suite would red on any box that has one" ;;
+  *) bad "env-isolation[\$HOME]: unexpected rendering: ${v_home_line:-<none>}" ;;
+esac
+if df_operands_all v-home "$K_PREFIX_DEFAULT"; then
+  ok "env-isolation[\$HOME]: and every df call measured that same directory"
+else
+  bad "env-isolation[\$HOME]: df measured '$(df_operands v-home | sed -n 1p)'"
+fi
+
+# (b3) THE POISON CASES MUST NOT DAMAGE THE ISOLATION THEY TEST AGAINST. Found the hard
+#      way: an earlier version of the loop above poisoned CARGO_HOME and then `unset` it,
+#      which destroyed the suite-wide isolated value for EVERY LATER CASE — (b2) then failed
+#      with "the user-level config WON" for a reason that had nothing to do with the shipped
+#      code. So the invariant is asserted here, after the poisoning, rather than assumed.
+if [ "${CARGO_HOME:-}" = "$DA_CARGO_HOME" ]; then
+  ok "env-isolation: the isolated CARGO_HOME survived the poison cases — later cases still run isolated"
+else
+  bad "env-isolation: a poison case left CARGO_HOME='${CARGO_HOME:-<unset>}' instead of $DA_CARGO_HOME — every case after it runs unisolated"
+  export CARGO_HOME="$DA_CARGO_HOME"
+fi
 
 # (c) THE OPERAND GUARD MUST DISCRIMINATE IN BOTH DIRECTIONS *UNDER A PIN*. Reddening a
 #     CORRECT gate is as broken as greening a wrong one, and that is precisely how this
@@ -2015,6 +2126,100 @@ if grep -qx 'RESULT: FAIL' "$w_sum" 2>/dev/null; then
 else
   bad "negative-avail: no exact 'RESULT: FAIL' line"
 fi
+
+# ===========================================================================
+# Case X (roborev job 389, Low): an over-precise decimal bar cannot round into a
+# false admission.
+#
+# The grammar accepted arbitrarily precise decimals while the comparison runs in
+# doubles, so `40.0000000000000000001` converted to exactly 40 and a filesystem
+# with EXACTLY 40 GiB free PASSED a floor set strictly above 40 — same direction
+# as the round-5 %d saturation. Refused rather than rounded, because the loss
+# happens in the TEXT->double conversion, before any arithmetic this code does.
+# ===========================================================================
+X_EXACT_40_KIB=41943040        # exactly 40 GiB, the reading that must be refused
+X_OVERPRECISE=40.0000000000000000001
+
+# THE POSITIVE CONTROL: the shipped comparator, on the raw value, admits it. This is the
+# defect itself — the comparison cannot see the difference, which is why the BAR is refused
+# upstream instead.
+if awk -v k="$X_EXACT_40_KIB" -v g="$X_OVERPRECISE" 'BEGIN { exit ((k+0) >= (g*1048576)) ? 0 : 1 }'; then
+  ok "bar-precision CONTROL: the float comparison ADMITS exactly 40GiB against a >40 bar — the defect is real and lives in the text->double conversion"
+else
+  bad "bar-precision CONTROL: the comparison already refused $X_OVERPRECISE; this case does not demonstrate the defect"
+fi
+
+x_run() {
+  local label="$1" bar="$2" avail="$3"
+  local sc; sc=$(df_script "$label" "$avail")
+  run_stub_gate "$label" "$sc" \
+    CQLITE_GATE_MIN_FREE_GB="$bar" \
+    CQLITE_GATE_SLOTS_DIR="$tmp/$label-slots" CQLITE_GATE_MAX_CONCURRENCY=1 \
+    CQLITE_GATE_STUB_SLEEP=2
+  X_ERR=$RS_ERR
+  watch_until_exit "$RS_PID" "$RS_RUNDIR" 120; X_STATUS=$WX_STATUS; X_MARKERS=$WX_MARKERS
+  assert_no_timeout "$label"
+  X_LINE=$(grep_line "$X_ERR" '^agent-gate: disk-admission: ')
+}
+
+# The over-precise bar REFUSES, before measuring, under its own token.
+x_run x-overprecise "$X_OVERPRECISE" "$X_EXACT_40_KIB"
+if [ "$X_STATUS" -ne 0 ] && [ "$X_MARKERS" -eq 0 ]; then
+  ok "bar-precision: an over-precise bar REFUSES and never begins work"
+else
+  bad "bar-precision: exactly 40GiB was ADMITTED against a >40 bar (exit $X_STATUS, markers $X_MARKERS)"
+fi
+case "$X_LINE" in
+  *'BAR-TOO-PRECISE-FAIL-CLOSED (#3755)'*)
+    ok "bar-precision: its OWN token, distinct from the out-of-range and the measurement refusals" ;;
+  *'BAR-UNREPRESENTABLE'*)
+    bad "bar-precision: reported as out-of-range — a different operator mistake with a different remedy: $X_LINE" ;;
+  *) bad "bar-precision: expected BAR-TOO-PRECISE-FAIL-CLOSED, got: ${X_LINE:-<none>}" ;;
+esac
+if [ "$(df_calls x-overprecise)" -eq 0 ]; then
+  ok "bar-precision: refused BEFORE any df call — an unusable bar needs no measurement"
+else
+  bad "bar-precision: measured $(df_calls x-overprecise) time(s) before refusing on an unusable bar"
+fi
+if grep -q "at most 3 decimal places" "$X_ERR" 2>/dev/null; then
+  ok "bar-precision: the remedy names the accepted precision"
+else
+  bad "bar-precision: no stderr line naming the accepted precision"
+fi
+
+# THE BOUNDARY, both sides — so the bound is pinned rather than merely present.
+x_run x-3dp 40.001 "$X_EXACT_40_KIB"
+if [ "$X_STATUS" -ne 0 ] && [ "$X_MARKERS" -eq 0 ]; then
+  case "$X_LINE" in
+    *'BAR-TOO-PRECISE'*) bad "bar-precision[3dp]: 40.001 was refused as over-precise — the bound is off by one" ;;
+    *'FAIL-CLOSED (#3755)'*'bar 40.001GiB(pinned)'*)
+      ok "bar-precision[3dp]: 3 decimals are ACCEPTED and applied — exactly 40GiB correctly refuses a 40.001 floor" ;;
+    *) bad "bar-precision[3dp]: unexpected rendering: ${X_LINE:-<none>}" ;;
+  esac
+else
+  bad "bar-precision[3dp]: a 40.001 floor ADMITTED exactly 40GiB (exit $X_STATUS)"
+fi
+x_run x-4dp 40.0001 "$X_EXACT_40_KIB"
+case "$X_LINE" in
+  *'BAR-TOO-PRECISE-FAIL-CLOSED (#3755)'*)
+    ok "bar-precision[4dp]: 4 decimals are REFUSED — the bound is exactly where it is documented" ;;
+  *) bad "bar-precision[4dp]: expected a too-precise refusal at 4 decimals, got: ${X_LINE:-<none>}" ;;
+esac
+# NOT AN OVER-CORRECTION: ordinary fractional bars still work. `0.1` in particular is not
+# exactly representable as a double, and refusing it would have reddened correct input —
+# which is why the bound is a digit count and not an exact-representability test.
+x_run x-half 0.5 "$HIGH"
+if [ "$X_STATUS" -eq 0 ] && [ "$X_MARKERS" -ge 1 ]; then
+  ok "bar-precision: a 0.5GiB bar still PASSES a spacious filesystem (the bound does not red correct input)"
+else
+  bad "bar-precision: a legitimate 0.5GiB bar was refused (exit $X_STATUS)"
+fi
+x_run x-tenth 0.1 "$HIGH"
+case "$X_LINE" in
+  *'bar 0.1GiB(pinned)'*)
+    ok "bar-precision: 0.1GiB — not exactly representable as a double — is ACCEPTED, because a digit bound admits it safely" ;;
+  *) bad "bar-precision: 0.1 was not accepted as pinned: ${X_LINE:-<none>}" ;;
+esac
 
 printf '\n%s\n' "-----------------------------------------------"
 printf 'passed: %d  failed: %d  skipped: %d\n' "$PASS" "$FAIL" "$SKIP"
