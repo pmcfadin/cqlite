@@ -5669,7 +5669,7 @@ esac
 fa_bnd_all=$(grep -cE 'length\([A-Za-z_]+\)[[:space:]]*>[[:space:]]*[0-9]+' "$fa_tool")
 fa_bnd_ph=$(grep -E 'length\([A-Za-z_]+\)[[:space:]]*>[[:space:]]*[0-9]+' "$fa_tool" \
               | grep -c 'too long to publish safely')
-if [ "${fa_bnd_all:-0}" -ge 1 ] && [ "$fa_bnd_all" = "$fa_bnd_ph" ]; then
+if [ "${fa_bnd_all:-0}" -ge 2 ] && [ "$fa_bnd_all" = "$fa_bnd_ph" ]; then
   ok "3765-order-no-early-bound: all $fa_bnd_all length bound(s) in the extractor resolve to an affirmative 'too long to publish safely' placeholder — none retains a prefix, whatever its size"
 else
   bad "3765-order-no-early-bound: $fa_bnd_all length bound(s) in the extractor but only $fa_bnd_ph publish a placeholder — a bound that keeps a PREFIX severs the shape every later rule keys on (blocker 8), and a bound must never be able to change a safety verdict"
@@ -6125,6 +6125,49 @@ else
   bad "3765-pub-nextest: expected count=2 with the two test paths, got count='${fa_nx_count:-<none>}' names='$fa_nx_names' — publishing the package would ordinalise every failure in one crate"
 fi
 
+# 55ac. BLOCKER 13 (roborev job 49): AN OVER-LONG GUARD LABEL IS COUNTED, NOT SILENTLY
+#       DROPPED. The B1 rule was
+#           if (length(lbl) <= 70) add("guard", lbl " (" v ")")
+#           next
+#       so a longer label was DISCARDED and the unconditional `next` then stopped every
+#       LATER tier from seeing the line — the field reported `0 RECOGNISED`, which reads as
+#       "scanned, nothing matched", when a guard pattern HAD matched. That is this issue's
+#       own rule violated: an absence must be a MEASUREMENT, never a silence. The cutoff was
+#       undocumented too; it is now derived (the widest guard label this repo emits is
+#       `cli-tests Pass 1 (default)` at 26 chars, and the B1 shape is broad enough that a
+#       whole SENTENCE can match it) and its failure publishes a bounded placeholder.
+fa_lbl80=$(awk 'BEGIN { s = sprintf("%80s", ""); gsub(/ /, "L", s); print s }')
+printf '%s: FAIL — detail\n' "$fa_lbl80" > "$fa_pubdir/longlabel.log"
+fa_ll=$(bash "$fa_tool" "$fa_pubdir/longlabel.log" 10 2>/dev/null)
+fa_ll_count=$(printf '%s\n' "$fa_ll" | sed -n 's/^count=//p' | head -1)
+if [ "${fa_ll_count:-0}" = 1 ]; then
+  ok "3765-longlabel-counted: a guard line with an 80-char label is COUNTED (count=1), not discarded"
+else
+  bad "3765-longlabel-counted: expected count=1 for an over-long guard label, got count='${fa_ll_count:-<none>}' — the match is being silently dropped"
+fi
+_fa_run longlabel "fmt:FAIL file-size:PASS clippy:PASS" "fmt=$fa_pubdir/longlabel.log" PASS
+fa_got=$(_fa_line fmt)
+case "$fa_got" in
+  *"0 RECOGNISED"*) bad "3765-longlabel-not-zero: the RENDERED field reads '0 RECOGNISED' for a line a guard recogniser MATCHED ('$fa_got') — 'scanned, nothing matched' is a false statement here, and the worst kind (it is what stops the next person looking)" ;;
+  *) ok "3765-longlabel-not-zero: the field does NOT report 0 RECOGNISED for a matched-but-over-long guard label" ;;
+esac
+case "$fa_got" in
+  *"1 RECOGNISED (guard): <guard label too long to publish safely: 80 chars> (FAIL)"*)
+    ok "3765-longlabel-placeholder: the over-long label publishes a bounded placeholder naming its MEASURED length, with the verdict preserved ($fa_got)" ;;
+  *) bad "3765-longlabel-placeholder: expected the '<guard label too long to publish safely: 80 chars> (FAIL)' placeholder, got '$fa_got'" ;;
+esac
+# THE `next` INTERACTION, which is the half a count-only case cannot see: with the drop in
+# place the guard tier matched NOTHING on this fixture, so the toolchain tier below won and
+# the field named `capitalised-error` — a real identity, from a tier that is not the one that
+# matched. The TIER is therefore the assertion, not merely the non-zero count.
+printf '%s: FAIL — detail\nError: something else entirely\n' "$fa_lbl80" > "$fa_pubdir/longlabel-mixed.log"
+fa_llm_tier=$(bash "$fa_tool" "$fa_pubdir/longlabel-mixed.log" 10 2>/dev/null | sed -n 's/^tier=//p' | head -1)
+if [ "${fa_llm_tier:-}" = guard ]; then
+  ok "3765-longlabel-tier: on a log carrying BOTH an over-long guard label and a toolchain diagnostic, the GUARD tier still wins — the drop no longer hands the field to a lower tier"
+else
+  bad "3765-longlabel-tier: expected tier=guard, got tier='${fa_llm_tier:-<none>}' — the over-long label is being dropped and the unconditional 'next' hands the line to a later tier"
+fi
+
 # 55ad. BLOCKER 12 (roborev job 49): THE DEDUP KEY IS BOUNDED BEFORE IT IS RETAINED. The
 #       full identity used to become an awk associative-array key with the 4096 bound applied
 #       only AFTERWARDS, so many distinct oversized recognised lines could consume unbounded
@@ -6316,7 +6359,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=510
+ASSERT_FLOOR=514
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.

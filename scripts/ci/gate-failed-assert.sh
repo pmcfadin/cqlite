@@ -273,10 +273,18 @@ awk -v max="$max" '
   # a real guard label carries spaces and parentheses (`cli-tests Pass 1 (default)`). `:`
   # and `/` stay OUT, so `https://x: FAIL` publishes a placeholder rather than a URL.
   #
+  # BOUND 70, MEASURED AND NOW DOCUMENTED (blocker 13 — it used to be an undocumented
+  # `<= 70` in the B1 rule whose failure was a SILENT DROP): the widest guard label this
+  # repo emits is `cli-tests Pass 1 (default)` at 26 characters, and the B1 shape
+  # (`<anything>: FAIL`) is broad enough that a whole SENTENCE can match it — 70 is ~2.7x
+  # the widest real label, so a real label is never replaced and a sentence always is. An
+  # over-long label is COUNTED and publishes a placeholder: a match must never be reported
+  # as a non-match.
   function publabel(t) {
     gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
     if (t == "") return "<no guard label in the matched line>"
     if (t ~ /[^A-Za-z0-9 ._()-]/) return "<guard label outside the safe charset>"
+    if (length(t) > 70) return "<guard label too long to publish safely: " length(t) " chars>"
     return t
   }
   # lasttok() — the final whitespace-delimited token (A4: nextest prints `<pkg> <test>`).
@@ -360,7 +368,13 @@ awk -v max="$max" '
       lbl = substr(s, 1, RSTART - 1)
       v = substr(s, RSTART + 2, RLENGTH - 2)
       gsub(/[^A-Za-z-]/, "", v)
-      if (length(lbl) <= 70) add("guard", lbl " (" v ")", publabel(norm(lbl)) " (" v ")", 0)
+      # UNCONDITIONAL. This used to be `if (length(lbl) <= 70) add(...)`, so a longer
+      # label was SILENTLY DROPPED and the unconditional `next` below then stopped every
+      # LATER tier from seeing the line — the field reported `0 RECOGNISED`, which reads as
+      # "scanned, nothing matched", when a guard pattern HAD matched. An absence must be a
+      # MEASUREMENT, never a silence (blocker 13). publabel() turns the bound into an
+      # affirmative placeholder, so the match is always counted and the tier still wins.
+      add("guard", lbl " (" v ")", publabel(norm(lbl)) " (" v ")", 0)
     }
     next
   }
