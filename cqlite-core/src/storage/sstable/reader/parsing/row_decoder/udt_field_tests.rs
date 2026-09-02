@@ -665,4 +665,58 @@ mod tests {
              with a genuine empty instance"
         );
     }
+
+    /// The manual `Frozen` branches must charge the SAME as the consolidated decoder,
+    /// in BOTH directions — this finding was two errors pointing opposite ways.
+    ///
+    /// A manual `Frozen<Udt>` unwrap consumes TWO levels (the `Frozen` and the `Udt`)
+    /// and was charging one, so an over-limit nesting was ACCEPTED. The non-UDT
+    /// frozen fall-through consumes ONE (just the `Frozen`) and was charging two, so
+    /// otherwise-valid values were REJECTED a level early.
+    ///
+    /// IT MUST CALL `parse_inline_udt_value`, NOT `parse_udt_field_value`. A first
+    /// version drove the latter and PASSED with BOTH defects reintroduced, because
+    /// that path takes the consolidated decoder's own `Frozen` arm and never reaches
+    /// the manual branch under test. Verified RED-capable by reverting each charge
+    /// independently. The subject is the manual branch, so the entry point has to be
+    /// the function that owns it.
+    #[test]
+    fn manual_frozen_branches_charge_the_same_as_the_consolidated_decoder() {
+        let p = parser();
+
+        // `outer` has ONE field, typed `Frozen<Udt<inner_u>>` — the manual
+        // `Frozen<Udt>` branch in `udt/inline.rs`.
+        let inner_u = CqlType::Udt(
+            "inner_u".to_string(),
+            vec![("a".to_string(), CqlType::Int)],
+        );
+        let frozen_udt_field = vec![("f".to_string(), CqlType::Frozen(Box::new(inner_u)))];
+        // outer payload = [i32 field_len][inner UDT bytes]; inner = one null field.
+        let inner_bytes = (-1i32).to_be_bytes().to_vec();
+        let mut outer_bytes = (inner_bytes.len() as i32).to_be_bytes().to_vec();
+        outer_bytes.extend_from_slice(&inner_bytes);
+
+        assert!(
+            p.parse_inline_udt_value(&outer_bytes, "outer", &frozen_udt_field, MAX_TYPE_NESTING_DEPTH - 3)
+                .is_ok(),
+            "Frozen<Udt> three levels below the budget must decode"
+        );
+        assert!(
+            p.parse_inline_udt_value(&outer_bytes, "outer", &frozen_udt_field, MAX_TYPE_NESTING_DEPTH - 1)
+                .is_err(),
+            "Frozen<Udt> ONE below the budget must be refused: the manual unwrap \
+             consumes TWO levels, so charging one accepts an over-limit nesting"
+        );
+
+        // `Frozen<int>` — the non-UDT fall-through, which consumes only the `Frozen`.
+        let frozen_scalar_field = vec![("f".to_string(), CqlType::Frozen(Box::new(CqlType::Int)))];
+        let mut scalar_bytes = 4i32.to_be_bytes().to_vec();
+        scalar_bytes.extend_from_slice(&7i32.to_be_bytes());
+        assert!(
+            p.parse_inline_udt_value(&scalar_bytes, "outer", &frozen_scalar_field, MAX_TYPE_NESTING_DEPTH - 1)
+                .is_ok(),
+            "Frozen<int> ONE below the budget must decode — charging two levels for a \
+             non-UDT frozen rejects valid values a level early"
+        );
+    }
 }

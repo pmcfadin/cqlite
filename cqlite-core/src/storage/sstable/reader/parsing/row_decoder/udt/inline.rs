@@ -108,22 +108,27 @@ impl V5CompressedLegacyParser {
                     }
                     CqlType::Frozen(inner) => match inner.as_ref() {
                         CqlType::Udt(nested_name, nested_fields) if !nested_fields.is_empty() => {
-                            // Frozen nested UDT - unwrap and parse
+                            // Frozen nested UDT - unwrap and parse. `depth + 2`: this
+                            // manual unwrap consumes BOTH the `Frozen` and the `Udt`,
+                            // which is what the consolidated decoder charges when it
+                            // walks the same shape itself (roborev, #3722).
                             let inner_value = self.parse_inline_udt_value(
                                 field_data,
                                 nested_name,
                                 nested_fields,
-                                depth + 1,
+                                depth + 2,
                             )?;
                             Value::Frozen(Box::new(inner_value))
                         }
                         _ => {
                             // Other frozen types, through THE ONE decoder (#3722).
-                            // `depth + 2`: the `Frozen` and its inner type each consume
-                            // a nesting level, which is what the consolidated decoder
-                            // charges when it walks the same shape itself.
+                            // `depth + 1`, NOT + 2: only the `Frozen` is consumed here.
+                            // The inner type is a NON-UDT handed to the consolidated
+                            // decoder, which charges its own levels. Charging two
+                            // rejected otherwise-valid values one level early, and was
+                            // my own error porting this during the main merge (roborev).
                             let inner_value =
-                                self.parse_udt_field_value(field_data, inner, depth + 2)?;
+                                self.parse_udt_field_value(field_data, inner, depth + 1)?;
                             Value::Frozen(Box::new(inner_value))
                         }
                     },

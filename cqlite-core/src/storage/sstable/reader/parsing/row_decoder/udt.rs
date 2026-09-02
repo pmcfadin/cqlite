@@ -854,6 +854,9 @@ impl V5CompressedLegacyParser {
                         }
                     }
                     CqlType::Frozen(inner) => {
+                        // `depth + 2` at every inner decode below: a manual
+                        // `Frozen<Udt>` unwrap consumes BOTH levels. The merge
+                        // from main reverted this to + 1 (roborev, #3722).
                         // Handle FROZEN<udt_type> - the inner type may be a UDT
                         match inner.as_ref() {
                             CqlType::Custom(nested_type_name) => {
@@ -866,7 +869,7 @@ impl V5CompressedLegacyParser {
                                         field_data,
                                         nested_udt,
                                         registry,
-                                        depth + 1,
+                                        depth + 2,
                                     )?;
                                     Value::Frozen(Box::new(inner_value))
                                 } else {
@@ -882,7 +885,7 @@ impl V5CompressedLegacyParser {
                                         field_data,
                                         nested_udt,
                                         registry,
-                                        depth + 1,
+                                        depth + 2,
                                     )?;
                                     Value::Frozen(Box::new(inner_value))
                                 } else if !inline_fields.is_empty() {
@@ -891,7 +894,7 @@ impl V5CompressedLegacyParser {
                                         field_data,
                                         udt_name,
                                         inline_fields,
-                                        depth + 1,
+                                        depth + 2,
                                     )?;
                                     Value::Frozen(Box::new(inner_value))
                                 } else {
