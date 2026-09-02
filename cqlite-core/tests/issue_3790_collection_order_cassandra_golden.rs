@@ -191,23 +191,70 @@ fn fixture_dir() -> PathBuf {
         )
     });
     let ks = root.join(KEYSPACE);
-    let mut found = None;
-    for entry in std::fs::read_dir(&ks)
+
+    // AMBIGUITY IS A HARD FAILURE, NOT A CHOICE (roborev job 42, findings 1+3).
+    //
+    // This used to take the FIRST prefix-matching directory and `break`, which is
+    // wrong in two reachable ways, and both of them pass silently:
+    //
+    //   1. STALE GENERATION. Regenerating the fixture produces a NEW `<uuid>`
+    //      directory. If the previous one is still committed (the generator's
+    //      printed staging commands used to add the new files without staging the
+    //      old directory's DELETION), the keyspace holds two generations and the
+    //      winner is whatever `read_dir` yields first — i.e. this test would
+    //      validate the CORRECT comparator against a STALE oracle, or vice versa.
+    //   2. SHADOWING. `sstables_root_for_table` searches `$CQLITE_DATASETS_ROOT`
+    //      BEFORE the checkout, so an out-of-tree corpus that happens to carry a
+    //      `test_comparator_order/collection_order-*` would silently replace the
+    //      COMMITTED oracle this test exists to assert against.
+    //
+    // `read_dir` order is filesystem-dependent, so either case is a test that
+    // passes or fails for reasons unrelated to the code under review. We therefore
+    // require EXACTLY ONE candidate carrying BOTH halves of the committed oracle
+    // (the Cassandra-written `*-Data.db` and its `*-Data.db.jsonl` golden), and
+    // panic naming every candidate otherwise. Fail-closed: a fixture we cannot
+    // identify unambiguously is not an oracle.
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(&ks)
         .unwrap_or_else(|e| panic!("read keyspace dir {ks:?}: {e}"))
         .flatten()
-    {
-        let path = entry.path();
-        if path.is_dir()
-            && entry
-                .file_name()
-                .to_str()
-                .is_some_and(|n| n.starts_with(&format!("{TABLE}-")))
-        {
-            found = Some(path);
-            break;
-        }
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&format!("{TABLE}-")))
+        })
+        .filter(|p| {
+            let has = |suffix: &str| {
+                std::fs::read_dir(p).is_ok_and(|rd| {
+                    rd.flatten().any(|e| {
+                        e.file_name()
+                            .to_str()
+                            .is_some_and(|n| n.ends_with(suffix))
+                    })
+                })
+            };
+            has("-Data.db") && has("-Data.db.jsonl")
+        })
+        .collect();
+    candidates.sort();
+
+    match candidates.len() {
+        1 => candidates.remove(0),
+        0 => panic!(
+            "no {TABLE}-<uuid> directory under {ks:?} carries BOTH a *-Data.db and its \
+             *-Data.db.jsonl golden. {KEYSPACE}.{TABLE} is COMMITTED to git and must \
+             resolve in every checkout, unconditionally (#3220: must_run) — {}",
+            describe_search(KEYSPACE, TABLE)
+        ),
+        n => panic!(
+            "AMBIGUOUS fixture: {n} {TABLE}-<uuid> directories under {ks:?} each carry a \
+             *-Data.db + golden, so which one this test asserts against would depend on \
+             filesystem order. Leave exactly ONE generation committed (a regeneration must \
+             stage the previous directory's DELETION, not just add the new files). \
+             Candidates: {candidates:?}"
+        ),
     }
-    found.unwrap_or_else(|| panic!("no {TABLE}-<uuid> directory under {ks:?} (#3220: must_run)"))
 }
 
 // ===========================================================================

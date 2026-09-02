@@ -347,8 +347,22 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   if $ENGINE exec "$CONTAINER_NAME" bash -lc 'tar -C /var/lib/cassandra -cf - data' \
       | tar -C "$TMPDIR_EXPORT" -xf -; then
     if [[ -d "$TMPDIR_EXPORT/data/$KEYSPACE" ]]; then
-      rm -rf "$OUT_DIR/$KEYSPACE"
+      # REPLACE ONLY THE TABLE GENERATIONS, NEVER THE KEYSPACE DIRECTORY
+      # (roborev job 42, finding 2). `rm -rf "$OUT_DIR/$KEYSPACE"` used to be
+      # here, and it deleted the COMMITTED `README.md` beside the fixture --
+      # which is THE ORACLE for this issue (it records the observed on-disk
+      # ordering the tests assert against) -- and never restored it. Scope the
+      # removal to the `<TABLE>-<uuid>/` generations so keyspace-level
+      # documentation survives regeneration.
       mkdir -p "$OUT_DIR/$KEYSPACE"
+      # Nullglob so a first-ever run (no existing generation) is not a literal
+      # "$TABLE-*" pathspec.
+      shopt -s nullglob
+      for _stale in "$OUT_DIR/$KEYSPACE/$TABLE"-*/; do
+        log "removing previous generation $_stale"
+        rm -rf "$_stale"
+      done
+      shopt -u nullglob
       cp -r "$TMPDIR_EXPORT/data/$KEYSPACE/." "$OUT_DIR/$KEYSPACE/"
       log "$KEYSPACE SSTables placed in $OUT_DIR/$KEYSPACE"
     else
@@ -439,6 +453,18 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   #     `Digest.crc32` pathspec matches NOTHING — and `git add` aborts on an
   #     unmatched pathspec, staging NONE of the other sidecars on the same
   #     command line. Hence the leading-`*` globs.
+  # STAGE THE PREVIOUS GENERATION'S DELETION FIRST (roborev job 42, finding 1).
+  # `git add` only ever ADDS. Regeneration produces a NEW `<uuid>` directory, so
+  # adding just the new files leaves the OLD directory still tracked and still
+  # committed -- two generations of the same table in the corpus, after which the
+  # test's fixture lookup would be resolved by filesystem order. `git add -A --`
+  # on the keyspace path stages deletions of tracked files (including the
+  # force-added, otherwise-ignored .db binaries), which is exactly what is needed
+  # and what a bare `git add` cannot do.
+  echo "  # FIRST: stage the removal of any previous generation (git add only ADDS):"
+  echo "  git -C '$REPO_ROOT' add -A -- \\"
+  echo "    '$OUT_DIR'/$KEYSPACE"
+  echo ""
   echo "  # Force-add the .db binaries (gitignored — MUST use -f):"
   echo "  git -C '$REPO_ROOT' add -f \\"
   echo "    '$OUT_DIR'/$KEYSPACE/*/*.db"
