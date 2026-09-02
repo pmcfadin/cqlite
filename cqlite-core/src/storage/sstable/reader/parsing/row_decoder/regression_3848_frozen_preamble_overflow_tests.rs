@@ -30,6 +30,39 @@
 //! overflow the add — so removing the cap would red that test even though the
 //! saturating comparison is still in place.
 //!
+//! ## The third axis: TRUNCATION (roborev job 66 on the round-1 fix)
+//!
+//! The sweep of the same class across the sibling decode sites (commit
+//! `cf09db960`) rewrote their bounds checks into the saturating form but left
+//! `let len = len_raw as usize;` sitting BEFORE the check. `usize` is 32 bits on
+//! `wasm32-unknown-unknown` — a configured target of this workspace — so a
+//! declared length of `1u64 << 32` truncates to `0usize` and a declared
+//! `(1u64 << 32) + 8` truncates to exactly `8usize`: both then SATISFY a
+//! saturating comparison against 8 remaining bytes, and the input is silently
+//! misparsed instead of rejected. That is an ORDERING defect, not an arithmetic
+//! one, so no amount of care in the comparison reaches it.
+//!
+//! 3. **The order** — [`vuint_length_within`] compares the raw `u64` against the
+//!    available byte count widened to `u64` (always lossless) and casts ONLY
+//!    once the value is proven to fit, so the surviving `as usize` is provably
+//!    lossless on every target. [`checked_vuint_length`] adds the canonical
+//!    corruption message, which reports the RAW `u64` rather than its truncated
+//!    form.
+//!
+//! No gate component or CI lane builds a 32-bit target, so a
+//! `#[cfg(target_pointer_width = "32")]` test would execute NOWHERE. These cases
+//! therefore exercise the SHARED GUARD directly with lengths that would truncate
+//! on a 32-bit target, which is target-independent and runs on every lane.
+//!
+//! **Declared limit of the axis-3 cases.** On a 64-bit host `as usize` is the
+//! identity, so these assertions cannot DISTINGUISH the correct ordering from a
+//! reintroduced cast-first one — no test can, without a 32-bit target or a model
+//! of one. What they pin is the guard's CONTRACT (reject rather than narrow, and
+//! name the raw length), and the fact that there is exactly ONE place to inspect
+//! for the ordering is the point of extracting it. Stated here rather than left
+//! to be assumed, because a case that silently covers less than it appears to is
+//! worse than a declared gap.
+//!
 //! ## Dataset independence
 //!
 //! These tests call the associated function DIRECTLY. It needs no
@@ -39,7 +72,7 @@
 //! builds run with `overflow-checks = true`, so a regressed add would abort the
 //! process here rather than silently wrap.
 
-use super::V5CompressedLegacyParser;
+use super::{checked_vuint_length, vuint_length_within, V5CompressedLegacyParser};
 use crate::error::Error;
 use crate::parser::vint::encode_vuint;
 use crate::storage::sstable::reader::parsing::row_decoder::MAX_CELL_VALUE_LENGTH;
@@ -148,4 +181,80 @@ fn valid_preamble_decodes_and_advances_offset() {
         prefix_len + 4,
         "offset advances past the VUInt prefix and the element count"
     );
+}
+
+/// Every length that would TRUNCATE on a 32-bit target, and that would pass a
+/// post-cast availability check there. The guard compares before it converts, so
+/// each one is rejected on every target.
+///
+/// `(1u64 << 32) + 8` is the sharpest case: it narrows to exactly `8usize`, so a
+/// post-cast `len > available` against 8 remaining bytes would be satisfied and
+/// 8 bytes of a claimed 4 GiB run would be decoded as the whole value.
+const TRUNCATING_LENGTHS: [u64; 4] = [1u64 << 32, (1u64 << 32) + 8, u32::MAX as u64 + 1, u64::MAX];
+
+/// Axis 3: the shared guard rejects a length that `as usize` would truncate,
+/// rather than returning a narrowed value the caller would treat as in-bounds.
+#[test]
+fn truncating_vuint_lengths_are_rejected_before_the_usize_cast() {
+    for len_raw in TRUNCATING_LENGTHS {
+        assert_eq!(
+            vuint_length_within(len_raw, 8),
+            None,
+            "length {len_raw} exceeds the 8 available bytes and must be rejected, \
+             not narrowed to a value that fits"
+        );
+    }
+}
+
+/// Axis 3, the message half: the rejection is a NAMED `Error::Corruption` and it
+/// reports the RAW `u64`, so an adversarial prefix is diagnosable in full rather
+/// than in whatever it happened to truncate to.
+#[test]
+fn truncating_vuint_lengths_yield_named_corruption_naming_the_raw_length() {
+    for len_raw in TRUNCATING_LENGTHS {
+        let err = checked_vuint_length(len_raw, 8, "Frozen element", "c", "blob")
+            .expect_err("a length past the available bytes must be rejected");
+        match &err {
+            Error::Corruption(msg) => {
+                assert!(
+                    msg.contains(&format!("need {len_raw} bytes for blob"))
+                        && msg.contains("Frozen element 'c'")
+                        && msg.contains("only 8 available"),
+                    "must name the subject, the RAW length and the available bytes (got {msg:?})"
+                );
+            }
+            other => panic!("expected Error::Corruption, got {other:?}"),
+        }
+    }
+}
+
+/// The guard must not be trivially over-strict: a legitimate length within the
+/// available bytes converts cleanly, including the two boundary cases (an empty
+/// run, and a run that consumes every remaining byte).
+#[test]
+fn vuint_length_guard_accepts_a_legitimate_length() {
+    assert_eq!(vuint_length_within(5, 8), Some(5), "5 of 8 bytes fits");
+    assert_eq!(
+        vuint_length_within(8, 8),
+        Some(8),
+        "exactly the remainder fits"
+    );
+    assert_eq!(
+        vuint_length_within(0, 0),
+        Some(0),
+        "an empty run at the end fits"
+    );
+    assert_eq!(
+        checked_vuint_length(5, 8, "Frozen element", "c", "text")
+            .expect("a length within the available bytes must be accepted"),
+        5
+    );
+}
+
+/// The boundary in the other direction: one byte past the remainder is rejected,
+/// so the accept case above is not passing because the guard accepts everything.
+#[test]
+fn vuint_length_guard_rejects_one_byte_past_the_available_bytes() {
+    assert_eq!(vuint_length_within(9, 8), None, "9 of 8 bytes must not fit");
+    assert_eq!(vuint_length_within(1, 0), None, "no bytes remain");
 }
