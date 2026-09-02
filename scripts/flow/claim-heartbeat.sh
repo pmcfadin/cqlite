@@ -250,7 +250,7 @@
 # SCOPE OF `dead-lanes`: SUPERVISOR FLEETS ONLY — DESCOPED (owner ruling 2026-09-01 on
 # #3548, option C; completes #3393)
 #   The subject set is `refs/lane-claims/<machine>/<lane-id>` plus the legacy
-#   `refs/machine-claims/<machine>`. The only IN-TREE CALLER that writes either is
+#   `refs/machine-claims/<machine>`. The only IN-TREE CALLER that CREATES OR REFRESHES either is
 #   `scripts/local/worker-supervisor.sh` (through `stamp`) — but `stamp` is a PUBLIC
 #   subcommand and can be invoked directly, so a manually stamped fleet legitimately
 #   carries refs; the legacy namespace has no current writer at all. EXIT 1 MEANS "NOTHING WAS

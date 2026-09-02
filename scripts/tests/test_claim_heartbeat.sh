@@ -3060,7 +3060,7 @@ require_help_phrase() {  # <the guarantee this phrase carries> <the COMPLETE phr
 require_help_phrase "supervisor-fleets-only scope, with the ruling cited" \
   'SUPERVISOR FLEETS ONLY — DESCOPED (owner ruling 2026-09-01 on #3548, option C; completes #3393)'
 require_help_phrase "only-writer relationship" \
-  'The only IN-TREE CALLER that writes either is `scripts/local/worker-supervisor.sh`'
+  'The only IN-TREE CALLER that CREATES OR REFRESHES either is `scripts/local/worker-supervisor.sh`'
 require_help_phrase "exit-1-is-not-a-clean-bill-of-health rule (#3467)" \
   'EXIT 1 MEANS "NOTHING WAS REPORTED", NEVER a clean bill of health'
 require_help_phrase "refs/claims/issue-<N> refusal (transient claiming-shell pid)" \

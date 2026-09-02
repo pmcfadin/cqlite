@@ -872,7 +872,7 @@ machine + heartbeat age (issue #2089). Interpretation:
   `project-board-sync` 30-min cron's `reap-claims` job reaps on the SAME predicate server-side (age >
   4h AND no open PR AND, for a local claim, PID-dead) — so a supervisor that dies overnight gets its
   claim reaped by CI without waiting for a human to run flow-board (issue #2655). **`worker-supervisor.sh`
-  is the only IN-TREE CALLER that writes `refs/lane-claims/*`**, so on this fleet — `/drive-issue` lanes, zero
+  is the only IN-TREE CALLER that CREATES OR REFRESHES `refs/lane-claims/*`**, so on this fleet — `/drive-issue` lanes, zero
   production supervisors — that namespace is EMPTY (measured on all three boxes) and neither the
   `reap-claims` job nor `dead-lanes` has a subject. What IS populated here is the per-issue lock
   `refs/claims/issue-<N>` and the per-MACHINE heartbeat `refs/heartbeats/<machine>`; see *Lane liveness on
@@ -915,7 +915,7 @@ carries at most a one-line summary and a pointer here. Five review rounds on #35
 rather than guarded. Edit the signatures HERE and nowhere else.
 
 Why: `dead-lanes` enumerates `refs/lane-claims/<machine>/<lane-id>` plus the legacy
-`refs/machine-claims/<machine>`, and **the only IN-TREE CALLER that writes either is
+`refs/machine-claims/<machine>`, and **the only IN-TREE CALLER that CREATES OR REFRESHES either is
 `scripts/local/worker-supervisor.sh`**. This fleet runs `/drive-issue` lanes, not supervisors.
 **Measured on 2026-09-01, on all three boxes:** `lane-claims=0 machine-claims=0`, production
 supervisors ZERO, while `claims=6 heartbeats=20` — so the detector had no subject and exited 1.
@@ -923,7 +923,9 @@ supervisors ZERO, while `claims=6 heartbeats=20` — so the detector had no subj
 general:** refs persist after supervisors stop, the legacy per-machine refs are deliberately still
 read so pre-ruling ones drain, and `stamp` is a documented subcommand that can create a lane ref
 directly — so a migrated, previously supervised or manually stamped fleet can legitimately produce
-rows. The operational conclusion holds either way: **exit 1 means "nothing was reported", never a
+rows. The CI reaper (`project-board-sync.yml`, via `claim-heartbeat.sh reap`) also WRITES these
+namespaces — it DELETES stale refs — which is why the precise relationship is "creates or
+refreshes", not "is the only thing that touches them". The operational conclusion holds either way: **exit 1 means "nothing was reported", never a
 clean bill of health.**
 
 The two populated namespaces were **measured** and rejected as substitutes, so do not expect a
