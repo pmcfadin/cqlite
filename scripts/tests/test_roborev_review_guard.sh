@@ -4480,8 +4480,10 @@ STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
   --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
 RC=$?
 assert_verdict 'case (wv31)' FAIL 1
+# The wording is the SHARED helper's since #3759 round 3 — one validated read serves both kinds, so it
+# says "authorization" rather than "waiver". The properties asserted are unchanged.
 assert_says 'case (wv31) an unusable scanner is UNAVAILABLE and fails closed' \
-  '^waiver: UNAVAILABLE \(the structured waiver scanner is unusable'
+  '^waiver: UNAVAILABLE \(the structured authorization scanner is unusable'
 assert_says 'case (wv31) and it says a waiver is never decided from a text stream' \
   'NEVER decided from a flattened text stream'
 # THE LOAD-BEARING CONTROL FOR THE KEYWORD REDACTION'S WORD BOUNDARY (roborev job 230). This cause names
@@ -6127,7 +6129,7 @@ STUB_GH_ISSUE_COMMENTS_GARBAGE='3544'
 run_wrapper "$w_work"
 assert_verdict 'case (mp6/unparseable)' FAIL 1
 assert_says 'case (mp6/unparseable) an unparseable comments payload is its own could-not-check cause' \
-  'NOT read: #3544 \(its comments payload was not a JSON object carrying a comments LIST'
+  'NOT read: #3544 \(refused: the payload was not a JSON object carrying a comments LIST'
 reset_stub
 reset_stub
 mp_waiver_fixture
@@ -6157,7 +6159,7 @@ for _mp6_shape in \
   assert_verdict "case (mp6/relation-shape/${_mp6_shape%%:*})" FAIL 1
   assert_no_marker_form "case (mp6/relation-shape/${_mp6_shape%%:*})"
   assert_says "case (mp6/relation-shape/${_mp6_shape%%:*}) is a could-not-check naming the broken payload" \
-    'the closingIssuesReferences payload was not readable as a JSON object carrying a closingIssuesReferences LIST'
+    'the payload was not a JSON object carrying a closingIssuesReferences LIST'
   assert_lacks "case (mp6/relation-shape/${_mp6_shape%%:*}) and NEVER claims that no linked issue is declared" \
     'no linked issue is declared on this PR'
   reset_stub
@@ -6408,7 +6410,7 @@ for _mp15_shape in \
   assert_verdict "case (mp15/${_mp15_shape%%:*})" FAIL 1
   assert_no_marker_form "case (mp15/${_mp15_shape%%:*})"
   assert_says "case (mp15/${_mp15_shape%%:*}) the thread is could-not-check, naming what was not a comments LIST" \
-    'NOT read: #3544 \(its comments payload was not a JSON object carrying a comments LIST'
+    'NOT read: #3544 \(refused: the payload was not a JSON object carrying a comments LIST'
   assert_lacks "case (mp15/${_mp15_shape%%:*}) and the probe NEVER claims it checked that thread" \
     'checked: no matching marker there either'
   assert_lacks "case (mp15/${_mp15_shape%%:*}) nor does a zero exit from the scanner become a grant" \
@@ -6467,7 +6469,7 @@ MP16SCAN
   assert_verdict "case (mp16/${_mp16_state%%:*})" FAIL 1
   assert_no_marker_form "case (mp16/${_mp16_state%%:*})"
   assert_says "case (mp16/${_mp16_state%%:*}) an unvalidated state does not make a thread checked" \
-    'NOT read: #3544 \(the scanner returned the unrecognised state'
+    'NOT read: #3544 \(refused: the scanner returned the unrecognised state'
   assert_lacks "case (mp16/${_mp16_state%%:*}) and the probe never claims it checked that thread" \
     'checked: no matching marker there either'
   assert_lacks "case (mp16/${_mp16_state%%:*}) nor does an unrecognised state escalate" '^waiver: MISPLACED'
@@ -7407,8 +7409,16 @@ fi
 # divergence in a channel rule is an authorization bypass — which is exactly how the in-band author
 # channel came back once already (#3312 job 26).
 _dfe_bad=""
-grep -qF 'python3 "$WAIVER_SCAN_TOOL" findings-deferral' "$ORACLES" || _dfe_bad="$_dfe_bad deferral-does-not-call-the-one-scanner"
-grep -qF 'python3 "$WAIVER_SCAN_TOOL" prompt-content-absent' "$ORACLES" || _dfe_bad="$_dfe_bad waiver-kind-not-named-explicitly"
+# SINCE #3759 ROUND 3 THE CALL IS ONE HOP FURTHER IN, AND THE PROPERTY IS STRICTLY STRONGER. Both kinds
+# now reach the scanner through the single validated read `roborev_validated_authorization_scan`, so
+# what is asserted is that each kind is named explicitly AT ITS CALL of that one helper — an
+# unambiguous literal, exactly as the direct invocation was — rather than that each lookup spells out
+# its own `python3 "$WAIVER_SCAN_TOOL" <kind>`. The "no second enforcer" half is now enforced by the
+# #3759 chokepoint assert below, which requires EVERY scanner invocation to be inside that helper;
+# before the restructure nothing forbade a third call site anywhere in the file.
+grep -qF 'roborev_validated_authorization_scan findings-deferral' "$ORACLES" || _dfe_bad="$_dfe_bad deferral-does-not-call-the-one-scanner"
+grep -qF 'roborev_validated_authorization_scan prompt-content-absent' "$ORACLES" || _dfe_bad="$_dfe_bad waiver-kind-not-named-explicitly"
+grep -qF 'python3 "$WAIVER_SCAN_TOOL"' "$ORACLES" || _dfe_bad="$_dfe_bad one-scanner-path-not-invoked"
 grep -qF 'roborev-defer: findings' "$SCAN_TOOL" || _dfe_bad="$_dfe_bad marker-form-absent-from-the-scanner"
 # THE MARKER FORM MAY NOT LIVE IN THE SHELL. Executable lines only: the comment blocks in these files
 # describe the mechanism, and scanning prose would make writing it down a violation — the same mistake
@@ -7998,6 +8008,83 @@ fi
 # "simplification" would quietly undo. Neither substitutes for the other — a structural assert cannot
 # see a granting path built some other way, and a behavioural case cannot see a granting path nobody
 # fixtured.
+printf '== structural (#3759 r3): EVERY payload read on the probe path goes through ONE helper ==\n'
+# WHY THIS ASSERT EXISTS RATHER THAN A FOURTH SITE FIX. Three review rounds produced 3, then 1, then 2
+# findings, and EVERY one was the same class — an input reaching a conclusion without an affirmative
+# validation. Round 3's second finding was inside code round 3 had just ADDED while fixing that class.
+# Site fixes provably do not converge here, so the validation was restructured into one chokepoint and
+# this assert is what keeps it one: it makes the NEXT input STRUCTURALLY unable to join the unvalidated
+# set. That is the repo's own "remove the shared channel rather than pick a rarer delimiter", applied
+# to validation.
+#
+# EXECUTABLE LINES ONLY, and EXTRACTED TO A FILE rather than piped into `grep -q` (#3387): the comment
+# blocks in the oracles NAME the rejected shapes and the mechanism, so scanning prose would make
+# writing the reasoning down a violation; and a negated `grep -q` on a pipe reports a non-match on a
+# real match once the writer outruns the 64 KB buffer, which is fail-open for every clause here.
+_chk_bad=""
+_chk_exec="$tmp/chokepoint-oracles-exec.txt"
+grep -v '^[[:space:]]*#' "$ORACLES" >"$_chk_exec" || true
+
+# (1) THE SCANNER IS INVOKED ONLY FROM INSIDE THE ONE VALIDATED READ. Extract that function's body and
+#     require every invocation in the file to be inside it. A count-based assert would pass a second
+#     call site that happened to replace one inside the helper.
+_chk_vscan="$tmp/chokepoint-vscan-body.txt"
+awk '/^roborev_validated_authorization_scan\(\) \{/,/^\}$/' "$ORACLES" >"$_chk_vscan"
+if [ ! -s "$_chk_vscan" ]; then
+  _chk_bad="$_chk_bad validated-read-helper-not-found"
+else
+  _chk_total=$(grep -cF 'python3 "$WAIVER_SCAN_TOOL"' "$_chk_exec" || true)
+  _chk_inside=$(grep -cF 'python3 "$WAIVER_SCAN_TOOL"' "$_chk_vscan" || true)
+  [ "$_chk_total" -gt 0 ] || _chk_bad="$_chk_bad no-scanner-invocation-at-all"
+  [ "$_chk_total" = "$_chk_inside" ] || _chk_bad="$_chk_bad scanner-invoked-outside-the-validated-read($_chk_inside-of-$_chk_total-inside)"
+  # AND THE STATE IS READ ONLY THERE. A caller extracting `state=` itself would be re-deriving the
+  # verdict from raw scanner output, which is the exact collapse the closed-grammar check removes.
+  _chk_state_total=$(grep -cF "sed -n 's/^state=//p'" "$_chk_exec" || true)
+  _chk_state_inside=$(grep -cF "sed -n 's/^state=//p'" "$_chk_vscan" || true)
+  [ "$_chk_state_total" = "$_chk_state_inside" ] || _chk_bad="$_chk_bad scanner-state-extracted-outside-the-validated-read"
+fi
+
+# (2) THE PAYLOAD SHAPE IS JUDGED ONLY INSIDE THE ONE VALIDATOR. The predicates are named individually
+#     because a future edit is far likelier to re-add one of them at a call site than to reimplement
+#     all three.
+_chk_jsonf="$tmp/chokepoint-jsonf-body.txt"
+awk '/^roborev_json_list_field\(\) \{/,/^\}$/' "$ORACLES" >"$_chk_jsonf"
+if [ ! -s "$_chk_jsonf" ]; then
+  _chk_bad="$_chk_bad shape-validator-not-found"
+else
+  for _chk_pred in 'if not isinstance(data, dict):' 'not in data' 'if not isinstance(data[' ; do
+    _chk_pt=$(grep -cF -- "$_chk_pred" "$_chk_exec" || true)
+    _chk_pi=$(grep -cF -- "$_chk_pred" "$_chk_jsonf" || true)
+    [ "$_chk_pt" = "$_chk_pi" ] || _chk_bad="$_chk_bad shape-predicate-outside-the-validator:${_chk_pred}"
+  done
+fi
+
+# (3) BOTH GRANTING LOOKUPS AND THE PROBE GO THROUGH THE HELPER — asserted positively, because
+#     (1) and (2) only forbid a SECOND implementation and would be satisfied by a caller that
+#     validated nothing at all.
+for _chk_caller in 'roborev_validated_authorization_scan prompt-content-absent' \
+                   'roborev_validated_authorization_scan findings-deferral' \
+                   'roborev_validated_authorization_scan "$kind"' \
+                   'roborev_json_list_field "$rel_json" closingIssuesReferences' ; do
+  grep -qF -- "$_chk_caller" "$_chk_exec" || _chk_bad="$_chk_bad caller-not-routed:${_chk_caller%% *}"
+done
+
+# (4) ONE GRAMMAR FOR A GITHUB OWNER OR REPOSITORY NAME. Round 3's second finding was two PARALLEL
+#     identity validations where only one constrained anything, so the character class is defined once
+#     and BOTH the shell's check and the python leg's `ref_repo` consume that one definition. A literal
+#     class re-appearing in the executable text is the drift this forbids.
+grep -qF "ROBOREV_GH_NAME_RE='[A-Za-z0-9._-]+'" "$_chk_exec" || _chk_bad="$_chk_bad name-grammar-not-defined-once"
+grep -qF 'PROBE_NAME_RE="$ROBOREV_GH_NAME_RE"' "$_chk_exec" || _chk_bad="$_chk_bad name-grammar-not-passed-to-the-python-leg"
+if [ "$(grep -cF '[A-Za-z0-9._-]+' "$_chk_exec" || true)" != "1" ]; then
+  _chk_bad="$_chk_bad name-grammar-spelled-more-than-once"
+fi
+
+if [ -z "$_chk_bad" ]; then
+  ok 'structural (#3759): every payload read, every scanner invocation and every identity check on the probe path goes through the ONE validated read, and the name grammar is defined once'
+else
+  bad "structural (#3759): the validation chokepoint has been bypassed —$_chk_bad. Four review rounds of per-site fixes did not converge on this class; the helper is what makes a NEW input structurally unable to join the unvalidated set, so a call site that reads a payload or the scanner directly reopens it (#3229/#3544: restructure, do not carve the same place again)"
+fi
+
 printf '== structural (#3759): MISPLACED grants nothing, and the probe reuses the one scanner ==\n'
 # (1) THE GRANTING GATES ARE STILL THE TWO TOKEN-EXACT `= "granted"` COMPARISONS, and `misplaced`
 # appears in NO granting branch. A `MISPLACED*` prefix test, a `!= none` test or a second granting

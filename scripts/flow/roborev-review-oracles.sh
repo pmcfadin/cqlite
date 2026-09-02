@@ -1190,6 +1190,140 @@ WAIVER_SCAN_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/roborev-waiver-s
 # The allowlist is still expressed once, above, and consumed only by the scanner it is passed to.
 
 
+# ============ THE ONE VALIDATED READ ON THIS PATH (issue #3759, round 3) ============
+# WHY THIS EXISTS AS A CHOKEPOINT AND NOT AS THREE MORE CHECKS. Three review rounds produced 3, then
+# 1, then 2 findings, and EVERY ONE was the same class: an input reaching a conclusion without an
+# affirmative validation, so "could not tell" collapsed onto an answer. Round 3's second finding was
+# inside `ref_repo()` — code round 3 ADDED while fixing that very class. This repository's standing
+# ruling for that shape (#3229: defects landing inside the preceding fix rounds; #3544: five rounds in
+# one mechanism) is to RESTRUCTURE, not to carve the same place a fourth time. So the validation is
+# removed from the call sites and expressed ONCE, and the guard suite asserts structurally that no
+# payload read and no scanner invocation on this path exists outside these two helpers. That is this
+# repo's own "remove the shared channel rather than pick a rarer delimiter", applied to validation:
+# it makes the NEXT input structurally unable to join the unvalidated set, which four rounds of site
+# fixes did not achieve.
+#
+# THE CHARACTER CONSTRAINT FOR A GITHUB OWNER OR REPOSITORY NAME, DEFINED EXACTLY ONCE. Round 3's
+# second finding was two PARALLEL identity validations — the shell's on the current repository and
+# `ref_repo()`'s on each reference's — where only one of them constrained anything. Two validators of
+# one grammar drift, and a drift here produces a CONFIDENT declared skip from an unvalidated identity,
+# which is the false confidence this whole feature exists to remove. So the pattern is written here
+# and is the only one either side uses: the shell interpolates it, and the python leg receives it.
+ROBOREV_GH_NAME_RE='[A-Za-z0-9._-]+'
+
+# roborev_json_list_field <json> <field>: is this payload a top-level JSON OBJECT whose <field> is a
+# LIST? Sets, and never returns non-zero:
+#   ROBOREV_JSONF_OK     1 (affirmatively yes) | 0 (anything else)
+#   ROBOREV_JSONF_CAUSE  the reason, when 0
+#
+# THE ONLY PLACE A PAYLOAD SHAPE IS JUDGED on this path. A missing key, an explicit `null`, a non-list
+# value, a non-object top level and an unparseable body are ONE answer here — none of them is the
+# shape we require — but they are never the PERMISSIVE answer, which is the whole point: `gh` always
+# returns the field it was asked for, so any of these is a broken payload and never an empty result.
+roborev_json_list_field() { # <json> <field>
+  ROBOREV_JSONF_OK=0
+  ROBOREV_JSONF_CAUSE="the payload was never examined"
+  if ! command -v python3 >/dev/null 2>&1; then
+    ROBOREV_JSONF_CAUSE="python3 is not on PATH, so the payload's shape could not be established"
+    return 0
+  fi
+  if printf '%s' "$1" | ROBOREV_JSONF_FIELD="$2" python3 -c '
+import json, os, sys
+field = os.environ.get("ROBOREV_JSONF_FIELD", "")
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+# The OBJECT form is what every `gh ... --json <field>` call emits, measured. A bare top-level list is
+# refused even where a downstream consumer would accept one: a shape `gh` does not produce is a shape
+# nobody established, and a false could-not-check is the fail-closed direction.
+if not isinstance(data, dict):
+    sys.exit(1)
+if field not in data:
+    sys.exit(1)
+if not isinstance(data[field], list):
+    sys.exit(1)
+' 2>/dev/null; then
+    ROBOREV_JSONF_OK=1
+    ROBOREV_JSONF_CAUSE=""
+    return 0
+  fi
+  ROBOREV_JSONF_CAUSE="the payload was not a JSON object carrying a $2 LIST (it was unparseable, a non-object, missing that key, or null)"
+  return 0
+}
+
+# roborev_validated_authorization_scan <kind> <base> <head> <job> <observed-or-empty> <json>:
+# the ONE way an authorization scan is performed anywhere in this file. Sets, and never returns
+# non-zero:
+#   ROBOREV_VSCAN_OUTCOME  ok | could-not-check | refused
+#   ROBOREV_VSCAN_CAUSE    the reason, on the two non-ok outcomes
+#   ROBOREV_VSCAN_RESULT   the scanner's raw key=value lines, on `ok` only
+#   ROBOREV_VSCAN_STATE    the scanner's state, VALIDATED, on `ok` only
+#
+# THREE-VALUED ON PURPOSE, because the two failures are different operator actions. `could-not-check`
+# is "this box could not perform the read" (no python3, no scanner file, the scanner died) — fix the
+# box. `refused` is "we DID look and what came back is not a shape or a verdict we accept" (a payload
+# that is not an object carrying a comments list; a `state=` outside the closed set) — fix or report
+# the payload. Neither is ever permissive, and a two-valued return would re-import the collapse this
+# whole restructure exists to remove.
+#
+# A ZERO EXIT FROM THE SCANNER IS NOT A SUCCESSFUL READ. The scanner reduces `{}`,
+# `{"comments": null}` and `{"comments": {}}` to an EMPTY comment list and exits 0 — CORRECT for its
+# own contract (*given these comments, is there an authorization in them?* over no comments is "no"),
+# and it is reused UNMODIFIED by design, so the shape check belongs to the CALLER that draws a
+# conclusion. That caller is now this one function rather than three separate ones.
+roborev_validated_authorization_scan() { # <kind> <base> <head> <job> <observed-or-empty> <json>
+  local kind="$1" base="$2" head="$3" job="$4" observed="$5" json="$6" rc
+  ROBOREV_VSCAN_OUTCOME="could-not-check"
+  ROBOREV_VSCAN_CAUSE="the scan was never performed"
+  ROBOREV_VSCAN_RESULT=""
+  ROBOREV_VSCAN_STATE=""
+  if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$WAIVER_SCAN_TOOL" ]; then
+    ROBOREV_VSCAN_CAUSE="the structured authorization scanner is unusable (python3 present: $(command -v python3 >/dev/null 2>&1 && printf yes || printf no); tool: $WAIVER_SCAN_TOOL) — an authorization is NEVER decided from a flattened text stream, so this fails closed rather than falling back to line parsing"
+    return 0
+  fi
+  roborev_json_list_field "$json" comments
+  if [ "$ROBOREV_JSONF_OK" -ne 1 ]; then
+    ROBOREV_VSCAN_OUTCOME="refused"
+    ROBOREV_VSCAN_CAUSE="$ROBOREV_JSONF_CAUSE, so nothing was actually read from it — the scanner would have reduced it to zero comments and exited 0, which is NOT a check"
+    return 0
+  fi
+  # THE ONE SCANNER INVOCATION IN THIS FILE. The kind is always named explicitly by the caller and
+  # there is no default, so no call can ever read a marker its caller did not ask for; the deferral
+  # additionally passes its observed count, so `count=` is matched identically wherever it is asked.
+  if [ -n "$observed" ]; then
+    ROBOREV_VSCAN_RESULT="$(printf '%s' "$json" | python3 "$WAIVER_SCAN_TOOL" "$kind" "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS" "$observed" 2>/dev/null)" && rc=0 || rc=1
+  else
+    ROBOREV_VSCAN_RESULT="$(printf '%s' "$json" | python3 "$WAIVER_SCAN_TOOL" "$kind" "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS" 2>/dev/null)" && rc=0 || rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    ROBOREV_VSCAN_RESULT=""
+    ROBOREV_VSCAN_OUTCOME="could-not-check"
+    ROBOREV_VSCAN_CAUSE="the scanner exited non-zero although the payload was well-formed, so what it found was never established"
+    return 0
+  fi
+  ROBOREV_VSCAN_STATE="$(printf '%s\n' "$ROBOREV_VSCAN_RESULT" | sed -n 's/^state=//p' | head -1)"
+  # ===== THE RETURNED STATE IS A CLOSED GRAMMAR, CHECKED BEFORE IT IS TRUSTED =====
+  # An EMPTY or ABSENT `state=` line, or one nothing here has ever judged, is not a verdict. The
+  # permissive branch is keyed on AFFIRMATIVE membership, never on `!= granted` — the same rule the
+  # wrapper applies to its own verdict keys. This is the set the SCANNER may return; it is NOT the
+  # lookups' own recognition lists, which additionally carry `misplaced` (a state the scanner cannot
+  # emit, because thread identity is the caller's knowledge).
+  case "$ROBOREV_VSCAN_STATE" in
+    granted|unauthorized|stale|malformed|none|count-mismatch|unavailable) ;;
+    *)
+      ROBOREV_VSCAN_OUTCOME="refused"
+      ROBOREV_VSCAN_CAUSE="the scanner returned the unrecognised state '${ROBOREV_VSCAN_STATE:-<none>}', so what it found was never established"
+      ROBOREV_VSCAN_RESULT=""
+      ROBOREV_VSCAN_STATE=""
+      return 0
+      ;;
+  esac
+  ROBOREV_VSCAN_OUTCOME="ok"
+  ROBOREV_VSCAN_CAUSE=""
+  return 0
+}
+
 # ============ THE LINKED-ISSUE MISPLACEMENT PROBE (issue #3759) ============
 # WHY IT EXISTS, measured rather than imagined. For PR #3710 the coordination lead granted BOTH
 # authorizations — field-perfect, correct base/head/job, each the sole nonblank content of its own
@@ -1241,7 +1375,7 @@ ROBOREV_LINKED_ISSUE_PROBE_MAX=3
 roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-findings-count>]
   local kind="$1" base="$2" head="$3" job="$4" observed="${5:-}"
   local rel_errfile rel_json rel_errtext numbers declared probed=0 skipped_cross=0
-  local issue read_ok=() unread=() comments result state scan_rc
+  local issue read_ok=() unread=() comments state
   local issue_errfile issue_errtext read_list unread_list bound_clause cross_clause suffix
   local repo_nwo repo_errfile repo_errtext
   ROBOREV_PROBE_OUTCOME="could-not-check"
@@ -1252,10 +1386,6 @@ roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-fi
   ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: the probe was never asked"
   if ! command -v gh >/dev/null 2>&1; then
     ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: 'gh' is not on PATH"
-    return 0
-  fi
-  if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$WAIVER_SCAN_TOOL" ]; then
-    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: the structured authorization scanner is unusable, and a marker is NEVER recognised from a flattened text stream — not even to print a diagnostic, because a second recogniser is a second place for the grammar to diverge"
     return 0
   fi
   if ! rel_errfile="$(mktemp 2>/dev/null)"; then
@@ -1309,7 +1439,7 @@ roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-fi
   # the pull request derived from an identity nobody established. The pattern is therefore exactly one
   # `owner/name` pair over GitHub's own character set, so anything else takes the could-not-check
   # branch with the rest of the class.
-  if [[ ! "$repo_nwo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+  if [[ ! "$repo_nwo" =~ ^${ROBOREV_GH_NAME_RE}/${ROBOREV_GH_NAME_RE}$ ]]; then
     rm -f "$rel_errfile"
     ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: 'gh repo view --json nameWithOwner' did not answer with a single owner/name pair, so which repository a closing reference points at could not be established"
     return 0
@@ -1354,32 +1484,34 @@ roborev_linked_issue_marker_probe() { # <kind> <base> <head> <job> [<observed-fi
   # for digits itself. Two affirmative tests rather than one because the shell is what interpolates
   # into an emitted diagnostic, and a value that reaches a renderer must have been judged by the
   # process that renders it.
-  if ! numbers="$(printf '%s' "$rel_json" | PROBE_REPO_NWO="$repo_nwo" python3 -c '
-import json, os, sys
+  # THE RELATION PAYLOAD'S SHAPE IS JUDGED BY THE ONE VALIDATOR, not by this extractor. The extractor
+  # below therefore PARSES and never DECIDES: by the time it runs, the payload is affirmatively an
+  # object whose `closingIssuesReferences` is a list.
+  roborev_json_list_field "$rel_json" closingIssuesReferences
+  if [ "$ROBOREV_JSONF_OK" -ne 1 ]; then
+    ROBOREV_PROBE_DETAIL="the linked-issue thread could NOT be checked: $ROBOREV_JSONF_CAUSE — that is a broken payload, NOT an empty relation, and the two must never render alike"
+    return 0
+  fi
+  if ! numbers="$(printf '%s' "$rel_json" | PROBE_REPO_NWO="$repo_nwo" PROBE_NAME_RE="$ROBOREV_GH_NAME_RE" python3 -c '
+import json, os, re, sys
 # The current repository, as `gh` itself resolves it. Compared CASE-INSENSITIVELY because GitHub
 # owner and repository names are case-insensitive, so `PMcFadin/CQLite` and `pmcfadin/cqlite` are one
 # repository and treating them as two would produce a declared skip for a same-repository reference.
+# ONE grammar for a GitHub owner or repository name, received from the shell so that the current
+# repository and every reference are held to the SAME constraint. Two parallel validators of one
+# grammar drift, and a drift here yields a CONFIDENT declared skip from an unvalidated identity.
+NAME_RE = re.compile("^" + os.environ.get("PROBE_NAME_RE", "(?!)") + "$")
 want_repo = " ".join(os.environ.get("PROBE_REPO_NWO", "").split()).lower()
+# The shape was judged by `roborev_json_list_field` before this ran, so this leg PARSES and never
+# DECIDES. A parse failure here would mean the payload changed between the two reads, which cannot
+# happen (it is one shell variable), so it stays a non-zero exit rather than a silent empty set.
 try:
     data = json.load(sys.stdin)
 except ValueError:
     sys.exit(1)
-# ===== THE SHAPE IS TESTED AFFIRMATIVELY; NOTHING UNREADABLE BECOMES AN ANSWER (#3759 round 1) =====
-# This used to read `data.get(...) if isinstance(data, dict) else None` and then coerce a `None` to
-# `[]`, so FOUR different unreadable payloads — a non-object top level, a MISSING
-# `closingIssuesReferences` key, an explicit `null`, and a non-list value — all arrived at the
-# shell as ZERO declared references and rendered "no linked issue is declared on this PR". That is
-# an ANSWER derived from a payload that could not be read: the permissive-branch-inherits-the-
-# unknown-state shape this whole file is written against. `gh pr view --json closingIssuesReferences`
-# ALWAYS returns the key it was asked for, so its absence is a broken payload and never an empty
-# relation. Each of these is now a NON-ZERO exit, which the caller renders as could-not-check.
-if not isinstance(data, dict):
-    sys.exit(1)
-if "closingIssuesReferences" not in data:
+if not isinstance(data, dict) or not isinstance(data.get("closingIssuesReferences"), list):
     sys.exit(1)
 refs = data["closingIssuesReferences"]
-if not isinstance(refs, list):
-    sys.exit(1)
 
 def ref_repo(ref):
     """owner/name for a reference, lowercased, or None when it cannot be established.
@@ -1395,7 +1527,14 @@ def ref_repo(ref):
     name = repo.get("name")
     owner = repo.get("owner")
     login = owner.get("login") if isinstance(owner, dict) else None
-    if not isinstance(name, str) or not isinstance(login, str) or not name or not login:
+    if not isinstance(name, str) or not isinstance(login, str):
+        return None
+    # BOTH COMPONENTS ARE HELD TO THE SAME CONSTRAINT AS THE CURRENT REPOSITORY (#3759 round 3). A
+    # non-empty check is not a validation: `"a b"`, `"x/y"` or a newline-bearing value would have
+    # produced a joined identity that compares unequal to everything, and an identity that matches
+    # nothing renders as a CONFIDENT cross-repository DECLARED SKIP. An identity that fails this is
+    # REPO-UNVERIFIED — "cannot tell which repository" — and never CROSS-REPO.
+    if not NAME_RE.match(name) or not NAME_RE.match(login):
         return None
     return ("%s/%s" % (login, name)).lower()
 
@@ -1475,73 +1614,18 @@ for ref in refs:
       continue
     fi
     rm -f "$issue_errfile"
-    # ===== THE PAYLOAD IS VALIDATED AFFIRMATIVELY BEFORE ANY CONCLUSION IS DRAWN FROM IT (#3759 r2) =
-    # A ZERO EXIT FROM THE SCANNER IS NOT "THE THREAD WAS READ". The scanner coerces a valid-JSON but
-    # malformed payload — `{}`, `{"comments": null}`, `{"comments": {}}` — to an EMPTY comment list
-    # and exits 0, which is CORRECT for its own contract (*given these comments, is there an
-    # authorization in them?* — over no comments, the answer is no). It is this CALLER that then drew
-    # the unwarranted conclusion, rendering "checked: no matching marker" over a thread nothing was
-    # ever read from. The scanner is reused UNMODIFIED by design, so the validation belongs here.
-    #
-    # AND THIS IS THE INVARIANT, NOT THE SITE. Round 1 fixed the same collapse on the RELATION payload
-    # and left the sibling input on the same path with it. The rule for this whole probe is: EVERY
-    # INPUT IS VALIDATED AFFIRMATIVELY, AND "COULD NOT TELL" NEVER COLLAPSES ONTO AN ANSWER. The
-    # inputs are the current-repository identity, the relation payload, each reference's
-    # classification token, this comments payload, the scanner's exit status and the scanner's
-    # `state=` — all six now have an affirmative test, and a new input on this path needs one too.
-    if ! printf '%s' "$comments" | python3 -c '
-import json, sys
-try:
-    data = json.load(sys.stdin)
-except ValueError:
-    sys.exit(1)
-# The object form is what `gh issue view --json comments` emits, measured; a bare top-level list is
-# refused even though the scanner would accept one, because a shape `gh` does not produce is a shape
-# nobody established, and a false could-not-check is the fail-closed direction.
-if not isinstance(data, dict):
-    sys.exit(1)
-if "comments" not in data:
-    sys.exit(1)
-if not isinstance(data["comments"], list):
-    sys.exit(1)
-' 2>/dev/null; then
-      unread+=("#$issue (its comments payload was not a JSON object carrying a comments LIST, so nothing was actually read from that thread — the scanner would have reduced it to zero comments and exited 0, which is NOT a check)")
+    # ===== ONE VALIDATED READ, THE SAME ONE THE GRANTING LOOKUPS USE (#3759 round 3) =====
+    # The payload shape, the scanner invocation, the scanner's exit status and its returned `state=`
+    # are all judged inside `roborev_validated_authorization_scan` — the same kind, base, head, job,
+    # allowlist and observed count as the pull-request-side call, with no new argument, no new grammar
+    # and no thread parameter. Anything other than `ok` makes this thread UNREAD, never checked: a
+    # thread whose read we could not validate was not looked at, whatever the scanner's exit code said.
+    roborev_validated_authorization_scan "$kind" "$base" "$head" "$job" "$observed" "$comments"
+    if [ "$ROBOREV_VSCAN_OUTCOME" != "ok" ]; then
+      unread+=("#$issue ($ROBOREV_VSCAN_OUTCOME: $ROBOREV_VSCAN_CAUSE)")
       continue
     fi
-    # THE SAME SCANNER, THE SAME KIND, THE SAME SCOPE, THE SAME ALLOWLIST. No new argument, no new
-    # grammar, no thread parameter — see the header. The deferral additionally passes the SAME
-    # observed count, so `count=` is matched identically on both threads.
-    if [ -n "$observed" ]; then
-      result="$(printf '%s' "$comments" | python3 "$WAIVER_SCAN_TOOL" "$kind" "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS" "$observed" 2>/dev/null)" && scan_rc=0 || scan_rc=1
-    else
-      result="$(printf '%s' "$comments" | python3 "$WAIVER_SCAN_TOOL" "$kind" "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS" 2>/dev/null)" && scan_rc=0 || scan_rc=1
-    fi
-    if [ "$scan_rc" -ne 0 ]; then
-      # REACHED ONLY FOR A NON-ZERO EXIT THE VALIDATION ABOVE DID NOT ALREADY EXPLAIN: the payload was
-      # affirmatively a JSON object carrying a comments list, so an unparseable payload is no longer
-      # this branch's cause and the text no longer claims it is. Kept as a defensive branch — a
-      # scanner that dies for any other reason must still be a could-not-check and never a check.
-      unread+=("#$issue (the scanner exited non-zero for that thread although its payload was well-formed, so what it found there was never established)")
-      continue
-    fi
-    state="$(printf '%s\n' "$result" | sed -n 's/^state=//p' | head -1)"
-    # ===== THE RETURNED STATE IS A CLOSED GRAMMAR, CHECKED BEFORE IT IS TRUSTED (#3759 r2) =====
-    # An EMPTY or ABSENT `state=` line, or one this code has never judged, used to count as a
-    # successfully checked thread — a verdict derived from a value nobody validated, and the same
-    # collapse as the payload above. The permissive branch is keyed on the AFFIRMATIVE membership,
-    # never on `!= granted`, which is the rule the wrapper already applies to its own verdict keys.
-    #
-    # THE UNION OF THE TWO LOOKUPS' RECOGNITION LISTS, deliberately not narrowed per kind: this is a
-    # RECOGNITION list, not a granting list, every member of it is non-granting except `granted`, and
-    # the escalation below keys on `granted` alone — so per-kind precision here would buy nothing and
-    # would add a second place for those lists to drift.
-    case "$state" in
-      granted|unauthorized|stale|malformed|none|count-mismatch|unavailable) ;;
-      *)
-        unread+=("#$issue (the scanner returned the unrecognised state '${state:-<none>}' for that thread, so what it found there was never established)")
-        continue
-        ;;
-    esac
+    state="$ROBOREV_VSCAN_STATE"
     read_ok+=("#$issue")
     # ===== ESCALATION ONLY FROM AN ISSUE-SIDE `granted`, KEYED ON THE AFFIRMATIVE VALUE =====
     # An issue-side marker that is itself stale, malformed or unauthorized is a DIFFERENT defect that
@@ -1694,11 +1778,6 @@ roborev_absence_waiver_lookup() {
     ROBOREV_WAIVER_DETAIL="'gh' is not on PATH, so no PR comment could be read"
     return 0
   fi
-  if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$WAIVER_SCAN_TOOL" ]; then
-    ROBOREV_WAIVER_STATE="unavailable"
-    ROBOREV_WAIVER_DETAIL="the structured waiver scanner is unusable (python3 present: $(command -v python3 >/dev/null 2>&1 && printf yes || printf no); tool: $WAIVER_SCAN_TOOL) — a waiver is NEVER decided from a flattened text stream, so this fails closed rather than falling back to line parsing"
-    return 0
-  fi
   # ===== ONE `gh` CALL, RAW JSON, DECIDED STRUCTURALLY (#3312 job 26) =====
   # `--json comments` WITHOUT `--jq`: the author and the body must stay SEPARATE FIELDS of the same
   # object all the way to the decision. The previous form asked `jq` to flatten them into one text
@@ -1716,26 +1795,39 @@ roborev_absence_waiver_lookup() {
     return 0
   fi
   [ -n "$json" ] || return 0
-  # The scanner owns the WHOLE decision — shape, scope, reason and authorization — so this shell never
-  # associates an author with a body. Its output is `key=value` lines with whitespace-collapsed values,
-  # the same shape `roborev-job-facts.py` emits, so a free-text reason cannot introduce a second channel.
-  # THE MARKER KIND IS NAMED EXPLICITLY (#3626). The scanner now decides TWO authorizations — the
-  # absence waiver and the findings deferral — and each call selects exactly one, so neither can ever
-  # read the other's marker: an absence waiver confers no authority over `findings:` and a findings
-  # deferral confers none over `prompt-content:`. There is no default kind, deliberately: a default
-  # would be the one thing that could make a call read a marker its caller did not ask for.
-  if ! result=$(printf '%s' "$json" | python3 "$WAIVER_SCAN_TOOL" prompt-content-absent "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS" 2>/dev/null); then
+  # ===== THE ONE VALIDATED READ (#3759 round 3) =====
+  # The scanner owns the WHOLE authorization decision — shape, scope, reason and authorization — so
+  # this shell never associates an author with a body. Its output is `key=value` lines with
+  # whitespace-collapsed values, the same shape `roborev-job-facts.py` emits, so a free-text reason
+  # cannot introduce a second channel. THE MARKER KIND IS NAMED EXPLICITLY (#3626): the scanner
+  # decides TWO authorizations and each call selects exactly one, with no default — a default would
+  # be the one thing that could make a call read a marker its caller did not ask for.
+  #
+  # WHAT ROUTING THIS THROUGH THE HELPER REPAIRS, AND IT IS NOT ONLY THE PROBE: this call previously
+  # handed the PR payload to the scanner with NO SHAPE VALIDATION, so a valid-JSON but malformed
+  # payload (`{}`, `{"comments": null}`, `{"comments": {}}`) was reduced to zero comments and reported
+  # `waiver: NONE` — "there is no authorization" — when the comments were never read. That is a
+  # PRE-EXISTING defect on the GRANTING path, older than the misplacement probe; the probe merely
+  # added a new consequence to it. A malformed payload is now `unavailable` (the state that says the
+  # oracle could not be consulted), and because the probe runs ONLY from `none`, it is not run at all.
+  roborev_validated_authorization_scan prompt-content-absent "$base" "$head" "$job" "" "$json"
+  if [ "$ROBOREV_VSCAN_OUTCOME" != "ok" ]; then
     ROBOREV_WAIVER_STATE="unavailable"
-    ROBOREV_WAIVER_DETAIL="the PR comments could not be parsed as JSON, so no waiver could be established"
+    # THE HELPER'S CAUSE IS PASSED THROUGH VERBATIM, not wrapped. It is already a self-contained
+    # sentence, and one of them names the SCANNER'S OWN PATH, which an operator has to read to fix a
+    # fail-closed UNAVAILABLE — a wrapper sentence in front of it buys nothing and costs the reader.
+    ROBOREV_WAIVER_DETAIL="$ROBOREV_VSCAN_CAUSE"
     return 0
   fi
-  ROBOREV_WAIVER_STATE=$(printf '%s\n' "$result" | sed -n 's/^state=//p' | head -1)
+  result="$ROBOREV_VSCAN_RESULT"
+  ROBOREV_WAIVER_STATE="$ROBOREV_VSCAN_STATE"
   ROBOREV_WAIVER_AUTHOR=$(printf '%s\n' "$result" | sed -n 's/^author=//p' | head -1)
   ROBOREV_WAIVER_SCOPE=$(printf '%s\n' "$result" | sed -n 's/^scope=//p' | head -1)
   ROBOREV_WAIVER_REASON=$(printf '%s\n' "$result" | sed -n 's/^reason=//p' | head -1)
   ROBOREV_WAIVER_DETAIL=$(printf '%s\n' "$result" | sed -n 's/^detail=//p' | head -1)
-  # A STATE THIS CODE HAS NEVER JUDGED IS NOT A PASS: an unrecognised (or empty) verdict from the
-  # scanner fails closed instead of inheriting the permissive path.
+  # A STATE THIS CODE HAS NEVER JUDGED IS NOT A PASS. The scanner's own state was already validated
+  # against its closed set inside the helper, so this `case` is now a BELT over THIS function's state
+  # variable — which is a different subject, because the probe below can additionally set `misplaced`.
   case "$ROBOREV_WAIVER_STATE" in
     # `misplaced` IS IN THIS LIST AS A BELT, NOT AS A ROUTE (#3759). The scanner never emits it —
     # thread identity is the caller's knowledge — and the probe below assigns it AFTER this
@@ -1969,11 +2061,6 @@ roborev_findings_deferral_lookup() {
     ROBOREV_DEFERRAL_DETAIL="'gh' is not on PATH, so no PR comment could be read"
     return 0
   fi
-  if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$WAIVER_SCAN_TOOL" ]; then
-    ROBOREV_DEFERRAL_STATE="unavailable"
-    ROBOREV_DEFERRAL_DETAIL="the structured authorization scanner is unusable (python3 present: $(command -v python3 >/dev/null 2>&1 && printf yes || printf no); tool: $WAIVER_SCAN_TOOL) — an authorization is NEVER decided from a flattened text stream, so this fails closed rather than falling back to line parsing"
-    return 0
-  fi
   # ONE `gh` CALL, RAW JSON, DECIDED STRUCTURALLY — AND `comments` IS THE WHOLE PAYLOAD (#3626).
   # `body` was fetched here for a PR-body link check that has been DELETED rather than patched: a PR
   # body is editable at any time by anyone with write access with NO per-edit attribution, while a
@@ -1987,12 +2074,17 @@ roborev_findings_deferral_lookup() {
     return 0
   fi
   [ -n "$json" ] || return 0
-  if ! result=$(printf '%s' "$json" | python3 "$WAIVER_SCAN_TOOL" findings-deferral "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS" "$observed" 2>/dev/null); then
+  # THE ONE VALIDATED READ (#3759 round 3) — see the waiver's copy of this comment for what routing it
+  # through the helper repairs on the GRANTING path, which is a pre-existing defect and not the
+  # probe's. A malformed payload is `unavailable`, and the probe therefore never runs over it.
+  roborev_validated_authorization_scan findings-deferral "$base" "$head" "$job" "$observed" "$json"
+  if [ "$ROBOREV_VSCAN_OUTCOME" != "ok" ]; then
     ROBOREV_DEFERRAL_STATE="unavailable"
-    ROBOREV_DEFERRAL_DETAIL="the PR payload could not be parsed as JSON, so no deferral could be established"
+    ROBOREV_DEFERRAL_DETAIL="$ROBOREV_VSCAN_CAUSE"
     return 0
   fi
-  ROBOREV_DEFERRAL_STATE=$(printf '%s\n' "$result" | sed -n 's/^state=//p' | head -1)
+  result="$ROBOREV_VSCAN_RESULT"
+  ROBOREV_DEFERRAL_STATE="$ROBOREV_VSCAN_STATE"
   ROBOREV_DEFERRAL_AUTHOR=$(printf '%s\n' "$result" | sed -n 's/^author=//p' | head -1)
   ROBOREV_DEFERRAL_SCOPE=$(printf '%s\n' "$result" | sed -n 's/^scope=//p' | head -1)
   ROBOREV_DEFERRAL_REASON=$(printf '%s\n' "$result" | sed -n 's/^reason=//p' | head -1)

@@ -281,6 +281,15 @@ path whose entire justification is that it grants nothing and only selects a thr
 incident this mechanism exists for is a same-repository coordination thread; and skipping is the
 fail-closed direction, whose worst case is a `NONE` that declares the skip.
 
+**BOTH COMPONENTS OF A REFERENCE'S IDENTITY SHALL BE HELD TO THE SAME CONSTRAINT AS THE CURRENT
+REPOSITORY, FROM ONE SHARED GRAMMAR.** The owner login and the repository name SHALL each satisfy the
+same character grammar the current-repository identity satisfies, and that grammar SHALL be defined
+**exactly once** and consumed by both checks. Two parallel validators of one grammar drift, and the
+drift here is not benign: an identity that passes a weaker check but matches nothing compares unequal
+to every reference, which renders as a **confident cross-repository declared skip** derived from an
+identity nobody established. An identity failing this grammar SHALL be **could-not-check**, never a
+declared skip.
+
 **"In another repository" and "cannot tell which repository" are different facts and SHALL NOT render
 alike.** A reference whose repository cannot be read from the payload, and a current repository that
 could not be established at all, SHALL each be a **could-not-check** cause — never a declared skip
@@ -316,6 +325,10 @@ SHALL say so.
 #### Scenario: Owner and repository names are compared case-insensitively
 - **WHEN** the current repository and the reference's repository differ only in letter case
 - **THEN** they are one repository, the reference is probed, and no skip is declared
+
+#### Scenario: A reference identity that fails the name grammar is not a cross-repository skip
+- **WHEN** a reference's repository object carries an owner login or a name that does not satisfy the shared owner/name grammar
+- **THEN** the reference is could-not-check, not a declared cross-repository skip, and the grammar it was judged against is the same one, defined once, that the current-repository identity is judged against
 
 #### Scenario: A reference whose repository cannot be established
 - **WHEN** a relation entry carries a usable number but no readable repository
@@ -374,14 +387,33 @@ Reporting only the first is the same defect as rendering 4's own reason for exis
 more completeness than the probe achieved.
 
 **EVERY INPUT ON THE PROBE PATH SHALL BE VALIDATED AFFIRMATIVELY, AND A ZERO EXIT SHALL NOT BE READ
-AS A SUCCESSFUL READ.** This is the requirement's governing invariant, stated once rather than per
-input, because three successive reviews found the same collapse at a different input each time. The
-probe's inputs are the **current-repository identity**, the **relation payload**, each reference's
-**classification**, each thread's **comments payload**, the scanner's **exit status** and the
-scanner's returned **`state=`**; each SHALL have an affirmative test, and a new input on this path
-SHALL acquire one.
+AS A SUCCESSFUL READ — ENFORCED BY A SINGLE VALIDATED READ, NOT BY A CHECK AT EACH CALL SITE.** Three
+successive reviews found this same collapse at a different input each time (3, then 1, then 2
+findings), and the third round's second finding was inside code that round had just **added while
+fixing the class**. Per this repository's standing ruling for that shape — defects landing inside the
+preceding fix rounds, several rounds inside one mechanism — the response SHALL be to **restructure**,
+not to validate one more site.
 
-Two consequences that are **not** obvious and SHALL be honoured explicitly. (1) The reused scanner
+Therefore: every payload read and every authorization scan on this path SHALL go through **one**
+validated-read helper, which returns a **three-valued** result — `ok`, `could-not-check(<cause>)`,
+`refused(<cause>)` — and which is the **only** place that judges (a) that a payload is a top-level
+JSON **object**, (b) that the field it needs is a **list**, (c) that the scanner's exit status was
+zero, and (d) that the scanner's returned `state=` is in its **closed** recognition set. `ok` is the
+only outcome from which any conclusion may be drawn; the other two are non-granting and carry a cause.
+No caller on this path SHALL read a payload, invoke the scanner, or extract the scanner's `state=` any
+other way, and a **structural** test SHALL assert that — because what four rounds of site fixes failed
+to achieve is making the **next** input structurally unable to join the unvalidated set.
+
+**THE TWO GRANTING LOOKUPS SHALL USE THE SAME READ.** This is not confined to the probe: the
+pull-request payload that decides an **authorization** SHALL be validated by the same helper. A
+malformed pull-request payload SHALL make the lookup state **`unavailable`** — the value that says the
+oracle could not be consulted — and, because the probe runs only from `none`, SHALL therefore not be
+probed at all. *(Recorded honestly: the missing validation on that granting read predates this change
+— on `main` a malformed payload already yields `none` rather than `unavailable`. This change did not
+introduce it; it added a new consequence to it, and repairs it.)*
+
+Two consequences that are **not** obvious and SHALL be honoured explicitly, and both now live inside
+that one helper. (1) The reused scanner
 coerces a valid-JSON but malformed payload — `{}`, `{"comments": null}`, `{"comments": {}}` — to an
 **empty comment list** and exits **0**. That is correct for the scanner's own contract and the scanner
 SHALL NOT be changed for it; the **caller** SHALL validate the payload as a JSON **object** carrying a
@@ -421,6 +453,14 @@ means before it can be printed.
 #### Scenario: An unreadable relation payload is not reported as an empty relation
 - **WHEN** the relation payload is unparseable, is not a JSON object, omits the `closingIssuesReferences` key, carries an explicit `null`, or carries a non-list value
 - **THEN** each shape takes the *could not check* rendering naming the broken payload, and none of them reports *"no linked issue is declared on this PR"*
+
+#### Scenario: Every read on the path goes through the one validated helper
+- **WHEN** `scripts/tests/test_roborev_review_guard.sh` runs
+- **THEN** it asserts structurally that every scanner invocation and every `state=` extraction lies inside the validated-read helper, that every payload-shape predicate lies inside the one shape validator, that both granting lookups and the probe route through them, and it fails if any call site reads a payload or the scanner directly
+
+#### Scenario: A malformed pull-request payload does not grant and is not probed
+- **WHEN** the pull-request comments payload parses but is not an object carrying a `comments` list
+- **THEN** the lookup state is `unavailable` naming the cause — never `none`, which would assert that no authorization exists over comments nobody read — and no linked-issue probe is performed
 
 #### Scenario: A valid-JSON but malformed comments payload is not a read thread
 - **WHEN** a probed thread's comments payload parses but is not an object carrying a `comments` list — `{}`, `{"comments": null}`, `{"comments": {}}`, or a non-list value — so the scanner reduces it to zero comments and exits 0
