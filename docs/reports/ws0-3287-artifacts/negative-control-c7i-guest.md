@@ -81,22 +81,22 @@ regenerated.)
 | `cycle_activity.stalls_l3_miss` | **exactly 0**, all arms, every rep | `arm-*-stalls.csv` |
 | `offcore_requests_outstanding.all_data_rd` / `.cycles_with_data_rd` | **exactly 0**, all arms | `arm-*-offcore.csv` |
 | `cache-misses`, `cache-references` | **exactly 0**, all arms | `arm-*-cache.csv` |
-| `cycle_activity.stalls_l2_miss` on the 2 GiB arm | **> 80% of all cycles** (billions; 82.3–89.9% over six captures) | `arm-hostile-2g-stalls.csv` |
+| `cycle_activity.stalls_l2_miss` on the 2 GiB arm | **> 80% of all cycles** (billions; 82.3–90.0% over seven captures) | `arm-hostile-2g-stalls.csv` |
 | `instructions` friendly vs hostile-512m | **ratio 1.00** (0.999–1.002 across reps; 1.00003 in the committed capture) | `arm-*-control.csv` |
-| `ns_per_access` | **~5–6 ns** L2-resident vs **~165–315 ns** DRAM (range over six captures) | `arm-*.txt` |
+| `ns_per_access` | **~5–6 ns** L2-resident vs **~165–315 ns** DRAM (range over seven captures) | `arm-*.txt` |
 | stall-counter NESTING | **holds** in every arm — but see the declared limit below | `differential.txt` |
 
 **The prediction was written before the measurement**: a 2 GiB random chase over 64 B nodes through a
 serial data dependency cannot be L3-resident and the prefetcher cannot help it, so an honest
 L3-miss-stall counter must be large. Instead, **over 80% of all cycles are stalled with an L2-miss demand
 load outstanding and exactly zero of them are attributed to an L3 miss**, on a working set 19.5× the
-L3. (The bound is stated loosely on purpose: it measured between 82.3% and 89.9% over six captures on
+L3. (The bound is stated loosely on purpose: it measured between 82.3% and 90.0% over seven captures on
 a shared box. The exact figure moves with load; that it is most of the cycles does not, and the zero
 does not move at all.) That is not a small number; it is physically impossible.
 
 **The workload's behaviour is established by WALL CLOCK, not by the PMU, so it is not in doubt — only
 the counter is.** `ns_per_access` runs ~5–6 ns in the L2-resident arm against ~165–315 ns in the DRAM
-arms across six captures — an access-latency spread of roughly **28× to 64×**, produced purely by
+arms across seven captures — an access-latency spread of roughly **28× to 65×** (28.4–64.2× measured), produced purely by
 changing the working-set extent — while `instructions` differs by **≤0.2%** between those arms
 (0.003% in the committed capture): identical work, identical code path. An L3 hit
 is ~15–20 ns; ~200 ns is DRAM. No counter is needed to know these loads left the cache.
@@ -231,12 +231,12 @@ ones from a genuinely memory-clean workload. Only a differential against a predi
 
 The committed `host/` artefacts are regenerated in full whenever the probe changes, so every file
 under `host/` is reproducible by the committed script rather than by a revision of it that no longer
-exists. Over this branch's review rounds that happened **six times** on the same box
+exists. Over this branch's review rounds that happened **seven times** on the same box
 (`host/capability-probe.txt` stamps each one, and the superseded captures are in this branch's git
-history). Six independent reps is more than the finding needed, and the contrast they draw is the
+history). Seven independent reps is more than the finding needed, and the contrast they draw is the
 file's whole argument:
 
-| `hostile-2g` arm | across all six captures |
+| `hostile-2g` arm | across all seven captures |
 |---|---|
 | `cycle_activity.stalls_l3_miss:u` | **0 in every one — bit-identical** |
 | `offcore_requests_outstanding.*:u` | **0 in every one — bit-identical** |
@@ -245,7 +245,7 @@ file's whole argument:
 | `cycle_activity.stalls_total:u` | 5.63e9 – 7.50e9 (varies 33%) |
 | `ns_per_access` (slowest group) | 243.0 – 314.0 ns (tracks box load) |
 
-A counter that varies with load is measuring something. A counter that returns **exactly 0** in six
+A counter that varies with load is measuring something. A counter that returns **exactly 0** in seven
 captures of a workload doing billions of DRAM accesses — while its immediate neighbour in the same
 PMU group reads six billion and the wall clock says every access went to memory — is not.
 

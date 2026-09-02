@@ -176,7 +176,7 @@ inv "numactl --hardware" numactl --hardware
 
 # ------------------------------------------------- Gate D: derive the pinned CPUs
 # A COMPLETE SMT sibling group, read from sysfs. Correct on any topology.
-CPUSET=""; CPU_TOPO_NOTE=""; CPUSET_OK=0
+CPUSET=""; CPU_TOPO_NOTE=""; CPUSET_OK=0; ALLOWED_GROUPS=""
 
 # A COMPLETE, ONLINE, PROCESS-ALLOWED SMT sibling group, read from sysfs.
 # Revision 5 claimed to validate a complete group and only checked that each
@@ -229,10 +229,16 @@ else
       set_eq "$mgrp" "$grp" || { ok=0; break; }
     done
     [ "$ok" = 1 ] || continue
-    CPUSET=$(printf '%s\n' $grp | sort -n | paste -sd,)
-    CPU_TOPO_NOTE="complete sibling group from cpu${c##*cpu}, all members online AND in this process's Cpus_allowed_list"
-    CPUSET_OK=1
-    break
+    # Tally the UNIQUE complete groups available to THIS process (roborev job 405).
+    # Keyed by the group's sorted membership so the two hyperthreads of one core are
+    # counted once.
+    _key=$(printf '%s\n' $grp | sort -n | paste -sd,)
+    case " $ALLOWED_GROUPS " in *" $_key "*) ;; *) ALLOWED_GROUPS="$ALLOWED_GROUPS $_key"; esac
+    if [ "$CPUSET_OK" != 1 ]; then
+      CPUSET="$_key"
+      CPU_TOPO_NOTE="complete sibling group from cpu${c##*cpu}, all members online AND in this process's Cpus_allowed_list"
+      CPUSET_OK=1
+    fi
   done
   [ "$CPUSET_OK" = 1 ] || note_fail "Gate D: no COMPLETE sibling group is both online and permitted by this process's affinity mask — refusing to guess a CPU set (the #3217 hardcoded-core-table defect)"
 fi
@@ -242,14 +248,30 @@ fi
   echo "differential. #3224's measurement GEOMETRY needs 6 complete cores for the"
   echo "server plus 2 for the client, EXCLUSIVELY; that is a separate requirement"
   echo "this probe reports but cannot satisfy on a shared box."
-  echo "physical-core count: $(lscpu | awk -F: '/^Core\(s\) per socket/{gsub(/ /,"",$2);c=$2} /^Socket\(s\)/{gsub(/ /,"",$2);s=$2} END{print (c*s)?c*s:"unknown"}')"
+  # THE GEOMETRY NUMBER MUST BE THE ONE THIS PROCESS CAN ACTUALLY USE (roborev job
+  # 405). The line below used to be lscpu's MACHINE-WIDE core count while Gate D had
+  # validated exactly one group, so a process confined to a single core on a large
+  # host published evidence suggesting many usable cores — the reader would conclude
+  # the 6+2 geometry was within reach when it was not. Both numbers are now printed
+  # and each is labelled with its scope; the ALLOWED one is what the geometry
+  # requirement must be judged against.
+  _agroups=$(printf '%s' "${ALLOWED_GROUPS# }" | tr ' ' '\n' | grep -c '[0-9]' 2>/dev/null || echo 0)
+  echo "complete sibling groups ONLINE and ALLOWED to this process: ${_agroups} <-- judge #3224's 6+2 geometry against THIS"
+  echo "  (each group = one physical core; enumerated: ${ALLOWED_GROUPS# })"
+  echo "physical-core count, MACHINE-WIDE (NOT process-allowed; do not read as usable): $(lscpu | awk -F: '/^Core\(s\) per socket/{gsub(/ /,"",$2);c=$2} /^Socket\(s\)/{gsub(/ /,"",$2);s=$2} END{print (c*s)?c*s:"unknown"}')"
 } >> "$D/capability-probe.txt" 2>&1
 # Class swept with roborev job 327's f2: the CREATION of this file is checked above,
 # but its APPENDS were not, so a write failure part-way left a truncated inventory
-# under a COMPLETE verdict. Verified by its own last line rather than by `[ -s ]`,
-# which a half-written file also satisfies.
-grep -q '^physical-core count:' "$D/capability-probe.txt" 2>/dev/null \
-  || note_fail "inventory: capability-probe.txt is truncated (no 'physical-core count:' line) — the host inventory was not fully recorded"
+# under a COMPLETE verdict.
+#
+# Keyed on an EXPLICIT SENTINEL, not on a content line. Job 327 keyed it on
+# `^physical-core count:`, and rewording that line for job 405 silently broke the
+# guard — caught by the selftest, which is the point of having one. A sentinel whose
+# only job is to mark completeness cannot be invalidated by editing the prose around
+# it, and it matches the three other artefacts.
+echo "END-OF-RECORD: capability-probe complete" >> "$D/capability-probe.txt"
+grep -q '^END-OF-RECORD: capability-probe complete$' "$D/capability-probe.txt" 2>/dev/null \
+  || note_fail "inventory: capability-probe.txt is empty or truncated (no end-of-record marker) — the host inventory was not fully recorded"
 
 # ----------------------------------------------------- Gate A: TMA level-1 and -2
 # RECORDED, NOT CLASSIFIED (#3870, see SCOPE above). Each command's exit status and
@@ -387,7 +409,13 @@ else
            cycle_activity.stalls_total offcore_requests_outstanding.all_data_rd \
            LLC-load-misses cache-references; do
     { echo "== $e =="
-      if def=$(grep -A3 -E "^  ${e}\$" <<<"$PLD") && [ -n "$def" ]; then echo "$def"; echo "[semantics: FOUND]"
+      # From the event heading to the NEXT heading, never a fixed context window
+      # (roborev job 405). `grep -A3` truncates a wrapped description — so the
+      # encoding this file exists to record could fall outside the window while the
+      # entry still reported FOUND — and over-reads a short entry into the next
+      # event. awk delimits on the heading itself, so the record is whatever perf
+      # actually printed for that event.
+      if def=$(awk -v e="  ${e}" '''$0==e{f=1;print;next} f&&/^  [^ ]/{exit} f{print}''' <<<"$PLD") && [ -n "$def" ]; then echo "$def"; echo "[semantics: FOUND]"
       else echo "[semantics: NOT-LISTED on this host — no definition to verify against]"; fi
       echo; } >> "$D/counter-semantics-verification.txt"
   done
@@ -423,7 +451,13 @@ add_group() { # $1 name  rest: symbolic events
 }
 add_group control cycles instructions
 add_group stalls  cycle_activity.stalls_total cycle_activity.stalls_l2_miss cycle_activity.stalls_l3_miss
-add_group offcore offcore_requests_outstanding.all_data_rd offcore_requests_outstanding.cycles_with_data_rd
+# offcore_requests.all_data_rd joins the DIFFERENTIAL (roborev job 405). It used to
+# be probed with `perf stat -e … -- true` only and reported as `PROGRAMS`, which
+# cannot distinguish a working counter from a silent zero — the exact failure this
+# probe exists to catch, left undetectable on the one gate #3287 is about. add_group
+# drops it automatically where the PMU lacks it, so this costs nothing on a host
+# like this one and buys the differential on a host that has it.
+add_group offcore offcore_requests_outstanding.all_data_rd offcore_requests_outstanding.cycles_with_data_rd offcore_requests.all_data_rd
 add_group cache   LLC-loads LLC-load-misses cache-references cache-misses
 add_group prefetch l1d_pend_miss.pending l1d_pend_miss.fb_full
 
@@ -601,11 +635,22 @@ reading() { # $1 rendered-name  $2 group  -> raw per-arm counts, no verdict
   echo
   echo "-- GATE B: offcore / prefetch-stall term (the one #3287 exists for) --"
   echo "  (counts as measured; the 2 GiB arm is many times L3, so read a 0 there)"
-  for n in offcore_requests_outstanding.all_data_rd:u offcore_requests_outstanding.cycles_with_data_rd:u; do
+  for n in offcore_requests_outstanding.all_data_rd:u offcore_requests_outstanding.cycles_with_data_rd:u \
+           offcore_requests.all_data_rd:u; do
     echo "  $n : $(reading "$n" offcore)"
   done
-  for e in offcore_requests.all_data_rd offcore_requests_buffer.sq_full; do
-    echo "  $e : ${DISP[$e]:-unprobed} (disposition only; not in a differential group)"
+  # offcore_requests_buffer.sq_full is DECLARED UNVALIDATED and is NOT Gate B
+  # evidence (roborev job 405). It only becomes non-zero when the super-queue
+  # actually fills, which a single-dependency pointer chase does not reliably do, so
+  # a zero here would be indistinguishable from a silent instrument and this probe
+  # ships no positive control that could tell them apart. Reporting its disposition
+  # as though it were a reading is exactly the false-assurance this file argues
+  # against, so it is labelled instead.
+  for e in offcore_requests_buffer.sq_full; do
+    echo "  $e : ${DISP[$e]:-unprobed} — DECLARED UNVALIDATED, NOT Gate B evidence:"
+    echo "      no positive control exists here (the chase does not reliably fill the"
+    echo "      super-queue), so a 0 could not be told from a stuck counter. Do not"
+    echo "      derive anything from this line."
   done
   # The prefetch group was being MEASURED and VALIDATED and then left out of this
   # verdict, even though the resume note names l1d_pend_miss.fb_full as a required

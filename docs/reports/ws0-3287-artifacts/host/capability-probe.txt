@@ -1,6 +1,6 @@
 
 == date -u ==
-Wed Sep  2 16:43:46 UTC 2026
+Wed Sep  2 17:05:54 UTC 2026
 [rc=0] date -u
 
 == uname -a ==
@@ -80,7 +80,7 @@ Vulnerability Vmscape:                   Not affected
 available: 1 nodes (0)
 node 0 cpus: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
 node 0 size: 31549 MB
-node 0 free: 8338 MB
+node 0 free: 2963 MB
 node distances:
 node   0 
   0:  10 
@@ -95,4 +95,7 @@ NOTE: this is ONE complete sibling group, enough for the capability
 differential. #3224's measurement GEOMETRY needs 6 complete cores for the
 server plus 2 for the client, EXCLUSIVELY; that is a separate requirement
 this probe reports but cannot satisfy on a shared box.
-physical-core count: 8
+complete sibling groups ONLINE and ALLOWED to this process: 8 <-- judge #3224's 6+2 geometry against THIS
+  (each group = one physical core; enumerated: 0,8 1,9 2,10 3,11 4,12 5,13 6,14 7,15)
+physical-core count, MACHINE-WIDE (NOT process-allowed; do not read as usable): 8
+END-OF-RECORD: capability-probe complete

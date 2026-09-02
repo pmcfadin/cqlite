@@ -16,7 +16,6 @@
   cycle_activity.stalls_total
        [Total execution stalls. Unit: cpu]
         cpu/event=0xa3,cmask=4,period=1000003,umask=4/
-  exe.amx_busy
 [semantics: FOUND]
 
 == offcore_requests_outstanding.all_data_rd ==
@@ -30,6 +29,8 @@
        [Cache accesses. Usually this indicates Last Level Cache accesses but
         this may vary depending on your CPU. This may include prefetches and
         coherency messages; again this depends on the design of your CPU.
+        Unit: cpu]
+        cpu/event=0x2e,umask=0x4f/
 [semantics: FOUND]
 
 END-OF-RECORD: counter-semantics complete
