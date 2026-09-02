@@ -224,7 +224,7 @@ near-independent issues instead of running one to done before starting the next:
   **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` at <5-min intervals rather than idling —
   **never a bare `grep -q` on the bare `RESULT:` token**, which also matches the startup
   `RESULT: INCOMPLETE (gate did not finish)` **liveness placeholder** (not a verdict) and so false-fires the
-  instant the gate launches (#3041). That grammar is for full/`--lite`/`--delta`; an **`--only <component>`**
+  instant the gate launches (#3041). That grammar is for full and `--lite` ONLY; an **`--only <component>`**
   run demotes success to `RESULT: PARTIAL`, so it spins on green there (#3750) — poll exit status `3`, or
   `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`, and read the component's verdict SEPARATELY via
   `scripts/gate-component-verdict.sh --mode only --component <name>`. `--delta` is a THIRD mode with a THIRD set — it alone can terminate `ERROR` or `REFUSED`, so polling it with the record grammar hangs on a terminal outcome: `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` (#3750).

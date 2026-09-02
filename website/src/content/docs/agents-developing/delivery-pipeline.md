@@ -539,7 +539,9 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   the anchored **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` — never a bare `grep -q` on the
   bare `RESULT:` token, which also matches the startup `RESULT: INCOMPLETE` liveness placeholder and would accept
   a just-launched gate as a verdict, #3041; and never that grammar on an `--only` run, which demotes success to
-  `RESULT: PARTIAL` and so spins on green — see #3750 for the per-mode grammars and the separate component-verdict
+  `RESULT: PARTIAL` and so spins on green, and never that grammar on the **`--delta`** re-cert it also runs,
+  which alone can terminate `ERROR`/`REFUSED` and needs
+  `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'` — see #3750 for the per-mode grammars and the separate component-verdict
   read),
   the **C**
   intent audit, the final roborev pass, then merges on green and `flow-finalize`s. The closer has **no

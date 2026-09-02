@@ -29,8 +29,8 @@ the **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' "$AGENT_G
 `grep -q` on the bare `RESULT:` token fires the instant the gate starts and would accept a just-launched (or
 still-queued) gate as certified, and an unanchored form matches `RESULT: PASSENGER`.
 
-**COMPLETION AND VERDICT ARE TWO ASSERTIONS (#3750).** The record grammar above is for full/`--lite`/`--delta`
-and must keep **REFUSING** `PARTIAL`. An **`--only <component>`** run demotes success to `RESULT: PARTIAL`, so
+**COMPLETION AND VERDICT ARE TWO ASSERTIONS (#3750).** The record grammar above is for full and `--lite`
+ONLY, and must keep **REFUSING** `PARTIAL`, `ERROR` and `REFUSED`. An **`--only <component>`** run demotes success to `RESULT: PARTIAL`, so
 that grammar spins on green there. Poll `--only` by **EXIT STATUS** (`3` = completed PARTIAL) where you can
 observe it, else by the **ONLY grammar** `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`. **`--delta`
 is a THIRD mode with a THIRD set** — it alone can terminate `ERROR` or `REFUSED` (7 emit sites, all in

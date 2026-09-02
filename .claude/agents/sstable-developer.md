@@ -96,7 +96,7 @@ AGENT_GATE_SUMMARY_FILE=/tmp/lite-<N>.txt \
   bash scripts/agent-gate.sh --lite > /tmp/lite-<N>.log 2>&1 < /dev/null
 cat /tmp/lite-<N>.txt   # the complete ==== AGENT-GATE LITE SUMMARY ==== block
 ```
-The correct liveness probe on a full/`--lite`/`--delta` summary file is the **RECORD grammar**
+The correct liveness probe on a full or `--lite` summary file is the **RECORD grammar**
 `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` — a bare `INCOMPLETE` is the start-of-run placeholder
 written by the EXIT trap, **not** a verdict (#3041). An **`--only <component>`** run demotes success to
 `RESULT: PARTIAL`, so that grammar spins on green (#3750): poll its **exit status `3`** or

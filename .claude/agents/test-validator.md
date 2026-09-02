@@ -89,7 +89,7 @@ never reads gate stdout. **Never invoke the full gate yourself**: a subagent idl
 full gate gets killed by the 600s stall watchdog and takes its child gate process down with it.
 **Queued gate ≠ hung gate:** under load the full gate may queue for a #1825 slot (prints `waiting for gate
 slot (N in use)…` once) — use a long timeout or `run_in_background`, never assume a hang. The correct
-liveness probe on a full/`--lite`/`--delta` summary file is the **RECORD grammar**
+liveness probe on a full or `--lite` summary file is the **RECORD grammar**
 `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'` — a bare `INCOMPLETE` is the start-of-run placeholder,
 **not** a verdict (#3041). An **`--only <component>`** run is different: it demotes success to
 `RESULT: PARTIAL`, so the record grammar spins on green (#3750) — use its **exit status `3`**, or

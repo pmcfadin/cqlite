@@ -256,8 +256,10 @@ the same axis is where that stops being true.
 launch, before the #1825 slot is even granted (#3041). It is therefore the artifact of
 three states at once — queued, running, killed — and the correct completion probe (the RECORD
 grammar, `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'`) reports "not finished" for all three.
-An `--only` run needs the ONLY grammar instead (`…|PARTIAL)…`), and its component verdict is a
-separate read — see #3750. Resolving them
+An `--only` run needs the ONLY grammar instead (`…|PARTIAL)…`), a **`--delta` run needs the DELTA
+grammar** (`…|PARTIAL|ERROR|REFUSED)…` — it is the only mode that can terminate `ERROR` or `REFUSED`,
+so the record grammar hangs on a terminal outcome there), and a component verdict is a separate
+read — see #3750. Resolving them
 needed a human running `ps` on the box, which is what made one actor the fleet's only
 gate-runner.
 
