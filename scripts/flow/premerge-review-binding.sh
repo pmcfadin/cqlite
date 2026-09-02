@@ -355,6 +355,32 @@ record_verdict_class() {
   esac
 }
 
+# record_status_class <status> — did the review CONCLUDE? THREE-VALUED.
+#
+# THIS IS THE FIX FOR roborev JOB 78, FINDING F1, and what it replaces was a
+# HALF-FIX of job 59's finding 1. That finding asked for affirmative structured
+# evidence that the referenced job "completed successfully". The fix read the
+# VERDICT and extracted `status` beside it — then consumed the status NOWHERE
+# except a diagnostic string, so the COMPLETION half was never implemented while
+# the code read as though it were. A record carrying a clean letter with
+# `status=running` or `status=failed` bound the merge: roborev writes the verdict
+# column before the row is finalised, so an in-flight round can already carry a
+# letter.
+#
+# `done` is the terminal-success token, established by MEASUREMENT rather than
+# assumption — this box's own live records (`roborev show 59 --json`,
+# `roborev show 78 --json`) both report `status: done`, and every fixture in the
+# suite agrees. Anything NOT affirmatively recognised is `unknown` and NEVER
+# binds: a status this code has never judged is exactly the unmeasured state
+# that must not inherit the permissive branch.
+record_status_class() {
+  case "$1" in
+    done) printf 'terminal' ;;
+    '') printf 'unknown' ;;
+    *) printf 'nonterminal' ;;
+  esac
+}
+
 # deferral_authorized <job> <base> <head> <tmp> — 0 when an allowlisted human
 # authorized deferring THIS job's findings, with DEFERRAL_AUTHOR set.
 #
@@ -633,7 +659,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   local job bound=0 unclassifiable=0 unclassifiable_base=0 reviewed
   local heads=()
   local unresolved=()
-  local findings_unauthorized=0 verdict_unknown=0
+  local findings_unauthorized=0 verdict_unknown=0 unconcluded=0
   BOUND_NOTE=""
 
   # result_permits_binding <job> — 0 when this job's RECORD says its review
@@ -654,8 +680,26 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   # reachable only from the structured verdict letter, never reconstructed from
   # prose.
   result_permits_binding() {
-    local j="$1" class
+    local j="$1" class sclass
     RESULT_NOTE=""
+    # THE COMPLETION HALF, FIRST (job 78 finding F1). A verdict letter on a
+    # record whose job never reached a terminal state is not a review result:
+    # it is a partial row. Checked BEFORE the verdict so no verdict class can
+    # reach its own branch on an unconcluded job.
+    sclass=$(record_status_class "$RH_STATUS")
+    case "$sclass" in
+      terminal) : ;;
+      nonterminal)
+        RESULT_NOTE="job status is $(sane "$RH_STATUS"), which is not a terminal-success state — the review did not conclude, so nothing may rest on it"
+        RESULT_UNCONCLUDED=1
+        return 1
+        ;;
+      *)
+        RESULT_NOTE="job status could not be established from the record, so whether the review CONCLUDED is unknown"
+        RESULT_UNCONCLUDED=1
+        return 1
+        ;;
+    esac
     class=$(record_verdict_class "$RH_VERDICT")
     case "$class" in
       clean)
@@ -697,6 +741,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
     RH_ERR=""
     RH_VERDICT=""
     RH_STATUS=""
+    RESULT_UNCONCLUDED=0
     if ! reviewed_head_of "$job" "$tmp"; then
       say "job $(sane "$job") $(sane "$RH_ERR")"
       unresolved+=("$RH_ERR")
@@ -781,10 +826,14 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         break
       fi
       say "job $(sane "$job") but it CANNOT bind: $(sane "$RESULT_NOTE")"
-      case "$(record_verdict_class "$RH_VERDICT")" in
-        findings) findings_unauthorized=1 ;;
-        *) verdict_unknown=1 ;;
-      esac
+      if [ "${RESULT_UNCONCLUDED:-0}" -eq 1 ]; then
+        unconcluded=1
+      else
+        case "$(record_verdict_class "$RH_VERDICT")" in
+          findings) findings_unauthorized=1 ;;
+          *) verdict_unknown=1 ;;
+        esac
+      fi
       continue
     fi
 
@@ -801,10 +850,14 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
           break
         fi
         say "job $(sane "$job") but it CANNOT bind: $(sane "$RESULT_NOTE")"
-        case "$(record_verdict_class "$RH_VERDICT")" in
-          findings) findings_unauthorized=1 ;;
-          *) verdict_unknown=1 ;;
-        esac
+        if [ "${RESULT_UNCONCLUDED:-0}" -eq 1 ]; then
+          unconcluded=1
+        else
+          case "$(record_verdict_class "$RH_VERDICT")" in
+            findings) findings_unauthorized=1 ;;
+            *) verdict_unknown=1 ;;
+          esac
+        fi
         ;;
       1)
         say "job $(sane "$job") is an ancestor, but REVIEWABLE CODE was added after it"
@@ -859,6 +912,13 @@ could not be classified, so whether reviewable code was added after the review i
   if [ "$unclassifiable_base" -eq 1 ]; then
     causes+=("a recorded round's BASE half could not be compared against this PR's merge-base, \
 so how much of the branch that round actually covered is UNKNOWN.")
+  fi
+  if [ "$unconcluded" -eq 1 ]; then
+    causes+=("a recorded round COVERS the certified head, but its job RECORD does not \
+AFFIRMATIVELY report a terminal-success status, so the review did not CONCLUDE (or its \
+completion could not be read). A verdict letter on an unconcluded job is a partial row, not a \
+review result. Wait for the round to finish, or run a fresh one at this head and post the block \
+it prints.")
   fi
   if [ "$verdict_unknown" -eq 1 ]; then
     causes+=("a recorded round COVERS the certified head, but its job RECORD carries no \

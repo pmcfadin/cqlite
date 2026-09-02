@@ -205,21 +205,34 @@ chmod +x "$BIN/roborev"
 # readable verdict no longer binds, so a fixture omitting it would be asserting
 # the unknown-verdict path by accident. Pass `-` for a record carrying NO
 # verdict field at all.
+# roborev_job <id> <base> <head> [<verdict>] [<status>] [<started_at>]
+#
+# <verdict>    P clean / F findings / - omit the field entirely
+# <status>     the JOB's terminal state; `done` is the observed success token
+#              (measured on live records 59 and 78 on this box). `-` omits it.
+# <started_at> the F2 chronology key. `-` omits it. Defaults are chosen so every
+#              pre-F2 caller keeps its meaning: one covering record, terminal and
+#              stamped, i.e. unambiguously the latest.
 roborev_job() {
   mkdir -p "$MOCK_ROBOREV_DIR"
-  python3 - "$MOCK_ROBOREV_DIR/job-$1.json" "$1" "$2" "$3" "${4:-P}" <<'PY'
+  python3 - "$MOCK_ROBOREV_DIR/job-$1.json" "$1" "$2" "$3" "${4:-P}" \
+    "${5:-done}" "${6:-2026-09-02T10:00:00Z}" <<'PYJOB'
 import json, sys
-out, job, base, head, verdict = sys.argv[1:6]
+out, job, base, head, verdict, status, started = sys.argv[1:8]
 row = {"id": int(job), "git_ref": "%s..%s" % (base, head),
-       "status": "done", "model": "gpt-5.6-sol",
+       "model": "gpt-5.6-sol",
        "token_usage": json.dumps({"input_tokens": 400000,
                                   "cached_input_tokens": 320000,
                                   "total_output_tokens": 5000})}
 if verdict != "-":
     row["verdict"] = verdict
+if status != "-":
+    row["status"] = status
+if started != "-":
+    row["started_at"] = started
 json.dump({"id": int(job), "job_id": int(job), "agent": "codex", "job": row},
           open(out, "w"))
-PY
+PYJOB
 }
 
 # defer_marker <issues> <count> <base> <head> <job> <reason> — the authorization
@@ -1652,6 +1665,93 @@ if run_binding 5 "result: a record with NO verdict field does NOT bind" \
   esac
 fi
 
+# ==============================================================================
+# FINDING F1 (roborev job 78) — A NON-TERMINAL JOB MUST NOT BIND
+# ==============================================================================
+# Job 59's finding 1 asked for affirmative structured evidence that the review
+# CONCLUDED SUCCESSFULLY. The fix read the record's VERDICT and extracted
+# `status` beside it — and then never consumed it, so the completion half was
+# never implemented while the code read as though it were. A record carrying a
+# clean letter with `status=running` (the letter is written before the row is
+# finalised) or `status=failed` bound the merge.
+#
+# `done` is the observed terminal-success token, measured on this box's own live
+# records (jobs 59 and 78 both report `status: done`). Anything NOT
+# affirmatively recognised fails closed and is NAMED, because a status this code
+# has never judged is exactly the unknown that must not inherit the permissive
+# branch.
+
+# --- status=running, verdict CLEAN: must NOT bind ----------------------------
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 620)"
+roborev_job 620 "$(cd "$WORK" && git rev-parse main)" "$HEAD_AFTER" P running
+if run_binding 5 "status: a RUNNING record with a clean letter does NOT bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "status: a running record is UNMEASURED — the review has not concluded" ;;
+    *) bad "status: expected UNMEASURED for a running record (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *running*)
+      ok "status: the refusal NAMES the non-terminal status it saw" ;;
+    *) bad "status: the refusal did not name the status (got: $OUT)" ;;
+  esac
+fi
+
+# --- status=failed, verdict CLEAN: must NOT bind -----------------------------
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 621)"
+roborev_job 621 "$(cd "$WORK" && git rev-parse main)" "$HEAD_AFTER" P failed
+if run_binding 5 "status: a FAILED record with a clean letter does NOT bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "status: a failed record is UNMEASURED, never a binding" ;;
+    *) bad "status: expected UNMEASURED for a failed record (got: $OUT)" ;;
+  esac
+fi
+
+# --- status ABSENT, verdict CLEAN: must NOT bind ------------------------------
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 622)"
+roborev_job 622 "$(cd "$WORK" && git rev-parse main)" "$HEAD_AFTER" P -
+if run_binding 5 "status: a record with NO status field does NOT bind" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "status: an ABSENT status never binds — completion was not measured" ;;
+    *) bad "status: expected UNMEASURED for a status-less record (got: $OUT)" ;;
+  esac
+fi
+
+# --- status=done is the AFFIRMATIVE token: the control for the three above ----
+# Without this the cases above are satisfied by a leg broken shut.
+pr_payload "$MOCK_GH_DIR/pr.json" main "$(roborev_block 623)"
+roborev_job 623 "$(cd "$WORK" && git rev-parse main)" "$HEAD_AFTER" P done
+if run_binding 0 "status: a DONE record with a clean letter still binds (control)" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict BOUND"*)
+      ok "status: \`done\` is the affirmative terminal token, so correct input is not red" ;;
+    *) bad "status: a done+clean record failed to bind (got: $OUT)" ;;
+  esac
+fi
+
+# --- status non-terminal + FINDINGS + an AUTHORIZED deferral: still no bind ---
+# The status gate sits BEFORE the verdict branch, so an unconcluded job cannot
+# reach EITHER bindable class. Pinned on the deferral class too, because that is
+# the path an authorization could otherwise carry past the completion check.
+MB_RUN=$(cd "$WORK" && git rev-parse main)
+pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 624)" pmcfadin \
+  "$(defer_marker 3602,3613 2 "$MB_RUN" "$HEAD_AFTER" 624 'deferred but the round never finished')"
+roborev_job 624 "$MB_RUN" "$HEAD_AFTER" F running
+if run_binding 5 "status: an unconcluded job does not bind even WITH a deferral" \
+  review-binding 1 o/r "$HEAD_AFTER"; then
+  case "$OUT" in
+    *"verdict UNMEASURED"*)
+      ok "status: the completion gate precedes BOTH bindable verdict classes" ;;
+    *) bad "status: a running findings+deferral record was not UNMEASURED (got: $OUT)" ;;
+  esac
+fi
+
 # --- verdict FINDINGS + AUTHORIZED deferral: binds, under a DISTINCT token ----
 # The marker must name THIS job's base and head, be the SOLE content of a
 # top-level comment, and come from the hard-coded allowlist.
@@ -1830,7 +1930,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=119
+CASE_FLOOR=125
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"
