@@ -2308,7 +2308,39 @@ fi
 # A vacuous assertion is worse than a missing one, because it invites reliance it
 # cannot support. It is KEPT as a cheap second signal (it also catches a stray
 # sentinel from an earlier run) and is no longer the primary check.
-to_leaks() { ps -eo args= 2>/dev/null | grep -c -x -F "$TOSENTINEL"; }
+# THREE-VALUED SINCE roborev job 380, and it had TWO fail-open routes at once:
+#   * `ps` ran INSIDE A PIPELINE, so its exit status was DISCARDED entirely — the
+#     pipeline's status is grep's. A failing `ps` produced EMPTY input, grep
+#     counted 0, and the caller read "no leaks".
+#   * `grep -c` prints `0` AND EXITS 1 on no-match, so its status cannot be used
+#     naively either (that trap already cost this file one round).
+# So `ps` writes to a FILE, its status is inspected, and only then is the count
+# taken. Prints a NUMBER, or the literal `UNMEASURABLE` — never a silent 0. The
+# caller must FAIL on UNMEASURABLE: this suite tests a guard that is fail-closed
+# on an unmeasurable state, so its own checks being permissive there would be
+# incoherent.
+to_leaks() {
+  local psout n rc=0 grc=0
+  psout="$T/ps-census.txt"
+  ps -eo args= >"$psout" 2>/dev/null || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$psout"
+    printf 'UNMEASURABLE\n'
+    return 0
+  fi
+  n=$(grep -c -x -F "$TOSENTINEL" "$psout" 2>/dev/null)
+  grc=$?
+  rm -f "$psout"
+  # grep -c: 0 = matches, 1 = none (still prints a count), >=2 = ERROR.
+  if [ "$grc" -ge 2 ]; then
+    printf 'UNMEASURABLE\n'
+    return 0
+  fi
+  case "$n" in
+    ''|*[!0-9]*) printf 'UNMEASURABLE\n'; return 0 ;;
+  esac
+  printf '%s\n' "$n"
+}
 
 # to_check_pid <label> <pidfile> <expected-argv-needle> — the PRIMARY leak check
 # (job 367). The shim records its OWN pid before it blocks; `exec` PRESERVES the
@@ -2331,15 +2363,22 @@ to_leaks() { ps -eo args= 2>/dev/null | grep -c -x -F "$TOSENTINEL"; }
 # SELF-TESTED (see 44(l)): it prints exactly one verdict token and KILLS NOTHING.
 # A check whose only caller reports "no leak" cannot demonstrate that it would
 # ever say otherwise, which is the defect this whole round is about.
-#   NO-SUBJECT | BAD-PID | GONE | ZOMBIE | LEAK | RECYCLED
+#   NO-SUBJECT | BAD-PID | UNMEASURABLE | GONE | ZOMBIE | LEAK | RECYCLED
+#
+# `UNMEASURABLE` was added on roborev job 380: `args=$(ps …) || args=""` collapsed
+# a FAILED probe onto an EMPTY one, so a `ps` that could not run was reported as
+# `GONE` — a surviving timeout child read as successfully reaped while the suite
+# passed. Same measured split as `to_kill_decoy` uses: `ps -p <gone>` exits 1 with
+# no output (an affirmative "not found"), a broken `ps` exits >= 2.
 to_pid_verdict() {
-  local pidfile="$1" needle="$2" pid args
+  local pidfile="$1" needle="$2" pid args rc=0
   if [ ! -f "$pidfile" ]; then printf 'NO-SUBJECT\n'; return 0; fi
   pid=$(cat "$pidfile" 2>/dev/null)
   case "$pid" in
     ''|*[!0-9]*) printf 'BAD-PID\n'; return 0 ;;
   esac
-  args=$(ps -p "$pid" -o args= 2>/dev/null) || args=""
+  args=$(ps -p "$pid" -o args= 2>/dev/null) || rc=$?
+  if [ "$rc" -ge 2 ]; then printf 'UNMEASURABLE\n'; return 0; fi
   if [ -z "$args" ]; then printf 'GONE\n'; return 0; fi
   case "$args" in
     *"<defunct>"*) printf 'ZOMBIE\n' ;;
@@ -2360,6 +2399,11 @@ to_check_pid() {
       return 1 ;;
     BAD-PID)
       bad "hung-read ($label): the shim recorded a non-numeric pid ('$pid') — the leak check cannot be made"
+      return 1 ;;
+    UNMEASURABLE)
+      # NOT read as "no leak": the probe could not answer, so whether the runner
+      # reaped its child is UNKNOWN, and an unknown is never a pass (job 380).
+      bad "hung-read ($label): the process probe FAILED (ps unusable), so whether pid $pid survived the bound is UNKNOWN — never read as reaped"
       return 1 ;;
   esac
   ok "hung-read ($label): the shim recorded its own pid ($pid) — the leak check has a SUBJECT"
@@ -2443,7 +2487,9 @@ to_run_arm() {
   # SECONDARY: the sentinel census, kept as a cheap cross-check. It can only see
   # the TERM arm's `exec`ed sleep — see the note on to_leaks.
   leaks=$(to_leaks)
-  if [ "$leaks" = 0 ]; then
+  if [ "$leaks" = UNMEASURABLE ]; then
+    bad "hung-read ($label): the sentinel census could not be taken (ps unusable) — that is UNKNOWN, not 'no strays' (job 380)"
+  elif [ "$leaks" = 0 ]; then
     ok "hung-read ($label): the sentinel census also finds no stray sleep (secondary check)"
   else
     bad "hung-read ($label): $leaks stray process(es) matching the sentinel survived — the runner did not reap its child (job 279)"
@@ -2774,6 +2820,25 @@ else
     bad "leak self-test: an affirmatively-gone pid left the registration set — it would never be released"
   fi
   DECOY_CLEANUP_NEEDLE=""
+  # THE SAME FAIL-CLOSED PROPERTY FOR THE TWO *LEAK CHECKS* (job 380). The arm
+  # above covers `to_kill_decoy`; these cover the PRIMARY verdict and the
+  # SECONDARY census, which had the same permissive-on-unmeasurable read. Reuses
+  # the `$FAILPS` shim built above — no new machinery.
+  _kd_path="$PATH"
+  PATH="$FAILPS:$PATH"
+  v=$(to_pid_verdict "$DECOY_PID" "$DECOY_DIR/git")
+  n=$(to_leaks)
+  PATH="$_kd_path"
+  if [ "$v" = UNMEASURABLE ]; then
+    ok "leak self-test: a FAILED ps probe makes to_pid_verdict UNMEASURABLE, never GONE (job 380)"
+  else
+    bad "leak self-test: to_pid_verdict reported '$v' with an unusable ps — a surviving process would read as successfully reaped"
+  fi
+  if [ "$n" = UNMEASURABLE ]; then
+    ok "leak self-test: a FAILED ps makes the census UNMEASURABLE, never a silent 0 (job 380)"
+  else
+    bad "leak self-test: to_leaks reported '$n' with an unusable ps — a stray would read as absent"
+  fi
   # (the no-child property is asserted at the fixture, while the decoy is still
   # alive — see `decoy_kids` above. A post-hoc census for a `sleep` argv, which
   # is what stood here, became VACUOUS the moment the decoy stopped spawning one:
