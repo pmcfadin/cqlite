@@ -1,10 +1,53 @@
 use super::*;
+// Issue #3847: the ONE statement of which widths a fixed-width CQL scalar admits
+// on the read path and what an EMPTY buffer means. Lives under `raw_value`
+// because that is #3847's named subject; these two field decoders are reconciled
+// TO it so the two families cannot hold two opinions about a width.
+use super::raw_value::fixed_width::{self, FixedWidthCell};
 
 // Issue #3811: the inline-field UDT decoder, split out under the campsite rule
 // and carrying the consumption contract census finding C left open.
 mod inline;
 
+// Issue #3847: the empty buffer is a legal fixed-width UDT field value meaning
+// null. Registered here (not in `mod.rs`, which is over the campsite file-size
+// ratchet ceiling) because it drives THIS file's two field decoders and their
+// three framing call sites.
+#[cfg(test)]
+#[path = "udt/issue_3847_empty_fixed_width_tests.rs"]
+mod issue_3847_empty_fixed_width_tests;
+
 impl V5CompressedLegacyParser {
+    /// The width rule for a fixed-width scalar UDT FIELD (issue #3847).
+    ///
+    /// A UDT field's slice is exactly bounded by its `[i32 BE len]` component
+    /// header, and neither of this file's two field decoders reports consumption,
+    /// so the accepted set is checked here IN FULL: `{n, 0}` — `n` bytes, or the
+    /// EMPTY buffer, which is Cassandra's on-the-wire spelling of `null`. Anything
+    /// else is corruption.
+    ///
+    /// Oracle: `docs/round-artifacts/issue-3847-cassandra-oracle.md` (pinned
+    /// `cassandra-5.0.8`); the rule itself, and why `deserialize()` rather than
+    /// `validate()` governs a read path, is stated once in
+    /// [`super::raw_value::fixed_width`]. A [`FixedWidthCell::Null`] MUST be
+    /// decoded to [`Value::Null`] by the caller — before #3847 both decoders
+    /// spelled this `data.len() != n` and refused a legal empty field, which is
+    /// what `parse_nested_udt_from_registry`, `parse_inline_udt_value` and
+    /// `raw_type_value.rs`'s UDT framing all hit on a zero-length field.
+    ///
+    /// `what` and the singular/plural of `byte` reproduce the pre-#3847 message
+    /// wording exactly, so a caller matching on the text is unaffected.
+    fn require_udt_field_width(data: &[u8], n: usize, what: &str) -> Result<FixedWidthCell> {
+        fixed_width::admissible_exactly(data, n).ok_or_else(|| {
+            Error::corruption(format!(
+                "{} field requires {} byte{}, got {}",
+                what,
+                n,
+                if n == 1 { "" } else { "s" },
+                data.len()
+            ))
+        })
+    }
     /// Issue #1080: is this on-disk SerializationHeader marshal type a TOP-LEVEL
     /// frozen (or bare) UDT — `FrozenType(UserType(...))` or `UserType(...)` — that
     /// may be decoded as a single UDT blob via `decode_frozen_udt_from_header_type`?
@@ -551,93 +594,67 @@ impl V5CompressedLegacyParser {
                     crate::storage::sstable::reader::value_borrow::borrow_active(data),
                 ))
             }
-            CqlType::Int => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Int field requires 4 bytes, got {}",
-                        data.len()
-                    )));
+            CqlType::Int => match Self::require_udt_field_width(data, 4, "Int")? {
+                FixedWidthCell::Null => Ok(Value::Null),
+                FixedWidthCell::Bytes => {
+                    let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                    Ok(Value::Integer(v))
                 }
-                let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Integer(v))
-            }
-            CqlType::BigInt => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "BigInt field requires 8 bytes, got {}",
-                        data.len()
-                    )));
+            },
+            CqlType::BigInt => match Self::require_udt_field_width(data, 8, "BigInt")? {
+                FixedWidthCell::Null => Ok(Value::Null),
+                FixedWidthCell::Bytes => {
+                    let v = i64::from_be_bytes([
+                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                    ]);
+                    Ok(Value::BigInt(v))
                 }
-                let v = i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::BigInt(v))
-            }
-            CqlType::Float => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Float field requires 4 bytes, got {}",
-                        data.len()
-                    )));
+            },
+            CqlType::Float => match Self::require_udt_field_width(data, 4, "Float")? {
+                FixedWidthCell::Null => Ok(Value::Null),
+                FixedWidthCell::Bytes => {
+                    let bits = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                    Ok(Value::Float32(f32::from_bits(bits)))
                 }
-                let bits = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Float32(f32::from_bits(bits)))
-            }
-            CqlType::Double => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "Double field requires 8 bytes, got {}",
-                        data.len()
-                    )));
+            },
+            CqlType::Double => match Self::require_udt_field_width(data, 8, "Double")? {
+                FixedWidthCell::Null => Ok(Value::Null),
+                FixedWidthCell::Bytes => {
+                    let bits = u64::from_be_bytes([
+                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                    ]);
+                    Ok(Value::Float(f64::from_bits(bits)))
                 }
-                let bits = u64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::Float(f64::from_bits(bits)))
-            }
-            CqlType::Boolean => {
-                if data.len() != 1 {
-                    return Err(Error::corruption(format!(
-                        "Boolean field requires 1 byte, got {}",
-                        data.len()
-                    )));
+            },
+            CqlType::Boolean => match Self::require_udt_field_width(data, 1, "Boolean")? {
+                FixedWidthCell::Null => Ok(Value::Null),
+                FixedWidthCell::Bytes => Ok(Value::Boolean(data[0] != 0)),
+            },
+            CqlType::Uuid => match Self::require_udt_field_width(data, 16, "UUID")? {
+                FixedWidthCell::Null => Ok(Value::Null),
+                FixedWidthCell::Bytes => {
+                    let uuid_bytes: [u8; 16] = data[0..16]
+                        .try_into()
+                        .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
+                    Ok(Value::Uuid(uuid_bytes))
                 }
-                Ok(Value::Boolean(data[0] != 0))
-            }
-            CqlType::Uuid => {
-                if data.len() != 16 {
-                    return Err(Error::corruption(format!(
-                        "UUID field requires 16 bytes, got {}",
-                        data.len()
-                    )));
+            },
+            CqlType::Timestamp => match Self::require_udt_field_width(data, 8, "Timestamp")? {
+                FixedWidthCell::Null => Ok(Value::Null),
+                FixedWidthCell::Bytes => {
+                    let millis = i64::from_be_bytes([
+                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                    ]);
+                    Ok(Value::Timestamp(millis))
                 }
-                let uuid_bytes: [u8; 16] = data[0..16]
-                    .try_into()
-                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
-                Ok(Value::Uuid(uuid_bytes))
-            }
-            CqlType::Timestamp => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "Timestamp field requires 8 bytes, got {}",
-                        data.len()
-                    )));
+            },
+            CqlType::Date => match Self::require_udt_field_width(data, 4, "Date")? {
+                FixedWidthCell::Null => Ok(Value::Null),
+                FixedWidthCell::Bytes => {
+                    let days = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                    Ok(Value::Date(days as i32))
                 }
-                let millis = i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::Timestamp(millis))
-            }
-            CqlType::Date => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Date field requires 4 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let days = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Date(days as i32))
-            }
+            },
             CqlType::Blob => Ok(Value::Blob(
                 crate::storage::sstable::reader::value_borrow::borrow_active(data),
             )),
@@ -845,83 +862,62 @@ impl V5CompressedLegacyParser {
                     crate::storage::sstable::reader::value_borrow::borrow_active(data),
                 ))
             }
-            CqlType::Int => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Int field requires 4 bytes, got {}",
-                        data.len()
-                    )));
+            CqlType::Int => match Self::require_udt_field_width(data, 4, "Int")? {
+                FixedWidthCell::Null => Ok(Value::Null),
+                FixedWidthCell::Bytes => {
+                    let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                    Ok(Value::Integer(v))
                 }
-                let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Integer(v))
-            }
-            CqlType::BigInt => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "BigInt field requires 8 bytes, got {}",
-                        data.len()
-                    )));
+            },
+            CqlType::BigInt => match Self::require_udt_field_width(data, 8, "BigInt")? {
+                FixedWidthCell::Null => Ok(Value::Null),
+                FixedWidthCell::Bytes => {
+                    let v = i64::from_be_bytes([
+                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                    ]);
+                    Ok(Value::BigInt(v))
                 }
-                let v = i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::BigInt(v))
-            }
-            CqlType::Boolean => {
-                if data.len() != 1 {
-                    return Err(Error::corruption(format!(
-                        "Boolean field requires 1 byte, got {}",
-                        data.len()
-                    )));
+            },
+            CqlType::Boolean => match Self::require_udt_field_width(data, 1, "Boolean")? {
+                FixedWidthCell::Null => Ok(Value::Null),
+                FixedWidthCell::Bytes => Ok(Value::Boolean(data[0] != 0)),
+            },
+            CqlType::Float => match Self::require_udt_field_width(data, 4, "Float")? {
+                FixedWidthCell::Null => Ok(Value::Null),
+                FixedWidthCell::Bytes => {
+                    let bits = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                    Ok(Value::Float32(f32::from_bits(bits)))
                 }
-                Ok(Value::Boolean(data[0] != 0))
-            }
-            CqlType::Float => {
-                if data.len() != 4 {
-                    return Err(Error::corruption(format!(
-                        "Float field requires 4 bytes, got {}",
-                        data.len()
-                    )));
+            },
+            CqlType::Double => match Self::require_udt_field_width(data, 8, "Double")? {
+                FixedWidthCell::Null => Ok(Value::Null),
+                FixedWidthCell::Bytes => {
+                    let bits = u64::from_be_bytes([
+                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                    ]);
+                    Ok(Value::Float(f64::from_bits(bits)))
                 }
-                let bits = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                Ok(Value::Float32(f32::from_bits(bits)))
-            }
-            CqlType::Double => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "Double field requires 8 bytes, got {}",
-                        data.len()
-                    )));
-                }
-                let bits = u64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::Float(f64::from_bits(bits)))
-            }
+            },
             CqlType::Uuid | CqlType::TimeUuid => {
-                if data.len() != 16 {
-                    return Err(Error::corruption(format!(
-                        "UUID field requires 16 bytes, got {}",
-                        data.len()
-                    )));
+                match Self::require_udt_field_width(data, 16, "UUID")? {
+                    FixedWidthCell::Null => Ok(Value::Null),
+                    FixedWidthCell::Bytes => {
+                        let uuid_bytes: [u8; 16] = data[0..16]
+                            .try_into()
+                            .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
+                        Ok(Value::Uuid(uuid_bytes))
+                    }
                 }
-                let uuid_bytes: [u8; 16] = data[0..16]
-                    .try_into()
-                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
-                Ok(Value::Uuid(uuid_bytes))
             }
-            CqlType::Timestamp => {
-                if data.len() != 8 {
-                    return Err(Error::corruption(format!(
-                        "Timestamp field requires 8 bytes, got {}",
-                        data.len()
-                    )));
+            CqlType::Timestamp => match Self::require_udt_field_width(data, 8, "Timestamp")? {
+                FixedWidthCell::Null => Ok(Value::Null),
+                FixedWidthCell::Bytes => {
+                    let millis = i64::from_be_bytes([
+                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                    ]);
+                    Ok(Value::Timestamp(millis))
                 }
-                let millis = i64::from_be_bytes([
-                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                ]);
-                Ok(Value::Timestamp(millis))
-            }
+            },
             CqlType::Blob => Ok(Value::Blob(
                 crate::storage::sstable::reader::value_borrow::borrow_active(data),
             )),
