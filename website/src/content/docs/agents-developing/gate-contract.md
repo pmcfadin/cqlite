@@ -763,7 +763,17 @@ another repository — and it is a **digest** of that canonical path, because fl
 injective: replacing `/` and every unsupported character with `_` maps `/tmp/a/b/objects` and
 `/tmp/a_b/objects` to one name, so two repositories on a box shared a throttle stamp *and* a
 `CORRUPT` latch. The form is `<sanitised tail>.<16 hex of sha256>`, where the tail is readability
-only and carries no identity; three digest tools (`sha256sum`, `shasum -a 256`,
+only and carries no identity. **The digest is taken from the RAW path, in the resolver — digesting
+the RENDERED value was itself the next defect (round 5).** Round 4 made the key injective over the
+flattening and then fed the digest the value `--print-store` had already passed through the sweep
+script's `sane()` escaper, which is a *display* encoding and a lossy one: a path holding a real
+newline and one holding the two literal characters `\n` produced ONE key, which is the same
+shared-stamp-and-latch harm arriving through the fix for it. So `store_key` lives in the sweep
+script — the only process holding the raw bytes — and publishes a second anchored `store-key` line
+that the caller validates and uses verbatim, while the supervisor's own digest helper is gone, so no
+lossy value is left for a future caller to digest. The transferable rule: **a value sanitised for
+DISPLAY is not an IDENTITY; derive a comparison key before any rendering, and where both are needed
+publish two fields rather than deriving one from the other.** Three digest tools (`sha256sum`, `shasum -a 256`,
 `openssl dgst -sha256`) cover both platforms, the output is parsed from both ends and then validated
 as hex, and a host with none fails closed to the **empty** key — no throttle, no latch, announced
 once naming both causes — never a silent fall back to the colliding form. `cksum` is present
@@ -777,7 +787,42 @@ non-corrupt stamp and throttled past a corruption about to be recorded; and a la
 said `VERIFIED` returned toward a spawn without re-reading the latch, so a peer latching the box
 *during* that lane's two fsck walks was never seen. Both are ordering fixes, neither needs a lock:
 latch first, stamp second, and one `obj_sweep_stop_if_latched` helper before the throttled,
-`VERIFIED` and `UNMEASURED` returns alike — one rule instead of a set of paths to audit. **What is
+`VERIFIED` and `UNMEASURED` returns alike — one rule instead of a set of paths to audit.
+**That rule was still a set of SITES, and round 5 found the fourth — so the read is now at ENTRY,
+above every branch.** The documented opt-out `OBJ_SWEEP_INTERVAL_HOURS=0` returned before any latch
+read, so switching the sweep off also switched off an already-recorded `CORRUPT` verdict. Patching
+the fourth site would have left a fifth, because the design required every early return to remember
+the check; the read is therefore hoisted to the top of `object_store_sweep`, whose prologue is now
+declarations and assignments only, and the invariant is a property of the FUNCTION ("it cannot be
+entered without a latch read") that holds for branches nobody has written yet — asserted
+structurally. The post-sweep reads stay: a peer can latch the box while this lane spends up to
+`MAX_SWEEP_WALKS` walks. Cost: one `--print-store` resolution per iteration (measured 5 ms) on a
+path that previously paid none. The latch question is also **four-valued**, because `[[ -e ]]` is
+false both for an absent latch and for one the process cannot look at: `unknown` STOPS under its own
+reason (`object-store-latch-unreadable`, never as `CORRUPT` — nothing observed damage), and
+`unkeyed` is the one permissive answer, announced once, because no key means no latch was ever named
+and stopping would make a missing sweep script halt every lane for want of a hygiene probe.
+
+**The thundering herd is closed, with the hazard its fix introduces.** The throttle read and the
+sweep invocation were unsynchronised and the stamp is written at the END of a sweep, so when the
+interval expired every lane read the same stale stamp and started its own full-store fsck — not
+merely a CPU cost: the walks are I/O-bound, so contention pushes them toward the per-walk bound, and
+an expired bound is `UNMEASURED`, a correlated loss of the measurement on every lane at once. The
+serialiser is a per-store claim **directory** created with `mkdir` (the latch's kernel-arbitrated
+create-only primitive, and deliberately not `flock`, since this file's single-instance lock is
+mkdir-based precisely because macOS ships no `flock(1)`). A loser does not wait — it skips that
+iteration's probe and carries on after the usual latch read — and the throttle is **re-read after
+acquiring**, which is what stops the claim converting a herd into a queue of redundant sweeps. A
+stale claim must not wedge the box, which would be worse than the herd, so the recovery threshold is
+**derived**: a claim cannot be stale while the sweep it represents could still be running, so it is
+the sweep's own `MAX_SWEEP_WALKS` (read from that script) × this supervisor's per-walk bound + slack
+= 3 × 200 + 60 = 660s; a claim with no parseable start time reads as stale on purpose (its cause is
+a lane killed between the `mkdir` and the write, and the other reading wedges the sweep forever),
+and where the bound cannot be derived **no claim is taken at all** and the previous behaviour is
+restored, announced. The claim is a registered resource released by the EXIT trap, so the `CORRUPT`
+path — which ends the process — does not leave peers waiting out the bound. Not closed, and
+pre-existing: this file installs no INT/TERM handlers, so a signalled supervisor releases neither
+its claim nor its lock; for the claim that is a delay, not a wedge. **What is
 not closed:** the latch read and the worker spawn are still unsynchronised, and the preflight hold
 loop can poll for minutes between them, so one worker can still start on a box latched moments
 earlier. It is bounded (that lane's next iteration reads the latch at the top of its sweep and

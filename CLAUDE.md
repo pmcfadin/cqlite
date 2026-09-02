@@ -552,7 +552,63 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   DURING that lane's two fsck walks was simply not seen. So: latch first, stamp second, and one
   `obj_sweep_stop_if_latched` helper called before the throttled, `VERIFIED` and `UNMEASURED`
   returns alike — one rule ("no such return without a fresh latch read") instead of a set of paths
-  someone must remember to audit. **What is NOT closed, stated because a narrowed race described as
+  someone must remember to audit.
+  **THAT RULE WAS STILL A SET OF SITES, AND ROUND 5 FOUND THE FOURTH — SO THE READ IS NOW AT
+  ENTRY, ABOVE EVERY BRANCH (round 5, item 1).** The documented opt-out
+  `OBJ_SWEEP_INTERVAL_HOURS=0` returned before ANY latch read, so switching the sweep off also
+  switched off an already-recorded CORRUPT verdict — while this paragraph asserted a latch ignores
+  the interval. Round 3 fixed three such returns and introduced the helper *for* them; round 5's
+  fourth is the same defect through a new door, because the design required every early return to
+  independently REMEMBER the check, and patching site four leaves site five to the next reviewer.
+  So the read is hoisted to the TOP of `object_store_sweep` — the prologue before it is
+  declarations and assignments ONLY — and the invariant becomes a property of the FUNCTION ("it
+  cannot be entered without a latch read") rather than of an audited list, which holds for branches
+  nobody has written yet; it is asserted structurally, both that the first control-flow line comes
+  after the gate and that nothing before it can branch, call out or return. The post-sweep reads
+  STAY: a peer can latch the box while this lane spends up to `MAX_SWEEP_WALKS` walks, which is a
+  different question. Cost: one `--print-store` resolution per iteration (measured **5 ms**), which
+  the opt-out path did not pay before, against a supervisor iteration measured in minutes.
+  **AND THE LATCH QUESTION IS FOUR-VALUED, BECAUSE A FILE PREDICATE IS NOT.** `[[ -e "$latch" ]]`
+  is false both for an absent latch and for one the process cannot look at — CLAUDE.md's standing
+  two-valued-predicate rule, landing on the single file whose job is to stop the box. `present` and
+  `absent` (an affirmative measurement: the directory was searchable, or does not exist) join
+  **`unknown`**, which STOPS under its own reason `object-store-latch-unreadable` — never as
+  CORRUPT, since nothing observed damage and that remedy would send an operator to re-clone a
+  healthy store — and **`unkeyed`**, the one permissive answer, announced once: no key means no
+  latch was ever NAMED, the writer derives the name through the same resolver, and stopping instead
+  would make a missing `check-object-store-integrity.sh` (ordinary on any branch cut before #3749)
+  halt every lane for want of a hygiene probe. Its residual is stated at the branch: a TRANSIENT
+  resolver failure in one lane misses a peer's verdict for one iteration.
+  **THE THUNDERING HERD IS CLOSED, WITH THE HAZARD ITS FIX INTRODUCES (round 5, item 2 — a Low in
+  round 1, "not disposed of" in round 2, a Medium in round 5).** The throttle read and the sweep
+  invocation were unsynchronised and the stamp is written at the END of a sweep, so at the moment
+  the interval expires every lane read the same stale stamp and started its own full-store fsck —
+  and the consequence is not merely CPU: the walks are I/O-bound, so contention pushes them toward
+  the per-walk bound, and an expired bound is `UNMEASURED`, i.e. a CORRELATED loss of the
+  measurement on every lane at once. The serialiser is a per-store claim DIRECTORY created with
+  `mkdir` — the same kernel-arbitrated create-only primitive as the latch, and deliberately **not
+  `flock`**, because this file's own single-instance lock is mkdir-based precisely since **macOS
+  ships no `flock(1)`**, and a second locking mechanism is a second set of failure modes. A loser
+  does NOT wait: it skips that iteration's probe and carries on (after the usual latch read), since
+  "a peer is doing it right now" is a complete answer for a 6-hourly hygiene sweep and waiting would
+  put the box's whole spawn path behind one fsck. The throttle is **RE-READ after acquiring**, which
+  is what stops the claim converting a herd into a QUEUE of redundant sweeps. **A stale claim must
+  not wedge the box, which would be strictly worse than the herd**, so the recovery threshold is
+  DERIVED and not chosen — a claim cannot be stale while the sweep it represents could legitimately
+  still be running, so it is the sweep's own `MAX_SWEEP_WALKS` (**read from that script**, never
+  re-typed) x this supervisor's per-walk bound + slack = 3 x 200 + 60 = 660s — and a claim carrying
+  NO parseable start time reads as stale, deliberately: its cause is a lane killed in the
+  microseconds between the `mkdir` and the write, and the other reading wedges the sweep forever on
+  a file nobody can age (cost of this direction: one extra sweep, once). Where the bound cannot be
+  derived, **no claim is taken at all** and the previous behaviour is restored, announced — an
+  unrecoverable claim is worse than the herd it prevents. The claim is a **REGISTERED** resource
+  (`OBJ_SWEEP_CLAIM_OWNED`, read by the EXIT trap installed before any sweep can run), so the
+  CORRUPT path — which ends the process — does not leave its peers waiting out the bound; CLAUDE.md's
+  roborev-job-282 ruling, applied to a resource this fix ADDED. Still not closed, and it is the
+  pre-existing half: this file installs no INT/TERM handlers, so a SIGNALLED supervisor releases
+  neither its claim nor its lock — for the claim a delay rather than a wedge, and adding signal
+  handlers changes the LOCK's lifetime too (#3683's subject).
+  **What is NOT closed, stated because a narrowed race described as
   closed is worse than one described honestly:** the latch read and the worker spawn are still
   unsynchronised, and the preflight hold loop can poll for minutes between them, so ONE worker can
   still start on a box latched moments earlier. It is bounded — that lane's next iteration reads the
@@ -578,7 +634,20 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   every unsupported character with `_` maps `/tmp/a/b/objects` and `/tmp/a_b/objects` to ONE name, so
   two repositories on a box shared a throttle stamp *and* a CORRUPT latch — one store suppressing the
   other's sweep, or stopping every lane with the other's damage. `<sanitised tail>.<16 hex of
-  sha256>`: the tail is READABILITY ONLY and carries no identity. Three digest tools (`sha256sum`,
+  sha256>`: the tail is READABILITY ONLY and carries no identity.
+  **AND THE DIGEST IS OVER THE RAW PATH, COMPUTED IN THE RESOLVER — DIGESTING THE RENDERED VALUE WAS
+  ITSELF THE NEXT DEFECT (round 5, item 3).** Round 4 made the key injective over the flattening and
+  then fed the digest the value `--print-store` had already passed through the sweep's `sane()`
+  escaper: a DISPLAY encoding, and a LOSSY one, so a path holding a real newline and one holding the
+  two literal characters `\n` produced ONE key — the same shared-stamp-and-latch harm, arriving
+  through the fix for it. `sane()` exists so a control character cannot break the anchored output; it
+  is not reversible and was never an identity. So `store_key` lives in the sweep script, the only
+  process holding the raw bytes, and publishes a second anchored `store-key` line the caller
+  VALIDATES and uses verbatim; the supervisor's own digest helper is GONE, so there is no lossy value
+  left for a future caller to digest. The general rule, worth more than the instance: **a value
+  sanitised for DISPLAY is not an IDENTITY, and a comparison key must be derived before any rendering
+  — where both are needed, publish them as two fields rather than deriving one from the other.**
+  Three digest tools (`sha256sum`,
   `shasum -a 256`, `openssl dgst -sha256`) cover both platforms, the output is parsed from both ends
   and then VALIDATED as hex, and a host with none **fails closed to the EMPTY key** — no throttle, no
   latch, announced once naming both causes — never a silent fall back to the colliding form on
