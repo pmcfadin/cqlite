@@ -18334,6 +18334,20 @@ run_file_size() {
     if [ "$ratchet_verdict" = FAIL ]; then
       _record_status_detail "$name" \
         "TWO failures: a REAL size-ratchet violation AND a log-persistence failure ($log_persist_err)$_fs_detail_where"
+    elif [ "$ratchet_verdict" = OPT-OUT ]; then
+      # THE OPT-OUT ARM RETAINS THE DISCLOSURE (roborev job 104). The other arms replace the
+      # detail wholesale, which is right for them — there is nothing to retain. Here there is:
+      # the override NAME and the grown COUNT are the entire point of this issue, and this is
+      # the one state where they can be lost from EVERY reachable artifact at once, because
+      # the log that would otherwise hold them is precisely what failed to persist and the
+      # sibling may be unwritable too. Job 21 established this property for the WITHHOLD path
+      # and it was not carried to the PERSISTENCE path — the same omission, one branch over.
+      #
+      # It still LEADS with the persistence failure, so the row never attributes the FAIL to
+      # the ratchet, and it says OPTED OUT OF rather than "computed OPT-OUT" because a reader
+      # needs to know the ratchet was switched off, not merely what token it produced.
+      _record_status_detail "$name" \
+        "LOG PERSISTENCE FAILURE, not a ratchet violation ($log_persist_err); the ratchet was OPTED OUT OF: CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); ${#grew[@]} over-threshold file(s) grown$_fs_detail_where"
     elif [ -z "$base" ]; then
       _record_status_detail "$name" \
         "LOG PERSISTENCE FAILURE, not a ratchet violation ($log_persist_err); the ratchet was SKIPPED (base ref unavailable), so nothing was compared$_fs_detail_where"

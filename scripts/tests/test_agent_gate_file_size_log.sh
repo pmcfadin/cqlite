@@ -997,10 +997,24 @@ STUB
       "$sumrow11" '^file-size: +FAIL \([0-9]+s\)'
   has "case11 (#3402): the row says the failure is LOG PERSISTENCE, not the ratchet" \
       "$sumrow11" "LOG PERSISTENCE FAILURE, not a ratchet violation"
-  has "case11 (#3402): the row STILL names the ratchet's own state, so the opt-out is disclosed" \
-      "$sumrow11" "the ratchet itself computed OPT-OUT"
-  lacks "case11 (#3402): the row does NOT present the opt-out as the reason for the FAIL" \
-      "$sumrow11" "(ratchet NOT enforced)"
+  # THE DISCLOSURE ITSELF, not merely the token (roborev job 104). This is the one state where
+  # the override name and the grown count can vanish from EVERY reachable artifact at once:
+  # the log that would hold them is what failed to persist, and the sibling may be unwritable
+  # too. Naming only "computed OPT-OUT" told a reader the ratchet produced a token, not that
+  # it was switched off nor over how many files.
+  has "case11 (#3402): the row says the ratchet was OPTED OUT OF, not merely what it computed" \
+      "$sumrow11" "the ratchet was OPTED OUT OF: CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced)"
+  has "case11 (#3402): the row RETAINS the grown count through a persistence failure" \
+      "$sumrow11" "1 over-threshold file(s) grown"
+  # ORDERING, not absence (roborev job 104). This assert used to be a `lacks` on the opt-out
+  # branch's literal bytes, standing in for "the row does not blame the opt-out for the FAIL".
+  # That proxy broke the moment the persistence arm legitimately RETAINED those bytes — and a
+  # proxy that forbids the correct output is worse than no assert, because the obvious way to
+  # green it is to delete the disclosure. The property actually wanted is that the persistence
+  # cause LEADS: a reader must not be able to read the opt-out as the reason for the failure.
+  # An ordered pattern says exactly that and is compatible with retaining the disclosure.
+  has_re "case11 (#3402): the persistence cause LEADS the detail — the opt-out is not the reason for the FAIL" \
+      "$sumrow11" 'LOG PERSISTENCE FAILURE, not a ratchet violation .*the ratchet was OPTED OUT OF'
 
   # -------------------------------------------------------------------------
   # Case 13 — CQLITE_ALLOW_FILE_GROWTH set to a NON-1 value (#3401 review item 3). The
@@ -1089,7 +1103,7 @@ printf 'file-size component log + opt-out marker guard (#3401/#3402): %d passed,
 # the first value written here was WRONG (109, guessed from the number of asserts typed
 # rather than counted from a run: `fs_summary_row || bad` contributes nothing unless it
 # fires).
-EXPECTED_CHECKS=112
+EXPECTED_CHECKS=113
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"
