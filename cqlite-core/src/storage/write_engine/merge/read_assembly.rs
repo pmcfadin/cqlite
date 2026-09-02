@@ -397,27 +397,25 @@ fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
 /// comparison of the `cell_path`, so the raw bytes can be compared directly with
 /// no decode round-trip.
 ///
-/// The two decodable `Custom` names — `inet` and `time` — are the ONLY declared
-/// scalar types in this sort path without a dedicated [`ComparatorType`] arm.
-/// Both have a canonical serialized form whose UNSIGNED byte order equals their
-/// Cassandra order, and the element/key `cell_path` IS that serialized form, so
-/// ordering by raw `cell_path` bytes matches Cassandra exactly and needs no
-/// decode round-trip (roborev 1631/1632). Until #3790 the scalar `Custom` arm
-/// ordered them by FORMATTED string, diverging from a single-generation
-/// `SELECT`; this path was — and remains — correct either way:
-///   * `inet` (`InetAddressType`): raw address bytes, e.g. `9.0.0.1` = `[9,0,0,1]`
-///     precedes `10.0.0.1` = `[10,0,0,1]` (formatted-string order is the reverse).
-///   * `time` (`TimeType`): 8-byte big-endian nanoseconds-of-day, always
-///     non-negative, so byte order == numeric order (formatted `HH:MM:...` string
-///     order misorders, e.g. any value whose text form sorts against its magnitude).
+/// True when the element/key `cell_path` can be ordered by RAW BYTES, skipping the
+/// decode round-trip (roborev 1631/1632). `inet` ONLY: `Value::Inet` holds the raw
+/// address and its comparator is `[u8]::cmp` over those same bytes, so shortcut and
+/// comparator are UNCONDITIONALLY equivalent for any input.
+///
+/// `time` was listed here and was REMOVED (#3790): its entry assumed nanos are
+/// "always non-negative, so byte order == numeric order", which NOTHING enforces,
+/// so a negative sorts ABOVE non-negatives by raw bytes and below by the signed
+/// comparator — merged reads would disagree with the writer. Not a perf trade: an
+/// optimisation whose equivalence premise was false. See `types::comparator::custom`
+/// for the measurement; range validation is #3920.
 ///
 /// Branches on the DECLARED type only (no-heuristics, issue #28); recurses through
-/// `Frozen` defensively though neither inet nor time is ever frozen here.
+/// `Frozen` defensively though `inet` is never frozen here.
 #[cfg(feature = "write-support")]
 fn comparator_orders_by_raw_cell_path_bytes(cmp: &ComparatorType) -> bool {
     match cmp {
         ComparatorType::Frozen(inner) => comparator_orders_by_raw_cell_path_bytes(inner),
-        ComparatorType::Custom(name) => name == "inet" || name == "time",
+        ComparatorType::Custom(name) => name == "inet",
         _ => false,
     }
 }
