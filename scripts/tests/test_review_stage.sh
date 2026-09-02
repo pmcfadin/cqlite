@@ -2601,7 +2601,29 @@ fi
 # was accepted (2 assertions) is REPLACED by the case that it is refused by name and writes nothing
 # (4), and the classifier gains the matching hand-written case (3): 465 -> 471, with the two prose
 # assertions that quoted the two-value set corrected in place. Every assertion is unconditional.
-ASSERT_FLOOR=471
+# ROUND 7 MOVES IT TO 519, AND EVERY ADDED ASSERTION IS UNCONDITIONAL.
+# L1(a) — section 17 adds 15: the three values READ FROM THE STAGE RECORD (`deadline=`, `agent=`,
+# `spawned-at=`) reached the verdict and STATUS lines through `one_line` alone, which does not map
+# the ONE reserved character of a `key=value` line, so a hand-edited record put a SECOND
+# `deadline=`/`agent=` pair on a line consumers scan field by field. COUNTED, not matched — the
+# broken script prints `deadline=1800` too — plus the `past-deadline` defect the case surfaced (a
+# two-valued guard testing for the literal `unknown` let any other non-numeric value reach
+# `[ ... -gt ... ]`, printing a raw bash diagnostic into the REVIEW-STAGE: block and then taking the
+# permissive branch), and a CONTROL that an ordinary record's values pass through UNCHANGED.
+# L1(b) — section 18 adds 6: the STRUCTURAL emit-boundary guard
+# (scripts/tests/lib/emit-boundary-scan.sh) must be CLEAN on the shipped script, must DECLARE its
+# scope and its subject count at run time, and must RED on a planted bypass AND NAME it — with the
+# plant itself asserted to have landed, since a plant that missed would make the control vacuous.
+# L2 — section 19 adds 27: the rename must replace the EXACT destination name (`mv -f -T`), covered
+# in five deliberately different ways because the window `-T` closes is not inducible from outside
+# the process — the end-to-end OUTCOME for a planted directory and a planted symlink-to-directory
+# (with the refusing LAYER named, so the case does not claim to exercise `mv -T`), the atomic
+# replacement CONTROL, the HOST property measured on this box, a no-`-T` host simulated with a
+# PATH-shadowed `mv` (the "REQUIRED, not attempted" assertion), and the structural pins.
+# Every branch of every conditional in all three sections emits the SAME NUMBER of assertions
+# (the `[ ! -f "$EBS" ]` fallback emits 6 bads against 6 oks; each precondition emits exactly one
+# either way), so the EXACT floor holds by the two shapes recorded above.
+ASSERT_FLOOR=519
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

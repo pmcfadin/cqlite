@@ -2590,6 +2590,144 @@ c_refused "RESULT: not in its documented position -> refuse" \
     "REVIEW-STAGE: c verdict RESULT: PASS elapsed=7 deadline=1800 agent=spec-auditor report=$T/planted-c-report.md")" \
   "RESULT:"
 
+# --- 44b(v): THE MANDATORY FIELDS' VALUES, NOT ONLY THEIR NAMES (round 7, L3) ---
+# THE FINDING. Round 1's F2 made each of `elapsed=` / `deadline=` / `agent=` / `report=` mandatory
+# and EXACTLY ONCE — by COUNTING them. It never looked at what they carried, so a `PASS` line ending
+# in a BARE `report=`, or carrying an empty `elapsed=`, `deadline=` or `agent=`, was ACCEPTED and
+# certified a merge. "Counted, not measured" is this repository's own recurring shape: a count is an
+# affirmative measurement of PRESENCE and of nothing else.
+#
+# THE PERMITTED SET IS DERIVED FROM THE EMITTER, WHICH IS THE ONLY WAY THIS DOES NOT RED ON CORRECT
+# INPUT. Part 1 below RUNS the SHIPPED review-stage.sh through EVERY state it has and requires each
+# captured line to be accepted — including round 6's K1 state, which legitimately emits
+# `elapsed=unknown deadline=unknown agent=unknown report=unresolved`, and `--deadline-secs 0`, which
+# legitimately emits `deadline=0`. A validator written from what "looks reasonable" would red on
+# both. Part 2 then pins the refusals.
+RSSH="$SCRIPT_DIR/../flow/review-stage.sh"
+
+# c_capture_state <state> — drive the SHIPPED emitter into <state> in a throwaway repository and
+# print the path of a file holding its verdict line. Prints nothing on failure.
+c_capture_state() {
+  local st="$1" d f rp
+  d="$T/l3-$st"
+  rm -rf "$d" 2>/dev/null || true
+  mkdir -p "$d" 2>/dev/null || return 1
+  git init -q "$d" >/dev/null 2>&1 || return 1
+  printf '.review-stage/\n' >"$d/.gitignore" 2>/dev/null || return 1
+  if [ "$st" != never-opened ]; then
+    if [ "$st" = deadline-zero ]; then
+      (cd "$d" && bash "$RSSH" open c --issue 700 --agent spec-auditor --deadline-secs 0 >/dev/null 2>&1) || return 1
+    else
+      (cd "$d" && bash "$RSSH" open c --issue 700 --agent spec-auditor >/dev/null 2>&1) || return 1
+    fi
+  fi
+  rp="$(SR_REPORT "$d" 700 c)"
+  case "$st" in
+    pass | deadline-zero) printf 'result: PASS\n' >"$rp" 2>/dev/null || return 1 ;;
+    findings) printf 'result: FINDINGS\n' >"$rp" 2>/dev/null || return 1 ;;
+    sentinel | never-opened) : ;;
+    report-absent) rm -f "$rp" 2>/dev/null || true ;;
+    report-empty) : >"$rp" 2>/dev/null || return 1 ;;
+    report-ungrammatical) printf 'result: MAYBE\n' >"$rp" 2>/dev/null || return 1 ;;
+    report-unreadable) printf 'result: PASS\n' >"$rp" 2>/dev/null || return 1; chmod 000 "$rp" 2>/dev/null || true ;;
+    self-reported) printf 'result: NOT-RUN (the corpus root was absent)\n' >"$rp" 2>/dev/null || return 1 ;;
+    record-unreadable) chmod 000 "$d/.review-stage/issue-700/c.stage" 2>/dev/null || true ;;
+    author-performed)
+      (cd "$d" && bash "$RSSH" record-author-performed c --issue 700 \
+        --reason no-independent-auditor-available \
+        --evidence docs/round-artifacts/issue-3751-l3.md --performed-by author >/dev/null 2>&1) || return 1 ;;
+  esac
+  f="$T/l3-cap-$st.txt"
+  (cd "$d" && bash "$RSSH" verdict c --issue 700 >"$f" 2>/dev/null) || true
+  chmod 644 "$d/.review-stage/issue-700/c.stage" 2>/dev/null || true
+  [ -s "$f" ] || return 1
+  printf '%s\n' "$f"
+}
+
+# PART 1 — every state the emitter can produce is ACCEPTED by the value validator.
+# The EXIT CODE varies by token (PASS/AUTHOR-PERFORMED proceed, everything else refuses), so the
+# assertion is on the CAUSE: no state may be refused for an unusable field value.
+for L3_ST in pass findings sentinel report-absent report-empty report-ungrammatical \
+  report-unreadable self-reported record-unreadable author-performed deadline-zero; do
+  L3_F="$(c_capture_state "$L3_ST")" || L3_F=""
+  if [ -n "$L3_F" ] && [ -s "$L3_F" ]; then
+    ok "l3/states: captured a REAL verdict line from the shipped emitter for state '$L3_ST'"
+    L3_OUT="$(PATH="$BIN:$PATH" bash "$NEUTRAL_ASSERT" 2421 "$CERTIFIED" "$GOOD" \
+      --c-verdict "$L3_F" 2>&1)" || true
+    case "$L3_OUT" in
+      *"NO USABLE VALUE"*)
+        bad "l3/states: state '$L3_ST' was refused for an unusable field value — the validator REDS ON CORRECT EMITTER OUTPUT (line: $(cat "$L3_F"))" ;;
+      *) ok "l3/states: state '$L3_ST' is NOT refused for an unusable field value" ;;
+    esac
+  else
+    bad "l3/states: could not capture a verdict line for state '$L3_ST' (1/2) — the assertion below would be vacuous"
+    bad "l3/states: the same absence for state '$L3_ST' (2/2)"
+  fi
+done
+# AND THE SWEEP IS NOT SATISFIED BY REFUSING EVERYTHING: the two proceeding tokens must still
+# proceed, from the captured lines.
+for L3_ST in pass author-performed; do
+  L3_F="$T/l3-cap-$L3_ST.txt"
+  if [ -s "$L3_F" ] && run 0 "l3/states CONTROL: the captured '$L3_ST' line still PROCEEDS" \
+    2421 "$CERTIFIED" "$GOOD" --c-verdict "$L3_F"; then
+    ok "l3/states CONTROL: and reports its token ('$L3_ST')"
+  elif [ ! -s "$L3_F" ]; then
+    bad "l3/states CONTROL: no captured line for '$L3_ST'"
+  fi
+done
+
+# PART 2 — the refusals. Each line is WELL-FORMED except for ONE field's value, so the case cannot
+# pass by refusing for a neighbouring reason: the assertion names the field.
+c_value_refused() {
+  local desc="$1" line="$2" needle="$3" f
+  f="$(c_verdict_file "l3v-$(printf '%s' "$desc" | LC_ALL=C tr -c 'A-Za-z0-9' '-')" "$line")"
+  if run 2 "$desc" 2421 "$CERTIFIED" "$GOOD" --c-verdict "$f"; then
+    case "$OUT" in
+      *"NO USABLE VALUE"*) ok "$desc: refused as a MANDATORY FIELD WITH NO USABLE VALUE" ;;
+      *) bad "$desc: refused for the WRONG reason (got: $OUT)"; return 1 ;;
+    esac
+    case "$OUT" in
+      *"$needle"*) ok "$desc: and the refusal NAMES the field and what was wrong" ;;
+      *) bad "$desc: the refusal does not name '$needle' (got: $OUT)" ;;
+    esac
+  fi
+}
+c_value_refused "l3/bare-report" \
+  "REVIEW-STAGE: c RESULT: PASS elapsed=7 deadline=1800 agent=spec-auditor report=" \
+  "report= is EMPTY"
+c_value_refused "l3/empty-agent" \
+  "REVIEW-STAGE: c RESULT: PASS elapsed=7 deadline=1800 agent= report=$T/x.md" \
+  "agent= is EMPTY"
+c_value_refused "l3/empty-elapsed" \
+  "REVIEW-STAGE: c RESULT: PASS elapsed= deadline=1800 agent=spec-auditor report=$T/x.md" \
+  "elapsed=''"
+c_value_refused "l3/empty-deadline" \
+  "REVIEW-STAGE: c RESULT: PASS elapsed=7 deadline= agent=spec-auditor report=$T/x.md" \
+  "deadline=''"
+c_value_refused "l3/nonnumeric-elapsed" \
+  "REVIEW-STAGE: c RESULT: PASS elapsed=abc deadline=1800 agent=spec-auditor report=$T/x.md" \
+  "elapsed='abc'"
+c_value_refused "l3/suffixed-deadline" \
+  "REVIEW-STAGE: c RESULT: PASS elapsed=7 deadline=1800s agent=spec-auditor report=$T/x.md" \
+  "deadline='1800s'"
+# THE `unknown` SENTINELS ARE ACCEPTED — round 6's K1 emits them, and they are not a passing verdict
+# on their own (their token is NOT-RUN). Asserted against a PASS token deliberately: the value
+# validator must not be the thing that catches a hand-forged token, and a `NOT-RUN` line would be
+# refused by the token switch before this validator's acceptance could be observed.
+if run 0 "l3/unknown-sentinels: elapsed=unknown deadline=unknown agent=unknown is ACCEPTED" \
+  2421 "$CERTIFIED" "$GOOD" --c-verdict "$(c_verdict_file l3unk \
+    "REVIEW-STAGE: c RESULT: PASS elapsed=unknown deadline=unknown agent=unknown report=unresolved")"; then
+  case "$OUT" in
+    *"NO USABLE VALUE"*) bad "l3/unknown-sentinels: the emitter's own not-measured values were refused" ;;
+    *) ok "l3/unknown-sentinels: and 'unresolved' as the report, which round 6's K1 emits" ;;
+  esac
+fi
+if run 0 "l3/zero: elapsed=0 deadline=0 is ACCEPTED — a zero is a measurement" \
+  2421 "$CERTIFIED" "$GOOD" --c-verdict "$(c_verdict_file l3zero \
+    "REVIEW-STAGE: c RESULT: PASS elapsed=0 deadline=0 agent=spec-auditor report=$T/x.md")"; then
+  ok "l3/zero: (--deadline-secs 0 is a legal open, so this line is reachable from the emitter)"
+fi
+
 # --- 44c: AUTHOR-PERFORMED keeps its own token (item 2.4) -------------------
 if run 0 "verdict AUTHOR-PERFORMED -> proceeds, under its OWN token" \
   2421 "$CERTIFIED" "$GOOD" \
@@ -3522,7 +3660,20 @@ fi
 # prose-preserved assertions either side of a planted control byte and the CONTROL that the
 # neutralisation did not change the verdict. So the floor moves by the SAME 5 and the derived
 # 6-assertion margin is PRESERVED UNCHANGED.
-ASSERT_FLOOR=310
+#
+# ROUND 7 ADDS 47, ALL HOST-INDEPENDENT (310 -> 357): section 44b(iv)'s 4 (a control-bearing
+# `--c-verdict` FILENAME reaches the SUCCESS block through `C_SOURCE` — the byte census plus the
+# assertion a byte census alone would miss, that EXACTLY ONE column-zero `PREMERGE: OK ` line
+# survives), section 44b(v)'s 37 (the mandatory fields' VALUES: the shipped emitter driven through
+# ALL ELEVEN of its states with each captured line required to be ACCEPTED — the only way this
+# validator does not red on correct input — plus six refusals each naming its field, and the
+# `unknown`/`unresolved`/`0` acceptance cases), and section 44h's 6 (the structural emit-boundary
+# guard and its positive control). Every one needs only bash, git and coreutils, the same as every
+# other non-Case-41 case, so the floor moves by the SAME 47 and the derived 6-assertion margin for
+# the ONE host-gated block (Case 41's TERM-ignoring escalation, which needs a real
+# `timeout`/`gtimeout` supporting `--kill-after`) is PRESERVED UNCHANGED — still deliberately not
+# the exact 363, for the reason recorded above.
+ASSERT_FLOOR=357
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

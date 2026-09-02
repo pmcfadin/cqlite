@@ -595,6 +595,7 @@ _c_verdict_awk() {
   BEGIN {
     n = 0; tok = ""; rep = ""; line = ""; kind = ""; rpos = 0
     ke = 0; kd = 0; ka = 0; kr = 0
+    ve = ""; vd = ""; va = ""
   }
   { gsub(/\033\[[0-9;]*[a-zA-Z]/, ""); sub(/\r$/, "") }
   /^REVIEW-STAGE: / {
@@ -607,10 +608,10 @@ _c_verdict_awk() {
         if (NF >= 4) tok = $4
       }
       for (i = 4; i <= NF; i++) {
-        if (substr($i, 1, 8) == "elapsed=") ke++
-        else if (substr($i, 1, 9) == "deadline=") kd++
-        else if (substr($i, 1, 6) == "agent=") ka++
-        else if (substr($i, 1, 7) == "report=") { kr++; if (rep == "") rep = substr($i, 8) }
+        if (substr($i, 1, 8) == "elapsed=") { ke++; if (ke == 1) ve = substr($i, 9) }
+        else if (substr($i, 1, 9) == "deadline=") { kd++; if (kd == 1) vd = substr($i, 10) }
+        else if (substr($i, 1, 6) == "agent=") { ka++; if (ka == 1) va = substr($i, 7) }
+        else if (substr($i, 1, 7) == "report=") { kr++; if (kr == 1) rep = substr($i, 8) }
       }
     }
   }
@@ -618,6 +619,7 @@ _c_verdict_awk() {
     print "n=" n; print "token=" tok; print "report=" rep
     print "kind=" kind; print "rpos=" rpos
     print "ke=" ke; print "kd=" kd; print "ka=" ka; print "kr=" kr
+    print "velapsed=" ve; print "vdeadline=" vd; print "vagent=" va
     print "line=" line
   }
 '
@@ -629,7 +631,7 @@ _c_verdict_awk() {
 # refuses everywhere else.
 c_parse_verdict() {
   local kind="$1" value="$2" what="$3" out k v
-  local missing dup key kname kcount
+  local missing dup key kname kcount vbad
   if [ "$kind" = file ]; then
     out=$(_c_verdict_awk <"$value") || refuse_tool_failure awk "$what"
   else
@@ -637,6 +639,7 @@ c_parse_verdict() {
   fi
   CV_N=""; CV_TOKEN=""; CV_REPORT=""; CV_LINE=""
   CV_KIND=""; CV_RPOS=""; CV_KE=""; CV_KD=""; CV_KA=""; CV_KR=""
+  CV_VE=""; CV_VD=""; CV_VA=""
   while IFS='=' read -r k v; do
     case "$k" in
       n)      CV_N="$v" ;;
@@ -648,6 +651,9 @@ c_parse_verdict() {
       kd)     CV_KD="$v" ;;
       ka)     CV_KA="$v" ;;
       kr)     CV_KR="$v" ;;
+      velapsed)  CV_VE="$v" ;;
+      vdeadline) CV_VD="$v" ;;
+      vagent)    CV_VA="$v" ;;
       line)   CV_LINE="$v" ;;
     esac
   done <<C_PARSE
@@ -734,6 +740,56 @@ C_PARSE
         "  everywhere else."
       set -- "$@" \
         "A truncated capture is the shape a cut-short redirect or a copied fragment leaves." \
+        "Re-capture it whole:  review-stage.sh verdict $C_STAGE_KIND --issue <N> > <path>"
+      refuse_no_c_verdict "$@"
+    fi
+
+    # THE VALUES, NOT ONLY THE FIELD NAMES (#3751 round 7, L3). The census above COUNTS each
+    # mandatory key and never looked at what it carried, so a `PASS` line ending in a BARE
+    # `report=` — or carrying an empty `elapsed=`, `deadline=` or `agent=` — was ACCEPTED and
+    # certified a merge. Round 1's F2 closed presence and multiplicity and left the values
+    # unmeasured, which is this repository's recurring "counted, not measured" shape: a count is an
+    # affirmative measurement of PRESENCE and of nothing else.
+    #
+    # THE PERMITTED SET IS DERIVED FROM WHAT THE EMITTER CAN PRODUCE, not from what looks
+    # reasonable — otherwise this reds on correct input, which is the guard agents learn to waive.
+    # `review-stage.sh verdict` was RUN across every state it has (PASS, FINDINGS, AUTHOR-PERFORMED,
+    # and each NOT-RUN cause: no report written / report absent / report empty / report unreadable /
+    # report ungrammatical / a self-reported cause / stage never opened / stage record unreadable),
+    # and the captured lines carry exactly two shapes per field:
+    #   elapsed=  digits (`0` included) or the literal `unknown`
+    #   deadline= digits (`0` included, from `--deadline-secs 0`) or the literal `unknown`
+    #   agent=    a sanitize_field token, or the literal `unknown`
+    #   report=   an absolute path, or the literal `unresolved`  (round 6's K1 states)
+    # So `unknown`/`unresolved` are ACCEPTED — they are the emitter's honest "not measured" and are
+    # NOT a passing verdict on their own (the token is what proceeds, and it is `NOT-RUN` in every
+    # state that produces them). Only agent and report are checked for NON-EMPTINESS rather than for
+    # a charset: awk splits fields on whitespace, so a value with a space never arrives whole here,
+    # and asserting a charset would be a claim about a shape this reader cannot see.
+    vbad=0
+    set -- \
+      "The $what's verdict line carries a MANDATORY FIELD WITH NO USABLE VALUE:" \
+      "  REVIEW-STAGE: <kind> RESULT: <token> elapsed=<n> deadline=<n> agent=<t> report=<abs>"
+    case "$CV_VE" in
+      unknown) ;;
+      "" | *[!0-9]*) set -- "$@" "  elapsed='$CV_VE' — must be a decimal number of seconds, or the literal 'unknown'."; vbad=1 ;;
+    esac
+    case "$CV_VD" in
+      unknown) ;;
+      "" | *[!0-9]*) set -- "$@" "  deadline='$CV_VD' — must be a decimal number of seconds, or the literal 'unknown'."; vbad=1 ;;
+    esac
+    if [ -z "$CV_VA" ]; then
+      set -- "$@" "  agent= is EMPTY — the line must name the agent whose silence this stage measures (review-stage.sh emits 'unknown' when the record cannot be read)."
+      vbad=1
+    fi
+    if [ -z "$CV_REPORT" ]; then
+      set -- "$@" "  report= is EMPTY — the line must name the report of record (review-stage.sh emits 'unresolved' when no report path could be derived)."
+      vbad=1
+    fi
+    if [ "$vbad" -eq 1 ]; then
+      set -- "$@" \
+        "A key that is PRESENT but carries nothing is the shape a hand-edited or truncated capture" \
+        "leaves, and the field census above only asserts that each key appears EXACTLY ONCE." \
         "Re-capture it whole:  review-stage.sh verdict $C_STAGE_KIND --issue <N> > <path>"
       refuse_no_c_verdict "$@"
     fi
