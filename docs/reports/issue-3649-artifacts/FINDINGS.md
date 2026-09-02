@@ -543,6 +543,45 @@ That is a pass derived from the absence of a bad signal, in the one check added
 to stop exactly that, and it is why there is a fourth token: `UNRECOGNISED` is
 disclosed as *not known to be local*, distinctly from `NOT-MEASURABLE`.
 
+**A CENSUS OF PROPERTIES IS ONLY AS GOOD AS THE PROPERTY STATEMENTS IN IT, AND
+THOSE STATEMENTS ARE PROSE.** The round-20 enumeration was built specifically to
+close the analyzer's trust boundary, and it did not prevent round 23's two
+findings — because it enumerated the right SUBJECTS with the WRONG PREDICATES:
+
+| the enumeration said | the property actually is |
+|---|---|
+| "enough replicates completed" — a **floor** | exact conformance to the declared sampling plan |
+| "the records describe this session" — **internal** consistency | session-local **provenance** |
+
+Both weaker, neither stronger, which is a bias and not a coincidence: a
+predicate written from the check in front of you inherits the check's strength.
+**The census inherited the very class it was built to close** — prose beside
+code, describing something adjacent to what the code does.
+
+**Two of twenty were weak; the larger problem was the entry set.** Re-reading
+the other eighteen turned up no further weak predicates — a useful negative —
+but the reverse direction had gone unmeasured: **37 raised causes against 18
+entries.** Round 20 declared "the list can be wrong by omission" and nothing
+measured it, so four rounds of new refusals accumulated unlisted while the
+census went on reporting twenty properties. *A declared gap that nobody measures
+is a gap that grows.*
+
+**Closing it BY SET rather than BY PROSE is the whole point.** Every refusal must
+now be classified verdict-gating or input-integrity, and an unclassified one
+reds. Forty more property sentences would have been forty more chances to state
+a property more weakly than the check enforces; **set membership carries no claim
+about what a cause enforces**, only that someone decided which kind it is. The
+staleness half then caught my own error on its first run — seven driver-side
+causes I had classified, which this census cannot see because its subject is the
+analyzer's surface.
+
+**And writing the cases moved the fix.** Renumbering a replicate red as a
+*parity* violation, because the ordering check ran first — so the diagnostic told
+the operator the wrong thing about the wrong problem. Whether the pairs ARE the
+declared plan is prior to whether they ran in the declared order, and the set
+check moved ahead of it. The cases did not merely verify the fix; they showed it
+was in the wrong place.
+
 **A PLANT THAT SILENTLY FAILS TO APPLY IS INDISTINGUISHABLE FROM A FIX THAT
 WORKS.** Twice in one round I concluded a guard had no coverage because a plant
 produced no red — and both times the plant had never applied: `str.replace` with
