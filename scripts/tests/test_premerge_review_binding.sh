@@ -873,6 +873,42 @@ case "$E2E_OK" in
   *) bad "wiring: the legs' reports did not both reach the success output (got: $E2E_OK)" ;;
 esac
 
+# --- G1: the SHIPPED assert must REFUSE on a stop order ----------------------
+# AC7's headline claim is that a lead's HOLD: is MECHANICAL. Every other case
+# proves the leg refuses through its OWN CLI; none drove the shipped
+# premerge-assert.sh to refuse BECAUSE of a hold, so the claim rested on a
+# composition argument rather than on a public surface. The review is left BOUND
+# here so the only thing that can refuse is the hold.
+hold_payload "$MOCK_GH_DIR/pr-hold.json" \
+  "[{\"author\":{\"login\":\"pmcfadin\"},\"createdAt\":\"$HOLD_AT\",\"body\":\"HOLD: merge after #9999\"}]"
+E2E_HOLD=$(cd "$WORK" && PATH="$BIN:$PATH" MOCK_GH_OUT="$HEAD_AFTER OPEN" \
+  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" 2>&1)
+E2E_HOLD_RC=$?
+if [ "$E2E_HOLD_RC" -eq 2 ]; then
+  ok "wiring: the shipped assert REFUSES (exit 2) on a column-zero HOLD: comment (AC7)"
+else
+  bad "wiring: a HOLD: order did not stop the shipped assert (exit $E2E_HOLD_RC): $E2E_HOLD"
+fi
+case "$E2E_HOLD" in
+  *"PREMERGE: HOLD"*)
+    ok "wiring: the hold refusal carries its own distinct marker to the merge point" ;;
+  *) bad "wiring: the hold refusal reached the merge point unnamed (got: $E2E_HOLD)" ;;
+esac
+# NON-VACUITY CONTROL: a refusal-only case is satisfied by a leg that is broken
+# SHUT, so an allowlisted release over the same payload must reach exit 0. This
+# is the pair that makes the two assertions above mean something.
+hold_payload "$MOCK_GH_DIR/pr-hold.json" \
+  "[{\"author\":{\"login\":\"pmcfadin\"},\"createdAt\":\"$HOLD_AT\",\"body\":\"HOLD: merge after #9999\"},{\"author\":{\"login\":\"pmcfadin\"},\"createdAt\":\"$GO_AT\",\"body\":\"GO: cleared\"}]"
+E2E_GO=$(cd "$WORK" && PATH="$BIN:$PATH" MOCK_GH_OUT="$HEAD_AFTER OPEN" \
+  bash "$FLOW/premerge-assert.sh" 1 "$HEAD_AFTER" "$E2E_GATE" 2>&1)
+E2E_GO_RC=$?
+if [ "$E2E_GO_RC" -eq 0 ]; then
+  ok "wiring: an allowlisted GO: releases the hold and the shipped assert reaches exit 0"
+else
+  bad "wiring: a released hold still blocked the shipped assert (exit $E2E_GO_RC): $E2E_GO"
+fi
+hold_payload "$MOCK_GH_DIR/pr-hold.json" '[]'
+
 # --- the scanner's own contract -----------------------------------------------------
 scan_pr="$T/scan-pr.json"
 python3 - "$scan_pr" <<'PY'
@@ -1794,7 +1830,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=116
+CASE_FLOOR=119
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"
