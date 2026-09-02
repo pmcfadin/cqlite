@@ -1,0 +1,59 @@
+{
+  "issue": "#3096",
+  "seed": 30960001,
+  "table": "ws0.events",
+  "rows": 4000000,
+  "partitions": 40000,
+  "rows_per_partition": 100,
+  "cells_per_row": 12,
+  "data_db_bytes": 2774760422,
+  "data_db_sha256": "4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecaee6669f6b0d9bbae269",
+  "bytes_per_row": 693.6901055,
+  "total_component_bytes": 2779185469,
+  "components": {
+    "nb-1-big-CRC.db": {
+      "name": "nb-1-big-CRC.db",
+      "bytes": 169364,
+      "sha256": "b38c33aeb85a9267e6d10ed6fd9728743c73840abb789b3e196b9a2de0ae64de"
+    },
+    "nb-1-big-Data.db": {
+      "name": "nb-1-big-Data.db",
+      "bytes": 2774760422,
+      "sha256": "4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecaee6669f6b0d9bbae269"
+    },
+    "nb-1-big-Digest.crc32": {
+      "name": "nb-1-big-Digest.crc32",
+      "bytes": 10,
+      "sha256": "81530bedf46a526b94ec956149c08544337789db9e47bd0759a6b04fd066d8eb"
+    },
+    "nb-1-big-Filter.db": {
+      "name": "nb-1-big-Filter.db",
+      "bytes": 47936,
+      "sha256": "bb1c7b82ed2b256c44a0838a5227a2f0ca707a93d2c05996495d2f6303473fde"
+    },
+    "nb-1-big-Index.db": {
+      "name": "nb-1-big-Index.db",
+      "bytes": 4196097,
+      "sha256": "94c1aa0e28d2738794f737c172c901ed23305319c525e6185078ae43205a04ff"
+    },
+    "nb-1-big-Statistics.db": {
+      "name": "nb-1-big-Statistics.db",
+      "bytes": 5252,
+      "sha256": "aff85755f8946fceec870e9fd88dde159edb99cc61af67b8362da39fc96f8417"
+    },
+    "nb-1-big-Summary.db": {
+      "name": "nb-1-big-Summary.db",
+      "bytes": 6308,
+      "sha256": "77126573c848b5a404e7d94f56640751858792c540dab9f52d30b42c2780b29b"
+    },
+    "nb-1-big-TOC.txt": {
+      "name": "nb-1-big-TOC.txt",
+      "bytes": 80,
+      "sha256": "ae4483b226c871452de0cde875010d1619e378751c9fc0fef14697c06c2095c9"
+    }
+  },
+  "compression_info_present": false,
+  "not_a_correctness_oracle": "PERFORMANCE FIXTURE ONLY. This corpus is CQLite-written and CQLite-read, so it is INVARIANT to a uniform framing/serialization error (issue #3042) — two defects that cancel are undetectable by a symmetric round trip BY CONSTRUCTION. No on-disk framing or encoding correctness claim may rest on it; correctness stays anchored to the Cassandra-written fixtures and the oracles in openspec/changes/arrow-encode-doget/design.md.",
+  "differs_from_prior_corpus": "Differs from the #3058/#3100 corpus digest 0185909de6da0de839e75defe8b7113f502001017db3b5312d7ed6fd3312f0b1 BY CONSTRUCTION: that corpus was Cassandra-written and LZ4-compressed, which CQLite's uncompressed-only write surface (issue #1406) cannot reproduce. That digest is NOT asserted anywhere.",
+  "schema_sha256": "6bdd1d06ad7eb597b3103ace250930b28b19a76aa128bbf2e4170c90406baed0"
+}
