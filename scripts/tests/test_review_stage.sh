@@ -112,13 +112,34 @@ rc_is() {
 # assertions below name it and a bare literal in each would drift apart.
 WRITE_FD_PIN=9
 
-REPORT_OF() { printf '%s/.review-stage/issue-%s/%s.md\n' "$1" "$2" "$3"; }
-# REPORT_GEN_OF <repo> <issue> <kind> <generation> — the same path, GENERATION-BOUND (round 5,
-# J1). Generation 0 keeps the bare `<kind>.md` name (so `REPORT_OF` above is generation 0 and every
-# quoted document example stays true); generation N>0 is `<kind>.<N>.md`.
-REPORT_GEN_OF() {
-  if [ "$4" = 0 ]; then printf '%s/.review-stage/issue-%s/%s.md\n' "$1" "$2" "$3"
-  else printf '%s/.review-stage/issue-%s/%s.%s.md\n' "$1" "$2" "$3" "$4"; fi
+# REPORT_OF <repo> <issue> <kind> — THE REPORT THE STAGE RECORD CURRENTLY NAMES, derived the way
+# the tool derives it (round 6, K2). The report path carries a per-open NONCE, so it is NOT
+# predictable and NOTHING may reconstruct it from a shape: this helper reads `report-nonce:` out of
+# the stage record, exactly as `load_stage` does. With no record, or a record with no nonce, it
+# yields the LEGACY bare `<kind>.md` — which is the path a never-opened stage reports and the path
+# every pre-nonce record's single report lives at.
+REPORT_OF() {
+  local d="$1/.review-stage/issue-$2" n
+  n="$(LC_ALL=C sed -n 's/^report-nonce:[[:space:]]*//p' "$d/$3.stage" 2>/dev/null | LC_ALL=C head -1 || true)"
+  if [ -n "$n" ]; then printf '%s/%s.%s.md\n' "$d" "$3" "$n"; else printf '%s/%s.md\n' "$d" "$3"; fi
+}
+# LEGACY_REPORT_OF <repo> <issue> <kind> — the BARE `<kind>.md`. Read but never written by this
+# version: it is what a pre-nonce record names and what a never-opened stage reports.
+LEGACY_REPORT_OF() { printf '%s/.review-stage/issue-%s/%s.md\n' "$1" "$2" "$3"; }
+# NONCE_PATH_OK <path> <dir> <kind> — the path IS `<dir>/<kind>.<alnum>.md`. Used where the
+# nonce is UNKNOWABLE to the test (a refusal writes no record, so there is nothing to read it
+# from), which is the point: the shape is asserted, the value is not predicted.
+NONCE_PATH_OK() {
+  local q="$1" dir="$2" kind="$3" mid
+  case "$q" in "$dir/$kind."*.md) ;; *) return 1 ;; esac
+  mid="${q#"$dir/$kind."}"; mid="${mid%.md}"
+  case "$mid" in "" | *[!A-Za-z0-9]* ) return 1 ;; esac
+  return 0
+}
+# RECORD_NONCE <repo> <issue> <kind> — the record's nonce token, or empty.
+RECORD_NONCE() {
+  LC_ALL=C sed -n 's/^report-nonce:[[:space:]]*//p' "$1/.review-stage/issue-$2/$3.stage" 2>/dev/null \
+    | LC_ALL=C head -1 || true
 }
 # The path `open` PRINTS on its own line — the one a caller pastes into a spawn prompt. Read from
 # the output rather than reconstructed, because "the clause hands the fresh agent the right file"
@@ -385,7 +406,12 @@ rs "$R3" open c --issue 200 --agent spec-auditor
 rc_is 2 "check-ignore: a report path git does not confirm ignored is REFUSED (exit 2)"
 has "OPEN-REFUSED reason=path-not-gitignored" "check-ignore: the refusal names the reason"
 has "what=report-of-record" "check-ignore: the refusal names the REPORT half"
-has "path=$R3/.review-stage/issue-200/c.md" "check-ignore: the refusal names the DERIVED path verbatim"
+REFUSED_PATH="$(printf '%s\n' "$OUT" | LC_ALL=C sed -n 's/.*[ ]path=\([^ ]*\).*/\1/p' | LC_ALL=C head -1)"
+if NONCE_PATH_OK "$REFUSED_PATH" "$R3/.review-stage/issue-200" c; then
+  ok "check-ignore: the refusal names the DERIVED path it was about to write"
+else
+  bad "check-ignore: the refusal named '$REFUSED_PATH', which is not \$repo/.review-stage/issue-200/c.<nonce>.md"
+fi
 has "#2926" "check-ignore: the refusal explains the mid-run tree-mutation hazard it prevents"
 if [ -f "$R3/.review-stage/issue-200/c.md" ]; then
   bad "check-ignore: the refusal must not write the file it refused"
@@ -829,16 +855,34 @@ has "REVIEW-STAGE:" "usage: --help renders the header contract"
 # EVERY CASE ASSERTS THE VICTIM IS UNTOUCHED, not merely that the exit code was 2: a refusal
 # that had already written through the link would satisfy an exit-code-only test.
 
-# (a) the REPORT path is a symlink to a tracked, non-ignored file in the same repo.
+# (a) A LINK PLANTED AT THE GUESSABLE REPORT NAME IS NOW INERT, WHICH IS STRONGER THAN REFUSED
+#     (round 6, K2). This case used to plant a symlink at `.review-stage/issue-<N>/c.md` and
+#     assert `open` REFUSED it. Since the report name carries a per-open NONCE there IS no
+#     guessable report name: `open` writes `c.<nonce>.md` and never touches the planted link, so
+#     the refusal is UNREACHABLE FROM HERE and the case asserts the property that replaced it —
+#     the victim is untouched because the write was never AT it. The report-half leaf refusal
+#     itself is still real code and still REACHED, by case (e) below (`record-author-performed`
+#     writes the path the RECORD names, which IS knowable), and the report path's PARENT
+#     components are covered by (c) and (d). This is the same disposition round 4 gave section
+#     5(c): a case whose state became unreachable by construction is REPLACED, never weakened.
 R10="$(newrepo)"
 printf 'the original tracked content\n' >"$R10/victim.md"
 git -C "$R10" add victim.md >/dev/null 2>&1
 mkdir -p "$R10/.review-stage/issue-800"
 ln -s "$R10/victim.md" "$R10/.review-stage/issue-800/c.md"
 rs "$R10" open c --issue 800 --agent spec-auditor
-rc_is 2 "symlink: a REPORT path that is a symlink is REFUSED (exit 2)"
-has "reason=path-is-symlink" "symlink: the refusal names the symlink reason"
-has "what=report-of-record" "symlink: the refusal names which half was refused"
+rc_is 0 "symlink: a link at the OLD guessable report name does not even take part in the open"
+R10_RP="$(printed_report_path)"
+if NONCE_PATH_OK "$R10_RP" "$R10/.review-stage/issue-800" c && [ -f "$R10_RP" ] && [ ! -L "$R10_RP" ]; then
+  ok "symlink: the report went to a nonce-named REGULAR file, not to the planted name"
+else
+  bad "symlink: the open wrote '$R10_RP', which is not a nonce-named regular file"
+fi
+if [ -L "$R10/.review-stage/issue-800/c.md" ]; then
+  ok "symlink: the planted link is still a link — nothing wrote through it or replaced it"
+else
+  bad "symlink: the planted link was written through or replaced"
+fi
 if [ "$(cat "$R10/victim.md")" = "the original tracked content" ]; then
   ok "symlink: the tracked file the link pointed at is UNTOUCHED"
 else
@@ -954,8 +998,8 @@ rc_is 2 "tempfile: records ignored only by EXTENSION are REFUSED (the temp would
 has "what=report-of-record-tempfile" "tempfile: the refusal names the TEMPORARY half"
 has "TEMPORARY file the write goes through" "tempfile: the refusal explains the path the caller never named"
 has "ignore the DIRECTORY instead" "tempfile: the refusal names the remedy"
-if [ -f "$R16/.review-stage/issue-806/c.md" ]; then
-  bad "tempfile: the refusal must not write the report it refused"
+if [ -n "$(ls -A "$R16/.review-stage/issue-806" 2>/dev/null)" ]; then
+  bad "tempfile: the refusal must not write anything in the stage directory ($(ls -A "$R16/.review-stage/issue-806" 2>/dev/null))"
 else
   ok "tempfile: nothing was written at the refused path"
 fi
@@ -965,7 +1009,8 @@ fi
 R17="$(newrepo '.review-stage/')"
 rs "$R17" open c --issue 807 --agent spec-auditor
 rc_is 0 "tempfile control: a DIRECTORY-ignored .review-stage/ is accepted"
-if [ -f "$R17/.review-stage/issue-807/c.md" ] && [ ! -L "$R17/.review-stage/issue-807/c.md" ]; then
+CTRL807="$(REPORT_OF "$R17" 807 c)"
+if [ -f "$CTRL807" ] && [ ! -L "$CTRL807" ]; then
   ok "tempfile control: the report was written as a regular file"
 else
   bad "tempfile control: the report was not written"
@@ -1297,7 +1342,10 @@ awk '
     done = 1
     print "  if [ -n \"${PROBE_OUT:-}\" ]; then"
     print "    _pr_head=\"$( (LC_ALL=C grep -m1 \"^head-sha:\" \"${PROBE_SFILE:-/nonexistent}\" 2>/dev/null || printf \"head-sha: none\\n\") | LC_ALL=C sed -e \"s/^head-sha:[[:space:]]*//\" )\""
-    print "    _pr_tok=\"$( (LC_ALL=C grep -m1 \"^result:\" \"${PROBE_RPATH:-/nonexistent}\" 2>/dev/null || printf \"result: none\\n\") | LC_ALL=C sed -e \"s/^result:[[:space:]]*//\" -e \"s/[[:space:]].*$//\" )\""
+    print "    _pr_nonce=\"$( (LC_ALL=C grep -m1 \"^report-nonce:\" \"${PROBE_SFILE:-/nonexistent}\" 2>/dev/null || true) | LC_ALL=C sed -e \"s/^report-nonce:[[:space:]]*//\" )\""
+    print "    _pr_rp=\"${PROBE_RPREFIX:-/nonexistent}.md\""
+    print "    if [ -n \"$_pr_nonce\" ]; then _pr_rp=\"${PROBE_RPREFIX:-/nonexistent}.$_pr_nonce.md\"; fi"
+    print "    _pr_tok=\"$( (LC_ALL=C grep -m1 \"^result:\" \"$_pr_rp\" 2>/dev/null || printf \"result: none\\n\") | LC_ALL=C sed -e \"s/^result:[[:space:]]*//\" -e \"s/[[:space:]].*$//\" )\""
     print "    printf \"PROBE after=%s record-head=%s report-token=%s\\n\" \"$what\" \"$_pr_head\" \"$_pr_tok\" >>\"$PROBE_OUT\""
     print "    if [ -n \"${PROBE_KILL:-}\" ]; then exit 90; fi"
     print "  fi"
@@ -1309,14 +1357,24 @@ else
   bad "marker-order: the instrumented copy does not parse — the assertions below are vacuous"
 fi
 
-# rsp <repo> <probe-log> <sfile> <rpath> <kill:0|1> <args...> — the instrumented run.
+# rsp <repo> <probe-log> <sfile> <report-prefix> <kill:0|1> <args...> — the instrumented run.
+#
+# THE PROBE READS THE REPORT THE RECORD NAMES, NOT A PATH THE TEST PREDICTED (round 6, K2). The
+# report name carries a per-open NONCE, so no caller can know it in advance — and that is the
+# FAITHFUL observable anyway: the pair `premerge-assert.sh` acts on is (this record's `head-sha:`,
+# the verdict of the report THIS RECORD names), so the probe derives the second from the first
+# exactly as `load_stage` does. The fourth argument is therefore the `<dir>/<kind>` PREFIX, and the
+# probe appends `.<nonce>.md` (or `.md` for a pre-nonce record). One consequence is recorded in
+# case (b) below: at the FIRST write boundary the record is still the OLD one, so the token
+# observed there is the OLD report's — which is TRUTHFUL, because the head-sha beside it is the
+# old one too.
 rsp() {
   local repo="$1" log="$2" sf="$3" rp="$4" kill="$5"; shift 5
   : >"$log"
   if [ "$kill" = "1" ]; then
-    OUT="$(cd "$repo" && PROBE_OUT="$log" PROBE_SFILE="$sf" PROBE_RPATH="$rp" PROBE_KILL=1 bash "$RS_PROBE" "$@" 2>&1)"
+    OUT="$(cd "$repo" && PROBE_OUT="$log" PROBE_SFILE="$sf" PROBE_RPREFIX="$rp" PROBE_KILL=1 bash "$RS_PROBE" "$@" 2>&1)"
   else
-    OUT="$(cd "$repo" && PROBE_OUT="$log" PROBE_SFILE="$sf" PROBE_RPATH="$rp" bash "$RS_PROBE" "$@" 2>&1)"
+    OUT="$(cd "$repo" && PROBE_OUT="$log" PROBE_SFILE="$sf" PROBE_RPREFIX="$rp" bash "$RS_PROBE" "$@" 2>&1)"
   fi
   RC=$?
 }
@@ -1335,7 +1393,7 @@ else
   bad "marker-order: could not commit in the scratch repo — the head-sha assertions would be vacuous"
 fi
 SF_A="$R11F/.review-stage/issue-900/c.stage"
-RP_A="$(REPORT_OF "$R11F" 900 c)"
+RP_A="$R11F/.review-stage/issue-900/c"
 LOG_A="$T/probe-a.log"
 rsp "$R11F" "$LOG_A" "$SF_A" "$RP_A" 0 open c --issue 900 --agent spec-auditor
 rc_is 0 "marker-order: the instrumented first open succeeds"
@@ -1377,20 +1435,19 @@ else
   bad "marker-order: could not create a distinct commit B (A=$SHA_A B=$SHA_B)"
 fi
 SF_B="$R11F/.review-stage/issue-901/c.stage"
-# THE PROBE WATCHES THE GENERATION THE RE-OPEN PUBLISHES (round 5, J1). The re-opened stage's
-# report is generation 1 (`c.1.md`), not the generation-0 file the previous agent holds — so the
-# on-disk pair a reader would act on is (this record's head-sha, generation 1's verdict). Reading
-# generation 0 here would measure a file nothing consults and report the H1 property as broken on
-# a script that has it.
-RP_B="$(REPORT_GEN_OF "$R11F" 901 c 1)"
+# THE PROBE WATCHES THE REPORT THE RECORD NAMES AT EACH BOUNDARY (round 5 J1, round 6 K2) — the
+# pair a reader would act on, derived rather than predicted. The previous agent's report is
+# captured BEFORE the re-open, because after it the record names a different file.
 RP_B_OLD="$(REPORT_OF "$R11F" 901 c)"
+RPFX_B="$R11F/.review-stage/issue-901/c"
 LOG_B="$T/probe-b.log"
-rsp "$R11F" "$LOG_B" "$SF_B" "$RP_B" 0 open c --issue 901 --agent spec-auditor --force
+rsp "$R11F" "$LOG_B" "$SF_B" "$RPFX_B" 0 open c --issue 901 --agent spec-auditor --force
 rc_is 0 "marker-order: the forced re-open succeeds"
-if [ -f "$RP_B" ]; then
-  ok "marker-order: the re-open published generation 1's report, so the probe measured the file a reader consults"
+RP_B="$(REPORT_OF "$R11F" 901 c)"
+if [ -f "$RP_B" ] && [ "$RP_B" != "$RP_B_OLD" ]; then
+  ok "marker-order: the re-open published a NEW report and the record names it"
 else
-  bad "marker-order: generation 1's report ($RP_B) does not exist — the assertions below would measure the wrong file"
+  bad "marker-order: the re-open's report ('$RP_B') is missing or is the previous one ('$RP_B_OLD')"
 fi
 FORBIDDEN="$(LC_ALL=C grep -c "record-head=$SHA_B report-token=PASS" "$LOG_B" 2>/dev/null || true)"
 if [ "$FORBIDDEN" = "0" ]; then
@@ -1399,25 +1456,37 @@ else
   bad "marker-order: $FORBIDDEN boundary/boundaries paired the new head-sha with the stale PASS (log: $(cat "$LOG_B" 2>/dev/null))"
 fi
 PB1="$(nth_probe "$LOG_B" 1)"
+# WHAT THE FIRST BOUNDARY SHOWS, AND WHY IT IS THE TRUTHFUL PAIR (the observable moved in round 6,
+# the property did not). The RECORD is the publication marker and it has not been written yet, so
+# at this boundary the record still names the OLD commit AND the OLD report — a CONSISTENT pair,
+# describing the audit that really happened. Round 5's version of this assertion measured the
+# NEW file directly (it could, because the path was a predictable generation) and read NOT-RUN;
+# with the path nonce-bound, predicting it is exactly what a reader cannot do, so the probe asks
+# the record. The forbidden pair (new head-sha + PASS) is asserted above and is what H1 is about.
 case "$PB1" in
-  *"report-token=NOT-RUN"*) ok "marker-order: the new generation's report is the SENTINEL at the FIRST boundary" ;;
-  *) bad "marker-order: the report was not yet the sentinel at the first boundary (got: $PB1)" ;;
+  *"report-token=PASS"*) ok "marker-order: at the FIRST boundary the record still names the OLD report, so its PASS is what a reader would see" ;;
+  *) bad "marker-order: the first boundary did not read the record-named report (got: $PB1)" ;;
 esac
 case "$PB1" in
-  *"record-head=$SHA_A"*) ok "marker-order: the record still names the OLD commit while the new report is being published" ;;
+  *"record-head=$SHA_A"*) ok "marker-order: and it names the OLD commit, so the pair a reader acts on is CONSISTENT, not a false certification" ;;
   *) bad "marker-order: the record was already re-stamped before the report was published (got: $PB1)" ;;
 esac
-# AND THE PREVIOUS GENERATION'S PASS IS STILL ON DISK, UNREAD (round 5, J1). H1 used to CLOBBER it
+PB2="$(nth_probe "$LOG_B" 2)"
+case "$PB2" in
+  *"record-head=$SHA_B report-token=NOT-RUN"*) ok "marker-order: at the SECOND boundary the new commit is paired with the new report's SENTINEL, in ONE atomic record write" ;;
+  *) bad "marker-order: the second boundary is not (new head-sha, sentinel) (got: $PB2)" ;;
+esac
+# AND THE PREVIOUS REPORT'S PASS IS STILL ON DISK, UNREAD (round 5, J1). H1 used to CLOBBER it
 # with the sentinel, which was the only thing keeping the stale verdict out of the reader's way;
 # now the reader simply does not look there. Both properties are asserted, because the ORDER still
-# has to hold for the generation the re-open publishes.
+# has to hold for the report the re-open publishes.
 if LC_ALL=C grep -q '^result: PASS$' "$RP_B_OLD" 2>/dev/null; then
-  ok "marker-order: the previous generation's PASS survives as history"
+  ok "marker-order: the superseded report's PASS survives as history"
 else
-  bad "marker-order: the previous generation's report was clobbered instead of superseded"
+  bad "marker-order: the superseded report was clobbered instead of superseded"
 fi
 rs "$R11F" verdict c --issue 901
-rc_is 5 "marker-order: and the re-opened stage reads its OWN generation, so the stale PASS is not a verdict"
+rc_is 5 "marker-order: and the re-opened stage reads the report its RECORD names, so the stale PASS is not a verdict"
 
 # (c) THE INTERRUPTED STATE, PERMANENTLY: the same forced re-open, killed at the first write.
 #     Whatever is on disk afterwards must NOT read as a verdict for the new tree. This is the
@@ -1432,9 +1501,9 @@ git -C "$R11F" -c user.email=t@example.invalid -c user.name=t commit -q -m C >/d
 SHA_C="$(git -C "$R11F" rev-parse HEAD 2>/dev/null || true)"
 SF_C="$R11F/.review-stage/issue-902/c.stage"
 RP_C="$(REPORT_OF "$R11F" 902 c)"
-RP_C_NEW="$(REPORT_GEN_OF "$R11F" 902 c 1)"
+RPFX_C="$R11F/.review-stage/issue-902/c"
 LOG_C="$T/probe-c.log"
-rsp "$R11F" "$LOG_C" "$SF_C" "$RP_C_NEW" 1 open c --issue 902 --agent spec-auditor --force
+rsp "$R11F" "$LOG_C" "$SF_C" "$RPFX_C" 1 open c --issue 902 --agent spec-auditor --force
 rc_is 90 "marker-order: the simulated kill fired at the first write"
 NPC="$(LC_ALL=C grep -c . "$LOG_C" 2>/dev/null || true)"
 if [ "$NPC" = "1" ]; then
@@ -1442,18 +1511,28 @@ if [ "$NPC" = "1" ]; then
 else
   bad "marker-order: $NPC write(s) completed before the kill, expected 1"
 fi
+# THE ORPHANED REPORT IS FOUND, NOT PREDICTED (round 6, K2). The record was never written, so
+# NOTHING names the report the killed open had published — which is the whole point: an
+# unpublished report is a file no reader can reach. The test locates it as the report in this
+# stage directory that the record does NOT name.
+RP_C_NEW=""
+for CAND in "$R11F/.review-stage/issue-902/"c.*.md; do
+  [ -f "$CAND" ] || continue
+  [ "$CAND" != "$RP_C" ] || continue
+  RP_C_NEW="$CAND"
+done
 SENT="$(LC_ALL=C grep -c '^result: NOT-RUN' "$RP_C_NEW" 2>/dev/null || true)"
-if [ "$SENT" = "1" ]; then
-  ok "marker-order: the interrupted state leaves the new generation's SENTINEL on disk"
+if [ -n "$RP_C_NEW" ] && [ "$SENT" = "1" ]; then
+  ok "marker-order: the interrupted state leaves the unpublished report's SENTINEL on disk"
 else
-  bad "marker-order: the new generation's report is not the sentinel after the kill ($(LC_ALL=C grep -m1 '^result:' "$RP_C_NEW" 2>/dev/null))"
+  bad "marker-order: the unpublished report is missing or is not the sentinel after the kill (path='$RP_C_NEW')"
 fi
 # WHAT THE INTERRUPTED STATE IS, AND WHY IT IS STILL THE FAIL-CLOSED ONE (round 5, J1 changes the
 # OBSERVABLE here, not the property). The RECORD is the publication marker and it was not written,
-# so the stage is EXACTLY what it was before the re-open: generation 0, opened at B, recording the
-# audit that was really made at B. That pair is TRUTHFUL — and it is now published ATOMICALLY,
-# because `head-sha:` and `report-generation:` are two fields of ONE record write, so no partial
-# state can pair a new commit with an older generation's verdict at all. Before generations, the
+# so the stage is EXACTLY what it was before the re-open: the SAME report, opened at B, recording
+# the audit that was really made at B. That pair is TRUTHFUL — and it is published ATOMICALLY,
+# because `head-sha:` and `report-nonce:` are two fields of ONE record write, so no partial
+# state can pair a new commit with an older report's verdict at all. Before the nonce, the
 # same interruption left the ONE report clobbered to the sentinel; that was fail-closed too, but it
 # DESTROYED the audit it had, and the H1 pairing was kept out only by the write order.
 DISKHEAD="$(LC_ALL=C sed -n 's/^head-sha:[[:space:]]*//p' "$SF_C" 2>/dev/null | LC_ALL=C head -1 || true)"
@@ -1462,16 +1541,16 @@ if [ "$DISKHEAD" = "$SHA_B" ]; then
 else
   bad "marker-order: the record's head-sha is '$DISKHEAD', expected the pre-kill '$SHA_B'"
 fi
-DISKGEN="$(LC_ALL=C sed -n 's/^report-generation:[[:space:]]*//p' "$SF_C" 2>/dev/null | LC_ALL=C head -1 || true)"
-if [ "$DISKGEN" = "0" ]; then
-  ok "marker-order: and it still names the generation that head-sha was stamped WITH — the pair is atomic, so it cannot be split by an interruption"
+DISKNONCE="$(RECORD_NONCE "$R11F" 902 c)"
+if [ -n "$DISKNONCE" ] && [ "$RP_C" = "$R11F/.review-stage/issue-902/c.$DISKNONCE.md" ]; then
+  ok "marker-order: and it still names the report that head-sha was stamped WITH — the pair is atomic, so it cannot be split by an interruption"
 else
-  bad "marker-order: the record's report-generation is '$DISKGEN', expected the pre-kill '0'"
+  bad "marker-order: the record's report-nonce is '$DISKNONCE', which does not name the pre-kill report '$RP_C'"
 fi
 rs "$R11F" verdict c --issue 902
-rc_is 0 "marker-order: the interrupted re-open published NOTHING, so the stage is still the previous generation"
-has "report=$RP_C" "marker-order: the verdict is read from the generation the RECORD names, not the half-published one"
-hasnt "report=$RP_C_NEW" "marker-order: the unpublished generation's sentinel is not read"
+rc_is 0 "marker-order: the interrupted re-open published NOTHING, so the stage is still the previous report"
+has "report=$RP_C" "marker-order: the verdict is read from the report the RECORD names, not the half-published one"
+hasnt "report=$RP_C_NEW" "marker-order: the unpublished report's sentinel is not read"
 
 # (d) POSITIVE CONTROL: the UNINTERRUPTED forced re-open leaves a USABLE stage — otherwise (c)
 #     could pass on a script that broke --force altogether, and a guard that reds on correct
@@ -1479,10 +1558,10 @@ hasnt "report=$RP_C_NEW" "marker-order: the unpublished generation's sentinel is
 rs "$R11F" open c --issue 902 --agent spec-auditor --force
 rc_is 0 "marker-order CONTROL: a complete forced re-open succeeds"
 RP_C_LIVE="$(printed_report_path)"
-if [ -n "$RP_C_LIVE" ] && [ "$RP_C_LIVE" != "$RP_C" ]; then
-  ok "marker-order CONTROL: the completed re-open published a NEW generation and printed its path"
+if [ -n "$RP_C_LIVE" ] && [ "$RP_C_LIVE" != "$RP_C" ] && [ "$RP_C_LIVE" != "$RP_C_NEW" ]; then
+  ok "marker-order CONTROL: the completed re-open published a FRESH report and printed its path"
 else
-  bad "marker-order CONTROL: the re-open printed '$RP_C_LIVE', which is not a fresh generation"
+  bad "marker-order CONTROL: the re-open printed '$RP_C_LIVE', which is not a fresh report"
 fi
 printf 'result: PASS\n\nre-audited at C.\n' >"$RP_C_LIVE"
 rs "$R11F" verdict c --issue 902
@@ -1588,7 +1667,7 @@ fi
 mkdir -p "$R13/sub/deeper"
 OUT="$(cd "$R13/sub/deeper" && bash "$RS" open c --issue 902 --agent spec-auditor 2>&1)"; RC=$?
 rc_is 0 "derived: open from a SUBDIRECTORY succeeds"
-has "$R13/.review-stage/issue-902/c.md" "derived: the path is anchored at the repo ROOT, not at cwd"
+has "$(REPORT_OF "$R13" 902 c)" "derived: the path is anchored at the repo ROOT, not at cwd"
 if [ -e "$R13/sub/deeper/.review-stage" ]; then
   bad "derived: a .review-stage/ tree was created relative to the caller's cwd"
 else
@@ -1606,7 +1685,7 @@ LC_ALL=C sed -e "s|^report: .*|report: $R13/.review-stage/issue-903/other.md|" "
 rs "$R13" verdict c --issue 903
 rc_is 5 "derived/H2: a planted 'report:' naming another PASS report does NOT select it"
 has "RESULT: NOT-RUN (no report written)" "derived/H2: the verdict comes from the DERIVED path's sentinel"
-has "report=$R13/.review-stage/issue-903/c.md" "derived/H2: and the emitted report= names the DERIVED path"
+has "report=$(REPORT_OF "$R13" 903 c)" "derived/H2: and the emitted report= names the DERIVED path"
 rs "$R13" status c --issue 903
 has "state=sentinel-only" "derived/H2: status reads the derived path too, so the two cannot disagree"
 
@@ -1652,26 +1731,23 @@ done
 rs "$R13" open c --issue "$(printf '907\n908')" --agent spec-auditor
 rc_is 64 "derived/issue: an issue carrying a NEWLINE is refused"
 
-# --- 14. THE REPORT PATH IS GENERATION-BOUND (round 5, J1) ------------------------
-# THE FINDING. `open --force` reset the report to the sentinel and re-stamped `head-sha:`, but
+# --- 14. THE REPORT PATH IS NONCE-BOUND (round 5 J1, round 6 K2) ------------------
+# THE J1 FINDING. `open --force` reset the report to the sentinel and re-stamped `head-sha:`, but
 # the report PATH was unchanged — so the PREVIOUS, idle agent could wake up afterwards and write
 # its OLD-TREE verdict into that same path, where it was now paired with the NEWLY stamped
 # `head-sha:`. A commit nobody audited then passed `premerge-assert.sh`. This is not an exotic
 # race: #3751 exists BECAUSE delegated agents go idle and return late, so "the late agent wakes
 # up and writes" is the expected behaviour of the population this mechanism serves.
 #
-# THE FIX IS STRUCTURAL, NOT A CHECK. Every open records a `report-generation:` in the stage
-# record and the report path INCLUDES it, so a resumed old agent holds a STALE PATH and cannot
-# write into the current generation's report at all. A check could only notice the write
-# afterwards, and the harm is the write.
+# THE FIX IS STRUCTURAL, NOT A CHECK. Every open records a `report-nonce:` in the stage record and
+# the report path INCLUDES it, so a resumed old agent holds a STALE PATH and cannot write into the
+# current report at all. A check could only notice the write afterwards, and the harm is the write.
 #
-# TWO SHAPES, ONE DERIVATION, and the reason the first open keeps the bare name: generation 0 is
-# `<kind>.md` and generation N>0 is `<kind>.<N>.md`. They cannot collide because `<kind>` may not
-# contain a dot (round 4's narrowing) and a generation is digits only. Keeping generation 0's
-# name bare is what makes every quoted `.review-stage/issue-<N>/<kind>.md` example in the agent
-# definitions, the skills, CLAUDE.md and both website pages still TRUE for a first open, and what
-# keeps a record written before this field existed readable instead of reported as
-# `report absent` — a guard that reds on correct input is the guard agents learn to waive.
+# ROUND 6 (K2) CHANGED THE VALUE, NOT THE PROPERTY: the path component was a SCANNED generation
+# number and is now a GENERATED nonce, because a value chosen by looking at what is on disk can be
+# chosen twice (section 16). So the shapes here are `<kind>.<nonce>.md` for every open this version
+# performs and the bare `<kind>.md` for a LEGACY record only — which is why (a) below asserts the
+# SHAPE and reads the VALUE from the record, exactly as a reader must.
 
 R14="$(newrepo)"
 printf 'seed\n' >"$R14/seed.txt"
@@ -1679,28 +1755,34 @@ git -C "$R14" add seed.txt >/dev/null 2>&1
 git -C "$R14" -c user.email=t@example.invalid -c user.name=t commit -q -m A >/dev/null 2>&1
 G_A="$(git -C "$R14" rev-parse HEAD 2>/dev/null || true)"
 if [ -n "$G_A" ]; then
-  ok "generation: the scratch repo has a resolvable HEAD (the head-sha half is measurable)"
+  ok "nonce: the scratch repo has a resolvable HEAD (the head-sha half is measurable)"
 else
-  bad "generation: could not commit in the scratch repo — the assertions below would be vacuous"
+  bad "nonce: could not commit in the scratch repo — the assertions below would be vacuous"
 fi
 
-# (a) THE FIRST OPEN KEEPS THE BARE NAME, and the printed path is the OPEN-OK line's path. Pinned
-#     so a change to the compatibility rule has to be deliberate: several committed documents
-#     quote this exact shape.
+# (a) EVERY OPEN — INCLUDING THE FIRST — CARRIES A NONCE, and the record is the one place that
+#     names it. The bare `<kind>.md` is READ but never WRITTEN by this version (case (h)), so a
+#     reader that reconstructed the path from a shape rather than from the record would be reading
+#     a file nobody wrote.
 rs "$R14" open c --issue 950 --agent spec-auditor
-rc_is 0 "generation: the first open succeeds"
+rc_is 0 "nonce: the first open succeeds"
 G_P0="$(printed_report_path)"
-if [ "$G_P0" = "$(REPORT_GEN_OF "$R14" 950 c 0)" ]; then
-  ok "generation: generation 0's report keeps the bare <kind>.md name (every quoted doc example stays true)"
+if NONCE_PATH_OK "$G_P0" "$R14/.review-stage/issue-950" c; then
+  ok "nonce: the first open's report is <kind>.<nonce>.md — an UNPREDICTABLE name, not the bare one"
 else
-  bad "generation: the first open printed '$G_P0', expected $(REPORT_GEN_OF "$R14" 950 c 0)"
+  bad "nonce: the first open printed '$G_P0', which is not \$dir/c.<nonce>.md"
 fi
-has "report=$G_P0" "generation: the OPEN-OK line's report= field is the SAME path the clause prints"
-has "report-generation=0" "generation: the OPEN-OK line names the generation"
-if LC_ALL=C grep -q '^report-generation: 0$' "$R14/.review-stage/issue-950/c.stage" 2>/dev/null; then
-  ok "generation: the stage record records the generation, so a reader has ONE source of truth for which report counts"
+if [ "$G_P0" != "$(LEGACY_REPORT_OF "$R14" 950 c)" ]; then
+  ok "nonce: and it is NOT the legacy bare name (which this version never writes)"
 else
-  bad "generation: the stage record does not record report-generation: 0 (record: $(cat "$R14/.review-stage/issue-950/c.stage" 2>/dev/null))"
+  bad "nonce: the first open wrote the legacy bare name, so a re-open could collide with it"
+fi
+has "report=$G_P0" "nonce: the OPEN-OK line's report= field is the SAME path the clause prints"
+has "report-nonce=$(RECORD_NONCE "$R14" 950 c)" "nonce: the OPEN-OK line names the nonce the record carries"
+if [ "$G_P0" = "$(REPORT_OF "$R14" 950 c)" ]; then
+  ok "nonce: the stage record NAMES this report, so a reader has ONE source of truth for which report counts"
+else
+  bad "nonce: the record names '$(REPORT_OF "$R14" 950 c)', not the printed '$G_P0' (record: $(cat "$R14/.review-stage/issue-950/c.stage" 2>/dev/null))"
 fi
 
 # (b) THE J1 SCENARIO, END TO END. The stage records a PASS at A; a further commit lands; the
@@ -1708,49 +1790,49 @@ fi
 #     old-tree PASS into the path it was originally given.
 printf 'result: PASS\n\naudited at A.\n' >"$G_P0"
 rs "$R14" verdict c --issue 950
-rc_is 0 "generation: the first-generation audit is readable while it is current"
+rc_is 0 "nonce: the first report is readable while it is current"
 printf 'more\n' >>"$R14/seed.txt"
 git -C "$R14" add seed.txt >/dev/null 2>&1
 git -C "$R14" -c user.email=t@example.invalid -c user.name=t commit -q -m B >/dev/null 2>&1
 G_B="$(git -C "$R14" rev-parse HEAD 2>/dev/null || true)"
 if [ -n "$G_B" ] && [ "$G_B" != "$G_A" ]; then
-  ok "generation: a distinct commit B exists"
+  ok "nonce: a distinct commit B exists"
 else
-  bad "generation: could not create a distinct commit B (A=$G_A B=$G_B)"
+  bad "nonce: could not create a distinct commit B (A=$G_A B=$G_B)"
 fi
 rs "$R14" open c --issue 950 --agent spec-auditor --force
-rc_is 0 "generation: the forced re-open succeeds"
+rc_is 0 "nonce: the forced re-open succeeds"
 G_P1="$(printed_report_path)"
 if [ "$G_P1" != "$G_P0" ]; then
-  ok "generation: the re-opened stage's report path DIFFERS from the one the idle agent holds"
+  ok "nonce: the re-opened stage's report path DIFFERS from the one the idle agent holds"
 else
-  bad "generation: --force reused the report path ($G_P1) — the resumed agent can still write into the current report"
+  bad "nonce: --force reused the report path ($G_P1) — the resumed agent can still write into the current report"
 fi
-if [ "$G_P1" = "$(REPORT_GEN_OF "$R14" 950 c 1)" ]; then
-  ok "generation: and it is generation 1's path"
+if NONCE_PATH_OK "$G_P1" "$R14/.review-stage/issue-950" c; then
+  ok "nonce: and it is a fresh nonce-named report"
 else
-  bad "generation: the forced re-open printed '$G_P1', expected $(REPORT_GEN_OF "$R14" 950 c 1)"
+  bad "nonce: the forced re-open printed '$G_P1', which is not \$dir/c.<nonce>.md"
 fi
-has "report-generation=1" "generation: the OPEN-OK line names the new generation"
+has "report-nonce=$(RECORD_NONCE "$R14" 950 c)" "nonce: the OPEN-OK line names the NEW nonce, and the record carries it"
 # THE OLD AGENT WAKES UP AND WRITES. This is the whole finding.
 printf 'result: PASS\n\naudited at A, reported late.\n' >"$G_P0"
 rs "$R14" verdict c --issue 950
-rc_is 5 "generation: a resumed agent's write into its OLD path is NOT a verdict for the new tree"
-has "NOT-RUN (no report written)" "generation: the current generation reads as the sentinel it is"
-hasnt "RESULT: PASS" "generation: no PASS is reported for a tree nobody audited"
-has "report=$G_P1" "generation: and the emitted report= names the CURRENT generation"
-# NOTHING IS DELETED. Old generations stay on disk as history; the property is that nothing
+rc_is 5 "nonce: a resumed agent's write into its OLD path is NOT a verdict for the new tree"
+has "NOT-RUN (no report written)" "nonce: the current report reads as the sentinel it is"
+hasnt "RESULT: PASS" "nonce: no PASS is reported for a tree nobody audited"
+has "report=$G_P1" "nonce: and the emitted report= names the CURRENT report"
+# NOTHING IS DELETED. Superseded reports stay on disk as history; the property is that nothing
 # READS them, not that they are removed — an audit trail is the point of this whole issue.
 if LC_ALL=C grep -q '^result: PASS$' "$G_P0" 2>/dev/null; then
-  ok "generation: the previous generation's report is left INTACT on disk as history"
+  ok "nonce: the superseded report is left INTACT on disk as history"
 else
-  bad "generation: the previous generation's report was destroyed — the audit trail is the point of this issue"
+  bad "nonce: the superseded report was destroyed — the audit trail is the point of this issue"
 fi
-# AND THE RECORD PAIRS THE NEW GENERATION WITH THE NEW COMMIT, in ONE atomic write.
+# AND THE RECORD PAIRS THE NEW REPORT WITH THE NEW COMMIT, in ONE atomic write.
 if LC_ALL=C grep -q "^head-sha: $G_B\$" "$R14/.review-stage/issue-950/c.stage" 2>/dev/null; then
-  ok "generation: the record re-stamped head-sha to B beside the new generation (one atomic pair)"
+  ok "nonce: the record re-stamped head-sha to B beside the new nonce (one atomic pair)"
 else
-  bad "generation: the record does not name B (record: $(cat "$R14/.review-stage/issue-950/c.stage" 2>/dev/null))"
+  bad "nonce: the record does not name B (record: $(cat "$R14/.review-stage/issue-950/c.stage" 2>/dev/null))"
 fi
 
 # (c) POSITIVE CONTROL: the RE-SPAWNED agent, writing into the path the clause printed, reaches a
@@ -1758,103 +1840,114 @@ fi
 #     guard that reds on correct input is the guard agents learn to waive.
 printf 'result: PASS\n\nre-audited at B.\n' >"$G_P1"
 rs "$R14" verdict c --issue 950
-rc_is 0 "generation CONTROL: the fresh agent's report at the printed path IS the verdict"
-has "report=$G_P1" "generation CONTROL: read from the current generation's path"
+rc_is 0 "nonce CONTROL: the fresh agent's report at the printed path IS the verdict"
+has "report=$G_P1" "nonce CONTROL: read from the current report's path"
 
-# (d) MONOTONIC ACROSS A SECOND RE-OPEN, and generation 1's report is left alone too.
+# (d) A SECOND RE-OPEN IS A THIRD DISTINCT PATH, and the previous two are left alone. "Distinct",
+#     not "one greater": nothing counts any more (section 16).
 rs "$R14" open c --issue 950 --agent spec-auditor --force
-rc_is 0 "generation: a second forced re-open succeeds"
+rc_is 0 "nonce: a second forced re-open succeeds"
 G_P2="$(printed_report_path)"
-if [ "$G_P2" = "$(REPORT_GEN_OF "$R14" 950 c 2)" ]; then
-  ok "generation: the generation ADVANCES (2), so no two opens of one stage ever share a path"
+if [ -n "$G_P2" ] && [ "$G_P2" != "$G_P1" ] && [ "$G_P2" != "$G_P0" ]; then
+  ok "nonce: the path is DISTINCT from both earlier ones, so no two opens of one stage share a path"
 else
-  bad "generation: the second re-open printed '$G_P2', expected $(REPORT_GEN_OF "$R14" 950 c 2)"
+  bad "nonce: the second re-open printed '$G_P2', which collides with an earlier report"
 fi
 if LC_ALL=C grep -q '^result: PASS$' "$G_P1" 2>/dev/null; then
-  ok "generation: generation 1's report is history too, not clobbered"
+  ok "nonce: the previous report is history too, not clobbered"
 else
-  bad "generation: generation 1's report was destroyed by the next re-open"
+  bad "nonce: the previous report was destroyed by the next re-open"
 fi
 rs "$R14" verdict c --issue 950
-rc_is 5 "generation: and the new generation starts as a non-verdict, whatever the older ones say"
+rc_is 5 "nonce: and the new report starts as a non-verdict, whatever the older ones say"
 
-# (e) THE ADVANCE BELT: a monotonic counter read from the record cannot help when the RECORD is
-#     gone and the REPORT is not — the count would restart at 0 and hand a new agent the path an
-#     old one still holds. So the generation also ADVANCES PAST any generation whose report file
-#     already exists.
+# (e) THE PROPERTY THE DELETED EXISTENCE BELT WAS FOR, NOW STRUCTURAL (round 6, K2). Round 5's
+#     counter had to be defended with a scan: delete the RECORD while a REPORT survives and the
+#     count restarted at 0, handing a new agent the path an old, still-running agent holds. The
+#     scan is GONE and the property is stronger, because a generated value cannot land on an
+#     existing name whether or not anything looked.
 rs "$R14" open c --issue 951 --agent spec-auditor
-rc_is 0 "generation/belt: a stage opens at generation 0"
+rc_is 0 "nonce/orphan: a stage opens"
 G_B0="$(printed_report_path)"
 printf 'result: PASS\n\naudited by the agent that is still running.\n' >"$G_B0"
 rm -f "$R14/.review-stage/issue-951/c.stage"
 rs "$R14" open c --issue 951 --agent spec-auditor
-rc_is 0 "generation/belt: with the record gone, a fresh open succeeds"
+rc_is 0 "nonce/orphan: with the record gone, a fresh open succeeds"
 G_B1="$(printed_report_path)"
 if [ "$G_B1" != "$G_B0" ]; then
-  ok "generation/belt: it ADVANCES past the surviving report rather than reusing its path"
+  ok "nonce/orphan: it picks a path the surviving report does not occupy — with no probe of what exists"
 else
-  bad "generation/belt: the fresh open reused $G_B0, which an earlier agent still holds"
+  bad "nonce/orphan: the fresh open reused $G_B0, which an earlier agent still holds"
 fi
 if LC_ALL=C grep -q '^result: PASS$' "$G_B0" 2>/dev/null; then
-  ok "generation/belt: and the surviving report is untouched"
+  ok "nonce/orphan: and the surviving report is untouched"
 else
-  bad "generation/belt: the surviving report was clobbered"
+  bad "nonce/orphan: the surviving report was clobbered"
 fi
 rs "$R14" verdict c --issue 951
-rc_is 5 "generation/belt: the re-opened stage reads its OWN generation, not the survivor's PASS"
+rc_is 5 "nonce/orphan: the re-opened stage reads its OWN report, not the survivor's PASS"
 
-# (f) A RECORD WHOSE GENERATION CANNOT BE READ NAMES ITS OWN CAUSE AND FABRICATES NO PATH. The
-#     field decides WHICH ARTIFACT COUNTS, so "cannot tell" may not take the permissive branch by
-#     falling back to generation 0 — that is how a stale generation-0 PASS would be read as the
+# (f) A RECORD WHOSE NONCE CANNOT BE READ NAMES ITS OWN CAUSE AND FABRICATES NO PATH. The field
+#     decides WHICH ARTIFACT COUNTS, so "cannot tell" may not take the permissive branch by
+#     falling back to the bare name — that is how a stale report's PASS would be read as the
 #     current verdict.
 rs "$R14" open c --issue 952 --agent spec-auditor
 G_SF="$R14/.review-stage/issue-952/c.stage"
-printf 'result: PASS\n\nstale, from generation 0.\n' >"$(REPORT_GEN_OF "$R14" 952 c 0)"
-LC_ALL=C sed -e 's|^report-generation: .*|report-generation: nope|' "$G_SF" >"$G_SF.new" && mv "$G_SF.new" "$G_SF"
+printf 'result: PASS\n\nstale, at the legacy name.\n' >"$(LEGACY_REPORT_OF "$R14" 952 c)"
+LC_ALL=C sed -e 's|^report-nonce: .*|report-nonce: ../../nope|' "$G_SF" >"$G_SF.new" && mv "$G_SF.new" "$G_SF"
 rs "$R14" verdict c --issue 952
-rc_is 5 "generation/defect: an unreadable report-generation is a NON-VERDICT"
-has "stage record unreadable" "generation/defect: and it names the STAGE RECORD, not the report (a different operator action)"
-hasnt "RESULT: PASS" "generation/defect: the generation-0 report is NOT read as the current verdict"
-has "report=unresolved" "generation/defect: no path is fabricated on the line that is otherwise the authority"
+rc_is 5 "nonce/defect: an unreadable report-nonce is a NON-VERDICT"
+has "stage record unreadable" "nonce/defect: and it names the STAGE RECORD, not the report (a different operator action)"
+hasnt "RESULT: PASS" "nonce/defect: the legacy-named report is NOT read as the current verdict"
+has "report=unresolved" "nonce/defect: no path is fabricated on the line that is otherwise the authority"
 rs "$R14" status c --issue 952
-has "state=stage-record-unreadable" "generation/defect: status gives it its own state, per the one-state-per-cause rule"
+has "state=stage-record-unreadable" "nonce/defect: status gives it its own state, per the one-state-per-cause rule"
 rs "$R14" record-author-performed c --issue 952 \
   --reason 'no peer auditor was available on this box' --evidence docs/development/review-stage-reporting.md --performed-by author
-rc_is 2 "generation/defect: record-author-performed REFUSES rather than write to a guessed path"
-# NAMED, so this case cannot pass on the NEIGHBOURING refusal: a generation-0 report holding a
+rc_is 2 "nonce/defect: record-author-performed REFUSES rather than write to a guessed path"
+# NAMED, so this case cannot pass on the NEIGHBOURING refusal: a legacy-named report holding a
 # recorded PASS would refuse as `verdict-already-recorded` whether or not the record is readable.
-has "AUTHOR-REFUSED reason=stage-record-unreadable" "generation/defect: naming the record defect, not the neighbouring already-recorded refusal"
+has "AUTHOR-REFUSED reason=stage-record-unreadable" "nonce/defect: naming the record defect, not the neighbouring already-recorded refusal"
+# AND A TOO-SHORT TOKEN IS REFUSED TOO: the value is alphanumeric, so charset alone would accept
+# it, and a one-character "nonce" is a value a second open could plausibly land on.
+rs "$R14" open c --issue 955 --agent spec-auditor
+G_SF5="$R14/.review-stage/issue-955/c.stage"
+LC_ALL=C sed -e 's|^report-nonce: .*|report-nonce: a|' "$G_SF5" >"$G_SF5.new" && mv "$G_SF5.new" "$G_SF5"
+rs "$R14" verdict c --issue 955
+rc_is 5 "nonce/defect: an alphanumeric but too-SHORT token is a NON-VERDICT too (charset is not the whole rule)"
+has "stage record unreadable" "nonce/defect: named as a record defect"
 
-# (g) SEVERAL generation lines is AMBIGUOUS, refused by the COUNT and not resolved by order —
+# (g) SEVERAL nonce lines is AMBIGUOUS, refused by the COUNT and not resolved by order —
 #     the same rule the `result:` reader follows, for the same reason.
 rs "$R14" open c --issue 953 --agent spec-auditor
 G_SF2="$R14/.review-stage/issue-953/c.stage"
-printf 'result: PASS\n\nstale, from generation 0.\n' >"$(REPORT_GEN_OF "$R14" 953 c 0)"
-printf 'report-generation: 7\n' >>"$G_SF2"
+G_P953="$(printed_report_path)"
+printf 'result: PASS\n\na real audit, at the report the record named.\n' >"$G_P953"
+printf 'report-nonce: aaaaaaaaaa\n' >>"$G_SF2"
 rs "$R14" verdict c --issue 953
-rc_is 5 "generation/defect: TWO report-generation lines is a NON-VERDICT"
-has "stage record unreadable" "generation/defect: named as a record defect"
-hasnt "RESULT: PASS" "generation/defect: and the first line does not win"
+rc_is 5 "nonce/defect: TWO report-nonce lines is a NON-VERDICT"
+has "stage record unreadable" "nonce/defect: named as a record defect"
+hasnt "RESULT: PASS" "nonce/defect: and the first line does not win"
 
 # (h) A RECORD WRITTEN BEFORE THE FIELD EXISTED still reads its report. Every prior version wrote
 #     exactly ONE report, at `<kind>.md`, so ABSENT is an affirmative measurement of that shape —
-#     not a "cannot tell". Reading generation 0 there is the TRUE answer, and reporting
+#     not a "cannot tell". Reading the bare name there is the TRUE answer, and reporting
 #     `report absent` instead would red on correct input.
 rs "$R14" open c --issue 954 --agent spec-auditor
 G_SF3="$R14/.review-stage/issue-954/c.stage"
-printf 'result: PASS\n\naudited by the previous version of this tool.\n' >"$(REPORT_GEN_OF "$R14" 954 c 0)"
-LC_ALL=C grep -v '^report-generation:' "$G_SF3" >"$G_SF3.new" && mv "$G_SF3.new" "$G_SF3"
+printf 'result: PASS\n\naudited by the previous version of this tool.\n' >"$(LEGACY_REPORT_OF "$R14" 954 c)"
+LC_ALL=C grep -v '^report-nonce:' "$G_SF3" >"$G_SF3.new" && mv "$G_SF3.new" "$G_SF3"
 rs "$R14" verdict c --issue 954
-rc_is 0 "generation/legacy: a record with no report-generation reads generation 0's report"
-has "report=$(REPORT_GEN_OF "$R14" 954 c 0)" "generation/legacy: and names the bare path that version wrote"
+rc_is 0 "nonce/legacy: a record with no report-nonce reads the bare report that version wrote"
+has "report=$(LEGACY_REPORT_OF "$R14" 954 c)" "nonce/legacy: and names the bare path that version wrote"
 
-# --- 15. AN UNREADABLE STAGE RECORD IS NOT "no generation field" (round 6, K1) -----
-# THE FINDING. The generation was counted with
-#   ngen="$(grep -c ... "$sfile" 2>/dev/null || true)"; case "$ngen" in ""|*[!0-9]*) ngen=0
+# --- 15. AN UNREADABLE STAGE RECORD IS NOT "no nonce field" (round 6, K1) ----------
+# THE FINDING. The field naming this stage's report was counted with
+#   n="$(grep -c ... "$sfile" 2>/dev/null || true)"; case "$n" in ""|*[!0-9]*) n=0
 # and `grep` uses its EXIT STATUS to separate the two facts this reader depends on: 1 means "the
 # file was READ and holds no such line", >=2 means "the file could NOT BE READ". `|| true` threw
-# that away, so an unreadable record was INDISTINGUISHABLE from a record with no generation field
-# and took the LEGACY reading — generation 0, the bare `<kind>.md` — so an OLD report recording
+# that away, so an unreadable record was INDISTINGUISHABLE from a record with no such field
+# and took the LEGACY reading — the bare `<kind>.md` — so an OLD report recording
 # PASS was reported as the current verdict while which report is current was UNKNOWN. That is the
 # shape this repo names repeatedly: the unmeasured state inheriting the permissive branch.
 #
@@ -1865,9 +1958,10 @@ has "report=$(REPORT_GEN_OF "$R14" 954 c 0)" "generation/legacy: and names the b
 R15K="$(newrepo)"
 rs "$R15K" open c --issue 960 --agent spec-auditor
 rc_is 0 "record-read: the stage opened"
-# THE STALE PASS GOES AT THE LEGACY BARE PATH — the file a "no generation field" reading consults.
+# THE STALE PASS GOES AT THE LEGACY BARE PATH — the file a "no nonce field" reading consults.
 # It is the artifact whose PASS must not be reported while the record cannot be read.
-K1_LEGACY="$(REPORT_GEN_OF "$R15K" 960 c 0)"
+K1_RP="$(printed_report_path)"
+K1_LEGACY="$(LEGACY_REPORT_OF "$R15K" 960 c)"
 printf 'result: PASS\n\naudited long ago, at a tree nobody can now name.\n' >"$K1_LEGACY"
 K1_SF="$R15K/.review-stage/issue-960/c.stage"
 if [ -f "$K1_SF" ] && [ -f "$K1_LEGACY" ]; then
@@ -1899,17 +1993,167 @@ else
   # would have treated an unreadable record as generation 0 and handed a re-spawned agent the
   # path an earlier agent may still hold.
   rs "$R15K" open c --issue 960 --agent spec-auditor --force
-  rc_is 2 "record-read: open REFUSES on a record it cannot read rather than guessing the legacy generation"
+  rc_is 2 "record-read: open REFUSES on a record it cannot read rather than guessing the legacy reading"
   has "reason=stage-record-unreadable" "record-read: and the refusal names the record, by its own reason"
 fi
 chmod 644 "$K1_SF" 2>/dev/null || true
 # CONTROL: readable again, and the stage reads its verdict — so the case cannot pass on a tool
 # that simply refuses everything. The PASS is written to the path `open` PRINTED, which is the
 # file a caller was handed.
-printf 'result: PASS\n\nre-audited.\n' >"$K1_LEGACY"
+printf 'result: PASS\n\nre-audited.\n' >"$K1_RP"
 rs "$R15K" verdict c --issue 960
 rc_is 0 "record-read CONTROL: a READABLE record reads its report and reports the verdict"
 has "RESULT: PASS" "record-read CONTROL: the recorded PASS is reported once the record can be read"
+
+# --- 16. THE REPORT PATH IS GENERATED, NEVER SELECTED (round 6, K2) ----------------
+# THE FINDING. Round 5 chose the report's generation by SCANNING the stage directory for an unused
+# `<kind>.<gen>.md` — a bounded walk with its own exhaustion refusal. A value chosen by looking at
+# what is already on disk is a value TWO CONCURRENT CALLERS CAN BOTH CHOOSE: two `open --force`
+# runs read the same record, probe the same directory BEFORE either has written, pick the same
+# generation and hand ONE report path to TWO agents — so the superseded agent's write lands on the
+# current report and replaces FINDINGS with PASS.
+#
+# THE FIX IS SUBTRACTION: the counter, the scan, the 4096-attempt bound and the exhaustion refusal
+# are DELETED and the path component is a GENERATED nonce. Nothing is selected, so nothing races —
+# and a lock would have been the worse answer, serialising a race a nonce removes while adding a
+# mechanism (a stale lock file, a box without `flock`, a holder killed mid-open) to a script whose
+# whole subject is not taking the permissive branch when something cannot be measured.
+
+# (a) THE RACE, SIMULATED DETERMINISTICALLY. This is a SIMULATION OF THE INTERLEAVING, not a real
+#     concurrent run: the two opens are sequential, and the stage directory is RESTORED to the
+#     state both of them observed between them, because in the interleaving being modelled B's
+#     read (and, under the scanned counter, B's existence probe) happens BEFORE either agent
+#     writes. No timing is involved, so the case cannot flake — and it reds on the scanned counter
+#     every time (measured: both calls printed `c.1.md`, and A's `result: FINDINGS` was replaced by
+#     B's `result: PASS`).
+R16="$(newrepo)"
+printf 'seed\n' >"$R16/seed.txt"
+git -C "$R16" add seed.txt >/dev/null 2>&1
+git -C "$R16" -c user.email=t@example.invalid -c user.name=t commit -q -m A >/dev/null 2>&1
+rs "$R16" open c --issue 970 --agent spec-auditor
+rc_is 0 "race: the stage both concurrent calls will re-open is open"
+K2_SD="$R16/.review-stage/issue-970"
+K2_SNAP="$T/k2-snap-$$"
+rm -rf "$K2_SNAP"
+if cp -a "$K2_SD" "$K2_SNAP" 2>/dev/null; then
+  ok "race: the state both calls observe was snapshotted (the simulation has a subject)"
+else
+  bad "race: could not snapshot the stage directory — the assertions below would be vacuous"
+fi
+rs "$R16" open c --issue 970 --agent spec-auditor --force
+rc_is 0 "race: call A's forced re-open succeeds"
+K2_PA="$(printed_report_path)"
+# B ran CONCURRENTLY: it observed the pre-A state, so that is the state it is given.
+rm -rf "$K2_SD"; cp -a "$K2_SNAP" "$K2_SD"
+rs "$R16" open c --issue 970 --agent spec-auditor --force
+rc_is 0 "race: call B's forced re-open succeeds"
+K2_PB="$(printed_report_path)"
+if [ -n "$K2_PA" ] && [ "$K2_PA" != "$K2_PB" ]; then
+  ok "race: the two calls were handed DIFFERENT report paths, though both observed the same prior state"
+else
+  bad "race: both calls were handed '$K2_PA' — one report path for two agents, so either agent can overwrite the other's verdict"
+fi
+# NOW BOTH AGENTS REPORT. A found a blocking finding; B found nothing.
+printf 'result: FINDINGS\n\nagent A: one blocking finding.\n' >"$K2_PA"
+printf 'result: PASS\n\nagent B: nothing found.\n' >"$K2_PB"
+if LC_ALL=C grep -q '^result: FINDINGS$' "$K2_PA" 2>/dev/null; then
+  ok "race: A's FINDINGS is still A's FINDINGS — the superseded agent cannot overwrite it"
+else
+  bad "race: A's report now reads '$(LC_ALL=C grep -m1 '^result:' "$K2_PA" 2>/dev/null)' — a FINDINGS was replaced by a concurrent open's PASS"
+fi
+# AND THE PUBLISHED VERDICT IS THE ONE THE RECORD NAMES — exactly one of the two, never a mixture.
+rs "$R16" verdict c --issue 970
+if [ "$(REPORT_OF "$R16" 970 c)" = "$K2_PB" ]; then
+  ok "race: the record names B's report (the LAST record write published), so the verdict is unambiguous"
+else
+  bad "race: the record names '$(REPORT_OF "$R16" 970 c)', which is neither call's published report"
+fi
+has "report=$K2_PB" "race: and the emitted report= is that one"
+
+# (b) NOTHING IS SELECTED — asserted STRUCTURALLY over the shipped script, because the point of
+#     this item is a DELETION and a behavioural case cannot see that a mechanism is gone. Three
+#     literals from the removed machinery must be absent, and the generator must contain no
+#     filesystem existence probe (which is what made the old value collidable). This half PINS THE
+#     DELETION; case (a) is the behavioural guard, because a reintroduced counter under new names
+#     would slip past a literal scan and still red (a).
+for GONE in 'gen_attempts' 'report-generation' '-exhausted'; do
+  if LC_ALL=C grep -q -- "$GONE" "$RS"; then
+    bad "race/structural: the shipped script still contains '$GONE' — the selection machinery was not removed"
+  else
+    ok "race/structural: '$GONE' is gone from the shipped script"
+  fi
+done
+GENBODY="$(LC_ALL=C sed -n '/^new_report_nonce() {$/,/^}$/p' "$RS")"
+if [ -n "$GENBODY" ]; then
+  ok "race/structural: the nonce generator was located in the shipped script"
+else
+  bad "race/structural: could not locate new_report_nonce() — the assertion below would be vacuous"
+fi
+case "$GENBODY" in
+  *'[ -f '* | *'[ -e '* | *'[ -L '* | *' ls '*)
+    bad "race/structural: the nonce generator probes the filesystem — a value derived from what exists is a value two callers can both choose" ;;
+  *) ok "race/structural: the nonce generator makes no filesystem probe, so its value cannot be a function of what exists" ;;
+esac
+
+# (c) THE GENERATOR IS ACTUALLY UNIQUE ACROSS REAL OPENS. The structural case says nothing is
+#     selected; this one measures that what IS produced does not repeat. Twelve opens of twelve
+#     stages, through the shipped script, must yield twelve distinct valid tokens.
+K2_TOKENS="$T/k2-tokens.txt"
+: >"$K2_TOKENS"
+K2_N=0
+while [ "$K2_N" -lt 12 ]; do
+  K2_N=$((K2_N + 1))
+  rs "$R16" open c --issue "98$K2_N" --agent spec-auditor >/dev/null 2>&1
+  RECORD_NONCE "$R16" "98$K2_N" c >>"$K2_TOKENS"
+done
+K2_TOTAL="$(LC_ALL=C grep -c . "$K2_TOKENS" || true)"
+K2_UNIQ="$(LC_ALL=C sort -u "$K2_TOKENS" | LC_ALL=C grep -c . || true)"
+if [ "$K2_TOTAL" = "12" ]; then
+  ok "race/unique: all twelve opens recorded a nonce"
+else
+  bad "race/unique: only $K2_TOTAL of 12 opens recorded a nonce"
+fi
+if [ "$K2_UNIQ" = "$K2_TOTAL" ]; then
+  ok "race/unique: all $K2_TOTAL tokens are DISTINCT"
+else
+  bad "race/unique: $K2_TOTAL tokens collapsed to $K2_UNIQ distinct values"
+fi
+K2_BAD=0
+while IFS= read -r TOKV; do
+  [ -n "$TOKV" ] || continue
+  case "$TOKV" in
+    *[!A-Za-z0-9]* ) K2_BAD=$((K2_BAD + 1)) ;;
+    *) [ "${#TOKV}" -ge 6 ] || K2_BAD=$((K2_BAD + 1)) ;;
+  esac
+done <"$K2_TOKENS"
+if [ "$K2_BAD" = "0" ]; then
+  ok "race/unique: every token is alphanumeric and at least 6 characters (the shape report_path requires)"
+else
+  bad "race/unique: $K2_BAD token(s) are not a valid nonce shape"
+fi
+
+# (d) NO FALLBACK GENERATOR. The nonce comes from `mktemp -u`; a box that cannot produce one is
+#     REFUSED, not given a predictable substitute (a pid, a timestamp, a counter) — which is
+#     exactly the collidable value this replaces. Reached by SUBSTITUTING THE ARTIFACT the script
+#     calls (a `mktemp` earlier on PATH), never a test-only seam: a seam is one more thing a real
+#     invoker can set.
+K2_BIN="$T/k2-fakebin"
+mkdir -p "$K2_BIN"
+printf '#!/bin/sh\nexit 1\n' >"$K2_BIN/mktemp"
+chmod +x "$K2_BIN/mktemp"
+OUT="$(cd "$R16" && PATH="$K2_BIN:$PATH" bash "$RS" open c --issue 990 --agent spec-auditor 2>&1)"; RC=$?
+rc_is 2 "race/no-fallback: an open that cannot generate a nonce is REFUSED"
+has "reason=report-nonce-not-generated" "race/no-fallback: the refusal names the cause"
+has "no fallback to a predictable token" "race/no-fallback: and says why there is no substitute"
+if [ -z "$(ls -A "$R16/.review-stage/issue-990" 2>/dev/null | LC_ALL=C grep -v '^c\.stage$' || true)" ]; then
+  ok "race/no-fallback: no report was written at any path"
+else
+  bad "race/no-fallback: the refused open wrote $(ls -A "$R16/.review-stage/issue-990" 2>/dev/null)"
+fi
+# CONTROL: with mktemp back, the same open succeeds — so the case above is about the generator and
+# not about a script that refuses everything.
+rs "$R16" open c --issue 991 --agent spec-auditor
+rc_is 0 "race/no-fallback CONTROL: with a working mktemp the same open succeeds"
 
 # --- case floor ---------------------------------------------------------------
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
@@ -2005,7 +2249,21 @@ has "RESULT: PASS" "record-read CONTROL: the recorded PASS is reported once the 
 # host-conditional and takes the FIRST shape the two rules above allow: the mode-000 branch emits
 # the SAME NUMBER of assertions whether or not this user can read a mode-000 file (root can), so
 # the count does not move.
-ASSERT_FLOOR=440
+# ROUND 6's SECOND ITEM (K2) MOVES IT TO 465, IN BOTH DIRECTIONS. Section 16 adds 21 (the report
+# path is GENERATED, never SELECTED: the race simulation end to end, the structural pins on the
+# DELETED selection machinery, the uniqueness measurement over twelve real opens, and the
+# no-fallback refusal with its control). Section 14 was RE-EXPRESSED rather than shrunk — the
+# scanned generation became a nonce, so (a) asserts the SHAPE and reads the VALUE from the record,
+# (d) asserts DISTINCTNESS instead of monotonicity, (e) keeps the property the deleted existence
+# belt was for, and (f) gains the too-SHORT-token case (charset is not the whole rule): 40 -> 44.
+# Section 11(a) also changed OUTCOME rather than disappearing: a symlink planted at the old
+# guessable report name is now INERT rather than refused (the name is unpredictable), so the case
+# asserts that stronger property and grew from 4 assertions to 5, with the reachable report-half
+# leaf refusal still covered by 11(e). 440 -> 465. Every added assertion is UNCONDITIONAL —
+# section 16's extra requirements (git commits, `cp -a`, a PATH-shadowed `mktemp`) are the SUBJECT
+# of asserted preconditions rather than preconditions for running — so the EXACT floor still holds
+# by the two shapes recorded above.
+ASSERT_FLOOR=465
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

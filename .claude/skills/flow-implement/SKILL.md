@@ -143,10 +143,12 @@ never gate stdout or review churn.
    absent, unreadable, empty, ungrammatical or never-opened, and the token NAMES which, because the operator
    action differs per cause — plus `stage record unreadable`, where the RECORD does not name which
    report is current. Do NOT proceed to the PR on a `NOT-RUN` stage: re-spawn
-   (`open --force` KEEPS the original clock, so the elapsed time still reads true, and ADVANCES the
-   report GENERATION — spawn with the path it PRINTS, because the previous generation's file is no
-   longer read, so an idle agent that resumes and writes there cannot certify anything, #3751 round
-   5), or read `status` for how long it has produced nothing. **Never infer a clean review from an idle
+   (`open --force` KEEPS the original clock, so the elapsed time still reads true, and publishes the
+   report under a FRESH NONCE — spawn with the path it PRINTS, because the previous file is no
+   longer read, so an idle agent that resumes and writes there cannot certify anything, #3751 rounds
+   5-6; the nonce is GENERATED rather than chosen by scanning, so two concurrent `--force` calls
+   cannot be handed one path), or read `status` for how long it has produced nothing — its `report=`
+   field is also the authority when you need the path and do not have the clause. **Never infer a clean review from an idle
    notice** — that is the exact false certification #3751 exists to prevent.
    `review-stage.sh` writes only under `.review-stage/`, which is gitignored and verified so
    fail-closed, so it cannot dirty a running gate (#2926/#3648). **`scripts/flow/roborev-review.sh`

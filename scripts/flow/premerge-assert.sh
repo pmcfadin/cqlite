@@ -225,14 +225,16 @@
 #       one. Every one of those refusals prints the same remedy — re-open the stage
 #       at this commit with `--force` (which RE-STAMPS `head-sha`, deliberately
 #       unlike `spawned-at`) and re-run C.
-#   WHICH REPORT the record names is NOT this script's question (#3751 round 5, J1).
-#   The record also carries a `report-generation:`, and the report path INCLUDES it
-#   (`<kind>.md` at generation 0, `<kind>.<N>.md` after a re-open) so that a
-#   PREVIOUS, idle agent resuming after a `--force` holds a stale path and cannot
-#   write into the current report at all. This script never derives that path: it
-#   runs `review-stage.sh verdict`, which resolves the generation from the same
+#   WHICH REPORT the record names is NOT this script's question (#3751 round 5 J1,
+#   round 6 K2). The record also carries a `report-nonce:`, and the report path
+#   INCLUDES it (`<kind>.<nonce>.md`; a bare `<kind>.md` only for a record written
+#   before the field existed) so that a PREVIOUS, idle agent resuming after a
+#   `--force` holds a stale path and cannot write into the current report at all.
+#   The nonce is GENERATED, never chosen by scanning what is on disk, so two
+#   concurrent opens cannot be handed one path. This script never derives that path:
+#   it runs `review-stage.sh verdict`, which resolves the nonce from the same
 #   record with the same function `open` wrote it with. A record whose
-#   `report-generation:` cannot be read therefore arrives here as a NON-PASSING
+#   `report-nonce:` cannot be read therefore arrives here as a NON-PASSING
 #   TOKEN (`NOT-RUN (stage record unreadable: …)`), which the closed grammar below
 #   refuses like any other — no fallback, and no second opinion about which file
 #   holds the verdict.
@@ -299,8 +301,8 @@ usage() {
   printf '                              was opened at. A stale, missing or unparsable\n' >&2
   printf '                              head-sha REFUSES — re-open with --force, re-run C\n' >&2
   printf '                              WRITING INTO THE PATH THAT open PRINTS: a --force\n' >&2
-  printf '                              re-open advances the report GENERATION, so the\n' >&2
-  printf '                              previous generation file is no longer read (#3751).\n' >&2
+  printf '                              re-open publishes a report under a FRESH NONCE, so\n' >&2
+  printf '                              the previous file is no longer read (#3751).\n' >&2
   printf '         --c-verdict <path>   a file holding a captured verdict line, i.e.\n' >&2
   printf '                              scripts/flow/review-stage.sh verdict c --issue <N> > <path>\n' >&2
 }
@@ -483,7 +485,7 @@ C_ROUTING=""        # REQUIRED | NOT-APPLICABLE | UNMEASURED
 C_ROUTING_DETAIL=""
 # ONE remedy sentence for every stage-binding refusal (#3751 round 3, G1): each of those
 # refusals has the SAME next action, and six copies of it is six places for it to drift.
-C_REOPEN_REMEDY="Remedy: re-open the stage at THIS commit and re-run C — review-stage.sh open <kind> --issue <N> --agent spec-auditor --force (--force RE-STAMPS head-sha, deliberately unlike spawned-at, and ADVANCES the report generation: spawn the auditor with the path that command PRINTS, because the previous generation's file is no longer read) — then read it with: review-stage.sh verdict <kind> --issue <N>"
+C_REOPEN_REMEDY="Remedy: re-open the stage at THIS commit and re-run C — review-stage.sh open <kind> --issue <N> --agent spec-auditor --force (--force RE-STAMPS head-sha, deliberately unlike spawned-at, and publishes the report under a FRESH NONCE: spawn the auditor with the path that command PRINTS, because the previous file is no longer read) — then read it with: review-stage.sh verdict <kind> --issue <N>"
 
 # c_safe_display <text> — THE ONE EMIT BOUNDARY for text this script did not produce (#3751 round
 # 5, J3). The stage verdict line, its token, its `report=` field and its stage KIND all come from a
@@ -662,8 +664,8 @@ C_PARSE
     refuse_no_c_verdict \
       "The $what holds NO verdict line (no line begins 'REVIEW-STAGE: ' at column zero)." \
       "A captured verdict is produced by:  review-stage.sh verdict $C_STAGE_KIND --issue <N> > <path>" \
-      "The stage's REPORT file (.review-stage/issue-<N>/$C_STAGE_KIND.md, or" \
-      "$C_STAGE_KIND.<generation>.md once the stage has been re-opened) is NOT that line:" \
+      "The stage's REPORT file (.review-stage/issue-<N>/$C_STAGE_KIND.<nonce>.md, whose" \
+      "name the stage record names — see review-stage.sh) is NOT that line:" \
       "the report is the agent's prose, the verdict line is the closed-grammar reading of it."
   fi
   if [ "$CV_N" -gt 1 ]; then

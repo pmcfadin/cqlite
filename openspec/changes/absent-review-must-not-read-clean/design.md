@@ -41,20 +41,29 @@ pass-through. `PASS-BUT-UNMEASURED` must not satisfy a `PASS*` test.
 review-stage.sh open <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--force]
 ```
 
-- The path is `<repo-root>/.review-stage/issue-<N>/<kind>[.<generation>].md` inside the worktree,
-  **DERIVED, not overridable, and GENERATION-BOUND**. The generation is round 5's (J1) answer to a
+- The path is `<repo-root>/.review-stage/issue-<N>/<kind>.<nonce>.md` inside the worktree,
+  **DERIVED, not overridable, and NONCE-BOUND**. The per-open nonce is round 5's (J1) answer to a
   defect in this section as it was first built: `--force` reset the report and re-stamped `head-sha:`
   AT THE SAME PATH, so the previous, idle agent could wake up afterwards and write its old-tree
   verdict into that path, where it was paired with the new `head-sha:` — a commit nobody audited
   passing `premerge-assert.sh`. Since this whole mechanism exists BECAUSE delegated agents return
   late, that is the expected behaviour of the population it serves. So each open records a
-  `report-generation:` (generation 0 keeps the bare `<kind>.md` name, both for the documents that
-  quote it and for records written before the field existed; each re-open advances) and the readers
-  derive the path from THAT NUMBER — never from a path in a data file, which is the channel round 4
-  removed. A resumed agent therefore holds a stale path and is STRUCTURALLY unable to write into the
-  current report; a check could not deliver that, because the harm is a write. Old generations'
-  reports stay on disk as history, and `open` advances past any generation whose report still
-  exists, so a deleted stage record cannot re-issue a path an older agent holds. A `[--report <path>]` override was specified here and shipped, and it is **REMOVED in
+  `report-nonce:` and the readers derive the path from THAT TOKEN — never from a path in a data file,
+  which is the channel round 4 removed. A bare `<kind>.md` is still READ, for records written before
+  the field existed (that version wrote exactly one report, at that name), and is never written. A
+  resumed agent therefore holds a stale path and is STRUCTURALLY unable to write into the
+  current report; a check could not deliver that, because the harm is a write.
+  **Round 6 (K2) replaced a SCANNED GENERATION NUMBER with the GENERATED nonce**: the first design
+  picked the next generation by walking the directory for an unused `<kind>.<gen>.md`, and a value
+  chosen from what is on disk is a value two concurrent `open --force` calls can both choose — both
+  printed `c.1.md`, and one agent's `FINDINGS` was overwritten by the other's `PASS`. The scan, its
+  attempt bound and its exhaustion refusal are DELETED rather than locked: a lock would serialise a
+  race the nonce removes while adding its own failure modes, and subtraction cannot introduce a false
+  PASS. The nonce comes from `mktemp -u`'s name substitution (the source the write path's temporary
+  name already uses) with no fallback, and no cryptographic strength is needed or claimed — it is a
+  uniqueness token, not a secret. `reopen-count:` remains as the human-readable audit number.
+  Superseded reports stay on disk as history, and nothing DEPENDS on their existence, so a deleted
+  stage record cannot re-issue a path an older agent holds. A `[--report <path>]` override was specified here and shipped, and it is **REMOVED in
   round 4** — a DELIBERATE NARROWING of this design surface, recorded rather than quietly dropped. It
   was mandated by no requirement and used by NOTHING (measured by grep: no agent definition, no skill,
   no script, no call site — only this usage line and the test suite), and it was the caller-controlled

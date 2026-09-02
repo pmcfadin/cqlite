@@ -218,33 +218,54 @@ Three further declared limits of the mechanism itself:
   gate INVALIDATES it) applied to the intent audit, and an audit of an older tree may not
   certify a newer one. The remedy every one of those refusals prints is the same: re-open the
   stage with `--force` at this commit and re-run C.
-- **The report path is GENERATION-BOUND, so a resumed agent cannot write into the current report
-  (round 5, J1).** `open --force` reset the report to the sentinel and re-stamped `head-sha:` **at
-  the same path**, so the PREVIOUS, idle agent could wake up after the reset and write its OLD-TREE
-  verdict there — where it was paired with the NEWLY stamped `head-sha:`, and a commit nobody
-  audited passed `premerge-assert.sh`. This mechanism exists BECAUSE delegated agents go idle and
-  return late, so that is the expected behaviour of the population it serves, not an exotic race.
-  Every open now records a `report-generation:` and the path INCLUDES it — `<kind>.md` at
-  generation 0, `<kind>.<N>.md` for each re-open — so the resumed agent holds a STALE PATH and is
-  STRUCTURALLY unable to write into the current report. A check could not deliver this: the harm is
-  a WRITE, and a check placed after it could only report it. Four properties worth keeping in mind.
-  (1) The generation is a **NUMBER in the record, never a path** — the reader derives the path from
-  it with the same function `open` used, so there is ONE source of truth for which report counts,
-  and round 4's removal of the `report:` path field (a data file that could redirect a reader) is
-  not undone. (2) It is written in the SAME atomic record as `head-sha:`, so the tree audited and
-  the artifact auditing it are published together or not at all — an interrupted `--force` leaves
-  the ENTIRE previous stage in place, which is coherent and refuses at the merge point on the sha.
-  (3) An ABSENT field is generation 0, which is an affirmative reading of a record written before
-  the field existed (that version wrote exactly one report, at `<kind>.md`), while SEVERAL lines or
-  a non-numeric value is a `stage record unreadable` NON-VERDICT that derives no path at all —
-  falling back to generation 0 is exactly how a stale generation-0 `PASS` would be read as current.
-  (4) Old generations' reports are LEFT ON DISK as history: nothing reads them, they are what an
-  operator opens to see what the previous agent concluded, and `open` uses their EXISTENCE to avoid
-  handing a new agent a path an old one still holds (so deleting one by hand re-opens that hole).
-  The operational consequence for a lane: **paste the path `open` PRINTS, never a remembered one.**
+- **The report path is NONCE-BOUND, so a resumed agent cannot write into the current report
+  (round 5 J1, round 6 K2).** `open --force` reset the report to the sentinel and re-stamped
+  `head-sha:` **at the same path**, so the PREVIOUS, idle agent could wake up after the reset and
+  write its OLD-TREE verdict there — where it was paired with the NEWLY stamped `head-sha:`, and a
+  commit nobody audited passed `premerge-assert.sh`. This mechanism exists BECAUSE delegated agents
+  go idle and return late, so that is the expected behaviour of the population it serves, not an
+  exotic race. Every open now records a `report-nonce:` and the path INCLUDES it —
+  `<kind>.<nonce>.md` — so the resumed agent holds a STALE PATH and is STRUCTURALLY unable to write
+  into the current report. A check could not deliver this: the harm is a WRITE, and a check placed
+  after it could only report it. Five properties worth keeping in mind.
+  (1) The nonce is an **OPAQUE TOKEN in the record, never a path** — the reader derives the path
+  from it with the same function `open` used, so there is ONE source of truth for which report
+  counts, and round 4's removal of the `report:` path field (a data file that could redirect a
+  reader) is not undone. (2) It is written in the SAME atomic record as `head-sha:`, so the tree
+  audited and the artifact auditing it are published together or not at all — an interrupted
+  `--force` leaves the ENTIRE previous stage in place, which is coherent and refuses at the merge
+  point on the sha. (3) An ABSENT field is the LEGACY bare `<kind>.md`, which is an affirmative
+  reading of a record written before the field existed (that version wrote exactly one report, at
+  that name), while SEVERAL lines, an invalid token, or a record that could NOT BE READ AT ALL
+  (round 6, K1) is a `stage record unreadable` NON-VERDICT that derives no path at all — falling
+  back to the bare name is exactly how a stale `PASS` would be read as current.
+  (4) **The nonce is GENERATED, never SELECTED (round 6, K2).** The first design NUMBERED the
+  generations and chose the next one by SCANNING the stage directory for an unused
+  `<kind>.<gen>.md`; a value chosen by looking at what is already on disk is a value TWO CONCURRENT
+  CALLERS CAN BOTH CHOOSE — two `open --force` runs read the same record, probe the same directory
+  before either has written, pick the same generation and hand ONE report path to TWO agents, so
+  the superseded agent's write replaces the current verdict, `FINDINGS` included (measured: both
+  calls printed `c.1.md`, and A's `result: FINDINGS` became B's `result: PASS`). A nonce makes that
+  structurally impossible rather than serialised, and a LOCK would have been the worse answer — it
+  serialises a race a nonce removes and adds a mechanism (a stale lock file, a box without `flock`,
+  a holder killed mid-open) to a tool whose subject is not taking the permissive branch when
+  something cannot be measured. The scan, its attempt bound and its exhaustion refusal are
+  **DELETED**: with nothing selected there is nothing to exhaust, and subtraction cannot introduce
+  a false PASS. The randomness comes from `mktemp -u`'s name substitution — the same source the
+  write path's temporary name already uses — and no cryptographic strength is needed or claimed:
+  the nonce is a uniqueness token, not a secret. There is deliberately **no fallback generator**; a
+  box that cannot produce one is refused by name. `reopen-count:` remains as the human-readable
+  audit number, because it answers a different question (how many spawns).
+  (5) Superseded reports are LEFT ON DISK as history: nothing reads them, and they are what an
+  operator opens to see what the previous agent concluded. Since round 6 nothing DEPENDS on their
+  existence either — the nonce is generated, not chosen from what is absent — so deleting one by
+  hand costs the audit trail and nothing else.
+  The operational consequence for a lane: **paste the path `open` PRINTS, never a remembered one**
+  — and it cannot be reconstructed from the kind and the issue, so where no path was named, ask
+  `review-stage.sh status <kind> --issue <N>`, whose `report=` field is the authority.
 - **The report path is DERIVED, and `--report` is GONE (round 4, H2/H3).** It is always
-  `<repo-root>/.review-stage/issue-<N>/<kind>[.<generation>].md`, computed the same way by `open`
-  and by every reader — so nothing a caller passes, and nothing written in a data file, can redirect a reader to
+  `<repo-root>/.review-stage/issue-<N>/<kind>.<nonce>.md` (a bare `<kind>.md` only for a record
+  written before the nonce existed), computed the same way by `open` and by every reader — so nothing a caller passes, and nothing written in a data file, can redirect a reader to
   another file. The override is REMOVED rather than hardened, which is a **deliberate narrowing of
   the approved design surface**: it was mandated by no spec requirement and used by NOTHING
   (measured by grep — no agent definition, no skill, no script, no call site), and it was the

@@ -1148,25 +1148,37 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `sstable-developer`, which had queued work it never did, are in it beside the four reviewers).
   Writes go under `.review-stage/`, whose ignore status is **verified with `git check-ignore`,
   fail-closed**, so a stage opened mid-run cannot dirty a running gate (#2926) or make
-  `premerge-assert.sh` refuse on `dirty: yes` (#3648). **The report path is DERIVED and GENERATION-BOUND —
-  `<repo-root>/.review-stage/issue-<N>/<kind>.md` at generation 0 and `<kind>.<N>.md` after each
-  `--force` re-open, computed the same way by the writer and by every
-  reader, with NO `--report` override (removed in round 4).** The generation exists because
+  `premerge-assert.sh` refuse on `dirty: yes` (#3648). **The report path is DERIVED and NONCE-BOUND —
+  `<repo-root>/.review-stage/issue-<N>/<kind>.<nonce>.md`, one fresh unpredictable nonce per open
+  (a bare `<kind>.md` is READ, never written, for a record predating the field), computed the same
+  way by the writer and by every reader, with NO `--report` override (removed in round 4).** The
+  per-open nonce exists because
   `--force` used to reset the report AT THE SAME PATH (#3751 round 5, J1): the PREVIOUS, idle agent
   could wake up after the reset and write its OLD-TREE verdict into that path, where it was paired
   with the newly stamped `head-sha:`, and **a commit nobody audited passed `premerge-assert.sh`** —
   which is the expected behaviour of this population, not an exotic race, since this whole mechanism
   exists because delegated agents return late. A resumed agent now holds a STALE PATH and is
   STRUCTURALLY unable to write into the current report; a check could not deliver that, because the
-  harm is a write. The stage record names the generation as a **NUMBER, never a path** (round 4
+  harm is a write. The stage record names the report as an **OPAQUE TOKEN, never a path** (round 4
   removed the `report:` path field precisely so no data file can redirect a reader), in the SAME
   atomic write as `head-sha:`, so the tree audited and the artifact auditing it are published
-  together or not at all; an absent field is generation 0 (what every earlier version wrote — an
-  affirmative reading, not a permissive default), and several or a non-numeric value is a
-  `stage record unreadable` NON-VERDICT that derives no path at all rather than falling back to
-  generation 0. Old generations' reports stay on disk as HISTORY: nothing reads them, and `open`
-  uses their existence to avoid handing a new agent a path an old one still holds. **So paste the
-  path `open` PRINTS into the spawn prompt — never a remembered one.** That flag was mandated by no
+  together or not at all; an absent field is the LEGACY bare name (what every earlier version
+  wrote — an affirmative reading, not a permissive default), and several lines, an invalid token,
+  or a record that **could not be READ at all** is a `stage record unreadable` NON-VERDICT that
+  derives no path rather than falling back to that name — **`|| true` on the count once collapsed
+  "could not read" onto "no such field", so an unreadable record reported an OLD report's PASS at
+  exit 0 (#3751 round 6, K1); `grep` exits 1 for the second and >= 2 for the first, and only the
+  second is legitimately permissive.** **AND THE TOKEN IS GENERATED, NEVER SELECTED (round 6, K2):**
+  the first design numbered the generations and picked the next by SCANNING for an unused file, and
+  a value chosen from what is on disk is a value two concurrent `open --force` calls can both
+  choose — measured, both printed `c.1.md` and one agent's `FINDINGS` became the other's `PASS`. The
+  scan, its attempt bound and its exhaustion refusal are DELETED rather than locked: a lock
+  serialises a race a nonce removes and adds its own failure modes, while subtraction cannot
+  introduce a false PASS. `reopen-count:` remains as the human-readable audit number.
+  Superseded reports stay on disk as HISTORY: nothing reads them, and since round 6 nothing depends
+  on their existence either. **So paste the path `open` PRINTS into the spawn prompt — never a
+  remembered one; it carries a nonce and cannot be reconstructed, so where none was named ask
+  `review-stage.sh status <kind> --issue <N>` and read its `report=` field.** That flag was mandated by no
   requirement and used by nothing, and it was the caller-controlled component behind a finding
   cluster across four rounds: written RAW into the LINE-oriented stage record, a legal
   newline-bearing filename SPLIT and the reader took the PREFIX — which could select a DIFFERENT

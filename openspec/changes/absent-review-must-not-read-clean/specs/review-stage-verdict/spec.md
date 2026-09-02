@@ -14,7 +14,8 @@ non-verdict sentinel recording `spawned-at`, `agent`, `issue`, and a `deadline`.
 
 #### Scenario: the report path is derived, never caller-supplied
 - **WHEN** any subcommand resolves the report of record for `<kind>`/`<issue>`
-- **THEN** the path is `<repo-root>/.review-stage/issue-<N>/<kind>[.<generation>].md`, computed
+- **THEN** the path is `<repo-root>/.review-stage/issue-<N>/<kind>.<nonce>.md` (a bare `<kind>.md`
+  is READ, never written, for a record predating the nonce), computed
   identically by the writer and by EVERY reader, with NO override flag — so no caller-controlled
   component enters a path this tool builds, reads or writes
 - **AND** `<kind>` (`[A-Za-z0-9][A-Za-z0-9_-]*`) and `<issue>` (decimal digits only) are the WHOLE
@@ -183,25 +184,33 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
 
 #### Scenario: a re-opened stage's report path cannot be written by the agent it replaced
 - **WHEN** `open --force` re-opens a stage
-- **THEN** the stage record's `report-generation:` ADVANCES and the report path INCLUDES it
-  (`<kind>.md` at generation 0, `<kind>.<N>.md` thereafter), so the previous, idle agent holds a STALE
+- **THEN** the stage record carries a FRESH `report-nonce:` and the report path INCLUDES it
+  (`<kind>.<nonce>.md`), so the previous, idle agent holds a STALE
   PATH and is STRUCTURALLY unable to write into the current report — a resumed agent's late write into
   the path it was originally given used to be paired with the newly stamped `head-sha:`, certifying a
   commit nobody audited
-- **AND** the path `open` PRINTS (and the paste-ready clause it emits) is that new generation's path,
+- **AND** the path `open` PRINTS (and the paste-ready clause it emits) is that new report's path,
   so a re-spawned agent is handed the file that counts
-- **AND** the generation is recorded as a NUMBER, never a path, and every reader derives the path from
+- **AND** the nonce is recorded as an OPAQUE TOKEN, never a path, and every reader derives the path from
   the record with the same function the writer used — one source of truth for which report counts, and
   no data file that can redirect a reader
-- **AND** a record with NO `report-generation:` reads as generation 0 — an affirmative reading of a
-  record written before the field existed, which wrote exactly one report at `<kind>.md`, so a correct
+- **AND** a record with NO `report-nonce:` reads as the bare `<kind>.md` — an affirmative reading of a
+  record written before the field existed, which wrote exactly one report at that name, so a correct
   older record is not reported as `report absent`
-- **AND** SEVERAL `report-generation:` lines, or a non-numeric value, is a `stage record unreadable`
-  NON-VERDICT that derives NO path at all and fabricates none in its emitted line: falling back to
-  generation 0 is how a stale generation-0 `PASS` would be read as the current verdict
-- **AND** older generations' reports are LEFT on disk as history — nothing reads them, and `open`
-  advances past a generation whose report file still exists, so a deleted stage record cannot hand a
-  new agent the path an older agent still holds
+- **AND** SEVERAL `report-nonce:` lines, or a value that is not a valid token, is a `stage record
+  unreadable` NON-VERDICT that derives NO path at all and fabricates none in its emitted line: falling
+  back to the bare name is how a stale `PASS` would be read as the current verdict
+- **AND** a stage record that EXISTS and cannot be READ is that SAME NON-VERDICT on the read side and a
+  NAMED REFUSAL on the write side, never the no-field reading: *read failed* and *read fine, field
+  absent* are different facts, and only the second is legitimately permissive
+- **AND** the nonce is GENERATED, never SELECTED from what is on disk: two concurrent `open --force`
+  calls SHALL be handed two DIFFERENT report paths, so a superseded agent cannot overwrite the current
+  verdict, and no scan, attempt bound or exhaustion refusal exists to be raced
+- **AND** a run that cannot generate an unpredictable nonce is REFUSED by name, with no fallback to a
+  predictable token
+- **AND** superseded reports are LEFT on disk as history — nothing reads them, and nothing DEPENDS on
+  their existence, so a deleted stage record cannot cause a new agent to be handed a path an older
+  agent still holds
 
 #### Scenario: an interrupted open cannot publish a stale verdict
 - **WHEN** `open` (or `open --force`) writes its two files and is interrupted between them — by a failed
@@ -212,8 +221,8 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
 - **AND** the previous report's verdict is NEVER paired with the newly-recorded `head-sha:` — writing the
   record first made a `result: PASS` from an audit of an OLDER tree satisfy both of the merge point's
   bindings at once, and a check could only have REPORTED that pairing, because the harm is a WRITE
-- **AND** since the record carries the report GENERATION beside `head-sha:` in ONE atomic write, an
-  interrupted re-open leaves the ENTIRE previous stage in place — the older generation's verdict beside
+- **AND** since the record carries the report NONCE beside `head-sha:` in ONE atomic write, an
+  interrupted re-open leaves the ENTIRE previous stage in place — the previous report's verdict beside
   the commit it was really audited at, which is coherent and still refuses at the merge point on the sha
   — instead of destroying the audit it had
 - **AND** an uninterrupted `--force` re-open still yields a usable stage that can record a fresh verdict

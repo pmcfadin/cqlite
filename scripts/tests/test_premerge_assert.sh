@@ -255,6 +255,16 @@ run() {
 CERTIFIED="da9a7cb2abc00000000000000000000000000000"   # full 40-char hex
 STALE="ca8eb016def11111111111111111111111111111"       # full 40-char hex
 
+# SR_REPORT <repo> <issue> <kind> — THE REPORT THE STAGE RECORD NAMES, derived the way
+# review-stage.sh derives it (#3751 round 6, K2). The report name carries a per-open NONCE, so it
+# is UNPREDICTABLE and must be READ from `report-nonce:`, never reconstructed from a shape; with no
+# record, or a record with no nonce, it is the LEGACY bare `<kind>.md`.
+SR_REPORT() {
+  local d="$1/.review-stage/issue-$2" n
+  n="$(LC_ALL=C sed -n 's/^report-nonce:[[:space:]]*//p' "$d/$3.stage" 2>/dev/null | LC_ALL=C head -1 || true)"
+  if [ -n "$n" ]; then printf '%s/%s.%s.md\n' "$d" "$3" "$n"; else printf '%s/%s.md\n' "$d" "$3"; fi
+}
+
 # THE INJECTED C VERDICT (#3751) — a captured `review-stage.sh verdict` PASS line,
 # in the shape review-stage.sh emits it. Every case that is not ABOUT the C flag
 # gets this, so those cases assert what they always asserted. It is a FILE (an
@@ -2457,7 +2467,7 @@ if git init -q "$C_REAL_REPO" >/dev/null 2>&1 &&
   (cd "$C_REAL_REPO" && bash "$SCRIPT_DIR/../flow/review-stage.sh" open c --issue 3751 \
     --agent spec-auditor >/dev/null 2>&1) &&
   printf 'result: PASS\n\n## Findings\n\nnone.\n' \
-    >"$C_REAL_REPO/.review-stage/issue-3751/c.md" &&
+    >"$(SR_REPORT "$C_REAL_REPO" 3751 c)" &&
   (cd "$C_REAL_REPO" && bash "$SCRIPT_DIR/../flow/review-stage.sh" verdict c --issue 3751 \
     >"$C_REAL_FILE" 2>/dev/null) &&
   [ -s "$C_REAL_FILE" ]; then
@@ -2472,7 +2482,7 @@ if [ -n "$C_REAL_OK" ]; then
   # `ungrammatical` at a merge point.
   C_REAL_LINE=$(cat "$C_REAL_FILE")
   case "$C_REAL_LINE" in
-    "REVIEW-STAGE: c RESULT: PASS elapsed="*" deadline="*" agent=spec-auditor report="*"/.review-stage/issue-3751/c.md")
+    "REVIEW-STAGE: c RESULT: PASS elapsed="*" deadline="*" agent=spec-auditor report="*"/.review-stage/issue-3751/c."*".md")
       ok "real line: the emitted shape is <kind> RESULT: <token> elapsed= deadline= agent= report=" ;;
     *) bad "real line: the emitter's shape moved — update the parser WITH it (got: $C_REAL_LINE)" ;;
   esac
@@ -2806,7 +2816,7 @@ fi
 # and FAIL this one — which is the whole reason it exists.
 if [ -n "$C_STAGED" ]; then
   if (cd "$C_DESIGN" && printf 'result: PASS\n\n## Findings\n\nnone.\n' \
-    >".review-stage/issue-3751/c.md"); then
+    >"$(SR_REPORT "$C_DESIGN" 3751 c)"); then
     ok "positive control: a real report was written over the sentinel"
   else
     bad "positive control: could not write the report — the control is vacuous"
@@ -2941,7 +2951,7 @@ if [ -n "$C_PEER" ]; then
     (cd "$C_PEER" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
       --agent spec-auditor >/dev/null 2>&1) &&
     printf 'result: PASS\n\n## Findings\n\nnone.\n' \
-      >"$C_PEER/.review-stage/issue-3751/c.md"; then
+      >"$(SR_REPORT "$C_PEER" 3751 c)"; then
     ok "binding fixture: a PASSING local stage plus a resolvable NON-HEAD commit"
   else
     bad "binding fixture: could not build the peer-commit repository — the case would be vacuous"
@@ -3014,7 +3024,7 @@ if [ -n "$STALE_REPO" ]; then
   if (cd "$STALE_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
     --agent spec-auditor >/dev/null 2>&1) &&
     printf 'result: PASS\n\n## Findings\n\nnone.\n' \
-      >"$STALE_REPO/.review-stage/issue-3751/c.md" &&
+      >"$(SR_REPORT "$STALE_REPO" 3751 c)" &&
     STALE_A=$(git -C "$STALE_REPO" rev-parse HEAD 2>/dev/null); then
     ok "stale fixture: a PASSING c stage was opened at the branch head (sha A)"
   else
@@ -3074,18 +3084,19 @@ if [ -n "$STALE_B" ]; then
   # AND THE REMEDY IS RE-OPENING THE STAGE: --force re-stamps head-sha (deliberately unlike
   # spawned-at), so a re-opened, re-audited stage certifies B. Without this the refusal above
   # would be a dead end, and a guard with no way past it is the guard agents learn to waive.
-  # THE RE-AUDIT GOES INTO THE PATH THE RE-OPEN PRINTS, NOT THE OLD ONE (#3751 round 5, J1). A
-  # forced re-open publishes a NEW report GENERATION, so `.review-stage/issue-3751/c.md` is the
-  # file the PREVIOUS agent holds and nothing reads it any more. Taking the path from the tool's
-  # own printed line is also the property under test one level up: the clause a lane pastes into
-  # the re-spawn prompt has to name the file that counts.
+  # THE RE-AUDIT GOES INTO THE PATH THE RE-OPEN PRINTS, NOT THE OLD ONE (#3751 round 5 J1, round
+  # 6 K2). A forced re-open publishes a report under a FRESH NONCE, so the file the PREVIOUS agent
+  # holds is not read any more. Taking the path from the tool's own printed line is also the
+  # property under test one level up: the clause a lane pastes into the re-spawn prompt has to name
+  # the file that counts.
+  STALE_RP_OLD="$(SR_REPORT "$STALE_REPO" 3751 c)"
   STALE_REOPEN_OUT="$(cd "$STALE_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
     --agent spec-auditor --force 2>/dev/null || true)"
   STALE_RP="$(printf '%s\n' "$STALE_REOPEN_OUT" | LC_ALL=C sed -n 's|^\(/.*\.md\)$|\1|p' | LC_ALL=C head -1)"
-  if [ -n "$STALE_RP" ] && [ "$STALE_RP" != "$STALE_REPO/.review-stage/issue-3751/c.md" ]; then
-    ok "stale remedy: the re-open printed a NEW generation's report path (a resumed agent's old path cannot certify)"
+  if [ -n "$STALE_RP" ] && [ "$STALE_RP" != "$STALE_RP_OLD" ]; then
+    ok "stale remedy: the re-open printed a FRESH report path (a resumed agent's old path cannot certify)"
   else
-    bad "stale remedy: the re-open printed '$STALE_RP', which is not a fresh generation path"
+    bad "stale remedy: the re-open printed '$STALE_RP', which is not a fresh report path"
   fi
   if [ -n "$STALE_RP" ] &&
     printf 'result: PASS\n\n## Findings\n\nre-audited at B.\n' >"$STALE_RP"; then
@@ -3139,7 +3150,7 @@ if [ -n "$SHAPE_REPO" ]; then
   if (cd "$SHAPE_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" open c --issue 3751 \
     --agent spec-auditor >/dev/null 2>&1) &&
     printf 'result: PASS\n\n## Findings\n\nnone.\n' \
-      >"$SHAPE_REPO/.review-stage/issue-3751/c.md"; then
+      >"$(SR_REPORT "$SHAPE_REPO" 3751 c)"; then
     ok "shape fixture: a PASSING c stage was opened for the unparsable-record cases"
   else
     bad "shape fixture: could not open the stage — the cases would be vacuous"
@@ -3189,28 +3200,28 @@ if [ -n "$SHAPE_REPO" ]; then
       *) ok "record-shape/unparsable: no PASS token is emitted for an unreadable binding" ;;
     esac
   fi
-  # (d) AN UNREADABLE `report-generation:` — the field that names WHICH REPORT this stage's
+  # (d) AN UNREADABLE `report-nonce:` — the field that names WHICH REPORT this stage's
   #     verdict lives in (#3751 round 5, J1). The AUTO path does not read the report itself; it
   #     asks `review-stage.sh verdict`, which refuses to derive a path it cannot compute. So the
   #     refusal arrives as a NON-PASSING TOKEN rather than as a stage-binding failure — asserted
-  #     here because this is the seam between the two scripts, and a fallback to generation 0
-  #     would have let the generation-0 report certify a stage that has moved on.
-  if sr_plant "$SHAPE_REPO" '{ sub(/^report-generation:.*/, "report-generation: nope"); print }' &&
+  #     here because this is the seam between the two scripts, and a fallback to the bare name
+  #     would have let a superseded report certify a stage that has moved on.
+  if sr_plant "$SHAPE_REPO" '{ sub(/^report-nonce:.*/, "report-nonce: ../../nope"); print }' &&
     run_in_repo "$SHAPE_REPO" 2 \
-      "record-shape: an unreadable report-generation REFUSES (the report cannot be located)" \
+      "record-shape: an unreadable report-nonce REFUSES (the report cannot be located)" \
       --c-verdict AUTO; then
     case "$OUT" in
-      *"stage record unreadable"*) ok "record-shape/generation: the refusal names the STAGE RECORD as the unreadable half" ;;
-      *) bad "record-shape/generation: the refusal must name the record defect (got: $OUT)" ;;
+      *"stage record unreadable"*) ok "record-shape/nonce: the refusal names the STAGE RECORD as the unreadable half" ;;
+      *) bad "record-shape/nonce: the refusal must name the record defect (got: $OUT)" ;;
     esac
     case "$OUT" in
       *"PREMERGE: C-VERDICT PASS"*)
-        bad "record-shape/generation: a stage whose report could not be located certified the merge" ;;
-      *) ok "record-shape/generation: no PASS token is emitted when the report cannot be located" ;;
+        bad "record-shape/nonce: a stage whose report could not be located certified the merge" ;;
+      *) ok "record-shape/nonce: no PASS token is emitted when the report cannot be located" ;;
     esac
     case "$OUT" in
-      *"review-stage.sh open c --issue"*) ok "record-shape/generation: and the refusal names a concrete remedy" ;;
-      *) bad "record-shape/generation: the refusal must name a remedy (got: $OUT)" ;;
+      *"review-stage.sh open c --issue"*) ok "record-shape/nonce: and the refusal names a concrete remedy" ;;
+      *) bad "record-shape/nonce: the refusal must name a remedy (got: $OUT)" ;;
     esac
   fi
 fi
@@ -3332,7 +3343,7 @@ if [ -n "$DIFF_OK" ]; then
       bad "differential/$DROW: could not open the stage — this row is vacuous"
       continue
     fi
-    diff_row_body_a "$DROW" >"$DIFF_REPO/.review-stage/issue-$DIFF_N/c.md"
+    diff_row_body_a "$DROW" >"$(SR_REPORT "$DIFF_REPO" "$DIFF_N" c)"
     DOUT_A=$(cd "$DIFF_REPO" && bash "$NEUTRAL_DIR/review-stage.sh" verdict c \
       --issue "$DIFF_N" 2>&1) || true
     DA=$(diff_disp_a "$DOUT_A")
@@ -3396,7 +3407,7 @@ fi
 # ROUND 5 (J1) ADDS 4, ALSO HOST-INDEPENDENT (307 -> 311): section 44f's stale-remedy case gains
 # one assertion (a forced re-open publishes a NEW report GENERATION and PRINTS its path, so the
 # re-audit is written where a reader looks — the old path is the one the resumed agent holds), and
-# a fourth unparsable-record shape is added (an unreadable `report-generation:`, which arrives
+# a fourth unparsable-record shape is added (an unreadable `report-nonce:`, which arrives
 # here as a non-passing TOKEN because the seam between the two scripts is
 # `review-stage.sh verdict`, plus its remedy assertion). Both need only git and bash, so the floor
 # moves by the SAME 4 and the derived 6-assertion margin for the ONE host-gated block is PRESERVED

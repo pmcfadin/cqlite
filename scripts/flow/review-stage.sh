@@ -96,10 +96,12 @@
 #
 # TWO FILES, AND WHY (the never-opened / report-absent distinction needs them)
 # ---------------------------------------------------------------------------
-#   <dir>/<kind>.md      the REPORT OF RECORD: what the agent writes, what `verdict` reads.
-#   <dir>/<kind>.stage   the STAGE RECORD: kind/issue/agent/spawned-at/deadline, plus the
-#                        `head-sha:` the stage was opened AT and the `report-generation:` that
-#                        names WHICH `<kind>[.<gen>].md` is current (both below).
+#   <dir>/<kind>.<nonce>.md  the REPORT OF RECORD: what the agent writes, what `verdict` reads.
+#                            Its name carries a per-open NONCE, so it is UNPREDICTABLE and is
+#                            taken from the record — never reconstructed (both below).
+#   <dir>/<kind>.stage       the STAGE RECORD: kind/issue/agent/spawned-at/deadline, plus the
+#                            `head-sha:` the stage was opened AT and the `report-nonce:` that
+#                            names WHICH report is current (both below).
 # A single file cannot tell `stage never opened` from `report absent` — deleting it erases
 # the evidence that anything was ever opened, and `verdict` still has to report an agent, a
 # deadline and an elapsed time for a stage whose report has gone missing. So the two facts
@@ -150,26 +152,44 @@
 # agents go idle and return late, so "the late agent wakes up and writes" is the expected behaviour
 # of the population this mechanism serves.
 #
-# So every open records a `report-generation:` and the report path INCLUDES it:
-#   generation 0  ->  <dir>/<kind>.md          (a first open, and every record written before
-#                                               this field existed)
-#   generation N  ->  <dir>/<kind>.<N>.md      (N > 0: each re-open)
+# So every open records a `report-nonce:` and the report path INCLUDES it:
+#   a nonce   ->  <dir>/<kind>.<nonce>.md   (EVERY open this version performs, first or forced)
+#   NO nonce  ->  <dir>/<kind>.md           (LEGACY: read, never written — a record written
+#                                            before this field existed, whose version wrote
+#                                            exactly one report, at that name)
 # A resumed agent therefore holds a STALE PATH and is STRUCTURALLY unable to write into the current
-# generation's report. A check could not deliver this — the harm is a WRITE, and a check placed
-# after it could only report it.
+# report. A check could not deliver this — the harm is a WRITE, and a check placed after it could
+# only report it.
 #
-# THE GENERATION IS THE RECORD'S TO NAME, AND IT IS A NUMBER, NOT A PATH. Round 4 (H2) removed the
-# record's `report:` PATH field because a data file naming a location let a reader be redirected to
-# another file; a digit cannot redirect, and the readers derive the path from it with the SAME
-# function `open` used, so there is exactly one source of truth for which report counts. It is
-# written in the SAME atomic record as `head-sha:`, so the pair (the tree audited, the artifact
-# that audits it) is published together or not at all.
-# FOUR READINGS, and only two of them are a path: exactly one digits-only field is that
-# generation; NO field at all is generation 0 (an AFFIRMATIVE reading of a record written before
-# the field existed — that version wrote exactly one report, at `<kind>.md`, so refusing would red
-# on correct input); anything else (several lines, a non-numeric value) is a RECORD DEFECT that
-# derives no path at all and reports `stage record unreadable`, because falling back to generation 0
-# is how a stale generation-0 PASS would be read as the current verdict.
+# AND THE NONCE IS GENERATED, NEVER SELECTED (#3751 round 6, K2). The first design NUMBERED the
+# generations and chose the next one by SCANNING the directory for an unused `<kind>.<gen>.md`. A
+# value chosen by looking at what is already on disk is a value TWO CONCURRENT CALLERS CAN BOTH
+# CHOOSE: two `open --force` runs read the same record, probe the same directory before either has
+# written, pick the same generation and hand ONE report path to TWO agents — so a superseded agent
+# overwrites the current verdict, FINDINGS included. A nonce makes that STRUCTURALLY IMPOSSIBLE
+# rather than serialised: two concurrent opens produce two nonces and two records, the record
+# written LAST is the published one (round 4, H1 — the record is the publication marker) and the
+# loser's agent writes where no reader looks. A LOCK would have been the worse answer — it
+# serialises a race a nonce removes, and adds a mechanism (a stale lock file, a box without
+# `flock`, a holder killed mid-open) to a script whose subject is not taking the permissive branch
+# when something cannot be measured. The scan, its 4096-attempt bound and its exhaustion refusal
+# are DELETED: with nothing selected there is nothing to exhaust, and subtraction cannot introduce
+# a false PASS. `reopen-count:` remains as the human-readable audit number — it answers a
+# different question (how many spawns), and the nonce only has to be UNIQUE.
+#
+# THE NONCE IS THE RECORD'S TO NAME, AND IT IS AN OPAQUE TOKEN, NOT A PATH. Round 4 (H2) removed
+# the record's `report:` PATH field because a data file naming a location let a reader be
+# redirected to another file; a validated alphanumeric token cannot redirect, and the readers
+# derive the path from it with the SAME function `open` used, so there is exactly one source of
+# truth for which report counts. It is written in the SAME atomic record as `head-sha:`, so the
+# pair (the tree audited, the artifact that audits it) is published together or not at all.
+# FOUR READINGS, and only two of them are a path: exactly one valid alphanumeric field is that
+# nonce; NO field at all is the LEGACY bare `<kind>.md` (an AFFIRMATIVE reading of a record
+# written before the field existed — that version wrote exactly one report, at that name, so
+# refusing would red on correct input); anything else (several lines, a value that is not a valid
+# token) is a RECORD DEFECT that derives no path at all and reports `stage record unreadable`,
+# because falling back to the bare name is how a stale report's PASS would be read as the current
+# verdict.
 # AND THE FOURTH IS "THE RECORD COULD NOT BE READ AT ALL", WHICH IS NOT THE SECOND (#3751 round 6,
 # K1). The count was taken with `grep -c … || true`, which threw away the ONE signal separating
 # them — `grep` exits 1 for "read fine, no such line" and >= 2 for "could not read" — so an
@@ -178,9 +198,10 @@
 # read is the `stage record unreadable` non-verdict on the read side and a NAMED refusal
 # (`reason=stage-record-unreadable`) on the write side. *read failed* and *read fine, field absent*
 # are different facts and only the second one is legitimately permissive.
-# OLD GENERATIONS' REPORTS STAY ON DISK as history: nothing reads them, they are what an operator
-# opens to see what the previous agent concluded, and `open` uses their EXISTENCE to avoid handing a
-# new agent a path an old one still holds. Deleting one by hand re-opens exactly that hole.
+# SUPERSEDED REPORTS STAY ON DISK as history: nothing reads them (the record names exactly one),
+# and they are what an operator opens to see what the previous agent concluded. Since round 6 (K2)
+# nothing DEPENDS on their existence either — the nonce is generated, not chosen from what is
+# absent — so deleting one by hand costs the audit trail and nothing else.
 #
 # AND BOTH PATHS ARE DERIVED — THERE IS NO `--report` (#3751 round 4, H2/H3)
 # ------------------------------------------------------------------------
@@ -604,38 +625,95 @@ repo_root() {
 stage_dir()  { printf '%s/.review-stage/issue-%s\n' "$(repo_root)" "$1"; }
 stage_file() { printf '%s/%s.stage\n' "$(stage_dir "$1")" "$2"; }
 
-# AND THE REPORT PATH IS GENERATION-BOUND (#3751 round 5, J1). The third argument is the stage's
-# REPORT GENERATION — see the header section — and it is INTERNAL: `open` computes it, the stage
-# record carries it, and every reader takes it from that record. No caller supplies it.
+# AND THE REPORT PATH IS NONCE-BOUND (#3751 round 5 J1, round 6 K2). The third argument is the
+# stage's REPORT NONCE — see the header section — and it is INTERNAL: `open` generates it, the
+# stage record carries it, and every reader takes it from that record. No caller supplies it.
 #
 # TWO SHAPES, ONE DERIVATION:
-#   generation 0  ->  <dir>/<kind>.md
-#   generation N  ->  <dir>/<kind>.<N>.md        (N > 0)
-# They cannot collide and no `<kind>.<gen>` is ambiguous with another kind, because a `<kind>` may
-# not contain a `.` (round 4's narrowing) and a generation is decimal digits. Generation 0 keeps
-# the BARE name deliberately: it is the path every committed document quotes and the path every
-# earlier version of this tool wrote, so a first open and a record written before this field
-# existed both stay exactly as they were. A scheme that renamed generation 0 would report
-# `report absent` for a stage that has a perfectly good report — a guard that reds on correct
-# input is the guard agents learn to waive.
+#   a nonce      ->  <dir>/<kind>.<nonce>.md      (every open this version performs)
+#   NO nonce     ->  <dir>/<kind>.md              (LEGACY: a record written before the field
+#                                                  existed, which is the ONE report that version
+#                                                  ever wrote)
+# They cannot collide and no `<kind>.<nonce>` is ambiguous with another kind, because a `<kind>`
+# may not contain a `.` (round 4's narrowing) and a nonce is alphanumeric. The bare name is READ
+# but never WRITTEN by this version: keeping it readable is what stops a pre-nonce record being
+# reported as `report absent`, and a guard that reds on correct input is the guard agents learn to
+# waive.
 #
-# THE GENERATION IS VALIDATED BY ITS PRODUCER, IN THE PARENT SHELL — never by a helper called
+# THE NONCE IS VALIDATED BY ITS PRODUCER, IN THE PARENT SHELL — never by a helper called
 # from a substitution. Every call here is `$(report_path …)`, so a `die_usage` inside this
 # function would exit only the SUBSTITUTION (round 2's B6 lesson) and leave the caller with an
-# empty path; so `cmd_open` and `load_stage` each `case`-test the value where they compute it,
-# with no subshell in between. The `case` below is a BELT whose only reachable effect inside a
-# substitution is the diagnostic plus an empty value — which then fails closed at `assert_ignored`
-# (git cannot confirm an empty path) rather than writing anywhere.
+# empty path; so `cmd_open` and `load_stage` each test the value with `nonce_is_valid` where they
+# compute it, with no subshell in between. The `case` below is a BELT whose only reachable effect
+# inside a substitution is the diagnostic plus an empty value — which then fails closed at
+# `assert_ignored` (git cannot confirm an empty path) rather than writing anywhere.
 report_path() {
-  local issue="$1" kind="$2" gen="${3:-}"
-  case "$gen" in
-    "" | *[!0-9]* ) die_usage "internal: report_path needs a numeric report generation, got '$gen'" ;;
-  esac
-  if [ "$gen" -eq 0 ]; then
+  local issue="$1" kind="$2" nonce="${3:-}"
+  if [ -z "$nonce" ]; then
     printf '%s/%s.md\n' "$(stage_dir "$issue")" "$kind"
-  else
-    printf '%s/%s.%s.md\n' "$(stage_dir "$issue")" "$kind" "$gen"
+    return 0
   fi
+  case "$nonce" in
+    *[!A-Za-z0-9]* ) die_usage "internal: report_path needs an alphanumeric report nonce, got '$nonce'" ;;
+  esac
+  printf '%s/%s.%s.md\n' "$(stage_dir "$issue")" "$kind" "$nonce"
+}
+
+# nonce_is_valid <token> — the ONE predicate for a usable report nonce. A PREDICATE, not a
+# `die_usage`, because both producers call it in the parent shell and each maps a rejection to its
+# own outcome (a named refusal at `open`, a record defect at `load_stage`). Alphanumeric only, so
+# the token cannot introduce a path separator, a `.` (which would make `<kind>.<nonce>` ambiguous)
+# or anything a line-oriented record could not carry; the length floor is what stops a truncated
+# or hand-edited one-character value being accepted as unique.
+NONCE_MIN_LEN=6
+NONCE_MAX_LEN=64
+nonce_is_valid() {
+  local tok="${1:-}"
+  case "$tok" in
+    "" | *[!A-Za-z0-9]* ) return 1 ;;
+  esac
+  [ "${#tok}" -ge "$NONCE_MIN_LEN" ] || return 1
+  [ "${#tok}" -le "$NONCE_MAX_LEN" ] || return 1
+  return 0
+}
+
+# new_report_nonce <dir> — a FRESH, UNPREDICTABLE report nonce, or NOTHING.
+#
+# WHY A NONCE AND NOT A COUNTER (#3751 round 6, K2). Round 5 chose the generation by SCANNING for
+# an unused `<kind>.<gen>.md`, and a value chosen by looking at what is already on disk is a value
+# TWO CONCURRENT CALLERS CAN BOTH CHOOSE: two `open --force` runs read the same record, probe the
+# same directory before either has written, pick the same generation and hand the SAME report path
+# to two agents — so the superseded agent overwrites the current verdict, including replacing
+# FINDINGS with PASS. NOTHING IS SELECTED HERE, so nothing races: two concurrent opens produce two
+# different nonces and two different records, the record written LAST is the published one (the
+# record is the publication marker — round 4, H1) and the loser's agent writes to a path no reader
+# derives. That is the J1 property with no lock, and a lock is the worse trade: it would SERIALISE
+# a race a nonce makes impossible, and `flock` is one more mechanism to get right (a stale lock
+# file, a box without flock, a holder killed mid-open) in a script whose whole subject is not
+# taking the permissive branch when something cannot be measured.
+#
+# THE RANDOMNESS COMES FROM `mktemp -u`'s X-substitution — the same source the temporary file name
+# already comes from (`prepare_write`), so this adds no dependency this script did not already
+# have. NO CRYPTOGRAPHIC STRENGTH IS NEEDED OR CLAIMED: the nonce is a UNIQUENESS token, not a
+# secret. What it must not be is PREDICTABLE ENOUGH TO COLLIDE with a value another live open
+# picks, and 10 alphanumeric characters is far past that.
+#
+# NO FALLBACK GENERATOR, for the same reason `prepare_write` has none: a predictable fallback
+# (a pid, a timestamp, a counter) is exactly the collidable value this replaces, and "cannot tell"
+# must not take the permissive branch. A box without a usable `mktemp -u` gets the caller's named
+# refusal instead of a weaker token it cannot see. Prints nothing on any shape it does not
+# recognise; the CALLER validates with `nonce_is_valid` in the parent shell.
+new_report_nonce() {
+  local dir="${1:-.}" cand tok
+  # `-u` CREATES NOTHING — this is a name generator, not a file. The directory only supplies the
+  # template's prefix, which is discarded.
+  cand="$(mktemp -u "$dir/.nonce.XXXXXXXXXX" 2>/dev/null || true)"
+  [ -n "$cand" ] || return 0
+  tok="${cand##*.}"
+  case "$tok" in
+    "" | *[!A-Za-z0-9]* ) return 0 ;;
+  esac
+  printf '%s\n' "$tok"
 }
 
 
@@ -920,8 +998,8 @@ cmd_open() {
   local sfile rpath dir
   sfile="$(stage_file "$issue" "$kind")"
 
-  # THE STAGE RECORD'S PATH IS CHECKED FIRST, because the report's path is not known until the
-  # generation has been computed from that record (#3751 round 5, J1). The report half is checked
+  # THE STAGE RECORD'S PATH IS CHECKED FIRST, because the report's path is not known until this
+  # open's nonce has been generated (#3751 round 5 J1, round 6 K2). The report half is checked
   # immediately after, before anything is written to it.
   #
   # THE SYMLINK WALK RUNS FIRST, BEFORE THE `mkdir -p`: a component that is a dangling symlink
@@ -933,7 +1011,7 @@ cmd_open() {
   assert_ignored "$sfile" stage-record
 
   local spawned_iso spawned_epoch reopen_count=0 prior_iso="" head_sha=""
-  local gen=0 prior_gen="" ngen_lines=0
+  local nonce="" prior_nonce="" nnonce_lines=0
   spawned_iso="$(now_iso)"
   spawned_epoch="$(now_epoch)"
 
@@ -965,38 +1043,43 @@ cmd_open() {
 
   if [ -f "$sfile" ]; then
     prior_iso="$(read_field "$sfile" spawned-at)"
-    # THE PRIOR GENERATION, READ BEFORE ANY REFUSAL, so the `already-open` refusal can name the
+    # THE PRIOR NONCE, READ BEFORE ANY REFUSAL, so the `already-open` refusal can name the
     # report that is CURRENT rather than the one a re-open would create. COUNTED, not first-wins:
     # this field decides WHICH ARTIFACT COUNTS, and "several records is refused, never resolved by
     # order" is the rule the `result:` reader follows for exactly the same reason. An unreadable
-    # value refuses below; an ABSENT one is generation 0 (see the header: that is what every
-    # earlier version of this tool wrote).
+    # value refuses below; an ABSENT one is the LEGACY bare report (see the header: that is what
+    # every earlier version of this tool wrote).
+    #
+    # A DEFECTIVE RECORD REFUSES EVEN UNDER `--force`, THOUGH THE NEW PATH DOES NOT DEPEND ON IT.
+    # The fresh nonce is generated below and cannot collide whatever this record says — but a
+    # record we cannot read is also a record whose `spawned-at` we cannot read, so a forced
+    # re-open would silently restart a clock a reader is using and destroy the only evidence of
+    # which report the previous agent holds. The remedy is a human reading the record.
     #
     # THE READ IS VERIFIED AFFIRMATIVELY (#3751 round 6, K1). `count_field_lines` returns non-zero
     # when the record could not be READ at all, which is a different fact from "read fine, no such
-    # field" — the second is the legacy generation-0 shape, the first measures nothing. Guessing
-    # generation 0 from a failed read would hand the re-spawned agent the path an earlier agent may
-    # still hold, so it is its OWN named refusal: the remedy is `chmod`/a repaired record, not a
-    # re-spawn.
-    if ! ngen_lines="$(count_field_lines "$sfile" report-generation)"; then
+    # field" — the second is the legacy shape, the first measures nothing.
+    if ! nnonce_lines="$(count_field_lines "$sfile" report-nonce)"; then
       emit "$REFUSE_MARKER reason=stage-record-unreadable kind=$kind issue=$issue record=$sfile"
-      emit "$REFUSE_MARKER detail=this stage's record EXISTS and could not be READ, so which report of this stage is current could not be measured and NOTHING was written. That is not the same as a record with no report-generation (which reads as the original single report): an unmeasured record may not take the permissive reading, because guessing would hand a re-spawned agent the path an earlier agent may still hold. Fix the record's permissions, or remove the stage directory and open a fresh stage."
+      emit "$REFUSE_MARKER detail=this stage's record EXISTS and could not be READ, so which report of this stage is current could not be measured and NOTHING was written. That is not the same as a record with no report-nonce (which reads as the original single report): an unmeasured record may not take the permissive reading, because it is also a record whose spawned-at cannot be read, so a forced re-open would silently restart a clock a reader is using. Fix the record's permissions, or remove the stage directory and open a fresh stage."
       exit 2
     fi
-    prior_gen="$(read_field "$sfile" report-generation)"
-    if [ "$ngen_lines" -le 1 ] && { [ -z "$prior_gen" ] || case "$prior_gen" in *[!0-9]*) false ;; *) true ;; esac; }; then
-      gen="${prior_gen:-0}"
-    else
-      # FAIL-CLOSED, AND IT REFUSES rather than guessing 0: guessing would hand the re-spawned
-      # agent a path an EARLIER agent may still hold, which is the whole defect this generation
-      # closes. The remedy is a human reading the record, so the refusal says so.
-      emit "$REFUSE_MARKER reason=report-generation-unreadable kind=$kind issue=$issue record=$sfile lines=$ngen_lines value=$(field_value "${prior_gen:-<none>}")"
-      emit "$REFUSE_MARKER detail=the stage record's report-generation must be exactly ONE line carrying decimal digits; it names which report of this stage is current, so a guess could hand a re-spawned agent a path an earlier agent still holds. Read the record and repair it, or remove the stage directory and open a fresh stage."
+    prior_nonce=""
+    if [ "$nnonce_lines" -eq 1 ]; then
+      prior_nonce="$(read_field "$sfile" report-nonce)"
+    fi
+    if [ "$nnonce_lines" -gt 1 ] || { [ "$nnonce_lines" -eq 1 ] && ! nonce_is_valid "$prior_nonce"; }; then
+      # FAIL-CLOSED, AND IT REFUSES rather than reading the legacy bare name: that name may be a
+      # report an EARLIER agent still holds, and reporting it as this stage's current report is
+      # exactly the false certification the nonce closes. The remedy is a human reading the
+      # record, so the refusal says so.
+      emit "$REFUSE_MARKER reason=report-nonce-unreadable kind=$kind issue=$issue record=$sfile lines=$nnonce_lines value=$(field_value "${prior_nonce:-<none>}")"
+      emit "$REFUSE_MARKER detail=the stage record's report-nonce must be exactly ONE line carrying an alphanumeric token; it names which report of this stage is current, so a guess could name a report an earlier agent still holds. Read the record and repair it, or remove the stage directory and open a fresh stage."
       exit 2
     fi
-    rpath="$(report_path "$issue" "$kind" "$gen")"
+    rpath="$(report_path "$issue" "$kind" "$prior_nonce")"
     if [ "$force" -ne 1 ]; then
-      emit "$REFUSE_MARKER reason=already-open kind=$kind issue=$issue spawned-at=${prior_iso:-unknown} report-generation=$gen report=$(field_value "$rpath")"
+      emit "$REFUSE_MARKER reason=already-open kind=$kind issue=$issue spawned-at=${prior_iso:-unknown} report=$(field_value "$rpath")"
       emit "$REFUSE_MARKER detail=a stage is already open for this kind; re-opening would restart a clock a reader is using. Pass --force to re-stamp the report (the original spawned-at is PRESERVED either way), or read it with: $prog verdict $kind --issue $issue"
       exit 2
     fi
@@ -1019,59 +1102,46 @@ cmd_open() {
       "" | *[!0-9]* ) reopen_count=1 ;;
       *) reopen_count=$((prior_count + 1)) ;;
     esac
-    # A RE-OPEN GETS A NEW GENERATION, WHICH IS THE WHOLE FIX (#3751 round 5, J1). `--force` used
-    # to reset the report AT THE SAME PATH, so the PREVIOUS, idle agent could wake up afterwards
-    # and write its old-tree verdict into that path — where it was paired with the newly stamped
-    # `head-sha:`, and a commit nobody audited passed the merge point. #3751 exists BECAUSE
-    # delegated agents return late, so that is the expected behaviour of this population, not an
-    # exotic race. Advancing the generation makes the resumed agent's path STALE: it is
-    # STRUCTURALLY unable to write into the current report, which a check could not deliver
-    # (the harm is a write, and a check after it could only report it).
-    #
-    # `reopen-count` is deliberately NOT reused as the generation. They answer different
-    # questions — how many times this stage was spawned, versus which report is current — and the
-    # belt below can advance the generation without a re-open having happened, so making one field
-    # mean both would make one of the two answers wrong.
-    gen=$((gen + 1))
   fi
 
-  # THE BELT: ADVANCE PAST ANY GENERATION WHOSE REPORT ALREADY EXISTS. A counter read from the
-  # record cannot help when the RECORD is gone and a REPORT is not — `rm` the `.stage` file and a
-  # fresh open would restart at generation 0 and hand a new agent the path an older, still-running
-  # agent holds. Every generation ever opened leaves its report file behind (nothing here deletes
-  # one — see the note at the writes), so "this generation's file already exists" is exactly the
-  # signal that the generation is taken. BOUNDED, because an unbounded scan would spin on a
-  # pathological directory; the bound is far above any plausible number of re-spawns.
+  # A FRESH NONCE FOR EVERY OPEN, AND THAT IS THE WHOLE FIX (#3751 round 5 J1, round 6 K2).
   #
-  # DECLARED LIMIT: this is a filesystem probe, and `[ -e ]` cannot tell "absent" from "cannot
-  # tell". An unstattable directory therefore yields a candidate that may be taken — and it also
-  # cannot be WRITTEN, so the run refuses by name at `prepare_write` (`reason=tempfile-not-created`)
-  # rather than publishing anything. The authority for which generation is current remains the
-  # RECORD; this only chooses a fresh one.
-  # TESTED HERE, IN THE PARENT SHELL (see `report_path`): every producer of a generation checks it
-  # where it computes it, so a bad value dies at the top level instead of inside a substitution.
-  case "$gen" in
-    "" | *[!0-9]* ) die_usage "internal: the computed report generation is not a decimal number ('$gen')" ;;
-  esac
+  # J1's half: `--force` used to reset the report AT THE SAME PATH, so the PREVIOUS, idle agent
+  # could wake up afterwards and write its old-tree verdict into that path — where it was paired
+  # with the newly stamped `head-sha:`, and a commit nobody audited passed the merge point. #3751
+  # exists BECAUSE delegated agents return late, so that is the expected behaviour of this
+  # population, not an exotic race. A fresh path makes the resumed agent STRUCTURALLY unable to
+  # write into the current report, which a check could not deliver (the harm is a write, and a
+  # check after it could only report it).
   #
-  # IT ADVANCES PAST A REGULAR FILE AND NOTHING ELSE. A previous generation's report IS a regular
-  # file; a SYMLINK or a directory at the candidate is not side-stepped but left to the named
-  # refusal below, because quietly choosing another name would turn a planted symlink — the exact
-  # thing round 1's walk exists to REFUSE, loudly — into an invisible change of generation. The
-  # loop condition and the exhaustion test below are the SAME predicate, so a loop that ended for
-  # any other reason cannot be reported as exhaustion.
-  local gen_attempts=0
-  rpath="$(report_path "$issue" "$kind" "$gen")"
-  while [ "$gen_attempts" -lt 4096 ] && [ -f "$rpath" ] && [ ! -L "$rpath" ]; do
-    gen_attempts=$((gen_attempts + 1))
-    gen=$((gen + 1))
-    rpath="$(report_path "$issue" "$kind" "$gen")"
-  done
-  if [ -f "$rpath" ] && [ ! -L "$rpath" ]; then
-    emit "$REFUSE_MARKER reason=report-generation-exhausted kind=$kind issue=$issue attempts=$gen_attempts path=$(field_value "$rpath")"
-    emit "$REFUSE_MARKER detail=every report generation up to the bound already has a file on disk, so no fresh report path could be chosen and NOTHING was written. Archive or remove this stage's old generation reports (they are history; nothing reads them) and re-open."
+  # K2's half: the fresh path must not be CHOSEN. Round 5 chose it by scanning for an unused
+  # `<kind>.<gen>.md` — a 4096-attempt walk with its own exhaustion refusal — and a value chosen
+  # by looking at what is on disk is a value TWO CONCURRENT CALLERS CAN BOTH CHOOSE: two
+  # `open --force` runs read the same record, probe the same directory before either has written,
+  # pick the same generation, and hand ONE report path to TWO agents, so the superseded agent
+  # overwrites the current verdict — FINDINGS replaced by PASS. The scan, its bound and its
+  # exhaustion refusal are DELETED, not guarded: with nothing selected there is nothing to
+  # exhaust and nothing to race, and the record written LAST is the published one while the
+  # loser's agent writes to a path no reader derives. Subtraction cannot introduce a false PASS.
+  #
+  # THE EXISTENCE BELT IS DELETED WITH IT, and the property it was for is now structural: a
+  # record deleted by hand while its report survives no longer restarts a counter at 0, because
+  # there is no counter — a fresh open picks a value nothing on disk can predict.
+  #
+  # `reopen-count` REMAINS, and it is where the human-readable audit number lives. It answers a
+  # DIFFERENT question from the nonce (how many times this stage was spawned, versus which report
+  # is current), and it is what an operator reads beside `reopened-at:` to correlate a surviving
+  # report with a re-spawn; the nonce only has to be UNIQUE.
+  nonce="$(new_report_nonce "$dir")"
+  if ! nonce_is_valid "$nonce"; then
+    # NO FALLBACK, for the reason `prepare_write` has none: every predictable substitute (a pid, a
+    # timestamp, a counter) is exactly the collidable value this replaces, so a box that cannot
+    # generate an unpredictable token is REFUSED rather than given a weaker one it cannot see.
+    emit "$REFUSE_MARKER reason=report-nonce-not-generated kind=$kind issue=$issue value=$(field_value "${nonce:-<none>}")"
+    emit "$REFUSE_MARKER detail=an unpredictable report nonce could not be generated, so NO report path was derived and NOTHING was written. The nonce comes from mktemp -u's name substitution, so this box has no usable mktemp. There is deliberately no fallback to a predictable token (a pid, a timestamp, a counter): a token two concurrent opens could both choose is the collision this nonce exists to remove, so refusing is the fail-closed answer."
     exit 2
   fi
+  rpath="$(report_path "$issue" "$kind" "$nonce")"
 
   # THE REPORT HALF OF THE PATH VERIFICATION, on the path that was just chosen. Its PARENT is the
   # SAME directory as the stage record's, created above, and it is
@@ -1103,12 +1173,12 @@ cmd_open() {
   # of `scripts/tests/test_review_stage.sh` observes the on-disk state at BOTH write boundaries
   # and pins that the forbidden pair (new head-sha + stale verdict) exists at neither.
 
-  # OLDER GENERATIONS' REPORTS ARE LEFT ON DISK, DELIBERATELY. They are HISTORY: nothing reads
-  # them (the record names exactly one generation, and that is the only path any reader derives),
-  # and they are what an operator opens to see what the previous agent actually concluded. Deleting
-  # them silently would destroy the audit trail this whole issue exists to create — and the belt
-  # above uses their EXISTENCE to avoid handing a new agent a path an old one still holds, so
-  # removing one by hand re-opens exactly that hole. They are under `.review-stage/`, which is
+  # SUPERSEDED REPORTS ARE LEFT ON DISK, DELIBERATELY. They are HISTORY: nothing reads them (the
+  # record names exactly ONE nonce, and that is the only path any reader derives), and they are
+  # what an operator opens to see what the previous agent actually concluded. Deleting them
+  # silently would destroy the audit trail this whole issue exists to create. Since round 6 (K2)
+  # nothing DEPENDS on their existence — the nonce is generated, not chosen from what is absent —
+  # so removing one by hand costs the trail and nothing else. They are under `.review-stage/`, which is
   # gitignored, so they cost nothing but a few kilobytes.
   #
   # THE SENTINEL. `result:` is the FIRST recordable line on purpose: it is what `verdict`
@@ -1125,11 +1195,11 @@ cmd_open() {
     printf 'spawned-at: %s\n' "$spawned_iso"
     printf 'deadline-secs: %s\n' "$deadline"
     printf 'report-of-record: %s\n' "$rpath"
-    # WHICH GENERATION THIS FILE IS (#3751 round 5, J1). Human-facing: an agent (or an operator)
-    # holding an OLDER generation's file can see that it is not the current one. It is a NOTE, not
-    # a location — the reader takes the current generation from the STAGE RECORD, never from a
+    # WHICH REPORT THIS FILE IS (#3751 round 5 J1, round 6 K2). Human-facing: an agent (or an
+    # operator) holding a SUPERSEDED file can see that it is not the current one. It is a NOTE,
+    # not a location — the reader takes the current nonce from the STAGE RECORD, never from a
     # report, because a report is author-controlled text (round 4, H2).
-    printf 'report-generation: %s\n' "$gen"
+    printf 'report-nonce: %s\n' "$nonce"
     printf '\n'
     printf '## How to complete this stage\n'
     printf '\n'
@@ -1184,20 +1254,22 @@ cmd_open() {
     # forced re-open re-writes the sentinel, so the re-spawned agent audits the tree that is
     # there NOW; carrying an older sha forward would bind the verdict to a tree nobody read.
     printf 'head-sha: %s\n' "$head_sha"
-    # THE REPORT GENERATION — the field that decides WHICH FILE HOLDS THIS STAGE'S VERDICT (#3751
-    # round 5, J1). It is written in the SAME atomic record as `head-sha:`, so the pair (the tree
-    # audited, the artifact that audits it) is published together or not at all; that is what makes
-    # a resumed agent's write into an older generation's path unreadable rather than a false
-    # certification. Readers take the path from THIS number and nothing else, and it is a NUMBER
-    # rather than a path on purpose: round 4 (H2) removed the `report:` path field because a data
-    # file naming a location let a reader be redirected to another file. A digit cannot redirect.
-    printf 'report-generation: %s\n' "$gen"
+    # THE REPORT NONCE — the field that decides WHICH FILE HOLDS THIS STAGE'S VERDICT (#3751
+    # round 5 J1, round 6 K2). It is written in the SAME atomic record as `head-sha:`, so the pair
+    # (the tree audited, the artifact that audits it) is published together or not at all; that is
+    # what makes a superseded agent's write into its own path unreadable rather than a false
+    # certification. Readers take the path from THIS token and nothing else, and it is an OPAQUE
+    # TOKEN rather than a path on purpose: round 4 (H2) removed the `report:` path field because a
+    # data file naming a location let a reader be redirected to another file. An alphanumeric
+    # token cannot redirect — it is validated, and the directory and the name shape around it are
+    # DERIVED.
+    printf 'report-nonce: %s\n' "$nonce"
     printf 'reopen-count: %s\n' "$reopen_count"
     [ "$reopen_count" -eq 0 ] || printf 'reopened-at: %s\n' "$(now_iso)"
   } >&9
   commit_write "$sfile" stage-record
 
-  emit "OPEN-OK kind=$kind issue=$issue agent=$agent deadline-secs=$deadline spawned-at=$spawned_iso head-sha=$head_sha report-generation=$gen reopen-count=$reopen_count report=$(field_value "$rpath")"
+  emit "OPEN-OK kind=$kind issue=$issue agent=$agent deadline-secs=$deadline spawned-at=$spawned_iso head-sha=$head_sha report-nonce=$nonce reopen-count=$reopen_count report=$(field_value "$rpath")"
   # THE RAW PATH, ON A LINE OF ITS OWN — deliberately NOT through `field_value`. A caller
   # consumes this line to open the file, so a neutralised '=' would hand back a path that does
   # not exist. Safe for the reason the fields are not: this is a WHOLE LINE with no `key=value`
@@ -1223,8 +1295,8 @@ and put your findings below it. If that line still reads \`result: NOT-RUN\` whe
 stage is recorded as NOT-RUN and BLOCKS the merge — an absent review is not a clean one, and
 no returned message, idle notice or verbal summary substitutes for the file.
 WRITE TO THE PATH IN THIS CLAUSE, not one you were given earlier or remember from another
-stage: that filename carries this stage's report GENERATION, and a re-opened stage reads only
-its current generation — an earlier one is history that nothing consults.
+stage: that filename carries a per-open NONCE, and a re-opened stage reads only the report its
+record names — an earlier one is history that nothing consults.
 --- end clause ---
 CLAUSE
 }
@@ -1237,7 +1309,7 @@ classify_report() {
   local rpath="$1" open="$2" record_defect="${3:-}" line value tok cause body defect
 
   # THE RECORD IS ASKED FIRST, BECAUSE IT NAMES WHICH REPORT TO READ (#3751 round 5, J1). A record
-  # whose `report-generation:` cannot be read yields no path at all, so there is nothing to
+  # whose `report-nonce:` cannot be read yields no path at all, so there is nothing to
   # classify — and this is its OWN cause, not one of the report ones: `report absent` and `report
   # ungrammatical` would each assert something about a FILE THAT WAS NEVER IDENTIFIED, and the
   # operator action is different again (repair the record, or open a fresh stage).
@@ -1388,60 +1460,63 @@ classify_report() {
 # `--report` gone the path has ONE derivation (`report_path`), used by the writer and by every
 # reader, so nothing in a data file can redirect a reader to another file.
 #
-# AND THE GENERATION COMES FROM THE RECORD, WHICH IS THE ONE SOURCE OF TRUTH FOR WHICH REPORT
-# COUNTS (#3751 round 5, J1). `report_path` needs it, and taking it from anywhere else would
-# recreate the divergence round 4 closed: the writer and the readers must agree about which file a
-# stage means. Three answers, and only two of them are a path:
-#   exactly one digits-only field  -> that generation
-#   NO field at all                -> generation 0. This is an AFFIRMATIVE reading of a record
-#                                     written before the field existed, not a permissive default:
-#                                     every earlier version of this tool wrote exactly ONE report,
-#                                     at `<kind>.md`, so generation 0 IS that record's report.
-#                                     Refusing here would red on correct input.
-#   anything else (several lines,   -> a RECORD DEFECT. No path is derived, no report is read, and
-#   a non-numeric value)              `classify_report` reports `stage record unreadable`. Falling
-#                                     back to generation 0 would be the permissive branch on
-#                                     "cannot tell", and it is precisely how a stale generation-0
-#                                     PASS would be read as the current verdict.
+# AND THE NONCE COMES FROM THE RECORD, WHICH IS THE ONE SOURCE OF TRUTH FOR WHICH REPORT
+# COUNTS (#3751 round 5 J1, round 6 K2). `report_path` needs it, and taking it from anywhere else
+# would recreate the divergence round 4 closed: the writer and the readers must agree about which
+# file a stage means. FOUR answers, and only two of them are a path:
+#   exactly one valid token        -> that report
+#   NO field at all               -> the LEGACY bare `<kind>.md`. This is an AFFIRMATIVE reading of
+#                                    a record written before the field existed, not a permissive
+#                                    default: every earlier version of this tool wrote exactly ONE
+#                                    report, at that name, so it IS that record's report. Refusing
+#                                    here would red on correct input.
+#   anything else (several lines, -> a RECORD DEFECT. No path is derived, no report is read, and
+#   a token that is not valid)      `classify_report` reports `stage record unreadable`. Falling
+#                                    back to the bare name would be the permissive branch on
+#                                    "cannot tell", and it is precisely how a stale report's PASS
+#                                    would be read as the current verdict.
+#   THE READ ITSELF FAILED        -> the same RECORD DEFECT, and NOT the legacy reading (#3751
+#                                    round 6, K1): *read failed* and *read fine, field absent* are
+#                                    different facts, and a `|| true` that collapsed them let an
+#                                    unreadable record report an old report's PASS.
 # COUNTED rather than first-wins, for the same reason the `result:` reader counts: this field
 # decides which artifact is authoritative, and picking one of two answers by order is not a rule.
 STAGE_OPEN=0; STAGE_AGENT=unknown; STAGE_DEADLINE=unknown; STAGE_REPORT=""
 STAGE_SPAWNED_ISO=unknown; STAGE_ELAPSED=unknown
-STAGE_GENERATION=0; STAGE_RECORD_DEFECT=""
+STAGE_NONCE=""; STAGE_RECORD_DEFECT=""
 load_stage() {
   local issue="$1" kind="$2" sfile epoch
   sfile="$(stage_file "$issue" "$kind")"
-  STAGE_GENERATION=0; STAGE_RECORD_DEFECT=""
+  STAGE_NONCE=""; STAGE_RECORD_DEFECT=""
   if [ ! -f "$sfile" ]; then
-    # NEVER OPENED: there is no record to name a generation, so the path reported is the one a
-    # FIRST open would use. It is a path nobody has written, which is what `stage never opened`
-    # says.
-    STAGE_REPORT="$(report_path "$issue" "$kind" 0)"
+    # NEVER OPENED: there is no record to name a report, so the path reported is the LEGACY bare
+    # one. It is a path nobody has written, which is what `stage never opened` says.
+    STAGE_REPORT="$(report_path "$issue" "$kind" "")"
     return 0
   fi
   STAGE_OPEN=1
-  local ngen gval
+  local nnonce nval
   # THE READ IS VERIFIED AFFIRMATIVELY, AND A FAILED READ IS ITS OWN DEFECT (#3751 round 6, K1).
   # `count_field_lines` returns non-zero only when the record could not be READ; "read fine, no
   # such field" prints 0 and returns 0. The two were collapsed by a `|| true`, so an unreadable
   # record fell through to the LEGACY reading and an OLD report's `PASS` was reported as the
   # current verdict. The legacy reading below is reserved for a record that WAS read.
-  if ! ngen="$(count_field_lines "$sfile" report-generation)"; then
-    STAGE_RECORD_DEFECT="the record EXISTS and could not be READ, so which report is current was never measured (permission or I/O — not the same as a record with no report-generation)"
-    ngen=0
-  elif [ "$ngen" -gt 1 ]; then
-    STAGE_RECORD_DEFECT="report-generation appears $ngen times (AMBIGUOUS — several records is refused, never resolved by order)"
-  elif [ "$ngen" -eq 0 ]; then
-    STAGE_GENERATION=0
+  if ! nnonce="$(count_field_lines "$sfile" report-nonce)"; then
+    STAGE_RECORD_DEFECT="the record EXISTS and could not be READ, so which report is current was never measured (permission or I/O — not the same as a record with no report-nonce)"
+  elif [ "$nnonce" -gt 1 ]; then
+    STAGE_RECORD_DEFECT="report-nonce appears $nnonce times (AMBIGUOUS — several records is refused, never resolved by order)"
+  elif [ "$nnonce" -eq 0 ]; then
+    STAGE_NONCE=""
   else
     # READ ONLY WHERE IT IS USED, and only after the count above established that the record can
     # be read at all: `read_field` reports "absent or empty" for an unreadable file too, so its
     # empty value is only meaningful once the read itself is known to have succeeded.
-    gval="$(read_field "$sfile" report-generation)"
-    case "$gval" in
-      "" | *[!0-9]* ) STAGE_RECORD_DEFECT="report-generation is not a decimal number ($(field_value "${gval:-<empty>}"))" ;;
-      *) STAGE_GENERATION="$gval" ;;
-    esac
+    nval="$(read_field "$sfile" report-nonce)"
+    if nonce_is_valid "$nval"; then
+      STAGE_NONCE="$nval"
+    else
+      STAGE_RECORD_DEFECT="report-nonce is not an alphanumeric token of $NONCE_MIN_LEN-$NONCE_MAX_LEN characters ($(field_value "${nval:-<empty>}"))"
+    fi
   fi
   if [ -n "$STAGE_RECORD_DEFECT" ]; then
     # NO FABRICATED PATH. `report=` is on the line that is otherwise the authority, so an
@@ -1450,7 +1525,7 @@ load_stage() {
     # there is none. Callers render `${STAGE_REPORT:-unresolved}`.
     STAGE_REPORT=""
   else
-    STAGE_REPORT="$(report_path "$issue" "$kind" "$STAGE_GENERATION")"
+    STAGE_REPORT="$(report_path "$issue" "$kind" "$STAGE_NONCE")"
   fi
   local v
   v="$(read_field "$sfile" agent)";         [ -z "$v" ] || STAGE_AGENT="$v"
@@ -1666,8 +1741,8 @@ cmd_record_author_performed() {
     exit 2
   fi
   # AND A RECORD THAT DOES NOT NAME ITS CURRENT REPORT IS NOT WRITABLE (#3751 round 5, J1). With
-  # no readable `report-generation:` there is no derived path, so writing would mean GUESSING one —
-  # and the guess (generation 0) is the path an earlier agent may still hold. Refused BEFORE the
+  # no readable `report-nonce:` there is no derived path, so writing would mean GUESSING one —
+  # and the guess (the bare name) is the path an earlier agent may still hold. Refused BEFORE the
   # already-recorded check below, because that check reads a report this stage cannot locate.
   if [ -n "$STAGE_RECORD_DEFECT" ]; then
     emit "AUTHOR-REFUSED reason=stage-record-unreadable kind=$kind issue=$issue record=$(field_value "$(stage_file "$issue" "$kind")") defect=$(field_value "$STAGE_RECORD_DEFECT")"
