@@ -2341,15 +2341,21 @@ fi
 #                   (default: the ancestry walk's)
 #   $6 control_args the argv the CONTROL invokes, which must be the one the shim
 #                   triggers on (default: the ancestry walk's)
+#   $7 control_bin  the BINARY the control invokes (default `git`). Added for job
+#                   395, whose shim intercepts `sh` — the canonicalisation helper
+#                   runs `sh -c 'cd -- "$1" && pwd -P'`, not git. Parameterising
+#                   the proven runner beats a second construction, which is where
+#                   every defect in this scaffolding came from.
 to_run_arm() {
   local label="$1" shimdir="$2" want_rc="$3" pidfile="$4"
   local want_cause="${5:-the ancestry walk timed out after}"
   local control_args="${6:-merge-base --is-ancestor $R_CERT $R_CERT}"
+  local control_bin="${7:-git}"
   local out rc leaks crc=0
   rm -f "$pidfile"
   # shellcheck disable=SC2086  # intentional word-split of the control argv list
   PATH="$shimdir:$PATH" "$REAL_TO" --kill-after=1 2 \
-    git $control_args >/dev/null 2>&1 || crc=$?
+    "$control_bin" $control_args >/dev/null 2>&1 || crc=$?
   if [ "$crc" = "$want_rc" ]; then
     ok "hung-read ($label): CONTROL — the shim really produces runner exit $want_rc"
   else
@@ -2476,6 +2482,50 @@ DISCSHIM
     to_run_arm "DISCOVERY path / exit 124" "$DSH" 124 "$DPID" \
       "the work-tree root probe (rev-parse --show-toplevel) timed out after" \
       "rev-parse --show-toplevel"
+
+    # ARM 5 — A HUNG *CANONICALISATION* (roborev job 395). `_anchor_canon` used to
+    # end in `|| true`, so a timeout there was reported as an unresolvable path and
+    # the operator got the stalled-mount cause's remedy from a completely different
+    # cause. It was the one site job 374's status propagation did not reach,
+    # because its own suppression hid the status.
+    #
+    # SAME TEMPLATE AS ARM 1, different INTERCEPTED BINARY: the helper runs
+    # `sh -c 'cd -- "$1" && pwd -P'`, so the shim is `sh`, and it `exec`s the real
+    # sh for everything else. The FIRST canonicalisation reached is the work-tree
+    # root, so that is the cause this arm expects.
+    #
+    # IT TRIGGERS ON `pwd`, NOT ON `cd -- `, and that is forced by the control
+    # rather than a preference: `to_run_arm`'s control argv is WORD-SPLIT, so a
+    # quoted `-c` body cannot survive it — `cd -- "$1" && pwd -P` arrives as
+    # separate words and no single arg contains `cd -- `, which made the control
+    # exit 2 instead of the runner's 124. `pwd` is one word, appears in the real
+    # helper's body, and the shim is only on PATH for this arm — where the
+    # assert's ONLY use of `sh` is that canonicalisation.
+    CSH="$T/bin-sh-hang-canon"
+    mkdir -p "$CSH"
+    CPID="$T/hang-canon.pid"
+    REALSH=$(command -v sh 2>/dev/null) || REALSH=""
+    if [ -z "$REALSH" ]; then
+      printf 'ARM NOT TAKEN: hung canonicalisation (job 395) — the real `sh` could not be resolved, so a\n'
+      printf 'ARM NOT TAKEN: pass-through shim cannot be built. The canonicalisation TIMEOUT cause is\n'
+      printf 'ARM NOT TAKEN: UNEXERCISED on this run.\n'
+      ok "hung-read (CANON path): SKIPPED (real sh unresolvable — arm UNEXERCISED, declared not silent)"
+    else
+      cat >"$CSH/sh" <<CANONSHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *pwd*) printf '%s\\n' "\$\$" >"$CPID"; exec $TOSENTINEL ;;
+  esac
+done
+exec "$REALSH" "\$@"
+CANONSHIM
+      chmod +x "$CSH/sh"
+      to_run_arm "CANON path / exit 124" "$CSH" 124 "$CPID" \
+        "canonicalising the work-tree root (cd + pwd -P) timed out after" \
+        "-c pwd" \
+        sh
+    fi
 
     # ARM 4 — A DISCOVERY CALL THAT *FAILS* (not hangs). Found while RED-verifying
     # arm 3, and it is the more serious half: `cd ""` SUCCEEDS in bash and leaves

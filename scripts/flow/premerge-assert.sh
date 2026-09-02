@@ -598,8 +598,11 @@ refuse_anchor_unverifiable() {
 #                                               |         | absolute, canonicalised
 # rev-parse --is-shallow-repository              | RUNNER  | must equal the literal `false`;
 #                                               |         | anything else => UNVERIFIABLE
-# _anchor_canon  (sh -c 'cd -- "$1" && pwd -P') | RUNNER  | empty input refused; empty output
-#   x4: toplevel, common-dir, TMPDIR, created   |         | treated as could-not-measure
+# _anchor_canon  (sh -c 'cd -- "$1" && pwd -P') | RUNNER  | empty input refused; rc now
+#   x5: toplevel, common-dir, TMPDIR, created,  |         | INSPECTED three-valued (job 395):
+#       object-dir                              |         | 124/137 -> TIMEOUT cause, rc 1 ->
+#                                               |         | unresolvable-path cause. Empty
+#                                               |         | output alone no longer decides.
 # TMPDIR read                                    | n/a     | canonicalised, then proven
 #                                               |         | OUTSIDE work tree AND git dir
 # mktemp -d <tmp_canon>/premerge-anchor.XXXXXX   | RUNNER  | result: non-empty, canonical,
@@ -670,7 +673,16 @@ refuse_anchor_unverifiable() {
 # and target-revalidated; and the `anchor-reads:` token was corrected twice — once
 # for overclaiming, once for UNDERclaiming after these fixes.
 #
-# AND WHAT THE LATEST ROUND CHANGED (job 388), a MATERIAL change to what this
+# AND WHAT THE LATEST ROUND CHANGED (job 395): `_anchor_canon` stopped
+# suppressing its exit status with `|| true`, so all FIVE canonicalisations now
+# distinguish a TIMEOUT (124/137, stalled filesystem) from an unresolvable path
+# (rc 1) instead of collapsing both onto "empty output". Its table row narrows
+# accordingly: empty output alone no longer decides the cause. This was the one
+# site job 374 did not reach, because its own `|| true` hid the status job 374
+# taught every other call to inspect — and the comment there ARGUED for the
+# suppression on safety grounds, which was true and was not the point.
+#
+# AND WHAT THE ROUND BEFORE THAT CHANGED (job 388), a MATERIAL change to what this
 # table claims: the `rm -rf` row is now a DECLARED NON-DELETION, and the identity
 # probe plus the whole delete-time revalidation are GONE with it. The
 # `anchor-reads:` token lost `rm` from its bounded externals — its third
@@ -943,12 +955,28 @@ trap '_anchor_cleanup; trap - HUP;  kill -HUP  $$' HUP
 # is an EXTERNAL command, so it goes through the existing runner. Verified to
 # agree with the builtin form, symlinked input included.
 #
-# A timeout, a missing/unreadable path and an absent `sh` all yield EMPTY, which
-# every caller already treats as "could not measure" and refuses on. That is the
-# fail-closed direction, and it is why this does not need its own timeout arm.
+# A missing/unreadable path and an absent `sh` yield EMPTY, which every caller
+# treats as "could not measure" and refuses on — the fail-closed direction. A
+# TIMEOUT is no longer in that set: since job 395 the rc is preserved and each
+# caller routes 124/137 to the TIMEOUT cause, because failing closed with the
+# WRONG REMEDY still sends an operator to the wrong place.
+# THE EXIT STATUS IS PRESERVED, NOT SUPPRESSED (roborev job 395). It used to end
+# in `|| true`, and the comment above justified that: a timeout, a missing path and
+# an absent `sh` all yield EMPTY, and every caller treats empty as
+# could-not-measure. That reasoning was right about SAFETY — it fails closed, the
+# merge stays blocked, no false pass — and wrong about DIAGNOSIS: an operator sent
+# to hunt an unreadable path when the real cause is a stalled mount. That is the
+# misleading-remedy class job 374 fixed everywhere else; this was the one site that
+# escaped it, because its `|| true` hid the status job 374 taught every other call
+# to inspect.
+#
+# The rc is naturally THREE-VALUED here, which is what makes the split possible:
+#   0        canonicalised; stdout is the path
+#   1        `cd` failed — a genuinely missing/unreadable path (its own cause)
+#   124/137  the runner terminated it — a stalled filesystem (the TIMEOUT cause)
 _anchor_canon() {
   [ -n "$1" ] || return 0
-  _anchor_bounded sh -c 'cd -- "$1" && pwd -P' sh "$1" 2>/dev/null || true
+  _anchor_bounded sh -c 'cd -- "$1" && pwd -P' sh "$1" 2>/dev/null
 }
 
 # _anchor_build_scratch — on success sets ANCHOR_SCRATCH (the mktemp dir),
@@ -962,7 +990,7 @@ _anchor_build_scratch() {
   local anchor="$1" head="$2"
   local lane_objects repo_canon common_canon tmp_req tmp_canon created_canon alt_q
   local created_base
-  local rc toplevel commondir
+  local rc toplevel commondir lane_objects_canon
 
   # THE SCRATCH MUST BE PROVABLY OUTSIDE THE REPOSITORY, and "the repository" is
   # BOTH roots: the work tree AND the git COMMON dir (these are worktrees of one
@@ -986,14 +1014,30 @@ _anchor_build_scratch() {
   fi
   # A non-timeout failure, or an empty answer, keeps its ORIGINAL cause below:
   # those are real states (an unusable repository) with their own remedy.
-  repo_canon=$(_anchor_canon "$toplevel")
-  common_canon=$(_anchor_canon "$commondir")
+  # EACH CANONICALISATION INSPECTS ITS STATUS (job 395), so a stalled mount gets
+  # the TIMEOUT cause and its remedy instead of borrowing the unresolvable-path
+  # one. The non-timeout failure keeps that original cause below — it is a real
+  # state (an unusable repository) with its own remedy.
+  rc=0
+  repo_canon=$(_anchor_canon "$toplevel") || rc=$?
+  if _anchor_timed_out "$rc"; then
+    _anchor_refuse_timeout "$anchor" "$head" "canonicalising the work-tree root (cd + pwd -P)"
+  fi
+  rc=0
+  common_canon=$(_anchor_canon "$commondir") || rc=$?
+  if _anchor_timed_out "$rc"; then
+    _anchor_refuse_timeout "$anchor" "$head" "canonicalising the git common directory (cd + pwd -P)"
+  fi
   if [ -z "$repo_canon" ] || [ -z "$common_canon" ]; then
     ANCHOR_SCRATCH_ERR="the work-tree root and/or git common directory could not be resolved, so a scratch location cannot be proven outside them"
     return 1
   fi
   tmp_req="${TMPDIR:-/tmp}"
-  tmp_canon=$(_anchor_canon "$tmp_req")
+  rc=0
+  tmp_canon=$(_anchor_canon "$tmp_req") || rc=$?
+  if _anchor_timed_out "$rc"; then
+    _anchor_refuse_timeout "$anchor" "$head" "canonicalising TMPDIR (cd + pwd -P)"
+  fi
   if [ -z "$tmp_canon" ]; then
     ANCHOR_SCRATCH_ERR="the scratch root TMPDIR=$tmp_req could not be resolved (absent, unreadable, or not a directory)"
     return 1
@@ -1018,7 +1062,11 @@ _anchor_build_scratch() {
     ANCHOR_SCRATCH_ERR="could not create a scratch directory under $tmp_canon"
     return 1
   fi
-  created_canon=$(_anchor_canon "$ANCHOR_SCRATCH")
+  rc=0
+  created_canon=$(_anchor_canon "$ANCHOR_SCRATCH") || rc=$?
+  if _anchor_timed_out "$rc"; then
+    _anchor_refuse_timeout "$anchor" "$head" "canonicalising the created scratch directory (cd + pwd -P)"
+  fi
   if [ -z "$created_canon" ]; then
     ANCHOR_SCRATCH_ERR="the created scratch directory could not be canonicalized"
     return 1
@@ -1070,7 +1118,14 @@ _anchor_build_scratch() {
   # BOUNDED, and it keeps its own diagnostic (job 374's lesson: a broken object
   # directory must not borrow the absent-object remedy). The unbounded builtin
   # stat this replaces was the last first-touch filesystem probe in the path.
-  if [ -z "$(_anchor_canon "$lane_objects")" ]; then
+  # SPLIT OUT of an `[ -z "$(...)" ]` test, which discarded the status entirely —
+  # the most thorough of the five suppressions (job 395).
+  rc=0
+  lane_objects_canon=$(_anchor_canon "$lane_objects") || rc=$?
+  if _anchor_timed_out "$rc"; then
+    _anchor_refuse_timeout "$anchor" "$head" "canonicalising the object directory (cd + pwd -P)"
+  fi
+  if [ -z "$lane_objects_canon" ]; then
     ANCHOR_SCRATCH_ERR="this repository's object directory ($lane_objects) is not a readable directory"
     return 1
   fi
