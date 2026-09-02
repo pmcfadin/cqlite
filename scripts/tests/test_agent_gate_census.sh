@@ -682,8 +682,11 @@ case "$agg" in
   *) bad "G1: got '$agg'" ;;
 esac
 case "$agg" in
-  *'the gap set is CURATED'*'UNMEASURED, never verified'*)
-    ok "G2: the aggregate line DECLARES its own non-exhaustiveness, so it cannot be read as a verified all-clear" ;;
+  # …and it must name an OPEN issue for the residual. #3625 is the ORIGIN (closed
+  # NOT_PLANNED, absorbed into #3162); a printed pointer that resolves only to a dead ticket
+  # leaves the residual belonging to nobody, which is the same defect as the gap strings.
+  *'the gap set is CURATED'*'UNMEASURED, never verified'*'tracked in #3162'*)
+    ok "G2: the aggregate line DECLARES its own non-exhaustiveness AND points the residual at an OPEN issue, so it cannot be read as a verified all-clear or followed to a dead ticket" ;;
   *) bad "G2: the aggregate line does not declare its non-exhaustiveness: $agg" ;;
 esac
 agg0=$(census_summary_line fmt PASS)

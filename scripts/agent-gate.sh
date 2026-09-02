@@ -7561,7 +7561,7 @@ census_summary_line() { # <name> <status> [<name> <status>]...
       *)              unk=$((unk + 1)) ;;
     esac
   done
-  printf 'census: %d/%d components AFFIRMED a count; %d DECLARED-GAP (RECOGNISED); %d NOT-MEASURED (RECOGNISED); %d measured-ZERO (RECOGNISED); %d not-applicable (component did not PASS); %d no-subject (PASSed; the run had nothing to measure); %d UNDECLARED; %d unrecognised; %d row(s) carry a VACUOUS status. NON-EXHAUSTIVE: the gap set is CURATED, so an unaffirmed component is UNMEASURED, never verified (#3625).' \
+  printf 'census: %d/%d components AFFIRMED a count; %d DECLARED-GAP (RECOGNISED); %d NOT-MEASURED (RECOGNISED); %d measured-ZERO (RECOGNISED); %d not-applicable (component did not PASS); %d no-subject (PASSed; the run had nothing to measure); %d UNDECLARED; %d unrecognised; %d row(s) carry a VACUOUS status. NON-EXHAUSTIVE: the gap set is CURATED, so an unaffirmed component is UNMEASURED, never verified (#3625; the remaining gaps are tracked in #3162).' \
     "$aff" "$n" "$gapn" "$nm" "$zero" "$na_np" "$na_pass" "$und" "$unk" "$vac"
 }
 
