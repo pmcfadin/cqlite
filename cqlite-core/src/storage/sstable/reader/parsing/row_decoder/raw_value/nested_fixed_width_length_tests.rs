@@ -231,10 +231,13 @@ fn wrong_declared_length_is_refused_at_every_nesting_position() {
                 let body = build(&payload);
                 let err = p
                     .parse_value_from_raw_bytes(&body, &type_str, "col", 0)
-                    .expect_err(&format!(
-                        "{} at {}: a {}-byte element must be refused (Cassandra admits {} only)",
-                        t, label, w, width
-                    ));
+                    .err()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} at {}: a {}-byte element must be refused (Cassandra admits {} only)",
+                            t, label, w, width
+                        )
+                    });
                 // Which half refused is DERIVED from the direction, so a case
                 // cannot pass on the wrong one: too few bytes must fail the arm's
                 // own `require_fixed_width`, too many must fail the caller's
@@ -283,10 +286,13 @@ fn zero_length_fixed_width_element_is_refused_at_every_nesting_position() {
             let body = build(&[]);
             let err = p
                 .parse_value_from_raw_bytes(&body, &type_str, "col", 0)
-                .expect_err(&format!(
-                    "{} at {}: a 0-byte element must be refused (admits {} only)",
-                    t, label, width
-                ));
+                .err()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} at {}: a 0-byte element must be refused (admits {} only)",
+                        t, label, width
+                    )
+                });
             assert!(
                 is_width_error(&err),
                 "{} at {} (0 bytes): expected the under-width refusal, got {:?}",
@@ -454,7 +460,8 @@ fn admissible_widths_match_the_pinned_serializers() {
         );
         let over = p
             .parse_value_from_raw_bytes(&vec![0u8; width + 1], t, "col", 0)
-            .expect_err(&format!("{}: {} byte(s) must be refused", t, width + 1));
+            .err()
+            .unwrap_or_else(|| panic!("{}: {} byte(s) must be refused", t, width + 1));
         assert!(
             is_over_width_error(&over),
             "{}: {} byte(s) must fail the consumption assert, got {:?}",
@@ -467,7 +474,8 @@ fn admissible_widths_match_the_pinned_serializers() {
         if *width > 1 {
             let under = p
                 .parse_value_from_raw_bytes(&vec![0u8; width - 1], t, "col", 0)
-                .expect_err(&format!("{}: {} byte(s) must be refused", t, width - 1));
+                .err()
+                .unwrap_or_else(|| panic!("{}: {} byte(s) must be refused", t, width - 1));
             assert!(
                 is_under_width_error(&under),
                 "{}: {} byte(s) must fail require_fixed_width, got {:?}",
