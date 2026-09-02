@@ -294,7 +294,13 @@ tma_probe "perf stat --all-user -M TopdownL2" perf stat --all-user -M TopdownL2 
 for e in slots topdown-retiring topdown-fe-bound topdown-be-bound topdown-bad-spec; do
   tma_probe "event ${e}:u" perf stat -e "${e}:u" -- true
 done
-[ -s "$D/tma-probe.txt" ] || note_fail "Gate A: tma-probe.txt is empty — the step did not record its output"
+# A FINAL-RECORD SENTINEL, not `[ -s ]` (roborev job 331). Non-emptiness is
+# satisfied by a half-written file, so a truncated artefact passed the guard and
+# `VERDICT: COMPLETE` was reported with records missing. Each of the three
+# generated artefacts below now ends with a marker, and the MARKER is required.
+echo "END-OF-RECORD: tma-probe complete" >> "$D/tma-probe.txt"
+grep -q '^END-OF-RECORD: tma-probe complete$' "$D/tma-probe.txt" 2>/dev/null \
+  || note_fail "Gate A: tma-probe.txt is empty or truncated (no end-of-record marker) — the step did not fully record its output"
 
 # ------------------------------------------------------ per-event disposition
 # Four-valued. PROGRAMS is deliberately NOT called SUPPORTED: programming a
@@ -364,7 +370,9 @@ CANDIDATES=(cycles instructions
 { printf '%-52s %s\n' EVENT DISPOSITION
   for e in "${CANDIDATES[@]}"; do probe_event "$e"; printf '%-52s %s\n' "$e" "${DISP[$e]}"; done
 } > "$D/event-disposition.txt" 2>&1
-[ -s "$D/event-disposition.txt" ] || note_fail "event disposition is empty"
+echo "END-OF-RECORD: event-disposition complete" >> "$D/event-disposition.txt"
+grep -q '^END-OF-RECORD: event-disposition complete$' "$D/event-disposition.txt" 2>/dev/null \
+  || note_fail "event disposition is empty or truncated (no end-of-record marker)"
 
 # ------------------------------------------- counter-semantics (AC4, #3224 5.2)
 : > "$D/counter-semantics-verification.txt"
@@ -385,8 +393,9 @@ else
   done
 fi
 
-[ -s "$D/counter-semantics-verification.txt" ] \
-  || note_fail "counter semantics: verification file is empty — AC4's semantics record was not written"
+echo "END-OF-RECORD: counter-semantics complete" >> "$D/counter-semantics-verification.txt"
+grep -q '^END-OF-RECORD: counter-semantics complete$' "$D/counter-semantics-verification.txt" 2>/dev/null \
+  || note_fail "counter semantics: verification file is empty or truncated (no end-of-record marker) — AC4's semantics record was not fully written"
 
 # --------------------------------------------------------------- the differential
 if ! cc -O2 -std=c99 -pthread -o "$OUT/cache-hostile.bin" "$SRC" -lm 2>"$D/cache-hostile-build.txt"; then
@@ -655,17 +664,34 @@ reading() { # $1 rendered-name  $2 group  -> raw per-arm counts, no verdict
     echo "         and the [rc=]/arm-rc: lines in host/*.txt). No capability claim may"
     echo "         be derived from this run."
   fi
+  # END-OF-REPORT SENTINEL, and it is the LAST thing the block emits (roborev job
+  # 331). The previous check required a `VERDICT:` line, which the block writes
+  # BEFORE this point — so a write that failed after the verdict and before the
+  # rest (a disk filling mid-block, a mount going read-only) left a truncated
+  # report that satisfied the guard and exited 0. A sentinel emitted last is the
+  # only thing whose presence proves the block RAN TO COMPLETION.
+  echo "END-OF-REPORT: differential.txt complete"
 } > "$D/differential.txt" 2>&1
 
 # The report is the deliverable, so its WRITE is verified before success is claimed
 # (roborev job 327). `{ ... } > "$D/differential.txt"` can fail — a full disk, a
 # read-only mount, a removed directory — and the redirect's failure was invisible
 # here, so the script would print "capability probe COMPLETE" and exit 0 with no
-# report at all, or a truncated one. Checked against the terminal VERDICT line
-# rather than mere existence, because a truncated file exists too.
+# report at all, or a truncated one.
+#
+# Verified against the END-OF-REPORT SENTINEL, which the block emits LAST (roborev
+# job 331). Requiring `^VERDICT: ` was not enough: the verdict is written before the
+# block finishes, so a failure after it left a truncated report that PASSED the
+# guard. Both are required — the verdict for the reader, the sentinel for
+# completeness — because a file can hold one without the other.
 if ! grep -q '^VERDICT: ' "$D/differential.txt" 2>/dev/null; then
-  echo "PROBE-STEP-FAILED: the report $D/differential.txt is missing, unreadable or truncated (no VERDICT line)." >&2
+  echo "PROBE-STEP-FAILED: the report $D/differential.txt is missing, unreadable or has no VERDICT line." >&2
   echo "  Every step may have run, but nothing was published, so there is no result to read." >&2
+  exit 1
+fi
+if ! grep -q '^END-OF-REPORT: differential.txt complete$' "$D/differential.txt" 2>/dev/null; then
+  echo "PROBE-STEP-FAILED: the report $D/differential.txt is TRUNCATED — it carries a VERDICT but not the" >&2
+  echo "  end-of-report sentinel, so the write failed part-way through the block. Do not read its numbers." >&2
   exit 1
 fi
 if [ "$FAILED" = 0 ]; then echo "capability probe COMPLETE -> $D/"; exit 0; fi

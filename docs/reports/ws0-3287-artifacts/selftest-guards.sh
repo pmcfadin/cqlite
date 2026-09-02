@@ -68,6 +68,9 @@ mk_env() { # $1 dir
 #        SHIM_GATE_ABSURD=1                       -> gate-probe instruction counts whose
 #                                                    ratio exceeds the 100x work ratio
 #        SHIM_GATE_RATIO=<n>                      -> gate-probe ratio of exactly <n>x
+#        SHIM_RM_FAIL_PURGE=1                     -> `rm` REFUSES the stale-file purge
+#                                                    (argv mentioning /arm-) and removes
+#                                                    nothing; every other rm passes through
 args=("$@")
 if [[ " ${args[*]} " == *" --version "* ]]; then echo "perf version shim"; exit 0; fi
 if [[ " ${args[*]} " == *" list "* ]]; then
@@ -193,6 +196,23 @@ exit 0
 STUB
 chmod +x "$out"; }
 exit 0
+SHIM
+  # A deterministic `rm` that can fail the PURGE and nothing else (roborev job 331).
+  # The previous fixture made the output directory read-only, which does not stop
+  # root or CAP_DAC_OVERRIDE from unlinking — so the case FALSE-FAILED for anyone
+  # running the suite privileged. Failure is now chosen by an env var, not by the
+  # filesystem, so the case is privilege-independent. Only the purge is matched
+  # (its argv always mentions `/arm-`, whether or not the glob expanded); the
+  # probe's other rm calls -- the FIFOs, the chase binary, the event-probe CSV --
+  # pass straight through to the real rm.
+  cat > "$b/rm" <<'SHIM'
+#!/usr/bin/env bash
+REAL=/bin/rm; [ -x "$REAL" ] || REAL=/usr/bin/rm
+if [ -n "${SHIM_RM_FAIL_PURGE:-}" ] && [[ " $* " == *"/arm-"* ]]; then
+  echo "rm: cannot remove: Operation not permitted (shim)" >&2
+  exit 1
+fi
+exec "$REAL" "$@"
 SHIM
   cat > "$b/taskset" <<'SHIM'
 #!/usr/bin/env bash
@@ -405,13 +425,16 @@ else bad "stale CSVs from a previous run survived into this run's verdict" "$d";
 # ANOTHER HOST'S numbers would be reported beside this host's inventory under
 # COMPLETE. Driven for real: plant a stale CSV, make the directory read-only so the
 # unlink cannot succeed, and require a named refusal.
+# The unlink is made to fail by a SHIM, not by directory permissions (roborev job
+# 331): `chmod a-w` does not stop root or CAP_DAC_OVERRIDE, so the old fixture
+# false-FAILED for anyone running this suite privileged — a guard that reds on
+# correct input. The shim fails only the purge and is privilege-independent.
 d="$TMP/c5b"; mkdir -p "$d/out/host"
 printf '# stale\n777777777,,cycle_activity.stalls_l3_miss:u,1,100.00,,\n' > "$d/out/host/arm-hostile-2g-stalls.csv"
-chmod a-w "$d/out/host"
-rc=$(SHIM_TMA=absent run_probe "$d")
-chmod u+w "$d/out/host" 2>/dev/null
-if [ "$rc" != 0 ] && grep -q 'stale measurement files could NOT be removed' "$d/stderr.txt"; then
-  ok "unremovable stale CSV -> run REFUSES to start (job 327: rm -f's status was discarded)"
+rc=$(SHIM_TMA=absent SHIM_RM_FAIL_PURGE=1 run_probe "$d")
+if [ "$rc" != 0 ] && grep -q 'stale measurement files could NOT be removed' "$d/stderr.txt" \
+   && grep -q '777777777' "$d/out/host/arm-hostile-2g-stalls.csv" 2>/dev/null; then
+  ok "purge that FAILS -> run REFUSES to start, stale numbers still on disk (job 327 rc discarded; job 331 privilege-independent)"
 else bad "a stale file that could not be purged did not stop the run (rc=$rc)" "$d"; fi
 
 # --- 6. <not counted> is a failed measurement, not an absence --------------
