@@ -5124,6 +5124,13 @@ PYINNER
 }
 # THE TRACEBACK: a non-dict latency_ms used to reach `.get` in the print path.
 # ROUND 24 FINDING 2: a TYPE is a noun, a VALID RANGE is the property.
+# NOT ALL OF THESE ARE CAUGHT BY THE RANGE CHECK ALONE, and that is worth
+# knowing rather than assuming: negative requests_error and requests_unavailable
+# reach a verdict only because of it, while a negative requests_ok, a negative
+# rows_total, a zero concurrency and a negative latency are ALSO caught by later
+# checks. The first two are the cases that actually red when the range check is
+# removed; the rest assert a refusal that would happen anyway. Keeping them is
+# cheap and states the property per field, but they are not evidence for it.
 record_agreement_case negative-errors   'record["requests_error"] = -3'
 record_agreement_case negative-shed     'record["requests_unavailable"] = -1'
 record_agreement_case negative-ok       'record["requests_ok"] = -5'
