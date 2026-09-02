@@ -80,7 +80,7 @@ auto-disable. Every SUMMARY's `accelerators:` line now carries a trailing
 `sccache-health=` token:
 
 ```
-accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720(pinned) sccache-used=1375141619(4%)
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720 sccache-used=1375141619(4%)
 ```
 
 - `sccache-health=na`   — sccache not in use (nothing to probe).
@@ -116,30 +116,25 @@ later client can change it. Measured: with a server up, `--show-stats` reports t
 
 * raising the value has **no effect until `sccache --stop-server`** (the next compile restarts it);
 * an env var being *visible* proves nothing about the cap in force — which is why every SUMMARY now
-  carries `sccache-cap=<bytes>(<source>)` read from the running server, and why
-  `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` correlates the
-  `/etc/environment` line, the running server, **and the value seen by the two session types a gate
-  can be launched from** — a non-login PAM session and a login shell (which also runs
-  `/etc/profile.d`) — comparing every exported `SCCACHE_*` variable, not just the cap, before it
-  will say `sccache-cap: VERIFIED`. The **invoking shell is deliberately NOT compared**: under the
-  documented `sudo bash …` invocation that environment is root's, which legitimately differs from
-  the user's and produced a false `CONFLICTING-SOURCES` on correct boxes. An invoking shell that
-  disagrees with both sessions is therefore a hazard this check does **not** detect — a declared
-  gap, printed in the scope note of every verdict (#3727). Any
-  disagreement is `CONFLICTING-SOURCES`; a difference in an `SCCACHE_*` name it does not classify as
-  routing is `UNMEASURED` naming that name, never a pass on a partial match. The same rule covers
-  the **binary**: each context is asked which `sccache` it would run and the ones that HAVE one must
-  agree, or it is `CONFLICTING-SOURCES` (two installs can differ in the grammar, the default cap and
-  the server itself) — never a fall back to the one on bootstrap's own PATH, which under
-  `sudo bash …` is root's rather than the account gates run as. A context with **no** sccache is a
-  non-participant, not a disagreement: on the documented `cargo install sccache` layout a non-login
-  PAM session resolves nothing (sudo's `secure_path`), and treating that as a conflict made an
-  ordinary box non-passing. It is reported instead — a gate launched from such a context compiles
-  **uncached**, which is a different fact from running at the wrong cap. `--fix-sccache-cap` never rewrites an existing value; a box deliberately
-  running a different cap keeps it. Before writing, it also resolves **its own** fleet literal
-  through the isolated oracle and refuses to persist anything that resolves to sccache's default —
+  carries `sccache-cap=<bytes>` read from the **running server**, and why
+  `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` correlates the `/etc/environment`
+  line, the value a fresh **non-login PAM session** sees, what sccache makes of that value in
+  **bytes** (its own isolated oracle), and the **bytes the running server enforces**, before it will
+  say `sccache-cap: VERIFIED`. `--fix-sccache-cap` never rewrites an existing value; a box
+  deliberately running a different cap keeps it. Before writing, it resolves **its own** fleet
+  literal through that oracle and refuses to persist anything that resolves to sccache's default —
   a shape test cannot do that job, because a 21-digit value passes every shape rule and measures as
   the default (#3727).
+
+**One measured context, and it says so (lead ruling `req-3727-w4`).** An earlier form of this
+section compared a non-login PAM session, a login shell and (briefly) the invoking shell, and
+classified their disagreements (`CONFLICTING-SOURCES`, unclassified-routing `UNMEASURED`, binary
+agreement, non-participant contexts). That comparison layer is **removed**: ten review rounds landed
+in it, and the follow-up issue carries its state-combination knowledge. **Declared residual, and it
+is #3727's own root cause:** on this fleet a LOGIN shell can see a different value from a non-login
+PAM session (`/etc/profile.d/20-agent-ami.sh` sources `~/.agent-ami/worker-env.sh` AFTER `pam_env`
+applies `/etc/environment`), and nothing now measures that context — so a `VERIFIED` is a statement
+about the non-login session that was measured, which is what the verdict's own scope note says.
 
 A third fact, measured while building that check and worth knowing before you read any
 `--show-stats` output: **with NO server running, `--show-stats` does not start one** (nothing listens
@@ -159,48 +154,28 @@ gate token and `--fix-sccache-cap` decide attribution that way.
 ### `sccache-cap=` / `sccache-used=` on the accelerators line (issue #3727)
 
 ```
-accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720(pinned) sccache-used=1375141619(4%) mold=linked perf=ok
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720 sccache-used=1375141619(4%) mold=linked perf=ok
 ```
 
-- `sccache-cap=<bytes>(pinned)` — the env value is set, accepted, and **enforced by the running
-  server**.
-- `…(default)` — the var is UNSET and the server is at sccache's own default. On a fleet box, read
-  this as *the cap is not provisioned* — the #3414 reading, one variable over.
-- `…(inherited)` — the var is UNSET and the server enforces a non-default cap: whoever started it
-  chose that value.
-- `…(stale)` — the var is set and valid but the server enforces something else. **Remedy
-  `sccache --stop-server`**, not editing the value.
-- `…(invalid)` — sccache discards the value **syntactically** (see the grammar table above) **and**
-  the running server enforces exactly that fallback, so the value is having no effect. A value that
-  is *shaped* like a cap but too large for the shell to work out is **not** called invalid — sccache
-  does not uniformly discard those (measured: 21 digits falls back to the default, 19 digits WRAPS
-  and is accepted), so it reports `(unattributed)` instead of a state nobody established (#3727). Fix the value, then
-  `sccache --stop-server`.
-- `…(invalid-stale)` — TWO faults: sccache discards the value **and** the running server enforces
-  something that is neither the fallback nor derived from it. **Fix the value FIRST** — stopping the
-  server on its own replaces the enforced cap with sccache's default, which *lowers* it when the
-  running cap is above the default and *raises* it when below; the WARN computes which. (Env-value
-  validity and running-server provenance are independent axes; one label for both would invent a
-  causal link and invert the remedy — #3727.)
-- `…(unattributed)` — the provenance could not be established, so this is the cap that *will* apply
-  rather than one proven to be in force. Two causes: the attribution differential did not show that
-  a *running* server answered (the reading moved with the client's env, or the second read failed) —
-  most commonly no server is up yet — or **sccache's own default cap could not be measured**, which
-  the `default`/`inherited`/`invalid` labels are stated relative to (`pinned` and `stale` compare the
-  configured value against the enforced cap, so they are still produced without it). There is
-  deliberately no hardcoded default: this fleet
-  installs sccache unversioned, and a constant would mislabel `default` as `inherited` on a build
-  whose default differs (#3727).
-- `unmeasured(<why>)` / `na(sccache-not-in-use)` — no reading was taken. A positive verdict requires
-  an affirmative measurement, so these never render as `0` or blank.
-- `sccache-used=<bytes>(<N>%)` — occupancy and fill against the enforced cap; `>= 95%` also emits a
-  LOUD `WARN:` that the cache is **at/near capacity and therefore at RISK of evicting** objects a
-  later gate would have hit. Its remedy is **source-aware**: for a `stale` server whose configured
-  value is already larger it says *restart, do not edit the value* (the same advice as the `stale`
-  WARN beside it, rather than contradicting it); "raise the value" is reserved for the caps that are
-  genuinely too small (#3727). It does **not** claim eviction is happening: sccache exposes no eviction
-  counter, so that would be an inference, not a measurement (#3727 — this issue's own title made
-  exactly that inference). `(cap-zero)` where the cap is 0.
+Both tokens report **measured bytes**, and nothing else. There is deliberately **no provenance
+classifier**: the 7-state suffix (`pinned`/`default`/`inherited`/`stale`/`invalid`/`invalid-stale`/
+`unattributed`), the value-grammar map that computed it, the probed default and the four
+remediation `WARN`s were **removed** by lead ruling `req-3727-w4` — reporting stays, interpreting
+goes. Read the number, and read `sccache-cap: VERIFIED` from
+`bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` for the correlation.
+
+- `sccache-cap=<bytes>` — the cap the **running server** enforces, in bytes.
+- `sccache-cap=unmeasured(<why>)` — **no cap may be claimed.** The two attribution causes are the
+  ones to know: `no-running-server` (a number WAS read and the differential proved it was the
+  client's own environment) and `unattributed` (the differential could not be taken). The rest are
+  read failures: `no-binary`, `no-stats`, `unparsed`, `not-unique`, `no-size`.
+- `sccache-cap=na(sccache-not-in-use)` — sccache is not in use on this box, the same input
+  `sccache-health` renders `na` for.
+- `sccache-used=<bytes>(<N>%)` — occupancy, and the fill against the enforced cap. `(cap-zero)`
+  where the cap is a legal 0; `pct-<why>` where the occupancy is real but the ratio is not
+  available. It does **not** claim eviction is happening: sccache exposes no eviction counter, so
+  that would be an inference, not a measurement (#3727 — this issue's own title made exactly that
+  inference), and the near-capacity WARN that used to say so is gone with the rest of the advice.
 
 **`sccache-health` cannot answer any of this.** It is the sum of four ERROR counters with **no**
 capacity, occupancy or eviction input, so a `warn` there can never be cleared by raising the cap, and
@@ -241,7 +216,7 @@ Every SUMMARY block (full **and** `--lite`) carries a **machine-checkable
 scrollback:
 
 ```
-accelerators: sccache=on nextest=absent lanes=serial sccache-health=ok sccache-cap=32212254720(pinned) sccache-used=1375141619(4%)
+accelerators: sccache=on nextest=absent lanes=serial sccache-health=ok sccache-cap=32212254720 sccache-used=1375141619(4%)
 ```
 
 State values: `on` (detected & used) · `absent` (missing → WARN) · `off`
@@ -267,7 +242,7 @@ ld-prime is already the fastest linker on macOS, so a permanent `n/a` token woul
 churn every existing summary parser for zero signal):
 
 ```
-accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720(pinned) sccache-used=1375141619(4%) mold=linked
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720 sccache-used=1375141619(4%) mold=linked
 ```
 
 State values (Linux only):
@@ -303,7 +278,7 @@ After `mold=`, a Linux `accelerators:` line carries a `perf=` token answering *c
 box be profiled at all?*
 
 ```
-accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720(pinned) sccache-used=1375141619(4%) mold=linked perf=ok
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok sccache-cap=32212254720 sccache-used=1375141619(4%) mold=linked perf=ok
 ```
 
 It is a **free** read of `/proc/sys/kernel/{perf_event_paranoid,kptr_restrict}` through

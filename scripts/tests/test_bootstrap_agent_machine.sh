@@ -4449,14 +4449,18 @@ else
   fi
   # The scope note must state what VERIFIED does NOT cover — an unqualified VERIFIED reads as
   # "every gate on this box gets this cap", and the server-startup caveat is the new one.
-  if out_has "$scc_sl_v" 'scope:.*NON-LOGIN PAM session.*LOGIN shell' \
-     && out_has "$scc_sl_v" 'scope:.*INVOKING shell.*NOT compared' \
+  # SINCE THE RULING the note declares ONE measured session type and the login shell as a
+  # DECLARED RESIDUAL rather than a compared context — and the residual is the assertion that
+  # matters, because an unqualified VERIFIED would now cover a launch path nothing measured.
+  if out_has "$scc_sl_v" 'scope:.*ONE session type.*NON-LOGIN PAM session' \
+     && out_has "$scc_sl_v" 'scope:.*LOGIN shell additionally runs /etc/profile.d' \
+     && out_has "$scc_sl_v" 'scope:.*does not measure that context' \
      && out_has "$scc_sl_v" 'scope:.*SERVER at STARTUP' \
      && out_has "$scc_sl_v" 'scope:.*provenance is not' \
-     && out_has "$scc_sl_v" 'sccache-cap=<bytes>(pinned)'; then
-    ok "sccache-cap: VERIFIED prints its scope — both session types measured, the invoking shell DECLARED as not compared, server-startup lifetime, unproven provenance, and the gate's own token as per-run authority"
+     && out_has "$scc_sl_v" 'sccache-cap=<bytes>'; then
+    ok "sccache-cap: VERIFIED prints its scope — the ONE session type measured, the login shell DECLARED as unmeasured, server-startup lifetime, unproven provenance, and the gate's own token as per-run authority"
   else
-    bad "sccache-cap: the scope note is missing one of its three statements"
+    bad "sccache-cap: the scope note is missing a statement, or still claims a context this section no longer measures"
     printf '%s\n' "$scc_sl_v" | grep 'scope:' | head -4
   fi
 
@@ -4474,15 +4478,18 @@ else
   #        the bare form.
   scc_out_nh=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=10737418240 SCC_STUB_LOG="$scc_log")
   scc_sl_nh=$(scc_slice "$scc_out_nh")
+  # THE REMEDY TEXT IS GONE (lead ruling req-3727-w4) and this case now asserts its ABSENCE
+  # alongside the verdict: the two byte counts ARE the finding, and which server to stop in which
+  # context was the interpretation layer the ruling removed. Asserted the other way round so
+  # nobody reinstates it by reflex.
   if out_has "$scc_sl_nh" -E '\[warn\].*sccache-cap: NOT-HONOURED' \
-     && out_has "$scc_sl_nh" -E 'remedy: +sudo -n -u .*--stop-server' \
-     && out_has "$scc_sl_nh" -E "remedy: +sudo .*$scc_shims_v/sccache --stop-server" \
-     && ! out_has "$scc_sl_nh" -E 'remedy: +sccache --stop-server' \
+     && out_has "$scc_sl_nh" '10737418240 bytes' \
+     && ! out_has "$scc_sl_nh" 'remedy' \
      && ! out_has "$scc_sl_nh" -E '\[ok\].*sccache-cap' \
      && ! out_has "$scc_sl_nh" 'fix the VALUE'; then
-    ok "sccache-cap: a stale server is NOT-HONOURED whose remedy stops THE MEASURED server (probed user + agreed binary + --stop-server), never the bare form and never editing the value"
+    ok "sccache-cap: a stale server is NOT-HONOURED naming BOTH byte counts, and prints no remedy text at all"
   else
-    bad "sccache-cap: the stale-server state did not report NOT-HONOURED with the stop-server remedy"
+    bad "sccache-cap: the stale-server state did not report NOT-HONOURED with both byte counts (or an advice layer is back)"
     printf '%s\n' "$scc_sl_nh" | head -6
   fi
 
@@ -4651,27 +4658,6 @@ else
     printf '%s\n' "$scc_pre_src" | head -8
   fi
 
-  # 12b-f2. THE BINARY IS PART OF THE OBJECT (issue #3727 roborev round 6, f1). Round 3 moved the
-  #         ROUTING into the measured session and kept the binary ours; "ours" is bootstrap's ambient
-  #         PATH, which under `sudo bash bootstrap` is ROOT's — so the section could ask one sccache
-  #         about a cap and start or verify a server with it while gates run another. Two contexts
-  #         running different binaries can differ in the grammar, the default cap AND the server, so
-  #         a disagreement is the same class as a value disagreement and gets the same verdict.
-  scc_altbin="$tmp/scc-altbin"; mkdir -p "$scc_altbin"
-  mk_stub "$scc_altbin" sccache "$scc_stub_body"
-  scc_out_bin=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G \
-    SCC_STUB_MAX=32212254720 SCC_SHIM_LOGIN_BIN="$scc_altbin" SCC_STUB_LOG="$scc_log")
-  scc_sl_bin=$(scc_slice "$scc_out_bin")
-  if out_has "$scc_sl_bin" -E '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
-     && out_has "$scc_sl_bin" 'would run DIFFERENT ones' \
-     && out_has "$scc_sl_bin" "$scc_altbin/sccache" \
-     && ! out_has "$scc_sl_bin" -E '\[ok\].*sccache-cap'; then
-    ok "sccache-cap: contexts that would run DIFFERENT sccache binaries are CONFLICTING-SOURCES, naming both paths"
-  else
-    bad "sccache-cap: a binary disagreement was resolved by picking one, or not reported"
-    printf '%s\n' "$scc_sl_bin" | head -6
-  fi
-
   # 12b-f2b. TWO PROBES MUST NOT AGREE BY SHARING OUR CONTAMINATION (roborev job 399, f2). The
   #          scrub before each session used to NAME three variables, leaving SCCACHE_REDIS /
   #          SCCACHE_CONF / SCCACHE_WEBDAV_* / any FUTURE SCCACHE_* in the caller's environment. If
@@ -4741,33 +4727,6 @@ else
   else
     bad "sccache-cap: $scc_sess_n session invocation(s) found, and one carries no blanket scrub — the caller's routing reaches a session probe, a read or a start:"
     printf '%s\n' "${scc_sess_bad:-  (no invocation found at all — the derivation broke, which is not a pass)}"
-  fi
-
-  # 12b-f3. A CONTEXT WITH NO SCCACHE IS A NON-PARTICIPANT, NOT A VETO (issue #3727 roborev round 7,
-  #         f1 — and round 6's fix, as first written, broke exactly this box). `cargo install sccache`
-  #         lands in the user's Cargo bin directory and sudo replaces PATH with `secure_path`, so on
-  #         the DOCUMENTED Linux install the non-login PAM session resolves nothing while the
-  #         invoking shell and the login shell both resolve the same binary. Requiring all three to
-  #         agree made that ordinary box UNMEASURED and refused persistence — red on correct input.
-  #         It must VERIFY, and it must SAY that one context cannot run sccache at all, because a
-  #         gate launched from there compiles uncached whatever the cap says.
-  scc_out_nobin=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G \
-    SCC_STUB_MAX=32212254720 SCC_SHIM_NONLOGIN_NOBIN=1 SCC_STUB_LOG="$scc_log")
-  scc_sl_nobin=$(scc_slice "$scc_out_nobin")
-  if out_has "$scc_sl_nobin" -E '\[ok\].*sccache-cap: VERIFIED' \
-     && [ "$(scc_warns "$scc_sl_nobin")" = 0 ]; then
-    ok "sccache-cap: a box whose non-login PAM session has no sccache (the cargo-install shape) still VERIFIES — a missing binary is not a disagreement"
-  else
-    bad "sccache-cap: the cargo-install shape was refused (round 6's guard reds on correct input again)"
-    printf '%s\n' "$scc_sl_nobin" | head -8
-  fi
-  if out_has "$scc_sl_nobin" 'no sccache is on the PATH of' \
-     && out_has "$scc_sl_nobin" 'non-login-PAM' \
-     && out_has "$scc_sl_nobin" 'UNCACHED'; then
-    ok "sccache-cap: the non-participant context is REPORTED by name, with what it costs (an uncached gate), rather than passing silently"
-  else
-    bad "sccache-cap: a context that cannot run sccache at all was not reported"
-    printf '%s\n' "$scc_sl_nobin" | grep -i 'binary\|scope' | head -3
   fi
 
   # 12b-g2. A FRESH PROVISIONED BOX: NO SERVER YET, AND THE SECTION BECOMES THE FIRST STARTER
@@ -4850,15 +4809,14 @@ else
     SCC_STUB_LOG="$scc_log_race" --fix-sccache-cap)
   scc_sl_race=$(scc_slice "$scc_out_race")
   if out_has "$scc_sl_race" -E '\[warn\].*sccache-cap: NOT-HONOURED' \
-     && out_has "$scc_sl_race" -E 'remedy: +sudo -n -u .*--stop-server' \
-     && out_has "$scc_sl_race" 'lost race' \
+     && out_has "$scc_sl_race" 'a start was attempted' \
      && ! out_has "$scc_sl_race" 'THIS RUN STARTED' \
      && ! out_has "$scc_sl_race" 'sccache-level inconsistency' \
      && ! out_has "$scc_sl_race" -E '\[ok\].*sccache-cap' \
      && grep -q -- '--start-server' "$scc_log_race"; then
-    ok "sccache-cap: a LOST start race (the start WAS attempted, another cap answered) is reported as one, does NOT claim ownership, and still prints the stop-server remedy"
+    ok "sccache-cap: a LOST start race (the start WAS attempted, another cap answered) is REPORTED as the measured fact and does NOT claim ownership"
   else
-    bad "sccache-cap: a lost start race claimed ownership or suppressed the stale-server remedy"
+    bad "sccache-cap: a lost start race claimed ownership, or the attempt was not reported"
     printf '%s\n' "$scc_sl_race" | head -8
   fi
 
@@ -4896,79 +4854,6 @@ else
   else
     bad "sccache-cap: a live server was restarted or stopped, or the verdict was not NOT-HONOURED"
     printf '%s\n' "$(scc_slice "$scc_out_live")" | head -6; cat "$scc_log_live" | head -3
-  fi
-
-  # 12b-q. CONFLICTING-SOURCES OUTRANKS VERIFIED (issue #3727 round 3, and the ROOT CAUSE of the
-  #        whole issue). MEASURED on box3: a login shell saw 30G (from ~/.agent-ami/worker-env.sh,
-  #        sourced by /etc/profile.d/20-agent-ami.sh) while a non-login PAM session saw 50G (from
-  #        /etc/environment) — profile.d runs AFTER pam_env, so the profile WINS for a login shell,
-  #        which is the dominant launch path on this fleet. This case is deliberately set up so
-  #        EVERY OTHER FACT WOULD VERIFY (the file, the non-login session and the running server all
-  #        agree on 30G): only the login shell disagrees, so a section that certified on one session
-  #        would print [ok] here. That is the false certification, and it must be a warn instead.
-  scc_log_conf="$tmp/scc-stub-argv-conflict.log"; : >"$scc_log_conf"
-  scc_out_conf=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 \
-    SCC_SHIM_LOGIN_VALUE=40G SCC_STUB_LOG="$scc_log_conf" --fix-sccache-cap)
-  scc_sl_conf=$(scc_slice "$scc_out_conf")
-  if out_has "$scc_sl_conf" -E '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
-     && out_has "$scc_sl_conf" "'30G'" \
-     && out_has "$scc_sl_conf" "'40G'" \
-     && ! out_has "$scc_sl_conf" -E '\[ok\].*sccache-cap'; then
-    ok "sccache-cap: a login shell disagreeing with a non-login session is CONFLICTING-SOURCES naming BOTH values — even when every other fact would VERIFY"
-  else
-    bad "sccache-cap: two session types disagreed and the section still certified (or did not name both values)"
-    printf '%s\n' "$scc_sl_conf" | head -6
-  fi
-  # It must also point at the mechanism and at a source hunt that DECLARES its own
-  # non-exhaustiveness: the reason this went unnoticed is that /etc/profile.d/20-agent-ami.sh
-  # contains no `SCCACHE_CACHE_SIZE` string at all — it only SOURCES the file that does.
-  if out_has "$scc_sl_conf" 'profile.d' \
-     && out_has "$scc_sl_conf" 'NOT exhaustive' \
-     && out_has "$scc_sl_conf" 'grep -rn SCCACHE_CACHE_SIZE'; then
-    ok "sccache-cap: the conflict names the profile.d mechanism and prints a source hunt declared NON-exhaustive"
-  else
-    bad "sccache-cap: the conflict verdict does not tell the operator where to look"
-    printf '%s\n' "$scc_sl_conf" | head -8
-  fi
-  # And it must not start a server while the answer is ambiguous: which cap would it use?
-  if ! grep -qE -- '--start-server|--stop-server' "$scc_log_conf"; then
-    ok "sccache-cap: no server is started or stopped while the sources conflict (there is no single value to start it with)"
-  else
-    bad "sccache-cap: a server was started/stopped under conflicting sources"
-    cat "$scc_log_conf" | head -3
-  fi
-
-  # 12b-r. THE SAME DISEASE ONE VARIABLE OVER: agreeing caps, DISAGREEING ROUTING. If the two
-  #        session types resolve SCCACHE_DIR differently they contact different servers, so a cap
-  #        verified against one says nothing about the other — the round-2 finding (verify one
-  #        object, certify another) reappearing through the round-3 door. On box3 SCCACHE_DIR
-  #        escaped the conflict only because both files happen to carry the same value.
-  scc_out_rconf=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 \
-    SCC_SHIM_LOGIN_DIR=/some/other/cache SCC_STUB_LOG="$scc_log_conf" --fix-sccache-cap)
-  scc_sl_rconf=$(scc_slice "$scc_out_rconf")
-  if out_has "$scc_sl_rconf" -E '\[warn\].*sccache-cap: CONFLICTING-SOURCES' \
-     && out_has "$scc_sl_rconf" 'ROUTING' \
-     && out_has "$scc_sl_rconf" '/some/other/cache' \
-     && ! out_has "$scc_sl_rconf" -E '\[ok\].*sccache-cap'; then
-    ok "sccache-cap: agreeing caps with disagreeing ROUTING is also CONFLICTING-SOURCES, naming the other cache"
-  else
-    bad "sccache-cap: a routing disagreement did not block certification"
-    printf '%s\n' "$scc_sl_rconf" | head -6
-  fi
-
-  # 12b-s. AN UNMEASURABLE LOGIN SESSION MAY ONLY WEAKEN A POSITIVE CLAIM. The login shell is the
-  #        launch path that matters on this fleet, so failing to measure it cannot fall back to the
-  #        non-login answer — that is the single-session certification this round removed.
-  scc_out_lfail=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 \
-    SCC_SHIM_LOGIN_FAIL=1 --fix-sccache-cap)
-  scc_sl_lfail=$(scc_slice "$scc_out_lfail")
-  if out_has "$scc_sl_lfail" -E '\[warn\].*sccache-cap: UNMEASURED' \
-     && out_has "$scc_sl_lfail" 'LOGIN-shell session could not be measured' \
-     && ! out_has "$scc_sl_lfail" -E '\[ok\].*sccache-cap'; then
-    ok "sccache-cap: an unmeasurable LOGIN session is UNMEASURED, never a fall back to the non-login answer"
-  else
-    bad "sccache-cap: an unmeasurable login session was silently ignored"
-    printf '%s\n' "$scc_sl_lfail" | head -6
   fi
 
   # 12b-h. THE ISOLATION ASSERT, which is the single most important line in the section: if the

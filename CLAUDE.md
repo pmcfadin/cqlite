@@ -762,32 +762,36 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `/etc/environment` by hand. Bootstrap says the same thing at the same fork, as
   `gate-pin: NOT-HONOURED`.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, the two #3727 sccache
-  capacity tokens
-  `sccache-cap=<bytes>(pinned|default|inherited|stale|invalid|invalid-stale|unattributed)` +
-  `sccache-used=<bytes>(<N>%)`, plus a `mold=` token and
+  capacity tokens `sccache-cap=<bytes>` + `sccache-used=<bytes>(<N>%)`, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a
   PERMISSION verdict, not a missing capability): re-run `bash scripts/bootstrap-agent-machine.sh
   --yes`, which installs + verifies `/etc/sysctl.d/99-cqlite-perf.conf`. Self-test:
   `bash scripts/tests/test_agent_gate_summary.sh`.
-  **`sccache-health` is an ERROR-COUNTER token, NOT a capacity one (#3727)** — it is the sum of four
-  failure counters with no occupancy input, so a `warn` there can NEVER be cleared by raising the
-  cap and a full, thrashing cache reads `ok`. `sccache-cap=…(stale)` means the RUNNING SERVER
-  predates the value (remedy `sccache --stop-server`, never editing the value: sccache reads
-  `SCCACHE_CACHE_SIZE` once, at server startup); `…(default)` on a fleet box means the cap is not
-  provisioned, the #3414 reading one variable over; `…(invalid-stale)` means BOTH that the value
-  is discarded AND that the running cap is not its fallback, where the remedy INVERTS (fix the
-  value FIRST — a bare `--stop-server` there REPLACES the enforced cap with sccache's default,
-  which LOWERS it when the running cap is above the default and RAISES it when below; the WARN
-  computes which); `…(unattributed)` means no RUNNING server was
-  proven to enforce the number — measured, a client with no server answers `max_cache_size` from its
-  OWN env, and **a null `cache_size` does NOT distinguish the two** (a running server with an empty
-  cache reports null as well), so attribution is a DIFFERENTIAL: a running server's answer does not
-  move when the client's `SCCACHE_CACHE_SIZE` changes, a client's does. Measured trap: `30G` is 30 GiB but **`30GiB`
-  and `30GB` are SILENTLY DISCARDED** to the 10 GiB default and a bare integer means BYTES, with
-  no diagnostic anywhere — `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap` persists
-  and VERIFIES the value against a fresh profile-free session AND the running server (only
-  VERIFIED is an `[ok]`; the value->bytes map is asked of an ISOLATED sccache, never reimplemented).
+  **The two capacity tokens report MEASURED BYTES AND NOTHING ELSE (#3727, lead ruling
+  `req-3727-w4`: keep what is MEASURED, remove what is CLASSIFIED or ADVISED).** An earlier form
+  appended a 7-state provenance suffix
+  (`pinned|default|inherited|stale|invalid|invalid-stale|unattributed`), reimplemented sccache's
+  value grammar to compute it, probed sccache's own default, and emitted four remediation WARNs;
+  all of it is REMOVED, and its state-combination knowledge lives in the follow-up issue instead of
+  in code. **The one honesty that stays is a measurement, not a classification** — two states,
+  measured or not: sccache reads `SCCACHE_CACHE_SIZE` ONCE, at server startup, `--show-stats` NEVER
+  STARTS a server, and with no server the CLIENT answers `max_cache_size` from its OWN env, so a
+  number is a cap in force only if a RUNNING server produced it. **A null `cache_size` does NOT
+  distinguish the two** (a running server with an empty cache reports null as well), so attribution
+  is a DIFFERENTIAL: read the cap twice, the second time with a sentinel — a running server's answer
+  does not move, a client's does. Unattributed renders `unmeasured(no-running-server)` or
+  `unmeasured(unattributed)`, **never a byte count**. **`sccache-health` cannot answer any of this**
+  — it is the sum of four ERROR counters with no occupancy input, so a `warn` there can NEVER be
+  cleared by raising the cap and a full, thrashing cache reads `ok`. Measured trap: `30G` is 30 GiB
+  but **`30GiB` and `30GB` are SILENTLY DISCARDED** to the 10 GiB default and a bare integer means
+  BYTES, with no diagnostic anywhere — `bash scripts/bootstrap-agent-machine.sh --fix-sccache-cap`
+  persists the value and VERIFIES it by correlating the `/etc/environment` line, the value a fresh
+  non-login PAM session sees, that value in BYTES (asked of an ISOLATED sccache, never
+  reimplemented) and the BYTES the running server enforces (only VERIFIED is an `[ok]`).
+  **Declared residual:** a LOGIN shell can see a different value (on this fleet `/etc/profile.d`
+  runs after `pam_env` — #3727's own root cause) and that context is no longer measured, so the
+  verdict is scoped to the non-login session in its own scope note.
 
 ## Core Commands
 
