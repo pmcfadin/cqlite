@@ -34,12 +34,12 @@
 //! the value deserializer is follow-up #2339. The opaque/scalar choice branches
 //! on the DECLARED schema type only (no guessing).
 //!
-//! ONE decodable scalar — `inet` (`InetAddressType`) — has a serialized `cell_path`
-//! form that IS unconditionally unsigned-byte-comparable, so it is ordered by raw
-//! `cell_path` bytes rather than decoded ([`comparator_orders_by_raw_cell_path_bytes`],
-//! roborev 1631/1632). `time` was also listed there and was REMOVED (#3790): raw
-//! bytes disagree with its signed comparator for an out-of-range negative, so it is
-//! now decoded and sorted like any other scalar.
+//! Two decodable scalars — `inet` (`InetAddressType`) and `time` (`TimeType`) —
+//! have serialized `cell_path` forms that ARE unsigned-byte-comparable, so they
+//! are ordered by raw `cell_path` bytes rather than decoded and routed through
+//! the scalar comparator ([`comparator_orders_by_raw_cell_path_bytes`], roborev
+//! 1631/1632). The scalar comparator used to order them by FORMATTED string;
+//! since #3790 it agrees, so raw-byte order stays equivalent and cheaper.
 //!
 //! Tombstone handling follows Cassandra SELECT semantics (issue #1742: SELECT
 //! output is the read-path authority), NOT the single-generation reader's
@@ -328,10 +328,10 @@ fn cell_path_bytes(cell: &CellData) -> &[u8] {
 /// The Set/Map callers now FAIL CLOSED on an opaque composite element/key before
 /// reaching here (see [`composite_collection_unsupported`], #2339), so in practice
 /// `cmp` is always a scalar. Two scalar shapes:
-///   * An `inet` comparator ([`comparator_orders_by_raw_cell_path_bytes`]) orders by
-///     raw `cell_path` byte comparison — its serialized form's unsigned byte order
-///     IS its Cassandra order, unconditionally (roborev 1631/1632). `time` was here
-///     until #3790; see that predicate for why it was removed.
+///   * A `inet`/`time` comparator ([`comparator_orders_by_raw_cell_path_bytes`])
+///     orders by raw `cell_path` byte comparison — its serialized form's unsigned
+///     byte order IS its Cassandra order (roborev 1631/1632; the scalar comparator
+///     mis-ordered these by formatted string until #3790).
 ///   * Any other scalar decodes each `cell_path` to a `Value` and orders by the
 ///     type comparator (e.g. signed-int order != raw byte order), surfacing any
 ///     genuine decode error (wrong-width scalar) rather than masking it.
@@ -397,24 +397,27 @@ fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
 /// comparison of the `cell_path`, so the raw bytes can be compared directly with
 /// no decode round-trip.
 ///
-/// True when the element/key `cell_path` can be ordered by RAW BYTES, skipping the
-/// decode round-trip (roborev 1631/1632). `inet` ONLY: `Value::Inet` holds the raw
-/// address and its comparator is `[u8]::cmp` over those same bytes, so shortcut and
-/// comparator are UNCONDITIONALLY equivalent for any input.
-///
-/// `time` was listed here and was REMOVED (#3790): its entry assumed nanos are
-/// "always non-negative, so byte order == numeric order", which NOTHING enforces, so
-/// a negative sorts ABOVE non-negatives by raw bytes and below by the signed
-/// comparator. Not a perf trade — an optimisation whose equivalence premise was
-/// false. Measurement: `types::comparator::custom`; validation is #3920.
+/// The two decodable `Custom` names — `inet` and `time` — are the ONLY declared
+/// scalar types in this sort path without a dedicated [`ComparatorType`] arm.
+/// Both have a canonical serialized form whose UNSIGNED byte order equals their
+/// Cassandra order, and the element/key `cell_path` IS that serialized form, so
+/// ordering by raw `cell_path` bytes matches Cassandra exactly and needs no
+/// decode round-trip (roborev 1631/1632). Until #3790 the scalar `Custom` arm
+/// ordered them by FORMATTED string, diverging from a single-generation
+/// `SELECT`; this path was — and remains — correct either way:
+///   * `inet` (`InetAddressType`): raw address bytes, e.g. `9.0.0.1` = `[9,0,0,1]`
+///     precedes `10.0.0.1` = `[10,0,0,1]` (formatted-string order is the reverse).
+///   * `time` (`TimeType`): 8-byte big-endian nanoseconds-of-day, always
+///     non-negative, so byte order == numeric order (formatted `HH:MM:...` string
+///     order misorders, e.g. any value whose text form sorts against its magnitude).
 ///
 /// Branches on the DECLARED type only (no-heuristics, issue #28); recurses through
-/// `Frozen` defensively though `inet` is never frozen here.
+/// `Frozen` defensively though neither inet nor time is ever frozen here.
 #[cfg(feature = "write-support")]
 fn comparator_orders_by_raw_cell_path_bytes(cmp: &ComparatorType) -> bool {
     match cmp {
         ComparatorType::Frozen(inner) => comparator_orders_by_raw_cell_path_bytes(inner),
-        ComparatorType::Custom(name) => name == "inet",
+        ComparatorType::Custom(name) => name == "inet" || name == "time",
         _ => false,
     }
 }
@@ -485,10 +488,6 @@ fn last_value(elements: Vec<CellData>) -> Value {
 }
 
 #[cfg(all(test, feature = "write-support"))]
-#[path = "read_assembly_time_order_tests.rs"]
-mod time_order_tests;
-
-#[cfg(all(test, feature = "write-support"))]
 mod tests {
     use super::*;
     use crate::schema::{Column, KeyColumn, TableSchema};
@@ -526,9 +525,9 @@ mod tests {
                 // Blob + raw-byte-order path.
                 col("fset", "set<frozen<addr_type>>"),
                 col("ftk", "map<frozen<tuple<int, text>>, bigint>"),
-                // inet/time element ordering (roborev 1631/1632, #3790): the scalar
-                // comparator ordered both by FORMATTED string until #3790. inet sorts by
-                // raw bytes here; time is decoded and sorted signed (see #3790).
+                // inet/time element ordering (roborev 1631/1632): InetAddressType /
+                // TimeType order by raw serialized bytes, which the scalar comparator
+                // contradicted with a formatted-string order until #3790.
                 col("iset", "set<inet>"),
                 col("tset", "set<time>"),
             ],
@@ -658,17 +657,18 @@ mod tests {
     }
 
     #[test]
-    fn set_of_time_orders_by_value_not_formatted_string() {
-        // set<time>: cell_path is the 8-byte big-endian nanoseconds-of-day. Since #3790
-        // this path DECODES it and orders via Custom("time") (signed); before #3790 the
-        // scalar comparator used FORMATTED-string order ("TIME(HH:MM:SS.nnn)").
-        // NOTE the value choice, which is subtle: fmt_time zero-pads every field, so for
-        // every VALID time (hours <= 23) string order and numeric order COINCIDE and no
-        // in-range pair can show the divergence. 100h is DELIBERATELY OUT OF RANGE — it
-        // widens the hours field, and "TIME(100:..." then sorts BEFORE "TIME(10:..."
-        // ('0' < ':'), the REVERSE of numeric order. Both values are positive, so signed
-        // and raw-byte order agree here; the negative case (where they do NOT) is pinned
-        // in read_assembly_time_order_tests.rs. Arrive out of order to prove the sort runs.
+    fn set_of_time_orders_by_raw_bytes_not_formatted_string() {
+        // set<time>: cell_path is the 8-byte big-endian nanoseconds-of-day; Cassandra's
+        // TimeType orders by that raw long (non-negative → byte order == numeric order).
+        // Until #3790 the scalar Custom("time") comparator instead used a
+        // FORMATTED-string order ("TIME(HH:MM:SS.nnn)"), which — because the hours
+        // field is only zero-padded to two digits — diverges from numeric order once
+        // the hours magnitude changes digit-width. 10h vs 100h: the string
+        // "TIME(100:..." sorts BEFORE "TIME(10:..." ('0' < ':'), the REVERSE of numeric
+        // order, so a multi-SSTable set would mis-order pre-fix. (Valid times-of-day
+        // happen to coincide under the current Display; ordering by the raw cell_path
+        // bytes is the robust, parity-correct rule and closes that class here,
+        // roborev 1632.) Arrive out of order to prove the sort runs.
         let t_small = 36_000_000_000_000i64; // 10h in ns
         let t_big = 360_000_000_000_000i64; // 100h in ns
         let cells = vec![
@@ -679,8 +679,8 @@ mod tests {
         assert_eq!(
             get(&out, "tset"),
             Some(&Value::Set(vec![Value::Time(t_small), Value::Time(t_big)])),
-            "set<time> must order by nanos VALUE (10h before 100h), not the \
-             reversed formatted-string order"
+            "set<time> must order by the raw big-endian long (10h before 100h), \
+             not the reversed formatted-string order"
         );
     }
 

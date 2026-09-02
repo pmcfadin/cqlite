@@ -23,15 +23,6 @@
 //! `ComparisonType.BYTE_ORDER` resolves to `ByteBufferUtil.compareUnsigned`:
 //! UNSIGNED lexicographic comparison of the serialized bytes, with the shorter
 //! operand first where it is a prefix of the longer.
-//!
-//! `inet` implements that literally (`[u8]::cmp` IS `compareUnsigned`). **`time`
-//! does NOT, deliberately**: it compares the nanos SIGNED, which is identical to
-//! byte order for every value Cassandra can produce (the valid range is
-//! non-negative) and which agrees with `Value`'s own `PartialOrd`, the ordering
-//! the writer/memtable paths use. See `compare_time` for the measured reason and
-//! issue #3920, which owns unifying validation and ordering. Stated here so the
-//! authority citations above are not read as a claim about what this module does
-//! for `time`.
 
 use crate::types::Value;
 use crate::{Error, Result};
@@ -81,39 +72,35 @@ fn compare_inet(left: &Value, right: &Value) -> Result<Ordering> {
     }
 }
 
-/// `time`: SIGNED comparison of the nanos-since-midnight long.
+/// `time`: comparison of the 8-byte BIG-ENDIAN nanos-since-midnight long, as
+/// unsigned bytes — `TimeType`'s `super(ComparisonType.BYTE_ORDER)`.
 ///
-/// Cassandra's `TimeType` is `super(ComparisonType.BYTE_ORDER)` over the 8-byte
-/// big-endian long (pinned `cassandra-5.0.8`), and over `time`'s VALID range
-/// (`0..=86_399_999_999_999`) every value is non-negative, so byte order,
-/// unsigned order and signed order all COINCIDE. For every value Cassandra can
-/// produce, this IS Cassandra's order.
+/// This is deliberately NOT a plain signed `i64::cmp`. Over `time`'s valid
+/// range (`0..=86_399_999_999_999`) every value is non-negative, so byte order,
+/// unsigned order and signed numeric order all coincide and this IS numeric
+/// order. They diverge only for an out-of-range NEGATIVE nanos, whose sign bit
+/// sets the leading byte to `0xFF`: Cassandra's BYTE_ORDER sorts it ABOVE every
+/// non-negative value, where signed `i64::cmp` would sort it below. Comparing
+/// `to_be_bytes()` is the serialized form verbatim, so THIS COMPARATOR agrees
+/// with Cassandra for all inputs.
 ///
-/// WHY SIGNED AND NOT `to_be_bytes()` — this was byte-order-exact first, and the
-/// change is deliberate (roborev jobs 45/46, issue #3920).
-///
-/// The two readings differ only for an out-of-range NEGATIVE nanos, whose sign
-/// bit makes the leading byte `0xFF`: unsigned byte order sorts it ABOVE every
-/// non-negative value, signed sorts it below. Byte-order-exactness looks like the
-/// stricter choice, but it puts this comparator in conflict with the rest of
-/// CQLite, and MEASURED, that conflict is REACHABLE:
-///
-/// * NOTHING validates the range. `86_399_999_999_999` appears in no check
-///   anywhere in `cqlite-core/src` — decode is `map(be_i64, Value::Time)`
-///   (`parser/types/primitives.rs`), which accepts ANY bit pattern, and encode
-///   writes `nanos.to_be_bytes()` verbatim (`parser/types/mod.rs`). So a negative
-///   `Value::Time` is constructible, WRITABLE, and READABLE.
-/// * `Value`'s own `PartialOrd` compares SIGNED, and writer/memtable paths order
-///   through it.
-///
-/// So an unsigned comparator would let CQLite write a negative `time` in one order
-/// and read it back in another — a genuine misordering in CQLite-WRITTEN data,
-/// traded for exactness on input Cassandra cannot generate. Agreeing with the
-/// writer is the conservative direction until validation and ordering are changed
-/// TOGETHER, which is #3920's job.
+/// SCOPED CLAIM — the comparator, not the whole system (roborev job 45).
+/// `Value`'s own `PartialOrd` (`types.rs`, the `(Value::Time(a), Value::Time(b))`
+/// arm) compares SIGNED, and writer/memtable paths that order through it are
+/// unchanged by #3790. The two therefore agree for every value in the valid range
+/// and DISAGREE for an out-of-range negative nanos, where this comparator sorts it
+/// above non-negatives and `PartialOrd` sorts it below. Cassandra's
+/// `TimeSerializer` validates `0..=86_399_999_999_999`, so no Cassandra-written
+/// SSTable can contain such a value and no READ path can observe the divergence;
+/// it is reachable only for a negative `Value::Time` that CQLite itself
+/// constructs. Unifying the two (or rejecting out-of-range time at the write
+/// boundary) is filed as #3920 — it means changing writer-path ordering, which is
+/// outside this issue (1:1:1:1). Noted here rather than left implicit, because
+/// choosing byte-order-exactness for the negative case is precisely what makes
+/// the inconsistency worth naming.
 fn compare_time(left: &Value, right: &Value) -> Result<Ordering> {
     match (left, right) {
-        (Value::Time(l), Value::Time(r)) => Ok(l.cmp(r)),
+        (Value::Time(l), Value::Time(r)) => Ok(l.to_be_bytes().cmp(&r.to_be_bytes())),
         _ => Err(Error::Schema(
             "Type mismatch: expected time values".to_string(),
         )),
