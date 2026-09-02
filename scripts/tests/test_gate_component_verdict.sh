@@ -854,8 +854,36 @@ fi
 # Detected on a WHITESPACE-FLATTENED, backtick-stripped rendering, because the offending
 # phrase wraps lines in two of the six files and a line-oriented grep missed them. The
 # signature is the mode LIST all six spell — the phrase a future author would copy.
+# ITS OWN ROOT SET, WIDER THAN 15.11's — AND DELIBERATELY NOT ALL OF scripts/.
+#
+# 15.11 and 15.12 ask DIFFERENT questions, so they take different roots. 15.11 asks "does a
+# site that TEACHES the grammars teach all three?", which is a property of DOCTRINE sites; a
+# test file is not a teaching site, and demanding the delta grammar in one would red three
+# sibling suites that merely reference the record grammar in a narrative comment (MEASURED:
+# test_agent_gate_{tree_integrity,summary,component_set}.sh). 15.12 asks "does any text
+# ATTRIBUTE the record grammar to --delta?", which is a TRUTH claim and is wrong wherever it
+# is written — including in a lessons log agents copy from, and in a comment that contradicts
+# the code beneath it. Both of those slipped through precisely because the roots were narrow:
+# `process_improvements.md:698` (written by THIS change) and this very file's own line 336.
+#
+# NOT WIDENED TO ALL OF scripts/, and that is measured rather than assumed:
+# `scripts/gate-liveness.sh:565` reads "The three dialects are the gate's own
+# (full / --lite / --delta)" — about the three summary MARKER dialects, not the completion
+# grammars — and it MATCHES this needle under the same flatten pipeline. Scanning it would red
+# the lane on correct input, i.e. the guard agents learn to waive. If the needle is ever made
+# to distinguish those two uses, widen then, not before.
+#
+# DECLARED LIMIT: the needle is a SINGLE FIXED PHRASE, so a REWORDED attribution ("for full,
+# `--lite` and `--delta`") escapes it. The scanned roots carry no such variant today — checked
+# — but this guard catches the phrase, not the class, and saying so is worth more than
+# implying the class is closed.
+_scope_sites=$(grep -rlE 'RESULT: \(PASS\|FAIL(\|PARTIAL)?(\|ERROR\|REFUSED)?\)' \
+           "$REPO_ROOT/CLAUDE.md" "$REPO_ROOT/process_improvements.md" \
+           "$REPO_ROOT/docs" "$REPO_ROOT/website/src/content/docs" \
+           "$REPO_ROOT/.claude" "$REPO_ROOT/scripts/tests" 2>/dev/null \
+           | grep -v '/openspec/changes/archive/' | sort)
 _scoped=""
-for _f in $_sites; do
+for _f in $_scope_sites; do
   if tr -s '[:space:]' ' ' < "$_f" | tr -d '`*' | sed 's| */ *|/|g' \
      | grep -qF 'full/--lite/--delta'; then
     _scoped="$_scoped ${_f#"$REPO_ROOT"/}"
