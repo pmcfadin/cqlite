@@ -85,24 +85,36 @@ fn compare_inet(left: &Value, right: &Value) -> Result<Ordering> {
 /// with Cassandra for all inputs.
 ///
 /// SCOPED CLAIM — this comparator, not the whole system (roborev jobs 45/70).
-/// Three other sites order `time` and TWO OF THEM ARE SIGNED: `Value::PartialOrd`
-/// (`types.rs`), and — the one that reaches disk — the whole-collection writer
-/// (`data_writer/collection_order::compare_collection_elements`, which
-/// `write_complex_set` uses and then emits cell paths in that order with no
-/// re-sort). The per-element writer (`compare_cell_paths`) is unsigned like this.
+/// Other sites order `time` too, and TWO REMAIN SIGNED: `Value::PartialOrd`
+/// (`types.rs`) and `write_engine::mutation::compare_values` (which decides
+/// `ClusteringKey` placement). Both are tracked by **#3920**.
 ///
-/// They agree for every value in `time`'s valid range, and DISAGREE for an
-/// out-of-range negative nanos. **A READ CAN OBSERVE THAT** — an earlier revision
-/// of this comment claimed it could not, which was wrong: Cassandra's
-/// `TimeSerializer` rejects such a value so no CASSANDRA-written SSTable holds
-/// one, but nothing in CQLite validates the range, so a CQLite-WRITTEN collection
-/// can be laid down in signed order and read back in byte order.
+/// The site that REACHES DISK is now unsigned and agrees with this comparator:
+/// #3935 corrected the whole-collection writer
+/// (`data_writer/collection_order::compare_collection_elements`, used by
+/// `write_set_complex_cells`/`write_map_complex_cells`, which then emit cell
+/// paths in that order with no re-sort) from signed to `to_be_bytes()`. The
+/// per-element writer (`compare_cell_paths`) was already unsigned. So both write
+/// paths and this read comparator agree for ALL inputs.
 ///
-/// Unifying them means changing on-disk collection ordering, memtable key
-/// placement and compaction merge, which is outside this issue (1:1:1:1): filed
-/// as #3935, with the missing range validation — the fix that would make all the
-/// sites agree trivially — as #3920. Noted here rather than left implicit,
-/// because choosing byte-order-exactness is what makes the split worth naming.
+/// The remaining signed sites agree with this one for every value in `time`'s
+/// valid range and DISAGREE for an out-of-range negative nanos. **A READ CAN
+/// OBSERVE THAT** — an earlier revision of this comment claimed it could not,
+/// which was wrong.
+///
+/// RANGE VALIDATION WOULD *NOT* CLOSE THE CLASS — an earlier revision of this
+/// comment called it "the fix that would make all the sites agree trivially",
+/// and that claim is FALSIFIED by the pinned source. `TimeType` has NO
+/// `validate` override, and `serializers/TimeSerializer.java:71-75` `validate`
+/// checks the SIZE ONLY:
+/// `if (accessor.size(value) != 8) throw new MarshalException(...)`. The range
+/// check `result < 0 || result >= TimeUnit.DAYS.toNanos(1)` lives ONLY in
+/// `timeStringToLong` (`TimeSerializer.java:50`), the CQL string-literal / JSON
+/// path. So an 8-byte BINARY out-of-range `time` passes Cassandra's own
+/// validation, is stored, and is ordered by `TimeType`'s BYTE_ORDER. Cassandra
+/// does not reject such a value; BYTE_ORDER is simply what the pinned tag
+/// specifies for it, which is why byte-order-exactness — not validation — is the
+/// rule every site has to converge on (#3920 for the two that have not yet).
 fn compare_time(left: &Value, right: &Value) -> Result<Ordering> {
     match (left, right) {
         (Value::Time(l), Value::Time(r)) => Ok(l.to_be_bytes().cmp(&r.to_be_bytes())),
