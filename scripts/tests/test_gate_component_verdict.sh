@@ -617,6 +617,68 @@ SA6="$TMP/ti-detail.txt"
 expect "10.6 control: tree-integrity PASS with trailing detail is still a PASS" \
   PASS 0 "tooling-tests" -- "$SA6" --mode only --component tooling-tests --run-id run-1
 
+# AN UNCERTAIN TREE-INTEGRITY MUST NOT MASK A CERTAIN SUMMARY-INTEGRITY FAILURE (#3951).
+# The tree-integrity checks return EARLY, so a block carrying an UNMEASURED tree verdict
+# together with `summary-integrity: FAIL` was answered COULD-NOT-MEASURE (4) where the
+# header documents NOT-PASS (1). `summary-integrity: FAIL` is an INDEPENDENT, affirmatively
+# established declaration that the whole block is non-certifying (#2874 — a foreign run-id
+# clobbered the path mid-run), so the more specific, affirmatively-established signal wins:
+# never let a "cannot tell" mask a "definitely not".
+#
+# SEVERITY, STATED PLAINLY: this can produce no false PASS — 4 and 1 are both refusals. What
+# was wrong is the PRECISION of the refusal, and that a header claim and the code disagreed,
+# which is the stale-prose class.
+_mk_si() {  # <path> <tree-integrity value> [extra summary-integrity line...]
+  local path="$1" ti="$2"; shift 2
+  { echo "==== AGENT-GATE SUMMARY ===="
+    echo "run-id: run-1"
+    [ -n "$ti" ] && echo "tree-integrity: $ti"
+    local l; for l in "$@"; do printf '%s\n' "$l"; done
+    echo "mode: PARTIAL (--only tooling-tests) - does NOT count as the gate"
+    comp_line tooling-tests PASS 1112s
+    echo "RESULT: PARTIAL"
+    echo "==== END AGENT-GATE SUMMARY ===="
+  } > "$path"
+}
+_SI_FAIL="summary-integrity: FAIL (foreign run-id observed; detected-after-component: fmt)"
+
+_mk_si "$TMP/si-over-skip.txt" "SKIP (no capture)" "$_SI_FAIL"
+expect "10.7 tree-integrity SKIP + summary-integrity FAIL => NOT-PASS, naming the CERTAIN signal" \
+  NOT-PASS 1 "summary-integrity" -- "$TMP/si-over-skip.txt" --mode only --component tooling-tests --run-id run-1
+
+_mk_si "$TMP/si-over-pending.txt" "PENDING" "$_SI_FAIL"
+expect "10.8 tree-integrity PENDING + summary-integrity FAIL => NOT-PASS" \
+  NOT-PASS 1 "summary-integrity" -- "$TMP/si-over-pending.txt" --mode only --component tooling-tests --run-id run-1
+
+_mk_si "$TMP/si-over-absent.txt" "" "$_SI_FAIL"
+expect "10.9 an ABSENT tree-integrity line + summary-integrity FAIL => NOT-PASS" \
+  NOT-PASS 1 "summary-integrity" -- "$TMP/si-over-absent.txt" --mode only --component tooling-tests --run-id run-1
+
+_mk_si "$TMP/si-over-ambig-ti.txt" "PASS" "tree-integrity: SKIP (no capture)" "$_SI_FAIL"
+expect "10.10 an AMBIGUOUS tree-integrity + summary-integrity FAIL => NOT-PASS" \
+  NOT-PASS 1 "summary-integrity" -- "$TMP/si-over-ambig-ti.txt" --mode only --component tooling-tests --run-id run-1
+
+# AMBIGUITY IS NEVER A GUESS, in EITHER direction. A duplicated `summary-integrity:` line is
+# not an affirmative FAIL, so it may not preempt an uncertain tree verdict either — the
+# refusal stands, unpromoted.
+_mk_si "$TMP/si-dup-with-skip.txt" "SKIP (no capture)" "$_SI_FAIL" "$_SI_FAIL"
+expect "10.11 a DUPLICATED summary-integrity line cannot promote anything — ambiguity stays a refusal" \
+  COULD-NOT-MEASURE 4 "" -- "$TMP/si-dup-with-skip.txt" --mode only --component tooling-tests --run-id run-1
+
+_mk_si "$TMP/si-dup-with-pass.txt" "PASS" "$_SI_FAIL" "$_SI_FAIL"
+expect "10.12 a DUPLICATED summary-integrity line is ambiguous even under a PASSing tree verdict" \
+  COULD-NOT-MEASURE 4 "summary-integrity-ambiguous" -- "$TMP/si-dup-with-pass.txt" --mode only --component tooling-tests --run-id run-1
+
+# CONTROLS — the mappings the C audit verified behaviourally against the shipped script must
+# be UNDISTURBED by this change, so both are re-asserted right beside it.
+_mk_si "$TMP/si-none-skip.txt" "SKIP (no capture)"
+expect "10.13 control: tree-integrity SKIP ALONE is still COULD-NOT-MEASURE (mapping undisturbed)" \
+  COULD-NOT-MEASURE 4 "tree-integrity" -- "$TMP/si-none-skip.txt" --mode only --component tooling-tests --run-id run-1
+
+_mk_si "$TMP/si-with-ti-fail.txt" "FAIL (tree-mutated-midrun; detected-after-component: fmt)" "$_SI_FAIL"
+expect "10.14 control: tree-integrity FAIL keeps naming the TREE cause (its verdict is already certain)" \
+  NOT-PASS 1 "tree-integrity" -- "$TMP/si-with-ti-fail.txt" --mode only --component tooling-tests --run-id run-1
+
 echo "=== section 11: --help obeys the SAME four invariants as every verdict (B4) ==="
 # CLAUDE.md #3312 instance 2, verbatim: the artifact that DESCRIBED the escape hatch became
 # it. --help printed the header, which spelled the forbidden literals out — so the sentence
