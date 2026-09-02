@@ -225,10 +225,7 @@ fn a_well_formed_shadowed_udt_field_still_filters_with_the_same_accounting() {
         .expect("a well-formed shadowed field must still filter silently");
     assert_eq!(filtered, 1, "the field is counted as dropped");
     match &value {
-        Value::Udt(u) => assert_eq!(
-            u.fields[0].value, None,
-            "the shadowed field is left absent"
-        ),
+        Value::Udt(u) => assert_eq!(u.fields[0].value, None, "the shadowed field is left absent"),
         other => panic!("expected a UDT, got {other:?}"),
     }
 }
@@ -303,9 +300,8 @@ fn a_wrong_width_dropped_element_is_not_validated_today_known_gap_3778() {
         "live-path control: a 3-byte `int` set member IS refused by #3811's width rule"
     );
     assert_eq!(
-        decode_set(&[short_member], Some(shadow_everything())).expect(
-            "KNOWN GAP (#3778): a shadowed member's path is never width-validated today"
-        ),
+        decode_set(&[short_member], Some(shadow_everything()))
+            .expect("KNOWN GAP (#3778): a shadowed member's path is never width-validated today"),
         (Value::Set(vec![]), 1),
         "KNOWN GAP (#3778): the malformed member is filtered and counted, no error escapes"
     );
@@ -340,7 +336,10 @@ fn a_wrong_width_dropped_element_is_not_validated_today_known_gap_3778() {
     );
     let (value, filtered) = decode_udt(&[short_field], Some(shadow_everything()))
         .expect("KNOWN GAP (#3778): a shadowed field's value is never width-validated today");
-    assert_eq!(filtered, 1, "KNOWN GAP (#3778): the field is counted as dropped");
+    assert_eq!(
+        filtered, 1,
+        "KNOWN GAP (#3778): the field is counted as dropped"
+    );
     match &value {
         Value::Udt(u) => assert_eq!(u.fields[0].value, None, "the field is left absent"),
         other => panic!("expected a UDT, got {other:?}"),
