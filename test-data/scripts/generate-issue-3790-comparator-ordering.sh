@@ -3,11 +3,16 @@
 # multicell-collection ORDERING fixture (issue #3790).
 #
 # WHAT THIS PRODUCES AND WHY
-# `ComparatorType::compare` compares `Custom("inet")` and `Custom("time")` by
-# their FORMATTED STRING (`compare_custom` => `format!("{}", value)`) instead of
-# by serialized bytes. Cassandra 5.0.8 constructs both `InetAddressType` and
-# `TimeType` with `ComparisonType.BYTE_ORDER`, so the correct order is unsigned
-# byte-wise over the serialized value. In a NON-FROZEN collection the element /
+# HISTORICALLY (the defect this fixture was built to falsify),
+# `ComparatorType::compare` compared `Custom("inet")` and `Custom("time")` by
+# their FORMATTED STRING (a `compare_custom` helper doing `format!("{}", value)`)
+# instead of by serialized bytes. #3790 removed that helper: `inet` and `time` now
+# compare BY VALUE in `cqlite-core/src/types/comparator/custom.rs`, and the
+# formatted-string comparison survives only as the residual path for an
+# unresolved-UDT / unknown `Custom(name)`.
+# Cassandra 5.0.8 constructs both `InetAddressType` and `TimeType` with
+# `ComparisonType.BYTE_ORDER`, so the correct order is unsigned byte-wise over the
+# serialized value. In a NON-FROZEN collection the element /
 # map key IS the cell path, so that comparator decides the ON-DISK order — which
 # is what makes the divergence observable in Cassandra-written bytes.
 #
