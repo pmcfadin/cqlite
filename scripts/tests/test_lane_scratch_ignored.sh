@@ -345,7 +345,19 @@ assert_not_ignored ".lanes-foo" "differs after the dot — outside the reserved 
 census_out="$fixture/.git/lane-scratch-census.z"
 census_err="$fixture/.git/lane-scratch-census.err"
 census_rc=0
-gg -C "$REPO_ROOT" ls-files -z >"$census_out" 2>"$census_err" || census_rc=$?
+# `-c safe.directory=<root>` is required here and ONLY here, and it is one
+# decision with the `env -i` allowlist above: clearing global AND system config
+# also cleared any safe.directory authorization, so on a containerized or shared
+# checkout whose owner differs from the gate user this census would die with
+# "detected dubious ownership" — a MANDATORY tooling-tests component unusable on
+# a checkout the enclosing gate reads perfectly well, i.e. the guard agents learn
+# to waive. The value is safe because it is the path this guard already VALIDATED
+# ($repo_root_abs, resolved with `pwd -P`), not something inherited; git honours
+# safe.directory only from protected configuration, of which `-c` is part.
+# Deliberately NOT applied to the fixture calls: those repositories are created
+# by this process under its own TMPDIR and are owned by the gate user, so they
+# need no authorization and granting it there would widen the surface for nothing.
+gg -c "safe.directory=$repo_root_abs" -C "$REPO_ROOT" ls-files -z >"$census_out" 2>"$census_err" || census_rc=$?
 census_err_text="$(cat "$census_err" 2>/dev/null)"
 
 if [ "$census_rc" -ne 0 ]; then
