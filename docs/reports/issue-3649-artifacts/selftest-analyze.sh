@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=436
+CASE_FLOOR=438
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -2788,6 +2788,26 @@ STUBEOF
     RC=$?
     set -e
   }
+
+  : > "$TMP/cargo-argv.log"
+  # ROUND 15 FINDING 3, THROUGH THE WHOLE DRIVER. Round 14 canonicalised resolved
+  # integers, and one comparison kept reading the raw option string -- so
+  # `--max-concurrent-scans 04` launched the server as `4`, the startup line
+  # echoed `4`, and the string `04` did not match: a CORRECT session aborting
+  # with admission-mismatch after BOTH release builds, caused by our own fix.
+  # Only the end-to-end path sees this, because it needs a real server printing a
+  # real startup line, which is exactly why the shims exist.
+  run_e2e "$TMP/e2e-zero" --ramp 1 --no-prewarm --max-concurrent-scans 04
+  if [ "$RC" = "0" ]; then
+    ok "a leading-zero --max-concurrent-scans completes instead of a false admission-mismatch"
+  else
+    bad "a leading-zero --max-concurrent-scans aborted the session (exit $RC): $(grep -m2 '^AB-3649: cause' "$TMP/err.txt" | tr '\n' ' ')"
+  fi
+  if grep -q '^AB-3649: run .* admission requested 04 resolved 4 observed 4 ' "$TMP/out.txt"; then
+    ok "the log distinguishes the raw request from the resolved value it is compared against"
+  else
+    bad "the admission line does not show both the raw request and the resolved value"
+  fi
 
   : > "$TMP/cargo-argv.log"
   run_e2e "$TMP/e2e-ss" --ramp 1 --no-prewarm

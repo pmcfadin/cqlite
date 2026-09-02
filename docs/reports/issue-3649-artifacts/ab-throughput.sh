@@ -1154,11 +1154,19 @@ run_one() { # <arm> <replicate> <position-in-pair: 1|2>
   local admission_observed admission_source
   admission_observed="$(parse_startup "$server_log" scans)"
   admission_source="$(parse_startup "$server_log" source)"
-  say "run $tag admission requested $MAX_CONCURRENT_SCANS observed $admission_observed source $admission_source"
+  # COMPARED AGAINST THE RESOLVED VALUE, NOT THE RAW OPTION STRING. Round 14
+  # canonicalised resolved integers so the argv, the manifest and this read-back
+  # would carry one representation -- and this one comparison was left reading
+  # the raw global. `--max-concurrent-scans 04` therefore launched the server as
+  # `4`, the startup line echoed `4`, and the string `04` did not match it: a
+  # CORRECT session aborting after both release builds, on a defect our own fix
+  # introduced. Its three siblings below already compared against `expect_*_pre`;
+  # this was the only site that did not.
+  say "run $tag admission requested $MAX_CONCURRENT_SCANS resolved $expect_scans_pre observed $admission_observed source $admission_source"
   if [ "$admission_observed" != "NOT-OBSERVED" ] \
-     && [ "$admission_observed" != "$MAX_CONCURRENT_SCANS" ]; then
+     && [ "$admission_observed" != "$expect_scans_pre" ]; then
     die admission-mismatch \
-      "$tag: the server resolved --max-concurrent-scans to $admission_observed but $MAX_CONCURRENT_SCANS was requested; the arms would not be served under the same admission ceiling"
+      "$tag: the server resolved --max-concurrent-scans to $admission_observed but this arm expects $expect_scans_pre; the arms would not be served under the same admission ceiling"
   fi
   # THE SWEEP: every option that can differ between what we REQUESTED, what the
   # server RESOLVED and what the manifest RECORDS is read back from the same
