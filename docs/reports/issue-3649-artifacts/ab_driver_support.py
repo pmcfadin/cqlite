@@ -1318,8 +1318,24 @@ def validate_replicate(path, tag, raw_ramp, shape, step_duration_s):
         # while the driver keeps its own cause vocabulary.
         try:
             validate_record_shape(record, path, position + 1, shape)
-            validate_record_usable(
-                record, path, position + 1, expected_concurrency, step_duration_s)
+            # A FULLY SHED STEP IS EXCLUDED, NOT FATAL -- which is what the
+            # analyzer does and what this function's own contract below already
+            # says. `validate_record_usable` requires requests_ok >= 1, so a
+            # step the server shed entirely was rejected as `run-degenerate`
+            # and killed a session the analysis would have accepted with that
+            # step excluded. A guard that reds on correct input is the guard an
+            # operator learns to work around.
+            #
+            # The SHAPE, ROUND and CONCURRENCY checks still run above and below:
+            # what is skipped is only the USABILITY of a step that contributed
+            # no successful work, never whether the record describes this
+            # session. Shedding at concurrency 1 remains fatal, refused further
+            # down, because admission shedding at single-stream is not a
+            # throughput measurement at all.
+            if not record.get("requests_unavailable", 0):
+                validate_record_usable(
+                    record, path, position + 1, expected_concurrency,
+                    step_duration_s)
         except Unmeasured as exc:
             err("cause replicate-invalid")
             err("cause-detail %s record %d: %s (the analyzer refuses this with "

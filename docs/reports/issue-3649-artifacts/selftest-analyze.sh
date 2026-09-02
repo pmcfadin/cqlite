@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=552
+CASE_FLOOR=555
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -3881,6 +3881,51 @@ if [ -n "$EXPORT_CENSUS" ]; then
 else
   bad "an AB_* export precedes its variable's final value (see above)"
 fi
+
+# ---- a fully shed step is EXCLUDED, not fatal --------------------------------
+# ROUND 21 FINDING 3. validate_record_usable requires requests_ok >= 1, and it
+# ran before shedding was considered -- so a step the server shed ENTIRELY was
+# rejected as run-degenerate, killing a session the ANALYZER would have accepted
+# with that step excluded. The driver contradicted both the analyzer and its own
+# stated contract.
+rm -f "$TMP/shedzero.jsonl"
+python3 - "$TMP/shedzero.jsonl" <<'PYINNER'
+import json
+import sys
+
+records = []
+for index, (concurrency, ok, shed) in enumerate(((1, 5, 0), (2, 5, 0), (4, 0, 7))):
+    records.append({
+        "schema": "flight-loadgen.step/v1", "round": "base-r01",
+        "endpoint": "http://127.0.0.1:8815", "ts_unix_ms": 1780000000000,
+        "seed": 42, "step": index, "target_concurrency": concurrency,
+        "shape": "full", "duration_s": 60.0,
+        "requests_ok": ok, "requests_unavailable": shed, "requests_error": 0,
+        "error_codes": {}, "qps": ok / 60.0,
+        # A fully shed step did no work: zero rows, zero rate. That is exactly
+        # the shape `run-degenerate` refuses, and exactly what the analyzer
+        # excludes rather than refusing.
+        "rows_per_s": 100000.0 if ok else 0.0,
+        "rows_total": 6000000 if ok else 0,
+        "latency_ms": {"p50": 1.0, "p95": 2.0, "p99": 3.0, "max": 4.0},
+    })
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    for record in records:
+        handle.write(json.dumps(record) + "\n")
+PYINNER
+run_support validate-replicate "$TMP/shedzero.jsonl" base-r01 1,2,4 full 60s
+check_support "a ramp whose last step was shed ENTIRELY" 0
+if grep -q 'SHED requests-unavailable 7' "$TMP/out.txt"; then
+  ok "the shed step is reported as excluded rather than killing the session"
+else
+  bad "the fully shed step was not reported as shed"
+fi
+# ...and shedding at concurrency 1 is STILL fatal: it is not a throughput
+# measurement, and the exclusion above must not have widened into that.
+rm -f "$TMP/shedone.jsonl"
+mkstep "$TMP/shedone.jsonl" base-r01 1 100000 3
+run_support validate-replicate "$TMP/shedone.jsonl" base-r01 1 full 60s
+check_support "shedding at single-stream concurrency" 1 replicate-invalid
 
 # ---- a requested pin that nothing verified is not a pin ----------------------
 # ROUND 21 FINDING 2. check_affinity returned SUCCESS on three unverifiable
