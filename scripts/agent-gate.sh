@@ -7353,7 +7353,7 @@ _census_kind() {
     # selected `.rs` file cannot be read — changes the RATCHET's failure semantics for every
     # diff, which is its own decision with its own risk of reddening correct input. Doing
     # `emitted` properly requires settling that first. Tracked in #3162.
-    file-size|pub-surface|roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests)
+    file-size|pub-surface|roborev-lints|binding-unwind-profile|delivery-telemetry|tooling-tests|dep-duplicates)
                     printf 'gap:shell/python guard prints no AGENT-GATE-CENSUS contract line yet (#3162)' ;;
     *) return 1 ;;
   esac
