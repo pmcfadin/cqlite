@@ -800,7 +800,12 @@ fi
 # able to tell which of the THREE modes a site is using, so a site that names two grammars
 # and not the third is a site that teaches the hang.
 _missing=""
-_sites=$(grep -rlF 'RESULT: (PASS|FAIL|PARTIAL)' \
+# THE UNION OF ALL THREE GRAMMARS, not just the `--only` one. Deriving from the --only
+# grammar alone had a BLIND SPOT that shipped: `.claude/agents/flow-closer.md` publishes the
+# RECORD grammar and nothing else, so it sat OUTSIDE the derived set — and it is the file of
+# the agent that runs `agent-gate.sh --delta` for Case B re-certs, i.e. the site most likely
+# to hit the hang. A site that teaches ANY of the three must teach the third.
+_sites=$(grep -rlE 'RESULT: \(PASS\|FAIL(\|PARTIAL)?(\|ERROR\|REFUSED)?\)' \
            "$REPO_ROOT/CLAUDE.md" "$REPO_ROOT/docs" "$REPO_ROOT/website/src/content/docs" \
            "$REPO_ROOT/.claude" 2>/dev/null | grep -v '/openspec/changes/archive/' | sort)
 if [ -z "$_sites" ]; then
@@ -813,6 +818,30 @@ if [ -z "$_missing" ]; then
   ok "15.11 the --delta grammar is published at every site that publishes the other two"
 else
   bad "15.11 the --delta grammar is published at every site that publishes the other two" "missing:$_missing"
+fi
+
+# AND NO SITE MAY SCOPE THE RECORD GRAMMAR TO `--delta` (AC4). Publishing the third grammar
+# is only half of it: six of the eight sites went on ATTRIBUTING the record grammar to
+# `--delta` in the same breath — the mode this change's own text says hangs forever on a
+# terminal ERROR/REFUSED. That is not a contradiction a reader can resolve, it is simply
+# wrong, and in `flow-closer.md` (which runs `--delta` for Case B re-certs) it was the only
+# grammar present at all.
+#
+# Detected on a WHITESPACE-FLATTENED, backtick-stripped rendering, because the offending
+# phrase wraps lines in two of the six files and a line-oriented grep missed them. The
+# signature is the mode LIST all six spell — the phrase a future author would copy.
+_scoped=""
+for _f in $_sites; do
+  if tr -s '[:space:]' ' ' < "$_f" | tr -d '`*' | sed 's| */ *|/|g' \
+     | grep -qF 'full/--lite/--delta'; then
+    _scoped="$_scoped ${_f#"$REPO_ROOT"/}"
+  fi
+done
+if [ -z "$_scoped" ]; then
+  ok "15.12 no site scopes the RECORD grammar to --delta (the mode it cannot terminate on)"
+else
+  bad "15.12 no site scopes the RECORD grammar to --delta (the mode it cannot terminate on)" \
+      "scoped:$_scoped"
 fi
 
 echo "=== section 16: the reader gives COMPLETION; the MODE FILTER is ours (F1) ==="
