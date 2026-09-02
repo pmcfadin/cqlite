@@ -11030,12 +11030,31 @@ test_preflight_wait_gates_every_return_on_the_latch() {
   body="$(awk '/^preflight_wait\(\) \{$/,/^\}$/' "$SUPERVISOR")"
   gate="$(grep -n '^[[:space:]]*obj_sweep_stop_if_latched_now$' <<<"$body" | head -1 | cut -d: -f1)"
   call_line="$(grep -n '^[[:space:]]*preflight_wait_holds ' <<<"$body" | head -1 | cut -d: -f1)"
-  # PLANT: the wrapper was really extracted and really contains both halves. A body of ""
-  # has no ungated return either, so every assert below would be vacuous without this.
-  if [[ -n "$body" && "$gate" =~ ^[0-9]+$ && "$call_line" =~ ^[0-9]+$ ]]; then
-    pass "preflight-latch-gate-plant: preflight_wait was extracted from the shipped supervisor and carries both the inner call and the latch gate"
+  # (3) FIRST, BECAUSE IT DOES NOT DEPEND ON THE EXTRACTION and must not be skipped by the
+  #     plant's early return: the gate is nowhere inside a command substitution. It stops the
+  #     lane through finalize_exit, and inside `$( )` that ends a SUBSHELL.
+  #     MEASURED NUANCE, recorded so nobody reads more into this than it says: with the shipped
+  #     `set -e` an `x="$(gate)"` whose finalize_exit exits 1 still takes the process down, so
+  #     the behavioural arm below does NOT catch that mutant — this assert is the only thing
+  #     that does. The protection evaporates the moment the status is tested (`if x="$(gate)"`)
+  #     or the verdict exits 0, which is why the shape is banned rather than tolerated.
+  subshell="$(grep -n '\$(.*obj_sweep_stop_if_latched_now' "$SUPERVISOR" 2>/dev/null || true)"
+  if [[ -z "$subshell" ]]; then
+    pass "preflight-latch-gate: no call site puts the gate in a command substitution — its finalize_exit ends the PROCESS, not a subshell [STRUCTURAL]"
   else
-    fail "preflight-latch-gate-plant: body=${#body} bytes gate='$gate' inner-call='$call_line' — the asserts below would prove nothing"
+    fail "preflight-latch-gate(subshell): $subshell — finalize_exit there would end a subshell and the lane would spawn anyway"
+  fi
+  # PLANT: the wrapper was really extracted and really carries both halves. A body of "" has no
+  # ungated return either, so the asserts below would be vacuous without this — and a body that
+  # extracted fine while carrying NO plain gate call is not a staging failure, it is the defect
+  # itself, so it is named as one.
+  if [[ -n "$body" && "$call_line" =~ ^[0-9]+$ && "$gate" =~ ^[0-9]+$ ]]; then
+    pass "preflight-latch-gate-plant: preflight_wait was extracted from the shipped supervisor and carries both the inner call and the latch gate"
+  elif [[ -n "$body" && "$call_line" =~ ^[0-9]+$ ]]; then
+    fail "preflight-latch-gate: THE DEFECT — preflight_wait calls the hold loop at line $call_line and then reads the STOP latch NOWHERE (no plain 'obj_sweep_stop_if_latched_now' call in its body), so a hold of up to BUILD_HOLD_MAX x HOLD_POLL_SECS ends in a spawn on whatever a peer recorded meanwhile"
+    return
+  else
+    fail "preflight-latch-gate-plant: STAGING — body=${#body} bytes gate='$gate' inner-call='$call_line'; preflight_wait could not be read from $SUPERVISOR and the asserts below would prove nothing"
     return
   fi
   # (1) THE GATE IS AFTER THE INNER CALL AND BEFORE EVERY return/exit IN THE WRAPPER.
@@ -11060,14 +11079,6 @@ test_preflight_wait_gates_every_return_on_the_latch() {
     pass "preflight-latch-gate: preflight_wait_holds appears exactly twice at the start of a line (its definition and the ONE gated call) — the hold loop has no ungated caller [STRUCTURAL]"
   else
     fail "preflight-latch-gate(callers): $inner_refs line-initial references to preflight_wait_holds, wanted 2 (definition + one call) — a second caller would bypass the gate"
-  fi
-  # (3) AND THE GATE IS NOT INSIDE A COMMAND SUBSTITUTION anywhere in the file: it stops the
-  #     lane through finalize_exit, which inside `$( )` ends a subshell and returns.
-  subshell="$(grep -n '\$(.*obj_sweep_stop_if_latched_now' "$SUPERVISOR" 2>/dev/null || true)"
-  if [[ -z "$subshell" ]]; then
-    pass "preflight-latch-gate: no call site puts the gate in a command substitution — its finalize_exit ends the PROCESS, not a subshell [STRUCTURAL]"
-  else
-    fail "preflight-latch-gate(subshell): $subshell — finalize_exit there would end a subshell and the lane would spawn anyway"
   fi
 }
 
