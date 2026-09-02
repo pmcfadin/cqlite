@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=495
+CASE_FLOOR=498
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -2948,6 +2948,40 @@ PYINNER
     e2e_narrow_profile "$wd"
   }
 
+  # THE REQUIRED-NESS OF --profile, ASSERTED BEFORE ANY BUILD. Written as its
+  # own case rather than left implicit in the 27 invocations that had to gain
+  # the flag: those show the requirement FIRES, but a requirement nothing names
+  # is one a later change can relax without anything going red. "Before any
+  # build" is MEASURED here, not assumed -- the shimmed cargo logs every
+  # invocation, so an empty log is the evidence that nothing was compiled.
+  : > "$TMP/cargo-argv.log"
+  set +e
+  AB_SELFTEST_SHIMBIN="$SHIMBIN" \
+  AB_SELFTEST_CARGO_LOG="$TMP/cargo-argv.log" \
+  PATH="$SHIMBIN:$PATH" \
+    bash "$DRIVER" \
+      --corpus "$TMP/e2e-corpus" --ticket-template "$TMP/e2e-ticket.json" \
+      --work-dir "$TMP/e2e-noprofile" --repo "$SCRATCH" \
+      --base-ref HEAD~1 --head-ref HEAD --max-concurrent-scans 16 \
+      --replicates 5 --step-duration 1s --ramp 1 --no-prewarm \
+      > "$TMP/out.txt" 2> "$TMP/err.txt"
+  RC=$?
+  set -e
+  if [ "$RC" = 3 ]; then
+    ok "a measurement with no --profile is a usage error, not a default"
+  else
+    bad "a measurement with no --profile exited $RC, expected 3"
+  fi
+  if grep -q 'usage-error --profile is REQUIRED for a measurement' "$TMP/err.txt"; then
+    ok "the refusal says the profile is required and why there is no default"
+  else
+    bad "the missing-profile refusal does not name the requirement"
+  fi
+  if [ ! -s "$TMP/cargo-argv.log" ]; then
+    ok "no --profile refuses BEFORE any build -- the cargo log is empty"
+  else
+    bad "a session missing --profile reached cargo: $(head -1 "$TMP/cargo-argv.log")"
+  fi
   : > "$TMP/cargo-argv.log"
   # ROUND 15 FINDING 3, THROUGH THE WHOLE DRIVER. Round 14 canonicalised resolved
   # integers, and one comparison kept reading the raw option string -- so
