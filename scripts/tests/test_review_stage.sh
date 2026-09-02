@@ -2487,6 +2487,236 @@ else
   esac
 fi
 
+
+# --- 20. A VALIDATED-AS-DIGITS VALUE IS NOT A COMPARABLE ONE (round 8) ----------
+# THE FINDING (roborev job 379). `validate_secs` accepted an arbitrarily long digit string, and
+# `status` then handed it to bash's FIXED-WIDTH `[ -gt ]`. Measured on the shipped script at
+# 69ea2f273:
+#
+#   $ review-stage.sh open   c --issue 900 --agent spec-auditor --deadline-secs 9999999999999999999999999
+#   REVIEW-STAGE: OPEN-OK ... deadline-secs=9999999999999999999999999 ...        (accepted, rc 0)
+#   $ review-stage.sh status c --issue 900
+#   REVIEW-STAGE: STATUS ... deadline=9999999999999999999999999 past-deadline=no ...
+#   review-stage.sh: line 1726: [: 9999999999999999999999999: integer expression expected
+#
+# Two defects on one line. A RAW BASH DIAGNOSTIC outside the `REVIEW-STAGE: ` anchor every line of
+# that block carries (round 7's L1 fixed the sibling instance of exactly that leak), and
+# `past-deadline=no` — a PERMISSIVE answer derived from a comparison that never happened, which is
+# this repository's standing prohibition: never derive a pass from the absence of a bad signal.
+#
+# THE CLASS IS WIDER THAN THE FLAG, and the siblings are WORSE because `$(( ))` does not fail at
+# all -- it WRAPS SILENTLY. Measured, same script, same box:
+#
+#   spawned-epoch: 18446744073709551616  ->  elapsed=1788315330 past-deadline=yes + a PAST DEADLINE
+#                                            note, for a stage opened ONE SECOND earlier: 56 years
+#                                            of fabricated elapsed time, and no diagnostic anywhere
+#   spawned-epoch: 01756000000           ->  elapsed=1524598466  (`$(( 010 ))` is OCTAL in bash
+#                                            arithmetic while `[ 010 -gt 9 ]` is DECIMAL -- ONE
+#                                            value with TWO readings inside one script)
+#   reopen-count:  99999999999999999999  ->  reopen-count=7766279631452241920 WRITTEN BACK into the
+#                                            record and printed on OPEN-OK
+#
+# So the fix is ONE predicate, int_is_comparable, applied at every boundary where a value from
+# argv or from the record reaches a fixed-width operation -- and the bound is AFFIRMATIVE (at most
+# MAX_INT_DIGITS digits, no leading zero) rather than a test for the values that happen to break.
+#
+# FIELD_IS <needle> — an EXACT `key=value` field, not a substring. `reopen-count=1` is a prefix of
+# `reopen-count=16`, so a `has` assertion would have PASSED on the octal defect this section is
+# about. Every emitted field is space-delimited, so bracketing the line with spaces makes the test
+# exact without a regex.
+FIELD_IS() {
+  case " $OUT " in
+    *" $1 "*) ok "$2" ;;
+    *) bad "$2 (got: $OUT)" ;;
+  esac
+}
+# PLANT_FIELD <record> <key> <value> <label> — rewrite one record field and ASSERT the rewrite
+# landed. A `sed` that missed would make every assertion after it vacuous, which is the harness
+# defect round 7 recorded twice. Same `> .new && mv` idiom as section 17 (no `-i`, whose suffix
+# handling is GNU-vs-BSD incompatible).
+PLANT_FIELD() {
+  local f="$1" k="$2" v="$3" label="$4"
+  if [ -f "$f" ] &&
+    LC_ALL=C sed -e "s|^$k:.*|$k: $v|" "$f" >"$f.new" 2>/dev/null &&
+    mv "$f.new" "$f" 2>/dev/null &&
+    LC_ALL=C grep -q "^$k: $v\$" "$f"; then
+    ok "$label"
+  else
+    bad "$label — the plant did NOT land, so the assertions after it prove nothing"
+  fi
+}
+R20="$(newrepo)"
+
+# (a) THE INVOKER ROUTE: refused AT THE BOUNDARY, by name, exit 64 — never surfaced two
+#     subcommands later as somebody else's shell error.
+rs "$R20" open c --issue 910 --agent spec-auditor --deadline-secs 9999999999999999999999999
+rc_is 64 "secs/bound: a 25-digit --deadline-secs is a USAGE refusal (exit 64), not an accepted value"
+has "--deadline-secs" "secs/bound: the refusal NAMES the flag"
+has "digits" "secs/bound: and states the bound, so the operator knows what to pass instead"
+hasnt "integer expression expected" "secs/bound: no raw bash diagnostic — the refusal is this tool's own"
+if [ -e "$R20/.review-stage/issue-910/c.stage" ]; then
+  bad "secs/bound: a stage record was written for a refused --deadline-secs"
+else
+  ok "secs/bound: and NOTHING was written — a refused value never reaches the record"
+fi
+# THE BOUNDARY VALUE, BOTH SIDES. `MAX_INT_DIGITS` is 10, so 9999999999 is the widest ACCEPTED
+# value and 10000000000 the narrowest refused one. Pinning both sides is what makes this a bound
+# rather than a direction.
+rs "$R20" open c --issue 911 --agent spec-auditor --deadline-secs 9999999999
+rc_is 0 "secs/bound: the widest in-bound value (10 digits) is ACCEPTED"
+FIELD_IS "deadline-secs=9999999999" "secs/bound: and is recorded verbatim, not clamped"
+rs "$R20" open c --issue 912 --agent spec-auditor --deadline-secs 10000000000
+rc_is 64 "secs/bound: one digit wider (11 digits) is REFUSED"
+
+# (b) THE CONTROL, without which every assertion here is satisfiable by a validator that refuses
+#     everything: the values the emitter really produces still pass. `0` in particular — round 7's
+#     L3 records `deadline=0` as a legitimate emitter state, so a bound that refused a leading zero
+#     WITHOUT excepting `0` itself would red on correct input.
+for d in 0 1 1800; do
+  rs "$R20" open c --issue "92$d" --agent spec-auditor --deadline-secs "$d"
+  rc_is 0 "secs/bound CONTROL: --deadline-secs $d is accepted"
+done
+
+# (c) LEADING ZEROS ARE REFUSED, because they are read TWO WAYS in one script (octal to `$(( ))`,
+#     decimal to `[ ]`). A value with two readings is refused rather than normalised.
+rs "$R20" open c --issue 930 --agent spec-auditor --deadline-secs 0800
+rc_is 64 "secs/bound: a zero-padded '0800' is REFUSED — one value must not have two readings"
+has "leading zero" "secs/bound: and the refusal says WHY, so it does not read as an arbitrary rejection"
+
+# (d) THE RECORD READ-BACK ROUTE. `deadline-secs` is read out of the record and is deliberately
+#     NOT validated on the read side (round 7's disposition: the record's own text is DISPLAYED,
+#     routed through `field_value`, so a hand edit stays visible in the audit trail). What has to
+#     be affirmative is the COMPARISON.
+R20D="$(newrepo)"
+rs "$R20D" open c --issue 940 --agent spec-auditor
+rc_is 0 "secs/record: the stage opened"
+PLANT_FIELD "$R20D/.review-stage/issue-940/c.stage" deadline-secs 9999999999999999999999999 \
+  "secs/record: the overflowing deadline landed in the record (asserted, not assumed)"
+rs "$R20D" status c --issue 940
+rc_is 0 "secs/record: status still reports (advisory — it decides nothing, and it must not DIE either)"
+FIELD_IS "past-deadline=unknown" "secs/record: an INCOMPARABLE deadline yields past-deadline=unknown, never a permissive 'no' from a comparison that never ran"
+hasnt "past-deadline=no" "secs/record: and specifically NOT 'no' — the exact permissive answer the finding reported"
+hasnt "integer expression expected" "secs/record: no raw bash diagnostic escapes the REVIEW-STAGE: block"
+# EVERY LINE, not merely the absence of one known string: the property is that nothing UNANCHORED
+# escapes, and a future shell error would carry different text. `status` emits only
+# `REVIEW-STAGE: ` lines, which is what makes this assertion expressible here (`open` also prints
+# the bare report path and the paste-ready clause, by design).
+N20_UNANCHORED="$(printf '%s\n' "$OUT" | LC_ALL=C grep -cv '^REVIEW-STAGE: ' || true)"
+if [ "$N20_UNANCHORED" = "0" ]; then
+  ok "secs/record: EVERY line of status output carries the REVIEW-STAGE: anchor — 0 unanchored lines"
+else
+  bad "secs/record: $N20_UNANCHORED unanchored line(s) escaped the status block (got: $OUT)"
+fi
+FIELD_IS "deadline=9999999999999999999999999" "secs/record: the record's own text is still DISPLAYED — a hand edit stays visible in the audit trail"
+rs "$R20D" verdict c --issue 940
+rc_is 5 "secs/record: and the VERDICT is unchanged — a display/measurement boundary decides nothing"
+
+# (e) THE SILENT-WRAP ROUTE, the worse half: `$(( now - epoch ))` never fails, so the old code
+#     reported a FABRICATED elapsed with no diagnostic at all.
+R20E="$(newrepo)"
+rs "$R20E" open c --issue 950 --agent spec-auditor --deadline-secs 1800
+rc_is 0 "secs/epoch: the stage opened"
+for plant in 18446744073709551616 01756000000; do
+  PLANT_FIELD "$R20E/.review-stage/issue-950/c.stage" spawned-epoch "$plant" \
+    "secs/epoch: spawned-epoch=$plant landed in the record (asserted, not assumed)"
+  rs "$R20E" status c --issue 950
+  rc_is 0 "secs/epoch($plant): status still reports"
+  FIELD_IS "elapsed=unknown" "secs/epoch($plant): an INCOMPARABLE spawned-epoch yields elapsed=unknown — never a wrapped or octal number presented as a measurement"
+  FIELD_IS "past-deadline=unknown" "secs/epoch($plant): and past-deadline is unknown, because there is no elapsed time to compare"
+  hasnt "PAST DEADLINE" "secs/epoch($plant): no PAST DEADLINE note fires off a fabricated clock"
+  rs "$R20E" verdict c --issue 950
+  FIELD_IS "elapsed=unknown" "secs/epoch($plant): the VERDICT line's elapsed= is unknown too — premerge-assert.sh reads that field, and a fabricated number there is digits and would pass its grammar"
+done
+# THE CONTROL: an ordinary record still MEASURES. Without it every assertion above is satisfiable
+# by a `load_stage` that answered `unknown` for everything.
+R20F="$(newrepo)"
+rs "$R20F" open c --issue 960 --agent spec-auditor --deadline-secs 1800
+rc_is 0 "secs/epoch CONTROL: an ordinary stage opened"
+rs "$R20F" status c --issue 960
+hasnt "elapsed=unknown" "secs/epoch CONTROL: an ordinary record's elapsed IS measured — the bound did not turn the clock off"
+FIELD_IS "past-deadline=no" "secs/epoch CONTROL: and a real comparison still yields a real answer"
+
+# (f) THE ARITHMETIC-ON-A-RECORD-VALUE ROUTE: `reopen-count` is READ from the record and fed to
+#     `$(( prior_count + 1 ))`, whose wrap was WRITTEN BACK — so the fabrication was durable.
+R20G="$(newrepo)"
+rs "$R20G" open c --issue 970 --agent spec-auditor
+rc_is 0 "secs/reopen: the stage opened"
+SF20G="$R20G/.review-stage/issue-970/c.stage"
+for plant in 99999999999999999999 017; do
+  PLANT_FIELD "$SF20G" reopen-count "$plant" \
+    "secs/reopen: reopen-count=$plant landed in the record (asserted, not assumed)"
+  rs "$R20G" open c --issue 970 --agent spec-auditor --force
+  rc_is 0 "secs/reopen($plant): the re-open still succeeds — an unusable counter is not a reason to refuse a spawn"
+  FIELD_IS "reopen-count=1" "secs/reopen($plant): the counter falls back to the SAME value an absent/non-numeric one gets, never a wrapped or octal number"
+  N20G="$(LC_ALL=C sed -n 's/^reopen-count:[[:space:]]*//p' "$SF20G" 2>/dev/null | LC_ALL=C head -1)"
+  if [ "$N20G" = "1" ]; then
+    ok "secs/reopen($plant): and the record itself holds 1 — the fabrication is not made durable"
+  else
+    bad "secs/reopen($plant): the record now holds reopen-count '$N20G' — a wrapped/octal value was written back"
+  fi
+done
+
+# (g) THE ADOPTION ROUTE: `--force` keeps the FIRST spawn's clock by copying `spawned-epoch`
+#     forward, so an unusable value used to be re-written into the fresh record and outlive the
+#     edit that introduced it.
+R20H="$(newrepo)"
+rs "$R20H" open c --issue 980 --agent spec-auditor
+rc_is 0 "secs/adopt: the stage opened"
+SF20H="$R20H/.review-stage/issue-980/c.stage"
+PLANT_FIELD "$SF20H" spawned-epoch 18446744073709551616 \
+  "secs/adopt: the unusable prior epoch landed in the record (asserted, not assumed)"
+rs "$R20H" open c --issue 980 --agent spec-auditor --force
+rc_is 0 "secs/adopt: --force still re-opens the stage"
+has "the clock restarts from now" "secs/adopt: and it SAYS the clock restarted — a silently reset clock is what the --force path exists not to do"
+E20H="$(LC_ALL=C sed -n 's/^spawned-epoch:[[:space:]]*//p' "$SF20H" 2>/dev/null | LC_ALL=C head -1)"
+case "$E20H" in
+  18446744073709551616) bad "secs/adopt: the unusable epoch was ADOPTED into the fresh record — the fabrication outlives the edit" ;;
+  "" | *[!0-9]* ) bad "secs/adopt: the fresh record's spawned-epoch is not a number ('$E20H')" ;;
+  *) ok "secs/adopt: the fresh record carries a real clock reading, not the unusable one" ;;
+esac
+rs "$R20H" status c --issue 980
+FIELD_IS "past-deadline=no" "secs/adopt: and status measures a restarted clock rather than 56 years of fabricated elapsed time"
+
+# (h) STRUCTURAL. The point of round 8 is ONE predicate at every such boundary, not four local
+#     patches — so the shipped script is asserted to HAVE that predicate, to declare its bound
+#     ONCE, and to route every fixed-width consumer of a record/argv value through it. Counted on
+#     EXECUTABLE lines only (`^[^#]*`), because the comments quote the symbol by name and a comment
+#     is not a call — the shape section 19 already uses.
+N20_DEF="$(LC_ALL=C grep -c '^int_is_comparable()' "$RS" || true)"
+if [ "$N20_DEF" = "1" ]; then
+  ok "secs/structural: int_is_comparable is defined EXACTLY once — one predicate, not a family"
+else
+  bad "secs/structural: int_is_comparable is defined $N20_DEF times (want 1)"
+fi
+N20_BOUND="$(LC_ALL=C grep -c '^MAX_INT_DIGITS=' "$RS" || true)"
+if [ "$N20_BOUND" = "1" ]; then
+  ok "secs/structural: the bound is declared ONCE, as a named constant — never a literal at each site"
+else
+  bad "secs/structural: MAX_INT_DIGITS is declared $N20_BOUND times (want 1)"
+fi
+# COUNTED AS OCCURRENCES, NOT LINES: two of the gates test BOTH operands on one `&&` line, and a
+# gate that dropped one operand would leave the line count unchanged — which is the whole defect
+# class one level up (`now_epoch`'s own output was the unvalidated operand). SEVEN is the
+# enumeration: argv (1), both operands of the elapsed subtraction (2), both operands of the
+# past-deadline comparison (2), the adopted prior epoch (1), the reopen counter (1).
+N20_CALLS="$(LC_ALL=C grep '^[^#]*int_is_comparable ' "$RS" | LC_ALL=C grep -o 'int_is_comparable ' | LC_ALL=C grep -c . || true)"
+if [ "$N20_CALLS" -ge 7 ]; then
+  ok "secs/structural: $N20_CALLS executable call(s) route through it — argv, both subtraction operands, both comparison operands, the adopted epoch and the counter"
+else
+  bad "secs/structural: only $N20_CALLS executable int_is_comparable call(s) — the boundaries this round enumerated are 7"
+fi
+# AND THE SUBJECTS ARE STILL THERE, i.e. each fixed-width operation this round gated still exists.
+# Named per value, so a red says WHICH boundary's subject moved and the guard above went vacuous.
+for pair in 'STAGE_ELAPSED" -gt "$STAGE_DEADLINE:the past-deadline comparison' \
+  'now - epoch:the elapsed-time subtraction' \
+  'prior_count + 1:the reopen-count increment'; do
+  needle="${pair%%:*}"; label="${pair#*:}"
+  if LC_ALL=C grep -qF "$needle" "$RS"; then
+    ok "secs/structural: $label is still present, so the routing assertion above has a subject"
+  else
+    bad "secs/structural: $label is GONE from the script — this round's subject moved and the guard above is now vacuous"
+  fi
+done
 # --- case floor ---------------------------------------------------------------
 # A CASE FLOOR (#3544). A span-replacing edit once silently deleted FOUR cases from a suite
 # that then reported `failed: 0` at 102 instead of 105 — a green tally over a shrunken suite,
@@ -2623,7 +2853,23 @@ fi
 # Every branch of every conditional in all three sections emits the SAME NUMBER of assertions
 # (the `[ ! -f "$EBS" ]` fallback emits 6 bads against 6 oks; each precondition emits exactly one
 # either way), so the EXACT floor holds by the two shapes recorded above.
-ASSERT_FLOOR=519
+#
+# ROUND 8 (roborev job 379) MOVES IT TO 578. Section 20 adds 59: a validated-as-digits value is
+# not a COMPARABLE one, so the bound is affirmative at every boundary where a value from argv or
+# from the stage record reaches a fixed-width operation. Five routes, each with the plant asserted
+# to have landed — the invoker flag (refused at the boundary, exit 64, nothing written) with BOTH
+# sides of the 10-digit bound pinned; the record's `deadline-secs` read back (`past-deadline`
+# reads `unknown`, and EVERY line of the status block is asserted to carry the `REVIEW-STAGE: `
+# anchor, so a future shell error with different text is caught too); `spawned-epoch`'s silent
+# `$(( ))` WRAP and its OCTAL reading (`elapsed=unknown`, on the status AND verdict lines);
+# `reopen-count`'s wrap, which was WRITTEN BACK into the record; and the `--force` adoption path,
+# where an unusable epoch used to outlive the edit that introduced it. Plus three CONTROLS (`0`,
+# `1`, `1800` still accepted; an ordinary record still MEASURES; a real comparison still answers)
+# and six structural pins. `FIELD_IS` compares an EXACT space-delimited field rather than a
+# substring, because `reopen-count=1` is a prefix of `reopen-count=16` and a `has` assertion would
+# have passed on the octal defect this section is about. Every assertion is unconditional — each
+# `if`/`case` calls exactly one of `ok`/`bad` — so the EXACT floor holds by the two shapes above.
+ASSERT_FLOOR=578
 EXECUTED=$((PASS + FAIL))
 if [ "$EXECUTED" -lt "$ASSERT_FLOOR" ]; then
   bad "CASE FLOOR: only $EXECUTED assertions executed, below the committed floor of $ASSERT_FLOOR — a section died silently, and 'failed: 0' over a shrunken suite is not a pass"

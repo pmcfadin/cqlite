@@ -618,7 +618,20 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   inside a fenced block, a glob-ish value), asserting they agree per row AND that both reach the
   EXPECTED disposition — agreement alone is satisfiable by both being wrong in the same way.
   `status` reports
-  elapsed/deadline and is **advisory, never a verdict input**. `NOT-RUN` always names ONE OF SEVEN causes
+  elapsed/deadline and is **advisory, never a verdict input** — **which is not licence to answer from
+  a comparison that never happened (round 8)**: bash's `[ -gt ]` is a FIXED-WIDTH int64 comparison,
+  so an ALL-DIGIT `--deadline-secs` wider than int64 was accepted at the boundary and leaked a raw
+  `integer expression expected` onto stderr, OUTSIDE the `REVIEW-STAGE: ` anchor, then reported the
+  permissive `past-deadline=no`; `$(( ))` is worse because it does not fail at all but **WRAPS
+  SILENTLY**, so a record's `spawned-epoch` produced `elapsed=1788315330` (56 years, for a stage
+  opened a second earlier) and a `reopen-count` wrap was **written back into the record**, while a
+  zero-padded value is read as OCTAL by `$(( ))` and DECIMAL by `[ ]`. **Being digits is not being
+  comparable**: ONE predicate (`int_is_comparable`, bound `MAX_INT_DIGITS = 10` — ~317 years as a
+  duration, the year 2286 as an epoch) gates all 7 boundaries where argv or a stage-record value
+  reaches a fixed-width operation, INCLUDING the clock's own `date -u +%s` reading, which nothing
+  else validates. Out of bound from argv is a NAMED usage refusal that writes nothing; from the
+  record it is `elapsed=unknown` / `past-deadline=unknown`, with the record's own text still
+  DISPLAYED verbatim so a hand edit stays visible in the audit trail. `NOT-RUN` always names ONE OF SEVEN causes
   (`no report written`, `report absent`, `report unreadable`, `report empty`,
   `report ungrammatical: <what>`, `stage never opened`, `stage record unreadable: <what>`), because the operator action differs per cause —
   `report unreadable` is its own cause rather than folded into `report empty` (whose fix is the AGENT,

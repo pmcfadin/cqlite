@@ -215,6 +215,46 @@ Three further declared limits of the mechanism itself:
   `REVIEW-STAGE: ` anchor — and then took the permissive `past-deadline=no` branch, an answer derived
   from a comparison that never ran. Only DIGITS are compared now; everything else is
   `past-deadline=unknown`.
+- **A VALIDATED-AS-DIGITS VALUE IS NOT A COMPARABLE ONE, and `$(( ))` is the worse half (round 8).**
+  Round 7 closed the non-digit route above and left the class open, because bash's `[ -gt ]` is a
+  **FIXED-WIDTH (int64) comparison**: an ALL-DIGIT value above `9223372036854775807` is refused with
+  the same raw `integer expression expected`, and the enclosing `if` then takes its ELSE branch. So
+  `--deadline-secs 9999999999999999999999999` was ACCEPTED at the boundary and surfaced two
+  subcommands later as *somebody else's shell error* plus `past-deadline=no`. `$(( ))` does not fail
+  at all — **it WRAPS SILENTLY** — so the same class read out of the stage record produced FABRICATED
+  numbers with no diagnostic anywhere: `spawned-epoch: 18446744073709551616` yielded
+  `elapsed=1788315330` (56 years, for a stage opened one second earlier) with `past-deadline=yes` and
+  a `PAST DEADLINE` note, and `reopen-count: 99999999999999999999` wrapped to `7766279631452241920`
+  **and was written back into the record**. Leading zeros belong to the same defect from the other
+  side: `$(( 010 ))` is **OCTAL** (8) while `[ 010 -gt 9 ]` is **DECIMAL** — one value with two
+  readings inside one script, so `spawned-epoch: 01756000000` reported 48 years of elapsed time.
+  The fix is **ONE predicate**, `int_is_comparable`, at **every** boundary where a value from argv or
+  from the stage record reaches a fixed-width operation — 7 call sites: the flag, both operands of
+  the elapsed subtraction, both operands of the past-deadline comparison, the epoch `--force` copies
+  forward, and the reopen counter. The bound is `MAX_INT_DIGITS = 10` (≤ `9999999999`): as a
+  duration ~317 years, as a unix epoch the year 2286, both comfortably beyond legitimate use while
+  leaving nine orders of magnitude of headroom under int64. **`0` is accepted** — round 7's L3
+  records `deadline=0` as a legitimate emitter state, so a blanket leading-zero refusal would red on
+  correct input. Refused values are a NAMED usage error at the boundary (`--deadline-secs`, exit 64,
+  nothing written) or the honest `elapsed=unknown` / `past-deadline=unknown` on the read side.
+  **`status` is advisory and decides nothing, and that is not licence to answer from an unperformed
+  comparison**: `no` is the permissive answer, and a permissive answer derived from a comparison that
+  never happened is this repository's standing prohibition, advisory or not.
+  **`now_epoch()`'s own output is checked on the same terms**, not trusted: it is `date -u +%s` and
+  is validated nowhere else, so an unusable clock reading would have produced `elapsed=0` — a
+  fabricated measurement indistinguishable from a stage opened this second. **The record's own text
+  is still DISPLAYED verbatim** (routed through `field_value`), so a hand edit stays visible in the
+  audit trail; what is affirmative is the COMPARISON, not the display.
+  Audited with it: **19 distinct numeric inputs across 62 fixed-width sites in the two scripts, 6
+  affected, all in `review-stage.sh`.** `premerge-assert.sh` has none — every operand there is a
+  string LENGTH, a script flag, or an awk line counter that `gate_parse_file`/`c_parse_verdict`
+  already validate affirmatively as digits and that is bounded by the summary file's line count, so
+  it cannot be an arbitrary digit string. Its `elapsed=`/`deadline=` grammar check (round 7's L3)
+  is **deliberately NOT narrowed to this bound**: it never COMPARES those values, and the emitter can
+  legitimately still print an incomparable `deadline=` read out of a hand-edited record — narrowing
+  it would red on real emitter output, which is L3's own derived-from-the-emitter rule. `--issue`
+  is the other unbounded digit string and is **correctly** unbounded: nothing compares it, it is a
+  path component and a string.
 - **The deadline is advisory and changes nothing.** A late report is still a report; a stage
   silent inside its deadline is still `NOT-RUN`. Letting a clock decide would add a clock to a
   question already answerable from content, and would fail a slow-but-real review.

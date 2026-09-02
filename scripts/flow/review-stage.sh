@@ -252,10 +252,16 @@
 # a report; a stage that is silent inside its deadline is still `NOT-RUN`. Letting the clock
 # decide would add a clock to a question already answerable from CONTENT, and would fail a
 # slow-but-real review. `status` therefore exits 0 for every state it can measure — reading
-# status must not be able to decide anything.
+# status must not be able to decide anything. ADVISORY IS NOT LICENCE TO ANSWER FROM AN
+# UNPERFORMED COMPARISON, though: an `elapsed` or `deadline` this tool cannot COMPARE (see
+# `int_is_comparable`) reports `elapsed=unknown` / `past-deadline=unknown`, never the permissive
+# `no` (#3751 round 8).
 #
 # SUBCOMMANDS
 #   open  <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--force]
+#         <S> is at most MAX_INT_DIGITS (10) decimal digits with no leading zero — ~317 years,
+#         comfortably beyond any review timeout, and bounded so this tool can always compare it
+#         (#3751 round 8). A wider or zero-padded value is a USAGE refusal, exit 64.
 #         Pre-stamp the sentinel BEFORE spawning. Refuses an already-open stage without
 #         --force; --force NEVER resets `spawned-at` (a second spawn silently restarting the
 #         clock would make the deadline unreadable, and a re-spawn is exactly what a lane
@@ -593,11 +599,63 @@ validate_issue() {
   printf '%s\n' "$n"
 }
 
+# THE WIDEST INTEGER THIS TOOL WILL COMPARE OR ADD (#3751 round 8). 10 decimal digits, i.e. at
+# most 9999999999. Read as a DURATION that is ~317 years; read as a UNIX EPOCH it is the year
+# 2286 — both comfortably beyond any legitimate use of a review timeout whose default is 1800s —
+# while leaving nine orders of magnitude of headroom under int64, so an accepted value can ALWAYS
+# be compared by `[ -gt ]` and `$(( a - b ))` on two accepted values can never wrap.
+MAX_INT_DIGITS=10
+
+# int_is_comparable <value> — is this a value bash can actually compare and add? 0 = yes.
+#
+# A VALIDATED-AS-DIGITS VALUE IS NOT A COMPARABLE ONE (#3751 round 8, roborev job 379).
+# `validate_secs` accepted an arbitrarily long digit string and `status` then handed it to bash's
+# FIXED-WIDTH `[ -gt ]`, which above 9223372036854775807 REFUSES the operand with its own
+# `integer expression expected` on STDERR — a raw shell diagnostic OUTSIDE the `REVIEW-STAGE: `
+# anchor every line of that block carries — and the enclosing `if` then took its ELSE branch, so
+# `past-deadline` reported `no` from a comparison that never happened. Measured on the shipped
+# script: `--deadline-secs 9999999999999999999999999` was ACCEPTED and `status` printed
+# `review-stage.sh: line 1726: [: 9999999999999999999999999: integer expression expected` beside
+# `past-deadline=no`.
+#
+# `$(( ))` IS WORSE, WHICH IS WHY THIS IS ONE PREDICATE AND NOT ONE PATCH: it does not fail at
+# all, it WRAPS SILENTLY. A record carrying `spawned-epoch: 18446744073709551616` produced
+# `elapsed=1788315330` — 56 years of elapsed time for a stage opened one second earlier — with
+# `past-deadline=yes`, a `PAST DEADLINE` note, and NO diagnostic anywhere; and
+# `reopen-count: 99999999999999999999` wrapped to `7766279631452241920` and was WRITTEN BACK into
+# the record. So the bound is AFFIRMATIVE and is checked at every boundary where a value from argv
+# or from the stage record reaches a fixed-width operation — never a test for the values that
+# happen to break.
+#
+# LEADING ZEROS ARE REFUSED WITH IT, because one value then has TWO READINGS inside one script:
+# `$(( 010 ))` is OCTAL (8) while `[ 010 -gt 9 ]` is DECIMAL (true) — both measured on this box.
+# A value read two ways is refused rather than normalised. `0` itself is accepted: round 7's L3
+# records `deadline=0` (from `--deadline-secs 0`) as a legitimate emitter state, so refusing every
+# value that starts with a zero would red on correct input.
+#
+# It NEVER dies and prints nothing, so it is safe to call from any `if`/`&&` in the parent shell
+# (round 2's B6 rule: a `die` inside a command substitution cannot reach the top level).
+int_is_comparable() {
+  local v="${1:-}"
+  case "$v" in
+    "" | *[!0-9]* ) return 1 ;;
+    0 ) return 0 ;;
+    0* ) return 1 ;;
+  esac
+  [ "${#v}" -le "$MAX_INT_DIGITS" ] || return 1
+  return 0
+}
+
 validate_secs() {
   local s="${1:-}" flag="${2:---deadline-secs}"
   case "$s" in
     "" | *[!0-9]* ) die_usage "$flag must be a non-negative integer number of seconds, got '$s'" ;;
   esac
+  # DIGITS ARE NOT ENOUGH — REFUSED AT THE BOUNDARY, BY NAME (#3751 round 8). Accepting a value
+  # this tool cannot compare only moves the failure to `status`, where it surfaced as a raw bash
+  # diagnostic outside the anchored block plus a permissive `past-deadline=no`. See
+  # `int_is_comparable` for the measurement and for why leading zeros go with it.
+  int_is_comparable "$s" || die_usage "$flag must be at most $MAX_INT_DIGITS digits and must not have a leading zero (got '$s'). A deadline is a review timeout in seconds: $MAX_INT_DIGITS digits is ~317 years, comfortably beyond any legitimate use, and a wider value is one this tool cannot compare without leaking a shell diagnostic, while a zero-padded one is read as OCTAL by \$(( )) and as DECIMAL by [ ]"
   printf '%s\n' "$s"
 }
 
@@ -1157,17 +1215,30 @@ cmd_open() {
       spawned_iso="$prior_iso"
       local prior_epoch
       prior_epoch="$(read_field "$sfile" spawned-epoch)"
-      case "$prior_epoch" in
-        "" | *[!0-9]* ) note "the existing stage record has no readable spawned-epoch; the clock restarts from now" ;;
-        *) spawned_epoch="$prior_epoch" ;;
-      esac
+      # COMPARABLE, NOT MERELY NUMERIC (#3751 round 8). This value is copied FORWARD into the
+      # fresh record, so an out-of-range or zero-padded one used to be re-written and outlive the
+      # edit that introduced it — every later `status` then subtracted it in `$(( ))`, which
+      # wraps silently. An unusable prior clock takes the same branch an absent one takes: the
+      # clock restarts, and it SAYS so.
+      if int_is_comparable "$prior_epoch"; then
+        spawned_epoch="$prior_epoch"
+      else
+        note "the existing stage record has no usable spawned-epoch (absent, non-numeric, zero-padded or too wide for this tool to subtract without wrapping); the clock restarts from now"
+      fi
     fi
     local prior_count
     prior_count="$(read_field "$sfile" reopen-count)"
-    case "$prior_count" in
-      "" | *[!0-9]* ) reopen_count=1 ;;
-      *) reopen_count=$((prior_count + 1)) ;;
-    esac
+    # SAME PREDICATE, SAME REASON (#3751 round 8): this one goes through `$(( prior_count + 1 ))`,
+    # and a record carrying `reopen-count: 99999999999999999999` wrapped to
+    # `7766279631452241920`, which was then WRITTEN BACK — a fabricated number made durable, on a
+    # field that exists to be read in an audit trail. `017` was read as OCTAL and became 16.
+    # An unusable counter falls back to the value an absent one gets; it is never a reason to
+    # refuse a spawn.
+    if int_is_comparable "$prior_count"; then
+      reopen_count=$((prior_count + 1))
+    else
+      reopen_count=1
+    fi
   fi
 
   # A FRESH NONCE FOR EVERY OPEN, AND THAT IS THE WHOLE FIX (#3751 round 5 J1, round 6 K2).
@@ -1551,7 +1622,7 @@ STAGE_OPEN=0; STAGE_AGENT=unknown; STAGE_DEADLINE=unknown; STAGE_REPORT=""
 STAGE_SPAWNED_ISO=unknown; STAGE_ELAPSED=unknown
 STAGE_NONCE=""; STAGE_RECORD_DEFECT=""
 load_stage() {
-  local issue="$1" kind="$2" sfile epoch
+  local issue="$1" kind="$2" sfile epoch now
   sfile="$(stage_file "$issue" "$kind")"
   STAGE_NONCE=""; STAGE_RECORD_DEFECT=""
   if [ ! -f "$sfile" ]; then
@@ -1598,10 +1669,20 @@ load_stage() {
   v="$(read_field "$sfile" deadline-secs)"; [ -z "$v" ] || STAGE_DEADLINE="$v"
   v="$(read_field "$sfile" spawned-at)";    [ -z "$v" ] || STAGE_SPAWNED_ISO="$v"
   epoch="$(read_field "$sfile" spawned-epoch)"
-  case "$epoch" in
-    "" | *[!0-9]* ) STAGE_ELAPSED=unknown ;;
-    *) STAGE_ELAPSED=$(( $(now_epoch) - epoch )); [ "$STAGE_ELAPSED" -ge 0 ] || STAGE_ELAPSED=0 ;;
-  esac
+  now="$(now_epoch)"
+  # BOTH OPERANDS, AND THE BOUND IS THE POINT (#3751 round 8). `$(( ))` does not fail on an
+  # unusable operand — it WRAPS, silently — so an out-of-range or zero-padded `spawned-epoch` in
+  # the record produced a FABRICATED elapsed time on the line an operator reads (measured: 56
+  # years for a stage opened one second earlier, with `past-deadline=yes` and a `PAST DEADLINE`
+  # note). `now_epoch` is `date -u +%s`, whose output is not validated anywhere either, so an
+  # unusable clock reading is checked on the same terms rather than trusted: `elapsed` is a
+  # MEASUREMENT, and a number nobody measured is worse here than the honest `unknown`.
+  if int_is_comparable "$epoch" && int_is_comparable "$now"; then
+    STAGE_ELAPSED=$(( now - epoch ))
+    [ "$STAGE_ELAPSED" -ge 0 ] || STAGE_ELAPSED=0
+  else
+    STAGE_ELAPSED=unknown
+  fi
 }
 
 parse_kind_issue() {
@@ -1710,23 +1791,23 @@ cmd_status() {
     *) state=reported ;;
   esac
   # --- STATUS-CAUSE-MAP-END ---------------------------------------------------------------
-  # AFFIRMATIVE, NOT "is it the literal `unknown`" (#3751 round 7, L1). `STAGE_DEADLINE` is read
-  # from the stage record and is NOT validated on the read side, so a hand-edited
-  # `deadline-secs: 1800 agent=forged` fell through this guard into `[ ... -gt ... ]`, which
-  # printed bash's own `integer expression expected` onto stderr and then took the `past=no`
-  # branch — a permissive answer derived from a comparison that never happened, and a raw bash
-  # diagnostic inside a block whose every line is supposed to carry the `REVIEW-STAGE: ` anchor.
-  # Only DIGITS may be compared; everything else — `unknown` included — is `unknown`.
+  # AFFIRMATIVE, NOT "is it the literal `unknown`" (#3751 round 7, L1) — AND DIGITS ARE NOT THE
+  # BOUND (#3751 round 8, roborev job 379). `STAGE_DEADLINE` is read from the stage record and is
+  # deliberately NOT validated on the read side (the record's own text is DISPLAYED, routed
+  # through `field_value`, so a hand edit stays visible in the audit trail); what has to be
+  # affirmative is this COMPARISON. Round 7 closed the non-digit half: a hand-edited
+  # `deadline-secs: 1800 agent=forged` fell into `[ ... -gt ... ]`, which printed bash's own
+  # `integer expression expected` onto stderr — a raw diagnostic inside a block whose every line
+  # is supposed to carry the `REVIEW-STAGE: ` anchor — and then took the `past=no` branch.
+  # An ALL-DIGIT value wider than int64 did exactly the same thing, because `[ ]` is a
+  # fixed-width comparison, so the gate is `int_is_comparable` (see its comment) and not a digit
+  # test. Anything it refuses — `unknown` included — is `unknown` here: `status` is ADVISORY and
+  # never a verdict input, but an advisory that answers `no` from a comparison that never ran is
+  # still wrong, and `no` is the permissive answer.
   past=unknown
-  case "$STAGE_ELAPSED" in
-    "" | *[!0-9]*) ;;
-    *)
-      case "$STAGE_DEADLINE" in
-        "" | *[!0-9]*) ;;
-        *) if [ "$STAGE_ELAPSED" -gt "$STAGE_DEADLINE" ]; then past=yes; else past=no; fi ;;
-      esac
-      ;;
-  esac
+  if int_is_comparable "$STAGE_ELAPSED" && int_is_comparable "$STAGE_DEADLINE"; then
+    if [ "$STAGE_ELAPSED" -gt "$STAGE_DEADLINE" ]; then past=yes; else past=no; fi
+  fi
 
   emit "STATUS kind=$KI_KIND issue=$KI_ISSUE state=$state elapsed=$STAGE_ELAPSED deadline=$(field_value "$STAGE_DEADLINE") past-deadline=$past agent=$(field_value "$STAGE_AGENT") spawned-at=$(field_value "$STAGE_SPAWNED_ISO") report=$(field_value "${STAGE_REPORT:-unresolved}")"
   if [ "$state" = sentinel-only ] && [ "$past" = yes ]; then

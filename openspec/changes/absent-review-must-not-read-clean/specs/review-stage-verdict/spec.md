@@ -265,6 +265,24 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
   only for the literal `unknown` let any other non-numeric value reach an integer comparison, which
   emitted a raw shell diagnostic into the anchored output block and then took the permissive branch,
   an answer derived from a comparison that never ran
+- **AND** being DIGITS SHALL NOT be treated as being COMPARABLE: bash's `[ -gt ]` is a fixed-width
+  comparison that refuses an all-digit value above int64 with the same raw shell diagnostic, and
+  `$(( ))` does not refuse at all but WRAPS SILENTLY, so a value from argv or from the stage record
+  SHALL be bounded AFFIRMATIVELY — at most a stated maximum number of decimal digits, with no
+  leading zero, since a zero-padded value is read as OCTAL by `$(( ))` and as DECIMAL by `[ ]` and
+  one value SHALL NOT have two readings inside one script
+- **AND** that bound SHALL be checked by ONE predicate at EVERY boundary where such a value reaches
+  a fixed-width operation — the flag, both operands of the elapsed subtraction (INCLUDING the
+  clock's own reading, which is validated nowhere else), both operands of the past-deadline
+  comparison, the epoch a re-open copies forward, and the reopen counter — never per-site, and never
+  as a test for the values that happen to break
+- **AND** an out-of-bound value from ARGV SHALL be a NAMED usage refusal at the boundary that writes
+  nothing, while one read from the RECORD SHALL yield `elapsed=unknown` / `past-deadline=unknown`
+  with the record's own text still DISPLAYED verbatim, so a hand edit stays visible in the audit
+  trail — what is affirmative is the COMPARISON, not the display
+- **AND** `status` being ADVISORY SHALL NOT license a permissive answer: `no` is the permissive
+  value, and a verdict-irrelevant report derived from a comparison that never happened is still
+  wrong
 
 #### Scenario: a sibling stage's PASS cannot certify C
 - **WHEN** the verdict line names a stage kind other than `c`, or omits any of

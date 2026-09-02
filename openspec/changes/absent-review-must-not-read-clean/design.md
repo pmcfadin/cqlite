@@ -41,6 +41,17 @@ pass-through. `PASS-BUT-UNMEASURED` must not satisfy a `PASS*` test.
 review-stage.sh open <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--force]
 ```
 
+- `<S>` is bounded AFFIRMATIVELY at `MAX_INT_DIGITS` (10) decimal digits with no leading zero
+  (round 8). Being digits is not being COMPARABLE: `[ -gt ]` is a fixed-width int64 comparison that
+  refuses a wider operand with a raw `integer expression expected` on stderr — outside the anchored
+  block — and then takes the permissive branch, while `$(( ))` does not refuse at all but WRAPS
+  SILENTLY, and a zero-padded value is read as OCTAL by `$(( ))` and DECIMAL by `[ ]`. Ten digits is
+  ~317 years as a duration and the year 2286 as a unix epoch, with nine orders of magnitude of
+  headroom under int64; `0` is accepted, because `deadline=0` is a legitimate emitter state. ONE
+  predicate, `int_is_comparable`, gates every boundary where such a value reaches a fixed-width
+  operation — argv, both operands of the elapsed subtraction (the clock's own reading included),
+  both operands of the past-deadline comparison, the epoch `--force` copies forward, and the reopen
+  counter.
 - The path is `<repo-root>/.review-stage/issue-<N>/<kind>.<nonce>.md` inside the worktree,
   **DERIVED, not overridable, and NONCE-BOUND**. The per-open nonce is round 5's (J1) answer to a
   defect in this section as it was first built: `--force` reset the report and re-stamped `head-sha:`

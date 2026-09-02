@@ -1135,7 +1135,19 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   inside a fenced block, a glob-ish value) and asserts they agree per row AND reach the expected
   disposition, because agreement on a wrong answer is not correctness and a second
   implementation's correctness is only knowable by testing it against the first; `status` reports elapsed/deadline and is **advisory, never a
-  verdict input**. `NOT-RUN` always names ONE OF SEVEN causes (`no report written`, `report absent`,
+  verdict input** — **which is not licence to answer from a comparison that never happened (#3751
+  round 8)**: bash's `[ -gt ]` is a FIXED-WIDTH int64 comparison, so an ALL-DIGIT `--deadline-secs`
+  wider than int64 was accepted at the boundary and leaked a raw `integer expression expected` onto
+  stderr, OUTSIDE the `REVIEW-STAGE: ` anchor, then reported the permissive `past-deadline=no`;
+  `$(( ))` is worse because it does not fail at all but **WRAPS SILENTLY**, so a record's
+  `spawned-epoch` yielded `elapsed=1788315330` (56 years, for a stage opened a second earlier) and
+  a `reopen-count` wrap was **written back**, while a zero-padded value is read as OCTAL by `$(( ))`
+  and DECIMAL by `[ ]`. **Being digits is not being comparable**: ONE predicate
+  (`int_is_comparable`, bound `MAX_INT_DIGITS = 10` — ~317 years, or the year 2286 as an epoch)
+  gates all 7 boundaries where argv or a record value reaches a fixed-width operation, INCLUDING
+  the clock's own `date -u +%s` reading, which nothing else validates. Out of bound from argv is a
+  named usage refusal that writes nothing; from the record it is `elapsed=unknown` /
+  `past-deadline=unknown`, with the record's own text still DISPLAYED so a hand edit stays visible. `NOT-RUN` always names ONE OF SEVEN causes (`no report written`, `report absent`,
   `report unreadable`, `report empty`, `report ungrammatical: <what>`, `stage never opened`,
   `stage record unreadable: <what>`) because
   the operator action differs per cause — `report unreadable` was added in round 2 rather than folded
