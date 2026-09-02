@@ -908,7 +908,8 @@ machine + heartbeat age (issue #2089). Interpretation:
 otherwise** — owner ruling 2026-09-01 on #3548 (option C, descope and document; completes #3393).
 
 **This section is the CANONICAL statement of the two board signatures.** Every other site — the
-`dead-lanes` `--help`, the recovery table above, `CLAUDE.md`, the website delivery-pipeline page —
+`dead-lanes` section of `claim-heartbeat.sh --help` (there is no subcommand-level help), the recovery
+table above, `CLAUDE.md`, the website delivery-pipeline page —
 carries at most a one-line summary and a pointer here. Five review rounds on #3548 (jobs 38, 40, 41,
 47, 55) were all propagation failures of one duplicated statement, so the duplication was removed
 rather than guarded. Edit the signatures HERE and nowhere else.
@@ -1017,10 +1018,11 @@ So, in this order:
    SUPERVISOR fleet**. Run it **on the box in question**: a PID is only checkable where it runs. A row
    annotated `open-pr=yes` is an **orphaned endgame** (#2499): adopt it, never reap it. Since #3393's
    per-lane claim refs every lane on a multi-lane box is reported independently, so this no longer
-   covers just one of them. **On a supervisor-less `/drive-issue` box this step reports nothing** —
-   the claim namespace it reads is empty (#3548) — so skip to step 3 and reconcile the board by hand,
-   following *Lane liveness on a supervisor-less `/drive-issue` fleet*, which PRECEDES this procedure
-   (named by heading rather than by direction, so a reordering cannot silently invert the pointer).
+   covers just one of them. On a supervisor-less `/drive-issue` box, read
+   *Lane liveness on a supervisor-less `/drive-issue` fleet* — which PRECEDES this procedure, named by
+   heading so a reordering cannot invert the pointer — for what this command's subject set is here;
+   any rows it does produce (leftover or manually `stamp`ed refs) are worth inspecting, and the manual
+   board reconciliation in that section applies either way.
 3. **`df -h`** — a full disk is the other resource-exhaustion story that surfaces as a confusing
    failure (#3379), and it is equally cheap to rule out.
 4. **Only then** treat the instance as broken. Note that a soft `reboot-instances` may be

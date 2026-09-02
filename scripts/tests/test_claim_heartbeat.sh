@@ -3164,19 +3164,27 @@ $nsd_out"
 fi
 
 # ===========================================================================
-echo "TEST 83: ONE canonical signature statement; every other site POINTS at it (#3548)"
+echo "TEST 83: ONE canonical signature statement, and no site contradicts it (#3548)"
 # ===========================================================================
 # CONSOLIDATION, NOT A CLEVERER GUARD (roborev job 58). One statement about the two board signatures
 # was duplicated across five sites and produced a review finding at jobs 38, 40, 41, 47 and 55 — every
 # one a PROPAGATION failure, i.e. the duplication WAS the defect. The previous version of this case
 # pinned the same phrases in several files, which could not see drift BETWEEN two occurrences inside
 # one file (it flattened each file to a single blob), and a per-section guard would only detect what
-# should not be possible. So the statement now lives in ONE place and this case asserts that shape:
+# should not be possible. So the statement now lives in ONE place and this case asserts exactly two
+# things — no more, and the second bullet is what it does NOT assert:
 #   * the CANONICAL location (docs/development/fleet-runbook.md, "Lane liveness on a supervisor-less
 #     /drive-issue fleet") carries the FULL content, and
-#   * every POINTING site carries a pointer to it, and
 #   * NO covered site re-asserts a definite label for either signature (the plant-verified negative
-#     half, kept as-is: needles grepped from the files' real text, narrow, symmetric across (a)/(b)).
+#     half: needles grepped from the files' real text, narrow, symmetric across (a)/(b)).
+#
+# POINTER INTEGRITY IS DELIBERATELY NOT GUARDED — a decision, not an oversight (jobs 59, 61). Three
+# assertions requiring each site to point here were DELETED; do not restore them. This case reads each
+# file as ONE blob, so a pointer assertion matches anywhere in the file and PASSES while the pointer is
+# broken: measured, 209 passed / 0 failed with the pointer deleted outright from CLAUDE.md and the
+# website page, satisfied by an unrelated citation. A broken pointer is a nit; a guard with known false
+# passes is worse than none (this repo has removed two for that reason). Job 61 caught this comment
+# still CLAIMING that coverage after the assertions were gone.
 #
 # DECLARED GAP, stated rather than implied: the `cmd_dead_lanes` SEAM COMMENT is NOT covered. It sits
 # below ---END-HELP--- so `--help` cannot reach it, and reading it would mean parsing the script's
