@@ -153,8 +153,12 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   contract requires the party that LAUNCHED the run, which this script is not), and it cannot prove
   the summary came from a genuine gate rather than a hand-written file — a hostile invoker is out of
   the threat model, since whoever runs the script controls the process. What it closes is **accident
-  and drift**, which is the observed failure mode. `dirty:` is reported in the success line, not
-  enforced (failing on it is proposed separately in #3648).
+  and drift**, which is the observed failure mode. `dirty:` is reported in the success line **and
+  enforced** (#3648): the gate-of-record block — and, in Case B, the delta block too — must read
+  `dirty: no`, matched affirmatively, so an absent or unrecognised value REFUSES rather than being read
+  as clean. A `dirty: yes` run certified the sha PLUS uncommitted tracked edits, which `commit:`/
+  `tree-start:` cannot distinguish from the clean tree. No env opt-out exists and none may be added — a
+  dirty tree is always re-gateable.
   **The OPTIONAL fourth argument is the only way a `--delta` re-cert can certify a merge.** #1892
   *mandates* `--delta` — "never a repeat full gate" — for a test/docs-only diff on top of a full PASS
   at anchor `X`, and mandates that the PR record BOTH blocks, so a 3-arg-only guard red on correct,
@@ -189,9 +193,20 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   path (e.g. `$(mktemp /tmp/gate-<issue>-XXXXXX.txt)`) — shared `/tmp` names get contended under
   multi-lane load, so one lane's summary can clobber or be misread as another's.
 - **Single full gate per machine — enforced mechanically (#2640).** The default posture is one full
-  gate at a time on a box: `bootstrap-agent-machine.sh` pins `CQLITE_GATE_MAX_CONCURRENCY=1`, so the
-  #1825 machine-wide cap admits exactly one full gate and the #2640 per-gate core budget hands that
-  sole gate the full core count. The gate also derives `CARGO_BUILD_JOBS` + nextest `--test-threads`
+  gate at a time on a box: `bootstrap-agent-machine.sh` persists `CQLITE_GATE_MAX_CONCURRENCY=1`
+  into `/etc/environment` — which PAM reads at session creation, so non-interactive shells see it —
+  and then **verifies from a fresh, profile-free session that the value is visible and that the gate
+  honours it** (`gate-pin: VERIFIED`, #3414), rather than trusting that the write happened. That
+  verdict is scoped to a PAM-created session, so a gate launched from a systemd unit or container
+  entrypoint is not covered by it; it also measures that the file and the session AGREE, not that the
+  file is where the session got the value, so a box setting the same value from a sudoers `env_file`
+  would read VERIFIED with an `/etc/environment` no PAM stack loads. The per-run authority stays the
+  gate's own `cpu-budget:` token.
+  A visible value the gate discards or clamps reports `gate-pin: NOT-HONOURED` — its remedy is to
+  fix the VALUE, since bootstrap never rewrites an existing one. With the
+  pin in effect the #1825 machine-wide cap admits exactly one full gate and the #2640 per-gate core
+  budget hands that sole gate the full core count; a gate that resolved its cap from the default
+  formula instead says so on its own `cpu-budget:` line as `max-concurrency=N(default)`. The gate also derives `CARGO_BUILD_JOBS` + nextest `--test-threads`
   from the slot count and wraps itself in `taskpolicy -c utility` (macOS) / `nice` (Linux), so even
   if two gates do overlap neither oversubscribes the CPU. No manual `pgrep`-serialization is needed.
 
@@ -250,6 +265,25 @@ dispatch/claim authority**: it only narrows the candidate set — the selection 
 `Status`, and the claim ref plus a fresh board read at claim time remain the sole double-work arbiter.
 flow-* skills no longer write the board-derived labels (they set board Status only; the mirror follows);
 `status:spec-review`/`status:addressing` stay transient skill-managed sub-markers the mirror does not touch.
+
+### Product first: what may sit in Ready (owner ruling 2026-09-01, #3893)
+
+The board's `Ready` column is the sole dispatch authority, so what it holds is what the fleet builds.
+On 2026-09-01 it held 9 product items against 38 delivery-tooling items, and the release lane starved
+while workers iterated on bash harnesses (22/25/32 roborev findings over 7–12 rounds on three PRs).
+The standing rule since:
+
+1. **Workers take release-milestoned product items first.** Tooling (gate, roborev, claim, bootstrap,
+   fleet, telemetry, coord) is taken only when no product item is `Ready`, or the item is blocking.
+2. **A tooling issue reaches `Ready` only if it** caused a false PASS or the merge of bad code, blocked
+   a lane for more than an hour, or recurred twice — cited in the body. Everything else is `Backlog`,
+   a one-line doctrine note, or nothing. "Well-scoped" is not sufficient.
+3. **Scripts get a two-round review cap.** Round-3 roborev findings on `scripts/**`, `.claude/**`,
+   `.github/**` or `docs/reports/*-artifacts/**` are disposed (one follow-up issue, a deferral marker
+   on the merits), never fixed — except hangs and false verdicts, which are always fixed.
+4. **Tooling is feature-complete for the release.** A tooling change needs a rule-2 justification.
+5. **In-flight tooling PRs finish on their merits**; nothing new is promoted until the product queue
+   is empty. Retro metric: product share of merged PRs, target ≥ 70 %.
 
 ## The claim protocol (no duplicate work)
 
@@ -434,6 +468,22 @@ because the fail-open defect family clustered in that exit-0 path, and being wro
 It claims nothing about lanes that never stamped (a lane run with `CLAIM_CMD=""` is invisible) and
 nothing about other machines — a PID is only checkable where it runs, so **run it ON the suspect
 box**.
+
+**AND ON A SUPERVISOR-LESS FLEET IT ANSWERED ABOUT THE EMPTY SET — supervisor fleets only, DESCOPED
+by owner ruling 2026-09-01 on #3548 (option C; completes #3393).** The subject set is
+`refs/lane-claims/*` plus the legacy `refs/machine-claims/*`, and the only in-tree CALLER that creates
+or refreshes either is `worker-supervisor.sh` (`stamp` is a public subcommand and can be invoked directly). This fleet runs `/drive-issue` lanes, so when #3548 was measured the command
+had no subject and exited 1 — persisted or manually `stamp`ed refs can still produce rows, and either
+way **1 means "nothing was reported", never a clean bill of health.** The two *populated* namespaces
+are deliberately not read, both refusals measured: `refs/claims/issue-<N>` records the transient
+claiming shell's pid (dead while its lane runs), and `refs/heartbeats/<machine>` is single-slot per
+machine. **AC4** survives as a counterfactual: were a later change ever to read a non-refreshing
+carrier, a stale pid there must abstain rather than yield `DEAD-*`.
+
+**Everything else is stated once, not here.** What lane liveness on this fleet actually rests on, and
+both board signatures — neither of which is a verdict — live in
+`docs/development/fleet-runbook.md` → *Lane liveness on a supervisor-less `/drive-issue` fleet*. Seven
+review rounds on #3548 were propagation failures of duplicated prose, so nothing restates it.
 
 A suspected dead lane still has a diagnostic **order, and it matters** — full procedure in
 `docs/development/fleet-runbook.md`. The one line worth memorising: when a box accepts TCP but sends no SSH

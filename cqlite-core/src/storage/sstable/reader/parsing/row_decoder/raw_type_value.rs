@@ -41,18 +41,16 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let text_len = text_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + text_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need {} bytes for text, only {} available",
-                        column_name,
-                        text_len,
-                        data.len() - offset
-                    )));
-                }
+                let text_len = checked_vuint_length(
+                    text_len,
+                    data.len() - offset,
+                    "Frozen element",
+                    column_name,
+                    "text",
+                )?;
 
                 let text_bytes = &data[offset..offset + text_len];
                 std::str::from_utf8(text_bytes)
@@ -103,18 +101,16 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let text_len = text_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + text_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need {} bytes for text, only {} available",
-                        column_name,
-                        text_len,
-                        data.len() - offset
-                    )));
-                }
+                let text_len = checked_vuint_length(
+                    text_len,
+                    data.len() - offset,
+                    "Frozen element",
+                    column_name,
+                    "text",
+                )?;
 
                 let text_bytes = &data[offset..offset + text_len];
                 std::str::from_utf8(text_bytes).map_err(|e| {
@@ -245,21 +241,25 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let date_len = date_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if date_len != 4 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': expected date length 4, got {}",
-                        column_name, date_len
-                    )));
-                }
+                // #3848: compare the RAW `u64` against the required width. A
+                // `date_len as usize` first would let `(1 << 32) + 4` pass the
+                // `== 4` test on a 32-bit target (truncation is chosen, not random).
+                let date_len = checked_vuint_exact_length(
+                    date_len,
+                    &[4],
+                    "Frozen element",
+                    column_name,
+                    "date",
+                )?;
 
-                if offset + 4 > data.len() {
+                if date_len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 4 bytes for date, only {} available",
+                        "Frozen element '{}': need {} bytes for date, only {} available",
                         column_name,
+                        date_len,
                         data.len() - offset
                     )));
                 }
@@ -284,21 +284,23 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let time_len = time_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if time_len != 8 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': expected time length 8, got {}",
-                        column_name, time_len
-                    )));
-                }
+                // #3848: raw-`u64` width check before the narrowing (see `date`).
+                let time_len = checked_vuint_exact_length(
+                    time_len,
+                    &[8],
+                    "Frozen element",
+                    column_name,
+                    "time",
+                )?;
 
-                if offset + 8 > data.len() {
+                if time_len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
-                        "Frozen element '{}': need 8 bytes for time, only {} available",
+                        "Frozen element '{}': need {} bytes for time, only {} available",
                         column_name,
+                        time_len,
                         data.len() - offset
                     )));
                 }
@@ -325,18 +327,16 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let duration_len = duration_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + duration_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need {} bytes for duration, only {} available",
-                        column_name,
-                        duration_len,
-                        data.len() - offset
-                    )));
-                }
+                let duration_len = checked_vuint_length(
+                    duration_len,
+                    data.len() - offset,
+                    "Frozen element",
+                    column_name,
+                    "duration",
+                )?;
 
                 // Parse three VInt components from the duration_len bytes
                 let duration_bytes = &data[offset..offset + duration_len];
@@ -400,18 +400,19 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let len = len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if len != 4 && len != 16 {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': invalid inet length {}, expected 4 or 16",
-                        column_name, len
-                    )));
-                }
+                // #3848: raw-`u64` width check before the narrowing (see `date`).
+                let len = checked_vuint_exact_length(
+                    len,
+                    &[4, 16],
+                    "Frozen element",
+                    column_name,
+                    "inet",
+                )?;
 
-                if offset + len > data.len() {
+                if len > data.len().saturating_sub(offset) {
                     return Err(Error::corruption(format!(
                         "Frozen element '{}': need {} bytes for inet, only {} available",
                         column_name,
@@ -435,18 +436,16 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let blob_len = blob_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + blob_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need {} bytes for blob, only {} available",
-                        column_name,
-                        blob_len,
-                        data.len() - offset
-                    )));
-                }
+                let blob_len = checked_vuint_length(
+                    blob_len,
+                    data.len() - offset,
+                    "Frozen element",
+                    column_name,
+                    "blob",
+                )?;
 
                 let blob_bytes = crate::storage::sstable::reader::value_borrow::borrow_active(
                     &data[offset..offset + blob_len],
@@ -491,18 +490,16 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let varint_len = varint_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + varint_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need {} bytes for varint, only {} available",
-                        column_name,
-                        varint_len,
-                        data.len() - offset
-                    )));
-                }
+                let varint_len = checked_vuint_length(
+                    varint_len,
+                    data.len() - offset,
+                    "Frozen element",
+                    column_name,
+                    "varint",
+                )?;
 
                 let varint_bytes = crate::storage::sstable::reader::value_borrow::borrow_active(
                     &data[offset..offset + varint_len],
@@ -519,18 +516,16 @@ impl V5CompressedLegacyParser {
                         column_name, e
                     ))
                 })?;
-                let total_len = total_len as usize;
                 let bytes_consumed = data[offset..].len() - remaining.len();
                 offset += bytes_consumed;
 
-                if offset + total_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Frozen element '{}': need {} bytes for decimal, only {} available",
-                        column_name,
-                        total_len,
-                        data.len() - offset
-                    )));
-                }
+                let total_len = checked_vuint_length(
+                    total_len,
+                    data.len() - offset,
+                    "Frozen element",
+                    column_name,
+                    "decimal",
+                )?;
 
                 if total_len < 4 {
                     return Err(Error::corruption(format!(
@@ -737,23 +732,17 @@ impl V5CompressedLegacyParser {
                         // Empty field
                         tracing::debug!("Frozen UDT field '{}' is empty", field_def.name);
                         Some(Self::create_empty_value_for_type(&field_def.field_type))
-                    } else if field_len < 0 {
-                        // Validation: reject other negative values
-                        return Err(Error::corruption(format!(
-                            "Frozen UDT field '{}': invalid negative field length {}",
-                            field_def.name, field_len
-                        )));
                     } else {
-                        // Field with data
-                        let field_len = field_len as usize;
-                        if current_offset + field_len > udt_data.len() {
-                            return Err(Error::corruption(format!(
-                                "Frozen UDT field '{}': need {} bytes but only {} available",
-                                field_def.name,
-                                field_len,
-                                udt_data.len() - current_offset
-                            )));
-                        }
+                        // Field with data. Routed through the shared guard (issue
+                        // #3612, R3-F1/N1) so this loop cannot drift from the other
+                        // three: it owns BOTH the negative rejection and the
+                        // `checked_add` bounds test.
+                        let field_len = Self::checked_component_len(
+                            field_len,
+                            &field_def.name,
+                            current_offset,
+                            udt_data.len(),
+                        )?;
 
                         let field_data = &udt_data[current_offset..current_offset + field_len];
                         current_offset += field_len;
@@ -971,15 +960,12 @@ impl V5CompressedLegacyParser {
                                     Self::parse_simple_udt_field_value(&[], &field_def.field_type)?;
                                 Some(value)
                             } else {
-                                let field_len = field_len as usize;
-                                if current_offset + field_len > udt_data.len() {
-                                    return Err(Error::corruption(format!(
-                                        "Frozen UDT field '{}' extends beyond data (need {}, have {})",
-                                        field_def.name,
-                                        field_len,
-                                        udt_data.len() - current_offset
-                                    )));
-                                }
+                                let field_len = Self::checked_component_len(
+                                    field_len,
+                                    &field_def.name,
+                                    current_offset,
+                                    udt_data.len(),
+                                )?;
 
                                 let field_data =
                                     &udt_data[current_offset..current_offset + field_len];
@@ -1109,18 +1095,16 @@ impl V5CompressedLegacyParser {
                                 column_name, e
                             ))
                         })?;
-                        let blob_len = blob_len as usize;
                         let bytes_consumed = data[offset..].len() - remaining.len();
                         offset += bytes_consumed;
 
-                        if offset + blob_len > data.len() {
-                            return Err(Error::corruption(format!(
-                                "Frozen element '{}': need {} bytes for unknown type, only {} available",
-                                column_name,
-                                blob_len,
-                                data.len() - offset
-                            )));
-                        }
+                        let blob_len = checked_vuint_length(
+                            blob_len,
+                            data.len() - offset,
+                            "Frozen element",
+                            column_name,
+                            "unknown type",
+                        )?;
 
                         let blob_bytes =
                             crate::storage::sstable::reader::value_borrow::borrow_active(
@@ -1143,18 +1127,16 @@ impl V5CompressedLegacyParser {
                             column_name, e
                         ))
                     })?;
-                    let blob_len = blob_len as usize;
                     let bytes_consumed = data[offset..].len() - remaining.len();
                     offset += bytes_consumed;
 
-                    if offset + blob_len > data.len() {
-                        return Err(Error::corruption(format!(
-                            "Frozen element '{}': need {} bytes for unknown type, only {} available",
-                            column_name,
-                            blob_len,
-                            data.len() - offset
-                        )));
-                    }
+                    let blob_len = checked_vuint_length(
+                        blob_len,
+                        data.len() - offset,
+                        "Frozen element",
+                        column_name,
+                        "unknown type",
+                    )?;
 
                     let blob_bytes = crate::storage::sstable::reader::value_borrow::borrow_active(
                         &data[offset..offset + blob_len],

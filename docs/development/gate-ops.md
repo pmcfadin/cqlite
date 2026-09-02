@@ -238,6 +238,24 @@ removes a finished issue's worktree; additionally prune stale worktrees' `target
 dirs and size the shared cache with `SCCACHE_CACHE_SIZE` (recommend `30G` on the
 10-core machine).
 
+**A single `--lite` round can be the thing that exhausts the disk.** Measured by
+another lane and reported in issue #3764: one `--lite` on a `cqlite-core/src/` diff
+grew `target/debug/deps` by **~18 GB in roughly ten minutes**, taking that box from
+34 GB to 16 GB free — because that diff shape triggers the issue #2658
+dependent-crate leg, which runs `cargo test -p <pkg> --all-targets --no-run` for
+every workspace member that directly declares a dependency on `cqlite-core`. So do
+not budget `--lite` as a cheap, disk-neutral round on a shared box. Worse, **`--lite`
+is EXEMPT from the issue #1825 gate-slot cap**, so nothing serialises that build
+against a peer's concurrent gate of record — the two compete for the same disk with
+no arbitration. There is no admission check for `--lite` today; issue #3763 owns that
+gap.
+
+**And the cost lands on the NEXT lane, not the one that spent the disk.**
+`scripts/local/worker-supervisor.sh` sets `DISK_FLOOR_GB="${DISK_FLOOR_GB:-40}"`
+(`:155`) and enforces it in `preflight_reason()` (`:3204-3208`), so the incident's end
+state — 16 GB free — is **below** that floor: nothing stopped the `--lite` that spent
+the disk, but the very next worker iteration on that box would have held on `disk`.
+
 **macOS Time Machine local-snapshot gotcha:** deleting `target/` dirs alone often
 reclaims **nothing** while a Time Machine *local snapshot* is pinning the freed
 blocks. If free space does not recover after deleting build artifacts, check and
@@ -366,6 +384,21 @@ Running many sessions/worktrees at once used to let ~15 full gates hit the CPU a
 
 - **`--lite` and `--only` runs are EXEMPT** (never queued): `--lite` is cheap, and `--only` PARTIAL runs are used by nested tooling self-tests (capping them could self-deadlock the queue).
 - **N** defaults to `max(2, floor((ncpu-2)/4))`; override with `CQLITE_GATE_MAX_CONCURRENCY`.
+- **Every SUMMARY says WHERE N came from (issue #3414)**: the `cpu-budget:` line stamps
+  `max-concurrency=N(pinned|default|invalid|clamped)` — `pinned` = the env var held a valid
+  integer >= 1, `default` = it was UNSET so N is the formula, `invalid` = it was empty or
+  non-numeric and was silently discarded for the formula, `clamped` = it was a valid integer
+  < 1 and was silently raised to 1. `3` and `3 because nothing set it` are different
+  operational facts: the whole fleet ran at `N=3` for months with the pin present in
+  `~/.bashrc` and invisible to every non-interactive shell (stock Ubuntu `.bashrc` returns
+  early when not interactive), and no artifact said so.
+- **The remedy differs by token.** `default` = no pin line at all, so
+  `bash scripts/bootstrap-agent-machine.sh --fix-gate-pin` (or `--yes`) persists one into
+  `/etc/environment`, and its `gate-pin:` line VERIFIES the result by probing a fresh
+  profile-free PAM session rather than by grepping the file it wrote. `invalid`/`clamped` =
+  the line is ALREADY there with a bad value, and bootstrap never rewrites an existing value,
+  so re-running it is a **silent no-op** — fix the VALUE by hand. Bootstrap reports that fork
+  as `gate-pin: NOT-HONOURED`.
 - **SIGKILL-safe stale-slot reaping**: each slot is an `fcntl.flock` held by a background daemon (`scripts/lib/gate_slot_daemon.py`) whose lock fd is NOT inherited by the gate's `cargo`/`nextest` children, so a killed gate releases its slot within one poll — no permanent leak/deadlock.
 - Works **across worktrees** (shared slot dir) and composes with `AGENT_GATE_JOBS` (per-gate) + `sccache`. The cap bounds the *worst case*; those cut average load / per-compile time.
 

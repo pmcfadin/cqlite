@@ -117,6 +117,8 @@
 #                                            # never read 1 as a clean bill of health.
 #                                            # A sound clean verdict is possible on
 #                                            # per-lane refs and is tracked separately.
+#                                            # SUPERVISOR FLEETS ONLY (DESCOPED, #3548) —
+#                                            # see SCOPE OF `dead-lanes` below.
 #
 # WHY `dead-lanes` IS NOT `should-reap` (issue #3393 AC3)
 #   `should-reap` is a REAP GATE, and it consults the pid ONLY AFTER age >
@@ -241,7 +243,31 @@
 #   watchdog's clothes. So this implements the same detection keyed on a signal
 #   the repository DOES own: the supervisor-authored claim ref and the pid it
 #   records (#2655). The remaining half — teaching the fleet a committed lane/
-#   session convention — needs an owner decision and is left to #3393.
+#   session convention — was left to #3393 and has since been DECIDED, not
+#   deferred: the owner DESCOPED it on 2026-09-01 (see the scope note directly
+#   below). Do not read this paragraph as an open question; it is settled.
+#
+# SCOPE OF `dead-lanes`: SUPERVISOR FLEETS ONLY — DESCOPED (owner ruling 2026-09-01 on
+# #3548, option C; completes #3393)
+#   The subject set is `refs/lane-claims/<machine>/<lane-id>` plus the legacy
+#   `refs/machine-claims/<machine>`. The only IN-TREE CALLER that CREATES OR REFRESHES either is
+#   `scripts/local/worker-supervisor.sh` (through `stamp`) — but `stamp` is a PUBLIC
+#   subcommand and can be invoked directly, so a manually stamped fleet legitimately
+#   carries refs; the legacy namespace has no current writer at all. EXIT 1 MEANS "NOTHING WAS
+#   REPORTED", NEVER a clean bill of health (#3467) — including when the subject set is
+#   empty, as it was on this fleet when #3548 was measured (see the runbook below).
+#   The two POPULATED namespaces are deliberately NOT read, and both refusals are measured:
+#   `refs/claims/issue-<N>` records the TRANSIENT CLAIMING SHELL's pid, never refreshed
+#   (measured dead while its lane ran, so it would report healthy lanes dead), and
+#   `refs/heartbeats/<machine>` is SINGLE-SLOT PER MACHINE, so N lanes overwrite each other.
+#   Being UNENUMERATED is the abstention: neither yields a row or a verdict of any kind.
+#   AC4 as a COUNTERFACTUAL: WERE a later change ever to read a NON-REFRESHING carrier, a
+#   stale pid there must never yield a `DEAD-*` verdict — it must abstain; `refs/lane-claims/*`
+#   is restamped every supervisor iteration, so `DEAD-*` there is correct.
+#   Everything else — what the fleet's liveness actually rests on, both board signatures and
+#   the measurement itself — is stated ONCE in docs/development/fleet-runbook.md, section
+#   "Lane liveness on a supervisor-less `/drive-issue` fleet". It is deliberately not
+#   restated here: seven review rounds on #3548 were propagation failures of duplicated prose.
 #
 # Run from inside the repo (any cwd under the working tree/worktree is fine —
 # this never touches the working tree or the current branch).
@@ -294,6 +320,10 @@
 set -euo pipefail
 
 prog="$(basename "$0")"
+
+# SCRIPT_HOME — this script's own directory, for locating lib/ (issue #3822). Resolved
+# from BASH_SOURCE (not $0) so it is correct whether the script is executed or sourced.
+SCRIPT_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 die_usage() { echo "$prog: $*" >&2; exit 64; }
 note()      { echo "[claim-heartbeat] $*" >&2; }
@@ -1101,161 +1131,29 @@ cmd_should_reap() {
   return 0
 }
 
-# process_start_window <pid> — echo `<earliest> <latest>` epoch seconds bracketing when <pid>
-# started, or EMPTY when it cannot be determined. Empty is a THIRD answer and is never folded
-# onto "consistent".
-#
-# DERIVED FROM ELAPSED TIME, NOT A WALL-CLOCK STRING (roborev round 3, Medium). The first cut
-# read `ps -o lstart=` and parsed it with `date -u`, but `lstart` is LOCAL wall time with no
-# zone in it, so on any non-UTC host the epoch came out shifted by the offset — MEASURED: the
-# same lstart parses 19,800s apart between UTC and Asia/Kolkata, far past the tolerance, which
-# would falsely declare a live supervisor DEAD-PID-REUSED. Elapsed seconds carry no timezone at
-# all, so the whole class is gone rather than corrected.
-#
-# AN INTERVAL, NOT A POINT (roborev round 15, Medium). `start = now - elapsed` needs `now` and
-# `elapsed` to refer to the same instant, and they cannot: one is read before the other. The
-# first cut sampled `now` BEFORE running `ps`, so a slow `ps` shifted the computed start
-# BACKWARD — and a start that looks earlier than it is makes a REUSED pid look like it predates
-# the claim, i.e. a false ALIVE. That delay is most likely on exactly the resource-exhausted
-# hosts this command exists for. So the query is bracketed and both bounds are returned; the
-# caller must decide UNKNOWN when the interval straddles its decision boundary.
-process_start_window() {
-  local pid="$1" secs t0 t1
-  t0="$(date -u +%s)"
-  secs="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')"
-  case "$secs" in
-    '' | *[!0-9]*) secs="" ;;
-  esac
-  if [ -z "$secs" ]; then
-    # Fall back to `etime` ([[DD-]HH:]MM:SS), which POSIX ps provides where `etimes` is
-    # absent. Still elapsed, still timezone-free.
-    local et d hms h m sec
-    et="$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')"
-    [ -n "$et" ] || return 0
-    case "$et" in
-      *-*) d="${et%%-*}"; hms="${et#*-}" ;;
-      *)   d=0;           hms="$et" ;;
-    esac
-    case "$hms" in
-      *:*:*) h="${hms%%:*}"; m="$(printf '%s' "$hms" | cut -d: -f2)"; sec="${hms##*:}" ;;
-      *:*)   h=0;            m="${hms%%:*}";                          sec="${hms##*:}" ;;
-      *)     return 0 ;;
-    esac
-    case "$d$h$m$sec" in
-      *[!0-9]*) return 0 ;;
-    esac
-    secs=$(( (10#$d * 86400) + (10#$h * 3600) + (10#$m * 60) + 10#$sec ))
-  fi
-  t1="$(date -u +%s)"
-  # The elapsed reading was taken at some instant in [t0, t1], so the start lies in
-  # [t0 - secs, t1 - secs]. Earliest first.
-  printf '%s %s\n' "$((t0 - secs))" "$((t1 - secs))"
+# PROCESS-LIVENESS PRIMITIVES: sourced, not defined here (issue #3822).
+# `process_start_window`, `ps_usable`, `signal_probe_class`, `process_presence` and
+# `process_state_class` moved VERBATIM to scripts/flow/lib/process-liveness.sh so
+# drive-issue-state.sh can answer the same "is that process still running" question
+# without a SECOND implementation of the review rounds encoded in their comments.
+# Behaviour here is unchanged; the library is the single definition. A MISSING library
+# is fatal and named — never a silent continue with the predicates undefined, which
+# would make every liveness answer an empty string.
+# `-f` AS WELL AS `-r`, matching drive-issue-state.sh's guard on the SAME library (roborev
+# job 57). `-r` alone is TRUE for a FIFO, and the `.` below then BLOCKS FOREVER waiting for a
+# writer: MEASURED, `mkfifo lib/process-liveness.sh` made this script run until killed
+# (`timeout 10` -> rc 124) with NO diagnostic at all — no verdict, no timeout, in a script the
+# fleet reaper runs unattended. A socket, a device or a directory is the same class. `-f` is
+# false for every one of them, so ONE predicate covers the class rather than a list of types to
+# keep complete. Both predicates FOLLOW a symlink, which is deliberate: a symlinked checkout is
+# a legitimate layout. This exposure is NEW with the library extraction — before it, the
+# predicates were inline here and there was no `source` to guard.
+{ [ -f "$SCRIPT_HOME/lib/process-liveness.sh" ] && [ -r "$SCRIPT_HOME/lib/process-liveness.sh" ]; } || {
+  echo "$prog: cannot read $SCRIPT_HOME/lib/process-liveness.sh as a regular file (the shared process-liveness primitives, #3822) — NOTHING was measured" >&2
+  exit 1
 }
-
-# ps_usable — exit 0 iff `ps` can be trusted to answer an existence question here.
-#
-# SELF-VALIDATING, because "nonzero" is not the same as "absent" (roborev round 8, Medium).
-# A `ps` that is missing, unsupported, or simply unable to run would otherwise turn every
-# claim into DEAD-NO-PROCESS and exit 3 — a fleet-wide false DEAD. That failure mode is not
-# hypothetical on the boxes this issue is about: under the memory exhaustion #3393 records,
-# a process that cannot fork cannot run `ps` either, so the ONE moment the report matters
-# most is when the probe is most likely to fail. So the tool is validated against a pid
-# that is certainly present — our own — before any of its answers are believed. This is
-# necessary but NOT sufficient; see `process_presence` for why a per-TARGET vote is also
-# needed (round 9).
-ps_usable() {
-  ps -p "$$" >/dev/null 2>&1
-}
-
-# signal_probe_class <pid> — echo `present` | `absent` | `denied` | `unknown`.
-#
-# `kill -0` is the ONE probe here that is not visibility-based, which is why its failure mode
-# has to be decoded rather than abstained on (roborev round 10, Medium). EPERM means the
-# process EXISTS and is simply not ours; ESRCH means it is gone. Treating both as "no
-# opinion" made every remaining voter a VISIBILITY probe — `ps` and `/proc/<pid>` are
-# correlated, both hidden by `hidepid=2` — so a different user's live process was unanimously
-# "absent" and reported DEAD.
-#
-# `LC_ALL=C` is load-bearing: the distinction is drawn from the error text, so the message
-# has to be in a known language. An unrecognised message is `unknown`, never folded onto
-# either answer.
-signal_probe_class() {
-  local pid="$1" err
-  if kill -0 "$pid" 2>/dev/null; then
-    printf 'present\n'
-    return 0
-  fi
-  err="$(LC_ALL=C kill -0 "$pid" 2>&1 || true)"
-  case "$err" in
-    *"not permitted"* | *"Not permitted"* | *"Operation not permitted"*) printf 'denied\n' ;;
-    *"No such process"* | *"no such process"*)                           printf 'absent\n' ;;
-    *)                                                                   printf 'unknown\n' ;;
-  esac
-}
-
-# process_presence <pid> — echo `present` | `absent` | `unknown`.
-#
-# BUILT FROM AGREEING VOTES, because a NEGATIVE answer from one probe is not proof of
-# absence (roborev round 9, Medium). `ps -p` exiting nonzero can mean the process is gone,
-# but it can equally mean a transient failure under load or that the target is not visible
-# to us — and reading that as absence reports a LIVE supervisor as DEAD. Validating `ps`
-# against our OWN pid (round 8) was necessary but not sufficient: it proves the tool runs,
-# not that it can see THIS target.
-#
-# THE VOTERS MUST NOT ALL MEASURE THE SAME THING (round 10). `ps -p` and `/proc/<pid>` are
-# both VISIBILITY probes and are hidden together by `hidepid=2`, so on their own they can be
-# unanimously and confidently wrong about a live process owned by another user. The signal
-# probe is the independent one, and its EPERM answer is affirmative evidence of EXISTENCE —
-# which is exactly the case the other two get wrong.
-#
-# Unanimous present => present. Unanimous absent => absent. DISAGREEMENT => unknown: our view
-# of the process table is not self-consistent, so nothing is claimed either way.
-process_presence() {
-  local pid="$1" yes=0 no=0 sig
-  if ps -p "$pid" >/dev/null 2>&1; then yes=$((yes + 1)); else no=$((no + 1)); fi
-  if [ -d /proc ]; then
-    if [ -e "/proc/$pid" ]; then yes=$((yes + 1)); else no=$((no + 1)); fi
-  fi
-  sig="$(signal_probe_class "$pid")"
-  case "$sig" in
-    present | denied) yes=$((yes + 1)) ;;   # denied == EPERM == it exists
-    absent)           no=$((no + 1)) ;;
-    unknown)          : ;;                  # genuinely no opinion; abstains
-  esac
-
-  if [ "$yes" -gt 0 ] && [ "$no" -eq 0 ]; then
-    printf 'present\n'
-  elif [ "$yes" -eq 0 ] && [ "$no" -gt 0 ] && [ "$sig" = absent ]; then
-    # ABSENCE REQUIRES THE INDEPENDENT PROBE TO SAY SO (roborev round 15, Medium). Round 10
-    # fixed the case where the signal probe answered `denied`, but when it answers `unknown`
-    # the only remaining voters are `ps` and `/proc` — which are BOTH visibility probes,
-    # hidden together by `hidepid=2`. They can then be unanimously and confidently wrong
-    # about a live process, and this function would call it absent: a false DEAD. So a
-    # declaration of absence needs the one non-visibility probe to have affirmed it.
-    printf 'absent\n'
-  else
-    printf 'unknown\n'
-  fi
-}
-
-# process_state_class <pid> — echo `zombie` | `running` | `unreadable`.
-#
-# THREE-VALUED, and that is the whole point (roborev round 7, Medium). The first cut was a
-# two-valued `process_is_zombie` that returned "not a zombie" when the state could not be
-# read — after which a readable start time produced ALIVE and exit 0. So an unreadable
-# state became a CLEAN result, which is the same "unknown folded onto the permissive
-# answer" shape this command exists to avoid, reintroduced one level down in the fix for
-# the previous round. The unreadable case must be neither: not `zombie` (a false DEAD on a
-# healthy fleet is how a monitor gets ignored) and not `running` (that is the false-clean).
-process_state_class() {
-  local st
-  st="$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')"
-  case "$st" in
-    '') printf 'unreadable\n' ;;
-    Z*) printf 'zombie\n' ;;
-    *)  printf 'running\n' ;;
-  esac
-}
+# shellcheck source=lib/process-liveness.sh
+. "$SCRIPT_HOME/lib/process-liveness.sh"
 
 # open_pr_state <issue> — echo `yes` | `no` | `unknown`. THREE-VALUED on purpose
 # (roborev round 2, Low): `issue_has_open_pr` is fail-SAFE for the REAPER — a gh outage
@@ -1303,6 +1201,13 @@ open_pr_state() {
 
 # cmd_dead_lanes — REPORT (never mutate) every machine claim whose owning process is
 # gone. See the header for what "owning process" means and what this does NOT cover.
+#
+# SUPERVISOR FLEETS ONLY — DESCOPED (#3548, owner ruling 2026-09-01; completes #3393). The
+# subject set below is `refs/lane-claims/*` + the legacy `refs/machine-claims/*` (who writes
+# them, and who does not, is stated once in the header's SCOPE section); returning 1 means "NOTHING WAS REPORTED", never a clean bill of
+# health (#3467). The populated `refs/claims/issue-<N>` and `refs/heartbeats/<machine>` are NOT
+# read here — do not point this at them; the measured reasons and AC4's counterfactual are in
+# the header's SCOPE section.
 #
 # EXIT PRECEDENCE (3 outranks 1, deliberately): a found dead lane is ACTIONABLE NOW,
 # so it wins the exit code, and any incompleteness is still stated in the text rather

@@ -3510,7 +3510,7 @@ else
   for req_ in '--lib' '--no-default-features' 'all-compression,' 'write-support,' '--test' \
               'check_no_unexpected_zero_tests' 'check_test_targets_observed' \
               'check_unittest_targets_ran' '_deny_warnings' \
-              '_package_test_targets_gated' '_ds_fixture_posture' '_fx_blind_n'; do
+              '_package_test_targets_gated' '_ds_fixture_posture'; do
     if [ "$(grep -cF -- "$req_" "$ds_code_")" -gt 0 ]; then
       ok "3725-iso-ds-instrument: the widened lane still passes/uses $req_"
     else
@@ -3531,56 +3531,15 @@ else
   else
     bad "3725-iso-ds-failclosed: fewer than 4 FAIL-CLOSED branches in the widened lane — a derivation that can fall through silently is a lane with no subject reporting PASS"
   fi
-  # A FIXTURE-BLIND TARGET MUST FAIL THE LANE IN STRICT MODE, NOT MERELY BE CENSUSED
-  # (roborev round 1, finding 1). Reporting it informationally is what let
-  # scan_delta_parity_test — which ignored CQLITE_REQUIRE_FIXTURES — return successfully
-  # with its corpus absent and merge-gate as "passed" having compared nothing. Asserted as
-  # a CONJUNCTION on one line so a future edit cannot keep the counter and drop the guard.
-  if grep -qE '\[ "\$_fx_mode" = strict \] && \[ "\$_fx_blind_n" -gt 0 \]' "$ds_code_"; then
-    ok "3725-iso-ds-blind-fails: a fixture-blind derived target FAILs the lane in strict mode (not a census line)"
-  else
-    bad "3725-iso-ds-blind-fails: the strict-mode fixture-blind FAIL is gone — a target that ignores CQLITE_REQUIRE_FIXTURES then returns successfully with its corpus absent and the lane reports PASS having compared nothing (#3725's own defect, one target over)"
-  fi
+  # The strict-mode fixture-blind FAIL that used to be asserted here was DESCOPED by lead
+  # ruling on #3725 (COORD-3725-08): seven rounds found seven holes in the source-text scan
+  # behind it, five introduced by the preceding fix, so the guard was removed rather than
+  # carved again (#3229/#3283 precedent). The coverage is now the strict flag itself plus a
+  # one-time behavioural measurement, and #3789 owns declared per-target posture. There is
+  # deliberately NO assertion here: pinning a mechanism that no longer exists is what made
+  # this suite red the gate of record after the descope landed.
 fi
 
-# THE FIXTURE-AWARENESS PATTERN, RUN against the shapes it must and must not accept
-# (roborev round 3, R3-F1 + the two narrowings measured on top of it). The pattern is READ
-# FROM THE SHIPPED GATE, never retyped here: a copy would drift from the value that runs,
-# and this suite would then certify a pattern nobody executes.
-fxp_=$(grep -m1 "^  local _fx_lookup=" "$GATE" | sed "s/^  local _fx_lookup=//")
-if [ -z "$fxp_" ]; then
-  bad "3725-fx-pattern: could not read _fx_lookup out of the gate — every case below would pass vacuously"
-else
-  eval "fx_re_=$fxp_"
-  fxd_="$tmp/3725-fx"; mkdir -p "$fxd_"
-  # The scan the lane performs: strip // comment tails, then match. Kept in this order and
-  # WITHOUT a pipe into grep -q, exactly as the lane does it (#3380).
-  fx_match_() { sed 's|//.*||' "$1" > "$fxd_/stripped.rs"; grep -cE "$fx_re_" "$fxd_/stripped.rs" 2>/dev/null || true; }
-  printf 'fn f() { let x = std::env::var("CQLITE_REQUIRE_FIXTURES"); }\n' > "$fxd_/path.rs"
-  printf 'use std::env::var;\nfn f() { let x = var("CQLITE_REQUIRE_FIXTURES"); }\n' > "$fxd_/bare.rs"
-  printf 'fn f() { let x = my_read_var("CQLITE_REQUIRE_FIXTURES"); }\n' > "$fxd_/lookalike.rs"
-  printf '// used to call std::env::var("CQLITE_REQUIRE_FIXTURES")\nfn f() {}\n' > "$fxd_/commented.rs"
-  printf 'fn f() { panic!("set std::env::var(\\"CQLITE_REQUIRE_FIXTURES\\") first"); }\n' > "$fxd_/instring.rs"
-  printf 'fn f() {}\n' > "$fxd_/absent.rs"
-  # ACCEPT: the two real lookup spellings. Rejecting either would red a correct target.
-  for ok_ in path bare; do
-    if [ "$(fx_match_ "$fxd_/$ok_.rs")" -gt 0 ]; then
-      ok "3725-fx-pattern[accept-$ok_]: a real env lookup is recognised"
-    else
-      bad "3725-fx-pattern[accept-$ok_]: a REAL env::var lookup is not recognised — the lane would call a correct target fixture-blind and FAIL the gate of record on it"
-    fi
-  done
-  # REJECT: the four shapes that must not count as an executable lookup. Each was a measured
-  # false-accept of an earlier revision (lookalike + commented) or is closed by the grammar
-  # (instring: a quoted lookup needs escaped quotes).
-  for no_ in lookalike commented instring absent; do
-    if [ "$(fx_match_ "$fxd_/$no_.rs")" -eq 0 ]; then
-      ok "3725-fx-pattern[reject-$no_]: does not count as an executable lookup"
-    else
-      bad "3725-fx-pattern[reject-$no_]: ACCEPTED as a fixture-awareness lookup — a target can then satisfy the check without ever reading the variable, which is R3-F1's defect"
-    fi
-  done
-fi
 
 # The two targets that used to IGNORE the strict flag must keep honouring it (roborev round
 # 1, finding 1). Source facts, and cheap: the lane's own guard fails closed if either
@@ -4779,9 +4738,15 @@ fi
 # the policy and the counts, which is what a reader needs to interpret an excusal at all.
 lh_fn52=$(awk '/^run_legacy_heuristics\(\) \{/,/^\}/' "$GATE")
 pol_cen_missing=""
-printf '%s\n' "$lh_fn52" | grep -qE 'lh_census\+=\("polarity: \$\{#allow_zero\[@\]\} of \$count' \
+# SIGPIPE-FREE MATCH (#3685), a THIRD measured-dangerous site — found because it false-FAILed a
+# real suite run in lane-3725 under six peer lanes' load, then matched rc=0 three times in three
+# when re-run quiet. It fits origin/main's own danger heuristic exactly: `$lh_fn52` is the WHOLE
+# ~670-line run_legacy_heuristics body and the `polarity:` line sits early in it, so `grep -q`
+# exits having discarded most of the input — and discarded bytes ARE the race window. Converted
+# to the `[[ ]]` glob form main measured at 0/80, per the same reasoning applied to L4618/L4930.
+[[ $lh_fn52 == *'lh_census+=("polarity: ${#allow_zero[@]} of $count'* ]] \
   || pol_cen_missing="$pol_cen_missing counts"
-printf '%s\n' "$lh_fn52" | grep -qF 'excusable ONLY when EVERY' || pol_cen_missing="$pol_cen_missing policy"
+[[ $lh_fn52 == *'excusable ONLY when EVERY'* ]] || pol_cen_missing="$pol_cen_missing policy"
 if [ -n "$pol_cen_missing" ]; then
   bad "1699-pol-census: the excusal policy/counts do not reach the census — missing:$pol_cen_missing. A reader of the component log would see an allowed-zero entry with no way to tell what earned it"
 else
@@ -4833,7 +4798,20 @@ fi
 # 1465c. The component-level dataset SKIP must declare the leak-lane state, or a skipped
 #        component leaves NO `node-bindings-leak-lane:` line and "no line" becomes
 #        ambiguous between "it ran" and "this gate predates the line".
-if grep -q '_node_leak_lane_note SKIP-OPTOUT' <<<"$nll_component"; then
+# SIGPIPE-FREE MATCH, DELIBERATELY NOT `printf | grep -q` (#3685). Measured at this site:
+#        `printf '%s' "$nll_component" | grep -q PATTERN` under this suite's `set -uo pipefail`
+#        returned **rc=141** in 30 of 80 runs (37.5%) — `grep -q` exits at the first match, closing
+#        the read end, and whichever of `printf`'s write(2) calls lands after that gets EPIPE. Over
+#        those 80 runs `rc=1` occurred ZERO times: the note was present EVERY time, so the pipeline
+#        was inverting a TRUE assertion into a FAIL. It red two consecutive gates of record on an
+#        identical tree digest (#3414) before the mechanism was found.
+#
+#        DANGER HEURISTIC for the other ~200 sites in #3685 — large variable x EARLY match. Here the
+#        data is 34,397 bytes (it FITS a 65,536-byte pipe, so this is syscall interleaving, NOT
+#        buffer exhaustion) and the first match is at byte 3,372, so grep discards 31,025 bytes it
+#        never reads: near-maximal exposure. A pattern near the END of its data is nearly safe.
+#        `[[ ]]` glob measured 0/80 on the identical variable and load. Only THIS site is changed.
+if [[ $nll_component == *'_node_leak_lane_note SKIP-OPTOUT'* ]]; then
   ok "1465-skip-declares: the #3522 opt-out SKIP branch writes the SKIP-OPTOUT note"
 else
   bad "1465-skip-declares: the opt-out SKIP branch does not declare the leak-lane state"
@@ -4927,7 +4905,18 @@ fi
 nll_comp_v1=$(sed -n '/^run_node_bindings() {/,/^}$/p' "$GATE")
 nll_leakfile_v1="$SCRIPT_DIR/../../bindings/node/__test__/leak-paths.test.js"
 nll_v1_ok=1
-grep -q 'leak_strict_env=(-u CQLITE_LEAK_BUDGET_RELAX)' <<<"$nll_comp_v1" \
+# SIGPIPE-FREE MATCH (#3685), second and LAST measured-dangerous site in this file. The
+# `printf | grep -q` form here false-FAILed 12/40 (30%): the data is 34,397 bytes and this
+# pattern sits at byte 6,331, so `grep -q` exits having DISCARDED 28,066 bytes and whichever
+# of printf's write(2) calls lands after that gets EPIPE -> rc=141 -> a FAIL on a TRUE
+# assertion. It is why `1465-gate-strict` red 1-in-3 suite runs even after L4618 was fixed.
+#        SORT KEY for #3685's other sites is BYTES DISCARDED, not "early match" — the
+#        discarded count IS the race window. Measured here: 305-byte data at 14% => 0/40
+#        (too small to race); 34,397-byte data at 93%/98% => 0/40 (only ~2.5KB discarded);
+#        34,397 at 18%/10% => 30%/37.5%. Small OR late is safe; only large AND early fires.
+#        `grep -c` sites below are SAFE by construction — a count reads all input, so there
+#        is no early exit to race. Only the two `grep -q` sites needed changing.
+[[ $nll_comp_v1 == *'leak_strict_env=(-u CQLITE_LEAK_BUDGET_RELAX)'* ]] \
   || { nll_v1_ok=0; echo "  node-bindings does not declare the strict leak-budget env"; }
 # every `env` that launches node in this component must carry the unset array
 nll_env_launches=$(printf '%s\n' "$nll_comp_v1" | grep -cE '^[[:space:]]*if (! )?env ')
@@ -5279,20 +5268,44 @@ fi
 # network, no datasets), so none of these five can become a declared tooling skip.
 fm_sum="$tmp/3453-annot-summary.txt"
 if AGENT_GATE_SUMMARY_FILE="$fm_sum" bash "$GATE" --emit-summary-selftest >/dev/null 2>&1; then
-  fm_lines=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\)' "$fm_sum")
-  fm_annot=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\) +\[.+\]$' "$fm_sum")
+  # VACUOUS joins PASS/FAIL/SKIP in the component-status vocabulary (#3625): a PASS whose
+  # measured subject count is zero is recorded under its own token, so a shape recogniser
+  # that omits it would stop SEEING the very lines that state a component verified nothing.
+  fm_lines=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\)' "$fm_sum")
+  # The line's tail is now `[<feature matrix>]  {<census>}` — BOTH are part of the block
+  # contract, and the `$` anchor requires the census to be LAST, so neither can be dropped
+  # without this failing (#3453 + #3625).
+  fm_annot=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\) +\[.+\]  \{.+\}$' "$fm_sum")
   if [ "$fm_lines" -gt 0 ] && [ "$fm_annot" = "$fm_lines" ]; then
-    ok "3453-annot-a: all $fm_lines component line(s) carry a bracketed feature matrix"
+    ok "3453-annot-a: all $fm_lines component line(s) carry a bracketed feature matrix AND a census suffix"
   else
-    bad "3453-annot-a: only $fm_annot of $fm_lines component lines carry a feature matrix"
-    grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP)' "$fm_sum" || true
+    bad "3453-annot-a: only $fm_annot of $fm_lines component lines carry a feature matrix + census suffix"
+    grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS)' "$fm_sum" || true
   fi
-  if grep -qE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP).*\[(UNDECLARED|UNCLASSIFIED)' "$fm_sum"; then
+  # #3625: the aggregate census line. It must be present, must declare its own
+  # NON-EXHAUSTIVENESS, and must report every non-affirmed class as `N RECOGNISED` rather
+  # than a bare N — a bare zero in a gate log reads as a verified all-clear.
+  fm_census=$(grep -E '^census: ' "$fm_sum" | head -1)
+  # The line carries STATE buckets (which name no status) and STATUS-DERIVED figures. The
+  # `VACUOUS (RECOGNISED)` heading this used to require is GONE on purpose (#3625, roborev
+  # job 371 + sweep): it was a STATUS word counted from the ZERO STATE, and a shipping mode
+  # already emitted a `VACUOUS` row beside `0 VACUOUS`. The state bucket is now
+  # `measured-ZERO` and the status figure is counted from the observed status.
+  case "$fm_census" in
+    *'AFFIRMED a count'*'DECLARED-GAP (RECOGNISED)'*'NOT-MEASURED (RECOGNISED)'*'measured-ZERO (RECOGNISED)'*'not-applicable (component did not PASS)'*'no-subject (PASSed'*'carry a VACUOUS status'*'NON-EXHAUSTIVE'*)
+      ok "3625-census-block: the block carries ONE aggregate census line whose status-naming qualifiers are DERIVED (not-applicable/did-not-PASS vs no-subject/PASSed, and a VACUOUS count from the status), declaring its own non-exhaustiveness" ;;
+    '') bad "3625-census-block: no 'census:' aggregate line in the emitted block" ;;
+    *)  bad "3625-census-block: the census line does not carry the required RECOGNISED / status-derived / NON-EXHAUSTIVE wording: $fm_census" ;;
+  esac
+  # VACUOUS included (#3625): omitting it made this screen BLIND to exactly the rows that
+  # report a component verified nothing — the ones most worth checking for a broken
+  # annotation.
+  if grep -qE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS).*\[(UNDECLARED|UNCLASSIFIED)' "$fm_sum"; then
     bad "3453-annot-b: a component line reads UNDECLARED/UNCLASSIFIED in the reference block"
   else
     ok "3453-annot-b: no component line reads UNDECLARED/UNCLASSIFIED in the reference block"
   fi
-  if grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP)' "$fm_sum" | grep -q 'RESULT:'; then
+  if grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS)' "$fm_sum" | grep -q 'RESULT:'; then
     bad "3453-annot-c: an annotation embeds the RESULT: token — it would break the #2908 poll predicate"
   else
     ok "3453-annot-c: no annotation embeds the RESULT: token (the one-RESULT invariant is safe)"

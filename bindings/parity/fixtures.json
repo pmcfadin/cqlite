@@ -1,0 +1,107 @@
+{
+  "_comment": [
+    "3-way cross-binding parity fixtures (issue #1455).",
+    "",
+    "Each fixture names ONE SELECT that is run through all three legs (Python",
+    "binding, Node binding, CLI --out json) and canonicalized to the SAME JSON.",
+    "",
+    "`columns` declares the CQL type of every column the query returns. It is",
+    "the AUTHORITATIVE input to canonicalization (issue #28: no type guessing",
+    "from value shapes), and the harness asserts that the declared column set",
+    "equals the set every leg actually returns -- so schema drift reds the test",
+    "rather than silently changing what is compared.",
+    "",
+    "`known_divergence` is EMPTY for every fixture and must stay that way. It",
+    "exists so a future, deliberately-accepted gap has somewhere to be recorded",
+    "with a reason; it is NOT a place to silence a real cross-binding bug. The",
+    "issue originally proposed allowlisting `duration` and `time` until #1450",
+    "landed -- #1450 IS landed, and all three legs were measured to agree",
+    "exactly on both, so nothing is allowlisted.",
+    "",
+    "DECLARED CORPUS GAP: there is NO `varint` column anywhere in the committed",
+    "CQL schema corpus (test-data/schemas/**), so the issue's requested",
+    "timestamp+blob+varint+decimal fixture is covered for timestamp, blob and",
+    "decimal ONLY. The varint canonicalization rule is exercised by",
+    "canonical-vectors.json, not by any live fixture. No fixture was fabricated",
+    "to close this.",
+    "",
+    "`floor` (issue #1455, B2) is the case floor: an empty or truncated fixture",
+    "list would otherwise produce an EMPTY pytest parametrize \u2014 one skipped",
+    "placeholder and the 3-way comparison silently gone, green. The floor names",
+    "the fixtures by NAME, not just a count, so swapping one for a trivial",
+    "substitute is caught too."
+  ],
+  "floor": {
+    "min_fixtures": 3,
+    "required_names": [
+      "basic_types",
+      "collections",
+      "typed_collections"
+    ]
+  },
+  "fixtures": [
+    {
+      "name": "basic_types",
+      "keyspace": "test_basic",
+      "table": "simple_table",
+      "schema": "test-data/schemas/basic-types.cql",
+      "query": "SELECT * FROM test_basic.simple_table LIMIT 5",
+      "columns": {
+        "id": "uuid",
+        "name": "text",
+        "age": "int",
+        "salary": "bigint",
+        "height": "float",
+        "weight": "double",
+        "active": "boolean",
+        "created": "timestamp",
+        "birth_date": "date",
+        "work_time": "time",
+        "description": "blob",
+        "account_balance": "decimal",
+        "session_id": "timeuuid",
+        "ip_address": "inet",
+        "small_number": "tinyint",
+        "medium_number": "smallint",
+        "duration_val": "duration",
+        "varchar_field": "varchar",
+        "ascii_field": "ascii"
+      },
+      "known_divergence": []
+    },
+    {
+      "name": "collections",
+      "keyspace": "test_collections",
+      "table": "collection_table",
+      "schema": "test-data/schemas/collections.cql",
+      "query": "SELECT * FROM test_collections.collection_table LIMIT 5",
+      "columns": {
+        "id": "uuid",
+        "tags": "set<text>",
+        "scores": "list<int>",
+        "properties": "map<text, text>",
+        "numbers_set": "set<int>",
+        "ordered_values": "list<timestamp>",
+        "metadata_map": "map<text, bigint>"
+      },
+      "known_divergence": []
+    },
+    {
+      "name": "typed_collections",
+      "keyspace": "test_collections",
+      "table": "typed_collections_table",
+      "schema": "test-data/schemas/collections.cql",
+      "query": "SELECT * FROM test_collections.typed_collections_table LIMIT 5",
+      "columns": {
+        "id": "uuid",
+        "uuid_set": "set<uuid>",
+        "timestamp_list": "list<timestamp>",
+        "boolean_map": "map<text, boolean>",
+        "decimal_set": "set<decimal>",
+        "blob_list": "list<blob>",
+        "inet_map": "map<text, inet>"
+      },
+      "known_divergence": []
+    }
+  ]
+}

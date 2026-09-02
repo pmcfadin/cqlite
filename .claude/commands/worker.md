@@ -71,8 +71,11 @@ onto its own branch). Rules, non-negotiable:
    worktree you can resume. If one exists, **resume it**
    (`git fetch` the branch, `cd` the worktree, continue from its last commit — no re-claim, no dup work) and
    do NOT touch the Ready column this session. Only if there is no own resumable claim do you **pick up** a
-   new one (`flow-board` pickup rule): the **oldest issue whose board `Status=Ready`** with **no**
-   claim on origin. **Eligibility check (#2665):** the lock is now the slugless fixed-name ref
+   new one (`flow-board` pickup rule): the **oldest RELEASE-MILESTONED product issue whose board
+   `Status=Ready`** with **no** claim on origin; only when no product item is `Ready` do you take a
+   delivery-tooling item, oldest first (owner ruling 2026-09-01, #3893 — the queue is for the release,
+   not the tooling; a tooling item in `Ready` is there because it is blocking, which is the manager's
+   call to make, not yours). **Eligibility check (#2665):** the lock is now the slugless fixed-name ref
    `refs/claims/issue-<N>` — a model-chosen slug is NEVER the lock, so a different-slug or
    identical-SHA push can no longer double-claim (field: #1632). Check both the ref AND the legacy
    branch glob (older workers may still branch-lock):

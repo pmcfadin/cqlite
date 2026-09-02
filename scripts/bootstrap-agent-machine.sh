@@ -58,6 +58,29 @@
 #      machine's configured agent (commonly codex via .roborev.toml); we warn
 #      only if the local config is broken, never prescribe an agent.
 #   5. Datasets present + CQLITE_DATASETS_ROOT guidance.
+#   5b. Single-gate pin (issues #2640/#3414). Persists CQLITE_GATE_MAX_CONCURRENCY=1
+#      into /etc/environment — which PAM reads at SESSION CREATION, with no
+#      interactivity guard — and takes its VERDICT from an AFFIRMATIVE PROBE of a
+#      fresh, profile-free session, never from a grep of the file it just wrote.
+#      VISIBILITY IS ONLY HALF THE QUESTION: a value the gate does not HONOUR is a pin
+#      in name only, so the gate itself is then asked (via its `--cpu-budget` hook,
+#      never a re-derivation of its rules) what it will do with the value. One
+#      greppable `gate-pin:` line: VERIFIED / NOT-SYSTEM-WIDE / NOT-HONOURED / FAILED /
+#      UNMEASURED, and only VERIFIED is an [ok] (same posture as `git-push:`). VERIFIED
+#      requires BOTH halves — the line present in the system-wide file AND a fresh
+#      session that sees a value the gate honours — because file-only was the original
+#      #3414 defect and session-only certifies a pin that may reach sudo sessions alone,
+#      and the file's VALUE must EQUAL the session's (presence alone let a file saying
+#      `abc` pass while a per-user override supplied `1`). NON-LINUX hosts get UNMEASURED
+#      and never a success: with no PAM-read system-wide file there is nothing to correlate
+#      the session value against, so a machine-wide pin cannot be told apart from a sudo-
+#      or user-scoped one that ordinary gate processes never see. No verdict that reports a
+#      state is available there, so none is given. `verify.run` runs on Linux, so nothing
+#      on this fleet regresses. `--yes` persists it, and
+#      so does the narrow `--fix-gate-pin` that `.agent-ami/profile.yaml`'s verify.run
+#      passes, so a freshly launched box is PINNED rather than merely reported unpinned.
+#      PAM reads /etc/environment at session creation, so the probe in the SAME run sees
+#      what the write just persisted — no reboot and no re-login.
 #   6. Health check: run the gate's fmt component and print its authoritative
 #      `accelerators:` line.
 #
@@ -79,6 +102,26 @@
 #                                                      #   withholds "All checks green." and can
 #                                                      #   never buy a vacuous green. For offline
 #                                                      #   boxes and hermetic self-tests.
+#   bash scripts/bootstrap-agent-machine.sh --fix-gate-pin     # persist the single-gate pin
+#                                                      #   (section 5b's /etc/environment write)
+#                                                      #   WITHOUT --yes, and nothing else — the
+#                                                      #   sibling of --fix-credentials, and what
+#                                                      #   .agent-ami/profile.yaml's verify.run
+#                                                      #   uses so a freshly launched box is
+#                                                      #   PINNED rather than merely reported
+#                                                      #   unpinned. Needs privilege; when it
+#                                                      #   cannot persist, the section stays
+#                                                      #   non-passing (never an [ok]).
+#   bash scripts/bootstrap-agent-machine.sh --skip-gate-pin    # skip ONLY section 5b (the
+#                                                      #   single-gate pin: the /etc/environment
+#                                                      #   write AND the PAM-session visibility
+#                                                      #   probe). Same posture as
+#                                                      #   --skip-push-probe: it emits
+#                                                      #   `gate-pin: OPT-OUT` as a [warn], so it
+#                                                      #   can never buy a vacuous green.
+#                                                      #   CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 is the
+#                                                      #   env spelling, for harnesses that drive
+#                                                      #   bootstrap on a fixed command line.
 #   bash scripts/bootstrap-agent-machine.sh --skip-smoke   # skip the final GATE run (section 6).
 #                                                      #   DISTINCT from --skip-push-probe: this
 #                                                      #   one is about the gate fmt smoke, that
@@ -95,6 +138,34 @@ SKIP_SMOKE=0
 # --skip-smoke: --skip-smoke skips the GATE fmt run in section 6 and has nothing to do
 # with git. Two different subjects, two different flags (issue #3369).
 SKIP_PUSH_PROBE=0
+# --skip-gate-pin / CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 (issue #3414): skip section 5b
+# entirely — no /etc/environment write and no PAM session probe. A THIRD subject, so a
+# third switch, exactly as --skip-push-probe is separate from --skip-smoke. It is LOUD
+# and NON-PASSING (a `gate-pin: OPT-OUT` [warn]), so it withholds "All checks green."
+# and --strict still exits 1: an opt-out that returned `ok` would be a switch for buying
+# a vacuous green, which is the failure mode this whole section exists to remove. The
+# env spelling exists because the sibling self-suites drive bootstrap on fixed command
+# lines they cannot easily grow an argument on; both spellings take the same code path
+# and print the same non-passing verdict, and the message names which one was used.
+SKIP_GATE_PIN=0
+SKIP_GATE_PIN_HOW=""
+if [ "${CQLITE_BOOTSTRAP_SKIP_GATE_PIN:-0}" = 1 ]; then
+  SKIP_GATE_PIN=1; SKIP_GATE_PIN_HOW="CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1"
+fi
+# --fix-gate-pin (issue #3414): perform section 5b's /etc/environment write WITHOUT --yes,
+# and nothing else. A SIBLING of --fix-credentials, deliberately not a widening of it:
+# that flag documents itself as running section 3b's auto-fix "and NOTHING else", and
+# quietly making that false is the drift this codebase pays for later. Same one-flag-per-
+# subject rule --skip-push-probe / --skip-smoke / --skip-gate-pin already follow.
+#
+# WHY A REPAIR FLAG AT ALL. `.agent-ami/profile.yaml`'s verify.run is the only bootstrap
+# invocation a launcher-onboarded box ever gets, and it does not pass --yes. Without this
+# flag a fresh box is left UNPINNED and verify merely reds — which converts #3414's silent
+# defect into a loud one without removing it, and a verify that reds on every new box is an
+# alarm people learn to waive. Persisting env wiring is not a toolchain install, so verify
+# stays a verification step rather than becoming an installer — the same reasoning that
+# justified --fix-credentials.
+FIX_GATE_PIN=0
 FIX_CREDENTIALS=0
 STRICT=0
 for arg in "$@"; do
@@ -102,6 +173,8 @@ for arg in "$@"; do
     --yes|-y) AUTO_YES=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
     --skip-push-probe) SKIP_PUSH_PROBE=1 ;;
+    --skip-gate-pin) SKIP_GATE_PIN=1; SKIP_GATE_PIN_HOW="--skip-gate-pin" ;;
+    --fix-gate-pin) FIX_GATE_PIN=1 ;;
     --fix-credentials) FIX_CREDENTIALS=1 ;;
     --strict) STRICT=1 ;;
     -h|--help)
@@ -113,6 +186,20 @@ for arg in "$@"; do
     *) echo "bootstrap: unknown arg: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
+
+# Contradictory intents must not resolve silently — "I told it to fix the pin and it
+# skipped the section" is exactly the class of quiet surprise this issue is about.
+# An EXPLICIT --skip-gate-pin beside --fix-gate-pin is a usage error; the ENV opt-out is
+# the weaker signal, so an explicit --fix-gate-pin overrides it (a harness exporting
+# CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 must not be able to neuter a caller's explicit repair).
+# Resolved here, after the loop, so flag ORDER cannot change the outcome.
+if [ "$FIX_GATE_PIN" = 1 ] && [ "$SKIP_GATE_PIN" = 1 ]; then
+  if [ "$SKIP_GATE_PIN_HOW" = "--skip-gate-pin" ]; then
+    echo "bootstrap: --skip-gate-pin and --fix-gate-pin are contradictory (try --help)" >&2
+    exit 2
+  fi
+  SKIP_GATE_PIN=0; SKIP_GATE_PIN_HOW=""
+fi
 
 # ---- OS + package-manager detection ----
 OS=$(uname -s)
@@ -247,21 +334,152 @@ mold_target_section() {
 # and a both-files machine never has the block land in the ignored file.
 mold_write_block() {
   local linker="$1"
-  local cfg_dir cfg_file preserved
+  local cfg_dir cfg_file preserved write_target tmpw
   cfg_dir="${CARGO_HOME:-$HOME/.cargo}"
   if ! mkdir -p "$cfg_dir" 2>/dev/null; then
     warn "could not create $cfg_dir — skipping mold linker config"
     return 0
   fi
+  # `-f` FOLLOWS the link, so a DANGLING legacy `config` symlink reads as absent and selection
+  # falls through to `config.toml` — leaving the block in a file cargo will ignore the moment the
+  # link's target appears, since cargo prefers the extension-less name (#3756 roborev round 2).
+  # `-L` is the affirmative "a legacy config was declared here" test; the symlink resolution below
+  # then either writes through to the declared target or REFUSES, so a broken link is never
+  # silently replaced. The `config.toml` arm needs no equivalent: its `else` branch already
+  # selects the same path, so a dangling `config.toml` link reaches the resolver either way.
+  #
+  # ...BUT ONLY WHEN IT IS NOT SHADOWING A REAL config.toml (#3756 roborev round 3). Selecting a
+  # DANGLING `config` while a populated `config.toml` exists would materialise the legacy target
+  # containing the mold block ALONE — and cargo, which reads exactly one of the two and prefers
+  # the extension-less name, would from that moment ignore every setting the user has in
+  # `config.toml`. The round-2 fix bought a latent flip and would have paid with an immediate one.
+  # A broken symlink beside a real config is an AMBIGUOUS state, not a state to guess at, so it
+  # gets the same posture as the other two fail-safes in this function: warn, write nothing, leave
+  # the tree byte-identical. A dangling legacy link with NO config.toml is unambiguous — the user
+  # declared where the config goes — and is still written through.
   if [ -f "$cfg_dir/config" ]; then
     cfg_file="$cfg_dir/config"
+  elif [ -L "$cfg_dir/config" ] && [ ! -e "$cfg_dir/config.toml" ] && [ ! -L "$cfg_dir/config.toml" ]; then
+    cfg_file="$cfg_dir/config"
+  elif [ -L "$cfg_dir/config" ]; then
+    warn "$cfg_dir/config is a broken symlink and $cfg_dir/config.toml also exists — writing NO mold block (materialising the legacy name would make cargo prefer it and silently ignore config.toml); fix or remove the symlink and re-run bootstrap"
+    return 0
   elif [ -f "$cfg_dir/config.toml" ]; then
     cfg_file="$cfg_dir/config.toml"
   else
     cfg_file="$cfg_dir/config.toml"
   fi
+  # THE SYMLINK IS RESOLVED BEFORE ANYTHING IS READ, SO THE FILE WE PRESERVE AND THE FILE WE
+  # WRITE ARE THE SAME FILE BY CONSTRUCTION (#3756 roborev round 6). They used to be derived
+  # separately — `$preserved` from `$cfg_file`, the rename from a resolved `$write_target` — and
+  # any normalisation that moved one and not the other turned an APPEND into an OVERWRITE: a
+  # target text ending in `/` made the preserve read see nothing (a trailing slash forces
+  # directory resolution) while the write, with the slash stripped, landed on a real regular file
+  # and destroyed it. Resolving first REMOVES the second derivation instead of trying to keep two
+  # of them in step.
+  write_target="$cfg_file"
+  if [ -L "$cfg_file" ]; then
+    # PORTABLE SYMLINK RESOLUTION (#3756). `readlink -f` is GNU-only — BSD/macOS readlink
+    # has no -f — and the previous form's `|| echo "$cfg_file"` made that failure SILENT:
+    # write_target became the SYMLINK PATH, so the atomic rename below replaced the symlink
+    # with a plain file, which is exactly what resolving it exists to prevent. The failure
+    # was invisible on every Linux lane and would only ever be met by a macOS operator.
+    #
+    # Chase the chain with bare `readlink` (POSIX, both flavours) instead, bounded so a
+    # symlink loop cannot spin, then canonicalise the final DIRECTORY with `cd`+`pwd -P`
+    # (this repo's canonicalisation idiom, and what makes the result absolute).
+    # THE HOP CAP IS ABOVE EVERY PLATFORM'S KERNEL LIMIT, so it bounds a LOOP without ever
+    # being the thing that refuses a chain the OS would happily open (#3756 roborev round 10).
+    # At 32 it was STRICTER than the `readlink -f` it replaced, in a measurable window. Measured
+    # on Linux here: the kernel resolves a 39-link chain and ELOOPs at 41 (MAXSYMLINKS=40), while
+    # `readlink -f` walks 60+ in userspace — so a 33-to-40-link config chain was openable by
+    # cargo, resolvable by the old code, and refused by this one. (BSD/macOS documents
+    # MAXSYMLINKS=32, which is why the window is Linux-only; not measured here, and it does not
+    # matter, because 64 is above both.) Above the kernel limit the chain cannot be opened by
+    # anything, so refusing it costs nothing; a genuine loop still terminates in 64 iterations
+    # and is refused by name below.
+    local _wt="$cfg_file" _lt _wd _hops=0
+    while [ -L "$_wt" ] && [ "$_hops" -lt 64 ]; do
+      _lt=$(readlink "$_wt" 2>/dev/null) || break
+      [ -n "$_lt" ] || break
+      case "$_lt" in
+        /*) _wt="$_lt" ;;
+        *) _wt="$(dirname "$_wt")/$_lt" ;;
+      esac
+      _hops=$((_hops + 1))
+    done
+    # WHAT COUNTS AS RESOLVED, chosen to MATCH `readlink -f` rather than to be stricter than
+    # it: the final component need NOT already exist (a symlink pointing at a file its owner
+    # has not created yet is an ordinary dotfile-manager setup, and GNU resolves it), but its
+    # PARENT DIRECTORY must, or there is nowhere to rename onto. A result that is still a
+    # symlink (loop or hop limit), or that resolves to a DIRECTORY, is not a write target.
+    # Refuse in those cases rather than fall back to the symlink path: the fallback IS the
+    # defect above, and destroying a user's symlink is not recoverable, while skipping the
+    # accelerator config is.
+    #
+    # `cd -P`, NOT bare `cd` (#3756 roborev round 3). bash's `cd` defaults to LOGICAL path
+    # handling, which resolves `..` TEXTUALLY against the path given — so a target whose text
+    # crosses a symlinked directory and then `..` lands somewhere `readlink -f` would not.
+    # Measured on a fixture where `link -> real/inner`: `cd link/..` gives the PARENT OF THE
+    # LINK, `cd -P link/..` gives `real`. Writing the block to the wrong file is bad; doing it
+    # while believing we resolved the link is worse.
+    # A TARGET WHOSE TEXT ENDS IN `/` IS REFUSED, NOT NORMALISED (#3756 roborev round 6, HIGH).
+    # A trailing slash DENOTES a directory, and it also defeats both guards when it does not name
+    # one: `-L` resolves the path as a directory and so reads false for a symlink, `-d` reads
+    # false for a regular file — and then `dirname`/`basename` STRIP the slash and hand `mv` the
+    # real file underneath. Normalising a malformed path is how a check stops describing the
+    # thing that gets used; that is the third finding in this one family, so the malformed input
+    # is refused rather than repaired.
+    case "$_wt" in
+      */)
+        warn "$cfg_file resolves to $_wt, whose trailing '/' denotes a directory it does not name — skipping mold linker config rather than normalising the path into a different file"
+        return 0 ;;
+    esac
+    # EACH REFUSAL SAYS ITS OWN NAME. These conditions have DIFFERENT operator remedies — fix a
+    # symlink loop, create a missing directory, point the link at a file instead of a device —
+    # so folding them into one catch-all ("could not be resolved") would send the reader to the
+    # wrong place. They were folded, and case 6z caught it: a FIFO target was correctly refused
+    # under a message about unresolvable symlinks.
+    if [ -L "$_wt" ]; then
+      warn "$cfg_file is a symlink whose target could not be resolved — it is still a symlink after $_hops hops, which is past every platform's kernel symlink limit, so nothing could open it either (a loop?) — skipping mold linker config rather than replacing the symlink with a plain file"
+      return 0
+    fi
+    if [ -e "$_wt" ] && [ ! -f "$_wt" ]; then
+      warn "$cfg_file resolves to $_wt, which is not a regular file (a directory, FIFO, socket or device node) — skipping mold linker config rather than replacing it"
+      return 0
+    fi
+    _wd=$(cd -P "$(dirname "$_wt")" 2>/dev/null && pwd -P) || _wd=''
+    if [ -z "$_wd" ]; then
+      warn "$cfg_file is a symlink whose target could not be resolved — the directory of $_wt does not exist — skipping mold linker config rather than replacing the symlink with a plain file"
+      return 0
+    fi
+    write_target="$_wd/$(basename "$_wt")"
+    # AND RE-CHECK THE VALUE ACTUALLY USED, not just the intermediate it came from (#3756
+    # roborev round 3). The guards above test `$_wt`, and normalisation can move the answer:
+    # a target whose text ends in `/` forces DIRECTORY resolution, so `-L` reads false even
+    # when the name IS a symlink to a regular file, and `basename` then strips the slash and
+    # hands `mv` that very symlink. Whatever the route, the no-clobber guarantee is about
+    # `$write_target`, so it is asserted ON `$write_target` — a check on an input cannot speak
+    # for an output that was computed from it.
+  fi
+  # ONLY A REGULAR FILE OR A NONEXISTENT PATH IS A WRITE TARGET (#3756 roborev rounds 7 and 8,
+  # both HIGH). "not a symlink and not a directory" is not the same set as "a config file": it
+  # also admits FIFOs, sockets and DEVICE NODES, and `mv -f` replaces whichever one it finds.
+  # Enumerating the types to REJECT is the permissive shape this repo keeps finding, so the test
+  # is affirmative — nonexistent, or `-f` — and anything else is refused by name.
+  #
+  # AND IT SITS OUTSIDE THE SYMLINK BRANCH, which is round 8's correction to round 7's fix.
+  # Scoped to `[ -L "$cfg_file" ]` it only ever examined targets reached THROUGH a link, so a
+  # `~/.cargo/config.toml` that is ITSELF a FIFO, socket or directory reached `mv -f` unchecked.
+  # The property is about the path being WRITTEN, not about how that path was arrived at — the
+  # same reason the check moved onto `$write_target` in round 6 — so it now guards every route
+  # into the write, and the two routes are pinned by separate cases (6z symlinked, 6aa direct).
+  if [ -L "$write_target" ] || { [ -e "$write_target" ] && [ ! -f "$write_target" ]; }; then
+    warn "$write_target is not a regular file (a symlink, directory, FIFO, socket or device node) — skipping mold linker config rather than replacing it"
+    return 0
+  fi
   preserved=$(mktemp) || { warn "mktemp failed — skipping mold linker config"; return 0; }
-  if [ -f "$cfg_file" ]; then
+  if [ -f "$write_target" ]; then
     awk -v b="$MOLD_BEGIN" -v e="$MOLD_END" '
       { lines[NR] = $0 }
       END {
@@ -275,7 +493,7 @@ mold_write_block() {
         if (start > 1 && lines[start-1] == "") rmstart = start - 1
         for (i = 1; i <= NR; i++) if (i < rmstart || i > endi) print lines[i]
       }
-    ' "$cfg_file" >"$preserved"
+    ' "$write_target" >"$preserved"
   else
     : >"$preserved"
   fi
@@ -306,10 +524,6 @@ mold_write_block() {
   # rename over the target — so an ENOSPC/interrupt mid-write can never leave a
   # truncated config (which would break every cargo invocation). Resolve a symlink
   # to its target so we never silently replace a symlinked config with a plain file.
-  local write_target="$cfg_file" tmpw
-  if [ -L "$cfg_file" ]; then
-    write_target=$(readlink -f "$cfg_file" 2>/dev/null || echo "$cfg_file")
-  fi
   tmpw=$(mktemp "$(dirname "$write_target")/.cqlite-mold.XXXXXX" 2>/dev/null) \
     || { warn "mktemp failed in $(dirname "$write_target") — skipping mold linker config"; rm -f "$preserved"; return 0; }
   {
@@ -1734,33 +1948,1093 @@ info "  export CQLITE_DATASETS_ROOT=$MAIN_DATASETS"
 info "  Worktrees lack the gitignored Data.db binaries — always aim CQLITE_DATASETS_ROOT"
 info "  at the main checkout (above), NOT a worktree's own test-data/datasets."
 
-# ---- 5b. Single-gate default: one full gate per box (issue #2640) ----
-# One worker per machine (#1930) runs its full gates serially, so the DEFAULT
-# posture is a SINGLE full gate at a time. Pin CQLITE_GATE_MAX_CONCURRENCY=1 in the
-# shell profile so (a) the #1825 machine-wide cap admits exactly one full gate and
-# (b) the #2640 per-gate core budget hands that sole gate the FULL core count —
-# no CPU oversubscription, no manual pgrep-serialization. A machine that
-# deliberately wants >1 concurrent gate overrides the export.
-hdr "Single-gate default (CQLITE_GATE_MAX_CONCURRENCY=1, issue #2640)"
-PROFILE=""
-case "${SHELL:-}" in
-  */zsh) PROFILE="$HOME/.zshrc" ;;
-  */bash) PROFILE="$HOME/.bashrc" ;;
-  *) PROFILE="${ENV:-$HOME/.profile}" ;;
-esac
+# ---- 5b. Single-gate pin: one full gate per box (issues #2640 / #3414) ----
+# The #1825 machine-wide cap admits N concurrent full gates, and the #2640 per-gate
+# core budget derives each gate's core share from the SAME N — so pinning
+# CQLITE_GATE_MAX_CONCURRENCY=1 admits exactly one full gate and hands it the FULL core
+# count: no CPU oversubscription, no manual pgrep-serialization. A machine that
+# deliberately wants >1 concurrent gate overrides the pin, and bootstrap NEVER rewrites
+# an existing value.
+#
+# WHY THIS SECTION WAS REBUILT (issue #3414). It used to append the export to the shell
+# PROFILE and then report `ok` from a GREP OF THAT PROFILE — or, worse, from the value
+# it had INHERITED from its own caller. Both are PROXIES, and both were wrong on every
+# box in the fleet at once: Ubuntu's stock ~/.bashrc opens with
+# `case $- in *i*) ;; *) return;; esac`, so a line appended to it is never reached by
+# the non-interactive shells that actually launch gates (a script, a `bash -c`, a
+# detached `setsid`, a subagent). Measured: `ssh <box> 'echo $CQLITE_GATE_MAX_CONCURRENCY'`
+# printed UNSET on all three boxes whose profiles held the export; every gate therefore
+# resolved N=3 from the #1825 formula, and the live slot daemon's own argv said
+# `--slots 3` while an isolation guarantee had been given to a measurement lane on the
+# strength of the cap. PRESENCE IN A CONFIG FILE AND VISIBILITY TO THE PROCESS THAT
+# READS IT ARE DIFFERENT FACTS, and only the second one matters.
+#
+# So this section does two separable things, and only the second one can produce a
+# success verdict:
+#   (1) PERSIST where a non-interactive shell provably reads it — /etc/environment,
+#       read by PAM's pam_env at SESSION CREATION (`/etc/pam.d/sudo`, `/etc/pam.d/sshd`
+#       and `/etc/pam.d/login` all carry `pam_env.so readenv=1`), with no interactivity
+#       guard anywhere in the path. bash itself NEVER reads that file — measured,
+#       `env -i bash -c` AND `env -i bash -lc` both report UNSET — which is exactly why
+#       no shell-file check can answer this question, login shell or not.
+#   (2) PROBE a fresh, profile-free session and report what it actually saw.
+hdr "Single-gate pin (CQLITE_GATE_MAX_CONCURRENCY, issues #2640/#3414)"
+
+# The PRODUCTION persistence target, written as a LITERAL here. The privileged write
+# below can never name anything else (see the seam guard and the invariant assert).
+PIN_ENV_FILE=/etc/environment
+PIN_ENV_FILE_IS_SEAM=0
+PIN_SECTION_OK=1
+PIN_PERSIST_NOTE=""
+# NO INLINE COMMENT ON THE VALUE LINE: pam_env parses `KEY=VALUE` literally, so a
+# trailing `# ...` would become part of the value. Whole-line comments are skipped, so
+# the rationale goes on its own line above it.
+PIN_ENV_COMMENT='# cqlite: one full gate per box, full cores (issues #2640/#3414)'
+PIN_ENV_VALUE='1'
+PIN_ENV_LINE="CQLITE_GATE_MAX_CONCURRENCY=$PIN_ENV_VALUE"
 EXPORT_LINE='export CQLITE_GATE_MAX_CONCURRENCY=1  # cqlite: one full gate per box, full cores (issue #2640)'
-if [ -n "${CQLITE_GATE_MAX_CONCURRENCY:-}" ]; then
-  ok "CQLITE_GATE_MAX_CONCURRENCY already set to '${CQLITE_GATE_MAX_CONCURRENCY}' in this environment"
-elif [ -n "$PROFILE" ] && [ -f "$PROFILE" ] && grep -q 'CQLITE_GATE_MAX_CONCURRENCY' "$PROFILE" 2>/dev/null; then
-  ok "CQLITE_GATE_MAX_CONCURRENCY already pinned in $PROFILE"
-elif [ "$AUTO_YES" = 1 ] && [ -n "$PROFILE" ]; then
-  printf '%s\n' "$EXPORT_LINE" >>"$PROFILE" \
-    && ok "pinned CQLITE_GATE_MAX_CONCURRENCY=1 in $PROFILE (re-source or open a new shell)" \
-    || warn "could not append to $PROFILE — add manually: $EXPORT_LINE"
-else
-  warn "CQLITE_GATE_MAX_CONCURRENCY not pinned — one full gate per box is the default posture (#2640)"
-  info "add to ${PROFILE:-your shell profile}:  $EXPORT_LINE"
-  info "(re-run with --yes to auto-append)"
+
+if [ "$SKIP_GATE_PIN" = 1 ]; then
+  warn "gate-pin: OPT-OUT ($SKIP_GATE_PIN_HOW) — the pin was NOT persisted and its visibility was NOT measured"
+  info "this run cannot certify that a non-interactive shell sees CQLITE_GATE_MAX_CONCURRENCY; drop the opt-out to measure it"
+  PIN_SECTION_OK=0
+fi
+
+# PLATFORM SCOPING, EXPLICIT AND NOT INFERRED FROM FILE ABSENCE (#3414 roborev round 3).
+# /etc/environment + pam_env is a Linux mechanism. Requiring the file for VERIFIED made a
+# correctly-configured Mac PERMANENTLY non-passing under --strict — red on correct input,
+# which is the shape this lane has now refused three times: an alarm that always fires is
+# one people learn to waive, and it would have made `verify.run` unusable on any non-Linux
+# host rather than merely unverified.
+#
+# Scoped on $PLATFORM, deliberately NOT on "is /etc/environment missing?", because those
+# are different facts with opposite correct answers: a Mac has no such file BY DESIGN,
+# while a LINUX box without one is a genuine anomaly that must stay non-passing. Folding
+# them together would trade a false red for a false green.
+#
+# Reported as an explicit NON-FAILING verdict rather than silence: this repo's rule for
+# the CI tier registry is that absence is an error while inapplicability must be reported
+# as an explicit success, and the same reasoning applies to a provisioning check — a
+# section that simply prints nothing is indistinguishable from one that did not run.
+#
+# macOS persistence (a launchd equivalent) is deliberately NOT implemented: there is no
+# Mac on this fleet, so it could not be verified, and an unverifiable persistence path is
+# worse than a documented gap. macOS is SCOPED OUT here, not supported.
+# THE MECHANISM IS LINUX-SPECIFIC; THE REQUIREMENT IS NOT (#3414 final roborev). An
+# earlier form emitted `ok "NOT-APPLICABLE"` here unconditionally, which let `--strict`
+# CERTIFY AN UNPINNED non-Linux host: no /etc/environment exists to persist into, so the
+# section declared inapplicability and passed — while every gate on that box resolved the
+# #1825 cap from the formula. Inapplicability of the PERSISTENCE step was standing in for
+# absence of the REQUIREMENT, which is this issue's own defect wearing a platform label.
+#
+# So the platform no longer earns an exemption; it earns a NARROWER QUESTION. We cannot
+# ask "is it in the system env file" (there is none), but "does a fresh session see a
+# value the GATE HONOURS" is platform-independent and is the fact that matters. That is
+# decided below, in the same probe the Linux path uses, minus the file-correlation half.
+PIN_PLATFORM_UNMANAGED=0
+if [ "$PIN_SECTION_OK" = 1 ] && [ "$PLATFORM" != linux ]; then
+  PIN_PLATFORM_UNMANAGED=1
+  info "gate-pin: no PAM-read system-wide env file on this $PLATFORM host, so bootstrap does not MANAGE the pin here — but it still VERIFIES it: the probe below asks whether a fresh session sees a value the gate honours"
+  info "to cap gates here, export CQLITE_GATE_MAX_CONCURRENCY in whatever this host's session-startup mechanism is"
+fi
+
+# Effective privilege, resolved BEFORE the seam guard because the guard now depends on it.
+# Unknown is treated as privileged (fail closed): a seam that steers a write must not be
+# admitted because we could not establish who we are.
+# `$EUID` — Bash's own readonly — NEVER a PATH-resolved `id` (#3414 roborev round 8, HIGH).
+# The privilege decision gates a seam that can steer a ROOT `tee -a` at an arbitrary
+# absolute path, so a shadowed or merely MALFORMED `id` (a busybox variant, a broken PATH)
+# makes a root invocation look unprivileged and reopens the round-5 High through a
+# different door. A malformed `id` is an ACCIDENT, not an attack, which is what puts this
+# inside the threat model rather than in the invoker-controls-the-process category.
+# A nonnumeric value is treated as UNKNOWN, never as "not root": the guards below read an
+# empty PIN_EUID as privileged, so an unreadable identity fails closed. Also one fewer fork.
+PIN_EUID="${EUID-}"
+case "$PIN_EUID" in ''|*[!0-9]*) PIN_EUID="" ;; esac
+
+if [ "$PIN_SECTION_OK" = 1 ] && [ -n "${CQLITE_BOOTSTRAP_ENV_FILE:-}" ] \
+   && { [ "$PIN_EUID" = 0 ] || [ -z "$PIN_EUID" ]; }; then
+  # THE SEAM IS REFUSED OUTRIGHT UNDER ROOT (#3414 roborev round 5, HIGH).
+  #
+  # THIS IS THE SIXTH INSTANCE OF THIS ISSUE'S OWN DEFECT IN THIS LANE, AND IT WAS INSIDE
+  # THE SAFETY GUARD ITSELF. The invariant below used to read `${#PIN_ROOT[@]} -gt 0`,
+  # i.e. "are we going through sudo" — a PROXY for the fact that matters, which is
+  # EFFECTIVE PRIVILEGE. When bootstrap is itself EUID 0, PIN_ROOT is empty and the
+  # `tee -a` is privileged anyway, so "no env var can ever steer a PRIVILEGED write" was
+  # FALSE under root: CQLITE_BOOTSTRAP_ENV_FILE could aim a root write at any absolute
+  # path. Presence of a sudo prefix stood in for being privileged exactly as presence in
+  # ~/.bashrc stood in for a gate seeing the pin.
+  #
+  # Refused rather than made safe: dropping to a validated UID would put MORE machinery
+  # in the privileged path, and the seam exists precisely to avoid privileged writes. The
+  # cost is real and accepted — the section cannot be exercised through the seam as root,
+  # so a test that needs it must SKIP (counted), never report ok.
+  warn "gate-pin: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE is set and this process is root or of unknown identity — refusing a seam that could steer a PRIVILEGED write at an env-chosen path)"
+  info "the seam is for unprivileged self-tests only; run them as a normal user"
+  PIN_SECTION_OK=0
+fi
+
+if [ "$PIN_SECTION_OK" = 1 ] && [ -n "${CQLITE_BOOTSTRAP_ENV_FILE:-}" ]; then
+  # TEST-ONLY SEAM — fail-closed, with NO production fallback (the #3249 lesson: a test
+  # seam that degrades to the real path certifies the real path by accident). It exists
+  # so the self-tests can drive this section's DECISIONS without a privileged write to
+  # the real /etc/environment, including when a suite happens to run as root. Two
+  # properties keep it from being a hole of its own:
+  #   * it is inert unless CQLITE_BOOTSTRAP_TEST_MODE=1, and a seam set WITHOUT the
+  #     marker SKIPS the section rather than falling back, and
+  #   * under the marker the write is UNPRIVILEGED (PIN_ROOT is forced empty below), so
+  #     no environment variable can ever steer a PRIVILEGED write at a path of its
+  #     choosing — the privileged branch only ever names the literal /etc/environment.
+  if [ "${CQLITE_BOOTSTRAP_TEST_MODE:-0}" != 1 ]; then
+    warn "gate-pin: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE is set without CQLITE_BOOTSTRAP_TEST_MODE=1) — refusing to persist the pin at an env-chosen path"
+    PIN_SECTION_OK=0
+  else
+    case "$CQLITE_BOOTSTRAP_ENV_FILE" in
+      /etc/environment)
+        warn "gate-pin: SKIPPED (the test seam may not name the production /etc/environment)"
+        PIN_SECTION_OK=0 ;;
+      /*)
+        if [ -L "$CQLITE_BOOTSTRAP_ENV_FILE" ]; then
+          warn "gate-pin: SKIPPED (the test seam path is a SYMLINK — a write would follow it)"
+          PIN_SECTION_OK=0
+        elif [ ! -d "$(dirname "$CQLITE_BOOTSTRAP_ENV_FILE")" ]; then
+          warn "gate-pin: SKIPPED (the test seam's parent directory does not exist)"
+          PIN_SECTION_OK=0
+        else
+          PIN_ENV_FILE="$CQLITE_BOOTSTRAP_ENV_FILE"; PIN_ENV_FILE_IS_SEAM=1
+        fi ;;
+      *)
+        warn "gate-pin: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE must be an ABSOLUTE path)"
+        PIN_SECTION_OK=0 ;;
+    esac
+  fi
+fi
+
+if [ "$PIN_SECTION_OK" = 1 ]; then
+  # Privilege, resolved the same way section 2c resolves it: NON-INTERACTIVELY, so no
+  # code path here can ever sit on a password prompt on an unattended worker. The
+  # runas target of the AVAILABILITY probe is the same as the runas target of the real
+  # probe, so a box whose sudoers permits root-but-not-self cannot look available and
+  # then fail in the measurement.
+  PIN_ROOT=()
+  PIN_PRIV_STATE=unknown
+  # Initialised HERE, above the first thing that can set it: the non-root name check below
+  # records a subject note, and an initialisation further down would blank it (the note
+  # would vanish and the state would degrade to a bare no-identity).
+  PIN_PROBE_SUBJECT_NOTE=""
+  # AND THE NAME MUST MAP BACK TO $EUID (#3414 roborev round 9). `id -un` is a PATH lookup
+  # against NSS, and both halves can lie: a shadowed or malformed `id`, or a stale NSS
+  # mapping, can name an account that is NOT the one we are running as. The name is then
+  # handed to `sudo -n -u`, so the probe would open a session for a DIFFERENT account and
+  # report its PAM environment as ours — the wrong-subject defect the root branch below
+  # already guards, on the path nobody thought to guard because it looked like it was just
+  # asking who we are. $EUID is the authority (shell-set, no fork, unshadowable); the name
+  # is a label for the messages and is only usable once it resolves back to that uid.
+  # A mismatch is UNMEASURED, never a guess between two disagreeing sources.
+  PIN_SELF_USER=$(id -un 2>/dev/null || true)
+  if [ -n "$PIN_SELF_USER" ]; then
+    pin_name_uid=$(id -u "$PIN_SELF_USER" 2>/dev/null || echo none)
+    if [ "$pin_name_uid" != "$PIN_EUID" ]; then
+      PIN_PROBE_SUBJECT_NOTE="'id -un' answered '$PIN_SELF_USER', which resolves to uid $pin_name_uid rather than this process's EUID $PIN_EUID — a shadowed 'id' or a stale NSS mapping, so probing that name would answer about the wrong account"
+      PIN_SELF_USER=""
+    fi
+  fi
+  PIN_SELF_UID="$PIN_EUID"   # one source: resolved before the seam guard, which needs it
+  # UNDER `sudo bash bootstrap …` THE ANSWER TO `id -un` IS root, WHICH IS THE WRONG
+  # SUBJECT (#3414 roborev round 5). Gates run as the agent account, and the two genuinely
+  # diverge: a per-user `~/.pam_environment` on that account, or a sudoers rule that
+  # supplies a value only for root's sessions, both make root's session say VERIFIED while
+  # the account that matters gets something else. So when we are root and sudo told us who
+  # invoked us, probe THAT account.
+  #
+  # The name is VALIDATED before use, and an unresolvable one is UNMEASURED rather than a
+  # silent fall back to root: falling back would answer a question about the wrong user
+  # and report it as if it were the right one, which is the substitution this whole
+  # section exists to stop.
+  # SUDO_UID IS THE AUTHORITY AND SUDO_USER MUST AGREE WITH IT (#3414 roborev round 8).
+  # Trusting the NAME alone accepts stale or inconsistent metadata — `SUDO_UID=1000
+  # SUDO_USER=root` would probe root and could report VERIFIED while the agent account has
+  # a different PAM environment, which is the wrong-subject defect this retarget exists to
+  # fix, wearing the retarget's own clothes. So: a validated NUMERIC SUDO_UID, NONZERO
+  # (root invoking sudo tells us nothing new), and if a username is present it must resolve
+  # to that same uid. Anything absent or inconsistent is UNMEASURED — never a fall back to
+  # answering about root, and never a guess between two disagreeing sources.
+  if [ "$PIN_EUID" = 0 ]; then
+    pin_sudo_uid="${SUDO_UID-}"
+    case "$pin_sudo_uid" in ''|*[!0-9]*) pin_sudo_uid="" ;; esac
+    pin_sudo_name="${SUDO_USER-}"
+    if [ -z "$pin_sudo_uid" ]; then
+      PIN_SELF_USER=""
+      PIN_PROBE_SUBJECT_NOTE="running as root with no usable SUDO_UID (absent or non-numeric), so the account a gate would run as is unknown"
+    elif [ "$pin_sudo_uid" = 0 ]; then
+      PIN_SELF_USER=""
+      PIN_PROBE_SUBJECT_NOTE="SUDO_UID is 0, so sudo was invoked BY root — that tells us nothing about the account a gate runs as"
+    else
+      pin_resolved=$(id -un "$pin_sudo_uid" 2>/dev/null || true)
+      if [ -z "$pin_resolved" ]; then
+        PIN_SELF_USER=""
+        PIN_PROBE_SUBJECT_NOTE="SUDO_UID $pin_sudo_uid does not resolve to an account"
+      elif [ -n "$pin_sudo_name" ] && [ "$(id -u "$pin_sudo_name" 2>/dev/null || echo none)" != "$pin_sudo_uid" ]; then
+        PIN_SELF_USER=""
+        PIN_PROBE_SUBJECT_NOTE="INCONSISTENT sudo metadata — SUDO_USER '$pin_sudo_name' does not resolve to SUDO_UID $pin_sudo_uid, so which account to probe is ambiguous and neither answer would be trustworthy"
+      else
+        PIN_SELF_USER="$pin_resolved"
+        PIN_PROBE_SUBJECT_NOTE="probed as '$pin_resolved' (uid $pin_sudo_uid, the account that invoked sudo), not root — root's session is not the one a gate runs in"
+      fi
+    fi
+  fi
+  if [ -z "$PIN_SELF_USER" ]; then
+    PIN_PRIV_STATE=no-identity
+    [ -n "$PIN_PROBE_SUBJECT_NOTE" ] && PIN_PRIV_STATE=invoker-unresolvable
+  elif ! have sudo; then
+    PIN_PRIV_STATE=no-sudo-binary
+  elif [ -z "$TIMEOUT_BIN" ]; then
+    # THE BOUND IS CHECKED BEFORE THE FIRST PROBE, NOT AFTER (#3414 roborev round 10).
+    # `bounded` DEGRADES TO RUNNING THE COMMAND DIRECTLY when no timeout utility exists,
+    # and both sudo probes used to execute ABOVE the later no-timeout guard — so on a host
+    # with neither `timeout` nor `gtimeout` a stalled sudo/PAM/NSS lookup hung bootstrap
+    # indefinitely WHILE THE CODE CLAIMED IT REFUSES UNBOUNDED SESSION PROBING. The false
+    # claim is the worse half: a comment asserting a safety property the code does not
+    # have is worse than not having it, because it stops the next person checking.
+    PIN_PRIV_STATE=no-timeout-binary
+  else
+    # ROOT-WRITE PERMISSION AND SESSION-PROBE PERMISSION ARE INDEPENDENT FACTS, and gating
+    # the probe on the WRITE one was a false red (#3414 roborev round 10). `sudo -n true`
+    # asks "may I run ANYTHING as root"; the probe needs only "may I open a session as
+    # MYSELF". A host granting the second but not the first — a narrowly-scoped sudoers
+    # rule, or a box already correctly pinned — was reported sudo-needs-password and
+    # failed --strict on a legitimately configured machine.
+    #
+    # This finishes a split started two rounds ago: PIN_WRITE_PRIV was separated from
+    # PIN_PRIV_STATE in USE, but their ACQUISITION stayed entangled, so the weaker
+    # permission still depended on the stronger one being granted first.
+    if bounded 10 sudo -n -u "$PIN_SELF_USER" true >/dev/null 2>&1; then
+      PIN_PRIV_STATE=sudo-nopasswd
+    else
+      PIN_PRIV_STATE=sudo-runas-denied
+    fi
+  fi
+  # WRITE privilege: a SEPARATE question, asked separately and only where persistence is
+  # attempted. A root shell with no sudo binary can persist but cannot probe; a box that
+  # permits the runas-self session but not unrestricted root can probe but not persist.
+  # Neither fact implies the other, so neither is derived from the other's answer.
+  PIN_WRITE_PRIV=0
+  if [ "$PIN_SELF_UID" = 0 ]; then
+    PIN_WRITE_PRIV=1; PIN_ROOT=()
+  elif have sudo && [ -n "$TIMEOUT_BIN" ] && bounded 10 sudo -n true >/dev/null 2>&1; then
+    PIN_WRITE_PRIV=1; PIN_ROOT=(sudo -n)
+  fi
+  # Test mode never runs a PRIVILEGED write; the sandbox file belongs to the invoking
+  # user. Forcing PIN_ROOT empty is what makes "no env var can steer a privileged
+  # write" true IN CODE rather than merely by construction.
+  if [ "$PIN_ENV_FILE_IS_SEAM" = 1 ]; then PIN_ROOT=(); PIN_WRITE_PRIV=1; fi
+
+  # pin_strip_pam_quotes <raw>: reproduce pam_env's own de-quoting, so the value compared
+  # below is the value a session actually RECEIVES.
+  #
+  # STRIPPING QUOTES IS READING THE FILE'S FORMAT; NORMALISING THE VALUE IS REINTERPRETING
+  # IT. The first is mandatory, the second is forbidden. Without this, a legitimately
+  # quoted line — `CQLITE_GATE_MAX_CONCURRENCY="1"`, and quoting IS the convention in this
+  # file, which opens with `PATH="/usr/local/sbin:..."` — parses as `"1"`, the session
+  # reports `1`, and a correctly-pinned box gets a non-passing verdict: red on correct
+  # input, produced by the fix for a false green. But ` 1 ` must still mismatch `1`,
+  # because the gate genuinely discards the former; that asymmetry is why the gate is
+  # asked rather than second-guessed.
+  #
+  # THE RULE IS MEASURED, NOT ASSUMED (pam 1.5.3-5ubuntu5.7, this fleet's platform), by
+  # writing shapes into the real /etc/environment and reading them back out of a fresh
+  # session. It is NOT "a matched pair": a LEADING quote is stripped whether or not it is
+  # closed, and single quotes behave like double ones — the symmetry this was told not to
+  # assume, checked rather than guessed:
+  #     "1"  -> 1        '1' -> 1        1   -> 1        "a b"  -> a b
+  #     "1   -> 1        '1  -> 1        1"  -> 1"       a"b    -> a"b
+  #     ""   -> (empty)  "   -> (empty)  " 1 " -> ` 1 `  ""1""  -> "1"
+  # i.e. drop a leading `"` or `'`, then drop a trailing one of the SAME kind if present.
+  #
+  # WHY A WRONG ANSWER HERE IS SAFE IN THE DIRECTION THAT MATTERS: the session side of the
+  # comparison is pam_env's OWN output, so any disagreement between this parser and a
+  # different pam build moves the two values APART, never together. Over-stripping and
+  # under-stripping both yield a non-passing verdict; neither can manufacture a VERIFIED.
+  pin_strip_pam_quotes() {
+    local v="$1" q
+    case "$v" in
+      '"'*) q='"' ;;
+      "'"*) q="'" ;;
+      *) printf '%s' "$v"; return 0 ;;
+    esac
+    v=${v#?}
+    case "$v" in *"$q") v=${v%?} ;; esac
+    printf '%s' "$v"
+  }
+
+  # Does the file ALREADY carry a pin line? Read ONCE, here, because two very different
+  # boxes reach the FAILED verdict below and they need different remedies: a box with no
+  # line (persist it) and a box whose line is present yet invisible to a fresh session
+  # (a PAM condition — re-running with --yes finds the line already there and changes
+  # NOTHING, so an operator told to do that just loops).
+  #
+  # AND IT CAPTURES THE VALUE, NOT JUST THE PRESENCE OF A LINE (#3414 roborev round 3).
+  # THIS IS THE FOURTH INSTANCE OF THIS ISSUE'S OWN DEFECT IN THIS LANE, and it was inside
+  # the correlation added to fix the third: presence is a PROXY for the fact that matters,
+  # exactly as "the export is in ~/.bashrc" was. Concretely — the file holds
+  # `CQLITE_GATE_MAX_CONCURRENCY=abc`, a sudoers env_file or ~/.pam_environment supplies
+  # `1`, both halves of the file-AND-session conjunction are satisfied, the verdict is
+  # VERIFIED — and every ordinary PAM session receives `abc`, which the gate discards for
+  # its default formula and stamps N(invalid). The verdict must therefore compare VALUES.
+  #
+  # Parsed the way pam_env reads the file, because a second, subtly-different parser here
+  # would be the same class of bug one layer down:
+  #   * whole-line `#` comments are skipped;
+  #   * NO inline-comment stripping — pam_env takes a trailing `# …` as part of the value,
+  #     which is precisely why this section's own append puts its comment on its own line;
+  #   * the LAST assignment wins if a file somehow carries two.
+  # An assignment we cannot parse is UNMEASURED, never a mismatch: a parse failure is an
+  # absence of evidence, and reporting it as a contradiction would invent one.
+  PIN_FILE_HAS_LINE=unknown
+  PIN_FILE_VALUE=""
+  # pin_read_env_file: THE ONE PARSER, callable again (roborev job 319, Medium). It used to
+  # run inline, exactly once, at the top of the section — so every later decision read a
+  # snapshot taken before the writes. That was fine while this run was the only writer; it
+  # stopped being fine when the create and append learned to LOSE a race (jobs 314/316),
+  # because a lost race leaves the cache saying "no line" about a file that now HAS one, and
+  # two things downstream act on that stale answer: the shell-profile fallback appends a
+  # hardcoded `=1` — manufacturing the 1-vs-4 divergence 11ai exists to prevent — and the
+  # verdict compares the session against an empty PIN_FILE_VALUE and reports NOT-SYSTEM-WIDE
+  # about a correctly pinned box.
+  #
+  # Factored rather than re-implemented at the call sites: a second parse is a second place
+  # for the sentinel/quote/last-wins rules to drift, and those rules are the subtle part.
+  pin_read_env_file() {
+  # Reset to the SAME default the one-shot version started from (:2166), not to empty: an
+  # unreadable or symlinked file assigns nothing below, and `unknown` is the value the
+  # "uncorrelatable file" verdict keys on. Resetting to "" silently disabled that branch —
+  # caught by the existing case, which is the argument for making the function reproduce the
+  # original initial state rather than an intuitive-looking blank one.
+  PIN_FILE_HAS_LINE=unknown; PIN_FILE_VALUE=""
+  if [ ! -e "$PIN_ENV_FILE" ]; then
+    PIN_FILE_HAS_LINE=absent-file
+  elif [ ! -L "$PIN_ENV_FILE" ] && [ -r "$PIN_ENV_FILE" ]; then
+    if grep -Eq '^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=' "$PIN_ENV_FILE" 2>/dev/null; then
+      # `sed -n 's/…//p' | tail -1` = last assignment wins. The pattern anchors at line
+      # start (so a `#`-commented line cannot match) and stops at the FIRST `=`, taking
+      # everything after it verbatim — no trimming, no comment stripping.
+      # A SENTINEL PREFIX, because an EMPTY capture and a FAILED capture are otherwise the
+      # same string: `CQLITE_GATE_MAX_CONCURRENCY=` is a legitimate (empty, gate-invalid)
+      # value, while sed producing nothing means the parse failed. Without the marker the
+      # `unparseable` branch is unreachable and an unparseable file would silently report
+      # an empty value — the unset-vs-set-empty conflation this issue removed from the
+      # gate, re-created in the parser that checks it.
+      pin_file_raw=$(sed -n 's/^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=/VAL:/p' "$PIN_ENV_FILE" 2>/dev/null | tail -1)
+      case "$pin_file_raw" in
+        VAL:*) PIN_FILE_VALUE=$(pin_strip_pam_quotes "${pin_file_raw#VAL:}"); PIN_FILE_HAS_LINE=yes ;;
+        *)     PIN_FILE_HAS_LINE=unparseable ;;
+      esac
+    else
+      PIN_FILE_HAS_LINE=no
+    fi
+  fi
+  }
+  pin_read_env_file
+
+  PIN_CREATE_RESIDUE=""
+  # pin_append_env_file: CHECK-AND-APPEND under a lock, re-reading inside it (roborev job
+  # 316, Medium). The caller's "is a line already there" fact is read ~150 lines earlier, and
+  # the append was a bare `tee -a`, so a value added in between — a provisioner setting a
+  # DELIBERATE `=4`, or a peer bootstrap on the same box — was silently overridden, because
+  # pam_env takes the LAST assignment. That breaks this script's own stated contract that it
+  # never rewrites an existing value, and two concurrent runs also produced DUPLICATE lines.
+  #
+  # `flock` serialises against every cooperating writer (both bootstrap runs take it), and
+  # the re-read INSIDE the lock shrinks the window to the locked region. Exit 3 means
+  # someone else won and we must not write.
+  #
+  # RESIDUAL, DECLARED: flock is ADVISORY, so a writer using a plain `>>` and no lock can
+  # still interleave. That is not closable from here — it needs cooperation from the other
+  # writer — and it is strictly better than the unlocked version it replaces. Where flock is
+  # absent the same body runs unlocked, which still buys the re-read: losing the lock is a
+  # weaker guarantee, not a reason to skip the check.
+  pin_append_env_file() {
+    local -a pin_lock=()
+    command -v flock >/dev/null 2>&1 && pin_lock=(flock "$PIN_ENV_FILE")
+    ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} ${pin_lock[@]+"${pin_lock[@]}"} bash -c '
+      f="$1"; comment="$2"; line="$3"
+      if grep -Eq "^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=" "$f" 2>/dev/null; then
+        exit 3
+      fi
+      prefix=""
+      # A file whose last byte is not a newline would otherwise have our KEY=VALUE welded
+      # onto its final line, and pam_env would read the result as one malformed entry.
+      if [ -s "$f" ] && [ -n "$(tail -c 1 "$f" 2>/dev/null)" ]; then prefix="
+"; fi
+      printf "%s%s\n%s\n" "$prefix" "$comment" "$line" >> "$f"
+    ' _ "$PIN_ENV_FILE" "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" 2>/dev/null
+  }
+
+  # pin_create_env_file: CREATE-IF-ABSENT, atomically (roborev job 314, Medium). The
+  # `[ ! -e "$PIN_ENV_FILE" ]` test in the caller and the write are two separate steps, and
+  # the write used to be a TRUNCATING `tee` — so a file created in between, by cloud-init, a
+  # provisioning run or a peer agent on the same box, was silently OVERWRITTEN and whatever
+  # it held was destroyed. On a fleet that runs bootstrap on several lanes per box that is a
+  # live race, not a theoretical one.
+  #
+  # `set -C` (noclobber) opens with O_EXCL, so the KERNEL arbitrates and a loser writes
+  # nothing — the same reason the claim protocol pushes a ref instead of checking for one.
+  # `umask 022` establishes the mode AT CREATION instead of chmod-ing afterwards, which also
+  # closes the window where the file briefly exists at a mode nobody chose. The readback in
+  # The mode is VERIFIED, not merely instructed: setting a umask/chmod is an instruction, and
+  # this section's whole rule is that an instruction is not a measurement. The verification now
+  # happens on the STAGED file before `ln` (job 329) rather than on the destination after it.
+  pin_create_env_file() {
+    # THE CREATE AND THE WRITE ARE SEPARATE STEPS SO THEIR FAILURES ARE DISTINGUISHABLE
+    # (roborev job 321, Medium). Collapsing them and then asking `[ -e "$FILE" ]` cannot tell
+    # SOMEONE ELSE'S file from OUR OWN partially-written one — both exist — and the two
+    # dispositions are opposite: leave someone else's alone, roll our own back. Getting it
+    # wrong falsely blamed a concurrent writer AND left a truncated assignment that a later
+    # run would read as an existing pin and decline to repair.
+    #   exit 4 = exclusive create refused, i.e. the file already existed  -> LOST RACE
+    #   exit 5 = we created it and the write then failed                  -> OUR partial file
+    local pin_child_rc
+    ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} bash -c '
+      umask 022
+      f="$3"
+      # ATOMIC CREATE *WITH CONTENT*, via a hard link (roborev job 323, Medium). The previous
+      # form created the file exclusively and THEN wrote it, which reopened the very window it
+      # was meant to close: another writer appending between the two steps had its content
+      # erased by the truncating write, so the create was "atomic" only in the sense that
+      # nothing else could CREATE it. Writing the content into a temporary in the SAME
+      # directory and then `ln`-ing it into place makes the file appear complete or not at
+      # all — `ln` fails if the destination exists, so exclusivity and completeness are the
+      # same operation instead of two.
+      t="$f.cqlite-pin.$$"
+      rm -f "$t" 2>/dev/null
+      printf "%s\n%s\n" "$1" "$2" > "$t" 2>/dev/null || { rm -f "$t" 2>/dev/null; exit 5; }
+      # ESTABLISH AND VERIFY THE MODE ON THE *TEMP*, BEFORE LINKING (roborev job 329, Medium).
+      # This used to be a post-`ln` read-back with a rollback that removed the DESTINATION BY
+      # PATHNAME, which is a destructive race: `ln` succeeding proves the inode is ours AT
+      # LINK TIME, not at REMOVE time, so a provisioner that unlinked and replaced the file in
+      # between had ITS replacement deleted by our rollback. Verifying here makes the
+      # destination correct BY CONSTRUCTION — `ln` links the inode, so it carries this mode
+      # from the instant it appears — and removes the need for any rollback at all.
+      chmod 0644 "$t" 2>/dev/null || true
+      # PORTABLE MODE READ (roborev job 330, Medium). `stat -c` is GNU-only; BSD/macOS `stat`
+      # rejects it. The PRODUCTION path is Linux-gated, but the TEST SEAM stubs `uname` to
+      # simulate Linux while linking the HOST copy of `stat`, so on a macOS host this check would
+      # fail-closed (exit 6) and the create would never happen — a break that the Linux-only
+      # justification does not cover. GNU first, BSD fallback; `stat -f %Lp` is the BSD spelling.
+      _pm=$(stat -c %a "$t" 2>/dev/null || stat -f %Lp "$t" 2>/dev/null) # portability-lint-allow: GNU `stat -c` PAIRED with the BSD `stat -f` fallback on the same line — the portable spelling, not a GNU-only one
+      [ "$_pm" = 644 ] || { rm -f "$t" 2>/dev/null; exit 6; }
+      ln "$t" "$f" 2>/dev/null || { rm -f "$t" 2>/dev/null; exit 4; }
+      rm -f "$t" 2>/dev/null
+    ' _ "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" "$PIN_ENV_FILE" 2>/dev/null
+    pin_child_rc=$?
+    if [ "$pin_child_rc" = 4 ]; then pin_create_rc=3; return 3; fi
+    if [ "$pin_child_rc" = 6 ]; then
+      # Mode could not be established ON THE STAGED FILE, so nothing was ever linked. The
+      # destination is untouched by construction — there is no rollback to get wrong.
+      PIN_CREATE_RESIDUE="0644 could not be established on the staged file, so $PIN_ENV_FILE was never created; the temporary was removed by the child"
+      pin_create_rc=1; return 1
+    fi
+    if [ "$pin_child_rc" != 0 ]; then
+      # NEVER TOUCH THE DESTINATION ON A PRE-LINK FAILURE (roborev job 328, Medium). This
+      # branch used to `rm -f "$PIN_ENV_FILE"` unconditionally, which was DESTRUCTIVE and
+      # defeated the very no-clobber guarantee the temp+`ln` rewrite exists for: exit 5 means
+      # the TEMP write failed, i.e. `ln` never ran and the destination was NEVER ours — so if
+      # a concurrent provisioner created /etc/environment during our write, we deleted THEIR
+      # file and called it our own cleanup.
+      #
+      # The child already removes its own temp on every failure path, and there is NO child
+      # exit where `ln` SUCCEEDED and we then failed (a successful `ln` falls through to
+      # rc=0). Therefore the parent never needs to remove the destination here, and the
+      # correct disposition is: report, and touch NOTHING.
+      #
+      # AND THERE IS NO OTHER ROLLBACK LEFT TO GET WRONG. An earlier revision kept a post-`ln`
+      # mode rollback here on the argument that `ln` proves the inode is ours — true at LINK
+      # time, FALSE at REMOVE time, which is the destructive race job 329 found. The mode is
+      # now verified on the staged file before linking, so no rollback exists at all.
+      PIN_CREATE_RESIDUE="the staging write failed (rc $pin_child_rc) before $PIN_ENV_FILE was linked; nothing was written there and the temporary was removed by the child"
+      pin_create_rc=1; return 1
+    fi
+    pin_create_rc=0; return 0
+  }
+
+  # pin_create_mode_ok WAS HERE AND IS DELETED (roborev job 329, Medium). It read the mode
+  # back AFTER `ln` and, on a mismatch, removed the DESTINATION BY PATHNAME — a destructive
+  # race, because `ln` proves the inode is ours at LINK time and not at REMOVE time. The mode
+  # is now established and verified on the TEMP before linking, so the destination is correct
+  # from the instant it exists and there is nothing to roll back. Removing the rollback
+  # removes the race; narrowing it would only have made the window smaller.
+  if [ "$PIN_PLATFORM_UNMANAGED" = 1 ]; then
+    PIN_PERSIST_NOTE="not persisted (no PAM-read system-wide env file on $PLATFORM)"
+    info "not touching $PIN_ENV_FILE on this $PLATFORM host — pam_env is a Linux mechanism and this platform does not consume that file, so writing it would change host state for nothing"
+  elif [ ! -e "$PIN_ENV_FILE" ]; then
+    # CREATE IT ON LINUX WHEN AUTHORISED (#3414 final roborev). Refusing here meant a
+    # MINIMAL Linux install — where /etc/environment simply does not ship — could never be
+    # repaired: --fix-gate-pin declined, the probe found no pin, and --strict failed that
+    # box's onboarding FOREVER. A repair flag that cannot repair the one case it exists for
+    # is the "red on correct input" shape inverted: the box is fixable and we refuse to fix
+    # it. pam_env consumes the file once it exists, so creating it is the repair.
+    #
+    # Created with the ownership and mode pam_env expects and every other consumer assumes:
+    # root:root 0644. Explicitly NOT 0600 — this file is read by PAM for every login
+    # session, and a mode nothing else on the box uses is its own trap. Guarded the same way
+    # the append is: only under an explicit authorisation, only with write privilege, and
+    # only at the literal production path (the seam forces PIN_ROOT empty, and the invariant
+    # below still refuses a privileged write to a non-production path).
+    if [ "$AUTO_YES" != 1 ] && [ "$FIX_GATE_PIN" != 1 ]; then
+      PIN_PERSIST_NOTE="no $PIN_ENV_FILE and no authorisation to create it"
+      info "no $PIN_ENV_FILE on this $PLATFORM host — pass --yes or --fix-gate-pin and it will be CREATED (root:root 0644) so pam_env can consume it"
+    elif [ "$PIN_WRITE_PRIV" != 1 ]; then
+      PIN_PERSIST_NOTE="no $PIN_ENV_FILE and no privilege to create it ($PIN_PRIV_STATE)"
+      warn "gate-pin: $PIN_ENV_FILE does not exist and this run cannot create it ($PIN_PRIV_STATE) — the pin was NOT persisted"
+      info "create it as root:  printf '%s\n' '$PIN_ENV_COMMENT' '$PIN_ENV_LINE' > $PIN_ENV_FILE && chmod 0644 $PIN_ENV_FILE"
+    elif pin_create_env_file; then
+      PIN_FILE_HAS_LINE=yes; PIN_FILE_VALUE="$PIN_ENV_VALUE"
+      # REPORT WHAT IT ACTUALLY IS, read back — not what the write intended. An earlier
+      # draft of this line asserted "root:root 0644" unconditionally, which is false
+      # wherever the write was unprivileged (the test seam forces PIN_ROOT empty, so the
+      # file belongs to the invoking user). A message claiming an ownership it did not
+      # establish is the same presence-for-fact substitution this section exists to remove,
+      # in the section's own output.
+      pin_made=$(ls -ld -- "$PIN_ENV_FILE" 2>/dev/null | awk '{print $1" "$3":"$4}')
+      info "CREATED $PIN_ENV_FILE (${pin_made:-mode/owner unreadable}) carrying '$PIN_ENV_LINE' — pam_env reads it at session creation, so NEW sessions pick it up"
+    elif [ "${pin_create_rc:-}" = 3 ]; then
+      # RACED, and the contract wins — same disposition as the append's lost race.
+      pin_read_env_file
+      PIN_PERSIST_NOTE="not persisted (another writer created $PIN_ENV_FILE first)"
+      info "$PIN_ENV_FILE was created by something else while this run was working — left EXACTLY as it is, and re-read, so the verdict and the profile decision below use what the file NOW says rather than the snapshot taken before the race"
+    elif [ -n "$PIN_CREATE_RESIDUE" ]; then
+      # THE FAILURE REPORT MUST MATCH THE FILESYSTEM (roborev job 311, Low). The write is
+      # two steps — content then mode — so a `tee` that succeeded followed by a mode that
+      # could not be established used to take this branch and say "NOT persisted" while
+      # leaving a POPULATED file behind. The next run then reads a present
+      # CQLITE_GATE_MAX_CONCURRENCY line, treats the pin as already persisted, and never
+      # repairs the mode: one run's reported failure becomes the next run's silent success
+      # at a permission nothing chose. So the residue is rolled back, and where it cannot
+      # be, that is stated rather than folded into the generic message.
+      PIN_PERSIST_NOTE="could not create $PIN_ENV_FILE ($PIN_CREATE_RESIDUE)"
+      warn "gate-pin: could not create $PIN_ENV_FILE — the pin was NOT persisted ($PIN_CREATE_RESIDUE)"
+    else
+      PIN_PERSIST_NOTE="could not create $PIN_ENV_FILE"
+      warn "gate-pin: could not create $PIN_ENV_FILE — the pin was NOT persisted"
+    fi
+  elif [ -L "$PIN_ENV_FILE" ]; then
+    PIN_PERSIST_NOTE="$PIN_ENV_FILE is a SYMLINK"
+    warn "gate-pin: $PIN_ENV_FILE is a SYMLINK — refusing a privileged write that would follow it; nothing was persisted"
+  elif [ ! -r "$PIN_ENV_FILE" ]; then
+    PIN_PERSIST_NOTE="$PIN_ENV_FILE is unreadable"
+    warn "gate-pin: cannot read $PIN_ENV_FILE — cannot tell whether the pin is already there, so nothing was written (a blind append could duplicate or contradict an existing line)"
+  elif [ "$PIN_FILE_HAS_LINE" = yes ] || [ "$PIN_FILE_HAS_LINE" = unparseable ]; then
+    # `unparseable` counts as PRESENT for the append decision even though its value could
+    # not be read: grep DID match a line, so appending would leave the file with two
+    # assignments and pam_env would silently take the last one.
+    info "$PIN_ENV_FILE already carries a CQLITE_GATE_MAX_CONCURRENCY line — left EXACTLY as it is (a box deliberately running >1 concurrent gate overrides the pin; bootstrap never rewrites an existing value)"
+  elif [ "$AUTO_YES" != 1 ] && [ "$FIX_GATE_PIN" != 1 ]; then
+    PIN_PERSIST_NOTE="not persisted (neither --yes nor --fix-gate-pin)"
+    info "persist the pin:  bash scripts/bootstrap-agent-machine.sh --fix-gate-pin   (appends '$PIN_ENV_LINE' to $PIN_ENV_FILE; --yes does it too)"
+  elif [ "$PIN_WRITE_PRIV" != 1 ]; then
+    PIN_PERSIST_NOTE="no privilege to write $PIN_ENV_FILE ($PIN_PRIV_STATE)"
+    warn "gate-pin: cannot write $PIN_ENV_FILE ($PIN_PRIV_STATE) — the pin was NOT persisted"
+    info "add these two lines as root:  $PIN_ENV_COMMENT / $PIN_ENV_LINE"
+  elif { [ "$PIN_EUID" = 0 ] || [ -z "$PIN_EUID" ] || [ "${#PIN_ROOT[@]}" -gt 0 ]; } \
+       && [ "$PIN_ENV_FILE" != /etc/environment ]; then
+    # INVARIANT, enforced rather than argued — and keyed on EFFECTIVE PRIVILEGE, not on
+    # the presence of a sudo prefix (#3414 roborev round 5). `${#PIN_ROOT[@]} -gt 0` alone
+    # was a proxy: under EUID 0 the array is empty and the write is privileged regardless,
+    # so the old form could not fire on the one path where it mattered most. An unknown
+    # EUID counts as privileged, because a guard that abstains is not a guard.
+    PIN_PERSIST_NOTE="internal invariant refused the write"
+    warn "gate-pin: INTERNAL — refusing a PRIVILEGED write to a non-production path ($PIN_ENV_FILE)"
+  else
+    # A file whose last byte is not a newline would otherwise have our KEY=VALUE welded
+    # onto its final line, and pam_env would read the result as one malformed entry.
+    # Prepend a newline in that case only; the append happens at most once per box, so
+    # this can never accumulate blank lines.
+    # Appended at the END, after any managed marker block the image owner put in the
+    # file (this fleet's images carry a `# >>> agent-ami worker auth >>>` block), so
+    # nothing already there is disturbed.
+    pin_append_env_file; pin_append_rc=$?
+    if [ "$pin_append_rc" = 3 ]; then
+      # RACED, and the contract wins. Reported as the left-alone case rather than as a
+      # failure: nothing is wrong with the box, and the file now holds someone else's
+      # deliberate value.
+      pin_read_env_file
+      PIN_PERSIST_NOTE="not persisted (a concurrent writer added a CQLITE_GATE_MAX_CONCURRENCY line first)"
+      info "$PIN_ENV_FILE gained a CQLITE_GATE_MAX_CONCURRENCY line while this run was working — left EXACTLY as it is, because appending ours would land LAST and pam_env takes the last assignment, silently overriding a value someone else chose"
+    elif [ "$pin_append_rc" = 0 ]; then
+      # BOTH halves of the cached parse must move together. Setting only HAS_LINE left
+      # PIN_FILE_VALUE at its pre-write value (empty), so the value comparison below
+      # compared the session against what the file said BEFORE the append and reported a
+      # mismatch on a box this very run had just pinned correctly. Caught by 11q/11u.
+      PIN_FILE_HAS_LINE=yes
+      PIN_FILE_VALUE="$PIN_ENV_VALUE"
+      info "appended '$PIN_ENV_LINE' to $PIN_ENV_FILE — PAM reads it at session creation, so NEW sessions pick it up with no reboot and no re-login"
+    else
+      PIN_PERSIST_NOTE="the append to $PIN_ENV_FILE failed"
+      warn "gate-pin: the append to $PIN_ENV_FILE FAILED — the pin was NOT persisted"
+      info "add these two lines as root:  $PIN_ENV_COMMENT / $PIN_ENV_LINE"
+    fi
+  fi
+
+  # The shell-profile export is the FALLBACK for a box where no system-wide value could be
+  # established — that is the only state in which it adds anything, and the branches below
+  # are ordered to say so. It is NOT merely "interactive convenience": PAM applies
+  # /etc/environment to interactive login shells too, so where a system-wide value exists
+  # this file is redundant at best and an override at worst (see the skip branch).
+  #
+  # It is reported with `info`, NEVER `ok`, whichever branch runs: a profile line is
+  # precisely the artifact whose presence certified nothing for months, and letting it
+  # produce a success verdict anywhere would reintroduce #3414.
+  PROFILE=""
+  case "${SHELL:-}" in
+    */zsh) PROFILE="$HOME/.zshrc" ;;
+    */bash) PROFILE="$HOME/.bashrc" ;;
+    *) PROFILE="${ENV:-$HOME/.profile}" ;;
+  esac
+  if [ -n "$PROFILE" ] && [ -f "$PROFILE" ] && grep -q 'CQLITE_GATE_MAX_CONCURRENCY' "$PROFILE" 2>/dev/null; then
+    info "$PROFILE already carries the export — INTERACTIVE shells only (stock ~/.bashrc returns early for non-interactive ones), so it says nothing about the shell a gate runs in"
+  elif [ "$PIN_FILE_HAS_LINE" = yes ]; then
+    # SKIPPED, DELIBERATELY, when the system-wide file already carries a value (#3414
+    # roborev round 4). The append hardcodes `=1`, so on a box deliberately pinned to 4
+    # it would MANUFACTURE a divergence between two mechanisms on the same machine —
+    # this issue's own subject, created by the tool that exists to remove it.
+    #
+    # Skipping rather than deriving the value, for a reason stronger than "the profile is
+    # only convenience": /etc/environment is read by PAM at SESSION CREATION, which
+    # applies to interactive login shells too, so on such a box the interactive shell
+    # ALREADY receives the system-wide value — a profile export could only OVERRIDE it,
+    # handing interactive shells 1 while every non-interactive one gets 4. Deriving the
+    # value instead would agree today and go stale the moment someone edits
+    # /etc/environment, manufacturing the same divergence later and more quietly.
+    info "not touching $PROFILE — $PIN_ENV_FILE already sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE, and PAM delivers that to interactive shells too; appending a hardcoded '=$PIN_ENV_VALUE' here could only override it"
+  elif [ "$PIN_FILE_HAS_LINE" != no ] && [ "$PIN_FILE_HAS_LINE" != absent-file ]; then
+    # UNREADABLE IS NOT ABSENT (#3414 roborev round 8). The skip above keys on a value
+    # having been FOUND; this branch catches the states where we could not tell — an
+    # unreadable file, or a line we could not parse. Appending the hardcoded `=1` there
+    # would recreate exactly the divergence the skip exists to prevent, because the file we
+    # could not read may already pin 4. An unmeasurable state must not inherit the
+    # permissive branch: append only where absence was AFFIRMATIVELY established.
+    info "not touching $PROFILE — could not determine what $PIN_ENV_FILE sets ($PIN_FILE_HAS_LINE), and appending a hardcoded '=$PIN_ENV_VALUE' could contradict a value that is already there"
+  elif [ "$AUTO_YES" = 1 ] && [ -n "$PROFILE" ]; then
+    if printf '%s\n' "$EXPORT_LINE" >>"$PROFILE" 2>/dev/null; then
+      info "appended the export to $PROFILE — the FALLBACK for interactive shells on a box with no system-wide value; it is not the verdict, which comes from the session probe below"
+    else
+      info "could not append to $PROFILE (the interactive fallback; the system-wide pin is what a gate reads) — add by hand: $EXPORT_LINE"
+    fi
+  fi
+
+  # pin_gate_source_for <value>: what the GATE will do with <value>, echoed as its own
+  # source token (`pinned` / `default` / `invalid` / `clamped`); rc 1 if the gate could
+  # not be consulted.
+  #
+  # ASK THE GATE, DO NOT RE-DERIVE ITS RULES HERE. A copy of the resolver would be a
+  # SECOND IMPLEMENTATION, and a second implementation's correctness is only knowable by
+  # differential testing against the original (CLAUDE.md's #3283 lesson, learned from a
+  # bash port of a Go function that was tested against a MODEL of Go rather than Go). The
+  # original is one `--cpu-budget` call away: measured 0.4s, and it exits before the
+  # #1825 slot logic so it creates no run directory and takes no slot. If the gate cannot
+  # be consulted the answer is UNKNOWN, never an assumed `pinned` — a positive verdict
+  # requires an affirmative measurement.
+  # Echoes "<source>:<resolved-N>" (e.g. `pinned:1`), or rc 1 if the gate could not be
+  # consulted. BOTH halves are returned because the SOURCE TOKEN ALONE CANNOT TELL YOU THE
+  # ORACLE WAS REASONING ABOUT YOUR VALUE (#3414 roborev round 4): `pinned` says only that
+  # *something* was a valid pin, and the caller must check that the N the gate resolved is
+  # the value we handed it.
+  #
+  # BASH_ENV AND ENV ARE SCRUBBED HERE TOO, and this is the same hole closed for the probe
+  # in round 2, sitting one call site over. This launches a FRESH NON-INTERACTIVE bash,
+  # which SOURCES $BASH_ENV before running anything — so on a box whose sudoers lacks
+  # env_reset an inherited BASH_ENV could export a valid integer into the ORACLE's shell,
+  # overriding the `CQLITE_GATE_MAX_CONCURRENCY="$v"` set on this very command line. A
+  # persisted value of `abc` would then get a `(pinned)` answer from an oracle that never
+  # saw `abc`. Fixing the probe and leaving the oracle open is fixing one instance of a
+  # class; the value check above is the belt to this braces, and vice versa.
+  # pin_canon_decimal: the gate's leading-zero normalisation, MIRRORED here — and that is a
+  # SECOND IMPLEMENTATION, which this repo is right to be suspicious of (roborev job 333).
+  # Two reasons it is the lesser evil, and the mechanism that keeps it honest:
+  #   * The alternative the finding also offered — have the oracle echo its INPUT back — is a
+  #     change to the `cpu-budget:` line's CONTRACT, which is a published gate surface that
+  #     other readers parse. Widening it to serve one caller is the bigger coupling.
+  #   * The drift check below exists to catch the oracle answering about a DIFFERENT value, so
+  #     it cannot be expressed without comparing against our input; asking the oracle to
+  #     canonicalise our input for us is circular.
+  # ANTI-DRIFT IS A TEST, NOT A COMMENT: the suite runs the REAL gate for `08` and requires
+  # bootstrap to reach VERIFIED, so if the gate's normalisation rule ever changes this reds.
+  pin_canon_decimal() {
+    local c="$1"
+    case "$c" in
+      ''|*[!0-9]*) printf '%s' "$c"; return 0 ;;
+    esac
+    while [ "${#c}" -gt 1 ] && [ "${c#0}" != "$c" ]; do c="${c#0}"; done
+    printf '%s' "$c"
+  }
+
+  pin_gate_source_for() {
+    local v="$1" line tok n
+    [ -r "$GATE" ] || return 1
+    line=$(bounded 30 env -u BASH_ENV -u ENV CQLITE_GATE_MAX_CONCURRENCY="$v" CQLITE_GATE_NO_NICE=1 \
+             bash "$GATE" --cpu-budget 2>/dev/null | grep -E '^cpu-budget: ' | head -1)
+    [ -n "$line" ] || return 1
+    # The line is space-delimited key=value tokens; max-concurrency=N(source) is ONE of
+    # them, which is exactly why that token carries no spaces.
+    tok=$(printf '%s\n' "$line" | tr ' ' '\n' | sed -n 's/^max-concurrency=//p' | head -1)
+    case "$tok" in
+      *"("*")") n=${tok%%(*}; tok=${tok#*(}; printf '%s:%s' "${tok%)}" "$n" ;;
+      *) return 1 ;;
+    esac
+  }
+
+  # pin_scope_note: what VERIFIED does NOT cover. Printed with the verdict, not buried in
+  # a doc, because an unqualified VERIFIED reads as "gates on this box are pinned" and the
+  # probe cannot see a gate launched from a non-PAM parent (#3414 review B2).
+  # pin_scope_note: what VERIFIED does and does NOT cover.
+  #
+  # A CHECK USED TO LIVE HERE AND WAS DELETED ON PURPOSE (#3414 round 7). It parsed
+  # /etc/pam.d/{sshd,login} and downgraded a would-be VERIFIED when those stacks did not
+  # appear to read this file. Do not helpfully reintroduce it. Four reasons it went:
+  #   * it accumulated two defects in two review rounds, both invisible on the happy path
+  #     (its result assigned inside `$( )` so an unreadable config silently passed; then a
+  #     substring match on `pam_env.so` that a comment or another module's args satisfied);
+  #   * IT WAS CONFIG INSPECTION STANDING IN FOR RUNTIME BEHAVIOUR — reading a file to
+  #     infer what a session will receive is the proxy reasoning this whole section exists
+  #     to remove, and it was only ever admissible because it could not create a pass;
+  #   * what it approximated is measured DIRECTLY, every run, by the gate itself:
+  #     `cpu-budget: max-concurrency=N(pinned)` is the actual resolved cap of the actual
+  #     gate, not an inference about one;
+  #   * the only remaining fix was to make anything unparseable WEAKEN — but a weaken is
+  #     non-passing, non-passing fails --strict, and --strict is what verify.run uses, so a
+  #     PAM layout we could not parse would have failed ONBOARDING for that box. Exactly
+  #     one layout has ever been validated.
+  # The residual it addressed is therefore DOCUMENTED, not measured, and the honest text
+  # below says so. Settling it needs a runtime probe of the real launch path, not a better
+  # parser.
+  pin_scope_note() {
+    # What the correlation DOES buy: the line is in the system-wide file pam_env reads in
+    # every PAM stack (sshd, login, su, sudo), so the claim is not limited to the one
+    # session type the probe could open. What it does NOT buy is a launch path with no
+    # PAM in its ancestry at all — that residual is real and is stated, not implied.
+    info "scope: measured through a PAM-created (sudo) session against the line in $PIN_ENV_FILE. Whether the service stacks a gate is actually launched from also read that file is NOT checked here — and a process tree created WITHOUT PAM (a systemd unit, a container entrypoint) never has it applied at all"
+    info "scope: pam_env reads $PIN_ENV_FILE at SESSION CREATION, so this verdict is about FUTURE sessions. THIS shell, and every process already descended from it — including workers a launcher started before now — do NOT have the pin and will not until their sessions are recreated. A gate launched by such a worker still resolves the #1825 cap from the formula (#3728)"
+    info "scope: VERIFIED asserts that the file SETS this value and a fresh session SEES that same value — it does NOT prove the file is where the session got it. If this box also sets CQLITE_GATE_MAX_CONCURRENCY to the same value from a sudoers env_file or ~/.pam_environment, an $PIN_ENV_FILE that no PAM stack actually loads would still read VERIFIED. Agreement is measured; provenance is not (#3728)"
+    info "the authoritative per-run confirmation is the gate's own SUMMARY line:  cpu-budget: ... max-concurrency=N(pinned)   (N(default) there means that gate did not see the pin)"
+    [ -n "$PIN_PROBE_SUBJECT_NOTE" ] && info "subject: $PIN_PROBE_SUBJECT_NOTE"
+  }
+
+  # pin_value_remedy: the remedy for a VISIBLE but NOT-HONOURED value. Shared by both
+  # not-honoured branches so neither can silently lose it.
+  pin_value_remedy() {
+    if [ "$PIN_FILE_HAS_LINE" = yes ] && [ "$PIN_FILE_VALUE" != "$pin_probe_seen" ]; then
+      # COMPARE BEFORE PRESCRIBING (roborev job 311, Low). The enclosing `case` dispatches
+      # on the GATE's classification of what the SESSION saw, which says nothing about
+      # where that value came from. So a box whose system file is CORRECT (`=1`) but whose
+      # session is overridden by a sudoers env_file or ~/.pam_environment holding `abc`
+      # lands here, and the unconditional branch below sent the operator to edit a file
+      # that is already right — they find nothing wrong and re-run into the same verdict.
+      # That is the #3414 defect one level down: a remedy keyed on a verdict rather than on
+      # the fact that decides between two remedies.
+      info "the bad value is NOT coming from $PIN_ENV_FILE — that file sets CQLITE_GATE_MAX_CONCURRENCY='$PIN_FILE_VALUE' while this session sees '$pin_probe_seen', so a sudo- or user-specific source (a sudoers env_file, ~/.pam_environment, a launcher-injected env) is OVERRIDING it"
+      info "fix or remove THAT override — editing $PIN_ENV_FILE would change a value that is already being ignored"
+    elif [ "$PIN_FILE_HAS_LINE" = yes ]; then
+      # "A POSITIVE INTEGER" IS ADVICE AN OVERSIZED VALUE HAS ALREADY TAKEN (roborev job
+      # 333). `99999999999999999999` IS a positive integer and is still refused, so the
+      # unqualified remedy sends that operator to re-read a line they will find nothing
+      # wrong with. The bound is stated where the remedy is, not only in the diagnosis.
+      info "fix the VALUE (not the presence) — edit the CQLITE_GATE_MAX_CONCURRENCY line in $PIN_ENV_FILE to a positive decimal integer of at most 18 digits (a larger one is refused even though it is positive); bootstrap deliberately never rewrites an existing value"
+    else
+      info "the value is visible but is NOT coming from $PIN_ENV_FILE — find and fix whatever sets it (a systemd unit, the image, a launcher-injected env), then re-run"
+    fi
+  }
+
+  # ---- (2) THE VERDICT: an affirmative probe of a fresh, profile-free session ----
+  #
+  # THE SCRUB IS THE LOAD-BEARING PART. Bootstrap normally runs inside a session that
+  # already inherited the value, so an UNSCRUBBED probe returns it on a box where
+  # nothing is persisted at all — the same false positive as the old profile grep, one
+  # level up, and it would certify the very failure this section exists to catch.
+  # `env -u` removes it from the process handed to sudo; sudoers' `Defaults env_reset`
+  # is belt, not braces, since a box without env_reset would pass an inherited value
+  # straight through.
+  #
+  # BASH_ENV AND ENV ARE SCRUBBED FOR THE SAME REASON, and they are the hole that
+  # "belt, not braces" actually admits (#3414 review). A NON-INTERACTIVE bash SOURCES
+  # $BASH_ENV before running its command — so on a box whose sudoers lacks env_reset an
+  # inherited BASH_ENV survives into the probe, that file can `export
+  # CQLITE_GATE_MAX_CONCURRENCY=1`, and the probe reports the box pinned with NOTHING in
+  # /etc/environment. Scrubbing the variable while leaving the mechanism that can
+  # re-inject it is not a scrub. (`ENV` is POSIX sh's equivalent, scrubbed with it.)
+  #
+  # NO `-i`, so no PROFILE file is read (`~/.bash_profile`, `~/.bashrc`, `/etc/profile`)
+  # — which is the point, since those are exactly the files #3414 showed a gate never
+  # reads. Note the claim is "no profile file", NOT "no file at all": with BASH_ENV and
+  # ENV scrubbed the remaining sources are the session's own (pam_env's /etc/environment
+  # and ~/.pam_environment, a sudoers env_file). Negative control, run by hand on the box
+  # this was written on: a variable exported in the parent shell but absent from
+  # /etc/environment reads UNSET through this probe, while the persisted pin reads 1.
+  #
+  # WHAT THIS PROBE DOES **NOT** COVER, stated here because the verdict text says it too
+  # (#3414 review B2). It measures a PAM-CREATED session, because `sudo` is the only way
+  # to create one unprivileged. A gate is NOT launched through sudo, and a process tree
+  # created WITHOUT PAM — a systemd unit, a container entrypoint — never has
+  # /etc/environment applied to it at all. So VERIFIED means "a PAM-created session on
+  # this box sees a value the gate honours", never "every gate on this box is pinned".
+  # The authoritative per-run confirmation is the gate's OWN `cpu-budget:
+  # max-concurrency=N(pinned)` token, which reports what that gate actually resolved.
+  #
+  # The bound may degrade to SIGTERM-only (a `timeout` without --kill-after) — tolerated
+  # HERE, unlike the §3b push probe, because this probe is LOCAL, NON-MUTATING and
+  # `sudo -n` never prompts, so there is nothing for a wedged child to hold open. What
+  # is NOT tolerated is running it UNBOUNDED: hanging the fleet's provisioning entry
+  # point is worse than an unmeasured verdict.
+  PIN_PROBE_BOUND=20
+  if [ "$PIN_PRIV_STATE" = no-timeout-binary ] || [ -z "$TIMEOUT_BIN" ]; then
+    warn "gate-pin: UNMEASURED (no timeout/gtimeout on PATH — refusing to run an UNBOUNDED session probe during bootstrap; NOTHING was probed)"
+    info "install GNU coreutils so the probe can be bounded (macOS: brew install coreutils), then re-run"
+  elif [ "$PIN_PRIV_STATE" = invoker-unresolvable ]; then
+    warn "gate-pin: UNMEASURED ($PIN_PROBE_SUBJECT_NOTE — refusing to answer about the wrong user)"
+    info "re-run as the agent account itself, which needs no sudo metadata to be trusted"
+  elif [ "$PIN_PRIV_STATE" = no-identity ]; then
+    warn "gate-pin: UNMEASURED ('id -un' reported no identity, so there is no user to open a probe session as — pin visibility is UNKNOWN, not ok)"
+  elif [ "$PIN_PRIV_STATE" = no-sudo-binary ]; then
+    warn "gate-pin: UNMEASURED (no 'sudo' on this box, so no fresh PAM session can be created — pin visibility is UNKNOWN, not ok)"
+    info "check by hand:  env -u CQLITE_GATE_MAX_CONCURRENCY -u BASH_ENV -u ENV sudo -u \"\$(id -un)\" bash -c 'printf \"[%s]\\n\" \"\${CQLITE_GATE_MAX_CONCURRENCY-UNSET}\"'"
+    info "(the scrub and the '-' — not ':-' — are load-bearing: without them an INHERITED value, or a set-but-EMPTY one, reads as a healthy pin, which is the defect this section exists to remove)"
+  elif [ "$PIN_PRIV_STATE" = sudo-runas-denied ]; then
+    warn "gate-pin: UNMEASURED (sudo will not open a session as '$PIN_SELF_USER' without a password, so no probe session could be created — pin visibility is UNKNOWN, not ok)"
+    info "this needs only a session as YOURSELF, not root — authenticate once and re-run:  sudo -v && bash scripts/bootstrap-agent-machine.sh"
+  else
+    pin_probe_rc=0
+    # TWO markers, because SET-BUT-EMPTY and UNSET are different facts with different
+    # consequences — the gate DISCARDS an empty value for its default formula and stamps
+    # `(invalid)`, which is a misconfigured box, not an unprovisioned one. `${VAR+1}`
+    # separates them; `${VAR-}` alone cannot, and collapsing them here would put the
+    # `:-` defect this issue removed from the gate back into the tool that verifies it.
+    pin_probe_out=$(bounded "$PIN_PROBE_BOUND" env -u CQLITE_GATE_MAX_CONCURRENCY -u BASH_ENV -u ENV \
+      sudo -n -u "$PIN_SELF_USER" \
+      bash -c 'printf "cqlite-gate-pin-probe-set=%s\ncqlite-gate-pin-probe=%s\n" "${CQLITE_GATE_MAX_CONCURRENCY+1}" "${CQLITE_GATE_MAX_CONCURRENCY-}"' 2>/dev/null) || pin_probe_rc=$?
+    # Anchored on our own markers at line start, and each value is read from the FIRST
+    # matching line: the probe's stdout can also carry a shell's own noise, and a
+    # verdict decided by an unanchored match would be decided by whatever else printed.
+    pin_probe_set=$(printf '%s\n' "$pin_probe_out" | sed -n 's/^cqlite-gate-pin-probe-set=//p' | head -1)
+    pin_probe_seen=$(printf '%s\n' "$pin_probe_out" | sed -n 's/^cqlite-gate-pin-probe=//p' | head -1)
+    # THE VERDICT IS A CONJUNCTION OF TWO MEASUREMENTS, NEVER A FILE-STATE PRECEDENCE
+    # THAT OVERRIDES THE PROBE (#3414, lead ruling). Written out because getting the
+    # asymmetry backwards is easy and would silently undo an earlier ruling in this same
+    # issue:
+    #
+    #   session sees value | /etc/environment line        | verdict
+    #   -------------------|------------------------------|--------------------------
+    #   NO                 | anything — present, absent,   | FAILED. "Not visible" is an
+    #                      | unreadable, or no such file   | AFFIRMATIVE measurement;
+    #                      |                              | nothing about the file can
+    #                      |                              | rescue or worsen it. The file
+    #                      |                              | state picks only the REMEDY
+    #                      |                              | TEXT below, never the verdict.
+    #   yes                | present                      | VERIFIED (still subject to the
+    #                      |                              | gate-honours check)
+    #   yes                | verified absent (readable)   | NOT-SYSTEM-WIDE
+    #   yes                | unreadable / undeterminable  | UNMEASURED — the attribution
+    #                      |                              | half genuinely was not measured
+    #
+    # THE RULE THIS ENCODES, which came up three separate times in #3414: AN UNMEASURABLE
+    # HALF MAY ONLY EVER WEAKEN A POSITIVE CLAIM; IT MAY NEVER SOFTEN A NEGATIVE ONE.
+    # UNMEASURED earns its place by blocking a VERIFIED we cannot support — not by
+    # excusing a FAILED we have already established. Collapsing every unreadable-file case
+    # to UNMEASURED would downgrade a real FAILED to "could not measure", which is the
+    # discard-a-measurement error already ruled against for the unwritable-file case.
+    if [ "$pin_probe_rc" = 124 ] || [ "$pin_probe_rc" = 137 ]; then
+      warn "gate-pin: UNMEASURED (the probe exceeded its ${PIN_PROBE_BOUND}s bound and was killed — pin visibility is UNKNOWN, not ok)"
+    elif ! printf '%s\n' "$pin_probe_out" | grep -q '^cqlite-gate-pin-probe-set='; then
+      warn "gate-pin: UNMEASURED (the probe session produced no cqlite-gate-pin-probe-set= line, rc=$pin_probe_rc — pin visibility is UNKNOWN, not ok)"
+    elif [ -n "$pin_probe_set" ]; then
+      # VISIBLE. That is only HALF the question: a value the gate does not HONOUR is a
+      # pin in name only, and certifying it here would be this issue's own shape one
+      # level further out — presence of a VISIBLE value standing in for a value that has
+      # EFFECT. So the gate is asked what it will actually do with it.
+      pin_gate_out=$(pin_gate_source_for "$pin_probe_seen") || pin_gate_out=""
+      pin_gate_src=${pin_gate_out%%:*}
+      pin_gate_n=${pin_gate_out#*:}
+      # A `pinned` token whose N is NOT the value we handed the oracle means the oracle
+      # answered about something else — the BASH_ENV-pollution shape above, or any future
+      # way the two could drift. Demote it to the same non-answer as an unconsultable gate
+      # rather than trusting the suffix.
+      # COMPARED AS CANONICAL DECIMALS, NOT AS RAW STRINGS (roborev job 333, Medium). The
+      # gate NORMALISES a valid leading-zero pin (`08` -> `8(pinned)`), so a raw string
+      # compare read `8` != `08` and demoted a CORRECTLY PERSISTED `08` to UNMEASURED —
+      # `--strict` red on a properly pinned box, i.e. the guard that reds on correct input,
+      # which is the guard agents learn to waive. Introduced by this branch's own octal fix:
+      # normalisation was added to the gate and this comparison was not told about it.
+      # Canonicalising BOTH sides keeps the drift check intact — an oracle answering about a
+      # different value still differs after normalisation.
+      if [ "$pin_gate_src" = pinned ] \
+         && [ "$(pin_canon_decimal "$pin_gate_n")" != "$(pin_canon_decimal "$pin_probe_seen")" ]; then
+        pin_gate_src=""
+      fi
+      case "$pin_gate_src" in
+        pinned)
+          # TWO AFFIRMATIVE HALVES, AND NEITHER SUFFICES ALONE (#3414 roborev round 2).
+          # Scoping the TEXT to "a sudo session" while leaving the VERDICT an `ok` still
+          # certified onboarding green: zero warnings => "All checks green." => verify.run
+          # passes, on a box where the value might reach ONLY sudo sessions (a sudoers
+          # `env_file`, `~/.pam_environment`) while every gate launched outside sudo gets
+          # nothing. A verdict that passes while its own text says it might not hold is a
+          # contradiction, not a caveat.
+          #
+          # So the probe is CORRELATED WITH THE FILE, using the read already taken to
+          # decide the append — no second probe:
+          #   file line + session sees it  => VERIFIED, and that is well-founded for ANY
+          #     PAM-created session (sshd, login, su — pam_env reads /etc/environment in
+          #     all of those stacks, not just sudo's), not merely for the one we opened.
+          #   session sees it, no file line => the value comes from something sudo- or
+          #     user-specific; it is NOT a system-wide pin. Non-passing.
+          # File-only was the ORIGINAL #3414 defect and session-only is this finding, so
+          # requiring both is the smallest honest verdict. Two fixes the reviewer offered
+          # are deliberately NOT taken: "verify through the actual gate launch path"
+          # (bootstrap cannot know that path) and "keep any sudo-scoped result
+          # non-passing" (the probe is ALWAYS sudo-scoped, so that reds every box's
+          # onboarding forever — an always-firing alarm is one people learn to waive,
+          # which is the same reason the fleet does not just let verify red).
+          # ON A PLATFORM WITH NO PAM-READ SYSTEM FILE, the file half does not exist and
+          # asking for it would manufacture a permanent failure on a correctly-pinned host
+          # — the red-on-correct-input shape refused elsewhere in this section. The
+          # remaining question is still affirmative and still platform-independent: a fresh
+          # scrubbed session sees a value, and the GATE HONOURS it. That is a narrower
+          # claim than the Linux verdict and is worded as one; it is NOT an exemption, and
+          # an unpinned host still lands in the non-passing branch below (#3414 final
+          # roborev — the earlier `NOT-APPLICABLE` ok certified exactly that host).
+          if [ "${PIN_PLATFORM_UNMANAGED:-0}" = 1 ]; then
+            # NO SUCCESS VERDICT IS AVAILABLE HERE, SO NONE IS GIVEN (#3414 roborev round
+            # 14). With no PAM-read system-wide file there is nothing to correlate the
+            # session value against — and that correlation is exactly how the Linux path
+            # tells a machine-wide pin from a sudo- or user-scoped one (a sudoers
+            # `env_file`, `~/.pam_environment`). The problem is not merely unsolved here,
+            # it is UNSOLVABLE with the machinery this section has.
+            #
+            # So every verdict that reports a state either over-claims or permanently reds:
+            # an `ok` certifies a host whose ordinary gate processes may be unpinned, and a
+            # FAILED asserts an absence nothing established. The honest third answer is that
+            # the measurement could not be taken, cause named. "Could not measure" is a
+            # different statement from "wrong", and it is the true one — so this is NOT the
+            # red-on-correct-input shape refused elsewhere in this section.
+            #
+            # SECOND GUARD ON THIS BRANCH REPLACED RATHER THAN PATCHED, after the PAM
+            # weaken-signal. Introduced round 11, amended round 13, defective again round
+            # 14; the pre-committed trigger for that pattern is deletion, and it applies to
+            # a verdict the LEAD introduced exactly as it applied to the PAM signal.
+            warn "gate-pin: UNMEASURED (a fresh, profile-free session on this $PLATFORM host sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate would HONOUR it — but this platform has no PAM-read system-wide file to compare it against, so a machine-wide pin cannot be told apart from a sudo- or user-scoped one that ordinary gate processes never see)"
+            info "on this platform the per-run authority is the gate's own SUMMARY line:  cpu-budget: ... max-concurrency=N(pinned)   (N(default) means that gate did not see the pin)"
+          else
+          case "$PIN_FILE_HAS_LINE" in
+            yes)
+              # STRING equality on the raw effective value, deliberately not a numeric
+              # one. `1`, `01` and `1 ` are different strings and the gate's own resolver
+              # already treats them differently (a trailing space matches `*[!0-9]*` and
+              # is discarded as invalid). Normalising here would be a SECOND classifier
+              # free to disagree with the gate — the thing avoided by asking the gate what
+              # it honours instead of re-deriving its rules.
+              if [ "$PIN_FILE_VALUE" = "$pin_probe_seen" ]; then
+                # Called DIRECTLY: see the note on the function — a substitution here
+                # forks, and both of its result globals would be lost with the fork.
+                ok "gate-pin: VERIFIED ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE AND a fresh PAM-created, profile-free session sees that SAME value, which the gate HONOURS verbatim — max-concurrency=$pin_probe_seen(pinned); this run's own value, BASH_ENV and ENV were scrubbed first)"
+                pin_scope_note
+              else
+                warn "gate-pin: NOT-SYSTEM-WIDE ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY='$PIN_FILE_VALUE' but this session sees '$pin_probe_seen' — a sudo- or user-specific source is OVERRIDING the system-wide file, so ordinary PAM sessions get the file's value and the gate will act on THAT, not on the one measured here)"
+                info "fix the VALUE in $PIN_ENV_FILE (bootstrap never rewrites an existing value), or remove the per-user/sudoers override so the two agree"
+              fi
+              ;;
+            unparseable)
+              warn "gate-pin: UNMEASURED (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate would honour it, but the CQLITE_GATE_MAX_CONCURRENCY assignment in $PIN_ENV_FILE could not be PARSED, so it cannot be compared against what the session saw)"
+              ;;
+            unknown)
+              # Half the evidence is unreadable, so the correlation cannot be made. Not a
+              # pass: a positive verdict requires an affirmative measurement of BOTH halves.
+              warn "gate-pin: UNMEASURED (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate would honour it, but $PIN_ENV_FILE could not be READ, so it cannot be confirmed the value is a system-wide pin rather than a sudo- or user-specific one)"
+              ;;
+            *)
+              warn "gate-pin: NOT-SYSTEM-WIDE (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate would honour it, but there is NO CQLITE_GATE_MAX_CONCURRENCY line in $PIN_ENV_FILE — so it is reaching this session from a sudo- or user-specific source (a sudoers env_file, ~/.pam_environment) and gates launched outside that source get nothing)"
+              if [ "$PIN_FILE_HAS_LINE" = absent-file ] && [ "$PIN_PLATFORM_UNMANAGED" = 1 ]; then
+                # UNMANAGED PLATFORM only — on Linux the absent file is creatable, so the
+                # remedy below is the true one (roborev job 332; see the absent-file arm
+                # of the FAILED table for the full reasoning).
+                info "this $PLATFORM host has no $PIN_ENV_FILE, so there is no system-wide file to correlate against — set CQLITE_GATE_MAX_CONCURRENCY=1 in this host's own session-startup mechanism (launchd/systemd/the image)"
+              elif [ "$PIN_FILE_HAS_LINE" = absent-file ]; then
+                info "fix:  bash scripts/bootstrap-agent-machine.sh --fix-gate-pin   (this $PLATFORM host has no $PIN_ENV_FILE yet — the flag CREATES it carrying '$PIN_ENV_LINE', which every PAM session reads; the per-user source stays as it is)"
+              else
+                info "fix:  bash scripts/bootstrap-agent-machine.sh --fix-gate-pin   (persists '$PIN_ENV_LINE' to $PIN_ENV_FILE, which every PAM session reads — the per-user source stays as it is)"
+              fi
+              ;;
+          esac
+          fi
+          ;;
+        invalid)
+          # Its OWN verdict, not FAILED: the pin is present and visible, so "persist the
+          # pin" is the wrong remedy and would send the operator to a file that already
+          # has a line in it. What is wrong is the VALUE.
+          # THE CAUSE IS NAMED FROM THE VALUE, because `invalid` covers more than it used
+          # to (roborev job 333). This branch widened it to include a digit string too
+          # large to represent, and the diagnosis still said "empty or non-numeric" — so an
+          # oversized value was told it was non-numeric and handed a "use a positive
+          # integer" remedy it already satisfied. A remedy the operator has already
+          # complied with is worse than none: it stops them looking.
+          case "$pin_probe_seen" in
+            '') pin_invalid_why="it is EMPTY" ;;
+            *[!0-9]*) pin_invalid_why="it is not a plain decimal integer" ;;
+            *) pin_invalid_why="it is a decimal integer too large to use as a slot cap (more than 18 significant digits)" ;;
+          esac
+          warn "gate-pin: NOT-HONOURED (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY='$pin_probe_seen', but the gate DISCARDS it — $pin_invalid_why — and falls back to the #1825 default formula, stamping max-concurrency=N(invalid))"
+          pin_value_remedy
+          ;;
+        clamped)
+          warn "gate-pin: NOT-HONOURED (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY='$pin_probe_seen', but the gate silently raises it to 1, stamping max-concurrency=1(clamped) — the cap you asked for is not the cap you get)"
+          pin_value_remedy
+          ;;
+        *)
+          # Visibility WAS measured; honouring was not. Not a pass: the sole oracle for
+          # the second half could not be consulted.
+          warn "gate-pin: UNMEASURED (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY='$pin_probe_seen', but $GATE could not be consulted to confirm the gate HONOURS that value — half the question is unanswered, which is not ok)"
+          ;;
+      esac
+    else
+      # NOT VISIBLE. Two different boxes, two different remedies — split on a fact we
+      # already read above rather than printing one remedy and hoping.
+      warn "gate-pin: FAILED (a fresh profile-free session does NOT see CQLITE_GATE_MAX_CONCURRENCY — every non-interactive gate on this box will resolve the #1825 cap from the default formula and admit co-tenants, #3414)"
+      # The verdict is ALREADY emitted, unconditionally, above. What follows selects the
+      # REMEDY only — two different boxes reach FAILED and need different next steps, but
+      # no file state can turn this verdict into anything else (see the table above).
+      case "$PIN_FILE_HAS_LINE" in
+        yes)
+          info "the pin IS in $PIN_ENV_FILE and a fresh session still does not see it — this is a PAM condition, NOT a missing pin"
+          info "re-running with --yes / --fix-gate-pin will NOT help: either finds the line already present and changes nothing"
+          info "check the session stack reads it:  grep -n pam_env /etc/pam.d/sudo /etc/pam.d/login /etc/pam.d/sshd   (each needs 'pam_env.so readenv=1')"
+          info "and re-check by hand:  env -u CQLITE_GATE_MAX_CONCURRENCY -u BASH_ENV -u ENV sudo -u \"\$(id -un)\" bash -c 'printf \"[%s]\\n\" \"\${CQLITE_GATE_MAX_CONCURRENCY-UNSET}\"'"
+          ;;
+        absent-file)
+          # No remedy that names a file this host does not have (the ruling on #3414's
+          # residual 4): telling a Mac to re-run --yes to append to /etc/environment is
+          # advice that cannot work on the box it is printed for.
+          #
+          # BUT THAT RULING IS ABOUT AN UNMANAGED PLATFORM, AND APPLYING IT TO EVERY
+          # ABSENT FILE MADE IT FALSE ON LINUX (roborev job 332). "The file is missing" and
+          # "this platform has no such file" are DIFFERENT STATES: on Linux the missing
+          # file is CREATED by --fix-gate-pin (the persist path above says so in its own
+          # message), so "nowhere to persist it" sent an operator on a minimal Linux
+          # image to hand-edit systemd while a working remedy sat one flag away. A false
+          # remedy costs more than a missing one, because it stops them looking.
+          #
+          # The VERDICT was already scoped on platform rather than on file presence (the
+          # test suite asserts exactly that); this scopes the REMEDY the same way.
+          if [ "$PIN_PLATFORM_UNMANAGED" = 1 ]; then
+            info "this $PLATFORM host has no $PIN_ENV_FILE, so bootstrap has nowhere to persist it — set CQLITE_GATE_MAX_CONCURRENCY=1 in this host's own session-startup mechanism (launchd/systemd/the image), NOT in a shell profile"
+          else
+            info "fix:  bash scripts/bootstrap-agent-machine.sh --fix-gate-pin   (this $PLATFORM host has no $PIN_ENV_FILE yet — the flag CREATES it carrying '$PIN_ENV_LINE', and pam_env reads it at session creation; --yes does it too)"
+          fi
+          ;;
+        *)
+          [ -n "$PIN_PERSIST_NOTE" ] && info "nothing was persisted this run: $PIN_PERSIST_NOTE"
+          info "fix:  bash scripts/bootstrap-agent-machine.sh --fix-gate-pin   (appends '$PIN_ENV_LINE' to $PIN_ENV_FILE; --yes does it too)"
+          ;;
+      esac
+      info "the gate reports the same fact on its cpu-budget line as max-concurrency=N(default) instead of N(pinned)"
+    fi
+  fi
 fi
 
 # ---- 5c. Notification channel (ntfy) — issue #3119 ----
@@ -1836,8 +3110,8 @@ else
     # measured in #3119, the pristine upstream copy HANGS when it inherits a tty
     # stdin, and bootstrap must never wedge on an optional version probe.
     NOTIFY_ADJUNCT_VER=""
-    if have timeout && timeout --kill-after=1 1 true >/dev/null 2>&1; then
-      NOTIFY_ADJUNCT_VER=$(timeout --kill-after=1 5 agent-notify --version 2>/dev/null </dev/null | head -1)
+    if have timeout && timeout --kill-after=1 1 true >/dev/null 2>&1; then # portability-lint-allow: GUARDED by `have timeout` AND a functional probe on the same line — this IS the remedy the rule recommends
+      NOTIFY_ADJUNCT_VER=$(timeout --kill-after=1 5 agent-notify --version 2>/dev/null </dev/null | head -1) # portability-lint-allow: inside the `have timeout &&` guard above; the lint is line-oriented and cannot see an enclosing if
     fi
     info "optional local adjunct: ${NOTIFY_ADJUNCT_VER:-agent-notify (version not probed)} — desktop/sound only, no version requirement"
   else

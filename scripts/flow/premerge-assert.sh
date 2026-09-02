@@ -20,8 +20,9 @@
 # certified sha never verified that a certified sha EXISTS. The gate-of-record
 # convention was honour-system doctrine; this script is the one point every merge
 # passes through, so the convention becomes a mechanism here: a summary file
-# carrying a FULL-gate block with `RESULT: PASS`, `tree-integrity: PASS`, and
-# provenance (`commit:` + `tree-start:`) covering the certified sha is REQUIRED.
+# carrying a FULL-gate block with `RESULT: PASS`, `tree-integrity: PASS`,
+# `dirty: no` (#3648), and provenance (`commit:` + `tree-start:`) covering the
+# certified sha is REQUIRED.
 #
 # TWO DISTINCT ESCAPES, ONE MECHANISM
 #   * #3408 — NO GATE AT ALL. That PR merged on 22 `--lite` PASSes and not one
@@ -443,7 +444,7 @@ _gate_awk() {
     if (WANT == "delta") { S = DELTA_S; E = DELTA_E } else { S = FULL_S; E = FULL_E }
     blocks = 0; full = 0; lite = 0; delta = 0; open = 0; unterminated = 0
     n_result = 0; n_ti = 0; n_commit = 0; n_ts = 0; n_mode = 0
-    n_anchor = 0; n_nested = 0; anchor_unresolved = 0
+    n_anchor = 0; n_nested = 0; anchor_unresolved = 0; n_dirty = 0; n_tsdirty = 0
     v_result = ""; v_ti = ""; v_commit = ""; v_ts = ""; v_dirty = ""
     v_mode = ""; v_anchor = ""
   }
@@ -459,7 +460,19 @@ _gate_awk() {
     if ($1 == "MODE:")                { n_mode++;   v_mode = $2 }
     else if ($1 == "RESULT:")         { n_result++; v_result = $2 }
     else if ($1 == "tree-integrity:") { n_ti++;     v_ti = $2 }
-    else if ($1 == "tree-start:")     { n_ts++;     v_ts = $2 }
+    else if ($1 == "tree-start:") {
+      n_ts++; v_ts = $2
+      # tree-start: carries its OWN `dirty:`, and it is NOT redundant with the
+      # commit: one: commit: renders TREE_END_DIRTY on the normal path
+      # (agent-gate.sh:8810), so a run that STARTED dirty and finished clean --
+      # legal under the non-fatal `tree-integrity: PASS (lockfile-settled: ...)`
+      # class (agent-gate.sh:8754) -- shows `commit: ... dirty: no` while having
+      # executed against uncommitted content (#3648 roborev round 4).
+      for (i = 2; i <= NF; i++) if ($i == "dirty:") {
+        n_tsdirty++
+        if (n_tsdirty == 1 && i < NF) v_tsdirty = $(i + 1)
+      }
+    }
     else if ($1 == "nested-under:")   { n_nested++ }
     else if ($1 == "delta-anchor:") {
       n_anchor++; v_anchor = $2
@@ -467,7 +480,16 @@ _gate_awk() {
     }
     else if ($1 == "commit:") {
       n_commit++; v_commit = $2
-      for (i = 2; i < NF; i++) if ($i == "dirty:") v_dirty = $(i + 1)
+      # COUNT every `dirty:` token and keep the FIRST value, never the last.
+      # The old loop assigned on every match, so `dirty: yes dirty: no` reduced
+      # to `no` and certified a dirty run (#3648 roborev round 2). That is the
+      # "last one wins" rule assert_single_key exists to refuse, one field down.
+      # Scanned to NF (not NF-1) so a BARE trailing `dirty:` still COUNTS as an
+      # occurrence; its value stays empty and refuses on the empty-value path.
+      for (i = 2; i <= NF; i++) if ($i == "dirty:") {
+        n_dirty++
+        if (n_dirty == 1 && i < NF) v_dirty = $(i + 1)
+      }
     }
     next
   }
@@ -485,12 +507,15 @@ _gate_awk() {
     print "n_ts=" n_ts
     print "n_anchor=" n_anchor
     print "n_nested=" n_nested
+    print "n_dirty=" n_dirty
+    print "n_tsdirty=" n_tsdirty
     print "anchor_unresolved=" anchor_unresolved
     print "v_result=" v_result
     print "v_ti=" v_ti
     print "v_commit=" v_commit
     print "v_ts=" v_ts
     print "v_dirty=" v_dirty
+    print "v_tsdirty=" v_tsdirty
     print "v_mode=" v_mode
     print "v_anchor=" v_anchor
   }
@@ -506,9 +531,9 @@ gate_parse_file() {
   gp_out=$(_gate_awk "$1" "$2") || refuse_tool_failure awk "$3"
   GP_blocks=""; GP_full=""; GP_lite=""; GP_delta=""; GP_unterminated=""
   GP_n_mode=""; GP_n_result=""; GP_n_ti=""; GP_n_commit=""; GP_n_ts=""
-  GP_n_anchor=""; GP_n_nested=""; GP_anchor_unresolved=""
+  GP_n_anchor=""; GP_n_nested=""; GP_anchor_unresolved=""; GP_n_dirty=""; GP_n_tsdirty=""
   GP_v_result=""; GP_v_ti=""; GP_v_commit=""; GP_v_ts=""; GP_v_dirty=""
-  GP_v_mode=""; GP_v_anchor=""
+  GP_v_mode=""; GP_v_anchor=""; GP_v_tsdirty=""
   while IFS='=' read -r gp_k gp_v; do
     case "$gp_k" in
       blocks)       GP_blocks="$gp_v" ;;
@@ -523,12 +548,15 @@ gate_parse_file() {
       n_ts)         GP_n_ts="$gp_v" ;;
       n_anchor)     GP_n_anchor="$gp_v" ;;
       n_nested)     GP_n_nested="$gp_v" ;;
+      n_dirty)      GP_n_dirty="$gp_v" ;;
+      n_tsdirty)    GP_n_tsdirty="$gp_v" ;;
       anchor_unresolved) GP_anchor_unresolved="$gp_v" ;;
       v_result)     GP_v_result="$gp_v" ;;
       v_ti)         GP_v_ti="$gp_v" ;;
       v_commit)     GP_v_commit="$gp_v" ;;
       v_ts)         GP_v_ts="$gp_v" ;;
       v_dirty)      GP_v_dirty="$gp_v" ;;
+      v_tsdirty)    GP_v_tsdirty="$gp_v" ;;
       v_mode)       GP_v_mode="$gp_v" ;;
       v_anchor)     GP_v_anchor="$gp_v" ;;
     esac
@@ -536,7 +564,7 @@ gate_parse_file() {
 $gp_out
 GATE_PARSE
   for gp_k in blocks full lite delta unterminated n_mode n_result n_ti n_commit \
-              n_ts n_anchor n_nested anchor_unresolved; do
+              n_ts n_anchor n_nested anchor_unresolved n_dirty n_tsdirty; do
     eval "gp_v=\${GP_$gp_k}"
     case "$gp_v" in
       ''|*[!0-9]*)
@@ -615,6 +643,115 @@ assert_covers() {
       "If the only diff since the gate's anchor is test/docs-only, the route is the" \
       "ANCHORED DELTA PAIR below — a fourth argument, not a repeat full gate."
   fi
+}
+
+# assert_clean_tree <what> <value>: the run that block records must have executed
+# against a COMMITTED tree (#3648).
+#
+# WHY THIS IS ENFORCED AND NOT MERELY REPORTED. A gate that ran with `dirty: yes`
+# certified sha PLUS uncommitted non-ignored content — not the sha. The gate's tree
+# capture pairs a tracked-side diff with `git ls-files --others --exclude-standard`,
+# so `dirty: yes` is real uncommitted NON-IGNORED content — tracked edits AND/OR
+# untracked files the ignore rules do not exclude — never a gitignored log. The escape is then ordinary: a full gate PASSes
+# at HEAD X with edits in the worktree, the edits are discarded or simply never
+# committed, X is pushed and merged — and the gate of record covered a tree that
+# is NOT the one that lands. `commit:`/`tree-start:` cannot see it: both name X in
+# exactly that run.
+#
+# HOW OFTEN THIS FIRES — MEASURED, WITH ITS POPULATION AND ITS LIMITS (2026-09-01,
+# #3648). Census of one box's `/tmp/agent-gate.*` summaries, restricted to blocks
+# that could ever BE a gate of record: FULL-gate blocks, deduplicated by `run-id`,
+# NOT `nested-under:`, and carrying a canonical `RESULT` token — n=2395, of which
+# 1608 are `RESULT: PASS`. Of those 1608 PASSes an affirmative `dirty: no` match
+# refuses 26 (~1.6%), broken down by cause so the figure can be re-derived rather
+# than inherited: 19 `dirty: yes`, 7 carrying NO `dirty:` field at all, and 0
+# `unverified` (all 40 `unverified` blocks in the population are already FAIL).
+# So the absent-field arm below is not hypothetical — it is 7 of the 26.
+# LIMITS, stated because a number in a comment decays like any other claim: this
+# is a SINGLE-BOX `/tmp` census over run dirs of unknown age, blind to runs that
+# were pruned, and the fixture exclusion (canonical `RESULT` + no `nested-under:`)
+# is a heuristic that removes this repo's own planted near-miss summaries, not a
+# guarantee that none survive. Percentages taken over the UNfiltered population
+# are unstable for exactly that reason; the absolute counts are not.
+#
+# The compare is AFFIRMATIVE — `= no`, never `!= yes` — for the same reason the
+# RESULT/tree-integrity token compares are: a `!= yes` test is a two-valued
+# predicate over a multi-state signal and would hand every unmeasured state
+# (`unverified`, an absent field, a future value) the PERMISSIVE branch. An absent
+# or unrecognised value therefore REFUSES; it is never skipped and never read as
+# clean, exactly as a non-hex `commit:`/`tree-start:` placeholder refuses rather
+# than being skipped.
+#
+# `dirty: unverified` IS A REAL EMITTED VALUE, AND THIS ARM IS DEFENCE IN DEPTH —
+# NOT A HOLE THIS CHANGE CLOSES. scripts/agent-gate.sh:8814 emits
+# `commit: unverified branch: <b> dirty: unverified` deliberately, when no
+# validated tree capture exists (the start capture failed, or there is no worktree
+# at the terminal emit) — the run is ALREADY fail-closed there and must not name a
+# sha nothing verified. Such a block is therefore refused THREE times over: by
+# `RESULT: FAIL`, by the non-hex `commit:` placeholder, and now here. The
+# redundancy is deliberate: each of those three is a separate key, and a value
+# that means "the state was never measured" must not survive on the strength of
+# one neighbouring check (the standing rule that no key may delegate its failure
+# to its neighbour).
+#
+# THERE IS NO ENV OPT-OUT AND NONE MAY BE ADDED. A dirty tree is always
+# re-gateable — commit or discard, then re-run — so an escape hatch could only
+# buy a vacuous green, which is the shape this whole script exists to refuse.
+assert_clean_tree() {
+  local what="$1" val="$2" kind="$3" line="${5:?assert_clean_tree: line label required}"
+  # The REMEDY is per-artifact, because the two artifacts are re-produced by
+  # DIFFERENT runs (#3648 roborev round 1, finding 1). Telling the operator to
+  # "re-run the FULL gate" over a dirty DELTA block contradicts #1892, which
+  # mandates `--delta` — never a repeat full gate — for a test/docs-only diff on
+  # top of a full PASS. A refusal naming the wrong remedy sends a correct operator
+  # down a route doctrine forbids, which is worse than naming none.
+  #
+  # `kind` is REQUIRED and an unrecognised value REFUSES. It deliberately takes no
+  # `${3:-full}` default: a permissive default is how a new call site silently
+  # inherits the wrong remedy, and this file's whole discipline is that an
+  # unestablished value is never given the benign branch.
+  local rerun
+  case "$kind" in
+    full)  rerun="re-run the FULL gate on the clean tree and pass that summary" ;;
+    delta) rerun="re-run the --delta re-certification on the clean tree and pass that summary (the anchor's own full-gate PASS is unaffected)" ;;
+    *)
+      refuse_no_gate \
+        "INTERNAL: assert_clean_tree was called with remedy kind '$kind', which is not" \
+        "'full' or 'delta'. Refusing rather than guessing a remedy (#3648)."
+      ;;
+  esac
+  # AMBIGUITY BEFORE VALUE: more than one `dirty:` on the commit: line means the
+  # block states the tree's cleanliness twice, and no reading of it is
+  # authoritative. Refused BEFORE the `= no` compare, or `dirty: yes dirty: no`
+  # would return 0 here on the second token's value (#3648 roborev round 2).
+  if [ "${4:-1}" -gt 1 ] 2>/dev/null; then
+    refuse_no_gate \
+      "The $what has ${4} 'dirty:' fields on its '$line' line — AMBIGUOUS, refusing." \
+      "A block that states its tree state twice authorises nothing: a 'last one wins'" \
+      "reading would let a trailing 'dirty: no' override the real value."
+  fi
+  if [ "$val" = no ]; then
+    return 0
+  fi
+  if [ -z "$val" ]; then
+    refuse_no_gate \
+      "The $what records NO 'dirty:' value on its '$line' line — nothing was measured" \
+      "about whether that run executed against a committed tree, so it cannot certify one." \
+      "REMEDY: $rerun."
+  fi
+  refuse_no_gate \
+    "The $what records 'dirty: $val' — the gate of record must be 'dirty: no' (#3648)." \
+    "'yes' means that run certified the sha PLUS uncommitted NON-IGNORED content — both" \
+    "modified TRACKED files and UNTRACKED files the repo's ignore rules do not exclude," \
+    "since the gate's capture pairs a tracked-side diff with" \
+    "\`git ls-files --others --exclude-standard\` (so this is never a gitignored log, and it" \
+    "is not tracked-only either). Anything that is" \
+    "neither 'yes' nor 'no' means the state was never established — and an unestablished" \
+    "state is not a clean one. Either way the tree that was gated is not provably the tree" \
+    "that will merge: commit:/tree-start: name the same sha in both cases and cannot see it." \
+    "REMEDY: commit the edits (or discard them), then $rerun." \
+    "There is deliberately NO opt-out: a dirty tree is always" \
+    "re-gateable, so an override could only buy a vacuous green."
 }
 
 # assert_pass_block <what>: the verdict half every accepted block must satisfy —
@@ -702,6 +839,9 @@ assert_single_key "$GP_n_ts" tree-start "full-gate block"
 full_commit="$GP_v_commit"
 full_ts="$GP_v_ts"
 full_dirty="$GP_v_dirty"
+full_ndirty="$GP_n_dirty"
+full_tsdirty="$GP_v_tsdirty"
+full_ntsdirty="$GP_n_tsdirty"
 
 if [ -z "$delta_file" ]; then
   # CASE A — DIRECT: the gate of record ran on the merged tree itself.
@@ -777,14 +917,24 @@ else
   delta_commit="$GP_v_commit"
   delta_ts="$GP_v_ts"
   delta_dirty="$GP_v_dirty"
-  [ -n "$delta_dirty" ] || delta_dirty=unknown
+  delta_ndirty="$GP_n_dirty"
+  delta_tsdirty="$GP_v_tsdirty"
+  delta_ntsdirty="$GP_n_tsdirty"
+  # The delta run's OWN tree must be clean too: it is the run that covers the
+  # tree being merged, so a dirty delta re-cert certifies edits that are not in
+  # the PR exactly as a dirty full gate does.
+  assert_clean_tree "delta block" "$delta_dirty" delta "$delta_ndirty" commit:
+  assert_clean_tree "delta block" "$delta_tsdirty" delta "$delta_ntsdirty" tree-start:
 fi
 
-# `dirty:` is REPORTED, not enforced — DELIBERATELY. Failing on `dirty: yes` is
-# not in the owner's ruling on #3465 and is not absorbed into this change; it is
-# proposed separately in #3648. This is a decision, not an oversight: print it so
-# a dirty gate of record is VISIBLE at the merge point.
-[ -n "$full_dirty" ] || full_dirty=unknown
+# `dirty:` is REPORTED **AND ENFORCED** (#3648, replacing the deferral note this
+# line used to carry). In CASE B this is the ANCHOR's own tree: a full PASS taken
+# on a dirty tree anchors the whole chain on a tree nobody can reconstruct, so
+# both blocks are held to the same requirement. The evidence line below still
+# prints the value — after this call it can only ever read `dirty: no`, which is
+# the affirmative record that the check RAN.
+assert_clean_tree "full-gate block" "$full_dirty" full "$full_ndirty" commit:
+assert_clean_tree "full-gate block" "$full_tsdirty" full "$full_ntsdirty" tree-start:
 
 # ---------------------------------------------------------------------------
 # THE ADVISORY IS MEASURED **BEFORE** THE HEAD CHECK (#3650, roborev job 250)

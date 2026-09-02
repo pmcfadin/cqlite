@@ -6,6 +6,7 @@
   "query": "SELECT * FROM test_udt_collision.udt_collide",
   "note_on_proto_field": "The `__proto__` entries are ORDINARY DECLARED UDT FIELDS of the `collide`/`collide_twin` types, not JSON prototype trickery: `JSON.parse` and Python's `json` both create them as ordinary own keys (neither invokes a setter), so this file compares them like any other field. They exist because an ordinary JavaScript property assignment on a plain object reaches `Object.prototype`'s inherited `__proto__` accessor, which silently discarded such a field (string value) or replaced the object's prototype (null value) -- roborev R1-1 on #3504. The Node binding therefore builds its `fields` bag with a NULL PROTOTYPE. The Python side has no analogous hazard (a `dict` `__setitem__` consults no prototype chain), so the same field set is expected verbatim in both bindings.",
   "note_on_paths": "Both paths are CHECKOUT-RELATIVE and resolved from the repo root with NO environment variable. Neither suite may route them through CQLITE_DATASETS_ROOT: the suites' corpus resolution is an either/or on that variable, and when it is set -- which every gate run does -- the checkout copy is never consulted, so a corpus-rooted fixture is invisible exactly where they run.",
+  "note_on_multicell_map_keys": "The `row1.cm_key`/`row1.tm_key` entries are the MULTICELL spelling of the frozen `row1.fcm_key`/`row1.ftm_key` pair: `cm`/`tm` are `map<frozen<udt>,int>` (multicell, so the key lives in the CELL PATH) while `fcm`/`ftm` are `frozen<map<frozen<udt>,int>>` (a single value cell). The two decode paths are DIFFERENT CODE and only the frozen one used to work -- `parse_cell_path_key` matched a closed set of PRIMITIVE cell-path types and fell back to `Value::Blob` for a frozen UDT, so `cm`/`tm` keys arrived as opaque bytes and never reached either binding's UDT rendering at all (issue #3612, fixed by the site now at cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column/cell_path_key.rs, which delegates to the structural decoder). MEASURED from both bindings built from this tree: the two spellings' key facts are IDENTICAL IN CONTENT to their frozen siblings above, which is the whole point -- a caller cannot tell the spellings apart. That makes the pair a standing PARITY CONTROL in two directions at once: cross-BINDING (Python vs Node, as every entry here is) and cross-DECODE-PATH (multicell vs frozen), so a regression in either cell-path or value-cell decoding reddens both suites. The map VALUES differ on purpose (`cm`->1, `tm`->2 against `fcm`->3, `ftm`->4), so a test cannot accidentally read one column's cell while believing it read the other's.",
   "udts": {
     "row1.c": {
       "typeName": "collide",
@@ -23,6 +24,26 @@
       "fields": {
         "label": "no-colliding-field",
         "real_field": 7
+      }
+    },
+    "row1.cm_key": {
+      "typeName": "collide",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "_type": "key-type-marker",
+        "_keyspace": "key-keyspace-marker",
+        "__proto__": "key-proto-marker",
+        "real_field": 100
+      }
+    },
+    "row1.tm_key": {
+      "typeName": "collide_twin",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "_type": "key-type-marker",
+        "_keyspace": "key-keyspace-marker",
+        "__proto__": "key-proto-marker",
+        "real_field": 100
       }
     },
     "row1.fcm_key": {
@@ -75,6 +96,8 @@
     }
   },
   "map_values": {
+    "row1.cm_value": 1,
+    "row1.tm_value": 2,
     "row1.fcm_value": 3,
     "row1.ftm_value": 4
   }
