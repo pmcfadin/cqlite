@@ -3999,7 +3999,16 @@ object_store_sweep() {
     if ! printf '%s\n' "$out" | grep -q '^OBJECT-STORE: verdict-detail REMEDY'; then
       log "object-store: REMEDY — this sweep printed no operator guidance (an older or stubbed check-object-store-integrity.sh). Stop every lane on this box and run 'bash scripts/check-object-store-integrity.sh' by hand for the measured remedy; 'git fetch --force origin' does NOT repair a damaged store and neither does a local 'git gc'/'git repack' (#3749)."
     fi
-    log "object-store: CLEAR THE LATCH ONLY AFTER a re-run of that sweep reports its affirmative verdict — 'I think I fixed it' is not an exit condition.${latch:+ rm -f $latch}"
+    # AND THE CLEARING INSTRUCTION IS PRINTED ONLY WHERE THERE IS SOMETHING TO CLEAR. On
+    # the un-latchable path (above) no latch exists, and naming one would be a second
+    # confidently-wrong instruction — the exact class item 2 removed — pointing an operator
+    # at a file that is not there while the real state (peers will re-sweep) was logged
+    # separately.
+    if [[ "$latched" -eq 1 ]]; then
+      log "object-store: CLEAR THE LATCH ONLY AFTER a re-run of that sweep reports its affirmative verdict — 'I think I fixed it' is not an exit condition: rm -f $latch"
+    else
+      log "object-store: there is NO latch to clear (this verdict could not be recorded box-wide) — repair the store, then re-run the sweep and require its affirmative verdict before resuming any lane (#3749)."
+    fi
     finalize_exit "object-store-corrupt" 1
   fi
 

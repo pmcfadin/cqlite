@@ -10515,6 +10515,16 @@ test_object_store_unlatchable_corrupt_does_not_refresh_the_throttle() {
   else
     fail "obj-sweep(unlatchable): stamp='$(tr '\n' '/' <"$stamp" 2>/dev/null)' — a peer reading it can throttle past a confirmed-corrupt store (see $d/unlatchable.log)"
   fi
+  # AND THE DIAGNOSTIC DOES NOT NAME A LATCH THAT IS NOT THERE. Printing "rm -f <latch>"
+  # here would be a second confidently-wrong instruction of exactly the class round 9 item
+  # 2 removed: the file does not exist, so an operator sent to delete it learns nothing and
+  # may conclude the box was latched.
+  if ! grep -q "rm -f $latch" "$d/unlatchable.log" &&
+    grep -q 'NO latch to clear' "$d/unlatchable.log"; then
+    pass "obj-sweep(unlatchable): the stop says there is NO latch to clear instead of naming a file that was never created"
+  else
+    fail "obj-sweep(unlatchable-remedy): the diagnostic points at a latch that does not exist (see $d/unlatchable.log)"
+  fi
   # AND THE ARM THAT MAKES *FORCING* NECESSARY RATHER THAN MERELY LEAVING THE STAMP ALONE:
   # a PEER whose own sweep started earlier finishes DURING this one and writes a FRESH
   # timestamp. Staged with the `during` hook (a side effect inside the sweep stub — the
