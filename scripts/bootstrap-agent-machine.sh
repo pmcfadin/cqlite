@@ -425,21 +425,152 @@ mold_target_section() {
 # and a both-files machine never has the block land in the ignored file.
 mold_write_block() {
   local linker="$1"
-  local cfg_dir cfg_file preserved
+  local cfg_dir cfg_file preserved write_target tmpw
   cfg_dir="${CARGO_HOME:-$HOME/.cargo}"
   if ! mkdir -p "$cfg_dir" 2>/dev/null; then
     warn "could not create $cfg_dir — skipping mold linker config"
     return 0
   fi
+  # `-f` FOLLOWS the link, so a DANGLING legacy `config` symlink reads as absent and selection
+  # falls through to `config.toml` — leaving the block in a file cargo will ignore the moment the
+  # link's target appears, since cargo prefers the extension-less name (#3756 roborev round 2).
+  # `-L` is the affirmative "a legacy config was declared here" test; the symlink resolution below
+  # then either writes through to the declared target or REFUSES, so a broken link is never
+  # silently replaced. The `config.toml` arm needs no equivalent: its `else` branch already
+  # selects the same path, so a dangling `config.toml` link reaches the resolver either way.
+  #
+  # ...BUT ONLY WHEN IT IS NOT SHADOWING A REAL config.toml (#3756 roborev round 3). Selecting a
+  # DANGLING `config` while a populated `config.toml` exists would materialise the legacy target
+  # containing the mold block ALONE — and cargo, which reads exactly one of the two and prefers
+  # the extension-less name, would from that moment ignore every setting the user has in
+  # `config.toml`. The round-2 fix bought a latent flip and would have paid with an immediate one.
+  # A broken symlink beside a real config is an AMBIGUOUS state, not a state to guess at, so it
+  # gets the same posture as the other two fail-safes in this function: warn, write nothing, leave
+  # the tree byte-identical. A dangling legacy link with NO config.toml is unambiguous — the user
+  # declared where the config goes — and is still written through.
   if [ -f "$cfg_dir/config" ]; then
     cfg_file="$cfg_dir/config"
+  elif [ -L "$cfg_dir/config" ] && [ ! -e "$cfg_dir/config.toml" ] && [ ! -L "$cfg_dir/config.toml" ]; then
+    cfg_file="$cfg_dir/config"
+  elif [ -L "$cfg_dir/config" ]; then
+    warn "$cfg_dir/config is a broken symlink and $cfg_dir/config.toml also exists — writing NO mold block (materialising the legacy name would make cargo prefer it and silently ignore config.toml); fix or remove the symlink and re-run bootstrap"
+    return 0
   elif [ -f "$cfg_dir/config.toml" ]; then
     cfg_file="$cfg_dir/config.toml"
   else
     cfg_file="$cfg_dir/config.toml"
   fi
+  # THE SYMLINK IS RESOLVED BEFORE ANYTHING IS READ, SO THE FILE WE PRESERVE AND THE FILE WE
+  # WRITE ARE THE SAME FILE BY CONSTRUCTION (#3756 roborev round 6). They used to be derived
+  # separately — `$preserved` from `$cfg_file`, the rename from a resolved `$write_target` — and
+  # any normalisation that moved one and not the other turned an APPEND into an OVERWRITE: a
+  # target text ending in `/` made the preserve read see nothing (a trailing slash forces
+  # directory resolution) while the write, with the slash stripped, landed on a real regular file
+  # and destroyed it. Resolving first REMOVES the second derivation instead of trying to keep two
+  # of them in step.
+  write_target="$cfg_file"
+  if [ -L "$cfg_file" ]; then
+    # PORTABLE SYMLINK RESOLUTION (#3756). `readlink -f` is GNU-only — BSD/macOS readlink
+    # has no -f — and the previous form's `|| echo "$cfg_file"` made that failure SILENT:
+    # write_target became the SYMLINK PATH, so the atomic rename below replaced the symlink
+    # with a plain file, which is exactly what resolving it exists to prevent. The failure
+    # was invisible on every Linux lane and would only ever be met by a macOS operator.
+    #
+    # Chase the chain with bare `readlink` (POSIX, both flavours) instead, bounded so a
+    # symlink loop cannot spin, then canonicalise the final DIRECTORY with `cd`+`pwd -P`
+    # (this repo's canonicalisation idiom, and what makes the result absolute).
+    # THE HOP CAP IS ABOVE EVERY PLATFORM'S KERNEL LIMIT, so it bounds a LOOP without ever
+    # being the thing that refuses a chain the OS would happily open (#3756 roborev round 10).
+    # At 32 it was STRICTER than the `readlink -f` it replaced, in a measurable window. Measured
+    # on Linux here: the kernel resolves a 39-link chain and ELOOPs at 41 (MAXSYMLINKS=40), while
+    # `readlink -f` walks 60+ in userspace — so a 33-to-40-link config chain was openable by
+    # cargo, resolvable by the old code, and refused by this one. (BSD/macOS documents
+    # MAXSYMLINKS=32, which is why the window is Linux-only; not measured here, and it does not
+    # matter, because 64 is above both.) Above the kernel limit the chain cannot be opened by
+    # anything, so refusing it costs nothing; a genuine loop still terminates in 64 iterations
+    # and is refused by name below.
+    local _wt="$cfg_file" _lt _wd _hops=0
+    while [ -L "$_wt" ] && [ "$_hops" -lt 64 ]; do
+      _lt=$(readlink "$_wt" 2>/dev/null) || break
+      [ -n "$_lt" ] || break
+      case "$_lt" in
+        /*) _wt="$_lt" ;;
+        *) _wt="$(dirname "$_wt")/$_lt" ;;
+      esac
+      _hops=$((_hops + 1))
+    done
+    # WHAT COUNTS AS RESOLVED, chosen to MATCH `readlink -f` rather than to be stricter than
+    # it: the final component need NOT already exist (a symlink pointing at a file its owner
+    # has not created yet is an ordinary dotfile-manager setup, and GNU resolves it), but its
+    # PARENT DIRECTORY must, or there is nowhere to rename onto. A result that is still a
+    # symlink (loop or hop limit), or that resolves to a DIRECTORY, is not a write target.
+    # Refuse in those cases rather than fall back to the symlink path: the fallback IS the
+    # defect above, and destroying a user's symlink is not recoverable, while skipping the
+    # accelerator config is.
+    #
+    # `cd -P`, NOT bare `cd` (#3756 roborev round 3). bash's `cd` defaults to LOGICAL path
+    # handling, which resolves `..` TEXTUALLY against the path given — so a target whose text
+    # crosses a symlinked directory and then `..` lands somewhere `readlink -f` would not.
+    # Measured on a fixture where `link -> real/inner`: `cd link/..` gives the PARENT OF THE
+    # LINK, `cd -P link/..` gives `real`. Writing the block to the wrong file is bad; doing it
+    # while believing we resolved the link is worse.
+    # A TARGET WHOSE TEXT ENDS IN `/` IS REFUSED, NOT NORMALISED (#3756 roborev round 6, HIGH).
+    # A trailing slash DENOTES a directory, and it also defeats both guards when it does not name
+    # one: `-L` resolves the path as a directory and so reads false for a symlink, `-d` reads
+    # false for a regular file — and then `dirname`/`basename` STRIP the slash and hand `mv` the
+    # real file underneath. Normalising a malformed path is how a check stops describing the
+    # thing that gets used; that is the third finding in this one family, so the malformed input
+    # is refused rather than repaired.
+    case "$_wt" in
+      */)
+        warn "$cfg_file resolves to $_wt, whose trailing '/' denotes a directory it does not name — skipping mold linker config rather than normalising the path into a different file"
+        return 0 ;;
+    esac
+    # EACH REFUSAL SAYS ITS OWN NAME. These conditions have DIFFERENT operator remedies — fix a
+    # symlink loop, create a missing directory, point the link at a file instead of a device —
+    # so folding them into one catch-all ("could not be resolved") would send the reader to the
+    # wrong place. They were folded, and case 6z caught it: a FIFO target was correctly refused
+    # under a message about unresolvable symlinks.
+    if [ -L "$_wt" ]; then
+      warn "$cfg_file is a symlink whose target could not be resolved — it is still a symlink after $_hops hops, which is past every platform's kernel symlink limit, so nothing could open it either (a loop?) — skipping mold linker config rather than replacing the symlink with a plain file"
+      return 0
+    fi
+    if [ -e "$_wt" ] && [ ! -f "$_wt" ]; then
+      warn "$cfg_file resolves to $_wt, which is not a regular file (a directory, FIFO, socket or device node) — skipping mold linker config rather than replacing it"
+      return 0
+    fi
+    _wd=$(cd -P "$(dirname "$_wt")" 2>/dev/null && pwd -P) || _wd=''
+    if [ -z "$_wd" ]; then
+      warn "$cfg_file is a symlink whose target could not be resolved — the directory of $_wt does not exist — skipping mold linker config rather than replacing the symlink with a plain file"
+      return 0
+    fi
+    write_target="$_wd/$(basename "$_wt")"
+    # AND RE-CHECK THE VALUE ACTUALLY USED, not just the intermediate it came from (#3756
+    # roborev round 3). The guards above test `$_wt`, and normalisation can move the answer:
+    # a target whose text ends in `/` forces DIRECTORY resolution, so `-L` reads false even
+    # when the name IS a symlink to a regular file, and `basename` then strips the slash and
+    # hands `mv` that very symlink. Whatever the route, the no-clobber guarantee is about
+    # `$write_target`, so it is asserted ON `$write_target` — a check on an input cannot speak
+    # for an output that was computed from it.
+  fi
+  # ONLY A REGULAR FILE OR A NONEXISTENT PATH IS A WRITE TARGET (#3756 roborev rounds 7 and 8,
+  # both HIGH). "not a symlink and not a directory" is not the same set as "a config file": it
+  # also admits FIFOs, sockets and DEVICE NODES, and `mv -f` replaces whichever one it finds.
+  # Enumerating the types to REJECT is the permissive shape this repo keeps finding, so the test
+  # is affirmative — nonexistent, or `-f` — and anything else is refused by name.
+  #
+  # AND IT SITS OUTSIDE THE SYMLINK BRANCH, which is round 8's correction to round 7's fix.
+  # Scoped to `[ -L "$cfg_file" ]` it only ever examined targets reached THROUGH a link, so a
+  # `~/.cargo/config.toml` that is ITSELF a FIFO, socket or directory reached `mv -f` unchecked.
+  # The property is about the path being WRITTEN, not about how that path was arrived at — the
+  # same reason the check moved onto `$write_target` in round 6 — so it now guards every route
+  # into the write, and the two routes are pinned by separate cases (6z symlinked, 6aa direct).
+  if [ -L "$write_target" ] || { [ -e "$write_target" ] && [ ! -f "$write_target" ]; }; then
+    warn "$write_target is not a regular file (a symlink, directory, FIFO, socket or device node) — skipping mold linker config rather than replacing it"
+    return 0
+  fi
   preserved=$(mktemp) || { warn "mktemp failed — skipping mold linker config"; return 0; }
-  if [ -f "$cfg_file" ]; then
+  if [ -f "$write_target" ]; then
     awk -v b="$MOLD_BEGIN" -v e="$MOLD_END" '
       { lines[NR] = $0 }
       END {
@@ -453,7 +584,7 @@ mold_write_block() {
         if (start > 1 && lines[start-1] == "") rmstart = start - 1
         for (i = 1; i <= NR; i++) if (i < rmstart || i > endi) print lines[i]
       }
-    ' "$cfg_file" >"$preserved"
+    ' "$write_target" >"$preserved"
   else
     : >"$preserved"
   fi
@@ -484,10 +615,6 @@ mold_write_block() {
   # rename over the target — so an ENOSPC/interrupt mid-write can never leave a
   # truncated config (which would break every cargo invocation). Resolve a symlink
   # to its target so we never silently replace a symlinked config with a plain file.
-  local write_target="$cfg_file" tmpw
-  if [ -L "$cfg_file" ]; then
-    write_target=$(readlink -f "$cfg_file" 2>/dev/null || echo "$cfg_file")
-  fi
   tmpw=$(mktemp "$(dirname "$write_target")/.cqlite-mold.XXXXXX" 2>/dev/null) \
     || { warn "mktemp failed in $(dirname "$write_target") — skipping mold linker config"; rm -f "$preserved"; return 0; }
   {
@@ -2385,7 +2512,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       # simulate Linux while linking the HOST copy of `stat`, so on a macOS host this check would
       # fail-closed (exit 6) and the create would never happen — a break that the Linux-only
       # justification does not cover. GNU first, BSD fallback; `stat -f %Lp` is the BSD spelling.
-      _pm=$(stat -c %a "$t" 2>/dev/null || stat -f %Lp "$t" 2>/dev/null)
+      _pm=$(stat -c %a "$t" 2>/dev/null || stat -f %Lp "$t" 2>/dev/null) # portability-lint-allow: GNU `stat -c` PAIRED with the BSD `stat -f` fallback on the same line — the portable spelling, not a GNU-only one
       [ "$_pm" = 644 ] || { rm -f "$t" 2>/dev/null; exit 6; }
       ln "$t" "$f" 2>/dev/null || { rm -f "$t" 2>/dev/null; exit 4; }
       rm -f "$t" 2>/dev/null
@@ -3209,8 +3336,8 @@ else
     # measured in #3119, the pristine upstream copy HANGS when it inherits a tty
     # stdin, and bootstrap must never wedge on an optional version probe.
     NOTIFY_ADJUNCT_VER=""
-    if have timeout && timeout --kill-after=1 1 true >/dev/null 2>&1; then
-      NOTIFY_ADJUNCT_VER=$(timeout --kill-after=1 5 agent-notify --version 2>/dev/null </dev/null | head -1)
+    if have timeout && timeout --kill-after=1 1 true >/dev/null 2>&1; then # portability-lint-allow: GUARDED by `have timeout` AND a functional probe on the same line — this IS the remedy the rule recommends
+      NOTIFY_ADJUNCT_VER=$(timeout --kill-after=1 5 agent-notify --version 2>/dev/null </dev/null | head -1) # portability-lint-allow: inside the `have timeout &&` guard above; the lint is line-oriented and cannot see an enclosing if
     fi
     info "optional local adjunct: ${NOTIFY_ADJUNCT_VER:-agent-notify (version not probed)} — desktop/sound only, no version requirement"
   else

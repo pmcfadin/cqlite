@@ -831,6 +831,412 @@ else
   echo "--- repo cfg now ---"; cat "$repo_cfg"; echo "--------------------"
 fi
 
+# 6o. A SYMLINKED ~/.cargo/config.toml SURVIVES THE ATOMIC WRITE ON A BSD/macOS HOST
+#     (issue #3756). The mold write resolves a symlinked config to its target so the
+#     rename never replaces the LINK with a plain file. That resolution used
+#     `readlink -f`, which is GNU-only, behind a `|| echo "$cfg_file"` fallback that
+#     turned the BSD failure into a SILENT wrong answer — the write_target became the
+#     symlink path and the rename destroyed the link. No Linux lane can see it.
+#
+#     THE SHIM IS CONTROLLED FIRST. A differential whose shim does not reproduce the
+#     reported defect proves nothing, so the OLD IDIOM is run against the shim and must
+#     be shown to DESTROY the symlink before the real script is asked to preserve one.
+sbO=$(mktemp -d "$tmp/moldO.XXXXXX"); stubO="$tmp/stubO"; mkdir -p "$stubO"
+mk_stub "$stubO" uname 'echo Linux; exit 0'
+stub_net "$stubO"
+mk_stub "$stubO" mold '[ "$1" = --version ] && echo "mold 2.4.0"; exit 0'
+mk_stub "$stubO" cc 'exit 0'
+# BSD/macOS readlink: no -f. Apple/FreeBSD readlink(1) takes only -n (and -f is simply
+# not in its option string), so the option is rejected and nothing is printed.
+mk_stub "$stubO" readlink '
+_p=""
+for _a in "$@"; do
+  case "$_a" in
+    -*f*) echo "readlink: illegal option -- f" >&2; exit 1 ;;
+    -*)   ;;
+    *)    _p="$_a" ;;
+  esac
+done
+[ -n "$_p" ] && [ -L "$_p" ] || exit 1
+_l=$(ls -ld -- "$_p") || exit 1
+case "$_l" in *" -> "*) printf "%s\\n" "${_l#* -> }" ;; *) exit 1 ;; esac
+exit 0
+'
+# Shim control A: the shim really is BSD — it refuses -f and still answers the bare form.
+mkdir -p "$sbO/ctl"; : >"$sbO/ctl/real.txt"; ln -s "$sbO/ctl/real.txt" "$sbO/ctl/link.txt"
+ctlO_f=$(PATH="$stubO:$PATH" readlink -f "$sbO/ctl/link.txt" 2>/dev/null); ctlO_frc=$? # portability-lint-allow: probes the SHIM with the GNU-only option on purpose — this line IS the control that the shim rejects it
+ctlO_b=$(PATH="$stubO:$PATH" readlink "$sbO/ctl/link.txt" 2>/dev/null)
+if [ "$ctlO_frc" -ne 0 ] && [ -z "$ctlO_f" ] && [ "$ctlO_b" = "$sbO/ctl/real.txt" ]; then
+  ok "mold/symlink: the BSD readlink shim rejects -f and still resolves the bare form (the shim is the platform it claims to emulate)"
+else
+  bad "mold/symlink: the BSD readlink shim is not BSD-shaped (-f rc=$ctlO_frc out=[$ctlO_f]; bare=[$ctlO_b]) — every verdict below it would be unearned"
+fi
+# Shim control B: THE OLD IDIOM, run under the shim, DESTROYS the symlink. This is the
+# defect being fixed, reproduced, so the fix's green below is a measured difference and
+# not an assumption.
+mkdir -p "$sbO/old"; printf 'real = 1\n' >"$sbO/old/real.toml"
+ln -s "$sbO/old/real.toml" "$sbO/old/config.toml"
+PATH="$stubO:$PATH" bash -c '
+  cfg_file=$1
+  write_target=$(readlink -f "$cfg_file" 2>/dev/null || echo "$cfg_file") # portability-lint-allow: this IS the #3756 defect, reproduced on purpose — the control that makes the assertion below a measurement rather than an assumption
+  t=$(mktemp "$(dirname "$write_target")/.old.XXXXXX")
+  printf "rewritten = 1\n" >"$t"
+  mv -f "$t" "$write_target"
+' _ "$sbO/old/config.toml" >/dev/null 2>&1
+if [ ! -L "$sbO/old/config.toml" ] && [ -f "$sbO/old/config.toml" ]; then
+  ok "mold/symlink control: the OLD \`readlink -f … || echo\` idiom REPLACES the symlink with a plain file under BSD readlink — the defect is reproduced, so the fix's verdict below is a difference and not an assumption" # portability-lint-allow: the defect NAME in a diagnostic string, not an invocation
+else
+  bad "mold/symlink control: the old idiom did NOT destroy the symlink under the BSD shim (still-link=$([ -L "$sbO/old/config.toml" ] && echo yes || echo no)) — the shim does not reach the defect, so nothing below it is evidence"
+fi
+# The case itself: bootstrap, unmodified, under the same shim.
+mkdir -p "$sbO/.cargo" "$sbO/elsewhere"
+realO="$sbO/elsewhere/cargo-config.toml"
+printf '[net]\nretry = 3\n' >"$realO"
+ln -s "$realO" "$sbO/.cargo/config.toml"
+PATH="$stubO:$PATH" HOME="$sbO" CARGO_HOME="$sbO/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+if [ -L "$sbO/.cargo/config.toml" ] \
+   && [ "$(count_begin "$realO")" = 1 ] \
+   && grep -qx 'retry = 3' "$realO"; then
+  ok "mold/symlink: a symlinked cargo config is written THROUGH to its target on a BSD-readlink host — the link survives, the block lands once, user content is preserved"
+else
+  bad "mold/symlink: the symlinked config was not preserved (still-link=$([ -L "$sbO/.cargo/config.toml" ] && echo yes || echo no) begin-count=$(count_begin "$realO"))"
+  echo "--- link path ---"; ls -ld "$sbO/.cargo/config.toml"
+  echo "--- target ---"; cat "$realO" 2>/dev/null; echo "--------------"
+fi
+
+# 6p. AN UNRESOLVABLE symlink is REFUSED, not silently replaced (#3756). The old fallback
+#     wrote through to the symlink PATH, which turns an unresolvable link into a plain file —
+#     unrecoverable for the user, where skipping the accelerator config is not. A symlink LOOP
+#     is the unresolvable case that cannot be argued away as "just create it".
+sbP=$(mktemp -d "$tmp/moldP.XXXXXX"); mkdir -p "$sbP/.cargo"
+ln -s "$sbP/.cargo/loop-b.toml" "$sbP/.cargo/config.toml"
+ln -s "$sbP/.cargo/config.toml" "$sbP/.cargo/loop-b.toml"
+outP=$(PATH="$stubO:$PATH" HOME="$sbP" CARGO_HOME="$sbP/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+if [ -L "$sbP/.cargo/config.toml" ] && [ -L "$sbP/.cargo/loop-b.toml" ] \
+   && printf '%s' "$outP" | grep -q "symlink whose target could not be resolved"; then
+  ok "mold/symlink: a symlink LOOP is refused with a named warning and both links are left untouched, rather than one being replaced by a plain file"
+else
+  bad "mold/symlink: the symlink-loop case did not refuse (config-is-link=$([ -L "$sbP/.cargo/config.toml" ] && echo yes || echo no) b-is-link=$([ -L "$sbP/.cargo/loop-b.toml" ] && echo yes || echo no))"
+  printf '%s\n' "$outP" | grep -i 'mold\|symlink' | head -5
+fi
+
+# 6q. A symlink whose TARGET DOES NOT EXIST YET but whose parent directory does is WRITTEN
+#     THROUGH, not refused (#3756). `readlink -f` resolves such a path, and a dotfile manager
+#     that links config.toml ahead of the file is an ordinary setup — so the portable
+#     replacement must MATCH that behaviour. Without this case the fix could quietly be
+#     stricter than what it replaced, and nothing would say so.
+sbQ=$(mktemp -d "$tmp/moldQ.XXXXXX"); mkdir -p "$sbQ/.cargo" "$sbQ/dotfiles"
+ln -s "$sbQ/dotfiles/cargo-config.toml" "$sbQ/.cargo/config.toml"
+PATH="$stubO:$PATH" HOME="$sbQ" CARGO_HOME="$sbQ/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+if [ -L "$sbQ/.cargo/config.toml" ] && [ -f "$sbQ/dotfiles/cargo-config.toml" ] \
+   && [ "$(count_begin "$sbQ/dotfiles/cargo-config.toml")" = 1 ]; then
+  ok "mold/symlink: a symlink to a not-yet-created target is written THROUGH (the target is created, the link survives) — the portable resolver is not stricter than the readlink -f it replaced" # portability-lint-allow: the replaced construct NAMED in a diagnostic string, not an invocation
+else
+  bad "mold/symlink: a symlink to a not-yet-created target was not written through (still-link=$([ -L "$sbQ/.cargo/config.toml" ] && echo yes || echo no) target-exists=$([ -f "$sbQ/dotfiles/cargo-config.toml" ] && echo yes || echo no) begin-count=$(count_begin "$sbQ/dotfiles/cargo-config.toml"))"
+fi
+
+# 6r. A DANGLING LEGACY `~/.cargo/config` SYMLINK REACHES THE RESOLVER (#3756 roborev round 2).
+#     Selection used `-f`, which FOLLOWS the link and therefore reads a dangling one as absent —
+#     so bootstrap wrote `config.toml` instead, and the moment the link's target appeared cargo
+#     would prefer the extension-less `config` and ignore the block entirely. Both halves are
+#     asserted: the declared target is created and carries the block, AND no `config.toml` is
+#     written beside it (writing both is what makes the wrong one win later).
+sbR=$(mktemp -d "$tmp/moldR.XXXXXX"); mkdir -p "$sbR/.cargo" "$sbR/dotfiles"
+ln -s "$sbR/dotfiles/legacy-config" "$sbR/.cargo/config"
+PATH="$stubO:$PATH" HOME="$sbR" CARGO_HOME="$sbR/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+if [ -L "$sbR/.cargo/config" ] && [ -f "$sbR/dotfiles/legacy-config" ] \
+   && [ "$(count_begin "$sbR/dotfiles/legacy-config")" = 1 ] \
+   && [ ! -e "$sbR/.cargo/config.toml" ]; then
+  ok "mold/symlink: a DANGLING legacy ~/.cargo/config symlink selects the legacy name and is written THROUGH to its declared target — not sidestepped into a config.toml that cargo would later ignore"
+else
+  bad "mold/symlink: the dangling legacy config symlink was not handled (still-link=$([ -L "$sbR/.cargo/config" ] && echo yes || echo no) target=$([ -f "$sbR/dotfiles/legacy-config" ] && echo yes || echo no) begin=$(count_begin "$sbR/dotfiles/legacy-config") stray-config.toml=$([ -e "$sbR/.cargo/config.toml" ] && echo yes || echo no))"
+fi
+
+# 6s. ...and an UNRESOLVABLE legacy symlink still REFUSES rather than being replaced. 6r opens a
+#     path that 6p's config.toml case did not cover, so the refusal is re-asserted on it: a
+#     selection change that quietly turned a refusal into a clobber is exactly the regression
+#     6r could introduce.
+sbS=$(mktemp -d "$tmp/moldS.XXXXXX"); mkdir -p "$sbS/.cargo"
+ln -s "$sbS/.cargo/no-such-dir/legacy-config" "$sbS/.cargo/config"
+outS=$(PATH="$stubO:$PATH" HOME="$sbS" CARGO_HOME="$sbS/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+if [ -L "$sbS/.cargo/config" ] && [ ! -e "$sbS/.cargo/no-such-dir" ] \
+   && printf '%s' "$outS" | grep -q "symlink whose target could not be resolved"; then
+  ok "mold/symlink: a legacy config symlink into a NONEXISTENT directory is refused with a named warning and left untouched — 6r widened selection without widening what may be clobbered"
+else
+  bad "mold/symlink: the unresolvable legacy symlink case did not refuse (still-link=$([ -L "$sbS/.cargo/config" ] && echo yes || echo no) dir-created=$([ -e "$sbS/.cargo/no-such-dir" ] && echo yes || echo no))"
+  printf '%s\n' "$outS" | grep -i 'mold\|symlink' | head -5
+fi
+
+# 6t. AN INTERMEDIATE DIRECTORY SYMLINK FOLLOWED BY `..` RESOLVES PHYSICALLY (#3756 roborev
+#     round 3). bash's `cd` is LOGICAL by default: it resolves `..` against the path TEXT, so
+#     `cd link/..` lands in the parent of the LINK while `cd -P link/..` lands in the parent of
+#     the link's TARGET — and `readlink -f`, the thing being replaced, is physical. Measured on
+#     the fixture below: logical gives `$sbT/.cargo`, physical gives `$sbT/real`. The
+#     consequence of getting it wrong is not a skipped config, it is the block written to a
+#     DIFFERENT FILE while the run believes it resolved the link.
+sbT=$(mktemp -d "$tmp/moldT.XXXXXX"); mkdir -p "$sbT/.cargo" "$sbT/real/inner"
+ln -s "$sbT/real/inner" "$sbT/.cargo/linkdir"
+# target text crosses the symlinked directory and then goes UP: physically that is $sbT/real.
+ln -s "$sbT/.cargo/linkdir/../cargo-config.toml" "$sbT/.cargo/config.toml"
+PATH="$stubO:$PATH" HOME="$sbT" CARGO_HOME="$sbT/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+if [ -L "$sbT/.cargo/config.toml" ] \
+   && [ "$(count_begin "$sbT/real/cargo-config.toml")" = 1 ] \
+   && [ ! -e "$sbT/.cargo/cargo-config.toml" ]; then
+  ok "mold/symlink: a target crossing a symlinked directory and then \`..\` resolves PHYSICALLY (to \$sbT/real, where readlink -f would put it) — not to the logical parent, which is a different file" # portability-lint-allow: the replaced construct NAMED in a diagnostic string, not an invocation
+else
+  bad "mold/symlink: the intermediate-symlink + .. case resolved to the wrong file (physical target begin=$(count_begin "$sbT/real/cargo-config.toml") logical-path-written=$([ -e "$sbT/.cargo/cargo-config.toml" ] && echo yes || echo no))"
+  ls -l "$sbT/.cargo" "$sbT/real" 2>&1 | head -12
+fi
+
+# 6u. THE NO-CLOBBER GUARANTEE IS ASSERTED ON THE VALUE ACTUALLY WRITTEN (#3756 roborev round 3).
+#     A target whose TEXT ends in `/` forces directory resolution, so `-L` reads false even when
+#     the name is a symlink to a regular file; `basename` then strips the slash and hands `mv`
+#     that very symlink. The guard therefore re-tests `$write_target` itself, and this case
+#     drives exactly that route: config.toml -> "…/second/" -> a regular file.
+#     THE REFUSAL MOVED EARLIER IN ROUND 6, and the alternation below records that rather than
+#     hiding it: a trailing-slash target is now rejected BY NAME before canonicalisation, so this
+#     case exits through the trailing-slash message instead of the write-target re-check. What is
+#     ASSERTED has not moved — nothing is clobbered and both links survive — and sibling case 6x
+#     drives the same malformed shape onto a REGULAR file, which is the destructive route.
+sbU=$(mktemp -d "$tmp/moldU.XXXXXX"); mkdir -p "$sbU/.cargo"
+printf 'user = 1\n' >"$sbU/.cargo/actual.toml"
+ln -s "$sbU/.cargo/actual.toml" "$sbU/.cargo/second"
+ln -s "$sbU/.cargo/second/" "$sbU/.cargo/config.toml"
+outU=$(PATH="$stubO:$PATH" HOME="$sbU" CARGO_HOME="$sbU/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+# EVERY protected link is asserted PRESENT and UNCHANGED — `-L` plus its exact `readlink` value
+# (#3756 roborev round 12). These cases claim "the links are untouched"; testing only one of them,
+# and only for existence, would pass if the other were deleted or REPOINTED. Assert the claim made.
+if [ -L "$sbU/.cargo/second" ] && [ "$(readlink "$sbU/.cargo/second")" = "$sbU/.cargo/actual.toml" ] \
+   && [ -L "$sbU/.cargo/config.toml" ] && [ "$(readlink "$sbU/.cargo/config.toml")" = "$sbU/.cargo/second/" ] \
+   && [ "$(count_begin "$sbU/.cargo/actual.toml")" = 0 ] \
+   && printf '%s' "$outU" | grep -qE "could not be resolved|which is itself a symlink or a directory|trailing '/' denotes a directory it does not name"; then
+  ok "mold/symlink: a trailing-slash target naming a SECOND symlink is refused — the intermediate guards can be bypassed by normalisation, so the no-clobber test is re-run on the write target itself"
+else
+  bad "mold/symlink: the trailing-slash second-symlink case was not refused (second-is-link=$([ -L "$sbU/.cargo/second" ] && echo yes || echo no) actual-begin=$(count_begin "$sbU/.cargo/actual.toml"))"
+  printf '%s\n' "$outU" | grep -i 'mold\|symlink' | head -5
+fi
+
+# 6v. A DANGLING LEGACY `config` SYMLINK MUST NOT SHADOW A REAL `config.toml` (#3756 roborev
+#     round 5 — a regression introduced by 6r's own fix, which is why the two are tested
+#     together). Selecting the legacy name would MATERIALISE its target holding the mold block
+#     ALONE, and cargo reads exactly one of the two files and prefers the extension-less one —
+#     so from that moment every user setting in config.toml is silently ignored. 6r bought a
+#     LATENT preference flip and would have paid for it with an IMMEDIATE one. Ambiguous state,
+#     so: warn, write nothing, leave the tree byte-identical — the posture the other two
+#     fail-safes in this function already take.
+sbV=$(mktemp -d "$tmp/moldV.XXXXXX"); mkdir -p "$sbV/.cargo" "$sbV/dotfiles"
+printf '[net]\nretry = 11\n' >"$sbV/.cargo/config.toml"
+ln -s "$sbV/dotfiles/legacy-config" "$sbV/.cargo/config"
+# A PRISTINE COPY plus `cmp`, never `$(cat …)` (#3756 roborev round 9). Command substitution
+# STRIPS trailing newlines, so a mutation that only adds or removes them compares EQUAL — and
+# these cases claim the file is byte-identical, which is a stronger property than substitution
+# can test. Measured: `a\n` vs `a\n\n\n` are equal under `$(cat …)` and differ under `cmp`.
+cp "$sbV/.cargo/config.toml" "$sbV/pristine-config.toml"
+outV=$(PATH="$stubO:$PATH" HOME="$sbV" CARGO_HOME="$sbV/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+if [ ! -e "$sbV/dotfiles/legacy-config" ] \
+   && [ -L "$sbV/.cargo/config" ] && [ "$(readlink "$sbV/.cargo/config")" = "$sbV/dotfiles/legacy-config" ] \
+   && cmp -s "$sbV/pristine-config.toml" "$sbV/.cargo/config.toml" \
+   && printf '%s' "$outV" | grep -q "broken symlink and .* also exists"; then
+  ok "mold/symlink: a DANGLING legacy config symlink beside a real config.toml is refused with a named warning — the legacy target is NOT materialised, so cargo's preference does not flip and the user's config.toml is left byte-identical"
+else
+  bad "mold/symlink: the shadowing case was not refused (legacy-materialised=$([ -e "$sbV/dotfiles/legacy-config" ] && echo yes || echo no) config.toml-changed=$(cmp -s "$sbV/pristine-config.toml" "$sbV/.cargo/config.toml" && echo no || echo yes))"
+  printf '%s\n' "$outV" | grep -i 'mold\|symlink' | head -5
+  echo "--- config.toml ---"; cat "$sbV/.cargo/config.toml"
+fi
+
+# 6w. ...and the same refusal when the coexisting config.toml is ITSELF a symlink. `-e` follows
+#     the link, so a config.toml that is a symlink to a real file is caught by it — but a
+#     DANGLING config.toml symlink is not, and it is still a declared config the user owns. The
+#     selection therefore tests `-e` OR `-L` on config.toml, and this case drives the `-L` half:
+#     without it, two broken declarations would silently resolve in favour of one of them.
+sbW=$(mktemp -d "$tmp/moldW.XXXXXX"); mkdir -p "$sbW/.cargo" "$sbW/dotfiles"
+ln -s "$sbW/dotfiles/legacy-config" "$sbW/.cargo/config"
+ln -s "$sbW/dotfiles/modern-config" "$sbW/.cargo/config.toml"
+outW=$(PATH="$stubO:$PATH" HOME="$sbW" CARGO_HOME="$sbW/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+if [ ! -e "$sbW/dotfiles/legacy-config" ] && [ ! -e "$sbW/dotfiles/modern-config" ] \
+   && [ -L "$sbW/.cargo/config" ] && [ "$(readlink "$sbW/.cargo/config")" = "$sbW/dotfiles/legacy-config" ] \
+   && [ -L "$sbW/.cargo/config.toml" ] && [ "$(readlink "$sbW/.cargo/config.toml")" = "$sbW/dotfiles/modern-config" ] \
+   && printf '%s' "$outW" | grep -q "broken symlink and .* also exists"; then
+  ok "mold/symlink: a dangling legacy config symlink beside a DANGLING config.toml symlink is refused too — neither target is materialised, so the run does not pick a winner between two broken declarations"
+else
+  bad "mold/symlink: the two-dangling-symlinks case was not refused (legacy=$([ -e "$sbW/dotfiles/legacy-config" ] && echo materialised || echo no) modern=$([ -e "$sbW/dotfiles/modern-config" ] && echo materialised || echo no))"
+  printf '%s\n' "$outW" | grep -i 'mold\|symlink' | head -5
+fi
+
+# 6x. A TRAILING-SLASH TARGET NAMING A REGULAR FILE DESTROYS NOTHING (#3756 roborev round 6,
+#     HIGH — data loss). `config.toml -> "…/regular-file/"` defeats BOTH guards: a trailing
+#     slash forces directory resolution, so `-L` reads false for a symlink and `-d` reads false
+#     for a regular file. `dirname`/`basename` then STRIP the slash and hand `mv` the real file
+#     underneath — and because the preserve read used the un-normalised path it saw nothing, so
+#     the append became an OVERWRITE and the file's contents were gone.
+#
+#     Two things are asserted, because the fix has two halves: the malformed target is REFUSED
+#     (a trailing slash denotes a directory it does not name), and — the half that makes the
+#     whole class unreachable — the preserve read and the write now derive from the SAME
+#     resolved path, so no future normalisation can move one without the other.
+sbX=$(mktemp -d "$tmp/moldX.XXXXXX"); mkdir -p "$sbX/.cargo" "$sbX/data"
+printf 'irreplaceable = "user data"\n' >"$sbX/data/regular-file"
+cp "$sbX/data/regular-file" "$sbX/pristine-regular-file"   # byte-exact baseline; see 6v on why not $(cat …)
+ln -s "$sbX/data/regular-file/" "$sbX/.cargo/config.toml"
+outX=$(PATH="$stubO:$PATH" HOME="$sbX" CARGO_HOME="$sbX/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+if cmp -s "$sbX/pristine-regular-file" "$sbX/data/regular-file" \
+   && [ -L "$sbX/.cargo/config.toml" ] \
+   && [ "$(count_begin "$sbX/data/regular-file")" = 0 ] \
+   && printf '%s' "$outX" | grep -q "trailing '/' denotes a directory it does not name"; then
+  ok "mold/symlink: a trailing-slash target naming a REGULAR FILE is refused by name — the file keeps its contents byte-for-byte and the symlink is untouched (this path used to OVERWRITE it)"
+else
+  bad "mold/symlink: the trailing-slash regular-file case lost data or was not refused (content-preserved=$(cmp -s "$sbX/pristine-regular-file" "$sbX/data/regular-file" && echo yes || echo NO) still-link=$([ -L "$sbX/.cargo/config.toml" ] && echo yes || echo no) block-written=$(count_begin "$sbX/data/regular-file"))"
+  echo "--- file now ---"; cat "$sbX/data/regular-file"; echo "----------------"
+  printf '%s\n' "$outX" | grep -i 'mold\|symlink' | head -5
+fi
+
+# 6y. THE PRESERVE READ FOLLOWS THE RESOLVED PATH, NOT THE LINK (#3756 roborev round 6, the
+#     class fix). With resolution moved ahead of the read, a symlinked config's EXISTING user
+#     content must survive the append — asserted through a symlink so the two derivations are
+#     genuinely different paths, which is the condition under which they used to diverge.
+sbY=$(mktemp -d "$tmp/moldY.XXXXXX"); mkdir -p "$sbY/.cargo" "$sbY/store"
+printf '[net]\nretry = 17\n' >"$sbY/store/cargo-config.toml"
+ln -s "$sbY/store/cargo-config.toml" "$sbY/.cargo/config.toml"
+PATH="$stubO:$PATH" HOME="$sbY" CARGO_HOME="$sbY/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+if grep -qx 'retry = 17' "$sbY/store/cargo-config.toml" \
+   && [ "$(count_begin "$sbY/store/cargo-config.toml")" = 1 ] \
+   && [ -L "$sbY/.cargo/config.toml" ]; then
+  ok "mold/symlink: user content in a SYMLINKED config survives the append — the preserve read and the write derive from one resolved path, so an append cannot silently become an overwrite"
+else
+  bad "mold/symlink: symlinked-config user content did not survive (retry-line=$(grep -c 'retry = 17' "$sbY/store/cargo-config.toml") begin=$(count_begin "$sbY/store/cargo-config.toml"))"
+  cat "$sbY/store/cargo-config.toml"
+fi
+
+# 6z. A SPECIAL FILE IS NOT A WRITE TARGET (#3756 roborev round 7, HIGH). "not a symlink and
+#     not a directory" is not the same set as "a config file": it also admits FIFOs, sockets and
+#     device nodes — and the legacy-link selection added in round 2 is precisely what routes
+#     `~/.cargo/config -> <fifo>` into the resolver, where a privileged run would replace the
+#     special file with a regular one. A FIFO is used rather than /dev/null because the suite
+#     runs unprivileged and must be able to CREATE the subject; the code path is identical (both
+#     are `-e` and not `-f`), and the assertion is on the file's TYPE surviving.
+if command -v mkfifo >/dev/null 2>&1; then
+  sbZ=$(mktemp -d "$tmp/moldZ.XXXXXX"); mkdir -p "$sbZ/.cargo" "$sbZ/special"
+  mkfifo "$sbZ/special/pipe" 2>/dev/null && ln -s "$sbZ/special/pipe" "$sbZ/.cargo/config"
+  if [ -p "$sbZ/special/pipe" ]; then
+    outZ=$(PATH="$stubO:$PATH" HOME="$sbZ" CARGO_HOME="$sbZ/.cargo" \
+      "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+    if [ -p "$sbZ/special/pipe" ] && [ -L "$sbZ/.cargo/config" ] \
+       && printf '%s' "$outZ" | grep -q "is not a regular file"; then
+      ok "mold/symlink: a config symlink pointing at a SPECIAL FILE (FIFO) is refused by name — the special file keeps its type and the link is untouched; only a regular file or a nonexistent path is a write target"
+    else
+      bad "mold/symlink: the special-file target was not refused (still-fifo=$([ -p "$sbZ/special/pipe" ] && echo yes || echo NO) still-link=$([ -L "$sbZ/.cargo/config" ] && echo yes || echo no))"
+      ls -l "$sbZ/special/pipe" "$sbZ/.cargo/config" 2>&1 | head -4
+      printf '%s\n' "$outZ" | grep -i 'mold\|symlink\|regular file' | head -5
+    fi
+  else
+    # A SKIP, never a silent pass: the subject could not be created, so the case has no verdict.
+    skip "mold/symlink: special-file target case — mkfifo did not produce a FIFO on this filesystem, so the subject does not exist"
+  fi
+else
+  skip "mold/symlink: special-file target case — no mkfifo on this host"
+fi
+
+# 6aa. A SPECIAL FILE REACHED DIRECTLY — NOT THROUGH A SYMLINK (#3756 roborev round 8, HIGH).
+#      6z's fix was scoped to the `[ -L "$cfg_file" ]` branch, so it only examined targets
+#      reached THROUGH a link: a `~/.cargo/config.toml` that IS a FIFO went straight to `mv -f`
+#      unchecked. The property is about the path being WRITTEN, not how it was arrived at, so
+#      the check is unconditional and BOTH routes get a case — this is the direct one, and its
+#      existence is what stops the check being re-scoped into a branch later.
+if command -v mkfifo >/dev/null 2>&1; then
+  sbAA=$(mktemp -d "$tmp/moldAA.XXXXXX"); mkdir -p "$sbAA/.cargo"
+  mkfifo "$sbAA/.cargo/config.toml" 2>/dev/null
+  if [ -p "$sbAA/.cargo/config.toml" ]; then
+    outAA=$(PATH="$stubO:$PATH" HOME="$sbAA" CARGO_HOME="$sbAA/.cargo" \
+      "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+    if [ -p "$sbAA/.cargo/config.toml" ] \
+       && printf '%s' "$outAA" | grep -q "is not a regular file"; then
+      ok "mold/symlink: a config.toml that IS a FIFO — reached directly, with no symlink anywhere — is refused by name and keeps its type; the write-target type check guards every route, not just the symlink branch"
+    else
+      bad "mold/symlink: a DIRECT special-file config.toml was not refused (still-fifo=$([ -p "$sbAA/.cargo/config.toml" ] && echo yes || echo NO))"
+      ls -l "$sbAA/.cargo/config.toml" 2>&1 | head -2
+      printf '%s\n' "$outAA" | grep -i 'mold\|regular file' | head -5
+    fi
+  else
+    skip "mold/symlink: direct special-file case — mkfifo did not produce a FIFO on this filesystem, so the subject does not exist"
+  fi
+else
+  skip "mold/symlink: direct special-file case — no mkfifo on this host"
+fi
+
+# 6ab. ...and a DIRECTORY at config.toml is refused too, by the same unconditional check. A
+#      directory is the route where the old code did not merely replace the wrong thing: `mv`
+#      would have moved the temp file INSIDE it and the run would have reported success.
+sbAB=$(mktemp -d "$tmp/moldAB.XXXXXX"); mkdir -p "$sbAB/.cargo/config.toml"
+outAB=$(PATH="$stubO:$PATH" HOME="$sbAB" CARGO_HOME="$sbAB/.cargo" \
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+# `ls -A` STATUS AND OUTPUT, both — never `[ -z "$(find …)" ]`, which collapses "the scan
+# FAILED" onto "no match" and always picks the permissive answer (this repo lints that shape as
+# `1699-find-tristate`). An unreadable directory must not read as an empty one.
+ab_listing=$(ls -A "$sbAB/.cargo/config.toml" 2>/dev/null); ab_ls_rc=$?
+if [ -d "$sbAB/.cargo/config.toml" ] && [ "$ab_ls_rc" -eq 0 ] && [ -z "$ab_listing" ] \
+   && printf '%s' "$outAB" | grep -q "is not a regular file"; then
+  ok "mold/symlink: a DIRECTORY at config.toml is refused by name and left empty — nothing is moved inside it and no success is reported"
+else
+  bad "mold/symlink: a directory at config.toml was not refused (still-dir=$([ -d "$sbAB/.cargo/config.toml" ] && echo yes || echo no) ls-rc=$ab_ls_rc contents=[$(printf '%s' "$ab_listing" | tr '\n' ' ')])"
+  printf '%s\n' "$outAB" | grep -i 'mold\|regular file' | head -5
+fi
+
+# 6ac. A LONG-BUT-OPENABLE SYMLINK CHAIN RESOLVES (#3756 roborev round 10). The hop cap exists
+#      to bound a LOOP, not to be stricter than the `readlink -f` it replaced — and at 32 it was.
+#      Measured on Linux: the kernel resolves a 39-link chain and ELOOPs at 41 (MAXSYMLINKS=40)
+#      while `readlink -f` walks 60+, so a 35-link config chain was openable by cargo, resolvable
+#      by the old code, and refused by the new one. 35 is chosen deliberately: it is ABOVE the old
+#      cap of 32 and BELOW the kernel limit, so this case fails on a cap of 32 and passes on 64 —
+#      a cap regression is what it detects, not symlinks in general.
+sbAC=$(mktemp -d "$tmp/moldAC.XXXXXX"); mkdir -p "$sbAC/.cargo" "$sbAC/chain"
+printf '[net]\nretry = 23\n' >"$sbAC/chain/final.toml"
+# A PORTABLE ARITHMETIC LOOP, NOT `seq` (#3756 roborev round 11). `seq` is not in POSIX, and the
+# availability question is the SMALLER half: this suite does not run under `set -e`, so ANY failure
+# of the chain construction — a missing `seq`, an `ln` refusal, a full filesystem — left the loop
+# empty with `ac_built` still 1 and `ac_prev` still pointing at the FINAL FILE. `config.toml` was
+# then symlinked straight to it and the case PASSED having exercised a ONE-link chain, i.e. a
+# vacuous pass inside the test whose whole purpose is the 35-link one. Availability is fixed by
+# the loop; the vacuity is fixed by COUNTING what was actually built and requiring the number.
+ac_prev="$sbAC/chain/final.toml"
+ac_built=0
+ac_i=1
+while [ "$ac_i" -le 35 ]; do
+  ln -s "$ac_prev" "$sbAC/chain/l$ac_i" || break
+  ac_prev="$sbAC/chain/l$ac_i"
+  ac_built=$((ac_built + 1))
+  ac_i=$((ac_i + 1))
+done
+# THE LENGTH IS ASSERTED, NOT INFERRED. `ac_built` now counts links that were actually created, so
+# a short chain can no longer masquerade as the long one; and the deepest link must really BE a
+# symlink. THE CHAIN MUST ALSO BE OPENABLE BY THIS KERNEL, or the case asserts about a path nothing
+# could use and fails for the fixture's reason rather than the code's. Probed, not assumed.
+if [ "$ac_built" -eq 35 ] && [ -L "$ac_prev" ] \
+   && [ "$(head -1 "$ac_prev" 2>/dev/null)" = '[net]' ]; then
+  ln -s "$ac_prev" "$sbAC/.cargo/config.toml"
+  PATH="$stubO:$PATH" HOME="$sbAC" CARGO_HOME="$sbAC/.cargo" \
+    "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+  if [ -L "$sbAC/.cargo/config.toml" ] \
+     && [ "$(count_begin "$sbAC/chain/final.toml")" = 1 ] \
+     && grep -qx 'retry = 23' "$sbAC/chain/final.toml"; then
+    ok "mold/symlink: a 35-link chain — longer than the old 32-hop cap, shorter than the kernel's limit — is resolved and written THROUGH to its final target; the cap bounds a loop without being stricter than the readlink -f it replaced" # portability-lint-allow: the replaced construct NAMED in a diagnostic string, not an invocation
+  else
+    bad "mold/symlink: a 35-link openable chain was not written through (still-link=$([ -L "$sbAC/.cargo/config.toml" ] && echo yes || echo no) begin=$(count_begin "$sbAC/chain/final.toml") user-line=$(grep -c 'retry = 23' "$sbAC/chain/final.toml"))"
+  fi
+else
+  skip "mold/symlink: 35-link chain case — this host could not provide an OPENABLE 35-link chain (built $ac_built of 35 links; deepest-is-symlink=$([ -L "$ac_prev" ] && echo yes || echo no); readable=$([ -n "$(head -1 "$ac_prev" 2>/dev/null)" ] && echo yes || echo no)), so the subject does not exist — a shorter chain is NOT silently substituted"
+fi
+
 # --- 7. git push credentials (issue #2942) ---------------------------------
 # `gh` auth and `git` auth are SEPARATE credential paths: an authenticated gh CLI is
 # NOT evidence that a raw `git push` can authenticate, and scripts/flow/claim.sh +
@@ -1691,7 +2097,18 @@ if ! printf '%s' "$out7pk" | grep -q 'gh auth setup-git' \
   ok "push: a failed cleanup attributes NO cause and gives no credential advice — it reports the observation"
 else
   bad "push: an unsupportable cause (or credential advice) was attached to a failed cleanup"
-  push_plain "$out7pk" | grep -E 'CLAIM:|cause|setup-git' | head -4
+  # PRINT THE EVIDENCE THIS ASSERTION TURNS ON, which is FOUR separate conditions — three
+  # negative and one positive. The old diagnostic grepped `CLAIM:|cause|setup-git`, which
+  # covers only two of them, so an intermittent failure caused by `--fix-credentials` or
+  # `ref-deletion policy` appearing printed a line that looked entirely correct and named
+  # nothing (measured: two occurrences on #3756, neither attributable from the output).
+  # Same rule as #3758 nit 7, one case over.
+  printf '     which condition failed: setup-git=%s fix-credentials=%s deletion-policy=%s no-cause-attributed=%s\n' \
+    "$(printf '%s' "$out7pk" | grep -c 'gh auth setup-git')" \
+    "$(printf '%s' "$out7pk" | grep -c -- '--fix-credentials')" \
+    "$(printf '%s' "$out7pk" | grep -ci 'ref-deletion policy')" \
+    "$(push_plain "$out7pk" | grep -c 'no cause is attributed')"
+  push_plain "$out7pk" | grep -nE 'CLAIM:|cause|setup-git|--fix-credentials|ref-deletion policy' | head -8
 fi
 # The verdict must come from claim.sh's ANCHORED verdict line AND its exit status, not
 # from a substring anywhere in the captured stream. A claim.sh that prints the token in
@@ -2702,61 +3119,85 @@ MUT
   fi
   return 0
 }
+# THE RUNAWAY BOUND IS RESOLVED, NOT ASSUMED (#3756 roborev round 4). `timeout(1)` is not on
+# stock macOS — which is the platform class this whole file's portability work is about — so an
+# unguarded `timeout -s KILL 300` here would fail for the HARNESS's reason on exactly the hosts
+# the suite exists to protect. Resolve once, try the coreutils `gtimeout` spelling too, and
+# degrade to an UNBOUNDED run when neither exists: the bound is a runaway guard, not the property
+# under test, and losing it is better than a case that cannot run. Same `${var:+…}` idiom the
+# gate-pin cases already use for their own bound.
+NOTIFY_TIMEOUT_BIN=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
 runnotifyroot() { # runnotifyroot <dir> [env assignments...]
   local dir="$1"; shift
   env PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" "$@" \
-    timeout -s KILL 300 "$PIN_BS" "$dir/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1
+    "$NOTIFY_TIMEOUT_BIN" -s KILL 300 \
+    "$PIN_BS" "$dir/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1
 }
 
-# (b) POSITIVE twin: a healthy wrapper must be reported VERIFIED.
-goodroot="$tmp/notify-good"
-if mknotifyroot "$goodroot" good; then
-  good_out=$(runnotifyroot "$goodroot" CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t')
-  if printf '%s' "$good_out" | grep -q 'notify capability verified' \
-     && ! printf '%s' "$good_out" | grep -q 'notify self-test FAILED'; then
-    ok "notify capability: a HEALTHY wrapper is reported verified"
+# THESE CASES REQUIRE A BOUNDED RUNNER, AND SKIP LOUDLY WITHOUT ONE (#3756 roborev round 12).
+# An earlier revision degraded to an UNBOUNDED run when neither `timeout` nor `gtimeout` existed
+# (stock macOS), reasoning that the bound is a runaway guard rather than the property under test.
+# That trade is wrong HERE: this file runs in the gate's MANDATORY `tooling-tests` component, so a
+# hang regression in the code under test would wedge the component — and the whole gate — with no
+# verdict, for as long as the box stays up. A verdict-less stall is strictly worse than a declared
+# coverage loss, and the skip is COUNTED and printed in the tally, so the reduction is visible
+# rather than silent. Every Linux lane and every CI runner has timeout(1), so this fires only where
+# the alternative was the wedge.
+if [ -n "$NOTIFY_TIMEOUT_BIN" ]; then
+  # (b) POSITIVE twin: a healthy wrapper must be reported VERIFIED.
+  goodroot="$tmp/notify-good"
+  if mknotifyroot "$goodroot" good; then
+    good_out=$(runnotifyroot "$goodroot" CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t')
+    if printf '%s' "$good_out" | grep -q 'notify capability verified' \
+       && ! printf '%s' "$good_out" | grep -q 'notify self-test FAILED'; then
+      ok "notify capability: a HEALTHY wrapper is reported verified"
+    else
+      bad "notify capability: healthy wrapper was not reported verified"
+      printf '%s\n' "$good_out" | grep -i 'notify' | head -4
+    fi
   else
-    bad "notify capability: healthy wrapper was not reported verified"
-    printf '%s\n' "$good_out" | grep -i 'notify' | head -4
+    bad "notify capability: could not stage the healthy wrapper tree"
   fi
-else
-  bad "notify capability: could not stage the healthy wrapper tree"
-fi
 
-# (a) NEGATIVE: a genuinely broken wrapper must be reported FAILED, and must NOT be
-#     reported verified. This is the assertion the auditor's mutation defeats.
-badroot="$tmp/notify-broken"
-if mknotifyroot "$badroot" broken; then
-  bad_out=$(runnotifyroot "$badroot" CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t')
-  if printf '%s' "$bad_out" | grep -q 'notify self-test FAILED' \
-     && ! printf '%s' "$bad_out" | grep -q 'notify capability verified'; then
-    ok "notify capability: a BROKEN wrapper is reported FAILED and never verified"
+  # (a) NEGATIVE: a genuinely broken wrapper must be reported FAILED, and must NOT be
+  #     reported verified. This is the assertion the auditor's mutation defeats.
+  badroot="$tmp/notify-broken"
+  if mknotifyroot "$badroot" broken; then
+    bad_out=$(runnotifyroot "$badroot" CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t')
+    if printf '%s' "$bad_out" | grep -q 'notify self-test FAILED' \
+       && ! printf '%s' "$bad_out" | grep -q 'notify capability verified'; then
+      ok "notify capability: a BROKEN wrapper is reported FAILED and never verified"
+    else
+      bad "notify capability: broken wrapper was not surfaced (probe verdict ignored?)"
+      printf '%s\n' "$bad_out" | grep -i 'notify' | head -4
+    fi
   else
-    bad "notify capability: broken wrapper was not surfaced (probe verdict ignored?)"
-    printf '%s\n' "$bad_out" | grep -i 'notify' | head -4
+    bad "notify capability: could not stage the broken wrapper tree (mutation did not apply)"
   fi
-else
-  bad "notify capability: could not stage the broken wrapper tree (mutation did not apply)"
-fi
 
-# (c) NO TARGET: never exercised on a fleet box, because the ambient
-#     CODEX_NOTIFY_WEBHOOK always takes the other branch. Assert the warning, the
-#     EXACT export text a reader is told to add, and rc 0 (bootstrap is advisory).
-if mknotifyroot "$tmp/notify-notarget" good; then
-  notarget_out=$(runnotifyroot "$tmp/notify-notarget" \
-    CODEX_NOTIFY_WEBHOOK= CQLITE_NOTIFY_WEBHOOK= CODEX_NOTIFY_NTFY_TOPIC= CQLITE_NOTIFY_TOPIC=)
-  notarget_rc=$?
-  if [ "$notarget_rc" -eq 0 ] \
-     && printf '%s' "$notarget_out" | grep -q 'no notify target configured' \
-     && printf '%s' "$notarget_out" | grep -q 'CODEX_NOTIFY_WEBHOOK=https://ntfy.sh/<your-topic>' \
-     && printf '%s' "$notarget_out" | grep -q 'silent no-ops on this machine'; then
-    ok "notify no-target: warns, prints the exact export line, and still exits 0"
+  # (c) NO TARGET: never exercised on a fleet box, because the ambient
+  #     CODEX_NOTIFY_WEBHOOK always takes the other branch. Assert the warning, the
+  #     EXACT export text a reader is told to add, and rc 0 (bootstrap is advisory).
+  if mknotifyroot "$tmp/notify-notarget" good; then
+    notarget_out=$(runnotifyroot "$tmp/notify-notarget" \
+      CODEX_NOTIFY_WEBHOOK= CQLITE_NOTIFY_WEBHOOK= CODEX_NOTIFY_NTFY_TOPIC= CQLITE_NOTIFY_TOPIC=)
+    notarget_rc=$?
+    if [ "$notarget_rc" -eq 0 ] \
+       && printf '%s' "$notarget_out" | grep -q 'no notify target configured' \
+       && printf '%s' "$notarget_out" | grep -q 'CODEX_NOTIFY_WEBHOOK=https://ntfy.sh/<your-topic>' \
+       && printf '%s' "$notarget_out" | grep -q 'silent no-ops on this machine'; then
+      ok "notify no-target: warns, prints the exact export line, and still exits 0"
+    else
+      bad "notify no-target case (rc=$notarget_rc)"
+      printf '%s\n' "$notarget_out" | grep -i 'notify' | head -4
+    fi
   else
-    bad "notify no-target case (rc=$notarget_rc)"
-    printf '%s\n' "$notarget_out" | grep -i 'notify' | head -4
+    bad "notify no-target: could not stage the tree"
   fi
 else
-  bad "notify no-target: could not stage the tree"
+  skip "notify capability: the HEALTHY-wrapper case — no timeout(1)/gtimeout on this host, so bootstrap cannot be run under a deadline and an unbounded run could wedge the mandatory tooling-tests component"
+  skip "notify capability: the BROKEN-wrapper case — same reason (no bounded runner available)"
+  skip "notify no-target: the no-target case — same reason (no bounded runner available)"
 fi
 
 # --- 11. Single-gate pin: the VERDICT is a session PROBE, not a file read (#3414) ---
@@ -3696,7 +4137,10 @@ FAKEGATE
     # diagnostic must carry the evidence its own assertion turns on (#3758 nit 7).
     cat "$pin_home_aj/.bashrc"
     printf '%s\n' "$out_aj" | grep -iE 'CREATED|not touching|NOT persisted|gate-pin:' | head -8
-    echo "  env-file: mode=$(stat -c %a "$envf_aj" 2>/dev/null) content=[$(cat "$envf_aj" 2>/dev/null | tr '\n' '|')]"
+    # GNU `stat -c` FIRST, BSD `stat -f` fallback: this is a failure diagnostic, and a
+    # diagnostic that prints an empty mode on the one platform class the suite exists to
+    # protect (#3756) is worse than none — it is what stops the next reader looking.
+    echo "  env-file: mode=$(stat -c %a "$envf_aj" 2>/dev/null || stat -f %Lp "$envf_aj" 2>/dev/null) content=[$(cat "$envf_aj" 2>/dev/null | tr '\n' '|')]" # portability-lint-allow: GNU `stat -c` PAIRED with the BSD `stat -f` fallback on the same line
   fi
 
   # 11ak. THE SEAM MUST NOT STEER A ROOT-PRIVILEGED WRITE (issue #3414 roborev round 5,

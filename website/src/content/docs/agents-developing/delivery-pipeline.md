@@ -469,6 +469,22 @@ It claims nothing about lanes that never stamped (a lane run with `CLAIM_CMD=""`
 nothing about other machines — a PID is only checkable where it runs, so **run it ON the suspect
 box**.
 
+**AND ON A SUPERVISOR-LESS FLEET IT ANSWERED ABOUT THE EMPTY SET — supervisor fleets only, DESCOPED
+by owner ruling 2026-09-01 on #3548 (option C; completes #3393).** The subject set is
+`refs/lane-claims/*` plus the legacy `refs/machine-claims/*`, and the only in-tree CALLER that creates
+or refreshes either is `worker-supervisor.sh` (`stamp` is a public subcommand and can be invoked directly). This fleet runs `/drive-issue` lanes, so when #3548 was measured the command
+had no subject and exited 1 — persisted or manually `stamp`ed refs can still produce rows, and either
+way **1 means "nothing was reported", never a clean bill of health.** The two *populated* namespaces
+are deliberately not read, both refusals measured: `refs/claims/issue-<N>` records the transient
+claiming shell's pid (dead while its lane runs), and `refs/heartbeats/<machine>` is single-slot per
+machine. **AC4** survives as a counterfactual: were a later change ever to read a non-refreshing
+carrier, a stale pid there must abstain rather than yield `DEAD-*`.
+
+**Everything else is stated once, not here.** What lane liveness on this fleet actually rests on, and
+both board signatures — neither of which is a verdict — live in
+`docs/development/fleet-runbook.md` → *Lane liveness on a supervisor-less `/drive-issue` fleet*. Seven
+review rounds on #3548 were propagation failures of duplicated prose, so nothing restates it.
+
 A suspected dead lane still has a diagnostic **order, and it matters** — full procedure in
 `docs/development/fleet-runbook.md`. The one line worth memorising: when a box accepts TCP but sends no SSH
 banner from inside the VPC, **check `dmesg` for an OOM kill before concluding the instance is broken**.
