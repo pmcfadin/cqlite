@@ -364,7 +364,10 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    `--c-verdict <path>` (a captured `review-stage.sh verdict … > <path>` line) only where AUTO
    cannot locate the stage — and capture the **`c`** stage's own line: the assert validates the
    WHOLE grammar and compares the stage KIND by string equality, so a sibling stage's `PASS`
-   (a `rust-review` verdict, say) or a truncated capture is refused as ungrammatical.
+   (a `rust-review` verdict, say) or a truncated capture is refused as ungrammatical. It measures
+   each mandatory field's VALUE too, not only that the key is there exactly once — so capture the
+   line WHOLE (redirect the command; never hand-edit it), because a bare `report=` or an emptied
+   `elapsed=`/`deadline=`/`agent=` is refused by name.
    The third argument is **REQUIRED** (an optional one would leave the convention
    honour-system): it is the `AGENT_GATE_SUMMARY_FILE` you already hold from step 1's full
    gate. A `--lite` summary is never acceptable anywhere, and a `--delta` summary is never

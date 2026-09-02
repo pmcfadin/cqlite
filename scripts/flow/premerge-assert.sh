@@ -305,6 +305,9 @@ usage() {
   printf '                              the previous file is no longer read (#3751).\n' >&2
   printf '         --c-verdict <path>   a file holding a captured verdict line, i.e.\n' >&2
   printf '                              scripts/flow/review-stage.sh verdict c --issue <N> > <path>\n' >&2
+  printf '                              Capture it WHOLE: the stage KIND, every mandatory key\n' >&2
+  printf '                              AND each key VALUE are validated, so a bare report= or\n' >&2
+  printf '                              an emptied elapsed=/deadline=/agent= is refused (#3751).\n' >&2
 }
 
 # --- ARGUMENTS: POSITIONALS PLUS NAMED REQUIRED FLAGS (#3751/#3752) ----------

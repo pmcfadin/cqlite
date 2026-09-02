@@ -1191,7 +1191,14 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   ignored-but-symlinked report clobbered a TRACKED file and reported `OPEN-OK` (measured); the
   writes themselves go through an UNPREDICTABLE same-directory temporary file (`mktemp -u`)
   CREATED AND OPENED IN ONE STEP under `set -C`, i.e. `O_CREAT|O_EXCL`, then written through the
-  ALREADY-OPEN DESCRIPTOR and `mv -f`'d into place (#3751 round 3, G3). The first version used a
+  ALREADY-OPEN DESCRIPTOR and `mv -f -T`'d into place (#3751 round 3, G3; the `-T` is round 7's L2 —
+  a plain `mv -f` does NOT promise to replace the destination NAME, so a `dest` that is or BECOMES a
+  directory or a symlink-to-one receives the temp file INSIDE it and `mv` **EXITS 0**, landing the
+  write outside the verified path while the tool reports success. `-T` is **REQUIRED, not
+  attempted** — no fallback, since a fallback restores the defect exactly where it cannot be
+  detected — which makes GNU coreutils a stated HOST PRECONDITION of `review-stage.sh`; a stock
+  BSD/macOS `mv` fails the option parse, moves nothing, and every write REFUSES, naming the missing
+  option). The first version used a
   PREDICTABLE `.<name>.tmp.$$`, validated it and then REOPENED it BY NAME — a TOCTOU a PEER LANE
   could win (every lane here runs as one user under a shared HOME), making the write clobber a
   planted symlink's target while `mv` installed the link as the report and reported success. The
@@ -1834,8 +1841,12 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   local artifact to THIS PR transitively, and correct input is unaffected (the closer pushes, then
   asserts, in the lane it just certified). Second binding: the verdict line is validated against its
   WHOLE documented grammar — `REVIEW-STAGE: <kind> RESULT: <token> elapsed=<n> deadline=<n>
-  agent=<t> report=<abs>` — with the **stage KIND compared by STRING EQUALITY** and each mandatory
-  key required EXACTLY ONCE. "Somewhere on this line it says `RESULT: PASS`" is not a verdict about
+  agent=<t> report=<abs>` — with the **stage KIND compared by STRING EQUALITY**, each mandatory
+  key required EXACTLY ONCE, **and each one's VALUE measured** (round 7's L3: the census only
+  COUNTED, so a `PASS` line ending in a BARE `report=` was ACCEPTED — "counted, not measured". The
+  permitted set is DERIVED FROM WHAT THE EMITTER PRODUCES, which is what stops it redding on correct
+  input: digits or `unknown` for the two clocks, non-empty for `agent`/`report`, so round 6's honest
+  `unknown`/`unresolved` and a legitimate `deadline=0` all still pass). "Somewhere on this line it says `RESULT: PASS`" is not a verdict about
   C: measured on #3751's own branch, a sibling `code-review` stage's PASS line satisfied
   `--c-verdict`, and a truncated capture with no `elapsed=`/`agent=`/`report=` did too. Only `PASS`
   and `AUTHOR-PERFORMED`

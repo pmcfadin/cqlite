@@ -190,14 +190,48 @@ Three further declared limits of the mechanism itself:
   control case, since a boundary that mangles legitimate text is one people route around. Both
   boundaries are DISPLAY-ONLY: every decision is made on the RAW value first, so neither can change
   a verdict.
+- **THE BOUNDARY IS NOW STRUCTURALLY UNAVOIDABLE, BECAUSE THREE ROUNDS FOUND A NEW SITE EACH
+  (round 7, L1).** Round 2's S1 (the cause), round 5's J3 (`one_line`'s incomplete map plus two
+  premerge print sites) and round 7's L1 (`C_SOURCE` on the SUCCESS line, plus `deadline=`/`agent=`/
+  `spawned-at=` read out of the stage record) are one class; every fix was right and the class kept
+  regenerating, which is the standing signal to mechanize rather than patch a fourth time —
+  CLAUDE.md's rule is to neutralise at ONE boundary and NEVER per interpolation site, "because a
+  per-site escape is a list to keep complete". `scripts/tests/lib/emit-boundary-scan.sh` asserts
+  that on every line of the operator-facing channel each interpolated value is either ROUTED through
+  a boundary or NAMED IN AN ALLOWLIST WITH ITS REASON, so a new interpolation cannot be added
+  silently. Both suites run it, each with a POSITIVE CONTROL that plants a bypass in a throwaway
+  copy and requires the guard to red AND to name the planted symbol. **It DECLARES its scope on
+  every run**, and what it does not cover is part of that output: positional parameters (not
+  resolvable to their call sites), `review-stage.sh`'s record/report FILE writers (a different
+  channel, whose boundary is `sanitize_field` on the write side) and `die_usage` (invoker argv to the
+  invoker's own terminal), and whether a boundary function is CORRECT — it is a ROUTING check, and
+  the behaviour is pinned behaviourally elsewhere. An allowlist entry is a CLAIM with a stated
+  reason, not a measurement, in the shape #1716's `tools/` disposition guard checks that a
+  disposition was RECORDED rather than that it is true.
+- **Round 7 also made `status`'s `past-deadline=` affirmative.** It guarded with a test for the
+  literal `unknown`, so any OTHER non-numeric value read from the record reached
+  `[ "$elapsed" -gt "$deadline" ]`, which printed bash's own `integer expression expected` onto
+  stderr — a raw diagnostic inside a block every line of which is supposed to carry the
+  `REVIEW-STAGE: ` anchor — and then took the permissive `past-deadline=no` branch, an answer derived
+  from a comparison that never ran. Only DIGITS are compared now; everything else is
+  `past-deadline=unknown`.
 - **The deadline is advisory and changes nothing.** A late report is still a report; a stage
   silent inside its deadline is still `NOT-RUN`. Letting a clock decide would add a clock to a
   question already answerable from content, and would fail a slow-but-real review.
 - **With an explicit `--c-verdict <path>`, `premerge-assert.sh` verifies the verdict's grammar
   and token, not that the stage belongs to THIS issue.** The grammar check is the FULL emitted
   line — the stage KIND must be `c`, and `elapsed=`/`deadline=`/`agent=`/`report=` must each
-  appear exactly once — so a sibling stage's `PASS` line (a `rust-review` verdict, say) can no
-  longer certify C; what it cannot check is the ISSUE, because the line carries no sha. The
+  appear exactly once **AND CARRY A USABLE VALUE** (round 7, L3: the census only COUNTED them, so a
+  `PASS` line ending in a BARE `report=`, or carrying an empty `elapsed=`/`deadline=`/`agent=`, was
+  ACCEPTED and certified a merge — "counted, not measured", since a count is an affirmative
+  measurement of PRESENCE and of nothing else). The permitted set is **DERIVED FROM WHAT THE EMITTER
+  CAN PRODUCE**, which is what stops it redding on correct input: `elapsed`/`deadline` are decimal
+  digits (**`0` included**, from `--deadline-secs 0`) or the literal `unknown`, and `agent`/`report`
+  need only be NON-EMPTY — which admits `unknown` and `unresolved`, the honest not-measured values
+  round 6's K1 emits. A charset is deliberately NOT asserted for `agent`/`report`: awk splits fields
+  on whitespace, so a value containing a space never arrives whole at that reader, and asserting a
+  charset would be a claim about a shape it cannot see. So a sibling stage's `PASS` line (a
+  `rust-review` verdict, say) can no longer certify C; what it cannot check is the ISSUE, because the line carries no sha. The
   report path is printed on the success line so a human can see which stage answered. `AUTO` is
   the intended form because its binding is MECHANICAL: it locates the stage in this worktree,
   refuses two stage records as ambiguous, and applies **TWO independent bindings, because they
@@ -349,8 +383,27 @@ is REFUSED, never followed (#3751 round 1)** — `check-ignore` judges a LEXICAL
 follows links, so an ignored-but-symlinked report clobbered a TRACKED file and reported `OPEN-OK`
 (measured); the writes themselves go through an UNPREDICTABLE same-directory temporary file
 (`mktemp -u`) CREATED AND OPENED IN ONE STEP under `set -C` — i.e. `O_CREAT|O_EXCL` — then written
-through the ALREADY-OPEN DESCRIPTOR and `mv -f`'d into place (#3751 round 3, G3), so a concurrent
-reader never sees a half-written `result:` line. **The first version was a TOCTOU**: the temp path
+through the ALREADY-OPEN DESCRIPTOR and `mv -f -T`'d into place (#3751 round 3, G3; the `-T` is
+round 7's L2), so a concurrent reader never sees a half-written `result:` line.
+
+**GNU-COREUTILS DEPENDENCY, STATED EXACTLY (#3751 round 7, L2): the rename REQUIRES `mv -T` /
+`--no-target-directory`, which a stock BSD/macOS `mv` does not have.** A plain `mv -f SRC DEST` does
+not promise to replace the NAME `DEST`: if `DEST` is — or BECOMES — a directory, or a symlink to one,
+`mv` puts the temporary file INSIDE it and **EXITS 0**, so the write lands outside the verified path
+while the tool reports success (measured: `mv -f` → exit 0 with the temp inside `dest/`; `mv -f -T` →
+refused, source left in place). `-T` closes the LEAF for a second reason too — `rename(2)` does not
+follow a symlink for the destination. It is **REQUIRED, NOT ATTEMPTED**: there is deliberately no
+fallback to a plain `mv -f`, which would restore the defect on exactly the hosts that cannot detect
+it, and no probe is needed for safety because an `mv` without `-T` fails the option parse, moves
+nothing, and the write REFUSES. A three-valued probe (`yes`/`no`/`unknown`, answered by PERFORMING
+`mv -T` on two throwaway files, never by scanning `--help` text) runs ONLY on that refusal path, to
+NAME the cause — "this host's mv has no `-T`" and "the rename was refused" are the same exit status
+and two completely different operator actions. `review-stage.sh`'s CONSTRAINTS block records the
+precondition, and its "macOS bash 3.2 compatible" claim is narrowed to LANGUAGE compatibility
+accordingly. **`-T` is DEFENCE IN DEPTH for a TOCTOU window**: the symlink and
+not-a-regular-file checks already refuse a PRE-PLANTED directory or link, so what `-T` covers is the
+window between those checks and the rename — which is why its coverage is structural plus a measured
+host property plus a PATH-shimmed no-`-T` host, and not an induced race. **The first version was a TOCTOU**: the temp path
 was a PREDICTABLE `.<name>.tmp.$$`, validated and then REOPENED BY NAME, and a PEER LANE could
 plant a symlink in that window — every lane on this box runs as one user under a shared HOME, so
 this is a NON-INVOKER route and therefore a defect — making the write clobber the link's target

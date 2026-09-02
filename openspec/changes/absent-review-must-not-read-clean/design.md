@@ -88,7 +88,13 @@ review-stage.sh open <kind> --issue <N> --agent <type> [--deadline-secs <S>] [--
   (#3751 round 1, F5) — `check-ignore` judges a LEXICAL path while a write follows links. **And the
   TEMPORARY file the write goes through is unpredictable and created exclusively** (#3751 round 3, G3):
   the name comes from `mktemp -u` and the file is created and opened in ONE `O_CREAT|O_EXCL` step
-  (`set -C`), then written through the held descriptor and `mv -f`'d into place. The first version used
+  (`set -C`), then written through the held descriptor and `mv -f -T`'d into place. **The `-T` is
+  load-bearing and is REQUIRED, not attempted** (round 7, L2): a plain `mv -f` does not promise to
+  replace the destination NAME, so a `dest` that is or BECOMES a directory (or a symlink to one)
+  receives the temporary file INSIDE it while `mv` EXITS 0 — the write lands outside the verified path
+  and the tool reports success. There is no fallback, which makes GNU coreutils a stated host
+  precondition; a `mv` without `-T` fails the option parse, moves nothing, and the write REFUSES,
+  naming the missing option. The first version used
   a predictable `.<name>.tmp.$$`, validated it and reopened it BY NAME — a TOCTOU a PEER LANE could win,
   since every lane here runs as one user under a shared HOME, so it was a non-invoker route and a
   defect. The window is REMOVED rather than narrowed: a check placed after a harmful effect can only

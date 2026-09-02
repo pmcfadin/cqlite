@@ -145,8 +145,15 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
 - **WHEN** `open` or `record-author-performed` writes a record
 - **THEN** the write goes through a same-directory temporary file whose name is UNPREDICTABLE (not
   derivable from the record path plus a pid), created and opened in ONE `O_CREAT|O_EXCL` step, written
-  through the ALREADY-OPEN descriptor, and `mv -f`'d into place — so no path is re-resolved between
+  through the ALREADY-OPEN descriptor, and `mv -f -T`'d into place — so no path is re-resolved between
   validation and writing, and a symlink planted at the temporary name is REFUSED rather than followed
+- **AND** the rename SHALL carry `-T` / `--no-target-directory`, so it replaces the EXACT destination
+  NAME: a plain `mv -f` puts the temporary file INSIDE a destination that is (or becomes) a directory
+  or a symlink-to-one and EXITS 0, landing the write outside the verified path while reporting success
+- **AND** `-T` SHALL be REQUIRED, never attempted: there is NO fallback to a plain `mv -f`, and a host
+  whose `mv` lacks it gets a NAMED refusal from every write with NOTHING written, the missing option
+  named — a fallback would restore the defect on exactly the hosts that cannot detect it. The GNU
+  coreutils dependency is a stated HOST PRECONDITION of the tool
 - **AND** the temporary path is verified gitignored BEFORE it is created, on the exact name that is then
   created, so the verification has no time-of-check/time-of-use gap of its own
 - **AND** the failure to create one EXCLUSIVELY is a NAMED refusal (`reason=tempfile-not-created`) with
@@ -242,12 +249,37 @@ any failure to measure SHALL be `UNMEASURED` and TREATED AS REQUIRED.
   a verdict
 - **AND** a comment or claim about that boundary states exactly what it neutralises: asserting more
   than the mechanism delivers is itself a defect, because it is what stops the next reader checking
+- **AND** the boundary covers EVERY data value on an emitted line, the SUCCESS path included — not
+  only the ones a reviewer has named so far: `C_SOURCE` on `PREMERGE: C-VERDICT`, and `deadline=`/
+  `agent=`/`spawned-at=` read out of the stage record, were three further sites of the same class
+- **AND** that completeness SHALL be asserted STRUCTURALLY, not site by site: a committed scanner
+  requires every interpolated value on the operator-facing channel to be either ROUTED through a
+  boundary or NAMED IN AN ALLOWLIST WITH ITS REASON, DECLARES its own scope and subject count at run
+  time, and is exercised by a POSITIVE CONTROL that plants a bypass in a throwaway copy and requires
+  the scanner to red AND to name the planted symbol — because a scanner that flags nothing exits
+  exactly as a clean one does
+
+#### Scenario: an unmeasurable clock is not a permissive answer
+- **WHEN** `status` reads an `elapsed` or `deadline` value that is not a decimal number of seconds
+- **THEN** it reports `past-deadline=unknown` rather than comparing them — a two-valued guard testing
+  only for the literal `unknown` let any other non-numeric value reach an integer comparison, which
+  emitted a raw shell diagnostic into the anchored output block and then took the permissive branch,
+  an answer derived from a comparison that never ran
 
 #### Scenario: a sibling stage's PASS cannot certify C
 - **WHEN** the verdict line names a stage kind other than `c`, or omits any of
   `elapsed=`/`deadline=`/`agent=`/`report=`, or carries one of them twice
 - **THEN** `premerge-assert.sh` REFUSES as ungrammatical, naming what was wrong — the stage kind is
   compared by STRING EQUALITY and each mandatory key must appear EXACTLY ONCE
+- **AND** each mandatory key's VALUE SHALL be measured, not merely counted: a key that is PRESENT but
+  carries nothing (a bare `report=`, an empty `elapsed=`/`deadline=`/`agent=`) is REFUSED naming the
+  field, because a count is an affirmative measurement of PRESENCE and of nothing else
+- **AND** the permitted value set SHALL be DERIVED FROM WHAT THE EMITTER CAN PRODUCE, measured by
+  running `review-stage.sh verdict` through EVERY state it has — so `elapsed`/`deadline` admit decimal
+  digits INCLUDING `0` or the literal `unknown`, and `agent`/`report` need only be non-empty, which
+  admits the honest `unknown`/`unresolved` values an unreadable stage record yields. A validator
+  written from what looks reasonable would REFUSE three legitimate emitter outputs, and a guard that
+  reds on correct input is the guard agents learn to waive
 
 ### Requirement: A hand-performed substitute is recorded as author-performed, never as clean
 
