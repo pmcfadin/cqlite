@@ -333,8 +333,9 @@ echo "=== section 6: the two DOCUMENTED text-completion grammars, run against re
 # string did not behave as documented, so they are asserted BEHAVIOURALLY here rather
 # than being trusted.
 #
-#   RECORD grammar (full / --lite / --delta): terminal ⇔ PASS or FAIL.
-#   ONLY   grammar (--only):                  terminal ⇔ PASS, FAIL or PARTIAL.
+#   RECORD grammar (full / --lite):           terminal ⇔ PASS or FAIL.
+#   ONLY   grammar (--only <component>):      terminal ⇔ PASS, FAIL or PARTIAL.
+#   DELTA  grammar (--delta <anchor>):        + ERROR or REFUSED (see §15).
 #
 # Both are ANCHORED and token-terminated. An unanchored `RESULT: (PASS|FAIL)` matches
 # `RESULT: PASSENGER`, and an unanchored `…|PARTIAL)` matches `RESULT: PARTIALLY` — the
@@ -867,16 +868,26 @@ fi
 # `process_improvements.md:698` (written by THIS change) and this very file's own line 336.
 #
 # NOT WIDENED TO ALL OF scripts/, and that is measured rather than assumed:
-# `scripts/gate-liveness.sh:565` reads "The three dialects are the gate's own
-# (full / --lite / --delta)" — about the three summary MARKER dialects, not the completion
-# grammars — and it MATCHES this needle under the same flatten pipeline. Scanning it would red
-# the lane on correct input, i.e. the guard agents learn to waive. If the needle is ever made
-# to distinguish those two uses, widen then, not before.
+# `scripts/gate-liveness.sh:565` names the three summary MARKER dialects — NOT the completion
+# grammars — using this needle's exact wording, so it MATCHES under the same flatten pipeline.
+# Scanning it would red the lane on correct input, i.e. the guard agents learn to waive. If the
+# needle is ever made to distinguish those two uses, widen then, not before.
+#
+# AND THIS COMMENT DESCRIBES THAT PHRASE RATHER THAN QUOTING IT, which is not fussiness: the
+# first draft quoted it verbatim and 15.12 MATCHED ITS OWN JUSTIFICATION — a false FAIL from the
+# guard reading its own prose. Excluding this file would have blinded the case to line 336, the
+# very instance it was widened for, so the prose gives way instead. Same discipline as #3312's
+# rule that no diagnostic may reproduce any part of the marker it enforces.
 #
 # DECLARED LIMIT: the needle is a SINGLE FIXED PHRASE, so a REWORDED attribution ("for full,
 # `--lite` and `--delta`") escapes it. The scanned roots carry no such variant today — checked
 # — but this guard catches the phrase, not the class, and saying so is worth more than
 # implying the class is closed.
+# THE NEEDLE IS ASSEMBLED FROM ITS PARTS, because a guard that spells its own needle MATCHES
+# ITSELF: with the literal inline, 15.12 red on THIS file no matter how clean every site was —
+# and excluding this file would have blinded the case to line 336, the instance it was widened
+# for. The repo's existing idiom (the roborev harness splits its needle for the same reason).
+_needle="full/--lite/--del""ta"
 _scope_sites=$(grep -rlE 'RESULT: \(PASS\|FAIL(\|PARTIAL)?(\|ERROR\|REFUSED)?\)' \
            "$REPO_ROOT/CLAUDE.md" "$REPO_ROOT/process_improvements.md" \
            "$REPO_ROOT/docs" "$REPO_ROOT/website/src/content/docs" \
@@ -885,7 +896,7 @@ _scope_sites=$(grep -rlE 'RESULT: \(PASS\|FAIL(\|PARTIAL)?(\|ERROR\|REFUSED)?\)'
 _scoped=""
 for _f in $_scope_sites; do
   if tr -s '[:space:]' ' ' < "$_f" | tr -d '`*' | sed 's| */ *|/|g' \
-     | grep -qF 'full/--lite/--delta'; then
+     | grep -qF -- "$_needle"; then
     _scoped="$_scoped ${_f#"$REPO_ROOT"/}"
   fi
 done

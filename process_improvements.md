@@ -695,11 +695,16 @@ issues have landed). Keep entries short so a future reader can re-run the measur
       looks like a mysterious instant FAIL/INCOMPLETE rather than a
       still-running gate. **Standing lesson:** poll for a TERMINAL verdict
       only — `grep -qE '^RESULT: (PASS|FAIL)'` — never the bare `RESULT:`
-      substring. **[Corrected by #3750:** that string is the RECORD grammar
-      (full/`--lite`/`--delta`) and it SPINS ON GREEN for an `--only` run, which
-      demotes success to `RESULT: PARTIAL`. Use the exit status (`3`), or
+      substring. **[Corrected by #3750:** that string is the RECORD grammar,
+      which is for a full gate and `--lite` ONLY — there are THREE grammars, one
+      per run mode, and using this one anywhere else spins forever on a terminal
+      outcome. It SPINS ON GREEN for an `--only` run, which demotes success to
+      `RESULT: PARTIAL`: use the exit status (`3`), or
       `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`, and read the
-      component's verdict separately from its own line.**] Worth fixing in the CLAUDE.md gate-invocation recipe and the
+      component's verdict separately from its own line. And it spins on a
+      **`--delta`** re-cert, the only mode that can terminate `ERROR` or
+      `REFUSED`, which needs
+      `grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'`.**] Worth fixing in the CLAUDE.md gate-invocation recipe and the
       `flow-closer` prompt template, since every closer inherits the wrong
       predicate from the docs. Found by the #2043 closer, which caught it
       itself and switched predicates rather than reporting a bogus verdict.

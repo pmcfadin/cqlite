@@ -22,8 +22,10 @@ read only the summary file — never `gate.log`.
 - **`INCOMPLETE` is a liveness placeholder, not a verdict (#3041).** The startup sentinel puts
   `RESULT: INCOMPLETE (gate did not finish)` in the summary file before any component runs (a queued
   gate already has one), so any completion poll must be
-  the **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"`, never a
-  bare `grep -q` on the bare `RESULT:` token and never an unanchored form (which matches `RESULT: PASSENGER`).
+  the **RECORD grammar** `grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"` — for a
+  full gate or `--lite` ONLY, and never a bare `grep -q` on the bare `RESULT:` token nor an unanchored form
+  (which matches `RESULT: PASSENGER`). **`--only` and `--delta` each need their OWN grammar** — see the two
+  bullets below; using this one on either spins forever on a terminal outcome (#3750).
 - **An `--only <component>` run needs the OTHER grammar, and its verdict is a SEPARATE read (#3750).** `--only`
   demotes success to `RESULT: PARTIAL`, so the record grammar above spins on green. Completion: **exit status
   `3`** where observable, else `grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)'`. Verdict:

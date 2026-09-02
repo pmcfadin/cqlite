@@ -1074,7 +1074,7 @@ read it:
 > # COMPLETION IS NOT A VERDICT. `PARTIAL` says the run ENDED. Read the component's OWN line separately:
 > bash scripts/gate-component-verdict.sh "$SUM" --mode only --component tooling-tests --run-id <id>
 > # exit 0 PASS / 1 NOT-PASS / 4 COULD-NOT-MEASURE (no verdict available, whatever the reason) /
-> # 64 USAGE. A completed run whose component SKIPped is NOT a pass, and a LITE or DELTA block, or
+> # 64 USAGE. A completed run whose component SKIPped is NOT a pass, and
 > # a LITE or DELTA block is REFUSED (4). A tree-integrity token of FAIL returns NOT-PASS (1) — the
 > # gate declared that run non-certifying, which invalidates every component in the block — while
 > # SKIP/PENDING/absent return 4, since tree stability was then never measured.
