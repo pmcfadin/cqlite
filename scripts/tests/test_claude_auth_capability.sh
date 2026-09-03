@@ -2202,6 +2202,68 @@ else
 fi
 
 # =====================================================================================
+# 36. THE FIVE DOCUMENTED LIMITATIONS MUST BE FINDABLE AT THEIR CODE SITES (#3733).
+#     Under the lead's ruling these are limitations of a REPORT, not defects — but "not a
+#     defect" is only true while a reader can FIND them. A limitation that lives in a
+#     commit message, or in an issue thread, or in one paragraph of a header, is a
+#     limitation the next person rediscovers as a bug and re-fixes; this file's own history
+#     is three rounds of exactly that.
+#     STRUCTURAL, AND DELIBERATELY MODEST. It asserts two things and NEITHER is that the
+#     text is TRUE: that each of the five is marked `LIMITATION <n> of 5` as a COMMENT
+#     somewhere in the library (so `grep` finds it at the code it belongs to, not only in
+#     the header), and that the header INDEX names all five (so a reader who starts at the
+#     top learns the set exists and is closed). Truth is not mechanically checkable here —
+#     the same boundary #1716's tools-crate guard draws, recorded rather than papered over.
+#     `of 5` is part of the marker on purpose: it makes the set CLOSED, so adding a sixth
+#     limitation without renumbering reds this case instead of hiding in the tail.
+# =====================================================================================
+lim_missing=''
+lim_unindexed=''
+# THE HEADER IS CAPTURED ONCE, AND IT IS READ WITHOUT A PIPE. `awk … | grep -q` is the
+# SIGPIPE-under-pipefail trap this repository documents and that the library itself was
+# fixed for: `grep -q` exits on the first match, `awk` then dies 141, and `set -o pipefail`
+# reports the PIPELINE as failed — for a SUCCESSFUL match. Measured while writing this case,
+# and it was INTERMITTENT (limitations 1 and 5 red, 2-4 green, because whether awk had
+# finished writing depended on where the match fell), which is the worst possible shape for
+# a guard. A here-string has no second process to lose a race with.
+lim_hdr=$(awk 'NR>1 && !/^#/ { exit } { print }' "$CAPLIB")
+for lim_n in 1 2 3 4 5; do
+  # A COMMENT, not merely the string: the runtime verdict DETAILS also cite these markers
+  # (that is how an operator gets from a pasted line to the explanation), so a substring
+  # match anywhere would be satisfied by the detail text alone and would assert nothing
+  # about the code site. `#` before the marker on the same line is the discriminator.
+  grep -qE '^[[:space:]]*#.*LIMITATION '"$lim_n"' of 5' "$CAPLIB" || lim_missing="${lim_missing:+$lim_missing }$lim_n"
+  # The header index: a numbered entry in the leading comment block, which is bounded by
+  # the first non-comment line so a match further down the file cannot stand in for it.
+  grep -qE '^#[[:space:]]*'"$lim_n"'\.' <<<"$lim_hdr" || lim_unindexed="${lim_unindexed:+$lim_unindexed }$lim_n"
+done
+if [ -z "$lim_missing" ]; then
+  ok "limitations: all five are marked as comments at their own code sites in the library"
+else
+  bad "limitations: no code-site comment marks LIMITATION(s) $lim_missing of 5 — a reader cannot find them"
+fi
+if [ -z "$lim_unindexed" ]; then
+  ok "limitations: the library header indexes all five, so the set reads as closed"
+else
+  bad "limitations: the header index omits LIMITATION(s) $lim_unindexed of 5"
+fi
+# THE POSITIVE CONTROL, because a scanner built to find something must be shown finding it
+# (and, here, shown NOT finding what it must not): a sixth marker must red the closed-set
+# assertion rather than pass unnoticed. Run against a COPY — this suite never mutates the
+# library it is testing.
+lim_copy="$tmp/caplib-sixth.sh"
+# PREPENDED, not `sed`-substituted: a multi-line replacement needs a backslash-escaped
+# newline in the script and the first draft of this line was an unterminated `s' command,
+# so the control silently measured nothing. `cat` cannot get that wrong.
+{ printf '# LIMITATION 6 of 5: a planted marker\n'; cat "$CAPLIB"; } >"$lim_copy"
+if grep -qE '^[[:space:]]*#.*LIMITATION 6 of 5' "$lim_copy" \
+   && ! grep -qE '^[[:space:]]*#.*LIMITATION 6 of 5' "$CAPLIB"; then
+  ok "limitations: the scanner finds a planted sixth marker (and the real library has none)"
+else
+  bad "limitations: the scanner cannot distinguish a planted sixth marker from the real library"
+fi
+
+# =====================================================================================
 # 34. NEITHER LINE MAY EVER CERTIFY THIS BOX — THE INVARIANT, NOT AN INSTANCE (#3733,
 #     lead ruling). Three consecutive independent reviews each found a NEW High of one
 #     shape: the probe cannot observe the property its verdict named. The response was a

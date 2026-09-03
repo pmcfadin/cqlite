@@ -839,6 +839,18 @@ claude_auth_verdict_into__untraced() {
   CLAUDE_AUTH_PROBE_DIR="$__cfg"
   claude_auth_probe_arm_traps
 
+  # ---- LIMITATION 2 of 5 (#3733): THIS SCRUBS ONE CREDENTIAL AND LEAVES THE OTHERS. Only
+  # $CLAUDE_AUTH_TOKEN_KEY is neutralised and re-supplied from the persisted value;
+  # ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_USE_BEDROCK and
+  # CLAUDE_CODE_USE_VERTEX are inherited from this process untouched, and `claude`
+  # authenticates from any of them. So a returned sentinel means SOME credential in this
+  # environment worked — not that the persisted one did, which is the claim the old
+  # `VERIFIED` state made and could not support. NOT scrubbed, on the standing ruling that
+  # this file reports rather than certifies: silently changing what the probe authenticates
+  # with would be a behaviour change hiding behind a report, and the honest move is to NAME
+  # what was present (see `claude_auth_alt_credentials_into`, whose output goes into the
+  # PROBE-ANSWERED detail).
+  #
   # NOT A PIPE. `__out=$(...)` then `__rc=$?` on its own line. ONE invocation, because
   # there is no longer a bound-without-escalation form to branch on: the resolver refuses
   # rather than hand back a SIGTERM-only `timeout`.
@@ -969,6 +981,16 @@ claude_tmux_env_verdict_into__untraced() {
   # from a DIFFERENT invocation than `__rc`/`__out`, so a server that started or died between
   # them produced a failure message with an empty cause (or a cause for a call that
   # succeeded). NOT A PIPE: `$?` is read on its own line.
+  # ---- LIMITATION 5 of 5 (#3733): THIS READS THE SERVER'S GLOBAL ENVIRONMENT, AND
+  # NOTHING ELSE. `show-environment -g` prints the server's global table; it does not spawn
+  # a pane, so what a pane would ACTUALLY receive is not observed here. A session or window
+  # environment entry (`show-environment` without `-g`, `new-session -e`), an
+  # `update-environment` list, or a per-pane override can all differ from the global table,
+  # and every one of them is invisible to this call. Documented rather than fixed: spawning
+  # a pane on the operator's LIVE server to find out would mean creating a session on a box
+  # whose sessions are lanes, which is a worse thing for a report to do than being
+  # incomplete. The cold path DOES spawn a pane — on its own throwaway server — and carries
+  # LIMITATION 1 instead.
   local __errf=''
   if __errf=$(mktemp "${TMPDIR:-/tmp}/cqlite-tmuxenv.XXXXXX" 2>/dev/null) && [ -f "$__errf" ]; then
     # REGISTERED WITH THE PROBE LIFECYCLE, not merely deleted on the success path. Bounding
@@ -1069,6 +1091,17 @@ claude_tmux_env_verdict_into__untraced() {
   # is deliberately the NON-permissive answer: an unknown must never resolve to the good
   # case. Its remedy differs from SERVER-CONFIG-STALE's — re-seeding the server writes the
   # same nonexistent path back, so `--fix-claude-auth` cannot help here.
+  #
+  # ---- LIMITATION 3 of 5 (#3733): THIS TEST IS EVALUATED AS *THIS* PROCESS. Under the
+  # documented `sudo bash scripts/bootstrap-agent-machine.sh --yes` invocation that is ROOT,
+  # while the account that will actually spawn the lane is the invoking agent — so a
+  # directory root can stat is reported as existing even when the agent cannot read or write
+  # it, which is the un-onboarded first-run picker all over again. NOT delegated, and the
+  # reason is that a delegated `test -d` is a THIRD identity-dependent probe to bound,
+  # authorize and interpret, and the ruling for this file is to report rather than to grow.
+  # The `*-CARRIES-BOTH`/`*-DELIVERS-BOTH` details say "as seen by THIS process" for exactly
+  # this reason. (Note the tmux READ is delegated — see the identity block — so this is a
+  # gap in one predicate, not in the section's posture.)
   if [ ! -d "$__scfg" ]; then
     eval "$__ov=SERVER-CONFIG-NODIR"
     eval "$__od=\"the server's \$CLAUDE_AUTH_CONFIG_KEY MATCHes \$__file but that directory does not exist (or cannot be read as one): \$__scfg — a pane gets a config dir claude will treat as un-onboarded\""
@@ -1225,6 +1258,16 @@ claude_tmux_cold_probe_into() {
   # credential, so a probe run as root measures ROOT's would-be server and says nothing about
   # the agent's. A FAILED handover is a REFUSAL, never a quiet fall back to a root-run probe
   # whose answer would be about the wrong user.
+  #
+  # ---- LIMITATION 4 of 5 (#3733): THIS HANDOVER PRECEDES THE HEREDOC THAT WRITES
+  # `probe.sh` (below), so that one file is NOT covered by it: `$__res` is created above and
+  # is chowned, but `probe.sh` is written afterwards BY THIS PROCESS and keeps this uid's
+  # ownership. It works under the ordinary umask (022 leaves it world-readable and the pane
+  # only needs to READ it), and it breaks under a restrictive one (0077 leaves it readable
+  # only by root, so a delegated `sh probe.sh` fails and the run reports "the isolated pane
+  # did not report" — a true statement with a misleading cause). Documented rather than
+  # reordered, per the ruling for this file; moving the `chown` after the write, or chowning
+  # the file explicitly, is a one-line change if this ever fires.
   if [ "$CLAUDE_AUTH_TMUX_IDENTITY" = delegate ]; then
     if ! chown -R "$CLAUDE_AUTH_TMUX_IDENTITY_USER" "$__dir" 2>/dev/null; then
       rm -rf "$__dir"
@@ -1259,6 +1302,18 @@ fi
 } >"$1"
 CLAUDE_AUTH_PROBE
 
+  # ---- LIMITATION 1 of 5 (#3733): WHAT FOLLOWS OBSERVES TMUX PROPAGATION, NOT pam_env
+  # DELIVERY. The two credential variables are scrubbed and RE-SUPPLIED HERE from the values
+  # this process READ out of the pam_env file — so the throwaway server is handed them by us,
+  # and what is then measured is whether a tmux server passes its own start environment to a
+  # pane. It is NOT whether pam_env would deliver those values to a login session: a
+  # `/etc/environment` line pam_env silently drops (a grammar this parser reads more
+  # permissively than pam does, a pam_env misconfiguration, a `readenv=0`) is invisible here,
+  # and the cold state would still report a delivery. Deliberate, and it is the only shape
+  # available: measuring pam_env would mean CREATING a PAM session, which needs privilege
+  # this may not have and would be a login on the operator's box. The propagation half is
+  # still the half that failed in the field (fact 4), which is why the probe exists at all —
+  # what changed on #3733 is that the state it produces no longer claims the other half.
   local -a __e=(env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u TMUX -u TMUX_PANE
                 -u "$CLAUDE_AUTH_TOKEN_KEY" -u "$CLAUDE_AUTH_CONFIG_KEY"
                 "CQLITE_AUTH_PROBE_SALT=$__salt" "CQLITE_AUTH_PROBE_DIGEST=$CLAUDE_AUTH_DIGEST_CMD")
@@ -1377,7 +1432,11 @@ claude_tmux_cold_verdict_into() {
     return 0
   fi
   # Same two-valued caveat as the live path: an unreadable parent collapses onto "does not
-  # exist", which is deliberately the NON-permissive answer.
+  # exist", which is deliberately the NON-permissive answer. And the same LIMITATION 3 of 5
+  # (#3733) applies here as at the live-path site — `[ -d ]` runs as THIS process, which
+  # under the documented sudo invocation is root, so this says the directory exists TO US and
+  # not that the agent that will spawn the lane can use it. Two sites, one limitation,
+  # marked at both: a reader lands on whichever one they are reading.
   if [ ! -d "$__prcfg" ]; then
     eval "$__ov=COLD-START-NODIR"
     eval "$__od=\"a throwaway server started from \$__file delivers both variables, but the \$CLAUDE_AUTH_CONFIG_KEY it delivers does not exist as a directory: \$__prcfg — claude will treat it as un-onboarded\""
