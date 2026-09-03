@@ -222,6 +222,48 @@ the bug as the specification.
 bytes or Cassandra source**, never CQLite's own output. A round-trip test is a useful
 regression net for internal invariants; it is not parity evidence.
 
+### The projected-column blind spot (point-vs-scan on a SUBSET of columns, issue #3890)
+
+Every blind spot above is about which **oracle** you compare against. This one is about **how
+much of the row** you compare, and it is the cheapest of the five to reintroduce:
+
+> **A point-read test that compares a SUBSET of columns against the scan cannot see a
+> TRUNCATED point row.**
+
+`assert_point_equals_scan` (`cqlite-core/tests/issue_1573_readat_positional.rs`) projected
+`id` plus one named column and ran `SELECT id, <col>` on both legs. `SELECT id, name` decodes
+the first two cells and stops, so a point read whose *later* cells failed to decode compared
+equal on exactly the two columns under comparison — and stayed green for years.
+
+Two properties turn "under-tested" into "invisible":
+
+1. **The failure does not propagate.** A cell-decode error inside the row loop is swallowed —
+   `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/row_data.rs` logs it at `debug`
+   and `break`s out of the column loop (removing that swallow is issue #3721). So the query
+   returns `Ok`.
+2. **The failure has no positive signal.** The cells after the failure point are simply
+   **absent** from the row's `values` map. A `get(col)` comparison over the columns you named
+   cannot notice a column you did not name.
+
+**Rule.** A point/seek-vs-scan comparison runs `SELECT *` and asserts **both directions** of
+the column set — no scan column absent from the point row, no point column the scan lacks —
+and names the missing column in the failure message. Row counts and whole-row fingerprint
+*sets* are not substitutes: neither says, per row, which column went missing.
+
+**The corpus-wide instance** is
+`cqlite-core/tests/issue_3890_point_read_column_parity_sweep.rs`: it derives its table set at
+run time from `test-data/schemas/**/*.cql` intersected with the `*-Data.db` components on
+disk (never a curated list), sweeps every table it can express, and prints by name every
+table it cannot — `no-schema`, `unrenderable-key`, `empty` — because a lane that omits
+coverage silently is indistinguishable from one that covers it.
+
+**And its bound is measured, not chosen.** The per-table cap on probed partition keys was
+first 4; at 4 the sweep reached **none** of the 14 point reads that decode badly on the
+pre-fix code, because the affected partitions are not among any table's first four keys. At
+32 it reaches all of them and still runs in under a second (962 targeted reads over 101
+tables). A bound tight enough to cost nothing can be tight enough to detect nothing — so when
+you cap a sweep, measure what the cap excludes.
+
 ## Golden JSONL files
 
 Every Data.db in the dataset has a companion `.jsonl` file containing
