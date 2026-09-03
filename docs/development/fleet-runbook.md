@@ -1083,8 +1083,12 @@ throwaway server (tmux propagation, not pam_env delivery); the `claude -p` probe
 `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`CLAUDE_CODE_USE_BEDROCK`/`CLAUDE_CODE_USE_VERTEX` (so a
 sentinel means *some* credential worked); `[ -d <config dir> ]` runs as the caller, root under the
 documented `sudo` invocation (so it says the directory exists *to us*). Each fix was correct and the
-family kept regenerating, so the design changed instead. The five things the observations cannot see
-are documented **in the script** as `LIMITATION 1..5 (#3733)` at their own code sites.
+family kept regenerating, so the design changed instead. The **four** things the observations cannot
+see are documented **in the script** as `LIMITATION 1..5 (#3733)` at their own code sites — five
+numbered slots, of which slot 4 is a **record of one that was reclassified as a defect and fixed**
+(root wrote into a directory it had already handed to the invoking user, which on a one-user fleet is
+a peer lane's symlink opportunity; a hazard that exists whatever the output says is not a limitation
+of a report). The slot is kept rather than renumbered so older references still resolve.
 
 Three consequences to work with:
 
@@ -1307,7 +1311,7 @@ three review rounds kept finding.
 the six-fact diagnosis above — stands and is the durable value: it is what tells you where to look
 when a lane will not start. **AC3, a verified cold-start capability check, was NARROWED by owner
 ruling**: the observations remain, no certification is claimed, and no replacement mechanism is
-proposed. The five things they cannot see are `LIMITATION 1..5 (#3733)` in
+proposed. The four things they cannot see are `LIMITATION 1..5 (#3733)` — slot 4 being a fixed one, kept as a record — in
 `scripts/claude-auth-capability.sh`, marked at their own code sites.
 
 ### Can an unattended box be re-authenticated without a human at a browser? **Yes.**

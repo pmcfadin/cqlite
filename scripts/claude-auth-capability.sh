@@ -30,9 +30,11 @@
 # six measured facts are what tell an operator where to look. What was withdrawn is the
 # claim that any of them can be VERIFIED from here.
 #
-# THE FIVE DOCUMENTED LIMITATIONS, indexed so a reader can find each one at its own code
-# site (grep `LIMITATION <n> of 5`). Under this ruling these are limitations of a REPORT,
-# not defects — but a reader must never have to rediscover them:
+# FIVE NUMBERED SLOTS: FOUR LIVE LIMITATIONS AND ONE FIXED, indexed so a reader can find
+# each at its own code site (grep `LIMITATION <n> of 5`). The four live ones are limitations
+# of a REPORT, not defects — but a reader must never have to rediscover them. Slot 4 is a
+# RECORD of one that was filed here, reclassified and FIXED: the numbers are not reused and
+# nothing is renumbered, so every reference written while it was live still resolves.
 #   1. the COLD-START probe injects the /etc/environment values into its OWN throwaway
 #      server, so it observes tmux propagation and NOT pam_env delivery
 #      (claude_tmux_cold_probe_into);
@@ -42,8 +44,13 @@
 #   3. `[ -d <config dir> ]` is evaluated as THIS process — root, under the documented sudo
 #      invocation — so it says nothing about the delegated agent's access
 #      (claude_tmux_env_verdict_into__untraced and claude_tmux_cold_verdict_into);
-#   4. the probe directory's `chown -R` precedes the heredoc that writes `probe.sh`, so that
-#      one file is not covered by the handover (claude_tmux_cold_probe_into);
+#   4. FIXED (was: the probe directory's `chown -R` precedes the heredoc that writes
+#      `probe.sh`, so that one file is not covered by the handover). RECLASSIFIED first:
+#      root writing into a directory it has already given away is not a claim that could be
+#      wrong, it is a same-uid PEER LANE's opportunity to interpose a symlink and have ROOT
+#      overwrite an arbitrary file — a non-invoker route, so a defect and not a limitation
+#      of a report. The write now precedes the handover; the umask half closed with it
+#      (claude_tmux_cold_probe_into);
 #   5. the LIVE-server path reads the tmux GLOBAL environment only and never spawns a pane
 #      (claude_tmux_env_verdict_into__untraced).
 #
@@ -1255,33 +1262,23 @@ claude_tmux_cold_probe_into() {
       eval "$__owhy='the private working directory path contains a quote or whitespace, which cannot be passed safely as a tmux pane command — refusing'"
       return 0 ;;
   esac
-  # A DELEGATED PROBE MUST BE ABLE TO WRITE ITS OWN WORKING DIRECTORY. `mktemp -d` gives us
-  # a 0700 directory owned by THIS uid, and a tmux started as the invoking agent could
-  # neither create the socket in it nor write the pane report. The probe is delegated for the
-  # same reason the live read is: a per-user tmux config is exactly what can substitute the
-  # credential, so a probe run as root measures ROOT's would-be server and says nothing about
-  # the agent's. A FAILED handover is a REFUSAL, never a quiet fall back to a root-run probe
-  # whose answer would be about the wrong user.
+  # ---- ROOT CREATES EVERYTHING IT OWNS **BEFORE** THE HANDOVER BELOW ----------------
+  # THE ORDER OF THESE TWO STEPS IS A SECURITY PROPERTY, NOT HOUSEKEEPING (#3733, the
+  # limitation formerly numbered 4 of 5). This `cat` used to sit AFTER the `chown -R`, so
+  # root wrote into a directory it had ALREADY given away — and on this fleet EVERY LANE
+  # RUNS AS ONE USER, so the recipient is a PEER LANE, which can plant a symlink at
+  # `probe.sh` and have ROOT truncate and overwrite an arbitrary file. That is a
+  # NON-INVOKER route and therefore a defect, not a documented limitation of a report: it
+  # is not a claim that could merely be wrong, and it exists whatever the verdict line says.
+  # Written first, the file is created while the directory is still this uid's own 0700
+  # `mktemp -d`, so there is no window in which another party can interpose a path.
+  # SECOND EFFECT, VERIFIED NOT ASSUMED: because `chown -R` now runs AFTER the write, it
+  # covers `probe.sh` too, so the file's owner becomes the delegate and a restrictive umask
+  # no longer strands it root-readable-only. Previously it kept this uid's ownership at
+  # root's umask, and at 0077 a delegated `sh probe.sh` could not read it — reported as "the
+  # isolated pane did not report", a true statement with a misleading cause. Both halves are
+  # closed by the one reorder.
   #
-  # ---- LIMITATION 4 of 5 (#3733): THIS HANDOVER PRECEDES THE HEREDOC THAT WRITES
-  # `probe.sh` (below), so that one file is NOT covered by it: `$__res` is created above and
-  # is chowned, but `probe.sh` is written afterwards BY THIS PROCESS and keeps this uid's
-  # ownership. It works under the ordinary umask (022 leaves it world-readable and the pane
-  # only needs to READ it), and it breaks under a restrictive one (0077 leaves it readable
-  # only by root, so a delegated `sh probe.sh` fails and the run reports "the isolated pane
-  # did not report" — a true statement with a misleading cause). Documented rather than
-  # reordered, per the ruling for this file; moving the `chown` after the write, or chowning
-  # the file explicitly, is a one-line change if this ever fires.
-  if [ "$CLAUDE_AUTH_TMUX_IDENTITY" = delegate ]; then
-    if ! chown -R "$CLAUDE_AUTH_TMUX_IDENTITY_USER" "$__dir" 2>/dev/null; then
-      rm -rf "$__dir"
-      eval "$__owhy=\"the probe's private working directory could not be handed to the invoking agent (\$CLAUDE_AUTH_TMUX_IDENTITY_USER), so a tmux started as that login could not write into it — refusing rather than measuring the wrong user's cold start\""
-      return 0
-    fi
-  fi
-  CLAUDE_AUTH_PROBE_DIR="$__dir"; CLAUDE_AUTH_PROBE_SOCKET="$__sock"
-  claude_auth_probe_arm_traps
-
   # The pane script reports DELIVERY, never the value: set/unset, a LENGTH, a SALTED DIGEST
   # and the config directory (a path, not a secret). Nothing it writes carries the
   # credential — the digest is salted per run, so it identifies the delivered value only by
@@ -1305,6 +1302,47 @@ fi
   printf 'end\n'
 } >"$1"
 CLAUDE_AUTH_PROBE
+  # THE WRITE IS REQUIRED TO HAVE WORKED, and the check is on the RESULT rather than on an
+  # exit status: "cat exited 0" and "the script is there" are different claims (the same
+  # rule the isolated config's `chmod` verification follows). Unchecked, a failed write
+  # surfaced later as "the isolated pane did not report" — a cause that sends the reader
+  # looking at tmux.
+  if [ ! -s "$__dir/probe.sh" ]; then
+    rm -rf "$__dir"
+    eval "$__owhy='the isolated probe pane script could not be written into the private working directory (no space, or the write failed) — refusing rather than starting a probe whose pane has nothing to run'"
+    return 0
+  fi
+
+  # A DELEGATED PROBE MUST BE ABLE TO WRITE ITS OWN WORKING DIRECTORY. `mktemp -d` gives us
+  # a 0700 directory owned by THIS uid, and a tmux started as the invoking agent could
+  # neither create the socket in it nor write the pane report. The probe is delegated for the
+  # same reason the live read is: a per-user tmux config is exactly what can substitute the
+  # credential, so a probe run as root measures ROOT's would-be server and says nothing about
+  # the agent's. A FAILED handover is a REFUSAL, never a quiet fall back to a root-run probe
+  # whose answer would be about the wrong user.
+  #
+  # ---- LIMITATION 4 of 5 (#3733) — FIXED, and the slot is KEPT AS A RECORD rather than
+  # renumbered. It read: this handover PRECEDES the heredoc that writes `probe.sh`, so that
+  # one file is not covered by it and keeps this uid's ownership at this uid's umask. It was
+  # first filed as a umask problem and documented alongside the four PROXY limitations, and
+  # that classification was WRONG: the ruling that excused those ("a report cannot break a
+  # working box") does not reach this one, because root writing into a directory it has
+  # already given away is not a claim at all — it is a same-uid peer's opportunity to
+  # interpose a symlink and have ROOT overwrite an arbitrary file. A hazard that exists
+  # whatever the output says is a defect. FIXED by writing `probe.sh` above, before this
+  # handover; the umask half closed with it, because `-R` now covers the file. The number is
+  # not reused and 1/2/3/5 keep theirs, so every reference written while it was live still
+  # resolves. Pinned behaviourally AND structurally by section 37 of
+  # scripts/tests/test_claude_auth_capability.sh.
+  if [ "$CLAUDE_AUTH_TMUX_IDENTITY" = delegate ]; then
+    if ! chown -R "$CLAUDE_AUTH_TMUX_IDENTITY_USER" "$__dir" 2>/dev/null; then
+      rm -rf "$__dir"
+      eval "$__owhy=\"the probe's private working directory could not be handed to the invoking agent (\$CLAUDE_AUTH_TMUX_IDENTITY_USER), so a tmux started as that login could not write into it — refusing rather than measuring the wrong user's cold start\""
+      return 0
+    fi
+  fi
+  CLAUDE_AUTH_PROBE_DIR="$__dir"; CLAUDE_AUTH_PROBE_SOCKET="$__sock"
+  claude_auth_probe_arm_traps
 
   # ---- LIMITATION 1 of 5 (#3733): WHAT FOLLOWS OBSERVES TMUX PROPAGATION, NOT pam_env
   # DELIVERY. The two credential variables are scrubbed and RE-SUPPLIED HERE from the values
@@ -1654,8 +1692,9 @@ claude_auth_usage() {
   printf 'PRINTED exits 0 whatever it found, so do not gate anything on the status. For the\n'
   printf 'three report modes the ONLY non-zero status is a usage error (2) — even a refused\n'
   printf 'test-only seam prints a line and exits 0. --fix-tmux-env is the exception, because\n'
-  printf 'seeding is an ACTION. The five things the observations CANNOT see are documented in\n'
-  printf 'this file as LIMITATION 1..5.\n'
+  printf 'seeding is an ACTION. The FOUR things the observations CANNOT see are documented\n'
+  printf 'in this file as LIMITATION 1..5 — five numbered slots, of which slot 4 is a RECORD\n'
+  printf 'of one that was reclassified as a defect and FIXED rather than documented.\n'
   printf '\n'
   printf '  --auth          what happened when a `claude -p` run carrying the PERSISTED value\n'
   printf '                  was made? prints one `claude-auth:` line:\n'
@@ -1694,7 +1733,7 @@ claude_auth_usage() {
 # `claude-auth-report:` prefix (distinct from both verdict-line prefixes) so it can neither
 # be mistaken for an observation nor grepped away with one.
 claude_auth_emit_scope_note__untraced() {
-  printf 'claude-auth-report: OBSERVATIONS-ONLY — neither line above certifies that this box can start a lane (#3733). What they cannot see: pam_env DELIVERY (only tmux propagation), WHICH credential authenticated, whether the config dir is usable BY THE AGENT, and what a PANE receives as opposed to the server global table. See LIMITATION 1..5 in scripts/claude-auth-capability.sh.\n'
+  printf 'claude-auth-report: OBSERVATIONS-ONLY — neither line above certifies that this box can start a lane (#3733). What they cannot see: pam_env DELIVERY (only tmux propagation), WHICH credential authenticated, whether the config dir is usable BY THE AGENT, and what a PANE receives as opposed to the server global table. See LIMITATION 1..5 in scripts/claude-auth-capability.sh (four live; slot 4 is a fixed-and-recorded one).\n'
 }
 
 claude_auth_emit_auth() {

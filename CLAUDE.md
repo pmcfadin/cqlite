@@ -2356,8 +2356,16 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   passing — the unattended run reports, and a human decides.
   **THIS NARROWS #3733's AC3** (owner scope change): the AC1 pam_env/tmux-server diagnosis stands
   and is the issue's durable value; the "verified cold-start capability" half is withdrawn, and no
-  replacement mechanism is claimed. **The five things the observations cannot see are documented IN
-  THE SCRIPT** as `LIMITATION 1..5 (#3733)` at their own code sites, indexed in its header and
+  replacement mechanism is claimed. **The FOUR things the observations cannot see are documented IN
+  THE SCRIPT** as `LIMITATION 1..5 (#3733)` — five numbered slots, of which **slot 4 is a RECORD of
+  one that was RECLASSIFIED AS A DEFECT AND FIXED**, because root writing `probe.sh` into a directory
+  it had already `chown`ed to the invoking user is not a claim that could merely be wrong: on this
+  fleet every lane runs as ONE user, so the recipient is a PEER LANE, which can interpose a symlink
+  and have ROOT overwrite an arbitrary file. **The ruling that excuses a report's over-claims does
+  not reach a hazard that exists whatever the output says** — that is the test for whether a finding
+  in this family is a documented limitation or a defect. The write now precedes the handover, which
+  closes the umask half too (`chown -R` covers the file; measured both orders). The slot is kept
+  rather than renumbered so references written while it was live still resolve. All five are
   cited in the runtime details, with a suite guard on findability and on the set being closed —
   under this ruling they are limitations of a report, not defects, but a reader must be able to
   find them without reading a commit message.

@@ -390,11 +390,26 @@ EOF
 # plant_chown <dir> <rc>: a recording `chown` that succeeds or fails on demand. The cold
 # probe hands its private working directory to the invoking user before a delegated tmux
 # can write into it, and both outcomes are verdict-bearing.
+#
+# IT ALSO RECORDS WHAT EXISTED AT HANDOVER TIME, which is what makes the ORDERING testable
+# at all (#3733 LIMITATION 4). The hazard is not a wrong verdict: root used to write
+# `probe.sh` into a directory it had ALREADY given away, and on this fleet every lane runs
+# as ONE user, so the recipient is a peer lane — which can plant a symlink at that path and
+# have ROOT follow it. The race itself is not testable (the interleaving is not
+# controllable), but the invariant "root creates everything it owns BEFORE transferring" is:
+# at the moment `chown` runs, `probe.sh` must already be there. `-h`/`-R` and any flags are
+# skipped so the recorded subject is the PATH, not an option.
 plant_chown() {
   local d="$1" crc="$2"
   cat >"$d/chown" <<EOF
 #!/usr/bin/env bash
 printf 'chown %s\n' "\$*" >>"$d/chown-calls.log"
+subj=''
+for a in "\$@"; do case "\$a" in -*) ;; *) subj="\$a" ;; esac; done
+if [ -n "\$subj" ] && [ -d "\$subj" ]; then
+  if [ -e "\$subj/probe.sh" ]; then st=present; else st=absent; fi
+  printf 'at-handover probe.sh=%s\n' "\$st" >>"$d/chown-calls.log"
+fi
 exit $crc
 EOF
   chmod +x "$d/chown"
@@ -2322,9 +2337,29 @@ for lim_n in 1 2 3 4 5; do
   grep -qE '^#[[:space:]]*'"$lim_n"'\.' <<<"$lim_hdr" || lim_unindexed="${lim_unindexed:+$lim_unindexed }$lim_n"
 done
 if [ -z "$lim_missing" ]; then
-  ok "limitations: all five are marked as comments at their own code sites in the library"
+  ok "limitations: all five slots are marked as comments at their own code sites in the library"
 else
   bad "limitations: no code-site comment marks LIMITATION(s) $lim_missing of 5 — a reader cannot find them"
+fi
+# THE LIVE/FIXED SPLIT IS ASSERTED, NOT JUST THE PRESENCE OF FIVE SLOTS (#3733). Slot 4 was
+# RECLASSIFIED and FIXED — root wrote into a directory it had already handed over, which is a
+# same-uid peer's symlink opportunity and so a defect rather than a limitation of a report —
+# and its slot is KEPT as a record instead of renumbered, so references written while it was
+# live still resolve. Without this, "five slots exist" would read identically whether slot 4
+# is a live limitation or a fixed one, and a future silent claim that one of the OTHER four
+# is fixed would pass too. Section 37 is what pins the fix itself.
+lim_fixed_ok=0; lim_live_bad=''
+for lim_n in 1 2 3 4 5; do
+  if grep -qE '^[[:space:]]*#.*LIMITATION '"$lim_n"' of 5[^A-Za-z0-9]*\(#3733\)[^A-Za-z0-9]*(—|-)[[:space:]]*FIXED' "$CAPLIB"; then
+    [ "$lim_n" = 4 ] && lim_fixed_ok=1 || lim_live_bad="${lim_live_bad:+$lim_live_bad }$lim_n"
+  else
+    [ "$lim_n" = 4 ] && lim_live_bad="${lim_live_bad:+$lim_live_bad }4(not-marked-FIXED)"
+  fi
+done
+if [ "$lim_fixed_ok" = 1 ] && [ -z "$lim_live_bad" ]; then
+  ok "limitations: slot 4 is recorded as FIXED and the other four are still live"
+else
+  bad "limitations: the live/FIXED split does not hold (slot-4-FIXED=$lim_fixed_ok, wrong: ${lim_live_bad:-none}) — a fixed slot and a live one must not read alike"
 fi
 if [ -z "$lim_unindexed" ]; then
   ok "limitations: the library header indexes all five, so the set reads as closed"
@@ -2345,6 +2380,93 @@ if grep -qE '^[[:space:]]*#.*LIMITATION 6 of 5' "$lim_copy" \
   ok "limitations: the scanner finds a planted sixth marker (and the real library has none)"
 else
   bad "limitations: the scanner cannot distinguish a planted sixth marker from the real library"
+fi
+
+# =====================================================================================
+# 37. ROOT MUST CREATE EVERYTHING IT OWNS **BEFORE** IT TRANSFERS THE DIRECTORY (#3733,
+#     was LIMITATION 4 of 5, now FIXED).
+#     WHY THIS ONE IS NOT COVERED BY THE "IT IS ONLY A REPORT" RULING. The other four
+#     limitations are PROXY defects: the observation claims more than it saw, and a wrong
+#     claim damages nothing. This one is not a claim at all. Root wrote `probe.sh` into a
+#     directory it had ALREADY chowned to the invoking user, and on this fleet EVERY LANE
+#     RUNS AS ONE USER — so the recipient is a PEER LANE, which can plant a symlink at that
+#     path and make ROOT truncate and overwrite an arbitrary file. That hazard exists
+#     whenever the probe runs, whatever the line says, and it is a NON-INVOKER route: the
+#     defect class this repo treats as real rather than out of model.
+#     TWO ASSERTIONS, ONE BEHAVIOURAL AND ONE STRUCTURAL, AND THEY ARE LABELLED AS SUCH.
+#     The RACE is not testable — the interleaving is not controllable — so nothing here
+#     pretends to reproduce it. (a) BEHAVIOURAL: the recording `chown` stub reports what
+#     existed in the directory at the moment it ran; `probe.sh` must already be there.
+#     (b) STRUCTURAL: no write in the cold probe may target a path under the private
+#     directory AFTER the `chown` line, which is the general invariant (a) can only sample —
+#     (a) sees today's one write, (b) reds on the next one someone adds below the handover.
+# =====================================================================================
+# (a) BEHAVIOURAL. Same posture as section 33(e): running as root, SUDO_USER naming the
+#     agent, a delegated cold-start probe, a recording chown.
+d37=$(mkshim "$tmp/s37"); plant_tmux "$d37" no-server; plant_id "$d37" root 0 "$INVOKER" 4711
+plant_delegator "$d37" runuser; plant_chown "$d37" 0
+run_cap "$d37" "$ef2" "SUDO_USER=$INVOKER" "SUDO_UID=4711" -- --tmux-env
+# THE FIXTURE MUST HAVE REACHED THE CHOWN AT ALL, asserted first: with no chown recorded,
+# the ordering assertion below has no subject and would pass by vacuity.
+if [ -f "$d37/chown-calls.log" ] && grep -q '^chown ' "$d37/chown-calls.log"; then
+  ok "handover ordering: the delegated cold probe really did hand its directory over (chown recorded)"
+else
+  bad "handover ordering: no chown was recorded, so the ordering assertion below has no subject: $(cat "$d37/chown-calls.log" 2>/dev/null)"
+fi
+if grep -q '^at-handover probe.sh=present$' "$d37/chown-calls.log" 2>/dev/null; then
+  ok "handover ordering: probe.sh already existed when the directory was handed over (root wrote it while it still owned the dir)"
+else
+  bad "handover ordering: root wrote probe.sh AFTER giving the directory away — a peer lane can symlink that path: $(cat "$d37/chown-calls.log" 2>/dev/null)"
+fi
+
+# (b) STRUCTURAL — labelled structural because it reads SOURCE, not behaviour. It cannot
+#     observe a race and does not claim to; what it pins is that no write reachable in the
+#     cold probe targets the handed-over directory after the handover.
+#     THE ALIAS SET IS DERIVED, NEVER CURATED: `$__res` and `$__sock` are assigned FROM
+#     `$__dir`, so a scan looking only for the literal `$__dir` would miss `: >"$__res"`
+#     entirely — and a hand-listed set is a list to keep complete. Every local assigned a
+#     value mentioning `$__dir` joins the set, so a new derived path is covered on the day
+#     it is written.
+#     THE BODY ENDS AT A BRACE THAT IS THE WHOLE LINE, and that is not pedantry: the pane
+#     heredoc this function now writes FIRST contains `} >"$1"` at column zero, so a
+#     `/^\}/` terminator truncated the body BEFORE the chown and the derivation failed —
+#     which the fail-closed branch below correctly reported rather than passing. A scan that
+#     cannot find its subject must FAIL, never green.
+cp_body=$(awk '/^claude_tmux_cold_probe_into\(\) \{/ { on = 1 } on { print } on && /^\}$/ { exit }' "$CAPLIB")
+cp_aliases=$(printf '%s\n' "$cp_body" \
+  | sed -n 's/^[[:space:]]*\(local[[:space:]]\+\)\{0,1\}\(__[a-z0-9_]*\)=.*\$__dir.*/\2/p' | sort -u)
+cp_chown_ln=$(printf '%s\n' "$cp_body" | grep -n '^[[:space:]]*if ! chown ' | head -1 | cut -d: -f1)
+# cp_writes_after <body> <chown-line> <alias-list>: the line NUMBERS of redirections into a
+# $__dir-derived path that sit at or below <chown-line>. Empty = invariant holds.
+cp_writes_after() {
+  local body="$1" ln="$2" aliases="$3" a='' hits=''
+  for a in __dir $aliases; do
+    hits="$hits$(printf '%s\n' "$body" | grep -nE '>[[:space:]]*"\$'"$a"'[/"]' \
+                 | awk -F: -v L="$ln" '$1 >= L { print $0 }')"
+  done
+  printf '%s' "$hits"
+}
+if [ -z "$cp_chown_ln" ] || [ -z "$cp_aliases" ]; then
+  bad "handover ordering (structural): the scan could not locate the chown line or derive the alias set from $CAPLIB — a failed derivation is a FAIL, never a pass"
+else
+  ok "handover ordering (structural): the scan located the chown and derived $(printf '%s\n' "$cp_aliases" | grep -c .) \$__dir-derived path name(s) from source"
+  cp_bad=$(cp_writes_after "$cp_body" "$cp_chown_ln" "$cp_aliases")
+  if [ -z "$cp_bad" ]; then
+    ok "handover ordering (structural): no write targets the private directory at or after the handover"
+  else
+    bad "handover ordering (structural): a root write to the handed-over directory sits at or below the chown: $cp_bad"
+  fi
+  # THE POSITIVE CONTROL. Every assertion above is NEGATIVE, so a scanner that matched
+  # nothing would green them all. Plant the ORIGINAL ordering — a write moved below the
+  # chown — in a synthetic body and require the scan to find it.
+  cp_planted=$(printf '%s\n' "$cp_body" | sed 's|^\([[:space:]]*\)cat >"$__dir/probe.sh".*|\1: PLACEHOLDER|')
+  cp_planted=$(printf '%s\ncat >"$__dir/probe.sh" <<X\nX\n' "$cp_planted")
+  cp_planted_ln=$(printf '%s\n' "$cp_planted" | grep -n '^[[:space:]]*if ! chown ' | head -1 | cut -d: -f1)
+  if [ -n "$cp_planted_ln" ] && [ -n "$(cp_writes_after "$cp_planted" "$cp_planted_ln" "$cp_aliases")" ]; then
+    ok "handover ordering (structural): the scan FINDS a write planted below the chown (so the clean verdict above is not vacuous)"
+  else
+    bad "handover ordering (structural): the scan cannot see a write planted below the chown — it proves nothing about the real body"
+  fi
 fi
 
 # =====================================================================================
@@ -2551,15 +2673,18 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case. Raised 91 -> 122 by round 4 (the digest identity of a
 # delivered credential, the sudo-posture cases, and the bounding class), 122 -> 124 by
-# round 5's two probe-working-directory interrupt cases, and 124 -> 140 by the #3733
-# DEMOTION (sections 34-36: the no-certification invariant, the alternate-credential
-# observation, and the limitation-findability guard, plus the seam-refusal exit-status pin,
-# the marker-scanner positive control, and the assertions that changed subject where a
-# verdict became an observation). 143 cases run, and the real-tmux isolation case
-# (3 assertions) is still the only legitimately skippable one.
-# THE FIGURE IS MEASURED, NOT COUNTED BY EYE: forcing the tmux block's `command -v tmux`
-# test to `true` in a throwaway `git worktree` reports 140/0/1.
-CASE_FLOOR=140
+# round 5's two probe-working-directory interrupt cases, and 124 -> 146 by #3733's
+# DEMOTION and the handover fix. Sections 34-36 (the no-certification invariant, the
+# alternate-credential observation, the limitation-findability guard and the live/FIXED
+# split), section 37 (the handover ordering, behavioural + structural + its positive
+# control), the seam-refusal exit-status pin, the marker-scanner positive control, and the
+# assertions that changed subject where a verdict became an observation. 149 cases run, and
+# the real-tmux isolation case (3 assertions) is still the only legitimately skippable one.
+# THE FIGURE IS MEASURED, NOT COUNTED BY EYE, AND IT IS RE-MEASURED WHENEVER IT MOVES:
+# forcing the tmux block's `command -v tmux` test to `true` in a throwaway `git worktree`
+# reports 146/0/1. The value in this file is the authority — a figure quoted in a commit
+# message is a snapshot of the run that produced it and does not follow later edits.
+CASE_FLOOR=146
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
