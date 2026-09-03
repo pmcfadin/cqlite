@@ -2,6 +2,13 @@ use super::*;
 
 use range_marker_error::unparseable_marker_in_buffered_block as unparseable;
 
+// Issue #3928: the partition-HEADER arm, split out when it gained a tolerance
+// DECISION (campsite rule, epic #1116). Declared here rather than in the parent
+// `mod.rs` because it is used by this walk alone — the two sliding drivers reach
+// the same decision from their own `at_final_chunk`.
+mod partition_header_arm;
+use partition_header_arm::HeaderStep;
+
 impl V5CompressedLegacyParser {
     /// Within-partition clustering-slice variant of [`parse_block_emit`] (Issue
     /// #954, Epic #951).
@@ -93,12 +100,6 @@ impl V5CompressedLegacyParser {
         let now_secs = self.now_secs;
         let table_id = TableId::new(format!("{}.{}", self.keyspace, self.table_name));
 
-        // Cassandra partition key size limits (used in header validation)
-        // - CASSANDRA_MAX_KEY_SIZE: 64KB limit per Apache Cassandra specification
-        // - FORMAT_MAX_KEY_SIZE: u8 max value - V5CompressedLegacy format limitation
-        const CASSANDRA_MAX_KEY_SIZE: usize = 65536; // 64KB per Cassandra spec
-        const FORMAT_MAX_KEY_SIZE: usize = 255; // u8 max value - format limitation
-
         // Parse ALL partitions in block (Issue #2 fix: previously only parsed one partition)
         let mut partition_index = 0;
         let mut skipped_partitions = 0;
@@ -122,71 +123,15 @@ impl V5CompressedLegacyParser {
                 data.len()
             );
 
-            // CRITICAL FIX (Issue #164): Validate partition header format before attempting parse
-            //
-            // Most compressed blocks contain EXACTLY ONE partition. After parsing the first
-            // partition's row data and trailing VInt, we should NOT assume there's another
-            // partition just because offset < data.len().
-            //
-            // Partition header format validation:
-            // - Byte 0: Flags (typically 0x00, sometimes has partition-level flags)
-            // - Byte 1: Partition key length (u8, typically 16 for UUID)
-            // - Bytes 2+: Partition key data
-            //
-            // If we don't see a valid partition header structure, we've reached the end
-            // of partitions in this block (remaining bytes are likely padding or metadata).
-            if offset >= data.len() {
-                break; // End of block
-            }
-
-            // Check if this looks like a partition header (flags byte + reasonable key length)
-            // Partition keys can be up to 64KB per Cassandra spec (composite keys, text, etc.)
-            if offset + 2 > data.len() {
-                tracing::debug!(
-                    "V5CompressedLegacy: Not enough bytes for partition header at offset {} (need 2, have {}), stopping",
-                    offset,
-                    data.len() - offset
-                );
-                break;
-            }
-
-            let flags = data[offset];
-            let key_len = data[offset + 1] as usize;
-
-            // Validate partition header:
-            // - Key length must be non-zero and within format's limit (u8 max = 255 bytes)
-            //   Note: Cassandra spec allows 64KB keys, but V5CompressedLegacy format uses u8 length
-            // - Must have enough bytes for the header (size depends on format version)
-            //
-            // VG3: oa format (hasUIntDeletionTime) uses a compact DeletionTime:
-            //   LIVE = 1 byte; DELETED = 12 bytes.  The minimum is therefore 1 byte.
-            // nb format always uses 12 bytes (4 + 8).
-            // NOTE: No heuristic validation of flags (Issue #258, #28 no-heuristics mandate)
-            let deletion_time_min = if self.has_uint_deletion_time() { 1 } else { 12 };
-            let header_min_size = 1 + 1 + key_len + deletion_time_min;
-            if key_len == 0
-                || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE)
-                || offset + header_min_size > data.len()
-            {
-                tracing::warn!(
-                    "V5CompressedLegacy: Skipping malformed partition header at offset {} \
-                     (flags=0x{:02x}, key_len={}, need {} bytes, have {}, partition={}): header validation failed",
-                    offset,
-                    flags,
-                    key_len,
-                    header_min_size,
-                    data.len() - offset,
-                    partition_index
-                );
-                // Try to skip to next potential partition boundary
-                skipped_partitions += 1;
-                offset += 1; // Minimal forward progress to avoid infinite loop
-                continue; // Skip this partition, try next
-            }
-
-            // Try to parse partition header
-            match self.parse_partition_header_full(data, offset) {
-                Ok((partition_key, new_offset, partition_deletion)) => {
+            // Issue #3928: the partition-HEADER arm — bounds, the issue-#164
+            // structural validation, and the real parse — lives in ONE place
+            // (`partition_header_arm.rs`), because on a PROVEN-COMPLETE buffer it
+            // must REFUSE rather than skip a byte and resynchronise: the resync
+            // both drops the partition and can invent one out of misaligned
+            // bytes. `?` propagates that refusal; `Resync`/`EndOfBlock` are only
+            // reachable on a `BufferExtent::Window`.
+            match self.block_partition_header(data, offset, extent, partition_index)? {
+                HeaderStep::Parsed(partition_key, new_offset, partition_deletion) => {
                     let header_size = new_offset - offset;
                     offset = new_offset;
 
@@ -736,18 +681,11 @@ impl V5CompressedLegacyParser {
                         break;
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "V5CompressedLegacy: Failed to parse partition header at offset {} \
-                         (partition={}): {}. Attempting to continue to next partition.",
-                        offset,
-                        partition_index,
-                        e
-                    );
-                    // Try to skip forward to find next partition
+                HeaderStep::EndOfBlock => break,
+                HeaderStep::Resync => {
                     skipped_partitions += 1;
-                    offset += 1;
-                    continue; // Skip this partition, try next
+                    offset += 1; // Minimal forward progress to avoid an infinite loop
+                    continue; // Skip this partition, try the next offset
                 }
             }
         }

@@ -392,6 +392,14 @@ required-features = ["state_machine", "cli-helpers", "lz4"]
 name = "point_vs_full_differential"
 required-features = ["state_machine", "cli-helpers", "lz4"]
 
+# Corrupt partition-HEADER refusal lane (issue #3928, the header-arm residual of
+# #3782). Same `#![cfg]` and the same three load-bearing gates as the three
+# targets above, for the same reasons, and executed by the same lanes
+# (`core-tests` and the diff-scoped `--lite` blast radius).
+[[test]]
+name = "issue_3928_corrupt_header_refusal"
+required-features = ["state_machine", "cli-helpers", "lz4"]
+
 [[bench]]
 name = "partition_lookup"
 harness = false

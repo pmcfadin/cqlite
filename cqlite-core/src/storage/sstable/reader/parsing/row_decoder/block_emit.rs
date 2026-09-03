@@ -93,7 +93,23 @@ impl V5CompressedLegacyParser {
             let (partition_key, next_data_offset, partition_deletion) =
                 match self.parse_partition_header_full(data, offset) {
                     Ok(ph) => ph,
-                    Err(_) => break,
+                    // Issue #3928: on a PROVEN-COMPLETE buffer no further bytes
+                    // can arrive to finish this header, so the bare `break` was a
+                    // silent truncation of the whole REMAINDER of the walk — and
+                    // when the FIRST partition's header is the undecodable one,
+                    // of everything. Measured on a real `da` fixture whose first
+                    // partition's `DeletionTime` discriminator was flipped to a
+                    // value Cassandra's own reader throws on: this route
+                    // (`bti_scan_with_metadata_cancellable` → here) answered `Ok`
+                    // with **0 of 468 rows**, which is the 0-rows-when-present
+                    // failure. Mid-window the break STAYS: a header can
+                    // legitimately straddle a chunk-covering window's tail.
+                    Err(e) => {
+                        if extent.is_complete() {
+                            return Err(e);
+                        }
+                        break;
+                    }
                 };
 
             let table_id = TableId::new(format!("{}.{}", self.keyspace, self.table_name));
