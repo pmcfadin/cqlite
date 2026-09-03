@@ -696,3 +696,134 @@ if [ "$rc" -eq 0 ] && grep -qF '**NO CLEAN PAIRS.**' "$RUNOUT" \
 else
   fail "8. a run whose every pair was excluded must still report the exclusions (rc=$rc, out: $(tailout))"
 fi
+
+# --- Case 9: POOLED ACROSS SETS, NEVER ACROSS ROUNDS ------------------------------------
+# The tool's whole reason to exist is that a partly contaminated set still holds valid pairs,
+# so pairs from different SETS must pool into one median. What must never happen is a pair
+# spanning two ROUNDS (or two sets): Method §3b step 4 differences WITHIN a round, and two
+# sessions from different rounds ran minutes apart under different box conditions, so their
+# difference is not a treatment effect.
+#
+# 9a. POOLING: two sets, one round each, the same (A,B) shape. Arm B must show TWO pairs.
+P9A1="$TMP/pair9-set1"; P9A2="$TMP/pair9-set2"
+mkses "$P9A1" 1 A 1 "$(isot 0)"   "$(isot 120)" 400000 20000 250000 25000 1.40
+mkses "$P9A1" 1 B 2 "$(isot 120)" "$(isot 240)" 400000 20000 275000 22500 1.50
+mkses "$P9A2" 1 A 1 "$(isot 240)" "$(isot 360)" 400000 20000 250000 25000 1.40
+mkses "$P9A2" 1 B 2 "$(isot 360)" "$(isot 480)" 400000 20000 275000 22500 1.50
+TS_P9="$TMP/ts-p9.jsonl"
+mkts "$TS_P9" "$(cadence_offsets 0 480)" - on
+pairs_run "$TS_P9" "set1=$P9A1" "set2=$P9A2"
+if [ "$rc" -eq 0 ] && [ "$(mdcell "$RUNOUT" arm B 'clean pairs')" = "2" ] \
+  && grep -qF '| set1 | 1 | B |' "$RUNOUT" && grep -qF '| set2 | 1 | B |' "$RUNOUT"; then
+  pass "9a. pairs POOL across sets — arm B has 2 pairs and the per-pair table names both sets"
+else
+  fail "9a. pairs from different sets must pool (rc=$rc, out: $(tailout))"
+fi
+
+# 9b. NEVER ACROSS ROUNDS, and the fixture is built so a violation would CHANGE THE ANSWER:
+# round 1 holds ONLY the baseline and round 2 ONLY the treatment. Both are clean and fully
+# covered, and their figures WOULD form a readable pair (control 0.00% against a -10.00%
+# treatment) if the tool keyed its grid on the arm alone. It must report none.
+P9B="$TMP/pair9-cross-round"
+mkses "$P9B" 1 A 1 "$(isot 0)"   "$(isot 120)" 400000 20000 250000 25000 1.40
+mkses "$P9B" 2 B 1 "$(isot 120)" "$(isot 240)" 400000 20000 275000 22500 1.50
+pairs_run "$TS_P9" "set1=$P9B"
+if [ "$rc" -eq 0 ] && grep -qF '**2 clean**' "$RUNOUT" && grep -qF '**NO CLEAN PAIRS.**' "$RUNOUT"; then
+  pass "9b. a baseline in round 1 and a treatment in round 2 form NO pair — and BOTH are clean, so the absence is the pairing rule and not a dirty session"
+else
+  fail "9b. sessions from different rounds must never pair (rc=$rc, out: $(head -1 "$RUNOUT"))"
+fi
+
+# 9c. NEVER ACROSS SETS EITHER, for the same reason: pooling is over PAIRS, not over sessions.
+# One set holds only the baseline, the other only the treatment, both in round 1 — the exact
+# shape a grid keyed on round alone would pair.
+P9C1="$TMP/pair9-c-set1"; P9C2="$TMP/pair9-c-set2"
+mkses "$P9C1" 1 A 1 "$(isot 0)"   "$(isot 120)" 400000 20000 250000 25000 1.40
+mkses "$P9C2" 1 B 1 "$(isot 120)" "$(isot 240)" 400000 20000 275000 22500 1.50
+pairs_run "$TS_P9" "set1=$P9C1" "set2=$P9C2"
+if [ "$rc" -eq 0 ] && grep -qF '**2 clean**' "$RUNOUT" && grep -qF '**NO CLEAN PAIRS.**' "$RUNOUT"; then
+  pass "9c. a baseline in set1 and a treatment in set2, same round number, form NO pair (both clean)"
+else
+  fail "9c. sessions from different sets must never pair (rc=$rc, out: $(head -1 "$RUNOUT"))"
+fi
+
+# --- Case 10: the medians and direction counts, NUMERICALLY -----------------------------
+# Every value is hand-chosen so each cell has exactly one expected answer, and the fixture is
+# built to pin the SIGN IN BOTH DIRECTIONS: two rounds where the treatment is FASTER (rows/s
+# up, cycles/row down) and one where it is SLOWER. A one-sided fixture cannot tell a correct
+# report from one that prints an absolute value or an inverted quantity.
+#
+#   round 1  Δcycles/row  -4.00%   Δrows/s  +10.00%   (faster)
+#   round 2  Δcycles/row  -8.00%   Δrows/s  +20.00%   (faster)
+#   round 3  Δcycles/row  +4.00%   Δrows/s   -5.00%   (slower)
+#   => median Δcycles/row -4.00%, median Δrows/s +10.00%, direction 2/3 up,
+#      worst pair-control 0.00% (every pair's bare-scan legs agree exactly),
+#      median IPC 2.0000 over the flight IPCs 1.0 / 2.0 / 3.0
+MED="$TMP/medians"
+mkses "$MED" 1 A 1 "$(isot 0)"   "$(isot 120)" 400000 20000 100000 25000 1.40
+mkses "$MED" 1 B 2 "$(isot 120)" "$(isot 240)" 400000 20000 110000 24000 1.00
+mkses "$MED" 2 A 1 "$(isot 240)" "$(isot 360)" 400000 20000 100000 25000 1.40
+mkses "$MED" 2 B 2 "$(isot 360)" "$(isot 480)" 400000 20000 120000 23000 2.00
+mkses "$MED" 3 A 1 "$(isot 480)" "$(isot 600)" 400000 20000 100000 25000 1.40
+mkses "$MED" 3 B 2 "$(isot 600)" "$(isot 720)" 400000 20000  95000 26000 3.00
+TS_MED="$TMP/ts-medians.jsonl"
+mkts "$TS_MED" "$(cadence_offsets 0 720)" - on
+pairs_run "$TS_MED" "set1=$MED"
+if [ "$rc" -ne 0 ]; then
+  fail "10. the medians fixture must run (rc=$rc, out: $(tailout))"
+else
+  # Each cell is read BY COLUMN HEADER, never by position: a positional read keeps passing
+  # after a column moves and is then asserting about a different quantity.
+  # IFS is set to TAB alone: the default IFS splits on SPACE too, so `median Δrows/s` arrived
+  # as column=`median`, and mdcell's own diagnostic named the wrong column while the assertion
+  # compared an empty string — a red that describes a defect in the harness, not the tool.
+  while IFS=$'\t' read -r column expected; do
+    got="$(mdcell "$RUNOUT" arm B "$column")"
+    if [ "$got" = "$expected" ]; then
+      pass "10. arm B '$column' = $got"
+    else
+      fail "10. arm B '$column' must be $expected (got '$got')"
+    fi
+  done <<'CELLS'
+clean pairs	3
+median Δcycles/row	-4.00%
+median Δrows/s	+10.00%
+direction (rows/s)	2/3 up
+worst pair-control	0.00%
+median IPC	2.0000
+CELLS
+  # ...and the per-pair table, whose rows pin the sign of BOTH quantities against each other:
+  # a faster treatment must read cycles/row DOWN and rows/s UP, and a slower one the reverse.
+  # A whole-row match also reds on a column swap, which a per-cell read of this table could
+  # not see (every row's first cell is the same set label).
+  for row in \
+    '| set1 | 1 | B | -4.00% | +10.00% | 0.00% |' \
+    '| set1 | 2 | B | -8.00% | +20.00% | 0.00% |' \
+    '| set1 | 3 | B | +4.00% | -5.00% | 0.00% |'; do
+    if grep -qF "$row" "$RUNOUT"; then
+      pass "10. per-pair row present and exact: $row"
+    else
+      fail "10. missing per-pair row: $row"
+    fi
+  done
+fi
+
+# The direction count at both extremes, so `N/M up` is pinned as a COUNT OF POSITIVES and not
+# a count of pairs. Two one-pair fixtures differing in exactly one property: whether the
+# treatment's rows/s is above or below the baseline's.
+for dir in faster slower; do
+  D10="$TMP/dir-$dir"
+  if [ "$dir" = faster ]; then f_rps=110000; f_cpr=24000; expect_up="1/1 up"; expect_rps="+10.00%"; expect_cpr="-4.00%"
+  else f_rps=90000; f_cpr=27500; expect_up="0/1 up"; expect_rps="-10.00%"; expect_cpr="+10.00%"; fi
+  mkses "$D10" 1 A 1 "$(isot 0)"   "$(isot 120)" 400000 20000 100000 25000 1.40
+  mkses "$D10" 1 B 2 "$(isot 120)" "$(isot 240)" 400000 20000 "$f_rps" "$f_cpr" 1.40
+  pairs_run "$TS_MED" "set1=$D10"
+  if [ "$rc" -eq 0 ] \
+    && [ "$(mdcell "$RUNOUT" arm B 'direction (rows/s)')" = "$expect_up" ] \
+    && [ "$(mdcell "$RUNOUT" arm B 'median Δrows/s')" = "$expect_rps" ] \
+    && [ "$(mdcell "$RUNOUT" arm B 'median Δcycles/row')" = "$expect_cpr" ]; then
+    pass "10-$dir. a $dir treatment reads $expect_rps rows/s, $expect_cpr cycles/row, $expect_up"
+  else
+    fail "10-$dir. a $dir treatment must read $expect_rps / $expect_cpr / $expect_up (rc=$rc, out: $(tailout))"
+  fi
+done
