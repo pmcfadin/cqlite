@@ -52,14 +52,24 @@ back into one.
 ## Autonomy: arm `--auto`, GitHub merges on green (default, #2667)
 
 - **Default:** the moment **local certification** is met — `agent-gate.sh` PASS + **C** PASS
-  (design-driven) + roborev clean — the closer runs `bash scripts/flow/premerge-assert.sh <pr>
-  <certified-sha> <gate-summary-file>` — the third argument is REQUIRED and is the FULL gate's own
-  summary file, so a merge with NO gate of record is now mechanically refused (#3465) — re-reads for
+  (design-driven) + roborev clean — the closer runs the pre-merge assert in one of its **two call
+  shapes** — the third argument is REQUIRED and is the FULL gate's own summary file, so a merge with
+  NO gate of record is mechanically refused (#3465) — re-reads for
   a fresh `HOLD:` order, then **arms `gh pr merge --auto --squash
   --delete-branch`** and `flow-finalize`s. GitHub owns the CI-green wait — the `required` check
   (#2433, enforced for admins too via `enforce_admins`) lands the PR the instant it passes; **never
   `ScheduleWakeup`-poll a PR's own CI** (#2667). Do NOT wait for the owner. **Seam 1 (spec approval)
   is the ONLY standing human gate.**
+  ```bash
+  # CASE A — the usual shape: the full gate ran on the head being merged.
+  bash scripts/flow/premerge-assert.sh <pr> <certified-sha> /tmp/gate-<N>.txt
+  # CASE B — the #1892 post-gate-polish route: a full PASS at anchor X, then a
+  # test/docs-only diff re-certified with `--delta X` (never a repeat full gate).
+  # Arg 3 is the ANCHOR's full summary, arg 4 the delta block; the anchor must
+  # also be an ANCESTOR of <certified-sha>, checked fail-closed (#3653).
+  bash scripts/flow/premerge-assert.sh <pr> <certified-sha> /tmp/gate-<N>.txt /tmp/delta-<N>.txt
+  ```
+  (`.claude/agents/flow-closer.md` carries the full contract for both shapes.)
 - **Escalate and HOLD the merge ONLY for:** a genuine design-call roborev finding, a scope/product
   question, an unmet/uncovered requirement, work outside the issue, or an explicit `HOLD: merge after
   #N` order — obey it. Everything else merges autonomously.

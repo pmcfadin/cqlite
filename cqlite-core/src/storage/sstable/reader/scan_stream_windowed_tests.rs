@@ -399,6 +399,13 @@ mod fixture_drain {
     /// signal, so a caller must be able to observe the `Err` — and, separately, to
     /// measure whether the streaming path had already emitted rows to its consumer
     /// when it did.
+    ///
+    /// Issue #3782 needs the same helper to assert a REFUSAL (a terminal drain over a
+    /// TRUNCATED window returns the decode error instead of emitting a partial
+    /// trailing partition). The tuple serves both, where its `Result<usize>` could
+    /// not: on `Err` a `Result<usize>` carries NO count, and the rows-already-emitted
+    /// figure is exactly what distinguishes "refused before emitting" from "refused
+    /// after handing rows to the consumer".
     fn drain_result(
         reader: &SSTableReader,
         chunks: &[Vec<u8>],
@@ -852,6 +859,13 @@ mod fixture_drain {
             failed.1
         );
 
+        // Issue #3782 sharpened the same discriminator from its side: the clean run's
+        // terminal drive is `at_final_chunk = true` over bytes whose last row is cut, so
+        // it REFUSES rather than emitting partial rows. Before that it emitted them and
+        // this guard compared row COUNTS — i.e. the fixture built to expose silent
+        // truncation was asserted from the wrong side. Both issues reached that
+        // conclusion independently.
+        //
         // THE PROPERTY (issue #1143), unchanged: `io_failed` SKIPS the terminal
         // drain, so a mid-stream read error never surfaces the partial trailing
         // partition. The gated run must therefore complete cleanly, having parsed

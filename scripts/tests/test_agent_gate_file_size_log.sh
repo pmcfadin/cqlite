@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
-# Regression test for issue #3401: the `file-size` gate component must PERSIST its
-# arithmetic as $LOG_DIR/file-size.log, on EVERY invocation.
+# Regression test for issues #3401 and #3402: the `file-size` gate component must PERSIST
+# its arithmetic as $LOG_DIR/file-size.log on EVERY invocation (#3401), and an ENGAGED
+# growth override must be VISIBLE IN THE SUMMARY BLOCK (#3402).
 #
-# The defect: run_file_size computed the base ref, the over-threshold advisory list and
+# The #3402 defect: with CQLITE_ALLOW_FILE_GROWTH=1 the component reported a bare
+# `file-size: PASS (0s)`, so a pasted SUMMARY — the unit of evidence a PR reviewer reads —
+# could not be told apart from a run where the ratchet was genuinely satisfied. The
+# component now reports its own NON-FAILING `OPT-OUT` token carrying the env var and the
+# COUNT, plus a pointer to this component's log — deliberately NOT the file names, which
+# live in file-size.log (#3401) and, for a reviewer, in the PR diff. The property that
+# matters most here is the
+# NEGATIVE one (case 4c): `OPT-OUT` may be emitted ONLY for the affirmative value `1`,
+# because a permissive branch keyed on `!= <bad>` would let a typo waive the ratchet.
+#
+# The #3401 defect: run_file_size computed the base ref, the over-threshold advisory list and
 # the exact `path: before -> after (limit N)` growth entries, echoed them to STDOUT — i.e.
 # into gate.log, the one file CLAUDE.md forbids an agent to read — and wrote only a bare
 # `file-size.result` (`FAIL 0`). So a `file-size: FAIL` in a pasted SUMMARY named NOTHING:
@@ -15,14 +26,18 @@
 # case therefore asserts the REAL numbers (`900 -> 950 (limit 800)`), the REAL base sha,
 # the thresholds and the terminal verdict.
 #
-# Seven paths through run_file_size, because the log must exist on ALL of them (AC3):
+# Paths through run_file_size, because the log must exist on ALL of them (AC3), plus the
+# three #3402 SUMMARY-visibility paths:
 #   1. grown + over threshold             -> FAIL
 #   2. over threshold but SHRUNK          -> PASS (advisory list, empty ratchet)
 #   3. no changed .rs files at all        -> PASS ("nothing over threshold" still logged)
 #   3b. changed .rs files, none over the threshold -> PASS (same log line, DIFFERENT input:
 #       case 3's tree is clean, so on its own it never proves a CHANGED-but-small file is
 #       handled — only that the component ran with an empty file list)
-#   4. grown + CQLITE_ALLOW_FILE_GROWTH=1 -> PASS (the opt-out is RECORDED)
+#   4. grown + CQLITE_ALLOW_FILE_GROWTH=1 -> OPT-OUT (the opt-out is RECORDED, and — since
+#      #3402 — VISIBLE in the SUMMARY block, not only in this log)
+#   4c. #3402: a MALFORMED override, run for BOTH spellings (`0` and `true`) -> still a
+#       ratchet FAIL, never OPT-OUT
 #   5. base ref unresolvable              -> PASS (advisory only, ratchet skipped)
 #   6. AC2: the FAIL stdout NAMES $LOG_DIR/file-size.log, so it is reachable from the
 #      SUMMARY's existing `logs:` line without the reader guessing a filename.
@@ -52,6 +67,12 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 GATE="$SCRIPT_DIR/../agent-gate.sh"
+# Case 4i runs a REAL FULL gate in a fixture, which must clear the #3544 component-set
+# pre-flight first: that needs the canonical remote identity pinned in the fixture's own copy
+# of the gate and a committed component manifest beside it. Both are the sanctioned
+# artifact-substitution helpers (a settable seam would reopen the hole #3544 closes).
+# shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.bash
+. "$SCRIPT_DIR/lib/agent-gate-canonical-pin.bash"
 
 # Never inherit a caller's summary path / parent marker (#2751/#2874 discipline), and
 # never block on the machine-wide gate slot (#1825) — these runs compile nothing.
@@ -197,6 +218,47 @@ has() {
   if grep -Fq -- "$3" "$2"; then ok "$1"; else bad "$1 (missing: '$3')"; fi
 }
 
+# has_re <label> <file> <ere> — the regex sibling of `has`, for shape assertions the
+# `%-18s` padding makes awkward as a literal. Same fail-closed rules: an empty pattern
+# matches every line, a missing/empty file is a measurement failure, never a match.
+has_re() {
+  if [ -z "${3:-}" ]; then
+    bad "$1 (EMPTY pattern — the expected shape was never captured)"; return
+  fi
+  if [ ! -f "$2" ]; then bad "$1 (no such file: $2)"; return; fi
+  if [ ! -s "$2" ]; then bad "$1 (file is ZERO BYTES: $2)"; return; fi
+  if grep -Eq -- "$3" "$2"; then ok "$1"; else bad "$1 (no line matched: '$3')"; fi
+}
+
+# lacks <label> <file> <literal> — the NEGATIVE assert, and it is fail-closed the same way
+# the positives are. A missing/empty file trivially "lacks" any needle, which is precisely
+# the vacuous green this suite refuses: the absence of a token in a block that was never
+# emitted proves nothing about the emitter (#3402).
+lacks() {
+  if [ -z "${3:-}" ]; then
+    bad "$1 (EMPTY needle — nothing was actually being excluded)"; return
+  fi
+  if [ ! -f "$2" ]; then bad "$1 (no such file: $2 — absence UNMEASURED)"; return; fi
+  if [ ! -s "$2" ]; then bad "$1 (file is ZERO BYTES: $2 — absence UNMEASURED)"; return; fi
+  if grep -Fq -- "$3" "$2"; then bad "$1 (unexpectedly PRESENT: '$3')"; else ok "$1"; fi
+}
+
+# fs_summary_row <summary-file> <outfile> (#3402) — isolate the emitted block's
+# `file-size:` component row so the SUMMARY-visibility asserts read the ROW, not the
+# whole block. Reading the row matters: a needle found anywhere in the block (the
+# component log path, a meta line) would not prove it landed on the line a reader of a
+# pasted summary actually sees. A missing block or a missing row writes a SENTINEL, never
+# an empty file, so every downstream `has`/`has_re` fails closed with a readable value.
+fs_summary_row() {
+  local out="$2"
+  if [ ! -s "${1:-}" ]; then printf '%s\n' '<no-summary-file-emitted>' >"$out"; return 1; fi
+  if ! grep -m1 -E '^file-size: ' "$1" >"$out" 2>/dev/null; then
+    printf '%s\n' '<no-file-size-row-in-block>' >"$out"; return 1
+  fi
+  [ -s "$out" ] || { printf '%s\n' '<empty-file-size-row>' >"$out"; return 1; }
+  return 0
+}
+
 # assert_log_present <label> <logfile> — existence AND non-emptiness, per AC3.
 assert_log_present() {
   if [ -f "$2" ] && [ -s "$2" ]; then
@@ -277,6 +339,20 @@ elif grep -Fq -- '-> ' "$log2"; then
 else
   ok "case2: PASS log lists no growth entry (ratchet genuinely empty)"
 fi
+# #3402 NEGATIVE CONTROL — the override UNSET. This is the run whose SUMMARY line must be
+# UNCHANGED by #3402: a plain `file-size: PASS (Ns)` with no OPT-OUT token and no detail
+# suffix anywhere in the block. Without it, "the token appears when the override is set"
+# is only half a property — a component that stamped OPT-OUT unconditionally would satisfy
+# case 4 and be a strictly worse defect than the one being fixed.
+sumrow2="$tmp/shrank.sumrow"
+fs_summary_row "$r2/.sum" "$sumrow2" ||
+  bad "case2 (#3402): the run emitted no usable file-size row — the negative control is UNMEASURED"
+has_re "case2 (#3402): with the override UNSET the SUMMARY row reads a plain PASS" \
+    "$sumrow2" '^file-size: +PASS \([0-9]+s\)'
+lacks "case2 (#3402): an unset override stamps NO OPT-OUT token anywhere in the block" \
+    "$r2/.sum" "OPT-OUT"
+lacks "case2 (#3402): an unset override stamps no CQLITE_ALLOW_FILE_GROWTH detail in the block" \
+    "$r2/.sum" "CQLITE_ALLOW_FILE_GROWTH"
 
 # ---------------------------------------------------------------------------
 # Case 3 — PASS with NO changed .rs files at all: an empty-ish run still gets a log that
@@ -319,21 +395,285 @@ has "case3b: log carries the terminal verdict" "$log3b" ">>> [file-size] PASS"
 # ---------------------------------------------------------------------------
 # Case 4 — the CQLITE_ALLOW_FILE_GROWTH=1 opt-out. The growth is ALLOWED, and the log must
 # RECORD what was allowed (the numbers are the whole point of the acknowledgement).
+#
+# #3402 extends this case from the LOG to the SUMMARY BLOCK. The log was already complete;
+# what was missing is that the SUMMARY — the unit of evidence agents paste into PRs —
+# carried a bare `file-size: PASS (0s)`, byte-indistinguishable from a run where the
+# ratchet was genuinely satisfied. So the component's own status TOKEN is now OPT-OUT, and
+# the row must NAME the env var and the COUNT and POINT AT this log — deliberately NOT the
+# file names, which are log-only (see the removed-cases note below for why rendering them on
+# the row was tried and withdrawn). The asserts below check both directions: the disclosure
+# is present, and no repository path rode onto the row with it.
 # ---------------------------------------------------------------------------
 mkrepo optout cqlite-core/src/big.rs 900 950 main; r4="$REPO"
 out4="$tmp/optout.out"
 run_only_file_size "$r4" "$out4" CQLITE_ALLOW_FILE_GROWTH=1
+rc4=$?
 d4=$(logdir_of "$out4") || bad "case4: the run published no usable 'logs:' dir"
 log4="$d4/file-size.log"
 
-assert_verdict "case4: CQLITE_ALLOW_FILE_GROWTH=1 turns the same growth into a PASS" "$d4" PASS
+assert_verdict "case4: CQLITE_ALLOW_FILE_GROWTH=1 turns the same growth into OPT-OUT, not PASS (#3402)" \
+    "$d4" OPT-OUT
 assert_log_present "case4: file-size.log written on the opt-out path (AC3)" "$log4"
 has "case4: opt-out log records the acknowledgement" \
     "$log4" "ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1"
 has "case4: opt-out log still records the exact growth entry" \
     "$log4" "cqlite-core/src/big.rs: 900 -> 950 (limit 800)"
-has "case4: opt-out log carries the terminal PASS verdict" \
-    "$log4" ">>> [file-size] PASS"
+has "case4: opt-out log carries the terminal OPT-OUT verdict" \
+    "$log4" ">>> [file-size] OPT-OUT"
+
+# --- case 4, #3402 half: the four facts a reader of a PASTED block needs ---------------
+# Asserted against the ROW, not the block: a needle found anywhere in the block would not
+# prove it landed on the line the reader actually sees.
+sumrow4="$tmp/optout.sumrow"
+fs_summary_row "$r4/.sum" "$sumrow4" ||
+  bad "case4 (#3402): the run emitted no usable file-size row — the SUMMARY asserts are UNMEASURED"
+has_re "case4 (#3402): the SUMMARY row carries the OPT-OUT status token, not PASS" \
+    "$sumrow4" '^file-size: +OPT-OUT \([0-9]+s\)'
+has "case4 (#3402): the SUMMARY row NAMES the env var that was engaged" \
+    "$sumrow4" "CQLITE_ALLOW_FILE_GROWTH=1"
+has "case4 (#3402): the SUMMARY row gives the COUNT of grown files" \
+    "$sumrow4" "1 over-threshold file(s) grown"
+# The row deliberately carries NO repository content (see the REMOVED-cases note below).
+# What it must carry instead is a pointer to where the names DO live, plus — asserted from
+# the other side — proof that no path leaked onto it.
+has "case4 (#3402): the SUMMARY row POINTS AT the component log for the file list" \
+    "$sumrow4" "see file-size.log under logs:"
+lacks "case4 (#3402): the row renders NO repository path — the whole mangling family is unreachable" \
+    "$sumrow4" "cqlite-core/src/big.rs"
+has "case4 (#3402): the row keeps its feature-matrix annotation ahead of the detail" \
+    "$sumrow4" "[no-cargo]"
+# ANCHORED ON THE TOKEN POSITION, not on the substring (#3625 interaction). A bare
+# `lacks "PASS"` began matching the census suffix's own wording — `{no census: component
+# ended OPT-OUT, so there is no PASS to affirm}` — so it reported the row "ALSO reads PASS"
+# on a perfectly correct line. The property wanted is that the STATUS FIELD is not PASS, and
+# only a position-anchored pattern says that; a substring test over a line that now carries
+# three suffixes was always going to collide with one of them eventually.
+if [ ! -s "$sumrow4" ]; then
+  bad "case4 (#3402): no file-size row captured — the token check could not run"
+elif grep -qE '^file-size: +PASS ' "$sumrow4"; then
+  bad "case4 (#3402): the row's STATUS FIELD reads PASS — a reader greps one token, not two"
+else
+  ok "case4 (#3402): the row's STATUS FIELD is not PASS — a reader greps one token, not two"
+fi
+# NON-FAILING, measured through the gate's own verdict rather than asserted of the source.
+# In `--only` mode a passing run is promoted to RESULT: PARTIAL and exits 3, while any
+# component FAIL leaves RESULT: FAIL and exit 1 — so this pair distinguishes exactly the
+# property #3402 must not break: a legitimate OPT-OUT does not fail the run.
+if [ "$rc4" = 3 ]; then
+  ok "case4 (#3402): a legitimate OPT-OUT is NON-FAILING (--only run exits 3, the pass code, not 1)"
+else
+  bad "case4 (#3402): expected the --only pass exit 3, got $rc4 — OPT-OUT failed the run"
+fi
+has "case4 (#3402): the block's RESULT is the passing PARTIAL, not FAIL" \
+    "$r4/.sum" "RESULT: PARTIAL"
+
+# ---------------------------------------------------------------------------
+# REMOVED, deliberately: cases 4b (elision past three files), 4e (a path containing `: `)
+# and 4g (a path containing the completion probe's verdict token). All three exercised the
+# INLINE GROWN-PATH LIST, which is gone.
+#
+# Why the list went, recorded here because a future reader will otherwise re-add it: it was
+# the OPTIONAL half of #3402 ("ideally naming the files", with the issue itself deferring
+# that data to the sibling log issue #3401, now merged), and it produced THREE of this PR's
+# seven review findings — one per round, each a different way of mangling a filename: a
+# `: ` split when recovering a path from a display string; substitution inside a path
+# carrying `RESULT:`; and `,` joining, which made `src/a.rs,b.rs` indistinguishable from two
+# files. Every fix was correct and the next round found another. That is the shape #3229
+# already ruled on — remove the mechanism rather than carve it a fourth time — and escaping
+# would only move the argument to the escape grammar (#3312: a rarer delimiter is still
+# forgeable).
+#
+# The row now carries env var + COUNT + a pointer to file-size.log, which is what the issue
+# actually specified. The names live in the log (#3401's whole subject) and, for a PR
+# reviewer, in the diff itself — the grown files are the files the PR changed.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Case 4h (#3402, roborev job 25) — the detail must carry NOTHING from the environment.
+# `$LOG_DIR` is `mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX"`, so interpolating any path
+# under it put CALLER-CONTROLLED text into a field whose contract says gate-authored — and a
+# TMPDIR containing the completion probe's verdict token then tripped the withholding guard,
+# taking the override name and the growth count with it. Exactly the disclosure this issue
+# exists to produce, destroyed by an environment variable.
+#
+# The fixture IS the hostile TMPDIR: a directory literally named `RESULT: PASS`, which is a
+# legal directory name and reaches LOG_DIR by the ordinary route. The needles assert the
+# disclosure SURVIVES it, and that no part of the path rode onto the row.
+# ---------------------------------------------------------------------------
+hostile_tmp="$tmp/RESULT: PASS"
+if ! mkdir -p "$hostile_tmp" 2>/dev/null; then
+  bad "case4h: could not create the hostile TMPDIR fixture — the environment route is UNMEASURED"
+  bad "case4h: (env-var needle not reached)"
+  bad "case4h: (count needle not reached)"
+  bad "case4h: (forged-verdict needle not reached)"
+else
+  mkrepo hostiletmp cqlite-core/src/big.rs 900 950 main; r4h="$REPO"
+  out4h="$tmp/hostiletmp.out"
+  run_only_file_size "$r4h" "$out4h" CQLITE_ALLOW_FILE_GROWTH=1 TMPDIR="$hostile_tmp"
+  sumrow4h="$tmp/hostiletmp.sumrow"
+  fs_summary_row "$r4h/.sum" "$sumrow4h" ||
+    bad "case4h (#3402): the run emitted no usable file-size row — the TMPDIR asserts are UNMEASURED"
+  has "case4h (#3402): a hostile TMPDIR does NOT cost the override name" \
+      "$sumrow4h" "CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced)"
+  has "case4h (#3402): a hostile TMPDIR does NOT cost the growth count" \
+      "$sumrow4h" "1 over-threshold file(s) grown"
+  if [ ! -s "$sumrow4h" ]; then
+    bad "case4h (#3402): no file-size row captured — the forged-verdict check could not run"
+  elif grep -Eq 'RESULT: (PASS|FAIL)' "$sumrow4h"; then
+    bad "case4h (#3402): the TMPDIR's verdict token reached the row — it would forge a verdict"
+  else
+    ok "case4h (#3402): no part of the TMPDIR reached the row — the pointer composes, it does not carry"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Case 4c (#3402), run for BOTH malformed spellings — THE FALSE-PASS ROUTE, and the reason the emit is keyed on the
+# AFFIRMATIVE `= 1`. `CQLITE_ALLOW_FILE_GROWTH` has THREE states, not two: exactly `1`
+# (engaged), SET BUT NOT 1 (`0`, `true`, `yes` — a typo, and already reported as "this IS
+# a ratchet violation"), and unset. A permissive branch keyed on `!= <bad>` would let the
+# middle state buy an OPT-OUT, i.e. a mis-spelled override silently waiving the ratchet —
+# strictly worse than the invisible opt-out this issue closes. Both spellings of the
+# middle state are exercised on the SAME grown fixture as case 4, so the only difference
+# between a FAIL here and an OPT-OUT there is the value of the variable.
+# ---------------------------------------------------------------------------
+for bad_val in 0 true; do
+  mkrepo "badval$bad_val" cqlite-core/src/big.rs 900 950 main; rbv="$REPO"
+  outbv="$tmp/badval$bad_val.out"
+  run_only_file_size "$rbv" "$outbv" "CQLITE_ALLOW_FILE_GROWTH=$bad_val"
+  rcbv=$?
+  dbv=$(logdir_of "$outbv") || bad "case4c/$bad_val: the run published no usable 'logs:' dir"
+  assert_verdict "case4c/$bad_val (#3402): a malformed override keeps the ratchet VIOLATION (FAIL)" \
+      "$dbv" FAIL
+  has "case4c/$bad_val (#3402): the log carries the unchanged ratchet-violation wording" \
+      "$dbv/file-size.log" "FAIL: change makes over-threshold file(s) larger."
+  lacks "case4c/$bad_val (#3402): NO OPT-OUT token anywhere in the emitted block" \
+      "$rbv/.sum" "OPT-OUT"
+  sumrowbv="$tmp/badval$bad_val.sumrow"
+  fs_summary_row "$rbv/.sum" "$sumrowbv" ||
+    bad "case4c/$bad_val (#3402): no usable file-size row — the malformed-value assert is UNMEASURED"
+  has_re "case4c/$bad_val (#3402): the SUMMARY row reads FAIL" \
+      "$sumrowbv" '^file-size: +FAIL \([0-9]+s\)'
+  if [ "$rcbv" = 1 ]; then
+    ok "case4c/$bad_val (#3402): the run FAILS (exit 1), so a typo can never buy a green"
+  else
+    bad "case4c/$bad_val (#3402): expected exit 1, got $rcbv — a malformed override did not fail the run"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Case 4i (#3402, roborev job 26) — the disclosure must survive an EARLY-EXIT emit.
+#
+# `run_file_size` executes ~250 lines BEFORE the dataset and schemas preflights, and each
+# early-exit `emit_summary` hand-builds its own meta list. So a full gate with an engaged
+# override and a missing corpus recorded `file-size: OPT-OUT` and then emitted its ONLY
+# block with NO component row at all — the override name and the growth count absent from
+# the very artifact this issue exists to put them in. Round 1 found the same shape in the
+# tree-integrity boundary block; this is the preflight emit.
+#
+# This is the suite's one REAL FULL-GATE run. It compiles nothing: the preflight fails before
+# any component is dispatched, which is exactly the window under test. It needs the #3544
+# pre-flight to pass, hence the pinned canonical remote + committed manifest and a local bare
+# origin.
+# ---------------------------------------------------------------------------
+pf_root="$tmp/preflight-fixture"
+pf_empty="$tmp/preflight-empty-root/sstables"
+pf_ok=1
+mkdir -p "$pf_root/scripts" "$pf_root/cqlite-core/src" "$pf_empty" 2>/dev/null || pf_ok=0
+if [ "$pf_ok" = 1 ]; then
+  cp "$GATE" "$pf_root/scripts/agent-gate.sh" || pf_ok=0
+fi
+if [ "$pf_ok" = 1 ]; then
+  agent_gate_pin_canonical_remote "$pf_root/scripts/agent-gate.sh" "$pf_root.origin.git" || pf_ok=0
+  agent_gate_install_components_manifest "$pf_root/scripts/agent-gate.sh" || pf_ok=0
+fi
+if [ "$pf_ok" = 1 ]; then
+  lines 900 "$pf_root/cqlite-core/src/big.rs"
+  printf 'target/\n*.log\n' > "$pf_root/.gitignore"
+  ( cd "$pf_root" && git "${GIT_CFG[@]}" init -q -b main . &&
+    git "${GIT_CFG[@]}" add -A && git "${GIT_CFG[@]}" commit -qm init &&
+    git init -q --bare "$pf_root.origin.git" &&
+    git "${GIT_CFG[@]}" remote add origin "$pf_root.origin.git" &&
+    git "${GIT_CFG[@]}" push -q origin main ) >/dev/null 2>&1 || pf_ok=0
+fi
+if [ "$pf_ok" != 1 ]; then
+  # NOT a skip: this suite needs git and a writable scratch, both of which every other case
+  # already relies on, so a failure here is a broken harness rather than a missing capability.
+  bad "case4i: could not build the full-gate preflight fixture — the early-exit path is UNMEASURED"
+  bad "case4i: (OPT-OUT row needle not reached)"
+  bad "case4i: (count-agreement needle not reached)"
+  bad "case4i mutant: (not reached)"
+else
+  lines 950 "$pf_root/cqlite-core/src/big.rs"
+  pf_sum="$tmp/preflight.sum"; pf_out="$tmp/preflight.out"
+  ( cd "$pf_root" && env -u AGENT_GATE_SUMMARY_FILE CQLITE_DATASETS_ROOT="${pf_empty%/sstables}" \
+      CQLITE_ALLOW_FILE_GROWTH=1 CQLITE_GATE_DISABLE_CAP=1 AGENT_GATE_SUMMARY_FILE="$pf_sum" \
+      bash "$pf_root/scripts/agent-gate.sh" >"$pf_out" 2>&1 )
+  # POSITIVE CONTROL: the run must actually have stopped at the corpus preflight. Without
+  # this, an assert below could be measuring a run that never got there.
+  if grep -q 'missing-fixtures: FAIL-CLOSED' "$pf_sum" 2>/dev/null; then
+    ok "case4i: the fixture run really stopped at the #2078 corpus preflight (window under test)"
+  else
+    bad "case4i: the run did not reach the corpus preflight — the early-exit path is UNMEASURED"
+    grep -E '^(preflight|component-set|RESULT):' "$pf_sum" 2>/dev/null | head -3
+  fi
+  # The annotation is REQUIRED, not incidental (roborev job 76). #3453's contract is that
+  # EVERY component line names the feature matrix it ran; a funnel-appended row that omitted
+  # it would satisfy "the disclosure is present" while losing the execution evidence beside
+  # it — and the first version of this assert PINNED that incomplete shape, which is how a
+  # test stops being a check and starts being a ratchet on a defect.
+  # The row's tail is `[<matrix>]  {<census>} — <detail>` after #3625 landed its census
+  # suffix, so matrix and detail are no longer adjacent. Asserted as an ORDERED pattern rather
+  # than a literal: the three suffixes must appear in that order, and a future fourth cannot
+  # silently displace the disclosure without this failing.
+  has_re "case4i (#3402): the preflight-FAIL block carries the OPT-OUT row, its matrix and its detail" \
+      "$pf_sum" '^file-size: +OPT-OUT \(0s\)  \[no-cargo\].*CQLITE_ALLOW_FILE_GROWTH=1 \(ratchet NOT enforced\); 1 over-threshold file\(s\) grown'
+  # The count must AGREE with the rows printed. It did not: the helper assigns its count
+  # inside a command substitution, so the caller read 0 beside one row — a count
+  # contradicting its own table, which is the invariant
+  # scripts/tests/test_agent_gate_tree_provenance.sh asserts for the boundary block.
+  pf_rows=$(grep -cE '^[a-z][a-z0-9-]*: +(PASS|FAIL|SKIP|OPT-OUT) \([0-9]+s\)' "$pf_sum" 2>/dev/null | tr -d ' ')
+  pf_said=$(sed -n 's/^components-recorded: \([0-9]*\) .*/\1/p' "$pf_sum" | head -1)
+  if [ -n "$pf_said" ] && [ "$pf_said" = "${pf_rows:-x}" ]; then
+    ok "case4i (#3402): components-recorded ($pf_said) equals the rows printed — no contradicted count"
+  else
+    bad "case4i (#3402): the block says '$pf_said' completed but printed ${pf_rows:-<unmeasured>} row(s)"
+  fi
+  # The mutant: stop the EMIT FUNNEL appending the table, which is the state before this fix.
+  # The block still emits, so only the row can distinguish the two.
+  #
+  # WRITE-AND-MOVE, never `sed -i` (roborev job 74): `sed -i EXPR FILE` is GNU-only — BSD and
+  # macOS sed require an argument to -i (`sed -i '' EXPR FILE`), so the GNU spelling makes
+  # this REGISTERED gate test fail on a platform the repo supports, and
+  # scripts/tests/test_agent_gate_tree_portability.sh lints for exactly this shape. The
+  # temp-file form needs no version sniff and is unambiguous on both.
+  #
+  # THE GUARD ASSERTS THE MUTATION CHANGED SOMETHING, not that a pattern is now absent. The
+  # first version sed'd `${_pf_rows:+…}` — the per-site wiring this fix REPLACED — and then
+  # checked that pattern was gone, which is trivially true of a file that never contained it.
+  # So it built an identical copy, "proved" nothing, and reported the row surviving as a
+  # failure of the check rather than of the mutant. A mutant that cannot be shown to differ
+  # from the original is a vacuous control, and `cmp` is the only thing that shows it.
+  pf_mut="$tmp/preflight-mutant"
+  if cp -r "$pf_root" "$pf_mut" 2>/dev/null &&
+     grep -q 'line=$(_recorded_component_rows_block)' "$pf_mut/scripts/agent-gate.sh" &&
+     sed 's/^\( *\)line=$(_recorded_component_rows_block)$/\1line=""/' \
+         "$pf_mut/scripts/agent-gate.sh" > "$pf_mut/scripts/agent-gate.sh.mut" &&
+     mv "$pf_mut/scripts/agent-gate.sh.mut" "$pf_mut/scripts/agent-gate.sh" &&
+     ! cmp -s "$pf_root/scripts/agent-gate.sh" "$pf_mut/scripts/agent-gate.sh"; then
+    pf_msum="$tmp/preflight-mutant.sum"
+    ( cd "$pf_mut" && env -u AGENT_GATE_SUMMARY_FILE CQLITE_DATASETS_ROOT="${pf_empty%/sstables}" \
+        CQLITE_ALLOW_FILE_GROWTH=1 CQLITE_GATE_DISABLE_CAP=1 AGENT_GATE_SUMMARY_FILE="$pf_msum" \
+        bash "$pf_mut/scripts/agent-gate.sh" >"$tmp/preflight-mutant.out" 2>&1 )
+    if grep -q 'CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced)' "$pf_msum" 2>/dev/null; then
+      bad "case4i mutant: the row survives without the rows argument — the check cannot fail"
+    else
+      ok "case4i mutant: without the rows argument the override is INVISIBLE in the block (proved discriminating)"
+    fi
+  else
+    bad "case4i mutant: could not build the mutant fixture — the assert above is unproven"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # Case 5 — base ref UNRESOLVABLE (no main/master, no origin/*): the ratchet is skipped and
@@ -428,6 +768,7 @@ case "\$d" in
     if [ -d "\$d" ]; then
       case "\${FS_SABOTAGE:-}" in
         dir)     mkdir -p "\$d/file-size.log" ;;
+        detaildir) mkdir -p "\$d/file-size.status-detail" ;;
         devfull) ln -s /dev/full "\$d/file-size.log" ;;
         sibfull) mkdir -p "\$d/file-size.log"
                  ln -s /dev/full "\$d/file-size.persistence-error.log" ;;
@@ -573,6 +914,16 @@ STUB
   else
     ok "case9: the combined failure does NOT disclaim the real ratchet violation"
   fi
+  # #3402: the same non-disclaimer, on the SUMMARY ROW. stdout is gate.log, which agents are
+  # told never to read — the row is the artifact a reader actually sees, so the property has
+  # to hold there too or it holds only where nobody looks.
+  sumrow9="$tmp/bothfail.sumrow"
+  fs_summary_row "$r9/.sum" "$sumrow9" ||
+    bad "case9 (#3402): the run emitted no usable file-size row — the SUMMARY asserts are UNMEASURED"
+  has "case9 (#3402): the row reports BOTH failures, not persistence alone" \
+      "$sumrow9" "TWO failures: a REAL size-ratchet violation AND a log-persistence failure"
+  lacks "case9 (#3402): the row does NOT disclaim the real ratchet violation" \
+      "$sumrow9" "not a ratchet violation"
 
   # -------------------------------------------------------------------------
   # Case 10 — persistence failure on a NO-BASE run (#3401 review L1). With no resolvable
@@ -601,6 +952,16 @@ STUB
   else
     ok "case10: claims no ratchet verdict for a run that never computed one"
   fi
+  # #3402: and the ROW must not claim it either. `ratchet_verdict` is PASS on this path
+  # (nothing ever set it otherwise), so an arm that simply interpolated it would assert a
+  # comparison that never ran — #3401 review L1, one artifact over.
+  sumrow10="$tmp/nobasepersist.sumrow"
+  fs_summary_row "$r10/.sum" "$sumrow10" ||
+    bad "case10 (#3402): the run emitted no usable file-size row — the SUMMARY asserts are UNMEASURED"
+  has "case10 (#3402): the row says the ratchet was SKIPPED, so nothing was compared" \
+      "$sumrow10" "the ratchet was SKIPPED (base ref unavailable), so nothing was compared"
+  lacks "case10 (#3402): the row claims NO computed ratchet verdict" \
+      "$sumrow10" "the ratchet itself computed"
 
   # -------------------------------------------------------------------------
   # Case 11 — the sibling must carry the SAME arithmetic in EVERY ratchet state (#3401
@@ -638,6 +999,82 @@ STUB
   # instead, so it cannot be satisfied from any other state.
   has "case11: CONTROL — the sibling records the allowance as the reason the ratchet passed" \
       "$sib11" "growth allowance: ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1"
+  # #3402 — THE REPRODUCED DEFECT. The opt-out branch stamps the status detail, then the
+  # persistence block turns the token into FAIL, so before the fix this row read
+  #   file-size: FAIL (0s)  [no-cargo] — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced);
+  #   1 over-threshold file(s) grown: cqlite-core/src/big.rs
+  # — a FAIL whose entire detail describes an opt-out that is NOT why it failed, sending the
+  # reader to look for a growth violation that the gate had in fact ALLOWED. Measured on the
+  # real gate, not reasoned about. The four needles are complementary and none is satisfiable
+  # from another state: the FAIL token (persistence), the persistence wording, the ratchet's
+  # OWN state preserved (so the opt-out is disclosed, not merely suppressed), and the ABSENCE
+  # of the opt-out branch's own phrasing, which is the exact bytes that used to leak here.
+  sumrow11="$tmp/optoutpersist.sumrow"
+  fs_summary_row "$r11/.sum" "$sumrow11" ||
+    bad "case11 (#3402): the run emitted no usable file-size row — the SUMMARY asserts are UNMEASURED"
+  has_re "case11 (#3402): the row's TOKEN is FAIL — a persistence failure IS a component failure" \
+      "$sumrow11" '^file-size: +FAIL \([0-9]+s\)'
+  has "case11 (#3402): the row says the failure is LOG PERSISTENCE, not the ratchet" \
+      "$sumrow11" "LOG PERSISTENCE FAILURE, not a ratchet violation"
+  # THE DISCLOSURE ITSELF, not merely the token (roborev job 104). This is the one state where
+  # the override name and the grown count can vanish from EVERY reachable artifact at once:
+  # the log that would hold them is what failed to persist, and the sibling may be unwritable
+  # too. Naming only "computed OPT-OUT" told a reader the ratchet produced a token, not that
+  # it was switched off nor over how many files.
+  has "case11 (#3402): the row says the ratchet was OPTED OUT OF, not merely what it computed" \
+      "$sumrow11" "the ratchet was OPTED OUT OF: CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced)"
+  has "case11 (#3402): the row RETAINS the grown count through a persistence failure" \
+      "$sumrow11" "1 over-threshold file(s) grown"
+  # ORDERING, not absence (roborev job 104). This assert used to be a `lacks` on the opt-out
+  # branch's literal bytes, standing in for "the row does not blame the opt-out for the FAIL".
+  # That proxy broke the moment the persistence arm legitimately RETAINED those bytes — and a
+  # proxy that forbids the correct output is worse than no assert, because the obvious way to
+  # green it is to delete the disclosure. The property actually wanted is that the persistence
+  # cause LEADS: a reader must not be able to read the opt-out as the reason for the failure.
+  # An ordered pattern says exactly that and is compatible with retaining the disclosure.
+  has_re "case11 (#3402): the persistence cause LEADS the detail — the opt-out is not the reason for the FAIL" \
+      "$sumrow11" 'LOG PERSISTENCE FAILURE, not a ratchet violation .*the ratchet was OPTED OUT OF'
+
+  # -------------------------------------------------------------------------
+  # Case 14 (#3402, roborev job 108) — an UNWRITABLE sidecar must leave NOTHING renderable,
+  # never a stale or partial detail. `_record_status_detail` is called TWICE on this path:
+  # once by the opt-out branch, then again by the persistence block to REPLACE that detail.
+  # A truncate-in-place whose second write failed left the FIRST detail in the file, so the
+  # row claimed `CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced)` while the component was
+  # FAIL for a persistence reason — the C1 false attribution, arriving through a failed write.
+  #
+  # The fixture plants a DIRECTORY at the sidecar path, so every write to it fails
+  # (uid-independent, unlike a chmod, which is a no-op for root).
+  #
+  # WHAT THIS CASE DOES *NOT* PROVE, said plainly rather than left to be assumed: it does NOT
+  # discriminate the write-then-rename fix. With the sidecar wholly unwritable, the previous
+  # truncate-in-place form fails identically and also renders nothing — verified against a
+  # mutant restoring it, where this case still passes. The hazard the fix closes needs the
+  # FIRST write to SUCCEED and the SECOND to FAIL, i.e. the path must become unwritable
+  # BETWEEN two calls inside one component, which no external fixture can arrange at this
+  # granularity (the same reason #3401 declared the mid-sequence partial write unreachable).
+  # So this case pins the REACHABLE half — an unwritable sidecar renders nothing partial or
+  # stale — and the unreachable half rests on the code being obviously safer rather than on a
+  # green here. A case that cannot fail for the reason you think it can is worse than one
+  # whose scope is written down.
+  # -------------------------------------------------------------------------
+  mkrepo detailfail cqlite-core/src/big.rs 900 950 main; r14="$REPO"
+  out14="$tmp/detailfail.out"
+  run_only_file_size "$r14" "$out14" PATH="$STUBBIN:$PATH" FS_SABOTAGE=detaildir \
+      CQLITE_ALLOW_FILE_GROWTH=1
+  d14=$(logdir_of "$out14") || bad "case14: the run published no usable 'logs:' dir"
+  if [ -d "$d14/file-size.status-detail" ]; then
+    ok "case14: sabotage in place (the status-detail path is a directory, so every write fails)"
+  else
+    bad "case14: sabotage did NOT take effect at '$d14/file-size.status-detail' — the path was never exercised"
+  fi
+  sumrow14="$tmp/detailfail.sumrow"
+  fs_summary_row "$r14/.sum" "$sumrow14" ||
+    bad "case14 (#3402): the run emitted no usable file-size row — the stale-detail asserts are UNMEASURED"
+  lacks "case14 (#3402): an unwritable sidecar renders NO opt-out claim (no stale detail)" \
+      "$sumrow14" "ratchet NOT enforced"
+  lacks "case14 (#3402): and no partial fragment of it either" \
+      "$sumrow14" "CQLITE_ALLOW_FILE_GROWTH"
 
   # -------------------------------------------------------------------------
   # Case 13 — CQLITE_ALLOW_FILE_GROWTH set to a NON-1 value (#3401 review item 3). The
@@ -708,7 +1145,7 @@ fi
 
 # ---------------------------------------------------------------------------
 printf '\n%s\n' "----------------------------------------"
-printf 'file-size component log guard (#3401): %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
+printf 'file-size component log + opt-out marker guard (#3401/#3402): %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 # Census, not a floor (#3401 review N4/N2): every assertion reports exactly one of
 # ok/FAIL/SKIP, so `PASS + FAIL + SKIP` is fixed for a run that reaches the end. A floor
 # with slack tolerates silently deleted assertions — the vacuous-green shape this suite
@@ -716,7 +1153,20 @@ printf 'file-size component log guard (#3401): %d passed, %d failed, %d skipped\
 # precondition failure (an unusable repo, a missing mktemp) short-circuits its case's
 # remaining asserts and lands here too, so the message names both causes rather than
 # misattributing one as the other.
-EXPECTED_CHECKS=75
+# 99 -> 107 on #3402's C1 fix: +2 case9, +2 case10, +4 case11, all unconditional (the
+# FS_SABOTAGE=dir shape is uid-independent and needs no /dev/full, so none can self-skip).
+# 75 (#3401) -> 107 -> 112 -> 114 -> 116 across #3402's review rounds, then DOWN to 105 on
+# job 23, when the inline grown-path list was removed (cases 4b/4e/4g went with it, -12, and
+# case 4 gained a log-pointer needle plus a no-repository-path needle, +1 net), then 105 ->
+# 108 on job 25 (+3 case4h: a hostile TMPDIR must not cost the disclosure). A census that
+# only ever rises is a census nobody re-derives — this one is recomputed from the run, and
+# the first value written here was WRONG (109, guessed from the number of asserts typed
+# rather than counted from a run: `fs_summary_row || bad` contributes nothing unless it
+# fires).
+# 113 -> 116 on job 108 (+3 case14: an unwritable sidecar must leave nothing renderable).
+# Counted from a RUN, not from asserts typed: the `fs_summary_row || bad` guard contributes
+# nothing unless it fires, which is why the first value written here (117) was wrong twice.
+EXPECTED_CHECKS=116
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"

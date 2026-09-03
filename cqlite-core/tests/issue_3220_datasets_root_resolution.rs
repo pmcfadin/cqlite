@@ -35,7 +35,7 @@
 mod datasets_root;
 
 use datasets_root::{
-    first_root_with_table, sstables_root_candidates, table_has_data,
+    first_root_with_table, sstables_root_candidates, table_generation_dirs, table_has_data,
     CHECKOUT_SSTABLES_ROOT_OVERRIDE_ENV,
 };
 use std::path::{Path, PathBuf};
@@ -247,4 +247,85 @@ fn a_prefix_sharing_sibling_table_does_not_satisfy_the_request() {
         "`wide_table_v2-<uuid>` must not answer a request for `wide_table`"
     );
     assert!(table_has_data(&root, "test_da", "wide_table_v2"));
+}
+
+/// Issue #3782 (roborev job 57 finding 2) — GENERATION selection must be
+/// deterministic AND must require the component, not take the first `read_dir`
+/// hit.
+///
+/// `read_dir` order is unspecified, so a lane that takes "the first `<table>-*`
+/// directory" is nondeterministic as soon as a table has more than one
+/// generation directory — and if it also does not require a `*-Data.db` it can
+/// bind to a sidecar-only generation and fail on one machine while passing on
+/// another with the same bytes on disk. That pairing is live in this corpus: the
+/// checkout's `test_basic/composite_key_table-…/` holds sidecars only while the
+/// fetched root's copy is complete.
+///
+/// Synthetic roots, because the real layout can only ever show THIS machine's
+/// directory order — the same reason [`first_root_with_table`] is tested this way.
+#[test]
+fn generation_selection_is_deterministic_and_skips_a_sidecar_only_generation() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("sstables");
+    // Created in an order that is NOT the sorted order, and with the
+    // sidecar-only generation created first — the shape that makes an
+    // order-dependent selection pick the unusable directory.
+    let sidecar_only = make_table_dir(
+        &root,
+        "test_basic",
+        "composite_key_table",
+        "0000sidecar",
+        &["nb-1-big-Data.db.jsonl", "nb-1-big-TOC.txt"],
+    );
+    let later = make_table_dir(
+        &root,
+        "test_basic",
+        "composite_key_table",
+        "cccc",
+        &["nb-1-big-Data.db"],
+    );
+    let earlier = make_table_dir(
+        &root,
+        "test_basic",
+        "composite_key_table",
+        "bbbb",
+        &["nb-1-big-Data.db"],
+    );
+
+    let dirs = table_generation_dirs(&root, "test_basic", "composite_key_table");
+    assert!(
+        !dirs.contains(&sidecar_only),
+        "a generation directory with no *-Data.db is not usable and must not be \
+         offered: {dirs:?}"
+    );
+    // SORTED, whatever order the directories were created in — the whole point.
+    assert_eq!(
+        dirs,
+        vec![earlier.clone(), later],
+        "generation directories must be returned in sorted order, never read_dir order"
+    );
+    // Which one a single-fixture lane takes: the FIRST of that defined order.
+    assert_eq!(dirs.first(), Some(&earlier));
+}
+
+/// The fail-closed half: a table whose only generation directory carries
+/// sidecars has NO usable generation, and that must be reported as absence — the
+/// loud named failure every #3782 caller turns into a panic — never as a
+/// directory a lane then tries to read.
+#[test]
+fn a_table_whose_only_generation_is_sidecar_only_has_no_usable_generation() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("sstables");
+    make_table_dir(
+        &root,
+        "test_basic",
+        "composite_key_table",
+        "aaaa",
+        &["nb-1-big-Data.db.jsonl", "nb-1-big-Statistics.db.txt"],
+    );
+    assert!(
+        table_generation_dirs(&root, "test_basic", "composite_key_table").is_empty(),
+        "a sidecar-only table must offer no usable generation directory"
+    );
+    assert!(!table_has_data(&root, "test_basic", "composite_key_table"));
 }

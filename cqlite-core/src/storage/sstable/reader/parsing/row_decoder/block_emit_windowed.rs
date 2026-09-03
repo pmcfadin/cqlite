@@ -35,6 +35,7 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_emit_windowed<F>(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         row_body_window: Option<(usize, usize)>,
@@ -589,7 +590,47 @@ impl V5CompressedLegacyParser {
                                 );
                             }
                             Err(e) => {
-                                // Issue #3721: `column_decode_error` decides.
+                                // End of valid data in partition
+                                debug!(
+                                    "V5CompressedLegacy: Partition {} ended after {} rows: {}",
+                                    partition_index, row_count, e
+                                );
+                                if row_count == 0 {
+                                    // If we couldn't parse even one row, log as error
+                                    tracing::error!(
+                                        "V5CompressedLegacy: Partition {} - Failed to parse first row at offset {}: {}",
+                                        partition_index, offset, e
+                                    );
+                                }
+                                // Issue #3782: on a PROVEN-complete buffer no further
+                                // bytes can finish this row, so the failure is
+                                // truncation/corruption — DATA LOSS — and is reported;
+                                // swallowing it made a SELECT over a fixture with ONE
+                                // corrupted clustering byte return 23 of 100 rows.
+                                // Otherwise the tolerant break STAYS: a chunk-covering
+                                // window can legitimately cut a row at its tail. See
+                                // `BufferExtent`.
+                                // Issue #3721 composes INSIDE that gate: on a complete
+                                // buffer the failure is authoritative, but it is still
+                                // two different facts — a per-column decode failure
+                                // (propagate, naming the column) versus the ordinary
+                                // end-of-partition-body signal (break). Only
+                                // `column_decode_error` can tell them apart, so returning
+                                // `Err(e)` unconditionally here would report a normal
+                                // partition end as corruption.
+                                // #3782 FIRST and unconditionally: on a proven-complete
+                                // buffer ANY failure is data loss, whatever its kind.
+                                if extent.is_complete() {
+                                    return Err(e);
+                                }
+                                // #3721 for the incomplete case: a per-column decode
+                                // failure must STILL reach the caller, because the caller
+                                // owns the tolerance decision (the BTI point read remembers
+                                // it and retries with more bytes; the driver uses
+                                // `at_final_chunk`). Gating this on `is_complete()` put that
+                                // decision back INSIDE the parse — contradicting #3782's own
+                                // rule — and silently reintroduced job 80's phantom absence,
+                                // caught by `issue_3721_bti_point_read_absence`.
                                 column_decode_error::end_of_partition_or_bail(
                                     e,
                                     partition_index,

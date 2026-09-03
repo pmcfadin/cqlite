@@ -129,9 +129,17 @@ pub fn fuzz_block_emit(block: &[u8]) -> Result<()> {
             None,
         );
 
-    parser.parse_block_emit(block, Some(&ctx.schema), &ctx.reader, |_entry| {
-        Ok(std::ops::ControlFlow::Continue(()))
-    })
+    // #3782: the fuzzer's buffer is standalone — no continuation can ever
+    // arrive — so `Complete` is the truthful declaration AND the stricter arm to
+    // fuzz. Errors are expected here; the contract this target proves is that no
+    // input panics, hangs or OOMs.
+    parser.parse_block_emit(
+        block,
+        crate::storage::sstable::reader::parsing::row_decoder::BufferExtent::Complete,
+        Some(&ctx.schema),
+        &ctx.reader,
+        |_entry| Ok(std::ops::ControlFlow::Continue(())),
+    )
 }
 
 /// Cached reader + schema for [`fuzz_block_emit`].

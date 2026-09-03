@@ -444,7 +444,8 @@ jobs:
           # cqlite-core TEST-ONLY helper and is NOT consulted by the node binding
           # runtime. Actual fail-closed coverage here comes from the
           # check-dataset-manifest.sh step above (hard-fails on a partial/dropped
-          # 39-table corpus) plus the JS skipIfNoDatasets throw on missing data. The flag
+          # 39-table corpus) plus the JS assertDatasetsAvailable() throw on missing data
+          # (#3641 renamed it from skipIfNoDatasets, which never skipped). The flag
           # is set for parity of intent with the Rust/Python lanes.
           CQLITE_REQUIRE_FIXTURES: "1"
           # Issue #1465 (roborev V1): the exception-path/abandoned-iterator leak budgets

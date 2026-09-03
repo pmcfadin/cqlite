@@ -280,7 +280,13 @@ async fn range_marker_resumes_across_window_refill_byte_identical() {
 
     // Reference: the buffered whole-partition decode.
     let buffered = parser
-        .parse_block_for_compaction(&whole, Some(&schema), &reader)
+        // #3782: `whole` came from `stitch_all_chunks` — the entire data section.
+        .parse_block_for_compaction(
+            &whole,
+            crate::storage::sstable::reader::parsing::BufferExtent::Complete,
+            Some(&schema),
+            &reader,
+        )
         .expect("buffered compaction decode");
 
     // Non-vacuity: the fixture really produced a RangeMarker per partition, so the

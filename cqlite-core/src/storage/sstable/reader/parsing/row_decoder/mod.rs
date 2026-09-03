@@ -787,6 +787,10 @@ pub struct V5CompressedLegacyParser {
 
 mod block_emit;
 mod block_emit_windowed;
+// Issue #3782: the explicit buffer-extent contract the block-emit parses take.
+mod buffer_extent;
+// `pub` only so it is RE-EXPORTABLE beside the parser (module is `pub(crate)`).
+pub use buffer_extent::BufferExtent;
 mod cell_kind;
 mod cell_value;
 mod cell_value_complex; // campsite split of `cell_value` (#1795): complex ladder

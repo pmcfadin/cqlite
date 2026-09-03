@@ -12,6 +12,7 @@ use super::model::{
     bti_lookup_step, point_read_absence_or_remembered, point_read_remember_or_bail,
     table_header_consistent_for_seek, BtiLookupStep,
 };
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::{ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use tracing::debug;
@@ -361,8 +362,27 @@ impl SSTableReader {
             // key (see `emitted_our_key` below).
             let mut found: Option<ScanRow> = None;
             let mut emitted_our_key = false;
+            // #3782: a chunk-covering WINDOW — a truncated tail here is this
+            // reader's straddle signal ("pull the next chunk"), not corruption.
             let parse_result = parser.parse_block_emit(
                 &window[within..],
+                // Issue #3782 x #3721: the extent MUST come from the same finality state the
+                // guard below uses (`chunk_targeted`), or the two mechanisms cancel.
+                //
+                // `Window` unconditionally is what broke `issue_3721_bti_point_read_absence`:
+                // on the WHOLE-SECTION path every byte is already present, but a tolerant
+                // extent makes the parse SWALLOW the decode failure and return `Ok(())`, so
+                // `point_read_remember_or_bail` remembers nothing and
+                // `point_read_absence_or_remembered` answers `Ok(None)` — job 80's phantom
+                // ABSENCE, reintroduced through an AUTO-MERGED line, not a resolved conflict.
+                //
+                // Chunk-targeted, more bytes can arrive, so `Window` is right there and the
+                // #1572 straddle retry stays intact.
+                if chunk_targeted {
+                    BufferExtent::Window
+                } else {
+                    BufferExtent::Complete
+                },
                 schema_opt,
                 self,
                 |(tid, entry_key, entry_value)| {
@@ -784,8 +804,10 @@ impl SSTableReader {
             let avail = window.len().saturating_sub(within);
             (start.min(avail), end.min(avail))
         });
+        // #3782: chunk-covering window (see above) — tolerant tail by contract.
         parser.parse_block_emit_windowed(
             &window[within..],
+            BufferExtent::Window,
             schema_opt,
             self,
             clamped_window,

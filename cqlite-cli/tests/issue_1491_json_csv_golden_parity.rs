@@ -396,6 +396,55 @@ const CASES: &[Case] = &[
         multicell: &[],
         skips: &[],
     },
+    // The inet/time multicell-collection ORDERING fixture (#3790). COMPARED, not
+    // excluded: its only non-plain shape is a multicell cell tombstone, which
+    // `golden_dump_shapes` says "cannot justify an exclusion".
+    Case {
+        presence: Presence::Committed,
+        keyspace: "test_comparator_order",
+        table: "collection_order",
+        schema: "issue-3790-comparator-ordering",
+        pk: &["id"],
+        ck: &[],
+        multicell: &[
+            ("inet_set", Multicell::Set),
+            ("inet_map", Multicell::Map),
+            ("time_set", Multicell::Set),
+            ("time_map", Multicell::Map),
+            ("pair_set", Multicell::Set),
+        ],
+        // Two MEASURED rendering divergences, neither of them ordering. What each
+        // skip costs for ORDER differs, and saying "order is still compared" of
+        // both would be false (roborev job 69):
+        //   * inet_set: the matcher proves the two sides are the SAME address, so a
+        //     reordered set fails — element [0] would pair ::1 against 9.0.0.1.
+        //   * pair_set: NestedFrozenValueLeftUndecodedByGolden compares no content,
+        //     so THIS LANE would not notice the tuples being reordered with the
+        //     count preserved. That order is pinned instead by
+        //     cqlite-core/tests/issue_3790_collection_order_cassandra_golden.rs,
+        //     which asserts pair_set's cell-path sequence (inet-major, time-minor,
+        //     both partitions) directly against the same golden.
+        skips: &[
+            Skip {
+                path: "inet_set",
+                formats: BOTH,
+                divergence: Divergence::InetIpv6RendersCompressed,
+                why: "golden spells IPv6 expanded (getHostAddress), egress compressed; the matcher proves both parse to the SAME address, and element ORDER is still compared",
+            },
+            Skip {
+                path: "inet_map",
+                formats: BOTH,
+                divergence: Divergence::InetMapKeyIpv6SpellingNotPairableByThisLane,
+                why: "inet map keys never pair across the two IPv6 spellings, so the column is NOT COMPARED AT ALL (null/malformed/wrong-COUNT unchecked); its ORDER is pinned by issue_3790_collection_order_cassandra_golden.rs",
+            },
+            Skip {
+                path: "pair_set",
+                formats: BOTH,
+                divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
+                why: "golden leaves the frozen tuple<inet, time> as colon-joined text while the CLI decodes it; only the SHAPE is checked — so a REORDERING of the tuples is NOT detected here either, and pair_set's order is pinned by issue_3790_collection_order_cassandra_golden.rs instead",
+            },
+        ],
+    },
     Case {
         presence: Presence::Committed,
         keyspace: "test_signed_coll",
@@ -418,43 +467,38 @@ const CASES: &[Case] = &[
         pk: &["id"],
         ck: &[],
         multicell: &[("sd", Multicell::Set), ("sf", Multicell::Set)],
-        // MEASURED DIVERGENCE, and a JSON-ONLY one: `sf` is a `set<double>`
-        // containing `Infinity`, `-Infinity` and `NaN`. The golden carries all
-        // three by name (`["-Infinity",…,"Infinity","NaN"]`); JSON has no literal
-        // for them, so the JSON egress emits `null` and the value is lost. The CSV
-        // egress renders every cell as text and carries the same three tokens
-        // verbatim (`{-Infinity, -1.5, -0e0, 0e0, 2.5, Infinity, NaN}`, which the
-        // decimal canonicalization reads as the golden's `-0.0`/`0.0`), so CSV IS
-        // compared here — a `BOTH` scope dropped the whole column from a format
-        // that renders it correctly (review finding K1).
-        //
-        // A SECOND measured divergence, and JSON-only for the same reason: `sd`
-        // (`set<decimal>`, exact 30-digit text) is compared in the CSV lane, where
-        // every cell is text and the 30-digit values match exactly, but in the JSON
-        // lane the egress renders a `decimal` as a JSON STRING
-        // (`"-999999999999999999999999999999.999"`) where `cassandra-5.0.8`
-        // `DecimalType.toJSONString` returns `BigDecimal.toString()` UNQUOTED, i.e.
-        // a JSON number. The divergence is a property of the type, not of the
-        // position, so it would show on a scalar `decimal` column too; it surfaced
-        // here because `sd` is the only `decimal` in any compared case. It only
-        // became visible once the kinding relaxation stopped being applied to the
-        // CLI side (review finding M1) — while it was symmetric, the CLI's string
-        // was read as a number at this stringified position.
+        // TWO declared gaps, JSON-lane-only, and NEITHER is an egress defect
+        // awaiting a fix (issue #3644 items 2 and 3) — each variant's own docs
+        // carry the oracle. `sf`'s non-finite `null` is what
+        // `DoubleType.toJSONString:114-123` returns, and the golden's quoted
+        // `"Infinity"`/`"NaN"` are the cell-PATH `getString` artifact
+        // (`JsonTransformer.java:452`), not the egress oracle; `sd`'s remaining gap
+        // is this COMPARATOR's f64 parse, the egress having been fixed to emit the
+        // unquoted number `DecimalType.toJSONString:314-317` requires. Both columns
+        // are compared IN FULL in the CSV lane, where every cell is text and the
+        // three tokens and all 33 digits survive verbatim — a `BOTH` scope dropped
+        // the whole column from a format that renders it correctly (finding K1).
         skips: &[
             Skip {
                 path: "sf",
                 formats: &[Egress::Json],
                 divergence: Divergence::NonFiniteFloatRendersAsJsonNull,
-                why: "set<double> Infinity/-Infinity/NaN render as JSON null — JSON has \
-                      no literal for them; the set's FINITE members are compared",
+                why: "CORRECT BEHAVIOUR, not a defect: cassandra-5.0.8 \
+                      DoubleType.toJSONString:114-123 returns the literal `null` for \
+                      NaN/Infinity/-Infinity, and CQLite matches it; the golden's quoted \
+                      tokens are the cell-PATH getString artifact \
+                      (JsonTransformer.java:452), not the egress oracle. The set's \
+                      FINITE members are compared",
             },
             Skip {
                 path: "sd",
                 formats: &[Egress::Json],
-                divergence: Divergence::DecimalRendersAsJsonString,
-                why: "decimal renders as a JSON string where cassandra-5.0.8 \
-                      DecimalType.toJSONString emits an unquoted number; the quoted \
-                      NUMBER must still equal the golden's",
+                divergence: Divergence::ExactDecimalNotCarriedByThisLanesJsonParse,
+                why: "COMPARATOR LIMITATION, not an egress divergence: the CLI emits the \
+                      unquoted number DecimalType.toJSONString:314-317 requires, but this \
+                      lane's JSON parse holds it as an f64; both sides must still be the \
+                      same double, the CSV lane compares every digit, and the egress text \
+                      is pinned by tests/issue_3644_json_decimal_unquoted.rs",
             },
         ],
     },

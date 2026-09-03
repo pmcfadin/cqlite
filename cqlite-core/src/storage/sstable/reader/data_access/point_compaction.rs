@@ -211,6 +211,34 @@ impl SSTableReader {
     /// The parse uses the SAME `build_v5_parser(false)` +
     /// `parse_one_partition_for_compaction` the full-scan compaction stream uses,
     /// so the rows are byte-identical to that stream restricted to this partition.
+    ///
+    /// # A FOURTH exit: a propagated decode refusal (#3782 AC2)
+    ///
+    /// The three-exit spine routes every *anomaly of the index* to `Ok(None)` →
+    /// scan fallback. Since #3782 there is a fourth exit that is NOT an anomaly of
+    /// the index: `parse_one_partition_for_compaction` is called with
+    /// `at_final_chunk = true` over a window PROVEN to cover `[offset, end)`, so a
+    /// row that fails to decode there is truncation or corruption of `Data.db`, and
+    /// that `Err` PROPAGATES.
+    ///
+    /// It deliberately does NOT degrade to `Ok(None)`. #3782 AC2 is exactly that a
+    /// fatal decode error on the index-random-read path surfaces as that error —
+    /// no WARN-and-fall-back-to-sequential-scan detour — because the detour is the
+    /// silent degradation the issue exists to remove: the scan would re-read the
+    /// same damaged bytes through the tolerant break and answer SHORT, reporting
+    /// success for a partition it lost rows from.
+    ///
+    /// Reachability, since the guard above already covers the truncated-window
+    /// cases: `within >= window.len()` and `!reached_end` both return `Ok(None)`
+    /// BEFORE the parse, and `pull_chunk_window` materialises WHOLE chunks, so the
+    /// window always extends to the end of the chunk containing `end`. A decode
+    /// refusal therefore requires the partition body to run past that chunk
+    /// boundary — i.e. the index-derived `end` understates the partition's true
+    /// extent by at least a chunk, which means `Index.db`/the trie DISAGREES with
+    /// `Data.db`. On such an SSTable refusing is the correct answer: the successor
+    /// offset is, by construction, the next partition's exact start
+    /// (`partition_successor.rs` takes the minimum index offset strictly greater
+    /// than this one), so a well-formed pair cannot produce it.
     async fn seek_partition_compaction_rows(
         &self,
         offset: u64,

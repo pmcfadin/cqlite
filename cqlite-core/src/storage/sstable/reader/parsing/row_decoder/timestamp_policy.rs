@@ -270,11 +270,10 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                 }
                 Ok(Some(next_offset))
             }
-            // Issue #3721: a per-column decode failure reaches the caller instead of
-            // being folded into the `Ok(None)` end-of-partition signal, which would
-            // return a SHORT partition from a successful scan.
-            Err(e) if column_decode_error::is_column_decode(&e) => Err(e),
-            Err(_) => Ok(None),
+            // Issue #3782: preserve the decode error instead of collapsing it into
+            // "no row here". The DRIVER decides whether to tolerate it, from
+            // `at_final_chunk`; a policy has no way to know.
+            Err(e) => Err(e),
         }
     }
 

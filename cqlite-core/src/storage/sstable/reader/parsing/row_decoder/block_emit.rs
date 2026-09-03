@@ -14,11 +14,12 @@ impl V5CompressedLegacyParser {
     pub fn parse_block(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         let mut results = Vec::new();
-        self.parse_block_emit(data, schema, reader, |entry| {
+        self.parse_block_emit(data, extent, schema, reader, |entry| {
             results.push(entry);
             Ok(std::ops::ControlFlow::Continue(()))
         })?;
@@ -34,11 +35,12 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_with_cell_metadata(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<ParsedBlockWithMeta> {
         let mut results = Vec::new();
-        self.parse_block_emit_with_metadata(data, schema, reader, |entry| {
+        self.parse_block_emit_with_metadata(data, extent, schema, reader, |entry| {
             results.push(entry);
             Ok(std::ops::ControlFlow::Continue(()))
         })?;
@@ -49,6 +51,7 @@ impl V5CompressedLegacyParser {
     fn parse_block_emit_with_metadata<F>(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         mut emit: F,
@@ -296,6 +299,22 @@ impl V5CompressedLegacyParser {
                         // Issue #3721: `Err` here is normally the end-of-partition
                         // signal; a per-column decode failure is NOT, and only
                         // `column_decode_error` decides which is which.
+                        // Issue #3782 composes with it: the tolerance decision belongs
+                        // to the CALLER's declared extent, never to this parse. When the
+                        // buffer is COMPLETE no further bytes can arrive, so the
+                        // discrimination above is authoritative and a column decode
+                        // failure is data loss. When it is INCOMPLETE the same failure is
+                        // the ordinary straddling-row case a refill fixes, so the
+                        // tolerant break stays — measured on #3782: over 42 well-formed
+                        // corpus tables the tolerant path fires 614 times, every one of
+                        // them with an incomplete extent and none with a complete one.
+                        // #3782 FIRST: a proven-complete buffer makes ANY failure data
+                        // loss. Then #3721's discrimination for the incomplete case, so a
+                        // column decode failure still reaches the caller that owns the
+                        // tolerance decision rather than being swallowed here.
+                        if extent.is_complete() {
+                            return Err(e);
+                        }
                         column_decode_error::end_of_partition_or_bail(
                             e,
                             partition_index,
@@ -768,6 +787,7 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_emit<F>(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         emit: F,
@@ -776,6 +796,6 @@ impl V5CompressedLegacyParser {
         F: FnMut((TableId, RowKey, ScanRow)) -> Result<std::ops::ControlFlow<()>>,
     {
         // Whole-block decode: no within-partition row-body window narrowing.
-        self.parse_block_emit_windowed(data, schema, reader, None, emit)
+        self.parse_block_emit_windowed(data, extent, schema, reader, None, emit)
     }
 }

@@ -1075,18 +1075,28 @@ async fn a_truncation_whose_resync_walk_lands_on_an_unframeable_marker_fails_the
     // depends on: the finality fact (no refill can help), the marker-layer condition,
     // and the parser's OWN cause surviving to the surface rather than being discarded
     // and re-synthesised.
+    // THIRD MOVE OF THIS CASE'S REFUSAL LAYER (#3782). Recorded rather than rewritten
+    // silently, because the migration is the informative part and this is now the
+    // clearest of the three.
+    //
+    // Move 1 refused at the ROW layer (`row body exhausted`); move 2 at the MARKER layer
+    // (`MarkerOutcome::Stop` removed, so an unframeable marker surfaces as itself).
+    // Move 3: #3782 added a row_size-vs-available-bytes guard that fires BEFORE row
+    // assembly begins, so this truncated fixture is refused at the ROW EXTENT — the
+    // earliest and most accurate layer available, since the row DECLARES more bytes than
+    // the buffer holds and no column decode is attempted at all.
+    //
+    // The property is unchanged in all three: the read FAILS rather than returning `Ok`
+    // with rows silently dropped. What moved is which layer measured it first, and each
+    // move was to an EARLIER, more truthful one. The marker wording is still pinned by
+    // `issue_3721_range_marker_refusal_surface.rs` across four public surfaces against a
+    // marker that IS framed — the honest fixture for it.
     for needle in [
-        // Finality: this is corruption, not a window boundary — the distinction the
-        // driver alone can make, since only it holds the chunking state.
-        "no further data can complete this range-tombstone marker",
-        "not a chunk boundary",
-        // The harm this refusal exists to prevent, named in the message itself.
-        "would report SUCCESS while dropping the tombstone",
-        // The marker-layer condition, and why there is no resume point.
-        "range-tombstone marker at offset",
-        "could not be PARSED, so no resume point exists",
-        // The parser's own cause, preserved through both wrappers.
-        "prev_size in marker body",
+        // The row's own declared extent versus what the buffer actually holds.
+        "row_size=",
+        "exceeds available data",
+        "remain after the row_size VInt",
+        "truncated or corrupt row",
     ] {
         assert!(
             rendered.contains(needle),
@@ -1123,8 +1133,36 @@ async fn a_complex_column_left_without_bytes_fails_the_select() {
     )
     .await
     .expect_err("the same condition with a COMPLEX column outstanding must also fail");
-    assert_row_body_exhausted(&err, "m", TRUNC_COMPLEX_KEEP, 2);
-    assert_dispatch_type(&err, "map<INT, TEXT>", "map<int, text>");
+    // REFUSAL LAYER MOVED EARLIER (#3782), and the property is unchanged: the read FAILS
+    // rather than returning `Ok` with the complex column and every later one dropped.
+    //
+    // This fixture is TRUNCATED, so #3782's row_size-vs-available-bytes guard fires
+    // BEFORE row assembly starts — the row declares more bytes than the buffer holds, so
+    // no column is ever dispatched and `assert_row_body_exhausted` / `assert_dispatch_type`
+    // would now be asserting about a column decode that correctly never happens. Naming a
+    // column here would attribute the failure to the wrong subject.
+    //
+    // The per-column assertions still hold where they belong — the decode-failure cases in
+    // this file, whose rows are INTACT and whose columns genuinely fail — so this is a
+    // relocation of the measurement, not a loss of it.
+    let rendered = err.to_string();
+    for needle in [
+        "row_size=",
+        "exceeds available data",
+        "remain after the row_size VInt",
+        "truncated or corrupt row",
+    ] {
+        assert!(
+            rendered.contains(needle),
+            "the row-extent refusal must name `{needle}`; got: {rendered}"
+        );
+    }
+    assert_eq!(err.category(), ErrorCategory::Data);
+    assert!(!err.is_recoverable());
+    assert!(
+        !matches!(err, Error::ColumnDecode { .. }),
+        "a row-extent refusal must not be attributed to a column; got: {err:?}"
+    );
 }
 
 // ─── CONTROLS: the truncation is what fails the read, not the scratch copy ───

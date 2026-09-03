@@ -42,6 +42,7 @@ use crate::schema::TableSchema;
 use crate::storage::sstable::reader::parsing::row_decoder::column_decode_error;
 use crate::types::{ScanRow, TableId};
 use crate::{Result, RowKey};
+use crate::storage::sstable::reader::parsing::BufferExtent;
 
 /// One decode attempt's outcome: `None` means the seek could not bound the target
 /// partition authoritatively and the caller must fall back to a full scan.
@@ -148,8 +149,20 @@ impl SSTableReader {
         let mut rows: Vec<(RowKey, ScanRow)> = Vec::new();
         // Issue #3721: a per-column decode failure propagates; the retry cannot live
         // here (`end_bound` is already narrowed) — `clustering_seek_decode`.
+        //
+        // Issue #3782's extent is `Window`, not `Complete`, and the choice is
+        // load-bearing rather than incidental. This is a POINT READER decoding a
+        // partition window bounded to a clustering-slice block extent, and it sits
+        // inside the retraction loop above: the first attempt narrows, and
+        // `indexed_walk_falls_back` retracts to the full-partition path. `Window` is
+        // exactly the straddle protocol `BufferExtent` documents for point readers —
+        // `Complete` would turn the tolerant tail break into a refusal, so the FIRST
+        // attempt would hard-fail instead of retracting, breaking a legitimate control
+        // flow rather than fixing a defect. `big_promoted.rs` passes `Window` here too,
+        // for the same operation.
         parser.parse_block_emit_windowed(
             &window[within..],
+            BufferExtent::Window,
             schema,
             self,
             clamped,

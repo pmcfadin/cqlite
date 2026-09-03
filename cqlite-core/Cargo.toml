@@ -231,6 +231,22 @@ mach2 = "0.4"
 name = "issue_1495_arrow_accessor_parity"
 required-features = ["arrow"]
 
+# Issue #3790 merged-read `time` collection-ordering guard. It calls
+# `storage::write_engine::merge::assemble_read_cells`, and the whole
+# `storage::write_engine` module is gated on `write-support`, so an
+# auto-discovered target would fail to COMPILE under `--no-default-features`
+# (the gate's `minimal-build`) — `cannot find write_engine in storage`.
+#
+# `required-features` rather than a crate-level `#![cfg]`: `write-support` is a
+# DEFAULT feature, so this keeps the target running in `core-tests` (the gate of
+# record) while excluding it only where the module genuinely does not exist. A
+# `#![cfg(feature = ...)]` on a NON-default feature is what puts a target in a
+# lane that executes nowhere (#3522) — that trap is the reason this test is not
+# gated in its source.
+[[test]]
+name = "issue_3790_merged_read_time_order"
+required-features = ["write-support"]
+
 # Full-Index.db partition-enumeration regression (issue #2302). It is
 # `#![cfg(all(feature = "work-counters", feature = "write-support"))]` — the
 # `read_work_counters` probe gauge AND the `SSTableWriter`/mutation write API — so
@@ -331,6 +347,42 @@ name = "issue_1704_scan_path_error_counts"
 # clean-fixture control could not decode its chunks — coverage that executes but
 # cannot assert what it claims.
 required-features = ["observability-testing", "delta-scan", "lz4"]
+
+# Corrupt-clustering-row refusal lanes (issue #3782, roborev job 59 finding 2 /
+# #3950). All three targets are
+# `#![cfg(all(feature = "state_machine", feature = "cli-helpers", feature = "lz4"))]`
+# and all three gates are load-bearing: `cli-helpers` (which implies
+# `state_machine`) for the `ingestion`/`Database` surface the lanes drive, and
+# `lz4` because EVERY fixture they read is an LZ4-compressed Cassandra 5.0
+# SSTable — `support/corrupt_clustering_fixture.rs` asserts the algorithm before
+# mutating, and without the feature `Compressor::decompress` answers
+# `Err("LZ4 compression not available")`. Declaring only the first two let
+# `cargo test -p cqlite-core --no-default-features --features cli-helpers` RUN
+# them and fail on their PRISTINE CONTROLS: a false FAIL wearing a correctness
+# failure's clothes. The `#![cfg]`s and these lists must always agree.
+#
+# Which lanes still EXECUTE them (#3522 — a `required-features` line that
+# excludes a target from every lane is a worse defect than the bug it fixes;
+# `lz4` arrives via the DEFAULT `all-compression`, and no invocation below
+# passes `--no-default-features`):
+#   * issue_3782_corrupt_row_refusal, probe_3782, point_vs_full_differential
+#     — `core-tests` (`cargo nextest run -p cqlite-core --features cli-helpers`)
+#   * point_vs_full_differential — ALSO `bti-multiclustering`
+#     (`cargo test -p cqlite-core --features "state_machine cli-helpers"
+#     --test point_vs_full_differential`) and the two fail-closed positive
+#     controls it drives (scripts/tests/test_point_vs_full_failclosed.sh)
+#   * the diff-scoped `--lite` blast radius, which also runs `--features cli-helpers`
+[[test]]
+name = "issue_3782_corrupt_row_refusal"
+required-features = ["state_machine", "cli-helpers", "lz4"]
+
+[[test]]
+name = "probe_3782"
+required-features = ["state_machine", "cli-helpers", "lz4"]
+
+[[test]]
+name = "point_vs_full_differential"
+required-features = ["state_machine", "cli-helpers", "lz4"]
 
 [[bench]]
 name = "partition_lookup"

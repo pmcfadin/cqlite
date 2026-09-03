@@ -9,6 +9,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (CLI `--format json`, observable): a `decimal` and a `varint` render
+  as UNQUOTED JSON NUMBERS, not as quoted strings (#3644).** Same egress and the
+  same class as the #3629 entry below. `JsonCell::from_value`
+  (`cqlite-cli/src/output/json_cell.rs`) now emits both types as raw JSON number
+  fragments carrying `ValueFormatter`'s digits verbatim, at every position — a
+  bare cell, and nested in a `list`/`set`/`tuple`, a map value or a UDT field.
+
+  - **Before**: `{"amount":"123.45","big":"170141183460469231731687303715884105727"}`
+  - **After**:  `{"amount":123.45,"big":170141183460469231731687303715884105727}`
+
+  **Oracle**, read at the pinned tag — never CQLite's prior output:
+  `cassandra-5.0.8`'s `DecimalType.toJSONString` (`DecimalType.java:314-317`) and
+  `IntegerType.toJSONString` (`IntegerType.java:488-491`) both return
+  `Objects.toString(getSerializer().deserialize(buffer), "\"\"")`, i.e. a bare
+  `toString()`; `DecimalType` deliberately OVERRIDES the QUOTING form at
+  `AbstractType.java:186-189`, so the absence of quotes is a decision Cassandra
+  made explicitly. `tools/JsonTransformer.java:494` writes a cell value with
+  `writeRawValue(cellType.toJSONString(...))`, so that text reaches the document
+  unquoted.
+
+  **What a consumer that called `as_str()` on these columns should do.** Read the
+  cell as a NUMBER. A `decimal`/`varint` is arbitrary-precision (a Java
+  `BigInteger` unscaled value — the committed
+  `test_signed_coll.signed_special_collections` fixture carries 33 significant
+  digits), so a parser that maps every JSON number onto a `double` will LOSE
+  digits it previously received intact inside the string. Use a parser that keeps
+  the LITERAL:
+
+  - **Python**: `json.loads(text, parse_float=decimal.Decimal)`. `parse_float`
+    receives the number's original lexeme, so no rounding has happened yet. A
+    `varint` needs nothing — it carries no `.`/`e`, so it goes through
+    `parse_int`, and a Python `int` is already arbitrary-precision.
+  - **JavaScript**: a bigint/decimal-aware parser such as `lossless-json` (every
+    number is kept as its original text) or `json-bigint`. **A plain
+    `JSON.parse` reviver does NOT work**: the reviver's `value` argument is an
+    already-parsed, already-rounded `Number`, so the digits are gone before it is
+    called and cannot be recovered from it. (The ES2025 source-text-access
+    reviver — the third `context.source` argument — *does* expose the original
+    lexeme, but it is not available in every engine — measured here, Node.js 20
+    has no `context.source` (it landed in V8 with Node.js 21) — so feature-detect
+    it and fall back to a dedicated parser.)
+  - **Rust**: `serde_json`'s `arbitrary_precision` feature (a `Number` then holds
+    the literal digits) or `serde_json::value::RawValue` (the raw fragment,
+    unparsed). Note `arbitrary_precision` is additive across the whole build, so
+    it changes `Number` for every `serde_json` user in your dependency graph;
+    `RawValue` is the local, non-invasive option.
+
+  The digits themselves are unchanged — only the quotes are gone.
+
+  **Also changed, in `cqlite-core`'s text formatter and therefore in ALL text
+  egress (`json`, `csv`, `table`): a `decimal` whose magnitude is ZERO at a
+  NEGATIVE scale now renders `0e1` (scale `-1`) instead of `00`.**
+  `ValueFormatter::format_decimal` (`cqlite-core/src/util/value_fmt.rs`) spelled
+  that value `"0"` followed by one zero per unit of negative scale, which is not
+  valid JSON — a leading zero followed by a digit — so the JSON egress had to
+  quote it. It now takes the SAME bounded exponent form `<digits>e<-scale>` that
+  the issue #1754 over-bound branch already emitted, which is a valid JSON number
+  and preserves the scale (`BigDecimal(0, -1)` is not `BigDecimal(0, 0)`, so
+  collapsing to `0` would discard information). A NON-zero magnitude at a negative
+  scale was already valid JSON and is unchanged (`5` at scale `-1` → `50`).
+  **This is a JSON-VALIDITY fix, NOT spelling parity**: `0e1` is still not Java's
+  `BigDecimal.toString()` spelling `0E+1`, and the wider `format_decimal` vs
+  `BigDecimal.toString()` divergence class (a non-zero magnitude at a negative
+  scale → Java `1.23E+3` vs CQLite `1230`; an adjusted exponent below −6 → Java
+  `1E-10` vs CQLite `0.0000000001`) is untouched and tracked separately — no
+  committed fixture covers it, and it would move `csv`/`table` output for many
+  more values. Pinned by
+  `cqlite-core/tests/issue_3644_decimal_zero_negative_scale.rs` and
+  `cqlite-cli/tests/issue_3644_json_decimal_unquoted.rs`
+  (`a_zero_magnitude_at_a_negative_scale_is_an_unquoted_exponent_form`).
+
+  **Known residual**, recorded rather than omitted: the quoted-string fallback
+  remains, and after the fix above the only rendering known to take it is the
+  `<corrupt-decimal:…>` marker an over-bound magnitude produces (issue #1754).
+  That is not a JSON number, so the egress emits it as a string rather than an
+  unparseable document; it deliberately does not invent a spelling.
+
+  Not affected by the QUOTING change (their text was never quoted; the
+  zero-at-negative-scale spelling above does reach them): `table` and `csv`
+  output, and
+  `cqlite-core`'s `impl ToJson for Value`, which is a different renderer and still
+  emits `{"scale": …, "unscaled": <base64>}` — see
+  `docs/development/QUERY_RESULT_CONTRACT.md`.
+
 - **BREAKING (CLI `--format json` and `cqlite-core`'s `ToJson`, observable): a UDT
   renders as its DECLARED FIELDS AND NOTHING ELSE — the injected `_type` key is
   gone (#3629).** This is the CLI-side half of #3504's class, on a third surface and
