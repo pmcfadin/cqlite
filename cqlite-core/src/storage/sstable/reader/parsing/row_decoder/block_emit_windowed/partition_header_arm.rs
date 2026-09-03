@@ -182,27 +182,44 @@ impl V5CompressedLegacyParser {
         match self.parse_partition_header_full(data, offset) {
             Ok((key, next_offset, deletion)) => Ok(HeaderStep::Parsed(key, next_offset, deletion)),
             Err(e) => {
-                // Issue #3928: the error's own kind is preserved and returned on
-                // a proven-complete buffer — the same rule, and the same reason,
-                // as the row arm's `return Err(e)` (#3782).
+                // Issue #3928 fix round 4 — REPORTED UNCONDITIONALLY, at every
+                // extent, exactly as the sliding drivers report it.
+                //
+                // `Ready` is an AFFIRMATIVE guarantee from
+                // `partition_header_readiness` that every header byte is present:
+                // the key length, the key, and the `DeletionTime` for its
+                // live/deleted form, sized by PEEKING the discriminator (#1741).
+                // So **a `Ready` header cannot straddle**, and that is what
+                // decides this arm rather than the extent.
+                //
+                // The tolerant break here used to be justified by the point
+                // readers' straddle protocol. That justification does not reach
+                // this arm: the break protects a straddling ROW, and AC1 licenses
+                // tolerance only where "a header can legitimately straddle" —
+                // which a `Ready` header provably cannot. No later chunk can
+                // repair an invalid oa/da deletion-time discriminator, so
+                // resynchronising past it drops a real partition and can invent
+                // misaligned ones.
+                //
+                // Measured on the real `da` fixture with its first partition's
+                // discriminator flipped to `0xFF` (a byte Cassandra's own
+                // `DeletionTime.Serializer.deserialize` throws on) parsed under a
+                // `BufferExtent::Window`: `Ok` with 401 of 468 rows — **180 LOST
+                // and 113 FABRICATED**. Pinned by
+                // `a_windowed_block_read_refuses_a_complete_but_structurally_invalid_header`.
+                //
+                // The corpus cannot evidence this arm in either direction (AC3's
+                // counters record 0 arrivals here across 126 tables), which is
+                // why the absence of a measured loss was never a reason to
+                // tolerate it.
                 //
                 // This arm composes NO message: `e` is `scan_partition_header`'s
-                // own, and under the validation above it can realistically only
-                // be the `oa`/`da` invalid-IS_LIVE-byte rejection, which does
-                // not rest on the key-length model. Its two key-length messages
-                // are already excluded here (a zero or over-long length, and a
-                // key running past the buffer, are what the validation just
-                // checked), and rewording THEM belongs to **#3999** with the
-                // model they assert — see `undecodable_partition_header`.
-                if refuse {
-                    return Err(e);
-                }
-                tracing::warn!(
-                    "V5CompressedLegacy: Failed to parse partition header at offset {offset} \
-                     (partition={partition_index}): {e}. Resynchronising because {}.",
-                    tolerance.why_tolerant()
-                );
-                Ok(HeaderStep::Resync)
+                // own, and after `Ready` it can realistically only be the
+                // `oa`/`da` invalid-IS_LIVE-byte rejection, which does not rest
+                // on the key-length model — so no #3999 caveat is owed here.
+                // Rewording that error's own text belongs to #3999 with the model
+                // it asserts.
+                Err(e)
             }
         }
     }

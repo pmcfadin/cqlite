@@ -700,3 +700,39 @@ pub fn bounded_walk(
         .map_err(why)
         .map(|()| keys)
 }
+
+/// A parser on the **`da`** (BTI) gate path, so `has_uint_deletion_time()` is
+/// TRUE and the partition-level `DeletionTime` is read in the oa/da COMPACT form
+/// (1-byte `0x80` LIVE sentinel, else the 12-byte deleted form).
+///
+/// [`framing_parser`] defaults to nb gates, where the legacy 12-byte
+/// `DeletionTime` has no invalid encodings — so an nb-gated parse of a `da`
+/// header cannot exercise a structurally-invalid discriminator at all. Every
+/// case about that discriminator needs THIS parser.
+pub fn da_framing_parser(
+    spec: &FixtureSpec,
+) -> cqlite_core::storage::sstable::reader::V5CompressedLegacyParser {
+    use cqlite_core::storage::sstable::version_gate::{BtiVersionGates, VersionGates};
+    let gates = VersionGates::Bti(BtiVersionGates::from_version("da").expect("da gates"));
+    framing_parser(spec).with_version_gates(std::sync::Arc::new(gates))
+}
+
+/// [`block_walk`] on the `da` gate path, at a CALLER-STATED extent — so one case
+/// can ask the same bytes under `Window` and under `Complete` and attribute any
+/// difference to the extent alone.
+pub fn da_block_walk(
+    spec: &FixtureSpec,
+    schema: &TableSchema,
+    reader: &SSTableReader,
+    buf: &[u8],
+    extent: cqlite_core::storage::sstable::reader::BufferExtent,
+) -> Result<Vec<Vec<u8>>, String> {
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    da_framing_parser(spec)
+        .parse_block_emit_windowed(buf, extent, Some(schema), reader, None, |(_t, k, _r)| {
+            keys.push(k.as_bytes().to_vec());
+            Ok(std::ops::ControlFlow::Continue(()))
+        })
+        .map_err(why)
+        .map(|()| keys)
+}

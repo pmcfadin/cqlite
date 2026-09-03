@@ -529,3 +529,112 @@ async fn corpus_wide_well_formed_tables_still_compact_without_refusal() {
         scanned_tables.len()
     );
 }
+
+/// Fix round 4 — a `Ready` header that fails the full parse is refused at EVERY
+/// extent, `BufferExtent::Window` included.
+///
+/// `partition_header_readiness` answering `Ready` is an AFFIRMATIVE guarantee
+/// that every header byte is present — the key length, the key, and the
+/// `DeletionTime` for its live/deleted form, sized by peeking the discriminator
+/// (#1741). So a parse failure after `Ready` cannot be truncation, and **a
+/// `Ready` header cannot straddle**. That is what decides this arm: the tolerant
+/// break protects a straddling ROW, and AC1 licenses tolerance only where "a
+/// header can legitimately straddle" — which this one provably cannot. No later
+/// chunk can repair an invalid deletion-time discriminator, so resynchronising
+/// past it dropped a real partition and could invent misaligned ones, while the
+/// sliding drivers propagated the identical error regardless of extent.
+///
+/// Oracle: the real Cassandra `da` fixture with its FIRST partition's
+/// `DeletionTime` discriminator flipped to `0xFF` — a byte Cassandra's own
+/// `DeletionTime.Serializer.deserialize` throws on
+/// (`DeletionTime.java:222-230`), and one that leaves the header COMPLETE, which
+/// is exactly the `Ready`-then-`Err` shape. The `da` gate path is required: nb's
+/// legacy 12-byte `DeletionTime` has no invalid encodings, so an nb-gated parse
+/// could not produce this at all.
+///
+/// Both directions, because a fix here could equally break healthy windowed
+/// reads: the PRISTINE section must still walk cleanly under the SAME `Window`
+/// extent and emit the same partition keys it emits under `Complete`.
+#[tokio::test]
+async fn a_windowed_block_read_refuses_a_complete_but_structurally_invalid_header() {
+    use cqlite_core::storage::sstable::reader::BufferExtent;
+
+    let spec = &BTI_MULTICLUSTERING_HEADER;
+    let staged = fixture::stage_spec(spec, &fixture_dir(spec), "ready-invalid");
+    let schema = table_schema(spec);
+    let reader = open_reader(&staged.mutated_dir).await;
+    let pristine = fixture::stitched_data_section(&staged.control_dir);
+    let mutated = fixture::stitched_data_section(&staged.mutated_dir);
+
+    // PRECONDITION as a measured byte-level fact, not an assumption: the header
+    // is COMPLETE (its discriminator is present, so nothing is straddling) and
+    // that discriminator is the value Cassandra rejects. `partition_header_readiness`
+    // is crate-internal, so its `Ready` verdict is stated in these bytes instead.
+    let key_len = usize::from(u16::from_be_bytes([mutated[0], mutated[1]]));
+    let discriminator_at = 2 + key_len;
+    assert!(
+        discriminator_at < mutated.len(),
+        "the discriminator at {discriminator_at} must be PRESENT for this to be the \
+         complete-but-invalid shape rather than a straddle"
+    );
+    assert_eq!(
+        mutated[discriminator_at], 0xFF,
+        "this case needs the harness's DeletionTimeDiscriminator mutation"
+    );
+    assert_eq!(
+        pristine[discriminator_at], 0x80,
+        "control: Cassandra wrote the LIVE sentinel there"
+    );
+
+    // CONTROL, and the both-directions guard: the PRISTINE section walks cleanly
+    // under BOTH extents and agrees on the partition keys. A fix that made
+    // healthy windowed reads fatal reds here.
+    let ctl_window = da_block_walk(spec, &schema, &reader, &pristine, BufferExtent::Window)
+        .expect("a PRISTINE section must walk cleanly under a Window extent");
+    let ctl_complete = da_block_walk(spec, &schema, &reader, &pristine, BufferExtent::Complete)
+        .expect("a PRISTINE section must walk cleanly under a Complete extent");
+    assert!(
+        !ctl_window.is_empty(),
+        "0-rows-when-present: the pristine Window walk emitted nothing"
+    );
+    assert_eq!(
+        multiset::multiset(ctl_window.iter().cloned()),
+        multiset::multiset(ctl_complete.iter().cloned()),
+        "the extent must not change what a HEALTHY section decodes"
+    );
+
+    // The subject: the same walk over the mutated section must REFUSE at BOTH
+    // extents. Pre-fix the `Window` leg answered Ok, having resynchronised past
+    // a header no later chunk could ever repair.
+    for extent in [BufferExtent::Window, BufferExtent::Complete] {
+        let got = da_block_walk(spec, &schema, &reader, &mutated, extent);
+        match got {
+            Err(e) => assert!(
+                e.contains("Data corruption"),
+                "{extent:?}: the refusal must carry the decode error's own kind; got {e}"
+            ),
+            Ok(keys) => {
+                let control = multiset::multiset(ctl_complete.iter().cloned());
+                let got_ms = multiset::multiset(keys.iter().cloned());
+                panic!(
+                    "{extent:?}: a COMPLETE but structurally invalid header must be REFUSED — \
+                     `Ready` guarantees every header byte is present, so no later chunk can \
+                     repair it and it cannot be a straddle. Got Ok with {} key occurrence(s) \
+                     against a control of {}: {} LOST [{}], {} FABRICATED [{}]",
+                    keys.len(),
+                    ctl_complete.len(),
+                    multiset::deficit(&got_ms, &control)
+                        .iter()
+                        .map(|(_, n)| n)
+                        .sum::<usize>(),
+                    multiset::describe(&multiset::deficit(&got_ms, &control)),
+                    multiset::surplus(&got_ms, &control)
+                        .iter()
+                        .map(|(_, n)| n)
+                        .sum::<usize>(),
+                    multiset::describe(&multiset::surplus(&got_ms, &control)),
+                );
+            }
+        }
+    }
+}
