@@ -20,21 +20,33 @@
 # channel is GONE (#3312: remove the shared channel, do not pick a rarer delimiter) rather than
 # trying to lose a race on purpose.
 #
-# THE RULE
-# --------
-# In scripts/gate-liveness.sh, no bash BUILTIN writer (`printf`/`echo`) may feed a pipeline that
-# contains a SHORT-CIRCUITING reader. Every such site is a herestring (`reader <<<"$text"`), which
-# bash implements with a temp file: there is no writer left to take EPIPE, so an early-exiting
-# reader is harmless.
+# THE RULE (BROAD FORM — lead ruling on REQUEST-3803-B, 2026-09-03)
+# ------------------------------------------------------------------
+# In scripts/gate-liveness.sh, a bash BUILTIN writer (`printf`/`echo`) with a pipe after it on the
+# same line is a FAIL. Full stop. No quote tracking, no command splitting, no recognised-reader
+# set, no stage ordering. Every reader in that file is a herestring (`reader <<<"$text"`), which
+# bash implements with a temp file: there is no writer left to take EPIPE at all.
 #
-# TWO THINGS THIS DELIBERATELY DOES NOT ASSERT.
-#   * An EXTERNAL writer (grep, sed) feeding a short-circuiting reader is NOT a violation: an
-#     external command takes SIGPIPE's default disposition and dies silently, emitting nothing onto
-#     the channel this file's callers read. Only a bash builtin narrates its own failed write.
-#   * A builtin feeding a reader that runs to EOF (`grep -c`, `cut`, `wc`) is NOT a violation:
-#     nothing closes the pipe early, so no write can fail.
-# Narrowing to the ACTUAL hazard is what keeps this guard from redding on correct code — and a lane
-# that reds on correct input is the lane agents learn to waive.
+# WHY NOT A NARROWER RULE. The narrow recogniser did not converge: six review rounds produced NINE
+# findings in a ~50-line matcher with the per-round count RISING (1,1,1,2,2,3), and FOUR of the
+# nine were false NEGATIVES — a quoted `;` splitting a command and hiding a real hazard, an escaped
+# quote desynchronising the scanner, an unquoted backslash doing the same, and `echo|head` missed
+# for want of whitespace. Each fix opened the next hole, because it was a recogniser over
+# bash-as-written: a grammar the author controls, so the residual set never closes (#3312).
+#
+# THE ASYMMETRY THAT DECIDES IT (#3229). A guard with documented false-PASSes is worse than no
+# guard — it hides defects while reading green. A guard with loud false POSITIVES costs NOISE, not
+# blindness. So this guard deliberately REPORTS several correct shapes; that set is enumerated in
+# violations() and in the run-time DECLARED SCOPE block, and pinned as cases 6,7,8,9,9e,9i.
+# Narrowing any of them is issue #3992.
+#
+# WHAT IT STILL DOES NOT ASSERT (false-NEGATIVE direction, both declared at run time):
+#   * The scan is LEXICAL and PER-LINE: a writer split across a line continuation, hidden behind a
+#     function, or fed from a process substitution is not recognised.
+#   * Only `printf` and `echo` count as writers. Any other builtin that can take EPIPE is not.
+#   Note an EXTERNAL writer (grep, sed) is out of scope by design, not by oversight: an external
+#   command takes SIGPIPE's default disposition and dies silently, emitting nothing onto the
+#   channel this file's callers read. Only a bash builtin narrates its own failed write.
 #
 # The guard scans the SHIPPED file (never a copy or a model of it), so unrouting one site reds this
 # suite instead of greening it — the idiom of scripts/tests/test_cargo_output_parsers.sh.
@@ -132,12 +144,9 @@ print_scope() {
 #      what is inside a quote.
 #   2. Requires a bash builtin writer token (`printf`/`echo`) on the line.
 #   3. Masks `||` so a logical OR is never read as a pipe, then splits the line on `|`.
-#   4. Reports the line ONLY IF some segment AFTER the first begins with a RECOGNISED
-#      short-circuiting reader. This is the narrowing that removes the false-positive class: in
-#      `printf 'a | b\n'`, `echo "col1|col2"`, `printf '%s\n' "x"  # note |` and
-#      `v=$(printf '%s' "$x"); other | thing`, the token after the pipe is not a recognised reader,
-#      so none of them is reported.
-# ---------------------------------------------------------------------------
+#   (The numbered narrow recipe that used to be here — segment splitting plus a recognised-reader
+#   set — described the design that was removed. See THE RULE at the top of this file.)
+#
 violations() {
   local file="$1"
   awk '
@@ -259,7 +268,7 @@ fi
 # 4. Second positive control: the two-hop `... | head -1` form, where the early exit is head's and
 #    the builtin takes EPIPE at the far end of the pipeline. The token right after the pipe here is
 #    `grep -nxF` / `sed -n`, NEITHER of which short-circuits — the hazard is downstream, so the
-#    matcher must scan EVERY segment and not just the first.
+#    (broad form: there are no segments; retained because the SHAPE it pins is still a hazard)
 # ---------------------------------------------------------------------------
 cat >"$tmp/pos2.sh" <<'POS2'
 #!/usr/bin/env bash
@@ -332,7 +341,7 @@ _declared_fp 9 "an UNRELATED later pipeline, same line" 'v=$(printf '"'"'%s'"'"'
 # 9b. CONVERSE CONTROL. Cases 6-9 assert the matcher stays QUIET on correct code; alone they are
 #    satisfiable by a matcher that has stopped matching anything. This asserts the other
 #    direction on the same shapes: a quoted pipe, and a `;`, must NOT MASK a genuine
-#    builtin-into-short-circuiting-reader pipeline on the same line.
+#    builtin-into-pipe on the same line.
 # ---------------------------------------------------------------------------
 printf '#!/usr/bin/env bash\n%s\n%s\n' 'echo "col1|col2" | grep -q x' 'printf %s "$v"; :; printf %s\n "$t" | head -1' >"$tmp/conv.sh"
 conv_n=$(violations "$tmp/conv.sh" | grep -c .)
@@ -376,7 +385,8 @@ _pin() { # _pin <id> <expected-count> <label> <line-of-bash>
 _pin 9d 1 "a quoted semicolon does NOT hide a real hazard" 'printf '"'"'x;y\n'"'"' | grep -q x'
 # finding 1, false-POSITIVE half: a quoted `|` is not a pipe.
 _pin 9e 1 "DECLARED noise: a quoted pipe IS reported (accepted; #3992)"        'printf '"'"'x | grep -q y\n'"'"''
-# finding 2: long-option short-circuiting spellings must be recognised.
+# finding 2 (job 36): these long-option forms were once unrecognised; the broad form catches
+# them because it does not inspect options at all.
 _pin 9f 3 "grep long options --quiet/--silent/--max-count are recognised" 'printf %s "$t" | grep --quiet a
 printf %s "$t" | grep --silent a
 printf %s "$t" | grep --max-count=1 a'
@@ -409,9 +419,9 @@ _pin 9k 1 "a writer preceded by an unrelated pipe is still caught" 'producer | p
 sub_out=$(violations "$SUBJECT")
 sub_n=$(grep -c . <<<"$sub_out")
 if [ "$sub_n" -eq 0 ]; then
-  ok "10 scripts/gate-liveness.sh: builtin-writer-into-short-circuiting-reader sites: 0 RECOGNISED"
+  ok "10 scripts/gate-liveness.sh: builtin-writer-into-pipe sites: 0 RECOGNISED"
 else
-  bad "10 scripts/gate-liveness.sh: builtin-writer-into-short-circuiting-reader sites" "$sub_n RECOGNISED — each can emit \`printf: write error: Broken pipe\` onto a verdict a caller reads (#3803). Use a herestring:"
+  bad "10 scripts/gate-liveness.sh: builtin-writer-into-pipe sites" "$sub_n RECOGNISED — each can emit \`printf: write error: Broken pipe\` onto a verdict a caller reads (#3803). Use a herestring:"
   while IFS= read -r v; do
     [ -n "$v" ] || continue
     printf '     %s:%s\n' "$SUBJECT" "$v"
