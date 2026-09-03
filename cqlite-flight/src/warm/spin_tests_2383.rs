@@ -421,10 +421,24 @@ fn cancel_during_large_index_parse_aborts_promptly() {
     // cancel strictly BETWEEN two parsed entries is not reachable from this crate
     // without a clock (the loop lives in cqlite-core and exposes no progress
     // signal), so that stride's own coverage belongs to a cqlite-core-local test
-    // beside the loop, not here. Trading a probabilistic in-loop landing for a
+    // beside the loop, not here. That test EXISTS and was MEASURED to hold the
+    // stride, so this narrowing is not a net coverage loss for the repository:
+    // `cqlite_core::storage::sstable::index_reader::lazy::tests::
+    // ensure_materialized_cancel_mid_parse_aborts_promptly` (400k entries, several
+    // CANCEL_POLL_INTERVAL windows) goes RED with ONLY the in-loop stride poll
+    // disabled and the coarse pre-parse check intact — the exact configuration
+    // that leaves THIS test green. Trading a probabilistic in-loop landing for a
     // deterministic pre-parse one is the deliberate choice of #3940: the old test
     // did not reliably land in the loop either, it merely failed loudly when it
     // missed.
+    //
+    // NOT FIXED HERE, and filed rather than left implicit: that core sibling still
+    // uses the `baseline / 20` calibrated margin this issue removes — its doc
+    // comment cites this test as the shared convention — so it carries the same
+    // two-scheduling-window defect one crate over, in a longer-running gate
+    // component. It is out of scope for #3940 (different crate, and a
+    // deterministic fix there needs a hook INSIDE the core parse loop, whose
+    // mid-loop landing is precisely that test's value) and is tracked separately.
     assert!(
         matches!(res, Err(WarmError::Cancelled)),
         "a cancel tripped on the opening thread immediately before a large \
