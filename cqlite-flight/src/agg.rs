@@ -669,10 +669,30 @@ fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::TinyInt(x), Value::TinyInt(y)) => Some(x.cmp(y)),
         (Value::SmallInt(x), Value::SmallInt(y)) => Some(x.cmp(y)),
         (Value::Integer(x), Value::Integer(y)) => Some(x.cmp(y)),
+        // SIGNED `i64` order. `Timestamp` belongs here and must STAY here:
+        // `db/marshal/TimestampType.java:56` is `super(ComparisonType.CUSTOM)`
+        // and its `compareCustom` is `LongType.compareLongs(...)`, i.e. signed —
+        // a pre-1970 instant is a legal negative millis-since-epoch and must
+        // remain the minimum (pinned tag `cassandra-5.0.8`).
         (Value::BigInt(x), Value::BigInt(y))
         | (Value::Counter(x), Value::Counter(y))
-        | (Value::Timestamp(x), Value::Timestamp(y))
-        | (Value::Time(x), Value::Time(y)) => Some(x.cmp(y)),
+        | (Value::Timestamp(x), Value::Timestamp(y)) => Some(x.cmp(y)),
+        // `time` is UNSIGNED byte order, NOT signed — issue #3935.
+        // `db/marshal/TimeType.java:48` is
+        // `private TimeType() {super(ComparisonType.BYTE_ORDER);}`, and
+        // `ComparisonType.BYTE_ORDER` resolves to `ByteBufferUtil.compareUnsigned`
+        // over the serialized 8-byte big-endian nanos-since-midnight long. So an
+        // out-of-range NEGATIVE nanos (sign bit -> leading byte `0xFF`) sorts
+        // ABOVE every in-range value (leading byte `0x00`), where signed
+        // `i64::cmp` would sort it below. `time` and `timestamp` are both 8-byte
+        // longs and do NOT share a comparator: do not re-unify these two arms.
+        //
+        // Range validation would not close this: Cassandra's binary `validate`
+        // checks the SIZE ONLY, so an out-of-range `time` is storable and is
+        // ordered by BYTE_ORDER. That argument is written out ONCE, in
+        // `cqlite-core`'s `types::comparator::custom::compare_time`
+        // (`# CANONICAL STATEMENT`).
+        (Value::Time(x), Value::Time(y)) => Some(x.to_be_bytes().cmp(&y.to_be_bytes())),
         (Value::Date(x), Value::Date(y)) => Some(x.cmp(y)),
         (Value::Float(x), Value::Float(y)) => Some(cmp_f64_trino(*x, *y)),
         (Value::Float32(x), Value::Float32(y)) => Some(cmp_f64_trino(*x as f64, *y as f64)),
