@@ -1191,6 +1191,28 @@ through the gate-authored field.
   floors** (minimum fixture/vector/refusal counts plus required names and CQL kinds), since an emptied
   table otherwise yields an empty parametrize that pytest reports as one skipped placeholder — #3544's
   case-floor lesson, one directory over.
+- **Fifth blind spot: a point-read test that compares a SUBSET of columns against the scan cannot see
+  a TRUNCATED point row (issue #3890).** The four above are about which ORACLE you compare against;
+  this one is about how much of the row you compare. `assert_point_equals_scan`
+  (`cqlite-core/tests/issue_1573_readat_positional.rs`) projected `id` plus ONE named column, and
+  `SELECT id, name` decodes the first two cells and stops — so a point read whose LATER cells failed to
+  decode compared equal on exactly the columns being compared, for years. Two properties make it
+  invisible rather than merely under-tested: a failed cell decode inside the row loop is SWALLOWED
+  (`row_decoder/row_data.rs` logs at `debug` and `break`s — #3721 is removing that), so nothing
+  propagates; and the missing cells are simply ABSENT from the row's map, so a `get(col)` comparison
+  over the columns you named can never notice them. **Rule: a point/seek-vs-scan comparison uses
+  `SELECT *` and asserts BOTH directions of the column set** — no scan column absent from the point
+  row, no point column the scan lacks — and reports the missing column BY NAME. The corpus-wide
+  instance is `cqlite-core/tests/issue_3890_point_read_column_parity_sweep.rs`. **Two rules about
+  its per-table key cap, both of which cost a review round: a bound tight enough to cost nothing
+  can be tight enough to miss most of what it exists to catch, so measure what your cap EXCLUDES;
+  and a cap's detection figure is only meaningful alongside its SELECTION** — capping in scan order
+  and sorting afterwards samples different keys than capping over the sorted set, and that alone
+  moved the same measurement. **No figure is quoted here on purpose: measuring a guard's detection
+  power needs the swallow instrumented AND the fix reverted, so it is not reproducible from
+  committed source, and a number nobody can re-derive from the repo is what stops the next person
+  looking.** That target's module header carries the numbers with the exact recipe — commands, cap
+  values, and how the fix is reverted so detection is measured against the defect PRESENT.
 
 ### Fuzzing (issue #1614)
 `fuzz/` is a cargo-fuzz/libFuzzer crate in its own workspace, excluded from the main one — the gate
