@@ -394,6 +394,138 @@ else
 fi
 
 # ===========================================================================
+# PART 2e — THE COUNTING DOMAIN FAILS CLOSED (#3551, the fabricated-win defect)
+# ===========================================================================
+# `perf stat -C <list>` counting a list the measured work did not run on is not noise: pin the
+# Flight server to `2,3` while counting `2,10` and the window collects cpu10's IDLE and misses
+# cpu3's WORK, so the SAME rows cost FEWER cycles and the arm reads as a large win. Nothing in
+# the output says so, which is why the wrapper VALIDATES the pairing rather than trusting the
+# leg that set it.
+#
+# Driven against the wrapper EXTRACTED FROM THE SHIPPED DRIVER (the same `awk` extraction
+# test_ws0_perf_invocation_lint.sh uses for the argv guard), with `perf` shimmed to a function
+# that only PRINTS: no perf, no root, no measurement. The extraction is the point — a copy of the
+# wrapper written here would keep passing after the shipped one changed.
+wrapper_probe() { # wrapper_probe <counted> <pairing-table> <argv…>
+  local counted="$1" table="$2"; shift 2
+  ( set -uo pipefail
+    # shellcheck disable=SC1090
+    source "$REPO_ROOT/scripts/perf/lib-perf-lint.sh"   # supplies $_PP_SHORT/$_PP_LONG
+    EVENTS="cycles"; PERF_COUNT_CPUS="$counted"; WS0_PERF_COUNT_PAIRINGS="$table"
+    perf() { printf 'PERF-RAN: %s\n' "$*"; }
+    eval "$(awk '/^perf_stat_c\(\)/,/^}/' "$DRIVER")"
+    perf_stat_c /dev/null "$@" ) 2>&1
+}
+# The table a real session with a DIFFERENT flight pin derives: the bare scan counts where it
+# runs, and the Flight window counts the SERVER while bracketing the CLIENT.
+PAIR_TABLE="2,10|2,10"$'\n'"2,3|4,12"
+
+# --- 2e-1. THE RED ARM: the Flight window still counting $SERVER_CPUS ------------------------
+# The planted defect is exactly one property away from the control below: the counted list, and
+# nothing else. It must be REFUSED and the diagnostic must NAME BOTH lists — a bare red is not
+# evidence, since an unrelated breakage in a 60-line wrapper produces an identical exit code.
+out=$(wrapper_probe "2,10" "$PAIR_TABLE" taskset -c 4,12 flight-loadgen --shape full); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "'2,10'" <<<"$out" && grep -q "'4,12'" <<<"$out" \
+   && ! grep -q 'PERF-RAN' <<<"$out"; then
+  pass "counting domain RED ARM: a Flight window counting \$SERVER_CPUS (2,10) while bracketing the client (4,12) is REFUSED, naming BOTH lists, and perf never runs"
+else
+  fail "the mispaired counting domain must be refused naming both lists (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# ...and the refusal must say WHY it cannot be waved through — that the error is invisible in the
+# output and flatters the arm — because the reflex response to a confusing guard is to bypass it.
+if grep -q "FEWER cycles" <<<"$out" && grep -q "verified pairings" <<<"$out"; then
+  pass "counting domain RED ARM: the refusal states the DIRECTION of the error and prints the verified pairings it checked against"
+else
+  fail "the refusal must state the direction and the table (out: $(head -8 <<<"$out"))"
+fi
+
+# --- 2e-2. THE POSITIVE CONTROL, differing in ONE property: the counted list -----------------
+# Identical argv, identical table; the counted list is the FLIGHT pin. perf must run, CPU-wide,
+# with that list — otherwise 2e-1 proves only that this wrapper refuses everything.
+out=$(wrapper_probe "2,3" "$PAIR_TABLE" taskset -c 4,12 flight-loadgen --shape full); rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'PERF-RAN: stat -x, -e cycles -C 2,3 -o /dev/null -- taskset -c 4,12 flight-loadgen --shape full' <<<"$out"; then
+  pass "counting domain CONTROL: the SAME argv with the FLIGHT pin as the counted list is accepted and reaches perf as -C 2,3 (one property apart from the RED arm)"
+else
+  fail "the correct flight pairing must reach perf (rc=$rc, out: $out)"
+fi
+# ...and the bare-scan pairing, where the counted list and the argv's affinity are the SAME. A
+# rule of "counted == taskset list" would have accepted this and RED the correct Flight rep
+# above, which is why the check is a closed PAIRING TABLE and not an equality.
+out=$(wrapper_probe "2,10" "$PAIR_TABLE" taskset -c 2,10 ws0-scan-bench --passes 1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'PERF-RAN: stat -x, -e cycles -C 2,10' <<<"$out"; then
+  pass "counting domain CONTROL: the BARE-SCAN pairing (counted == the measured process's own affinity) is accepted — the two legitimate shapes differ, so the check is a table and not an equality"
+else
+  fail "the bare-scan pairing must be accepted (rc=$rc, out: $out)"
+fi
+
+# --- 2e-3. AN UNCHECKABLE DOMAIN IS A REFUSAL, and there is NO DEFAULT ----------------------
+# "An unset value must never inherit $SERVER_CPUS": a silent default is precisely how this
+# defect would survive its own fix, so an empty domain, an empty table and an argv whose command
+# is not pinned are each named refusals.
+out=$(wrapper_probe "" "$PAIR_TABLE" taskset -c 2,10 /bin/true); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "no counting domain" <<<"$out" && ! grep -q 'PERF-RAN' <<<"$out"; then
+  pass "counting domain: an EMPTY/unset \$PERF_COUNT_CPUS is a NAMED refusal, never an inherited \$SERVER_CPUS"
+else
+  fail "an empty counting domain must be refused (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+out=$(wrapper_probe "2,10" "" taskset -c 2,10 /bin/true); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "no verified counting-domain table" <<<"$out"; then
+  pass "counting domain: an absent pairing TABLE is refused — a domain that cannot be checked against the session's verified pins is not a checked domain"
+else
+  fail "an absent pairing table must be refused (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+out=$(wrapper_probe "2,10" "$PAIR_TABLE" /bin/true); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "carries no 'taskset -c" <<<"$out"; then
+  pass "counting domain: an argv with no 'taskset -c <list>' is refused — WHERE the measured command runs is then unknowable, and an unverifiable pairing is not a verified one"
+else
+  fail "an unpinned argv must be refused (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+# ...and the OPTION allowlist still fires FIRST, so the new checks did not displace the argv
+# guard (a caller-supplied option must be refused whatever the domain says).
+out=$(wrapper_probe "2,10" "$PAIR_TABLE" -p1234 taskset -c 2,10 /bin/true); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "was passed the perf option" <<<"$out"; then
+  pass "counting domain: the pre-existing OPTION allowlist still fires first (the new validation did not displace layer 3)"
+else
+  fail "the argv option guard must still fire (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+
+# --- 2e-4. THE WIRING: the table is DERIVED, and each leg sets its own domain ----------------
+# The table must come from the lists this session VERIFIED, never from a literal: a hand-written
+# table could name a pin nobody checked, which is the F6 shape one layer down.
+if grep -qF 'WS0_PERF_COUNT_PAIRINGS="$SERVER_CPUS|$SERVER_CPUS"' "$DRIVER" \
+   && grep -qF '"$FLIGHT_SERVER_CPUS|$CLIENT_CPUS"' "$DRIVER"; then
+  pass "wiring (STRUCTURAL): the pairing table is DERIVED from the verified server/flight/client lists, not written out"
+else
+  fail "wiring: the pairing table must be derived from the verified lists"
+fi
+# ...and each leg assigns its own domain on the line IMMEDIATELY BEFORE its window, so the
+# assignment and the argv it must agree with cannot drift apart.
+if python3 - "$MEASURE_LIB" <<'PY'
+import sys
+lines = open(sys.argv[1]).read().split("\n")
+calls = [i for i, l in enumerate(lines) if l.strip().startswith("perf_stat_c ")]
+assert calls, "no perf_stat_c call sites found in the measurement legs"
+def preceding_statement(i):
+    # Walk UP past comments and blank lines: what must abut the call is the STATEMENT before it,
+    # and this rig's idiom puts a paragraph of reasoning between the two. Skipping comments is
+    # what makes the assert about code order rather than about comment length.
+    j = i - 1
+    while j >= 0 and (not lines[j].strip() or lines[j].lstrip().startswith("#")):
+        j -= 1
+    return lines[j] if j >= 0 else ""
+bad = [i + 1 for i in calls if "PERF_COUNT_CPUS=" not in preceding_statement(i)]
+if bad:
+    print(f"perf_stat_c call sites with no counting domain set just above: lines {bad}",
+          file=sys.stderr)
+    raise SystemExit(1)
+PY
+then
+  pass "wiring (STRUCTURAL): EVERY perf_stat_c call site in the measurement legs sets \$PERF_COUNT_CPUS on the line above it (all 3 of them), so no window inherits another arm's domain"
+else
+  fail "wiring: each perf_stat_c call must be preceded by its own PERF_COUNT_CPUS assignment"
+fi
+
+# ===========================================================================
 # PART 3 — WHICH ALLOCATOR IS THE SERVER PROCESS ACTUALLY RUNNING?
 # ===========================================================================
 # `verify_flight_allocator_mapping` takes the maps PATH as a parameter precisely so this can be
@@ -698,8 +830,10 @@ fi
 # Without it, a block that silently never executes (a helper returning early, a `$(...)` whose
 # command vanished) LOWERS the count and registers NO failure, and the gate reads only the exit
 # code. The floor is DERIVED FROM A MEASURED RUN and set below the observed count, so adding a
-# case cannot red the suite.
-MIN_CHECKS=40
+# case cannot red the suite. MEASURED at 66 after #3551's items 5/7 landed (56 before them),
+# never counted from the source — loops and helpers multiply, and a source estimate understated
+# a floor by 29 elsewhere on this branch's history.
+MIN_CHECKS=50
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

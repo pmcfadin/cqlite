@@ -568,7 +568,11 @@ argv_probe() { # argv_probe <args…> — run the driver's perf_stat_c with a pe
   ( set -uo pipefail
     # shellcheck disable=SC1090
     source "$PERF_LINT_LIB"          # supplies $_PP_SHORT / $_PP_LONG
-    EVENTS="cycles"; SERVER_CPUS="0"; PERF_COUNT_CPUS="0"
+    EVENTS="cycles"; SERVER_CPUS="1"; PERF_COUNT_CPUS="1"
+    # The counting-domain pairing table (#3551), consistent with this probe's own `taskset -c 1`
+    # argv. Supplied because the wrapper REFUSES an unchecked domain — there is no default — so
+    # without it every accept case below would red on a guard that is doing its job.
+    WS0_PERF_COUNT_PAIRINGS="1|1"
     perf() { printf 'PERF-RAN: %s\n' "$*"; }
     eval "$(awk '/^perf_stat_c\(\)/,/^}/' "$DRIVER")"
     perf_stat_c /dev/null "$@" ) 2>&1
@@ -612,7 +616,7 @@ done
 # ...and an ordinary COMMAND option must NOT be: a guard that refuses `--shape full`
 # refuses every real call, which is the guard an operator deletes.
 out=$(argv_probe taskset -c 1 flight-loadgen --shape full --step-duration 45s)
-if grep -q 'PERF-RAN: stat -x, -e cycles -C 0 -o /dev/null -- taskset -c 1 flight-loadgen --shape full --step-duration 45s' <<<"$out"; then
+if grep -q 'PERF-RAN: stat -x, -e cycles -C 1 -o /dev/null -- taskset -c 1 flight-loadgen --shape full --step-duration 45s' <<<"$out"; then
   pass "argv-guard: ordinary COMMAND options (--shape/--step-duration) pass through untouched"
 else
   fail "argv-guard: a command's own options must not be refused (out: $out)"
@@ -620,7 +624,7 @@ fi
 # And the ACCEPT direction: an ordinary argv reaches perf, so the guard is not one
 # that refuses everything.
 out=$(argv_probe taskset -c 1 /bin/true)
-if grep -q 'PERF-RAN: stat -x, -e cycles -C 0 -o /dev/null -- taskset -c 1 /bin/true' <<<"$out"; then
+if grep -q 'PERF-RAN: stat -x, -e cycles -C 1 -o /dev/null -- taskset -c 1 /bin/true' <<<"$out"; then
   pass "argv-guard: an ordinary argv is passed through, CPU-wide, with -C (the accept half)"
 else
   fail "argv-guard: a clean argv must reach perf with -C (out: $out)"
