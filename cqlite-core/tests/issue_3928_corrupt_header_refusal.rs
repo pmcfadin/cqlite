@@ -434,6 +434,23 @@ async fn bti_scan_refuses_a_partition_header_cassandra_itself_rejects() {
 /// side of that same arm fires **0** times, which is why making it fatal costs
 /// nothing.
 ///
+/// RE-TAKEN A THIRD TIME after round 3 (B1's termination at the row-body bound
+/// and B2's call into the shared oa/da sizing rule): identical again — 542, the
+/// same 3 mid-stream straddles, and **0** at every refusing header site with 0
+/// errors. Two things that measurement says, beyond "nothing moved":
+///
+/// * B1's termination costs no well-formed read. None of these four surfaces
+///   passes a `row_body_window` — the bounded path is the point/promoted
+///   readers' — so this corpus scan does not exercise it, and
+///   `a_bounded_walk_stops_at_its_bound_and_reads_no_further_partition` in the
+///   truncation lane is what covers it.
+/// * the block-emit `Incomplete` arm fires **0** times here, which is exactly
+///   why B2's straddling deleted header needs a hand-built buffer:
+///   `regression_1741k_tests.rs` records that a real fixture cannot place a
+///   deleted partition's 12-byte `DeletionTime` astride a chunk boundary, since
+///   Cassandra purges tombstone-covered rows at flush and chunk boundaries are
+///   not byte-addressable. A corpus scan can never reach that shape.
+///
 /// So the header-arm refusal costs nothing on well-formed input, and the row
 /// arm's toleration count did not move — which is AC3's property. The
 /// instrumentation was temporary and is not committed; re-take the measurement
