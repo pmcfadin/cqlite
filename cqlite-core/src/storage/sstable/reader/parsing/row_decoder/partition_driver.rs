@@ -111,10 +111,6 @@ pub(super) enum MarkerOutcome {
 /// and must classify it. No policy has one today — all three route a
 /// `parse_row_data_*` `Result` and nothing else — and being forced to choose is
 /// the point.
-/// What a [`SlidingPartitionPolicy::on_data_row`]
-/// call found. FOUR outcomes on ONE channel: the two failures are separate
-/// variants because the driver must treat them differently and cannot tell them
-/// apart from an [`Error`] value.
 #[derive(Debug)]
 pub(super) enum DataRowOutcome {
     /// The row decoded and was handled; continue the row loop at this offset.
@@ -122,7 +118,7 @@ pub(super) enum DataRowOutcome {
     /// The policy DECLINES the row with no error to report. Unchanged pre-#3782
     /// behaviour: end-of-partition on the final chunk, else `NeedMore`.
     ///
-    /// `dead_code`-allowed, and the reason is worth recording rather than
+    /// `dead_code`-EXPECTED, and the reason is worth recording rather than
     /// silencing: NO production policy declines TODAY. Both classify their one
     /// failure since #3782 (`DecodeFailed`), so the decline path is reached only by
     /// the driver's `StubPolicy` test harness. That was
@@ -131,7 +127,32 @@ pub(super) enum DataRowOutcome {
     /// It is kept because the DRIVER's disposition of it is load-bearing contract —
     /// distinct from both failures, pinned by test (f) — and deleting the variant
     /// would delete that behaviour along with its test.
-    #[allow(dead_code)]
+    ///
+    /// `#[expect]` rather than `#[allow]` so the allowance is SELF-RETIRING: an
+    /// `expect` that is never triggered is itself a `-D warnings` error, so this
+    /// reds the moment a policy DOES start constructing the variant — i.e. exactly
+    /// when the reason recorded above stops being true.
+    ///
+    /// The `cfg_attr` predicate is REQUIRED and was measured, not guessed: with no
+    /// attribute at all, `dead_code` fires in three of the four configurations and
+    /// stays SILENT in exactly one — cqlite-core's own `--lib` test build WITH
+    /// `write-support`, where the `StubPolicy` harness (itself `write-support`-gated)
+    /// is the sole constructor. A bare `#[expect(dead_code)]` is therefore
+    /// UNFULFILLED there and FAILS the gate of record's `core-tests`
+    /// (`-D unfulfilled-lint-expectations`, implied by `-D warnings`) — measured.
+    /// So the expectation is asserted precisely where the variant IS unconstructed,
+    /// which also makes the predicate a second statement of the reason above: if the
+    /// harness ever stops being the only (or a `write-support`-gated) constructor,
+    /// this reds too, naming the lint rather than failing silently.
+    #[cfg_attr(
+        not(all(test, feature = "write-support")),
+        expect(
+            dead_code,
+            reason = "no production policy declines today; constructed only by the \
+                      driver's StubPolicy test harness, whose disposition of it is \
+                      pinned by test (f)"
+        )
+    )]
     Declined,
     /// The row FAILED TO DECODE, with the decoder's error preserved (issue #3782).
     /// A BYTES-AVAILABILITY answer: the policy does NOT decide tolerance, the
