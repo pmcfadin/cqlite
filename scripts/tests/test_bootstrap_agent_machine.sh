@@ -1738,12 +1738,14 @@ mk_push_repo() {
   # file is appended to by whichever earlier `--yes` case runs first, so what these cases
   # measured depended on suite ordering.
   # SCCACHE_CACHE_SIZE joins the pin for the same reason and with the same history (issue
-  # #3727): section 5b2's VERIFIED requires the file line AND a session that sees it AND a
+  # #3727): section 5b2's BEST state requires the file line AND a session that sees it AND a
   # running server enforcing the bytes it means, so without this every sandbox here gains a
-  # `sccache-cap: FAILED` warn, `base_warns` goes 1 -> 2, and the three green-path cases below
-  # silently skip — the drift this file's own comments record FOUR times. The value pairs with
-  # mk_push_bin's sudo shim and sccache stub, so 5b2 contributes ZERO warnings deterministically
-  # on a capped host and an uncapped one alike.
+  # `sccache-cap: FAILED` warn instead of the declared SCOPED-NON-LOGIN gap, and the green-path
+  # cases below lose the ONE warning they are calibrated on — the drift this file's own comments
+  # record FOUR times. The value pairs with mk_push_bin's sudo shim and sccache stub, so 5b2
+  # contributes EXACTLY ONE warning deterministically, on a capped host and an uncapped one
+  # alike. It is one rather than zero since round 426: 5b2 may no longer emit an [ok], because
+  # it measures a single launch context (see push_warns_ex_scc).
   printf 'CQLITE_GATE_MAX_CONCURRENCY=1\nSCCACHE_CACHE_SIZE=30G\n' >"$dir/etc-environment"
   : >"$dir/test-data/datasets/sstables/ks/tbl/nb-1-big-Data.db"
 }
@@ -1879,6 +1881,16 @@ push_plain()  { printf '%s' "$1" | sed "s/${PUSH_ESC}\[[0-9;]*m//g"; }
 # below are the whole basis of the delta assertion.
 push_warns()  { push_plain "$1" | grep -cE '^[[:space:]]+\[warn\] '; }
 push_green()  { out_has "$1" -F 'All checks green.'; }
+# SINCE #3727 ROUND 426 NO RUN OF THIS SCRIPT CAN REACH ZERO WARNINGS ON A HOST WITH SCCACHE.
+# Section 5b2's BEST state is a [warn] (SCOPED-NON-LOGIN): it measures ONE launch context — a
+# non-login PAM session — so it may not certify the cap a gate actually gets, and an [ok] there
+# was a false certification of this section's own subject. `All checks green.` and `--strict`
+# exit 0 are therefore UNREACHABLE while #3946 is open. The green-path cases below assert the
+# RESIDUAL instead of the green: every warning EXCEPT that one declared gap must be absent, which
+# keeps them sensitive to a second warning appearing (the property they were written for) without
+# asserting a green that would now be a lie. `grep -vc` exits 1 on a zero count and still prints
+# it, which is why this is used only in a command substitution.
+push_warns_ex_scc() { push_plain "$1" | grep -E '^[[:space:]]+\[warn\] ' | grep -vc 'sccache-cap: SCOPED-NON-LOGIN'; }
 push_verdict(){ push_plain "$1" | grep -F 'git-push:'; }
 
 # 7p-a/d. THE POSITIVE CONTROL and the OPT-OUT, measured as a pair against ONE sandbox
@@ -1926,22 +1938,33 @@ fi
 # FAIL=0. Asserting the baseline catches that drift at its cause instead of letting it
 # disable assertions one by one. If this reds, a section has started warning in the clean
 # sandbox; find it before touching the cases below.
-if [ "$base_warns" -eq 1 ]; then
-  ok "push: the clean sandbox costs exactly ONE warning (the opt-out) — the exit-0/green cases below can run"
+# The baseline is TWO since #3727 round 426: the opt-out, plus section 5b2's declared
+# SCOPED-NON-LOGIN gap, which no host can clear while #3946 is open. Both halves are asserted
+# BY NAME rather than by the count alone — a count of two is also what an unrelated new warning
+# plus a lost opt-out would produce.
+if [ "$base_warns" -eq 2 ] && [ "$(push_warns_ex_scc "$out7pd")" -eq 1 ] \
+   && out_has "$out7pd" -E '\[warn\].*sccache-cap: SCOPED-NON-LOGIN'; then
+  ok "push: the clean sandbox costs exactly TWO warnings — the opt-out plus 5b2's declared scope gap (#3946) — so the cases below can run"
 else
-  bad "push: sandbox baseline drifted to $base_warns warnings — the three end-to-end cases below will SKIP, not fail"
+  bad "push: sandbox baseline drifted to $base_warns warnings ($(push_warns_ex_scc "$out7pd") of them not 5b2's declared gap) — the three end-to-end cases below will SKIP, not fail"
   push_plain "$out7pd" | grep -E '^[[:space:]]+\[warn\] ' | head -4
 fi
 
-if [ "$base_warns" -eq 1 ]; then
-  if push_green "$out7pa" && [ "$rc7pa" -eq 0 ]; then
-    ok "push: VERIFIED yields 'All checks green.' and --strict exits 0 (zero warnings)"
+if [ "$base_warns" -eq 2 ]; then
+  # WHAT THIS CASE NOW ASSERTS, AND WHY IT IS NOT A WEAKER TEST. It used to require
+  # `All checks green.` + rc 0; since round 426 that is unreachable on any host with sccache,
+  # so it requires instead that a VERIFIED push probe adds NOTHING — the only warning left is
+  # 5b2's declared gap — and that green/rc are withheld FOR THAT, which is the truthful pair.
+  # Weakening it to "rc is nonzero" would pass for any reason at all, so the residual is
+  # counted rather than the exit code alone.
+  if [ "$(push_warns_ex_scc "$out7pa")" -eq 0 ] && ! push_green "$out7pa" && [ "$rc7pa" -ne 0 ]; then
+    ok "push: VERIFIED leaves NO warning of its own — the ONLY one left is 5b2's declared scope gap, and green/--strict are withheld for exactly that (rc=$rc7pa)"
   else
-    bad "push: a verified machine did not go green / --strict did not exit 0 (rc=$rc7pa)"
+    bad "push: a verified machine carries a warning that is not 5b2's declared gap, or went green despite it (rc=$rc7pa non-scc-warns=$(push_warns_ex_scc "$out7pa"))"
     push_verdict "$out7pa"
   fi
 else
-  skip "push: absolute-green assertions need an otherwise-clean sandbox (baseline=$base_warns warnings)"
+  skip "push: residual assertions need an otherwise-clean sandbox (baseline=$base_warns warnings)"
   printf '%s' "$out7pd" | grep -F '[warn]' | sed 's/\x1b\[[0-9;]*m//g' | head -5
 fi
 
@@ -2140,15 +2163,15 @@ else
   bad "push: the repaired box still carries a credential WARNING (verify.run would fail on a box it just fixed)"
   push_plain "$out7pj" | grep -E 'credential|git-push' | head -6
 fi
-if [ "$base_warns" -eq 1 ]; then
-  if [ "$rc7pj" -eq 0 ] && push_green "$out7pj" && [ "$(push_warns "$out7pj")" -eq 0 ]; then
-    ok "push: AC1+AC3 end to end — unwired box + --fix-credentials --strict => exit 0 AND 'All checks green.'"
+if [ "$base_warns" -eq 2 ]; then
+  if [ "$(push_warns_ex_scc "$out7pj")" -eq 0 ]; then
+    ok "push: AC1+AC3 end to end — unwired box + --fix-credentials --strict leaves NO warning but 5b2's declared scope gap (green/rc 0 are unreachable while #3946 is open)"
   else
-    bad "push: repaired box did not certify (rc=$rc7pj warns=$(push_warns "$out7pj") green=$(push_green "$out7pj" && echo yes || echo no))"
+    bad "push: repaired box did not certify ($(push_warns_ex_scc "$out7pj") warning(s) other than 5b2's declared gap, rc=$rc7pj)"
     push_plain "$out7pj" | grep -E '\[warn\]' | head -5
   fi
 else
-  skip "push: AC1+AC3 exit-0 assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
+  skip "push: AC1+AC3 residual assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
 fi
 
 # 7p-k. AN UNSUCCESSFUL CLEANUP DELETE (#3369 blocker 2). `cmd_smoke` used to emit SMOKE-OK — text and
@@ -2596,12 +2619,12 @@ else
 fi
 # ONE verdict, as everywhere else in §3b: the refusal must not also emit the generic
 # "could not configure any" warning, or a single fault would be counted twice.
-if [ "$base_warns" -eq 1 ]; then
-  if [ "$(push_warns "$out7pr")" -eq 1 ] \
+if [ "$base_warns" -eq 2 ]; then
+  if [ "$(push_warns_ex_scc "$out7pr")" -eq 1 ] \
      && ! out_has "$out7pr" 'could NOT configure any'; then
     ok "push: the refusal is exactly ONE warning and names the host, not a generic second verdict"
   else
-    bad "push: refusal emitted $(push_warns "$out7pr") warnings (expected 1)"
+    bad "push: refusal emitted $(push_warns_ex_scc "$out7pr") warnings other than 5b2's declared gap (expected 1)"
     push_plain "$out7pr" | grep -E '^[[:space:]]+\[warn\] ' | head -4
   fi
 else
@@ -4907,27 +4930,55 @@ else
   fi
   scc_log="$tmp/scc-stub-argv.log"; : >"$scc_log"
 
-  # 12b-a. VERIFIED — the only [ok] this section may ever emit. The file sets the cap, a fresh
-  #        profile-free session sees the SAME value, and the RUNNING server enforces exactly the
-  #        bytes that value means. Without this case, every negative below would also pass
-  #        against a section that can only ever say FAILED.
+  # 12b-a. SCOPED-NON-LOGIN — the STRONGEST token this section may emit, and it is NOT an [ok]
+  #        (issue #3727 roborev round 426). The file sets the cap, a fresh profile-free session
+  #        sees the SAME value, and the RUNNING server enforces exactly the bytes that value
+  #        means — every link measured, all of it in ONE context. It used to be an [ok] VERIFIED,
+  #        which certified the cap a GATE gets from a measurement that never looked at a login
+  #        shell (measured on box3, same tree: 32212254720 for a detached gate vs 53687091200
+  #        for a lane-shell --lite). So the assertion is now two-sided: the measured facts must
+  #        all still be reported, AND the section must emit NO [ok] and never the bare token
+  #        VERIFIED. Without this case, every negative below would also pass against a section
+  #        that can only ever say FAILED.
   scc_shims_v="$tmp/scc-shims-v"
   scc_env_v="$tmp/scc-env-v"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\nSCCACHE_CACHE_SIZE=30G\n' >"$scc_env_v"
   mksccshims "$scc_shims_v" "file:$scc_env_v"
   scc_out_v=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 SCC_STUB_LOG="$scc_log")
   scc_sl_v=$(scc_slice "$scc_out_v")
-  if out_has "$scc_sl_v" -E '\[ok\].*sccache-cap: VERIFIED' \
-     && [ "$(scc_warns "$scc_sl_v")" = 0 ] && [ "$(scc_oks "$scc_sl_v")" = 1 ]; then
-    ok "sccache-cap: file + session + RUNNING server agree -> exactly one [ok] VERIFIED and zero [warn]"
+  if out_has "$scc_sl_v" -E '\[warn\].*sccache-cap: SCOPED-NON-LOGIN' \
+     && [ "$(scc_oks "$scc_sl_v")" = 0 ] && [ "$(scc_warns "$scc_sl_v")" = 1 ]; then
+    ok "sccache-cap: file + session + RUNNING server agree -> exactly one [warn] SCOPED-NON-LOGIN and ZERO [ok]"
   else
-    bad "sccache-cap: the positive case did not reach a clean VERIFIED (oks=$(scc_oks "$scc_sl_v") warns=$(scc_warns "$scc_sl_v"))"
+    bad "sccache-cap: the best state did not reach a lone SCOPED-NON-LOGIN (oks=$(scc_oks "$scc_sl_v") warns=$(scc_warns "$scc_sl_v"))"
     printf '%s\n' "$scc_sl_v" | head -6
   fi
-  # The scope note must state what VERIFIED does NOT cover — an unqualified VERIFIED reads as
+  # THE FALSE CERTIFICATION MUST NOT COME BACK, asserted as an ABSENCE over the whole slice and
+  # not just off the one line above: the token `VERIFIED` in ANY spelling, and any [ok] at all.
+  # A grep for `sccache-cap: VERIFIED` must also not match the new token, which is why it does
+  # not begin with VERIFIED (the `PASS*` accepts `PASSthisNeverRan` shape).
+  if ! out_has "$scc_sl_v" -F 'sccache-cap: VERIFIED' \
+     && ! out_has "$scc_sl_v" -E '^[[:space:]]+\[ok\] ' \
+     && out_has "$scc_sl_v" -F 'NOT established — this verdict is deliberately NOT a success token'; then
+    ok "sccache-cap: the best state emits NO [ok] line and no 'sccache-cap: VERIFIED' anywhere, and SAYS the gate's cap is not established (round 426)"
+  else
+    bad "sccache-cap: a success token is back — the false certification of this section's own subject"
+    printf '%s\n' "$scc_sl_v" | grep -E 'VERIFIED|\[ok\]' | head -4
+  fi
+  # BOTH DIRECTIONS (the traded-false-pass check): the SCOPED verdict must still carry every
+  # measured fact, or a false pass has merely become a content-free warn.
+  if out_has "$scc_sl_v" -F 'sets SCCACHE_CACHE_SIZE=30G' \
+     && out_has "$scc_sl_v" -F 'sees that SAME value' \
+     && out_has "$scc_sl_v" -F 'enforces exactly the 32212254720 bytes it means'; then
+    ok "sccache-cap: the SCOPED verdict still NAMES all three measured links (file value, session agreement, bytes the running server enforces)"
+  else
+    bad "sccache-cap: the scoped verdict dropped a measured fact — it now reports LESS than was measured"
+    printf '%s\n' "$scc_sl_v" | grep 'sccache-cap:' | head -3
+  fi
+  # The scope note must state what the verdict does NOT cover — a success token would read as
   # "every gate on this box gets this cap", and the server-startup caveat is the new one.
   # SINCE THE RULING the note declares ONE measured session type and the login shell as a
-  # DECLARED RESIDUAL rather than a compared context — and the residual is the assertion that
-  # matters, because an unqualified VERIFIED would now cover a launch path nothing measured.
+  # DECLARED RESIDUAL rather than a compared context — and since round 426 the TOKEN carries
+  # that residual too, because a grep for the verdict line never sees an info: scope line.
   if out_has "$scc_sl_v" 'scope:.*ONE session type.*NON-LOGIN PAM session' \
      && out_has "$scc_sl_v" 'scope:.*LOGIN shell additionally runs /etc/profile.d' \
      && out_has "$scc_sl_v" 'scope:.*context is NOT measured here' \
@@ -4936,7 +4987,7 @@ else
      && out_has "$scc_sl_v" 'scope:.*SERVER at STARTUP' \
      && out_has "$scc_sl_v" 'scope:.*provenance is not' \
      && out_has "$scc_sl_v" 'sccache-cap=<bytes>'; then
-    ok "sccache-cap: VERIFIED prints its scope — the ONE session type measured, the login shell DECLARED as unmeasured, server-startup lifetime, unproven provenance, and the gate's own token as per-run authority"
+    ok "sccache-cap: the scoped verdict prints its scope — the ONE session type measured, the login shell DECLARED as unmeasured, server-startup lifetime, unproven provenance, and the gate's own token as per-run authority"
   else
     bad "sccache-cap: the scope note is missing a statement, or still claims a context this section no longer measures"
     printf '%s\n' "$scc_sl_v" | grep 'scope:' | head -4
@@ -5209,7 +5260,7 @@ else
   if grep -q '^census-ran$' "$scc_envlog" \
      && grep -q '^marker:present$' "$scc_envlog" \
      && ! grep -q 'poisoned' "$scc_envlog" \
-     && out_has "$scc_sl_scrub" -E '\[ok\].*sccache-cap: VERIFIED'; then
+     && out_has "$scc_sl_scrub" -E '\[warn\].*sccache-cap: SCOPED-NON-LOGIN'; then
     ok "sccache-cap: every caller SCCACHE_* is scrubbed before each session probe (SCCACHE_REDIS/SCCACHE_CONF absent at the sudo boundary), while an unrelated variable survives — so the probes cannot agree by sharing our routing"
   else
     bad "sccache-cap: a caller-only SCCACHE_* reached the session probe (or the census never ran) — two probes could agree on OUR routing and certify a server no gate will use"
@@ -5341,24 +5392,24 @@ else
   scc_out_fresh=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=none \
     SCC_STUB_STATE="$scc_state_w" SCC_STUB_LOG="$scc_log_fresh" --fix-sccache-cap)
   scc_sl_fresh=$(scc_slice "$scc_out_fresh")
-  if out_has "$scc_sl_fresh" -E '\[ok\].*sccache-cap: VERIFIED' \
+  if out_has "$scc_sl_fresh" -E '\[warn\].*sccache-cap: SCOPED-NON-LOGIN' \
      && [ "$(scc_warns "$scc_sl_fresh")" = 0 ]; then
-    ok "sccache-cap: a fresh box with NO server reaches VERIFIED — the section starts the server under the persisted value instead of failing --strict"
+    ok "sccache-cap: a fresh box with NO server reaches the BEST state (SCOPED-NON-LOGIN with all links measured) — the section starts the server under the persisted value instead of learning nothing"
   else
-    bad "sccache-cap: a fresh box with no running server did not reach VERIFIED (roborev finding 2)"
+    bad "sccache-cap: a fresh box with no running server did not reach the best state (roborev finding 2)"
     printf '%s\n' "$scc_sl_fresh" | head -8
   fi
   if out_has "$scc_sl_fresh" 'THIS RUN STARTED' \
      && out_has "$scc_sl_fresh" 'scope:.*THIS RUN started it'; then
-    ok "sccache-cap: the VERIFIED verdict DECLARES that this run started the server (not an independent observation)"
+    ok "sccache-cap: the verdict DECLARES that this run started the server (not an independent observation)"
   else
-    bad "sccache-cap: a run that started the server claimed VERIFIED without saying so"
-    printf '%s\n' "$scc_sl_fresh" | grep -E 'VERIFIED|scope:' | head -4
+    bad "sccache-cap: a run that started the server reported the best state without saying so"
+    printf '%s\n' "$scc_sl_fresh" | grep -E 'SCOPED-NON-LOGIN|scope:' | head -4
   fi
   if grep -q -- '--start-server' "$scc_log_fresh"; then
     ok "sccache-cap: the start is REAL — 'sccache --start-server' appears in the recorded argv"
   else
-    bad "sccache-cap: VERIFIED was reached with no --start-server invocation"
+    bad "sccache-cap: the best state was reached with no --start-server invocation"
     cat "$scc_log_fresh" | head -5
   fi
   # ... and the cap the started server enforces is the one from the FILE, not sccache's default:
@@ -5382,11 +5433,11 @@ else
   scc_out_empty=$(runscc "$scc_bs" "$scc_shims_v" "$scc_env_v" SCCACHE_CACHE_SIZE=30G SCC_STUB_MAX=32212254720 \
     SCC_STUB_USED=null SCC_STUB_LOG="$scc_log_empty" --fix-sccache-cap)
   scc_sl_empty=$(scc_slice "$scc_out_empty")
-  if out_has "$scc_sl_empty" -E '\[ok\].*sccache-cap: VERIFIED' \
+  if out_has "$scc_sl_empty" -E '\[warn\].*sccache-cap: SCOPED-NON-LOGIN' \
      && [ "$(scc_warns "$scc_sl_empty")" = 0 ] \
      && ! out_has "$scc_sl_empty" 'THIS RUN STARTED' \
      && ! grep -q -- '--start-server' "$scc_log_empty"; then
-    ok "sccache-cap: a RUNNING server with an empty cache (cache_size null) VERIFIES as an ALREADY-RUNNING server — no start, no UNMEASURED"
+    ok "sccache-cap: a RUNNING server with an empty cache (cache_size null) is read as an ALREADY-RUNNING server — no start, no UNMEASURED"
   else
     bad "sccache-cap: a running server with an empty cache was mistaken for no server (the null-size premise is back)"
     printf '%s\n' "$scc_sl_empty" | head -6; cat "$scc_log_empty" | head -3
@@ -5513,13 +5564,13 @@ else
     bad "sccache-cap: --fix-sccache-cap rewrote an existing value"
     diff <(printf '%s\n' "$scc_before") "$scc_env_7g" | head -6
   fi
-  # ... and that box is VERIFIED at ITS OWN cap, which is what makes the no-rewrite rule safe
+  # ... and that box is measured at ITS OWN cap, which is what makes the no-rewrite rule safe
   # rather than merely polite.
   scc_sl_7g=$(scc_slice "$scc_out_7g")
-  if out_has "$scc_sl_7g" -E '\[ok\].*sccache-cap: VERIFIED.*7G'; then
-    ok "sccache-cap: a box on its own 7G cap VERIFIES at that value (the fleet literal is not imposed)"
+  if out_has "$scc_sl_7g" -E '\[warn\].*sccache-cap: SCOPED-NON-LOGIN.*7G'; then
+    ok "sccache-cap: a box on its own 7G cap is measured at that value (the fleet literal is not imposed)"
   else
-    bad "sccache-cap: a box with its own cap did not verify at its own value (slice $(printf '%s' "$scc_sl_7g" | wc -c) bytes, whole output $(printf '%s' "$scc_out_7g" | wc -c) bytes)"
+    bad "sccache-cap: a box with its own cap was not measured at its own value (slice $(printf '%s' "$scc_sl_7g" | wc -c) bytes, whole output $(printf '%s' "$scc_out_7g" | wc -c) bytes)"
     printf '%s\n' "$scc_sl_7g" | head -6
   fi
 
@@ -5532,11 +5583,11 @@ else
     SCC_STUB_LOG="$scc_log" --fix-sccache-cap)
   if grep -q '^SCCACHE_CACHE_SIZE=30G$' "$scc_env_w" \
      && grep -q '^# cqlite: sccache object-cache size cap' "$scc_env_w" \
-     && out_has "$(scc_slice "$scc_out_w")" -E '\[ok\].*sccache-cap: VERIFIED' \
+     && out_has "$(scc_slice "$scc_out_w")" -E '\[warn\].*sccache-cap: SCOPED-NON-LOGIN' \
      && out_has "$(scc_slice "$scc_out_w")" 'resolves to 32212254720 bytes'; then
-    ok "sccache-cap: --fix-sccache-cap persists the cap, NAMES the bytes sccache resolves it to, AND the same run's probe verifies it"
+    ok "sccache-cap: --fix-sccache-cap persists the cap, NAMES the bytes sccache resolves it to, AND the same run's probe measures it"
   else
-    bad "sccache-cap: the write path did not persist + verify in one run"
+    bad "sccache-cap: the write path did not persist + measure in one run"
     echo "--- env file ---"; cat "$scc_env_w"; scc_slice "$scc_out_w" | head -6
   fi
   # The comment goes on its OWN line: pam_env takes a trailing `# …` as part of the value, so an
@@ -5656,16 +5707,20 @@ else
 fi
 
 # 12b-o. STRUCTURAL, because the behavioural cases above can only cover the branches someone
-#        thought of: section 5b2 must contain EXACTLY ONE `ok` call, and it must be the probe's
-#        VERIFIED verdict. Any future `ok` added for a file write, a platform exemption or a
-#        visible-but-unenforced value reds this immediately — the twin of 11i for 5b.
+#        thought of: since #3727 round 426 section 5b2 must contain NO `ok` call AT ALL, and must
+#        reach its best state through exactly ONE `warn "sccache-cap: SCOPED-NON-LOGIN (` call.
+#        An [ok] here would certify the cap a gate gets from a single measured launch context,
+#        which is this section's own defect; any future `ok` added for a file write, a platform
+#        exemption or a visible-but-unenforced value reds this immediately — the twin of 11i for
+#        5b, and STRONGER than the one-named-ok form it replaces, because the permitted count is
+#        now zero.
 scc_section=$(awk '/^# ---- 5b2\./,/^# ---- 5c\./' "$BOOTSTRAP")
 scc_ok_total=$(printf '%s\n' "$scc_section" | grep -cE '^[[:space:]]*ok "' || true)
-scc_ok_named=$(printf '%s\n' "$scc_section" | grep -cE '^[[:space:]]*ok "sccache-cap: VERIFIED [(]' || true)
-if [ -n "$scc_section" ] && [ "${scc_ok_total:-0}" = 1 ] && [ "${scc_ok_named:-0}" = 1 ]; then
-  ok "sccache-cap: section 5b2's ONLY success verdict is VERIFIED (no platform exemption, no write-succeeded ok)"
+scc_scoped_named=$(printf '%s\n' "$scc_section" | grep -cE '^[[:space:]]*warn "sccache-cap: SCOPED-NON-LOGIN [(]' || true)
+if [ -n "$scc_section" ] && [ "${scc_ok_total:-0}" = 0 ] && [ "${scc_scoped_named:-0}" = 1 ]; then
+  ok "sccache-cap: section 5b2 emits NO ok() at all, and reaches its best state through exactly one named SCOPED-NON-LOGIN warn (round 426)"
 else
-  bad "sccache-cap: section 5b2 has ${scc_ok_total:-0} ok() call(s), ${scc_ok_named:-0} of them a named verdict"
+  bad "sccache-cap: section 5b2 has ${scc_ok_total:-0} ok() call(s) (expected 0) and ${scc_scoped_named:-0} named SCOPED-NON-LOGIN warn(s) (expected 1)"
 fi
 
 # 12b-p. TWO SPELLINGS OF ONE NUMBER IS DRIFT, and this is the only mechanism against it: the
@@ -5953,10 +6008,15 @@ if [ "$scc413c_ok" -eq 1 ]; then
   PATH="$scc413c_savepath"
   scc413c_out="$push_out"; scc413c_rc="$push_rc"; scc413c_warns=$(push_warns "$scc413c_out")
   scc413c_plain=$(push_plain "$scc413c_out")
-  if [ "$scc413c_rc" -eq 0 ] && [ "$scc413c_warns" -eq 0 ] && push_green "$scc413c_out"; then
-    ok "sccache-strict-e2e: a box whose sccache is ONLY in ~/.cargo/bin passes --strict with ZERO warnings (the false 'sccache MISSING' that failed a healthy machine is gone)"
+  # THE PROPERTY OF THIS CASE IS #3413's: no FALSE 'sccache MISSING' warning on a box whose
+  # sccache lives only in ~/.cargo/bin. It used to be expressed as "--strict goes green with
+  # ZERO warnings", which is unreachable since round 426 (5b2's declared scope gap warns on
+  # every host). Expressed as the residual it keeps the same sensitivity: the ONLY warning is
+  # that declared gap, so a returning false MISSING — or any other new warning — still reds.
+  if [ "$(push_warns_ex_scc "$scc413c_out")" -eq 0 ] && [ "$scc413c_warns" -eq 1 ]; then
+    ok "sccache-strict-e2e: a box whose sccache is ONLY in ~/.cargo/bin carries NO warning but 5b2's declared scope gap (the false 'sccache MISSING' that failed a healthy machine is gone)"
   else
-    bad "sccache-strict-e2e: --strict did not go green (rc=$scc413c_rc warns=$scc413c_warns) on a box the gate accelerates"
+    bad "sccache-strict-e2e: that box carries $(push_warns_ex_scc "$scc413c_out") warning(s) beyond 5b2's declared gap (rc=$scc413c_rc warns=$scc413c_warns)"
     printf '%s\n' "$scc413c_plain" | grep -E '^[[:space:]]+\[warn\] ' | head -5
   fi
   if out_has "$scc413c_out" -F -- "sccache present" && out_has "$scc413c_out" -F -- "at '$scc413c_scc'"; then
@@ -5970,13 +6030,13 @@ if [ "$scc413c_ok" -eq 1 ]; then
   else
     bad "sccache-strict-e2e: the false MISSING warning is back — that is the --strict failure in the finding"
   fi
-  # AND SECTION 5b2 MUST HAVE RUN, not been skipped by its precondition: it reaches VERIFIED,
-  # which is only reachable if the section resolved a binary, read the running server and
-  # correlated the env file. `UNMEASURED (no 'sccache'` is the precondition-skip signature.
-  if out_has "$scc413c_out" -E '\[ok\].*sccache-cap: VERIFIED'; then
-    ok "sccache-strict-e2e: section 5b2 ran and CERTIFIED the cap — persistence/verification is no longer skipped on this layout"
+  # AND SECTION 5b2 MUST HAVE RUN, not been skipped by its precondition: SCOPED-NON-LOGIN is
+  # only reachable if the section resolved a binary, read the running server and correlated the
+  # env file. `UNMEASURED (no 'sccache'` is the precondition-skip signature.
+  if out_has "$scc413c_out" -E '\[warn\].*sccache-cap: SCOPED-NON-LOGIN'; then
+    ok "sccache-strict-e2e: section 5b2 ran and MEASURED every link — persistence/measurement is no longer skipped on this layout"
   else
-    bad "sccache-strict-e2e: section 5b2 did not reach VERIFIED — the precondition skip (or a session that could not resolve the binary) is back"
+    bad "sccache-strict-e2e: section 5b2 did not reach SCOPED-NON-LOGIN — the precondition skip (or a session that could not resolve the binary) is back"
     printf '%s\n' "$scc413c_plain" | grep -i 'sccache-cap' | head -5
   fi
   if ! out_has "$scc413c_out" -F -- "no 'sccache' for the account gates run as"; then
@@ -6346,7 +6406,7 @@ fi
 # the two prior recurrences arrived through different causes and a third will too.
 pin_mustrun_missing=""
 for pin_mustrun in \
-  "push: VERIFIED yields 'All checks green.' and --strict exits 0 (zero warnings)" \
+  "push: VERIFIED leaves NO warning of its own" \
   "push: AC1+AC3 end to end" \
   "push: the refusal is exactly ONE warning and names the host"; do
   out_has "$PIN_RAN_CASES" -F -- "$pin_mustrun" \

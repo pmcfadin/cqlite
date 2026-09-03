@@ -88,8 +88,14 @@
 #      rewriting an existing value) and takes its VERDICT from a fresh profile-free session
 #      PLUS the RUNNING SERVER — because the cap is read by the sccache SERVER at startup and
 #      is therefore fixed by whichever process started it: a visible env var proves nothing
-#      once a server is already up. One greppable `sccache-cap:` line: VERIFIED /
-#      NOT-SYSTEM-WIDE / NOT-HONOURED / FAILED / UNMEASURED, and only VERIFIED is an [ok].
+#      once a server is already up. One greppable `sccache-cap:` line: SCOPED-NON-LOGIN /
+#      NOT-SYSTEM-WIDE / NOT-HONOURED / FAILED / UNMEASURED — and NONE of them is an [ok],
+#      because this section measures ONE context (a non-login PAM session) while #3727's own
+#      root cause lives in another (a LOGIN shell runs /etc/profile.d after pam_env). Even the
+#      best state, every link measured and agreeing, is SCOPED-NON-LOGIN: a [warn] that reports
+#      what was measured and DECLARES that the cap a gate gets is not established. So
+#      `--strict` does not go green on this section until #3946 measures the launch contexts;
+#      that is deliberate — a partial result is UNKNOWN, never an [ok] (#3414's rule).
 #      NOT-HONOURED reports BOTH byte counts and prints NO remedy: the advice layer (which server
 #      to stop, in which context, in which direction) was REMOVED by lead ruling req-3727-w4 and is
 #      the follow-up issue's subject. The value->bytes
@@ -3948,9 +3954,10 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # THIS IS THE FIX FOR A REAL PROVISIONING FAILURE, AND IT IS A FEATURE RATHER THAN A SOFTENED
   # VERDICT (issue #3727 roborev finding 2). A freshly launched box has no sccache server until
   # its first cached compilation, so `cache_size` is null, so the cap IN FORCE is genuinely
-  # unmeasurable — and this section would report UNMEASURED and fail `--strict` on EVERY new box
-  # immediately after correctly persisting the value. An alarm that fires on every new box is one
-  # people learn to waive.
+  # unmeasurable — and this section would report UNMEASURED, learning NOTHING about the cap,
+  # immediately after correctly persisting the value. (Since round 426 no state here is an [ok],
+  # so `--strict` is red either way; what the start buys is the difference between a verdict
+  # carrying four measured facts and one carrying none.)
   #
   # The mechanism this whole section is about supplies the fix: the cap is fixed by whichever
   # process starts the server FIRST, and nothing later can change it. So bootstrap deliberately
@@ -4164,7 +4171,8 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # THE PLACEHOLDER / UNUSABLE-LITERAL REFUSAL. Persisting a value sccache would discard is
   # worse than persisting nothing: it is silent (there is no diagnostic anywhere), and because
   # this section never rewrites an existing value it would be permanent. The MEASUREMENT still
-  # runs — a box someone else capped correctly can still reach VERIFIED.
+  # runs — a box someone else capped correctly still reaches SCOPED-NON-LOGIN with every link
+  # measured and agreeing.
   #
   # PLACED AT THE TWO WRITE SITES, NOT AT THE HEAD OF THE CHAIN. At the head it warned on every
   # box, including boxes that already carry a cap line and where nothing would be written — a
@@ -4274,12 +4282,13 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
   # an artifact that cannot affect the fact being measured is how #3727 happened.
 
   # ---- (4) THE VERDICT ----
-  # scc_scope_note: what VERIFIED does NOT cover, printed with the verdict rather than buried in
-  # a doc — an unqualified VERIFIED reads as "every gate on this box gets this cap".
+  # scc_scope_note: what the SCOPED-NON-LOGIN verdict does NOT cover, printed with the verdict
+  # rather than buried in a doc — an unqualified success token would read as "every gate on this
+  # box gets this cap", which is why no success token is emitted here at all.
   scc_scope_note() {
     info "scope: measured through ONE session type — a NON-LOGIN PAM session (sudo), which is what pam_env applies $SCC_ENV_FILE to. A LOGIN shell additionally runs /etc/profile.d, and on this fleet that is where a DIFFERENT value can come from (#3727's own root cause); that context is NOT measured here and NO disagreement between the two is detected — the mechanism that will cover it is #3946. Whether the service stacks a gate is actually launched from read the same sources is NOT checked here either, and a process tree created WITHOUT PAM (a systemd unit, a container entrypoint) never has $SCC_ENV_FILE applied at all — measured, such a session (env -i) sees the variable UNSET"
     info "scope: the cap is read by the sccache SERVER at STARTUP, so this verdict is about THIS box's CURRENT server plus FUTURE sessions. A server started later by a session that does NOT see the value will enforce sccache's default instead, and a server already running keeps its cap for its whole lifetime"
-    info "scope: VERIFIED asserts that the file SETS this value, that a fresh session SEES that same value, and that the RUNNING server enforces exactly the bytes that value means — it does NOT prove the file is where the session got it. Agreement is measured; provenance is not"
+    info "scope: SCOPED-NON-LOGIN asserts that the file SETS this value, that a fresh non-login session SEES that same value, and that the RUNNING server enforces exactly the bytes that value means — it does NOT prove the file is where the session got it, and it does NOT certify the cap a gate will see. Agreement is measured; provenance is not; the login/launcher context is not measured at all"
     # WHICH SERVER WAS MEASURED, stated rather than assumed: every read and any start ran INSIDE
     # that session, so its routing decided which server answered. Printed even when unset, because
     # "sccache's own default location" is itself the answer a reader needs.
@@ -4420,10 +4429,12 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
     # DECLARED RESIDUAL, and it is the reason the removed layer was written: on this fleet a
     # LOGIN shell can see a different value from a non-login PAM session
     # (/etc/profile.d/20-agent-ami.sh sources ~/.agent-ami/worker-env.sh AFTER pam_env applies
-    # /etc/environment — measured on box3, and it is #3727's own root cause). This section no
-    # longer measures that, so a box whose login shells disagree with the file now reports
-    # VERIFIED about the non-login session it did measure. The claim is SCOPED to that session
-    # in the verdict text rather than left implicit.
+    # /etc/environment — measured on box3, and it is #3727's own root cause). This section does
+    # not measure that, so the best state it can reach is SCOPED-NON-LOGIN: a [warn] carrying
+    # every measured fact AND the statement that the cap a gate gets is not established. It was
+    # an [ok] VERIFIED for one commit, which was a false certification of this section's own
+    # subject (roborev round 426) — the residual is now in the TOKEN and the verdict text, not
+    # only in a scope note a grep for the verdict never sees.
     if [ "$scc_probe_rc" = 124 ] || [ "$scc_probe_rc" = 137 ]; then
       warn "sccache-cap: UNMEASURED (the non-login session probe exceeded its ${SCC_PROBE_BOUND}s bound and was killed — cap visibility is UNKNOWN, not ok)"
     elif [ "$scc_probe_ok" != 1 ]; then
@@ -4514,15 +4525,41 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
               # above; this half asks a different question — is the session getting THIS FILE's
               # value — and normalising here would be a second classifier free to disagree.
               if [ "$SCC_FILE_VALUE" = "$scc_probe_seen" ]; then
+                # THE STRONGEST TOKEN THIS SECTION MAY EMIT IS A SCOPED ONE, AND IT IS NOT AN
+                # [ok] (issue #3727 roborev round 426). Every link above WAS measured — the file
+                # declares the value, a fresh session SEES it, sccache resolves it to N bytes and
+                # the RUNNING server enforces exactly N — but all of it in ONE context, a
+                # NON-LOGIN PAM session, while a LOGIN shell additionally runs /etc/profile.d and
+                # on this fleet that is where a DIFFERENT value comes from (#3727's own root
+                # cause). MEASURED, same box, same tree: a gate launched via gate-detached.sh
+                # reported sccache-cap=32212254720 while `--lite` from a lane shell reported
+                # 53687091200. So an unqualified VERIFIED here would certify the box at one cap
+                # while a real gate ran against another — a FALSE CERTIFICATION of exactly the
+                # property this section exists to establish. The measurement is NOT widened (the
+                # multi-context comparison layer is #3946's, removed by lead ruling req-3727-w4);
+                # the CLAIM is narrowed to what was measured, per #3414's rule that a partial
+                # result is UNKNOWN and never an [ok].
+                #
+                # WHY A DISTINCT TOKEN RATHER THAN AN EXISTING ONE. NOT-SYSTEM-WIDE asserts a
+                # MEASURED disagreement between the file and the session; here the two were
+                # measured to AGREE, so it would be affirmatively false, would make two different
+                # host states indistinguishable in the greppable line, and its remedy would send
+                # an operator to change a correct value. UNMEASURED asserts a link could not be
+                # read; here every link was, and reporting less than was measured is a wrong
+                # ANSWER — the operator would hunt a broken probe on a correctly capped box. The
+                # name deliberately does NOT begin with VERIFIED: a grep for `sccache-cap:
+                # VERIFIED` must not match it (the `PASS*` accepts `PASSthisNeverRan` shape).
+                #
                 # WHERE THIS RUN STARTED THE SERVER ITSELF, SAY SO IN THE VERDICT. The third
                 # fact is then true because bootstrap MADE it true — a provisioning action, not
                 # an independent observation of a server somebody else started — and a reader
-                # who cannot tell those apart would over-read the [ok]. (The read-back is still
+                # who cannot tell those apart would over-read the line. (The read-back is still
                 # a measurement: it is sccache reporting what it actually enforces.)
-                # ONE `ok` CALL, with the varying phrase in a variable: the self-test's
-                # structural guard requires section 5b2 to contain exactly one `ok "` and for it
-                # to be the named VERIFIED verdict, and two call sites would defeat a guard that
-                # exists to stop a future `ok` sneaking in for a file write or an exemption.
+                # ONE VERDICT CALL, with the varying phrase in a variable: the self-test's
+                # structural guard requires section 5b2 to contain NO `ok "` at all, and to
+                # reach this state through exactly one `warn "sccache-cap: SCOPED-NON-LOGIN (`
+                # call — two call sites would defeat a guard that exists to stop a future
+                # success token sneaking in for a file write, an exemption or this state.
                 if [ "$SCC_SERVER_STARTED" = 1 ]; then
                   # "THIS RUN STARTED" is as strong as the evidence allows: there was no server
                   # when the run began, this run asked for one at this value, and the server now
@@ -4533,7 +4570,7 @@ if [ "$SCC_SECTION_OK" = 1 ]; then
                 else
                   scc_srv_phrase="the ALREADY-RUNNING sccache server enforces exactly the $SCC_SEEN_BYTES bytes it means"
                 fi
-                ok "sccache-cap: VERIFIED ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE=$SCC_FILE_VALUE, a fresh PAM-created, profile-free session sees that SAME value, and $scc_srv_phrase; this run's own value, BASH_ENV and ENV were scrubbed first)"
+                warn "sccache-cap: SCOPED-NON-LOGIN ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE=$SCC_FILE_VALUE, a fresh PAM-created, profile-free session sees that SAME value, and $scc_srv_phrase; this run's own value, BASH_ENV and ENV were scrubbed first) — SCOPED, NOT a certification: that NON-LOGIN PAM session is the ONLY context measured, a LOGIN shell additionally runs /etc/profile.d and can export a DIFFERENT value, and no disagreement between the two is detected here (#3946), so the cap a gate actually gets is NOT established — this verdict is deliberately NOT a success token"
                 scc_scope_note
               else
                 warn "sccache-cap: NOT-SYSTEM-WIDE ($SCC_ENV_FILE sets SCCACHE_CACHE_SIZE='$SCC_FILE_VALUE' but this session sees '$scc_probe_seen' — a sudo- or user-specific source is OVERRIDING the system-wide file, so ordinary PAM sessions get the file's value and whichever of them starts the sccache server will cap it with THAT, not with the one measured here)"
