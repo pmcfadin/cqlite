@@ -290,6 +290,19 @@ EXEMPTIONS: dict[str, str] = {
         "a driver library; sourced by the driver, never invokes it — its ws0-baseline.sh mentions"
         " are prose explaining the split, the driver globals it reads, and the round-21 finding"
         " that the boundary verifier was unwired",
+    # #3551's campsite-rule split (the three flight-arm flags took the driver ~250 lines further
+    # past the ~800-line source target). Reported UNCOVERED the moment it became tracked, exactly
+    # as its nine library predecessors were — and the TWO POSTURES showed themselves again in the
+    # same run: the PERF tree lint's subject is a `scripts/perf/*.sh` glob, so this library joined
+    # all three of its layers AUTOMATICALLY (127 -> 129 checks), while this CONTENT-based census
+    # correctly demanded a decision. Checking BOTH on a split is exactly why. Same class as its
+    # siblings: sourced by the driver, never invokes it, and its `ws0-baseline.sh` mentions are
+    # prose (the line budget that forced the split, and what the driver deliberately keeps — the
+    # flag defaults, the --help text and the ORDER of operations).
+    "scripts/perf/lib-flight-arm.sh":
+        "a driver library; sourced by the driver, never invokes it — its ws0-baseline.sh mentions"
+        " are prose explaining the split and what the driver keeps (defaults, --help, the order"
+        " of operations)",
     "scripts/perf/README.md": "documentation",
     "scripts/perf/ws0_report.py": "the reporter; prose reference only",
     # Round 22's F1 module — the boundary record READ BACK — and the census reported it UNCOVERED
