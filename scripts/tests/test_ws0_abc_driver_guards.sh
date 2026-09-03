@@ -54,6 +54,29 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ABC_DRIVER="$REPO_ROOT/scripts/perf/ws0-3551-abc.sh"
+
+# THE ARM SET IS DERIVED FROM THE DRIVER, NEVER RESTATED HERE (#3551).
+#
+# This suite first hard-coded `A B C0 C` in five places, and adding arm D to the driver reddened
+# two cases that were testing nothing about arm D — a curated copy of a set the driver owns. Per
+# this repo's standing rule the subject set is computed from committed source at run time, so a
+# new arm is picked up rather than breaking the suite; and a FAILED derivation is a FAIL that
+# NAMES the derivation, never a fallback to a default, which would silently re-curate the list.
+_arms_line=$(grep -oE '^ARMS=\([^)]*\)' "$ABC_DRIVER" | head -1) || true
+if [ -z "$_arms_line" ]; then
+  printf 'FAIL - derivation: no top-level ARMS=(...) in %s, so the arm set cannot be derived\n' \
+    "$ABC_DRIVER" >&2
+  exit 1
+fi
+# shellcheck disable=SC2206  # deliberate word split of a literal array body
+DRIVER_ARMS=(${_arms_line#ARMS=(})
+DRIVER_ARMS=("${DRIVER_ARMS[@]%)}")
+NARMS=${#DRIVER_ARMS[@]}
+if [ "$NARMS" -lt 2 ]; then
+  printf 'FAIL - derivation: %s declares %d arm(s); a pairing suite needs at least 2\n' \
+    "$ABC_DRIVER" "$NARMS" >&2
+  exit 1
+fi
 AGG="$REPO_ROOT/scripts/perf/ws0_abc_aggregate.py"
 
 fails=0
@@ -284,13 +307,13 @@ make_measured() {
   local out="$1" rnd="$2" arm="$3"
   mkdir -p "$out/r$rnd-$arm"
   printf '{}\n' > "$out/r$rnd-$arm/results.json"
-  printf '{"round":%s,"position_in_round":1,"arms_in_round":4,"arm":"%s","exit":0}\n' \
-    "$rnd" "$arm" > "$out/r$rnd-$arm/abc-window.json"
+  printf '{"round":%s,"position_in_round":1,"arms_in_round":%s,"arm":"%s","exit":0}\n' \
+    "$rnd" "$NARMS" "$arm" > "$out/r$rnd-$arm/abc-window.json"
 }
 measure_all() {
   local out="$1" rounds="$2" r arm
   for ((r = 1; r <= rounds; r++)); do
-    for arm in A B C0 C; do make_measured "$out" "$r" "$arm"; done
+    for arm in "${DRIVER_ARMS[@]}"; do make_measured "$out" "$r" "$arm"; done
   done
 }
 
@@ -310,8 +333,8 @@ abc_copy "$TMP/d-base" || true
 OUT="$TMP/out-fresh"
 out=$(run_abc "$TMP/d-base" --corpus "$CORPUS" --bin-dir "$BINS" --out "$OUT" --rounds 1); rc=$?
 n=$(stub_invocations)
-if [ "$rc" -eq 0 ] && [ "$n" -eq 4 ]; then
-  pass "0a. the harness CAN observe a measurement: a fresh --out runs all 4 arms of round 1 through the stub (recorded $n invocations)"
+if [ "$rc" -eq 0 ] && [ "$n" -eq "$NARMS" ]; then
+  pass "0a. the harness CAN observe a measurement: a fresh --out runs all $NARMS arms of round 1 through the stub (recorded $n invocations)"
 else
   fail "0a. a fresh --out must invoke the stub once per arm (rc=$rc, invocations=$n, out: $out)"
 fi
@@ -328,9 +351,12 @@ else
 fi
 # The fingerprint's own content, asserted once: a field list nobody checks is a field list that
 # can quietly shrink, and every refusal case below rests on these being present.
-for field in corpus_path corpus_data_db_sha256 corpus_rows bin_dir step_duration arena_max \
-             jemalloc_lib port arms binary_sha256.ws0-scan-bench binary_sha256.cqlite-flight \
-             binary_sha256.flight-loadgen arm_flags.A arm_flags.B arm_flags.C0 arm_flags.C; do
+_expected_fields=(corpus_path corpus_data_db_sha256 corpus_rows bin_dir step_duration
+                  arena_max jemalloc_lib port arms binary_sha256.ws0-scan-bench
+                  binary_sha256.cqlite-flight binary_sha256.flight-loadgen)
+# One `arm_flags.<arm>` per DERIVED arm, so a new arm must appear in the fingerprint too.
+for _a in "${DRIVER_ARMS[@]}"; do _expected_fields+=("arm_flags.$_a"); done
+for field in "${_expected_fields[@]}"; do
   if grep -q "\"$field\"" "$OUT/abc-run.json"; then
     pass "0b. the fingerprint records $field"
   else
@@ -367,7 +393,7 @@ out=$(run_abc "$TMP/d-base" "${base_args[@]}"); rc=$?
 skips=$(grep -c 'SKIP (measured, window VERIFIED' <<<"$out")
 n=$(stub_invocations)
 if [ "$rc" -eq 0 ] && grep -q "resume:   VERIFIED against" <<<"$out" \
-   && [ "$skips" -eq 12 ] && [ "$n" -eq 0 ]; then
+   && [ "$skips" -eq "$((3 * NARMS))" ] && [ "$n" -eq 0 ]; then
   pass "1a. an IDENTICAL configuration is ACCEPTED, all 12 sessions SKIPPED, and NOTHING re-measured"
 else
   fail "1a. an identical resume must be accepted and skip everything (rc=$rc, skips=$skips, stub=$n, out: $out)"
@@ -486,8 +512,8 @@ measure_all "$BASE_OUT" 5
 out=$(run_abc "$TMP/d-base" --corpus "$CORPUS" --bin-dir "$BINS" --out "$BASE_OUT" --rounds 5)
 rc=$?
 skips=$(grep -c 'SKIP (measured, window VERIFIED' <<<"$out")
-if [ "$rc" -eq 0 ] && grep -q "resume:   VERIFIED against" <<<"$out" && [ "$skips" -eq 20 ]; then
-  pass "1l. --rounds 3 -> 5 over the SAME --out is ACCEPTED (the deliberate exclusion), all 20 sessions skipped"
+if [ "$rc" -eq 0 ] && grep -q "resume:   VERIFIED against" <<<"$out" && [ "$skips" -eq "$((5 * NARMS))" ]; then
+  pass "1l. --rounds 3 -> 5 over the SAME --out is ACCEPTED (the deliberate exclusion), all $((5 * NARMS)) sessions skipped"
 else
   fail "1l. extending the round count must be accepted (rc=$rc, skips=$skips, out: $(tail -5 <<<"$out"))"
 fi
@@ -574,8 +600,8 @@ WIN_OUT="$TMP/out-window"
 measure_all "$WIN_OUT" 1
 win_args=(--corpus "$CORPUS" --bin-dir "$BINS" --out "$WIN_OUT" --rounds 1)
 out=$(run_abc "$TMP/d-base" "${win_args[@]}"); rc=$?
-if [ "$rc" -eq 0 ] && [ "$(grep -c 'SKIP (measured, window VERIFIED' <<<"$out")" -eq 4 ]; then
-  pass "2a. (control) four intact sessions are ACCEPTED and skipped"
+if [ "$rc" -eq 0 ] && [ "$(grep -c 'SKIP (measured, window VERIFIED' <<<"$out")" -eq "$NARMS" ]; then
+  pass "2a. (control) all $NARMS intact sessions are ACCEPTED and skipped"
 else
   fail "2a. (control) the intact window set must be accepted (rc=$rc, out: $out)"
 fi
@@ -608,7 +634,7 @@ refuses_naming "2g. a window with no \`exit\` field is REFUSED, naming the direc
   "$TMP/d-base" "$WIN_OUT/r1-A" "carries no 'exit'" -- "${win_args[@]}"
 make_measured "$WIN_OUT" 1 A
 out=$(run_abc "$TMP/d-base" "${win_args[@]}"); rc=$?
-if [ "$rc" -eq 0 ] && [ "$(grep -c 'SKIP (measured, window VERIFIED' <<<"$out")" -eq 4 ]; then
+if [ "$rc" -eq 0 ] && [ "$(grep -c 'SKIP (measured, window VERIFIED' <<<"$out")" -eq "$NARMS" ]; then
   pass "2h. every window mutation reverted, the set is accepted again — no case above passed on a broken fixture"
 else
   fail "2h. the reverted window set must be accepted (rc=$rc, out: $out)"
