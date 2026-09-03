@@ -44,12 +44,16 @@
 #   3. `[ -d <config dir> ]` is evaluated as THIS process — root, under the documented sudo
 #      invocation — so it says nothing about the delegated agent's access
 #      (claude_tmux_env_verdict_into__untraced and claude_tmux_cold_verdict_into);
-#   4. FIXED (was: the probe directory's `chown -R` precedes the heredoc that writes
-#      `probe.sh`, so that one file is not covered by the handover). RECLASSIFIED first:
-#      root writing into a directory it has already given away is not a claim that could be
-#      wrong, it is a same-uid PEER LANE's opportunity to interpose a symlink and have ROOT
-#      overwrite an arbitrary file — a non-invoker route, so a defect and not a limitation
-#      of a report. The write now precedes the handover; the umask half closed with it
+#   4. FIXED, TWICE, AND THE SECOND FIX SUBSUMED THE FIRST (was: the probe directory's
+#      `chown -R` precedes the heredoc that writes `probe.sh`, so that one file is not
+#      covered by the handover). RECLASSIFIED first: root writing into a directory it has
+#      already given away is not a claim that could be wrong, it is a same-uid PEER LANE's
+#      opportunity to interpose a symlink and have ROOT overwrite an arbitrary file — a
+#      non-invoker route, so a defect and not a limitation of a report. Fix 1 moved the write
+#      ABOVE the handover. Fix 2 removed the enabling condition instead: there is no
+#      `chown -R` any more, so the delegate never gets DIRECTORY WRITE and nothing in
+#      `$__dir` can be interposed at all. probe.sh stays root-owned with an explicit
+#      readable mode, which is what closes the umask half now that no `-R` covers it
 #      (claude_tmux_cold_probe_into);
 #   5. the LIVE-server path reads the tmux GLOBAL environment only and never spawns a pane
 #      (claude_tmux_env_verdict_into__untraced).
@@ -251,6 +255,14 @@ CLAUDE_AUTH_REJECT_RE='invalid api key|invalid x-api-key|invalid[ _-]?token|inva
 CLAUDE_AUTH_SERVICE_RE='rate.?limit|(^|[^0-9])429([^0-9]|$)|too many requests|quota|credit balance|overloaded|(^|[^0-9])5[0-9][0-9]([^0-9]|$)|service unavailable|internal server error|bad gateway'
 # The cold-start tmux probe is local-only (no network), so it gets a much tighter bound.
 CLAUDE_AUTH_TMUX_PROBE_BOUND=20
+# A HARD BYTE CAP ON THE PANE REPORT, kept even though substitution is now impossible.
+# The report is a handful of short lines (~150 bytes); 64 KiB is generous by three orders of
+# magnitude. It is BELT, and it is kept because "the content is bounded by what the delegate
+# wrote" is an argument about the current permission layout, while a cap bounds MEMORY
+# unconditionally — and an unbounded read into a shell variable is the specific defect that
+# produced this constant (a symlink to /dev/zero accumulated until the timeout fired).
+# Read as CAP+1 so hitting the cap is DETECTABLE rather than silently truncating a record.
+CLAUDE_AUTH_REPORT_MAX=65536
 
 # ---- alternate credentials: OBSERVED AND NAMED, DELIBERATELY NOT SCRUBBED ----------
 # LIMITATION 2 of 5 (#3733) lives at the probe's `env` call; this is the list it reports.
@@ -342,8 +354,8 @@ claude_auth_resolve_timeout() {
 # external invocation in this file is either BOUNDED or declared here as unable to block:
 #   BOUNDED — `claude -p` (90s, the network probe); every `tmux` invocation, live or
 #     throwaway (`show-environment -g`, `setenv -g`, `new-session`, `kill-server`); the
-#     pane-report wait loop; THE SINGLE `cat` THAT READS THE PANE REPORT BACK; the digest
-#     tool; and (below) the identity lookups `id` uses.
+#     pane-report wait loop; THE SINGLE BYTE-CAPPED `head -c` THAT READS THE PANE REPORT
+#     BACK; the digest tool; and (below) the identity lookups `id` uses.
 #     A DELEGATION PREFIX AND A SCRUBBING `env` ARE INSIDE THE BOUND, NOT IN FRONT OF IT:
 #     `runuser -u`/`sudo -n -u` and `env -u …` are words of the bounded argv, and `env`
 #     EXECVEs its target rather than forking one, so the single process the bound kills is
@@ -352,7 +364,8 @@ claude_auth_resolve_timeout() {
 #     before `timeout` is reached.
 #   DECLARED UNBOUNDABLE-BY-NEED, each because it cannot block indefinitely:
 #     * `uname -s` — a syscall wrapper;
-#     * `mktemp`, `rm`, `chown -R` over the probe's own working directory, `cat` reading a
+#     * `mktemp`, `rm`, `mkdir`, and the `chown`/`chmod` handover grants over the probe's own
+#       working directory, `cat` reading a
 #       file this process wrote and the `cat >` heredoc that writes the pane script into
 #       that directory — local filesystem calls on paths WE created, over content of a size
 #       this file fixes;
@@ -361,14 +374,22 @@ claude_auth_resolve_timeout() {
 #       bounding them would make the NOT-PERSISTED verdict itself depend on a `timeout`
 #       binary that a correct box need not have (the read must still work when the probe
 #       cannot run);
-#     * (REMOVED — the pane REPORT file is now BOUNDED, see the list above. Recorded rather
-#       than silently deleted, because the reasoning is the lesson: this entry argued the read
-#       was safe because the bounded wait loop had already observed the terminating `end` line,
-#       so the file was "complete, regular and small by the time it is read". THAT ARGUMENT
-#       WAS UNSOUND. The report path sits inside the directory the probe has ALREADY handed to
-#       the invoking user, so what the wait loop proves is what the file WAS THEN, not what the
-#       path RESOLVES TO NOW; a peer lane replacing it with a fifo made an unbounded read block
-#       FOREVER. It is one bounded `cat` now, parsed in memory;)
+#     * (REMOVED — the pane REPORT file is now BOUNDED **and** BYTE-CAPPED, see the list
+#       above. Recorded rather than silently deleted, because two rounds of reasoning here
+#       were wrong in the same place and that is the lesson. (1) The entry originally argued
+#       the read was safe because the bounded wait loop had already observed the terminating
+#       `end` line, so the file was "complete, regular and small by the time it is read" —
+#       UNSOUND: the report sat inside a directory already handed to the invoking user, so
+#       the wait loop proves what the file WAS THEN, not what the path RESOLVES TO NOW, and
+#       a peer replacing it with a fifo made an unbounded read block FOREVER. (2) Bounding
+#       the read in TIME then left it unbounded in MEMORY: a symlink to /dev/zero
+#       accumulated into a shell variable until the timeout, which can OOM an unattended
+#       bootstrap. THE FIX FOR THE FAMILY IS NOT A THIRD CLEVERER READ — the SUBSTITUTION
+#       CAPABILITY IS REMOVED (see the handover block: `$__dir` is root-owned and
+#       traverse-only, only the report FILE's ownership and a dedicated `sock/` move), so
+#       neither a fifo nor a symlink can be planted at all. The bound and the cap stay as
+#       belt, because a control that depends on today's permission layout should not be the
+#       only one;)
 #     * `tr`/`cut` inside the redaction boundary, over a string already in memory — a bound
 #       that fired there would DESTROY the verdict text it is rendering.
 #   NOT AN EXTERNAL CALL AT ALL — `command -v`, `printf` and the `kill -s` signal re-raise
@@ -1248,12 +1269,32 @@ claude_tmux_cold_probe_into() {
     return 0
   fi
   __res="$__dir/result"; : >"$__res"
+  # ---- THE SOCKET GETS ITS OWN SUBDIRECTORY, AND THAT IS THE WHOLE FIX (#3733) --------
+  # Creating a socket is the ONE thing in this probe that genuinely needs DIRECTORY WRITE,
+  # and directory write is exactly what allows unlink/create/symlink — i.e. SUBSTITUTION of
+  # `result` or `probe.sh`. Two consecutive review rounds landed in one mechanism because
+  # the handover was wider than the need: `chown -R` gave the delegate write on the whole
+  # tree, so root was reading paths another party could replace (round 428: unbounded `sed`
+  # became a fifo HANG; round 430: bounded `cat` became unbounded MEMORY on a symlink to
+  # /dev/zero). Carving the READ a third time is the move this repo rules against — the
+  # capability is REMOVED instead, which is #3312's umbrella lesson applied to a filesystem
+  # path rather than to a text channel.
+  # So: the socket lives in `$__dir/sock/`, the only component handed directory write, and
+  # `$__dir` itself stays root-owned and traverse-only. MEASURED against real tmux under a
+  # real `runuser` handover before this was written: tmux creates `sock/<name>.sock` and
+  # NOTHING else anywhere in `$__dir`, and `runuser` does not chdir, so no writable cwd is
+  # needed here either.
+  if ! mkdir "$__dir/sock" 2>/dev/null || [ ! -d "$__dir/sock" ]; then
+    rm -rf "$__dir"
+    eval "$__owhy='could not create the private socket subdirectory for the isolated probe'"
+    return 0
+  fi
   # `-S <path>` INSIDE the private working directory, not `-L <name>`: a `-L` socket lives
   # in the shared /tmp/tmux-<uid>/ and tmux LEAVES THE SOCKET FILE BEHIND when a server
   # self-exits (measured), so every run would litter a directory it does not own. Here the
   # socket is removed with the directory. A unix socket path is bounded (sun_path, 108
   # bytes), so an over-long TMPDIR is a NAMED refusal rather than a mysterious tmux error.
-  __sock="$__dir/cqlite-authprobe.sock"
+  __sock="$__dir/sock/cqlite-authprobe.sock"
   if [ "${#__sock}" -gt 100 ]; then
     rm -rf "$__dir"
     eval "$__owhy='the private probe socket path would exceed the unix-socket length limit (TMPDIR is too long) — refusing rather than guessing'"
@@ -1270,20 +1311,21 @@ claude_tmux_cold_probe_into() {
   esac
   # ---- ROOT CREATES EVERYTHING IT OWNS **BEFORE** THE HANDOVER BELOW ----------------
   # THE ORDER OF THESE TWO STEPS IS A SECURITY PROPERTY, NOT HOUSEKEEPING (#3733, the
-  # limitation formerly numbered 4 of 5). This `cat` used to sit AFTER the `chown -R`, so
-  # root wrote into a directory it had ALREADY given away — and on this fleet EVERY LANE
-  # RUNS AS ONE USER, so the recipient is a PEER LANE, which can plant a symlink at
-  # `probe.sh` and have ROOT truncate and overwrite an arbitrary file. That is a
-  # NON-INVOKER route and therefore a defect, not a documented limitation of a report: it
-  # is not a claim that could merely be wrong, and it exists whatever the verdict line says.
-  # Written first, the file is created while the directory is still this uid's own 0700
-  # `mktemp -d`, so there is no window in which another party can interpose a path.
-  # SECOND EFFECT, VERIFIED NOT ASSUMED: because `chown -R` now runs AFTER the write, it
-  # covers `probe.sh` too, so the file's owner becomes the delegate and a restrictive umask
-  # no longer strands it root-readable-only. Previously it kept this uid's ownership at
-  # root's umask, and at 0077 a delegated `sh probe.sh` could not read it — reported as "the
-  # isolated pane did not report", a true statement with a misleading cause. Both halves are
-  # closed by the one reorder.
+  # limitation formerly numbered 4 of 5). This `cat` used to sit AFTER a `chown -R`, so root
+  # wrote into a directory it had ALREADY given away — and on this fleet EVERY LANE RUNS AS
+  # ONE USER, so the recipient is a PEER LANE, which could plant a symlink at `probe.sh` and
+  # have ROOT truncate and overwrite an arbitrary file. That is a NON-INVOKER route and
+  # therefore a defect, not a documented limitation of a report: it is not a claim that could
+  # merely be wrong, and it exists whatever the verdict line says.
+  # Written here, the file is created while the directory is still this uid's own 0700
+  # `mktemp -d`. THE ORDERING IS NOW BELT RATHER THAN THE CONTROL: the handover below no
+  # longer grants the delegate directory write at all, so there is no point in the run at
+  # which any entry here is interposable. Kept because ordering costs nothing and a control
+  # that rests only on today's permission layout should not stand alone.
+  # UMASK: probe.sh is made explicitly readable in the handover below. It used to rely on
+  # `chown -R` covering it, and with `-R` gone that would have left it at root's umask —
+  # 0077 strands it root-readable-only and a delegated `sh probe.sh` cannot read it, which
+  # surfaced as "the isolated pane did not report", a true statement with a misleading cause.
   #
   # The pane script reports DELIVERY, never the value: set/unset, a LENGTH, a SALTED DIGEST
   # and the config directory (a path, not a secret). Nothing it writes carries the
@@ -1319,13 +1361,31 @@ CLAUDE_AUTH_PROBE
     return 0
   fi
 
-  # A DELEGATED PROBE MUST BE ABLE TO WRITE ITS OWN WORKING DIRECTORY. `mktemp -d` gives us
-  # a 0700 directory owned by THIS uid, and a tmux started as the invoking agent could
-  # neither create the socket in it nor write the pane report. The probe is delegated for the
-  # same reason the live read is: a per-user tmux config is exactly what can substitute the
-  # credential, so a probe run as root measures ROOT's would-be server and says nothing about
-  # the agent's. A FAILED handover is a REFUSAL, never a quiet fall back to a root-run probe
-  # whose answer would be about the wrong user.
+  # A DELEGATED PROBE NEEDS THREE NARROW GRANTS, NOT WRITE ON THE WHOLE TREE. `mktemp -d`
+  # gives a 0700 directory owned by THIS uid, and a tmux started as the invoking agent could
+  # otherwise neither create its socket nor write the pane report. The probe is delegated for
+  # the same reason the live read is: a per-user tmux config is exactly what can substitute
+  # the credential, so a probe run as root measures ROOT's would-be server and says nothing
+  # about the agent's. A FAILED handover is a REFUSAL, never a quiet fall back to a root-run
+  # probe whose answer would be about the wrong user.
+  #
+  # THIS USED TO BE `chown -R "$user" "$__dir"`, AND THAT WAS THE ENABLING CONDITION FOR TWO
+  # SEPARATE HIGHS. `-R` grants DIRECTORY WRITE, which is unlink/create/symlink — so every
+  # path root then read inside that directory was replaceable by a same-uid peer lane. What
+  # the delegate actually needs is narrower, and each grant is now matched to its need:
+  #   * `result`  — the pane TRUNCATES it (`} >"$1"`), which needs write on the FILE. Root
+  #                 pre-created the inode above, so only its ownership moves: the delegate
+  #                 can rewrite the contents and CANNOT replace the inode.
+  #   * `sock/`   — the only thing that must create a NEW entry, so it is the only thing
+  #                 given directory write, and it holds nothing root reads.
+  #   * `$__dir`  — 0711: traverse by name, no write, and not even LIST. probe.sh and result
+  #                 cannot be unlinked, replaced or symlinked; `$__dir` is not listable, so
+  #                 the socket name is not even enumerable.
+  #   * probe.sh  — stays ROOT-OWNED and is made readable (an inherited restrictive umask
+  #                 would otherwise leave it 0600 root-only and the delegated `sh` could not
+  #                 read it). Root-owned means the delegate cannot alter what it executes.
+  # EVERY STEP IS REQUIRED TO HAVE WORKED, and the mode is set LAST so a failure part-way
+  # cannot leave a directory that is writable AND handed over.
   #
   # ---- LIMITATION 4 of 5 (#3733) — FIXED, and the slot is KEPT AS A RECORD rather than
   # renumbered. It read: this handover PRECEDES the heredoc that writes `probe.sh`, so that
@@ -1341,9 +1401,14 @@ CLAUDE_AUTH_PROBE
   # resolves. Pinned behaviourally AND structurally by section 37 of
   # scripts/tests/test_claude_auth_capability.sh.
   if [ "$CLAUDE_AUTH_TMUX_IDENTITY" = delegate ]; then
-    if ! chown -R "$CLAUDE_AUTH_TMUX_IDENTITY_USER" "$__dir" 2>/dev/null; then
+    if ! chmod 0644 "$__dir/probe.sh" 2>/dev/null \
+       || ! chown "$CLAUDE_AUTH_TMUX_IDENTITY_USER" "$__res" 2>/dev/null \
+       || ! chmod 0600 "$__res" 2>/dev/null \
+       || ! chown "$CLAUDE_AUTH_TMUX_IDENTITY_USER" "$__dir/sock" 2>/dev/null \
+       || ! chmod 0700 "$__dir/sock" 2>/dev/null \
+       || ! chmod 0711 "$__dir" 2>/dev/null; then
       rm -rf "$__dir"
-      eval "$__owhy=\"the probe's private working directory could not be handed to the invoking agent (\$CLAUDE_AUTH_TMUX_IDENTITY_USER), so a tmux started as that login could not write into it — refusing rather than measuring the wrong user's cold start\""
+      eval "$__owhy=\"the probe's private working directory could not be handed to the invoking agent (\$CLAUDE_AUTH_TMUX_IDENTITY_USER) — the report file, the socket subdirectory and the traverse-only mode on the directory itself are all required, so a tmux started as that login could not run; refusing rather than measuring the wrong user's cold start\""
       return 0
     fi
   fi
@@ -1416,7 +1481,15 @@ CLAUDE_AUTH_PROBE
   # inference from the absence of a bad signal.
   local __rtok='' __rlen='' __rcfg='' __rdig='' __match=unmeasured
   local __report='' __rrc=0 __line='' __sawend=0
-  __report=$(claude_auth_bounded "$CLAUDE_AUTH_TMUX_PROBE_BOUND" cat "$__res" 2>/dev/null)
+  # `head -c` RATHER THAN `cat`, AND NOT THROUGH A PIPE. `cat` reads to EOF, so a path that
+  # never ends (a symlink to /dev/zero) accumulated into this variable until the bound fired
+  # — bounded in TIME and unbounded in MEMORY, which could OOM an unattended bootstrap. The
+  # cap is read as CAP+1 bytes so exceeding it is an observable state and not a silent
+  # truncation. `head -c <file>` directly, never `cat file | head -c`: `head` exits at the
+  # cap and the producer would take SIGPIPE, which under `pipefail` reports a SUCCESSFUL
+  # read as a failed pipeline (this file's standing rule).
+  __report=$(claude_auth_bounded "$CLAUDE_AUTH_TMUX_PROBE_BOUND" \
+    head -c "$((CLAUDE_AUTH_REPORT_MAX + 1))" "$__res" 2>/dev/null)
   __rrc=$?
   if [ "$__rrc" -ne 0 ]; then
     claude_auth_probe_cleanup; claude_auth_probe_restore_traps
@@ -1439,8 +1512,17 @@ CLAUDE_AUTH_PROBE
     esac
   done <<<"$__report"
   claude_auth_probe_cleanup; claude_auth_probe_restore_traps
+  # OVERSIZE AND TRUNCATED ARE NAMED SEPARATELY, because they are different operator facts:
+  # one says the report is not what this probe writes, the other says the record is
+  # incomplete. Checked before the marker, so an oversize read is not reported as a missing
+  # `end` — the cap would have cut the marker off and the diagnosis would name the wrong
+  # thing.
+  if [ "${#__report}" -gt "$CLAUDE_AUTH_REPORT_MAX" ]; then
+    eval "$__owhy=\"the isolated pane's report exceeded its \${CLAUDE_AUTH_REPORT_MAX}-byte cap and the read was stopped — this probe writes a handful of short lines, so that path is not holding what a pane wrote; nothing could be measured\""
+    return 0
+  fi
   if [ "$__sawend" != 1 ]; then
-    eval "$__owhy=\"the isolated pane's report could not be read as a complete record: the bytes read back carry no terminating 'end' line although the wait loop observed one, so the path changed underneath the probe (truncated, replaced, or a fifo whose bytes another reader consumed)\""
+    eval "$__owhy=\"the isolated pane's report could not be read as a complete record: the bytes read back carry no terminating 'end' line although the wait loop observed one, so the report was truncated or is not the record the pane wrote\""
     return 0
   fi
   case "$__rlen" in ''|*[!0-9]*) __rlen=0 ;; esac

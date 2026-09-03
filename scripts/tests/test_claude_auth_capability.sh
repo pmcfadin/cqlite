@@ -436,13 +436,33 @@ plant_chown() {
 printf 'chown %s\n' "\$*" >>"$d/chown-calls.log"
 subj=''
 for a in "\$@"; do case "\$a" in -*) ;; *) subj="\$a" ;; esac; done
-if [ -n "\$subj" ] && [ -d "\$subj" ]; then
-  if [ -e "\$subj/probe.sh" ]; then st=present; else st=absent; fi
+# THE SUBJECT IS NO LONGER THE PROBE DIRECTORY. Since the handover was NARROWED (#3733) the
+# subjects are the report FILE and the `sock/` subdirectory, so a probe-dir-only check would
+# silently stop measuring. Look for probe.sh beside the subject AND one level up, which
+# covers a file subject, a subdirectory subject, and the old whole-directory subject alike.
+if [ -n "\$subj" ]; then
+  st=absent
+  for c in "\$subj/probe.sh" "\$(dirname "\$subj")/probe.sh"; do
+    [ -e "\$c" ] && st=present
+  done
   printf 'at-handover probe.sh=%s\n' "\$st" >>"$d/chown-calls.log"
 fi
 exit $crc
 EOF
   chmod +x "$d/chown"
+}
+
+# plant_chmod <dir>: a recording `chmod` that also DOES the chmod, so the probe still works.
+# It records the mode and the subject, never a path-free summary: the #3733 handover is a set
+# of NARROW grants and which subject got which mode is the whole property.
+plant_chmod() {
+  local d="$1"
+  cat >"$d/chmod" <<EOF
+#!/usr/bin/env bash
+printf 'chmod %s\n' "\$*" >>"$d/chmod-calls.log"
+exec /bin/chmod "\$@"
+EOF
+  chmod +x "$d/chmod"
 }
 
 # plant_absent <dir> <tool>: make <tool> UNRESOLVABLE even though /usr/bin is on PATH.
@@ -2757,6 +2777,91 @@ else
 fi
 
 # =====================================================================================
+# 44. THE SUBSTITUTION CAPABILITY IS REMOVED, NOT DETECTED (#3733).
+#     TWO CONSECUTIVE ROUNDS LANDED IN ONE MECHANISM: root reading a path inside a directory
+#     it had handed away. Round 428 — unbounded `sed` on a FIFO planted there — HUNG an
+#     unattended run forever. Round 430 — the bounded `cat` that fixed it — accumulated
+#     memory from a symlink to /dev/zero until the bound fired, i.e. bounded in TIME and
+#     unbounded in MEMORY. Carving the READ a third time is the move this repo rules against;
+#     it is #3312's umbrella lesson on a filesystem path instead of a text channel: REMOVE
+#     the shared channel, do not pick a rarer delimiter.
+#     THE ENABLING CONDITION WAS `chown -R`, WHICH GRANTS DIRECTORY WRITE — i.e.
+#     unlink/create/symlink. The delegate never needed it: the pane TRUNCATES the report
+#     (write on the FILE, whose inode root pre-creates), and the only thing that must create
+#     a NEW entry is tmux's socket. So `$__dir` stays root-owned at 0711 (traverse, no write,
+#     not even LIST), only the report FILE's ownership moves, and the socket gets its own
+#     delegate-owned `sock/`.
+#     HOW THE REFUSAL IS ASSERTED WITHOUT ROOT, in two halves, because this suite runs
+#     unprivileged and CANNOT create a root-owned directory to attack:
+#      (a) THE OS MECHANISM, measured on this host against a real directory that is
+#          root-owned and not writable by us: a non-owner CANNOT create or unlink an entry
+#          there. That is the property the fix rests on, and it is measured rather than
+#          asserted from the manual page.
+#      (b) THE POLICY, measured from the probe's RUN-TIME argv through recording stubs: the
+#          probe never chowns the DIRECTORY, sets it to exactly that traverse-only mode, and
+#          hands over only the report file and the socket subdirectory.
+#     (a) AND (b) TOGETHER ARE THE REFUSAL: the mode the code actually sets is one the OS
+#     actually refuses entry-creation under. Neither half alone would be evidence — (a) is
+#     about a directory that is not ours, (b) is about a mode with no demonstrated effect.
+#     A real end-to-end plant needs root; it was run out of band against this exact code and
+#     recorded in the commit message, deliberately NOT added here: a sudo-dependent case
+#     would leave root-owned litter that this suite's own `rm -rf` trap cannot remove.
+# =====================================================================================
+# (a) THE OS MECHANISM. Any root-owned directory that we cannot write serves; `/usr` exists
+#     on every platform this repo supports. If we CAN write it (the suite running as root),
+#     the mechanism cannot be measured here and that is a SKIP with its reason, never a pass.
+if [ -d /usr ] && [ ! -w /usr ] && [ -x /usr ]; then
+  m44a=0; m44b=0
+  ( : > /usr/cqlite-3733-probe ) 2>/dev/null && m44a=1
+  ( ln -s /dev/zero /usr/cqlite-3733-link ) 2>/dev/null && m44b=1
+  rm -f /usr/cqlite-3733-probe /usr/cqlite-3733-link 2>/dev/null
+  if [ "$m44a" = 0 ] && [ "$m44b" = 0 ]; then
+    ok "substitution removed (os mechanism): a non-owner can neither create a file nor plant a symlink in a root-owned directory it cannot write"
+  else
+    bad "substitution removed (os mechanism): entry creation in a non-writable root-owned directory SUCCEEDED (file=$m44a symlink=$m44b) — the permission model the fix rests on does not hold on this host"
+  fi
+else
+  skip "substitution removed (os mechanism)" "no root-owned directory this process cannot write (running as root?)"
+fi
+
+# (b) THE POLICY, from run-time argv. Delegated cold-start posture, recording chown + chmod.
+d44=$(mkshim "$tmp/s44"); plant_tmux "$d44" no-server; plant_id "$d44" root 0 "$INVOKER" 4711
+plant_delegator "$d44" runuser; plant_chown "$d44" 0; plant_chmod "$d44"
+run_cap "$d44" "$ef2" "SUDO_USER=$INVOKER" "SUDO_UID=4711" -- --tmux-env
+# THE FIXTURE MUST HAVE PERFORMED A HANDOVER, asserted first, or every negative below is
+# satisfied by a probe that never got that far.
+if [ -f "$d44/chown-calls.log" ] && [ -f "$d44/chmod-calls.log" ] \
+   && grep -q '^claude-tmux-env: COLD-START-DELIVERS-BOTH' <<<"$out"; then
+  ok "substitution removed (policy): the delegated probe ran its handover and still reported a delivery"
+else
+  bad "substitution removed (policy): the fixture did not complete a delegated handover, so the assertions below have no subject: out=[$out] chown=[$(cat "$d44/chown-calls.log" 2>/dev/null)] chmod=[$(cat "$d44/chmod-calls.log" 2>/dev/null)]"
+fi
+# THE DIRECTORY ITSELF IS NEVER CHOWNED, and `-R` never appears. Either would restore
+# directory write to the delegate and with it the whole substitution capability.
+if grep -qE '^chown .*(-R|--recursive)' "$d44/chown-calls.log" 2>/dev/null; then
+  bad "substitution removed (policy): a RECURSIVE chown is back — that grants directory write and re-enables substitution: $(grep '^chown ' "$d44/chown-calls.log")"
+elif grep -qE '^chown [^ ]+ [^ ]*cqlite-tmux-probe\.[A-Za-z0-9]+$' "$d44/chown-calls.log" 2>/dev/null; then
+  bad "substitution removed (policy): the probe DIRECTORY itself was chowned to the delegate — that grants directory write: $(grep '^chown ' "$d44/chown-calls.log")"
+else
+  ok "substitution removed (policy): neither a recursive chown nor a chown of the probe directory occurs"
+fi
+# THE HANDED-OVER SUBJECTS ARE EXACTLY THE REPORT FILE AND THE SOCKET SUBDIRECTORY.
+if grep -qE '^chown [^ ]+ .*/result$' "$d44/chown-calls.log" 2>/dev/null \
+   && grep -qE '^chown [^ ]+ .*/sock$' "$d44/chown-calls.log" 2>/dev/null; then
+  ok "substitution removed (policy): ownership moves for the report FILE and the socket subdirectory only"
+else
+  bad "substitution removed (policy): the narrow grants are not what ran: $(cat "$d44/chown-calls.log" 2>/dev/null)"
+fi
+# AND THE DIRECTORY IS SET TO THE TRAVERSE-ONLY MODE (a) just proved refuses creation. The
+# mode is matched EXACTLY: `0711` grants group/other traverse and no write, which is the
+# property. A pattern like `07*` would accept `0777`.
+if grep -qE '^chmod 0711 [^ ]*cqlite-tmux-probe\.[A-Za-z0-9]+$' "$d44/chmod-calls.log" 2>/dev/null; then
+  ok "substitution removed (policy): the probe directory is set to 0711 — traverse only, no write, not listable"
+else
+  bad "substitution removed (policy): the probe directory was not set to a traverse-only mode: $(cat "$d44/chmod-calls.log" 2>/dev/null)"
+fi
+
+# =====================================================================================
 # 37. ROOT MUST CREATE EVERYTHING IT OWNS **BEFORE** IT TRANSFERS THE DIRECTORY (#3733,
 #     was LIMITATION 4 of 5, now FIXED).
 #     WHY THIS ONE IS NOT COVERED BY THE "IT IS ONLY A REPORT" RULING. The other four
@@ -2809,7 +2914,18 @@ fi
 cp_body=$(awk '/^claude_tmux_cold_probe_into\(\) \{/ { on = 1 } on { print } on && /^\}$/ { exit }' "$CAPLIB")
 cp_aliases=$(printf '%s\n' "$cp_body" \
   | sed -n 's/^[[:space:]]*\(local[[:space:]]\+\)\{0,1\}\(__[a-z0-9_]*\)=.*\$__dir.*/\2/p' | sort -u)
-cp_chown_ln=$(printf '%s\n' "$cp_body" | grep -n '^[[:space:]]*if ! chown ' | head -1 | cut -d: -f1)
+#     THE HANDOVER LINE IS THE FIRST `chown`/`chmod` IN THE BODY, not a fixed spelling. The
+#     handover was `if ! chown -R …` and is now a chain of narrower `chmod`/`chown` grants
+#     (#3733), so a pattern anchored on the old spelling stopped matching — which the
+#     fail-closed branch below correctly reported rather than passing.
+# cp_handover_ln <body>: ONE implementation, called by both the real scan and its positive
+# control. Two rounds ago these were separate greps and the control silently stopped finding
+# its plant when the real pattern changed — a positive control that drifts from the thing it
+# validates is worse than none.
+cp_handover_ln() {
+  printf '%s\n' "$1" | grep -nE '^[[:space:]]*(if ! )?(chown|chmod) |^[[:space:]]*\|\| ! (chown|chmod) ' | head -1 | cut -d: -f1
+}
+cp_chown_ln=$(cp_handover_ln "$cp_body")
 # cp_writes_after <body> <chown-line> <alias-list>: the line NUMBERS of redirections into a
 # $__dir-derived path that sit at or below <chown-line>. Empty = invariant holds.
 cp_writes_after() {
@@ -2835,7 +2951,7 @@ else
   # chown — in a synthetic body and require the scan to find it.
   cp_planted=$(printf '%s\n' "$cp_body" | sed 's|^\([[:space:]]*\)cat >"$__dir/probe.sh".*|\1: PLACEHOLDER|')
   cp_planted=$(printf '%s\ncat >"$__dir/probe.sh" <<X\nX\n' "$cp_planted")
-  cp_planted_ln=$(printf '%s\n' "$cp_planted" | grep -n '^[[:space:]]*if ! chown ' | head -1 | cut -d: -f1)
+  cp_planted_ln=$(cp_handover_ln "$cp_planted")
   if [ -n "$cp_planted_ln" ] && [ -n "$(cp_writes_after "$cp_planted" "$cp_planted_ln" "$cp_aliases")" ]; then
     ok "handover ordering (structural): the scan FINDS a write planted below the chown (so the clean verdict above is not vacuous)"
   else
@@ -3047,9 +3163,10 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case. Raised 91 -> 122 by round 4 (the digest identity of a
 # delivered credential, the sudo-posture cases, and the bounding class), 122 -> 124 by
-# round 5's two probe-working-directory interrupt cases, and 124 -> 170 by #3733's
+# round 5's two probe-working-directory interrupt cases, and 124 -> 174 by #3733's
 # DEMOTION, the handover fix, the three repair-status fixes, the bounded report read, the
-# argument validation and the opt-out-override report.
+# argument validation, the opt-out-override report and the removal of the substitution
+# capability.
 # Sections 34-36 (the
 # no-certification invariant, the alternate-credential observation, the
 # limitation-findability guard and the live/FIXED split), section 37 (the handover ordering,
@@ -3061,14 +3178,18 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # the bound — the fifo-substitution BLOCKER) and section 41 (unknown/extra arguments are
 # refused with status 2 and never reach the billed probe), section 42 (a requested repair
 # that could not be ATTEMPTED is an action failure) and section 43 (opt-out plus
-# --fix-claude-auth is already decided both ways, and says which intent lost). 173 cases run,
-# and the real-tmux isolation case (3 assertions) is still the only legitimately skippable
-# one.
+# --fix-claude-auth is already decided both ways, and says which intent lost) and section 44
+# (the substitution capability is REMOVED, not detected). 178 cases run, and there are now
+# TWO legitimately skippable cases, not one: the real-tmux isolation case (3 assertions) and
+# section 44's OS-mechanism case, which cannot measure "a non-owner is refused" when the
+# suite itself runs as root. The floor therefore excludes both — it is the count that runs on
+# EVERY host, and a floor that included a case skippable on a legitimate host is a floor that
+# reds on correct input.
 # THE FIGURE IS MEASURED, NOT COUNTED BY EYE, AND IT IS RE-MEASURED WHENEVER IT MOVES:
 # forcing the tmux block's `command -v tmux` test to `true` in a throwaway `git worktree`
-# reports 170/0/1. The value in this file is the authority — a figure quoted in a commit
+# reports 174/0/2 with BOTH skippable branches forced. The value in this file is the authority — a figure quoted in a commit
 # message is a snapshot of the run that produced it and does not follow later edits.
-CASE_FLOOR=170
+CASE_FLOOR=174
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1
