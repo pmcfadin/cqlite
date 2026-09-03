@@ -154,21 +154,25 @@ async fn open_reader(dir: &Path) -> SSTableReader {
 
 /// What one read surface answered on one leg of a staged pair.
 ///
-/// `keys` is `None` when the surface REFUSED (`Err`) and `Some(keys)` when it
+/// `keys` is `Err(message)` when the surface REFUSED and `Ok(keys)` when it
 /// answered `Ok` — carrying the partition key of every emitted element, in emit
-/// order, so a DUPLICATE is visible. A set would hide the resync's
-/// re-emission of a partition it had already emitted, which is one of the ways
-/// the #3782/#3928 shape makes the count go UP while data is lost.
+/// order, so a DUPLICATE is visible. A set would hide the resync's re-emission
+/// of a partition it had already emitted, which is one of the ways the
+/// #3782/#3928 shape makes the count go UP while data is lost.
+///
+/// The refusal's MESSAGE is retained rather than discarded: a control leg that
+/// refuses a PRISTINE fixture is a broken lane, and "it refused" without saying
+/// why sends the next reader back to the debugger.
 struct Outcome {
     name: &'static str,
-    keys: Option<Vec<Vec<u8>>>,
+    keys: Result<Vec<Vec<u8>>, String>,
 }
 
 impl Outcome {
     fn describe(&self, control: &std::collections::BTreeMap<Vec<u8>, usize>) -> String {
         match &self.keys {
-            None => format!("{}: REFUSED", self.name),
-            Some(keys) => {
+            Err(why) => format!("{}: REFUSED ({why})", self.name),
+            Ok(keys) => {
                 let got = multiset::multiset(keys.iter().cloned());
                 let lost = multiset::deficit(&got, control);
                 let fabricated = multiset::surplus(&got, control);
@@ -184,6 +188,21 @@ impl Outcome {
             }
         }
     }
+}
+
+/// Render a refusal for a diagnostic.
+fn why(e: cqlite_core::Error) -> String {
+    e.to_string()
+}
+
+/// A control-leg surface's own partition-key multiset. An empty multiset for a
+/// surface that REFUSED the control leg, which `assert_control_is_healthy`
+/// already panics on — this only keeps the rendering total.
+fn control_multiset(c: &Outcome) -> std::collections::BTreeMap<Vec<u8>, usize> {
+    c.keys
+        .as_ref()
+        .map(|k| multiset::multiset(k.iter().cloned()))
+        .unwrap_or_default()
 }
 
 /// Every partition-key-bearing read surface, evaluated over the generation in
@@ -206,19 +225,19 @@ async fn observe(dir: &Path, schema: &TableSchema) -> Vec<Outcome> {
 
     out.push(Outcome {
         name: "distinct_partition_keys",
-        keys: reader.distinct_partition_keys().await.ok(),
+        keys: reader.distinct_partition_keys().await.map_err(why),
     });
     out.push(Outcome {
         name: "partition_verify_scan",
         keys: reader
             .partition_verify_scan()
             .await
-            .ok()
+            .map_err(why)
             .map(|rows| rows.into_iter().map(|(k, _ldt)| k).collect()),
     });
     out.push(Outcome {
         name: "get_all_entries",
-        keys: reader.get_all_entries().await.ok().map(|rows| {
+        keys: reader.get_all_entries().await.map_err(why).map(|rows| {
             rows.into_iter()
                 .map(|(_t, k, _r)| k.as_bytes().to_vec())
                 .collect()
@@ -226,18 +245,22 @@ async fn observe(dir: &Path, schema: &TableSchema) -> Vec<Outcome> {
     });
     out.push(Outcome {
         name: "iterate_all_partitions",
-        keys: reader.iterate_all_partitions().await.ok().map(|rows| {
-            rows.into_iter()
-                .map(|(k, _r)| k.as_bytes().to_vec())
-                .collect()
-        }),
+        keys: reader
+            .iterate_all_partitions()
+            .await
+            .map_err(why)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|(k, _r)| k.as_bytes().to_vec())
+                    .collect()
+            }),
     });
     out.push(Outcome {
         name: "iterate_all_partitions_for_compaction",
         keys: reader
             .iterate_all_partitions_for_compaction(Some(schema))
             .await
-            .ok()
+            .map_err(why)
             .map(|rows| {
                 rows.into_iter()
                     .map(|r| r.key.as_bytes().to_vec())
@@ -247,16 +270,20 @@ async fn observe(dir: &Path, schema: &TableSchema) -> Vec<Outcome> {
 
     let cancel = cqlite_core::storage::scan_cancel::ScanCancel::new();
     let mut streamed: Vec<Vec<u8>> = Vec::new();
-    let streamed_ok = reader
+    let streamed = reader
         .stream_all_partitions_for_compaction(Some(schema), &cancel, |row| {
             streamed.push(row.key.as_bytes().to_vec());
             Ok(std::ops::ControlFlow::Continue(()))
         })
         .await
-        .is_ok();
+        .map_err(why)
+        // The rows emitted BEFORE a refusal are deliberately discarded: a
+        // surface that refused emitted no answer, and counting its partial
+        // emission as an answer would let a refusal be scored for fabrication.
+        .map(|()| streamed);
     out.push(Outcome {
         name: "stream_all_partitions_for_compaction",
-        keys: streamed_ok.then_some(streamed),
+        keys: streamed,
     });
 
     out
@@ -302,10 +329,10 @@ fn assert_control_is_healthy(
 ) {
     let expected: BTreeSet<&Vec<u8>> = control_partitions.keys().collect();
     for o in observed {
-        let keys = o.keys.as_ref().unwrap_or_else(|| {
+        let keys = o.keys.as_ref().unwrap_or_else(|why| {
             panic!(
-                "control leg: {}.{} surface `{}` REFUSED a PRISTINE Cassandra fixture — the \
-                 mutated-leg expectations below would be meaningless",
+                "control leg: {}.{} surface `{}` REFUSED a PRISTINE Cassandra fixture ({why}) \
+                 — the mutated-leg expectations below would be meaningless",
                 spec.keyspace, spec.table, o.name
             )
         });
@@ -358,15 +385,8 @@ fn tolerating(control: &[Outcome], mutated: &[Outcome]) -> Vec<String> {
     control
         .iter()
         .zip(mutated.iter())
-        .filter(|(_, m)| m.keys.is_some())
-        .map(|(c, m)| {
-            let ctl = c
-                .keys
-                .as_ref()
-                .map(|k| multiset::multiset(k.iter().cloned()))
-                .unwrap_or_default();
-            m.describe(&ctl)
-        })
+        .filter(|(_, m)| m.keys.is_ok())
+        .map(|(c, m)| m.describe(&control_multiset(c)))
         .collect()
 }
 
@@ -383,17 +403,14 @@ fn fabricating(control: &[Outcome], mutated: &[Outcome]) -> Vec<String> {
         .iter()
         .zip(mutated.iter())
         .filter_map(|(c, m)| {
-            let keys = m.keys.as_ref()?;
-            let ctl = c
-                .keys
-                .as_ref()
-                .map(|k| multiset::multiset(k.iter().cloned()))
-                .unwrap_or_default();
+            let keys = m.keys.as_ref().ok()?;
+            let ctl = control_multiset(c);
             let got = multiset::multiset(keys.iter().cloned());
-            multiset::surplus(&got, &ctl)
-                .is_empty()
-                .then_some(())
-                .map_or_else(|| Some(m.describe(&ctl)), |()| None)
+            if multiset::surplus(&got, &ctl).is_empty() {
+                None
+            } else {
+                Some(m.describe(&ctl))
+            }
         })
         .collect()
 }
