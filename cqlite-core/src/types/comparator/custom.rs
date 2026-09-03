@@ -111,6 +111,7 @@ fn compare_inet(left: &Value, right: &Value) -> Result<Ordering> {
 ///     An earlier revision of this comment said "the site that REACHES DISK is
 ///     now unsigned"; that was FALSE, and the corrected statement is the scoped
 ///     one above.
+///
 /// Both are tracked by **#3920**.
 ///
 /// The remaining signed sites agree with this one for every value in `time`'s
