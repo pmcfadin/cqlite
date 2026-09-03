@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASSED=0
 FAILED=0
-CASE_FLOOR=591
+CASE_FLOOR=612
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok      %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  BROKEN  %s\n' "$1"; }
@@ -2454,6 +2454,73 @@ PYINNER
     --max-concurrent-scans 4 --ramp 2 --profile narrow
   check_driver "the driver refuses a ramp that maps to no analyzer section" 3
 
+  # THE DRIVER MAY NOT ACCEPT A SESSION ITS OWN ANALYZER WILL REFUSE. A
+  # single-stream CONTROL used to be allowed to omit --profile, and
+  # `resolve_profile` refuses exactly that manifest with cause
+  # `profile-unrecorded` -- the case at the top of this suite pins that half --
+  # while the analyzer command the driver prints on its `next` line carries no
+  # flag that could supply one. So the accepted session was unscoreable by
+  # construction, and the bill arrived after three release builds and every
+  # replicate pair. Refused at pre-flight now, in the measurement branch's
+  # idiom; the e2e section below MEASURES that nothing was built.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --work-dir "$TMP/w-ctl-noprof" --min-corpus-bytes 1 \
+    --min-sstables 1 --repo "$SCRATCH" --control selftest \
+    --base-ref HEAD~1 --head-ref HEAD
+  check_driver "a single-stream control with no --profile" 3
+  if grep -q '^AB-3649: usage-error --profile is REQUIRED for a single-stream (--ramp 1) session, control or not' "$TMP/err.txt"; then
+    ok "the refusal names the requirement, and that a control's verdict is disclaimed rather than unscored"
+  else
+    bad "the single-stream control refusal does not name the requirement: $(head -1 "$TMP/err.txt")"
+  fi
+  # ...and it must name the cause the analyzer WOULD have produced, or an
+  # operator cannot tell that these two refusals are one requirement.
+  if grep -q 'profile-unrecorded' "$TMP/err.txt"; then
+    ok "the refusal names profile-unrecorded, the analyzer cause it stands in for"
+  else
+    bad "the refusal does not name the analyzer cause it exists to pre-empt"
+  fi
+  # WHAT "BEFORE ANY WORK" MEANS HERE, MEASURED RATHER THAN ASSUMED: this check
+  # sits after the lock and the session directory -- exactly where the
+  # measurement branch's does -- so the session directory DOES exist and is
+  # empty of everything expensive. The three worktrees and the three target
+  # directories are what a metered box is billed for, and none was created. The
+  # e2e section below pins the same property from the other end, by measuring
+  # that cargo was never invoked.
+  EXPENSIVE="$(find "$TMP/w-ctl-noprof" -maxdepth 1 \
+                 \( -name 'wt-*' -o -name 'target-*' \) 2>/dev/null || echo UNMEASURED)"
+  if [ -z "$EXPENSIVE" ]; then
+    ok "the refused control built no worktree and no target directory"
+  else
+    bad "a refused control had already begun building: $EXPENSIVE"
+  fi
+  # ...and it released the lock, or one mistyped flag bricks the work directory.
+  if [ ! -d "$TMP/w-ctl-noprof/.session-lock" ]; then
+    ok "the refused control released the work-directory lock"
+  else
+    bad "a control refused for its profile LEAKED the lock"
+  fi
+  # THE BOUNDARY FROM THE OTHER SIDE, or the above proves only that something
+  # was refused. A MULTI-STEP control consults no band -- the utilization
+  # section is a DIRECTION -- so requiring a profile there would red a correct
+  # session, and this case fails if the refusal is widened to it.
+  run_driver --corpus "$TMP/no-such-corpus-dir" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --ramp 1,2 --work-dir "$TMP/w-ctl-ramp" --min-corpus-bytes 1 \
+    --min-sstables 1 --repo "$SCRATCH" --control selftest \
+    --base-ref HEAD~1 --head-ref HEAD
+  check_driver "a multi-step control with no --profile, which needs no band" 2 corpus-absent
+  # ...and a multi-step MEASUREMENT still needs one, because the driver records
+  # the profile for whichever section reads it and the requirement is not the
+  # ramp's to relax.
+  run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
+    --max-concurrent-scans 4 --ramp 1,2 --work-dir "$TMP/w-meas-ramp" --repo "$SCRATCH"
+  check_driver "a multi-step measurement with no --profile" 3
+  if grep -q 'usage-error --profile is REQUIRED for a measurement' "$TMP/err.txt"; then
+    ok "a measurement's profile requirement is unchanged by the ramp it declares"
+  else
+    bad "a multi-step measurement was refused for the wrong reason: $(head -1 "$TMP/err.txt")"
+  fi
+
   # FINDING 3 (round 8): a RELATIVE --work-dir. `CARGO_TARGET_DIR` is read after
   # the driver cds into the worktree, so a relative path put the target directory
   # somewhere the driver then did not look -- both arms compiling, then
@@ -2683,6 +2750,136 @@ PYINNER
     --max-concurrent-scans 4 --work-dir "$TMP/w-leak" --min-corpus-bytes 1 --control selftest --min-sstables 1 \
     --repo "$SCRATCH" --profile narrow
   check_driver "a session reusing a work directory whose predecessor failed" 2 corpus-absent
+
+  # THE SESSION DIRECTORY AND THE LEDGER, WHEN THE FILESYSTEM SAYS NO. Both were
+  # created unguarded under `set -euo pipefail`, so a failure exited 1 with a
+  # native `mkdir:` or redirection diagnostic and NO anchor -- breaking the one
+  # property every line of this script is required to have, at the one moment an
+  # operator is reading it to find out what went wrong.
+  #
+  # INDUCING IT NEEDS A PLANT, AND THE PLANT IS A PATH, NOT THE GUARD. Both
+  # names live under the work directory and are created AFTER the lock, so any
+  # permission or read-only condition wide enough to fail them fails the LOCK
+  # first and the session is refused `work-dir-busy` -- a different guard, which
+  # is why no case reached this one before. So a scratch copy of the driver has
+  # ONE path constant substituted and the guard under test is the shipped one,
+  # byte for byte. The substitution is VERIFIED to have taken: a plant that
+  # silently did not apply is a case testing the ordinary path and reporting ok.
+  run_planted() { # <driver-copy> <args...>
+    local d="$1"; shift
+    set +e
+    bash "$d" "$@" > "$TMP/out.txt" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+  }
+  # The copy must sit BESIDE the python helpers -- the driver resolves
+  # `ab_driver_support.py` from its own directory and refuses without it -- so
+  # the plants live in a scratch directory holding both, never in the checkout.
+  PLANTDIR="$TMP/plantdir"
+  mkdir -p "$PLANTDIR"
+  cp "$HERE"/*.py "$PLANTDIR/"
+  plant_path() { # <dest> <sed-expression> <literal-that-must-appear>
+    sed -e "$2" "$DRIVER" > "$1"
+    if grep -qF -- "$3" "$1" && bash -n "$1" 2>/dev/null; then
+      ok "the planted driver copy carries '$3' and still parses"
+    else
+      bad "the plant '$3' did not take, so the case below tests the ordinary path"
+    fi
+  }
+
+  # 1. The session directory: its parent is steered onto a REGULAR FILE, which
+  #    is a real ENOTDIR from a real mkdir.
+  mkdir -p "$TMP/w-nodirs"
+  : > "$TMP/w-nodirs/blocked"
+  plant_path "$PLANTDIR/driver-nodirs.sh" \
+    's|^RUN_DIR="$WORK_DIR/run-$SESSION_ID"$|RUN_DIR="$WORK_DIR/blocked/run-$SESSION_ID"|' \
+    'RUN_DIR="$WORK_DIR/blocked/run-$SESSION_ID"'
+  run_planted "$PLANTDIR/driver-nodirs.sh" --corpus "$TMP/tinycorpus" \
+    --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-nodirs" --min-corpus-bytes 1 --min-sstables 1 \
+    --control selftest --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD --profile narrow
+  check_driver "a session directory that cannot be created" 2 session-dir-uncreatable
+  # The native diagnostic is CAPTURED, not discarded: it names the errno, which
+  # is the entire diagnosis, and it must arrive INSIDE an anchored line.
+  if grep -q '^AB-3649: cause-detail .*[Nn]ot a directory' "$TMP/err.txt"; then
+    ok "the mkdir diagnostic reaches the operator inside the anchored detail"
+  else
+    bad "the session-directory refusal discarded the errno: $(grep -m1 'cause-detail' "$TMP/err.txt")"
+  fi
+  # ...and the lock is released, or one failed session bricks the work directory.
+  if [ ! -d "$TMP/w-nodirs/.session-lock" ]; then
+    ok "a session that cannot create its directory still releases the lock"
+  else
+    bad "a session that failed creating its directory LEAKED the lock"
+  fi
+
+  # 2. The ledger: steered onto the log DIRECTORY the driver has just created,
+  #    which is a real EISDIR from the real redirection.
+  mkdir -p "$TMP/w-noledger"
+  plant_path "$PLANTDIR/driver-noledger.sh" \
+    's|^RUNS_JSONL="$RUN_DIR/runs.jsonl"$|RUNS_JSONL="$LOG_DIR"|' \
+    'RUNS_JSONL="$LOG_DIR"'
+  run_planted "$PLANTDIR/driver-noledger.sh" --corpus "$TMP/tinycorpus" \
+    --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-noledger" --min-corpus-bytes 1 --min-sstables 1 \
+    --control selftest --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD --profile narrow
+  check_driver "a ledger that cannot be initialized" 2 ledger-uninitialisable
+  if grep -q '^AB-3649: cause-detail .*[Ii]s a directory' "$TMP/err.txt"; then
+    ok "the redirection diagnostic reaches the operator inside the anchored detail"
+  else
+    bad "the ledger refusal discarded the errno: $(grep -m1 'cause-detail' "$TMP/err.txt")"
+  fi
+
+  # 3. THE POSITIVE CONTROL, without which the two cases above are worth
+  #    nothing: the SAME plant against a copy whose guards are removed -- the
+  #    pre-fix code, restored verbatim -- must exit 1 and emit an UNANCHORED
+  #    line. A case that passes against the defect and the fix alike proves only
+  #    that something happened.
+  if python3 - "$PLANTDIR/driver-nodirs.sh" "$PLANTDIR/driver-unguarded.sh" <<'PYINNER'
+import sys
+
+src = open(sys.argv[1], encoding="utf-8").read().split("\n")
+out, i, removed = [], 0, 0
+while i < len(src):
+    if src[i].startswith(("SESSION_DIR_ERR=", "LEDGER_ERR=")):
+        # Consume the whole line-continued statement and put back exactly what
+        # stood there before the fix.
+        out.append('mkdir -p "$RUN_DIR" "$LOG_DIR"'
+                   if src[i].startswith("SESSION_DIR_ERR=")
+                   else ': > "$RUNS_JSONL"')
+        removed += 1
+        while src[i].rstrip().endswith("\\"):
+            i += 1
+        i += 1
+        continue
+    out.append(src[i])
+    i += 1
+if removed != 2:
+    sys.stderr.write("AB-3649: expected 2 guarded statements to un-guard, found %d\n" % removed)
+    raise SystemExit(1)
+open(sys.argv[2], "w", encoding="utf-8").write("\n".join(out))
+PYINNER
+  then
+    ok "the pre-fix copy was produced: both guards removed, the path plant kept"
+  else
+    bad "the pre-fix copy could not be produced, so the guards are unproven"
+  fi
+  mkdir -p "$TMP/w-unguarded"
+  : > "$TMP/w-unguarded/blocked"
+  run_planted "$PLANTDIR/driver-unguarded.sh" --corpus "$TMP/tinycorpus" \
+    --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
+    --work-dir "$TMP/w-unguarded" --min-corpus-bytes 1 --min-sstables 1 \
+    --control selftest --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD --profile narrow
+  if [ "$RC" = 1 ] && ! anchored; then
+    ok "the pre-fix code exits 1 with an unanchored diagnostic, so these cases discriminate"
+  else
+    bad "the pre-fix code did not reproduce the finding (exit $RC, anchored=$(anchored && echo yes || echo no))"
+  fi
+  if ! grep -q 'session-dir-uncreatable' "$TMP/err.txt"; then
+    ok "the pre-fix code names no cause at all, which is the finding"
+  else
+    bad "the pre-fix copy still carried the guard, so the plant removed nothing"
+  fi
 
   # P1-7: a worktree at the right commit but carrying uncommitted edits builds
   # code the manifest does not describe.
@@ -3161,6 +3358,42 @@ PYINNER
     ok "no --profile refuses BEFORE any build -- the cargo log is empty"
   else
     bad "a session missing --profile reached cargo: $(head -1 "$TMP/cargo-argv.log")"
+  fi
+  # ...AND THE SAME REQUIREMENT FOR A SINGLE-STREAM CONTROL, which is the
+  # finding: the label disclaims the verdict, it does not remove the band the
+  # single-stream section reaches its verdict through, so a `--ramp 1` control
+  # that recorded no profile was accepted here and refused by
+  # `resolve_profile` with `profile-unrecorded` -- after everything had been
+  # built and run. Measured the same way, because "refuses before any build" is
+  # the whole value of moving it: an empty cargo log is the evidence.
+  : > "$TMP/cargo-argv.log"
+  set +e
+  AB_SELFTEST_SHIMBIN="$SHIMBIN" \
+  AB_SELFTEST_CARGO_LOG="$TMP/cargo-argv.log" \
+  PATH="$SHIMBIN:$PATH" \
+    bash "$DRIVER" \
+      --corpus "$TMP/e2e-corpus" --ticket-template "$TMP/e2e-ticket.json" \
+      --work-dir "$TMP/e2e-ctl-noprofile" --repo "$SCRATCH" \
+      --base-ref HEAD~1 --head-ref HEAD --max-concurrent-scans 16 \
+      --control profile-probe \
+      --replicates 5 --step-duration 1s --ramp 1 --no-prewarm \
+      > "$TMP/out.txt" 2> "$TMP/err.txt"
+  RC=$?
+  set -e
+  if [ "$RC" = 3 ]; then
+    ok "a single-stream control with no --profile is a usage error too"
+  else
+    bad "a single-stream control with no --profile exited $RC, expected 3"
+  fi
+  if [ ! -s "$TMP/cargo-argv.log" ]; then
+    ok "a single-stream control with no --profile refuses BEFORE any build -- the cargo log is empty"
+  else
+    bad "a control missing --profile reached cargo: $(head -1 "$TMP/cargo-argv.log")"
+  fi
+  if anchored; then
+    ok "the single-stream control refusal is anchored on both streams"
+  else
+    bad "the single-stream control refusal emitted an unanchored line"
   fi
   # ROUND 19 FINDING C, THROUGH THE WHOLE DRIVER. AB_SHAPE was exported before
   # canonicalisation and never updated, so an accepted alias put the CANONICAL
