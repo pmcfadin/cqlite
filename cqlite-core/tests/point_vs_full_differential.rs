@@ -58,7 +58,17 @@
 //! SAME bytes at 1 generation and at N ≥ 2 generations and requires identical
 //! result sets, reusing this file's corpus conventions, pinned `now`, SKIP
 //! contract and `normalize`.
-#![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
+#![cfg(all(
+    feature = "state_machine",
+    feature = "cli-helpers",
+    // `issue_3782_corrupt_agreement` (submodule, unconditionally compiled into
+    // this target) stages the LZ4-compressed #3782 fixture through
+    // `support/corrupt_clustering_fixture.rs`, whose control leg cannot decode
+    // without the production `lz4` decoder — see the note on
+    // `issue_3782_corrupt_row_refusal.rs` (roborev job 59 finding 2, #3950).
+    // Kept in step with `Cargo.toml`'s `required-features`.
+    feature = "lz4"
+))]
 
 // `#[path]` because this file IS the integration target's crate root: a bare
 // `mod` would resolve to `tests/one_vs_n_generation.rs`, which cargo would then
@@ -68,6 +78,19 @@
 // obvious and keeps this file inside the campsite file-size target.
 #[path = "point_vs_full_differential/one_vs_n_generation.rs"]
 mod one_vs_n_generation;
+
+// Issue #3782: the CORRUPT-fixture half of the differential. The two arms agreed
+// by both TRUNCATING before the fix, so agreement alone never revealed the loss —
+// same directory, same reason (a submodule keeps this file inside the campsite
+// size target and out of cargo's target auto-discovery).
+#[path = "point_vs_full_differential/issue_3782_corrupt_agreement.rs"]
+mod issue_3782_corrupt_agreement;
+
+// Issue #3890: the same point-vs-full comparison over NON-INTEGER (UUID)
+// partition keys, which this file's `CORPUS` is structurally unable to express
+// (`probe_keys: &[i64]` / `discover_pk_ints`). Same `#[path]` rationale as above.
+#[path = "point_vs_full_differential/uuid_keyed_axis.rs"]
+mod uuid_keyed_axis;
 
 // TABLE-granular fixture-root resolution, shared with the sibling dataset lanes
 // (issue #3220). Declared BEFORE first use so both this file and the submodule
@@ -381,6 +404,33 @@ const CORPUS: &[TableCase] = &[
             ("bucket = 'bo' AND seq = 5", 1),
         ],
     },
+    // BIG (`nb`) COMPRESSED wide partition (issue #3890): 114 LZ4 chunks over a
+    // 1,837,037-byte UNCOMPRESSED data section (27,823 bytes on disk), read from
+    // CompressionInfo.db's header — the largest committed multi-chunk compressed
+    // BIG fixture, and second overall behind `test_da.wide_table` (115 chunks,
+    // BTI). `wide_table` above covers the BTI half; this covers the BIG half,
+    // where the seek's chunk-rounded window overruns furthest into the SUCCESSOR
+    // partition when the PARSE input is unbounded and the walker then re-reads a
+    // row body as a partition header. All rows are live, so the only divergence
+    // this case can report is a point path that dropped or over-collected rows.
+    // Re-derivation command: test-data/schemas/wide-partition-big.cql.
+    TableCase {
+        keyspace: "test_big",
+        table: "wide_partition",
+        schema: "wide-partition-big.cql",
+        pk_column: "pk",
+        probe_keys: &[],
+        divergence_classes: &["big_compressed_multichunk"],
+        // COMMITTED: `git ls-files` lists
+        // test-data/datasets/sstables/test_big/wide_partition-ffe2ee50…/nb-2-big-Data.db.
+        must_run: true,
+        // A single `int` clustering column, like `wide_table`. The partition sizes
+        // are NOT uniform across pk values here, so every predicate is confined to
+        // the low `ck` range every partition is known to hold (the fixture's
+        // partitions each start at ck=0 and run contiguously), keeping one expected
+        // count valid for every probed key.
+        clustering_slice_predicates: &[("ck < 8", 8), ("ck >= 2 AND ck < 5", 3)],
+    },
 ];
 
 /// Stable identity of a corpus case, used by the per-case must-run bookkeeping.
@@ -690,6 +740,10 @@ async fn point_vs_full_differential_equality() {
         // of quietly narrowing the corpus.
         "bti_clustering_slice",
         "compound_clustering",
+        // Issue #3890: the BIG (`nb`) COMPRESSED multi-chunk class. Listed so
+        // dropping `test_big.wide_partition` reds this lane rather than quietly
+        // narrowing the corpus back to fixtures whose chunk overrun is negligible.
+        "big_compressed_multichunk",
     ] {
         assert!(
             covered.contains(required),

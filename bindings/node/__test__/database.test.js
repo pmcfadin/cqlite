@@ -13,7 +13,7 @@
  */
 
 const { Database, version } = require('../lib/index.js');
-const { skipIfNoDatasets, getNonexistentPath } = require('./helpers.js');
+const { assertDatasetsAvailable, getNonexistentPath } = require('./helpers.js');
 
 describe('Database Wrapper Tests (Issue #296)', () => {
   beforeAll(() => {
@@ -29,7 +29,7 @@ describe('Database Wrapper Tests (Issue #296)', () => {
   });
 
   test('Database.open() returns Database instance', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
     });
@@ -54,7 +54,7 @@ describe('Database Wrapper Tests (Issue #296)', () => {
   });
 
   test('Database.execute() returns QueryResult', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
     });
@@ -83,7 +83,7 @@ describe('Database Wrapper Tests (Issue #296)', () => {
   });
 
   test('Database.execute() with invalid SQL rejects with ParseError or QueryError', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
     });
@@ -106,7 +106,7 @@ describe('Database Wrapper Tests (Issue #296)', () => {
   });
 
   test('Database.close() resolves successfully', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
     });
@@ -122,7 +122,7 @@ describe('Database Wrapper Tests (Issue #296)', () => {
   });
 
   test('Database.getStats() returns valid statistics', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
     });
@@ -146,7 +146,7 @@ describe('Database Wrapper Tests (Issue #296)', () => {
   });
 
   test('DatabaseStats bigint fields support BigInt operations (Issue #351)', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
     });
@@ -167,7 +167,7 @@ describe('Database Wrapper Tests (Issue #296)', () => {
   });
 
   test('Operations on closed database fail', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
     });
@@ -185,7 +185,7 @@ describe('Database Wrapper Tests (Issue #296)', () => {
 
 describe('DatabaseOptions Tests (Issue #339)', () => {
   test('Database.open() with memoryLimit option', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
       memoryLimit: 256 * 1024 * 1024, // 256MB
@@ -203,7 +203,7 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
   });
 
   test('Database.open() with cacheEnabled=true option', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
       cacheEnabled: true,
@@ -221,7 +221,7 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
   });
 
   test('Database.open() with cacheEnabled=false option', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
       cacheEnabled: false,
@@ -239,7 +239,7 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
   });
 
   test('Database.open() with all options combined', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
       memoryLimit: 512 * 1024 * 1024, // 512MB
@@ -262,7 +262,7 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
   });
 
   test('Database.open() accepts memoryLimit as BigInt-safe integer', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     // Test with 4GB limit (within safe integer range)
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
@@ -273,7 +273,7 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
   });
 
   test('Database.open() accepts memoryLimit of 1 byte (minimum valid value)', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     // Test boundary condition: 1 is the minimum valid memoryLimit
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
@@ -284,7 +284,7 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
   });
 
   test('DatabaseOptions fields are optional', async () => {
-    skipIfNoDatasets();
+    assertDatasetsAvailable();
     // All fields should be optional - open with just schema
     const db1 = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
@@ -300,7 +300,7 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
 
   describe('memoryLimit edge cases', () => {
     test('Database.open() with zero memoryLimit should fail', async () => {
-      skipIfNoDatasets();
+      assertDatasetsAvailable();
       await expect(
         Database.open(global.testPaths.SSTABLES_DIR, {
           schema: global.testPaths.SCHEMA_BASIC_TYPES,
@@ -310,7 +310,7 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
     });
 
     test('Database.open() with negative memoryLimit should fail', async () => {
-      skipIfNoDatasets();
+      assertDatasetsAvailable();
       await expect(
         Database.open(global.testPaths.SSTABLES_DIR, {
           schema: global.testPaths.SCHEMA_BASIC_TYPES,
@@ -320,7 +320,7 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
     });
 
     test('Database.open() with fractional memoryLimit (0.5) should fail', async () => {
-      skipIfNoDatasets();
+      assertDatasetsAvailable();
       await expect(
         Database.open(global.testPaths.SSTABLES_DIR, {
           schema: global.testPaths.SCHEMA_BASIC_TYPES,
@@ -330,7 +330,7 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
     });
 
     test('Database.open() with fractional memoryLimit (0.1) should fail', async () => {
-      skipIfNoDatasets();
+      assertDatasetsAvailable();
       await expect(
         Database.open(global.testPaths.SSTABLES_DIR, {
           schema: global.testPaths.SCHEMA_BASIC_TYPES,
@@ -340,7 +340,7 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
     });
 
     test('Database.open() with fractional memoryLimit (0.99) should fail', async () => {
-      skipIfNoDatasets();
+      assertDatasetsAvailable();
       await expect(
         Database.open(global.testPaths.SSTABLES_DIR, {
           schema: global.testPaths.SCHEMA_BASIC_TYPES,
@@ -350,7 +350,7 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
     });
 
     test('Database.open() with NaN memoryLimit should fail', async () => {
-      skipIfNoDatasets();
+      assertDatasetsAvailable();
       await expect(
         Database.open(global.testPaths.SSTABLES_DIR, {
           schema: global.testPaths.SCHEMA_BASIC_TYPES,
@@ -360,7 +360,7 @@ describe('DatabaseOptions Tests (Issue #339)', () => {
     });
 
     test('Database.open() with Infinity memoryLimit should fail', async () => {
-      skipIfNoDatasets();
+      assertDatasetsAvailable();
       await expect(
         Database.open(global.testPaths.SSTABLES_DIR, {
           schema: global.testPaths.SCHEMA_BASIC_TYPES,

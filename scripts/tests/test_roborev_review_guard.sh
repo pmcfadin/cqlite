@@ -239,6 +239,9 @@ summary_key_order() { # summary_key_order <file> <extended-regex-of-keys> -> "k1
 #                        returns the REAL review-row shape (id/prompt, no git_ref or
 #                        status), forcing the richer `list --json` source; otherwise the
 #                        `list --json` fallback path
+#   STUB_REVIEW_ROW_ID   top-level `id` of the `show --json` REVIEW row; empty => the job id
+#                        (the agreeing shape), a DIFFERENT number => the measured divergence
+#                        where only job_id / job.id name the job asked for (#3654)
 #   STUB_INVOKED         file the stub appends its argv to (empty => never run)
 # ---------------------------------------------------------------------------
 stubbin="$tmp/bin"
@@ -329,8 +332,13 @@ case "$cmd" in
     # `review-completed`, the vacuity tiers and `findings` against (#3312 job 24). Empty means the record
     # has none, which a recheck must read as "not re-establishable" rather than inherit.
     if [ "${STUB_SHOW_JSON:-object}" = nested ]; then
-      # The MEASURED `roborev show <id> --json` shape: a REVIEW row carrying its own
-      # `id` (equal to the job id) that NESTS the job row under a "job" key.
+      # The MEASURED `roborev show <id> --json` shape: a REVIEW row carrying its OWN `id` that
+      # NESTS the job row under a "job" key. That top-level `id` is the REVIEW row's own sequence
+      # and NEED NOT equal the job asked for (#3654) — measured over records 1-10 on v0.61.2, six
+      # agree and two PAIRS swap (asking for 8 returns id=9, asking for 9 returns id=8), while
+      # `job_id` and the nested `job.id` name the requested job in every one. STUB_REVIEW_ROW_ID
+      # expresses that divergence; it defaults to the job id, so the AGREEING shape stays
+      # fixtured too and a case has to opt in to the divergent one.
       # `verdict_bool` is the SOURCE COLUMN the `verdict` letter is synthesised FROM, so the two
       # must AGREE or the fixture is a record roborev cannot emit: `P` <=> 1, `F` <=> 0 (measured —
       # job 154 clean/verdict_bool=1, job 162 findings-bearing/verdict_bool=0). Hard-coding 0 while
@@ -340,7 +348,7 @@ case "$cmd" in
       stub_verdict_bool=0
       [ "${STUB_VERDICT_FIELD:-}" != P ] || stub_verdict_bool=1
       printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":%s,"%s":"%s","prompt":"%s","job":' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "$stub_verdict_bool" "${STUB_RECORD_OUTPUT_FIELD:-output}" "${STUB_RECORD_OUTPUT:-}" "$(json_prompt)"
+        "${STUB_REVIEW_ROW_ID:-${STUB_JOB:-4600}}" "${STUB_JOB:-4600}" "$stub_verdict_bool" "${STUB_RECORD_OUTPUT_FIELD:-output}" "${STUB_RECORD_OUTPUT:-}" "$(json_prompt)"
       emit_job_object
       printf '}\n'
       exit 0
@@ -349,7 +357,7 @@ case "$cmd" in
       # The REAL `show --json` shape: the REVIEW row — id/agent/prompt, and no
       # git_ref / status / verdict / token_usage.
       printf '{"id":%s,"job_id":%s,"agent":"codex","prompt":"%s"}\n' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "$(json_prompt)"
+        "${STUB_REVIEW_ROW_ID:-${STUB_JOB:-4600}}" "${STUB_JOB:-4600}" "$(json_prompt)"
       exit 0
     fi
     emit_job_object; printf '\n'
@@ -1168,6 +1176,10 @@ export STUB_HAS_TOKEN_DATA=''
 export STUB_VERDICT_FIELD=''
 export STUB_RECORD_BLANK_FOR=0
 export STUB_PAYLOAD_JOB=''
+# #3654: the top-level `id` of a `show --json` REVIEW row. Defaults to the job id (the agreeing
+# shape); a case sets it to a DIFFERENT number to fixture the measured divergence, where only
+# `job_id` and the nested `job.id` name the job asked for.
+export STUB_REVIEW_ROW_ID=''
 export STUB_LIST_JSON=array
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
@@ -1206,6 +1218,7 @@ reset_stub() {
   STUB_VERDICT_FIELD=''
   STUB_RECORD_BLANK_FOR=0
   STUB_PAYLOAD_JOB=''
+  STUB_REVIEW_ROW_ID=''
   STUB_LIST_JSON=array
   STUB_RECORD_OUTPUT=''
   STUB_RECORD_OUTPUT_FIELD=''
@@ -3614,17 +3627,29 @@ assert_says 'case (w4) names the undefined check function' 'did not define robor
 assert_never_enqueued 'case (w4)'
 
 if [ "$HAVE_PYTHON3" -eq 1 ]; then
-printf '== case (x10): the NESTED job row in show --json is read as a first-class source ==\n'
+printf '== case (x10): the NESTED job row is selected even when the review row id DIVERGES ==\n'
 reset_stub
-# MEASURED (round 6): `roborev show <id> --json` returns a REVIEW row whose own `id`
-# equals the job id and which NESTS the job row — git_ref, status, model,
-# requested_model, token_usage, verdict — under a "job" key. Returning the FIRST id
-# match handed back the outer row, which has none of those fields; that looked like an
+# MEASURED (round 6): `roborev show <id> --json` returns a REVIEW row that NESTS the job row —
+# git_ref, status, model, requested_model, token_usage, verdict — under a "job" key. Returning the
+# FIRST id match handed back the outer row, which has none of those fields; that looked like an
 # async durability problem and silently downgraded sha-assert, tier 2 and model.
-# `list --json` is disabled here so `show` is the ONLY source.
+#
+# AND THE REVIEW ROW'S OWN `id` NEED NOT EQUAL THE JOB (#3654): measured over records 1-10 on
+# v0.61.2, six agree and two PAIRS swap (asking for 8 returns id=9, asking for 9 returns id=8),
+# while `job_id` and `job.id` name the requested job in every one. Every fixture here used
+# MATCHING ids, so the divergent shape roborev really emits executed NOWHERE. Under divergence the
+# two objects answer through DIFFERENT keys — the review row only through `job_id`, the nested job
+# row only through `id` — so this case pins that `find_job` still lands on the job row when the
+# match keys differ, which the equal-id shape cannot distinguish. Measured, not assumed: with the
+# "prefer the object carrying git_ref" arm removed, the outer row is selected and the facts come
+# back with NO git_ref, NO status and token_state=absent, which the wrapper reports as job-record
+# DEGRADED — so this case goes RED on job-record / sha-assert / tier 2 / model at once. (That
+# break reds the equal-id shape too; what is new here is the payload shape, not the tie-break.)
+# `list --json` is disabled so `show` is the ONLY source.
 work=$(make_fixture case_x10 pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
 STUB_SHOW_JSON=nested
+STUB_REVIEW_ROW_ID=$((STUB_JOB - 1))   # the measured divergence: review row 4655, job 4656
 STUB_LIST_JSON=none
 run_wrapper "$work"
 assert_verdict 'case (x10)' PASS 0
@@ -3632,6 +3657,19 @@ assert_says 'case (x10) the nested job row was used' '^job-record: PASS$'
 assert_says 'case (x10) the range oracle worked from the nested row' '^sha-assert: PASS$'
 assert_says 'case (x10) tokens came from the nested row' '^vacuity-tier2: PASS$'
 assert_says 'case (x10) the model was confirmed from the nested row' '^model: gpt-5\.6-sol$'
+
+printf '== case (x10b): the AGREEING review/job id shape still reads complete ==\n'
+reset_stub
+# The majority shape (six of the ten measured records), kept so the divergent fixture above does
+# not silently REPLACE the coverage it was derived from.
+work=$(make_fixture case_x10b pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_SHOW_JSON=nested
+STUB_LIST_JSON=none
+run_wrapper "$work"
+assert_verdict 'case (x10b)' PASS 0
+assert_says 'case (x10b) the nested job row was used' '^job-record: PASS$'
+assert_says 'case (x10b) the range oracle worked from the nested row' '^sha-assert: PASS$'
 fi  # HAVE_PYTHON3
 
 printf '== case (w): a MISSING oracles file FAILs closed, never silently no-ops ==\n'
@@ -5852,6 +5890,112 @@ assert_says 'header: roborev block present' '^==== ROBOREV REVIEW SUMMARY ====$'
 assert_lacks 'header: no AGENT-GATE SUMMARY header' '==== AGENT-GATE SUMMARY ===='
 assert_lacks 'header: no AGENT-GATE LITE SUMMARY header' '==== AGENT-GATE LITE SUMMARY ===='
 assert_lacks 'header: no AGENT-GATE DELTA SUMMARY header' '==== AGENT-GATE DELTA SUMMARY ===='
+
+printf '== (jd1) #3654: --help documents that job ids are PER-DAEMON, and how to settle it ==\n'
+# THE INCIDENT: two lanes on two boxes requested absence waivers 50 minutes apart, both naming
+# `job=265` for DIFFERENT reviews (different ranges, branches and token counts). Both were correct
+# — ids are sequential PER DAEMON, not global — but the coordination lead read the repetition as a
+# collision and WITHHELD a valid waiver. The failure is symmetric: a lead who then treats `job=` as
+# uninformative discards the one field binding an authorization to a REVIEW rather than to a RANGE.
+#
+# SCOPE (#3654 narrowed to asks 1+2): what ships is the DOCUMENTED FACT plus a check that settles
+# it. The emitted `job-machine:` key and the cross-box residual are #3825; waiver evidence policy
+# is #3826. This case therefore pins the doctrine and the payload traps, and nothing about a key.
+CASE_N=$((CASE_N + 1))
+OUT="$tmp/out-$CASE_N.txt"
+bash "$WRAPPER_REAL" --help >"$OUT" 2>"$tmp/jd1-help-err.txt"
+if [ -s "$tmp/jd1-help-err.txt" ]; then
+  bad "case (jd1) --help wrote to stderr: $(head -2 "$tmp/jd1-help-err.txt")"
+else
+  ok 'case (jd1) --help is clean on stderr'
+fi
+assert_says 'case (jd1) --help states that job ids are per-daemon' 'JOB IDS ARE PER-DAEMON, NOT GLOBAL'
+assert_says 'case (jd1) --help says to verify git_ref, never the id alone' "VERIFY THE RECORD'S git_ref AND NEVER THE ID"
+assert_says 'case (jd1) --help records the measurement behind it' "'job=265' on two lanes"
+# THE PRESCRIBED COMMANDS MUST BE ONES THAT WORK. `show <id> --json` NESTS the fields under `.job`,
+# so a top-level jq over that payload prints nulls — a check whose output cannot show what it claims.
+assert_says 'case (jd1) --help prescribes the NESTED .job projection' \
+  "roborev show <id> --json | jq '\.job |"
+assert_says 'case (jd1) --help names the nesting trap' "NESTS git_ref/status/token_usage"
+# THE TOP-LEVEL id IS THE REVIEW ROW'S OWN SEQUENCE, measured over ten records: asking for 9
+# returns id=8 with job_id=9. A human reading it manufactures the very doubt the check removes.
+assert_says 'case (jd1) --help warns that a show payload top-level id is not the job asked for' \
+  "TOP-LEVEL 'id' of a 'show' payload is the REVIEW"
+assert_says 'case (jd1) --help gives the measured id-divergence' 'asking for 9 returns id=8'
+# THE LIST DEFAULT FOLLOWS THE --repo PATH'S HEAD, not the invoking shell's branch. The earlier
+# claim here named the cwd's branch and was FALSE: its evidence was a null from a --repo sitting on
+# main, which BOTH readings explain identically — a probe that cannot distinguish what it asserts.
+assert_says 'case (jd1) --help states the list default follows the --repo HEAD' \
+  'defaults its branch filter to the CURRENT HEAD OF THE --repo PATH'
+assert_lacks 'case (jd1) --help no longer claims the list filters by the shell branch' \
+  'filters by the CURRENT BRANCH by default'
+# A LOCAL ROW COUNT IS NOT EVIDENCE OF UNIQUENESS: `list` only ever sees the LOCAL daemon, so the
+# length probe returns 1 whether or not another box holds the same id — identical output under the
+# two states it claims to separate.
+assert_says 'case (jd1) --help refuses the row-count probe as a collision check' \
+  'A LOCAL ROW COUNT IS NOT EVIDENCE OF UNIQUENESS'
+assert_says 'case (jd1) --help says why the probe cannot work' 'only ever sees the LOCAL daemon'
+# AND THE PROCEDURE MUST DECLARE ITS OWN LIMIT. Checking `job` plus `git_ref` settles that the id
+# names the review you think it does ON THIS DAEMON — it does NOT bind a waiver to one BOX: two
+# daemons can hold the same id for the SAME range, so an authorization for machine A's review is
+# accepted by `--recheck-job` against machine B's different review, undetectably from here. This
+# declaration was DELETED once, together with the (#3825) key it had been written beside, and the
+# residual was re-reported in one round — presenting the git_ref check as settling the question
+# with no statement of its limit IS the defect. It needs no key to be true, so it is pinned here.
+assert_says 'case (jd1) --help declares what the git_ref check does NOT claim' \
+  'WHAT THE git_ref CHECK SETTLES, AND WHAT IS NOT CLAIMED'
+assert_says 'case (jd1) --help scopes what it settles to one daemon' \
+  'names the review you think it does ON THIS DAEMON'
+assert_says 'case (jd1) --help says two daemons can share an id for the same range' \
+  'the SAME id for the SAME git_ref range'
+assert_says 'case (jd1) --help says no local lookup can detect it' 'no local lookup can detect it'
+assert_says 'case (jd1) --help declares the residual not closed here, and names #3825' \
+  'NOT CLAIMED and NOT closed here: closing it is #3825'
+# THE PRESCRIBED LOOKUP MUST REACH AN OLDER RECORD. `roborev list` returns a BOUNDED WINDOW —
+# `--limit` defaults to 50 (measured: `roborev list --help`, v0.61.2) — so a limitless documented
+# command answers NOTHING for a job outside it, an absence indistinguishable from "no such job",
+# and it is precisely the older reviews a waiver argument reaches back to. It also undercuts the
+# row-count probe next to it: a count of 1 says nothing about the window it was taken over.
+assert_says 'case (jd1) --help gives the documented list lookup an explicit --limit' \
+  'roborev list --json --limit 200 --repo <abs-repo> --branch'
+assert_says 'case (jd1) --help names the bounded window' 'BOUNDED WINDOW of the most recent rows'
+assert_says 'case (jd1) --help says to raise the limit until the job appears' \
+  'RAISE it until the job appears'
+assert_says 'case (jd1) --help gives the stopping rule for raising it' 'row count STOPS GROWING'
+assert_says 'case (jd1) --help calls a truncated empty result UNMEASURED' 'UNMEASURED, not an answer'
+assert_lacks 'case (jd1) --help no longer claims the row count is unconditionally 1' '# always 1'
+# ASK 5, FACTUAL HALF ONLY (policy is #3826): what each signal can and cannot establish.
+assert_says 'case (jd1) --help scopes the after-the-fact cost to a HUMAN reading the record' \
+  'ONLY FOR A HUMAN READING'
+assert_says 'case (jd1) --help says the prompt is NOT self-authenticating' 'IS NOT SELF-AUTHENTICATING'
+# Fragment kept to ONE line: the full phrase wraps in the rendered help, and a pattern spanning the
+# break matches nothing — the same line-wrapping trap that made an earlier assert pass by accident.
+assert_says 'case (jd1) --help says the counts are daemon-recorded but NOT independent' \
+  'IS DAEMON-RECORDED BUT NOT'
+assert_says 'case (jd1) --help says NEITHER signal establishes provenance' 'NEITHER SIGNAL ESTABLISHES'
+# AND NO PREFERENCE SHIPS. The narrowing keeps the limits and drops every recommendation; a
+# reintroduced "lead with it" would be policy this change deliberately does not decide.
+assert_says 'case (jd1) --help defers the evidence policy to #3826' 'TRACKED AS #3826'
+assert_lacks 'case (jd1) --help recommends no ordering between the signals' 'should LEAD with'
+# WHAT DELETING THE CLASSIFIER BOUGHT, AND WHAT IT DID NOT. The surviving claim is the PARSER one —
+# no automated verdict is derived from injectable prompt text, and nothing may be added that does —
+# and it is load-bearing: a future reader must not read the limit below as licence to resurrect the
+# classifier. The claim that was DELETED said there was "nothing to spoof into a PASS", which was
+# false and contradicted the sentence above it: the human is IN the path, so spoofed prompt text can
+# mislead an authorizer into issuing the marker that makes `--recheck-job` pass. Third overstatement
+# in this one paragraph across the issue's rounds, so it went by SUBTRACTION, not a third rewrite —
+# subtraction cannot introduce a false claim. Both halves are pinned, so neither can creep back.
+assert_says 'case (jd1) --help keeps the parser-exploit claim, which is the true one' \
+  'the direct PARSER exploit is gone'
+assert_says 'case (jd1) --help still forbids parsing the prompt for delivery mode' \
+  'parses the prompt for delivery mode, and nothing may be added that does'
+assert_says 'case (jd1) --help bounds what that buys' 'THAT IS ALL IT BUYS'
+assert_says 'case (jd1) --help puts the human IN the path' 'human is IN the path, not outside it'
+assert_says 'case (jd1) --help leaves the human-spoofing exposure to #3826' \
+  "#3826's subject and is"
+assert_lacks 'case (jd1) --help no longer claims there is nothing to spoof into a PASS' \
+  'nothing to spoof'
+reset_stub
 
 printf '== --help documents the exit codes and the live worktree probe ==\n'
 reset_stub

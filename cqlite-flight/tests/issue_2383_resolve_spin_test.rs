@@ -193,7 +193,7 @@ async fn do_get_drain(svc: &CqliteFlightService, ticket: Vec<u8>) -> usize {
 /// × opens) amplification, seen as 8× re-parses for one logical query).
 ///
 /// Re-anchored (issue #2412, coordinator-flagged regression class — same root
-/// cause as `spin_tests_2383::cancel_during_large_index_parse_aborts_promptly`):
+/// cause as `spin_tests_2383::cancel_at_large_index_parse_entry_aborts_promptly`):
 /// this test originally asserted query 1 (cold) full-parses `Index.db` `>= 2`
 /// (once per generation) via `index_parses_total`. Since #2412 Stage 2, BIG
 /// open defers that parse (`open_lazy`) whenever a usable `Summary.db` is

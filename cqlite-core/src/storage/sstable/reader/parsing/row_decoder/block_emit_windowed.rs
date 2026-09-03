@@ -33,6 +33,7 @@ impl V5CompressedLegacyParser {
     pub fn parse_block_emit_windowed<F>(
         &self,
         data: &[u8],
+        extent: BufferExtent,
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         row_body_window: Option<(usize, usize)>,
@@ -602,6 +603,17 @@ impl V5CompressedLegacyParser {
                                         "V5CompressedLegacy: Partition {} - Failed to parse first row at offset {}: {}",
                                         partition_index, offset, e
                                     );
+                                }
+                                // Issue #3782: on a PROVEN-complete buffer no further
+                                // bytes can finish this row, so the failure is
+                                // truncation/corruption — DATA LOSS — and is reported;
+                                // swallowing it made a SELECT over a fixture with ONE
+                                // corrupted clustering byte return 23 of 100 rows.
+                                // Otherwise the tolerant break STAYS: a chunk-covering
+                                // window can legitimately cut a row at its tail. See
+                                // `BufferExtent`.
+                                if extent.is_complete() {
+                                    return Err(e);
                                 }
                                 break; // End of valid data in partition
                             }

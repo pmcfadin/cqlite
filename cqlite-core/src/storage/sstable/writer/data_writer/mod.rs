@@ -260,6 +260,10 @@ mod index_prefix;
 /// Incremental rows+markers interleave (issue #1668, stage 5c-iii). See
 /// [`marker_merge::merge_rows_and_markers`].
 mod marker_merge;
+/// Declared-marshal comparators for FROZEN SORTED collection keys/elements
+/// (epic #1116 split out of [`udt_canon`]). See
+/// [`marshal_comparator::compare_for_marshal`].
+mod marshal_comparator;
 mod partition;
 mod rows;
 mod schema_helpers;

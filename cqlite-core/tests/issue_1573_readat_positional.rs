@@ -203,7 +203,16 @@ async fn bti_lookups_do_not_open_per_lookup() {
 
 /// Scenario (value parity): every row returned by the migrated point-read path
 /// byte-matches the scan path (the correctness oracle) for the corpus table.
-/// `value_col` is a non-key column projected alongside `id`.
+///
+/// Issue #3890 (AC2): the comparison is CELL-LEVEL ACROSS EVERY COLUMN the scan
+/// returns (`SELECT *`), in both directions — every scan column must be PRESENT in
+/// the point row with an equal value, and the point row must carry no column the
+/// scan row lacks. This test previously projected `id` plus ONE named column, which
+/// is exactly why a point read whose later cells failed to decode stayed green for
+/// years: the two compared columns decoded fine and everything after the failure
+/// was simply absent from the row. `value_col` is retained as the historically
+/// projected non-key column and is asserted to be among the columns compared, so
+/// the strengthening can never silently degrade to comparing key columns alone.
 async fn assert_point_equals_scan(
     keyspace: &str,
     schema: &str,
@@ -225,15 +234,19 @@ async fn assert_point_equals_scan(
         "present fixture must yield >= 1 id (0 = read regression, not a skip)"
     );
 
-    // Oracle: the full scan's row for each id.
+    // Oracle: the full scan's WHOLE row for each id (every column).
     let scan = db
-        .execute(&format!("SELECT id, {value_col} FROM {table}"))
+        .execute(&format!("SELECT * FROM {table}"))
         .await
         .expect("scan");
+    assert!(
+        !scan.rows.is_empty(),
+        "present fixture must yield >= 1 scanned row (0 = read regression, not a skip)"
+    );
     for id in &ids {
         let point = db
             .execute(&format!(
-                "SELECT id, {value_col} FROM {table} WHERE id = {}",
+                "SELECT * FROM {table} WHERE id = {}",
                 uuid_to_literal(id)
             ))
             .await
@@ -248,16 +261,44 @@ async fn assert_point_equals_scan(
             .iter()
             .find(|r| matches!(r.values.get("id"), Some(Value::Uuid(b)) if b == id))
             .expect("scanned row for id");
-        assert_eq!(
-            point.rows[0].values.get("id"),
-            scanned.values.get("id"),
-            "point-read id must byte-match the scan path"
+        let got = &point.rows[0].values;
+        assert!(
+            scanned.values.contains_key(value_col),
+            "oracle row for id={} must carry the projected column '{value_col}' — without it \
+             this comparison would degrade to key columns only",
+            uuid_to_literal(id)
         );
-        assert_eq!(
-            point.rows[0].values.get(value_col),
-            scanned.values.get(value_col),
-            "point-read value must byte-match the scan path"
-        );
+        // Direction 1: no column the SCAN saw may be MISSING from the point row,
+        // and every shared column must byte-match. A truncated point-read row
+        // (issue #3890) shows up here as an absent column, not a wrong value.
+        for (col, want) in scanned.values.iter() {
+            match got.get(col) {
+                Some(have) => assert_eq!(
+                    have,
+                    want,
+                    "point-read column '{col}' for id={} must byte-match the scan path",
+                    uuid_to_literal(id)
+                ),
+                None => panic!(
+                    "point-read row for id={} is MISSING column '{col}' that the scan path \
+                     returned — a truncated point-read row (issue #3890). Point row has {:?}",
+                    uuid_to_literal(id),
+                    {
+                        let mut names: Vec<&str> = got.keys().map(|k| &**k).collect();
+                        names.sort_unstable();
+                        names
+                    }
+                ),
+            }
+        }
+        // Direction 2: and no column the scan did NOT return.
+        for col in got.keys() {
+            assert!(
+                scanned.values.contains_key(&**col),
+                "point-read row for id={} carries column '{col}' the scan path did not return",
+                uuid_to_literal(id)
+            );
+        }
     }
 }
 

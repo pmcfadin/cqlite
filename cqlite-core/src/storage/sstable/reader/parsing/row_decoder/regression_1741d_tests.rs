@@ -123,12 +123,19 @@ fn emit_rows(
 ) -> Vec<crate::types::RowCells> {
     let mut out = Vec::new();
     parser
-        .parse_block_emit(block, Some(schema), reader, |(_t, _k, row)| {
-            if let crate::types::ScanRow::Row(cells) = row {
-                out.push(cells);
-            }
-            Ok(std::ops::ControlFlow::Continue(()))
-        })
+        // #3782: `block` is the whole stitched data section (see the callers).
+        .parse_block_emit(
+            block,
+            super::BufferExtent::Complete,
+            Some(schema),
+            reader,
+            |(_t, _k, row)| {
+                if let crate::types::ScanRow::Row(cells) = row {
+                    out.push(cells);
+                }
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
         .unwrap();
     out
 }

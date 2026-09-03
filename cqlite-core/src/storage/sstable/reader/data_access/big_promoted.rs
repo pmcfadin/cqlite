@@ -33,6 +33,7 @@ use crate::parser::types::{parse_cql_value, CqlTypeId};
 use crate::parser::vint::parse_vuint;
 use crate::schema::{CqlType, TableSchema};
 use crate::storage::sstable::promoted_index_reader::{DecodedIndexInfo, DecodedPromotedIndex};
+use crate::storage::sstable::reader::parsing::BufferExtent;
 use crate::types::{ScanRow, Value};
 use crate::{Error, Result, RowKey};
 use tracing::debug;
@@ -395,8 +396,10 @@ impl SSTableReader {
                 .saturating_add(block.width as usize)
                 .min(avail);
             let mut block_rows: Vec<ScanRow> = Vec::new();
+            // #3782: a chunk-covering partition window; its tail may cut a row.
             parser.parse_block_emit_windowed(
                 &window[within..],
+                BufferExtent::Window,
                 Some(schema),
                 self,
                 Some((body_start, body_end)),
@@ -453,8 +456,10 @@ impl SSTableReader {
         let avail = window.len().saturating_sub(within);
         let clamped = row_body_window.map(|(s, e)| (s.min(avail), e.min(avail)));
         let mut rows: Vec<(RowKey, ScanRow)> = Vec::new();
+        // #3782: a chunk-covering partition window; its tail may cut a row.
         parser.parse_block_emit_windowed(
             &window[within..],
+            BufferExtent::Window,
             schema,
             self,
             clamped,

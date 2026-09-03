@@ -1,6 +1,9 @@
 //! Core data types for CQLite
 
 pub mod comparator;
+// `impl PartialOrd for Value` only — PRIVATE on purpose: a trait impl applies
+// crate-wide regardless of module visibility, so this adds no public surface.
+mod value_ord;
 
 #[cfg(test)]
 mod comparator_test;
@@ -1340,50 +1343,6 @@ impl From<Vec<u8>> for Value {
 impl From<Bytes> for Value {
     fn from(b: Bytes) -> Self {
         Value::Blob(b)
-    }
-}
-
-/// Ordering for `Value`.
-///
-/// NOTE (contract split, #1870/#2010/#2074): this `PartialOrd` INTENTIONALLY
-/// diverges from the DERIVED `PartialEq`. For `float`/`double` it uses the
-/// Cassandra/Java total order (`-0.0 < +0.0`; every `NaN` sorts last and compares
-/// Equal to every other `NaN`), whereas the derived `PartialEq` keeps IEEE
-/// semantics (`-0.0 == +0.0`, `NaN != NaN`). `partial_cmp` may thus report `Equal`
-/// where `eq` reports `false` (two NaNs) and vice-versa (`-0.0`/`+0.0`). GROUP BY
-/// grouping (issue #2074) does NOT use the derived `PartialEq` for floats: the
-/// aggregation group-key path (`aggregation::group_key_eq` + `hash_group_key`)
-/// routes them through this SAME total order (all NaN → ONE group; `-0.0`/`+0.0`
-/// DISTINCT). Any future `impl Ord for Value` MUST reuse this comparator, never
-/// derive from `PartialEq`.
-impl PartialOrd for Value {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        use crate::float_cmp::{cassandra_double_cmp as dcmp, cassandra_float_cmp as fcmp};
-        use std::cmp::Ordering;
-        match (self, other) {
-            (Value::Null, Value::Null) => Some(Ordering::Equal),
-            (Value::Null, _) => Some(Ordering::Less),
-            (_, Value::Null) => Some(Ordering::Greater),
-
-            (Value::Boolean(a), Value::Boolean(b)) => a.partial_cmp(b),
-            (Value::Integer(a), Value::Integer(b)) => a.partial_cmp(b),
-            (Value::BigInt(a), Value::BigInt(b)) => a.partial_cmp(b),
-            (Value::Counter(a), Value::Counter(b)) => a.partial_cmp(b),
-            (Value::Float(a), Value::Float(b)) => Some(dcmp(*a, *b)),
-            (Value::Text(a), Value::Text(b)) => a.partial_cmp(b),
-            (Value::Blob(a), Value::Blob(b)) => a.partial_cmp(b),
-            (Value::Timestamp(a), Value::Timestamp(b)) => a.partial_cmp(b),
-            (Value::Time(a), Value::Time(b)) => a.partial_cmp(b),
-            (Value::Date(a), Value::Date(b)) => a.partial_cmp(b),
-            (Value::Uuid(a), Value::Uuid(b)) => a.partial_cmp(b),
-            (Value::TinyInt(a), Value::TinyInt(b)) => a.partial_cmp(b),
-            (Value::SmallInt(a), Value::SmallInt(b)) => a.partial_cmp(b),
-            (Value::Float32(a), Value::Float32(b)) => Some(fcmp(*a, *b)),
-            (Value::Inet(a), Value::Inet(b)) => a.partial_cmp(b),
-
-            // For complex types, compare by string representation
-            (a, b) => a.to_string().partial_cmp(&b.to_string()),
-        }
     }
 }
 

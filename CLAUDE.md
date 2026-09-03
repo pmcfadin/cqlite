@@ -146,7 +146,14 @@ named setup failure instead of 14 separate `beforeAll` throws and closes `parity
 placeholder — the one corpus-conditional path in that suite that would pass silently. (An earlier draft
 of this paragraph said those suites `describe.skip`; **measured, none does** — the repo's Node
 convention THROWS. A false rationale in a gate log is worse than none, because it is what stops the
-next person looking.) The durable question is the same one shape up: for each workspace member, **which component
+next person looking.) **The throwing helper was NAMED `skipIfNoDatasets()` until #3641** — a
+skip-named function that could not skip, believed by design work until someone measured it (an empty
+root gives `prepared.test.js` 16 FAILED of 16, not 16 skipped). It is now
+`assertDatasetsAvailable()`, the three suites that had copied its body verbatim call it, and its
+contract — throws on an absent corpus, in BOTH strict-mode directions, never skips — is asserted in
+`bindings/node/__test__/helpers.test.js` rather than only described in a doc comment. **A name is a
+claim about behaviour, and this repo's gate design consumed that claim**; the doc comment that said
+otherwise sat two lines above the throw and did not travel to a single one of the 14 call sites. The durable question is the same one shape up: for each workspace member, **which component
 EXECUTES it** — recorded, member by member, in `scripts/tests/workspace-test-disposition.txt`
 (`EXECUTED`/`PARTIAL`/`NOT-EXECUTED`, a closed label set enforced under `tooling-tests`), so a new
 crate cannot join the unexecuted set unannounced. Each record also carries a CLASS — `silent` (no
@@ -226,6 +233,11 @@ names it, correct that entry in the same diff or the exemption silently becomes 
 you widen or narrow, measure first** — the #1255 narrowing outlived its own premise (the widened
 component measures **138s**, dominated by the `release-unwind` LTO build it already paid), so the
 speed argument that justified the hole had stopped being true long before anyone re-checked it.
+That figure is the POST-REBASE build of PR #3555, the one that merged; **133s** appears in that
+PR's body and is the same measurement taken on its PRE-REBASE build. Two real measurements of two
+builds, not a discrepancy — cite the number with the build it describes, and do not average them
+or quote one as the other (#3642).
+
 **THIRD CONFIRMED INSTANCE, AND IT WAS FOUND WITHOUT LOOKING FOR IT (#3725) — SO THE DEFERRAL MUST
 NAME A LANE THAT BOTH EXECUTES AND GATES.** `test-data/scripts/smoke-test-all-tables.sh` skips
 `test_types` from the smoke sweep on the stated ground that those keyspaces are *"validated by
@@ -1116,7 +1128,30 @@ Keep files small — agentic context cost scales with file size. Targets (total 
 included): source `~800`, test files `~1500`. The gate's `file-size` ratchet FAILs if your change
 grows an over-threshold `.rs` file (or pushes one over). Touching an over-threshold file → split it
 by responsibility (source: epic #1116; tests: #1135). Genuinely out of scope → re-run with
-`CQLITE_ALLOW_FILE_GROWTH=1` and leave a note linking #1116/#1135.
+`CQLITE_ALLOW_FILE_GROWTH=1` and leave a note linking #1116/#1135. **That override is now
+VISIBLE in the SUMMARY, and the component's status token says so (#3402):**
+`file-size: OPT-OUT (0s)  [no-cargo] — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); N
+over-threshold file(s) grown — see <logdir>/file-size.log`. `PASS` means the check RAN
+and was SATISFIED; it never means the check was switched off — a bare `file-size: PASS` under an
+engaged override was indistinguishable from a genuine one, so the disclosure depended on the
+author remembering to write it in the PR body. `OPT-OUT` is NON-FAILING (only an exact `FAIL`
+sets `OVERALL=FAIL`), so an acknowledged growth still reaches `RESULT: PASS` — it is now merely
+impossible to hide. It is emitted ONLY for the value **exactly `1`**: a value SET BUT NOT `1`
+(`0`, `true`, `yes`) is not an opt-out, stays a ratchet violation and FAILs, because a
+permissive branch keyed on `!= <bad>` would let a typo waive the ratchet. **The row carries NO
+repository content**: the file NAMES live in `file-size.log` (#3401) and, for a reviewer, in the
+PR diff itself. Rendering them inline was tried and REMOVED — it was the optional half of #3402
+("ideally naming the files") and produced THREE of that PR's seven review findings, one per
+round, each a different way of mangling a filename (a `: ` split recovering a path from a
+display string; substitution inside a path containing `RESULT:`; `,` joining, making
+`src/a.rs,b.rs` indistinguishable from two files). **Remove the mechanism rather than carve it a
+fourth time** (#3229's ruling); escaping only moves the argument to the escape grammar (#3312).
+So the one boundary rendering these details (`_status_detail`) takes GATE-AUTHORED text only —
+fixed wording plus computed values — strips `[:cntrl:]` under `LC_ALL=C`, and WITHHOLDS any
+value carrying the completion probe's `RESULT:` token rather than rewriting it, because a
+rewrite would name something that does not exist. If you add a component that needs repository
+content in its detail, re-introduce a trusted/untrusted split deliberately; do not smuggle it
+through the gate-authored field.
 
 ### Testing
 - Integration tests use real SSTable data only; validate against `sstabledump` output via JSONL
@@ -1211,6 +1246,28 @@ by responsibility (source: epic #1116; tests: #1135). Genuinely out of scope →
   floors** (minimum fixture/vector/refusal counts plus required names and CQL kinds), since an emptied
   table otherwise yields an empty parametrize that pytest reports as one skipped placeholder — #3544's
   case-floor lesson, one directory over.
+- **Fifth blind spot: a point-read test that compares a SUBSET of columns against the scan cannot see
+  a TRUNCATED point row (issue #3890).** The four above are about which ORACLE you compare against;
+  this one is about how much of the row you compare. `assert_point_equals_scan`
+  (`cqlite-core/tests/issue_1573_readat_positional.rs`) projected `id` plus ONE named column, and
+  `SELECT id, name` decodes the first two cells and stops — so a point read whose LATER cells failed to
+  decode compared equal on exactly the columns being compared, for years. Two properties make it
+  invisible rather than merely under-tested: a failed cell decode inside the row loop is SWALLOWED
+  (`row_decoder/row_data.rs` logs at `debug` and `break`s — #3721 is removing that), so nothing
+  propagates; and the missing cells are simply ABSENT from the row's map, so a `get(col)` comparison
+  over the columns you named can never notice them. **Rule: a point/seek-vs-scan comparison uses
+  `SELECT *` and asserts BOTH directions of the column set** — no scan column absent from the point
+  row, no point column the scan lacks — and reports the missing column BY NAME. The corpus-wide
+  instance is `cqlite-core/tests/issue_3890_point_read_column_parity_sweep.rs`. **Two rules about
+  its per-table key cap, both of which cost a review round: a bound tight enough to cost nothing
+  can be tight enough to miss most of what it exists to catch, so measure what your cap EXCLUDES;
+  and a cap's detection figure is only meaningful alongside its SELECTION** — capping in scan order
+  and sorting afterwards samples different keys than capping over the sorted set, and that alone
+  moved the same measurement. **No figure is quoted here on purpose: measuring a guard's detection
+  power needs the swallow instrumented AND the fix reverted, so it is not reproducible from
+  committed source, and a number nobody can re-derive from the repo is what stops the next person
+  looking.** That target's module header carries the numbers with the exact recipe — commands, cap
+  values, and how the fix is reverted so detection is measured against the defect PRESENT.
 
 ### Fuzzing (issue #1614)
 `fuzz/` is a cargo-fuzz/libFuzzer crate in its own workspace, excluded from the main one — the gate
@@ -1438,6 +1495,75 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   What distinguishes them is a **human plus the review's token accounting** (genuine: 398k–649k input /
   314k–554k cached; vacuous baseline ~18.7k / 0). That trade was chosen over a machine guessing from
   injectable text.
+  **THAT COST IS TRUE AT REVIEW TIME, AND FALSE AFTER THE FACT ONLY FOR A HUMAN READING THE STORED
+  RECORD — IT STAYS TRUE OF THE MACHINE, AND MUST (#3654).** The prompt roborev SENT is RETAINED in the job record and retrievable
+  later — `roborev show <id> --prompt` — even though the snapshot file it names is transient and
+  already deleted, and a delivery-by-path prompt says so in its own words under `### Combined
+  Diff`. That is the **DIRECT ARTIFACT** — roborev's ACTUAL prompt rather than a statistic about it —
+  **IT IS NOT SELF-AUTHENTICATING, AND THE
+  TRUST PROPERTIES RUN THE OPPOSITE WAY FROM THE OBVIOUS READING:** roborev's prompt EMBEDS
+  repository-controlled content at positions indistinguishable from roborev's own text, so a
+  reviewed branch can carry text MIMICKING that delivery wording — a human in the loop is not a
+  channel separation, it is the same shared channel with a slower parser — so the prompt is read for
+  the STRUCTURAL fact it reports, never as proof of its own provenance. The **token accounting is
+  DAEMON-RECORDED BUT NOT INDEPENDENT, and it does not establish delivery either**: the RECORD is
+  authentic (the branch cannot rewrite it), but the counts measure THE PROMPT, and the prompt embeds
+  repository-controlled content — so a branch influences their MAGNITUDE without forging anything.
+  That bites where the counts are used: the vacuous baseline is ~18.7k input / 0 cached, so padding
+  non-diff prompt content can make a review that received NO diff look token-rich. **NEITHER SIGNAL
+  ESTABLISHES PROVENANCE, and they are NOT INDEPENDENT** — both are functions of the same
+  repository-influenced prompt. **Which evidence a waiver should rest on is an OPEN QUESTION,
+  tracked as #3826** — nothing here recommends one signal over the other, or any ordering between
+  them (an earlier revision of this paragraph asserted the counts were
+  unwritable-and-therefore-corroborating; that was false in the half that mattered). **It resurrects nothing of the deleted delivery classifier,
+  and that distinction is load-bearing rather than a caveat:** the classifier read injectable prompt
+  text AT DECISION TIME to produce an AUTOMATED verdict, while this is a HUMAN reading a STORED
+  record as evidence for a HAND-GRANTED waiver, so the direct PARSER exploit is gone: nothing in
+  the wrapper parses the prompt for delivery mode, and nothing may be added that does. **THAT IS
+  ALL IT BUYS** — the human is IN the path, not outside it, so spoofed repository-controlled prompt
+  text can still mislead an authorizer into issuing the marker, and the marker is what makes
+  `--recheck-job` pass. That exposure is **#3826**'s subject and is NOT settled here.
+  **AND `job=` IS DAEMON-SCOPED, WHICH NOBODY HAD WRITTEN DOWN (#3654).** Each box runs its own
+  roborev daemon with its own database and its own sequential ids, so **two boxes can legitimately
+  present the SAME id for DIFFERENT reviews** — measured: `job=265` on two lanes 50 minutes apart,
+  different ranges, branches and token counts, both correct — and the coordination lead read the
+  repetition as a collision and WITHHELD a valid waiver. The failure is symmetric and the other
+  direction is worse: a lead who therefore treats `job=` as uninformative discards the one field
+  binding an authorization to a REVIEW rather than to a RANGE. So **verify the record's `git_ref`,
+  never the id alone** — `roborev show <id> --json | jq '.job | {id, git_ref, branch, status,
+  token_usage}'`, because `show` NESTS those fields under `.job`, while for
+  `roborev list --json --limit <n> --repo <abs> --branch <branch>`
+  **`--limit` is REQUIRED READING and must be RAISED until the job appears or the returned row
+  count STOPS GROWING** — it defaults to 50 (measured, v0.61.2), so an older job is outside the
+  window and the query yields nothing though the record exists, an absence indistinguishable from
+  "no such job" and exactly the reach a waiver argument needs; an empty result at a limit that is
+  still growing the row count is UNMEASURED, not an answer. And
+  `list`'s default branch filter follows the **`--repo` PATH's CURRENT HEAD**, not the branch your
+  shell is standing in — so name `--branch` whenever that checkout is not on the job's branch, which
+  is exactly the `--recheck-job` case. An earlier revision of this line named the cwd's branch and
+  was FALSE; the evidence offered for it — a `null` from a `--repo` sitting on `main` — is explained
+  identically by both readings, so it could never have separated them. The measurement that does:
+  from cwd `/tmp`, which is not a git repository at all, `--repo <lane>` returns that lane's rows. **Read `.job`, never a `show` payload's TOP-LEVEL
+  `id`**: that is the REVIEW row's own sequence and need not be the job you asked for (measured over
+  ten records — asking for 9 returns `id=8`, `job_id=9`, `job.id=9`), so a top-level jq manufactures
+  the very "is this the right review?" doubt the check exists to remove. The wrapper is unaffected —
+  `find_job` matches `id`/`job_id`/`job` and then prefers the object carrying `git_ref` — so this is
+  a trap for the human running the check by hand, not a live false `STALE`. **A LOCAL ROW COUNT IS NOT EVIDENCE OF
+  UNIQUENESS**: `roborev list … | jq '[.[] | select(.id==N)] | length'` returns `1` whether or not
+  another box holds that id, because `list` only ever sees the LOCAL daemon — and `0` when the row
+  fell outside the `--limit` window, so the count says nothing about the window it was taken over — another probe whose
+  output is IDENTICAL under the two states it claims to separate (the `RESULT: INCOMPLETE` launch
+  sentinel read as a verdict; a gate run dir found by `ls -t`; `mergeable: MERGEABLE` on a
+  marker-bearing merge commit) — and it gave both lanes the right answer for a reason that did not
+  hold. Use `git_ref`. **AND WHAT THE `git_ref` CHECK SETTLES IS SCOPED TO ONE DAEMON — the rest is
+  NOT CLAIMED.** It settles that the id names the review you think it does *on this daemon*. It does
+  NOT settle the cross-box case: two daemons can hold the same id for the SAME `git_ref` range, so a
+  waiver authorized against machine A's review can be accepted by `--recheck-job` against machine B's
+  DIFFERENT review of that range, and **no local lookup can detect it** — `roborev list` only ever
+  sees the local daemon, while the marker travels through GITHUB. So same-range cross-daemon
+  collisions remain UNPROTECTED; that is declared, not closed. **Whether the block should NAME the
+  issuing daemon — and the cross-box question that comes with it — is tracked as #3825, together with
+  the marker-grammar question it raises.**
   **THE ABSENCE WAIVER — the break-glass, its four constraints, and why the documentation is not the
   credential (#3312 job 23).** The **OWNER or the coordination LEAD** may excuse an absence FAIL with a
   **dedicated, column-zero line** of a PR comment:
@@ -1937,6 +2063,98 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   EXIST and the merged tree is covered — directly, or by an anchored delta re-cert on top of it. A
   block carrying `nested-under:` (#2874) is refused outright: a nested sub-gate runs at the SAME tree,
   so the sha binding provably cannot see it.
+  **AND IN CASE B THE ANCHOR MUST BE ON THE CERTIFIED SHA'S HISTORY (#3653).** Everything above proves
+  the two blocks AGREE about a sha, never that the sha is on THIS PR — Case B's anchor identity rested
+  entirely on the delta run's SELF-DECLARED `delta-anchor:` line, so any full-gate PASS plus a delta
+  naming it satisfied the chain: the #3616 cross-lane class surviving in the one path Case A's sha
+  binding does not cover. (The accident route was narrowed by `agent-gate.sh --delta`'s own
+  fail-closed diff classification, i.e. **by another script** — a real constraint stated nowhere the
+  guard is read.) So `git merge-base --is-ancestor <anchor> <certified>`, **three-valued** because
+  `--is-ancestor`'s rc 1 is itself three-valued (#3544 — in a SHALLOW clone it also means "the
+  connecting history is absent", so rc 1 is a verdict only in a repository proven complete):
+  **BOUND** (rc 0) proceeds and is RECORDED as `anchor-ancestry: BOUND` on the `PREMERGE: DELTA-RECERT`
+  line, because a silent pass is indistinguishable from a check that never ran; **NOT-ANCESTOR**
+  (rc 1, both objects present, `--is-shallow-repository` = `false`) is exit 2 naming both shas;
+  everything UNMEASURABLE — no git, not a work tree, either object absent, shallow or shallowness
+  unknown, `--is-ancestor` exiting ≥ 2 — is exit 3 under its own `PREMERGE: ANCHOR-UNVERIFIABLE`
+  marker, each cause carrying its own remedy, because an unmeasurable result is UNKNOWN and "fix the
+  box" is a different operator action from "your chain is wrong". **The walk does NOT run in the lane**
+  (roborev job 355): `$GIT_DIR/info/grafts` rewrites parentage and SURVIVES `--no-replace-objects` (the
+  job-285 measurement above, re-measured for this check: `no` → `YES` → `YES`), so a graft alone turns a
+  FOREIGN anchor into `BOUND` — and grafts live in the COMMON git dir that every lane on this fleet
+  shares, making the planter a PEER LANE as well as an accident. The ruling there was to MOVE the walk,
+  and it is applied here: the object reads and `merge-base` run in a throwaway `git init` scratch whose
+  only view of the lane is `GIT_ALTERNATE_OBJECT_DIRECTORIES` — pure object storage, no config, hence no
+  grafts, no replace refs, no promisor; a failure to build it is UNVERIFIABLE, **never** a fall-back to
+  the live repository. Two reads stay in the lane on purpose: resolving its object directory
+  (`rev-parse --git-path objects`, no object read, no network) and `--is-shallow-repository`, because a
+  fresh scratch is NEVER shallow and probing it there would answer `false` unconditionally, making the
+  shallow guard a vacuous pass. **A SCRATCH'S ENVIRONMENT IS LOAD-BEARING IN A WAY A LANE READ'S IS NOT**
+  (roborev job 358): the old rationale — "these reads are addressed BY A SHA, so no environment can bend
+  them" — is right about a read in the lane and WRONG here, because an environment variable does not bend
+  the OBJECT, it bends WHICH REPOSITORY ANSWERS. Measured on git 2.43.0: `GIT_DIR` **overrides `-C`**, and
+  both `git init --template=<dir>` and `GIT_TEMPLATE_DIR` seed a planted `info/grafts` INTO the new
+  scratch. So every git call — the lane DISCOVERY reads included (job 276: the allowlist has to reach the
+  sites a later change adds) — runs under `env -i` + an allowlist ADMITting only `PATH` and `TMPDIR`
+  (tighter than the pre-flight's: no network here, so no `HOME`, no `SSH_*`, no proxy), with
+  `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM=/dev/null` plus an explicit empty `--template=`. The reads are
+  also **bounded** by the runner this script already resolves for the advisory — but **only the EXTERNAL
+  commands are** (every git call and `mktemp -d`), and the token says exactly that:
+  `anchor-reads: bounded-<n>s+<g>s(external:git,mktemp,sh;UNBOUNDED:command-v+pwd-builtins)`. **The scratch
+  directory is deliberately NOT DELETED** — a delete through a peer-mutable pathname cannot be made
+  race-free in shell (no `openat`/`unlinkat`) and every lane here runs as the SAME USER, so after three
+  rounds of narrowing it was REMOVED: one object-less `git init` is left under TMPDIR per Case B merge and
+  the OS reaps it. **The
+  token was corrected TWICE — once for overclaiming, once for UNDERclaiming**, and an
+  **ANCHOR-PATH OPERATION AUDIT** in the script header now lists every operation with two facts, *is it
+  bounded* and *is its target validated*, in the `workspace-test-disposition.txt` idiom (a new operation
+  must join the table; it records completeness and labelling, not truth). That audit exists because seven
+  shipped-script findings on #3653 were the same two questions asked of different operations, one per
+  review round. It made canonicalisation runner-bounded (`sh -c 'cd … && pwd -P'` is external, so no
+  builtin-bounding was invented), DELETED both `[ -d … ]` builtin stats as redundant with it, and bounded
+  + target-revalidated the scratch `rm -rf`. What is left unbounded is `command -v` PATH lookups and one
+  `$(pwd)` diagnostic — builtins over local state, unreachable from the shared object store or TMPDIR. And **where no `timeout`/`gtimeout`
+  supporting `--kill-after` exists the check REFUSES** (`ANCHOR-UNVERIFIABLE`, naming a one-command
+  remedy). **That REVERSES the first ruling here, which said run unbounded and declare it, on the ground
+  that a hang is a LIVENESS failure yielding no verdict rather than a false pass.** What that missed: **a
+  hang in this guard BLOCKS THE MERGE ANYWAY**, so the real comparison is never merge-vs-refuse but
+  *hang forever with no diagnosis* vs *refuse now with a named cause and remedy* — same outcome for the
+  merge, and the refusal strictly dominates. "It cannot produce a false pass" was true and IRRELEVANT,
+  because the alternative was never a pass. Hand-rolling a portable bounded runner is ruled OUT: that is
+  new process-lifetime code, the family that produced three defects in this issue's own test scaffolding,
+  and a fourth inside a merge guard costs more than one named install command.
+  **THE COMMIT-GRAPH IS TRUSTED METADATA, SO IT IS DISABLED — AND THE MEASUREMENT IS NOT THE ONE THE
+  FINDING PREDICTED** (roborev job 361). `objects/info/commit-graph` reaches the scratch through the
+  alternate, is NOT content-addressed, and git trusts its parent edges. Measured on git 2.43.0 against a
+  graph whose CDAT parent slot was patched and whose checksum recomputed: `rev-list --parents` reports the
+  FORGED parent and `-c core.commitGraph=false` the real one (so the graph IS consulted and IS trusted) —
+  but `merge-base --is-ancestor`, the call this guard makes, answered `no` **both** ways, so the exploit
+  against THIS call did not reproduce. The flag ships as defence in depth (one git version or one refactor
+  from mattering) and the test says so, pinning it STRUCTURALLY where no behavioural arm can. Measured and
+  deliberately NOT disabled: `core.multiPackIndex` (with the pack `.idx` removed the object was
+  unreadable, so no evidence it supplies lookups or edges) and reachability bitmaps (`GIT_TRACE2_PERF=1`
+  showed ZERO bitmap mentions during the call) — widening past a measurement is guessing.
+  **AND AT THAT POINT THE BOUNDARY IS DECLARED RATHER THAN ENUMERATED AGAIN.** Three review rounds found
+  three routes into one mechanism (graft → environment/template → commit-graph), which is #3544 job 264's
+  *"one axis closed, space declared done"* shape, and #3746 / job 311 already ruled on the unclosable
+  version: DECLARE it in the emitted line and hand the subject to the issue that owns it. So every Case B
+  success line ends with one constant — `ancestry over this box's SHARED object store: objects+metadata
+  and SCRATCH namespace: objects, metadata and scratch TRUSTED, not verified (#3746) — closes
+  accident/drift, NOT a same-UID peer` — folded into the ONE renderer, never per-arm. **THAT IS THE
+  TERMINUS OF THIS HARDENING LINE (job 390).** Every lane on this fleet runs as the same user, so a peer
+  can write the shared object store AND our scratch — it can drop `.git/info/grafts` into the scratch
+  between `git init` and the walk, reproducing the graft attack inside the thing built to prevent it — and
+  no mode or ownership can admit this process while excluding a peer. So the CLAIM is narrowed rather than
+  the hole patched, and the hazard is assigned to **#3746**, which already owns "lanes share an object
+  store". **A later same-UID-peer instance is that declared boundary, not a new defect** — which is what
+  #3653 asked for, since its own text says the hostile route is largely closed elsewhere and the defect was
+  the constraint not being stated where the guard is read. What the binding proves:
+  ancestry over the objects and commit metadata this box's shared store presents, isolated (each with a
+  positive control) from grafts, replace refs, an inherited `GIT_DIR`, an ambient template, and the
+  commit-graph. What it does not: that the anchor is on the PR **as GitHub sees it**, and anything against
+  a peer that can WRITE that shared store. A fifth route in this family is a residual under that
+  declaration, not a false claim — a check that claims nothing false is worth more than one claiming a
+  closure it does not deliver.
   **What a `PREMERGE: OK` does NOT prove (#3650) — it says so itself, on a `PREMERGE: SCOPE` line.**
   It proves the diff is unchanged since certification and that a full gate PASSed on **that exact
   tree**. It does NOT prove the change was certified against the `main` it will join: a squash-merge

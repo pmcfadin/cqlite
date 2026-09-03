@@ -9,6 +9,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (CLI `--format json`, observable): a `decimal` and a `varint` render
+  as UNQUOTED JSON NUMBERS, not as quoted strings (#3644).** Same egress and the
+  same class as the #3629 entry below. `JsonCell::from_value`
+  (`cqlite-cli/src/output/json_cell.rs`) now emits both types as raw JSON number
+  fragments carrying `ValueFormatter`'s digits verbatim, at every position — a
+  bare cell, and nested in a `list`/`set`/`tuple`, a map value or a UDT field.
+
+  - **Before**: `{"amount":"123.45","big":"170141183460469231731687303715884105727"}`
+  - **After**:  `{"amount":123.45,"big":170141183460469231731687303715884105727}`
+
+  **Oracle**, read at the pinned tag — never CQLite's prior output:
+  `cassandra-5.0.8`'s `DecimalType.toJSONString` (`DecimalType.java:314-317`) and
+  `IntegerType.toJSONString` (`IntegerType.java:488-491`) both return
+  `Objects.toString(getSerializer().deserialize(buffer), "\"\"")`, i.e. a bare
+  `toString()`; `DecimalType` deliberately OVERRIDES the QUOTING form at
+  `AbstractType.java:186-189`, so the absence of quotes is a decision Cassandra
+  made explicitly. `tools/JsonTransformer.java:494` writes a cell value with
+  `writeRawValue(cellType.toJSONString(...))`, so that text reaches the document
+  unquoted.
+
+  **What a consumer that called `as_str()` on these columns should do.** Read the
+  cell as a NUMBER. A `decimal`/`varint` is arbitrary-precision (a Java
+  `BigInteger` unscaled value — the committed
+  `test_signed_coll.signed_special_collections` fixture carries 33 significant
+  digits), so a parser that maps every JSON number onto a `double` will LOSE
+  digits it previously received intact inside the string. Use a parser that keeps
+  the LITERAL:
+
+  - **Python**: `json.loads(text, parse_float=decimal.Decimal)`. `parse_float`
+    receives the number's original lexeme, so no rounding has happened yet. A
+    `varint` needs nothing — it carries no `.`/`e`, so it goes through
+    `parse_int`, and a Python `int` is already arbitrary-precision.
+  - **JavaScript**: a bigint/decimal-aware parser such as `lossless-json` (every
+    number is kept as its original text) or `json-bigint`. **A plain
+    `JSON.parse` reviver does NOT work**: the reviver's `value` argument is an
+    already-parsed, already-rounded `Number`, so the digits are gone before it is
+    called and cannot be recovered from it. (The ES2025 source-text-access
+    reviver — the third `context.source` argument — *does* expose the original
+    lexeme, but it is not available in every engine — measured here, Node.js 20
+    has no `context.source` (it landed in V8 with Node.js 21) — so feature-detect
+    it and fall back to a dedicated parser.)
+  - **Rust**: `serde_json`'s `arbitrary_precision` feature (a `Number` then holds
+    the literal digits) or `serde_json::value::RawValue` (the raw fragment,
+    unparsed). Note `arbitrary_precision` is additive across the whole build, so
+    it changes `Number` for every `serde_json` user in your dependency graph;
+    `RawValue` is the local, non-invasive option.
+
+  The digits themselves are unchanged — only the quotes are gone.
+
+  **Also changed, in `cqlite-core`'s text formatter and therefore in ALL text
+  egress (`json`, `csv`, `table`): a `decimal` whose magnitude is ZERO at a
+  NEGATIVE scale now renders `0e1` (scale `-1`) instead of `00`.**
+  `ValueFormatter::format_decimal` (`cqlite-core/src/util/value_fmt.rs`) spelled
+  that value `"0"` followed by one zero per unit of negative scale, which is not
+  valid JSON — a leading zero followed by a digit — so the JSON egress had to
+  quote it. It now takes the SAME bounded exponent form `<digits>e<-scale>` that
+  the issue #1754 over-bound branch already emitted, which is a valid JSON number
+  and preserves the scale (`BigDecimal(0, -1)` is not `BigDecimal(0, 0)`, so
+  collapsing to `0` would discard information). A NON-zero magnitude at a negative
+  scale was already valid JSON and is unchanged (`5` at scale `-1` → `50`).
+  **This is a JSON-VALIDITY fix, NOT spelling parity**: `0e1` is still not Java's
+  `BigDecimal.toString()` spelling `0E+1`, and the wider `format_decimal` vs
+  `BigDecimal.toString()` divergence class (a non-zero magnitude at a negative
+  scale → Java `1.23E+3` vs CQLite `1230`; an adjusted exponent below −6 → Java
+  `1E-10` vs CQLite `0.0000000001`) is untouched and tracked separately — no
+  committed fixture covers it, and it would move `csv`/`table` output for many
+  more values. Pinned by
+  `cqlite-core/tests/issue_3644_decimal_zero_negative_scale.rs` and
+  `cqlite-cli/tests/issue_3644_json_decimal_unquoted.rs`
+  (`a_zero_magnitude_at_a_negative_scale_is_an_unquoted_exponent_form`).
+
+  **Known residual**, recorded rather than omitted: the quoted-string fallback
+  remains, and after the fix above the only rendering known to take it is the
+  `<corrupt-decimal:…>` marker an over-bound magnitude produces (issue #1754).
+  That is not a JSON number, so the egress emits it as a string rather than an
+  unparseable document; it deliberately does not invent a spelling.
+
+  Not affected by the QUOTING change (their text was never quoted; the
+  zero-at-negative-scale spelling above does reach them): `table` and `csv`
+  output, and
+  `cqlite-core`'s `impl ToJson for Value`, which is a different renderer and still
+  emits `{"scale": …, "unscaled": <base64>}` — see
+  `docs/development/QUERY_RESULT_CONTRACT.md`.
+
 - **BREAKING (CLI `--format json` and `cqlite-core`'s `ToJson`, observable): a UDT
   renders as its DECLARED FIELDS AND NOTHING ELSE — the injected `_type` key is
   gone (#3629).** This is the CLI-side half of #3504's class, on a third surface and
@@ -46,6 +130,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refusing outright to compare any UDT declaring a `_type` field.
 
 ### Fixed
+
+- **All surfaces (observable): a structured value inside a frozen UDT decodes from
+  its DECLARED type instead of degrading to a blob (#3631).** A UDT field whose
+  type is a collection, tuple or nested UDT — `frozen<map<text,int>>`,
+  `frozen<list<…>>`, `frozen<set<…>>`, `frozen<tuple<…>>` — surfaced to every
+  caller as raw bytes. The decode path matched a CLOSED SET of primitive types and
+  fell back to `Value::Blob` for the rest, while the declared `CqlType` naming the
+  real type was the `match` scrutinee itself: the silent degradation #28
+  (no-heuristics) forbids.
+
+  - **Before** (`udt_hashable_shapes` row 3's `stn`, CLI `--format json`):
+    `{"label":"unhashable","m":"0x0000000100000001610000000400000001"}`
+  - **After**: `{"label":"unhashable","m":[{"key":"a","value":1}]}` — which is what
+    Cassandra's own `sstabledump` already emitted for those bytes (`"m":{"a":1}`).
+
+  Python gets `{'a': 1}` instead of a 17-byte `bytes`; `cqlite-core`'s `ToJson`
+  gets `{"'a'": 1}` (its `Map` arm `Display`-stringifies keys, unchanged here).
+
+  **Two consequences a caller may notice.** (1) A declared type CQLite has no
+  decoding rule for is now an explicit `Error::unsupported_format` NAMING the type,
+  where it used to be an opaque blob and a `tracing::debug!` no caller could see —
+  including a nested UDT whose field list is in neither the `UdtRegistry` nor the
+  inline type. (2) In the Python binding, `Udt.__hash__`'s `TypeError` is now
+  reachable from decoded data: a UDT with a decoded `dict` field is genuinely
+  unhashable, where the same UDT with a `bytes` field was not. No column in the
+  committed corpus reaches a hashing position with such a UDT inside it, so nothing
+  observable changed there — the boundary is recorded in
+  `test-data/fixtures/issue_3504/README.md`, Table 2.
+
+  Also fixed in the same class: a ZERO-LENGTH field followed Cassandra's per-type
+  empty-value rule rather than becoming an empty blob (`Value::Null` for every
+  scalar whose serializer guards `accessor.isEmpty(value) ? null : …`; only
+  text/ascii/varchar/blob keep a meaningful empty value); a `date`-typed UDT field
+  gained the `SimpleDateType` epoch offset every other decode site already applied;
+  and the type-nesting limit no longer resets at each frozen-UDT hop, so a cyclic
+  `UdtRegistry` is refused rather than recursing until the stack is exhausted.
+  Instance A of the same issue — a non-frozen `map<frozen<udt>,int>` cell-path key —
+  was fixed separately by #3612.
+
+  **Marshal-form UDT fields that never decoded at all.** A UDT read from its on-disk
+  `UserType(...)` marshal string resolved each field type through a table that
+  covered 16 marshal suffixes, so a field Cassandra CAN write — `duration`
+  (`DurationType`), `smallint` (`ShortType`), `tinyint` (`ByteType`), `counter`
+  (`CounterColumnType`) or a `tuple<…>` (`TupleType(...)`, which is STRUCTURAL and
+  needs parsing, not a name match) — surfaced as a blob. All of them now decode; the
+  table is one arm per `CQL3Type.Native` constant at the pinned `cassandra-5.0.8`
+  tag, and there is now ONE such table rather than two that disagreed. Two mappings
+  were also WRONG: legacy `DateType` (an 8-byte millis value, `asCQL3Type() ->
+  TIMESTAMP`) was read as CQL `date` because a `ends_with("DateType")` arm also
+  matches `SimpleDateType`, and `TimeUUIDType` was collapsed onto `uuid`. Matching is
+  now EXACT on the marshal class's simple name, so a third-party `AbstractType` is no
+  longer suffix-matched into `blob`. A marshal type CQLite genuinely cannot express
+  (`EmptyType`, `VectorType(...)`, a foreign class) is refused BY NAME instead of
+  being reported as a user-defined type with a missing field list.
+
+  **And the marshal class's PACKAGE is part of its identity.** Matching the simple
+  name exactly still ignored the package, so a third-party `com.acme.Int32Type` was
+  decoded as CQL `int` — an unknown class's bytes read as if the class were known,
+  the same no-heuristics defect one level up. `TypeParser.getAbstractType` at the
+  pinned tag resolves a name as `compareWith.contains(".") ? compareWith :
+  "org.apache.cassandra.db.marshal." + compareWith`, so a marshal name has exactly
+  two legal spellings — bare, or fully qualified under
+  `org.apache.cassandra.db.marshal` — and both continue to decode identically.
+  Anything else, INCLUDING a structural form (`com.acme.TupleType(...)`) and a
+  package that merely resembles the marshal one (`…db.marshalX.`,
+  `notorg.apache.cassandra.db.marshal.`, `my.org.apache.cassandra.db.marshal.`), is
+  now an `Error::unsupported_format` naming the package it was rejected on. The same
+  rule closed a package-SUFFIX hole in the `UserType(` marker locator, where a
+  substring search accepted `my.org.apache.cassandra.db.marshal.UserType(...)` as
+  Cassandra's.
+
+  **A malformed `inet` is refused.** An `inet` value is 4 bytes (IPv4) or 16 (IPv6),
+  or empty meaning null (`InetAddressSerializer`); any other width was accepted and
+  handed back as a `Value::Inet` no address can be built from. It is now
+  `Error::corruption`, the same class and wording every other bad-width scalar gets.
 
 - **Both bindings (observable): a JSON number above `i64::MAX` no longer loses
   precision, and neither binding fabricates a substitute value (#3505).** A

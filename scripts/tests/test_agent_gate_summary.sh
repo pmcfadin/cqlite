@@ -5271,21 +5271,42 @@ fi
 #
 # Host-INDEPENDENT: bash plus --emit-summary-selftest (no cargo, no python3, no jq, no
 # network, no datasets), so none of these five can become a declared tooling skip.
+#
+# GRAMMAR, and why it is a CLOSED set with FOUR tokens rather than three (#3402): the
+# component status token is part of this block contract, so a new one is an extension made
+# HERE, deliberately, not an assertion weakened to let a change through. `OPT-OUT` is the
+# `file-size` component's own non-failing token for an ENGAGED CQLITE_ALLOW_FILE_GROWTH=1
+# — `PASS` must mean "the check ran and was satisfied", never "the check was switched off".
+# Two consequences are encoded below: an OPT-OUT row is still a COUNTED component row (a
+# three-token grammar would silently drop it from `fm_lines`, and a dropped row is exactly
+# the undercount this census exists to catch), and it may carry a `— <detail>` suffix AFTER
+# the bracketed matrix, so the annotation assert is anchored on the bracket plus an
+# OPTIONAL detail rather than on end-of-line. `--emit-summary-selftest` emits no OPT-OUT
+# row itself; the behavioural coverage is scripts/tests/test_agent_gate_file_size_log.sh,
+# which drives the REAL `--only file-size` path (also in tooling-tests).
+#
+# ONE definition of the row grammar, shared by the census below and by 54f, which is what
+# makes 54f a test OF THIS CENSUS rather than of a second copy that can drift from it.
+# FIVE tokens, from two issues that landed together and reached the same conclusion
+# independently: #3625's VACUOUS (a PASS whose measured subject count is zero) and #3402's
+# OPT-OUT (file-size under an engaged CQLITE_ALLOW_FILE_GROWTH=1). A shape recogniser that
+# omits either stops SEEING the rows it does not name.
+FM_ROW_RE='^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT) \([0-9]+s\)'
+# The tail is `[<feature matrix>]  {<census>}` and then, optionally, #3402's ` — <detail>`.
+# BOTH structured suffixes stay REQUIRED and the census stays LAST OF THEM, so neither can be
+# dropped without this failing (#3453 + #3625). The detail is free text and is the only thing
+# allowed after the census — structured tokens a parser keys on never sit behind unstructured
+# prose. Absent detail, this is byte-identical to #3625's anchor.
+FM_ROW_ANNOT_RE="$FM_ROW_RE"' +\[.+\]  \{.+\}( — .*)?$'
 fm_sum="$tmp/3453-annot-summary.txt"
 if AGENT_GATE_SUMMARY_FILE="$fm_sum" bash "$GATE" --emit-summary-selftest >/dev/null 2>&1; then
-  # VACUOUS joins PASS/FAIL/SKIP in the component-status vocabulary (#3625): a PASS whose
-  # measured subject count is zero is recorded under its own token, so a shape recogniser
-  # that omits it would stop SEEING the very lines that state a component verified nothing.
-  fm_lines=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\)' "$fm_sum")
-  # The line's tail is now `[<feature matrix>]  {<census>}` — BOTH are part of the block
-  # contract, and the `$` anchor requires the census to be LAST, so neither can be dropped
-  # without this failing (#3453 + #3625).
-  fm_annot=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS) \([0-9]+s\) +\[.+\]  \{.+\}$' "$fm_sum")
+  fm_lines=$(grep -cE "$FM_ROW_RE" "$fm_sum")
+  fm_annot=$(grep -cE "$FM_ROW_ANNOT_RE" "$fm_sum")
   if [ "$fm_lines" -gt 0 ] && [ "$fm_annot" = "$fm_lines" ]; then
     ok "3453-annot-a: all $fm_lines component line(s) carry a bracketed feature matrix AND a census suffix"
   else
     bad "3453-annot-a: only $fm_annot of $fm_lines component lines carry a feature matrix + census suffix"
-    grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS)' "$fm_sum" || true
+    grep -E "$FM_ROW_RE" "$fm_sum" || true
   fi
   # #3625: the aggregate census line. It must be present, must declare its own
   # NON-EXHAUSTIVENESS, and must report every non-affirmed class as `N RECOGNISED` rather
@@ -5305,12 +5326,12 @@ if AGENT_GATE_SUMMARY_FILE="$fm_sum" bash "$GATE" --emit-summary-selftest >/dev/
   # VACUOUS included (#3625): omitting it made this screen BLIND to exactly the rows that
   # report a component verified nothing — the ones most worth checking for a broken
   # annotation.
-  if grep -qE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS).*\[(UNDECLARED|UNCLASSIFIED)' "$fm_sum"; then
+  if grep -qE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS|OPT-OUT).*\[(UNDECLARED|UNCLASSIFIED)' "$fm_sum"; then
     bad "3453-annot-b: a component line reads UNDECLARED/UNCLASSIFIED in the reference block"
   else
     ok "3453-annot-b: no component line reads UNDECLARED/UNCLASSIFIED in the reference block"
   fi
-  if grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP|VACUOUS)' "$fm_sum" | grep -q 'RESULT:'; then
+  if grep -E "$FM_ROW_RE" "$fm_sum" | grep -q 'RESULT:'; then
     bad "3453-annot-c: an annotation embeds the RESULT: token — it would break the #2908 poll predicate"
   else
     ok "3453-annot-c: no annotation embeds the RESULT: token (the one-RESULT invariant is safe)"
@@ -5355,6 +5376,52 @@ if [ -r "$SCRIPT_DIR/../../$fm_guard" ] && grep -q "$fm_guard" "$GATE"; then
   ok "3453-annot-e: the completeness/no-drift guard exists AND is registered in the gate (tooling-tests)"
 else
   bad "3453-annot-e: $fm_guard missing (looked under $SCRIPT_DIR/../..) or not registered in $GATE — the COMPONENTS completeness census would be silently gone"
+fi
+
+# --- 54f. #3402: the census grammar must ADMIT the OPT-OUT component row ---------------
+#
+# WHY THIS EXISTS: `--emit-summary-selftest` emits no OPT-OUT row, so the fourth token has
+# NO SUBJECT in the census above — the extension would sit here unexercised, and a later
+# "tidy" back to three tokens would pass this whole section while silently dropping every
+# OPT-OUT row from it. MEASURED, so this is not a hypothetical: against a two-row sample
+# (one PASS, one OPT-OUT) the three-token grammar counted 1 of 2 with fm_lines == fm_annot
+# — i.e. it reported "all component line(s) carry a feature matrix" over a subject set it
+# had itself shrunk. A vacuous green is the one outcome this section exists to refuse, so
+# the undercount is worse than a red would have been.
+#
+# The two regexes are the SAME variables the census used, never re-spelled here — a second
+# copy could drift and then 54f would certify a grammar nobody uses. The row is the real
+# render (`%-18s` name, token, `(Ns)`, two spaces, the bracketed matrix, then #3402's
+# ` — <detail>` suffix); the behavioural half — that the gate actually PRODUCES this row,
+# and only for an override of exactly `1` — is scripts/tests/test_agent_gate_file_size_log.sh,
+# asserted registered below rather than duplicated here.
+# The samples carry ALL THREE suffixes in the shipped order — `[<matrix>]  {<census>}` then
+# #3402's optional ` — <detail>`. They were written before #3625's census landed and then
+# matched 0 of 2, because the annotation anchor now REQUIRES the census: a sample that lags
+# the real render turns this section into a test of an obsolete shape, which is worse than no
+# sample at all. Kept as literals rather than generated, so a change to the render must be
+# reflected here deliberately.
+fm_optout_row='file-size:         OPT-OUT (0s)  [no-cargo]  {no census: component ended OPT-OUT, so there is no PASS to affirm} — CQLITE_ALLOW_FILE_GROWTH=1 (ratchet NOT enforced); 1 over-threshold file(s) grown — see file-size.log under logs:'
+fm_plain_row='fmt:               PASS (1s)  [fmt --all]  {AFFIRMED 1 target}'
+fm_rowfile="$tmp/3402-rows.txt"
+printf '%s\n%s\n' "$fm_plain_row" "$fm_optout_row" >"$fm_rowfile"
+fm_n_row=$(grep -cE "$FM_ROW_RE" "$fm_rowfile")
+fm_n_annot=$(grep -cE "$FM_ROW_ANNOT_RE" "$fm_rowfile")
+if [ "$fm_n_row" = 2 ]; then
+  ok "3402-grammar-a: the census counts an OPT-OUT row as a component row (2/2) — no silent undercount"
+else
+  bad "3402-grammar-a: the census counted $fm_n_row of 2 component rows — an OPT-OUT row is being dropped"
+fi
+if [ "$fm_n_annot" = 2 ]; then
+  ok "3402-grammar-b: the annotation assert tolerates the ' — <detail>' suffix after the bracketed matrix (2/2)"
+else
+  bad "3402-grammar-b: the annotation assert matched $fm_n_annot of 2 — a detail suffix defeats the end-of-line anchor"
+fi
+fs_guard=scripts/tests/test_agent_gate_file_size_log.sh
+if [ -r "$SCRIPT_DIR/../../$fs_guard" ] && grep -q "$fs_guard" "$GATE"; then
+  ok "3402-grammar-c: the behavioural OPT-OUT guard exists AND is registered in the gate (tooling-tests)"
+else
+  bad "3402-grammar-c: $fs_guard missing (looked under $SCRIPT_DIR/../..) or not registered in $GATE — the grammar above would have no behavioural counterpart"
 fi
 
 # TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
@@ -5410,7 +5477,10 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=410
+# 410 -> 413 on #3402: section 54f adds 3 asserts, host-INDEPENDENT for the same reason as
+# 54 (pure bash grep over an in-suite string, plus two file-presence reads), so the same
+# "raise by exactly the number added" rule applies and the deliberate ~9 margin is kept.
+ASSERT_FLOOR=413
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
