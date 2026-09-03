@@ -451,6 +451,19 @@ async fn bti_scan_refuses_a_partition_header_cassandra_itself_rejects() {
 ///   Cassandra purges tombstone-covered rows at flush and chunk boundaries are
 ///   not byte-addressable. A corpus scan can never reach that shape.
 ///
+/// RE-TAKEN A FOURTH TIME after the round-4 fix made a `Ready`-then-unparseable
+/// header refuse at every extent: identical again — 542, the same 3 mid-stream
+/// straddles, and **0** at every refusing header site including the newly
+/// unconditional one, with 0 errors.
+///
+/// That last zero is the point, and it is why "no measured loss" was NOT a
+/// reason to keep tolerating there: this arm fires **0** times on 126 well-formed
+/// tables, so the corpus cannot evidence it in EITHER direction. Measured where
+/// it CAN be reached — the real `da` fixture with its discriminator flipped,
+/// parsed under a `Window` — the pre-fix answer was `Ok` with 401 of 468 rows,
+/// 180 LOST and 113 FABRICATED. An arm the corpus cannot reach needs a
+/// constructed oracle, never an argument from silence.
+///
 /// So the header-arm refusal costs nothing on well-formed input, and the row
 /// arm's toleration count did not move — which is AC3's property. The
 /// instrumentation was temporary and is not committed; re-take the measurement
