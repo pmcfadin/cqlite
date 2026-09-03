@@ -59,7 +59,7 @@ SUBJECT="$REPO_ROOT/scripts/gate-liveness.sh"
 # Case floor (CLAUDE.md, #3544): a span-replacing edit that silently deletes cases yields a green
 # tally over a shrunken suite. This is ENFORCED (exit 1), not merely printed, and may only go DOWN
 # with a stated reason.
-CASE_FLOOR=28
+CASE_FLOOR=29
 
 pass=0; fail=0; cases=0
 ok()   { cases=$((cases+1)); pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
@@ -214,8 +214,17 @@ violations() {
       # Verified valid with `bash -n`. Excluding alnum/_/- from the boundary is what still keeps
       # `printfoo | head` and `echoes | head` out -- those are different words, not writers.
       if (!match(line, /(^|[^[:alnum:]_.\/-])(printf|echo)([^[:alnum:]_-]|$)/)) next
-      w = RSTART
-      p = first_pipe(line, w)
+      # Scan for the pipe from just past the WRITER WORD, not from RSTART. match() may consume a
+      # LEADING boundary character, and if that character is itself a pipe then starting at RSTART
+      # finds it and treats the writer as upstream of it -- reporting `producer|printf %s done`,
+      # where the builtin is the FINAL stage and cannot take EPIPE (roborev job 115, an UNDECLARED
+      # false positive that also contradicted case 9c). Equally, the scan must NOT start past the
+      # TRAILING boundary character, because for `echo|head` that character IS the pipe and
+      # skipping it would drop a real hazard. So: end of the writer word, then scan.
+      wpos = RSTART
+      if (substr(line, wpos, 1) !~ /[pe]/) wpos = wpos + 1   # a leading boundary char was consumed
+      wlen = (substr(line, wpos, 1) == "p") ? 6 : 4          # printf | echo
+      p = first_pipe(line, wpos + wlen)
       if (p == 0) next
       printf "%d:%s\n", NR, line
     }
@@ -436,6 +445,14 @@ _pin 9m 1 "fd dup straight after the writer: echo>&1|head"          'echo>&1|hea
 _pin 9n 1 "redirect straight after the writer: printf>/dev/null|head" 'printf>/dev/null|head -1'
 _pin 9o 0 "printfoo is NOT the printf builtin"                       'printfoo | head -1'
 _pin 9p 0 "echoes is NOT the echo builtin"                           'echoes | head -1'
+
+# ---------------------------------------------------------------------------
+# 9q. A final-stage writer with NO surrounding whitespace (roborev job 115). Case 9c pins the
+#    same property WITH whitespace, which is why 9c passed while this shape was reported: the
+#    leading `|` was consumed by match() and then found by the pipe scan. An UNDECLARED false
+#    positive is worse than a declared one -- it contradicts the rule the guard prints.
+# ---------------------------------------------------------------------------
+_pin 9q 0 "final-stage writer, no whitespace: producer|printf is NOT a hazard" 'producer|printf %s done'
 
 # ---------------------------------------------------------------------------
 # 10. THE ASSERTION. Scan the SHIPPED reader.
