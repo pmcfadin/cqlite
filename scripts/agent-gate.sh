@@ -7087,7 +7087,14 @@ _census_kind() {
     write-tests|cli-tests|compaction-byte-parity|bti-multiclustering)  printf 'libtest' ;;
     query-semantics-oracle|flight-query-semantics-oracle|flight-tests) printf 'libtest' ;;
     legacy-heuristics|binding-rust-tests|kit-dashboard-drift)          printf 'libtest' ;;
-    feature-iso-parquet|feature-iso-delta-scan|minimal-build)          printf 'compile' ;;
+    # feature-iso-delta-scan EXECUTES since #3725 -- it has NO `--no-run` pass, so cargo
+    # emits `Running`/`test result:` and NEVER an `Executable ` line. It kept the
+    # `compile` kind it carried while the lane WAS compile-only, so the census measured
+    # ZERO and read VACUOUS on a lane that had just executed 3346 lib + 72 integration
+    # tests -- the one failure mode this block's header warns about. Its parquet sibling
+    # is still `--lib --no-run` and stays `compile`; the two are no longer symmetric.
+    feature-iso-delta-scan)                                            printf 'libtest' ;;
+    feature-iso-parquet|minimal-build)                                 printf 'compile' ;;
     # integration-tests: `cargo test --package X --no-run` then a named-target run pass.
     integration-tests)                                                 printf 'both' ;;
     # scoped-tests has NO statically correct kind, and declaring one was a HIGH defect
