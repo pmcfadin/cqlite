@@ -651,3 +651,109 @@ async fn a_windowed_block_read_refuses_a_complete_but_structurally_invalid_heade
         }
     }
 }
+
+/// Fix round 5 — the OTHER direction of the same arm, and the case that stops a
+/// future round re-flipping the round-4 decision.
+///
+/// Round 4 made a `Ready`-then-unparseable header refuse at every extent. That
+/// is right AT A CONFIRMED PARTITION BOUNDARY: readiness proves every header
+/// byte is present, so nothing later can repair it.
+///
+/// But `Ready` proves only that *enough bytes for a candidate header exist at
+/// this offset*. It does NOT prove the cursor IS at a partition boundary. The row
+/// loop's tolerant break (`block_emit_windowed.rs`, "End of valid data in
+/// partition") fires when a row will not decode — the straddle protocol on a
+/// `Window` — and it used to break only the INNER loop, leaving the outer
+/// partition loop to re-enter the header arm at that MID-ROW offset. Readiness
+/// reads `data[1]` as the key length and never inspects byte 0, and any oa/da
+/// discriminator byte with bit 7 set that is not exactly `0x80` fails the full
+/// parse — so row payload classifies `Ready`-then-`Err` there and an
+/// unconditional refusal REJECTED A HEALTHY WINDOW.
+///
+/// # Why this fixture, and why the obvious one proves nothing
+///
+/// Measured over EVERY prefix of each committed `da` fixture, each parsed with
+/// its OWN `da` gates (the only configuration in which `Ready`-then-`Err` is
+/// structurally reachable — nb's legacy 12-byte `DeletionTime` has no invalid
+/// encodings):
+///
+/// | fixture | prefixes | refused pre-fix |
+/// |---|---|---|
+/// | `test_da.wide_table` | 1857615 | **294096 (15.8%)** |
+/// | `test_da.multiclustering_table` | 57548 | 0 |
+/// | `test_da.wide_multiclustering_small` | 112255 | 0 |
+///
+/// The two zeros are not evidence of health: those fixtures' payloads are ASCII
+/// text, so a discriminator byte with bit 7 set essentially never occurs and the
+/// arm is simply UNREACHABLE in them. `wide_table` has an `int` clustering and
+/// binary payload, which is why it reaches the route. A property measured only on
+/// the ASCII fixtures reads clean while being out of reach — the same trap as
+/// reading AC3's zeros as coverage.
+///
+/// # The property
+///
+/// **No healthy prefix of a real data section, declared as a `Window`, may be
+/// refused.** A `Window` says "the tail may cut a row"; every prefix here is
+/// exactly that, so each must read cleanly and return the rows that ended before
+/// the cut. No corruption is involved in this case at all.
+///
+/// A SWEEP rather than one hand-picked prefix: which offsets land on a
+/// `Ready`-classifying tail is a property of the fixture's bytes, not something
+/// to encode as a magic number, and the refusal count IS the measurement. It is
+/// bounded to the first 64 KiB with a prime stride so the committed case stays
+/// fast — the exhaustive 1.85 M-prefix sweep above was a throwaway probe.
+#[tokio::test]
+async fn no_healthy_window_prefix_is_ever_refused() {
+    use cqlite_core::storage::sstable::reader::BufferExtent;
+
+    let spec = &fixture::BTI_WIDE_TABLE;
+    let dir = fixture_dir(spec);
+    let schema = table_schema(spec);
+    let reader = open_reader(&dir).await;
+    // PRISTINE — this direction needs no corruption; the defect is healthy data
+    // being refused.
+    let dec = fixture::stitched_data_section(&dir);
+    assert!(
+        dec.len() > 65536,
+        "this sweep needs a real multi-row section; got {} bytes",
+        dec.len()
+    );
+
+    // A prime stride, so the sample is not aligned to any row or chunk period.
+    const STRIDE: usize = 251;
+    const SPAN: usize = 64 * 1024;
+    let mut refused: Vec<(usize, String)> = Vec::new();
+    let (mut scanned, mut with_rows) = (0usize, 0usize);
+    let mut keep = STRIDE;
+    while keep <= SPAN.min(dec.len()) {
+        scanned += 1;
+        match da_block_walk(spec, &schema, &reader, &dec[..keep], BufferExtent::Window) {
+            Ok(keys) => {
+                if !keys.is_empty() {
+                    with_rows += 1;
+                }
+            }
+            Err(e) => refused.push((keep, e)),
+        }
+        keep += STRIDE;
+    }
+
+    assert!(
+        scanned > 100,
+        "case floor: the sweep must cover a real range of prefixes, scanned {scanned}"
+    );
+    assert!(
+        with_rows > 0,
+        "0-rows-when-present: {scanned} healthy prefixes and none yielded a row, so this \
+         sweep is not exercising the walk at all"
+    );
+    assert!(
+        refused.is_empty(),
+        "round 5: {} of {scanned} HEALTHY window prefixes were REFUSED. A `Window` declares \
+         that its tail MAY cut a row, so a cut row is the straddle protocol and not \
+         corruption — the outer partition loop must not probe for a header at the mid-row \
+         offset the tolerant break leaves behind. First few: {:?}",
+        refused.len(),
+        &refused[..refused.len().min(3)]
+    );
+}

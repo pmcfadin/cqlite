@@ -31,6 +31,97 @@
 //! `Window` the SAME condition is the ordinary straddle — a header split across
 //! the chunk boundary — and stays tolerant.
 
+//! # Reachable only from a CONFIRMED boundary (issue #3928 round 5)
+//!
+//! This arm is entered ONLY where the walk has been promised a partition starts:
+//! the block start (the caller's own offset 0), the byte after an
+//! `END_OF_PARTITION` the row loop just consumed, or an offset a
+//! `peek_is_partition_header` confirmed. That property is what makes the
+//! `Ready`-then-unparseable refusal below SAFE rather than merely justified, and
+//! it is maintained by the four breaks in `block_emit_windowed.rs` that leave the
+//! cursor at an UNCONFIRMED position, each of which now ENDS THE WALK instead of
+//! falling through to here:
+//!
+//! * the #954 row-body bound (finding B1) — nothing further was requested;
+//! * the tolerant ROW break — the straddle protocol, so the cursor is MID-ROW;
+//! * the three range-tombstone MARKER failures (finding I2) — the cursor is ON
+//!   the marker. These `return` the MARKER's own error at EVERY extent, which
+//!   delivers the same property a fortiori (a `return` cannot fall through to
+//!   here at all) and is issue #3721's decision, not this one's — see
+//!   "Reconciling #3721 and #3928" below.
+//!
+//! # Why that matters, measured
+//!
+//! `Ready` proves only that enough bytes for a CANDIDATE header exist at this
+//! offset — not that the offset IS a boundary. Readiness reads `data[1]` as the
+//! key length and never inspects byte 0, and any oa/da discriminator byte with
+//! bit 7 set that is not exactly `0x80` fails the full parse. So row payload
+//! classifies `Ready`-then-`Err` at a mid-row offset, and while the row break
+//! fell through to here, the (correct-at-a-boundary) unconditional refusal
+//! REJECTED HEALTHY WINDOWS: measured on the real `da` fixture
+//! `test_da.wide_table` with its own gates, **294096 of 1857615** healthy window
+//! prefixes refused, every one through this arm. The ASCII-payload `da` fixtures
+//! showed 0 of 57548 and 0 of 112255 — the arm is simply unreachable in them, so
+//! they could not have detected it.
+//!
+//! Both directions are pinned in `issue_3928_corrupt_header_refusal.rs`:
+//! `a_windowed_block_read_refuses_a_complete_but_structurally_invalid_header`
+//! (refuse at a boundary) and `no_healthy_window_prefix_is_ever_refused` (never
+//! refuse a healthy window).
+//!
+//! # Reconciling #3721 and #3928 (rebase onto PR #3814)
+//!
+//! Both issues are refuse-don't-swallow fixes to the SAME walk, and at the four
+//! breaks above they were written independently and appeared to disagree. They do
+//! not, once the two questions are separated:
+//!
+//! * **#3721 asks WHETHER a failure is reported to the caller.** Only it can
+//!   tell, and only at the site that holds the error: an
+//!   [`Error::ColumnDecode`] is a per-column decode failure the caller owns the
+//!   tolerance decision for (`column_decode_error::end_of_partition_or_bail`),
+//!   while a range-marker failure is corruption and never a terminator
+//!   (`range_marker_error`).
+//! * **#3928 asks WHERE a failure that is NOT reported leaves the cursor**, and
+//!   hence whether this arm may be entered from it.
+//!
+//! So they compose per site rather than competing:
+//!
+//! * the THREE MARKER sites `return` unconditionally (#3721). #3928's I2
+//!   invariant is satisfied *more* strictly than by its own proposed
+//!   `break 'partitions`, because a `return` ends the walk at every extent and
+//!   can never reach this arm. Gating those returns on `extent.is_complete()` —
+//!   which is what #3928 round 5 wrote, before #3721 landed — was MEASURED to
+//!   reintroduce #3721's defect: the scan passes `Window` even with the whole
+//!   partition buffered, so all three `d9_select_marker_parse_failure` cases went
+//!   back to `Ok` with the marker and every later row silently dropped. And
+//!   nothing #3928 measured argues the other way: all 294096 healthy-window
+//!   refusals above arrived through the ROW break, none through a marker site.
+//! * the ROW break keeps #3721's `end_of_partition_or_bail(..)?` (so a
+//!   `ColumnDecode` still reaches the caller — `issue_3721_bti_point_read_absence`
+//!   pins that) and then `break 'partitions` rather than a plain `break` (#3928),
+//!   because an `Ok` from that call establishes only "not `ColumnDecode`" and
+//!   consumes nothing: the cursor is where the failed row parse STARTED, which is
+//!   a boundary in neither direction.
+//!
+//! ## Residuals, both of them #3721's and both still open
+//!
+//! 1. A marker refusal is `Error::Corruption`, which
+//!    `column_decode_error::indexed_walk_falls_back` does not recognise (it
+//!    matches `is_column_decode` only), so an index-NARROWED read fails instead
+//!    of retracting. The fix is a TYPED retraction signal — matching message text
+//!    would violate the no-heuristics rule (#28) — not tolerance, which would
+//!    merely make the narrowed read silently short.
+//! 2. A `Window` that cuts a VALID marker's body is refused rather than treated
+//!    as the straddle it is. That IS decidable structurally, by the move #1741
+//!    made for headers (`partition_header_readiness`) applied to the marker's own
+//!    framing: every byte present and still failing is corruption, absent bytes
+//!    are a straddle. It is new parse-side machinery rather than a reconciliation
+//!    of two existing changes, so it is named here and not invented.
+//!
+//! Until (1) or (2) lands, the accepted direction at a marker is a conservative
+//! false refusal on a narrowed read — recoverable, and loud — over a silent short
+//! answer from `SELECT`, which is the defect itself.
+
 use super::super::buffer_extent::HeaderTolerance;
 use super::super::*;
 
@@ -250,17 +341,21 @@ fn undecodable_partition_header(offset: usize, detail: &str) -> Error {
     ))
 }
 
-/// Issue #3928 fix round 1, I2 — name the leading byte's STRUCTURAL class when it
-/// is one this arm should never have been handed.
+/// Issue #3928 — name the leading byte's STRUCTURAL class when it is one this arm
+/// should never have been handed.
 ///
-/// The row loop breaks with `offset` still ON a range-tombstone marker it could
-/// not parse or feed (`block_emit_windowed.rs`'s three marker breaks), and the
-/// outer partition loop then re-enters HERE. Without this the diagnostic reads
-/// "undecodable partition header" for a MARKER failure and sends the next reader
-/// to the wrong arm.
+/// Round 1 (I2) added this because the row loop broke with `offset` still ON a
+/// range-tombstone marker it could not parse or feed, and the outer partition
+/// loop then re-entered HERE — so the diagnostic read "undecodable partition
+/// header" for a MARKER failure and sent the next reader to the wrong arm. That
+/// route is GONE as of round 5: all three marker sites now `return` the marker's
+/// own error at every extent (issue #3721), so this arm is reachable only from a
+/// CONFIRMED partition boundary.
 ///
-/// Diagnostics only: the refusal itself is unchanged, and moving the marker
-/// breaks to report their own failure is a different arm and a different issue.
+/// The notes are kept because a boundary can still legitimately be REACHED with
+/// a marker or END_OF_PARTITION byte at it on malformed input (two consecutive
+/// end markers, say), and naming that is still the difference between one read
+/// and a debugging session. What they no longer describe is a fall-through.
 fn structural_note_at(data: &[u8], offset: usize) -> &'static str {
     let Some(&leading) = data.get(offset) else {
         return "";
@@ -270,9 +365,10 @@ fn structural_note_at(data: &[u8], offset: usize) -> &'static str {
          re-entered the header arm at a marker rather than at a partition start"
     } else if V5CompressedLegacyParser::is_range_tombstone_marker(leading) {
         " — NOTE: this leading byte carries IS_MARKER, i.e. it is a RANGE-TOMBSTONE \
-         marker and not a partition header. The previous partition's row loop ended at a \
-         marker it could not parse or feed, leaving the cursor on it; the failure to \
-         investigate is in the MARKER arm, not here"
+         marker and not a partition header. Since #3928 round 5 the row loop's marker \
+         failures can no longer leave the cursor here (they return the marker's own error \
+         at every extent), so this indicates a partition BOUNDARY whose first byte is a \
+         marker — malformed input, not a fall-through"
     } else {
         ""
     }

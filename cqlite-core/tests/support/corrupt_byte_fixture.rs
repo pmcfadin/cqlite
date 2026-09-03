@@ -210,6 +210,29 @@ pub const BIG_COMPOSITE_HEADER: FixtureSpec = FixtureSpec {
     mutation: Mutation::FirstPartitionHeader(HeaderByte::KeyLengthLowByte),
 };
 
+/// `test_da.wide_table` — Cassandra 5.0 `da`/BTI with an `int` clustering key,
+/// so its row payload is BINARY: unlike `multiclustering_table`'s ASCII text,
+/// roughly half its bytes have bit 7 set.
+///
+/// That is the whole reason this fixture exists here (issue #3928 round 5). The
+/// oa/da `DeletionTime` discriminator is only invalid when bit 7 is SET and the
+/// byte is not exactly `0x80`, so a mid-row offset in an ASCII payload
+/// essentially never classifies `Ready`-then-unparseable, while a mid-row offset
+/// in this one does about one time in six. A property about that arm measured
+/// only on `multiclustering_table` reads as clean when it is simply out of
+/// reach — measured: 0 of 57548 prefixes there against 294096 of 1857615 here.
+///
+/// **PRISTINE READS ONLY — the `mutation` below is never applied.** The consuming
+/// case sweeps unmodified prefixes of this fixture's own data section; the field
+/// exists because [`FixtureSpec`] carries one for the staging path, which this
+/// spec does not use.
+pub const BTI_WIDE_TABLE: FixtureSpec = FixtureSpec {
+    keyspace: "test_da",
+    table: "wide_table",
+    schema_file: "wide-table-bti.cql",
+    mutation: Mutation::FirstPartitionHeader(HeaderByte::KeyLengthLowByte),
+};
+
 /// Issue #3928 — the BTI (`da`) header-arm lane. Same fixture as
 /// [`BTI_MULTICLUSTERING`]; `da` has `hasUIntDeletionTime`, so its
 /// partition-level `DeletionTime` HAS an invalid encoding and the corruption is

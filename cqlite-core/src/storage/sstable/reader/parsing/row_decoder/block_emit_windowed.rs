@@ -357,6 +357,9 @@ impl V5CompressedLegacyParser {
                                             // continues at `next_offset`) with an
                                             // unrepresentable bound kind; `break`
                                             // dropped every later row and said `Ok`.
+                                            // #3928 (I2) a fortiori: a `return`
+                                            // reaches no header arm — see that arm,
+                                            // "Reconciling #3721 and #3928".
                                             return Err(range_marker_error::range_marker_refused(
                                                 e,
                                                 &partition_index,
@@ -395,6 +398,12 @@ impl V5CompressedLegacyParser {
                                     // discriminator (matching the message text would violate the
                                     // no-heuristics rule, issue #28), so it is left as a named
                                     // residual rather than invented here.
+                                    //
+                                    // Issue #3928 (I2) a fortiori: a `return` ends the walk at
+                                    // every extent, so the header arm is never re-entered with
+                                    // the cursor ON the marker. That reconciliation, and the
+                                    // SECOND residual it leaves, are recorded in
+                                    // `partition_header_arm.rs`, "Reconciling #3721 and #3928".
                                     Err(cause) => {
                                         return Err(unparseable(cause, &partition_index, offset))
                                     }
@@ -405,7 +414,10 @@ impl V5CompressedLegacyParser {
                                     offset = next_offset;
                                     continue;
                                 }
-                                // Same decision on the PHYSICAL path (no shadowing).
+                                // Same decision, and the same two residuals, on the
+                                // PHYSICAL path (no shadowing); #3928's I2 invariant
+                                // holds here for the same reason (a `return` ends the
+                                // walk at every extent).
                                 Err(cause) => {
                                     return Err(unparseable(cause, &partition_index, offset))
                                 }
@@ -644,7 +656,20 @@ impl V5CompressedLegacyParser {
                                     row_count,
                                     offset,
                                 )?;
-                                break; // End of valid data in partition
+                                // Issue #3928 round 5 (I2): END THE WALK. The two changes
+                                // compose EXACTLY here — #3721 decides above whether this
+                                // failure is PROPAGATED (only it can tell), #3928 where a
+                                // non-propagated one LANDS. `Ok` from
+                                // `end_of_partition_or_bail` means only "not
+                                // `Error::ColumnDecode`", and it consumed nothing, so the
+                                // cursor still sits where the failed row parse STARTED —
+                                // the only exit here leaving it UNCONFIRMED (both boundary
+                                // exits set `partition_complete`), reachable only when
+                                // `!extent.is_complete()`, i.e. MID-ROW under the straddle
+                                // protocol. Reasoning and the measurement in BOTH
+                                // directions: `partition_header_arm.rs`, "Reconciling
+                                // #3721 and #3928".
+                                break 'partitions; // End of valid data in partition
                             }
                         }
                     }
