@@ -7,49 +7,70 @@
 //! During #3790 the `time` comparator was changed to SIGNED and `time` was removed
 //! from this path's raw-byte fast path, on the argument that the comparator should
 //! agree with "the writer". **Both changes were wrong and were reverted.** The
-//! argument verified the wrong writer: `Value::PartialOrd` is signed, but it does
-//! NOT determine on-disk collection order — `data_writer/complex.rs` re-sorts every
-//! non-list collection's cell paths through `schema_helpers::compare_cell_paths`
-//! (`a.cmp(b)`, unsigned) immediately before writing, overriding whatever order the
-//! memtable produced. So a signed read path REORDERS what the writer correctly wrote.
+//! argument verified the wrong writer: `Value::PartialOrd` was signed AT THE TIME
+//! (#3935 has since made it BYTE_ORDER too), and it does NOT determine on-disk
+//! collection order either way. **PRECISELY WHICH WRITER SORTS WHERE**
+//! (an earlier revision of this paragraph said `complex.rs` re-sorts EVERY non-list
+//! collection's cell paths, which is FALSE — only ONE of its two paths does):
+//!
+//! * PER-ELEMENT — `write_complex_column_per_element` sorts the supplied cells with
+//!   `schema_helpers::compare_cell_paths` (`a.cmp(b)`, unsigned) immediately before
+//!   writing, overriding whatever order the caller produced.
+//! * WHOLE-COLUMN — `write_complex_column` does NOT re-sort cell paths; it orders the
+//!   `Value`'s elements with `collection_order::compare_collection_elements` and emits
+//!   the cell paths in THAT order. Which is why a signed `time` arm there wrote a
+//!   non-Cassandra order for years (issue #3935) with no `compare_cell_paths` pass to
+//!   catch it.
+//!
+//! Either way the on-disk order is unsigned/BYTE_ORDER, so a signed read path
+//! REORDERS what the writer correctly wrote.
 //!
 //! The authority (never CQLite's own behaviour, #3041) — pinned `cassandra-5.0.8`,
 //! `src/java/org/apache/cassandra/db/marshal/TimeType.java`:
 //! `TimeType() { super(ComparisonType.BYTE_ORDER); }` — unsigned bytes of the 8-byte
 //! big-endian nanos. CQLite's byte-parity-guarded writer already does exactly that.
 //!
-//! ## Why no fixture can cover this, and why that made it easy to get wrong twice
+//! ## Why no fixture covers this
 //!
-//! Cassandra's `TimeSerializer` validates `0..=86_399_999_999_999`, so **no
-//! Cassandra-written SSTable can contain a negative `time`** — the committed golden
-//! (`issue_3790_collection_order_cassandra_golden.rs`) covers only in-range values,
-//! where signed, unsigned and byte order all coincide. The entire disagreement lives
-//! in values Cassandra cannot produce, so no observation settles it: the deciding
-//! evidence has to be the RULE plus what our own writer does. This test encodes that
-//! conclusion so it cannot be re-litigated by whichever review lands next.
+//! **CORRECTED BY #3935 (measured against the pinned tag).** An earlier revision of
+//! this comment said "Cassandra's `TimeSerializer` validates
+//! `0..=86_399_999_999_999`, so no Cassandra-written SSTable can contain a negative
+//! `time`". That is FALSE: Cassandra ACCEPTS, stores and `BYTE_ORDER`s an 8-byte
+//! binary out-of-range `time`. The argument and its `TimeSerializer` citations are
+//! written out ONCE, in `types::comparator::custom::compare_time` (`# CANONICAL
+//! STATEMENT`); it is deliberately not restated here, so a future re-pin has one
+//! paragraph to correct rather than four.
+//!
+//! The real reasons no fixture covers it: the committed golden
+//! (`issue_3790_collection_order_cassandra_golden.rs`) holds only in-range values,
+//! where signed, unsigned and byte order all coincide; and producing an out-of-range
+//! one needs a binary-protocol write that bypasses the CQL string path, which no
+//! committed generator does. The deciding evidence is therefore the RULE from the
+//! pinned source. This test encodes that conclusion so it cannot be re-litigated by
+//! whichever review lands next.
 //!
 //! ## WHAT THIS DOES NOT EXERCISE — declared, not implied (roborev job 54)
 //!
 //! It calls `assemble_read_cells` on hand-built `CellData`, so it pins the
 //! **merged-read assembly** order and **NOTHING ABOUT THE WRITER**. An earlier
 //! revision named these cases `..._matching_the_writer`, which was an overclaim
-//! twice over: the writer is never invoked here, and "the writer" is ambiguous
-//! because CQLite has TWO collection write paths that DISAGREE for a negative
-//! `time`:
+//! twice over: the writer is never invoked here, and at the time "the writer" was
+//! ambiguous, because CQLite had TWO collection write paths that DISAGREED for a
+//! negative `time`:
 //!
 //! * per-element (`data_writer/complex.rs`, via `compare_cell_paths`) — unsigned
 //!   raw cell-path bytes, which matches Cassandra and matches this test;
-//! * whole-collection (`data_writer/complex.rs`, `write_complex_set` via
-//!   `collection_order::compare_collection_elements`) — **signed** for
-//!   `Value::Time`, and it emits cell paths in that order with no re-sort.
+//! * whole-collection (`data_writer/complex.rs`, `write_set_complex_cells` /
+//!   `write_map_complex_cells` via `collection_order::compare_collection_elements`)
+//!   — **was signed** for `Value::Time`, emitting cell paths in that order with no
+//!   re-sort.
 //!
-//! So the whole-collection writer currently disagrees with Cassandra, with the
-//! per-element writer, and with this test, for out-of-range negatives. That is a
-//! pre-existing write-path parity defect, out of scope for a comparator fix
-//! (on-disk byte ordering is compaction-parity territory) and filed as **#3935**.
-//! An end-to-end write→read regression belongs there, where the rule is decided;
-//! adding one here would pin one of two conflicting writer behaviours as correct
-//! before that decision is made.
+//! **#3935 FIXED that second path to `TimeType`'s BYTE_ORDER**, so both write paths
+//! and this read path now agree for all inputs. The scope caveat above still stands
+//! unchanged — this file still invokes no writer — and the write-side property is
+//! pinned end to end by `issue_3935_collection_time_byte_order.rs`, which asserts
+//! the two write paths emit the same on-disk order and that it is the rule-derived
+//! one.
 //!
 //! ## What this catches, MEASURED — and what it does not
 //!
@@ -155,8 +176,9 @@ fn negative_time_set_element_sorts_by_unsigned_serialized_bytes() {
         "set<time> must order by UNSIGNED serialized bytes (negatives LAST, 0xFF \
          leading), matching Cassandra's TimeType BYTE_ORDER and the PER-ELEMENT \
          write path. Signed order would be [-2, -1, 0, max] — the reverted #3790 \
-         mistake. NOTE the whole-collection writer is signed today (#3935); this \
-         asserts the read side, not that writer."
+         mistake. This asserts the READ side only; the whole-collection writer \
+         was signed until #3935 corrected it, and the write side is pinned by \
+         issue_3935_collection_time_byte_order.rs."
     );
 }
 
