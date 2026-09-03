@@ -1491,6 +1491,12 @@ verdict = {
 # `python3 -` (no __file__) and the suite does not guarantee its working directory.
 sys.path.insert(0, sys.argv[7])
 from ws0_quiescence_evidence import assert_self_consistent, EvidenceError  # noqa: E402
+# #3551: the verdict now DECLARES what its zero census does not bound, and the evidence checker
+# asserts that field BY DERIVATION from `samples` -- so it is composed through the writer's own
+# function rather than pasted. A pasted literal is the drift pair the assert below exists to
+# catch, and this is the FOURTH time this fixture has lagged the shipped shape.
+from ws0_quiescence import census_scope_note  # noqa: E402
+census["census_scope"] = census_scope_note(census["samples"])
 try:
     assert_self_consistent(verdict, "the fixture's OWN baseline verdict")
 except EvidenceError as exc:
