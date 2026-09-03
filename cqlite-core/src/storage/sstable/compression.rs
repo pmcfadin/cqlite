@@ -21,20 +21,11 @@ pub enum CompressionAlgorithm {
 
 /// Maximum allowed decompressed size to prevent memory exhaustion attacks (128MB)
 ///
-/// Gated to the union of its consumers' features, the same reason and the same
-/// idiom as `validate_decompression_size` below (issue #1873): every reader of
-/// this bound lives under `lz4` (`validate_decompression_size`), `snappy`
-/// (`snappy_decompress_raw`), `deflate` or `zstd`, and with NONE of them enabled
-/// every `decompress` arm returns `"<algo> compression not available"` without
-/// decompressing anything — so there is no unbounded path left for the constant
-/// to guard, and it is genuinely dead rather than merely unreferenced.
-///
-/// Without this gate, `cargo test -p cqlite-ffi-common` (which depends on
-/// cqlite-core with `default-features = false`, so no compression backend is on)
-/// FAILS under `-D warnings` with `constant MAX_DECOMPRESSED_SIZE is never
-/// used`. That reached no lane until #3522 made `binding-rust-tests` execute
-/// cqlite-ffi-common and #2658 made `--lite`'s scoped-tests compile every direct
-/// cqlite-core dependent.
+/// Gated to the union of its consumers' features — same reason and same idiom as
+/// `validate_decompression_size` below (issue #1873). With no backend enabled every
+/// `decompress` arm errors without decompressing, so nothing unbounded is left to
+/// guard: genuinely dead, not merely unreferenced. Ungated, `cargo test -p
+/// cqlite-ffi-common` (cqlite-core at `default-features = false`) fails `-D warnings`.
 #[cfg(any(
     feature = "lz4",
     feature = "snappy",
