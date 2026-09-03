@@ -83,9 +83,23 @@
 
 use super::*;
 
-/// Every fixed-width CQL short form this decoder admits, with the exact width
-/// the pinned Cassandra serializer requires. `alias` marks the non-CQL marshal
-/// aliases the match also accepts (`short` = `smallint`, `byte` = `tinyint`).
+/// The fixed-width CQL short forms this decoder admits, with the exact width the
+/// pinned Cassandra serializer requires. `short` = `smallint` and `byte` =
+/// `tinyint` are the non-CQL marshal aliases the match also accepts.
+///
+/// **CURATED, NOT DERIVED — a DECLARED GAP, not a drift guard (roborev r12).**
+/// This list is maintained BY HAND. Every case below iterates it, so a
+/// fixed-width arm ADDED to `raw_value/reporting.rs` and omitted here is never
+/// exercised and these tests stay GREEN: they cannot detect a new arm, only
+/// re-assert the ones named. Read no case here as proving the arm set complete.
+///
+/// Deriving it was considered and rejected rather than overlooked: the arms are
+/// `match` string literals in another module, so deriving them means parsing
+/// Rust to find declarations in arbitrary source — the unbounded-scanner class
+/// this repo REMOVED on purpose (#1712 deleted the rustdoc-derived `pub-surface`
+/// snapshot for exactly that reason: a scanner that cannot abstain). A curated
+/// list that DECLARES its incompleteness is worth more than a derivation whose
+/// own correctness nobody can establish.
 const FIXED_WIDTH_TYPES: &[(&str, usize)] = &[
     ("int", 4),
     ("bigint", 8),
