@@ -1087,19 +1087,41 @@ if _target_dir:
         PRUNE_EXACT.add(_target_dir)
 
 
-def buildscript_owners_of(path):
-    """Members WITH a build script whose package directory contains this file."""
+def buildscript_owners_of(*paths):
+    """Members WITH a build script whose package directory contains this file.
+
+    Takes EVERY spelling of the file (lexical and resolved) and unions the answers,
+    for the reason given on `owners_of` below.
+    """
     if not buildscript_members:
         return ()
     out = []
     for name in buildscript_members:
         d = members[name]["dir"]
-        if path == d or path.startswith(d + os.sep):
-            out.append(name)
+        for path in paths:
+            if path == d or path.startswith(d + os.sep):
+                out.append(name)
+                break
     return out
 
 
-def owners_of(path):
+def _direct_owners_of(path):
+    """Layers 1 and 2 of `owners_of` for ONE spelling of a path, with NO fallback.
+
+    Split out on roborev job 115 so several spellings of one file can be unioned
+    WITHOUT each one independently reaching the "credit every member" fallback --
+    see `owners_of`.
+    """
+    owners = set(exact_owners.get(path, ()))
+    for tree_dir, name in tree_owners:
+        if name in owners:
+            continue
+        if path == tree_dir or path.startswith(tree_dir + os.sep):
+            owners.add(name)
+    return owners
+
+
+def owners_of(*paths):
     """Every possible owner — AMBIGUITY RESOLVES TOWARD CREDITING (roborev jobs 58, 93).
 
     Three layers, and none of them SUBTRACTS:
@@ -1128,13 +1150,33 @@ def owners_of(path):
     Over-crediting is the permitted direction (a dead feature can escape; the contract
     line declares it) and it is bounded: the file set is what the walk found, and a file
     no target covers cannot be attributed more precisely without parsing.
+
+    EVERY SPELLING OF THE FILE IS ASKED, AND THE FALLBACK SITS BEHIND THE UNION -- NOT
+    INSIDE IT (roborev job 115). Ownership used to be computed from the RESOLVED path
+    alone, so an IN-REPOSITORY symlink crossing package trees
+    (`a/src/shared.rs -> ../../b/src/shared_impl.rs`, reached by a `mod shared;` in `a`)
+    attributed the module wholly to `b`: a feature of `a` gated in there was reported
+    DEAD while `cargo` compiles it as part of `a`. That is a FALSE FAIL, and it
+    contradicts this component's own printed contract, so it is a correctness defect and
+    not one of the declared escape routes -- those all err toward crediting, and this one
+    erred toward a dead verdict. The out-of-repo refusals above never fired, because the
+    link resolves INSIDE the repository. Measured before and after.
+
+    The lexical path is the one that matters most (it is what a `mod`/`#[path]` in that
+    tree actually compiles), and the resolved path is kept because the real file may be
+    reachable from its own tree too -- a file two targets can reach references both
+    packages' features, exactly as layer 2 already says.
+
+    WHY THE FALLBACK IS NOT SIMPLY APPLIED PER PATH: layer 3 credits EVERY workspace
+    member, so asking two spellings independently and unioning the RESULTS would let one
+    covered spelling be joined by the other's blanket credit -- turning a precise answer
+    into a workspace-wide one and masking genuinely dead features elsewhere. So the two
+    DIRECT layers are unioned first (`_direct_owners_of`) and layer 3 fires only if that
+    union is empty, i.e. only when NO spelling of the file is covered by any target.
     """
-    owners = set(exact_owners.get(path, ()))
-    for tree_dir, name in tree_owners:
-        if name in owners:
-            continue
-        if path == tree_dir or path.startswith(tree_dir + os.sep):
-            owners.add(name)
+    owners = set()
+    for path in paths:
+        owners |= _direct_owners_of(path)
     if not owners:
         owners = set(members)
     return owners
@@ -1230,8 +1272,11 @@ for dirpath, dirnames, filenames in os.walk(REPO_ROOT, onerror=_walk_error, foll
             # Outside every target source tree: the scan never treated it as source, so
             # there is nothing to be wrong about. Skipped, as before.
             continue
-        owners = owners_of(full)
-        bs_owners = buildscript_owners_of(full)
+        # BOTH spellings, lexical first (roborev job 115): `full` alone attributed an
+        # in-repo symlink crossing package trees to the destination package only, and a
+        # feature of the SOURCE package gated in that module read DEAD -- a false FAIL.
+        owners = owners_of(raw, full)
+        bs_owners = buildscript_owners_of(raw, full)
         if not owners and not bs_owners:
             # Not a source file of any workspace-member target and not inside a
             # build-script package: a non-member crate's source (the measurement
