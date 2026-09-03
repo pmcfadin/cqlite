@@ -520,6 +520,45 @@
 #                      so the real driver is never reached — asserted from the stub's
 #                      own log (a positive control proves the harness CAN see an
 #                      invocation) and from lib-ws0-hermetic.sh's shims.
+#                      Also runs scripts/tests/test_ws0_3551_artifact_tools.sh (#3551) —
+#                      the two MEASUREMENT-ANALYSIS tools under
+#                      docs/reports/ws0-3551-artifacts/ (clean-pairs.py,
+#                      window-census.py) whose stdout IS that issue's published result.
+#                      This repo reviews docs/reports/*-artifacts/ harnesses as CODE
+#                      (#3229) and these two had NO tests, which is how a real defect
+#                      got in: a session read CLEAN on ONE zero-census sample anywhere
+#                      in its window, so a mostly UNOBSERVED session could enter the
+#                      published medians — a non-empty sample set is not COVERAGE. The
+#                      coverage BOUND is DERIVED from the committed judge
+#                      (ws0_quiescence.MAX_SAMPLE_GAP_S) at run time, never restated,
+#                      and which side of it is permissive is READ from that rule's own
+#                      strict `>`. Driven from BOTH ends, and the two BOUNDARY halves
+#                      (window start to first sample, last sample to window end) are
+#                      driven SEPARATELY from the interior one, because a
+#                      consecutive-differences scan cannot see them and that is where
+#                      this rule is usually got wrong. NOT MEASURED is asserted
+#                      textually DISTINCT from UNDERCOVERED. Pairing: a contaminated
+#                      BASELINE voids its whole round (the set-3-round-2 event, four
+#                      clean treatments lost); a pair whose own bare-scan control moved
+#                      at least as much as its treatment is REPORTED and excluded —
+#                      including when it is the only pair, which used to print a bare
+#                      NO CLEAN PAIRS and drop the reason; pairs pool across SETS and
+#                      never across ROUNDS, on fixtures where a violation would change
+#                      the answer. Medians and direction counts pinned NUMERICALLY by
+#                      column HEADER (never position) with a FASTER and a SLOWER
+#                      treatment, so both signs are pinned. And the per-CPU column's
+#                      corrected claim is pinned phrase by phrase — TOTAL busy
+#                      INCLUDING our own measurement, explicitly NOT a contamination
+#                      bound — plus a count-equality assert that no un-negated mention
+#                      can appear, which a phrase list cannot express. Every refusal is
+#                      matched on the tool's OWN diagnostic, never a bare non-zero exit,
+#                      and each coverage refusal carries a positive control ON THE
+#                      ORACLE: a MUTATED scratch copy with the bound removed must ACCEPT
+#                      the same fixture (so the refusal is the RULE and not a malformed
+#                      fixture), with a boundary-only mutant discriminating the halves
+#                      and every plant asserted to have TAKEN. Hermetic: synthetic
+#                      session dirs, window records and sampler JSONL under $TMPDIR,
+#                      and NOTHING read from /data/ws0-3551 (one lane's live outputs).
 #                      Also runs scripts/tests/test_ws0_perf_invocation_lint.sh (#3272
 #                      item 10) — the THIRD structural guard, split out of the file above
 #                      under the campsite rule (it reached 1607 lines against the ~1500
@@ -17018,6 +17057,49 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_abc_driver_guards.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (ws0 interleaved A/B/C set guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 #3551 ARTIFACT-TOOL GUARDS — the two MEASUREMENT-ANALYSIS tools under
+  # docs/reports/ws0-3551-artifacts/ whose stdout IS the published result of that
+  # issue (clean-pairs.py, window-census.py). This repo reviews
+  # docs/reports/*-artifacts/ harnesses as CODE (#3229) and these two had NO tests,
+  # which is how a real defect got in: a session was accepted as CLEAN on the
+  # strength of ONE zero-census sample anywhere in its window, so a mostly
+  # UNOBSERVED session could enter the published medians. A non-empty sample set is
+  # not COVERAGE. The suite drives that rule from BOTH ends — the accept direction
+  # first, because a guard that only ever reds proves nothing — and separately
+  # drives the two BOUNDARY halves (window start to first sample, last sample to
+  # window end), which a consecutive-differences scan cannot see and which is where
+  # this rule is usually got wrong. The coverage BOUND is DERIVED from the committed
+  # judge (scripts/perf/ws0_quiescence.py's MAX_SAMPLE_GAP_S) at run time rather
+  # than restated, and which side of it is permissive is READ from that rule's own
+  # strict `>` rather than guessed. Plus: NOT MEASURED asserted textually distinct
+  # from UNDERCOVERED; the pairing rules (a contaminated BASELINE voids its whole
+  # round; a pair whose own bare-scan control moved at least as much as its
+  # treatment is reported and excluded; pairs pool across SETS and never across
+  # ROUNDS, on fixtures where a violation would change the answer); the medians and
+  # direction counts pinned NUMERICALLY by column HEADER with a faster AND a slower
+  # treatment so both signs are pinned; and the per-CPU column's corrected claim —
+  # it is TOTAL busy INCLUDING our own measurement and explicitly NOT a
+  # contamination bound, pinned phrase by phrase plus a count-equality assert that
+  # no un-negated mention can appear. Every refusal is matched on the tool's OWN
+  # diagnostic, never on a bare non-zero exit. Each coverage refusal also carries a
+  # positive control ON THE ORACLE: a MUTATED scratch copy with the bound removed
+  # must ACCEPT the same fixture, so the refusal is attributable to the rule and not
+  # to a malformed fixture, and a boundary-only mutant discriminates the two halves.
+  # Hermetic: synthetic session dirs, window records and sampler JSONL under
+  # $TMPDIR; NOTHING is read from /data/ws0-3551 (one lane's live outputs). No
+  # cargo, perf, sudo, taskset, root, corpus bytes, server or network.
+  echo ">>> [$name] bash scripts/tests/test_ws0_3551_artifact_tools.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_3551_artifact_tools.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 #3551 artifact-tool guards); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
