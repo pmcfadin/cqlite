@@ -66,31 +66,62 @@ declare -a UNGUARDED=(
   "scripts/flow/roborev-review-oracles.sh"
 )
 print_scope() {
+  # Derived at run time FROM THE SHIPPED MATCHER, so the figure can never drift from the rule
+  # actually enforced; a hard-coded number would decay like a comment. Fail-closed: if the
+  # matcher is not callable the field says so rather than rendering a bare 0, which would read
+  # as a measured all-clear from a scan that never ran.
+  local SHAPE_FILE_COUNT
+  if ! declare -F violations >/dev/null 2>&1; then
+    SHAPE_FILE_COUNT="COULD NOT MEASURE (matcher unavailable at declaration time)"
+  else
+    # Counted in the loop and emitted once, rather than piping into `grep -c`: under this
+    # file's `set -o pipefail`, a loop whose LAST iteration ends on a false test makes the whole
+    # pipeline non-zero, which silently turned the census into COULD NOT MEASURE.
+    SHAPE_FILE_COUNT=$(
+      cd "$REPO_ROOT" 2>/dev/null || { printf ''; exit 0; }
+      _n=0
+      while IFS= read -r f; do
+        [ -r "$f" ] || continue
+        if [ "$(violations "$f" | grep -c . || true)" -gt 0 ]; then _n=$((_n+1)); fi
+      done < <(git ls-files 'scripts/*.sh' 'scripts/**/*.sh' 2>/dev/null)
+      printf '%s' "$_n"
+    )
+    [ -n "$SHAPE_FILE_COUNT" ] || SHAPE_FILE_COUNT="COULD NOT MEASURE (census failed)"
+  fi
   printf '\n==== DECLARED SCOPE (test_gate_liveness_no_sigpipe.sh, #3803) ====\n'
   printf 'guarded:   scripts/gate-liveness.sh (ONE file)\n'
-  printf 'UNGUARDED: %d file(s) carrying the SAME builtin-writer-into-pipe shape, by scope decision\n' "${#UNGUARDED[@]}"
+  printf 'THE RULE:  a bash BUILTIN writer (printf/echo) with a pipe after it on the same line\n'
+  printf '           is a FAIL. No quote tracking, no command splitting, no reader set, no stage\n'
+  printf '           ordering. Lead ruling on REQUEST-3803-B, 2026-09-03.\n'
+  printf 'DECLARED FALSE POSITIVES -- correct code this guard REPORTS. Accepted noise, because a\n'
+  printf '           guard with false-PASSes hides defects while a guard with loud false POSITIVES\n'
+  printf '           only costs noise (#3229). Remedy is always: restructure the line.\n'
+  printf '           1. pipe inside a format string       printf %%s "a | b"\n'
+  printf '           2. pipe inside a quoted argument     echo "col1|col2"\n'
+  printf '           3. pipe in a trailing comment        printf %%s "$x"   # see: cmd | head\n'
+  printf '           4. unrelated later pipeline          v=$(printf %%s "$x"); other | grep -q y\n'
+  printf '           5. quoted option-looking pattern     printf %%s "$t" | grep -e "text -q"\n'
+  printf '           6. run-to-EOF reader                 printf %%s "$t" | grep -c foo\n'
+  printf '           Pinned as cases 6,7,8,9,9e,9i. Narrowing any of them is issue #3992.\n'
+  printf 'RESIDUALS of the broad form (all false-NEGATIVE direction, all declared):\n'
+  printf '           a. The scan is LEXICAL and PER-LINE. A writer split across a line\n'
+  printf '              continuation, hidden behind a function, or fed from a process\n'
+  printf '              substitution is NOT recognised.\n'
+  printf '           b. Only printf and echo count as writers. Any other bash builtin that can\n'
+  printf '              take EPIPE is not recognised.\n'
+  printf 'GUARDED SET IS ONE FILE, AND THE SHAPE IS PERVASIVE. Measured across git-tracked\n'
+  printf '           scripts/**/*.sh: %s files contain at least one line matching this rule.\n' "$SHAPE_FILE_COUNT"
+  printf '           That is a count of SHAPE MATCHES, NOT of hazards -- most are presumably the\n'
+  printf '           declared false-positive classes above, and this guard makes NO claim about\n'
+  printf '           how many are real. Two are named below because they produce verdicts the\n'
+  printf '           merge gate consumes, so they were the deliberate scope decision on #3803:\n'
   local f
   for f in "${UNGUARDED[@]}"; do printf '           - %s\n' "$f"; done
-  printf 'recognised readers (a pipeline segment whose FIRST WORD is one of these is a hazard):\n'
-  printf '           head | grep with a -q/-m flag | read | sed with a `q` command | awk containing `exit`\n'
-  printf 'NON-EXHAUSTIVE, and these are the residuals the narrowing buys:\n'
-  printf '           1. A builtin feeding an UNRECOGNISED short-circuiting reader is NOT DETECTED.\n'
-  printf '              The reader set above is a recognised list, not a proof about every command\n'
-  printf '              that can exit before EOF; a new one passes unseen until it is added here.\n'
-  printf '           2b. Command segments are split on ; && || LEXICALLY. A separator inside a quoted
-              string or a command substitution splits where bash would not, so such a line
-              may be mis-segmented in EITHER direction. There are none in the subject today.
-           2. The scan is LEXICAL and per-line. It does NOT tokenise bash: a writer split\n'
-  printf '              across a line continuation, hidden behind a function, or fed from a process\n'
-  printf '              substitution is NOT recognised.\n'
-  printf '           3. Comments are NOT stripped beyond whole-line ones. A `|` followed by a\n'
-  printf '              recognised reader INSIDE a trailing comment would be REPORTED. This is\n'
-  printf '              deliberate: stripping it needs quote-awareness, and a quote-aware strip that\n'
-  printf '              guesses wrong drops a REAL site (a false negative in a mandatory gate\n'
-  printf '              component), which is the worse direction.\n'
+  printf '           The sibling issue #3969 records MEASURED live instances of this family in\n'
+  printf '           OTHER scripts (a broken pipe turning the NEXT assertion into a bogus FAIL),\n'
+  printf '           so the unguarded set is emphatically NOT just those two.\n'
   printf '==== END DECLARED SCOPE ====\n\n'
 }
-print_scope
 
 # ---------------------------------------------------------------------------
 # The matcher. Emits "<lineno>:<text>" per offending line; nothing when clean.
@@ -170,6 +201,10 @@ violations() {
     }
   ' "$file"
 }
+
+# Invoked AFTER violations() is defined, so the shape census in the declaration can actually
+# run. Called earlier it rendered 0 from an unmeasured scan.
+print_scope
 
 n_violations() { violations "$1" | grep -c . ; }
 
