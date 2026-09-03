@@ -1,6 +1,7 @@
 //! CHARACTERISATION of the #1741 per-element shadow/TTL filter in the
-//! multicell complex-column loop — set members, map entries and UDT fields —
-//! and of the ONE width gap that filter still leaves open (issue #3723).
+//! multicell complex-column loop — its SET, MAP and UDT branches; the LIST
+//! branch (`complex_column.rs`'s list arm) is NOT covered here — and of the ONE
+//! width gap that filter still leaves open (issue #3723).
 //!
 //! ## What these cases are, and are not
 //!
@@ -280,24 +281,32 @@ fn only_the_shadowed_member_is_filtered_from_a_mixed_set() {
 /// behaviour**, and the assertions here are NOT a guard for it.
 ///
 /// A wrong-width fixed-width element that the #1741 filter drops is accepted
-/// silently, in all three branches and for both drop reasons, because the
-/// `continue` runs before any decode. Each case carries its own live-path
-/// control: the SAME bytes unfiltered, showing the width violation is real and
-/// that #3811 does refuse it once something looks.
+/// silently, because the `continue` runs before any decode. Coverage is the
+/// SET, MAP and UDT branches for the SHADOWED reason, plus the SET branch for
+/// the TTL-EXPIRED reason — 4 of the 6 branch x reason combinations, not a
+/// cross product.
+///
+/// Each case carries a live-path control: the same bytes decoded with NO filter
+/// are refused. The controls assert `is_err()` only — they show that SOMETHING
+/// refuses those bytes once a decode looks at them, and deliberately do not pin
+/// WHICH layer refused (contrast the map-key case below, which matches the
+/// message and so does pin its layer). Note the TTL control cannot use bytes
+/// identical to the shadowed cases': `expiring_set_cell` is a different
+/// encoding, so it re-asserts the refusal on its OWN bytes.
 ///
 /// It fails in BOTH directions:
 ///
 /// * if a dropped element starts being refused (someone closed #3778 — a real
 ///   behaviour change that must update this test in the same commit);
-/// * if the LIVE path stops refusing the same bytes (someone loosened #3811's
-///   composed width rule).
+/// * if the LIVE path stops refusing those bytes (someone loosened the composed
+///   width rule).
 #[test]
 fn a_wrong_width_dropped_element_is_not_validated_today_known_gap_3778() {
     // (set, shadowed) — a 3-byte `int` member.
     let short_member = build_set_cell_bytes(&[0x00, 0x00, 0x07]);
     assert!(
         decode_set(std::slice::from_ref(&short_member), None).is_err(),
-        "live-path control: a 3-byte `int` set member IS refused by #3811's width rule"
+        "live-path control: a 3-byte `int` set member IS refused — by the `int` arm's own under-width `require_fixed_width`, which #3811 made PROPAGATE out of the set-member path"
     );
     assert_eq!(
         decode_set(&[short_member], Some(shadow_everything()))
@@ -306,8 +315,15 @@ fn a_wrong_width_dropped_element_is_not_validated_today_known_gap_3778() {
         "KNOWN GAP (#3778): the malformed member is filtered and counted, no error escapes"
     );
 
-    // (set, TTL-expired) — the other drop reason, same outcome.
+    // (set, TTL-expired) — the other drop reason, same outcome. Carries its own
+    // live-path control (roborev r13): without it this case shows only that an
+    // expired member is dropped, not that the SAME bytes would otherwise be
+    // REFUSED — which is the whole claim.
     let expired_member = expiring_set_cell(&[0x00, 0x00, 0x07]);
+    assert!(
+        decode_set(std::slice::from_ref(&expired_member), None).is_err(),
+        "live-path control: the same TTL-expired member's 3-byte `int` IS refused when nothing drops it"
+    );
     assert_eq!(
         decode_set(&[expired_member], Some(expiry_only_filter()))
             .expect("KNOWN GAP (#3778): a TTL-expired member is not width-validated either"),

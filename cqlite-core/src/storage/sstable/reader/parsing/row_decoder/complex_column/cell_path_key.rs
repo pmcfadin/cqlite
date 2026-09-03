@@ -206,8 +206,8 @@
 //! absorbs into a partial-row `break`; and an element the #1741 per-element
 //! shadow/TTL filter DROPS is `continue`d before any decode runs, so its bytes
 //! are never width-checked at all. Both are CHARACTERISED (not endorsed) by
-//! `raw_value/dropped_element_tests.rs`, each case carrying a live-path control
-//! proving the width violation is real.
+//! `raw_value/dropped_element_tests.rs`, whose WRONG-WIDTH cases carry live-path
+//! controls; its zero-length/non-width cases assert only that the drop is silent.
 //!
 //! Issue **#3723** was opened to close that with a dedicated FATAL variant; that
 //! mechanism was superseded by #3811 and removed, and the disposition question is

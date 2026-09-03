@@ -11,7 +11,7 @@
 //! mistake), so it is not admissible evidence here.
 //!
 //! `ListSerializer.validate` (5.0.8) validates every element with the ELEMENT
-//! type's own `validate`, and then throws
+//! type's own `validate`, and — if bytes remain — throws
 //! `"Unexpected extraneous bytes after list value"`. So a 5-byte `int` element
 //! is refused twice over by Cassandra: once by `Int32Serializer.validate`
 //! (`size != 4 && !isEmpty`) and again by the extraneous-bytes check. The
@@ -449,18 +449,26 @@ fn legal_short_and_absent_encodings_stay_legal() {
     );
 }
 
-/// Drift guard, at the DIRECT (unnested) bounded position: for every name the
-/// fixed-width arms of `raw_value::reporting` match, the admissible length is
-/// exactly the width the pinned `cassandra-5.0.8` serializer requires — `width`
-/// decodes, `width + 1` and `width - 1` do not.
+/// Width assertion at the DIRECT (unnested) bounded position: for each name in
+/// [`FIXED_WIDTH_TYPES`], the admissible length is exactly the width the pinned
+/// `cassandra-5.0.8` serializer requires — `width` decodes; `width + 1` does
+/// not; `width - 1` does not, WHERE `width > 1` (a 1-byte type has no distinct
+/// under-width case, so the loop skips it).
 ///
 /// This is the behavioural form of what an earlier revision asserted by
 /// comparing a `fixed_width_admissible_width` TABLE against
 /// [`FIXED_WIDTH_TYPES`]. #3811 owns the widths inline in each arm, so there is
 /// no table to compare; asserting the OBSERVABLE width is strictly stronger —
 /// a table can agree with the pinned serializers while the arm it feeds does
-/// not. [`FIXED_WIDTH_TYPES`] is the closed name set those arms match, so an
-/// arm added or renamed without updating it fails the `None`-side loop below.
+/// not.
+///
+/// **NOT a drift guard, despite the position of this test (roborev r13).** It
+/// iterates [`FIXED_WIDTH_TYPES`] and nothing else, and that list is CURATED
+/// (see its declaration) — nothing here notices an arm ADDED or RENAMED in
+/// `raw_value::reporting`, so such an arm leaves this test GREEN. What it does
+/// assert is that every name the list DOES carry still behaves exactly as its
+/// pinned serializer requires; the trailing loop asserts only that four NAMED
+/// variable-width types are not width-constrained.
 #[test]
 fn admissible_widths_match_the_pinned_serializers() {
     let p = parser();
