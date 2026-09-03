@@ -11,8 +11,6 @@
 
 use super::*;
 
-use super::*;
-
 /// Build a `RowHeader` fixture with only the fields the #932 row-timestamp
 /// rule reads populated; everything else is a benign default.
 fn hdr(
