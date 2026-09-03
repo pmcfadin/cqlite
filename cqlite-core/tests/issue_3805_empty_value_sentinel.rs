@@ -520,6 +520,50 @@ fn the_byte_backed_families_are_not_admitted_because_empty_is_meaningful_there()
     assert_ne!(Value::blob(Vec::new()), Value::Empty(EmptyValueType::Int));
 }
 
+/// MECHANIZES THE "ONLY ONE LOSSY PAIR" CLAIM behind the F2 fix (roborev job
+/// 438), so it cannot decay into a stale comment.
+///
+/// `Value::data_type()` is the bridge any declared-type check crosses, and it
+/// is LOSSY wherever two CQL types share one `Value` variant. F2 was that
+/// shape for uuid/timeuuid. This walks EVERY admitted family and asserts the
+/// round trip `tag -> non-empty value -> data_type() -> tag` is exact, with
+/// the uuid/timeuuid pair as the ONE declared exception. A new lossy pair —
+/// or a new family whose variant is shared — fails here by name instead of
+/// silently making some sentinel incomparable in `try_compare_values`.
+#[test]
+fn data_type_round_trips_for_every_admitted_family_except_the_uuid_pair() {
+    let mut exceptions: Vec<&'static str> = Vec::new();
+    for (ty, name, zero) in admitted_families() {
+        // `zero` is a NON-EMPTY value of the family, which is what a
+        // declared-type check is handed at runtime.
+        let observed = EmptyValueType::for_cql_type(&zero.data_type());
+        if observed == Some(ty) {
+            continue;
+        }
+        exceptions.push(name);
+        // Any exception must be inside the 16-byte uuid/timeuuid pair —
+        // anything else is a new instance of the F2 class.
+        assert!(
+            matches!(
+                (ty, observed),
+                (
+                    EmptyValueType::Uuid | EmptyValueType::TimeUuid,
+                    Some(EmptyValueType::Uuid) | Some(EmptyValueType::TimeUuid)
+                )
+            ),
+            "family `{name}` does not round-trip through data_type() (observed \
+             {observed:?}) and is NOT the declared uuid/timeuuid pair — this is a \
+             NEW lossy pair and try_compare_values will refuse its sentinel"
+        );
+    }
+    assert_eq!(
+        exceptions,
+        vec!["timeuuid"],
+        "the set of lossy families changed; the F2 helper in value_ops.rs \
+         documents exactly one (timeuuid) and must be revisited"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // (6) THE SIZE PIN — asserted numerically so a future widening is legible
 // ---------------------------------------------------------------------------
