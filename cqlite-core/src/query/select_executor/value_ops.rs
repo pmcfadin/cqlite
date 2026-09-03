@@ -78,6 +78,61 @@ pub(super) fn compare_values_ordering(a: &Value, b: &Value) -> std::cmp::Orderin
     try_compare_values(a, b).unwrap_or(std::cmp::Ordering::Equal)
 }
 
+/// Does the empty-buffer sentinel `tag` name the declared type of the NON-EMPTY
+/// value `other` — i.e. are the two the same CQL type, so that "empty sorts
+/// before non-empty" applies (issue #3805)?
+///
+/// # `Value::data_type()` IS LOSSY FOR uuid/timeuuid, AND THAT IS THE WHOLE
+/// REASON THIS FUNCTION EXISTS
+///
+/// CQLite stores BOTH CQL `uuid` and CQL `timeuuid` as `Value::Uuid([u8; 16])`,
+/// and `data_type()` answers `CqlType::Uuid` for both. So a plain
+/// `for_cql_type(&other.data_type()) == Some(tag)` REJECTED
+/// `Empty(TimeUuid)` against every non-empty timeuuid — an ordering that
+/// refuses a legitimate pair (roborev job 438 F2).
+///
+/// The 16-byte pair is therefore admitted **for the EMPTY-vs-NON-EMPTY case
+/// only**, which is sound because of what is being asserted: the answer for
+/// such a pair is `Less` (empty first) **whichever** of the two types it is —
+/// `db/marshal/Int32Type.java:61-71` at `cassandra-5.0.8` returns
+/// `Boolean.compare(right.isEmpty, left.isEmpty)` as soon as EITHER side is
+/// empty, and `TimeUUIDType`/`UUIDType` both inherit that empty short-circuit,
+/// so the type-specific logic below it is never reached. Two things this
+/// deliberately does NOT do:
+///
+/// * it does NOT conflate `uuid` and `timeuuid` in any NON-EMPTY comparison —
+///   those really do differ (`TimeUUIDType` orders by embedded timestamp
+///   first), and this function is only ever consulted when one side IS a
+///   sentinel, so no non-empty ordering can reach it;
+/// * it does NOT change `Value` to preserve uuid/timeuuid identity — that is a
+///   second public-surface change nobody ruled.
+///
+/// # This is the ONLY lossy pair among the admitted families
+///
+/// Checked family by family against `Value::data_type()`: `int`→`Integer`,
+/// `bigint`→`BigInt`, `counter`→`Counter`, `float`→`Float32`,
+/// `double`→`Float`, `timestamp`→`Timestamp`, `boolean`→`Boolean`,
+/// `inet`→`Inet`, `varint`→`Varint`, `decimal`→`Decimal` — each a distinct
+/// `Value` variant mapping to a distinct `CqlType`. Only `uuid`/`timeuuid`
+/// share one variant. (`text`/`ascii`/`varchar` also share `Value::Text`, but
+/// none of them is an admitted family — an empty buffer is a MEANINGFUL value
+/// there, so no sentinel names them; see `EmptyValueType::for_cql_type`.)
+fn empty_tag_matches_operand(tag: crate::types::EmptyValueType, other: &Value) -> bool {
+    use crate::types::EmptyValueType as E;
+    match crate::types::EmptyValueType::for_cql_type(&other.data_type()) {
+        Some(observed) if observed == tag => true,
+        // The uuid/timeuuid pair, in both directions: `Value::Uuid` observes as
+        // `Uuid`, so an `Empty(TimeUuid)` tag must still match it, and an
+        // `Empty(Uuid)` tag must still match a value a caller built as a
+        // timeuuid (also `Value::Uuid`).
+        Some(observed) => matches!(
+            (tag, observed),
+            (E::Uuid | E::TimeUuid, E::Uuid | E::TimeUuid)
+        ),
+        None => false,
+    }
+}
+
 /// Compare two `Value`s for ordering, returning an error when the operand
 /// types are not comparable. Preferred in WHERE-clause evaluation so users see
 /// a real diagnostic rather than a silent equality.
@@ -116,12 +171,12 @@ pub(super) fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Order
     // against a DIFFERENT type stays incomparable, exactly as two mismatched
     // scalars do.
     if let Value::Empty(tag) = a {
-        if crate::types::EmptyValueType::for_cql_type(&b.data_type()) == Some(*tag) {
+        if empty_tag_matches_operand(*tag, b) {
             return Ok(std::cmp::Ordering::Less);
         }
     }
     if let Value::Empty(tag) = b {
-        if crate::types::EmptyValueType::for_cql_type(&a.data_type()) == Some(*tag) {
+        if empty_tag_matches_operand(*tag, a) {
             return Ok(std::cmp::Ordering::Greater);
         }
     }
@@ -652,6 +707,44 @@ mod tests {
         );
     }
 
+    /// REGRESSION, roborev job 438 F2. CQLite stores BOTH CQL `uuid` and CQL
+    /// `timeuuid` as `Value::Uuid([u8; 16])`, so `data_type()` answers
+    /// `CqlType::Uuid` for a timeuuid too — and a naive declared-type equality
+    /// check therefore REFUSED `Empty(TimeUuid)` against every non-empty
+    /// timeuuid. An ordering that refuses a legitimate pair breaks the
+    /// "empty sorts strictly before every non-empty value of its type"
+    /// property. Both directions plus antisymmetry, for BOTH spellings of the
+    /// 16-byte pair.
+    #[test]
+    fn the_uuid_timeuuid_pair_compares_despite_a_lossy_data_type() {
+        use crate::types::EmptyValueType;
+        use std::cmp::Ordering;
+
+        // A real v1 (time) UUID and an ordinary one; `Value` cannot tell them
+        // apart, which is the point.
+        let non_empty = [
+            Value::Uuid([0u8; 16]),
+            Value::Uuid([0xff; 16]),
+            Value::Uuid([
+                0x58, 0xe0, 0xa7, 0xd7, 0xee, 0xbc, 0x11, 0xd8, 0x9f, 0x32, 0xf2, 0x80, 0x1f, 0x1b,
+                0x9f, 0xd1,
+            ]),
+        ];
+        for tag in [EmptyValueType::TimeUuid, EmptyValueType::Uuid] {
+            let empty = Value::Empty(tag);
+            for other in &non_empty {
+                let fwd = try_compare_values(&empty, other)
+                    .unwrap_or_else(|e| panic!("Empty({tag:?}) vs {other:?} refused: {e}"));
+                let rev = try_compare_values(other, &empty)
+                    .unwrap_or_else(|e| panic!("{other:?} vs Empty({tag:?}) refused: {e}"));
+                assert_eq!(fwd, Ordering::Less, "Empty({tag:?}) did not sort first");
+                // Antisymmetry: reversing the operands reverses the answer.
+                assert_eq!(rev, Ordering::Greater, "asymmetry broken for {tag:?}");
+                assert_eq!(fwd.reverse(), rev);
+            }
+        }
+    }
+
     /// …and a sentinel of a DIFFERENT declared type stays INCOMPARABLE, exactly
     /// as two mismatched scalars do. Comparability is decided by the declared
     /// type, never by byte shape (no-heuristics, issue #28).
@@ -660,6 +753,19 @@ mod tests {
         use crate::types::EmptyValueType;
 
         assert!(try_compare_values(&Value::Empty(EmptyValueType::Int), &Value::BigInt(1)).is_err());
+        // The 16-byte pair admission above must NOT leak into any other
+        // family: a uuid sentinel is still incomparable with a non-uuid.
+        assert!(
+            try_compare_values(&Value::Empty(EmptyValueType::Uuid), &Value::Integer(1)).is_err()
+        );
+        assert!(
+            try_compare_values(&Value::Empty(EmptyValueType::TimeUuid), &Value::BigInt(1)).is_err()
+        );
+        assert!(
+            try_compare_values(&Value::Empty(EmptyValueType::Timestamp), &Value::BigInt(1))
+                .is_err(),
+            "timestamp and bigint are distinct CqlTypes and must stay incomparable"
+        );
         assert!(try_compare_values(
             &Value::Empty(EmptyValueType::Int),
             &Value::text("x".to_string())
