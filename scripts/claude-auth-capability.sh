@@ -1,7 +1,51 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# claude-auth-capability.sh — THE one place that knows whether a fleet box can start
-# `claude` on a COLD, non-interactive lane, and how that is VERIFIED (issue #3733).
+# claude-auth-capability.sh — THE one place that REPORTS what can be observed about a
+# fleet box's ability to start `claude` on a COLD, non-interactive lane (issue #3733).
+#
+# THIS FILE CERTIFIES NOTHING, AND THAT IS A DESIGN DECISION, NOT AN OMISSION (#3733, lead
+# ruling). It used to emit two CERTIFYING verdicts whose passing state was `VERIFIED`.
+# Three consecutive independent reviews of that design each found a NEW High-severity
+# defect, and all three were ONE shape: THE PROBE CANNOT OBSERVE THE PROPERTY ITS VERDICT
+# NAMED. The cold-start probe proves tmux PROPAGATION, not pam_env DELIVERY (LIMITATION 1);
+# the `claude -p` probe proves that SOMETHING in its environment authenticated, not that
+# the PERSISTED value did (LIMITATION 2); `[ -d ]` proves a directory exists TO US, not
+# that the delegated agent can use it (LIMITATION 3). Each individual fix was correct and
+# the family kept regenerating, which in this repository is the standing signal to change
+# the DESIGN rather than carve the same place a fourth time.
+#
+# So both lines are OBSERVATIONS. They print what was found; they never say the box is
+# ready. Concretely, and these are the properties `scripts/tests/test_claude_auth_capability.sh`
+# section 34 pins as an INVARIANT rather than case by case:
+#   * no state either line emits is named `VERIFIED` — the word a pasted log reads as a
+#     certification whatever the surrounding prose says;
+#   * every entry point prints a `claude-auth-report: OBSERVATIONS-ONLY` scope note, so an
+#     operator reading ONE pasted line learns it certifies nothing;
+#   * THE EXIT STATUS CARRIES NO VERDICT. A report that was PRINTED exits 0 whatever it
+#     found, so the best- and worst-looking boxes are indistinguishable by exit status and
+#     `if script --auth; then …` cannot be written. That is the load-bearing half: a state
+#     rename alone would leave an exit-code gate intact, and an exit code is exactly how a
+#     caller acts on a proxy.
+# The AC1 mechanism knowledge below is the durable value of #3733 and is UNCHANGED — the
+# six measured facts are what tell an operator where to look. What was withdrawn is the
+# claim that any of them can be VERIFIED from here.
+#
+# THE FIVE DOCUMENTED LIMITATIONS, indexed so a reader can find each one at its own code
+# site (grep `LIMITATION <n> of 5`). Under this ruling these are limitations of a REPORT,
+# not defects — but a reader must never have to rediscover them:
+#   1. the COLD-START probe injects the /etc/environment values into its OWN throwaway
+#      server, so it observes tmux propagation and NOT pam_env delivery
+#      (claude_tmux_cold_probe_into);
+#   2. the `claude -p` probe does not neutralise ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN,
+#      CLAUDE_CODE_USE_BEDROCK or CLAUDE_CODE_USE_VERTEX, so an answered probe means SOME
+#      credential in its environment worked (claude_auth_verdict_into__untraced);
+#   3. `[ -d <config dir> ]` is evaluated as THIS process — root, under the documented sudo
+#      invocation — so it says nothing about the delegated agent's access
+#      (claude_tmux_env_verdict_into__untraced and claude_tmux_cold_verdict_into);
+#   4. the probe directory's `chown -R` precedes the heredoc that writes `probe.sh`, so that
+#      one file is not covered by the handover (claude_tmux_cold_probe_into);
+#   5. the LIVE-server path reads the tmux GLOBAL environment only and never spawns a pane
+#      (claude_tmux_env_verdict_into__untraced).
 #
 # THE FIELD FAILURE. A newly created tmux session lands on claude's first-run login
 # chooser, so a retired lane cannot be replaced. The causal chain was measured end to
@@ -23,21 +67,29 @@
 #      distinguishing state is a long-running process's start environment, which is why
 #      the failure is silent until dispatch.
 #
-# HENCE TWO INDEPENDENT VERDICTS, each on its own greppable line, because they fail
-# independently and their remedies differ:
+# HENCE TWO INDEPENDENT OBSERVATION LINES, each greppable, because they observe different
+# things and their remedies differ. THE STATE NAMES SAY WHAT WAS SEEN, NOT WHETHER IT IS
+# GOOD — that is why the formerly-passing states were RENAMED rather than merely demoted:
 #
-#   claude-auth:      is the PERSISTED credential valid for a cold, non-interactive start?
-#                     VERIFIED | NOT-PERSISTED | FAILED | UNMEASURED
+#   claude-auth:      what happened when a `claude -p` run carrying the persisted value was
+#                     made?
+#                     PROBE-ANSWERED | NOT-PERSISTED | FAILED | UNMEASURED
+#                     PROBE-ANSWERED means rc 0 AND the sentinel came back. It does NOT say
+#                     the persisted value is what authenticated (LIMITATION 2).
 #                     FAILED is reserved for a POSITIVELY IDENTIFIED rejection; every other
 #                     unsuccessful probe (rate limit, outage, quota, crash, no sentinel) is
 #                     UNMEASURED with its cause named — see the matcher block below.
-#   claude-tmux-env:  does that credential REACH a tmux-spawned pane?
-#                     live server:  VERIFIED | SERVER-STALE | SERVER-MISSING |
+#   claude-tmux-env:  what does a tmux server hold, or what would a new one hand a pane?
+#                     live server:  SERVER-CARRIES-BOTH | SERVER-STALE | SERVER-MISSING |
 #                                   SERVER-INCOMPLETE | SERVER-CONFIG-STALE |
 #                                   SERVER-CONFIG-NODIR
-#                     no server:    VERIFIED | COLD-START-MISSING |
+#                     no server:    COLD-START-DELIVERS-BOTH | COLD-START-MISSING |
 #                                   COLD-START-INCOMPLETE | COLD-START-NODIR
 #                     either:       NO-SERVER | UNMEASURED
+#                     The live and cold "both present" states are DELIBERATELY DIFFERENT
+#                     TOKENS: they are different observations (a server's global table vs a
+#                     throwaway server's propagation), and one name for both hid which had
+#                     been made.
 #
 # A SERVERLESS BOX IS NOT A DEAD END. That is the NORMAL state of a freshly provisioned
 # machine at the exact moment `.agent-ami/profile.yaml` runs bootstrap with `--strict`, so a
@@ -50,20 +102,23 @@
 # are deliberately distinct from the SERVER-* ones — a live server that lacks the credential
 # and a would-be server that would lack it are different operator actions.
 #
-# NONEMPTY IS NOT CORRECT. VERIFIED requires the server's CLAUDE_CONFIG_DIR to EQUAL the
-# persisted value AND that directory to EXIST — testing only "is it absent" and letting
-# every other state fall through to VERIFIED is the two-valued predicate that always picks
-# the permissive answer, and a wrong config dir is the un-onboarded first-run picker this
-# file exists to catch. DECLARED RESIDUAL: `exists` is not `onboarded`. Whether a config
-# directory holds usable onboarding state is deliberately NOT probed — it would mean
-# depending on an internal JSON field shape that can change upstream, and a check that
-# silently stops matching reports VERIFIED for the wrong reason.
+# NONEMPTY IS NOT CORRECT. `*-CARRIES-BOTH`/`*-DELIVERS-BOTH` require the server's
+# CLAUDE_CONFIG_DIR to EQUAL the persisted value AND that directory to EXIST — testing only
+# "is it absent" and letting every other state fall through to the good one is the
+# two-valued predicate that always picks the permissive answer, and a wrong config dir is
+# the un-onboarded first-run picker this file exists to describe. TWO DECLARED RESIDUALS:
+# `exists` is not `onboarded` (whether a config directory holds usable onboarding state is
+# deliberately NOT probed — that would mean depending on an internal JSON field shape that
+# can change upstream, and a check that silently stops matching would report the good state
+# for the wrong reason); and `exists` is `exists TO THIS PROCESS` (LIMITATION 3).
 #
-# ONLY `VERIFIED` IS A SUCCESS, on either line. NO-SERVER is UNMEASURED-class: the isolated
+# NO STATE ON EITHER LINE IS A SUCCESS. NO-SERVER is UNMEASURED-class: the isolated
 # cold-start probe could not run, so nothing was measured (it does NOT merely mean "no
-# server was running" — that case is measured now). An unmeasured capability never inherits the
-# permissive branch — the standing rule that a positive verdict requires an AFFIRMATIVE
-# MEASUREMENT (docs/development/fleet-runbook.md; CLAUDE.md, "git-push:"/"gate-pin:").
+# server was running" — that case is measured now). An unmeasured capability never inherits
+# the permissive branch — the standing rule that a positive verdict requires an AFFIRMATIVE
+# MEASUREMENT (docs/development/fleet-runbook.md; CLAUDE.md, "git-push:"/"gate-pin:") — and
+# under this ruling the affirmative measurement for "this box can start a lane" is not
+# available from here at all, so the line reports and stops.
 #
 # THE SCRUB IS LOAD-BEARING, and it is #3414's central lesson one subject over. Bootstrap
 # runs inside a session that ALREADY carries CLAUDE_CODE_OAUTH_TOKEN, so an unscrubbed
@@ -112,8 +167,9 @@
 # occurrences of the token under `bash -x … --auth`, 16 under `--report`.
 #
 # PLATFORM. /etc/environment + pam_env is Linux-specific. On a non-Linux host BOTH lines
-# are UNMEASURED and NEVER an [ok]: scoping a platform out is not the same as passing it,
-# and an [ok] is what `--strict` reads (a real #3414 defect).
+# are UNMEASURED: scoping a platform out is not the same as passing it. (Since the demotion
+# no state here is an [ok] anywhere, so this is now about the TEXT being honest rather than
+# about `--strict`; the #3414 defect it was written for cannot recur.)
 #
 # TEST-ONLY ENV SEAM — INERT UNLESS CQLITE_BOOTSTRAP_TEST_MODE=1:
 #   CQLITE_CLAUDE_AUTH_ENV_FILE   stand-in for /etc/environment (test mode only)
@@ -188,6 +244,29 @@ CLAUDE_AUTH_REJECT_RE='invalid api key|invalid x-api-key|invalid[ _-]?token|inva
 CLAUDE_AUTH_SERVICE_RE='rate.?limit|(^|[^0-9])429([^0-9]|$)|too many requests|quota|credit balance|overloaded|(^|[^0-9])5[0-9][0-9]([^0-9]|$)|service unavailable|internal server error|bad gateway'
 # The cold-start tmux probe is local-only (no network), so it gets a much tighter bound.
 CLAUDE_AUTH_TMUX_PROBE_BOUND=20
+
+# ---- alternate credentials: OBSERVED AND NAMED, DELIBERATELY NOT SCRUBBED ----------
+# LIMITATION 2 of 5 (#3733) lives at the probe's `env` call; this is the list it reports.
+# `claude` will authenticate from any of these, so a probe that leaves them in place can
+# return the sentinel with the persisted value playing no part. They are NOT scrubbed:
+# under the lead's ruling this file REPORTS rather than certifies, and silently changing
+# what the probe authenticates with would be a behaviour change hiding behind a report.
+# What it does instead is NAME the ones present, so a reader of the line knows the probe's
+# environment held another way in. NAMES ONLY — never a value; two of these are secrets.
+CLAUDE_AUTH_ALT_CRED_KEYS='ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX'
+# claude_auth_alt_credentials_into <outvar>: a space-separated list of the alternate
+# credential variables SET (and non-empty) in this process's environment, or empty.
+# `${!k+set}` distinguishes set-empty from unset; an empty value authenticates nothing, so
+# only a non-empty one is reported — reporting a set-empty variable would be a false alarm.
+claude_auth_alt_credentials_into() {
+  local __o="$1" __k='' __acc=''
+  eval "$__o="
+  for __k in $CLAUDE_AUTH_ALT_CRED_KEYS; do
+    [ -n "${!__k:-}" ] || continue
+    __acc="${__acc:+$__acc }$__k"
+  done
+  eval "$__o=\$__acc"
+}
 
 claude_auth_test_mode() { [ "${CQLITE_BOOTSTRAP_TEST_MODE:-}" = 1 ]; }
 claude_auth_seam_set()  { [ -n "${CQLITE_CLAUDE_AUTH_ENV_FILE:-}" ]; }
@@ -699,9 +778,12 @@ claude_auth_read_key_into__untraced() {
 # diagnosis. Capture into a variable, then read `$?` on the next line.
 claude_auth_verdict_into__untraced() {
   local __ov="$1" __od="$2" __op="${3:-}"
-  local __file='' __state='' __tok='' __cfg='' __out='' __rc=0
+  local __file='' __state='' __tok='' __cfg='' __out='' __rc=0 __alt=''
   eval "$__ov=UNMEASURED"; eval "$__od="
   [ -z "$__op" ] || eval "$__op="
+  # Read BEFORE the probe runs, from THIS process's environment — which is the environment
+  # the probe inherits everything but the two scrubbed keys from.
+  claude_auth_alt_credentials_into __alt
 
   if ! claude_auth_env_file_into __file; then
     eval "$__od='the TEST-ONLY seam CQLITE_CLAUDE_AUTH_ENV_FILE is set without CQLITE_BOOTSTRAP_TEST_MODE=1 — refusing to answer about an env-chosen file (details on stderr)'"
@@ -770,8 +852,22 @@ claude_auth_verdict_into__untraced() {
   [ -z "$__op" ] || eval "$__op=\"\$(claude_auth_redact \"\$__out\")\""
 
   if [ "$__rc" -eq 0 ] && claude_auth_contains "$__out" "$CLAUDE_AUTH_SENTINEL"; then
-    eval "$__ov=VERIFIED"
-    eval "$__od=\"the \$CLAUDE_AUTH_TOKEN_KEY persisted in \$__file authenticated a cold, non-interactive 'claude -p' run against a FRESH empty config dir (rc 0 AND the sentinel returned)\""
+    eval "$__ov=PROBE-ANSWERED"
+    # THE WORDING IS THE WHOLE DEMOTION. This used to say the persisted credential
+    # "authenticated", which is a claim about WHICH credential worked — and nothing here
+    # observes that (LIMITATION 2 at the `env` call above). What was observed is that a run
+    # whose environment CARRIED the persisted value answered. The alternate credentials
+    # present in that environment are NAMED, so the reader can see when another way in was
+    # available; with none present the line says so, because "none was found" and "nobody
+    # looked" are different facts and only one of them is this file's own reporting gap.
+    # LIMITATION REFERENCE FIRST: `claude_auth_redact` truncates the detail at 500
+    # characters, so a reference at the end of a long sentence is silently cut — a
+    # documented limitation a reader cannot find is not documented.
+    if [ -n "$__alt" ]; then
+      eval "$__od=\"LIMITATION 2 of 5 — THIS DOES NOT SAY THE PERSISTED VALUE IS WHAT WORKED: these alternate credentials were in the probe's environment too and are NOT scrubbed: \$__alt. What was observed: a cold, non-interactive 'claude -p' run whose environment CARRIED the \$CLAUDE_AUTH_TOKEN_KEY persisted in \$__file answered (rc 0 AND the sentinel returned) against a FRESH empty config dir\""
+    else
+      eval "$__od=\"LIMITATION 2 of 5 — no alternate credential (\$CLAUDE_AUTH_ALT_CRED_KEYS) was set here, which is an OBSERVATION about this process and not a proof that the persisted value is what worked. What was observed: a cold, non-interactive 'claude -p' run whose environment CARRIED the \$CLAUDE_AUTH_TOKEN_KEY persisted in \$__file answered (rc 0 AND the sentinel returned) against a FRESH empty config dir\""
+    fi
     return 0
   fi
   # ---- the probe did not succeed. WHY it did not decides the verdict. ----------------
@@ -978,8 +1074,10 @@ claude_tmux_env_verdict_into__untraced() {
     eval "$__od=\"the server's \$CLAUDE_AUTH_CONFIG_KEY MATCHes \$__file but that directory does not exist (or cannot be read as one): \$__scfg — a pane gets a config dir claude will treat as un-onboarded\""
     return 0
   fi
-  eval "$__ov=VERIFIED"
-  eval "$__od=\"the running tmux server's global environment carries a \$CLAUDE_AUTH_TOKEN_KEY MATCHing \$__file, and a \$CLAUDE_AUTH_CONFIG_KEY MATCHing it whose directory EXISTS — a pane spawned now inherits both\""
+  eval "$__ov=SERVER-CARRIES-BOTH"
+  # Limitation references FIRST — the detail is truncated at 500 characters (see the note
+  # in claude_tmux_cold_verdict_into).
+  eval "$__od=\"LIMITATION 5 of 5 (the server's GLOBAL table only — no pane was spawned) + LIMITATION 3 of 5 (the dir exists TO THIS PROCESS). The running server's global environment carries a \$CLAUDE_AUTH_TOKEN_KEY MATCHing \$__file and a \$CLAUDE_AUTH_CONFIG_KEY MATCHing it whose directory exists\""
 }
 
 # ---- the COLD-START probe: what would a NEWLY created server deliver? --------------
@@ -1285,8 +1383,11 @@ claude_tmux_cold_verdict_into() {
     eval "$__od=\"a throwaway server started from \$__file delivers both variables, but the \$CLAUDE_AUTH_CONFIG_KEY it delivers does not exist as a directory: \$__prcfg — claude will treat it as un-onboarded\""
     return 0
   fi
-  eval "$__ov=VERIFIED"
-  eval "$__od=\"no live tmux server to inspect, so this was measured COLD: an ISOLATED throwaway server on a private socket, started from \$__file with the inherited credential scrubbed, delivered BOTH \$CLAUDE_AUTH_TOKEN_KEY and an existing \$CLAUDE_AUTH_CONFIG_KEY to a pane — a server created now will too\""
+  eval "$__ov=COLD-START-DELIVERS-BOTH"
+  # THE DETAIL IS BUDGETED, not merely written: `claude_auth_redact` truncates at 500
+  # characters, so a limitation reference buried in a long sentence is silently cut — which
+  # is a documented limitation that a reader cannot find. The references come FIRST.
+  eval "$__od=\"LIMITATION 1 of 5 (tmux propagation, NOT pam_env delivery: the probe supplies the values itself) + LIMITATION 3 of 5 (the dir exists TO THIS PROCESS). No live server, so measured COLD: an isolated throwaway server on a private socket, handed what \$__file holds with the inherited credential scrubbed, delivered BOTH \$CLAUDE_AUTH_TOKEN_KEY and an existing \$CLAUDE_AUTH_CONFIG_KEY to a pane\""
 }
 
 # claude_tmux_show_key_into <outvar_value> <outvar_state> <show-environment-output> <key>:
@@ -1473,26 +1574,51 @@ claude_auth_fix_tmux_env() {
 # ---- CLI ---------------------------------------------------------------------------
 claude_auth_usage() {
   printf 'usage: %s --auth [--show-probe-output] | --tmux-env | --report | --fix-tmux-env\n' "${0##*/}"
-  printf '  --auth          is the PERSISTED credential valid for a cold, non-interactive start?\n'
-  printf '                  prints one `claude-auth:` line: VERIFIED|NOT-PERSISTED|FAILED|UNMEASURED\n'
-  printf '                  (exit 0 only for VERIFIED). Makes ONE real, HARD-bounded `claude -p`\n'
-  printf '                  call (the bound escalates to SIGKILL; without one, no probe is run).\n'
+  printf '\n'
+  printf 'THIS IS A REPORT, NOT A CHECK (issue #3733). Neither line certifies that this box\n'
+  printf 'can start a lane, and THERE IS NO EXIT STATUS THAT SAYS SO: a report that was\n'
+  printf 'PRINTED exits 0 whatever it found, so do not gate anything on the status. Only a\n'
+  printf 'usage error (2) and a refusal to produce a report at all (1) are non-zero. The five\n'
+  printf 'things the observations CANNOT see are documented in this file as LIMITATION 1..5.\n'
+  printf '\n'
+  printf '  --auth          what happened when a `claude -p` run carrying the PERSISTED value\n'
+  printf '                  was made? prints one `claude-auth:` line:\n'
+  printf '                  PROBE-ANSWERED|NOT-PERSISTED|FAILED|UNMEASURED.\n'
+  printf '                  Makes ONE real, HARD-bounded `claude -p` call (the bound escalates\n'
+  printf '                  to SIGKILL; without one, no probe is run). PROBE-ANSWERED means rc 0\n'
+  printf '                  AND the sentinel came back; it does NOT say the persisted value is\n'
+  printf '                  what authenticated (LIMITATION 2), and the line names any alternate\n'
+  printf '                  credential that was also in the environment.\n'
   printf '                  FAILED is reserved for a POSITIVELY IDENTIFIED rejection, because its\n'
   printf '                  remedy is "replace the value". A rate limit, an outage, a quota error,\n'
   printf '                  a crash or a missing sentinel are UNMEASURED with the cause named —\n'
-  printf '                  equally non-passing, but never an instruction to discard a token.\n'
-  printf '  --tmux-env      does that credential REACH a tmux-spawned pane? prints one\n'
-  printf '                  `claude-tmux-env:` line: VERIFIED|SERVER-STALE|SERVER-MISSING|\n'
-  printf '                  SERVER-INCOMPLETE|SERVER-CONFIG-STALE|SERVER-CONFIG-NODIR when a\n'
-  printf '                  server is running; COLD-START-MISSING|COLD-START-INCOMPLETE|\n'
+  printf '                  never an instruction to discard a token.\n'
+  printf '  --tmux-env      what does a tmux server hold, or what would a new one hand a pane?\n'
+  printf '                  prints one `claude-tmux-env:` line: SERVER-CARRIES-BOTH|SERVER-STALE|\n'
+  printf '                  SERVER-MISSING|SERVER-INCOMPLETE|SERVER-CONFIG-STALE|\n'
+  printf '                  SERVER-CONFIG-NODIR when a server is running (its GLOBAL environment\n'
+  printf '                  only — no pane is spawned, LIMITATION 5);\n'
+  printf '                  COLD-START-DELIVERS-BOTH|COLD-START-MISSING|COLD-START-INCOMPLETE|\n'
   printf '                  COLD-START-NODIR when none is (an ISOLATED throwaway server on a\n'
-  printf '                  private socket, started from the PERSISTED environment, measures\n'
-  printf '                  what a new one would deliver); NO-SERVER|UNMEASURED when nothing\n'
-  printf '                  could be measured (exit 0 only for VERIFIED). VERIFIED needs the\n'
-  printf '                  CLAUDE_CONFIG_DIR to EQUAL the persisted one and to EXIST.\n'
+  printf '                  private socket, handed the values read from /etc/environment —\n'
+  printf '                  which observes tmux propagation, NOT pam_env delivery,\n'
+  printf '                  LIMITATION 1); NO-SERVER|UNMEASURED when nothing could be read.\n'
   printf '  --report        both lines.\n'
   printf '  --fix-tmux-env  seed the RUNNING tmux server from the persisted value, then\n'
-  printf '                  re-measure. Writes NO file; the token value is never printed.\n'
+  printf '                  re-report. UNCONDITIONAL and OPERATOR-DRIVEN: nothing here can\n'
+  printf '                  validate the value first, so this OVERWRITES whatever the server\n'
+  printf '                  holds — which may be the only working credential on the box.\n'
+  printf '                  Writes NO file; the token value is never printed. Its exit status\n'
+  printf '                  IS about the seeding action, which is a thing that can fail.\n'
+}
+
+# claude_auth_emit_scope_note: printed by every report entry point, ONCE per invocation.
+# A line that omits its own scope is indistinguishable from one that has none — the same
+# reason the gate's narrowed lanes declare their narrowing at run time. It carries the
+# `claude-auth-report:` prefix (distinct from both verdict-line prefixes) so it can neither
+# be mistaken for an observation nor grepped away with one.
+claude_auth_emit_scope_note() {
+  printf 'claude-auth-report: OBSERVATIONS-ONLY — neither line above certifies that this box can start a lane (#3733). What they cannot see: pam_env DELIVERY (only tmux propagation), WHICH credential authenticated, whether the config dir is usable BY THE AGENT, and what a PANE receives as opposed to the server global table. See LIMITATION 1..5 in scripts/claude-auth-capability.sh.\n'
 }
 
 claude_auth_emit_auth() {
@@ -1506,14 +1632,19 @@ claude_auth_emit_auth() {
   if [ "$show" = 1 ] && [ -n "$p" ]; then
     printf 'claude-auth probe-output: %s\n' "$(claude_auth_redact "$p")"
   fi
-  [ "$v" = VERIFIED ]
+  # NO VERDICT IS RETURNED. There is no passing state to return, and an exit status that
+  # distinguished the states would BE the certification this file no longer makes — a
+  # caller writing `if … --auth; then` is exactly how a proxy gets acted on. rc 0 means
+  # "a report was printed".
+  return 0
 }
 
 claude_auth_emit_tmux() {
   local v='' d=''
   claude_tmux_env_verdict_into v d
   printf 'claude-tmux-env: %s (%s)\n' "$v" "$(claude_auth_redact "$d")"
-  [ "$v" = VERIFIED ]
+  # Same rule as claude_auth_emit_auth: the status is about the report, not the box.
+  return 0
 }
 
 claude_auth_main() {
@@ -1522,13 +1653,18 @@ claude_auth_main() {
     --auth)
       [ "${2:-}" = --show-probe-output ] && show=1
       claude_auth_emit_auth "$show" || rc=1
+      claude_auth_emit_scope_note
       return $rc ;;
-    --tmux-env)     claude_auth_emit_tmux || rc=1; return $rc ;;
+    --tmux-env)     claude_auth_emit_tmux || rc=1; claude_auth_emit_scope_note; return $rc ;;
     --report)
       claude_auth_emit_auth 0 || rc=1
       claude_auth_emit_tmux  || rc=1
+      claude_auth_emit_scope_note
       return $rc ;;
-    --fix-tmux-env) claude_auth_fix_tmux_env || rc=1; claude_auth_emit_tmux || rc=1; return $rc ;;
+    # THE ONE ENTRY POINT WHOSE STATUS IS STILL MEANINGFUL: seeding is an ACTION, and an
+    # action that did not happen is a failure worth returning. The re-report that follows
+    # it cannot change the status — it is a report.
+    --fix-tmux-env) claude_auth_fix_tmux_env || rc=1; claude_auth_emit_tmux; claude_auth_emit_scope_note; return $rc ;;
     -h|--help|'')   claude_auth_usage ;;
     *) printf 'claude-auth-capability: unknown arg: %s\n' "$1" >&2; claude_auth_usage >&2; return 2 ;;
   esac

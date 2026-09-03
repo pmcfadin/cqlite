@@ -442,10 +442,15 @@ if printf '%s' "$out" | grep -q '^claude-auth: NOT-PERSISTED'; then
 else
   bad "claude-auth: expected NOT-PERSISTED, got: $out"
 fi
-if [ "$rc" -ne 0 ]; then
-  ok "claude-auth: a non-VERIFIED verdict exits non-zero"
+# THE EXIT STATUS IS ABOUT THE REPORT, NOT ABOUT THE BOX (#3733, lead ruling). This line
+# no longer certifies anything, so no exit status may encode a pass: a report that was
+# PRINTED exits 0 whatever it found. Section 24 pins the invariant that the best- and
+# worst-looking inputs are INDISTINGUISHABLE by exit status, which is what stops a caller
+# gating on it.
+if [ "$rc" -eq 0 ]; then
+  ok "claude-auth: a printed report exits 0 — the status is about the report, not the box"
 else
-  bad "claude-auth: NOT-PERSISTED exited 0 — a non-verdict must never read as success"
+  bad "claude-auth: a printed NOT-PERSISTED report exited $rc — the status must not encode a verdict"
 fi
 
 # =====================================================================================
@@ -469,21 +474,32 @@ else
 fi
 
 # =====================================================================================
-# 2. VERIFIED — persisted token, and the probe returns BOTH rc 0 AND the sentinel.
+# 2. PROBE-ANSWERED — persisted token, and the probe returns BOTH rc 0 AND the sentinel.
+#    THE TOKEN IS DELIBERATELY NOT `VERIFIED` (#3733, lead ruling): what was observed is
+#    that a `claude -p` run whose environment carried the persisted value answered, which
+#    is NOT the same claim as "the persisted value is what authenticated" — see LIMITATION
+#    2 in the library. The state name says what happened; it certifies nothing.
 # =====================================================================================
 d2=$(mkshim "$tmp/s2"); ef2="$tmp/env2"
 mkenvfile "$ef2" "CLAUDE_CODE_OAUTH_TOKEN=$TOK" "CLAUDE_CONFIG_DIR=$CFGDIR"
 plant_claude_probe_env "$d2"
 run_cap "$d2" "$ef2" -- --auth
-if printf '%s' "$out" | grep -q '^claude-auth: VERIFIED'; then
-  ok "claude-auth: VERIFIED when the persisted token authenticates a cold non-interactive run"
+if printf '%s' "$out" | grep -q '^claude-auth: PROBE-ANSWERED'; then
+  ok "claude-auth: PROBE-ANSWERED when a run carrying the persisted token returns the sentinel"
 else
-  bad "claude-auth: expected VERIFIED, got: $out"
+  bad "claude-auth: expected PROBE-ANSWERED, got: $out"
 fi
-if [ "$rc" -eq 0 ]; then
-  ok "claude-auth: VERIFIED exits 0"
+# ...AND THE LINE DISCLAIMS THE CLAIM IT USED TO MAKE. The old wording said the persisted
+# credential "authenticated"; nothing here can observe WHICH credential in the probe's
+# environment did, so the detail must name that limitation rather than assert the stronger
+# fact. A state rename with the old sentence behind it would be a cosmetic demotion.
+# SCOPED TO THE OBSERVATION LINE, not the whole output: the scope note printed beside it
+# also talks about limitations, so an unscoped grep would pass on the note alone and assert
+# nothing about the line under test.
+if printf '%s' "$out" | grep '^claude-auth:' | grep -q 'LIMITATION 2'; then
+  ok "claude-auth: the answered-probe detail names the alternate-credential limitation"
 else
-  bad "claude-auth: VERIFIED exited $rc"
+  bad "claude-auth: the answered-probe detail claims more than was observed: $out"
 fi
 # ...and the value the probe actually received came from the FILE, not from the ambient
 # environment: the stub reports `saw=persisted` only for the planted literal.
@@ -514,7 +530,7 @@ if printf '%s' "$out" | grep -q 'saw=persisted'; then
 else
   bad "claude-auth: BASH_ENV re-injected a credential into the probe: $out"
 fi
-if printf '%s' "$out" | grep -q '^claude-auth: VERIFIED'; then
+if printf '%s' "$out" | grep -q '^claude-auth: PROBE-ANSWERED'; then
   ok "claude-auth: ...and the verdict is still about the PERSISTED value"
 else
   bad "claude-auth: the BASH_ENV case did not reach a verdict about the persisted value: $out"
@@ -707,7 +723,7 @@ ef_export="$tmp/env-export"
 mkenvfile "$ef_export" "export CLAUDE_CODE_OAUTH_TOKEN=$TOK" "  export CLAUDE_CONFIG_DIR=$CFGDIR"
 d7d=$(mkshim "$tmp/s7d"); plant_claude_probe_env "$d7d"
 run_cap "$d7d" "$ef_export" -- --auth
-if printf '%s' "$out" | grep -q '^claude-auth: VERIFIED'; then
+if printf '%s' "$out" | grep -q '^claude-auth: PROBE-ANSWERED'; then
   ok "claude-auth: an 'export '-prefixed assignment is read the way pam_env reads it"
 else
   bad "claude-auth: an export-prefixed token line was not seen: $out"
@@ -735,7 +751,7 @@ for mode_case in \
   "missing:SERVER-MISSING:the running server carries no token (THE field failure)" \
   "stale:SERVER-STALE:the running server carries a DIFFERENT token" \
   "incomplete:SERVER-INCOMPLETE:token matches but CLAUDE_CONFIG_DIR is absent" \
-  "complete:VERIFIED:token matches and CLAUDE_CONFIG_DIR is present" \
+  "complete:SERVER-CARRIES-BOTH:token matches and CLAUDE_CONFIG_DIR is present" \
   "broken:UNMEASURED:tmux failed for a reason that is not a missing server"
 do
   mode="${mode_case%%:*}"; rest="${mode_case#*:}"
@@ -1073,15 +1089,19 @@ fi
 # =====================================================================================
 d21=$(mkshim "$tmp/s21"); plant_tmux "$d21" no-server
 run_cap "$d21" "$ef2" -- --tmux-env
-if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
-  ok "claude-tmux-env: a box with NO live server PASSES when the persisted environment delivers both variables"
+if printf '%s' "$out" | grep -q '^claude-tmux-env: COLD-START-DELIVERS-BOTH'; then
+  ok "claude-tmux-env: COLD-START-DELIVERS-BOTH names what a throwaway server handed its pane"
 else
-  bad "claude-tmux-env: a fresh box with a good persisted environment could not pass: $out"
+  bad "claude-tmux-env: a fresh box with a good persisted environment was not reported: $out"
 fi
-if [ "$rc" -eq 0 ]; then
-  ok "claude-tmux-env: that cold-start VERIFIED exits 0 (so --strict on a fresh box can succeed)"
+# THE COLD STATE IS TEXTUALLY DISTINCT FROM THE LIVE ONE (#3733, lead ruling), and that is
+# the point: the cold probe INJECTS the /etc/environment values into its own throwaway
+# server, so it observes tmux PROPAGATION and NOT pam_env DELIVERY (LIMITATION 1). One
+# token for both would have hidden which of the two was actually seen.
+if printf '%s' "$out" | grep '^claude-tmux-env:' | grep -q 'LIMITATION 1 of 5'; then
+  ok "claude-tmux-env: the cold-start line names the propagation-not-PAM-delivery limitation"
 else
-  bad "claude-tmux-env: cold-start VERIFIED exited $rc"
+  bad "claude-tmux-env: the cold-start line claims more than the probe observed: $out"
 fi
 if [ -f "$d21/tmux-calls.log" ] && grep -qE '^kill-server sock=/.*cqlite-tmux-probe\..*/cqlite-authprobe\.sock$' "$d21/tmux-calls.log"; then
   ok "cold-start probe: the throwaway server is killed on its own PRIVATE socket"
@@ -1105,10 +1125,10 @@ if printf '%s' "$out" | grep -q '^claude-tmux-env: COLD-START-MISSING'; then
 else
   bad "claude-tmux-env: a tokenless persisted source did not fail the cold-start probe: $out"
 fi
-if [ "$rc" -ne 0 ]; then
-  ok "claude-tmux-env: COLD-START-MISSING exits non-zero"
+if [ "$rc" -eq 0 ]; then
+  ok "claude-tmux-env: COLD-START-MISSING is REPORTED, and the exit status stays 0"
 else
-  bad "claude-tmux-env: COLD-START-MISSING exited 0"
+  bad "claude-tmux-env: COLD-START-MISSING exited $rc — the status must not encode a verdict"
 fi
 d21c=$(mkshim "$tmp/s21c"); plant_tmux "$d21c" no-server
 run_cap "$d21c" "$ef_nocfg" -- --tmux-env
@@ -1136,10 +1156,10 @@ if printf '%s' "$out" | grep -q '^claude-tmux-env: NO-SERVER'; then
 else
   bad "claude-tmux-env: an unrunnable probe did not report NO-SERVER: $out"
 fi
-if [ "$rc" -ne 0 ]; then
-  ok "claude-tmux-env: NO-SERVER still exits non-zero"
+if [ "$rc" -eq 0 ]; then
+  ok "claude-tmux-env: NO-SERVER is REPORTED, and the exit status stays 0"
 else
-  bad "claude-tmux-env: NO-SERVER exited 0 — an unmeasured capability must never read as success"
+  bad "claude-tmux-env: NO-SERVER exited $rc — the status must not encode a verdict"
 fi
 # The INHERITED credential must not be able to answer for the PERSISTED one here either:
 # a good token in the ambient environment with nothing persisted is still a fail.
@@ -1176,10 +1196,10 @@ else
         CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" TMUX_TMPDIR="$TT" \
         bash "$CAPLIB" --tmux-env 2>&1) || rc=$?
   printf '%s\n' "$out" >>"$TRANSCRIPT"
-  if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
-    ok "cold-start probe: REAL tmux, no live server, good persisted environment -> VERIFIED"
+  if printf '%s' "$out" | grep -q '^claude-tmux-env: COLD-START-DELIVERS-BOTH'; then
+    ok "cold-start probe: REAL tmux, no live server, good persisted environment -> COLD-START-DELIVERS-BOTH"
   else
-    bad "cold-start probe: the real-tmux cold path did not verify: $out"
+    bad "cold-start probe: the real-tmux cold path did not report a delivery: $out"
   fi
   # NOTHING was created in the shared socket directory at all — the probe used a socket
   # inside its own working directory, so it can neither collide with nor outlive anything.
@@ -1229,8 +1249,8 @@ EOF
 }
 d25=$(mkshim "$tmp/s25"); plant_claude_bulky "$d25"
 run_cap "$d25" "$ef2" -- --auth
-if printf '%s' "$out" | grep -q '^claude-auth: VERIFIED'; then
-  ok "claude-auth: a sentinel on line 1 of 200 KB of output still VERIFIES (no SIGPIPE inversion)"
+if printf '%s' "$out" | grep -q '^claude-auth: PROBE-ANSWERED'; then
+  ok "claude-auth: a sentinel on line 1 of 200 KB of output is still seen (no SIGPIPE inversion)"
 else
   bad "claude-auth: a large probe output inverted a successful sentinel match: $out"
 fi
@@ -1280,15 +1300,15 @@ chmod +x "$d25c/tmux"
 many_start=$(date +%s)
 run_cap "$d25c" "$ef2" -- --tmux-env
 many_elapsed=$(( $(date +%s) - many_start ))
-if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED' && [ "$many_elapsed" -lt 30 ]; then
+if printf '%s' "$out" | grep -q '^claude-tmux-env: SERVER-CARRIES-BOTH' && [ "$many_elapsed" -lt 30 ]; then
   ok "claude-tmux-env: a 5000-variable server environment is read correctly and FINISHES (${many_elapsed}s)"
 else
   bad "claude-tmux-env: a 5000-variable server environment was misread or did not finish (${many_elapsed}s): $out"
 fi
 d25b=$(mkshim "$tmp/s25b"); plant_tmux_bulky "$d25b"
 run_cap "$d25b" "$ef2" -- --tmux-env
-if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
-  ok "claude-tmux-env: a correctly seeded server with 200 KB of environment still VERIFIES"
+if printf '%s' "$out" | grep -q '^claude-tmux-env: SERVER-CARRIES-BOTH'; then
+  ok "claude-tmux-env: a correctly seeded server with 200 KB of environment is still read correctly"
 else
   bad "claude-tmux-env: a large show-environment inverted the key lookup: $out"
 fi
@@ -1504,10 +1524,12 @@ if printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
 else
   bad "claude-tmux-env: the tmux path ran without an enforceable bound: $out"
 fi
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'kill\|hard\|UNBOUNDED'; then
-  ok "claude-tmux-env: ...non-passing, and it names the missing hard bound"
+# THE NAMING IS THE WHOLE ASSERTION NOW: the exit status carries no verdict (section 34),
+# so requiring a non-zero one here would be requiring the certification this issue removed.
+if printf '%s' "$out" | grep '^claude-tmux-env:' | grep -qi 'kill\|hard\|UNBOUNDED'; then
+  ok "claude-tmux-env: ...and it names the missing hard bound rather than a generic absence"
 else
-  bad "claude-tmux-env: the tmux-path refusal is not non-passing or does not name the bound: rc=$rc $out"
+  bad "claude-tmux-env: the tmux-path refusal does not name the bound: $out"
 fi
 
 # =====================================================================================
@@ -1696,17 +1718,17 @@ else
 fi
 d31=$(mkshim "$tmp/s31"); plant_tmux "$d31" substitute
 run_cap "$d31" "$ef2" -- --tmux-env
-if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
-  bad "cold-start probe: a same-length SUBSTITUTED token was certified VERIFIED: $out"
+if printf '%s' "$out" | grep -q -e '^claude-tmux-env: COLD-START-DELIVERS-BOTH' -e '^claude-tmux-env: SERVER-CARRIES-BOTH'; then
+  bad "cold-start probe: a same-length SUBSTITUTED token was reported as a delivery: $out"
 elif printf '%s' "$out" | grep -q '^claude-tmux-env: NO-SERVER'; then
   ok "cold-start probe: a same-length substituted token is NOT verified (UNMEASURED-class)"
 else
   bad "cold-start probe: unexpected verdict for a substituted token: $out"
 fi
-if [ "$rc" -ne 0 ]; then
-  ok "cold-start probe: the substituted-token verdict exits non-zero"
+if [ "$rc" -eq 0 ]; then
+  ok "cold-start probe: the substituted-token report exits 0 like every other report"
 else
-  bad "cold-start probe: a substituted token exited 0"
+  bad "cold-start probe: a substituted token exited $rc — the status must not encode a verdict"
 fi
 if printf '%s' "$out" | grep -qi 'does not match the persisted'; then
   ok "cold-start probe: the detail says the DELIVERED value does not match the persisted one"
@@ -2001,8 +2023,8 @@ fi
 d33b=$(mkshim "$tmp/s33b"); plant_tmux "$d33b" complete; plant_id "$d33b" root 0 "$INVOKER" 4711
 plant_delegator "$d33b" runuser
 run_cap "$d33b" "$ef2" 'SUDO_USER=cqlite-no-such-login-3733' 'SUDO_UID=6553' -- --tmux-env
-if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
-  bad "sudo posture: an unresolvable invoking identity certified the CURRENT UID's server: $out"
+if printf '%s' "$out" | grep -q '^claude-tmux-env: SERVER-CARRIES-BOTH'; then
+  bad "sudo posture: an unresolvable invoking identity reported the CURRENT UID's server: $out"
 elif printf '%s' "$out" | grep -q '^claude-tmux-env: UNMEASURED'; then
   ok "sudo posture: an unresolvable invoking identity is UNMEASURED, never a fall back"
 else
@@ -2097,7 +2119,7 @@ if [ ! -f "$d33f/delegate-calls.log" ]; then
 else
   bad "sudo posture: a delegation was applied with no sudo in play: $(cat "$d33f/delegate-calls.log")"
 fi
-if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
+if printf '%s' "$out" | grep -q '^claude-tmux-env: SERVER-CARRIES-BOTH'; then
   ok "sudo posture: ...and the ordinary path still reaches its verdict"
 else
   bad "sudo posture: the ordinary (non-sudo) path regressed: $out"
@@ -2115,8 +2137,8 @@ if [ -f "$d33g/delegate-calls.log" ] && grep -q "user=$INVOKER cmd=.*new-session
 else
   bad "sudo posture: the cold-start probe ran as the current UID: $(cat "$d33g/delegate-calls.log" 2>/dev/null)"
 fi
-if printf '%s' "$out" | grep -q '^claude-tmux-env: VERIFIED'; then
-  ok "sudo posture: ...and the delegated cold-start probe still reaches VERIFIED"
+if printf '%s' "$out" | grep -q '^claude-tmux-env: COLD-START-DELIVERS-BOTH'; then
+  ok "sudo posture: ...and the delegated cold-start probe still reports a delivery"
 else
   bad "sudo posture: the delegated cold-start probe did not verify: $out"
 fi
@@ -2127,6 +2149,103 @@ if printf '%s' "$out" | grep -q '^claude-tmux-env: NO-SERVER' && printf '%s' "$o
   ok "sudo posture: a failed handover of the probe directory REFUSES (UNMEASURED-class)"
 else
   bad "sudo posture: a failed ownership handover did not refuse: $out"
+fi
+
+# =====================================================================================
+# 34. NEITHER LINE MAY EVER CERTIFY THIS BOX — THE INVARIANT, NOT AN INSTANCE (#3733,
+#     lead ruling). Three consecutive independent reviews each found a NEW High of one
+#     shape: the probe cannot observe the property its verdict named. The response was a
+#     DESIGN change rather than a fourth fix — both lines are OBSERVATIONS now — and the
+#     durable pin is this invariant, because a case-by-case rename can be undone one state
+#     at a time while an invariant reds on the first reintroduction.
+#
+#     THREE PROPERTIES, and the third is the one that stops a caller acting on a proxy:
+#      (a) no state either line emits is the token `VERIFIED` — the word a pasted log reads
+#          as a certification, whatever the surrounding prose says;
+#      (b) every entry point prints its own scope note, so an operator reading ONE pasted
+#          line learns it certifies nothing;
+#      (c) the BEST-looking and the WORST-looking inputs are INDISTINGUISHABLE by exit
+#          status. That is what makes `if script --auth; then …` impossible to write, which
+#          is the actual downstream hazard: a token rename leaves an exit-code gate intact.
+#     The fixtures are the extremes of the whole state space: a perfect box (persisted
+#     token, answering probe, server carrying both) and a bare one (nothing persisted, no
+#     server, no claude).
+# =====================================================================================
+d34_best=$(mkshim "$tmp/s34best"); plant_claude_probe_env "$d34_best"; plant_tmux "$d34_best" complete
+run_cap "$d34_best" "$ef2" -- --report
+best_out="$out"; best_rc="$rc"
+d34_worst=$(mkshim "$tmp/s34worst"); plant_tmux "$d34_worst" no-server
+run_cap "$d34_worst" "$ef" -- --report
+worst_out="$out"; worst_rc="$rc"
+# THE FIXTURES MUST ACTUALLY BE THE TWO EXTREMES, asserted first: two inputs that landed on
+# the SAME state would make (c) below pass without comparing anything (the "uniform output
+# kills its own test" shape).
+if printf '%s' "$best_out" | grep -q '^claude-auth: PROBE-ANSWERED' \
+   && printf '%s' "$best_out" | grep -q '^claude-tmux-env: SERVER-CARRIES-BOTH' \
+   && printf '%s' "$worst_out" | grep -q '^claude-auth: NOT-PERSISTED' \
+   && printf '%s' "$worst_out" | grep -q '^claude-tmux-env: COLD-START-MISSING'; then
+  ok "no-certification: the two fixtures really are the best- and worst-looking inputs"
+else
+  bad "no-certification: the fixtures did not reach opposite states, so the comparison below proves nothing: best=[$best_out] worst=[$worst_out]"
+fi
+if printf '%s\n%s' "$best_out" "$worst_out" | grep -q '^claude-auth: VERIFIED\|^claude-tmux-env: VERIFIED'; then
+  bad "no-certification: a state named VERIFIED is still emitted: $(printf '%s\n%s' "$best_out" "$worst_out" | grep 'VERIFIED')"
+else
+  ok "no-certification: no input produces a VERIFIED state on either line"
+fi
+if printf '%s' "$best_out" | grep -q '^claude-auth-report: OBSERVATIONS-ONLY' \
+   && printf '%s' "$worst_out" | grep -q '^claude-auth-report: OBSERVATIONS-ONLY'; then
+  ok "no-certification: every report declares that neither line certifies this box"
+else
+  bad "no-certification: a report was printed with no scope note: best=[$best_out] worst=[$worst_out]"
+fi
+if [ "$best_rc" = "$worst_rc" ] && [ "$best_rc" -eq 0 ]; then
+  ok "no-certification: the best and worst inputs are indistinguishable by exit status (both $best_rc)"
+else
+  bad "no-certification: the exit status still encodes a verdict (best=$best_rc worst=$worst_rc)"
+fi
+
+# =====================================================================================
+# 35. AN ALTERNATE CREDENTIAL IN THE ENVIRONMENT IS REPORTED, NOT SILENTLY ABSORBED
+#     (#3733, LIMITATION 2). The `--auth` probe scrubs CLAUDE_CODE_OAUTH_TOKEN and
+#     re-supplies the PERSISTED value, and it does NOT scrub ANTHROPIC_API_KEY,
+#     ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_USE_BEDROCK or CLAUDE_CODE_USE_VERTEX — so a
+#     sentinel coming back proves that SOMETHING in the probe's environment authenticated,
+#     not that the persisted value did. Deliberately DECLARED rather than scrubbed: the
+#     ruling is that these are documented limitations of a report, not defects to patch.
+#     What the report must therefore never do is claim the persisted value works.
+#
+#     THE STUB IS THE ORACLE: it answers ONLY when the alternate credential is present, and
+#     the persisted token is a value it would otherwise reject. So a report claiming the
+#     persisted credential works is affirmatively false on this input.
+# =====================================================================================
+d35=$(mkshim "$tmp/s35")
+cat >"$d35/claude" <<'EOF'
+#!/usr/bin/env bash
+# Authenticates on the ALTERNATE credential alone; the persisted token is rejected.
+if [ -n "${ANTHROPIC_API_KEY-}" ]; then printf 'CQLITE_CLAUDE_AUTH_OK\n'; exit 0; fi
+printf 'Failed to authenticate\n'; exit 1
+EOF
+chmod +x "$d35/claude"
+run_cap "$d35" "$ef2" 'ANTHROPIC_API_KEY=sk-ant-alternate-not-the-subject' -- --auth
+if printf '%s' "$out" | grep -q '^claude-auth: PROBE-ANSWERED'; then
+  ok "alternate credential: the probe answered, and the state says only that"
+else
+  bad "alternate credential: expected PROBE-ANSWERED, got: $out"
+fi
+if printf '%s' "$out" | grep '^claude-auth:' | grep -q 'ANTHROPIC_API_KEY'; then
+  ok "alternate credential: the report NAMES the unscrubbed alternate credential it found"
+else
+  bad "alternate credential: an unscrubbed alternate credential went unreported: $out"
+fi
+# THE DIRECTION THAT MATTERS: the line must not assert that the PERSISTED value
+# authenticated, because on this input it demonstrably did not.
+# The verb is the whole assertion: `authenticated` names WHICH credential worked, and
+# nothing here can observe that. The line must report that the run ANSWERED and stop there.
+if printf '%s' "$out" | grep '^claude-auth:' | grep -qi 'authenticated\|credential is valid\|credential works'; then
+  bad "alternate credential: the report claims the PERSISTED credential authenticated: $out"
+else
+  ok "alternate credential: the report does NOT claim the persisted credential authenticated"
 fi
 
 # =====================================================================================
