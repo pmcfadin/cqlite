@@ -397,6 +397,15 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
             result.push(CqlTypeId::Uuid as u8);
             result.extend_from_slice(uuid);
         }
+        // EMPTY-BUFFER SENTINEL (issue #3805): the declared type's id followed
+        // by ZERO payload bytes. Every family this tag admits is either
+        // fixed-width (so, exactly like the `Integer`/`BigInt`/`Uuid` arms
+        // above, no length is written) or self-delimiting, and the payload of
+        // the empty buffer is nothing at all — so the round trip is
+        // byte-exact: type byte in, type byte out, zero value bytes either way.
+        Value::Empty(ty) => {
+            result.push(map_empty_value_type_to_cql_type(*ty) as u8);
+        }
         Value::Json(json) => {
             // Store JSON as text
             let json_str = json.to_string();
@@ -654,6 +663,11 @@ fn serialize_value_without_type_prefix(value: &Value) -> Result<Vec<u8>> {
         Value::Inet(bytes) => Ok(bytes.to_vec()),
         Value::SmallInt(i) => Ok(i.to_be_bytes().to_vec()),
         Value::Float32(f) => Ok(f.to_be_bytes().to_vec()),
+        // EMPTY-BUFFER SENTINEL (issue #3805): the BARE serialized form is the
+        // empty buffer — zero bytes. Written explicitly rather than left to the
+        // strip-the-type-byte fallback below, so the byte-exactness is a stated
+        // property and not a consequence of slicing a 1-byte vector.
+        Value::Empty(_) => Ok(Vec::new()),
         // For complex types, fall back to full serialization and strip type byte
         _ => {
             let full_bytes = serialize_cql_value(value)?;
@@ -691,6 +705,32 @@ fn map_value_to_cql_type(value: &Value) -> CqlTypeId {
         Value::Varint(_) => CqlTypeId::Varint,
         Value::Decimal { .. } => CqlTypeId::Decimal,
         Value::Duration { .. } => CqlTypeId::Duration,
+        // The sentinel reports its DECLARED type, not a synthetic one
+        // (issue #3805).
+        Value::Empty(ty) => map_empty_value_type_to_cql_type(*ty),
+    }
+}
+
+/// The wire type id of an [`EmptyValueType`]'s declared type (issue #3805).
+///
+/// `counter`, `timeuuid` and `varint` map to their own ids; `float`/`double`
+/// follow CQL widths (CQL `float` is 4 bytes = CQLite `Float32`, CQL `double`
+/// is 8 bytes = CQLite `Float`), which is why the tag names them in CQL terms.
+fn map_empty_value_type_to_cql_type(ty: crate::types::EmptyValueType) -> CqlTypeId {
+    use crate::types::EmptyValueType as E;
+    match ty {
+        E::Int => CqlTypeId::Int,
+        E::BigInt => CqlTypeId::BigInt,
+        E::Counter => CqlTypeId::Counter,
+        E::Float => CqlTypeId::Float,
+        E::Double => CqlTypeId::Double,
+        E::Timestamp => CqlTypeId::Timestamp,
+        E::Uuid => CqlTypeId::Uuid,
+        E::TimeUuid => CqlTypeId::Timeuuid,
+        E::Boolean => CqlTypeId::Boolean,
+        E::Inet => CqlTypeId::Inet,
+        E::Decimal => CqlTypeId::Decimal,
+        E::Varint => CqlTypeId::Varint,
     }
 }
 

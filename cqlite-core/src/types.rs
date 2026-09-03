@@ -1173,6 +1173,10 @@ impl Value {
             Value::Null => true,
             Value::Blob(b) => b.is_empty(),
             Value::Text(s) => s.is_empty(),
+            // The empty-buffer sentinel's payload IS the empty buffer
+            // (issue #3805). Reported `true` for length, which is what this
+            // predicate answers — NOT "is null": `is_null()` stays `false`.
+            Value::Empty(_) => true,
             _ => false,
         }
     }
@@ -1193,6 +1197,10 @@ impl Value {
             Value::Uuid(_) => UUID_SIZE,
             Value::Duration { .. } => DURATION_SIZE,
             Value::Tombstone(_) => TOMBSTONE_SIZE,
+            // Zero payload bytes by definition (issue #3805): the serialized
+            // form of the sentinel is the EMPTY buffer, and its length is
+            // carried by the enclosing framing, never by the value.
+            Value::Empty(_) => 0,
 
             // Variable-length types with prefix
             Value::Text(s) => VINT_LENGTH_PREFIX + s.len(),

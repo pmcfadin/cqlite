@@ -1,0 +1,202 @@
+ISSUE #3805 — CASSANDRA FORMAT ORACLE — VERDICT  (rev 2: + empirical half folded in)
+Full findings: docs/round-artifacts/issue-3805-cassandra-oracle.md
+Sources  (authority #1, pinned cassandra-5.0.8): .oracle-3805/cassandra/     [untracked]
+Measured (authority #2, sstabledump on C* 5.0.2): .oracle-3805/empirical/    [untracked, lead's]
+
+BOTH AUTHORITIES AGREE IN EVERY PARTICULAR. Nothing measured contradicts the source reading; three
+claims that were source-derived INFERENCES are now MEASUREMENTS (ordering, the accept/refuse
+boundary, the "" rendering).
+
+================================================================================
+1. ONE-LINE ANSWER TO SUB-QUESTION 5 — split into what IS and IS NOT decided
+================================================================================
+The question has three claims and they do NOT share epistemic status:
+
+  (i)   the entry must be PRESENT (not dropped)          -- DECIDED by the sources
+  (ii)  its key must be DISTINCT FROM A NULL key         -- DECIDED by the sources
+  (iii) which concrete CQLite `Value` variant it becomes -- NOT DECIDED by Cassandra AT ALL
+
+ONE LINE: a zero-length cell path for a `validate`-accepting fixed-width key is a PRESENT map entry
+whose key is DISTINCT from null and from every typed value, rendered "" in JSON/text; WHICH CQLite
+`Value` variant carries it is a CQLite representation choice that Cassandra does not decide.
+
+(i) DECIDED: the framing cannot express "absent" (unsigned VInt, ByteBufferUtil.java:356-360/:382-389;
+    CellPath.java:44-48); Cassandra writes/validates/reads it (measured); both renderers emit a value;
+    the driver returns the entry. A reader that omits it is wrong and detectably so.
+
+(ii) DECIDED, on three independent grounds:
+     - Int32Type.compareCustom:61-71 gives empty a UNIQUE sort position, strictly first. MEASURED on
+       real bytes for 4 independent key types.
+     - A NULL MAP KEY IS ILLEGAL IN CQL (Maps.java:342-343, :426-427, :510-511), so "null key" is not
+       a state the data model admits.
+     - The Python driver hands back a PRESENT `EmptyValue` sentinel, explicitly distinct from None
+       (`OrderedMapSerializedKey([(EMPTY, 7)])`); only cqlsh's FORMATTER then fails.
+     Confronted rather than waved away: Cassandra's SERVER-SIDE MapSerializer.deserialize:144 DOES
+     produce a `null` key -- so Cassandra's two decoders DISAGREE. But that path is unreachable for a
+     MULTICELL map read (MapType.serializedValues:323-334 repacks raw bytes, never decoding the key
+     server-side), it applies to FROZEN maps and internal validation, and its `null` is tolerable only
+     because LinkedHashMap accepts one null key -- a Java container accident, not a format statement.
+
+(iii) NOT DECIDED, and I decline to invent it. Cassandra HAS no "typed empty" object: the decode is
+      null, there is no CQL literal (only blobAsX(0x), a function application), and the native protocol
+      draws no value-side null/empty distinction. `EmptyValue` is a PYTHON DRIVER construct, not a
+      Cassandra type-system entity. What the sources give is a FILTER on candidates, and only that:
+        RULED OUT  Value::Null            -- violates (ii); a null map key is illegal in CQL
+        RULED OUT  Value::Integer(0)      -- 0 has its own encoding and sort position; can collide
+        ADMISSIBLE opaque empty blob      -- Value::blob(vec![]), ALREADY the committed choice at
+                                             regression_3747_empty_map_key_tests.rs:165. Satisfies
+                                             (i) and (ii). Loses the type (schema still carries it).
+        ADMISSIBLE a typed-empty variant  -- also satisfies both; also preserves the type.
+      The sources do NOT choose between the last two. That is a CQLite type-model decision for the
+      lead. The committed Value::blob(vec![]) is NOT wrong on this evidence.
+
+ONE RENDERING CONSTRAINT THE SOURCES DO IMPOSE, whichever variant wins: JSON/text output must be ""
+(both Cassandra renderers emit it; Int32Type.fromString("") round-trips it). Printing null or 0
+diverges from sstabledump = a parity failure regardless of internal representation.
+CAVEAT, NOW MEASURED: "" does NOT distinguish an empty fixed-width key from an empty-STRING text key
+(m_text "" is byte-identical to m_int "" in the dump). The rendering is right for parity and
+INSUFFICIENT as a type oracle; the schema must supply the type.
+
+================================================================================
+1b. THE LINE BETWEEN LEGAL DATA AND CORRUPTION -- the substantive addition
+================================================================================
+A reader must NOT give one answer for all fixed-width families. Key the decision on validate():
+
+  validate ACCEPTS empty -> LEGAL DATA, PRESERVE:
+    int, bigint, float, double, timestamp, uuid, timeuuid, boolean, inet, varint, DECIMAL
+    (CQL can produce every one -- measured. Refusing rejects data Cassandra would have read.)
+
+  validate THROWS on empty -> CORRUPTION on Cassandra's own terms, REFUSE:
+    tinyint, smallint, date, time   -- and ONLY these four (the bare `!= N` spelling)
+    (ColumnMetadata.validateCellPath:457-467 rejects it; CQL refuses to build it -- measured.)
+
+TRAP: all four REFUSED families' deserialize STILL returns null on empty (ByteSerializer.java:30-33,
+ShortSerializer.java:30-33, SimpleDateSerializer.java:50-53, TimeSerializer.java:32-35). So a reader
+keying on DECODABILITY instead of on validate() will silently accept bytes Cassandra rejects.
+
+================================================================================
+2. IS A CASSANDRA-WRITTEN FIXTURE PRODUCIBLE VIA CQL?
+================================================================================
+YES -- and no longer merely derived: it has been BUILT and DUMPED (.oracle-3805/empirical/).
+
+WHY (one line): `0x` is a grammatical blob literal (Lexer.g:378-379, HEXNUMBER is '0' X HEX*, ZERO OR
+MORE digits), blobAsX passes it through after only a validate() that accepts empty
+(BytesConversionFcts.java:107-127), and EVERY map-key guard is a Java REFERENCE-null or object-IDENTITY
+check -- never a LENGTH check (Maps.java:342-345, :426-429, :510-513).
+
+Measured: works via BOTH routes the source predicted --
+  map literal      INSERT INTO t (id, mi) VALUES (1, {blobAsInt(0x): 7})    [Maps.DelayedValue.bind]
+  subscript UPDATE UPDATE t SET mi[blobAsInt(0x)] = 7 WHERE id = 2          [Maps.SetterByKey.execute]
+
+Per-type census of SELECT blobAsX(0x), 17 probed:
+  ACCEPTED (13): int bigint float double timestamp uuid timeuuid boolean inet counter decimal varint text
+  REFUSED   (4): tinyint smallint date time   ("value 0x is not a valid binary representation for type X")
+  (blobAsBlob does not exist; that probe row is an artifact, not a finding.)
+THE SPLIT IS EXACTLY THE validate() SPELLING -- verified type by type at the pinned tag. Perfect
+two-way agreement between authority #1 and #2, which makes the spelling a reliable PREDICTOR.
+
+Observed dump (real flushed nb-1-big-Data.db): every empty key renders "path" : [ "" ], not null, not
+omitted, no throw -- and the empty entry COEXISTS with its non-empty sibling in 4 of 7 columns, with
+the EMPTY KEY SORTING FIRST every time (confirming Int32Type.compareCustom:61-71 on real bytes).
+Incidental, matters for a parity golden: a whole-map INSERT emits a COMPLEX DELETION before the cells
+(collection overwrite). A subscript UPDATE does not.
+
+DO NOT put tinyint/smallint/date/time in a Cassandra-written fixture as empty keys -- IMPOSSIBLE,
+measured; the generator fails at INSERT. They belong in a negative/unit test.
+`counter` also cannot be a map key at all (not a legal collection key type in CQL).
+HIGHEST-VALUE columns to include: `inet` and `decimal` -- different validate SPELLINGS (hence
+different code paths) AND both currently mis-excluded in committed artifacts (see §3 below).
+
+================================================================================
+3. TWO CORRECTIONS TO COMMITTED CLAIMS  -- verified against the pinned source
+================================================================================
+(a) `decimal` IS NOT "CORRUPT ON CASSANDRA'S OWN TERMS" -- AN EMPTY DECIMAL IS EXPLICITLY LEGAL.
+    DecimalSerializer.java:58-63
+        public <T> void validate(T value, ValueAccessor<T> accessor) throws MarshalException
+        {
+            // We at least store the scale.
+            if (!accessor.isEmpty(value) && accessor.size(value) < 4)
+                throw new MarshalException(String.format("Expected 0 or at least 4 bytes (%d)", ...));
+        }
+    DecimalSerializer.java:31-34
+            if (value == null || accessor.isEmpty(value))
+                return null;
+    THREE things in those lines say empty is legal: the guard EXCLUDES empty from the failure
+    condition (same escape shape as Int32's `size != 4 && !isEmpty`); the MESSAGE ITSELF says
+    "Expected 0 or at least 4 bytes"; and deserialize null-guards empty FIRST, so the getInt(value,0)
+    that would underflow is never reached. Confirmed empirically: m_dec dumped as "path" : [ "" ].
+
+    FALSIFIES THREE COMMITTED CLAIMS AT ONCE:
+      - PR #3783 test doc, verified verbatim at
+        cqlite-core/.../regression_3747_empty_map_key_tests.rs:175-178 -- "...and `decimal` needs
+        >= 4 bytes, so an empty buffer is corrupt ON CASSANDRA'S OWN TERMS" -- and its refused list
+        at :190 `["tinyint","smallint","date","time","decimal"]`.
+      - issue #3805's own table ("both layers agree empty decimal is short, so arguably fine").
+      - the OWNER RULING's constraint 3 ("`decimal` stays refused; both layers agree").
+
+    IMPORTANT FRAMING: THE RULE AT :175 IS CORRECT AND SHOULD BE KEPT. "`Err` only where Cassandra's
+    own validate THROWS" is exactly the right test, and the four `!= N` families are classified
+    CORRECTLY. This is a ONE-ELEMENT MEMBERSHIP ERROR INSIDE A CORRECT RULE -- move `decimal` from
+    refused to preserved; no redesign. The sentence's own final clause is the reason: "Refusing adds
+    no availability risk for data Cassandra would have read" is FALSE for decimal -- Cassandra WOULD
+    have read it.
+    FLAGGED FOR THE LEAD, NOT TREATED AS SETTLED HERE: one of the three is an OWNER RULING. The
+    source and the measurement are unambiguous, but changing a ruling is not a worker's call.
+
+(b) AN EMPTY `inet` MAP KEY IS PRODUCIBLE -- THE EXCLUSION IS UNNECESSARY, NOT MERELY UNPROVEN.
+    Verified verbatim, test-data/schemas/issue-3747-empty-map-key.cql:63-68 on
+    origin/issue-3747-empty-map-key-dropped:
+      "NOT COVERED, AND DELIBERATELY SO: `inet`. ... an empty inet key is representable ON DISK --
+       but CQL has NO literal that expresses one, so a CASSANDRA-WRITTEN fixture cannot carry it."
+    The PREMISE about the serializer is CORRECT and correctly cited (InetAddressSerializer.java:52-55
+    early-returns on empty). THE INFERENCE FAILS: blobAsInet(0x) expresses it, the INSERT succeeded,
+    and the dump carries m_inet "path" : [ "" ] beside "10.0.0.1".
+    STATED FAIRLY, because the distinction is why it was missed: read hyper-literally, "CQL has no
+    LITERAL that expresses one" is TRUE -- blobAsInet(0x) is a FUNCTION APPLICATION over a blob
+    literal, not an inet literal. What is false is the step to "a fixture cannot carry it": a fixture
+    needs an EXPRESSIBLE TERM, not a literal. So the exclusion is UNNECESSARY, not careless -- and
+    `inet` should move to COVERED, since its early-return validate spelling is a distinct code path
+    worth covering on its own merits.
+
+    GENERALISABLE, AND IT APPLIES TO EVERY "no CQL literal expresses this" CLAIM IN THIS REPO:
+    blobAsX(0x) is a UNIVERSAL CONSTRUCTOR for the empty value of ANY type whose validate admits
+    empty. Measured: works for 13 of 17 types; the 4 failures are exactly the 4 whose validate
+    refuses. CHECK blobAsX(0x) BEFORE DECLARING AN EMPTY-VALUE FIXTURE UNPRODUCIBLE.
+
+================================================================================
+4. CORRECTIONS TO THE ORIGINAL BRIEF'S PREMISES  (unchanged from rev 1, still stand)
+================================================================================
+(A) [MAIN] The brief asked whether a cell path is "a framing where -1/absent vs 0-length carry
+    distinct meanings". It is a different framing, but NOT that way: writeWithVIntLength ->
+    writeUnsignedVInt32 (ByteBufferUtil.java:356-360), so a NEGATIVE length is UNREPRESENTABLE and is
+    declared CORRUPTION on read (:382-389); CellPath.create asserts non-null (CellPath.java:44-48).
+    There is NO -1/absent spelling to contrast against, so a 0-length cell path UNAMBIGUOUSLY means
+    "the empty buffer". The -1-vs-0 distinction is real but lives in the NATIVE-PROTOCOL framing
+    (CollectionSerializer.java:82-101, a SIGNED putInt), which a map cell path can never reach
+    because MapType.serializedValues:323-334 hands writeValue a non-null empty buffer -> length 0.
+    A THIRD framing exists for the cell VALUE: an empty value gets its own FLAG BIT,
+    HAS_EMPTY_VALUE_MASK (Cell.java:243-264), not a length. Three framings; only one can say "null".
+(B) `boolean` does NOT use `size != N && !isEmpty`. It is `if (size > 1) throw`
+    (BooleanSerializer.java:46-50) -- empty is legal because 0 <= 1, not via an isEmpty clause.
+(C) `timeuuid` and `inet` both use the EARLY-RETURN spelling, not the `&&` form
+    (TimeUUID.java:306-309; InetAddressSerializer.java:52-55). The brief noted this for inet only.
+(D) There is NO serializers/TimeUUIDSerializer.java at this tag (404) -- it is the NESTED
+    TimeUUID.Serializer / TimeUUID.AbstractSerializer in utils/TimeUUID.java:304-366. Likewise no
+    independent counter serializer body: `CounterSerializer extends LongSerializer` adding nothing
+    but an instance (CounterSerializer.java:20-23 is the WHOLE file).
+(E) The sibling lane's `isEmpty ? null : ...` result is CONFIRMED independently for all 10 families
+    this question names. Its "12 of 12" is a LARGER population (the value read path) -- cite 10/10
+    for these families on the strength of this audit, not 12/12. And per §1(ii) above, that result
+    is about the VALUE path and does NOT transfer unchanged to a KEY.
+(F) CounterColumnType.toJSONString:90-94 is `CounterSerializer.instance.deserialize(buffer).toString()`
+    with NO null guard -> would NPE on empty. Unreachable via a map cell path (counter cannot be a
+    collection key; JsonTransformer uses getString for paths). It is the ONE non-null-safe renderer
+    in the family; every getString/toString path IS null-safe and yields "".
+(G) Cassandra states this issue's exact distinction itself, rejecting an empty COMPACT-table
+    clustering value -- UpdateParameters.java:94-95: "we don't want to allow that to be empty (even
+    though this would be fine for the storage engine)". It knows how to reject an empty component and
+    says why when it does. It does so there and NOWHERE for a cell path.
+(H) Intent, and it bears on how much weight to put on any of this: AbstractType.allowsEmpty()'s own
+    javadoc (:505-516) says "the main user of this API is for testing to know what types allow empty
+    values" -- a TEST-DATA-GENERATION affordance, not a user-facing feature. Best read as LEGAL BUT
+    UNINTENDED. THAT IS PRECISELY WHY (iii) HAS NO SOURCE ANSWER: nobody designed a meaning for it.

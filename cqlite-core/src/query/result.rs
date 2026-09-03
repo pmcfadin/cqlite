@@ -1038,6 +1038,16 @@ impl ToJson for Value {
 
         match self {
             Value::Null => serde_json::Value::Null,
+            // EMPTY-BUFFER SENTINEL (issue #3805) — the EMPTY JSON STRING, not
+            // `null` and not `0`. `sstabledump` renders an empty fixed-width
+            // buffer as `""` (`tools/JsonTransformer.java:444-458` →
+            // `db/marshal/AbstractType.java:146-156`) and `SELECT JSON` yields
+            // `{"": v}` (`db/marshal/MapType.java:362-388`), so `""` is the
+            // parity-required rendering. NOTE the rendering is deliberately
+            // type-BLIND, exactly as Cassandra's is: `""` does not distinguish
+            // an empty `int` from an empty `text` (measured — oracle §4b.4), so
+            // the schema, never the rendering, is the type oracle.
+            Value::Empty(_) => json!(""),
             Value::Boolean(b) => json!(*b),
             Value::Integer(i) => json!(*i),
             Value::BigInt(i) => json!(*i),

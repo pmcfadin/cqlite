@@ -257,6 +257,10 @@ impl Memtable {
 
             match v {
                 Value::Null => {}
+                // Zero payload bytes: the sentinel's serialized form is the
+                // EMPTY buffer, and its 1-byte type tag lives inline in the
+                // `Value` slot, not on the heap (issue #3805).
+                Value::Empty(_) => {}
                 Value::Boolean(_) | Value::TinyInt(_) => total = total.saturating_add(1),
                 Value::SmallInt(_) => total = total.saturating_add(2),
                 Value::Integer(_) | Value::Float32(_) | Value::Date(_) => {

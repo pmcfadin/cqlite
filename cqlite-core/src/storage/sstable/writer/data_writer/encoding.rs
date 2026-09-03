@@ -390,6 +390,9 @@ pub(crate) fn write_cell_value_into(buf: &mut Vec<u8>, column: &str, value: &Val
 pub(crate) fn infer_cql_type_from_value(value: Option<&Value>) -> CqlType {
     match value {
         None | Some(Value::Null) => CqlType::Text, // Default for NULL
+        // The sentinel CARRIES its declared type, so inference is exact here
+        // rather than a `text` fallback (issue #3805).
+        Some(Value::Empty(ty)) => ty.cql_type(),
         Some(Value::Boolean(_)) => CqlType::Boolean,
         Some(Value::TinyInt(_)) => CqlType::TinyInt,
         Some(Value::SmallInt(_)) => CqlType::SmallInt,

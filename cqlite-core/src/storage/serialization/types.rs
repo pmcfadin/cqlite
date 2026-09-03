@@ -433,6 +433,9 @@ impl TypeSerializer {
     fn infer_cql_type(value: Option<&Value>) -> CqlType {
         match value {
             None | Some(Value::Null) => CqlType::Text,
+            // The sentinel CARRIES its declared type, so inference is exact
+            // here rather than a `text` fallback (issue #3805).
+            Some(Value::Empty(ty)) => ty.cql_type(),
             Some(Value::Boolean(_)) => CqlType::Boolean,
             Some(Value::TinyInt(_)) => CqlType::TinyInt,
             Some(Value::SmallInt(_)) => CqlType::SmallInt,
