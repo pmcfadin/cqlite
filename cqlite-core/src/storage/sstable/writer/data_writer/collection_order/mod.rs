@@ -6,7 +6,16 @@
 //! the element/key type's own `AbstractType.compare` — NOT raw unsigned
 //! serialized-byte order. This module is the SINGLE shared comparator both the
 //! non-frozen complex-cell path (`complex.rs`) and the frozen `serialize_value`
-//! path (`encoding.rs`) call, so the two cannot drift.
+//! path (`encoding.rs`) call, so the two cannot drift. Both callers are covered
+//! by `tests/issue_3935_collection_time_byte_order.rs`.
+//!
+//! SCOPED: "single" means for those two callers, NOT for the writer as a whole.
+//! [`super::marshal_comparator`] is a SECOND, independent implementation of the
+//! same Cassandra rule, dispatched on the DECLARED MARSHAL rather than the
+//! `Value` variant, which orders a frozen UDT's `SetType`/`MapType` FIELD. The
+//! two are pinned against each other by
+//! `tests/writer_comparator_differential.rs` — they had the same `time` defect
+//! independently (#3935), so their agreement is tested rather than assumed.
 //!
 //! Responsibility split (epic #1116):
 //!   * [`scalar`] — the #1275 SCALAR leaf comparators (signed integers, Java
@@ -105,7 +114,9 @@ pub(crate) fn compare_collection_elements(a: &Value, b: &Value) -> Ordering {
         //   * the per-element write path, `schema_helpers::compare_cell_paths`,
         //     which compares the raw serialized cell-path bytes unsigned; and
         //   * the read comparator `types::comparator::custom` `Custom("time")`
-        //     (#3790), which already compares `to_be_bytes()`.
+        //     (#3790), which already compares `to_be_bytes()`; and
+        //   * the declared-marshal comparator `marshal_comparator`, which orders a
+        //     frozen UDT's collection field (corrected in the same issue).
         (Value::Time(x), Value::Time(y)) => x.to_be_bytes().cmp(&y.to_be_bytes()),
         // Floating point — Float.compare / Double.compare total order.
         (Value::Float32(x), Value::Float32(y)) => scalar::compare_f32_java(*x, *y),

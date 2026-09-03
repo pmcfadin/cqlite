@@ -26,7 +26,7 @@
 //! out-of-range NEGATIVE nanos. This file pins the agreement.
 //!
 //! A SECOND, independently-written comparator had the SAME defect:
-//! `data_writer/udt_canon`'s `classify_comparator` put `TimeType` in its
+//! `data_writer/marshal_comparator`'s `classify_comparator` put `TimeType` in its
 //! `SignedInt` family beside `TimestampType`. It orders a frozen `SetType`'s
 //! elements / a `MapType`'s keys from the DECLARED MARSHAL while canonicalizing
 //! a UDT value, and for a collection field of a frozen UDT nothing re-sorts
@@ -106,7 +106,7 @@
 //!   FROZEN cases `frozen_set_matches_byte_order` /
 //!   `frozen_map_matches_byte_order`. The two `udt_nested_*` cases stay GREEN,
 //!   because that path does not consult this comparator.
-//! * `udt_canon::classify_comparator` reverted to classifying `TimeType` as
+//! * `marshal_comparator::classify_comparator` reverted to classifying `TimeType` as
 //!   `SignedInt` — **2 FAIL, 8 pass**: FAIL exactly
 //!   `udt_nested_set_matches_byte_order` and `udt_nested_map_matches_byte_order`,
 //!   whose emitted on-disk order was the SIGNED sequence
@@ -175,7 +175,7 @@ const FROZEN_SET_COL: &str = "fset";
 const FROZEN_MAP_COL: &str = "fmap";
 /// A `frozen<udt>` column whose single declared field is a `set<time>` /
 /// `map<time,text>`. This is the reachable surface of the SECOND writer-side
-/// sorted-collection comparator, `udt_canon::compare_for_marshal` (see the
+/// sorted-collection comparator, `marshal_comparator::compare_for_marshal` (see the
 /// module comment on the UDT cases below).
 const UDT_SET_COL: &str = "uset";
 const UDT_MAP_COL: &str = "umap";

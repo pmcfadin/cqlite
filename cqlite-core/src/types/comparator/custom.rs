@@ -93,7 +93,7 @@ fn compare_inet(left: &Value, right: &Value) -> Result<Ordering> {
 ///     cell paths in that order with no re-sort) and by `encoding.rs`'s frozen
 ///     `serialize_value` — corrected from signed to `to_be_bytes()`;
 ///   * the frozen sorted-collection canonicalizer,
-///     `data_writer/udt_canon::classify_comparator`, which orders a UDT's
+///     `data_writer/marshal_comparator::classify_comparator`, which orders a UDT's
 ///     `SetType` element / `MapType` key field and had the SAME defect
 ///     independently (`serialize_collection_elements` does not re-sort, so its
 ///     order is the on-disk order for a UDT field);
@@ -121,9 +121,9 @@ fn compare_inet(left: &Value, right: &Value) -> Result<Ordering> {
 /// # CANONICAL STATEMENT: range validation would *not* close the class
 ///
 /// This is the ONE place this argument is written out; the other `time`-ordering
-/// sites (`data_writer/collection_order`, `data_writer/udt_canon`, and the
-/// `issue_3935_*` / `issue_3790_*` test targets) point HERE rather than restating
-/// it, so a future re-pin has one paragraph to correct instead of four.
+/// sites (`data_writer/collection_order`, `data_writer/marshal_comparator`, and
+/// the `issue_3935_*` / `issue_3790_*` test targets) point HERE rather than
+/// restating it, so a future re-pin has one paragraph to correct instead of four.
 ///
 /// RANGE VALIDATION WOULD *NOT* CLOSE THE CLASS — an earlier revision of this
 /// comment called it "the fix that would make all the sites agree trivially",
