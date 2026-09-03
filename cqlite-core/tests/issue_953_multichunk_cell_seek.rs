@@ -303,6 +303,62 @@ fn fingerprints(rows: &[QueryRow]) -> Vec<BTreeMap<String, String>> {
     out
 }
 
+/// Issue #3890 (AC2): per-ROW column-presence parity against the scan oracle.
+///
+/// The row-count and fingerprint-set assertions above are set-level: they cannot
+/// say WHICH row lost WHICH column. A seek row whose cell decode stopped part-way
+/// (the #3890 truncation class) is missing every column after the failure point,
+/// so pair each seek row with its scan row by clustering key (`ck`) and require the
+/// expected column set to be present and equal, naming the divergence.
+fn assert_columns_present_and_equal(pk: i32, got: &[QueryRow], want: &[QueryRow]) {
+    let by_ck = |rows: &[QueryRow]| -> BTreeMap<i32, BTreeMap<String, String>> {
+        rows.iter()
+            .filter_map(|r| match r.values.get("ck") {
+                Some(Value::Integer(ck)) => Some((*ck, row_fingerprint(r))),
+                _ => None,
+            })
+            .collect()
+    };
+    let want_by_ck = by_ck(want);
+    let got_by_ck = by_ck(got);
+    assert_eq!(
+        want_by_ck.len(),
+        want.len(),
+        "pk={pk}: every oracle row must carry an integer `ck` to pair on"
+    );
+    assert_eq!(
+        got_by_ck.len(),
+        got.len(),
+        "pk={pk}: every seek row must carry an integer `ck` to pair on — a row that lost `ck` \
+         is itself a truncated row (issue #3890)"
+    );
+    for (ck, want_cols) in &want_by_ck {
+        let got_cols = got_by_ck.get(ck).unwrap_or_else(|| {
+            panic!("pk={pk}: seek result is missing the row ck={ck} the full scan returned")
+        });
+        for (col, want_val) in want_cols {
+            match got_cols.get(col) {
+                Some(got_val) => assert_eq!(
+                    got_val, want_val,
+                    "pk={pk} ck={ck}: seek column '{col}' diverges from the full scan"
+                ),
+                None => panic!(
+                    "pk={pk} ck={ck}: seek row is MISSING column '{col}' the full scan \
+                     returned — a point/seek row truncated mid-cell (issue #3890). \
+                     Seek row has {:?}",
+                    got_cols.keys().collect::<Vec<_>>()
+                ),
+            }
+        }
+        for col in got_cols.keys() {
+            assert!(
+                want_cols.contains_key(col),
+                "pk={pk} ck={ck}: seek row carries column '{col}' the full scan did not return"
+            );
+        }
+    }
+}
+
 /// THE regression: seek each partition of a small-chunked SSTable whose rows span
 /// multiple compression chunks. Every partition's rows must come back COMPLETE and
 /// byte-identical to the full scan, the seek must DECODE the partition itself
@@ -379,6 +435,12 @@ async fn multichunk_row_seek_returns_full_partition() {
             fingerprints(expected_rows),
             "Issue #953: seek rows for pk={pk} must be byte-identical to the full scan"
         );
+        // Issue #3890 (AC2): partition completeness was asserted by ROW COUNT plus
+        // a whole-row fingerprint set; neither states, per row, that every expected
+        // COLUMN is present. Assert that directly, so a point/seek row truncated
+        // mid-cell (the class #3890 fixes) names the missing column instead of
+        // sliding through as a differing fingerprint set.
+        assert_columns_present_and_equal(*pk, &targeted.rows, expected_rows);
         assert_eq!(
             decoded, 1,
             "Issue #953: the within-SSTable seek for pk={pk} must DECODE exactly one partition \

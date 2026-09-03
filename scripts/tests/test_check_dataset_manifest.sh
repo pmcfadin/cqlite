@@ -2394,6 +2394,235 @@ fi
 # can rest on a message the component prints before the suite starts, nor on a branch
 # announcement a later disagreeing verdict contradicts.
 # ---------------------------------------------------------------------------
+# ---- ONE assertion path for EVERY node-gate case (roborev #3642, round 3) ------------
+# Three review rounds each found the SAME defect in a DIFFERENT case, and each was fixed
+# only in the case the reviewer named -- which is how a finding family regenerates:
+#   round 1 -> case 101: asserted a message the component prints BEFORE `npm test`, so it
+#              passed when the suite never ran;
+#   round 2 -> case 100: never asserted that `npm test` was NOT invoked, so a lost early
+#              return would print the right diagnostic and run the suite anyway;
+#   round 3 -> cases 98/99: selected the FIRST verdict-shaped line (`head -1`), which is
+#              the branch ANNOUNCEMENT, so a later disagreeing verdict recorded after a
+#              lost `return` left both green -- and neither consulted the npm log.
+# ONE defect: an assertion keyed on an EARLY or PARTIAL marker instead of on what the run
+# RECORDED, uncorroborated by the invocation log. So both properties now live in one
+# helper every node-gate case goes through, and a case cannot be written without them:
+#
+#   (a) EVERY verdict the run RECORDS -- each `>>> [node-bindings] <V> (` line in the log
+#       AND the single SUMMARY entry -- must be in the case's allowed set, and there must
+#       be at least one. Not "the first", not "some line matches": the announcement and
+#       the terminal line have the SAME shape, so a `return` lost after the announcement
+#       is only ever visible as a SECOND, DISAGREEING verdict.
+#   (b) The recorded npm argv must agree with the case's contract: npm must have been
+#       reached AT ALL (`ci`/`install` precede every branch under test, so an absent
+#       `test` line then means "not reached" rather than "the marker was never written"),
+#       and `npm test` must be present or absent exactly as the case requires.
+#
+# `_nbgate_measure` reads the three artifacts of one completed run ONCE; the assert
+# REFUSES to answer about any tag other than the last measured one, so re-ordering or
+# inserting a case reds it instead of silently reading a stale measurement.
+#
+# DEFINED OUTSIDE THE `$nbgate_ok` CLONE GUARD BELOW, because nothing in the pair needs
+# git or the scratch clone — only $WORK — and cases 103/104, which test the pair itself,
+# must run on a box where the clone cannot be built (see their header).
+NBG_TAG=""; NBG_LOG_N=0; NBG_LOG_TOKS=""; NBG_LOG_LAST=""
+NBG_SUM_N=0; NBG_SUM_TOKS=""; NBG_LIVE=0; NBG_TEST=0; NBG_WHY=""
+_nbgate_measure() { # <tag>
+  local tag=$1 log sum argv toks sumtoks
+  log="$WORK/nbgate-$tag.log"; sum="$WORK/nbgate-$tag.summary"
+  argv="$WORK/nbgate-$tag.npm-argv"
+  NBG_TAG=$tag
+  # THE TOKEN IS CAPTURED BY SHAPE, NOT ENUMERATED (#3977) -------------------------
+  # These lines parse the **GATE's** component-status vocabulary, not the dataset
+  # manifest's own, so test_agent_gate_census.sh's R1 sweep applies to them: an
+  # enumeration here is the same defect R1 exists for, one artifact over. The token is
+  # an OPEN VARIABLE -- agent-gate.sh emits `>>> [<name>] $RECORDED_STATUS (<n>s)` from
+  # many sites, 12 of them inside `run_node_bindings` alone (measured 2026-09-03; a
+  # count in a comment decays, so it is scoped to the one function this parses) -- and
+  # the vocabulary is already FIVE tokens wide (_status_is_nonfailing's
+  # closed non-failing set PASS|SKIP|OPT-OUT, plus FAIL and VACUOUS). So an enumeration
+  # goes blind every time a token is added, and blind in the direction that matters
+  # here: a token this capture DROPS is a recorded verdict that property (a) CANNOT SEE,
+  # i.e. a disagreeing verdict that leaves the case green. Shape also makes the two halves of
+  # this function AGREE -- the SUMMARY reader four lines below has always read
+  # `[A-Za-z-]*`, and only the log side had a list.
+  #
+  # THE DISCRIMINATOR IS THE WHOLE `<TOKEN> (<detail>)` SHAPE, token to end of line, and
+  # it is what makes a one-word token safe: agent-gate.sh emits a verdict as exactly
+  # that, while this component's continuation prose (`>>> [node-bindings]   NOT VALIDATED
+  # by this run: ...`) and its coverage census do not close a paren at end of line.
+  # ` (` ALONE IS NOT ENOUGH, and case 104 is what measured it: an ALL-CAPS census
+  # heading of the form `SUBJECTS (all DERIVED from cargo …):` is indistinguishable from
+  # a status BY TOKEN SHAPE -- a status is all-caps too -- so the trailing `)$` is
+  # load-bearing, not decoration. (That heading is another component's today; the shape
+  # is the exposure, not the current caller set.)
+  #
+  # It deliberately does NOT require `([0-9]+s)`: the BRANCH ANNOUNCEMENTS
+  # (`SKIP (AGENT_GATE_ALLOW_MISSING_FIXTURES=1 and ...)`) carry no duration, and those
+  # are exactly the lines property (a) needs to see -- the announcement and the terminal
+  # line share a shape, so a lost `return` is only ever visible as a SECOND, DISAGREEING
+  # verdict. Nothing here reads a PRESENTATION property (#3400): these are gate-authored
+  # `echo`s, not cargo output, and no colour or quiet setting reaches them.
+  #
+  # Cases 103/104 are the control: they plant VACUOUS and OPT-OUT (both DROPPED by the
+  # enumeration this replaced) and require the assert to SEE them, alongside prose the
+  # capture must not take.
+  #
+  # HOW THE PAIR REACHED `main`, declared so the next person does not re-derive it:
+  # 694df0d90 (#3642/#3867, 2026-09-02 12:38 -07) is the commit that ADDED all four
+  # literal sites, as `+` lines in this file. Had its branch carried the R1 guard
+  # (bdaf2b6e1, #3625/#3916, same day 09:27 -07), its own `tooling-tests` would have RED
+  # on its own diff; it merged green, so its base predated the guard -- ordinary base
+  # staleness, not an authoring error on either side. Ancestry holds between the two
+  # commits but evidences only that the guard was on `main` when #3867 merged, which is
+  # true of ANY squash-merge landing after it, wherever the branch was cut.
+  # `scripts/tests/**` IS in base-staleness.sh's GATE_GLOBAL_PATTERNS (:307), so #3650
+  # slice 1's advisory RECOGNISES this pair today -- but it is advisory by construction
+  # and cannot fail a run. What would have BLOCKED it is a gate on the MERGE RESULT,
+  # which is #3650 SLICE 2 and is explicitly not implemented; that issue owns this
+  # residual. No second guard is added here for the combination.
+  toks=$(sed -n 's/^>>> \[node-bindings\] \([A-Za-z][A-Za-z-]*\) (.*)$/\1/p' "$log" 2>/dev/null)
+  NBG_LOG_TOKS=$(printf '%s\n' "$toks" | grep -E '.' | tr '\n' ' ')
+  NBG_LOG_N=$(printf '%s\n' "$toks" | grep -cE '.')
+  NBG_LOG_LAST=$(printf '%s\n' "$toks" | grep -E '.' | tail -1)
+  # `^node-bindings:` cannot match the sibling `node-bindings-leak-lane:` line.
+  sumtoks=$(sed -n 's/^node-bindings:[[:space:]]*\([A-Za-z-]*\).*/\1/p' "$sum" 2>/dev/null)
+  NBG_SUM_TOKS=$(printf '%s\n' "$sumtoks" | grep -E '.' | tr '\n' ' ')
+  NBG_SUM_N=$(printf '%s\n' "$sumtoks" | grep -cE '.')
+  NBG_LIVE=0; NBG_TEST=0; NBG_BUILD=0; NBG_TYPECHECK=0
+  grep -qE '^(ci|install)( |$)' "$argv" 2>/dev/null && NBG_LIVE=1
+  grep -qE '^test( |$)' "$argv" 2>/dev/null && NBG_TEST=1
+  # ANCHORED, so `run build:debug` / `run typecheck:watch` cannot satisfy the claim that
+  # `npm run build` / `npm run typecheck` themselves ran (roborev job 102).
+  grep -qE '^run build( |$)' "$argv" 2>/dev/null && NBG_BUILD=1
+  grep -qE '^run typecheck( |$)' "$argv" 2>/dev/null && NBG_TYPECHECK=1
+  return 0
+}
+# _nbgate_assert <tag> <allowed verdicts, space-separated> <expect npm test: yes|no>
+# Sets NBG_WHY to EVERY violated property (not just the first) and returns non-zero.
+_nbgate_assert() {
+  local tag=$1 allowed=$2 wanttest=$3 t why=""
+  if [ "$NBG_TAG" != "$tag" ]; then
+    NBG_WHY="measurement mismatch: the last measured run is '${NBG_TAG:-<none>}', not '$tag' — a case must assert the run it just measured"
+    return 1
+  fi
+  [ "$NBG_LOG_N" -ge 1 ] || why="$why; the run recorded NO node-bindings verdict line at all"
+  for t in $NBG_LOG_TOKS; do
+    case " $allowed " in
+      *" $t "*) ;;
+      *) why="$why; the run RECORDED verdict '$t' (allowed: $allowed); recorded sequence: ${NBG_LOG_TOKS:-<none>}, final: ${NBG_LOG_LAST:-<none>}" ;;
+    esac
+  done
+  [ "$NBG_SUM_N" = 1 ] || why="$why; the SUMMARY holds $NBG_SUM_N 'node-bindings:' entries, expected exactly 1 (entries: ${NBG_SUM_TOKS:-<none>})"
+  for t in $NBG_SUM_TOKS; do
+    case " $allowed " in
+      *" $t "*) ;;
+      *) why="$why; the SUMMARY records '$t' (allowed: $allowed)" ;;
+    esac
+  done
+  [ "$NBG_LIVE" = 1 ] || why="$why; no 'npm ci'/'npm install' in the argv log, so the invocation marker is not PROVEN LIVE in this run and an absent 'test' line would prove nothing"
+  # EVERY nested run below reaches the manifest check, and the component invokes
+  # `npm run build` then `npm run typecheck` BEFORE it. So both are required in all four
+  # cases -- unconditionally, not per-contract (roborev job 102).
+  #
+  # WHY THIS IS NOT REDUNDANT WITH THE STRUCTURAL PIN, which is the whole point: case 93
+  # pins that the `npm run typecheck` LINE EXISTS in run_node_bindings. It cannot pin that
+  # the line RUNS. A control-flow change that returns, branches or short-circuits past it
+  # while LEAVING THE LINE PRESENT satisfies case 93 and every verdict assertion here --
+  # and silently re-falsifies the .github/ci-gating-tiers.yml sentence that names this
+  # component as the merge-gating half of the node-ci exemption. That is #3493's own defect
+  # class, and it is what this issue exists to close.
+  [ "$NBG_BUILD" = 1 ] || why="$why; 'npm run build' was NOT invoked, so the native module this component's claims rest on was never built in this run"
+  [ "$NBG_TYPECHECK" = 1 ] || why="$why; 'npm run typecheck' was NOT invoked — the ci-gating-tiers.yml exemption names THIS component as running it, so a run that reaches the manifest check without it makes that registry sentence FALSE (the structural pin proves the line exists, never that it executes)"
+  if [ "$wanttest" = yes ]; then
+    [ "$NBG_TEST" = 1 ] || why="$why; 'npm test' was NOT invoked, so the suite never ran"
+  else
+    [ "$NBG_TEST" = 0 ] || why="$why; 'npm test' WAS invoked, so the run continued into the suite it was supposed to gate"
+  fi
+  if [ -n "$why" ]; then
+    NBG_WHY="${why#; } [recorded npm argv: $(tr '\n' '|' < "$WORK/nbgate-$tag.npm-argv" 2>/dev/null || echo '<no argv log>')]"
+    return 1
+  fi
+  NBG_WHY=""
+  return 0
+}
+
+# ---- Cases 103/104: MEMBERSHIP IS NOT DETECTION -------------------------------------
+# Removing the three-token list from _nbgate_measure proves the LITERAL is gone; it does
+# not prove the capture SEES a token the list dropped, which is the property the fix is
+# for. So the parse is exercised against a SYNTHETIC triple carrying VACUOUS and OPT-OUT
+# — both shipping component statuses, and both invisible to the enumeration this
+# replaced. Driven straight at the two helpers rather than through a nested
+# `agent-gate.sh --only node-bindings` run (cases 97-102 pay ~6 of those): a real run
+# cannot be made to emit an out-of-vocabulary verdict on demand, and the subject here is
+# the PARSE, not the component.
+#
+# Placed BEFORE every case that consumes the helpers, so a broken parse is named without
+# waiting for the slow runs — and before any measurement whose globals a later case reads
+# (cases 102 and 99 assert off the PRECEDING measurement, so nothing may be inserted
+# between one of those and its measure).
+#
+# AND OUTSIDE THE `$nbgate_ok` CLONE GUARD, WHICH IS WHERE THEY FIRST SHIPPED. These two
+# cases need neither git nor the scratch clone — only $WORK and the synthetic triple they
+# write themselves — so a git-less box, or ANY clone/checkout/pin failure above, used to
+# take #3977's ONLY detection control with it while the suite still printed `failed: 0`.
+# A lane that omits coverage silently is indistinguishable from one that covers it, and
+# this is the control that certifies the shape capture itself.
+nbg_probe_log="$WORK/nbgate-parseprobe.log"
+{
+  # Two lines the capture MUST NOT take: the SKIP branch's continuation prose, and an
+  # ALL-CAPS census heading whose first word is followed by ` (` — that second one is
+  # not hypothetical, it REDDENED this case against a first draft whose shape stopped at
+  # ` (`, and it is why the pattern requires the paren to CLOSE at end of line. Plus a
+  # sibling component's verdict, which the `[node-bindings]` anchor must exclude.
+  echo ">>> [node-bindings]   NOT VALIDATED by this run: the 14 dataset-gated jest suites."
+  echo ">>> [node-bindings] SUBJECTS (all DERIVED from cargo at run time, never hard-coded):"
+  echo ">>> [node-bindings-leak-lane] FAIL (9s)"
+  # Three it MUST take: the ordinary token, and the two the old list dropped.
+  echo ">>> [node-bindings] PASS (12s)"
+  echo ">>> [node-bindings] VACUOUS (0s)"
+  echo ">>> [node-bindings] OPT-OUT (3s)"
+} > "$nbg_probe_log"
+printf 'node-bindings: PASS (12s)  [via npm: feature set NOT observed]\nnode-bindings-leak-lane: BUDGETS-AFFIRMED\n' \
+  > "$WORK/nbgate-parseprobe.summary"
+printf 'ci\nrun build\nrun typecheck\ntest\n' > "$WORK/nbgate-parseprobe.npm-argv"
+_nbgate_measure parseprobe
+# Case 103 — the DETECTION half. Every other property of the triple holds, so the assert
+# can only fail on the recorded verdicts, and it must NAME both planted tokens: a bare
+# non-zero in a file this size is produced identically by an unrelated breakage.
+# The assert must FAIL **and** name both tokens. Both halves, because reading the reason
+# alone would let a PASS whose text happens to quote the recorded sequence satisfy this
+# case -- a control with its own false-pass route is not a control.
+nbg_probe_state=refused
+_nbgate_assert parseprobe "PASS" yes && nbg_probe_state=admitted
+nbg_probe_why="$NBG_WHY"
+[ "$nbg_probe_state" = refused ] \
+  || nbg_probe_why="THE ASSERT PASSED with only PASS allowed over recorded verdicts '${NBG_LOG_TOKS:-<none>}'"
+# THE NAMING HALF IS ASSERTED PER TOKEN, on the PER-TOKEN clause `_nbgate_assert` emits
+# for each out-of-vocabulary verdict (`the run RECORDED verdict '<TOK>'`) — deliberately
+# NOT on the `recorded sequence:` field, which carries BOTH tokens whenever EITHER one
+# fires. Keying on the sequence made the two-token claim INCIDENTAL: a capture that saw
+# only VACUOUS would still print a sequence mentioning OPT-OUT and satisfy a substring
+# test. So each planted token must appear in its OWN clause, and the count must be 2.
+nbg_probe_named=0
+case "$nbg_probe_why" in *"RECORDED verdict 'VACUOUS'"*) nbg_probe_named=$((nbg_probe_named + 1)) ;; esac
+case "$nbg_probe_why" in *"RECORDED verdict 'OPT-OUT'"*) nbg_probe_named=$((nbg_probe_named + 1)) ;; esac
+if [ "$nbg_probe_state" = refused ] && [ "$nbg_probe_named" = 2 ]; then
+  ok "case 103: the log-side verdict capture SEES tokens the retired three-token enumeration dropped — a planted VACUOUS and OPT-OUT are both RECORDED and each is NAMED in its OWN out-of-vocabulary clause by _nbgate_assert (#3977)"
+else
+  bad "case 103: a planted VACUOUS/OPT-OUT verdict was not both seen and named per token (assert verdict: $nbg_probe_state; per-token clauses matched: $nbg_probe_named of 2; recorded: '${NBG_LOG_TOKS:-<none>}', n=$NBG_LOG_N; why: ${nbg_probe_why:-<empty>}). A token the capture drops is a DISAGREEING verdict property (a) cannot see, which is what leaves a case green over a lost \`return\`. Log: $nbg_probe_log"
+fi
+# Case 104 — the POSITIVE CONTROL. Without it, a case 103 that reds for an unrelated
+# reason reads as proof. Same triple, same measurement: with all three tokens allowed the
+# assert must PASS, and the capture must have taken EXACTLY the three verdict lines —
+# which is what pins the prose/census/sibling lines OUT.
+if _nbgate_assert parseprobe "PASS VACUOUS OPT-OUT" yes && [ "$NBG_LOG_N" = 3 ] \
+   && [ "$NBG_LOG_TOKS" = "PASS VACUOUS OPT-OUT " ] && [ "$NBG_LOG_LAST" = "OPT-OUT" ]; then
+  ok "case 104: the same triple PASSes once the planted tokens are ALLOWED, and the capture took exactly the 3 verdict lines — the continuation prose, the census heading and the sibling component's line are excluded by shape and by anchor, not by enumeration"
+else
+  bad "case 104: the shape capture does not hold on correct input (recorded: '${NBG_LOG_TOKS:-<none>}', n=$NBG_LOG_N, last='${NBG_LOG_LAST:-<none>}'; expected exactly 'PASS VACUOUS OPT-OUT '; ${NBG_WHY:-<verdict properties held>}). Either it is taking prose/census/sibling lines, or case 103's red is not attributable to the planted tokens. Log: $nbg_probe_log"
+fi
+
 nbgate_ok=0
 if ! command -v git >/dev/null 2>&1; then
   echo "info - git absent; skipping the node-bindings manifest exit-code mapping cases (97-102)"
@@ -2546,106 +2775,6 @@ JESTSTUB
       ${optenv[@]+"${optenv[@]}"} \
       bash "$nbgate_wt/scripts/agent-gate.sh" --only node-bindings >"$out" 2>&1
     printf '%s' "$out"
-  }
-  # ---- ONE assertion path for EVERY node-gate case (roborev #3642, round 3) ------------
-  # Three review rounds each found the SAME defect in a DIFFERENT case, and each was fixed
-  # only in the case the reviewer named -- which is how a finding family regenerates:
-  #   round 1 -> case 101: asserted a message the component prints BEFORE `npm test`, so it
-  #              passed when the suite never ran;
-  #   round 2 -> case 100: never asserted that `npm test` was NOT invoked, so a lost early
-  #              return would print the right diagnostic and run the suite anyway;
-  #   round 3 -> cases 98/99: selected the FIRST verdict-shaped line (`head -1`), which is
-  #              the branch ANNOUNCEMENT, so a later disagreeing verdict recorded after a
-  #              lost `return` left both green -- and neither consulted the npm log.
-  # ONE defect: an assertion keyed on an EARLY or PARTIAL marker instead of on what the run
-  # RECORDED, uncorroborated by the invocation log. So both properties now live in one
-  # helper every node-gate case goes through, and a case cannot be written without them:
-  #
-  #   (a) EVERY verdict the run RECORDS -- each `>>> [node-bindings] <V> (` line in the log
-  #       AND the single SUMMARY entry -- must be in the case's allowed set, and there must
-  #       be at least one. Not "the first", not "some line matches": the announcement and
-  #       the terminal line have the SAME shape, so a `return` lost after the announcement
-  #       is only ever visible as a SECOND, DISAGREEING verdict.
-  #   (b) The recorded npm argv must agree with the case's contract: npm must have been
-  #       reached AT ALL (`ci`/`install` precede every branch under test, so an absent
-  #       `test` line then means "not reached" rather than "the marker was never written"),
-  #       and `npm test` must be present or absent exactly as the case requires.
-  #
-  # `_nbgate_measure` reads the three artifacts of one completed run ONCE; the assert
-  # REFUSES to answer about any tag other than the last measured one, so re-ordering or
-  # inserting a case reds it instead of silently reading a stale measurement.
-  NBG_TAG=""; NBG_LOG_N=0; NBG_LOG_TOKS=""; NBG_LOG_LAST=""
-  NBG_SUM_N=0; NBG_SUM_TOKS=""; NBG_LIVE=0; NBG_TEST=0; NBG_WHY=""
-  _nbgate_measure() { # <tag>
-    local tag=$1 log sum argv toks sumtoks
-    log="$WORK/nbgate-$tag.log"; sum="$WORK/nbgate-$tag.summary"
-    argv="$WORK/nbgate-$tag.npm-argv"
-    NBG_TAG=$tag
-    toks=$(grep -Eo '^>>> \[node-bindings\] (PASS|FAIL|SKIP) \(' "$log" 2>/dev/null \
-      | awk '{print $3}')
-    NBG_LOG_TOKS=$(printf '%s\n' "$toks" | grep -E '^(PASS|FAIL|SKIP)$' | tr '\n' ' ')
-    NBG_LOG_N=$(printf '%s\n' "$toks" | grep -cE '^(PASS|FAIL|SKIP)$')
-    NBG_LOG_LAST=$(printf '%s\n' "$toks" | grep -E '^(PASS|FAIL|SKIP)$' | tail -1)
-    # `^node-bindings:` cannot match the sibling `node-bindings-leak-lane:` line.
-    sumtoks=$(sed -n 's/^node-bindings:[[:space:]]*\([A-Za-z-]*\).*/\1/p' "$sum" 2>/dev/null)
-    NBG_SUM_TOKS=$(printf '%s\n' "$sumtoks" | grep -E '.' | tr '\n' ' ')
-    NBG_SUM_N=$(printf '%s\n' "$sumtoks" | grep -cE '.')
-    NBG_LIVE=0; NBG_TEST=0; NBG_BUILD=0; NBG_TYPECHECK=0
-    grep -qE '^(ci|install)( |$)' "$argv" 2>/dev/null && NBG_LIVE=1
-    grep -qE '^test( |$)' "$argv" 2>/dev/null && NBG_TEST=1
-    # ANCHORED, so `run build:debug` / `run typecheck:watch` cannot satisfy the claim that
-    # `npm run build` / `npm run typecheck` themselves ran (roborev job 102).
-    grep -qE '^run build( |$)' "$argv" 2>/dev/null && NBG_BUILD=1
-    grep -qE '^run typecheck( |$)' "$argv" 2>/dev/null && NBG_TYPECHECK=1
-    return 0
-  }
-  # _nbgate_assert <tag> <allowed verdicts, space-separated> <expect npm test: yes|no>
-  # Sets NBG_WHY to EVERY violated property (not just the first) and returns non-zero.
-  _nbgate_assert() {
-    local tag=$1 allowed=$2 wanttest=$3 t why=""
-    if [ "$NBG_TAG" != "$tag" ]; then
-      NBG_WHY="measurement mismatch: the last measured run is '${NBG_TAG:-<none>}', not '$tag' — a case must assert the run it just measured"
-      return 1
-    fi
-    [ "$NBG_LOG_N" -ge 1 ] || why="$why; the run recorded NO node-bindings verdict line at all"
-    for t in $NBG_LOG_TOKS; do
-      case " $allowed " in
-        *" $t "*) ;;
-        *) why="$why; the run RECORDED verdict '$t' (allowed: $allowed); recorded sequence: ${NBG_LOG_TOKS:-<none>}, final: ${NBG_LOG_LAST:-<none>}" ;;
-      esac
-    done
-    [ "$NBG_SUM_N" = 1 ] || why="$why; the SUMMARY holds $NBG_SUM_N 'node-bindings:' entries, expected exactly 1 (entries: ${NBG_SUM_TOKS:-<none>})"
-    for t in $NBG_SUM_TOKS; do
-      case " $allowed " in
-        *" $t "*) ;;
-        *) why="$why; the SUMMARY records '$t' (allowed: $allowed)" ;;
-      esac
-    done
-    [ "$NBG_LIVE" = 1 ] || why="$why; no 'npm ci'/'npm install' in the argv log, so the invocation marker is not PROVEN LIVE in this run and an absent 'test' line would prove nothing"
-    # EVERY nested run below reaches the manifest check, and the component invokes
-    # `npm run build` then `npm run typecheck` BEFORE it. So both are required in all four
-    # cases -- unconditionally, not per-contract (roborev job 102).
-    #
-    # WHY THIS IS NOT REDUNDANT WITH THE STRUCTURAL PIN, which is the whole point: case 93
-    # pins that the `npm run typecheck` LINE EXISTS in run_node_bindings. It cannot pin that
-    # the line RUNS. A control-flow change that returns, branches or short-circuits past it
-    # while LEAVING THE LINE PRESENT satisfies case 93 and every verdict assertion here --
-    # and silently re-falsifies the .github/ci-gating-tiers.yml sentence that names this
-    # component as the merge-gating half of the node-ci exemption. That is #3493's own defect
-    # class, and it is what this issue exists to close.
-    [ "$NBG_BUILD" = 1 ] || why="$why; 'npm run build' was NOT invoked, so the native module this component's claims rest on was never built in this run"
-    [ "$NBG_TYPECHECK" = 1 ] || why="$why; 'npm run typecheck' was NOT invoked — the ci-gating-tiers.yml exemption names THIS component as running it, so a run that reaches the manifest check without it makes that registry sentence FALSE (the structural pin proves the line exists, never that it executes)"
-    if [ "$wanttest" = yes ]; then
-      [ "$NBG_TEST" = 1 ] || why="$why; 'npm test' was NOT invoked, so the suite never ran"
-    else
-      [ "$NBG_TEST" = 0 ] || why="$why; 'npm test' WAS invoked, so the run continued into the suite it was supposed to gate"
-    fi
-    if [ -n "$why" ]; then
-      NBG_WHY="${why#; } [recorded npm argv: $(tr '\n' '|' < "$WORK/nbgate-$tag.npm-argv" 2>/dev/null || echo '<no argv log>')]"
-      return 1
-    fi
-    NBG_WHY=""
-    return 0
   }
 
   # Case 101 FIRST — the positive control. If a green manifest does not carry the run past
