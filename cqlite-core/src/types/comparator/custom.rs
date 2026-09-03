@@ -98,9 +98,23 @@ fn compare_inet(left: &Value, right: &Value) -> Result<Ordering> {
 ///     `i64::cmp` by #3935. Both `ClusteringKey::compare` and `ClusteringKey`'s
 ///     `Ord` call it, and `write_engine::merge` sorts merged rows with
 ///     `ClusteringKey::compare` under the comment "Sort merged rows by
-///     clustering key for output order", i.e. it decides the PHYSICAL ROW ORDER
-///     written to `Data.db` for a `time` CLUSTERING COLUMN. That is the
-///     disk-reaching site, and it is why a partial fix was refused;
+///     clustering key for output order", so it governs the memtable `BTreeMap`
+///     placement and the merge order, and it is what WOULD decide the PHYSICAL
+///     ROW ORDER written to `Data.db` for a `time` CLUSTERING COLUMN. Read
+///     "would": TODAY `data_writer/encoding::serialize_value_for_clustering`
+///     has no `Custom` arm, so `(Value::Time(_), Custom("time"))` hits its
+///     `_ =>` fail-closed refusal and CQLite cannot write such a column at all
+///     — pinned by
+///     `issue_3935_time_clustering_row_order`'s
+///     `a_time_clustering_column_is_refused_by_the_write_path_declared_gap`.
+///     It is the site that would REACH DISK first once that arm lands, which is
+///     why a partial fix was refused;
+///   * `cqlite-flight`'s `agg::compare_values` — the `Min`/`Max` accumulator's
+///     total order for pushed-down aggregates on the Arrow Flight / Trino
+///     surface, corrected from signed by #3935. It shared ONE signed arm with
+///     `BigInt`/`Counter`/`Timestamp`, and it was missed by this census's first
+///     pass because that grep was scoped to `cqlite-core` — see the
+///     NON-EXHAUSTIVENESS note below;
 ///   * the whole-collection AND frozen writer,
 ///     `data_writer/collection_order::compare_collection_elements` — called both
 ///     by `write_set_complex_cells`/`write_map_complex_cells` (which then emit
@@ -119,16 +133,50 @@ fn compare_inet(left: &Value, right: &Value) -> Result<Ordering> {
 /// The enumeration is a CENSUS, not a proof of closure: it records the sites
 /// found by grepping every `Value::Time`-vs-`Value::Time` comparison arm plus
 /// every `TimeType` classification in the marshal-name comparators, and a NEW
-/// comparator added later would not be in it. After #3935 the only signed
-/// `Value::Time` comparison LEFT in the tree is a deliberate test-only NEGATIVE
-/// CONTROL (`collection_order`'s `time_orders_by_byte_order`, which re-sorts
-/// with the old signed closure and asserts the two sequences DIFFER, so the
-/// byte-order assertion provably has teeth). `Value::Timestamp` is deliberately
-/// NOT in this set and must stay SIGNED everywhere — `TimestampType` is
-/// `ComparisonType.CUSTOM` and its `compareCustom` delegates to
-/// `LongType.compareLongs` — so do not "unify" a `Time` arm with a `Timestamp`
-/// one. The convergence is pinned by
-/// `cqlite-core/tests/issue_3935_collection_time_byte_order.rs`.
+/// comparator added later would not be in it. NON-EXHAUSTIVENESS IS NOT
+/// HYPOTHETICAL HERE: the first pass ran that grep across `cqlite-core` ONLY and
+/// therefore missed `cqlite-flight`'s `agg::compare_values` entirely, so any
+/// later re-census must sweep EVERY workspace member, not just this crate.
+///
+/// The REMAINING signed comparisons of `time` VALUES in the tree — whether
+/// spelled as a `Value::Time` arm or as `i64::cmp` over the same nanos —
+/// enumerated BY NAME rather than asserted as a count:
+///
+///   * in LIBRARY code — NONE. After #3935 every library site compares the
+///     8-byte big-endian form as unsigned bytes;
+///   * `data_writer::collection_order::tests::time_negative_nanos_sorts_above_every_non_negative`
+///     — a deliberate test-only NEGATIVE CONTROL: it re-sorts the same input
+///     with the OLD signed closure and asserts the two sequences DIFFER, so the
+///     byte-order assertion provably has teeth rather than being satisfiable by
+///     any total order;
+///   * `data_writer::collection_order::tests::in_range_time_order_is_unchanged`
+///     — a deliberate test-only signed REFERENCE ORACLE: over the valid range
+///     `0..=86_399_999_999_999` every value has a `0x00` sign byte, so unsigned
+///     byte order and signed numeric order COINCIDE, and the case requires the
+///     new comparator to EQUAL `i64::cmp` on every in-range pair. That is the
+///     compatibility half of the fix; a signed comparison is the correct oracle
+///     for it;
+///   * `cqlite-flight`'s
+///     `agg::tests::time_min_max_orders_by_byte_order_not_signed` — the same
+///     NEGATIVE-CONTROL shape one crate over: a plain `Vec<i64>::sort()` (signed)
+///     over the identical input, required to DIFFER from the comparator's
+///     sequence.
+///
+/// Two neighbours that are NOT in this set, so the boundary is not guessed at:
+/// `data_writer::collection_order::tests::timestamp_keeps_signed_order` and
+/// `cqlite-flight`'s `agg::tests::timestamp_min_max_keeps_signed_order` are
+/// signed comparisons of `Value::Timestamp`, which is CORRECT and permanent (see
+/// the next paragraph). The second also re-sorts a `time` sequence, but through
+/// the now-unsigned comparator, and asserts the two types order the SAME input
+/// DIFFERENTLY — the pin against re-unifying the arms.
+///
+/// `Value::Timestamp` is deliberately NOT in the converged set and must stay
+/// SIGNED everywhere — `TimestampType` is `ComparisonType.CUSTOM` and its
+/// `compareCustom` delegates to `LongType.compareLongs` — so do not "unify" a
+/// `Time` arm with a `Timestamp` one. The convergence is pinned by
+/// `cqlite-core/tests/issue_3935_collection_time_byte_order.rs`,
+/// `cqlite-core/tests/issue_3935_time_clustering_row_order.rs` and
+/// `cqlite-flight`'s `agg::tests::time_min_max_orders_by_byte_order_not_signed`.
 ///
 /// # CANONICAL STATEMENT: range validation would *not* close the class
 ///
