@@ -3299,7 +3299,7 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
   info "claude-tmux-env: $CLAUDE_TMUX_V ($(claude_auth_redact "$CLAUDE_TMUX_D"))"
   case "$CLAUDE_TMUX_V" in
     SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE|SERVER-CONFIG-STALE)
-      info "repair the RUNNING server (no reboot, no re-login, nothing written to disk):  bash scripts/bootstrap-agent-machine.sh --fix-claude-auth   (--yes does it too)"
+      info "repair the RUNNING server (no reboot, no re-login, nothing written to disk):  bash scripts/bootstrap-agent-machine.sh --fix-claude-auth   (EXPLICIT only — --yes does NOT do it, #3733 — and it OVERWRITES whatever the server holds)"
       info "or by hand:  tmux setenv -g CLAUDE_CODE_OAUTH_TOKEN \"\$TOKEN\"; tmux setenv -g CLAUDE_CONFIG_DIR \"\$CLAUDE_CONFIG_DIR\"" ;;
     SERVER-CONFIG-NODIR)
       info "seeding cannot help: the server's CLAUDE_CONFIG_DIR MATCHes the persisted value and that DIRECTORY does not exist — re-seeding writes the same missing path back"
