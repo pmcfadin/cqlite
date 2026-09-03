@@ -1444,6 +1444,29 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   unconditionally (selected == executed, which is exactly what was NOT true of jest) and because no
   uniform per-script assertion tally exists to prefer; its residual — a script that runs and
   asserts nothing — is declared there too.
+- **Admission is re-taken AT SLOT GRANT, and every FULL SUMMARY carries a `disk-admission:`
+  line naming BOTH readings (#3755).** Admission and CONSUMPTION are different moments: a gate
+  admitted with 167G free can queue an hour behind a peer and begin building at 30G — the queue
+  wait wasted, the build aborting into a floor **while still holding the slot**. So one predicate
+  is evaluated twice inside `acquire_gate_slot` (which self-exempts `--lite`/`--delta`/`--only`, so
+  the guard is full-gate-only by construction): once at LAUNCH, **ADVISORY** — a low reading there
+  can be freed by the very peer we are about to queue behind, and a guard that reds on correct
+  input is the guard agents learn to waive — and again the instant the slot is granted, before
+  `_tree_recapture_after_slot` and the first component, where it is **FAIL-CLOSED**. A refusal
+  RELEASES the slot first, then emits a complete terminal block; `RESULT` stays **`FAIL`**, never a
+  new token (`RESULT: REFUSED` would break the mandated `grep -qE 'RESULT: (PASS|FAIL)'` completion
+  probe and reintroduce #3041 from the other side — a poller would read a FINISHED refusal as
+  still-running), so distinctness is carried by the named `disk-admission: FAIL-CLOSED (#3755)` and
+  `refusal:` lines, the `missing-fixtures`/`missing-schemas` precedent. The line always states the
+  value observed, the bar, and `evaluated 1x|2x`, because *"admitted once"* and *"admitted twice"*
+  are the whole point. The bar is `CQLITE_GATE_MIN_FREE_GB`, **default 40GiB**, carrying a
+  `default|pinned|invalid|clamped` source token for the #3414 reason (`${VAR:-40}` renders an unset
+  and a mis-set variable identically). A reading that could not be TAKEN is `UNMEASURED (<why>)`,
+  **declared and non-fatal at both moments** — the cap's own doctrine is that the gate must never
+  be un-runnable because of the cap — but never silently: the block says the bar was NOT APPLIED
+  rather than PASS. Self-test: `scripts/tests/test_agent_gate_disk_admission.sh` (in
+  `tooling-tests`), which drives the readings with a PATH-shim `df` and a real queued slot, never a
+  seam in the shipped script.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a
