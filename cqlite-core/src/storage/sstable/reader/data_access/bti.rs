@@ -187,12 +187,13 @@ impl SSTableReader {
                 is_bti,
                 fully_qualified_match,
                 offset,
+                // Issue #3890 x #3721: the UN-narrowed successor offset is BOTH
+                // the retraction bound and the authoritative PARSE bound —
+                // `decode_end_bound` may point INSIDE the partition, which is
+                // right for the DECOMPRESSION and wrong for the PARSE. Passed
+                // ONCE, as `full_end_bound`, so the two uses cannot drift apart.
                 end_bound,
                 decode_end_bound,
-                // Issue #3890: the UN-narrowed successor offset — `decode_end_bound`
-                // may point INSIDE the partition, which is right for the
-                // DECOMPRESSION and wrong for the PARSE.
-                end_bound,
                 row_body_window,
                 clustering_engaged,
                 schema_opt.as_ref(),

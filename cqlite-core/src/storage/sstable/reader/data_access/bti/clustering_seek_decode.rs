@@ -88,6 +88,7 @@ impl SSTableReader {
                 fully_qualified_match,
                 offset,
                 decode_end_bound,
+                full_end_bound,
                 row_body_window,
                 clustering_engaged,
                 schema_opt,
@@ -104,6 +105,7 @@ impl SSTableReader {
                         is_bti,
                         fully_qualified_match,
                         offset,
+                        full_end_bound,
                         full_end_bound,
                         None,
                         false,
@@ -196,6 +198,12 @@ impl SSTableReader {
         fully_qualified_match: bool,
         offset: u64,
         end_bound: Option<usize>,
+        // Issue #3890: the target PARTITION's authoritative end, i.e. `end_bound`
+        // with NO clustering narrowing applied. It bounds the PARSE, while
+        // `end_bound` above bounds the DECOMPRESSION — under an engaged #954
+        // slice those differ, and parsing to the narrowed one reads another
+        // partition's bytes.
+        partition_end_bound: Option<usize>,
         row_body_window: Option<(usize, usize)>,
         clustering_engaged: bool,
         schema_opt: Option<&crate::schema::TableSchema>,
@@ -227,6 +235,7 @@ impl SSTableReader {
         self.bti_decompress_and_parse_target_all(
             offset as usize,
             end_bound,
+            partition_end_bound,
             row_body_window,
             key,
             table_id,
