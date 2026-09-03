@@ -1,0 +1,23 @@
+EVENT                                                DISPOSITION
+cycles                                               PROGRAMS
+instructions                                         PROGRAMS
+cycle_activity.stalls_total                          PROGRAMS
+cycle_activity.stalls_l2_miss                        PROGRAMS
+cycle_activity.stalls_l3_miss                        PROGRAMS
+offcore_requests_outstanding.all_data_rd             PROGRAMS
+offcore_requests_outstanding.cycles_with_data_rd     PROGRAMS
+offcore_requests.all_data_rd                         ABSENT-FROM-PMU
+offcore_requests_buffer.sq_full                      ABSENT-FROM-PMU
+l1d_pend_miss.pending                                PROGRAMS
+l1d_pend_miss.fb_full                                PROGRAMS
+l1d_pend_miss.l2_stall                               PROGRAMS
+idq_uops_not_delivered.core                          PROGRAMS
+int_misc.recovery_cycles                             PROGRAMS
+exe_activity.bound_on_stores                         PROGRAMS
+cycle_activity.stalls_mem_any                        ABSENT-FROM-PMU
+topdown.slots                                        ABSENT-FROM-PMU
+LLC-loads                                            ABSENT-FROM-PMU
+LLC-load-misses                                      ABSENT-FROM-PMU
+cache-references                                     PROGRAMS
+cache-misses                                         PROGRAMS
+END-OF-RECORD: event-disposition complete

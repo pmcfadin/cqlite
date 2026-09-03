@@ -1,0 +1,78 @@
+== LLC-load-misses ==
+[semantics: NOT-LISTED on this host — no definition to verify against]
+
+== cache-misses ==
+  cache-misses
+       [Cache misses. Usually this indicates Last Level Cache misses; this is
+        intended to be used in conjunction with the
+        PERF_COUNT_HW_CACHE_REFERENCES event to calculate cache miss rates.
+        Unit: cpu]
+        cpu/event=0x2e,umask=0x41/
+[semantics: FOUND]
+
+== cache-references ==
+  cache-references
+       [Cache accesses. Usually this indicates Last Level Cache accesses but
+        this may vary depending on your CPU. This may include prefetches and
+        coherency messages; again this depends on the design of your CPU.
+        Unit: cpu]
+        cpu/event=0x2e,umask=0x4f/
+[semantics: FOUND]
+
+== cycle_activity.stalls_l2_miss ==
+  cycle_activity.stalls_l2_miss
+       [Execution stalls while L2 cache miss demand load is outstanding. Unit:
+        cpu]
+        cpu/event=0xa3,cmask=5,period=1000003,umask=5/
+[semantics: FOUND]
+
+== cycle_activity.stalls_l3_miss ==
+  cycle_activity.stalls_l3_miss
+       [Execution stalls while L3 cache miss demand load is outstanding. Unit:
+        cpu]
+        cpu/event=0xa3,cmask=6,period=1000003,umask=6/
+[semantics: FOUND]
+
+== cycle_activity.stalls_total ==
+  cycle_activity.stalls_total
+       [Total execution stalls. Unit: cpu]
+        cpu/event=0xa3,cmask=4,period=1000003,umask=4/
+[semantics: FOUND]
+
+== cycles ==
+  cycles
+       [Total cycles. Be wary of what happens during CPU frequency scaling
+        [This event is an alias of cpu-cycles]. Unit: cpu]
+        cpu/legacy-hardware-config=0/
+[semantics: FOUND]
+
+== instructions ==
+  instructions
+       [Retired instructions. Be careful,these can be affected by various
+        issues,most notably hardware interrupt counts. Unit: cpu]
+        cpu/event=0xc0/
+[semantics: FOUND]
+
+== l1d_pend_miss.fb_full ==
+  l1d_pend_miss.fb_full
+       [Number of cycles a demand request has waited due to L1D Fill Buffer
+        (FB) unavailability. Unit: cpu]
+        cpu/event=0x48,period=1000003,umask=2/
+[semantics: FOUND]
+
+== l1d_pend_miss.pending ==
+  l1d_pend_miss.pending
+       [Number of L1D misses that are outstanding. Unit: cpu]
+        cpu/event=0x48,period=1000003,umask=1/
+[semantics: FOUND]
+
+== offcore_requests_outstanding.all_data_rd ==
+[semantics: NOT-LISTED on this host — no definition to verify against]
+
+== offcore_requests_outstanding.cycles_with_data_rd ==
+  offcore_requests_outstanding.cycles_with_data_rd
+       [OFFCORE_REQUESTS_OUTSTANDING.CYCLES_WITH_DATA_RD. Unit: cpu]
+        cpu/event=0x20,cmask=1,period=1000003,umask=8/
+[semantics: FOUND]
+
+END-OF-RECORD: counter-semantics complete
