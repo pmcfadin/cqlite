@@ -46,6 +46,23 @@ pub(super) fn compare_values(a: &Value, b: &Value) -> Result<Ordering> {
         // issues #1870/#2010. Must agree with the reader's Value::partial_cmp,
         // which since #3935 it does for EVERY arm, `Time` included, and with
         // `types::comparator::custom::compare_time`.
+        //
+        // ONE DECLARED EXCEPTION to that "EVERY arm" claim, recorded because the
+        // sentence above is a claim about code and would otherwise be false as
+        // written (issue #3805, lead ruling Q2): this function does NOT handle
+        // `Value::Empty`, the empty-buffer sentinel, which falls through to the
+        // mismatched-variant `Err` below while `Value::partial_cmp` sorts it
+        // strictly FIRST. Deliberate, not an oversight: `Value::Empty` arises
+        // from a multicell collection's CELL PATH (a map key), and a CLUSTERING
+        // value never decodes to it, so the divergent input cannot occur here --
+        // adding an untested arm to this hot merge path to satisfy an
+        // unreachable invariant is the worse trade. IF a clustering value ever
+        // CAN decode to `Value::Empty` (an empty clustering component is legal
+        // to Cassandra's storage engine -- see `cql3/UpdateParameters.java:88-101`
+        // at `cassandra-5.0.8`, which forbids it in CQL for COMPACT TABLES only),
+        // this function needs an `Empty` arm ordering it FIRST, matching
+        // `Int32Type.compareCustom` (`db/marshal/Int32Type.java:61-71`) and
+        // `Value::partial_cmp`.
         (Float32(a), Float32(b)) => Ok(crate::float_cmp::cassandra_float_cmp(*a, *b)),
         (Float(a), Float(b)) => Ok(crate::float_cmp::cassandra_double_cmp(*a, *b)),
         (Text(a), Text(b)) => Ok(a.cmp(b)),

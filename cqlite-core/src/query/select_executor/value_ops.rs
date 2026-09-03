@@ -150,6 +150,16 @@ pub(super) fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Order
             return Ok(crate::float_cmp::cassandra_double_cmp(x, y));
         }
     }
+    // LOAD-BEARING FOR THE `Ord` CONTRACT, not merely a fast path (issue #3805,
+    // lead audit Q3). Two `Value::Empty` values share a discriminant WHATEVER
+    // their tags, so this test fires FIRST for a sentinel-vs-sentinel pair and
+    // routes it to `partial_cmp`, which answers `Equal` for equal tags. That is
+    // what keeps such a pair OUT of the `Less`/`Greater` arms below, where the
+    // left-hand `if let Value::Empty(tag) = a` would match and return `Less` for
+    // a pair that must be `Equal` — breaking reflexivity and able to panic a
+    // `sort_by`. A refactor that reorders these blocks, or narrows this test to
+    // specific variants, reintroduces that defect: if the sentinel arms ever
+    // move above this line they must handle `(Empty, Empty)` themselves.
     if std::mem::discriminant(a) == std::mem::discriminant(b) {
         return a.partial_cmp(b).ok_or_else(|| {
             Error::query_execution("Cannot compare incompatible types".to_string())
