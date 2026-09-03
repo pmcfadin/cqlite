@@ -257,12 +257,19 @@ disk (never a curated list), sweeps every table it can express, and prints by na
 table it cannot — `no-schema`, `unrenderable-key`, `empty` — because a lane that omits
 coverage silently is indistinguishable from one that covers it.
 
-**And its bound is measured, not chosen.** The per-table cap on probed partition keys was
-first 4; at 4 the sweep reached **none** of the 14 point reads that decode badly on the
-pre-fix code, because the affected partitions are not among any table's first four keys. At
-32 it reaches all of them and still runs in under a second (962 targeted reads over 101
-tables). A bound tight enough to cost nothing can be tight enough to detect nothing — so when
-you cap a sweep, measure what the cap excludes.
+**And its bound is measured, not chosen.** Of the 10 point reads that decode badly on the
+pre-fix code, a per-table cap of 4 reaches **2** and a cap of 32 reaches **all 10** — and the
+sweep still runs in under a second (962 targeted reads over 101 tables). A bound tight enough
+to cost nothing can be tight enough to miss most of what it exists to catch, so when you cap a
+sweep, measure what the cap excludes.
+
+**A cap is only as reproducible as its SELECTION, and that is the subtler half.** The first
+version stopped collecting after 32 distinct keys in *scan* order and sorted afterwards, while
+its own doc said "the first 32 in sorted order" — so which keys got swept moved with scan
+ordering. Fixing it to collect every distinct key first and apply the cap in sorted order
+*changed the measurement*: 14 detected before, 10 after, from the same corpus and the same
+defect. Neither number is wrong; they are counts over different samples. If you quote what a
+cap detects, quote the selection with it.
 
 ## Golden JSONL files
 

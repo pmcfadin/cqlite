@@ -1204,8 +1204,10 @@ through the gate-authored field.
   `SELECT *` and asserts BOTH directions of the column set** — no scan column absent from the point
   row, no point column the scan lacks — and reports the missing column BY NAME. The corpus-wide
   instance is `cqlite-core/tests/issue_3890_point_read_column_parity_sweep.rs`, whose per-table key
-  cap is MEASURED (at 4 keys/table it reached none of the 14 bad reads; at 32 it reaches all of them
-  in <1 s) — a bound tight enough to cost nothing can be tight enough to detect nothing.
+  cap is MEASURED (of the 10 point reads that decode badly pre-fix, a cap of 4 reaches 2 and a cap of
+  32 reaches all 10, in <1 s) — a bound tight enough to cost nothing can be tight enough to miss most
+  of what it exists to catch. And a cap is only as reproducible as its SELECTION: capping in scan
+  order and sorting afterwards made the same measurement read 14, because it sampled different keys.
 
 ### Fuzzing (issue #1614)
 `fuzz/` is a cargo-fuzz/libFuzzer crate in its own workspace, excluded from the main one — the gate

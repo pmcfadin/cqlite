@@ -25,17 +25,16 @@
 //! ever lost a column, and this sweep is GREEN both before and after the fix. It
 //! is therefore forward-looking coverage for the class, not a red-first pin of
 //! this instance. What the sweep DID measure, with the swallow temporarily
-//! instrumented (not committed): its 962 targeted reads produce 14 swallowed
+//! instrumented (not committed): its 962 targeted reads produce 10 swallowed
 //! `invalid cell flags` errors on `origin/main` and ZERO with the fix — the same
 //! signal as the two named regression tests (17 -> 0 on `test_basic.simple_table`,
 //! 2 -> 0 on the #953 repacked `test_da.wide_table`). Once #3721 removes the
-//! swallow those 14 become hard failures, and this sweep is the lane that runs
+//! swallow those 10 become hard failures, and this sweep is the lane that runs
 //! them.
 //!
 //! That measurement is also why [`MAX_KEYS_PER_TABLE`] is 32 and not 4: at 4 the
-//! sweep reached NONE of the 14 (the affected partitions are simply not among any
-//! table's first four keys) — a bound tight enough to make the lane cost nothing
-//! and detect nothing.
+//! sweep reaches only 2 of the 10 — a bound tight enough to make the lane cost
+//! nothing is a bound tight enough to miss most of what it exists to catch.
 //!
 //! # Derivation, not curation
 //!
@@ -202,9 +201,14 @@ const MUST_RUN: &[MustRun] = &[
     MustRun {
         keyspace: "test_big",
         table: "wide_partition",
-        why: "the corpus's largest committed multi-chunk compressed fixture (114 LZ4 chunks over \
-              ~1.8 MB), i.e. where an unbounded parse input overruns furthest into the successor \
-              partition; also the fixture the issue's stale `0x63` breadcrumb pointed at",
+        why: "the fixture the issue's third breadcrumb pointed at (a `clustering_seek_decode.rs` \
+              comment recording `invalid cell flags 0x63`, since moved or deleted — that path \
+              does not exist in this tree and `0x63` appears nowhere in cqlite-core/src). \
+              Independently, it is the largest committed multi-chunk compressed BIG (`nb`) \
+              fixture: 114 LZ4 chunks over a 1,837,037-byte UNCOMPRESSED data section (27,823 \
+              bytes on disk), read from CompressionInfo.db's header — `test_da.wide_table` is \
+              larger overall at 115 chunks but is BTI (`da`). See \
+              test-data/schemas/wide-partition-big.cql for the re-derivation command",
         binaries: Binaries::Committed,
     },
 ];
@@ -264,10 +268,16 @@ fn must_run_violations(
 /// function of the TABLE COUNT, not of the corpus's largest partition count,
 /// without ever skipping a table.
 ///
-/// 32 is MEASURED, not chosen for symmetry with the sibling lanes: at 4 the sweep
-/// reached none of the 14 point reads that decode badly on `origin/main`, at 32 it
-/// reaches all of them, and the whole sweep still runs in <1 s (962 targeted reads
-/// over 101 tables). Lowering it silently removes detection, not just cost.
+/// 32 is MEASURED, not chosen for symmetry with the sibling lanes: of the 10 point
+/// reads that decode badly on `origin/main`, a cap of 4 reaches **2** and a cap of
+/// 32 reaches **all 10** — and the whole sweep still runs in <1 s (962 targeted
+/// reads over 101 tables). Lowering it silently removes detection, not just cost.
+///
+/// Both figures are with the SELECTION BELOW (all distinct keys collected first,
+/// then the cap applied in sorted order). They moved when that was fixed — under
+/// the earlier scan-order selection the same measurement read 14 and 0 — which is
+/// exactly why the selection is load-bearing rather than incidental: change which
+/// keys are sampled and you change what the cap detects.
 const MAX_KEYS_PER_TABLE: usize = 32;
 
 /// Committed CQL schema files, discovered from the checkout (never a hardcoded
@@ -393,6 +403,28 @@ fn row_cells(row: &QueryRow) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// One partition-key tuple: `(column, rendered CQL literal)` per partition-key
+/// column, in schema order. The literals build the predicate; the TUPLE is what
+/// pairs a scanned row to a probe.
+type KeyTuple = Vec<(String, String)>;
+
+/// True iff `row`'s partition-key columns render to EXACTLY this tuple's literals,
+/// component by component.
+///
+/// This is the fix for a real false-failure: matching by `predicate.contains("pk =
+/// 1")` is satisfied by the predicate `pk = 10`, so key 10's oracle absorbed key
+/// 1's scanned rows. Compare structured values instead of making the rendered
+/// string more unusual (#3312: remove the shared channel, do not pick a rarer
+/// delimiter).
+fn row_key_equals(row: &QueryRow, tuple: &KeyTuple) -> bool {
+    tuple.iter().all(|(col, lit)| {
+        row.values
+            .get(col.as_str())
+            .and_then(cql_literal)
+            .is_some_and(|got| got == *lit)
+    })
+}
+
 /// One non-coverable discovered table, with the reason. Printed every run.
 #[derive(Debug)]
 struct Declared {
@@ -430,11 +462,24 @@ async fn sweep_table(
         );
     }
 
-    // Build the deterministic probe set: the first MAX_KEYS_PER_TABLE distinct
-    // partition-key tuples in sorted order, each rendered as CQL literals.
-    let mut predicates: BTreeMap<String, ()> = BTreeMap::new();
+    // Build the probe set. Every DISTINCT renderable partition-key tuple in the
+    // scan is collected FIRST, into an ordered map keyed by the tuple's rendered
+    // components, and only THEN is the cap applied — so the sampled keys are the
+    // first `MAX_KEYS_PER_TABLE` in SORTED order, which is what this file
+    // documents and what makes the cap's measured detection reproducible.
+    // Capping inside the collection loop instead took the first 32 in SCAN order
+    // and sorted afterwards, so which keys got swept moved with scan ordering.
+    //
+    // The map's VALUE is the STRUCTURED tuple (one `(column, literal)` per key
+    // column, in schema order). Pairing a scanned row to a probe is done against
+    // that tuple, component by component, never by searching the rendered
+    // predicate string: `pk = 10` CONTAINS `pk = 1`, so a substring test pulls
+    // key 1's rows into key 10's oracle — a false row-count/parity failure, and a
+    // real divergence masked by conflating two keys' rows. Structured comparison
+    // removes the shared channel rather than picking a rarer delimiter (#3312).
+    let mut probes: BTreeMap<Vec<String>, KeyTuple> = BTreeMap::new();
     for row in scan_rows {
-        let mut parts: Vec<String> = Vec::with_capacity(pk_cols.len());
+        let mut tuple: KeyTuple = Vec::with_capacity(pk_cols.len());
         for col in &pk_cols {
             let Some(v) = row.values.get(*col) else {
                 return TableOutcome::Declared(
@@ -448,14 +493,12 @@ async fn sweep_table(
                     format!("partition-key column '{col}' decoded as {v:?} (no CQL literal form)"),
                 );
             };
-            parts.push(format!("{col} = {lit}"));
+            tuple.push(((*col).to_string(), lit));
         }
-        predicates.insert(parts.join(" AND "), ());
-        if predicates.len() >= MAX_KEYS_PER_TABLE {
-            break;
-        }
+        let sort_key: Vec<String> = tuple.iter().map(|(_, lit)| lit.clone()).collect();
+        probes.insert(sort_key, tuple);
     }
-    if predicates.is_empty() {
+    if probes.is_empty() {
         return TableOutcome::Declared(
             "unrenderable-key",
             "no partition-key predicate could be rendered".to_string(),
@@ -463,7 +506,12 @@ async fn sweep_table(
     }
 
     let mut probed = 0usize;
-    for predicate in predicates.keys() {
+    for tuple in probes.values().take(MAX_KEYS_PER_TABLE) {
+        let predicate = tuple
+            .iter()
+            .map(|(col, lit)| format!("{col} = {lit}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
         let query = format!("SELECT * FROM {qualified} WHERE {predicate}");
         let point = match db.execute(&query).await {
             Ok(r) => r,
@@ -472,19 +520,12 @@ async fn sweep_table(
                 continue;
             }
         };
-        // Oracle: the scan rows belonging to this partition key, matched by the
-        // rendered predicate's own key columns so the pairing needs no second
-        // literal round-trip.
+        // Oracle: the scan rows whose partition key equals this probe's tuple —
+        // EXACT per-component equality of rendered values, never a substring of
+        // the predicate.
         let expected: Vec<&QueryRow> = scan_rows
             .iter()
-            .filter(|r| {
-                pk_cols.iter().all(|col| {
-                    r.values
-                        .get(*col)
-                        .and_then(cql_literal)
-                        .is_some_and(|lit| predicate.contains(&format!("{col} = {lit}")))
-                })
-            })
+            .filter(|r| row_key_equals(r, tuple))
             .collect();
         if expected.is_empty() {
             failures.push(format!(
@@ -869,4 +910,78 @@ fn must_run_violations_fire_for_every_non_running_outcome() {
             "MUST_RUN must name {required} (it is one of the fixtures #3890 is about); got {ids:?}"
         );
     }
+}
+
+/// The oracle pairing must be EXACT per key component, not a substring of the
+/// rendered predicate. Proof it discriminates the collision that motivated it:
+/// the predicate `pk = 10` contains the text `pk = 1`, so the substring form
+/// paired key 1's scanned row into key 10's oracle — inflating the expected row
+/// count into a false parity failure, and conflating two keys' rows so a real
+/// divergence in one could be masked by the other.
+#[test]
+fn oracle_pairing_is_exact_per_key_component_not_a_substring() {
+    let row = |pk: i32| QueryRow {
+        values: [(std::sync::Arc::from("pk"), Value::Integer(pk))]
+            .into_iter()
+            .collect(),
+        key: cqlite_core::RowKey::from(pk.to_be_bytes().to_vec()),
+        metadata: Default::default(),
+        cell_metadata: None,
+    };
+    let tuple_10: KeyTuple = vec![("pk".to_string(), "10".to_string())];
+    let tuple_1: KeyTuple = vec![("pk".to_string(), "1".to_string())];
+
+    assert!(row_key_equals(&row(10), &tuple_10), "10 must pair with 10");
+    assert!(row_key_equals(&row(1), &tuple_1), "1 must pair with 1");
+    // The collision, both directions.
+    assert!(
+        !row_key_equals(&row(1), &tuple_10),
+        "key 1's row must NOT pair with the probe for key 10 (the substring bug)"
+    );
+    assert!(
+        !row_key_equals(&row(10), &tuple_1),
+        "key 10's row must NOT pair with the probe for key 1"
+    );
+    // Positive control that the substring form really does collide, so this test
+    // is known to discriminate rather than merely to pass.
+    let predicate_10 = "pk = 10";
+    assert!(
+        predicate_10.contains("pk = 1"),
+        "the rendered predicate for key 10 DOES contain key 1's rendering — which is \
+         why the pairing may not be a substring test"
+    );
+
+    // A COMPOUND key: every component must match, not just the first.
+    let compound = |a: &str, b: i32| QueryRow {
+        values: [
+            (
+                std::sync::Arc::from("bucket"),
+                Value::Text(a.as_bytes().to_vec().into()),
+            ),
+            (std::sync::Arc::from("seq"), Value::Integer(b)),
+        ]
+        .into_iter()
+        .collect(),
+        key: cqlite_core::RowKey::from(a.as_bytes().to_vec()),
+        metadata: Default::default(),
+        cell_metadata: None,
+    };
+    let t: KeyTuple = vec![
+        ("bucket".to_string(), "'bo'".to_string()),
+        ("seq".to_string(), "5".to_string()),
+    ];
+    assert!(row_key_equals(&compound("bo", 5), &t));
+    assert!(
+        !row_key_equals(&compound("bo", 50), &t),
+        "a differing SECOND component must not pair"
+    );
+    assert!(
+        !row_key_equals(&compound("boo", 5), &t),
+        "a differing FIRST component must not pair"
+    );
+    // A row MISSING a key column can never pair (it is not evidence of equality).
+    assert!(
+        !row_key_equals(&row(10), &t),
+        "a row without the tuple's key columns must not pair"
+    );
 }

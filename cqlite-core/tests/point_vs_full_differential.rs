@@ -404,13 +404,16 @@ const CORPUS: &[TableCase] = &[
             ("bucket = 'bo' AND seq = 5", 1),
         ],
     },
-    // BIG (`nb`) COMPRESSED wide partition, 114 LZ4 chunks over ~1.8 MB (issue
-    // #3890). The other compressed cases here are small enough that the seek's
-    // chunk-rounded window barely overruns the target partition; this is the
-    // corpus's largest multi-chunk compressed fixture, so it is where an unbounded
-    // PARSE input walks furthest into the SUCCESSOR partition and re-reads its row
-    // body as a partition header. All rows are live, so the only divergence this
-    // case can report is a point path that dropped or over-collected rows.
+    // BIG (`nb`) COMPRESSED wide partition (issue #3890): 114 LZ4 chunks over a
+    // 1,837,037-byte UNCOMPRESSED data section (27,823 bytes on disk), read from
+    // CompressionInfo.db's header — the largest committed multi-chunk compressed
+    // BIG fixture, and second overall behind `test_da.wide_table` (115 chunks,
+    // BTI). `wide_table` above covers the BTI half; this covers the BIG half,
+    // where the seek's chunk-rounded window overruns furthest into the SUCCESSOR
+    // partition when the PARSE input is unbounded and the walker then re-reads a
+    // row body as a partition header. All rows are live, so the only divergence
+    // this case can report is a point path that dropped or over-collected rows.
+    // Re-derivation command: test-data/schemas/wide-partition-big.cql.
     TableCase {
         keyspace: "test_big",
         table: "wide_partition",
