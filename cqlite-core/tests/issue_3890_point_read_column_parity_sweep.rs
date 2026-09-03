@@ -20,13 +20,22 @@
 //! row — that is detectable now, and it is what makes a future instance of this
 //! class red a lane instead of being swallowed.
 //!
-//! MEASURED CAVEAT, stated rather than implied: on the fixtures in this corpus
-//! #3890's overrun landed entirely in the SUCCESSOR partition's bytes, so no
-//! TARGET-partition row ever lost a column and this sweep is GREEN both before
-//! and after the fix. It is therefore forward-looking coverage for the class, not
-//! a red-first pin of this instance. The red-first evidence for #3890 is the
-//! swallowed-error count (17 -> 0 on `test_basic.simple_table`, 2 -> 0 on the #953
-//! repacked `test_da.wide_table`), recorded in the PR.
+//! MEASURED CAVEAT, stated rather than implied: on this corpus #3890's overrun
+//! landed entirely in the SUCCESSOR partition's bytes, so no TARGET-partition row
+//! ever lost a column, and this sweep is GREEN both before and after the fix. It
+//! is therefore forward-looking coverage for the class, not a red-first pin of
+//! this instance. What the sweep DID measure, with the swallow temporarily
+//! instrumented (not committed): its 962 targeted reads produce 14 swallowed
+//! `invalid cell flags` errors on `origin/main` and ZERO with the fix — the same
+//! signal as the two named regression tests (17 -> 0 on `test_basic.simple_table`,
+//! 2 -> 0 on the #953 repacked `test_da.wide_table`). Once #3721 removes the
+//! swallow those 14 become hard failures, and this sweep is the lane that runs
+//! them.
+//!
+//! That measurement is also why [`MAX_KEYS_PER_TABLE`] is 32 and not 4: at 4 the
+//! sweep reached NONE of the 14 (the affected partitions are simply not among any
+//! table's first four keys) — a bound tight enough to make the lane cost nothing
+//! and detect nothing.
 //!
 //! # Derivation, not curation
 //!
@@ -45,7 +54,7 @@
 //!     was discovered to have been either swept or DECLARED non-coverable;
 //!   * within a table, at most [`MAX_KEYS_PER_TABLE`] DISTINCT partition keys are
 //!     probed, taken in sorted (deterministic) order — so a 400k-partition fixture
-//!     costs the same as a 4-partition one;
+//!     costs the same as a 32-partition one;
 //!   * exactly ONE full scan per table serves as the oracle for all its keys;
 //!   * exactly ONE ingest per (candidate root) — not per table.
 //!
@@ -95,7 +104,12 @@ use datasets_root::{describe_roots, repo_root, sstables_root_candidates, table_h
 /// Per-table cap on DISTINCT partition keys probed. Keeps the sweep's cost a
 /// function of the TABLE COUNT, not of the corpus's largest partition count,
 /// without ever skipping a table.
-const MAX_KEYS_PER_TABLE: usize = 4;
+///
+/// 32 is MEASURED, not chosen for symmetry with the sibling lanes: at 4 the sweep
+/// reached none of the 14 point reads that decode badly on `origin/main`, at 32 it
+/// reaches all of them, and the whole sweep still runs in <1 s (962 targeted reads
+/// over 101 tables). Lowering it silently removes detection, not just cost.
+const MAX_KEYS_PER_TABLE: usize = 32;
 
 /// Committed CQL schema files, discovered from the checkout (never a hardcoded
 /// list): `test-data/schemas/**/*.cql`, including the `legacy/` and `udts/`
@@ -369,7 +383,7 @@ async fn open_root(
     let cfg = IngestionConfig {
         schema_paths: schemas.to_vec(),
         data_dir: root.to_path_buf(),
-        version_hint: None,
+        version_hint: Some("5.0".to_string()),
         core_config: Config::default(),
         table_directory_filter: None,
     };
