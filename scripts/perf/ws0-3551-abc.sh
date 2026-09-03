@@ -77,8 +77,13 @@ ws0-3551-abc.sh — issue #3551 interleaved SMT-unpin + allocator trial
   --port N           Loopback port (default $PORT).
   -h, --help         This text.
 
-Arms: A=$PIN_A siblings/system · B=$PIN_B distinct-cores/system
-      C0=$PIN_B distinct-cores/system + MALLOC_ARENA_MAX · C=$PIN_B distinct-cores/jemalloc
+Arms: a 2x2 of PIN x ALLOCATOR, plus the arena probe. Deltas across ONE axis at a time are
+what is attributable; arm C differs from arm A in BOTH axes and on its own is not.
+
+                     glibc        jemalloc
+  1 phys core $PIN_A     A            D
+  2 phys cores $PIN_B    B            C
+  C0 = B + MALLOC_ARENA_MAX=$ARENA_MAX (#3217 partC F1-AC2's pre-registered arena experiment)
 
 \$OUT/abc-run.json is this set's RUN FINGERPRINT: the corpus path AND its recorded Data.db
 sha256 + row count, the --bin-dir path AND a digest of every measured binary in it, the arm set
@@ -115,7 +120,7 @@ done
 
 mkdir -p "$OUT"
 
-ARMS=(A B C0 C)
+ARMS=(A B C0 C D)
 
 arm_flags() {
   # The one place an arm's identity is defined. Printed into the run record below AND read back
@@ -126,6 +131,23 @@ arm_flags() {
     B)  printf '%s\n' --flight-server-cpus "$PIN_B" --flight-pin-mode distinct-cores --flight-allocator system ;;
     C0) printf '%s\n' --flight-server-cpus "$PIN_B" --flight-pin-mode distinct-cores --flight-allocator system --flight-malloc-arena-max "$ARENA_MAX" ;;
     C)  printf '%s\n' --flight-server-cpus "$PIN_B" --flight-pin-mode distinct-cores --flight-allocator jemalloc ;;
+    # ARM D EXISTS TO BREAK A CONFOUND, and it was added because the first 4-arm set measured
+    # one: arm C differs from arm A in TWO properties at once (the pin AND the allocator), so a
+    # C-vs-A delta cannot distinguish "jemalloc is worth X on this workload" from "jemalloc is
+    # what unlocks the second physical core that glibc's malloc was preventing the server from
+    # using". Those are different claims with different production consequences, and A->B
+    # (measured SLOWER on two cores under glibc) is what makes the second one plausible.
+    #
+    # With D the arm set is a clean 2x2 of pin x allocator, plus C0 as the arena probe:
+    #
+    #                 glibc      jemalloc
+    #   1 core 2,10      A          D
+    #   2 cores 2,3      B          C
+    #
+    # So (D-A) prices the allocator at a FIXED pin, (B-A) prices the pin at a FIXED allocator,
+    # and (C-D)-(B-A) is the interaction — which is the quantity the SMT hypothesis is actually
+    # about. Measuring only A/B/C leaves the headline attributable to either variable.
+    D)  printf '%s\n' --flight-server-cpus "$PIN_A" --flight-pin-mode siblings --flight-allocator jemalloc ;;
     *)  echo "FATAL: unknown arm '$1'" >&2; return 2 ;;
   esac
 }
