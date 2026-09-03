@@ -311,10 +311,10 @@ impl V5CompressedLegacyParser {
             }
             None => {
                 // The policy DECLINED the row with no error to report (#3782: an
-                // actual decode error took the `DecodeFailed` arm above, #3809: a
-                // refusal the `Refused` arm). Mid-stream that may
-                // be a row straddling the chunk boundary, so request more bytes
-                // unless this is the final chunk (where it is end-of-partition).
+                // actual decode error took the `DecodeFailed` arm above; #3809: a
+                // refusal took the `Refused` arm). Mid-stream that may be a row
+                // straddling the chunk boundary, so request more bytes unless this
+                // is the final chunk (where it is end-of-partition).
                 if at_final_chunk {
                     state.reset();
                     Ok(PartitionStreamStep::PartitionDone(0))

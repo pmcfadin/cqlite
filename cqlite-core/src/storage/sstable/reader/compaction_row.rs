@@ -492,8 +492,9 @@ impl CompactionRowData {
     /// builder.
     ///
     /// The IS_EMPTY/IS_NULL conflation named above is a real upstream read-path
-    /// divergence, but it is not this invariant's to fix: refusing a lost identity
-    /// BY VALUE requires the two states to be distinguishable here first.
+    /// divergence, tracked as issue #3988, but it is not this invariant's to fix:
+    /// refusing a lost identity BY VALUE requires the two states to be
+    /// distinguishable here first.
     ///
     /// # Why `Error::Corruption`, and what it does NOT claim
     ///

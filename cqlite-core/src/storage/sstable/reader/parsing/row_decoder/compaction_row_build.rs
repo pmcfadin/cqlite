@@ -169,7 +169,8 @@ impl V5CompressedLegacyParser {
             for ck in &schema.clustering_keys {
                 // PRESENCE is the whole test — the VALUE is deliberately not
                 // judged, `Value::Null` included; the refutation and its Cassandra
-                // citations are on the invariant itself (roborev #3809 job 93).
+                // citations are on the invariant itself (roborev #3809 job 93), and
+                // the upstream IS_EMPTY/IS_NULL conflation it turns on is #3988.
                 match simple_cells.iter().find(|c| c.column == ck.name) {
                     Some(c) => clustering.push((ck.name.clone(), c.value.clone())),
                     // Stop at the first gap: `clustering.len()` is then the
