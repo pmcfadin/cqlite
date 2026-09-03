@@ -13,7 +13,7 @@
 | `r3-A` | A | 3 | 3 | 2026-09-03T02:49:13Z → 2026-09-03T02:51:04Z | 11 | 0 | clean (census 0, max gap 10s) | 46.2% |
 | `r3-B` | B | 3 | 4 | 2026-09-03T02:51:04Z → 2026-09-03T02:53:08Z | 12 | 0 | clean (census 0, max gap 10s) | 42.3% |
 
-**All 12 sessions clean** — every in-window sample recorded `competing_count = 0`.
+**All 12 sessions clean** — every in-window sample carried a READABLE `competing_count` (a non-negative integer, `bool` refused) and recorded `competing_count = 0`.
 
 `competing_count` bounds compilers, linkers and the `agent-gate.sh` script and NOT total foreign load (issue #3551 D3), and it does not replace the drift control, which is what decides readability.
 

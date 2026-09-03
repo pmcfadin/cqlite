@@ -1069,7 +1069,8 @@ fi
 # case cannot red the suite. RE-DERIVE IT BY RUNNING THE SUITE at each addition, never by
 # counting the source — the loops and helpers multiply, and a source estimate understated a
 # floor by 29 elsewhere in this repo's history.
-MIN_CHECKS=90
+# MEASURED: 98 (fingerprint + provenance + configuration + ratio), 105 (+ the F1 fingerprint-absent cases).
+MIN_CHECKS=100
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

@@ -1,4 +1,4 @@
-Sessions examined: 42 across 3 set(s); **31 clean**, 11 contaminated, 0 UNDERCOVERED, 0 UNOBSERVED (an unobserved window is could-not-measure, never clean: the bound is the judge's own MAX_SAMPLE_GAP_S = 30s at a 10s cadence).
+Sessions examined: 42 across 3 set(s); **31 clean**, 11 contaminated, 0 UNDERCOVERED, 0 UNOBSERVED, 0 CENSUS-UNUSABLE (an unobserved window is could-not-measure, never clean: the bound is the judge's own MAX_SAMPLE_GAP_S = 30s at a 10s cadence; a CENSUS-UNUSABLE one carries a sample whose census fields cannot be read at all, which is a third fact again and is never counted clean).
 
 A pair is (baseline `A`, treatment) inside ONE round, with BOTH sessions clean. Method §3b step 4 differences within a round, so such a pair is valid regardless of any other round or arm.
 

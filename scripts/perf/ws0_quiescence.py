@@ -63,7 +63,7 @@ import os
 import pathlib
 import sys
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # Comm names that mean another lane is compiling or gating on this box. Matched against
 # /proc/<pid>/comm EXACTLY. `comm` is capped at 15 characters by the kernel, so a longer
@@ -135,6 +135,116 @@ DEFAULT_MAX_LOAD1_MOVEMENT = 0.5
 # this gate exists to prevent, inside the gate itself.
 SAMPLER_CADENCE_S = 10.0
 MAX_SAMPLE_GAP_S = 30.0
+
+# THE CENSUS FIELDS AND THE RULE FOR READING THEM — MODULE LEVEL SO THERE IS ONE COPY.
+#
+# These were locals of `window_census_clean`, which made the rule unimportable: the two
+# report-producing tools in `docs/reports/ws0-3551-artifacts/` had each written their own
+# `r.get("competing_count")` instead, and an absent, malformed or false-valued field read there
+# as ZERO CONTAMINATION — a published "clean" derived from a field nobody could read (roborev
+# #3551 round 3 F2). The rule now lives here, beside the bound those tools already import, and
+# `window_census_clean` uses it too, so the judge and the tools cannot drift into two opinions
+# about what a readable census record is.
+CENSUS_FIELDS = ("rustc", "cargo", "gate")
+FULL_CENSUS_FIELD = "competing_count"
+
+
+def is_census_count(value: object) -> bool:
+    """Is this an affirmative census COUNT — a non-negative int?
+
+    `bool` IS an `int` in Python and is REJECTED: `competing_count: true` would otherwise be a
+    count of 1 and `false` a count of 0, i.e. a schema error read as a measurement. This repo
+    has been bitten by exactly that, which is why the bool test comes first.
+    """
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def census_record_defect(rec: Dict[str, object], *,
+                         require_full_census: bool) -> Tuple[str, str]:
+    """Can this sample support a CLEAN verdict? `(state, reason)`, three-valued.
+
+    `("ok", "")`         every census field present and readable, `competing_count` included.
+    `("narrow", "")`     the narrow fields are readable and `competing_count` is ABSENT. Only
+                         reachable with `require_full_census=False`.
+    `("unusable", why)`  a field is absent or is not a non-negative integer count. `why` is a
+                         sentence whose subject is the sample, so a caller renders it as
+                         `the sample at <ts> <why>`.
+
+    THE TWO POLICIES, and why they differ. `window_census_clean` passes
+    `require_full_census=False`: a timeseries recorded before `competing_count` existed carries
+    the narrow census only, and the judge ACCEPTS it while RECORDING that narrowness
+    (`census_breadth`), so its verdict never implies coverage it does not have. The artifact
+    tools pass `True`, because their published verdict is the word "clean" with no breadth field
+    beside it — for them an absent `competing_count` is a census they cannot read, and a
+    positive verdict requires an affirmative measurement.
+    """
+    for field in CENSUS_FIELDS:
+        if field not in rec:
+            return ("unusable",
+                    f"carries no {field!r} field. An absent census field is falsy and would"
+                    " read as CLEAN, so a timeseries missing it cannot establish that the"
+                    " window was uncontaminated.")
+        if not is_census_count(rec[field]):
+            return ("unusable",
+                    f"has {field}={rec[field]!r}, which is not a non-negative integer count.")
+    if FULL_CENSUS_FIELD not in rec or rec[FULL_CENSUS_FIELD] is None:
+        if require_full_census:
+            return ("unusable",
+                    f"carries no readable {FULL_CENSUS_FIELD!r}. That field is the FULL census"
+                    " (the whole COMPETING_COMMS set, not just rustc/cargo/gate), and an"
+                    " absent one is falsy: reading it as zero contamination would certify a"
+                    " window on a census that was never taken.")
+        return ("narrow", "")
+    if not is_census_count(rec[FULL_CENSUS_FIELD]):
+        return ("unusable",
+                f"has {FULL_CENSUS_FIELD}={rec[FULL_CENSUS_FIELD]!r}, which is not a"
+                " non-negative integer count.")
+    return ("ok", "")
+
+
+def census_observed_competitor(rec: Dict[str, object]) -> bool:
+    """Did this sample OBSERVE a competing process? Only READABLE fields are counted.
+
+    Every value is passed through `is_census_count` before it is believed, so a malformed one is
+    never counted as a competitor by its truthiness (`"0"` is a non-empty string) and never as a
+    zero either: an unreadable record is `census_record_defect`'s `unusable` state, and this
+    predicate reports what the readable records said.
+
+    The NARROW fields are read as well as `competing_count`. `competing_count` is the superset in
+    every timeseries this rig has produced — it is computed from the same `COMPETING_COMMS` list —
+    so this costs one `any()` and asserts that relationship instead of assuming it.
+
+    `window_census_clean` deliberately does NOT call this, and the reason is a behaviour it must
+    keep: its own equivalent test is INTERLEAVED with the `load1` requirement, so a record whose
+    `competing_count` is non-zero is reported CONTAMINATED without also being required to carry a
+    readable `load1` (`continue`, before that check). Collapsing the two would turn a contaminated
+    sample with no `load1` into a SCHEMA refusal — a different named cause for the same box. The
+    part that must not drift is the FIELD RULE, and that is `is_census_count`, called here and
+    there. The two report-producing tools in `docs/reports/ws0-3551-artifacts/` have no such
+    interleaving and both call this.
+    """
+    if is_census_count(rec.get(FULL_CENSUS_FIELD)) and rec[FULL_CENSUS_FIELD]:
+        return True
+    return any(is_census_count(rec.get(field)) and rec[field] for field in CENSUS_FIELDS)
+
+
+def first_unusable_census_record(rows: List[Dict[str, object]], *,
+                                 require_full_census: bool = True) -> Optional[str]:
+    """The FIRST sample in `rows` that cannot support a clean verdict, rendered for a report.
+
+    `None` when every row is readable. Returned as `the sample at <ts> <reason>` so a caller can
+    print it verbatim: a verdict that says a record is unusable without NAMING it sends its
+    reader to look through a thousand samples.
+
+    Both artifact tools call this rather than looping themselves — the loop is trivial and the
+    RULE is what must not be duplicated, but two copies of the loop are two places for the
+    policy flag to be passed differently.
+    """
+    for rec in rows:
+        state, reason = census_record_defect(rec, require_full_census=require_full_census)
+        if state == "unusable":
+            return f"the sample at {rec.get('ts')!r} {reason}"
+    return None
 
 
 class NotQuiescent(Exception):
@@ -670,40 +780,28 @@ def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, obje
     # is authoritative when present. The individual fields remain accepted for a timeseries
     # recorded before that field existed — but such a record is explicitly a NARROWER census,
     # and the verdict says so rather than implying full coverage.
-    CENSUS_FIELDS = ("rustc", "cargo", "gate")
+    # THE RULE IS THE MODULE-LEVEL `census_record_defect`, not a copy of it here (roborev #3551
+    # round 3 F2). It was inline, and therefore unimportable, and the two report-producing tools
+    # in `docs/reports/ws0-3551-artifacts/` had each grown their own weaker version. The policy
+    # flag is the ONE difference between this caller and those: `require_full_census=False`
+    # accepts a pre-`competing_count` timeseries as a NARROW census and RECORDS the narrowness
+    # below, so this verdict never implies coverage it does not have.
     narrow_census_records = 0
     dirty = []
     for rec in rows:
-        counts = {}
-        for field in CENSUS_FIELDS:
-            if field not in rec:
-                raise NotQuiescent(
-                    "QUIESCENCE_TIMESERIES_SCHEMA",
-                    f"the sample at {rec.get('ts')!r} carries no {field!r} field. An absent"
-                    " census field is falsy and would read as CLEAN, so a timeseries missing"
-                    " it cannot establish that the window was uncontaminated.",
-                )
-            value = rec[field]
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise NotQuiescent(
-                    "QUIESCENCE_TIMESERIES_SCHEMA",
-                    f"the sample at {rec.get('ts')!r} has {field}={value!r}, which is not a"
-                    " non-negative integer count.",
-                )
-            counts[field] = value
+        state, reason = census_record_defect(rec, require_full_census=False)
+        if state == "unusable":
+            raise NotQuiescent(
+                "QUIESCENCE_TIMESERIES_SCHEMA",
+                f"the sample at {rec.get('ts')!r} {reason}",
+            )
+        counts = {field: rec[field] for field in CENSUS_FIELDS}
         # `competing_count` is the FULL census when the sampler provides it. Its absence is
         # recorded, never silently treated as equivalent coverage.
-        full = rec.get("competing_count")
-        if full is None:
+        if state == "narrow":
             narrow_census_records += 1
         else:
-            if isinstance(full, bool) or not isinstance(full, int) or full < 0:
-                raise NotQuiescent(
-                    "QUIESCENCE_TIMESERIES_SCHEMA",
-                    f"the sample at {rec.get('ts')!r} has competing_count={full!r}, which is"
-                    " not a non-negative integer count.",
-                )
-            if full:
+            if rec[FULL_CENSUS_FIELD]:
                 dirty.append(rec)
                 continue
         # LOAD1 IS REQUIRED AND MUST BE FINITE (finding 4). Without this, a census-complete

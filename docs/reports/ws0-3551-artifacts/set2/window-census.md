@@ -16,7 +16,7 @@
 | `r3-A` | A | 3 | 4 | 2026-09-03T03:22:24Z → 2026-09-03T03:24:15Z | 11 | 6 | **CONTAMINATED** (6 of 11) | 83.1% |
 | `r3-B` | B | 3 | 5 | 2026-09-03T03:24:15Z → 2026-09-03T03:26:21Z | 12 | 0 | clean (census 0, max gap 10s) | 41.7% |
 
-**8 of 15 session(s) NOT USABLE** (contaminated, undercovered, or unobserved): `r1-C`, `r1-D`, `r2-B`, `r2-C0`, `r3-C0`, `r3-C`, `r3-D`, `r3-A`
+**8 of 15 session(s) NOT USABLE** (contaminated, undercovered, unobserved, or census-unusable): `r1-C`, `r1-D`, `r2-B`, `r2-C0`, `r3-C0`, `r3-C`, `r3-D`, `r3-A`
 
 `competing_count` bounds compilers, linkers and the `agent-gate.sh` script and NOT total foreign load (issue #3551 D3), and it does not replace the drift control, which is what decides readability.
 

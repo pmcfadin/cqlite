@@ -1523,7 +1523,8 @@ fi
 # in this repo's history. MEASURED: 56 (pin/allocator/report), 66 (+ items 5/7's counting
 # domain), 80 (+ item 9's environ and arena), 91 (+ item 10's admission read-back), 103
 # (+ item 8's environment records).
-MIN_CHECKS=90
+# MEASURED: 103 (through item 8's environment records), 120 (+ the F3 maps field-parse cases).
+MIN_CHECKS=115
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

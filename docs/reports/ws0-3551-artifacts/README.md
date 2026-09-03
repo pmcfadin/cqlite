@@ -39,7 +39,21 @@ every derived table plus the fingerprints and digests that say what produced the
 
 ## The guard suite
 
-`scripts/tests/test_ws0_3551_artifact_tools.sh` (86 checks, in the gate's `tooling-tests`) covers
-the two tools here. It exists because they had **no tests when they produced these figures** and
-roborev found a real coverage defect in them; the figures were re-derived under it afterwards,
-unchanged.
+`scripts/tests/test_ws0_3551_artifact_tools.sh` (137 checks, in the gate's `tooling-tests`)
+covers the two tools here. It exists because they had **no tests when they produced these
+figures** and roborev found real defects in them: first a coverage defect (a non-empty sample set
+read as coverage), then a census one — the census field was read with an unvalidated dict `get`,
+so an ABSENT, malformed or `false` `competing_count` was zero contamination and a fully covered
+window could be published CLEAN on a census nobody could read. Both rules are now IMPORTED from
+the committed judge rather than restated here, and `census-unusable` is its own verdict beside
+`contaminated`, `undercovered` and `unobserved`.
+
+The figures were re-derived under each fix, **unchanged**. For the census fix, measured by running
+the pre-fix and post-fix tools over the same three set roots and the same committed timeseries:
+every per-session verdict, every count and every median is identical, and all 1091 records of
+`quiescence/box-load-frozen.jsonl` carry a readable `competing_count` and readable
+`rustc`/`cargo`/`gate`. What changed in the published tables is two sentences of vocabulary.
+`set*/window-census.md` keeps its pinned-CPU column, which came from the UNTRIMMED timeseries and
+cannot be re-derived from the committed trimmed one (see above), so those files were updated at
+the footer sentence only rather than overwritten with a regeneration that would have replaced the
+column with `NOT MEASURED`.

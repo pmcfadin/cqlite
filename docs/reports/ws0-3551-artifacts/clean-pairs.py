@@ -41,7 +41,12 @@ if not (_PERF / "ws0_quiescence.py").is_file():
     raise SystemExit(f"REFUSED: cannot locate ws0_quiescence.py under {_PERF}; the coverage rule "
                      "is imported from the committed judge and is not restated here")
 sys.path.insert(0, str(_PERF))
-from ws0_quiescence import MAX_SAMPLE_GAP_S, SAMPLER_CADENCE_S  # noqa: E402
+from ws0_quiescence import (  # noqa: E402
+    MAX_SAMPLE_GAP_S,
+    SAMPLER_CADENCE_S,
+    census_observed_competitor,
+    first_unusable_census_record,
+)
 
 SCAN = "bare_scan"
 
@@ -107,8 +112,8 @@ def coverage_gap(sess: dict, win: list[dict]) -> float | None:
     return max(gaps)
 
 
-def clean(sess: dict, rows: list[dict]) -> tuple[str, int, int, float | None]:
-    """Three-valued: `clean` / `contaminated` / `undercovered`.
+def clean(sess: dict, rows: list[dict]) -> tuple[str, int, int, float | None, str]:
+    """Five-valued: `clean` / `contaminated` / `census-unusable` / `unobserved` / `undercovered`.
 
     A NON-EMPTY sample set is NOT coverage, and treating it as coverage was a real defect in
     this tool's first version (roborev, #3551 round 2): one zero-census sample anywhere in a
@@ -117,12 +122,38 @@ def clean(sess: dict, rows: list[dict]) -> tuple[str, int, int, float | None]:
     file's docstring already claimed to follow — implemented for the empty case and not for the
     undercovered one, which is the harder half. The bound is the JUDGE's own MAX_SAMPLE_GAP_S,
     imported rather than restated.
+
+    AND THE CENSUS FIELD ITSELF IS VALIDATED BEFORE ANYTHING IS DERIVED FROM IT (roborev #3551
+    round 3 F2). The census field was read with a bare, unvalidated dict `get`, so an ABSENT,
+    MALFORMED or FALSE-VALUED
+    census field was zero contamination: a fully covered window whose samples carried no
+    readable census could be published as CLEAN — the same "a pass derived from the absence of a
+    bad signal" defect the committed judge had already fixed in its own copy of this rule, which
+    is why the rule is now IMPORTED from it rather than written again here. `census-unusable` is
+    its own state because "the census says a competitor was present", "the window was too
+    sparsely observed" and "the record cannot be read at all" are three different operator
+    facts.
+
+    VALIDATION PRECEDES DERIVATION, which is what fixes the ORDER as well as the rule: `comp`
+    and the coverage gap are both DERIVED FROM these records, so a record that cannot be read
+    makes any verdict derived from the set partly unreadable — and a malformed value would
+    otherwise be counted as a competitor by its own truthiness (a `competing_count` of `"0"` is
+    a non-empty string). The count of valid records that DID show a competitor is carried into
+    the reason, so a positive contamination observation is never lost to the unusable verdict.
     """
     win = [r for r in rows if sess["started"] <= r["ts"] <= sess["ended"]]
-    comp = sum(1 for r in win if r.get("competing_count"))
+    unusable = first_unusable_census_record(win)
+    if unusable is not None:
+        comp = sum(1 for r in win if census_observed_competitor(r))
+        also = f"; {comp} readable in-window sample(s) DID show a competitor" if comp else ""
+        return "census-unusable", comp, len(win), coverage_gap(sess, win), unusable + also
+    # Every record is readable here, so the count is a MEASUREMENT. The predicate is the judge's
+    # own, imported: which fields make a sample contaminated is exactly the kind of rule that
+    # must not have a second copy in a tool whose whole claim is agreement with the gate.
+    comp = sum(1 for r in win if census_observed_competitor(r))
     gap = coverage_gap(sess, win)
     if comp:
-        return "contaminated", comp, len(win), gap
+        return "contaminated", comp, len(win), gap, ""
     # "COULD NOT MEASURE AT ALL" AND "MEASURED TOO SPARSELY" ARE DIFFERENT OPERATOR FACTS and
     # get different states, matching `window-census.py`'s text. Collapsing them onto one label
     # was a declared residual of the first version; the two tools implement ONE three-valued
@@ -130,10 +161,10 @@ def clean(sess: dict, rows: list[dict]) -> tuple[str, int, int, float | None]:
     # reader. Neither is ever counted clean, so no published figure turns on the distinction —
     # which is exactly why it was cheap to make them agree.
     if gap is None:
-        return "unobserved", comp, len(win), gap
+        return "unobserved", comp, len(win), gap, ""
     if gap > MAX_SAMPLE_GAP_S:
-        return "undercovered", comp, len(win), gap
-    return "clean", comp, len(win), gap
+        return "undercovered", comp, len(win), gap, ""
+    return "clean", comp, len(win), gap, ""
 
 
 def _append_excluded(out: list[str], excluded: list[str]) -> None:
@@ -182,7 +213,7 @@ def main(argv=None) -> int:
             s = session(d)
             total += 1
             s["set"] = label
-            s["state"], s["comp"], s["nsamp"], s["gap"] = clean(s, rows)
+            s["state"], s["comp"], s["nsamp"], s["gap"], s["why"] = clean(s, rows)
             s["clean"] = s["state"] == "clean"
             grid.setdefault((label, s["round"]), {})[s["arm"]] = s
 
@@ -214,11 +245,24 @@ def main(argv=None) -> int:
     out.append(f"Sessions examined: {total} across {len(sets)} set(s); "
                f"**{nclean} clean**, {states.count('contaminated')} contaminated, "
                f"{states.count('undercovered')} UNDERCOVERED, "
-               f"{states.count('unobserved')} UNOBSERVED (an unobserved window is "
+               f"{states.count('unobserved')} UNOBSERVED, "
+               f"{states.count('census-unusable')} CENSUS-UNUSABLE (an unobserved window is "
                f"could-not-measure, never clean: the bound is the judge's own "
                f"MAX_SAMPLE_GAP_S = {MAX_SAMPLE_GAP_S:.0f}s at a {SAMPLER_CADENCE_S:.0f}s "
-               f"cadence).")
+               f"cadence; a CENSUS-UNUSABLE one carries a sample whose census fields cannot be "
+               f"read at all, which is a third fact again and is never counted clean).")
     out.append("")
+    # NAMED, NOT COUNTED. A count says a record could not be read; it does not say WHICH, and
+    # the operator's next action is on that record. Printed for every unusable session, so this
+    # state can never be inferred only from a number in the line above.
+    unusable = [s for g in grid.values() for s in g.values() if s["state"] == "census-unusable"]
+    if unusable:
+        out.append(f"### {len(unusable)} session(s) CENSUS-UNUSABLE — the census could not be "
+                   "read, so no pair from them is counted")
+        out.append("")
+        for s in sorted(unusable, key=lambda s: (s["set"], s["round"], s["arm"])):
+            out.append(f"* {s['set']} r{s['round']} {s['arm']} (`{s['dir'].name}`): {s['why']}")
+        out.append("")
     out.append(f"A pair is (baseline `{args.baseline}`, treatment) inside ONE round, with BOTH "
                "sessions clean. Method §3b step 4 differences within a round, so such a pair is "
                "valid regardless of any other round or arm.")

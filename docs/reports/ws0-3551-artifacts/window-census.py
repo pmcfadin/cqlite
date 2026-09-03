@@ -44,7 +44,17 @@ _PERF = pathlib.Path(__file__).resolve().parents[3] / "scripts" / "perf"
 if not (_PERF / "ws0_quiescence.py").is_file():
     raise SystemExit(f"REFUSED: cannot locate ws0_quiescence.py under {_PERF}")
 sys.path.insert(0, str(_PERF))
-from ws0_quiescence import MAX_SAMPLE_GAP_S  # noqa: E402
+# The coverage BOUND and the CENSUS-FIELD RULE are both imported. The second one is here because
+# this tool read the census field with a bare, unvalidated dict `get`, so an absent, malformed
+# or false-valued census field
+# was zero contamination and a fully covered window could be published CLEAN on a census nobody
+# could read (roborev #3551 round 3 F2). The committed judge had already fixed that in its own
+# copy of the rule; importing it is what stops the two disagreeing again.
+from ws0_quiescence import (  # noqa: E402
+    MAX_SAMPLE_GAP_S,
+    census_observed_competitor,
+    first_unusable_census_record,
+)
 
 PINS = (2, 3, 10, 11)
 
@@ -121,7 +131,11 @@ def main(argv=None) -> int:
     for name, rec in sorted(sessions, key=lambda s: s[1]["started"]):
         lo, hi = rec["started"], rec["ended"]
         win = [r for r in rows if lo <= r["ts"] <= hi]
-        comp = sum(1 for r in win if r.get("competing_count"))
+        # VALIDATION PRECEDES DERIVATION: both the count below and the coverage gap are derived
+        # from these records, so a record that cannot be read makes any verdict over the set
+        # partly unreadable.
+        unusable = first_unusable_census_record(win)
+        comp = sum(1 for r in win if census_observed_competitor(r))
         busies = []
         for a, b in zip(win, win[1:]):
             vals = [busy_between(a, b, c) for c in PINS]
@@ -131,7 +145,16 @@ def main(argv=None) -> int:
         busies.sort()
         med = f"{busies[len(busies)//2]:.1f}%" if busies else "NOT MEASURED"
         gap = largest_gap(lo, hi, win)
-        if comp:
+        if unusable is not None:
+            # ITS OWN STATE, and NAMED. "the census says a competitor was present", "the window
+            # was too sparsely observed" and "the record cannot be read at all" are three
+            # different operator facts; only the first is a measurement of the box. The count of
+            # readable samples that DID show a competitor is carried along so that observation
+            # is not lost to this verdict.
+            also = f"; {comp} readable sample(s) DID show a competitor" if comp else ""
+            verdict = f"**CENSUS-UNUSABLE** ({unusable}{also})"
+            dirty_sessions.append(name)
+        elif comp:
             verdict = f"**CONTAMINATED** ({comp} of {len(win)})"
             dirty_sessions.append(name)
         elif gap is None:
@@ -150,11 +173,12 @@ def main(argv=None) -> int:
     out.append("")
     if dirty_sessions:
         out.append(f"**{len(dirty_sessions)} of {len(sessions)} session(s) NOT USABLE** "
-                   "(contaminated, undercovered, or unobserved): "
+                   "(contaminated, undercovered, unobserved, or census-unusable): "
                    + ", ".join(f"`{s}`" for s in dirty_sessions))
     else:
-        out.append(f"**All {len(sessions)} sessions clean** — every in-window sample recorded "
-                   "`competing_count = 0`.")
+        out.append(f"**All {len(sessions)} sessions clean** — every in-window sample carried a "
+                   "READABLE `competing_count` (a non-negative integer, `bool` refused) and "
+                   "recorded `competing_count = 0`.")
     out.append("")
     out.append("`competing_count` bounds compilers, linkers and the `agent-gate.sh` script "
                "and NOT total foreign load (issue #3551 D3), and it does not replace the drift "

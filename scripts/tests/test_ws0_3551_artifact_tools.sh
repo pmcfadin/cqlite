@@ -37,19 +37,23 @@
 # `$TMPDIR` by the two fixture writers below. The only committed files read are the two tools
 # and `scripts/perf/ws0_quiescence.py`, whose constant is the subject of case 0b.
 #
-# # DECLARED RESIDUAL, because a suite that omits coverage silently is indistinguishable from
-# # one that has it
+# # THE STATE VOCABULARY, and what this suite pins about each tool's spelling of it
 #
-# The two tools do NOT agree on the TEXT for a window with no covering sample at all.
-# `window-census.py` distinguishes `NOT MEASURED (no sample covers this window)` from
-# `**UNDERCOVERED** (…)`, which is right — "the scan could not be performed" and "the scan was
-# too sparse" are different operator facts. `clean-pairs.py` collapses both onto the state
-# `undercovered` (`clean()`: `if gap is None or gap > MAX_SAMPLE_GAP_S`). Case 4 therefore
-# asserts the DISTINCTION where it exists and, on `clean-pairs.py`, asserts only the property
-# that matters for the published figures — the session is NOT clean and its pair is NOT counted
-# — deliberately NOT pinning that tool's label, so making the two agree is not a change this
-# suite reds on. The divergence is reported rather than fixed here: regenerating
-# `clean-pairs.md` needs the live measurement outputs and is a change to a published report.
+# Five states, and they are FIVE because they are five different operator actions: `clean`,
+# `contaminated` (the census OBSERVED a competitor), `census-unusable` (a sample's census fields
+# cannot be READ at all — roborev round 3 F2), `unobserved` (no sample covers the window) and
+# `undercovered` (samples intersect the window but do not cover it). Both tools implement one
+# rule and both now carry the same vocabulary; the underlying field rule is IMPORTED from the
+# committed judge (`census_record_defect` / `census_observed_competitor` /
+# `first_unusable_census_record`), never restated, which is what case 5b-10 pins structurally.
+#
+# WHAT IS PINNED PER TOOL. `window-census.py`'s verdict TEXT is asserted (it is the published
+# table), including that `NOT MEASURED (no sample covers this window)`, `**UNDERCOVERED**` and
+# `**CENSUS-UNUSABLE**` are textually DISTINCT — spelling two of them the same way would hide a
+# real distinction in a report. On `clean-pairs.py` the per-session label is asserted only where
+# it reaches the published summary line (`N CENSUS-UNUSABLE`, `N UNDERCOVERED`); case 4
+# deliberately pins only the PROPERTY that matters for the figures — the session is not clean and
+# its pair is not counted — so a later wording change there is not a red.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -249,6 +253,43 @@ for line in pathlib.Path(path).read_text().splitlines():
 sys.stderr.write(f"no row {key!r} in a table headed {header0!r} in {path}\n")
 raise SystemExit(3)
 PY
+
+# `censusmut.py FILE OFFSET FIELD VALUE` — set (or with `__DELETE__`, remove) ONE census field
+# of the ONE sample at BASE+OFFSET, leaving every other byte of the timeseries alone. That is what
+# makes each census arm below a single-property RED arm: same windows, same figures, same
+# coverage, one field of one in-window record.
+cat > "$TMP/censusmut.py" <<'CMPY'
+import datetime
+import json
+import pathlib
+import sys
+
+BASE = datetime.datetime(2026, 9, 3, 2, 0, 0, tzinfo=datetime.timezone.utc)
+path = pathlib.Path(sys.argv[1])
+want = (BASE + datetime.timedelta(seconds=int(sys.argv[2]))).strftime("%Y-%m-%dT%H:%M:%SZ")
+field, raw = sys.argv[3], sys.argv[4]
+
+out = []
+hits = 0
+for line in path.read_text().splitlines():
+    if not line.strip():
+        continue
+    rec = json.loads(line)
+    if rec.get("ts") == want:
+        hits += 1
+        if raw == "__DELETE__":
+            rec.pop(field, None)
+        else:
+            rec[field] = json.loads(raw)
+    out.append(json.dumps(rec))
+# THE PLANT IS ASSERTED TO HAVE TAKEN: an offset matching no sample would leave the file
+# untouched, and the RED arm would then be testing the unmutated fixture.
+if hits != 1:
+    sys.stderr.write(f"PLANT DID NOT TAKE: {hits} sample(s) at {want} in {path}\n")
+    raise SystemExit(1)
+path.write_text("\n".join(out) + "\n")
+print(want)
+CMPY
 
 isot() { python3 "$TMP/iso.py" "$1"; }
 mkts() { python3 "$TMP/mkts.py" "$@"; }
@@ -470,9 +511,9 @@ if grep -qF 'NOT USABLE' "$RUNOUT" && grep -qF '`r1-B`' "$RUNOUT"; then
 else
   fail "4. the footer must name the unusable session (out: $(tailout))"
 fi
-# On `clean-pairs.py` only the PROPERTY is asserted, never the label: see this file's DECLARED
-# RESIDUAL — that tool collapses `no covering sample` onto its `undercovered` state, and
-# pinning the collapsed label here would red the suite on a later fix that separates them.
+# On `clean-pairs.py` only the PROPERTY is asserted here, never the per-session label: see this
+# file's vocabulary note. Its summary-line counts ARE pinned (case 2 asserts `1 UNDERCOVERED`,
+# case 5b `1 CENSUS-UNUSABLE`), because those reach the published report.
 pairs_run "$TS_NONE" "set1=$COV"
 if [ "$rc" -eq 0 ] && grep -qF '**NO CLEAN PAIRS.**' "$RUNOUT" && grep -qF '**1 clean**' "$RUNOUT"; then
   pass "4. ...and clean-pairs counts only the OBSERVED session clean (1 of 2) and forms no pair"
@@ -525,6 +566,174 @@ if [ "$rc" -eq 0 ] && grep -qF '**0 clean**' "$RUNOUT" && grep -qF '1 UNDERCOVER
 else
   fail "5. clean-pairs must refuse a gap of ${OVER}s (rc=$rc, out: $(head -1 "$RUNOUT"))"
 fi
+
+# ===========================================================================
+# PART 1b — THE CENSUS FIELD ITSELF (roborev #3551 round 3 F2)
+# ===========================================================================
+# Both tools read `r.get("competing_count")`, so an ABSENT, MALFORMED or FALSE-VALUED census
+# field was ZERO CONTAMINATION: a fully covered window whose samples carried no readable census
+# could be published CLEAN. That is a pass derived from the ABSENCE of a bad signal, in the two
+# tools whose stdout IS this issue's published result — and the committed judge had ALREADY
+# fixed the same defect in its own copy of the rule, which is why these cases also pin that the
+# rule is IMPORTED from it rather than written a third time.
+#
+# Every arm uses the case-1 fixture and the case-1 timeseries with ONE field of ONE in-window
+# record changed, so the coverage, the windows and the figures are identical to the POSITIVE
+# CONTROL that case 1 already established. `census-unusable` is asserted to be TEXTUALLY
+# DISTINCT from the contaminated and coverage verdicts, because those are three different
+# operator facts.
+census_arm() { # census_arm <label> <field> <json-value|__DELETE__> <expected-cause-substring>
+  local label="$1" field="$2" value="$3" cause="$4"
+  local ts_bad="$TMP/ts-census-$label.jsonl" planted verdict
+  mkts "$ts_bad" "$(cadence_offsets 0 240)" - on
+  # Offset 150s is inside r1-B's window [120s, 240s] and outside r1-A's [0s, 120s], so r1-A is
+  # the untouched half of every arm below.
+  if ! planted=$(python3 "$TMP/censusmut.py" "$ts_bad" 150 "$field" "$value"); then
+    fail "$label. PLANT DID NOT TAKE: no in-window sample at +150s to mutate — this arm would test the unmutated fixture"
+    return
+  fi
+  census_run "$COV" "$ts_bad"
+  verdict="$(mdcell "$RUNOUT" session r1-B verdict)"
+  if [ "$rc" -eq 0 ] && grep -qF '**CENSUS-UNUSABLE**' <<<"$verdict" \
+    && grep -qF "$planted" <<<"$verdict" && grep -qF "$cause" <<<"$verdict"; then
+    pass "$label. window-census: r1-B is CENSUS-UNUSABLE, NAMING the record ($planted) and the cause: '$verdict'"
+  else
+    fail "$label. an unusable census record must make the session CENSUS-UNUSABLE, naming the record and the cause '$cause' (rc=$rc, verdict: '$verdict')"
+  fi
+  # The three states are DIFFERENT operator facts, so the text must not be either of the others.
+  if ! grep -qE 'CONTAMINATED|UNDERCOVERED|NOT MEASURED \(no sample' <<<"$verdict"; then
+    pass "$label. ...and that verdict is textually DISTINCT from CONTAMINATED / UNDERCOVERED / NOT MEASURED"
+  else
+    fail "$label. CENSUS-UNUSABLE must not be spelled as any other state (verdict: '$verdict')"
+  fi
+  # r1-A's window holds no mutated record, so it must be unaffected — the finding is the planted
+  # field, not the fixture.
+  if grep -q '^clean (census 0' <<<"$(mdcell "$RUNOUT" session r1-A verdict)"; then
+    pass "$label. ...and r1-A, whose window holds no mutated sample, still reads clean"
+  else
+    fail "$label. r1-A must be unaffected (got: $(mdcell "$RUNOUT" session r1-A verdict))"
+  fi
+  if grep -qF 'NOT USABLE' "$RUNOUT" && grep -qF '`r1-B`' "$RUNOUT"; then
+    pass "$label. ...and the footer lists r1-B as NOT USABLE"
+  else
+    fail "$label. the footer must name r1-B unusable (out: $(tailout))"
+  fi
+  # clean-pairs: the session is NOT clean, its PAIR is NOT counted, and the unusable record is
+  # NAMED in its own section — a count alone does not say which record to go and look at.
+  pairs_run "$ts_bad" "set1=$COV"
+  if [ "$rc" -eq 0 ] && grep -qF '**NO CLEAN PAIRS.**' "$RUNOUT" \
+    && grep -qF '**1 clean**' "$RUNOUT" && grep -qF '1 CENSUS-UNUSABLE' "$RUNOUT"; then
+    pass "$label. clean-pairs: 1 clean, 1 CENSUS-UNUSABLE, and NO pair counted"
+  else
+    fail "$label. clean-pairs must not count the pair (rc=$rc, out: $(head -3 "$RUNOUT"))"
+  fi
+  if grep -qF 'session(s) CENSUS-UNUSABLE' "$RUNOUT" && grep -qF "$planted" "$RUNOUT" \
+    && grep -qF "$cause" "$RUNOUT"; then
+    pass "$label. ...and clean-pairs NAMES the unusable record ($planted) and the cause in its own section"
+  else
+    fail "$label. clean-pairs must name the unusable record and cause (out: $(tail -6 "$RUNOUT"))"
+  fi
+}
+
+# 5b-1. ABSENT — the exact shape the finding describes: a fully covered, zero-competing window
+# with `competing_count` missing from ONE in-window record.
+census_arm 5b-1-absent competing_count __DELETE__ "carries no readable 'competing_count'"
+# 5b-2. A NON-INTEGER value. `"0"` is chosen deliberately: it is a STRING, so a `.get()`
+# truthiness read would have counted it as a COMPETITOR (wrong state, right refusal) while
+# `"0" == 0` is false — the two-valued reading is wrong in both directions at once.
+census_arm 5b-2-string competing_count '"0"' 'has competing_count='
+# 5b-3. NEGATIVE — a count that cannot be one.
+census_arm 5b-3-negative competing_count '-1' 'has competing_count=-1'
+# 5b-4/5. `true` and `false`, THE BOOL CASE. `bool` IS an `int` in Python, so an
+# `isinstance(v, int)` check alone accepts them: `true` would be a count of 1 and `false` a count
+# of 0 — a schema error read as a measurement, and the direction that matters is `false`, which
+# reads as CLEAN. This repo has been bitten by exactly that, so both are driven.
+census_arm 5b-4-true competing_count 'true' 'has competing_count=True'
+census_arm 5b-5-false competing_count 'false' 'has competing_count=False'
+# 5b-6/7. THE NARROW FIELDS ARE REQUIRED TOO, matching the committed judge, which raises
+# QUIESCENCE_TIMESERIES_SCHEMA on an absent or non-integer `rustc`/`cargo`/`gate`. A tool that
+# validated only `competing_count` would accept a record the gate itself refuses.
+census_arm 5b-6-narrow-absent rustc __DELETE__ "carries no 'rustc' field"
+census_arm 5b-7-narrow-float gate '1.5' 'has gate=1.5'
+
+# 5b-8. THE POSITIVE CONTROL ON THE MUTATOR ITSELF. Every arm above rests on the mutator being
+# able to leave a fixture the tools still accept: if `censusmut.py` corrupted the file, all eight
+# arms would red for a reason that has nothing to do with the census rule. So the SAME mutation
+# path writing a VALID `0` must leave both sessions clean and the pair counted.
+TS_CENSUS_OK="$TMP/ts-census-valid-zero.jsonl"
+mkts "$TS_CENSUS_OK" "$(cadence_offsets 0 240)" - on
+if planted=$(python3 "$TMP/censusmut.py" "$TS_CENSUS_OK" 150 competing_count '0'); then
+  census_run "$COV" "$TS_CENSUS_OK"
+  if [ "$rc" -eq 0 ] && grep -qF 'All 2 sessions clean' "$RUNOUT"; then
+    pass "5b-8. CONTROL: the same mutation path writing a VALID 0 at $planted leaves both sessions clean — the eight arms above are the VALUE, not the mutator"
+  else
+    fail "5b-8. a valid 0 written by the mutator must stay clean (rc=$rc, out: $(tailout))"
+  fi
+  pairs_run "$TS_CENSUS_OK" "set1=$COV"
+  # The AFFIRMATIVE count, not the absence of the token: the summary line legitimately carries
+  # `0 CENSUS-UNUSABLE`, so an absence test would red on a correct report — and would also pass
+  # if the state were renamed. `0 CENSUS-UNUSABLE` plus no named section is the readable form.
+  if [ "$rc" -eq 0 ] && [ "$(mdcell "$RUNOUT" arm B 'clean pairs')" = "1" ] \
+    && grep -qF '0 CENSUS-UNUSABLE' "$RUNOUT" \
+    && ! grep -qF 'session(s) CENSUS-UNUSABLE' "$RUNOUT"; then
+    pass "5b-8. ...and clean-pairs counts the pair, reports 0 CENSUS-UNUSABLE and names no unusable session"
+  else
+    fail "5b-8. the valid-zero fixture must pair (rc=$rc, out: $(head -3 "$RUNOUT"))"
+  fi
+else
+  fail "5b-8. the mutator must be able to write a valid 0 — without this control the arms above prove nothing"
+fi
+
+# 5b-9. THE DIVERGENCE FROM THE JUDGE IS DELIBERATE, AND PINNED SO IT IS NOT "FIXED" LATER.
+# `window_census_clean` ACCEPTS a record with no `competing_count` as a NARROW census and RECORDS
+# that narrowness (`census_breadth`), because a timeseries recorded before that field existed is
+# still readable and the judge's verdict carries the breadth beside it. These tools publish the
+# WORD "clean" with no breadth field, so for them an absent full census is unusable. Both halves
+# are asserted here, over the SAME record, so the difference is a decision on the record rather
+# than a discrepancy someone reconciles by weakening the tools.
+if python3 - "$REPO_ROOT" <<'JUDGEPY'
+import pathlib
+import sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts" / "perf"))
+from ws0_quiescence import census_record_defect
+narrow = {"ts": "2026-09-03T02:02:30Z", "rustc": 0, "cargo": 0, "gate": 0, "load1": 0.4}
+judge_state, _ = census_record_defect(narrow, require_full_census=False)
+tool_state, reason = census_record_defect(narrow, require_full_census=True)
+assert judge_state == "narrow", judge_state
+assert tool_state == "unusable", tool_state
+assert "competing_count" in reason, reason
+JUDGEPY
+then
+  pass "5b-9. the SHARED rule is three-valued and policy-flagged: the judge reads a missing competing_count as NARROW (and records it), the tools read it as UNUSABLE — one implementation, two declared policies"
+else
+  fail "5b-9. census_record_defect must return narrow for the judge's policy and unusable for the tools'"
+fi
+
+# 5b-10. STRUCTURAL: the rule is IMPORTED, not restated — the same property case 0b asserts for
+# the coverage bound, for the census rule. A tool with its own `competing_count` truthiness read
+# would pass every behavioural arm above at whatever strictness it chose.
+for t in "$PAIRS_TOOL" "$CENSUS_TOOL"; do
+  b="$(basename "$t")"
+  if grep -q 'first_unusable_census_record' "$t" && grep -q 'census_observed_competitor' "$t"; then
+    pass "5b-10. $b imports the census rule (validation AND the competitor predicate) from the committed judge"
+  else
+    fail "5b-10. $b must import first_unusable_census_record and census_observed_competitor from ws0_quiescence"
+  fi
+  # The defect's own spelling, pinned absent. The needle is SPLIT so this suite cannot match its
+  # own source, and the two tools' PROSE deliberately does not reproduce the literal either —
+  # a comment naming the construct its own guard scans for reds the guard on a correct file,
+  # which is this repo's recurring "prose inside a diff naming its own oracle" shape.
+  if grep -qF "$(printf '%s' '.get("competing' '_count")')" "$t"; then
+    fail "5b-10. $b still reads the census field with an unvalidated .get() — that IS the F2 defect"
+  else
+    pass "5b-10. $b contains no unvalidated .get() read of the census field"
+  fi
+  if grep -qE '^[[:space:]]*(def is_census_count|CENSUS_FIELDS[[:space:]]*=)' "$t"; then
+    fail "5b-10. $b defines its own copy of the census field list or validity rule"
+  else
+    pass "5b-10. $b defines no private copy of the census field list or validity rule"
+  fi
+done
 
 # --- Case 6: the IMPORT itself must REFUSE, not fall back to a private constant ---------
 # Both tools resolve the judge RELATIVE TO THEIR OWN LOCATION (`parents[3]/scripts/perf`), so
@@ -1171,7 +1380,8 @@ done
 # code. The floor is DERIVED FROM A MEASURED RUN and set below the observed count, so adding a
 # case cannot red the suite. RE-DERIVE IT BY RUNNING THE SUITE at each addition, never by
 # counting the source — the loops and the driven tables multiply.
-MIN_CHECKS=80
+# MEASURED: 86 (coverage rule + pairing + census report), 137 (+ the F2 census-field cases).
+MIN_CHECKS=130
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
