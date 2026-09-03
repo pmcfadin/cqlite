@@ -977,6 +977,60 @@ EOF
   printf '#!/usr/bin/env bash\ncase "$*" in *stat*) echo "1234567,,cycles" >&2 ;; esac\nexit 0\n' >"$d/perf"
   chmod +x "$d/perf"
 }
+# EVERY DECIDING GREP OVER A BOOTSTRAP RUN READS A HERE-STRING, NEVER A PIPE, and this is
+# not a style preference — it is a defect that was reproduced here. `set -o pipefail` is on
+# and `grep -q` EXITS ON THE FIRST MATCH, so with a producer that still has more than a pipe
+# buffer to write, `printf` takes SIGPIPE and dies 141 and the PIPELINE reports FAILURE for
+# a SUCCESSFUL match. A full bootstrap run is exactly that much output: the overwrite-warning
+# case below red on a run whose warning was plainly present in the log. The library was fixed
+# for the same shape (its matcher block says so); the suite's own assertions over the SMALL
+# `$out` payloads are unaffected and are left alone, which is also why this only bit here.
+# The `bad` messages still pipe — those greps read to EOF and decide nothing.
+# bs_marked <text> <marker-ere> <message-prefix-ere>: the lines of a bootstrap run that
+# carry [<marker>] AND whose MESSAGE begins with <message-prefix>. rc 0 iff there is one.
+#
+# WHY A HELPER AND NOT A `grep -E '\[warn\].*claude-auth'`: that form was written, and it
+# MATCHED A LINE ABOUT SOMETHING ELSE ENTIRELY —
+# `[warn] no 'origin' remote in <tmpdir>/bs-root — cannot check push credentials` — because
+# this suite's own `mktemp` prefix is `claude-auth-test`, so the tmpdir PATH in an unrelated
+# warning contains the needle. A `.*` between a marker and a name is a whole-line search
+# masquerading as a structural one, and the payload it searches contains attacker-… no, worse
+# than attacker-controlled: OUR OWN PATHS. So the message prefix is ANCHORED to the position
+# right after the marker.
+# AND THE MARKER IS COLOUR-WRAPPED, so the escapes are stripped AT THE PARSE SITE — the same
+# rule CLAUDE.md states for cargo output: `ok()`/`warn()` print `\033[32m[ok]\033[0m`, so a
+# pattern spanning marker-then-space matches nothing against the raw text. ESC is produced by
+# `printf` rather than written as `\x1b`, which is a GNU-sed extension.
+bs_marked() {
+  local __esc; __esc=$(printf '\033')
+  # BOTH INTERPOLATIONS ARE GROUPED. Unparenthesised, `$2` = `ok|warn` splits the WHOLE
+  # pattern at the `|` — it became `(^ *\[ok)|(warn\] +(…))`, whose left branch matched
+  # `[ok]   cargo present`. An alternation dropped into a pattern without a group is the
+  # second "structural match that is really a whole-line search" in this one helper.
+  sed -e "s/${__esc}\[[0-9;]*m//g" <<<"$1" | grep -E "^[[:space:]]*\[($2)\][[:space:]]+($3)"
+}
+# THE HELPER'S OWN POSITIVE CONTROL, and it is not optional: every assertion below that
+# uses `bs_marked` is a NEGATIVE one ("no marked claude line exists"), so a helper that
+# matched NOTHING would make all of them pass vacuously — a searcher must be shown finding
+# what it is looking for. Both of this helper's real defects are planted here (a
+# colour-wrapped marked line it must FIND, and an unrelated warning whose PATH contains
+# `claude-auth` which it must NOT), so a regression in either direction reds immediately
+# instead of greening the negatives. Hermetic: a synthetic transcript, no bootstrap run.
+# THREE PROBES, ONE PER DEFECT, each its OWN transcript so a clause cannot be satisfied by
+# the wrong line: (A) a colour-wrapped `[warn] claude-auth:` must MATCH; (B) an unrelated
+# warning whose PATH contains `claude-auth` must NOT (the tmpdir-name defect); (C) an
+# `[ok]` line about something else must NOT match under the `ok|warn` alternation (the
+# ungrouped-alternation defect, whose left branch matched `[ok]   cargo present`).
+bs_probe_a=$(printf '  \033[33m[warn]\033[0m claude-auth: OPT-OUT (planted)\n')
+bs_probe_b=$(printf '  \033[33m[warn]\033[0m no origin remote in /t/claude-auth-test.XX/bs-root\n')
+bs_probe_c=$(printf '  \033[32m[ok]\033[0m   cargo present\n')
+if bs_marked "$bs_probe_a" warn 'claude-auth:' >/dev/null \
+   && ! bs_marked "$bs_probe_b" warn 'claude-auth' >/dev/null \
+   && ! bs_marked "$bs_probe_c" 'ok|warn' 'claude-auth:|claude-tmux-env:' >/dev/null; then
+  ok "marker scanner: finds a colour-wrapped marked line; a tmpdir PATH holding the needle and an unrelated [ok] are not ones"
+else
+  bad "marker scanner: bs_marked mis-classifies one of its three planted probes (A match / B path-only / C other-[ok])"
+fi
 d18=$(mkshim "$tmp/s18"); plant_claude_probe_env "$d18"; plant_tmux "$d18" complete
 plant_bootstrap_quiet_stubs "$d18"
 # run_bootstrap <args...> -> $bs_out. The board identity is PINNED so the run cannot vary
@@ -989,7 +1043,7 @@ run_bootstrap() {
 }
 bs_out=$(run_bootstrap --skip-smoke --skip-push-probe --skip-claude-auth)
 printf '%s\n' "$bs_out" >>"$TRANSCRIPT"
-if printf '%s' "$bs_out" | grep -q 'claude-auth: OPT-OUT'; then
+if grep -q 'claude-auth: OPT-OUT' <<<"$bs_out"; then
   ok "bootstrap: --skip-claude-auth emits a LOUD claude-auth: OPT-OUT verdict"
 else
   bad "bootstrap: --skip-claude-auth produced no OPT-OUT line"
@@ -1002,15 +1056,15 @@ fi
 # skips. Note this run also passes --skip-push-probe, whose OPT-OUT is a REAL [warn] and
 # does withhold, so the assertion is scoped to the claude-auth line's own posture rather
 # than to the summary string.
-if printf '%s' "$bs_out" | grep -q '\[warn\].*claude-auth: OPT-OUT'; then
+if bs_marked "$bs_out" warn 'claude-auth: OPT-OUT' >/dev/null; then
   bad "bootstrap: the claude-auth opt-out is still a [warn], so --strict fails on a non-verdict: $(printf '%s' "$bs_out" | grep 'claude-auth: OPT-OUT')"
 else
   ok "bootstrap: the claude-auth opt-out is loud but carries NO [warn] — --strict cannot fail on it"
 fi
 bs_out2=$(run_bootstrap --skip-smoke --skip-push-probe)
 printf '%s\n' "$bs_out2" >>"$TRANSCRIPT"
-if printf '%s' "$bs_out2" | grep -q 'claude-auth: PROBE-ANSWERED' \
-   && printf '%s' "$bs_out2" | grep -q 'claude-tmux-env: SERVER-CARRIES-BOTH'; then
+if grep -q 'claude-auth: PROBE-ANSWERED' <<<"$bs_out2" \
+   && grep -q 'claude-tmux-env: SERVER-CARRIES-BOTH' <<<"$bs_out2"; then
   ok "bootstrap: both observation lines surface through bootstrap's reporter"
 else
   bad "bootstrap: the observation lines are missing from the run"
@@ -1022,15 +1076,15 @@ fi
 # `ok` is what `--strict` reads, and `warn` is what makes `--strict` fail — so a line
 # carrying either marker is a verdict again whatever the library called it. This fixture is
 # the ANSWERED/CARRIES-BOTH box, i.e. the only input that could ever have earned an [ok].
-if printf '%s' "$bs_out2" | grep -qE '\[(ok|warn)\].*(claude-auth:|claude-tmux-env:)'; then
-  bad "bootstrap: a claude credential line is still an [ok]/[warn] verdict: $(printf '%s' "$bs_out2" | grep -E '\[(ok|warn)\].*(claude-auth:|claude-tmux-env:)')"
+if bs_marked "$bs_out2" 'ok|warn' 'claude-auth:|claude-tmux-env:' >/dev/null; then
+  bad "bootstrap: a claude credential line is still an [ok]/[warn] verdict: $(bs_marked "$bs_out2" 'ok|warn' 'claude-auth:|claude-tmux-env:')"
 else
   ok "bootstrap: neither claude credential line is an [ok] or a [warn] — --strict cannot read them"
 fi
 # ...and the scope note reaches bootstrap's output too. Bootstrap is the primary consumer
 # and its output is what an operator pastes, so a scope note printed only by the standalone
 # CLI would be absent exactly where it is read.
-if printf '%s' "$bs_out2" | grep -q 'claude-auth-report: OBSERVATIONS-ONLY'; then
+if grep -q 'claude-auth-report: OBSERVATIONS-ONLY' <<<"$bs_out2"; then
   ok "bootstrap: the OBSERVATIONS-ONLY scope note reaches bootstrap's own output"
 else
   bad "bootstrap: bootstrap printed the two lines with no scope note beside them"
@@ -1051,7 +1105,7 @@ usage_rc=0
 # refactor away from not holding.
 usage_out=$(PATH="$d18:$PATH" bash "$bs_root/scripts/bootstrap-agent-machine.sh" --skip-claude-auth --fix-claude-auth 2>&1) || usage_rc=$?
 printf '%s\n' "$usage_out" >>"$TRANSCRIPT"
-if [ "$usage_rc" = 2 ] && printf '%s' "$usage_out" | grep -q 'contradictory'; then
+if [ "$usage_rc" = 2 ] && grep -q 'contradictory' <<<"$usage_out"; then
   ok "bootstrap: --skip-claude-auth beside --fix-claude-auth is a usage error (exit 2)"
 else
   bad "bootstrap: contradictory flags resolved silently (rc=$usage_rc): $usage_out"
@@ -1716,7 +1770,7 @@ plant_claude "$d30a" 1 'Failed to authenticate: OAuth session expired and could 
 plant_tmux_stateful "$d30a" "$TOK_OTHER" "$CFGDIR"
 bs30a=$(run_bootstrap_in "$d30a" "$ef2" --skip-smoke --skip-push-probe --yes)
 printf '%s\n' "$bs30a" >>"$TRANSCRIPT"
-if printf '%s' "$bs30a" | grep -q 'claude-auth: FAILED'; then
+if grep -q 'claude-auth: FAILED' <<<"$bs30a"; then
   ok "seed gate: the harm case really does present a REJECTED persisted credential"
 else
   bad "seed gate: the fixture did not produce claude-auth: FAILED, so the case tests nothing: $(printf '%s' "$bs30a" | grep -c .) lines"
@@ -1729,12 +1783,13 @@ fi
 # A REPAIR THAT QUIETLY DOES NOT HAPPEN READS AS "NOTHING WAS WRONG", so `--yes` must SAY
 # that seeding is now the operator's call and NAME the command. This is the case that stops
 # the change being "silently stopped repairing".
-if printf '%s' "$bs30a" | grep -q -- '--fix-claude-auth'; then
+# `-e`, because the pattern STARTS WITH `--` and grep would otherwise read it as options.
+if grep -q -e '--fix-claude-auth' <<<"$bs30a"; then
   ok "seed gate: the unattended run NAMES the operator-driven repair instead of doing it"
 else
   bad "seed gate: --yes declined to seed SILENTLY: $(printf '%s' "$bs30a" | sed -n '/Claude credential/,/^$/p' | head -12)"
 fi
-if printf '%s' "$bs30a" | grep -q 'claude-tmux-env: SERVER-STALE'; then
+if grep -q 'claude-tmux-env: SERVER-STALE' <<<"$bs30a"; then
   ok "seed gate: the tmux observation is REPORTED UNCHANGED (the run neither repaired nor hid it)"
 else
   bad "seed gate: the tmux observation was not left as found: $(printf '%s' "$bs30a" | grep 'claude-tmux-env:')"
@@ -1751,7 +1806,7 @@ plant_claude "$d30b" 1 'Failed to authenticate: OAuth session expired and could 
 plant_tmux_stateful "$d30b" "$TOK_OTHER" "$CFGDIR"
 bs30b=$(run_bootstrap_in "$d30b" "$ef2" --skip-smoke --skip-push-probe --fix-claude-auth)
 printf '%s\n' "$bs30b" >>"$TRANSCRIPT"
-if printf '%s' "$bs30b" | grep -q 'claude-auth: FAILED'; then
+if grep -q 'claude-auth: FAILED' <<<"$bs30b"; then
   ok "seed gate: the explicit-flag case presents the SAME rejected credential the old gate refused"
 else
   bad "seed gate: the explicit-flag fixture is not the refused one, so it proves nothing: $(printf '%s' "$bs30b" | grep 'claude-auth:')"
@@ -1761,12 +1816,17 @@ if [ -f "$d30b/tmux-calls.log" ] && grep -q '^setenv CLAUDE_CODE_OAUTH_TOKEN len
 else
   bad "seed gate: --fix-claude-auth did not seed — the gate was relocated, not removed: $(cat "$d30b/tmux-calls.log" 2>/dev/null)"
 fi
-if printf '%s' "$bs30b" | grep -qi 'OVERWRIT'; then
-  ok "seed gate: the explicit repair STATES that it overwrites whatever the server holds"
+# THE OVERWRITE WARNING MUST BE THERE **AND** MUST NOT BE A `[warn]`. Both halves: a
+# destructive action needs a loud statement, and `--strict --fix-claude-auth` must not exit
+# 1 on a repair the operator explicitly asked for and which SUCCEEDED — that would be a
+# verdict about an action, the same confusion this issue removed one subject over.
+if grep -qi 'OVERWRIT' <<<"$bs30b" \
+   && ! bs_marked "$bs30b" warn 'claude-auth' >/dev/null; then
+  ok "seed gate: the explicit repair STATES the overwrite, and carries no [warn]"
 else
   bad "seed gate: --fix-claude-auth seeded an unvalidated value with no warning: $(printf '%s' "$bs30b" | sed -n '/Claude credential/,/^$/p' | head -14)"
 fi
-if printf '%s' "$bs30b" | grep -q 'claude-tmux-env: SERVER-CARRIES-BOTH'; then
+if grep -q 'claude-tmux-env: SERVER-CARRIES-BOTH' <<<"$bs30b"; then
   ok "seed gate: the repair is RE-REPORTED against the changed server"
 else
   bad "seed gate: the seeded server was not re-read: $(printf '%s' "$bs30b" | grep 'claude-tmux-env:')"
@@ -2491,15 +2551,15 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case. Raised 91 -> 122 by round 4 (the digest identity of a
 # delivered credential, the sudo-posture cases, and the bounding class), 122 -> 124 by
-# round 5's two probe-working-directory interrupt cases, and 124 -> 139 by the #3733
+# round 5's two probe-working-directory interrupt cases, and 124 -> 140 by the #3733
 # DEMOTION (sections 34-36: the no-certification invariant, the alternate-credential
-# observation, and the limitation-findability guard, plus the seam-refusal exit-status pin
-# and the assertions that changed subject where a verdict became an observation). 142 cases
-# run, and the real-tmux isolation case (3 assertions) is still the only legitimately
-# skippable one.
+# observation, and the limitation-findability guard, plus the seam-refusal exit-status pin,
+# the marker-scanner positive control, and the assertions that changed subject where a
+# verdict became an observation). 143 cases run, and the real-tmux isolation case
+# (3 assertions) is still the only legitimately skippable one.
 # THE FIGURE IS MEASURED, NOT COUNTED BY EYE: forcing the tmux block's `command -v tmux`
-# test to `true` in a throwaway `git worktree` reports 139/0/1.
-CASE_FLOOR=139
+# test to `true` in a throwaway `git worktree` reports 140/0/1.
+CASE_FLOOR=140
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

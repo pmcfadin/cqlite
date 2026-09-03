@@ -3275,8 +3275,14 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
   if [ "$FIX_CLAUDE_AUTH" = 1 ]; then
     case "$CLAUDE_TMUX_V" in
       SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE|SERVER-CONFIG-STALE)
-        warn "claude-auth: --fix-claude-auth OVERWRITES the running tmux server's credential with the value persisted in /etc/environment. NOTHING HERE HAS VALIDATED THAT VALUE (#3733: no observation in this section can tell which credential authenticated), so if the server currently holds the only working credential on this box, this destroys it. You asked for it explicitly; proceeding."
-        info "seeding the running tmux server from the persisted value (nothing is written to disk)"
+        # A DISTINCT PREFIX AND NOT A `warn`, both deliberate. The prefix keeps repair
+        # chatter out of a `^claude-auth:` grep, which is now reserved for the OBSERVATION
+        # line (the scope note owns `claude-auth-report:`). And `warn` would make
+        # `--strict --fix-claude-auth` exit 1 on a SUCCESSFUL repair the operator asked
+        # for, which is a verdict about an action rather than a health finding — the same
+        # confusion, one subject over. It is still the loudest line this section prints.
+        info "claude-auth-repair: WARNING — this OVERWRITES the running tmux server's credential with the value persisted in /etc/environment. NOTHING HERE HAS VALIDATED THAT VALUE (#3733: no observation in this section can tell which credential authenticated), so if the server currently holds the only working credential on this box, this destroys it. You asked for it explicitly; proceeding."
+        info "claude-auth-repair: seeding the running tmux server from the persisted value (nothing is written to disk)"
         claude_auth_fix_tmux_env | while IFS= read -r claude_fix_line; do info "$claude_fix_line"; done
         # RE-READ, never assumed: `tmux setenv` exiting 0 is a claim about the command, not
         # about the server's environment, and this whole section exists because those are
@@ -3285,14 +3291,14 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
       *)
         # NO BACKTICKS INSIDE THIS DOUBLE-QUOTED STRING: they are LIVE command
         # substitution here, and the first draft of this line really did run `tmux`.
-        info "claude-auth: --fix-claude-auth has nothing to seed in state $CLAUDE_TMUX_V — 'tmux setenv -g' needs a RUNNING server, and the remedy for this state is named below" ;;
+        info "claude-auth-repair: --fix-claude-auth has nothing to seed in state $CLAUDE_TMUX_V — 'tmux setenv -g' needs a RUNNING server, and the remedy for this state is named below" ;;
     esac
   elif [ "$AUTO_YES" = 1 ]; then
     case "$CLAUDE_TMUX_V" in
       SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE|SERVER-CONFIG-STALE)
         # LOUD, not silent: a repair that quietly does not happen reads as "nothing was
         # wrong", and the operator then never learns why the box is still broken.
-        info "claude-auth: --yes does NOT seed the running tmux server (#3733). Seeding overwrites a credential nothing here can validate, and an unattended run must not make that call: run 'bash scripts/bootstrap-agent-machine.sh --fix-claude-auth' deliberately, and read the warning it prints" ;;
+        info "claude-auth-repair: --yes does NOT seed the running tmux server (#3733). Seeding overwrites a credential nothing here can validate, and an unattended run must not make that call: run 'bash scripts/bootstrap-agent-machine.sh --fix-claude-auth' deliberately, and read the warning it prints" ;;
     esac
   fi
   # ONE RENDERING FOR EVERY STATE, through `info` — see the note on the claude-auth line.
