@@ -1027,6 +1027,38 @@ trait ToJson {
     fn to_json(&self) -> serde_json::Value;
 }
 
+/// JSON object key for one map ENTRY (issue #3805).
+///
+/// A JSON object key must be a string, so a map key is rendered rather than
+/// converted — historically by `format!("{}", k)`, i.e. through
+/// `Display for Value`. That is correct for every key type EXCEPT the
+/// empty-buffer sentinel: `Display` is this crate's DIAGNOSTIC rendering (it
+/// prints `Text` QUOTED and `Blob` as `BLOB(n bytes)`) and renders a sentinel
+/// as `EMPTY(int)`, whereas Cassandra renders an empty key as the EMPTY STRING
+/// — `sstabledump` prints `"path" : [ "" ]`
+/// (`tools/JsonTransformer.java:444-458` →
+/// `db/marshal/AbstractType.java:146-156` →
+/// `serializers/Int32Serializer.java:46-49`, whose `toString(null)` is `""`)
+/// and `SELECT JSON` yields `{"": v}` (`db/marshal/MapType.java:362-388` →
+/// `db/marshal/Int32Type.java:126-130`), both at `cassandra-5.0.8`. A map key
+/// is exactly the surface #3805 concerns, so `EMPTY(int)` there was a parity
+/// divergence.
+///
+/// The fix is deliberately NARROW — the sentinel arm only, with every other key
+/// type left on `Display`. Routing the whole key path through
+/// `util::value_fmt::ValueFormatter` would ALSO be `""`-correct for the
+/// sentinel, but it would change EVERY OTHER key's rendering at the same time
+/// (`Display` renders a `text` key as `'k'`, `ValueFormatter` as `k`), which is
+/// an output change well outside this issue and would move committed goldens.
+/// `Display` itself is deliberately unchanged: the defect was a DATA surface
+/// consuming a diagnostic renderer, not the diagnostic renderer.
+fn json_map_key(key: &Value) -> String {
+    match key {
+        Value::Empty(_) => String::new(),
+        other => format!("{other}"),
+    }
+}
+
 impl ToJson for Value {
     fn to_json(&self) -> serde_json::Value {
         // Non-finite floats have no JSON representation; we emit null for those.
@@ -1070,7 +1102,7 @@ impl ToJson for Value {
             Value::Map(entries) => {
                 let json_map: serde_json::Map<String, serde_json::Value> = entries
                     .iter()
-                    .map(|(k, v)| (format!("{}", k), v.to_json()))
+                    .map(|(k, v)| (json_map_key(k), v.to_json()))
                     .collect();
                 serde_json::Value::Object(json_map)
             }

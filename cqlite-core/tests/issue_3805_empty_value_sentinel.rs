@@ -401,6 +401,58 @@ fn the_rendering_is_the_empty_string_for_every_family() {
     }
 }
 
+/// REGRESSION, roborev job 438 F1. A JSON object key must be a STRING, so a map
+/// key is RENDERED rather than converted, and `QueryRow::to_json` did it with
+/// `format!("{}", k)` — i.e. through `Display for Value`, which renders the
+/// sentinel as `EMPTY(int)`. The value-path case above could not catch it,
+/// because the value path and the KEY path are different code.
+///
+/// A MAP KEY is exactly the surface #3805 exists for, and Cassandra renders an
+/// empty key as `""`: `sstabledump` prints `"path" : [ "" ]`
+/// (`tools/JsonTransformer.java:444-458` →
+/// `db/marshal/AbstractType.java:146-156`) and `SELECT JSON` yields `{"": v}`
+/// (`db/marshal/MapType.java:362-388`), both at `cassandra-5.0.8`.
+#[test]
+fn a_map_key_sentinel_renders_as_the_empty_json_key_not_a_diagnostic_string() {
+    use cqlite_core::query::result::QueryRow;
+    use cqlite_core::types::RowKey;
+
+    for (ty, name, _) in admitted_families() {
+        let mut row = QueryRow::new(RowKey::new(b"pk".to_vec()));
+        row.set(
+            "m".to_string(),
+            Value::Map(vec![
+                (Value::Empty(ty), Value::text("empty")),
+                (Value::Integer(42), Value::text("forty-two")),
+            ]),
+        );
+
+        let json = row.to_json();
+        let map = json
+            .get("m")
+            .and_then(|m| m.as_object())
+            .unwrap_or_else(|| panic!("column `m` is not a JSON object for {name}"));
+
+        assert!(
+            map.contains_key(""),
+            "Empty({name}) map key rendered as {:?}, expected the empty string key",
+            map.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            map.get(""),
+            Some(&serde_json::json!("empty")),
+            "the empty key's VALUE was lost or attached to the wrong key for {name}"
+        );
+        // The empty key must not collide with, or displace, its non-empty
+        // sibling — the fixture writes both for exactly this reason.
+        assert_eq!(map.len(), 2, "entry lost or merged for {name}");
+        assert!(
+            !map.keys().any(|k| k.contains("EMPTY")),
+            "a diagnostic Display rendering leaked into a data surface for {name}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // (5) THE LEGAL/CORRUPTION LINE — keyed on `validate()`, never on decodability
 // ---------------------------------------------------------------------------
