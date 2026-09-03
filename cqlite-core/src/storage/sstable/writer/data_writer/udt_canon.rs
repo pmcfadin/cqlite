@@ -405,10 +405,12 @@ enum CompareKind {
     /// elements (Cassandra orders those by their serialized bytes here too).
     UnsignedBytes,
     /// Compare as a SIGNED numeric of the given width: Int32Type→i32, LongType/
-    /// CounterColumnType/TimestampType/TimeType→i64, ByteType→i8, ShortType→i16.
+    /// CounterColumnType/TimestampType→i64, ByteType→i8, ShortType→i16.
     /// Unsigned big-endian byte order disagrees with the Cassandra comparator for
     /// these (e.g. `-1` = 0xFFFFFFFF would sort AFTER `0`), so they are compared on
     /// the decoded signed value.
+    ///
+    /// `TimeType` is deliberately NOT in this family — see the arms below.
     SignedInt,
 }
 
@@ -423,12 +425,31 @@ fn classify_comparator(ty: &str) -> Option<CompareKind> {
     };
     match name {
         // Signed integers — Cassandra compares the decoded signed value.
+        //
+        // `TimestampType` belongs here and `TimeType` does NOT: authority, pinned
+        // `cassandra-5.0.8`, `db/marshal/TimestampType.java:56`
+        // `super(ComparisonType.CUSTOM)`, whose `compareCustom` (`:69-71`) is
+        // exactly `return LongType.compareLongs(...)` — SIGNED. Conflating the two
+        // temporal types was issue #3935.
         "Int32Type" | "LongType" | "ByteType" | "ShortType" | "CounterColumnType"
-        | "TimestampType" | "TimeType" => Some(CompareKind::SignedInt),
+        | "TimestampType" => Some(CompareKind::SignedInt),
         // Byte-ordered AbstractTypes: unsigned serialized-byte order == comparator.
         // SimpleDateType is byte-ordered (epoch shifted by 2^31 at serialization).
+        //
+        // `TimeType` is BYTE_ORDER, not signed (issue #3935). Authority, pinned
+        // `cassandra-5.0.8`: `db/marshal/TimeType.java:48`
+        // `private TimeType() {super(ComparisonType.BYTE_ORDER);}`, i.e.
+        // `ByteBufferUtil.compareUnsigned` over the serialized 8-byte big-endian
+        // nanos-since-midnight long. `TimeType` declares no `validate` override and
+        // `serializers/TimeSerializer.java:71-75` `validate` checks the SIZE ONLY
+        // (`accessor.size(value) != 8`) — the range check lives only in
+        // `timeStringToLong` (`:50`), the CQL string-literal/JSON path — so an
+        // 8-byte BINARY out-of-range (negative) `time` is accepted, stored, and
+        // ordered BYTE_ORDER, which sorts its `0xFF` leading byte ABOVE every
+        // in-range value. Over `time`'s valid range every value is non-negative, so
+        // byte and signed order coincide and no in-range on-disk ordering moved.
         "UTF8Type" | "AsciiType" | "BytesType" | "InetAddressType" | "BooleanType"
-        | "SimpleDateType" => Some(CompareKind::UnsignedBytes),
+        | "SimpleDateType" | "TimeType" => Some(CompareKind::UnsignedBytes),
         // FAIL-CLOSED (no-heuristics, issue #28; tracked for #1254): types whose
         // Cassandra comparator is non-trivial and NOT plain unsigned-byte order:
         //   UUIDType/TimeUUIDType/LexicalUUIDType — version- and time-field-aware,
@@ -461,14 +482,17 @@ fn unsupported_comparator_err(ty: &str) -> Error {
 }
 
 /// Decode the SIGNED i128 value of a signed-integer `Value`, or an error if the
-/// variant is not one of the signed-int variants (Integer/BigInt/Counter/TinyInt/
-/// SmallInt). Widening to `i128` makes all four widths comparable in one ordering.
+/// variant is not one of the signed-int variants (Integer/BigInt/Counter/Timestamp/
+/// TinyInt/SmallInt). Widening to `i128` makes all four widths comparable in one
+/// ordering.
+///
+/// `Value::Time` is deliberately ABSENT (issue #3935): `TimeType` is
+/// `ComparisonType.BYTE_ORDER`, so a `time` element/key is compared by its
+/// serialized bytes via [`CompareKind::UnsignedBytes`] and never decoded here.
 fn signed_value(value: &Value) -> Result<i128> {
     match value {
         Value::Integer(n) => Ok(*n as i128),
-        Value::BigInt(n) | Value::Counter(n) | Value::Timestamp(n) | Value::Time(n) => {
-            Ok(*n as i128)
-        }
+        Value::BigInt(n) | Value::Counter(n) | Value::Timestamp(n) => Ok(*n as i128),
         Value::TinyInt(n) => Ok(*n as i128),
         Value::SmallInt(n) => Ok(*n as i128),
         other => Err(Error::InvalidInput(format!(
