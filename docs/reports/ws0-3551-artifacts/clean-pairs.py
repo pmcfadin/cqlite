@@ -128,6 +128,25 @@ def clean(sess: dict, rows: list[dict]) -> tuple[str, int, int, float | None]:
     return "clean", comp, len(win), gap
 
 
+def _append_excluded(out: list[str], excluded: list[str]) -> None:
+    """The EXCLUDED pairs, appended wherever the report ends.
+
+    It is a SECTION and not an aside because "no pair was readable" and "a pair existed and
+    its own drift control was larger than the effect" are different operator facts. The
+    no-pairs branch used to return BEFORE this, so a run whose EVERY pair was excluded printed
+    a bare `NO CLEAN PAIRS` and dropped the reason — the one case where the reason is the whole
+    of the information. Measured before the fix on a two-session fixture: the exclusion line
+    was absent from the output entirely.
+    """
+    if not excluded:
+        return
+    out.append("")
+    out.append(f"### {len(excluded)} clean pair(s) EXCLUDED — control ≥ treatment")
+    out.append("")
+    for e in excluded:
+        out.append(f"* {e}")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--set", action="append", required=True, metavar="LABEL=DIR",
@@ -197,6 +216,7 @@ def main(argv=None) -> int:
     out.append("")
     if not pairs:
         out.append("**NO CLEAN PAIRS.** Nothing here is readable; do not derive a delta from it.")
+        _append_excluded(out, excluded)
         text = "\n".join(out)
         print(text)
         if args.out:
@@ -225,12 +245,7 @@ def main(argv=None) -> int:
         for p in ps:
             out.append(f"| {p['set']} | {p['round']} | {p['arm']} | {p['d_cpr']:+.2f}% | "
                        f"{p['d_rps']:+.2f}% | {p['ctl']:.2f}% |")
-    if excluded:
-        out.append("")
-        out.append(f"### {len(excluded)} clean pair(s) EXCLUDED — control ≥ treatment")
-        out.append("")
-        for e in excluded:
-            out.append(f"* {e}")
+    _append_excluded(out, excluded)
     text = "\n".join(out)
     print(text)
     if args.out:

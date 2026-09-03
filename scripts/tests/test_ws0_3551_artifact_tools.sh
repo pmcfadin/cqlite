@@ -587,3 +587,112 @@ if [ "$rc" -eq 0 ] && grep -qF '**2 clean**' "$RUNOUT"; then
 else
   fail "6. the with-judge scratch copy of clean-pairs.py must run (rc=$rc, out: $(tailout))"
 fi
+
+# ===========================================================================
+# PART 2 — clean-pairs.py's PAIRING LOGIC
+# ===========================================================================
+# --- Case 7: BOTH sessions of a pair must be clean --------------------------------------
+# This is not hypothetical: set 3 round 2 of this issue's own measurement lost FOUR otherwise
+# clean treatment sessions to a contaminated BASELINE. A pair is a within-round difference, so
+# a treatment with no readable baseline is not half a pair, it is no pair.
+#
+# One round, four arms: A (the baseline) plus three treatments, all four fully covered. The two
+# arms differ in EXACTLY ONE property — whether the sampler saw a competing process inside
+# A's window.
+P7="$TMP/pair7"
+mkses "$P7" 1 A 1 "$(isot 0)"   "$(isot 120)" 400000 20000 250000 25000 1.40
+mkses "$P7" 1 B 2 "$(isot 120)" "$(isot 240)" 400000 20000 275000 22500 1.50
+mkses "$P7" 1 C 3 "$(isot 240)" "$(isot 360)" 400000 20000 275000 22500 1.50
+mkses "$P7" 1 D 4 "$(isot 360)" "$(isot 480)" 400000 20000 275000 22500 1.50
+TS_P7_OK="$TMP/ts-p7-clean.jsonl"
+TS_P7_DIRTY="$TMP/ts-p7-dirty-baseline.jsonl"
+mkts "$TS_P7_OK"    "$(cadence_offsets 0 480)" -  on
+mkts "$TS_P7_DIRTY" "$(cadence_offsets 0 480)" 60 on   # offset 60 is inside A's window only
+pairs_run "$TS_P7_OK" "set1=$P7"
+if [ "$rc" -eq 0 ] && [ "$(mdcell "$RUNOUT" arm B 'clean pairs')" = "1" ] \
+  && [ "$(mdcell "$RUNOUT" arm C 'clean pairs')" = "1" ] \
+  && [ "$(mdcell "$RUNOUT" arm D 'clean pairs')" = "1" ]; then
+  pass "7. CONTROL: with a clean baseline all three treatments pair (B, C and D each get 1 pair)"
+else
+  fail "7. a clean round must yield one pair per treatment (rc=$rc, out: $(tailout))"
+fi
+pairs_run "$TS_P7_DIRTY" "set1=$P7"
+if [ "$rc" -eq 0 ] && grep -qF '**NO CLEAN PAIRS.**' "$RUNOUT" \
+  && grep -qF '**3 clean**, 1 contaminated' "$RUNOUT"; then
+  pass "7. a CONTAMINATED BASELINE forms no pair at all — 3 clean treatments, 0 pairs (the set-3-round-2 event)"
+else
+  fail "7. a contaminated baseline must void every pair in its round (rc=$rc, out: $(head -1 "$RUNOUT"))"
+fi
+census_run "$P7" "$TS_P7_DIRTY"
+verdict="$(mdcell "$RUNOUT" session r1-A verdict)"
+if grep -qF '**CONTAMINATED** (1 of ' <<<"$verdict"; then
+  pass "7. ...and window-census NAMES the baseline as the contaminated one: '$verdict'"
+else
+  fail "7. window-census must name r1-A contaminated with its n-of-m count (verdict: '$verdict')"
+fi
+
+# --- Case 8: a pair whose OWN CONTROL moved as much as its treatment is not readable ----
+# Both sessions of a pair ran the bare-scan leg on the same CPUs with the same binary, so
+# their bare-scan disagreement is that pair's own drift bound. `ctl >= abs(d_cpr)` means there
+# is nothing to read the delta against, and such a pair must be REPORTED and kept out of the
+# medians — reported, because "no readable pair" and "a pair existed but its control swamped
+# it" are different operator facts.
+#
+# Two rounds. r1's control is 0.00% against a +4.00% treatment (readable). r2's control is
+# 2.00% against a +1.00% treatment (not readable). Round 2's treatment `cycles_per_row` is the
+# ONE property that differs between the two arms below.
+P8="$TMP/pair8"
+mk_p8() {
+  local root="$1" r2_flight_cpr="$2"
+  rm -rf "$root"
+  mkses "$root" 1 A 1 "$(isot 0)"   "$(isot 120)" 400000 20000 250000 25000 1.40
+  mkses "$root" 1 B 2 "$(isot 120)" "$(isot 240)" 400000 20000 250000 26000 1.40
+  mkses "$root" 2 A 1 "$(isot 240)" "$(isot 360)" 400000 20000 250000 25000 1.40
+  mkses "$root" 2 B 2 "$(isot 360)" "$(isot 480)" 400000 20400 250000 "$r2_flight_cpr" 1.40
+}
+TS_P8="$TMP/ts-p8.jsonl"
+mkts "$TS_P8" "$(cadence_offsets 0 480)" - on
+# The RED arm: r2's treatment moved +1.00% under a 2.00% control.
+mk_p8 "$P8" 25250
+pairs_run "$TS_P8" "set1=$P8"
+if [ "$rc" -eq 0 ] && [ "$(mdcell "$RUNOUT" arm B 'clean pairs')" = "1" ]; then
+  pass "8. the swamped pair does NOT enter the medians — arm B counts 1 pair, not 2"
+else
+  fail "8. a pair whose control >= its treatment must not be counted (rc=$rc, out: $(tailout))"
+fi
+if grep -qF '### 1 clean pair(s) EXCLUDED — control ≥ treatment' "$RUNOUT" \
+  && grep -qF 'set1 r2 B: control moved 2.00% vs treatment +1.00% — nothing to read it against' "$RUNOUT"; then
+  pass "8. ...and it is REPORTED by name, with BOTH percentages: the excluded line identifies set1 r2 B"
+else
+  fail "8. the exclusion must be reported naming the set, round, arm and both figures (out: $(tailout))"
+fi
+if [ "$(mdcell "$RUNOUT" arm B 'worst pair-control')" = "0.00%" ]; then
+  pass "8. ...and 'worst pair-control' is over the COUNTED pairs only (0.00%, not the excluded pair's 2.00%)"
+else
+  fail "8. worst pair-control must describe the counted pairs (got: $(mdcell "$RUNOUT" arm B 'worst pair-control'))"
+fi
+# THE CONTROL, differing in exactly that one property: r2's treatment moves +4.00% instead,
+# clearing its own 2.00% drift bound, and the pair is counted.
+mk_p8 "$P8" 26000
+pairs_run "$TS_P8" "set1=$P8"
+if [ "$rc" -eq 0 ] && [ "$(mdcell "$RUNOUT" arm B 'clean pairs')" = "2" ] \
+  && ! grep -qF 'EXCLUDED' "$RUNOUT"; then
+  pass "8. CONTROL: a treatment that clears its own drift bound IS counted (2 pairs, no exclusions)"
+else
+  fail "8. a readable pair must be counted (rc=$rc, out: $(tailout))"
+fi
+# AND THE EXCLUSION MUST STILL BE REPORTED WHEN IT IS THE ONLY PAIR. The no-pairs branch used
+# to `return` before the excluded section, so a run whose EVERY pair was swamped printed a bare
+# `NO CLEAN PAIRS` and silently dropped the reason — precisely the case where the reason IS the
+# information. Measured on this fixture before the fix: the exclusion line was absent.
+P8B="$TMP/pair8-all-excluded"
+mkses "$P8B" 1 A 1 "$(isot 0)"   "$(isot 120)" 400000 20000 250000 25000 1.40
+mkses "$P8B" 1 B 2 "$(isot 120)" "$(isot 240)" 400000 20400 250000 25250 1.40
+pairs_run "$TS_P8" "set1=$P8B"
+if [ "$rc" -eq 0 ] && grep -qF '**NO CLEAN PAIRS.**' "$RUNOUT" \
+  && grep -qF '### 1 clean pair(s) EXCLUDED — control ≥ treatment' "$RUNOUT" \
+  && grep -qF 'set1 r1 B: control moved 2.00% vs treatment +1.00%' "$RUNOUT"; then
+  pass "8. an ALL-EXCLUDED run still reports WHY — 'NO CLEAN PAIRS' plus the named exclusion"
+else
+  fail "8. a run whose every pair was excluded must still report the exclusions (rc=$rc, out: $(tailout))"
+fi
