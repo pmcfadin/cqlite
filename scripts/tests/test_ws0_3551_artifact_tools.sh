@@ -975,3 +975,116 @@ then
 else
   fail "12. the report must never call the per-CPU column a contamination bound un-negated"
 fi
+
+# ===========================================================================
+# PART 4 — THE NAMED REFUSALS
+# ===========================================================================
+# Both tools PRODUCE A PUBLISHED REPORT, so every input they cannot read must be a refusal
+# that NAMES what was wrong — never a table with a row quietly missing from it. Each case
+# below asserts the diagnostic's own text, not merely a non-zero exit, which an unrelated
+# breakage produces identically.
+
+# R1. window-census: a root holding no session at all.
+EMPTY_ROOT="$TMP/no-sessions"
+mkdir -p "$EMPTY_ROOT"
+census_run "$EMPTY_ROOT" "$TS_C11_OK"
+if [ "$rc" -ne 0 ] && grep -qF "REFUSED: no abc-window.json under $EMPTY_ROOT" "$RUNOUT"; then
+  pass "R1. window-census REFUSES a root with no sessions, naming the root (rc=$rc)"
+else
+  fail "R1. an empty root must be a named refusal (rc=$rc, out: $(tailout))"
+fi
+
+# R2. an EMPTY timeseries, in BOTH tools. A tool that read it as "no competitor observed"
+# would certify every window in the set on no evidence at all.
+EMPTY_TS="$TMP/empty.jsonl"
+: > "$EMPTY_TS"
+census_run "$C11" "$EMPTY_TS"
+if [ "$rc" -ne 0 ] && grep -qF "REFUSED: $EMPTY_TS holds no samples" "$RUNOUT"; then
+  pass "R2. window-census REFUSES an empty timeseries by name (rc=$rc)"
+else
+  fail "R2. an empty timeseries must be a named refusal in window-census (rc=$rc, out: $(tailout))"
+fi
+pairs_run "$EMPTY_TS" "set1=$C11"
+if [ "$rc" -ne 0 ] && grep -qF "REFUSED: $EMPTY_TS holds no samples" "$RUNOUT"; then
+  pass "R2. clean-pairs REFUSES an empty timeseries by name (rc=$rc)"
+else
+  fail "R2. an empty timeseries must be a named refusal in clean-pairs (rc=$rc, out: $(tailout))"
+fi
+
+# R3. clean-pairs: a session with no warm bare-scan leg has NO CONTROL, so it is not half a
+# pair — it is unreadable, and silently dropping it would shrink the pair count with no note.
+NOCTL="$TMP/no-control"
+mkses "$NOCTL" 1 A 1 "$(isot 0)" "$(isot 120)" 400000 20000 250000 25000 1.40
+python3 - "$NOCTL/r1-A/results.json" <<'DROPSCAN'
+import json
+import pathlib
+import sys
+p = pathlib.Path(sys.argv[1])
+doc = json.loads(p.read_text())
+doc["measurements"] = [m for m in doc["measurements"]
+                       if not (m["temperature"] == "warm" and m["arm"] == "bare_scan")]
+p.write_text(json.dumps(doc))
+DROPSCAN
+pairs_run "$TS_C11_OK" "set1=$NOCTL"
+if [ "$rc" -eq 2 ] && grep -qF 'has no warm bare_scan leg — no control, so no readable pair' "$RUNOUT"; then
+  pass "R3. clean-pairs REFUSES (exit 2) a session with no warm bare-scan control, naming it"
+else
+  fail "R3. a session with no control must be a named exit-2 refusal (rc=$rc, out: $(tailout))"
+fi
+
+# R4. clean-pairs: a malformed `--set` spec.
+pairs_run "$TS_C11_OK" "notalabelspec"
+if [ "$rc" -eq 2 ] && grep -qF "REFUSED: --set 'notalabelspec' is not LABEL=DIR" "$RUNOUT"; then
+  pass "R4. clean-pairs REFUSES a --set that is not LABEL=DIR, quoting the value (rc=$rc)"
+else
+  fail "R4. a malformed --set must be a named exit-2 refusal (rc=$rc, out: $(tailout))"
+fi
+
+# R5. clean-pairs: a session directory with a `results.json` and NO window record. The window
+# is what says which instants to judge, so a session without one cannot be judged at all — and
+# `results.json` alone carries no provenance.
+NOWIN="$TMP/no-window"
+mkses "$NOWIN" 1 A 1 "$(isot 0)" "$(isot 120)" 400000 20000 250000 25000 1.40
+rm -f "$NOWIN/r1-A/abc-window.json"
+pairs_run "$TS_C11_OK" "set1=$NOWIN"
+if [ "$rc" -eq 2 ] && grep -qF "REFUSED: $NOWIN/r1-A/abc-window.json is absent" "$RUNOUT"; then
+  pass "R5. clean-pairs REFUSES a session with no window record, naming the missing file (rc=$rc)"
+else
+  fail "R5. an absent abc-window.json must be a named exit-2 refusal (rc=$rc, out: $(tailout))"
+fi
+# ...and window-census SKIPS such a directory rather than refusing, because its subject IS the
+# window record — a directory without one is not a session it can judge. Asserted so the
+# difference between the two tools is a decision on the record and not a surprise: the OTHER
+# session in the same root must still be reported.
+mkses "$NOWIN" 1 B 2 "$(isot 120)" "$(isot 240)" 400000 20000 275000 22500 1.50
+census_run "$NOWIN" "$TS_P9"
+if [ "$rc" -eq 0 ] && grep -qF '`r1-B`' "$RUNOUT" && ! grep -qF '`r1-A`' "$RUNOUT"; then
+  pass "R5. window-census reports the session WITH a window record and omits the one without (its subject IS that record)"
+else
+  fail "R5. window-census must still report r1-B while omitting the window-less r1-A (rc=$rc, out: $(tailout))"
+fi
+
+# ==========================================================================
+# A MINIMUM CHECK COUNT — this file has no `set -e`
+# ==========================================================================
+# Without it, a block that silently never executes (a `$( )` whose command vanished, a helper
+# returning early) LOWERS the count and registers NO failure, and the gate reads only the exit
+# code. The floor is DERIVED FROM A MEASURED RUN and set below the observed count, so adding a
+# case cannot red the suite. RE-DERIVE IT BY RUNNING THE SUITE at each addition, never by
+# counting the source — the loops and the driven tables multiply.
+MIN_CHECKS=60
+if [ "$checks" -lt "$MIN_CHECKS" ]; then
+  echo
+  echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
+  echo "       A block that silently never executed would lower the count with no failure"
+  echo "       registered, and the gate reads only the exit code."
+  exit 1
+fi
+
+echo
+if [ "$fails" -eq 0 ]; then
+  echo "PASS - all $checks #3551 artifact-tool (coverage rule / pairing / census report) checks fired as specified"
+  exit 0
+fi
+echo "FAIL - $fails of $checks check(s) failed"
+exit 1
