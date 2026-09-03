@@ -1,6 +1,7 @@
 //! CSV output writer for QueryResult
 //!
-//! Implements CSV output format following QUERY_RESULT_CONTRACT.md specification.
+//! Implements CSV output format following
+//! `docs/development/QUERY_RESULT_CONTRACT.md`.
 //!
 //! ## Format Specification
 //! - First row: column headers from `metadata.columns` in order
