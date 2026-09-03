@@ -192,6 +192,9 @@ run_report_full() {
   # refuse. Cases whose subject is a MISSING manifest remove it explicitly after this call.
   rm -f "$1/session-corpus-pin.json"
   ws0_pin_session_corpus "$1" "$2" "$5" "$3" "$4" "$6"
+  # ...and the per-rep SERVER LOG the reporter requires, if absent — this local invoker stamps
+  # the manifest itself, so it bypasses the shared `run_report` that would otherwise do it.
+  ws0_stamp_missing_server_logs "$1"
   python3 "$REPORT" --dir "$1" --corpus "$2" 2>&1
 }
 

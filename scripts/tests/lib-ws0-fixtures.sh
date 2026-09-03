@@ -149,6 +149,37 @@ ws0_write_server_log() {
   } > "$path"
 }
 
+# ws0_stamp_missing_server_logs <session-dir> — stand in for the driver, for every flight rep
+# whose `.jsonl` exists and whose `.server.log` does not (#3551 item 10).
+#
+# The reporter REQUIRES a server log per flight rep (the admission ceiling is DERIVED from
+# available_parallelism, which respects the CPU affinity mask, so it moves with the pin and a
+# session whose reps disagree differed in a second property). ~34 case sites across these suites
+# build reps AD HOC rather than through `make_flight_rep`, and requiring each to stamp the log
+# would put the same line in 34 places — the one someone forgets then fails for a reason
+# unrelated to its subject. So this is called from `run_report`, IF ABSENT, exactly as the
+# pre-measurement corpus pin is and for the same stated reason.
+#
+# The tag set is DERIVED FROM THE ARTIFACTS PRESENT (every `flight-*.jsonl` in the dir), not from
+# a parameter: an ad-hoc case's rep set is whatever it wrote, and a parameterised list would go
+# stale exactly where those cases differ from the builders. A case whose SUBJECT is the log
+# (absent, empty, unparseable, disagreeing) must therefore invoke the reporter DIRECTLY rather
+# than through `run_report` — stated here because that is the one thing this convenience takes
+# away.
+ws0_stamp_missing_server_logs() {
+  local d="$1" j tag
+  [ -d "$d" ] || return 0
+  for j in "$d"/flight-*.jsonl; do
+    # A literal, unexpanded glob means there are no flight reps — nothing to stamp, and NOT an
+    # error: a scan-only fixture is legitimate.
+    [ -e "$j" ] || continue
+    tag="$(basename "$j" .jsonl)"
+    # `.prewarm.jsonl` is not a rep artifact; its tag would name a rep that does not exist.
+    case "$tag" in *.prewarm) continue ;; esac
+    [ -e "$d/$tag.server.log" ] || ws0_write_server_log "$d/$tag.server.log" 4 derived 2
+  done
+}
+
 perf_csv() {
   printf '%s,,cycles,1000000000,100.00,1.000,GHz\n%s,,instructions,1000000000,100.00,2.000,insn per cycle\n' "$2" "$3" > "$1"
 }

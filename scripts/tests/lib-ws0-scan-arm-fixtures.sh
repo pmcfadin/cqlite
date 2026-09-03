@@ -81,6 +81,8 @@ run_report() {
   # The PRE-MEASUREMENT corpus pin, stamped IF ABSENT — see lib-ws0-report-fixtures.sh's
   # `run_report` for why "if absent" and not unconditionally (#3272 review round 4).
   [ -e "$1/session-corpus-pin.json" ] || ws0_pin_session_corpus "$1" "$2" 1 "$3" bypass 1
+  # ...and the per-rep server log the reporter requires, if absent (#3551 item 10).
+  ws0_stamp_missing_server_logs "$1"
   # The TEMPS are a property of the SESSION now (#3272 F1), so they are stamped into the
   # manifest above rather than passed here.
   python3 "$REPORT" --dir "$1" --corpus "$2" 2>&1

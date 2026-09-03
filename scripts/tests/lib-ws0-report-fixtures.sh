@@ -148,6 +148,9 @@ make_session() {
 run_report() { # run_report <dir> <corpus> [extra args…]
   local d="$1" c="$2"; shift 2
   [[ -e "$d/session-corpus-pin.json" ]] || ws0_pin_session_corpus "$d" "$c"
+  # ...and the per-rep SERVER LOG the reporter now requires, IF ABSENT — same standing-in-for-the
+  # driver reasoning as the pin above (#3551 item 10).
+  ws0_stamp_missing_server_logs "$d"
   # ONLY the two paths: reps/temps/arms/scan-passes and the CPU pins are READ FROM the
   # session manifest since #3272 F1, so passing them here would be an argparse error.
   python3 "$REPORT" --dir "$d" --corpus "$c" "$@" 2>&1
@@ -171,6 +174,7 @@ run_report_args() {
   shift 6 2>/dev/null || shift $#
   rm -f "$d/session-corpus-pin.json"
   ws0_pin_session_corpus "$d" "$c" "$reps" "$temps" "$arms" "$passes"
+  ws0_stamp_missing_server_logs "$d"
   python3 "$REPORT" --dir "$d" --corpus "$c" "$@" 2>&1
 }
 

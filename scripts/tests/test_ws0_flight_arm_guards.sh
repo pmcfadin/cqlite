@@ -966,16 +966,171 @@ else
   fail "the recorded allocator verification string must declare its report-time limit"
 fi
 
+# ===========================================================================
+# PART 5 — THE ADMISSION CEILING IS READ BACK, AND MUST AGREE (#3551 item 10)
+# ===========================================================================
+# `cqlite-flight` DERIVES its ceiling when `--max-concurrent-scans` is not pinned:
+# `clamp(2 x available_parallelism, 2, 64)`, and `available_parallelism` respects the CPU
+# AFFINITY MASK. So the ceiling is a FUNCTION OF THE PIN, and a 2-CPU pin vs a 4-CPU pin differ
+# in TWO properties — where the work runs AND how much of it the server admits at once. The rig
+# does not PIN the ceiling to force agreement (that would change the configuration #3248 measured
+# and hide exactly this drift); it READS IT BACK from each rep's own log and refuses disagreement.
+#
+# The reporter is invoked DIRECTLY here rather than through `run_report`, deliberately: that
+# helper stamps a server log IF ABSENT (standing in for the driver, as it does for the corpus
+# pin), so a case whose subject IS the log has to bypass it or the fixture would repair the very
+# condition under test.
+report_direct() { python3 "$REPORT" --dir "$1" --corpus "$2" 2>&1; }
+
+# --- 5a. THE ACCEPT DIRECTION, and the #3400 construction it depends on ---------------------
+d="$TMP/adm-ok"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus"
+out=$(report_direct "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "^admission    : max_concurrent_scans=4 (source derived, available_parallelism=2)" <<<"$out" \
+   && grep -q "OBSERVED IDENTICAL across all 1 flight rep(s)" <<<"$out"; then
+  pass "admission: the report prints the ceiling, its SOURCE and available_parallelism, and says how many reps were OBSERVED to agree"
+else
+  fail "the admission line must carry all three fields (rc=$rc, line: $(grep '^admission' <<<"$out"))"
+fi
+# THE CONSTRUCTION ASSERT, which is what makes 5a evidence rather than a coincidence: the fixture
+# log is written in the server's REAL escaped shape, so the plain `max_concurrent_scans=` literal
+# does NOT occur in it. The parse therefore cannot have matched without stripping the escapes
+# first — the #3400 property, asserted rather than assumed.
+if ! grep -q 'max_concurrent_scans=' "$d/flight-bypass-warm-1.server.log" \
+   && grep -q $'\033' "$d/flight-bypass-warm-1.server.log"; then
+  pass "admission (#3400): the fixture log is ANSI-escaped and contains NO plain 'max_concurrent_scans=' literal, so 5a's success PROVES the parse strips escapes"
+else
+  fail "the fixture log must carry escapes and no plain literal, or 5a proves nothing about the strip"
+fi
+# ...and results.json carries the triple AND the per-rep record, not just the agreed values.
+if python3 - "$d/results.json" <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1]))
+a = j["flight_admission"]
+assert a["max_concurrent_scans"] == "4", a
+assert a["max_concurrent_scans_source"] == "derived", a
+assert a["available_parallelism"] == "2", a
+assert a["per_rep"]["flight-bypass-warm-1"]["max_concurrent_scans"] == "4", a
+assert a["reps_agreeing"] == 1, a
+assert "NOT pinned" in a["note"], a
+PY
+then
+  pass "admission: results.json records all three fields, the PER-REP values and the count that agreed — a reader comparing two sessions needs the ceiling AND its input"
+else
+  fail "results.json must record the admission triple per rep"
+fi
+
+# --- 5b. DISAGREEING REPS ARE REFUSED (the drift this exists to catch) ---------------------
+d="$TMP/adm-disagree"; make_session "$d" "$GOOD_FLIGHT"
+make_scan_rep "$d" warm 2 ok
+make_flight_rep "$d" warm 2 ok "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus" 2 warm bypass 1
+# ONE property apart from the accept case: rep 2's server logged a DIFFERENT ceiling, from a
+# different available_parallelism — the signature of a rep whose affinity mask differed.
+ws0_write_server_log "$d/flight-bypass-warm-2.server.log" 8 derived 4
+out=$(report_direct "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "did NOT all run under the same admission" <<<"$out" \
+   && grep -q "max_concurrent_scans:" <<<"$out" \
+   && grep -q "flight-bypass-warm-1='4'" <<<"$out" && grep -q "flight-bypass-warm-2='8'" <<<"$out"; then
+  pass "admission: reps that disagree on the ceiling are REFUSED, naming the FIELD and every rep's value"
+else
+  fail "disagreeing admission records must be refused naming both (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# ...and the refusal must state the remedy that is NOT available: pinning
+# --max-concurrent-scans would change the measured configuration and hide the drift.
+if grep -q "remedy is NOT to pin --max-concurrent-scans" <<<"$out"; then
+  pass "admission: the refusal names the WRONG remedy explicitly (pinning would hide the drift it exists to catch)"
+else
+  fail "the refusal must rule out pinning (out: $(head -6 <<<"$out"))"
+fi
+# ...and available_parallelism is reported as its own disagreeing field, because a changed
+# ceiling with an UNCHANGED available_parallelism means something pinned it — a different cause.
+if grep -q "available_parallelism:" <<<"$out"; then
+  pass "admission: EVERY disagreeing field is named, so 'the mask changed' and 'someone pinned it' are distinguishable causes"
+else
+  fail "each disagreeing field must be named (out: $(head -4 <<<"$out"))"
+fi
+# THE POSITIVE CONTROL, one property apart: with rep 2's log AGREEING, the same two-rep session
+# reports. Without it, 5b would be satisfied by any two-rep session failing for any reason.
+ws0_write_server_log "$d/flight-bypass-warm-2.server.log" 4 derived 2
+out=$(report_direct "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "OBSERVED IDENTICAL across all 2 flight rep(s)" <<<"$out"; then
+  pass "admission CONTROL: the SAME two-rep session reports once rep 2's log AGREES (so 5b is about the disagreement, not about the fixture)"
+else
+  fail "the agreeing two-rep session must report (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+
+# --- 5c. AN UNMEASURABLE RECORD IS A REFUSAL, per cause ------------------------------------
+d="$TMP/adm-absent"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus"
+rm -f "$d/flight-bypass-warm-1.server.log"
+out=$(report_direct "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "carries no server log" <<<"$out" \
+   && grep -q "AFFINITY MASK" <<<"$out"; then
+  pass "admission: an ABSENT server log is refused naming the rep, and the diagnostic states WHY the ceiling matters (it moves with the pin)"
+else
+  fail "an absent server log must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+d="$TMP/adm-empty"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus"
+: > "$d/flight-bypass-warm-1.server.log"
+out=$(report_direct "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "is EMPTY" <<<"$out"; then
+  pass "admission: an EMPTY server log is its own could-not-measure refusal (a server that started always logs its startup line)"
+else
+  fail "an empty server log must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+d="$TMP/adm-garbage"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus"
+printf 'cqlite-flight starting listen=127.0.0.1:18815 batch_size=8192\n' \
+  > "$d/flight-bypass-warm-1.server.log"
+out=$(report_direct "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "does not record max_concurrent_scans" <<<"$out" \
+   && grep -q "colour is not the cause" <<<"$out"; then
+  pass "admission: a log WITHOUT the fields is refused NAMING them, and rules colour out explicitly (the parse runs on stripped text)"
+else
+  fail "an unparseable log must be refused naming the fields (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+
+# --- 5d. THE DECLARED/READ ORACLE, both directions -----------------------------------------
+# The same property `PINNING_RECORD_FIELDS` has: a field declared and never read is a property of
+# the measurement the report cannot see; a field read and never declared cannot be found by the
+# next person adding one.
+if python3 - <<'PY'
+import pathlib, sys
+sys.path.insert(0, "scripts/perf")
+from ws0_flight_admission import FLIGHT_ADMISSION_FIELDS
+src = pathlib.Path("scripts/perf/ws0_flight_admission.py").read_text()
+# Every declared field must be READ by the reader loop, and the reader must read NOTHING it did
+# not declare: the loop is over the tuple, so the assertion is that each name appears in the
+# AGREEMENT check and in the returned record, and that the module names no other `_scans`/
+# `parallelism` field.
+for f in FLIGHT_ADMISSION_FIELDS:
+    assert src.count(f) >= 2, f
+assert len(FLIGHT_ADMISSION_FIELDS) == 3, FLIGHT_ADMISSION_FIELDS
+import ws0_report
+rsrc = pathlib.Path("scripts/perf/ws0_report.py").read_text()
+for f in FLIGHT_ADMISSION_FIELDS:
+    assert f"flight_admission['{f}']" in rsrc, f
+print("DECLARED-AND-READ")
+PY
+then
+  pass "admission: every declared field is READ by the module AND printed by the report — a field declared without a reader is one the report cannot see"
+else
+  fail "the admission field set must be declared and read in both directions"
+fi
+
 # ==========================================================================
 # A MINIMUM CHECK COUNT — this file has no `set -e` (#3272 round 3 nit)
 # ==========================================================================
 # Without it, a block that silently never executes (a helper returning early, a `$(...)` whose
 # command vanished) LOWERS the count and registers NO failure, and the gate reads only the exit
 # code. The floor is DERIVED FROM A MEASURED RUN and set below the observed count, so adding a
-# case cannot red the suite. MEASURED at 66 after #3551's items 5/7 landed (56 before them),
-# never counted from the source — loops and helpers multiply, and a source estimate understated
-# a floor by 29 elsewhere on this branch's history.
-MIN_CHECKS=50
+# case cannot red the suite. RE-DERIVED BY RUNNING IT at each addition, never counted from the
+# source — loops and helpers multiply, and a source estimate understated a floor by 29 elsewhere
+# in this repo's history. MEASURED: 56 (pin/allocator/report), 66 (+ items 5/7's counting
+# domain), 80 (+ item 9's environ and arena), 91 (+ item 10's admission read-back).
+MIN_CHECKS=80
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
