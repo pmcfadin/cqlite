@@ -970,19 +970,46 @@ if printf '%s' "$bs_out" | grep -q 'claude-auth: OPT-OUT'; then
 else
   bad "bootstrap: --skip-claude-auth produced no OPT-OUT line"
 fi
-if printf '%s' "$bs_out" | grep -q 'All checks green'; then
-  bad "bootstrap: --skip-claude-auth still reported 'All checks green' — an opt-out must never buy one"
+# THE OPT-OUT NO LONGER WITHHOLDS, AND THAT IS THE POINT (#3733, lead ruling). It used to
+# be a `[warn]`, i.e. `--strict` failed on it. But the thing being declined is a REPORT that
+# certifies nothing, so failing `--strict` for declining it made `--strict` pass or fail on
+# a line that is no longer a verdict — which is precisely what the ruling forbids. The
+# opt-out stays LOUD (asserted above) and is now non-verdict-bearing, like the section it
+# skips. Note this run also passes --skip-push-probe, whose OPT-OUT is a REAL [warn] and
+# does withhold, so the assertion is scoped to the claude-auth line's own posture rather
+# than to the summary string.
+if printf '%s' "$bs_out" | grep -q '\[warn\].*claude-auth: OPT-OUT'; then
+  bad "bootstrap: the claude-auth opt-out is still a [warn], so --strict fails on a non-verdict: $(printf '%s' "$bs_out" | grep 'claude-auth: OPT-OUT')"
 else
-  ok "bootstrap: the opt-out WITHHOLDS 'All checks green'"
+  ok "bootstrap: the claude-auth opt-out is loud but carries NO [warn] — --strict cannot fail on it"
 fi
 bs_out2=$(run_bootstrap --skip-smoke --skip-push-probe)
 printf '%s\n' "$bs_out2" >>"$TRANSCRIPT"
-if printf '%s' "$bs_out2" | grep -q 'claude-auth: VERIFIED' \
-   && printf '%s' "$bs_out2" | grep -q 'claude-tmux-env: VERIFIED'; then
-  ok "bootstrap: both verdict lines surface through bootstrap's reporter"
+if printf '%s' "$bs_out2" | grep -q 'claude-auth: PROBE-ANSWERED' \
+   && printf '%s' "$bs_out2" | grep -q 'claude-tmux-env: SERVER-CARRIES-BOTH'; then
+  ok "bootstrap: both observation lines surface through bootstrap's reporter"
 else
-  bad "bootstrap: the verdict lines are missing from the run"
+  bad "bootstrap: the observation lines are missing from the run"
   printf '%s\n' "$bs_out2" | sed -n '/Claude credential/,/^$/p'
+fi
+# NEITHER LINE MAY BE AN [ok] OR A [warn], ON THE BEST-LOOKING BOX THERE IS (#3733). This
+# is the bootstrap half of section 34's invariant and it needs its own case, because the
+# library can be perfectly honest while its primary consumer re-certifies its output:
+# `ok` is what `--strict` reads, and `warn` is what makes `--strict` fail — so a line
+# carrying either marker is a verdict again whatever the library called it. This fixture is
+# the ANSWERED/CARRIES-BOTH box, i.e. the only input that could ever have earned an [ok].
+if printf '%s' "$bs_out2" | grep -qE '\[(ok|warn)\].*(claude-auth:|claude-tmux-env:)'; then
+  bad "bootstrap: a claude credential line is still an [ok]/[warn] verdict: $(printf '%s' "$bs_out2" | grep -E '\[(ok|warn)\].*(claude-auth:|claude-tmux-env:)')"
+else
+  ok "bootstrap: neither claude credential line is an [ok] or a [warn] — --strict cannot read them"
+fi
+# ...and the scope note reaches bootstrap's output too. Bootstrap is the primary consumer
+# and its output is what an operator pastes, so a scope note printed only by the standalone
+# CLI would be absent exactly where it is read.
+if printf '%s' "$bs_out2" | grep -q 'claude-auth-report: OBSERVATIONS-ONLY'; then
+  ok "bootstrap: the OBSERVATIONS-ONLY scope note reaches bootstrap's own output"
+else
+  bad "bootstrap: bootstrap printed the two lines with no scope note beside them"
 fi
 # HOST SAFETY, ASSERTED RATHER THAN INTENDED: `gh auth switch` mutates the operator's real
 # gh state and is restored only by a trap a SIGKILL defeats. The stub refuses it and logs
@@ -1598,21 +1625,26 @@ claude_auth_case 'a 401 embedded in a larger number is NOT a rejection' s29i 1 \
   'API Error: 1401337 requests queued upstream' UNMEASURED
 
 # =====================================================================================
-# 30. `--yes` MUST NOT SEED A KNOWN-BAD CREDENTIAL INTO A WORKING tmux SERVER.
-#     The repair was gated on the TMUX verdict alone and never consulted `claude-auth:`.
-#     So on a box whose PERSISTED token is FAILED (or UNMEASURED) while the RUNNING server
-#     holds a working one, `--yes` overwrote the working value with the broken one and every
-#     lane spawned afterwards failed to authenticate. The repair BROKE A WORKING BOX — the
-#     exact inverse of what this section exists to do — and `.agent-ami/profile.yaml` runs
-#     bootstrap unattended, so nobody was watching.
-#     SERVER-STALE is precisely the state in which this fires: "the server's token DIFFERS
-#     from the persisted one" is reported the same way whether the server's copy is the old
-#     broken one or the only working one on the box, and nothing in that verdict can tell
-#     them apart. What CAN tell them apart is the other line, which was already measured
-#     three lines earlier and simply not read.
-#     Seeding therefore requires claude-auth: VERIFIED. The hand-run
-#     `claude-auth-capability.sh --fix-tmux-env` stays ungated as the deliberate override,
-#     so the refusal costs an operator nothing it does not name.
+# 30. `--yes` MUST NOT SEED AT ALL, AND `--fix-claude-auth` IS THE OPERATOR'S DECISION.
+#     THE HAZARD IS UNCHANGED AND IS WORTH RESTATING, because the fix for it changed shape.
+#     On a box whose PERSISTED token is bad while the RUNNING server holds a working one,
+#     seeding overwrites the working value and every lane spawned afterwards fails to
+#     authenticate — the repair BREAKING a working box, unattended, since
+#     `.agent-ami/profile.yaml` runs bootstrap this way. SERVER-STALE is precisely where it
+#     fires: "the server's token DIFFERS from the persisted one" reads the same whether the
+#     server's copy is the stale one or the only good one on the machine, and nothing in
+#     that line can tell them apart.
+#     THE OLD FIX WAS TO REQUIRE `claude-auth: VERIFIED` FIRST, AND THAT IS NOW WITHDRAWN
+#     (#3733, lead ruling): the gate's whole purpose was to stop a bad token overwriting a
+#     working server, and `VERIFIED` was a PROXY that three reviews showed can be true on a
+#     box whose persisted credential was never the thing that authenticated (LIMITATION 2).
+#     A gate on a proxy that can be false-positive in exactly the direction that causes the
+#     harm is worse than no gate, because it invites the unattended seeding it cannot
+#     justify. So the unattended path no longer seeds AT ALL, and seeding is what an
+#     operator gets by typing `--fix-claude-auth` and reading the warning it prints.
+#     WHAT THIS COSTS, stated rather than discovered later: `--yes` no longer repairs a
+#     SERVER-MISSING/STALE box in passing. That is the intended trade — the unattended run
+#     reports, and a human decides.
 # =====================================================================================
 # run_bootstrap_in <shimdir> <envfile> <args...>: the same pinned, offline invocation as
 # section 18, parameterised so a case can vary the planted verdicts.
@@ -1666,36 +1698,54 @@ else
   bad "seed gate: the fixture did not produce claude-auth: FAILED, so the case tests nothing: $(printf '%s' "$bs30a" | grep -c .) lines"
 fi
 if [ ! -f "$d30a/tmux-calls.log" ] || ! grep -q '^setenv ' "$d30a/tmux-calls.log"; then
-  ok "seed gate: --yes performs NO seed when the persisted credential is not VERIFIED"
+  ok "seed gate: --yes performs NO seed — the unattended path never mutates the server"
 else
-  bad "seed gate: --yes seeded a non-VERIFIED credential into the running server: $(cat "$d30a/tmux-calls.log")"
+  bad "seed gate: --yes seeded the running server unattended: $(cat "$d30a/tmux-calls.log")"
 fi
-if printf '%s' "$bs30a" | grep -qi 'REFUS.*seed\|seed.*REFUS'; then
-  ok "seed gate: the refusal is LOUD and names the precondition"
+# A REPAIR THAT QUIETLY DOES NOT HAPPEN READS AS "NOTHING WAS WRONG", so `--yes` must SAY
+# that seeding is now the operator's call and NAME the command. This is the case that stops
+# the change being "silently stopped repairing".
+if printf '%s' "$bs30a" | grep -q -- '--fix-claude-auth'; then
+  ok "seed gate: the unattended run NAMES the operator-driven repair instead of doing it"
 else
-  bad "seed gate: --yes declined to seed SILENTLY, which reads as 'nothing was wrong': $(printf '%s' "$bs30a" | sed -n '/Claude credential/,/^$/p' | head -12)"
+  bad "seed gate: --yes declined to seed SILENTLY: $(printf '%s' "$bs30a" | sed -n '/Claude credential/,/^$/p' | head -12)"
 fi
 if printf '%s' "$bs30a" | grep -q 'claude-tmux-env: SERVER-STALE'; then
-  ok "seed gate: the tmux verdict is REPORTED UNCHANGED (the run neither repaired nor hid it)"
+  ok "seed gate: the tmux observation is REPORTED UNCHANGED (the run neither repaired nor hid it)"
 else
-  bad "seed gate: the tmux verdict was not left as found: $(printf '%s' "$bs30a" | grep 'claude-tmux-env:')"
+  bad "seed gate: the tmux observation was not left as found: $(printf '%s' "$bs30a" | grep 'claude-tmux-env:')"
 fi
-# (b) THE HAPPY PATH STILL SEEDS, and is re-measured rather than asserted. Without this the
-#     fix above could have been "never seed", which passes (a) and helps nobody.
+# (b) THE EXPLICIT FLAG STILL SEEDS, ON THE SAME REJECTED-CREDENTIAL FIXTURE. Two things at
+#     once, and both matter. Without this the change could have been "never seed", which
+#     passes (a) and helps nobody. And running it on the fixture the OLD design REFUSED is
+#     what proves the proxy gate is gone rather than merely relocated: the decision moved
+#     to the human who typed the flag, and the run must say what it is about to overwrite.
+#     Re-measured rather than asserted — `tmux setenv` exiting 0 is a claim about the
+#     command, not about the server's environment.
 d30b=$(mkshim "$tmp/s30b"); plant_bootstrap_quiet_stubs "$d30b"
-plant_claude_probe_env "$d30b"
+plant_claude "$d30b" 1 'Failed to authenticate: OAuth session expired and could not be refreshed'
 plant_tmux_stateful "$d30b" "$TOK_OTHER" "$CFGDIR"
-bs30b=$(run_bootstrap_in "$d30b" "$ef2" --skip-smoke --skip-push-probe --yes)
+bs30b=$(run_bootstrap_in "$d30b" "$ef2" --skip-smoke --skip-push-probe --fix-claude-auth)
 printf '%s\n' "$bs30b" >>"$TRANSCRIPT"
-if [ -f "$d30b/tmux-calls.log" ] && grep -q '^setenv CLAUDE_CODE_OAUTH_TOKEN len=' "$d30b/tmux-calls.log"; then
-  ok "seed gate: a VERIFIED persisted credential IS still seeded by --yes"
+if printf '%s' "$bs30b" | grep -q 'claude-auth: FAILED'; then
+  ok "seed gate: the explicit-flag case presents the SAME rejected credential the old gate refused"
 else
-  bad "seed gate: the happy path stopped seeding — the gate is a blanket refusal: $(cat "$d30b/tmux-calls.log" 2>/dev/null)"
+  bad "seed gate: the explicit-flag fixture is not the refused one, so it proves nothing: $(printf '%s' "$bs30b" | grep 'claude-auth:')"
 fi
-if printf '%s' "$bs30b" | grep -q 'claude-tmux-env: VERIFIED'; then
-  ok "seed gate: the repair is RE-MEASURED against the changed server and reaches VERIFIED"
+if [ -f "$d30b/tmux-calls.log" ] && grep -q '^setenv CLAUDE_CODE_OAUTH_TOKEN len=' "$d30b/tmux-calls.log"; then
+  ok "seed gate: an explicit --fix-claude-auth seeds, with no proxy gate in front of it"
 else
-  bad "seed gate: the seeded server did not re-measure VERIFIED: $(printf '%s' "$bs30b" | grep 'claude-tmux-env:')"
+  bad "seed gate: --fix-claude-auth did not seed — the gate was relocated, not removed: $(cat "$d30b/tmux-calls.log" 2>/dev/null)"
+fi
+if printf '%s' "$bs30b" | grep -qi 'OVERWRIT'; then
+  ok "seed gate: the explicit repair STATES that it overwrites whatever the server holds"
+else
+  bad "seed gate: --fix-claude-auth seeded an unvalidated value with no warning: $(printf '%s' "$bs30b" | sed -n '/Claude credential/,/^$/p' | head -14)"
+fi
+if printf '%s' "$bs30b" | grep -q 'claude-tmux-env: SERVER-CARRIES-BOTH'; then
+  ok "seed gate: the repair is RE-REPORTED against the changed server"
+else
+  bad "seed gate: the seeded server was not re-read: $(printf '%s' "$bs30b" | grep 'claude-tmux-env:')"
 fi
 
 # =====================================================================================

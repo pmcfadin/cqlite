@@ -1570,6 +1570,17 @@ claude_auth_fix_tmux_env() {
   claude_auth_xtrace_restore
   return "$__cax_rc"
 }
+# WRAPPED THOUGH IT HANDLES NO SECRET, and deliberately so: bootstrap calls it, and the
+# containment guard's rule is a SUBSET relation over derived sets, not a judgement about
+# which callers are risky. An exemption for "this one is harmless" is one more list to keep
+# complete, and the wrapper costs four lines.
+claude_auth_emit_scope_note() {
+  claude_auth_xtrace_off
+  claude_auth_emit_scope_note__untraced "$@"
+  local __cax_rc=$?
+  claude_auth_xtrace_restore
+  return "$__cax_rc"
+}
 
 # ---- CLI ---------------------------------------------------------------------------
 claude_auth_usage() {
@@ -1617,7 +1628,7 @@ claude_auth_usage() {
 # reason the gate's narrowed lanes declare their narrowing at run time. It carries the
 # `claude-auth-report:` prefix (distinct from both verdict-line prefixes) so it can neither
 # be mistaken for an observation nor grepped away with one.
-claude_auth_emit_scope_note() {
+claude_auth_emit_scope_note__untraced() {
   printf 'claude-auth-report: OBSERVATIONS-ONLY — neither line above certifies that this box can start a lane (#3733). What they cannot see: pam_env DELIVERY (only tmux propagation), WHICH credential authenticated, whether the config dir is usable BY THE AGENT, and what a PANE receives as opposed to the server global table. See LIMITATION 1..5 in scripts/claude-auth-capability.sh.\n'
 }
 

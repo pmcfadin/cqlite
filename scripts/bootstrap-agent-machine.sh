@@ -81,32 +81,43 @@
 #      passes, so a freshly launched box is PINNED rather than merely reported unpinned.
 #      PAM reads /etc/environment at session creation, so the probe in the SAME run sees
 #      what the write just persisted — no reboot and no re-login.
-#   5c. Claude credential reachability (issue #3733, LINUX only). TWO independent
-#      questions, because they fail independently and their remedies differ, each on its
-#      own greppable line. `claude-auth:` asks whether the PERSISTED credential is valid
-#      for a COLD, non-interactive start: the token is read from /etc/environment (the
-#      pam_env source — the ONLY place it is provisioned), the inherited
-#      CLAUDE_CODE_OAUTH_TOKEN is SCRUBBED so an already-authenticated bootstrap session
-#      cannot answer for a persisted one (#3414's lesson, one subject over), and the value
-#      is exercised by a bounded `claude -p` requiring BOTH rc 0 AND a sentinel.
-#      `claude-tmux-env:` asks whether that credential REACHES a tmux-spawned pane — the
-#      dimension that actually failed in the field: a pane's environment comes from the
-#      tmux SERVER, fixed at server start, so a server predating provisioning hands out
-#      panes with neither variable however correct the disk is, and NOTHING ON DISK
-#      distinguishes such a box. Verdicts: VERIFIED / NOT-PERSISTED / FAILED / UNMEASURED
-#      and VERIFIED / SERVER-STALE / SERVER-MISSING / SERVER-INCOMPLETE /
-#      SERVER-CONFIG-STALE / SERVER-CONFIG-NODIR against a LIVE server, VERIFIED /
-#      COLD-START-MISSING / COLD-START-INCOMPLETE / COLD-START-NODIR when NO server is
-#      running (a freshly provisioned box: an ISOLATED throwaway tmux server on a private
-#      socket, started from the PERSISTED environment, measures what a NEW server would
-#      deliver to a pane), and NO-SERVER / UNMEASURED when nothing could be measured. A
-#      VERIFIED pane environment needs the CLAUDE_CONFIG_DIR to EQUAL the persisted one AND
-#      that directory to EXIST — nonempty is not correct. Only VERIFIED is an [ok] on either line (same posture as `git-push:`
-#      and `gate-pin:`); NO-SERVER is UNMEASURED-class. The TOKEN VALUE IS NEVER PRINTED,
-#      and bootstrap writes it to NO file — /etc/environment already holds it, and a second
-#      copy is refused on the PRECEDENT of openspec/specs/worker-environment-preflight/
-#      spec.md, whose "SHALL NOT write the token itself to disk" clause is stated for
-#      `$GH_TOKEN` under the git-credential requirement, not for this credential.
+#   5c. Claude credential reachability (issue #3733, LINUX only). A REPORT, NOT A CHECK —
+#      and unlike every other section here it produces NO [ok] and NO [warn], so `--strict`
+#      neither passes nor fails on it. It used to emit two CERTIFYING verdicts whose
+#      passing state was VERIFIED; three consecutive independent reviews each found a NEW
+#      High of one shape (the probe cannot observe the property its verdict names), so the
+#      lead ruled the DESIGN changed rather than the code carved a fourth time. The two
+#      lines now print WHAT WAS FOUND and stop.
+#      `claude-auth:` reports what happened when a bounded `claude -p` run carrying the
+#      value persisted in /etc/environment (the pam_env source — the ONLY place it is
+#      provisioned) was made, with the inherited CLAUDE_CODE_OAUTH_TOKEN SCRUBBED so an
+#      already-authenticated bootstrap session cannot answer for a persisted one (#3414's
+#      lesson, one subject over): PROBE-ANSWERED / NOT-PERSISTED / FAILED / UNMEASURED.
+#      PROBE-ANSWERED means rc 0 AND the sentinel came back; it does NOT say the persisted
+#      value is what authenticated, and the line NAMES any alternate credential
+#      (ANTHROPIC_API_KEY and friends) that was also in the probe's environment.
+#      `claude-tmux-env:` reports what a tmux server holds, or what a newly created one
+#      would hand a pane — the dimension that actually failed in the field: a pane's
+#      environment comes from the tmux SERVER, fixed at server start, so a server predating
+#      provisioning hands out panes with neither variable however correct the disk is, and
+#      NOTHING ON DISK distinguishes such a box. States: SERVER-CARRIES-BOTH /
+#      SERVER-STALE / SERVER-MISSING / SERVER-INCOMPLETE / SERVER-CONFIG-STALE /
+#      SERVER-CONFIG-NODIR against a LIVE server (its GLOBAL environment only — no pane is
+#      spawned); COLD-START-DELIVERS-BOTH / COLD-START-MISSING / COLD-START-INCOMPLETE /
+#      COLD-START-NODIR when NO server is running (a freshly provisioned box: an ISOLATED
+#      throwaway tmux server on a private socket, handed the values read from
+#      /etc/environment — which observes tmux PROPAGATION, not pam_env DELIVERY); and
+#      NO-SERVER / UNMEASURED when nothing could be read. A `*-BOTH` state needs the
+#      CLAUDE_CONFIG_DIR to EQUAL the persisted one AND that directory to exist as seen by
+#      THIS process — nonempty is not correct, and "exists to us" is not "usable by the
+#      agent". The five things these observations cannot see are documented as
+#      LIMITATION 1..5 in scripts/claude-auth-capability.sh, and every run prints a
+#      `claude-auth-report: OBSERVATIONS-ONLY` scope note. The TOKEN VALUE IS NEVER
+#      PRINTED, and bootstrap writes it to NO file — /etc/environment already holds it, and
+#      a second copy is refused on the PRECEDENT of openspec/specs/
+#      worker-environment-preflight/spec.md, whose "SHALL NOT write the token itself to
+#      disk" clause is stated for `$GH_TOKEN` under the git-credential requirement, not for
+#      this credential.
 #   6. Health check: run the gate's fmt component and print its authoritative
 #      `accelerators:` line.
 #
@@ -150,13 +161,14 @@
 #                                                      #   bootstrap on a fixed command line.
 #   bash scripts/bootstrap-agent-machine.sh --skip-claude-auth # skip ONLY section 5c (the
 #                                                      #   Claude credential probe AND the tmux
-#                                                      #   reachability measurement). The probe
-#                                                      #   makes a real bounded network/LLM call,
-#                                                      #   so an opt-out is warranted — but a
-#                                                      #   SILENT skip is not: it emits
-#                                                      #   `claude-auth: OPT-OUT` as a [warn], so
-#                                                      #   it withholds "All checks green." and can
-#                                                      #   never buy a vacuous green.
+#                                                      #   observation). The probe makes a real
+#                                                      #   bounded network/LLM call, so an opt-out
+#                                                      #   is warranted — but a SILENT skip is not:
+#                                                      #   it emits a LOUD `claude-auth: OPT-OUT`.
+#                                                      #   It is NOT a [warn] and does NOT withhold
+#                                                      #   "All checks green.", because section 5c
+#                                                      #   certifies nothing — there is no green to
+#                                                      #   buy (#3733).
 #                                                      #   CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1 is
 #                                                      #   the env spelling, for harnesses that
 #                                                      #   drive bootstrap on a fixed command line.
@@ -166,8 +178,14 @@
 #                                                      #   repairs SERVER-MISSING / SERVER-STALE /
 #                                                      #   SERVER-INCOMPLETE without persisting a
 #                                                      #   second copy of the secret ANYWHERE.
-#                                                      #   Implied by --yes. Nothing else — the
-#                                                      #   sibling of --fix-gate-pin.
+#                                                      #   OPERATOR-DRIVEN AND UNCONDITIONAL, and
+#                                                      #   *** NOT implied by --yes *** (#3733):
+#                                                      #   nothing in section 5c can validate the
+#                                                      #   value first, so this OVERWRITES whatever
+#                                                      #   the server holds — which may be the only
+#                                                      #   working credential on the box. It says
+#                                                      #   so at the point of action. Nothing else
+#                                                      #   — the sibling of --fix-gate-pin.
 #   bash scripts/bootstrap-agent-machine.sh --skip-smoke   # skip the final GATE run (section 6).
 #                                                      #   DISTINCT from --skip-push-probe: this
 #                                                      #   one is about the gate fmt smoke, that
@@ -214,26 +232,40 @@ fi
 FIX_GATE_PIN=0
 # --skip-claude-auth / CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1 (issue #3733): skip section 5c
 # entirely — no `claude -p` probe and no tmux server inspection. A FOURTH subject, so a
-# fourth switch, exactly as --skip-gate-pin is separate from --skip-push-probe. It is LOUD
-# and NON-PASSING (a `claude-auth: OPT-OUT` [warn]).
+# fourth switch, exactly as --skip-gate-pin is separate from --skip-push-probe. It is LOUD.
+#
+# IT IS NOT A [warn], AND ITS SIBLINGS ARE. `git-push:`/`gate-pin:` opt-outs are warns
+# because they decline a real VERDICT, and an opt-out that bought a green would be a switch
+# for a vacuous certification. Section 5c certifies nothing since the #3733 ruling, so
+# there is no green to buy — and making this a warn would make `--strict` pass or fail on a
+# line that is not a verdict, which is exactly what the ruling forbids.
 #
 # WHY AN OPT-OUT EXISTS HERE AT ALL, when the sibling probes justify theirs on hangs: this
 # one makes a REAL, BILLED, NETWORK LLM CALL. That is a cost an offline box, a hermetic
 # self-test and a rate-limited fleet each have a legitimate reason to decline. What is NOT
-# legitimate is declining it QUIETLY, which is why the opt-out is a warn and not a skip.
+# legitimate is declining it QUIETLY, which is why it still prints a line.
 SKIP_CLAUDE_AUTH=0
 SKIP_CLAUDE_AUTH_HOW=""
 if [ "${CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH:-0}" = 1 ]; then
   SKIP_CLAUDE_AUTH=1; SKIP_CLAUDE_AUTH_HOW="CQLITE_BOOTSTRAP_SKIP_CLAUDE_AUTH=1"
 fi
 # --fix-claude-auth (issue #3733): seed the RUNNING tmux server from the ALREADY-PERSISTED
-# value, and nothing else. Implied by --yes, mirroring --fix-gate-pin.
+# value, and nothing else.
 #
-# IT REQUIRES `claude-auth: VERIFIED` FIRST (round 3). Seeding a credential nothing has
-# validated over whatever a running server currently holds can BREAK a working box, and the
-# unattended `.agent-ami/profile.yaml` path is where that would happen unwatched. The
-# refusal is loud and names the hand-run override
-# (`scripts/claude-auth-capability.sh --fix-tmux-env`, which seeds unconditionally).
+# IT IS *NOT* IMPLIED BY --yes, WHICH IS WHERE IT DIFFERS FROM --fix-gate-pin, AND THAT IS
+# THE #3733 RULING. Seeding a credential nothing has validated over whatever a running
+# server currently holds can BREAK a working box, and the unattended
+# `.agent-ami/profile.yaml` path is where that would happen unwatched. Round 3 met that
+# with a precondition — `claude-auth: VERIFIED` — and the lead has WITHDRAWN it: `VERIFIED`
+# was a PROXY that three reviews showed can be true on a box whose persisted credential was
+# never the thing that authenticated, i.e. false-positive in precisely the direction that
+# causes the harm. A gate like that is worse than no gate, because it licenses the
+# unattended seeding it cannot justify.
+#
+# SO THE DECISION MOVED TO THE OPERATOR. `--yes` never seeds and says so. An explicit
+# `--fix-claude-auth` seeds UNCONDITIONALLY and states the overwrite at the point of
+# action. The hand-run `scripts/claude-auth-capability.sh --fix-tmux-env` is the same
+# operation without the rest of bootstrap.
 #
 # IT PERSISTS NOTHING. The repair for the field failure is not another file: the token is
 # already in /etc/environment, and the broken thing is a long-running process whose start
@@ -3129,11 +3161,24 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
 fi
 
 # ---- 5c. Claude credential reachability — issue #3733 ----
-# TWO INDEPENDENT VERDICTS, because they fail independently on a real box and their
-# remedies differ. The mechanics, the measured causal chain and the recovery procedure
-# live in docs/development/fleet-runbook.md ("Claude credential reachability"); the
-# implementation lives in scripts/claude-auth-capability.sh, which is standalone-runnable
-# and self-tested (scripts/tests/test_claude_auth_capability.sh, in `tooling-tests`).
+# TWO INDEPENDENT OBSERVATIONS — AND THEY CERTIFY NOTHING (#3733, lead ruling). This
+# section used to print two VERDICTS whose passing state was `VERIFIED`, reported through
+# `ok`/`warn`, so `--strict` passed or failed on them. Three consecutive independent
+# reviews each found a NEW High of one shape — the probe cannot observe the property its
+# verdict names — so the DESIGN changed instead of the code being carved a fourth time.
+#
+# WHAT THAT MEANS HERE, concretely: both lines go through `info`, NEVER `ok` and NEVER
+# `warn`. `ok` is what `--strict` reads and `warn` is what makes it fail, so a line
+# carrying either marker would be a verdict again whatever the library called it — and the
+# library being honest while its PRIMARY CONSUMER re-certifies its output is the same
+# defect one layer up. `scripts/tests/test_claude_auth_capability.sh` asserts this against
+# the best-looking box there is, i.e. the only input that could ever have earned an [ok].
+#
+# The mechanics, the measured causal chain and the recovery procedure live in
+# docs/development/fleet-runbook.md ("Claude credential reachability"); the implementation
+# lives in scripts/claude-auth-capability.sh, which is standalone-runnable and self-tested
+# (scripts/tests/test_claude_auth_capability.sh, in `tooling-tests`), and which documents
+# the five things these observations CANNOT see as LIMITATION 1..5.
 #
 # WHY THIS IS NOT INLINE: bootstrap is already 3000+ lines, and the logic is worth testing
 # on its own — the same argument that put the perf checks in scripts/perf-capability.sh.
@@ -3149,12 +3194,16 @@ CLAUDE_AUTH_D=""
 CLAUDE_TMUX_V=""
 CLAUDE_TMUX_D=""
 if [ "$SKIP_CLAUDE_AUTH" = 1 ]; then
-  # Loud and NON-PASSING by construction: an opt-out that returned `ok` would be a switch
-  # for buying a vacuous green, which is the failure mode this section exists to remove.
-  warn "claude-auth: OPT-OUT ($SKIP_CLAUDE_AUTH_HOW) — the persisted credential was NOT exercised and tmux reachability was NOT measured"
-  info "this run cannot certify that a NEW tmux session on this box can start 'claude'; drop the opt-out to measure it"
+  # LOUD, AND DELIBERATELY NOT A `warn` (#3733). The sibling opt-outs (`git-push:`,
+  # `gate-pin:`) are warns because they decline a real VERDICT, and an opt-out that bought
+  # a green would be a switch for a vacuous certification. Nothing is being certified
+  # here, so there is no green to buy: making this a warn would make `--strict` fail on a
+  # line the ruling says is not a verdict. It stays loud because a silent skip reads as
+  # "nothing was wrong".
+  info "claude-auth: OPT-OUT ($SKIP_CLAUDE_AUTH_HOW) — the persisted credential was NOT exercised and tmux reachability was NOT observed"
+  info "this section only ever REPORTS (#3733); drop the opt-out to see the two observation lines"
 elif [ ! -r "$CLAUDE_AUTH_LIB" ]; then
-  warn "claude-auth: UNMEASURED (scripts/claude-auth-capability.sh missing from this checkout — nothing here can answer the cold-start question)"
+  info "claude-auth: UNREPORTED (scripts/claude-auth-capability.sh missing from this checkout — nothing here can produce the observation lines)"
 else
   CLAUDE_AUTH_SECTION_OK=1
 fi
@@ -3169,11 +3218,10 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
   # bootstrap is the primary consumer, and its output is what an operator pastes.
   # ---- (a) is the PERSISTED credential valid for a cold, non-interactive start? ----
   claude_auth_verdict_into CLAUDE_AUTH_V CLAUDE_AUTH_D
-  if [ "$CLAUDE_AUTH_V" = VERIFIED ]; then
-    ok "claude-auth: VERIFIED ($(claude_auth_redact "$CLAUDE_AUTH_D"))"
-  else
-    warn "claude-auth: $CLAUDE_AUTH_V ($(claude_auth_redact "$CLAUDE_AUTH_D"))"
-  fi
+  # ONE RENDERING FOR EVERY STATE, through `info`. A per-state branch is what put `ok` on
+  # one of them, and there is no state to distinguish any more: PROBE-ANSWERED is an
+  # observation exactly as NOT-PERSISTED is.
+  info "claude-auth: $CLAUDE_AUTH_V ($(claude_auth_redact "$CLAUDE_AUTH_D"))"
   # THE REMEDY DIFFERS BY VERDICT, and getting that wrong sends an operator in a circle —
   # the #3414 `default` vs `invalid` lesson. NOT-PERSISTED means provision it; FAILED means
   # replace a value that IS there; UNMEASURED means fix the named precondition and re-run.
@@ -3181,6 +3229,8 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
   # an outage, a quota error or a CLI crash prove nothing about the credential, so they
   # report UNMEASURED — equally non-passing, but never "throw this token away".
   case "$CLAUDE_AUTH_V" in
+    PROBE-ANSWERED)
+      info "this does NOT say the box can start a lane, and it does not say the PERSISTED value is what authenticated — see the LIMITATION references on the line above" ;;
     NOT-PERSISTED)
       info "provision it:  add a CLAUDE_CODE_OAUTH_TOKEN=<token> line to /etc/environment (root:root 0644, its own line, NO inline comment — pam_env takes a trailing '# ...' as part of the value)"
       info "no browser is needed: the credential is a STATIC, SHAREABLE gateway token, so provisioning a box is a file copy plus 'bash scripts/bootstrap-agent-machine.sh --fix-claude-auth' — there is no interactive OAuth step"
@@ -3197,48 +3247,56 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
   # Measured BEFORE any repair, so the run reports the state it FOUND; the repair below
   # re-measures rather than asserting its own success.
   claude_tmux_env_verdict_into CLAUDE_TMUX_V CLAUDE_TMUX_D
-  # THE REPAIR IS ATTEMPTED ONLY WHERE IT CAN HELP. `tmux setenv -g` needs a running
-  # server, so NO-SERVER and UNMEASURED are left alone: running it there would print a
-  # failure that says nothing about the box.
+  # ---- THE REPAIR IS THE OPERATOR'S DECISION, AND `--yes` NO LONGER MAKES IT ----------
+  # THE HAZARD IS REAL AND UNCHANGED: on a box whose PERSISTED token is bad while the
+  # RUNNING server holds a working one, seeding overwrites the working value and every lane
+  # spawned afterwards fails to authenticate — the repair BREAKING a working box,
+  # unattended, since `.agent-ami/profile.yaml` runs bootstrap this way. SERVER-STALE is
+  # exactly where it fires: "the server's token DIFFERS from the persisted one" reads
+  # identically whether the server's copy is the stale one or the only good one on the
+  # machine, and nothing in THAT line can tell them apart.
   #
-  # AND ONLY WHERE THE THING IT WOULD SEED IS KNOWN GOOD (#3733, round 3). The gate used to
-  # read the TMUX verdict alone and never consulted `claude-auth:` — so on a box whose
-  # PERSISTED token is FAILED or UNMEASURED while the RUNNING server holds a WORKING one,
-  # `--yes` overwrote the working value with the broken one and every lane spawned
-  # afterwards failed to authenticate. THE REPAIR BROKE A WORKING BOX, unattended: this is
-  # what `.agent-ami/profile.yaml` runs. SERVER-STALE is exactly where it fires — "the
-  # server's token DIFFERS from the persisted one" reads identically whether the server's
-  # copy is the stale one or the only working one on the machine, and nothing in THAT line
-  # can tell them apart. The other line can, and it was already measured a few lines above.
+  # THE OLD GUARD WAS `claude-auth: VERIFIED`, AND IT IS WITHDRAWN (#3733, lead ruling).
+  # Its whole purpose was to stop a bad token overwriting a working server, and `VERIFIED`
+  # was a PROXY that three reviews showed can be true on a box whose persisted credential
+  # was never the thing that authenticated (LIMITATION 2 in the capability script). A gate
+  # on a proxy that can be false-positive in precisely the direction that causes the harm
+  # is worse than no gate: it licenses the unattended seeding it cannot justify. Removing
+  # the gate while keeping the seeding under `--yes` would be the same harm with the excuse
+  # deleted, so BOTH went.
   #
-  # There is deliberately no override flag: the hand-run
-  # `bash scripts/claude-auth-capability.sh --fix-tmux-env` seeds unconditionally and is
-  # named in the refusal, so an operator who really means it is one documented command away
-  # — while the unattended path cannot take that decision on its own.
-  if [ "$CLAUDE_TMUX_V" != VERIFIED ] && { [ "$AUTO_YES" = 1 ] || [ "$FIX_CLAUDE_AUTH" = 1 ]; }; then
-    if [ "$CLAUDE_AUTH_V" != VERIFIED ]; then
-      # LOUD, not silent: a repair that quietly does not happen reads as "nothing was
-      # wrong", and the operator then never learns why the box is still broken.
-      warn "claude-auth: REFUSING to seed the running tmux server — the PERSISTED credential is $CLAUDE_AUTH_V, not VERIFIED, and seeding would push a value nothing has validated over whatever the server currently holds (which may be the only working credential on this box)"
-      info "fix the PERSISTED credential first (the claude-auth remedy above), then re-run:  bash scripts/bootstrap-agent-machine.sh --fix-claude-auth"
-      info "to seed anyway, deliberately and by hand:  bash scripts/claude-auth-capability.sh --fix-tmux-env"
-    else
-      case "$CLAUDE_TMUX_V" in
-        SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE|SERVER-CONFIG-STALE)
-          info "repairing: seeding the running tmux server from the persisted value (nothing is written to disk)"
-          claude_auth_fix_tmux_env | while IFS= read -r claude_fix_line; do info "$claude_fix_line"; done
-          # RE-MEASURED, never assumed: `tmux setenv` exiting 0 is a claim about the command,
-          # not about the server's environment, and this whole section exists because those
-          # are different facts.
-          claude_tmux_env_verdict_into CLAUDE_TMUX_V CLAUDE_TMUX_D ;;
-      esac
-    fi
+  # SO: `--yes` NEVER SEEDS. Only an explicit `--fix-claude-auth` does, and it seeds
+  # UNCONDITIONALLY with the overwrite stated at the point of action — nothing here can
+  # validate the value first, so the honest thing is to say what is about to happen and let
+  # the human who typed the flag own it. WHAT THIS COSTS: `--yes` no longer repairs a
+  # SERVER-MISSING/STALE box in passing; the unattended run reports, and a human decides.
+  # `tmux setenv -g` still needs a running server, so the cold/unmeasured states are left
+  # alone — seeding there would print a failure that says nothing about the box.
+  if [ "$FIX_CLAUDE_AUTH" = 1 ]; then
+    case "$CLAUDE_TMUX_V" in
+      SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE|SERVER-CONFIG-STALE)
+        warn "claude-auth: --fix-claude-auth OVERWRITES the running tmux server's credential with the value persisted in /etc/environment. NOTHING HERE HAS VALIDATED THAT VALUE (#3733: no observation in this section can tell which credential authenticated), so if the server currently holds the only working credential on this box, this destroys it. You asked for it explicitly; proceeding."
+        info "seeding the running tmux server from the persisted value (nothing is written to disk)"
+        claude_auth_fix_tmux_env | while IFS= read -r claude_fix_line; do info "$claude_fix_line"; done
+        # RE-READ, never assumed: `tmux setenv` exiting 0 is a claim about the command, not
+        # about the server's environment, and this whole section exists because those are
+        # different facts.
+        claude_tmux_env_verdict_into CLAUDE_TMUX_V CLAUDE_TMUX_D ;;
+      *)
+        # NO BACKTICKS INSIDE THIS DOUBLE-QUOTED STRING: they are LIVE command
+        # substitution here, and the first draft of this line really did run `tmux`.
+        info "claude-auth: --fix-claude-auth has nothing to seed in state $CLAUDE_TMUX_V — 'tmux setenv -g' needs a RUNNING server, and the remedy for this state is named below" ;;
+    esac
+  elif [ "$AUTO_YES" = 1 ]; then
+    case "$CLAUDE_TMUX_V" in
+      SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE|SERVER-CONFIG-STALE)
+        # LOUD, not silent: a repair that quietly does not happen reads as "nothing was
+        # wrong", and the operator then never learns why the box is still broken.
+        info "claude-auth: --yes does NOT seed the running tmux server (#3733). Seeding overwrites a credential nothing here can validate, and an unattended run must not make that call: run 'bash scripts/bootstrap-agent-machine.sh --fix-claude-auth' deliberately, and read the warning it prints" ;;
+    esac
   fi
-  if [ "$CLAUDE_TMUX_V" = VERIFIED ]; then
-    ok "claude-tmux-env: VERIFIED ($(claude_auth_redact "$CLAUDE_TMUX_D"))"
-  else
-    warn "claude-tmux-env: $CLAUDE_TMUX_V ($(claude_auth_redact "$CLAUDE_TMUX_D"))"
-  fi
+  # ONE RENDERING FOR EVERY STATE, through `info` — see the note on the claude-auth line.
+  info "claude-tmux-env: $CLAUDE_TMUX_V ($(claude_auth_redact "$CLAUDE_TMUX_D"))"
   case "$CLAUDE_TMUX_V" in
     SERVER-MISSING|SERVER-STALE|SERVER-INCOMPLETE|SERVER-CONFIG-STALE)
       info "repair the RUNNING server (no reboot, no re-login, nothing written to disk):  bash scripts/bootstrap-agent-machine.sh --fix-claude-auth   (--yes does it too)"
@@ -3261,6 +3319,10 @@ if [ "$CLAUDE_AUTH_SECTION_OK" = 1 ]; then
     UNMEASURED)
       info "check by hand:  bash scripts/claude-auth-capability.sh --tmux-env" ;;
   esac
+  # THE SCOPE NOTE MUST REACH BOOTSTRAP'S OWN OUTPUT, not just the standalone CLI's:
+  # bootstrap is the primary consumer and its output is what an operator pastes, so a
+  # declaration printed only by the CLI would be absent exactly where it is read.
+  claude_auth_emit_scope_note | while IFS= read -r claude_note_line; do info "$claude_note_line"; done
 fi
 
 # ---- 5d. Notification channel (ntfy) — issue #3119 ----
