@@ -30,7 +30,7 @@ use crate::types::Value;
 /// to `LongType.compareLongs`. The two arms therefore diverge BY DESIGN for a
 /// negative long, and unifying them would break one of the two types. This arm
 /// now agrees with `types::comparator::custom::compare_time` and with the write
-/// path's `write_engine::mutation::compare_values` for ALL inputs.
+/// path's `write_engine::clustering_order::compare_values` for ALL inputs.
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         use crate::float_cmp::{cassandra_double_cmp as dcmp, cassandra_float_cmp as fcmp};

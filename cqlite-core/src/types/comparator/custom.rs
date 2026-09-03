@@ -89,12 +89,12 @@ fn compare_inet(left: &Value, right: &Value) -> Result<Ordering> {
 /// inputs — in-range and out-of-range-negative alike. The enumerated set:
 ///   * THIS comparator, `types::comparator::custom::compare_time`, reached by
 ///     `ComparatorType::Custom("time")` on the read/clustering path;
-///   * `Value::PartialOrd`'s `Time` arm (`types.rs`) — corrected from signed
+///   * `Value::PartialOrd`'s `Time` arm (`types::value_ord`) — corrected from signed
 ///     `i64::partial_cmp` by #3935. The query-side comparator
 ///     `select_executor::value_ops::try_compare_values` delegates here for
 ///     same-variant operands (`Value::Time` has no `as_f64`, so it never takes
 ///     the numeric-coercion branch), so it converged with it;
-///   * `write_engine::mutation::compare_values` — corrected from signed
+///   * `write_engine::clustering_order::compare_values` — corrected from signed
 ///     `i64::cmp` by #3935. Both `ClusteringKey::compare` and `ClusteringKey`'s
 ///     `Ord` call it, and `write_engine::merge` sorts merged rows with
 ///     `ClusteringKey::compare` under the comment "Sort merged rows by

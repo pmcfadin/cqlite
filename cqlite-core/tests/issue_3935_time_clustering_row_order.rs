@@ -9,10 +9,10 @@
 //! site used unsigned big-endian byte order — `TimeType`'s rule — while two
 //! sites still used signed `i64` comparison:
 //!
-//! * `Value::PartialOrd`'s `Time` arm (`types.rs`), which the query-side
+//! * `Value::PartialOrd`'s `Time` arm (`types::value_ord`), which the query-side
 //!   comparator `select_executor::value_ops::try_compare_values` delegates to
 //!   for same-variant operands;
-//! * `write_engine::mutation::compare_values`'s `Time` arm, reached by BOTH
+//! * `write_engine::clustering_order::compare_values`'s `Time` arm, reached by BOTH
 //!   `ClusteringKey::compare` (schema-aware) and `ClusteringKey`'s `Ord` (the
 //!   memtable `BTreeMap` key order). `write_engine::merge` then sorts merged
 //!   rows with `ClusteringKey::compare` "for output order", so this one decides
@@ -204,9 +204,10 @@ fn value_partial_ord_keeps_timestamp_signed() {
 }
 
 // ===========================================================================
-// SITE 6 — `write_engine::mutation::compare_values`, via `ClusteringKey`.
+// SITE 6 — `write_engine::clustering_order::compare_values`, via `ClusteringKey`.
 //
-// `compare_values` is private; both public routes to it are covered:
+// `compare_values` is crate-internal (`pub(super)`), so both PUBLIC routes to
+// it are covered:
 // `ClusteringKey`'s `Ord` (memtable BTreeMap order) and the schema-aware
 // `ClusteringKey::compare` (which `merge` uses for output row order).
 // ===========================================================================
