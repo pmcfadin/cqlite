@@ -142,7 +142,7 @@
 # scrub nothing asserts:
 #   * `-u BASH_ENV` in the `--auth` probe is THE MECHANISM. Remove it and a $BASH_ENV file
 #     re-exporting the credential reaches the child AFTER `env KEY=<persisted>` has run and
-#     overrides it — a VERIFIED that is about the inherited value. Pinned by case 2b.
+#     overrides it — a PROBE-ANSWERED that is about the inherited value. Pinned by case 2b.
 #   * `-u $CLAUDE_AUTH_TOKEN_KEY` in the COLD PROBE is THE MECHANISM, because the
 #     re-supplying assignment there is CONDITIONAL (`[ -z "$__ptok" ] ||`): with nothing
 #     persisted, that flag is the only thing keeping the inherited token out of the pane.
@@ -542,7 +542,9 @@ claude_auth_resolve_tmux_identity() {
 # delivered token used to be checked against `${#persisted}` alone. LENGTH EQUALITY IS NOT
 # VALUE EQUALITY: one `set-environment CLAUDE_CODE_OAUTH_TOKEN <other>` line in a tmux
 # config substitutes a different value, and if it is the same length the probe reported
-# VERIFIED — the verdict that certifies a fresh box as able to start a lane.
+# VERIFIED — which was then the verdict that certified a fresh box as able to start a lane.
+# No such verdict exists any more (#3733); the comparison below is why the state it reports
+# is worth reporting at all.
 #
 # COMPARED WITHOUT EVER PRINTING EITHER VALUE, which is this file's standing rule. The pane
 # writes a SALTED SHA-256 of what it received; the parent hashes the persisted value with
@@ -949,8 +951,10 @@ claude_tmux_env_verdict_into__untraced() {
   # verdict is defined RELATIVE to the persisted /etc/environment + pam_env source, and
   # without that source there is nothing to compare a server's environment against. The
   # header block has always documented both lines as UNMEASURED off Linux; the guard was
-  # missing here, so a macOS host could emit VERIFIED — and an [ok] is what `--strict`
-  # reads (#3414: scoping a platform out is not the same as passing it).
+  # missing here, so a macOS host could emit VERIFIED, which was then an [ok] and so was
+  # what `--strict` read (#3414: scoping a platform out is not the same as passing it).
+  # Neither line reaches `ok()` since #3733, so the guard now keeps the TEXT honest rather
+  # than keeping a false [ok] out of a strict run.
   if ! claude_auth_platform_linux; then
     eval "$__od=\"/etc/environment + pam_env is a Linux mechanism; on \$(uname -s 2>/dev/null) there is no persisted baseline a tmux server could be compared against, so pane reachability cannot be measured\""
     return 0
@@ -1086,8 +1090,8 @@ claude_tmux_env_verdict_into__untraced() {
   # which is the two-valued predicate CLAUDE.md warns about: only the bad state was tested,
   # so a STALE, WRONG or NONEXISTENT directory inherited the permissive branch. It matters
   # here more than anywhere: a wrong CLAUDE_CONFIG_DIR sends `claude` to an un-onboarded
-  # directory, and THAT is the first-run picker this issue exists for. So VERIFIED requires
-  # an AFFIRMATIVE match — equal to the persisted value AND the directory exists.
+  # directory, and THAT is the first-run picker this issue exists for. So SERVER-CARRIES-BOTH
+  # requires an AFFIRMATIVE match — equal to the persisted value AND the directory exists.
   claude_auth_read_key_into __cfg __cfgstate "$__file" "$CLAUDE_AUTH_CONFIG_KEY"
   if [ "$__cfgstate" != present ] || [ -z "$__cfg" ]; then
     eval "$__od=\"the server names a \$CLAUDE_AUTH_CONFIG_KEY but \$__file provides no persisted value to compare it against (\$__cfgstate) — PRESENT is not CORRECT, and a comparison with nothing is not a verdict\""
@@ -1405,8 +1409,10 @@ CLAUDE_AUTH_PROBE
 }
 
 # claude_tmux_cold_verdict_into <outvar_verdict> <outvar_detail> <env-file>
-# Verdicts: VERIFIED | COLD-START-MISSING | COLD-START-INCOMPLETE | COLD-START-NODIR |
-#           NO-SERVER (UNMEASURED-class: the isolated probe could not run).
+# States: COLD-START-DELIVERS-BOTH | COLD-START-MISSING | COLD-START-INCOMPLETE |
+#         COLD-START-NODIR | NO-SERVER (UNMEASURED-class: the isolated probe could not run).
+# NONE of them certifies anything (#3733) — an enumeration in a comment is exactly the prose
+# that rots after a rename, and this one said `VERIFIED` for a run after the token was gone.
 # The COLD-START-* names are deliberately distinct from the SERVER-* ones: "a live server
 # that lacks the credential" and "a would-be server that would lack it" are different
 # operator actions, and a pasted log has to keep them apart.
@@ -1448,8 +1454,9 @@ claude_tmux_cold_verdict_into() {
   fi
   # THE DELIVERED VALUE MUST BE THE PERSISTED VALUE, COMPARED AS A VALUE. This was a LENGTH
   # comparison, and length equality is not value equality: one `set-environment` line in a
-  # tmux config substituting a different token of the same length yielded VERIFIED — the
-  # verdict that certifies a fresh box. The comparison is by salted digest and neither value
+  # tmux config substituting a different token of the same length yielded VERIFIED — then the
+  # verdict that certified a fresh box, a state that no longer exists (#3733). The
+  # observation below is still worth making. The comparison is by salted digest and neither value
   # is printed (see the digest block near the top). `unmeasured` — no digest computable on
   # one side — is NOT read as a match: an unmeasured identity is UNMEASURED-class, and this
   # branch says which of the two it was.

@@ -1294,7 +1294,7 @@ the server's copy is the stale one or the only good one on the machine, and noth
 can tell those apart.
 
 Round 3 met that with a precondition — seed only when `claude-auth:` is `VERIFIED` — and **that
-precondition is withdrawn (#3733 lead ruling)**, because `VERIFIED` was a *proxy* that can be true
+precondition is withdrawn (#3733 lead ruling)**, because `VERIFIED` was a *proxy* that could be true
 on a box whose persisted credential was never what authenticated (LIMITATION 2): false-positive in
 precisely the direction that causes the harm, which makes it **worse than no gate**, since it
 licenses the unattended seeding it cannot justify. Removing the gate while keeping the seeding

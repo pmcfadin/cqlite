@@ -89,7 +89,7 @@ TOK='sk-cqlite-test-TOKEN-3733-do-not-print'
 TOK_OTHER='sk-cqlite-test-STALE-3733-do-not-print'
 SENTINEL='CQLITE_CLAUDE_AUTH_OK'
 
-# THE CONFIG-DIR FIXTURES ARE REAL PATHS, because VERIFIED now requires the directory to
+# THE CONFIG-DIR FIXTURES ARE REAL PATHS, because a `*-BOTH` state requires the directory to
 # EXIST — a nonexistent CLAUDE_CONFIG_DIR sends `claude` to an un-onboarded config and
 # produces the first-run picker, which is this issue's reported symptom. CFGDIR exists,
 # CFGDIR_OTHER exists and is a DIFFERENT directory, CFGDIR_GHOST is never created.
@@ -487,7 +487,7 @@ fi
 #     session that ALREADY carries the token, so an unscrubbed check answers about the
 #     INHERITED value while claiming to answer about the PERSISTED one. With nothing
 #     persisted and a perfectly good token in the environment, the verdict must still be
-#     NOT-PERSISTED — never VERIFIED.
+#     NOT-PERSISTED — never PROBE-ANSWERED.
 #
 #     WHAT THIS CASE DOES **NOT** PROVE, stated because a green tally standing in for an
 #     unmeasured property is the exact failure this file exists to remove one level down:
@@ -616,7 +616,7 @@ d4=$(mkshim "$tmp/s4")
 plant_claude "$d4" 0 ''
 run_cap "$d4" "$ef2" -- --auth
 if printf '%s' "$out" | grep -q '^claude-auth: UNMEASURED'; then
-  ok "claude-auth: rc 0 with NO sentinel is not VERIFIED (and is UNMEASURED, not an accusation)"
+  ok "claude-auth: rc 0 with NO sentinel is not PROBE-ANSWERED (and is UNMEASURED, not an accusation)"
 else
   bad "claude-auth: rc 0 + empty output produced '$out' — rc alone must not certify"
 fi
@@ -628,7 +628,7 @@ d5=$(mkshim "$tmp/s5")
 plant_claude "$d5" 1 "$SENTINEL"
 run_cap "$d5" "$ef2" -- --auth
 if printf '%s' "$out" | grep -q '^claude-auth: UNMEASURED'; then
-  ok "claude-auth: the sentinel with rc != 0 is not VERIFIED (and names no rejection, so UNMEASURED)"
+  ok "claude-auth: the sentinel with rc != 0 is not PROBE-ANSWERED (and names no rejection, so UNMEASURED)"
 else
   bad "claude-auth: sentinel + rc 1 produced '$out' — output alone must not certify"
 fi
@@ -1133,7 +1133,7 @@ fi
 #     CLAUDE.md warns about — only the bad state is tested, so every unknown state inherits
 #     the permissive branch — and it undermines the exact verdict this issue turns on: a
 #     wrong config dir sends `claude` to an un-onboarded directory, which IS the first-run
-#     picker. VERIFIED now requires an AFFIRMATIVE match against the persisted value AND
+#     picker. SERVER-CARRIES-BOTH now requires an AFFIRMATIVE match against the persisted value AND
 #     the directory to exist; each failure keeps its own name because the remedies differ
 #     (re-seed the server vs. provision the directory vs. nothing to compare against).
 # =====================================================================================
@@ -1157,7 +1157,7 @@ fi
 
 # No persisted CLAUDE_CONFIG_DIR at all: there is nothing to compare the server against,
 # and a comparison with nothing is not a verdict (the same rule case 14 applies to the
-# token). UNMEASURED, never VERIFIED.
+# token). UNMEASURED, never a delivery state.
 ef_nocfg="$tmp/env-nocfg"
 mkenvfile "$ef_nocfg" "CLAUDE_CODE_OAUTH_TOKEN=$TOK"
 d20c=$(mkshim "$tmp/s20c"); plant_tmux "$d20c" complete
@@ -1172,8 +1172,8 @@ fi
 # 20. THE PLATFORM GUARD APPLIES TO **BOTH** VERDICTS. /etc/environment + pam_env is a
 #     Linux mechanism, and the header block has always documented both lines as UNMEASURED
 #     off Linux — but the guard was applied only to `claude-auth:`, so a macOS host could
-#     emit `claude-tmux-env: VERIFIED` and recommend Linux-only /etc/environment remedies.
-#     A false VERIFIED is an [ok], and [ok] is what `--strict` reads (#3414: scoping a
+#     emit a DELIVERY state and recommend Linux-only /etc/environment remedies. When this
+#     case was written a false one was an [ok], and [ok] is what `--strict` reads (#3414: scoping a
 #     platform out is not the same as passing it).
 # =====================================================================================
 # This is the ONE place the platform varies: every other shim dir pins `uname -s` to Linux
@@ -1622,7 +1622,7 @@ else
   bad "claude-auth: a SIGTERM-only timeout was accepted as a bound: $out"
 fi
 if [ ! -e "$CLAUDE_RAN_MARKER" ]; then
-  ok "claude-auth: the probe is NOT RUN when the bound cannot be enforced (a would-be VERIFIED stub was never invoked)"
+  ok "claude-auth: the probe is NOT RUN when the bound cannot be enforced (a would-be PROBE-ANSWERED stub was never invoked)"
 else
   bad "claude-auth: the unbounded probe RAN anyway — a missing capability inherited the permissive branch"
 fi
@@ -1852,8 +1852,8 @@ fi
 #     The probe reports what a would-be server DELIVERS to a pane, and the delivered token
 #     was checked only against `${#persisted}`. A tmux configuration that substitutes a
 #     DIFFERENT value of the same length — one `set-environment` line, and every fleet box
-#     has a tmux config — therefore produced `VERIFIED`, which is the verdict that
-#     certifies a fresh box as able to start a lane. Length equality is not value equality.
+#     has a tmux config — therefore produced `VERIFIED`, which was then the verdict that
+#     certified a fresh box as able to start a lane. Length equality is not value equality.
 #     THE SUBSTITUTED FIXTURE IS ASSERTED TO BE THE SAME LENGTH FIRST, because the case is
 #     only evidence about VALUE comparison if a LENGTH comparison would have passed it: a
 #     different-length fixture would red against the defect too, for the wrong reason.
@@ -2168,7 +2168,7 @@ fi
 
 # (b) AN UNRESOLVABLE IDENTITY IS UNMEASURED, NEVER THE CURRENT UID. The tmux stub here is
 # `complete`, i.e. root's server is perfect — so a silent fall back to the current UID
-# reports VERIFIED about the wrong server, which is exactly the false certification.
+# would report a DELIVERY about the wrong server, which is exactly the false certification.
 d33b=$(mkshim "$tmp/s33b"); plant_tmux "$d33b" complete; plant_id "$d33b" root 0 "$INVOKER" 4711
 plant_delegator "$d33b" runuser
 run_cap "$d33b" "$ef2" 'SUDO_USER=cqlite-no-such-login-3733' 'SUDO_UID=6553' -- --tmux-env

@@ -2345,7 +2345,7 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   green would be a vacuous certification, whereas here there is no green to buy.
   **`--fix-claude-auth` IS NO LONGER GATED, AND IT IS NO LONGER IMPLIED BY `--yes`.** The gate
   (round 3) required `claude-auth: VERIFIED` before seeding the running tmux server, to stop a bad
-  token overwriting a working one — but `VERIFIED` was a proxy that can be TRUE on a box whose
+  token overwriting a working one — but `VERIFIED` was a proxy that could be TRUE on a box whose
   persisted credential was never what authenticated, i.e. false-positive in precisely the direction
   that causes the harm, which makes it **worse than no gate because it licenses the unattended
   seeding it cannot justify**. Removing the gate while keeping the seeding under `--yes` would be
