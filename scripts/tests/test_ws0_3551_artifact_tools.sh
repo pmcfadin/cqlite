@@ -827,3 +827,151 @@ for dir in faster slower; do
     fail "10-$dir. a $dir treatment must read $expect_rps / $expect_cpr / $expect_up (rc=$rc, out: $(tailout))"
   fi
 done
+
+# ===========================================================================
+# PART 3 — window-census.py's REPORT
+# ===========================================================================
+# --- Case 11: a contaminated session is named CONTAMINATED with its n-of-m count --------
+# The count is the information: `3 of 13` says a competitor was present for part of the window,
+# which is a different fact from `13 of 13`, and a bare CONTAMINATED says neither.
+C11="$TMP/census11"
+mkses "$C11" 1 A 1 "$(isot 0)" "$(isot 120)" 400000 20000 250000 25000 1.40
+TS_C11_OK="$TMP/ts-c11-clean.jsonl"; TS_C11_DIRTY="$TMP/ts-c11-dirty.jsonl"
+mkts "$TS_C11_OK"    "$(cadence_offsets 0 120)" -        on
+mkts "$TS_C11_DIRTY" "$(cadence_offsets 0 120)" 40,50,60 on
+census_run "$C11" "$TS_C11_DIRTY"
+verdict="$(mdcell "$RUNOUT" session r1-A verdict)"
+if [ "$rc" -eq 0 ] && [ "$verdict" = '**CONTAMINATED** (3 of 13)' ]; then
+  pass "11. a contaminated session is NAMED with its count: '$verdict'"
+else
+  fail "11. a contaminated session must read '**CONTAMINATED** (3 of 13)' (rc=$rc, got '$verdict')"
+fi
+if [ "$(mdcell "$RUNOUT" session r1-A competing)" = "3" ] \
+  && [ "$(mdcell "$RUNOUT" session r1-A 'in-window samples')" = "13" ]; then
+  pass "11. ...and the competing and in-window-sample columns carry the same 3 and 13"
+else
+  fail "11. the columns must agree with the verdict (competing=$(mdcell "$RUNOUT" session r1-A competing), samples=$(mdcell "$RUNOUT" session r1-A 'in-window samples'))"
+fi
+if grep -qF '**1 of 1 session(s) NOT USABLE**' "$RUNOUT"; then
+  pass "11. ...and the footer counts it unusable"
+else
+  fail "11. the footer must count the contaminated session unusable (out: $(tailout))"
+fi
+# THE CONTROL, differing in exactly one property (whether any sample carries a competitor).
+census_run "$C11" "$TS_C11_OK"
+if [ "$rc" -eq 0 ] && [ "$(mdcell "$RUNOUT" session r1-A competing)" = "0" ] \
+  && grep -qF 'All 1 sessions clean' "$RUNOUT"; then
+  pass "11. CONTROL: the same session over an uncontaminated timeseries reads clean"
+else
+  fail "11. the control must read clean (rc=$rc, out: $(tailout))"
+fi
+
+# --- Case 12: the per-CPU column is TOTAL busy INCLUDING OUR OWN measurement ------------
+# A FIRST DRAFT OF THIS TOOL IMPLIED THE COLUMN BOUNDED CONTAMINATION, which it cannot: during
+# a session the pinned CPUs are busy BY DESIGN — that is the measured server and the measured
+# scan — so it cannot separate a peer's cycles from ours. The corrected wording is pinned here
+# so it cannot regress into the claim it cannot support.
+#
+# The header must also NAME the CPUs the tool actually differences, derived from the tool's own
+# PINS rather than restated, so the column cannot claim one CPU set while measuring another.
+_pins_line=$(grep -oE '^PINS = \([^)]*\)' "$CENSUS_TOOL" | head -1) || true
+if [ -z "$_pins_line" ]; then
+  fail "12. derivation: no top-level PINS = (...) in $CENSUS_TOOL, so the header's CPU set cannot be checked"
+else
+  pass "12. derivation: the pinned CPU set is read from the tool ($_pins_line)"
+  census_run "$C11" "$TS_C11_OK"
+  hdr=$(grep -m1 -F '| session |' "$RUNOUT")
+  if grep -qF 'TOTAL incl. our own' <<<"$hdr"; then
+    pass "12. the per-CPU column header declares it is TOTAL busy INCLUDING our own measurement"
+  else
+    fail "12. the per-CPU column header must say TOTAL incl. our own (header: $hdr)"
+  fi
+  missing=""
+  for cpu in $(tr -d 'PINS=() ' <<<"$_pins_line" | tr ',' ' '); do
+    grep -qF "$cpu" <<<"$hdr" || missing="$missing $cpu"
+  done
+  if [ -z "$missing" ]; then
+    pass "12. ...and it names every CPU the tool differences (${_pins_line#PINS = })"
+  else
+    fail "12. the header omits pinned CPU(s):$missing (header: $hdr)"
+  fi
+fi
+# The reading itself, numerically. The fixture's cumulative counters advance 1000 total / 500
+# idle per sample on every pinned CPU, so every consecutive pair differences to exactly 50.0%
+# and the median has one expected answer.
+# The column NAME is derived from the emitted header, not restated: a restated name would
+# make this cell read empty (and `mdcell` name a missing column) the moment the header is
+# reworded, which is a red describing the harness rather than the tool.
+col=$(python3 - "$RUNOUT" <<'HDR'
+import pathlib
+import sys
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    if not line.startswith("| session |"):
+        continue
+    for cell in (c.strip() for c in line.strip("|").split("|")):
+        if "pinned-CPU" in cell:
+            print(cell)
+            raise SystemExit(0)
+raise SystemExit(3)
+HDR
+)
+if [ -z "$col" ]; then
+  fail "12. derivation: no pinned-CPU column in the emitted header, so its value cannot be read"
+  col='pinned-CPU-column-NOT-DERIVED'
+else
+  pass "12. derivation: the per-CPU column name is read from the emitted header"
+fi
+if [ "$(mdcell "$RUNOUT" session r1-A "$col")" = "50.0%" ]; then
+  pass "12. the per-CPU cell is a READING: 50.0% from counters that advance 1000 total / 500 idle per sample"
+else
+  fail "12. the per-CPU cell must read 50.0% (got '$(mdcell "$RUNOUT" session r1-A "$col")')"
+fi
+# ...and an ABSENT `percpu` block is NOT MEASURED, never 0.0%: an absent snapshot and an idle
+# CPU are different facts and only one of them is a measurement. ONE property differs.
+TS_NOPCT="$TMP/ts-c11-no-percpu.jsonl"
+mkts "$TS_NOPCT" "$(cadence_offsets 0 120)" - off
+census_run "$C11" "$TS_NOPCT"
+if [ "$rc" -eq 0 ] && [ "$(mdcell "$RUNOUT" session r1-A "$col")" = "NOT MEASURED" ]; then
+  pass "12. an absent percpu block reads NOT MEASURED, not 0.0% (an absent snapshot is not an idle CPU)"
+else
+  fail "12. an absent percpu block must read NOT MEASURED (got '$(mdcell "$RUNOUT" session r1-A "$col")')"
+fi
+# THE FOOTER'S CORRECTED WORDING, pinned phrase by phrase...
+census_run "$C11" "$TS_C11_OK"
+while IFS= read -r phrase; do
+  [ -n "$phrase" ] || continue
+  if grep -qF "$phrase" "$RUNOUT"; then
+    pass "12. footer states: '$phrase'"
+  else
+    fail "12. the footer must state '$phrase' — this is the corrected wording and must not regress"
+  fi
+done <<'PHRASES'
+The pinned-CPU column is TOTAL busy
+dominated by THIS MEASUREMENT during a session
+does NOT separate a peer's cycles from ours
+is NOT a contamination bound
+`competing_count` bounds compilers, linkers and the `agent-gate.sh` script and NOT total foreign load
+PHRASES
+# ...and the NEGATIVE half, which the phrase list above cannot express: the report must never
+# call the column a contamination bound WITHOUT the negation. Asserted as an equality of
+# counts rather than an absence, because `NOT a contamination bound` contains the very
+# substring a bare absence test would look for.
+if python3 - "$RUNOUT" <<'PY'
+import pathlib
+import sys
+text = pathlib.Path(sys.argv[1]).read_text()
+claims = text.count("contamination bound")
+negated = text.count("NOT a contamination bound")
+if claims == 0:
+    sys.stderr.write("the phrase 'contamination bound' is absent entirely\n")
+    raise SystemExit(2)
+if claims != negated:
+    sys.stderr.write(f"{claims} mention(s) of 'contamination bound', only {negated} negated\n")
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
+then
+  pass "12. every mention of 'contamination bound' in the report is NEGATED — the column is never claimed to be one"
+else
+  fail "12. the report must never call the per-CPU column a contamination bound un-negated"
+fi
