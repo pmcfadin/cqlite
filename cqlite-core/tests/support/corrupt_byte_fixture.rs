@@ -75,11 +75,21 @@ pub enum Mutation {
     },
     /// Issue #3928 — the partition-HEADER arm. Overwrite one byte of the FIRST
     /// partition header, whose position is a FORMAT FACT and needs no index
-    /// component to locate: a Cassandra `Data.db` begins with its first
-    /// partition's header (`SortedTableWriter.append`, cassandra-5.0.8:
-    /// `ByteBufferUtil.writeWithShortLength(key.getKey(), writer)` followed by
-    /// the partition-level `DeletionTime`), so the header starts at DECOMPRESSED
-    /// offset 0 and therefore inside chunk 0.
+    /// component to locate.
+    ///
+    /// A Cassandra `Data.db` begins with its first partition's header, written by
+    /// `SortedTablePartitionWriter.start` — the writer BOTH formats share
+    /// (cassandra-5.0.8 `SortedTablePartitionWriter.java:97-105`):
+    ///
+    /// ```java
+    /// ByteBufferUtil.writeWithShortLength(key.getKey(), writer);
+    /// DeletionTime.getSerializer(version).serialize(partitionLevelDeletion, writer);
+    /// ```
+    ///
+    /// So the header starts at DECOMPRESSED offset 0 — hence inside chunk 0 —
+    /// and is a 2-byte big-endian key length, the key, then the partition-level
+    /// `DeletionTime` in the form `version.hasUIntDeletionTime()` selects
+    /// (`DeletionTime.java:191-196`).
     FirstPartitionHeader(HeaderByte),
 }
 
@@ -499,12 +509,13 @@ fn candidate_literal_sites(
 /// # Why the site needs no index component
 ///
 /// A Cassandra `Data.db` begins with its first partition's header
-/// (`SortedTableWriter.append` → `ByteBufferUtil.writeWithShortLength(key, …)`
-/// then the partition-level `DeletionTime`, cassandra-5.0.8), and chunks are
+/// (`SortedTablePartitionWriter.start`, cassandra-5.0.8 — see
+/// [`Mutation::FirstPartitionHeader`] for the two lines), and chunks are
 /// fixed-size in the DECOMPRESSED domain, so that header lives at decompressed
-/// offset 0 — inside chunk 0 — on both BIG and BTI. The byte within it is
-/// derived per [`HeaderByte`], reading the key length out of the fixture's own
-/// bytes rather than assuming a key width.
+/// offset 0 — inside chunk 0 — on both BIG and BTI, because both formats use
+/// that same writer. The byte within it is derived per [`HeaderByte`], reading
+/// the key length out of the fixture's own bytes rather than assuming a key
+/// width.
 ///
 /// # Why a COMPRESSED-domain write, found by search
 ///

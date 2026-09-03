@@ -18,9 +18,10 @@
 //! 2. the one-byte resync can land on MISALIGNED bytes that parse as a plausible
 //!    header, so the walk INVENTS a partition that does not exist.
 //!
-//! #3782's probe attributed **15 of 35** corrupted read-path losses to the
-//! header arm (`block_emit_windowed.rs`) against 20 to the row arm, so this was
-//! the larger share.
+//! Per the issue body (a figure from #3782's own measurement probe, cited here
+//! rather than re-measured): **15 of 35** corrupted read-path losses were
+//! attributable to the header arm against 20 to the row arm, so this was the
+//! larger share. The numbers this file establishes itself are below.
 //!
 //! **The row COUNT goes UP while data is lost**, which is why nothing in this
 //! file compares counts: every assertion is over the MULTISET of partition keys
@@ -33,10 +34,15 @@
 //!
 //! * the control leg is the untouched Cassandra fixture, and the mutated leg
 //!   differs from it by exactly ONE decompressed byte (asserted by the harness);
-//! * the BIG (`nb`) site is the low byte of the 2-byte key length
-//!   `ByteBufferUtil.writeWithShortLength` wrote (`ByteBufferUtil.java:362-368`),
-//!   zeroed — so the header declares a 0-byte key while the key Cassandra wrote
-//!   still follows, and every later structure is misframed;
+//! * both sites are inside the header `SortedTablePartitionWriter.start` writes
+//!   — the writer BOTH formats share
+//!   (`SortedTablePartitionWriter.java:97-105`): a key with
+//!   `ByteBufferUtil.writeWithShortLength` (`ByteBufferUtil.java:362-368`), then
+//!   the partition-level `DeletionTime` in the version-selected form
+//!   (`DeletionTime.java:191-196`);
+//! * the BIG (`nb`) site is the low byte of that 2-byte key length, zeroed — so
+//!   the header declares a 0-byte key while the key Cassandra wrote still
+//!   follows, and every later structure is misframed;
 //! * the BTI (`da`) site is the partition-level `DeletionTime` discriminator,
 //!   which Cassandra writes as exactly `IS_LIVE_DELETION = 0b1000_0000` for a
 //!   live partition and whose own reader THROWS on any other byte with that bit

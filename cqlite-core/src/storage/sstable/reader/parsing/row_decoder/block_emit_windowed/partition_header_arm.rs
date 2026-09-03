@@ -88,9 +88,10 @@ impl V5CompressedLegacyParser {
             // there is no next one, so trailing bytes that cannot even begin a
             // header are corruption — a Cassandra `Data.db` is exactly a
             // concatenation of partitions with no padding
-            // (`SortedTableWriter.append`, cassandra-5.0.8), so `offset` here is
-            // either `data.len()` (handled by the caller's loop condition) or a
-            // partial header nothing can complete.
+            // (`SortedTableWriter.append` → `SortedTablePartitionWriter.start`
+            // per partition, cassandra-5.0.8), so `offset` here is either
+            // `data.len()` (handled by the caller's loop condition) or a partial
+            // header nothing can complete.
             return if extent.is_complete() {
                 Err(undecodable_partition_header(
                     offset,
