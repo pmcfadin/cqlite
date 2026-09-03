@@ -4,10 +4,12 @@
 //!
 //! Split out of `compaction.rs` under the campsite rule (epic #1116), the same
 //! way `compaction_stream.rs` was (#2299): that file owns the block/partition
-//! ENTRY POINTS and the `CompactionPolicy`, this one owns the row build. The
-//! method is `pub(super)` only so its former host can still call it.
+//! ENTRY POINTS and the `CompactionPolicy`, this one owns the row build. A CHILD
+//! module of it (not a sibling) so the split costs no declaration line in
+//! `row_decoder/mod.rs`, which is itself at the size limit; the method is
+//! `pub(super)` only so its former host can still call it.
 
-use super::*;
+use super::super::*;
 
 impl V5CompressedLegacyParser {
     /// Build a [`CompactionRow`] from a parsed row's pieces (epic #899).
@@ -32,8 +34,8 @@ impl V5CompressedLegacyParser {
     /// A row with NO row deletion is not checked — see the boundary note at the
     /// call site.
     ///
-    /// The caller reports that `Err` as [`DataRowOutcome::Refused`], never as
-    /// [`DataRowOutcome::DecodeFailed`]: the row DECODED, so the refusal is a
+    /// The caller reports that `Err` as `DataRowOutcome::Refused`, never as
+    /// `DataRowOutcome::DecodeFailed`: the row DECODED, so the refusal is a
     /// judgement about content and no refill can change it (#3782 vs #3809).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_compaction_row_data(

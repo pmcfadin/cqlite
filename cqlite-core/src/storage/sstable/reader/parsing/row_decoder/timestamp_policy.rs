@@ -4,6 +4,9 @@
 //! (epic #1116).
 
 use super::*;
+// The discriminated data-row policy outcome (issue #3809) — imported explicitly;
+// see the note at `compaction.rs`'s own import.
+use super::partition_driver::DataRowOutcome;
 
 /// Issue #1640 (K1): [`SlidingPartitionPolicy`] for the streaming-scan /
 /// compaction-read `(TableId, RowKey, ScanRow, row_timestamp)` path

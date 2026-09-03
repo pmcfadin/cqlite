@@ -1,4 +1,16 @@
 use super::*;
+// The discriminated data-row policy outcome (issue #3809). Imported EXPLICITLY
+// rather than through `row_decoder/mod.rs`'s glob because that file sits at the
+// campsite-rule size limit and this costs no line there.
+use super::partition_driver::DataRowOutcome;
+
+// Issue #3809 (campsite #1116): the per-element row BUILDER, split out of this
+// file so the clustering-identity invariant and its tests have room. A child
+// module rather than a sibling so this split costs no line in `row_decoder/mod.rs`
+// (that file is itself at its size limit); `build_compaction_row_data` is
+// `pub(super)` purely so its former host still calls it.
+#[path = "compaction_row_build.rs"]
+mod compaction_row_build;
 
 impl V5CompressedLegacyParser {
     /// Parse all partitions in a decompressed block into per-element

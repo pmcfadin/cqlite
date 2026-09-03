@@ -797,13 +797,7 @@ mod cell_value;
 mod cell_value_complex;
 mod cell_value_scalar;
 mod compaction;
-// issue #3809 (campsite #1116): the per-element row BUILDER, split out of
-// `compaction` so the identity invariant and its tests have room.
-mod compaction_row_build;
 mod compaction_stream; // issue #2299 (split of `compaction`, campsite #1116)
-                       // Issue #3809: the discriminated data-row policy outcome (a REFUSAL is not a
-                       // bytes-availability question, so it bypasses `at_final_chunk` tolerance).
-mod data_row_outcome;
 pub(in crate::storage::sstable::reader) use compaction_stream::{
     CompactionPartitionState, PartitionStreamStep,
 };
@@ -822,7 +816,6 @@ mod row_framing;
 mod udt;
 mod vuint_length;
 
-use data_row_outcome::DataRowOutcome;
 use partition_driver::{row_write_timestamp, MarkerOutcome, SlidingPartitionPolicy};
 // Per-column decode dispatch tag (Epic J / issue #1635). Imported into this
 // module's namespace so the `use super::*` sibling modules (`cell_value`,

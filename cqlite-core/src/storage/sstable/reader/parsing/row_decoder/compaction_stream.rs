@@ -10,8 +10,7 @@
 //! driver never has to keep a WIDE partition fully resident).
 
 use super::compaction::CompactionPolicy;
-use super::data_row_outcome::DataRowOutcome;
-use super::partition_driver::{MarkerOutcome, SlidingPartitionPolicy};
+use super::partition_driver::{DataRowOutcome, MarkerOutcome, SlidingPartitionPolicy};
 use super::row_framing::PartitionHeaderReadiness;
 use super::{RowColumnResolution, V5CompressedLegacyParser};
 use crate::schema::TableSchema;
