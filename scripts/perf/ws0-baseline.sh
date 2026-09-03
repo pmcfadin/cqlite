@@ -163,6 +163,18 @@ FLIGHT_ALLOCATOR="system"
 # fall-through to the system allocator: a run labelled `jemalloc` that measured system malloc is
 # the instrument-reports-success-without-measuring shape this rig exists to refuse.
 FLIGHT_ALLOCATOR_LIB=""
+# --- ARM C, GENERALISED: THE MECHANISM UNDER TEST IS ARENA CONTENTION (#3551, #3217 partC F1) ---
+# `docs/reports/ws0-3217-artifacts/partC/PROPOSED-FOLLOWUPS.md` F1 (strength STRONGEST)
+# pre-registers this experiment as its AC2: "a controlled arena experiment at the same points:
+# MALLOC_ARENA_MAX = 1, 2, 4, default ... If capping arenas does not move the -24%, the allocator
+# hypothesis is falsified and that is a passing outcome to be reported as such."
+#
+# EMPTY means INJECT NOTHING, and that is not the same as injecting 0: glibc's handling of an
+# empty or zero value is not something this rig may assume, so the variable is simply absent from
+# the server's environment unless a value was asked for (the launch has two forms for exactly
+# that reason). Independent of `--flight-allocator`: the two knobs are recordable together or
+# separately.
+FLIGHT_MALLOC_ARENA_MAX=""
 # The candidate PATHS live beside the three-valued probe that consumes them, in
 # `scripts/perf/lib-flight-arm.sh`: the list and the probe are one decision (what counts as
 # "this host has no jemalloc"), and splitting them would put half of it two files away.
@@ -271,6 +283,16 @@ ws0-baseline.sh — issue #3096 same-session Arrow-encode baseline
                        would be a byte-identical duplicate of arm B under a label saying
                        otherwise. On `system` the NEGATIVE is asserted too (no jemalloc
                        mapping) and any inherited LD_PRELOAD is emptied for the launch.
+  --flight-malloc-arena-max N
+                       Set MALLOC_ARENA_MAX=N for the FLIGHT SERVER PROCESS ONLY (same seam as
+                       --flight-allocator, and independent of it). Unset = inject nothing,
+                       which is NOT the same as 0. Positive integer, validated up front.
+                       VERIFIED per rep from /proc/<pid>/environ as a whole NUL-separated
+                       entry — an arena cap leaves no mapping, so `maps` cannot see it at all,
+                       and a substring match would confuse =1 with =16. This is #3217 partC
+                       F1's pre-registered AC2: if capping arenas does not move the delta the
+                       allocator hypothesis is FALSIFIED, which is a result to report, not a
+                       failure.
   --jemalloc-lib PATH  The preloaded library, for a host where it is not one of the standard
                        paths. Must be an existing, readable, regular file. Without it the
                        path is DISCOVERED and a failed discovery REFUSES (remedy named) —
@@ -365,6 +387,7 @@ while [[ $# -gt 0 ]]; do
         system|jemalloc) FLIGHT_ALLOCATOR="$2" ;;
         *) echo "FATAL: --flight-allocator must be system|jemalloc (got '$2')" >&2; exit 2 ;;
       esac; shift 2 ;;
+    --flight-malloc-arena-max) FLIGHT_MALLOC_ARENA_MAX="$2"; shift 2 ;;
     --jemalloc-lib) FLIGHT_ALLOCATOR_LIB="$2"; shift 2 ;;
     --reps) REPS="$2"; shift 2 ;;
     --temp)
@@ -449,6 +472,12 @@ unset _perf_lint_out
 # CALL SITES stay here, so what this driver actually validates is visible at its
 # top level rather than buried in a library.
 
+# Through the SHARED validator (`lib-args.sh`), never a new numeric check: a second
+# implementation of "is this a positive integer" is a second thing to drift, and this one is
+# already wrap-proof (#3272 F2). Only when a value was given — empty means inject nothing.
+if [[ -n "$FLIGHT_MALLOC_ARENA_MAX" ]]; then
+  require_positive_int flight-malloc-arena-max "$FLIGHT_MALLOC_ARENA_MAX"
+fi
 require_positive_int scan-passes "$SCAN_PASSES"
 require_positive_int reps "$REPS"
 require_positive_int port "$PORT" 65535
@@ -754,6 +783,23 @@ fi
 # up. Exit 2, like every other argument refusal.
 record_flight_allocator_facts || exit 2
 
+# --- THE ENVIRONMENT IS PART OF THE MEASUREMENT (#3551 item 8) ------------------------------
+# Two records, deliberately separate: AMBIENT (as measured in this driver's own environment) and
+# INJECTED (what the rig sets, per arm). "The operator had a stray LD_PRELOAD" and "the rig set
+# one on purpose" are different facts and only one of them is a defect. Without them, arm A and
+# arm C are indistinguishable in every recorded field — one binary set across all arms is
+# deliberate, so the ENVIRONMENT is the only thing that differs, and it was written down nowhere.
+# `docs/reports/ws0-3552-report.md` §4 is the governing rule: state RUSTFLAGS and
+# CARGO_ENCODED_RUSTFLAGS AS MEASURED, because a reproduction only corroborates if its
+# environment differs — not just its tree, box, or operator.
+WS0_ENV_AMBIENT="$(ws0_ambient_env_record)"
+# ...and an ambient ALLOCATOR setting is REFUSED rather than merely recorded, because
+# `ws0-scan-bench` would inherit it and the bare scan is the drift control. Above the boundary
+# because it is an environment read: `--validate-args-only` reaches it, so the refusal is
+# hermetically observable and costs nothing.
+refuse_ambient_allocator_env || exit 2
+WS0_ENV_INJECTED="flight server process ONLY: LD_PRELOAD=${FLIGHT_ALLOCATOR_LIB:-<empty>}, $FLIGHT_ARENA_RECORDED; bare scan (the drift control): NOTHING is injected, asserted per rep against the environment its bench inherits (<tag>.scan-env.status)"
+
 if [[ "$VALIDATE_ONLY" == "1" ]]; then
   # `baseline-mode` is in the stamp so the hermetic self-tests can observe WHICH claim the run
   # makes without executing anything. The canonical-corpus COMPARISON itself is necessarily below
@@ -762,7 +808,9 @@ if [[ "$VALIDATE_ONLY" == "1" ]]; then
        "port=$PORT scan-passes=$SCAN_PASSES step=$STEP_DURATION cold-step=$COLD_STEP_DURATION" \
        "baseline-mode=$BASELINE_MODE events=[$EVENTS] bin-dir=[${BIN_DIR:-<default target/release>}]" \
        "flight-cpus=$FLIGHT_SERVER_CPUS flight-pin-mode=$FLIGHT_PIN_MODE" \
-       "flight-allocator=$FLIGHT_ALLOCATOR jemalloc-lib=[$FLIGHT_ALLOCATOR_LIB_RECORDED]"
+       "flight-allocator=$FLIGHT_ALLOCATOR jemalloc-lib=[$FLIGHT_ALLOCATOR_LIB_RECORDED]" \
+       "flight-malloc-arena-max=[${FLIGHT_MALLOC_ARENA_MAX:-<not injected>}]" \
+       "env-ambient=[$WS0_ENV_AMBIENT]"
   echo "  nothing was executed: no sysctl write, no build, no cache drop, no perf, no measurement."
   exit 0
 fi
@@ -1107,6 +1155,8 @@ WS0_CFG_SCAN_PASSES="$SCAN_PASSES" \
 WS0_CFG_SERVER_CPUS="$SERVER_CPUS" \
 WS0_CFG_CLIENT_CPUS="$CLIENT_CPUS" \
 WS0_CFG_FLIGHT_SERVER_CPUS="$FLIGHT_SERVER_CPUS" \
+WS0_CFG_ENV_AMBIENT="$WS0_ENV_AMBIENT" \
+WS0_CFG_ENV_INJECTED="$WS0_ENV_INJECTED" \
 WS0_CFG_STEP_DURATION="$STEP_DURATION/$COLD_STEP_DURATION" \
 WS0_CFG_FLIGHT_ENDPOINT="$FLIGHT_ENDPOINT" \
 WS0_CFG_BASELINE_MODE="$BASELINE_MODE" \
@@ -1205,6 +1255,7 @@ WS0_PIN_FLIGHT_PIN_MODE="$FLIGHT_PIN_MODE" \
 WS0_PIN_FLIGHT_PIN_VERIFIED="$WS0_FLIGHT_PIN_VERIFIED" \
 WS0_PIN_FLIGHT_ALLOCATOR="$FLIGHT_ALLOCATOR" \
 WS0_PIN_FLIGHT_ALLOCATOR_LIB="$FLIGHT_ALLOCATOR_LIB_RECORDED" \
+WS0_PIN_FLIGHT_MALLOC_ARENA_MAX="$FLIGHT_ARENA_RECORDED" \
 WS0_PIN_FLIGHT_ALLOCATOR_VERIFICATION="$FLIGHT_ALLOCATOR_VERIFICATION" \
 python3 -c '
 import json, os, pathlib, socket, sys
@@ -1232,6 +1283,7 @@ rec = {
     "flight_pin_verified": os.environ["WS0_PIN_FLIGHT_PIN_VERIFIED"],
     "flight_allocator": os.environ["WS0_PIN_FLIGHT_ALLOCATOR"],
     "flight_allocator_lib": os.environ["WS0_PIN_FLIGHT_ALLOCATOR_LIB"],
+    "flight_malloc_arena_max": os.environ["WS0_PIN_FLIGHT_MALLOC_ARENA_MAX"],
     "flight_allocator_verification": os.environ["WS0_PIN_FLIGHT_ALLOCATOR_VERIFICATION"],
     "host": socket.gethostname() or "unknown",
     "verified_by": "scripts/perf/lib-cpu.sh verify_sibling_pair + verify_disjoint, fail-closed,"

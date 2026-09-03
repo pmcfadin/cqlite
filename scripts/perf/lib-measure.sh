@@ -92,6 +92,11 @@ WS0_MEASURE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ---------------------------------------------------------------------------
 measure_scan() {
   local temp="$1" rep="$2" tag="scan-$temp-$rep"
+  # THE DRIFT CONTROL MUST BE UNPERTURBED, AND THAT IS ASSERTED RATHER THAN INTENDED (#3551).
+  # This leg's three `ws0-scan-bench` launches inherit THIS shell's environment, so the check is
+  # against that environment, immediately before them: nothing can change between the two, since
+  # it is the same process. An affirmative measurement of the thing the child will receive.
+  assert_scan_env_unperturbed "$tag" || exit 1
   drop_caches_if_cold "$temp"
 
   # --- untimed PREWARM (warm arm only) -----------------------------------------
@@ -203,11 +208,28 @@ measure_flight() {
   # from the operator's environment, rather than trusting it to be unset: a control arm quietly
   # running jemalloc does not merely add noise, it INVERTS the comparison. What it was set to is
   # recorded in pinning-verification.json, and the outcome is OBSERVED below rather than assumed.
+  # ONLY THIS PROCESS, and that is the whole method (#3551). Exporting either variable before
+  # `ws0-baseline.sh` would reach `ws0-scan-bench` too (this file launches it three times, at the
+  # prewarm, the setup-only leg and the timed scan), putting the BARE-SCAN DRIFT CONTROL on a
+  # different allocator in arm C than in arms A/B — which breaks method §3b step 3, the one
+  # property these flags exist to provide. So the injection is per-process, on this line, and the
+  # bare-scan path ASSERTS it received neither (see `assert_scan_env_unperturbed`).
   local preload=""
   [[ "$FLIGHT_ALLOCATOR" == "jemalloc" ]] && preload="$FLIGHT_ALLOCATOR_LIB"
-  CQLITE_FLIGHT_MERGE_PATH="$arm" LD_PRELOAD="$preload" taskset -c "$FLIGHT_SERVER_CPUS" "$BIN/cqlite-flight" \
-    --data-dir "$CORPUS" --listen "127.0.0.1:$PORT" \
-    > "$OUT_DIR/$tag.server.log" 2>&1 &
+  # TWO LAUNCH FORMS, because an ABSENT `MALLOC_ARENA_MAX` is not the same as an empty one and
+  # this rig may not guess which glibc does what with a zero/empty value. `LD_PRELOAD` is set on
+  # BOTH — to the library on the jemalloc arm, to EMPTY on the system arm, where an empty value
+  # preloads nothing AND neutralises anything inherited. An ambient one is refused before the
+  # first rep, so this is belt and braces rather than the only control.
+  if [[ -n "$FLIGHT_MALLOC_ARENA_MAX" ]]; then
+    CQLITE_FLIGHT_MERGE_PATH="$arm" LD_PRELOAD="$preload" MALLOC_ARENA_MAX="$FLIGHT_MALLOC_ARENA_MAX" taskset -c "$FLIGHT_SERVER_CPUS" "$BIN/cqlite-flight" \
+      --data-dir "$CORPUS" --listen "127.0.0.1:$PORT" \
+      > "$OUT_DIR/$tag.server.log" 2>&1 &
+  else
+    CQLITE_FLIGHT_MERGE_PATH="$arm" LD_PRELOAD="$preload" taskset -c "$FLIGHT_SERVER_CPUS" "$BIN/cqlite-flight" \
+      --data-dir "$CORPUS" --listen "127.0.0.1:$PORT" \
+      > "$OUT_DIR/$tag.server.log" 2>&1 &
+  fi
   SERVER_PID=$!
   await_server_ready "$tag"
 
@@ -216,8 +238,11 @@ measure_flight() {
   # mapped its libraries. FATAL either way: an unmet expectation means this rep measured an arm
   # other than the one it is labelled, which is worse than no rep.
   local alloc_status=""
-  if ! alloc_status="$(verify_flight_allocator_mapping \
-        "/proc/$SERVER_PID/maps" "$FLIGHT_ALLOCATOR" "$FLIGHT_ALLOCATOR_LIB_BASENAME" "$tag")"; then
+  # ONE LINE deliberately, the same trap the prewarm calls above record: split across a `\`
+  # continuation, the next line's first token would be a bare `"$VAR"`, which
+  # `lib-perf-lint.sh`'s fail-closed layer 1 classifies as a POSSIBLE perf invocation (an
+  # unresolvable command word could be anything, including perf). Measured, at this very call.
+  if ! alloc_status="$(verify_flight_server_allocator "/proc/$SERVER_PID/maps" "/proc/$SERVER_PID/environ" "$FLIGHT_ALLOCATOR" "$FLIGHT_ALLOCATOR_LIB" "$FLIGHT_MALLOC_ARENA_MAX" "$tag")"; then
     printf '%s\n' "FAILED-$FLIGHT_ALLOCATOR-allocator-UNVERIFIED" > "$OUT_DIR/$tag.allocator.status"
     stop_server
     echo "FATAL: the allocator this rep was LABELLED with was not the one the server process" >&2
