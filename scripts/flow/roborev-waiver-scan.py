@@ -122,10 +122,19 @@ DEFER_STEM = "roborev-defer: findings"
 # check. Enforcing it at REVIEW time is what the wrapper does and where the measurement exists.
 #
 # So the state is `granted-authorization`, TEXTUALLY DISTINCT from the wrapper's `granted`, and the
-# consumer prints it as its own token. Nobody grepping for a full deferral grant can match this, and
-# the merge gate DECLARES in its own output that the count half was enforced upstream and is not
-# re-verified here. One parser, one marker grammar, one new disposition — never a second
-# implementation of a channel rule, because a divergence there is an authorization bypass.
+# consumer prints it as its own token. Nobody grepping for a full deferral grant can match this. One
+# parser, one marker grammar, one new disposition — never a second implementation of a channel rule,
+# because a divergence there is an authorization bypass.
+#
+# WHAT THIS STATE MAY AND MAY NOT BE USED FOR (roborev job 103). It used to be enough to DECLARE the
+# unjudged `count=` half in the merge gate's output and bind anyway. It is not: an allowlisted human
+# can post a fresh marker AFTER the review carrying any count, so the merge gate was honouring an
+# authorization the review-time path would REJECT — a non-invoker, accident-shaped route, i.e. a
+# defect under #3312's triage rule and not an out-of-model bypass. `granted-authorization` therefore
+# does NOT license a merge: `premerge-review-binding.sh` maps it to UNMEASURED (exit 5). Its remaining
+# job is purely diagnostic — separating "no authorization exists" (a measured refusal) from "the
+# authorization is good but its count is unverifiable at the merge point", which are different
+# operator actions. A caller must never treat it as equivalent to `granted`.
 AUTHZ_KIND = "findings-deferral-authorization"
 
 # ===== NO EMITTED DIAGNOSTIC CARRIES ANY PART OF THE MARKER FORM (#3312 job 23, layer 3) =====
@@ -476,6 +485,8 @@ def judge_defer_line(line, author, base, head, job, allowlist, observed_count):
         # THE AUTHORIZATION-ONLY KIND (AUTHZ_KIND). The count half is SKIPPED, not defaulted and not
         # compared with itself — see the AUTHZ_KIND comment for why the merge gate has no measured
         # count. Everything else above and below still applies, and the grant token differs.
+        # Because the count is unjudged, the resulting state must not authorize a merge on its own;
+        # since job 103 the merge gate treats it as UNMEASURED rather than declaring the gap.
         if author not in allowlist:
             return "unauthorized", dict(
                 fields, detail=unauthorized_detail(author, allowlist, "deferral"))

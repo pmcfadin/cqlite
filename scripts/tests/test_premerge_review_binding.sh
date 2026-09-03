@@ -2008,9 +2008,15 @@ if run_binding 5 "status: an unconcluded job does not bind even WITH a deferral"
   esac
 fi
 
-# --- verdict FINDINGS + AUTHORIZED deferral: binds, under a DISTINCT token ----
-# The marker must name THIS job's base and head, be the SOLE content of a
-# top-level comment, and come from the hard-coded allowlist.
+# --- verdict FINDINGS + AUTHORIZED deferral: UNMEASURED, never BOUND ----------
+# roborev job 103. The authorization itself is impeccable here — allowlisted
+# author, sole-content top-level marker, correct base/head/job scope, both
+# tracking issues verified OPEN — and it STILL must not bind, because the
+# marker's `count=` half is matched against the count the REVIEW observed and no
+# trusted count exists at the merge point (the job record carries a verdict
+# LETTER; a recheck writes no row). Declaring that gap and binding anyway let the
+# merge gate honour a marker the review-time path would REJECT: an allowlisted
+# human can post a fresh marker afterwards carrying any count at all.
 MB_MAIN=$(cd "$WORK" && git rev-parse main)
 pr_payload_with_comment "$MOCK_GH_DIR/pr.json" main "$(roborev_block 612)" pmcfadin \
   "$(defer_marker 3602,3613 2 "$MB_MAIN" "$HEAD_AFTER" 612 'both filed and lead-deferred')"
@@ -2018,27 +2024,40 @@ roborev_job 612 "$MB_MAIN" "$HEAD_AFTER" F
 # `issues=` names two tracking issues, so BOTH must be OPEN issues GitHub confirms.
 issue_state_fixture 3602 OPEN
 issue_state_fixture 3613 OPEN
-if run_binding 0 "result: FINDINGS + an authorized deferral DOES bind" \
+if run_binding 5 "result: FINDINGS + an authorized deferral is UNMEASURED, not BOUND (job 103)" \
   review-binding 1 o/r "$HEAD_AFTER"; then
   case "$OUT" in
-    *"verdict BOUND"*)
-      ok "result: an authorized deferral binds, so #3626's unobtainable-merge trap is not reintroduced" ;;
-    *) bad "result: expected BOUND with an authorized deferral (got: $OUT)" ;;
+    *"verdict UNMEASURED"*)
+      ok "result: a deferral cannot be verified at the merge point, so it cannot clear it" ;;
+    *) bad "result: expected UNMEASURED for a findings+deferral round (got: $OUT)" ;;
   esac
   case "$OUT" in
-    *"deferral AUTHORIZED by @pmcfadin"*)
-      ok "result: the deferred bind is reported under its OWN token, naming the authorizer" ;;
-    *) bad "result: a deferred bind did not name its authorization (got: $OUT)" ;;
+    *"verdict BOUND"*)
+      bad "result: a findings record reached BOUND — the count= gap is back (got: $OUT)" ;;
+    *) ok "result: no findings record reaches BOUND on any path" ;;
+  esac
+  # The cause must name the COUNT as the unverifiable half, and must NOT read as
+  # "your authorization is bad" — that would send a lead to re-post a marker that
+  # was already correct, which is the wrong-remedy defect job 102 closed.
+  case "$OUT" in
+    *"count="*"CANNOT BE VERIFIED"* | *"count="*"cannot be verified"*)
+      ok "result: the cause names the count= half as the unverifiable evidence" ;;
+    *) bad "result: the cause did not name the count= half (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"AUTHORIZED by @pmcfadin"*)
+      ok "result: the good authorization is still REPORTED, so the remedy is not 're-post the marker'" ;;
+    *) bad "result: the cause did not record that an authorization was found (got: $OUT)" ;;
   esac
   case "$OUT" in
     *"count= half is NOT re-verified here"*)
-      ok "result: the block DECLARES the count half is not re-verified, rather than implying it" ;;
-    *) bad "result: the deferred bind did not declare its unverified half (got: $OUT)" ;;
+      bad "result: the stale DECLARATION of the count gap survived (got: $OUT)" ;;
+    *) ok "result: the old 'declared rather than implied' count line is gone" ;;
   esac
   case "$OUT" in
-    *"issues= half names was verified"*)
-      ok "result: the block declares the issues= half WAS verified, so the two halves are distinguished" ;;
-    *) bad "result: the deferred bind did not declare the issues= half verified (got: $OUT)" ;;
+    *"obtain a clean covering round"* | *"re-run the review"*)
+      ok "result: the remedy is a clean round, not a fixed box and not a fresh marker" ;;
+    *) bad "result: the cause carried no usable remedy (got: $OUT)" ;;
   esac
 fi
 
@@ -2276,7 +2295,7 @@ fi
 # --- CASE FLOOR (#3544) ---------------------------------------------------------------
 # A span-replacing edit that silently deletes cases leaves a GREEN tally over a
 # SHRUNKEN suite. The floor is what makes that a red.
-CASE_FLOOR=146
+CASE_FLOOR=148
 TOTAL=$((PASSED + FAILED))
 if [ "$TOTAL" -lt "$CASE_FLOOR" ]; then
   bad "case floor: only $TOTAL assertions ran, below the committed floor of $CASE_FLOOR — cases were deleted"

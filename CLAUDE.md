@@ -2052,20 +2052,30 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   happened to match bound the merge, and it is an ACCIDENT route before a hostile one (a lane
   pasting its own first FAILING round certifies itself). A job now binds only when the **JOB
   RECORD's structured verdict** — never the PR block's self-reported one, which is untrusted text —
-  says `clean`, **or** says `findings` AND an allowlisted human authorized deferring them for that
-  exact base/head/job. The verdict is THREE-VALUED and an unreadable one is `UNMEASURED`: a range
-  match is not a review. The deferral route exists because roborev **re-reports** a lead-deferred
-  finding on every later round (#3626), so a record stays `findings` forever once findings were
-  deferred and requiring `clean` with no way out would make such a merge UNOBTAINABLE. That
-  authorization is RE-VERIFIED through the SAME scanner the wrapper uses
-  (`roborev-waiver-scan.py findings-deferral-authorization`, a deliberately narrow kind returning
-  the DISTINCT state `granted-authorization`), so nothing is decided from the block's text.
-  **What that kind deliberately does NOT judge, and the leg's output SAYS so rather than implying
-  it: the marker's `count=` half**, which is matched against the findings count OBSERVED BY THE
-  REVIEW — this leg never ran the review and the record carries a verdict letter and no count, so
-  fabricating one would be an affirmative assert over an unmeasured value and comparing the
-  marker's count with itself would be a tautology. It is enforced at review time, where the
-  measurement exists. **AND THE DEFERRAL PATH IS THREE-VALUED, NOT TWO (roborev job 102): "the
+  says `clean`. The verdict is THREE-VALUED and an unreadable one is `UNMEASURED`: a range
+  match is not a review.
+  **AND A `findings` RECORD CANNOT BIND AT THE MERGE POINT AT ALL — NOT EVEN WITH A PERFECT
+  AUTHORIZATION (roborev job 103). DECLARING THE GAP WAS NOT ENOUGH.** The deferral route exists at
+  REVIEW time because roborev **re-reports** a lead-deferred finding on every later round (#3626), so
+  a record stays `findings` forever and requiring `clean` there with no way out would make such a
+  merge UNOBTAINABLE. At the MERGE point the authorization is still re-verified through the SAME
+  scanner the wrapper uses (`roborev-waiver-scan.py findings-deferral-authorization`, a narrow kind
+  returning the DISTINCT state `granted-authorization`) — but a grant now yields **`UNMEASURED`
+  (exit 5), never `BOUND`**. The reason is the one half that kind cannot judge: the marker's
+  **`count=`**, the field that ties a deferral to the findings it defers, is matched against the
+  count OBSERVED BY THE REVIEW, and **no trusted count exists at merge time** — measured, on
+  findings-bearing jobs 78 and 102, `roborev show --json` exposes only `verdict_bool`/`verdict`, a
+  letter and no count, and `--recheck-job` enqueues nothing so it writes no record either. The
+  earlier design DECLARED that gap in the leg's output and bound anyway, which let the merge gate
+  honour an authorization **the review-time path would REJECT**: an allowlisted human can post a
+  fresh marker after the review carrying any count at all, and nothing at the merge point compared
+  it to anything. The actor is a NON-INVOKER and the shape is an ACCIDENT, so by #3312's triage rule
+  it is a defect and not an out-of-model bypass — and a declaration is not a control. Fabricating a
+  count would be an affirmative assert over an unmeasured value; comparing the marker's count with
+  itself would be a tautology. **So the remedy at merge time is a CLEAN covering round, never a
+  marker** — the leg says exactly that, and the call is kept only to separate "no authorization
+  exists" (a measured refusal, exit 4) from "the authorization is good but unverifiable here"
+  (exit 5), which are different operator actions. **AND THE DEFERRAL PATH IS THREE-VALUED, NOT TWO (roborev job 102): "the
   authorization was evaluated and REFUSED" and "the authorization COULD NOT BE EVALUATED" are
   different states with different REMEDIES, so they get different exits.** A CLOSED or non-existent
   tracking issue is an answer GitHub GAVE ⇒ `UNBOUND` (exit 4); an issue whose state could not be

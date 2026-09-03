@@ -109,12 +109,15 @@
 #      merge; they differ in the REMEDY, and reporting "no authorized deferral
 #      covers this job" for an unreachable `gh` sends a lead to re-post a marker
 #      that was already fine.
-#      STILL NOT RE-VERIFIED HERE, and declared rather than implied: the
-#      deferral marker's `count=` half, which is matched against the findings
-#      count OBSERVED BY THE REVIEW. This leg never ran the review and the
-#      record carries no count, so there is nothing here to compare against;
-#      that half is enforced at review time, by the wrapper. It is the ONLY
-#      unverified half, and the emitted block says so.
+#      AND A FINDINGS RECORD CAN NEVER REACH BOUND (roborev job 103): even a
+#      well-formed authorization from an allowlisted human, naming issues
+#      verified OPEN, is UNMEASURED (exit 5), because the marker's `count=` half
+#      — the field that ties a deferral to the findings it defers — is matched
+#      against the count OBSERVED BY THE REVIEW, and no trusted count exists
+#      here (the record carries a verdict LETTER; a recheck writes no row). This
+#      used to be DECLARED and allowed to bind, which let the merge gate honour a
+#      marker the review-time path would REJECT — a fresh marker can carry any
+#      count. Every bind therefore rests on an affirmatively CLEAN record.
 #   2. It does NOT model roborev's exclusion set, and it does not re-derive the
 #      wrapper's own asserts. It answers ONE question: is the commit a recorded
 #      review actually covered an ancestor of the tree about to merge, with no
@@ -420,16 +423,28 @@ record_status_class() {
 # since-closed issue is an ACCIDENT route, and by #3312's triage rule an accident
 # route is a defect, not an out-of-model invoker bypass.
 #
-# WHAT IS STILL NOT RE-VERIFIED, DECLARED RATHER THAN IMPLIED: the `count=` half. It
-# is matched against the findings count OBSERVED BY THE REVIEW, and this leg
-# never ran the review — the job record carries a verdict LETTER and no count.
-# So the scanner is called in its `findings-deferral-authorization` mode, which
-# judges marker form, sole-content, top-level placement, structured authorship,
-# the allowlist and the base/head/job scope, and returns the DISTINCT state
-# `granted-authorization`. Fabricating a count to satisfy the check would be an
-# affirmative assert over an unmeasured value; comparing the marker's count with
-# itself would be a tautology. The count is enforced at REVIEW time, where the
-# measurement exists.
+# THE `count=` HALF CANNOT BE VERIFIED HERE, AND DECLARING THAT IS NOT ENOUGH
+# (roborev job 103). It is matched against the findings count OBSERVED BY THE
+# REVIEW; this leg never ran the review, the job record carries a verdict LETTER
+# and no count (measured on findings-bearing jobs 78 and 102, which expose only
+# `verdict_bool`/`verdict`), and `--recheck-job` enqueues nothing so it writes no
+# record either. Both routes to a trusted count are therefore unavailable.
+#
+# This code used to DECLARE that gap and bind anyway. That let the merge gate
+# accept an authorization the review-time path would REJECT: an allowlisted human
+# can post a fresh marker after the review carrying any count at all, and nothing
+# here compared it to anything. The actor is a non-invoker and the shape is an
+# accident, which by #3312's triage rule makes it a defect rather than an
+# out-of-model bypass — so a grant here yields UNMEASURED, never BOUND.
+#
+# THE CALL IS STILL MADE, and it still earns its keep: it separates "there is no
+# authorization at all" (a MEASURED refusal, exit 4) from "the authorization is
+# good but its count is unverifiable here" (exit 5). Those are different operator
+# actions, which is the same reason returns 1 and 2 were split in job 102. What
+# it no longer does is authorize a merge. Fabricating a count would be an
+# affirmative assert over an unmeasured value, and comparing the marker's count
+# with itself would be a tautology; the count is enforced at REVIEW time, where
+# the measurement exists.
 # issue_state_of <issue> <repo-slug> — prints one of the oracle's four states.
 # Sourced in a SUBSHELL: the oracles file is pure definitions, but it also
 # assigns globals (REPO, CODE_FREE_*, ROBOREV_*) and this leg has its own `P`,
@@ -717,7 +732,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
   local job bound=0 unclassifiable=0 unclassifiable_base=0 reviewed
   local heads=()
   local unresolved=()
-  local findings_unauthorized=0 verdict_unknown=0 unconcluded=0 authz_unmeasured=0
+  local findings_unauthorized=0 verdict_unknown=0 unconcluded=0 authz_unmeasured=0 deferral_unverifiable=0
   # THE COVERING SET (job 78, finding F2). Parallel indexed arrays, because
   # bash 3.2 has no associative arrays and this file must run on the macOS
   # system bash.
@@ -775,10 +790,22 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
         deferral_authorized "$j" "$RH_BASE" "$RH_HEAD" "$tmp" "$repo"
         case "$?" in
           0)
-            # A DISTINCT TOKEN, deliberately: nobody grepping this log for a
-            # clean bind can match a deferred one.
-            RESULT_NOTE="record verdict is FINDINGS, deferral AUTHORIZED by @$(sane "$DEFERRAL_AUTHOR") (tracking issues VERIFIED OPEN)"
-            return 0
+            # THE AUTHORIZATION IS GOOD AND IT STILL CANNOT BIND (roborev job
+            # 103). The marker's `count=` half is what ties a deferral to the
+            # findings it defers, and it is matched against the count OBSERVED
+            # BY THE REVIEW. This leg never ran the review, and the job record
+            # carries a verdict LETTER and NO count (measured: findings-bearing
+            # jobs 78 and 102 both expose only `verdict_bool`/`verdict`), nor
+            # does a recheck write a job row. So there is no trusted count here
+            # to compare against — and DECLARING that gap, which is what this
+            # code used to do, let the merge gate accept a marker the
+            # review-time path would REJECT: an allowlisted human can post a
+            # fresh marker after the review carrying any count at all. An
+            # accident route past a check that exists is a defect (#3312), so
+            # the binding is UNMEASURED rather than declared.
+            RESULT_NOTE="record verdict is FINDINGS and its deferral is AUTHORIZED by @$(sane "$DEFERRAL_AUTHOR") (tracking issues VERIFIED OPEN), but the marker's count= half CANNOT BE VERIFIED at the merge point: no trusted findings count exists in job $(sane "$j")'s record, which carries a verdict letter only"
+            RESULT_DEFERRAL_UNVERIFIABLE=1
+            return 1
             ;;
           2)
             # COULD NOT EVALUATE. Distinct from a refusal because the remedy is
@@ -825,6 +852,12 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
       say "job $(sane "$j") CANNOT bind: $(sane "$RESULT_NOTE")"
       if [ "${RESULT_UNCONCLUDED:-0}" -eq 1 ]; then
         class=unconcluded
+      elif [ "${RESULT_DEFERRAL_UNVERIFIABLE:-0}" -eq 1 ]; then
+        # Its OWN class, not folded into authz_unmeasured: nothing failed here.
+        # The authorization was evaluated and is GOOD; the evidence that would
+        # tie it to a findings count structurally does not exist at this point,
+        # so the operator's action is to obtain a clean round — not to fix a box.
+        class=deferral_unverifiable
       elif [ "${RESULT_UNMEASURED:-0}" -eq 1 ]; then
         # Checked BEFORE the verdict class: this record's verdict IS `findings`,
         # but the reason it cannot bind is that the authorization oracle could
@@ -858,6 +891,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
     RH_STARTED=""
     RESULT_UNCONCLUDED=0
     RESULT_UNMEASURED=0
+    RESULT_DEFERRAL_UNVERIFIABLE=0
     if ! reviewed_head_of "$job" "$tmp"; then
       say "job $(sane "$job") $(sane "$RH_ERR")"
       unresolved+=("$RH_ERR")
@@ -992,6 +1026,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
       say "latest $(sane "${cov_note[0]}")"
       case "${cov_class[0]}" in
         unconcluded) unconcluded=1 ;;
+        deferral_unverifiable) deferral_unverifiable=1 ;;
         authz_unmeasured) authz_unmeasured=1 ;;
         findings) findings_unauthorized=1 ;;
         *) verdict_unknown=1 ;;
@@ -1084,6 +1119,7 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
           say "latest $(sane "${cov_note[$best]}")"
           case "${cov_class[$best]}" in
             unconcluded) unconcluded=1 ;;
+            deferral_unverifiable) deferral_unverifiable=1 ;;
             authz_unmeasured) authz_unmeasured=1 ;;
             findings) findings_unauthorized=1 ;;
             *) verdict_unknown=1 ;;
@@ -1101,22 +1137,11 @@ print(v if isinstance(v,str) else "")' "$tmp/pr.json" 2>/dev/null) || base_ref="
     verdict BOUND
     detail "a recorded roborev round covers the certified head's reviewable content, and that"
     detail "round's RECORD says its review concluded in a bindable state: $BOUND_NOTE."
-    case "$BOUND_NOTE" in
-      *AUTHORIZED*)
-        detail "THAT BIND RESTS ON AN AUTHORIZED DEFERRAL, not on a clean review. The"
-        detail "authorization was re-verified here from the PR's top-level comments (marker"
-        detail "form, sole content, column-zero, structured authorship, hard-coded allowlist,"
-        detail "base/head/job scope), and EVERY issue its issues= half names was verified to"
-        detail "be an OPEN issue GitHub confirms — asked four-valued, so a CLOSED issue and a"
-        detail "non-existent one are each a measured REFUSAL (exit 4), one that could NOT BE"
-        detail "ASKED is UNMEASURED (exit 5), and none of the three grants. The marker's"
-        detail "count= half is NOT re-verified here and is not"
-        detail "claimed to be: it is matched against the findings count OBSERVED BY THE"
-        detail "REVIEW, which this leg never ran, and it is enforced at review time. That is"
-        detail "the ONE unverified half of this authorization, and it is named rather than"
-        detail "left for a reader to discover."
-        ;;
-    esac
+    # NOTE: there is deliberately no "this bind rests on a deferral" arm here.
+    # Since roborev job 103 a FINDINGS record can never reach BOUND — its
+    # deferral's count= half is unverifiable at the merge point — so every bind
+    # rests on an affirmatively CLEAN record. An arm describing a deferred bind
+    # would be describing an unreachable state.
     exit 0
   fi
 
@@ -1151,6 +1176,18 @@ AFFIRMATIVELY report a terminal-success status, so the review did not CONCLUDE (
 completion could not be read). A verdict letter on an unconcluded job is a partial row, not a \
 review result. Wait for the round to finish, or run a fresh one at this head and post the block \
 it prints.")
+  fi
+  if [ "$deferral_unverifiable" -eq 1 ]; then
+    causes+=("a recorded round COVERS the certified head and its record verdict is FINDINGS, \
+so it can bind ONLY via an authorized deferral — and an authorization WAS found, from an \
+allowlisted human, naming tracking issues verified OPEN. It still cannot bind: the marker's \
+\`count=\` half is what ties a deferral to the findings it defers, it is matched against the count \
+OBSERVED BY THE REVIEW, and no trusted findings count exists at this point — the job record \
+carries a verdict LETTER and no count, and a recheck writes no record. Accepting the marker \
+anyway would let the merge gate honour an authorization the review-time path would REJECT, since \
+a fresh marker can carry any count at all. REMEDY: re-run the review after the findings are \
+addressed, or otherwise obtain a clean covering round — a deferral cannot be verified at the \
+merge point. This is NOT a finding that the authorization is bad; do not re-post the marker.")
   fi
   if [ "$authz_unmeasured" -eq 1 ]; then
     causes+=("a recorded round COVERS the certified head and its record verdict is FINDINGS, \
@@ -1187,11 +1224,12 @@ different actions — so it is reported as its own verdict rather than folded in
     say "unbound a recorded round COVERS the certified head, but its record verdict is"
     say "unbound FINDINGS and no authorized deferral covers it."
     verdict UNBOUND
-    detail "REMEDY: either resolve the findings and run a fresh round at this head, or — if the"
-    detail "lead has ruled them deferrable — have an authorized human post the findings-deferral"
-    detail "marker for THIS base/head/job as the sole content of a top-level PR comment, then"
-    detail "re-decide the round with the wrapper's --recheck-job <id>. The marker form is in"
-    detail "\`bash scripts/flow/roborev-review.sh --help\`; it is deliberately not printed here."
+    detail "REMEDY: resolve the findings and run a fresh round at this head, so a covering"
+    detail "round exists whose record verdict is affirmatively CLEAN. A findings-deferral"
+    detail "marker will NOT make this bind (roborev job 103): its count= half is matched"
+    detail "against the count the REVIEW observed, and no trusted count exists at the merge"
+    detail "point, so an authorized deferral is UNMEASURED here rather than a clearance. A"
+    detail "deferral is still the route past the WRAPPER's own findings gate at review time."
     exit 4
   fi
   say "unbound none of the recorded roborev rounds covers the certified head."
