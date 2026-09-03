@@ -4,11 +4,13 @@ pub mod comparator;
 // `impl PartialOrd for Value` only — PRIVATE on purpose: a trait impl applies
 // crate-wide regardless of module visibility, so this adds no public surface.
 mod value_ord;
+pub mod empty_value;
 
 #[cfg(test)]
 mod comparator_test;
 
 pub use comparator::ComparatorType;
+pub use empty_value::EmptyValueType;
 
 use crate::schema::CqlType;
 use bytes::Bytes;
@@ -74,195 +76,6 @@ const DURATION_SIZE: usize = 12; // 3 * 4 bytes (months, days, nanos)
 const TOMBSTONE_SIZE: usize = 16;
 const VINT_LENGTH_PREFIX: usize = 4;
 
-/// Declared CQL type of a [`Value::Empty`] sentinel — the type families for which
-/// Cassandra treats the EMPTY BUFFER as a legal, meaningless-valued encoding
-/// (issue #3805).
-///
-/// # Why a dedicated, CLOSED tag rather than [`CqlType`]
-///
-/// Two independent reasons, both load-bearing:
-///
-/// 1. **Closure is a correctness property.** Cassandra draws a hard line between
-///    a family whose `validate()` ACCEPTS an empty buffer and one whose
-///    `validate()` THROWS on it. At `cassandra-5.0.8`, `int` is spelled
-///    `if (accessor.size(value) != 4 && !accessor.isEmpty(value)) throw` —
-///    `serializers/Int32Serializer.java:40-44`, whose diagnostic literally reads
-///    *"Expected 4 or 0 byte int"* — while `tinyint`, `smallint`, `date` and
-///    `time` are spelled as a BARE `!= N` with no escape clause
-///    (`serializers/ByteSerializer.java:40-44`,
-///    `serializers/ShortSerializer.java:40-44`,
-///    `serializers/SimpleDateSerializer.java:118-122`,
-///    `serializers/TimeSerializer.java:71-75`). For those four an empty cell path
-///    is CORRUPTION on Cassandra's own terms —
-///    `schema/ColumnMetadata.java:457-467` (`validateCellPath`) would itself
-///    reject it. A closed tag makes `Empty(tinyint)` UNCONSTRUCTIBLE; a
-///    `Box<CqlType>` payload would happily admit it.
-/// 2. **The [`Value`] size pin.** `size_of::<CqlType>()` is 56 (its widest
-///    variant is `Udt(String, Vec<(String, CqlType)>)` = 24 + 24 + tag), so an
-///    inline `CqlType` would take `Value` to 64 and break the 40-byte ceiling
-///    below. A `Box<CqlType>` would fit but costs a heap allocation per sentinel
-///    and buys nothing over a 1-byte tag. This tag is fieldless, so
-///    `size_of::<EmptyValueType>() == 1` and `Value` stays at 40.
-///
-/// # Membership rule (source-derived, not curated)
-///
-/// A family is admitted iff **both** hold at `cassandra-5.0.8`:
-///
-/// * its `validate()` accepts the empty buffer (so the bytes are legal data
-///   Cassandra would have read), **and**
-/// * its `deserialize()` maps the empty buffer to `null`, i.e. empty is
-///   MEANINGLESS for it — `TypeSerializer.java:71-74` (`isNull` == `buffer ==
-///   null || accessor.isEmpty(buffer)`) is the declared base contract, and
-///   `AbstractType.java:455-461` (`isEmptyValueMeaningless`) names the property.
-///
-/// The second clause is what excludes `text`/`ascii`/`varchar`/`blob`: those
-/// OVERRIDE `isNull` precisely to say an empty buffer is a real value —
-/// `serializers/BytesSerializer.java:57-62` (*"is not \"null\" for bytes types,
-/// it is byte[0]"*) and `serializers/AbstractTextSerializer.java:72-77`. CQLite
-/// already represents those natively as `Text(Bytes::new())` /
-/// `Blob(Bytes::new())`, and a second representation would create two spellings
-/// of one value.
-///
-/// `counter` is admitted from the source only (`CounterSerializer extends
-/// LongSerializer` and adds nothing — `serializers/CounterSerializer.java:20-23`);
-/// it is not reachable as a map key, since CQL forbids a `counter` collection
-/// element.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum EmptyValueType {
-    /// CQL `int` — `serializers/Int32Serializer.java:30-33`, `:40-44`.
-    Int,
-    /// CQL `bigint` — `serializers/LongSerializer.java:30-33`, `:40-44`.
-    BigInt,
-    /// CQL `counter` — `serializers/CounterSerializer.java:20-23` (inherits
-    /// `LongSerializer` wholesale). Source-only: not map-key reachable.
-    Counter,
-    /// CQL `float` (4 bytes on the wire; CQLite's [`Value::Float32`]) —
-    /// `serializers/FloatSerializer.java:30-36`, `:43-47`.
-    Float,
-    /// CQL `double` (8 bytes on the wire; CQLite's [`Value::Float`]) —
-    /// `serializers/DoubleSerializer.java:30-35`, `:42-46`.
-    Double,
-    /// CQL `timestamp` — `serializers/TimestampSerializer.java:137-140`, `:184-188`.
-    Timestamp,
-    /// CQL `uuid` — `serializers/UUIDSerializer.java:31-34`, `:42-47`.
-    Uuid,
-    /// CQL `timeuuid` — `utils/TimeUUID.java:339-342`, `:306-316` (there is NO
-    /// `serializers/TimeUUIDSerializer.java` at this tag).
-    TimeUuid,
-    /// CQL `boolean` — `serializers/BooleanSerializer.java:32-38`; its `validate`
-    /// (`:46-50`) rejects only `size > 1`, so `0` passes without needing an
-    /// `isEmpty` escape clause at all.
-    Boolean,
-    /// CQL `inet` — `serializers/InetAddressSerializer.java:32-45` and `:52-55`,
-    /// which use the EARLY-RETURN spelling (`if (isEmpty) return;`) rather than
-    /// the `&& !isEmpty` conjunct.
-    Inet,
-    /// CQL `decimal`. **Admitted, and this corrects a claim committed elsewhere
-    /// in this repository.** `serializers/DecimalSerializer.java:58-63` throws
-    /// only `if (!accessor.isEmpty(value) && accessor.size(value) < 4)` and its
-    /// message reads *"Expected 0 or at least 4 bytes"*; `:31-34` null-guards
-    /// empty BEFORE the `getInt(value, 0)` that would underflow. So empty is
-    /// explicitly legal, in the same escape-clause family as `int` — NOT
-    /// "corrupt because a decimal needs 4 bytes". Cassandra 5.0.2 wrote an empty
-    /// `decimal` map key and `sstabledump` rendered it `"path" : [ "" ]`
-    /// (`docs/round-artifacts/issue-3805-cassandra-oracle.md` §4b.4, §4c(a)).
-    Decimal,
-    /// CQL `varint` — `serializers/IntegerSerializer.java:31-34` returns `null`
-    /// on empty and its `validate` body is the comment `// no invalid integers.`,
-    /// so everything passes.
-    Varint,
-}
-
-impl EmptyValueType {
-    /// The CQL type this sentinel declares.
-    ///
-    /// Total by construction: every admitted family has a [`CqlType`]
-    /// counterpart, so there is no fallback arm to mis-attribute.
-    #[must_use]
-    pub fn cql_type(self) -> CqlType {
-        match self {
-            EmptyValueType::Int => CqlType::Int,
-            EmptyValueType::BigInt => CqlType::BigInt,
-            EmptyValueType::Counter => CqlType::Counter,
-            EmptyValueType::Float => CqlType::Float,
-            EmptyValueType::Double => CqlType::Double,
-            EmptyValueType::Timestamp => CqlType::Timestamp,
-            EmptyValueType::Uuid => CqlType::Uuid,
-            EmptyValueType::TimeUuid => CqlType::TimeUuid,
-            EmptyValueType::Boolean => CqlType::Boolean,
-            EmptyValueType::Inet => CqlType::Inet,
-            EmptyValueType::Decimal => CqlType::Decimal,
-            EmptyValueType::Varint => CqlType::Varint,
-        }
-    }
-
-    /// The lowercase CQL type name, as it appears in a schema.
-    #[must_use]
-    pub fn cql_name(self) -> &'static str {
-        match self {
-            EmptyValueType::Int => "int",
-            EmptyValueType::BigInt => "bigint",
-            EmptyValueType::Counter => "counter",
-            EmptyValueType::Float => "float",
-            EmptyValueType::Double => "double",
-            EmptyValueType::Timestamp => "timestamp",
-            EmptyValueType::Uuid => "uuid",
-            EmptyValueType::TimeUuid => "timeuuid",
-            EmptyValueType::Boolean => "boolean",
-            EmptyValueType::Inet => "inet",
-            EmptyValueType::Decimal => "decimal",
-            EmptyValueType::Varint => "varint",
-        }
-    }
-
-    /// The declared type of an empty buffer, from a [`CqlType`] — `None` when
-    /// that type does NOT admit an empty buffer.
-    ///
-    /// This is the ONE place the legal/corruption line is drawn, and it is drawn
-    /// on `validate()` (never on decodability): all four refused families'
-    /// `deserialize` ALSO returns `null` on empty
-    /// (`serializers/ByteSerializer.java:30-33`,
-    /// `serializers/ShortSerializer.java:30-33`,
-    /// `serializers/SimpleDateSerializer.java:50-53`,
-    /// `serializers/TimeSerializer.java:32-35`), so a reader keyed on
-    /// decodability would silently accept bytes Cassandra's own
-    /// `validateCellPath` throws on.
-    ///
-    /// `text`/`ascii`/`varchar`/`blob` return `None` for the OTHER reason — an
-    /// empty buffer is a legal, MEANINGFUL value there, represented natively as
-    /// `Text(Bytes::new())` / `Blob(Bytes::new())`, never as a sentinel.
-    #[must_use]
-    pub fn for_cql_type(ty: &CqlType) -> Option<EmptyValueType> {
-        match ty {
-            CqlType::Int => Some(EmptyValueType::Int),
-            CqlType::BigInt => Some(EmptyValueType::BigInt),
-            CqlType::Counter => Some(EmptyValueType::Counter),
-            CqlType::Float => Some(EmptyValueType::Float),
-            CqlType::Double => Some(EmptyValueType::Double),
-            CqlType::Timestamp => Some(EmptyValueType::Timestamp),
-            CqlType::Uuid => Some(EmptyValueType::Uuid),
-            CqlType::TimeUuid => Some(EmptyValueType::TimeUuid),
-            CqlType::Boolean => Some(EmptyValueType::Boolean),
-            CqlType::Inet => Some(EmptyValueType::Inet),
-            CqlType::Decimal => Some(EmptyValueType::Decimal),
-            CqlType::Varint => Some(EmptyValueType::Varint),
-            // CORRUPTION on Cassandra's own terms — bare `!= N` validate.
-            CqlType::TinyInt | CqlType::SmallInt | CqlType::Date | CqlType::Time => None,
-            // Empty is a MEANINGFUL value for these; no sentinel.
-            CqlType::Text | CqlType::Ascii | CqlType::Varchar | CqlType::Blob => None,
-            // Not a scalar family this sentinel speaks for.
-            CqlType::Duration
-            | CqlType::List(_)
-            | CqlType::Set(_)
-            | CqlType::Map(_, _)
-            | CqlType::Tuple(_)
-            | CqlType::Udt(_, _)
-            | CqlType::Frozen(_)
-            | CqlType::Custom(_) => None,
-        }
-    }
-}
-
 /// Database value type that can hold any supported data type
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
@@ -325,57 +138,38 @@ pub enum Value {
     /// The EMPTY BUFFER of a declared scalar type — a present, orderable value
     /// that is neither `Null` nor the type's zero value (issue #3805).
     ///
-    /// # What it represents
-    ///
     /// A non-frozen `map<K, V>` is multicell: each entry's KEY travels in its
-    /// cell's CellPath, framed on disk as `[unsigned VInt length][bare key]`
+    /// cell's CellPath, framed as `[unsigned VInt length][bare key]`
     /// (`db/marshal/CollectionType.java:361-382` →
     /// `utils/ByteBufferUtil.java:356-360`, `:382-389`, at `cassandra-5.0.8`).
     /// The length is UNSIGNED and `CellPath.create` asserts non-null
-    /// (`db/rows/CellPath.java:44-48`), so that framing has no way to spell
-    /// "absent" or "null": a **zero-length cell path means the key's serialized
-    /// form IS the empty buffer**, unambiguously. Cassandra accepts, stores,
-    /// orders and returns such a key.
+    /// (`db/rows/CellPath.java:44-48`), so that framing cannot spell "absent" or
+    /// "null": a **zero-length cell path means the key's serialized form IS the
+    /// empty buffer**. Cassandra accepts, stores, orders and returns such a key.
     ///
-    /// # Why it is NOT `Null`, and NOT the type's zero value
+    /// NOT `Null`: a null map key is ILLEGAL CQL (`cql3/Maps.java:342-343`,
+    /// `:426-427`, `:510-511`), the comparator gives the empty buffer a UNIQUE
+    /// first position (`db/marshal/Int32Type.java:61-71`), and the driver hands
+    /// back a PRESENT sentinel distinct from `None` (measured — oracle §4b.3).
+    /// The "empty ⇒ null" contract of `TypeSerializer.java:71-74` is a property
+    /// of the VALUE decode path and does not transfer to a key. NOT the type's
+    /// zero value either: `0` has its own 4-byte encoding
+    /// (`serializers/Int32Serializer.java:35-38`) and its own sort position, so
+    /// collapsing empty onto it would COLLIDE with a genuine `0` key — and
+    /// CQLite's scalar variants hold PARSED scalars, so `Integer(_)` cannot
+    /// carry "empty" at all without becoming `Integer(0)`.
     ///
-    /// * `Null` is ruled out three ways: a null map key is ILLEGAL CQL
-    ///   (`cql3/Maps.java:342-343` *"null is not supported inside collections"*,
-    ///   `:426-427`, `:510-511` *"Invalid null map key"*); the comparator gives
-    ///   the empty buffer a UNIQUE first position rather than treating it as
-    ///   anything else (`db/marshal/Int32Type.java:61-71`); and the driver on the
-    ///   path a user observes returns a PRESENT `EmptyValue` sentinel explicitly
-    ///   distinct from `None` (measured on Cassandra 5.0.2 —
-    ///   `docs/round-artifacts/issue-3805-cassandra-oracle.md` §4b.3). The
-    ///   "empty ⇒ null" contract of `TypeSerializer.java:71-74` is a property of
-    ///   the VALUE decode path and does NOT transfer to a key.
-    /// * The type's zero value is ruled out because `0` has a distinct 4-byte
-    ///   encoding (`serializers/Int32Serializer.java:35-38`) and a distinct sort
-    ///   position (`Int32Type.java:61-71`), so collapsing empty onto it would
-    ///   COLLIDE with a genuine `0` key in the same map. Note CQLite's scalar
-    ///   variants hold PARSED scalars, not raw payloads, so `Integer(_)` cannot
-    ///   carry "empty" at all without becoming `Integer(0)`.
+    /// Invariants: **orders** strictly before every non-empty value of its type
+    /// (`Int32Type.compareCustom:61-71`; measured on real bytes for four key
+    /// types — oracle §4b.4), **serializes** to a zero-length buffer, and
+    /// **renders** as `""` (`tools/JsonTransformer.java:444-458` →
+    /// `db/marshal/AbstractType.java:146-156`; round-trips via
+    /// `Int32Type.java:85-89`).
     ///
-    /// # Invariants
-    ///
-    /// * **Ordering**: sorts strictly BEFORE every non-empty value of its type,
-    ///   per `Int32Type.compareCustom:61-71`
-    ///   (`Boolean.compare(right.isEmpty, left.isEmpty)` == `-1` when only the
-    ///   left is empty) — measured on real bytes for four independent key types
-    ///   (oracle §4b.4). Implemented in this file's `PartialOrd`.
-    /// * **Round-trip**: serializes back to a ZERO-LENGTH buffer, byte-exactly.
-    /// * **Rendering**: any JSON/text rendering must be `""`, because that is
-    ///   what both Cassandra renderers emit (`tools/JsonTransformer.java:444-458`
-    ///   → `db/marshal/AbstractType.java:146-156` →
-    ///   `Int32Serializer.toString(null)` == `""`; `SELECT JSON` yields
-    ///   `{"": v}`) and it round-trips (`Int32Type.java:85-89`:
-    ///   `fromString("")` → EMPTY).
-    ///
-    /// # Size
-    ///
-    /// The payload is a fieldless 1-byte tag, so this variant does not move the
-    /// `size_of::<Value>()` pin below. See [`EmptyValueType`] for why a
-    /// `CqlType` payload was rejected.
+    /// Full derivation: `docs/round-artifacts/issue-3805-cassandra-oracle.md`.
+    /// Why the payload is a 1-byte tag rather than a `CqlType` (the
+    /// `size_of::<Value>()` pin below, plus closure of the admitted set):
+    /// [`EmptyValueType`].
     Empty(EmptyValueType),
 }
 
@@ -1642,15 +1436,11 @@ impl fmt::Display for Value {
             Value::Udt(udt) => Self::fmt_udt(f, udt),
             Value::Frozen(inner) => Self::fmt_typed(f, "FROZEN", &**inner),
             Value::Tombstone(info) => Self::fmt_tombstone(f, info),
-            // DEBUG-facing form, deliberately NOT `""`. This `Display` is the
-            // internal/diagnostic rendering (note `Text` prints QUOTED and `Blob`
-            // prints `BLOB(n bytes)`), so it names the declared type — an
-            // unqualified `""` here would be indistinguishable from an empty
-            // `text` and from the empty string itself. The USER-FACING JSON/text
-            // rendering required by Cassandra parity is `""`
-            // (`tools/JsonTransformer.java:444-458` →
-            // `db/marshal/AbstractType.java:146-156`), and that belongs to the
-            // output layer, not here.
+            // DEBUG-facing form, deliberately NOT `""` (note `Text` prints
+            // QUOTED and `Blob` prints `BLOB(n bytes)` here): an unqualified
+            // `""` would be indistinguishable from an empty `text`. The
+            // USER-FACING `""` rendering Cassandra parity requires belongs to
+            // the output layer (`util::value_fmt`, `query::result`).
             Value::Empty(ty) => Self::fmt_typed(f, "EMPTY", ty.cql_name()),
         }
     }
