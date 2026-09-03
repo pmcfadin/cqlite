@@ -100,6 +100,31 @@ pub(super) fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Order
             Error::query_execution("Cannot compare incompatible types".to_string())
         });
     }
+    // EMPTY-BUFFER SENTINEL vs a NON-EMPTY value OF THE SAME DECLARED TYPE
+    // (issue #3805). The discriminants differ — `Value::Empty(Int)` and
+    // `Value::Integer(5)` are different variants — but Cassandra compares them
+    // with ONE comparator and puts the empty buffer strictly first:
+    // `db/marshal/Int32Type.java:61-71` at `cassandra-5.0.8` returns
+    // `Boolean.compare(right.isEmpty, left.isEmpty)` whenever EITHER side is
+    // empty, i.e. `-1` when only the left is. Without this branch the pair
+    // reached the incomparable-types error below, which would drop a legitimate
+    // key from an ORDER BY / WHERE evaluation.
+    //
+    // Comparability is decided by the DECLARED TYPE, never by byte shape
+    // (no-heuristics, #28): the sentinel carries its type, and the other side's
+    // `data_type()` must map back to that same admitted family. A sentinel
+    // against a DIFFERENT type stays incomparable, exactly as two mismatched
+    // scalars do.
+    if let Value::Empty(tag) = a {
+        if crate::types::EmptyValueType::for_cql_type(&b.data_type()) == Some(*tag) {
+            return Ok(std::cmp::Ordering::Less);
+        }
+    }
+    if let Value::Empty(tag) = b {
+        if crate::types::EmptyValueType::for_cql_type(&a.data_type()) == Some(*tag) {
+            return Ok(std::cmp::Ordering::Greater);
+        }
+    }
     // Data-safety (issue #1694): log the operand TYPES, never their values.
     tracing::debug!(
         "Cannot compare values of incompatible types: {:?} vs {:?}",
@@ -599,5 +624,46 @@ mod tests {
             matches!(zmin, Value::Float(x) if *x == 0.0 && x.is_sign_negative()),
             "MIN of {{-0.0, +0.0}} = -0.0"
         );
+    }
+
+    /// Issue #3805: the empty-buffer sentinel is COMPARABLE against a
+    /// non-empty value of the SAME declared type, and sorts strictly first
+    /// (`db/marshal/Int32Type.java:61-71` at `cassandra-5.0.8`). Its
+    /// discriminant differs, so without the dedicated branch this pair raised
+    /// "Cannot compare incompatible types" and the key would have been dropped
+    /// from an ORDER BY / WHERE evaluation.
+    #[test]
+    fn the_empty_buffer_sentinel_is_comparable_within_its_declared_type() {
+        use crate::types::EmptyValueType;
+        use std::cmp::Ordering;
+
+        let empty = Value::Empty(EmptyValueType::Int);
+        assert_eq!(
+            try_compare_values(&empty, &Value::Integer(i32::MIN)).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            try_compare_values(&Value::Integer(i32::MIN), &empty).unwrap(),
+            Ordering::Greater
+        );
+        assert_eq!(
+            try_compare_values(&empty, &Value::Empty(EmptyValueType::Int)).unwrap(),
+            Ordering::Equal
+        );
+    }
+
+    /// …and a sentinel of a DIFFERENT declared type stays INCOMPARABLE, exactly
+    /// as two mismatched scalars do. Comparability is decided by the declared
+    /// type, never by byte shape (no-heuristics, issue #28).
+    #[test]
+    fn a_sentinel_of_another_type_stays_incomparable() {
+        use crate::types::EmptyValueType;
+
+        assert!(try_compare_values(&Value::Empty(EmptyValueType::Int), &Value::BigInt(1)).is_err());
+        assert!(try_compare_values(
+            &Value::Empty(EmptyValueType::Int),
+            &Value::text("x".to_string())
+        )
+        .is_err());
     }
 }
