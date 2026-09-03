@@ -207,6 +207,15 @@ pub fn value_to_napi(ctx: &ConvCtx, value: &Value) -> Result<JsUnknown> {
         // Null
         Value::Null => env.get_null().map(|v| v.into_unknown()),
 
+        // EMPTY-BUFFER SENTINEL (issue #3805) → the empty JS string. `""` is
+        // Cassandra's own rendering of an empty fixed-width buffer
+        // (`tools/JsonTransformer.java:444-458` →
+        // `db/marshal/AbstractType.java:146-156` →
+        // `serializers/Int32Serializer.java:46-49`, at `cassandra-5.0.8`), and
+        // it is deliberately NOT `null`: the entry is present and its key is
+        // distinct from null. All three surfaces agree (parity, issue #1455).
+        Value::Empty(_) => env.create_string("").map(|s| s.into_unknown()),
+
         // Boolean
         Value::Boolean(b) => env.get_boolean(*b).map(|v| v.into_unknown()),
 
