@@ -468,6 +468,97 @@
 #                      a readiness TIMEOUT fatal, an unanswerable prober stopping the run.
 #                      Hermetic: fake sysfs + a loopback listener under $TMPDIR; no
 #                      perf/sudo/taskset/root/hardware.
+#                      Also runs scripts/tests/test_ws0_flight_arm_guards.sh (#3551) —
+#                      the FLIGHT arm's own pin and allocator, split from the file above
+#                      (at the ~1500-line target) along a RESPONSIBILITY seam: that one
+#                      asks whether the pinned CPUs are one physical core, this one asks
+#                      what DIFFERS between two arms that no longer run the same way.
+#                      --flight-pin-mode selects between two AFFIRMATIVE assertions and
+#                      relaxes neither, so distinct-cores REFUSES a sibling pair (naming
+#                      both CPUs and the sysfs answer) and siblings REFUSES a distinct
+#                      one, proved over the SAME two inputs; a single-CPU list is refused
+#                      because pairwise-distinct over one element compares nothing.
+#                      --flight-allocator is verified from the RUNNING PROCESS because
+#                      LD_PRELOAD FAILS OPEN (glibc prints "cannot be preloaded ...:
+#                      ignored" and continues with system malloc, exit 0), so arm C would
+#                      otherwise be a byte-identical duplicate of arm B under a label
+#                      saying otherwise; the absent-mapping branch and the EMPTY/ABSENT
+#                      maps files are driven against synthetic maps, the last two as
+#                      COULD-NOT-MEASURE refusals rather than "no mapping present"
+#                      (measured on a mutant: `system VERIFIED ... (0 mappings read)`).
+#                      Plus the #3272-F6 substitution at the new pin, the record's closed
+#                      grammars, and a ONE-FIELD report differential proving a
+#                      distinct-cores pin is never described as physical-core siblings.
+#                      Hermetic: fake sysfs, synthetic maps/session dirs/corpus under
+#                      $TMPDIR, every driver call through ws0_driver_run.
+#                      Also runs scripts/tests/test_ws0_abc_driver_guards.sh (#3551) —
+#                      the INTERLEAVED A/B/C SET's own guards, the subject neither file
+#                      above can answer: is a directory of WS0 measurement sessions ONE
+#                      PAIRED EXPERIMENT? Three roborev findings, one family (an artifact
+#                      ADOPTED without its provenance established). ws0-3551-abc.sh's
+#                      RESUME is deliberate and stays, so it is CHECKED: a run
+#                      FINGERPRINT (corpus path AND its recorded Data.db sha256 + rows,
+#                      --bin-dir AND all three binaries' digests, each arm's EXACT flag
+#                      list, --step-duration/--arena-max/--jemalloc-lib/--port) written
+#                      once and verified field-by-field after, with --rounds DELIBERATELY
+#                      excluded because extending a set is a legitimate resume — asserted
+#                      in BOTH directions, since a guard that reds on correct input is the
+#                      guard an operator works around. Plus per-session window validation
+#                      (arm and round must match the directory name, recorded exit must be
+#                      0) and ws0_abc_aggregate.py's configuration validation over EVERY
+#                      (round, arm) rather than the first, and `ratio bare/flight` pinned
+#                      NUMERICALLY to the rig's own quantity (rows/s bare over rows/s
+#                      flight, not a cycles quotient) on a fixture separating all three
+#                      candidate readings, plus a flight-FASTER fixture pinning the
+#                      direction below 1. Every pin/mode/allocator RED arm is planted by
+#                      SUBSTITUTING the artifact (a sed on a scratch copy — those are the
+#                      driver's DEFINITION of an arm, not flags) and the plant is asserted
+#                      to have TAKEN, because a sed that matched nothing leaves a RED arm
+#                      identical to its control. Hermetic: synthetic session dirs,
+#                      identity and binary fixtures under $TMPDIR, plus a recording STUB
+#                      standing in for the measurement driver beside the scratch copy,
+#                      so the real driver is never reached — asserted from the stub's
+#                      own log (a positive control proves the harness CAN see an
+#                      invocation) and from lib-ws0-hermetic.sh's shims.
+#                      Also runs scripts/tests/test_ws0_3551_artifact_tools.sh (#3551) —
+#                      the two MEASUREMENT-ANALYSIS tools under
+#                      docs/reports/ws0-3551-artifacts/ (clean-pairs.py,
+#                      window-census.py) whose stdout IS that issue's published result.
+#                      This repo reviews docs/reports/*-artifacts/ harnesses as CODE
+#                      (#3229) and these two had NO tests, which is how a real defect
+#                      got in: a session read CLEAN on ONE zero-census sample anywhere
+#                      in its window, so a mostly UNOBSERVED session could enter the
+#                      published medians — a non-empty sample set is not COVERAGE. The
+#                      coverage BOUND is DERIVED from the committed judge
+#                      (ws0_quiescence.MAX_SAMPLE_GAP_S) at run time, never restated,
+#                      and which side of it is permissive is READ from that rule's own
+#                      strict `>`. Driven from BOTH ends, and the two BOUNDARY halves
+#                      (window start to first sample, last sample to window end) are
+#                      driven SEPARATELY from the interior one, because a
+#                      consecutive-differences scan cannot see them and that is where
+#                      this rule is usually got wrong. NOT MEASURED is asserted
+#                      textually DISTINCT from UNDERCOVERED. Pairing: a contaminated
+#                      BASELINE voids its whole round (the set-3-round-2 event, four
+#                      clean treatments lost); a pair whose own bare-scan control moved
+#                      at least as much as its treatment is REPORTED and excluded —
+#                      including when it is the only pair, which used to print a bare
+#                      NO CLEAN PAIRS and drop the reason; pairs pool across SETS and
+#                      never across ROUNDS, on fixtures where a violation would change
+#                      the answer. Medians and direction counts pinned NUMERICALLY by
+#                      column HEADER (never position) with a FASTER and a SLOWER
+#                      treatment, so both signs are pinned. And the per-CPU column's
+#                      corrected claim is pinned phrase by phrase — TOTAL busy
+#                      INCLUDING our own measurement, explicitly NOT a contamination
+#                      bound — plus a count-equality assert that no un-negated mention
+#                      can appear, which a phrase list cannot express. Every refusal is
+#                      matched on the tool's OWN diagnostic, never a bare non-zero exit,
+#                      and each coverage refusal carries a positive control ON THE
+#                      ORACLE: a MUTATED scratch copy with the bound removed must ACCEPT
+#                      the same fixture (so the refusal is the RULE and not a malformed
+#                      fixture), with a boundary-only mutant discriminating the halves
+#                      and every plant asserted to have TAKEN. Hermetic: synthetic
+#                      session dirs, window records and sampler JSONL under $TMPDIR,
+#                      and NOTHING read from /data/ws0-3551 (one lane's live outputs).
 #                      Also runs scripts/tests/test_ws0_perf_invocation_lint.sh (#3272
 #                      item 10) — the THIRD structural guard, split out of the file above
 #                      under the campsite rule (it reached 1607 lines against the ~1500
@@ -17051,6 +17142,129 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_cpu_pinning_guards.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (ws0 cpu-pinning / server-ownership guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 FLIGHT-ARM GUARDS (#3551) — the pin MODE, the ALLOCATOR and what the report
+  # may SAY about either. Its own file because the suite above is at the ~1500-line
+  # test target and this is a different subject: not "are the pinned CPUs one physical
+  # core" but "the two arms no longer run the same way, so what exactly differs, and is
+  # the difference the one the label claims". `--flight-pin-mode` selects between TWO
+  # AFFIRMATIVE assertions (each read from a fake thread_siblings_list) rather than
+  # relaxing one, so distinct-cores must REFUSE a sibling pair and siblings must REFUSE a
+  # distinct one — proved over the SAME two inputs — and a single-CPU list is refused
+  # because "pairwise distinct" over one element compares nothing. `--flight-allocator`
+  # is verified from the RUNNING PROCESS because LD_PRELOAD FAILS OPEN (glibc prints
+  # "cannot be preloaded ...: ignored" and continues with system malloc, exit 0), so the
+  # absent-mapping branch — the one the check exists for — is driven against synthetic
+  # /proc/<pid>/maps files, as are the EMPTY and ABSENT maps files, which must read as
+  # COULD-NOT-MEASURE refusals and never as "no jemalloc mapping present" (measured on a
+  # mutant: `system VERIFIED ... (0 mappings read)`). Plus the #3272-F6 substitution at
+  # the new pin, the record's closed grammars, and a ONE-FIELD report differential
+  # proving a distinct-cores pin is never described as `physical-core siblings`.
+  # Hermetic: fake sysfs, synthetic maps + session dirs + a few-KB corpus under $TMPDIR;
+  # every driver call through ws0_driver_run. No cargo, perf, sudo, taskset, root,
+  # libjemalloc, server, corpus or network.
+  echo ">>> [$name] bash scripts/tests/test_ws0_flight_arm_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_flight_arm_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 flight-arm pin/allocator guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 INTERLEAVED A/B/C GUARDS (#3551) — its own file because the two suites above are
+  # about ONE SESSION (which CPUs, which program, what differs between the two arms of
+  # it) and this is about a SET of sessions: is a directory of WS0 measurement runs one
+  # PAIRED EXPERIMENT? `ws0-3551-abc.sh`'s resume is deliberate (a shared box, and a set
+  # that starts over loses its window), so it is CHECKED rather than removed: a run
+  # FINGERPRINT — the corpus path AND its recorded Data.db sha256 + row count, the
+  # --bin-dir AND a digest of all three measured binaries, each arm's EXACT flag list,
+  # --step-duration/--arena-max/--jemalloc-lib/--port — written on the first invocation
+  # and verified field-by-field on every later one, with `--rounds` DELIBERATELY excluded
+  # and that exclusion asserted in BOTH directions (3->5 and 5->2 must be ACCEPTED),
+  # because a guard that reds on correct input is the guard an operator works around.
+  # Plus: a SKIPPED session must prove it is the session the slot expects (its
+  # abc-window.json present and readable, its arm and round matching the directory name,
+  # its recorded exit 0 — `results.json` alone carries no provenance at all); the
+  # aggregator's configuration validated over EVERY (round, arm) rather than the first,
+  # per-arm treatment stability and cross-arm invariants kept DISTINCT, and an ABSENT
+  # field refused as COULD-NOT-MEASURE with the field named; and `ratio bare/flight`
+  # pinned NUMERICALLY to this rig's own quantity (rows/s bare over rows/s flight — it
+  # was a cycles quotient, and inverted) on a fixture where all three candidate readings
+  # DIFFER, beside a flight-FASTER fixture that pins the direction below 1.
+  # The pin/mode/allocator RED arms substitute the ARTIFACT (a `sed` over a scratch copy
+  # of the driver — those three are its definition of an arm, not flags) and the plant is
+  # asserted to have TAKEN, since a `sed` that stopped matching leaves a RED arm identical
+  # to its control. Hermetic: synthetic session dirs, corpus identity and binary fixtures
+  # under $TMPDIR, plus a recording STUB beside the scratch copy so the `$HERE/`-relative
+  # driver path never resolves to the real measurement driver — and hermeticity is asserted
+  # AFFIRMATIVELY, from the stub's own log (one positive control proves the harness can
+  # SEE an invocation) and from lib-ws0-hermetic.sh's shims. No cargo, perf, sudo,
+  # taskset, root, corpus binaries, server or network.
+  # NOTE: the WS0 measurement driver's FILENAME is deliberately not written anywhere in
+  # this file. `test_ws0_hermeticity.sh`'s completeness census is CONTENT-based over every
+  # tracked file, so a prose mention here would report scripts/agent-gate.sh UNCOVERED and
+  # need the WHOLE GATE exempted from that lint — a real coverage reduction (a future gate
+  # component that genuinely invoked the driver would then go unflagged) bought for a
+  # comment. MEASURED: it reported exactly that, uncovered=1, the moment this comment first
+  # named it.
+  echo ">>> [$name] bash scripts/tests/test_ws0_abc_driver_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_abc_driver_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 interleaved A/B/C set guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 #3551 ARTIFACT-TOOL GUARDS — the two MEASUREMENT-ANALYSIS tools under
+  # docs/reports/ws0-3551-artifacts/ whose stdout IS the published result of that
+  # issue (clean-pairs.py, window-census.py). This repo reviews
+  # docs/reports/*-artifacts/ harnesses as CODE (#3229) and these two had NO tests,
+  # which is how a real defect got in: a session was accepted as CLEAN on the
+  # strength of ONE zero-census sample anywhere in its window, so a mostly
+  # UNOBSERVED session could enter the published medians. A non-empty sample set is
+  # not COVERAGE. The suite drives that rule from BOTH ends — the accept direction
+  # first, because a guard that only ever reds proves nothing — and separately
+  # drives the two BOUNDARY halves (window start to first sample, last sample to
+  # window end), which a consecutive-differences scan cannot see and which is where
+  # this rule is usually got wrong. The coverage BOUND is DERIVED from the committed
+  # judge (scripts/perf/ws0_quiescence.py's MAX_SAMPLE_GAP_S) at run time rather
+  # than restated, and which side of it is permissive is READ from that rule's own
+  # strict `>` rather than guessed. Plus: NOT MEASURED asserted textually distinct
+  # from UNDERCOVERED; the pairing rules (a contaminated BASELINE voids its whole
+  # round; a pair whose own bare-scan control moved at least as much as its
+  # treatment is reported and excluded; pairs pool across SETS and never across
+  # ROUNDS, on fixtures where a violation would change the answer); the medians and
+  # direction counts pinned NUMERICALLY by column HEADER with a faster AND a slower
+  # treatment so both signs are pinned; and the per-CPU column's corrected claim —
+  # it is TOTAL busy INCLUDING our own measurement and explicitly NOT a
+  # contamination bound, pinned phrase by phrase plus a count-equality assert that
+  # no un-negated mention can appear. Every refusal is matched on the tool's OWN
+  # diagnostic, never on a bare non-zero exit. Each coverage refusal also carries a
+  # positive control ON THE ORACLE: a MUTATED scratch copy with the bound removed
+  # must ACCEPT the same fixture, so the refusal is attributable to the rule and not
+  # to a malformed fixture, and a boundary-only mutant discriminates the two halves.
+  # Hermetic: synthetic session dirs, window records and sampler JSONL under
+  # $TMPDIR; NOTHING is read from /data/ws0-3551 (one lane's live outputs). No
+  # cargo, perf, sudo, taskset, root, corpus bytes, server or network.
+  echo ">>> [$name] bash scripts/tests/test_ws0_3551_artifact_tools.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_3551_artifact_tools.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 #3551 artifact-tool guards); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

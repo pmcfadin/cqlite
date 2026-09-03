@@ -47,6 +47,16 @@ _EPS = 1e-6
 # self-consistent in every other respect while describing a bar nobody would accept (job 78 F2).
 # Duplicated rather than imported to keep this module dependency-free; the values are asserted
 # against the writer's by scripts/tests/test_ws0_quiescence_evidence_guards.sh.
+# The census RULES the writer applies, mirrored for `_expected_census_scope`. Same posture as
+# the bounds above: duplicated to keep this module dependency-free, drift-checked against
+# ws0_quiescence.COMPETING_COMMS / COMPETING_CMDLINE by the guard suite. A rule ADDED to the
+# writer without updating these makes the scope-note derivation disagree, which reds the guard
+# suite -- deliberately: widening what the census covers changes what a zero census MEANS, and
+# that sentence is published in the verdict.
+CANONICAL_COMPETING_COMMS = ("rustc", "cargo", "cc1", "cc1plus", "ld", "lld", "mold")
+CANONICAL_COMPETING_CMDLINE = ("agent-gate.sh",)
+
+
 def _expected_census_breadth(narrow: int, samples: int) -> str:
     """Recompose `census_breadth` exactly as ws0_quiescence.judge() does.
 
@@ -61,6 +71,34 @@ def _expected_census_breadth(narrow: int, samples: int) -> str:
     return (f"NARROW on {narrow} of {samples} record(s): those carry"
             " rustc/cargo/gate only, so a short-lived cc1/ld/lld/mold between boundaries"
             " would not appear. Stated rather than implied.")
+
+
+def _expected_census_scope(samples: int) -> str:
+    """Recompose `census_scope` exactly as ws0_quiescence.census_scope_note() does.
+
+    SAME FAMILY AS `census_breadth` ABOVE, and the reason is the same: the field states WHAT A
+    ZERO CENSUS DOES NOT COVER (#3551 defect 3 -- 91 consecutive samples read
+    competing_count=0 while load1 reached 6.39 and the pinned CPUs measured up to 86% busy).
+    Inspected rather than derived, ANY other nonempty text would pass -- including a
+    reassurance, which is precisely the thing this field exists to prevent. So it is asserted as
+    a DERIVATION from the sample count it describes.
+
+    Mirrored rather than imported, keeping this module dependency-free, and drift-checked
+    against the writer by scripts/tests/test_ws0_quiescence_evidence_guards.sh (which compares
+    the two functions' OUTPUT over several sample counts, not their source text).
+    """
+    return (
+        f"BOUNDED, NOT SILENT: a zero census across {samples} in-window record(s) bounds"
+        f" COMPILERS AND LINKERS ({', '.join(CANONICAL_COMPETING_COMMS)}) plus the named"
+        f" script(s) ({', '.join(CANONICAL_COMPETING_CMDLINE)}) and NOTHING ELSE. It does NOT"
+        " bound total foreign load: a peer lane running node, jest, python, git or a shell"
+        " suite is INVISIBLE to this census, so this is 0 RECOGNISED competing processes, never"
+        " 'nothing was running'. MEASURED (#3551): 91 consecutive samples read"
+        " competing_count=0 while load1 reached 6.39 with 9 runnable tasks and the pinned CPUs"
+        " measured a median 8% / max 86% busy with foreign work. In-window load1 and the"
+        " per-sample `percpu` jiffy snapshot are CONTEXT, NOT GATES -- read them before"
+        " trusting this verdict."
+    )
 
 
 def _expected_load1_after_note(is_bounded: bool) -> str:
@@ -142,6 +180,9 @@ FIELDS: Dict[str, Tuple[Callable[[Any], bool], str]] = {
                                             "a non-negative integer"),
     "window_census.census_breadth": (lambda v: isinstance(v, str) and v.strip() != "",
                                      "a non-empty string"),
+    # #3551 defect 3: the verdict must state what its zero census does NOT bound.
+    "window_census.census_scope": (lambda v: isinstance(v, str) and v.strip() != "",
+                                   "a non-empty string"),
     "window_census.timeseries": (lambda v: isinstance(v, str) and v.strip() != "",
                                  "a non-empty path string"),
     "window_census.window.start": (lambda v: _iso(v) is not None, "an ISO-8601 instant"),
@@ -192,6 +233,9 @@ P2_DERIVATIONS: Dict[str, Any] = {
     "load1_after_note": (
         lambda f: _expected_load1_after_note(f["load1_after_is_bounded"]),
         "f(load1_after_is_bounded)", None),
+    "window_census.census_scope": (
+        lambda f: _expected_census_scope(f["window_census.samples"]),
+        "f(samples)", None),
 }
 
 # TYPE_ONLY -- neither self-declared nor derived: a primary observation, or a literal. Listed

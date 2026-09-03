@@ -71,7 +71,7 @@
 # did (#3249): an earlier draft of THIS paragraph asserted a count already false when written. Run
 # `wc -l`, the only statement of this file's size that cannot be stale.
 #
-# Ten libraries, each owning ONE question about whether a measurement means what it says:
+# Eleven libraries, each owning ONE question about whether a measurement means what it says:
 #
 #     lib-cpu.sh             are the pinned CPUs one physical core?
 #     lib-host-state.sh      is the host's state put back?
@@ -83,6 +83,8 @@
 #     lib-binaries.sh        WHICH PROGRAMS are measured, and are they this revision's?
 #     lib-inputs.sh          WHICH SCHEMA are the bytes read with, and WHICH REQUEST is asked?
 #     lib-corpus-boundary.sh are the bytes still the PINNED bytes, MID-RUN?
+#     lib-flight-arm.sh      the two arms no longer run the same way — what differs, and was
+#                            the difference VERIFIED rather than requested? (#3551)
 #
 # What remains here is deliberately the part that must stay legible in ONE file: the ORDER of
 # operations, which is itself a correctness property (arguments before creation, verification
@@ -117,6 +119,10 @@ source "$HERE/lib-binaries.sh"
 source "$HERE/lib-inputs.sh"
 # shellcheck source=scripts/perf/lib-corpus-boundary.sh
 source "$HERE/lib-corpus-boundary.sh"
+# AFTER lib-cpu.sh, which its verification calls (#3551): the sourcing order is the dependency
+# order.
+# shellcheck source=scripts/perf/lib-flight-arm.sh
+source "$HERE/lib-flight-arm.sh"
 # LAST, because the sourcing order is the DEPENDENCY order: the measurement legs call
 # `stop_server`/`require_port_free`/`await_server_ready` from lib-server.sh above, plus this
 # driver's own `perf_stat_c` and `drop_caches_if_cold` (both defined below — a function body is
@@ -128,6 +134,50 @@ source "$HERE/lib-measure.sh"
 CORPUS=""
 SERVER_CPUS="2,10"
 CLIENT_CPUS="4,12,5,13,6,14,7,15"
+# --- THE FLIGHT ARM'S OWN PIN AND ALLOCATOR (#3551) --------------------------------------
+# The rig has never had §3b step 3's DRIFT CONTROL: a leg that is code-identical AND
+# pin-identical across the arms being compared. These three variables are what create one.
+# Everything about the bare-scan arm stays on `$SERVER_CPUS`, so when only the FLIGHT pin (or
+# only the FLIGHT allocator) moves, the bare scan is the same program on the same cores in the
+# same session — the control the comparison needs — and the difference between arms is the ONE
+# property that changed.
+#
+# `FLIGHT_SERVER_CPUS` is EMPTY here and defaults to `$SERVER_CPUS` after the argument loop, so
+# EVERY EXISTING INVOCATION BEHAVES BYTE-IDENTICALLY: same taskset list, same perf counting
+# domain, same recorded manifest value. The default is resolved after the loop rather than here
+# because `--server-cpus` may be given AFTER `--flight-server-cpus` and the loop is
+# order-independent.
+FLIGHT_SERVER_CPUS=""
+# WHICH PROPERTY the flight pin must satisfy — `siblings` (one physical core's hyperthreads, the
+# #3096 default) or `distinct-cores` (one thread per physical core, the SMT-unpin arm). NOT a
+# relaxation: each value selects an EQUALLY AFFIRMATIVE assertion read from the real
+# `thread_siblings_list`, and an unknown value is a usage error rather than a default (see the
+# argument loop).
+FLIGHT_PIN_MODE="siblings"
+# Arm C: the Flight SERVER PROCESS ONLY runs under `LD_PRELOAD=<libjemalloc>`. The binary is
+# byte-identical across arms — that is the point of doing it with a preload rather than a build
+# flag — so nothing else in the rig changes.
+FLIGHT_ALLOCATOR="system"
+# An explicit library path for a host whose libjemalloc is somewhere else. EMPTY = DISCOVER from
+# the standard paths below, and a failed discovery is a NAMED REFUSAL rather than a silent
+# fall-through to the system allocator: a run labelled `jemalloc` that measured system malloc is
+# the instrument-reports-success-without-measuring shape this rig exists to refuse.
+FLIGHT_ALLOCATOR_LIB=""
+# --- ARM C, GENERALISED: THE MECHANISM UNDER TEST IS ARENA CONTENTION (#3551, #3217 partC F1) ---
+# `docs/reports/ws0-3217-artifacts/partC/PROPOSED-FOLLOWUPS.md` F1 (strength STRONGEST)
+# pre-registers this experiment as its AC2: "a controlled arena experiment at the same points:
+# MALLOC_ARENA_MAX = 1, 2, 4, default ... If capping arenas does not move the -24%, the allocator
+# hypothesis is falsified and that is a passing outcome to be reported as such."
+#
+# EMPTY means INJECT NOTHING, and that is not the same as injecting 0: glibc's handling of an
+# empty or zero value is not something this rig may assume, so the variable is simply absent from
+# the server's environment unless a value was asked for (the launch has two forms for exactly
+# that reason). Independent of `--flight-allocator`: the two knobs are recordable together or
+# separately.
+FLIGHT_MALLOC_ARENA_MAX=""
+# The candidate PATHS live beside the three-valued probe that consumes them, in
+# `scripts/perf/lib-flight-arm.sh`: the list and the probe are one decision (what counts as
+# "this host has no jemalloc"), and splitting them would put half of it two files away.
 REPS=3
 TEMPS="warm cold"
 ARMS="bypass"
@@ -209,6 +259,44 @@ ws0-baseline.sh — issue #3096 same-session Arrow-encode baseline
   --corpus DIR         Corpus root from ws0-corpus-gen (holds ws0/events/). REQUIRED.
   --server-cpus LIST   Pinned physical-core sibling pair for BOTH arms (default $SERVER_CPUS).
   --client-cpus LIST   CPUs for the Flight load generator; must not overlap (default $CLIENT_CPUS).
+  --flight-server-cpus LIST
+                       Pin the FLIGHT SERVER to LIST instead of --server-cpus. Defaults to
+                       --server-cpus, so omitting it changes nothing: same taskset list and
+                       the same CPU-wide counting domain as today. Verified before the first
+                       rep — every CPU present and ONLINE, disjoint from --client-cpus, and
+                       satisfying --flight-pin-mode. The BARE-SCAN arm always stays on
+                       --server-cpus, which is what makes it a pin-identical drift control
+                       across arms that differ only in the flight pin (#3551).
+  --flight-pin-mode WHICH
+                       siblings | distinct-cores (default $FLIGHT_PIN_MODE). NOT a relaxation
+                       of the sibling guard: both are read from the real thread_siblings_list
+                       and both fail closed. `siblings` REFUSES a distinct-core set;
+                       `distinct-cores` REFUSES a sibling pair, and REFUSES a single-CPU list
+                       (pairwise-distinct over one CPU compares nothing). An unknown value is
+                       a usage error, never a default.
+  --flight-allocator WHICH
+                       system | jemalloc (default $FLIGHT_ALLOCATOR). On jemalloc the Flight
+                       SERVER PROCESS ONLY is launched with LD_PRELOAD=<lib>; the binary is
+                       byte-identical across arms. VERIFIED AFTER START from
+                       /proc/<pid>/maps, per rep: glibc prints 'cannot be preloaded ...
+                       ignored' and CONTINUES with system malloc, so without that read arm C
+                       would be a byte-identical duplicate of arm B under a label saying
+                       otherwise. On `system` the NEGATIVE is asserted too (no jemalloc
+                       mapping) and any inherited LD_PRELOAD is emptied for the launch.
+  --flight-malloc-arena-max N
+                       Set MALLOC_ARENA_MAX=N for the FLIGHT SERVER PROCESS ONLY (same seam as
+                       --flight-allocator, and independent of it). Unset = inject nothing,
+                       which is NOT the same as 0. Positive integer, validated up front.
+                       VERIFIED per rep from /proc/<pid>/environ as a whole NUL-separated
+                       entry — an arena cap leaves no mapping, so `maps` cannot see it at all,
+                       and a substring match would confuse =1 with =16. This is #3217 partC
+                       F1's pre-registered AC2: if capping arenas does not move the delta the
+                       allocator hypothesis is FALSIFIED, which is a result to report, not a
+                       failure.
+  --jemalloc-lib PATH  The preloaded library, for a host where it is not one of the standard
+                       paths. Must be an existing, readable, regular file. Without it the
+                       path is DISCOVERED and a failed discovery REFUSES (remedy named) —
+                       never a silent fall-through to system malloc.
   --reps N             Reps per (arm, temperature). Median reported, spread printed (default $REPS).
   --temp WHICH         warm | cold | both (default both).
   --arm WHICH          bypass | merge | both (default bypass).
@@ -285,6 +373,22 @@ while [[ $# -gt 0 ]]; do
     --corpus) CORPUS="$2"; shift 2 ;;
     --server-cpus) SERVER_CPUS="$2"; shift 2 ;;
     --client-cpus) CLIENT_CPUS="$2"; shift 2 ;;
+    --flight-server-cpus) FLIGHT_SERVER_CPUS="$2"; shift 2 ;;
+    # A CLOSED SET, like --temp/--arm above: an unrecognised mode must not fall back to the
+    # default, because the whole point of the flag is WHICH property was asserted, and a run
+    # that silently asserted the other one is a measurement of something nobody asked for.
+    --flight-pin-mode)
+      case "$2" in
+        siblings|distinct-cores) FLIGHT_PIN_MODE="$2" ;;
+        *) echo "FATAL: --flight-pin-mode must be siblings|distinct-cores (got '$2')" >&2; exit 2 ;;
+      esac; shift 2 ;;
+    --flight-allocator)
+      case "$2" in
+        system|jemalloc) FLIGHT_ALLOCATOR="$2" ;;
+        *) echo "FATAL: --flight-allocator must be system|jemalloc (got '$2')" >&2; exit 2 ;;
+      esac; shift 2 ;;
+    --flight-malloc-arena-max) FLIGHT_MALLOC_ARENA_MAX="$2"; shift 2 ;;
+    --jemalloc-lib) FLIGHT_ALLOCATOR_LIB="$2"; shift 2 ;;
     --reps) REPS="$2"; shift 2 ;;
     --temp)
       case "$2" in
@@ -368,6 +472,12 @@ unset _perf_lint_out
 # CALL SITES stay here, so what this driver actually validates is visible at its
 # top level rather than buried in a library.
 
+# Through the SHARED validator (`lib-args.sh`), never a new numeric check: a second
+# implementation of "is this a positive integer" is a second thing to drift, and this one is
+# already wrap-proof (#3272 F2). Only when a value was given — empty means inject nothing.
+if [[ -n "$FLIGHT_MALLOC_ARENA_MAX" ]]; then
+  require_positive_int flight-malloc-arena-max "$FLIGHT_MALLOC_ARENA_MAX"
+fi
 require_positive_int scan-passes "$SCAN_PASSES"
 require_positive_int reps "$REPS"
 require_positive_int port "$PORT" 65535
@@ -656,13 +766,51 @@ if [[ -n "$BIN_DIR" ]]; then
   done
 fi
 
+# --- THE FLIGHT PIN DEFAULTS TO THE SERVER PIN (#3551) -------------------------------------
+# AFTER the argument loop, because the loop is order-independent: resolving it at declaration
+# would make `--flight-server-cpus` + a later `--server-cpus` silently disagree with the flag the
+# operator wrote last. The equality is what makes this whole feature a NO-OP by default.
+if [[ -z "$FLIGHT_SERVER_CPUS" ]]; then
+  FLIGHT_SERVER_CPUS="$SERVER_CPUS"
+fi
+
+# --- THE FLIGHT ARM'S ALLOCATOR, RESOLVED BEFORE ANY MEASUREMENT (#3551) -------------------
+# `scripts/perf/lib-flight-arm.sh` owns the three-valued library probe (present /
+# verified-absent / a NAMED could-not-measure state, each a refusal) and the four values the
+# manifest, the pin record and the per-rep check all read. Called HERE, above the argument
+# boundary, because it reads nothing but file metadata and because "refusing a value after
+# acting on it is not refusing it" — the rule `--bin-dir` and `--profile-out` follow a few lines
+# up. Exit 2, like every other argument refusal.
+record_flight_allocator_facts || exit 2
+
+# --- THE ENVIRONMENT IS PART OF THE MEASUREMENT (#3551 item 8) ------------------------------
+# Two records, deliberately separate: AMBIENT (as measured in this driver's own environment) and
+# INJECTED (what the rig sets, per arm). "The operator had a stray LD_PRELOAD" and "the rig set
+# one on purpose" are different facts and only one of them is a defect. Without them, arm A and
+# arm C are indistinguishable in every recorded field — one binary set across all arms is
+# deliberate, so the ENVIRONMENT is the only thing that differs, and it was written down nowhere.
+# `docs/reports/ws0-3552-report.md` §4 is the governing rule: state RUSTFLAGS and
+# CARGO_ENCODED_RUSTFLAGS AS MEASURED, because a reproduction only corroborates if its
+# environment differs — not just its tree, box, or operator.
+WS0_ENV_AMBIENT="$(ws0_ambient_env_record)"
+# ...and an ambient ALLOCATOR setting is REFUSED rather than merely recorded, because
+# `ws0-scan-bench` would inherit it and the bare scan is the drift control. Above the boundary
+# because it is an environment read: `--validate-args-only` reaches it, so the refusal is
+# hermetically observable and costs nothing.
+refuse_ambient_allocator_env || exit 2
+WS0_ENV_INJECTED="flight server process ONLY: LD_PRELOAD=${FLIGHT_ALLOCATOR_LIB:-<empty>}, $FLIGHT_ARENA_RECORDED; bare scan (the drift control): NOTHING is injected, asserted per rep against the environment its bench inherits (<tag>.scan-env.status)"
+
 if [[ "$VALIDATE_ONLY" == "1" ]]; then
   # `baseline-mode` is in the stamp so the hermetic self-tests can observe WHICH claim the run
   # makes without executing anything. The canonical-corpus COMPARISON itself is necessarily below
   # this boundary (it reads the corpus's recorded identity off disk), like the schema check.
   echo "ARGUMENTS OK (--validate-args-only): reps=$REPS temps=[$TEMPS] arms=[$ARMS]" \
        "port=$PORT scan-passes=$SCAN_PASSES step=$STEP_DURATION cold-step=$COLD_STEP_DURATION" \
-       "baseline-mode=$BASELINE_MODE events=[$EVENTS] bin-dir=[${BIN_DIR:-<default target/release>}]"
+       "baseline-mode=$BASELINE_MODE events=[$EVENTS] bin-dir=[${BIN_DIR:-<default target/release>}]" \
+       "flight-cpus=$FLIGHT_SERVER_CPUS flight-pin-mode=$FLIGHT_PIN_MODE" \
+       "flight-allocator=$FLIGHT_ALLOCATOR jemalloc-lib=[$FLIGHT_ALLOCATOR_LIB_RECORDED]" \
+       "flight-malloc-arena-max=[${FLIGHT_MALLOC_ARENA_MAX:-<not injected>}]" \
+       "env-ambient=[$WS0_ENV_AMBIENT]"
   echo "  nothing was executed: no sysctl write, no build, no cache drop, no perf, no measurement."
   exit 0
 fi
@@ -697,6 +845,56 @@ echo "$WS0_SERVER_SIBLINGS"
 # NOT `verify_sibling_pair … || echo` (#3272 round 21) — that `||` swallowed every failure, so an offline/absent CPU was accepted, affinity silently reduced, manifest wrong: see verify_cpus_online.
 verify_cpus_online "$CLIENT_CPUS" "client" || exit 2
 verify_disjoint "$SERVER_CPUS" "$CLIENT_CPUS"
+
+# --- THE FLIGHT ARM'S PIN, VERIFIED WITH THE SAME RIGOUR AS THE SERVER'S (#3551) -----------
+# Three checks, all fail-closed and all BEFORE the first rep: every CPU present and ONLINE, the
+# requested PIN MODE (two affirmative assertions, never a relaxation), and disjointness from the
+# client set. `scripts/perf/lib-flight-arm.sh` carries the argument for each; the CALL is here so
+# the ORDER stays visible in one file — after the server set is verified, before anything is
+# measured. It captures the sysfs echo into `$WS0_FLIGHT_PIN_VERIFIED`, which the pin record
+# below carries, so the report's claim rests on an observation.
+verify_flight_arm_pin || exit 2
+
+
+# --- THE COUNTING DOMAIN FOLLOWS THE ARM (#3551) -------------------------------------------
+# `perf_stat_c`/`perf_record_c` count CPU-WIDE over `$PERF_COUNT_CPUS`, and the two arms no
+# longer necessarily run on the same CPUs. Counting the SERVER set while the Flight server ran on
+# a DIFFERENT set would collect cycles from cores that served nothing and divide them by this
+# rep's rows — a cycles/row figure of the wrong CPUs, silently, which is the exact defect class
+# the sibling check exists to prevent one level down. So each measurement leg sets this to the
+# CPUs ITS server actually ran on (`lib-measure.sh`), and it is initialised here so no perf
+# invocation can ever see it unset. With the flight pin at its default the value is identical in
+# both arms and every argv is byte-for-byte what it is today.
+PERF_COUNT_CPUS="$SERVER_CPUS"
+# ...AND THE COUNTING DOMAIN IS CHECKED AGAINST A CLOSED SET, NOT LEFT TO CONVENTION (#3551).
+#
+# `perf stat -C <list>` counting a list the measured work did not run on is a FABRICATED number
+# IN THE FLATTERING DIRECTION: pin the Flight server to `2,3` while counting `2,10` and the
+# window collects cpu10's IDLE and misses cpu3's WORK entirely, so the same rows cost fewer
+# cycles and the arm looks like a large win. Nothing in the output would say so. Getting that
+# right by convention is exactly what this rig refuses to rely on, so the wrapper VALIDATES its
+# own counting domain against the two pairings this session actually verified — and refuses
+# anything else, naming both lists.
+#
+# The table is `<counted>|<affinity of the process inside the perf window>`, one per line, and
+# it is DERIVED from the verified lists rather than written out, so it cannot describe a pin
+# nobody checked. Exactly two entries are legitimate, and the second one is why a simple
+# "counted == taskset list" rule would be WRONG:
+#
+#   * BARE SCAN — the window brackets `ws0-scan-bench` on the server set and counts the server
+#     set: the measured process runs on the counted CPUs.
+#   * FLIGHT — the window brackets the LOAD GENERATOR on the CLIENT set while counting the
+#     SERVER's CPUs, deliberately (that is the whole design: the client's cost must stay outside
+#     the counted domain). So here the counted list and the argv's `taskset -c` list MUST
+#     differ, and requiring them equal would red every correct Flight rep.
+#
+# With the flight pin at its default the two entries collapse to the pre-#3551 behaviour.
+# ONE LINE, with the separator spelled `$'\n'`, deliberately: a continuation line whose first
+# token is a bare `"$VAR"` is classified a POSSIBLE perf invocation by `lib-perf-lint.sh`'s
+# fail-closed layer 1 (an unresolvable command word could be anything, including perf), so the
+# two-line form FAILED the rig's own startup lint — measured, at this very line. Same trap
+# `lib-measure.sh` records for its prewarm call.
+WS0_PERF_COUNT_PAIRINGS="$SERVER_CPUS|$SERVER_CPUS"$'\n'"$FLIGHT_SERVER_CPUS|$CLIENT_CPUS"
 
 # ---------------------------------------------------------------------------
 # Server lifecycle — ONLY the process THIS script started (issue #3096 review)
@@ -956,6 +1154,9 @@ WS0_CFG_ARMS="$ARMS" \
 WS0_CFG_SCAN_PASSES="$SCAN_PASSES" \
 WS0_CFG_SERVER_CPUS="$SERVER_CPUS" \
 WS0_CFG_CLIENT_CPUS="$CLIENT_CPUS" \
+WS0_CFG_FLIGHT_SERVER_CPUS="$FLIGHT_SERVER_CPUS" \
+WS0_CFG_ENV_AMBIENT="$WS0_ENV_AMBIENT" \
+WS0_CFG_ENV_INJECTED="$WS0_ENV_INJECTED" \
 WS0_CFG_STEP_DURATION="$STEP_DURATION/$COLD_STEP_DURATION" \
 WS0_CFG_FLIGHT_ENDPOINT="$FLIGHT_ENDPOINT" \
 WS0_CFG_BASELINE_MODE="$BASELINE_MODE" \
@@ -1049,6 +1250,13 @@ WS0_PIN_SERVER_CPUS="$SERVER_CPUS" \
 WS0_PIN_CLIENT_CPUS="$CLIENT_CPUS" \
 WS0_PIN_SIBLINGS="$WS0_SERVER_SIBLINGS" \
 WS0_PIN_TOPOLOGY_ROOT="$CPU_TOPOLOGY_ROOT" \
+WS0_PIN_FLIGHT_SERVER_CPUS="$FLIGHT_SERVER_CPUS" \
+WS0_PIN_FLIGHT_PIN_MODE="$FLIGHT_PIN_MODE" \
+WS0_PIN_FLIGHT_PIN_VERIFIED="$WS0_FLIGHT_PIN_VERIFIED" \
+WS0_PIN_FLIGHT_ALLOCATOR="$FLIGHT_ALLOCATOR" \
+WS0_PIN_FLIGHT_ALLOCATOR_LIB="$FLIGHT_ALLOCATOR_LIB_RECORDED" \
+WS0_PIN_FLIGHT_MALLOC_ARENA_MAX="$FLIGHT_ARENA_RECORDED" \
+WS0_PIN_FLIGHT_ALLOCATOR_VERIFICATION="$FLIGHT_ALLOCATOR_VERIFICATION" \
 python3 -c '
 import json, os, pathlib, socket, sys
 sys.path.insert(0, sys.argv[1])
@@ -1061,6 +1269,22 @@ rec = {
     # read out of thread_siblings_list.
     "server_siblings_expanded": os.environ["WS0_PIN_SIBLINGS"],
     "topology_root": os.environ["WS0_PIN_TOPOLOGY_ROOT"],
+    # THE FLIGHT ARM (#3551). Recorded because the report prints a claim about each of them, and
+    # because a value that exists in no artifact is a claim resting on the operators memory of
+    # what they typed. `flight_server_cpus` is additionally compared against the MANIFEST by
+    # `ws0_pinning.verify_pinning_record`, which is the F6 substitution check extended to the
+    # new pin: a manifest edited to name CPUs no verification ran against is refused rather than
+    # printed as verified.
+    "flight_server_cpus": os.environ["WS0_PIN_FLIGHT_SERVER_CPUS"],
+    "flight_pin_mode": os.environ["WS0_PIN_FLIGHT_PIN_MODE"],
+    # The sysfs ANSWER for the flight pin — `verify_sibling_pair`s or `verify_distinct_cores`s
+    # own output line, carrying the expanded sibling sets it read. The substance of the
+    # verification, not a restatement of the argument.
+    "flight_pin_verified": os.environ["WS0_PIN_FLIGHT_PIN_VERIFIED"],
+    "flight_allocator": os.environ["WS0_PIN_FLIGHT_ALLOCATOR"],
+    "flight_allocator_lib": os.environ["WS0_PIN_FLIGHT_ALLOCATOR_LIB"],
+    "flight_malloc_arena_max": os.environ["WS0_PIN_FLIGHT_MALLOC_ARENA_MAX"],
+    "flight_allocator_verification": os.environ["WS0_PIN_FLIGHT_ALLOCATOR_VERIFICATION"],
     "host": socket.gethostname() or "unknown",
     "verified_by": "scripts/perf/lib-cpu.sh verify_sibling_pair + verify_disjoint, fail-closed,"
                    " against the real thread_siblings_list BEFORE the first rep",
@@ -1178,7 +1402,7 @@ perf_record_c() {
   #
   # Defaults on the driver globals, same standalone-extraction rule as perf_stat_c below: two
   # suites text-extract these functions and run them under `set -u`.
-  exec perf record -e cycles -F "${PROFILE_FREQ:-499}" -C "$SERVER_CPUS" -o "$outfile" -- sleep 86400
+  exec perf record -e cycles -F "${PROFILE_FREQ:-499}" -C "$PERF_COUNT_CPUS" -o "$outfile" -- sleep 86400
 }
 
 perf_stat_c() {
@@ -1219,6 +1443,83 @@ perf_stat_c() {
       exit 2
     done
   done
+  # --- THE COUNTING DOMAIN, VALIDATED HERE (#3551) ------------------------------------------
+  # After the option allowlist above, so an argv-guard case still gets the argv diagnostic, and
+  # BEFORE the sampler starts, so `perf record` inherits a domain that has been checked (that is
+  # the answer to "does the --profile-out path need the same treatment": it reads the SAME
+  # variable and is started below this point, so one validation covers both invocations).
+  #
+  # `${VAR:-}` here is NOT a permissive default: an empty value is REFUSED two lines down. It
+  # exists so an unset variable produces this NAMED diagnostic instead of bash's
+  # unbound-variable error, and there is deliberately no fall-back to `$SERVER_CPUS` — a silent
+  # default is precisely how this defect would survive its own fix.
+  local _counted="${PERF_COUNT_CPUS:-}" _pairings="${WS0_PERF_COUNT_PAIRINGS:-}"
+  local _aff="" _want_c=0 _tok _pair
+  # THE `taskset` CPU FLAG, spelled as a variable whose assignment ENDS THE LINE — and that is
+  # not style. `scripts/tests/ws0_embedded_python.py`'s `_DASH_C_ANCHOR` looks for a literal
+  # `-c` followed by another token on the same line, ANCHORED ON THE FLAG deliberately (a
+  # variable-spelled COMMAND word was invisible before #3451 round 7), so both a comparison
+  # written `"$_tok" == "-c"` and a diagnostic quoting `taskset -c <list>` read as a
+  # `-c '<program>'` invocation with an unresolvable command word and FAIL CLOSED in that
+  # census — correctly on its own terms, since it cannot know one is a string comparison and
+  # the other is prose. Using the variable in both places keeps that census's rule intact
+  # instead of adding an exemption to it. MEASURED: the literal form red the embedded-python
+  # census in four of its cases — and note the anchor matches `-c` followed by ANY non-space,
+  # INCLUDING a closing quote, so `_cpu_flag="-c"` at end of line is matched too (measured:
+  # span 19-22 of that very line). Hence the two-step construction, which contains no `-c`
+  # adjacency at all.
+  local _cpu_flag="-"
+  _cpu_flag+="c"
+  if [[ -z "$_counted" ]]; then
+    echo "FATAL: perf_stat_c was called with no counting domain (\$PERF_COUNT_CPUS is empty or" >&2
+    echo "       unset). Each measurement leg sets it to the CPUs ITS OWN server runs on" >&2
+    echo "       immediately before this call; there is no default, because counting the wrong" >&2
+    echo "       CPUs fabricates a number in the flattering direction rather than failing" >&2
+    echo "       (#3551)." >&2
+    exit 2
+  fi
+  if [[ -z "$_pairings" ]]; then
+    echo "FATAL: perf_stat_c has no verified counting-domain table (\$WS0_PERF_COUNT_PAIRINGS is" >&2
+    echo "       empty or unset), so '$_counted' cannot be checked against the pins this session" >&2
+    echo "       VERIFIED. The driver derives that table from the verified lists before the first" >&2
+    echo "       rep. Refused rather than assumed: an unchecked domain is the defect (#3551)." >&2
+    exit 2
+  fi
+  # The affinity of the process this window brackets, read out of THIS call's argv — never from a
+  # global, because the pairing being checked is between the counted list and what is about to
+  # RUN. Bash has already done word-splitting and quote removal, so the spelling problem a
+  # source scan would have does not exist here.
+  for _tok in "$@"; do
+    if [[ "$_want_c" == "2" ]]; then _aff="$_tok"; break; fi
+    if [[ "$_want_c" == "1" && "$_tok" == "$_cpu_flag" ]]; then _want_c=2; continue; fi
+    case "$_tok" in */taskset|taskset) _want_c=1 ;; esac
+  done
+  if [[ -z "$_aff" ]]; then
+    echo "FATAL: perf_stat_c cannot tell WHERE the command it is about to measure will run: its" >&2
+    echo "       argv carries no 'taskset $_cpu_flag <list>', so the counting domain" >&2
+    echo "       ('$_counted') is therefore unverifiable against it, and an unverifiable" >&2
+    echo "       pairing is refused" >&2
+    echo "       rather than assumed correct (#3551). Every leg in this rig pins its command." >&2
+    echo "       The argument list was: $*" >&2
+    exit 2
+  fi
+  local _ok=0
+  while IFS= read -r _pair; do
+    [[ -n "$_pair" ]] || continue
+    [[ "$_pair" == "$_counted|$_aff" ]] && { _ok=1; break; }
+  done <<<"$_pairings"
+  if [[ "$_ok" != "1" ]]; then
+    echo "FATAL: perf stat would COUNT cpus '$_counted' while the command it brackets is pinned" >&2  # perf-lint-allow: a diagnostic STRING
+    echo "       to '$_aff', and that pairing is not one this session verified." >&2
+    echo "       The verified pairings (<counted>|<measured-process affinity>) are:" >&2
+    printf '         %s\n' $_pairings >&2
+    echo "       This is the #3551 defect and it fails CLOSED because it CANNOT be seen in the" >&2
+    echo "       output: counting a list the work did not run on collects the other CPUs' IDLE" >&2
+    echo "       and misses the work entirely, so the same rows cost FEWER cycles and the arm" >&2
+    echo "       reads as a large win. Fix the leg that set \$PERF_COUNT_CPUS, not this check." >&2
+    exit 2
+  fi
+
   # THE SAMPLING SESSION BRACKETS EXACTLY THIS WINDOW (#3248 AC1). Started here rather than in
   # the measurement legs because this function already IS the timed window: any other insertion
   # point would need to guess the window's duration, and a guess either truncates the profile or
@@ -1305,7 +1606,7 @@ perf_stat_c() {
   # Testing the status with `||` suppresses `set -e` for this command only, so the cleanup
   # always runs and the measured status is still propagated by `return $_rc` below.
   local _rc=0
-  perf stat -x, -e "$EVENTS" -C "$SERVER_CPUS" -o "$outfile" -- "$@" || _rc=$?
+  perf stat -x, -e "$EVENTS" -C "$PERF_COUNT_CPUS" -o "$outfile" -- "$@" || _rc=$?
   if [[ -n "$_prof_pid" ]]; then
     # SIGINT, not SIGKILL: perf finalises perf.data on INT and leaves an unreadable stub on KILL.
     # THE PROFILER MUST STILL HAVE BEEN RUNNING, AND ITS EXIT STATUS IS READ (#3248, roborev
