@@ -491,6 +491,34 @@
 #                      distinct-cores pin is never described as physical-core siblings.
 #                      Hermetic: fake sysfs, synthetic maps/session dirs/corpus under
 #                      $TMPDIR, every driver call through ws0_driver_run.
+#                      Also runs scripts/tests/test_ws0_abc_driver_guards.sh (#3551) —
+#                      the INTERLEAVED A/B/C SET's own guards, the subject neither file
+#                      above can answer: is a directory of ws0-baseline.sh sessions ONE
+#                      PAIRED EXPERIMENT? Three roborev findings, one family (an artifact
+#                      ADOPTED without its provenance established). ws0-3551-abc.sh's
+#                      RESUME is deliberate and stays, so it is CHECKED: a run
+#                      FINGERPRINT (corpus path AND its recorded Data.db sha256 + rows,
+#                      --bin-dir AND all three binaries' digests, each arm's EXACT flag
+#                      list, --step-duration/--arena-max/--jemalloc-lib/--port) written
+#                      once and verified field-by-field after, with --rounds DELIBERATELY
+#                      excluded because extending a set is a legitimate resume — asserted
+#                      in BOTH directions, since a guard that reds on correct input is the
+#                      guard an operator works around. Plus per-session window validation
+#                      (arm and round must match the directory name, recorded exit must be
+#                      0) and ws0_abc_aggregate.py's configuration validation over EVERY
+#                      (round, arm) rather than the first, and `ratio bare/flight` pinned
+#                      NUMERICALLY to the rig's own quantity (rows/s bare over rows/s
+#                      flight, not a cycles quotient) on a fixture separating all three
+#                      candidate readings, plus a flight-FASTER fixture pinning the
+#                      direction below 1. Every pin/mode/allocator RED arm is planted by
+#                      SUBSTITUTING the artifact (a sed on a scratch copy — those are the
+#                      driver's DEFINITION of an arm, not flags) and the plant is asserted
+#                      to have TAKEN, because a sed that matched nothing leaves a RED arm
+#                      identical to its control. Hermetic: synthetic session dirs,
+#                      identity and binary fixtures under $TMPDIR, plus a recording STUB
+#                      ws0-baseline.sh beside the scratch copy, so the real driver is
+#                      never reached — asserted from the stub's own log (a positive
+#                      control proves the harness CAN see an invocation) and the shims.
 #                      Also runs scripts/tests/test_ws0_perf_invocation_lint.sh (#3272
 #                      item 10) — the THIRD structural guard, split out of the file above
 #                      under the campsite rule (it reached 1607 lines against the ~1500
@@ -16941,6 +16969,47 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_flight_arm_guards.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (ws0 flight-arm pin/allocator guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 INTERLEAVED A/B/C GUARDS (#3551) — its own file because the two suites above are
+  # about ONE SESSION (which CPUs, which program, what differs between the two arms of
+  # it) and this is about a SET of sessions: is a directory of `ws0-baseline.sh` runs one
+  # PAIRED EXPERIMENT? `ws0-3551-abc.sh`'s resume is deliberate (a shared box, and a set
+  # that starts over loses its window), so it is CHECKED rather than removed: a run
+  # FINGERPRINT — the corpus path AND its recorded Data.db sha256 + row count, the
+  # --bin-dir AND a digest of all three measured binaries, each arm's EXACT flag list,
+  # --step-duration/--arena-max/--jemalloc-lib/--port — written on the first invocation
+  # and verified field-by-field on every later one, with `--rounds` DELIBERATELY excluded
+  # and that exclusion asserted in BOTH directions (3->5 and 5->2 must be ACCEPTED),
+  # because a guard that reds on correct input is the guard an operator works around.
+  # Plus: a SKIPPED session must prove it is the session the slot expects (its
+  # abc-window.json present and readable, its arm and round matching the directory name,
+  # its recorded exit 0 — `results.json` alone carries no provenance at all); the
+  # aggregator's configuration validated over EVERY (round, arm) rather than the first,
+  # per-arm treatment stability and cross-arm invariants kept DISTINCT, and an ABSENT
+  # field refused as COULD-NOT-MEASURE with the field named; and `ratio bare/flight`
+  # pinned NUMERICALLY to this rig's own quantity (rows/s bare over rows/s flight — it
+  # was a cycles quotient, and inverted) on a fixture where all three candidate readings
+  # DIFFER, beside a flight-FASTER fixture that pins the direction below 1.
+  # The pin/mode/allocator RED arms substitute the ARTIFACT (a `sed` over a scratch copy
+  # of the driver — those three are its definition of an arm, not flags) and the plant is
+  # asserted to have TAKEN, since a `sed` that stopped matching leaves a RED arm identical
+  # to its control. Hermetic: synthetic session dirs, corpus identity and binary fixtures
+  # under $TMPDIR, plus a recording STUB `ws0-baseline.sh` beside the scratch copy so
+  # `$HERE/ws0-baseline.sh` never resolves to the real one — and hermeticity is asserted
+  # AFFIRMATIVELY, from the stub's own log (one positive control proves the harness can
+  # SEE an invocation) and from lib-ws0-hermetic.sh's shims. No cargo, perf, sudo,
+  # taskset, root, corpus binaries, server or network.
+  echo ">>> [$name] bash scripts/tests/test_ws0_abc_driver_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_abc_driver_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 interleaved A/B/C set guards); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
