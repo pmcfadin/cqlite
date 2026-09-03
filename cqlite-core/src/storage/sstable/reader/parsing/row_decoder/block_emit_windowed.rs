@@ -388,6 +388,31 @@ impl V5CompressedLegacyParser {
                                     // Issue #3721 (job 78): corruption, never a
                                     // terminator (`range_marker_error` docs). The
                                     // cause used to be dropped into `debug!`.
+                                    //
+                                    // Issue #3782 x #3721 (job 98): DELIBERATELY UNCONDITIONAL,
+                                    // and the alternative was MEASURED to be worse.
+                                    //
+                                    // roborev job 98 is right that an index-NARROWED window can
+                                    // legitimately end inside a valid marker, and that this
+                                    // refusal is `Error::Corruption`, which
+                                    // `indexed_walk_falls_back` does not recognise (it matches
+                                    // `is_column_decode` only) — so such a read fails instead of
+                                    // retracting. That is a real, conservative false refusal.
+                                    //
+                                    // But gating this on `extent.is_complete()` REINTRODUCED
+                                    // #3721's defect on the SELECT path: the scan passes `Window`
+                                    // even with the whole partition buffered, so all three
+                                    // `d9_select_marker_parse_failure` cases went back to
+                                    // returning `Ok` with the marker and every later row silently
+                                    // dropped. A false refusal on a narrowed read is recoverable;
+                                    // a silent short answer from `SELECT` is the defect itself.
+                                    //
+                                    // The correct fix is a RETRACTION SIGNAL the indexed walk can
+                                    // recognise — not tolerance, which would merely make the
+                                    // narrowed read silently short instead. That needs a TYPED
+                                    // discriminator (matching the message text would violate the
+                                    // no-heuristics rule, issue #28), so it is left as a named
+                                    // residual rather than invented here.
                                     Err(cause) => {
                                         return Err(unparseable(cause, &partition_index, offset))
                                     }
