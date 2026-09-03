@@ -44,14 +44,31 @@
 //!   "Corrupted sstable. Invalid flags found deserializing DeletionTime")`
 //!   (`DeletionTime.java:208-230`). So refusal is the FORMAT's expectation.
 //!
-//! # Pre-fix measurement (this file's cases, on `main` @ 05134c947)
+//! # Pre-fix measurement
 //!
-//! | surface (BIG, key-length byte zeroed)     | control | before the fix |
+//! Measured by running THIS file against `main` @ 05134c947 (i.e. with only the
+//! src half of the fix reverted), `CQLITE_DATASETS_ROOT=/data/datasets`.
+//!
+//! On the BTI (`da`) fixture — the discriminator flipped to `0xFF` — **all six
+//! surfaces answered `Ok`**:
+//!
+//! | surface                                   | control | before the fix |
 //! |-------------------------------------------|---------|----------------|
-//! | see `docs`-free note in each case below   |         |                |
+//! | `distinct_partition_keys`                 | 3 keys  | `Ok`, **5** keys — 1 real key LOST, 3 FABRICATED |
+//! | `partition_verify_scan`                   | 3       | `Ok`, **5** — same split |
+//! | `get_all_entries`                         | 468 rows| `Ok`, **0** — the whole table, silently |
+//! | `iterate_all_partitions`                  | 468     | `Ok`, **0** |
+//! | `iterate_all_partitions_for_compaction`   | 468     | `Ok`, **404** — 180 rows LOST, 116 FABRICATED |
+//! | `stream_all_partitions_for_compaction`    | 468     | `Ok`, **404** — same split |
 //!
-//! The numbers are asserted, not tabulated: each case names what it observed in
-//! its own panic message, so a table here could never go stale.
+//! The fabricated keys are byte strings like `"bos8-p1bos8-p1…"` — clustering
+//! and payload bytes read as a partition key, i.e. partitions the SSTable does
+//! not contain. Compaction would have written that back to disk.
+//!
+//! On the BIG (`nb`) fixture the pre-fix surfaces already answered `Err`, but
+//! INCIDENTALLY: the header arm resynchronised and #3782's ROW arm then refused
+//! the garbage it landed on. That is why the BIG case asserts the ABSENCE of the
+//! resync WARN as well as the refusal — see its own comment.
 #![cfg(all(
     feature = "state_machine",
     feature = "cli-helpers",
@@ -267,14 +284,23 @@ async fn control_keys(
     multiset::multiset(keys)
 }
 
-/// Assert that EVERY surface answered on a well-formed control leg, and did so
-/// with the same partition-key multiset — so a later "the mutated leg refused"
-/// can never be a surface that refuses on healthy data too.
+/// Assert that EVERY surface answered on the well-formed control leg, and agreed
+/// on WHICH partitions the fixture holds — so "the mutated leg refused" can
+/// never be a surface that refuses on healthy data too, and the per-surface
+/// controls the fabrication check compares against are themselves sound.
+///
+/// The comparison is over the DISTINCT key set, not the multiset: these surfaces
+/// have deliberately different granularities (`distinct_partition_keys` emits
+/// one entry per PARTITION, `get_all_entries` one per ROW), so their
+/// multiplicities legitimately differ — measured on the BTI fixture, 3 vs 468.
+/// The per-surface multiset is still the oracle for FABRICATION below; it is
+/// just compared against the SAME surface on the pristine leg.
 fn assert_control_is_healthy(
     observed: &[Outcome],
-    control: &std::collections::BTreeMap<Vec<u8>, usize>,
+    control_partitions: &std::collections::BTreeMap<Vec<u8>, usize>,
     spec: &FixtureSpec,
 ) {
+    let expected: BTreeSet<&Vec<u8>> = control_partitions.keys().collect();
     for o in observed {
         let keys = o.keys.as_ref().unwrap_or_else(|| {
             panic!(
@@ -283,23 +309,132 @@ fn assert_control_is_healthy(
                 spec.keyspace, spec.table, o.name
             )
         });
-        let got = multiset::multiset(keys.iter().cloned());
-        let surplus = multiset::surplus(&got, control);
-        let deficit = multiset::deficit(&got, control);
         assert!(
-            surplus.is_empty() && deficit.is_empty(),
-            "control leg: {}.{} surface `{}` disagrees with `distinct_partition_keys` on a \
-             PRISTINE fixture: {} surplus [{}], {} missing [{}]",
+            !keys.is_empty(),
+            "0-rows-when-present: {}.{} surface `{}` answered Ok with NOTHING on a pristine \
+             fixture",
+            spec.keyspace,
+            spec.table,
+            o.name
+        );
+        let got: BTreeSet<&Vec<u8>> = keys.iter().collect();
+        assert_eq!(
+            got.len(),
+            expected.len(),
+            "control leg: {}.{} surface `{}` sees {} distinct partition key(s) where \
+             `distinct_partition_keys` sees {} — the surfaces disagree about the PRISTINE \
+             fixture, so neither can be an oracle for the mutated one",
             spec.keyspace,
             spec.table,
             o.name,
-            surplus.iter().map(|(_, n)| n).sum::<usize>(),
-            multiset::describe(&surplus),
-            deficit.iter().map(|(_, n)| n).sum::<usize>(),
-            multiset::describe(&deficit)
+            got.len(),
+            expected.len()
+        );
+        assert!(
+            got == expected,
+            "control leg: {}.{} surface `{}` reports a DIFFERENT set of partition keys than \
+             `distinct_partition_keys` on the PRISTINE fixture",
+            spec.keyspace,
+            spec.table,
+            o.name
         );
     }
 }
+
+/// The surfaces of the mutated leg that still answered `Ok`, described against
+/// the control leg's SAME-SURFACE result.
+///
+/// Pairing surface-with-itself is what makes a fabrication verdict meaningful:
+/// these surfaces emit at different granularities, so a cross-surface multiset
+/// comparison would report hundreds of spurious "surplus" occurrences (measured:
+/// 465 on the BTI fixture, from `get_all_entries`' per-ROW emit against a
+/// per-PARTITION control).
+fn tolerating(control: &[Outcome], mutated: &[Outcome]) -> Vec<String> {
+    assert_eq!(
+        control.len(),
+        mutated.len(),
+        "the two legs must be observed through the same surface list"
+    );
+    control
+        .iter()
+        .zip(mutated.iter())
+        .filter(|(_, m)| m.keys.is_some())
+        .map(|(c, m)| {
+            let ctl = c
+                .keys
+                .as_ref()
+                .map(|k| multiset::multiset(k.iter().cloned()))
+                .unwrap_or_default();
+            m.describe(&ctl)
+        })
+        .collect()
+}
+
+/// The surfaces of the mutated leg that FABRICATED — answered `Ok` carrying a
+/// partition-key occurrence the SAME surface did not produce on the pristine
+/// fixture.
+fn fabricating(control: &[Outcome], mutated: &[Outcome]) -> Vec<String> {
+    assert_eq!(
+        control.len(),
+        mutated.len(),
+        "the two legs must be observed through the same surface list"
+    );
+    control
+        .iter()
+        .zip(mutated.iter())
+        .filter_map(|(c, m)| {
+            let keys = m.keys.as_ref()?;
+            let ctl = c
+                .keys
+                .as_ref()
+                .map(|k| multiset::multiset(k.iter().cloned()))
+                .unwrap_or_default();
+            let got = multiset::multiset(keys.iter().cloned());
+            multiset::surplus(&got, &ctl)
+                .is_empty()
+                .then_some(())
+                .map_or_else(|| Some(m.describe(&ctl)), |()| None)
+        })
+        .collect()
+}
+
+/// Capture WARN-and-above tracing output into a shared buffer, so a case can
+/// assert what a code path did NOT log.
+#[derive(Clone, Default)]
+struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("log sink mutex")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+    type Writer = LogSink;
+    fn make_writer(&'a self) -> LogSink {
+        self.clone()
+    }
+}
+impl LogSink {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("log sink mutex").clone()).to_string()
+    }
+}
+
+/// The two WARNs the pre-#3928 block-emit header arm emitted immediately before
+/// `offset += 1`, verbatim from
+/// `block_emit_windowed/partition_header_arm.rs`. Since the fix they are
+/// reachable ONLY on a `BufferExtent::Window`, so their presence on a
+/// full-extent walk IS the resync.
+const RESYNC_WARNS: &[&str] = &[
+    "Skipping malformed partition header",
+    "Failed to parse partition header",
+];
 
 /// AC1 — on a PROVEN-COMPLETE buffer a malformed partition header REFUSES.
 ///
@@ -315,16 +450,44 @@ async fn every_proven_complete_surface_refuses_a_malformed_partition_header() {
     let staged = fixture::stage_spec(spec, &fixture_dir(spec), "hdr-big");
     let schema = table_schema(spec);
 
-    let control = control_keys(&staged.control_dir, spec).await;
+    let control_partitions = control_keys(&staged.control_dir, spec).await;
     let control_observed = observe(&staged.control_dir, &schema).await;
-    assert_control_is_healthy(&control_observed, &control, spec);
+    assert_control_is_healthy(&control_observed, &control_partitions, spec);
 
-    let mutated = observe(&staged.mutated_dir, &schema).await;
-    let tolerated: Vec<String> = mutated
-        .iter()
-        .filter(|o| o.keys.is_some())
-        .map(|o| o.describe(&control))
-        .collect();
+    // The refusal is asserted TOGETHER with the absence of the resync, because on
+    // THIS fixture the refusal alone does not pin #3928: measured pre-fix, all six
+    // surfaces already answered `Err` here — but with a ROW decode error
+    // (`Clustering 'clustering_key_1': invalid UTF-8`) raised by #3782's arm AFTER
+    // the header arm had resynchronised onto misaligned bytes. That green was
+    // incidental: it depended on the garbage the resync landed on failing later.
+    // So this case also requires the resync itself not to have happened — which
+    // pre-fix it demonstrably did, twice, and which no surface in this set may do,
+    // since every one of them walks a full extent.
+    let sink = LogSink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .finish();
+    // A THREAD-LOCAL dispatcher (`set_default`), never a global one: sibling cases
+    // in this target walk the whole corpus on other threads and a global sink
+    // would mix their WARNs in.
+    let mutated = {
+        let _dispatch = tracing::subscriber::set_default(subscriber);
+        observe(&staged.mutated_dir, &schema).await
+    };
+    let logs = sink.text();
+    for needle in RESYNC_WARNS {
+        assert!(
+            !logs.contains(needle),
+            "AC1: a full-extent walk RESYNCHRONISED past the corrupt header — it logged \
+             {needle:?} and skipped a byte, which both drops this partition and can invent \
+             another out of misaligned bytes. On a proven-complete buffer that arm must \
+             REFUSE. Captured WARN output was:\n{logs}"
+        );
+    }
+
+    let tolerated = tolerating(&control_observed, &mutated);
     assert!(
         tolerated.is_empty(),
         "AC1: with the first partition header's key-length byte zeroed (decompressed offset {}, \
@@ -352,22 +515,29 @@ async fn every_proven_complete_surface_refuses_a_malformed_partition_header() {
 /// control, NEVER over a row count: the measured failure RAISES the count.
 #[tokio::test]
 async fn no_surface_fabricates_a_partition_from_a_corrupted_header_byte() {
-    let spec = &BIG_COMPOSITE_HEADER;
-    let staged = fixture::stage_spec(spec, &fixture_dir(spec), "fab-big");
-    let schema = table_schema(spec);
-
-    let control = control_keys(&staged.control_dir, spec).await;
-    let fabricating: Vec<String> = observe(&staged.mutated_dir, &schema)
-        .await
-        .into_iter()
-        .filter(|o| match &o.keys {
-            None => false,
-            Some(keys) => {
-                !multiset::surplus(&multiset::multiset(keys.iter().cloned()), &control).is_empty()
-            }
-        })
-        .map(|o| o.describe(&control))
-        .collect();
+    // BOTH fixtures, because the pre-fix fabrication was MEASURED on the BTI one
+    // (`distinct_partition_keys` answered Ok with 5 keys where the fixture holds
+    // 3) while the BIG one lost partitions instead. A case that covered only the
+    // fixture where the harm was loss would assert this property where it was
+    // never violated.
+    let mut fabricated: Vec<String> = Vec::new();
+    for (spec, tag) in [
+        (&BIG_COMPOSITE_HEADER, "fab-big"),
+        (&BTI_MULTICLUSTERING_HEADER, "fab-bti"),
+    ] {
+        let staged = fixture::stage_spec(spec, &fixture_dir(spec), tag);
+        let schema = table_schema(spec);
+        let control_partitions = control_keys(&staged.control_dir, spec).await;
+        let control_observed = observe(&staged.control_dir, &schema).await;
+        assert_control_is_healthy(&control_observed, &control_partitions, spec);
+        let mutated = observe(&staged.mutated_dir, &schema).await;
+        fabricated.extend(
+            fabricating(&control_observed, &mutated)
+                .into_iter()
+                .map(|d| format!("{}.{}: {d}", spec.keyspace, spec.table)),
+        );
+    }
+    let fabricating = fabricated;
     assert!(
         fabricating.is_empty(),
         "AC2: one corrupted header byte must never make a surface emit a partition the pristine \
@@ -378,6 +548,14 @@ async fn no_surface_fabricates_a_partition_from_a_corrupted_header_byte() {
 }
 
 /// AC1 on the user-facing `SELECT` surface, materializing and streaming.
+///
+/// SCOPE, stated because a green run here must not be read as this issue's pin:
+/// measured pre-fix, `SELECT` ALREADY refused on this fixture — the header arm
+/// resynchronised and #3782's ROW arm then refused the garbage it landed on. So
+/// this is a REGRESSION guard for the surface a user actually calls; the
+/// evidence for #3928 is the resync-absence assertion in
+/// `every_proven_complete_surface_refuses_a_malformed_partition_header` and the
+/// two BTI-covering cases, all three of which FAIL pre-fix.
 #[tokio::test]
 async fn select_refuses_a_malformed_partition_header() {
     let spec = &BIG_COMPOSITE_HEADER;
@@ -446,16 +624,12 @@ async fn bti_scan_refuses_a_partition_header_cassandra_itself_rejects() {
     let staged = fixture::stage_spec(spec, &fixture_dir(spec), "hdr-bti");
     let schema = table_schema(spec);
 
-    let control = control_keys(&staged.control_dir, spec).await;
+    let control_partitions = control_keys(&staged.control_dir, spec).await;
     let control_observed = observe(&staged.control_dir, &schema).await;
-    assert_control_is_healthy(&control_observed, &control, spec);
+    assert_control_is_healthy(&control_observed, &control_partitions, spec);
 
     let mutated = observe(&staged.mutated_dir, &schema).await;
-    let tolerated: Vec<String> = mutated
-        .iter()
-        .filter(|o| o.keys.is_some())
-        .map(|o| o.describe(&control))
-        .collect();
+    let tolerated = tolerating(&control_observed, &mutated);
     assert!(
         tolerated.is_empty(),
         "AC1 (BTI): the partition-level DeletionTime discriminator at decompressed offset {} is \
@@ -657,105 +831,4 @@ fn assert_corruption_kind(e: &cqlite_core::Error, surface: &str) {
         "{surface}: the refusal must carry the header decode error's own kind \
          (Error::Corruption), not a re-wrapped generic; got {e:?}"
     );
-}
-
-/// TEMPORARY diagnostic — not committed.
-#[tokio::test]
-#[ignore]
-async fn diag_measure() {
-    for spec in [&BIG_COMPOSITE_HEADER, &BTI_MULTICLUSTERING_HEADER] {
-        let staged = fixture::stage_spec(spec, &fixture_dir(spec), "diag");
-        let schema = table_schema(spec);
-        println!(
-            "\n=== {}.{} mutated_offset={} span={}",
-            spec.keyspace, spec.table, staged.mutated_offset, staged.mutated_span
-        );
-        let sink = LogSink::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(sink.clone())
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .finish();
-        let ctl = observe(&staged.control_dir, &schema).await;
-        let mut_out = {
-            let _d = tracing::subscriber::set_default(subscriber);
-            observe_verbose(&staged.mutated_dir, &schema).await
-        };
-        for (c, m) in ctl.iter().zip(mut_out.iter()) {
-            let cn = c.keys.as_ref().map(|k| k.len());
-            println!("  {:42} control={:?}  mutated={}", c.name, cn, m);
-        }
-        let logs = sink.text();
-        for line in logs.lines().take(20) {
-            println!("  WARN> {line}");
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-impl std::io::Write for LogSink {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("m").extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
-    type Writer = LogSink;
-    fn make_writer(&'a self) -> LogSink {
-        self.clone()
-    }
-}
-impl LogSink {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().expect("m").clone()).to_string()
-    }
-}
-
-async fn observe_verbose(dir: &Path, schema: &TableSchema) -> Vec<String> {
-    let reader = open_reader(dir).await;
-    let mut v = Vec::new();
-    v.push(match reader.distinct_partition_keys().await {
-        Ok(k) => format!("Ok({} keys)", k.len()),
-        Err(e) => format!("Err({e})"),
-    });
-    v.push(match reader.partition_verify_scan().await {
-        Ok(k) => format!("Ok({} parts)", k.len()),
-        Err(e) => format!("Err({e})"),
-    });
-    v.push(match reader.get_all_entries().await {
-        Ok(k) => format!("Ok({} rows)", k.len()),
-        Err(e) => format!("Err({e})"),
-    });
-    v.push(match reader.iterate_all_partitions().await {
-        Ok(k) => format!("Ok({} rows)", k.len()),
-        Err(e) => format!("Err({e})"),
-    });
-    v.push(
-        match reader
-            .iterate_all_partitions_for_compaction(Some(schema))
-            .await
-        {
-            Ok(k) => format!("Ok({} rows)", k.len()),
-            Err(e) => format!("Err({e})"),
-        },
-    );
-    let cancel = cqlite_core::storage::scan_cancel::ScanCancel::new();
-    let mut n = 0usize;
-    v.push(
-        match reader
-            .stream_all_partitions_for_compaction(Some(schema), &cancel, |_r| {
-                n += 1;
-                Ok(std::ops::ControlFlow::Continue(()))
-            })
-            .await
-        {
-            Ok(()) => format!("Ok({n} rows)"),
-            Err(e) => format!("Err({e}) after {n}"),
-        },
-    );
-    v
 }
