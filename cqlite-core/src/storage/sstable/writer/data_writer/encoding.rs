@@ -197,6 +197,14 @@ pub(crate) fn serialize_value(value: &Value) -> Result<Vec<u8>> {
 pub(crate) fn serialize_value_into(value: &Value, out: &mut Vec<u8>) -> Result<()> {
     match value {
         Value::Null => {}
+        // EMPTY-BUFFER SENTINEL (issue #3805): appends NOTHING, so the value's
+        // serialized form is a ZERO-LENGTH buffer — byte-exactly what Cassandra
+        // wrote and what a zero-length cell path / empty cell value means. The
+        // length is carried by the enclosing framing (an unsigned VInt for a
+        // cell path, `db/marshal/CollectionType.java:361-382`; the
+        // `HAS_EMPTY_VALUE_MASK` flag bit for a cell value, `db/rows/Cell.java:264`),
+        // never by these bytes, so writing nothing is the whole encoding.
+        Value::Empty(_) => {}
         Value::Boolean(b) => out.push(if *b { 1 } else { 0 }),
         Value::TinyInt(n) => out.push(*n as u8),
         Value::SmallInt(n) => out.extend_from_slice(&n.to_be_bytes()),

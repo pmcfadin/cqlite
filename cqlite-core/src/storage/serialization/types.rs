@@ -72,6 +72,31 @@ impl TypeSerializer {
     pub fn serialize_value(&self, value: &Value, data_type: &str) -> Result<Vec<u8>> {
         match value {
             Value::Null => Ok(Vec::new()), // NULL cells have no data
+            // EMPTY-BUFFER SENTINEL (issue #3805): zero bytes — but ONLY where
+            // the DECLARED type admits an empty buffer, and only where the
+            // sentinel's own tag agrees with it. Both mismatches are refused
+            // rather than silently written: for `tinyint`/`smallint`/`date`/
+            // `time` an empty buffer is CORRUPTION on Cassandra's own terms
+            // (bare `!= N` validate — `serializers/ByteSerializer.java:40-44`
+            // and siblings; `schema/ColumnMetadata.java:457-467` would reject
+            // it), and a tag/column disagreement is a caller bug, not something
+            // to paper over by inferring from the bytes (no-heuristics, #28).
+            Value::Empty(tag) => {
+                let cql_type = CqlType::parse(data_type)?;
+                match crate::types::EmptyValueType::for_cql_type(&cql_type) {
+                    Some(admitted) if admitted == *tag => Ok(Vec::new()),
+                    Some(admitted) => Err(Error::InvalidInput(format!(
+                        "empty-buffer sentinel declares type `{}` but column type is `{}` \
+                         (issue #3805)",
+                        tag.cql_name(),
+                        admitted.cql_name()
+                    ))),
+                    None => Err(Error::InvalidInput(format!(
+                        "type `{data_type}` does not admit an empty buffer, so an \
+                         empty-buffer sentinel cannot be serialized for it (issue #3805)"
+                    ))),
+                }
+            }
             _ => {
                 let cql_type = CqlType::parse(data_type)?;
                 self.serialize_typed_value(value, &cql_type)
