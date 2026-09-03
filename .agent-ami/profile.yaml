@@ -116,6 +116,18 @@ verify:
   # write is idempotent and NEVER rewrites an existing value, and the verdict still comes from
   # probing a fresh session AND the running server, so a box that cannot be capped stays
   # non-passing and --strict still exits 1.
+  #
+  # SINCE #3727 ROBOREV ROUND 426, NO BOX PASSES THIS STEP ON THE SCCACHE HALF, AND THAT IS A
+  # PENDING FLEET DECISION RATHER THAN A SETTLED DESIGN. Section 5b2 measures ONE launch context
+  # (a non-login PAM session) while a LOGIN shell runs /etc/profile.d after pam_env and can
+  # export a DIFFERENT value -- measured on box3, same tree: a detached gate reported
+  # sccache-cap=32212254720 while a lane-shell --lite reported 53687091200. An [ok] there
+  # certified a cap no gate had to receive, so the section's strongest verdict is now
+  # SCOPED-NON-LOGIN, a [warn]. Every bootstrap invocation therefore carries at least that one
+  # warning, so `--strict` exits 1 and `All checks green.` is NEVER printed -- the `expect`
+  # below cannot match on any host until #3946 measures the launch contexts. The `expect`
+  # string is deliberately LEFT AS IT IS: it is the artifact that makes this visible, and
+  # quietly relaxing it would restore exactly the silent green #3727 exists to remove.
   run: "bash scripts/bootstrap-agent-machine.sh --fix-credentials --fix-gate-pin --fix-sccache-cap --strict"
   expect: "All checks green."
 hooks:
