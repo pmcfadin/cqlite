@@ -105,23 +105,39 @@ impl V5CompressedLegacyParser {
         // each bound below without an addition a reader has to check.
         let remaining = data.len().saturating_sub(offset);
         if remaining < 2 {
-            // DELIBERATELY NOT FATAL on either extent — the one header answer
-            // issue #3928 left exactly as it found it.
+            // Fewer bytes remain than ANY header needs. Whether that is an
+            // ordinary end of walk or DATA LOSS is decided by the same `refuse`
+            // predicate as every other answer here — and it must be, because
+            // this arm's two tolerant readings are both about the CALLER's
+            // situation and neither is about the byte count:
             //
-            // It is not the resync: nothing is skipped and nothing is
-            // re-interpreted, the walk simply ends. And fewer than two bytes
-            // cannot be a partition Cassandra wrote, so there is no partition
-            // here to DROP and no misaligned header to INVENT — neither harm
-            // this issue exists to remove is reachable.
+            // * on a `Window` the header continues in the next chunk;
+            // * on a BOUNDED walk (`row_body_window`) the walk was asked to stop
+            //   short of the extent, so these bytes were never claimed to begin
+            //   a partition.
             //
-            // Making it fatal on a `Complete` buffer was TRIED and REVERTED: a
-            // #954 clustering-slice walk stops its row loop at `body_end`, which
-            // sits immediately BEFORE that partition's `END_OF_PARTITION` byte,
-            // so a bounded walk over a truthfully-complete buffer ends with
-            // exactly ONE byte unconsumed as a NORMAL outcome. It red
-            // `regression_1741c_tests::range_tombstone_before_slice_is_shadowed_on_windowed_read`,
-            // and a guard that reds on correct input is the guard agents learn
-            // to waive.
+            // On an UNBOUNDED, proven-complete walk neither reading is
+            // available: the file ends here, so a surviving header stub is the
+            // evidence that the partition Cassandra wrote was truncated away —
+            // exactly as a truncated ROW's stub is under #3782. Reporting `Ok`
+            // there answered a query with one fewer partition than the file was
+            // written with, and it did so INCONSISTENTLY: the sibling
+            // cell-metadata walk (`block_emit.rs`) has no such carve-out, so
+            // `SELECT *` answered `Ok` and `SELECT *, WRITETIME(c)` answered
+            // `Err` on the same bytes (`data_access/mod.rs:249` vs `:288` hand
+            // both walks the SAME stitched `Complete` buffer). Pinned by
+            // `issue_3928_corrupt_header_refusal.rs`'s
+            // `both_stitched_walks_agree_and_refuse_a_truncated_final_header`.
+            if refuse {
+                return Err(undecodable_partition_header(
+                    offset,
+                    &format!(
+                        "only {remaining} byte(s) remain, fewer than the 2 any header needs \
+                         (partition={partition_index}){}",
+                        structural_note(data[offset])
+                    ),
+                ));
+            }
             tracing::debug!(
                 "V5CompressedLegacy: Not enough bytes for partition header at offset \
                  {offset} (need 2, have {remaining}), stopping"
@@ -142,8 +158,10 @@ impl V5CompressedLegacyParser {
             || header_min_size > remaining
         {
             let detail = format!(
-                "flags=0x{flags:02x}, key_len={key_len}, need {header_min_size} bytes, \
-                 have {remaining}, partition={partition_index}: header validation failed"
+                "CQLite READ flags=0x{flags:02x} and a key length of {key_len} here, needing \
+                 {header_min_size} bytes with {remaining} available (partition={partition_index})\
+                 {}",
+                structural_note(flags)
             );
             if refuse {
                 return Err(undecodable_partition_header(offset, &detail));
@@ -161,6 +179,15 @@ impl V5CompressedLegacyParser {
                 // Issue #3928: the error's own kind is preserved and returned on
                 // a proven-complete buffer — the same rule, and the same reason,
                 // as the row arm's `return Err(e)` (#3782).
+                //
+                // This arm composes NO message: `e` is `scan_partition_header`'s
+                // own, and under the validation above it can realistically only
+                // be the `oa`/`da` invalid-IS_LIVE-byte rejection, which does
+                // not rest on the key-length model. Its two key-length messages
+                // are already excluded here (a zero or over-long length, and a
+                // key running past the buffer, are what the validation just
+                // checked), and rewording THEM belongs to **#3999** with the
+                // model they assert — see `undecodable_partition_header`.
                 if refuse {
                     return Err(e);
                 }
@@ -186,10 +213,40 @@ impl V5CompressedLegacyParser {
 /// per driver over its own authoritative signal.
 fn undecodable_partition_header(offset: usize, detail: &str) -> Error {
     Error::corruption(format!(
-        "V5CompressedLegacy: undecodable partition header at offset {offset} ({detail}); \
-         the buffer is PROVEN COMPLETE, so no further bytes can arrive to finish this \
-         header. Skipping a byte to resynchronise would DROP this partition and can land \
-         on misaligned bytes that parse as a plausible header, INVENTING a partition that \
-         does not exist (issue #3928)"
+        "V5CompressedLegacy: refusing an undecodable partition header at offset {offset} \
+         ({detail}); this walk is UNBOUNDED over a PROVEN-COMPLETE buffer, so no further \
+         bytes can arrive to finish this header. Skipping a byte to resynchronise would \
+         DROP this partition and can land on misaligned bytes that parse as a plausible \
+         header, INVENTING a partition that does not exist (issue #3928). \
+         NOTE (#3999): CQLite reads the partition key length as ONE byte after a 'flags' \
+         byte, while Cassandra writes an unsigned 2-byte big-endian length and no flags \
+         byte (SortedTablePartitionWriter.start -> ByteBufferUtil.writeWithShortLength), \
+         so the two models agree only for keys under 256 bytes; for a longer key this \
+         refusal may be CQLite's model and not corruption."
     ))
+}
+
+/// Issue #3928 fix round 1, I2 — name the leading byte's STRUCTURAL class when it
+/// is one this arm should never have been handed.
+///
+/// The row loop breaks with `offset` still ON a range-tombstone marker it could
+/// not parse or feed (`block_emit_windowed.rs`'s three marker breaks), and the
+/// outer partition loop then re-enters HERE. Without this the diagnostic reads
+/// "undecodable partition header" for a MARKER failure and sends the next reader
+/// to the wrong arm.
+///
+/// Diagnostics only: the refusal itself is unchanged, and moving the marker
+/// breaks to report their own failure is a different arm and a different issue.
+fn structural_note(leading: u8) -> &'static str {
+    if V5CompressedLegacyParser::is_end_of_partition(leading) {
+        " — NOTE: this leading byte is an END_OF_PARTITION marker (0x01), so the walk \
+         re-entered the header arm at a marker rather than at a partition start"
+    } else if V5CompressedLegacyParser::is_range_tombstone_marker(leading) {
+        " — NOTE: this leading byte carries IS_MARKER, i.e. it is a RANGE-TOMBSTONE \
+         marker and not a partition header. The previous partition's row loop ended at a \
+         marker it could not parse or feed, leaving the cursor on it; the failure to \
+         investigate is in the MARKER arm, not here"
+    } else {
+        ""
+    }
 }

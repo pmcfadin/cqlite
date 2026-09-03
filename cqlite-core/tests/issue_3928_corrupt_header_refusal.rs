@@ -876,3 +876,311 @@ fn assert_corruption_kind(e: &cqlite_core::Error, surface: &str) {
          (Error::Corruption), not a re-wrapped generic; got {e:?}"
     );
 }
+
+// ===========================================================================
+// Fix round 1 — a header that RAN OUT, which is a different corruption class
+// from a header with a flipped byte and reaches different arms.
+//
+// A flipped byte makes `partition_header_readiness` answer `Malformed` (a
+// zero/over-long declared key length) or `Ready` (present but structurally
+// invalid). A `Data.db` that ENDS inside a header makes it answer
+// `Incomplete` — and at the sliding drivers' FINAL chunk that answer was
+// `DriverHeader::Done`, which both drivers read as CLEAN COMPLETION. A header
+// with a valid nonzero key length whose key or `DeletionTime` was truncated
+// away is well over two bytes and is not a tail; reporting it as completion is
+// the same swallow, one classifier arm over.
+//
+// The bytes are a PREFIX of the fixture's own stitched decompressed data
+// section — exactly what a file truncated by a crashed writer or a short read
+// presents — and the cut offset comes from `Index.db`, cross-checked against
+// `Data.db` (see `last_partition_header_offset`). No file is rewritten, so
+// there is no re-compression or CRC arithmetic to get wrong.
+// ===========================================================================
+
+/// Where a truncated `Data.db` ends inside the LAST partition's header.
+///
+/// The three variants are the three distinct answers
+/// `partition_header_readiness` gives for a header that ran out, and each is
+/// decided by a DIFFERENT branch of that classifier — so covering one says
+/// nothing about the others.
+#[derive(Clone, Copy, Debug)]
+enum HeaderCut {
+    /// ONE byte of the header survives: fewer than the two any header needs.
+    /// The classifier's `data.len() < 2` branch. This is the tail the block-emit
+    /// walk deliberately tolerates, and the one the drivers report as `Done`.
+    OneByte,
+    /// The 2-byte key length survives and the KEY is cut in half. The
+    /// classifier's `data.get(deletion_offset) == None` branch.
+    InsideKey,
+    /// Key length and key survive; the partition-level `DeletionTime` is cut
+    /// (`nb` needs 12 bytes and 4 are present). The classifier's
+    /// `deletion_offset + deletion_time_min > data.len()` branch.
+    InsideDeletionTime,
+}
+
+/// The pristine stitched section, the last partition header's offset, and the
+/// byte count that leaves that header cut as `cut` describes.
+fn truncation(dir: &Path, cut: HeaderCut) -> (Vec<u8>, usize, usize) {
+    let dec = fixture::stitched_data_section(dir);
+    let hdr = fixture::last_partition_header_offset(dir, &dec);
+    // `writeWithShortLength`: 2-byte big-endian key length
+    // (`SortedTablePartitionWriter.start`, cassandra-5.0.8). Cross-checked
+    // against Index.db by the helper above, so this is a measured length.
+    let key_len = usize::from(u16::from_be_bytes([dec[hdr], dec[hdr + 1]]));
+    assert!(
+        key_len >= 4,
+        "this fixture's partition key is {key_len} byte(s); the InsideKey cut needs at \
+         least 4 so that some key bytes survive AND some are cut"
+    );
+    let keep = match cut {
+        HeaderCut::OneByte => hdr + 1,
+        HeaderCut::InsideKey => hdr + 2 + key_len / 2,
+        // `nb`'s DeletionTime is a fixed 12 bytes (`DeletionTime.LegacySerializer`:
+        // 4-byte localDeletionTime + 8-byte markedForDeleteAt), so 4 present is a
+        // genuine mid-field cut.
+        HeaderCut::InsideDeletionTime => hdr + 2 + key_len + 4,
+    };
+    assert!(
+        keep > hdr && keep < dec.len(),
+        "the {cut:?} cut must land strictly inside the last header: keep={keep}, \
+         header at {hdr}, section {} byte(s)",
+        dec.len()
+    );
+    (dec, hdr, keep)
+}
+
+/// A parser configured the way the stitched read paths configure theirs, minus
+/// the Statistics.db timestamp bases (which affect decoded VALUES, never
+/// framing). The control assertions in each case below require this parser to
+/// decode the PRISTINE section completely, so its adequacy for these cases is
+/// measured rather than assumed.
+fn framing_parser(
+    spec: &FixtureSpec,
+) -> cqlite_core::storage::sstable::reader::V5CompressedLegacyParser {
+    cqlite_core::storage::sstable::reader::V5CompressedLegacyParser::new(
+        spec.keyspace.to_string(),
+        spec.table.to_string(),
+        0,
+        0,
+        None,
+    )
+}
+
+/// Partition keys the block-emit walk (`parse_block` → `parse_block_emit_windowed`
+/// with NO row-body window, the route `stitch_and_parse_all_chunks` takes) emits
+/// over `buf`, or the refusal.
+fn block_walk(
+    spec: &FixtureSpec,
+    schema: &TableSchema,
+    reader: &SSTableReader,
+    buf: &[u8],
+) -> Result<Vec<Vec<u8>>, String> {
+    use cqlite_core::storage::sstable::reader::BufferExtent;
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    framing_parser(spec)
+        .parse_block_emit_windowed(
+            buf,
+            BufferExtent::Complete,
+            Some(schema),
+            reader,
+            None,
+            |(_t, k, _r)| {
+                keys.push(k.as_bytes().to_vec());
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
+        .map_err(why)
+        .map(|()| keys)
+}
+
+/// The same buffer through the CELL-METADATA walk — `parse_block_with_cell_metadata`,
+/// the route `stitch_and_parse_all_chunks_with_metadata` takes when a query
+/// carries `WRITETIME(col)`/`TTL(col)` (`ProjectionFlags::include_cell_metadata`).
+fn metadata_walk(
+    spec: &FixtureSpec,
+    schema: &TableSchema,
+    reader: &SSTableReader,
+    buf: &[u8],
+) -> Result<Vec<Vec<u8>>, String> {
+    use cqlite_core::storage::sstable::reader::BufferExtent;
+    framing_parser(spec)
+        .parse_block_with_cell_metadata(buf, BufferExtent::Complete, Some(schema), reader)
+        .map_err(why)
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(_t, k, _r, _m)| k.as_bytes().to_vec())
+                .collect()
+        })
+}
+
+/// The SLIDING driver, at its FINAL chunk — `parse_one_partition_for_compaction`,
+/// the public entry to `drive_partition_sliding`, which is also what
+/// `stream_partition_body_incremental` shares its header arm with.
+fn driver_at_final_chunk(
+    spec: &FixtureSpec,
+    schema: &TableSchema,
+    reader: &SSTableReader,
+    buf: &[u8],
+) -> Result<String, String> {
+    let mut emitted = 0usize;
+    framing_parser(spec)
+        .parse_one_partition_for_compaction(buf, Some(schema), reader, true, &mut |_row| {
+            emitted += 1;
+            Ok(std::ops::ControlFlow::Continue(()))
+        })
+        .map_err(why)
+        .map(|step| format!("{step:?} after emitting {emitted} row(s)"))
+}
+
+/// B1(b) + the `SELECT *` vs `WRITETIME(col)` divergence — the two stitched
+/// walks must AGREE, and on an unbounded proven-complete buffer both must
+/// REFUSE.
+///
+/// `stitch_and_parse_all_chunks` (`data_access/mod.rs:249`) and
+/// `stitch_and_parse_all_chunks_with_metadata` (`:288`) hand the SAME
+/// `stitch_all_chunks` buffer to their parses with the SAME
+/// `BufferExtent::Complete`; they are the plain and
+/// `WRITETIME`/`TTL`-projection variants of ONE query. So before this round a
+/// `Data.db` truncated to one surviving header byte answered `SELECT *` with
+/// `Ok` (last partition silently dropped, via the block walk's tail carve-out)
+/// and `SELECT *, WRITETIME(c)` with `Err` (the metadata walk has no such
+/// carve-out) — on the same file.
+///
+/// This case asserts the property at the parse both routes are handed, which is
+/// where the divergence lives; it does not drive the two SQL statements, because
+/// that would need a rewritten `CompressionInfo.db` and CRC to truncate the file
+/// on disk, and the buffer is the same object either way.
+#[tokio::test]
+async fn both_stitched_walks_agree_and_refuse_a_truncated_final_header() {
+    let spec = &BIG_COMPOSITE_HEADER;
+    let dir = fixture_dir(spec);
+    let schema = table_schema(spec);
+    let reader = open_reader(&dir).await;
+
+    for cut in [
+        HeaderCut::OneByte,
+        HeaderCut::InsideKey,
+        HeaderCut::InsideDeletionTime,
+    ] {
+        let (dec, hdr, keep) = truncation(&dir, cut);
+
+        // CONTROL: the untruncated section decodes completely on BOTH walks, and
+        // they agree. This is what makes a refusal below attributable to the
+        // truncation rather than to this parser's configuration.
+        let control_block = block_walk(spec, &schema, &reader, &dec).unwrap_or_else(|e| {
+            panic!("{cut:?}: the PRISTINE section must decode on the block walk: {e}")
+        });
+        let control_meta = metadata_walk(spec, &schema, &reader, &dec).unwrap_or_else(|e| {
+            panic!("{cut:?}: the PRISTINE section must decode on the metadata walk: {e}")
+        });
+        assert!(
+            !control_block.is_empty(),
+            "0-rows-when-present: {cut:?} control block walk emitted nothing"
+        );
+        assert_eq!(
+            multiset::multiset(control_block.iter().cloned()),
+            multiset::multiset(control_meta.iter().cloned()),
+            "{cut:?}: the two stitched walks must agree on the PRISTINE section"
+        );
+
+        let got_block = block_walk(spec, &schema, &reader, &dec[..keep]);
+        let got_meta = metadata_walk(spec, &schema, &reader, &dec[..keep]);
+
+        // The DIVERGENCE assertion: whatever the answer is, one query variant may
+        // not disagree with the other about the same bytes.
+        assert_eq!(
+            got_block.is_err(),
+            got_meta.is_err(),
+            "{cut:?} (truncated to {keep} of {} bytes, last header at {hdr}): the two \
+             stitched walks DISAGREE — block walk {} / metadata walk {}. These are \
+             `SELECT *` and `SELECT *, WRITETIME(col)` over one file.",
+            dec.len(),
+            got_block
+                .as_ref()
+                .map_or_else(|e| format!("Err({e})"), |k| format!("Ok({} keys)", k.len())),
+            got_meta
+                .as_ref()
+                .map_or_else(|e| format!("Err({e})"), |k| format!("Ok({} keys)", k.len())),
+        );
+
+        // And on an UNBOUNDED, proven-complete buffer both must refuse: the
+        // partition Cassandra wrote there is gone, so answering `Ok` reports a
+        // table with one fewer partition than the file was written with.
+        if let Ok(keys) = &got_block {
+            let got = multiset::multiset(keys.iter().cloned());
+            let control = multiset::multiset(control_block.iter().cloned());
+            let lost = multiset::deficit(&got, &control);
+            panic!(
+                "{cut:?} (truncated to {keep} of {} bytes): the block walk answered Ok with \
+                 {} key occurrence(s) against a control of {} — {} LOST [{}]. A truncated \
+                 header on a proven-complete buffer is DATA LOSS and must be refused.",
+                dec.len(),
+                keys.len(),
+                control_block.len(),
+                lost.iter().map(|(_, n)| n).sum::<usize>(),
+                multiset::describe(&lost)
+            );
+        }
+    }
+}
+
+/// B1(a) — the sliding drivers' `Incomplete`-at-the-final-chunk answer.
+///
+/// `DriverHeader::Done` is read by BOTH drivers as clean completion
+/// (`ParseStep::Done` / `PartitionStreamStep::AllDone`), so it is only a truthful
+/// answer for the sub-two-byte tail. A header whose declared key length is valid
+/// and nonzero but whose key or `DeletionTime` was truncated away is not a tail:
+/// no further bytes can arrive at the final chunk, the partition is gone, and
+/// reporting completion drops it silently.
+///
+/// The `OneByte` cut is the CONTROL for the carve-out that stays: it must remain
+/// a clean `Done`, so this case pins both directions and cannot pass by refusing
+/// everything.
+#[tokio::test]
+async fn the_sliding_driver_refuses_a_final_chunk_header_truncated_past_its_length() {
+    let spec = &BIG_COMPOSITE_HEADER;
+    let dir = fixture_dir(spec);
+    let schema = table_schema(spec);
+    let reader = open_reader(&dir).await;
+
+    // CONTROL: the last partition, whole, drives to an Emitted step.
+    let (dec, hdr, _) = truncation(&dir, HeaderCut::OneByte);
+    let whole = driver_at_final_chunk(spec, &schema, &reader, &dec[hdr..]).unwrap_or_else(|e| {
+        panic!("the PRISTINE last partition must drive cleanly at the final chunk: {e}")
+    });
+    assert!(
+        whole.starts_with("Emitted"),
+        "control: the whole last partition must report Emitted(consumed), got {whole}"
+    );
+
+    // The tolerated tail: fewer than two bytes cannot be a partition Cassandra
+    // wrote, so `Done` is the truthful answer and must STAY.
+    let (dec, hdr, keep) = truncation(&dir, HeaderCut::OneByte);
+    let tail = driver_at_final_chunk(spec, &schema, &reader, &dec[hdr..keep]).unwrap_or_else(|e| {
+        panic!(
+            "the sub-two-byte tail must stay tolerated — refusing it reds a #954 \
+             clustering-slice walk on correct input: {e}"
+        )
+    });
+    assert!(
+        tail.starts_with("Done"),
+        "the one-surviving-byte tail must report Done, got {tail}"
+    );
+
+    // The two deeper cuts are NOT tails and must refuse.
+    for cut in [HeaderCut::InsideKey, HeaderCut::InsideDeletionTime] {
+        let (dec, hdr, keep) = truncation(&dir, cut);
+        let got = driver_at_final_chunk(spec, &schema, &reader, &dec[hdr..keep]);
+        assert!(
+            got.is_err(),
+            "B1(a) {cut:?}: a header truncated PAST its declared key length must be \
+             REFUSED at the final chunk, not reported as completion. The driver answered \
+             {} over {} byte(s) of a header that declares a {}-byte key — the partition \
+             Cassandra wrote there is gone, and both drivers read this answer as a clean \
+             end of walk.",
+            got.as_ref().map_or_else(|e| e.clone(), |s| s.clone()),
+            keep - hdr,
+            u16::from_be_bytes([dec[hdr], dec[hdr + 1]])
+        );
+    }
+}

@@ -710,3 +710,161 @@ pub fn stage_spec(spec: &FixtureSpec, src: &Path, tag: &str) -> Staged {
         staging,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #3928 fix round 1 — TRUNCATED-header bytes, for the arms that decide
+// what a header that RAN OUT means.
+//
+// A corrupted byte and a truncated file are different corruption classes and
+// reach different arms: a flipped byte makes `partition_header_readiness`
+// answer `Malformed`/`Ready`, while a file that ENDS inside a header makes it
+// answer `Incomplete`. The `Incomplete`-at-the-final-chunk answer, and the
+// block-emit walk's sub-two-byte tail, are the two arms this section feeds.
+//
+// Nothing here writes a file. The bytes handed to the parse are a PREFIX of the
+// fixture's own decompressed data section, which is exactly what a `Data.db`
+// truncated by a crashed writer or a short read presents to the reader — so the
+// oracle stays Cassandra-written bytes (#3042) with no re-compression, no CRC
+// arithmetic and no `CompressionInfo.db` surgery to get wrong.
+// ---------------------------------------------------------------------------
+
+/// The whole DECOMPRESSED data section of the generation in `dir`, stitched in
+/// chunk order — the same buffer `sequential_scan`/`stitch_and_parse_all_chunks`
+/// hand to the parse with [`BufferExtent::Complete`].
+///
+/// [`BufferExtent::Complete`]: cqlite_core::storage::sstable::reader::BufferExtent::Complete
+pub fn stitched_data_section(dir: &Path) -> Vec<u8> {
+    let (alg, _chunk_length, offs) = parse_compression_info(&comp_file(dir, "-CompressionInfo.db"));
+    assert!(
+        alg.to_uppercase().contains("LZ4"),
+        "expected an LZ4-compressed fixture, got {alg}"
+    );
+    let data = std::fs::read(comp_file(dir, "-Data.db")).expect("read Data.db");
+    let file_len = data.len() as u64;
+    assert_eq!(
+        offs.first().copied(),
+        Some(0),
+        "this helper stitches the whole file as chunks, so chunk 0 must start at \
+         offset 0 (got {:?})",
+        offs.first()
+    );
+    let mut out = Vec::new();
+    for (i, &start) in offs.iter().enumerate() {
+        let end = offs.get(i + 1).copied().unwrap_or(file_len);
+        let (lo, hi) = (start as usize, (end - 4) as usize);
+        out.extend_from_slice(
+            &lz4_flex::decompress_size_prepended(&data[lo..hi])
+                .unwrap_or_else(|e| panic!("decompress chunk {i} of {dir:?}: {e}")),
+        );
+    }
+    out
+}
+
+/// One unsigned VInt in Cassandra's encoding, from `b[at..]`, as
+/// `(value, bytes_consumed)`.
+///
+/// Authority: `org.apache.cassandra.io.util.VIntCoding` (cassandra-5.0.8) — the
+/// count of leading ONE bits in the first byte is the number of EXTRA bytes, and
+/// the remaining low bits of the first byte are the value's most significant
+/// bits.
+fn read_unsigned_vint(b: &[u8], at: usize) -> (u64, usize) {
+    let first = b[at];
+    let extra = first.leading_ones() as usize;
+    if extra == 0 {
+        return (u64::from(first), 1);
+    }
+    // The first byte keeps `7 - extra + 1` low bits after the `extra` marker
+    // bits and the terminating zero.
+    let mask = 0xFFu8 >> (extra + 1);
+    let mut v = u64::from(first & mask);
+    for k in 1..=extra {
+        v = (v << 8) | u64::from(b[at + k]);
+    }
+    (v, extra + 1)
+}
+
+/// Every `(partition key, DECOMPRESSED data-section position)` pair the BIG
+/// `Index.db` declares, in on-disk order.
+///
+/// This is AUTHORITATIVE Cassandra metadata, not a scan for a byte pattern: each
+/// entry is `ByteBufferUtil.writeWithShortLength(key)` followed by the
+/// `RowIndexEntry` position and promoted-index size as unsigned VInts
+/// (`RowIndexEntry.Serializer.serialize`, cassandra-5.0.8), and a promoted index
+/// of non-zero size is skipped whole.
+///
+/// The result is CROSS-CHECKED against `Data.db` by the caller
+/// ([`last_partition_header_offset`]), so a mis-parse fails loudly instead of
+/// pointing a truncation at the wrong byte.
+pub fn index_partition_positions(dir: &Path) -> Vec<(Vec<u8>, usize)> {
+    let b = std::fs::read(comp_file(dir, "-Index.db")).expect("read Index.db");
+    let mut out: Vec<(Vec<u8>, usize)> = Vec::new();
+    let mut o = 0usize;
+    while o + 2 <= b.len() {
+        let key_len = u16::from_be_bytes([b[o], b[o + 1]]) as usize;
+        o += 2;
+        assert!(
+            o + key_len <= b.len(),
+            "Index.db entry {} declares a {key_len}-byte key with only {} byte(s) left",
+            out.len(),
+            b.len() - o
+        );
+        let key = b[o..o + key_len].to_vec();
+        o += key_len;
+        let (position, n) = read_unsigned_vint(&b, o);
+        o += n;
+        let (promoted_size, n) = read_unsigned_vint(&b, o);
+        o += n + promoted_size as usize;
+        out.push((key, position as usize));
+    }
+    assert!(
+        !out.is_empty(),
+        "Index.db of {dir:?} declares no partitions"
+    );
+    out
+}
+
+/// The DECOMPRESSED offset at which the LAST partition's header begins, taken
+/// from `Index.db` and CROSS-CHECKED against `Data.db`.
+///
+/// The cross-check is what makes this a measurement rather than a claim: the
+/// two-byte big-endian key length `SortedTablePartitionWriter.start` wrote at
+/// that offset must equal the length of the key `Index.db` records for the same
+/// partition, and the key bytes themselves must match. Two independently-written
+/// Cassandra components agreeing is a much stronger warrant than either alone —
+/// and if the VInt walk above ever mis-parsed, this fails by name.
+pub fn last_partition_header_offset(dir: &Path, dec: &[u8]) -> usize {
+    let entries = index_partition_positions(dir);
+    let mut prev = None;
+    for (i, (_key, pos)) in entries.iter().enumerate() {
+        if let Some(p) = prev {
+            assert!(
+                *pos > p,
+                "Index.db positions must increase: entry {i} is {pos} after {p}"
+            );
+        }
+        prev = Some(*pos);
+    }
+    let (key, pos) = entries.last().expect("Index.db declares a last partition");
+    assert!(
+        pos + 2 + key.len() <= dec.len(),
+        "Index.db puts the last partition header at {pos} but the stitched data section \
+         holds only {} byte(s)",
+        dec.len()
+    );
+    let declared = u16::from_be_bytes([dec[*pos], dec[*pos + 1]]) as usize;
+    assert_eq!(
+        declared,
+        key.len(),
+        "cross-check FAILED: Data.db declares a {declared}-byte partition key at offset \
+         {pos} while Index.db records a {}-byte key there — the Index.db walk found the \
+         wrong offset, so a truncation derived from it would cut the wrong byte",
+        key.len()
+    );
+    assert_eq!(
+        &dec[*pos + 2..*pos + 2 + key.len()],
+        &key[..],
+        "cross-check FAILED: the key bytes at Data.db offset {pos} are not the key \
+         Index.db records for the last partition"
+    );
+    *pos
+}

@@ -42,6 +42,34 @@
 
 use super::super::*;
 
+/// Issue #3999 — every refusal derived from CQLite's partition-key-LENGTH model
+/// must carry this, because that model is known to differ from Cassandra's for
+/// keys of 256 bytes or more.
+///
+/// Cassandra writes the Data.db partition key as
+/// `ByteBufferUtil.writeWithShortLength(key.getKey(), writer)` inside
+/// `SortedTablePartitionWriter.start` (cassandra-5.0.8
+/// `SortedTablePartitionWriter.java:97-105`), i.e. `out.writeShort(length)` — an
+/// unsigned 16-bit BIG-ENDIAN length, with NO flags byte. CQLite reads byte 0 as
+/// "flags" and byte 1 as a one-byte length, so the two models coincide only
+/// while the high byte is `0x00`, i.e. for keys under 256 bytes. For a 256-byte
+/// key Cassandra writes `0x0100`, CQLite reads a length of `0`, and a refusal
+/// here would be CQLite's own model rather than corruption.
+///
+/// Correcting the model touches `partition_header_readiness`,
+/// `scan_partition_header`, `peek_is_partition_header`,
+/// `parse_partition_header_full` and `FORMAT_MAX_KEY_SIZE`, and needs a
+/// 256-byte-key fixture the corpus does not have — a different family, tracked
+/// as **#3999**. Until then the refusal STAYS (loud beats silent, and #3928's
+/// whole subject is that the silent answer both dropped and invented
+/// partitions) and it SAYS SO, so an operator who hits a long key is pointed at
+/// the right issue instead of at their disk.
+const KEY_LENGTH_MODEL_CAVEAT: &str = "NOTE (#3999): CQLite reads that length as ONE byte \
+     after a 'flags' byte, while Cassandra writes an unsigned 2-byte big-endian length and no \
+     flags byte (SortedTablePartitionWriter.start -> ByteBufferUtil.writeWithShortLength), so \
+     the two models agree only for keys under 256 bytes; for a longer key this refusal may be \
+     CQLite's model and not corruption.";
+
 /// What a sliding driver should do with the bytes at its window front.
 pub(in crate::storage::sstable::reader::parsing::row_decoder) enum DriverHeader {
     /// A structurally-valid header: the partition key, the offset of the first
@@ -86,23 +114,67 @@ impl V5CompressedLegacyParser {
             PartitionHeaderReadiness::Malformed => {
                 if at_final_chunk {
                     return Err(Error::corruption(format!(
-                        "V5CompressedLegacy: malformed partition header at the FINAL chunk \
-                         (leading bytes {:02x?}, {} byte(s) in window): the declared partition \
-                         key length is zero or over-long and no further bytes can arrive to \
-                         change that. Skipping a byte to resynchronise would DROP this \
-                         partition and can land on misaligned bytes that parse as a plausible \
-                         header, INVENTING a partition that does not exist (issue #3928)",
+                        "V5CompressedLegacy: refusing an unreadable partition header at the \
+                         FINAL chunk (leading bytes {:02x?}, {} byte(s) in window): CQLite \
+                         READ a partition key length of {} and rejects it as zero or \
+                         over-long, and no further bytes can arrive to change what was read. \
+                         Skipping a byte to resynchronise would DROP this partition and can \
+                         land on misaligned bytes that parse as a plausible header, INVENTING \
+                         a partition that does not exist (issue #3928). \
+                         {KEY_LENGTH_MODEL_CAVEAT}",
                         &data[..data.len().min(2)],
-                        data.len()
+                        data.len(),
+                        usize::from(data[1])
                     )));
                 }
                 Ok(DriverHeader::Resync)
             }
-            PartitionHeaderReadiness::Incomplete => Ok(if at_final_chunk {
-                DriverHeader::Done
-            } else {
-                DriverHeader::NeedMore
-            }),
+            // `Incomplete` has THREE causes in `partition_header_readiness`, and
+            // only the first is a tail (issue #3928, fix round 1):
+            //
+            //   1. `data.len() < 2` — fewer bytes than ANY header needs;
+            //   2. the declared key runs past the buffer (the discriminator byte
+            //      at `2 + key_len` is absent);
+            //   3. the `DeletionTime` for its live/deleted form runs past it.
+            //
+            // Mid-stream all three are the ordinary straddle and become
+            // `NeedMore`. At the FINAL chunk they are NOT the same fact:
+            // `DriverHeader::Done` is read by BOTH drivers as CLEAN COMPLETION
+            // (`ParseStep::Done` / `PartitionStreamStep::AllDone`), which is
+            // truthful only for cause 1 — fewer than two bytes cannot be a
+            // partition Cassandra wrote, so nothing is lost there.
+            //
+            // Causes 2 and 3 are a header with a VALID, NONZERO declared key
+            // length whose key or `DeletionTime` was truncated away: well over
+            // two bytes, no further bytes can arrive, and the partition
+            // Cassandra wrote is gone. Reporting that as completion drops it
+            // silently and answers `Ok` — the swallow this issue exists to
+            // close, one classifier arm over from the ones it started with.
+            //
+            // The cause is re-derived from the SAME two bytes the classifier
+            // judged rather than by widening the classifier's own vocabulary:
+            // `partition_header_readiness` is shared with the non-allocating
+            // boundary peek (`peek_partition_boundary`), where a new variant
+            // would have to be mapped for a question that does not arise.
+            PartitionHeaderReadiness::Incomplete => {
+                if !at_final_chunk {
+                    return Ok(DriverHeader::NeedMore);
+                }
+                if data.len() < 2 {
+                    return Ok(DriverHeader::Done);
+                }
+                Err(Error::corruption(format!(
+                    "V5CompressedLegacy: refusing a TRUNCATED partition header at the FINAL \
+                     chunk: CQLite READ a {}-byte partition key length from the window's \
+                     {} byte(s), so the key and its partition-level DeletionTime cannot \
+                     both be present, and no further bytes can arrive. The partition \
+                     Cassandra wrote here was truncated away, so reporting completion \
+                     would DROP it and answer Ok with one fewer partition than the file \
+                     holds (issue #3928). {KEY_LENGTH_MODEL_CAVEAT}",
+                    usize::from(data[1]),
+                    data.len()
+                )))
+            }
             PartitionHeaderReadiness::Ready => match self.parse_partition_header_full(data, 0) {
                 Ok((key, after_header, deletion)) => {
                     Ok(DriverHeader::Parsed(key, after_header, deletion))
