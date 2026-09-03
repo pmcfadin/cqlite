@@ -2264,7 +2264,7 @@ PYINNER
 
   for bogus in why todo TBD "  " "<why>"; do
     run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-      --work-dir "$TMP/w-attest" --control selftest --repo "$SCRATCH" --attest-local-storage "$bogus"
+      --work-dir "$TMP/w-attest" --control selftest --repo "$SCRATCH" --attest-local-storage "$bogus" --profile narrow
     # exit 3 is this driver's usage-error code, as for --help; exit 2 is a
     # named refusal, which a bad flag value is not.
     check_driver "an attestation reason of '$bogus'" 3
@@ -2274,13 +2274,13 @@ PYINNER
   # digits-only let it reach the server launch -- after three release builds.
   for badport in 65536 99999 4294967296; do
     run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-      --work-dir "$TMP/w-port" --control selftest --repo "$SCRATCH" --port "$badport"
+      --work-dir "$TMP/w-port" --control selftest --repo "$SCRATCH" --port "$badport" --profile narrow
     check_driver "a --port of $badport" 3
   done
   # ...and the boundary from the other side, or the above proves only that
   # something was refused.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-port-ok" --min-corpus-bytes 1 --min-sstables 1 --control selftest --repo "$SCRATCH" --port 65535
+    --work-dir "$TMP/w-port-ok" --min-corpus-bytes 1 --min-sstables 1 --control selftest --repo "$SCRATCH" --port 65535 --profile narrow
   if grep -q '^AB-3649: cause-detail --port 65535 is above 65535' "$TMP/err.txt"; then
     bad "--port 65535 was refused; the range check is exclusive where it should be inclusive"
   else
@@ -2312,7 +2312,7 @@ PYINNER
   # A CONTROL may compare anything: that is what the label is for.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-arms-ctl" --min-corpus-bytes 1 --min-sstables 1 --repo "$SCRATCH" \
-    --control other-commits --base-ref HEAD --head-ref HEAD~1
+    --control other-commits --base-ref HEAD --head-ref HEAD~1 --profile narrow
   if grep -q '^AB-3649: cause arm-refs-not-2820$' "$TMP/err.txt"; then
     bad "a control was refused for comparing other commits"
   else
@@ -2354,7 +2354,7 @@ PYINNER
   # code from the wrong guard.
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --server-cpus 0,2 --client-cpus 2,3 --work-dir "$TMP/w-overlap" --min-corpus-bytes 1 --control selftest \
-    --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD
+    --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD --profile narrow
   check_driver "the driver refuses overlapping server and client CPU sets" 3
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/nope.json" --max-concurrent-scans 4 \
@@ -2362,10 +2362,10 @@ PYINNER
   check_driver "an absent ticket template" 2 ticket-template-absent
 
   run_driver --corpus "$TMP/emptycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-empty" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH"
+    --work-dir "$TMP/w-empty" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH" --profile narrow
   check_driver "a served directory holding no Data.db files" 2 corpus-empty
   run_driver --corpus "$TMP/nosuchtable" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-nodir" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH"
+    --work-dir "$TMP/w-nodir" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH" --profile narrow
   check_driver "a ticket naming a table that is not under the data root" 2 served-dir-absent
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
@@ -2377,7 +2377,7 @@ PYINNER
   # have counted two and let a single-source served table through -- the exact
   # phantom the guard exists to stop.
   run_driver --corpus "$TMP/onesstcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-onesst" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH"
+    --work-dir "$TMP/w-onesst" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH" --profile narrow
   check_driver "a served table with one SSTable and a decoy elsewhere under the data root" \
     2 corpus-too-few-sstables
   # ...and the size floor is likewise a claim about the served table: this corpus
@@ -2401,7 +2401,7 @@ PYINNER
   head -c 400000 /dev/zero > "$TMP/symcorpus/elsewhere/real-Data.db"
   ln -sf "$TMP/symcorpus/elsewhere/real-Data.db" "$TMP/symcorpus/ks/tbl/nb-2-big-Data.db"
   run_driver --corpus "$TMP/symcorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-sym" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH"
+    --work-dir "$TMP/w-sym" --min-corpus-bytes 1 --control selftest --repo "$SCRATCH" --profile narrow
   check_driver "a symlinked decoy standing in for a second SSTable" 2 corpus-too-few-sstables
   # A HARD link -- which is what a Cassandra snapshot is -- canonicalises inside
   # the directory and must still count, or the check would red on real corpora.
@@ -2425,7 +2425,7 @@ PYINNER
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --head-server-extra '--max-batch-bytes 1' \
     --control sensitivity --work-dir "$TMP/w-asym" --min-corpus-bytes 1 \
-    --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD
+    --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD~1 --head-ref HEAD --profile narrow
   if [ "$RC" != "3" ]; then
     ok "a labelled control may serve the arms asymmetrically"
   else
@@ -2433,17 +2433,17 @@ PYINNER
   fi
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
-    --work-dir "$TMP/w-badarm" --min-corpus-bytes 1 --control selftest --merge-path sideways
+    --work-dir "$TMP/w-badarm" --min-corpus-bytes 1 --control selftest --merge-path sideways --profile narrow
   check_driver "an unrecognised --merge-path value" 3
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-same" --min-corpus-bytes 1 --control selftest --min-sstables 1 --repo "$SCRATCH" \
-    --base-ref HEAD --head-ref HEAD
+    --base-ref HEAD --head-ref HEAD --profile narrow
   check_driver "two arm refs resolving to the same commit" 2 arm-refs-identical
 
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
     --work-dir "$TMP/w-badref" --min-corpus-bytes 1 --control selftest --min-sstables 1 --repo "$SCRATCH" \
-    --base-ref no-such-rev-3649 --head-ref HEAD
+    --base-ref no-such-rev-3649 --head-ref HEAD --profile narrow
   check_driver "an arm ref that resolves to nothing" 2 arm-ref-unresolvable
 
   # P1-3: every ramp element, through the same validator the helper exposes.
@@ -2463,7 +2463,7 @@ PYINNER
   ( cd "$TMP" && bash "$DRIVER" --corpus "$TMP/tinycorpus" \
       --ticket-template "$TMP/ticket.json" --max-concurrent-scans 4 \
       --work-dir ./relwd --repo "$SCRATCH" --min-corpus-bytes 1 --control selftest --min-sstables 1 \
-      --base-ref HEAD~1 --head-ref HEAD ) > "$TMP/out.txt" 2>&1 || true
+      --base-ref HEAD~1 --head-ref HEAD --profile narrow ) > "$TMP/out.txt" 2>&1 || true
   if grep -qE "^AB-3649: work-dir /" "$TMP/out.txt"; then
     ok "a relative --work-dir is canonicalised to an absolute path before anything derives from it"
   else
@@ -2478,7 +2478,7 @@ PYINNER
   head -c 4096 /dev/zero > "$TMP/plaincorpus/ks/tbl/nb-2-big-Data.db"
   run_driver --corpus "$TMP/plaincorpus" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --work-dir "$TMP/w-plain" --min-corpus-bytes 1 \
-    --min-sstables 1 --control selftest --repo "$SCRATCH"
+    --min-sstables 1 --control selftest --repo "$SCRATCH" --profile narrow
   # A control MAY measure an uncompressed corpus; only a measurement may not.
   if grep -q 'corpus compression MISSING' "$TMP/out.txt"; then
     ok "a corpus with no usable CompressionInfo.db is detected and named MISSING"
@@ -2530,7 +2530,7 @@ PYINNER
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --min-sstables 1 --min-corpus-bytes 1 \
     --control floor-probe --work-dir "$TMP/w-floorctl" --repo "$SCRATCH" \
-    --base-ref HEAD~1 --head-ref HEAD
+    --base-ref HEAD~1 --head-ref HEAD --profile narrow
   if [ "$RC" != "3" ]; then
     ok "a labelled control may lower the floors, where its verdict is disclaimed"
   else
@@ -2549,7 +2549,7 @@ PYINNER
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --control inject \
     --head-server-extra '--max-batch-bytes $(touch '"$TMP"'/PWNED)' \
-    --work-dir "$TMP/w-inject" --min-corpus-bytes 1 --min-sstables 1 --repo "$SCRATCH"
+    --work-dir "$TMP/w-inject" --min-corpus-bytes 1 --min-sstables 1 --repo "$SCRATCH" --profile narrow
   if [ "$RC" = "3" ] && grep -qE 'session-config-invalid|not resolvable per arm' "$TMP/err.txt"; then
     ok "a shell-metacharacter payload in a per-arm flag is refused, not resolved"
   else
@@ -2594,7 +2594,7 @@ PYINNER
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/tk-narrow.json" \
     --max-concurrent-scans 4 --work-dir "$TMP/w-narrow-ctl" --min-corpus-bytes 1 \
     --min-sstables 1 --repo "$SCRATCH" --control shape-probe \
-    --base-ref HEAD~1 --head-ref HEAD --shape limit-k
+    --base-ref HEAD~1 --head-ref HEAD --shape limit-k --profile narrow
   if [ "$RC" != "2" ] || grep -q 'ticket-not-full-ring' "$TMP/err.txt"; then
     bad "a labelled control was still refused for a narrowed ticket (exit $RC)"
   else
@@ -2642,7 +2642,7 @@ PYINNER
   mkdir -p "$TMP/w-locked/.session-lock"
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --work-dir "$TMP/w-locked" --min-corpus-bytes 1 --control selftest --min-sstables 1 \
-    --repo "$SCRATCH"
+    --repo "$SCRATCH" --profile narrow
   check_driver "a second session in a work directory already in use" 2 work-dir-busy
   if [ -z "$(find "$TMP/w-locked" -maxdepth 1 -type d -name 'run-*' 2>/dev/null)" ]; then
     ok "a session refused by the lock leaves no directory behind at all"
@@ -2669,7 +2669,7 @@ PYINNER
   # refusal that happens well after acquisition.
   run_driver --corpus "$TMP/no-such-corpus-dir" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --work-dir "$TMP/w-leak" --min-corpus-bytes 1 --control selftest --min-sstables 1 \
-    --repo "$SCRATCH"
+    --repo "$SCRATCH" --profile narrow
   check_driver "a session failing after it took the lock" 2 corpus-absent
   if [ -d "$TMP/w-leak/.session-lock" ]; then
     bad "a session that failed after acquiring the lock LEAKED it, blocking every later session"
@@ -2681,7 +2681,7 @@ PYINNER
   # the property an operator cares about; being able to run again is.
   run_driver --corpus "$TMP/no-such-corpus-dir" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --work-dir "$TMP/w-leak" --min-corpus-bytes 1 --control selftest --min-sstables 1 \
-    --repo "$SCRATCH"
+    --repo "$SCRATCH" --profile narrow
   check_driver "a session reusing a work directory whose predecessor failed" 2 corpus-absent
 
   # P1-7: a worktree at the right commit but carrying uncommitted edits builds
@@ -2691,7 +2691,7 @@ PYINNER
   printf 'uncommitted\n' >> "$TMP/w-dirty/wt-base/f.txt"
   run_driver --corpus "$TMP/tinycorpus" --ticket-template "$TMP/ticket.json" \
     --max-concurrent-scans 4 --work-dir "$TMP/w-dirty" --min-corpus-bytes 1 --control selftest \
-    --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD --head-ref HEAD~1
+    --min-sstables 1 --repo "$SCRATCH" --base-ref HEAD --head-ref HEAD~1 --profile narrow
   check_driver "a reused worktree at the right commit but not clean" 2 worktree-dirty
 
   # ROUND 2 FINDING 4 / ROUND 3 FINDING 2 / ROUND 4 FINDING 2 -- one class, now

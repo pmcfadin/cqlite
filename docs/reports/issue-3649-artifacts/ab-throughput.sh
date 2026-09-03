@@ -545,8 +545,20 @@ else
   warn "cause-detail another session holds $SESSION_LOCK. This is not about files -- each session now writes only to its own directory -- it is about CPU: two measurement sessions on one box invalidate each other. If nothing is running, remove that directory."
   exit 2
 fi
-mkdir -p "$RUN_DIR" "$LOG_DIR"
-: > "$RUNS_JSONL"
+# GUARDED, BOTH OF THEM. Unguarded under `set -euo pipefail` these two
+# statements exit 1 with a native, UNANCHORED `mkdir:` or redirection
+# diagnostic -- breaking the one property every line of this script is required
+# to have, at the one moment an operator is reading output to find out what went
+# wrong. The native text is CAPTURED into the anchored detail rather than
+# discarded (it names the errno, which is the whole diagnosis) and `die`
+# sanitizes it, so a multi-line mkdir report cannot emit a line without the
+# prefix. `2>&1` is applied to the group BEFORE the inner redirection is
+# attempted, because bash performs redirections left to right and a suppressor
+# written after the operation it suppresses suppresses nothing.
+SESSION_DIR_ERR="$(mkdir -p "$RUN_DIR" "$LOG_DIR" 2>&1)" \
+  || die session-dir-uncreatable "$RUN_DIR (and its logs/ subdirectory) could not be created: ${SESSION_DIR_ERR:-mkdir failed and reported nothing}. Every session writes to its own directory, so this abort wrote nothing at all"
+LEDGER_ERR="$( { : > "$RUNS_JSONL"; } 2>&1 )" \
+  || die ledger-uninitialisable "the per-run ledger $RUNS_JSONL could not be created: ${LEDGER_ERR:-the redirection failed and reported nothing}. The manifest is rewritten from this file after every completed run, so a session that cannot write it can record nothing truthfully"
 
 # ---------------------------------------------------------------------------
 # Manifest. Rewritten after every completed run, so an interrupted session
@@ -981,8 +993,24 @@ if [ -z "$CONTROL" ]; then
     '') usage_error "--profile is REQUIRED for a measurement: the target band differs by workload (~1.1-1.25x narrow, ~1.05-1.1x wide) and nothing can derive which one this session is. There is deliberately no default -- one silently scored wide-row sessions against the narrow band" ;;
     *)  usage_error "--profile is '$PROFILE'; it must be narrow or wide" ;;
   esac
-elif [ -n "$PROFILE" ] && [ "$PROFILE" != narrow ] && [ "$PROFILE" != wide ]; then
-  usage_error "--profile is '$PROFILE'; it must be narrow or wide"
+else
+  # A CONTROL'S VERDICT IS DISCLAIMED; IT IS NOT UNSCORED. The single-stream
+  # section reaches its verdict only through a band, and `resolve_profile`
+  # (analyze-ab.py) reads that band from the manifest -- so a `--ramp 1` session
+  # that recorded no profile is refused there with cause `profile-unrecorded`,
+  # deterministically, and the analyzer command this driver prints on its `next`
+  # line carries no flag that could supply one. Accepting such a session here is
+  # a validator accepting what its own consumer refuses, and the bill is three
+  # release builds and every replicate pair before anyone finds out. So it is
+  # refused at the same point, and for the same reason, as the measurement
+  # branch above. A multi-step control needs no band: the utilization section is
+  # a DIRECTION and consults none.
+  case "$PROFILE" in
+    narrow|wide) ;;
+    '') [ "$RAMP_SECTION" != single-stream ] || usage_error \
+          "--profile is REQUIRED for a single-stream (--ramp 1) session, control or not: the target band differs by workload (~1.1-1.25x narrow, ~1.05-1.1x wide) and nothing can derive which one this session is. The band is read from the manifest, so a session that declares nothing here is refused by analyze-ab.py --single-stream with cause profile-unrecorded -- after the builds and the replicates have been paid for. A control's verdict is disclaimed, not unscored" ;;
+    *)  usage_error "--profile is '$PROFILE'; it must be narrow or wide" ;;
+  esac
 fi
 if [ -z "$CONTROL" ]; then
   [ "$SHAPE" = "full" ] || usage_error \
