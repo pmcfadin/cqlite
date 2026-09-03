@@ -242,6 +242,30 @@ tree_coloured() {
 }
 # Content, but no COLUMN-ZERO `<name> v<version>` line: every line is an indented branch.
 tree_unparseable() { printf '├── foo v1.0.0\n│   └── x v0.1.0\n    (nothing at column zero)\n'; }
+# P7b/P23 writers (roborev round 11). tree_only_continuations has EVERY line recognised as
+# a continuation and NO column-zero head, which is the only way `unparseable-output` can
+# still fire now that indented lines are validated — it proves that cause is REACHABLE and
+# not dead code the closed grammar quietly retired.
+tree_only_continuations() { printf '├── foo v1.0.0\n│   └── x v0.1.0\n'; }
+# An indented FOREIGN line on an otherwise VALID duplicate group: the records around it
+# would still have produced a verdict, which is the finding.
+tree_indented_foreign() { printf 'foo v1.0.0\n└── x v0.1.0\n    warning: something cargo never printed here\nfoo v2.0.0\n└── y v0.2.0\n'; }
+tree_indented_truncation() { printf 'foo v1.0.0\n└── x v0.1.0\n    ... 3 more lines\nfoo v2.0.0\n└── y v0.2.0\n'; }
+# POSITIVE: every indented shape MEASURED in real output — deep branch nesting in both
+# charsets, and the INDENTED section headers the column-zero allowlist never covered.
+tree_indented_ok() {
+  cat <<'EOF'
+foo v1.0.0
+├── x v0.1.0
+│   └── deep v0.0.1
+│   [dev-dependencies]
+│   └── deeper v0.0.2
+    [build-dependencies]
+└── y v0.2.0
+foo v2.0.0
+|   `-- ascii v0.3.0
+EOF
+}
 
 # IMPOSSIBLE CENSUS: `cargo tree -d` reports DUPLICATE groups, so every crate it prints
 # has at least two members. A crate appearing ONCE means the output is not the document
@@ -465,7 +489,14 @@ assert_case "P6: EMPTY cargo tree output is a measured ZERO against a zero basel
 
 # --- P7: unparseable output -----------------------------------------------
 d=$(new_tree p7); plant_cargo "$d" 0 tree_unparseable; run_guard "$d"
-assert_case "P7: output with content but no recognisable duplicate line is UNMEASURABLE (exit 3), naming the cause" \
+assert_case "P7: an INDENTED line the parser cannot classify is refused AT THE LINE (exit 3), naming unrecognised-continuation — more specific than the end-of-parse fallback it used to reach" \
+  3 'SKIP-UNMEASURABLE cause=unrecognised-continuation' 'NOT a pass'
+# P7b: `unparseable-output` is still REACHABLE. Every line here IS a recognised
+# continuation and none is a column-zero head, so nothing is counted and the end-of-parse
+# three-valued check fires. Without this case the closed grammar could have made that
+# cause dead code while its documentation still advertised it.
+d=$(new_tree p7b); plant_cargo "$d" 0 tree_only_continuations; run_guard "$d"
+assert_case "P7b: all-recognised continuations with NO column-zero head still reach unparseable-output — that cause is not dead code" \
   3 'SKIP-UNMEASURABLE cause=unparseable-output' 'NOT a pass'
 case "$OUT" in
   *'verdict '*) bad "P7: an unparseable read must not print a verdict at all" ;;
@@ -768,6 +799,30 @@ case "$OUT" in
   *'verdict '*) bad "P22f: THE FINDING, REPRODUCED — a verdict was published from two unrecognised records that the census check cannot see" ;;
   *)            ok "P22f: no verdict is published from an unrecognised duplicate group" ;;
 esac
+
+# --- P23: INDENTED LINES ARE VALIDATED, NOT ASSUMED ----------------------
+# roborev round 11, Medium. The continuation arm used to `continue` on ANY
+# whitespace-prefixed line, so an indented diagnostic or truncation marker was SILENTLY
+# SKIPPED while the records around it still produced a verdict — a NO-INCREASE from a
+# partially parsed census, the same false-verdict class as round 9's version field.
+# Both fixtures below are REAL duplicate groups (foo x2), so `implausible-census` cannot
+# catch them: the census is perfectly plausible and simply INCOMPLETE.
+d=$(new_tree p23a); plant_cargo "$d" 0 tree_indented_foreign; run_guard "$d"
+assert_case "P23a: an indented FOREIGN line inside a valid duplicate group is refused — the finding's own case" \
+  3 'SKIP-UNMEASURABLE cause=unrecognised-continuation' 'warning: something cargo never printed'
+case "$OUT" in
+  *'verdict '*) bad "P23a: THE FINDING, REPRODUCED — a verdict was published from a census that silently skipped an unclassifiable indented line" ;;
+  *)            ok "P23a: no verdict is published from a partially parsed census" ;;
+esac
+d=$(new_tree p23b); plant_cargo "$d" 0 tree_indented_truncation; run_guard "$d"
+assert_case "P23b: an indented TRUNCATION marker is refused rather than skipped" \
+  3 'SKIP-UNMEASURABLE cause=unrecognised-continuation' '... 3 more lines'
+# POSITIVE, and it is what stops this tightening reddening correct input: every indented
+# shape MEASURED in real `cargo tree -d --workspace --target all` output — 274 branch-carried
+# records and 17 INDENTED section headers over 291 indented lines — plus the ascii charset.
+d=$(new_tree p23c); plant_cargo "$d" 0 tree_indented_ok; run_guard "$d"
+assert_case "P23c: deep nesting in BOTH charsets and INDENTED [dev-/build-dependencies] headers are all still COUNTED, not refused" \
+  0 'MEASURED 2 duplicate instance(s) / 1 duplicated crate(s)' 'verdict NO-INCREASE'
 
 # --- P12: --regenerate round trip ----------------------------------------
 d=$(new_tree p12 none); plant_cargo "$d" 0 tree_grew
@@ -1316,7 +1371,7 @@ echo "dep-duplicates ratchet self-test: $PASS passed, $FAIL failed"
 # ROUND 8 ADDS THREE AND MOVES THE FLOOR BY THREE: the P11 leading-zero shapes are
 # planted (shim cargo + plant_timeout), so they are host-independent BY CONSTRUCTION and
 # a deletion of them must red. 46 + 3 = 49.
-CASE_FLOOR=60
+CASE_FLOOR=65
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): cases are being skipped or dying silently.\n' \
     "$((PASS + FAIL))" "$CASE_FLOOR" >&2

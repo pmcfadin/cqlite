@@ -437,6 +437,19 @@ census_bump() {
 #                 quoting the line.
 now_instances=0
 now_names=""
+# _record_fields_ok <text>: does <text> BEGIN with a `<crate-name> v<semver>` pair?
+# Pure predicate, no side effects, ONE definition — used by BOTH the column-zero record
+# path and the continuation path below, so the name and version rules cannot drift into two
+# implementations that disagree (the second-implementation trap: agreement is only knowable
+# by testing it, and here it is simply not duplicated).
+_record_fields_ok() {
+  local t=$1 nm ver rest
+  case "$t" in *' '*) ;; *) return 1 ;; esac
+  nm="${t%% *}"; rest="${t#* }"; ver="${rest%% *}"
+  case "$nm" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  [[ $ver =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]
+}
+
 nonblank=0
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
@@ -449,9 +462,41 @@ while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
     # RECORD candidate — column zero, crate-name first character. Validated below.
     [A-Za-z0-9_-]*) ;;
-    # CONTINUATION — an indented entry (space or tab: cargo indents with spaces, the tab
-    # is admitted because an indented line is a continuation whatever the whitespace).
-    [[:blank:]]*) continue ;;
+    # CONTINUATION — an INDENTED line, VALIDATED rather than assumed (roborev round 11,
+    # Medium). This arm used to `continue` on ANY whitespace-prefixed line, so an indented
+    # diagnostic or a truncation marker was SILENTLY SKIPPED and the surviving records
+    # still produced a verdict — a NO-INCREASE from a partially parsed census, which is
+    # the same false-verdict class as round 9's version field and exactly what the
+    # "closed grammar" claim is supposed to exclude.
+    #
+    # MEASURED, not assumed: `cargo tree -d --workspace --target all` on this workspace
+    # prints 291 indented lines, and after stripping the leading blanks and any run of
+    # tree-branch characters EVERY one of them is either a `<name> v<semver>` record (274)
+    # or an EXACT `[dev-dependencies]`/`[build-dependencies]` header (17) — headers appear
+    # INDENTED as well as at column zero, which the column-zero allowlist above does not
+    # cover and this arm must therefore accept. Nothing else occurs.
+    [[:blank:]]*)
+      _cont="${line#"${line%%[![:blank:]]*}"}"
+      # Strip the tree-branch run: cargo's utf8 charset and its --charset ascii form, plus
+      # the blanks between them. Both are cargo's own; neither can begin a crate name.
+      while :; do
+        case "$_cont" in
+          '├'*|'│'*|'└'*|'─'*|'|'*|'`'*) _cont="${_cont#?}" ;;
+          [[:blank:]]*)                  _cont="${_cont#?}" ;;
+          *) break ;;
+        esac
+      done
+      case "$_cont" in
+        # A pure connector line (branch characters and nothing else). Not observed on this
+        # workspace, so it is ACCEPTED rather than refused: it is legitimate cargo output
+        # for a differently shaped tree, and a guard that reds on correct input is the
+        # guard agents learn to waive.
+        '') continue ;;
+        '[dev-dependencies]'|'[build-dependencies]') continue ;;
+      esac
+      if _record_fields_ok "$_cont"; then continue; fi
+      unmeasurable unrecognised-continuation \
+        "$PROBE_DESC printed an INDENTED line that is neither a tree-branch continuation carrying a '<name> v<version>' entry nor a recognised section header: '$line'; a line this parser cannot classify may not be skipped, because the records around it would still yield a verdict" ;;
     # CONTINUATION — a column-zero tree branch. utf8 charset (cargo's default) then the
     # `--charset ascii` symbols. Both are cargo's own; neither can begin a crate name.
     '├'*|'│'*|'└'*|'─'*) continue ;;
@@ -474,29 +519,39 @@ while IFS= read -r line || [ -n "$line" ]; do
   nm="${line%% *}"
   rest="${line#* }"
   ver="${rest%% *}"
-  case "$nm" in
-    *[!A-Za-z0-9_-]*) unmeasurable malformed-record \
-      "$PROBE_DESC printed a column-zero line whose first field '$nm' is not a crate name: '$line'" ;;
-  esac
-  # THE WHOLE FIELD, not just its first character (roborev round 9, Medium). `v[0-9]*`
-  # required only a `v` and ONE digit and let the trailing `*` swallow anything after it,
-  # so a TRUNCATED `foo v1` or a garbage `foo v1garbage` satisfied it and was COUNTED —
-  # a verdict derived from a document this parser does not actually recognise, which is
-  # the one thing the closed grammar exists to prevent. `ver` is never used as a value
-  # (the census keys on the crate NAME); validating it is purely how we recognise a line
-  # as a cargo duplicate-group head, so it must match cargo's OWN output shape exactly.
-  #
-  # DERIVED FROM MEASURED OUTPUT, not assumed: `cargo tree -d --workspace --target all`
-  # on this workspace prints 114 heads — 110 bare `vN.N.N`, plus `v0.11.1+wasi-snapshot-
-  # preview1` and `v1.0.0+spec-1.0.0` style BUILD METADATA (dots AND hyphens inside it).
-  # Cargo prints a resolved semver, always three numeric components. PRERELEASE (`-rc.1`)
-  # appears nowhere in this corpus but is legal semver that cargo can print, so it is
-  # ACCEPTED rather than refused — a guard that reds on correct input is the guard agents
-  # learn to waive. Leading zeros in the numeric parts are likewise not refused: they are
-  # not what this check is for, and cargo could only print what a manifest resolved to.
-  if [[ ! $ver =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+  # ONE acceptance decision, shared with the continuation arm above (`_record_fields_ok`).
+  # The per-field checks below run ONLY on the rejection path, to say WHICH field offends:
+  # a divergence in a DIAGNOSTIC cannot produce a false verdict, whereas a divergence in
+  # what is ACCEPTED can — so it is acceptance, and only acceptance, that is single-sourced.
+  if ! _record_fields_ok "$line"; then
+    case "$nm" in
+      *[!A-Za-z0-9_-]*) unmeasurable malformed-record \
+        "$PROBE_DESC printed a column-zero line whose first field '$nm' is not a crate name: '$line'" ;;
+    esac
+    # THE WHOLE FIELD, not just its first character (roborev round 9, Medium). `v[0-9]*`
+    # required only a `v` and ONE digit and let the trailing `*` swallow anything after it,
+    # so a TRUNCATED `foo v1` or a garbage `foo v1garbage` satisfied it and was COUNTED —
+    # a verdict derived from a document this parser does not actually recognise, which is
+    # the one thing the closed grammar exists to prevent. `ver` is never used as a value
+    # (the census keys on the crate NAME); validating it is purely how we recognise a line
+    # as a cargo duplicate-group head, so it must match cargo's OWN output shape exactly.
+    #
+    # DERIVED FROM MEASURED OUTPUT, not assumed: `cargo tree -d --workspace --target all`
+    # on this workspace prints 114 heads — 110 bare `vN.N.N`, plus `v0.11.1+wasi-snapshot-
+    # preview1` and `v1.0.0+spec-1.0.0` style BUILD METADATA (dots AND hyphens inside it).
+    # Cargo prints a resolved semver, always three numeric components. PRERELEASE (`-rc.1`)
+    # appears nowhere in this corpus but is legal semver that cargo can print, so it is
+    # ACCEPTED rather than refused — a guard that reds on correct input is the guard agents
+    # learn to waive. Leading zeros in the numeric parts are likewise not refused: they are
+    # not what this check is for, and cargo could only print what a manifest resolved to.
+    if [[ ! $ver =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+      unmeasurable malformed-record \
+        "$PROBE_DESC printed a column-zero line whose second field '$ver' is not a complete v<major>.<minor>.<patch>[-prerelease][+build]: '$line'"
+    fi
+    # Reached only if the shared predicate rejected the line but no field-specific arm
+    # above matched it — an unclassifiable rejection is still a refusal, never a skip.
     unmeasurable malformed-record \
-      "$PROBE_DESC printed a column-zero line whose second field '$ver' is not a complete v<major>.<minor>.<patch>[-prerelease][+build]: '$line'"
+      "$PROBE_DESC printed a column-zero line that is not a '<name> v<version>' duplicate-group head: '$line'"
   fi
   now_instances=$((now_instances + 1))
   census_get "$NOW_CENSUS" "$nm" >/dev/null || now_names="$now_names $nm"
