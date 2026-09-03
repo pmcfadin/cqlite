@@ -10,6 +10,7 @@
 //! driver never has to keep a WIDE partition fully resident).
 
 use super::compaction::CompactionPolicy;
+use super::data_row_outcome::DataRowOutcome;
 use super::partition_driver::{MarkerOutcome, SlidingPartitionPolicy};
 use super::row_framing::PartitionHeaderReadiness;
 use super::{RowColumnResolution, V5CompressedLegacyParser};
@@ -234,7 +235,15 @@ impl V5CompressedLegacyParser {
         let mut emitted: Vec<crate::storage::sstable::reader::compaction_row::CompactionRow> =
             Vec::new();
         let decoded = match policy.on_data_row(data, 0, schema, reader, resolution, &mut emitted) {
-            Ok(v) => v,
+            DataRowOutcome::Decoded(v) => Some(v),
+            DataRowOutcome::Declined => None,
+            // Issue #3809 — a REFUSAL is EXTENT-INDEPENDENT: the row decoded and
+            // its content is unrepresentable, which is not a bytes-availability
+            // question, so `at_final_chunk` is not consulted. Converting it to
+            // `NeedMore` here would make this streaming driver — which every
+            // windowed consumer drives with `at_final_chunk == false` until its
+            // last chunk — swallow the refusal and truncate the partition.
+            DataRowOutcome::Refused(e) => return Err(e),
             // Issue #3782 — the SAME rule as the buffered `drive_partition_sliding`,
             // deliberately spelled out here rather than shared, because this driver
             // resumes from offset 0 per structure and owns its own `ParseStep`
@@ -243,7 +252,7 @@ impl V5CompressedLegacyParser {
             // straddling the window; mid-stream it is the ordinary straddling case
             // and stays tolerant. Measured over 42 well-formed corpus tables the
             // tolerant path fires 614 times, ALL at `at_final_chunk == false`.
-            Err(e) => {
+            DataRowOutcome::DecodeFailed(e) => {
                 if at_final_chunk {
                     return Err(e);
                 }
@@ -303,7 +312,8 @@ impl V5CompressedLegacyParser {
             }
             None => {
                 // The policy DECLINED the row with no error to report (#3782: an
-                // actual decode error took the `Err` arm above). Mid-stream that may
+                // actual decode error took the `DecodeFailed` arm above, #3809: a
+                // refusal the `Refused` arm). Mid-stream that may
                 // be a row straddling the chunk boundary, so request more bytes
                 // unless this is the final chunk (where it is end-of-partition).
                 if at_final_chunk {

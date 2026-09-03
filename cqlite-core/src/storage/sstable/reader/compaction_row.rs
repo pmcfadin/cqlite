@@ -25,6 +25,7 @@
 //! - Far-future local deletion times in `[2^31, 2^32)` are preserved as the
 //!   wrapping `as u32 as i32` value — never widened to i64.
 
+use crate::error::{Error, Result};
 use crate::types::{RowKey, ScanRow, TombstoneType, Value};
 
 /// One row surfaced by the compaction read path, carrying per-element complex
@@ -387,6 +388,168 @@ pub enum CompactionRowData {
     },
 }
 
+impl CompactionRowData {
+    /// Issue #3809 (Finding 1): the identity invariant of a ROW DELETION — refuse
+    /// one that has LOST the clustering of the row it deletes.
+    ///
+    /// The subject is the row deletion, NOT one enum variant: a row deletion is
+    /// carried by [`Self::Tombstone`] (nothing survived it) AND by
+    /// `Self::Live { row_deletion: Some(..) }` (issue #932 — cells written after it
+    /// survive), and both hand the same `deletion_time` to the merge, so both are
+    /// checked. The builder in `row_decoder/compaction.rs` calls this for EVERY
+    /// non-static row carrying a row deletion, before it decides which of the two
+    /// variants to emit. A row with NO row deletion is deliberately NOT checked: it
+    /// has no `deletion_time`, so it cannot become the `None` bucket's row deletion
+    /// and can shadow nothing (the boundary is stated at the call site).
+    ///
+    /// `declared_clustering_columns` is the table's clustering arity;
+    /// `recovered_clustering_values` is how many of those the row actually yielded.
+    /// Returns `Err(Error::Corruption)` when a NON-static row on a CLUSTERED table
+    /// recovered fewer than it declares, and `Ok(())` otherwise.
+    ///
+    /// `pub(crate)` deliberately (issue #3366): the ONE production caller is the
+    /// private per-element builder in `row_decoder/compaction.rs`, and nothing in
+    /// this repo detects public-API drift, so this is not exported. The scalar
+    /// cases are pinned by the unit tests at the foot of this file; the byte-level
+    /// case is `cqlite-core/tests/issue_3809_tombstone_clustering_identity.rs`.
+    ///
+    /// # Why this cannot be a silent `clustering: []`
+    ///
+    /// An empty clustering does not merely lose precision, it loses IDENTITY.
+    /// `SSTableRowIteratorAdapter::extract_clustering_key_from_compaction` maps it
+    /// to `None` on BOTH arms — from `Tombstone.clustering`, and for a `Live` row
+    /// from its `simple` cells — so the row joins the `None` reconcile bucket, the
+    /// bucket that also holds the partition's STATIC row, where `merge::reconcile`
+    /// adopts its `deletion_time` as the WHOLE group's row deletion and
+    /// `shadow_by_row_deletion` drops every cell in that bucket at or below it. The
+    /// row deletion is then either dropped outright (resurrecting the very row it
+    /// was written to delete) or, with no static column present, written by
+    /// `data_writer::rows` with no clustering prefix and no `IS_STATIC` flag: a
+    /// structurally invalid row on a clustered table. All of that on the WRITE path,
+    /// with no diagnostic.
+    ///
+    /// # Cassandra authority (pinned `cassandra-5.0.8` — never a working tree)
+    ///
+    /// A clustering prefix is ARITY-TOTAL, so a partial one is not a shape
+    /// Cassandra can write:
+    ///
+    /// * `db/Clustering.java` — `Serializer.serialize` asserts
+    ///   `clustering.size() == types.size()`, and `deserialize` reads exactly
+    ///   `types.size()` values.
+    /// * `db/rows/UnfilteredSerializer.java` — `deserializeTombstonesOnly` builds
+    ///   `BTreeRow.emptyDeletedRow(clustering, deletion)`: a row tombstone always
+    ///   carries a full clustering. The clustering prefix is written from the row's
+    ///   flags before any deletion or cell body, so a row whose deletion coexists
+    ///   with surviving cells carries the same full clustering.
+    ///
+    /// # The two EXEMPT cases, which are correct input and must never red
+    ///
+    /// * `is_static` — Cassandra distinguishes `Clustering.EMPTY` from
+    ///   `Clustering.STATIC_CLUSTERING` by `kind()` (`Clustering.java:102,124`), a
+    ///   distinction this `Vec<(String, Value)>` cannot express, so `[]` is how a
+    ///   static row's clustering is represented here. A static row also carries no
+    ///   clustering prefix on disk, so zero recovered values is EXPECTED.
+    /// * `declared_clustering_columns == 0` — `[]` is the complete and only
+    ///   clustering a table with no clustering columns has.
+    ///
+    /// # Why ARITY only, and never the VALUE (roborev #3809 job 93, REFUTED)
+    ///
+    /// `recovered_clustering_values` is a COUNT of present components; the values
+    /// themselves are deliberately not judged, `Value::Null` included. Refusing a
+    /// null component was proposed and refuted on two independent grounds, both
+    /// from the pinned tag rather than from CQLite's own behaviour:
+    ///
+    /// * The harm is UNREACHABLE for a row. The only writer of the null header
+    ///   state is `ClusteringPrefix.Serializer.makeHeader` on a `null` component
+    ///   (`db/ClusteringPrefix.java:548`), and the CQL write path rejects a null
+    ///   clustering value before any `Clustering` is built
+    ///   (`cql3/restrictions/SingleColumnRestriction.java:195`,
+    ///   `MultiColumnRestriction.java:242`). The one derived-row path that
+    ///   contemplates a null row clustering is compact-table-gated
+    ///   (`db/view/ViewUpdateGenerator.java:179`) and `isCompactTable()` is hard
+    ///   `false` in 5.0 (`schema/TableMetadata.java:291`), with startup refused for
+    ///   any table still carrying the pre-4.0 compact flags (`:101`).
+    /// * A value test could not tell that case apart, and would REFUSE correct
+    ///   data. `parse_clustering_prefix` maps the IS_EMPTY header state to
+    ///   `Value::Null` for every clustering type outside a four-spelling allowlist
+    ///   (`row_decoder/row_framing.rs`), whereas Cassandra materialises an empty
+    ///   clustering value as a zero-length value EXPLICITLY distinct from null
+    ///   (`ClusteringPrefix.java:514`) and declares empty valid input for 17 type
+    ///   families (`allowsEmpty()`, `db/marshal/AbstractType.java:513`) — of which
+    ///   `StringType`, `BytesType`, `TupleType` and `AbstractCompositeType` treat
+    ///   it as MEANINGFUL rather than null-equivalent (`isEmptyValueMeaningless()`,
+    ///   `AbstractType.java:458`, overridden true by `Int32Type.java:56`). So a
+    ///   null test here reds a legal empty-valued clustering, and a guard that reds
+    ///   on correct input is worse than no guard.
+    ///
+    /// Header state `0b11` needs no arm either: `makeHeader`'s branches are
+    /// exclusive so no writer emits it, and Cassandra's reader tests `isNull` first
+    /// (`ClusteringPrefix.java:565`) and so consumes no value bytes — byte-for-byte
+    /// what CQLite does. `ClusteringPrefix.Kind` is likewise out of scope here: a
+    /// row's prefix carries NO kind byte (`UnfilteredSerializer.java:191`, `:481`
+    /// use `Clustering.serializer`), the ordinal being written only for markers
+    /// (`:287`, `ClusteringBoundOrBoundary.java:105`), which never reach this
+    /// builder.
+    ///
+    /// The IS_EMPTY/IS_NULL conflation named above is a real upstream read-path
+    /// divergence, but it is not this invariant's to fix: refusing a lost identity
+    /// BY VALUE requires the two states to be distinguishable here first.
+    ///
+    /// # Why `Error::Corruption`, and what it does NOT claim
+    ///
+    /// The variant is kept for its CONTRACT: `Error::is_recoverable` returns
+    /// `false` for it, so compaction stops instead of retrying a defect that
+    /// re-deriving the same input reproduces exactly. But `Corruption` renders as
+    /// `Data corruption: ...`, and with today's decoder that attribution would be
+    /// wrong: `parse_clustering_prefix` is itself arity-total (it pushes exactly
+    /// `schema.clustering_keys.len()` values or returns `Err`), so a short
+    /// clustering cannot reach here from Cassandra-written bytes — a fire points
+    /// at a CQLite decoder / column-resolution regression, not at damaged data.
+    /// The message therefore SAYS SO, rather than leaving an operator hunting a
+    /// disk fault. (`Error::Internal` would carry the same `is_recoverable ==
+    /// false` but retitles the telemetry bucket from `Corruption` to `Other`
+    /// (`observability/error_schema.rs:162,209`) and drops the `Data` category;
+    /// the guard cannot itself tell a reader defect from a hand-written or
+    /// otherwise non-Cassandra file, so the data-shaped bucket is kept and the
+    /// uncertainty is stated in the text.)
+    pub(crate) fn require_tombstone_clustering_identity(
+        keyspace: &str,
+        table: &str,
+        is_static: bool,
+        declared_clustering_columns: usize,
+        recovered_clustering_values: usize,
+    ) -> Result<()> {
+        // `declared_clustering_columns == 0` is STRUCTURALLY REDUNDANT under the
+        // `<` predicate below (`recovered < 0` cannot hold) and is retained on
+        // purpose: it is the exemption this function's contract states, and it is
+        // what keeps a table with no clustering columns correct if the predicate is
+        // ever tightened to `!=` or `>` (an arity-TOTAL comparison, which is what
+        // `Clustering.java`'s own assert is). Both directions are pinned by the
+        // unit tests at the foot of this file.
+        if is_static || declared_clustering_columns == 0 {
+            return Ok(());
+        }
+        if recovered_clustering_values < declared_clustering_columns {
+            return Err(Error::corruption(format!(
+                "row deletion in {keyspace}.{table} lost its clustering identity: \
+                 the schema declares {declared_clustering_columns} clustering \
+                 column(s) but only {recovered_clustering_values} clustering \
+                 value(s) were recovered from the row's clustering prefix (#912). \
+                 This covers a row deletion with or without surviving cells (#932), \
+                 since both carry the same deletion timestamp into the merge. \
+                 Cassandra never writes a partial clustering (Clustering.java's \
+                 clustering.size() == types.size() assert), and emitting an empty \
+                 clustering would make this row deletion identify no row (issue \
+                 #3809). The ON-DISK BYTES MAY BE SOUND: the clustering-prefix \
+                 decoder is arity-total, so this shape is unreachable from \
+                 Cassandra-written input and most likely indicates a CQLite \
+                 decoder or column-resolution regression rather than damaged data"
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// A single-cell (simple) column value with its write metadata.
 ///
 /// Cell tombstones for simple columns are represented by `value` holding a
@@ -596,3 +759,13 @@ mod row_liveness_tests {
         );
     }
 }
+
+// Issue #3809 (Finding 1): the scalar cases of
+// `CompactionRowData::require_tombstone_clustering_identity`, in a sibling file to
+// keep this source under the campsite-rule size limit (epic #1116). In-crate
+// because the invariant is `pub(crate)` (#3366). The arms that CALL it are pinned
+// in `parsing/row_decoder/compaction_build_identity_tests.rs`; the byte-level case
+// lives in `cqlite-core/tests/issue_3809_tombstone_clustering_identity.rs`.
+#[cfg(test)]
+#[path = "compaction_row_tombstone_identity_tests.rs"]
+mod tombstone_clustering_identity_tests;

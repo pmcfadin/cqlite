@@ -148,7 +148,7 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         resolution: &RowColumnResolution,
         pending: &mut Vec<Self::Row>,
-    ) -> Result<Option<usize>> {
+    ) -> DataRowOutcome {
         match self.parser.parse_row_data_with_offset(
             data,
             offset,
@@ -233,12 +233,16 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                         ));
                     }
                 }
-                Ok(Some(next_offset))
+                DataRowOutcome::Decoded(next_offset)
             }
             // Issue #3782: preserve the decode error instead of collapsing it into
             // "no row here". The DRIVER decides whether to tolerate it, from
-            // `at_final_chunk`; a policy has no way to know.
-            Err(e) => Err(e),
+            // `at_final_chunk`; a policy has no way to know. Classified
+            // `DecodeFailed` and never `Refused` (#3809) because that is exactly
+            // what it is — the row's bytes did not yield a row, which more bytes
+            // may still fix. This policy raises no refusal: the user-facing read
+            // path builds a display row and has no row-BUILD invariant to fail.
+            Err(e) => DataRowOutcome::DecodeFailed(e),
         }
     }
 
