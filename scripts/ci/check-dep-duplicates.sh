@@ -437,17 +437,76 @@ census_bump() {
 #                 quoting the line.
 now_instances=0
 now_names=""
-# _record_fields_ok <text>: does <text> BEGIN with a `<crate-name> v<semver>` pair?
-# Pure predicate, no side effects, ONE definition — used by BOTH the column-zero record
-# path and the continuation path below, so the name and version rules cannot drift into two
-# implementations that disagree (the second-implementation trap: agreement is only knowable
-# by testing it, and here it is simply not duplicated).
-_record_fields_ok() {
+# ---------------------------------------------------------------------------
+# ONE VALIDATED CLASSIFIER (roborev round 12, two Mediums — and the round-11 fix's own
+# blind spot). Rounds 9, 11 and 12 all reported the SAME class: a path that SKIPS a line
+# without validating it, so the surviving records still publish a verdict from a partial
+# census. Round 11 validated INDENTED continuations and left the COLUMN-ZERO connector arm
+# permissive — the fix reaching one member of its own class. Patching a fourth instance
+# would repeat that, so the structure changes instead: EVERY line is classified by ONE
+# predicate pair, and no arm may `continue` without having validated the WHOLE line.
+#
+# _trailing_ok <text>: the part after `<name> v<semver>` must be a sequence of ` (...)`
+# groups and nothing else. MEASURED, not assumed: over every line of real
+# `cargo tree -d --workspace --target all` output the trailing content is empty, ` (*)`,
+# ` (proc-macro)`, ` (<abs path>)`, or those combined — 26 distinct spellings, all of that
+# shape. A group's CONTENT is deliberately not enumerated: cargo also prints registry and
+# git sources (`(https://…)`, `(git+…#sha)`) that this workspace has none of, and refusing
+# them would red a correct run elsewhere. What IS enforced is that trailing text cannot be
+# arbitrary — `foo v1.2.3 *** truncated ***` is refused, which is the finding.
+_trailing_ok() {
+  local t=$1
+  while [ -n "$t" ]; do
+    case "$t" in
+      ' ('*) t="${t#' ('}" ;;
+      *) return 1 ;;
+    esac
+    case "$t" in
+      *')'*) t="${t#*')'}" ;;
+      *) return 1 ;;                # an unclosed group is not cargo output
+    esac
+  done
+  return 0
+}
+
+# _record_ok <text>: is <text> a COMPLETE record — `<crate-name> v<semver>` plus only
+# recognised trailing groups? ONE definition, used by the column-zero record path AND the
+# continuation path, so what is ACCEPTED cannot drift into two disagreeing implementations.
+_record_ok() {
   local t=$1 nm ver rest
   case "$t" in *' '*) ;; *) return 1 ;; esac
   nm="${t%% *}"; rest="${t#* }"; ver="${rest%% *}"
   case "$nm" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
-  [[ $ver =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]
+  [[ $ver =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] || return 1
+  case "$rest" in
+    "$ver") return 0 ;;             # version was the last field
+    *) _trailing_ok "${rest#"$ver"}" ;;
+  esac
+}
+
+# _connector_line_ok <line>: strip the leading blanks and any run of tree-branch
+# characters, then require the remainder to be EMPTY (a pure connector), an EXACT section
+# header, or a COMPLETE record. Used for BOTH indented lines and column-zero lines that
+# begin with a connector character — the two arms that each produced a finding.
+_connector_line_ok() {
+  local c=$1
+  c="${c#"${c%%[![:blank:]]*}"}"
+  while :; do
+    case "$c" in
+      # utf8 charset (cargo's default) and the `--charset ascii` form. `-` is the ASCII
+      # counterpart of `─`: ascii branches are `|--` and `` `-- ``, so omitting it reds
+      # correct ASCII output — which is exactly what P19c/P23c caught. A crate name can
+      # contain a hyphen but never begins with one, so stripping a leading run is safe.
+      '├'*|'│'*|'└'*|'─'*|'|'*|'`'*|'-'*) c="${c#?}" ;;
+      [[:blank:]]*) c="${c#?}" ;;
+      *) break ;;
+    esac
+  done
+  case "$c" in
+    '') return 0 ;;
+    '[dev-dependencies]'|'[build-dependencies]') return 0 ;;
+  esac
+  _record_ok "$c"
 }
 
 nonblank=0
@@ -476,31 +535,18 @@ while IFS= read -r line || [ -n "$line" ]; do
     # INDENTED as well as at column zero, which the column-zero allowlist above does not
     # cover and this arm must therefore accept. Nothing else occurs.
     [[:blank:]]*)
-      _cont="${line#"${line%%[![:blank:]]*}"}"
-      # Strip the tree-branch run: cargo's utf8 charset and its --charset ascii form, plus
-      # the blanks between them. Both are cargo's own; neither can begin a crate name.
-      while :; do
-        case "$_cont" in
-          '├'*|'│'*|'└'*|'─'*|'|'*|'`'*) _cont="${_cont#?}" ;;
-          [[:blank:]]*)                  _cont="${_cont#?}" ;;
-          *) break ;;
-        esac
-      done
-      case "$_cont" in
-        # A pure connector line (branch characters and nothing else). Not observed on this
-        # workspace, so it is ACCEPTED rather than refused: it is legitimate cargo output
-        # for a differently shaped tree, and a guard that reds on correct input is the
-        # guard agents learn to waive.
-        '') continue ;;
-        '[dev-dependencies]'|'[build-dependencies]') continue ;;
-      esac
-      if _record_fields_ok "$_cont"; then continue; fi
+      _connector_line_ok "$line" && continue
       unmeasurable unrecognised-continuation \
-        "$PROBE_DESC printed an INDENTED line that is neither a tree-branch continuation carrying a '<name> v<version>' entry nor a recognised section header: '$line'; a line this parser cannot classify may not be skipped, because the records around it would still yield a verdict" ;;
-    # CONTINUATION — a column-zero tree branch. utf8 charset (cargo's default) then the
-    # `--charset ascii` symbols. Both are cargo's own; neither can begin a crate name.
-    '├'*|'│'*|'└'*|'─'*) continue ;;
-    '|'*|'`'*) continue ;;
+        "$PROBE_DESC printed an INDENTED line that is neither a tree-branch continuation carrying a complete '<name> v<version>' entry nor a recognised section header: '$line'; a line this parser cannot classify may not be skipped, because the records around it would still yield a verdict" ;;
+    # CONTINUATION — a column-zero tree branch, VALIDATED (roborev round 12, Medium 2).
+    # utf8 charset (cargo's default) then the `--charset ascii` symbols; both are cargo's
+    # own and neither can begin a crate name. Round 11 validated the INDENTED arm and left
+    # THIS one skipping unconditionally, so a diagnostic or truncation marker beginning
+    # with a connector character bypassed the whole closed parser.
+    '├'*|'│'*|'└'*|'─'*|'|'*|'`'*)
+      _connector_line_ok "$line" && continue
+      unmeasurable unrecognised-connector-line \
+        "$PROBE_DESC printed a column-zero line that begins with a tree-branch character but whose content is neither a complete '<name> v<version>' entry nor a recognised section header: '$line'; a line this parser cannot classify may not be skipped, because the records around it would still yield a verdict" ;;
     # HEADER — an EXACT allowlist (whole line), not a `[`-prefix test.
     '[dev-dependencies]'|'[build-dependencies]') continue ;;
     '['*) unmeasurable unrecognised-section-header \
@@ -519,11 +565,12 @@ while IFS= read -r line || [ -n "$line" ]; do
   nm="${line%% *}"
   rest="${line#* }"
   ver="${rest%% *}"
-  # ONE acceptance decision, shared with the continuation arm above (`_record_fields_ok`).
+  # ONE acceptance decision, shared with BOTH connector arms above (`_record_ok`, reached
+  # through `_connector_line_ok`).
   # The per-field checks below run ONLY on the rejection path, to say WHICH field offends:
   # a divergence in a DIAGNOSTIC cannot produce a false verdict, whereas a divergence in
   # what is ACCEPTED can — so it is acceptance, and only acceptance, that is single-sourced.
-  if ! _record_fields_ok "$line"; then
+  if ! _record_ok "$line"; then
     case "$nm" in
       *[!A-Za-z0-9_-]*) unmeasurable malformed-record \
         "$PROBE_DESC printed a column-zero line whose first field '$nm' is not a crate name: '$line'" ;;
@@ -548,6 +595,14 @@ while IFS= read -r line || [ -n "$line" ]; do
       unmeasurable malformed-record \
         "$PROBE_DESC printed a column-zero line whose second field '$ver' is not a complete v<major>.<minor>.<patch>[-prerelease][+build]: '$line'"
     fi
+    # Trailing content after a VALID name/version pair (roborev round 12, Medium 1):
+    # `foo v1.2.3 *** truncated ***` used to be COUNTED because only the first two fields
+    # were checked. Refused by name here.
+    case "$rest" in
+      "$ver") ;;
+      *) _trailing_ok "${rest#"$ver"}" || unmeasurable malformed-record \
+           "$PROBE_DESC printed a column-zero line with unrecognised trailing content after '$ver' (cargo prints only ' (...)' groups such as ' (*)', ' (proc-macro)' or a source path): '$line'" ;;
+    esac
     # Reached only if the shared predicate rejected the line but no field-specific arm
     # above matched it — an unclassifiable rejection is still a refusal, never a skip.
     unmeasurable malformed-record \

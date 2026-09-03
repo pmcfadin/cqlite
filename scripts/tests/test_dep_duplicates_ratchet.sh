@@ -253,6 +253,19 @@ tree_indented_foreign() { printf 'foo v1.0.0\n└── x v0.1.0\n    warning: s
 tree_indented_truncation() { printf 'foo v1.0.0\n└── x v0.1.0\n    ... 3 more lines\nfoo v2.0.0\n└── y v0.2.0\n'; }
 # POSITIVE: every indented shape MEASURED in real output — deep branch nesting in both
 # charsets, and the INDENTED section headers the column-zero allowlist never covered.
+# P24 writers (roborev round 12). Both are REAL duplicate groups (foo x2), so
+# implausible-census cannot catch them: the census is plausible and merely INCOMPLETE.
+tree_trailing_garbage() { printf 'foo v1.0.0 *** truncated ***\nfoo v2.0.0\n'; }
+tree_connector_foreign() { printf 'foo v1.0.0\nfoo v2.0.0\n\u251c\u2500\u2500 warning: not a package entry\n'; }
+# POSITIVE: every trailing-group spelling MEASURED in real output.
+tree_trailing_ok() {
+  cat <<'EOF'
+foo v1.0.0 (*)
+foo v2.0.0 (proc-macro)
+bar v0.1.0 (/abs/path/to/crate)
+bar v0.2.0 (/abs/path/to/crate) (*)
+EOF
+}
 tree_indented_ok() {
   cat <<'EOF'
 foo v1.0.0
@@ -824,6 +837,31 @@ d=$(new_tree p23c); plant_cargo "$d" 0 tree_indented_ok; run_guard "$d"
 assert_case "P23c: deep nesting in BOTH charsets and INDENTED [dev-/build-dependencies] headers are all still COUNTED, not refused" \
   0 'MEASURED 2 duplicate instance(s) / 1 duplicated crate(s)' 'verdict NO-INCREASE'
 
+# --- P24: THE WHOLE LINE IS VALIDATED, NOT ITS FIRST TWO FIELDS ----------
+# roborev round 12, two Mediums, both the same false-verdict class as rounds 9 and 11 —
+# and the second was the round-11 fix's OWN blind spot (it validated indented connectors
+# and left the COLUMN-ZERO connector arm skipping unconditionally). Hence one shared
+# `_record_ok`/`_connector_line_ok` pair rather than a fourth instance patch.
+d=$(new_tree p24a); plant_cargo "$d" 0 tree_trailing_garbage; run_guard "$d"
+assert_case "P24a: unrecognised trailing content after a VALID name/version pair is refused — 'foo v1.2.3 *** truncated ***' used to be counted" \
+  3 'SKIP-UNMEASURABLE cause=malformed-record' 'unrecognised trailing content'
+case "$OUT" in
+  *'verdict '*) bad "P24a: THE FINDING, REPRODUCED — a verdict was published from a record with arbitrary trailing text" ;;
+  *)            ok "P24a: no verdict is published from a record carrying unrecognised trailing text" ;;
+esac
+d=$(new_tree p24b); plant_cargo "$d" 0 tree_connector_foreign; run_guard "$d"
+assert_case "P24b: a COLUMN-ZERO line starting with a connector character is validated too — round 11 fixed only the indented arm" \
+  3 'SKIP-UNMEASURABLE cause=unrecognised-connector-line' 'warning: not a package entry'
+case "$OUT" in
+  *'verdict '*) bad "P24b: THE FINDING, REPRODUCED — a connector-prefixed foreign line bypassed the closed parser" ;;
+  *)            ok "P24b: no verdict is published when a connector-prefixed line cannot be classified" ;;
+esac
+# POSITIVE, and what stops this tightening reddening correct input: every trailing-group
+# spelling measured in real output — ' (*)', ' (proc-macro)', a source path, and combined.
+d=$(new_tree p24c); plant_cargo "$d" 0 tree_trailing_ok; run_guard "$d"
+assert_case "P24c: all MEASURED trailing-group spellings are still COUNTED, not refused" \
+  0 'MEASURED 4 duplicate instance(s) / 2 duplicated crate(s)' 'verdict NO-INCREASE'
+
 # --- P12: --regenerate round trip ----------------------------------------
 d=$(new_tree p12 none); plant_cargo "$d" 0 tree_grew
 run_guard "$d" --regenerate
@@ -1371,7 +1409,7 @@ echo "dep-duplicates ratchet self-test: $PASS passed, $FAIL failed"
 # ROUND 8 ADDS THREE AND MOVES THE FLOOR BY THREE: the P11 leading-zero shapes are
 # planted (shim cargo + plant_timeout), so they are host-independent BY CONSTRUCTION and
 # a deletion of them must red. 46 + 3 = 49.
-CASE_FLOOR=65
+CASE_FLOOR=71
 if [ $((PASS + FAIL)) -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - only %s verdicts were produced (floor %s): cases are being skipped or dying silently.\n' \
     "$((PASS + FAIL))" "$CASE_FLOOR" >&2
