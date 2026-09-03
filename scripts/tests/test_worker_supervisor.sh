@@ -10597,11 +10597,20 @@ test_object_store_sweep_claim_wait_completed_stops_contending() {
     fi
     # THE PROPERTY: ONE completion, no re-contention, the worker runs, and NO fsck was spent
     # (the box is inside the interval — that is what a fresh stamp means).
-    if [[ "$rc" == 0 && "$completed_n" -eq 1 && "$skipped_n" -eq 1 && -f "$counter" && ! -s "$calls" ]]; then
+    #
+    # THE CONTROL ARM DELIBERATELY DOES **NOT** REQUIRE THE NEW SKIP LINE, and that is what
+    # keeps it a one-property control. Its job is to show that the dead-peer arm's verdict is
+    # the PERSISTENT CLAIM and not a lane that has stopped working, so it must stay passable
+    # under a mutant that removes the fix (round 13's lesson: a control that reds under the
+    # subject's own mutant proves nothing about the subject). A released peer lets the lane
+    # proceed by EITHER route — the new skip, or the acquire-and-release round trip the old
+    # code took — and both are "it proceeded, promptly, having swept nothing".
+    if [[ "$rc" == 0 && "$completed_n" -eq 1 && -f "$counter" && ! -s "$calls" ]] &&
+      { [[ "$arm" != dead-peer ]] || [[ "$skipped_n" -eq 1 ]]; }; then
       if [[ "$arm" == dead-peer ]]; then
         pass "obj-sweep(claim-wait-completed/dead-peer): a peer that advertises a sweep and then never releases its claim ends this lane's wait ONCE — the lane skips the interval and runs its worker instead of re-contending for a claim nobody will give up"
       else
-        pass "obj-sweep(claim-wait-completed/released-control): the SAME staging with the peer RELEASING normally also ends in one completion and one skip, inside the same cap — so the dead-peer arm is the persistent claim and not a lane that stopped working"
+        pass "obj-sweep(claim-wait-completed/released-control): the SAME staging with the peer RELEASING normally also ends in one completion, inside the same cap, with no fsck spent — so the dead-peer arm is the persistent claim and not a lane that stopped working"
       fi
     elif [[ "$rc" == timeout ]]; then
       fail "obj-sweep(claim-wait-completed/$arm): THE DEFECT — the lane did NOT exit within 20s (the derived wait budget is 63s, so this is not the wait expiring): it observed the peer's completion $completed_n time(s), i.e. it went back and contended for the still-present claim after every one of them, spinning until the wall-clock budget (see $d/sup.log)"
