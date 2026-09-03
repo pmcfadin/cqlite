@@ -5430,10 +5430,11 @@ else
     SCC_STUB_STATE="$scc_state_w" SCC_STUB_LOG="$scc_log_fresh" --fix-sccache-cap)
   scc_sl_fresh=$(scc_slice "$scc_out_fresh")
   if out_has "$scc_sl_fresh" -E '\[gap\].*sccache-cap: SCOPED-NON-LOGIN' \
-     && [ "$(scc_warns "$scc_sl_fresh")" = 1 ] && [ "$(scc_oks "$scc_sl_fresh")" = 0 ]; then
+     && [ "$(scc_warns "$scc_sl_fresh")" = 0 ] && [ "$(scc_oks "$scc_sl_fresh")" = 0 ] \
+     && [ "$(scc_gaps "$scc_sl_fresh")" = 1 ]; then
     ok "sccache-cap: a fresh box with NO server reaches the BEST state (SCOPED-NON-LOGIN with all links measured) — the section starts the server under the persisted value instead of learning nothing"
   else
-    bad "sccache-cap: a fresh box with no running server did not reach the best state (roborev finding 2)"
+    bad "sccache-cap: a fresh box with no running server did not reach the best state (roborev finding 2) (oks=$(scc_oks "$scc_sl_fresh") warns=$(scc_warns "$scc_sl_fresh") gaps=$(scc_gaps "$scc_sl_fresh"))"
     printf '%s\n' "$scc_sl_fresh" | head -8
   fi
   if out_has "$scc_sl_fresh" 'THIS RUN STARTED' \
@@ -5471,12 +5472,13 @@ else
     SCC_STUB_USED=null SCC_STUB_LOG="$scc_log_empty" --fix-sccache-cap)
   scc_sl_empty=$(scc_slice "$scc_out_empty")
   if out_has "$scc_sl_empty" -E '\[gap\].*sccache-cap: SCOPED-NON-LOGIN' \
-     && [ "$(scc_warns "$scc_sl_empty")" = 1 ] && [ "$(scc_oks "$scc_sl_empty")" = 0 ] \
+     && [ "$(scc_warns "$scc_sl_empty")" = 0 ] && [ "$(scc_oks "$scc_sl_empty")" = 0 ] \
+     && [ "$(scc_gaps "$scc_sl_empty")" = 1 ] \
      && ! out_has "$scc_sl_empty" 'THIS RUN STARTED' \
      && ! grep -q -- '--start-server' "$scc_log_empty"; then
     ok "sccache-cap: a RUNNING server with an empty cache (cache_size null) is read as an ALREADY-RUNNING server — no start, no UNMEASURED"
   else
-    bad "sccache-cap: a running server with an empty cache was mistaken for no server (the null-size premise is back)"
+    bad "sccache-cap: a running server with an empty cache was mistaken for no server (the null-size premise is back) (oks=$(scc_oks "$scc_sl_empty") warns=$(scc_warns "$scc_sl_empty") gaps=$(scc_gaps "$scc_sl_empty"))"
     printf '%s\n' "$scc_sl_empty" | head -6; cat "$scc_log_empty" | head -3
   fi
 
@@ -5816,6 +5818,70 @@ if [ -r "$scc_profile" ] \
 else
   bad "sccache-cap: verify.run no longer passes --fix-sccache-cap — launched boxes will arrive UNCAPPED"
   grep -nE '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$scc_profile" | head -2
+fi
+
+# --- 12b-v. THE VERIFY CONTRACT MUST BE SATISFIABLE, NOT MERELY WELL-SHAPED (#3727 round 428) --
+# EVERY case above asserts the SHAPE of verify.run — that it carries this flag, that the cap
+# literals agree. None of them asked the only question a launched box cares about: CAN THIS
+# COMMAND SUCCEED? Round 426 made section 5b2's best state a [warn], so `--strict` exited 1 and
+# `All checks green.` was never printed on ANY host, and the whole suite stayed green while
+# every agent-machine verification on the fleet was broken — including on correctly provisioned
+# hosts. A contract nothing can satisfy is worse than no contract: an alarm that always fires is
+# waived, and then nothing is checked at all.
+#
+# So this case EXECUTES the profile's own command in the otherwise-healthy sandbox and requires
+# BOTH halves of the contract to hold: `--strict` exit 0 AND the literal `expect` string in
+# stdout. Two callers read two different signals (the launcher matches the string; everything
+# else reads the exit code), so a case asserting only one of them cannot see them diverge.
+#
+# THE FLAGS AND THE EXPECTED TEXT ARE DERIVED FROM profile.yaml, NEVER RESTATED HERE. A copy
+# would let the profile change under a test that keeps passing against the old contract — which
+# is this issue's own defect one level up. The derivation is fail-closed: an unreadable profile,
+# a missing key, or a run line whose arguments are not all `--flags` reds rather than silently
+# testing a shorter command (an empty flag set would make this the plain `--strict` case, which
+# 7p-a already covers, and it would pass while proving nothing about the profile).
+scc_v_run=$(sed -n 's/^[[:space:]]*run:[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$scc_profile" | head -1)
+scc_v_expect=$(sed -n 's/^[[:space:]]*expect:[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$scc_profile" | head -1)
+# Everything after the script path is the flag set. Validated token by token: only `--x` forms
+# are executed, so nothing else in that string can become an argument.
+scc_v_flags=${scc_v_run#*bootstrap-agent-machine.sh}
+scc_v_bad_tok=""
+# shellcheck disable=SC2086  # deliberate word-splitting: the flag set IS a token list
+for scc_v_t in $scc_v_flags; do
+  case "$scc_v_t" in --?*) ;; *) scc_v_bad_tok="$scc_v_t" ;; esac
+done
+if [ ! -r "$scc_profile" ] || [ -z "$scc_v_run" ] || [ -z "$scc_v_expect" ]; then
+  bad "verify-contract: could not read verify.run/verify.expect from .agent-ami/profile.yaml — the contract cannot be exercised"
+elif [ -z "${scc_v_flags// /}" ] || [ -n "$scc_v_bad_tok" ]; then
+  bad "verify-contract: verify.run's argument list is not a pure flag set (offending token: '${scc_v_bad_tok:-<empty>}') — refusing to execute it"
+else
+  # The SAME sandbox shape as 7p-a: a healthy, capped, push-capable box — i.e. the state a
+  # launched instance is in by the time verify runs. If THIS cannot certify, no real box can.
+  bare7pv="$tmp/bare7pv.git"; mk_push_bare "$bare7pv"
+  repo7pv="$tmp/repo7pv"; mk_push_repo "$repo7pv" "file://$bare7pv"
+  bin7pv="$tmp/bin7pv"; mk_push_bin "$bin7pv"
+  gc7pv="$tmp/gc7pv"; : >"$gc7pv"
+  # shellcheck disable=SC2086  # the validated flag set must reach bootstrap as separate args
+  run_push "$repo7pv" "$bin7pv" "$gc7pv" $scc_v_flags
+  out7pv=$push_out; rc7pv=$push_rc
+  if [ "$rc7pv" -eq 0 ] && out_has "$out7pv" -F "$scc_v_expect"; then
+    ok "verify-contract: .agent-ami/profile.yaml's verify.run CAN succeed on a healthy box — exit 0 and its expect string '$scc_v_expect' both satisfied"
+  else
+    bad "verify-contract: verify.run CANNOT succeed on a healthy box (rc=$rc7pv, expect '$scc_v_expect' $(out_has "$out7pv" -F "$scc_v_expect" && echo matched || echo ABSENT)) — every agent-machine verification on the fleet fails, including correctly provisioned hosts"
+    push_plain "$out7pv" | grep -E '^[[:space:]]+\[(warn|gap)\]' | head -5
+  fi
+  # AND THE GREEN MUST NOT HAVE BEEN BOUGHT BY DROPPING THE GAP. The other way to make this
+  # command pass is to stop reporting section 5b2's scope limit at all — a silent green, which
+  # is exactly what round 426 was right to remove. Passability and honesty are asserted TOGETHER
+  # or each becomes satisfiable by breaking the other.
+  if out_has "$out7pv" -E '\[gap\].*sccache-cap: SCOPED-NON-LOGIN' \
+     && out_has "$out7pv" -F 'declared gap(s) RECOGNISED' \
+     && ! out_has "$out7pv" -E '\[ok\].*sccache-cap:'; then
+    ok "verify-contract: that certifying run STILL reports 5b2's scope limit as a [gap] and counts it in the summary — the pass was not bought by silence or by an [ok]"
+  else
+    bad "verify-contract: the certifying run hid section 5b2's scope limit (gap line, summary count, or an [ok] appeared) — a silent green is the #3727 defect, not the fix"
+    push_plain "$out7pv" | grep -E 'sccache-cap:|declared gap' | head -5
+  fi
 fi
 
 # --- 12c. ONE ANSWER TO "WHICH sccache" PER CONTEXT (issue #3727, roborev job 413) ------
@@ -6444,7 +6510,7 @@ else
   printf '%s\n' "$pin_cov_missing"
 fi
 
-# --- 15. THE THREE GREEN-PATH CASES MUST HAVE RUN, BY NAME (#3414 roborev round 7) -----
+# --- 15. THE GREEN-PATH CASES MUST HAVE RUN, BY NAME (#3414 rd 7; #3727 rd 428) --------
 # They have now been silently disabled TWICE by unrelated changes — once when section 5b
 # started warning in every sandbox (round 4), once when the seam began refusing under root
 # (round 7). Both times the suite reported FAIL=0 and both times the skip count was the
@@ -6452,15 +6518,20 @@ fi
 # announced as passes; this catches the EFFECT directly, keyed on the case names, because
 # the two prior recurrences arrived through different causes and a third will too.
 pin_mustrun_missing=""
+# The 7p-a entry was RENAMED by #3727 round 428 (it asserts the full green again, not a
+# residual) and the verify-contract case JOINS the registry: a case that proves
+# .agent-ami/profile.yaml's verify.run can succeed is precisely the kind that must not stop
+# running unnoticed, and it lives behind the same sandbox preconditions as the other three.
 for pin_mustrun in \
-  "push: VERIFIED leaves NO warning of its own" \
+  "push: a VERIFIED machine reaches 'All checks green.'" \
   "push: AC1+AC3 end to end" \
-  "push: the refusal is exactly ONE warning and names the host"; do
+  "push: the refusal is exactly ONE warning and names the host" \
+  "verify-contract: .agent-ami/profile.yaml's verify.run CAN succeed"; do
   out_has "$PIN_RAN_CASES" -F -- "$pin_mustrun" \
     || pin_mustrun_missing="${pin_mustrun_missing:+$pin_mustrun_missing; }$pin_mustrun"
 done
 if [ -z "$pin_mustrun_missing" ]; then
-  ok "suite: the three green-path cases RAN (not skipped by a warning-count drift)"
+  ok "suite: every green-path case RAN by name, verify.run passability included (not skipped by a warning-count drift)"
 else
   bad "suite: green-path case(s) did not run — silently disabled again: $pin_mustrun_missing"
 fi

@@ -117,17 +117,28 @@ verify:
   # probing a fresh session AND the running server, so a box that cannot be capped stays
   # non-passing and --strict still exits 1.
   #
-  # SINCE #3727 ROBOREV ROUND 426, NO BOX PASSES THIS STEP ON THE SCCACHE HALF, AND THAT IS A
-  # PENDING FLEET DECISION RATHER THAN A SETTLED DESIGN. Section 5b2 measures ONE launch context
-  # (a non-login PAM session) while a LOGIN shell runs /etc/profile.d after pam_env and can
-  # export a DIFFERENT value -- measured on box3, same tree: a detached gate reported
-  # sccache-cap=32212254720 while a lane-shell --lite reported 53687091200. An [ok] there
-  # certified a cap no gate had to receive, so the section's strongest verdict is now
-  # SCOPED-NON-LOGIN, a [warn]. Every bootstrap invocation therefore carries at least that one
-  # warning, so `--strict` exits 1 and `All checks green.` is NEVER printed -- the `expect`
-  # below cannot match on any host until #3946 measures the launch contexts. The `expect`
-  # string is deliberately LEFT AS IT IS: it is the artifact that makes this visible, and
-  # quietly relaxing it would restore exactly the silent green #3727 exists to remove.
+  # THIS STEP MUST BE SATISFIABLE ON A HEALTHY BOX, AND FOR ONE ROUND IT WAS NOT (#3727 roborev
+  # rounds 426 + 428). Section 5b2 measures ONE launch context (a non-login PAM session) while a
+  # LOGIN shell runs /etc/profile.d after pam_env and can export a DIFFERENT value -- measured on
+  # box3, same tree: a detached gate reported sccache-cap=32212254720 while a lane-shell --lite
+  # reported 53687091200. An [ok] there certified a cap no gate had to receive, so the section's
+  # strongest verdict is SCOPED-NON-LOGIN and it is NEVER an [ok]. Round 426 got that right and
+  # then emitted it as a [warn] -- and `--strict` fails on any warning, so this command could not
+  # print `All checks green.` or exit 0 on ANY host, forever, including a perfectly provisioned
+  # one, because nothing an operator does on a box clears a limit of what the script MEASURES.
+  # A verification that always fails is one people waive, and a waived preflight checks nothing:
+  # strictly worse than the false [ok] it replaced.
+  # SCOPED-NON-LOGIN is therefore a [gap] -- bootstrap's third status class, as loud as a [warn],
+  # never a success token, counted and NAMED separately in the summary -- and `--strict` keys on
+  # warnings alone. So a healthy box reaches `All checks green.` (the `expect` below matches)
+  # WITH the [gap] line printed beside it: green means nothing on THIS box needs attention, not
+  # that every property was established. The cap a gate actually gets is still NOT certified by
+  # this step; #3946 owns that, the per-run authority is the gate's own
+  # `accelerators: ... sccache-cap=<bytes>` token, and the [gap] line says exactly that on every
+  # run. `expect` is unchanged, and the passability of this exact command is asserted by
+  # scripts/tests/test_bootstrap_agent_machine.sh (case 12b-v), which derives the flags and the
+  # expected text FROM THIS FILE and requires the [gap] to survive the green -- so neither an
+  # always-red contract nor a silent green can ship again.
   run: "bash scripts/bootstrap-agent-machine.sh --fix-credentials --fix-gate-pin --fix-sccache-cap --strict"
   expect: "All checks green."
 hooks:

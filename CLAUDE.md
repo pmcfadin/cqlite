@@ -952,15 +952,32 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   persists the value and MEASURES four links: the `/etc/environment` line, the value a fresh
   non-login PAM session sees, that value in BYTES (asked of an ISOLATED sccache, never
   reimplemented) and the BYTES the running server enforces. **Its strongest verdict is
-  `SCOPED-NON-LOGIN`, and NO state of that section is an `[ok]` (#3727 roborev round 426)** — so
-  `--strict` does not go green on it, on any box, while #3946 is open. That is deliberate: all
-  four links are measured in ONE launch context, and an `[ok]` there certified the cap a GATE
-  gets from a measurement that never looked at a login shell. Measured, same box and same tree:
-  a detached gate reported `sccache-cap=32212254720` while a lane-shell `--lite` reported
+  `SCOPED-NON-LOGIN`, and NO state of that section is an `[ok]` (#3727 roborev round 426)** —
+  all four links are measured in ONE launch context, and an `[ok]` there certified the cap a
+  GATE gets from a measurement that never looked at a login shell. Measured, same box and same
+  tree: a detached gate reported `sccache-cap=32212254720` while a lane-shell `--lite` reported
   `53687091200`. Per #3414's rule a partial result is UNKNOWN, never an `[ok]`; reusing
   `NOT-SYSTEM-WIDE` was rejected (it asserts a MEASURED file-vs-session disagreement, which here
   was measured to be ABSENT) and so was `UNMEASURED` (every link WAS read — reporting less than
   was measured is a wrong ANSWER that sends an operator hunting a broken probe).
+  **BUT "NOT AN `[ok]`" IS NOT "A `[warn]`", AND CONFLATING THEM BROKE EVERY MACHINE
+  VERIFICATION ON THE FLEET (#3727 roborev round 428).** Round 426 emitted this verdict as a
+  `[warn]`, which counts toward `WARNINGS`, and `--strict` fails on any warning — so
+  `.agent-ami/profile.yaml`'s `verify.run` could **never** print `All checks green.` or exit 0
+  **on any host, forever, including a perfectly provisioned one**, since no action on any box
+  clears a limit of what the script MEASURES. That is strictly worse than the false `[ok]` it
+  replaced: **a check that always fails gets waived, and then nothing is checked at all.** So
+  bootstrap has a THIRD status class, `[gap]`, with its own counter: as loud as a `[warn]`,
+  never a success token, counted and named in the summary (`N declared gap(s) RECOGNISED`,
+  affirmative `0 RECOGNISED` when there are none), and **`--strict` keys on `WARNINGS`
+  alone**. A healthy box therefore reaches `All checks green.` **with the `[gap]` line still
+  printed beside it** — green means nothing on THIS box needs attention, never that every
+  property was established. The distinction to carry elsewhere: **a `[warn]` is a per-box
+  defect an operator can clear; a `[gap]` is a declared incompleteness of the measurement,
+  identical on every correct host and clearable only by landing the issue it names** — and a
+  guard that reds on correct input is the guard agents learn to waive. Its one caller today is
+  this verdict, and the suite pins BOTH directions (exactly one `gap()` for it, ZERO `warn()`s),
+  because an `[ok]` is the false certification and a `[warn]` is the always-red preflight.
   **And every one of those sccache calls is made by the DROPPED-PRIVILEGE session, because
   bootstrap's documented invocation is `sudo bash scripts/bootstrap-agent-machine.sh` while the
   binary it resolves is `<the invoking account's home>/.cargo/bin/sccache` (#3727, roborev job
