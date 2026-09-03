@@ -53,16 +53,34 @@ impl V5CompressedLegacyParser {
     /// Decode the partition header at `offset`, or say what the walk should do
     /// instead.
     ///
-    /// `extent` decides the tolerance and NOTHING else does: the parse cannot
-    /// know whether more bytes can arrive, so the caller states it (see
-    /// [`BufferExtent`]'s contract, which forbids a default).
+    /// Tolerance is decided by TWO caller-stated facts and nothing else:
+    ///
+    /// * `extent` — can more bytes still arrive? The parse cannot know, so the
+    ///   caller states it (see [`BufferExtent`]'s contract, which forbids a
+    ///   default).
+    /// * `bounded` — was this walk asked to stop SHORT of the extent? A #954
+    ///   clustering-slice walk (`row_body_window`) stops its row loop at
+    ///   `body_end`, mid-partition by construction, and the outer partition loop
+    ///   then re-enters here at bytes that were never claimed to begin a
+    ///   partition. Only an UNBOUNDED walk over a complete buffer can hold the
+    ///   bytes at `offset` to that promise, so only there is an undecodable
+    ///   header proof of corruption.
+    ///
+    /// Every production caller that passes a `row_body_window` today also passes
+    /// [`BufferExtent::Window`] (`big_promoted.rs`, `bti_point.rs`), so `bounded`
+    /// changes nothing for them; it is what keeps the `Complete`-plus-window
+    /// combination — which nothing forbids, and which
+    /// `regression_1741c_tests.rs` uses — from being refused on correct input.
     pub(super) fn block_partition_header(
         &self,
         data: &[u8],
         offset: usize,
         extent: BufferExtent,
+        bounded: bool,
         partition_index: usize,
     ) -> Result<HeaderStep> {
+        // The ONE tolerance predicate, named once and read twice below.
+        let refuse = extent.is_complete() && !bounded;
         // Cassandra partition key size limits (used in header validation)
         // - CASSANDRA_MAX_KEY_SIZE: 64KB limit per Apache Cassandra specification
         // - FORMAT_MAX_KEY_SIZE: u8 max value - V5CompressedLegacy format limitation
@@ -82,34 +100,33 @@ impl V5CompressedLegacyParser {
         // - Bytes 2+: partition key data
         //
         // NOTE: no heuristic validation of `flags` (issues #258, #28).
-        if offset + 2 > data.len() {
-            // Issue #3928: on a WINDOW this is the tail of the chunk and the
-            // header continues in the next one. On a PROVEN-COMPLETE buffer
-            // there is no next one, so trailing bytes that cannot even begin a
-            // header are corruption — a Cassandra `Data.db` is exactly a
-            // concatenation of partitions with no padding
-            // (`SortedTableWriter.append` → `SortedTablePartitionWriter.start`
-            // per partition, cassandra-5.0.8), so `offset` here is either
-            // `data.len()` (handled by the caller's loop condition) or a partial
-            // header nothing can complete.
-            return if extent.is_complete() {
-                Err(undecodable_partition_header(
-                    offset,
-                    &format!(
-                        "only {} byte(s) remain, fewer than the 2 a header needs \
-                         (partition={partition_index})",
-                        data.len() - offset
-                    ),
-                ))
-            } else {
-                tracing::debug!(
-                    "V5CompressedLegacy: Not enough bytes for partition header at offset {} \
-                     (need 2, have {}), stopping",
-                    offset,
-                    data.len() - offset
-                );
-                Ok(HeaderStep::EndOfBlock)
-            };
+        // `remaining` rather than `offset + N > data.len()`: the caller's loop
+        // guarantees `offset < data.len()`, but a saturating subtraction states
+        // each bound below without an addition a reader has to check.
+        let remaining = data.len().saturating_sub(offset);
+        if remaining < 2 {
+            // DELIBERATELY NOT FATAL on either extent — the one header answer
+            // issue #3928 left exactly as it found it.
+            //
+            // It is not the resync: nothing is skipped and nothing is
+            // re-interpreted, the walk simply ends. And fewer than two bytes
+            // cannot be a partition Cassandra wrote, so there is no partition
+            // here to DROP and no misaligned header to INVENT — neither harm
+            // this issue exists to remove is reachable.
+            //
+            // Making it fatal on a `Complete` buffer was TRIED and REVERTED: a
+            // #954 clustering-slice walk stops its row loop at `body_end`, which
+            // sits immediately BEFORE that partition's `END_OF_PARTITION` byte,
+            // so a bounded walk over a truthfully-complete buffer ends with
+            // exactly ONE byte unconsumed as a NORMAL outcome. It red
+            // `regression_1741c_tests::range_tombstone_before_slice_is_shadowed_on_windowed_read`,
+            // and a guard that reds on correct input is the guard agents learn
+            // to waive.
+            tracing::debug!(
+                "V5CompressedLegacy: Not enough bytes for partition header at offset \
+                 {offset} (need 2, have {remaining}), stopping"
+            );
+            return Ok(HeaderStep::EndOfBlock);
         }
 
         let flags = data[offset];
@@ -122,14 +139,13 @@ impl V5CompressedLegacyParser {
         let header_min_size = 1 + 1 + key_len + deletion_time_min;
         if key_len == 0
             || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE)
-            || offset + header_min_size > data.len()
+            || header_min_size > remaining
         {
             let detail = format!(
                 "flags=0x{flags:02x}, key_len={key_len}, need {header_min_size} bytes, \
-                 have {}, partition={partition_index}: header validation failed",
-                data.len() - offset
+                 have {remaining}, partition={partition_index}: header validation failed"
             );
-            if extent.is_complete() {
+            if refuse {
                 return Err(undecodable_partition_header(offset, &detail));
             }
             tracing::warn!(
@@ -145,7 +161,7 @@ impl V5CompressedLegacyParser {
                 // Issue #3928: the error's own kind is preserved and returned on
                 // a proven-complete buffer — the same rule, and the same reason,
                 // as the row arm's `return Err(e)` (#3782).
-                if extent.is_complete() {
+                if refuse {
                     return Err(e);
                 }
                 tracing::warn!(

@@ -130,7 +130,13 @@ impl V5CompressedLegacyParser {
             // both drops the partition and can invent one out of misaligned
             // bytes. `?` propagates that refusal; `Resync`/`EndOfBlock` are only
             // reachable on a `BufferExtent::Window`.
-            match self.block_partition_header(data, offset, extent, partition_index)? {
+            match self.block_partition_header(
+                data,
+                offset,
+                extent,
+                row_body_window.is_some(),
+                partition_index,
+            )? {
                 HeaderStep::Parsed(partition_key, new_offset, partition_deletion) => {
                     let header_size = new_offset - offset;
                     offset = new_offset;
