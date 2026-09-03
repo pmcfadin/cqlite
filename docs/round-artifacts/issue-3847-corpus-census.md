@@ -3,73 +3,100 @@
 Acceptance criterion: *"run the 144-file corpus before/after census (a table that
 gains rows is the expected direction here, and must be explained)."*
 
+**This is a RE-RUN at the final sha (roborev job 99, finding 1).** The first census
+measured its AFTER leg at `13401947e`, and six production commits landed after it —
+including the marshal-resolver changes of jobs 97/98, which are exactly the code a
+non-regression claim has to cover. Worse, its BEFORE leg was `b2132fb2c`, which
+predates this branch's rebase: the merge-base is now `fb889e227`, so **both** legs
+were stale and re-running only the AFTER leg would have compared against a base that
+no longer exists. A measurement artifact is a fact about ONE TREE, and every commit
+after it widens the gap between what it claims and what it measured.
+
 ## Method
 
-Subject set **DISCOVERED ON DISK**, never a hard-coded count (CLAUDE.md #1229):
-`find $CQLITE_DATASETS_ROOT -name '*-Data.db'` → **155 files** on this box
+Subject set **DISCOVERED ON DISK**, never a hard-coded count:
+`find $CQLITE_DATASETS_ROOT -name '*-Data.db'` → **155 files**
 (`CQLITE_DATASETS_ROOT=/data/datasets`, the root
-`test-data/scripts/fetch-datasets.sh --verify-only` names; the criterion's "144"
-is a count from an earlier corpus pin). Per file, two observables:
+`test-data/scripts/fetch-datasets.sh --verify-only` names; the criterion's "144" is a
+count from an earlier corpus pin). Per file, two observables:
 
 1. the **row count**, `jq 'length'` over `cqlite read-sstable <Data.db> --format json`;
-2. a **hash of the whole rendered JSON** (`sha256sum`, first 16 hex) — so a
-   changed VALUE at an unchanged row count is visible, which a row count alone
-   cannot see.
+2. a **hash of the whole rendered JSON** (`sha256sum`, first 16 hex) — so a changed
+   VALUE at an unchanged row count is visible, which a row count alone cannot see.
 
-Two `cqlite-cli` debug binaries, one per tree:
+Two `cqlite-cli` debug binaries, one per tree, both run from one scratch cwd (the CLI
+writes a `cqlite.db` beside itself, which must not land in either worktree):
 
 | leg | tree | commit |
 |---|---|---|
-| BEFORE | `git worktree --detach` at `merge-base(HEAD, origin/main)` | `b2132fb2c` |
-| AFTER | this branch | `13401947e` |
+| BEFORE | `git worktree --detach` at `merge-base(HEAD, origin/main)` | `fb889e227` |
+| AFTER | this branch | `6a3b1c1d5` |
 
-Both legs ran from one scratch cwd (the CLI writes a `cqlite.db` beside itself,
-which must not land in either worktree).
+Only `docs/round-artifacts/**` changes after `6a3b1c1d5` (this file and its two TSVs),
+so the AFTER leg covers every code commit on the branch.
 
-## Result: byte-for-byte identical, and NOT vacuous
+## Result: byte-for-byte identical
 
 ```
-files=155  decoded=151  zero-row=0  error=4  total-rows=21000
+files=155  decoded=141  no-output=10  corruption-fixtures=4  total-rows=21000
 diff BEFORE AFTER  ->  0 lines
 ```
 
-- **No table gained rows, no table lost rows, and no rendered output changed** —
-  the two censuses are identical on every one of the 155 files, hashes included.
-- The 4 `ERROR(rc=5)` files are the DELIBERATELY corrupted fixtures
-  (`corruption/test_comp_corrupt/{compression_info_bad_offset,data_db_bit_flip,`
-  `data_db_truncation,uncompressed_data_bit_flip}`). They fail identically on both
-  legs: this change neither repaired nor broke a corruption fixture.
-- **Non-vacuity is measured, not asserted**: 151 files decoded, **zero** of them
-  to 0 rows, 21000 rows total. A corpus-less root would have produced 0 files or
-  0 rows and is distinguishable from this.
+No table gained rows, none lost rows, and **no rendered output changed** — the two
+censuses are identical on all 155 files, hashes included.
+
+### Three states, counted honestly
+
+The previous artifact reported `decoded=151 ... zero-row=0 error=4`, which folded ten
+files that **emit no output at all** into "decoded". That overstated the result, so the
+accounting here is three-way:
+
+- **141 files decode to a row count**, totalling 21000 rows, **none of them 0** —
+  this is the non-vacuity evidence, measured rather than asserted. A corpus-less root
+  would have produced 0 files or 0 rows and is distinguishable from this.
+- **10 files emit nothing** (`ERROR` in the TSVs, rendered-JSON hash
+  `e3b0c44298fc1c14` = sha256 of empty input): the `system` / `system_schema`
+  metadata tables (`sstable_activity`, `sstable_activity_v2`, `aggregates`,
+  `column_masks`, `functions`, `triggers`, `types`, `views`) plus two tombstone-only
+  test tables (`test_tomb/skipped_partition_delete` `nb-2`,
+  `test_types/ct_deleted_counter_shadowing` `nb-2`). Identical on both legs.
+- **4 deliberately corrupted fixtures** under `corruption/test_comp_corrupt/`
+  (`compression_info_bad_offset`, `data_db_bit_flip`, `data_db_truncation`,
+  `uncompressed_data_bit_flip`). They fail identically on both legs: this change
+  neither repaired nor broke a corruption fixture.
+
+**This run does not separate "no output" from "non-zero exit"** — the label is one
+`ERROR` covering both — because the two are distinguished by a return code this
+harness did not capture per file. The prior run's `UNPARSEABLE` / `ERROR(rc=5)` split
+is preserved in git history if that distinction is ever needed. Stated rather than
+papered over: what is established here is per-file OUTPUT equality between the two
+trees, which is the non-regression property, not a diagnosis of the 14.
+
+### The hash column is not comparable to the PREVIOUS artifact
+
+The recorded hashes differ from the superseded run's for the same files (e.g.
+`bti_partitions_footer_flip`: `de6511d8a9b3c22f` here, `6ec78e40b8498b30` before) at
+an unchanged row count. That is expected and is the reason the re-run was necessary:
+the baseline moved from `b2132fb2c` to `fb889e227`, so `main` changed the rendering in
+between. **Within this run both legs agree exactly**, which is the only comparison a
+non-regression claim rests on. Cross-run hash comparison is meaningless once the base
+has moved.
+
+Reproducibility spot-checked after the fact: the two `da-2-bti` rows were re-measured
+against a freshly rebuilt CLI and reproduced their recorded count and hash exactly.
 
 ## Why "no change" is the CORRECT result here, stated rather than assumed
 
-The acceptance criterion anticipated a table GAINING rows. It did not happen, and
-the reason is that the widened accepted set is **not exercised by this corpus**:
-no fixture carries a zero-length component for a fixed-width scalar (a
-zero-length frozen-collection element, tuple/UDT component or UDT field). The
-widening is therefore a **latent-correctness fix** — it makes CQLite read a shape
-Cassandra can legitimately write, and which this corpus happens not to contain —
-and its evidence is the unit oracle (`raw_value/fixed_width.rs`'s pinned
-`cassandra-5.0.8` `deserialize` table, and the 20 cases in the two
-`issue_3847_empty_fixed_width_tests.rs` files), not the census.
+The acceptance criterion anticipated a table GAINING rows. It did not happen, and the
+reason is that the widened accepted set is **not exercised by this corpus**: no fixture
+carries a zero-length component for a fixed-width scalar (a zero-length
+frozen-collection element, tuple/UDT component or UDT field). The widening is therefore
+a **latent-correctness** fix — it makes CQLite read a shape Cassandra can legitimately
+write, and which this corpus happens not to contain — and its evidence is the unit
+oracle (`raw_value/fixed_width.rs`'s pinned `cassandra-5.0.8` `deserialize` table and
+the 28 cases in the two `issue_3847_empty_fixed_width_tests.rs` files), **not** the
+census.
 
-What the census DOES establish, which is the thing that could have gone wrong: the
-change is not a REGRESSION. A widening of a width guard could have admitted
-garbage that previously errored, changed a decoded value, or shifted a
-consumption offset and truncated a row — `row_data.rs` `break`s its column loop
-on a failing column, so a mis-wired guard presents as a quietly truncated row
-rather than a failure. Identical hashes over 21000 rows is the measurement that
-rules that out.
-
-## Declared limits of this census
-
-- It reads the **corpus present on this box** (155 `*-Data.db`). A fixture set
-  containing a zero-length fixed-width component would move numbers here; none is
-  known to exist, and generating one is a WRITE-side exercise this change does not
-  attempt.
-- `read-sstable --format json` renders values as strings, so the hash is over
-  CQLite's rendering, not over typed values. It cannot distinguish two values with
-  one rendering — sufficient for a regression check, not an oracle for
-  correctness (which is what the Cassandra-pinned unit cases are for).
+What the census DOES establish is the thing that could have gone wrong: a widening of a
+width guard could have admitted garbage that previously errored, changed a decoded
+value, or shifted a row count. It did none of those. **This is not a regression.**
