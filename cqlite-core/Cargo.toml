@@ -400,6 +400,13 @@ required-features = ["state_machine", "cli-helpers", "lz4"]
 name = "issue_3928_corrupt_header_refusal"
 required-features = ["state_machine", "cli-helpers", "lz4"]
 
+# The TRUNCATED-header half of the same issue, split out at the 1500-line test
+# threshold (campsite rule, #1135). Same `#![cfg]` and the same three
+# load-bearing gates as its sibling, and executed by the same lanes.
+[[test]]
+name = "issue_3928_truncated_header_refusal"
+required-features = ["state_machine", "cli-helpers", "lz4"]
+
 [[bench]]
 name = "partition_lookup"
 harness = false
