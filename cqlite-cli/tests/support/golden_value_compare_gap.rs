@@ -78,11 +78,24 @@ pub enum Divergence {
     /// A frozen UDT nested inside another frozen UDT renders as its RAW BYTES in
     /// CQL blob-hex spelling instead of a decoded object.
     ///
+    /// **NO CASE DECLARES THIS GAP SINCE #3631**, which made the nested frozen UDT
+    /// decode: the `udt_nested` skip that used to carry it was retired by
+    /// [`Report::stale_skips`] the moment the two sides agreed at `e.home`. The
+    /// variant is KEPT rather than deleted for two reasons that are not about this
+    /// lane's current corpus — it is the subject the FIELD-scoped and CSV
+    /// staleness machinery is covered with (three suites in
+    /// `golden_value_compare*_tests.rs`), and it is the named OPPOSITE direction of
+    /// [`Divergence::NestedFrozenValueLeftUndecodedByGolden`], which those docs
+    /// rely on to say declaring the wrong one matches nothing. A regression that
+    /// reintroduced blob hex here would be reported as an ordinary diff, NOT
+    /// suppressed: a variant that exists suppresses nothing until a case declares
+    /// it at a path.
+    ///
     /// ORACLE: `sstabledump` decodes the nested value —
     /// `cassandra-5.0.8 UserType.toJSONString` walks the declared field list and
     /// writes each field — so the golden carries a JSON OBJECT there
     /// (`{"street":"1 Navy Way","city":"Arlington","zip":"22201"}` in the
-    /// committed `udt_nested` golden).
+    /// committed `udt_nested` golden — which the egress now MATCHES).
     ///
     /// EGRESS SHAPE: a blob literal and nothing else — `0x` followed by an EVEN
     /// number of hex digits, which is CQL's spelling of a byte string.
