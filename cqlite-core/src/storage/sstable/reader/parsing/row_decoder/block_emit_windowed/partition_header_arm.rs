@@ -36,7 +36,7 @@ use super::super::*;
 
 /// What the block-emit walk should do with the bytes at a candidate partition
 /// start.
-pub(super) enum HeaderStep {
+pub(in crate::storage::sstable::reader::parsing::row_decoder) enum HeaderStep {
     /// A structurally-valid header: the partition key, the offset of the first
     /// row/marker, and the partition-level deletion.
     Parsed(RowKey, usize, Option<(i64, i32)>),
@@ -76,7 +76,7 @@ impl V5CompressedLegacyParser {
     ///   partition's own `END_OF_PARTITION` marker). Tracking the STOP rather
     ///   than inferring it from a partition index is what makes both edges right
     ///   at once.
-    pub(super) fn block_partition_header(
+    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn block_partition_header(
         &self,
         data: &[u8],
         offset: usize,
@@ -84,94 +84,99 @@ impl V5CompressedLegacyParser {
         partition_index: usize,
     ) -> Result<HeaderStep> {
         let refuse = tolerance.refuses();
-        // Cassandra partition key size limits (used in header validation)
-        // - CASSANDRA_MAX_KEY_SIZE: 64KB limit per Apache Cassandra specification
-        // - FORMAT_MAX_KEY_SIZE: u8 max value - V5CompressedLegacy format limitation
-        const CASSANDRA_MAX_KEY_SIZE: usize = 65536; // 64KB per Cassandra spec
-        const FORMAT_MAX_KEY_SIZE: usize = 255; // u8 max value - format limitation
-
-        // CRITICAL FIX (Issue #164): validate the partition header format before
-        // attempting the parse.
+        // Issue #3928 fix round 3 (B2) — the oa/da DeletionTime SIZING RULE is
+        // CALLED, never re-derived.
         //
-        // Most compressed blocks contain EXACTLY ONE partition. After parsing the
-        // first partition's row data and trailing VInt we must NOT assume there is
-        // another partition just because `offset < data.len()`.
+        // This arm used to compute its own minimum,
+        // `if has_uint_deletion_time() { 1 } else { 12 }`, with no look at the
+        // discriminator. That is the PRE-#1741 rule: only the LIVE sentinel
+        // (`0x80`) is one byte, and a DELETED oa/da partition carries the full
+        // 12-byte form. So a legitimate deleted header STRADDLING a
+        // `BufferExtent::Window` passed the 1-byte minimum, failed the full
+        // parse, and returned `Resync` — discarding a header byte of HEALTHY
+        // data, the direction `buffer_extent.rs` records as being as much a
+        // defect as a swallow.
         //
-        // Partition header format:
-        // - Byte 0: flags (typically 0x00, sometimes partition-level flags)
-        // - Byte 1: partition key length (u8, NOT a VInt)
-        // - Bytes 2+: partition key data
+        // #1741 fixed exactly that, inside `partition_header_readiness`, which
+        // peeks `data[2 + key_len]` to size the form and answers `Incomplete`
+        // when the discriminator itself is absent. The two sliding drivers route
+        // through it; this arm did not, so the two implementations of one rule
+        // DRIFTED — the driver path got the fix and this one kept the bug. It now
+        // asks the same classifier, and the pair is pinned together in
+        // `regression_1741k_tests.rs`.
         //
-        // NOTE: no heuristic validation of `flags` (issues #258, #28).
-        // `remaining` rather than `offset + N > data.len()`: the caller's loop
-        // guarantees `offset < data.len()`, but a saturating subtraction states
-        // each bound below without an addition a reader has to check.
+        // The classifier also owns the key-length limits, so this arm no longer
+        // carries its own copy of the 255-byte cap.
+        //
+        // `remaining` survives for the DIAGNOSTICS only: no decision is made from
+        // a byte count (fix round 2), and the sub-two-byte case an earlier
+        // revision handled separately is simply `Incomplete` to the classifier.
         let remaining = data.len().saturating_sub(offset);
-        if remaining < 2 {
-            // Fewer bytes remain than ANY header needs — which decides NOTHING
-            // on its own, and treating it as a decision was finding C1's mirror
-            // on this arm. It is judged by the same `refuse` predicate as every
-            // other answer here, because the two tolerant readings are both
-            // about the CALLER's situation (see `HeaderTolerance::why_tolerant`)
-            // and neither is about how many bytes are left.
+        // `get(..).unwrap_or_default()` rather than `&data[offset..]`: this is
+        // reachable from `row_decoder` now, so an out-of-range offset must read
+        // as an empty buffer (which the classifier answers `Incomplete`) and
+        // never as a slice panic.
+        let head = data.get(offset..).unwrap_or_default();
+        match self.partition_header_readiness(head) {
+            // The header — or, for an oa/da DELETED partition, its full 12-byte
+            // DeletionTime — is not entirely present.
             //
-            // On an UNBOUNDED, proven-complete walk neither reading is
-            // available: the file ends here, so a surviving header stub is the
-            // evidence that the partition Cassandra wrote was truncated away —
-            // exactly as a truncated ROW's stub is under #3782. Reporting `Ok`
-            // there answered a query with one fewer partition than the file was
-            // written with, and it did so INCONSISTENTLY: the sibling
-            // cell-metadata walk (`block_emit.rs`) has no such carve-out, so
-            // `SELECT *` answered `Ok` and `SELECT *, WRITETIME(c)` answered
-            // `Err` on the same bytes (`data_access/mod.rs:249` vs `:288` hand
-            // both walks the SAME stitched `Complete` buffer). Pinned by
-            // `issue_3928_corrupt_header_refusal.rs`'s
-            // `both_stitched_walks_agree_and_refuse_a_truncated_final_header`.
-            if refuse {
-                return Err(undecodable_partition_header(
-                    offset,
-                    &format!(
-                        "only {remaining} byte(s) remain, fewer than the 2 any header needs \
-                         (partition={partition_index}){}",
-                        structural_note(data[offset])
-                    ),
-                ));
+            // On a WINDOW that is the ordinary straddle: the walk ends here and
+            // the caller refills. On an UNBOUNDED, proven-complete buffer no
+            // further bytes can arrive, so the partition Cassandra wrote here was
+            // truncated away and reporting a clean end of block would DROP it —
+            // the same verdict the drivers' arm reaches from the same
+            // classification (finding C1), and the reason the two stitched walks
+            // agree (`data_access/mod.rs:249` vs `:288` hand both the SAME
+            // stitched `Complete` buffer).
+            PartitionHeaderReadiness::Incomplete => {
+                if refuse {
+                    return Err(undecodable_partition_header(
+                        offset,
+                        &format!(
+                            "the header is INCOMPLETE — {remaining} byte(s) remain, too few to \
+                             hold its declared key AND the DeletionTime for its live/deleted \
+                             form (partition={partition_index}){}",
+                            structural_note_at(data, offset)
+                        ),
+                    ));
+                }
+                tracing::debug!(
+                    "V5CompressedLegacy: partition header at offset {offset} is INCOMPLETE \
+                     ({remaining} byte(s) remain), stopping — tolerated because {}",
+                    tolerance.why_tolerant()
+                );
+                return Ok(HeaderStep::EndOfBlock);
             }
-            tracing::debug!(
-                "V5CompressedLegacy: Not enough bytes for partition header at offset \
-                 {offset} (need 2, have {remaining}), stopping — tolerated because {}",
-                tolerance.why_tolerant()
-            );
-            return Ok(HeaderStep::EndOfBlock);
-        }
-
-        let flags = data[offset];
-        let key_len = data[offset + 1] as usize;
-
-        // VG3: oa format (hasUIntDeletionTime) uses a compact DeletionTime:
-        //   LIVE = 1 byte; DELETED = 12 bytes. The minimum is therefore 1 byte.
-        // nb format always uses 12 bytes (4 + 8).
-        let deletion_time_min = if self.has_uint_deletion_time() { 1 } else { 12 };
-        let header_min_size = 1 + 1 + key_len + deletion_time_min;
-        if key_len == 0
-            || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE)
-            || header_min_size > remaining
-        {
-            let detail = format!(
-                "CQLite READ flags=0x{flags:02x} and a key length of {key_len} here, needing \
-                 {header_min_size} bytes with {remaining} available (partition={partition_index})\
-                 {}",
-                structural_note(flags)
-            );
-            if refuse {
-                return Err(undecodable_partition_header(offset, &detail));
+            // A zero or over-long declared key length — decidable from two bytes,
+            // so no further byte can change the verdict.
+            //
+            // NOTE: no heuristic validation of `flags` (issues #258, #28); the
+            // classifier reads the LENGTH only. Issue #164's concern — that a
+            // block's trailing bytes must not be assumed to begin another
+            // partition just because `offset < data.len()` — is answered by this
+            // arm's three-way classification rather than by a hand-rolled
+            // minimum.
+            PartitionHeaderReadiness::Malformed => {
+                let detail = format!(
+                    "CQLite READ a key length of {} here, which it rejects as zero or \
+                     over-long, with {remaining} byte(s) available (partition={partition_index}){}",
+                    head.get(1).copied().unwrap_or(0),
+                    structural_note_at(data, offset)
+                );
+                if refuse {
+                    return Err(undecodable_partition_header(offset, &detail));
+                }
+                tracing::warn!(
+                    "V5CompressedLegacy: Skipping malformed partition header at offset {offset} \
+                     ({detail}) — resynchronising because {}",
+                    tolerance.why_tolerant()
+                );
+                return Ok(HeaderStep::Resync);
             }
-            tracing::warn!(
-                "V5CompressedLegacy: Skipping malformed partition header at offset {offset} \
-                 ({detail}) — resynchronising because {}",
-                tolerance.why_tolerant()
-            );
-            return Ok(HeaderStep::Resync);
+            // Every header byte is present, so the full parse below cannot fail
+            // from truncation.
+            PartitionHeaderReadiness::Ready => {}
         }
 
         match self.parse_partition_header_full(data, offset) {
@@ -239,7 +244,10 @@ fn undecodable_partition_header(offset: usize, detail: &str) -> Error {
 ///
 /// Diagnostics only: the refusal itself is unchanged, and moving the marker
 /// breaks to report their own failure is a different arm and a different issue.
-fn structural_note(leading: u8) -> &'static str {
+fn structural_note_at(data: &[u8], offset: usize) -> &'static str {
+    let Some(&leading) = data.get(offset) else {
+        return "";
+    };
     if V5CompressedLegacyParser::is_end_of_partition(leading) {
         " — NOTE: this leading byte is an END_OF_PARTITION marker (0x01), so the walk \
          re-entered the header arm at a marker rather than at a partition start"

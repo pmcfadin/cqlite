@@ -7,7 +7,7 @@ use range_marker_error::unparseable_marker_in_buffered_block as unparseable;
 // DECISION (campsite rule, epic #1116). Declared here rather than in the parent
 // `mod.rs` because it is used by this walk alone — the two sliding drivers reach
 // the same decision from their own `at_final_chunk`.
-mod partition_header_arm;
+pub(super) mod partition_header_arm;
 use partition_header_arm::HeaderStep;
 
 impl V5CompressedLegacyParser {
@@ -110,8 +110,10 @@ impl V5CompressedLegacyParser {
         // becomes one only when its endpoint is REACHED, which is where
         // `bounded_out()` is called. Before that, partition 0's own header is as
         // attributable as on an unbounded walk.
-        let mut tolerance = HeaderTolerance::for_extent(extent);
-        while offset < data.len() {
+        let tolerance = HeaderTolerance::for_extent(extent);
+        // Issue #3928 (finding B1): LABELLED so the row-body bound can terminate
+        // the WHOLE walk, not just the row loop — see the bound check below.
+        'partitions: while offset < data.len() {
             // Cooperative cancellation (issue #2264): an uncompressed, index-less
             // SSTable is returned to the scan as ONE contiguous block, so this loop
             // is the 400k+-partition hot loop that the compaction streaming read
@@ -281,18 +283,34 @@ impl V5CompressedLegacyParser {
                         // block-granularity over-read within the window).
                         if let Some(body_end) = row_body_end {
                             if offset >= body_end {
-                                // Issue #3928 (C2): THE stop that costs this walk
-                                // its positional authority. The row loop halts
-                                // mid-partition by the caller's request, so every
-                                // later offset in this call — the outer partition
-                                // loop's next header probe included — sits at
-                                // bytes nothing promised would begin a partition.
-                                // Recorded HERE rather than inferred from
-                                // `partition_index` (which is bumped only at the
-                                // END of this arm, so it is already 1 by then —
-                                // the measured false-refusal this replaces).
-                                tolerance.bounded_out();
-                                break;
+                                // Issue #3928 (finding B1): TERMINATE THE WHOLE
+                                // WALK, not just this row loop.
+                                //
+                                // The bound is the end of what the caller ASKED
+                                // to read (the row-index block extent the
+                                // authoritative BTI/promoted index resolved for
+                                // the requested clustering range). Reaching it
+                                // used to break only the inner loop, so the outer
+                                // partition loop then walked the unrequested
+                                // remainder byte-by-byte as candidate headers.
+                                // That both read partitions nobody asked for and
+                                // could FABRICATE one from misaligned row payload
+                                // — AC2's own subject — and on a wide partition it
+                                // could rescan the same remainder per call.
+                                //
+                                // Measured on the PRISTINE BIG fixture with a
+                                // window ending at offset 62: the walk emitted 99
+                                // FOREIGN partition keys, i.e. the whole table,
+                                // for a request scoped to ~32 bytes. Pinned by
+                                // `a_bounded_walk_stops_at_its_bound_and_reads_no_further_partition`.
+                                //
+                                // Nothing after this point in the arm is owed to
+                                // the caller: the #3095 static-only emission
+                                // below is already gated on
+                                // `row_body_end.is_none()`, and a bounded read's
+                                // rows are trimmed by the post-scan clustering
+                                // backstop either way.
+                                break 'partitions;
                             }
                         }
 

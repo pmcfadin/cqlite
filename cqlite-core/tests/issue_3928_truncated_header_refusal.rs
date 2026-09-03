@@ -367,3 +367,86 @@ async fn a_bounded_walk_still_refuses_a_malformed_initial_header() {
         got.map_or(0, |k| k.len())
     );
 }
+
+/// B1 (fix round 3) — a BOUNDED walk must stop at its bound, not scan the
+/// remainder as candidate headers.
+///
+/// This is AC2's own subject on the bounded path, and it needs NO corruption at
+/// all: reaching `body_end` only broke the inner ROW loop, so the outer
+/// PARTITION loop then walked every remaining byte of the buffer as a candidate
+/// header. On a real fixture that remainder holds real partitions, so the walk
+/// read partitions the caller never asked for — and at misaligned offsets row
+/// payload can parse as a plausible header and FABRICATE one. On a wide
+/// partition the same remainder can be rescanned per call.
+///
+/// The fix terminates the whole block walk at the bound: if you have reached the
+/// bound there is nothing further you were asked to read, so continuing is both
+/// risky and pointless.
+///
+/// Oracle: the PRISTINE Cassandra fixture and its own `Index.db`. The window is
+/// placed strictly inside partition 0's body, so every key emitted must be
+/// partition 0's — any other key, real or invented, is a partition the caller
+/// did not request.
+#[tokio::test]
+async fn a_bounded_walk_stops_at_its_bound_and_reads_no_further_partition() {
+    let spec = &BIG_COMPOSITE_HEADER;
+    let dir = fixture_dir(spec);
+    let schema = table_schema(spec);
+    let reader = open_reader(&dir).await;
+
+    let dec = fixture::stitched_data_section(&dir);
+    let entries = fixture::index_partition_positions(&dir);
+    assert!(
+        entries.len() >= 3,
+        "this case needs a multi-partition fixture; Index.db declares {}",
+        entries.len()
+    );
+    let (p0_key, p0_at) = (entries[0].0.clone(), entries[0].1);
+    let p1_at = entries[1].1;
+    assert_eq!(
+        p0_at, 0,
+        "the first partition header is at offset 0 by format"
+    );
+
+    // A window strictly INSIDE partition 0's body: after its header
+    // (2-byte key length + key + the fixed 12-byte nb DeletionTime) and strictly
+    // before partition 1's header, so the bound is reached mid-partition and the
+    // remainder holds 99 real partitions.
+    let body_start = 2 + p0_key.len() + 12;
+    let body_end = body_start + (p1_at - body_start) / 2;
+    assert!(
+        body_start < body_end && body_end < p1_at,
+        "window ({body_start}, {body_end}) must sit inside partition 0's body, which ends \
+         where partition 1 begins at {p1_at}"
+    );
+
+    let keys = bounded_walk(
+        spec,
+        &schema,
+        &reader,
+        &dec,
+        (body_start, body_end),
+        cqlite_core::storage::sstable::reader::BufferExtent::Window,
+    )
+    .expect("a tolerant bounded walk over a PRISTINE fixture must not refuse");
+
+    let foreign: Vec<String> = keys
+        .iter()
+        .filter(|k| **k != p0_key)
+        .map(|k| format!("{k:02x?}"))
+        .collect();
+    assert!(
+        foreign.is_empty(),
+        "B1: a walk bounded at {body_end} read PAST its bound and emitted {} key \
+         occurrence(s) that are not the requested partition's ({} distinct foreign): the \
+         outer partition loop scanned the unrequested remainder as candidate headers, which \
+         both reads partitions nobody asked for and can FABRICATE one from misaligned row \
+         payload. First few: {:?}",
+        foreign.len(),
+        keys.iter()
+            .filter(|k| **k != p0_key)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        &foreign[..foreign.len().min(3)]
+    );
+}

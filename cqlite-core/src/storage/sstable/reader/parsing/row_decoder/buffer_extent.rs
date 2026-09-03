@@ -74,60 +74,69 @@ impl BufferExtent {
     }
 }
 
-/// Issue #3928 — the ONE piece of state that decides whether an undecodable
-/// partition HEADER is refused, computed once per walk and consulted at every
-/// header arm.
+/// Issue #3928 — the ONE predicate that decides whether an undecodable partition
+/// HEADER is refused, asked by both header arms.
 ///
-/// # Why this exists, and why it replaced a mechanism rather than extending one
+/// # Why this exists, and what it has stopped being
 ///
-/// The header arms reached this shape over three review rounds, each moving the
+/// The header arms reached this shape over four review rounds, each moving the
 /// boundary by one case: the arm consulted NOTHING (a `tracing::warn!` and
 /// `offset += 1`, unconditionally); then a per-site byte-count test
 /// (`remaining < 2`, `data.len() < 2`) plus a per-CALL boolean (`bounded`); and
-/// each of those turned out to be wrong at its own edges — the byte count
-/// because one surviving byte is the first byte of a truncated header and not a
-/// tail, the call-wide boolean because a row-body window introduces no
-/// uncertainty until its endpoint is REACHED, so partition 0's own header was
-/// being excused before the window had done anything.
+/// each of those was wrong at its own edges — the byte count because one
+/// surviving byte is the first byte of a truncated header and not a tail, the
+/// call-wide boolean because a row-body window introduces no uncertainty until
+/// its endpoint is REACHED. Both edges are edges of ONE question, so the
+/// question is asked once:
 ///
-/// Three rounds in one predicate is this repository's signal to replace the
-/// mechanism. Both edges are edges of ONE question, so the question is asked
-/// once, in one place:
+/// > Can a byte still arrive?
 ///
-/// > Can a byte still arrive, or is this walk's progress no longer attributable?
+/// # The second axis was REMOVED, not decided differently (finding B1)
 ///
-/// * **Can a byte still arrive** — [`BufferExtent`], stated by the caller.
-/// * **Is progress attributable** — has every byte before this offset been
-///   consumed as a complete structure, so that "a partition starts here" is a
-///   promise the walk actually made? It has, until something stops the walk
-///   somewhere it was not promised a boundary.
+/// Round 2 gave this type a second field, `attributable`, cleared when the #954
+/// row-body bound stopped the walk: past that bound the outer partition loop was
+/// re-entering the header arm at bytes nothing promised would begin a partition,
+/// so tolerance had to take over there.
 ///
-/// A byte count answers NEITHER, which is why it is gone from the decision and
-/// survives only in the diagnostics.
+/// Round 3 removed the SITUATION instead. Scanning on past the bound was itself
+/// the defect — it read partitions the caller never asked for and could fabricate
+/// one from misaligned row payload (measured: 99 foreign partition keys from a
+/// walk bounded at offset 62) — so the block walk now TERMINATES at the bound.
+/// With no offset past the bound ever reaching a header arm, `attributable` was
+/// provably always `true`; the compiler said so, by reporting its setter
+/// unreachable. It is gone because the code path it described is gone, NOT
+/// because the reasoning behind it was wrong. If a future stop ever leaves the
+/// walk mid-partition and then probes for a header, that axis has to come back
+/// with it.
+///
+/// Two stops deliberately do NOT get it today: the row loop's unparseable
+/// range-tombstone-marker breaks leave the cursor on the marker, and refusing
+/// there — with the marker NAMED in the diagnostic, see `structural_note_at` —
+/// is louder than tolerating, which is the whole subject of this issue.
+///
+/// # Why still a type
+///
+/// So the two arms cannot drift on the refusal question. That is not
+/// hypothetical: `partition_header_readiness` and this file's own arm held two
+/// implementations of the oa/da DeletionTime sizing rule, and #1741's fix
+/// reached only one of them (finding B2). One `refuses()`, asked from both arms,
+/// is the same defence applied to the tolerance question.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::storage::sstable::reader::parsing::row_decoder) struct HeaderTolerance {
     extent: BufferExtent,
-    attributable: bool,
 }
 
 impl HeaderTolerance {
-    /// The block-emit walk, which is handed its extent explicitly. Progress is
-    /// attributable from the start: the walk begins at a partition boundary the
-    /// caller vouches for.
+    /// The block-emit walk, which is handed its extent explicitly.
     pub(in crate::storage::sstable::reader::parsing::row_decoder) fn for_extent(
         extent: BufferExtent,
     ) -> Self {
-        Self {
-            extent,
-            attributable: true,
-        }
+        Self { extent }
     }
 
     /// The sliding drivers, whose `at_final_chunk` IS the "no further bytes can
     /// arrive" fact — an authoritative property of the window, not a guess about
-    /// the bytes. They have no row-body bound, so their progress is always
-    /// attributable: each call starts at a partition boundary the caller
-    /// advanced to by a confirmed consumed-byte count.
+    /// the bytes.
     pub(in crate::storage::sstable::reader::parsing::row_decoder) fn for_final_chunk(
         at_final_chunk: bool,
     ) -> Self {
@@ -138,45 +147,24 @@ impl HeaderTolerance {
         })
     }
 
-    /// The walk has been stopped by its caller's #954 row-body END BOUND, i.e.
-    /// SHORT of the extent and mid-partition by construction. Every later offset
-    /// in this call is therefore unattributable — the bytes there were never
-    /// claimed to begin a partition — so tolerance takes over from here on.
-    ///
-    /// Call this AT the stop, never at the start of the call: that ordering is
-    /// the whole of finding C2. A window supplied at the call is not yet an
-    /// uncertainty; reaching its endpoint is.
-    pub(in crate::storage::sstable::reader::parsing::row_decoder) fn bounded_out(&mut self) {
-        self.attributable = false;
-    }
-
     /// Must an undecodable partition header here be REPORTED rather than
     /// resynchronised past?
     ///
-    /// Affirmative in both conjuncts, so a permissive answer is never keyed on
-    /// "not the bad one": the buffer must be PROVEN complete AND the walk must
-    /// still be attributable.
+    /// Keyed on the AFFIRMATIVE value, so a permissive answer is never derived
+    /// from "not the bad one".
     pub(in crate::storage::sstable::reader::parsing::row_decoder) fn refuses(self) -> bool {
-        self.extent.is_complete() && self.attributable
+        self.extent.is_complete()
     }
 
-    /// Which conjunct is tolerating, for a diagnostic. Never used to decide.
+    /// Why this walk is tolerating, for a diagnostic. Never used to decide.
     pub(in crate::storage::sstable::reader::parsing::row_decoder) fn why_tolerant(
         self,
     ) -> &'static str {
-        match (self.extent.is_complete(), self.attributable) {
-            (false, _) => {
-                "the buffer is a chunk-covering WINDOW, so a header may still be \
-                           completed by the next chunk"
-            }
-            (true, false) => {
-                "this walk was stopped by its row-body end bound, so offsets past \
-                              that bound were never claimed to begin a partition"
-            }
-            (true, true) => {
-                "nothing is tolerating: this walk is unbounded over a proven-complete \
-                             buffer"
-            }
+        if self.extent.is_complete() {
+            "nothing is tolerating: this walk is over a proven-complete buffer"
+        } else {
+            "the buffer is a chunk-covering WINDOW, so a header may still be completed by the \
+             next chunk"
         }
     }
 }
