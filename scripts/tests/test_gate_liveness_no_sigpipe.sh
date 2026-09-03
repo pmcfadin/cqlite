@@ -59,7 +59,7 @@ SUBJECT="$REPO_ROOT/scripts/gate-liveness.sh"
 # Case floor (CLAUDE.md, #3544): a span-replacing edit that silently deletes cases yields a green
 # tally over a shrunken suite. This is ENFORCED (exit 1), not merely printed, and may only go DOWN
 # with a stated reason.
-CASE_FLOOR=23
+CASE_FLOOR=28
 
 pass=0; fail=0; cases=0
 ok()   { cases=$((cases+1)); pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
@@ -207,9 +207,13 @@ violations() {
     { line = $0 }
     line ~ /^[[:space:]]*#/ { next }
     {
-      # The writer token boundary is whitespace OR the pipe itself, so `echo|head` is caught --
-      # a form the narrow revisions missed for want of trailing whitespace.
-      if (!match(line, /(^|[^[:alnum:]_.\/-])(printf|echo)([[:space:]]|\|)/)) next
+      # The writer token boundary is ANY non-word character or end of line, not just whitespace
+      # or a pipe. Narrowing it to those two was a FALSE NEGATIVE (roborev job 110): bash accepts
+      # a redirection immediately after the builtin, so `printf<<<"$t"|head -1`, `echo>&1|head -1`
+      # and `printf>/dev/null|head -1` are all valid, all hazardous, and all evaded the guard.
+      # Verified valid with `bash -n`. Excluding alnum/_/- from the boundary is what still keeps
+      # `printfoo | head` and `echoes | head` out -- those are different words, not writers.
+      if (!match(line, /(^|[^[:alnum:]_.\/-])(printf|echo)([^[:alnum:]_-]|$)/)) next
       w = RSTART
       p = first_pipe(line, w)
       if (p == 0) next
@@ -419,6 +423,19 @@ _pin 9i 1 "DECLARED noise: a quoted arg containing the word printf IS reported (
 # ---------------------------------------------------------------------------
 _pin 9j 1 "no-argument writer: echo|head is caught (every narrow revision missed it)" 'echo|head -n 0'
 _pin 9k 1 "a writer preceded by an unrelated pipe is still caught" 'producer | printf %s "$x" | grep -q y'
+
+# ---------------------------------------------------------------------------
+# 9l-9n. Redirection immediately after the writer (roborev job 110, false-NEGATIVE direction).
+#    All three are valid bash (checked with `bash -n`) and all three evaded the first broad
+#    draft, which required whitespace or a pipe right after the builtin.
+# 9o-9p. And the words that must still NOT be writers, so widening the boundary cannot be
+#    satisfied by matching any identifier that merely starts with printf/echo.
+# ---------------------------------------------------------------------------
+_pin 9l 1 "herestring straight after the writer: printf<<<...|head" 'printf<<<"$text"|head -1'
+_pin 9m 1 "fd dup straight after the writer: echo>&1|head"          'echo>&1|head -1'
+_pin 9n 1 "redirect straight after the writer: printf>/dev/null|head" 'printf>/dev/null|head -1'
+_pin 9o 0 "printfoo is NOT the printf builtin"                       'printfoo | head -1'
+_pin 9p 0 "echoes is NOT the echo builtin"                           'echoes | head -1'
 
 # ---------------------------------------------------------------------------
 # 10. THE ASSERTION. Scan the SHIPPED reader.
