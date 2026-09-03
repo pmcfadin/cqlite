@@ -16273,6 +16273,15 @@ run_pub_surface() {
 # peer's artifacts are never answered as ours. Includes the /proc starttime parser tested
 # differentially against awk over every live pid. Hermetic; one bounded nested
 # `--only file-size` for wiring evidence (cannot select tooling-tests, so no recursion).
+# Also runs scripts/tests/test_gate_component_verdict.sh (#3750), the non-vacuity proof
+# for the split of COMPLETION from VERDICT: 106 cases (per-section floors) over
+# scripts/gate-component-verdict.sh
+# and the two DOCUMENTED text-completion grammars. Pins the case the lead named — a
+# COMPLETED `--only` run whose component SKIPped is NOT a pass, because a SKIP means the
+# check never ran — that a status token which merely STARTS WITH `PASS` is not one, that
+# the verdict is never DERIVED from the run's terminal token in either direction, and that
+# the gate-of-record grammar keeps REFUSING `PARTIAL` while the `--only` grammar terminates
+# on it without readmitting the #3041 `INCOMPLETE` sentinel. Hermetic: temp dirs only.
 # Also runs scripts/tests/test_gate_detached.sh (#3473), which pins BOTH the cgroup
 # mechanism (a `KillMode=control-group` teardown kills work that used setsid+nohup, while
 # the same work in its own cgroup survives — demonstrated on a cgroup the test creates and
@@ -17691,6 +17700,22 @@ run_tooling_tests() {
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
     echo ">>> [$name] $RECORDED_STATUS ($((end - start))s)"
+    return 0
+  fi
+
+  # the #3750 split of COMPLETION from VERDICT: scripts/gate-component-verdict.sh plus
+  # the two DOCUMENTED text-completion grammars it sits beside. Pins the case the lead
+  # named — a COMPLETED `--only` run whose component SKIPped is NOT a pass — and that the
+  # gate-of-record grammar keeps REFUSING `PARTIAL`. No cargo, no datasets, no network.
+  echo ">>> [$name] bash scripts/tests/test_gate_component_verdict.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gate_component_verdict.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (completion-vs-verdict split #3750); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
 

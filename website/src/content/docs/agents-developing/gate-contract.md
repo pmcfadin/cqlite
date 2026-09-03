@@ -1149,7 +1149,39 @@ read it:
 > exist. The only correct predicate is:
 >
 > ```bash
-> grep -qE 'RESULT: (PASS|FAIL)' "$AGENT_GATE_SUMMARY_FILE"   # a VERDICT ⇒ gate finished
+> # RECORD grammar — full / --lite. Anchored + token-terminated; it MUST keep refusing PARTIAL, and
+> # ERROR and REFUSED with it. Widening it would weaken the gate-of-record probe for nothing.
+> grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"   # a VERDICT ⇒ gate finished
+>
+> # ONLY grammar — `--only <component>` ONLY, never the gate of record (#3750). `--only` demotes a
+> # SUCCESSFUL run to `RESULT: PARTIAL`, so the record grammar spins on green. The EXIT STATUS (3) is
+> # primary; this is the fallback for a detached run whose exit code you never observe.
+> grep -qE '^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"
+>
+> # DELTA grammar — `--delta <anchor>` ONLY. It is the only mode that can terminate ERROR or REFUSED
+> # (7 emit sites, all inside `run_delta`; REFUSED goes through `emit_summary "$(_tree_result REFUSED)"`,
+> # so grepping `emit_summary REFUSED` finds nothing while the token IS emitted). A --delta poller on
+> # the RECORD grammar hangs on a terminal outcome. This set is gate-liveness.sh's own enumerated
+> # terminal set, token for token — ONE source of truth, so it carries PARTIAL (which --delta cannot
+> # emit) and the reader's defensive REFUSED, with ERROR the emit you will actually meet.
+> grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)' "$AGENT_GATE_SUMMARY_FILE"
+>
+> # Safe to widen COMPLETION here, and it would not have been before #3750 separated completion from
+> # verdict: the verdict is a separate affirmative read, so three grammars are not three chances to be
+> # wrong. Better than any of them: ask gate-liveness.sh.
+>
+> # COMPLETION IS NOT A VERDICT. `PARTIAL` says the run ENDED. Read the component's OWN line separately:
+> bash scripts/gate-component-verdict.sh "$SUM" --mode only --component tooling-tests --run-id <id>
+> # exit 0 PASS / 1 NOT-PASS / 4 COULD-NOT-MEASURE (no verdict available, whatever the reason) /
+> # 64 USAGE. A completed run whose component SKIPped is NOT a pass, and
+> # a LITE or DELTA block is REFUSED (4). A tree-integrity token of FAIL returns NOT-PASS (1) — the
+> # gate declared that run non-certifying, which invalidates every component in the block — while
+> # SKIP/PENDING/absent return 4, since tree stability was then never measured.
+> #
+> # NOT a completion probe, and no opinion about liveness — NEVER in a loop. Establish completion
+> # first (exit status, or gate-liveness.sh, the three-valued liveness authority and the only one of
+> # the two that may be polled). A retryability taxonomy here was DESCOPED (#3750): it told a lane a
+> # LIVE gate was permanently unmeasurable, and an obedient lane relaunches it — two gates, one path.
 > ```
 >
 > A terminal `RESULT: INCOMPLETE` means "still running, or died" — never a certification.
