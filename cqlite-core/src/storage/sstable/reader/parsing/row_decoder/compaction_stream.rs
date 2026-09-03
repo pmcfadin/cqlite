@@ -16,7 +16,9 @@ use super::compaction::CompactionPolicy;
 // cannot be decoded at all. `PartitionHeaderReadiness` is NOT imported any more
 // — #3928 moved this driver's readiness classification into the shared header
 // arm, so this file no longer classifies for itself.
-use super::partition_driver::{DataRowOutcome, DriverHeader, MarkerOutcome, SlidingPartitionPolicy};
+use super::partition_driver::{
+    DataRowOutcome, DriverHeader, MarkerOutcome, SlidingPartitionPolicy,
+};
 use super::{RowColumnResolution, V5CompressedLegacyParser};
 use crate::schema::TableSchema;
 use crate::types::RowKey;
