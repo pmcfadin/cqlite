@@ -697,8 +697,13 @@ doubt, blocker.</li>
 spawns a per-issue <code dir="auto">flow-closer</code> that runs the ONE full <code dir="auto">scripts/agent-gate.sh</code> of record (via
 <code dir="auto">run_in_background</code> + the summary-file pattern — it <strong>never idle-waits</strong>, which would trip the #1855 stall
 watchdog and orphan the gate; polling the summary file is mandatory on a hard 45-min deadline, with
-<code dir="auto">grep -qE 'RESULT: (PASS|FAIL)'</code> — never a bare <code dir="auto">grep -q</code> on the bare <code dir="auto">RESULT:</code> token, which also matches the startup
-<code dir="auto">RESULT: INCOMPLETE</code> liveness placeholder and would accept a just-launched gate as a verdict, #3041),
+the anchored <strong>RECORD grammar</strong> <code dir="auto">grep -qE '^RESULT: (PASS|FAIL)([[:space:]]|$)'</code> — never a bare <code dir="auto">grep -q</code> on the
+bare <code dir="auto">RESULT:</code> token, which also matches the startup <code dir="auto">RESULT: INCOMPLETE</code> liveness placeholder and would accept
+a just-launched gate as a verdict, #3041; and never that grammar on an <code dir="auto">--only</code> run, which demotes success to
+<code dir="auto">RESULT: PARTIAL</code> and so spins on green, and never that grammar on the <strong><code dir="auto">--delta</code></strong> re-cert it also runs,
+which alone can terminate <code dir="auto">ERROR</code>/<code dir="auto">REFUSED</code> and needs
+<code dir="auto">grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)'</code> — see #3750 for the per-mode grammars and the separate component-verdict
+read),
 the <strong>C</strong>
 intent audit, the final roborev pass, then merges on green and <code dir="auto">flow-finalize</code>s. The closer has <strong>no
 <code dir="auto">Agent</code> tool</strong>, so it never spawns directly: for <strong>C</strong> (and any src-design fix) it emits a structured

@@ -800,20 +800,355 @@ branch at once, which is fail-closed rather than a false green, and the named di
 fleet-wide stop into a five-minute fix. Every baseline-bearing verdict line ends by naming its
 baseline source (<code dir="auto">— baseline read via the committed manifest</code> / <code dir="auto">— baseline read via the TEXTUAL FALLBACK: … VERIFIED ABSENT at that sha</code>), so use of the fallback is visible rather than inferred.</p>
 <p><strong>And it ends by naming the OBJECT provenance too, because the shared object store is TRUSTED, not
-verified</strong> (<code dir="auto">; objects: baseline REUSED from this lane's SHARED store</code> / <code dir="auto">baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store</code> / <code dir="auto">provenance NOT RECORDED</code> — each
-followed by <code dir="auto">store TRUSTED, not verified (#3746)</code>). Git does not rehash a packed object against the
-id it was asked for on an ordinary read, and on this fleet <strong>every lane on a box is a worktree of
-one shared <code dir="auto">.git</code></strong>, so a peer lane planting a forged pack/index can make a canonical sha resolve to
-a shortened manifest — a false <code dir="auto">PASS</code>, and a non-invoker route, hence a defect.</p>
-<p>It is <strong>declared rather than closed</strong> because removal does not close it. The ancestry walk and the
-provenance leg read HEAD’s <strong>committed</strong> content, which has no source other than that store — the
-working tree cannot substitute, since the <code dir="auto">UNCOMMITTED</code> verdict exists precisely to compare against
-what is committed — so a forged HEAD object still turns <code dir="auto">UNCOMMITTED</code> (fatal) into <code dir="auto">DECLARED</code>
-(non-fatal) after removal, while charging every <code dir="auto">--lite</code> round for a half-closure (measured
-3.41 s / 93 MB full, 3.58 s / 45 MB at <code dir="auto">--depth=1</code>; shallow is <em>not</em> cheaper — it still ships the
-tip’s whole tree). A check that claims nothing false is worth more than one claiming a closure it
-does not deliver. Closing it properly — including the possibility that the real subject is the
-infrastructure decision that lanes share an object store at all — is <strong>#3746</strong>.</p>
+verified per-read</strong> (<code dir="auto">; objects: baseline REUSED from this lane's SHARED store</code> / <code dir="auto">baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store</code> / <code dir="auto">provenance NOT RECORDED</code> —
+each followed by <code dir="auto">store TRUSTED, not verified (#3749)</code>). Git does not rehash a packed object against
+the id it was asked for on an ordinary read, and on this fleet <strong>every lane on a box is a worktree of
+one shared <code dir="auto">.git</code></strong>, so a planted pack/index can make a canonical sha resolve to a shortened
+manifest — a false <code dir="auto">PASS</code>. What an ordinary read <em>does</em> verify is the pack CRC and the zlib stream,
+which catch <strong>accidental</strong> damage (bit rot, a torn or truncated write) but never rehash content
+against its own name.</p>
+<p><strong>#3749’s owner ruling split that into two subjects, and overturned the earlier framing.</strong> This page
+used to call a peer lane planting objects “a non-invoker route, hence a defect”; that is
+<strong>retracted</strong>. <em>Deliberate</em> forgery by a same-host peer is <strong>invoker-class and out of model</strong> — the
+#3312 triage rule already says same-host actors able to write these scripts are invoker-class, and a
+peer wanting a false <code dir="auto">PASS</code> can simply edit <code dir="auto">scripts/agent-gate.sh</code>, which is cheaper than forging
+pack data; no check inside a process defends against the party that controls the process.
+<em>Accidental</em> corruption <strong>is</strong> in model, and its control is a periodic full-rehash sweep:
+<code dir="auto">scripts/check-object-store-integrity.sh</code> runs a full <code dir="auto">git fsck</code> (never <code dir="auto">--connectivity-only</code>, which
+does not rehash content) over the shared store and emits an anchored four-valued
+<code dir="auto">VERIFIED</code>/<code dir="auto">CORRUPT</code>/<code dir="auto">UNSWEEPABLE</code>/<code dir="auto">UNMEASURED</code> verdict — exit 0/4/6/5, and <strong>a consumer must not
+read <code dir="auto">UNMEASURED</code> as clean</strong>. It runs at machine onboarding (<code dir="auto">bootstrap-agent-machine.sh</code> section 5d, where
+<code dir="auto">VERIFIED</code> is the only <code dir="auto">[ok]</code>, so an unmeasured host cannot pass <code dir="auto">--strict</code>) and on the worker
+supervisor’s throttled per-iteration cadence (default every 6h). There, <code dir="auto">CORRUPT</code> <strong>stops the
+supervisor loudly</strong> instead of holding — corruption is non-self-clearing, so a hold-and-repoll loop
+would spin to the wall-clock budget taking no useful action — and so does <code dir="auto">UNSWEEPABLE</code> (below),
+while <code dir="auto">UNMEASURED</code> is journalled and
+paged once and deliberately does <strong>not</strong> stop the loop, because refusing to run any worker over a
+hygiene probe that could not run is a self-DoS. <strong>That sweep is periodic, not per-read, which is why
+the emitted clause still says <code dir="auto">TRUSTED, not verified</code>.</strong></p>
+<p><strong>The fatal verdict is affirmative, and it had to be made so.</strong> A <code dir="auto">git fsck</code> over a store up to
+eight peer lanes are concurrently writing prints <code dir="auto">error:</code> lines on a <strong>healthy</strong> store (measured on
+this fleet: <code dir="auto">invalid reflog entry</code> naming a different branch each run, on a quarter to a half of all
+runs), so recognising damage from the <em>text shape</em> of a diagnostic made a healthy box page high, stop
+its supervisor and fail <code dir="auto">--strict</code> bootstrap. The class comes from fsck’s exit <strong>bitmask</strong> — bits
+<code dir="auto">1 ERROR_OBJECT</code>/<code dir="auto">4 ERROR_PACK</code> are the subject; <code dir="auto">2 ERROR_REACHABLE</code>/<code dir="auto">8 ERROR_REFS</code>/
+<code dir="auto">16 ERROR_COMMIT_GRAPH</code>/<code dir="auto">32 ERROR_MULTI_PACK_INDEX</code> are <em>not</em> demoted to clean but get their own
+non-passing <code dir="auto">UNMEASURED</code> cause. <strong>Except that <code dir="auto">2 ERROR_REACHABLE</code> has two causes, and routing both
+to <code dir="auto">UNMEASURED</code> was a false negative on real corruption.</strong> That bit fires for a stale reflog entry
+naming an object a peer’s gc pruned (routine, not the subject) <em>and</em> for an object genuinely absent
+while a live ref, the index or HEAD still needs it (corruption). Both reproduce, so the reproduction
+discriminator cannot separate them, and <code dir="auto">UNMEASURED</code> is deliberately non-fatal to the supervisor’s
+loop — so workers kept running against a demonstrably damaged store, reported as “not measured”.
+They are separated by a <strong>third walk with <code dir="auto">--no-reflogs</code></strong>, which drops the reflogs from the
+reachability roots and keeps everything else: a complaint that <em>survives</em> it is reachable from a live
+root and is <code dir="auto">CORRUPT</code>, with a remedy that says the reflog remedy does not apply; one that <em>clears</em> is
+<code dir="auto">REFLOG-SCOPED</code> and stays <code dir="auto">UNMEASURED</code>. Measured on git 2.43.0 on real fixtures, both directions: a
+blob deleted while HEAD’s tree names it exits 2 with and without reflogs; a commit deleted after
+<code dir="auto">reset --hard</code>, named only by the reflog, exits 2 with and <strong>0</strong> without. This is <strong>not</strong> the
+<code dir="auto">--no-reflogs</code> <em>suppression</em> rejected earlier — that decided whether to report and was measured not
+to help; this decides which cause, on a class that has already reproduced twice, and can only make
+the verdict stronger. Passes 1 and 2 never carry the flag (asserted structurally over the shipped
+call sites), an attribution walk that is killed, unlaunchable or unclassifiable leaves the complaint
+<code dir="auto">UNATTRIBUTED</code> and non-passing, and a damage bit appearing only in the third walk has not reproduced
+across the sweep walks. The verdict set stays closed at three: the split is in the <em>cause</em> text, not
+in a fourth token two readers and a structural assert would have to learn. <strong>And “the roots the walk
+has” was itself an unchecked assumption, wrong in both directions.</strong> A review finding held that
+<code dir="auto">--git-dir=&#x3C;common></code> discards linked worktrees’ private administrative context, so a missing object
+needed only by a lane’s private HEAD or index would be overlooked. Measured on git 2.43.0, that is
+<strong>false</strong>: a common-dir fsck <em>does</em> walk every registered worktree’s private <code dir="auto">HEAD</code>, its private
+index, and the HEAD of a <em>prunable</em> worktree — all three surviving <code dir="auto">--no-reflogs</code>, hence already
+<code dir="auto">CORRUPT</code>. What it does <em>not</em> walk is a <strong>linked</strong> worktree’s per-worktree refs (<code dir="auto">refs/worktree/*</code>,
+<code dir="auto">refs/bisect/*</code>, <code dir="auto">refs/rewritten/*</code>; the main worktree’s live in the common dir and are walked):
+delete an object named only by one and the sweep exits <strong>0 VERIFIED</strong>, because the HEAD reflog echoes
+the id and that echo clears under <code dir="auto">--no-reflogs</code>. The covered roots are pinned by fixtures; <strong>the
+hole is a DECLARED GAP, and the probe built to close it was removed.</strong> Three measurements rule out
+the fsck-shaped fixes and are recorded so nobody re-derives them: <code dir="auto">git fsck &#x3C;sha></code> <em>replaces</em> the
+default heads (so private roots can never be appended to the sweep walk), an explicit-head fsck
+still scans the whole object directory and so costs a full rehash, and <code dir="auto">rev-list &#x3C;missing-root></code>
+dies 128 (so <code dir="auto">--missing=print</code> cannot answer the case that fires). What was built instead was an
+O(refs) question — enumerate each linked worktree’s refs, subtract the common ones, ask
+<code dir="auto">cat-file --batch-check</code> whether the remainder’s targets are present — and <strong>its first review
+returned three false-<code dir="auto">VERIFIED</code> routes of its own, two of them High</strong>: a present root whose
+reachable <em>child</em> is missing is invisible to a target-presence check; a per-worktree ref is
+discarded by the name subtraction when a common ref shares its name, even pointing at a different,
+missing object; and a failed <code dir="auto">awk</code>/<code dir="auto">sort</code>/<code dir="auto">comm</code> degrades to a zero-root census and then permits
+<code dir="auto">VERIFIED</code>. A mechanism added to prevent one false clean produced three new ways to reach one, in
+one review — so #3229’s ruling (<em>a guard with known documented false-PASSes is worse than no guard</em>),
+its companion (<em>subtraction cannot introduce a false PASS</em>) and #3544’s own posture (<em>a check that
+claims nothing false is worth more than one claiming a closure it does not deliver</em>) all point the
+same way. <strong>The class also has zero instances on this fleet</strong>, measured twice independently on
+2026-09-02: 14 registered worktrees, all three namespaces absent from every linked worktree’s admin
+dir and from the common dir, 0 mentions in <code dir="auto">packed-refs</code> — live per-worktree refs would have made
+removal leave a live hole, and the right answer would then have been to fix the three findings.
+<strong>The declaration is emitted on every run</strong>: <code dir="auto">declared-gap</code> lines, on all three verdict classes
+(what a run did not walk does not depend on what it found), in <strong><code dir="auto">1 RECOGNISED</code></strong> form rather than a
+bare count, naming the un-walked namespaces, the coverage that is <em>not</em> in the gap (the measurement
+above, which is what keeps the gap one namespace wide) and the fleet measurement with its date,
+since “zero instances” expires. One measurement is kept for whoever revisits this:
+<strong><code dir="auto">git worktree list --porcelain</code> is fail-open</strong> — it silently drops a worktree whose admin <code dir="auto">gitdir</code>
+file is missing (rc 0, no diagnostic) — so any future enumeration must be filesystem-first over
+<code dir="auto">$GIT_COMMON_DIR/worktrees/*</code>, git’s own administrative directory, with the command only as a
+cross-check in the direction it can fail. <strong>The mask does not end at
+31, and assuming it did dropped real damage.</strong> A range check over <code dir="auto">1..31</code> — reasoned from 128 being
+<code dir="auto">die()</code> and <code dir="auto">127 &#x26; 1</code> being 1 — classified 33 (<code dir="auto">32|1</code>) and 36 (<code dir="auto">32|4</code>) as unclassified and therefore
+<code dir="auto">UNMEASURED</code>, a false negative on genuine object corruption. Measured on git 2.43.0: a truncated
+<code dir="auto">multi-pack-index</code> exits 32, and that store with one corrupted blob exits 35. So the damage bits are
+tested <strong>independently, and first</strong>, and an unrelated bit can never mask them; only a status at or
+above 124 (timeout/shell conventions, <code dir="auto">die()</code> and signal deaths above them) is refused bit-testing
+outright, and a status carrying a bit outside the supported mask is unclassified rather than folded
+into a class whose remedy would be wrong — which is how it degrades safely as git adds bits.</p>
+<p><strong>And that range has two halves, which sharing one verdict made a false negative on real
+commit-object corruption.</strong> Measured on git 2.43.0: overwrite the loose object a live ref points <em>at</em>
+with unparseable bytes and fsck prints <code dir="auto">fatal: loose object &#x3C;sha> … is corrupt</code> and exits <strong>128</strong>,
+while the same damage to a <em>blob</em> — or a valid object stored under the commit’s name — exits 3
+(<code dir="auto">2|1</code>) and is caught. So the exact damage this control exists for lands outside the mask, where
+<code dir="auto">unclassified</code> ⇒ <code dir="auto">UNMEASURED</code> ⇒ the supervisor writes a fresh throttle stamp and keeps spawning
+workers. <code dir="auto">124..127</code> is the timeout/exec convention — the fsck <strong>never ran</strong>, a fact about the box’s
+tooling, and it stays permissive; <code dir="auto">128</code>+ is git’s own <code dir="auto">die()</code> or a signal death — it <strong>ran and did
+not finish</strong>, and reproduced on <em>both</em> walks it is the stopping verdict <code dir="auto">UNSWEEPABLE</code> (exit 6). The
+boundary is argued from the exec chain rather than assumed: <code dir="auto">env</code>/<code dir="auto">nice</code>/<code dir="auto">timeout</code> each report their
+own failures inside <code dir="auto">125..127</code>, so a status at or above 128 is the innermost command having actually
+started, which together with the launch marker below makes “fsck ran and died” an <em>affirmative</em>
+observation. <strong>On that cause <code dir="auto">UNSWEEPABLE</code> claims no cause and prints no repair</strong> (scoped to the
+<em>fatal</em> cause: the verdict gained a second one, below, which does name its cause) — the alternative was to read the
+<code dir="auto">fatal:</code> text for a damage signature, i.e. the text-shape classifier again, narrower, with every
+wording nobody enumerated falling back to the same permissive state. It tells the operator to run the
+walk by hand and act on what the <code dir="auto">fatal:</code> line names (that line is kept in the findings <strong>for display
+only</strong>; it reaches no branch), and it makes a completed sweep the condition for resuming. The
+verdict set is closed at <strong>four</strong>, and the closure is over <em>dispositions</em>, not over a count: a token
+is what every consumer keys its behaviour on, so a state that stops the box cannot be expressed as
+another verdict’s cause text, while two causes that both continue (the reflog split above) must be.</p>
+<p><strong><code dir="auto">UNSWEEPABLE</code> has a second cause: the store’s own <code dir="auto">fsck.*</code> config, which the environment allowlist
+cannot reach.</strong> <code dir="auto">env -i</code> plus the allowlist closes git’s <em>environment</em> config sources; a <strong>local
+config is a file in the repository, not an environment variable</strong>, and <code dir="auto">git fsck</code> is configurable.
+Measured on git 2.43.0 against a real fixture (a commit object with no author email — an
+ERROR-severity message, exit bit 1, the sweep’s own damage class): plain fsck exits <strong>1</strong>, while both
+<code dir="auto">fsck.&#x3C;msg-id>=ignore</code> and a <code dir="auto">fsck.skipList</code> naming that object exit <strong>0</strong> — so the sweep reported
+<code dir="auto">VERIFIED</code> <strong>about a damaged store</strong>, the exact false affirmative this control exists to prevent. It
+is in model because the file is the <em>shared</em> <code dir="auto">.git/config</code> a peer lane, or an accident, writes. It is
+<strong>refused, not overridden</strong>: <code dir="auto">fsck.&#x3C;msg-id></code> is an open-ended key space (one key per message id, new
+ids with new git versions), so a <code dir="auto">-c</code> per key is a list that is wrong the moment git adds a message,
+and a partial override is the “one axis closed, space declared done” shape this issue has hit five
+times. So any <code dir="auto">fsck.*</code> key in the configuration the walk would read means <strong>no walk at all</strong> and
+<code dir="auto">UNSWEEPABLE</code>, naming the keys and the <code dir="auto">config --list --show-origin --name-only</code> that lists them, and
+claiming <strong>no damage</strong> — nothing was rehashed. It <em>stops</em> rather than reporting, because the policy is
+a persistent property of the repository and because an <code dir="auto">fsck.&#x3C;msg-id></code> naming an id this git does not
+know <strong>already</strong> stops the box through the fatal cause, so the permissive reading would stop a box
+whose config merely breaks fsck while letting one that suppresses real damage carry on. “Could not
+<strong>ask</strong>” stays permissive and is its own state: a failed probe, or an rc-0 answer listing no key at
+all (an <em>unread</em> policy, not an empty one — every repository’s config declares
+<code dir="auto">core.repositoryformatversion</code>), is <code dir="auto">UNMEASURED</code> with its own cause and no walk, so <code dir="auto">VERIFIED</code> is
+reachable only from a policy that was read and found empty. And both consumers’ text is now derived
+from the <strong>token</strong> alone — the latch records only the verdict, so a reader naming the fatal mechanism
+was affirmatively false on the other cause.</p>
+<p><strong>And a status is only a bitmask if the command that produced it actually ran.</strong> fsck’s status space
+is shared with the shell’s, so the classifier had a precondition it never checked: the two capture
+redirections are part of the fsck command, and a failure to open the scratch output file (a full or
+reaped <code dir="auto">TMPDIR</code>) means bash execs nothing and exits <strong>1</strong> — <code dir="auto">ERROR_OBJECT</code>. Both passes then fail
+identically, both “reproduce”, and the sweep emitted <code dir="auto">CORRUPT</code> <strong>about a store it never opened</strong> —
+the same false-<code dir="auto">CORRUPT</code> harm as the text-shape classifier, arriving through the shell instead of
+through a concurrent writer. It cannot be inferred from the status, which is the point; the evidence
+is <strong>affirmative</strong> — a marker written inside the redirected group as its first statement (a
+redirection failure on a compound command means the body does not execute at all) plus both capture
+files existing afterwards — and its absence is a <code dir="auto">launchfail</code> class routed to <code dir="auto">UNMEASURED</code>, never
+bit-tested. Generalise it: <strong>before reading a status as a structured value, establish that the
+process whose convention you are applying is the process that produced it.</strong></p>
+<p>And no non-clean walk is fatal on one observation: it is re-run <strong>once</strong> as a discriminator — a
+concurrency artefact does not survive a second independent walk, damage does — never a
+retry-until-clean loop (the reachability attribution above is a third walk answering a different
+question; <code dir="auto">MAX_SWEEP_WALKS</code> in the sweep script is the declared ceiling, and every caller’s bound is
+derived from it). <strong>The two channels must also agree before the fatal verdict is acted on.</strong> Both
+consumers read the exit status <em>and</em> the anchored <code dir="auto">verdict </code> line, and both tested them with <code dir="auto">||</code>
+while the comment above each asserted the conjunction — so an exit 4 with no verdict line, or a stray
+<code dir="auto">CORRUPT</code> line under any other status, was enough to create a sticky, box-wide, operator-cleared
+latch that halts every lane. Blast radius decides the direction: a false latch stops four lanes until
+a human notices, while one more iteration over a genuinely damaged store costs the next sweep, which
+reproduces it and latches it properly. A disagreement is therefore routed to <code dir="auto">UNMEASURED</code> and <em>named</em>
+(<code dir="auto">INCONSISTENT sweep result</code>), never folded into the generic “could not measure” line; the
+<code dir="auto">UNMEASURED</code> tests stay disjunctive on purpose, because a disjunction that can only reach a
+non-passing branch cannot manufacture a verdict. The <code dir="auto">CORRUPT</code> verdict is <strong>persisted for the box in its own create-only
+file</strong> (<code dir="auto">&#x3C;stamp>.STOP</code>, which records <em>which</em> stopping verdict it is, read affirmatively — it was
+<code dir="auto">.CORRUPT</code> until a second stopping verdict existed, and a file whose <em>name</em> asserts damage is a
+confidently-wrong claim on disk for a verdict that establishes no cause; an unrecognised second line
+is a cause-free stop and is never defaulted to the damage text), because a timestamp-only stamp let
+the detecting lane stop while its
+peers skipped their own sweep for the interval and kept spawning workers over the damaged store.
+Putting the verdict <em>in</em> that stamp was the first fix and was itself a defect: stamp writes are
+unsynchronised overwrites, so a lane whose sweep started before the detection could finish after it
+and replace <code dir="auto">CORRUPT</code> with <code dir="auto">VERIFIED</code>. Two consecutive review rounds found a defect in that one
+shared mutable cell, so the channel is <strong>removed rather than serialised</strong> — the latch’s only
+transition is ABSENT → PRESENT, created under <code dir="auto">set -C</code> so the kernel arbitrates and a losing writer
+cannot overwrite the winner, while the timestamp stays freely overwritable because moving a
+timestamp backwards costs one extra sweep. A lock was considered and rejected: it makes the
+read-modify-write atomic but leaves a value any writer can move backwards, so “CORRUPT is sticky”
+would rest on every future writer remembering to honour it. The latch does not expire and is cleared
+by hand (<code dir="auto">rm -f &#x3C;latch></code>, named in every message that mentions it); a create that could not happen
+is reported, never read as a latched box. The stamp’s <strong>key</strong> is resolved by the sweep script itself
+(<code dir="auto">--print-store</code>), never by a <code dir="auto">git</code> call in the supervisor — a bare <code dir="auto">git rev-parse --git-common-dir</code> inherits the caller’s environment, so an inherited <code dir="auto">GIT_DIR</code> keyed the stamp on
+another repository — and it is a <strong>digest</strong> of that canonical path, because flattening is not
+injective: replacing <code dir="auto">/</code> and every unsupported character with <code dir="auto">_</code> maps <code dir="auto">/tmp/a/b/objects</code> and
+<code dir="auto">/tmp/a_b/objects</code> to one name, so two repositories on a box shared a throttle stamp <em>and</em> a
+<code dir="auto">CORRUPT</code> latch. The form is <code dir="auto">&#x3C;sanitised tail>.&#x3C;16 hex of sha256></code>, where the tail is readability
+only and carries no identity. <strong>The digest is taken from the RAW path, in the resolver — digesting
+the RENDERED value was itself the next defect (round 5).</strong> Round 4 made the key injective over the
+flattening and then fed the digest the value <code dir="auto">--print-store</code> had already passed through the sweep
+script’s <code dir="auto">sane()</code> escaper, which is a <em>display</em> encoding and a lossy one: a path holding a real
+newline and one holding the two literal characters <code dir="auto">\n</code> produced ONE key, which is the same
+shared-stamp-and-latch harm arriving through the fix for it. So <code dir="auto">store_key</code> lives in the sweep
+script — the only process holding the raw bytes — and publishes a second anchored <code dir="auto">store-key</code> line
+that the caller validates and uses verbatim, while the supervisor’s own digest helper is gone, so no
+lossy value is left for a future caller to digest. The transferable rule: <strong>a value sanitised for
+DISPLAY is not an IDENTITY; derive a comparison key before any rendering, and where both are needed
+publish two fields rather than deriving one from the other.</strong> Three digest tools (<code dir="auto">sha256sum</code>, <code dir="auto">shasum -a 256</code>,
+<code dir="auto">openssl dgst -sha256</code>) cover both platforms, the output is parsed from both ends and then validated
+as hex, and a host with none fails closed to the <strong>empty</strong> key — no throttle, no latch, announced
+once naming both causes — never a silent fall back to the colliding form. <code dir="auto">cksum</code> is present
+everywhere and deliberately unused: CRC32 is not collision-resistant, and a colliding key is the
+defect being removed.</p>
+<p><strong>The latch is created before the throttle stamp, re-read before every return that leads to a spawn,
+and the remaining race is declared rather than closed.</strong> The stamp used to be written for every
+outcome <em>before</em> the <code dir="auto">CORRUPT</code> branch ran, so between those two writes a peer read a fresh
+non-corrupt stamp and throttled past a corruption about to be recorded; and a lane whose own sweep
+said <code dir="auto">VERIFIED</code> returned toward a spawn without re-reading the latch, so a peer latching the box
+<em>during</em> that lane’s two fsck walks was never seen. Both are ordering fixes, neither needs a lock:
+latch first, stamp second, and one <code dir="auto">obj_sweep_stop_if_latched</code> helper before the throttled,
+<code dir="auto">VERIFIED</code> and <code dir="auto">UNMEASURED</code> returns alike — one rule instead of a set of paths to audit.
+<strong>And ordering was not enough: the stamp is written only if the latch is CONFIRMED present, else it
+is forced stale (round 9, item 1).</strong> “Latch first, stamp second” left the stamp unconditional, so on
+the one branch where the latch could not be <em>persisted</em> — a writable stamp inside a directory that is
+not writable, so creating <code dir="auto">&#x3C;stamp>.STOP</code> fails while rewriting <code dir="auto">&#x3C;stamp></code> succeeds — the detecting
+lane stopped (correct) and still advertised a freshly swept box (not correct): its peers read the
+fresh stamp, skipped their own sweep for the whole interval, and kept working against a store already
+confirmed damaged. The stamp write is now gated on <code dir="auto">obj_sweep_latch_present</code>, the afterwards-existence
+check and never the create’s exit status (which cannot tell “a peer got there first” from “the
+directory is unwritable”); where the latch is missing the stamp is forced to epoch <code dir="auto">0</code>, because a peer
+whose sweep started earlier can finish <em>during</em> this one and write a fresh timestamp. Forcing can only
+cause MORE sweeping, so it cannot manufacture a false clean.</p>
+<p><strong>And the printed remedy has to work, which it did not (round 9, item 2).</strong> All three copies of the
+repair instruction said <code dir="auto">git fetch --force origin</code>, which repairs nothing: <code dir="auto">--force</code> only permits
+non-fast-forward <em>ref</em> updates and re-downloads no objects, so with the advertised tips unchanged the
+negotiation can transfer nothing — an operator following it exactly kept the corruption and gained the
+impression of a repair. Measured on git 2.43.0 against planted damage, by the sweep’s own verdict:
+<code dir="auto">--force</code> leaves a corrupt loose object, a flipped pack byte and a missing object untouched;
+<code dir="auto">git fetch --refetch origin</code> (git 2.36+) restores a MISSING object but not damaged content, whose bytes
+stay in the object directory where fsck still finds them — so content damage needs the pack or loose
+object deleted first, after which <code dir="auto">--refetch</code> verifies clean. A fresh clone works, but only <strong>from the
+canonical remote over the network</strong>: <code dir="auto">git clone &#x3C;local path></code> hardlinks the object files, so a clone of
+the damaged repository is damaged too. Hence the sweep owns the text (it knows the damage class, and
+the measurements live beside it) and both consumers QUOTE its <code dir="auto">verdict-detail</code> lines instead of
+paraphrasing, with a fail-closed fallback so a stopped box is never left with no remedy — and clearing
+the latch is gated on a re-run of the sweep reporting its affirmative verdict.</p>
+<p><strong>That rule was still a set of SITES, and round 5 found the fourth — so the read is now at ENTRY,
+above every branch.</strong> The documented opt-out <code dir="auto">OBJ_SWEEP_INTERVAL_HOURS=0</code> returned before any latch
+read, so switching the sweep off also switched off an already-recorded <code dir="auto">CORRUPT</code> verdict. Patching
+the fourth site would have left a fifth, because the design required every early return to remember
+the check; the read is therefore hoisted to the top of <code dir="auto">object_store_sweep</code>, whose prologue is now
+declarations and assignments only, and the invariant is a property of the FUNCTION (“it cannot be
+entered without a latch read”) that holds for branches nobody has written yet — asserted
+structurally. The post-sweep reads stay: a peer can latch the box while this lane spends up to
+<code dir="auto">MAX_SWEEP_WALKS</code> walks. Cost: one <code dir="auto">--print-store</code> resolution per iteration (measured 5 ms) on a
+path that previously paid none. The latch question is also <strong>four-valued</strong>, because <code dir="auto">[[ -e ]]</code> is
+false both for an absent latch and for one the process cannot look at: <code dir="auto">unknown</code> STOPS under its own
+reason (<code dir="auto">object-store-latch-unreadable</code>, never as <code dir="auto">CORRUPT</code> — nothing observed damage), and
+<code dir="auto">absent</code> requires the absence to be <strong>established through searchable ancestors</strong> — <code dir="auto">-d</code> on the
+holding directory is itself two-valued (false both for a directory that does not exist and for one
+whose <em>ancestor</em> cannot be searched), so the probe walks up to the deepest ancestor it can stat and
+counts the absence only when that one is searchable, and
+<code dir="auto">unkeyed</code> is the one permissive answer, announced once, because no key means no latch was ever named
+and stopping would make a missing sweep script halt every lane for want of a hygiene probe.</p>
+<p><strong>The thundering herd is closed, with the hazard its fix introduces.</strong> The throttle read and the
+sweep invocation were unsynchronised and the stamp is written at the END of a sweep, so when the
+interval expired every lane read the same stale stamp and started its own full-store fsck — not
+merely a CPU cost: the walks are I/O-bound, so contention pushes them toward the per-walk bound, and
+an expired bound is <code dir="auto">UNMEASURED</code>, a correlated loss of the measurement on every lane at once. The
+serialiser is a per-store claim <strong>directory</strong> created with <code dir="auto">mkdir</code> (the latch’s kernel-arbitrated
+create-only primitive, and deliberately not <code dir="auto">flock</code>, since this file’s single-instance lock is
+mkdir-based precisely because macOS ships no <code dir="auto">flock(1)</code>). <strong>A loser <em>does</em> wait, which reverses the
+original design.</strong> It used to skip that iteration’s probe and carry straight on to the spawn path
+after one latch read, on the argument that “a peer is doing it right now” is a complete answer for a
+6-hourly hygiene sweep — a complete answer about the SWEEP and no answer at all about the SPAWN,
+because the loser knows a full-store fsck is in flight (that is why its claim failed) and that fsck
+can end in <code dir="auto">CORRUPT</code> or <code dir="auto">UNSWEEPABLE</code>, latching the box. The window it discarded was the peer’s
+<strong>entire sweep</strong>: 13-80s measured on this fleet, up to <code dir="auto">MAX_SWEEP_WALKS</code> × <code dir="auto">OBJ_SWEEP_TIMEOUT_SECS</code>
+(600s at the shipped defaults) by construction — not the narrow post-read spawn gap the residual
+note described. The loser now waits, re-reading the latch, the stamp, the claim and the stop file
+every <code dir="auto">OBJ_SWEEP_CLAIM_POLL_SECS</code> (granularity, not a bound), <strong>bounded by the claim’s own derived
+staleness value</strong>: the same 660s that says “this claim may be taken over” says “stop waiting for
+it”, so a dead peer cannot wedge the wait and there is no second, driftable constant. A timeout is
+not a clean result and does not carry on — when the peer neither finishes nor vacates, that claim is
+stale by construction at the deadline, so the next acquire recovers it and <strong>the loser becomes the
+sweeper</strong>. <strong>And a completed peer ends the wait — it does not send the loser back to contend.</strong> The
+wait’s <code dir="auto">completed</code> (the throttle stamp went fresh) was treated as “go round and acquire again”, and
+it is reached <em>without sleeping</em>, on the pass that observes the stamp — so a peer that writes the
+stamp and then dies before releasing leaves the claim present and the stamp fresh, every acquire
+answers <code dir="auto">held</code>, every wait answers <code dir="auto">completed</code> in microseconds, and the lane spun CPU-hot until the
+supervisor’s whole <code dir="auto">MAX_HOURS</code> budget expired (measured: 2165 completions in 20s). The age-based
+recovery built for exactly that dead peer could not save it, which is the transferable part:
+<code dir="auto">completed</code> was tested <em>before</em> the claim’s deadline on every pass, so the recovery the design
+relies on never ran. The fix adds no second notion of “the peer is gone” — a fresh stamp is the same
+answer the throttle at the top of the sweep gives, so the lane skips exactly as it would have there,
+which is strictly less work than the acquire-and-release round trip the ordinary case used to make.
+The loop is now bounded in wall time <strong>by construction</strong> and by a value it already derived
+(<code dir="auto">exhausted</code> and <code dir="auto">completed</code> break; neither surviving state is required to have slept, so the loop
+itself is bounded by the iteration’s own <code dir="auto">claim_stale</code> budget), never by <code dir="auto">MAX_HOURS</code>. The general
+rule: <strong>a state a loop can reach without sleeping must not be a loop-continuing state</strong>, and a bound
+placed after a fast-path test is not a bound at all.
+Otherwise, only where peers keep handing the claim around for the whole budget does the lane skip,
+journalled and paged as <code dir="auto">NOT SWEPT AND NOT MEASURED</code>, never as clean, and never as a stop (a peer
+sweeping is also the shape of a healthy box recovering a wedged claim, and stopping four lanes over a
+hygiene probe’s contention is the self-DoS that file refuses everywhere else). The throttle is
+<strong>re-read after acquiring</strong>, which is what stops the claim converting a herd into a queue of
+redundant sweeps. A
+stale claim must not wedge the box, which would be worse than the herd, so the recovery threshold is
+<strong>derived</strong>: a claim cannot be stale while the sweep it represents could still be running, so it is
+the sweep’s own <code dir="auto">MAX_SWEEP_WALKS</code> (read from that script) × this supervisor’s per-walk bound + slack
+= 3 × 200 + 60 = 660s; a claim with no parseable start time reads as stale on purpose (its cause is
+a lane killed between the <code dir="auto">mkdir</code> and the write, and the other reading wedges the sweep forever),
+and where the bound cannot be derived <strong>no claim is taken at all</strong> and the previous behaviour is
+restored, announced. The claim is a registered resource released by the EXIT trap, so the <code dir="auto">CORRUPT</code>
+path — which ends the process — does not leave peers waiting out the bound. Not closed, and
+pre-existing: this file installs no INT/TERM handlers, so a signalled supervisor releases neither
+its claim nor its lock; for the claim that is a delay, not a wedge. <strong>What is not closed, per path
+and with its real magnitude</strong> — a residual whose size is understated is worse than one described
+honestly, and a residual left standing when it could be closed is the other half of that. <strong>Path 1,
+the claim loser: closed</strong> — it was the peer’s whole sweep (13-80s measured, 600s by construction),
+now bounded by one <code dir="auto">OBJ_SWEEP_CLAIM_POLL_SECS</code>. <strong>Path 2, a lane’s own sweep: covered</strong> by the entry
+read plus the post-sweep reads. <strong>Path 3, the last latch read to the worker spawn: narrowed from up
+to an hour to one pre-spawn prologue, and it is not zero.</strong> The hold loop used to run after the last
+latch read and never re-read it, so at the shipped defaults a lane could sit for <code dir="auto">BUILD_HOLD_MAX</code> ×
+<code dir="auto">HOLD_POLL_SECS</code> = 12 × 300s = <strong>3600s</strong> (leftover-worker family: <code dir="auto">LEFTOVER_HOLD_MAX</code> ×
+<code dir="auto">HOLD_POLL_SECS</code> = 900s) and then spawn onto a box a peer had latched meanwhile. <code dir="auto">preflight_wait</code> is
+now a <strong>wrapper</strong>: the loop lives in <code dir="auto">preflight_wait_holds</code> and the STOP latch is re-read on <em>every</em>
+return out of it, so the hold window is closed structurally — a property of the function boundary,
+not an enumerated set of returns (round 3 fixed three such returns and round 5 found a fourth; that
+shape does not converge). What remains is <code dir="auto">run_iteration</code>’s pre-spawn prologue: <code dir="auto">stamp_claim</code>, i.e.
+one <code dir="auto">claim-heartbeat.sh stamp</code> ref push to <code dir="auto">origin</code>, around an <code dir="auto">rm</code>/<code dir="auto">mkdir</code>/assignments — a measured
+lower bound of <strong>0.26-0.28s</strong> for a bare <code dir="auto">git ls-remote origin HEAD</code> on this fleet, unbounded in
+principle since the supervisor puts no timeout on that push, and <strong>not</strong> the “milliseconds” a purely
+local prologue would give. It is bounded in harm (that lane’s next iteration reads the latch at the
+top of its sweep and stops, and nothing certifies a merge in that window without a full gate, which
+a latched box refuses), and closing it entirely still needs per-store synchronisation shared by the
+sweep and the spawn decision, which is split to its own issue. Path 1 and the hold window are
+closed; the pre-spawn window is open; the race is not gone. The sweep is also <strong>not interruptible</strong> — its two walks
+run in a child process — so the supervisor checks the stop file and the wall-clock budget
+immediately <em>before</em> the sweep, and bounds the exposure in wall time: its per-walk default is the
+sweep script’s own bound <strong>divided by <code dir="auto">MAX_SWEEP_WALKS</code></strong> (200 vs 600/3), so every walk it can pay
+for still costs no more than one walk at the script’s bound. The walk count is <strong>read from the
+shipped script</strong>, not re-typed in the test: the relation was asserted with a hard-coded factor 2, so
+adding the third walk would have kept it green while the supervisor’s real worst case rose to 900s —
+a relation whose own constant is restated is two magic numbers wearing a relation’s clothes. Raising
+a bound, or the walk count, is a change to somebody’s stop latency.</p>
+<p>Three alternatives were <strong>rejected</strong> by the same ruling, recorded so they are not re-derived:
+per-lane full clones (a permanent multi-GB tax for an out-of-model threat); per-read rehashing (the
+fourth carve into one pre-flight, charged to every <code dir="auto">--lite</code> round); and removing the reuse
+optimisation — whose original argument still stands, because removal does not close it. The ancestry
+walk and the provenance leg read HEAD’s <strong>committed</strong> content, which has no source other than that
+store — the working tree cannot substitute, since the <code dir="auto">UNCOMMITTED</code> verdict exists precisely to
+compare against what is committed — so a forged HEAD object still turns <code dir="auto">UNCOMMITTED</code> (fatal) into
+<code dir="auto">DECLARED</code> (non-fatal) after removal, while charging every <code dir="auto">--lite</code> round for a half-closure
+(measured 3.41 s / 93 MB full, 3.58 s / 45 MB at <code dir="auto">--depth=1</code>; shallow is <em>not</em> cheaper — it still
+ships the tip’s whole tree). A check that claims nothing false is worth more than one claiming a
+closure it does not deliver.</p>
 <p><strong>The baseline’s identity is validated before the fetch.</strong> Trusting a remote merely <em>named</em>
 <code dir="auto">origin</code> made <code dir="auto">git remote set-url origin &#x3C;anything></code> a git-config-shaped opt-out — and it fires
 <strong>by accident</strong> in the fork workflow, where <code dir="auto">origin</code> legitimately names a contributor’s fork whose
@@ -1168,7 +1503,11 @@ means a bare <code dir="auto">grep -q</code> on the bare <code dir="auto">RESULT
 single component has run. An agent polling that way can read a just-launched (or
 queued) gate as a finished one and advance toward merge on a verdict that does not
 exist. The only correct predicate is:</p>
-<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">grep</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-qE</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">'</span><span style="--0:#ECC48D;--1:#984E4D">RESULT: (PASS|FAIL)</span><span style="--0:#D9F5DD;--1:#111111">'</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C5E478;--1:#3B61B0">$AGENT_GATE_SUMMARY_FILE</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">   </span><span style="--0:#919F9F;--1:#5F636F"># a VERDICT ⇒ gate finished</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="grep -qE &#x27;RESULT: (PASS|FAIL)&#x27; &#x22;$AGENT_GATE_SUMMARY_FILE&#x22;   # a VERDICT ⇒ gate finished"><div></div></button></div></figure></div>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># RECORD grammar — full / --lite. Anchored + token-terminated; it MUST keep refusing PARTIAL, and</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># ERROR and REFUSED with it. Widening it would weaken the gate-of-record probe for nothing.</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">grep</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-qE</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">'</span><span style="--0:#ECC48D;--1:#984E4D">^RESULT: (PASS|FAIL)([[:space:]]|$)</span><span style="--0:#D9F5DD;--1:#111111">'</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C5E478;--1:#3B61B0">$AGENT_GATE_SUMMARY_FILE</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">   </span><span style="--0:#919F9F;--1:#5F636F"># a VERDICT ⇒ gate finished</span></div></div><div class="ec-line"><div class="code">
+</div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># ONLY grammar — `--only &#x3C;component>` ONLY, never the gate of record (#3750). `--only` demotes a</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># SUCCESSFUL run to `RESULT: PARTIAL`, so the record grammar spins on green. The EXIT STATUS (3) is</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># primary; this is the fallback for a detached run whose exit code you never observe.</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">grep</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-qE</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">'</span><span style="--0:#ECC48D;--1:#984E4D">^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)</span><span style="--0:#D9F5DD;--1:#111111">'</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C5E478;--1:#3B61B0">$AGENT_GATE_SUMMARY_FILE</span><span style="--0:#D9F5DD;--1:#111111">"</span></div></div><div class="ec-line"><div class="code">
+</div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># DELTA grammar — `--delta &#x3C;anchor>` ONLY. It is the only mode that can terminate ERROR or REFUSED</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># (7 emit sites, all inside `run_delta`; REFUSED goes through `emit_summary "$(_tree_result REFUSED)"`,</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># so grepping `emit_summary REFUSED` finds nothing while the token IS emitted). A --delta poller on</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># the RECORD grammar hangs on a terminal outcome. This set is gate-liveness.sh's own enumerated</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># terminal set, token for token — ONE source of truth, so it carries PARTIAL (which --delta cannot</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># emit) and the reader's defensive REFUSED, with ERROR the emit you will actually meet.</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">grep</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-qE</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">'</span><span style="--0:#ECC48D;--1:#984E4D">^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)</span><span style="--0:#D9F5DD;--1:#111111">'</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C5E478;--1:#3B61B0">$AGENT_GATE_SUMMARY_FILE</span><span style="--0:#D9F5DD;--1:#111111">"</span></div></div><div class="ec-line"><div class="code">
+</div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># Safe to widen COMPLETION here, and it would not have been before #3750 separated completion from</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># verdict: the verdict is a separate affirmative read, so three grammars are not three chances to be</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># wrong. Better than any of them: ask gate-liveness.sh.</span></div></div><div class="ec-line"><div class="code">
+</div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># COMPLETION IS NOT A VERDICT. `PARTIAL` says the run ENDED. Read the component's OWN line separately:</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">bash</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">scripts/gate-component-verdict.sh</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C5E478;--1:#3B61B0">$SUM</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--mode</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">only</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--component</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">tooling-tests</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--run-id</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">&#x3C;id></span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># exit 0 PASS / 1 NOT-PASS / 4 COULD-NOT-MEASURE (no verdict available, whatever the reason) /</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># 64 USAGE. A completed run whose component SKIPped is NOT a pass, and</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># a LITE or DELTA block is REFUSED (4). A tree-integrity token of FAIL returns NOT-PASS (1) — the</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># gate declared that run non-certifying, which invalidates every component in the block — while</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># SKIP/PENDING/absent return 4, since tree stability was then never measured.</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F">#</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># NOT a completion probe, and no opinion about liveness — NEVER in a loop. Establish completion</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># first (exit status, or gate-liveness.sh, the three-valued liveness authority and the only one of</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># the two that may be polled). A retryability taxonomy here was DESCOPED (#3750): it told a lane a</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># LIVE gate was permanently unmeasurable, and an obedient lane relaunches it — two gates, one path.</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="grep -qE &#x27;^RESULT: (PASS|FAIL)([[:space:]]|$)&#x27; &#x22;$AGENT_GATE_SUMMARY_FILE&#x22;   # a VERDICT ⇒ gate finishedgrep -qE &#x27;^RESULT: (PASS|FAIL|PARTIAL)([[:space:]]|$)&#x27; &#x22;$AGENT_GATE_SUMMARY_FILE&#x22;grep -qE &#x27;^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)([[:space:]]|$)&#x27; &#x22;$AGENT_GATE_SUMMARY_FILE&#x22;bash scripts/gate-component-verdict.sh &#x22;$SUM&#x22; --mode only --component tooling-tests --run-id <id>"><div></div></button></div></figure></div>
 <p>A terminal <code dir="auto">RESULT: INCOMPLETE</code> means “still running, or died” — never a certification.</p>
 </blockquote>
 <ul>
