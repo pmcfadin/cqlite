@@ -873,6 +873,16 @@ rc=0
 out=$(PATH="$d17:$PATH" env -u CQLITE_BOOTSTRAP_TEST_MODE CQLITE_CLAUDE_AUTH_ENV_FILE="$ef2" \
       bash "$CAPLIB" --auth 2>&1) || rc=$?
 printf '%s\n' "$out" >>"$TRANSCRIPT"
+# ...AND THE REFUSAL IS STILL A REPORT, so it exits 0 like every other one. Pinned because
+# the usage text makes exactly this claim ("even a refused test-only seam prints a line and
+# exits 0"), and a help string is a claim about behaviour that decays like a comment. It is
+# also the nearest thing to a "could not produce a report" path, i.e. the one an exit-code
+# gate would most plausibly be written against.
+if [ "$rc" -eq 0 ]; then
+  ok "the seam refusal is still a printed report, so it exits 0 like every other one"
+else
+  bad "the seam refusal exited $rc — the report modes must carry no verdict in their status"
+fi
 if printf '%s' "$out" | grep -q '^claude-auth: UNMEASURED' && printf '%s' "$out" | grep -q 'CQLITE_BOOTSTRAP_TEST_MODE'; then
   ok "the env-file seam is inert (and REFUSES loudly) without CQLITE_BOOTSTRAP_TEST_MODE=1"
 else
@@ -2467,14 +2477,15 @@ printf '\n== summary ==\npass=%s fail=%s skip=%s\n' "$PASS" "$FAIL" "$SKIP"
 # a host without `uname` is a named refusal at startup, because that host would take the
 # non-Linux branch in every case. Raised 91 -> 122 by round 4 (the digest identity of a
 # delivered credential, the sudo-posture cases, and the bounding class), 122 -> 124 by
-# round 5's two probe-working-directory interrupt cases, and 124 -> 138 by the #3733
+# round 5's two probe-working-directory interrupt cases, and 124 -> 139 by the #3733
 # DEMOTION (sections 34-36: the no-certification invariant, the alternate-credential
-# observation, and the limitation-findability guard, plus the assertions that changed
-# subject where a verdict became an observation). 141 cases run, and the real-tmux
-# isolation case (3 assertions) is still the only legitimately skippable one.
+# observation, and the limitation-findability guard, plus the seam-refusal exit-status pin
+# and the assertions that changed subject where a verdict became an observation). 142 cases
+# run, and the real-tmux isolation case (3 assertions) is still the only legitimately
+# skippable one.
 # THE FIGURE IS MEASURED, NOT COUNTED BY EYE: forcing the tmux block's `command -v tmux`
-# test to `true` in a throwaway `git worktree` reports 138/0/1.
-CASE_FLOOR=138
+# test to `true` in a throwaway `git worktree` reports 139/0/1.
+CASE_FLOOR=139
 if [ "$((PASS + FAIL))" -lt "$CASE_FLOOR" ]; then
   printf 'FAIL - case floor: %s cases ran, expected at least %s (cases were lost)\n' "$((PASS + FAIL))" "$CASE_FLOOR"
   exit 1

@@ -1651,9 +1651,11 @@ claude_auth_usage() {
   printf '\n'
   printf 'THIS IS A REPORT, NOT A CHECK (issue #3733). Neither line certifies that this box\n'
   printf 'can start a lane, and THERE IS NO EXIT STATUS THAT SAYS SO: a report that was\n'
-  printf 'PRINTED exits 0 whatever it found, so do not gate anything on the status. Only a\n'
-  printf 'usage error (2) and a refusal to produce a report at all (1) are non-zero. The five\n'
-  printf 'things the observations CANNOT see are documented in this file as LIMITATION 1..5.\n'
+  printf 'PRINTED exits 0 whatever it found, so do not gate anything on the status. For the\n'
+  printf 'three report modes the ONLY non-zero status is a usage error (2) — even a refused\n'
+  printf 'test-only seam prints a line and exits 0. --fix-tmux-env is the exception, because\n'
+  printf 'seeding is an ACTION. The five things the observations CANNOT see are documented in\n'
+  printf 'this file as LIMITATION 1..5.\n'
   printf '\n'
   printf '  --auth          what happened when a `claude -p` run carrying the PERSISTED value\n'
   printf '                  was made? prints one `claude-auth:` line:\n'
@@ -1724,17 +1726,22 @@ claude_auth_emit_tmux() {
 claude_auth_main() {
   local show=0 rc=0
   case "${1:-}" in
+    # THE THREE REPORT MODES RETURN 0, UNCONDITIONALLY AND BY CONSTRUCTION. The `|| rc=1`
+    # these arms used to carry is not merely dead now that the emitters always return 0 —
+    # keeping it would be a place for a verdict to grow back, and it made the usage text
+    # claim a non-zero status no input can produce. A refused test-only seam still PRINTS
+    # its UNMEASURED line, so even that is a report.
     --auth)
       [ "${2:-}" = --show-probe-output ] && show=1
-      claude_auth_emit_auth "$show" || rc=1
+      claude_auth_emit_auth "$show"
       claude_auth_emit_scope_note
-      return $rc ;;
-    --tmux-env)     claude_auth_emit_tmux || rc=1; claude_auth_emit_scope_note; return $rc ;;
+      return 0 ;;
+    --tmux-env)     claude_auth_emit_tmux; claude_auth_emit_scope_note; return 0 ;;
     --report)
-      claude_auth_emit_auth 0 || rc=1
-      claude_auth_emit_tmux  || rc=1
+      claude_auth_emit_auth 0
+      claude_auth_emit_tmux
       claude_auth_emit_scope_note
-      return $rc ;;
+      return 0 ;;
     # THE ONE ENTRY POINT WHOSE STATUS IS STILL MEANINGFUL: seeding is an ACTION, and an
     # action that did not happen is a failure worth returning. The re-report that follows
     # it cannot change the status — it is a report.
