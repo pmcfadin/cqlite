@@ -283,8 +283,11 @@ async fn drive(data: &[u8], at_final_chunk: bool) -> (ParseStep, usize, Vec<Stub
     (step, buffered, collected)
 }
 
-/// As [`drive`], but hands back the driver's `Result` so a test can assert the
-/// #3782 refusal (and the error it carries) rather than unwrapping it.
+/// As [`drive`], but hands back the driver's `Result` so a test can assert
+/// EITHER failure disposition — a `DecodeFailed`, which the driver returns at the
+/// final chunk and tolerates mid-window (#3782), or a `Refused`, which it
+/// propagates at every extent (#3809) — and the error each carries, rather than
+/// unwrapping it.
 #[cfg(feature = "write-support")]
 async fn drive_result(
     data: &[u8],
@@ -392,10 +395,16 @@ async fn marker_stop_non_final_chunk_needmore_no_emit() {
 //   Refused        | Err                                    | Err
 // -----------------------------------------------------------------------
 
-/// (d) Issue #3782, the refusal: a row that FAILS TO DECODE on the FINAL chunk
-/// returns the decode error, KIND PRESERVED, instead of flushing a partial
-/// partition and reporting `Emitted`. No further bytes can arrive at the final
-/// chunk, so the error is truncation/corruption — data loss — never framing.
+/// (d) Issue #3782, the DECODE FAILURE at a complete buffer: a row that FAILS
+/// TO DECODE on the FINAL chunk returns the decode error, KIND PRESERVED,
+/// instead of flushing a partial partition and reporting `Emitted`. No further
+/// bytes can arrive at the final chunk, so the error is truncation/corruption —
+/// data loss — never framing.
+///
+/// This is a `DecodeFailed`, NOT a [`DataRowOutcome::Refused`]: the disposition
+/// asserted here is the DRIVER's, read off `at_final_chunk`, which is exactly
+/// what sibling case (e) shows changing at a `Window` extent. A refusal's
+/// disposition does not vary that way — see (g)/(h).
 #[cfg(feature = "write-support")]
 #[tokio::test]
 async fn final_chunk_row_decode_error_is_returned_not_swallowed() {
@@ -405,7 +414,7 @@ async fn final_chunk_row_decode_error_is_returned_not_swallowed() {
     let err = match step {
         Err(e) => e,
         Ok(step) => panic!(
-            "a decode error at the final chunk must be REFUSED, not flushed as a partial \
+            "a decode error at the final chunk must be RETURNED, not flushed as a partial \
                  partition: got {step:?} with {} rows forwarded",
             collected.len()
         ),
@@ -423,7 +432,7 @@ async fn final_chunk_row_decode_error_is_returned_not_swallowed() {
     assert_eq!(buffered, 1, "the pre-error row was buffered");
     assert!(
         collected.is_empty(),
-        "a refused partition forwards nothing: {collected:?}"
+        "a partition whose decode failed forwards nothing: {collected:?}"
     );
 }
 
@@ -448,9 +457,16 @@ async fn non_final_chunk_row_decode_error_still_requests_more_bytes() {
     );
 }
 
-/// (f) Issue #3782 did NOT change the DECLINE path: a policy that returns
-/// `Ok(None)` still ends the partition on the final chunk and still flushes the
-/// rows buffered before it. Only a genuine `Err` refuses.
+/// (f) Neither #3782 nor #3809 changed the DECLINE path: a policy that returns
+/// [`DataRowOutcome::Declined`] — no error to report — still ends the partition
+/// on the final chunk and still flushes the rows buffered before it.
+///
+/// The contrast is with the two FAILURE outcomes, and it is NOT "an error
+/// refuses and anything else is tolerated": a `Declined` is tolerated at every
+/// extent, a [`DataRowOutcome::Refused`] is tolerated at NONE, and a
+/// [`DataRowOutcome::DecodeFailed`] is tolerated at a `Window` extent only. Each
+/// of the three carries its own disposition, which is why they are three
+/// variants and not one `Result` (see `SlidingPartitionPolicy::on_data_row`).
 #[cfg(feature = "write-support")]
 #[tokio::test]
 async fn final_chunk_policy_decline_still_flushes_as_before() {
